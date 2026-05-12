@@ -22,6 +22,7 @@ limitations under the License.
 #include <utility>
 
 #include "attention.h"
+#include "common/flash_comm1_context.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
@@ -45,10 +46,16 @@ class Qwen3GatedDeltaNetBaseImpl : public torch::nn::Module {
   virtual void load_state_dict(const StateDict& state_dict) = 0;
   virtual void verify_loaded_weights(const std::string& prefix) const = 0;
 
+torch::Tensor forward(const torch::Tensor& hidden_states,
+                         const AttentionMetadata& attn_metadata,
+                         KVCache& kv_cache,
+                         const ModelInputParams& input_params);
+
   torch::Tensor forward(const torch::Tensor& hidden_states,
-                        const AttentionMetadata& attn_metadata,
-                        KVCache& kv_cache,
-                        const ModelInputParams& input_params);
+                         const AttentionMetadata& attn_metadata,
+                         KVCache& kv_cache,
+                         const ModelInputParams& input_params,
+                         const FlashComm1Context* fc1_ctx);
 
  protected:
   virtual std::pair<torch::Tensor, torch::Tensor> project_padded_inputs(

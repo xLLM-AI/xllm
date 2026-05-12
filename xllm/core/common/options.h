@@ -180,6 +180,15 @@ class Options {
 
   PROPERTY(bool, enable_multi_stream_parallel) = false;
 
+  // Flash Communication 1 (FC1) sequence-parallel optimization
+  PROPERTY(bool, enable_flashcomm1) = false;
+
+  PROPERTY(int32_t, flashcomm1_min_prefill_tokens) = 1000;
+
+  PROPERTY(int32_t, flashcomm1_min_decode_tokens) = 128;
+
+  PROPERTY(bool, enable_mmrs_fusion) = true;
+
   PROPERTY(bool, enable_profile_step_time) = false;
 
   PROPERTY(bool, enable_profile_token_budget) = false;

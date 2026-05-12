@@ -22,6 +22,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/common/flash_comm1_context.h"
 #include "core/common/global_flags.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
@@ -55,9 +56,9 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
  public:
   explicit Qwen3HybridModelImplBase(const ModelContext& context)
       : device_(context.get_tensor_options().device()),
-        model_args_(context.get_model_args()) {
+        model_args_(context.get_model_args()),
+        parallel_args_(context.get_parallel_args()) {
     auto options = context.get_tensor_options();
-    auto parallel_args = context.get_parallel_args();
 
     blocks_ = register_module("layers", torch::nn::ModuleList());
     layers_.reserve(model_args_.n_layers());
@@ -73,16 +74,13 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
     attn_mask_ = layer::AttentionMask(options.device(),
                                       options.dtype().toScalarType(),
                                       /*mask_value=*/mask_value);
-    dp_size_ = parallel_args.dp_size();
+    dp_size_ = parallel_args_.dp_size();
   }
 
-  // tokens: [num_tokens]
-  // positions: [num_tokens] token pos in the sequence
   ModelOutput forward(torch::Tensor tokens,
                       torch::Tensor positions,
                       std::vector<KVCache>& kv_caches,
                       const ModelInputParams& input_params) override {
-    // Disable gradient computation to reduce memory usage during inference
     torch::NoGradGuard no_grad;
     if (dp_size_ > 1) {
       if (tokens.sizes() == 0) {
@@ -91,12 +89,21 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
       }
     }
 
+    int32_t num_tokens = static_cast<int32_t>(tokens.size(0));
+    bool is_prefill = input_params.batch_forward_type.is_prefill();
+    FlashComm1Context fc1_ctx = build_flash_comm1_context(
+        num_tokens, is_prefill, parallel_args_);
+
     layer::AttentionMetadata attn_metadata =
         layer::AttentionMetadataBuilder::build(
             input_params,
             model_args_.enable_mla(),
             build_attention_mask(input_params));
     torch::Tensor h = embed_tokens_(tokens);
+
+    if (fc1_ctx.is_sequence_sharded()) {
+      h = shard_sequence(h, fc1_ctx);
+    }
 
     torch::Tensor mrope_cos_sin;
     for (const auto& layer : layers_) {
@@ -113,14 +120,19 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
                          attn_metadata,
                          kv_caches[i],
                          input_params,
-                         mrope_cos_sin);
+                         mrope_cos_sin,
+                         &fc1_ctx);
     }
     auto [hidden_states, residual_out] = norm_->forward(h, residual);
     h = hidden_states;
+
+    if (fc1_ctx.is_sequence_sharded()) {
+      h = gather_and_unpad_sequence(h, fc1_ctx);
+    }
+
     return ModelOutput(h);
   }
 
-  // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict) override {
     embed_tokens_->load_state_dict(
         state_dict.get_dict_with_prefix("embed_tokens."));
@@ -179,6 +191,7 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
   }
 
   ModelArgs model_args_;
+  ParallelArgs parallel_args_;
   torch::nn::ModuleList blocks_{nullptr};
   std::vector<layer::Qwen3HybridDecoderLayerModulePtr> layers_;
   int32_t max_seq_len_ = 0;

@@ -20,6 +20,8 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
+#include "common/flash_comm1_context.h"
+
 namespace xllm {
 namespace layer {
 
@@ -144,7 +146,23 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
     const torch::Tensor& mrope_cos_sin) {
-  auto qkv = qkv_proj_->forward(hidden_states);
+  return forward(positions, hidden_states, attn_metadata, kv_cache, mrope_cos_sin, nullptr);
+}
+
+torch::Tensor Qwen3NextAttentionImpl::forward(
+    const torch::Tensor& positions,
+    const torch::Tensor& hidden_states,
+    const AttentionMetadata& attn_metadata,
+    KVCache& kv_cache,
+    const torch::Tensor& mrope_cos_sin,
+    const FlashComm1Context* fc1_ctx) {
+  torch::Tensor h = hidden_states;
+
+  if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
+    h = gather_sequence(hidden_states, *fc1_ctx);
+  }
+
+  auto qkv = qkv_proj_->forward(h);
 
   if (use_fused_qkv_) {
     const int64_t T = qkv.size(0);
@@ -168,10 +186,13 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
     auto out = std::get<0>(
         attn_->forward(attn_metadata, q_flat, k_flat, v_flat, kv_cache));
     out = out * torch::sigmoid(gate.view({T, q_size_}));
+
+    if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
+      return o_proj_->forward(out, RowParallelReduceMode::REDUCE_SCATTER, fc1_ctx);
+    }
     return o_proj_->forward(out);
   }
 
-  // Fallback path: weight-reordered layout [Q | G | K | V]
   torch::Tensor q, k, v;
   torch::Tensor gate;
 
@@ -197,6 +218,10 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
 
   if (attn_output_gate_) {
     out = out * torch::sigmoid(gate);
+  }
+
+  if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
+    return o_proj_->forward(out, RowParallelReduceMode::REDUCE_SCATTER, fc1_ctx);
   }
   return o_proj_->forward(out);
 }

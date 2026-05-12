@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <tuple>
 
+#include "common/flash_comm1_context.h"
 #include "xllm/core/kernels/ops_api.h"
 
 namespace xllm {
@@ -327,8 +328,23 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
     const ModelInputParams& input_params) {
+  return forward(hidden_states, attn_metadata, kv_cache, input_params, nullptr);
+}
+
+torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
+    const torch::Tensor& hidden_states,
+    const AttentionMetadata& attn_metadata,
+    KVCache& kv_cache,
+    const ModelInputParams& input_params,
+    const FlashComm1Context* fc1_ctx) {
+  torch::Tensor h = hidden_states;
+
+  if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
+    h = gather_sequence(hidden_states, *fc1_ctx);
+  }
+
   auto [qkvz_padded, ba_padded] =
-      project_padded_inputs(hidden_states, attn_metadata);
+      project_padded_inputs(h, attn_metadata);
   int64_t batch_size = qkvz_padded.size(0);
   int64_t seq_len = qkvz_padded.size(1);
 
@@ -395,13 +411,11 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     conv1d_params.query_start_loc = attn_metadata.q_cu_seq_lens;
     conv1d_params.max_query_len = attn_metadata.max_query_len;
     mixed_qkv = xllm::kernel::causal_conv1d_update(conv1d_params);
-    // Reshape back to 3D [batch_size, dim, seq_len]
     mixed_qkv =
         mixed_qkv.view({batch_size, -1, mixed_qkv.size(-1)}).contiguous();
     mixed_qkv = mixed_qkv.transpose(1, 2);
   }
 
-  // Compute gated delta net decay and beta terms.
   if (attn_metadata.is_prefill) {
     xllm::kernel::FusedGdnGatingParams gdn_params;
     gdn_params.A_log = A_log_;
@@ -424,7 +438,6 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     std::tie(g, beta) = xllm::kernel::fused_gdn_gating(gdn_params);
   }
   auto [processed_q, processed_k, processed_v] = process_mixed_qkv(mixed_qkv);
-  // Apply chunked or recurrent gated-delta attention and update caches.
   if (attn_metadata.is_prefill) {
     xllm::kernel::ChunkGatedDeltaRuleParams chunk_gated_delta_params;
     chunk_gated_delta_params.q = processed_q;
@@ -432,11 +445,8 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     chunk_gated_delta_params.v = processed_v;
     chunk_gated_delta_params.g = g;
     chunk_gated_delta_params.beta = beta;
-    // Get initial state from ssm_cache for sequences with previous state
-    // Shape: [batch_size, num_heads, head_k_dim, head_v_dim]
     torch::Tensor initial_state_tensor =
         torch::index_select(ssm_cache, 0, linear_state_indices);
-    // Todo: chunked-prefill/prefix-cache use initial_state
     initial_state_tensor.fill_(0.0);
     chunk_gated_delta_params.initial_state = initial_state_tensor;
     chunk_gated_delta_params.output_final_state = true;
@@ -482,12 +492,14 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
   norm_out = norm_out.view(z_shape_og);
   norm_out = norm_out.view({-1, norm_out.size(2), norm_out.size(3)});
 
-  // Project the normalized attention output back to hidden size.
   auto rearranged_norm =
       norm_out.reshape({norm_out.size(0), norm_out.size(1) * norm_out.size(2)});
   rearranged_norm = reshape_qkvz_unpad(attn_metadata, rearranged_norm);
-  auto attn_output = o_proj_->forward(rearranged_norm);
-  return attn_output;
+
+  if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
+    return o_proj_->forward(rearranged_norm, RowParallelReduceMode::REDUCE_SCATTER, fc1_ctx);
+  }
+  return o_proj_->forward(rearranged_norm);
 }
 
 torch::Tensor Qwen3GatedDeltaNetBaseImpl::reshape_qkvz_unpad(

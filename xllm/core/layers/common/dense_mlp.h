@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include "activation.h"
+#include "common/flash_comm1_context.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/quant_args.h"
@@ -42,6 +43,9 @@ class DenseMLPImpl : public torch::nn::Module {
                const std::string& module_prefix = "");
 
   torch::Tensor forward(const torch::Tensor& hidden_states);
+
+  torch::Tensor forward(const torch::Tensor& hidden_states,
+                        const FlashComm1Context* fc1_ctx);
 
   void load_state_dict(const StateDict& state_dict);
   void load_state_dict(const StateDict& state_dict,

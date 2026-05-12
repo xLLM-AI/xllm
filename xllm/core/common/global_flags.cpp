@@ -728,6 +728,31 @@ DEFINE_bool(use_cpp_chat_template,
 DEFINE_int32(health_check_interval_ms,
              3000,
              "Worker health check interval in milliseconds.");
+
+// --- Flash Communication 1 (FC1) config ---
+DEFINE_bool(enable_flashcomm1,
+            false,
+            "Enable Flash Communication 1 (FC1) sequence-parallel optimization "
+            "for tensor parallel inference on NPU. Reduces RMSNorm/residual "
+            "compute and activation memory by sharding hidden states along "
+            "sequence dimension.");
+
+DEFINE_int32(flashcomm1_min_prefill_tokens,
+             1000,
+             "Minimum prefill token count to activate FC1. Below this threshold, "
+             "FC1 overhead exceeds benefits. Default 1000.");
+
+DEFINE_int32(flashcomm1_min_decode_tokens,
+             128,
+             "Minimum decode batch token count to activate FC1. Below this "
+             "threshold, FC1 auto-disables. Default 128.");
+
+DEFINE_bool(enable_mmrs_fusion,
+            true,
+            "Enable Matmul+ReduceScatter fusion kernel for FC1. "
+            "Automatically enabled for TP<=8. Set false to fallback to "
+            "separate matmul + reduce_scatter.");
+
 DEFINE_bool(enable_xattention_one_stage,
             false,
             "Whether to force xattention one-stage decode for rec "

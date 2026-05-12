@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <optional>
 
+#include "common/flash_comm1_context.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
 #include "framework/parallel_state/parallel_args.h"
@@ -45,8 +46,11 @@ class FusedMoEImpl : public torch::nn::Module {
       const torch::Tensor& hidden_states,
       const torch::Tensor& router_logits,
       const std::optional<torch::Tensor>& shared_output);
+torch::Tensor forward(const torch::Tensor& hidden_states,
+                         const ModelInputParams& input_params);
   torch::Tensor forward(const torch::Tensor& hidden_states,
-                        const ModelInputParams& input_params);
+                         const ModelInputParams& input_params,
+                         const FlashComm1Context* fc1_ctx);
   void load_state_dict(const StateDict& state_dict);
 
  private:

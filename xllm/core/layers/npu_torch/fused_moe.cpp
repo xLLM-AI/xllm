@@ -20,6 +20,7 @@ limitations under the License.
 #include <numeric>
 #include <vector>
 
+#include "common/flash_comm1_context.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "kernels/ops_api.h"
 
@@ -405,19 +406,30 @@ torch::Tensor FusedMoEImpl::forward_expert(
 }
 
 torch::Tensor FusedMoEImpl::forward(const torch::Tensor& hidden_states,
-                                    const ModelInputParams& input_params) {
-  auto input = hidden_states;
+                                     const ModelInputParams& input_params) {
+  return forward(hidden_states, input_params, nullptr);
+}
+
+torch::Tensor FusedMoEImpl::forward(const torch::Tensor& hidden_states,
+                                     const ModelInputParams& input_params,
+                                     const FlashComm1Context* fc1_ctx) {
+  torch::Tensor input = hidden_states;
+
+  if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
+    input = gather_sequence(hidden_states, *fc1_ctx);
+  }
+
   bool need_slice = false;
   if (parallel_args_.dp_size() > 1 && parallel_args_.ep_size() > 1) {
     input = parallel_state::gather(input,
-                                   parallel_args_.dp_local_process_group_,
-                                   input_params.dp_global_token_nums);
+                                    parallel_args_.dp_local_process_group_,
+                                    input_params.dp_global_token_nums);
     need_slice = true;
   }
 
   std::optional<torch::Tensor> shared_output = std::nullopt;
   if (n_shared_experts_ > 0) {
-    shared_output = shared_experts_(input);
+    shared_output = shared_experts_->forward(input, fc1_ctx);
     if (shared_expert_gate_) {
       auto gate = torch::sigmoid(shared_expert_gate_->forward(input));
       if (shared_output.has_value()) {
@@ -428,6 +440,18 @@ torch::Tensor FusedMoEImpl::forward(const torch::Tensor& hidden_states,
   }
   auto router_logits = gate_(input);
   auto output = forward_expert(input, router_logits, shared_output);
+
+  if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
+    FlashComm1Context ctx_copy = *fc1_ctx;
+    ctx_copy.tp_group = tp_pg_;
+    output = maybe_pad_and_reduce(output, ctx_copy, RowParallelReduceMode::REDUCE_SCATTER);
+  } else if (tp_pg_->world_size() > 1) {
+    output = parallel_state::reduce(output, tp_pg_);
+  }
+
+  if (parallel_args_.ep_size() > 1) {
+    output = parallel_state::reduce(output, parallel_args_.moe_ep_group_);
+  }
 
   if (need_slice) {
     const auto& dp_tokens = input_params.dp_global_token_nums;

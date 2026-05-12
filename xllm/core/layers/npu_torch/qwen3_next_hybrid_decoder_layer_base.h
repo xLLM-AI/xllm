@@ -20,6 +20,7 @@ limitations under the License.
 #include <memory>
 #include <string>
 
+#include "common/flash_comm1_context.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/model_context.h"
@@ -37,13 +38,21 @@ class Qwen3HybridDecoderLayerModule : public torch::nn::Module {
  public:
   virtual void load_state_dict(const StateDict& state_dict) = 0;
   virtual void verify_loaded_weights(const std::string& prefix) const = 0;
+virtual torch::Tensor forward(torch::Tensor& x,
+                                 std::optional<torch::Tensor>& residual,
+                                 torch::Tensor& positions,
+                                 const AttentionMetadata& attn_metadata,
+                                 KVCache& kv_cache,
+                                 const ModelInputParams& input_params,
+                                 const torch::Tensor& mrope_cos_sin = {}) = 0;
   virtual torch::Tensor forward(torch::Tensor& x,
-                                std::optional<torch::Tensor>& residual,
-                                torch::Tensor& positions,
-                                const AttentionMetadata& attn_metadata,
-                                KVCache& kv_cache,
-                                const ModelInputParams& input_params,
-                                const torch::Tensor& mrope_cos_sin = {}) = 0;
+                                 std::optional<torch::Tensor>& residual,
+                                 torch::Tensor& positions,
+                                 const AttentionMetadata& attn_metadata,
+                                 KVCache& kv_cache,
+                                 const ModelInputParams& input_params,
+                                 const torch::Tensor& mrope_cos_sin,
+                                 const FlashComm1Context* fc1_ctx) = 0;
   virtual torch::Tensor build_mrope_cos_sin(
       const torch::Tensor& positions) const {
     return {};
@@ -64,13 +73,22 @@ class Qwen3HybridDecoderLayerImplBase : public Qwen3HybridDecoderLayerModule {
 
   void verify_loaded_weights(const std::string& prefix) const override;
 
+torch::Tensor forward(torch::Tensor& x,
+                         std::optional<torch::Tensor>& residual,
+                         torch::Tensor& positions,
+                         const AttentionMetadata& attn_metadata,
+                         KVCache& kv_cache,
+                         const ModelInputParams& input_params,
+                         const torch::Tensor& mrope_cos_sin = {}) override;
+
   torch::Tensor forward(torch::Tensor& x,
-                        std::optional<torch::Tensor>& residual,
-                        torch::Tensor& positions,
-                        const AttentionMetadata& attn_metadata,
-                        KVCache& kv_cache,
-                        const ModelInputParams& input_params,
-                        const torch::Tensor& mrope_cos_sin = {}) override;
+                         std::optional<torch::Tensor>& residual,
+                         torch::Tensor& positions,
+                         const AttentionMetadata& attn_metadata,
+                         KVCache& kv_cache,
+                         const ModelInputParams& input_params,
+                         const torch::Tensor& mrope_cos_sin,
+                         const FlashComm1Context* fc1_ctx) override;
 
   torch::Tensor build_mrope_cos_sin(
       const torch::Tensor& positions) const override;
