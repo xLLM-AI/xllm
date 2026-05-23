@@ -44,6 +44,7 @@ limitations under the License.
 #include "image_generation.pb.h"
 #include "models.pb.h"
 #include "service_impl_factory.h"
+#include "text_generation.pb.h"
 #include "video_generation.pb.h"
 #include "xllm_metrics.h"
 namespace xllm {
@@ -648,6 +649,60 @@ void APIService::AudioGenerationHttp(
       std::make_shared<AudioGenerationCall>(
           ctrl, done_guard.release(), req_pb, resp_pb, arena != nullptr);
   audio_generation_service_impl_->process_async(call);
+}
+
+void APIService::TextGeneration(::google::protobuf::RpcController* controller,
+                                const proto::TextGenerationRequest* request,
+                                proto::TextGenerationResponse* response,
+                                ::google::protobuf::Closure* done) {
+  process_typed_brpc_request<TextGenerationCall, TextGenerationServiceImpl>(
+      text_generation_service_impl_,
+      controller,
+      request,
+      response,
+      done,
+      "TextGeneration");
+}
+
+void APIService::TextGenerationHttp(
+    ::google::protobuf::RpcController* controller,
+    const proto::HttpRequest* request,
+    proto::HttpResponse* response,
+    ::google::protobuf::Closure* done) {
+  xllm::ClosureGuard done_guard(
+      done,
+      [](void* /*unused*/) { request_in_metric(nullptr); },
+      [controller](void* /*unused*/) {
+        request_out_metric(static_cast<void*>(controller));
+      });
+  if (!request || !response || !controller) {
+    LOG(ERROR) << "brpc request | response | controller is null";
+    return;
+  }
+
+  auto arena = GetArenaWithCheck<TextGenerationCall>(response);
+  auto req_pb =
+      google::protobuf::Arena::CreateMessage<proto::TextGenerationRequest>(
+          arena);
+  auto resp_pb =
+      google::protobuf::Arena::CreateMessage<proto::TextGenerationResponse>(
+          arena);
+
+  brpc::Controller* ctrl = static_cast<brpc::Controller*>(controller);
+  std::string error;
+  json2pb::Json2PbOptions options;
+  butil::IOBuf& buf = ctrl->request_attachment();
+  butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
+  bool st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
+  if (!st) {
+    ctrl->SetFailed(error);
+    LOG(ERROR) << "parse json to proto failed: " << error;
+    return;
+  }
+  std::shared_ptr<TextGenerationCall> call =
+      std::make_shared<TextGenerationCall>(
+          ctrl, done_guard.release(), req_pb, resp_pb, arena != nullptr);
+  text_generation_service_impl_->process_async(call);
 }
 
 void APIService::VideoGeneration(::google::protobuf::RpcController* controller,

@@ -130,6 +130,7 @@ void fill_generation_params(DiTGenerationParams& generation_params,
   }
   if (params.has_seed()) {
     generation_params.seed = params.seed();
+    generation_params.seed_is_set = true;
   }
   if (params.has_max_sequence_length()) {
     generation_params.max_sequence_length = params.max_sequence_length();
@@ -142,6 +143,7 @@ void fill_generation_params(DiTGenerationParams& generation_params,
 DiTRequestParams::DiTRequestParams(const proto::ImageGenerationRequest& request,
                                    const std::string& x_rid,
                                    const std::string& x_rtime) {
+  request_kind = DiTRequestKind::kImage;
   request_id = request.has_request_id() ? request.request_id()
                                         : generate_request_id("imggen-");
   x_request_id = x_rid;
@@ -208,11 +210,62 @@ DiTRequestParams::DiTRequestParams(const proto::ImageGenerationRequest& request,
 }
 
 // ---------------------------------------------------------------------------
+// Text generation constructor (Cola-DLM)
+// ---------------------------------------------------------------------------
+DiTRequestParams::DiTRequestParams(const proto::TextGenerationRequest& request,
+                                   const std::string& x_rid,
+                                   const std::string& x_rtime) {
+  request_kind = DiTRequestKind::kText;
+  // Cola-DLM official defaults (inference.py / run_cola.py), not image DiT.
+  generation_params.guidance_scale = 7.0f;
+  generation_params.max_new_tokens = 32;
+  request_id = request.has_request_id() ? request.request_id()
+                                        : generate_request_id("textgen-");
+  x_request_id = x_rid;
+  x_request_time = x_rtime;
+  model = request.model();
+
+  if (request.has_input()) {
+    input_params.prompt = request.input().prompt();
+  }
+
+  if (request.has_parameters()) {
+    const auto& params = request.parameters();
+    if (params.has_seed()) {
+      generation_params.seed = params.seed();
+      generation_params.seed_is_set = true;
+    }
+    if (params.has_max_new_tokens()) {
+      generation_params.max_new_tokens = params.max_new_tokens();
+    }
+    if (params.has_diffusion_steps()) {
+      generation_params.diffusion_steps = params.diffusion_steps();
+    }
+    if (params.has_guidance_scale()) {
+      generation_params.guidance_scale = params.guidance_scale();
+    }
+    if (params.has_temperature()) {
+      generation_params.temperature = params.temperature();
+    }
+    if (params.has_top_k()) {
+      generation_params.top_k = params.top_k();
+    }
+    if (params.has_top_p()) {
+      generation_params.top_p = params.top_p();
+    }
+    if (params.has_repetition_penalty()) {
+      generation_params.repetition_penalty = params.repetition_penalty();
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Audio generation constructor
 // ---------------------------------------------------------------------------
 DiTRequestParams::DiTRequestParams(const proto::AudioGenerationRequest& request,
                                    const std::string& x_rid,
                                    const std::string& x_rtime) {
+  request_kind = DiTRequestKind::kAudio;
   if (request.has_request_id()) {
     request_id = request.request_id();
   } else {
@@ -227,6 +280,7 @@ DiTRequestParams::DiTRequestParams(const proto::AudioGenerationRequest& request,
   const auto& params = request.parameters();
   if (params.has_seed()) {
     generation_params.seed = params.seed();
+    generation_params.seed_is_set = true;
   }
   if (params.has_max_sequence_length()) {
     generation_params.max_sequence_length = params.max_sequence_length();
@@ -267,6 +321,7 @@ DiTRequestParams::DiTRequestParams(const proto::AudioGenerationRequest& request,
 DiTRequestParams::DiTRequestParams(const proto::VideoGenerationRequest& request,
                                    const std::string& x_rid,
                                    const std::string& x_rtime) {
+  request_kind = DiTRequestKind::kVideo;
   request_id = request.has_request_id() ? request.request_id()
                                         : generate_request_id("vidgen-");
   x_request_id = x_rid;
@@ -317,6 +372,28 @@ bool DiTRequestParams::verify_params(
   if (input_params.prompt.empty() && !input_params.prompt_embed.defined()) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, "prompt is empty");
     return false;
+  }
+
+  if (request_kind == DiTRequestKind::kText) {
+    if (model.empty()) {
+      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, "model is empty");
+      return false;
+    }
+    if (generation_params.max_new_tokens <= 0) {
+      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                          "max_new_tokens must be positive.");
+      return false;
+    }
+    if (generation_params.diffusion_steps <= 0) {
+      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                          "diffusion_steps must be positive.");
+      return false;
+    }
+    return true;
+  }
+
+  if (request_kind == DiTRequestKind::kAudio) {
+    return true;
   }
 
   if (generation_params.width <= 0 || generation_params.height <= 0) {

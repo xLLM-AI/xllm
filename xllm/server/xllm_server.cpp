@@ -44,6 +44,7 @@ constexpr const char* kApiServiceRoutes =
     "v1/models => ModelsHttp,"
     "v1/image/generation => ImageGenerationHttp,"
     "v1/audio/generation => AudioGenerationHttp,"
+    "v1/text/generation => TextGenerationHttp,"
     "v1/video/generation => VideoGenerationHttp,"
     "v1/rerank => RerankHttp,"
     "v1/messages => AnthropicMessagesHttp,"

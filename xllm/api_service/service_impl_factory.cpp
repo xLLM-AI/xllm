@@ -93,6 +93,8 @@ void ServiceImplFactory::create(
              std::make_unique<ImageGenerationServiceImpl>(dit_master, models);
          self->audio_generation_service_impl_ =
              std::make_unique<AudioGenerationServiceImpl>(dit_master, models);
+         self->text_generation_service_impl_ =
+             std::make_unique<TextGenerationServiceImpl>(dit_master, models);
          self->video_generation_service_impl_ =
              std::make_unique<VideoGenerationServiceImpl>(dit_master, models);
        }},
