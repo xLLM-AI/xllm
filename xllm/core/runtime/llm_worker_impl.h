@@ -51,7 +51,7 @@ class LLMWorkerImpl : public WorkerImpl {
   std::optional<ForwardOutput> step_no_sync(const ForwardInput& input);
   std::optional<ForwardOutput> execute_no_sync_on_stream(
       const ForwardInput& input,
-      Stream& compute_stream);
+      Stream& compute_stream) override;
 
   folly::SemiFuture<std::optional<ForwardOutput>> step_async_no_sync(
       const ForwardInput& input);
@@ -94,7 +94,6 @@ class LLMWorkerImpl : public WorkerImpl {
   void set_word_embedding(layer::WordEmbedding& embedding) {
     model_->set_word_embedding(embedding);
   };
-
  protected:
   std::unique_ptr<BeamSearcher> beam_searcher_;
 };

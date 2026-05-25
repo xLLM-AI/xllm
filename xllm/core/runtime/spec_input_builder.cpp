@@ -210,9 +210,21 @@ DecodeRowContext make_decode_row_context(const ForwardInput& input) {
   CHECK(input.positions_host.defined())
       << "positions_host must be defined for decode row build";
   ctx.positions = get_positions(input);
+  ctx.use_mrope_positions = input.positions_host.dim() == 2;
+  ctx.position_stride = ctx.use_mrope_positions
+                            ? static_cast<int32_t>(input.positions_host.size(1))
+                            : 1;
   CHECK_GE(static_cast<int32_t>(ctx.positions.size()), ctx.num_sequences)
       << "positions size is smaller than num_sequences, positions_size="
       << ctx.positions.size() << ", num_sequences=" << ctx.num_sequences;
+  if (ctx.use_mrope_positions) {
+    CHECK_EQ(input.positions_host.size(0), 3)
+        << "mRoPE positions should be [3, num_tokens], got "
+        << input.positions_host.sizes();
+    CHECK_GE(ctx.position_stride, ctx.num_sequences)
+        << "mRoPE position width is smaller than num_sequences, width="
+        << ctx.position_stride << ", num_sequences=" << ctx.num_sequences;
+  }
 
   ctx.kv_seq_lens = get_kv_seq_lens(input);
   if (!input.input_params.multi_block_tables.empty()) {
@@ -253,15 +265,34 @@ void append_decode_row(const DecodeRowContext& ctx,
   CHECK_GE(row.seq_id, 0);
   CHECK_LT(row.seq_id, ctx.num_sequences);
   CHECK_LT(static_cast<size_t>(row.seq_id), ctx.positions.size());
-  const int32_t new_position = ctx.positions[row.seq_id] + row.position_offset;
-  CHECK_GE(new_position, 0) << "invalid decode position";
+  const int32_t cache_position =
+      ctx.use_mrope_positions
+          ? calc_kv_len(ctx.kv_seq_lens, row.seq_id, row.position_offset) - 1
+          : ctx.positions[row.seq_id] + row.position_offset;
+  CHECK_GE(cache_position, 0) << "invalid decode cache position";
 
   // All decode paths can toggle which fields are emitted, so one row builder
   // can serve draft/validate/first-decode/update-last-step scenarios.
   if (row.append_token) {
     buf.out_token_ids.emplace_back(resolve_row_token_id(ctx, row));
   }
-  buf.out_positions.emplace_back(new_position);
+  if (ctx.use_mrope_positions) {
+    buf.position_helper.use_mrope_positions = true;
+    // Decode emits text tokens only. Preserve the mRoPE [3, N] layout for
+    // downstream graph stability, but use the text position from dim 0 for all
+    // three axes instead of extending image h/w axes.
+    const int32_t text_position =
+        ctx.positions[row.seq_id] + row.position_offset;
+    CHECK_GE(text_position, 0) << "invalid decode mRoPE text position";
+
+    buf.position_helper.append_out_position_id(text_position);
+  } else {
+    const int32_t model_position =
+        ctx.positions[row.seq_id] + row.position_offset;
+    CHECK_GE(model_position, 0) << "invalid decode model position";
+    buf.position_helper.append_out_position_id(model_position);
+  }
+
   if (ctx.model_managed_multiblock) {
     buf.out_new_cache_slots.emplace_back(0);
     if (row.append_block_table) {
@@ -281,7 +312,7 @@ void append_decode_row(const DecodeRowContext& ctx,
     const Slice<int32_t> block_table_slice =
         get_block_table_slice(ctx, row.seq_id);
     buf.out_new_cache_slots.emplace_back(
-        calc_slot_id(new_position, block_table_slice, block_size));
+        calc_slot_id(cache_position, block_table_slice, block_size));
     if (row.append_block_table) {
       if (buf.out_block_table_stride == 0) {
         buf.out_block_table_stride =

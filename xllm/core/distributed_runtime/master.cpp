@@ -268,7 +268,7 @@ Master::Master(const Options& options, EngineType type)
 
     auto engine = std::make_unique<VLMEngine>(eng_options);
     engine_ = std::move(engine);
-  } else if (type == EngineType::SSM) {
+  } else if (type == EngineType::SSM || type == EngineType::VLMSSM) {
     // create a speculative engine if draft model path is provided
     const std::string draft_model_path =
         options_.draft_model_path().value_or("");
@@ -342,7 +342,12 @@ Master::Master(const Options& options, EngineType type)
     if (use_suffix_spec) {
       engine_ = std::make_unique<SuffixSpeculativeEngine>(spec_options);
     } else {
-      engine_ = std::make_unique<SpeculativeEngine>(spec_options);
+      if (type == EngineType::VLMSSM) {
+        engine_ =
+            std::make_unique<SpeculativeEngineBase<VLMEngine>>(spec_options);
+      } else {
+        engine_ = std::make_unique<SpeculativeEngineBase<LLMEngine>>(spec_options);
+      }
     }
   } else if (type == EngineType::LLM) {
     if (options_.task_type() == "embed" || options.task_type() == "mm_embed") {

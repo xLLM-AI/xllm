@@ -55,8 +55,10 @@ std::string next_warmup_request_id();
 // decoding is enabled (MTP), the worker's decode path requires a valid decode
 // state written through the MTP bootstrap channel before it validates the
 // per-token decode state. This injects a placeholder bootstrap embedding of
-// shape [1, hidden_size] so the bootstrap path runs during graph capture; the
-// embedding values are irrelevant because warmup only captures the graph.
+// shape [1, hidden_size] so the bootstrap path runs during graph capture. The
+// caller should pass the algorithm-specific bootstrap width, e.g. 3x target
+// hidden size for Eagle3; the embedding values are irrelevant because warmup
+// only captures the graph.
 // Does nothing when speculative decoding is disabled.
 void prepare_warmup_decode_sequence(Sequence* sequence,
                                     int64_t hidden_size,

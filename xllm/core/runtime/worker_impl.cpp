@@ -720,6 +720,15 @@ void WorkerImpl::prepare_work_before_execute(const ForwardInput& input,
       input, processed_input, *prepare_stream_);
 }
 
+std::optional<ForwardOutput> WorkerImpl::execute_no_sync_on_stream(
+    const ForwardInput& input,
+    Stream& compute_stream) {
+  (void)input;
+  (void)compute_stream;
+  LOG(FATAL) << "execute_no_sync_on_stream is not supported by this worker";
+  return std::nullopt;
+}
+
 void WorkerImpl::prepare_work_before_execute_on_stream(
     const ForwardInput& input,
     ForwardInput& processed_input,

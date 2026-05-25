@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -34,12 +35,74 @@ struct DecodeBuildMeta {
   int32_t kv_max_seq_len = 0;
 };
 
+// A position builder that Compatible with both RoPE and mRoPE. For mRoPE, it
+// emits 3 columns of position ids
+struct PositionBuildHelper {
+  PositionBuildHelper() = default;
+  PositionBuildHelper(const torch::Tensor& position_ids_tensor)
+      : position_ids(position_ids_tensor) {
+    use_mrope_positions =
+        position_ids_tensor.dim() == 2 && position_ids_tensor.size(0) == 3;
+  }
+
+  Slice<int32_t> get_input_positions() const {
+    size_t num_positions =
+        use_mrope_positions ? position_ids.size(1) : position_ids.numel();
+    return Slice<int32_t>{position_ids.data_ptr<int32_t>(), num_positions};
+  }
+
+  torch::Tensor make_cpu_position_tensor() {
+    if (use_mrope_positions) {
+      CHECK_EQ(out_position_id_vec.size(),
+               static_cast<size_t>(out_position_columns) * 3);
+    }
+    torch::Tensor positions =
+        torch::empty({static_cast<int64_t>(out_position_id_vec.size())},
+                     torch::TensorOptions()
+                         .dtype(torch::kInt)
+                         .device(torch::kCPU)
+                         .pinned_memory(true));
+    std::copy(out_position_id_vec.begin(),
+              out_position_id_vec.end(),
+              positions.data_ptr<int32_t>());
+    if (use_mrope_positions) {
+      return positions.view({out_position_columns, 3})
+          .transpose(0, 1)
+          .contiguous();
+    }
+    return positions;
+  }
+
+  void append_out_position_id(int32_t position_id) {
+    if (use_mrope_positions) {
+      for (int i = 0; i < 3; ++i) {
+        out_position_id_vec.emplace_back(position_id);
+      }
+    } else {
+      out_position_id_vec.emplace_back(position_id);
+    }
+    out_position_columns++;
+  }
+
+  void reserve_out_position_id(int32_t reserve_size) {
+    if (use_mrope_positions) {
+      out_position_id_vec.reserve(reserve_size * 3);
+    } else {
+      out_position_id_vec.reserve(reserve_size);
+    }
+  }
+
+  torch::Tensor position_ids;
+  std::vector<int32_t> out_position_id_vec;
+  bool use_mrope_positions = false;
+  int32_t out_position_columns = 0;
+};
+
 // Aggregated output vectors produced by row builders.
 // Callers convert these vectors to tensors and write back to input params.
 struct DecodeBuildBuffers {
   DecodeBuildMeta meta;
   std::vector<int32_t> out_token_ids;
-  std::vector<int32_t> out_positions;
   std::vector<int32_t> out_kv_seq_lens;
   std::vector<int32_t> out_q_seq_lens;
   std::vector<int32_t> out_q_cu_seq_lens;
@@ -48,6 +111,7 @@ struct DecodeBuildBuffers {
   std::vector<std::vector<std::vector<int32_t>>> out_multi_block_tables;
   int32_t out_block_table_rows = 0;
   int32_t out_block_table_stride = 0;
+  PositionBuildHelper position_helper;
 };
 
 // CPU-side row context shared by decode row builders.
@@ -63,6 +127,8 @@ struct DecodeRowContext {
   int32_t num_sequences = 0;
   int32_t block_table_stride = 0;
   bool model_managed_multiblock = false;
+  bool use_mrope_positions = false;
+  int32_t position_stride = 1;
 };
 
 // Declarative spec for one emitted decode row.

@@ -138,7 +138,6 @@ class LLMEngine : public Engine {
           layer_offsets) override;
 
  private:
-  friend class SpeculativeEngine;
 
   // ---- RL deep-sleep path (SleepableAllocator), isolated from the xtensor
   // ---- (PageAllocator) sleep/wakeup path. ----
@@ -149,6 +148,9 @@ class LLMEngine : public Engine {
   bool rl_wakeup(const WakeupOptions& options);
   bool xtensor_sleep(MasterStatus master_status);
   bool xtensor_wakeup(const WakeupOptions& options);
+
+  template <typename TargetEngine>
+  friend class SpeculativeEngineBase;
 
   // setup workers internal
   void setup_workers(const runtime::Options& options);

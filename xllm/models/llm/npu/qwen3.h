@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/nn/functional/normalization.h>
 
+#include <filesystem>
 #include <optional>
 #include <unordered_set>
 #include <vector>
@@ -26,6 +27,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/state_dict/state_dict.h"
 #include "core/layers/npu/npu_qwen3_decoder_layer_impl.h"
 #include "llm_model_base.h"
 
@@ -119,6 +121,10 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
     }
     LOG(INFO) << "layers_to_capture_set_ size: "
               << layers_to_capture_set_.size();
+  }
+
+  void set_quarot_global_rotation(torch::Tensor global_rotation) {
+    quarot_global_rotation_t_ = global_rotation.transpose(0, 1).contiguous();
   }
 
   virtual ModelOutput forward(torch::Tensor tokens,
@@ -242,10 +248,17 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
       const int32_t layer_index = i;
       if (capture_aux_hidden_states_ &&
           layers_to_capture_set_.count(layer_index) != 0) {
+        torch::Tensor aux_h = h;
+        if (::xllm::KernelConfig::get_instance().enable_interlayer_addnorm() &&
+            residual.defined()) {
+          aux_h = h + residual;
+        }
+        aux_h = restore_quarot_hidden(
+            aux_h.reshape({num_tokens, hidden_size}), hidden_size);
         aux_output_buffer_.slice(0, 0, num_tokens)
             .slice(
                 1, capture_idx * hidden_size, (capture_idx + 1) * hidden_size)
-            .copy_(h.reshape({num_tokens, hidden_size}));
+            .copy_(aux_h);
         capture_idx++;
       }
 
@@ -281,17 +294,30 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
   }
 
  private:
+  torch::Tensor restore_quarot_hidden(torch::Tensor aux_h,
+                                      int64_t hidden_size) {
+    if (!quarot_global_rotation_t_.defined() ||
+        quarot_global_rotation_t_.numel() == 0) {
+      return aux_h;
+    }
+
+    return torch::matmul(aux_h, quarot_global_rotation_t_);
+  }
+
   torch::Tensor viusal_pos_mask_;
   std::unordered_set<int32_t> layers_to_capture_set_;
   bool capture_aux_hidden_states_ = false;
   torch::Tensor aux_output_buffer_;
+  torch::Tensor quarot_global_rotation_t_;
 };
 TORCH_MODULE(QWen3Model);
 
 class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
  public:
   QWen3ForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<QWen3Model>(context) {}
+      : LlmForCausalLMImplBase<QWen3Model>(context),
+        device_(context.get_tensor_options().device()),
+        dtype_(context.get_tensor_options().dtype().toScalarType()) {}
 
   torch::Tensor pooler(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) {
@@ -302,6 +328,58 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
     return torch::nn::functional::normalize(
         h, torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
   }
+
+  void load_model(std::unique_ptr<ModelLoader> loader,
+                  std::string prefix = "model.") override {
+    const std::filesystem::path model_path(loader->model_weights_path());
+    LlmForCausalLMImplBase<QWen3Model>::load_model(std::move(loader), prefix);
+    load_optional_quarot_rotation(model_path);
+  }
+
+  void lazy_load_model(std::unique_ptr<ModelLoader> loader,
+                       std::string prefix = "model.") override {
+    const std::filesystem::path model_path(loader->model_weights_path());
+    LlmForCausalLMImplBase<QWen3Model>::lazy_load_model(std::move(loader),
+                                                        prefix);
+    load_optional_quarot_rotation(model_path);
+  }
+
+ private:
+  void load_optional_quarot_rotation(const std::filesystem::path& model_path) {
+    const std::filesystem::path quarot_path =
+        model_path / "optional" / "quarot.safetensors";
+    if (!std::filesystem::exists(quarot_path)) {
+      return;
+    }
+
+    auto state_dict = StateDictFromSafeTensor::load(quarot_path.string());
+    torch::Tensor global_rotation = state_dict->get_tensor("global_rotation");
+    if (!global_rotation.defined()) {
+      LOG(WARNING) << "Optional QuaRot file exists but global_rotation is "
+                      "missing: "
+                   << quarot_path.string();
+      return;
+    }
+    CHECK_EQ(global_rotation.dim(), 2)
+        << "QuaRot global_rotation must be a 2D tensor";
+    CHECK_EQ(global_rotation.size(0), global_rotation.size(1))
+        << "QuaRot global_rotation must be square";
+
+    global_rotation =
+        global_rotation
+            .to(torch::TensorOptions()
+                    .dtype(dtype_)
+                    .device(device_),
+                /*non_blocking=*/false,
+                /*copy=*/true)
+            .contiguous();
+    model_->set_quarot_global_rotation(global_rotation);
+    LOG(INFO) << "Loaded optional QuaRot global_rotation from "
+              << quarot_path.string() << ", shape=" << global_rotation.sizes();
+  }
+
+  torch::Device device_;
+  torch::Dtype dtype_;
 };
 TORCH_MODULE(QWen3ForCausalLM);
 

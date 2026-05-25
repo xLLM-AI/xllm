@@ -65,11 +65,13 @@ runtime::Options SuffixTargetOptions(const runtime::Options& options) {
 
 SuffixWorkerImpl::SuffixWorkerImpl(const ParallelArgs& parallel_args,
                                    const torch::Device& device,
-                                   const runtime::Options& options)
+                                   const runtime::Options& options,
+                                   WorkerType worker_type)
     : SpeculativeWorkerImpl(parallel_args,
                             device,
                             options,
-                            SuffixTargetOptions(options)) {
+                            SuffixTargetOptions(options),
+                            worker_type) {
   suffix_cache_ = std::make_unique<SuffixDecodingCache>(
       options_.speculative_suffix_cache_max_depth(),
       options_.speculative_suffix_max_cached_requests());
@@ -78,7 +80,7 @@ SuffixWorkerImpl::SuffixWorkerImpl(const ParallelArgs& parallel_args,
 std::optional<ForwardOutput> SuffixWorkerImpl::step_empty(
     const ForwardInput& input) {
   if (!input.input_params.meta.batch_forward_type.is_decode()) {
-    auto output = impl_->step(input);
+    auto output = target_impl_->step(input);
     output->sample_output.embeddings = torch::Tensor();
     return output;
   } else {
@@ -87,7 +89,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_empty(
       it *= options_.num_speculative_tokens() + 1;
     }
 
-    auto future = impl_->step_async(new_input);
+    auto future = target_impl_->step_async(new_input);
     ForwardOutput output = std::move(future).get().value();
     output.sample_output.embeddings = torch::Tensor();
     return output;
@@ -98,7 +100,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_prefill(
     const ForwardInput& input) {
   Timer timer;
   // run the target model to get first token and hidden states
-  auto future = impl_->step_async(input);
+  auto future = target_impl_->step_async(input);
   ForwardOutput output = std::move(future).get().value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
@@ -285,7 +287,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
               timer.elapsed_seconds());
 
   timer.reset();
-  auto future = impl_->step_async(validate_input);
+  auto future = target_impl_->step_async(validate_input);
   ForwardOutput target_output = std::move(future).get().value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
