@@ -316,7 +316,7 @@ find_package(benchmark CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(OpenCV CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
-find_package(Python COMPONENTS Development REQUIRED)
+find_package(Python COMPONENTS Interpreter Development REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
 
 if (USE_CXX11_ABI)
@@ -405,6 +405,7 @@ if(USE_NPU)
   #-> because the scope of third-party softwares managed by vcpkg is used throughout the entire xllm.
   message(STATUS "VCPKG_INCLUDE_DIR = ${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include")
   include_directories("${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include")
+  include_directories(SYSTEM ${Python_INCLUDE_DIRS})
 
   add_subdirectory(
     "${XLLM_ATB_LAYERS_SOURCE_DIR}"
