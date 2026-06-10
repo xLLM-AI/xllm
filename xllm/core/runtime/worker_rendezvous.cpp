@@ -50,12 +50,7 @@ bool WorkerRendezvous::link_cluster(const std::vector<uint64_t>& cluster_ids,
     return false;
   }
 
-  const size_t cluster_count = cluster_ids.size();
-  for (size_t i = 0; i < cluster_count; ++i) {
-    if (!kv_cache_transfer_->link_cluster(cluster_ids[i], addrs[i], ports[i])) {
-      return false;
-    }
-  }
+  return kv_cache_transfer_->link_clusters(cluster_ids, addrs, ports);
 #endif
   return true;
 }
@@ -72,13 +67,7 @@ bool WorkerRendezvous::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
     return false;
   }
 
-  const size_t cluster_count = cluster_ids.size();
-  for (size_t i = 0; i < cluster_count; ++i) {
-    if (!kv_cache_transfer_->unlink_cluster(
-            cluster_ids[i], addrs[i], ports[i])) {
-      return false;
-    }
-  }
+  return kv_cache_transfer_->unlink_clusters(cluster_ids, addrs, ports);
 #endif
   return true;
 }

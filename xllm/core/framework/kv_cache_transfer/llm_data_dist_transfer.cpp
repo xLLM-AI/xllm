@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <chrono>
+#include <exception>
 
 #include "common/macros.h"
 #include "core/framework/config/disagg_pd_config.h"
@@ -111,25 +112,55 @@ void LlmDataDistTransfer::get_cache_info(uint64_t& cluster_id,
 bool LlmDataDistTransfer::link_cluster(const uint64_t cluster_id,
                                        const std::string& remote_addr,
                                        const uint16_t port) {
-  if (linked_cluster_ids.find(cluster_id) != linked_cluster_ids.end()) {
-    // The cluster is connected.
-    return true;
+  return link_clusters(std::vector<uint64_t>{cluster_id},
+                       std::vector<std::string>{remote_addr},
+                       std::vector<uint16_t>{port});
+}
+
+bool LlmDataDistTransfer::link_clusters(
+    const std::vector<uint64_t>& cluster_ids,
+    const std::vector<std::string>& remote_addrs,
+    const std::vector<uint16_t>& ports) {
+  if (cluster_ids.size() != remote_addrs.size() ||
+      cluster_ids.size() != ports.size()) {
+    LOG(ERROR) << "Cluster endpoint size mismatch: cluster_ids="
+               << cluster_ids.size() << ", addrs=" << remote_addrs.size()
+               << ", ports=" << ports.size();
+    return false;
   }
 
   std::vector<llm_datadist::Status> rets;
   std::vector<ClusterInfo> clusters;
-  ClusterInfo cluster_info = create_cluster_info(cluster_id, remote_addr, port);
-  clusters.emplace_back(std::move(cluster_info));
+  clusters.reserve(cluster_ids.size());
+  for (size_t i = 0; i < cluster_ids.size(); ++i) {
+    if (linked_cluster_ids.find(cluster_ids[i]) != linked_cluster_ids.end()) {
+      continue;
+    }
+    clusters.emplace_back(
+        create_cluster_info(cluster_ids[i], remote_addrs[i], ports[i]));
+  }
 
-  auto ret = llm_data_dist_->LinkLlmClusters(
-      clusters, rets, /*timeout_in_millis=*/60000);
+  if (clusters.empty()) {
+    return true;
+  }
+
+  uint64_t ret = LLM_SUCCESS;
+  try {
+    ret = llm_data_dist_->LinkLlmClusters(
+        clusters, rets, /*timeout_in_millis=*/60000);
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "LinkLlmClusters threw exception: " << e.what()
+               << ", clusters = " << clusters.size();
+    return false;
+  }
   if (ret != LLM_SUCCESS) {
     LOG(ERROR) << "LinkLlmClusters failed, ret = " << std::hex << ret;
     return false;
   }
-  LOG(INFO) << "LinkLlmClusters success, ip : " << remote_addr
-            << ", port : " << port;
-  linked_cluster_ids.insert(cluster_id);
+  LOG(INFO) << "LinkLlmClusters success, clusters = " << clusters.size();
+  for (uint64_t id : cluster_ids) {
+    linked_cluster_ids.insert(id);
+  }
 
   return true;
 }
@@ -138,11 +169,32 @@ bool LlmDataDistTransfer::unlink_cluster(const uint64_t& cluster_id,
                                          const std::string& remote_addr,
                                          const uint16_t remote_port,
                                          bool force_flag) {
+  return unlink_clusters(std::vector<uint64_t>{cluster_id},
+                         std::vector<std::string>{remote_addr},
+                         std::vector<uint16_t>{remote_port},
+                         force_flag);
+}
+
+bool LlmDataDistTransfer::unlink_clusters(
+    const std::vector<uint64_t>& cluster_ids,
+    const std::vector<std::string>& remote_addrs,
+    const std::vector<uint16_t>& remote_ports,
+    bool force_flag) {
+  if (cluster_ids.size() != remote_addrs.size() ||
+      cluster_ids.size() != remote_ports.size()) {
+    LOG(ERROR) << "Cluster endpoint size mismatch: cluster_ids="
+               << cluster_ids.size() << ", addrs=" << remote_addrs.size()
+               << ", ports=" << remote_ports.size();
+    return false;
+  }
+
   std::vector<llm_datadist::Status> rets;
   std::vector<ClusterInfo> clusters;
-  ClusterInfo cluster_info =
-      create_cluster_info(cluster_id, remote_addr, remote_port);
-  clusters.emplace_back(std::move(cluster_info));
+  clusters.reserve(cluster_ids.size());
+  for (size_t i = 0; i < cluster_ids.size(); ++i) {
+    clusters.emplace_back(
+        create_cluster_info(cluster_ids[i], remote_addrs[i], remote_ports[i]));
+  }
 
   auto ret =
       llm_data_dist_->UnlinkLlmClusters(clusters, rets, 1000, force_flag);
@@ -150,9 +202,10 @@ bool LlmDataDistTransfer::unlink_cluster(const uint64_t& cluster_id,
     LOG(ERROR) << "UnlinkLlmClusters failed, ret = " << std::hex << ret;
     return false;
   }
-  LOG(INFO) << "UnlinkLlmClusters success, ip : " << remote_addr
-            << ", port : " << remote_port;
-  linked_cluster_ids.erase(cluster_id);
+  LOG(INFO) << "UnlinkLlmClusters success, clusters = " << clusters.size();
+  for (uint64_t id : cluster_ids) {
+    linked_cluster_ids.erase(id);
+  }
 
   return true;
 }

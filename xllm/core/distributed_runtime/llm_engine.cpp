@@ -719,7 +719,10 @@ bool LLMEngine::link_cluster(const std::vector<uint64_t>& cluster_ids,
                              const std::vector<uint16_t>& ports,
                              const int32_t src_dp_size,
                              const int32_t src_kv_split_size) {
-  // Each D worker connects to all P workers that share the same TP rank.
+  // Each D worker connects to P workers that share the same TP rank.
+  // LlmDataDist currently throws SVector out_of_range when one decoder worker
+  // links multiple CP/KV split prompt endpoints, so KV-split mode pins each
+  // decoder worker to one split endpoint.
   // P layout: rank = dp_i * src_cp_tp_size + split_j * src_tp_size + tp_rank
   // D workers cycle through tp_rank in [0, src_tp_size) round-robin.
   // Requires: D-side dp_local_tp_size_ == src_tp_size.
@@ -735,18 +738,20 @@ bool LLMEngine::link_cluster(const std::vector<uint64_t>& cluster_ids,
     std::vector<uint64_t> target_cluster_ids;
     std::vector<std::string> target_addrs;
     std::vector<uint16_t> target_ports;
-    target_cluster_ids.reserve(src_dp_size * src_kv_split_size);
-    target_addrs.reserve(src_dp_size * src_kv_split_size);
-    target_ports.reserve(src_dp_size * src_kv_split_size);
+    const int32_t worker_split_index =
+        src_kv_split_size > 1 ? static_cast<int32_t>(worker_rank) %
+                                    src_kv_split_size
+                              : 0;
+    target_cluster_ids.reserve(src_dp_size);
+    target_addrs.reserve(src_dp_size);
+    target_ports.reserve(src_dp_size);
 
     for (int32_t dp_i = 0; dp_i < src_dp_size; ++dp_i) {
-      for (int32_t split_j = 0; split_j < src_kv_split_size; ++split_j) {
-        int32_t p_idx =
-            dp_i * src_cp_tp_size + split_j * src_tp_size + src_dp_worker_index;
-        target_cluster_ids.emplace_back(cluster_ids[p_idx]);
-        target_addrs.emplace_back(addrs[p_idx]);
-        target_ports.emplace_back(ports[p_idx]);
-      }
+      int32_t p_idx = dp_i * src_cp_tp_size +
+                      worker_split_index * src_tp_size + src_dp_worker_index;
+      target_cluster_ids.emplace_back(cluster_ids[p_idx]);
+      target_addrs.emplace_back(addrs[p_idx]);
+      target_ports.emplace_back(ports[p_idx]);
     }
 
     src_dp_worker_index = (src_dp_worker_index + 1) % src_tp_size;
@@ -794,18 +799,20 @@ bool LLMEngine::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
     std::vector<uint64_t> target_cluster_ids;
     std::vector<std::string> target_addrs;
     std::vector<uint16_t> target_ports;
-    target_cluster_ids.reserve(src_dp_size * src_kv_split_size);
-    target_addrs.reserve(src_dp_size * src_kv_split_size);
-    target_ports.reserve(src_dp_size * src_kv_split_size);
+    const int32_t worker_split_index =
+        src_kv_split_size > 1 ? static_cast<int32_t>(worker_rank) %
+                                    src_kv_split_size
+                              : 0;
+    target_cluster_ids.reserve(src_dp_size);
+    target_addrs.reserve(src_dp_size);
+    target_ports.reserve(src_dp_size);
 
     for (int32_t dp_i = 0; dp_i < src_dp_size; ++dp_i) {
-      for (int32_t split_j = 0; split_j < src_kv_split_size; ++split_j) {
-        int32_t p_idx =
-            dp_i * src_cp_tp_size + split_j * src_tp_size + src_dp_worker_index;
-        target_cluster_ids.emplace_back(cluster_ids[p_idx]);
-        target_addrs.emplace_back(addrs[p_idx]);
-        target_ports.emplace_back(ports[p_idx]);
-      }
+      int32_t p_idx = dp_i * src_cp_tp_size +
+                      worker_split_index * src_tp_size + src_dp_worker_index;
+      target_cluster_ids.emplace_back(cluster_ids[p_idx]);
+      target_addrs.emplace_back(addrs[p_idx]);
+      target_ports.emplace_back(ports[p_idx]);
     }
 
     src_dp_worker_index = (src_dp_worker_index + 1) % src_tp_size;

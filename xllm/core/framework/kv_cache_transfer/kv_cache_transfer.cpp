@@ -37,6 +37,47 @@ limitations under the License.
 
 namespace xllm {
 
+bool KVCacheTransfer::link_clusters(
+    const std::vector<uint64_t>& cluster_ids,
+    const std::vector<std::string>& remote_addrs,
+    const std::vector<uint16_t>& ports) {
+  if (cluster_ids.size() != remote_addrs.size() ||
+      cluster_ids.size() != ports.size()) {
+    LOG(ERROR) << "Cluster endpoint size mismatch: cluster_ids="
+               << cluster_ids.size() << ", addrs=" << remote_addrs.size()
+               << ", ports=" << ports.size();
+    return false;
+  }
+
+  for (size_t i = 0; i < cluster_ids.size(); ++i) {
+    if (!link_cluster(cluster_ids[i], remote_addrs[i], ports[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool KVCacheTransfer::unlink_clusters(
+    const std::vector<uint64_t>& cluster_ids,
+    const std::vector<std::string>& remote_addrs,
+    const std::vector<uint16_t>& ports,
+    bool force_flag) {
+  if (cluster_ids.size() != remote_addrs.size() ||
+      cluster_ids.size() != ports.size()) {
+    LOG(ERROR) << "Cluster endpoint size mismatch: cluster_ids="
+               << cluster_ids.size() << ", addrs=" << remote_addrs.size()
+               << ", ports=" << ports.size();
+    return false;
+  }
+
+  for (size_t i = 0; i < cluster_ids.size(); ++i) {
+    if (!unlink_cluster(cluster_ids[i], remote_addrs[i], ports[i], force_flag)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 folly::SemiFuture<bool> KVCacheTransfer::pull_kv_blocks_async(
     const uint64_t src_cluster_id,
     const std::string& src_addr,

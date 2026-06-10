@@ -107,10 +107,19 @@ class KVCacheTransfer {
                             const std::string& remote_addr,
                             const uint16_t port) = 0;
 
+  virtual bool link_clusters(const std::vector<uint64_t>& cluster_ids,
+                             const std::vector<std::string>& remote_addrs,
+                             const std::vector<uint16_t>& ports);
+
   virtual bool unlink_cluster(const uint64_t& cluster_id,
                               const std::string& remote_addr,
                               const uint16_t port,
                               bool force_flag = true) = 0;
+
+  virtual bool unlink_clusters(const std::vector<uint64_t>& cluster_ids,
+                               const std::vector<std::string>& remote_addrs,
+                               const std::vector<uint16_t>& ports,
+                               bool force_flag = true);
 
   virtual bool pull_kv_blocks(
       const uint64_t src_cluster_id,
