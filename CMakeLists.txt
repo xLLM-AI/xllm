@@ -44,10 +44,17 @@ if(USE_NPU)
     set(XLLM_OPS_BUILD_DIR "${CMAKE_SOURCE_DIR}/third_party/xllm_ops/build")
   endif()
 
+  if(DEFINED ENV{XLLM_OPS_PRECOMPILE_JOBS} AND NOT "$ENV{XLLM_OPS_PRECOMPILE_JOBS}" STREQUAL "")
+    set(XLLM_OPS_PRECOMPILE_JOBS "$ENV{XLLM_OPS_PRECOMPILE_JOBS}")
+  else()
+    set(XLLM_OPS_PRECOMPILE_JOBS "1")
+  endif()
+
   if(NOT DEFINED XLLM_OPS_GIT_HEAD_CACHED OR NOT XLLM_OPS_GIT_HEAD STREQUAL XLLM_OPS_GIT_HEAD_CACHED)
-    message(STATUS "xllm_ops git HEAD changed; running precompile via execute_process")
+    message(STATUS "xllm_ops git HEAD changed; running precompile via execute_process (jobs=${XLLM_OPS_PRECOMPILE_JOBS})")
     execute_process(
       COMMAND ${CMAKE_COMMAND} -E env "XLLM_OPS_BUILD_DIR=${XLLM_OPS_BUILD_DIR}"
+              "OPS_CPU_NUMBER=${XLLM_OPS_PRECOMPILE_JOBS}"
               bash ${CMAKE_SOURCE_DIR}/third_party/xllm_ops/build.sh
       WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/third_party/xllm_ops
       RESULT_VARIABLE XLLM_OPS_RESULT
