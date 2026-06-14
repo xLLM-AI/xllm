@@ -91,6 +91,10 @@ DEFINE_bool(
     false,
     "Whether to decode both audio and video when the input is a video.");
 
+DEFINE_bool(enable_mistral_prompt_to_message,
+            false,
+            "Whether to enable mistral prompt to message conversion.");
+
 // NOTE: This is an experimental flag,
 //       it needs to be removed after the function is stable.
 DEFINE_bool(use_cpp_chat_template,

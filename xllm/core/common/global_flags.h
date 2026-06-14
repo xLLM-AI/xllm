@@ -314,6 +314,9 @@ DECLARE_string(reasoning_parser);
 
 DECLARE_string(tool_call_parser);
 
+// --- flux2 text encoder prompt config ---
+DECLARE_bool(enable_mistral_prompt_to_message);
+
 // --- execution config ---
 DECLARE_bool(enable_shm);
 
