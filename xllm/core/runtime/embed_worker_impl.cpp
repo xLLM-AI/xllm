@@ -86,6 +86,17 @@ std::optional<ForwardOutput> EmbedWorkerImpl::step(const ForwardInput& input) {
     auto embeddings =
         model_->pooler(hidden_states, sampling_params.selected_token_idxes);
     sample_output.embeddings = embeddings;
+    if (FLAGS_enable_return_mm_full_embeddings) {
+      auto q_seq_len_vec = input.input_params.attention.host.q_seq_lens;
+      sample_output.mm_embeddings.reserve(q_seq_len_vec.size());
+      int32_t token_start_idx = 0;
+      for (auto seq_len : q_seq_len_vec) {
+        auto image_embed =
+            embeddings.slice(0, token_start_idx, token_start_idx + seq_len);
+        sample_output.mm_embeddings.emplace_back(image_embed);
+        token_start_idx += seq_len;
+      }
+    }
     COUNTER_ADD(execution_latency_seconds_sampling, timer.elapsed_seconds());
 
     // set sample output to output

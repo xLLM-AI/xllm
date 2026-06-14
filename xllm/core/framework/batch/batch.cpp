@@ -479,7 +479,7 @@ void Batch::process_sample_output(const RawForwardOutput& raw_output,
     const auto sequences = get_sequences();
     for (auto* seq : sequences) {
       int64_t mm_item_count = seq->mm_data().size();
-      if (mm_item_count <= 0) {
+      if (!FLAGS_enable_mistral_prompt_to_message && mm_item_count <= 0) {
         continue;
       }
       std::vector<torch::Tensor> seq_mm_embeddings;

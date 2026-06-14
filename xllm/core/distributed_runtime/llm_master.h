@@ -23,6 +23,8 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "api_service/chat_json_parser.h"
+#include "api_service/serving_mode.h"
 #include "common/options.h"
 #include "common/rate_limiter.h"
 #include "framework/chat_template/chat_template.h"
@@ -31,7 +33,6 @@ limitations under the License.
 #include "llm_engine.h"
 #include "master.h"
 #include "scheduler/continuous_scheduler.h"
-
 namespace xllm {
 
 class Call;

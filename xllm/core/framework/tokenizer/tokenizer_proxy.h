@@ -27,7 +27,8 @@ class TokenizerProxy : public Tokenizer {
 
   bool encode(const std::string_view& text,
               std::vector<int32_t>* ids,
-              bool add_special_tokens = true) const override;
+              bool add_special_tokens = true,
+              int32_t max_sequence_length = 0) const override;
 
   bool encode(int64_t item_id, std::vector<int32_t>* token_ids) const override;
 
