@@ -68,11 +68,25 @@ DisaggPDScheduler::DisaggPDScheduler(Engine* engine, const Options& options)
     initialize_rpc_server(server_name_);
     register_instance_info(server_name_, engine);
 
-    // Profile ttft & topt and update instance info (for mix instances)
-    if (!options_.disable_ttft_profiling() &&
-        options_.instance_role().value() == InstanceRole::MIX) {
-      profile_ttft();
-      profile_tpot();
+    // Profile time predictors before the instance is registered to service.
+    // In disaggregated PD mode, prefill lanes need TTFT profiling data for
+    // prefill-route estimation, while decode lanes need TPOT profiling data
+    // for decode-pressure estimation. The previous implementation only
+    // profiled MIX roles, which left PREFILL/DECODE-only topologies with empty
+    // profiling vectors and caused projected/estimated route fields to remain
+    // zero in service traces.
+    if (!options_.disable_ttft_profiling()) {
+      const auto role = options_.instance_role().value();
+      if (role == InstanceRole::MIX || role == InstanceRole::PREFILL) {
+        profile_ttft();
+      }
+      if (role == InstanceRole::MIX || role == InstanceRole::DECODE) {
+        profile_tpot();
+      }
+      LOG(INFO) << "Disagg PD profiling summary, role="
+                << role.to_string()
+                << ", ttft_points=" << instance_info_.ttft_profiling_data.size()
+                << ", tpot_points=" << instance_info_.tpot_profiling_data.size();
     }
   }
 }
@@ -149,10 +163,35 @@ void DisaggPDScheduler::profile_ttft() {
   // get the maximum prefill token length
   auto& model_args = engine_->model_args();
   int32_t max_context_len = model_args.max_position_embeddings();
+  const int32_t profile_max_prompt_length =
+      std::max(2, options_.profile_max_prompt_length());
+  const int32_t block_size = kv_cache_manager_->block_size();
+  const int32_t total_cache_token_capacity =
+      static_cast<int32_t>(kv_cache_manager_->num_blocks()) * block_size;
+  max_context_len = std::min(max_context_len, profile_max_prompt_length);
   if (!options_.enable_chunked_prefill()) {
     max_context_len =
         std::min(max_context_len, options_.max_tokens_per_batch());
   }
+  // Reserve at least one block and avoid landing exactly on a block boundary.
+  // The profiling path accounts blocks as token_length / block_size + 1, so a
+  // length like (num_blocks - 1) * block_size still rounds up to num_blocks
+  // and can trip "Not enough blocks". Subtract one extra token to keep the
+  // request strictly below that boundary.
+  const int32_t safe_cache_token_capacity = std::max(
+      1, total_cache_token_capacity - block_size - 1);
+  max_context_len = std::min(max_context_len, safe_cache_token_capacity);
+  CHECK_GT(max_context_len, 1)
+      << "TTFT profiling requires positive KV cache token capacity, block_size="
+      << block_size
+      << ", num_blocks=" << kv_cache_manager_->num_blocks();
+  LOG(INFO) << "TTFT profiling capacity bound, max_context_len="
+            << max_context_len
+            << ", profile_max_prompt_length=" << profile_max_prompt_length
+            << ", total_cache_token_capacity=" << total_cache_token_capacity
+            << ", safe_cache_token_capacity=" << safe_cache_token_capacity
+            << ", block_size=" << block_size
+            << ", num_blocks=" << kv_cache_manager_->num_blocks();
 
   // warm up
   profile_manager_->run_request(max_context_len, 0);
