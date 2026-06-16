@@ -238,6 +238,7 @@ CompressorImpl::CompressorImpl(int64_t compress_ratio,
                                bool rotate,
                                double norm_eps,
                                const torch::TensorOptions& options,
+                               const ModelArgs& args,
                                const QuantArgs& quant_args)
     : compress_ratio_(compress_ratio),
       hidden_dim_(hidden_dim),
@@ -248,6 +249,7 @@ CompressorImpl::CompressorImpl(int64_t compress_ratio,
       overlap_(compress_ratio == 4 ? true : false),
       coff_(compress_ratio == 4 ? 2 : 1) {
   compress_len_ = compress_ratio_ * coff_;
+  num_spec_tokens_ = args.num_speculative_tokens(),
   wkv_ = register_module("wkv",
                          ReplicatedLinear(hidden_dim_,
                                           coff_ * head_dim_,
@@ -271,10 +273,8 @@ CompressorImpl::CompressorImpl(int64_t compress_ratio,
     const double log_dim = std::ceil(std::log2(static_cast<double>(head_dim_)));
     const int64_t padded_dim =
         static_cast<int64_t>(1ull << static_cast<uint64_t>(log_dim));
-    hadamard_matrix_ = util::create_hadamard_matrix(padded_dim,
-                                                    torch::kFloat32,
-                                                    torch::Device(torch::kCPU),
-                                                    /*normalize=*/true);
+    hadamard_matrix_ = util::create_hadamard_matrix(
+        padded_dim, torch::kFloat32, torch::Device(torch::kCPU), true);
     hadamard_matrix_ =
         hadamard_matrix_.to(options.device(), options.dtype().toScalarType());
   }
@@ -391,36 +391,39 @@ torch::Tensor CompressorImpl::forward_decode(
   torch::Tensor& score_block_table = std::get<1>(block_tables);
 
   const DSAMetadata& dsa = *attn_metadata.dsa_metadata;
-  const int64_t batch_size =
-      static_cast<int64_t>(attn_metadata.kv_seq_lens.size(0));
+  int64_t batch_size = static_cast<int64_t>(attn_metadata.kv_seq_lens.size(0));
 
+  std::optional<torch::Tensor> cu_query_lens = std::nullopt;
+  if (num_spec_tokens_ > 0) {
+    int64_t step = num_spec_tokens_ + 1;
+    batch_size /= step;
+    cu_query_lens = std::optional<torch::Tensor>(
+        dsa.q_cu_seq_lens.slice(0, 0, dsa.q_cu_seq_lens.size(-1), step)
+            .contiguous());
+  }
   torch::Tensor kv_pack = wkv_->forward(hidden_states);
   torch::Tensor score_pack = wgate_->forward(hidden_states);
 
-  int64_t cache_len = batch_size * compress_len_;
+  int64_t cache_len = batch_size * (compress_len_ + num_spec_tokens_);
   auto new_kv_state =
       kv_state.view({kv_state.size(0) * kv_state.size(1), kv_state.size(2)})
           .slice(0, 0, cache_len)
-          .view({batch_size, compress_len_, kv_state.size(2)});
-  auto new_score_state =
-      score_state
           .view(
-              {score_state.size(0) * score_state.size(1), score_state.size(2)})
-          .slice(0, 0, cache_len)
-          .view({batch_size, compress_len_, score_state.size(2)});
+              {batch_size, compress_len_ + num_spec_tokens_, kv_state.size(2)});
+  auto new_score_state = score_state
+                             .view({score_state.size(0) * score_state.size(1),
+                                    score_state.size(2)})
+                             .slice(0, 0, cache_len)
+                             .view({batch_size,
+                                    compress_len_ + num_spec_tokens_,
+                                    score_state.size(2)});
 
-  if (kv_pack.dim() == 2) {
+  if (kv_pack.dim() == 2 && num_spec_tokens_ == 0) {
     kv_pack = kv_pack.unsqueeze(/*dim=*/1);
   }
-  if (score_pack.dim() == 2) {
+  if (score_pack.dim() == 2 && num_spec_tokens_ == 0) {
     score_pack = score_pack.unsqueeze(/*dim=*/1);
   }
-
-  CHECK(slot_mapping.defined())
-      << "CompressorImpl::forward_decode requires decode slot_mapping.";
-  CHECK_EQ(slot_mapping.numel(), batch_size)
-      << "CompressorImpl::forward_decode expects one decode slot per "
-         "sequence.";
   torch::Tensor decode_slots = slot_mapping;
   torch::Tensor positions = dsa.input_positions;
   torch::Tensor kv_cache_view = kv_cache.reshape({-1, 1, head_dim_});
@@ -449,9 +452,21 @@ torch::Tensor CompressorImpl::forward_decode(
                                               std::nullopt,
                                               eps_,
                                               overlap_,
-                                              std::nullopt,
-                                              /*mtp_token_num=*/0);
+                                              cu_query_lens,
+                                              num_spec_tokens_);
 
+  if (num_spec_tokens_ > 0 && compress_ratio_ == 4) {
+    auto accept_tokens =
+        torch::full({state_ids.size(0)}, num_spec_tokens_, positions.options());
+    xllm::kernel::mlu::update_compressor_states(new_kv_state,
+                                                new_score_state,
+                                                accept_tokens,
+                                                state_ids,
+                                                positions,
+                                                cu_query_lens.value(),
+                                                overlap_,
+                                                num_spec_tokens_);
+  }
   return empty_output(hidden_states, head_dim_);
 }
 

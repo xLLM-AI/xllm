@@ -62,7 +62,8 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
       .model_id(options_.model_id())
       .enable_linear_state(options_.enable_linear_state())
       .linear_state_num_slots(options_.linear_state_num_slots())
-      .linear_chunk_stride(options_.linear_chunk_stride());
+      .linear_chunk_stride(options_.linear_chunk_stride())
+      .num_speculative_tokens(options_.num_speculative_tokens());
 
   uint32_t num_single_blocks = std::max<uint32_t>(
       options_.num_single_blocks(), default_max_single_block_sequences + 2);

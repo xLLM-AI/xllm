@@ -75,6 +75,7 @@ limitations under the License.
 #include "llm/joyai_llm_flash.h"                  // IWYU pragma: keep
 #include "llm/joyai_llm_flash_mtp.h"              // IWYU pragma: keep
 #include "llm/mlu/deepseek_v4.h"                  // IWYU pragma: keep
+#include "llm/mlu/deepseek_v4_mtp.h"              // IWYU pragma: keep
 #include "llm/mtp_model_base.h"                   // IWYU pragma: keep
 #include "llm/oxygen.h"                           // IWYU pragma: keep
 #include "llm/qwen2.h"                            // IWYU pragma: keep

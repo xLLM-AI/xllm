@@ -84,6 +84,10 @@ class BlockManager {
     // to the LINEAR leaf's prefix cache as its hash-domain step. Ignored unless
     // linear state is on; -1 makes the linear probe bail out.
     PROPERTY(int32_t, linear_chunk_stride) = -1;
+    // Number of speculative tokens for MTP decode (passed from
+    // runtime::Options). Used by CompositeBlockManager to adjust SWA block
+    // release accounting.
+    PROPERTY(uint32_t, num_speculative_tokens) = 0;
   };
 
   explicit BlockManager(Options options) : options_(options) {}

@@ -216,6 +216,7 @@ DeepseekV4AttentionImpl::DeepseekV4AttentionImpl(
                                              /*rotate=*/false,
                                              eps_,
                                              options,
+                                             args,
                                              empty_quant_args));
   }
   if (compress_ratio_ == 4) {
@@ -237,6 +238,7 @@ DeepseekV4AttentionImpl::DeepseekV4AttentionImpl(
                                                  q_lora_rank_,
                                                  eps_,
                                                  options,
+                                                 args,
                                                  empty_quant_args));
   }
 }

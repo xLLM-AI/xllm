@@ -78,4 +78,21 @@ void fused_compress_multi_kv(const torch::Tensor& kv,
                                           compressed_kv);
 }
 
+void update_compressor_states(torch::Tensor& kv_state,
+                              torch::Tensor& score_state,
+                              const torch::Tensor& accept_tokens,
+                              const torch::Tensor& batch_to_kv_state,
+                              const torch::Tensor& positions,
+                              const torch::Tensor& cu_query_len,
+                              const bool overlap,
+                              const int64_t K) {
+  tmo::torch_api::update_compressor_states(kv_state,
+                                           score_state,
+                                           accept_tokens,
+                                           batch_to_kv_state,
+                                           positions,
+                                           cu_query_len,
+                                           overlap,
+                                           K);
+}
 }  // namespace xllm::kernel::mlu

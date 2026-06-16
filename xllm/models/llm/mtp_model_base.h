@@ -195,7 +195,21 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
   }
 
   virtual void verify_loaded_weights() const {
-    mtp_block_->verify_loaded_weights();
+    // Not all decoder layer types provide verify_loaded_weights();
+    // only call it when the method exists.
+    if constexpr (requires { mtp_block_->verify_loaded_weights(); }) {
+      mtp_block_->verify_loaded_weights();
+    }
+  }
+
+  // Forward cache mapping to the underlying decoder layer block.
+  // Only applicable for decoder layers that support set_cache_mapping
+  // (e.g. MLU DeepseekV4DecoderLayer with DSACacheMapping).
+  template <typename MappingType>
+  void set_cache_mapping(const MappingType& mapping) {
+    if constexpr (requires { mtp_block_->set_cache_mapping(mapping); }) {
+      mtp_block_->set_cache_mapping(mapping);
+    }
   }
 
   virtual void prepare_expert_weight(int32_t layer_id,

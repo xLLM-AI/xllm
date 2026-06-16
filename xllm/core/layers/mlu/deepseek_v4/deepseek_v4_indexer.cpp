@@ -95,6 +95,7 @@ DeepseekV4IndexerImpl::DeepseekV4IndexerImpl(
     int64_t q_lora_rank,
     double norm_eps,
     const torch::TensorOptions& options,
+    const ModelArgs& args,
     const QuantArgs& quant_args)
     : dim_(dim),
       n_heads_(index_n_heads),
@@ -125,6 +126,7 @@ DeepseekV4IndexerImpl::DeepseekV4IndexerImpl(
                                            /*rotate=*/true,
                                            norm_eps,
                                            options,
+                                           args,
                                            quant_args));
 
   const double log_dim = std::ceil(std::log2(static_cast<double>(head_dim_)));

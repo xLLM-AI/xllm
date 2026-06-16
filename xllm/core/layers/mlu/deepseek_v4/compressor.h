@@ -20,6 +20,7 @@ limitations under the License.
 #include <cstdint>
 #include <tuple>
 
+#include "framework/model/model_args.h"
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "framework/state_dict/utils.h"
@@ -44,6 +45,7 @@ class CompressorImpl : public torch::nn::Module {
       double norm_eps,
       const torch::TensorOptions& options =
           torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCPU),
+      const ModelArgs& args = ModelArgs{},
       const QuantArgs& quant_args = QuantArgs{});
 
   torch::Tensor forward(const AttentionMetadata& attn_metadata,
@@ -89,6 +91,7 @@ class CompressorImpl : public torch::nn::Module {
   int64_t head_dim_ = 0;
   int64_t rope_head_dim_ = 0;
   int64_t compress_len_ = 0;
+  int64_t num_spec_tokens_ = 0;
   bool rotate_ = false;
   bool overlap_ = false;
   double eps_ = 1e-6;
