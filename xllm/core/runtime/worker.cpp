@@ -25,7 +25,6 @@ limitations under the License.
 #include <optional>
 #include <utility>
 
-#include "common/global_flags.h"
 #include "common/metrics.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
@@ -48,7 +47,7 @@ Worker::Worker(const ParallelArgs& parallel_args,
                const runtime::Options& options,
                WorkerType worker_type) {
   if (options.enable_speculative_decode()) {
-    auto algo = FLAGS_speculative_algorithm;
+    auto algo = options.speculative_algorithm();
     LOG(INFO) << "Speculative decode is enabled, algorithm: " << algo;
     if (algo == "Eagle3") {
       impl_ = new Eagle3WorkerImpl(parallel_args, device, options);
@@ -89,37 +88,30 @@ bool Worker::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   return impl_->allocate_kv_cache(kv_cache_shape);
 }
 
-void Worker::get_device_info(std::string& device_ip, uint16_t& port) {
-  impl_->get_device_info(device_ip, port);
-}
-
 void Worker::get_cache_info(uint64_t& cluster_id,
                             std::string& addr,
-                            int64_t& k_cache_id,
-                            int64_t& v_cache_id) {
-  impl_->get_cache_info(cluster_id, addr, k_cache_id, v_cache_id);
+                            uint16_t& port) {
+  impl_->get_cache_info(cluster_id, addr, port);
 }
 
 bool Worker::link_cluster(const std::vector<uint64_t>& cluster_ids,
                           const std::vector<std::string>& addrs,
-                          const std::vector<std::string>& device_ips,
                           const std::vector<uint16_t>& ports) {
-  return impl_->link_cluster(cluster_ids, addrs, device_ips, ports);
+  return impl_->link_cluster(cluster_ids, addrs, ports);
 }
 
 bool Worker::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                             const std::vector<std::string>& addrs,
-                            const std::vector<std::string>& device_ips,
                             const std::vector<uint16_t>& ports) {
-  return impl_->unlink_cluster(cluster_ids, addrs, device_ips, ports);
+  return impl_->unlink_cluster(cluster_ids, addrs, ports);
 }
 
-bool Worker::link_d2d(const std::string& remote_addr) {
-  return impl_->link_d2d(remote_addr);
+bool Worker::link_p2p(const std::string& remote_addr) {
+  return impl_->link_p2p(remote_addr);
 }
 
-bool Worker::unlink_d2d(const std::string& remote_addr) {
-  return impl_->unlink_d2d(remote_addr);
+bool Worker::unlink_p2p(const std::string& remote_addr) {
+  return impl_->unlink_p2p(remote_addr);
 }
 
 std::tuple<int64_t, int64_t> Worker::estimate_kv_cache_capacity() {
@@ -172,16 +164,16 @@ folly::SemiFuture<bool> Worker::allocate_kv_cache_with_transfer_async(
 folly::SemiFuture<bool> Worker::pull_kv_blocks_async(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
-    const int64_t src_k_cache_id,
-    const int64_t src_v_cache_id,
     const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks) {
+    const std::vector<uint64_t>& dst_blocks,
+    const std::vector<uint64_t>& src_linear_state_ids,
+    const std::vector<uint64_t>& dst_linear_state_ids) {
   return impl_->pull_kv_blocks_async(src_cluster_id,
                                      src_addr,
-                                     src_k_cache_id,
-                                     src_v_cache_id,
                                      src_blocks,
-                                     dst_blocks);
+                                     dst_blocks,
+                                     src_linear_state_ids,
+                                     dst_linear_state_ids);
 }
 
 uint32_t Worker::transfer_kv_blocks(
@@ -234,6 +226,28 @@ folly::SemiFuture<bool> Worker::wakeup_async(const WakeupOptions& options) {
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this, options, promise = std::move(promise)]() mutable {
     promise.setValue(this->wakeup(options));
+  });
+  return future;
+}
+
+bool Worker::start_profile() { return impl_->start_profile(); }
+
+bool Worker::stop_profile() { return impl_->stop_profile(); }
+
+folly::SemiFuture<bool> Worker::start_profile_async() {
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([this, promise = std::move(promise)]() mutable {
+    promise.setValue(this->start_profile());
+  });
+  return future;
+}
+
+folly::SemiFuture<bool> Worker::stop_profile_async() {
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([this, promise = std::move(promise)]() mutable {
+    promise.setValue(this->stop_profile());
   });
   return future;
 }

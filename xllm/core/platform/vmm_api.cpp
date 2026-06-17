@@ -20,6 +20,7 @@ limitations under the License.
 #include <cstdint>
 
 #include "common/global_flags.h"
+#include "core/framework/config/kv_cache_config.h"
 
 namespace xllm {
 namespace vmm {
@@ -65,6 +66,16 @@ size_t get_recommended_granularity(int32_t device_id) {
   // get the recommended granularity size FIRST
   int ret = cuMemGetAllocationGranularity(
       &granularity_size, &prop, CU_MEM_ALLOC_GRANULARITY_RECOMMENDED);
+  CHECK_EQ(ret, 0) << "Failed to get allocation granularity";
+#elif defined(USE_DCU)
+  hipMemAllocationProp prop = {};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device_id;
+
+  // get the recommended granularity size FIRST
+  int ret = hipMemGetAllocationGranularity(
+      &granularity_size, &prop, hipMemAllocationGranularityRecommended);
   CHECK_EQ(ret, 0) << "Failed to get allocation granularity";
 #else
   (void)device_id;
@@ -116,9 +127,17 @@ void create_phy_mem_handle(PhyMemHandle& phy_mem_handle, int32_t device_id) {
   // Now create physical memory with the correct granularity size
   ret = cuMemCreate(&phy_mem_handle, granularity_size, &prop, 0);
   // Note: cuMemSetAccess is called in map() after cuMemMap, not here
+#elif defined(USE_DCU)
+  hipMemAllocationProp prop = {};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device_id;
+
+  ret = hipMemCreate(&phy_mem_handle, granularity_size, &prop, 0);
 #endif
   CHECK_EQ(ret, 0) << "Failed to create physical memory handle";
-  FLAGS_phy_page_granularity_size = granularity_size;
+  ::xllm::KVCacheConfig::get_instance().phy_page_granularity_size(
+      granularity_size);
 }
 
 void create_vir_ptr(VirPtr& vir_ptr, size_t aligned_size) {
@@ -129,6 +148,8 @@ void create_vir_ptr(VirPtr& vir_ptr, size_t aligned_size) {
   ret = cnMemAddressReserve(&vir_ptr, aligned_size, 0, 0, 0);
 #elif defined(USE_CUDA) || defined(USE_ILU)
   ret = cuMemAddressReserve(&vir_ptr, aligned_size, 0, 0, 0);
+#elif defined(USE_DCU)
+  ret = hipMemAddressReserve(&vir_ptr, aligned_size, 0, 0, 0);
 #elif defined(USE_MUSA)
   ret = muMemAddressReserve(&vir_ptr, aligned_size, 0, 0, 0);
 #endif
@@ -143,6 +164,8 @@ void release_phy_mem_handle(PhyMemHandle& phy_mem_handle) {
   ret = cnMemRelease(phy_mem_handle);
 #elif defined(USE_CUDA) || defined(USE_ILU)
   ret = cuMemRelease(phy_mem_handle);
+#elif defined(USE_DCU)
+  ret = hipMemRelease(phy_mem_handle);
 #elif defined(USE_MUSA)
   ret = muMemRelease(phy_mem_handle);
 #endif
@@ -157,6 +180,8 @@ void release_vir_ptr(VirPtr& vir_ptr, size_t aligned_size) {
   ret = cnMemAddressFree(vir_ptr, aligned_size);
 #elif defined(USE_CUDA) || defined(USE_ILU)
   ret = cuMemAddressFree(vir_ptr, aligned_size);
+#elif defined(USE_DCU)
+  ret = hipMemAddressFree(vir_ptr, aligned_size);
 #elif defined(USE_MUSA)
   ret = muMemAddressFree(vir_ptr, aligned_size);
 #endif
@@ -166,7 +191,8 @@ void release_vir_ptr(VirPtr& vir_ptr, size_t aligned_size) {
 void map(VirPtr& vir_ptr, PhyMemHandle& phy_mem_handle, int32_t device_id) {
   map(vir_ptr,
       phy_mem_handle,
-      static_cast<size_t>(FLAGS_phy_page_granularity_size),
+      static_cast<size_t>(
+          ::xllm::KVCacheConfig::get_instance().phy_page_granularity_size()),
       device_id);
 }
 
@@ -199,6 +225,16 @@ void map(VirPtr& vir_ptr,
   accessDesc.location.id = device_id;
   accessDesc.flags = MU_MEM_ACCESS_FLAGS_PROT_READWRITE;
   ret = muMemSetAccess(vir_ptr, granularity_size, &accessDesc, 1);
+#elif defined(USE_DCU)
+  ret = hipMemMap(vir_ptr, granularity_size, 0, phy_mem_handle, 0);
+  CHECK_EQ(ret, 0) << "Failed to map virtual memory to physical memory";
+
+  // Set access permissions on the mapped virtual address range
+  hipMemAccessDesc accessDesc = {};
+  accessDesc.location.type = hipMemLocationTypeDevice;
+  accessDesc.location.id = device_id;
+  accessDesc.flags = hipMemAccessFlagsProtReadWrite;
+  ret = hipMemSetAccess(vir_ptr, granularity_size, &accessDesc, 1);
 #endif
   CHECK_EQ(ret, 0) << "Failed to set memory access permissions";
 }
@@ -209,8 +245,8 @@ void unmap(VirPtr& vir_ptr, size_t aligned_size) {
   // `aclrtMapMem` at the given virtual address. Since we map per-physical-page
   // (granularity_size) at different offsets, we must unmap each mapped segment
   // before releasing the reserved virtual address range.
-  size_t granularity_size =
-      static_cast<size_t>(FLAGS_phy_page_granularity_size);
+  size_t granularity_size = static_cast<size_t>(
+      ::xllm::KVCacheConfig::get_instance().phy_page_granularity_size());
   if (granularity_size == 0) {
     granularity_size = aligned_size;
   }
@@ -228,6 +264,10 @@ void unmap(VirPtr& vir_ptr, size_t aligned_size) {
 #elif defined(USE_CUDA) || defined(USE_ILU)
   int ret = 0;
   ret = cuMemUnmap(vir_ptr, aligned_size);
+  CHECK_EQ(ret, 0) << "Failed to unmap virtual memory from physical memory";
+#elif defined(USE_DCU)
+  int ret = 0;
+  ret = hipMemUnmap(vir_ptr, aligned_size);
   CHECK_EQ(ret, 0) << "Failed to unmap virtual memory from physical memory";
 #endif
 }

@@ -19,11 +19,12 @@ limitations under the License.
 
 #include "comm_channel.h"
 #include "common/health_check_manager.h"
+#include "core/framework/config/service_config.h"
 #include "distributed_runtime/collective_service.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/parallel_state/process_group.h"
-#if defined(USE_CUDA) || defined(USE_MLU)
+#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
 #include "platform/numa_utils.h"
 #endif
 #include "remote_worker.h"
@@ -88,7 +89,7 @@ std::unique_ptr<CommChannel> create_channel(const std::string& worker_addrs,
   return channel;
 }
 
-#if defined(USE_CUDA) || defined(USE_MLU)
+#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
 void setup_numa_affinity_and_isolation(
     const runtime::Options& options,
     std::vector<int32_t>& device_numa_nodes,
@@ -146,7 +147,7 @@ void DistManager::setup_multi_node_workers(
     const std::string& master_node_addr) {
   const auto& devices = options.devices();
 
-#if defined(USE_CUDA) || defined(USE_MLU)
+#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
   std::vector<int32_t> device_numa_nodes;
   std::vector<bool> force_spawn_for_numa_isolation;
   setup_numa_affinity_and_isolation(
@@ -242,10 +243,11 @@ void DistManager::setup_multi_node_workers(
     // Node1: 0, 1, 2, 3
     // Node2: 0+4, 1+4, 2+4, 3+4
     const int32_t rank = i + base_rank;
+    worker_server_options.server_idx(rank);
 
     // we use spawn process worker to launch a xllm instance
     // when start a offline inference task with multi-gpu/npu/mpu/...
-#if defined(USE_CUDA) || defined(USE_MLU)
+#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
     bool use_spawn_worker = (options.enable_offline_inference() && i > 0) ||
                             force_spawn_for_numa_isolation[i];
     if (force_spawn_for_numa_isolation[i]) {
@@ -321,7 +323,7 @@ void DistManager::setup_multi_node_workers(
     }
     // Start background health check thread with 3(magic num) second interval
     HealthCheckManager::instance().start_health_check_thread(
-        FLAGS_health_check_interval_ms);
+        ::xllm::ServiceConfig::get_instance().health_check_interval_ms());
 
     LOG(INFO) << "Started cluster health check thread";
   }

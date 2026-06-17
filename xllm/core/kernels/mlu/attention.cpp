@@ -150,7 +150,10 @@ void batch_decode(const torch::Tensor& query,
                   int64_t window_size_right,
                   float scale,
                   bool return_lse,
-                  int64_t kv_cache_quant_bit_size) {
+                  int64_t kv_cache_quant_bit_size,
+                  const std::optional<torch::Tensor>& cu_seq_q,
+                  int64_t max_seq_q,
+                  const std::optional<torch::Tensor>& sink) {
   tmo::torch_api::single_query_cached_kv_attn(query,
                                               k_cache,
                                               output,
@@ -170,7 +173,21 @@ void batch_decode(const torch::Tensor& query,
                                               window_size_right,
                                               scale,
                                               return_lse,
-                                              kv_cache_quant_bit_size);
+                                              kv_cache_quant_bit_size,
+                                              cu_seq_q,
+                                              max_seq_q,
+                                              sink);
+}
+
+void update_out_and_lse(torch::Tensor& out,
+                        torch::Tensor& lse,
+                        const torch::Tensor& block_out,
+                        const torch::Tensor& block_lse,
+                        const std::optional<torch::Tensor>& seq_offsets,
+                        const std::optional<torch::Tensor>& cu_seqs,
+                        const std::optional<torch::Tensor>& block_cu_seqs) {
+  tmo::torch_api::update_out_and_lse(
+      out, lse, block_out, block_lse, seq_offsets, cu_seqs, block_cu_seqs);
 }
 
 void masked_indexer_select_paged_kv(
@@ -189,7 +206,10 @@ void masked_indexer_select_paged_kv(
     const std::optional<torch::Tensor>& q_scale,
     const std::optional<torch::Tensor>& k_scale_cache,
     const torch::Tensor& sparse_block_table,
-    const torch::Tensor& sparse_context_lens) {
+    const torch::Tensor& sparse_context_lens,
+    bool is_score_float,
+    int64_t compress_ratio,
+    const std::optional<torch::Tensor>& kv_cache_block_table_offset) {
   // add one redundant dimension for future extension
   torch::Tensor weights_extended = weights.unsqueeze(-1);
   tmo::torch_api::masked_indexer_select_paged_kv(query,
@@ -207,7 +227,10 @@ void masked_indexer_select_paged_kv(
                                                  q_scale,
                                                  k_scale_cache,
                                                  sparse_block_table,
-                                                 sparse_context_lens);
+                                                 sparse_context_lens,
+                                                 is_score_float,
+                                                 compress_ratio,
+                                                 kv_cache_block_table_offset);
 }
 
 }  // namespace xllm::kernel::mlu

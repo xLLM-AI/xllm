@@ -59,7 +59,7 @@ class ChunkedPrefillScheduler : public ContinuousScheduler {
       size_t& remaining_seq_budget,
       size_t& num_preempted_requests,
       std::vector<Sequence*>& prefill_stage_sequences,
-      std::unique_ptr<DecodePriorityQueue>& running_queue,
+      std::unique_ptr<RequestPriorityQueue>& running_queue,
       bool& budget_exhausted,
       bool& blocks_exhausted);
   void handle_prefill_requests(
@@ -70,7 +70,7 @@ class ChunkedPrefillScheduler : public ContinuousScheduler {
       size_t& remaining_seq_budget,
       size_t& num_preempted_requests,
       std::vector<Sequence*>& prefill_stage_sequences,
-      RequestPriorityQueue& waiting_priority_queue,
+      RequestPriorityQueue* waiting_priority_queue,
       bool& budget_exhausted,
       bool& blocks_exhausted,
       std::vector<std::shared_ptr<Request>>& finished_requests);

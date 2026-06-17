@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/macros.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "phy_page.h"  // Includes page_id_t definition
 #include "platform/vmm_api.h"
 
@@ -106,7 +107,9 @@ class XTensor {
 
   VirPtr vaddr_;
   size_t size_;
-  size_t page_size_;  // Page size (FLAGS_phy_page_granularity_size)
+  size_t
+      page_size_;  // Page size
+                   // (::xllm::KVCacheConfig::get_instance().phy_page_granularity_size())
   torch::Dtype dtype_;
   torch::Device dev_;
 

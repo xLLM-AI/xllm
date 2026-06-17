@@ -46,7 +46,7 @@ function(cc_library)
   # Check if this is a header only library
   set(_CC_SRCS "${CC_LIB_SRCS}")
   foreach(src_file IN LISTS _CC_SRCS)
-    if(${src_file} MATCHES ".*\\.(h|inc)")
+    if(${src_file} MATCHES ".*\\.(h|hpp|hxx|inc|inl)$")
       list(REMOVE_ITEM _CC_SRCS "${src_file}")
     endif()
   endforeach()

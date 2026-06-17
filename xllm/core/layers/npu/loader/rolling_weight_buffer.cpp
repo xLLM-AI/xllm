@@ -19,6 +19,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "core/common/global_flags.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/xtensor/xtensor_allocator.h"
 
 namespace xllm {
@@ -30,7 +31,7 @@ RollingWeightBuffer::RollingWeightBuffer(int32_t num_slots,
     : num_slots_(num_slots),
       storage_size_(storage_size),
       model_id_(model_id),
-      use_xtensor_(FLAGS_enable_xtensor) {
+      use_xtensor_(::xllm::KVCacheConfig::get_instance().enable_xtensor()) {
   CHECK_GT(num_slots_, 0) << "num_slots must be > 0";
   CHECK_GT(storage_size_, 0u) << "storage_size must be > 0";
 

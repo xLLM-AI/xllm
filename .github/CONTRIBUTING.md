@@ -20,7 +20,7 @@ limitations under the License. -->
 + Raise questions / Answer questions
 + Provide demos, examples or test cases
 + Give suggestions or other comments
-+ Paticipate in [issues](https://github.com/xxx/xLLM/issues) or [discussions](https://github.com/xxx/xLLM/discussions)
++ Paticipate in [issues](https://github.com/jd-opensource/xllm/issues) or [discussions](https://github.com/jd-opensource/xllm/discussions)
 + Pull requests
 + Sharing related research / application
 + Any other ways to improve xLLM
@@ -33,8 +33,7 @@ For developers who want to contribute to our code, here is the guidance:
     + A function in plan
 
 ## 2. Install environment for development
-+ We strongly suggest you to read our **[Document](http://xxx/docs/)** before developing
-+ For setting environment, please check our  **[Readme file](/README.md)**
++ We strongly suggest you to read our **[Document](https://docs.xllm-ai.com/)** before developing
 
 ## 3. Build our project
 + You could run our demo to check whether the requirements are successfully installed:

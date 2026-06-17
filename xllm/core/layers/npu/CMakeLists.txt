@@ -1,4 +1,5 @@
 include(cc_library)
+include(cc_test)
 
 include_directories(
   ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
@@ -15,6 +16,7 @@ cc_library(
     npu_qwen2_vision_encoder_layer_impl.h
     npu_qwen2dot5_vision_encoder_layer_impl.h
     npu_qwen3_vision_encoder_layer_impl.h
+    npu_kimik25_vision_encoder_layer_impl.h
     npu_qwen3_moe_decoder_layer_impl.h
     # atb_parallel_linear.h
     npu_block_copy_impl.h
@@ -35,6 +37,8 @@ cc_library(
     npu_glm4_decoder_layer_impl.h
     npu_rms_norm_impl.h
     npu_siglip_encoder_layer_impl.h
+    rotary_embedding.h
+    deepseek_v4_rotary_embedding.h
     ../common/rotary_embedding_util.h
     loader/qwen3_decoder_loader.h
     loader/qwen2_decoder_loader.h
@@ -53,6 +57,7 @@ cc_library(
     loader/qwen2_vision_encoder_loader.h
     loader/qwen2dot5_vision_encoder_loader.h
     loader/qwen3_vision_encoder_loader.h
+    loader/kimik25_vision_encoder_loader.h
     loader/rms_norm_loader.h
     loader/siglip_encoder_loader.h
     loader/base_loader.h
@@ -66,6 +71,7 @@ cc_library(
     npu_qwen2_vision_encoder_layer_impl.cpp
     npu_qwen2dot5_vision_encoder_layer_impl.cpp
     npu_qwen3_vision_encoder_layer_impl.cpp
+    npu_kimik25_vision_encoder_layer_impl.cpp
     npu_qwen3_moe_decoder_layer_impl.cpp
     # atb_parallel_linear.cpp
     npu_block_copy_impl.cpp
@@ -86,6 +92,8 @@ cc_library(
     npu_glm4_decoder_layer_impl.cpp
     npu_rms_norm_impl.cpp
     npu_siglip_encoder_layer_impl.cpp
+    rotary_embedding.cpp
+    deepseek_v4_rotary_embedding.cpp
     ../common/rotary_embedding_util.cpp
     loader/qwen3_decoder_loader.cpp
     loader/qwen2_decoder_loader.cpp
@@ -104,6 +112,7 @@ cc_library(
     loader/qwen2_vision_encoder_loader.cpp
     loader/qwen2dot5_vision_encoder_loader.cpp
     loader/qwen3_vision_encoder_loader.cpp
+    loader/kimik25_vision_encoder_loader.cpp
     loader/rms_norm_loader.cpp
     loader/siglip_encoder_loader.cpp
     loader/base_loader.cpp
@@ -128,4 +137,30 @@ cc_library(
     xllm_atb_layers
     ${NPU_RUNTIME_SO}
     nnopbase
+)
+
+cc_library(
+  NAME
+    deepseek_v4_rotary_embedding_lib
+  HDRS
+    deepseek_v4_rotary_embedding.h
+    ../common/rotary_embedding_util.h
+  SRCS
+    deepseek_v4_rotary_embedding.cpp
+    ../common/rotary_embedding_util.cpp
+  DEPS
+    glog::glog
+    torch
+)
+
+cc_test(
+  NAME
+    deepseek_v4_rotary_embedding_test
+  SRCS
+    deepseek_v4_rotary_embedding_tests.cpp
+  DEPS
+    :deepseek_v4_rotary_embedding_lib
+    torch
+    glog::glog
+    GTest::gtest_main
 )

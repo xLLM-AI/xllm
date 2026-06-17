@@ -29,7 +29,7 @@ class OxygenModelImpl : public QWen3ModelImpl {
                               torch::Tensor positions,
                               std::vector<KVCache>& kv_caches,
                               const ModelInputParams& input_params) {
-    bool use_deepstack = input_params.deep_stacks.size() > 0;
+    bool use_deepstack = input_params.multimodal.deep_stacks.size() > 0;
     ModelInputParams& input_params_new =
         const_cast<ModelInputParams&>(input_params);
     std::vector<torch::Tensor> deep_stacks;
@@ -38,7 +38,7 @@ class OxygenModelImpl : public QWen3ModelImpl {
       tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
       positions = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
     }
-    auto inputs_embeds = input_params.input_embedding;
+    auto inputs_embeds = input_params.embedding.input_embedding;
     torch::Tensor h;
     if (inputs_embeds.defined()) {
       h = inputs_embeds;
@@ -46,10 +46,11 @@ class OxygenModelImpl : public QWen3ModelImpl {
       h = embed_tokens_(tokens);
     }
     if (use_deepstack) {
-      deep_stacks = input_params.deep_stacks;  // [num_deepstack, hidden_size]
+      deep_stacks =
+          input_params.multimodal.deep_stacks;  // [num_deepstack, hidden_size]
     }
 
-    auto& dp_token_nums = input_params_new.dp_global_token_nums;
+    auto& dp_token_nums = input_params_new.parallel.dp_global_token_nums;
     std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
     if (!input_params_new.attn_metadata) {
       input_params_new.attn_metadata =
@@ -88,8 +89,7 @@ class OxygenModelImpl : public QWen3ModelImpl {
 
       if (use_deepstack) {
         if (deep_stacks.size() > 0 && i < deep_stacks.size()) {
-          h = deepstack_process(
-              h, input_params.visual_pos_masks, deep_stacks[i]);
+          h = h + deep_stacks[i];
         }
       }
     }

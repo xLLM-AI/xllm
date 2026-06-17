@@ -28,11 +28,11 @@ limitations under the License.
 
 #include "api_service/call.h"
 #include "common/metrics.h"
+#include "core/platform/device_name_utils.h"
 #include "dit_engine.h"
 #include "framework/request/dit_request.h"
 #include "models/model_registry.h"
 #include "scheduler/scheduler_factory.h"
-#include "util/device_name_utils.h"
 #include "util/scope_guard.h"
 #include "util/timer.h"
 
@@ -49,8 +49,10 @@ DiTMaster::DiTMaster(const Options& options)
   scheduler_ = create_dit_scheduler(engine_.get(), scheduler_options);
   LOG(INFO) << "created dit scheduler in DiTMaster.";
 
-  threadpool_ =
-      std::make_unique<ThreadPool>(options.num_request_handling_threads());
+  threadpool_ = std::make_unique<ThreadPool>(
+      /*num_threads=*/options.num_request_handling_threads(),
+      /*cpu_binding=*/false,
+      /*pool_name=*/"DiTMaster.request");
   LOG(INFO) << "ThreadPool with " << options.num_request_handling_threads()
             << " threads created in DiTMaster.";
 }

@@ -55,6 +55,8 @@ class ProcessGroupImpl : public ProcessGroup {
   // Destructor.
   ~ProcessGroupImpl() override;
 
+  std::string hccl_comm_name(bool init_comm = true) override;
+
  private:
   HcclComm comm_ = nullptr;
   c10_npu::NPUStream comm_stream_;

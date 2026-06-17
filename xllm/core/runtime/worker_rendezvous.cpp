@@ -40,21 +40,19 @@ WorkerRendezvous::WorkerRendezvous(
 
 bool WorkerRendezvous::link_cluster(const std::vector<uint64_t>& cluster_ids,
                                     const std::vector<std::string>& addrs,
-                                    const std::vector<std::string>& device_ips,
                                     const std::vector<uint16_t>& ports) {
 #if defined(USE_NPU) || defined(USE_MLU)
   if (!kv_cache_transfer_) {
     LOG(ERROR) << "KVCacheTransfer not initialized";
     return false;
   }
-  if (!validate_cluster_endpoints(cluster_ids, addrs, device_ips, ports)) {
+  if (!validate_cluster_endpoints(cluster_ids, addrs, ports)) {
     return false;
   }
 
   const size_t cluster_count = cluster_ids.size();
   for (size_t i = 0; i < cluster_count; ++i) {
-    if (!kv_cache_transfer_->link_cluster(
-            cluster_ids[i], addrs[i], device_ips[i], ports[i])) {
+    if (!kv_cache_transfer_->link_cluster(cluster_ids[i], addrs[i], ports[i])) {
       return false;
     }
   }
@@ -62,24 +60,22 @@ bool WorkerRendezvous::link_cluster(const std::vector<uint64_t>& cluster_ids,
   return true;
 }
 
-bool WorkerRendezvous::unlink_cluster(
-    const std::vector<uint64_t>& cluster_ids,
-    const std::vector<std::string>& addrs,
-    const std::vector<std::string>& device_ips,
-    const std::vector<uint16_t>& ports) {
+bool WorkerRendezvous::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
+                                      const std::vector<std::string>& addrs,
+                                      const std::vector<uint16_t>& ports) {
 #if defined(USE_NPU) || defined(USE_MLU)
   if (!kv_cache_transfer_) {
     LOG(ERROR) << "KVCacheTransfer not initialized";
     return false;
   }
-  if (!validate_cluster_endpoints(cluster_ids, addrs, device_ips, ports)) {
+  if (!validate_cluster_endpoints(cluster_ids, addrs, ports)) {
     return false;
   }
 
   const size_t cluster_count = cluster_ids.size();
   for (size_t i = 0; i < cluster_count; ++i) {
     if (!kv_cache_transfer_->unlink_cluster(
-            cluster_ids[i], addrs[i], device_ips[i], ports[i])) {
+            cluster_ids[i], addrs[i], ports[i])) {
       return false;
     }
   }
@@ -87,28 +83,28 @@ bool WorkerRendezvous::unlink_cluster(
   return true;
 }
 
-bool WorkerRendezvous::link_d2d(const std::string& remote_addr) {
+bool WorkerRendezvous::link_p2p(const std::string& remote_addr) {
 #if defined(USE_NPU)
   if (!weight_transfer_) {
     LOG(ERROR) << "MooncakeWeightTransfer not initialized";
     return false;
   }
-  return weight_transfer_->link_d2d(remote_addr);
+  return weight_transfer_->link_p2p(remote_addr);
 #else
-  LOG(ERROR) << "link_d2d requires USE_NPU build";
+  LOG(ERROR) << "link_p2p requires USE_NPU build";
   return false;
 #endif
 }
 
-bool WorkerRendezvous::unlink_d2d(const std::string& remote_addr) {
+bool WorkerRendezvous::unlink_p2p(const std::string& remote_addr) {
 #if defined(USE_NPU)
   if (!weight_transfer_) {
     LOG(ERROR) << "MooncakeWeightTransfer not initialized";
     return false;
   }
-  return weight_transfer_->unlink_d2d(remote_addr);
+  return weight_transfer_->unlink_p2p(remote_addr);
 #else
-  LOG(ERROR) << "unlink_d2d requires USE_NPU build";
+  LOG(ERROR) << "unlink_p2p requires USE_NPU build";
   return false;
 #endif
 }
@@ -116,17 +112,14 @@ bool WorkerRendezvous::unlink_d2d(const std::string& remote_addr) {
 bool WorkerRendezvous::validate_cluster_endpoints(
     const std::vector<uint64_t>& cluster_ids,
     const std::vector<std::string>& addrs,
-    const std::vector<std::string>& device_ips,
     const std::vector<uint16_t>& ports) const {
   const size_t cluster_count = cluster_ids.size();
-  if (addrs.size() == cluster_count && device_ips.size() == cluster_count &&
-      ports.size() == cluster_count) {
+  if (addrs.size() == cluster_count && ports.size() == cluster_count) {
     return true;
   }
 
   LOG(ERROR) << "Cluster endpoint size mismatch: cluster_ids="
              << cluster_ids.size() << ", addrs=" << addrs.size()
-             << ", device_ips=" << device_ips.size()
              << ", ports=" << ports.size();
   return false;
 }

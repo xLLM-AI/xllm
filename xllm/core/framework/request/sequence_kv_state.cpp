@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "sequence_kv_state.h"
 
+#include <algorithm>
+
 namespace xllm {
 
 namespace {
@@ -36,6 +38,13 @@ size_t KVCacheState::shared_kv_blocks_num() const {
   return num_owned_shared_blocks_;
 }
 
+size_t KVCacheState::shared_kv_tokens_num() const {
+  if (blocks_.empty() || num_owned_shared_blocks_ == 0) {
+    return 0;
+  }
+  return num_owned_shared_blocks_ * blocks_[0].size();
+}
+
 size_t KVCacheState::kv_cache_tokens_num() const {
   return kv_cache_tokens_num_;
 }
@@ -47,6 +56,25 @@ void KVCacheState::set_kv_cache_tokens_num(size_t num) {
 void KVCacheState::incr_kv_cache_tokens_num(size_t num) {
   CHECK(kv_cache_tokens_num_ + num <= current_max_tokens_capacity());
   kv_cache_tokens_num_ += num;
+  slice_window_pos_ += num;
+}
+
+void KVCacheState::set_slice_window_size(uint32_t size) {
+  CHECK(size > 0);
+  CHECK(!composite_blocks_.empty() && !composite_blocks_[0].empty());
+  slice_window_size_ = size;
+  slice_window_pos_ = 0;
+  slice_window_buffer_ = size;
+}
+
+void KVCacheState::update_slice_window_pos() {
+  if (slice_window_size_ > 0) {
+    if (slice_window_pos_ >= slice_window_buffer_) {
+      // Keep SWA physical block order stable. DSA metadata maps logical
+      // positions to physical blocks with modulo arithmetic.
+      slice_window_pos_ = slice_window_pos_ % slice_window_size_;
+    }
+  }
 }
 
 void KVCacheState::add_kv_blocks(const std::vector<Block>& new_blocks) {
@@ -101,12 +129,15 @@ void KVCacheState::add_shared_kv_blocks(std::vector<Block>&& blocks,
 }
 
 size_t KVCacheState::current_max_tokens_capacity() const {
-  if (blocks_.empty()) {
-    return 0;
+  if (!blocks_.empty()) {
+    // all blocks have the same size
+    const size_t block_size = blocks_[0].size();
+    return blocks_.size() * block_size;
   }
-  // all blocks have the same size
-  const size_t block_size = blocks_[0].size();
-  return blocks_.size() * block_size;
+  if (!composite_blocks_.empty() && !composite_blocks_[1].empty()) {
+    return composite_blocks_[1].size() * composite_blocks_[1][0].size();
+  }
+  return 0;
 }
 
 // returns allocated cache blocks
@@ -141,11 +172,26 @@ std::optional<TransferKVInfo>& KVCacheState::transfer_kv_info() {
   return transfer_kv_info_;
 }
 
+size_t KVCacheState::next_transfer_block_idx() const {
+  return next_transfer_block_idx_;
+}
+
+void KVCacheState::set_next_transfer_block_idx(size_t idx) {
+  next_transfer_block_idx_ = idx;
+}
+
+void KVCacheState::advance_transfer_block_idx(size_t idx) {
+  next_transfer_block_idx_ = std::max(next_transfer_block_idx_, idx);
+}
+
 void KVCacheState::reset() {
   kv_cache_tokens_num_ = 0;
   num_owned_shared_blocks_ = 0;
+  pushed_local_block_count_ = 0;
   blocks_.clear();
+  composite_blocks_.clear();
   transfer_kv_info_.reset();
+  next_transfer_block_idx_ = 0;
 }
 
 void KVCacheState::process_beam_search(std::optional<Block> new_block) {

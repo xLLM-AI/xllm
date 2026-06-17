@@ -24,8 +24,8 @@ limitations under the License.
 #include <vector>
 
 #include "common.pb.h"
+#include "core/framework/multimodal/mm_data.h"
 #include "core/framework/sampling/sampling_params.h"
-#include "mm_data.h"
 #include "sequence.h"
 #include "stopping_checker.h"
 #include "util/threadpool.h"

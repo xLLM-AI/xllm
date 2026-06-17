@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <sstream>
 
+#include "core/framework/config/kv_cache_config.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
@@ -84,7 +85,7 @@ class IndexerTest : public ::testing::Test {
     int_option_ = options_.dtype(torch::kInt32);
 
     parallel_args_ = test::create_default_parallel_args(mock_process_group_);
-    FLAGS_block_size = 1;
+    KVCacheConfig::get_instance().block_size(1);
   }
 
   void TearDown() override {}

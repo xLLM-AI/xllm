@@ -20,6 +20,7 @@ limitations under the License.
 #include <algorithm>
 
 #include "common/global_flags.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "phy_page_pool.h"
 
 namespace xllm {
@@ -39,7 +40,8 @@ void GlobalXTensor::init(const torch::Device& device) {
     return;
   }
 
-  page_size_ = FLAGS_phy_page_granularity_size;
+  page_size_ =
+      ::xllm::KVCacheConfig::get_instance().phy_page_granularity_size();
   total_size_ = num_total_pages_ * page_size_;
 
   vmm::create_vir_ptr(vaddr_, total_size_);

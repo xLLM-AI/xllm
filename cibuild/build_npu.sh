@@ -6,7 +6,11 @@ function error() {
   exit 1
 }
 
-IMAGE="quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-20260429"
+IMAGE="quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260605"
+
+XLLM_OPS_CACHE="/export/home/npu_xllm_ops_build_cache"
+TRITON_BINARY_CACHE="/export/home/npu_triton_binary_cache"
+mkdir -p "${XLLM_OPS_CACHE}" "${TRITON_BINARY_CACHE}"
 
 RUN_OPTS=(
   --rm
@@ -24,8 +28,12 @@ RUN_OPTS=(
   -v /usr/local/sbin/:/usr/local/sbin/
   -v /export/home:/export/home
   -v /export/home/npu_vcpkg_cache_abi_1:/root/.cache/vcpkg # cached vcpkg installed dir
+  -v "${XLLM_OPS_CACHE}":"${XLLM_OPS_CACHE}" # cached xllm_ops build dir
+  -v "${TRITON_BINARY_CACHE}":"${TRITON_BINARY_CACHE}" # cached triton_npu binary dir
   -v /etc/hccn.conf:/etc/hccn.conf
   -w /export/home
+  -e XLLM_OPS_BUILD_DIR="${XLLM_OPS_CACHE}"
+  -e TRITON_BINARY_PATH="${TRITON_BINARY_CACHE}"
 )
 
 CMD="$*"

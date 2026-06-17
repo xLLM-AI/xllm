@@ -76,6 +76,8 @@ class ModelContext {
     return optimization_config_;
   }
 
+  ModelContext with_parallel_args(const ParallelArgs& parallel_args) const;
+
 #if defined(USE_NPU)
   const atb::Context* get_atb_context() const { return context_; }
   std::shared_ptr<AtbWorkspace> get_atb_workspace() const {
@@ -83,8 +85,8 @@ class ModelContext {
   }
 #endif
 
-  void set_image_embedding_mode(bool image_embedding_mode) {
-    model_args_.image_embedding_mode() = image_embedding_mode;
+  void set_encoder_embedding_mode(bool encoder_embedding_mode) {
+    model_args_.encoder_embedding_mode() = encoder_embedding_mode;
   }
 
   const std::string& get_model_id() const { return model_id_; }

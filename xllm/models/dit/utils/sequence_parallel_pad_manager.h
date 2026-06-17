@@ -18,6 +18,8 @@ limitations under the License.
 #include <string>
 #include <unordered_map>
 
+#include "core/framework/config/parallel_config.h"
+
 namespace xllm::dit {
 
 class SequenceParallelPadManager {
@@ -37,8 +39,12 @@ class SequenceParallelPadManager {
     }
 
     if (ref_tensor.defined()) {
-      if (ref_tensor.size(dim) % FLAGS_sp_size != 0) {
-        int64_t pad_len = FLAGS_sp_size - ref_tensor.size(dim) % FLAGS_sp_size;
+      if (ref_tensor.size(dim) %
+              ::xllm::ParallelConfig::get_instance().sp_size() !=
+          0) {
+        int64_t pad_len = ::xllm::ParallelConfig::get_instance().sp_size() -
+                          ref_tensor.size(dim) %
+                              ::xllm::ParallelConfig::get_instance().sp_size();
         set(tensor_name, pad_len);
 
         std::vector<int64_t> pad_shape(ref_tensor.dim() * 2);

@@ -21,47 +21,66 @@ ConcurrentBlockManagerImpl::ConcurrentBlockManagerImpl(const Options& options)
     : BlockManagerImpl(options) {}
 
 std::vector<Block> ConcurrentBlockManagerImpl::allocate(size_t num_blocks) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return BlockManagerImpl::allocate(num_blocks);
 }
 
 void ConcurrentBlockManagerImpl::deallocate(const Slice<Block>& blocks) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   BlockManagerImpl::deallocate(blocks);
 }
 
 std::vector<Block> ConcurrentBlockManagerImpl::allocate_shared(
-    const Slice<int32_t>& tokens_ids,
-    const Slice<Block>& existed_shared_blocks) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return BlockManagerImpl::allocate_shared(tokens_ids);
+    const Slice<int32_t>& token_ids,
+    const Slice<Block>& existed_shared_blocks,
+    const MMData& mm_data) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  return BlockManagerImpl::allocate_shared(
+      token_ids, existed_shared_blocks, mm_data);
 }
 
 void ConcurrentBlockManagerImpl::cache(const Slice<int32_t>& token_ids,
                                        std::vector<Block>& blocks,
-                                       size_t existed_shared_blocks_num) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  BlockManagerImpl::cache(token_ids, blocks, existed_shared_blocks_num);
+                                       size_t existed_shared_blocks_num,
+                                       const MMData& mm_data) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  BlockManagerImpl::cache(
+      token_ids, blocks, existed_shared_blocks_num, mm_data);
 }
 
 void ConcurrentBlockManagerImpl::cache(const std::vector<Block>& blocks) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   BlockManagerImpl::cache(blocks);
 }
 
 size_t ConcurrentBlockManagerImpl::num_blocks_in_prefix_cache() const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return BlockManagerImpl::num_blocks_in_prefix_cache();
 }
 
 size_t ConcurrentBlockManagerImpl::num_free_blocks() const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return BlockManagerImpl::num_free_blocks();
 }
 
 double ConcurrentBlockManagerImpl::kv_cache_utilization() const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
   return BlockManagerImpl::kv_cache_utilization();
+}
+
+size_t ConcurrentBlockManagerImpl::num_used_blocks() const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  return BlockManagerImpl::num_used_blocks();
+}
+
+void ConcurrentBlockManagerImpl::free(int32_t block_id) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  BlockManagerImpl::free(block_id);
+}
+
+Block ConcurrentBlockManagerImpl::allocate() {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  return BlockManagerImpl::allocate();
 }
 
 }  // namespace xllm

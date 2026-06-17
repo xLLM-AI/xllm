@@ -20,6 +20,8 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/metrics.h"
+#include "core/framework/config/kv_cache_store_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "framework/batch/batch_factory.h"
 #include "util/timer.h"
 #include "util/utils.h"
@@ -78,19 +80,21 @@ void MixScheduler::get_latency_budget_and_request_order(
   int32_t latency_budget_threshold = static_cast<int32_t>(0.65 * min_tpot);
   latency_budget = std::max(min_remaining_time, latency_budget_threshold);
 
-  const double lambda = FLAGS_aggressive_coeff;
+  const double lambda =
+      ::xllm::SchedulerConfig::get_instance().aggressive_coeff();
   double load_judge_func =
       total_exec_time * latency_budget / (latency_budget - constant_overhead);
   for (auto& request : running_queue) {  // determine urgency
     auto& sequence = request->sequences()[0];
 
-    if (FLAGS_enable_starve_prevent) {
+    if (::xllm::SchedulerConfig::get_instance().enable_starve_prevent()) {
       // avoid overly starvation, threshold can be tuned
       const int32_t starve_unit_time = sequence->is_prefill_stage()
                                            ? -request->ttft_slo_ms()
                                            : -request->tpot_slo_ms();
-      const int32_t starve_time_threshold =
-          static_cast<int32_t>(FLAGS_starve_threshold * starve_unit_time);
+      const int32_t starve_time_threshold = static_cast<int32_t>(
+          ::xllm::SchedulerConfig::get_instance().starve_threshold() *
+          starve_unit_time);
       if (request->get_remaining_time() < starve_time_threshold) {
         request->set_starved(true);
       }
@@ -262,7 +266,8 @@ void MixScheduler::handle_running_queue_requests(
 
   size_t remaining_copy_blocks_budget =
       (options_.enable_latency_aware_schedule() &&
-       FLAGS_enable_control_h2d_block_num)
+       ::xllm::KVCacheStoreConfig::get_instance()
+           .enable_control_h2d_block_num())
           ? get_max_copy_block_num(running_queue, latency_budget)
           : std::numeric_limits<int32_t>::max();
 
@@ -692,7 +697,7 @@ bool MixScheduler::allocate_blocks_for(Sequence* sequence,
   // number of tokens and the number of tokens already processed
   *current_step_handle_tokens = max_handle_num_tokens - kv_cache_tokens_num;
   // allocate blocks for the sequence
-  if (FLAGS_host_blocks_factor > 1.0) {
+  if (::xllm::KVCacheStoreConfig::get_instance().host_blocks_factor() > 1.0) {
     return kv_cache_manager_->allocate(
         sequence, max_handle_num_tokens, needed_copy_blocks_num);
   } else {

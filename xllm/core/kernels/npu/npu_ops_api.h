@@ -17,7 +17,9 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <optional>
+#include <string>
 #include <tuple>
+#include <vector>
 
 #include "custom_functions_npu/atb_common.h"
 
@@ -45,6 +47,32 @@ void batch_decode(const torch::Tensor& query,
                   const torch::Tensor& seq_lens,
                   torch::Tensor& output);
 
+std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const std::optional<torch::Tensor>& atten_mask,
+    const std::optional<torch::Tensor>& block_table,
+    const std::vector<int64_t>& actual_seq_lengths,
+    const std::vector<int64_t>& actual_seq_lengths_kv,
+    int64_t num_heads,
+    int64_t num_key_value_heads,
+    double scale,
+    int64_t block_size,
+    int64_t sparse_mode,
+    const std::string& input_layout,
+    bool softmax_lse_flag = false);
+
+void batch_chunked_paged_prefill(const torch::Tensor& query,
+                                 const torch::Tensor& k_cache,
+                                 const torch::Tensor& v_cache,
+                                 float scale,
+                                 const torch::Tensor& block_table,
+                                 const torch::Tensor& seq_lens,
+                                 const torch::Tensor& attn_mask,
+                                 const torch::Tensor& q_seq_lens,
+                                 torch::Tensor& output);
+
 // Custom batch decode for ACL graph execution
 // This variant uses CustomPagedAttention to avoid .to(kCPU) operations
 // that break ACL graph capture
@@ -67,6 +95,11 @@ torch::Tensor rms_norm(const torch::Tensor& input,
                        const torch::Tensor& weight,
                        double eps,
                        const std::string& mode);
+
+std::tuple<torch::Tensor, torch::Tensor> rms_norm_dynamic_quant(
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    double eps);
 
 void npu_gemma_rms_norm(const torch::Tensor& x,
                         const torch::Tensor& gamma,
@@ -132,6 +165,97 @@ apply_npu_moe_init_routing_v2(const torch::Tensor& x,
                               torch::IntArrayRef active_expert_range,
                               int row_idx_type);
 
+std::tuple<torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor>
+apply_npu_moe_distribute_dispatch_v2(
+    const torch::Tensor& x,
+    const torch::Tensor& expert_ids,
+    const std::optional<torch::Tensor>& expert_scales,
+    const std::optional<torch::Tensor>& x_active_mask,
+    const std::optional<torch::Tensor>& scales,
+    const std::string& group_ep,
+    int64_t ep_world_size,
+    int64_t ep_rank_id,
+    int64_t moe_expert_num,
+    const std::string& group_tp,
+    int64_t tp_world_size,
+    int64_t tp_rank_id,
+    int64_t expert_shard_type,
+    int64_t shared_expert_num,
+    int64_t shared_expert_rank_num,
+    int64_t quant_mode,
+    int64_t global_bs,
+    int64_t expert_token_nums_type,
+    const std::string& comm_alg);
+
+torch::Tensor apply_npu_moe_distribute_combine_v2(
+    const torch::Tensor& expand_x,
+    const torch::Tensor& expert_ids,
+    const torch::Tensor& assist_info_for_combine,
+    const torch::Tensor& ep_send_counts,
+    const torch::Tensor& expert_scales,
+    const std::optional<torch::Tensor>& tp_send_counts,
+    const std::optional<torch::Tensor>& x_active_mask,
+    const std::optional<torch::Tensor>& expand_scales,
+    const std::optional<torch::Tensor>& shared_expert_x,
+    const std::string& group_ep,
+    int64_t ep_world_size,
+    int64_t ep_rank_id,
+    int64_t moe_expert_num,
+    const std::string& group_tp,
+    int64_t tp_world_size,
+    int64_t tp_rank_id,
+    int64_t expert_shard_type,
+    int64_t shared_expert_num,
+    int64_t shared_expert_rank_num,
+    int64_t global_bs,
+    int64_t comm_quant_mode,
+    const std::string& comm_alg);
+
+bool has_moe_distribute_dispatch_combine_v2();
+
+std::tuple<torch::Tensor, torch::Tensor> apply_npu_dispatch_ffn_combine(
+    const torch::Tensor& x,
+    const torch::TensorList weight1,
+    const torch::TensorList weight2,
+    const torch::Tensor& expert_ids,
+    const torch::TensorList scale1,
+    const torch::TensorList scale2,
+    const torch::Tensor& probs,
+    const std::string& group,
+    int64_t max_output_size,
+    double swiglu_limit,
+    const std::optional<torch::Tensor>& output,
+    const std::optional<torch::Tensor>& expert_token_nums);
+
+bool has_dispatch_ffn_combine();
+
+std::tuple<torch::Tensor, torch::Tensor> apply_npu_dispatch_gmm_combine_decode(
+    const torch::Tensor& x,
+    const torch::Tensor& expert_ids,
+    const torch::TensorList gmm1_permuted_weight,
+    const torch::TensorList gmm1_permuted_weight_scale,
+    const torch::TensorList gmm2_weight,
+    const torch::TensorList gmm2_weight_scale,
+    const torch::Tensor& expert_scales,
+    const std::optional<torch::Tensor>& expert_smooth_scales,
+    const std::optional<torch::Tensor>& x_active_mask,
+    const std::string& group_ep,
+    int64_t ep_rank_size,
+    int64_t ep_rank_id,
+    int64_t moe_expert_num,
+    int64_t shared_expert_num,
+    int64_t shared_expert_rank_num,
+    int64_t quant_mode,
+    int64_t global_bs);
+
+bool has_dispatch_gmm_combine_decode();
+
 std::pair<torch::Tensor, torch::Tensor> apply_npu_partial_rotary_embedding(
     const torch::Tensor& positions,
     torch::Tensor& query,
@@ -154,6 +278,23 @@ torch::Tensor npu_recurrent_gated_delta_rule(
     const std::optional<torch::Tensor>& g,
     const std::optional<torch::Tensor>& gk);
 
+std::tuple<torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           std::optional<torch::Tensor>,
+           std::optional<torch::Tensor>>
+w4a8_dynamic_moe_preprocess(
+    const torch::Tensor& w13_weight,
+    const torch::Tensor& w2_weight,
+    const torch::Tensor& w13_weight_scale,
+    const torch::Tensor& w2_weight_scale,
+    const std::optional<torch::Tensor>& w13_weight_scale_second,
+    const std::optional<torch::Tensor>& w2_weight_scale_second,
+    const std::optional<torch::Tensor>& w13_scale_bias,
+    const std::optional<torch::Tensor>& w2_scale_bias,
+    int64_t group_size);
+
 std::tuple<torch::Tensor, torch::Tensor> rec_constrained_topk(
     const torch::Tensor& logits,
     const torch::Tensor& sequence_group,
@@ -168,4 +309,16 @@ std::tuple<torch::Tensor, torch::Tensor> rec_constrained_topk(
     int64_t top_k,
     int64_t max_prefix1_degree,
     int64_t max_prefix2_degree);
+
+torch::Tensor causal_conv1d(const torch::Tensor& x,
+                            const torch::Tensor& weight,
+                            const torch::Tensor& conv_state,
+                            const std::optional<torch::Tensor>& bias_opt,
+                            const torch::IntArrayRef query_start_loc_opt,
+                            const torch::IntArrayRef cache_indices_opt,
+                            const torch::IntArrayRef initial_state_mode_opt,
+                            const torch::IntArrayRef num_accepted_tokens_opt,
+                            int64_t activation_mode,
+                            int64_t pad_slot_id,
+                            int64_t run_mode);
 }  // namespace xllm::kernel::npu

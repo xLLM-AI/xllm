@@ -20,7 +20,9 @@ limitations under the License.
 namespace xllm {
 
 TEST(SingleBlockManagerTest, AllocateAndFreeRoundTrip) {
-  SingleBlockManager manager(3, "single");
+  // id 0 is reserved for padding (matching BlockManagerImpl), so a pool sized
+  // for 4 physical slots exposes 3 usable blocks.
+  SingleBlockManager manager(4, "single");
 
   EXPECT_EQ(manager.num_total_blocks(), 3);
   EXPECT_EQ(manager.num_blocks_in_prefix_cache(), 0);
@@ -30,6 +32,9 @@ TEST(SingleBlockManagerTest, AllocateAndFreeRoundTrip) {
 
   auto blocks = manager.allocate(2);
   ASSERT_EQ(blocks.size(), 2);
+  for (const auto& block : blocks) {
+    EXPECT_GE(block.id(), 1) << "padding slot 0 must never be allocated";
+  }
   EXPECT_EQ(manager.num_free_blocks(), 1);
   EXPECT_EQ(manager.num_used_blocks(), 2);
   EXPECT_DOUBLE_EQ(manager.kv_cache_utilization(), 2.0 / 3.0);
@@ -45,16 +50,19 @@ TEST(SingleBlockManagerTest, AllocateAndFreeRoundTrip) {
 }
 
 TEST(SingleBlockManagerTest, AllocateReturnsEmptyWhenExhausted) {
-  SingleBlockManager manager(2, "single");
+  // id 0 is reserved internally, so 3 physical slots expose 2 usable blocks.
+  SingleBlockManager manager(3, "single");
   auto blocks = manager.allocate(2);
   ASSERT_EQ(blocks.size(), 2);
   EXPECT_TRUE(manager.allocate(1).empty());
 }
 
 TEST(SingleBlockManagerTest, AllocateSingleDiesWhenExhausted) {
-  SingleBlockManager manager(1, "single");
+  // id 0 is reserved internally, so 2 physical slots expose a single usable
+  // block, whose id is 1.
+  SingleBlockManager manager(2, "single");
   Block block = manager.allocate();
-  EXPECT_EQ(block.id(), 0);
+  EXPECT_EQ(block.id(), 1);
   EXPECT_DEATH(manager.allocate(), "No more single blocks available");
 }
 
@@ -87,7 +95,9 @@ TEST(SingleBlockManagerTest, PrefixCacheStyleApisAreSafeNoopsWhenDisabled) {
 }
 
 TEST(SingleBlockManagerTest, UsedBlocksAccountingDoesNotLeakWithAliases) {
-  SingleBlockManager manager(1, "single");
+  // id 0 is reserved internally, so 2 physical slots expose a single usable
+  // block.
+  SingleBlockManager manager(2, "single");
   EXPECT_EQ(manager.num_used_blocks(), 0u);
   EXPECT_EQ(manager.num_free_blocks(), 1u);
 
@@ -115,6 +125,25 @@ TEST(SingleBlockManagerTest, UsedBlocksAccountingDoesNotLeakWithAliases) {
   // When the last alias is released, used block accounting should converge.
   EXPECT_EQ(manager.num_used_blocks(), 0u);
   EXPECT_EQ(manager.num_free_blocks(), 1u);
+}
+
+TEST(SingleBlockManagerTest, ReservesPaddingSlotZero) {
+  // Draining the whole pool must never yield the reserved padding id 0, which
+  // padded batch rows use as kPaddingLinearStateId. 4 physical slots expose 3
+  // usable blocks.
+  SingleBlockManager manager(4, "single");
+  EXPECT_EQ(manager.num_total_blocks(), 3);
+
+  std::vector<Block> blocks = manager.allocate(3);
+  ASSERT_EQ(blocks.size(), 3u);
+  for (const auto& block : blocks) {
+    EXPECT_NE(block.id(), 0) << "padding slot 0 must stay reserved";
+  }
+  EXPECT_TRUE(manager.allocate(1).empty());
+
+  // Releasing every usable block must not free the reserved id either.
+  blocks.clear();
+  EXPECT_EQ(manager.num_free_blocks(), 3u);
 }
 
 TEST(SingleBlockManagerTest, ConstructorRejectsZeroBlocks) {

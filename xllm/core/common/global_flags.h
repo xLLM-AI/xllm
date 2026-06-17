@@ -17,13 +17,15 @@ limitations under the License.
 
 #include <gflags/gflags.h>
 
-constexpr int64_t GB = int64_t(1024) * 1024 * 1024;
+DECLARE_string(config_json_file);
+
+DECLARE_bool(enable_dump_config_json);
+
+DECLARE_string(dump_config_json_file);
 
 DECLARE_string(host);
 
 DECLARE_int32(port);
-
-DECLARE_int32(disagg_pd_port);
 
 DECLARE_int32(rpc_idle_timeout_s);
 
@@ -39,6 +41,8 @@ DECLARE_string(task);
 
 DECLARE_string(devices);
 
+DECLARE_int32(device_id);
+
 DECLARE_int32(limit_image_per_prompt);
 
 // --- kvcache config ---
@@ -49,7 +53,7 @@ DECLARE_string(kv_cache_dtype);
 
 DECLARE_bool(enable_prefix_cache);
 
-DECLARE_bool(enable_cache_upload);
+DECLARE_int64(max_encoder_cache_size);
 
 DECLARE_uint32(xxh3_128bits_seed);
 
@@ -86,8 +90,32 @@ DECLARE_int32(num_request_handling_threads);
 
 DECLARE_int32(num_response_handling_threads);
 
+// --- parallel config ---
 DECLARE_string(communication_backend);
 
+DECLARE_int32(dp_size);
+
+DECLARE_int32(ep_size);
+
+DECLARE_int32(cp_size);
+
+DECLARE_int64(tp_size);
+
+DECLARE_int64(sp_size);
+
+DECLARE_int64(cfg_size);
+
+DECLARE_bool(enable_prefill_sp);
+
+DECLARE_bool(enable_mm_encoder_dp);
+
+DECLARE_bool(enable_multi_stream_parallel);
+
+DECLARE_int32(micro_batch_num);
+
+DECLARE_bool(enable_dp_balance);
+
+// --- ep load balance config ---
 DECLARE_bool(enable_eplb);
 
 DECLARE_int32(redundant_experts_num);
@@ -95,6 +123,8 @@ DECLARE_int32(redundant_experts_num);
 DECLARE_int64(eplb_update_interval);
 
 DECLARE_double(eplb_update_threshold);
+
+DECLARE_int32(expert_parallel_degree);
 
 DECLARE_string(rank_tablefile);
 
@@ -110,27 +140,20 @@ DECLARE_bool(enable_graph_vmm_pool);
 
 DECLARE_int32(max_tokens_for_graph_mode);
 
-DECLARE_bool(enable_chunked_prefill);
+DECLARE_int32(acl_graph_decode_batch_size_limit);
 
-DECLARE_bool(enable_prefill_sp);
+DECLARE_bool(enable_chunked_prefill);
 
 DECLARE_string(master_node_addr);
 
 DECLARE_string(xtensor_master_node_addr);
 
+// --- disaggregated prefill and decode config ---
 DECLARE_bool(enable_disagg_pd);
 
 DECLARE_bool(enable_pd_ooc);
 
-DECLARE_int32(nnodes);
-
-DECLARE_int32(node_rank);
-
-DECLARE_int32(dp_size);
-
-DECLARE_int32(ep_size);
-
-DECLARE_int32(cp_size);
+DECLARE_int32(disagg_pd_port);
 
 DECLARE_string(instance_role);
 
@@ -138,9 +161,11 @@ DECLARE_string(kv_cache_transfer_type);
 
 DECLARE_string(kv_cache_transfer_mode);
 
-DECLARE_string(device_ip);
-
 DECLARE_int32(transfer_listen_port);
+
+DECLARE_int32(nnodes);
+
+DECLARE_int32(node_rank);
 
 DECLARE_int32(max_concurrent_requests);
 
@@ -148,17 +173,11 @@ DECLARE_bool(enable_schedule_overlap);
 
 DECLARE_double(prefill_scheduling_memory_usage_threshold);
 
-DECLARE_int32(expert_parallel_degree);
-
 DECLARE_int32(max_reconnect_count);
-
-DECLARE_bool(enable_customize_mla_kernel);
 
 DECLARE_bool(enable_atb_comm_multiprocess);
 
 DECLARE_bool(enable_atb_spec_kernel);
-
-DECLARE_bool(enable_block_copy_kernel);
 
 DECLARE_string(etcd_addr);
 
@@ -178,12 +197,6 @@ DECLARE_bool(use_zero_evict);
 
 DECLARE_int32(max_decode_token_per_sequence);
 
-DECLARE_uint32(prefetch_timeout);
-
-DECLARE_uint32(prefetch_bacth_size);
-
-DECLARE_uint32(layers_wise_copy_batchs);
-
 DECLARE_string(priority_strategy);
 
 DECLARE_bool(use_mix_scheduler);
@@ -197,11 +210,18 @@ DECLARE_double(starve_threshold);
 
 DECLARE_bool(enable_starve_prevent);
 
+// --- kvcache store config ---
+DECLARE_uint32(prefetch_timeout);
+
+DECLARE_uint32(prefetch_batch_size);
+
+DECLARE_uint32(layers_wise_copy_batchs);
+
 DECLARE_double(host_blocks_factor);
 
 DECLARE_bool(enable_kvcache_store);
 
-DECLARE_bool(enable_control_h2d_block_num);
+DECLARE_bool(enable_cache_upload);
 
 DECLARE_string(store_protocol);
 
@@ -211,9 +231,7 @@ DECLARE_string(store_metadata_server);
 
 DECLARE_string(store_local_hostname);
 
-DECLARE_bool(enable_multi_stream_parallel);
-
-DECLARE_int32(micro_batch_num);
+DECLARE_bool(enable_control_h2d_block_num);
 
 DECLARE_bool(enable_profile_step_time);
 
@@ -223,13 +241,17 @@ DECLARE_bool(enable_latency_aware_schedule);
 
 DECLARE_int32(profile_max_prompt_length);
 
-DECLARE_int32(request_queue_size);
-
 DECLARE_bool(enable_profile_kv_blocks);
 
 DECLARE_bool(disable_ttft_profiling);
 
 DECLARE_bool(enable_forward_interruption);
+
+DECLARE_bool(enable_online_profile);
+
+DECLARE_string(profile_backend);
+
+DECLARE_string(profile_dir);
 
 DECLARE_int32(max_global_ttft_ms);
 
@@ -237,28 +259,45 @@ DECLARE_int32(max_global_tpot_ms);
 
 DECLARE_int32(max_requests_per_batch);
 
-DECLARE_bool(enable_manual_loader);
-
 DECLARE_bool(enable_xtensor);
 
 DECLARE_int64(phy_page_granularity_size);
 
-// --- rolling load config ---
+// --- load config ---
+DECLARE_bool(enable_manual_loader);
+
 DECLARE_bool(enable_rolling_load);
 
 DECLARE_int32(rolling_load_num_cached_layers);
 DECLARE_int32(rolling_load_num_rolling_slots);
 
+DECLARE_bool(enable_prefetch_weight);
+
 // --- beam search config ---
 DECLARE_bool(enable_beam_search_kernel);
 
+DECLARE_int32(beam_width);
+
+DECLARE_bool(enable_block_copy_kernel);
+
+DECLARE_bool(enable_topk_sorted);
+
+// --- rec config ---
 DECLARE_bool(enable_rec_fast_sampler);
 
 DECLARE_bool(enable_rec_prefill_only);
 
-DECLARE_bool(enable_topk_sorted);
-
 DECLARE_bool(output_rec_logprobs);
+
+DECLARE_bool(enable_xattention_one_stage);
+
+DECLARE_int32(max_decode_rounds);
+
+DECLARE_bool(enable_constrained_decoding);
+
+DECLARE_int32(request_queue_size);
+
+DECLARE_uint32(rec_worker_max_concurrency);
 
 // --- qwen3 reranker config ---
 DECLARE_bool(enable_qwen3_reranker);
@@ -267,6 +306,7 @@ DECLARE_string(reasoning_parser);
 
 DECLARE_string(tool_call_parser);
 
+// --- execution config ---
 DECLARE_bool(enable_shm);
 
 DECLARE_bool(use_contiguous_input_buffer);
@@ -275,11 +315,7 @@ DECLARE_uint64(input_shm_size);
 
 DECLARE_uint64(output_shm_size);
 
-DECLARE_bool(enable_prefetch_weight);
-
 DECLARE_int32(flashinfer_workspace_buffer_size);
-
-DECLARE_bool(enable_dp_balance);
 
 DECLARE_int32(random_seed);
 
@@ -293,7 +329,6 @@ DECLARE_int64(dit_cache_skip_interval_steps);
 
 DECLARE_double(dit_cache_residual_diff_threshold);
 
-DECLARE_bool(enable_constrained_decoding);
 DECLARE_bool(enable_convert_tokens_to_item);
 DECLARE_bool(enable_output_sku_logprobs);
 DECLARE_bool(enable_extended_item_info);
@@ -310,31 +345,27 @@ DECLARE_int64(dit_cache_start_blocks);
 
 DECLARE_int64(dit_cache_end_blocks);
 
-DECLARE_int64(tp_size);
+DECLARE_int64(dit_sp_communication_overlap);
 
-DECLARE_int64(sp_size);
-
-DECLARE_int64(cfg_size);
+DECLARE_int64(dit_generation_image_area_max);
 
 DECLARE_bool(dit_debug_print);
 
-// --- multi-step decode config ---
-
-DECLARE_int32(max_decode_rounds);
-
-DECLARE_int32(beam_width);
-
-DECLARE_bool(enable_xattention_one_stage);
-
 DECLARE_bool(use_audio_in_video);
 
-// --- concurrent rec worker config ---
-DECLARE_uint32(rec_worker_max_concurrency);
-
+// --- kernel config ---
 #if defined(USE_NPU)
+DECLARE_bool(enable_customize_mla_kernel);
+
 DECLARE_string(npu_kernel_backend);
 
 DECLARE_bool(enable_intralayer_addnorm);
+
+DECLARE_int32(enable_fused_mc2);
+
+DECLARE_bool(enable_interlayer_addnorm);
+
+DECLARE_bool(enable_split_rmsnorm_rope);
 #endif
 
 // --- chat template config ---

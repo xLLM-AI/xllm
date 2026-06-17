@@ -44,6 +44,10 @@ class DiTModelContext {
 
   const QuantArgs& get_quant_args(const std::string& component) const;
 
+  bool has_component(const std::string& component) const {
+    return model_args_.count(component) > 0;
+  }
+
 #if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU)
   ModelContext get_model_context(const std::string& component) const;
 #endif

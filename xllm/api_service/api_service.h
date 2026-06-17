@@ -21,6 +21,7 @@ limitations under the License.
 #include <unordered_map>
 
 #include "anthropic_service_impl.h"
+#include "audio_generation_service_impl.h"
 #include "chat_service_impl.h"
 #include "completion_service_impl.h"
 #include "embedding_service_impl.h"
@@ -30,6 +31,7 @@ limitations under the License.
 #include "rec_completion_service_impl.h"
 #include "rerank_service_impl.h"
 #include "sample_service_impl.h"
+#include "video_generation_service_impl.h"
 #include "xllm_service.pb.h"
 
 namespace xllm {
@@ -96,6 +98,26 @@ class APIService : public proto::XllmAPIService {
                            proto::HttpResponse* response,
                            ::google::protobuf::Closure* done) override;
 
+  void AudioGeneration(::google::protobuf::RpcController* controller,
+                       const proto::AudioGenerationRequest* request,
+                       proto::AudioGenerationResponse* response,
+                       ::google::protobuf::Closure* done) override;
+
+  void AudioGenerationHttp(::google::protobuf::RpcController* controller,
+                           const proto::HttpRequest* request,
+                           proto::HttpResponse* response,
+                           ::google::protobuf::Closure* done) override;
+
+  void VideoGeneration(::google::protobuf::RpcController* controller,
+                       const proto::VideoGenerationRequest* request,
+                       proto::VideoGenerationResponse* response,
+                       ::google::protobuf::Closure* done) override;
+
+  void VideoGenerationHttp(::google::protobuf::RpcController* controller,
+                           const proto::HttpRequest* request,
+                           proto::HttpResponse* response,
+                           ::google::protobuf::Closure* done) override;
+
   void Rerank(::google::protobuf::RpcController* controller,
               const proto::RerankRequest* request,
               proto::RerankResponse* response,
@@ -156,25 +178,56 @@ class APIService : public proto::XllmAPIService {
                   proto::HttpResponse* response,
                   ::google::protobuf::Closure* done) override;
 
-  void LinkD2D(::google::protobuf::RpcController* controller,
-               const proto::D2DLinkRequest* request,
+  void StartProfileHttp(::google::protobuf::RpcController* controller,
+                        const proto::HttpRequest* request,
+                        proto::HttpResponse* response,
+                        ::google::protobuf::Closure* done) override;
+
+  void StopProfileHttp(::google::protobuf::RpcController* controller,
+                       const proto::HttpRequest* request,
+                       proto::HttpResponse* response,
+                       ::google::protobuf::Closure* done) override;
+
+  void LinkP2P(::google::protobuf::RpcController* controller,
+               const proto::P2PLinkRequest* request,
                proto::Status* response,
                ::google::protobuf::Closure* done) override;
 
-  void LinkD2DHttp(::google::protobuf::RpcController* controller,
+  void LinkP2PHttp(::google::protobuf::RpcController* controller,
                    const proto::HttpRequest* request,
                    proto::HttpResponse* response,
                    ::google::protobuf::Closure* done) override;
 
-  void UnlinkD2D(::google::protobuf::RpcController* controller,
-                 const proto::D2DLinkRequest* request,
+  void UnlinkP2P(::google::protobuf::RpcController* controller,
+                 const proto::P2PLinkRequest* request,
                  proto::Status* response,
                  ::google::protobuf::Closure* done) override;
 
-  void UnlinkD2DHttp(::google::protobuf::RpcController* controller,
+  void UnlinkP2PHttp(::google::protobuf::RpcController* controller,
                      const proto::HttpRequest* request,
                      proto::HttpResponse* response,
                      ::google::protobuf::Closure* done) override;
+
+  // Async RL training support: pause/resume
+  void Pause(::google::protobuf::RpcController* controller,
+             const proto::PauseRequest* request,
+             proto::PauseResponse* response,
+             ::google::protobuf::Closure* done) override;
+
+  void PauseHttp(::google::protobuf::RpcController* controller,
+                 const proto::HttpRequest* request,
+                 proto::HttpResponse* response,
+                 ::google::protobuf::Closure* done) override;
+
+  void Resume(::google::protobuf::RpcController* controller,
+              const proto::ResumeRequest* request,
+              proto::ResumeResponse* response,
+              ::google::protobuf::Closure* done) override;
+
+  void ResumeHttp(::google::protobuf::RpcController* controller,
+                  const proto::HttpRequest* request,
+                  proto::HttpResponse* response,
+                  ::google::protobuf::Closure* done) override;
 
  private:
   using ChatHttpHandler = std::function<void(ClosureGuard&,
@@ -191,6 +244,15 @@ class APIService : public proto::XllmAPIService {
   bool add_model_master_if_absent(const std::string& model_id, Master* master);
   Master* get_model_master(const std::string& model_id) const;
 
+  // Core action helpers shared between brpc-typed and Http variants.
+  // Each returns true on success. On failure, the human readable reason is
+  // written to `error_message` so the caller can either set the HTTP response
+  // body or call `brpc::Controller::SetFailed`.
+  bool do_fork_master(const proto::MasterInfos& request,
+                      std::string* error_message);
+  bool do_sleep(const proto::MasterInfos& request, std::string* error_message);
+  bool do_wakeup(const proto::MasterInfos& request, std::string* error_message);
+
   Master* master_;
   ChatHttpHandler chat_completions_handler_;
   mutable std::shared_mutex masters_mutex_;
@@ -204,6 +266,8 @@ class APIService : public proto::XllmAPIService {
   std::unique_ptr<MMEmbeddingServiceImpl> mm_embedding_service_impl_;
   std::unique_ptr<ModelsServiceImpl> models_service_impl_;
   std::unique_ptr<ImageGenerationServiceImpl> image_generation_service_impl_;
+  std::unique_ptr<AudioGenerationServiceImpl> audio_generation_service_impl_;
+  std::unique_ptr<VideoGenerationServiceImpl> video_generation_service_impl_;
   std::unique_ptr<RerankServiceImpl> rerank_service_impl_;
   std::unique_ptr<RecCompletionServiceImpl> rec_completion_service_impl_;
 };

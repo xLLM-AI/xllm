@@ -141,7 +141,7 @@ void LogprobState::generate_output_tokens_logprobs(
     std::vector<LogProbData> logprobs;
     for (size_t j = 0; j < top_tokens.size(); ++j) {
       LogProbData logprob;
-      const int32_t top_token_id = top_tokens[j];
+      const int32_t top_token_id = static_cast<int32_t>(top_tokens[j]);
       const float top_logprob = top_logprobs[j];
 
       auto top_token = tokenizer.decode(std::vector<int32_t>{top_token_id},

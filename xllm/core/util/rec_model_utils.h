@@ -19,6 +19,7 @@ limitations under the License.
 #include <string_view>
 
 #include "core/common/global_flags.h"
+#include "core/framework/config/rec_config.h"
 
 namespace xllm {
 
@@ -40,15 +41,21 @@ enum class RecPipelineType : uint8_t {
 // Check if Rec multi-round mode is enabled.
 // Rec multi-round mode: multi-round decode loop runs on device (worker layer),
 // while the engine issues a single step.
-inline bool is_rec_multi_round_mode() { return FLAGS_max_decode_rounds > 0; }
+inline bool is_rec_multi_round_mode() {
+  return ::xllm::RecConfig::get_instance().max_decode_rounds() > 0;
+}
 
 // Get the number of decode rounds for Rec multi-round mode.
 // Returns 0 if Rec multi-round mode is disabled.
 inline int32_t get_rec_multi_round_decode_rounds() {
-  return is_rec_multi_round_mode() ? FLAGS_max_decode_rounds : 0;
+  return is_rec_multi_round_mode()
+             ? ::xllm::RecConfig::get_instance().max_decode_rounds()
+             : 0;
 }
 
-inline bool is_onerec_xattention_mode() { return FLAGS_max_decode_rounds > 0; }
+inline bool is_onerec_xattention_mode() {
+  return ::xllm::RecConfig::get_instance().max_decode_rounds() > 0;
+}
 
 // This helper intentionally names the legacy prefill-only contract instead of
 // mirroring the raw flag. Under the current CLI wiring, xattention mode and
@@ -56,7 +63,8 @@ inline bool is_onerec_xattention_mode() { return FLAGS_max_decode_rounds > 0; }
 // still need to branch on "should I use the old prefill-only behavior" as a
 // semantic boundary.
 inline bool use_legacy_onerec_prefill_only_contract() {
-  return FLAGS_enable_rec_prefill_only && !is_onerec_xattention_mode();
+  return ::xllm::RecConfig::get_instance().enable_rec_prefill_only() &&
+         !is_onerec_xattention_mode();
 }
 
 inline bool is_onerec_pipeline_type(RecPipelineType type) {

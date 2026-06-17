@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "deepseek_v2.h"
 
 namespace xllm {
@@ -26,10 +28,10 @@ class DeepseekV3ForCausalLMImpl
       : LlmForCausalLMImplBase<DeepseekV2Model>(context) {
     // Check if prefix cache or chunked prefill is enabled for unsupported
     // models
-    CHECK(!FLAGS_enable_prefix_cache)
+    CHECK(!::xllm::KVCacheConfig::get_instance().enable_prefix_cache())
         << "deepseek_v3 have not supported "
            "enable_prefix_cache yet. Please disable it.";
-    CHECK(!FLAGS_enable_chunked_prefill)
+    CHECK(!::xllm::SchedulerConfig::get_instance().enable_chunked_prefill())
         << "deepseek_v3 have not supported "
            "enable_chunked_prefill yet. Please disable it.";
   }

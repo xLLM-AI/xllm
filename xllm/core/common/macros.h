@@ -111,7 +111,7 @@ namespace xllm {
   } while (0)
 
 // Multi-model step lock/unlock macros for serializing step execution
-// Only locks when the condition (e.g., FLAGS_enable_xtensor) is true
+// Only locks when the condition is true.
 #define MULTI_MODEL_STEP_LOCK(condition)                \
   static std::mutex __multi_model_step_mutex;           \
   std::unique_lock<std::mutex> __multi_model_step_lock( \

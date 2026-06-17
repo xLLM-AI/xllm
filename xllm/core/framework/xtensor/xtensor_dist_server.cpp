@@ -22,6 +22,8 @@ limitations under the License.
 #include <thread>
 
 #include "common/global_flags.h"
+#include "core/framework/config/distributed_config.h"
+#include "core/framework/config/service_config.h"
 #include "platform/device.h"
 #include "server/xllm_server_registry.h"
 #include "util/net.h"
@@ -77,8 +79,11 @@ XTensorDistServer::XTensorDistServer(int local_rank,
     : server_name_("XTensorDistServer") {
   const auto& devices = options.devices();
   int32_t each_node_ranks = static_cast<int32_t>(devices.size());
-  int32_t world_size = each_node_ranks * FLAGS_nnodes;
-  int32_t global_rank = FLAGS_node_rank * each_node_ranks + local_rank;
+  int32_t world_size =
+      each_node_ranks * ::xllm::DistributedConfig::get_instance().nnodes();
+  int32_t global_rank =
+      ::xllm::DistributedConfig::get_instance().node_rank() * each_node_ranks +
+      local_rank;
 
   server_thread_ = std::make_unique<std::thread>([this,
                                                   &options,
@@ -117,7 +122,8 @@ bool XTensorDistServer::sync_master_node(const std::string& master_node_addr,
   int try_count = 0;
   brpc::Controller cntl;
   const int sleep_time_second = 3;
-  while (try_count < FLAGS_max_reconnect_count) {
+  while (try_count <
+         ::xllm::ServiceConfig::get_instance().max_reconnect_count()) {
     cntl.Reset();
     stub.Sync(&cntl, &addr_info, &uids, nullptr);
     if (cntl.Failed()) {
@@ -133,7 +139,8 @@ bool XTensorDistServer::sync_master_node(const std::string& master_node_addr,
     try_count++;
   }
 
-  if (try_count >= FLAGS_max_reconnect_count) {
+  if (try_count >=
+      ::xllm::ServiceConfig::get_instance().max_reconnect_count()) {
     LOG(ERROR) << "XTensorDistServer#" << addr_info.global_rank()
                << " connect to " << master_node_addr << " failed."
                << " Error message: " << cntl.ErrorText();

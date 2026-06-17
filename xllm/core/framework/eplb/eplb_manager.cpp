@@ -28,6 +28,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/global_flags.h"
+#include "core/framework/config/eplb_config.h"
 
 namespace xllm {
 
@@ -39,8 +40,9 @@ EplbManager::EplbManager(int32_t layer_num,
     : layer_num_(layer_num),
       device_num_(device_num),
       experts_num_(experts_num),
-      device_experts_num_(experts_num / device_num +
-                          FLAGS_redundant_experts_num) {
+      device_experts_num_(
+          experts_num / device_num +
+          ::xllm::EPLBConfig::get_instance().redundant_experts_num()) {
   // Initialize tensors with mutex protection
   {
     eplb_policy_ = std::make_unique<EplbPolicy>(
@@ -54,7 +56,8 @@ EplbManager::EplbManager(int32_t layer_num,
     for (int32_t layer = 0; layer < layer_num_; ++layer) {
       for (int32_t device = 0; device < device_num_; ++device) {
         int32_t device_route_experts_num =
-            device_experts_num_ - FLAGS_redundant_experts_num;
+            device_experts_num_ -
+            ::xllm::EPLBConfig::get_instance().redundant_experts_num();
         int32_t base = device * device_route_experts_num;
         for (int32_t expert = 0; expert < device_experts_num_; ++expert) {
           int32_t value = base + expert;
@@ -149,7 +152,8 @@ void EplbManager::rebalance_experts_loop() {
                                            state_.expert_load_queue.front());
         state_.expert_load_queue.pop();
         int64_t current_time = absl::ToUnixSeconds(absl::Now());
-        if (current_time - latest_record_time >= FLAGS_eplb_update_interval) {
+        if (current_time - latest_record_time >=
+            ::xllm::EPLBConfig::get_instance().eplb_update_interval()) {
           latest_record_time = current_time;
           auto result = eplb_policy_->rebalance_experts(state_.expert_load);
           state_.expert_distribution = result.first;

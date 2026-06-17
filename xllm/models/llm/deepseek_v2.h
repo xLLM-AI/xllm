@@ -77,14 +77,17 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
         tokens = torch::tensor({1}).to(torch::kInt32).to(device_);
         positions = torch::tensor({1}).to(torch::kInt32).to(device_);
       }
-      auto& dp_token_nums = modified_input_params.dp_global_token_nums;
+      auto& dp_token_nums = modified_input_params.parallel.dp_global_token_nums;
       std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
     }
     if (!modified_input_params.attn_metadata) {
       modified_input_params.attn_metadata =
           std::make_shared<layer::AttentionMetadata>(
               layer::AttentionMetadataBuilder::build(modified_input_params,
-                                                     model_args_.enable_mla()));
+                                                     model_args_.enable_mla(),
+                                                     /*compute_dtype=*/"half",
+                                                     /*attn_mask=*/std::nullopt,
+                                                     /*device=*/device_));
     }
     auto& attn_metadata = *(modified_input_params.attn_metadata);
     torch::Tensor hidden_states = embed_tokens_(tokens);

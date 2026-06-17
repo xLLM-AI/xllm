@@ -40,6 +40,10 @@ struct TokenizerArgs {
   // Special tokens to add to the vocabulary.
   PROPERTY(std::vector<SpecialToken>, special_tokens);
 
+  // Special tokens that should still be rendered even when
+  // skip_special_tokens is enabled during decoding.
+  PROPERTY(std::vector<std::string>, visible_special_tokens);
+
   // Regex pattern used by tiktok tokenizer only.
   PROPERTY(std::string, pattern);
 
@@ -84,6 +88,10 @@ inline std::ostream& operator<<(std::ostream& os, const TokenizerArgs& args) {
       os << "(" << token << ", " << id << ") ";
     }
     os << "]";
+  }
+  if (!args.visible_special_tokens().empty()) {
+    os << ", visible_special_tokens: ["
+       << absl::StrJoin(args.visible_special_tokens(), ", ") << "]";
   }
   os << ", pattern: " << absl::CEscape(args.pattern());
   if (!args.prefix_tokens().empty()) {

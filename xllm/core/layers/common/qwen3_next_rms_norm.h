@@ -33,6 +33,7 @@ class Qwen3NextRMSNormImpl : public torch::nn::Module {
       torch::Tensor& input,
       std::optional<torch::Tensor> residual = std::nullopt);
   torch::Tensor weight() const { return weight_; }
+  bool is_weight_loaded() const { return weight_is_loaded_; }
   double eps() const { return eps_; }
 
   void load_state_dict(const StateDict& state_dict);

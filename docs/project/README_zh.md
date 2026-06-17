@@ -17,13 +17,13 @@ limitations under the License. -->
 <div align="center">
 <img src="../assets/logo_with_llm.png" alt="xLLM" style="width:50%; height:auto;">
     
-[![Document](https://img.shields.io/badge/Document-black?logo=html5&labelColor=grey&color=red)](https://xllm.readthedocs.io/zh-cn/latest/) [![Docker](https://img.shields.io/badge/Docker-black?logo=docker&labelColor=grey&color=%231E90FF)](https://hub.docker.com/r/xllm/xllm-ai) [![License](https://img.shields.io/badge/license-Apache%202.0-brightgreen?labelColor=grey)](https://opensource.org/licenses/Apache-2.0) [![report](https://img.shields.io/badge/Technical%20Report-red?logo=arxiv&logoColor=%23B31B1B&labelColor=%23F0EBEB&color=%23D42626)](https://arxiv.org/abs/2510.14686) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/jd-opensource/xllm) 
+[![Document](https://img.shields.io/badge/Document-black?logo=html5&labelColor=grey&color=red)](https://docs.xllm-ai.com/) [![Docker](https://img.shields.io/badge/Docker-black?logo=docker&labelColor=grey&color=%231E90FF)](https://quay.io/repository/jd_xllm/xllm-ai?tab=tags) [![License](https://img.shields.io/badge/license-Apache%202.0-brightgreen?labelColor=grey)](https://opensource.org/licenses/Apache-2.0) [![report](https://img.shields.io/badge/Technical%20Report-red?logo=arxiv&logoColor=%23B31B1B&labelColor=%23F0EBEB&color=%23D42626)](https://arxiv.org/abs/2510.14686) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/jd-opensource/xllm)
     
 </div>
 
 ---------------------
 <p align="center">
-| <a href="https://xllm.readthedocs.io/zh-cn/latest/"><b>Documentation</b></a> |  <a href="https://arxiv.org/abs/2510.14686"><b>Technical Report</b></a> |
+| <a href="https://docs.xllm-ai.com/"><b>Documentation</b></a> |  <a href="https://arxiv.org/abs/2510.14686"><b>Technical Report</b></a> |
 </p>
 
 ### 📢 新闻
@@ -84,6 +84,7 @@ xLLM 提供了强大的智能计算能力，通过硬件系统的算力优化与
 | MLU      |        |                 |
 | ILU      | BI150  |                 |
 | MUSA     | S5000  |                 |
+| DCU      | BW1000 |                 |
 
 此外，请在[模型支持列表](../zh/supported_models.md)查看不同硬件上的模型支持情况。
 
@@ -96,22 +97,7 @@ xLLM 提供了强大的智能计算能力，通过硬件系统的算力优化与
 ---
 
 ## 成为贡献者
-您可以通过以下方法为 xLLM 作出贡献:
-
-1. 在Issue中报告问题
-2. 提供改进建议
-3. 补充文档
-    + Fork仓库
-    + 修改文档
-    + 提出pull request
-4. 修改代码
-    + Fork仓库
-    + 创建新分支
-    + 加入您的修改
-    + 提出pull request
-
-感谢您的贡献！ 🎉🎉🎉
-如果您在开发中遇到问题，请参阅**[xLLM中文指南](https://xllm.readthedocs.io/zh-cn/latest)**
+请参阅 [CONTRIBUTING_zh.md](../../.github/CONTRIBUTING_zh.md) 获取贡献指南。
 
 ---
 
@@ -155,7 +141,7 @@ xLLM 提供了强大的智能计算能力，通过硬件系统的算力优化与
 
 ## 许可证
 
-[Apache License](LICENSE)
+[Apache License](../../LICENSE)
 
 #### xLLM 由 JD.com 提供 
 #### 感谢您对xLLM的关心与贡献!

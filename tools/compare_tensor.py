@@ -1,5 +1,11 @@
+import os
+import sys
+
 import torch
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.logger import logger
 
 
 def compare_tensors(
@@ -34,12 +40,12 @@ def compare_tensors(
     # Count the number of differing elements
     diff_count = int(diff_mask.sum().item())
 
-    # If verbose, print details of differing elements
+    # If verbose, log details of differing elements
     if verbose and diff_count > 0:
         indices = torch.nonzero(diff_mask, as_tuple=False)
         for idx in indices:
             i, j = idx[0].item(), idx[1].item()
-            print(
+            logger.info(
                 f"diff at {i},{j}: "
                 f"{a[i, j].item():.6f} - {b[i, j].item():.6f} = "
                 f"{(a[i, j] - b[i, j]).item():.6f}"

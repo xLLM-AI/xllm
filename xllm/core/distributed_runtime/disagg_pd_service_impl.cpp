@@ -19,9 +19,11 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/types.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "distributed_runtime/llm_engine.h"
 #include "framework/request/request_output.h"
 #include "scheduler/disagg_pd_scheduler.h"
+#include "util/utils.h"
 
 namespace xllm {
 
@@ -37,10 +39,19 @@ DisaggPDServiceImpl::DisaggPDServiceImpl(DisaggPDScheduler* scheduler,
 
 std::shared_ptr<Request> DisaggPDServiceImpl::generate_request(
     const proto::DisaggRequest& req) {
-  // create a new request
-  // TODO: Should to support best_of > 1 case, now we only consider
-  // to allocate blocks for the first sequence in the request.
-  // But request maybe expend_sequence in running stage.
+  // best_of > 1 in disaggregated PD requires prefix cache on the decode
+  // instance: only the first sequence's KV is pulled from prefill, and
+  // the remaining best_of-1 sequences are expanded locally and reuse the
+  // first sequence's prompt KV via prefix cache.
+  if (req.best_of() > 1 &&
+      !::xllm::KVCacheConfig::get_instance().enable_prefix_cache()) {
+    LOG(ERROR) << "best_of > 1 in disaggregated PD mode requires "
+               << "enable_prefix_cache=true on the decode instance, "
+               << "request_id=" << req.req_id()
+               << ", best_of=" << req.best_of();
+    return nullptr;
+  }
+
   std::string prompt = req.prompt();
   std::vector<int> prompt_tokens(req.prompt_tokens().begin(),
                                  req.prompt_tokens().end());
@@ -164,6 +175,7 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
 
       auto dp_rank = sequence->dp_rank();
       resp->set_dp_rank(dp_rank);
+      resp->set_linear_state_id(sequence->get_single_block_id());
 
       size_t shared_num = sequence->kv_state().shared_kv_blocks_num();
       auto blocks = sequence->kv_state().kv_blocks();
@@ -177,7 +189,8 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
         block_ids.push_back(block_id);
       }
       // XTensor mode: calculate and return GlobalXTensor offsets
-      if (FLAGS_enable_xtensor && !block_ids.empty()) {
+      if (::xllm::KVCacheConfig::get_instance().enable_xtensor() &&
+          !block_ids.empty()) {
         std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>
             layer_offsets;
         if (engine_->get_xtensor_offsets_for_blocks(
@@ -226,12 +239,14 @@ void DisaggPDServiceImpl::decode_recv_first_generation(
     std::vector<uint64_t> cluster_ids(gen.cluster_ids().begin(),
                                       gen.cluster_ids().end());
     std::vector<std::string> addrs(gen.addrs().begin(), gen.addrs().end());
-    std::vector<int64_t> k_cache_ids(gen.k_cache_ids().begin(),
-                                     gen.k_cache_ids().end());
-    std::vector<int64_t> v_cache_ids(gen.v_cache_ids().begin(),
-                                     gen.v_cache_ids().end());
     std::vector<uint64_t> block_ids(gen.block_ids().begin(),
                                     gen.block_ids().end());
+    int32_t linear_state_id = gen.linear_state_id();
+    torch::Tensor mtp_bootstrap_embedding;
+    if (gen.has_mtp_bootstrap_embedding()) {
+      mtp_bootstrap_embedding =
+          util::proto_to_torch(gen.mtp_bootstrap_embedding());
+    }
 
     bool success = scheduler_->decode_recv_first_generation(
         gen.req_id(),
@@ -244,11 +259,11 @@ void DisaggPDServiceImpl::decode_recv_first_generation(
         gen.kv_cache_transfer_mode(),
         std::move(cluster_ids),
         std::move(addrs),
-        std::move(k_cache_ids),
-        std::move(v_cache_ids),
         std::move(block_ids),
+        linear_state_id,
         gen.dp_size(),
-        gen.dp_rank());
+        gen.dp_rank(),
+        mtp_bootstrap_embedding);
     if (!success) {
       response->set_ok(false);
       return;
@@ -266,14 +281,17 @@ void DisaggPDServiceImpl::link_instance(
                                     request->cluster_ids().end());
   std::vector<std::string> addrs(request->addrs().begin(),
                                  request->addrs().end());
-  std::vector<std::string> device_ips(request->device_ips().begin(),
-                                      request->device_ips().end());
   std::vector<uint16_t> ports(request->ports().begin(), request->ports().end());
   int32_t dp_size = request->dp_size();
+  int32_t kv_split_size = request->kv_split_size();
 
   // Call scheduler's link_instance method
-  bool success = scheduler_->link_instance(
-      request->instance_name(), cluster_ids, addrs, device_ips, ports, dp_size);
+  bool success = scheduler_->link_instance(request->instance_name(),
+                                           cluster_ids,
+                                           addrs,
+                                           ports,
+                                           dp_size,
+                                           kv_split_size);
 
   if (!success) {
     LOG(ERROR) << "Failed to link instance: " << request->instance_name();
@@ -292,14 +310,17 @@ void DisaggPDServiceImpl::unlink_instance(
                                     request->cluster_ids().end());
   std::vector<std::string> addrs(request->addrs().begin(),
                                  request->addrs().end());
-  std::vector<std::string> device_ips(request->device_ips().begin(),
-                                      request->device_ips().end());
   std::vector<uint16_t> ports(request->ports().begin(), request->ports().end());
   int32_t dp_size = request->dp_size();
+  int32_t kv_split_size = request->kv_split_size();
 
   // Call scheduler's unlink_instance method
-  bool success = scheduler_->unlink_instance(
-      request->instance_name(), cluster_ids, addrs, device_ips, ports, dp_size);
+  bool success = scheduler_->unlink_instance(request->instance_name(),
+                                             cluster_ids,
+                                             addrs,
+                                             ports,
+                                             dp_size,
+                                             kv_split_size);
 
   if (!success) {
     LOG(ERROR) << "Failed to unlink instance: " << request->instance_name();

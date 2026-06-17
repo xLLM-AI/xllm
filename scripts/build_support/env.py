@@ -45,7 +45,7 @@ def get_ixformer_root_path() -> Optional[str]:
         return os.path.dirname(os.path.abspath(ixformer.__file__))
     except ImportError:
         return None
-    
+
 
 def get_cuda_root_path() -> Optional[str]:
     try:
@@ -59,7 +59,20 @@ def get_cuda_root_path() -> Optional[str]:
         return CUDA_HOME
     except ImportError:
         return None
-    
+
+def get_dcu_root_path() -> Optional[str]:
+    try:
+        import torch
+        from torch.utils.cpp_extension import ROCM_HOME
+        if ROCM_HOME is None:
+            raise RuntimeError(
+                "PyTorch was not built with dcu, or hipcc is not in PATH. "
+                "Please set ROCM_PATH manually."
+            )
+        return ROCM_HOME
+    except ImportError:
+        return None
+
 
 def get_torch_musa_root_path() -> Optional[str]:
     try:
@@ -191,12 +204,15 @@ def set_npu_envs() -> None:
 def set_mlu_envs() -> None:
     set_common_envs()
     os.environ["PYTORCH_MLU_INSTALL_PATH"] = get_torch_mlu_root_path() or ""
-    
+
 
 def set_cuda_envs() -> None:
     set_common_envs()
     os.environ["CUDA_TOOLKIT_ROOT_DIR"] = get_cuda_root_path() or ""
 
+def set_dcu_envs() -> None:
+    set_common_envs()
+    os.environ["DCU_PATH"] = get_dcu_root_path() or ""
 
 def set_ilu_envs() -> None:
     set_common_envs()

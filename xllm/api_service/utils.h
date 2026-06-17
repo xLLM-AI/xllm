@@ -27,7 +27,9 @@ limitations under the License.
 
 #include "api_service/stream_output_parser.h"
 #include "chat.pb.h"
+#include "common.pb.h"
 #include "core/common/types.h"
+#include "core/framework/request/usage.h"
 #include "function_call/function_call.h"
 
 namespace xllm {
@@ -36,6 +38,23 @@ namespace api_service {
 // Check for unstreamed tool arguments and send them using the provided sender
 // This is shared between Chat API and Anthropic API implementations
 using SendFunc = std::function<bool(const std::string&, int)>;
+
+inline void set_proto_usage(proto::Usage* proto_usage,
+                            const xllm::Usage& usage) {
+  CHECK(proto_usage != nullptr);
+  proto_usage->set_prompt_tokens(usage.num_prompt_tokens);
+  proto_usage->set_completion_tokens(usage.num_generated_tokens);
+  proto_usage->set_total_tokens(usage.num_total_tokens);
+  auto* prompt_tokens_details = proto_usage->mutable_prompt_tokens_details();
+  prompt_tokens_details->set_cached_tokens(usage.num_cached_tokens);
+  prompt_tokens_details->set_audio_tokens(0);
+
+  auto* completion_tokens_details =
+      proto_usage->mutable_completion_tokens_details();
+  completion_tokens_details->set_reasoning_tokens(0);
+  completion_tokens_details->set_audio_tokens(0);
+}
+
 inline bool check_for_unstreamed_tool_args(
     std::shared_ptr<StreamOutputParser> stream_parser,
     size_t index,

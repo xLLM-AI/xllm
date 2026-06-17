@@ -17,14 +17,14 @@ limitations under the License. -->
 <div align="center">
 <img src="docs/assets/logo_with_llm.png" alt="xLLM" style="width:50%; height:auto;">
     
-[![Document](https://img.shields.io/badge/Document-black?logo=html5&labelColor=grey&color=red)](https://xllm.readthedocs.io/zh-cn/latest/) [![Docker](https://img.shields.io/badge/Docker-black?logo=docker&labelColor=grey&color=%231E90FF)](https://hub.docker.com/r/xllm/xllm-ai) [![License](https://img.shields.io/badge/license-Apache%202.0-brightgreen?labelColor=grey)](https://opensource.org/licenses/Apache-2.0) [![report](https://img.shields.io/badge/Technical%20Report-red?logo=arxiv&logoColor=%23B31B1B&labelColor=%23F0EBEB&color=%23D42626)](https://arxiv.org/abs/2510.14686) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/jd-opensource/xllm) 
+[![Document](https://img.shields.io/badge/Document-black?logo=html5&labelColor=grey&color=red)](https://docs.xllm-ai.com/) [![Docker](https://img.shields.io/badge/Docker-black?logo=docker&labelColor=grey&color=%231E90FF)](https://quay.io/repository/jd_xllm/xllm-ai?tab=tags) [![License](https://img.shields.io/badge/license-Apache%202.0-brightgreen?labelColor=grey)](https://opensource.org/licenses/Apache-2.0) [![report](https://img.shields.io/badge/Technical%20Report-red?logo=arxiv&logoColor=%23B31B1B&labelColor=%23F0EBEB&color=%23D42626)](https://arxiv.org/abs/2510.14686) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/jd-opensource/xllm)
     
 </div>
 
 ---------------------
 
 <p align="center">
-| <a href="https://xllm.readthedocs.io/zh-cn/latest/"><b>Documentation</b></a> | <a href="https://arxiv.org/abs/2510.14686"><b>Technical Report</b></a> |
+| <a href="https://docs.xllm-ai.com/"><b>Documentation</b></a> | <a href="https://arxiv.org/abs/2510.14686"><b>Technical Report</b></a> |
 </p>
 
 
@@ -87,6 +87,7 @@ limitations under the License. -->
 | MLU      |         |                 |
 | ILU      | BI150   |                 |
 | MUSA     | S5000   |                 |
+| DCU      | BW1000  |                 |
 
 Besides, please check the supported models on different hardwares at [Supported Models List](docs/en/supported_models.md).
 
@@ -99,22 +100,7 @@ Please refer to [Quick Start](docs/en/getting_started/quick_start.md) for more d
 --- 
 
 ## Contributing
-There are several ways you can contribute to xLLM:
-
-1. Reporting Issues (Bugs & Errors)
-2. Suggesting Enhancements
-3. Improving Documentation
-    + Fork the repository
-    + Add your view in document
-    + Send your pull request
-4. Writing Code
-    + Fork the repository
-    + Create a new branch
-    + Add your feature or improvement
-    + Send your pull request
-
-We appreciate all kinds of contributions! 🎉🎉🎉
-If you have problems about development, please check our document: **[Document](https://xllm.readthedocs.io/zh-cn/latest)**
+Please refer to [CONTRIBUTING.md](.github/CONTRIBUTING.md) for contribution guidelines.
 
 ---
 

@@ -15,11 +15,13 @@ limitations under the License.
 
 #pragma once
 
+#include <torch/torch.h>
 #include <xxHash/xxhash.h>
 
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -35,10 +37,8 @@ struct XXH3Key {
     std::memcpy(data, input_data, XXH3_128BITS_HASH_VALUE_LEN);
   }
 
-  bool operator==(const XXH3Key& other) {
-    return std::memcmp(reinterpret_cast<const char*>(data),
-                       reinterpret_cast<const char*>(other.data),
-                       XXH3_128BITS_HASH_VALUE_LEN);
+  bool operator==(const XXH3Key& other) const {
+    return std::memcmp(data, other.data, XXH3_128BITS_HASH_VALUE_LEN) == 0;
   }
 
   void set(const uint8_t* const input_data) {
@@ -64,10 +64,11 @@ struct FixedStringKeyHash {
 
 struct FixedStringKeyEqual {
   bool operator()(const XXH3Key& left, const XXH3Key& right) const {
-    return std::strncmp(reinterpret_cast<const char*>(left.data),
-                        reinterpret_cast<const char*>(right.data),
-                        sizeof(left.data)) == 0;
+    return std::memcmp(left.data, right.data, sizeof(left.data)) == 0;
   }
 };
+
+XXH3Key hash_tensor(const torch::Tensor& tensor);
+XXH3Key hash_string(const std::string& str);
 
 }  // namespace xllm

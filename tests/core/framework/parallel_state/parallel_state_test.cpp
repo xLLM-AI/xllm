@@ -29,7 +29,7 @@ limitations under the License.
 
 #if defined(USE_MLU)
 #include "framework/parallel_state/mlu_process_group.h"
-#elif defined(USE_CUDA)
+#elif defined(USE_CUDA) || defined(USE_DCU)
 #include "framework/parallel_state/cuda_process_group.h"
 #endif
 

@@ -34,6 +34,9 @@ class Glm4DecoderLoader : public BaseLoader {
 
  protected:
   void merge_host_at_weights() override;
+
+ private:
+  void merge_gate_up();
 };
 
 }  // namespace layer

@@ -16,10 +16,10 @@ limitations under the License.
 #pragma once
 
 #include "framework/kv_cache/embedding_cache.h"
+#include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #if defined(USE_NPU)
 #include "framework/kv_cache_transfer/spec_kv_cache_transfer.h"
 #endif
-#include "runtime/spec_input_builder.h"
 #include "runtime/speculative_worker_impl.h"
 
 namespace xllm {
@@ -56,9 +56,11 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                   int32_t random_seed,
                   MasterStatus master_status) override;
 
+  std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;
+
   bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;
 
-#if defined(USE_NPU)
+#if defined(USE_NPU) || defined(USE_MLU)
   bool allocate_kv_cache_with_transfer(
       const KVCacheShape& kv_cache_shape) override;
 #endif
@@ -74,7 +76,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
 
   void fill_validate_input_from_draft_outputs(
       const std::vector<ForwardOutput>& draft_outputs,
-      ForwardInput& validate_input);
+      ForwardInput& validate_input,
+      Stream& compute_stream);
   std::optional<ForwardOutput> run_validate(
       const ForwardInput& input,
       const std::vector<ForwardOutput>& draft_outputs,
@@ -100,32 +103,28 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // prepare inputs for draft model at Prefill phase.
   void prepare_prefill_inputs(const ForwardInput& inputs,
                               ForwardInput& prefill_inputs);
+  bool use_qwen3_5_spec_verify_path() const;
 
   // Prepare target validate input from cached target context.
   void prepare_validate_inputs(const ForwardInput& inputs,
-                               const specBuilder::DecodeCpuView& decode_view,
                                ForwardInput& validate_inputs);
 
   // prepare inputs for draft model at Decode phase.
   void prepare_draft_inputs(const ForwardInput& inputs,
-                            const specBuilder::DecodeCpuView& decode_view,
                             ForwardInput& draft_inputs,
                             int32_t position_offset);
-  void build_decode_step_view(
-      const ForwardInput& input,
-      const std::vector<EmbeddingCache::DecodeState>& last_states,
-      specBuilder::DecodeCpuView& decode_view) const;
+  void update_decode_step_input(
+      ForwardInput& input,
+      const std::vector<EmbeddingCache::DecodeState>& last_states) const;
 
   // Build draft-side input from cached target context at decode step start.
   void prepare_draft_extend_inputs(
       const ForwardInput& base_input,
-      const specBuilder::DecodeCpuView& decode_view,
       const std::vector<EmbeddingCache::DecodeState>& last_states,
       ForwardInput& extend_input);
 
   void write_target_context_to_cache(const ForwardInput& input,
                                      const SampleOutput& validate_output);
-  void record_validate_metrics(const SampleOutput& validate_output) const;
 
  protected:
   // Draft model worker
@@ -138,8 +137,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // If false, selected-only cache values are restored to dense [B, S, V].
   bool enable_opt_validate_probs_ = false;
 
-#if defined(USE_NPU)
-  std::shared_ptr<SpecKVCacheTransfer> kv_cache_transfer_;
+#if defined(USE_NPU) || defined(USE_MLU)
+  std::shared_ptr<KVCacheTransfer> kv_cache_transfer_;
 #endif
 };
 }  // namespace xllm

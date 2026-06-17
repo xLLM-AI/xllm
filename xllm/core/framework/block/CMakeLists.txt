@@ -2,6 +2,17 @@ include(cc_binary)
 include(cc_library)
 
 cc_library(
+  NAME
+    block_utils
+  HDRS
+    block_utils.h
+  SRCS
+    block_utils.cpp
+  DEPS
+    glog::glog
+)
+
+cc_library(
   NAME 
     block
   HDRS
@@ -12,6 +23,8 @@ cc_library(
     block_manager_impl.h
     concurrent_block_manager_impl.h
     hierarchy_block_manager_pool.h
+    sliding_window_block_manager.h
+    composite_block_manager.h
   SRCS 
     block.cpp
     single_block_manager.cpp
@@ -19,11 +32,15 @@ cc_library(
     concurrent_block_manager_impl.cpp
     block_manager_impl.cpp
     hierarchy_block_manager_pool.cpp
+    sliding_window_block_manager.cpp
+    composite_block_manager.cpp
   DEPS
+    :block_utils
     $<$<BOOL:${USE_NPU}>:torch_npu>
     $<$<BOOL:${USE_NPU}>:graph>
     :request
     :common
+    :prefix_cache
     glog::glog
     Boost::serialization
     SMHasherSupport

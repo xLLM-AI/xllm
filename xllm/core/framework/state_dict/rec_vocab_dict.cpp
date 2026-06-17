@@ -7,6 +7,7 @@
 #include <string>
 
 #include "common/global_flags.h"
+#include "core/framework/config/rec_config.h"
 #include "util/timer.h"
 
 namespace xllm {
@@ -106,11 +107,11 @@ bool RecVocabDict::initialize(const std::string& vocab_file) {
   int64_t item_id = 0;
   RecTokenTriple tokens;
 
-  if (!FLAGS_enable_extended_item_info) {
+  if (!::xllm::RecConfig::get_instance().enable_extended_item_info()) {
     const size_t line_size = tokens_size + itemid_size;
     while (ifs.read(reinterpret_cast<char*>(&item_id), itemid_size) &&
            ifs.read(reinterpret_cast<char*>(tokens.data()), tokens_size)) {
-      if (FLAGS_enable_constrained_decoding) {
+      if (::xllm::RecConfig::get_instance().enable_constrained_decoding()) {
         for (int32_t i = 0; i < tokens.size(); ++i) {
           std::vector<int32_t> prefix_tokens;
           for (int32_t j = 0; j < i; ++j) {
@@ -171,7 +172,7 @@ bool RecVocabDict::initialize(const std::string& vocab_file) {
         return fail_with_error("Failed to read token ids from " + vocab_file);
       }
 
-      if (FLAGS_enable_constrained_decoding) {
+      if (::xllm::RecConfig::get_instance().enable_constrained_decoding()) {
         for (int32_t i = 0; i < tokens.size(); ++i) {
           std::vector<int32_t> prefix_tokens;
           for (int32_t j = 0; j < i; ++j) {

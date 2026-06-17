@@ -27,12 +27,14 @@ class WorkerServer;
 class SpawnWorkerServer final {
  public:
   explicit SpawnWorkerServer(const std::string& master_node_addr,
-                             int local_rank,
-                             int global_rank,
-                             int world_size,
-                             int device_idx,
-                             int num_decoding_tokens,
-                             int block_size,
+                             int32_t local_rank,
+                             int32_t global_rank,
+                             int32_t world_size,
+                             int32_t device_idx,
+                             int32_t num_decoding_tokens,
+                             int32_t block_size,
+                             int32_t max_tokens_per_batch,
+                             int32_t max_seqs_per_batch,
                              bool enable_shm,
                              uint64_t input_shm_size,
                              uint64_t output_shm_size,
@@ -40,7 +42,17 @@ class SpawnWorkerServer final {
                              bool enable_prefill_sp,
                              const std::string& task_type,
                              const std::string& worker_type,
-                             const std::string& communication_backend);
+                             bool enable_speculative_decode,
+                             int32_t num_speculative_tokens,
+                             const std::string& speculative_algorithm,
+                             const std::string& communication_backend,
+                             const std::string& npu_kernel_backend,
+                             const std::string& rank_tablefile,
+                             bool enable_graph,
+                             bool enable_graph_mode_decode_no_padding,
+                             bool enable_prefill_piecewise_graph,
+                             int32_t max_tokens_for_graph_mode,
+                             int64_t max_encoder_cache_size);
 
   ~SpawnWorkerServer();
 

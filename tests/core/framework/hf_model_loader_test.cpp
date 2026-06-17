@@ -17,11 +17,13 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
 #include <string>
 #include <type_traits>
 
 #include "core/framework/model/rec_causal_lm.h"
 #include "core/platform/device.h"
+#include "core/util/model_config_utils.h"
 #include "models/model_registry.h"
 
 namespace xllm {
@@ -82,6 +84,57 @@ class DummyRecCausalLM final : public RecCausalLM {
 };
 
 }  // namespace
+
+TEST(HFModelLoaderTest, Qwen35DenseBackendAwareModelTypeSelection) {
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(R"json(
+    {
+      "architectures": ["Qwen3_5ForConditionalGeneration"],
+      "image_token_id": 248056,
+      "model_type": "qwen3_5",
+      "text_config": {
+        "model_type": "qwen3_5_text"
+      },
+      "video_token_id": 248057,
+      "vision_config": {
+        "model_type": "qwen3_5"
+      }
+    }
+  )json"));
+
+  const std::filesystem::path fake_model_path("/tmp/Qwen3.5-9B");
+  EXPECT_EQ(util::get_model_type(reader, fake_model_path), "qwen3_5_text");
+  EXPECT_EQ(util::get_model_type(reader, fake_model_path, "llm"),
+            "qwen3_5_text");
+  EXPECT_EQ(util::get_model_type(reader, fake_model_path, "vlm"), "qwen3_5");
+}
+
+TEST(HFModelLoaderTest, Qwen35MoeBackendAwareModelTypeSelection) {
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(R"json(
+    {
+      "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+      "image_token_id": 248056,
+      "model_type": "qwen3_5_moe",
+      "text_config": {
+        "model_type": "qwen3_5_moe_text",
+        "num_experts": 256,
+        "num_experts_per_tok": 8
+      },
+      "video_token_id": 248057,
+      "vision_config": {
+        "model_type": "qwen3_5_moe"
+      }
+    }
+  )json"));
+
+  const std::filesystem::path fake_model_path("/tmp/Qwen3.5-MoE");
+  EXPECT_EQ(util::get_model_type(reader, fake_model_path), "qwen3_5_moe_text");
+  EXPECT_EQ(util::get_model_type(reader, fake_model_path, "llm"),
+            "qwen3_5_moe_text");
+  EXPECT_EQ(util::get_model_type(reader, fake_model_path, "vlm"),
+            "qwen3_5_moe");
+}
 
 TEST(HFModelLoaderTest, LoadCompressedTensorsFp8StaticConfig) {
   JsonReader reader;
@@ -228,6 +281,89 @@ TEST(HFModelLoaderTest, Qwen35MtpModelArgsFromMoeConfig) {
   ASSERT_EQ(args.layer_types().size(), 2);
   EXPECT_EQ(args.layer_types()[0], "full_attention");
   EXPECT_EQ(args.layer_types()[1], "full_attention");
+}
+#endif
+
+#if defined(USE_DCU)
+TEST(HFModelLoaderTest, LoadCompressedTensorsInt8Scheme) {
+  struct TestCase {
+    const char* name;
+    const char* config;
+    bool is_w8a8_dynamic;
+  };
+  const TestCase test_cases[] = {
+      {"dynamic_activation",
+       R"json(
+         {
+           "quantization_config": {
+             "config_groups": {
+               "group_0": {
+                 "input_activations": {
+                   "dynamic": true,
+                   "num_bits": 8,
+                   "type": "int"
+                 },
+                 "weights": {
+                   "dynamic": false,
+                   "num_bits": 8,
+                   "type": "int"
+                 }
+               }
+             },
+             "ignore": [
+               "lm_head",
+               "model.layers.0.self_attn.o_proj"
+             ],
+             "quant_method": "compressed-tensors"
+           }
+         }
+       )json",
+       true},
+      {"static_activation",
+       R"json(
+         {
+           "quantization_config": {
+             "config_groups": {
+               "group_0": {
+                 "input_activations": {
+                   "dynamic": false,
+                   "num_bits": 8,
+                   "type": "int"
+                 },
+                 "weights": {
+                   "dynamic": false,
+                   "num_bits": 8,
+                   "type": "int"
+                 }
+               }
+             },
+             "quant_method": "compressed-tensors"
+           }
+         }
+       )json",
+       false},
+  };
+
+  for (const TestCase& test_case : test_cases) {
+    SCOPED_TRACE(test_case.name);
+    JsonReader reader;
+    ASSERT_TRUE(reader.parse_text(test_case.config));
+
+    QuantArgs quant_args;
+    ASSERT_TRUE(load_quant_cfg(reader, quant_args));
+    EXPECT_EQ(quant_args.quant_method(), "compressed-tensors");
+    EXPECT_EQ(quant_args.is_compressed_tensors_w8a8_dynamic(),
+              test_case.is_w8a8_dynamic);
+    if (test_case.is_w8a8_dynamic) {
+      EXPECT_EQ(quant_args.bits(), 8);
+      EXPECT_EQ(quant_args.moe_weight_bits(), 8);
+      EXPECT_TRUE(quant_args.activation_dynamic());
+      ASSERT_EQ(quant_args.ignored_modules().size(), 2);
+      EXPECT_EQ(quant_args.ignored_modules()[0], "lm_head");
+      EXPECT_EQ(quant_args.ignored_modules()[1],
+                "model.layers.0.self_attn.o_proj");
+    }
+  }
 }
 #endif
 

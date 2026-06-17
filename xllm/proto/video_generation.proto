@@ -1,0 +1,133 @@
+syntax = "proto3";
+
+option go_package = "jd.com/jd-infer/xllm;xllm";
+package xllm.proto;
+
+import "common.proto";
+import "tensor.proto";
+
+// Input parameters container
+message VideoInput {
+  // Primary input text description for video generation
+  string prompt = 1;
+
+  // Negative prompt to exclude unwanted features
+  optional string negative_prompt = 2;
+
+  // prompt embedding
+  optional Tensor prompt_embed = 3;
+
+  // negative prompt embedding
+  optional Tensor negative_prompt_embed = 4;
+
+  // Input image for image-to-video generation (base64 encoded)
+  optional string image = 5;
+
+  // Last image (base64 encoded)
+  optional string last_image = 6;
+
+  // Image embeddings for image-to-video generation
+  optional Tensor image_embeds = 7;
+}
+
+// Generation parameters container
+message VideoParameters {
+  // Size of the generated video frames, e.g. "256*256" or "832*480"
+  optional string size = 1;
+
+  // Number of inference steps for video generation
+  optional int32 num_inference_steps = 2;
+
+  // Guidance scale value for prompt adherence
+  optional float guidance_scale = 3;
+
+  // Guidance scale value for negative prompt adherence
+  optional float guidance_scale_2 = 4;  
+
+  // Number of videos to generate per prompt
+  optional int32 num_videos_per_prompt = 5;
+
+  // Random seed value for generation
+  optional int64 seed = 6;
+
+  // Maximum sequence length for prompt processing
+  optional int32 max_sequence_length = 7;
+
+  // Number of frames to generate
+  optional int32 num_frames = 8;
+
+  // Output video FPS (frames per second)
+  optional double fps = 9;
+
+  // video duration
+  optional int32 seconds = 10;
+
+  // high-low noise separation ratio
+  optional float boundary_ratio = 11;
+
+  // scheduler flow shif
+  optional float flow_shift = 12;
+
+  // True CFG scale value for balancing generation
+  optional float true_cfg_scale = 13;
+}
+
+// Request structure for video generation
+message VideoGenerationRequest {
+  // Model ID to use for generation
+  string model = 1;
+
+  VideoInput input = 2;
+
+  VideoParameters parameters = 3;
+
+  // End-user identifier
+  optional string user = 4;
+
+  // Server-side request ID for tracking
+  optional string request_id = 5;
+}
+
+// Individual video generation result
+message VideoGenData {
+  // Base64-encoded video data (MP4 format)
+  optional string video = 1;
+
+  // Width of the generated video in pixels
+  int32 width = 3;
+
+  // Height of the generated video in pixels
+  int32 height = 4;
+
+  // Seed used for generation
+  int64 seed = 5;
+
+  // Number of frames
+  int32 num_frames = 6;
+
+  // FPS of the output video
+  double fps = 7;
+}
+
+// Output container for video generation results
+message VideoGenerationOutput {
+  repeated VideoGenData results = 1;
+}
+
+// Response structure for video generation requests
+message VideoGenerationResponse {
+  // Response ID
+  string id = 1;
+
+  // Object type
+  string object = 2;
+
+  // Unix timestamp of when the response was created
+  int64 created = 3;
+
+  // Model used for generation
+  string model = 4;
+
+  // Contains generation results
+  VideoGenerationOutput output = 5;
+}

@@ -18,8 +18,10 @@ limitations under the License.
 #include <ATen/DLConvertor.h>
 #include <c10/core/Device.h>
 #include <cuda_runtime.h>
+#if !defined(USE_DCU)
 #include <dlfcn.h>
 #include <dlpack/dlpack.h>
+#endif
 
 #include <cstdlib>
 #include <mutex>
@@ -46,6 +48,7 @@ const std::unordered_map<torch::ScalarType, std::string_view>
         {torch::kUInt64, "u64"},
 };
 
+#if !defined(USE_DCU)
 void ensure_tvm_ffi_global_symbols() {
   // Ensure that TVMFFIEnvGetStream and other TVM FFI symbols are globally
   // visible for offline inference
@@ -547,4 +550,5 @@ ffi::Function get_function(const std::string& uri,
   func_cache.emplace(key, func);
   return func;
 }
+#endif  // !USE_DCU
 }  // namespace xllm::kernel::cuda

@@ -1,5 +1,17 @@
 include(cc_test)
 
+cc_test(
+  NAME
+    concurrent_block_manager_test
+  SRCS
+    concurrent_block_manager_test.cpp
+  DEPS
+    :block
+    :config
+    :prefix_cache
+    GTest::gtest_main
+)
+
 if(USE_NPU)
   cc_test(
     NAME
@@ -7,10 +19,11 @@ if(USE_NPU)
     SRCS
       block_manager_test.cpp
       single_block_manager_test.cpp
+      composite_block_manager_test.cpp
     DEPS
       :xllm_server
       :block
-      :flags
+      :config
       :kv_cache
       :prefix_cache
       absl::random_random

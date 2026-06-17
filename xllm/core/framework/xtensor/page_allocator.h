@@ -30,6 +30,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/types.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "virt_page.h"
 #include "xtensor.h"  // For offset_t type definition
 
@@ -283,7 +284,9 @@ class PageAllocator {
 
   // Configuration
   int32_t dp_size_ = 1;
-  size_t page_size_ = 0;  // Page size (from FLAGS_phy_page_granularity_size)
+  size_t page_size_ =
+      0;  // Page size (from
+          // ::xllm::KVCacheConfig::get_instance().phy_page_granularity_size())
   bool enable_page_prealloc_ = PAGE_PREALLOC_ENABLED;
 
   // Physical page tracking (shared across all models)

@@ -1,0 +1,109 @@
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+syntax = "proto3";
+
+option go_package = "jd.com/jd-infer/xllm;xllm";
+package xllm.proto;
+
+// Input parameters for audio generation (LongCat-AudioDiT)
+message AudioInput {
+  // Text to synthesize (TTS) or text of the target speech (voice cloning).
+  // For voice cloning: full_text = prompt_text + " " + text.
+  string prompt = 1;
+
+  // Prompt audio for voice cloning: base64-encoded PCM WAV, mono 24 kHz.
+  // When set the model clones the speaker's voice from this reference clip.
+  optional string prompt_audio = 2;
+
+  // Transcript of the prompt audio (for voice cloning duration estimation).
+  // The full tokenized text is prompt_text + " " + prompt (passed in `prompt`).
+  optional string prompt_text = 3;
+}
+
+// Generation parameters for audio generation
+message AudioParameters {
+  // Random seed value for audio generation
+  optional int64 seed = 1;
+
+  // Maximum sequence length for text processing
+  optional int32 max_sequence_length = 2;
+
+  // Guidance scale value for prompt adherence (CFG/APG strength)
+  optional float guidance_scale = 3;
+
+  // Target total duration in latent frames (prompt + generation). 0 = auto.
+  optional int32 audio_duration_frames = 4;
+
+  // Number of ODE Euler steps for audio generation (default 16).
+  optional int32 audio_steps = 5;
+
+  // Guidance method: "cfg" (default) or "apg".
+  optional string audio_guidance_method = 6;
+
+  // Sample rate of the model in Hz, read from model config.json.
+  // Clients should not set this field manually; it is populated from the model
+  // config (config.json "sampling_rate") and defaults to 24000.
+  optional int32 sampling_rate = 7;
+}
+
+// Request structure for audio generation tasks (LongCat-AudioDiT)
+message AudioGenerationRequest {
+  // ID of the audio generation model (e.g. "LongCat-AudioDiT-1B")
+  string model = 1;
+
+  AudioInput input = 2;
+
+  AudioParameters parameters = 3;
+
+  // Unique identifier representing the end-user
+  optional string user = 4;
+
+  // ID used by server to identify the request for tracking and troubleshooting
+  optional string request_id = 5;
+}
+
+// Individual audio generation result
+message AudioGenData {
+  // Base64-encoded PCM WAV audio output
+  optional string audio = 1;
+
+  // Seed used for generating this audio clip
+  int64 seed = 2;
+}
+
+// Output container for audio generation task results
+message AudioGenerationOutput {
+  // List of generated audio data
+  repeated AudioGenData results = 1;
+}
+
+// Response structure for audio generation requests
+message AudioGenerationResponse {
+  // The ID of the response
+  string id = 1;
+
+  // The object type
+  string object = 2;
+
+  // Unix timestamp of when the response was created
+  int64 created = 3;
+
+  // The model used to generate the audio
+  string model = 4;
+
+  // Contains task details and generation results
+  AudioGenerationOutput output = 5;
+}

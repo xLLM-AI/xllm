@@ -25,15 +25,21 @@ limitations under the License.
 namespace xllm {
 namespace function_call {
 
-DeepSeekV32Detector::DeepSeekV32Detector() : BaseFormatDetector() {
-  bot_token_ = "<｜DSML｜function_calls>";
-  eot_token_ = "</｜DSML｜function_calls>";
+DeepSeekV32Detector::DeepSeekV32Detector()
+    : DeepSeekV32Detector("<｜DSML｜function_calls>",
+                          "</｜DSML｜function_calls>") {}
+
+DeepSeekV32Detector::DeepSeekV32Detector(
+    const std::string& tool_calls_start_token,
+    const std::string& tool_calls_end_token)
+    : BaseFormatDetector() {
+  bot_token_ = tool_calls_start_token;
+  eot_token_ = tool_calls_end_token;
   invoke_end_token_ = "</｜DSML｜invoke>";
 
   // Regex patterns for DeepSeek-V3.2 DSML format
-  function_calls_regex_ = std::regex(
-      "<｜DSML｜function_calls>([\\s\\S]*?)</｜DSML｜function_calls>",
-      std::regex_constants::ECMAScript);
+  function_calls_regex_ = std::regex(bot_token_ + "([\\s\\S]*?)" + eot_token_,
+                                     std::regex_constants::ECMAScript);
   // Note: For streaming, we need to match even without closing tag
   // The third group will be empty if no closing tag is found
   // Use non-greedy match for content, but ensure we match the closing tag if
@@ -63,6 +69,9 @@ DeepSeekV32Detector::DeepSeekV32Detector() : BaseFormatDetector() {
       std::regex_constants::ECMAScript);
   utf8_buffer_.clear();
 }
+
+DeepSeekV4Detector::DeepSeekV4Detector()
+    : DeepSeekV32Detector("<｜DSML｜tool_calls>", "</｜DSML｜tool_calls>") {}
 
 std::pair<std::string, std::string> DeepSeekV32Detector::split_incomplete_utf8(
     const std::string& str) const {

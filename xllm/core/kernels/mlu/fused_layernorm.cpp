@@ -20,7 +20,7 @@ namespace xllm::kernel::mlu {
 void fused_layernorm(const torch::Tensor& input,
                      torch::Tensor& output,
                      const std::optional<torch::Tensor>& residual,
-                     const torch::Tensor& weight,
+                     const std::optional<torch::Tensor>& weight,
                      const std::optional<torch::Tensor>& beta,
                      const std::optional<torch::Tensor>& bias,
                      const std::optional<torch::Tensor>& quant_scale,

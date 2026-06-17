@@ -25,6 +25,17 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
+namespace {
+
+torch::Tensor to_cpu_int64_contiguous(const torch::Tensor& tensor) {
+  torch::Tensor cpu_tensor = safe_to(tensor, torch::kCPU).contiguous();
+  if (cpu_tensor.scalar_type() != torch::kInt64) {
+    cpu_tensor = cpu_tensor.to(torch::kInt64);
+  }
+  return cpu_tensor;
+}
+
+}  // namespace
 
 EmbeddingCache::EmbeddingCache(int32_t total_nums) {
   CHECK_GT(total_nums, 0) << "No embeddings to allocate";
@@ -61,9 +72,11 @@ void EmbeddingCache::write_prefill_target_context(
   CHECK_EQ(target_embeddings.size(0), static_cast<int64_t>(ids.size()))
       << "prefill target embedding count mismatch";
 
-  torch::Tensor next_tokens_cpu = safe_to(next_tokens, torch::kCPU);
-  for (int32_t i = 0; i < static_cast<int32_t>(ids.size()); ++i) {
-    const int64_t token = next_tokens_cpu[i].item<int64_t>();
+  torch::Tensor next_tokens_cpu = to_cpu_int64_contiguous(next_tokens);
+  const int64_t* next_tokens_data = next_tokens_cpu.const_data_ptr<int64_t>();
+  const int32_t num_ids = static_cast<int32_t>(ids.size());
+  for (int32_t i = 0; i < num_ids; ++i) {
+    const int64_t token = next_tokens_data[i];
     CHECK_GE(token, 0) << "prefill target token should be valid";
     CHECK_LE(token, static_cast<int64_t>(std::numeric_limits<int32_t>::max()))
         << "prefill target token overflow";
@@ -76,11 +89,31 @@ void EmbeddingCache::write_prefill_target_context(
     state.all_draft_accepted = false;
     state.token_id = static_cast<int32_t>(token);
     state.position_offset = 0;
-    state.embedding = target_embeddings[i].detach().cpu();
+    state.embedding = target_embeddings.select(/*dim=*/0, i).detach();
 
     DecodeState& tail = mutable_tail(ids[i]);
     tail = std::move(state);
   }
+}
+
+void EmbeddingCache::write_mtp_bootstrap_context(
+    int32_t embedding_id,
+    const std::string& request_id,
+    int32_t token_id,
+    const torch::Tensor& embedding) {
+  CHECK(embedding.defined()) << "MTP bootstrap embedding is undefined";
+  CHECK_GE(token_id, 0) << "MTP bootstrap token should be valid";
+
+  DecodeState state;
+  state.valid = true;
+  state.request_id = request_id;
+  state.all_draft_accepted = false;
+  state.token_id = token_id;
+  state.position_offset = 0;
+  state.embedding = embedding.detach();
+
+  DecodeState& tail = mutable_tail(embedding_id);
+  tail = std::move(state);
 }
 
 void EmbeddingCache::write_target_context(
@@ -106,28 +139,31 @@ void EmbeddingCache::write_target_context(
       << "accepted token/embedding width mismatch";
   CHECK_GE(num_speculative_tokens, 0) << "invalid speculative token count";
 
-  torch::Tensor accepted_tokens_cpu = safe_to(accepted_tokens, torch::kCPU);
-  for (int32_t i = 0; i < static_cast<int32_t>(ids.size()); ++i) {
+  torch::Tensor accepted_tokens_cpu = to_cpu_int64_contiguous(accepted_tokens);
+  const int64_t* accepted_tokens_data =
+      accepted_tokens_cpu.const_data_ptr<int64_t>();
+  const int32_t num_ids = static_cast<int32_t>(ids.size());
+  const int32_t token_width = static_cast<int32_t>(accepted_tokens_cpu.size(1));
+  for (int32_t i = 0; i < num_ids; ++i) {
     int32_t accepted_len = 0;
     int32_t last_token_id = -1;
-    const int32_t token_width =
-        static_cast<int32_t>(accepted_tokens_cpu.size(1));
+    int32_t correction_token = -1;
+    int32_t correction_offset = -1;
+    const int64_t row_offset = static_cast<int64_t>(i) * token_width;
     for (int32_t j = 0; j < token_width; ++j) {
-      const int64_t token = accepted_tokens_cpu[i][j].item<int64_t>();
+      const int64_t token = accepted_tokens_data[row_offset + j];
       if (token < 0) {
         break;
       }
       CHECK_LE(token, static_cast<int64_t>(std::numeric_limits<int32_t>::max()))
           << "accepted token overflow";
       last_token_id = static_cast<int32_t>(token);
+      correction_token = static_cast<int32_t>(token);
+      correction_offset = j;
       ++accepted_len;
     }
     CHECK_GT(accepted_len, 0)
         << "each sequence must have at least one accepted target token";
-    for (int32_t j = accepted_len; j < token_width; ++j) {
-      const int64_t token = accepted_tokens_cpu[i][j].item<int64_t>();
-      CHECK_LT(token, 0) << "accepted tokens should be a contiguous prefix";
-    }
 
     const int32_t last_idx = accepted_len - 1;
     DecodeState state;
@@ -138,13 +174,18 @@ void EmbeddingCache::write_target_context(
     state.all_draft_accepted = accepted_len == num_speculative_tokens + 1;
     state.token_id = last_token_id;
     state.position_offset = last_idx;
-    state.embedding = accepted_embeddings[i][last_idx].detach().cpu();
+    state.correction_token_id = correction_token;
+    state.correction_position_offset = correction_offset;
+    state.embedding = accepted_embeddings.select(/*dim=*/0, i)
+                          .select(/*dim=*/0, last_idx)
+                          .detach();
     if (last_idx > 0) {
       const int64_t prev_token =
-          accepted_tokens_cpu[i][last_idx - 1].item<int64_t>();
+          accepted_tokens_data[row_offset + last_idx - 1];
       state.prev_token_id = static_cast<int32_t>(prev_token);
-      state.prev_embedding =
-          accepted_embeddings[i][last_idx - 1].detach().cpu();
+      state.prev_embedding = accepted_embeddings.select(/*dim=*/0, i)
+                                 .select(/*dim=*/0, last_idx - 1)
+                                 .detach();
     }
 
     DecodeState& tail = mutable_tail(ids[i]);
@@ -193,6 +234,20 @@ std::vector<EmbeddingCache::DecodeState> EmbeddingCache::read_decode_states(
     states.emplace_back(std::move(state));
   }
   return states;
+}
+
+std::vector<int32_t> EmbeddingCache::read_accepted_prefix_lengths(
+    const std::vector<int32_t>& ids) const {
+  CHECK(!ids.empty()) << "decode ids should not be empty";
+  std::vector<int32_t> accepted_prefix_lengths;
+  accepted_prefix_lengths.reserve(ids.size());
+  for (int32_t id : ids) {
+    const DecodeState& state = get_tail(id);
+    CHECK_GE(state.correction_token_id, 0)
+        << "decode entry missing correction token id";
+    accepted_prefix_lengths.emplace_back(state.correction_position_offset + 1);
+  }
+  return accepted_prefix_lengths;
 }
 
 void EmbeddingCache::clear(const std::vector<int32_t>& ids) {

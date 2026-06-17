@@ -63,7 +63,7 @@ struct ModelTensors {
   int32_t dp_size = 0;
   int32_t tp_size = 0;
 
-  // ============== Weight Segments (for D2D transfer) ==============
+  // ============== Weight Segments (for P2P transfer) ==============
   // Ordered list of weight segments in GlobalXTensor.
   // For contiguous allocation: single segment.
   // For fallback (XTensor): multiple segments from non-contiguous pages.
@@ -203,7 +203,7 @@ class XTensorAllocator {
   // ============== PD Disaggregation Support (XTensor Mode) ==============
 
   // Convert a block_id to GlobalXTensor offsets for KV cache transfer.
-  // This is only used when FLAGS_enable_xtensor is true for PD disaggregation.
+  // This is only used when --enable_xtensor=true for PD disaggregation.
   //
   // Parameters:
   //   model_id: Model identifier

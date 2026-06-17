@@ -38,14 +38,16 @@ class AttentionMetadataBuilder {
   static AttentionMetadata build(
       const ModelInputParams& params,
       bool enable_mla,
-      const std::optional<torch::Tensor>& attn_mask = {});
+      const std::optional<torch::Tensor>& attn_mask = {},
+      const std::optional<torch::Device>& device = std::nullopt);
 
   // Build AttentionMetadata from ModelInputParams with specified compute_dtype.
   static AttentionMetadata build(
       const ModelInputParams& params,
       bool enable_mla,
       const std::string& compute_dtype,
-      const std::optional<torch::Tensor>& attn_mask = {});
+      const std::optional<torch::Tensor>& attn_mask = {},
+      const std::optional<torch::Device>& device = std::nullopt);
 };
 
 }  // namespace layer

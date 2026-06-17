@@ -66,13 +66,18 @@ void Qwen3NextGatedDeltaNetImpl::init_next_projections(
 }
 
 std::pair<torch::Tensor, torch::Tensor>
-Qwen3NextGatedDeltaNetImpl::project_padded_inputs(
-    const torch::Tensor& hidden_states,
-    const AttentionMetadata& attn_metadata) {
+Qwen3NextGatedDeltaNetImpl::project_decode_inputs(
+    const torch::Tensor& hidden_states) {
   auto qkvz = qkvz_proj_->forward(hidden_states);
   auto ba = ba_proj_->forward(hidden_states);
-  return {reshape_qkvz_with_pad(attn_metadata, qkvz),
-          reshape_qkvz_with_pad(attn_metadata, ba)};
+  return {qkvz.view({qkvz.size(0), -1, qkvz.size(-1)}),
+          ba.view({ba.size(0), -1, ba.size(-1)})};
+}
+
+std::pair<torch::Tensor, torch::Tensor>
+Qwen3NextGatedDeltaNetImpl::project_flat_inputs(
+    const torch::Tensor& hidden_states) {
+  return {qkvz_proj_->forward(hidden_states), ba_proj_->forward(hidden_states)};
 }
 
 void Qwen3NextGatedDeltaNetImpl::load_state_dict(const StateDict& state_dict) {

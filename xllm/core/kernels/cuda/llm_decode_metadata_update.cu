@@ -61,11 +61,17 @@ __global__ void llm_decode_metadata_update_kernel(
 }  // namespace
 
 void update_llm_decode_metadata(const LlmDecodeMetadataUpdateParams& params,
-                                cudaStream_t stream) {
-  const int64_t max_work_size = std::max({params.actual_num_tokens,
-                                          params.padded_num_tokens,
-                                          params.actual_batch_size + 1,
-                                          params.actual_indices_size});
+                                LlmDecodeMetadataUpdateStream stream) {
+  int64_t max_work_size = params.actual_num_tokens;
+  if (params.padded_num_tokens > max_work_size) {
+    max_work_size = params.padded_num_tokens;
+  }
+  if (params.actual_batch_size + 1 > max_work_size) {
+    max_work_size = params.actual_batch_size + 1;
+  }
+  if (params.actual_indices_size > max_work_size) {
+    max_work_size = params.actual_indices_size;
+  }
   if (max_work_size <= 0) {
     return;
   }

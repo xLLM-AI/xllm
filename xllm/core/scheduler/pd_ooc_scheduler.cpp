@@ -27,6 +27,7 @@ limitations under the License.
 #include "common/interruption_bus.h"
 #include "common/macros.h"
 #include "core/distributed_runtime/pd_ooc_service.h"
+#include "core/framework/config/disagg_pd_config.h"
 #include "disagg_pd.pb.h"
 #include "distributed_runtime/engine.h"
 #include "framework/batch/batch_factory.h"
@@ -136,7 +137,7 @@ void PDOOCScheduler::start_rpc_server() {
       ServerRegistry::get_instance().register_server(server_name_);
   if (!rpc_server->start(std::move(service))) {
     LOG(ERROR) << "Failed to start brpc disagg pd server on port "
-               << FLAGS_disagg_pd_port;
+               << ::xllm::DisaggPDConfig::get_instance().disagg_pd_port();
     return;
   }
 }
@@ -183,26 +184,25 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
   while (request_queue_.read(request)) {
     CHECK(request);
 
-    // expand sequences to the target number if prefix cache is disabled.
-    if (!enable_prefix_cache_) {
-      // expand sequences to the target number
-      request->expand_sequences(false);
-    }
-
+    // In disagg PD, expansion of best_of_n sequences is always handled
+    // on the DECODE instance (where prefix cache lets seq[1..best_of-1]
+    // reuse seq[0]'s prompt KV). On the PREFILL/MIX instance we keep a
+    // single sequence -- expanding here would waste N x prefill compute
+    // on candidates that are never shipped to the DECODE instance.
     if (request->sequences()[0]->kv_state().kv_cache_tokens_num() == 0) {
       if (request->offline()) {
         int current_offline_decode_bs =
-            running_requests_.size() + waiting_priority_queue_offline_.size();
+            running_requests_.size() + waiting_priority_queue_offline_->size();
         VLOG(1) << "Current offline decode batch size: "
                 << current_offline_decode_bs
                 << ", linear_saturation_bs_: " << linear_saturation_bs_;
         if (current_offline_decode_bs < linear_saturation_bs_) {
-          waiting_priority_queue_offline_.push(request);
+          waiting_priority_queue_offline_->push(request);
         } else {
           deferred_reqs.emplace_back(request);
         }
       } else {
-        waiting_priority_queue_.push(request);
+        waiting_priority_queue_->push(request);
       }
     } else {
       // request from prefill instance in disagge pd mode.
@@ -316,26 +316,34 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
   size_t num_online_decode_preempt_offline_requests = 0;
   // TO IMPROVE?: handle online decode request before prefill offline request
   bool previous_idle = (step_status_ == StepStatus::IDLE);
-  handle_prefill_requests(latency_budget,
-                          estimate_latency,
-                          remaining_token_budget,
-                          remaining_seq_budget,
-                          waiting_priority_queue_,
-                          num_online_prefill_preempt_offline_requests,
-                          finished_requests);
+  // The CP PR makes DisaggPDScheduler inherit ChunkedPrefillScheduler so the
+  // chunked-prefill code path is shared across all PD-disagg subclasses. That
+  // private 11-arg ChunkedPrefillScheduler::handle_prefill_requests in turn
+  // name-hides the 7-arg virtual one defined on ContinuousScheduler. We need
+  // the latter here (PD-OOC has its own budgeting and never goes through the
+  // chunked-prefill helper), so call it through the base class explicitly.
+  ContinuousScheduler::handle_prefill_requests(
+      latency_budget,
+      estimate_latency,
+      remaining_token_budget,
+      remaining_seq_budget,
+      waiting_priority_queue_.get(),
+      num_online_prefill_preempt_offline_requests,
+      finished_requests);
   if (!running_sequences_.empty()) {
     step_status_ = StepStatus::ONLINE_PREFILL;
     VLOG(1) << "Set step status to ONLINE PREFILL";
   } else {
     // In PD OOC mode, a batch can only consist entirely of online requests or
     // entirely of offline requests
-    handle_prefill_requests(latency_budget,
-                            estimate_latency,
-                            remaining_token_budget,
-                            remaining_seq_budget,
-                            waiting_priority_queue_offline_,
-                            num_online_prefill_preempt_offline_requests,
-                            finished_requests);
+    ContinuousScheduler::handle_prefill_requests(
+        latency_budget,
+        estimate_latency,
+        remaining_token_budget,
+        remaining_seq_budget,
+        waiting_priority_queue_offline_.get(),
+        num_online_prefill_preempt_offline_requests,
+        finished_requests);
     if (!running_sequences_.empty()) {
       step_status_ = StepStatus::OFFLINE_PREFILL;
       VLOG(1) << "Set step status to OFFLINE PREFILL";
@@ -351,7 +359,7 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
                              num_offline_decode_preempt_offline_requests,
                              num_online_decode_preempt_online_requests,
                              num_online_decode_preempt_offline_requests,
-                             running_queue_);
+                             running_queue_.get());
       handle_decode_requests(latency_budget,
                              estimate_latency,
                              remaining_token_budget,
@@ -359,7 +367,7 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
                              num_offline_decode_preempt_offline_requests,
                              num_online_decode_preempt_online_requests,
                              num_online_decode_preempt_offline_requests,
-                             running_queue_offline_);
+                             running_queue_offline_.get());
       if (!running_sequences_.empty()) {
         step_status_ = StepStatus::DECODE;
         VLOG(1) << "Set step status to DECODE";
@@ -398,7 +406,7 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
             pending_requests_.load(std::memory_order_relaxed));
   GAUGE_SET(num_running_requests, running_requests_.size());
   GAUGE_SET(num_waiting_requests,
-            waiting_priority_queue_.size() + running_queue_->size());
+            waiting_priority_queue_->size() + running_queue_->size());
 
   GAUGE_ADD(num_preempted_requests, num_preempted_requests);
   GAUGE_ADD(num_offline_decode_preempt_offline_requests,
@@ -444,9 +452,9 @@ void PDOOCScheduler::handle_prefill_interruption() {
     // Add back to offline waiting queue for rescheduling
     VLOG(1) << "Preempting offline request due to interruption: "
             << request->request_id();
-    VLOG(1) << "waiting_priority_queue_offline_.size() before push: "
-            << waiting_priority_queue_offline_.size();
-    waiting_priority_queue_offline_.push(request);
+    VLOG(1) << "waiting_priority_queue_offline_->size() before push: "
+            << waiting_priority_queue_offline_->size();
+    waiting_priority_queue_offline_->push(request);
 
     VLOG(1) << "Preempted offline request due to interruption: "
             << request->request_id();
@@ -486,7 +494,7 @@ void PDOOCScheduler::handle_decode_requests(
     size_t& num_offline_decode_preempt_offline_requests,
     size_t& num_online_decode_preempt_online_requests,
     size_t& num_online_decode_preempt_offline_requests,
-    std::unique_ptr<DecodePriorityQueue>& running_queue) {
+    RequestPriorityQueue* running_queue) {
   // only used in decode step
   if (options_.instance_role().value() != InstanceRole::DECODE) {
     return ContinuousScheduler::handle_decode_requests(
@@ -655,7 +663,7 @@ void PDOOCScheduler::handle_decode_requests(
       running_queue_offline_->pop_back();
       // add preemptable request to waiting priority queue
       request_to_preempt->set_preempted();
-      waiting_priority_queue_offline_.push(request_to_preempt);
+      waiting_priority_queue_offline_->push(request_to_preempt);
       continue;
     } else if (running_queue->size() > 1) {
       std::shared_ptr<Request> request_to_preempt = running_queue->back();
@@ -667,10 +675,10 @@ void PDOOCScheduler::handle_decode_requests(
         request_to_preempt->set_preempted();
         if (request_to_preempt->offline()) {
           ++num_offline_decode_preempt_offline_requests;
-          waiting_priority_queue_offline_.push(request_to_preempt);
+          waiting_priority_queue_offline_->push(request_to_preempt);
         } else {
           ++num_online_decode_preempt_online_requests;
-          waiting_priority_queue_.push(request_to_preempt);
+          waiting_priority_queue_->push(request_to_preempt);
         }
 
       } else {
@@ -857,6 +865,10 @@ void PDOOCScheduler::dispatch_requests() {
           for (auto& bid : resps.resps()[i].blocks_ids()) {
             info.remote_blocks_ids.emplace_back(bid);
           }
+          if (resps.resps()[i].linear_state_id() >= 0) {
+            info.remote_linear_state_ids.emplace_back(
+                resps.resps()[i].linear_state_id());
+          }
           info.dp_rank = resps.resps()[i].dp_rank();
           // TODO: remote_instances_info_ is not multi-thread safe.
           info.remote_instance_info = remote_instances_info_[selected_instance];
@@ -955,10 +967,6 @@ void PDOOCScheduler::prefill_send_first_generation() {
         ADD_VECTOR_TO_PROTO(gen->mutable_cluster_ids(),
                             instance_info_.cluster_ids);
         ADD_VECTOR_TO_PROTO(gen->mutable_addrs(), instance_info_.addrs);
-        ADD_VECTOR_TO_PROTO(gen->mutable_k_cache_ids(),
-                            instance_info_.k_cache_ids);
-        ADD_VECTOR_TO_PROTO(gen->mutable_v_cache_ids(),
-                            instance_info_.v_cache_ids);
 
         const auto blocks = request->sequences()[0]->kv_state().kv_blocks();
         std::vector<uint64_t> block_ids;
@@ -967,6 +975,8 @@ void PDOOCScheduler::prefill_send_first_generation() {
           block_ids.push_back(block.id());
         }
         ADD_VECTOR_TO_PROTO(gen->mutable_block_ids(), block_ids);
+        gen->set_linear_state_id(
+            request->sequences()[0]->get_single_block_id());
         gen->set_dp_size(instance_info_.dp_size);
         gen->set_dp_rank(request->sequences()[0]->dp_rank());
       }
@@ -1043,9 +1053,8 @@ bool PDOOCScheduler::decode_recv_multi_generations(
     const std::string& kv_cache_transfer_mode,
     std::vector<uint64_t> src_cluster_ids,
     std::vector<std::string> src_addrs,
-    std::vector<int64_t> src_k_cache_ids,
-    std::vector<int64_t> src_v_cache_ids,
     std::vector<uint64_t> src_block_ids,
+    int32_t src_linear_state_id,
     int32_t src_dp_size,
     int32_t src_dp_rank) {
   // push to request_queue_, and will be executed by engine.
@@ -1101,17 +1110,25 @@ bool PDOOCScheduler::decode_recv_multi_generations(
     for (const auto& block : blocks) {
       dst_block_ids.push_back(block.id());
     }
+    std::vector<uint64_t> src_linear_state_ids;
+    std::vector<uint64_t> dst_linear_state_ids;
+    if (src_linear_state_id >= 0 &&
+        request->sequences()[0]->get_single_block_id() >= 0) {
+      src_linear_state_ids.emplace_back(src_linear_state_id);
+      dst_linear_state_ids.emplace_back(
+          request->sequences()[0]->get_single_block_id());
+    }
 
     int32_t dst_dp_rank = request->sequences()[0]->dp_rank();
     engine_->pull_kv_blocks(src_dp_size,
                             src_dp_rank,
                             src_cluster_ids,
                             src_addrs,
-                            src_k_cache_ids,
-                            src_v_cache_ids,
                             src_block_ids,
                             dst_dp_rank,
-                            dst_block_ids);
+                            dst_block_ids,
+                            src_linear_state_ids,
+                            dst_linear_state_ids);
   }
 
   request_queue_.write(request);
@@ -1259,6 +1276,10 @@ void PDOOCScheduler::dispatch_offline_requests() {
         for (auto& bid : resps.resps()[0].blocks_ids()) {
           info.remote_blocks_ids.emplace_back(bid);
         }
+        if (resps.resps()[0].linear_state_id() >= 0) {
+          info.remote_linear_state_ids.emplace_back(
+              resps.resps()[0].linear_state_id());
+        }
         info.dp_rank = resps.resps()[0].dp_rank();
         info.remote_instance_info = remote_instances_info_[target_instance];
         sequence->kv_state().set_transfer_kv_info(std::move(info));
@@ -1376,17 +1397,12 @@ void PDOOCScheduler::prefill_send_multi_generations() {
           // multi_req->mutable_addrs()->Add(addr);
           multi_req->add_addrs(addr);
         }
-        for (auto k_cache_id : instance_info_.k_cache_ids) {
-          multi_req->mutable_k_cache_ids()->Add(k_cache_id);
-        }
-        for (auto v_cache_id : instance_info_.v_cache_ids) {
-          multi_req->mutable_v_cache_ids()->Add(v_cache_id);
-        }
 
         const auto blocks = sequence->kv_state().kv_blocks();
         for (const auto& block : blocks) {
           multi_req->mutable_block_ids()->Add(block.id());
         }
+        multi_req->set_linear_state_id(sequence->get_single_block_id());
         multi_req->set_dp_size(instance_info_.dp_size);
         multi_req->set_dp_rank(sequence->dp_rank());
       }
@@ -1480,17 +1496,12 @@ void PDOOCScheduler::build_disagg_requests(
   }
 
   // Add cluster info
-  std::vector<std::string> device_ips;
-  std::vector<uint16_t> ports;
-  engine_->get_device_info(device_ips, ports);
   reqs.mutable_cluster_infos()->mutable_cluster_ids()->Add(
       instance_info_.cluster_ids.begin(), instance_info_.cluster_ids.end());
   reqs.mutable_cluster_infos()->mutable_addrs()->Add(
       instance_info_.addrs.begin(), instance_info_.addrs.end());
-  reqs.mutable_cluster_infos()->mutable_device_ips()->Add(device_ips.begin(),
-                                                          device_ips.end());
-  reqs.mutable_cluster_infos()->mutable_ports()->Add(ports.begin(),
-                                                     ports.end());
+  reqs.mutable_cluster_infos()->mutable_ports()->Add(
+      instance_info_.ports.begin(), instance_info_.ports.end());
   reqs.mutable_cluster_infos()->set_dp_size(options_.dp_size());
 }
 

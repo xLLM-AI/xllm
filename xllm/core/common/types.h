@@ -207,7 +207,7 @@ struct RecItemInfo {
   std::string type;
 };
 
-// Weight segment info for D2D transfer (supports non-contiguous allocation)
+// Weight segment info for P2P transfer (supports non-contiguous allocation)
 // Forward declaration needed by InstanceInfo
 struct WeightSegment {
   uint64_t offset;  // Offset from GlobalXTensor base address
@@ -224,11 +224,9 @@ struct InstanceInfo {
   // remote kv cache info
   std::vector<uint64_t> cluster_ids;
   std::vector<std::string> addrs;
-  std::vector<int64_t> k_cache_ids;
-  std::vector<int64_t> v_cache_ids;
   int32_t dp_size;
-  // device network info
-  std::vector<std::string> device_ips;
+  int32_t kv_split_size;
+  // transfer listen ports
   std::vector<uint16_t> ports;
   // ttft profiling data
   std::vector<std::pair<int32_t, double>> ttft_profiling_data;
@@ -265,10 +263,8 @@ struct InstanceInfo {
     }
     json_val["cluster_ids"] = cluster_ids;
     json_val["addrs"] = addrs;
-    json_val["k_cache_ids"] = k_cache_ids;
-    json_val["v_cache_ids"] = v_cache_ids;
     json_val["dp_size"] = dp_size;
-    json_val["device_ips"] = device_ips;
+    json_val["kv_split_size"] = kv_split_size;
     json_val["ports"] = ports;
     json_val["ttft_profiling_data"] = ttft_profiling_data;
     json_val["tpot_profiling_data"] = tpot_profiling_data;
@@ -301,11 +297,13 @@ struct TransferKVInfo {
   // hint. BatchInputBuilder overwrites it with the current step local blocks.
   std::vector<uint64_t> local_blocks_ids;
   std::vector<uint64_t> remote_blocks_ids;
+  std::vector<uint64_t> local_linear_state_ids;
+  std::vector<uint64_t> remote_linear_state_ids;
   int32_t dp_rank;
   InstanceInfo remote_instance_info;
 
   // XTensor mode: destination offsets from D-node (per-layer)
-  // Only populated when FLAGS_enable_xtensor is true
+  // Only populated when KVCacheConfig::enable_xtensor is true.
   std::vector<XTensorLayerOffsets> dst_xtensor_layer_offsets;
 };
 
@@ -364,7 +362,9 @@ class MasterStatus {
   };
 
   constexpr MasterStatus(Value v) : value_(v) {}
-  constexpr MasterStatus(const xllm::proto::MasterStatus& status) {
+
+  explicit MasterStatus(const xllm::proto::MasterStatus& status)
+      : value_(WAKEUP) {
     switch (status) {
       case xllm::proto::MasterStatus::WAKEUP:
         value_ = WAKEUP;
@@ -377,7 +377,6 @@ class MasterStatus {
         break;
       default:
         LOG(FATAL) << "Unsupported master status: " << status;
-        value_ = WAKEUP;  // unreachable, suppress warning
         break;
     }
   }
@@ -392,7 +391,7 @@ class MasterStatus {
   bool operator==(Value rhs) const { return value_ == rhs; }
   bool operator!=(Value rhs) const { return value_ != rhs; }
 
-  constexpr xllm::proto::MasterStatus to_proto() const {
+  xllm::proto::MasterStatus to_proto() const {
     switch (value_) {
       case WAKEUP:
         return xllm::proto::MasterStatus::WAKEUP;
@@ -426,4 +425,5 @@ inline constexpr const char* LLM_REC_INPUT_TOKENS = "llm_rec_input_tokens";
 inline constexpr const char* LLM_REC_INPUT_INDICES = "llm_rec_input_indices";
 inline constexpr const char* LLM_REC_INPUT_EMBEDDING =
     "llm_rec_input_embedding";
+
 }  // namespace xllm

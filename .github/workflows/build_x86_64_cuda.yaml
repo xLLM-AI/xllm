@@ -114,6 +114,9 @@ jobs:
       with:
         submodules: true
 
+    - name: Clean submodules
+      run: git submodule foreach --recursive git clean -ffdx
+
     - name: Build
       if: ${{ success() }}
       timeout-minutes: 60

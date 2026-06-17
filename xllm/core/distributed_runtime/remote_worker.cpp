@@ -28,6 +28,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/metrics.h"
+#include "core/framework/config/service_config.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
@@ -50,7 +51,8 @@ bool RemoteWorker::wait_for_server_ready(const std::string& server_address) {
   // Retry until server initialize ready
   int try_count = 0;
   const int sleep_time_second = 3;
-  while (try_count < FLAGS_max_reconnect_count) {
+  while (try_count <
+         ::xllm::ServiceConfig::get_instance().max_reconnect_count()) {
     if (channel_->hello()) {
       LOG(INFO) << "RemoteWorker Hello connected, server_address: "
                 << server_address << ", global_rank_: " << global_rank_;
@@ -62,7 +64,8 @@ bool RemoteWorker::wait_for_server_ready(const std::string& server_address) {
     try_count++;
   }
 
-  if (try_count >= FLAGS_max_reconnect_count) {
+  if (try_count >=
+      ::xllm::ServiceConfig::get_instance().max_reconnect_count()) {
     LOG(ERROR) << "RemoteWorker Hello method failed, global_rank_ is "
                << global_rank_;
     return false;
@@ -75,37 +78,30 @@ bool RemoteWorker::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   return channel_->allocate_kv_cache(kv_cache_shape);
 }
 
-void RemoteWorker::get_device_info(std::string& device_ip, uint16_t& port) {
-  channel_->get_device_info(device_ip, port);
-}
-
 void RemoteWorker::get_cache_info(uint64_t& cluster_id,
                                   std::string& addr,
-                                  int64_t& k_cache_id,
-                                  int64_t& v_cache_id) {
-  channel_->get_cache_info(cluster_id, addr, k_cache_id, v_cache_id);
+                                  uint16_t& port) {
+  channel_->get_cache_info(cluster_id, addr, port);
 }
 
 bool RemoteWorker::link_cluster(const std::vector<uint64_t>& cluster_ids,
                                 const std::vector<std::string>& addrs,
-                                const std::vector<std::string>& device_ips,
                                 const std::vector<uint16_t>& ports) {
-  return channel_->link_cluster(cluster_ids, addrs, device_ips, ports);
+  return channel_->link_cluster(cluster_ids, addrs, ports);
 }
 
 bool RemoteWorker::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                                   const std::vector<std::string>& addrs,
-                                  const std::vector<std::string>& device_ips,
                                   const std::vector<uint16_t>& ports) {
-  return channel_->unlink_cluster(cluster_ids, addrs, device_ips, ports);
+  return channel_->unlink_cluster(cluster_ids, addrs, ports);
 }
 
-bool RemoteWorker::link_d2d(const std::string& remote_addr) {
-  return channel_->link_d2d(remote_addr);
+bool RemoteWorker::link_p2p(const std::string& remote_addr) {
+  return channel_->link_p2p(remote_addr);
 }
 
-bool RemoteWorker::unlink_d2d(const std::string& remote_addr) {
-  return channel_->unlink_d2d(remote_addr);
+bool RemoteWorker::unlink_p2p(const std::string& remote_addr) {
+  return channel_->unlink_p2p(remote_addr);
 }
 
 bool RemoteWorker::init_model(const std::string& model_weights_path,
@@ -126,18 +122,19 @@ std::tuple<int64_t, int64_t> RemoteWorker::estimate_kv_cache_capacity() {
   return result;
 }
 
-bool RemoteWorker::pull_kv_blocks(const uint64_t src_cluster_id,
-                                  const std::string& src_addr,
-                                  const int64_t src_k_cache_id,
-                                  const int64_t src_v_cache_id,
-                                  const std::vector<uint64_t>& src_blocks,
-                                  const std::vector<uint64_t>& dst_blocks) {
+bool RemoteWorker::pull_kv_blocks(
+    const uint64_t src_cluster_id,
+    const std::string& src_addr,
+    const std::vector<uint64_t>& src_blocks,
+    const std::vector<uint64_t>& dst_blocks,
+    const std::vector<uint64_t>& src_linear_state_ids,
+    const std::vector<uint64_t>& dst_linear_state_ids) {
   return channel_->pull_kv_blocks(src_cluster_id,
                                   src_addr,
-                                  src_k_cache_id,
-                                  src_v_cache_id,
                                   src_blocks,
-                                  dst_blocks);
+                                  dst_blocks,
+                                  src_linear_state_ids,
+                                  dst_linear_state_ids);
 }
 
 ForwardInput RemoteWorker::prepare_inputs(Batch& batch) {
@@ -175,15 +172,14 @@ folly::SemiFuture<std::optional<ForwardOutput>> RemoteWorker::step_async(
   return folly::makeSemiFuture(std::optional<ForwardOutput>(std::nullopt));
 }
 
-folly::SemiFuture<std::optional<RawForwardOutput>> RemoteWorker::step_async(
-    const RawForwardInput& input) {
+folly::SemiFuture<std::optional<RawForwardOutput>>
+RemoteWorker::step_remote_async(const ForwardInput& input) {
   folly::Promise<std::optional<RawForwardOutput>> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule(
       [this, input = std::move(input), promise = std::move(promise)]() mutable {
         channel_->execute_model_async(input, promise);
       });
-
   return future;
 }
 
@@ -250,26 +246,26 @@ folly::SemiFuture<bool> RemoteWorker::allocate_kv_cache_with_transfer_async(
 folly::SemiFuture<bool> RemoteWorker::pull_kv_blocks_async(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
-    const int64_t src_k_cache_id,
-    const int64_t src_v_cache_id,
     const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks) {
+    const std::vector<uint64_t>& dst_blocks,
+    const std::vector<uint64_t>& src_linear_state_ids,
+    const std::vector<uint64_t>& dst_linear_state_ids) {
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this,
                         src_cluster_id,
                         src_addr,
-                        src_k_cache_id,
-                        src_v_cache_id,
-                        &src_blocks,
-                        &dst_blocks,
+                        src_blocks,
+                        dst_blocks,
+                        src_linear_state_ids,
+                        dst_linear_state_ids,
                         promise = std::move(promise)]() mutable {
     if (!channel_->pull_kv_blocks(src_cluster_id,
                                   src_addr,
-                                  src_k_cache_id,
-                                  src_v_cache_id,
                                   src_blocks,
-                                  dst_blocks)) {
+                                  dst_blocks,
+                                  src_linear_state_ids,
+                                  dst_linear_state_ids)) {
       LOG(ERROR) << "PullKVCache failed";
       promise.setValue(false);
     } else {
@@ -370,6 +366,34 @@ folly::SemiFuture<bool> RemoteWorker::wakeup_async(
   threadpool_.schedule([this, options, promise = std::move(promise)]() mutable {
     if (!channel_->wakeup(options)) {
       LOG(ERROR) << "Wakeup failed";
+      promise.setValue(false);
+    } else {
+      promise.setValue(true);
+    }
+  });
+  return future;
+}
+
+folly::SemiFuture<bool> RemoteWorker::start_profile_async() {
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([this, promise = std::move(promise)]() mutable {
+    if (!channel_->start_profile()) {
+      LOG(ERROR) << "StartProfile failed";
+      promise.setValue(false);
+    } else {
+      promise.setValue(true);
+    }
+  });
+  return future;
+}
+
+folly::SemiFuture<bool> RemoteWorker::stop_profile_async() {
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([this, promise = std::move(promise)]() mutable {
+    if (!channel_->stop_profile()) {
+      LOG(ERROR) << "StopProfile failed";
       promise.setValue(false);
     } else {
       promise.setValue(true);

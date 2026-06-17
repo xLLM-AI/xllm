@@ -24,7 +24,8 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/distributed_runtime/llm_master.h"
 #include "core/distributed_runtime/vlm_master.h"
-#include "core/framework/request/mm_data.h"
+#include "core/framework/config/model_config.h"
+#include "core/framework/multimodal/mm_data.h"
 #include "core/framework/request/request_output.h"
 #include "core/framework/request/request_params.h"
 #include "core/framework/request/sample_slot.h"
@@ -43,17 +44,22 @@ PYBIND11_MODULE(xllm_export, m) {
       .def_readwrite("draft_model_path", &Options::draft_model_path_)
       .def_readwrite("draft_devices", &Options::draft_devices_)
       .def_readwrite("backend", &Options::backend_)
+      .def_readwrite("limit_image_per_prompt",
+                     &Options::limit_image_per_prompt_)
       .def_readwrite("block_size", &Options::block_size_)
       .def_readwrite("max_cache_size", &Options::max_cache_size_)
       .def_readwrite("max_memory_utilization",
                      &Options::max_memory_utilization_)
       .def_readwrite("enable_prefix_cache", &Options::enable_prefix_cache_)
+      .def_readwrite("max_encoder_cache_size",
+                     &Options::max_encoder_cache_size_)
       .def_readwrite("max_tokens_per_batch", &Options::max_tokens_per_batch_)
       .def_readwrite("max_seqs_per_batch", &Options::max_seqs_per_batch_)
       .def_readwrite("max_tokens_per_chunk_for_prefill",
                      &Options::max_tokens_per_chunk_for_prefill_)
       .def_readwrite("num_speculative_tokens",
                      &Options::num_speculative_tokens_)
+      .def_readwrite("speculative_algorithm", &Options::speculative_algorithm_)
       .def_readwrite("num_request_handling_threads",
                      &Options::num_request_handling_threads_)
       .def_readwrite("communication_backend", &Options::communication_backend_)
@@ -77,12 +83,18 @@ PYBIND11_MODULE(xllm_export, m) {
       .def_readwrite("instance_role", &Options::instance_role_)
       .def_readwrite("kv_cache_transfer_mode",
                      &Options::kv_cache_transfer_mode_)
-      .def_readwrite("device_ip", &Options::device_ip_)
       .def_readwrite("transfer_listen_port", &Options::transfer_listen_port_)
       .def_readwrite("disable_ttft_profiling",
                      &Options::disable_ttft_profiling_)
       .def_readwrite("enable_forward_interruption",
                      &Options::enable_forward_interruption_)
+      .def_readwrite("enable_graph", &Options::enable_graph_)
+      .def_readwrite("enable_graph_mode_decode_no_padding",
+                     &Options::enable_graph_mode_decode_no_padding_)
+      .def_readwrite("enable_prefill_piecewise_graph",
+                     &Options::enable_prefill_piecewise_graph_)
+      .def_readwrite("max_tokens_for_graph_mode",
+                     &Options::max_tokens_for_graph_mode_)
       .def_readwrite("enable_offline_inference",
                      &Options::enable_offline_inference_)
       .def_readwrite("spawn_worker_path", &Options::spawn_worker_path_)
@@ -207,14 +219,18 @@ PYBIND11_MODULE(xllm_export, m) {
       .def_readwrite("num_prompt_tokens", &Usage::num_prompt_tokens)
       .def_readwrite("num_generated_tokens", &Usage::num_generated_tokens)
       .def_readwrite("num_total_tokens", &Usage::num_total_tokens)
+      .def_readwrite("num_cached_tokens", &Usage::num_cached_tokens)
       .def_property_readonly(
           "prompt_tokens",
           [](const Usage& self) { return self.num_prompt_tokens; })
       .def_property_readonly(
           "completion_tokens",
           [](const Usage& self) { return self.num_generated_tokens; })
-      .def_property_readonly("total_tokens", [](const Usage& self) {
-        return self.num_total_tokens;
+      .def_property_readonly(
+          "total_tokens",
+          [](const Usage& self) { return self.num_total_tokens; })
+      .def_property_readonly("cached_tokens", [](const Usage& self) {
+        return self.num_cached_tokens;
       });
   // 5. export RequestOutput
   py::class_<RequestOutput>(m, "RequestOutput")
@@ -352,6 +368,15 @@ PYBIND11_MODULE(xllm_export, m) {
   m.def("get_model_backend",
         &ModelRegistry::get_model_backend,
         py::arg("model_type"));
+  m.def(
+      "configure_cpp_chat_template",
+      [](bool use_cpp_chat_template, const std::string& model_type) {
+        ModelConfig::get_instance().use_cpp_chat_template(
+            use_cpp_chat_template);
+        ModelConfig::get_instance().normalize_cpp_chat_template(model_type);
+      },
+      py::arg("use_cpp_chat_template"),
+      py::arg("model_type"));
 }
 
 }  // namespace xllm

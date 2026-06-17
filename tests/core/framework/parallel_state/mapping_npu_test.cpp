@@ -18,7 +18,40 @@ limitations under the License.
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <optional>
+#include <string>
+
 namespace xllm {
+namespace {
+
+class ScopedEnvVar final {
+ public:
+  explicit ScopedEnvVar(const std::string& name) : name_(name) {
+    const char* old_value = std::getenv(name_.c_str());
+    if (old_value != nullptr) {
+      old_value_ = old_value;
+    }
+  }
+
+  ~ScopedEnvVar() {
+    if (old_value_.has_value()) {
+      setenv(name_.c_str(), old_value_.value().c_str(), 1);
+    } else {
+      unsetenv(name_.c_str());
+    }
+  }
+
+  void unset() { unsetenv(name_.c_str()); }
+
+  void set(const std::string& value) {
+    setenv(name_.c_str(), value.c_str(), 1);
+  }
+
+ private:
+  std::string name_;
+  std::optional<std::string> old_value_;
+};
 
 MappingNPU::Options get_mapping_options() {
   MappingNPU::Options options;
@@ -31,7 +64,12 @@ MappingNPU::Options get_mapping_options() {
   return options;
 }
 
+}  // namespace
+
 TEST(TestMappingNPU, ToJson) {
+  ScopedEnvVar hccl_buffsize("HCCL_BUFFSIZE");
+  hccl_buffsize.unset();
+
   std::string rank_table_file;
   MappingNPU::Options options = get_mapping_options();
   MappingNPU mapping(rank_table_file, 16, 6, options);
@@ -43,6 +81,19 @@ TEST(TestMappingNPU, ToJson) {
   nlohmann::json attn_tp = data["attnTp"];
   int32_t attn_tp_group_id = attn_tp["groupId"];
   EXPECT_EQ(attn_tp_group_id, 0);
+  nlohmann::json mlp_tp = data["mlpTp"];
+  int32_t mlp_tp_buffer_size = mlp_tp["bufferSize"];
+  EXPECT_EQ(mlp_tp_buffer_size, 512);
+}
+
+TEST(TestMappingNPU, ToJsonUsesHcclBuffsizeEnv) {
+  ScopedEnvVar hccl_buffsize("HCCL_BUFFSIZE");
+  hccl_buffsize.set("128");
+
+  std::string rank_table_file;
+  MappingNPU::Options options = get_mapping_options();
+  MappingNPU mapping(rank_table_file, 16, 6, options);
+  nlohmann::json data = mapping.to_json();
   nlohmann::json mlp_tp = data["mlpTp"];
   int32_t mlp_tp_buffer_size = mlp_tp["bufferSize"];
   EXPECT_EQ(mlp_tp_buffer_size, 128);

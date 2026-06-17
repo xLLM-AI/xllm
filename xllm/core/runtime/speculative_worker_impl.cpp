@@ -17,8 +17,8 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/metrics.h"
+#include "core/framework/config/speculative_config.h"
 #include "spec_input_builder.h"
-#include "util/env_var.h"
 #include "util/slice.h"
 #include "util/timer.h"
 #include "util/utils.h"
@@ -33,6 +33,30 @@ namespace {
                   : tensor_;                                                  \
   } while (0)
 
+torch::Tensor make_cpu_int_tensor(const std::vector<int32_t>& values) {
+  return torch::tensor(values,
+                       torch::TensorOptions()
+                           .dtype(torch::kInt)
+                           .device(torch::kCPU)
+                           .pinned_memory(true));
+}
+
+void set_token_position_tensors(ForwardInput& input,
+                                const std::vector<int32_t>& token_ids,
+                                const std::vector<int32_t>& positions,
+                                const torch::TensorOptions& token_options,
+                                const torch::TensorOptions& position_options) {
+  input.device_tensors_ready = false;
+  input.token_ids_host = make_cpu_int_tensor(token_ids);
+  input.positions_host = make_cpu_int_tensor(positions);
+  input.token_ids = safe_to(input.token_ids_host, token_options, true);
+  input.positions = safe_to(input.positions_host, position_options, true);
+}
+
+Slice<int32_t> tensor_slice(const torch::Tensor& tensor) {
+  return {tensor.data_ptr<int32_t>(), static_cast<size_t>(tensor.numel())};
+}
+
 }  // namespace
 
 SpeculativeWorkerImpl::SpeculativeWorkerImpl(
@@ -43,13 +67,6 @@ SpeculativeWorkerImpl::SpeculativeWorkerImpl(
     : WorkerImpl(parallel_args, device, options) {
   impl_ =
       std::make_unique<LLMWorkerImpl>(parallel_args, device, target_options);
-
-  std::optional<double> fixed_acceptance_rate =
-      util::get_fix_speculative_acceptance_rate();
-  if (fixed_acceptance_rate.has_value()) {
-    rate_controller_ = std::make_shared<RejectionSamplerRateController>(
-        *fixed_acceptance_rate);
-  }
 }
 
 bool SpeculativeWorkerImpl::init_model(const std::string& model_weights_path,
@@ -84,11 +101,12 @@ bool SpeculativeWorkerImpl::allocate_kv_cache_with_transfer(
 
 std::optional<ForwardOutput> SpeculativeWorkerImpl::step(
     const ForwardInput& input) {
-  if (input.token_ids.numel() == 0) {
+  if (input.input_params.meta.num_sequences == 0 ||
+      input.token_ids.numel() == 0) {
     return step_empty(input);
   }
 
-  if (!input.input_params.batch_forward_type.is_decode()) {
+  if (!input.input_params.meta.batch_forward_type.is_decode()) {
     return step_prefill(input);
   } else {
     return step_decode(input);
@@ -101,14 +119,10 @@ ForwardInput SpeculativeWorkerImpl::update_input_by_last_step_output(
   ForwardInput& new_inputs = inputs;
 
   auto& input_params = new_inputs.input_params;
-  const int32_t num_sequences = input_params.num_sequences;
+  const int32_t num_sequences = input_params.meta.num_sequences;
   const int32_t block_size = options_.block_size();
 
-  torch::Tensor token_ids = safe_to(inputs.token_ids, torch::kCPU);
-  torch::Tensor positions = safe_to(inputs.positions, torch::kCPU);
-  torch::Tensor block_tables = safe_to(input_params.block_tables, torch::kCPU);
-  auto view = specBuilder::make_decode_cpu_view(
-      token_ids, positions, block_tables, input_params.kv_seq_lens_vec);
+  Slice<int32_t> token_ids = tensor_slice(inputs.token_ids_host);
   torch::Tensor last_token_ids = safe_to(
       last_step_output_.sample_output.next_tokens.flatten(), torch::kCPU);
   Slice<int64_t> last_tokens_ids_slice = {
@@ -127,11 +141,13 @@ ForwardInput SpeculativeWorkerImpl::update_input_by_last_step_output(
   buf.out_positions.reserve(num_sequences);
   buf.out_kv_seq_lens.reserve(num_sequences);
   buf.out_new_cache_slots.reserve(num_sequences);
+  specBuilder::DecodeRowContext row_ctx =
+      specBuilder::make_decode_row_context(inputs);
 
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-    specBuilder::append_decode_row_from_last_step(view,
+    specBuilder::append_decode_row_from_last_step(row_ctx,
                                                   seq_id,
-                                                  view.token_ids[seq_id],
+                                                  token_ids[seq_id],
                                                   last_tokens_ids_slice,
                                                   last_step_decode_num,
                                                   block_size,
@@ -143,21 +159,20 @@ ForwardInput SpeculativeWorkerImpl::update_input_by_last_step_output(
   CHECK_EQ(buf.out_positions.size(), buf.out_token_ids.size())
       << "step-update positions/tokens mismatch";
 
-  // Create new tensors with updated values
-  torch::TensorOptions int_options = inputs.token_ids.options();
-  new_inputs.token_ids = torch::tensor(buf.out_token_ids, int_options);
-  new_inputs.positions = torch::tensor(buf.out_positions, int_options);
+  set_token_position_tensors(new_inputs,
+                             buf.out_token_ids,
+                             buf.out_positions,
+                             inputs.token_ids.options(),
+                             inputs.positions.options());
   // update the input_params
-  input_params.kv_max_seq_len = buf.kv_max_seq_len;
-  input_params.kv_seq_lens_vec = std::move(buf.out_kv_seq_lens);
-  input_params.kv_seq_lens =
-      torch::tensor(input_params.kv_seq_lens_vec, int_options);
-  input_params.q_cu_seq_lens =
-      specBuilder::build_q_cu_seq_lens_tensor(input_params);
-  input_params.new_cache_slots =
-      torch::tensor(buf.out_new_cache_slots, int_options);
+  input_params.meta.kv_max_seq_len = buf.meta.kv_max_seq_len;
+  input_params.attention.host.kv_seq_lens = std::move(buf.out_kv_seq_lens);
+  input_params.attention.host.new_cache_slots =
+      std::move(buf.out_new_cache_slots);
+  input_params.attention.rebuild_device_buffer(device_);
+  new_inputs.device_tensors_ready = true;
 
-  return new_inputs.to(device_, dtype_);
+  return new_inputs;
 }
 
 void SpeculativeWorkerImpl::update_sampling_params(
@@ -191,37 +206,42 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
     const ForwardInput& input,
     ForwardInput& validate_input) {
   validate_input = input.to(device_, dtype_);
+  validate_input.device_tensors_ready = false;
   auto& input_params = validate_input.input_params;
-  torch::TensorOptions int_options = validate_input.token_ids.options();
+  torch::TensorOptions token_options = validate_input.token_ids.options();
+  torch::TensorOptions position_options = validate_input.positions.options();
 
   const int32_t num_speculative_tokens = options_.num_speculative_tokens();
-  const int32_t num_sequences = input_params.num_sequences;
+  const int32_t num_sequences = input_params.meta.num_sequences;
   const int32_t num_val_tokens = num_speculative_tokens + 1;
   const int32_t total_num_val_tokens = num_sequences * num_val_tokens;
   const int32_t block_size = options_.block_size();
+  specBuilder::DecodeRowContext row_ctx =
+      specBuilder::make_decode_row_context(input);
 
-  torch::Tensor token_ids = safe_to(input.token_ids, torch::kCPU);
-  torch::Tensor positions = safe_to(input.positions, torch::kCPU);
-  torch::Tensor block_tables = safe_to(input_params.block_tables, torch::kCPU);
-  auto view = specBuilder::make_decode_cpu_view(
-      token_ids, positions, block_tables, input_params.kv_seq_lens_vec);
+  Slice<int32_t> token_ids = tensor_slice(input.token_ids_host);
+  Slice<int32_t> positions = tensor_slice(input.positions_host);
+  Slice<int32_t> kv_seq_lens = input.input_params.attention.host.kv_seq_lens;
   specBuilder::DecodeBuildBuffers buf;
   buf.out_token_ids.reserve(total_num_val_tokens);
   buf.out_positions.reserve(total_num_val_tokens);
   buf.out_new_cache_slots.reserve(total_num_val_tokens);
-  if (!FLAGS_enable_atb_spec_kernel) {
+  if (!::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
     buf.out_kv_seq_lens.reserve(total_num_val_tokens);
     buf.out_q_seq_lens.reserve(total_num_val_tokens);
-    buf.out_block_tables.reserve(total_num_val_tokens);
+    buf.out_q_cu_seq_lens.reserve(total_num_val_tokens);
+    buf.out_block_tables.reserve(static_cast<size_t>(total_num_val_tokens) *
+                                 row_ctx.block_table_stride);
   }
 
   std::vector<int32_t> atb_kv_seq_lens_vec = {};
   std::vector<int32_t> atb_q_seq_lens_vec = {};
+  std::vector<int32_t> atb_q_cu_seq_lens_vec = {};
   int32_t atb_kv_max_seq_len = 0;
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-    int32_t start_position = view.positions[seq_id];
+    int32_t start_position = positions[seq_id];
     int32_t kv_len =
-        specBuilder::calc_kv_len(view.kv_seq_lens, seq_id, /*offset=*/0);
+        specBuilder::calc_kv_len(kv_seq_lens, seq_id, /*offset=*/0);
     CHECK_EQ(start_position + 1, kv_len)
         << "validate position/kv_len mismatch, seq_id=" << seq_id
         << ", start_position=" << start_position << ", kv_len=" << kv_len;
@@ -230,22 +250,26 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
       specBuilder::RowSpec row;
       row.seq_id = seq_id;
       if (val_idx == 0) {
-        row.use_input_token = true;
+        row.token_id = token_ids[seq_id];
       } else {
         row.token_id = -val_idx;
       }
       row.position_offset = val_idx;
-      row.append_kv_len = !FLAGS_enable_atb_spec_kernel;
-      row.append_q_len_one = !FLAGS_enable_atb_spec_kernel;
-      row.append_block_table = !FLAGS_enable_atb_spec_kernel;
-      specBuilder::append_decode_row(view, row, block_size, buf);
+      row.append_kv_len =
+          !::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel();
+      row.append_q_len_one =
+          !::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel();
+      row.append_block_table =
+          !::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel();
+      specBuilder::append_decode_row(row_ctx, row, block_size, buf);
     }
 
-    if (FLAGS_enable_atb_spec_kernel) {
+    if (::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
       const int32_t kv_len_after_validation = kv_len + num_speculative_tokens;
       specBuilder::update_kv_seq_lens_and_max(
           atb_kv_seq_lens_vec, kv_len_after_validation, atb_kv_max_seq_len);
-      specBuilder::append_seq_len_by_layout(atb_q_seq_lens_vec, num_val_tokens);
+      specBuilder::append_q_seq_len(
+          atb_q_seq_lens_vec, atb_q_cu_seq_lens_vec, num_val_tokens);
     }
   }
 
@@ -254,60 +278,54 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
   CHECK_EQ(buf.out_positions.size(), buf.out_token_ids.size())
       << "validate positions/tokens mismatch";
 
-  validate_input.token_ids = torch::tensor(buf.out_token_ids, int_options);
-  validate_input.positions = torch::tensor(buf.out_positions, int_options);
+  set_token_position_tensors(validate_input,
+                             buf.out_token_ids,
+                             buf.out_positions,
+                             token_options,
+                             position_options);
   // update the input_params
-  if (!FLAGS_enable_atb_spec_kernel) {
-    input_params.num_sequences = total_num_val_tokens;
-    input_params.q_max_seq_len = 1;
-    input_params.batch_forward_type = BatchForwardType::DECODE;
+  if (!::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
+    input_params.meta.num_sequences = total_num_val_tokens;
+    input_params.meta.q_max_seq_len = 1;
+    input_params.meta.batch_forward_type = BatchForwardType::DECODE;
   } else {
-    input_params.q_max_seq_len = num_val_tokens;
-    input_params.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+    input_params.meta.q_max_seq_len = num_val_tokens;
+    input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
   }
-  if (FLAGS_enable_atb_spec_kernel) {
-    input_params.q_seq_lens_vec = std::move(atb_q_seq_lens_vec);
+  if (::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
+    specBuilder::update_input_params(input_params,
+                                     buf,
+                                     num_val_tokens,
+                                     std::move(atb_q_seq_lens_vec),
+                                     std::move(atb_q_cu_seq_lens_vec),
+                                     atb_kv_max_seq_len,
+                                     std::move(atb_kv_seq_lens_vec));
   } else {
-    input_params.q_seq_lens_vec = std::move(buf.out_q_seq_lens);
+    specBuilder::update_input_params(input_params,
+                                     buf,
+                                     1,
+                                     std::move(buf.out_q_seq_lens),
+                                     std::move(buf.out_q_cu_seq_lens),
+                                     buf.meta.kv_max_seq_len,
+                                     std::move(buf.out_kv_seq_lens),
+                                     /*update_block_tables=*/true);
   }
-  input_params.q_seq_lens =
-      torch::tensor(input_params.q_seq_lens_vec, int_options);
-  input_params.q_cu_seq_lens =
-      specBuilder::build_q_cu_seq_lens_tensor(input_params);
-  if (FLAGS_enable_atb_spec_kernel) {
-    input_params.kv_max_seq_len = atb_kv_max_seq_len;
-    input_params.kv_seq_lens_vec = std::move(atb_kv_seq_lens_vec);
-  } else {
-    input_params.kv_max_seq_len = buf.kv_max_seq_len;
-    input_params.kv_seq_lens_vec = std::move(buf.out_kv_seq_lens);
-  }
-  input_params.kv_seq_lens =
-      torch::tensor(input_params.kv_seq_lens_vec, int_options);
-  input_params.new_cache_slots =
-      torch::tensor(buf.out_new_cache_slots, int_options);
-  if (!FLAGS_enable_atb_spec_kernel) {
-    util::pad_2d_vector(buf.out_block_tables, /*pad_value=*/0);
-    input_params.block_tables =
-        create_2d_tensor(buf.out_block_tables, torch::kInt).to(device_);
-  }
+  input_params.attention.rebuild_device_buffer(device_);
 
   // update the sampling_params
   update_sampling_params(
       validate_input.sampling_params, num_val_tokens, total_num_val_tokens);
 
   // update dp_global_token_nums for dp/ep parallel
-  for (auto& it : input_params.dp_global_token_nums) {
+  for (auto& it : input_params.parallel.dp_global_token_nums) {
     it *= num_val_tokens;
   }
+  validate_input.device_tensors_ready = true;
 }
 
 void SpeculativeWorkerImpl::prepare_work_before_execute(
     const ForwardInput& input,
     ForwardInput& processed_input) {
   WorkerImpl::prepare_work_before_execute(input, processed_input);
-  if (input.input_params.batch_forward_type.is_decode()) {
-    processed_input.token_ids = safe_to(processed_input.token_ids, torch::kCPU);
-    processed_input.positions = safe_to(processed_input.positions, torch::kCPU);
-  }
 }
 }  // namespace xllm

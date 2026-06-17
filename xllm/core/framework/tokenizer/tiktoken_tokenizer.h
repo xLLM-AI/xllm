@@ -17,6 +17,7 @@ limitations under the License.
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 #include <re2/re2.h>
 
 #include <vector>
@@ -51,6 +52,8 @@ class TiktokenTokenizer : public Tokenizer {
 
  private:
   void load_special_tokens(const std::vector<SpecialToken>& special_tokens);
+  void load_visible_special_tokens(
+      const std::vector<std::string>& visible_special_tokens);
 
   void load_vocab(const std::string& vocab_file_path);
 
@@ -79,6 +82,9 @@ class TiktokenTokenizer : public Tokenizer {
 
   // special token ids to tokens
   absl::flat_hash_map<int32_t, std::string> special_token_decoder_;
+
+  // special tokens that should be preserved in decoded output
+  absl::flat_hash_set<int32_t> visible_special_token_ids_;
 
   // special token regex (optional)
   std::unique_ptr<re2::RE2> special_token_regex_;

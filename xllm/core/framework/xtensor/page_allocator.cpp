@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/distributed_runtime/master.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "xtensor_allocator.h"
 
 namespace xllm {
@@ -42,7 +43,8 @@ void PageAllocator::init(size_t num_phy_pages,
 
   dp_size_ = dp_size;
   max_world_size_ = max_world_size > 0 ? max_world_size : 1;
-  page_size_ = FLAGS_phy_page_granularity_size;
+  page_size_ =
+      ::xllm::KVCacheConfig::get_instance().phy_page_granularity_size();
   enable_page_prealloc_ = enable_page_prealloc;
 
   // Set total physical pages from parameter (same for all workers)

@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/metrics.h"
+#include "core/framework/config/service_config.h"
 
 namespace xllm {
 
@@ -32,8 +33,9 @@ bool RateLimiter::is_limited() {
   }
 
   // Check rate limit.
-  if (FLAGS_max_concurrent_requests > 0 &&
-      num_requests >= FLAGS_max_concurrent_requests) {
+  if (::xllm::ServiceConfig::get_instance().max_concurrent_requests() > 0 &&
+      num_requests >=
+          ::xllm::ServiceConfig::get_instance().max_concurrent_requests()) {
     COUNTER_INC(server_request_total_limit);
     return true;
   }

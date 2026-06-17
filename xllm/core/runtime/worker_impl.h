@@ -83,32 +83,27 @@ class WorkerImpl {
   virtual bool allocate_kv_cache_with_transfer(
       const KVCacheShape& kv_cache_shape);
 
-#if defined(USE_NPU)
+#if defined(USE_NPU) || defined(USE_MLU)
   virtual bool allocate_kv_cache_with_transfer(
       std::shared_ptr<KVCacheTransfer> kv_cache_transfer,
       const KVCacheShape& kv_cache_shape);
 #endif
 
-  virtual void get_device_info(std::string& device_ip, uint16_t& port);
-
   virtual void get_cache_info(uint64_t& cluster_id,
                               std::string& addr,
-                              int64_t& k_cache_id,
-                              int64_t& v_cache_id);
+                              uint16_t& port);
 
   virtual bool link_cluster(const std::vector<uint64_t>& cluster_ids,
                             const std::vector<std::string>& addrs,
-                            const std::vector<std::string>& device_ips,
                             const std::vector<uint16_t>& ports);
 
   virtual bool unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                               const std::vector<std::string>& addrs,
-                              const std::vector<std::string>& device_ips,
                               const std::vector<uint16_t>& ports);
 
-  // D2D link for weight transfer
-  virtual bool link_d2d(const std::string& remote_addr);
-  virtual bool unlink_d2d(const std::string& remote_addr);
+  // P2P link for weight transfer
+  virtual bool link_p2p(const std::string& remote_addr);
+  virtual bool unlink_p2p(const std::string& remote_addr);
 
   // prepare input for execution
   virtual ForwardInput prepare_inputs(Batch& batch);
@@ -116,6 +111,9 @@ class WorkerImpl {
   // prepare work before model execution
   virtual void prepare_work_before_execute(const ForwardInput& inputs,
                                            ForwardInput& processed_inputs);
+  void prepare_work_before_execute_on_stream(const ForwardInput& input,
+                                             ForwardInput& processed_input,
+                                             Stream& prepare_stream);
 
   // Internal helper shared by worker pipelines before model execution.
   virtual void apply_kv_block_swaps(const ModelInputParams& input_params);
@@ -146,13 +144,19 @@ class WorkerImpl {
 
   virtual bool wakeup(const WakeupOptions& options);
 
+  // Start/stop online timeline profiling on this worker's device. CUDA only
+  // for now; on other backends these are no-ops returning false.
+  virtual bool start_profile();
+
+  virtual bool stop_profile();
+
   virtual folly::SemiFuture<bool> pull_kv_blocks_async(
       uint64_t src_cluster_id,
       const std::string& src_addr,
-      int64_t src_k_cache_id,
-      int64_t src_v_cache_id,
       const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks);
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids = {},
+      const std::vector<uint64_t>& dst_linear_state_ids = {});
 
   virtual uint32_t transfer_kv_blocks(
       const uint64_t batch_id,
@@ -198,10 +202,18 @@ class WorkerImpl {
 
  protected:
   void update_last_step_output(const std::optional<ForwardOutput>& output);
+  virtual std::optional<ForwardOutput> step_for_schedule_overlap(
+      const ForwardInput& input);
+  virtual ForwardInput update_input_by_last_step_output_for_schedule_overlap(
+      ForwardInput& input);
   // Only used for deepseek chunked prefill ops on npu device
   void prepare_mla_prefixcache_inputs(ModelInputParams& input_params);
 
   void init_hierarchy_kv_cache_transfer();
+
+  bool allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
+                                 bool use_huge_page_allocator = false,
+                                 bool enable_raw_device_allocator = false);
 
   // Get the effective number of layers based on whether this is a spec draft
   // model
@@ -209,7 +221,7 @@ class WorkerImpl {
 
   bool wakeup_local(const WakeupOptions& options);
 
-#if defined(USE_CUDA)
+#if defined(USE_CUDA) || defined(USE_DCU)
   void refresh_cuda_block_copy_runtime_state();
   bool can_use_cuda_block_copy_kernel(
       const ModelInputParams& input_params) const;
@@ -234,6 +246,9 @@ class WorkerImpl {
   // runtime (manager + buffer): decoder preload, non-decoder reload, and
   // decoder ATB binding refresh.
   bool init_rolling_runtime_state();
+
+  torch::Tensor recompute_new_cache_slots(const ForwardInput& input);
+  torch::Tensor compute_in_prefix_slots(const ForwardInput& input);
 #endif
 
  protected:
@@ -248,7 +263,9 @@ class WorkerImpl {
   // make sure only 1 thread in the pool
   // if enable_schedule_overlap, two step tasks might be dispatched to
   // the task queue, step need to be executed one-by-one
-  ThreadPool threadpool_;
+  ThreadPool threadpool_{/*num_threads=*/1,
+                         /*cpu_binding=*/false,
+                         /*pool_name=*/"WorkerImpl.schedule"};
 
   // dtype of the model
   torch::ScalarType dtype_;
@@ -288,7 +305,7 @@ class WorkerImpl {
   std::unique_ptr<HierarchyKVCacheTransfer> hierarchy_kv_cache_transfer_;
   std::unique_ptr<WorkerRendezvous> worker_rendezvous_;
 
-#if defined(USE_CUDA)
+#if defined(USE_CUDA) || defined(USE_DCU)
   CudaBlockCopyRuntimeState cuda_block_copy_runtime_state_;
 #endif
 

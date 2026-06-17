@@ -48,8 +48,8 @@ class Options {
   // model backend
   PROPERTY(std::string, backend);
 
-  // max image num per prompt, default 4
-  PROPERTY(int32_t, limit_image_per_prompt) = 4;
+  // max image num per prompt, default 8
+  PROPERTY(int32_t, limit_image_per_prompt) = 8;
 
   // block size, default 128
   PROPERTY(int32_t, block_size) = 128;
@@ -62,6 +62,9 @@ class Options {
   PROPERTY(double, max_memory_utilization) = 0.9;
 
   PROPERTY(bool, enable_prefix_cache) = true;
+
+  // maximum encoder cache size in MB (0 disables encoder cache)
+  PROPERTY(int64_t, max_encoder_cache_size) = 0;
 
   // max tokens num per batch
   PROPERTY(int32_t, max_tokens_per_batch) = 20480;
@@ -146,8 +149,6 @@ class Options {
 
   PROPERTY(std::string, kv_cache_transfer_mode) = "PUSH";
 
-  PROPERTY(std::optional<std::string>, device_ip);
-
   PROPERTY(uint16_t, transfer_listen_port) = 26000;
 
   PROPERTY(std::optional<std::string>, etcd_addr);
@@ -204,6 +205,12 @@ class Options {
   PROPERTY(bool, enable_forward_interruption) = false;
   // enable CUDA graph/ACL graph for performance optimization
   PROPERTY(bool, enable_graph) = false;
+  // enable graph-mode decode without padding
+  PROPERTY(bool, enable_graph_mode_decode_no_padding) = false;
+  // enable piecewise graph for prefill
+  PROPERTY(bool, enable_prefill_piecewise_graph) = false;
+  // maximum number of tokens for graph execution
+  PROPERTY(int32_t, max_tokens_for_graph_mode) = 2048;
   // all requests use single global ttft
   PROPERTY(int32_t, max_global_ttft_ms) = std::numeric_limits<int32_t>::max();
   // all requests use single global tpot
@@ -237,7 +244,7 @@ class Options {
   PROPERTY(uint32_t, prefetch_timeout) = 0;
 
   // Prefetch from kvcache store copy batch size
-  PROPERTY(uint32_t, prefetch_bacth_size) = 2;
+  PROPERTY(uint32_t, prefetch_batch_size) = 2;
 
   // Layer wise H2D copy batchs
   PROPERTY(uint32_t, layers_wise_copy_batchs) = 4;

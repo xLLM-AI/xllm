@@ -20,7 +20,10 @@ limitations under the License.
 
 #include "block_manager_impl.h"
 #include "common/global_flags.h"
+#include "composite_block_manager.h"
 #include "concurrent_block_manager_impl.h"
+#include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/service_config.h"
 #include "framework/xtensor/page_allocator.h"
 #include "framework/xtensor/phy_page_pool.h"
 #include "framework/xtensor/xtensor_block_manager_impl.h"
@@ -40,16 +43,34 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_cache_upload(options_.host_num_blocks() > 0
                                ? false
-                               : options_.enable_cache_upload());
+                               : options_.enable_cache_upload())
+      .sliding_window_size(options_.sliding_window_size())
+      .swa_blocks_per_seq(options_.swa_blocks_per_seq())
+      .max_tokens_per_batch(options_.max_tokens_per_batch())
+      .manager_types(options_.manager_types())
+      .compress_ratios(options_.compress_ratios())
+      .max_seqs_per_batch(options_.max_seqs_per_batch())
+      .hasher_type(options_.hasher_type());
+
+  const uint32_t max_single_block_sequences =
+      options_.max_concurrent_requests() > 0
+          ? options_.max_concurrent_requests()
+          : static_cast<uint32_t>(std::max(
+                ::xllm::ServiceConfig::get_instance().max_concurrent_requests(),
+                0));
+  const uint32_t num_single_blocks = std::max<uint32_t>(
+      options_.num_single_blocks(), max_single_block_sequences + 2);
+  CHECK_GT(num_single_blocks, 0u) << "num_single_blocks must be positive";
 
   for (int32_t i = 0; i < dp_size; ++i) {
     if (options_.enable_xtensor()) {
-      // Use XTensorBlockManagerImpl for xtensor mode
+      // Use XTensorBlockManagerImpl for xtensor mode.
       CHECK_GT(options_.num_layers(), 0)
           << "num_layers must be set when enable_xtensor is true";
       CHECK_GT(options_.slot_size(), 0)
           << "slot_size must be set when enable_xtensor is true";
-      size_t page_size = FLAGS_phy_page_granularity_size;
+      size_t page_size =
+          ::xllm::KVCacheConfig::get_instance().phy_page_granularity_size();
       // In the current implementation, K and V must be the same size, so we
       // divide by 2.
       size_t block_mem_size =
@@ -61,7 +82,10 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
                                                     page_size,
                                                     /*dp_rank=*/i,
                                                     options_.model_id()));
-    } else if (options.enable_disagg_pd() || options_.enable_kvcache_store()) {
+    } else if (!options_.manager_types().empty()) {
+      block_managers_.emplace_back(
+          std::make_unique<CompositeBlockManager>(block_options));
+    } else if (options_.enable_disagg_pd() || options_.enable_kvcache_store()) {
       block_managers_.emplace_back(
           std::make_unique<ConcurrentBlockManagerImpl>(block_options));
     } else {
@@ -72,7 +96,7 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
     // pool. Worker-side embedding and linear-state caches remain physically
     // separate and are addressed via transport fields.
     single_block_managers_.emplace_back(std::make_unique<SingleBlockManager>(
-        /*num_blocks=*/FLAGS_max_seqs_per_batch + 2,
+        /*num_blocks=*/num_single_blocks,
         /*resource_name=*/"single block",
         /*exhaustion_message=*/"No more single-block ids available"));
   }
@@ -120,7 +144,13 @@ bool BlockManagerPool::allocate_single_block(Sequence* sequence,
 
   auto single_blocks = single_block_managers_[dp_rank]->allocate(1);
   if (single_blocks.empty()) {
-    LOG(ERROR) << "Failed to allocate single block!";
+    const auto* manager = single_block_managers_[dp_rank].get();
+    LOG(ERROR) << "Failed to allocate single block! dp_rank=" << dp_rank
+               << ", free=" << manager->num_free_blocks()
+               << ", used=" << manager->num_used_blocks()
+               << ", total=" << manager->num_total_blocks()
+               << ", max_seqs_per_batch=" << options_.max_seqs_per_batch()
+               << ", configured_single_blocks=" << options_.num_single_blocks();
     return false;
   }
   sequence->set_single_block(std::move(single_blocks[0]));
@@ -154,8 +184,17 @@ void BlockManagerPool::deallocate(std::vector<Sequence*>& sequences) {
 
 void BlockManagerPool::deallocate(Sequence* sequence) {
   DCHECK(sequence != nullptr);
-  // add blocks to the prefix cache
   int32_t dp_rank = get_dp_rank(sequence);
+
+  if (block_managers_[dp_rank]->is_composite()) {
+    // TODO: not supporte prefix cache for composite manager yet.
+    block_managers_[dp_rank]->deallocate_sequence(sequence);
+    deallocate_single_block(sequence, dp_rank);
+    sequence->reset();
+    return;
+  }
+
+  // add blocks to the prefix cache
   cache(sequence);
   block_managers_[dp_rank]->deallocate(sequence->kv_state().kv_blocks());
   deallocate_single_block(sequence, dp_rank);
@@ -192,6 +231,18 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
   const bool needs_single_block = !sequence->has_single_block_id();
   if (needs_single_block && !allocate_single_block(sequence, dp_rank)) {
     return false;
+  }
+
+  if (block_managers_[dp_rank]->is_composite()) {
+    // TODO: not supporte prefix cache for composite manager yet.
+    if (!block_managers_[dp_rank]->allocate_for_sequence(sequence,
+                                                         num_tokens)) {
+      if (needs_single_block) {
+        deallocate_single_block(sequence, dp_rank);
+      }
+      return false;
+    }
+    return true;
   }
 
   // first try to allocate shared blocks
@@ -253,6 +304,16 @@ bool BlockManagerPool::try_allocate(Sequence* sequence) {
   if (needs_single_block && !allocate_single_block(sequence, dp_rank)) {
     return false;
   }
+  if (block_managers_[dp_rank]->is_composite()) {
+    if (!block_managers_[dp_rank]->allocate_for_sequence(
+            sequence, sequence->num_tokens())) {
+      if (needs_single_block) {
+        deallocate_single_block(sequence, dp_rank);
+      }
+      return false;
+    }
+    return true;
+  }
 
   std::vector<Block> shared_blocks;
   size_t shared_num = 0;
@@ -262,7 +323,7 @@ bool BlockManagerPool::try_allocate(Sequence* sequence) {
     // If the sequence holds shared_blocks, the hash values of these blocks do
     // not need to be recalculated and can be reused directly.
     shared_blocks = block_managers_[dp_rank]->allocate_shared(
-        sequence->tokens(), existed_shared_blocks);
+        sequence->tokens(), existed_shared_blocks, sequence->mm_data());
 
     if (!shared_blocks.empty()) {
       sequence->add_kv_blocks(shared_blocks);
@@ -331,19 +392,23 @@ void BlockManagerPool::allocate_shared(Sequence* sequence) {
     // If the sequence holds shared_blocks, the hash values of these blocks do
     // not need to be recalculated and can be reused directly.
     std::vector<Block> shared_blocks =
-        block_managers_[dp_rank]->allocate_shared(sequence->tokens(),
-                                                  existed_shared_blocks);
+        block_managers_[dp_rank]->allocate_shared(
+            sequence->tokens(), existed_shared_blocks, sequence->mm_data());
     sequence->add_shared_kv_blocks(std::move(shared_blocks));
   }
 }
 
 void BlockManagerPool::cache(Sequence* sequence) {
   int32_t dp_rank = get_dp_rank(sequence);
+  if (block_managers_[dp_rank]->is_composite()) {
+    // Prefix cache is not supported for CompositeBlockManager yet.
+    return;
+  }
   const auto token_ids = sequence->cached_tokens();
   auto* blocks = sequence->kv_state().mutable_kv_blocks();
   auto existed_shared_blocks_num = sequence->kv_state().shared_kv_blocks_num();
   block_managers_[dp_rank]->cache(
-      token_ids, *blocks, existed_shared_blocks_num);
+      token_ids, *blocks, existed_shared_blocks_num, sequence->mm_data());
 }
 
 void BlockManagerPool::get_merged_kvcache_event(KvCacheEvent* event) const {
@@ -366,7 +431,15 @@ int32_t BlockManagerPool::block_size() const { return options_.block_size(); }
 
 std::vector<size_t> BlockManagerPool::num_blocks_in_prefix_cache() const {
   std::vector<size_t> num_blocks_in_prefix_cache(block_managers_.size());
+  if (!options_.enable_prefix_cache()) {
+    return num_blocks_in_prefix_cache;
+  }
   for (size_t dp_rank = 0; dp_rank < block_managers_.size(); ++dp_rank) {
+    if (block_managers_[dp_rank]->is_composite()) {
+      // CompositeBlockManager does not support prefix-cache stats yet.
+      num_blocks_in_prefix_cache[dp_rank] = 0;
+      continue;
+    }
     num_blocks_in_prefix_cache[dp_rank] =
         block_managers_[dp_rank]->num_blocks_in_prefix_cache();
   }
@@ -399,6 +472,9 @@ double BlockManagerPool::kv_cache_utilization() const {
 void BlockManagerPool::deallocate_without_cache(Sequence* sequence) {
   DCHECK(sequence != nullptr);
   int32_t dp_rank = get_dp_rank(sequence);
+  DCHECK(!block_managers_[dp_rank].get()->is_composite())
+      << "Composite manager does not support deallocate_without_cache yet.";
+
   block_managers_[dp_rank]->deallocate(sequence->kv_state().kv_blocks());
   deallocate_single_block(sequence, dp_rank);
   sequence->reset();

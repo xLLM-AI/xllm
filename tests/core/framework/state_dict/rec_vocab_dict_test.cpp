@@ -23,7 +23,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "common/global_flags.h"
+#include "core/framework/config/rec_config.h"
 
 namespace xllm {
 namespace {
@@ -31,12 +31,12 @@ namespace {
 class ScopedConstrainedDecodingFlag final {
  public:
   explicit ScopedConstrainedDecodingFlag(bool value)
-      : old_value_(FLAGS_enable_constrained_decoding) {
-    FLAGS_enable_constrained_decoding = value;
+      : old_value_(RecConfig::get_instance().enable_constrained_decoding()) {
+    RecConfig::get_instance().enable_constrained_decoding(value);
   }
 
   ~ScopedConstrainedDecodingFlag() {
-    FLAGS_enable_constrained_decoding = old_value_;
+    RecConfig::get_instance().enable_constrained_decoding(old_value_);
   }
 
  private:

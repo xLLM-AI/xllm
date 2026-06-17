@@ -62,15 +62,12 @@ torch::Tensor Qwen2_5_VisionLayerImpl::forward(
     torch::Tensor& m_sin_pos,
     torch::Tensor& cu_seq_len,
     std::vector<int32_t>& cu_seq_len_vec,
-    ModelInputParams& input_params,
-    int node_id) {
+    int32_t node_id) {
   auto norm_output1 = std::get<0>(norm1_(hidden_states));
-  auto output = hidden_states + attention_(norm_output1,
-                                           m_cos_pos,
-                                           m_sin_pos,
-                                           cu_seq_len,
-                                           cu_seq_len_vec,
-                                           input_params);
+  auto output =
+      hidden_states +
+      attention_(
+          norm_output1, m_cos_pos, m_sin_pos, cu_seq_len, cu_seq_len_vec);
   auto norm_output2 = std::get<0>(norm2_(output));
   output = output + mlp_(norm_output2);
   return output;

@@ -63,7 +63,6 @@ static void BM_HashSearch(benchmark::State& state) {
   std::vector<Block> token_blocks = block_manager.allocate(n_blocks);
   Slice<int32_t> slice_token_ids(token_ids);
   Slice<int32_t> match_token_ids(token_ids);
-
   prefix_cache.insert(slice_token_ids, token_blocks);
   state.ResumeTiming();
 

@@ -41,12 +41,9 @@ void PDOOCServiceImpl::decode_recv_multi_generations(
                                       multi_gen.cluster_ids().end());
     std::vector<std::string> addrs(multi_gen.addrs().begin(),
                                    multi_gen.addrs().end());
-    std::vector<int64_t> k_cache_ids(multi_gen.k_cache_ids().begin(),
-                                     multi_gen.k_cache_ids().end());
-    std::vector<int64_t> v_cache_ids(multi_gen.v_cache_ids().begin(),
-                                     multi_gen.v_cache_ids().end());
     std::vector<uint64_t> block_ids(multi_gen.block_ids().begin(),
                                     multi_gen.block_ids().end());
+    int32_t linear_state_id = multi_gen.linear_state_id();
 
     bool success = pd_ooc_scheduler_->decode_recv_multi_generations(
         multi_gen.req_id(),
@@ -54,9 +51,8 @@ void PDOOCServiceImpl::decode_recv_multi_generations(
         multi_gen.kv_cache_transfer_mode(),
         std::move(cluster_ids),
         std::move(addrs),
-        std::move(k_cache_ids),
-        std::move(v_cache_ids),
         std::move(block_ids),
+        linear_state_id,
         multi_gen.dp_size(),
         multi_gen.dp_rank());
 

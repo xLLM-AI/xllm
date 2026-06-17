@@ -57,8 +57,9 @@ class VlmChatJsonParser final : public ChatJsonParser {
 };
 
 // Anthropic Messages API: remaps "content" (string|array) to
-// "content_string"/"content_blocks" and "system" (string|array) to
-// "system_string"/"system_blocks" for protobuf compatibility.
+// "content_string"/"content_blocks", tool_result fields to protobuf names,
+// and "system" (string|array) to "system_string"/"system_blocks" for
+// protobuf compatibility.
 class AnthropicChatJsonParser final : public ChatJsonParser {
  public:
   std::pair<Status, std::string> preprocess(

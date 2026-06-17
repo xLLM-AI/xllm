@@ -142,6 +142,9 @@ typedef struct XLLM_CAPI_EXPORT XLLM_InitOptions {
   /** Maximum REC worker pipeline concurrency */
   uint32_t rec_worker_max_concurrency;
 
+  /** FlashInfer attention workspace buffer size in bytes. */
+  uint32_t flashinfer_workspace_buffer_size;
+
   /** Model task type (generate/embed) */
   char task[XLLM_META_STRING_FIELD_MAX_LEN];
 
@@ -150,9 +153,6 @@ typedef struct XLLM_CAPI_EXPORT XLLM_InitOptions {
 
   /** Instance role (DEFAULT/PREFILL/DECODE/MIX) */
   char instance_role[XLLM_META_STRING_FIELD_MAX_LEN];
-
-  /** Device IP address for NPU communication */
-  char device_ip[XLLM_META_STRING_FIELD_MAX_LEN];
 
   /** Master address for multi-node distributed serving (e.g. 10.18.1.1:9999) */
   char master_node_addr[XLLM_META_STRING_FIELD_MAX_LEN];
@@ -177,6 +177,14 @@ typedef struct XLLM_CAPI_EXPORT XLLM_InitOptions {
    * Empty string = use the same devices as main model
    */
   char draft_devices[XLLM_META_STRING_FIELD_MAX_LEN];
+
+  // CPU affinity settings, format be like:
+  // 1,2,3
+  // meaing ith thread attach to logical processor 1,2,3
+  // or
+  // 1-8
+  // meaning ith thread will be attached to first 8 logical processors
+  char cpu_affinity[XLLM_META_STRING_FIELD_MAX_LEN];
 } XLLM_InitLLMOptions;
 
 /**
@@ -291,6 +299,9 @@ typedef struct XLLM_CAPI_EXPORT XLLM_Usage {
 
   /** Total tokens used (prompt + completion) */
   int32_t total_tokens;
+
+  /** Number of prompt tokens served from prefix cache */
+  int32_t cached_tokens;
 } XLLM_Usage;
 
 /**

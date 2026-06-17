@@ -13,8 +13,9 @@
 
 namespace xllm {
 
-PrefixCacheWithUpload::PrefixCacheWithUpload(uint32_t block_size)
-    : PrefixCache(block_size) {
+PrefixCacheWithUpload::PrefixCacheWithUpload(uint32_t block_size,
+                                             BlockHasherType hasher_type)
+    : PrefixCache(block_size, hasher_type) {
   db_kvcache_events_.set_front_value(new KvCacheEvent());
   db_kvcache_events_.set_back_value(new KvCacheEvent());
 }
@@ -33,10 +34,11 @@ PrefixCacheWithUpload::~PrefixCacheWithUpload() {
 
 size_t PrefixCacheWithUpload::insert(const Slice<int32_t>& token_ids,
                                      std::vector<Block>& blocks,
-                                     size_t existed_shared_blocks_num) {
+                                     size_t existed_shared_blocks_num,
+                                     const MMData& mm_data) {
   std::vector<XXH3Key> insert_keys;
   auto n_tokens = PrefixCache::insert(
-      token_ids, blocks, existed_shared_blocks_num, &insert_keys);
+      token_ids, blocks, existed_shared_blocks_num, mm_data, &insert_keys);
   save_event_async(true, insert_keys);
   return n_tokens;
 }

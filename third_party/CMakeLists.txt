@@ -30,6 +30,11 @@ target_include_directories(mooncake_store PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/Mooncake/mooncake-transfer-engine/include
 )
 
+find_package(yalantinglibs CONFIG REQUIRED)
+if(TARGET ascend_transport)
+  target_link_libraries(ascend_transport PUBLIC yalantinglibs::yalantinglibs)
+endif()
+
 if(USE_ILU)
   if(TARGET cpprest)
       set_target_properties(cpprest PROPERTIES

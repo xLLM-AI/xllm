@@ -6,6 +6,7 @@ option(USE_MLU "Enable MLU support" OFF)
 option(USE_ILU "Enable ILU support" OFF)
 option(USE_CUDA "Enable CUDA support" OFF)
 option(USE_MUSA "Enable MUSA support" OFF)
+option(USE_DCU "Enable DCU support" OFF)
 add_compile_definitions(YLT_ENABLE_IBV)
 add_definitions(-DYLT_ENABLE_IBV)
 set(YLT_ENABLE_IBV ON)
@@ -26,22 +27,41 @@ if(USE_NPU)
     OUTPUT_STRIP_TRAILING_WHITESPACE
     ERROR_QUIET
   )
-  if(DEFINED ENV{ASCEND_HOME_PATH} AND NOT "$ENV{ASCEND_HOME_PATH}" STREQUAL "")
-    set(XLLM_OPS_MARKER_PATH "$ENV{ASCEND_HOME_PATH}/opp/vendors/xllm/.xllm_ops_git_head")
+
+  if(DEFINED ENV{ASCEND_OPP_PATH} AND NOT "$ENV{ASCEND_OPP_PATH}" STREQUAL "")
+    set(XLLM_OPS_MARKER_PATH "$ENV{ASCEND_OPP_PATH}/vendors/xllm/.xllm_ops_git_head")
   else()
-    set(XLLM_OPS_MARKER_PATH "/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/xllm/.xllm_ops_git_head")
+    message(FATAL_ERROR "ASCEND_OPP_PATH is not initialized for NPU build.")
+  endif()
+
+  if(DEFINED ENV{XLLM_OPS_GIT_HEAD_CACHED})
+    set(XLLM_OPS_GIT_HEAD_CACHED "$ENV{XLLM_OPS_GIT_HEAD_CACHED}")
+  endif()
+
+  if(DEFINED ENV{XLLM_OPS_BUILD_DIR})
+    get_filename_component(XLLM_OPS_BUILD_DIR "$ENV{XLLM_OPS_BUILD_DIR}" ABSOLUTE)
+  else()
+    set(XLLM_OPS_BUILD_DIR "${CMAKE_SOURCE_DIR}/third_party/xllm_ops/build")
   endif()
 
   if(NOT DEFINED XLLM_OPS_GIT_HEAD_CACHED OR NOT XLLM_OPS_GIT_HEAD STREQUAL XLLM_OPS_GIT_HEAD_CACHED)
     message(STATUS "xllm_ops git HEAD changed; running precompile via execute_process")
     execute_process(
-      COMMAND bash ${CMAKE_SOURCE_DIR}/third_party/xllm_ops/build.sh
+      COMMAND ${CMAKE_COMMAND} -E env "XLLM_OPS_BUILD_DIR=${XLLM_OPS_BUILD_DIR}"
+              bash ${CMAKE_SOURCE_DIR}/third_party/xllm_ops/build.sh
       WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/third_party/xllm_ops
       RESULT_VARIABLE XLLM_OPS_RESULT
     )
     if(NOT XLLM_OPS_RESULT EQUAL 0)
       message(FATAL_ERROR "Failed to precompile xllm ops, error code: ${XLLM_OPS_RESULT}")
     endif()
+
+    ## Adapt to the modification in DeekSeekV4 where the installation path of xllm_ops has been changed to custom_xllm_math
+    if(EXISTS "$ENV{NPU_HOME_PATH}/opp/vendors/custom_xllm_math/op_api/include/aclnnop")
+      set(XLLM_OPS_MARKER_PATH "$ENV{ASCEND_OPP_PATH}/vendors/custom_xllm_math/.xllm_ops_git_head")
+    endif()
+    message(STATUS "XLLM_OPS_MARKER_PATH: ${XLLM_OPS_MARKER_PATH}")
+
     set(XLLM_OPS_GIT_HEAD_CACHED "${XLLM_OPS_GIT_HEAD}" CACHE INTERNAL "" FORCE)
     get_filename_component(XLLM_OPS_MARKER_DIR "${XLLM_OPS_MARKER_PATH}" DIRECTORY)
     file(MAKE_DIRECTORY "${XLLM_OPS_MARKER_DIR}")
@@ -105,6 +125,21 @@ function(parse_make_options options prefix)
   endforeach()
 endfunction()
 
+# Remove matching entries from a target's interface property (compile options / definitions).
+function(_dcu_patch_target target prop)
+  get_target_property(_vals ${target} ${prop})
+  if(NOT _vals)
+    return()
+  endif()
+  set(_new ${_vals})
+  foreach(_rx IN LISTS ARGN)
+    list(FILTER _new EXCLUDE REGEX "${_rx}")
+  endforeach()
+  if(NOT "${_new}" STREQUAL "${_vals}")
+    set_property(TARGET ${target} PROPERTY ${prop} ${_new})
+  endif()
+endfunction()
+
 # Set default build type
 if(NOT CMAKE_BUILD_TYPE)
   message(STATUS "Build type not set - defaulting to Release")
@@ -122,6 +157,7 @@ else()
   set(USE_CXX11_ABI 0)
   message(STATUS "Using the pre C++-11 ABI.")
 endif()
+
 
 if(USE_CCACHE)
   find_program(CCACHE_PROGRAM ccache)
@@ -204,6 +240,15 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/cmake)
 if(USE_CUDA)
   project("xllm" LANGUAGES C CXX CUDA)
   find_package(CUDAToolkit REQUIRED)
+elseif(USE_DCU)
+  project("xllm" LANGUAGES C CXX HIP)
+  if(DEFINED ENV{DCU_PATH} AND NOT "$ENV{DCU_PATH}" STREQUAL "")
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{DCU_PATH}")
+    set(DCU_ROOT "$ENV{DCU_PATH}")
+  else()
+    list(APPEND CMAKE_PREFIX_PATH "/opt/dtk")
+    set(DCU_ROOT "/opt/dtk")
+  endif()
 elseif(USE_MUSA)
   project("xllm" LANGUAGES C CXX MUSA)
   add_compile_options(
@@ -270,6 +315,7 @@ find_package(GTest CONFIG REQUIRED)
 find_package(benchmark CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(OpenCV CONFIG REQUIRED)
+find_package(FFMPEG REQUIRED)
 find_package(Python COMPONENTS Development REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
 
@@ -284,7 +330,31 @@ endif()
 # Important Note: Always invoke find_package for other dependencies
 # before including libtorch, as doing so afterwards may lead to
 # unexpected linker errors.
-if (DEFINED ENV{LIBTORCH_ROOT})
+if(USE_DCU)
+  if(NOT DEFINED TORCH_CMAKE_PREFIX OR "${TORCH_CMAKE_PREFIX}" STREQUAL "")
+    message(FATAL_ERROR "TORCH_CMAKE_PREFIX is required for DCU build.")
+  endif()
+  list(PREPEND CMAKE_PREFIX_PATH "${TORCH_CMAKE_PREFIX}")
+
+  if(NOT DEFINED TORCH_PKG_DIR OR "${TORCH_PKG_DIR}" STREQUAL "")
+    message(FATAL_ERROR "TORCH_PKG_DIR is required for DCU build.")
+  endif()
+
+  set(TORCH_LIB_DIR "${TORCH_PKG_DIR}/lib")
+  get_filename_component(_TORCH_PARENT "${TORCH_PKG_DIR}" DIRECTORY)
+  set(TORCH_BUNDLED_LIB_DIR "${_TORCH_PARENT}/torch.libs")
+
+  set(_TORCH_EXTRA_DIRS "")
+  if(EXISTS "${TORCH_LIB_DIR}")
+    list(APPEND _TORCH_EXTRA_DIRS "${TORCH_LIB_DIR}")
+  endif()
+  if(EXISTS "${TORCH_BUNDLED_LIB_DIR}")
+    list(APPEND _TORCH_EXTRA_DIRS "${TORCH_BUNDLED_LIB_DIR}")
+  endif()
+
+  find_package(Torch REQUIRED)
+  message(STATUS "Using ROCm PyTorch from: ${TORCH_CMAKE_PREFIX}")
+elseif (DEFINED ENV{LIBTORCH_ROOT})
   find_package(Torch REQUIRED HINTS "$ENV{LIBTORCH_ROOT}")
   message(STATUS "Using libtorch at $ENV{LIBTORCH_ROOT}")
 else()
@@ -301,14 +371,26 @@ else()
     set(LIBTORCH_SOURCE_DIR ${FETCHCONTENT_BASE_DIR}/libtorch-src)
   endif()
 
-  FetchContent_Declare(libtorch 
-    URL ${LIBTORCH_URL} 
+  FetchContent_Declare(libtorch
+    URL ${LIBTORCH_URL}
     SOURCE_DIR ${LIBTORCH_SOURCE_DIR}
   )
   FetchContent_MakeAvailable(libtorch)
-  
+
   find_package(Torch REQUIRED PATHS ${LIBTORCH_SOURCE_DIR} NO_DEFAULT_PATH)
   message(STATUS "Downloading and using libtorch 2.1.0 for CPU at ${LIBTORCH_SOURCE_DIR}")
+endif()
+
+if(USE_DCU AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  # Patch imported targets: remove flags that break __half/__half2 arithmetic in HIP.
+  get_property(_imported_targets DIRECTORY PROPERTY IMPORTED_TARGETS)
+  foreach(_t IN LISTS _imported_targets)
+    _dcu_patch_target(${_t} INTERFACE_COMPILE_OPTIONS
+        "^-Wno-duplicate-decl-specifier$"
+        "^-std=c\\+\\+17$"
+        "^-D__HIP_NO_HALF_(OPERATORS|CONVERSIONS)__"
+    )
+  endforeach()
 endif()
 
 if(USE_NPU)
@@ -339,9 +421,21 @@ if(USE_NPU)
       $ENV{PYTORCH_INSTALL_PATH}/include/torch/csrc/distributed
       $ENV{NPU_HOME_PATH}/include
       $ENV{ATB_HOME_PATH}/include
-      $ENV{NPU_HOME_PATH}/opp/vendors/xllm/op_api/include/
       ${CMAKE_CURRENT_SOURCE_DIR}/third_party/torch_npu_ops/
   )
+  ## Adapt to the modification in DeekSeekV4 where the installation path of xllm_ops has been changed to custom_xllm_math
+  if(EXISTS "$ENV{NPU_HOME_PATH}/opp/vendors/xllm/op_api/include")
+    include_directories(SYSTEM
+      $ENV{NPU_HOME_PATH}/opp/vendors/xllm/op_api/include/
+    )
+  endif()
+
+  if(EXISTS "$ENV{NPU_HOME_PATH}/opp/vendors/custom_xllm_math/op_api/include/aclnnop")
+    include_directories(SYSTEM
+        $ENV{NPU_HOME_PATH}/opp/vendors/custom_xllm_math/op_api/include/aclnnop
+    )
+  endif()
+
   # Keep third-party warnings suppressed while providing headers expected by
   # legacy includes like "atb_speed/log.h" from xllm_atb_layers.
   include_directories(SYSTEM
@@ -355,8 +449,14 @@ if(USE_NPU)
       $ENV{NPU_HOME_PATH}/lib64
       $ENV{ATB_HOME_PATH}/lib
       $ENV{NPU_TOOLKIT_HOME}/lib64
-      $ENV{NPU_HOME_PATH}/opp/vendors/xllm/op_api/lib/
   )
+  ## Adapt to the modification in DeekSeekV4 where the installation path of xllm_ops has been changed to custom_xllm_math
+  if(EXISTS "$ENV{NPU_HOME_PATH}/opp/vendors/custom_xllm_math/op_api/lib")
+    link_directories(
+        $ENV{NPU_HOME_PATH}/opp/vendors/custom_xllm_math/op_api/lib/
+    )
+  endif()
+
   link_libraries(cust_opapi)
   # avoid conflicts with xllm libruntime.a
   find_library(
@@ -528,6 +628,38 @@ if(USE_ILU)
   )
 endif()
 
+if(USE_DCU)
+  add_definitions(-DUSE_DCU)
+  set(CMAKE_VERBOSE_MAKEFILE ON)
+
+  include_directories($ENV{PYTHON_INCLUDE_PATH})
+  include_directories( SYSTEM
+      $ENV{PYTORCH_INSTALL_PATH}/include
+      $ENV{PYTORCH_INSTALL_PATH}/include/torch/csrc/api/include
+  )
+
+  link_directories(
+    $ENV{PYTHON_LIB_PATH}
+    $ENV{PYTORCH_INSTALL_PATH}/lib
+    ${DCU_ROOT}/lib
+    ${DCU_ROOT}/lib64
+    ${TORCH_LIB_DIR}
+    ${TORCH_BUNDLED_LIB_DIR}
+  )
+
+  foreach(_dir IN LISTS _TORCH_EXTRA_DIRS)
+    add_link_options("-Wl,-rpath-link,${_dir}")
+  endforeach()
+
+  list(APPEND CMAKE_BUILD_RPATH ${_TORCH_EXTRA_DIRS})
+  list(APPEND CMAKE_INSTALL_RPATH ${_TORCH_EXTRA_DIRS})
+
+  # Recommended to set explicitly for known target DCUs, e.g. gfx936 / gfx938
+  if(DEFINED ENV{PYTORCH_ROCM_ARCH} AND NOT "$ENV{PYTORCH_ROCM_ARCH}" STREQUAL "")
+    set(CMAKE_HIP_ARCHITECTURES "$ENV{PYTORCH_ROCM_ARCH}" CACHE STRING "dcu arch list")
+  endif()
+endif()
+
 # check if USE_CXX11_ABI is set correctly
 # if (DEFINED USE_CXX11_ABI)
 #   parse_make_options(${TORCH_CXX_FLAGS} "TORCH_CXX_FLAGS")
@@ -541,7 +673,13 @@ endif()
 
 # carry over torch flags to the rest of the project
 message(STATUS "TORCH_CXX_FLAGS: ${TORCH_CXX_FLAGS}")
-add_compile_options(${TORCH_CXX_FLAGS})
+if(USE_DCU)
+  set(_filtered_flags ${TORCH_CXX_FLAGS})
+  list(FILTER _filtered_flags EXCLUDE REGEX "^-D__HIP_NO_HALF_(OPERATORS|CONVERSIONS)__")
+  add_compile_options(${_filtered_flags})
+else()
+  add_compile_options(${TORCH_CXX_FLAGS})
+endif()
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DC10_USE_GLOG")
 
@@ -596,9 +734,11 @@ endif()
 
 # add subdirectories
 # Configure third_party first so xllm can link against real CMake targets.
+# add subdirectories
+# Configure third_party first so xllm can link against real CMake targets.
+
 add_subdirectory(third_party)
 if(TARGET brpc-static AND NOT TARGET brpc)
-  # Expose a canonical target name used across xllm/CMakeLists.
   add_library(brpc ALIAS brpc-static)
 endif()
 add_subdirectory(xllm)

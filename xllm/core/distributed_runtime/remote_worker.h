@@ -55,33 +55,29 @@ class RemoteWorker : public WorkerClient {
 
   virtual bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;
 
-  virtual void get_device_info(std::string& device_ip, uint16_t& port);
-
   virtual void get_cache_info(uint64_t& cluster_id,
                               std::string& addr,
-                              int64_t& k_cache_id,
-                              int64_t& v_cache_id);
+                              uint16_t& port) override;
 
   virtual bool link_cluster(const std::vector<uint64_t>& cluster_ids,
                             const std::vector<std::string>& addrs,
-                            const std::vector<std::string>& device_ips,
-                            const std::vector<uint16_t>& ports);
+                            const std::vector<uint16_t>& ports) override;
 
   virtual bool unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                               const std::vector<std::string>& addrs,
-                              const std::vector<std::string>& device_ips,
-                              const std::vector<uint16_t>& ports);
+                              const std::vector<uint16_t>& ports) override;
 
-  // D2D link for weight transfer
-  virtual bool link_d2d(const std::string& remote_addr) override;
-  virtual bool unlink_d2d(const std::string& remote_addr) override;
+  // P2P link for weight transfer
+  virtual bool link_p2p(const std::string& remote_addr) override;
+  virtual bool unlink_p2p(const std::string& remote_addr) override;
 
-  virtual bool pull_kv_blocks(const uint64_t src_cluster_id,
-                              const std::string& src_addr,
-                              const int64_t src_k_cache_id,
-                              const int64_t src_v_cache_id,
-                              const std::vector<uint64_t>& src_blocks,
-                              const std::vector<uint64_t>& dst_blocks);
+  virtual bool pull_kv_blocks(
+      const uint64_t src_cluster_id,
+      const std::string& src_addr,
+      const std::vector<uint64_t>& src_blocks,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids = {},
+      const std::vector<uint64_t>& dst_linear_state_ids = {}) override;
 
   // prepare input request
   virtual ForwardInput prepare_inputs(Batch& batch) override;
@@ -106,10 +102,10 @@ class RemoteWorker : public WorkerClient {
   virtual folly::SemiFuture<bool> pull_kv_blocks_async(
       const uint64_t src_cluster_id,
       const std::string& src_addr,
-      const int64_t src_k_cache_id,
-      const int64_t src_v_cache_id,
       const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks);
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids = {},
+      const std::vector<uint64_t>& dst_linear_state_ids = {}) override;
 
   virtual folly::SemiFuture<uint32_t> transfer_kv_blocks(
       const std::vector<BlockTransferInfo>& block_transfer_info) override;
@@ -127,8 +123,8 @@ class RemoteWorker : public WorkerClient {
   virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(
       const ForwardInput& inputs) override;
 
-  virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_async(
-      const RawForwardInput& inputs) override;
+  virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
+      const ForwardInput& inputs) override;
 
   virtual folly::SemiFuture<folly::Unit> process_group_test_async() override;
 
@@ -154,6 +150,10 @@ class RemoteWorker : public WorkerClient {
   virtual folly::SemiFuture<bool> wakeup_async(
       const WakeupOptions& options) override;
 
+  virtual folly::SemiFuture<bool> start_profile_async() override;
+
+  virtual folly::SemiFuture<bool> stop_profile_async() override;
+
  private:
   DISALLOW_COPY_AND_ASSIGN(RemoteWorker);
 
@@ -161,9 +161,13 @@ class RemoteWorker : public WorkerClient {
   int32_t global_rank_;
   // connection resource
   std::unique_ptr<CommChannel> channel_;
-  ThreadPool threadpool_;
+  ThreadPool threadpool_{/*num_threads=*/1,
+                         /*cpu_binding=*/false,
+                         /*pool_name=*/"RemoteWorker.request"};
   // copy working thread
-  ThreadPool copy_threadpool_{4};
+  ThreadPool copy_threadpool_{/*num_threads=*/4,
+                              /*cpu_binding=*/false,
+                              /*pool_name=*/"RemoteWorker.copy"};
   const torch::Device device_;
 };
 }  // namespace xllm

@@ -32,6 +32,11 @@ namespace xllm {
 
 class LLMWorkerImpl : public WorkerImpl {
  public:
+  enum class ForwardSyncPolicy : int8_t {
+    LEGACY = 0,
+    NO_SYNC,
+  };
+
   LLMWorkerImpl(const ParallelArgs& parallel_args,
                 const torch::Device& device,
                 const runtime::Options& options);
@@ -43,8 +48,25 @@ class LLMWorkerImpl : public WorkerImpl {
 
   std::optional<ForwardOutput> step(const ForwardInput& input) override;
 
-  std::optional<ForwardOutput> step_internal(const ForwardInput& input);
+  std::optional<ForwardOutput> step_no_sync(const ForwardInput& input);
+  std::optional<ForwardOutput> execute_no_sync_on_stream(
+      const ForwardInput& input,
+      Stream& compute_stream);
 
+  folly::SemiFuture<std::optional<ForwardOutput>> step_async_no_sync(
+      const ForwardInput& input);
+
+  std::optional<ForwardOutput> step_internal(
+      const ForwardInput& input,
+      ForwardSyncPolicy sync_policy = ForwardSyncPolicy::LEGACY);
+
+ protected:
+  std::optional<ForwardOutput> step_for_schedule_overlap(
+      const ForwardInput& input) override;
+  ForwardInput update_input_by_last_step_output_for_schedule_overlap(
+      ForwardInput& input) override;
+
+ public:
 #if defined(USE_NPU)
   layer::NpuLmHead get_npu_lm_head() { return model_->get_npu_lm_head(); };
 

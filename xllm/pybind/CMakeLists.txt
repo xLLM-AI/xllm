@@ -12,6 +12,7 @@ pybind_extension(
   LINKDIRS
     ${TORCH_INSTALL_PREFIX}/lib
   DEPS
+    :config
     :master
     :request
     :util
@@ -27,4 +28,3 @@ pybind_extension(
 target_link_options(xllm_export PRIVATE -Wl,-Bsymbolic)
 target_link_libraries(common PRIVATE leveldb::leveldb OpenSSL::SSL OpenSSL::Crypto protobuf::libprotobuf)
 add_dependencies(common brpc-static)
-

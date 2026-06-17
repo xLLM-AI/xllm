@@ -162,6 +162,7 @@ message XLLM_Usage {
   int32 prompt_tokens = 1;
   int32 completion_tokens = 2;
   int32 total_tokens = 3;
+  int32 cached_tokens = 4;
 }
 
 // --- XLLM_LogProb / XLLM_LogProbs ---

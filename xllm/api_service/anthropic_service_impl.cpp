@@ -21,9 +21,11 @@ limitations under the License.
 #include <google/protobuf/util/json_util.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_set>
 
+#include "api_service/anthropic_stream_utils.h"
 #include "api_service/stream_output_parser.h"
 #include "api_service/utils.h"
 #include "core/common/types.h"
@@ -35,6 +37,11 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+LLMMaster* check_master(LLMMaster* master) {
+  CHECK(master != nullptr);
+  return master;
+}
+
 struct FunctionCallInfo {
   std::string id = "";
   std::string name = "";
@@ -45,18 +52,6 @@ struct ContentBlockInfo {
   std::string normal_text = "";
   std::vector<FunctionCallInfo> function_calls;
 };
-
-std::string convert_finish_reason_to_anthropic(
-    const std::string& finish_reason) {
-  if (finish_reason == "stop") {
-    return "end_turn";
-  } else if (finish_reason == "length") {
-    return "max_tokens";
-  } else if (finish_reason == "function_call") {
-    return "tool_use";
-  }
-  return "end_turn";
-}
 
 // Build messages from Anthropic protobuf request
 std::vector<Message> build_messages(
@@ -282,8 +277,9 @@ bool send_result_to_client(std::shared_ptr<AnthropicCall> call,
 
     // set stop_reason
     if (choice.has_finish_reason()) {
-      anthropic_response.set_stop_reason(std::move(
-          convert_finish_reason_to_anthropic(choice.finish_reason())));
+      anthropic_response.set_stop_reason(
+          std::move(api_service::convert_finish_reason_to_anthropic(
+              choice.finish_reason())));
     }
 
     // Add text content block
@@ -349,6 +345,7 @@ bool start_new_content_block(std::shared_ptr<AnthropicCall> call,
   } else if (curr_content_block_type == "tool_use") {
     content_block->set_id(content_block_info.function_calls[0].id);
     content_block->set_name(content_block_info.function_calls[0].name);
+    content_block->mutable_input();
   } else {
     LOG(FATAL) << "Unknown content block type: " << curr_content_block_type;
   }
@@ -367,10 +364,15 @@ bool send_content_block_delta(std::shared_ptr<AnthropicCall> call,
                               const std::string& delta_type,
                               const ContentBlockInfo& content_block_info,
                               int& content_block_index) {
+  bool is_tool_use_delta = delta_type == "tool_use_delta";
+  if (is_tool_use_delta && content_block_info.function_calls.empty()) {
+    return true;
+  }
+
   // counter new block or tool function call, we need a new content block
   // <content_block_start> ... <content_block_stop>
   if (last_content_block_type != curr_content_block_type ||
-      (delta_type == "tool_use_delta" &&
+      (is_tool_use_delta &&
        !content_block_info.function_calls[0].name.empty())) {
     // try to create new content block
     if (!start_new_content_block(call,
@@ -389,12 +391,19 @@ bool send_content_block_delta(std::shared_ptr<AnthropicCall> call,
   if (delta_type == "text_delta") {
     delta->set_type("text_delta");
     delta->set_text(content_block_info.normal_text);
-  } else if (delta_type == "tool_use_delta") {
-    delta->set_type("input_json_delta");
-    if (!content_block_info.function_calls.empty() &&
-        !content_block_info.function_calls[0].arguments.empty()) {
-      delta->set_partial_json(content_block_info.function_calls[0].arguments);
+  } else if (is_tool_use_delta) {
+    std::optional<proto::AnthropicStreamEvent> event =
+        api_service::make_input_json_delta_event(
+            static_cast<int32_t>(content_block_index),
+            content_block_info.function_calls[0].arguments);
+    if (!event.has_value()) {
+      return true;
     }
+    if (!call->write(event->type(), event.value())) {
+      LOG(ERROR) << "Failed to send content_block_delta event";
+      return false;
+    }
+    return true;
   } else {
     LOG(FATAL) << "Unknown delta type: " << delta_type;
   }
@@ -480,6 +489,7 @@ bool send_delta_to_client(
   }
 
   std::string finish_reason = "";
+  bool has_tool_call = false;
   for (const auto& seq_output : output.outputs) {
     const auto& index = seq_output.index;
     std::string cur_text = seq_output.text;
@@ -533,6 +543,10 @@ bool send_delta_to_client(
       }
     }
 
+    if (stream_parser && stream_parser->get_has_tool_call(index)) {
+      has_tool_call = true;
+    }
+
     // Handle finish reason
     if (seq_output.finish_reason.has_value()) {
       // Check for unstreamed tool args before sending finish reason
@@ -563,11 +577,8 @@ bool send_delta_to_client(
   // 4) finish request, we need to send the
   // last `content_block_stop` and `message_delta` event
   if (output.finished || output.cancelled) {
-    if (output.finished) {
-      finish_reason = convert_finish_reason_to_anthropic(finish_reason);
-    } else {
-      finish_reason = "stop";
-    }
+    finish_reason = api_service::get_stream_stop_reason(
+        output.finished, has_tool_call, finish_reason);
 
     // if content_block_index < 0, means no content block started
     // so we don't need to send content_block_stop event
@@ -621,13 +632,11 @@ AnthropicServiceImpl::AnthropicServiceImpl(
     LLMMaster* master,
     const std::vector<std::string>& models)
     : APIServiceImpl(models),
-      master_(master),
+      master_(check_master(master)),
       tool_call_parser_format_(
-          master_->options().tool_call_parser().value_or("")),
+          master->options().tool_call_parser().value_or("")),
       reasoning_parser_format_(
-          master_->options().reasoning_parser().value_or("")) {
-  CHECK(master_ != nullptr);
-}
+          master->options().reasoning_parser().value_or("")) {}
 
 void AnthropicServiceImpl::process_async_impl(
     std::shared_ptr<AnthropicCall> call) {
@@ -639,7 +648,6 @@ void AnthropicServiceImpl::process_async_impl(
     return;
   }
 
-  CHECK(master_ != nullptr);
   // Check rate limit
   if (master_->get_rate_limiter()->is_limited()) {
     call->finish_with_error(
@@ -664,17 +672,26 @@ void AnthropicServiceImpl::process_async_impl(
                                              tool_call_parser_format_,
                                              reasoning_parser_format_,
                                              false /*is_force_reasoning_*/);
-    CHECK(stream_parser != nullptr) << "create StreamOutputParser failed!";
   }
 
   auto saved_streaming = request_params.streaming;
   auto message_id = request_params.request_id;
   auto saved_tools = request_params.tools;
 
+  std::optional<std::vector<int>> prompt_tokens = std::nullopt;
+  if (rpc_request.has_routing()) {
+    prompt_tokens = std::vector<int>{};
+    prompt_tokens->reserve(rpc_request.token_ids_size());
+    for (int32_t i = 0; i < rpc_request.token_ids_size(); ++i) {
+      prompt_tokens->emplace_back(rpc_request.token_ids(i));
+    }
+    request_params.decode_address = rpc_request.routing().decode_name();
+  }
+
   // Handle request
   master_->handle_request(
       std::move(messages),
-      std::nullopt,
+      std::move(prompt_tokens),
       std::move(request_params),
       call.get(),
       [call,

@@ -26,34 +26,43 @@ limitations under the License.
 namespace xllm {
 
 struct ModelInputParams;
+struct ForwardInput;
 
 namespace specBuilder {
 
-// CPU-side decoded input view used by builder helpers.
-// It keeps block-table ownership plus lightweight slices for fast row access.
-struct DecodeCpuView {
-  torch::Tensor block_tables_cpu;
-  std::vector<int32_t> token_ids_vec;
-  std::vector<int32_t> positions_vec;
-  std::vector<int32_t> kv_seq_lens_vec;
-  Slice<int32_t> token_ids;
-  Slice<int32_t> positions;
-  Slice<int32_t> kv_seq_lens;
-  Slice<int32_t> block_tables_data;
-  int32_t num_sequences = 0;
-  int32_t block_table_row_stride = 0;
+struct DecodeBuildMeta {
+  int32_t kv_max_seq_len = 0;
 };
 
 // Aggregated output vectors produced by row builders.
 // Callers convert these vectors to tensors and write back to input params.
 struct DecodeBuildBuffers {
+  DecodeBuildMeta meta;
   std::vector<int32_t> out_token_ids;
   std::vector<int32_t> out_positions;
   std::vector<int32_t> out_kv_seq_lens;
   std::vector<int32_t> out_q_seq_lens;
+  std::vector<int32_t> out_q_cu_seq_lens;
   std::vector<int32_t> out_new_cache_slots;
-  std::vector<std::vector<int32_t>> out_block_tables;
-  int32_t kv_max_seq_len = 0;
+  std::vector<int32_t> out_block_tables;
+  std::vector<std::vector<std::vector<int32_t>>> out_multi_block_tables;
+  int32_t out_block_table_rows = 0;
+  int32_t out_block_table_stride = 0;
+};
+
+// CPU-side row context shared by decode row builders.
+// It owns the contiguous block table tensor so row slices stay valid.
+struct DecodeRowContext {
+  torch::Tensor block_tables_owner;
+  std::vector<torch::Tensor> multi_block_tables_owner;
+  Slice<int32_t> token_ids;
+  Slice<int32_t> positions;
+  Slice<int32_t> kv_seq_lens;
+  Slice<int32_t> block_tables;
+  std::vector<std::vector<Slice<int32_t>>> multi_block_tables;
+  int32_t num_sequences = 0;
+  int32_t block_table_stride = 0;
+  bool model_managed_multiblock = false;
 };
 
 // Declarative spec for one emitted decode row.
@@ -78,14 +87,11 @@ struct TokenWithOffset {
   int32_t position_offset = 0;
 };
 
-// Creates a CPU decode view from tensors and kv_seq_lens layout.
-DecodeCpuView make_decode_cpu_view(const torch::Tensor& token_ids_cpu,
-                                   const torch::Tensor& positions_cpu,
-                                   const torch::Tensor& block_tables_cpu,
-                                   const Slice<int32_t>& kv_seq_lens_slice);
+// Builds a reusable row context from ForwardInput host-side fields.
+DecodeRowContext make_decode_row_context(const ForwardInput& input);
 
 // Appends one logical decode row into output buffers.
-void append_decode_row(const DecodeCpuView& view,
+void append_decode_row(const DecodeRowContext& ctx,
                        const RowSpec& row,
                        int32_t block_size,
                        DecodeBuildBuffers& buf);
@@ -100,7 +106,7 @@ TokenWithOffset resolve_token_with_position_offset(
     int32_t last_step_decode_num);
 
 // Resolves a token from last-step output and appends one decode row.
-void append_decode_row_from_last_step(const DecodeCpuView& view,
+void append_decode_row_from_last_step(const DecodeRowContext& ctx,
                                       int32_t seq_id,
                                       int32_t input_token_id,
                                       const Slice<int64_t>& last_step_tokens,
@@ -121,25 +127,32 @@ int32_t calc_kv_len(const Slice<int32_t>& kv_seq_lens_slice,
 // Appends one q/kv length element using current backend layout policy.
 void append_seq_len_by_layout(std::vector<int32_t>& vec, int32_t len);
 
+// Appends one q length and the matching cumulative q length.
+void append_q_seq_len(std::vector<int32_t>& q_seq_lens,
+                      std::vector<int32_t>& q_cu_seq_lens,
+                      int32_t len);
+
 // Appends kv_len into output vector and updates kv_max_seq_len.
 void update_kv_seq_lens_and_max(std::vector<int32_t>& kv_seq_lens_vec,
                                 int32_t kv_len,
                                 int32_t& kv_max_seq_len);
 
-// Builds q_cu_seq_lens tensor from params.get_q_seq_len(i).
+// Builds q_cu_seq_lens tensor from upstream-provided host values.
+// When include_leading_zero is true, returns query_start_loc-style
+// [0, cumsum...].
 torch::Tensor build_q_cu_seq_lens_tensor(const ModelInputParams& params,
-                                         torch::Device device = torch::kCPU);
+                                         torch::Device device = torch::kCPU,
+                                         bool include_leading_zero = false);
 
 // Updates common decode-side ModelInputParams fields from built buffers.
 void update_input_params(ModelInputParams& input_params,
                          DecodeBuildBuffers& buf,
-                         const torch::TensorOptions& int_options,
                          int32_t q_max_seq_len,
                          std::vector<int32_t> q_seq_lens_vec,
+                         std::vector<int32_t> q_cu_seq_lens_vec,
                          int32_t kv_max_seq_len,
                          std::vector<int32_t> kv_seq_lens_vec,
-                         bool update_block_tables = false,
-                         torch::Device block_tables_device = torch::kCPU);
+                         bool update_block_tables = false);
 
 namespace draftProbs {
 

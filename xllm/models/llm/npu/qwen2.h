@@ -16,6 +16,7 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/config/scheduler_config.h"
 #include "core/layers/npu/npu_qwen2_decoder_layer_impl.h"
 #include "layers/common/rotary_embedding_util.h"
 #include "llm_model_base.h"
@@ -57,7 +58,9 @@ class QWen2ModelImpl : public LlmModelImplBase<QWen2DecoderLayer> {
         model_args.max_position_embeddings(),
         model_args.rope_theta(),
         options);
-    int32_t mask_value = FLAGS_enable_chunked_prefill ? -9984 : 1;
+    int32_t mask_value =
+        ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill() ? -9984
+                                                                         : 1;
     attn_mask_ = layer::AttentionMask(options.device(),
                                       options.dtype().toScalarType(),
                                       /*mask_value=*/mask_value);

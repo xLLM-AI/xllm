@@ -30,6 +30,7 @@ limitations under the License.
 #include "completion.pb.h"
 #include "core/distributed_runtime/llm_master.h"
 #include "core/distributed_runtime/rec_master.h"
+#include "core/framework/config/rec_config.h"
 #include "core/framework/request/request_output.h"
 
 #ifdef likely
@@ -116,7 +117,8 @@ bool send_result_to_client_brpc_rec(std::shared_ptr<CompletionCall> call,
   output_tensor->set_name("rec_result");
   proto::InferOutputTensor* logprobs_tensor = nullptr;
   int32_t logprob_width = 0;
-  if (FLAGS_enable_output_sku_logprobs && !req_output.outputs.empty()) {
+  if (::xllm::RecConfig::get_instance().enable_output_sku_logprobs() &&
+      !req_output.outputs.empty()) {
     logprobs_tensor = response.mutable_output_tensors()->Add();
     logprobs_tensor->set_name("sku_logprobs");
     logprobs_tensor->set_datatype(proto::DataType::FLOAT);
@@ -124,11 +126,11 @@ bool send_result_to_client_brpc_rec(std::shared_ptr<CompletionCall> call,
         static_cast<int32_t>(req_output.outputs[0].token_ids_logprobs.size());
   }
 
-  if (FLAGS_enable_convert_tokens_to_item) {
+  if (::xllm::RecConfig::get_instance().enable_convert_tokens_to_item()) {
     output_tensor->set_datatype(proto::DataType::INT64);
     proto::InferOutputTensor* did_tensor = nullptr;
     proto::InferOutputTensor* type_tensor = nullptr;
-    if (FLAGS_enable_extended_item_info) {
+    if (::xllm::RecConfig::get_instance().enable_extended_item_info()) {
       did_tensor = response.mutable_output_tensors()->Add();
       did_tensor->set_name("item_did");
       did_tensor->set_datatype(proto::DataType::STRING);
@@ -140,7 +142,8 @@ bool send_result_to_client_brpc_rec(std::shared_ptr<CompletionCall> call,
 
     std::vector<RecEmitRecord> emitted_items;
     emitted_items.reserve(req_output.outputs.size());
-    const int32_t total_threshold = FLAGS_total_conversion_threshold;
+    const int32_t total_threshold =
+        ::xllm::RecConfig::get_instance().total_conversion_threshold();
     for (int32_t i = 0; i < static_cast<int32_t>(req_output.outputs.size());
          ++i) {
       const auto& output = req_output.outputs[i];
@@ -282,7 +285,7 @@ void RecCompletionServiceImpl::process_async_impl(
 
   RequestParams request_params(
       rpc_request, call->get_x_request_id(), call->get_x_request_time());
-  if (FLAGS_enable_output_sku_logprobs) {
+  if (::xllm::RecConfig::get_instance().enable_output_sku_logprobs()) {
     request_params.logprobs = true;
   }
   bool include_usage = false;

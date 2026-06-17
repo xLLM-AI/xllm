@@ -21,7 +21,8 @@ limitations under the License.
 #include <cstddef>
 #include <utility>
 
-#include "common/global_flags.h"
+#include "core/framework/config/kv_cache_config.h"
+#include "framework/kv_cache/kv_cache_utils.h"
 #include "util/utils.h"
 #include "worker.pb.h"
 
@@ -64,6 +65,13 @@ KVCacheShape::KVCacheShape(const KVCacheCapacity& kv_cache_cap,
                            int64_t world_size) {
   CHECK_GT(world_size, 0) << "world_size must be positive.";
   CHECK_GT(kv_cache_cap.block_size(), 0) << "block_size must be positive.";
+
+  if (util::is_target_model_type(model_args.model_type(),
+                                 /*target_type=*/"deepseek_v4",
+                                 /*match_mtp=*/true)) {
+    init_dsv4_pool_shape(kv_cache_cap);
+    return;
+  }
 
   const bool enable_lighting_indexer = model_args.index_n_heads() > 0;
   const bool enable_linear_attention = has_linear_attention_layers(model_args);
@@ -140,6 +148,11 @@ bool KVCacheShape::has_ssm_cache_shape() const {
 }
 
 void KVCacheShape::print_shapes() const {
+  if (shape_kind_ == ShapeKind::DSV4_POOL) {
+    print_dsv4_pool_shape();
+    return;
+  }
+
   if (has_key_cache_shape()) {
     LOG(INFO) << "Initializing k cache with shape: [" << key_cache_shape()
               << "]";
@@ -160,6 +173,24 @@ void KVCacheShape::print_shapes() const {
     LOG(INFO) << "Initializing ssm cache with shape: [" << ssm_cache_shape()
               << "]";
   }
+}
+
+void KVCacheShape::init_dsv4_pool_shape(const KVCacheCapacity& kv_cache_cap) {
+  shape_kind_ = ShapeKind::DSV4_POOL;
+  key_cache_shape_ = std::vector<int64_t>{kv_cache_cap.swa_count(),
+                                          kv_cache_cap.c4_count(),
+                                          kv_cache_cap.c128_count()};
+}
+
+void KVCacheShape::print_dsv4_pool_shape() const {
+  CHECK(has_key_cache_shape())
+      << "DeepSeek V4 cache shape must contain cache pool counts.";
+  const std::vector<int64_t>& pool_counts = key_cache_shape();
+  CHECK_GE(pool_counts.size(), 3)
+      << "DeepSeek V4 cache shape must be [swa_count, c4_count, c128_count].";
+  LOG(INFO) << "Initializing DSV4 kv cache with shape: [swa_count="
+            << pool_counts[0] << ", c4_count=" << pool_counts[1]
+            << ", c128_count=" << pool_counts[2] << "]";
 }
 
 void KVCacheShape::to_proto(proto::KVCacheShape* proto_shape) const {
@@ -210,7 +241,7 @@ void KVCacheShape::init_key_cache_shape(const KVCacheCapacity& kv_cache_cap,
                                         int64_t world_size) {
   if (model_args.enable_mla()) {
 #if defined(USE_NPU)
-    if (model_args.model_type() == "deepseek_v3" && FLAGS_enable_prefix_cache) {
+    if (use_npu_nz_kv_cache_layout(model_args.model_type())) {
       key_cache_shape_ = std::vector<int64_t>{
           kv_cache_cap.n_blocks(),
           util::ceil_div(model_args.kv_lora_rank(), kNzAlignment),
@@ -241,7 +272,7 @@ void KVCacheShape::init_value_cache_shape(const KVCacheCapacity& kv_cache_cap,
                                           int64_t world_size) {
   if (model_args.enable_mla()) {
 #if defined(USE_NPU)
-    if (model_args.model_type() == "deepseek_v3" && FLAGS_enable_prefix_cache) {
+    if (use_npu_nz_kv_cache_layout(model_args.model_type())) {
       value_cache_shape_ = std::vector<int64_t>{
           kv_cache_cap.n_blocks(),
           util::ceil_div(model_args.qk_rope_head_dim(), kNzAlignment),
@@ -282,10 +313,13 @@ void KVCacheShape::init_conv_cache_shape(const KVCacheCapacity& kv_cache_cap,
       get_local_head_count(model_args.linear_num_key_heads(), world_size);
   const int64_t local_linear_v_head_count =
       get_local_head_count(model_args.linear_num_value_heads(), world_size);
+  const int64_t conv_state_len = kv_cache_cap.linear_conv_state_len() > 0
+                                     ? kv_cache_cap.linear_conv_state_len()
+                                     : model_args.linear_conv_kernel_dim() - 1;
 
   conv_cache_shape_ = std::vector<int64_t>{
       kv_cache_cap.num_linear_state_blocks(),
-      model_args.linear_conv_kernel_dim() - 1,
+      conv_state_len,
       model_args.linear_key_head_dim() * local_linear_k_head_count * 2 +
           model_args.linear_key_head_dim() * local_linear_v_head_count};
 }
@@ -295,11 +329,13 @@ void KVCacheShape::init_ssm_cache_shape(const KVCacheCapacity& kv_cache_cap,
                                         int64_t world_size) {
   const int64_t local_linear_v_head_count =
       get_local_head_count(model_args.linear_num_value_heads(), world_size);
-  ssm_cache_shape_ =
-      std::vector<int64_t>{kv_cache_cap.num_linear_state_blocks(),
-                           local_linear_v_head_count,
-                           model_args.linear_key_head_dim(),
-                           model_args.linear_value_head_dim()};
+  const int64_t checkpoint_stride =
+      std::max<int64_t>(kv_cache_cap.linear_ssm_checkpoint_stride(), 1);
+  ssm_cache_shape_ = std::vector<int64_t>{
+      kv_cache_cap.num_linear_state_blocks() * checkpoint_stride,
+      local_linear_v_head_count,
+      model_args.linear_key_head_dim(),
+      model_args.linear_value_head_dim()};
 }
 
 void KVCacheShape::apply_device_layout(const ModelArgs& model_args) {

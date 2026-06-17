@@ -21,9 +21,22 @@ limitations under the License.
 #include "framework/parallel_state/parallel_state.h"
 #include "platform/device.h"
 
-DECLARE_bool(enable_flashcomm1);
-DECLARE_int32(flashcomm1_min_prefill_tokens);
-DECLARE_int32(flashcomm1_min_decode_tokens);
+DEFINE_bool(enable_flashcomm1,
+            false,
+            "Enable Flash Communication 1 (FC1) sequence-parallel optimization "
+            "for tensor parallel inference on NPU.");
+
+DEFINE_int32(flashcomm1_min_prefill_tokens,
+             1000,
+             "Minimum prefill token count to activate FC1.");
+
+DEFINE_int32(flashcomm1_min_decode_tokens,
+             128,
+             "Minimum decode batch token count to activate FC1.");
+
+DEFINE_bool(enable_mmrs_fusion,
+            true,
+            "Enable Matmul+ReduceScatter fusion kernel for FC1.");
 
 namespace xllm {
 

@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/metrics.h"
+#include "core/framework/config/service_config.h"
 #include "framework/request/finish_reason.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
@@ -35,7 +36,18 @@ AsyncResponseProcessor::AsyncResponseProcessor(
     const Tokenizer* tokenizer,
     const std::optional<InstanceRole>& role,
     bool enable_service_routing)
-    : response_threadpool_(FLAGS_num_response_handling_threads),
+    : response_threadpool_(
+          /*num_threads=*/::xllm::ServiceConfig::get_instance()
+              .num_response_handling_threads(),
+          /*cpu_binding=*/false,
+          /*pool_name=*/"AsyncResponseProcessor.response"),
+      rpc_threadpool_(/*num_threads=*/1,
+                      /*cpu_binding=*/false,
+                      /*pool_name=*/"AsyncResponseProcessor.rpc"),
+      generate_output_threadpool_(
+          /*num_threads=*/16,
+          /*cpu_binding=*/false,
+          /*pool_name=*/"AsyncResponseProcessor.generate_output"),
       tokenizer_(tokenizer->clone()),
       role_(role.value_or(InstanceRole::DEFAULT)),
       enable_batch_response_(enable_service_routing) {}
@@ -327,16 +339,19 @@ void AsyncResponseProcessor::process_stream_requests(
 
 // for batch generate, wait all response done.
 void AsyncResponseProcessor::wait_completion() {
-  size_t thread_num = response_threadpool_.size();
-  // Add a task to each thread, and when all tasks are completed, it indicates
-  // that all previously scheduled tasks in the thread pool have finished
-  // executing.
-  BlockingCounter counter(thread_num);
-  for (size_t i = 0; i < thread_num; ++i) {
-    auto runnable = [&counter]() mutable { counter.decrement_count(); };
-    response_threadpool_.schedule_with_tid(std::move(runnable), i);
-  }
-  counter.wait();
+  auto wait_threadpool = [](ThreadPool& threadpool) {
+    size_t thread_num = threadpool.size();
+    // Add a task to each thread, and when all tasks are completed, it indicates
+    // that all previously scheduled tasks in the thread pool have finished.
+    BlockingCounter counter(thread_num);
+    for (size_t i = 0; i < thread_num; ++i) {
+      auto runnable = [&counter]() mutable { counter.decrement_count(); };
+      threadpool.schedule_with_tid(std::move(runnable), i);
+    }
+    counter.wait();
+  };
+  wait_threadpool(response_threadpool_);
+  wait_threadpool(rpc_threadpool_);
 }
 
 }  // namespace xllm

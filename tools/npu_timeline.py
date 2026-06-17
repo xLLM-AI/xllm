@@ -17,9 +17,14 @@
 import collections
 import copy
 import json
+import os
 import re
+import sys
 import argparse
 from typing import Any, Dict, List, Optional, Tuple, Union
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.logger import logger
 
 class _ChromeTraceFormatter(object):
   """A helper class for generating traces in Chrome Trace Format."""
@@ -419,7 +424,7 @@ class Timeline(object):
           self._kernel_pids[deviceId] = device_pid
           self._chrome_trace.emit_pid('Kernel ' + str(deviceId), device_pid)
       else:
-        print("Unsupport AscendKind ", dev_stats['AscendKind'])
+        logger.warning(f"Unsupport AscendKind {dev_stats['AscendKind']}")
 
   def _get_marker_end(self, deviceId:int, stat_id:int) -> Dict:
     """Get the end marker stats."""
@@ -450,7 +455,7 @@ class Timeline(object):
           if cur_deviceId == deviceId:
             end_time = cur_end_time
         if end_time == 0:
-          print(f"end marker not found: deviceId:{deviceId} id:{stats_id}")
+          logger.warning(f"end marker not found: deviceId:{deviceId} id:{stats_id}")
           continue
         # end_time = end_marker_stat['timestamp']
         dev_stats['duration'] = end_time - start_time

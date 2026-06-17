@@ -20,8 +20,9 @@ limitations under the License.
 
 #include <algorithm>
 
-#include "common/global_flags.h"
 #include "continuous_scheduler.h"
+#include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "distributed_runtime/engine.h"
 #include "framework/request/rec_type.h"
 
@@ -99,6 +100,20 @@ class FakeEngine : public Engine {
   std::unique_ptr<BlockManagerPool> fake_block_manager_;
 };
 
+template <typename T>
+class ScopedConfigValue final {
+ public:
+  ScopedConfigValue(T& value, T new_value) : value_(value), old_(value) {
+    value_ = new_value;
+  }
+
+  ~ScopedConfigValue() { value_ = old_; }
+
+ private:
+  T& value_;
+  T old_;
+};
+
 ContinuousScheduler::Options CreateOptions(
     int32_t max_tokens_per_batch = 10000,
     int32_t max_seqs_per_batch = 256,
@@ -168,7 +183,8 @@ TEST(FixedStepsSchedulerTest, AddRequestSuccess) {
 }
 
 TEST(FixedStepsSchedulerTest, PrepareBatchEmptyWhenNoRequests) {
-  FLAGS_enable_prefix_cache = false;
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
   auto engine = std::make_unique<FakeEngine>(32, 32);
   auto opt = CreateOptions();
   FixedStepsScheduler scheduler(engine.get(), opt);
@@ -179,8 +195,12 @@ TEST(FixedStepsSchedulerTest, PrepareBatchEmptyWhenNoRequests) {
 }
 
 TEST(FixedStepsSchedulerTest, PrepareBatchOneRecSchedulesRequest) {
-  FLAGS_enable_prefix_cache = false;
-  FLAGS_prefill_scheduling_memory_usage_threshold = 1.0;
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<double> memory_threshold(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      1.0);
   auto engine = std::make_unique<FakeEngine>(64, 32);
   auto opt = CreateOptions(10000, 256);
   FixedStepsScheduler scheduler(engine.get(), opt);
@@ -203,8 +223,12 @@ TEST(FixedStepsSchedulerTest, PrepareBatchOneRecSchedulesRequest) {
 }
 
 TEST(FixedStepsSchedulerTest, PrepareBatchRespectsTokenBudget) {
-  FLAGS_enable_prefix_cache = false;
-  FLAGS_prefill_scheduling_memory_usage_threshold = 1.0;
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<double> memory_threshold(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      1.0);
   auto engine = std::make_unique<FakeEngine>(64, 32);
   auto opt = CreateOptions(50, 1);
   FixedStepsScheduler scheduler(engine.get(), opt);
@@ -218,8 +242,12 @@ TEST(FixedStepsSchedulerTest, PrepareBatchRespectsTokenBudget) {
 }
 
 TEST(FixedStepsSchedulerTest, StepCompletesWithRequest) {
-  FLAGS_enable_prefix_cache = false;
-  FLAGS_prefill_scheduling_memory_usage_threshold = 1.0;
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<double> memory_threshold(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      1.0);
   auto engine = std::make_unique<FakeEngine>(64, 32);
   auto opt = CreateOptions(10000, 256);
   FixedStepsScheduler scheduler(engine.get(), opt);

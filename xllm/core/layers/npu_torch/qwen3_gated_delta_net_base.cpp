@@ -17,7 +17,6 @@ limitations under the License.
 
 #include <tuple>
 
-#include "common/flash_comm1_context.h"
 #include "xllm/core/kernels/ops_api.h"
 
 namespace xllm {
@@ -27,6 +26,31 @@ namespace {
 torch::Tensor l2norm(const torch::Tensor& x, int64_t dim, double eps = 1e-6) {
   auto norm = torch::sqrt(torch::sum(torch::square(x), dim, true) + eps);
   return x / norm;
+}
+
+torch::Tensor repeat_tensor_heads(const torch::Tensor& tensor,
+                                  int64_t target_heads,
+                                  int64_t head_dim) {
+  const int64_t current_heads = tensor.size(head_dim);
+  if (current_heads == target_heads) {
+    return tensor;
+  }
+  CHECK_GT(current_heads, 0) << "current heads must be positive";
+  CHECK_EQ(target_heads % current_heads, 0)
+      << "target heads must be divisible by current heads, target_heads="
+      << target_heads << ", current_heads=" << current_heads;
+
+  const int64_t repeats = target_heads / current_heads;
+  std::vector<int64_t> view_shape = tensor.sizes().vec();
+  view_shape.insert(view_shape.begin() + head_dim + 1, 1);
+  std::vector<int64_t> expand_shape = view_shape;
+  expand_shape[head_dim + 1] = repeats;
+  std::vector<int64_t> output_shape = tensor.sizes().vec();
+  output_shape[head_dim] = target_heads;
+  return tensor.unsqueeze(head_dim + 1)
+      .expand(expand_shape)
+      .reshape(output_shape)
+      .contiguous();
 }
 
 std::tuple<torch::Tensor, torch::Tensor> torch_recurrent_gated_delta_rule(
@@ -53,6 +77,9 @@ std::tuple<torch::Tensor, torch::Tensor> torch_recurrent_gated_delta_rule(
   value = to_float32_and_transpose(value);
   beta = to_float32_and_transpose(beta);
   g = to_float32_and_transpose(g);
+  const int64_t value_num_heads = value.size(1);
+  query = repeat_tensor_heads(query, value_num_heads, 1);
+  key = repeat_tensor_heads(key, value_num_heads, 1);
 
   int64_t batch_size = key.size(0);
   int64_t num_heads = key.size(1);
@@ -120,12 +147,15 @@ std::tuple<torch::Tensor, torch::Tensor> torch_chunk_gated_delta_rule(
   value = to_float32(value);
   beta = to_float32(beta);
   g = to_float32(g);
+  const int64_t value_num_heads = value.size(1);
+  query = repeat_tensor_heads(query, value_num_heads, 1);
+  key = repeat_tensor_heads(key, value_num_heads, 1);
 
-  auto batch_size = query.size(0);
-  auto num_heads = query.size(1);
-  auto sequence_length = query.size(2);
-  auto k_head_dim = key.size(-1);
-  auto v_head_dim = value.size(-1);
+  int64_t batch_size = query.size(0);
+  int64_t num_heads = query.size(1);
+  int64_t sequence_length = query.size(2);
+  int64_t k_head_dim = key.size(-1);
+  int64_t v_head_dim = value.size(-1);
 
   int64_t pad_size = (chunk_size - sequence_length % chunk_size) % chunk_size;
   query = torch::nn::functional::pad(
@@ -243,6 +273,144 @@ std::tuple<torch::Tensor, torch::Tensor> torch_chunk_gated_delta_rule(
   core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(initial_dtype);
   return std::make_tuple(core_attn_out, last_recurrent_state);
 }
+
+int64_t get_checkpoint_stride(const torch::Tensor& conv_cache,
+                              const torch::Tensor& ssm_cache) {
+  if (!conv_cache.defined() || !ssm_cache.defined() ||
+      conv_cache.numel() == 0 || ssm_cache.numel() == 0) {
+    return 1;
+  }
+  CHECK_GT(conv_cache.size(0), 0) << "conv cache must have positive batch dim";
+  CHECK_EQ(ssm_cache.size(0) % conv_cache.size(0), 0)
+      << "ssm cache checkpoint layout mismatch, ssm_rows=" << ssm_cache.size(0)
+      << ", conv_rows=" << conv_cache.size(0);
+  return ssm_cache.size(0) / conv_cache.size(0);
+}
+
+torch::Tensor build_linear_state_base_indices(
+    const torch::Tensor& logical_state_indices,
+    int64_t checkpoint_stride) {
+  if (checkpoint_stride == 1) {
+    return logical_state_indices;
+  }
+  return logical_state_indices * checkpoint_stride;
+}
+
+torch::Tensor expand_sequence_tensor_to_batch(const torch::Tensor& tensor,
+                                              int64_t target_batch,
+                                              const char* tensor_name) {
+  CHECK(tensor.defined()) << tensor_name << " must be defined";
+  CHECK_EQ(tensor.dim(), 1) << tensor_name << " must be a 1D tensor.";
+  const int64_t source_batch = tensor.size(0);
+  if (source_batch == target_batch) {
+    return tensor.contiguous();
+  }
+  CHECK_GT(source_batch, 0) << tensor_name << " must not be empty.";
+  CHECK_EQ(target_batch % source_batch, 0)
+      << tensor_name << " cannot be expanded from " << source_batch << " to "
+      << target_batch;
+  const int64_t repeat_count = target_batch / source_batch;
+  return tensor.unsqueeze(1)
+      .expand({source_batch, repeat_count})
+      .reshape({target_batch})
+      .contiguous();
+}
+
+torch::Tensor run_spec_verify_conv(const torch::Tensor& mixed_qkv,
+                                   const torch::Tensor& conv_cache,
+                                   const torch::Tensor& logical_state_indices,
+                                   const torch::Tensor& num_accepted_tokens,
+                                   const torch::Tensor& q_cu_seq_lens,
+                                   const torch::Tensor& conv_weight,
+                                   int32_t conv_kernel_size) {
+  const int64_t batch_size = mixed_qkv.size(0);
+  const int64_t seq_len = mixed_qkv.size(2);
+  const int64_t expanded_state_len = conv_cache.size(1);
+  CHECK_EQ(expanded_state_len, conv_kernel_size - 1 + seq_len - 1)
+      << "unexpected speculative conv cache len, expected "
+      << (conv_kernel_size - 1 + seq_len - 1) << ", got " << expanded_state_len;
+
+  xllm::kernel::CausalConv1dUpdateParams conv1d_params;
+  conv1d_params.x = mixed_qkv.transpose(1, 2)
+                        .reshape({batch_size * seq_len, mixed_qkv.size(1)})
+                        .contiguous();
+  conv1d_params.conv_state = conv_cache.transpose(1, 2);
+  conv1d_params.weight = conv_weight;
+  conv1d_params.activation = true;
+  conv1d_params.conv_state_indices =
+      expand_sequence_tensor_to_batch(
+          logical_state_indices, batch_size, "logical_state_indices")
+          .contiguous();
+  conv1d_params.num_accepted_tokens =
+      expand_sequence_tensor_to_batch(
+          num_accepted_tokens.to(mixed_qkv.device(), torch::kInt32),
+          batch_size,
+          "num_accepted_tokens")
+          .contiguous();
+  conv1d_params.query_start_loc = q_cu_seq_lens;
+  conv1d_params.max_query_len = static_cast<int32_t>(seq_len);
+
+  torch::Tensor conv_output =
+      xllm::kernel::causal_conv1d_update(conv1d_params)
+          .view({batch_size, seq_len, mixed_qkv.size(1)})
+          .transpose(1, 2)
+          .contiguous();
+
+  return conv_output;
+}
+
+torch::Tensor run_spec_verify_gated_delta_rule(
+    torch::Tensor query,
+    torch::Tensor key,
+    torch::Tensor value,
+    torch::Tensor g,
+    torch::Tensor beta,
+    torch::Tensor& ssm_cache,
+    const torch::Tensor& checkpoint_indices,
+    const torch::Tensor& num_accepted_tokens,
+    const torch::Tensor& cu_seq_lens,
+    const std::vector<int32_t>& q_seq_lens_vec,
+    double scale) {
+  const auto device = value.device();
+  const int64_t batch_size = value.size(0);
+  const int64_t seq_len = value.size(1);
+  const int64_t total_seq_len = batch_size * seq_len;
+  CHECK_EQ(cu_seq_lens.numel(), batch_size + 1)
+      << "GDN spec verify cu_seq_lens must be cumulative.";
+  CHECK_EQ(q_seq_lens_vec.size(), static_cast<size_t>(batch_size))
+      << "GDN spec verify q_seq_lens_vec must be per sequence.";
+  for (int64_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
+    CHECK_EQ(q_seq_lens_vec[batch_idx], seq_len)
+        << "Qwen3.5 spec verify fused recurrent path expects dense "
+           "same-length validate tokens.";
+  }
+
+  xllm::kernel::FusedRecurrentGatedDeltaRuleParams params;
+  params.q = query.reshape({1, total_seq_len, query.size(-2), query.size(-1)})
+                 .contiguous();
+  params.k =
+      key.reshape({1, total_seq_len, key.size(-2), key.size(-1)}).contiguous();
+  params.v = value.reshape({1, total_seq_len, value.size(-2), value.size(-1)})
+                 .contiguous();
+  params.g = g.to(torch::kFloat32)
+                 .reshape({1, total_seq_len, g.size(-1)})
+                 .contiguous();
+  params.beta = beta.reshape({1, total_seq_len, beta.size(-1)}).contiguous();
+  params.scale = static_cast<float>(scale);
+  params.initial_state = ssm_cache;
+  params.inplace_final_state = true;
+  params.cu_seqlens = cu_seq_lens.to(torch::kLong).contiguous();
+  params.ssm_state_indices = checkpoint_indices.contiguous();
+  params.num_accepted_tokens =
+      num_accepted_tokens.to(device, torch::kInt32).contiguous();
+  params.use_qk_l2norm_in_kernel = true;
+
+  auto output_and_state =
+      xllm::kernel::fused_recurrent_gated_delta_rule(params);
+  return output_and_state.first.view(
+      {batch_size, seq_len, value.size(-2), value.size(-1)});
+}
+
 }  // namespace
 
 Qwen3GatedDeltaNetBaseImpl::Qwen3GatedDeltaNetBaseImpl(
@@ -305,6 +473,7 @@ void Qwen3GatedDeltaNetBaseImpl::load_common_state_dict(
   if (auto w = state_dict.get_tensor("conv1d.weight"); w.defined()) {
     conv1d_->load_state_dict(
         StateDict({{"weight", w.squeeze(1)}}), shard_tensor_count, shard_sizes);
+    conv1d_->weight().set_(conv1d_->weight().transpose(0, 1).contiguous());
   }
   o_proj_->load_state_dict(state_dict.get_dict_with_prefix("out_proj."));
   if (auto w = state_dict.get_tensor("norm.weight"); w.defined()) {
@@ -323,6 +492,18 @@ void Qwen3GatedDeltaNetBaseImpl::verify_common_loaded_weights(
                           << prefix << "A_log";
 }
 
+std::pair<torch::Tensor, torch::Tensor>
+Qwen3GatedDeltaNetBaseImpl::project_padded_inputs(
+    const torch::Tensor& hidden_states,
+    const AttentionMetadata& attn_metadata) {
+  if (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill) {
+    auto [qkvz_flat, ba_flat] = project_flat_inputs(hidden_states);
+    return {reshape_qkvz_with_pad(attn_metadata, qkvz_flat),
+            reshape_qkvz_with_pad(attn_metadata, ba_flat)};
+  }
+  return project_decode_inputs(hidden_states);
+}
+
 torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     const torch::Tensor& hidden_states,
     const AttentionMetadata& attn_metadata,
@@ -338,13 +519,13 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     const ModelInputParams& input_params,
     const FlashComm1Context* fc1_ctx) {
   torch::Tensor h = hidden_states;
-
   if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
     h = gather_sequence(hidden_states, *fc1_ctx);
   }
 
-  auto [qkvz_padded, ba_padded] =
-      project_padded_inputs(h, attn_metadata);
+  // Save original hidden_states size for potential padding later
+  const int64_t original_num_tokens = h.size(0);
+  auto [qkvz_padded, ba_padded] = project_padded_inputs(h, attn_metadata);
   int64_t batch_size = qkvz_padded.size(0);
   int64_t seq_len = qkvz_padded.size(1);
 
@@ -371,52 +552,92 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
 
   torch::Tensor conv_cache = kv_cache.get_conv_cache();
   torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
-  torch::Tensor g, beta, core_attn_out, last_recurrent_state;
-  auto device = mixed_qkv.device();
-  auto conv_weight = conv1d_->weight();
-  auto linear_state_indices = get_linear_state_indices(input_params, device);
+  torch::Device device = mixed_qkv.device();
+  torch::Tensor conv_weight = conv1d_->weight();
+  torch::Tensor logical_state_indices =
+      get_linear_state_indices(input_params, device);
+  const int64_t checkpoint_stride =
+      get_checkpoint_stride(conv_cache, ssm_cache);
+  torch::Tensor linear_state_base_indices =
+      build_linear_state_base_indices(logical_state_indices, checkpoint_stride);
+  const bool use_spec_verify = input_params.is_spec_verify;
+  const bool is_any_prefill =
+      attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
 
-  if (attn_metadata.is_prefill) {
+  if (!use_spec_verify && is_any_prefill) {
+    torch::IntArrayRef num_accepted_tokens_opt;
+    std::vector<int64_t> linear_state_indices_vec(
+        input_params.embedding.linear_state_ids.begin(),
+        input_params.embedding.linear_state_ids.end());
+    torch::Tensor conv_input = reshape_qkvz_unpad(attn_metadata, mixed_qkv);
+    mixed_qkv = xllm::kernel::causal_conv1d(
+        conv_input,
+        conv_weight,
+        conv_cache,
+        std::optional<torch::Tensor>(),  // bias (no bias for qwen3)
+        torch::IntArrayRef(input_params.parallel.query_start_loc),
+        torch::IntArrayRef(linear_state_indices_vec),
+        torch::IntArrayRef(input_params.parallel.has_initial_state),
+        num_accepted_tokens_opt,
+        1,   // activation_mode
+        -1,  // pad_slot_id
+        0    // run mode  0:fn, 1:update
+    );
+
+    mixed_qkv = reshape_qkvz_with_pad(attn_metadata, mixed_qkv);
     mixed_qkv = mixed_qkv.transpose(1, 2);
-    torch::Tensor conv_state =
-        (seq_len < conv_kernel_size_ - 1)
-            ? torch::pad(mixed_qkv, {0, conv_kernel_size_ - 1 - seq_len})
-        : (seq_len > conv_kernel_size_ - 1)
-            ? mixed_qkv.narrow(
-                  -1, seq_len - conv_kernel_size_ + 1, conv_kernel_size_ - 1)
-            : mixed_qkv;
-    conv_state = conv_state.transpose(1, 2).contiguous();
-    conv_cache.index_put_({linear_state_indices},
-                          conv_state.to(conv_cache.dtype()));
-    torch::Tensor bias;
-    auto conv_output =
-        torch::conv1d(mixed_qkv,
-                      conv_weight.unsqueeze(1).to(device),
-                      bias,
-                      /*stride=*/std::vector<int64_t>{1},
-                      /*padding=*/std::vector<int64_t>{3},
-                      /*dilation=*/std::vector<int64_t>{1},
-                      /*groups=*/static_cast<int64_t>(mixed_qkv.size(1)));
-    mixed_qkv = torch::silu(conv_output.slice(2, 0, seq_len));
-
+  } else if (use_spec_verify) {
+    CHECK(input_params.num_accepted_tokens.defined())
+        << "num_accepted_tokens must be populated for Qwen3.5 spec verify";
+    torch::Tensor conv_weight_for_update =
+        conv_weight.transpose(0, 1).contiguous();
+    torch::Tensor pre_conv_mixed_qkv = mixed_qkv.transpose(1, 2);
+    mixed_qkv =
+        run_spec_verify_conv(pre_conv_mixed_qkv,
+                             conv_cache,
+                             logical_state_indices,
+                             input_params.num_accepted_tokens.to(device),
+                             attn_metadata.q_cu_seq_lens,
+                             conv_weight_for_update,
+                             conv_kernel_size_);
   } else {
+    torch::Tensor conv_weight_for_update =
+        conv_weight.transpose(0, 1).contiguous();
     xllm::kernel::CausalConv1dUpdateParams conv1d_params;
     conv1d_params.x = mixed_qkv.reshape({-1, mixed_qkv.size(-1)});
-    conv1d_params.conv_state = conv_cache;
-    conv1d_params.weight = conv_weight;
-    conv1d_params.conv_state_indices = linear_state_indices;
+    conv1d_params.conv_state = conv_cache.transpose(1, 2);
+    conv1d_params.weight = conv_weight_for_update;
+    conv1d_params.conv_state_indices = logical_state_indices;
     conv1d_params.block_idx_last_scheduled_token =
         std::optional<torch::Tensor>();
     conv1d_params.initial_state_idx = std::optional<torch::Tensor>();
     conv1d_params.query_start_loc = attn_metadata.q_cu_seq_lens;
     conv1d_params.max_query_len = attn_metadata.max_query_len;
     mixed_qkv = xllm::kernel::causal_conv1d_update(conv1d_params);
+    // Reshape back to 3D [batch_size, dim, seq_len]
     mixed_qkv =
         mixed_qkv.view({batch_size, -1, mixed_qkv.size(-1)}).contiguous();
     mixed_qkv = mixed_qkv.transpose(1, 2);
   }
-
-  if (attn_metadata.is_prefill) {
+  const bool fla_ssm_state_layout = use_fla_ssm_state_layout();
+  const bool use_fused_sigmoid_gdn_decode =
+      fla_ssm_state_layout && !use_spec_verify && !is_any_prefill &&
+      checkpoint_stride == 1;
+  torch::Tensor g;
+  torch::Tensor beta;
+  // Compute gated delta net decay and beta terms.
+  if (use_spec_verify || attn_metadata.is_chunked_prefill ||
+      checkpoint_stride > 1) {
+    beta = torch::sigmoid(b);
+    torch::Tensor A_log_exp = A_log_.exp();
+    torch::Tensor a_float = a.to(torch::kFloat32);
+    torch::Tensor a_plus_dt = a_float + dt_bias_;
+    torch::Tensor softplus_out = torch::nn::functional::softplus(
+        a_plus_dt,
+        torch::nn::functional::SoftplusFuncOptions().beta(1.0).threshold(20.0));
+    g = -A_log_exp * softplus_out;
+    g = g.to(a.dtype()).contiguous();
+  } else if (attn_metadata.is_prefill) {
     xllm::kernel::FusedGdnGatingParams gdn_params;
     gdn_params.A_log = A_log_;
     gdn_params.a = a.contiguous().view({-1, a.size(-1)});
@@ -427,7 +648,7 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     std::tie(g, beta) = xllm::kernel::fused_gdn_gating(gdn_params);
     g = g.squeeze(0).contiguous().view({batch_size, seq_len, a.size(-1)});
     beta = beta.squeeze(0).contiguous().view({batch_size, seq_len, b.size(-1)});
-  } else {
+  } else if (!use_fused_sigmoid_gdn_decode) {
     xllm::kernel::FusedGdnGatingParams gdn_params;
     gdn_params.A_log = A_log_;
     gdn_params.a = a.view({-1, a.size(-1)});
@@ -438,52 +659,176 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     std::tie(g, beta) = xllm::kernel::fused_gdn_gating(gdn_params);
   }
   auto [processed_q, processed_k, processed_v] = process_mixed_qkv(mixed_qkv);
-  if (attn_metadata.is_prefill) {
+  torch::Tensor core_attn_out;
+  torch::Tensor last_recurrent_state;
+  // Apply chunked or recurrent gated-delta attention and update caches.
+  if (use_spec_verify) {
+    torch::Tensor spec_num_accepted_tokens = expand_sequence_tensor_to_batch(
+        input_params.num_accepted_tokens.to(device, torch::kInt32),
+        batch_size,
+        "num_accepted_tokens");
+    torch::Tensor spec_linear_state_base_indices =
+        expand_sequence_tensor_to_batch(
+            linear_state_base_indices, batch_size, "linear_state_base_indices");
+    torch::Tensor step_offsets =
+        torch::arange(seq_len,
+                      torch::TensorOptions()
+                          .dtype(spec_linear_state_base_indices.dtype())
+                          .device(device));
+    torch::Tensor checkpoint_indices =
+        spec_linear_state_base_indices.unsqueeze(1) + step_offsets;
+    double scale = 1.0 / std::sqrt(static_cast<float>(processed_q.size(-1)));
+    core_attn_out =
+        run_spec_verify_gated_delta_rule(processed_q,
+                                         processed_k,
+                                         processed_v,
+                                         g,
+                                         beta,
+                                         ssm_cache,
+                                         checkpoint_indices,
+                                         spec_num_accepted_tokens,
+                                         attn_metadata.q_cu_seq_lens,
+                                         attn_metadata.q_seq_lens_vec,
+                                         scale);
+  } else if (is_any_prefill) {
+    CHECK_GE(attn_metadata.q_seq_lens_vec.size(),
+             static_cast<size_t>(batch_size))
+        << "q_seq_lens_vec must be populated for Qwen3.5 prefill.";
+    std::vector<torch::Tensor> packed_q;
+    std::vector<torch::Tensor> packed_k;
+    std::vector<torch::Tensor> packed_v;
+    std::vector<torch::Tensor> packed_g;
+    std::vector<torch::Tensor> packed_beta;
+    packed_q.reserve(batch_size);
+    packed_k.reserve(batch_size);
+    packed_v.reserve(batch_size);
+    packed_g.reserve(batch_size);
+    packed_beta.reserve(batch_size);
+    for (int64_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
+      const int64_t valid_len = attn_metadata.q_seq_lens_vec[batch_idx];
+      packed_q.emplace_back(
+          processed_q[batch_idx].narrow(/*dim=*/0, /*start=*/0, valid_len));
+      packed_k.emplace_back(
+          processed_k[batch_idx].narrow(/*dim=*/0, /*start=*/0, valid_len));
+      packed_v.emplace_back(
+          processed_v[batch_idx].narrow(/*dim=*/0, /*start=*/0, valid_len));
+      packed_g.emplace_back(
+          g[batch_idx].narrow(/*dim=*/0, /*start=*/0, valid_len));
+      packed_beta.emplace_back(
+          beta[batch_idx].narrow(/*dim=*/0, /*start=*/0, valid_len));
+    }
+    torch::Tensor packed_processed_q = torch::cat(packed_q, 0).unsqueeze(0);
+    torch::Tensor packed_processed_k = torch::cat(packed_k, 0).unsqueeze(0);
+    torch::Tensor packed_processed_v = torch::cat(packed_v, 0).unsqueeze(0);
+    torch::Tensor packed_g_tensor = torch::cat(packed_g, 0).unsqueeze(0);
+    torch::Tensor packed_beta_tensor = torch::cat(packed_beta, 0).unsqueeze(0);
+
     xllm::kernel::ChunkGatedDeltaRuleParams chunk_gated_delta_params;
-    chunk_gated_delta_params.q = processed_q;
-    chunk_gated_delta_params.k = processed_k;
-    chunk_gated_delta_params.v = processed_v;
-    chunk_gated_delta_params.g = g;
-    chunk_gated_delta_params.beta = beta;
+    chunk_gated_delta_params.q = packed_processed_q;
+    chunk_gated_delta_params.k = packed_processed_k;
+    chunk_gated_delta_params.v = packed_processed_v;
+    chunk_gated_delta_params.g = packed_g_tensor;
+    chunk_gated_delta_params.beta = packed_beta_tensor;
+    // Get initial state from ssm_cache for sequences with previous state
+    // Shape: [batch_size, num_heads, head_k_dim, head_v_dim]
     torch::Tensor initial_state_tensor =
-        torch::index_select(ssm_cache, 0, linear_state_indices);
-    initial_state_tensor.fill_(0.0);
+        torch::index_select(ssm_cache, 0, linear_state_base_indices);
+    CHECK_EQ(input_params.parallel.has_initial_state.size(),
+             input_params.embedding.linear_state_ids.size())
+        << "has_initial_state must be sequence-scoped.";
+    for (size_t i = 0; i < input_params.parallel.has_initial_state.size();
+         ++i) {
+      if (input_params.parallel.has_initial_state[i] == 0) {
+        initial_state_tensor.select(0, static_cast<int64_t>(i)).fill_(0.0);
+      }
+    }
+    if (!fla_ssm_state_layout && attn_metadata.is_chunked_prefill) {
+      initial_state_tensor =
+          initial_state_tensor.transpose(-1, -2).contiguous();
+    }
     chunk_gated_delta_params.initial_state = initial_state_tensor;
     chunk_gated_delta_params.output_final_state = true;
     chunk_gated_delta_params.cu_seqlens = attn_metadata.q_cu_seq_lens;
     chunk_gated_delta_params.head_first = false;
     chunk_gated_delta_params.use_qk_l2norm_in_kernel = true;
-    std::tie(core_attn_out, last_recurrent_state) =
+    torch::Tensor packed_core_attn_out;
+    std::tie(packed_core_attn_out, last_recurrent_state) =
         xllm::kernel::chunk_gated_delta_rule(chunk_gated_delta_params);
-    ssm_cache.index_put_(
-        {linear_state_indices},
-        last_recurrent_state.transpose(-1, -2).to(ssm_cache.dtype()));
+    core_attn_out = torch::zeros_like(processed_v);
+    int64_t packed_offset = 0;
+    for (int64_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
+      const int64_t valid_len = attn_metadata.q_seq_lens_vec[batch_idx];
+      core_attn_out[batch_idx]
+          .narrow(/*dim=*/0, /*start=*/0, valid_len)
+          .copy_(packed_core_attn_out[0].narrow(
+              /*dim=*/0, packed_offset, valid_len));
+      packed_offset += valid_len;
+    }
+    torch::Tensor state_to_store = fla_ssm_state_layout
+                                       ? last_recurrent_state
+                                       : last_recurrent_state.transpose(-1, -2);
+    ssm_cache.index_put_({linear_state_base_indices},
+                         state_to_store.to(ssm_cache.dtype()));
+  } else if (checkpoint_stride > 1) {
+    auto ssm_state =
+        torch::index_select(ssm_cache, 0, linear_state_base_indices);
+    if (!fla_ssm_state_layout) {
+      ssm_state = ssm_state.transpose(-1, -2);
+    }
+    ssm_state = ssm_state.contiguous();
+    std::tie(core_attn_out, last_recurrent_state) =
+        torch_recurrent_gated_delta_rule(
+            processed_q, processed_k, processed_v, g, beta, ssm_state);
+    torch::Tensor state_to_store = fla_ssm_state_layout
+                                       ? last_recurrent_state
+                                       : last_recurrent_state.transpose(-1, -2);
+    ssm_cache.index_put_({linear_state_base_indices},
+                         state_to_store.to(ssm_cache.dtype()));
   } else {
-    processed_q = xllm::kernel::l2_norm(processed_q, 1e-6);
-    processed_k = xllm::kernel::l2_norm(processed_k, 1e-6);
-    auto zero = torch::zeros({1}, attn_metadata.q_seq_lens.options());
-    torch::Tensor actual_seq_lengths =
-        torch::cat({zero, attn_metadata.q_seq_lens}, 0);
     double scale = 1.0 / std::sqrt(static_cast<float>(processed_q.size(-1)));
-    core_attn_out = xllm::kernel::recurrent_gated_delta_rule(
-                        processed_q.reshape(
-                            {-1, processed_q.size(-2), processed_q.size(-1)}),
-                        processed_k.reshape(
-                            {-1, processed_k.size(-2), processed_k.size(-1)}),
-                        processed_v.reshape(
-                            {-1, processed_v.size(-2), processed_v.size(-1)}),
-                        ssm_cache,
-                        beta.squeeze(0).contiguous(),
-                        scale,
-                        actual_seq_lengths,
-                        linear_state_indices,
-                        c10::nullopt,
-                        g.squeeze(0).contiguous(),
-                        c10::nullopt)
-                        .unsqueeze(0)
-                        .contiguous();
+    if (fla_ssm_state_layout) {
+      xllm::kernel::FusedSigmoidGatingDeltaRuleUpdateParams params;
+      params.A_log = A_log_.contiguous();
+      params.a = a.contiguous();
+      params.dt_bias = dt_bias_.contiguous();
+      params.q = processed_q.contiguous();
+      params.k = processed_k.contiguous();
+      params.v = processed_v.contiguous();
+      params.b = b.contiguous();
+      params.initial_state_source = ssm_cache;
+      params.initial_state_indices = linear_state_base_indices.contiguous();
+      params.cu_seqlens = attn_metadata.q_cu_seq_lens.contiguous();
+      params.scale = static_cast<float>(scale);
+      params.use_qk_l2norm_in_kernel = true;
+      params.softplus_beta = 1.0f;
+      params.softplus_threshold = 20.0f;
+      core_attn_out =
+          xllm::kernel::fused_sigmoid_gating_delta_rule_update(params);
+    } else {
+      processed_q = xllm::kernel::l2_norm(processed_q, /*eps=*/1e-6);
+      processed_k = xllm::kernel::l2_norm(processed_k, /*eps=*/1e-6);
+      auto zero = torch::zeros({1}, attn_metadata.q_seq_lens.options());
+      torch::Tensor actual_seq_lengths =
+          torch::cat({zero, attn_metadata.q_seq_lens}, 0);
+      core_attn_out = xllm::kernel::recurrent_gated_delta_rule(
+                          processed_q.reshape(
+                              {-1, processed_q.size(-2), processed_q.size(-1)}),
+                          processed_k.reshape(
+                              {-1, processed_k.size(-2), processed_k.size(-1)}),
+                          processed_v.reshape(
+                              {-1, processed_v.size(-2), processed_v.size(-1)}),
+                          ssm_cache,
+                          beta.squeeze(0).contiguous(),
+                          scale,
+                          actual_seq_lengths,
+                          logical_state_indices,
+                          c10::nullopt,
+                          g.squeeze(0).contiguous(),
+                          c10::nullopt)
+                          .unsqueeze(0)
+                          .contiguous();
+    }
   }
-
   auto z_reshaped = z.view({-1, z.size(-1)});
   auto core_attn_out_reshaped =
       core_attn_out.view({-1, core_attn_out.size(-1)});
@@ -492,12 +837,21 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
   norm_out = norm_out.view(z_shape_og);
   norm_out = norm_out.view({-1, norm_out.size(2), norm_out.size(3)});
 
+  // Project the normalized attention output back to hidden size.
   auto rearranged_norm =
       norm_out.reshape({norm_out.size(0), norm_out.size(1) * norm_out.size(2)});
   rearranged_norm = reshape_qkvz_unpad(attn_metadata, rearranged_norm);
-
+  // For chunked prefill or spec verify, reshape_qkvz_with_pad may pad each
+  // batch to max_len, causing output tokens > original_num_tokens. We need to
+  // slice back to original_num_tokens to match residual shape for add_rms_norm.
+  if (rearranged_norm.size(0) > original_num_tokens) {
+    // Slice excess padding tokens
+    rearranged_norm =
+        rearranged_norm.slice(0, 0, original_num_tokens).contiguous();
+  }
   if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
-    return o_proj_->forward(rearranged_norm, RowParallelReduceMode::REDUCE_SCATTER, fc1_ctx);
+    return o_proj_->forward(
+        rearranged_norm, RowParallelReduceMode::REDUCE_SCATTER, fc1_ctx);
   }
   return o_proj_->forward(rearranged_norm);
 }
@@ -505,18 +859,29 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
 torch::Tensor Qwen3GatedDeltaNetBaseImpl::reshape_qkvz_unpad(
     const AttentionMetadata& attn_metadata,
     const torch::Tensor& padded_qkvz) const {
-  if (!attn_metadata.is_prefill) {
+  const bool has_padded_queries =
+      attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
+  if (!has_padded_queries) {
     return padded_qkvz;
   }
   std::vector<torch::Tensor> valid_batches;
-  int64_t bs = attn_metadata.q_seq_lens.size(0);
+  const bool has_host_lens = !attn_metadata.q_seq_lens_vec.empty();
+  int64_t bs = has_host_lens
+                   ? static_cast<int64_t>(attn_metadata.q_seq_lens_vec.size())
+                   : attn_metadata.q_seq_lens.size(0);
+  valid_batches.reserve(bs);
   int64_t max_len = attn_metadata.max_query_len;
   const auto& ori_seq_lens = attn_metadata.q_seq_lens;
   auto reshaped_qkvz = padded_qkvz.view({bs, max_len, -1});
   for (int64_t b = 0; b < bs; ++b) {
-    int64_t ori_len = ori_seq_lens[b].template item<int64_t>();
-    torch::Tensor valid_batch = reshaped_qkvz[b].slice(0, 0, ori_len);
-    valid_batches.push_back(valid_batch);
+    int64_t ori_len = has_host_lens ? attn_metadata.q_seq_lens_vec[b]
+                                    : ori_seq_lens[b].template item<int64_t>();
+    torch::Tensor valid_batch =
+        reshaped_qkvz[b].slice(/*dim=*/0, /*start=*/0, ori_len);
+    valid_batches.emplace_back(valid_batch);
+  }
+  if (valid_batches.size() == 1) {
+    return valid_batches[0].contiguous();
   }
   return torch::cat(valid_batches, 0).contiguous();
 }
@@ -524,41 +889,56 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::reshape_qkvz_unpad(
 torch::Tensor Qwen3GatedDeltaNetBaseImpl::get_linear_state_indices(
     const ModelInputParams& input_params,
     const torch::Device& device) const {
-  CHECK(!input_params.linear_state_ids.empty())
+  CHECK(!input_params.embedding.linear_state_ids.empty())
       << "linear_state_ids must be populated for gated delta net";
-  if (input_params.linear_state_indices.defined()) {
-    return input_params.linear_state_indices;
+  if (input_params.embedding.linear_state_indices.defined()) {
+    auto indices = input_params.embedding.linear_state_indices;
+    if (indices.device() != device || indices.scalar_type() != torch::kInt) {
+      indices =
+          indices.to(torch::TensorOptions().dtype(torch::kInt).device(device),
+                     /*non_blocking=*/true,
+                     /*copy=*/true);
+    }
+    return indices.contiguous();
   }
   return torch::tensor(
-      input_params.linear_state_ids,
+      input_params.embedding.linear_state_ids,
       torch::TensorOptions().dtype(torch::kInt).device(device));
 }
 
 torch::Tensor Qwen3GatedDeltaNetBaseImpl::reshape_qkvz_with_pad(
     const AttentionMetadata& attn_metadata,
     const torch::Tensor& qkvz) const {
-  int64_t bs = attn_metadata.q_seq_lens.size(0);
+  const bool has_host_lens = !attn_metadata.q_seq_lens_vec.empty();
+  int64_t bs = has_host_lens
+                   ? static_cast<int64_t>(attn_metadata.q_seq_lens_vec.size())
+                   : attn_metadata.q_seq_lens.size(0);
   int64_t max_len = attn_metadata.max_query_len;
   const auto& start_loc = attn_metadata.q_seq_lens;
-  if (!attn_metadata.is_prefill) {
-    return qkvz.view({qkvz.size(0), -1, qkvz.size(-1)});
+  const bool need_padding =
+      attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
+  if (!need_padding) {
+    return qkvz.view({bs, -1, qkvz.size(-1)});
   }
   std::vector<torch::Tensor> batches;
+  batches.reserve(bs);
   int64_t idx = 0;
   for (int64_t b = 0; b < bs; ++b) {
-    int64_t cur_len = start_loc[b].template item<int64_t>();
-    torch::Tensor batch = qkvz.slice(0, idx, idx + cur_len).contiguous();
+    int64_t cur_len = has_host_lens ? attn_metadata.q_seq_lens_vec[b]
+                                    : start_loc[b].template item<int64_t>();
+    torch::Tensor batch =
+        qkvz.slice(/*dim=*/0, idx, idx + cur_len).contiguous();
     idx = idx + cur_len;
     if (batch.size(0) != max_len) {
       batch = batch.size(0) > max_len
-                  ? batch.slice(0, 0, max_len).contiguous()
+                  ? batch.slice(/*dim=*/0, /*start=*/0, max_len).contiguous()
                   : torch::nn::functional::pad(
                         batch,
                         torch::nn::functional::PadFuncOptions(
                             {0, 0, 0, max_len - batch.size(0)}))
                         .contiguous();
     }
-    batches.push_back(batch);
+    batches.emplace_back(batch);
   }
   auto ret = torch::stack(batches, 0).contiguous();
   return ret;

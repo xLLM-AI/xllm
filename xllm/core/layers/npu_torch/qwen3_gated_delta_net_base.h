@@ -46,31 +46,39 @@ class Qwen3GatedDeltaNetBaseImpl : public torch::nn::Module {
   virtual void load_state_dict(const StateDict& state_dict) = 0;
   virtual void verify_loaded_weights(const std::string& prefix) const = 0;
 
-torch::Tensor forward(const torch::Tensor& hidden_states,
-                         const AttentionMetadata& attn_metadata,
-                         KVCache& kv_cache,
-                         const ModelInputParams& input_params);
+  torch::Tensor forward(const torch::Tensor& hidden_states,
+                        const AttentionMetadata& attn_metadata,
+                        KVCache& kv_cache,
+                        const ModelInputParams& input_params);
 
   torch::Tensor forward(const torch::Tensor& hidden_states,
-                         const AttentionMetadata& attn_metadata,
-                         KVCache& kv_cache,
-                         const ModelInputParams& input_params,
-                         const FlashComm1Context* fc1_ctx);
+                        const AttentionMetadata& attn_metadata,
+                        KVCache& kv_cache,
+                        const ModelInputParams& input_params,
+                        const FlashComm1Context* fc1_ctx);
 
  protected:
-  virtual std::pair<torch::Tensor, torch::Tensor> project_padded_inputs(
-      const torch::Tensor& hidden_states,
-      const AttentionMetadata& attn_metadata) = 0;
+  virtual std::pair<torch::Tensor, torch::Tensor> project_decode_inputs(
+      const torch::Tensor& hidden_states) = 0;
+  virtual std::pair<torch::Tensor, torch::Tensor> project_flat_inputs(
+      const torch::Tensor& hidden_states) = 0;
+  virtual bool use_fla_ssm_state_layout() const { return false; }
 
   void load_common_state_dict(const StateDict& state_dict);
   void verify_common_loaded_weights(const std::string& prefix) const;
 
-  torch::Tensor reshape_qkvz_with_pad(const AttentionMetadata& attn_metadata,
-                                      const torch::Tensor& qkvz) const;
-  torch::Tensor reshape_qkvz_unpad(const AttentionMetadata& attn_metadata,
-                                   const torch::Tensor& padded_qkvz) const;
   torch::Tensor get_linear_state_indices(const ModelInputParams& input_params,
                                          const torch::Device& device) const;
+
+  std::pair<torch::Tensor, torch::Tensor> project_padded_inputs(
+      const torch::Tensor& hidden_states,
+      const AttentionMetadata& attn_metadata);
+
+  torch::Tensor reshape_qkvz_unpad(const AttentionMetadata& attn_metadata,
+                                   const torch::Tensor& padded_qkvz) const;
+
+  torch::Tensor reshape_qkvz_with_pad(const AttentionMetadata& attn_metadata,
+                                      const torch::Tensor& qkvz) const;
 
   std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> process_mixed_qkv(
       torch::Tensor& mixed_qkv) const;

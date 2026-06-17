@@ -30,8 +30,10 @@ limitations under the License.
 #include "glm4v.h"
 #include "models/llm/npu/oxygen.h"
 #include "models/model_registry.h"
+#include "models/vlm/mposition/mposition.h"
+#include "models/vlm/utils/multimodal_utils.h"
 #include "processors/qwen2_vl_image_processor.h"
-#include "processors/qwen2_vl_input_processor.h"
+#include "processors/qwen2_vl_video_processor.h"
 #include "qwen2_5_vl.h"
 #include "torch_npu/csrc/aten/CustomFunctions.h"
 
@@ -41,7 +43,17 @@ class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
   OxygenvlmForConditionalGenerationImpl(const ModelContext& context)
       : model_args_(context.get_model_args()),
         options_(context.get_tensor_options()) {
-    visual_ = register_module("visual", Glm4VisionTransformer(context));
+    encoder_dp_group_ = context.get_parallel_args().encoder_dp_group_;
+    use_encoder_dp_ =
+        encoder_dp_group_ != nullptr && encoder_dp_group_->world_size() > 1;
+    if (use_encoder_dp_) {
+      ModelContext visual_context = context.with_parallel_args(ParallelArgs(
+          /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr));
+      visual_ =
+          register_module("visual", Glm4VisionTransformer(visual_context));
+    } else {
+      visual_ = register_module("visual", Glm4VisionTransformer(context));
+    }
 
     language_model_ =
         register_module("language_model", OxygenForCausalLM(context));
@@ -50,7 +62,7 @@ class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
   void prepare_encoder_input(const ModelInputParams& input_params,
                              std::optional<Glm4VImageInputs>& image_inputs,
                              std::optional<Glm4VVideoInputs>& video_inputs) {
-    const auto& mm_data = input_params.mm_data;
+    const auto& mm_data = input_params.multimodal.mm_data;
     torch::Tensor pixel_values;
     if (const auto& res = mm_data.get<torch::Tensor>("pixel_values"))
       pixel_values = res.value();
@@ -79,62 +91,39 @@ class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
     std::optional<Glm4VVideoInputs> video_input;
     prepare_encoder_input(input_params, image_input, video_input);
 
-    auto merge_size = model_args_.mm_image_merge_size();
     MMDict multimodal_embeds;
     if (image_input) {
-      // visual
-      auto image_embeds = visual_(image_input->pixel_values.to(options_),
-                                  image_input->image_grid_thw,
-                                  input_params);
-      auto image_tokens =
-          (image_input->image_grid_thw.prod(-1) / merge_size / merge_size)
-              .cpu()
-              .contiguous()
-              .to(torch::kLong);
-
-      std::vector<int64_t> image_tokens_vec(
-          image_tokens.data_ptr<int64_t>(),
-          image_tokens.data_ptr<int64_t>() + image_tokens.numel());
-      multimodal_embeds["image|embedding"] =
-          image_embeds.split(image_tokens_vec, 0);
+      torch::Tensor image_pixels = image_input->pixel_values.to(options_);
+      torch::Tensor image_grid =
+          image_input->image_grid_thw.to(options_.device());
+      std::vector<int32_t> image_token_nums =
+          get_mm_token_nums(input_params.multimodal.mm_data, MMType::IMAGE);
+      if (!use_encoder_dp_) {
+        auto image_embeds = visual_(image_pixels, image_grid);
+        multimodal_embeds["image|embedding"] =
+            split_by_token_nums(image_embeds, image_token_nums);
+      } else {
+        multimodal_embeds["image|embedding"] =
+            run_dp_encoder(visual_,
+                           image_pixels,
+                           image_grid,
+                           image_token_nums,
+                           model_args_.mm_projection_dim(),
+                           encoder_dp_group_);
+      }
     }
     if (video_input) {
-      std::vector<torch::Tensor> temp_frames_hw;
-      for (int i = 0; i < video_input->video_grid_thw.size(0); ++i) {
-        auto t = video_input->video_grid_thw[i][0].item<int32_t>();
-        auto h = video_input->video_grid_thw[i][1].item<int32_t>();
-        auto w = video_input->video_grid_thw[i][2].item<int32_t>();
-        auto repeated_row =
-            torch::tensor({1, h, w}).unsqueeze(0).repeat({t, 1});
-        temp_frames_hw.push_back(repeated_row);
-      }
-      auto flatten_video_grid_thw = torch::cat(temp_frames_hw, 0);
-      // visual
-      auto video_embeds = visual_(video_input->pixel_values_videos.to(options_),
-                                  flatten_video_grid_thw,
-                                  input_params);
-      auto t = video_input->video_grid_thw.index({torch::indexing::Slice(), 0});
-      auto video_tokens =
-          ((video_input->video_grid_thw.prod(-1) / merge_size / merge_size) / t)
-              .cpu()
-              .contiguous()
-              .to(torch::kLong);
-      std::vector<int64_t> video_tokens_vec(
-          video_tokens.data_ptr<int64_t>(),
-          video_tokens.data_ptr<int64_t>() + video_tokens.numel());
-
+      torch::Tensor video_pixels =
+          video_input->pixel_values_videos.to(options_);
+      torch::Tensor video_grid =
+          video_input->video_grid_thw.to(options_.device());
+      std::vector<int32_t> video_token_nums =
+          get_mm_token_nums(input_params.multimodal.mm_data, MMType::VIDEO);
+      auto video_embeds = visual_(video_pixels, video_grid);
       multimodal_embeds["video|embedding"] =
-          video_embeds.split(video_tokens_vec, 0);
+          split_by_token_nums(video_embeds, video_token_nums);
     }
     return multimodal_embeds;
-  }
-
-  torch::Tensor generate_multimodal_mask(torch::Tensor input_ids) {
-    auto special_token_ids =
-        torch::tensor({model_args_.image_token_id()},
-                      input_ids.options().dtype(torch::kInt64));
-    auto is_multimodal = torch::isin(input_ids, special_token_ids);
-    return is_multimodal;
   }
 
   torch::Tensor merge_multimodal_embeddings(
@@ -144,21 +133,23 @@ class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
     inputs_embeds.index_put_({is_multimodal}, multimodal_embeds);
     return inputs_embeds;
   }
-
   torch::Tensor get_input_embeddings(const torch::Tensor input_ids,
                                      const ModelInputParams& input_params) {
-    const auto& mm_data = input_params.mm_data;
-    torch::Tensor multimodal_embeds;
-    if (const auto& emb = mm_data.get<torch::Tensor>("embedding")) {
-      multimodal_embeds = emb.value();
-    }
+    const auto& mm_data = input_params.multimodal.mm_data;
     auto inputs_embeds = language_model_->get_input_embeddings(input_ids);
-    if (!multimodal_embeds.defined()) {
-      return inputs_embeds;
-    }
-    auto is_multimodal = generate_multimodal_mask(input_ids);
-    inputs_embeds = merge_multimodal_embeddings(
-        inputs_embeds, multimodal_embeds, is_multimodal);
+    auto merge_modality = [&](const std::string& embed_key,
+                              const std::string& mask_key) {
+      auto emb = mm_data.get<torch::Tensor>(embed_key);
+      if (!emb.has_value()) return;
+      auto mask = mm_data.get<torch::Tensor>(mask_key);
+      if (!mask.has_value()) return;
+      inputs_embeds =
+          merge_multimodal_embeddings(inputs_embeds, emb.value(), mask.value());
+    };
+
+    merge_modality("image|embedding", "image|mask");
+    merge_modality("video|embedding", "video|mask");
+
     return inputs_embeds;
   }
 
@@ -182,7 +173,7 @@ class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
     }
     visual_->verify_loaded_weights("model.visual.");
     visual_->merge_loaded_weights();
-    if (!model_args_.image_embedding_mode()) {
+    if (!model_args_.encoder_embedding_mode()) {
       language_model_->load_model(std::move(loader), "model.language_model.");
     }
   }
@@ -205,14 +196,19 @@ class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
  private:
   ModelArgs model_args_;
   torch::TensorOptions options_;
+  ProcessGroup* encoder_dp_group_ = nullptr;
+  bool use_encoder_dp_ = false;
   Glm4VisionTransformer visual_{nullptr};
   OxygenForCausalLM language_model_{nullptr};
 };
 TORCH_MODULE(OxygenvlmForConditionalGeneration);
 
-REGISTER_INPUT_PROCESSOR(oxygenvlm, Qwen2_5_VLInputProcessor);
+using OxygenVLMultimodalProcessor = MultimodalProcessor<Qwen2VLPromptProcessor,
+                                                        Qwen2VLImageProcessor,
+                                                        Qwen2VLVideoProcessor>;
+REGISTER_MULTIMODAL_PROCESSOR(oxygenvlm, OxygenVLMultimodalProcessor);
 REGISTER_CAUSAL_VLM_MODEL(oxygenvlm, OxygenvlmForConditionalGeneration);
-REGISTER_IMAGE_PROCESSOR(oxygenvlm, Qwen2VLImageProcessor);
+REGISTER_MPOSITION_GENERATOR(oxygenvlm, xllm::QwenVLMPositionGenerator);
 // register the model args
 REGISTER_MODEL_ARGS(oxygenvlm, [&] {
   LOAD_ARG_OR(model_type, "model_type", "oxygenvlm");

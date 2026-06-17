@@ -41,6 +41,21 @@ cc_library (
     absl::strings
 )
 
+cc_library (
+  NAME
+    deepseek_v4_cpp_template
+  HDRS
+    deepseek_v4_cpp_template.h
+  SRCS
+    deepseek_v4_cpp_template.cpp
+  DEPS
+    :chat_template_base
+    :tokenizer
+    nlohmann_json::nlohmann_json
+    glog::glog
+    absl::strings
+)
+
 # Factory (depends on all implementations)
 cc_library (
   NAME
@@ -51,8 +66,8 @@ cc_library (
     :chat_template_base
     :jinja_chat_template
     :deepseek_v32_cpp_template
+    :deepseek_v4_cpp_template
     nlohmann_json::nlohmann_json
     glog::glog
     gflags
 )
-

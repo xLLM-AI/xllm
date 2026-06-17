@@ -28,6 +28,8 @@ namespace function_call {
 class DeepSeekV32Detector : public BaseFormatDetector {
  public:
   DeepSeekV32Detector();
+  DeepSeekV32Detector(const std::string& tool_calls_start_token,
+                      const std::string& tool_calls_end_token);
 
   virtual ~DeepSeekV32Detector() = default;
 
@@ -66,6 +68,11 @@ class DeepSeekV32Detector : public BaseFormatDetector {
   std::vector<ToolCallItem> parse_json_tool_calls(
       const std::string& text,
       const std::vector<JsonTool>& tools);
+};
+
+class DeepSeekV4Detector final : public DeepSeekV32Detector {
+ public:
+  DeepSeekV4Detector();
 };
 
 }  // namespace function_call

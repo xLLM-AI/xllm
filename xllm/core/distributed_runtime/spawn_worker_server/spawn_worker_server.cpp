@@ -21,9 +21,16 @@ limitations under the License.
 #include <signal.h>
 #include <unistd.h>
 
+#include "core/common/global_flags.h"
 #include "core/distributed_runtime/worker_server.h"
+#include "core/framework/config/distributed_config.h"
+#include "core/framework/config/eplb_config.h"
+#include "core/framework/config/kernel_config.h"
+#include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/parallel_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/platform/device.h"
-#if defined(USE_CUDA) || defined(USE_MLU)
+#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
 #include "core/platform/numa_utils.h"
 #endif
 #include "core/runtime/options.h"
@@ -50,12 +57,14 @@ std::string get_backend_from_worker_type(const std::string& worker_type) {
 }  // namespace
 
 SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
-                                     int local_rank,
-                                     int global_rank,
-                                     int world_size,
-                                     int device_idx,
-                                     int num_decoding_tokens,
-                                     int block_size,
+                                     int32_t local_rank,
+                                     int32_t global_rank,
+                                     int32_t world_size,
+                                     int32_t device_idx,
+                                     int32_t num_decoding_tokens,
+                                     int32_t block_size,
+                                     int32_t max_tokens_per_batch,
+                                     int32_t max_seqs_per_batch,
                                      bool enable_shm,
                                      uint64_t input_shm_size,
                                      uint64_t output_shm_size,
@@ -63,7 +72,17 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
                                      bool enable_prefill_sp,
                                      const std::string& task_type,
                                      const std::string& worker_type,
-                                     const std::string& communication_backend) {
+                                     bool enable_speculative_decode,
+                                     int32_t num_speculative_tokens,
+                                     const std::string& speculative_algorithm,
+                                     const std::string& communication_backend,
+                                     const std::string& npu_kernel_backend,
+                                     const std::string& rank_tablefile,
+                                     bool enable_graph,
+                                     bool enable_graph_mode_decode_no_padding,
+                                     bool enable_prefill_piecewise_graph,
+                                     int32_t max_tokens_for_graph_mode,
+                                     int64_t max_encoder_cache_size) {
   // TODO: pass whole xllm::runtime::Options here from main process.
   xllm::runtime::Options runner_options;
   const std::string backend = get_backend_from_worker_type(worker_type);
@@ -71,21 +90,38 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
                           << worker_type;
   runner_options.block_size(block_size)
       .backend(backend)
+      .world_size(world_size)
+      .max_tokens_per_batch(max_tokens_per_batch)
+      .max_seqs_per_batch(max_seqs_per_batch)
       .num_decoding_tokens(num_decoding_tokens)
       .enable_prefill_sp(enable_prefill_sp)
-      .enable_schedule_overlap(false)
-      .enable_offline_inference(true)
+      .enable_speculative_decode(enable_speculative_decode)
+      .num_speculative_tokens(num_speculative_tokens)
+      .speculative_algorithm(speculative_algorithm)
+      .enable_schedule_overlap(/*enable_schedule_overlap=*/false)
+      .enable_offline_inference(/*enable_offline_inference=*/true)
       .master_node_addr(master_node_addr)
       .enable_shm(enable_shm)
       .input_shm_size(input_shm_size)
       .output_shm_size(output_shm_size)
       .is_local(is_local)
-      .task_type(task_type);
-  FLAGS_enable_schedule_overlap = false;
-  FLAGS_enable_prefill_sp = enable_prefill_sp;
-  FLAGS_master_node_addr = master_node_addr;
-  FLAGS_block_size = block_size;
-  FLAGS_communication_backend = communication_backend;
+      .npu_kernel_backend(npu_kernel_backend)
+      .enable_graph(enable_graph)
+      .enable_graph_mode_decode_no_padding(enable_graph_mode_decode_no_padding)
+      .enable_prefill_piecewise_graph(enable_prefill_piecewise_graph)
+      .max_tokens_for_graph_mode(max_tokens_for_graph_mode)
+      .task_type(task_type)
+      .max_encoder_cache_size(max_encoder_cache_size);
+  SchedulerConfig::get_instance()
+      .max_tokens_per_batch(max_tokens_per_batch)
+      .max_seqs_per_batch(max_seqs_per_batch)
+      .enable_schedule_overlap(false);
+  ParallelConfig::get_instance()
+      .enable_prefill_sp(enable_prefill_sp)
+      .communication_backend(communication_backend);
+  DistributedConfig::get_instance().master_node_addr(master_node_addr);
+  KVCacheConfig::get_instance().block_size(block_size);
+  EPLBConfig::get_instance().rank_tablefile(rank_tablefile);
 
   const std::string device_type = xllm::Device::type_str();
   const std::string device_str = device_type + ":" + std::to_string(device_idx);
@@ -94,10 +130,10 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
 
 #if defined(USE_NPU)
   device.init_device_context();
+  KernelConfig::get_instance().npu_kernel_backend(npu_kernel_backend);
   FLAGS_enable_atb_comm_multiprocess = true;
 #endif
-
-#if defined(USE_CUDA) || defined(USE_MLU)
+#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
   // Bind worker process to the same NUMA node as the device
   // This prevents the process from spanning across NUMA nodes, which would
   // significantly degrade memory access and other performance aspects
@@ -119,9 +155,9 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
   ParallelArgs parallel_args(global_rank,
                              world_size,
                              /* dp_size = */ 1,
-                             /*cp_size = */ 1,
-                             /*process_group = */ nullptr,
-                             /*ep_size = */ 1);
+                             /* cp_size = */ 1,
+                             /* process_group = */ nullptr,
+                             /* ep_size = */ 1);
   worker_server_ = std::make_unique<WorkerServer>(local_rank,
                                                   master_node_addr,
                                                   done_,

@@ -17,10 +17,12 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <type_traits>
 
 #include "common/global_flags.h"
+#include "core/util/env_var.h"
 #include "device.h"
 
 namespace xllm {
@@ -44,6 +46,13 @@ inline void* to_void_ptr(PtrT ptr) {
   } else {
     return reinterpret_cast<void*>(static_cast<std::uintptr_t>(ptr));
   }
+}
+
+inline size_t align_up(size_t value, size_t alignment) {
+  if (alignment == 0) {
+    return value;
+  }
+  return ((value + alignment - 1) / alignment) * alignment;
 }
 
 }  // namespace
@@ -88,22 +97,46 @@ void SharedVMMAllocator::init(int32_t device_id, size_t reserve_size) {
 
   device_id_ = device_id;
 
-  // Get device total memory if reserve_size not specified
-  if (reserve_size == 0) {
-    Device device(device_id);
-    int64_t total_mem = device.total_memory();
-    // Reserve 1.125x device memory for each virtual address space
-    reserve_size = static_cast<size_t>(total_mem + total_mem / 8);
-  }
+#if defined(USE_DCU)
+  CHECK_EQ(hipSetDevice(device_id_), hipSuccess)
+      << "hipSetDevice failed for device " << device_id_;
+  CHECK_EQ(hipFree(nullptr), hipSuccess)
+      << "hipFree(nullptr) failed when initializing HIP context";
+#endif
 
   granularity_ = vmm::get_recommended_granularity(device_id_);
   CHECK_GT(granularity_, 0u) << "Invalid VMM granularity size";
 
-  // Align reserve_size to granularity
-  reserved_size_ =
-      (reserve_size + granularity_ - 1) / granularity_ * granularity_;
+  if (reserve_size == 0) {
+    Device device(device_id);
+    int64_t total_mem = device.total_memory();
 
-  // Create the first virtual address space
+#if defined(USE_DCU)
+    constexpr int64_t kDefaultDcuVmmReserveMb = 64;
+    int64_t reserve_mb =
+        util::get_int_env("XLLM_DCU_VMM_RESERVE_MB", kDefaultDcuVmmReserveMb);
+    if (reserve_mb <= 0) {
+      reserve_mb = kDefaultDcuVmmReserveMb;
+    }
+
+    reserve_size = static_cast<size_t>(reserve_mb) * 1024ULL * 1024ULL;
+    reserve_size =
+        std::min<size_t>(static_cast<size_t>(total_mem), reserve_size);
+#else
+    reserve_size = static_cast<size_t>(total_mem + total_mem / 8);
+#endif
+  }
+
+  reserved_size_ = align_up(reserve_size, granularity_);
+
+  LOG(INFO) << "SharedVMMAllocator init: device=" << device_id_
+            << ", reserve_size=" << reserve_size << " bytes ("
+            << reserve_size / (1024 * 1024) << " MB)"
+            << ", granularity=" << granularity_ << " bytes ("
+            << granularity_ / (1024 * 1024) << " MB)"
+            << ", aligned reserved_size=" << reserved_size_ << " bytes ("
+            << reserved_size_ / (1024 * 1024) << " MB)";
+
   VirtualSpace first_space;
   vmm::create_vir_ptr(first_space.base_ptr, reserved_size_);
   first_space.reserved_size = reserved_size_;

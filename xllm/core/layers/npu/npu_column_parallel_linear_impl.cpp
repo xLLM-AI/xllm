@@ -16,6 +16,8 @@ limitations under the License.
 #include "layers/npu/npu_column_parallel_linear_impl.h"
 
 #include "common/global_flags.h"
+#include "core/framework/config/load_config.h"
+#include "core/framework/config/parallel_config.h"
 namespace xllm {
 namespace layer {
 
@@ -29,7 +31,8 @@ void NpuColumnParallelLinearImpl::param_from_args(
 
   if (parallel_args.world_size() > 1) {
     if (parallel_args.mapping_data().empty()) {
-      if (dp_size_ > 1) {
+      const bool use_local_tp = (dp_size_ > 1) || (cp_size_ > 1);
+      if (use_local_tp) {
         param.tensorParallelInfo.rank = dp_local_tp_rank_;
         param.tensorParallelInfo.worldSize = dp_local_tp_size_;
       } else {
@@ -37,15 +40,18 @@ void NpuColumnParallelLinearImpl::param_from_args(
         param.tensorParallelInfo.worldSize = parallel_args.world_size();
       }
       param.parallelType = atb_speed::common::COLUMN_PARALLEL;
-      param.tensorParallelInfo.commDomain = std::to_string(dp_rank_);
-      param.tensorParallelInfo.backend = "lccl";
+      const int32_t tp_group_id =
+          use_local_tp ? (parallel_args.rank() / dp_local_tp_size_) : 0;
+      param.tensorParallelInfo.commDomain = std::to_string(tp_group_id);
+      param.tensorParallelInfo.backend = FLAGS_communication_backend;
     } else {
       param.parallelType = atb_speed::common::COLUMN_PARALLEL;
       atb_speed::common::ParallelInfo parallelInfo =
-          parallel_args.mapping().Get(atb_speed::base::WORD_EMBED_TP);
+          parallel_args.mapping().Get(atb_speed::base::ATTN_TP);
       param.tensorParallelInfo.rank = parallelInfo.rank;
       param.tensorParallelInfo.worldSize = parallelInfo.rankIds.size();
-      param.tensorParallelInfo.backend = FLAGS_communication_backend;
+      param.tensorParallelInfo.backend =
+          ::xllm::ParallelConfig::get_instance().communication_backend();
       parallelInfo.InitCommDomain(param.tensorParallelInfo.hcommInfo,
                                   param.tensorParallelInfo.commDomain);
     }
@@ -64,7 +70,7 @@ NpuColumnParallelLinearImpl::NpuColumnParallelLinearImpl(
   dtype_ = c10::typeMetaToScalarType(options.dtype());
   tensor_placeholder_ = torch::zeros({1}).to(options);
   placeholder_ = atb_speed::Utils::AtTensor2Tensor(tensor_placeholder_);
-  if (FLAGS_enable_manual_loader) {
+  if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
     loader_ = std::make_unique<ColumParallelLinearLoader>(
         1, context, LoadMode::kManual);
   } else {

@@ -45,8 +45,11 @@ TiktokenTokenizer::TiktokenTokenizer(const std::string_view& dir_path,
 
   // add special tokens and construct special token regex
   if (!args.special_tokens().empty()) {
-    const auto vocab_size = encoder_.size();
     load_special_tokens(args.special_tokens());
+  }
+
+  if (!args.visible_special_tokens().empty()) {
+    load_visible_special_tokens(args.visible_special_tokens());
   }
 
   // construct regex
@@ -109,6 +112,22 @@ void TiktokenTokenizer::load_special_tokens(
     // surround with () to match special tokens
     const auto regex_str = absl::StrCat("(", special_token_regex_str, ")");
     special_token_regex_ = std::make_unique<re2::RE2>(regex_str);
+  }
+}
+
+void TiktokenTokenizer::load_visible_special_tokens(
+    const std::vector<std::string>& visible_special_tokens) {
+  for (const auto& token : visible_special_tokens) {
+    if (token.empty()) {
+      continue;
+    }
+
+    const auto token_id = token_to_id(token);
+    if (!token_id.has_value()) {
+      LOG(WARNING) << "Failed to find visible special token: " << token;
+      continue;
+    }
+    visible_special_token_ids_.insert(token_id.value());
   }
 }
 
@@ -301,7 +320,7 @@ std::string TiktokenTokenizer::decode(const Slice<int32_t>& ids,
     // encode special token
     const auto sit = special_token_decoder_.find(id);
     if (sit != special_token_decoder_.end()) {
-      if (!skip_special_tokens) {
+      if (!skip_special_tokens || visible_special_token_ids_.contains(id)) {
         ss << sit->second;
       }
       continue;
@@ -319,7 +338,7 @@ std::string TiktokenTokenizer::decode(const Slice<int32_t>& ids,
   std::string data = ss.str();
   absl::string_view bytes(data);
 
-  // replace unfinished utf8 bytes with � (U+FFFD)
+  // replace unfinished UTF-8 bytes with U+FFFD.
   std::stringstream utf8_ss;
   size_t offset = 0;
   while (offset < bytes.size()) {
@@ -329,8 +348,7 @@ std::string TiktokenTokenizer::decode(const Slice<int32_t>& ids,
     if (is_valid) {
       utf8_ss << bytes.substr(offset, consumed);
     } else {
-      // add replacement character � (U+FFFD) in UTF-8
-      utf8_ss << "�";
+      utf8_ss << "\xEF\xBF\xBD";
       break;
     }
     offset += consumed;

@@ -32,7 +32,7 @@ class PrefillOnlyScheduler final : public ContinuousScheduler {
       double& estimate_latency,
       size_t& remaining_token_budget,
       size_t& remaining_seq_budget,
-      RequestPriorityQueue& waiting_priority_queue,
+      RequestPriorityQueue* waiting_priority_queue,
       size_t& num_online_prefill_preempt_offline_requests,
       std::vector<std::shared_ptr<Request>>& finished_requests);
   void handle_last_step_prefill_requests(

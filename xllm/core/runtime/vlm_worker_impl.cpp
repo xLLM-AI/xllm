@@ -46,7 +46,7 @@ bool VLMWorkerImpl::init_model(ModelContext& context) {
   CHECK(model_ == nullptr) << "Model is already initialized.";
 
   // initialize model
-  context.set_image_embedding_mode(false);
+  context.set_encoder_embedding_mode(false);
   model_ = create_vlm_model(context);
   CHECK(model_ != nullptr) << "Failed to create model.";
   model_executor_ = std::make_unique<Executor>(
@@ -56,6 +56,13 @@ bool VLMWorkerImpl::init_model(ModelContext& context) {
 
 std::optional<ForwardOutput> VLMWorkerImpl::step(const ForwardInput& input) {
   Timer timer;
+  const bool empty_shard =
+      input.input_params.meta.num_sequences == 0 &&
+      (!input.token_ids.defined() || input.token_ids.numel() == 0);
+  if (empty_shard) {
+    return ForwardOutput{};
+  }
+
   // TODO guojinrong, to adapt multi stream parallel later
   // call model executor forward to get hidden states
   auto model_output = model_executor_->forward(

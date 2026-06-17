@@ -45,6 +45,14 @@ limitations under the License.
 
 namespace xllm {
 
+namespace layer {
+struct AttentionMetadata;
+}
+
+struct ModelGraphMetadataState {
+  virtual ~ModelGraphMetadataState() = default;
+};
+
 class CausalLM : public torch::nn::Module {
  public:
   ~CausalLM() override = default;
@@ -56,6 +64,17 @@ class CausalLM : public torch::nn::Module {
                               const torch::Tensor& positions,
                               std::vector<KVCache>& kv_caches,
                               const ModelInputParams& parameters) = 0;
+
+  virtual bool requires_graph_forward_metadata() { return false; }
+
+  virtual std::unique_ptr<ModelGraphMetadataState>
+  create_graph_forward_metadata_state() {
+    return nullptr;
+  }
+
+  virtual void prepare_graph_forward_metadata(ModelGraphMetadataState*,
+                                              const torch::Tensor&,
+                                              ModelInputParams&) {}
 
   // hidden_states: [num_tokens, hidden_size]
   // seleted_idxes: [num_tokens]
@@ -73,6 +92,17 @@ class CausalLM : public torch::nn::Module {
   // returns: [num_tokens, vocab_size]
   virtual torch::Tensor logits(const torch::Tensor& hidden_states,
                                const torch::Tensor& seleted_idxes) = 0;
+
+  // hidden_states: [num_tokens, hidden_size]
+  // seleted_idxes: [num_tokens]
+  // out_hidden: [num_selected_tokens, hidden_size]
+  // returns: [num_selected_tokens, vocab_size]
+  virtual torch::Tensor logits(const torch::Tensor& hidden_states,
+                               const torch::Tensor& seleted_idxes,
+                               torch::Tensor& out_hidden) {
+    NOT_IMPLEMENTED();
+    return torch::Tensor();
+  }
 
   virtual void load_model(std::unique_ptr<ModelLoader> loader) = 0;
 
@@ -148,6 +178,32 @@ class CausalLMImpl : public CausalLM {
     return model_->forward(tokens, positions, kv_caches, parameters);
   }
 
+  bool requires_graph_forward_metadata() override {
+    if constexpr (detail::has_requires_graph_forward_metadata<Model>::value) {
+      return model_->requires_graph_forward_metadata();
+    } else {
+      return CausalLM::requires_graph_forward_metadata();
+    }
+  }
+
+  std::unique_ptr<ModelGraphMetadataState> create_graph_forward_metadata_state()
+      override {
+    if constexpr (detail::has_create_graph_forward_metadata_state<
+                      Model>::value) {
+      return model_->create_graph_forward_metadata_state();
+    } else {
+      return CausalLM::create_graph_forward_metadata_state();
+    }
+  }
+
+  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
+                                      const torch::Tensor& positions,
+                                      ModelInputParams& parameters) override {
+    if constexpr (detail::has_prepare_graph_forward_metadata<Model>::value) {
+      model_->prepare_graph_forward_metadata(state, positions, parameters);
+    }
+  }
+
   torch::Tensor pooler(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) override {
     return model_->pooler(hidden_states, seleted_idxes);
@@ -156,6 +212,16 @@ class CausalLMImpl : public CausalLM {
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) override {
     return model_->logits(hidden_states, seleted_idxes);
+  }
+
+  torch::Tensor logits(const torch::Tensor& hidden_states,
+                       const torch::Tensor& seleted_idxes,
+                       torch::Tensor& out_hidden) override {
+    if constexpr (detail::has_logits_with_hidden<Model>::value) {
+      return model_->logits(hidden_states, seleted_idxes, out_hidden);
+    } else {
+      return CausalLM::logits(hidden_states, seleted_idxes, out_hidden);
+    }
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader) override {

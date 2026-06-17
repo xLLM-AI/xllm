@@ -6,6 +6,8 @@ from pathlib import Path
 import tilelang
 import tilelang.language as T
 
+from scripts.logger import logger
+
 from .utils import (
     DEFAULT_ASCEND_PASS_CONFIGS,
     detect_vec_core_num,
@@ -236,7 +238,7 @@ def _run_ref_check(
     import torch
 
     if not hasattr(torch, "npu") or not torch.npu.is_available():
-        print("[WARN] Skip RoPE reference check: NPU is not available")
+        logger.warning("Skip RoPE reference check: NPU is not available")
         return
 
     torch.manual_seed(42)
@@ -258,7 +260,7 @@ def _run_ref_check(
 
     x_ref = _torch_rope_ref_rows(x_in, sin, cos, 0)
     torch.testing.assert_close(x_out, x_ref, rtol=1e-3, atol=1e-3)
-    print("[INFO] RoPE output matches torch reference")
+    logger.info("RoPE output matches torch reference")
 
 
 def parse_args() -> argparse.Namespace:

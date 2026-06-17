@@ -124,8 +124,6 @@ struct XLLM_CAPI_EXPORT XLLM_InitLLMOptions {
   // The role of instance(e.g. DEFAULT, PREFILL, DECODE, MIX)
   std::string instance_role = "DEFAULT";
 
-  std::string device_ip = "";
-
   // The master address for multi-node distributed serving(e.g. 10.18.1.1:9999)
   std::string master_node_addr = "127.0.0.1:18899";
 
@@ -239,6 +237,9 @@ struct XLLM_CAPI_EXPORT XLLM_Usage {
 
   // The total number of tokens used in the request (prompt + completion).
   int32_t total_tokens;
+
+  // The number of prompt tokens served from prefix cache.
+  int32_t cached_tokens;
 };
 
 struct XLLM_CAPI_EXPORT XLLM_LogProbData {

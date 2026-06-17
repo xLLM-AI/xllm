@@ -11,6 +11,8 @@ elseif(USE_CUDA)
   add_subdirectory(cuda)
 elseif(USE_MUSA)
   add_subdirectory(musa)
+elseif(USE_DCU)
+  add_subdirectory(dcu)
 endif()
 
 add_subdirectory(common)
@@ -38,6 +40,7 @@ cc_library(
   HDRS
     onerec_block_layer.h
     oxygen_vision_layer.h
+    $<$<BOOL:${USE_NPU}>:deepseek_v4_decoder_layer.h>
     qwen2_decoder_layer.h
     qwen2_vision_layer.h
     qwen2_5_vision_layer.h
@@ -46,6 +49,7 @@ cc_library(
     qwen3_moe_decoder_layer.h
   SRCS
     oxygen_vision_layer.cpp
+    $<$<BOOL:${USE_NPU}>:deepseek_v4_decoder_layer.cpp>
     qwen2_vision_layer.cpp
     qwen2_decoder_layer.cpp
     qwen2_5_vision_layer.cpp
@@ -53,6 +57,7 @@ cc_library(
     qwen3_moe_decoder_layer.cpp
   DEPS
     $<$<BOOL:${USE_NPU}>:npu_layers>
+    $<$<BOOL:${USE_NPU}>:npu_torch_layers>
     $<$<BOOL:${USE_ILU}>:ilu_layers>
     $<$<BOOL:${USE_CUDA}>:cuda_layers>
     :common_layers

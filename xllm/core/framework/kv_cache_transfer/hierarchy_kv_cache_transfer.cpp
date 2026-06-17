@@ -38,9 +38,15 @@ HierarchyKVCacheTransfer::HierarchyKVCacheTransfer(
   device_.set_device();
   device_.init_device_context();
   h2d_threadpool_ = std::make_unique<ThreadPool>(
-      2, [this]() mutable { device_.set_device(); });
+      /*num_threads=*/2,
+      /*init_func=*/[this]() mutable { device_.set_device(); },
+      /*cpu_binding=*/false,
+      /*pool_name=*/"HierarchyKVCacheTransfer.h2d");
   d2h_threadpool_ = std::make_unique<ThreadPool>(
-      5, [this]() mutable { device_.set_device(); });
+      /*num_threads=*/5,
+      /*init_func=*/[this]() mutable { device_.set_device(); },
+      /*cpu_binding=*/false,
+      /*pool_name=*/"HierarchyKVCacheTransfer.d2h");
   for (int i = 0; i < h2d_threadpool_->size() + d2h_threadpool_->size(); i++) {
     copy_stream_.enqueue(device_.get_stream_from_pool(TIMEOUT_MS));
   }
@@ -50,7 +56,7 @@ HierarchyKVCacheTransfer::HierarchyKVCacheTransfer(
   }
 
   if (options_.enable_kvcache_store()) {
-    KVCacheStoreConfig config;
+    KVCacheStoreInitConfig config;
     config.localhost_name = options_.store_local_hostname();
     config.protocol = options_.store_protocol();
     config.metadata_server = options_.store_metadata_server();
@@ -127,13 +133,13 @@ void HierarchyKVCacheTransfer::set_layer_synchronizer(
 #if defined(USE_NPU)
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (layer_wise_load_synchronizer_.count(params.batch_id) != 0) {
-      params.layer_wise_load_synchronizer =
-          layer_wise_load_synchronizer_[params.batch_id];
-      layer_wise_load_synchronizer_.erase(params.batch_id);
+    if (layer_wise_load_synchronizer_.count(params.meta.batch_id) != 0) {
+      params.parallel.layer_wise_load_synchronizer =
+          layer_wise_load_synchronizer_[params.meta.batch_id];
+      layer_wise_load_synchronizer_.erase(params.meta.batch_id);
       uint32_t event_cnt =
-          params.layer_wise_load_synchronizer->get_event_size();
-      params.layers_per_bacth_copy =
+          params.parallel.layer_wise_load_synchronizer->get_event_size();
+      params.parallel.layers_per_bacth_copy =
           (options_.layers() + event_cnt - 1) / event_cnt;
     }
   }

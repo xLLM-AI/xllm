@@ -32,7 +32,6 @@ limitations under the License.
 #include "atb_speed/log.h"
 #include "atb_speed/utils/model_factory.h"
 #include "core/framework/model/model_args.h"
-#include "core/framework/model/model_input_params.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "loader/glm4_vision_encoder_loader.h"
 #include "nlohmann/json.hpp"
@@ -59,7 +58,6 @@ class NpuGlm4VisionEncoderLayerImpl : public BaseLayer {
                         torch::Tensor& sin_pos,
                         torch::Tensor& cu_seqlen,
                         std::vector<int>& cu_seqlen_vec,
-                        ModelInputParams& input_params,
                         int node_id = 0,
                         aclrtEvent* event = nullptr,
                         std::atomic<bool>* event_flag = nullptr);
@@ -69,7 +67,6 @@ class NpuGlm4VisionEncoderLayerImpl : public BaseLayer {
                                torch::Tensor& sin_pos,
                                torch::Tensor& cu_seqlen,
                                std::vector<int>& cu_seqlen_vec,
-                               ModelInputParams& input_params,
                                bool is_prefill);
 
   void param_from_args(atb_speed::glm::VisionEncoderLayerParam& param,

@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/model/model_output.h"
 #include "core/layers/npu/npu_deepseek_v2_decoder_layer_impl.h"
 #include "llm_model_base.h"
@@ -158,17 +159,23 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
       }
     }
 
-    auto h = npu_embed_tokens_(tokens, 0);
+    auto inputs_embeds = input_params.embedding.input_embedding;
+    torch::Tensor h;
+    if (inputs_embeds.defined()) {
+      h = inputs_embeds;
+    } else {
+      h = npu_embed_tokens_(tokens, 0);
+    }
     auto cos_sin = atb_pos_emb_(cos_sin_, positions, 0);
     auto cos_sin_chunks = cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
     auto cos_pos = cos_sin_chunks[0].contiguous();
     auto sin_pos = cos_sin_chunks[1].contiguous();
 
     torch::Tensor attn_mask;
-    if (FLAGS_enable_prefix_cache &&
-        !input_params.batch_forward_type.is_decode()) {
+    if (::xllm::KVCacheConfig::get_instance().enable_prefix_cache() &&
+        !input_params.meta.batch_forward_type.is_decode()) {
       attn_mask = attn_mask_.get_attn_mask(512, dtype_, device_);
-    } else if (input_params.batch_forward_type.is_prefill()) {
+    } else if (input_params.meta.batch_forward_type.is_prefill()) {
       attn_mask = attn_mask_.get_attn_mask(128, dtype_, device_);
     } else if (num_speculative_tokens_ > 0) {
       // TODO :the judgement of gen_free_mask need more check
@@ -180,9 +187,10 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event = nullptr;
       std::atomic<bool>* event_flag = nullptr;
-      if (input_params.layer_synchronizer != nullptr) {
-        event = input_params.layer_synchronizer->get_event(i);
-        event_flag = input_params.layer_synchronizer->get_event_flag(i);
+      if (input_params.parallel.layer_synchronizer != nullptr) {
+        event = input_params.parallel.layer_synchronizer->get_event(i);
+        event_flag =
+            input_params.parallel.layer_synchronizer->get_event_flag(i);
       }
       if (!input_params.synchronize_layer(i)) {
         return ModelOutput();
@@ -340,6 +348,55 @@ class DeepseekV2ForCausalLMImpl
 
   void update_expert_weight(int32_t layer_id) override {
     model_->update_expert_weight(layer_id + first_k_dense_replace_);
+  }
+
+  // Keep default load_model() behavior unchanged.
+  // This helper is for VLM wrappers whose HF checkpoints place language model
+  // tensors under custom prefixes, e.g.:
+  // - language_model.model.*
+  // - language_model.lm_head.*
+  void load_model_with_prefixes(std::unique_ptr<ModelLoader> loader,
+                                const std::string& model_prefix,
+                                const std::string& lm_head_prefix) {
+    for (const auto& state_dict : loader->get_state_dicts()) {
+      auto sub_dict = state_dict->get_dict_with_prefix(model_prefix);
+      if (sub_dict.size() == 0) {
+        sub_dict = state_dict->get_dict_with_prefix("model.");
+        if (sub_dict.size() == 0) {
+          sub_dict = state_dict->get_dict_with_prefix("");
+        }
+      }
+      model_->load_state_dict(sub_dict);
+
+      if (tie_word_embeddings) {
+        auto embed_dict =
+            state_dict->get_dict_with_prefix(model_prefix + "embed_tokens.");
+        if (embed_dict.size() == 0) {
+          embed_dict = state_dict->get_dict_with_prefix("model.embed_tokens.");
+          if (embed_dict.size() == 0) {
+            embed_dict = state_dict->get_dict_with_prefix("embed_tokens.");
+          }
+        }
+        npu_lm_head_->load_state_dict(embed_dict);
+      } else {
+        auto lm_dict = state_dict->get_dict_with_prefix(lm_head_prefix);
+        if (lm_dict.size() == 0) {
+          lm_dict = state_dict->get_dict_with_prefix("lm_head.");
+        }
+        npu_lm_head_->load_state_dict(lm_dict);
+      }
+    }
+
+    // verify
+    model_->verify_loaded_weights(model_prefix);
+    if (tie_word_embeddings) {
+      npu_lm_head_->verify_loaded_weights(model_prefix + "embed_tokens.");
+    } else {
+      npu_lm_head_->verify_loaded_weights(lm_head_prefix);
+    }
+
+    model_->merge_loaded_weights();
+    npu_lm_head_->merge_loaded_weights();
   }
 
  private:

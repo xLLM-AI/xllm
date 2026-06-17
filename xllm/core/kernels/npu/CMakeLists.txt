@@ -16,16 +16,24 @@ cc_library(
     fused_layernorm.cpp
     matmul.cpp
     npu_causal_conv1d.cpp
+    npu_fused_infer_attention.cpp
     npu_gemma_rms_norm.cpp
     npu_grouped_matmul.cpp
     npu_moe_gating_topk_softmax.cpp
+    npu_dispatch_ffn_combine.cpp
+    npu_dispatch_gmm_combine_decode.cpp
+    npu_moe_distribute_combine_v2.cpp
+    npu_moe_distribute_dispatch_v2.cpp
     npu_moe_init_routing_v2.cpp
     npu_moe_token_unpermute.cpp
     rope.cpp
     npu_recurrent_gated_delta_rule.cpp
+    utils.cpp
+    w4a8_dynamic_moe_preprocess.cpp
     rec_constrained_topk.cpp
   DEPS
     :torch_npu_kernels
     :tilelang_kernels
     xllm_ops
+    opapi
 )

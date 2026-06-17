@@ -461,7 +461,8 @@ std::vector<std::unique_ptr<ProcessGroup>> create_local_process_groups(
     process_groups.emplace_back(std::make_unique<ProcessGroupImpl>(
         /*rank=*/i, world_size, devices[i], comms[i]));
   }
-#elif defined(USE_CUDA) || defined(USE_MLU) || defined(USE_ILU)
+#elif defined(USE_CUDA) || defined(USE_MLU) || defined(USE_ILU) || \
+    defined(USE_DCU)
   // For GPU: use create_process_group with localhost
   // Parse port from options.master_node_addr() to support multiple instances
   std::string host;

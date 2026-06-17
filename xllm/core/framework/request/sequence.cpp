@@ -32,7 +32,11 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/common/metrics.h"
-#include "core/framework/request/mm_data_visitor.h"
+#include "core/framework/config/disagg_pd_config.h"
+#include "core/framework/config/execution_config.h"
+#include "core/framework/config/rec_config.h"
+#include "core/framework/multimodal/embedding_output.h"
+#include "core/framework/multimodal/mm_visitor.h"
 #include "core/framework/tokenizer/rec_tokenizer.h"
 #include "core/framework/tokenizer/tokenizer.h"
 #include "core/util/slice.h"
@@ -57,13 +61,16 @@ std::vector<int64_t> normalize_rec_item_ids(const std::vector<int64_t>& raw_ids,
     }
   }
 
-  const int32_t each_threshold = FLAGS_each_conversion_threshold;
+  const int32_t each_threshold =
+      ::xllm::RecConfig::get_instance().each_conversion_threshold();
   if (each_threshold > 0 &&
       static_cast<int32_t>(item_ids.size()) > each_threshold) {
-    uint32_t seed = FLAGS_random_seed >= 0
-                        ? static_cast<uint32_t>(FLAGS_random_seed) +
-                              static_cast<uint32_t>(sequence_index)
-                        : std::random_device{}();
+    uint32_t seed =
+        ::xllm::ExecutionConfig::get_instance().random_seed() >= 0
+            ? static_cast<uint32_t>(
+                  ::xllm::ExecutionConfig::get_instance().random_seed()) +
+                  static_cast<uint32_t>(sequence_index)
+            : std::random_device{}();
     std::mt19937 generator(seed);
     std::shuffle(item_ids.begin(), item_ids.end(), generator);
     item_ids.resize(each_threshold);
@@ -84,13 +91,16 @@ std::vector<RecItemInfo> normalize_rec_item_infos(
     }
   }
 
-  const int32_t each_threshold = FLAGS_each_conversion_threshold;
+  const int32_t each_threshold =
+      ::xllm::RecConfig::get_instance().each_conversion_threshold();
   if (each_threshold > 0 &&
       static_cast<int32_t>(item_infos.size()) > each_threshold) {
-    uint32_t seed = FLAGS_random_seed >= 0
-                        ? static_cast<uint32_t>(FLAGS_random_seed) +
-                              static_cast<uint32_t>(sequence_index)
-                        : std::random_device{}();
+    uint32_t seed =
+        ::xllm::ExecutionConfig::get_instance().random_seed() >= 0
+            ? static_cast<uint32_t>(
+                  ::xllm::ExecutionConfig::get_instance().random_seed()) +
+                  static_cast<uint32_t>(sequence_index)
+            : std::random_device{}();
     std::mt19937 generator(seed);
     std::shuffle(item_infos.begin(), item_infos.end(), generator);
     item_infos.resize(each_threshold);
@@ -164,7 +174,8 @@ void Sequence::generate_onerec_output(const Slice<int32_t>& ids,
     output.finish_reason = finish_reason_.to_string();
   }
   output.token_ids = ids.slice(num_prompt_tokens_, size);
-  if (FLAGS_enable_output_sku_logprobs && logprob_state_ != nullptr) {
+  if (::xllm::RecConfig::get_instance().enable_output_sku_logprobs() &&
+      logprob_state_ != nullptr) {
     const auto& token_logprobs = logprob_state_->get_logprobs();
     output.token_ids_logprobs.reserve(output.token_ids.size());
     for (size_t i = num_prompt_tokens_; i < size; ++i) {
@@ -176,11 +187,11 @@ void Sequence::generate_onerec_output(const Slice<int32_t>& ids,
     }
   }
   const size_t rec_token_size = static_cast<size_t>(REC_TOKEN_SIZE);
-  if (FLAGS_enable_convert_tokens_to_item &&
+  if (::xllm::RecConfig::get_instance().enable_convert_tokens_to_item() &&
       output.token_ids.size() == rec_token_size) {
     const Slice<int32_t> token_slice{output.token_ids.data(),
                                      output.token_ids.size()};
-    if (FLAGS_enable_extended_item_info) {
+    if (::xllm::RecConfig::get_instance().enable_extended_item_info()) {
       const auto* rec_tokenizer = dynamic_cast<const RecTokenizer*>(&tokenizer);
       if (rec_tokenizer != nullptr) {
         std::vector<RecItemInfo> item_infos;
@@ -276,6 +287,7 @@ Sequence::Sequence(const Sequence& other)
       mm_data_(other.mm_data_),
       mrope_position_delta_(other.mrope_position_delta_),
       output_embedding_(other.output_embedding_),
+      mtp_bootstrap_embedding_(other.mtp_bootstrap_embedding_),
       num_tokens_(other.num_tokens_),
       token_to_count_map_(other.token_to_count_map_),
       num_prompt_tokens_(other.num_prompt_tokens_),
@@ -297,7 +309,8 @@ Sequence::Sequence(const Sequence& other)
 
 // The first token will be only used in disagg pd mode.
 void Sequence::record_first_token(const Token& token) {
-  if (!FLAGS_enable_disagg_pd || !is_first_token_) {
+  if (!::xllm::DisaggPDConfig::get_instance().enable_disagg_pd() ||
+      !is_first_token_) {
     return;
   }
   RemoteToken t;
@@ -447,6 +460,12 @@ void Sequence::update_embeddings(const torch::Tensor& embeddings) {
     if (output_embedding_.dim() == 1) {
       output_embedding_ = output_embedding_.unsqueeze(0);
     }
+  }
+}
+
+void Sequence::update_mtp_bootstrap_embedding(const torch::Tensor& embedding) {
+  if (embedding.defined()) {
+    mtp_bootstrap_embedding_ = embedding.detach().clone();
   }
 }
 
@@ -677,6 +696,13 @@ void Sequence::add_kv_blocks(const std::vector<Block>& blocks) {
 
 void Sequence::add_host_kv_blocks(const std::vector<Block>& blocks) {
   host_kv_state_.add_kv_blocks(blocks);
+}
+
+size_t Sequence::num_prefix_cache_tokens() const {
+  size_t cached_tokens = std::max(kv_state_.shared_kv_tokens_num(),
+                                  host_kv_state_.shared_kv_tokens_num());
+  DCHECK_LE(cached_tokens, num_prompt_tokens_);
+  return cached_tokens;
 }
 
 // release all cache blocks

@@ -20,6 +20,7 @@ limitations under the License.
 #include <torch_npu/torch_npu.h>
 
 #include <nlohmann/json.hpp>
+#include <unordered_map>
 #ifdef TORCH_HIGHER_THAN_PTA6
 #include <torch_npu/csrc/framework/OpCommand.h>
 #else
@@ -34,6 +35,62 @@ limitations under the License.
 #include "xllm_ops_api.h"
 
 namespace xllm::kernel::npu {
+
+namespace {
+
+class AclWorkspaceCache final {
+ public:
+  ~AclWorkspaceCache() {
+    for (auto& workspace : workspaces_) {
+      if (workspace.second.addr_ != nullptr) {
+        aclrtSynchronizeStream(workspace.first);
+        aclrtFree(workspace.second.addr_);
+      }
+    }
+  }
+
+  void* get(aclrtStream stream, uint64_t workspace_size) {
+    if (workspace_size == 0) {
+      return nullptr;
+    }
+
+    AclWorkspace& workspace = workspaces_[stream];
+    if (workspace.addr_ != nullptr && workspace.size_ >= workspace_size) {
+      return workspace.addr_;
+    }
+
+    if (workspace.addr_ != nullptr) {
+      CHECK_ACL_SUCCESS(aclrtSynchronizeStream(stream),
+                        "top_k_top_p: failed to synchronize stream before "
+                        "workspace resize");
+      CHECK_ACL_SUCCESS(aclrtFree(workspace.addr_),
+                        "top_k_top_p: failed to free resized workspace");
+    }
+
+    CHECK_ACL_SUCCESS(
+        aclrtMalloc(
+            &workspace.addr_, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST),
+        "top_k_top_p: failed to allocate workspace");
+    workspace.size_ = workspace_size;
+    return workspace.addr_;
+  }
+
+ private:
+  class AclWorkspace final {
+   public:
+    void* addr_ = nullptr;
+    uint64_t size_ = 0;
+  };
+
+  std::unordered_map<aclrtStream, AclWorkspace> workspaces_;
+};
+
+AclWorkspaceCache& workspace_cache() {
+  thread_local AclWorkspaceCache cache;
+  return cache;
+}
+
+}  // namespace
 
 // Used by the sampling logits preprocessing path on NPU.
 // This wrapper applies top-k and top-p filtering before token sampling so the
@@ -67,23 +124,12 @@ void top_k_top_p(torch::Tensor& logits,
                                                        &workspace_size,
                                                        &executor),
                     "top_k_top_p: failed to get workspace size");
-  void* workspace_addr = nullptr;
-  if (workspace_size > 0) {
-    CHECK_ACL_SUCCESS(
-        aclrtMalloc(&workspace_addr, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST),
-        "top_k_top_p: failed to allocate workspace");
-  }
+  void* workspace_addr = workspace_cache().get(stream, workspace_size);
   CHECK_ACL_SUCCESS(
       aclnnApplyTopKTopP(workspace_addr, workspace_size, executor, stream),
       "top_k_top_p: failed to apply top k top p");
-  CHECK_ACL_SUCCESS(aclrtSynchronizeStream(stream),
-                    "top_k_top_p: failed to synchronize stream");
   aclDestroyTensor(logits_ids);
   aclDestroyTensor(topK_ids);
   aclDestroyTensor(topP_ids);
-  if (workspace_size > 0) {
-    CHECK_ACL_SUCCESS(aclrtFree(workspace_addr),
-                      "top_k_top_p: failed to free workspace");
-  }
 }
 }  // namespace xllm::kernel::npu

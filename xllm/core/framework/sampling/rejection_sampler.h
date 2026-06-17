@@ -18,54 +18,18 @@ limitations under the License.
 #include <torch/torch.h>
 #include <torch/types.h>
 
-#include <random>
-
 #include "sampling_params.h"
 
 namespace xllm {
 
-class RejectionSamplerRateController {
- public:
-  explicit RejectionSamplerRateController(double fixed_acceptance_rate);
-
-  // Core filtering function.
-  // Maintains the target acceptance rate using a cumulative drift correction.
-  torch::Tensor filter_with_acceptance_rate(const torch::Tensor& token_ids);
-
- private:
-  // Placeholder value for rejected tokens
-  static constexpr int32_t kPlaceholderTokenId = -1;
-
-  // Tolerance for detecting when the user changes the target rate
-  static constexpr double kTargetRateChangeTolerance = 1e-6;
-
-  // Gain factor for drift correction (higher = faster correction, lower =
-  // smoother)
-  static constexpr double kDriftCorrectionGain = 0.1;
-
-  // Target configuration
-  double fixed_acceptance_rate_;
-  double last_target_;
-
-  // Global statistics for long-term rate tracking
-  int64_t total_batches_ = 0;
-  int64_t accepted_batches_ = 0;
-
-  // Random number generator components
-  std::mt19937 gen_{std::random_device{}()};
-  std::uniform_real_distribution<double> dist_{0.0, 1.0};
-};
-
 class RejectionSampler final {
  public:
-  RejectionSampler(
-      const torch::Tensor& do_sample,
-      bool all_random_sample,
-      bool all_greedy_sample,
-      bool logprobs,
-      int64_t max_top_logprobs,
-      std::shared_ptr<RejectionSamplerRateController> rate_controller = nullptr,
-      bool enable_fused_kernel = false);
+  RejectionSampler(const torch::Tensor& do_sample,
+                   bool all_random_sample,
+                   bool all_greedy_sample,
+                   bool logprobs,
+                   int64_t max_top_logprobs,
+                   bool enable_fused_kernel = false);
 
   // operator() allows us to use the module as a function.
   template <typename... Args>
@@ -124,9 +88,6 @@ class RejectionSampler final {
   torch::Tensor do_sample_;
   bool all_random_sample_ = true;
   bool all_greedy_sample_ = true;
-
-  // rate controller for fixing the speculative acceptance rate
-  std::shared_ptr<RejectionSamplerRateController> rate_controller_;
 
   // whether to use fused kernel
   bool enable_fused_kernel_ = false;

@@ -21,6 +21,7 @@ limitations under the License.
 #include <cmath>
 #include <optional>
 
+#include "core/framework/config/scheduler_config.h"
 #include "distributed_runtime/engine.h"
 #include "util/utils.h"
 
@@ -74,6 +75,20 @@ class FakeEngine : public Engine {
  private:
   std::unique_ptr<Tokenizer> fake_tokenizer_;
   std::unique_ptr<BlockManagerPool> fake_block_manager_;
+};
+
+template <typename T>
+class ScopedConfigValue final {
+ public:
+  ScopedConfigValue(T& value, T new_value) : value_(value), old_(value) {
+    value_ = new_value;
+  }
+
+  ~ScopedConfigValue() { value_ = old_; }
+
+ private:
+  T& value_;
+  T old_;
 };
 
 ContinuousScheduler::Options create_scheduler_options(
@@ -471,7 +486,10 @@ TEST(ChunkedPrefillSchedulerTest, OnPrefillPreemptOffDecode) {
   // set chunked max_tokens budgets 10000 per step
   ContinuousScheduler::Options opt = create_scheduler_options(
       10000, 256, 0, max_tokens_per_chunk_for_prefill, 1);
-  FLAGS_prefill_scheduling_memory_usage_threshold = 2;  // release threshold
+  ScopedConfigValue<double> memory_threshold(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      2.0);
 
   {
     // 1. two offline decode requests then one online prefill request preempt

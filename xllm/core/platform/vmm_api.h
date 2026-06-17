@@ -27,6 +27,8 @@ limitations under the License.
 #include <cuda.h>
 #elif defined(USE_MUSA)
 #include <musa.h>
+#elif defined(USE_DCU)
+#include <hip/hip_runtime_api.h>
 #endif
 
 namespace xllm {
@@ -43,6 +45,9 @@ using PhyMemHandle = CUmemGenericAllocationHandle;
 #elif defined(USE_MUSA)
 using VirPtr = MUdeviceptr;
 using PhyMemHandle = MUmemGenericAllocationHandle;
+#elif defined(USE_DCU)
+using VirPtr = void*;
+using PhyMemHandle = hipMemGenericAllocationHandle_t;
 #endif
 
 template <typename T>

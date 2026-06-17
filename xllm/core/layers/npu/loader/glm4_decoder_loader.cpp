@@ -52,7 +52,9 @@ void Glm4DecoderLoader::load_state_dict(const StateDict& state_dict) {
 }
 
 void Glm4DecoderLoader::merge_host_at_weights() {
-  auto& w = working_tensors();
+  std::vector<at::Tensor>& w = working_tensors();
+
+  merge_gate_up();
 
   w[IN_Q_WEIGHT] =
       torch::cat({w[IN_Q_WEIGHT], w[IN_K_WEIGHT], w[IN_V_WEIGHT]}, 0)
@@ -65,6 +67,28 @@ void Glm4DecoderLoader::merge_host_at_weights() {
        {IN_MLP_W1_WEIGHT, IN_K_WEIGHT, IN_V_WEIGHT, IN_K_BIAS, IN_V_BIAS}) {
     w[idx] = zero_like_working(idx);
   }
+}
+
+void Glm4DecoderLoader::merge_gate_up() {
+  std::vector<at::Tensor>& w = working_tensors();
+
+  const int32_t world_size = parallel_args_.world_size();
+  if (world_size <= 1) {
+    return;
+  }
+
+  torch::Tensor gate_up_weight = w[IN_MLP_GATEUP_WEIGHT];
+  const int64_t gate_up_size = gate_up_weight.size(0);
+  const int64_t intermediate_size = gate_up_size / 2;
+
+  const int32_t rank = parallel_args_.rank();
+  torch::Tensor gate_weight = gate_up_weight.slice(0, 0, intermediate_size);
+  torch::Tensor up_weight =
+      gate_up_weight.slice(0, intermediate_size, gate_up_size);
+  w[IN_MLP_GATEUP_WEIGHT] = torch::cat({gate_weight.chunk(world_size, 0)[rank],
+                                        up_weight.chunk(world_size, 0)[rank]},
+                                       0)
+                                .contiguous();
 }
 
 void Glm4DecoderLoader::verify_loaded_weights() const {

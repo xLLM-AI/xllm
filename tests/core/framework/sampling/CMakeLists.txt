@@ -10,7 +10,7 @@ cc_test(
   DEPS
     absl::strings
     GTest::gtest_main
-    :flags
+    :config
     :sampler
     glog::glog
     :state_dict
@@ -20,6 +20,7 @@ target_link_libraries(sampler_test
                       PUBLIC
                       Python::Python
                       $<$<BOOL:${USE_NPU}>:ascendcl>
+                      $<$<BOOL:${USE_NPU}>:unified_dlog>
                       $<$<BOOL:${USE_NPU}>:hccl>
                       $<$<BOOL:${USE_NPU}>:c_sec>
                       $<$<BOOL:${USE_NPU}>:nnopbase>)

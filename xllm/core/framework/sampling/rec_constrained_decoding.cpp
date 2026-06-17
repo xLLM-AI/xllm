@@ -43,7 +43,10 @@ RecConstrainedDecoding::RecConstrainedDecoding(RecVocabDict* vocab_dict,
       device_(device),
       dtype_(dtype) {
   if (use_gen_threadpool_) {
-    gen_threadpool_ = std::make_unique<ThreadPool>(GEN_MASK_THREAD_NUM);
+    gen_threadpool_ = std::make_unique<ThreadPool>(
+        /*num_threads=*/GEN_MASK_THREAD_NUM,
+        /*cpu_binding=*/false,
+        /*pool_name=*/"RecConstrainedDecoding.generate_mask");
   }
 
   build_mask_cache_ = false;

@@ -32,7 +32,9 @@ void beam_search(torch::Tensor acc_logprob,
                  torch::Tensor out_beam_count_prefix_sums,
                  torch::Tensor out_sequence_group,
                  uint32_t batch_size,
+                 uint32_t num_return_sequences,
                  uint32_t current_step) {
+  (void)num_return_sequences;
   torch::Device device = acc_logprob.device();
 
   uint32_t beam_size = in_sequence_group.size(1);

@@ -15,9 +15,19 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
+
 namespace xllm {
 
 inline constexpr char kInferContentLength[] = "Infer-Content-Length";
 inline constexpr char kContentLength[] = "Content-Length";
+
+// Reserved row 0 of the linear / SSM state cache, used as the padding slot for
+// padded decode batch rows. This mirrors the KV cache convention, where block
+// id 0 is permanently held for padding (see BlockManagerImpl and
+// SingleBlockManager). Keeping both caches padded to row 0 makes the padding
+// contract uniform across attention and linear-attention layers; real
+// sequences are handed ids in [1, num_blocks - 1] only.
+inline constexpr int32_t kPaddingLinearStateId = 0;
 
 }  // namespace xllm

@@ -17,6 +17,12 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <map>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
+
 #if defined(USE_NPU)
 #ifdef TORCH_HIGHER_THAN_PTA6
 #include <torch_npu/csrc/core/npu/NPUFormat.h>
@@ -27,13 +33,14 @@ limitations under the License.
 #endif
 #endif
 
+#include "framework/kv_cache/deepseek_v4_kv_cache_impl.h"
 #include "framework/kv_cache/indexed_kv_cache_impl.h"
 #include "framework/kv_cache/linear_attention_kv_cache_impl.h"
 #include "framework/kv_cache/quantized_kv_cache_impl.h"
 #include "framework/xtensor/xtensor_allocator.h"
+#include "util/utils.h"
 
 namespace xllm {
-
 namespace {
 
 std::unique_ptr<KVCacheImpl> create_kv_cache_impl(
@@ -69,6 +76,19 @@ std::unique_ptr<KVCacheImpl> create_kv_cache_impl(
   return std::make_unique<KVCacheImpl>(kv_cache_shape, create_options);
 }
 
+std::string int32_vector_string(const std::vector<int32_t>& values) {
+  std::ostringstream oss;
+  oss << "[";
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (i > 0) {
+      oss << ",";
+    }
+    oss << values[i];
+  }
+  oss << "]";
+  return oss.str();
+}
+
 }  // namespace
 
 KVCache::KVCache() : impl_(std::make_unique<KVCacheImpl>()) {}
@@ -85,20 +105,53 @@ KVCache::KVCache(const LinearAttentionKVCacheTensors& tensors)
 KVCache::KVCache(const QuantizedKVCacheTensors& tensors)
     : impl_(std::make_unique<QuantizedKVCacheImpl>(tensors)) {}
 
+KVCache::KVCache(const DeepSeekV4KVCacheTensors& tensors)
+    : impl_(std::make_unique<DeepSeekV4KVCacheImpl>(tensors)) {}
+
 KVCache::KVCache(const KVCacheShape& kv_cache_shape,
                  const KVCacheCreateOptions& create_options,
                  int64_t layer_id)
     : impl_(create_kv_cache_impl(kv_cache_shape, create_options, layer_id)) {}
 
 torch::Tensor KVCache::get_k_cache() const { return impl_->get_k_cache(); }
+
 torch::Tensor KVCache::get_v_cache() const { return impl_->get_v_cache(); }
+
 torch::Tensor KVCache::get_index_cache() const {
   return impl_->get_index_cache();
 }
-torch::Tensor KVCache::get_conv_cache() const {
-  return impl_->get_conv_cache();
+
+std::vector<KVCacheTensor> KVCache::get_cache_tensors() const {
+  std::vector<KVCacheTensor> tensors;
+  tensors.reserve(5);
+
+  const torch::Tensor key_cache = get_k_cache();
+  if (key_cache.defined() && key_cache.numel() > 0) {
+    tensors.emplace_back(KVCacheTensorRole::KEY, key_cache);
+  }
+
+  const torch::Tensor value_cache = get_v_cache();
+  if (value_cache.defined() && value_cache.numel() > 0) {
+    tensors.emplace_back(KVCacheTensorRole::VALUE, value_cache);
+  }
+
+  const torch::Tensor index_cache = get_index_cache();
+  if (index_cache.defined() && index_cache.numel() > 0) {
+    tensors.emplace_back(KVCacheTensorRole::INDEX, index_cache);
+  }
+
+  const torch::Tensor conv_cache = get_conv_cache();
+  if (conv_cache.defined() && conv_cache.numel() > 0) {
+    tensors.emplace_back(KVCacheTensorRole::CONV, conv_cache);
+  }
+
+  const torch::Tensor ssm_cache = get_ssm_cache();
+  if (ssm_cache.defined() && ssm_cache.numel() > 0) {
+    tensors.emplace_back(KVCacheTensorRole::SSM, ssm_cache);
+  }
+
+  return tensors;
 }
-torch::Tensor KVCache::get_ssm_cache() const { return impl_->get_ssm_cache(); }
 
 std::optional<torch::Tensor> KVCache::get_k_cache_scale() const {
   return impl_->get_k_cache_scale();
@@ -106,6 +159,34 @@ std::optional<torch::Tensor> KVCache::get_k_cache_scale() const {
 
 std::optional<torch::Tensor> KVCache::get_v_cache_scale() const {
   return impl_->get_v_cache_scale();
+}
+
+torch::Tensor KVCache::get_conv_cache() const {
+  return impl_->get_conv_cache();
+}
+
+torch::Tensor KVCache::get_ssm_cache() const { return impl_->get_ssm_cache(); }
+
+torch::Tensor KVCache::get_indexer_cache_scale() const {
+  return impl_->get_indexer_cache_scale();
+}
+
+torch::Tensor KVCache::get_swa_cache() const { return impl_->get_swa_cache(); }
+
+torch::Tensor KVCache::get_compress_kv_state() const {
+  return impl_->get_compress_kv_state();
+}
+
+torch::Tensor KVCache::get_compress_score_state() const {
+  return impl_->get_compress_score_state();
+}
+
+torch::Tensor KVCache::get_compress_index_kv_state() const {
+  return impl_->get_compress_index_kv_state();
+}
+
+torch::Tensor KVCache::get_compress_index_score_state() const {
+  return impl_->get_compress_index_score_state();
 }
 
 std::vector<std::vector<int64_t>> KVCache::get_shapes() {
@@ -126,6 +207,41 @@ void allocate_kv_caches(std::vector<KVCache>& kv_caches,
 
   const int64_t num_layers = create_options.num_layers();
   kv_caches.reserve(num_layers);
+
+  if (util::is_target_model_type(create_options.model_type(),
+                                 /*target_type=*/"deepseek_v4",
+                                 /*match_mtp=*/true)) {
+    std::vector<int32_t> layer_compress_ratios;
+    layer_compress_ratios.reserve(static_cast<size_t>(num_layers));
+    std::map<int32_t, std::string> ratio_shape_summaries;
+    const std::vector<int32_t>& compress_ratios =
+        create_options.compress_ratios();
+
+    for (int64_t layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
+      const int32_t compress_ratio =
+          layer_idx < static_cast<int64_t>(compress_ratios.size())
+              ? compress_ratios[static_cast<size_t>(layer_idx)]
+              : 1;
+      DeepSeekV4KVCacheTensors tensors =
+          create_dsv4_cache_tensors(kv_cache_shape, create_options, layer_idx);
+      layer_compress_ratios.emplace_back(compress_ratio);
+      if (ratio_shape_summaries.find(compress_ratio) ==
+          ratio_shape_summaries.end()) {
+        ratio_shape_summaries.emplace(
+            compress_ratio, dsv4_shape_summary(tensors, compress_ratio));
+      }
+      kv_caches.emplace_back(tensors);
+    }
+
+    LOG(INFO) << "[DSV4][KVCacheInit] layer_crs: "
+              << int32_vector_string(layer_compress_ratios);
+    for (const std::pair<const int32_t, std::string>& summary :
+         ratio_shape_summaries) {
+      LOG(INFO) << "[DSV4][KVCacheInit] cr_" << summary.first
+                << " shapes: " << summary.second;
+    }
+    return;
+  }
 
   if (create_options.enable_xtensor()) {
     CHECK(kv_cache_shape.has_key_cache_shape())

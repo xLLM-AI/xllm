@@ -54,31 +54,33 @@ class Worker {
 
   folly::SemiFuture<bool> wakeup_async(const WakeupOptions& options);
 
+  // Start/stop online timeline profiling on this worker's device.
+  bool start_profile();
+
+  bool stop_profile();
+
+  folly::SemiFuture<bool> start_profile_async();
+
+  folly::SemiFuture<bool> stop_profile_async();
+
   std::tuple<int64_t, int64_t> estimate_kv_cache_capacity();
 
   // allocate kv cache. blocking call
   bool allocate_kv_cache(const KVCacheShape& kv_cache_shape);
 
-  void get_device_info(std::string& device_ip, uint16_t& port);
-
-  void get_cache_info(uint64_t& cluster_id,
-                      std::string& addr,
-                      int64_t& k_cache_id,
-                      int64_t& v_cache_id);
+  void get_cache_info(uint64_t& cluster_id, std::string& addr, uint16_t& port);
 
   bool link_cluster(const std::vector<uint64_t>& cluster_ids,
                     const std::vector<std::string>& addrs,
-                    const std::vector<std::string>& device_ips,
                     const std::vector<uint16_t>& ports);
 
   bool unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                       const std::vector<std::string>& addrs,
-                      const std::vector<std::string>& device_ips,
                       const std::vector<uint16_t>& ports);
 
-  // D2D link for weight transfer
-  bool link_d2d(const std::string& remote_addr);
-  bool unlink_d2d(const std::string& remote_addr);
+  // P2P link for weight transfer
+  bool link_p2p(const std::string& remote_addr);
+  bool unlink_p2p(const std::string& remote_addr);
 
   const bool is_driver();
 
@@ -107,10 +109,10 @@ class Worker {
   virtual folly::SemiFuture<bool> pull_kv_blocks_async(
       const uint64_t src_cluster_id,
       const std::string& src_addr,
-      const int64_t src_k_cache_id,
-      const int64_t src_v_cache_id,
       const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks);
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids = {},
+      const std::vector<uint64_t>& dst_linear_state_ids = {});
 
   virtual uint32_t transfer_kv_blocks(
       const uint64_t batch_id,
@@ -137,7 +139,9 @@ class Worker {
 
  private:
   WorkerImpl* impl_ = nullptr;
-  ThreadPool threadpool_;
+  ThreadPool threadpool_{/*num_threads=*/1,
+                         /*cpu_binding=*/false,
+                         /*pool_name=*/"Worker.async"};
 };
 
 }  // namespace xllm

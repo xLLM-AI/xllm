@@ -24,8 +24,8 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/framework/multimodal/mm_data.h"
 #include "core/framework/sampling/sampling_params.h"
-#include "mm_data.h"
 #include "rec_type.h"
 #include "request_output.h"
 #include "sample_slot.h"

@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <algorithm>
 
+#include "core/framework/config/scheduler_config.h"
 #include "framework/batch/batch_factory.h"
 #include "util/utils.h"
 
@@ -61,9 +62,41 @@ PDChunkBudget pick_pd_chunk_budget(size_t kv_tokens,
 DisaggPDChunkedPrefillScheduler::DisaggPDChunkedPrefillScheduler(
     Engine* engine,
     const Options& options)
-    : DisaggPDScheduler(engine, options) {
-  CHECK(!enable_prefix_cache_)
-      << "disagg pd chunked prefill scheduler does not support prefix cache";
+    : DisaggPDScheduler(engine, options) {}
+
+void DisaggPDChunkedPrefillScheduler::match_prefix_blocks(Sequence* sequence) {
+  CHECK(sequence != nullptr);
+  if (!enable_prefix_cache_) {
+    return;
+  }
+
+  if (sequence->kv_state().num_kv_blocks() == 0) {
+    kv_cache_manager_->allocate_shared(sequence);
+    return;
+  }
+  if (!sequence->is_chunked_prefill_stage()) {
+    return;
+  }
+
+  const size_t max_tokens_per_chunk = static_cast<size_t>(
+      std::max(options_.max_tokens_per_chunk_for_prefill(), 64));
+  const size_t total_chunked_size =
+      util::ceil_div(sequence->num_tokens(), max_tokens_per_chunk);
+  const int32_t match_frequency =
+      ::xllm::SchedulerConfig::get_instance().chunked_match_frequency();
+  CHECK_GT(match_frequency, 0);
+  if (total_chunked_size < static_cast<size_t>(match_frequency)) {
+    kv_cache_manager_->allocate_shared(sequence);
+    return;
+  }
+
+  const size_t prefix_cache_interval =
+      util::ceil_div(total_chunked_size, static_cast<size_t>(match_frequency));
+  const size_t cur_chunked_index =
+      sequence->kv_state().kv_cache_tokens_num() / max_tokens_per_chunk;
+  if (cur_chunked_index % prefix_cache_interval == 0) {
+    kv_cache_manager_->allocate_shared(sequence);
+  }
 }
 
 bool DisaggPDChunkedPrefillScheduler::alloc_chunk(Sequence* sequence,
@@ -71,6 +104,8 @@ bool DisaggPDChunkedPrefillScheduler::alloc_chunk(Sequence* sequence,
                                                   size_t* actual_tokens) {
   CHECK(sequence != nullptr);
   CHECK(actual_tokens != nullptr);
+
+  match_prefix_blocks(sequence);
 
   const size_t kv_tokens = sequence->kv_cache_tokens_num();
   const PDChunkBudget budget = pick_pd_chunk_budget(
@@ -96,14 +131,14 @@ void DisaggPDChunkedPrefillScheduler::schedule_waiting_prefill(
     if (request->finished() || request->cancelled()) {
       kv_cache_manager_->deallocate(request.get());
       done.emplace_back(request);
-      queue.pop();
+      queue.pop_top();
       continue;
     }
 
     CHECK(!request->sequences().empty());
     if (!kv_cache_manager_->update_prefetch_result(
             request, options_.prefetch_timeout())) {
-      queue.pop();
+      queue.pop_top();
       queue.push(request);
       break;
     }
@@ -113,7 +148,7 @@ void DisaggPDChunkedPrefillScheduler::schedule_waiting_prefill(
     if (!alloc_chunk(sequence, remaining_token_budget, &actual_tokens)) {
       if (running_sequences_.empty() &&
           exceeds_block_capacity(sequence, kv_cache_manager_)) {
-        queue.pop();
+        queue.pop_top();
         kv_cache_manager_->deallocate(request.get());
         LOG(ERROR) << "Request prompt is too long, no enough resource to "
                       "schedule a single pd chunked prefill sequence.";
@@ -123,13 +158,13 @@ void DisaggPDChunkedPrefillScheduler::schedule_waiting_prefill(
              "No enough resource to schedule a single pd chunked prefill "
              "sequence"});
       } else {
-        queue.pop();
+        queue.pop_top();
         queue.push(request);
       }
       break;
     }
 
-    queue.pop();
+    queue.pop_top();
     running_requests_.emplace_back(request);
     running_sequences_.emplace_back(sequence);
     running_sequences_budgets_.emplace_back(actual_tokens);
@@ -151,14 +186,14 @@ std::vector<Batch> DisaggPDChunkedPrefillScheduler::prepare_batch() {
   std::shared_ptr<Request> request;
   while (request_queue_.read(request)) {
     CHECK(request);
-    if (!enable_prefix_cache_) {
-      request->expand_sequences(/*shared_prefix=*/false);
-    }
-
+    // PREFILL/MIX path in disagg PD only handles the first sequence.
+    // For best_of_n, expansion to best_of sequences is deferred to the
+    // DECODE instance (where prefix cache lets seq[1..best_of-1] reuse
+    // seq[0]'s prompt KV). Expanding here would waste N x prefill compute.
     if (request->offline()) {
-      waiting_priority_queue_offline_.push(request);
+      waiting_priority_queue_offline_->push(request);
     } else {
-      waiting_priority_queue_.push(request);
+      waiting_priority_queue_->push(request);
     }
   }
 
@@ -180,9 +215,9 @@ std::vector<Batch> DisaggPDChunkedPrefillScheduler::prepare_batch() {
 
     if (running->is_chunked_prefill_stage()) {
       if (running->offline()) {
-        waiting_priority_queue_offline_.push(running);
+        waiting_priority_queue_offline_->push(running);
       } else {
-        waiting_priority_queue_.push(running);
+        waiting_priority_queue_->push(running);
       }
       *it = nullptr;
     }
@@ -201,11 +236,11 @@ std::vector<Batch> DisaggPDChunkedPrefillScheduler::prepare_batch() {
   running_requests_.reserve(max_seq_budget);
   running_sequences_.reserve(max_seq_budget);
   running_sequences_budgets_.reserve(max_seq_budget);
-  schedule_waiting_prefill(waiting_priority_queue_,
+  schedule_waiting_prefill(*waiting_priority_queue_,
                            remaining_token_budget,
                            remaining_seq_budget,
                            done);
-  schedule_waiting_prefill(waiting_priority_queue_offline_,
+  schedule_waiting_prefill(*waiting_priority_queue_offline_,
                            remaining_token_budget,
                            remaining_seq_budget,
                            done);

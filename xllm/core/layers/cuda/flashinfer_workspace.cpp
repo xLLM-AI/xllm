@@ -18,22 +18,24 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "core/common/global_flags.h"
+#include "core/framework/config/model_config.h"
 
 namespace xllm::layer::flashinfer {
 
 void FlashinferWorkspace::initialize(const torch::Device& device) {
   LOG(INFO) << "FlashinferWorkspace initialize on device: " << device;
-  float_workspace_buffer_ =
-      torch::empty({FLAGS_flashinfer_workspace_buffer_size},
-                   torch::dtype(torch::kUInt8).device(device));
+  float_workspace_buffer_ = torch::empty(
+      {::xllm::ModelConfig::get_instance().flashinfer_workspace_buffer_size()},
+      torch::dtype(torch::kUInt8).device(device));
   int_workspace_buffer_ = torch::empty(
       {8 * 1024 * 1024}, torch::dtype(torch::kUInt8).device(device));
   page_locked_int_workspace_buffer_ = torch::empty(
       {int_workspace_buffer_.size(0)},
       torch::dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true));
-  LOG(INFO) << "FlashinferWorkspace initialize end with "
-               "flashinfer_workspace_buffer_size: "
-            << FLAGS_flashinfer_workspace_buffer_size;
+  LOG(INFO)
+      << "FlashinferWorkspace initialize end with "
+         "flashinfer_workspace_buffer_size: "
+      << ::xllm::ModelConfig::get_instance().flashinfer_workspace_buffer_size();
 }
 
 torch::Tensor FlashinferWorkspace::get_float_workspace_buffer() {

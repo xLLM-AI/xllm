@@ -55,8 +55,11 @@ SentencePieceTokenizer::SentencePieceTokenizer(const std::string_view& dir_path,
 
   // add special tokens and construct special token regex
   if (!args.special_tokens().empty()) {
-    const auto vocab_size = sp_processor_.GetPieceSize();
     load_special_tokens(args.special_tokens());
+  }
+
+  if (!args.visible_special_tokens().empty()) {
+    load_visible_special_tokens(args.visible_special_tokens());
   }
 
   // construct prefix tokens
@@ -109,6 +112,22 @@ void SentencePieceTokenizer::load_special_tokens(
     // surround with () to match special tokens
     const auto regex_str = absl::StrCat("(", special_token_regex_str, ")");
     special_token_regex_ = std::make_unique<re2::RE2>(regex_str);
+  }
+}
+
+void SentencePieceTokenizer::load_visible_special_tokens(
+    const std::vector<std::string>& visible_special_tokens) {
+  for (const auto& token : visible_special_tokens) {
+    if (token.empty()) {
+      continue;
+    }
+
+    const auto token_id = token_to_id(token);
+    if (!token_id.has_value()) {
+      LOG(WARNING) << "Failed to find visible special token: " << token;
+      continue;
+    }
+    visible_special_token_ids_.insert(token_id.value());
   }
 }
 
@@ -206,7 +225,7 @@ std::string SentencePieceTokenizer::decode(const Slice<int32_t>& ids,
     // decode text before special token if exists
     decode_internal(ids, start, i, &ss);
 
-    if (!skip_special_tokens) {
+    if (!skip_special_tokens || visible_special_token_ids_.contains(ids[i])) {
       // output special token
       ss << sit->second;
     }

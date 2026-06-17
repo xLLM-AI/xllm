@@ -56,6 +56,9 @@ struct Options {
   // enable prefix cache
   PROPERTY(bool, enable_prefix_cache) = true;
 
+  // maximum encoder cache size in MB (0 disables encoder cache)
+  PROPERTY(int64_t, max_encoder_cache_size) = 0;
+
   // number of decoding tokens per sequence
   // in speculative decoding, it is the number of speculative tokens + 1
   PROPERTY(int64_t, num_decoding_tokens) = 1;
@@ -157,9 +160,6 @@ struct Options {
   // support `PUSH` and `PULL`
   PROPERTY(std::string, kv_cache_transfer_mode) = "PUSH";
 
-  // device_ip needed in disaggregated prefill and decode execution.
-  PROPERTY(std::optional<std::string>, device_ip);
-
   // transfer_listen_port needed in disaggregated prefill and decode execution.
   PROPERTY(uint16_t, transfer_listen_port) = 26000;
 
@@ -195,7 +195,7 @@ struct Options {
   PROPERTY(std::string, store_local_hostname) = "";
 
   // Prefetch from kvcache store copy batch size
-  PROPERTY(uint32_t, prefetch_bacth_size) = 2;
+  PROPERTY(uint32_t, prefetch_batch_size) = 2;
 
   // Layer wise H2D copy batchs
   PROPERTY(uint32_t, layers_wise_copy_batchs) = 4;
@@ -229,6 +229,12 @@ struct Options {
 
   // enable CUDA graph/ACL graph for performance optimization
   PROPERTY(bool, enable_graph) = false;
+  // enable graph-mode decode without padding
+  PROPERTY(bool, enable_graph_mode_decode_no_padding) = false;
+  // enable piecewise graph for prefill
+  PROPERTY(bool, enable_prefill_piecewise_graph) = false;
+  // maximum number of tokens for graph execution
+  PROPERTY(int32_t, max_tokens_for_graph_mode) = 2048;
 
   // beam width for beam search
   PROPERTY(int32_t, beam_width) = 128;

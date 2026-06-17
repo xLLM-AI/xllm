@@ -1,7 +1,7 @@
 import os
 import signal
 import sys
-from . import util
+from . import utils
 from typing import List, Optional, Union, Dict, Any
 from xllm_export import (VLMMaster, Options, RequestOutput,
                          RequestParams, MMData)
@@ -17,25 +17,27 @@ class VLM:
         self,
         model: str,
         task: str = "generate",
-        devices: str = 'auto',
-        draft_model: Optional[str] = None,
-        draft_devices: Optional[str] = None,
+        devices: str = 'npu:0',
+        draft_model: Optional[str] = '',
+        draft_devices: Optional[str] = 'npu:0',
+        limit_image_per_prompt: int = 8,
         block_size: int = 128,
         max_cache_size: int = 0,
-        max_memory_utilization: float = 0.9,
-        disable_prefix_cache: bool = False,
-        max_tokens_per_batch: int = 50000,
-        max_seqs_per_batch: int = 256,
-        max_tokens_per_chunk_for_prefill: int = 512,
+        max_memory_utilization: float = 0.8,
+        enable_prefix_cache: bool = True,
+        max_encoder_cache_size: int = 0,
+        max_tokens_per_batch: int = 10240,
+        max_seqs_per_batch: int = 1024,
+        max_tokens_per_chunk_for_prefill: int = -1,
         num_speculative_tokens: int = 0,
+        speculative_algorithm: str = 'MTP',
         num_request_handling_threads: int = 4,
         communication_backend: str = 'hccl',
         rank_tablefile: str = '',
         expert_parallel_degree: int = 0,
-        disable_chunked_prefill: bool = False,
+        enable_chunked_prefill: bool = True,
         enable_prefill_sp: bool = False,
         instance_role: str = 'DEFAULT',
-        device_ip: str = '',
         transfer_listen_port: int = 26000,
         nnodes: int = 1,
         node_rank: int = 0,
@@ -45,18 +47,28 @@ class VLM:
         enable_disagg_pd: bool = False,
         enable_schedule_overlap: bool = False,
         kv_cache_transfer_mode: str = 'PUSH',
+        enable_graph: bool = False,
+        enable_graph_mode_decode_no_padding: bool = False,
+        enable_prefill_piecewise_graph: bool = False,
+        max_tokens_for_graph_mode: int = 2048,
         enable_shm: bool = False,
         is_local: bool = True,
         input_shm_size: int = 1024,
         output_shm_size: int = 128,
+        use_cpp_chat_template: bool = True,
         **kwargs: Any,
     ) -> None:
         signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
         signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
 
+        if kwargs:
+            unknown = ", ".join(sorted(kwargs.keys()))
+            raise TypeError(f"Unexpected keyword arguments: {unknown}")
+
         if not os.path.exists(model):
             raise ValueError(f"model {model} not exists")
         self.model = model
+        model_type = utils._infer_model_type(model)
 
         options = Options()
         options.model_path = model
@@ -65,29 +77,25 @@ class VLM:
         options.draft_model_path = draft_model
         options.draft_devices = draft_devices
         options.backend ="vlm"
+        options.limit_image_per_prompt = limit_image_per_prompt
         options.block_size = block_size
         options.max_cache_size = max_cache_size
         options.max_memory_utilization = max_memory_utilization
-        if disable_prefix_cache:
-            options.enable_prefix_cache = False
-        else:
-            options.enable_prefix_cache = True
+        options.enable_prefix_cache = enable_prefix_cache
+        options.max_encoder_cache_size = max_encoder_cache_size
         options.max_tokens_per_batch = max_tokens_per_batch
         options.max_seqs_per_batch = max_seqs_per_batch
         options.max_tokens_per_chunk_for_prefill = max_tokens_per_chunk_for_prefill
         options.num_speculative_tokens = num_speculative_tokens
+        options.speculative_algorithm = speculative_algorithm
         options.num_request_handling_threads = num_request_handling_threads
         options.communication_backend = communication_backend
         options.rank_tablefile = rank_tablefile
         options.expert_parallel_degree = expert_parallel_degree
-        if disable_chunked_prefill:
-            options.enable_chunked_prefill = False
-        else:
-            options.enable_chunked_prefill = True
+        options.enable_chunked_prefill = enable_chunked_prefill
         options.enable_prefill_sp = enable_prefill_sp
-        free_port = util.get_free_port()
+        free_port = utils.get_free_port()
         options.master_node_addr = "127.0.0.1:" + str(free_port)
-        options.device_ip = device_ip
         options.transfer_listen_port = transfer_listen_port
         options.nnodes = nnodes
         options.node_rank = node_rank
@@ -95,21 +103,26 @@ class VLM:
         options.ep_size = ep_size
         options.instance_name = instance_name
         options.enable_disagg_pd = enable_disagg_pd
-        options.enable_schedule_overlap = False
+        options.enable_schedule_overlap = enable_schedule_overlap
         options.kv_cache_transfer_mode = kv_cache_transfer_mode
+        options.enable_graph = enable_graph
+        options.enable_graph_mode_decode_no_padding = enable_graph_mode_decode_no_padding
+        options.enable_prefill_piecewise_graph = enable_prefill_piecewise_graph
+        options.max_tokens_for_graph_mode = max_tokens_for_graph_mode
         options.enable_offline_inference = True
         options.spawn_worker_path = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
         options.enable_shm = enable_shm
         options.is_local = is_local
         options.input_shm_size = input_shm_size
         options.output_shm_size = output_shm_size
+        utils._configure_cpp_chat_template(use_cpp_chat_template, model_type)
         self.master = VLMMaster(options)
 
     def finish(self) -> None:
         try:
             #os.kill(os.getpid(), signal.SIGTERM)
             #os.kill(os.getpid(), signal.SIGKILL)
-            util.terminate_process(os.getpid())
+            utils.terminate_process(os.getpid())
         except Exception as e:
             pass
 

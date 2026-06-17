@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <string>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/TCPStore.hpp>
 
@@ -42,7 +43,7 @@ class ProcessGroup {
   ProcessGroup(int32_t rank, int32_t world_size, const torch::Device& device)
       : rank_(rank), world_size_(world_size), device_(device) {}
 
-  virtual ~ProcessGroup() = default;
+  virtual ~ProcessGroup();
 
   int32_t rank() const {
     if (pg_ == nullptr) {
@@ -100,6 +101,8 @@ class ProcessGroup {
       bool async_op = false,
       c10::intrusive_ptr<c10d::Work>* async_work = nullptr);
 
+  virtual std::string hccl_comm_name(bool init_comm = true);
+
  private:
   // rank of current process.
   int32_t rank_ = 0;
@@ -111,6 +114,8 @@ class ProcessGroup {
   torch::Device device_;
 
  protected:
+  void shutdown_backend();
+
 #if defined(USE_NPU) &&         \
     (TORCH_VERSION_MAJOR < 2 || \
      (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR < 7))

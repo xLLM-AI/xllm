@@ -50,6 +50,12 @@ class DiTFolderLoader : public ModelLoader {
 
   std::string component_name_;
 
+  // HuggingFace repo id or local path for the text encoder (e.g.
+  // "google/umt5-base"), read from config.json's "text_encoder_model" field.
+  // Used as a fallback tokenizer source when no tokenizer files exist in the
+  // model directory.
+  std::string text_encoder_model_;
+
   // sorted model weights files
   std::vector<std::string> model_weights_files_;
   // models weights tensors

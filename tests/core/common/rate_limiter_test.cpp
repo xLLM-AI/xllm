@@ -2,13 +2,13 @@
 
 #include <gtest/gtest.h>
 
-#include "global_flags.h"
+#include "core/framework/config/service_config.h"
 
 namespace xllm {
 
 TEST(RequestLimiterTest, Basic) {
   // Set the maximum number of concurrent requests to 1.
-  FLAGS_max_concurrent_requests = 1;
+  ServiceConfig::get_instance().max_concurrent_requests(1);
   RateLimiter rate_limiter;
   // The current number of concurrent requests is 0, no rate limiting is
   // applied.

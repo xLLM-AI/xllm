@@ -54,6 +54,12 @@ class KVCacheShape final {
   static KVCacheShape from_proto(const proto::KVCacheShape& proto_shape);
 
  private:
+  enum class ShapeKind : int8_t {
+    NORMAL = 0,
+    DSV4_POOL = 1,
+  };
+
+  void init_dsv4_pool_shape(const KVCacheCapacity& kv_cache_cap);
   void init_key_cache_shape(const KVCacheCapacity& kv_cache_cap,
                             const ModelArgs& model_args,
                             int64_t world_size);
@@ -69,10 +75,12 @@ class KVCacheShape final {
                             const ModelArgs& model_args,
                             int64_t world_size);
   void apply_device_layout(const ModelArgs& model_args);
+  void print_dsv4_pool_shape() const;
 
   static const std::vector<int64_t>& empty_shape();
 
  private:
+  ShapeKind shape_kind_ = ShapeKind::NORMAL;
   std::optional<std::vector<int64_t>> key_cache_shape_;
   std::optional<std::vector<int64_t>> value_cache_shape_;
 

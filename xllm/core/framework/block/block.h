@@ -57,6 +57,9 @@ class Block final {
   // check if the block is valid
   bool is_valid() const { return id_ >= 0 && ref_count_ != nullptr; }
 
+  // owner manager that allocated this block.
+  BlockManager* manager() const { return manager_; }
+
   // NOTE: Below block `hash_value_` is used for prefix cache and
   // for recording the hash value of the current block and previous blocks.
   // hash_value_ = Hash(current_block, Hash(pre_block)).

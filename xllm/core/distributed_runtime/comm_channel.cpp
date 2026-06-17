@@ -20,6 +20,8 @@ limitations under the License.
 
 #include <future>
 
+#include "common/global_flags.h"
+
 namespace xllm {
 
 bool CommChannel::init_brpc(const std::string& server_address) {
@@ -69,8 +71,14 @@ bool CommChannel::check_health() {
 }
 
 bool CommChannel::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
+  if (!kv_cache_shape.has_key_cache_shape() ||
+      kv_cache_shape.key_cache_shape().empty()) {
+    LOG(ERROR) << "allocate_kv_cache failed: key cache shape is empty";
+    return false;
+  }
   proto::AllocateKVCacheRequest request;
   kv_cache_shape.to_proto(request.mutable_kv_cache_shape());
+
   proto::Status s;
   brpc::Controller cntl;
   stub_->AllocateKVCache(&cntl, &request, &s, nullptr);
@@ -83,26 +91,9 @@ bool CommChannel::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   return true;
 }
 
-bool CommChannel::get_device_info(std::string& device_ip, uint16_t& port) {
-  proto::Empty req;
-  proto::DeviceInfo resp;
-  brpc::Controller cntl;
-
-  stub_->GetDeviceInfo(&cntl, &req, &resp, nullptr);
-  if (cntl.Failed()) {
-    LOG(ERROR) << "GetDeviceInfo failed: " << cntl.ErrorText();
-    return false;
-  }
-
-  device_ip = resp.device_ip();
-  port = resp.listen_port();
-  return true;
-}
-
 bool CommChannel::get_cache_info(uint64_t& cluster_id,
                                  std::string& addr,
-                                 int64_t& k_cache_id,
-                                 int64_t& v_cache_id) {
+                                 uint16_t& port) {
   proto::Empty req;
   proto::CacheInfo resp;
   brpc::Controller cntl;
@@ -115,25 +106,21 @@ bool CommChannel::get_cache_info(uint64_t& cluster_id,
 
   cluster_id = resp.cluster_id();
   addr = resp.addr();
-  k_cache_id = resp.k_cache_id();
-  v_cache_id = resp.v_cache_id();
+  port = static_cast<uint16_t>(resp.listen_port());
   return true;
 }
 
 bool CommChannel::link_cluster(const std::vector<uint64_t>& cluster_ids,
                                const std::vector<std::string>& addrs,
-                               const std::vector<std::string>& device_ips,
                                const std::vector<uint16_t>& ports) {
   proto::ClusterInfo cluster_info;
   cluster_info.mutable_cluster_ids()->Reserve(cluster_ids.size());
   cluster_info.mutable_addrs()->Reserve(addrs.size());
-  cluster_info.mutable_device_ips()->Reserve(device_ips.size());
   cluster_info.mutable_ports()->Reserve(ports.size());
 
   for (size_t i = 0; i < cluster_ids.size(); ++i) {
     cluster_info.add_cluster_ids(cluster_ids[i]);
     cluster_info.add_addrs(addrs[i]);
-    cluster_info.add_device_ips(device_ips[i]);
     cluster_info.add_ports(ports[i]);
   }
 
@@ -150,18 +137,15 @@ bool CommChannel::link_cluster(const std::vector<uint64_t>& cluster_ids,
 
 bool CommChannel::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                                  const std::vector<std::string>& addrs,
-                                 const std::vector<std::string>& device_ips,
                                  const std::vector<uint16_t>& ports) {
   proto::ClusterInfo cluster_info;
   cluster_info.mutable_cluster_ids()->Reserve(cluster_ids.size());
   cluster_info.mutable_addrs()->Reserve(addrs.size());
-  cluster_info.mutable_device_ips()->Reserve(device_ips.size());
   cluster_info.mutable_ports()->Reserve(ports.size());
 
   for (size_t i = 0; i < cluster_ids.size(); ++i) {
     cluster_info.add_cluster_ids(cluster_ids[i]);
     cluster_info.add_addrs(addrs[i]);
-    cluster_info.add_device_ips(device_ips[i]);
     cluster_info.add_ports(ports[i]);
   }
 
@@ -176,31 +160,31 @@ bool CommChannel::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
   return true;
 }
 
-bool CommChannel::link_d2d(const std::string& remote_addr) {
-  proto::D2DLinkWorkerRequest req;
+bool CommChannel::link_p2p(const std::string& remote_addr) {
+  proto::P2PLinkWorkerRequest req;
   req.set_remote_addr(remote_addr);
 
   proto::Status s;
   brpc::Controller cntl;
-  stub_->LinkD2D(&cntl, &req, &s, nullptr);
+  stub_->LinkP2P(&cntl, &req, &s, nullptr);
 
   if (cntl.Failed() || !s.ok()) {
-    LOG(ERROR) << "LinkD2D failed: " << cntl.ErrorText();
+    LOG(ERROR) << "LinkP2P failed: " << cntl.ErrorText();
     return false;
   }
   return true;
 }
 
-bool CommChannel::unlink_d2d(const std::string& remote_addr) {
-  proto::D2DLinkWorkerRequest req;
+bool CommChannel::unlink_p2p(const std::string& remote_addr) {
+  proto::P2PLinkWorkerRequest req;
   req.set_remote_addr(remote_addr);
 
   proto::Status s;
   brpc::Controller cntl;
-  stub_->UnlinkD2D(&cntl, &req, &s, nullptr);
+  stub_->UnlinkP2P(&cntl, &req, &s, nullptr);
 
   if (cntl.Failed() || !s.ok()) {
-    LOG(ERROR) << "UnlinkD2D failed: " << cntl.ErrorText();
+    LOG(ERROR) << "UnlinkP2P failed: " << cntl.ErrorText();
     return false;
   }
   return true;
@@ -257,20 +241,23 @@ bool CommChannel::estimate_kv_cache_capacity(int64_t& available_memory,
   return true;
 }
 
-bool CommChannel::pull_kv_blocks(const uint64_t src_cluster_id,
-                                 const std::string& src_addr,
-                                 const int64_t src_k_cache_id,
-                                 const int64_t src_v_cache_id,
-                                 const std::vector<uint64_t>& src_blocks,
-                                 const std::vector<uint64_t>& dst_blocks) {
+bool CommChannel::pull_kv_blocks(
+    const uint64_t src_cluster_id,
+    const std::string& src_addr,
+    const std::vector<uint64_t>& src_blocks,
+    const std::vector<uint64_t>& dst_blocks,
+    const std::vector<uint64_t>& src_linear_state_ids,
+    const std::vector<uint64_t>& dst_linear_state_ids) {
   proto::PullKVCacheRequest request;
   request.set_cluster_id(src_cluster_id);
   request.set_addr(src_addr);
-  request.set_k_cache_id(src_k_cache_id);
-  request.set_v_cache_id(src_v_cache_id);
 
   ADD_VECTOR_TO_PROTO(request.mutable_src_blocks(), src_blocks);
   ADD_VECTOR_TO_PROTO(request.mutable_dst_blocks(), dst_blocks);
+  ADD_VECTOR_TO_PROTO(request.mutable_src_linear_state_ids(),
+                      src_linear_state_ids);
+  ADD_VECTOR_TO_PROTO(request.mutable_dst_linear_state_ids(),
+                      dst_linear_state_ids);
 
   proto::Status s;
   brpc::Controller cntl;
@@ -280,7 +267,7 @@ bool CommChannel::pull_kv_blocks(const uint64_t src_cluster_id,
 }
 
 void CommChannel::execute_model_async(
-    const RawForwardInput& input,
+    const ForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise) {
   execute_model_with_brpc(input, promise);
 }
@@ -300,6 +287,12 @@ bool CommChannel::process_group_test() {
 
 bool CommChannel::allocate_kv_cache_with_transfer(
     const KVCacheShape& kv_cache_shape) {
+  if (!kv_cache_shape.has_key_cache_shape() ||
+      kv_cache_shape.key_cache_shape().empty()) {
+    LOG(ERROR)
+        << "AllocateKVCacheWithTransfer failed: key cache shape is empty";
+    return false;
+  }
   proto::AllocateKVCacheRequest request;
   kv_cache_shape.to_proto(request.mutable_kv_cache_shape());
 
@@ -382,6 +375,32 @@ bool CommChannel::wakeup(const WakeupOptions& options) {
   stub_->Wakeup(&cntl, &req, &s, nullptr);
   if (cntl.Failed() || !s.ok()) {
     LOG(ERROR) << "Wakeup failed: " << cntl.ErrorText();
+    return false;
+  }
+  return true;
+}
+
+bool CommChannel::start_profile() {
+  proto::Empty req;
+  proto::Status s;
+  brpc::Controller cntl;
+
+  stub_->StartProfile(&cntl, &req, &s, nullptr);
+  if (cntl.Failed() || !s.ok()) {
+    LOG(ERROR) << "StartProfile failed: " << cntl.ErrorText();
+    return false;
+  }
+  return true;
+}
+
+bool CommChannel::stop_profile() {
+  proto::Empty req;
+  proto::Status s;
+  brpc::Controller cntl;
+
+  stub_->StopProfile(&cntl, &req, &s, nullptr);
+  if (cntl.Failed() || !s.ok()) {
+    LOG(ERROR) << "StopProfile failed: " << cntl.ErrorText();
     return false;
   }
   return true;
@@ -528,13 +547,16 @@ bool CommChannel::get_active_activation_memory_async(
 }
 
 bool CommChannel::execute_model_with_brpc(
-    const RawForwardInput& input,
+    const ForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise) {
-  // convert to proto::ForwardInput
   proto::ForwardInput pb_forward_input;
-  forward_input_to_proto(input, &pb_forward_input);
+  auto* packed_input = pb_forward_input.mutable_packed_input();
+  if (!forward_input_to_packed_proto(input, packed_input)) {
+    LOG(ERROR) << "failed to pack ForwardInput for remote execution";
+    promise.setValue(std::optional<RawForwardOutput>(std::nullopt));
+    return false;
+  }
 
-  // call ExecuteModel with callback
   auto done = new ExecuteModelClosure();
   done->promise = std::move(promise);
   stub_->ExecuteModel(&done->cntl, &pb_forward_input, &done->pb_output, done);

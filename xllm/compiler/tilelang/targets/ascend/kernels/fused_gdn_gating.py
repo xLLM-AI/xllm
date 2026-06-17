@@ -6,6 +6,8 @@ from pathlib import Path
 import tilelang
 import tilelang.language as T
 
+from scripts.logger import logger
+
 from compiler.tilelang.targets.ascend.kernels.utils import (
     DEFAULT_ASCEND_PASS_CONFIGS,
     detect_vec_core_num,
@@ -213,9 +215,6 @@ def build_fused_gdn_gating_kernel(
                 beta_fp32_ub = T.alloc_shared(
                     (rows_per_iter, ub_tensor_dim), acc_dtype
                 )
-                sigmoid_tmp_ub = T.alloc_ub(
-                    (rows_per_iter, ub_tensor_dim), mask_dtype
-                )
                 softplus_cmp_mask_ub = T.alloc_ub(
                     (rows_per_iter, compare_select_mask_bytes), mask_dtype
                 )
@@ -309,7 +308,7 @@ def build_fused_gdn_gating_kernel(
                             x_ub, b_half_ub, "CAST_NONE", multi_count
                         )
                         T.tile.sigmoid(
-                            beta_fp32_ub, x_ub, sigmoid_tmp_ub
+                            beta_fp32_ub, x_ub
                         )
                         T.tile.mul(x_ub, neg_exp_A_ub, beta_x_ub)
                         T.tile.cast(
@@ -406,7 +405,7 @@ def build_fused_gdn_gating_kernel(
                             x_ub, b_half_ub, "CAST_NONE", multi_count
                         )
                         T.tile.sigmoid(
-                            beta_fp32_ub, x_ub, sigmoid_tmp_ub
+                            beta_fp32_ub, x_ub
                         )
                         T.tile.mul(x_ub, neg_exp_A_ub, beta_x_ub)
                         T.tile.cast(
@@ -524,7 +523,7 @@ def _run_ref_check(
     import torch
 
     if not hasattr(torch, "npu") or not torch.npu.is_available():
-        print("[WARN] Skip fused_gdn_gating reference check: NPU is not available")
+        logger.warning("Skip fused_gdn_gating reference check: NPU is not available")
         return
 
     if num_batches <= 0:
@@ -579,7 +578,7 @@ def _run_ref_check(
         rtol=1e-2,
         atol=1e-2,
     )
-    print(f"[INFO] fused_gdn_gating output matches torch reference for num_heads={num_heads}")
+    logger.info(f"fused_gdn_gating output matches torch reference for num_heads={num_heads}")
 
 
 def _run_ref_suite(

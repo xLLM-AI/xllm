@@ -1,4 +1,4 @@
-/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,75 +17,78 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <cstdint>
+#include <tuple>
 #include <vector>
 
-#include "core/util/tensor_helper.h"
-#include "image_processor.h"
-
+#include "core/framework/model/model_args.h"
+#include "processors/image_processor.h"
 namespace xllm {
 
-class MiniCPMVImageProcessor : public ImageProcessor {
+class MiniCPMVImageProcessor final : public ImageProcessor {
  public:
-  MiniCPMVImageProcessor(const ModelArgs& args);
-  ~MiniCPMVImageProcessor() override = default;
+  explicit MiniCPMVImageProcessor(const ModelArgs& args);
 
-  static std::pair<int, int> get_sliced_grid(
-      const std::pair<int, int>& original_size,
-      int max_slice_nums,
-      int scale_resolution,
+  static std::pair<int32_t, int32_t> get_sliced_grid(
+      const std::pair<int32_t, int32_t>& original_size,
+      int32_t max_slice_nums,
+      int32_t scale_resolution,
       bool never_split = false);
 
-  bool process(const MMInput& mm_inputs, MMData& mm_datas) override;
+  bool process(torch::Tensor image,
+               std::vector<torch::Tensor>& new_images,
+               std::vector<torch::Tensor>& tgt_sizes) const;
+  bool process(const std::vector<torch::Tensor>& images,
+               std::vector<MMDataItem>& output_items) const override;
 
  private:
-  bool process_images(std::vector<torch::Tensor> images, MMData& mm_datas);
-  bool process_image(torch::Tensor image,
-                     std::vector<torch::Tensor>& new_images,
-                     std::vector<torch::Tensor>& tgt_sizes);
-
-  int ensure_divide(int length, int patch_size) const {
+  int32_t ensure_divide(int32_t length, int32_t patch_size) const {
     return std::max(
-        std::lround(static_cast<float>(length) / patch_size) * patch_size,
-        static_cast<long>(patch_size));
+        static_cast<int32_t>(
+            std::lround(static_cast<float>(length) / patch_size) * patch_size),
+        patch_size);
   }
 
-  std::pair<int, int> find_best_resize(const std::pair<int, int>& original_size,
-                                       int scale_resolution,
-                                       int patch_size,
-                                       bool allow_upscale = false) const;
+  std::pair<int32_t, int32_t> find_best_resize(
+      const std::pair<int32_t, int32_t>& original_size,
+      int32_t scale_resolution,
+      int32_t patch_size,
+      bool allow_upscale = false) const;
 
-  std::pair<int, int> get_refine_size(const std::pair<int, int>& original_size,
-                                      const std::pair<int, int>& grid,
-                                      int scale_resolution,
-                                      int patch_size,
-                                      bool allow_upscale = false) const;
+  std::pair<int32_t, int32_t> get_refine_size(
+      const std::pair<int32_t, int32_t>& original_size,
+      const std::pair<int32_t, int32_t>& grid,
+      int32_t scale_resolution,
+      int32_t patch_size,
+      bool allow_upscale = false) const;
 
   std::tuple<torch::Tensor,
              std::vector<std::vector<torch::Tensor>>,
-             std::pair<int, int>>
+             std::pair<int32_t, int32_t>>
   slice_image(const torch::Tensor& image,
-              int max_slice_nums = 9,
-              int scale_resolution = 448,
-              int patch_size = 14,
-              bool never_split = false);
+              int32_t max_slice_nums = 9,
+              int32_t scale_resolution = 448,
+              int32_t patch_size = 14,
+              bool never_split = false) const;
 
   std::vector<std::vector<torch::Tensor>> split_to_patches(
       const torch::Tensor& image,
-      const std::pair<int, int>& grid) const;
+      const std::pair<int32_t, int32_t>& grid) const;
 
-  torch::Tensor reshape_by_patch(const torch::Tensor& image);
+  torch::Tensor reshape_by_patch(const torch::Tensor& image) const;
 
-  std::vector<torch::Tensor> get_sliced_images(const torch::Tensor& image,
-                                               int max_slice_nums = -1);
+  std::vector<torch::Tensor> get_sliced_images(
+      const torch::Tensor& image,
+      int32_t max_slice_nums = -1) const;
 
  private:
   bool slice_mode_;
-  int max_slice_nums_;
-  int scale_resolution_;
-  int patch_size_;
-  int image_feature_size_;
-  std::vector<double> norm_mean_;
-  std::vector<double> norm_std_;
+  int32_t max_slice_nums_;
+  int32_t scale_resolution_;
+  int32_t patch_size_;
+  int32_t image_feature_size_;
+  torch::Tensor norm_mean_;
+  torch::Tensor norm_std_;
 };
 
 }  // namespace xllm

@@ -19,6 +19,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "common/global_flags.h"
+#include "core/framework/config/eplb_config.h"
 #include "util/tensor_helper.h"
 
 namespace xllm {
@@ -75,7 +76,8 @@ DpEpPadding::DpEpPadding(torch::Tensor token_size_per_dp_group,
   // Set expert parallel degree
   if (mapping_npu_.contains("moeEpSize") &&
       mapping_npu_["moeEpSize"].get<int64_t>() > 1) {
-    expert_parallel_degree_ = FLAGS_expert_parallel_degree;
+    expert_parallel_degree_ =
+        ::xllm::EPLBConfig::get_instance().expert_parallel_degree();
   }
   input_ids_len_ = token_size_per_dp_group_[attn_dp_rank].item<int64_t>();
   max_dp_batch_size_ = token_size_per_dp_group_.max().item<int64_t>();

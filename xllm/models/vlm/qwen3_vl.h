@@ -20,9 +20,12 @@ limitations under the License.
 #include "core/layers/qwen3_vision_layer.h"
 #include "models/llm/qwen3.h"
 #include "models/model_registry.h"
+#include "models/vlm/mposition/mposition.h"
 #include "models/vlm/qwen3_vl_base.h"
-#include "processors/qwen3_vl_image_processor.h"
-#include "processors/qwen3_vl_input_processor.h"
+#include "processors/multimodal_processor.h"
+#include "processors/qwen2_vl_image_processor.h"
+#include "processors/qwen3_vl_prompt_processor.h"
+#include "processors/qwen3_vl_video_processor.h"
 #include "qwen2_5_vl.h"
 
 namespace xllm {
@@ -435,10 +438,8 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
     return torch::cat(outputs, 0);
   }
 
-  std::tuple<torch::Tensor, std::vector<torch::Tensor>> forward(
-      torch::Tensor hidden_states,
-      torch::Tensor grid_thw,  // [batch,thw]
-      const ModelInputParams& input_params) {
+  torch::Tensor forward(torch::Tensor hidden_states,
+                        torch::Tensor grid_thw) {  // [batch,thw]
     hidden_states = patch_embed_(hidden_states);
     auto pos_embeds = fast_pos_embed_interpolate(grid_thw);
     hidden_states = hidden_states + pos_embeds;
@@ -459,8 +460,6 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
     m_sin = rotary_pos_emb.sin().type_as(hidden_states);
     m_sin = m_sin.repeat({1, 2});
 
-    ModelInputParams& input_params_new =
-        const_cast<ModelInputParams&>(input_params);
     torch::Tensor cu_seqlens_cpu = cu_seqlens.cpu();
     std::vector<int> cu_seqlens_vec(
         cu_seqlens_cpu.data_ptr<int>(),  // full seqlen vec
@@ -468,13 +467,8 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
     std::vector<torch::Tensor> deepstack_feature_lists;
     deepstack_feature_lists.reserve(deepstack_visual_indexes_.size());
     for (int idx = 0; idx < layers_.size(); ++idx) {
-      hidden_states = layers_[idx](hidden_states,
-                                   m_cos,
-                                   m_sin,
-                                   cu_seqlens,
-                                   cu_seqlens_vec,
-                                   input_params_new,
-                                   idx);
+      hidden_states = layers_[idx](
+          hidden_states, m_cos, m_sin, cu_seqlens, cu_seqlens_vec, idx);
       auto it = std::find(deepstack_visual_indexes_.begin(),
                           deepstack_visual_indexes_.end(),
                           idx);
@@ -487,7 +481,13 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
     }
     // adapter
     hidden_states = merger_(hidden_states);
-    return std::make_tuple(hidden_states, deepstack_feature_lists);
+    std::vector<torch::Tensor> tensors;
+    tensors.reserve(deepstack_feature_lists.size() + 1);
+    tensors.push_back(hidden_states);
+    tensors.insert(tensors.end(),
+                   deepstack_feature_lists.begin(),
+                   deepstack_feature_lists.end());
+    return torch::cat(tensors, /*dim=*/1);
   }
 
   void load_state_dict(const StateDict& state_dict) {
@@ -554,9 +554,12 @@ class Qwen3_VLForConditionalGenerationImpl
 };
 TORCH_MODULE(Qwen3_VLForConditionalGeneration);
 
-REGISTER_INPUT_PROCESSOR(qwen3_vl, Qwen3_VLInputProcessor);
+using Qwen3VLMultimodalProcessor = MultimodalProcessor<Qwen3VLPromptProcessor,
+                                                       Qwen2VLImageProcessor,
+                                                       Qwen3VLVideoProcessor>;
+REGISTER_MULTIMODAL_PROCESSOR(qwen3_vl, Qwen3VLMultimodalProcessor);
 REGISTER_CAUSAL_VLM_MODEL(qwen3_vl, Qwen3_VLForConditionalGeneration);
-REGISTER_IMAGE_PROCESSOR(qwen3_vl, Qwen3VLImageProcessor);
+REGISTER_MPOSITION_GENERATOR(qwen3_vl, Qwen3VLMPositionGenerator);
 
 REGISTER_MODEL_ARGS(qwen3_vl, [&] {
   // text config

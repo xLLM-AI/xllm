@@ -17,12 +17,30 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <algorithm>
+#include <optional>
 #include <string>
+#include <type_traits>
 #include <vector>
 
+#include "core/framework/state_dict/utils.h"
+#include "core/util/utils.h"
 #include "llm_model_base.h"
 
 namespace xllm {
+
+enum class MtpProjectionType { CONCAT_EH_PROJ, ADD_EH_PROJ };
+
+inline bool is_deepseek_v4_mtp_model(const ModelArgs& model_args) {
+  return util::is_target_mtp_model_type(model_args.model_type(), "deepseek_v4");
+}
+
+inline MtpProjectionType get_mtp_projection_type(const ModelArgs& model_args) {
+  if (is_deepseek_v4_mtp_model(model_args)) {
+    return MtpProjectionType::ADD_EH_PROJ;
+  }
+  return MtpProjectionType::CONCAT_EH_PROJ;
+}
 
 template <typename DecoderLayerType>
 class MtpDecoderLayerImplBase : public torch::nn::Module {
@@ -31,54 +49,130 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
                           const int32_t layer_index)
       : model_args_(context.get_model_args()) {
     auto options = context.get_tensor_options();
-    auto parallel_args = context.get_parallel_args();
+
+    projection_type_ = get_mtp_projection_type(model_args_);
 
     // register submodules
     enorm_ = register_module("enorm", layer::RMSNorm(context));
     hnorm_ = register_module("hnorm", layer::RMSNorm(context));
-    // no quantization for eh_proj
-    eh_proj_ =
-        register_module("eh_proj",
-                        layer::ReplicatedLinear(model_args_.hidden_size() * 2,
-                                                model_args_.hidden_size(),
-                                                /*bias=*/false,
-                                                /*QuantArgs=*/QuantArgs(),
-                                                options));
-    mtp_block_ =
-        register_module("mtp_block", DecoderLayerType(context, layer_index));
+    if (projection_type_ == MtpProjectionType::ADD_EH_PROJ) {
+      e_proj_ =
+          register_module("e_proj",
+                          layer::ReplicatedLinear(model_args_.hidden_size(),
+                                                  model_args_.hidden_size(),
+                                                  /*bias=*/false,
+                                                  /*QuantArgs=*/QuantArgs(),
+                                                  options));
+      h_proj_ =
+          register_module("h_proj",
+                          layer::ReplicatedLinear(model_args_.hidden_size(),
+                                                  model_args_.hidden_size(),
+                                                  /*bias=*/false,
+                                                  /*QuantArgs=*/QuantArgs(),
+                                                  options));
+    } else {
+      // no quantization for eh_proj
+      eh_proj_ =
+          register_module("eh_proj",
+                          layer::ReplicatedLinear(model_args_.hidden_size() * 2,
+                                                  model_args_.hidden_size(),
+                                                  /*bias=*/false,
+                                                  /*QuantArgs=*/QuantArgs(),
+                                                  options));
+    }
+    const int32_t decoder_layer_index =
+        is_deepseek_v4_mtp_model(model_args_)
+            ? std::min<int32_t>(layer_index, model_args_.n_layers() - 1)
+            : layer_index;
+    mtp_block_ = register_module(
+        "mtp_block", DecoderLayerType(context, decoder_layer_index));
+
+    if (is_deepseek_v4_mtp_model(model_args_)) {
+      const int64_t hc_mult = model_args_.hc_mult();
+      const int64_t hc_dim = hc_mult * model_args_.hidden_size();
+      auto hc_options = options.dtype(torch::kFloat32);
+      hc_head_fn_ = register_parameter(
+          "hc_head_fn", torch::empty({hc_mult, hc_dim}, hc_options), false);
+      hc_head_base_ = register_parameter(
+          "hc_head_base", torch::empty({hc_mult}, hc_options), false);
+      hc_head_scale_ = register_parameter(
+          "hc_head_scale", torch::empty({1}, hc_options), false);
+    }
   }
 
-  torch::Tensor forward(torch::Tensor embed,
-                        std::optional<torch::Tensor>& residual,
-                        torch::Tensor positions,
-                        const layer::AttentionMetadata& attn_metadata,
-                        KVCache& kv_cache,
-                        const ModelInputParams& input_params) {
+  torch::Tensor forward(
+      torch::Tensor embed,
+      std::optional<torch::Tensor>& residual,
+      torch::Tensor positions,
+      const layer::AttentionMetadata& attn_metadata,
+      KVCache& kv_cache,
+      const ModelInputParams& input_params,
+      const std::optional<torch::Tensor>& input_ids = std::nullopt) {
     // Layer norm on token inputs
     auto enorm_out = std::get<0>(enorm_(embed));
 
-    torch::Tensor embedding_data = input_params.input_embedding;
+    torch::Tensor embedding_data = input_params.embedding.input_embedding;
     // for dummy data parallel run, we set a empty embedding
     if (attn_metadata.is_dummy) {
       embedding_data = torch::zeros({embed.size(0), model_args_.hidden_size()},
                                     embed.options());
     }
     CHECK(embedding_data.defined())
-        << "embedding is not defined in input_params.input_embedding";
+        << "embedding is not defined in input_params.embedding.input_embedding";
     torch::Tensor previous_hidden_states = embedding_data;
     previous_hidden_states = std::get<0>(hnorm_(previous_hidden_states));
 
-    // Concatenate along last dimension and project
-    auto concat_emb = torch::cat({enorm_out, previous_hidden_states}, -1);
-    auto hidden_states = eh_proj_(concat_emb);
+    torch::Tensor hidden_states;
+    if (projection_type_ == MtpProjectionType::ADD_EH_PROJ) {
+      hidden_states = e_proj_(enorm_out) + h_proj_(previous_hidden_states);
+    } else {
+      // Concatenate along last dimension and project
+      hidden_states =
+          eh_proj_(torch::cat({enorm_out, previous_hidden_states}, -1));
+    }
+
+    if (is_deepseek_v4_mtp_model(model_args_) && hidden_states.dim() == 2) {
+      hidden_states =
+          hidden_states.unsqueeze(1).repeat({1, model_args_.hc_mult(), 1});
+    }
 
     // Pass through mtp block
-    hidden_states = mtp_block_(hidden_states,
-                               residual,
-                               positions,
-                               attn_metadata,
-                               kv_cache,
-                               input_params);
+    if constexpr (std::is_invocable_v<DecoderLayerType,
+                                      torch::Tensor&,
+                                      std::optional<torch::Tensor>&,
+                                      torch::Tensor&,
+                                      const layer::AttentionMetadata&,
+                                      KVCache&,
+                                      const ModelInputParams&,
+                                      const std::optional<torch::Tensor>&>) {
+      hidden_states = mtp_block_(hidden_states,
+                                 residual,
+                                 positions,
+                                 attn_metadata,
+                                 kv_cache,
+                                 input_params,
+                                 input_ids);
+    } else {
+      hidden_states = mtp_block_(hidden_states,
+                                 residual,
+                                 positions,
+                                 attn_metadata,
+                                 kv_cache,
+                                 input_params);
+    }
+
+    if (is_deepseek_v4_mtp_model(model_args_)) {
+      auto x_float = hidden_states.to(torch::kFloat32);
+      auto x_flatten = x_float.flatten(-2, -1);
+      auto rsqrt = torch::rsqrt(x_flatten.pow(2).mean(-1, true) +
+                                model_args_.rms_norm_eps());
+      auto mixes = torch::matmul(x_flatten, hc_head_fn_.transpose(0, 1));
+      mixes = mixes * rsqrt;
+      auto pre = torch::sigmoid(mixes * hc_head_scale_ + hc_head_base_) +
+                 static_cast<double>(model_args_.hc_eps());
+      auto y = (pre.unsqueeze(-1) * x_float).sum(-2);
+      return y.to(hidden_states.dtype());
+    }
 
     return hidden_states;
   }
@@ -86,8 +180,18 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
   void load_state_dict(const StateDict& state_dict) {
     enorm_->load_state_dict(state_dict.get_dict_with_prefix("enorm."));
     hnorm_->load_state_dict(state_dict.get_dict_with_prefix("hnorm."));
-    eh_proj_->load_state_dict(state_dict.get_dict_with_prefix("eh_proj."));
+    if (projection_type_ == MtpProjectionType::ADD_EH_PROJ) {
+      e_proj_->load_state_dict(state_dict.get_dict_with_prefix("e_proj."));
+      h_proj_->load_state_dict(state_dict.get_dict_with_prefix("h_proj."));
+    } else {
+      eh_proj_->load_state_dict(state_dict.get_dict_with_prefix("eh_proj."));
+    }
     mtp_block_->load_state_dict(state_dict);
+    if (is_deepseek_v4_mtp_model(model_args_)) {
+      LOAD_WEIGHT(hc_head_fn);
+      LOAD_WEIGHT(hc_head_base);
+      LOAD_WEIGHT(hc_head_scale);
+    }
   }
 
   virtual void verify_loaded_weights() const {
@@ -105,8 +209,15 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
   layer::RMSNorm enorm_{nullptr};
   layer::RMSNorm hnorm_{nullptr};
   layer::ReplicatedLinear eh_proj_{nullptr};
+  layer::ReplicatedLinear e_proj_{nullptr};
+  layer::ReplicatedLinear h_proj_{nullptr};
   DecoderLayerType mtp_block_{nullptr};
 
+  DEFINE_WEIGHT(hc_head_fn);
+  DEFINE_WEIGHT(hc_head_base);
+  DEFINE_WEIGHT(hc_head_scale);
+
+  MtpProjectionType projection_type_ = MtpProjectionType::CONCAT_EH_PROJ;
   ModelArgs model_args_;
 };
 
@@ -119,11 +230,15 @@ class MtpModelImplBase : public torch::nn::Module {
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
 
+    int32_t mtp_num_layers = model_args_.num_nextn_predict_layers();
+    if (mtp_num_layers <= 0) {
+      mtp_num_layers = 1;
+    }
+
     // get mtp start and end layer index
     mtp_start_layer_idx_ = model_args_.n_layers();
-    mtp_end_layer_idx_ =
-        mtp_start_layer_idx_ + model_args_.num_nextn_predict_layers();
-    mtp_layers_.reserve(model_args_.num_nextn_predict_layers());
+    mtp_end_layer_idx_ = mtp_start_layer_idx_ + mtp_num_layers;
+    mtp_layers_.reserve(mtp_num_layers);
 
     // create mtp layers
     for (int32_t i = mtp_start_layer_idx_; i < mtp_end_layer_idx_; ++i) {
@@ -165,14 +280,16 @@ class MtpModelImplBase : public torch::nn::Module {
         tokens = torch::tensor({1}).to(torch::kInt32).to(device_);
         positions = torch::tensor({1}).to(torch::kInt32).to(device_);
       }
-      auto& dp_token_nums = modified_input_params.dp_global_token_nums;
+      auto& dp_token_nums = modified_input_params.parallel.dp_global_token_nums;
       std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
     }
     if (!modified_input_params.attn_metadata) {
       modified_input_params.attn_metadata =
           std::make_shared<layer::AttentionMetadata>(
               layer::AttentionMetadataBuilder::build(modified_input_params,
-                                                     model_args_.enable_mla()));
+                                                     model_args_.enable_mla(),
+                                                     /*attn_mask=*/std::nullopt,
+                                                     /*device=*/device_));
     }
     auto& attn_metadata = *(modified_input_params.attn_metadata);
     torch::Tensor hidden_states = embed_tokens_(tokens);
@@ -195,7 +312,8 @@ class MtpModelImplBase : public torch::nn::Module {
                             positions,
                             attn_metadata,
                             kv_caches[i],
-                            modified_input_params);
+                            modified_input_params,
+                            tokens);
       if (!modified_input_params.record_layer(static_cast<uint32_t>(i),
                                               hidden_states.device())) {
         return ModelOutput();

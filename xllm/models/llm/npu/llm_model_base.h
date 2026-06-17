@@ -27,6 +27,7 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/common/interruption_bus.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model/model_output.h"
@@ -56,6 +57,7 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
     // register submodules
     decoder_layer_ = register_module("decoder_layer", DecoderType(context));
     block_copy_ = register_module("block_copy", layer::NpuBlockCopy(context));
+    decoder_layer_->set_layer_id(layer_id_);
   }
 
   virtual torch::Tensor forward(torch::Tensor& x,
@@ -66,12 +68,12 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
                                 ModelInputParams& input_params,
                                 aclrtEvent* event,
                                 std::atomic<bool>* event_flag) {
-    if (input_params.src_block_indices.numel() > 0) {
+    if (input_params.block_copy.src_block_indices.numel() > 0) {
       block_copy_(kv_cache.get_k_cache(),
                   kv_cache.get_v_cache(),
-                  input_params.src_block_indices,
-                  input_params.dst_block_indices,
-                  input_params.cum_sum,
+                  input_params.block_copy.src_block_indices,
+                  input_params.block_copy.dst_block_indices,
+                  input_params.block_copy.cum_sum,
                   0);
     }
 
@@ -121,6 +123,10 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
     decoder_layer_->refresh_rolling_weights();
   }
 
+  virtual void set_residual(torch::Tensor residual) {
+    decoder_layer_->set_residual(residual);
+  }
+
  private:
   DecoderType decoder_layer_{nullptr};
   layer::NpuBlockCopy block_copy_{nullptr};
@@ -153,7 +159,7 @@ class LlmModelImplBase : public torch::nn::Module {
       tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
       positions = torch::tensor({0}).to(torch::kInt32).to(tokens.device());
     }
-    auto inputs_embeds = input_params.input_embedding;
+    auto inputs_embeds = input_params.embedding.input_embedding;
     // test
     torch::Tensor h;
     if (inputs_embeds.defined()) {
@@ -191,26 +197,27 @@ class LlmModelImplBase : public torch::nn::Module {
     ModelInputParams& input_params_new =
         const_cast<ModelInputParams&>(input_params);
     torch::Tensor attn_mask;
-    max_seq_len_ = FLAGS_enable_chunked_prefill
-                       ? std::max(input_params.kv_max_seq_len, max_seq_len_)
-                       : 128;
+    max_seq_len_ =
+        ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()
+            ? std::max(input_params.meta.kv_max_seq_len, max_seq_len_)
+            : 128;
     if (model_type_ == "qwen2") {
       attn_mask = attn_mask_.get_attn_mask(
           max_seq_len_, cos_pos.dtype().toScalarType(), cos_pos.device());
     } else {
-      if (FLAGS_enable_chunked_prefill) {
-        int num_sequences = input_params.num_sequences;
+      if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
+        int num_sequences = input_params.meta.num_sequences;
         if (num_sequences > 0) {
           std::vector<torch::Tensor> req_mask_vec;
           req_mask_vec.reserve(num_sequences);
 
           for (int j = 0; j < num_sequences; j++) {
-            auto mask =
-                attn_mask_.gen_append_mask(input_params.q_seq_lens_vec[j],
-                                           input_params.kv_seq_lens_vec[j],
-                                           max_seq_len_,
-                                           cos_pos.dtype().toScalarType(),
-                                           cos_pos.device());
+            auto mask = attn_mask_.gen_append_mask(
+                input_params.attention.host.q_seq_lens[j],
+                input_params.attention.host.kv_seq_lens[j],
+                max_seq_len_,
+                cos_pos.dtype().toScalarType(),
+                cos_pos.device());
             req_mask_vec.emplace_back(mask);
           }
           attn_mask = torch::cat(req_mask_vec, 0);
@@ -226,9 +233,10 @@ class LlmModelImplBase : public torch::nn::Module {
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event = nullptr;
       std::atomic<bool>* event_flag = nullptr;
-      if (input_params.layer_synchronizer != nullptr) {
-        event = input_params.layer_synchronizer->get_event(i);
-        event_flag = input_params.layer_synchronizer->get_event_flag(i);
+      if (input_params.parallel.layer_synchronizer != nullptr) {
+        event = input_params.parallel.layer_synchronizer->get_event(i);
+        event_flag =
+            input_params.parallel.layer_synchronizer->get_event_flag(i);
       }
       if (!input_params.synchronize_layer(i)) {
         return ModelOutput();
@@ -357,6 +365,12 @@ class LlmModelImplBase : public torch::nn::Module {
     npu_embed_tokens_ = npu_word_embedding;
   }
 
+  virtual void set_residual(torch::Tensor residual) {
+    for (auto& layer : layers_) {
+      layer->set_residual(residual);
+    }
+  }
+
  protected:
   torch::Tensor cos_sin_;
   torch::Tensor cos_pos_;
@@ -418,6 +432,17 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   virtual torch::Tensor logits(const torch::Tensor& hidden_states,
                                const torch::Tensor& seleted_idxes) {
     return npu_lm_head_(hidden_states, seleted_idxes, 0);
+  }
+
+  // hidden_states: [num_tokens, hidden_size]
+  // seleted_idxes: [num_tokens]
+  // out_hidden: [num_seqs, hidden_size]
+  // returns: [num_tokens, vocab_size]
+  virtual torch::Tensor logits(const torch::Tensor& hidden_states,
+                               const torch::Tensor& seleted_idxes,
+                               torch::Tensor& out_hidden) {
+    return npu_lm_head_->forward_with_hidden(
+        hidden_states, seleted_idxes, out_hidden, 0);
   }
 
   // hidden_states: [num_tokens, hidden_size]

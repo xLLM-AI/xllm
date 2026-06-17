@@ -19,7 +19,7 @@ cc_library(
     dit_scheduler.h
     prefill_only_scheduler.h
     scheduler_factory.h
-    decode_priority_queue.h
+    request_priority_queue.h
     perf_model.h
     fixed_steps_scheduler.h
   SRCS

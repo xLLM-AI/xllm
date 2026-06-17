@@ -51,17 +51,18 @@ BlockManagerImpl::BlockManagerImpl(const Options& options)
   CHECK_GT(options.num_blocks(), 0) << "No blocks to allocate";
   CHECK_GT(options.block_size(), 0) << "Block size must be positive";
   if (options_.enable_prefix_cache()) {
-    prefix_cache_ = create_prefix_cache(options.block_size(),
-                                        options.enable_cache_upload());
+    PrefixCache::Options prefix_cache_options;
+    prefix_cache_options.block_size(options.block_size())
+        .enable_cache_upload(options.enable_cache_upload())
+        .hasher_type(options.hasher_type());
+    prefix_cache_ = create_prefix_cache(prefix_cache_options);
     CHECK(prefix_cache_) << "Failed to create prefix cache!";
   }
 
   size_t total_blocks = options_.num_blocks();
   block_size_ = options_.block_size();
   num_free_blocks_.store(total_blocks, std::memory_order_relaxed);
-  if (options_.enable_prefix_cache()) {
-    usage_accounted_ids_.assign(total_blocks, 0);
-  }
+  usage_accounted_ids_.assign(total_blocks, 0);
   free_blocks_.reserve(total_blocks);
   for (int32_t i = 0; i < total_blocks; ++i) {
     // push smaller block ids to the back of the vector
@@ -85,10 +86,8 @@ std::vector<Block> BlockManagerImpl::allocate(size_t num_blocks) {
     size_t prev_count =
         num_free_blocks_.fetch_sub(1, std::memory_order_relaxed);
     const int32_t block_id = free_blocks_[prev_count - 1];
-    if (options_.enable_prefix_cache()) {
-      CHECK(mark_used(&usage_accounted_ids_, block_id))
-          << "block " << block_id << " usage accounted repeatedly";
-    }
+    CHECK(mark_used(&usage_accounted_ids_, block_id))
+        << "block " << block_id << " usage accounted repeatedly";
     blocks.emplace_back(block_id, this);
   }
 
@@ -98,30 +97,33 @@ std::vector<Block> BlockManagerImpl::allocate(size_t num_blocks) {
 }
 
 void BlockManagerImpl::deallocate(const Slice<Block>& blocks) {
-  if (options_.enable_prefix_cache()) {
-    for (const auto& block : blocks) {
-      // the block is not shared by other sequence
-      if (block.is_valid() && block.ref_count() <= 2 &&
-          clear_used(&usage_accounted_ids_, block.id())) {
-        if (num_used_blocks_ == 0) {
-          LOG(ERROR) << "num_used_blocks_==0 cannot fetch_sub for id:"
-                     << block.id()
-                     << ", total block size: " << num_total_blocks();
-          std::unordered_set<int32_t> block_id_set;
-          block_id_set.insert(block.id());
-          std::string error_msg = "Block already released: ";
-          for (auto& id : free_blocks_) {
-            if (block_id_set.count(id) != 0) {
-              error_msg.append(std::to_string(id)).append(" ");
-            }
-          }
-          LOG(FATAL) << error_msg;
-        }
-        num_used_blocks_.fetch_sub(1, std::memory_order_relaxed);
-      }
+  for (const auto& block : blocks) {
+    if (!block.is_valid()) {
+      continue;
     }
-  } else {
-    num_used_blocks_.fetch_sub(blocks.size(), std::memory_order_relaxed);
+    // Prefix-cache blocks may be shared by cache aliases, so only drop
+    // effective usage when no sequence owner remains. Without prefix cache,
+    // deallocate() marks the passed ids logically released immediately; their
+    // physical ids return to the free list when the last Block alias is
+    // dropped.
+    if ((!options_.enable_prefix_cache() || block.ref_count() <= 2u) &&
+        clear_used(&usage_accounted_ids_, block.id())) {
+      if (num_used_blocks_ == 0) {
+        LOG(ERROR) << "num_used_blocks_==0 cannot fetch_sub for id:"
+                   << block.id()
+                   << ", total block size: " << num_total_blocks();
+        std::unordered_set<int32_t> block_id_set;
+        block_id_set.insert(block.id());
+        std::string error_msg = "Block already released: ";
+        for (auto& id : free_blocks_) {
+          if (block_id_set.count(id) != 0) {
+            error_msg.append(std::to_string(id)).append(" ");
+          }
+        }
+        LOG(FATAL) << error_msg;
+      }
+      num_used_blocks_.fetch_sub(1, std::memory_order_relaxed);
+    }
   }
 }
 
@@ -155,14 +157,15 @@ bool BlockManagerImpl::has_enough_blocks(uint32_t num_blocks) {
 }
 
 std::vector<Block> BlockManagerImpl::allocate_shared(
-    const Slice<int32_t>& tokens_ids,
-    const Slice<Block>& existed_shared_blocks) {
+    const Slice<int32_t>& token_ids,
+    const Slice<Block>& existed_shared_blocks,
+    const MMData& mm_data) {
   // only allocate shared blocks for prefill sequences
   if (options_.enable_prefix_cache()) {
     AUTO_COUNTER(prefix_cache_latency_seconds_match);
 
     std::vector<Block> shared_blocks =
-        prefix_cache_->match(tokens_ids, existed_shared_blocks);
+        prefix_cache_->match(token_ids, existed_shared_blocks, mm_data);
 
     const size_t prefix_length =
         shared_blocks.empty() ? 0
@@ -182,11 +185,13 @@ std::vector<Block> BlockManagerImpl::allocate_shared(
 
 void BlockManagerImpl::cache(const Slice<int32_t>& token_ids,
                              std::vector<Block>& blocks,
-                             size_t existed_shared_blocks_num) {
+                             size_t existed_shared_blocks_num,
+                             const MMData& mm_data) {
   if (options_.enable_prefix_cache()) {
     AUTO_COUNTER(prefix_cache_latency_seconds_insert);
     // Add the kv cache to the prefix cache
-    prefix_cache_->insert(token_ids, blocks, existed_shared_blocks_num);
+    prefix_cache_->insert(
+        token_ids, blocks, existed_shared_blocks_num, mm_data);
   }
 }
 
@@ -219,8 +224,7 @@ Block BlockManagerImpl::allocate() {
 void BlockManagerImpl::free(int32_t block_id) {
   // do nothing for reserved block 0
   if (block_id != 0) {
-    if (options_.enable_prefix_cache() &&
-        clear_used(&usage_accounted_ids_, block_id)) {
+    if (clear_used(&usage_accounted_ids_, block_id)) {
       CHECK_GT(num_used_blocks_.load(std::memory_order_relaxed), 0u);
       num_used_blocks_.fetch_sub(1, std::memory_order_relaxed);
     }

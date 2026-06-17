@@ -118,9 +118,6 @@ jobs:
           find .git/modules -type f -name '*.lock' -print -delete || true
         fi
 
-        rm -rf .git/modules/third_party/tilelang-ascend
-        rm -rf third_party/tilelang-ascend
-
     - name: Checkout Code
       timeout-minutes: 5
       uses: actions/checkout@v4
@@ -128,9 +125,12 @@ jobs:
         clean: true
         submodules: recursive
 
+    - name: Clean submodules
+      run: git submodule foreach --recursive git clean -ffdx
+
     - name: Build
       if: ${{ success() }}
       timeout-minutes: 60
       run: |
         chmod +x ./cibuild/build_npu.sh
-        bash cibuild/build_npu.sh 'pip install pre-commit -i https://pypi.tuna.tsinghua.edu.cn/simple; python setup.py bdist_wheel; pip install dist/* --force-reinstall; python examples/generate.py --model="/export/home/models/Qwen2-7B-Instruct" --devices="npu:7"'
+        bash cibuild/build_npu.sh 'pip install pre-commit -i https://pypi.tuna.tsinghua.edu.cn/simple; python setup.py bdist_wheel; pip install dist/* --force-reinstall; cd /tmp && python /export/home/actions-runner/_work/xllm/xllm/examples/generate.py --model="/export/home/models/Qwen2-7B-Instruct" --devices="npu:7"'

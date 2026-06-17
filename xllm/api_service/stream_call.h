@@ -25,6 +25,8 @@ limitations under the License.
 #include <optional>
 #include <string>
 
+#include "anthropic.pb.h"
+#include "api_service/anthropic_json.h"
 #include "api_service/call.h"
 #include "core/common/types.h"
 
@@ -178,6 +180,17 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
 
   ~AnthropicCall() {}
 
+  bool write_and_finish(proto::AnthropicMessagesResponse& response) {
+    std::string json;
+    std::string err_msg;
+    if (!api_service::proto_to_anthropic_json(
+            response, this->json_options_, &json, &err_msg)) {
+      return this->finish_with_error(StatusCode::UNKNOWN, err_msg);
+    }
+    this->controller_->response_attachment().append(json);
+    return true;
+  }
+
   // Write SSE event with Anthropic format: event: <type>\ndata: <json>\n\n
   bool write(const std::string& event_type, const std::string& json_data) {
     this->io_buf_.clear();
@@ -198,13 +211,14 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
     this->io_buf_.append("event: ");
     this->io_buf_.append(event_type);
     this->io_buf_.append("\ndata: ");
-    butil::IOBufAsZeroCopyOutputStream json_output(&this->io_buf_);
+    std::string json;
     std::string err_msg;
-    if (!json2pb::ProtoMessageToJson(
-            message, &json_output, this->json_options_, &err_msg)) {
+    if (!api_service::proto_to_anthropic_json(
+            message, this->json_options_, &json, &err_msg)) {
       LOG(ERROR) << "Failed to convert proto to json: " << err_msg;
       return false;
     }
+    this->io_buf_.append(json);
     this->io_buf_.append("\n\n");
     this->connection_status_ |= this->pa_->Write(this->io_buf_);
     return this->connection_status_ == 0;

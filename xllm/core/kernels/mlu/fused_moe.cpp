@@ -51,6 +51,31 @@ std::tuple<torch::Tensor, torch::Tensor> moe_active_topk(
   return std::make_tuple(reduce_weight, expert_id);
 }
 
+std::tuple<torch::Tensor, torch::Tensor> moe_softplus_topk(
+    const torch::Tensor& input,
+    int64_t topk,
+    const std::optional<torch::Tensor>& input_ids,
+    const std::optional<torch::Tensor>& tid2eid,
+    const std::optional<torch::Tensor>& bias,
+    float route_scale) {
+  std::vector<int64_t> out_shape = input.sizes().vec();
+  out_shape.pop_back();
+  out_shape.push_back(topk);
+  auto reduce_weight = torch::empty(
+      out_shape, torch::dtype(torch::kFloat).device(input.device()));
+  auto expert_id = torch::empty(
+      out_shape, torch::dtype(torch::kInt32).device(input.device()));
+  tmo::torch_api::moe_softplus_topk(input,
+                                    input_ids,
+                                    tid2eid,
+                                    bias,
+                                    topk,
+                                    route_scale,
+                                    reduce_weight,
+                                    expert_id);
+  return std::make_tuple(reduce_weight, expert_id);
+}
+
 std::vector<torch::Tensor> moe_gen_idx(const torch::Tensor& expert_id,
                                        int64_t expert_num) {
   return tmo::torch_api::moe_gen_idx(expert_id, expert_num);

@@ -2,6 +2,8 @@ import importlib.util
 import os
 import sys
 import sysconfig
+from types import ModuleType
+from typing import Any
 
 
 def _get_python_version_tag() -> str:
@@ -33,38 +35,105 @@ def _find_export_so_path() -> str:
     )
 
 
-_export_so_path = _find_export_so_path()
-_spec = importlib.util.spec_from_file_location("xllm_export", _export_so_path)
-if _spec is None or _spec.loader is None:
-    raise ImportError(f"failed to create import spec for xllm_export: {_export_so_path}")
+def _load_xllm_export() -> ModuleType:
+    loaded_module = sys.modules.get("xllm_export")
+    if loaded_module is not None:
+        return loaded_module
 
-# Make `import xllm_export` work for submodules (pybind/*) by loading and
-# registering it before importing any modules that depend on it.
-xllm_export = importlib.util.module_from_spec(_spec)
-sys.modules["xllm_export"] = xllm_export
-_spec.loader.exec_module(xllm_export)
+    export_so_path = _find_export_so_path()
+    spec = importlib.util.spec_from_file_location("xllm_export", export_so_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"failed to create import spec for xllm_export: {export_so_path}")
 
-from xllm.pybind.embedding import Embedding
-from xllm.pybind.llm import LLM
-try:
-    from xllm.pybind.vlm import VLM
-except Exception:
-    VLM = None
-from xllm.pybind.args import ArgumentParser
-from xllm.pybind.params import SamplingParams, BeamSearchParams, PoolingParams
-from xllm_export import (
-    LLMMaster,
-    VLMMaster,
-    Options,
-    RequestParams,
-    RequestOutput,
-    Usage,
-    SequenceOutput,
-    Status,
-    StatusCode,
-    MMType,
-    MMData,
-)
+    # Make `import xllm_export` work for submodules (pybind/*) by loading and
+    # registering it before importing any modules that depend on it.
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["xllm_export"] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop("xllm_export", None)
+        raise
+    return module
+
+
+_PUBLIC_NAMES = {
+    "ArgumentParser",
+    "Embedding",
+    "LLM",
+    "LLMMaster",
+    "VLM",
+    "VLMMaster",
+    "Options",
+    "SamplingParams",
+    "BeamSearchParams",
+    "PoolingParams",
+    "RequestParams",
+    "RequestOutput",
+    "Usage",
+    "SequenceOutput",
+    "Status",
+    "StatusCode",
+    "MMType",
+    "MMData",
+    "xllm_export",
+}
+
+_PUBLIC_API_LOADED = False
+
+
+def _load_public_api() -> None:
+    global _PUBLIC_API_LOADED
+    if _PUBLIC_API_LOADED:
+        return
+
+    xllm_export = _load_xllm_export()
+
+    from xllm.pybind.args import ArgumentParser
+    from xllm.pybind.embedding import Embedding
+    from xllm.pybind.llm import LLM
+    from xllm.pybind.params import BeamSearchParams, PoolingParams, SamplingParams
+
+    try:
+        from xllm.pybind.vlm import VLM
+    except Exception:
+        VLM = None
+
+    globals().update(
+        {
+            "ArgumentParser": ArgumentParser,
+            "Embedding": Embedding,
+            "LLM": LLM,
+            "LLMMaster": xllm_export.LLMMaster,
+            "VLM": VLM,
+            "VLMMaster": xllm_export.VLMMaster,
+            "Options": xllm_export.Options,
+            "SamplingParams": SamplingParams,
+            "BeamSearchParams": BeamSearchParams,
+            "PoolingParams": PoolingParams,
+            "RequestParams": xllm_export.RequestParams,
+            "RequestOutput": xllm_export.RequestOutput,
+            "Usage": xllm_export.Usage,
+            "SequenceOutput": xllm_export.SequenceOutput,
+            "Status": xllm_export.Status,
+            "StatusCode": xllm_export.StatusCode,
+            "MMType": xllm_export.MMType,
+            "MMData": xllm_export.MMData,
+            "xllm_export": xllm_export,
+        }
+    )
+    _PUBLIC_API_LOADED = True
+
+
+def __getattr__(name: str) -> Any:
+    if name in _PUBLIC_NAMES:
+        _load_public_api()
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | _PUBLIC_NAMES)
 
 __all__ = [
     "ArgumentParser",

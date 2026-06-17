@@ -29,6 +29,7 @@ limitations under the License.
 
 #include "api_service/call.h"
 #include "common/metrics.h"
+#include "core/platform/device_name_utils.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
 #include "models/model_registry.h"
@@ -36,7 +37,6 @@ limitations under the License.
 #include "scheduler/scheduler_factory.h"
 #include "server/xllm_server_registry.h"
 #include "speculative_engine.h"
-#include "util/device_name_utils.h"
 #include "util/net.h"
 #include "util/scope_guard.h"
 #include "util/timer.h"
@@ -117,8 +117,10 @@ LLMMaster::LLMMaster(const Options& options)
       ChatTemplate::create(engine_->tokenizer_args(), model_args_.model_type());
 
   tokenizer_ = engine_->tokenizer()->clone();
-  threadpool_ =
-      std::make_unique<ThreadPool>(options_.num_request_handling_threads());
+  threadpool_ = std::make_unique<ThreadPool>(
+      /*num_threads=*/options_.num_request_handling_threads(),
+      /*cpu_binding=*/false,
+      /*pool_name=*/"LLMMaster.request");
 }
 
 LLMMaster::~LLMMaster() {
@@ -313,12 +315,13 @@ std::shared_ptr<Request> LLMMaster::generate_request(
 
   COUNTER_ADD(tokenization_latency_seconds, timer.elapsed_seconds());
 
-  int32_t max_context_len = model_args_.max_position_embeddings();
+  const int32_t max_context_len = model_args_.max_position_embeddings();
+  int32_t prompt_token_limit = max_context_len;
   if (!options_.enable_chunked_prefill()) {
-    max_context_len =
-        std::min(max_context_len, options_.max_tokens_per_batch());
+    prompt_token_limit =
+        std::min(prompt_token_limit, options_.max_tokens_per_batch());
   }
-  if (local_prompt_tokens.size() >= max_context_len) {
+  if (local_prompt_tokens.size() >= prompt_token_limit) {
     LOG(ERROR) << "Prompt is too long: " << local_prompt_tokens.size();
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "Prompt is too long",
@@ -370,7 +373,8 @@ std::shared_ptr<Request> LLMMaster::generate_request(
     // candidate for beam expansion.
     sampling_param.logprobs = true;
     if (sampling_param.top_logprobs == 0) {
-      sampling_param.top_logprobs = 1;
+      sampling_param.top_logprobs =
+          static_cast<int64_t>(sampling_param.beam_width);
     }
   }
   // sampling_param.do_sample = sp.do_sample;
@@ -548,12 +552,12 @@ bool LLMMaster::wakeup(const WakeupOptions& options) {
   return engine_->wakeup(opts);
 }
 
-bool LLMMaster::link_d2d(const std::vector<std::string>& device_ips) {
-  return engine_->link_d2d(device_ips);
+bool LLMMaster::link_p2p(const std::vector<std::string>& remote_addrs) {
+  return engine_->link_p2p(remote_addrs);
 }
 
-bool LLMMaster::unlink_d2d(const std::vector<std::string>& device_ips) {
-  return engine_->unlink_d2d(device_ips);
+bool LLMMaster::unlink_p2p(const std::vector<std::string>& remote_addrs) {
+  return engine_->unlink_p2p(remote_addrs);
 }
 
 LLMAssistantMaster::LLMAssistantMaster(const Options& options)
@@ -588,6 +592,59 @@ void LLMAssistantMaster::run() {
       std::this_thread::sleep_for(std::chrono::seconds(5));
     }
   });
+}
+
+// ============== Async RL training support: Pause/Resume ==============
+void LLMMaster::pause_scheduler(const std::string& mode) {
+  LOG(INFO) << "LLMMaster: pausing scheduler (mode=" << mode << ")";
+
+  auto* continuous_scheduler =
+      dynamic_cast<ContinuousScheduler*>(scheduler_.get());
+  if (!continuous_scheduler) {
+    LOG(ERROR) << "Scheduler is not a ContinuousScheduler";
+    return;
+  }
+
+  ContinuousScheduler::PauseMode pause_mode =
+      ContinuousScheduler::PauseMode::KEEP;
+  if (mode == "abort") {
+    pause_mode = ContinuousScheduler::PauseMode::ABORT;
+  } else if (mode == "wait") {
+    pause_mode = ContinuousScheduler::PauseMode::WAIT;
+  } else if (mode != "keep" && !mode.empty()) {
+    LOG(WARNING) << "Unknown pause mode '" << mode << "', defaulting to keep";
+  }
+
+  continuous_scheduler->pause(pause_mode);
+
+  // Block until the scheduler loop thread has actually reached PAUSED, so that
+  // when this call returns it is safe to update weights (KEEP/ABORT: running
+  // requests handled and KV cache freed; WAIT: all in-flight requests done).
+  continuous_scheduler->wait_until_paused();
+  LOG(INFO) << "LLMMaster: scheduler fully paused (mode=" << mode << ")";
+}
+
+void LLMMaster::resume_scheduler() {
+  LOG(INFO) << "LLMMaster: resuming scheduler";
+
+  auto* continuous_scheduler =
+      dynamic_cast<ContinuousScheduler*>(scheduler_.get());
+  if (!continuous_scheduler) {
+    LOG(ERROR) << "Scheduler is not a ContinuousScheduler";
+    return;
+  }
+
+  continuous_scheduler->resume();
+}
+
+bool LLMMaster::is_scheduler_paused() const {
+  auto* continuous_scheduler =
+      dynamic_cast<ContinuousScheduler*>(scheduler_.get());
+  if (!continuous_scheduler) {
+    return false;
+  }
+
+  return continuous_scheduler->is_paused();
 }
 
 }  // namespace xllm

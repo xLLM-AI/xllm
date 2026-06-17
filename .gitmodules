@@ -50,8 +50,3 @@
 	path = third_party/xxHash
 	url = https://gitcode.com/xLLM-AI/xxHash.git
 	fetchRecurseSubmodules = false
-[submodule "third_party/tilelang-ascend"]
-	path = third_party/tilelang-ascend
-	url = https://gitcode.com/xLLM-AI/tilelang-ascend.git
-	branch = ascendc_pto
-	fetchRecurseSubmodules = true

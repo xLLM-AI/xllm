@@ -125,6 +125,18 @@ aclnnStatus beam_search_group_get_workspace_size(
 
 }  // namespace
 
+void run_beam_search_rec_final(const torch::Tensor& logprobs,
+                               const torch::Tensor& top_tokens,
+                               const torch::Tensor& top_logprobs,
+                               torch::Tensor& sequence_group,
+                               int64_t current_step,
+                               int64_t result_width,
+                               torch::Tensor& out_token_ids,
+                               torch::Tensor& out_token_index,
+                               torch::Tensor& out_log_probs,
+                               torch::Tensor& out_beam_count_prefix_sums,
+                               torch::Tensor& out_sequence);
+
 // Run one beam-search update in REC multi-round decoding on NPU.
 // Inputs:
 //   logprobs: accumulated beam scores from the previous round.
@@ -222,5 +234,43 @@ void beam_search_rec(const torch::Tensor& logprobs,
         aclrtFree(workspace_addr),
         "beam_search_rec: failed to free workspace for REC beam search");
   }
+}
+
+void beam_search_rec(const torch::Tensor& logprobs,
+                     const torch::Tensor& top_tokens,
+                     const torch::Tensor& top_logprobs,
+                     torch::Tensor& sequence_group,
+                     int64_t current_step,
+                     int64_t result_width,
+                     torch::Tensor& out_token_ids,
+                     torch::Tensor& out_token_index,
+                     torch::Tensor& out_log_probs,
+                     torch::Tensor& out_beam_count_prefix_sums,
+                     torch::Tensor& out_sequence) {
+  if (result_width <= 0) {
+    beam_search_rec(logprobs,
+                    top_tokens,
+                    top_logprobs,
+                    sequence_group,
+                    current_step,
+                    out_token_ids,
+                    out_token_index,
+                    out_log_probs,
+                    out_beam_count_prefix_sums,
+                    out_sequence);
+    return;
+  }
+
+  run_beam_search_rec_final(logprobs,
+                            top_tokens,
+                            top_logprobs,
+                            sequence_group,
+                            current_step,
+                            result_width,
+                            out_token_ids,
+                            out_token_index,
+                            out_log_probs,
+                            out_beam_count_prefix_sums,
+                            out_sequence);
 }
 }  // namespace xllm::kernel::npu

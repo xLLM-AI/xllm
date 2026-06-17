@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "ATen/Tensor.h"
@@ -142,7 +143,19 @@ void batch_decode(const torch::Tensor& query,
                   int64_t window_size_right,
                   float scale,
                   bool return_lse,
-                  int64_t kv_cache_quant_bit_size);
+                  int64_t kv_cache_quant_bit_size,
+                  const std::optional<torch::Tensor>& cu_seq_q = std::nullopt,
+                  int64_t max_seq_q = -1,
+                  const std::optional<torch::Tensor>& sink = std::nullopt);
+
+void update_out_and_lse(
+    torch::Tensor& out,
+    torch::Tensor& lse,
+    const torch::Tensor& block_out,
+    const torch::Tensor& block_lse,
+    const std::optional<torch::Tensor>& seq_offsets = std::nullopt,
+    const std::optional<torch::Tensor>& cu_seqs = std::nullopt,
+    const std::optional<torch::Tensor>& block_cu_seqs = std::nullopt);
 
 void masked_indexer_select_paged_kv(
     const torch::Tensor& query,
@@ -160,12 +173,16 @@ void masked_indexer_select_paged_kv(
     const std::optional<torch::Tensor>& q_scale,
     const std::optional<torch::Tensor>& k_scale_cache,
     const torch::Tensor& sparse_block_table,
-    const torch::Tensor& sparse_context_lens);
+    const torch::Tensor& sparse_context_lens,
+    bool is_score_float = false,
+    int64_t compress_ratio = 1,
+    const std::optional<torch::Tensor>& kv_cache_block_table_offset =
+        std::nullopt);
 
 void fused_layernorm(const torch::Tensor& input,
                      torch::Tensor& output,
                      const std::optional<torch::Tensor>& residual,
-                     const torch::Tensor& weight,
+                     const std::optional<torch::Tensor>& weight,
                      const std::optional<torch::Tensor>& beta,
                      const std::optional<torch::Tensor>& bias,
                      const std::optional<torch::Tensor>& quant_scale,
@@ -325,6 +342,26 @@ void gather_split(const torch::Tensor& input,
                   const torch::Tensor& output_head,
                   const torch::Tensor& output_tail);
 
+torch::Tensor fused_mul_reduce_sum(const torch::Tensor& x,
+                                   const torch::Tensor& w);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> hc_split_sinkhorn(
+    const torch::Tensor& mixes,
+    const torch::Tensor& hc_scale,
+    const torch::Tensor& hc_base,
+    const std::optional<torch::Tensor>& pre_scale,
+    int64_t hc_mult,
+    int64_t sinkhorn_iter,
+    double eps);
+
+std::tuple<torch::Tensor, torch::Tensor> fused_mhc_post(
+    const torch::Tensor& x,
+    const torch::Tensor& residual,
+    const torch::Tensor& post,
+    const torch::Tensor& comb,
+    bool compute_rms,
+    double eps);
+
 void fused_mla_q(const torch::Tensor& input,
                  torch::Tensor& output,
                  torch::Tensor& output_scale,
@@ -397,5 +434,44 @@ torch::Tensor gemma_rms_norm(const torch::Tensor& x,
                              const torch::Tensor& gamma,
                              double eps,
                              torch::Tensor& norm_out);
+
+std::tuple<torch::Tensor, torch::Tensor> moe_softplus_topk(
+    const torch::Tensor& input,
+    int64_t topk,
+    const std::optional<torch::Tensor>& input_ids = std::nullopt,
+    const std::optional<torch::Tensor>& tid2eid = std::nullopt,
+    const std::optional<torch::Tensor>& bias = std::nullopt,
+    float route_scale = 1.0);
+
+void fused_compress_single_kv(
+    const torch::Tensor& kv,
+    const torch::Tensor& score,
+    const torch::Tensor& position,
+    const std::optional<torch::Tensor>& state_ids,
+    const torch::Tensor& ape,
+    torch::Tensor& kv_state,
+    torch::Tensor& score_state,
+    const torch::Tensor& gamma,
+    const torch::Tensor& sin,
+    const torch::Tensor& cos,
+    const std::optional<torch::Tensor>& hadamard_matrix,
+    const torch::Tensor& slot_mapping,
+    torch::Tensor& kv_cache,
+    const std::optional<torch::Tensor>& kv_cache_scale,
+    double eps,
+    bool overlap,
+    const std::optional<torch::Tensor>& cu_query_len = std::nullopt,
+    int64_t mtp_token_num = 0);
+
+void fused_compress_multi_kv(const torch::Tensor& kv,
+                             const torch::Tensor& score,
+                             torch::Tensor& kv_state,
+                             torch::Tensor& score_state,
+                             const torch::Tensor& cu_seqlens,
+                             const std::optional<torch::Tensor>& batch_ids,
+                             const torch::Tensor& ape,
+                             int64_t max_seqlen,
+                             bool overlap,
+                             torch::Tensor& compressed_kv);
 
 }  // namespace xllm::kernel::mlu

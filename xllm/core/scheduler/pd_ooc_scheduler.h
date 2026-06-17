@@ -71,9 +71,8 @@ class PDOOCScheduler : public DisaggPDScheduler {
       const std::string& kv_cache_transfer_mode,
       std::vector<uint64_t> src_cluster_ids,
       std::vector<std::string> src_addrs,
-      std::vector<int64_t> src_k_cache_ids,
-      std::vector<int64_t> src_v_cache_ids,
       std::vector<uint64_t> src_block_ids,
+      int32_t src_linear_state_id,
       int32_t src_dp_size,
       int32_t src_dp_rank);
 
@@ -101,7 +100,7 @@ class PDOOCScheduler : public DisaggPDScheduler {
       size_t& num_offline_decode_preempt_offline_requests,
       size_t& num_online_decode_preempt_online_requests,
       size_t& num_online_decode_preempt_offline_requests,
-      std::unique_ptr<DecodePriorityQueue>& running_queue) override;
+      RequestPriorityQueue* running_queue) override;
 
  private:
   void handle_prefill_interruption();

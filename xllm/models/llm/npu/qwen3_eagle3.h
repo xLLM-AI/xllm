@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/common/interruption_bus.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model/model_output.h"
@@ -120,7 +121,9 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
         model_args.rope_theta(),
         options_);
 
-    int32_t mask_value = FLAGS_enable_chunked_prefill ? -9984 : 1;
+    int32_t mask_value =
+        ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill() ? -9984
+                                                                         : 1;
     attn_mask_ = layer::AttentionMask(options_.device(),
                                       options_.dtype().toScalarType(),
                                       /*mask_value=*/mask_value);
@@ -155,10 +158,10 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     }
 
     torch::Tensor hidden_states = embed_tokens_(tokens, 0);
-    // Get hidden_states_extra from input_params.input_embedding
+    // Get hidden_states_extra from input_params.embedding.input_embedding
     // In EAGLE-3, hidden_states_extra comes from verifier layers
     // (3 layers concatenated)
-    torch::Tensor hidden_states_extra = input_params.input_embedding;
+    torch::Tensor hidden_states_extra = input_params.embedding.input_embedding;
     if (!hidden_states_extra.defined() || hidden_states_extra.size(0) == 0) {
       LOG(WARNING) << "hidden_states_extra use embedding from tokens.";
       hidden_states_extra = hidden_states;
@@ -179,20 +182,20 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
 
     // Generate attention mask
     torch::Tensor attn_mask;
-    if (!input_params.batch_forward_type.is_decode()) {
-      if (FLAGS_enable_chunked_prefill) {
-        int num_sequences = input_params.num_sequences;
+    if (!input_params.meta.batch_forward_type.is_decode()) {
+      if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
+        int num_sequences = input_params.meta.num_sequences;
         if (num_sequences > 0) {
           std::vector<torch::Tensor> req_mask_vec;
           req_mask_vec.reserve(num_sequences);
 
           for (int j = 0; j < num_sequences; j++) {
-            auto mask =
-                attn_mask_.gen_append_mask(input_params.q_seq_lens_vec[j],
-                                           input_params.kv_seq_lens_vec[j],
-                                           input_params.kv_max_seq_len,
-                                           cos_pos.dtype().toScalarType(),
-                                           cos_pos.device());
+            auto mask = attn_mask_.gen_append_mask(
+                input_params.attention.host.q_seq_lens[j],
+                input_params.attention.host.kv_seq_lens[j],
+                input_params.meta.kv_max_seq_len,
+                cos_pos.dtype().toScalarType(),
+                cos_pos.device());
             req_mask_vec.emplace_back(mask);
           }
           attn_mask = torch::cat(req_mask_vec, 0);
@@ -207,9 +210,9 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     aclrtEvent* event{nullptr};
     std::atomic<bool>* event_flag{nullptr};
 
-    if (input_params.layer_synchronizer != nullptr) {
-      event = input_params.layer_synchronizer->get_event(0);
-      event_flag = input_params.layer_synchronizer->get_event_flag(0);
+    if (input_params.parallel.layer_synchronizer != nullptr) {
+      event = input_params.parallel.layer_synchronizer->get_event(0);
+      event_flag = input_params.parallel.layer_synchronizer->get_event_flag(0);
     }
     if (!input_params.synchronize_layer(0)) {
       return ModelOutput();

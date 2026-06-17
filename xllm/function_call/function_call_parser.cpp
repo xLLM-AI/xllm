@@ -38,9 +38,10 @@ const std::unordered_map<std::string, std::vector<std::string>> auto_paser_map =
     {
         {"qwen25", {"qwen2", "qwen3"}},
         {"qwen3_coder", {"qwen3_coder", "qwen35"}},
-        {"kimi_k2", {"kimi_k2"}},
+        {"kimi_k2", {"kimi_k2", "kimi_k25"}},
         {"deepseekv3", {"deepseek_v3"}},
         {"deepseekv32", {"deepseek_v32"}},
+        {"deepseekv4", {"deepseek_v4", "deepseek_v4_mtp"}},
         // GLM-4.5 and GLM-4.7 are not supported for tool call parser
         // auto-selection
         // {"glm45", {"glm4_moe"}},
@@ -66,6 +67,7 @@ const std::unordered_map<std::string,
         {"kimi_k2", [] { return std::make_unique<KimiK2Detector>(); }},
         {"deepseekv3", [] { return std::make_unique<DeepSeekV3Detector>(); }},
         {"deepseekv32", [] { return std::make_unique<DeepSeekV32Detector>(); }},
+        {"deepseekv4", [] { return std::make_unique<DeepSeekV4Detector>(); }},
         {"glm45", [] { return std::make_unique<Glm45Detector>(); }},
         {"glm47", [] { return std::make_unique<Glm47Detector>(); }},
         // glm5 use glm47 detector

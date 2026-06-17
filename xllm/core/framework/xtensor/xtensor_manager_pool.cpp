@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "common/global_flags.h"
+#include "core/framework/config/distributed_config.h"
 #include "distributed_runtime/collective_service.h"
 #include "options.h"
 #include "remote_xtensor_manager.h"
@@ -29,11 +30,12 @@ XTensorManagerPool::XTensorManagerPool(const xtensor::Options& options,
     : options_(options),
       dp_size_(dp_size),
       collective_server_name_("XTensorManagerCollectiveServer") {
-  if (FLAGS_master_node_addr.empty()) {
+  if (::xllm::DistributedConfig::get_instance().master_node_addr().empty()) {
     setup_single_node_xtensor_managers();
   } else {
     collective_server_name_.append(std::to_string(options.server_idx()));
-    setup_multi_node_xtensor_managers(FLAGS_master_node_addr);
+    setup_multi_node_xtensor_managers(
+        ::xllm::DistributedConfig::get_instance().master_node_addr());
   }
 }
 
@@ -71,8 +73,10 @@ void XTensorManagerPool::setup_multi_node_xtensor_managers(
   }
 
   const int32_t each_node_ranks = static_cast<int32_t>(devices.size());
-  const int32_t world_size = each_node_ranks * FLAGS_nnodes;
-  const int32_t base_rank = FLAGS_node_rank * each_node_ranks;
+  const int32_t world_size =
+      each_node_ranks * ::xllm::DistributedConfig::get_instance().nnodes();
+  const int32_t base_rank =
+      ::xllm::DistributedConfig::get_instance().node_rank() * each_node_ranks;
   dp_local_tp_size_ = world_size / dp_size_;
 
   for (size_t i = 0; i < devices.size(); ++i) {
@@ -82,7 +86,7 @@ void XTensorManagerPool::setup_multi_node_xtensor_managers(
         std::make_unique<XTensorManagerServer>(
             i, master_node_addr, dones[i], devices[i], options_));
 
-    if (FLAGS_node_rank == 0) {
+    if (::xllm::DistributedConfig::get_instance().node_rank() == 0) {
       auto dp_local_process_group_num =
           (dp_size_ > 1 && dp_size_ < world_size) ? dp_size_ : 0;
 

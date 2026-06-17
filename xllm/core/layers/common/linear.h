@@ -82,6 +82,9 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
   }
   torch::Tensor per_channel_scale() const { return per_channel_scale_; }
   torch::Tensor weight_scale() const { return weight_scale_; }
+  bool uses_w8a8_dynamic_quant() const;
+  torch::Tensor w8a8_dynamic_weight_scale() const;
+  std::optional<torch::Tensor> bias() const;
   ProcessGroup* process_group() const { return process_group_; }
   std::optional<torch::Tensor> smooth() const {
     if (smooth_is_loaded_) {
@@ -110,6 +113,17 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
   DEFINE_FUSED_WEIGHT(
       input_scale);  // FP8 input (activation) scale for static quantization
 
+  // NPU static W8A8 parameters.
+  DEFINE_FUSED_WEIGHT(input_offset);  // Activation zero-point for npu_quantize.
+  DEFINE_FUSED_WEIGHT(deq_scale);     // Weight descale tensor for quant_matmul.
+  DEFINE_FUSED_WEIGHT(
+      quant_bias);  // Int32 bias consumed directly by quant_matmul.
+
+  // NPU dynamic W8A8 parameters.
+  DEFINE_FUSED_WEIGHT(
+      weight_offset);  // Kept for checkpoint parity; current dynamic path
+                       // follows the Python reference and does not consume it.
+
   int64_t rank_;
   int64_t world_size_;
   // whether to gather the output
@@ -120,23 +134,27 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
 
   // quantization args
   QuantArgs quant_args_;
+  torch::TensorOptions options_;
   at::ScalarType output_dtype_;
   LinearExtraArgs linear_extra_args_;
+  std::optional<std::string> resolved_weight_quant_method_;
 };
 TORCH_MODULE(ColumnParallelLinear);
 
 class QKVParallelLinearImpl : public torch::nn::Module {
  public:
-  QKVParallelLinearImpl(int64_t hidden_size,
-                        int64_t num_heads,
-                        int64_t num_kv_heads,
-                        int64_t head_size,
-                        int64_t num_kv_head_replicas,
-                        bool bias,
-                        bool gather_output,
-                        const ParallelArgs& parallel_args,
-                        const torch::TensorOptions& options,
-                        const QuantArgs& quant_args = QuantArgs{});
+  QKVParallelLinearImpl(
+      int64_t hidden_size,
+      int64_t num_heads,
+      int64_t num_kv_heads,
+      int64_t head_size,
+      int64_t num_kv_head_replicas,
+      bool bias,
+      bool gather_output,
+      const ParallelArgs& parallel_args,
+      const torch::TensorOptions& options,
+      const QuantArgs& quant_args = QuantArgs{},
+      const LinearExtraArgs& linear_extra_args = LinearExtraArgs());
 
   torch::Tensor forward(torch::Tensor input);
 
@@ -151,6 +169,7 @@ class QKVParallelLinearImpl : public torch::nn::Module {
 
   // return the weight (for testing)
   torch::Tensor weight() const { return weight_; }
+  bool is_weight_loaded() const { return weight_is_loaded_; }
 
   // Get FP8 input scale for fused RMSNorm+FP8 quantization
   // For QKV, returns max of Q/K/V scales (per-tensor)
@@ -168,6 +187,17 @@ class QKVParallelLinearImpl : public torch::nn::Module {
   DEFINE_FUSED_WEIGHT(
       input_scale);  // FP8 input (activation) scale for static quantization
 
+  // NPU static W8A8 parameters.
+  DEFINE_FUSED_WEIGHT(input_offset);  // Activation zero-point for npu_quantize.
+  DEFINE_FUSED_WEIGHT(deq_scale);     // Weight descale tensor for quant_matmul.
+  DEFINE_FUSED_WEIGHT(
+      quant_bias);  // Int32 bias consumed directly by quant_matmul.
+
+  // NPU dynamic W8A8 parameters.
+  DEFINE_FUSED_WEIGHT(
+      weight_offset);  // Kept for checkpoint parity; current dynamic path
+                       // follows the Python reference and does not consume it.
+
   int64_t rank_;
   int64_t world_size_;
   int64_t hidden_size_;
@@ -184,6 +214,7 @@ class QKVParallelLinearImpl : public torch::nn::Module {
   // quantization args
   QuantArgs quant_args_;
   at::ScalarType output_dtype_;
+  std::optional<std::string> resolved_weight_quant_method_;
 };
 TORCH_MODULE(QKVParallelLinear);
 
@@ -250,9 +281,19 @@ class RowParallelLinearImpl : public torch::nn::Module {
   DEFINE_WEIGHT(bias);
 
   // FP8 quantization parameters
-  DEFINE_WEIGHT(weight_scale);  // FP8 weight scale
-  DEFINE_WEIGHT(
+  DEFINE_FUSED_WEIGHT(weight_scale);  // FP8 weight scale
+  DEFINE_FUSED_WEIGHT(
       input_scale);  // FP8 input (activation) scale for static quantization
+
+  // NPU static W8A8 parameters.
+  DEFINE_WEIGHT(input_offset);  // Activation zero-point for npu_quantize.
+  DEFINE_WEIGHT(deq_scale);     // Weight descale tensor for quant_matmul.
+  DEFINE_WEIGHT(quant_bias);    // Int32 bias consumed directly by quant_matmul.
+
+  // NPU dynamic W8A8 parameters.
+  DEFINE_WEIGHT(
+      weight_offset);  // Kept for checkpoint parity; current dynamic path
+                       // follows the Python reference and does not consume it.
 
   // whether the input is already parallelized
   bool input_is_parallelized_;
@@ -268,18 +309,22 @@ class RowParallelLinearImpl : public torch::nn::Module {
 
   // quantization args
   QuantArgs quant_args_;
+  torch::TensorOptions options_;
   at::ScalarType output_dtype_;
   LinearExtraArgs linear_extra_args_;
+  std::optional<std::string> resolved_weight_quant_method_;
 };
 TORCH_MODULE(RowParallelLinear);
 
 class ReplicatedLinearImpl : public torch::nn::Module {
  public:
-  ReplicatedLinearImpl(int64_t in_features,
-                       int64_t out_features,
-                       bool bias,
-                       const QuantArgs& quant_args,
-                       const torch::TensorOptions& options);
+  ReplicatedLinearImpl(
+      int64_t in_features,
+      int64_t out_features,
+      bool bias,
+      const QuantArgs& quant_args,
+      const torch::TensorOptions& options,
+      const LinearExtraArgs& linear_extra_args = LinearExtraArgs());
 
   torch::Tensor forward(torch::Tensor input);
 
@@ -292,6 +337,10 @@ class ReplicatedLinearImpl : public torch::nn::Module {
 
   // return the weight (for testing)
   torch::Tensor weight() const { return weight_; }
+  bool uses_w8a8_dynamic_quant() const;
+  torch::Tensor w8a8_dynamic_weight_scale() const;
+  at::ScalarType output_dtype() const;
+  std::optional<torch::Tensor> bias() const;
 
  private:
   // parameter members, must be registered
@@ -299,6 +348,17 @@ class ReplicatedLinearImpl : public torch::nn::Module {
   // A^T: [out_features, in_features]
   DEFINE_WEIGHT(weight);
   DEFINE_WEIGHT(bias);
+
+  DEFINE_WEIGHT(weight_scale);   // FP8 scale or dynamic W8A8 weight scale.
+  DEFINE_WEIGHT(input_scale);    // FP8 input scale or static W8A8 input scale.
+  DEFINE_WEIGHT(input_offset);   // Static W8A8 activation zero-point.
+  DEFINE_WEIGHT(deq_scale);      // Static W8A8 descale tensor.
+  DEFINE_WEIGHT(quant_bias);     // Static W8A8 quant_matmul bias.
+  DEFINE_WEIGHT(weight_offset);  // Dynamic W8A8 checkpoint parity placeholder.
+  QuantArgs quant_args_;
+  torch::TensorOptions options_;
+  at::ScalarType output_dtype_;
+  std::optional<std::string> resolved_weight_quant_method_;
 };
 TORCH_MODULE(ReplicatedLinear);
 

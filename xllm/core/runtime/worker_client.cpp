@@ -42,55 +42,49 @@ bool WorkerClient::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   return worker_->allocate_kv_cache(kv_cache_shape);
 }
 
-void WorkerClient::get_device_info(std::string& device_ip, uint16_t& port) {
-  worker_->get_device_info(device_ip, port);
-}
-
 void WorkerClient::get_cache_info(uint64_t& cluster_id,
                                   std::string& addr,
-                                  int64_t& k_cache_id,
-                                  int64_t& v_cache_id) {
-  worker_->get_cache_info(cluster_id, addr, k_cache_id, v_cache_id);
+                                  uint16_t& port) {
+  worker_->get_cache_info(cluster_id, addr, port);
 }
 
 bool WorkerClient::link_cluster(const std::vector<uint64_t>& cluster_ids,
                                 const std::vector<std::string>& addrs,
-                                const std::vector<std::string>& device_ips,
                                 const std::vector<uint16_t>& ports) {
-  return worker_->link_cluster(cluster_ids, addrs, device_ips, ports);
+  return worker_->link_cluster(cluster_ids, addrs, ports);
 }
 
 bool WorkerClient::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                                   const std::vector<std::string>& addrs,
-                                  const std::vector<std::string>& device_ips,
                                   const std::vector<uint16_t>& ports) {
-  return worker_->unlink_cluster(cluster_ids, addrs, device_ips, ports);
+  return worker_->unlink_cluster(cluster_ids, addrs, ports);
 }
 
-bool WorkerClient::link_d2d(const std::string& remote_addr) {
-  return worker_->link_d2d(remote_addr);
+bool WorkerClient::link_p2p(const std::string& remote_addr) {
+  return worker_->link_p2p(remote_addr);
 }
 
-bool WorkerClient::unlink_d2d(const std::string& remote_addr) {
-  return worker_->unlink_d2d(remote_addr);
+bool WorkerClient::unlink_p2p(const std::string& remote_addr) {
+  return worker_->unlink_p2p(remote_addr);
 }
 
 std::tuple<int64_t, int64_t> WorkerClient::estimate_kv_cache_capacity() {
   return worker_->estimate_kv_cache_capacity();
 }
 
-bool WorkerClient::pull_kv_blocks(const uint64_t src_cluster_id,
-                                  const std::string& src_addr,
-                                  const int64_t src_k_cache_id,
-                                  const int64_t src_v_cache_id,
-                                  const std::vector<uint64_t>& src_blocks,
-                                  const std::vector<uint64_t>& dst_blocks) {
+bool WorkerClient::pull_kv_blocks(
+    const uint64_t src_cluster_id,
+    const std::string& src_addr,
+    const std::vector<uint64_t>& src_blocks,
+    const std::vector<uint64_t>& dst_blocks,
+    const std::vector<uint64_t>& src_linear_state_ids,
+    const std::vector<uint64_t>& dst_linear_state_ids) {
   auto future = worker_->pull_kv_blocks_async(src_cluster_id,
                                               src_addr,
-                                              src_k_cache_id,
-                                              src_v_cache_id,
                                               src_blocks,
-                                              dst_blocks);
+                                              dst_blocks,
+                                              src_linear_state_ids,
+                                              dst_linear_state_ids);
   return std::move(future).get();
 }
 
@@ -112,10 +106,10 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerClient::step_async(
   return worker_->step_async(input);
 }
 
-folly::SemiFuture<std::optional<RawForwardOutput>> WorkerClient::step_async(
-    const RawForwardInput& inputs) {
-  LOG(FATAL) << "Worker Method step_async with RawForwardInput param is "
-                "UnImplemented.";
+folly::SemiFuture<std::optional<RawForwardOutput>>
+WorkerClient::step_remote_async(const ForwardInput& input) {
+  LOG(FATAL) << "WorkerClient Method step_remote_async with ForwardInput "
+                "param is UnImplemented.";
   return folly::makeSemiFuture(std::optional<RawForwardOutput>(std::nullopt));
 }
 
@@ -145,16 +139,16 @@ folly::SemiFuture<bool> WorkerClient::allocate_kv_cache_with_transfer_async(
 folly::SemiFuture<bool> WorkerClient::pull_kv_blocks_async(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
-    const int64_t src_k_cache_id,
-    const int64_t src_v_cache_id,
     const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks) {
+    const std::vector<uint64_t>& dst_blocks,
+    const std::vector<uint64_t>& src_linear_state_ids,
+    const std::vector<uint64_t>& dst_linear_state_ids) {
   return worker_->pull_kv_blocks_async(src_cluster_id,
                                        src_addr,
-                                       src_k_cache_id,
-                                       src_v_cache_id,
                                        src_blocks,
-                                       dst_blocks);
+                                       dst_blocks,
+                                       src_linear_state_ids,
+                                       dst_linear_state_ids);
 }
 
 folly::SemiFuture<uint32_t> WorkerClient::transfer_kv_blocks(
@@ -185,6 +179,14 @@ folly::SemiFuture<bool> WorkerClient::sleep_async(MasterStatus master_status) {
 folly::SemiFuture<bool> WorkerClient::wakeup_async(
     const WakeupOptions& options) {
   return worker_->wakeup_async(options);
+}
+
+folly::SemiFuture<bool> WorkerClient::start_profile_async() {
+  return worker_->start_profile_async();
+}
+
+folly::SemiFuture<bool> WorkerClient::stop_profile_async() {
+  return worker_->stop_profile_async();
 }
 
 const torch::Device& WorkerClient::device() const { return worker_->device(); }

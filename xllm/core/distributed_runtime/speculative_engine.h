@@ -19,6 +19,7 @@ limitations under the License.
 #include "engine.h"
 #include "framework/batch/batch.h"
 #include "framework/block/block_manager_pool.h"
+#include "framework/kv_cache/kv_cache_utils.h"
 #include "framework/model/model_args.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
@@ -56,35 +57,32 @@ class SpeculativeEngine : public Engine {
   std::vector<int64_t> get_active_activation_memory() const override;
 
   // P/D
-  bool pull_kv_blocks(const int32_t src_dp_size,
-                      const int32_t src_dp_rank,
-                      const std::vector<uint64_t>& src_cluster_ids,
-                      const std::vector<std::string>& src_addrs,
-                      const std::vector<int64_t>& src_k_cache_ids,
-                      const std::vector<int64_t>& src_v_cache_ids,
-                      const std::vector<uint64_t>& src_blocks,
-                      const int32_t dst_dp_rank,
-                      const std::vector<uint64_t>& dst_blocks) override;
-
-  void get_device_info(std::vector<std::string>& device_ips,
-                       std::vector<uint16_t>& ports) override;
+  bool pull_kv_blocks(
+      const int32_t src_dp_size,
+      const int32_t src_dp_rank,
+      const std::vector<uint64_t>& src_cluster_ids,
+      const std::vector<std::string>& src_addrs,
+      const std::vector<uint64_t>& src_blocks,
+      const int32_t dst_dp_rank,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids = {},
+      const std::vector<uint64_t>& dst_linear_state_ids = {}) override;
 
   void get_cache_info(std::vector<uint64_t>& cluster_ids,
                       std::vector<std::string>& addrs,
-                      std::vector<int64_t>& k_cache_ids,
-                      std::vector<int64_t>& v_cache_ids) override;
+                      std::vector<uint16_t>& ports) override;
 
   bool link_cluster(const std::vector<uint64_t>& cluster_ids,
                     const std::vector<std::string>& addrs,
-                    const std::vector<std::string>& device_ips,
                     const std::vector<uint16_t>& ports,
-                    const int32_t src_dp_size) override;
+                    const int32_t src_dp_size,
+                    const int32_t src_kv_split_size = 1) override;
 
   bool unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                       const std::vector<std::string>& addrs,
-                      const std::vector<std::string>& device_ips,
                       const std::vector<uint16_t>& ports,
-                      const int32_t dp_size) override;
+                      const int32_t src_dp_size,
+                      const int32_t src_kv_split_size = 1) override;
 
  protected:
   SpeculativeEngine(const runtime::Options& options, bool use_draft_engine);
@@ -94,9 +92,8 @@ class SpeculativeEngine : public Engine {
 
   bool allocate_kv_cache();
 
-  int64_t calculate_kv_cache(int64_t cache_size_in_bytes,
-                             int64_t target_size,
-                             int64_t draft_size) const;
+  int64_t calculate_kv_cache(const KVCacheCapacity& target_kv_cache_cap,
+                             const KVCacheCapacity& draft_kv_cache_cap) const;
 
   // dtype
   torch::ScalarType dtype_;

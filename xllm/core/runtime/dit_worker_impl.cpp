@@ -29,6 +29,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "common/types.h"
 #include "core/common/global_flags.h"
+#include "core/framework/config/dit_config.h"
 #include "core/framework/dit_model_loader.h"
 #include "core/platform/device.h"
 #include "framework/dit_cache/dit_cache.h"
@@ -43,36 +44,44 @@ namespace xllm {
 namespace {
 DiTCacheConfig parse_dit_cache_from_flags() {
   DiTCacheConfig cache_config;
-  if (FLAGS_dit_cache_policy == "FBCache") {
+  if (::xllm::DiTConfig::get_instance().dit_cache_policy() == "FBCache") {
     cache_config.selected_policy = PolicyType::FBCache;
-    cache_config.fbcache.warmup_steps = FLAGS_dit_cache_warmup_steps;
+    cache_config.fbcache.warmup_steps =
+        ::xllm::DiTConfig::get_instance().dit_cache_warmup_steps();
     cache_config.fbcache.residual_diff_threshold =
-        FLAGS_dit_cache_residual_diff_threshold;
-  } else if (FLAGS_dit_cache_policy == "TaylorSeer") {
+        ::xllm::DiTConfig::get_instance().dit_cache_residual_diff_threshold();
+  } else if (::xllm::DiTConfig::get_instance().dit_cache_policy() ==
+             "TaylorSeer") {
     cache_config.selected_policy = PolicyType::TaylorSeer;
-    cache_config.taylorseer.n_derivatives = FLAGS_dit_cache_n_derivatives;
+    cache_config.taylorseer.n_derivatives =
+        ::xllm::DiTConfig::get_instance().dit_cache_n_derivatives();
     cache_config.taylorseer.skip_interval_steps =
-        FLAGS_dit_cache_skip_interval_steps;
-    cache_config.taylorseer.warmup_steps = FLAGS_dit_cache_warmup_steps;
-  } else if (FLAGS_dit_cache_policy == "FBCacheTaylorSeer") {
+        ::xllm::DiTConfig::get_instance().dit_cache_skip_interval_steps();
+    cache_config.taylorseer.warmup_steps =
+        ::xllm::DiTConfig::get_instance().dit_cache_warmup_steps();
+  } else if (::xllm::DiTConfig::get_instance().dit_cache_policy() ==
+             "FBCacheTaylorSeer") {
     cache_config.selected_policy = PolicyType::FBCacheTaylorSeer;
     cache_config.fbcachetaylorseer.n_derivatives =
-        FLAGS_dit_cache_n_derivatives;
-    cache_config.fbcachetaylorseer.warmup_steps = FLAGS_dit_cache_warmup_steps;
+        ::xllm::DiTConfig::get_instance().dit_cache_n_derivatives();
+    cache_config.fbcachetaylorseer.warmup_steps =
+        ::xllm::DiTConfig::get_instance().dit_cache_warmup_steps();
     cache_config.fbcachetaylorseer.residual_diff_threshold =
-        FLAGS_dit_cache_residual_diff_threshold;
-  } else if (FLAGS_dit_cache_policy == "ResidualCache") {
+        ::xllm::DiTConfig::get_instance().dit_cache_residual_diff_threshold();
+  } else if (::xllm::DiTConfig::get_instance().dit_cache_policy() ==
+             "ResidualCache") {
     cache_config.selected_policy = PolicyType::ResidualCache;
     cache_config.residual_cache.dit_cache_start_steps =
-        FLAGS_dit_cache_start_steps;
-    cache_config.residual_cache.dit_cache_end_steps = FLAGS_dit_cache_end_steps;
+        ::xllm::DiTConfig::get_instance().dit_cache_start_steps();
+    cache_config.residual_cache.dit_cache_end_steps =
+        ::xllm::DiTConfig::get_instance().dit_cache_end_steps();
     cache_config.residual_cache.dit_cache_start_blocks =
-        FLAGS_dit_cache_start_blocks;
+        ::xllm::DiTConfig::get_instance().dit_cache_start_blocks();
     cache_config.residual_cache.dit_cache_end_blocks =
-        FLAGS_dit_cache_end_blocks;
+        ::xllm::DiTConfig::get_instance().dit_cache_end_blocks();
     cache_config.residual_cache.skip_interval_steps =
-        FLAGS_dit_cache_skip_interval_steps;
-  } else if (FLAGS_dit_cache_policy == "None") {
+        ::xllm::DiTConfig::get_instance().dit_cache_skip_interval_steps();
+  } else if (::xllm::DiTConfig::get_instance().dit_cache_policy() == "None") {
     cache_config.selected_policy = PolicyType::None;
   }
   return cache_config;

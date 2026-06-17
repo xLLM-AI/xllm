@@ -20,6 +20,7 @@ limitations under the License.
 #include <unordered_set>
 
 #include "common/global_flags.h"
+#include "core/framework/config/rec_config.h"
 #include "core/util/rec_model_utils.h"
 #include "framework/batch/beam_search.h"
 #include "util/blocking_counter.h"
@@ -150,10 +151,13 @@ void SequencesGroup::generate_outputs(std::vector<SequenceOutput>& outputs,
     for (size_t i = 0; i < sequences_.size(); ++i) {
       const int32_t generated_tokens_num =
           sequences_[i]->num_generated_tokens();
+      // Use lowest() (negative) instead of min() (smallest positive) so
+      // candidates that produced no tokens do not outrank real samples
+      // (real average logprobs are negative).
       const float average_logprob =
           generated_tokens_num > 0
               ? sequences_[i]->get_acc_logprob() / generated_tokens_num
-              : std::numeric_limits<float>::min();
+              : std::numeric_limits<float>::lowest();
       logprobs_vec.emplace_back(average_logprob, i);
     }
     std::sort(logprobs_vec.begin(),
@@ -455,21 +459,10 @@ void SequencesGroup::generate_multi_round_output(
     out.text = tokenizer.decode(Slice<int32_t>{gen_ids.data(), gen_ids.size()},
                                 sequence_params_.skip_special_tokens);
     out.token_ids = std::move(gen_ids);
-    if (FLAGS_output_rec_logprobs && !out.token_ids.empty()) {
-      float beam_logprob = (b < last_lps.size()) ? last_lps[b] : -9999.0f;
-      out.logprobs.emplace();
-      auto append_logprob = [&](int32_t token_id) {
-        LogProb token_logprob;
-        token_logprob.token_id = token_id;
-        token_logprob.token = tokenizer.id_to_token(token_id);
-        token_logprob.logprob = beam_logprob;
-        out.logprobs->emplace_back(std::move(token_logprob));
-      };
-      out.logprobs->reserve(out.token_ids.size());
-      for (int32_t token_id : out.token_ids) {
-        append_logprob(token_id);
-      }
-    }
+    std::vector<LogProb> log_probs;
+    log_probs.resize(1);
+    log_probs[0].logprob = rank[i].first;
+    out.logprobs = log_probs;
 
     auto fr = base.finish_reason().to_string();
     if (fr.has_value()) {

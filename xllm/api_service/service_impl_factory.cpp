@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/distributed_runtime/llm_master.h"
 #include "core/distributed_runtime/rec_master.h"
 #include "core/distributed_runtime/vlm_master.h"
+#include "core/framework/config/model_config.h"
 
 namespace xllm {
 
@@ -65,7 +66,7 @@ void ServiceImplFactory::create(
              create_service_impl<ChatServiceImpl>(llm_master, models);
          self->embedding_service_impl_ =
              create_service_impl<EmbeddingServiceImpl>(llm_master, models);
-         if (FLAGS_enable_qwen3_reranker) {
+         if (::xllm::ModelConfig::get_instance().enable_qwen3_reranker()) {
            self->rerank_service_impl_ =
                create_service_impl<Qwen3RerankServiceImpl>(llm_master, models);
          } else {
@@ -87,9 +88,13 @@ void ServiceImplFactory::create(
        [](APIService* self,
           Master* master,
           const std::vector<std::string>& models) {
+         auto* dit_master = dynamic_cast<DiTMaster*>(master);
          self->image_generation_service_impl_ =
-             std::make_unique<ImageGenerationServiceImpl>(
-                 dynamic_cast<DiTMaster*>(master), models);
+             std::make_unique<ImageGenerationServiceImpl>(dit_master, models);
+         self->audio_generation_service_impl_ =
+             std::make_unique<AudioGenerationServiceImpl>(dit_master, models);
+         self->video_generation_service_impl_ =
+             std::make_unique<VideoGenerationServiceImpl>(dit_master, models);
        }},
       {static_cast<int8_t>(ServingMode::REC),
        [](APIService* self,

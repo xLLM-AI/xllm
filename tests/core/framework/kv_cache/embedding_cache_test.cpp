@@ -142,4 +142,27 @@ TEST(EmbeddingCacheTest, RequestMismatchMaterializesMissingState) {
   EXPECT_FALSE(states[0].embedding.defined());
 }
 
+TEST(EmbeddingCacheTest, WriteMtpBootstrapContextStoresExactDecodeState) {
+  EmbeddingCache cache(/*total_nums=*/2);
+  torch::Tensor embedding = torch::tensor({1.0f, 2.0f, 3.0f});
+
+  cache.write_mtp_bootstrap_context(
+      /*embedding_id=*/1, "req_bootstrap", /*token_id=*/17, embedding);
+
+  std::vector<EmbeddingCache::DecodeState> states =
+      cache.read_decode_states({1}, {"req_bootstrap"});
+  ASSERT_EQ(states.size(), 1u);
+  EXPECT_TRUE(states[0].valid);
+  EXPECT_EQ(states[0].request_id, "req_bootstrap");
+  EXPECT_EQ(states[0].token_id, 17);
+  EXPECT_EQ(states[0].position_offset, 0);
+  EXPECT_FALSE(states[0].all_draft_accepted);
+  EXPECT_TRUE(tensor_equal(states[0].embedding, embedding));
+
+  cache.clear({1});
+  states = cache.read_decode_states({1}, {"req_bootstrap"});
+  EXPECT_FALSE(states[0].valid);
+  EXPECT_FALSE(states[0].embedding.defined());
+}
+
 }  // namespace xllm

@@ -2,13 +2,15 @@ include(cc_binary)
 include(cc_library)
 
 cc_library(
-  NAME 
+  NAME
     prefix_cache
   HDRS
+    block_hasher.h
     prefix_cache.h
     prefix_cache_with_upload.h
     prefix_cache_factory.h
-  SRCS 
+  SRCS
+    block_hasher.cpp
     prefix_cache.cpp
     prefix_cache_with_upload.cpp
     prefix_cache_factory.cpp

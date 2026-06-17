@@ -1,4 +1,4 @@
-/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,72 +15,46 @@ limitations under the License.
 
 #pragma once
 
-#include <tuple>
-#include <unordered_map>
+#include <torch/torch.h>
+
+#include <cstdint>
 #include <vector>
 
-#include "image_processor.h"
+#include "core/framework/model/model_args.h"
+#include "processors/image_processor.h"
 
 namespace xllm {
 
-class Glm4VImageProcessor : public ImageProcessor {
+class Glm4VImageProcessor final : public ImageProcessor {
  public:
-  Glm4VImageProcessor(const ModelArgs&);
-  ~Glm4VImageProcessor() override = default;
+  explicit Glm4VImageProcessor(const ModelArgs& args);
 
-  bool process(const MMInput& mm_inputs, MMData& mm_datas) override;
+  bool process(const std::vector<torch::Tensor>& images,
+               std::vector<MMDataItem>& output_items) const override;
 
- private:
-  bool process_images(std::vector<torch::Tensor> images, MMData& mm_datas);
-  bool process_image(torch::Tensor image,
-                     torch::Tensor& pixel_values,
-                     torch::Tensor& thw);
-  bool process_videos(std::vector<torch::Tensor> videos,
-                      std::vector<VideoMetadata> video_meta_list,
-                      MMData& mm_datas);
-  bool process_video(torch::Tensor video,
-                     VideoMetadata& metadata,
-                     torch::Tensor& pixel_values,
-                     torch::Tensor& thw);
-  torch::Tensor sample_frames(const VideoMetadata& metadata,
-                              int temporal_patch_size);
+  bool process_image(const std::vector<torch::Tensor>& images,
+                     std::vector<torch::Tensor>& pixel_values,
+                     std::vector<torch::Tensor>& thw) const;
 
  private:
   bool do_convert_rgb_ = true;
   bool do_normalize_ = true;
-
   bool do_rescale_ = true;
   bool do_resize_ = true;
 
-  std::vector<double> image_mean_;
-  std::vector<double> image_std_;
+  torch::Tensor image_mean_;
+  torch::Tensor image_std_;
 
-  int max_pixels_ = 12845056;
-  int min_pixels_ = 3136;
+  int32_t max_pixels_ = 12845056;
+  int32_t min_pixels_ = 3136;
 
-  int merge_size_ = 2;
-  int patch_size_ = 14;
+  int32_t merge_size_ = 2;
+  int32_t patch_size_ = 14;
 
-  std::vector<double> video_mean_;
-  std::vector<double> video_std_;
-
-  int video_max_pixels_ = 47040000;
-  int video_min_pixels_ = 12544;
-
-  int video_merge_size_ = 2;
-  int video_patch_size_ = 14;
-
-  int resample_ = 3;
+  int32_t resample_ = 3;
   double rescale_factor_ = 0.00392156862745098;
 
-  std::unordered_map<std::string, int> size_;
-  int temporal_patch_size_ = 2;
-  int video_temporal_patch_size_ = 2;
-
-  bool do_sample_frame_ = true;
-
-  int min_frames_ = 4;
-  int max_frames_ = 768;
+  int32_t temporal_patch_size_ = 2;
 };
 
 }  // namespace xllm

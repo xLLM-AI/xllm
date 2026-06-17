@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "common/global_flags.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "core/util/tensor_helper.h"
 #include "phy_page_pool.h"
 #include "platform/vmm_api.h"
@@ -30,7 +31,8 @@ static inline size_t align_up(size_t size, size_t page_size) {
 }
 
 static inline VirPtr alloc_virtual_mem(size_t size) {
-  size_t page_size = FLAGS_phy_page_granularity_size;
+  size_t page_size =
+      ::xllm::KVCacheConfig::get_instance().phy_page_granularity_size();
   CHECK(size % page_size == 0)
       << "alloc size not aligned: " << size;  // Ensure alignment.
 
@@ -113,7 +115,8 @@ static inline void free_preallocated_weight_pages(
 XTensor::XTensor(size_t size, torch::Dtype dtype, torch::Device dev)
     : vaddr_(0),
       size_(0),
-      page_size_(FLAGS_phy_page_granularity_size),
+      page_size_(
+          ::xllm::KVCacheConfig::get_instance().phy_page_granularity_size()),
       dtype_(dtype),
       dev_(dev) {
   // Align size to page_size_
@@ -126,7 +129,8 @@ XTensor::XTensor(const std::vector<page_id_t>& page_ids,
                  torch::Device dev)
     : vaddr_(0),
       size_(0),
-      page_size_(FLAGS_phy_page_granularity_size),
+      page_size_(
+          ::xllm::KVCacheConfig::get_instance().phy_page_granularity_size()),
       dtype_(dtype),
       dev_(dev),
       use_preallocated_pages_(true),

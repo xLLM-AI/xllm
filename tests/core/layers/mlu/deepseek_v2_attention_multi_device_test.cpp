@@ -24,7 +24,8 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core/common/global_flags.h"
+#include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/parallel_config.h"
 #include "framework/batch/batch_forward_type.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
@@ -392,14 +393,18 @@ AttentionMetadata create_chunked_metadata(const torch::TensorOptions& options,
 KVCache create_decode_kv_cache(const ModelArgs& args,
                                const torch::TensorOptions& options) {
   const int64_t cache_width = args.qk_rope_head_dim() + args.kv_lora_rank();
-  torch::Tensor k_cache = seeded_tensor("attention_multi_device/k_cache",
-                                        {8, 1, FLAGS_block_size, cache_width},
-                                        torch::kBFloat16,
-                                        options.device());
+  torch::Tensor k_cache = seeded_tensor(
+      "attention_multi_device/k_cache",
+      {8, 1, KVCacheConfig::get_instance().block_size(), cache_width},
+      torch::kBFloat16,
+      options.device());
   torch::Tensor index_cache = torch::Tensor();
   if (args.index_head_dim() > 0) {
     index_cache = seeded_tensor("attention_multi_device/index_cache",
-                                {8, 1, FLAGS_block_size, args.index_head_dim()},
+                                {8,
+                                 1,
+                                 KVCacheConfig::get_instance().block_size(),
+                                 args.index_head_dim()},
                                 torch::kBFloat16,
                                 options.device());
   }
@@ -484,8 +489,9 @@ torch::Tensor run_attention_decode_once(const ModelArgs& args,
                                         KVCache& kv_cache,
                                         bool enable_full_weight_path,
                                         bool enable_fused_mla_kernel) {
-  ScopedBoolFlagValue flag_guard(FLAGS_enable_prefill_sp,
-                                 enable_full_weight_path);
+  ScopedBoolFlagValue flag_guard(
+      ParallelConfig::get_instance().enable_prefill_sp(),
+      enable_full_weight_path);
   OptimizationConfig optimization_config;
   optimization_config.enable_fused_mla_kernel = enable_fused_mla_kernel;
   optimization_config.enable_fused_indexer_qk = false;
@@ -511,8 +517,9 @@ AttentionRunResult run_attention_prefill_once(
     BatchForwardType batch_forward_type = BatchForwardType::PREFILL,
     int32_t prefix_len = 0,
     bool build_sp_context = true) {
-  ScopedBoolFlagValue flag_guard(FLAGS_enable_prefill_sp,
-                                 enable_full_weight_path);
+  ScopedBoolFlagValue flag_guard(
+      ParallelConfig::get_instance().enable_prefill_sp(),
+      enable_full_weight_path);
   OptimizationConfig optimization_config;
   optimization_config.enable_fused_mla_kernel = enable_fused_mla_kernel;
   optimization_config.enable_fused_indexer_qk = false;
@@ -582,7 +589,7 @@ int32_t run_attention_test_child(int32_t rank,
       return EXIT_CODE_SKIP;
     }
 
-    FLAGS_block_size = 16;
+    KVCacheConfig::get_instance().block_size(16);
     const int32_t device_index = rank % dev_count;
     xllm::Device xllm_device(device_index);
     xllm_device.set_device();
@@ -656,7 +663,7 @@ int32_t run_attention_prefill_repl_test_child(int32_t rank,
       return EXIT_CODE_SKIP;
     }
 
-    FLAGS_block_size = 16;
+    KVCacheConfig::get_instance().block_size(16);
     const int32_t device_index = rank % dev_count;
     xllm::Device xllm_device(device_index);
     xllm_device.set_device();
@@ -736,7 +743,7 @@ int32_t run_attention_prefill_fallback_test_child(int32_t rank,
       return EXIT_CODE_SKIP;
     }
 
-    FLAGS_block_size = 16;
+    KVCacheConfig::get_instance().block_size(16);
     const int32_t device_index = rank % dev_count;
     xllm::Device xllm_device(device_index);
     xllm_device.set_device();
@@ -818,7 +825,7 @@ int32_t run_attention_prefill_sp_test_child(int32_t rank,
       return EXIT_CODE_SKIP;
     }
 
-    FLAGS_block_size = 16;
+    KVCacheConfig::get_instance().block_size(16);
     const int32_t device_index = rank % dev_count;
     xllm::Device xllm_device(device_index);
     xllm_device.set_device();
@@ -907,7 +914,7 @@ int32_t run_attention_prefill_sp_baseline_test_child(int32_t rank,
       return EXIT_CODE_SKIP;
     }
 
-    FLAGS_block_size = 16;
+    KVCacheConfig::get_instance().block_size(16);
     const int32_t device_index = rank % dev_count;
     xllm::Device xllm_device(device_index);
     xllm_device.set_device();
@@ -1012,7 +1019,7 @@ int32_t run_attention_chunked_test_child(int32_t rank,
       return EXIT_CODE_SKIP;
     }
 
-    FLAGS_block_size = 16;
+    KVCacheConfig::get_instance().block_size(16);
     const int32_t device_index = rank % dev_count;
     xllm::Device xllm_device(device_index);
     xllm_device.set_device();

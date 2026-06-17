@@ -129,9 +129,23 @@ RMSNormImpl::forward_fp8(torch::Tensor& input,
 
 void RMSNormImpl::load_state_dict(const StateDict& state_dict) {
   LOAD_WEIGHT(weight);
+
+#if defined(USE_NPU)
+  // Bias loading policy for anti-outlier:
+  // rmsnorm mode: bias is optional and only enabled when checkpoint
+  //    contains "bias" (anti-outlier path).
+  if (state_dict.has("bias")) {
+    if (!bias_.defined()) {
+      bias_ = register_parameter(
+          "bias", torch::empty({norm_dim_}, weight_.options()), false);
+    }
+    LOAD_WEIGHT(bias);
+  }
+#else
   if (bias_.defined()) {
     LOAD_WEIGHT(bias);
   }
+#endif
 }
 
 void RMSNormImpl::set_layernorm_mode() {

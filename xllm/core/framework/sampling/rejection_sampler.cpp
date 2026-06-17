@@ -21,10 +21,6 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
-#include <algorithm>
-#include <cmath>
-#include <numeric>
-
 #include "kernels/ops_api.h"
 #include "sampler.h"
 
@@ -40,69 +36,16 @@ torch::Tensor index_select_2d(const torch::Tensor& input,
 
 }  // namespace
 
-RejectionSamplerRateController::RejectionSamplerRateController(
-    double fixed_acceptance_rate)
-    : fixed_acceptance_rate_(fixed_acceptance_rate),
-      last_target_(fixed_acceptance_rate) {}
-
-torch::Tensor RejectionSamplerRateController::filter_with_acceptance_rate(
-    const torch::Tensor& token_ids) {
-  // Basic parameter validation
-  if (fixed_acceptance_rate_ < 0.0 || fixed_acceptance_rate_ > 1.0 ||
-      token_ids.size(0) == 0) {
-    return token_ids.clone();
-  }
-
-  // Reset counters if the target rate has changed significantly
-  if (std::abs(last_target_ - fixed_acceptance_rate_) >
-      kTargetRateChangeTolerance) {
-    total_batches_ = 0;
-    accepted_batches_ = 0;
-    last_target_ = fixed_acceptance_rate_;
-  }
-
-  // Calculate Drift: Difference between expected hits and actual hits
-  double expected_hits = total_batches_ * fixed_acceptance_rate_;
-  double drift = expected_hits - accepted_batches_;
-
-  // Calculate adjusted probability
-  // If drift > 0 (we accepted too few), increase probability.
-  // The factor 0.1 acts as a gentle gain to correct long-term error.
-  double adj_rate = fixed_acceptance_rate_ + (drift * kDriftCorrectionGain);
-  adj_rate = std::clamp(adj_rate, 0.0, 1.0);
-
-  // Perform rejection sampling
-  bool accept = dist_(gen_) < adj_rate;
-
-  // Update statistics
-  total_batches_++;
-  if (accept) {
-    accepted_batches_++;
-  }
-
-  // Generate output
-  torch::Tensor out_tensor = token_ids.clone();
-  if (!accept) {
-    // Reject: Mask out tokens after the first one (dimension 1)
-    out_tensor.slice(1, 1).fill_(kPlaceholderTokenId);
-  }
-
-  return out_tensor;
-}
-
-RejectionSampler::RejectionSampler(
-    const torch::Tensor& do_sample,
-    bool all_random_sample,
-    bool all_greedy_sample,
-    bool logprobs,
-    int64_t max_top_logprobs,
-    std::shared_ptr<RejectionSamplerRateController> rate_controller,
-    bool enable_fused_kernel)
+RejectionSampler::RejectionSampler(const torch::Tensor& do_sample,
+                                   bool all_random_sample,
+                                   bool all_greedy_sample,
+                                   bool logprobs,
+                                   int64_t max_top_logprobs,
+                                   bool enable_fused_kernel)
     : logprobs_(logprobs),
       max_top_logprobs_(max_top_logprobs),
       all_random_sample_(all_random_sample),
       all_greedy_sample_(all_greedy_sample),
-      rate_controller_(rate_controller),
       enable_fused_kernel_(enable_fused_kernel) {
   CHECK(do_sample.defined());
   // Keep a private expanded view and do not mutate the caller-owned tensor.
@@ -192,17 +135,8 @@ SampleOutput RejectionSampler::forward(const torch::Tensor& draft_token_ids,
   }
 
   SampleOutput output;
-  if (rate_controller_) {
-    // for debug purpose, we will provide the perfect speculation to the rate
-    // controller
-    torch::Tensor perfect_speculation =
-        torch::cat({draft_token_ids, bonus_token_ids}, /*dim=*/-1);
-    output.next_tokens =
-        rate_controller_->filter_with_acceptance_rate(perfect_speculation);
-  } else {
-    output.next_tokens = mask_out_rejected_tokens ? masked_accepted_token_ids
-                                                  : accepted_token_ids;
-  }
+  output.next_tokens =
+      mask_out_rejected_tokens ? masked_accepted_token_ids : accepted_token_ids;
 
   if (logprobs_) {
     // log_softmax is equivalent to log(softmax) but more numerically stable

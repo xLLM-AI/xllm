@@ -76,7 +76,9 @@ class DiTWorkerImpl : public WorkerImpl {
   // model context, includes model args, parallel args and date type etc.
   mutable DiTModelContext dit_context_;
 
-  ThreadPool threadpool_;
+  ThreadPool threadpool_{/*num_threads=*/1,
+                         /*cpu_binding=*/false,
+                         /*pool_name=*/"DiTWorkerImpl.schedule"};
 };
 
 }  // namespace xllm

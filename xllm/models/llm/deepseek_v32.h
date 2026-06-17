@@ -19,6 +19,7 @@ limitations under the License.
 #include <string>
 
 #include "core/common/global_flags.h"
+#include "core/framework/config/parallel_config.h"
 #include "deepseek_v2.h"
 #include "layers/common/attention_metadata_builder.h"
 #include "layers/mlu/deepseek_v32_sp_context.h"
@@ -27,7 +28,7 @@ namespace xllm {
 
 inline std::optional<std::string> validate_deepseek_v32_sp_flags(
     const ParallelArgs& parallel_args) {
-  if (!FLAGS_enable_prefill_sp) {
+  if (!::xllm::ParallelConfig::get_instance().enable_prefill_sp()) {
     return std::nullopt;
   }
   if (parallel_args.dp_size() != 1) {
@@ -45,6 +46,7 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
  public:
   explicit DeepseekV32ModelImpl(const ModelContext& context)
       : DeepseekV2ModelImpl(context),
+        device_(context.get_tensor_options().device()),
         sequence_parallel_group_(context.get_parallel_args().sp_group_),
         parallel_world_size_(context.get_parallel_args().world_size()) {
     const auto sp_config_error =
@@ -61,12 +63,16 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
       modified_input_params.attn_metadata =
           std::make_shared<layer::AttentionMetadata>(
               layer::AttentionMetadataBuilder::build(modified_input_params,
-                                                     model_args_.enable_mla()));
+                                                     model_args_.enable_mla(),
+                                                     /*compute_dtype=*/"half",
+                                                     /*attn_mask=*/std::nullopt,
+                                                     /*device=*/device_));
     }
     auto& attn_metadata = *modified_input_params.attn_metadata;
     std::optional<layer::v32_sp::DeepseekV32SPContext> sp_ctx;
     const bool requested_sequence_parallel =
-        FLAGS_enable_prefill_sp && input_params.batch_forward_type.no_decode();
+        ::xllm::ParallelConfig::get_instance().enable_prefill_sp() &&
+        input_params.meta.batch_forward_type.no_decode();
     if (requested_sequence_parallel) {
       if (sequence_parallel_group_ == nullptr) {
         CHECK_EQ(parallel_world_size_, 1)
@@ -74,7 +80,7 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
       } else if (sequence_parallel_group_->world_size() > 1) {
         sp_ctx = layer::v32_sp::build_deepseek_v32_sp_context(
             attn_metadata,
-            input_params.batch_forward_type,
+            input_params.meta.batch_forward_type,
             tokens,
             sequence_parallel_group_,
             sequence_parallel_group_->rank(),
@@ -132,6 +138,7 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
   }
 
  private:
+  torch::Device device_;
   ProcessGroup* sequence_parallel_group_ = nullptr;
   int32_t parallel_world_size_ = 1;
   const layer::v32_sp::DeepseekV32SPContext* active_sequence_parallel_context_ =

@@ -19,6 +19,8 @@ limitations under the License.
 #include <cuda_runtime.h>
 #elif defined(USE_MLU)
 #include <cnrt.h>
+#elif defined(USE_DCU)
+#include <hip/hip_runtime_api.h>
 #endif
 #include <glog/logging.h>
 #include <numa.h>
@@ -201,10 +203,22 @@ int32_t get_device_numa_node(int32_t device_index) {
   LOG(WARNING) << "Failed to query PCI bus ID for MLU device " << device_index
                << " via cnrtDeviceGetPCIBusId: " << cnrtGetErrorStr(ret)
                << ", error code " << ret << ", skipping NUMA binding";
+#elif defined(USE_DCU)
+  char pci_bus_id[32] = {0};
+  hipError_t ret =
+      hipDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), device_index);
+  if (ret == hipSuccess) {
+    return get_numa_node_from_sysfs("DCU", device_index, pci_bus_id);
+  }
+
+  LOG(WARNING) << "Failed to query PCI bus ID for DCU device " << device_index
+               << " via hipDeviceGetPCIBusId: " << hipGetErrorString(ret)
+               << ", skipping NUMA binding";
 #else
   LOG(WARNING) << "Device NUMA detection is not supported for this backend, "
                << "device index " << device_index << ", skipping NUMA binding";
 #endif
+
   return -1;
 }
 

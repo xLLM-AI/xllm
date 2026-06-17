@@ -139,8 +139,8 @@ inline torch::Tensor compute_onerec_position_bias(
   }
 
   if (is_decode_stage && input_params != nullptr &&
-      !input_params->kv_seq_lens_vec.empty()) {
-    const int32_t seq_kv_len = input_params->kv_seq_lens_vec[0];
+      !input_params->attention.host.kv_seq_lens.empty()) {
+    const int32_t seq_kv_len = input_params->attention.host.kv_seq_lens[0];
     values = values.slice(1, -1, values.size(1)).slice(2, 0, seq_kv_len);
   } else if (is_decode_stage) {
     values = values.slice(1, -1, values.size(1));
@@ -245,7 +245,7 @@ class OneRecStackImpl : public torch::nn::Module {
     const bool is_prefill =
         onerec_params->rec_stage == OneRecModelInputParams::RecStage::PREFILL;
     auto [query_length, key_length] = compute_sequence_lengths(
-        input_params.q_max_seq_len, is_prefill, input_params);
+        input_params.meta.q_max_seq_len, is_prefill, input_params);
 
     ModelInputParams input_params_local = input_params;
     auto& mutable_onerec_params = input_params_local.mutable_onerec_params();
@@ -279,7 +279,7 @@ class OneRecStackImpl : public torch::nn::Module {
     torch::Tensor effective_attn_mask;
     if (use_absolute_position_embedding_) {
       const int64_t batch_size =
-          std::max<int64_t>(1, input_params.num_sequences);
+          std::max<int64_t>(1, input_params.meta.num_sequences);
       effective_attn_mask =
           create_moe_attention_mask(query_length, h, is_decoder_, batch_size);
     } else {
@@ -307,11 +307,12 @@ class OneRecStackImpl : public torch::nn::Module {
     }
 
     for (size_t i = 0; i < layers_.size(); ++i) {
-      aclrtEvent* event{nullptr};
-      std::atomic<bool>* event_flag{nullptr};
-      if (input_params.layer_synchronizer != nullptr) {
-        event = input_params.layer_synchronizer->get_event(i);
-        event_flag = input_params.layer_synchronizer->get_event_flag(i);
+      aclrtEvent* event = nullptr;
+      std::atomic<bool>* event_flag = nullptr;
+      if (input_params.parallel.layer_synchronizer) {
+        event = input_params.parallel.layer_synchronizer->get_event(i);
+        event_flag =
+            input_params.parallel.layer_synchronizer->get_event_flag(i);
       }
       if (!input_params.synchronize_layer(i)) {
         return torch::Tensor();
@@ -335,8 +336,8 @@ class OneRecStackImpl : public torch::nn::Module {
           event_flag,
           expert_array);
 
-      if (input_params.layer_synchronizer != nullptr &&
-          !input_params.layer_synchronizer->synchronize_layer(i)) {
+      if (input_params.parallel.layer_synchronizer != nullptr &&
+          !input_params.parallel.layer_synchronizer->synchronize_layer(i)) {
         return torch::Tensor();
       }
       validate_selected_token_idxes_stage(
@@ -409,9 +410,10 @@ class OneRecStackImpl : public torch::nn::Module {
         key_length = seq_length;
       } else {
         query_length = 1;
-        if (!input_params.kv_seq_lens_vec.empty()) {
-          key_length = *std::max_element(input_params.kv_seq_lens_vec.begin(),
-                                         input_params.kv_seq_lens_vec.end());
+        if (!input_params.attention.host.kv_seq_lens.empty()) {
+          key_length =
+              *std::max_element(input_params.attention.host.kv_seq_lens.begin(),
+                                input_params.attention.host.kv_seq_lens.end());
         }
         // Decode keeps a square bias/mask shape expected by OneRec NPU block.
         query_length = key_length;

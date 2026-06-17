@@ -43,6 +43,39 @@ cc_test(
 
 cc_test(
   NAME
+    anthropic_json_test
+  SRCS
+    anthropic_json_test.cpp
+  DEPS
+    api_service
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
+
+cc_test(
+  NAME
+    anthropic_stream_utils_test
+  SRCS
+    anthropic_stream_utils_test.cpp
+    ../../xllm/api_service/anthropic_stream_utils.cpp
+  DEPS
+    proto::xllm_proto
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    usage_json_test
+  SRCS
+    usage_json_test.cpp
+  DEPS
+    api_service
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
+
+cc_test(
+  NAME
     sample_service_impl_test
   SRCS
     sample_service_impl_test.cpp

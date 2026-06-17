@@ -55,9 +55,23 @@ struct CpPrefillInputs {
   }
 };
 
-CpPrefillInputs prepare_cp_prefill_inputs(int cp_size,
-                                          const torch::Tensor& input_ids,
-                                          const torch::Tensor& position_ids,
-                                          const torch::Tensor& input_lengths);
+// `cp_size`        : token-CP width. Drives current-segment k_offset (each
+//                    seq occupies cp_size * input_lengths[i] slots in the
+//                    rearranged kv buffer) and load-balance / kv-recover
+//                    index generation.
+// `kv_split_size`  : KV-shard width. Drives prefix geometry (per-rank prefix
+//                    tokens = total_prefix / kv_split_size) and the
+//                    prefix-segment offsets in `merged_kv`. Pass <= 0 (the
+//                    default) to mean "follow cp_size" - this preserves the
+//                    legacy behavior byte-for-byte.
+CpPrefillInputs prepare_cp_prefill_inputs(
+    int cp_size,
+    const torch::Tensor& input_ids,
+    const torch::Tensor& position_ids,
+    const torch::Tensor& input_lengths,
+    bool have_prefix_slots,
+    const std::vector<int32_t>& kv_cache_tokens_per_seq,
+    int block_size,
+    int kv_split_size = -1);
 
 }  // namespace xllm

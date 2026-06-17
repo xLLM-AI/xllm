@@ -75,7 +75,8 @@ class NpuGlm4DecoderLayerImpl : public BaseLayer {
                                torch::Tensor& attn_mask,
                                KVCache& kv_cache,
                                ModelInputParams& input_params,
-                               bool is_prefill);
+                               bool is_prefill,
+                               bool use_graph_decode_input);
 
   void initialize_quantization_parameters(
       atb_speed::chatglm::ChatglmLayerParam& param);
@@ -86,10 +87,12 @@ class NpuGlm4DecoderLayerImpl : public BaseLayer {
   int64_t init_attn_mask();
 
   atb_speed::Model::Node prefill_node_;
-  atb_speed::Model::Node decode_node_;
+  atb_speed::Model::Node decode_graph_node_;
+  atb_speed::Model::Node decode_eager_node_;
   std::string model_name_;
   atb_speed::chatglm::ChatglmLayerParam prefill_param_;
-  atb_speed::chatglm::ChatglmLayerParam decode_param_;
+  atb_speed::chatglm::ChatglmLayerParam decode_graph_param_;
+  atb_speed::chatglm::ChatglmLayerParam decode_eager_param_;
   atb::Tensor internal_tensors_;
   atb::Tensor placeholder_;
 

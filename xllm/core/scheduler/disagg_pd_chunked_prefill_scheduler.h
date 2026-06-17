@@ -48,6 +48,7 @@ class DisaggPDChunkedPrefillScheduler final : public DisaggPDScheduler {
   bool alloc_chunk(Sequence* sequence,
                    size_t token_budget,
                    size_t* actual_tokens);
+  void match_prefix_blocks(Sequence* sequence);
   void schedule_waiting_prefill(RequestPriorityQueue& queue,
                                 size_t& remaining_token_budget,
                                 size_t& remaining_seq_budget,

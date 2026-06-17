@@ -44,12 +44,18 @@ class EmbeddingCache final {
     // current real position from this offset.
     int32_t token_id = -1;
     int32_t position_offset = 0;
+    // Store detached views into target outputs instead of cloning. The views
+    // keep their storage alive until replaced, trading short-lived HBM
+    // retention for avoiding per-step embedding copies.
     torch::Tensor embedding;
 
     // Previous accepted target token. Its position is derived as
     // position_offset - 1 when a 2-row draft extend is required.
     int32_t prev_token_id = -1;
     torch::Tensor prev_embedding;
+
+    int32_t correction_token_id = 0;  // accepted token for step correction
+    int32_t correction_position_offset = 0;
   };
 
   EmbeddingCache(int32_t total_nums);
@@ -67,6 +73,12 @@ class EmbeddingCache final {
       const torch::Tensor& next_tokens,
       const torch::Tensor& embeddings,
       const torch::Tensor& selected_token_idxes = torch::Tensor());
+
+  // Writes PD handoff bootstrap target context for the first MTP decode step.
+  void write_mtp_bootstrap_context(int32_t embedding_id,
+                                   const std::string& request_id,
+                                   int32_t token_id,
+                                   const torch::Tensor& embedding);
 
   // Writes target validate output after rejection sampling. accepted_tokens is
   // a contiguous accepted prefix padded by -1; accepted_embeddings keeps the
@@ -87,6 +99,8 @@ class EmbeddingCache final {
   std::vector<DecodeState> read_decode_states(
       const std::vector<int32_t>& embedding_ids,
       const std::vector<std::string>& request_ids) const;
+  std::vector<int32_t> read_accepted_prefix_lengths(
+      const std::vector<int32_t>& embedding_ids) const;
 
   void clear(const std::vector<int32_t>& embedding_ids);
 

@@ -21,8 +21,8 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
+#include "core/framework/multimodal/mm_data.h"
 #include "framework/model/model_args.h"
-#include "framework/request/mm_data.h"
 #include "framework/request/rec_type.h"
 #include "framework/request/sequences_group.h"
 #include "runtime/forward_params.h"
@@ -48,7 +48,7 @@ class RecBatchInputBuilder {
       uint64_t batch_id,
       const ModelArgs* args,
       BatchForwardType batch_forward_type,
-      ThreadPool* thread_pool = nullptr);
+      MPMCThreadPool* thread_pool = nullptr);
 };
 
 }  // namespace xllm

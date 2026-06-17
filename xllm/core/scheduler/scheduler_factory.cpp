@@ -16,6 +16,8 @@ limitations under the License.
 #include "scheduler/scheduler_factory.h"
 
 #include "core/common/global_flags.h"
+#include "core/framework/config/parallel_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "scheduler/chunked_prefill_scheduler.h"
 #include "scheduler/continuous_scheduler.h"
 #include "scheduler/disagg_pd_chunked_prefill_scheduler.h"
@@ -31,7 +33,7 @@ namespace xllm {
 
 SchedulerKind select_scheduler_kind(
     const ContinuousScheduler::Options& options) {
-  if (FLAGS_use_mix_scheduler) {
+  if (::xllm::SchedulerConfig::get_instance().use_mix_scheduler()) {
     return SchedulerKind::MIX;
   }
 
@@ -46,13 +48,14 @@ SchedulerKind select_scheduler_kind(
   }
 
   if (options.enable_chunked_prefill()) {
-    if (FLAGS_enable_prefill_sp || options.num_speculative_tokens() > 0) {
+    if (::xllm::ParallelConfig::get_instance().enable_prefill_sp() ||
+        options.num_speculative_tokens() > 0) {
       return SchedulerKind::PREFILL_ONLY;
     }
     return SchedulerKind::CHUNKED_PREFILL;
   }
 
-  if (FLAGS_use_zero_evict) {
+  if (::xllm::SchedulerConfig::get_instance().use_zero_evict()) {
     return SchedulerKind::ZERO_EVICTION;
   }
 

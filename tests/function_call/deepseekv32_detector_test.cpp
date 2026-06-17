@@ -69,6 +69,16 @@ class DeepSeek32DetectorTest : public ::testing::Test {
   std::vector<JsonTool> tools_;
 };
 
+class DeepSeekV4DetectorTest : public DeepSeek32DetectorTest {
+ protected:
+  void SetUp() override {
+    DeepSeek32DetectorTest::SetUp();
+    v4_detector_ = std::make_unique<DeepSeekV4Detector>();
+  }
+
+  std::unique_ptr<DeepSeekV4Detector> v4_detector_;
+};
+
 // Test constructor and basic properties
 TEST_F(DeepSeek32DetectorTest, ConstructorInitializesCorrectly) {
   EXPECT_NE(detector_, nullptr);
@@ -937,6 +947,55 @@ TEST_F(DeepSeek32DetectorTest, ToolCallWithoutWrapper) {
   EXPECT_EQ(result.normal_text, "Direct invoke");
   ASSERT_EQ(result.calls.size(), 1);
   EXPECT_EQ(result.calls[0].name.value(), "get_weather");
+}
+
+TEST_F(DeepSeekV4DetectorTest, ParsesToolCallsWrapper) {
+  std::string text =
+      "Need weather "
+      "<｜DSML｜tool_calls><｜DSML｜invoke "
+      "name=\"get_weather\"><｜DSML｜parameter "
+      "name=\"city\" string=\"true\">Beijing</｜DSML｜parameter></"
+      "｜DSML｜invoke></｜DSML｜tool_calls>";
+
+  auto result = v4_detector_->detect_and_parse(text, tools_);
+
+  EXPECT_EQ(result.normal_text, "Need weather");
+  ASSERT_EQ(result.calls.size(), 1);
+  EXPECT_EQ(result.calls[0].name.value(), "get_weather");
+  nlohmann::json params = nlohmann::json::parse(result.calls[0].parameters);
+  EXPECT_EQ(params["city"], "Beijing");
+}
+
+TEST_F(DeepSeekV4DetectorTest, StreamingHandlesToolCallsTokenSplit) {
+  std::vector<std::string> chunks = {
+      "Thinking... ",
+      "<｜DSML｜",
+      "tool",
+      "_calls><｜DSML｜invoke name=\"get_weather\">",
+      "<｜DSML｜parameter name=\"city\" string=\"true\">",
+      "Beijing</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜",
+      "tool_calls>"};
+
+  std::string accumulated_normal_text;
+  int tool_calls_found = 0;
+  std::string accumulated_args;
+  for (const auto& chunk : chunks) {
+    auto result = v4_detector_->parse_streaming_increment(chunk, tools_);
+    accumulated_normal_text += result.normal_text;
+    for (const auto& call : result.calls) {
+      if (call.name.has_value()) {
+        ++tool_calls_found;
+        EXPECT_EQ(call.name.value(), "get_weather");
+      } else {
+        accumulated_args += call.parameters;
+      }
+    }
+  }
+
+  EXPECT_EQ(accumulated_normal_text, "Thinking...");
+  EXPECT_EQ(tool_calls_found, 1);
+  nlohmann::json params = nlohmann::json::parse(accumulated_args);
+  EXPECT_EQ(params["city"], "Beijing");
 }
 
 }  // namespace function_call

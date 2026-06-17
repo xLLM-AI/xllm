@@ -22,7 +22,7 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
-#include "common/global_flags.h"
+#include "core/framework/config/eplb_config.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
@@ -738,33 +738,33 @@ class DeepseekV2DecoderLayerTest : public ::testing::Test {
 
   ModelInputParams build_prefill_params(int64_t batch_size, int64_t seq_len) {
     ModelInputParams input_params;
-    input_params.batch_forward_type = BatchForwardType::PREFILL;
-    input_params.num_sequences = batch_size;
-    input_params.q_max_seq_len = seq_len;
-    input_params.kv_max_seq_len = batch_size * seq_len;
-    input_params.q_seq_lens = torch::arange(
+    input_params.meta.batch_forward_type = BatchForwardType::PREFILL;
+    input_params.meta.num_sequences = batch_size;
+    input_params.meta.q_max_seq_len = seq_len;
+    input_params.meta.kv_max_seq_len = batch_size * seq_len;
+    input_params.attention.device.q_seq_lens = torch::arange(
         0,
         (batch_size + 1) * seq_len,
         seq_len,
         torch::TensorOptions().dtype(torch::kInt32).device(options_.device()));
-    input_params.kv_seq_lens = torch::arange(
+    input_params.attention.device.kv_seq_lens = torch::arange(
         0,
         (batch_size + 1) * seq_len,
         seq_len,
         torch::TensorOptions().dtype(torch::kInt32).device(options_.device()));
-    input_params.q_seq_lens_vec.resize(batch_size, seq_len);
-    input_params.kv_seq_lens_vec.resize(batch_size, seq_len);
-    input_params.new_cache_slots = torch::arange(
+    input_params.attention.host.q_seq_lens.resize(batch_size, seq_len);
+    input_params.attention.host.kv_seq_lens.resize(batch_size, seq_len);
+    input_params.attention.device.new_cache_slots = torch::arange(
         1,
         batch_size * seq_len + 1,
         torch::TensorOptions().dtype(torch::kInt32).device(options_.device()));
-    input_params.block_tables = torch::zeros(
+    input_params.attention.device.block_tables = torch::zeros(
         {batch_size, batch_size * seq_len},
         torch::TensorOptions().dtype(torch::kInt32).device(options_.device()));
 
     for (int64_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
       const int64_t start = batch_idx * seq_len + 1;
-      input_params.block_tables[batch_idx].index_put_(
+      input_params.attention.device.block_tables[batch_idx].index_put_(
           {torch::indexing::Slice(0, seq_len)},
           torch::arange(start,
                         start + seq_len,
@@ -924,11 +924,13 @@ struct QuantCase {
 class ExpertDegreeGuard {
  public:
   explicit ExpertDegreeGuard(int32_t value)
-      : saved_(FLAGS_expert_parallel_degree) {
-    FLAGS_expert_parallel_degree = value;
+      : saved_(EPLBConfig::get_instance().expert_parallel_degree()) {
+    EPLBConfig::get_instance().expert_parallel_degree(value);
   }
 
-  ~ExpertDegreeGuard() { FLAGS_expert_parallel_degree = saved_; }
+  ~ExpertDegreeGuard() {
+    EPLBConfig::get_instance().expert_parallel_degree(saved_);
+  }
 
  private:
   int32_t saved_;
@@ -1047,7 +1049,7 @@ TEST_P(DeepseekV2DecoderCarrierTest,
   auto* tp_pg_raw = init_env(tc);
   auto decoder = make_decoder(/*layer_id=*/0);
   ModelInputParams input_params;
-  input_params.dp_global_token_nums = tc.dp_global_token_nums;
+  input_params.parallel.dp_global_token_nums = tc.dp_global_token_nums;
   set_tp_full_tokens(tc);
 
   auto carrier = DeepseekV2DecoderLayerTestPeer::build_post_attn_carrier(
@@ -1334,27 +1336,27 @@ TEST_F(DeepseekV2DecoderLayerTest, ForwardMixedDpMoEReturnsLocalSlice) {
       torch::TensorOptions().dtype(torch::kInt32).device(options_.device()));
 
   ModelInputParams input_params;
-  input_params.batch_forward_type = BatchForwardType::PREFILL;
-  input_params.num_sequences = 2;
-  input_params.q_max_seq_len = 1;
-  input_params.kv_max_seq_len = 2;
-  input_params.q_seq_lens = torch::tensor(
+  input_params.meta.batch_forward_type = BatchForwardType::PREFILL;
+  input_params.meta.num_sequences = 2;
+  input_params.meta.q_max_seq_len = 1;
+  input_params.meta.kv_max_seq_len = 2;
+  input_params.attention.device.q_seq_lens = torch::tensor(
       {0, 1, 2},
       torch::TensorOptions().dtype(torch::kInt32).device(options_.device()));
-  input_params.kv_seq_lens = torch::tensor(
+  input_params.attention.device.kv_seq_lens = torch::tensor(
       {0, 1, 2},
       torch::TensorOptions().dtype(torch::kInt32).device(options_.device()));
-  input_params.q_seq_lens_vec = {1, 1};
-  input_params.kv_seq_lens_vec = {1, 1};
-  input_params.new_cache_slots = torch::arange(
+  input_params.attention.host.q_seq_lens = {1, 1};
+  input_params.attention.host.kv_seq_lens = {1, 1};
+  input_params.attention.device.new_cache_slots = torch::arange(
       1,
       3,
       torch::TensorOptions().dtype(torch::kInt32).device(options_.device()));
-  input_params.block_tables = torch::tensor(
+  input_params.attention.device.block_tables = torch::tensor(
       {{1, 0}, {2, 0}},
       torch::TensorOptions().dtype(torch::kInt32).device(options_.device()));
-  input_params.dp_global_token_nums = {2, 1};
-  input_params.dp_is_decode = {0, 0};
+  input_params.parallel.dp_global_token_nums = {2, 1};
+  input_params.parallel.dp_is_decode = {0, 0};
   input_params = input_params.to(options_.device());
 
   auto attn_metadata =
@@ -1449,7 +1451,7 @@ TEST_F(DeepseekV2DecoderLayerTest, DenseMlpChunkMatchesDirectChunkedPrefill) {
                                            torch::kBFloat16,
                                            options_.device());
   auto input_params = build_prefill_params(/*batch_size=*/1, /*seq_len=*/5);
-  input_params.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
 
   auto expected =
       DeepseekV2DecoderLayerTestPeer::mlp(*decoder)->forward(hidden_states);

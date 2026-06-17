@@ -36,6 +36,16 @@ struct CpEpPaddingData {
   PROPERTY(torch::Tensor, lm_head_skip_padding_token_indices);
 
   PROPERTY(torch::Tensor, gather_prenorm_idx);
+
+  PROPERTY(torch::Tensor, padding_idx);
+
+  PROPERTY(torch::Tensor, un_padding_idx);
+
+  PROPERTY(torch::Tensor, dynamic_ep_idx);
+
+  PROPERTY(torch::Tensor, moe_idx);
+
+  PROPERTY(torch::Tensor, expert_array);
 };
 
 class CpEpPadding {
@@ -51,13 +61,17 @@ class CpEpPadding {
 
  private:
   void prepare_indices();
+  void handle_expert_parallel();
+  float get_all2all_buffer_factor(int length) const;
   CpEpPaddingData assemble_result() const;
 
   bool is_dynamic_ep_ = false;
+  int32_t num_experts_per_tok_ = 0;
   int64_t input_length_ = 0;
   int64_t attn_tp_size_ = 1;
   int64_t attn_tp_rank_ = 0;
   int64_t attn_cp_size_ = 1;
+  const nlohmann::json mapping_npu_;
 
   torch::Tensor attn_padding_idx_;
   torch::Tensor attn_unpadding_idx_;
@@ -65,8 +79,14 @@ class CpEpPadding {
   torch::Tensor ffn_unpadding_idx_;
   torch::Tensor lm_head_skip_padding_token_indices_;
   torch::Tensor gather_prenorm_idx_;
+  torch::Tensor padding_idx_;
+  torch::Tensor un_padding_idx_;
+  torch::Tensor dynamic_ep_idx_;
+  torch::Tensor moe_idx_;
+  torch::Tensor expert_array_;
 
   at::Device device_;
+  torch::ScalarType dtype_;
 };
 
 }  // namespace xllm

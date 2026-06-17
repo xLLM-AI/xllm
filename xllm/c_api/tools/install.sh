@@ -41,8 +41,20 @@ read_version() {
     if [ -z "${VERSION}" ]; then
         error_exit "version content is empty"
     fi
+
+
+    # get the full hash of the latest commit
+    FULL_HASH=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+    # get the first 7 characters of the commit hash
+    if [ "${FULL_HASH}" = "unknown" ]; then
+        SHORT_HASH="unknown"
+    else
+        SHORT_HASH="${FULL_HASH:0:7}"
+    fi
+
+    PLATFORM=$(case $(uname -m) in x86_64|i?86) echo "x86";; aarch64|arm64) echo "aarch64";; *) echo "unknown";; esac)
     
-    TAR_FILE="${TAR_BASE_NAME}_${VERSION}.tar.gz"
+    TAR_FILE="lib${TAR_BASE_NAME}_${PLATFORM}_v${VERSION}_${SHORT_HASH}.tar.gz"
 }
 
 check_files() {

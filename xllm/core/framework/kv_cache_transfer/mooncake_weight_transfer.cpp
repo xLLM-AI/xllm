@@ -67,46 +67,46 @@ bool MooncakeWeightTransfer::register_global_xtensor() {
   return true;
 }
 
-bool MooncakeWeightTransfer::link_d2d(const std::string& remote_addr) {
+bool MooncakeWeightTransfer::link_p2p(const std::string& remote_addr) {
   std::string host;
   int port = 0;
   net::parse_host_port_from_addr(remote_addr, host, port);
   auto remote_cluster_id =
       net::convert_ip_port_to_uint64(host, static_cast<uint16_t>(port));
 
-  LOG(INFO) << "MooncakeWeightTransfer::link_d2d, remote_addr=" << remote_addr
+  LOG(INFO) << "MooncakeWeightTransfer::link_p2p, remote_addr=" << remote_addr
             << ", remote_cluster_id=" << remote_cluster_id;
 
   return mooncake_te_->open_session(remote_cluster_id, remote_addr);
 }
 
-bool MooncakeWeightTransfer::link_d2d(
+bool MooncakeWeightTransfer::link_p2p(
     const std::vector<std::string>& remote_addrs) {
   for (const auto& remote_addr : remote_addrs) {
-    if (!link_d2d(remote_addr)) {
+    if (!link_p2p(remote_addr)) {
       return false;
     }
   }
   return true;
 }
 
-bool MooncakeWeightTransfer::unlink_d2d(const std::string& remote_addr) {
+bool MooncakeWeightTransfer::unlink_p2p(const std::string& remote_addr) {
   std::string host;
   int port = 0;
   net::parse_host_port_from_addr(remote_addr, host, port);
   auto remote_cluster_id =
       net::convert_ip_port_to_uint64(host, static_cast<uint16_t>(port));
 
-  LOG(INFO) << "MooncakeWeightTransfer::unlink_d2d, remote_addr=" << remote_addr
+  LOG(INFO) << "MooncakeWeightTransfer::unlink_p2p, remote_addr=" << remote_addr
             << ", remote_cluster_id=" << remote_cluster_id;
 
   return mooncake_te_->close_session(remote_cluster_id, remote_addr);
 }
 
-bool MooncakeWeightTransfer::unlink_d2d(
+bool MooncakeWeightTransfer::unlink_p2p(
     const std::vector<std::string>& remote_addrs) {
   for (const auto& remote_addr : remote_addrs) {
-    if (!unlink_d2d(remote_addr)) {
+    if (!unlink_p2p(remote_addr)) {
       return false;
     }
   }

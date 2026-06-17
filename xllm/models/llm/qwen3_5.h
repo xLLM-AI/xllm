@@ -16,11 +16,13 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
-#include "core/layers/npu_torch/qwen3_5_decoder_layer_impl.h"
+#include "core/layers/qwen3_5_decoder_layer.h"
 #include "models/model_registry.h"
 #include "qwen3_next.h"
 
@@ -44,6 +46,21 @@ class Qwen3_5ForCausalLMImpl : public Qwen3NextForCausalLMImpl {
   explicit Qwen3_5ForCausalLMImpl(const ModelContext& context)
       : Qwen3NextForCausalLMImpl(context, /*init_model=*/false) {
     set_model_module(std::make_shared<Qwen3_5ModelImpl>(context));
+  }
+
+  torch::Tensor get_input_embeddings(torch::Tensor input_ids) {
+    return get_word_embedding()(input_ids);
+  }
+
+  void load_model(std::unique_ptr<ModelLoader> loader) {
+    Qwen3NextForCausalLMImpl::load_model(
+        std::move(loader), "model.language_model.", "lm_head.");
+  }
+
+  void load_model(std::unique_ptr<ModelLoader> loader,
+                  const std::string& model_prefix) {
+    Qwen3NextForCausalLMImpl::load_model(
+        std::move(loader), model_prefix, "lm_head.");
   }
 };
 TORCH_MODULE(Qwen3_5ForCausalLM);
@@ -163,53 +180,35 @@ TORCH_MODULE(Qwen3_5ForCausalLM);
   SET_ARG(topk_group, 0);                                                      \
   SET_ARG(routed_scaling_factor, 1.0f);                                        \
   SET_ARG(stop_token_ids,                                                      \
-          std::unordered_set<int32_t>({args->eos_token_id()}));                \
+          std::unordered_set<int32_t>({args->eos_token_id(), 248046}));        \
   LOAD_ARG_TEXT_OR_ROOT(mamba_ssm_dtype, "mamba_ssm_dtype", "float32")
 
-#define LOAD_QWEN3_5_TYPE_AND_DTYPE(default_model_type)         \
-  LOAD_ARG_OR(model_type, "model_type", default_model_type);    \
+#define LOAD_QWEN3_5_TEXT_TYPE_AND_DTYPE(default_model_type)    \
+  SET_ARG(model_type, default_model_type);                      \
   LOAD_ARG_OR(dtype, "text_config.dtype", "bfloat16");          \
   LOAD_ARG_OR(dtype, "dtype", args->dtype());                   \
   LOAD_ARG_OR(dtype, "text_config.torch_dtype", args->dtype()); \
   LOAD_ARG_OR(dtype, "torch_dtype", args->dtype())
 
-REGISTER_CAUSAL_MODEL(qwen3_5, Qwen3_5ForCausalLM);
-REGISTER_MODEL_ARGS(qwen3_5, [&] {
-  LOAD_QWEN3_5_TYPE_AND_DTYPE("qwen3_5");
-  LOAD_QWEN3_5_NEXT_COMPAT_ARGS(/*moe_intermediate_size=*/0,
-                                /*num_experts=*/0,
-                                /*num_experts_per_tok=*/0,
-                                /*shared_expert_intermediate_size=*/0);
-});
-
 REGISTER_CAUSAL_MODEL(qwen3_5_text, Qwen3_5ForCausalLM);
 REGISTER_MODEL_ARGS(qwen3_5_text, [&] {
-  LOAD_QWEN3_5_TYPE_AND_DTYPE("qwen3_5_text");
+  LOAD_QWEN3_5_TEXT_TYPE_AND_DTYPE("qwen3_5_text");
   LOAD_QWEN3_5_NEXT_COMPAT_ARGS(/*moe_intermediate_size=*/0,
                                 /*num_experts=*/0,
                                 /*num_experts_per_tok=*/0,
                                 /*shared_expert_intermediate_size=*/0);
-});
-
-REGISTER_CAUSAL_MODEL(qwen3_5_moe, Qwen3_5ForCausalLM);
-REGISTER_MODEL_ARGS(qwen3_5_moe, [&] {
-  LOAD_QWEN3_5_TYPE_AND_DTYPE("qwen3_5_moe");
-  LOAD_QWEN3_5_NEXT_COMPAT_ARGS(/*moe_intermediate_size=*/512,
-                                /*num_experts=*/512,
-                                /*num_experts_per_tok=*/10,
-                                /*shared_expert_intermediate_size=*/512);
 });
 
 REGISTER_CAUSAL_MODEL(qwen3_5_moe_text, Qwen3_5ForCausalLM);
 REGISTER_MODEL_ARGS(qwen3_5_moe_text, [&] {
-  LOAD_QWEN3_5_TYPE_AND_DTYPE("qwen3_5_moe_text");
+  LOAD_QWEN3_5_TEXT_TYPE_AND_DTYPE("qwen3_5_moe_text");
   LOAD_QWEN3_5_NEXT_COMPAT_ARGS(/*moe_intermediate_size=*/512,
                                 /*num_experts=*/512,
                                 /*num_experts_per_tok=*/10,
                                 /*shared_expert_intermediate_size=*/512);
 });
 
-#undef LOAD_QWEN3_5_TYPE_AND_DTYPE
+#undef LOAD_QWEN3_5_TEXT_TYPE_AND_DTYPE
 #undef LOAD_QWEN3_5_NEXT_COMPAT_ARGS
 #undef LOAD_QWEN3_5_ROPE_ARG
 #undef LOAD_ARG_TEXT_OR_ROOT_CHAIN

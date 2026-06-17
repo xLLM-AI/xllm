@@ -21,6 +21,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <atomic>
+#include <cstdint>
 #include <thread>
 
 #include "common/macros.h"
@@ -38,7 +39,7 @@ namespace xllm {
 
 class WorkerServer {
  public:
-  WorkerServer(int local_worker_idx,
+  WorkerServer(int32_t local_worker_idx,
                const std::string& master_node_addr,
                std::atomic<bool>& done,
                const ParallelArgs& parallel_args,
@@ -49,27 +50,25 @@ class WorkerServer {
 
   virtual ~WorkerServer();
 
-  void create_server(
-      const runtime::Options& options,
-      std::atomic<bool>& done,
-      const std::string& master_node_addr,
-      const torch::Device& d,
-      int world_size,
-      int global_rank,
-      int32_t dp_size,
-      int local_rank,
-      int32_t ep_size,
-      int32_t cp_size,
-      WorkerType worker_type,
-      std::unique_ptr<ForwardSharedMemoryManager> input_shm_manager,
-      std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager);
+  void create_server(const runtime::Options& options,
+                     std::atomic<bool>& done,
+                     const std::string& master_node_addr,
+                     const torch::Device& d,
+                     ParallelArgs startup_parallel_args,
+                     int32_t world_size,
+                     int32_t global_rank,
+                     int32_t dp_size,
+                     int32_t local_rank,
+                     int32_t ep_size,
+                     int32_t cp_size,
+                     WorkerType worker_type);
 
   void stop();
 
  private:
   DISALLOW_COPY_AND_ASSIGN(WorkerServer);
 
-  void create_spawn_server(int local_rank,
+  void create_spawn_server(int32_t local_rank,
                            const std::string& master_node_addr,
                            std::atomic<bool>& done,
                            const ParallelArgs& parallel_args,

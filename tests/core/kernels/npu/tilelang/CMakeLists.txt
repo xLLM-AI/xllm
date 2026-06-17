@@ -10,6 +10,7 @@ cc_test(
     torch
     GTest::gtest_main
     glog::glog
+    unified_dlog
 )
 
 cc_test(
@@ -22,6 +23,7 @@ cc_test(
     torch
     GTest::gtest_main
     glog::glog
+    unified_dlog
 )
 
 cc_test(
@@ -34,4 +36,5 @@ cc_test(
     torch
     GTest::gtest_main
     glog::glog
+    unified_dlog
 )

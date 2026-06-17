@@ -29,15 +29,22 @@
 #pragma once
 
 #include <cooperative_groups.h>
+#if !defined(USE_DCU)
 #include <cooperative_groups/reduce.h>
+#endif
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/transform_iterator.h>
 
+#if !defined(USE_DCU)
 #include <cub/cub.cuh>
 #include <cuda/atomic>
 #include <cuda/std/limits>
+#else
+#include <hipcub/hipcub.hpp>
+namespace cub = hipcub;
+#endif
 #include <limits>
 #include <type_traits>
 
@@ -59,8 +66,8 @@ namespace reduce_topk {
 
 namespace air_topk_stable {
 using WideT = float4;
-constexpr int VECTORIZED_READ_SIZE = 16;
-constexpr int WARP_SIZE = 32;
+constexpr int kVectorizedReadSize = 16;
+constexpr int kWarpSize = 32;
 
 // constexpr unsigned FULL_WARP_MASK = 0xffffffff;
 
@@ -175,17 +182,19 @@ __host__ __device__ IdxT calc_buf_len(IdxT len) {
   // When writing is not skipped, read `in_buf`(T) and `in_idx_buf`(IdxT), and
   // write `out_buf`(T) and `out_idx_buf`(IdxT). The ratio between these cases
   // determines whether to skip writing and hence the buffer size.
-  constexpr RATIO_T ratio = 2 + sizeof(IdxT) * 2 / sizeof(T);
+  constexpr RATIO_T kRatio = 2 + sizeof(IdxT) * 2 / sizeof(T);
   // Even such estimation is too conservative, so further decrease buf_len by
   // 1/8
-  IdxT buf_len = len / (ratio * 8);
+  IdxT buf_len = len / (kRatio * 8);
 
   // one-block kernel splits one large buffer into smaller ones, so round buf
   // size to 256 bytes to avoid alignment issues
   static_assert(is_a_power_of_two(sizeof(T)));
   static_assert(is_a_power_of_two(sizeof(IdxT)));
-  constexpr IdxT aligned = 256 / std::min(sizeof(T), sizeof(IdxT));
-  buf_len = buf_len & (~(aligned - 1));
+  constexpr size_t kMinTypeSize =
+      sizeof(T) < sizeof(IdxT) ? sizeof(T) : sizeof(IdxT);
+  constexpr IdxT kAligned = static_cast<IdxT>(256 / kMinTypeSize);
+  buf_len = buf_len & (~(kAligned - 1));
   return buf_len;
 }
 
@@ -219,12 +228,12 @@ __device__ void vectorized_process(size_t thread_rank,
     }
   } else {
     static_assert(sizeof(WideT) % sizeof(T) == 0);
-    constexpr int items_per_scalar = sizeof(WideT) / sizeof(T);
+    constexpr int kItemsPerScalar = sizeof(WideT) / sizeof(T);
 
     // TODO: it's UB
     union {
       WideT scalar;
-      T array[items_per_scalar];
+      T array[kItemsPerScalar];
     } wide;
 
     int skip_cnt =
@@ -236,36 +245,36 @@ __device__ void vectorized_process(size_t thread_rank,
       skip_cnt = len;
     }
     WideT const* in_cast = reinterpret_cast<decltype(in_cast)>(in + skip_cnt);
-    const IdxT len_cast = (len - skip_cnt) / items_per_scalar;
+    const IdxT len_cast = (len - skip_cnt) / kItemsPerScalar;
 
     for (IdxT i = thread_rank; i < len_cast; i += num_threads) {
       wide.scalar = in_cast[i];
-      const IdxT real_i = skip_cnt + i * items_per_scalar;
+      const IdxT real_i = skip_cnt + i * kItemsPerScalar;
 #pragma unroll
-      for (int j = 0; j < items_per_scalar; ++j) {
+      for (int j = 0; j < kItemsPerScalar; ++j) {
         f(wide.array[j], real_i + j);
       }
     }
 
-    static_assert(WARP_SIZE >= items_per_scalar);
-    // and because items_per_scalar > skip_cnt, WARP_SIZE > skip_cnt
+    static_assert(kWarpSize >= kItemsPerScalar);
+    // and because kItemsPerScalar > skip_cnt, kWarpSize > skip_cnt
     // no need to use loop
     if (thread_rank < skip_cnt) {
       f(in[thread_rank], thread_rank);
     }
-    // because len_cast = (len - skip_cnt) / items_per_scalar,
-    // len_cast * items_per_scalar + items_per_scalar > len - skip_cnt;
+    // because len_cast = (len - skip_cnt) / kItemsPerScalar,
+    // len_cast * kItemsPerScalar + kItemsPerScalar > len - skip_cnt;
     // and so
-    // len - (skip_cnt + len_cast * items_per_scalar) < items_per_scalar <=
-    // WARP_SIZE no need to use loop
-    const IdxT remain_i = skip_cnt + len_cast * items_per_scalar + thread_rank;
+    // len - (skip_cnt + len_cast * kItemsPerScalar) < kItemsPerScalar <=
+    // kWarpSize no need to use loop
+    const IdxT remain_i = skip_cnt + len_cast * kItemsPerScalar + thread_rank;
     if (remain_i < len) {
       f(in[remain_i], remain_i);
     }
   }
 }
 
-// sync_width should >= WARP_SIZE
+// sync_width should >= kWarpSize
 template <typename T, typename IdxT, typename Func>
 __device__ void vectorized_process(T const* in,
                                    IdxT len,
@@ -279,11 +288,11 @@ __device__ void vectorized_process(T const* in,
     }
   } else {
     static_assert(sizeof(WideT) % sizeof(T) == 0);
-    constexpr int items_per_scalar = sizeof(WideT) / sizeof(T);
+    constexpr int kItemsPerScalar = sizeof(WideT) / sizeof(T);
 
     union {
       WideT scalar;
-      T array[items_per_scalar];
+      T array[kItemsPerScalar];
     } wide;
 
     int skip_cnt =
@@ -295,7 +304,7 @@ __device__ void vectorized_process(T const* in,
       skip_cnt = len;
     }
     WideT const* in_cast = reinterpret_cast<decltype(in_cast)>(in + skip_cnt);
-    const IdxT len_cast = (len - skip_cnt) / items_per_scalar;
+    const IdxT len_cast = (len - skip_cnt) / kItemsPerScalar;
 
     const IdxT len_cast_for_sync =
         ((len_cast - 1) / sync_width + 1) * sync_width;
@@ -304,22 +313,22 @@ __device__ void vectorized_process(T const* in,
       if (valid) {
         wide.scalar = in_cast[i];
       }
-      const IdxT real_i = skip_cnt + i * items_per_scalar;
+      const IdxT real_i = skip_cnt + i * kItemsPerScalar;
 #pragma unroll
-      for (int j = 0; j < items_per_scalar; ++j) {
+      for (int j = 0; j < kItemsPerScalar; ++j) {
         f(wide.array[j], real_i + j, valid);
       }
     }
 
-    static_assert(WARP_SIZE >= items_per_scalar);
+    static_assert(kWarpSize >= kItemsPerScalar);
     // need at most one warp for skipped and remained elements,
-    // and sync_width >= WARP_SIZE
+    // and sync_width >= kWarpSize
     if (tid < sync_width) {
       bool valid = tid < skip_cnt;
       T value = valid ? in[tid] : T();
       f(value, tid, valid);
 
-      const IdxT remain_i = skip_cnt + len_cast * items_per_scalar + tid;
+      const IdxT remain_i = skip_cnt + len_cast * kItemsPerScalar + tid;
       valid = remain_i < len;
       value = valid ? in[remain_i] : T();
       f(value, remain_i, valid);
@@ -386,9 +395,9 @@ __device__ void filter_and_histogram(T const* in_buf,
                                      bool select_min,
                                      int pass,
                                      bool early_stop) {
-  constexpr int num_buckets = calc_num_buckets<BitsPerPass>();
-  __shared__ IdxT histogram_smem[num_buckets];
-  for (IdxT i = threadIdx.x; i < num_buckets; i += blockDim.x) {
+  constexpr int kNumBuckets = calc_num_buckets<BitsPerPass>();
+  __shared__ IdxT histogram_smem[kNumBuckets];
+  for (IdxT i = threadIdx.x; i < kNumBuckets; i += blockDim.x) {
     histogram_smem[i] = 0;
   }
   __syncthreads();
@@ -479,7 +488,7 @@ __device__ void filter_and_histogram(T const* in_buf,
   __syncthreads();
 
   // merge histograms produced by individual blocks
-  for (int i = threadIdx.x; i < num_buckets; i += blockDim.x) {
+  for (int i = threadIdx.x; i < kNumBuckets; i += blockDim.x) {
     if (histogram_smem[i] != 0) {
       atomicAdd(histogram + i, histogram_smem[i]);
     }
@@ -492,18 +501,16 @@ __device__ void filter_and_histogram(T const* in_buf,
  */
 template <typename IdxT, int BitsPerPass, int BlockSize>
 __device__ void scan(IdxT volatile* histogram) {
-  constexpr int num_buckets = calc_num_buckets<BitsPerPass>();
-  if constexpr (num_buckets >= BlockSize) {
-    static_assert(num_buckets % BlockSize == 0);
-    constexpr int items_per_thread = num_buckets / BlockSize;
+  constexpr int kNumBuckets = calc_num_buckets<BitsPerPass>();
+  if constexpr (kNumBuckets >= BlockSize) {
+    static_assert(kNumBuckets % BlockSize == 0);
+    constexpr int kItemsPerThread = kNumBuckets / BlockSize;
     typedef cub::
-        BlockLoad<IdxT, BlockSize, items_per_thread, cub::BLOCK_LOAD_TRANSPOSE>
+        BlockLoad<IdxT, BlockSize, kItemsPerThread, cub::BLOCK_LOAD_TRANSPOSE>
             BlockLoad;
-    typedef cub::BlockStore<IdxT,
-                            BlockSize,
-                            items_per_thread,
-                            cub::BLOCK_STORE_TRANSPOSE>
-        BlockStore;
+    typedef cub::
+        BlockStore<IdxT, BlockSize, kItemsPerThread, cub::BLOCK_STORE_TRANSPOSE>
+            BlockStore;
     typedef cub::BlockScan<IdxT, BlockSize> BlockScan;
 
     __shared__ union {
@@ -512,7 +519,7 @@ __device__ void scan(IdxT volatile* histogram) {
       typename BlockStore::TempStorage store;
     } temp_storage;
 
-    IdxT thread_data[items_per_thread];
+    IdxT thread_data[kItemsPerThread];
 
     BlockLoad(temp_storage.load).Load(histogram, thread_data);
     __syncthreads();
@@ -526,14 +533,14 @@ __device__ void scan(IdxT volatile* histogram) {
     __shared__ typename BlockScan::TempStorage temp_storage;
 
     IdxT thread_data = 0;
-    if (threadIdx.x < num_buckets) {
+    if (threadIdx.x < kNumBuckets) {
       thread_data = histogram[threadIdx.x];
     }
 
     BlockScan(temp_storage).InclusiveSum(thread_data, thread_data);
     __syncthreads();
 
-    if (threadIdx.x < num_buckets) {
+    if (threadIdx.x < kNumBuckets) {
       histogram[threadIdx.x] = thread_data;
     }
   }
@@ -548,8 +555,8 @@ __device__ void choose_bucket(Counter<T, IdxT>* counter,
                               IdxT const* histogram,
                               const IdxT k,
                               int const pass) {
-  constexpr int num_buckets = calc_num_buckets<BitsPerPass>();
-  for (int i = threadIdx.x; i < num_buckets; i += blockDim.x) {
+  constexpr int kNumBuckets = calc_num_buckets<BitsPerPass>();
+  for (int i = threadIdx.x; i < kNumBuckets; i += blockDim.x) {
     IdxT prev = (i == 0) ? 0 : histogram[i - 1];
     IdxT cur = histogram[i];
 
@@ -588,8 +595,10 @@ __device__ void last_filter(T const* in_buf,
   IdxT* p_out_cnt = &counter->out_cnt;
   IdxT* p_out_back_cnt = &counter->out_back_cnt;
   IdxT* p_equal = out_idx + k - num_of_kth_needed;
+#if !defined(USE_DCU)
   ::cuda::atomic_ref<IdxT, ::cuda::thread_scope_block> ref_last(
       p_equal[num_of_kth_needed - 1]);
+#endif
   for (IdxT i = threadIdx.x; i < current_len; i += blockDim.x) {
     const T value = in_buf[i];
     auto const bits = (twiddle_in(value, select_min) >> start_bit) << start_bit;
@@ -611,7 +620,13 @@ __device__ void last_filter(T const* in_buf,
         }
       }
       if constexpr (prioritize_smaller_indice) {
+#if defined(USE_DCU)
+        if (new_idx < __hip_atomic_load(&p_equal[num_of_kth_needed - 1],
+                                        __ATOMIC_RELAXED,
+                                        __HIP_MEMORY_SCOPE_WORKGROUP)) {
+#else
         if (new_idx < ref_last.load(::cuda::memory_order_relaxed)) {
+#endif
           for (int j = 0; j < num_of_kth_needed; j++) {
             IdxT pre_idx = atomicMin(&p_equal[j], new_idx);
             if (pre_idx > new_idx) {
@@ -658,15 +673,17 @@ __global__ void last_filter_kernel(T const* in,
   out += batch_id * k;
   out_idx += batch_id * k;
 
-  constexpr int pass = calc_num_passes<T, BitsPerPass>() - 1;
-  constexpr int start_bit = calc_start_bit<T, BitsPerPass>(pass);
+  constexpr int kPass = calc_num_passes<T, BitsPerPass>() - 1;
+  constexpr int kStartBit = calc_start_bit<T, BitsPerPass>(kPass);
 
   auto const kth_value_bits = counter->kth_value_bits;
   const IdxT num_of_kth_needed = counter->k;
   IdxT* p_out_cnt = &counter->out_cnt;
   IdxT* p_out_back_cnt = &counter->out_back_cnt;
   IdxT* p_equal = out_idx + k - num_of_kth_needed;
+#if !defined(USE_DCU)
   ::cuda::atomic_ref<IdxT> ref_last(p_equal[num_of_kth_needed - 1]);
+#endif
   auto f = [k,
             select_min,
             kth_value_bits,
@@ -676,9 +693,13 @@ __global__ void last_filter_kernel(T const* in,
             in_idx_buf,
             out,
             out_idx,
-            p_equal,
-            ref_last](T value, IdxT i) {
-    const auto bits = (twiddle_in(value, select_min) >> start_bit) << start_bit;
+            p_equal
+#if !defined(USE_DCU)
+            ,
+            ref_last
+#endif
+  ](T value, IdxT i) {
+    const auto bits = (twiddle_in(value, select_min) >> kStartBit) << kStartBit;
     if (bits < kth_value_bits) {
       IdxT pos = atomicAdd(p_out_cnt, static_cast<IdxT>(1));
       out[pos] = value;
@@ -694,7 +715,13 @@ __global__ void last_filter_kernel(T const* in,
         }
       }
       if constexpr (prioritize_smaller_indice) {
+#if defined(USE_DCU)
+        if (new_idx < __hip_atomic_load(&p_equal[num_of_kth_needed - 1],
+                                        __ATOMIC_RELAXED,
+                                        __HIP_MEMORY_SCOPE_WORKGROUP)) {
+#else
         if (new_idx < ref_last.load(::cuda::memory_order_relaxed)) {
+#endif
           for (int j = 0; j < num_of_kth_needed; j++) {
             IdxT pre_idx = atomicMin(&p_equal[j], new_idx);
             if (pre_idx > new_idx) {
@@ -822,8 +849,8 @@ __global__ void radix_kernel(T const* in,
   out += batch_id * k;
   out_idx += batch_id * k;
 
-  constexpr int num_buckets = calc_num_buckets<BitsPerPass>();
-  auto histogram = histograms + batch_id * num_buckets;
+  constexpr int kNumBuckets = calc_num_buckets<BitsPerPass>();
+  auto histogram = histograms + batch_id * kNumBuckets;
 
   filter_and_histogram<T, IdxT, BitsPerPass>(in_buf,
                                              in_idx_buf,
@@ -861,10 +888,10 @@ __global__ void radix_kernel(T const* in,
     choose_bucket<T, IdxT, BitsPerPass>(counter, histogram, current_k, pass);
     __syncthreads();
 
-    constexpr int num_passes = calc_num_passes<T, BitsPerPass>();
+    constexpr int kNumPasses = calc_num_passes<T, BitsPerPass>();
     // reset for next pass
-    if (pass != num_passes - 1) {
-      for (int i = threadIdx.x; i < num_buckets; i += blockDim.x) {
+    if (pass != kNumPasses - 1) {
+      for (int i = threadIdx.x; i < kNumBuckets; i += blockDim.x) {
         histogram[i] = 0;
       }
     }
@@ -885,11 +912,15 @@ __global__ void radix_kernel(T const* in,
     //                                           counter, select_min, pass);
     //     }
     // }
-    if (pass == num_passes - 1) {
+    if (pass == kNumPasses - 1) {
       const volatile IdxT num_of_kth_needed = counter->k;
       for (IdxT i = threadIdx.x; i < num_of_kth_needed; i += blockDim.x) {
+#if defined(USE_DCU)
+        out_idx[k - num_of_kth_needed + i] = std::numeric_limits<IdxT>::max();
+#else
         out_idx[k - num_of_kth_needed + i] =
             ::cuda::std::numeric_limits<IdxT>::max();
+#endif
       }
       __syncthreads();
       if constexpr (fused_last_filter) {
@@ -910,7 +941,7 @@ __global__ void radix_kernel(T const* in,
 
 template <typename T, typename IdxT, int BitsPerPass, int BlockSize>
 unsigned calc_grid_dim(int batch_size, IdxT len, int sm_cnt) {
-  static_assert(VECTORIZED_READ_SIZE / sizeof(T) >= 1);
+  static_assert(kVectorizedReadSize / sizeof(T) >= 1);
 
   int active_blocks;
   cudaOccupancyMaxActiveBlocksPerMultiprocessor(
@@ -923,14 +954,14 @@ unsigned calc_grid_dim(int batch_size, IdxT len, int sm_cnt) {
   IdxT best_num_blocks = 0;
   float best_tail_wave_penalty = 1.0f;
   const IdxT max_num_blocks =
-      ceildiv<IdxT>(len, VECTORIZED_READ_SIZE / sizeof(T) * BlockSize);
+      ceildiv<IdxT>(len, kVectorizedReadSize / sizeof(T) * BlockSize);
   for (int num_waves = 1;; ++num_waves) {
     IdxT num_blocks = std::min(
         max_num_blocks,
         static_cast<IdxT>(std::max(num_waves * active_blocks / batch_size, 1)));
     IdxT items_per_thread = ceildiv<IdxT>(len, num_blocks * BlockSize);
     items_per_thread =
-        alignTo<IdxT>(items_per_thread, VECTORIZED_READ_SIZE / sizeof(T));
+        alignTo<IdxT>(items_per_thread, kVectorizedReadSize / sizeof(T));
     num_blocks = ceildiv<IdxT>(len, items_per_thread * BlockSize);
     float actual_num_waves =
         static_cast<float>(num_blocks) * batch_size / active_blocks;
@@ -1037,8 +1068,8 @@ __device__ void filter_and_histogram_for_one_block(T const* in_buf,
                                                    IdxT* histogram,
                                                    bool select_min,
                                                    int pass) {
-  constexpr int num_buckets = calc_num_buckets<BitsPerPass>();
-  for (int i = threadIdx.x; i < num_buckets; i += blockDim.x) {
+  constexpr int kNumBuckets = calc_num_buckets<BitsPerPass>();
+  for (int i = threadIdx.x; i < kNumBuckets; i += blockDim.x) {
     histogram[i] = 0;
   }
   IdxT* p_filter_cnt = &counter->filter_cnt;
@@ -1085,7 +1116,7 @@ __device__ void filter_and_histogram_for_one_block(T const* in_buf,
           (twiddle_in(value, select_min) >> previous_start_bit)
           << previous_start_bit;
       if (previous_bits == kth_value_bits) {
-#if CUDART_VERSION < 12000
+#if !defined(USE_DCU) && CUDART_VERSION < 12000
         // Avoiding potential compiler bug in CUDA 11
         volatile
 #endif
@@ -1118,9 +1149,9 @@ __global__ void radix_topk_one_block_kernel(T const* in,
                                             IdxT* out_idx,
                                             bool const select_min,
                                             char* bufs) {
-  constexpr int num_buckets = calc_num_buckets<BitsPerPass>();
+  constexpr int kNumBuckets = calc_num_buckets<BitsPerPass>();
   __shared__ Counter<T, IdxT> counter;
-  __shared__ IdxT histogram[num_buckets];
+  __shared__ IdxT histogram[kNumBuckets];
 
   if (threadIdx.x == 0) {
     counter.k = k;
@@ -1144,8 +1175,8 @@ __global__ void radix_topk_one_block_kernel(T const* in,
   const IdxT buf_len = calc_buf_len<T, IdxT, unsigned>(len);
   bufs += batch_id * buf_len * 2 * (sizeof(T) + sizeof(IdxT));
 
-  constexpr int num_passes = calc_num_passes<T, BitsPerPass>();
-  for (int pass = 0; pass < num_passes; ++pass) {
+  constexpr int kNumPasses = calc_num_passes<T, BitsPerPass>();
+  for (int pass = 0; pass < kNumPasses; ++pass) {
     T const* in_buf = nullptr;
     IdxT const* in_idx_buf = nullptr;
     T* out_buf = nullptr;
@@ -1197,12 +1228,16 @@ __global__ void radix_topk_one_block_kernel(T const* in,
     }
     __syncthreads();
 
-    if ((pass == num_passes - 1)) {
+    if ((pass == kNumPasses - 1)) {
       if constexpr (prioritize_smaller_indice) {
         const IdxT num_of_kth_needed = counter.k;
         for (IdxT i = threadIdx.x; i < num_of_kth_needed; i += blockDim.x) {
+#if defined(USE_DCU)
+          out_idx[k - num_of_kth_needed + i] = std::numeric_limits<IdxT>::max();
+#else
           out_idx[k - num_of_kth_needed + i] =
               ::cuda::std::numeric_limits<IdxT>::max();
+#endif
         }
         __syncthreads();
       }
@@ -1236,9 +1271,9 @@ __global__ void radix_topk_one_block_kernel(T const* in,
 //}
 namespace moe_topk {
 namespace cg = cooperative_groups;
-static constexpr int kBLOCK_SIZE = 1024;
-static constexpr int kWARP_SIZE = 32;
-static constexpr int kWARPS_PER_BLOCK = kBLOCK_SIZE / kWARP_SIZE;
+static constexpr int kBlockSize = 1024;
+static constexpr int kWarpSize = 32;
+static constexpr int kWarpsPerBlock = kBlockSize / kWarpSize;
 
 template <typename T>
 __device__ __forceinline__ T negativeInfinity() {
@@ -1247,13 +1282,24 @@ __device__ __forceinline__ T negativeInfinity() {
 
 template <>
 __device__ __forceinline__ half negativeInfinity<half>() {
+#if !defined(USE_DCU)
   return -CUDART_INF_FP16;
+#else
+  return static_cast<half>(-INFINITY);
+#endif
 }
 
+#if !defined(USE_DCU)
 template <>
 __device__ __forceinline__ __nv_bfloat16 negativeInfinity<__nv_bfloat16>() {
   return -CUDART_INF_BF16;
 }
+#else
+template <>
+__device__ __forceinline__ hip_bfloat16 negativeInfinity<hip_bfloat16>() {
+  return static_cast<hip_bfloat16>(-INFINITY);
+}
+#endif
 
 /****************TopK kernel for candidate number<= 128 and K <= 8
  * **************** */
@@ -1269,27 +1315,27 @@ __global__ void moe_topk_kernel(InputT const* in,
                                 int32_t const len,
                                 int32_t const topK) {
   uint32_t const blockRank = blockIdx.x;
-  uint32_t const tIdx = kBLOCK_SIZE * blockRank + threadIdx.x;
-  uint32_t const warpIdx = tIdx / kWARP_SIZE;
-  uint32_t const laneIdx = tIdx % kWARP_SIZE;
-  uint32_t const warpNum = gridDim.x * kWARPS_PER_BLOCK;
+  uint32_t const tIdx = kBlockSize * blockRank + threadIdx.x;
+  uint32_t const warpIdx = tIdx / kWarpSize;
+  uint32_t const laneIdx = tIdx % kWarpSize;
+  uint32_t const warpNum = gridDim.x * kWarpsPerBlock;
   auto block = cg::this_thread_block();
-  auto warp = cg::tiled_partition<kWARP_SIZE>(block);
+  auto warp = cg::tiled_partition<kWarpSize>(block);
 
   InputT minScore = negativeInfinity<InputT>();
 
   for (uint32_t tokenId = warpIdx; tokenId < batchSize; tokenId += warpNum) {
     auto scoreOffset = tokenId * len;
     auto outputOffset = tokenId * topK;
-    InputT inputScore[MaxLen / kWARP_SIZE];
-    IdxT inputIndex[MaxLen / kWARP_SIZE];
+    InputT inputScore[MaxLen / kWarpSize];
+    IdxT inputIndex[MaxLen / kWarpSize];
 
     InputT warpTopKScore[MaxTopK];
     IdxT warpTopKExpertIdx[MaxTopK];
 
     // Load scores and indices for this warp
-    for (uint32_t i = 0; i < MaxLen / kWARP_SIZE; ++i) {
-      auto expertIdx = i * kWARP_SIZE + laneIdx;
+    for (uint32_t i = 0; i < MaxLen / kWarpSize; ++i) {
+      auto expertIdx = i * kWarpSize + laneIdx;
       inputScore[i] = expertIdx < len
                           ? static_cast<InputT>(in[scoreOffset + expertIdx])
                           : minScore;
@@ -1360,7 +1406,7 @@ void standalone_stable_radix_topk_(void* buf,
                                    cudaStream_t stream,
                                    bool sorted = false) {
   static_assert(air_topk_stable::calc_num_passes<T, BitsPerPass>() > 1);
-  constexpr int num_buckets = air_topk_stable::calc_num_buckets<BitsPerPass>();
+  constexpr int kNumBuckets = air_topk_stable::calc_num_buckets<BitsPerPass>();
 
   air_topk_stable::Counter<T, IdxT>* counters = nullptr;
   IdxT* histograms = nullptr;
@@ -1433,7 +1479,7 @@ void standalone_stable_radix_topk_(void* buf,
     }
     std::vector<size_t> sizes = {
         sizeof(*counters) * batch_size,
-        sizeof(*histograms) * num_buckets * batch_size,
+        sizeof(*histograms) * kNumBuckets * batch_size,
         sizeof(*buf1) * len_candidates * batch_size,
         sizeof(*idx_buf1) * len_candidates * batch_size,
         sizeof(*buf2) * len_candidates * batch_size,
@@ -1477,12 +1523,12 @@ void standalone_stable_radix_topk_(void* buf,
 
   dim3 blocks(grid_dim, batch_size);
 
-  constexpr int num_passes = air_topk_stable::calc_num_passes<T, BitsPerPass>();
+  constexpr int kNumPasses = air_topk_stable::calc_num_passes<T, BitsPerPass>();
 
   auto kernel = air_topk_stable::
       radix_kernel<T, IdxT, BitsPerPass, BlockSize, false, true>;
 
-  for (int pass = 0; pass < num_passes; ++pass) {
+  for (int pass = 0; pass < kNumPasses; ++pass) {
     air_topk_stable::set_buf_pointers(in,
                                       in_idx,
                                       buf1,
@@ -1495,7 +1541,7 @@ void standalone_stable_radix_topk_(void* buf,
                                       out_buf,
                                       out_idx_buf);
 
-    if (fused_last_filter && pass == num_passes - 1) {
+    if (fused_last_filter && pass == kNumPasses - 1) {
       kernel = air_topk_stable::
           radix_kernel<T, IdxT, BitsPerPass, BlockSize, true, true>;
     }
@@ -1677,10 +1723,11 @@ void standalone_stable_radix_topk_one_block_(void* buf,
     }
   }
 
-  air_topk_stable::
-      radix_topk_one_block_kernel<T, IdxT, BitsPerPass, BlockSize, true>
-      <<<batch_size, BlockSize, 0, stream>>>(
-          in, in_idx, len, k, topk_out, topk_out_idx, select_min, bufs);
+  auto one_block_kernel = air_topk_stable::
+      radix_topk_one_block_kernel<T, IdxT, BitsPerPass, BlockSize, true>;
+
+  one_block_kernel<<<batch_size, BlockSize, 0, stream>>>(
+      in, in_idx, len, k, topk_out, topk_out_idx, select_min, bufs);
 
   T* idx_sort_out = sorted ? sort_in : out;
   IdxT* idx_sort_out_idx = sorted ? sort_in_idx : out_idx;
@@ -1735,11 +1782,11 @@ void standalone_stable_radix_11bits(void* buf,
                                     IdxT* out_idx,
                                     bool greater,
                                     cudaStream_t stream = 0) {
-  constexpr int items_per_thread = 32;
-  constexpr int block_dim = 512;
-  constexpr bool fused_last_filter = false;
-  if (len <= block_dim * items_per_thread) {
-    standalone_stable_radix_topk_one_block_<T, IdxT, 11, block_dim>(
+  constexpr int kItemsPerThread = 32;
+  constexpr int kBlockDim = 512;
+  constexpr bool kFusedLastFilter = false;
+  if (len <= kBlockDim * kItemsPerThread) {
+    standalone_stable_radix_topk_one_block_<T, IdxT, 11, kBlockDim>(
         buf,
         buf_size,
         in,
@@ -1754,11 +1801,11 @@ void standalone_stable_radix_11bits(void* buf,
         sorted);
   } else {
     int32_t sm_cnt = xllm::Device::sm_count();
-    unsigned grid_dim = air_topk_stable::calc_grid_dim<T, IdxT, 11, block_dim>(
+    unsigned grid_dim = air_topk_stable::calc_grid_dim<T, IdxT, 11, kBlockDim>(
         batch_size, len, sm_cnt);
 
     if (grid_dim == 1) {
-      standalone_stable_radix_topk_one_block_<T, IdxT, 11, block_dim>(
+      standalone_stable_radix_topk_one_block_<T, IdxT, 11, kBlockDim>(
           buf,
           buf_size,
           in,
@@ -1772,7 +1819,7 @@ void standalone_stable_radix_11bits(void* buf,
           stream,
           sorted);
     } else {
-      standalone_stable_radix_topk_<T, IdxT, 11, block_dim>(
+      standalone_stable_radix_topk_<T, IdxT, 11, kBlockDim>(
           buf,
           buf_size,
           in,
@@ -1783,7 +1830,7 @@ void standalone_stable_radix_11bits(void* buf,
           out,
           out_idx,
           !greater,
-          fused_last_filter,
+          kFusedLastFilter,
           grid_dim,
           stream,
           sorted);
@@ -1819,7 +1866,7 @@ void moe_reduce_topk(T const* in,
   using OutputT = T;
   const uint32_t max_num_blocks = 1024;
   const uint32_t num_blocks = std::min(
-      static_cast<uint32_t>((batch_size - 1) / moe_topk::kWARPS_PER_BLOCK + 1),
+      static_cast<uint32_t>((batch_size - 1) / moe_topk::kWarpsPerBlock + 1),
       max_num_blocks);
 
   uint32_t max_len = nextPowerOfTwo(len) < 32 ? 32 : nextPowerOfTwo(len);
@@ -1927,7 +1974,7 @@ void moe_reduce_topk(T const* in,
   }
 
   dim3 moe_topk_grid_dim(num_blocks);
-  dim3 moe_topk_block_dim(moe_topk::kBLOCK_SIZE);
+  dim3 moe_topk_block_dim(moe_topk::kBlockSize);
 
   kernel_instance<<<moe_topk_grid_dim, moe_topk_block_dim, 0, stream>>>(
       in, out, out_idx, batch_size, len, k);
@@ -1950,14 +1997,14 @@ size_t invokeComputeTopkLastDimWorkspaceSize(SizeType32 batchSize,
   T* out_val = nullptr;
   IdxT* out_idx = nullptr;
 
-  constexpr int block_dim = 512;
-  constexpr bool fused_last_filter = false;
+  constexpr int kBlockDim = 512;
+  constexpr bool kFusedLastFilter = false;
   int32_t sm_cnt = xllm::Device::sm_count();
-  unsigned grid_dim = air_topk_stable::calc_grid_dim<T, IdxT, 11, block_dim>(
+  unsigned grid_dim = air_topk_stable::calc_grid_dim<T, IdxT, 11, kBlockDim>(
       batchSize, inputLength, sm_cnt);
 
   if (sorted) {
-    standalone_stable_radix_topk_<T, IdxT, 11, block_dim>(
+    standalone_stable_radix_topk_<T, IdxT, 11, kBlockDim>(
         workspace,
         buf_size,
         in,
@@ -1968,12 +2015,12 @@ size_t invokeComputeTopkLastDimWorkspaceSize(SizeType32 batchSize,
         out_val,
         out_idx,
         !is_largest,
-        fused_last_filter,
+        kFusedLastFilter,
         grid_dim,
         0,
         true);
   } else {
-    standalone_stable_radix_topk_<T, IdxT, 11, block_dim>(
+    standalone_stable_radix_topk_<T, IdxT, 11, kBlockDim>(
         workspace,
         buf_size,
         in,
@@ -1984,7 +2031,7 @@ size_t invokeComputeTopkLastDimWorkspaceSize(SizeType32 batchSize,
         out_val,
         out_idx,
         !is_largest,
-        fused_last_filter,
+        kFusedLastFilter,
         grid_dim,
         0,
         false);
@@ -2001,20 +2048,20 @@ size_t invokeComputeTopkLastDimWorkspaceSize(SizeType32 batchSize,
       batchSize, inputLength, k, is_largest, true);
 }
 
-#define INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(T) \
-  template size_t invokeComputeTopkLastDimWorkspaceSize<T>(          \
-      SizeType32 batchSize,                                          \
-      SizeType32 inputLength,                                        \
-      SizeType32 k,                                                  \
+#define INSTANTIATE_COMPUTE_TOPK_LAST_DIM_WORKSPACE_SIZE_DATA_TYPE(T) \
+  template size_t invokeComputeTopkLastDimWorkspaceSize<T>(           \
+      SizeType32 batchSize,                                           \
+      SizeType32 inputLength,                                         \
+      SizeType32 k,                                                   \
       bool is_largest)
 
-INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(int);
-INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(float);
-INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(half);
+INSTANTIATE_COMPUTE_TOPK_LAST_DIM_WORKSPACE_SIZE_DATA_TYPE(int);
+INSTANTIATE_COMPUTE_TOPK_LAST_DIM_WORKSPACE_SIZE_DATA_TYPE(float);
+INSTANTIATE_COMPUTE_TOPK_LAST_DIM_WORKSPACE_SIZE_DATA_TYPE(half);
 #ifdef ENABLE_BF16
-INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(__nv_bfloat16);
+INSTANTIATE_COMPUTE_TOPK_LAST_DIM_WORKSPACE_SIZE_DATA_TYPE(__nv_bfloat16);
 #endif
-#undef INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE
+#undef INSTANTIATE_COMPUTE_TOPK_LAST_DIM_WORKSPACE_SIZE_DATA_TYPE
 
 // Might need FP8 in the future.
 
@@ -2090,7 +2137,7 @@ void invokeTopkLastDim(SizeType32 batchSize,
                        true);
 }
 
-#define INSTANTIATE_TOPK_LastDim_DATA_TYPE(T)                        \
+#define INSTANTIATE_TOPK_LAST_DIM_DATA_TYPE(T)                       \
   template void invokeTopkLastDim<T>(SizeType32 batchSize,           \
                                      SizeType32 inputLength,         \
                                      SizeType32 k,                   \
@@ -2101,13 +2148,13 @@ void invokeTopkLastDim(SizeType32 batchSize,
                                      void* workspace,                \
                                      cudaStream_t stream)
 
-INSTANTIATE_TOPK_LastDim_DATA_TYPE(int);
-INSTANTIATE_TOPK_LastDim_DATA_TYPE(float);
-INSTANTIATE_TOPK_LastDim_DATA_TYPE(half);
+INSTANTIATE_TOPK_LAST_DIM_DATA_TYPE(int);
+INSTANTIATE_TOPK_LAST_DIM_DATA_TYPE(float);
+INSTANTIATE_TOPK_LAST_DIM_DATA_TYPE(half);
 #ifdef ENABLE_BF16
-INSTANTIATE_TOPK_LastDim_DATA_TYPE(__nv_bfloat16);
+INSTANTIATE_TOPK_LAST_DIM_DATA_TYPE(__nv_bfloat16);
 #endif
-#undef INSTANTIATE_TOPK_LastDim_DATA_TYPE
+#undef INSTANTIATE_TOPK_LAST_DIM_DATA_TYPE
 
 }  // namespace reduce_topk
 

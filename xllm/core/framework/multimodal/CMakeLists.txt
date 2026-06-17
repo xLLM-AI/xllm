@@ -1,0 +1,39 @@
+include(cc_library)
+
+cc_library(
+  NAME 
+    multimodal
+  HDRS
+    mm_batch_data.h
+    mm_codec.h
+    mm_data.h
+    mm_data_item.h
+    mm_visitor.h
+    embedding_output.h
+    mm_embedding_handler.h
+    mm_handler.h
+    mm_input.h
+    mm_item_state.h
+    mm_type.h
+  SRCS
+    mm_batch_data.cpp
+    mm_codec.cpp
+    mm_data.cpp
+    mm_data_item.cpp
+    mm_visitor.cpp
+    mm_embedding_handler.cpp
+    mm_handler.cpp
+    mm_input.cpp
+    mm_type.cpp
+  DEPS
+    common
+    util
+    encoder_cache
+    glog::glog
+    absl::strings
+    absl::time
+    proto::xllm_proto
+    torch
+    ${OpenCV_LIBS}
+    ${FFMPEG_LIBRARIES}
+)

@@ -75,6 +75,8 @@ class MMChatServiceImpl : public APIServiceImpl<MMChatCall> {
   DISALLOW_COPY_AND_ASSIGN(MMChatServiceImpl);
 
   VLMMaster* master_ = nullptr;
+  const std::string tool_call_parser_format_;
+  const std::string reasoning_parser_format_;
 };
 
 }  // namespace xllm

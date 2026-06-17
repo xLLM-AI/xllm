@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/config/kv_cache_config.h"
 #include "deepseek_v2.h"
 #include "layers/common/rotary_embedding_util.h"
 
@@ -86,10 +87,10 @@ class JoyAILLMFlashModelImpl : public torch::nn::Module {
     auto sin_pos = cos_sin_chunks[1].contiguous();
 
     torch::Tensor attn_mask;
-    if (FLAGS_enable_prefix_cache &&
-        !input_params.batch_forward_type.is_decode()) {
+    if (::xllm::KVCacheConfig::get_instance().enable_prefix_cache() &&
+        !input_params.meta.batch_forward_type.is_decode()) {
       attn_mask = attn_mask_.get_attn_mask(512, dtype_, device_);
-    } else if (input_params.batch_forward_type.is_prefill()) {
+    } else if (input_params.meta.batch_forward_type.is_prefill()) {
       attn_mask = attn_mask_.get_attn_mask(128, dtype_, device_);
     } else if (num_speculative_tokens_ > 0) {
       // TODO :the judgement of gen_free_mask need more check
@@ -101,9 +102,10 @@ class JoyAILLMFlashModelImpl : public torch::nn::Module {
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event = nullptr;
       std::atomic<bool>* event_flag = nullptr;
-      if (input_params.layer_synchronizer != nullptr) {
-        event = input_params.layer_synchronizer->get_event(i);
-        event_flag = input_params.layer_synchronizer->get_event_flag(i);
+      if (input_params.parallel.layer_synchronizer != nullptr) {
+        event = input_params.parallel.layer_synchronizer->get_event(i);
+        event_flag =
+            input_params.parallel.layer_synchronizer->get_event_flag(i);
       }
       if (!input_params.synchronize_layer(i)) {
         return ModelOutput();

@@ -90,7 +90,9 @@ class XTensorDistClient {
   std::unique_ptr<proto::XTensorDist_Stub> stub_;
 
   // Thread pool for async operations
-  ThreadPool threadpool_{1};
+  ThreadPool threadpool_{/*num_threads=*/1,
+                         /*cpu_binding=*/false,
+                         /*pool_name=*/"XTensorDistClient.async"};
 };
 
 }  // namespace xllm

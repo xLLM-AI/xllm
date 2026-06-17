@@ -50,16 +50,6 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
     }
   }
 
-  torch::Tensor deepstack_process(torch::Tensor hidden_states,
-                                  torch::Tensor visual_pos_masks,
-                                  torch::Tensor visual_embeds) {
-    visual_pos_masks = visual_pos_masks.to(hidden_states.device());
-    auto selected = hidden_states.index({visual_pos_masks});
-    auto local_this = selected + visual_embeds;
-    hidden_states.index_put_({visual_pos_masks}, local_this);
-    return hidden_states;
-  }
-
   std::pair<torch::Tensor, torch::Tensor> apply_mrope(
       const torch::Tensor positions) override {
     auto target_cos_sin = cos_sin_.index({positions});
@@ -101,7 +91,7 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
                               torch::Tensor positions,
                               std::vector<KVCache>& kv_caches,
                               const ModelInputParams& input_params) {
-    bool use_deepstack = input_params.deep_stacks.size() > 0;
+    bool use_deepstack = input_params.multimodal.deep_stacks.size() > 0;
     ModelInputParams& input_params_new =
         const_cast<ModelInputParams&>(input_params);
     std::vector<torch::Tensor> deep_stacks;
@@ -110,7 +100,7 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
       tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
       positions = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
     }
-    auto inputs_embeds = input_params.input_embedding;
+    auto inputs_embeds = input_params.embedding.input_embedding;
     torch::Tensor h;
     if (inputs_embeds.defined()) {
       h = inputs_embeds;
@@ -118,10 +108,11 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
       h = embed_tokens_(tokens);
     }
     if (use_deepstack) {
-      deep_stacks = input_params.deep_stacks;  // [num_deepstack, hidden_size]
+      deep_stacks =
+          input_params.multimodal.deep_stacks;  // [num_deepstack, hidden_size]
     }
 
-    auto& dp_token_nums = input_params_new.dp_global_token_nums;
+    auto& dp_token_nums = input_params_new.parallel.dp_global_token_nums;
     std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
     if (!input_params_new.attn_metadata) {
       input_params_new.attn_metadata =
@@ -131,7 +122,8 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
 
     auto& attn_metadata = *(input_params_new.attn_metadata);
 
-    torch::Tensor& new_cache_slots = input_params_new.new_cache_slots;
+    torch::Tensor& new_cache_slots =
+        input_params_new.attention.device.new_cache_slots;
     // musa cache slots should be (block_id, id_in_block)
     // todo: add this as an optional change to build input_params phase?
     new_cache_slots = torch::stack(
@@ -161,8 +153,7 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
 
       if (use_deepstack) {
         if (deep_stacks.size() > 0 && i < deep_stacks.size()) {
-          h = deepstack_process(
-              h, input_params.visual_pos_masks, deep_stacks[i]);
+          h = h + deep_stacks[i];
         }
       }
     }

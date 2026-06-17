@@ -37,20 +37,38 @@ using KVPushSynchronizerImpl = NPULayerSynchronizerImpl;
 using KVPushSynchronizerImpl = MLULayerSynchronizerImpl;
 #endif
 
+// In KV-split mode, filters and remaps remote_blocks_ids so that each KV-split
+// rank only sees the remote blocks assigned to it. When `kv_split_size == 1`
+// the caller should skip this entirely (every rank holds the full KV replica
+// and `remote_blocks_ids` is 1:1 with `local_blocks_ids`).
+//
+// Note: prior to the KV-split / CP decoupling refactor this was named
+// filter_cp_kv_infos and gated on cp_size>1. The behavior is identical when
+// kv_split_size == cp_size (the legacy default), so callers that pass cp_rank
+// / cp_size keep working byte-for-byte.
+std::vector<TransferKVInfo> filter_kv_split_infos(
+    int32_t kv_split_rank,
+    int32_t kv_split_size,
+    const std::vector<TransferKVInfo>& kv_infos);
+
 class KVCacheTransfer {
  public:
   struct KVCacheInfo {
     uint64_t dst_cluster_id;
     std::string dst_addr;
-    int64_t dst_k_cache_id;
-    int64_t dst_v_cache_id;
     std::vector<uint64_t> src_blocks;
     std::vector<uint64_t> dst_blocks;
+    std::vector<uint64_t> src_linear_state_ids;
+    std::vector<uint64_t> dst_linear_state_ids;
 
     // XTensor mode: destination offsets from D-node (per-layer)
     // dst_xtensor_layer_offsets[layer_id] = {k_offsets, v_offsets}
     std::vector<XTensorLayerOffsets> dst_xtensor_layer_offsets;
   };
+
+  static std::vector<std::string> rotate_dst_rank(
+      const std::vector<std::string>& keys,
+      int32_t kv_split_rank);
 
   KVCacheTransfer() = default;
   virtual ~KVCacheTransfer() = default;
@@ -77,36 +95,38 @@ class KVCacheTransfer {
                                  const KVCacheShape& kv_cache_shape,
                                  const torch::ScalarType dtype) {};
 
-  virtual void get_cache_info(uint64_t& cluster_id,
-                              std::string& addr,
-                              int64_t& key_cache_id,
-                              int64_t& value_cache_id) = 0;
+  virtual void register_kv_cache_spec(std::vector<xllm::KVCache>& kv_caches,
+                                      const KVCacheShape& kv_cache_shape,
+                                      const torch::ScalarType dtype) {
+    NOT_IMPLEMENTED();
+  };
+
+  virtual void get_cache_info(uint64_t& cluster_id, std::string& addr) = 0;
 
   virtual bool link_cluster(const uint64_t cluster_id,
                             const std::string& remote_addr,
-                            const std::string& device_ip,
                             const uint16_t port) = 0;
 
   virtual bool unlink_cluster(const uint64_t& cluster_id,
                               const std::string& remote_addr,
-                              const std::string& device_ip,
                               const uint16_t port,
                               bool force_flag = true) = 0;
 
-  virtual bool pull_kv_blocks(const uint64_t src_cluster_id,
-                              const std::string& src_addr,
-                              const int64_t src_k_cache_id,
-                              const int64_t src_v_cache_id,
-                              const std::vector<uint64_t>& src_blocks,
-                              const std::vector<uint64_t>& dst_blocks) = 0;
+  virtual bool pull_kv_blocks(
+      const uint64_t src_cluster_id,
+      const std::string& src_addr,
+      const std::vector<uint64_t>& src_blocks,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids,
+      const std::vector<uint64_t>& dst_linear_state_ids) = 0;
 
   virtual folly::SemiFuture<bool> pull_kv_blocks_async(
       const uint64_t src_cluster_id,
       const std::string& src_addr,
-      const int64_t src_k_cache_id,
-      const int64_t src_v_cache_id,
       const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks);
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids,
+      const std::vector<uint64_t>& dst_linear_state_ids);
 
 #if defined(USE_NPU) || defined(USE_MLU)
   virtual folly::SemiFuture<bool> push_kv_blocks_async(
@@ -125,7 +145,9 @@ class KVCacheTransfer {
   virtual bool push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
       std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
-      bool is_spec_draft) = 0;
+      bool is_spec_draft,
+      int32_t kv_split_rank,
+      int32_t kv_split_size) = 0;
 #endif
 
 #if defined(USE_NPU)
@@ -138,14 +160,18 @@ class KVCacheTransfer {
 
  protected:
   // working thread
-  ThreadPool threadpool_;
+  ThreadPool threadpool_{/*num_threads=*/1,
+                         /*cpu_binding=*/false,
+                         /*pool_name=*/"KVCacheTransfer.async"};
 };
 
 class KVCacheTransferFactory {
  public:
+  using AllocateKVCacheFunc =
+      std::function<bool(const KVCacheShape&, bool use_huge_page_allocator)>;
+
   static std::shared_ptr<KVCacheTransfer> create(
       const std::string& transfer_type,
-      const std::string& device_ip,
       uint16_t transfer_listen_port,
       InstanceRole instance_role,
       const Device& device,
@@ -153,7 +179,7 @@ class KVCacheTransferFactory {
       torch::ScalarType dtype,
       std::vector<xllm::KVCache>& kv_caches,
       int64_t num_layers,
-      std::function<void(const KVCacheShape&)> allocate_kv_cache_func,
+      AllocateKVCacheFunc allocate_kv_cache_func,
       bool enable_lighting_indexer,
       const std::string& model_type = "",
       const std::string& model_id = "");

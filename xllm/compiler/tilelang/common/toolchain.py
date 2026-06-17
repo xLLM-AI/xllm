@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import os
 import shutil
 import subprocess
@@ -13,15 +14,33 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[4]
 
 
-def default_tilelang_root() -> Path:
-    return repo_root() / "third_party" / "tilelang-ascend"
+def find_installed_tilelang_root() -> Path | None:
+    try:
+        files = importlib.metadata.files("tilelang")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    if files is None:
+        return None
+
+    for file in files:
+        if str(file) == "tilelang/__init__.py":
+            return Path(file.locate()).resolve().parent
+    return None
 
 
 def resolve_tilelang_root() -> Path:
     value = os.environ.get("TL_ROOT", "").strip()
     if value:
         return Path(value).resolve()
-    return default_tilelang_root().resolve()
+
+    installed_root = find_installed_tilelang_root()
+    if installed_root is not None:
+        return installed_root
+
+    raise RuntimeError(
+        "TileLang is not installed. Run `python xllm/compiler/tilelang_launcher.py "
+        "prepare-ascend` first."
+    )
 
 
 def require_env(name: str) -> str:
@@ -43,13 +62,13 @@ def prepare_tilelang_import(tilelang_root: str | Path | None = None) -> Path:
     tl_root = (
         Path(tilelang_root).resolve() if tilelang_root is not None else resolve_tilelang_root()
     )
+    import_path = tl_root.parent
     os.environ["TL_ROOT"] = str(tl_root)
-    prepend_pythonpath(os.environ, str(tl_root))
-    tl_root_str = str(tl_root)
-    # Keep TL_ROOT at sys.path front to avoid resolving the sibling
-    # package xllm/compiler/tilelang as top-level `tilelang`.
-    sys.path = [p for p in sys.path if p != tl_root_str]
-    sys.path.insert(0, tl_root_str)
+    prepend_pythonpath(os.environ, str(import_path))
+
+    import_path_str = str(import_path)
+    sys.path = [path for path in sys.path if path != import_path_str]
+    sys.path.insert(0, import_path_str)
     os.environ.setdefault("ACL_OP_INIT_MODE", "1")
     return tl_root
 

@@ -17,60 +17,26 @@ limitations under the License.
 
 #include <absl/time/clock.h>
 #include <absl/time/time.h>
-#include <string.h>
-#include <xxHash/xxhash.h>
 
 #include <iostream>
 #include <thread>
 
-#include "common/global_flags.h"
 #include "common/metrics.h"
+#include "core/framework/multimodal/mm_data.h"
 
 namespace xllm {
 
-void xxh3_128bits_hash(const uint8_t* pre_hash_value,
-                       const Slice<int32_t>& token_ids,
-                       uint8_t* hash_value) {
-  if (pre_hash_value == nullptr) {
-    XXH128_hash_t xxh3_128bits_hash_value =
-        XXH3_128bits_withSeed(reinterpret_cast<const void*>(token_ids.data()),
-                              sizeof(int32_t) * token_ids.size(),
-                              FLAGS_xxh3_128bits_seed);
-    memcpy(
-        hash_value, &xxh3_128bits_hash_value, sizeof(xxh3_128bits_hash_value));
-  } else {
-    uint8_t key[1024];
-
-    int32_t data_len =
-        sizeof(int32_t) * token_ids.size() + XXH3_128BITS_HASH_VALUE_LEN;
-    CHECK_GT(sizeof(key), data_len) << "key size is too small";
-
-    memcpy(key, pre_hash_value, XXH3_128BITS_HASH_VALUE_LEN);
-    memcpy(key + XXH3_128BITS_HASH_VALUE_LEN,
-           reinterpret_cast<const void*>(token_ids.data()),
-           sizeof(int32_t) * token_ids.size());
-
-    XXH128_hash_t xxh3_128bits_hash_value = XXH3_128bits_withSeed(
-        reinterpret_cast<const void*>(key), data_len, FLAGS_xxh3_128bits_seed);
-    memcpy(
-        hash_value, &xxh3_128bits_hash_value, sizeof(xxh3_128bits_hash_value));
-  }
-}
-
-std::vector<Block> PrefixCache::match(
-    const Slice<int32_t>& token_ids,
-    const Slice<Block>& existed_shared_blocks) {
+std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
+                                      const Slice<Block>& existed_shared_blocks,
+                                      const MMData& mm_data) {
   // allign tokens to block boundary
   const size_t n_tokens = round_down(token_ids.size(), block_size_);
   if (n_tokens == 0) {
     return std::vector<Block>();
   }
 
-  const int64_t now = absl::ToUnixMicros(absl::Now());
   size_t n_blocks = n_tokens / block_size_;
   total_blocks_.fetch_add(n_blocks);
-
-  auto tokens_slice = token_ids.slice(0, n_tokens);
 
   std::vector<Block> blocks;
   blocks.reserve(n_blocks);
@@ -84,15 +50,13 @@ std::vector<Block> PrefixCache::match(
       existed_shared_blocks.empty()
           ? XXH3Key{}
           : XXH3Key{existed_shared_blocks.back().get_immutable_hash_value()};
+
+  auto hasher = BlockHasher::create(hasher_type_, mm_data, start_index);
+
   for (size_t i = start_index; i < n_tokens; i += block_size_) {
-    if (i == 0) {
-      xxh3_128bits_hash(
-          nullptr, token_ids.slice(i, i + block_size_), token_hash_key.data);
-    } else {
-      xxh3_128bits_hash(token_hash_key.data,
-                        token_ids.slice(i, i + block_size_),
-                        token_hash_key.data);
-    }
+    const uint8_t* pre_hash_value = (i == 0) ? nullptr : token_hash_key.data;
+    hasher->compute(
+        token_ids, i, i + block_size_, pre_hash_value, token_hash_key);
 
     auto iter = cached_blocks_.find(token_hash_key);
     if (iter != cached_blocks_.end()) {
@@ -122,9 +86,11 @@ std::vector<Block> PrefixCache::match(
 
 size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
                            std::vector<Block>& blocks,
-                           size_t existed_shared_blocks_num) {
+                           size_t existed_shared_blocks_num,
+                           const MMData& mm_data) {
   std::vector<XXH3Key> insert_keys;
-  return insert(token_ids, blocks, existed_shared_blocks_num, &insert_keys);
+  return insert(
+      token_ids, blocks, existed_shared_blocks_num, mm_data, &insert_keys);
 }
 
 size_t PrefixCache::insert(const std::vector<Block>& blocks) {
@@ -145,6 +111,7 @@ size_t PrefixCache::evict(size_t n_blocks) {
 size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
                            std::vector<Block>& blocks,
                            size_t existed_shared_blocks_num,
+                           const MMData& mm_data,
                            std::vector<XXH3Key>* insert_keys) {
   const int64_t now = absl::ToUnixMicros(absl::Now());
   // allign tokens to block boundary
@@ -164,18 +131,16 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
                                : XXH3Key{blocks[existed_shared_blocks_num - 1]
                                              .get_immutable_hash_value()};
 
+  auto hasher = BlockHasher::create(
+      hasher_type_, mm_data, existed_shared_blocks_num * block_size_);
+
   uint32_t block_idx = existed_shared_blocks_num;
   insert_keys->reserve(n_blocks);
   for (size_t i = existed_shared_blocks_num * block_size_; i < n_tokens;
        i += block_size_) {
-    if (i == 0) {
-      xxh3_128bits_hash(
-          nullptr, token_ids.slice(i, i + block_size_), token_hash_key.data);
-    } else {
-      xxh3_128bits_hash(token_hash_key.data,
-                        token_ids.slice(i, i + block_size_),
-                        token_hash_key.data);
-    }
+    const uint8_t* pre_hash_value = (i == 0) ? nullptr : token_hash_key.data;
+    hasher->compute(
+        token_ids, i, i + block_size_, pre_hash_value, token_hash_key);
     blocks[block_idx].set_hash_value(token_hash_key.data);
 
     auto iter = cached_blocks_.find(token_hash_key);

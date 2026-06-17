@@ -5,8 +5,6 @@
 
 namespace xllm {
 
-std::unique_ptr<PrefixCache> create_prefix_cache(
-    const int32_t block_size,
-    const bool& enable_cache_upload = false);
+std::unique_ptr<PrefixCache> create_prefix_cache(PrefixCache::Options options);
 
 }  // namespace xllm

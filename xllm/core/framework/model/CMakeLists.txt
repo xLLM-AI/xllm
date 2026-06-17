@@ -8,7 +8,6 @@ cc_library(
     rec_causal_lm.h
     causal_vlm.h
     dit_model.h
-    mm_embedding_vlm.h
     model_args.h
     model_input_params.h
   SRCS

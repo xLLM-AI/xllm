@@ -31,8 +31,7 @@ torch::Tensor OxygenVisionAttentionImpl::forward(
     torch::Tensor& m_cos_pos,
     torch::Tensor& m_sin_pos,
     torch::Tensor& cu_seq_len,
-    std::vector<int32_t>& cu_seq_len_vec,
-    ModelInputParams& params) {
+    std::vector<int32_t>& cu_seq_len_vec) {
   // 1. qkv projection
   auto qkv = qkv_proj_->forward(hidden_states);
   // 2. split qkv
@@ -48,8 +47,7 @@ torch::Tensor OxygenVisionAttentionImpl::forward(
   int64_t S = q.size(1);
   int64_t head_dim = q.size(3);
   CHECK_EQ(head_dim, hidden_size_per_attention_head_) << "head_dim mismatch";
-  int32_t max_seqlen =
-      *std::max_element(cu_seq_len_vec.begin(), cu_seq_len_vec.end());
+  int32_t max_seqlen = get_max_sequence_length(cu_seq_len_vec);
 
   // 4. rope
   // Reshape q, k from [B, S, H, D] to [B*S, H, D] before applying RoPE so

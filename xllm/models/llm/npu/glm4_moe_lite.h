@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/framework/model_context.h"
 #include "core/framework/parallel_state/npu_dp_ep_padding.h"
 #include "core/layers/npu/npu_glm4_moe_lite_decoder_layer.h"
@@ -127,7 +129,9 @@ class Glm4MoeLiteModelImpl : public torch::nn::Module {
 
     max_seq_len_ = model_args.max_position_embeddings();
     // int32_t mask_value = model_args.dtype() == "bfloat16" ? 1 : -9984;
-    // int32_t mask_value = FLAGS_enable_chunked_prefill ? -9984 : 1;
+    // int32_t mask_value =
+    // ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill() ? -9984
+    // : 1;
     int32_t mask_value = model_args.dtype() == "bfloat16" ? 1 : -9984;
     attn_mask_ = layer::AttentionMask(options.device(),
                                       options.dtype().toScalarType(),
@@ -168,7 +172,7 @@ class Glm4MoeLiteModelImpl : public torch::nn::Module {
       }
     }
 
-    auto inputs_embeds = input_params.input_embedding;
+    auto inputs_embeds = input_params.embedding.input_embedding;
     torch::Tensor h;
     if (inputs_embeds.defined()) {
       h = inputs_embeds;
@@ -187,10 +191,10 @@ class Glm4MoeLiteModelImpl : public torch::nn::Module {
     auto sin_pos = cos_sin_chunks[1].contiguous();
 
     torch::Tensor attn_mask;
-    if (FLAGS_enable_prefix_cache &&
-        !input_params.batch_forward_type.is_decode()) {
+    if (::xllm::KVCacheConfig::get_instance().enable_prefix_cache() &&
+        !input_params.meta.batch_forward_type.is_decode()) {
       attn_mask = attn_mask_.get_attn_mask(512, dtype_, device_);
-    } else if (input_params.batch_forward_type.is_prefill()) {
+    } else if (input_params.meta.batch_forward_type.is_prefill()) {
       attn_mask = attn_mask_.get_attn_mask(128, dtype_, device_);
     } else if (num_speculative_tokens_ > 0) {
       // TODO :the judgement of gen_free_mask need more check
@@ -200,16 +204,17 @@ class Glm4MoeLiteModelImpl : public torch::nn::Module {
 
     ModelInputParams& input_params_new =
         const_cast<ModelInputParams&>(input_params);
-    input_params_new.expert_array = expert_array;
+    input_params_new.expert.expert_array = expert_array;
 
     RollingLayerGuard rolling_guard(rolling_mgr_);
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event = nullptr;
       std::atomic<bool>* event_flag = nullptr;
 
-      if (input_params.layer_synchronizer != nullptr) {
-        event = input_params.layer_synchronizer->get_event(i);
-        event_flag = input_params.layer_synchronizer->get_event_flag(i);
+      if (input_params.parallel.layer_synchronizer != nullptr) {
+        event = input_params.parallel.layer_synchronizer->get_event(i);
+        event_flag =
+            input_params.parallel.layer_synchronizer->get_event_flag(i);
       }
 
       if (!input_params.synchronize_layer(i)) {

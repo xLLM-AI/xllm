@@ -11,7 +11,7 @@
 
 namespace xllm {
 
-bool KVCacheStore::init(const KVCacheStoreConfig& config,
+bool KVCacheStore::init(const KVCacheStoreInitConfig& config,
                         std::vector<xllm::KVCache>* host_kv_caches) {
   CHECK(!is_initialized_) << "KVCacheStore is initialized.";
   config_ = config;

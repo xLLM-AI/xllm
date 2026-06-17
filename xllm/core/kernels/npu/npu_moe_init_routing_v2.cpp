@@ -47,7 +47,7 @@ apply_npu_moe_init_routing_v2(const torch::Tensor& x,
       expert_tokens_num_flag,
       quant_mode,
       active_expert_range,
-      0);
+      row_idx_type);
 }
 
 }  // namespace xllm::kernel::npu

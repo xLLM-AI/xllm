@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "common/global_flags.h"
+#include "core/framework/config/eplb_config.h"
 #include "layers/common/dp_utils.h"
 
 namespace xllm {
@@ -46,7 +47,9 @@ Qwen3_5DecoderLayerImpl::Qwen3_5DecoderLayerImpl(const ModelContext& context,
 
   const bool use_moe = is_moe_layer(model_args, layer_id);
 
-  enable_deep_ep_ = use_moe && FLAGS_expert_parallel_degree == 2;
+  enable_deep_ep_ =
+      use_moe &&
+      ::xllm::EPLBConfig::get_instance().expert_parallel_degree() == 2;
   if (enable_deep_ep_) {
     CHECK_EQ(parallel_args_.dp_size(), parallel_args_.world_size())
         << "Qwen3.5 MoE only support deep ep all2all when dp_size == "

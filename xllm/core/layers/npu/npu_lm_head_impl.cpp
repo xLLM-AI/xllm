@@ -15,10 +15,10 @@ limitations under the License.
 
 #include "npu_lm_head_impl.h"
 
-#include <gflags/gflags.h>
 #include <glog/logging.h>
-DECLARE_string(rank_tablefile);
-DECLARE_string(communication_backend);
+
+#include "core/framework/config/load_config.h"
+#include "core/framework/config/parallel_config.h"
 
 namespace xllm {
 namespace layer {
@@ -27,6 +27,7 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
                                     const ModelArgs& args,
                                     const ParallelArgs& parallel_args,
                                     bool isPrefill) {
+  param.outputHidden = cp_size_ > 1;
   param.unpadInputs = true;
   param.gatherAhead = isPrefill;
   param.hiddenSizePerAttentionHead = args.hidden_size() / args.n_heads();
@@ -58,17 +59,17 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
       param.linearParallelParam.tensorParallelInfo.commDomain =
           std::to_string(tp_group_id);
       param.linearParallelParam.tensorParallelInfo.backend =
-          FLAGS_communication_backend;
+          ::xllm::ParallelConfig::get_instance().communication_backend();
     } else {
       param.linearParallelParam.parallelType =
           atb_speed::common::COLUMN_PARALLEL;
       atb_speed::common::ParallelInfo parallelInfo =
-          parallel_args.mapping().Get(atb_speed::base::LM_HEAD_TP);
+          parallel_args.mapping().Get(atb_speed::base::ATTN_TP);
       param.linearParallelParam.tensorParallelInfo.rank = parallelInfo.rank;
       param.linearParallelParam.tensorParallelInfo.worldSize =
           parallelInfo.rankIds.size();
       param.linearParallelParam.tensorParallelInfo.backend =
-          FLAGS_communication_backend;
+          ::xllm::ParallelConfig::get_instance().communication_backend();
       parallelInfo.InitCommDomain(
           param.linearParallelParam.tensorParallelInfo.hcommInfo,
           param.linearParallelParam.tensorParallelInfo.commDomain);
@@ -100,7 +101,7 @@ NpuLmHeadImpl::NpuLmHeadImpl(const ModelContext& context) : BaseLayer(context) {
                   false);
 
   atb_weight_tensors_.resize(1);
-  atOutTensors_.resize(1);
+  atOutTensors_.resize(2);
 
   auto options = context.get_tensor_options();
   dtype_ = c10::typeMetaToScalarType(options.dtype());
@@ -113,7 +114,9 @@ NpuLmHeadImpl::NpuLmHeadImpl(const ModelContext& context) : BaseLayer(context) {
   loader_ = std::make_unique<LmHeadLoader>(
       1,
       context,
-      FLAGS_enable_manual_loader ? LoadMode::kManual : LoadMode::kEager);
+      ::xllm::LoadConfig::get_instance().enable_manual_loader()
+          ? LoadMode::kManual
+          : LoadMode::kEager);
 }
 
 int64_t NpuLmHeadImpl::init_layer() {
@@ -144,14 +147,14 @@ int64_t NpuLmHeadImpl::init_node(atb_speed::Model::Node& node,
     return -1;
   }
   node.inTensors.resize(node.operation->GetInputNum());
-  node.outTensors.resize(1);
+  node.outTensors.resize(node.operation->GetOutputNum());
 
   node.inTensors.at(1) = &atb_weight_tensors_[0];
 
   node.variantPack.inTensors.reserve(node.inTensors.size());
   node.variantPack.inTensors.resize(node.inTensors.size());
-  node.variantPack.outTensors.reserve(1);
-  node.variantPack.outTensors.resize(1);
+  node.variantPack.outTensors.reserve(node.outTensors.size());
+  node.variantPack.outTensors.resize(node.outTensors.size());
 
   return atb::NO_ERROR;
 }
@@ -159,6 +162,15 @@ int64_t NpuLmHeadImpl::init_node(atb_speed::Model::Node& node,
 torch::Tensor NpuLmHeadImpl::forward(const torch::Tensor& hidden_states,
                                      const torch::Tensor& seleted_idxes,
                                      int nodeId) {
+  torch::Tensor out_hidden;
+  return forward_with_hidden(hidden_states, seleted_idxes, out_hidden, nodeId);
+}
+
+torch::Tensor NpuLmHeadImpl::forward_with_hidden(
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& seleted_idxes,
+    torch::Tensor& out_hidden,
+    int nodeId) {
   atb::Status st;
   build_node_variant_pack(lm_head_node_prefill_, hidden_states, seleted_idxes);
   st = execute_node(lm_head_node_prefill_, nodeId);
@@ -167,6 +179,9 @@ torch::Tensor NpuLmHeadImpl::forward(const torch::Tensor& hidden_states,
   torch::Tensor output = atOutTensors_[0];
   if (padded_vocab_size_ > vocab_size_ && vocab_size_ > 0) {
     output = output.slice(/*dim=*/-1, /*start=*/0, /*end=*/vocab_size_);
+  }
+  if (atOutTensors_.size() > 1) {
+    out_hidden = atOutTensors_[1];
   }
   return output;
 }
@@ -214,12 +229,16 @@ void NpuLmHeadImpl::build_node_variant_pack(
   inTensorDescs.at(8) = placeholder_.desc;
 
   atb::Status st = node.operation->InferShape(inTensorDescs, outTensorDescs);
-  at::Tensor newTensor =
-      atb_speed::Utils::CreateAtTensorFromTensorDesc(outTensorDescs.at(0));
+  LOG_IF(FATAL, st != atb::NO_ERROR)
+      << model_name_ << " infer lmhead shape fail, error code: " << st;
 
-  atOutTensors_.at(0) = newTensor;
-  node.variantPack.outTensors.at(0) =
-      atb_speed::Utils::AtTensor2Tensor(atOutTensors_.at(0));
+  atOutTensors_.resize(node.variantPack.outTensors.size());
+  for (size_t i = 0; i < node.variantPack.outTensors.size(); ++i) {
+    atOutTensors_.at(i) =
+        atb_speed::Utils::CreateAtTensorFromTensorDesc(outTensorDescs.at(i));
+    node.variantPack.outTensors.at(i) =
+        atb_speed::Utils::AtTensor2Tensor(atOutTensors_.at(i));
+  }
 }
 
 }  // namespace layer

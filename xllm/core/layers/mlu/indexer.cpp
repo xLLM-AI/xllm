@@ -19,87 +19,9 @@ limitations under the License.
 
 #include <cmath>
 
+#include "core/framework/config/kv_cache_config.h"
 #include "kernels/ops_api.h"
-
-namespace {
-
-// Returns true if n is a power of two (greater than 0 and only one bit set)
-inline bool is_power_of_two(int64_t n) { return n > 0 && ((n & (n - 1)) == 0); }
-
-// Generates an n×n Hadamard matrix (Sylvester type, elements ±1).
-// If normalize = true, returns orthogonal Hadamard: H / sqrt(n).
-torch::Tensor create_hadamard_matrix(int64_t n,
-                                     torch::Dtype dtype = torch::kFloat32,
-                                     torch::Device device = torch::kCPU,
-                                     bool normalize = false) {
-  CHECK(is_power_of_two(n)) << "hadamard_matrix: n must be a power of two.";
-
-  auto options = torch::TensorOptions().dtype(dtype).device(device);
-  // Initial Hadamard matrix H_1 = [1]
-  torch::Tensor H = torch::ones({1, 1}, options);
-
-  // Recursively build Hadamard: H_{2m} = [[H_m,  H_m], [H_m, -H_m]]
-  for (int64_t m = 1; m < n; m <<= 1) {
-    // Concatenate along column (dim=1) for top and bottom blocks
-    auto top = torch::cat({H, H}, /*dim=*/1);
-    auto bottom = torch::cat({H, -H}, /*dim=*/1);
-    // Concatenate along row (dim=0) to form next Hadamard matrix
-    H = torch::cat({top, bottom}, /*dim=*/0);
-  }
-
-  if (normalize) {
-    H = H / std::sqrt(static_cast<double>(n));
-  }
-  return H;
-}
-
-// Performs a Hadamard-like linear transform with optional zero-padding and
-// scaling.
-//
-// Args:
-//   x: Tensor of shape (..., dim)
-//   h_matrix: Tensor of shape (dim_padded, dim_padded). Treated as
-//   [out_features, in_features], matching Python F.linear weight convention.
-//   scale: Optional multiplicative scaling factor (default = 1.0). By default,
-//   no scaling is applied (matches Python version).
-//
-// Returns:
-//   Tensor of same shape as x, after transformation.
-torch::Tensor hadamard_transform_ref(const torch::Tensor& x,
-                                     const torch::Tensor& h_matrix) {
-  // Save original shape and input dimension
-  const auto x_shape = x.sizes();
-  const int64_t dim = x.size(-1);
-  // Flatten x to 2D of shape [-1, dim]
-  torch::Tensor x2d = x.reshape({-1, dim});
-  // Compute next power of two for padding
-  const double log_dim = std::ceil(std::log2(static_cast<double>(dim)));
-  // 2 ** log_dim
-  const int64_t dim_padded =
-      static_cast<int64_t>(1ull << static_cast<uint64_t>(log_dim));
-  // Pad the last dimension with zeros on the right to reach dim_padded if
-  // necessary
-  if (dim != dim_padded) {
-    // Padding order: [pad_left_dim, pad_right_dim, ...], applied from last
-    // dimension backwards
-    x2d = torch::nn::functional::pad(
-        x2d,
-        torch::nn::functional::PadFuncOptions({0, dim_padded - dim})
-            .mode(torch::kConstant)
-            .value(0));
-  }
-  // Linear transformation: F.linear(input, weight) with no bias
-  // weight should have shape [out_features, in_features]; so out = x2d @
-  // h_matrix.T
-  torch::Tensor out = torch::nn::functional::linear(x2d, h_matrix);
-
-  // Truncate result to original dim (last dimension)
-  using torch::indexing::Slice;
-  out = out.index({Slice(), Slice(0, dim)});
-  // Restore original shape
-  return out.reshape(x_shape);
-}
-}  // namespace
+#include "util/linalg.h"
 
 namespace xllm {
 namespace layer {
@@ -162,8 +84,10 @@ IndexerImpl::IndexerImpl(int64_t dim,
   // Construct the Hadamard matrix on CPU with float32, then cast to target
   // dtype and device set normalize=true is equivalent to scale=hidden_size **
   // -0.5
-  hadamard_matrix_ = create_hadamard_matrix(
-      head_dim_padded, torch::kFloat32, torch::kCPU, true);
+  hadamard_matrix_ = util::create_hadamard_matrix(head_dim_padded,
+                                                  torch::kFloat32,
+                                                  torch::Device(torch::kCPU),
+                                                  /*normalize=*/true);
   hadamard_matrix_ =
       hadamard_matrix_.to(options.device(), options.dtype().toScalarType());
 
@@ -178,7 +102,7 @@ torch::Tensor IndexerImpl::rotate_activation(
   // Ensure the input is bfloat16 as per interface contract
   CHECK(input.dtype() == torch::kBFloat16)
       << "rotate_activation: input must be bfloat16";
-  return hadamard_transform_ref(input, hadamard_matrix);
+  return util::rotate_activation(input, hadamard_matrix);
 }
 
 IndexerRuntimeContext IndexerImpl::prepare_runtime_context(
@@ -538,7 +462,8 @@ std::tuple<torch::Tensor, torch::Tensor> IndexerImpl::run_indexer_select_kernel(
   params.q_scale = std::nullopt;        // empty tensor as q_scale
   params.k_scale_cache = std::nullopt;  // empty tensor as k_scale_cache
   params.index_topk = index_topk_;
-  params.kv_cache_block_size = FLAGS_block_size;
+  params.kv_cache_block_size =
+      ::xllm::KVCacheConfig::get_instance().block_size();
   params.sparse_block_table = ctx.new_block_tables;
   params.sparse_context_lens = ctx.new_context_lens;
 
@@ -615,7 +540,8 @@ IndexerImpl::run_indexer_select_kernel_sp_segmented(
     params.q_scale = std::nullopt;
     params.k_scale_cache = std::nullopt;
     params.index_topk = index_topk_;
-    params.kv_cache_block_size = FLAGS_block_size;
+    params.kv_cache_block_size =
+        ::xllm::KVCacheConfig::get_instance().block_size();
     params.sparse_block_table = out_block_seg;
     params.sparse_context_lens = out_ctx_seg;
     xllm::kernel::masked_indexer_select_paged_kv(params);

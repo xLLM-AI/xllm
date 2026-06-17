@@ -6,6 +6,7 @@ cc_test(
   SRCS
     rate_limiter_test.cpp
   DEPS
+    :config
     common
     absl::synchronization
     absl::time

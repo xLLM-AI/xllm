@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "core/common/global_flags.h"
+#include "core/framework/config/execution_config.h"
 #include "cuda_ops_api.h"
 #include "global_capture_instance.h"
 
@@ -115,7 +116,9 @@ void batch_prefill_with_optional_piecewise_capture(
     torch::Tensor output,
     std::optional<torch::Tensor>& output_lse) {
   // This function is only called for prefill, so is_prefill is always true
-  if (FLAGS_enable_graph && FLAGS_enable_prefill_piecewise_graph &&
+  if (::xllm::ExecutionConfig::get_instance().enable_graph() &&
+      ::xllm::ExecutionConfig::get_instance()
+          .enable_prefill_piecewise_graph() &&
       ::xllm::runtime::cuda::GlobalCaptureInstance::get_instance()
           .is_capturing()) {
     // Create temporary runner

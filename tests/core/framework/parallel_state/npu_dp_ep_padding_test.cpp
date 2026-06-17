@@ -18,7 +18,6 @@ limitations under the License.
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
-#include "common/global_flags.h"
 #include "framework/parallel_state/mapping_npu.h"
 
 namespace xllm {

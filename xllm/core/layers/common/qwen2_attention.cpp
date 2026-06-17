@@ -19,7 +19,7 @@ limitations under the License.
 
 #include <tuple>
 
-#if defined(USE_CUDA)
+#if defined(USE_CUDA) || defined(USE_DCU)
 #include "kernels/cuda/cuda_ops_api.h"
 #endif
 namespace {
@@ -29,7 +29,7 @@ inline bool is_qwen3_model(const std::string& model_type) {
   return qwen3_type_set.contains(model_type);
 }
 
-#if defined(USE_CUDA)
+#if defined(USE_CUDA) || defined(USE_DCU)
 inline bool supports_fused_qk_norm_rope_head_dim(int64_t head_dim) {
   return head_dim == 64 || head_dim == 128 || head_dim == 256;
 }
@@ -68,7 +68,7 @@ Qwen2AttentionImpl::Qwen2AttentionImpl(const ModelContext& context) {
   q_size_ = num_heads_ * head_dim_;
   kv_size_ = num_kv_heads_ * head_dim_;
   scaling_ = std::sqrt(1.0f / head_dim_);
-#if defined(USE_CUDA)
+#if defined(USE_CUDA) || defined(USE_DCU)
   // Fused QKNorm+RoPE currently only supports:
   // 1) non-MRoPE models (positions must be 1D),
   // 2) head_dim in {64, 128, 256}.
@@ -144,7 +144,7 @@ torch::Tensor Qwen2AttentionImpl::forward(
   const int64_t T = q.size(0);
   bool fused_qk_norm_rope_applied = false;
 
-#if defined(USE_CUDA)
+#if defined(USE_CUDA) || defined(USE_DCU)
   // Runtime guard: fused QKNorm+RoPE only accepts 1D position_ids.
   // MRoPE provides 2D positions, so it must fall back to the unfused path.
   if (can_use_fused_qk_norm_rope_ && positions.dim() == 1) {

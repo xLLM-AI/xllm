@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <vector>
 
@@ -32,11 +33,14 @@ class KVCacheState {
   void incr_kv_cache_tokens_num(size_t num);
   // get the number of shared blocks.
   size_t shared_kv_blocks_num() const;
+  size_t shared_kv_tokens_num() const;
 
   void add_kv_blocks(const std::vector<Block>& new_blocks);
   void add_shared_kv_blocks(std::vector<Block>&& blocks,
                             size_t current_total_num_tokens);
   void incr_shared_kv_blocks_num(size_t num);
+  void set_slice_window_size(uint32_t size);
+  void update_slice_window_pos();
 
   size_t current_max_tokens_capacity() const;
 
@@ -58,8 +62,28 @@ class KVCacheState {
   size_t num_kv_blocks() const;
   std::vector<int32_t> kv_cache_slots(int32_t pos_start, int32_t pos_end);
 
+  // composite block managers: blocks per sub-manager index (for
+  // CompositeBlockManager)
+  const std::vector<std::vector<Block>>& composite_blocks() const {
+    return composite_blocks_;
+  }
+  std::vector<std::vector<Block>>* mutable_composite_blocks() {
+    return &composite_blocks_;
+  }
+
   void set_transfer_kv_info(TransferKVInfo&& info);
   std::optional<TransferKVInfo>& transfer_kv_info();
+
+  uint32_t pushed_local_block_count() const {
+    return pushed_local_block_count_;
+  }
+  void set_pushed_local_block_count(uint32_t n) {
+    pushed_local_block_count_ = n;
+  }
+
+  size_t next_transfer_block_idx() const;
+  void set_next_transfer_block_idx(size_t idx);
+  void advance_transfer_block_idx(size_t idx);
 
   void reset();
 
@@ -81,8 +105,26 @@ class KVCacheState {
   // transfer kv info for disaggregated PD mode.
   std::optional<TransferKVInfo> transfer_kv_info_;
 
+  // next logical prompt block index that needs PD PUSH transfer.
+  size_t next_transfer_block_idx_ = 0;
+
   // shared blocks number of the sequence.
   uint32_t num_owned_shared_blocks_ = 0;
+
+  // blocks allocated per composite sub-manager index (used when BlockManager is
+  // CompositeBlockManager). DeepSeek V4 leans on this so each per-manager
+  // block table can be assembled independently of the legacy `blocks_` slot.
+  std::vector<std::vector<Block>> composite_blocks_;
+
+  // Sliding-window bookkeeping (DSA SWA: keeps the physical block order
+  // stable so DSA metadata's modulo-based logical->physical mapping holds).
+  uint32_t slice_window_pos_ = 0;
+  uint32_t slice_window_size_ = 0;
+  uint32_t slice_window_buffer_ = 0;
+
+  // Number of local KV blocks already pushed to the decode instance.
+  // Used for incremental push in chunked prefill + PD disagg mode.
+  uint32_t pushed_local_block_count_ = 0;
 };
 
 }  // namespace xllm

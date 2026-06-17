@@ -73,6 +73,14 @@ class KernelFamilyManifest:
             encoding="utf-8",
         )
 
+    def write_if_changed(self, path: str | Path) -> None:
+        output = Path(path)
+        content = json.dumps(self.to_json_dict(), indent=2, sort_keys=True) + "\n"
+        if output.is_file() and output.read_text(encoding="utf-8") == content:
+            return
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(content, encoding="utf-8")
+
     @classmethod
     def read(cls, path: str | Path) -> "KernelFamilyManifest":
         data = json.loads(Path(path).read_text(encoding="utf-8"))

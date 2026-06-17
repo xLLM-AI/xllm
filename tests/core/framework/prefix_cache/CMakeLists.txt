@@ -6,7 +6,7 @@ cc_test(
   SRCS
     prefix_cache_test.cpp
   DEPS
-    :flags
+    :config
     :kv_cache
     :prefix_cache
     :block

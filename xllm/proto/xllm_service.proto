@@ -10,6 +10,8 @@ import "sample.proto";
 import "chat.proto";
 import "embedding.proto";
 import "image_generation.proto";
+import "audio_generation.proto";
+import "video_generation.proto";
 import "rerank.proto";
 import "models.proto";
 import "anthropic.proto";
@@ -44,9 +46,30 @@ message MasterWeightSegmentList {
   repeated MasterWeightSegment segments = 1;
 }
 
-message D2DLinkRequest {
+message P2PLinkRequest {
   string model_id = 1;
-  repeated string device_ips = 2;
+  repeated string remote_addrs = 2;
+}
+
+// Async RL training support: pause/resume
+message PauseRequest {
+  // How to handle in-flight requests: "keep" (default), "abort", or "wait".
+  //  - keep:  preempt running requests, free KV cache, re-prefill on resume.
+  //  - abort: cancel running requests; clients must retry.
+  //  - wait:  let running requests finish naturally, then pause.
+  string mode = 1;
+}
+
+message PauseResponse {
+  string status = 1;  // "paused" or "error: ..."
+}
+
+message ResumeRequest {
+  // Empty for now - simple resume semantics
+}
+
+message ResumeResponse {
+  string status = 1;  // "running" or "error: ..."
 }
 
 service XllmAPIService {
@@ -64,6 +87,12 @@ service XllmAPIService {
 
   rpc ImageGeneration(ImageGenerationRequest) returns (ImageGenerationResponse);
   rpc ImageGenerationHttp(HttpRequest) returns (HttpResponse);
+
+  rpc AudioGeneration(AudioGenerationRequest) returns (AudioGenerationResponse);
+  rpc AudioGenerationHttp(HttpRequest) returns (HttpResponse);
+  
+  rpc VideoGeneration(VideoGenerationRequest) returns (VideoGenerationResponse);
+  rpc VideoGenerationHttp(HttpRequest) returns (HttpResponse);
 
   rpc Rerank (RerankRequest) returns (RerankResponse);
   rpc RerankHttp (HttpRequest) returns (HttpResponse);
@@ -84,9 +113,18 @@ service XllmAPIService {
   rpc Wakeup (MasterInfos) returns (Status);
   rpc WakeupHttp (HttpRequest) returns (HttpResponse);
 
-  rpc LinkD2D (D2DLinkRequest) returns (Status);
-  rpc LinkD2DHttp (HttpRequest) returns (HttpResponse);
+  rpc StartProfileHttp (HttpRequest) returns (HttpResponse);
+  rpc StopProfileHttp (HttpRequest) returns (HttpResponse);
 
-  rpc UnlinkD2D (D2DLinkRequest) returns (Status);
-  rpc UnlinkD2DHttp (HttpRequest) returns (HttpResponse);
+  rpc LinkP2P (P2PLinkRequest) returns (Status);
+  rpc LinkP2PHttp (HttpRequest) returns (HttpResponse);
+
+  rpc UnlinkP2P (P2PLinkRequest) returns (Status);
+  rpc UnlinkP2PHttp (HttpRequest) returns (HttpResponse);
+
+  // Async RL training support: pause/resume
+  rpc Pause (PauseRequest) returns (PauseResponse);
+  rpc PauseHttp (HttpRequest) returns (HttpResponse);
+  rpc Resume (ResumeRequest) returns (ResumeResponse);
+  rpc ResumeHttp (HttpRequest) returns (HttpResponse);
 }; 

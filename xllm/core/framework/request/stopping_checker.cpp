@@ -68,12 +68,8 @@ FinishReason StoppingChecker::check(const Slice<int32_t>& token_ids,
     return FinishReason::LENGTH;
   }
 
-  if (ignore_eos_) {
-    return FinishReason::NONE;
-  }
-
   // check eos token
-  if (last_token_id == eos_token_) {
+  if (!ignore_eos_ && last_token_id == eos_token_) {
     return FinishReason::STOP;
   }
 

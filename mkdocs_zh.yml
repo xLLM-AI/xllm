@@ -7,6 +7,8 @@ repo_url: https://github.com/jd-opensource/xllm
 
 edit_uri: edit/main/docs/zh
 use_directory_urls: true
+exclude_docs: |
+  project/*
 # Copyright
 copyright: Copyright &copy; 2025 xLLM Team
 # docs_dir: docs/zh
@@ -82,6 +84,7 @@ plugins:
   # - blog
   # - static-i18n
   - git-revision-date-localized:
+      fallback_to_build_date: true
       exclude:
         - argparse/*
         - examples/*
@@ -179,6 +182,7 @@ markdown_extensions:
   - mdx_math:
       enable_dollar_delimiter: true
 extra_javascript:
+  - mkdocs/javascripts/redirect_readthedocs.js
   - mkdocs/javascripts/mathjax.js
   - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
 
@@ -220,6 +224,8 @@ nav:
       - MoE优化:
         - features/moe_params.md
         - features/eplb.md
+      - 性能采集:
+        - features/online_profiling.md
       - 进阶指南:
         - 投机推理: features/mtp.md
         - GraphMode: features/graph_mode.md

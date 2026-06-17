@@ -24,6 +24,8 @@ limitations under the License.
 #include <algorithm>
 #include <unordered_map>
 
+#include "core/framework/config/distributed_config.h"
+#include "core/framework/config/service_config.h"
 #include "util/env_var.h"
 #include "util/hash_util.h"
 #include "util/net.h"
@@ -90,7 +92,8 @@ bool XServiceClient::init(const std::string& etcd_addr,
     incarnation_id_ = uuid.random();
   }
   chan_options_.max_retry = 3;
-  chan_options_.timeout_ms = FLAGS_rpc_channel_timeout_ms;
+  chan_options_.timeout_ms =
+      ::xllm::ServiceConfig::get_instance().rpc_channel_timeout_ms();
 
   const std::string etcd_username =
       util::get_optional_string_env(kEtcdUsernameEnvVar).value_or("");
@@ -188,7 +191,8 @@ std::string XServiceClient::get_instance_name() { return instance_name_; }
 bool XServiceClient::register_instance_with_retry(const std::string& key,
                                                   const std::string& value) {
   int retry_cnt = 0;
-  while (!etcd_client_->register_instance(key, value, FLAGS_etcd_ttl)) {
+  while (!etcd_client_->register_instance(
+      key, value, ::xllm::DistributedConfig::get_instance().etcd_ttl())) {
     if (retry_cnt >= 30) {
       LOG(ERROR) << "Register instance failed! key: " << key;
       return false;
@@ -228,8 +232,9 @@ bool XServiceClient::reconcile_registration() {
 
 void XServiceClient::reconcile_registration_loop() {
   while (!exited_.load()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(
-        static_cast<int64_t>(FLAGS_heart_beat_interval * 1000)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int64_t>(
+        ::xllm::DistributedConfig::get_instance().heart_beat_interval() *
+        1000)));
     if (!register_done_.load()) continue;
 
     if (!reconcile_registration()) {
@@ -323,15 +328,9 @@ InstanceInfo XServiceClient::get_instance_info(
   for (auto& addr : resp.addrs()) {
     result.addrs.emplace_back(addr);
   }
-  for (auto& k_cache_id : resp.k_cache_ids()) {
-    result.k_cache_ids.emplace_back(k_cache_id);
-  }
-  for (auto& v_cache_id : resp.v_cache_ids()) {
-    result.v_cache_ids.emplace_back(v_cache_id);
-  }
   result.dp_size = resp.dp_size();
-  for (auto& ip : resp.device_ips()) {
-    result.device_ips.emplace_back(ip);
+  if (resp.kv_split_size() > 0) {
+    result.kv_split_size = resp.kv_split_size();
   }
   for (auto& port : resp.ports()) {
     result.ports.emplace_back(port);
@@ -344,8 +343,9 @@ void XServiceClient::heartbeat() {
   KvCacheEvent event;
   while (!exited_.load()) {
     event.clear();
-    std::this_thread::sleep_for(std::chrono::milliseconds(
-        static_cast<int64_t>(FLAGS_heart_beat_interval * 1000)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int64_t>(
+        ::xllm::DistributedConfig::get_instance().heart_beat_interval() *
+        1000)));
     if (!register_done_.load()) continue;
 
     if (block_manager_pool_ == nullptr || scheduler_ == nullptr) continue;
@@ -550,6 +550,8 @@ std::vector<bool> XServiceClient::generations(
       proto_usage->set_num_generated_tokens(
           output.usage.value().num_generated_tokens);
       proto_usage->set_num_total_tokens(output.usage.value().num_total_tokens);
+      proto_usage->set_num_cached_tokens(
+          output.usage.value().num_cached_tokens);
     }
     req->mutable_outputs()->Reserve(output.outputs.size());
     for (auto& seq_output : output.outputs) {

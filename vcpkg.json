@@ -72,6 +72,11 @@
       "version>=": "1.1.10"
     },
     {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": ["avcodec", "avformat", "swscale", "swresample", "x264"]
+    },
+    {
       "name": "opencv4",
       "version>=": "4.7.0",
       "default-features": false,

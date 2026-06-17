@@ -1,4 +1,4 @@
-/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <boost/algorithm/string.hpp>
 #include <vector>
 
@@ -26,6 +27,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "common/types.h"
 #include "core/distributed_runtime/comm_channel.h"
+#include "core/framework/config/eplb_config.h"
 #include "core/runtime/params_utils.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/request/sequence.h"
@@ -35,6 +37,99 @@ limitations under the License.
 #include "util/timer.h"
 
 namespace xllm {
+namespace {
+
+int32_t get_num_decode_seqs_for_schedule_overlap(const ForwardInput& input) {
+  if (input.sampling_params.sample_idxes.defined()) {
+    return static_cast<int32_t>(input.sampling_params.sample_idxes.size(0));
+  }
+
+  if (!input.input_host_buffer_has_layout) {
+    return 0;
+  }
+
+  ForwardInput unpacked_input;
+  const bool unpacked = detail::unpack_from_input_host_buffer(
+      input, torch::Device(torch::kCPU), unpacked_input);
+  if (!unpacked || !unpacked_input.sampling_params.sample_idxes.defined()) {
+    return 0;
+  }
+  return static_cast<int32_t>(
+      unpacked_input.sampling_params.sample_idxes.size(0));
+}
+
+template <typename T>
+int64_t count_negative_tokens(const torch::Tensor& tokens) {
+  const T* data = tokens.const_data_ptr<T>();
+  const int64_t numel = tokens.numel();
+  int64_t count = 0;
+  for (int64_t i = 0; i < numel; ++i) {
+    if (data[i] < static_cast<T>(0)) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+void record_speculative_metrics_from_output(const torch::Tensor& next_tokens,
+                                            const runtime::Options& options) {
+  if (!options.enable_speculative_decode() || !next_tokens.defined() ||
+      next_tokens.dim() != 2 || next_tokens.numel() == 0) {
+    return;
+  }
+
+  const int64_t batch_size = next_tokens.size(0);
+  const int64_t token_width = next_tokens.size(1);
+  const int64_t num_speculative_tokens = options.num_speculative_tokens();
+  if (num_speculative_tokens <= 0 ||
+      token_width != num_speculative_tokens + 1) {
+    return;
+  }
+
+  torch::Tensor tokens = next_tokens.contiguous();
+  int64_t rejected_count = 0;
+  switch (tokens.scalar_type()) {
+    case torch::kInt64:
+      rejected_count = count_negative_tokens<int64_t>(tokens);
+      break;
+    case torch::kInt32:
+      rejected_count = count_negative_tokens<int32_t>(tokens);
+      break;
+    case torch::kInt16:
+      rejected_count = count_negative_tokens<int16_t>(tokens);
+      break;
+    case torch::kInt8:
+      rejected_count = count_negative_tokens<int8_t>(tokens);
+      break;
+    default:
+      LOG(WARNING) << "Unsupported speculative next_tokens dtype for metrics: "
+                   << tokens.scalar_type();
+      return;
+  }
+
+  const int64_t num_draft_tokens = batch_size * num_speculative_tokens;
+  rejected_count = std::min(rejected_count, num_draft_tokens);
+  COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
+  COUNTER_ADD(speculative_num_accepted_tokens_total,
+              num_draft_tokens - rejected_count);
+}
+
+torch::Tensor clone_cpu_tensor_view(const torch::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return tensor;
+  }
+  CHECK(tensor.device().is_cpu()) << "expected a CPU tensor view";
+  return tensor.contiguous().clone();
+}
+
+void stabilize_schedule_overlap_host_views(ForwardInput& input) {
+  input.token_ids_host = clone_cpu_tensor_view(input.token_ids_host);
+  input.positions_host = clone_cpu_tensor_view(input.positions_host);
+  input.input_params.attention.host.block_tables =
+      clone_cpu_tensor_view(input.input_params.attention.host.block_tables);
+}
+
+}  // namespace
 
 WorkerService::WorkerService(runtime::Options options,
                              const torch::Device& device)
@@ -43,7 +138,10 @@ WorkerService::WorkerService(runtime::Options options,
   device_.init_device_context();
   stream_ = device_.get_stream_from_pool();
   threadpool_ = std::make_unique<ThreadPool>(
-      4, [this]() mutable { device_.set_device(); });
+      /*num_threads=*/4,
+      /*init_func=*/[this]() mutable { device_.set_device(); },
+      /*cpu_binding=*/false,
+      /*pool_name=*/"WorkerService.request");
 }
 
 WorkerService::WorkerService(runtime::Options options,
@@ -57,7 +155,10 @@ WorkerService::WorkerService(runtime::Options options,
   device_.init_device_context();
   stream_ = device_.get_stream_from_pool();
   threadpool_ = std::make_unique<ThreadPool>(
-      4, [this]() mutable { device_.set_device(); });
+      /*num_threads=*/4,
+      /*init_func=*/[this]() mutable { device_.set_device(); },
+      /*cpu_binding=*/false,
+      /*pool_name=*/"WorkerService.request");
 }
 
 WorkerService::~WorkerService() = default;
@@ -82,6 +183,9 @@ void WorkerService::step(ForwardInput& fwd_input,
                          torch::Tensor& out_logprobs) {
   const bool use_default_stream =
       !options_.enable_schedule_overlap() && options_.backend() == "llm";
+  if (options_.enable_schedule_overlap()) {
+    stabilize_schedule_overlap_host_views(fwd_input);
+  }
   // execute model
   auto future = worker_->step_async(fwd_input);
   if (!options_.enable_schedule_overlap()) {
@@ -94,8 +198,9 @@ void WorkerService::step(ForwardInput& fwd_input,
           forward_outputs.value().beam_search_output;
       const auto& dit_forward_output =
           forward_outputs.value().dit_forward_output;
-      expert_load_data =
-          safe_to(forward_outputs.value().expert_load_data, torch::kCPU, true);
+      expert_load_data = safe_to(forward_outputs.value().expert_load_data,
+                                 torch::kCPU,
+                                 /*non_blocking=*/true);
       prepared_layer_id = forward_outputs.value().prepared_layer_id;
 
       {
@@ -105,52 +210,62 @@ void WorkerService::step(ForwardInput& fwd_input,
           embeddings =
               safe_to(sample_output.embeddings,
                       torch::dtype(torch::kFloat32).device(torch::kCPU),
-                      true);
+                      /*non_blocking=*/true);
 
           mm_embeddings.clear();
           mm_embeddings.reserve(sample_output.mm_embeddings.size());
           for (auto mm_embedding : sample_output.mm_embeddings) {
             mm_embeddings.emplace_back(
-                safe_to(mm_embedding, torch::kCPU, true));
+                safe_to(mm_embedding, torch::kCPU, /*non_blocking=*/true));
           }
 
           dit_images.clear();
           dit_images.reserve(dit_forward_output.tensors.size());
           for (auto dit_image : dit_forward_output.tensors) {
-            dit_images.emplace_back(safe_to(dit_image, torch::kCPU, true));
+            dit_images.emplace_back(
+                safe_to(dit_image, torch::kCPU, /*non_blocking=*/true));
           }
 
           // [num_seq]
-          next_tokens = safe_to(sample_output.next_tokens, torch::kCPU, true);
+          next_tokens = safe_to(sample_output.next_tokens,
+                                torch::kCPU,
+                                /*non_blocking=*/true);
           if (next_tokens.defined()) {
             // [num_seq]
-            logprobs = safe_to(sample_output.logprobs, torch::kCPU, true);
+            logprobs = safe_to(sample_output.logprobs,
+                               torch::kCPU,
+                               /*non_blocking=*/true);
 
             if (!beam_search_output.src_seq_idxes.defined()) {
               // beam search kernel will provide final tokens/logprobs in beam
               // search output, so keep top_tokens/top_logprobs undefined to
               // avoid returning them.
               // [num_seq, topk]
-              top_tokens = safe_to(sample_output.top_tokens, torch::kCPU, true);
+              top_tokens = safe_to(sample_output.top_tokens,
+                                   torch::kCPU,
+                                   /*non_blocking=*/true);
               // [num_seq, topk]
-              top_logprobs =
-                  safe_to(sample_output.top_logprobs, torch::kCPU, true);
+              top_logprobs = safe_to(sample_output.top_logprobs,
+                                     torch::kCPU,
+                                     /*non_blocking=*/true);
             }
           }
 
           // beam search output
           // [num_seq]
-          src_seq_idxes =
-              safe_to(beam_search_output.src_seq_idxes, torch::kCPU, true);
+          src_seq_idxes = safe_to(beam_search_output.src_seq_idxes,
+                                  torch::kCPU,
+                                  /*non_blocking=*/true);
           if (src_seq_idxes.defined()) {
             // [num_seq]
-            out_tokens =
-                safe_to(beam_search_output.out_tokens, torch::kCPU, true);
+            out_tokens = safe_to(beam_search_output.out_tokens,
+                                 torch::kCPU,
+                                 /*non_blocking=*/true);
             // [num_seq]
             out_logprobs =
                 safe_to(beam_search_output.out_logprobs,
                         torch::dtype(torch::kFloat32).device(torch::kCPU),
-                        true);
+                        /*non_blocking=*/true);
           }
         };
         if (use_default_stream) {
@@ -164,13 +279,15 @@ void WorkerService::step(ForwardInput& fwd_input,
         } else {
           stream_->synchronize();
         }
+        record_speculative_metrics_from_output(next_tokens, options_);
       }
     }
   } else {
     auto int_options = torch::TensorOptions().device(torch::kCPU);
     if (worker_->is_driver()) {
       // construct fake output tensor
-      int32_t num_decode_seqs = fwd_input.sampling_params.sample_idxes.size(0);
+      int32_t num_decode_seqs =
+          get_num_decode_seqs_for_schedule_overlap(fwd_input);
       next_tokens = torch::arange(
           -1, -1 * (num_decode_seqs + 1), -1, int_options.dtype(torch::kInt32));
       std::move(future).deferValue([](auto&&) {});
@@ -190,7 +307,7 @@ void WorkerService::create_polling_shm_thread(
         Timer timer;
         while (true) {
           ForwardInput fwd_input;
-          input_shm_manager->raw_input_read(fwd_input, device_);
+          input_shm_manager->input_read(fwd_input, device_);
           timer.reset();
           // model output variables
           torch::Tensor next_tokens;
@@ -347,13 +464,11 @@ void WorkerService::GetCacheInfo(::google::protobuf::RpcController* controller,
     brpc::ClosureGuard done_guard(done);
     uint64_t cluster_id;
     std::string addr;
-    int64_t k_cache_id;
-    int64_t v_cache_id;
-    worker_->get_cache_info(cluster_id, addr, k_cache_id, v_cache_id);
+    uint16_t listen_port;
+    worker_->get_cache_info(cluster_id, addr, listen_port);
     resp->set_cluster_id(cluster_id);
     resp->set_addr(addr);
-    resp->set_k_cache_id(k_cache_id);
-    resp->set_v_cache_id(v_cache_id);
+    resp->set_listen_port(listen_port);
   });
   return;
 }
@@ -366,18 +481,20 @@ void WorkerService::PullKVCache(::google::protobuf::RpcController* controller,
     brpc::ClosureGuard done_guard(done);
     uint64_t src_cluster_id = req->cluster_id();
     std::string addr = req->addr();
-    int64_t src_k_cache_id = req->k_cache_id();
-    int64_t src_v_cache_id = req->v_cache_id();
     std::vector<uint64_t> src_blocks(req->src_blocks().begin(),
                                      req->src_blocks().end());
     std::vector<uint64_t> dst_blocks(req->dst_blocks().begin(),
                                      req->dst_blocks().end());
+    std::vector<uint64_t> src_linear_state_ids(
+        req->src_linear_state_ids().begin(), req->src_linear_state_ids().end());
+    std::vector<uint64_t> dst_linear_state_ids(
+        req->dst_linear_state_ids().begin(), req->dst_linear_state_ids().end());
     auto future = worker_->pull_kv_blocks_async(src_cluster_id,
                                                 addr,
-                                                src_k_cache_id,
-                                                src_v_cache_id,
                                                 src_blocks,
-                                                dst_blocks);
+                                                dst_blocks,
+                                                src_linear_state_ids,
+                                                dst_linear_state_ids);
     bool status = std::move(future).get();
     resp->set_ok(status);
   });
@@ -408,7 +525,7 @@ void WorkerService::PrefetchFromStorage(
 
   brpc::StreamId stream_id;
   brpc::StreamOptions stream_options;
-  stream_options.idle_timeout_ms = 5 * options_.prefetch_bacth_size();
+  stream_options.idle_timeout_ms = 5 * options_.prefetch_batch_size();
   if (brpc::StreamAccept(&stream_id, *cntl, &stream_options) != 0) {
     resp->set_ok(false);
     LOG(ERROR) << "Failed to accept stream!";
@@ -426,16 +543,16 @@ void WorkerService::PrefetchFromStorage(
     bool is_completed = false;
 
     for (size_t i = 0; i < transfer_slice.size();
-         i += options_.prefetch_bacth_size()) {
+         i += options_.prefetch_batch_size()) {
       auto current_slice = transfer_slice.slice(
           i,
-          std::min(i + options_.prefetch_bacth_size(), transfer_slice.size()));
+          std::min(i + options_.prefetch_batch_size(), transfer_slice.size()));
 
       auto success_cnt =
           worker_->transfer_kv_blocks(UNINITIALIZED_BATCH_ID, current_slice);
 
       if (success_cnt != current_slice.size() ||
-          (i + options_.prefetch_bacth_size()) >= transfer_slice.size()) {
+          (i + options_.prefetch_batch_size()) >= transfer_slice.size()) {
         is_completed = true;
       }
 
@@ -464,21 +581,6 @@ void WorkerService::PrefetchFromStorage(
   return;
 }
 
-void WorkerService::GetDeviceInfo(::google::protobuf::RpcController* controller,
-                                  const proto::Empty* req,
-                                  proto::DeviceInfo* resp,
-                                  ::google::protobuf::Closure* done) {
-  threadpool_->schedule([this, controller, req, resp, done]() mutable {
-    brpc::ClosureGuard done_guard(done);
-    std::string device_ip;
-    uint16_t listen_port;
-    worker_->get_device_info(device_ip, listen_port);
-    resp->set_device_ip(device_ip);
-    resp->set_listen_port(listen_port);
-  });
-  return;
-}
-
 void WorkerService::LinkCluster(::google::protobuf::RpcController* controller,
                                 const proto::ClusterInfo* req,
                                 proto::Status* resp,
@@ -488,11 +590,9 @@ void WorkerService::LinkCluster(::google::protobuf::RpcController* controller,
     std::vector<uint64_t> cluster_ids(req->cluster_ids().begin(),
                                       req->cluster_ids().end());
     std::vector<std::string> addrs(req->addrs().begin(), req->addrs().end());
-    std::vector<std::string> device_ips(req->device_ips().begin(),
-                                        req->device_ips().end());
     std::vector<uint16_t> ports(req->ports().begin(), req->ports().end());
 
-    bool status = worker_->link_cluster(cluster_ids, addrs, device_ips, ports);
+    bool status = worker_->link_cluster(cluster_ids, addrs, ports);
     resp->set_ok(status);
   });
   return;
@@ -507,36 +607,33 @@ void WorkerService::UnlinkCluster(::google::protobuf::RpcController* controller,
     std::vector<uint64_t> cluster_ids(req->cluster_ids().begin(),
                                       req->cluster_ids().end());
     std::vector<std::string> addrs(req->addrs().begin(), req->addrs().end());
-    std::vector<std::string> device_ips(req->device_ips().begin(),
-                                        req->device_ips().end());
     std::vector<uint16_t> ports(req->ports().begin(), req->ports().end());
 
-    bool status =
-        worker_->unlink_cluster(cluster_ids, addrs, device_ips, ports);
+    bool status = worker_->unlink_cluster(cluster_ids, addrs, ports);
     resp->set_ok(status);
   });
   return;
 }
 
-void WorkerService::LinkD2D(::google::protobuf::RpcController* controller,
-                            const proto::D2DLinkWorkerRequest* req,
+void WorkerService::LinkP2P(::google::protobuf::RpcController* controller,
+                            const proto::P2PLinkWorkerRequest* req,
                             proto::Status* resp,
                             ::google::protobuf::Closure* done) {
   threadpool_->schedule([this, controller, req, resp, done]() mutable {
     brpc::ClosureGuard done_guard(done);
-    bool status = worker_->link_d2d(req->remote_addr());
+    bool status = worker_->link_p2p(req->remote_addr());
     resp->set_ok(status);
   });
   return;
 }
 
-void WorkerService::UnlinkD2D(::google::protobuf::RpcController* controller,
-                              const proto::D2DLinkWorkerRequest* req,
+void WorkerService::UnlinkP2P(::google::protobuf::RpcController* controller,
+                              const proto::P2PLinkWorkerRequest* req,
                               proto::Status* resp,
                               ::google::protobuf::Closure* done) {
   threadpool_->schedule([this, controller, req, resp, done]() mutable {
     brpc::ClosureGuard done_guard(done);
-    bool status = worker_->unlink_d2d(req->remote_addr());
+    bool status = worker_->unlink_p2p(req->remote_addr());
     resp->set_ok(status);
   });
   return;
@@ -581,6 +678,32 @@ void WorkerService::Wakeup(::google::protobuf::RpcController* controller,
   return;
 }
 
+void WorkerService::StartProfile(::google::protobuf::RpcController* controller,
+                                 const proto::Empty* req,
+                                 proto::Status* resp,
+                                 ::google::protobuf::Closure* done) {
+  threadpool_->schedule([this, controller, req, resp, done]() mutable {
+    brpc::ClosureGuard done_guard(done);
+    bool status = worker_->start_profile();
+    resp->set_ok(status);
+  });
+
+  return;
+}
+
+void WorkerService::StopProfile(::google::protobuf::RpcController* controller,
+                                const proto::Empty* req,
+                                proto::Status* resp,
+                                ::google::protobuf::Closure* done) {
+  threadpool_->schedule([this, controller, req, resp, done]() mutable {
+    brpc::ClosureGuard done_guard(done);
+    bool status = worker_->stop_profile();
+    resp->set_ok(status);
+  });
+
+  return;
+}
+
 void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
                                  const proto::ForwardInput* pb_forward_input,
                                  proto::ForwardOutput* pb_forward_output,
@@ -592,8 +715,12 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
 
         Timer timer;
         ForwardInput forward_input;
-        proto_to_forward_input(
-            pb_forward_input, forward_input, options_.num_decoding_tokens());
+        CHECK(pb_forward_input->has_packed_input())
+            << "ForwardInput must be sent via packed_input";
+        packed_proto_to_forward_input(pb_forward_input->packed_input(),
+                                      forward_input,
+                                      device_,
+                                      stream_.get());
 
         // model output
         torch::Tensor next_tokens;
@@ -654,12 +781,11 @@ void WorkerService::GetLastStepResult(
         auto future = worker_->get_last_step_result_async();
         auto forward_outputs = std::move(future).get();
         if (forward_outputs) {
-          const auto& sample_output = forward_outputs.value().sample_output;
-          const auto& expert_load_data = safe_to(
-              forward_outputs.value().expert_load_data, torch::kCPU, true);
-          int32_t prepared_layer_id = forward_outputs.value().prepared_layer_id;
-          const auto& beam_search_output =
-              forward_outputs.value().beam_search_output;
+          const ForwardOutput& forward_output = forward_outputs.value();
+          const auto& sample_output = forward_output.sample_output;
+          int32_t prepared_layer_id = forward_output.prepared_layer_id;
+          const auto& beam_search_output = forward_output.beam_search_output;
+          torch::Tensor expert_load_data;
           torch::Tensor embeddings;
           torch::Tensor next_tokens;
           torch::Tensor logprobs;
@@ -670,38 +796,59 @@ void WorkerService::GetLastStepResult(
           torch::Tensor out_logprobs;
           std::vector<torch::Tensor> dit_images;
           auto copy_output_to_host = [&]() {
+            if (options_.enable_schedule_overlap()) {
+              CHECK(stream_->wait_event(forward_output.ready_event))
+                  << "failed to wait forward output ready event";
+            }
+            expert_load_data = safe_to(forward_output.expert_load_data,
+                                       torch::kCPU,
+                                       /*non_blocking=*/true);
+
             // [num_seq, ..., embed_dim]
-            embeddings = safe_to(sample_output.embeddings, torch::kCPU, true);
-            embeddings = safe_to(embeddings, torch::kFloat32, true);
+            embeddings = safe_to(sample_output.embeddings,
+                                 torch::kCPU,
+                                 /*non_blocking=*/true);
+            embeddings = safe_to(embeddings,
+                                 torch::kFloat32,
+                                 /*non_blocking=*/true);
 
             dit_images.reserve(
-                forward_outputs.value().dit_forward_output.tensors.size());
-            for (auto image :
-                 forward_outputs.value().dit_forward_output.tensors) {
+                forward_output.dit_forward_output.tensors.size());
+            for (auto image : forward_output.dit_forward_output.tensors) {
               dit_images.emplace_back(image);
             }
 
             // [num_seq]
-            next_tokens = safe_to(sample_output.next_tokens, torch::kCPU, true);
-            if (next_tokens.defined() || FLAGS_enable_eplb) {
+            next_tokens = safe_to(sample_output.next_tokens,
+                                  torch::kCPU,
+                                  /*non_blocking=*/true);
+            if (next_tokens.defined() ||
+                ::xllm::EPLBConfig::get_instance().enable_eplb()) {
               // [num_seq] FloatTensor
-              logprobs = safe_to(sample_output.logprobs, torch::kCPU, true);
+              logprobs = safe_to(sample_output.logprobs,
+                                 torch::kCPU,
+                                 /*non_blocking=*/true);
               // [num_seq, topk]
-              top_tokens = safe_to(sample_output.top_tokens, torch::kCPU, true);
+              top_tokens = safe_to(sample_output.top_tokens,
+                                   torch::kCPU,
+                                   /*non_blocking=*/true);
               // [num_seq, topk]
-              top_logprobs =
-                  safe_to(sample_output.top_logprobs, torch::kCPU, true);
+              top_logprobs = safe_to(sample_output.top_logprobs,
+                                     torch::kCPU,
+                                     /*non_blocking=*/true);
               // [num_seq]
-              src_seq_idxes =
-                  safe_to(beam_search_output.src_seq_idxes, torch::kCPU, true);
+              src_seq_idxes = safe_to(beam_search_output.src_seq_idxes,
+                                      torch::kCPU,
+                                      /*non_blocking=*/true);
               // [num_seq]
-              out_tokens =
-                  safe_to(beam_search_output.out_tokens, torch::kCPU, true);
+              out_tokens = safe_to(beam_search_output.out_tokens,
+                                   torch::kCPU,
+                                   /*non_blocking=*/true);
               // [num_seq]
               out_logprobs =
                   safe_to(beam_search_output.out_logprobs,
                           torch::dtype(torch::kFloat32).device(torch::kCPU),
-                          true);
+                          /*non_blocking=*/true);
             }
           };
 
@@ -716,8 +863,10 @@ void WorkerService::GetLastStepResult(
           } else {
             stream_->synchronize();
           }
+          record_speculative_metrics_from_output(next_tokens, options_);
 
-          if (next_tokens.defined() || FLAGS_enable_eplb) {
+          if (next_tokens.defined() ||
+              ::xllm::EPLBConfig::get_instance().enable_eplb()) {
             forward_output_to_proto(next_tokens,
                                     logprobs,
                                     top_tokens,

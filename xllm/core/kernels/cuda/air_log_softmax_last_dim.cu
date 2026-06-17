@@ -91,6 +91,64 @@ __global__ void log_softmax_last_dim_kernel(const scalar_t* __restrict__ input,
   }
 }
 
+#if defined(USE_DCU)
+template <typename scalar_t, int kThreads>
+__global__ void log_softmax_last_dim_large_k_kernel(
+    const scalar_t* __restrict__ input,
+    const float* __restrict__ temps,
+    bool has_temps,
+    float* __restrict__ output,
+    int32_t k,
+    int64_t stride) {
+  const int32_t row = static_cast<int32_t>(blockIdx.x);
+  const int64_t base = static_cast<int64_t>(row) * stride;
+
+  using BlockReduce = cub::BlockReduce<float, kThreads>;
+  __shared__ typename BlockReduce::TempStorage reduce_storage;
+  __shared__ float s_row_max;
+  __shared__ float s_log_denom;
+
+  float inv_temp = 1.0f;
+  if (has_temps) {
+    float t = temps[row];
+    if (t == 0.0f) {
+      t = 1.0f;
+    }
+    inv_temp = 1.0f / t;
+  }
+
+  float thread_max = -std::numeric_limits<float>::infinity();
+  float thread_sum = 0.0f;
+
+  for (int32_t col = threadIdx.x; col < k; col += blockDim.x) {
+    float val = static_cast<float>(input[base + col]) * inv_temp;
+    float old_max = thread_max;
+    thread_max = val > thread_max ? val : thread_max;
+    thread_sum =
+        thread_sum * expf(old_max - thread_max) + expf(val - thread_max);
+  }
+
+  float row_max_local =
+      BlockReduce(reduce_storage).Reduce(thread_max, MaxReduceOp());
+  if (threadIdx.x == 0) {
+    s_row_max = row_max_local;
+  }
+  __syncthreads();
+
+  float rescaled_sum = thread_sum * expf(thread_max - s_row_max);
+  float row_sum_local = BlockReduce(reduce_storage).Sum(rescaled_sum);
+  if (threadIdx.x == 0) {
+    s_log_denom = logf(row_sum_local) + s_row_max;
+  }
+  __syncthreads();
+
+  for (int32_t col = threadIdx.x; col < k; col += blockDim.x) {
+    float val = static_cast<float>(input[base + col]) * inv_temp;
+    output[base + col] = val - s_log_denom;
+  }
+}
+#endif
+
 }  // namespace
 
 torch::Tensor air_log_softmax_last_dim(const torch::Tensor& input,
@@ -156,19 +214,39 @@ torch::Tensor air_log_softmax_last_dim(const torch::Tensor& input,
   // and correctly handle multi-GPU environments.
   const int max_smem =
       at::cuda::getCurrentDeviceProperties()->sharedMemPerBlock;
-  CHECK(total_shared_bytes <= static_cast<size_t>(max_smem))
-      << "air_log_softmax_last_dim: k (" << k << ") requires "
-      << total_shared_bytes << " bytes shared memory "
-      << "(dynamic=" << shared_mem_bytes << " + static=" << kStaticSmem
-      << "), exceeding device limit (" << max_smem << " bytes)";
+  const bool use_smem_kernel =
+      total_shared_bytes <= static_cast<size_t>(max_smem);
+
+#if !defined(USE_DCU)
+  CHECK(use_smem_kernel) << "air_log_softmax_last_dim: k (" << k
+                         << ") requires " << total_shared_bytes
+                         << " bytes shared memory "
+                         << "(dynamic=" << shared_mem_bytes
+                         << " + static=" << kStaticSmem
+                         << "), exceeding device limit (" << max_smem
+                         << " bytes)";
+#endif
 
   DISPATCH_FLOATING_TYPES(in.scalar_type(), "air_log_softmax_last_dim", [&] {
     const scalar_t* in_ptr = in.data_ptr<scalar_t>();
     const float* t_ptr = has_temps ? temps.data_ptr<float>() : nullptr;
     float* out_ptr = out.data_ptr<float>();
+
+#if defined(USE_DCU)
+    if (use_smem_kernel) {
+      log_softmax_last_dim_kernel<scalar_t, kThreads>
+          <<<grid, block, shared_mem_bytes, stream>>>(
+              in_ptr, t_ptr, has_temps, out_ptr, k, stride);
+    } else {
+      log_softmax_last_dim_large_k_kernel<scalar_t, kThreads>
+          <<<grid, block, 0, stream>>>(
+              in_ptr, t_ptr, has_temps, out_ptr, k, stride);
+    }
+#else
     log_softmax_last_dim_kernel<scalar_t, kThreads>
         <<<grid, block, shared_mem_bytes, stream>>>(
             in_ptr, t_ptr, has_temps, out_ptr, k, stride);
+#endif
   });
 
   C10_CUDA_KERNEL_LAUNCH_CHECK();

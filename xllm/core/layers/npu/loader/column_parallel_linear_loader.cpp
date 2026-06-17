@@ -35,7 +35,7 @@ ColumParallelLinearLoader::ColumParallelLinearLoader(
 
 void ColumParallelLinearLoader::load_state_dict(const StateDict& state_dict) {
   const bool to_host = load_to_host();
-  if (dp_size_ > 1) {
+  if (dp_size_ > 1 || cp_size_ > 1) {
     set_weight(state_dict,
                "weight",
                0,

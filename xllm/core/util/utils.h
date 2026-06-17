@@ -19,26 +19,25 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
-#include <type_traits>
+#include <string>
+#include <string_view>
+#include <unordered_set>
 #include <vector>
 
+#include "core/common/types.h"
+#include "core/framework/config/disagg_pd_config.h"
+#include "core/framework/config/parallel_config.h"
+#include "core/util/json_reader.h"
+#include "core/util/model_config_utils.h"
+#include "models/model_registry.h"
 #include "rec.pb.h"
 #include "slice.h"
 #include "tensor.pb.h"
 #include "worker.pb.h"
-
-// -------------------
-#include <filesystem>
-#include <optional>
-#include <string>
-#include <string_view>
-#include <unordered_set>
-
-#include "core/util/json_reader.h"
-#include "models/model_registry.h"
 
 namespace xllm {
 namespace util {
@@ -120,6 +119,7 @@ inline const std::unordered_set<std::string>& mla_model_type_set() {
       "deepseek_v3_mtp",
       "deepseek_v32_mtp",
       "kimi_k2",
+      "kimi_k25",
       "glm4_moe_lite",
       "glm_moe_dsa",  // glm5 model type
       "glm_moe_dsa_mtp",
@@ -129,6 +129,38 @@ inline const std::unordered_set<std::string>& mla_model_type_set() {
 
 inline bool is_mla_model_type(std::string_view model_type) {
   return mla_model_type_set().contains(std::string(model_type));
+}
+
+inline bool has_mtp_model_type_marker(std::string_view model_type) {
+  return model_type.find("mtp") != std::string_view::npos;
+}
+
+inline bool starts_with_model_type(std::string_view model_type,
+                                   std::string_view target_model_type) {
+  return model_type.size() >= target_model_type.size() &&
+         model_type.compare(0, target_model_type.size(), target_model_type) ==
+             0;
+}
+
+inline bool is_target_mtp_model_type(std::string_view model_type,
+                                     std::string_view target_model_type) {
+  return starts_with_model_type(model_type, target_model_type) &&
+         has_mtp_model_type_marker(model_type);
+}
+
+inline bool is_deepseek_v4_model_type(std::string_view model_type) {
+  constexpr std::string_view kTargetModelType = "deepseek_v4";
+  return model_type == kTargetModelType ||
+         is_target_mtp_model_type(model_type, kTargetModelType);
+}
+
+inline bool is_target_model_type(std::string_view model_type,
+                                 std::string_view target_model_type,
+                                 bool match_mtp) {
+  if (model_type == target_model_type) {
+    return true;
+  }
+  return match_mtp && is_target_mtp_model_type(model_type, target_model_type);
 }
 
 inline std::string get_model_name(
@@ -149,28 +181,6 @@ inline std::string get_model_name(
   }
 
   return model_name;
-}
-
-inline std::string get_model_type(const std::filesystem::path& model_path) {
-  JsonReader reader;
-  std::filesystem::path config_json_path = model_path / "config.json";
-
-  if (!std::filesystem::exists(config_json_path)) {
-    LOG(FATAL) << "Please check config.json or model_index.json file, one of "
-                  "them should exist in the model path: "
-               << model_path;
-  }
-
-  reader.parse(config_json_path);
-  auto model_type = reader.value<std::string>("model_type");
-  if (!model_type.has_value()) {
-    model_type = reader.value<std::string>("model_name");
-  }
-  if (!model_type.has_value()) {
-    LOG(FATAL) << "Please check config.json file in model path: " << model_path
-               << ", it should contain model_type or model_name key.";
-  }
-  return model_type.value();
 }
 
 inline std::string get_model_backend(const std::filesystem::path& model_path) {
@@ -197,8 +207,14 @@ inline bool should_enable_mla(
   if (resolved_backend == "dit") {
     return false;
   }
-  return is_mla_model_type(get_model_type(model_path));
+  return is_mla_model_type(get_model_type(model_path, backend));
 }
+
+inline int32_t kv_split_size_effective(void) {
+  return ParallelConfig::get_instance().kv_split_size_effective();
+}
+
+inline bool enable_kvcache_split(void) { return kv_split_size_effective() > 1; }
 
 }  // namespace util
 }  // namespace xllm

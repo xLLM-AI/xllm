@@ -25,4 +25,6 @@ limitations under the License.
 #include "layers/ilu/attention.h"
 #elif defined(USE_MUSA)
 #include "layers/musa/attention.h"
+#elif defined(USE_DCU)
+#include "layers/dcu/attention.h"
 #endif

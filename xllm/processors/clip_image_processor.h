@@ -1,4 +1,4 @@
-/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,36 +17,34 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <cstdint>
 #include <vector>
 
-#include "core/util/tensor_helper.h"
-#include "image_processor.h"
-
+#include "core/framework/model/model_args.h"
 namespace xllm {
 
-class CLIPImageProcessor : public ImageProcessor {
+class CLIPImageProcessor {
  public:
-  CLIPImageProcessor(const ModelArgs& args);
-  ~CLIPImageProcessor() override = default;
+  explicit CLIPImageProcessor(const ModelArgs& args);
 
-  bool process(const MMInput& mm_inputs, MMData& mm_datas) override;
-  torch::Tensor process_images(const torch::Tensor& images);
+  torch::Tensor process_images(const torch::Tensor& images) const;
 
  private:
-  std::vector<int64_t> get_resize_output_image_size(const torch::Tensor& image,
-                                                    int shortest_edge);
+  std::vector<int64_t> get_resize_output_image_size(
+      const torch::Tensor& image,
+      int32_t shortest_edge) const;
 
  private:
   bool do_resize_;
   bool do_center_crop_;
   bool do_rescale_;
   bool do_normalize_;
-  int shortest_edge_;
-  int resample_;
+  int32_t shortest_edge_;
+  int32_t resample_;
   double rescale_factor_;
-  std::pair<int, int> crop_size_;
-  std::vector<double> image_mean_;
-  std::vector<double> image_std_;
+  std::pair<int32_t, int32_t> crop_size_;
+  torch::Tensor image_mean_;
+  torch::Tensor image_std_;
 };
 
 }  // namespace xllm

@@ -21,10 +21,16 @@ limitations under the License.
 #include <brpc/server.h>
 #include <glog/logging.h>
 
+#include <limits>
 #include <random>
 
 #include "common/global_flags.h"
 #include "common/macros.h"
+#include "core/framework/config/disagg_pd_config.h"
+#include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/parallel_config.h"
+#include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/service_config.h"
 #include "disagg_pd.pb.h"
 #include "disagg_pd_scheduler.h"
 #include "distributed_runtime/engine.h"
@@ -38,11 +44,12 @@ limitations under the License.
 #include "scheduler/chunked_prefill_scheduler.h"
 #include "scheduler/continuous_scheduler.h"
 #include "util/env_var.h"
+#include "util/utils.h"
 
 namespace xllm {
 
 DisaggPDScheduler::DisaggPDScheduler(Engine* engine, const Options& options)
-    : ContinuousScheduler(engine, options), server_name_("DisaggPDServer") {
+    : ChunkedPrefillScheduler(engine, options), server_name_("DisaggPDServer") {
   if (!options_.instance_role().has_value()) {
     LOG(FATAL) << "Instance type is not set in disagg pd mode.";
   }
@@ -104,7 +111,7 @@ void DisaggPDScheduler::initialize_rpc_server(const std::string& server_name) {
     return;
   }
   xservice_client_->set_scheduler(this);
-  if (FLAGS_enable_xtensor) {
+  if (::xllm::KVCacheConfig::get_instance().enable_xtensor()) {
     xservice_client_->set_engine(engine_);
   }
 }
@@ -120,17 +127,15 @@ void DisaggPDScheduler::register_instance_info(const std::string& server_name,
             << ", instance rpc_address = " << instance_info_.rpc_address
             << ", instance type = " << instance_info_.type;
 
-  engine->get_cache_info(instance_info_.cluster_ids,
-                         instance_info_.addrs,
-                         instance_info_.k_cache_ids,
-                         instance_info_.v_cache_ids);
+  engine->get_cache_info(
+      instance_info_.cluster_ids, instance_info_.addrs, instance_info_.ports);
   instance_info_.dp_size = options_.dp_size();
-
-  engine->get_device_info(instance_info_.device_ips, instance_info_.ports);
+  instance_info_.kv_split_size =
+      ::xllm::ParallelConfig::get_instance().kv_split_size_effective();
 
   // Get total physical pages per worker (for etcd registration)
 #if defined(USE_NPU)
-  if (FLAGS_enable_xtensor) {
+  if (::xllm::KVCacheConfig::get_instance().enable_xtensor()) {
     auto& page_allocator = PageAllocator::get_instance();
     if (page_allocator.is_initialized()) {
       instance_info_.total_phy_pages = page_allocator.get_num_total_phy_pages();
@@ -199,6 +204,15 @@ void DisaggPDScheduler::profile_tpot() {
   }
 }
 
+void DisaggPDScheduler::cache_prefill_blocks(Request* request) {
+  CHECK(request != nullptr);
+  for (auto& sequence : request->sequences()) {
+    if (sequence->if_cache_block_for_prefill()) {
+      kv_cache_manager_->cache(sequence.get());
+    }
+  }
+}
+
 // TODO: maybe we should consider update info case even if info already exists
 // in local.
 bool DisaggPDScheduler::check_remote_instance_info(
@@ -236,7 +250,8 @@ proto::DisaggPDService_Stub* DisaggPDScheduler::create_rpc_channel(
     // create channel to prefill instance
     brpc::Channel* channel = new brpc::Channel();
     brpc::ChannelOptions options;
-    options.timeout_ms = FLAGS_rpc_channel_timeout_ms;
+    options.timeout_ms =
+        ::xllm::ServiceConfig::get_instance().rpc_channel_timeout_ms();
     options.max_retry = 3;
     std::string load_balancer = "";
     if (channel->Init(remote_instances_info_[instance_name].rpc_address.c_str(),
@@ -265,17 +280,55 @@ void DisaggPDScheduler::start_rpc_server() {
       ServerRegistry::get_instance().register_server(server_name_);
   if (!rpc_server->start(std::move(service))) {
     LOG(ERROR) << "Failed to start brpc disagg pd server on port "
-               << FLAGS_disagg_pd_port;
+               << ::xllm::DisaggPDConfig::get_instance().disagg_pd_port();
     return;
   }
 }
 
 void DisaggPDScheduler::step(const absl::Duration& timeout) {
   ContinuousScheduler::step(timeout);
-  // send first generation token to decode instance
-  if (options_.instance_role() != InstanceRole::DECODE && last_step_prefill_) {
+  // Send first generation token to decode instance.
+  // Always check (not gated on last_step_prefill_) because
+  // ChunkedPrefillScheduler does not set that flag and a chunked prefill
+  // may complete at any step. prefill_send_first_generation() internally
+  // checks num_generated_tokens() == 1 so spurious calls are harmless.
+  if (options_.instance_role() != InstanceRole::DECODE) {
     prefill_send_first_generation();
   }
+}
+
+std::vector<Batch> DisaggPDScheduler::prepare_batch() {
+  // For PREFILL / MIX in disagg PD, drain newly arrived requests here and
+  // skip the eager expand_sequences(false) that the base prepare_batch would
+  // otherwise call when enable_prefix_cache is off. For best_of_n requests,
+  // expansion to best_of sequences is deferred to the DECODE instance (where
+  // prefix cache lets seq[1..best_of-1] reuse seq[0]'s prompt KV). Without
+  // this guard, the PREFILL instance would waste N x prefill compute on
+  // candidates that are never used.
+  const bool is_decode =
+      options_.instance_role().has_value() &&
+      options_.instance_role().value() == InstanceRole::DECODE;
+  if (!is_decode) {
+    std::shared_ptr<Request> request;
+    while (request_queue_.read(request)) {
+      CHECK(request);
+      if (request->sequences()[0]->kv_state().kv_cache_tokens_num() == 0) {
+        if (request->offline()) {
+          waiting_priority_queue_offline_->push(request);
+        } else {
+          waiting_priority_queue_->push(request);
+        }
+      } else {
+        // request from prefill instance in disagge pd mode.
+        running_requests_.emplace_back(request);
+      }
+    }
+  }
+
+  if (options_.enable_chunked_prefill()) {
+    return ChunkedPrefillScheduler::prepare_batch();
+  }
+  return ContinuousScheduler::prepare_batch();
 }
 
 bool DisaggPDScheduler::add_request(std::shared_ptr<Request>& request) {
@@ -450,17 +503,12 @@ void DisaggPDScheduler::dispatch_requests() {
       req->set_skip_special_tokens(requests[i]->state().skip_special_tokens);
       //*reqs.mutable_reqs()->Add() = req;
     }
-    std::vector<std::string> device_ips;
-    std::vector<uint16_t> ports;
-    engine_->get_device_info(device_ips, ports);
     reqs.mutable_cluster_infos()->mutable_cluster_ids()->Add(
         instance_info_.cluster_ids.begin(), instance_info_.cluster_ids.end());
     reqs.mutable_cluster_infos()->mutable_addrs()->Add(
         instance_info_.addrs.begin(), instance_info_.addrs.end());
-    reqs.mutable_cluster_infos()->mutable_device_ips()->Add(device_ips.begin(),
-                                                            device_ips.end());
-    reqs.mutable_cluster_infos()->mutable_ports()->Add(ports.begin(),
-                                                       ports.end());
+    reqs.mutable_cluster_infos()->mutable_ports()->Add(
+        instance_info_.ports.begin(), instance_info_.ports.end());
     reqs.mutable_cluster_infos()->set_dp_size(options_.dp_size());
 
     // TODO: sync rpc here currently
@@ -507,6 +555,10 @@ void DisaggPDScheduler::dispatch_requests() {
           info.request_id = requests[i]->request_id();
           for (auto& bid : resps.resps()[i].blocks_ids()) {
             info.remote_blocks_ids.emplace_back(bid);
+          }
+          if (resps.resps()[i].linear_state_id() >= 0) {
+            info.remote_linear_state_ids.emplace_back(
+                resps.resps()[i].linear_state_id());
           }
           const size_t prompt_blocks =
               (requests[i]->state().prompt_tokens.size() +
@@ -580,6 +632,16 @@ void DisaggPDScheduler::prefill_send_first_generation() {
                                 requests = std::move(requests)]() mutable {
     // send request first token to remote instance
     // TODO: here we only support one sequence for now.
+    auto fail_request = [this](const std::shared_ptr<Request>& request,
+                               Status status) {
+      response_processor_->process_failed_request(request, status);
+      {
+        std::lock_guard<std::mutex> lock(req_to_channel_map_mutex_);
+        req_to_channel_map_.erase(request->request_id());
+      }
+      response_processor_->wait_completion();
+      kv_cache_manager_->deallocate(request.get());
+    };
     for (auto& request : requests) {
       // TODO: support batch request later
       proto::DisaggGenerationsRequests gens;
@@ -617,10 +679,6 @@ void DisaggPDScheduler::prefill_send_first_generation() {
         ADD_VECTOR_TO_PROTO(gen->mutable_cluster_ids(),
                             instance_info_.cluster_ids);
         ADD_VECTOR_TO_PROTO(gen->mutable_addrs(), instance_info_.addrs);
-        ADD_VECTOR_TO_PROTO(gen->mutable_k_cache_ids(),
-                            instance_info_.k_cache_ids);
-        ADD_VECTOR_TO_PROTO(gen->mutable_v_cache_ids(),
-                            instance_info_.v_cache_ids);
 
         const auto blocks = request->sequences()[0]->kv_state().kv_blocks();
         std::vector<uint64_t> block_ids;
@@ -629,8 +687,33 @@ void DisaggPDScheduler::prefill_send_first_generation() {
           block_ids.push_back(block.id());
         }
         ADD_VECTOR_TO_PROTO(gen->mutable_block_ids(), block_ids);
+        gen->set_linear_state_id(
+            request->sequences()[0]->get_single_block_id());
         gen->set_dp_size(instance_info_.dp_size);
         gen->set_dp_rank(request->sequences()[0]->dp_rank());
+      }
+      if (options_.num_speculative_tokens() > 0) {
+        torch::Tensor embedding =
+            request->sequences()[0]->get_mtp_bootstrap_embedding();
+        if (!embedding.defined()) {
+          LOG(ERROR) << "Missing MTP bootstrap embedding, request_id: "
+                     << request->request_id();
+          fail_request(
+              request,
+              {StatusCode::UNKNOWN, "Missing MTP bootstrap embedding"});
+          continue;
+        }
+        torch::Tensor embedding_cpu = safe_to(embedding, torch::kCPU);
+        if (!util::torch_to_proto(embedding_cpu,
+                                  gen->mutable_mtp_bootstrap_embedding())) {
+          LOG(ERROR) << "Failed to serialize MTP bootstrap embedding, "
+                     << "request_id: " << request->request_id();
+          fail_request(request,
+                       {StatusCode::UNKNOWN,
+                        "Failed to serialize MTP bootstrap embedding"});
+          continue;
+        }
+        request->sequences()[0]->clear_mtp_bootstrap_embedding();
       }
 
       // send first gens to remote instance
@@ -646,7 +729,8 @@ void DisaggPDScheduler::prefill_send_first_generation() {
       brpc::Controller cntl;
       stub->FirstGeneration(&cntl, &gens, &resp, nullptr);
 
-      if (cntl.Failed() || !resp.ok()) {
+      const bool sent_first_generation = !cntl.Failed() && resp.ok();
+      if (!sent_first_generation) {
         LOG(ERROR) << "Failed to send first generation to decode instance : "
                    << request->state().decode_address
                    << ", error text : " << cntl.ErrorText()
@@ -656,6 +740,10 @@ void DisaggPDScheduler::prefill_send_first_generation() {
       {
         std::lock_guard<std::mutex> lock(req_to_channel_map_mutex_);
         req_to_channel_map_.erase(request->request_id());
+      }
+      response_processor_->wait_completion();
+      if (sent_first_generation) {
+        cache_prefill_blocks(request.get());
       }
       kv_cache_manager_->deallocate(request.get());
     }
@@ -698,11 +786,11 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     const std::string& kv_cache_transfer_mode,
     std::vector<uint64_t> src_cluster_ids,
     std::vector<std::string> src_addrs,
-    std::vector<int64_t> src_k_cache_ids,
-    std::vector<int64_t> src_v_cache_ids,
     std::vector<uint64_t> src_block_ids,
+    int32_t src_linear_state_id,
     int32_t src_dp_size,
-    int32_t src_dp_rank) {
+    int32_t src_dp_rank,
+    torch::Tensor mtp_bootstrap_embedding) {
   // push to request_queue_, and will be executed by engine.
   std::shared_ptr<Request> request = nullptr;
   {
@@ -721,6 +809,40 @@ bool DisaggPDScheduler::decode_recv_first_generation(
       request_to_instance_map_.erase(inst_it);
     }
   }
+  auto& sequences = request->sequences();
+  if (sequences.empty() || sequences[0] == nullptr) {
+    LOG(ERROR) << "Request has no valid sequences, request_id: " << req_id;
+    for (auto& sequence : sequences) {
+      if (sequence != nullptr) {
+        kv_cache_manager_->deallocate(sequence.get());
+      }
+    }
+    return false;
+  }
+  Sequence* sequence = request->sequences()[0].get();
+  const bool need_mtp_bootstrap = options_.num_speculative_tokens() > 0;
+  if (need_mtp_bootstrap) {
+    const int32_t slot_id = sequence->get_single_block_id();
+    if (slot_id < 0) {
+      LOG(ERROR) << "Invalid MTP bootstrap slot, request_id: " << req_id;
+      kv_cache_manager_->deallocate(request.get());
+      return false;
+    }
+    if (token_id < 0 ||
+        token_id > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
+      LOG(ERROR) << "Invalid MTP bootstrap token, request_id: " << req_id
+                 << ", token_id: " << token_id;
+      kv_cache_manager_->deallocate(request.get());
+      return false;
+    }
+    if (!mtp_bootstrap_embedding.defined()) {
+      LOG(ERROR) << "Missing MTP bootstrap embedding, request_id: " << req_id;
+      kv_cache_manager_->deallocate(request.get());
+      return false;
+    }
+
+    sequence->update_mtp_bootstrap_embedding(mtp_bootstrap_embedding);
+  }
 
   Token first_token(token_id);
   if (has_logprob) {
@@ -734,48 +856,62 @@ bool DisaggPDScheduler::decode_recv_first_generation(
   }
   // Enable checking whether to skip the prefill token
   if (request->state().stream) {
-    request->sequences()[0]->enable_checking_prefill_token();
+    sequence->enable_checking_prefill_token();
   }
 
   // update latency metrics
-  request->sequences()[0]->set_time_to_first_token_latency_seconds(
+  sequence->set_time_to_first_token_latency_seconds(
       time_to_first_token_latency_seconds);
   // update latest_generate_time_ for sequence
-  request->sequences()[0]->tbt(
-      request->created_time() +
-      absl::Seconds(time_to_first_token_latency_seconds));
+  sequence->tbt(request->created_time() +
+                absl::Seconds(time_to_first_token_latency_seconds));
 
   // TODO: we only support one sequence for currently.
   if (enable_schedule_overlap()) {
     Token fake_token(-1);
-    request->sequences()[0]->append_token(fake_token);
-    request->sequences()[0]->update_last_step_token(first_token);
+    sequence->append_token(fake_token);
+    sequence->update_last_step_token(first_token);
   } else {
-    request->sequences()[0]->append_token(first_token);
+    sequence->append_token(first_token);
   }
 
   // pull kv cache
   if (kv_cache_transfer_mode == "PULL") {
-    const auto blocks = request->sequences()[0]->kv_state().kv_blocks();
+    const auto blocks = sequence->kv_state().kv_blocks();
     std::vector<uint64_t> dst_block_ids;
     dst_block_ids.reserve(blocks.size());
     for (const auto& block : blocks) {
       dst_block_ids.push_back(block.id());
     }
+    std::vector<uint64_t> src_linear_state_ids;
+    std::vector<uint64_t> dst_linear_state_ids;
+    if (src_linear_state_id >= 0 && sequence->get_single_block_id() >= 0) {
+      src_linear_state_ids.emplace_back(src_linear_state_id);
+      dst_linear_state_ids.emplace_back(sequence->get_single_block_id());
+    }
 
-    int32_t dst_dp_rank = request->sequences()[0]->dp_rank();
-    engine_->pull_kv_blocks(src_dp_size,
-                            src_dp_rank,
-                            src_cluster_ids,
-                            src_addrs,
-                            src_k_cache_ids,
-                            src_v_cache_ids,
-                            src_block_ids,
-                            dst_dp_rank,
-                            dst_block_ids);
+    int32_t dst_dp_rank = sequence->dp_rank();
+    const bool pulled = engine_->pull_kv_blocks(src_dp_size,
+                                                src_dp_rank,
+                                                src_cluster_ids,
+                                                src_addrs,
+                                                src_block_ids,
+                                                dst_dp_rank,
+                                                dst_block_ids,
+                                                src_linear_state_ids,
+                                                dst_linear_state_ids);
+    if (!pulled) {
+      LOG(ERROR) << "Failed to pull KV blocks, request_id: " << req_id;
+      kv_cache_manager_->deallocate(request.get());
+      return false;
+    }
   }
 
-  request_queue_.write(request);
+  if (!request_queue_.write(request)) {
+    LOG(ERROR) << "Failed to enqueue decode request, request_id: " << req_id;
+    kv_cache_manager_->deallocate(request.get());
+    return false;
+  }
   return true;
 }
 
@@ -783,7 +919,8 @@ bool DisaggPDScheduler::try_allocate(Sequence* sequence) {
   // When the KV Cache usage reaches the threshold, prefill requests will no
   // longer be scheduled to avoid frequent preemption.
   if (kv_cache_manager_->kv_cache_utilization() <
-      FLAGS_prefill_scheduling_memory_usage_threshold) {
+      ::xllm::SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold()) {
     return kv_cache_manager_->try_allocate(sequence);
   } else {
     return false;
@@ -821,19 +958,20 @@ void DisaggPDScheduler::get_latency_metrics(std::vector<int64_t>& ttft,
   tbt = std::move(recent_tbt_);
 }
 
-bool DisaggPDScheduler::link_instance(
-    const std::string& instance_name,
-    const std::vector<uint64_t>& cluster_ids,
-    const std::vector<std::string>& addrs,
-    const std::vector<std::string>& device_ips,
-    const std::vector<uint16_t>& ports,
-    const int32_t dp_size) {
+bool DisaggPDScheduler::link_instance(const std::string& instance_name,
+                                      const std::vector<uint64_t>& cluster_ids,
+                                      const std::vector<std::string>& addrs,
+                                      const std::vector<uint16_t>& ports,
+                                      const int32_t dp_size,
+                                      const int32_t src_kv_split_size) {
   std::lock_guard<std::mutex> lock(linked_instances_mutex_);
-  if (!engine_->link_cluster(cluster_ids, addrs, device_ips, ports, dp_size)) {
+  if (!engine_->link_cluster(
+          cluster_ids, addrs, ports, dp_size, src_kv_split_size)) {
     LOG(ERROR) << "Link instance failed, instance_name: " << instance_name;
     return false;
   }
-  LOG(INFO) << "Successfully linked instance, instance_name: " << instance_name;
+  LOG(INFO) << "Successfully linked instance, instance_name: " << instance_name
+            << ", prefill_kv_split_size: " << src_kv_split_size;
   linked_instance_.emplace(instance_name);
   return true;
 }
@@ -842,9 +980,9 @@ bool DisaggPDScheduler::unlink_instance(
     const std::string& instance_name,
     const std::vector<uint64_t>& cluster_ids,
     const std::vector<std::string>& addrs,
-    const std::vector<std::string>& device_ips,
     const std::vector<uint16_t>& ports,
-    const int32_t dp_size) {
+    const int32_t dp_size,
+    const int32_t src_kv_split_size) {
   // Clear received requests from this instance
   {
     std::lock_guard<std::mutex> lock(received_request_map_mutex_);
@@ -860,7 +998,7 @@ bool DisaggPDScheduler::unlink_instance(
 
   std::lock_guard<std::mutex> lock(linked_instances_mutex_);
   if (!engine_->unlink_cluster(
-          cluster_ids, addrs, device_ips, ports, dp_size)) {
+          cluster_ids, addrs, ports, dp_size, src_kv_split_size)) {
     LOG(ERROR) << "Unlink instance failed, instance_name: " << instance_name;
     return false;
   }

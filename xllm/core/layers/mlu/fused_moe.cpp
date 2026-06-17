@@ -18,6 +18,9 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "common/global_flags.h"
+#include "core/framework/config/eplb_config.h"
+#include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "kernels/ops_api.h"
 #include "layers/common/dp_utils.h"
 #include "util/tensor_helper.h"
@@ -77,7 +80,9 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
   }
 
   // Deep EP initialization check
-  enable_deep_ep_ = FLAGS_expert_parallel_degree == 2 && ep_size > 1;
+  enable_deep_ep_ =
+      ::xllm::EPLBConfig::get_instance().expert_parallel_degree() == 2 &&
+      ep_size > 1;
   if (enable_deep_ep_) {
     // for now, we only implement the deep ep for decode stage.
     // so we will assume the max_token_num is limited to max_batch_size * (1+K)
@@ -94,16 +99,20 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
     torch::ScalarType combine_dtype = options_.dtype().toScalarType();
     int64_t combine_token_size = hidden_size_ * get_dtype_size(combine_dtype);
     // Ensure calculation base is at least ep_size
-    int64_t effective_seqs =
-        std::max((int64_t)FLAGS_max_seqs_per_batch, (int64_t)ep_size);
-    // NOTE: FLAGS_max_seqs_per_batch represents the maximum total batch size,
-    // regardless of the dp size. To ensure robust scheduling and account
-    // for the worst-case scenario, we must guarantee that each rank is capable
-    // of handling the maximum possible number of tokens. Therefore, we define
-    // max_num_tokens_per_rank as the full maximum value, without dividing by
-    // either the rank count or the dp size.
+    int64_t effective_seqs = std::max(
+        (int64_t)::xllm::SchedulerConfig::get_instance().max_seqs_per_batch(),
+        (int64_t)ep_size);
+    // NOTE: ::xllm::SchedulerConfig::get_instance().max_seqs_per_batch()
+    // represents the maximum total batch size, regardless of the dp size. To
+    // ensure robust scheduling and account for the worst-case scenario, we must
+    // guarantee that each rank is capable of handling the maximum possible
+    // number of tokens. Therefore, we define max_num_tokens_per_rank as the
+    // full maximum value, without dividing by either the rank count or the dp
+    // size.
     int64_t max_num_tokens_per_rank =
-        (1 + FLAGS_num_speculative_tokens) * effective_seqs * topk_;
+        (1 +
+         ::xllm::SpeculativeConfig::get_instance().num_speculative_tokens()) *
+        effective_seqs * topk_;
 
     // make sure that all layers share the same deep ep instance
     //  so that the memory footprint is minimized

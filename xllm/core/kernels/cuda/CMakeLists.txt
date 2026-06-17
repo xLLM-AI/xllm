@@ -64,6 +64,7 @@ if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0)
       torch
       tvm_ffi
   )
+  set_target_properties(cutlass_sm90 PROPERTIES CUDA_ARCHITECTURES 90a)
 
   # --- SM100 (Blackwell) ---
   cc_library(
@@ -75,6 +76,7 @@ if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0)
       torch
       tvm_ffi
   )
+  set_target_properties(cutlass_sm100 PROPERTIES CUDA_ARCHITECTURES 100a)
 
   # --- SM120 ---
   cc_library(
@@ -86,6 +88,7 @@ if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0)
       torch
       tvm_ffi
   )
+  set_target_properties(cutlass_sm120 PROPERTIES CUDA_ARCHITECTURES 120a)
 
   set(_CUTLASS_SM_LIBS :cutlass_sm90 :cutlass_sm100 :cutlass_sm120)
 endif()

@@ -97,28 +97,5 @@ int64_t get_process_group_test_timeout_seconds() {
   return get_int_env(kTimeoutEnvVar, kDefaultTimeoutSeconds);
 }
 
-std::optional<double> get_fix_speculative_acceptance_rate() {
-  // XLLM_FIX_SPECULATIVE_ACCEPTANCE_RATE:
-  // Defines a fixed acceptance rate for speculative decoding to simulate
-  // specific performance scenarios.
-  // Valid values are in the range [0.0, 1.0].
-  // If not set, or set to an invalid value, the fixed rate logic is disabled
-  // (returns std::nullopt).
-  constexpr const char* kAcceptanceRateEnvVar =
-      "XLLM_FIX_SPECULATIVE_ACCEPTANCE_RATE";
-  double value = get_double_env(kAcceptanceRateEnvVar, -1.0);
-  if (value == -1.0) {
-    return std::nullopt;
-  }
-  // Validate the range. It must be a probability between 0 and 1.
-  if (value < 0.0 || value > 1.0) {
-    LOG(WARNING) << "Warning: Invalid value for " << kAcceptanceRateEnvVar
-                 << ": " << value << ". Must be in [0, 1]. Ignoring setting."
-                 << std::endl;
-    return std::nullopt;
-  }
-  return std::make_optional(value);
-}
-
 }  // namespace util
 }  // namespace xllm

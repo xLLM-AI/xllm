@@ -31,6 +31,7 @@ limitations under the License.
 #include "common/macros.h"
 #include "common/metrics.h"
 #include "common/types.h"
+#include "core/framework/multimodal/mm_data.h"
 #include "framework/prefix_cache/prefix_cache.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
@@ -46,6 +47,18 @@ class BlockManager {
     PROPERTY(bool, enable_prefix_cache) = true;
     PROPERTY(bool, enable_disagg_pd) = false;
     PROPERTY(bool, enable_cache_upload) = false;
+    // Token-level sliding window size for composite SWA allocation.
+    PROPERTY(uint32_t, sliding_window_size) = 0;
+    // Base SWA/cache-state block rows retained per sequence.
+    PROPERTY(uint32_t, swa_blocks_per_seq) = 0;
+    // Scheduler token budget used to size the shared SWA burst pool.
+    PROPERTY(uint32_t, max_tokens_per_batch) = 0;
+    // For CompositeBlockManager (passed from upstream).
+    PROPERTY(std::vector<uint32_t>, manager_types) = {};
+    PROPERTY(std::vector<uint32_t>, compress_ratios) = {};
+    PROPERTY(uint32_t, max_seqs_per_batch) = 0;
+    // Hasher type bound to the engine (TEXT for LLM, MM for VLM).
+    PROPERTY(BlockHasherType, hasher_type) = BlockHasherType::TEXT;
   };
 
   explicit BlockManager(Options options) : options_(options) {}
@@ -56,12 +69,14 @@ class BlockManager {
   virtual std::vector<Block> allocate(size_t num_blocks) = 0;
 
   virtual std::vector<Block> allocate_shared(
-      const Slice<int32_t>& tokens_ids,
-      const Slice<Block>& existed_shared_blocks = {}) = 0;
+      const Slice<int32_t>& token_ids,
+      const Slice<Block>& existed_shared_blocks = {},
+      const MMData& mm_data = MMData()) = 0;
 
   virtual void cache(const Slice<int32_t>& token_ids,
                      std::vector<Block>& blocks,
-                     size_t existed_shared_blocks_num = 0) = 0;
+                     size_t existed_shared_blocks_num = 0,
+                     const MMData& mm_data = MMData()) = 0;
   virtual void cache(const std::vector<Block>& blocks) = 0;
 
   // get merged all dp rank KVCacheEvent
@@ -89,6 +104,13 @@ class BlockManager {
 
   // get number of total blocks
   virtual size_t num_total_blocks() const = 0;
+
+  // CompositeBlockManager: Pool calls these when is_composite() is true.
+  virtual bool is_composite() const { return false; }
+  virtual bool allocate_for_sequence(Sequence* seq, size_t num_tokens) {
+    return false;
+  }
+  virtual void deallocate_sequence(Sequence* seq) {}
 
  protected:
   // the options for the block manager

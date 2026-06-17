@@ -41,13 +41,5 @@ std::optional<std::string> get_optional_string_env(const std::string& name);
 // insufficient.
 int64_t get_process_group_test_timeout_seconds();
 
-// Returns an optional fixed acceptance rate for speculative decoding (for
-// performance debugging only). If the XLLM_FIX_SPECULATIVE_ACCEPTANCE_RATE
-// environment variable is set to a value in [0.0, 1.0], returns
-// std::optional<double> with that value; otherwise returns std::nullopt.
-// WARNING: Using this will influence model accuracy and should not be used in
-// production.
-std::optional<double> get_fix_speculative_acceptance_rate();
-
 }  // namespace util
 }  // namespace xllm

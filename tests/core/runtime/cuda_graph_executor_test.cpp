@@ -24,8 +24,11 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core/common/global_flags.h"
 #include "core/framework/batch/batch_forward_type.h"
+#include "core/framework/config/execution_config.h"
+#include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/model_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_input_params.h"
@@ -62,6 +65,28 @@ std::vector<KVCache> MakeSingleKvCaches(torch::Tensor k_cache,
   return kv_caches;
 }
 
+class ScopedConfigSnapshot final {
+ public:
+  ScopedConfigSnapshot()
+      : execution_config_(ExecutionConfig::get_instance()),
+        kv_cache_config_(KVCacheConfig::get_instance()),
+        model_config_(ModelConfig::get_instance()),
+        scheduler_config_(SchedulerConfig::get_instance()) {}
+
+  ~ScopedConfigSnapshot() {
+    ExecutionConfig::get_instance() = execution_config_;
+    KVCacheConfig::get_instance() = kv_cache_config_;
+    ModelConfig::get_instance() = model_config_;
+    SchedulerConfig::get_instance() = scheduler_config_;
+  }
+
+ private:
+  ExecutionConfig execution_config_;
+  KVCacheConfig kv_cache_config_;
+  ModelConfig model_config_;
+  SchedulerConfig scheduler_config_;
+};
+
 class CudaGraphExecutorTestEnvironment : public ::testing::Environment {
  public:
   void SetUp() override {
@@ -74,9 +99,9 @@ class CudaGraphExecutorTestEnvironment : public ::testing::Environment {
     }
 
     // Keep the test minimal and deterministic.
-    FLAGS_block_size = 1;
-    FLAGS_max_tokens_per_batch = 128;
-    FLAGS_enable_graph_mode_decode_no_padding = true;
+    KVCacheConfig::get_instance().block_size(1);
+    SchedulerConfig::get_instance().max_tokens_per_batch(128);
+    ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding(true);
 
     // Seed all RNGs once per test environment.
     torch::manual_seed(0);
@@ -216,27 +241,27 @@ class FakeAttnCausalLM final : public CausalLM {
 
 ModelInputParams MakeDecodeParams(const torch::Device& device) {
   ModelInputParams p;
-  p.batch_forward_type = BatchForwardType::DECODE;
-  p.num_sequences = 1;
-  p.kv_max_seq_len = 4;
-  p.q_max_seq_len = 1;
-  p.enable_cuda_graph = false;  // executor will set metadata->enable_cuda_graph
+  p.meta.batch_forward_type = BatchForwardType::DECODE;
+  p.meta.num_sequences = 1;
+  p.meta.kv_max_seq_len = 4;
+  p.meta.q_max_seq_len = 1;
+  p.enable_graph = false;  // executor will set metadata->enable_cuda_graph
 
   auto iopt = torch::TensorOptions().dtype(torch::kInt32).device(device);
   // cumulative lengths (cu_seq_lens)
-  p.q_seq_lens = torch::tensor({0, 1}, iopt);
-  p.kv_seq_lens = torch::tensor({0, 4}, iopt);
-  p.q_cu_seq_lens = p.q_seq_lens;
+  p.attention.device.q_seq_lens = torch::tensor({0, 1}, iopt);
+  p.attention.device.kv_seq_lens = torch::tensor({0, 4}, iopt);
+  p.attention.device.q_cu_seq_lens = p.attention.device.q_seq_lens;
 
   // slot mapping for the single token -> last slot in the 4-length kv cache
-  p.new_cache_slots = torch::tensor({3}, iopt);
+  p.attention.device.new_cache_slots = torch::tensor({3}, iopt);
   // block table is required by AttentionMetadataBuilder for decode path
-  p.block_tables = torch::tensor({{0, 1, 2, 3}}, iopt);
+  p.attention.device.block_tables = torch::tensor({{0, 1, 2, 3}}, iopt);
 
   // FlashInfer paged-kv metadata: one page (block) per sequence.
-  p.paged_kv_indptr = torch::tensor({0, 4}, iopt);
-  p.paged_kv_indices = torch::tensor({0, 1, 2, 3}, iopt);
-  p.paged_kv_last_page_len = torch::tensor({1}, iopt);
+  p.attention.device.paged_kv_indptr = torch::tensor({0, 4}, iopt);
+  p.attention.device.paged_kv_indices = torch::tensor({0, 1, 2, 3}, iopt);
+  p.attention.device.paged_kv_last_page_len = torch::tensor({1}, iopt);
 
   return p;
 }
@@ -246,26 +271,27 @@ ModelInputParams MakePrefillParams(const torch::Device& device,
   CHECK_GT(num_tokens, 0);
 
   ModelInputParams p;
-  p.batch_forward_type = BatchForwardType::PREFILL;
-  p.num_sequences = 1;
-  p.kv_max_seq_len = num_tokens;
-  p.q_max_seq_len = num_tokens;
-  p.enable_cuda_graph = false;  // executor will set metadata->enable_cuda_graph
+  p.meta.batch_forward_type = BatchForwardType::PREFILL;
+  p.meta.num_sequences = 1;
+  p.meta.kv_max_seq_len = num_tokens;
+  p.meta.q_max_seq_len = num_tokens;
+  p.enable_graph = false;  // executor will set metadata->enable_cuda_graph
 
   auto iopt = torch::TensorOptions().dtype(torch::kInt32).device(device);
   // cumulative lengths (cu_seq_lens)
-  p.q_seq_lens = torch::tensor({0, num_tokens}, iopt);
-  p.kv_seq_lens = torch::tensor({0, num_tokens}, iopt);
-  p.q_cu_seq_lens = p.q_seq_lens;
+  p.attention.device.q_seq_lens = torch::tensor({0, num_tokens}, iopt);
+  p.attention.device.kv_seq_lens = torch::tensor({0, num_tokens}, iopt);
+  p.attention.device.q_cu_seq_lens = p.attention.device.q_seq_lens;
 
   // prefill writes all tokens into kv-cache slots [0, num_tokens)
-  p.new_cache_slots = torch::arange(0, num_tokens, iopt);
-  p.block_tables = torch::arange(0, num_tokens, iopt).unsqueeze(0);
+  p.attention.device.new_cache_slots = torch::arange(0, num_tokens, iopt);
+  p.attention.device.block_tables =
+      torch::arange(0, num_tokens, iopt).unsqueeze(0);
 
   // FlashInfer paged-kv metadata: one page (block) per token since block_size=1
-  p.paged_kv_indptr = torch::tensor({0, num_tokens}, iopt);
-  p.paged_kv_indices = torch::arange(0, num_tokens, iopt);
-  p.paged_kv_last_page_len = torch::tensor({1}, iopt);
+  p.attention.device.paged_kv_indptr = torch::tensor({0, num_tokens}, iopt);
+  p.attention.device.paged_kv_indices = torch::arange(0, num_tokens, iopt);
+  p.attention.device.paged_kv_last_page_len = torch::tensor({1}, iopt);
 
   return p;
 }
@@ -328,22 +354,23 @@ runtime::Options make_test_runtime_options(int64_t max_seqs_per_batch) {
 ModelInputParams make_multi_sequence_decode_params(
     const torch::Device& device) {
   ModelInputParams p;
-  p.batch_forward_type = BatchForwardType::DECODE;
-  p.num_sequences = 2;
-  p.kv_max_seq_len = 9;
-  p.q_max_seq_len = 1;
-  p.enable_cuda_graph = false;
+  p.meta.batch_forward_type = BatchForwardType::DECODE;
+  p.meta.num_sequences = 2;
+  p.meta.kv_max_seq_len = 9;
+  p.meta.q_max_seq_len = 1;
+  p.enable_graph = false;
 
   torch::TensorOptions iopt =
       torch::TensorOptions().dtype(torch::kInt32).device(device);
-  p.q_seq_lens = torch::tensor({0, 1, 2}, iopt);
-  p.kv_seq_lens = torch::tensor({0, 4, 9}, iopt);
-  p.q_cu_seq_lens = p.q_seq_lens;
-  p.new_cache_slots = torch::tensor({5, 7}, iopt);
-  p.block_tables = torch::tensor({{0, 1, 2, 3}, {4, 5, 6, 7}}, iopt);
-  p.paged_kv_indptr = torch::tensor({0, 1, 3}, iopt);
-  p.paged_kv_indices = torch::tensor({2, 4, 6}, iopt);
-  p.paged_kv_last_page_len = torch::tensor({1, 2}, iopt);
+  p.attention.device.q_seq_lens = torch::tensor({0, 1, 2}, iopt);
+  p.attention.device.kv_seq_lens = torch::tensor({0, 4, 9}, iopt);
+  p.attention.device.q_cu_seq_lens = p.attention.device.q_seq_lens;
+  p.attention.device.new_cache_slots = torch::tensor({5, 7}, iopt);
+  p.attention.device.block_tables =
+      torch::tensor({{0, 1, 2, 3}, {4, 5, 6, 7}}, iopt);
+  p.attention.device.paged_kv_indptr = torch::tensor({0, 1, 3}, iopt);
+  p.attention.device.paged_kv_indices = torch::tensor({2, 4, 6}, iopt);
+  p.attention.device.paged_kv_last_page_len = torch::tensor({1, 2}, iopt);
   return p;
 }
 
@@ -427,7 +454,7 @@ TEST(CudaGraphExecutorTest, DecodeMetadataFastPathUpdatesPersistentBuffers) {
       torch::equal(updated->attn_metadata->qo_indptr.value().cpu(),
                    torch::tensor({0, 1, 2}, torch::dtype(torch::kInt32))));
   EXPECT_TRUE(torch::equal(updated->attn_metadata->block_table.cpu(),
-                           params.block_tables.cpu()));
+                           params.attention.device.block_tables.cpu()));
 }
 
 TEST(CudaGraphExecutorTest, DecodeMetadataFastPathUpdatesLinearStateIndices) {
@@ -448,8 +475,8 @@ TEST(CudaGraphExecutorTest, DecodeMetadataFastPathUpdatesLinearStateIndices) {
   torch::Tensor tokens = torch::tensor({10, 11}, iopt);
   torch::Tensor positions = torch::tensor({20, 21}, iopt);
   ModelInputParams params = make_multi_sequence_decode_params(device);
-  params.linear_state_ids = {8, 6};
-  params.linear_state_indices = torch::tensor({8, 6}, iopt);
+  params.embedding.linear_state_ids = {8, 6};
+  params.embedding.linear_state_indices = torch::tensor({8, 6}, iopt);
   std::vector<KVCache> kv = MakeKvCaches(device,
                                          /*num_pages=*/16,
                                          /*page_size=*/1,
@@ -469,7 +496,7 @@ TEST(CudaGraphExecutorTest, DecodeMetadataFastPathUpdatesLinearStateIndices) {
   EXPECT_TRUE(torch::equal(
       persistent.persistent_linear_state_indices(/*actual_batch_size=*/2).cpu(),
       torch::tensor({8, 6}, torch::dtype(torch::kInt32))));
-  EXPECT_TRUE(torch::equal(updated->linear_state_indices.cpu(),
+  EXPECT_TRUE(torch::equal(updated->embedding.linear_state_indices.cpu(),
                            torch::tensor({8, 6}, torch::dtype(torch::kInt32))));
 }
 
@@ -497,8 +524,10 @@ TEST(CudaGraphExecutorTest, DecodeMetadataFastPathFallbackMatchesLegacyPath) {
   ModelInputParams fallback_params = make_multi_sequence_decode_params(device);
   torch::Tensor new_cache_slots_base =
       torch::tensor({5, 99, 7, 88}, iopt).view({2, 2});
-  fallback_params.new_cache_slots = new_cache_slots_base.select(1, 0);
-  ASSERT_FALSE(fallback_params.new_cache_slots.is_contiguous());
+  fallback_params.attention.device.new_cache_slots =
+      new_cache_slots_base.select(1, 0);
+  ASSERT_FALSE(
+      fallback_params.attention.device.new_cache_slots.is_contiguous());
 
   std::vector<KVCache> kv = MakeKvCaches(device,
                                          /*num_pages=*/16,
@@ -566,8 +595,8 @@ TEST(CudaGraphExecutorTest, BatchDecodeCaptureAndReplay) {
     GTEST_SKIP() << "CUDA is not available at runtime.";
   }
 
-  const bool old_enable_graph_vmm_pool = FLAGS_enable_graph_vmm_pool;
-  FLAGS_enable_graph_vmm_pool = false;
+  ScopedConfigSnapshot config_snapshot;
+  ExecutionConfig::get_instance().enable_graph_vmm_pool(false);
 
   const torch::Device device = InitXllmCudaDeviceForTest(/*device_index=*/0);
   xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
@@ -619,8 +648,6 @@ TEST(CudaGraphExecutorTest, BatchDecodeCaptureAndReplay) {
   torch::cuda::synchronize();
   EXPECT_TRUE(torch::allclose(out2, eager_out, /*rtol=*/1e-3, /*atol=*/1e-3))
       << "graph replay output should match eager output";
-
-  FLAGS_enable_graph_vmm_pool = old_enable_graph_vmm_pool;
 }
 
 TEST(CudaGraphExecutorTest,
@@ -629,8 +656,8 @@ TEST(CudaGraphExecutorTest,
     GTEST_SKIP() << "CUDA is not available at runtime.";
   }
 
-  const bool old_enable_graph_vmm_pool = FLAGS_enable_graph_vmm_pool;
-  FLAGS_enable_graph_vmm_pool = false;
+  ScopedConfigSnapshot config_snapshot;
+  ExecutionConfig::get_instance().enable_graph_vmm_pool(false);
 
   const torch::Device device = InitXllmCudaDeviceForTest(/*device_index=*/0);
   xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
@@ -677,8 +704,6 @@ TEST(CudaGraphExecutorTest,
 
   EXPECT_TRUE(torch::allclose(out1, eager_out, /*rtol=*/1e-3, /*atol=*/1e-3));
   EXPECT_TRUE(torch::allclose(out2, eager_out, /*rtol=*/1e-3, /*atol=*/1e-3));
-
-  FLAGS_enable_graph_vmm_pool = old_enable_graph_vmm_pool;
 }
 
 TEST(CudaGraphExecutorTest, PrefillPiecewiseCaptureAndReplay) {
@@ -686,18 +711,13 @@ TEST(CudaGraphExecutorTest, PrefillPiecewiseCaptureAndReplay) {
     GTEST_SKIP() << "CUDA is not available at runtime.";
   }
 
-  const bool old_enable_graph = FLAGS_enable_graph;
-  const bool old_enable_prefill_piecewise_graph =
-      FLAGS_enable_prefill_piecewise_graph;
-  const bool old_enable_graph_vmm_pool = FLAGS_enable_graph_vmm_pool;
-  const int64_t old_max_tokens_per_batch = FLAGS_max_tokens_per_batch;
-  const int32_t old_max_tokens_for_graph_mode = FLAGS_max_tokens_for_graph_mode;
-
-  FLAGS_enable_graph = true;
-  FLAGS_enable_prefill_piecewise_graph = true;
-  FLAGS_enable_graph_vmm_pool = false;
-  FLAGS_max_tokens_per_batch = 128;
-  FLAGS_max_tokens_for_graph_mode = 128;
+  ScopedConfigSnapshot config_snapshot;
+  ExecutionConfig::get_instance()
+      .enable_graph(true)
+      .enable_prefill_piecewise_graph(true)
+      .enable_graph_vmm_pool(false)
+      .max_tokens_for_graph_mode(128);
+  SchedulerConfig::get_instance().max_tokens_per_batch(128);
 
   const torch::Device device = InitXllmCudaDeviceForTest(/*device_index=*/0);
   xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
@@ -755,12 +775,6 @@ TEST(CudaGraphExecutorTest, PrefillPiecewiseCaptureAndReplay) {
   out2 = out2.clone();
   torch::cuda::synchronize();
 
-  FLAGS_enable_graph = old_enable_graph;
-  FLAGS_enable_prefill_piecewise_graph = old_enable_prefill_piecewise_graph;
-  FLAGS_enable_graph_vmm_pool = old_enable_graph_vmm_pool;
-  FLAGS_max_tokens_per_batch = old_max_tokens_per_batch;
-  FLAGS_max_tokens_for_graph_mode = old_max_tokens_for_graph_mode;
-
   EXPECT_EQ(out1.size(0), kNumTokens);
   EXPECT_EQ(out1.size(1), args.hidden_size());
   EXPECT_EQ(out2.size(0), kNumTokens);
@@ -783,19 +797,15 @@ TEST(CudaGraphExecutorTest, CompareMqa2v1AndMqa8v1) {
     GTEST_SKIP() << "CUDA is not available at runtime.";
   }
 
-  const bool old_enable_graph = FLAGS_enable_graph;
-  const bool old_enable_prefill_piecewise_graph =
-      FLAGS_enable_prefill_piecewise_graph;
-  const bool old_enable_graph_vmm_pool = FLAGS_enable_graph_vmm_pool;
-  const int64_t old_max_tokens_per_batch = FLAGS_max_tokens_per_batch;
-  const int32_t old_max_tokens_for_graph_mode = FLAGS_max_tokens_for_graph_mode;
-
-  FLAGS_enable_graph = true;
-  FLAGS_enable_prefill_piecewise_graph = true;
-  FLAGS_enable_graph_vmm_pool = false;
-  FLAGS_max_tokens_per_batch = 128;
-  FLAGS_max_tokens_for_graph_mode = 128;
-  FLAGS_flashinfer_workspace_buffer_size = 256 * 1024 * 1024;
+  ScopedConfigSnapshot config_snapshot;
+  ExecutionConfig::get_instance()
+      .enable_graph(true)
+      .enable_prefill_piecewise_graph(true)
+      .enable_graph_vmm_pool(false)
+      .max_tokens_for_graph_mode(128);
+  SchedulerConfig::get_instance().max_tokens_per_batch(128);
+  ModelConfig::get_instance().flashinfer_workspace_buffer_size(256 * 1024 *
+                                                               1024);
 
   const torch::Device device = InitXllmCudaDeviceForTest(/*device_index=*/0);
   xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
@@ -857,12 +867,6 @@ TEST(CudaGraphExecutorTest, CompareMqa2v1AndMqa8v1) {
   auto out_mqa_2v1 = run_mqa_prefill(/*n_heads=*/2, /*n_kv_heads=*/1);
   auto out_mqa_8v1 = run_mqa_prefill(/*n_heads=*/8, /*n_kv_heads=*/1);
 
-  FLAGS_enable_graph = old_enable_graph;
-  FLAGS_enable_prefill_piecewise_graph = old_enable_prefill_piecewise_graph;
-  FLAGS_enable_graph_vmm_pool = old_enable_graph_vmm_pool;
-  FLAGS_max_tokens_per_batch = old_max_tokens_per_batch;
-  FLAGS_max_tokens_for_graph_mode = old_max_tokens_for_graph_mode;
-
   EXPECT_EQ(out_mqa_2v1.eager_out.size(0), kNumTokens);
   EXPECT_EQ(out_mqa_2v1.graph_out.size(0), kNumTokens);
   EXPECT_EQ(out_mqa_8v1.eager_out.size(0), kNumTokens);
@@ -903,17 +907,12 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolMemoryReuseAcrossMultiShape) {
     GTEST_SKIP() << "CUDA is not available at runtime.";
   }
 
-  const bool old_enable_graph = FLAGS_enable_graph;
-  const bool old_enable_prefill_piecewise_graph =
-      FLAGS_enable_prefill_piecewise_graph;
-  const bool old_enable_graph_vmm_pool = FLAGS_enable_graph_vmm_pool;
-  const int64_t old_max_tokens_per_batch = FLAGS_max_tokens_per_batch;
-  const int32_t old_max_tokens_for_graph_mode = FLAGS_max_tokens_for_graph_mode;
-
-  FLAGS_enable_graph = true;
-  FLAGS_enable_prefill_piecewise_graph = true;
-  FLAGS_max_tokens_per_batch = 256;
-  FLAGS_max_tokens_for_graph_mode = 256;
+  ScopedConfigSnapshot config_snapshot;
+  ExecutionConfig::get_instance()
+      .enable_graph(true)
+      .enable_prefill_piecewise_graph(true)
+      .max_tokens_for_graph_mode(256);
+  SchedulerConfig::get_instance().max_tokens_per_batch(256);
 
   const torch::Device device = InitXllmCudaDeviceForTest(/*device_index=*/0);
   xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
@@ -942,7 +941,8 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolMemoryReuseAcrossMultiShape) {
   };
 
   auto run_prefill_capture_sweep = [&](bool enable_graph_vmm_pool) {
-    FLAGS_enable_graph_vmm_pool = enable_graph_vmm_pool;
+    ExecutionConfig::get_instance().enable_graph_vmm_pool(
+        enable_graph_vmm_pool);
     auto [model, exec] = create_executor();
 
     auto iopt = torch::TensorOptions().dtype(torch::kInt32).device(device);
@@ -998,12 +998,6 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolMemoryReuseAcrossMultiShape) {
   EXPECT_GT(grow_steps, 0U)
       << "With enable_graph_vmm_pool=false, expected at least one increasing "
       << "step during 256->128 sweep.";
-
-  FLAGS_enable_graph = old_enable_graph;
-  FLAGS_enable_prefill_piecewise_graph = old_enable_prefill_piecewise_graph;
-  FLAGS_enable_graph_vmm_pool = old_enable_graph_vmm_pool;
-  FLAGS_max_tokens_per_batch = old_max_tokens_per_batch;
-  FLAGS_max_tokens_for_graph_mode = old_max_tokens_for_graph_mode;
 }
 
 TEST(CudaGraphExecutorTest, GraphVmmPoolEnabledPrefillCorrectness) {
@@ -1011,18 +1005,13 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolEnabledPrefillCorrectness) {
     GTEST_SKIP() << "CUDA is not available at runtime.";
   }
 
-  const bool old_enable_graph = FLAGS_enable_graph;
-  const bool old_enable_prefill_piecewise_graph =
-      FLAGS_enable_prefill_piecewise_graph;
-  const bool old_enable_graph_vmm_pool = FLAGS_enable_graph_vmm_pool;
-  const int64_t old_max_tokens_per_batch = FLAGS_max_tokens_per_batch;
-  const int32_t old_max_tokens_for_graph_mode = FLAGS_max_tokens_for_graph_mode;
-
-  FLAGS_enable_graph = true;
-  FLAGS_enable_prefill_piecewise_graph = true;
-  FLAGS_max_tokens_per_batch = 256;
-  FLAGS_max_tokens_for_graph_mode = 256;
-  FLAGS_enable_graph_vmm_pool = true;
+  ScopedConfigSnapshot config_snapshot;
+  ExecutionConfig::get_instance()
+      .enable_graph(true)
+      .enable_prefill_piecewise_graph(true)
+      .max_tokens_for_graph_mode(256)
+      .enable_graph_vmm_pool(true);
+  SchedulerConfig::get_instance().max_tokens_per_batch(256);
 
   const torch::Device device = InitXllmCudaDeviceForTest(/*device_index=*/0);
   xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
@@ -1083,12 +1072,6 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolEnabledPrefillCorrectness) {
         << "With enable_graph_vmm_pool=true, graph output should match eager "
         << "output at num_tokens=" << num_tokens;
   }
-
-  FLAGS_enable_graph = old_enable_graph;
-  FLAGS_enable_prefill_piecewise_graph = old_enable_prefill_piecewise_graph;
-  FLAGS_enable_graph_vmm_pool = old_enable_graph_vmm_pool;
-  FLAGS_max_tokens_per_batch = old_max_tokens_per_batch;
-  FLAGS_max_tokens_for_graph_mode = old_max_tokens_for_graph_mode;
 }
 
 }  // namespace

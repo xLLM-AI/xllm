@@ -48,7 +48,10 @@ class DiTAsyncResponseProcessor final {
   DISALLOW_COPY_AND_ASSIGN(DiTAsyncResponseProcessor);
 
   // the threadpool to handle responses
-  ThreadPool response_threadpool_;
+  ThreadPool response_threadpool_{
+      /*num_threads=*/1,
+      /*cpu_binding=*/false,
+      /*pool_name=*/"DiTAsyncResponseProcessor.response"};
 };
 
 class DiTScheduler : public SchedulerBase {

@@ -21,6 +21,8 @@ limitations under the License.
 #include <map>
 
 #include "common/global_flags.h"
+#include "core/framework/config/load_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/layers/common/attention_mask.h"
 #include "loader/llama_decoder_loader.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
@@ -54,7 +56,9 @@ NpuLlamaDecoderLayerImpl::NpuLlamaDecoderLayerImpl(const ModelContext& context)
   loader_ = std::make_unique<LlamaDecoderLoader>(
       WEIGHT_COUNT_PER_LAYER,
       context,
-      FLAGS_enable_manual_loader ? LoadMode::kManual : LoadMode::kEager);
+      ::xllm::LoadConfig::get_instance().enable_manual_loader()
+          ? LoadMode::kManual
+          : LoadMode::kEager);
   at_placeholder_ = torch::zeros({1}).to(device_).to(dtype_);
 }
 
@@ -70,7 +74,9 @@ void NpuLlamaDecoderLayerImpl::param_from_args(
   param.enableSwiGLU = true;
   param.enableLcoc = isPrefill;
   param.enableSpeculate = false;
-  param.enableSplitFuse = FLAGS_enable_chunked_prefill && isPrefill;
+  param.enableSplitFuse =
+      ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill() &&
+      isPrefill;
   param.enableLora = false;
   param.loraEnableGMM = false;
   param.packQuantType = {1, 1};
@@ -167,7 +173,7 @@ torch::Tensor NpuLlamaDecoderLayerImpl::forward(torch::Tensor& x,
                                                 int node_id) {
   atb::Status st;
 
-  if (!input_params.batch_forward_type.is_decode()) {
+  if (!input_params.meta.batch_forward_type.is_decode()) {
     build_node_variant_pack(prefill_node_,
                             x,
                             cos_pos,
@@ -219,22 +225,27 @@ void NpuLlamaDecoderLayerImpl::build_node_variant_pack(
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 5) =
       atb_speed::Utils::AtTensor2Tensor(kv_cache.get_v_cache());
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 6) =
-      atb_speed::Utils::AtTensor2Tensor(input_params.kv_seq_lens);
+      atb_speed::Utils::AtTensor2Tensor(
+          input_params.attention.device.kv_seq_lens);
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 6).hostData =
-      input_params.kv_seq_lens_vec.data();
+      input_params.attention.host.kv_seq_lens.data();
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 7) = placeholder_;
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 7).hostData =
       placeholder_vec_.data();
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 8) = placeholder_;
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 9) =
-      atb_speed::Utils::AtTensor2Tensor(input_params.block_tables);
+      atb_speed::Utils::AtTensor2Tensor(
+          input_params.attention.device.block_tables);
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 10) =
-      atb_speed::Utils::AtTensor2Tensor(input_params.new_cache_slots);
-  if (is_prefill && FLAGS_enable_chunked_prefill) {
+      atb_speed::Utils::AtTensor2Tensor(
+          input_params.attention.device.new_cache_slots);
+  if (is_prefill &&
+      ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11) =
-        atb_speed::Utils::AtTensor2Tensor(input_params.q_seq_lens);
+        atb_speed::Utils::AtTensor2Tensor(
+            input_params.attention.device.q_seq_lens);
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11).hostData =
-        input_params.q_seq_lens_vec.data();
+        input_params.attention.host.q_seq_lens.data();
   }
   for (size_t i = 0; i < WEIGHT_COUNT_PER_LAYER; ++i) {
     CHECK_THROW(node.inTensors.at(i) == nullptr,

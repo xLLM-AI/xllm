@@ -5,3 +5,11 @@ endif()
 if(USE_MLU)
   add_subdirectory(mlu)
 endif()
+
+if(USE_NPU)
+  add_subdirectory(npu_torch)
+endif()
+
+if(USE_DCU)
+  add_subdirectory(dcu)
+endif()

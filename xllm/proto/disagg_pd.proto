@@ -5,10 +5,10 @@ package xllm.proto;
 option cc_generic_services = true;
 
 import "common.proto";
+import "tensor.proto";
 
 message ClusterInfos {
   repeated uint64 cluster_ids = 1;
-  repeated string device_ips = 2;
   repeated uint32 ports = 3;
   int32 dp_size = 4;
   repeated string addrs = 5;
@@ -92,6 +92,8 @@ message DisaggResponse {
   // Layout: [layer0_block0_k, layer0_block0_v, layer0_block1_k, layer0_block1_v, ...]
   //         [layer1_block0_k, layer1_block0_v, ...]
   repeated XTensorLayerOffsets xtensor_layer_offsets = 5;
+  // Sequence-scoped cache row used by linear attention caches.
+  int32 linear_state_id = 6;
 }
 
 // XTensor mode: offsets for one layer
@@ -118,8 +120,6 @@ message XTensorLayerOffsets {
 //   string kv_cache_transfer_mode = 7;
 //   repeated uint64 cluster_ids = 8;
 //   repeated string addrs = 14;
-//   repeated int64 k_cache_ids = 9;
-//   repeated int64 v_cache_ids = 10;
 //   repeated int32 block_ids = 11;
 //   int32 dp_size = 12;
 //   int32 dp_rank = 13;
@@ -138,6 +138,8 @@ message OutputUsage {
   int32 num_generated_tokens = 2;
   // the total number of tokens used in the request (prompt + completion).
   int32 num_total_tokens = 3;
+  // the number of prompt tokens served from prefix cache.
+  int32 num_cached_tokens = 4;
 }
 
 message LogProbData {
@@ -219,13 +221,15 @@ message DisaggGenerationsRequest {
   string kv_cache_transfer_mode = 3;
   repeated uint64 cluster_ids = 4;
   repeated string addrs = 5;
-  repeated int64 k_cache_ids = 6;
-  repeated int64 v_cache_ids = 7;
   repeated int32 block_ids = 8;
   int32 dp_size = 9;
   int32 dp_rank = 10;
   string x_request_id = 11;
   string x_request_time = 12;
+  // Sequence-scoped cache row used by linear attention caches.
+  int32 linear_state_id = 13;
+  // MTP bootstrap state for the first decode draft extend.
+  Tensor mtp_bootstrap_embedding = 14;
 }
 
 message DisaggGenerationsRequests {
@@ -236,9 +240,10 @@ message InstanceClusterInfo {
   string instance_name = 1;
   repeated uint64 cluster_ids = 2;
   repeated string addrs = 3;
-  repeated string device_ips = 4;
   repeated uint32 ports = 5;
   int32 dp_size = 6;
+  // Prefill-side effective KV-split width for link_cluster on decode.
+  int32 kv_split_size = 7;
 }
 
 service DisaggPDService {

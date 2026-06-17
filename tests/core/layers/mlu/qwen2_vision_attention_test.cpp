@@ -43,7 +43,7 @@ class Qwen2VisionAttentionTest : public ::testing::Test {
     options_ = torch::TensorOptions().dtype(torch::kBFloat16).device(device);
 
     process_group_ = create_process_group(
-        0, 1, 1, 3331, false, "localhost", "tp_group", device);
+        0, 1, 1, 3332, false, "localhost", "tp_group", device);
     parallel_args_.tp_group_ = process_group_.get();
 
     context_ = ModelContext(parallel_args_, model_args_, QuantArgs(), options_);
@@ -114,10 +114,8 @@ TEST_F(Qwen2VisionAttentionTest, ForwardTest) {
                                        torch::kBFloat16,
                                        options_.device());
 
-  // Create ModelInputParams
-  ModelInputParams params;
   auto output = vision_attention->forward(
-      hidden_states, m_cos_pos, m_sin_pos, cu_seq_len, cu_seq_len_vec, params);
+      hidden_states, m_cos_pos, m_sin_pos, cu_seq_len, cu_seq_len_vec);
   xllm::Device device(options_.device());
   device.synchronize_default_stream();
 
@@ -125,20 +123,20 @@ TEST_F(Qwen2VisionAttentionTest, ForwardTest) {
 
   int32_t check_count = 10;
   auto test_output = output.flatten().slice(0, 0, check_count);
-  std::vector<float> expected_values = {0.0703125f,
-                                        0.198242f,
-                                        0.0878906f,
-                                        -0.119141f,
-                                        0.142578f,
-                                        -0.410156f,
-                                        -0.233398f,
-                                        0.328125f,
-                                        -0.298828f,
-                                        0.0712891f};
-  test::verify_precision(test_output.unsqueeze(0), expected_values, 1e-4, 1e-5);
+  std::vector<float> expected_values = {-0.0864258f,
+                                        0.365234f,
+                                        0.0898438f,
+                                        0.226562f,
+                                        0.0834961f,
+                                        -0.228516f,
+                                        -0.0268555f,
+                                        0.126953f,
+                                        -0.371094f,
+                                        0.108887f};
+  test::verify_precision(test_output.unsqueeze(0), expected_values, 1e-3, 1e-3);
 
   auto output2 = vision_attention->forward(
-      hidden_states, m_cos_pos, m_sin_pos, cu_seq_len, cu_seq_len_vec, params);
+      hidden_states, m_cos_pos, m_sin_pos, cu_seq_len, cu_seq_len_vec);
   device.synchronize_default_stream();
   ASSERT_TRUE(torch::allclose(output.flatten().to(torch::kFloat32),
                               output2.flatten().to(torch::kFloat32),

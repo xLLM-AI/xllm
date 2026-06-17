@@ -49,38 +49,39 @@ class WorkerClient {
 
   virtual folly::SemiFuture<bool> wakeup_async(const WakeupOptions& options);
 
+  // Start/stop online timeline profiling on the underlying worker.
+  virtual folly::SemiFuture<bool> start_profile_async();
+
+  virtual folly::SemiFuture<bool> stop_profile_async();
+
   virtual std::tuple<int64_t, int64_t> estimate_kv_cache_capacity();
 
   // allocate kv cache. blocking call
   virtual bool allocate_kv_cache(const KVCacheShape& kv_cache_shape);
 
-  virtual void get_device_info(std::string& device_ip, uint16_t& port);
-
   virtual void get_cache_info(uint64_t& cluster_id,
                               std::string& addr,
-                              int64_t& k_cache_id,
-                              int64_t& v_cache_id);
+                              uint16_t& port);
 
   virtual bool link_cluster(const std::vector<uint64_t>& cluster_ids,
                             const std::vector<std::string>& addrs,
-                            const std::vector<std::string>& device_ips,
                             const std::vector<uint16_t>& ports);
 
   virtual bool unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                               const std::vector<std::string>& addrs,
-                              const std::vector<std::string>& device_ips,
                               const std::vector<uint16_t>& ports);
 
-  // D2D link for weight transfer
-  virtual bool link_d2d(const std::string& remote_addr);
-  virtual bool unlink_d2d(const std::string& remote_addr);
+  // P2P link for weight transfer
+  virtual bool link_p2p(const std::string& remote_addr);
+  virtual bool unlink_p2p(const std::string& remote_addr);
 
-  virtual bool pull_kv_blocks(const uint64_t src_cluster_id,
-                              const std::string& src_addr,
-                              const int64_t src_k_cache_id,
-                              const int64_t src_v_cache_id,
-                              const std::vector<uint64_t>& src_blocks,
-                              const std::vector<uint64_t>& dst_blocks);
+  virtual bool pull_kv_blocks(
+      const uint64_t src_cluster_id,
+      const std::string& src_addr,
+      const std::vector<uint64_t>& src_blocks,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids = {},
+      const std::vector<uint64_t>& dst_linear_state_ids = {});
 
   // prepare input for execution
   virtual ForwardInput prepare_inputs(Batch& batch);
@@ -107,10 +108,10 @@ class WorkerClient {
   virtual folly::SemiFuture<bool> pull_kv_blocks_async(
       const uint64_t src_cluster_id,
       const std::string& src_addr,
-      const int64_t src_k_cache_id,
-      const int64_t src_v_cache_id,
       const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks);
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids = {},
+      const std::vector<uint64_t>& dst_linear_state_ids = {});
 
   virtual folly::SemiFuture<uint32_t> transfer_kv_blocks(
       const std::vector<BlockTransferInfo>& block_transfer_info);
@@ -129,9 +130,10 @@ class WorkerClient {
   virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(
       const ForwardInput& inputs);
 
-  // for multi-node serving, we pass an non-tensor params to remote workers.
-  virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_async(
-      const RawForwardInput& inputs);
+  // Remote execution path: send ForwardInput transport payload and decode
+  // worker response as RawForwardOutput for distributed engine handling.
+  virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
+      const ForwardInput& inputs);
 
   virtual folly::SemiFuture<folly::Unit> process_group_test_async();
 

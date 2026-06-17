@@ -20,6 +20,9 @@ limitations under the License.
 #include <c10d/TCPStore.hpp>
 #include <torch_npu/csrc/distributed/ProcessGroupHCCL.hpp>
 
+#include "core/framework/config/dit_config.h"
+#include "core/framework/config/eplb_config.h"
+#include "npu_rank_table_env.h"
 #include "platform/device.h"
 
 namespace {
@@ -68,6 +71,13 @@ void check_input(torch::Tensor input) {
   CHECK(input.is_contiguous()) << "input should be contiguous";
   CHECK(!input.is_sparse()) << "input have to be npu dense tensor";
 }
+
+std::string resolve_tcp_store_host(const std::string& host, int32_t rank_size) {
+  // A rank_size=1 group is local to the current worker process. Using the
+  // cluster master address here makes remote workers connect back to rank0's
+  // node for their private group and can deadlock startup.
+  return rank_size == 1 ? "127.0.0.1" : host;
+}
 }  // namespace
 
 namespace xllm {
@@ -82,6 +92,8 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
                                    const torch::Device& device)
     : ProcessGroup(global_rank, world_size, device),
       comm_stream_(c10_npu::getNPUStreamFromPool(device.index())) {
+  parallel_state::sync_torch_npu_rank_table_file_env(
+      ::xllm::EPLBConfig::get_instance().rank_tablefile());
   c10::intrusive_ptr<c10d_npu::ProcessGroupHCCL::Options> hccl_pg_options =
       c10d_npu::ProcessGroupHCCL::Options::create();
   hccl_pg_options->group_id = group_name;
@@ -97,7 +109,12 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
     hccl_pg_options->global_ranks_in_group = uint32_ranks;
     rank = local_rank;
   }
-  auto store = create_tcp_store(host, port, rank);
+  // Single-rank process groups do not need rendezvous with another worker.
+  // Use an ephemeral localhost port to avoid collisions with stale TCPStore
+  // listeners from previous abnormal exits in dense same-host launches.
+  const int32_t store_port = rank_size == 1 ? 0 : port;
+  auto store = create_tcp_store(
+      resolve_tcp_store_host(host, rank_size), store_port, rank);
   pg_ = std::make_unique<c10d_npu::ProcessGroupHCCL>(
       store, rank, rank_size, hccl_pg_options);
 }
@@ -113,6 +130,8 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
                                    const torch::Device& device)
     : ProcessGroup(global_rank, world_size, device),
       comm_stream_(c10_npu::getNPUStreamFromPool(device.index())) {
+  parallel_state::sync_torch_npu_rank_table_file_env(
+      ::xllm::EPLBConfig::get_instance().rank_tablefile());
   c10::intrusive_ptr<c10d_npu::ProcessGroupHCCL::Options> hccl_pg_options =
       c10d_npu::ProcessGroupHCCL::Options::create();
   hccl_pg_options->group_id = group_name;
@@ -124,7 +143,7 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
     hccl_pg_options->global_ranks_in_group = uint32_ranks;
   }
 
-  if (FLAGS_dit_debug_print) {
+  if (::xllm::DiTConfig::get_instance().dit_debug_print()) {
     std::stringstream ranks_ss;
     ranks_ss << "Group : [" << group_ranks[0];
     for (size_t i = 1; i < group_ranks.size(); i++) {
@@ -141,7 +160,9 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
               << ranks_ss.str();
   }
 
-  auto store = create_tcp_store(host, port, local_rank);
+  const int32_t store_port = rank_size == 1 ? 0 : port;
+  auto store = create_tcp_store(
+      resolve_tcp_store_host(host, rank_size), store_port, local_rank);
   pg_ = std::make_unique<c10d_npu::ProcessGroupHCCL>(
       store, local_rank, rank_size, hccl_pg_options);
 }
@@ -149,9 +170,10 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
 // Destructor.
 ProcessGroupImpl::~ProcessGroupImpl() {
   if (pg_) {
-    pg_->shutdown();
-  } else {
+    shutdown_backend();
+  } else if (comm_ != nullptr) {
     HCCLCHECK(HcclCommDestroy(comm_));
+    comm_ = nullptr;
   }
   Device::empty_cache(device().index());
 }
@@ -163,5 +185,18 @@ ProcessGroupImpl::ProcessGroupImpl(int rank,
     : ProcessGroup(rank, world_size, device),
       comm_(comm),
       comm_stream_(c10_npu::getNPUStreamFromPool(device.index())) {}
+
+std::string ProcessGroupImpl::hccl_comm_name(bool init_comm) {
+  CHECK(pg_ != nullptr) << "HCCL comm name requires a torch NPU process group.";
+#if defined(USE_NPU) &&         \
+    (TORCH_VERSION_MAJOR < 2 || \
+     (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR < 7))
+  return pg_->getHcclCommName(pg_->getRank(), init_comm);
+#else
+  auto* hccl_pg = dynamic_cast<c10d_npu::ProcessGroupHCCL*>(pg_.get());
+  CHECK(hccl_pg != nullptr) << "Process group is not NPU HCCL.";
+  return hccl_pg->getHcclCommName(pg_->getRank(), init_comm);
+#endif
+}
 
 }  // namespace xllm

@@ -52,22 +52,16 @@ class SpeculativeWorkerImpl : public WorkerImpl {
                   int32_t random_seed,
                   MasterStatus master_status) override;
 
-  void get_device_info(std::string& device_ip, uint16_t& port) override {
-    impl_->get_device_info(device_ip, port);
-  };
-
   bool link_cluster(const std::vector<uint64_t>& cluster_ids,
                     const std::vector<std::string>& addrs,
-                    const std::vector<std::string>& device_ips,
                     const std::vector<uint16_t>& ports) override {
-    return impl_->link_cluster(cluster_ids, addrs, device_ips, ports);
+    return impl_->link_cluster(cluster_ids, addrs, ports);
   };
 
   bool unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                       const std::vector<std::string>& addrs,
-                      const std::vector<std::string>& device_ips,
                       const std::vector<uint16_t>& ports) override {
-    return impl_->unlink_cluster(cluster_ids, addrs, device_ips, ports);
+    return impl_->unlink_cluster(cluster_ids, addrs, ports);
   };
 
   std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override {
@@ -84,9 +78,8 @@ class SpeculativeWorkerImpl : public WorkerImpl {
 
   void get_cache_info(uint64_t& cluster_id,
                       std::string& addr,
-                      int64_t& k_cache_id,
-                      int64_t& v_cache_id) override {
-    impl_->get_cache_info(cluster_id, addr, k_cache_id, v_cache_id);
+                      uint16_t& port) override {
+    impl_->get_cache_info(cluster_id, addr, port);
   };
 
   // prepare input for execution
@@ -106,16 +99,16 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   folly::SemiFuture<bool> pull_kv_blocks_async(
       const uint64_t src_cluster_id,
       const std::string& src_addr,
-      const int64_t src_k_cache_id,
-      const int64_t src_v_cache_id,
       const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks) override {
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids = {},
+      const std::vector<uint64_t>& dst_linear_state_ids = {}) override {
     return impl_->pull_kv_blocks_async(src_cluster_id,
                                        src_addr,
-                                       src_k_cache_id,
-                                       src_v_cache_id,
                                        src_blocks,
-                                       dst_blocks);
+                                       dst_blocks,
+                                       src_linear_state_ids,
+                                       dst_linear_state_ids);
   };
 
  protected:
@@ -139,11 +132,6 @@ class SpeculativeWorkerImpl : public WorkerImpl {
  protected:
   // Target model worker
   std::unique_ptr<LLMWorkerImpl> impl_;
-
-  // performance debug for fixing the speculative acceptance rate
-  // NOTE: This is for performance debugging only, it will
-  // influence the model accuracy and should not be used in production.
-  std::shared_ptr<RejectionSamplerRateController> rate_controller_;
 
   bool enable_fused_kernel_ = false;
   int32_t embedding_size_ = 0;

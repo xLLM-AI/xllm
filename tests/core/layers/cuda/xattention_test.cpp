@@ -24,7 +24,8 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
-#include "core/common/global_flags.h"
+#include "core/framework/config/rec_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "layers/cuda/flashinfer_workspace.h"
 #include "layers/cuda/xattention_workspace.h"
@@ -177,6 +178,8 @@ class XAttentionDecodeCompareTest : public ::testing::Test {
 
     two_stage_cache.q_cu_seq_lens_shared =
         torch::arange(0, (kBatchSize + 1) * kBeamWidth, kBeamWidth, int_opts);
+    two_stage_cache.qo_indptr_expanded =
+        torch::arange(total_beam + 1, int_opts);
     two_stage_cache.paged_kv_indptr_expanded =
         torch::arange(total_beam + 1, int_opts);
     two_stage_cache.paged_kv_indices_expanded =
@@ -197,8 +200,8 @@ class XAttentionDecodeCompareTest : public ::testing::Test {
   }
 
   torch::Tensor run_decode_once(DecodeTestInput& input, bool enable_two_stage) {
-    FLAGS_enable_xattention_one_stage = !enable_two_stage;
-    FLAGS_max_tokens_per_batch = kSharedSeqLen;
+    RecConfig::get_instance().enable_xattention_one_stage(!enable_two_stage);
+    SchedulerConfig::get_instance().max_tokens_per_batch(kSharedSeqLen);
 
     XAttentionImpl attention(
         /*num_heads=*/kNumHeads,

@@ -20,7 +20,6 @@ cc_library(
     flash_comm1_context.h
   SRCS
     etcd_client.cpp
-    global_flags.cpp
     metrics.cpp
     $<$<BOOL:${USE_NPU}>:mspti_helper.cpp>
     options.cpp
@@ -28,12 +27,14 @@ cc_library(
     device_monitor.cpp
     flash_comm1_context.cpp
   DEPS
+    :config
     util
     parallel_state
     absl::random_random
     absl::strings
     torch
     $<$<BOOL:${USE_NPU}>:torch_npu>
+    $<$<BOOL:${USE_CUDA}>:CUDA::cudart>
     $<$<BOOL:${USE_MSPTI}>:mspti>
     $<$<BOOL:${USE_NPU}>:ms_tools_ext>
     Boost::serialization
@@ -41,17 +42,6 @@ cc_library(
     etcd-cpp-api
     $<$<BOOL:${USE_MLU}>:torch_mlu>
     $<$<BOOL:${USE_MUSA}>:torch_musa>
-)
-
-cc_library(
-  NAME
-    flags
-  HDRS
-    global_flags.h
-  SRCS
-    global_flags.cpp
-  DEPS
-    gflags::gflags
 )
 
 target_link_libraries(common PRIVATE OpenSSL::SSL OpenSSL::Crypto protobuf::libprotobuf)

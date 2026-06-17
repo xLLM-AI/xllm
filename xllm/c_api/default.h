@@ -46,18 +46,19 @@ const XLLM_InitOptions XLLM_INIT_LLM_OPTIONS_DEFAULT = {
     .expert_parallel_degree = 0,
     .server_idx = 0,
     .max_memory_utilization = 0.9,
+    .flashinfer_workspace_buffer_size = 134217728,
 
     .task = "generate",
     .communication_backend = "lccl",
     .instance_role = "DEFAULT",
-    .device_ip = "",
     .master_node_addr = "127.0.0.1:18899",
     .xservice_addr = "",
     .instance_name = "",
     .kv_cache_transfer_mode = "PUSH",
     .log_dir = "",
     .draft_model = "",
-    .draft_devices = ""};
+    .draft_devices = "",
+    .cpu_affinity = ""};
 
 const XLLM_RequestParams XLLM_LLM_REQUEST_PARAMS_DEFAULT = {
     .echo = false,
@@ -118,18 +119,19 @@ const XLLM_InitOptions XLLM_INIT_REC_OPTIONS_DEFAULT = {
     .max_token_per_req = 1000,
     .max_memory_utilization = 0.55,
     .rec_worker_max_concurrency = 2,
+    .flashinfer_workspace_buffer_size = 134217728,
 
     .task = "generate",
     .communication_backend = "lccl",
     .instance_role = "DEFAULT",
-    .device_ip = "",
     .master_node_addr = "127.0.0.1:18899",
     .xservice_addr = "",
     .instance_name = "",
     .kv_cache_transfer_mode = "PUSH",
     .log_dir = "",
     .draft_model = "",
-    .draft_devices = ""};
+    .draft_devices = "",
+    .cpu_affinity = ""};
 
 const XLLM_RequestParams XLLM_REC_REQUEST_PARAMS_DEFAULT = {
     .echo = false,

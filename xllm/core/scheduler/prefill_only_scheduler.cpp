@@ -19,6 +19,7 @@ limitations under the License.
 #include <limits>
 
 #include "common/metrics.h"
+#include "core/framework/config/scheduler_config.h"
 #include "framework/batch/batch_factory.h"
 #include "util/timer.h"
 #include "util/utils.h"
@@ -30,8 +31,8 @@ PrefillOnlyScheduler::PrefillOnlyScheduler(Engine* engine,
 
 PrefillOnlyScheduler::~PrefillOnlyScheduler() {
   // release all requests in the priority queue
-  while (!waiting_priority_queue_.empty()) {
-    waiting_priority_queue_.pop();
+  while (!waiting_priority_queue_->empty()) {
+    waiting_priority_queue_->pop_top();
   }
 
   // release all requests in the running priority queue
@@ -45,7 +46,7 @@ void PrefillOnlyScheduler::handle_prefill_requests(
     double& estimate_latency,
     size_t& remaining_token_budget,
     size_t& remaining_seq_budget,
-    RequestPriorityQueue& waiting_priority_queue,
+    RequestPriorityQueue* waiting_priority_queue,
     size_t& num_online_prefill_preempt_offline_requests,
     std::vector<std::shared_ptr<Request>>& finished_requests) {
   // Handle new request prompt first.
@@ -61,34 +62,36 @@ void PrefillOnlyScheduler::handle_prefill_requests(
   bool budget_exhausted = false;
   bool blocks_exhausted = false;
 
-  while (!waiting_priority_queue.empty() && remaining_seq_budget > 0 &&
+  while (!waiting_priority_queue->empty() && remaining_seq_budget > 0 &&
          remaining_token_budget > 0 && latency_budget > estimate_latency) {
     if (kv_cache_manager_->kv_cache_utilization() >=
-        FLAGS_prefill_scheduling_memory_usage_threshold) {
+        ::xllm::SchedulerConfig::get_instance()
+            .prefill_scheduling_memory_usage_threshold()) {
       blocks_exhausted = true;
       break;
     }
 
-    std::shared_ptr<Request> request(waiting_priority_queue.top());
+    std::shared_ptr<Request> request(waiting_priority_queue->top());
     if (request->finished() || request->cancelled()) {
       kv_cache_manager_->deallocate(request.get());
       // release the ownership of the request
       finished_requests.emplace_back(request);
       // remove the request from the priority queue
-      waiting_priority_queue.pop();
+      waiting_priority_queue->pop_top();
       continue;
     }
 
     const size_t num_sequences = request->sequences().size();
     if (!request->preempted()) {
-      CHECK(num_sequences == 1)
-          << "Waiting request should have only one sequence.";
+      CHECK(num_sequences == 1 || num_sequences == request->best_of())
+          << "Waiting request should have either 1 or best_of("
+          << request->best_of() << ") sequences, got " << num_sequences;
     }
 
     if (!kv_cache_manager_->update_prefetch_result(
             request, options_.prefetch_timeout())) {
-      waiting_priority_queue.pop();
-      waiting_priority_queue.push(request);
+      waiting_priority_queue->pop_top();
+      waiting_priority_queue->push(request);
       continue;
     }
 
@@ -148,7 +151,7 @@ void PrefillOnlyScheduler::handle_prefill_requests(
               // add preemptable request to waiting priority queue
               // TO IMPROVE?: not process this offline request in current batch
               request_to_preempt->set_preempted();
-              waiting_priority_queue_offline_.push(request_to_preempt);
+              waiting_priority_queue_offline_->push(request_to_preempt);
             }
             if (!kv_cache_manager_->allocate(prefill_sequence.get())) {
               LOG(ERROR) << "Should be able to allocate after preempting "
@@ -203,8 +206,9 @@ void PrefillOnlyScheduler::handle_prefill_requests(
     remaining_token_budget -= allocated_tokens;
     remaining_seq_budget -= allocated_seqs;
     estimate_latency += allocated_estimate_latency;
-    waiting_priority_queue.pop();
+    waiting_priority_queue->pop_top();
     running_requests_.emplace_back(request);
+    request->record_num_prefix_cache_tokens();
     running_sequences_.insert(running_sequences_.end(),
                               prefill_sequences.begin(),
                               prefill_sequences.end());
@@ -213,10 +217,10 @@ void PrefillOnlyScheduler::handle_prefill_requests(
                                       prefill_sequences_budget.end());
   }
   // maybe can pre-compute if prompt beyond length
-  if (running_sequences_.empty() && !waiting_priority_queue.empty() &&
+  if (running_sequences_.empty() && !waiting_priority_queue->empty() &&
       running_queue_->empty()) {
-    std::shared_ptr<Request> request(waiting_priority_queue.top());
-    waiting_priority_queue.pop();
+    std::shared_ptr<Request> request(waiting_priority_queue->top());
+    waiting_priority_queue->pop_top();
     kv_cache_manager_->deallocate(request.get());
     if (blocks_exhausted) {
       LOG(ERROR) << "Request prompt is too long, no enough memory to schedule "
@@ -261,7 +265,8 @@ void PrefillOnlyScheduler::handle_last_step_prefill_requests(
          remaining_seq_budget > 0 && remaining_token_budget > 0 &&
          latency_budget > estimate_latency) {
     if (kv_cache_manager_->kv_cache_utilization() >=
-        FLAGS_prefill_scheduling_memory_usage_threshold) {
+        ::xllm::SchedulerConfig::get_instance()
+            .prefill_scheduling_memory_usage_threshold()) {
       blocks_exhausted = true;
       break;
     }
@@ -276,8 +281,9 @@ void PrefillOnlyScheduler::handle_last_step_prefill_requests(
 
     const size_t num_sequences = request->sequences().size();
     if (!request->preempted()) {
-      CHECK(num_sequences == 1)
-          << "Waiting request should have only one sequence.";
+      CHECK(num_sequences == 1 || num_sequences == request->best_of())
+          << "Waiting request should have either 1 or best_of("
+          << request->best_of() << ") sequences, got " << num_sequences;
     }
 
     // TODO: FIXME later
@@ -334,7 +340,7 @@ void PrefillOnlyScheduler::handle_last_step_prefill_requests(
               // add preemptable request to waiting priority queue
               // TO IMPROVE?: not process this offline request in current batch
               request_to_preempt->set_preempted();
-              waiting_priority_queue_offline_.push(request_to_preempt);
+              waiting_priority_queue_offline_->push(request_to_preempt);
             }
             if (!kv_cache_manager_->allocate(prefill_sequence.get())) {
               LOG(ERROR) << "Should be able to allocate after preempting "
@@ -448,9 +454,9 @@ std::vector<Batch> PrefillOnlyScheduler::prepare_batch() {
 
     if (request->sequences()[0]->kv_state().kv_cache_tokens_num() == 0) {
       if (request->offline()) {
-        waiting_priority_queue_offline_.push(request);
+        waiting_priority_queue_offline_->push(request);
       } else {
-        waiting_priority_queue_.push(request);
+        waiting_priority_queue_->push(request);
       }
     } else {
       // request from prefill instance in disagge pd mode.
@@ -540,9 +546,9 @@ std::vector<Batch> PrefillOnlyScheduler::prepare_batch() {
         last_step_prefill_requests.emplace_back(*it);
       } else {
         if ((*it)->offline()) {
-          running_queue_offline_->push(*it, last_step_prefill_);
+          running_queue_offline_->push(*it);
         } else {
-          running_queue_->push(*it, last_step_prefill_);
+          running_queue_->push(*it);
         }
       }
     }
@@ -588,14 +594,14 @@ std::vector<Batch> PrefillOnlyScheduler::prepare_batch() {
                           estimate_latency,
                           remaining_token_budget,
                           remaining_seq_budget,
-                          waiting_priority_queue_,
+                          waiting_priority_queue_.get(),
                           num_online_prefill_preempt_offline_requests,
                           finished_requests);
   handle_prefill_requests(latency_budget,
                           estimate_latency,
                           remaining_token_budget,
                           remaining_seq_budget,
-                          waiting_priority_queue_offline_,
+                          waiting_priority_queue_offline_.get(),
                           num_online_prefill_preempt_offline_requests,
                           finished_requests);
 
@@ -611,7 +617,7 @@ std::vector<Batch> PrefillOnlyScheduler::prepare_batch() {
                            num_offline_decode_preempt_offline_requests,
                            num_online_decode_preempt_online_requests,
                            num_online_decode_preempt_offline_requests,
-                           running_queue_);
+                           running_queue_.get());
     handle_decode_requests(latency_budget,
                            estimate_latency,
                            remaining_token_budget,
@@ -619,7 +625,7 @@ std::vector<Batch> PrefillOnlyScheduler::prepare_batch() {
                            num_offline_decode_preempt_offline_requests,
                            num_online_decode_preempt_online_requests,
                            num_online_decode_preempt_offline_requests,
-                           running_queue_offline_);
+                           running_queue_offline_.get());
   }
 
   num_preempted_requests = num_offline_decode_preempt_offline_requests +
@@ -650,7 +656,7 @@ std::vector<Batch> PrefillOnlyScheduler::prepare_batch() {
             pending_requests_.load(std::memory_order_relaxed));
   GAUGE_SET(num_running_requests, running_requests_.size());
   GAUGE_SET(num_waiting_requests,
-            waiting_priority_queue_.size() + running_queue_->size());
+            waiting_priority_queue_->size() + running_queue_->size());
 
   GAUGE_ADD(num_preempted_requests, num_preempted_requests);
   GAUGE_ADD(num_offline_decode_preempt_offline_requests,

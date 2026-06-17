@@ -1,4 +1,4 @@
-/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,13 +15,13 @@ limitations under the License.
 
 #pragma once
 
+#include <glog/logging.h>
 #include <torch/torch.h>
 
 #include <vector>
 
 #include "core/framework/model/model_args.h"
-#include "core/framework/request/mm_data.h"
-#include "core/framework/request/mm_input.h"
+#include "core/framework/multimodal/mm_data.h"
 
 namespace xllm {
 
@@ -29,17 +29,20 @@ class ImageProcessor {
  public:
   virtual ~ImageProcessor() = default;
 
-  virtual bool process(const MMInput& mm_inputs, MMData& mm_datas) = 0;
-  virtual torch::Tensor resize(const torch::Tensor& image,
-                               const std::vector<int64_t>& size,
-                               int resample,
-                               bool antialias = true);
-  virtual torch::Tensor centerCrop(const torch::Tensor& image,
-                                   const std::pair<int, int>& cropSize);
-  virtual torch::Tensor rescale(const torch::Tensor& image, double scale);
-  virtual torch::Tensor normalize(const torch::Tensor& image,
-                                  const std::vector<double>& mean,
-                                  const std::vector<double>& std);
+  virtual bool process(const std::vector<torch::Tensor>& images,
+                       std::vector<MMDataItem>& output_items) const = 0;
+};
+
+class ImageNoneProcessor final : public ImageProcessor {
+ public:
+  ImageNoneProcessor() = default;
+  explicit ImageNoneProcessor(const ModelArgs&) {}
+
+  bool process(const std::vector<torch::Tensor>& images,
+               std::vector<MMDataItem>& output_items) const override {
+    LOG(ERROR) << "Image processor is not configured.";
+    return false;
+  }
 };
 
 }  // namespace xllm

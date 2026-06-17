@@ -118,6 +118,40 @@ struct ParallelArgs {
   // cp size
   PROPERTY(int32_t, cp_size) = 1;
 
+  // Derived: CP rank of the current process within its DP group.
+  // rank layout: dp_rank * (cp_size * tp_size) + cp_rank * tp_size + tp_rank
+  [[nodiscard]] int32_t cp_rank() const noexcept {
+    if (cp_size_ <= 1) {
+      return 0;
+    }
+    int32_t tp_sz = world_size_ / dp_size_ / cp_size_;
+    return (rank_ % (cp_size_ * tp_sz)) / tp_sz;
+  }
+
+  // KV-cache split width. 0 == "follow cp_size" (legacy). Use
+  // `kv_split_size_effective()` instead of reading the raw value when computing
+  // strides / block sizes; the raw setter is kept so the engine can override
+  // the per-instance value (e.g. PD link negotiation) without touching gflags.
+  PROPERTY(int32_t, kv_split_size) = 0;
+
+  // Effective KV split width: kv_split_size_ if explicitly set, otherwise
+  // cp_size_. When this equals 1 with cp_size_ > 1, each CP rank holds a
+  // complete KV replica and the ATB prefix AllGather can be skipped.
+  [[nodiscard]] int32_t kv_split_size_effective() const noexcept {
+    return kv_split_size_ > 0 ? kv_split_size_ : cp_size_;
+  }
+
+  // KV-split rank: global rank block index over world_size / kv_split_size.
+  // Aligns with MappingNPU::get_kv_split_group (get_dp_group stride) and ATB
+  // kvSplitInfo.rankIds ordering used by the prefix AllGather.
+  [[nodiscard]] int32_t kv_split_rank() const noexcept {
+    const int32_t kv = kv_split_size_effective();
+    if (kv <= 1) {
+      return 0;
+    }
+    return rank_ / (world_size_ / kv);
+  }
+
   // tp size
   PROPERTY(int32_t, tp_size) = 1;
 
@@ -146,6 +180,7 @@ struct ParallelArgs {
   ProcessGroup* process_group_ = nullptr;
   ProcessGroup* dp_local_process_group_ = nullptr;
   ProcessGroup* tp_group_ = nullptr;
+  ProcessGroup* encoder_dp_group_ = nullptr;
   ProcessGroup* single_rank_group_ = nullptr;
   // Sequence-parallel communication group used by prefill attention.
   // In the current implementation this aliases the TP group because SP uses

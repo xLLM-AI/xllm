@@ -1,0 +1,52 @@
+include(cc_library)
+
+cc_library(
+  NAME
+    config
+  HDRS
+    beam_search_config.h
+    config_utils.h
+    kv_cache_config.h
+    disagg_pd_config.h
+    distributed_config.h
+    dit_config.h
+    eplb_config.h
+    execution_config.h
+    help_formatter.h
+    kernel_config.h
+    kv_cache_store_config.h
+    load_config.h
+    model_config.h
+    option_category.h
+    parallel_config.h
+    profile_config.h
+    rec_config.h
+    scheduler_config.h
+    service_config.h
+    speculative_config.h
+  SRCS
+    beam_search_config.cpp
+    config_utils.cpp
+    kv_cache_config.cpp
+    disagg_pd_config.cpp
+    distributed_config.cpp
+    dit_config.cpp
+    eplb_config.cpp
+    execution_config.cpp
+    kernel_config.cpp
+    kv_cache_store_config.cpp
+    load_config.cpp
+    model_config.cpp
+    parallel_config.cpp
+    profile_config.cpp
+    rec_config.cpp
+    scheduler_config.cpp
+    service_config.cpp
+    speculative_config.cpp
+  DEPS
+    gflags::gflags
+    glog::glog
+    nlohmann_json::nlohmann_json
+    :platform
+    :util
+)

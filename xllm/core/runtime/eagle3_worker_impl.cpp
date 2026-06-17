@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "common/global_flags.h"
+#include "core/framework/config/speculative_config.h"
 #include "framework/model_loader.h"
 
 namespace xllm {
@@ -52,7 +53,8 @@ Eagle3WorkerImpl::Eagle3WorkerImpl(const ParallelArgs& parallel_args,
                     options,
                     eagle3_main_options(options),
                     eagle3_draft_options(options),
-                    FLAGS_enable_opt_validate_probs) {}
+                    ::xllm::SpeculativeConfig::get_instance()
+                        .enable_opt_validate_probs()) {}
 
 bool Eagle3WorkerImpl::init_model(const std::string& model_weights_path,
                                   int32_t random_seed,

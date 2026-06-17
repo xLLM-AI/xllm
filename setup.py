@@ -18,32 +18,47 @@ except ModuleNotFoundError:
 
 from scripts.build_support.env import (
     get_cxx_abi,
+    get_torch_root_path,
     set_cuda_envs,
     set_ilu_envs,
     set_mlu_envs,
     set_musa_envs,
     set_npu_envs,
+    set_dcu_envs,
 )
 from scripts.build_support.utils import (
     check_and_install_pre_commit,
+    get_ascend_platform,
     get_base_dir,
     get_cmake_dir,
     get_cpu_arch,
     get_device_type,
     get_python_version,
+    get_torch_cmake_prefix_path,
     get_torch_version,
     get_version,
     pre_build,
     read_readme,
 )
+from scripts.logger import logger
 
 BUILD_TEST_FILE: bool = True
 BUILD_EXPORT: bool = True
 
 
+def _ensure_tilelang_ascend_ready(target_platform: str, arch: str) -> None:
+    compiler_parent = os.path.join(get_base_dir(), "xllm")
+    if compiler_parent not in sys.path:
+        sys.path.insert(0, compiler_parent)
+    from compiler.tilelang.bootstrap import prepare_ascend
+
+    prepare_ascend(target_platform, arch)
+
+
 def _maybe_compile_tilelang_kernels(device: str) -> None:
     if device != "npu":
         return
+    target_platform = get_ascend_platform()
 
     output_root = os.path.join(get_cmake_dir(), "xllm", "compiler", "tilelang")
     os.makedirs(output_root, exist_ok=True)
@@ -59,8 +74,10 @@ def _maybe_compile_tilelang_kernels(device: str) -> None:
         "ascend",
         "--output-root",
         output_root,
+        "--device",
+        target_platform,
     ]
-    print("[INFO] compiling TileLang kernels via source-tree launcher")
+    logger.info("compiling TileLang kernels via source-tree launcher")
     subprocess.check_call(cmd, cwd=base_dir, env=env)
 
 
@@ -68,16 +85,23 @@ def _stage_triton_npu_runtime_binaries(base_dir: str, extdir: str, device: str) 
     if device != "npu":
         return
 
-    source_dir = os.path.join(
-        base_dir,
-        "third_party",
-        "torch_npu_ops",
-        "triton_npu",
-        "binary",
-    )
+    env_path = os.environ.get("TRITON_BINARY_PATH")
+    if env_path and os.path.isdir(env_path):
+        source_dir = env_path
+    else:
+        source_dir = os.path.join(
+            get_cmake_dir(),
+            "third_party",
+            "torch_npu_ops",
+            "triton_npu",
+            "binary",
+        )
+
     if not os.path.isdir(source_dir):
         raise RuntimeError(
-            f"Triton NPU binary directory does not exist: {source_dir}"
+            f"Triton NPU binary directory does not exist: {source_dir}\n"
+            "Hint: Ensure the CMake build completed successfully, or set "
+            "TRITON_BINARY_PATH to a directory containing pre-built binaries."
         )
 
     dest_dir = os.path.join(extdir, "triton_npu", "binary")
@@ -99,8 +123,8 @@ def _stage_triton_npu_runtime_binaries(base_dir: str, extdir: str, device: str) 
         raise RuntimeError(
             f"No Triton NPU runtime binaries were found under: {source_dir}"
         )
-    print(f"[INFO] staged {copied_count} Triton NPU runtime asset(s) into {dest_dir}")
-        
+    logger.info(f"Staged {copied_count} Triton NPU runtime asset(s) into {dest_dir}")
+
 class CMakeExtension(Extension):
     def __init__(self, name: str, path: str, sourcedir: str = "") -> None:
         super().__init__(name, sources=[])
@@ -149,9 +173,8 @@ class ExtBuild(build_ext):
             # build extensions
             for ext in self.extensions:
                 self.build_extension(ext)
-        except Exception as e:
-            print("ERROR: Build failed.")
-            print(f"Details: {e}")
+        except Exception:
+            logger.exception("Build failed.")
             exit(1)
 
     def build_extension(self, ext: CMakeExtension) -> None:
@@ -171,13 +194,19 @@ class ExtBuild(build_ext):
         default_jobs = os.cpu_count() or 1
         max_jobs: str = os.getenv("MAX_JOBS", str(default_jobs))
         max_jobs_int: int = int(max_jobs)
-        
+
         # Limit archive (ar/ranlib) concurrency to avoid file locking conflicts.
         # The ar tool requires exclusive access to archive files (.a files) when
         # creating or updating static libraries. When multiple ar processes attempt
         # to modify the same archive file simultaneously, they compete for file locks,
         # which can cause deadlocks and hang the build process.
         archive_jobs: int = min(8, max(1, max_jobs_int // 4))
+
+        if self.device is None:
+            raise ValueError("Please set --device to npu, mlu, cuda, dcu, ilu or musa.")
+        if self.arch is None:
+            raise ValueError("Please set --arch to x86 or arm.")
+
         cmake_args: list[str] = [
             "-G",
             "Ninja",
@@ -194,11 +223,6 @@ class ExtBuild(build_ext):
             f"-DCMAKE_JOB_POOLS=archive={archive_jobs}",
         ]
 
-        if self.device is None:
-            raise ValueError("Please set --device to npu or mlu or cuda or ilu or musa.")
-        if self.arch is None:
-            raise ValueError("Please set --arch to x86 or arm.")
-
         if self.device == "npu":
             cmake_args += ["-DUSE_NPU=ON"]
             set_npu_envs()
@@ -210,9 +234,40 @@ class ExtBuild(build_ext):
             torch_cuda_architectures = os.getenv("TORCH_CUDA_ARCH_LIST")
             if not torch_cuda_architectures:
                 raise ValueError("Please set TORCH_CUDA_ARCH_LIST environment variable, e.g. export TORCH_CUDA_ARCH_LIST=\"8.0 8.9 9.0 10.0 12.0\"")
-            cmake_args += ["-DUSE_CUDA=ON", 
+            cmake_args += ["-DUSE_CUDA=ON",
                            f"-DTORCH_CUDA_ARCH_LIST={torch_cuda_architectures}"]
             set_cuda_envs()
+
+        elif self.device == "dcu":
+            import torch
+
+            if getattr(torch.version, "hip", None):
+                dcu_arch = os.getenv("PYTORCH_ROCM_ARCH") or os.getenv("CMAKE_HIP_ARCHITECTURES")
+                torch_root = get_torch_root_path()
+                if not torch_root:
+                    raise RuntimeError("Unable to locate PyTorch package directory.")
+                cmake_args += [
+                    "-DUSE_DCU=ON",
+                    f"-DROCM_PATH={os.getenv('DCU_PATH', '/opt/dtk')}",
+                    f"-DTORCH_CMAKE_PREFIX={get_torch_cmake_prefix_path()}",
+                    f"-DTORCH_PKG_DIR={torch_root}",
+                ]
+                if dcu_arch:
+                    cmake_args += [f"-DCMAKE_HIP_ARCHITECTURES={dcu_arch}"]
+
+                # Pass FLASH_ATTENTION_LIB to CMake so the DCU layers can
+                # link against libflash_attention.so (prefix prefill/decode).
+                flash_attn_lib = os.getenv("FLASH_ATTENTION_LIB")
+                if flash_attn_lib:
+                    cmake_args += [f"-DFLASH_ATTENTION_LIB={flash_attn_lib}"]
+
+                set_dcu_envs()
+            else:
+                raise RuntimeError(
+                    "DCU build requires a HIP/ROCm PyTorch environment. "
+                    "Please install a PyTorch build with torch.version.hip set, "
+                    "or choose a different --device."
+                )
         elif self.device == "ilu":
             cmake_args += ["-DUSE_ILU=ON"]
             set_ilu_envs()
@@ -222,7 +277,7 @@ class ExtBuild(build_ext):
             global BUILD_TEST_FILE
             BUILD_TEST_FILE = False
         else:
-            raise ValueError("Please set --device to npu or mlu or cuda or ilu or musa.")
+            raise ValueError("Please set --device to npu, mlu, cuda, dcu, ilu or musa.")
 
         product: str = "xllm"
         if self.generate_so:
@@ -241,14 +296,14 @@ class ExtBuild(build_ext):
             cmake_args += ["-DUSE_CXX11_ABI=ON", "-D_GLIBCXX_USE_CXX11_ABI=1"]
         else:
             cmake_args += ["-DUSE_CXX11_ABI=OFF", "-D_GLIBCXX_USE_CXX11_ABI=0"]
-        
+
         build_args = ["--config", build_type]
         build_args += ["-j" + max_jobs]
 
         env: dict[str, str] = os.environ.copy()
         env["VCPKG_MAX_CONCURRENCY"] = str(max_jobs)
-        print("CMake Args: ", cmake_args)
-        print("Env: ", env)
+        logger.info(f"CMake Args: {cmake_args}")
+        logger.info(f"Env: {env}")
 
         self.build_cmake_targets(ext, cmake_args, build_args, env, extdir, product)
 
@@ -329,13 +384,13 @@ class ExtBuildSingleTest(ExtBuild):
             os.path.join(extdir, self.test_name),
             os.path.join(cmake_dir, "xllm", "core", self.test_name),
         ]
-        
+
         # Check possible paths first
         for path in possible_paths:
             if os.path.exists(path) and os.access(path, os.X_OK):
                 test_executable = path
                 break
-        
+
         # If not found, try recursive search in build directory
         if not test_executable:
             for root, dirs, files in os.walk(cmake_dir):
@@ -344,28 +399,27 @@ class ExtBuildSingleTest(ExtBuild):
                     if os.access(candidate, os.X_OK):
                         test_executable = candidate
                         break
-        
+
         if not test_executable:
             # If not found, try using ctest to run
-            print(f"⚠️  Warning: Could not find test executable {self.test_name}, trying ctest...")
+            logger.warning(f"⚠️  Could not find test executable {self.test_name}, trying ctest...")
             try:
                 subprocess.check_call(
                     ["ctest", "-R", self.test_name, "--verbose"],
                     cwd=cmake_dir,
                     env=env
                 )
-                print(f"✅ Test {self.test_name} passed!")
-            except subprocess.CalledProcessError as e:
-                print(f"❌ Failed to run test {self.test_name}")
+                logger.info(f"✅ Test {self.test_name} passed!")
+            except subprocess.CalledProcessError:
+                logger.exception(f"❌ Failed to run test {self.test_name}")
                 raise
         else:
-            # Run test executable directly
-            print(f"🚀 Running test: {test_executable}")
+            logger.info(f"🚀 Running test: {test_executable}")
             try:
                 subprocess.check_call([test_executable], cwd=os.path.dirname(test_executable), env=env)
-                print(f"✅ Test {self.test_name} passed!")
+                logger.info(f"✅ Test {self.test_name} passed!")
             except subprocess.CalledProcessError as e:
-                print(f"❌ Test {self.test_name} failed with exit code {e.returncode}")
+                logger.exception(f"❌ Test {self.test_name} failed with exit code {e.returncode}")
                 raise
 
 class BuildDistWheel(bdist_wheel):
@@ -397,11 +451,6 @@ class BuildDistWheel(bdist_wheel):
         if torch_version:
             name += f"_torch{torch_version}"
 
-        if get_cxx_abi():
-            name += "_cxx11_abi"
-        else:
-            name += "_no_cxx11_abi"
-
         self.distribution.metadata.name = name
         super().finalize_options()
 
@@ -410,10 +459,10 @@ class BuildDistWheel(bdist_wheel):
         build_ext_cmd.device = self.device
         build_ext_cmd.arch = self.arch
 
-        print("🔨 build project...")
+        logger.info("🔨 build project...")
         self.run_command('build')
 
-        print("🧪 testing UT...")
+        logger.info("🧪 testing UT...")
         self.run_command('test')
 
         if self.arch == 'arm':
@@ -421,7 +470,7 @@ class BuildDistWheel(bdist_wheel):
         else:
             ext_path = get_base_dir() + f"/build/lib.linux-x86_64-cpython-{get_python_version()}/"
         if len(ext_path) == 0:
-            print("❌ Build wheel failed, not found path.")
+            logger.error("❌ Build wheel failed, not found path.")
             exit(1)
         tmp_path = os.path.join(ext_path, 'xllm')
         for root, dirs, files in os.walk(tmp_path):
@@ -438,7 +487,7 @@ class BuildDistWheel(bdist_wheel):
 class TestUT(Command):
     description = "Run all testing binary."
     user_options = []
-    
+
     # Whitelist: tests that must run sequentially (not in parallel with others)
     # Add test names here if they use fork() or have device initialization conflicts
     # Note: Use test case name patterns (from gtest), not executable names
@@ -456,6 +505,10 @@ class TestUT(Command):
         pass
 
     def run_ctest(self, cmake_dir: str) -> int:
+        default_parallel: int = max(os.cpu_count() or 1, 8)
+        test_parallel: str = os.getenv("CTEST_PARALLEL", str(default_parallel))
+        logger.info(f"Test parallelism: {test_parallel} (set CTEST_PARALLEL to override)")
+
         def run_subprocess_with_streaming(
             cmd: list[str],
             error_message: str,
@@ -470,53 +523,55 @@ class TestUT(Command):
                 text=True,
                 bufsize=1,
             )
-            
+
             if process.stdout is None:
                 raise RuntimeError("Failed to capture subprocess stdout for streaming.")
 
             output_lines: list[str] = []
             for line in iter(process.stdout.readline, ''):
-                print(line, end='')
+                # Stream raw subprocess output as-is to preserve ctest formatting.
+                sys.stdout.write(line)
+                sys.stdout.flush()
                 output_lines.append(line)
-            
+
             return_code: int = process.wait()
-            
+
             # Warn if no tests were found, but don't fail (some backends may not compile certain tests)
             if warn_if_no_tests and return_code == 0:
                 output_text: str = ''.join(output_lines)
                 if 'No tests were found' in output_text:
-                    print(f"No tests matched the pattern (this is OK for some backends).")
+                    logger.warning("No tests matched the pattern (this is OK for some backends).")
                     return
-            
+
             if return_code != 0:
-                print(error_message)
-                exit(1)
-        
+                logger.error(error_message)
+                raise subprocess.CalledProcessError(return_code, cmd)
+
         try:
             # Step 1: Run all tests EXCEPT sequential ones in parallel
             if self.SEQUENTIAL_TESTS:
                 exclude_pattern = '|'.join(self.SEQUENTIAL_TESTS)
-                print("=" * 80)
-                print(f"Running tests in parallel (excluding: {', '.join(self.SEQUENTIAL_TESTS)})...")
-                print("=" * 80)
+                logger.info("=" * 80)
+                logger.info(f"Running tests in parallel (excluding: {', '.join(self.SEQUENTIAL_TESTS)})...")
+                logger.info("=" * 80)
                 run_subprocess_with_streaming(
-                    ['ctest', '--parallel', '8', '--repeat', 'until-pass:5', '-E', exclude_pattern],
+                    ['ctest', '--parallel', test_parallel, '--repeat', 'until-pass:5', '-E', exclude_pattern],
                     "Parallel tests failed."
                 )
             else:
-                print("=" * 80)
-                print("Running all tests in parallel...")
-                print("=" * 80)
+                logger.info("=" * 80)
+                logger.info("Running all tests in parallel...")
+                logger.info("=" * 80)
                 run_subprocess_with_streaming(
-                    ['ctest', '--parallel', '8', '--repeat', 'until-pass:5'],
+                    ['ctest', '--parallel', test_parallel, '--repeat', 'until-pass:5'],
                     "Parallel tests failed."
                 )
-            
+
             # Step 2: Run sequential tests one by one
             for idx, test_name in enumerate(self.SEQUENTIAL_TESTS, start=2):
-                print("\n" + "=" * 80)
-                print(f"Step {idx}: Running {test_name} sequentially...")
-                print("=" * 80)
+                logger.info("=" * 80)
+                logger.info(f"Step {idx}: Running {test_name} sequentially...")
+                logger.info("=" * 80)
                 # Use pattern matching to include all test cases under the test class
                 # e.g., ReduceScatterMultiDeviceTest matches ReduceScatterMultiDeviceTest.BasicTest, etc.
                 run_subprocess_with_streaming(
@@ -524,13 +579,13 @@ class TestUT(Command):
                     f"Sequential test {test_name} failed.",
                     warn_if_no_tests=True
                 )
-            
-            print("\n" + "=" * 80)
-            print("All tests passed!")
-            print("=" * 80)
+
+            logger.info("=" * 80)
+            logger.info("All tests passed!")
+            logger.info("=" * 80)
             return 0
         except subprocess.CalledProcessError as e:
-            print(e.stderr)
+            logger.exception(f"ctest failed: {e.stderr}")
             exit(1)
 
     def run(self) -> None:
@@ -567,11 +622,11 @@ class SingleTest(Command):
         build_ext.arch = self.arch
         build_ext.generate_so = self.generate_so
         build_ext.finalize_options()
-        
+
         # Ensure extension modules are set
         if not hasattr(build_ext, 'extensions') or not build_ext.extensions:
             build_ext.extensions = self.distribution.ext_modules
-        
+
         # Run build
         build_ext.run()
 
@@ -581,18 +636,18 @@ def parse_arguments() -> dict[str, Any]:
         epilog='Example: python setup.py build',
         usage='%(prog)s [COMMAND] [OPTIONS]'
     )
-    
+
     parser.add_argument(
         'setup_args',
         nargs='*',
         metavar='argparse.REMAINDER',
         help='setup command (build, test, bdist_wheel, etc.)'
     )
-    
+
     parser.add_argument(
         '--device',
         type=str.lower,
-        choices=['auto', 'npu', 'mlu', 'cuda', 'ilu', 'musa'],
+        choices=['auto', 'npu', 'mlu', 'cuda', 'ilu', 'musa', 'dcu'],
         default='auto',
         help='Device type: npu, mlu, ilu, cuda or musa (case-insensitive)'
     )
@@ -603,7 +658,7 @@ def parse_arguments() -> dict[str, Any]:
         default='false',
         help='Whether to generate so or binary'
     )
-    
+
     parser.add_argument(
         '--test-name',
         type=str,
@@ -612,9 +667,9 @@ def parse_arguments() -> dict[str, Any]:
     )
 
     args = parser.parse_args()
-    
+
     sys.argv = [sys.argv[0]] + args.setup_args
-    
+
     generate_so = args.generate_so.lower() in ('true', '1', 'yes', 'y', 'on')
 
     return {
@@ -630,9 +685,12 @@ if __name__ == "__main__":
     device = config['device']
     if device == 'auto':
         device = get_device_type()
-    print(f"🚀 Build xllm with CPU arch: {arch} and target device: {device}")
+    target_platform = get_ascend_platform() if device == "npu" else None
+    logger.info(f"🚀 Build xllm with CPU arch: {arch} and target device: {device}")
 
-    pre_build()
+    if device == "npu":
+        _ensure_tilelang_ascend_ready(target_platform, arch)
+    pre_build(device)
 
     generate_so = config['generate_so']
     test_name = config.get('test_name')
@@ -641,7 +699,7 @@ if __name__ == "__main__":
         BUILD_TEST_FILE = False
     if "SKIP_EXPORT" in os.environ:
         BUILD_EXPORT = False
-    
+
     version = get_version()
 
     # check and install git pre-commit
@@ -678,8 +736,8 @@ if __name__ == "__main__":
         long_description_content_type="text/markdown",
         url="https://github.com/jd-opensource/xllm",
         project_urls={
-            "Homepage": "https://xllm.readthedocs.io/zh-cn/latest/",
-            "Documentation": "https://xllm.readthedocs.io/zh-cn/latest/",
+            "Homepage": "https://xllm-ai.com/",
+            "Documentation": "https://docs.xllm-ai.com/",
         },
         classifiers=[
             "Intended Audience :: Developers",
@@ -699,11 +757,11 @@ if __name__ == "__main__":
                   "test": test_cmd,
                   'bdist_wheel': BuildDistWheel},
         options=options,
-        packages=find_namespace_packages(include=["scripts.build_support"]),
+        packages=find_namespace_packages(include=["scripts", "scripts.*"]),
         zip_safe=False,
-        py_modules=["xllm/launch_xllm", "xllm/__init__",
+        py_modules=["xllm/launch_server", "xllm/__init__",
                     "xllm/pybind/llm", "xllm/pybind/vlm",
-                    "xllm/pybind/embedding", "xllm/pybind/util",
+                    "xllm/pybind/embedding", "xllm/pybind/utils",
                     "xllm/pybind/args", "xllm/pybind/params",
                     "xllm/pybind/errors", "xllm/pybind/mm_utils"],
         python_requires=">=3.10",

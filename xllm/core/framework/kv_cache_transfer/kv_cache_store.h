@@ -12,7 +12,7 @@
 
 namespace xllm {
 
-struct KVCacheStoreConfig {
+struct KVCacheStoreInitConfig {
   std::string localhost_name = "127.0.0.1";
   std::string protocol = "tcp";
   std::string metadata_server = "";
@@ -27,7 +27,7 @@ class KVCacheStore {
  public:
   ~KVCacheStore();
 
-  bool init(const KVCacheStoreConfig& config,
+  bool init(const KVCacheStoreInitConfig& config,
             std::vector<xllm::KVCache>* host_kv_caches);
 
   uint32_t batch_put(
@@ -66,7 +66,7 @@ class KVCacheStore {
  private:
   bool is_initialized_ = false;
 
-  KVCacheStoreConfig config_;
+  KVCacheStoreInitConfig config_;
   mooncake::ReplicateConfig rep_config_;
 
   std::vector<xllm::KVCache>* host_kv_caches_;

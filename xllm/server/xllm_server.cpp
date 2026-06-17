@@ -23,6 +23,10 @@ limitations under the License.
 #include <csignal>
 
 #include "core/common/global_flags.h"
+#include "core/framework/config/disagg_pd_config.h"
+#include "core/framework/config/distributed_config.h"
+#include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/service_config.h"
 #include "health_reporter.h"
 
 namespace xllm {
@@ -39,14 +43,20 @@ constexpr const char* kApiServiceRoutes =
     "v1/embeddings => EmbeddingsHttp,"
     "v1/models => ModelsHttp,"
     "v1/image/generation => ImageGenerationHttp,"
+    "v1/audio/generation => AudioGenerationHttp,"
+    "v1/video/generation => VideoGenerationHttp,"
     "v1/rerank => RerankHttp,"
     "v1/messages => AnthropicMessagesHttp,"
     "v2/repository/index => ModelVersionsHttp,"
     "fork_master => ForkMasterHttp,"
     "sleep => SleepHttp,"
     "wakeup => WakeupHttp,"
-    "link_d2d => LinkD2DHttp,"
-    "unlink_d2d => UnlinkD2DHttp";
+    "start_profile => StartProfileHttp,"
+    "stop_profile => StopProfileHttp,"
+    "pause => PauseHttp,"
+    "resume => ResumeHttp,"
+    "link_p2p => LinkP2PHttp,"
+    "unlink_p2p => UnlinkP2PHttp";
 
 constexpr const char* kForkOnlyRoute = "fork_master => ForkMasterHttp";
 
@@ -56,9 +66,14 @@ struct ApiRouteBinding {
   const char* routes;
 };
 
-bool is_master_node() { return FLAGS_node_rank == 0; }
+bool is_master_node() {
+  return ::xllm::DistributedConfig::get_instance().node_rank() == 0;
+}
 
-bool is_xtensor_node() { return FLAGS_node_rank != 0 && FLAGS_enable_xtensor; }
+bool is_xtensor_node() {
+  return ::xllm::DistributedConfig::get_instance().node_rank() != 0 &&
+         ::xllm::KVCacheConfig::get_instance().enable_xtensor();
+}
 
 const char* get_api_service_routes_for_current_mode() {
   static constexpr std::array<ApiRouteBinding, 2> kBindings = {{
@@ -127,21 +142,27 @@ bool XllmServer::start(std::unique_ptr<APIService> service) {
   // TODO: enable arean message factory later.
   // options.rpc_pb_message_factory =
   //    brpc::GetArenaRpcPBMessageFactory<1024 * 1024, 1024 * 1024 * 128>();
-  options.idle_timeout_sec = FLAGS_rpc_idle_timeout_s;
-  options.num_threads = FLAGS_num_threads;
+  options.idle_timeout_sec =
+      ::xllm::ServiceConfig::get_instance().rpc_idle_timeout_s();
+  options.num_threads = ::xllm::ServiceConfig::get_instance().num_threads();
   // Use custom health reporter for /health endpoint
   options.health_reporter = &HealthReporter::instance();
-  if (server_->Start(FLAGS_port, &options) != 0) {
-    LOG(ERROR) << "Failed to start server on port " << FLAGS_port;
+  if (server_->Start(::xllm::ServiceConfig::get_instance().port(), &options) !=
+      0) {
+    LOG(ERROR) << "Failed to start server on port "
+               << ::xllm::ServiceConfig::get_instance().port();
     return false;
   }
-  LOG(INFO) << "Brpc Server started on port " << FLAGS_port
-            << ", idle_timeout_s: " << FLAGS_rpc_idle_timeout_s
-            << ", num_threads: " << FLAGS_num_threads;
+  LOG(INFO) << "Brpc Server started on port "
+            << ::xllm::ServiceConfig::get_instance().port()
+            << ", idle_timeout_s: "
+            << ::xllm::ServiceConfig::get_instance().rpc_idle_timeout_s()
+            << ", num_threads: "
+            << ::xllm::ServiceConfig::get_instance().num_threads();
 
   listen_address_ =
       std::string(butil::endpoint2str(server_->listen_address()).c_str());
-  listen_port_ = FLAGS_port;
+  listen_port_ = ::xllm::ServiceConfig::get_instance().port();
   has_initialized_ = true;
 
   auto pid = getpid();
@@ -165,12 +186,14 @@ bool XllmServer::start(std::unique_ptr<APIService> service) {
 
 bool XllmServer::start(std::unique_ptr<DisaggPDService> service) {
   std::string addr("");
-  if (!FLAGS_host.empty()) {
-    addr = FLAGS_host + ":" + std::to_string(FLAGS_disagg_pd_port);
+  if (!::xllm::ServiceConfig::get_instance().host().empty()) {
+    addr =
+        ::xllm::ServiceConfig::get_instance().host() + ":" +
+        std::to_string(::xllm::DisaggPDConfig::get_instance().disagg_pd_port());
   }
   if (!create_server((google::protobuf::Service*)(service.get()),
                      addr,
-                     FLAGS_disagg_pd_port,
+                     ::xllm::DisaggPDConfig::get_instance().disagg_pd_port(),
                      "Disagg PD")) {
     return false;
   }
@@ -183,12 +206,14 @@ bool XllmServer::start(std::unique_ptr<DisaggPDService> service) {
 
 bool XllmServer::start(std::unique_ptr<PDOOCService> service) {
   std::string addr("");
-  if (!FLAGS_host.empty()) {
-    addr = FLAGS_host + ":" + std::to_string(FLAGS_disagg_pd_port);
+  if (!::xllm::ServiceConfig::get_instance().host().empty()) {
+    addr =
+        ::xllm::ServiceConfig::get_instance().host() + ":" +
+        std::to_string(::xllm::DisaggPDConfig::get_instance().disagg_pd_port());
   }
   if (!create_server((google::protobuf::Service*)(service.get()),
                      addr,
-                     FLAGS_disagg_pd_port,
+                     ::xllm::DisaggPDConfig::get_instance().disagg_pd_port(),
                      "PD OOC")) {
     return false;
   }
@@ -242,8 +267,9 @@ bool XllmServer::create_server(google::protobuf::Service* service,
   }
 
   brpc::ServerOptions options;
-  options.idle_timeout_sec = FLAGS_rpc_idle_timeout_s;
-  options.num_threads = FLAGS_num_threads;
+  options.idle_timeout_sec =
+      ::xllm::ServiceConfig::get_instance().rpc_idle_timeout_s();
+  options.num_threads = ::xllm::ServiceConfig::get_instance().num_threads();
   butil::EndPoint endpoint;
   if (!addr.empty()) {
     listen_address_ = addr;
@@ -267,9 +293,10 @@ bool XllmServer::create_server(google::protobuf::Service* service,
   listen_port_ = server_->listen_address().port;
 
   LOG(INFO) << server_name << " server started on address "
-            << server_->listen_address()
-            << ", idle_timeout_sec: " << FLAGS_rpc_idle_timeout_s
-            << ", num_threads: " << FLAGS_num_threads;
+            << server_->listen_address() << ", idle_timeout_sec: "
+            << ::xllm::ServiceConfig::get_instance().rpc_idle_timeout_s()
+            << ", num_threads: "
+            << ::xllm::ServiceConfig::get_instance().num_threads();
 
   return true;
 }

@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include "common/global_flags.h"
+#include "core/framework/config/execution_config.h"
 #include "platform/device.h"
 #include "util/env_var.h"
 #if defined(USE_NPU)
@@ -39,7 +40,7 @@ bool should_enable_async_tiling_copy_stream() {
   // ATB copy-stream teardown is not reversible for the same context on the
   // current CANN/PTA stack, so contexts that may enter graph capture must not
   // pre-create the helper stream.
-  if (FLAGS_enable_graph) {
+  if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
     return false;
   }
   return util::get_bool_env("ATB_USE_TILING_COPY_STREAM", false);
@@ -82,6 +83,21 @@ ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
       context_(context) {}
 #endif
 
+ModelContext ModelContext::with_parallel_args(
+    const ParallelArgs& parallel_args) const {
+#if defined(USE_NPU)
+  ModelContext derived(
+      parallel_args, model_args_, quant_args_, tensor_options_, context_);
+  derived.atb_workspace_ = atb_workspace_;
+#else
+  ModelContext derived(
+      parallel_args, model_args_, quant_args_, tensor_options_);
+#endif
+  derived.model_id_ = model_id_;
+  derived.optimization_config_ = optimization_config_;
+  return derived;
+}
+
 void ModelContext::derive_optimization_config() {
   // default disable fused kernel
   optimization_config_.enable_fused_spec_kernel = false;
@@ -95,16 +111,11 @@ void ModelContext::derive_optimization_config() {
     // The current implementation of fused spec kernel is not stable.
     optimization_config_.enable_fused_spec_kernel = false;
     // fused mla only support smoothquant mode
-    // TODO: the fused kernel will support "glm_moe_dsa" model soon.
-    bool is_glm_moe_dsa =
-        model_args_.model_type().find("glm_moe_dsa") != std::string::npos;
     optimization_config_.enable_fused_mla_kernel =
-        quant_args_.quant_method() == kQuantMethodSmoothquant &&
-        !is_glm_moe_dsa;
-    // TODO: enable fused indexer qk for mlu backend
+        quant_args_.quant_method() == kQuantMethodSmoothquant;
     // The current implementation of fused indexer qk is missing the
     //  weights and bias loading.
-    optimization_config_.enable_fused_indexer_qk = !is_glm_moe_dsa;
+    optimization_config_.enable_fused_indexer_qk = true;
   }
 }
 

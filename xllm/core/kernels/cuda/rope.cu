@@ -17,6 +17,7 @@ limitations under the License.
 #include <torch/all.h>
 
 #include "cuda_ops_api.h"
+#include "device_utils.cuh"
 
 // ref to:
 // https://github.com/vllm-project/vllm/blob/main/csrc/pos_encoding_kernels.cu
@@ -98,7 +99,7 @@ inline __device__ void apply_rotary_embedding(
 }
 
 template <typename scalar_t, bool IS_NEOX>
-__global__ void rotary_embedding_kernel(
+__global__ void XLLM_KERNEL_ATTR(512) rotary_embedding_kernel(
     const int64_t* __restrict__ positions,  // [batch_size, seq_len] or
                                             // [num_tokens]
     scalar_t* __restrict__ query,           // [batch_size, seq_len, num_heads,
@@ -106,10 +107,10 @@ __global__ void rotary_embedding_kernel(
                                    // head_size]
     scalar_t* __restrict__ key,  // nullptr or
                                  // [batch_size, seq_len, num_kv_heads,
-                                 // head_size] or [num_tokens, num_kv_heads,
-                                 // head_size]
-    const scalar_t* __restrict__ cos_sin_cache,  // [max_position, 2, rot_dim //
-                                                 // 2]
+    // head_size] or [num_tokens, num_kv_heads,
+    // head_size]
+    const scalar_t* __restrict__ cos_sin_cache,  // [max_position, 2,
+                                                 // rot_dim // 2]
     const int rot_dim,
     const int64_t query_stride,
     const int64_t key_stride,

@@ -47,6 +47,8 @@ class ProfileManager {
     PROPERTY(int32_t,
              max_tokens_per_batch) = std::numeric_limits<int32_t>::max();
 
+    PROPERTY(int32_t, max_seqs_per_batch) = 1024;
+
     PROPERTY(int32_t, max_global_ttft_ms) = std::numeric_limits<int32_t>::max();
 
     PROPERTY(int32_t, max_global_tpot_ms) = std::numeric_limits<int32_t>::max();

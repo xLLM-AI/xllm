@@ -77,13 +77,13 @@ SuffixWorkerImpl::SuffixWorkerImpl(const ParallelArgs& parallel_args,
 
 std::optional<ForwardOutput> SuffixWorkerImpl::step_empty(
     const ForwardInput& input) {
-  if (!input.input_params.batch_forward_type.is_decode()) {
+  if (!input.input_params.meta.batch_forward_type.is_decode()) {
     auto output = impl_->step(input);
     output->sample_output.embeddings = torch::Tensor();
     return output;
   } else {
     ForwardInput new_input = input;
-    for (auto& it : new_input.input_params.dp_global_token_nums) {
+    for (auto& it : new_input.input_params.parallel.dp_global_token_nums) {
       it *= options_.num_speculative_tokens() + 1;
     }
 
@@ -104,15 +104,14 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_prefill(
               timer.elapsed_seconds());
 
   const auto& input_params = input.input_params;
-  const int32_t num_sequences = input_params.num_sequences;
-  const auto& request_ids = input_params.request_ids;
+  const int32_t num_sequences = input_params.meta.num_sequences;
+  const auto& request_ids = input_params.embedding.request_ids;
 
   if (suffix_cache_ != nullptr &&
       request_ids.size() == static_cast<size_t>(num_sequences)) {
-    torch::Tensor token_ids = safe_to(input.token_ids, torch::kCPU);
-    Slice<int32_t> tokens_ids_slice = {
-        token_ids.data_ptr<int32_t>(),
-        static_cast<size_t>(input.token_ids.numel())};
+    const torch::Tensor& token_ids = input.token_ids_host;
+    Slice<int32_t> tokens_ids_slice = {token_ids.data_ptr<int32_t>(),
+                                       static_cast<size_t>(token_ids.numel())};
 
     int32_t start_idx = 0;
     for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
@@ -175,9 +174,9 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_prefill(
 std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
     const ForwardInput& input) {
   const int32_t num_speculative_tokens = options_.num_speculative_tokens();
-  const int32_t num_sequences = input.input_params.num_sequences;
+  const int32_t num_sequences = input.input_params.meta.num_sequences;
   const int32_t num_val_tokens = num_speculative_tokens + 1;
-  const auto& request_ids = input.input_params.request_ids;
+  const auto& request_ids = input.input_params.embedding.request_ids;
 
   const bool has_request_ids =
       suffix_cache_ != nullptr &&
@@ -201,7 +200,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
     suffix_active_decode_req_ids_ = std::move(current_req_ids);
   }
 
-  torch::Tensor input_token_ids = safe_to(input.token_ids, torch::kCPU);
+  const torch::Tensor& input_token_ids = input.token_ids_host;
   Slice<int32_t> input_tokens_slice = {
       input_token_ids.data_ptr<int32_t>(),
       static_cast<size_t>(input_token_ids.numel())};
@@ -411,7 +410,6 @@ SampleOutput SuffixWorkerImpl::validate(
                                          /*all_greedy_sample=*/true,
                                          target_output.logprobs,
                                          target_output.max_top_logprobs,
-                                         rate_controller_,
                                          enable_fused_kernel_);
 
   SampleOutput sample_output =
@@ -424,13 +422,6 @@ SampleOutput SuffixWorkerImpl::validate(
   auto embeddings = target_output.sample_output.embeddings;
   sample_output.embeddings =
       embeddings.view({batch_size, num_val_tokens, embeddings.size(-1)});
-
-  torch::Tensor mask = (sample_output.next_tokens == -1).to(torch::kInt64);
-  size_t count = mask.sum().item<int64_t>();
-  size_t num_draft_tokens =
-      static_cast<size_t>(batch_size) * options_.num_speculative_tokens();
-  COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
-  COUNTER_ADD(speculative_num_accepted_tokens_total, num_draft_tokens - count);
 
   return sample_output;
 }

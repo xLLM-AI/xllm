@@ -23,7 +23,9 @@ limitations under the License.
 #include <tuple>
 
 #include "common/global_flags.h"
-#include "common/macros.h"
+#include "core/framework/config/beam_search_config.h"
+#include "core/framework/config/model_config.h"
+#include "core/framework/config/rec_config.h"
 #include "logits_utils.h"
 #include "sampler.h"
 #if defined(USE_CUDA)
@@ -48,9 +50,10 @@ static inline bool use_air_log_softmax_env() {
 // Check if fast path sampling can be used for multi-round pipeline.
 static inline bool can_use_fast_path(const SamplingParameters& params) {
   return params.use_beam_search && params.logprobs &&
-         FLAGS_enable_rec_fast_sampler && params.max_top_logprobs > 0 &&
-         !params.top_p.defined() && !FLAGS_enable_qwen3_reranker &&
-         FLAGS_max_decode_rounds > 0;
+         ::xllm::RecConfig::get_instance().enable_rec_fast_sampler() &&
+         params.max_top_logprobs > 0 && !params.top_p.defined() &&
+         !::xllm::ModelConfig::get_instance().enable_qwen3_reranker() &&
+         ::xllm::RecConfig::get_instance().max_decode_rounds() > 0;
 }
 
 static inline torch::Tensor log_softmax_last_dim(
@@ -323,11 +326,11 @@ SampleOutput RecSampler::MultiRoundFastPathSamplingStrategy::forward(
 
   CHECK_EQ(sample_logits.size(0), params.do_sample.size(0));
 
-  auto [topk_values, topk_indices] =
-      sample_logits.topk(params.max_top_logprobs,
-                         /*dim=*/-1,
-                         /*largest=*/true,
-                         /*sorted=*/FLAGS_enable_topk_sorted);
+  auto [topk_values, topk_indices] = sample_logits.topk(
+      params.max_top_logprobs,
+      /*dim=*/-1,
+      /*largest=*/true,
+      /*sorted=*/::xllm::BeamSearchConfig::get_instance().enable_topk_sorted());
   output.top_tokens = (topk_indices.scalar_type() == torch::kLong)
                           ? topk_indices
                           : topk_indices.to(torch::kLong);

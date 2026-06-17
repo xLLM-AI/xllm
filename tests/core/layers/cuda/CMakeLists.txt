@@ -6,6 +6,7 @@ cc_test(
   SRCS
     xattention_test.cpp
   DEPS
+    :config
     :cuda_layers
     :common_layers
     torch

@@ -47,6 +47,11 @@ class RequestBase {
 
   absl::Time created_time() const { return created_time_; }
 
+  // Get the elapsed time since the request was created.
+  double elapsed_seconds() const {
+    return absl::ToDoubleSeconds(absl::Now() - created_time_);
+  }
+
   const std::string& request_id() const { return request_id_; }
 
   const std::string& service_request_id() const { return service_request_id_; }

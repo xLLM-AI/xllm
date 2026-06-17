@@ -13,7 +13,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <gflags/gflags.h>
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
@@ -21,7 +20,8 @@ limitations under the License.
 #include <optional>
 #include <vector>
 
-#include "core/common/global_flags.h"
+#include "core/framework/config/distributed_config.h"
+#include "core/framework/config/parallel_config.h"
 #include "framework/batch/batch_forward_type.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "layers/common/attention_metadata.h"
@@ -214,7 +214,8 @@ TEST(DeepseekV32SPUtilsTest,
 }
 
 TEST(DeepseekV32SPUtilsTest, BuildContextRejectsMixedBatchForwardType) {
-  ScopedFlagValue enable_prefill_sp(FLAGS_enable_prefill_sp, true);
+  ScopedFlagValue enable_prefill_sp(
+      ParallelConfig::get_instance().enable_prefill_sp(), true);
   auto attn_metadata = make_prefill_metadata({8}, {8}, std::nullopt);
   auto tokens = torch::arange(8, torch::TensorOptions().dtype(torch::kInt64));
   xllm::layer::test::MockProcessGroup process_group(torch::kCPU,
@@ -274,8 +275,10 @@ TEST(DeepseekV32SPUtilsTest, BuildZigzagSplitPlanTracksContextLens) {
 
 TEST(DeepseekV32SPUtilsTest,
      BuildDeepseekV32SPContextBuildsMetadataForCurrentRank) {
-  ScopedFlagValue enable_sp(FLAGS_enable_prefill_sp, true);
-  ScopedFlagValue world_size_flag(FLAGS_nnodes, 4);
+  ScopedFlagValue enable_sp(ParallelConfig::get_instance().enable_prefill_sp(),
+                            true);
+  ScopedFlagValue world_size_flag(DistributedConfig::get_instance().nnodes(),
+                                  4);
 
   AttentionMetadata attn_metadata =
       make_prefill_metadata({4, 6, 11}, {12, 16, 32});
@@ -355,8 +358,9 @@ TEST(DeepseekV32SPUtilsTest,
 
 TEST(DeepseekV32SPUtilsTest,
      BuildDeepseekV32SPContextFallsBackWhenSeqShorterThanWorldSize) {
-  ScopedFlagValue enable_sp(FLAGS_enable_prefill_sp, true);
-  ScopedFlagValue nnodes_flag(FLAGS_nnodes, 2);
+  ScopedFlagValue enable_sp(ParallelConfig::get_instance().enable_prefill_sp(),
+                            true);
+  ScopedFlagValue nnodes_flag(DistributedConfig::get_instance().nnodes(), 2);
 
   AttentionMetadata attn_metadata = make_prefill_metadata({3});
   torch::Tensor tokens =
@@ -375,8 +379,10 @@ TEST(DeepseekV32SPUtilsTest,
 
 TEST(DeepseekV32SPUtilsTest,
      BuildDeepseekV32SPContextAcceptsChunkedPrefillBatch) {
-  ScopedFlagValue enable_sp(FLAGS_enable_prefill_sp, true);
-  ScopedFlagValue world_size_flag(FLAGS_nnodes, 4);
+  ScopedFlagValue enable_sp(ParallelConfig::get_instance().enable_prefill_sp(),
+                            true);
+  ScopedFlagValue world_size_flag(DistributedConfig::get_instance().nnodes(),
+                                  4);
 
   AttentionMetadata attn_metadata = make_prefill_metadata(
       {4, 6}, {16, 22}, std::nullopt, BatchForwardType::CHUNKED_PREFILL);
@@ -414,8 +420,10 @@ TEST(DeepseekV32SPUtilsTest,
 }
 
 TEST(DeepseekV32SPUtilsTest, BuildDeepseekV32SPContextRejectsMixedBatch) {
-  ScopedFlagValue enable_sp(FLAGS_enable_prefill_sp, true);
-  ScopedFlagValue world_size_flag(FLAGS_nnodes, 4);
+  ScopedFlagValue enable_sp(ParallelConfig::get_instance().enable_prefill_sp(),
+                            true);
+  ScopedFlagValue world_size_flag(DistributedConfig::get_instance().nnodes(),
+                                  4);
 
   AttentionMetadata attn_metadata = make_prefill_metadata({4, 6}, {16, 22});
   torch::Tensor tokens =
@@ -433,8 +441,10 @@ TEST(DeepseekV32SPUtilsTest, BuildDeepseekV32SPContextRejectsMixedBatch) {
 }
 
 TEST(DeepseekV32SPUtilsTest, BuildSPContextTracksSegmentRuntimeView) {
-  ScopedFlagValue enable_sp(FLAGS_enable_prefill_sp, true);
-  ScopedFlagValue world_size_flag(FLAGS_nnodes, 4);
+  ScopedFlagValue enable_sp(ParallelConfig::get_instance().enable_prefill_sp(),
+                            true);
+  ScopedFlagValue world_size_flag(DistributedConfig::get_instance().nnodes(),
+                                  4);
 
   AttentionMetadata attn_metadata = make_prefill_metadata(
       {4, 6, 11},
@@ -505,8 +515,10 @@ TEST(DeepseekV32SPUtilsTest, BuildSegmentTensorCacheTracksPartialPrefixHit) {
 }
 
 TEST(DeepseekV32SPUtilsTest, BuildSPContextKeepsExactBlockRollbackLens) {
-  ScopedFlagValue enable_sp(FLAGS_enable_prefill_sp, true);
-  ScopedFlagValue world_size_flag(FLAGS_nnodes, 4);
+  ScopedFlagValue enable_sp(ParallelConfig::get_instance().enable_prefill_sp(),
+                            true);
+  ScopedFlagValue world_size_flag(DistributedConfig::get_instance().nnodes(),
+                                  4);
 
   AttentionMetadata attn_metadata = make_prefill_metadata(
       {4, 8}, {20, 24}, make_block_table({{100, 101, 102}, {200, 201, 202}}));
@@ -536,7 +548,8 @@ TEST(DeepseekV32SPUtilsTest, BuildSPContextTracksMixedHitMiss) {
       {8, 8}, {8, 20}, make_block_table({{1, 2, 3}, {4, 5, 6}}));
   torch::Tensor tokens =
       torch::arange(0, 16, torch::TensorOptions().dtype(torch::kInt32));
-  ScopedFlagValue enable_sp(FLAGS_enable_prefill_sp, true);
+  ScopedFlagValue enable_sp(ParallelConfig::get_instance().enable_prefill_sp(),
+                            true);
 
   auto maybe_context =
       build_deepseek_v32_sp_context(attn_metadata,
@@ -608,8 +621,10 @@ TEST(DeepseekV32SPUtilsTest, SliceLocalPackedUsesRankOffset) {
 
 TEST(DeepseekV32SPUtilsTest,
      BuildDeepseekV32SPContextReturnsNulloptWhenDisabled) {
-  ScopedFlagValue enable_sp(FLAGS_enable_prefill_sp, false);
-  ScopedFlagValue world_size_flag(FLAGS_nnodes, 4);
+  ScopedFlagValue enable_sp(ParallelConfig::get_instance().enable_prefill_sp(),
+                            false);
+  ScopedFlagValue world_size_flag(DistributedConfig::get_instance().nnodes(),
+                                  4);
 
   AttentionMetadata attn_metadata = make_prefill_metadata({8});
   torch::Tensor tokens =
@@ -642,8 +657,9 @@ TEST(DeepseekV32SPUtilsTest, ReorderByIndexSlicesFirstDimension) {
 }
 
 TEST(DeepseekV32SPUtilsTest, RestoreGatheredToGlobalOrderWithoutPadding) {
-  ScopedFlagValue use_sp(FLAGS_enable_prefill_sp, true);
-  ScopedFlagValue nnodes(FLAGS_nnodes, 4);
+  ScopedFlagValue use_sp(ParallelConfig::get_instance().enable_prefill_sp(),
+                         true);
+  ScopedFlagValue nnodes(DistributedConfig::get_instance().nnodes(), 4);
 
   AttentionMetadata attn_metadata = make_prefill_metadata({16});
   torch::Tensor tokens =
@@ -668,8 +684,9 @@ TEST(DeepseekV32SPUtilsTest, RestoreGatheredToGlobalOrderWithoutPadding) {
 }
 
 TEST(DeepseekV32SPUtilsTest, AllGatherAcrossRanksRestoresGlobalOrder) {
-  ScopedFlagValue use_sp(FLAGS_enable_prefill_sp, true);
-  ScopedFlagValue nnodes(FLAGS_nnodes, 4);
+  ScopedFlagValue use_sp(ParallelConfig::get_instance().enable_prefill_sp(),
+                         true);
+  ScopedFlagValue nnodes(DistributedConfig::get_instance().nnodes(), 4);
 
   AttentionMetadata attn_metadata = make_prefill_metadata({10});
   torch::Tensor tokens =
@@ -775,8 +792,9 @@ TEST(DeepseekV32SPUtilsTest, LaunchAndFinishGatherMatchBlockingGather) {
 }
 
 TEST(DeepseekV32SPUtilsTest, PadToSPRowsExpandsLocalShardToPaddedRows) {
-  ScopedFlagValue use_sp(FLAGS_enable_prefill_sp, true);
-  ScopedFlagValue nnodes(FLAGS_nnodes, 4);
+  ScopedFlagValue use_sp(ParallelConfig::get_instance().enable_prefill_sp(),
+                         true);
+  ScopedFlagValue nnodes(DistributedConfig::get_instance().nnodes(), 4);
 
   AttentionMetadata attn_metadata = make_prefill_metadata({10});
   torch::Tensor tokens =
@@ -805,8 +823,9 @@ TEST(DeepseekV32SPUtilsTest, PadToSPRowsExpandsLocalShardToPaddedRows) {
 }
 
 TEST(DeepseekV32SPUtilsTest, SPContextBuildsGatheredSlotMapping) {
-  ScopedFlagValue use_sp(FLAGS_enable_prefill_sp, true);
-  ScopedFlagValue nnodes(FLAGS_nnodes, 4);
+  ScopedFlagValue use_sp(ParallelConfig::get_instance().enable_prefill_sp(),
+                         true);
+  ScopedFlagValue nnodes(DistributedConfig::get_instance().nnodes(), 4);
 
   AttentionMetadata attn_metadata = make_prefill_metadata({10});
   attn_metadata.slot_mapping =
@@ -830,8 +849,9 @@ TEST(DeepseekV32SPUtilsTest, SPContextBuildsGatheredSlotMapping) {
 
 TEST(DeepseekV32SPUtilsTest,
      NonChunkedSegmentSliceRequiresRestoredGlobalDenseOrder) {
-  ScopedFlagValue use_sp(FLAGS_enable_prefill_sp, true);
-  ScopedFlagValue nnodes(FLAGS_nnodes, 2);
+  ScopedFlagValue use_sp(ParallelConfig::get_instance().enable_prefill_sp(),
+                         true);
+  ScopedFlagValue nnodes(DistributedConfig::get_instance().nnodes(), 2);
 
   AttentionMetadata attn_metadata = make_prefill_metadata({4});
   torch::Tensor tokens =
@@ -870,8 +890,9 @@ TEST(DeepseekV32SPUtilsTest,
 }
 
 TEST(DeepseekV32SPUtilsTest, AsyncGatherReturnsGatheredOrder) {
-  ScopedFlagValue use_sp(FLAGS_enable_prefill_sp, true);
-  ScopedFlagValue nnodes(FLAGS_nnodes, 4);
+  ScopedFlagValue use_sp(ParallelConfig::get_instance().enable_prefill_sp(),
+                         true);
+  ScopedFlagValue nnodes(DistributedConfig::get_instance().nnodes(), 4);
 
   AttentionMetadata attn_metadata = make_prefill_metadata({10});
   torch::Tensor tokens =
@@ -925,8 +946,9 @@ TEST(DeepseekV32SPUtilsTest, AsyncGatherReturnsGatheredOrder) {
 }
 
 TEST(DeepseekV32SPUtilsTest, AsyncGatherHelpersMatchBlockingGather) {
-  ScopedFlagValue use_sp(FLAGS_enable_prefill_sp, true);
-  ScopedFlagValue nnodes(FLAGS_nnodes, 4);
+  ScopedFlagValue use_sp(ParallelConfig::get_instance().enable_prefill_sp(),
+                         true);
+  ScopedFlagValue nnodes(DistributedConfig::get_instance().nnodes(), 4);
 
   AttentionMetadata attn_metadata = make_prefill_metadata({10});
   torch::Tensor tokens =

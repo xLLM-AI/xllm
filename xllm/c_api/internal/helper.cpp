@@ -20,6 +20,7 @@ limitations under the License.
 #include <string>
 
 #include "core/common/global_flags.h"
+#include "core/framework/config/rec_config.h"
 #include "core/util/env_var.h"
 #include "core/util/rec_model_utils.h"
 #include "core/util/uuid.h"
@@ -197,7 +198,8 @@ XLLM_Response* build_success_response(const InferenceType& inference_type,
   }
 
   int32_t total_item_count = 0;
-  const int32_t total_threshold = FLAGS_total_conversion_threshold;
+  const int32_t total_threshold =
+      ::xllm::RecConfig::get_instance().total_conversion_threshold();
 
   for (int i = 0; i < output.outputs.size(); i++) {
     const auto& seq_output = output.outputs[i];
@@ -257,7 +259,8 @@ XLLM_Response* build_success_response(const InferenceType& inference_type,
       }
     }
 
-    if (is_onerec_pipeline && FLAGS_enable_convert_tokens_to_item &&
+    if (is_onerec_pipeline &&
+        ::xllm::RecConfig::get_instance().enable_convert_tokens_to_item() &&
         rec_output != nullptr) {
       size_t copied_item_count = 0;
       if (!seq_output.item_ids_list.empty()) {
@@ -284,7 +287,8 @@ XLLM_Response* build_success_response(const InferenceType& inference_type,
       }
     }
 
-    if (is_onerec_pipeline && FLAGS_enable_output_sku_logprobs &&
+    if (is_onerec_pipeline &&
+        ::xllm::RecConfig::get_instance().enable_output_sku_logprobs() &&
         !seq_output.token_ids_logprobs.empty() && rec_output != nullptr) {
       rec_output->rec_token_logprobs_size =
           seq_output.token_ids_logprobs.size();
@@ -307,6 +311,7 @@ XLLM_Response* build_success_response(const InferenceType& inference_type,
     response->usage.prompt_tokens = usage.num_prompt_tokens;
     response->usage.completion_tokens = usage.num_generated_tokens;
     response->usage.total_tokens = usage.num_total_tokens;
+    response->usage.cached_tokens = usage.num_cached_tokens;
   }
 
   return response;
@@ -349,7 +354,7 @@ XLLM_Response* handle_inference_request(
   RecPipelineType rec_pipeline_type = RecPipelineType::kLlmRecDefault;
   if constexpr (std::is_same_v<HandlerType, XLLM_REC_Handler>) {
     rec_pipeline_type = handler->pipeline_type;
-    if (FLAGS_enable_output_sku_logprobs &&
+    if (::xllm::RecConfig::get_instance().enable_output_sku_logprobs() &&
         is_onerec_pipeline_type(rec_pipeline_type)) {
       xllm_request_params.logprobs = true;
     }

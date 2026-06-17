@@ -243,22 +243,24 @@ void XTensorBlockManagerImpl::free(int32_t block_id) {
 }
 
 std::vector<Block> XTensorBlockManagerImpl::allocate_shared(
-    const Slice<int32_t>& tokens_ids,
-    const Slice<Block>& existed_shared_blocks) {
+    const Slice<int32_t>& /*token_ids*/,
+    const Slice<Block>& /*existed_shared_blocks*/,
+    const MMData& /*mm_data*/) {
   // Prefix cache not supported
   VLOG(1) << "allocate_shared called but prefix cache is not supported";
   return {};
 }
 
-void XTensorBlockManagerImpl::cache(const Slice<int32_t>& token_ids,
-                                    std::vector<Block>& blocks,
-                                    size_t existed_shared_blocks_num) {
+void XTensorBlockManagerImpl::cache(const Slice<int32_t>& /*token_ids*/,
+                                    std::vector<Block>& /*blocks*/,
+                                    size_t /*existed_shared_blocks_num*/,
+                                    const MMData& /*mm_data*/) {
   // Prefix cache not supported
   VLOG(1) << "cache called but prefix cache is not supported";
   return;
 }
 
-void XTensorBlockManagerImpl::cache(const std::vector<Block>& blocks) {
+void XTensorBlockManagerImpl::cache(const std::vector<Block>& /*blocks*/) {
   // Prefix cache not supported
   VLOG(1) << "cache called but prefix cache is not supported";
   return;

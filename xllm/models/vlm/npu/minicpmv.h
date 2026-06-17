@@ -31,8 +31,7 @@ limitations under the License.
 #include "models/llm/npu/qwen2.h"
 #include "models/model_registry.h"
 #include "processors/minicpmv_image_processor.h"
-#include "processors/minicpmv_input_processor.h"
-#include "processors/pywarpper_image_processor.h"
+#include "processors/minicpmv_prompt_processor.h"
 
 namespace xllm::npu::model {
 
@@ -823,7 +822,7 @@ class MiniCPMV2_6Impl : public torch::nn::Module {
 
   void prepare_encoder_input(const ModelInputParams& input_params,
                              std::optional<MiniCPMVImageInputs>& image_inputs) {
-    const auto& mm_data = input_params.mm_data;
+    const auto& mm_data = input_params.multimodal.mm_data;
 
     std::vector<torch::Tensor> pixel_values;
     if (const auto& res =
@@ -1007,16 +1006,16 @@ class MiniCPMV2_6Impl : public torch::nn::Module {
         num_slices.data_ptr<int64_t>(),
         num_slices.data_ptr<int64_t>() + num_slices.numel());
     multimodal_embeds["image|embedding"] =
-        image_embedding.split(image_tokens_vec, 0 /*dim*/);
+        image_embedding.split(image_tokens_vec, /*dim=*/0);
 
     return multimodal_embeds;
   }
 
   torch::Tensor get_input_embeddings(const torch::Tensor input_ids,
                                      const ModelInputParams& input_params) {
-    const auto& mm_data = input_params.mm_data;
+    const auto& mm_data = input_params.multimodal.mm_data;
     torch::Tensor multimodal_embeds;
-    if (const auto& emb = mm_data.get<torch::Tensor>("embedding")) {
+    if (const auto& emb = mm_data.get<torch::Tensor>("image|embedding")) {
       multimodal_embeds = emb.value();
     }
     auto inputs_embeds = language_model_->get_input_embeddings(input_ids);
@@ -1047,7 +1046,7 @@ class MiniCPMV2_6Impl : public torch::nn::Module {
   void load_model(std::unique_ptr<ModelLoader> loader) {
     // load weight
     for (const auto& state_dict : loader->get_state_dicts()) {
-      if (!model_args_.image_embedding_mode()) {
+      if (!model_args_.encoder_embedding_mode()) {
         if (use_vision_adapter_)
           mlp_->load_state_dict(state_dict->get_dict_with_prefix("mlp."));
       }
@@ -1059,7 +1058,7 @@ class MiniCPMV2_6Impl : public torch::nn::Module {
                                 "llm.");  // llm. weight name prefix
 
     // verify
-    if (!model_args_.image_embedding_mode()) {
+    if (!model_args_.encoder_embedding_mode()) {
       if (use_vision_adapter_) mlp_->verify_loaded_weights("mlp.");
     }
     resampler_->verify_loaded_weights("resampler.");
@@ -1097,8 +1096,9 @@ class MiniCPMV2_6Impl : public torch::nn::Module {
 TORCH_MODULE(MiniCPMV2_6);
 
 REGISTER_CAUSAL_VLM_MODEL(minicpmv, MiniCPMV2_6);
-REGISTER_INPUT_PROCESSOR(minicpmv, MiniCPMInputProcessor);
-REGISTER_IMAGE_PROCESSOR(minicpmv, MiniCPMVImageProcessor);
+using MiniCPMVMultimodalProcessor =
+    MultimodalProcessor<MiniCPMPromptProcessor, MiniCPMVImageProcessor>;
+REGISTER_MULTIMODAL_PROCESSOR(minicpmv, MiniCPMVMultimodalProcessor);
 
 REGISTER_MODEL_ARGS(minicpmv, [&] {
   // text config

@@ -109,7 +109,6 @@ static std::map<int, int> WEIGHT_SHARD = {{IN_Q_WEIGHT, 0},
                                           {IN_V_WEIGHT, 0},
                                           {IN_V_BIAS, 0},
                                           {IN_ATTENTION_OUT_WEIGHT, 1},
-                                          {IN_MLP_GATEUP_WEIGHT, 0},
                                           {IN_MLP_CPROJ_WEIGHT, 1}};
 
 }  // namespace glm4_decoder_constants

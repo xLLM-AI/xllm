@@ -17,7 +17,6 @@ limitations under the License.
 
 #include <torch/torch.h>
 
-#include "framework/model/model_input_params.h"
 #include "framework/model_context.h"
 #include "qwen2_vision_attention.h"
 
@@ -33,8 +32,7 @@ class OxygenVisionAttentionImpl : public Qwen2VisionAttentionImpl {
                         torch::Tensor& m_cos_pos,
                         torch::Tensor& m_sin_pos,
                         torch::Tensor& cu_seq_len,
-                        std::vector<int32_t>& cu_seq_len_vec,
-                        ModelInputParams& input_params) override;
+                        std::vector<int32_t>& cu_seq_len_vec) override;
 };
 TORCH_MODULE(OxygenVisionAttention);
 

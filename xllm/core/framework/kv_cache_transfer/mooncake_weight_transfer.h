@@ -37,10 +37,10 @@ class MooncakeWeightTransfer {
 
   bool register_global_xtensor();
 
-  bool link_d2d(const std::string& remote_addr);
-  bool link_d2d(const std::vector<std::string>& remote_addrs);
-  bool unlink_d2d(const std::string& remote_addr);
-  bool unlink_d2d(const std::vector<std::string>& remote_addrs);
+  bool link_p2p(const std::string& remote_addr);
+  bool link_p2p(const std::vector<std::string>& remote_addrs);
+  bool unlink_p2p(const std::string& remote_addr);
+  bool unlink_p2p(const std::vector<std::string>& remote_addrs);
 
   bool pull_weights(const std::string& remote_addr,
                     uint64_t src_offset,

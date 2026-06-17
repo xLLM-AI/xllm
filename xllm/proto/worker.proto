@@ -53,7 +53,7 @@ message WakeupRequest {
   repeated WakeupWeightSegmentList src_weight_segments = 3;
 }
 
-// A single weight segment for D2D transfer
+// A single weight segment for P2P transfer
 message WakeupWeightSegment {
   uint64 offset = 1;  // Byte offset from source GlobalXTensor base
   uint64 size = 2;    // Segment size in bytes
@@ -64,17 +64,17 @@ message WakeupWeightSegmentList {
   repeated WakeupWeightSegment segments = 1;
 }
 
-message D2DLinkWorkerRequest {
+message P2PLinkWorkerRequest {
   string remote_addr = 1; 
 }
 
 message PullKVCacheRequest {
   uint64 cluster_id = 1;
   string addr = 6;
-  int64 k_cache_id = 2;
-  int64 v_cache_id = 3;
   repeated uint64 src_blocks = 4;
   repeated uint64 dst_blocks = 5;
+  repeated uint64 src_linear_state_ids = 7;
+  repeated uint64 dst_linear_state_ids = 8;
 }
 
 enum TransferType {
@@ -99,21 +99,14 @@ message TransferStatus {
  uint32 success_cnt = 1;
 }
 
-message DeviceInfo {
-  string device_ip = 1;
-  uint32 listen_port = 2;
-}
-
 message CacheInfo {
   uint64 cluster_id = 1;
+  uint32 listen_port = 2;
   string addr = 4;
-  int64 k_cache_id = 2;
-  int64 v_cache_id = 3;
 }
 
 message ClusterInfo {
   repeated uint64 cluster_ids = 1;
-  repeated string device_ips = 2;
   repeated uint32 ports = 3;
   repeated string addrs = 4;
 }
@@ -124,8 +117,6 @@ message InstanceInfo {
   string type = 3;
   repeated uint64 cluster_ids = 4;
   repeated string addrs = 8;
-  repeated int64 k_cache_ids = 5;
-  repeated int64 v_cache_ids = 6;
   int32 dp_size = 7;
 }
 
@@ -138,6 +129,9 @@ message TransferKVInfo {
   // XTensor mode: destination offsets from D-node (per-layer)
   // Each XTensorLayerOffsets contains K/V offsets for all blocks at one layer
   repeated XTensorLayerOffsets dst_xtensor_layer_offsets = 6;
+  // Sequence-scoped cache rows used by linear attention caches.
+  repeated uint64 local_linear_state_ids = 7;
+  repeated uint64 remote_linear_state_ids = 8;
 }
 
 message EplbInfo {
@@ -158,6 +152,7 @@ message RequestSamplingParam {
   bool do_sample = 9;
   bool is_embeddings = 10;
   int32 beam_width = 11;
+  int32 num_return_sequences = 12;
 }
 
 message UniqueTokenIds {
@@ -188,9 +183,34 @@ message MMValue {
   }
 }
 
+message MMItemState {
+  uint32 token_pos_offset = 1;
+  uint32 token_pos_length = 2;
+  Tensor mm_token_mask = 3;
+  bytes schedule_data_key = 4;
+  int32 schedule_data_start_pos = 5;
+  int32 schedule_data_end_pos = 6;
+}
+
+message MMDataItem {
+  uint32 type = 1;
+  map<string, MMValue> dict = 2;
+  MMItemState state = 3;
+  int32 seq_index = 4;
+}
+
+// Preserve the original per-request MMData item vector over brpc/proto.
+message MMDataEntry {
+  uint32 type = 1;
+  bool is_item_vec = 2;
+  repeated MMDataItem items = 3;
+  map<string, MMValue> dict = 4;
+}
+
 message MMData {
   uint32 type = 1;
   map<string, MMValue> dict = 2;
+  repeated MMDataEntry entries = 3;
 }
 
 message DiTForwardInput {
@@ -210,7 +230,7 @@ message DiTForwardInput {
   
   // Tensor fields
   Tensor images = 6;
-  Tensor condition_images = 7;
+  TensorList images_list = 7;
   Tensor mask_images = 8;
   Tensor control_image = 9;
   Tensor masked_image_latents = 10;
@@ -219,7 +239,16 @@ message DiTForwardInput {
   Tensor negative_prompt_embeds = 13;
   Tensor negative_pooled_prompt_embeds = 14;
   Tensor latents = 15;
-  
+  Tensor last_images = 17;
+  Tensor image_embeds = 18;
+
+  // Voice cloning fields (LongCat-AudioDiT)
+  optional Tensor prompt_audio = 19;
+  optional string audio_prompt_text = 20;
+
+  // Conditional image generation
+  Tensor condition_images = 21;
+
   // generation params
   DiTGenerationParams generation_params = 16;
 }
@@ -240,58 +269,26 @@ message DiTGenerationParams {
   float strength = 9;
   bool enable_cfg_renorm = 10;
   float cfg_renorm_min = 11;
+  int32 num_frames = 12;
+  bool force_video_output = 13;
+  double video_fps = 14;
+  float guidance_scale_2 = 15;
+  int32 seconds = 16;
+  float boundary_ratio = 17;
+  float flow_shift = 18;
+  uint32 num_videos_per_prompt = 19;
+}
+
+message PackedForwardInput {
+  // Raw input payload encoded as:
+  // [RawInputLayoutHeader][descriptor bytes][tensor arena bytes].
+  // The descriptor records metadata/non-tensor fields; tensor arena stores all
+  // tensor payloads in one contiguous host buffer.
+  bytes payload = 1;
 }
 
 message ForwardInput {
-  // flatten the token ids and positions
-  repeated int32 flatten_tokens_vec = 1;
-  repeated int32 flatten_positions_vec = 2;
-  // sleceted tokens to return logits, including generated tokens and last
-  // prompt token
-  repeated RequestSamplingParam sampling_params = 3;
-  repeated int32 selected_token_idxes = 4;
-  // track the last token of selected tokens for sampling
-  repeated int32 sample_idxes = 5;
-  // track the unique token ids and counts in the batch
-  repeated UniqueTokenIds unique_token_ids_vec = 6;
-  repeated UniqueTokenCounts unique_token_counts_vec = 7;
-  repeated int32 unique_token_lens_vec = 8;
-  // bool empty_kv_cache = 9;
-  uint32 max_seq_len = 10;
-  uint32 q_max_seq_len = 11;
-  repeated int32  seq_lens = 12;
-  repeated int32  q_seq_lens = 13;
-  repeated int32 paged_kv_indptr = 14;
-  repeated int32 paged_kv_indices = 15;
-  repeated int32 paged_kv_last_page_len = 16;
-  // slot ids for new token
-  repeated int32 new_token_slot_ids = 17;
-  repeated BlockTables block_tables_vec = 18;
-  int32 num_sequences = 19;
-  repeated int32 dp_global_token_nums = 20;
-  // bool global_empty_kv_cache = 21;
-  repeated TransferKVInfo transfer_kv_infos = 22;
-  repeated Embeddings embeds = 23;
-  // uint32 prefill_seq_len = 24;
-  repeated int32 embedding_ids = 25;
-  repeated int32 extra_token_ids = 26;
-  EplbInfo eplb_info =27;
-  repeated BlockTransferInfo swap_blocks = 28;
-  // block copy kernel
-  repeated int32 src_block_indices = 32;
-  repeated int32 dst_block_indices = 33;
-  repeated int32 cum_sum = 34;
-  // beam search kernel
-  repeated float acc_logprob_vec = 37;
-  uint64 batch_id = 38;
-  int32 batch_forward_type = 39;
-  MMData mm_data = 40;
-  repeated int32 q_cu_seq_lens = 41;
-  repeated int32 dp_is_decode = 42;
-  repeated int32 kv_cache_tokens_nums = 43;
-  repeated string request_ids = 44;
-  DiTForwardInput dit_forward_input = 45;
-  repeated int32 linear_state_ids = 46;
+  PackedForwardInput packed_input = 100;
 }
 
  message BatchedForwardInputs {
@@ -342,12 +339,11 @@ service DistributeWorker {
   rpc AllocateKVCache (AllocateKVCacheRequest) returns (Status);
   rpc AllocateKVCacheWithTransfer(AllocateKVCacheRequest) returns (Status) {}
   rpc PullKVCache(PullKVCacheRequest) returns (Status) {}
-  rpc GetDeviceInfo(Empty) returns (DeviceInfo) {}
   rpc GetCacheInfo(Empty) returns (CacheInfo) {}
   rpc LinkCluster(ClusterInfo) returns (Status) {}
   rpc UnlinkCluster(ClusterInfo) returns (Status) {}
-  rpc LinkD2D(D2DLinkWorkerRequest) returns (Status) {}
-  rpc UnlinkD2D(D2DLinkWorkerRequest) returns (Status) {}
+  rpc LinkP2P(P2PLinkWorkerRequest) returns (Status) {}
+  rpc UnlinkP2P(P2PLinkWorkerRequest) returns (Status) {}
   rpc ExecuteModel (ForwardInput) returns (ForwardOutput);
   rpc GetLastStepResult (Empty) returns (ForwardOutput);
   rpc GetActiveActivationMemory (Empty) returns (ActivationMemory);
@@ -355,4 +351,6 @@ service DistributeWorker {
   rpc PrefetchFromStorage(BlockTransferInfos) returns (Status) {}
   rpc Sleep (SleepRequest)  returns (Status);
   rpc Wakeup (WakeupRequest) returns (Status);
+  rpc StartProfile (Empty) returns (Status);
+  rpc StopProfile (Empty) returns (Status);
 }

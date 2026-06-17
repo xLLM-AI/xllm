@@ -99,7 +99,8 @@ class NpuGlm4MoeDecoderImpl : public BaseLayer {
                                torch::Tensor& attn_mask,
                                KVCache& kv_cache,
                                const ModelInputParams& input_params,
-                               bool is_prefill);
+                               bool is_prefill,
+                               bool use_graph_decode_input);
 
   std::string model_name_;
 
@@ -116,10 +117,12 @@ class NpuGlm4MoeDecoderImpl : public BaseLayer {
 
   int32_t num_speculative_tokens_ = 0;
   atb_speed::glm::MoeLayerParam prefill_param_;
-  atb_speed::glm::MoeLayerParam decode_param_;
+  atb_speed::glm::MoeLayerParam decode_graph_param_;
+  atb_speed::glm::MoeLayerParam decode_eager_param_;
 
   atb_speed::Model::Node prefill_node_;
-  atb_speed::Model::Node decode_node_;
+  atb_speed::Model::Node decode_graph_node_;
+  atb_speed::Model::Node decode_eager_node_;
 
   atb::Tensor internal_tensor_;
 

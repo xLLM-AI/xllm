@@ -15,12 +15,28 @@ limitations under the License.
 
 #pragma once
 
+#if defined(USE_DCU)
+#include <hip/amd_detail/amd_hip_bf16.h>
+
+#include <hipcub/hipcub.hpp>
+
+namespace cub = hipcub;
+#else
 #include <cub/cub.cuh>
+#endif
 
 namespace xllm::kernel::cuda {
+#if !defined(USE_DCU)
+using BFloat16Type = __nv_bfloat16;
 
 #define WARP_SIZE 32
+#define XLLM_KERNEL_ATTR(MAX_THREADS)
+#else
+using BFloat16Type = hip_bfloat16;
 
+#define WARP_SIZE 64
+#define XLLM_KERNEL_ATTR(MAX_THREADS) __launch_bounds__(MAX_THREADS, 1)
+#endif
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
@@ -39,11 +55,23 @@ class alignas(Alignment) AlignedArray {
 #define XLLM_SHFL_XOR_SYNC_WIDTH(mask, var, lane_mask, width) \
   __shfl_xor_sync((mask), (var), (lane_mask), (width))
 
+template <typename T>
+__device__ __forceinline__ T xllm_ldg(const T* ptr) {
+#if defined(USE_DCU)
+  return *ptr;
+#else
+  return __ldg(ptr);
+#endif
+}
+
 // Define reduction operators based on CUDA version
 // CUDA 13 (12.9+) deprecated cub::Max/Min in favor of cuda::maximum/minimum
 #if CUDA_VERSION >= 12090
 using MaxReduceOp = ::cuda::maximum<>;
 using MinReduceOp = ::cuda::minimum<>;
+#elif defined(USE_DCU)
+using MaxReduceOp = hipcub::Max;
+using MinReduceOp = hipcub::Min;
 #else
 using MaxReduceOp = cub::Max;
 using MinReduceOp = cub::Min;
@@ -53,8 +81,14 @@ template <typename T>
 __device__ float convert_to_float(T x) {
   if constexpr (std::is_same_v<T, __half>) {
     return __half2float(x);
+#if defined(USE_DCU)
+  } else if constexpr (std::is_same_v<T, hip_bfloat16>) {
+    return __bfloat162float(reinterpret_cast<const __hip_bfloat16&>(x));
+#else
   } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
     return __bfloat162float(x);
+#endif
+
   } else if constexpr (std::is_same_v<T, float>) {
     return x;
   } else {

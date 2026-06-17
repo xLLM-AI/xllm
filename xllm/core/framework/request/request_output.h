@@ -24,18 +24,10 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/types.h"
+#include "core/framework/multimodal/embedding_output.h"
+#include "core/framework/request/usage.h"
 
 namespace xllm {
-struct Usage {
-  // the number of tokens in the prompt.
-  int32_t num_prompt_tokens = 0;
-
-  // the number of tokens in the generated completion.
-  int32_t num_generated_tokens = 0;
-
-  // the total number of tokens used in the request (prompt + completion).
-  int32_t num_total_tokens = 0;
-};
 
 struct LogProbData {
   // the text of the token.
@@ -51,11 +43,6 @@ struct LogProbData {
 struct LogProb : public LogProbData {
   // the top log probabilities.
   std::optional<std::vector<LogProbData>> top_logprobs;
-};
-
-struct EmbeddingOutput {
-  torch::Tensor embedding;
-  std::unordered_map<std::string, torch::Tensor> metadata;
 };
 
 struct SequenceOutput {

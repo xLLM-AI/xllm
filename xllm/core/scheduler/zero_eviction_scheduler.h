@@ -59,7 +59,7 @@ class BlockCapacityGuard {
 
   bool if_accept_candidate_sequences(
       const std::vector<Sequence*>& candidate_sequences,
-      const std::unique_ptr<DecodePriorityQueue>& running_queue,
+      const std::unique_ptr<RequestPriorityQueue>& running_queue,
       const std::vector<Sequence*>& running_sequences);
 
  private:

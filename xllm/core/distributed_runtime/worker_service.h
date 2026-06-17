@@ -85,11 +85,6 @@ class WorkerService : public proto::DistributeWorker {
                            proto::Status* resp,
                            google::protobuf::Closure* done) override;
 
-  void GetDeviceInfo(::google::protobuf::RpcController* controller,
-                     const proto::Empty* req,
-                     proto::DeviceInfo* resp,
-                     ::google::protobuf::Closure* done) override;
-
   void GetCacheInfo(::google::protobuf::RpcController* controller,
                     const proto::Empty* req,
                     proto::CacheInfo* resp,
@@ -105,13 +100,13 @@ class WorkerService : public proto::DistributeWorker {
                      proto::Status* resp,
                      ::google::protobuf::Closure* done) override;
 
-  void LinkD2D(::google::protobuf::RpcController* controller,
-               const proto::D2DLinkWorkerRequest* req,
+  void LinkP2P(::google::protobuf::RpcController* controller,
+               const proto::P2PLinkWorkerRequest* req,
                proto::Status* resp,
                ::google::protobuf::Closure* done) override;
 
-  void UnlinkD2D(::google::protobuf::RpcController* controller,
-                 const proto::D2DLinkWorkerRequest* req,
+  void UnlinkP2P(::google::protobuf::RpcController* controller,
+                 const proto::P2PLinkWorkerRequest* req,
                  proto::Status* resp,
                  ::google::protobuf::Closure* done) override;
 
@@ -139,6 +134,16 @@ class WorkerService : public proto::DistributeWorker {
               const proto::WakeupRequest* req,
               proto::Status* resp,
               ::google::protobuf::Closure* done) override;
+
+  void StartProfile(::google::protobuf::RpcController* controller,
+                    const proto::Empty* req,
+                    proto::Status* resp,
+                    ::google::protobuf::Closure* done) override;
+
+  void StopProfile(::google::protobuf::RpcController* controller,
+                   const proto::Empty* req,
+                   proto::Status* resp,
+                   ::google::protobuf::Closure* done) override;
 
  private:
   void step(ForwardInput& fwd_input,
@@ -172,7 +177,9 @@ class WorkerService : public proto::DistributeWorker {
 
   std::unique_ptr<ThreadPool> threadpool_;
 
-  ThreadPool copy_threadpool_{5};
+  ThreadPool copy_threadpool_{/*num_threads=*/5,
+                              /*cpu_binding=*/false,
+                              /*pool_name=*/"WorkerService.copy"};
 };
 
 }  // namespace xllm

@@ -19,6 +19,8 @@ proto_library(
     xllm_service.proto
     xservice.proto
     image_generation.proto
+    audio_generation.proto
+    video_generation.proto
     mooncake_transfer_engine.proto
     embedding_data.proto
     anthropic.proto

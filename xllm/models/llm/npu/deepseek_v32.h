@@ -170,7 +170,7 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
 
     torch::Tensor attn_mask;
     if (num_speculative_tokens_ == 0 ||
-        input_params.batch_forward_type.is_prefill()) {
+        input_params.meta.batch_forward_type.is_prefill()) {
       attn_mask = attn_mask_.get_attn_mask(128, dtype_, device_);
     } else {
       attn_mask = attn_mask_.gen_free_mask(
@@ -181,9 +181,10 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event = nullptr;
       std::atomic<bool>* event_flag = nullptr;
-      if (input_params.layer_synchronizer != nullptr) {
-        event = input_params.layer_synchronizer->get_event(i);
-        event_flag = input_params.layer_synchronizer->get_event_flag(i);
+      if (input_params.parallel.layer_synchronizer != nullptr) {
+        event = input_params.parallel.layer_synchronizer->get_event(i);
+        event_flag =
+            input_params.parallel.layer_synchronizer->get_event_flag(i);
       }
       if (!input_params.synchronize_layer(i)) {
         return ModelOutput();

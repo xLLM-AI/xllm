@@ -12,11 +12,11 @@
 
 ```bash
 # A2 x86
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-20260429
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260605
 # A2 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-20260429
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260605
 # A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-20260429
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605
 ```
 
 **注意**: A2 机器性能未进行压测。

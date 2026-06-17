@@ -79,6 +79,14 @@ void ImageGenerationServiceImpl::process_async_impl(
     return;
   }
 
+  // Check if the request is being rate-limited.
+  if (master_->get_rate_limiter()->is_limited()) {
+    call->finish_with_error(
+        StatusCode::RESOURCE_EXHAUSTED,
+        "The number of concurrent requests has reached the limit.");
+    return;
+  }
+
   // create DiTRequestParams for image generation request
   DiTRequestParams request_params(
       rpc_request, call->get_x_request_id(), call->get_x_request_time());
@@ -90,9 +98,11 @@ void ImageGenerationServiceImpl::process_async_impl(
       call.get(),
       [call,
        model,
+       master = master_,
        request_id = std::move(saved_request_id),
        created_time = absl::ToUnixSeconds(absl::Now())](
           const DiTRequestOutput& req_output) -> bool {
+        master->get_rate_limiter()->decrease_one_request();
         if (req_output.status.has_value()) {
           const auto& status = req_output.status.value();
           if (!status.ok()) {

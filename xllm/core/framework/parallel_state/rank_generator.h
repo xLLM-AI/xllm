@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "core/common/global_flags.h"
+#include "core/framework/config/dit_config.h"
 
 class RankGenerator {
  public:
@@ -63,7 +64,7 @@ class RankGenerator {
               << ", cfg=" << cfg << ", dp=" << dp << ", order=" << group_order_
               << ", world_size=" << world_size_;
 
-    if (FLAGS_dit_debug_print) {
+    if (::xllm::DiTConfig::get_instance().dit_debug_print()) {
       debug_print();
     }
   }

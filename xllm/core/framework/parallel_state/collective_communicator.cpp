@@ -23,7 +23,7 @@ limitations under the License.
 #include "xllm_atb_layers/core/include/atb_speed/utils/singleton.h"
 #elif defined(USE_MLU)
 #include "mlu_process_group.h"
-#elif defined(USE_CUDA)
+#elif defined(USE_CUDA) || defined(USE_DCU)
 #include "cuda_process_group.h"
 #elif defined(USE_ILU)
 #include "ilu_process_group.h"
@@ -31,11 +31,167 @@ limitations under the License.
 #include "musa_process_group.h"
 #endif
 #include "common/global_flags.h"
+#include "core/framework/config/eplb_config.h"
+#include "core/framework/config/kernel_config.h"
+#include "core/framework/config/parallel_config.h"
 #include "parallel_args.h"
 #include "process_group.h"
+#include "util/json_reader.h"
 #include "util/net.h"
 
 namespace xllm {
+
+#if defined(USE_NPU)
+namespace {
+
+bool rank_table_rank_id_matches(const nlohmann::json& rank_id,
+                                const std::string& target_rank_id) {
+  if (rank_id.is_string()) {
+    return rank_id.get<std::string>() == target_rank_id;
+  }
+  if (rank_id.is_number_integer()) {
+    return std::to_string(rank_id.get<int64_t>()) == target_rank_id;
+  }
+  return false;
+}
+
+std::string get_rank_table_server_host(int32_t global_rank,
+                                       const std::string& fallback_host) {
+  const std::string& rank_tablefile =
+      ::xllm::EPLBConfig::get_instance().rank_tablefile();
+  if (rank_tablefile.empty()) {
+    return fallback_host;
+  }
+
+  JsonReader rank_table_reader;
+  if (!rank_table_reader.parse(rank_tablefile)) {
+    return fallback_host;
+  }
+
+  const nlohmann::json rank_table = rank_table_reader.data();
+  if (!rank_table.is_object()) {
+    return fallback_host;
+  }
+
+  const std::string target_rank_id = std::to_string(global_rank);
+  auto search_server_list =
+      [&target_rank_id](const nlohmann::json& server_list) {
+        if (!server_list.is_array()) {
+          return std::string();
+        }
+
+        for (const nlohmann::json& server : server_list) {
+          if (!server.is_object()) {
+            continue;
+          }
+
+          auto server_id = server.find("server_id");
+          auto devices = server.find("device");
+          if (server_id == server.end() || !server_id->is_string() ||
+              server_id->get<std::string>().empty() ||
+              devices == server.end() || !devices->is_array()) {
+            continue;
+          }
+
+          for (const nlohmann::json& device : *devices) {
+            if (!device.is_object()) {
+              continue;
+            }
+
+            auto rank_id = device.find("rank_id");
+            if (rank_id != device.end() &&
+                rank_table_rank_id_matches(*rank_id, target_rank_id)) {
+              return server_id->get<std::string>();
+            }
+          }
+        }
+        return std::string();
+      };
+
+  auto server_list = rank_table.find("server_list");
+  if (server_list != rank_table.end()) {
+    const std::string host = search_server_list(*server_list);
+    if (!host.empty()) {
+      return host;
+    }
+  }
+
+  auto group_list = rank_table.find("group_list");
+  if (group_list != rank_table.end() && group_list->is_array()) {
+    for (const nlohmann::json& group : *group_list) {
+      if (!group.is_object()) {
+        continue;
+      }
+
+      server_list = group.find("server_list");
+      if (server_list == group.end()) {
+        continue;
+      }
+
+      const std::string host = search_server_list(*server_list);
+      if (!host.empty()) {
+        return host;
+      }
+    }
+  }
+
+  return fallback_host;
+}
+
+struct DispatchAndCombineComm {
+  nlohmann::json mapping_data;
+  atb_speed::base::Mapping mapping;
+  std::string domain;
+  HcclComm comm = nullptr;
+};
+
+DispatchAndCombineComm create_dispatch_and_combine_comm(int32_t global_rank,
+                                                        int32_t world_size,
+                                                        int32_t dp_size,
+                                                        int32_t ep_size,
+                                                        int32_t cp_size) {
+  const int32_t normalized_cp_size = cp_size > 0 ? cp_size : 1;
+  const int32_t attn_tp_size = world_size / (dp_size * normalized_cp_size);
+
+  MappingNPU::Options mapping_options;
+  mapping_options.dp_size(dp_size)
+      .tp_size(attn_tp_size)
+      .moe_tp_size(world_size / ep_size)
+      .moe_ep_size(ep_size)
+      .pp_size(1)
+      .sp_size(1)
+      .cp_size(normalized_cp_size);
+
+  MappingNPU mapping_npu(
+      FLAGS_rank_tablefile, world_size, global_rank, mapping_options);
+  DispatchAndCombineComm result;
+  result.mapping_data = mapping_npu.to_json();
+  result.mapping.ParseParam(result.mapping_data);
+  result.mapping.InitGlobalCommDomain(FLAGS_communication_backend);
+
+  auto moe_ep_parallel_info = result.mapping.Get(atb_speed::base::MOE_EP);
+  const bool moe_ep_is_world =
+      moe_ep_parallel_info.rankIds.size() == static_cast<size_t>(world_size);
+  const uint32_t comm_buffer_size =
+      moe_ep_is_world ? 0 : moe_ep_parallel_info.bufferSize;
+  const bool reuse_comm_domain = moe_ep_is_world;
+  result.domain =
+      atb_speed::GetSingleton<atb_speed::ExternalCommManager>().GetCommDomain(
+          moe_ep_parallel_info.groupId,
+          moe_ep_parallel_info.rankIds,
+          moe_ep_parallel_info.rank,
+          FLAGS_communication_backend,
+          comm_buffer_size,
+          0,
+          reuse_comm_domain);
+  result.comm =
+      atb_speed::GetSingleton<atb_speed::ExternalCommManager>().GetCommPtr(
+          result.domain);
+  return result;
+}
+
+}  // namespace
+#endif
 
 CollectiveCommunicator::CollectiveCommunicator(int global_rank,
                                                int world_size,
@@ -63,9 +219,11 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
   //         global_rank, world_size, device, comm);
 
   // comunicator will be inited in torch.
-  if (FLAGS_npu_kernel_backend == "TORCH") {
+  if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH") {
     parallel_args_ = std::make_unique<ParallelArgs>(
         global_rank, world_size, dp_size, cp_size, nullptr, ep_size);
+    parallel_args_->kv_split_size(
+        ::xllm::ParallelConfig::get_instance().kv_split_size());
     return;
   }
 
@@ -75,6 +233,12 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
   // refactored later.
   const int32_t normalized_cp_size = cp_size > 0 ? cp_size : 1;
   const int32_t attn_tp_size = world_size / (dp_size * normalized_cp_size);
+  // FLAGS_kv_split_size: 0 -> leave Options::kv_split_size = -1 so that
+  // MappingNPU falls back to cp_size (legacy byte-equivalent). >0 -> propagate
+  // verbatim; MappingNPU::validate() enforces divisibility against cp_size.
+  const int32_t kv_split_size =
+      ::xllm::ParallelConfig::get_instance().kv_split_size();
+  const int32_t mapping_kv_split_size = kv_split_size > 0 ? kv_split_size : -1;
   MappingNPU::Options mapping_options;
   mapping_options.dp_size(dp_size)
       .tp_size(attn_tp_size)
@@ -82,20 +246,24 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
       .moe_ep_size(ep_size)
       .pp_size(1)
       .sp_size(1)
-      .cp_size(normalized_cp_size);
-  MappingNPU mapping_npu(
-      FLAGS_rank_tablefile, world_size, global_rank, mapping_options);
+      .cp_size(normalized_cp_size)
+      .kv_split_size(mapping_kv_split_size);
+  MappingNPU mapping_npu(::xllm::EPLBConfig::get_instance().rank_tablefile(),
+                         world_size,
+                         global_rank,
+                         mapping_options);
   auto mapping_data = mapping_npu.to_json();
   atb_speed::base::Mapping mapping;
   mapping.ParseParam(mapping_data);
-  mapping.InitGlobalCommDomain(FLAGS_communication_backend);
+  mapping.InitGlobalCommDomain(
+      ::xllm::ParallelConfig::get_instance().communication_backend());
   auto moeEpParallelInfo = mapping.Get(atb_speed::base::MOE_EP);
   auto dispatchAndCombinecommDomain =
       atb_speed::GetSingleton<atb_speed::ExternalCommManager>().GetCommDomain(
           moeEpParallelInfo.groupId,
           moeEpParallelInfo.rankIds,
           moeEpParallelInfo.rank,
-          FLAGS_communication_backend,
+          ::xllm::ParallelConfig::get_instance().communication_backend(),
           moeEpParallelInfo.bufferSize,
           false);
   auto dispatchAndCombineHcclComm =
@@ -111,28 +279,55 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
                                                   mapping,
                                                   dispatchAndCombinecommDomain,
                                                   dispatchAndCombineHcclComm);
+  parallel_args_->kv_split_size(
+      ::xllm::ParallelConfig::get_instance().kv_split_size());
 #else
   parallel_args_ = std::make_unique<ParallelArgs>(
       global_rank, world_size, dp_size, cp_size, nullptr, ep_size);
+  parallel_args_->kv_split_size(
+      ::xllm::ParallelConfig::get_instance().kv_split_size());
 #endif
 }
 
 void CollectiveCommunicator::create_process_groups(
     const std::string& master_addr,
     const torch::Device& device) {
+  int32_t global_rank = parallel_args_->rank();
+  int32_t world_size = parallel_args_->world_size();
+  int32_t dp_size = parallel_args_->dp_size();
+  int32_t ep_size = parallel_args_->ep_size();
+  int32_t cp_size = parallel_args_->cp_size();
+
+  std::string host;
+  int32_t port;
+  net::parse_host_port_from_addr(master_addr, host, port);
+
+  int32_t port_offset = 0;
+
+  // Encoder DP is used by multi-modal models to parallelize vision encoder
+  // work inside each language-model TP group. The rank set matches the TP
+  // group, but each rank runs a full encoder on different multi-modal items.
+  if (::xllm::ParallelConfig::get_instance().enable_mm_encoder_dp()) {
+    const int32_t encoder_dp_size = world_size / dp_size;
+    port_offset = global_rank / encoder_dp_size + 1;
+    encoder_dp_group_ = create_process_group(global_rank,
+                                             world_size,
+                                             encoder_dp_size,
+                                             port + port_offset,
+                                             false,
+                                             host,
+                                             "encoder_dp_group",
+                                             device);
+    parallel_args_->encoder_dp_group_ = encoder_dp_group_.get();
+    port += dp_size;
+  }
+
 #if defined(USE_NPU)
-  if (FLAGS_npu_kernel_backend == "ATB") {
+  if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "ATB") {
     return;
   }
 #endif
-  std::string host;
-  int port;
-  net::parse_host_port_from_addr(master_addr, host, port);
 
-  int global_rank = parallel_args_->rank();
-  int world_size = parallel_args_->world_size();
-  int dp_size = parallel_args_->dp_size();
-  int ep_size = parallel_args_->ep_size();
   process_group_ = create_process_group(global_rank,
                                         world_size,
                                         world_size,
@@ -143,15 +338,23 @@ void CollectiveCommunicator::create_process_groups(
                                         device);
   parallel_args_->process_group_ = process_group_.get();
 
-  int tp_size = world_size / dp_size;
+  int32_t tp_size = world_size / dp_size;
   CHECK_EQ(tp_size * dp_size, world_size);
-  int port_offset = global_rank / tp_size + 1;
+  port_offset = global_rank / tp_size + 1;
+  std::string tp_host = host;
+#if defined(USE_NPU)
+  if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&
+      dp_size > 1) {
+    const int32_t tp_group_start = (global_rank / tp_size) * tp_size;
+    tp_host = get_rank_table_server_host(tp_group_start, host);
+  }
+#endif
   tp_group_ = create_process_group(global_rank,
                                    world_size,
                                    tp_size,
                                    port + port_offset,
                                    false,
-                                   host,
+                                   tp_host,
                                    "tp_group",
                                    device);
   parallel_args_->tp_group_ = tp_group_.get();
@@ -160,15 +363,21 @@ void CollectiveCommunicator::create_process_groups(
   // create a process group of size 1 for each rank. Otherwise, reuse tp_group
   // for single-rank operations.
   int32_t single_rank_group_count = 0;
+  int32_t single_rank_group_port_gap = 0;
   if (tp_size > 1) {
-    single_rank_group_ = create_process_group(global_rank,
-                                              world_size,
-                                              1,
-                                              port + dp_size + global_rank + 1,
-                                              false,
-                                              host,
-                                              "single_rank_group",
-                                              device);
+    // Keep local single-rank TCPStore ports away from the multi-rank group
+    // window. Otherwise the last single-rank port can sit directly on the next
+    // group's base port and hit EADDRINUSE in dense same-host launches.
+    single_rank_group_port_gap = world_size;
+    single_rank_group_ = create_process_group(
+        global_rank,
+        world_size,
+        1,
+        port + dp_size + single_rank_group_port_gap + global_rank + 1,
+        false,
+        host,
+        "single_rank_group",
+        device);
     parallel_args_->single_rank_group_ = single_rank_group_.get();
     single_rank_group_count = world_size;
   } else {
@@ -177,7 +386,7 @@ void CollectiveCommunicator::create_process_groups(
   // SP and TP share the same rank set during prefill today. Keep a distinct
   // handle so SP call sites do not depend on TP wiring directly.
   parallel_args_->sp_group_ = tp_group_.get();
-  port += dp_size + single_rank_group_count;
+  port += dp_size + single_rank_group_port_gap + single_rank_group_count;
 
   if (dp_size > 1) {
     port_offset = global_rank % tp_size + 1;
@@ -193,15 +402,26 @@ void CollectiveCommunicator::create_process_groups(
     port += tp_size;
   }
 
-  if (ep_size > 1) {
-    int moe_tp_size = world_size / ep_size;
+  int32_t moe_tp_size = world_size / ep_size;
+  CHECK_EQ(moe_tp_size * ep_size, world_size);
+  if (ep_size == 1) {
+    parallel_args_->moe_tp_group_ = process_group_.get();
+  } else {
     port_offset = global_rank / moe_tp_size + 1;
+    std::string moe_tp_host = host;
+#if defined(USE_NPU)
+    if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH") {
+      const int32_t moe_tp_group_start =
+          (global_rank / moe_tp_size) * moe_tp_size;
+      moe_tp_host = get_rank_table_server_host(moe_tp_group_start, host);
+    }
+#endif
     moe_tp_group_ = create_process_group(global_rank,
                                          world_size,
                                          moe_tp_size,
                                          port + port_offset,
                                          false,
-                                         host,
+                                         moe_tp_host,
                                          "moe_tp_group",
                                          device);
     parallel_args_->moe_tp_group_ = moe_tp_group_.get();
@@ -217,6 +437,19 @@ void CollectiveCommunicator::create_process_groups(
                                          device);
     parallel_args_->moe_ep_group_ = moe_ep_group_.get();
   }
+
+#if defined(USE_NPU)
+  if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&
+      FLAGS_expert_parallel_degree == 2 && ep_size == world_size) {
+    auto dispatch_and_combine_comm = create_dispatch_and_combine_comm(
+        global_rank, world_size, dp_size, ep_size, cp_size);
+    parallel_args_->mapping_data(dispatch_and_combine_comm.mapping_data);
+    parallel_args_->mapping(dispatch_and_combine_comm.mapping);
+    parallel_args_->dispatchAndCombinecommDomain(
+        dispatch_and_combine_comm.domain);
+    parallel_args_->dispatchAndCombineHcclComm(dispatch_and_combine_comm.comm);
+  }
+#endif
 }
 
 const ParallelArgs* CollectiveCommunicator::parallel_args() {

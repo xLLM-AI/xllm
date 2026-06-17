@@ -30,11 +30,18 @@ limitations under the License.
 #include <thread>
 #include <utility>
 
-#include "common/global_flags.h"
 #include "common/metrics.h"
 #include "common/types.h"
 #include "core/common/xllm_build_info.h"
+#include "core/framework/config/eplb_config.h"
+#include "core/framework/config/kernel_config.h"
+#include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/parallel_config.h"
 #include "dit_master.h"
+#if defined(USE_NPU)
+#include "framework/parallel_state/npu_rank_table_env.h"
+#endif
+#include "core/platform/device_name_utils.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
 #include "llm_engine.h"
@@ -43,7 +50,6 @@ limitations under the License.
 #include "rec_engine.h"
 #include "rec_master.h"
 #include "speculative_engine.h"
-#include "util/device_name_utils.h"
 #include "util/model_config_utils.h"
 #include "util/scope_guard.h"
 #include "util/timer.h"
@@ -100,13 +106,25 @@ void print_startup_banner(const std::filesystem::path& model_path,
 namespace {
 
 #if defined(USE_NPU)
+void validate_rank_tablefile_backend() {
+  const EPLBConfig& eplb_config = EPLBConfig::get_instance();
+  const ParallelConfig& parallel_config = ParallelConfig::get_instance();
+  if (!eplb_config.rank_tablefile().empty() &&
+      parallel_config.communication_backend() != "hccl") {
+    LOG(FATAL) << "--rank_tablefile requires --communication_backend=hccl, "
+               << "but got --communication_backend="
+               << parallel_config.communication_backend();
+  }
+}
+
 void resolve_npu_kernel_backend_for_options(Options* options) {
   CHECK(options != nullptr) << "options must not be null";
   if (options->backend() == "dit") {
     return;
   }
 
-  const std::string model_type = get_model_type(options->model_path());
+  const std::string model_type =
+      util::get_model_type(options->model_path(), options->backend());
   std::string effective_backend;
   std::string resolved_name;
   std::string error_message;
@@ -119,7 +137,7 @@ void resolve_npu_kernel_backend_for_options(Options* options) {
   }
 
   options->npu_kernel_backend(effective_backend);
-  FLAGS_npu_kernel_backend = effective_backend;
+  KernelConfig::get_instance().npu_kernel_backend(effective_backend);
   LOG(INFO) << "Resolved npu_kernel_backend=" << effective_backend
             << " for model_type=" << model_type;
 }
@@ -133,42 +151,61 @@ Master::Master(const Options& options, EngineType type)
       master_status_(options.master_status()) {
   const auto model_path =
       std::filesystem::path(options_.model_path()).lexically_normal();
+  if (options_.enable_prefix_cache() && options_.backend() == "llm") {
+    const std::string model_type = util::get_model_type(model_path);
+    if (util::is_deepseek_v4_model_type(model_type)) {
+      LOG(WARNING) << model_type
+                   << " does not support prefix cache with "
+                      "CompositeBlockManager yet, fallback to "
+                      "enable_prefix_cache=false";
+      options_.enable_prefix_cache(false);
+      KVCacheConfig::get_instance().enable_prefix_cache(false);
+    }
+  }
   options_.enable_mla(util::should_enable_mla(model_path, options_.backend()));
   print_startup_banner(model_path, options_.backend(), options_.node_rank());
   LOG(INFO) << "Master init options: " << options_.to_string();
-  FLAGS_enable_prefill_sp = options_.enable_prefill_sp();
+  ParallelConfig::get_instance().enable_prefill_sp(
+      options_.enable_prefill_sp());
 
   // Allow brpc receive SIGTREM and SIGINT signal.
   brpc::FLAGS_graceful_quit_on_sigterm = true;
   brpc::FLAGS_graceful_quit_on_sighup = true;
 
 #if defined(USE_NPU)
+  EPLBConfig& eplb_config = EPLBConfig::get_instance();
+  ParallelConfig& parallel_config = ParallelConfig::get_instance();
   if (options.rank_tablefile().has_value()) {
-    FLAGS_rank_tablefile = options.rank_tablefile().value();
+    eplb_config.rank_tablefile(options.rank_tablefile().value());
   }
   if (options.communication_backend().has_value()) {
-    FLAGS_communication_backend = options.communication_backend().value();
+    parallel_config.communication_backend(
+        options.communication_backend().value());
   }
+  validate_rank_tablefile_backend();
+  parallel_state::sync_torch_npu_rank_table_file_env(
+      eplb_config.rank_tablefile());
   if (options.expert_parallel_degree().has_value()) {
-    FLAGS_expert_parallel_degree = options.expert_parallel_degree().value();
+    eplb_config.expert_parallel_degree(
+        options.expert_parallel_degree().value());
   }
   if (options.enable_eplb().has_value()) {
-    FLAGS_enable_eplb = options.enable_eplb().value();
+    eplb_config.enable_eplb(options.enable_eplb().value());
   }
   if (options.redundant_experts_num().has_value()) {
-    FLAGS_redundant_experts_num = options.redundant_experts_num().value();
+    eplb_config.redundant_experts_num(options.redundant_experts_num().value());
   }
   if (options.eplb_update_interval().has_value()) {
-    FLAGS_eplb_update_interval = options.eplb_update_interval().value();
+    eplb_config.eplb_update_interval(options.eplb_update_interval().value());
   }
   if (options.eplb_update_threshold().has_value()) {
-    FLAGS_eplb_update_threshold = options.eplb_update_threshold().value();
+    eplb_config.eplb_update_threshold(options.eplb_update_threshold().value());
   }
   resolve_npu_kernel_backend_for_options(&options_);
 #endif
-  FLAGS_enable_multi_stream_parallel =
-      options.enable_multi_stream_parallel() && (options.nnodes() > 1);
-  if (FLAGS_enable_multi_stream_parallel) {
+  ParallelConfig::get_instance().enable_multi_stream_parallel(
+      options.enable_multi_stream_parallel() && (options.nnodes() > 1));
+  if (ParallelConfig::get_instance().enable_multi_stream_parallel()) {
     LOG(FATAL)
         << "Multi-stream parallel is refactoring now, will be supported later.";
   }
@@ -190,6 +227,9 @@ Master::Master(const Options& options, EngineType type)
   }
 
   if (type == EngineType::VLM) {
+    CHECK(!(options.enable_prefix_cache() && options.enable_cache_upload()))
+        << "VLM prefix cache does not support cache upload yet.";
+
     runtime::Options eng_options;
     eng_options.model_path(options_.model_path())
         .devices(devices)
@@ -198,6 +238,7 @@ Master::Master(const Options& options, EngineType type)
         .max_cache_size(options.max_cache_size())
         .max_memory_utilization(options.max_memory_utilization())
         .enable_prefix_cache(options.enable_prefix_cache())
+        .max_encoder_cache_size(options.max_encoder_cache_size())
         .task_type(options.task_type())
         .enable_mla(options_.enable_mla())
         .enable_prefill_sp(options_.enable_prefill_sp())
@@ -215,7 +256,14 @@ Master::Master(const Options& options, EngineType type)
         .node_rank(options.node_rank())
         .dp_size(options.dp_size())
         .ep_size(options.ep_size())
+        .max_tokens_per_batch(options_.max_tokens_per_batch())
         .max_seqs_per_batch(options_.max_seqs_per_batch())
+        .enable_graph(options_.enable_graph())
+        .enable_graph_mode_decode_no_padding(
+            options_.enable_graph_mode_decode_no_padding())
+        .enable_prefill_piecewise_graph(
+            options_.enable_prefill_piecewise_graph())
+        .max_tokens_for_graph_mode(options_.max_tokens_for_graph_mode())
         .max_tokens_per_chunk_for_prefill(
             options_.max_tokens_per_chunk_for_prefill());
 
@@ -223,7 +271,8 @@ Master::Master(const Options& options, EngineType type)
     engine_ = std::move(engine);
   } else if (type == EngineType::SSM) {
     // create a speculative engine if draft model path is provided
-    const auto draft_model_path = options_.draft_model_path().value_or("");
+    const std::string draft_model_path =
+        options_.draft_model_path().value_or("");
     const bool use_suffix_spec = options_.speculative_algorithm() == "Suffix";
     CHECK(use_suffix_spec || !draft_model_path.empty())
         << "draft model path is required unless --speculative_algorithm=Suffix";
@@ -264,7 +313,9 @@ Master::Master(const Options& options, EngineType type)
         .dp_size(options.dp_size())
         .ep_size(options.ep_size())
         .enable_prefill_sp(options_.enable_prefill_sp())
+        .cp_size(options.cp_size())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
+        .max_tokens_per_batch(options_.max_tokens_per_batch())
         .max_seqs_per_batch(options_.max_seqs_per_batch())
         .max_tokens_per_chunk_for_prefill(
             options_.max_tokens_per_chunk_for_prefill())
@@ -280,11 +331,13 @@ Master::Master(const Options& options, EngineType type)
         .enable_shm(options_.enable_shm())
         .input_shm_size(options_.input_shm_size() * 1024 * 1024)
         .output_shm_size(options_.output_shm_size() * 1024 * 1024)
-        .is_local(options_.is_local());
-
-    if (options_.device_ip().has_value()) {
-      spec_options.device_ip(options_.device_ip().value());
-    }
+        .is_local(options_.is_local())
+        .enable_graph(options_.enable_graph())
+        .enable_graph_mode_decode_no_padding(
+            options_.enable_graph_mode_decode_no_padding())
+        .enable_prefill_piecewise_graph(
+            options_.enable_prefill_piecewise_graph())
+        .max_tokens_for_graph_mode(options_.max_tokens_for_graph_mode());
 
     if (use_suffix_spec) {
       engine_ = std::make_unique<SuffixSpeculativeEngine>(spec_options);
@@ -316,6 +369,7 @@ Master::Master(const Options& options, EngineType type)
         .enable_prefill_sp(options_.enable_prefill_sp())
         .cp_size(options_.cp_size())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
+        .max_tokens_per_batch(options_.max_tokens_per_batch())
         .max_seqs_per_batch(options_.max_seqs_per_batch())
         .max_tokens_per_chunk_for_prefill(
             options_.max_tokens_per_chunk_for_prefill())
@@ -332,7 +386,7 @@ Master::Master(const Options& options, EngineType type)
         .store_master_server_address(options_.store_master_server_address())
         .store_metadata_server(options_.store_metadata_server())
         .store_local_hostname(options_.store_local_hostname())
-        .prefetch_bacth_size(options_.prefetch_bacth_size())
+        .prefetch_batch_size(options_.prefetch_batch_size())
         .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())
         .enable_offline_inference(options_.enable_offline_inference())
         .spawn_worker_path(options_.spawn_worker_path())
@@ -341,12 +395,15 @@ Master::Master(const Options& options, EngineType type)
         .output_shm_size(options_.output_shm_size() * 1024 * 1024)
         .is_local(options_.is_local())
         .server_idx(options_.server_idx())
+        .enable_graph(options_.enable_graph())
+        .enable_graph_mode_decode_no_padding(
+            options_.enable_graph_mode_decode_no_padding())
+        .enable_prefill_piecewise_graph(
+            options_.enable_prefill_piecewise_graph())
+        .max_tokens_for_graph_mode(options_.max_tokens_for_graph_mode())
         .kv_cache_dtype(options_.kv_cache_dtype())
         .model_id(options_.model_id());
 
-    if (options_.device_ip().has_value()) {
-      eng_options.device_ip(options_.device_ip().value());
-    }
     engine_ = std::make_unique<LLMEngine>(eng_options);
   } else if (type == EngineType::REC) {
     options_.enable_schedule_overlap(false);
@@ -379,6 +436,11 @@ Master::Master(const Options& options, EngineType type)
         .beam_width(options_.beam_width())
         .max_tokens_per_batch(options_.max_tokens_per_batch())
         .enable_graph(options_.enable_graph())
+        .enable_graph_mode_decode_no_padding(
+            options_.enable_graph_mode_decode_no_padding())
+        .enable_prefill_piecewise_graph(
+            options_.enable_prefill_piecewise_graph())
+        .max_tokens_for_graph_mode(options_.max_tokens_for_graph_mode())
         .max_tokens_per_chunk_for_prefill(
             options_.max_tokens_per_chunk_for_prefill())
         .rec_worker_max_concurrency(options_.rec_worker_max_concurrency());
@@ -437,8 +499,8 @@ std::unique_ptr<Master> create_master(const std::string& backend,
 }
 
 std::unique_ptr<Master> fork_master(Master* master, const Options& options) {
-  // sleep/wakeup/fork_master requires FLAGS_enable_xtensor
-  if (!FLAGS_enable_xtensor) {
+  // sleep/wakeup/fork_master requires --enable_xtensor=true
+  if (!::xllm::KVCacheConfig::get_instance().enable_xtensor()) {
     LOG(WARNING) << "fork_master requires xtensor to be enabled";
     return nullptr;
   }

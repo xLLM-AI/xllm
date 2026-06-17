@@ -51,6 +51,12 @@ def _variant_entry_symbol(spec: KernelCompileSpec) -> str:
     return f"{kernel_entry_name}__{spec.variant_key}_call"
 
 
+def _write_text_if_changed(path: Path, content: str) -> None:
+    if path.is_file() and path.read_text(encoding="utf-8") == content:
+        return
+    path.write_text(content, encoding="utf-8")
+
+
 def _run_variant_worker(args: _VariantWorkerArgs) -> _VariantBuildResult:
     mod = importlib.import_module(args.kernel_cls_module)
     kernel_cls = getattr(mod, args.kernel_cls_name)
@@ -333,17 +339,18 @@ def build_kernel_family(
         )
 
     variants_inc_path = family_output_dir / "variants.inc"
-    variants_inc_path.write_text(
+    _write_text_if_changed(
+        variants_inc_path,
         _render_variants_inc(
             family.kernel_name,
             family.kernel_cls,
             family.dispatch_schema,
             variant_manifests,
         ),
-        encoding="utf-8",
     )
     registry_inc_path = family_output_dir / "registry.inc"
-    registry_inc_path.write_text(
+    _write_text_if_changed(
+        registry_inc_path,
         _render_registry_inc(
             family.kernel_name,
             family.kernel_cls,
@@ -351,7 +358,6 @@ def build_kernel_family(
             family_kernel_abi,
             variant_manifests,
         ),
-        encoding="utf-8",
     )
 
     manifest = KernelFamilyManifest(
@@ -364,5 +370,5 @@ def build_kernel_family(
         kernel_abi=family_kernel_abi,
         variants=variant_manifests,
     )
-    manifest.write(manifest_path)
+    manifest.write_if_changed(manifest_path)
     return manifest

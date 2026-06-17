@@ -17,8 +17,10 @@ cc_library(
     base_executor_impl.h
     dit_executor.h
     $<$<BOOL:${USE_NPU}>:acl_graph_executor_impl.h>
+    $<$<BOOL:${USE_NPU}>:acl_graph_persistent_param.h>
     $<$<BOOL:${USE_MLU}>:mlu_graph_executor_impl.h>
     $<$<BOOL:${USE_CUDA}>:cuda_graph_executor_impl.h>
+    $<$<BOOL:${USE_DCU}>:dcu_graph_executor_impl.h>
     worker.h
     worker_impl.h
     llm_worker_impl.h
@@ -37,6 +39,7 @@ cc_library(
     spec_input_builder.h
     forward_shared_memory_manager.h
     worker_rendezvous.h
+    cp_input_partition.h
   SRCS
     executor.cpp
     executor_impl_factory.cpp
@@ -44,8 +47,10 @@ cc_library(
     vlm_executor_impl.cpp
     dit_executor.cpp
     $<$<BOOL:${USE_NPU}>:acl_graph_executor_impl.cpp>
+    $<$<BOOL:${USE_NPU}>:acl_graph_persistent_param.cpp>
     $<$<BOOL:${USE_MLU}>:mlu_graph_executor_impl.cpp>
     $<$<BOOL:${USE_CUDA}>:cuda_graph_executor_impl.cpp>
+    $<$<BOOL:${USE_DCU}>:dcu_graph_executor_impl.cpp>
     worker.cpp
     worker_impl.cpp
     worker_rendezvous.cpp
@@ -65,6 +70,7 @@ cc_library(
     eagle3_worker_impl.cpp
     spec_input_builder.cpp
     forward_shared_memory_manager.cpp
+    cp_input_partition.cpp
   DEPS
     torch
     $<$<BOOL:${USE_NPU}>:torch_npu>
@@ -72,6 +78,7 @@ cc_library(
     :platform
     :model_context
     :request
+    :encoder_cache
     :state_dict
     :dit_cache
     :model
@@ -96,4 +103,5 @@ cc_library(
     absl::flat_hash_map
     proto::xllm_proto
     $<$<BOOL:${USE_MLU}>:torch_mlu>
+    $<$<BOOL:${USE_DCU}>:hip::host>
 )

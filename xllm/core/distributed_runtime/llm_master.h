@@ -88,9 +88,15 @@ class LLMMaster : public Master {
 
   bool wakeup(const WakeupOptions& options) override;
 
-  bool link_d2d(const std::vector<std::string>& device_ips) override;
+  bool link_p2p(const std::vector<std::string>& remote_addrs) override;
 
-  bool unlink_d2d(const std::vector<std::string>& device_ips) override;
+  bool unlink_p2p(const std::vector<std::string>& remote_addrs) override;
+
+  // Async RL training support: pause/resume.
+  // mode: "keep" (default), "abort", or "wait" — see ContinuousScheduler.
+  void pause_scheduler(const std::string& mode = "keep");
+  void resume_scheduler();
+  bool is_scheduler_paused() const;
 
  private:
   std::shared_ptr<Request> generate_request(

@@ -93,7 +93,7 @@ TEST(ThreadPoolTest, CpuCoreBindingConstructor) {
   // Construct with cpu_cores binding — should not crash even if binding fails
   // (e.g., in containers with restricted affinity).
   std::vector<int32_t> cpu_cores = {0, 0};  // bind both threads to core 0
-  ThreadPool threadpool(2, cpu_cores);
+  ThreadPool threadpool(2, nullptr, cpu_cores);
   EXPECT_EQ(threadpool.size(), 2);
 
   std::atomic<int> counter{0};
@@ -129,7 +129,7 @@ TEST(ThreadPoolTest, CpuCoreBindingWithInitFunc) {
 TEST(ThreadPoolTest, CpuCoreBindingMismatchFallback) {
   // Mismatched cpu_cores size — should fall back to no binding gracefully.
   std::vector<int32_t> cpu_cores = {0, 1};  // 2 cores but 4 threads
-  ThreadPool threadpool(4, cpu_cores);
+  ThreadPool threadpool(4, nullptr, cpu_cores);
   EXPECT_EQ(threadpool.size(), 4);
 
   std::atomic<int> counter{0};
@@ -155,7 +155,7 @@ TEST(ThreadPoolTest, CpuCoreBindingVerifyAffinity) {
   absl::Notification done;
   std::atomic<bool> affinity_ok{false};
 
-  ThreadPool threadpool(1, cpu_cores);
+  ThreadPool threadpool(1, nullptr, cpu_cores);
   threadpool.schedule([&done, &affinity_ok, target_core]() {
     cpu_set_t cpu_set;
     CPU_ZERO(&cpu_set);

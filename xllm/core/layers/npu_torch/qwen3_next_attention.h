@@ -75,6 +75,9 @@ torch::Tensor forward(const torch::Tensor& positions,
   float rms_norm_eps_;
   bool use_fused_qkv_;
   bool is_interleaved_;
+  bool qkv_weight_reordered_ = false;
+  bool q_norm_weight_adjusted_ = false;
+  bool k_norm_weight_adjusted_ = false;
   std::vector<int64_t> mrope_section_;
   torch::Tensor mrope_gather_pattern_;
 

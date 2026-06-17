@@ -22,35 +22,60 @@ limitations under the License.
 
 #include "core/util/json_reader.h"
 
-namespace xllm {
+namespace xllm::util {
 
-std::string get_model_type(const std::filesystem::path& model_path) {
+std::string get_model_type(const JsonReader& reader,
+                           const std::filesystem::path& model_path,
+                           std::optional<std::string> backend) {
+  // Prefer model_type (e.g. LLM/VLM); fall back to model_name for configs
+  // that only have model_name (e.g. LongCat-Image: {"model_name":
+  // "LongCat-Image"}).
+  std::optional<std::string> model_type =
+      reader.value<std::string>("model_type");
+  if (!model_type.has_value()) {
+    model_type = reader.value<std::string>("model_name");
+  }
+  if (!model_type.has_value()) {
+    LOG(FATAL) << "Please check config.json file in model path: " << model_path
+               << ", it should contain model_type or model_name key.";
+  }
+
+  const bool is_qwen35_native_model_type =
+      *model_type == "qwen3_5" || *model_type == "qwen3_5_moe";
+  const bool use_vlm_model_type = backend.has_value() && *backend == "vlm";
+  if (!is_qwen35_native_model_type || use_vlm_model_type) {
+    return *model_type;
+  }
+
+  const std::optional<std::string> text_model_type =
+      reader.value<std::string>("text_config.model_type");
+  if (text_model_type.has_value()) {
+    return *text_model_type;
+  }
+
+  if (*model_type == "qwen3_5_moe") {
+    return "qwen3_5_moe_text";
+  }
+  return "qwen3_5_text";
+}
+
+std::string get_model_type(const std::filesystem::path& model_path,
+                           std::optional<std::string> backend) {
   JsonReader reader;
   // for llm, vlm and rec models, the config.json file is in the model path
-  std::filesystem::path config_json_path = model_path / "config.json";
+  const std::filesystem::path config_json_path = model_path / "config.json";
 
-  if (std::filesystem::exists(config_json_path)) {
-    reader.parse(config_json_path);
-    // Prefer model_type (e.g. LLM/VLM); fall back to model_name for configs
-    // that only have model_name (e.g. LongCat-Image: {"model_name":
-    // "LongCat-Image"}).
-    auto model_type = reader.value<std::string>("model_type");
-    if (!model_type.has_value()) {
-      model_type = reader.value<std::string>("model_name");
-    }
-    if (!model_type.has_value()) {
-      LOG(FATAL) << "Please check config.json file in model path: "
-                 << model_path
-                 << ", it should contain model_type or model_name key.";
-    }
-    return model_type.value();
-  } else {
+  if (!std::filesystem::exists(config_json_path)) {
     LOG(FATAL) << "Please check config.json or model_index.json file, one of "
                   "them should exist in the model path: "
                << model_path;
   }
+  if (!reader.parse(config_json_path.string())) {
+    LOG(FATAL) << "Failed to parse config.json file in model path: "
+               << model_path;
+  }
 
-  return "";
+  return get_model_type(reader, model_path, std::move(backend));
 }
 
-}  // namespace xllm
+}  // namespace xllm::util

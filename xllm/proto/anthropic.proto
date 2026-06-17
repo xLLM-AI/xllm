@@ -3,6 +3,7 @@ syntax = "proto3";
 option go_package = "jd.com/jd-infer/xllm;xllm";
 package xllm.proto;
 
+import "common.proto";
 import "google/protobuf/struct.proto";
 
 // Anthropic API Protocol Definitions
@@ -144,6 +145,19 @@ message AnthropicMessagesRequest {
 
   // Top-P (nucleus) sampling (optional)
   optional float top_p = 13;
+
+  // Whether to ignore the end of sequence token. xLLM extension.
+  optional bool ignore_eos = 14;
+
+  // Fields injected by xllm-service for disaggregated prefill/decode routing.
+  optional string service_request_id = 15;
+  repeated int32 token_ids = 16;
+  Routing routing = 17;
+  optional string source_xservice_addr = 18;
+
+  // request trace headers from client.
+  optional string x_request_id = 19;
+  optional string x_request_time = 20;
 }
 
 message AnthropicDelta {

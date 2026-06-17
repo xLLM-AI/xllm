@@ -32,6 +32,10 @@ limitations under the License.
 #elif defined(USE_MUSA)
 #include <c10/musa/MUSAGuard.h>
 #include <musa.h>
+#elif defined(USE_DCU)
+#include <c10/hip/HIPCachingAllocator.h>
+#include <c10/hip/HIPStream.h>
+#include <hip/hip_runtime_api.h>
 #endif
 
 namespace xllm {
@@ -99,6 +103,8 @@ void Device::set_device() const {
   c10::cuda::set_device(index());
 #elif defined(USE_MUSA)
   c10::musa::set_device(index());
+#elif defined(USE_DCU)
+  c10::hip::set_device(index());
 #endif
 }
 
@@ -113,7 +119,7 @@ void Device::set_seed(uint64_t seed) const {
     std::lock_guard<std::mutex> lock(gen.mutex());
     gen.set_current_seed(seed);
   }
-#elif defined(USE_CUDA)
+#elif defined(USE_CUDA) || defined(USE_DCU)
   torch::cuda::manual_seed(seed);
 #elif defined(USE_MUSA)
   torch::manual_seed(seed);
@@ -140,6 +146,8 @@ int Device::device_count() {
   return c10::cuda::device_count();
 #elif defined(USE_MUSA)
   return c10::musa::device_count();
+#elif defined(USE_DCU)
+  return c10::hip::device_count();
 #endif
 }
 
@@ -154,13 +162,15 @@ std::string Device::type_str() {
   return "ilu";
 #elif defined(USE_MUSA)
   return "musa";
+#elif defined(USE_DCU)
+  return "dcu";
 #endif
 }
 
 torch::DeviceType Device::type_torch() {
 #if defined(USE_NPU) || defined(USE_MLU)
   return torch::kPrivateUse1;
-#elif defined(USE_CUDA) || defined(USE_ILU)
+#elif defined(USE_CUDA) || defined(USE_ILU) || defined(USE_DCU)
   return torch::kCUDA;
 #elif defined(USE_MUSA)
   return torch::kMUSA;
@@ -192,6 +202,8 @@ Device::DeviceMem Device::get_device_mem() const {
   cudaMemGetInfo(&free_memory, &total_memory);
 #elif defined(USE_MUSA)
   musaMemGetInfo(&free_memory, &total_memory);
+#elif defined(USE_DCU)
+  hipMemGetInfo(&free_memory, &total_memory);
 #endif
   device_mem.total_memory = static_cast<int64_t>(total_memory);
   device_mem.free_memory = static_cast<int64_t>(free_memory);
@@ -211,6 +223,8 @@ void Device::empty_cache(int32_t device_index) {
   c10::cuda::CUDACachingAllocator::emptyCache();
 #elif defined(USE_MUSA)
   c10::musa::MUSACachingAllocator::emptyCache();
+#elif defined(USE_DCU)
+  c10::hip::HIPCachingAllocator::emptyCache();
 #endif
 }
 
@@ -225,6 +239,8 @@ int Device::synchronize_default_stream() {
   c10::cuda::getCurrentCUDAStream().synchronize();
 #elif defined(USE_MUSA)
   c10::musa::getCurrentMUSAStream().synchronize();
+#elif defined(USE_DCU)
+  c10::hip::getCurrentHIPStream().synchronize();
 #endif
   return 0;
 }
@@ -242,6 +258,8 @@ std::unique_ptr<Stream> Device::current_stream() const {
   auto current_s = c10::cuda::getCurrentCUDAStream(index());
 #elif defined(USE_MUSA)
   auto current_s = c10::musa::getCurrentMUSAStream(index());
+#elif defined(USE_DCU)
+  auto current_s = c10::hip::getCurrentHIPStream(index());
 #endif
   return std::make_unique<Stream>(current_s);
 }

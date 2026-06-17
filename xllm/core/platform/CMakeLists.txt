@@ -10,23 +10,33 @@ cc_library(
   HDRS
     stream.h
     device.h
+    device_name_utils.h
     vmm_api.h
     shared_vmm_allocator.h
     vmm_torch_allocator.h
     $<$<BOOL:${USE_MLU}>:mlu/mlu_layer_synchronizer.h>
     $<$<BOOL:${USE_MLU}>:mlu/mlu_tensor_alloc.h>
     $<$<BOOL:${USE_CUDA}>:cuda/cuda_utils.h>
-    $<$<OR:$<BOOL:${USE_CUDA}>,$<BOOL:${USE_MLU}>>:numa_utils.h>
+    $<$<BOOL:${USE_CUDA}>:cuda_profiler.h>
+    $<$<BOOL:${USE_CUDA}>:torch_profiler.h>
+    $<$<OR:$<BOOL:${USE_CUDA}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:numa_utils.h>
   SRCS
     stream.cpp
     device.cpp
+    device_name_utils.cpp
     vmm_api.cpp
     shared_vmm_allocator.cpp
     $<$<BOOL:${USE_MLU}>:mlu/mlu_layer_synchronizer.cpp>
     $<$<BOOL:${USE_MLU}>:mlu/mlu_tensor_alloc.cpp>
-    $<$<OR:$<BOOL:${USE_CUDA}>,$<BOOL:${USE_MLU}>>:numa_utils.cpp>
+    $<$<BOOL:${USE_CUDA}>:cuda_profiler.cpp>
+    $<$<BOOL:${USE_CUDA}>:torch_profiler.cpp>
+    $<$<OR:$<BOOL:${USE_CUDA}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:numa_utils.cpp>
   DEPS
+    :config
+    absl::strings
     torch
+    glog::glog
+    :util
     $<$<BOOL:${USE_NPU}>:torch_npu>
     $<$<BOOL:${USE_NPU}>:ascendcl>
     $<$<BOOL:${USE_MLU}>:torch_mlu>
@@ -34,8 +44,9 @@ cc_library(
     $<$<BOOL:${USE_MLU}>:cndrv>
     $<$<OR:$<BOOL:${USE_CUDA}>,$<BOOL:${USE_ILU}>>:cuda>
     $<$<OR:$<BOOL:${USE_CUDA}>,$<BOOL:${USE_ILU}>>:cudart>
-    $<$<OR:$<BOOL:${USE_CUDA}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_ILU}>>:numa>
+    $<$<OR:$<BOOL:${USE_CUDA}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_ILU}>,$<BOOL:${USE_DCU}>>:numa>
     $<$<BOOL:${USE_MUSA}>:musa>
     $<$<BOOL:${USE_MUSA}>:musart>
     $<$<BOOL:${USE_NPU}>:platform_npu>
+    $<$<BOOL:${USE_DCU}>:hip::host>
 )

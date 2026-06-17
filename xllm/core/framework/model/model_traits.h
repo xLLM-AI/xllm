@@ -22,6 +22,9 @@ limitations under the License.
 #include <utility>
 
 namespace xllm {
+struct ModelInputParams;
+struct ModelGraphMetadataState;
+
 namespace layer {
 class LmHead;
 class WordEmbedding;
@@ -68,6 +71,17 @@ struct has_set_word_embedding<
         std::declval<layer::WordEmbedding&>()))>> : std::true_type {};
 
 template <typename T, typename = void>
+struct has_logits_with_hidden : std::false_type {};
+
+template <typename T>
+struct has_logits_with_hidden<T,
+                              std::void_t<decltype(std::declval<T>()->logits(
+                                  std::declval<const torch::Tensor&>(),
+                                  std::declval<const torch::Tensor&>(),
+                                  std::declval<torch::Tensor&>()))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
 struct has_lazy_load_model : std::false_type {};
 
 template <typename T>
@@ -103,6 +117,36 @@ struct has_reload_model_weights_from_device<
     std::void_t<
         decltype(std::declval<T>()->reload_model_weights_from_device())>>
     : std::true_type {};
+
+template <typename T, typename = void>
+struct has_requires_graph_forward_metadata : std::false_type {};
+
+template <typename T>
+struct has_requires_graph_forward_metadata<
+    T,
+    std::void_t<decltype(std::declval<T>()->requires_graph_forward_metadata())>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_create_graph_forward_metadata_state : std::false_type {};
+
+template <typename T>
+struct has_create_graph_forward_metadata_state<
+    T,
+    std::void_t<
+        decltype(std::declval<T>()->create_graph_forward_metadata_state())>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_prepare_graph_forward_metadata : std::false_type {};
+
+template <typename T>
+struct has_prepare_graph_forward_metadata<
+    T,
+    std::void_t<decltype(std::declval<T>()->prepare_graph_forward_metadata(
+        std::declval<ModelGraphMetadataState*>(),
+        std::declval<const torch::Tensor&>(),
+        std::declval<ModelInputParams&>()))>> : std::true_type {};
 
 template <typename T, typename = void>
 struct has_pooler : std::false_type {};

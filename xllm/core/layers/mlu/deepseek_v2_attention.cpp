@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <tuple>
 
+#include "core/framework/config/parallel_config.h"
 #include "kernels/ops_api.h"
 
 namespace xllm {
@@ -37,7 +38,8 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
       v_head_dim_(args.v_head_dim()),
       eps_(args.rms_norm_eps()),
       interleaved_(true) {
-  use_full_replicated_attention_weights_ = FLAGS_enable_prefill_sp;
+  use_full_replicated_attention_weights_ =
+      ::xllm::ParallelConfig::get_instance().enable_prefill_sp();
   const int64_t tp_size = parallel_args.tp_group_->world_size();
   int64_t hidden_size = args.hidden_size();
   int64_t num_heads = args.n_heads();

@@ -54,6 +54,28 @@ torch::Tensor KVCacheImpl::get_conv_cache() const { return torch::Tensor(); }
 
 torch::Tensor KVCacheImpl::get_ssm_cache() const { return torch::Tensor(); }
 
+torch::Tensor KVCacheImpl::get_indexer_cache_scale() const {
+  return torch::Tensor();
+}
+
+torch::Tensor KVCacheImpl::get_swa_cache() const { return torch::Tensor(); }
+
+torch::Tensor KVCacheImpl::get_compress_kv_state() const {
+  return torch::Tensor();
+}
+
+torch::Tensor KVCacheImpl::get_compress_score_state() const {
+  return torch::Tensor();
+}
+
+torch::Tensor KVCacheImpl::get_compress_index_kv_state() const {
+  return torch::Tensor();
+}
+
+torch::Tensor KVCacheImpl::get_compress_index_score_state() const {
+  return torch::Tensor();
+}
+
 bool KVCacheImpl::empty() const {
   return !key_cache_.defined() || !value_cache_.defined();
 }

@@ -16,6 +16,7 @@ limitations under the License.
 
 #include <torch_npu/csrc/core/npu/NPUFormat.h>
 
+#include "core/framework/config/eplb_config.h"
 #include "deepseek_decoder_loader_constants.h"
 
 namespace xllm {
@@ -54,6 +55,7 @@ DeekseekV2DecoderLoader::DeekseekV2DecoderLoader(
       decode_isBF16_(decode_isBF16) {
   auto model_args = context.get_model_args();
   auto options = context.get_tensor_options();
+  enable_kimi_k25_moe_scale_dtype_fix_ = model_args.model_type() == "kimi_k25";
 
   rank_ = parallel_args_.rank();
   first_k_dense_replace_ = model_args.first_k_dense_replace();
@@ -65,8 +67,9 @@ DeekseekV2DecoderLoader::DeekseekV2DecoderLoader(
   CHECK_EQ(parallel_args_.world_size(), ep_size_ * ep_local_tp_size_);
   ep_local_tp_rank_ = parallel_args_.rank() % ep_local_tp_size_;
   num_experts_per_partition_ = model_args.n_routed_experts() / ep_size_;
-  redundant_experts_num_ = FLAGS_redundant_experts_num;
-  if (FLAGS_enable_eplb) {
+  redundant_experts_num_ =
+      ::xllm::EPLBConfig::get_instance().redundant_experts_num();
+  if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     num_experts_per_partition_ += redundant_experts_num_;
   }
   ep_rank_ = parallel_args_.rank() / ep_local_tp_size_;
@@ -147,8 +150,9 @@ void DeekseekV2DecoderLoader::process_expert_weights(
   }
 
   const bool is_sharded = WEIGHT_SHARD_W8A8.count(index);
-  const bool needs_eplb = FLAGS_enable_eplb && (rank_ % localWorldSize_ ==
-                                                expert_index % localWorldSize_);
+  const bool needs_eplb =
+      ::xllm::EPLBConfig::get_instance().enable_eplb() &&
+      (rank_ % localWorldSize_ == expert_index % localWorldSize_);
 
   const int start_idx = ep_rank_ * num_experts_per_partition_;
   const int end_idx = (ep_rank_ + 1) * num_experts_per_partition_;
@@ -219,7 +223,7 @@ void DeekseekV2DecoderLoader::initialize_weight_tensors(
     t[i] = torch::zeros({1}, options.device(target_device()));
   }
 
-  if (FLAGS_enable_eplb) {
+  if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     const int64_t size =
         50LL * 1024LL * 1024LL * int64_t(n_layers_ - first_k_dense_replace_);
     shared_buffer_ = std::make_unique<ExpertBufferManager>(
@@ -336,6 +340,9 @@ void DeekseekV2DecoderLoader::process_general_weights(
 
   correct_tensor_dtype(tmp_tensor, name);
   working_tensors()[index] = tmp_tensor;
+  if (layer_id_ != n_layers_ && absl::StrContains(name, "layernorm.weight")) {
+    working_tensors()[index + 1] = torch::zeros_like(tmp_tensor);
+  }
 }
 
 void DeekseekV2DecoderLoader::process_mlp_common_weights(
@@ -471,7 +478,7 @@ void DeekseekV2DecoderLoader::process_shared_expert_weights(
   if (index == -1) {
     return;
   }
-  if (FLAGS_expert_parallel_degree == 2) {
+  if (::xllm::EPLBConfig::get_instance().expert_parallel_degree() == 2) {
     tmp_tensor = tensor.to(target_device());
   } else {
     const bool is_sharded = WEIGHT_SHARD_W8A8.count(index);
@@ -591,12 +598,13 @@ void DeekseekV2DecoderLoader::initialize_device_expert_list(
     int num_device,
     int num_device_expert) {
   int32_t num_device_route_expert = num_device_expert;
-  if (FLAGS_enable_eplb) {
+  if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     num_device_route_expert = num_device_expert - redundant_experts_num_;
   }
   for (int i = 0; i < num_device * num_device_route_expert; ++i) {
     device_expert_list_.emplace_back(i);
-    if (FLAGS_enable_eplb && (i + 1) % num_device_route_expert == 0) {
+    if (::xllm::EPLBConfig::get_instance().enable_eplb() &&
+        (i + 1) % num_device_route_expert == 0) {
       for (int redundant_expert = 0; redundant_expert < redundant_experts_num_;
            ++redundant_expert)
         device_expert_list_.emplace_back(i);
@@ -735,7 +743,7 @@ void DeekseekV2DecoderLoader::merge_host_at_weights() {
   t[IN_KV_PROJ_WITH_MQA_DESCALE] = tensor_placeholder_;
   t[IN_KV_PROJ_WITH_MQA_OFFSET] = tensor_placeholder_;
   t[IN_KV_PROJ_WITH_MQA_SCALE] = tensor_placeholder_;
-  if (FLAGS_expert_parallel_degree != 2) {
+  if (::xllm::EPLBConfig::get_instance().expert_parallel_degree() != 2) {
     t[IN_BLOCK_SPARSE_MOE_GATE_WEIGHT] =
         torch::roll(t[IN_BLOCK_SPARSE_MOE_GATE_WEIGHT],
                     {-1 * ep_rank_ * num_experts_per_partition_},
@@ -750,6 +758,14 @@ void DeekseekV2DecoderLoader::merge_host_at_weights() {
   t[IN_BLOCK_SPARSE_MOE_GATE_WEIGHT] =
       t[IN_BLOCK_SPARSE_MOE_GATE_WEIGHT].to(torch::kFloat32);
   if (quantize_type_ == "w8a8_dynamic") {
+    if (enable_kimi_k25_moe_scale_dtype_fix_) {
+      t[IN_MLP_GATEUP_SCALE_EXPERT] =
+          t[IN_MLP_GATEUP_SCALE_EXPERT].to(torch::kBFloat16);
+      t[IN_MLP_DOWN_SCALE_EXPERT] =
+          t[IN_MLP_DOWN_SCALE_EXPERT].to(torch::kBFloat16);
+    }
+    // at_weight_tensors_[IN_BLOCK_SPARSE_MOE_GATE_WEIGHT] =
+    //     at_weight_tensors_[IN_BLOCK_SPARSE_MOE_GATE_WEIGHT].to(torch::kFloat32);
     if (!prefill_isBF16_) {
       t[IN_Q_PROJ_A_DESCALE] = convert_fp16_to_int64(t[IN_Q_PROJ_A_DESCALE]);
       t[IN_Q_PROJ_B_DESCALE] = convert_fp16_to_int64(t[IN_Q_PROJ_B_DESCALE]);

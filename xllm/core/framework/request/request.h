@@ -57,11 +57,6 @@ class Request : public RequestBase {
 
   bool cancelled() const { return cancelled_.load(std::memory_order_relaxed); }
 
-  // Get the elapsed time since the request was created.
-  double elapsed_seconds() const {
-    return absl::ToDoubleSeconds(absl::Now() - created_time_);
-  }
-
   RequestOutput generate_output(const Tokenizer& tokenizer,
                                 ThreadPool* thread_pool = nullptr);
 
@@ -151,6 +146,7 @@ class Request : public RequestBase {
   bool is_starved() const { return starved_; }
 
   RequestState& state() { return state_; }
+  size_t best_of() const { return state_.best_of; }
   void update_connection_status();
 
   bool check_beam_search() const {
@@ -160,6 +156,10 @@ class Request : public RequestBase {
   bool is_chunked_prefill_stage() const {
     return sequences_group_->is_chunked_prefill_stage();
   }
+
+  void record_num_prefix_cache_tokens();
+
+  size_t num_prefix_cache_tokens() const { return num_prefix_cache_tokens_; }
 
  private:
   RequestState state_;
@@ -178,7 +178,8 @@ class Request : public RequestBase {
 
   bool starved_ = false;
 
- private:
+  size_t num_prefix_cache_tokens_ = 0;
+
   void create_sequences_group();
 };
 

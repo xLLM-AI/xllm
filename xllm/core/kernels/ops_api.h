@@ -42,9 +42,30 @@ void dequant_from_paged_cache(ReshapeFromCacheParams& params);
 
 void fused_layernorm(FusedLayerNormParams& params);
 
+std::tuple<torch::Tensor, torch::Tensor> rms_norm_dynamic_quant(
+    RmsNormDynamicQuantParams& params);
+
 torch::Tensor matmul(MatmulParams& params);
 
+torch::Tensor quant_matmul(QuantMatmulParams& params);
+
+torch::Tensor quantize(NpuQuantizeParams& params);
+
+std::tuple<torch::Tensor, std::optional<torch::Tensor>> dynamic_quant(
+    NpuQuantizeParams& params);
+
 torch::Tensor group_gemm(GroupGemmParams& params);
+
+std::tuple<torch::Tensor, torch::Tensor> dequant_swiglu_quant(
+    DequantSwigluQuantParams& params);
+
+std::tuple<torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           std::optional<torch::Tensor>,
+           std::optional<torch::Tensor>>
+w4a8_dynamic_moe_preprocess(W4A8DynamicMoePreprocessParams& params);
 
 std::tuple<torch::Tensor, torch::Tensor> moe_active_topk(
     MoeFusedTopkParams& params);
@@ -102,6 +123,29 @@ torch::Tensor l2_norm(torch::Tensor& x, double eps = 1e-6);
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 moe_init_routing_v2(MoeInitRoutingV2Params& params);
 
+std::tuple<torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor>
+moe_distribute_dispatch_v2(MoeDistributeDispatchV2Params& params);
+
+torch::Tensor moe_distribute_combine_v2(MoeDistributeCombineV2Params& params);
+
+bool has_moe_distribute_dispatch_combine_v2();
+
+std::tuple<torch::Tensor, torch::Tensor> dispatch_ffn_combine(
+    DispatchFFNCombineParams& params);
+
+bool has_dispatch_ffn_combine();
+
+std::tuple<torch::Tensor, torch::Tensor> dispatch_gmm_combine_decode(
+    DispatchGmmCombineDecodeParams& params);
+
+bool has_dispatch_gmm_combine_decode();
+
 // FP8 scaled quantize: quantizes input tensor to FP8 e4m3 format
 // Returns: (quantized_output, scale)
 std::tuple<torch::Tensor, torch::Tensor> fp8_scaled_quantize(
@@ -134,12 +178,50 @@ std::pair<torch::Tensor, torch::Tensor> fused_gdn_gating(
 std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
     FusedRecurrentGatedDeltaRuleParams& params);
 
+torch::Tensor fused_sigmoid_gating_delta_rule_update(
+    FusedSigmoidGatingDeltaRuleUpdateParams& params);
+
 torch::Tensor causal_conv1d_update(CausalConv1dUpdateParams& params);
 
 torch::Tensor gated_layer_norm(GatedLayerNormParams& params);
 
 std::pair<torch::Tensor, torch::Tensor> partial_rotary_embedding(
     PartialRotaryEmbeddingParams& params);
+torch::Tensor hc_post(HcPostParams& params);
+
+std::tuple<torch::Tensor, torch::Tensor> quant_lightning_indexer(
+    QuantLightningIndexerParams& params);
+
+torch::Tensor hc_pre_inv_rms(HcPreInvRmsParams& params);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> hc_pre_sinkhorn(
+    HcPreSinkhornParams& params);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> hc_pre(
+    HcPreParams& params);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> moe_gating_top_k_hash(
+    MoeGatingTopKHashParams& params);
+
+std::tuple<torch::Tensor, torch::Tensor> sparse_attn_sharedkv(
+    SparseAttnSharedkvParams& params);
+
+torch::Tensor sparse_flash_attention(SparseFlashAttentionParams& params);
+
+std::tuple<torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor>
+compressor(CompressorParams& params);
+
+torch::Tensor quant_lightning_indexer_metadata(
+    QuantLightningIndexerMetadataParams& params);
+
+torch::Tensor sparse_attn_sharedkv_metadata(
+    SparseAttnSharedkvMetadataParams& params);
+
+void npu_inplace_partial_rotary_mul(NpuInplacePartialRotaryMulParams& params);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 fused_qkvzba_split_reshape_cat(FusedQkvzbaSplitReshapeParams& params);
@@ -174,4 +256,16 @@ torch::Tensor recurrent_gated_delta_rule(
     const std::optional<torch::Tensor>& num_accepted_tokens,
     const std::optional<torch::Tensor>& g,
     const std::optional<torch::Tensor>& gk);
+
+torch::Tensor causal_conv1d(const torch::Tensor& x,
+                            const torch::Tensor& weight,
+                            const torch::Tensor& conv_state,
+                            const std::optional<torch::Tensor>& bias_opt,
+                            const torch::IntArrayRef query_start_loc_opt,
+                            const torch::IntArrayRef cache_indices_opt,
+                            const torch::IntArrayRef initial_state_mode_opt,
+                            const torch::IntArrayRef num_accepted_tokens_opt,
+                            int64_t activation_mode,
+                            int64_t pad_slot_id,
+                            int64_t run_mode);
 }  // namespace xllm::kernel

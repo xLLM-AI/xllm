@@ -16,21 +16,27 @@ limitations under the License.
 #pragma once
 
 #include <ATen/DynamicLibrary.h>
+#if defined(USE_DCU)
+#include <c10/hip/HIPGuard.h>
+#else
 #include <c10/cuda/CUDAGuard.h>
+#endif
 #include <glog/logging.h>
 #include <torch/torch.h>
+#if !defined(USE_DCU)
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/extra/c_env_api.h>
 #include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/optional.h>
+#endif
 
 #include <string>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
 
-#if defined(__CUDACC__) || defined(_NVHPC_CUDA)
+#if defined(__CUDACC__) || defined(_NVHPC_CUDA) || defined(__HIPCC__)
 #define HOST_DEVICE_INLINE __host__ __device__ __forceinline__
 #define DEVICE_INLINE __device__ __forceinline__
 #define HOST_INLINE __host__ __forceinline__
@@ -40,7 +46,9 @@ limitations under the License.
 #define HOST_INLINE inline
 #endif
 
+#if !defined(USE_DCU)
 namespace ffi = tvm::ffi;
+#endif
 
 namespace xllm::kernel::cuda {
 
@@ -116,6 +124,7 @@ std::string get_batch_decode_uri(torch::ScalarType dtype_q,
 
 std::tuple<torch::Tensor, double> split_scale_param(const torch::Tensor& scale);
 
+#if !defined(USE_DCU)
 DLDataType to_dl_data_type(torch::ScalarType scalar_type);
 
 // below are tvm-ffi related functions
@@ -150,4 +159,5 @@ inline void bind_tvmffi_stream_to_current_torch_stream(
                  << " dev=" << device.index();
   }
 }
+#endif  // !defined(USE_DCU)
 }  // namespace xllm::kernel::cuda

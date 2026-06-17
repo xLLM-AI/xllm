@@ -28,7 +28,7 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
-#include "common/global_flags.h"
+#include "core/framework/config/eplb_config.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/quant_args.h"
@@ -241,9 +241,9 @@ std::unordered_map<std::string, torch::Tensor> create_all2all_test_weights(
 // Child process test function for basic All2All test
 int32_t run_all2all_basic_test_child(All2AllTestParams params) {
   try {
-    // 0. Set FLAGS_expert_parallel_degree to enable DeepEP
+    // 0. Set expert_parallel_degree to enable DeepEP
     // This is required for All2All path to work
-    FLAGS_expert_parallel_degree = 2;
+    EPLBConfig::get_instance().expert_parallel_degree(2);
 
     // 1. Check devices
     int32_t dev_count = xllm::Device::device_count();
@@ -370,7 +370,7 @@ int32_t run_all2all_smoothquant_test_child(All2AllTestParams params) {
 
 int32_t run_all2all_route_guard_test_child(All2AllTestParams params) {
   try {
-    FLAGS_expert_parallel_degree = 2;
+    EPLBConfig::get_instance().expert_parallel_degree(2);
 
     int32_t dev_count = xllm::Device::device_count();
     if (dev_count < params.world_size) {

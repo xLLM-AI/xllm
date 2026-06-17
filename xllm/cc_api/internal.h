@@ -147,6 +147,7 @@ XLLM_Response build_success_response(const RequestOutput& output,
     response.usage.prompt_tokens = usage.num_prompt_tokens;
     response.usage.completion_tokens = usage.num_generated_tokens;
     response.usage.total_tokens = usage.num_total_tokens;
+    response.usage.cached_tokens = usage.num_cached_tokens;
   }
 
   return response;

@@ -23,14 +23,16 @@ limitations under the License.
 #include <map>
 #include <memory>
 
-#include "common/global_flags.h"
 #include "common/metrics.h"
+#include "core/common/global_flags.h"
+#include "core/framework/config/execution_config.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/model/model_args.h"
 #include "framework/model_loader.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/request/rec_type.h"
 #include "master.h"  // For MasterStatus::WAKEUP constant
+#include "runtime/params_utils.h"
 #include "util/env_var.h"
 #include "util/net.h"
 #include "util/pretty_print.h"
@@ -112,7 +114,10 @@ bool RecEngine::init_model() {
   pipeline_->process_group_test();
 
   if (!threadpool_) {
-    threadpool_ = std::make_unique<ThreadPool>(16);
+    threadpool_ = std::make_unique<ThreadPool>(
+        /*num_threads=*/16,
+        /*cpu_binding=*/true,
+        /*pool_name=*/"rec_engine_pool");
   }
   // Compute KV cache config (shared logic)
   const int32_t world_size = static_cast<int32_t>(options_.devices().size());
@@ -277,7 +282,9 @@ bool RecEngine::LlmRecEnginePipeline::init_model_workers(
   futures.reserve(engine_.worker_clients_num_);
   for (auto& worker : engine_.worker_clients_) {
     futures.emplace_back(worker->init_model_async(
-        model_path, FLAGS_random_seed, MasterStatus::WAKEUP));
+        model_path,
+        ::xllm::ExecutionConfig::get_instance().random_seed(),
+        MasterStatus::WAKEUP));
   }
   auto results = folly::collectAll(futures).get();
   for (const auto& result : results) {
@@ -348,9 +355,9 @@ size_t RecEngine::LlmRecEnginePipeline::num_workers() const {
   return engine_.worker_clients_.size();
 }
 
-std::vector<RawForwardInput> RecEngine::LlmRecEnginePipeline::prepare_inputs(
+std::vector<ForwardInput> RecEngine::LlmRecEnginePipeline::prepare_inputs(
     std::vector<Batch>& batch) {
-  std::vector<RawForwardInput> batched_inputs;
+  std::vector<ForwardInput> batched_inputs;
   batched_inputs.reserve(engine_.dp_size_);
 
   // some dp related variables
@@ -368,20 +375,26 @@ std::vector<RawForwardInput> RecEngine::LlmRecEnginePipeline::prepare_inputs(
     batched_inputs.emplace_back(std::move(batch[dp_rank].prepare_forward_input(
         engine_.args_, engine_.threadpool_.get())));
     dp_global_token_nums[dp_rank] =
-        batched_inputs[dp_rank].flatten_tokens_vec.size();
+        static_cast<int32_t>(batched_inputs[dp_rank].host_token_ids().numel());
     if (batch_forward_type.is_empty() &&
-        !batched_inputs[dp_rank].batch_forward_type.is_empty()) {
-      batch_forward_type = batched_inputs[dp_rank].batch_forward_type;
+        !batched_inputs[dp_rank]
+             .input_params.meta.batch_forward_type.is_empty()) {
+      batch_forward_type =
+          batched_inputs[dp_rank].input_params.meta.batch_forward_type;
     }
-    dp_is_decode[dp_rank] = batch_forward_type.is_decode() &&
-                            batched_inputs[dp_rank].q_max_seq_len == 1;
+    dp_is_decode[dp_rank] =
+        batch_forward_type.is_decode() &&
+        batched_inputs[dp_rank].input_params.meta.q_max_seq_len == 1;
   }
 
   for (int32_t dp_rank = 0; dp_rank < engine_.dp_size_; ++dp_rank) {
-    batched_inputs[dp_rank].dp_global_token_nums = dp_global_token_nums;
-    batched_inputs[dp_rank].dp_is_decode = dp_is_decode;
-    if (batched_inputs[dp_rank].batch_forward_type.is_empty()) {
-      batched_inputs[dp_rank].batch_forward_type = batch_forward_type;
+    batched_inputs[dp_rank].input_params.parallel.dp_global_token_nums =
+        dp_global_token_nums;
+    batched_inputs[dp_rank].input_params.parallel.dp_is_decode = dp_is_decode;
+    if (batched_inputs[dp_rank]
+            .input_params.meta.batch_forward_type.is_empty()) {
+      batched_inputs[dp_rank].input_params.meta.batch_forward_type =
+          batch_forward_type;
     }
   }
 
@@ -400,16 +413,16 @@ ForwardOutput RecEngine::LlmRecEnginePipeline::step(
 
   auto run_one_step = [this, &batches](int step_idx) -> bool {
     Timer timer;
-    auto raw_forward_inputs = prepare_inputs(batches);
+    auto forward_inputs = prepare_inputs(batches);
     COUNTER_ADD(prepare_input_latency_microseconds,
                 timer.elapsed_microseconds());
 
-    const bool all_empty =
-        std::all_of(raw_forward_inputs.begin(),
-                    raw_forward_inputs.end(),
-                    [](const RawForwardInput& input) {
-                      return input.flatten_tokens_vec.empty();
-                    });
+    const bool all_empty = std::all_of(forward_inputs.begin(),
+                                       forward_inputs.end(),
+                                       [](const ForwardInput& input) {
+                                         return !input.token_ids.defined() ||
+                                                input.token_ids.numel() == 0;
+                                       });
     if (all_empty) {
       return false;
     }
@@ -421,8 +434,9 @@ ForwardOutput RecEngine::LlmRecEnginePipeline::step(
     for (size_t worker_rank = 0; worker_rank < engine_.worker_clients_num_;
          ++worker_rank) {
       auto dp_rank = worker_rank / engine_.dp_local_tp_size_;
-      futures.emplace_back(engine_.worker_clients_[worker_rank]->step_async(
-          raw_forward_inputs[dp_rank]));
+      futures.emplace_back(
+          engine_.worker_clients_[worker_rank]->step_remote_async(
+              forward_inputs[dp_rank]));
     }
     auto results = folly::collectAll(futures).get();
 
@@ -595,7 +609,9 @@ bool RecEngine::OneRecLocalEnginePipeline::init_model_workers(
   futures.reserve(engine_.workers_.size());
   for (auto& worker : engine_.workers_) {
     futures.emplace_back(worker->init_model_async(
-        model_path, FLAGS_random_seed, MasterStatus::WAKEUP));
+        model_path,
+        ::xllm::ExecutionConfig::get_instance().random_seed(),
+        MasterStatus::WAKEUP));
   }
   auto results = folly::collectAll(futures).get();
   for (const auto& result : results) {
@@ -685,6 +701,7 @@ ForwardOutput RecEngine::OneRecPrefillOnlyEnginePipeline::step(
   }
 
   Timer timer;
+  Timer timer_total;
   // OneRec does not need refresh_forward_type
   auto forward_inputs = engine_.workers_[0]->prepare_inputs(batches[0]);
   COUNTER_ADD(prepare_input_latency_microseconds, timer.elapsed_microseconds());
@@ -730,6 +747,11 @@ ForwardOutput RecEngine::OneRecPrefillOnlyEnginePipeline::step(
   }
 
   batches[0].finish();
+
+  VLOG(1) << "OneRec batch size " << batches.size() << ", sequence size "
+          << batches[0].size() << ", infer took "
+          << timer_total.elapsed_milliseconds() << "ms.";
+
   return decode_output;
 }
 
@@ -1034,7 +1056,9 @@ bool RecEngine::RecMultiRoundEnginePipeline::init_model_workers(
   futures.reserve(engine_.workers_.size());
   for (auto& worker : engine_.workers_) {
     futures.emplace_back(worker->init_model_async(
-        model_path, FLAGS_random_seed, MasterStatus::WAKEUP));
+        model_path,
+        ::xllm::ExecutionConfig::get_instance().random_seed(),
+        MasterStatus::WAKEUP));
   }
   auto results = folly::collectAll(futures).get();
   for (const auto& result : results) {

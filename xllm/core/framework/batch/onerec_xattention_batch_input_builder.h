@@ -34,7 +34,7 @@ class OneRecXAttentionBatchInputBuilder final : public OneRecBatchInputBuilder {
       const uint64_t batch_id,
       const ModelArgs* args,
       BatchForwardType batch_forward_type,
-      ThreadPool* thread_pool = nullptr)
+      MPMCThreadPool* thread_pool = nullptr)
       : OneRecBatchInputBuilder(sequence_groups,
                                 allowed_max_tokens,
                                 input_embeddings_vec,

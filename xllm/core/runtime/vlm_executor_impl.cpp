@@ -19,7 +19,8 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/metrics.h"
-#include "framework/request/mm_data_visitor.h"
+#include "core/framework/config/execution_config.h"
+#include "core/framework/multimodal/mm_visitor.h"
 #include "platform/device.h"
 
 namespace xllm {
@@ -32,7 +33,12 @@ VlmExecutorImpl::VlmExecutorImpl(CausalLM* model,
       args_(args),
       device_(device),
       options_(options) {
-  if (FLAGS_enable_graph) {
+  if (options_.max_encoder_cache_size() > 0) {
+    encoder_cache_ = std::make_unique<EncoderCache>(
+        options_.max_encoder_cache_size() * 1024 * 1024);
+  }
+
+  if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
     llm_executor_ = ExecutorImplFactory::get_instance().create_executor_impl(
         model, args, device, options, Device::type_str());
   }
@@ -44,7 +50,7 @@ ForwardInput VlmExecutorImpl::prepare_inputs(Batch& batch) {
 }
 
 MMDict VlmExecutorImpl::encode(const ModelInputParams& params) {
-  return dynamic_cast<CausalVLM*>(model_)->encode(params);
+  return model_->encode(params);
 }
 
 ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
@@ -52,22 +58,36 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
                                  std::vector<KVCache>& kv_caches,
                                  const ModelInputParams& params) {
   torch::NoGradGuard no_grad;
-  auto& mm_data = params.mm_data;
+  auto& mm_data = params.multimodal.mm_data;
+  if (encoder_cache_) {
+    EncoderCacheLookupVisitor lookup(encoder_cache_.get());
+    mm_data.foreach (lookup);
+  }
+
   EncoderInputGatherVisitor input_gather;
   mm_data.foreach (input_gather);
   CHECK(input_gather.finish(mm_data));
   mm_data.to(device_);
 
-  auto embedding = encode(params);
+  MMDict embedding = encode(params);
   EncoderOutputScatterVisitor scatter(embedding);
   mm_data.foreach (scatter);
   CHECK(scatter.finish());
 
-  EncoderEmbeddingGatherVisitor gather(device_);
+  if (encoder_cache_) {
+    EncoderCacheInsertVisitor insert(encoder_cache_.get());
+    mm_data.foreach (insert);
+  }
+
+  EncoderEmbeddingGatherVisitor gather(device_,
+                                       mm_data.type(),
+                                       params.attention.host.kv_seq_lens,
+                                       params.attention.host.q_seq_lens);
   mm_data.foreach (gather);
   CHECK(gather.finish(mm_data));
 
-  params.input_embedding = model_->get_input_embeddings(tokens, params);
+  params.embedding.input_embedding =
+      model_->get_input_embeddings(tokens, params);
 
   if (llm_executor_) {
     return llm_executor_->run(tokens, positions, kv_caches, params);

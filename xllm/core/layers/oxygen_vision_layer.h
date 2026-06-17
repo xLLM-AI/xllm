@@ -23,7 +23,6 @@ limitations under the License.
 #include "common/oxygen_vision_attention.h"
 #include "common/rms_norm.h"
 #include "framework/model/model_args.h"
-#include "framework/model/model_input_params.h"
 #include "framework/model_context.h"
 #include "framework/state_dict/state_dict.h"
 
@@ -41,7 +40,6 @@ class OxygenVisionLayerImpl : public torch::nn::Module {
                         torch::Tensor& m_sin_pos,
                         torch::Tensor& cu_seq_len,
                         std::vector<int32_t>& cu_seq_len_vec,
-                        ModelInputParams& input_params,
                         int node_id);
 
  private:

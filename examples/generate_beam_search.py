@@ -1,5 +1,5 @@
-# python examples/beam_search.py --model='/path/models/Qwen2-7B-Instruct' --devices='npu:0'
-# python beam_search.py --model='/path/models/Qwen2-7B-Instruct' --devices='npu:0,npu:1'
+# python examples/generate_beam_search.py --model='/path/models/Qwen2-7B-Instruct' --devices='npu:0'
+# python generate_beam_search.py --model='/path/models/Qwen2-7B-Instruct' --devices='npu:0,npu:1'
 
 from xllm import ArgumentParser, BeamSearchParams, LLM
 
@@ -9,6 +9,8 @@ llm = LLM(**vars(parser.parse_args()))
 
 beam_search_params = BeamSearchParams(
     beam_width=2,
+    # Top-k candidate count for beam expansion. Defaults to beam_width.
+    top_logprobs=4,
     max_tokens=20,
 )
 

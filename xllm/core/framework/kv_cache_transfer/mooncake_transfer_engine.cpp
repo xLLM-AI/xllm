@@ -323,8 +323,8 @@ bool MooncakeTransferEngine::register_memory(std::vector<void*> addrs,
     }
   }
 
-  buf_bytes_ = std::move(buf_bytes);
-  LOG(INFO) << "register_memory success, buf_num=" << buf_bytes_.size();
+  buf_bytes_.insert(buf_bytes_.end(), buf_bytes.begin(), buf_bytes.end());
+  LOG(INFO) << "register_memory success, total_buf_num=" << buf_bytes_.size();
 
   return true;
 }

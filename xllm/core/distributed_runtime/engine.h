@@ -64,15 +64,16 @@ class Engine {
   virtual std::vector<int64_t> get_active_activation_memory() const = 0;
 
   // P/D
-  virtual bool pull_kv_blocks(const int32_t src_dp_size,
-                              const int32_t src_dp_rank,
-                              const std::vector<uint64_t>& src_cluster_ids,
-                              const std::vector<std::string>& src_addrs,
-                              const std::vector<int64_t>& src_k_cache_ids,
-                              const std::vector<int64_t>& src_v_cache_ids,
-                              const std::vector<uint64_t>& src_blocks,
-                              const int32_t dst_dp_rank,
-                              const std::vector<uint64_t>& dst_blocks) {
+  virtual bool pull_kv_blocks(
+      const int32_t src_dp_size,
+      const int32_t src_dp_rank,
+      const std::vector<uint64_t>& src_cluster_ids,
+      const std::vector<std::string>& src_addrs,
+      const std::vector<uint64_t>& src_blocks,
+      const int32_t dst_dp_rank,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids = {},
+      const std::vector<uint64_t>& dst_linear_state_ids = {}) {
     NOT_IMPLEMENTED();
     return false;
   };
@@ -99,15 +100,9 @@ class Engine {
     NOT_IMPLEMENTED();
   };
 
-  virtual void get_device_info(std::vector<std::string>& device_ips,
-                               std::vector<uint16_t>& ports) {
-    NOT_IMPLEMENTED();
-  };
-
   virtual void get_cache_info(std::vector<uint64_t>& cluster_ids,
                               std::vector<std::string>& addrs,
-                              std::vector<int64_t>& k_cache_ids,
-                              std::vector<int64_t>& v_cache_ids) {
+                              std::vector<uint16_t>& ports) {
     NOT_IMPLEMENTED();
   };
 
@@ -123,30 +118,29 @@ class Engine {
 
   virtual bool link_cluster(const std::vector<uint64_t>& cluster_ids,
                             const std::vector<std::string>& addrs,
-                            const std::vector<std::string>& device_ips,
                             const std::vector<uint16_t>& ports,
-                            const int32_t src_dp_size) {
+                            const int32_t src_dp_size,
+                            const int32_t src_kv_split_size = 1) {
     NOT_IMPLEMENTED();
     return false;
   };
 
   virtual bool unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                               const std::vector<std::string>& addrs,
-                              const std::vector<std::string>& device_ips,
                               const std::vector<uint16_t>& ports,
-                              const int32_t dp_size) {
+                              const int32_t src_dp_size,
+                              const int32_t src_kv_split_size = 1) {
     NOT_IMPLEMENTED();
     return false;
   };
 
-  // D2D link for weight transfer - each worker links to one remote addr
-  // device_ips: one ip per worker, in worker order
-  virtual bool link_d2d(const std::vector<std::string>& device_ips) {
+  // P2P link for weight transfer - each worker links to one remote addr.
+  virtual bool link_p2p(const std::vector<std::string>& remote_addrs) {
     NOT_IMPLEMENTED();
     return false;
   };
 
-  virtual bool unlink_d2d(const std::vector<std::string>& device_ips) {
+  virtual bool unlink_p2p(const std::vector<std::string>& remote_addrs) {
     NOT_IMPLEMENTED();
     return false;
   };
@@ -158,6 +152,17 @@ class Engine {
 
   virtual bool wakeup(const WakeupOptions& options) {
     LOG(FATAL) << " wakeup is not implemented!";
+    return false;
+  };
+
+  // Start/stop online timeline profiling on all workers. CUDA only for now.
+  virtual bool start_profile() {
+    LOG(ERROR) << "start_profile is not implemented for this engine!";
+    return false;
+  };
+
+  virtual bool stop_profile() {
+    LOG(ERROR) << "stop_profile is not implemented for this engine!";
     return false;
   };
 

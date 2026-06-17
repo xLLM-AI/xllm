@@ -60,8 +60,6 @@ void replace_token(torch::Tensor& dst, torch::Tensor& src) {
   CHECK_ACL_SUCCESS(
       aclnnReplaceToken(workspace_addr, workspace_size, executor, stream),
       "replace_token: failed to replace token");
-  CHECK_ACL_SUCCESS(aclrtSynchronizeStream(stream),
-                    "replace_token: failed to synchronize stream");
   aclDestroyTensor(dst_ids);
   aclDestroyTensor(src_ids);
 }

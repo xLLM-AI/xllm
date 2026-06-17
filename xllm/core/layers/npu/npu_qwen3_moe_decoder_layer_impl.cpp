@@ -19,7 +19,13 @@ limitations under the License.
 
 #include <unordered_set>
 
-#include "common/global_flags.h"
+#include "core/framework/config/eplb_config.h"
+#include "core/framework/config/execution_config.h"
+#include "core/framework/config/kernel_config.h"
+#include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/load_config.h"
+#include "core/framework/config/parallel_config.h"
+#include "core/framework/config/scheduler_config.h"
 namespace xllm {
 namespace layer {
 
@@ -54,11 +60,15 @@ NpuQwen3MoeDecoderLayerImpl::NpuQwen3MoeDecoderLayerImpl(
   dp_local_tp_rank_ = parallel_args.rank() % dp_local_tp_size_;
 
   param_from_args(prefill_param_, model_args, parallel_args, true);
-  param_from_args(decode_param_, model_args, parallel_args, false);
+  param_from_args(decode_graph_param_, model_args, parallel_args, false);
+  decode_eager_param_ = decode_graph_param_;
+  decode_eager_param_.enableAclGraphPagedAttention = false;
   loader_ = std::make_unique<Qwen3MoeDecoderLoader>(
       WEIGHT_COUNT_PER_LAYER,
       context,
-      FLAGS_enable_manual_loader ? LoadMode::kManual : LoadMode::kEager);
+      ::xllm::LoadConfig::get_instance().enable_manual_loader()
+          ? LoadMode::kManual
+          : LoadMode::kEager);
   initialize_tensors(options);
 }
 
@@ -107,16 +117,20 @@ void NpuQwen3MoeDecoderLayerImpl::initialize_basic_parameters(
   // prefill only feature
   param.enableLcoc = is_prefill;  // false;
   param.enableSplitFuse =
-      (FLAGS_enable_chunked_prefill || FLAGS_enable_prefix_cache) && is_prefill;
+      (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill() ||
+       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache()) &&
+      is_prefill;
 
   // decode only feature
-  param.enableAclGraphPagedAttention = FLAGS_enable_graph && !is_prefill;
+  param.enableAclGraphPagedAttention =
+      ::xllm::ExecutionConfig::get_instance().enable_graph() && !is_prefill;
   param.enableInitRoutingV3 = !is_prefill;
 
   // Can be applied to prefill, but has not been tested yet
   param.enableFusedReducesumDiv = !is_prefill;
   param.enableAclnnExternelAddRmsNorm =
-      FLAGS_enable_intralayer_addnorm && !is_prefill;
+      ::xllm::KernelConfig::get_instance().enable_intralayer_addnorm() &&
+      !is_prefill;
   param.enableAclnnAddRmsNorm = !is_prefill;
 
   param.swigluBackend = atb_speed::common::OpBackend::ACLNN;
@@ -138,8 +152,10 @@ void NpuQwen3MoeDecoderLayerImpl::initialize_basic_parameters(
   }
   param.normEps = args.rms_norm_eps();
   param.rank = parallel_args.rank();
-  param.backend = FLAGS_communication_backend;
-  // param.rankTableFile = FLAGS_rank_tablefile;
+  param.backend =
+      ::xllm::ParallelConfig::get_instance().communication_backend();
+  // param.rankTableFile =
+  // ::xllm::EPLBConfig::get_instance().rank_tablefile();
 
   param.layerId = layer_id_;
   param.numHiddenLayers = 0;
@@ -210,12 +226,13 @@ void NpuQwen3MoeDecoderLayerImpl::initialize_parallel_parameters(
     const ParallelArgs& parallel_args) {
   param.lmHeadLocalTp = dp_local_tp_size_;
   param.mapping = parallel_args.mapping();
-  param.tensorParallelInfo = {parallel_args.rank(),
-                              parallel_args.world_size(),
-                              FLAGS_communication_backend,
-                              FLAGS_rank_tablefile,
-                              nullptr,
-                              ""};
+  param.tensorParallelInfo = {
+      parallel_args.rank(),
+      parallel_args.world_size(),
+      ::xllm::ParallelConfig::get_instance().communication_backend(),
+      ::xllm::EPLBConfig::get_instance().rank_tablefile(),
+      nullptr,
+      ""};
 
   param.maxDecodeDpTokenSize = 0;  // TODO
 }
@@ -275,7 +292,10 @@ int64_t NpuQwen3MoeDecoderLayerImpl::init_layer() {
   name_ = "qwen3_moe_decoder_layer " + std::to_string(layer_id_);
   model_name_ = "Qwen3_Moe";
   CHECK_OPERATION_STATUS_RETURN(init_node(prefill_node_, prefill_param_));
-  CHECK_OPERATION_STATUS_RETURN(init_node(decode_node_, decode_param_));
+  CHECK_OPERATION_STATUS_RETURN(
+      init_node(decode_graph_node_, decode_graph_param_));
+  CHECK_OPERATION_STATUS_RETURN(
+      init_node(decode_eager_node_, decode_eager_param_));
 
   return atb::NO_ERROR;
 }
@@ -317,7 +337,7 @@ torch::Tensor NpuQwen3MoeDecoderLayerImpl::forward(
     std::atomic<bool>* event_flag,
     int node_id) {
   atb::Status st;
-  if (!input_params.batch_forward_type.is_decode()) {
+  if (!input_params.meta.batch_forward_type.is_decode()) {
     build_node_variant_pack(prefill_node_,
                             x,
                             residual,
@@ -326,12 +346,18 @@ torch::Tensor NpuQwen3MoeDecoderLayerImpl::forward(
                             attn_mask,
                             kv_cache,
                             input_params,
-                            true);
+                            true,
+                            false);
     st = execute_node(prefill_node_, node_id, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
                            << "excute prefill layer fail, error code: " << st;
   } else {
-    build_node_variant_pack(decode_node_,
+    const bool use_graph_decode_input =
+        ::xllm::ExecutionConfig::get_instance().enable_graph() &&
+        input_params.graph.tiling_data.defined();
+    auto& decode_node =
+        use_graph_decode_input ? decode_graph_node_ : decode_eager_node_;
+    build_node_variant_pack(decode_node,
                             x,
                             residual,
                             cos_pos,
@@ -339,8 +365,9 @@ torch::Tensor NpuQwen3MoeDecoderLayerImpl::forward(
                             /*attn_mask*/ tensor_placeholder_,
                             kv_cache,
                             input_params,
-                            false);
-    st = execute_node(decode_node_, node_id + 1000, event, event_flag);
+                            false,
+                            use_graph_decode_input);
+    st = execute_node(decode_node, node_id + 1000, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
                            << "excute decode layer fail, error code: " << st;
   }
@@ -357,14 +384,15 @@ void NpuQwen3MoeDecoderLayerImpl::build_node_variant_pack(
     torch::Tensor& attn_mask,
     KVCache& kv_cache,
     const ModelInputParams& input_params,
-    bool is_prefill) {
+    bool is_prefill,
+    bool use_graph_decode_input) {
   internal_tensor_ = atb_speed::Utils::AtTensor2Tensor(x);
   int32_t input_idx = 0;
-  auto& dp_ep_padding = input_params.dp_ep_padding_data;
+  auto& dp_ep_padding = input_params.parallel.dp_ep_padding_data;
 
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER) = internal_tensor_;
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 1) =
-      atb_speed::Utils::AtTensor2Tensor(input_params.expert_array);
+      atb_speed::Utils::AtTensor2Tensor(input_params.expert.expert_array);
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 2) =
       atb_speed::Utils::AtTensor2Tensor(expert_group_);
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 3) =
@@ -383,17 +411,18 @@ void NpuQwen3MoeDecoderLayerImpl::build_node_variant_pack(
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 9) =
       atb_speed::Utils::AtTensor2Tensor(kv_cache.get_v_cache());
 
-  if (!input_params.block_tables.defined() ||
-      input_params.block_tables.storage().data() == nullptr) {
+  if (!input_params.attention.device.block_tables.defined() ||
+      input_params.attention.device.block_tables.storage().data() == nullptr) {
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 10) =
         atb_speed::Utils::AtTensor2Tensor(int_tensor_placeholder_);
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 10).hostData =
         const_cast<int32_t*>(placeholder_vec_.data());
   } else {
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 10) =
-        atb_speed::Utils::AtTensor2Tensor(input_params.kv_seq_lens);
+        atb_speed::Utils::AtTensor2Tensor(
+            input_params.attention.device.kv_seq_lens);
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 10).hostData =
-        const_cast<int32_t*>(input_params.kv_seq_lens_vec.data());
+        const_cast<int32_t*>(input_params.attention.host.kv_seq_lens.data());
   }
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11) =
       atb_speed::Utils::AtTensor2Tensor(tensor_placeholder_);
@@ -403,41 +432,45 @@ void NpuQwen3MoeDecoderLayerImpl::build_node_variant_pack(
       const_cast<int32_t*>(placeholder_vec_.data());
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 13) =
       atb_speed::Utils::AtTensor2Tensor(tensor_placeholder_);
-  if (!input_params.block_tables.defined() ||
-      input_params.block_tables.storage().data() == nullptr) {
+  if (!input_params.attention.device.block_tables.defined() ||
+      input_params.attention.device.block_tables.storage().data() == nullptr) {
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 14) =
         atb_speed::Utils::AtTensor2Tensor(block_tables_placeholder_);
   } else {
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 14) =
-        atb_speed::Utils::AtTensor2Tensor(input_params.block_tables);
+        atb_speed::Utils::AtTensor2Tensor(
+            input_params.attention.device.block_tables);
   }
-  if (!input_params.block_tables.defined() ||
-      input_params.block_tables.storage().data() == nullptr) {
+  if (!input_params.attention.device.block_tables.defined() ||
+      input_params.attention.device.block_tables.storage().data() == nullptr) {
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 15) =
         atb_speed::Utils::AtTensor2Tensor(slot_tensor_placeholder_);
   } else {
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 15) =
-        atb_speed::Utils::AtTensor2Tensor(input_params.new_cache_slots);
+        atb_speed::Utils::AtTensor2Tensor(
+            input_params.attention.device.new_cache_slots);
   }
 
   input_idx = WEIGHT_COUNT_PER_LAYER + 16;
   if (is_prefill &&
-      (FLAGS_enable_chunked_prefill || FLAGS_enable_prefix_cache)) {
-    node.variantPack.inTensors.at(input_idx++) =
-        atb_speed::Utils::AtTensor2Tensor(input_params.q_seq_lens);
-    node.variantPack.inTensors.at(input_idx - 1).hostData =
-        const_cast<int32_t*>(input_params.q_seq_lens_vec.data());
-  }
-
-  if (FLAGS_enable_graph && !is_prefill &&
-      input_params.graph_buffer.tiling_data.defined()) {
+      (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill() ||
+       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache())) {
     node.variantPack.inTensors.at(input_idx++) =
         atb_speed::Utils::AtTensor2Tensor(
-            input_params.graph_buffer.tiling_data);
+            input_params.attention.device.q_seq_lens);
+    node.variantPack.inTensors.at(input_idx - 1).hostData =
+        const_cast<int32_t*>(input_params.attention.host.q_seq_lens.data());
   }
 
-  if (input_params.batch_forward_type.is_decode() &&
-      FLAGS_enable_intralayer_addnorm && residual.has_value()) {
+  if (!is_prefill && use_graph_decode_input &&
+      input_params.graph.tiling_data.defined()) {
+    node.variantPack.inTensors.at(input_idx++) =
+        atb_speed::Utils::AtTensor2Tensor(input_params.graph.tiling_data);
+  }
+
+  if (input_params.meta.batch_forward_type.is_decode() &&
+      ::xllm::KernelConfig::get_instance().enable_intralayer_addnorm() &&
+      residual.has_value()) {
     // input
     auto& residual_tensor = residual.value();
     node.variantPack.inTensors.at(input_idx++) =

@@ -20,8 +20,10 @@ limitations under the License.
 #include <sys/sysinfo.h>
 
 #include "common/device_monitor.h"
+#include "core/common/global_flags.h"
 #include "core/common/metrics.h"
 #include "core/distributed_runtime/master.h"
+#include "core/framework/config/execution_config.h"
 #include "core/platform/device.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
@@ -59,7 +61,10 @@ DiTEngine::DiTEngine(const runtime::Options& options,
   worker_clients_num_ = worker_clients_.size();
 
   // init thread pool
-  threadpool_ = std::make_unique<ThreadPool>(16);
+  threadpool_ = std::make_unique<ThreadPool>(
+      /*num_threads=*/16,
+      /*cpu_binding=*/false,
+      /*pool_name=*/"DiTEngine.forward_input");
 }
 
 void DiTEngine::setup_workers(const runtime::Options& options) {
@@ -86,7 +91,9 @@ bool DiTEngine::init_model() {
   futures.reserve(worker_clients_num_);
   for (auto& worker : worker_clients_) {
     futures.push_back(worker->init_model_async(
-        model_path, FLAGS_random_seed, MasterStatus::WAKEUP));
+        model_path,
+        ::xllm::ExecutionConfig::get_instance().random_seed(),
+        MasterStatus::WAKEUP));
   }
 
   // wait for all futures to complete
@@ -111,8 +118,8 @@ DiTForwardOutput DiTEngine::step(std::vector<DiTBatch>& batches) {
 
   Timer timer;
   auto dit_forward_input = batches[0].prepare_forward_input();
-  RawForwardInput raw_forward_input;
-  raw_forward_input.dit_forward_input = dit_forward_input;
+  ForwardInput forward_input;
+  forward_input.input_params.dit_forward_input = dit_forward_input;
   COUNTER_ADD(prepare_input_latency_seconds, timer.elapsed_seconds());
 
   std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;
@@ -120,7 +127,7 @@ DiTForwardOutput DiTEngine::step(std::vector<DiTBatch>& batches) {
 
   for (auto worker_rank = 0; worker_rank < worker_clients_num_; ++worker_rank) {
     futures.emplace_back(
-        worker_clients_[worker_rank]->step_async(raw_forward_input));
+        worker_clients_[worker_rank]->step_remote_async(forward_input));
   }
 
   // wait for the all future to complete

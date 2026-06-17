@@ -37,7 +37,41 @@ const ChatJsonParser& ChatJsonParser::anthropic() {
 
 std::pair<Status, std::string> VlmChatJsonParser::preprocess(
     std::string json_str) const {
-  return {Status(), std::move(json_str)};
+  try {
+    auto json = nlohmann::json::parse(json_str);
+    if (!json.contains("messages") || !json["messages"].is_array()) {
+      return {Status(), std::move(json_str)};
+    }
+
+    bool modified = false;
+    for (auto& msg : json["messages"]) {
+      if (!msg.is_object()) {
+        return {Status(StatusCode::INVALID_ARGUMENT,
+                       "Message in 'messages' array must be an object."),
+                ""};
+      }
+      if (msg.contains("content") && msg["content"].is_string()) {
+        nlohmann::json content = nlohmann::json::array();
+        content.push_back(
+            {{"type", "text"},
+             {"text", msg["content"].get_ref<const std::string&>()}});
+        msg["content"] = std::move(content);
+        modified = true;
+      }
+    }
+
+    return modified ? std::make_pair(Status(), json.dump())
+                    : std::make_pair(Status(), std::move(json_str));
+  } catch (const nlohmann::json::exception& e) {
+    return {Status(StatusCode::INVALID_ARGUMENT,
+                   "Invalid JSON format: " + std::string(e.what())),
+            ""};
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "Exception during VLM JSON preprocessing: " << e.what();
+    return {Status(StatusCode::UNKNOWN,
+                   "Internal server error during JSON processing."),
+            ""};
+  }
 }
 
 std::pair<Status, std::string> LlmChatJsonParser::preprocess(
@@ -127,6 +161,27 @@ std::pair<Status, std::string> AnthropicChatJsonParser::preprocess(
           msg["content_string"] = content.get<std::string>();
           msg.erase("content");
         } else if (content.is_array()) {
+          for (auto& block : content) {
+            if (!block.is_object() ||
+                block.value("type", "") != "tool_result") {
+              continue;
+            }
+            if (block.contains("tool_use_id") && !block.contains("id")) {
+              block["id"] = block["tool_use_id"];
+            }
+            block.erase("tool_use_id");
+            if (!block.contains("content")) {
+              continue;
+            }
+            auto& tool_content = block["content"];
+            if (tool_content.is_string()) {
+              block["content_string"] = tool_content.get<std::string>();
+              block.erase("content");
+            } else if (tool_content.is_array()) {
+              block["content_list"] = {{"items", tool_content}};
+              block.erase("content");
+            }
+          }
           nlohmann::json content_blocks;
           content_blocks["blocks"] = content;
           msg["content_blocks"] = content_blocks;

@@ -24,39 +24,34 @@ using namespace llm_datadist;
 
 class SpecKVCacheTransfer : public LlmDataDistTransfer {
  public:
-  SpecKVCacheTransfer(const std::string& device_ip,
-                      const uint16_t listen_port,
+  SpecKVCacheTransfer(const uint16_t listen_port,
                       const InstanceRole& instance_role,
-                      const std::string& model_type = "");
+                      const std::string& model_type = "",
+                      bool enable_lighting_indexer = false);
 
   virtual ~SpecKVCacheTransfer() = default;
 
-  void allocate_kv_cache(std::vector<xllm::KVCache>& kv_caches,
-                         const int64_t num_layers,
+  void register_kv_cache(std::vector<xllm::KVCache>& kv_caches,
                          const KVCacheShape& kv_cache_shape,
                          const torch::ScalarType dtype) override;
 
-  void allocate_kv_cache_spec(std::vector<xllm::KVCache>& kv_caches,
-                              const int64_t num_layers,
+  void register_kv_cache_spec(std::vector<xllm::KVCache>& kv_caches,
                               const KVCacheShape& kv_cache_shape,
-                              torch::ScalarType dtype) override;
+                              const torch::ScalarType dtype) override;
 
-  void allocate_kv_cache_internal(std::vector<xllm::KVCache>& kv_caches,
-                                  const int64_t num_layers,
-                                  const KVCacheShape& kv_cache_shape,
-                                  torch::ScalarType dtype,
-                                  bool is_spec,
-                                  Cache& k_cache,
-                                  Cache& v_cache);
+  void register_kv_cache_internal(
+      std::vector<xllm::KVCache>& kv_caches,
+      LayerRegisteredCaches& layer_registered_caches);
 
   void free_kv_cache() override;
 
-  bool pull_kv_blocks(const uint64_t src_cluster_id,
-                      const std::string& src_addr,
-                      const int64_t src_k_cache_id,
-                      const int64_t src_v_cache_id,
-                      const std::vector<uint64_t>& src_blocks,
-                      const std::vector<uint64_t>& dst_blocks) override;
+  bool pull_kv_blocks(
+      const uint64_t src_cluster_id,
+      const std::string& src_addr,
+      const std::vector<uint64_t>& src_blocks,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids,
+      const std::vector<uint64_t>& dst_linear_state_ids) override;
 
   folly::SemiFuture<bool> push_kv_blocks_async(
       const std::vector<TransferKVInfo>& transfer_kv_infos,
@@ -67,29 +62,25 @@ class SpecKVCacheTransfer : public LlmDataDistTransfer {
   bool push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
       std::shared_ptr<NPULayerSynchronizerImpl>& layer_synchronizer,
-      bool is_spec_draft) override;
+      bool is_spec_draft,
+      int32_t kv_split_rank,
+      int32_t kv_split_size) override;
 
   bool push_kv_blocks_spec(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
-      std::shared_ptr<NPULayerSynchronizerImpl>& layer_synchronizer);
+      std::shared_ptr<NPULayerSynchronizerImpl>& layer_synchronizer,
+      int32_t kv_split_rank = 0,
+      int32_t kv_split_size = 1);
 
   bool push_kv_blocks_internal(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
       std::shared_ptr<NPULayerSynchronizerImpl>& layer_synchronizer,
-      int64_t num_layers,
-      const Cache& k_cache,
-      const Cache& v_cache);
-
-  void merge_kv_blocks(
-      std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
-      const std::vector<TransferKVInfo>& transfer_kv_infos,
-      const ParallelArgs& parallel_args) override;
+      const LayerRegisteredCaches& layer_registered_caches,
+      int32_t kv_split_rank = 0,
+      int32_t kv_split_size = 1);
 
  private:
-  int64_t spec_num_layers_;
-
-  Cache spec_k_cache_;
-  Cache spec_v_cache_;
+  LayerRegisteredCaches spec_layer_registered_caches_;
 };
 
 }  // namespace xllm

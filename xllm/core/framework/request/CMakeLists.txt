@@ -8,20 +8,11 @@ cc_library(
     dit_request_params.h
     finish_reason.h
     incremental_decoder.h
-    mm_batch_data.h
-    mm_codec.h
-    mm_data.h
-    mm_data_item.h
-    mm_item_state.h
-    mm_data_visitor.h
-    mm_handler.h
-    mm_embedding_handler.h
-    mm_input.h
-    mm_type.h
     request_base.h
     request.h
     dit_request.h
     request_output.h
+    usage.h
     dit_request_output.h
     dit_request_params.h
     request_params.h
@@ -38,16 +29,6 @@ cc_library(
     dit_request.cpp
     finish_reason.cpp
     incremental_decoder.cpp
-    mm_batch_data.cpp
-    mm_codec.cpp
-    mm_data.cpp
-    mm_data_item.cpp
-    mm_item_state.cpp
-    mm_data_visitor.cpp
-    mm_handler.cpp
-    mm_embedding_handler.cpp
-    mm_input.cpp
-    mm_type.cpp
     request.cpp
     dit_request.cpp
     request_output.cpp
@@ -65,13 +46,14 @@ cc_library(
   DEPS
     :kv_cache
     :prefix_cache
+    :encoder_cache
     :block
     :tokenizer
     :chat_template
+    :multimodal
     glog::glog
     absl::strings
     absl::time
     proto::xllm_proto
     torch
-    ${OpenCV_LIBS}
 )

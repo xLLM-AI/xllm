@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include "core/framework/config/load_config.h"
+
 namespace xllm {
 namespace layer {
 
@@ -35,7 +37,9 @@ NpuRMSNormImpl::NpuRMSNormImpl(const ModelContext& context)
   loader_ = std::make_unique<RMSNormLoader>(
       1,
       context,
-      FLAGS_enable_manual_loader ? LoadMode::kManual : LoadMode::kEager);
+      ::xllm::LoadConfig::get_instance().enable_manual_loader()
+          ? LoadMode::kManual
+          : LoadMode::kEager);
 }
 
 int64_t NpuRMSNormImpl::init_layer() {

@@ -38,8 +38,11 @@ constexpr size_t kRequestQueueSize = 100;
 void DiTAsyncResponseProcessor::process_completed_request(
     std::shared_ptr<DiTRequest> request) {
   response_threadpool_.schedule([request = std::move(request)]() {
-    LOG(INFO) << "request_id: " << request->request_id();
+    double end_2_end_latency_seconds = request->elapsed_seconds();
+    HISTOGRAM_OBSERVE(end_2_end_latency_milliseconds,
+                      static_cast<int64_t>(end_2_end_latency_seconds * 1000.0));
 
+    request->log_statistic(end_2_end_latency_seconds);
     request->state().output_func()(request->generate_output());
   });
 }

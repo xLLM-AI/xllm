@@ -18,13 +18,14 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
-#include "framework/request/mm_data.h"
+#include "core/framework/multimodal/mm_data.h"
 #include "framework/request/sequence.h"
 #include "runtime/forward_params.h"
 #include "util/threadpool.h"
@@ -52,25 +53,29 @@ class BatchInputBuilder {
   ForwardInput build_forward_input(uint32_t num_decoding_tokens,
                                    uint32_t min_decoding_batch_size);
 
-  RawForwardInput build_raw_forward_input();
-
  private:
   friend class BatchInputBuilderTestPeer;
 
   // Core building methods
   void process_sequences();
   void process_sequences_multithreaded();
+  void process_multi_modal_inputs(Sequence* sequence,
+                                  uint32_t n_kv_cache_tokens,
+                                  uint32_t q_seq_len,
+                                  int32_t seq_index);
   ForwardInput state_to_forward_input();
-  RawForwardInput state_to_raw_forward_input();
+  void padding_decode_batch_size(uint32_t num_decoding_tokens,
+                                 uint32_t min_decoding_batch_size);
 
   static TransferKVInfo build_step_transfer_info(
       const TransferKVInfo& full_info,
       const std::vector<uint64_t>& local_block_ids,
-      uint32_t n_kv_cache_tokens,
+      size_t next_transfer_block_idx,
       uint32_t seq_len,
-      uint32_t block_size);
+      uint32_t block_size,
+      size_t* advanced_transfer_block_idx);
 
-  void process_swap_block_infos(RawForwardInput& raw_forward_input);
+  void process_swap_block_infos(ForwardInput& forward_input);
 
   // State management
   struct BuilderState {
@@ -99,7 +104,8 @@ class BatchInputBuilder {
 #if defined(USE_NPU) || defined(USE_MUSA)
     std::vector<int32_t> seq_lens;
     std::vector<int32_t> q_seq_lens;
-#elif defined(USE_MLU) || defined(USE_CUDA) || defined(USE_ILU)
+#elif defined(USE_MLU) || defined(USE_CUDA) || defined(USE_ILU) || \
+    defined(USE_DCU)
     std::vector<int32_t> seq_lens = {0};    // cu_seq_lens
     std::vector<int32_t> q_seq_lens = {0};  // q_cu_seq_len
 #endif
@@ -107,6 +113,9 @@ class BatchInputBuilder {
     // Cache and block data
     std::vector<int32_t> new_token_slot_ids;
     std::vector<std::vector<int32_t>> block_tables_vec;
+    // multi block manager support for DeepSeek V4
+    // [manager_num][batch_size][block_ids]
+    std::vector<std::vector<std::vector<int32_t>>> multi_block_tables;
 
     // beam search kernel input
     std::vector<float> acc_logprob_vec;
@@ -116,6 +125,9 @@ class BatchInputBuilder {
     std::vector<int32_t> linear_state_ids;
     std::vector<std::string> request_ids;
     std::vector<int32_t> extra_token_ids;
+    std::vector<int32_t> mtp_shifted_token_ids;
+    std::vector<int32_t> mtp_bootstrap_row_idxes;
+    std::vector<torch::Tensor> mtp_bootstrap_embeddings;
     std::vector<TransferKVInfo> transfer_kv_infos;
 
     // for continuous kvcache
@@ -138,6 +150,10 @@ class BatchInputBuilder {
                                     uint32_t seq_len,
                                     uint32_t padded_seq_len,
                                     BuilderState* state_ptr = nullptr);
+  torch::Tensor get_mrope_positions(Sequence* sequence,
+                                    uint32_t start,
+                                    uint32_t end);
+
   void handle_sampling_parameters(Sequence* sequence,
                                   BuilderState* state_ptr = nullptr);
   void setup_kv_cache_info(
@@ -152,7 +168,7 @@ class BatchInputBuilder {
   const std::vector<Sequence*>& sequences_;
   const std::vector<uint32_t>& allowed_max_tokens_;
   const std::vector<torch::Tensor>& input_embeddings_vec_;
-  const std::vector<MMData>& mm_data_vec_;
+  std::vector<MMData> mm_data_vec_;
   const ModelArgs* args_;
 
   // Builder state

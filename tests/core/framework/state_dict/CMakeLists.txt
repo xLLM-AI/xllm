@@ -6,7 +6,7 @@ cc_test(
   SRCS
     rec_vocab_dict_test.cpp
   DEPS
-    :flags
+    :config
     :state_dict
     GTest::gtest_main
     glog::glog

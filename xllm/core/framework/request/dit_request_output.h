@@ -31,17 +31,26 @@ struct DiTGenerationOutput {
   // the index of the sequence in the request.
   size_t index;
 
-  // the generated image in torch tensor format.
+  // the generated image/video as base64-encoded data.
   std::string image;
 
-  // the height of the generated image.
+  // the generated audio as raw WAV bytes (audio models only).
+  std::string audio;
+
+  // the height of the generated image/video.
   int32_t height;
 
-  // the width of the generated image.
+  // the width of the generated image/video.
   int32_t width;
 
-  // seed used for image generation.
+  // seed used for generation.
   int64_t seed;
+
+  // number of video frames
+  int32_t num_frames = 0;
+
+  // video fps
+  double video_fps = 0.0;
 };
 
 struct DiTRequestOutput {

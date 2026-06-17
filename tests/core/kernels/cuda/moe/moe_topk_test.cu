@@ -221,7 +221,7 @@ __global__ void testReduceTopKSingleKernel(const Type* __restrict__ values,
                                            int32_t* __restrict__ outIndices,
                                            Type minValue,
                                            int actualK) {
-  auto warp = cg::tiled_partition<kWARP_SIZE>(cg::this_thread_block());
+  auto warp = cg::tiled_partition<kWarpSize>(cg::this_thread_block());
   const int lane = threadIdx.x;
 
   Type val = values[lane];
@@ -248,7 +248,7 @@ __global__ void testReduceTopKMultiKernel(const Type* __restrict__ values,
                                           int32_t* __restrict__ outIndices,
                                           Type minValue,
                                           int actualK) {
-  auto warp = cg::tiled_partition<kWARP_SIZE>(cg::this_thread_block());
+  auto warp = cg::tiled_partition<kWarpSize>(cg::this_thread_block());
   const int lane = threadIdx.x;
 
   Type val[N];
@@ -313,7 +313,7 @@ class ReduceTopKDeviceTest : public ::testing::Test {
 // K=1: find the global maximum across 32 warp lanes.
 TEST_F(ReduceTopKDeviceTest, SingleValueTopK1) {
   constexpr int K = 1;
-  constexpr int N = kWARP_SIZE;
+  constexpr int N = kWarpSize;
 
   std::vector<float> h_vals(N);
   std::vector<int32_t> h_idx(N);
@@ -354,7 +354,7 @@ TEST_F(ReduceTopKDeviceTest, SingleValueTopK1) {
 // K=4: find the top-4 across 32 warp lanes with pseudo-random data.
 TEST_F(ReduceTopKDeviceTest, SingleValueTopK4) {
   constexpr int K = 4;
-  constexpr int N = kWARP_SIZE;
+  constexpr int N = kWarpSize;
 
   std::mt19937 rng(42);
   std::vector<float> h_vals(N);
@@ -396,7 +396,7 @@ TEST_F(ReduceTopKDeviceTest, SingleValueTopK4) {
 // All values identical → top-K should return the K smallest indices.
 TEST_F(ReduceTopKDeviceTest, DuplicateValuesPreferSmallerIndex) {
   constexpr int K = 3;
-  constexpr int N = kWARP_SIZE;
+  constexpr int N = kWarpSize;
 
   std::vector<float> h_vals(N, 42.0f);
   std::vector<int32_t> h_idx(N);
@@ -427,7 +427,7 @@ TEST_F(ReduceTopKDeviceTest, DuplicateValuesPreferSmallerIndex) {
 // actualK < K: only the first actualK results are meaningful.
 TEST_F(ReduceTopKDeviceTest, SingleValueActualKLessThanK) {
   constexpr int K = 4;
-  constexpr int N = kWARP_SIZE;
+  constexpr int N = kWarpSize;
   const int actualK = 2;
 
   std::mt19937 rng(99);
@@ -470,7 +470,7 @@ TEST_F(ReduceTopKDeviceTest, SingleValueActualKLessThanK) {
 // Negative values: top-K should still pick the largest (closest to 0).
 TEST_F(ReduceTopKDeviceTest, SingleValueAllNegative) {
   constexpr int K = 2;
-  constexpr int N = kWARP_SIZE;
+  constexpr int N = kWarpSize;
 
   std::vector<float> h_vals(N);
   std::vector<int32_t> h_idx(N);
@@ -515,7 +515,7 @@ TEST_F(ReduceTopKDeviceTest, SingleValueAllNegative) {
 TEST_F(ReduceTopKDeviceTest, MultiValueN2K2) {
   constexpr int K = 2;
   constexpr int N_PER_THREAD = 2;
-  constexpr int TOTAL = kWARP_SIZE * N_PER_THREAD;
+  constexpr int TOTAL = kWarpSize * N_PER_THREAD;
 
   std::mt19937 rng(123);
   std::vector<float> h_vals(TOTAL);
@@ -558,7 +558,7 @@ TEST_F(ReduceTopKDeviceTest, MultiValueN2K2) {
 TEST_F(ReduceTopKDeviceTest, MultiValueN3K2) {
   constexpr int K = 2;
   constexpr int N_PER_THREAD = 3;
-  constexpr int TOTAL = kWARP_SIZE * N_PER_THREAD;
+  constexpr int TOTAL = kWarpSize * N_PER_THREAD;
 
   std::mt19937 rng(321);
   std::vector<float> h_vals(TOTAL);
@@ -601,7 +601,7 @@ TEST_F(ReduceTopKDeviceTest, MultiValueN3K2) {
 TEST_F(ReduceTopKDeviceTest, MultiValueN4K3) {
   constexpr int K = 3;
   constexpr int N_PER_THREAD = 4;
-  constexpr int TOTAL = kWARP_SIZE * N_PER_THREAD;
+  constexpr int TOTAL = kWarpSize * N_PER_THREAD;
 
   std::mt19937 rng(456);
   std::vector<float> h_vals(TOTAL);
@@ -649,7 +649,7 @@ TEST_F(ReduceTopKDeviceTest, MultiValueN4K3) {
 TEST_F(ReduceTopKDeviceTest, MultiValueN8K2_LargePath) {
   constexpr int K = 2;
   constexpr int N_PER_THREAD = 8;
-  constexpr int TOTAL = kWARP_SIZE * N_PER_THREAD;
+  constexpr int TOTAL = kWarpSize * N_PER_THREAD;
 
   std::mt19937 rng(789);
   std::vector<float> h_vals(TOTAL);
@@ -692,7 +692,7 @@ TEST_F(ReduceTopKDeviceTest, MultiValueN8K2_LargePath) {
 TEST_F(ReduceTopKDeviceTest, MultiValueN8K4_LargePath) {
   constexpr int K = 4;
   constexpr int N_PER_THREAD = 8;
-  constexpr int TOTAL = kWARP_SIZE * N_PER_THREAD;
+  constexpr int TOTAL = kWarpSize * N_PER_THREAD;
 
   std::mt19937 rng(1024);
   std::vector<float> h_vals(TOTAL);
@@ -735,7 +735,7 @@ TEST_F(ReduceTopKDeviceTest, MultiValueN8K4_LargePath) {
 TEST_F(ReduceTopKDeviceTest, MultiValueN12K3_LargePath) {
   constexpr int K = 3;
   constexpr int N_PER_THREAD = 12;
-  constexpr int TOTAL = kWARP_SIZE * N_PER_THREAD;
+  constexpr int TOTAL = kWarpSize * N_PER_THREAD;
 
   std::mt19937 rng(2048);
   std::vector<float> h_vals(TOTAL);
@@ -778,7 +778,7 @@ TEST_F(ReduceTopKDeviceTest, MultiValueN12K3_LargePath) {
 TEST_F(ReduceTopKDeviceTest, MultiValueN16K2_LargePath) {
   constexpr int K = 2;
   constexpr int N_PER_THREAD = 16;
-  constexpr int TOTAL = kWARP_SIZE * N_PER_THREAD;
+  constexpr int TOTAL = kWarpSize * N_PER_THREAD;
 
   std::mt19937 rng(4096);
   std::vector<float> h_vals(TOTAL);
@@ -822,7 +822,7 @@ TEST_F(ReduceTopKDeviceTest, MultiValueN16K2_LargePath) {
 TEST_F(ReduceTopKDeviceTest, MultiValueN8K3_AllDuplicate) {
   constexpr int K = 3;
   constexpr int N_PER_THREAD = 8;
-  constexpr int TOTAL = kWARP_SIZE * N_PER_THREAD;
+  constexpr int TOTAL = kWarpSize * N_PER_THREAD;
 
   std::vector<float> h_vals(TOTAL, 7.7f);
   std::vector<int32_t> h_idx(TOTAL);
@@ -860,7 +860,7 @@ TEST_F(ReduceTopKDeviceTest, MultiValueN8K3_AllDuplicate) {
 // Single-value reduceTopK with int type, K=2.
 TEST_F(ReduceTopKDeviceTest, IntTypeSingleValueTopK2) {
   constexpr int K = 2;
-  constexpr int N = kWARP_SIZE;
+  constexpr int N = kWarpSize;
 
   std::vector<int> h_vals(N);
   std::vector<int32_t> h_idx(N);

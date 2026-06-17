@@ -26,7 +26,8 @@ limitations under the License.
 #include <exception>
 #include <stdexcept>
 
-#include "core/common/global_flags.h"
+#include "core/framework/config/beam_search_config.h"
+#include "core/framework/config/execution_config.h"
 #include "helper.h"
 
 XLLM_CAPI_EXPORT XLLM_LLM_Handler* xllm_llm_create(void) {
@@ -100,7 +101,6 @@ XLLM_CAPI_EXPORT bool xllm_llm_initialize(
         .enable_chunked_prefill(xllm_init_options.enable_chunked_prefill)
         .enable_prefill_sp(xllm_init_options.enable_prefill_sp)
         .master_node_addr(xllm_init_options.master_node_addr)
-        .device_ip(xllm_init_options.device_ip)
         .transfer_listen_port(xllm_init_options.transfer_listen_port)
         .nnodes(xllm_init_options.nnodes)
         .node_rank(xllm_init_options.node_rank)
@@ -115,12 +115,12 @@ XLLM_CAPI_EXPORT bool xllm_llm_initialize(
         .is_local(true)
         .server_idx(xllm_init_options.server_idx);
 
-    options.enable_graph(FLAGS_enable_graph);
+    options.enable_graph(
+        ::xllm::ExecutionConfig::get_instance().enable_graph());
 
 #if !defined(USE_NPU) && !defined(USE_CUDA)
-    FLAGS_enable_block_copy_kernel = false;
+    xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel(false);
 #endif
-
     handler->master = std::make_unique<xllm::LLMMaster>(options);
     handler->master->run();
 

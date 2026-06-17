@@ -21,7 +21,6 @@ limitations under the License.
 #endif
 // clang-format on
 
-#include <c10/core/Event.h>
 #include <c10/core/Stream.h>
 #include <c10/core/StreamGuard.h>
 
@@ -36,9 +35,25 @@ limitations under the License.
 #include <c10/cuda/CUDAStream.h>
 #elif defined(USE_MUSA)
 #include <c10/musa/MUSAGuard.h>
+#elif defined(USE_DCU)
+#include <c10/hip/HIPStream.h>
 #endif
 
+#include "core/platform/stream_event.h"
+
 namespace xllm {
+
+#if defined(USE_NPU)
+using PlatformStream = c10_npu::NPUStream;
+#elif defined(USE_MLU)
+using PlatformStream = torch_mlu::MLUStream;
+#elif defined(USE_CUDA) || defined(USE_ILU)
+using PlatformStream = c10::cuda::CUDAStream;
+#elif defined(USE_MUSA)
+using PlatformStream = c10::musa::MUSAStream;
+#elif defined(USE_DCU)
+using PlatformStream = c10::hip::HIPStream;
+#endif
 
 class Stream {
  public:
@@ -50,40 +65,21 @@ class Stream {
   Stream(Stream&&) = default;
   Stream& operator=(Stream&&) = default;
 
-#if defined(USE_NPU)
-  Stream(c10_npu::NPUStream stream, const int32_t timeout = -1);
-#elif defined(USE_MLU)
-  Stream(torch_mlu::MLUStream stream, const int32_t timeout = -1);
-#elif defined(USE_CUDA) || defined(USE_ILU)
-  Stream(c10::cuda::CUDAStream stream, const int32_t timeout = -1);
-#elif defined(USE_MUSA)
-  Stream(c10::musa::MUSAStream stream, const int32_t timeout = -1);
-#endif
+  explicit Stream(PlatformStream stream, const int32_t timeout = -1);
 
   int synchronize() const;
   c10::StreamGuard set_stream_guard() const;
-#if defined(USE_NPU)
-  c10_npu::NPUStream* get_stream() { return &stream_; }
-#elif defined(USE_MLU)
-  torch_mlu::MLUStream* get_stream() { return &stream_; }
-#elif defined(USE_CUDA)
-  c10::cuda::CUDAStream* get_stream() { return &stream_; }
-#endif
+  PlatformStream* get_stream() { return &stream_; }
+  const PlatformStream* get_stream() const { return &stream_; }
   void wait_stream(const Stream& other_stream);
+  StreamEventPtr record_event() const;
+  bool wait_event(const StreamEventPtr& event) const;
 
   // Support for LOG(INFO) output
   friend std::ostream& operator<<(std::ostream& os, const Stream& stream);
 
  private:
-#if defined(USE_NPU)
-  c10_npu::NPUStream stream_;
-#elif defined(USE_MLU)
-  torch_mlu::MLUStream stream_;
-#elif defined(USE_CUDA) || defined(USE_ILU)
-  c10::cuda::CUDAStream stream_;
-#elif defined(USE_MUSA)
-  c10::musa::MUSAStream stream_;
-#endif
+  PlatformStream stream_;
   const int32_t timeout_;
 };
 

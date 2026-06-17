@@ -32,6 +32,7 @@ limitations under the License.
 #include "framework/block/block_manager_pool.h"
 #include "framework/eplb/eplb_manager.h"
 #include "framework/eplb/eplb_policy.h"
+#include "framework/kv_cache/kv_cache_utils.h"
 #include "framework/quant_args.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
@@ -63,15 +64,16 @@ class LLMEngine : public Engine {
   std::vector<int64_t> get_active_activation_memory() const override;
 
   // P/D
-  bool pull_kv_blocks(const int32_t src_dp_size,
-                      const int32_t src_dp_rank,
-                      const std::vector<uint64_t>& src_cluster_ids,
-                      const std::vector<std::string>& src_addrs,
-                      const std::vector<int64_t>& src_k_cache_ids,
-                      const std::vector<int64_t>& src_v_cache_ids,
-                      const std::vector<uint64_t>& src_blocks,
-                      const int32_t dst_dp_rank,
-                      const std::vector<uint64_t>& dst_blocks) override;
+  bool pull_kv_blocks(
+      const int32_t src_dp_size,
+      const int32_t src_dp_rank,
+      const std::vector<uint64_t>& src_cluster_ids,
+      const std::vector<std::string>& src_addrs,
+      const std::vector<uint64_t>& src_blocks,
+      const int32_t dst_dp_rank,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids = {},
+      const std::vector<uint64_t>& dst_linear_state_ids = {}) override;
 
   std::vector<folly::SemiFuture<uint32_t>> transfer_kv_blocks(
       const uint32_t dp_rank,
@@ -89,13 +91,9 @@ class LLMEngine : public Engine {
       std::vector<std::shared_ptr<std::atomic<uint32_t>>>* prefetch_results)
       override;
 
-  void get_device_info(std::vector<std::string>& device_ips,
-                       std::vector<uint16_t>& ports) override;
-
   void get_cache_info(std::vector<uint64_t>& cluster_ids,
                       std::vector<std::string>& addrs,
-                      std::vector<int64_t>& k_cache_ids,
-                      std::vector<int64_t>& v_cache_ids) override;
+                      std::vector<uint16_t>& ports) override;
 
   void get_xtensor_info(
       std::vector<size_t>& worker_free_phy_pages,
@@ -104,26 +102,30 @@ class LLMEngine : public Engine {
 
   bool link_cluster(const std::vector<uint64_t>& cluster_ids,
                     const std::vector<std::string>& addrs,
-                    const std::vector<std::string>& device_ips,
                     const std::vector<uint16_t>& ports,
-                    const int32_t src_dp_size) override;
+                    const int32_t src_dp_size,
+                    const int32_t src_kv_split_size = 1) override;
 
   bool unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                       const std::vector<std::string>& addrs,
-                      const std::vector<std::string>& device_ips,
                       const std::vector<uint16_t>& ports,
-                      const int32_t dp_size) override;
+                      const int32_t src_dp_size,
+                      const int32_t src_kv_split_size = 1) override;
 
-  // D2D link for weight transfer - each worker links to one remote addr
-  bool link_d2d(const std::vector<std::string>& device_ips) override;
+  // P2P link for weight transfer - each worker links to one remote addr
+  bool link_p2p(const std::vector<std::string>& remote_addrs) override;
 
-  bool unlink_d2d(const std::vector<std::string>& device_ips) override;
+  bool unlink_p2p(const std::vector<std::string>& remote_addrs) override;
 
   std::shared_ptr<DistManager> get_dist_manager() { return dist_manager_; };
 
   bool sleep(MasterStatus master_status) override;
 
   bool wakeup(const WakeupOptions& options) override;
+
+  bool start_profile() override;
+
+  bool stop_profile() override;
 
   // XTensor mode: get GlobalXTensor offsets for allocated blocks via RPC
   // Calls worker in the specified DP group to compute offsets
@@ -142,7 +144,7 @@ class LLMEngine : public Engine {
       const ModelLoader& model_loader) const;
   KVCacheCapacity estimate_kv_cache_capacity();
   bool allocate_kv_cache(const KVCacheCapacity& kv_cache_cap);
-  std::vector<RawForwardInput> prepare_inputs(std::vector<Batch>& batch);
+  std::vector<ForwardInput> prepare_inputs(std::vector<Batch>& batch);
   void process_group_test();
 
  protected:
@@ -194,9 +196,6 @@ class LLMEngine : public Engine {
   // avoid creating a new thread pool for each batch.
   // NOTE: Perhaps it can be optimized to create a global thread pool.
   std::unique_ptr<ThreadPool> threadpool_ = nullptr;
-
-  std::vector<std::string> worker_device_ips_;
-  std::vector<uint16_t> worker_ports_;
 
   bool layer_forward_interrupted_ = false;
 

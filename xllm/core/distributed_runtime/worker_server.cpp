@@ -33,9 +33,13 @@ limitations under the License.
 #include <memory>
 #include <utility>
 
-#include "common/global_flags.h"
 #include "common/metrics.h"
-#if defined(USE_CUDA) || defined(USE_MLU)
+#include "core/framework/config/eplb_config.h"
+#include "core/framework/config/execution_config.h"
+#include "core/framework/config/kernel_config.h"
+#include "core/framework/config/parallel_config.h"
+#include "core/framework/config/service_config.h"
+#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
 #include "core/platform/numa_utils.h"
 #endif
 #include "framework/kv_cache/kv_cache.h"
@@ -64,29 +68,41 @@ namespace {
 void handle_signal(int signum) { _exit(0); }
 }  // namespace
 
-void WorkerServer::create_server(
-    const runtime::Options& options,
-    std::atomic<bool>& done,
-    const std::string& master_node_addr,
-    const torch::Device& d,
-    int world_size,
-    int global_rank,
-    int32_t dp_size,
-    int local_rank,
-    int32_t ep_size,
-    int32_t cp_size,
-    WorkerType worker_type,
-    std::unique_ptr<ForwardSharedMemoryManager> input_shm_manager,
-    std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager) {
-  FLAGS_enable_prefill_sp = options.enable_prefill_sp();
+void WorkerServer::create_server(const runtime::Options& options,
+                                 std::atomic<bool>& done,
+                                 const std::string& master_node_addr,
+                                 const torch::Device& d,
+                                 ParallelArgs startup_parallel_args,
+                                 int32_t world_size,
+                                 int32_t global_rank,
+                                 int32_t dp_size,
+                                 int32_t local_rank,
+                                 int32_t ep_size,
+                                 int32_t cp_size,
+                                 WorkerType worker_type) {
+  ParallelConfig::get_instance().enable_prefill_sp(options.enable_prefill_sp());
+  if (options.enable_offline_inference()) {
+    ExecutionConfig::get_instance()
+        .enable_graph(options.enable_graph())
+        .enable_graph_mode_decode_no_padding(
+            options.enable_graph_mode_decode_no_padding())
+        .enable_prefill_piecewise_graph(
+            options.enable_prefill_piecewise_graph())
+        .max_tokens_for_graph_mode(options.max_tokens_for_graph_mode());
+  }
 #if defined(USE_NPU)
-  FLAGS_npu_kernel_backend = options.npu_kernel_backend();
+  KernelConfig::get_instance().npu_kernel_backend(options.npu_kernel_backend());
 #endif
   Device device(d);
   device.set_device();
   LOG(INFO) << "Create worker server with device: " << device.index();
 
-#if defined(USE_CUDA) || defined(USE_MLU)
+  std::unique_ptr<ForwardSharedMemoryManager> input_shm_manager = nullptr;
+  std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager = nullptr;
+  prepare_shm(
+      startup_parallel_args, options, input_shm_manager, output_shm_manager);
+
+#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
   // Bind worker thread to the same NUMA node as the device
   // This prevents the thread from spanning across NUMA nodes, which would
   // significantly degrade memory access and other performance aspects
@@ -105,7 +121,7 @@ void WorkerServer::create_server(
   }
 #endif
 
-  auto worker_global_rank = global_rank;
+  int32_t worker_global_rank = global_rank;
   // TODO: FIXME Later
   // std::unique_ptr<WorkerImpl> worker_impl =
   // std::make_unique<LLMWorkerImpl>(...);
@@ -195,36 +211,75 @@ void WorkerServer::stop() {
   use_spwan_worker_ = false;
 }
 
-void WorkerServer::create_spawn_server(int local_rank,
+void WorkerServer::create_spawn_server(int32_t local_rank,
                                        const std::string& master_node_addr,
                                        std::atomic<bool>& done,
                                        const ParallelArgs& parallel_args,
                                        const torch::Device& d,
                                        const runtime::Options& options,
                                        WorkerType& worker_type) {
-  auto local_rank_str = std::to_string(local_rank);
+  std::string local_rank_str = std::to_string(local_rank);
   const char* local_rank_ptr = local_rank_str.c_str();
-  auto global_rank_str = std::to_string(parallel_args.rank());
+  std::string global_rank_str = std::to_string(parallel_args.rank());
   const char* global_rank_ptr = global_rank_str.c_str();
-  auto world_size_str = std::to_string(parallel_args.world_size());
+  std::string world_size_str = std::to_string(parallel_args.world_size());
   const char* world_size_ptr = world_size_str.c_str();
-  auto device_idx_str = std::to_string(d.index());
+  std::string device_idx_str = std::to_string(d.index());
   const char* device_idx_ptr = device_idx_str.c_str();
-  auto num_decoding_tokens_str = std::to_string(options.num_decoding_tokens());
+  std::string num_decoding_tokens_str =
+      std::to_string(options.num_decoding_tokens());
   const char* num_decoding_tokens_ptr = num_decoding_tokens_str.c_str();
-  auto block_size_str = std::to_string(options.block_size());
+  std::string block_size_str = std::to_string(options.block_size());
   const char* block_size_ptr = block_size_str.c_str();
-  auto enable_shm_str = std::to_string(options.enable_shm());
+  std::string max_tokens_per_batch_str =
+      std::to_string(options.max_tokens_per_batch());
+  const char* max_tokens_per_batch_ptr = max_tokens_per_batch_str.c_str();
+  std::string max_seqs_per_batch_str =
+      std::to_string(options.max_seqs_per_batch());
+  const char* max_seqs_per_batch_ptr = max_seqs_per_batch_str.c_str();
+  std::string enable_shm_str = std::to_string(options.enable_shm());
   const char* enable_shm_ptr = enable_shm_str.c_str();
-  auto input_shm_size_str = std::to_string(options.input_shm_size());
+  std::string input_shm_size_str = std::to_string(options.input_shm_size());
   const char* input_shm_size_ptr = input_shm_size_str.c_str();
-  auto output_shm_size_str = std::to_string(options.output_shm_size());
+  std::string output_shm_size_str = std::to_string(options.output_shm_size());
   const char* output_shm_size_ptr = output_shm_size_str.c_str();
-  auto is_local_str = std::to_string(options.is_local());
+  std::string is_local_str = std::to_string(options.is_local());
   const char* is_local_ptr = is_local_str.c_str();
-  auto enable_prefill_sp_str = std::to_string(options.enable_prefill_sp());
+  std::string enable_prefill_sp_str =
+      std::to_string(options.enable_prefill_sp());
   const char* enable_prefill_sp_ptr = enable_prefill_sp_str.c_str();
-  const char* communication_backend_ptr = FLAGS_communication_backend.c_str();
+  std::string enable_speculative_decode_str =
+      std::to_string(options.enable_speculative_decode());
+  const char* enable_speculative_decode_ptr =
+      enable_speculative_decode_str.c_str();
+  std::string num_speculative_tokens_str =
+      std::to_string(options.num_speculative_tokens());
+  const char* num_speculative_tokens_ptr = num_speculative_tokens_str.c_str();
+  std::string speculative_algorithm_str = options.speculative_algorithm();
+  const char* speculative_algorithm_ptr = speculative_algorithm_str.c_str();
+  std::string enable_graph_str = std::to_string(options.enable_graph());
+  const char* enable_graph_ptr = enable_graph_str.c_str();
+  std::string enable_graph_mode_decode_no_padding_str =
+      std::to_string(options.enable_graph_mode_decode_no_padding());
+  const char* enable_graph_mode_decode_no_padding_ptr =
+      enable_graph_mode_decode_no_padding_str.c_str();
+  std::string enable_prefill_piecewise_graph_str =
+      std::to_string(options.enable_prefill_piecewise_graph());
+  const char* enable_prefill_piecewise_graph_ptr =
+      enable_prefill_piecewise_graph_str.c_str();
+  std::string max_tokens_for_graph_mode_str =
+      std::to_string(options.max_tokens_for_graph_mode());
+  const char* max_tokens_for_graph_mode_ptr =
+      max_tokens_for_graph_mode_str.c_str();
+  const char* communication_backend_ptr =
+      ::xllm::ParallelConfig::get_instance().communication_backend().c_str();
+  std::string npu_kernel_backend_str = options.npu_kernel_backend();
+  const char* npu_kernel_backend_ptr = npu_kernel_backend_str.c_str();
+  const char* rank_tablefile_ptr =
+      ::xllm::EPLBConfig::get_instance().rank_tablefile().c_str();
+  std::string max_encoder_cache_size_str =
+      std::to_string(options.max_encoder_cache_size());
+  const char* max_encoder_cache_size_ptr = max_encoder_cache_size_str.c_str();
   const char* worker_type_ptr = worker_type.to_string();
   std::string spawn_worker_bin_path =
       options.spawn_worker_path() + "/spawn_worker";
@@ -237,14 +292,26 @@ void WorkerServer::create_spawn_server(int local_rank,
                         device_idx_ptr,
                         num_decoding_tokens_ptr,
                         block_size_ptr,
+                        max_tokens_per_batch_ptr,
+                        max_seqs_per_batch_ptr,
                         enable_shm_ptr,
                         is_local_ptr,
                         enable_prefill_sp_ptr,
                         options.task_type().c_str(),
                         worker_type_ptr,
+                        enable_speculative_decode_ptr,
+                        num_speculative_tokens_ptr,
+                        speculative_algorithm_ptr,
                         input_shm_size_ptr,
                         output_shm_size_ptr,
                         communication_backend_ptr,
+                        npu_kernel_backend_ptr,
+                        rank_tablefile_ptr,
+                        enable_graph_ptr,
+                        enable_graph_mode_decode_no_padding_ptr,
+                        enable_prefill_piecewise_graph_ptr,
+                        max_tokens_for_graph_mode_ptr,
+                        max_encoder_cache_size_ptr,
                         nullptr};
   pid_t pid;
   int status = posix_spawnp(
@@ -266,8 +333,9 @@ void WorkerServer::prepare_shm(
     std::unique_ptr<ForwardSharedMemoryManager>& output_shm_manager) {
   if (options.is_local() && options.enable_shm()) {
     bool is_creator;
-    int dp_local_tp_size = parallel_args.world_size() / parallel_args.dp_size();
-    int dp_group = parallel_args.rank() / dp_local_tp_size;
+    int32_t dp_local_tp_size =
+        parallel_args.world_size() / parallel_args.dp_size();
+    int32_t dp_group = parallel_args.rank() / dp_local_tp_size;
 
     std::string name_prefix =
         "xllm_" + net::extract_port(options.master_node_addr().value());
@@ -285,7 +353,7 @@ void WorkerServer::prepare_shm(
   }
 }
 
-WorkerServer::WorkerServer(int local_worker_idx,
+WorkerServer::WorkerServer(int32_t local_worker_idx,
                            const std::string& master_node_addr,
                            std::atomic<bool>& done,
                            const ParallelArgs& parallel_args,
@@ -315,11 +383,6 @@ WorkerServer::WorkerServer(int local_worker_idx,
       signal(SIGINT, handle_signal);
       signal(SIGTERM, handle_signal);
 
-      std::unique_ptr<ForwardSharedMemoryManager> input_shm_manager = nullptr;
-      std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager = nullptr;
-      prepare_shm(
-          parallel_args, options, input_shm_manager, output_shm_manager);
-
       // start worker in a thread.
       worker_thread_ =
           std::make_unique<std::thread>(&WorkerServer::create_server,
@@ -328,15 +391,14 @@ WorkerServer::WorkerServer(int local_worker_idx,
                                         std::ref(done),
                                         master_node_addr,
                                         d,
+                                        parallel_args,
                                         parallel_args.world_size(),
                                         parallel_args.rank(),
                                         parallel_args.dp_size(),
                                         local_worker_idx,
                                         parallel_args.ep_size(),
                                         parallel_args.cp_size(),
-                                        worker_type,
-                                        std::move(input_shm_manager),
-                                        std::move(output_shm_manager));
+                                        worker_type);
     }
   } else {
     // TODO: support other model type later.
@@ -360,17 +422,18 @@ bool WorkerServer::sync_master_node(const std::string& master_node_addr,
   proto::Collective_Stub stub(&channel);
 
   // Retry until master node ready
-  int try_count = 0;
+  int32_t try_count = 0;
   brpc::Controller cntl;
-  const int sleep_time_second = 3;
-  while (try_count < FLAGS_max_reconnect_count) {
+  constexpr int32_t kSleepTimeSecond = 3;
+  while (try_count <
+         ::xllm::ServiceConfig::get_instance().max_reconnect_count()) {
     cntl.Reset();
     stub.Sync(&cntl, &addr_info, &uids, nullptr);
     if (cntl.Failed()) {
       LOG(WARNING) << "Worker#" << addr_info.global_rank()
                    << " try connect to engine server error, try again."
                    << " Error message: " << cntl.ErrorText();
-      std::this_thread::sleep_for(std::chrono::seconds(sleep_time_second));
+      std::this_thread::sleep_for(std::chrono::seconds(kSleepTimeSecond));
     } else {
       LOG(INFO) << "Worker#" << addr_info.global_rank() << " connect to "
                 << master_node_addr << " success.";
@@ -379,7 +442,8 @@ bool WorkerServer::sync_master_node(const std::string& master_node_addr,
     try_count++;
   }
 
-  if (try_count >= FLAGS_max_reconnect_count) {
+  if (try_count >=
+      ::xllm::ServiceConfig::get_instance().max_reconnect_count()) {
     LOG(ERROR) << "Worker#" << addr_info.global_rank() << " connect to "
                << master_node_addr << " failed."
                << " Error message: " << cntl.ErrorText();

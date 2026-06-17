@@ -59,12 +59,14 @@ class DeepseekV2DecoderLayerImpl : public torch::nn::Module {
     sp_ffn_chunk_size_ = sp_ctx != nullptr ? kDefaultSpFfnChunkSize : -1;
   }
 
-  torch::Tensor forward(torch::Tensor& x,
-                        std::optional<torch::Tensor>& residual,
-                        torch::Tensor& positions,
-                        const AttentionMetadata& attn_metadata,
-                        KVCache& kv_cache,
-                        const ModelInputParams& input_params);
+  torch::Tensor forward(
+      torch::Tensor& x,
+      std::optional<torch::Tensor>& residual,
+      torch::Tensor& positions,
+      const AttentionMetadata& attn_metadata,
+      KVCache& kv_cache,
+      const ModelInputParams& input_params,
+      const std::optional<torch::Tensor>& input_ids = std::nullopt);
 
  private:
   enum class PostAttnMode {

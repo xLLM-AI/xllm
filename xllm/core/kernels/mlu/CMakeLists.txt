@@ -19,5 +19,5 @@ cc_library(
     torch
     cnclep
     torch_mlu_ops
-    python3.10
+    Python::Python
 )

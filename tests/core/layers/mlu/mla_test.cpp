@@ -17,6 +17,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
+#include "core/framework/config/kv_cache_config.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
@@ -47,7 +48,7 @@ class DeepseekMLATest : public ::testing::Test {
     Device device(torch_device);
     device.set_seed();
 
-    FLAGS_block_size = 1;
+    KVCacheConfig::get_instance().block_size(1);
     // Initialize default model arguments for testing
     model_args_ = create_mla_model_args();
 

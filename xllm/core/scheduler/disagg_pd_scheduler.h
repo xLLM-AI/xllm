@@ -27,24 +27,26 @@ limitations under the License.
 #include "framework/request/request.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "runtime/xservice_client.h"
-#include "scheduler/continuous_scheduler.h"
+#include "scheduler/chunked_prefill_scheduler.h"
 #include "server/xllm_server_registry.h"
 #include "util/blockingconcurrentqueue.h"
 #include "util/threadpool.h"
 
 namespace xllm {
 
-class DisaggPDScheduler : public ContinuousScheduler {
+class DisaggPDScheduler : public ChunkedPrefillScheduler {
  public:
   DisaggPDScheduler(Engine* engine, const Options& options);
 
   virtual ~DisaggPDScheduler();
 
   virtual uint32_t get_waiting_requests_num() const override {
-    return waiting_priority_queue_.size();
+    return waiting_priority_queue_->size();
   };
 
   void step(const absl::Duration& timeout) override;
+
+  std::vector<Batch> prepare_batch() override;
 
   bool add_request(std::shared_ptr<Request>& request) override;
 
@@ -68,11 +70,11 @@ class DisaggPDScheduler : public ContinuousScheduler {
       const std::string& kv_cache_transfer_mode,
       std::vector<uint64_t> src_cluster_ids,
       std::vector<std::string> src_addrs,
-      std::vector<int64_t> src_k_cache_ids,
-      std::vector<int64_t> src_v_cache_ids,
       std::vector<uint64_t> src_block_ids,
+      int32_t src_linear_state_id,
       int32_t src_dp_size,
-      int32_t src_dp_rank);
+      int32_t src_dp_rank,
+      torch::Tensor mtp_bootstrap_embedding = torch::Tensor());
 
   // decode allocate blocks with prefix cache.
   bool try_allocate(Sequence* sequence);
@@ -85,16 +87,16 @@ class DisaggPDScheduler : public ContinuousScheduler {
   bool link_instance(const std::string& instance_name,
                      const std::vector<uint64_t>& cluster_ids,
                      const std::vector<std::string>& addrs,
-                     const std::vector<std::string>& device_ips,
                      const std::vector<uint16_t>& ports,
-                     const int32_t dp_size);
+                     const int32_t dp_size,
+                     const int32_t src_kv_split_size);
 
   bool unlink_instance(const std::string& instance_name,
                        const std::vector<uint64_t>& cluster_ids,
                        const std::vector<std::string>& addrs,
-                       const std::vector<std::string>& device_ips,
                        const std::vector<uint16_t>& ports,
-                       const int32_t dp_size);
+                       const int32_t dp_size,
+                       const int32_t src_kv_split_size);
 
  protected:
   // Pre-execute prefill requests of different lengths at startup and obtain the
@@ -102,6 +104,8 @@ class DisaggPDScheduler : public ContinuousScheduler {
   void profile_ttft();
 
   void profile_tpot();
+
+  void cache_prefill_blocks(Request* request);
 
   // check remote instance info, if not exist, get from master service
   bool check_remote_instance_info(const std::string& instance_name);
@@ -148,7 +152,9 @@ class DisaggPDScheduler : public ContinuousScheduler {
       prefill_request_queue_offline_;
 
   // use threadpool to handle prefill-completed request
-  ThreadPool prefill_threadpool_;
+  ThreadPool prefill_threadpool_{/*num_threads=*/1,
+                                 /*cpu_binding=*/false,
+                                 /*pool_name=*/"DisaggPDScheduler.prefill"};
 
   // related decode instance name(ID) list
   std::vector<std::string> decode_inst_names_;

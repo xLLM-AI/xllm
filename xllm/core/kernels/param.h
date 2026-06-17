@@ -277,6 +277,12 @@ struct FusedLayerNormParams {
   bool dynamic_quant = false;
 };
 
+struct RmsNormDynamicQuantParams {
+  torch::Tensor input;
+  torch::Tensor weight;
+  double eps;
+};
+
 // Matmul parameters
 struct MatmulParams {
   // Left input tensor A. Must be 2D or 3D. Must have same dimension as b.
@@ -304,6 +310,46 @@ struct MatmulParams {
   // Scaling factor for tensor c (if provided). Default: 0.0
   // Result: alpha * (a @ b) + beta * c (if c provided)
   double beta = 0.0;
+};
+
+// Quantized matmul parameters (NPU aclnnQuantMatmulV4 path).
+struct QuantMatmulParams {
+  // Quantized activation tensor. Typical dtype: int8.
+  torch::Tensor x1;
+  // Quantized weight tensor. Typical dtype: int8.
+  torch::Tensor x2;
+  // If weight transpose.
+  bool transpose2 = true;
+  // Weight descale tensor.
+  torch::Tensor scale;
+  // Optional weight offset tensor.
+  std::optional<torch::Tensor> offset;
+  // Optional per-token activation scale tensor.
+  std::optional<torch::Tensor> pertoken_scale;
+  // Optional bias tensor.
+  std::optional<torch::Tensor> bias;
+  // Optional output dtype, default backend behavior is BF16 if unset.
+  std::optional<at::ScalarType> output_dtype;
+};
+
+struct NpuQuantizeParams {
+  // Input activation tensor.
+  torch::Tensor input;
+
+  // Per-tensor/per-channel quantization scale. Required for per_tensor mode.
+  std::optional<torch::Tensor> scale;
+  // Zero-point for non-symmetric quantization. Optional.
+  std::optional<torch::Tensor> zero_point;
+  // Quantization target dtype. Currently qint8 path maps to int8 tensor output.
+  // support at::ScalarType::QInt8 /at::ScalarType::QUInt8 /
+  // at::ScalarType::QInt32
+  at::ScalarType output_dtype = at::ScalarType::QInt8;
+  int64_t axis = 1;
+
+  // dynamicquant param
+  c10::optional<at::Tensor> smooth_scales;
+  c10::optional<at::Tensor> group_index;
+  c10::optional<at::ScalarType> dst_type;
 };
 
 struct GroupGemmParams {
@@ -397,6 +443,44 @@ struct GroupGemmParams {
   // Shape: [expand_token_num].
   // Dtype: int32.
   std::optional<torch::Tensor> combine_idx;
+};
+
+struct DequantSwigluQuantParams {
+  // Input tensor from grouped matmul output.
+  // Typical dtype for W8A8 path: int32.
+  torch::Tensor x;
+  // Optional weight dequant scale tensor.
+  std::optional<torch::Tensor> weight_scale;
+  // Optional activation scale tensor.
+  std::optional<torch::Tensor> activation_scale;
+  // Optional bias tensor.
+  std::optional<torch::Tensor> bias;
+  // Optional output quant scale tensor for static quant mode.
+  std::optional<torch::Tensor> quant_scale;
+  // Optional output quant offset tensor for static quant mode.
+  std::optional<torch::Tensor> quant_offset;
+  // Optional group index / group list tensor for MoE grouped execution.
+  std::optional<torch::Tensor> group_index;
+  // Whether to apply activation on the left branch.
+  bool activate_left = true;
+  // Quantization mode: 0 static quant, 1 dynamic quant.
+  int64_t quant_mode = 1;
+};
+
+// Ascend W4A8_DYNAMIC MoE weight post-load processing for version 1.0.0.
+// Mirrors vllm-ascend's Python path: transpose/NZ-convert int4 weights, pack
+// them to int32, and fold first-level + second-level scales into the int64
+// dtype/layout consumed by npu_grouped_matmul.
+struct W4A8DynamicMoePreprocessParams {
+  torch::Tensor w13_weight;
+  torch::Tensor w2_weight;
+  torch::Tensor w13_weight_scale;
+  torch::Tensor w2_weight_scale;
+  std::optional<torch::Tensor> w13_weight_scale_second;
+  std::optional<torch::Tensor> w2_weight_scale_second;
+  std::optional<torch::Tensor> w13_scale_bias;
+  std::optional<torch::Tensor> w2_scale_bias;
+  int64_t group_size = 256;
 };
 
 struct MoeFusedTopkParams {
@@ -580,7 +664,7 @@ struct MoeAll2AllCreateParams {
   // Total number of processes in the distributed group.
   // Used for collective communication context and split assignment.
   int64_t nrank;
-  // The current compute device to be used、
+  // The current compute device to be used
   // default to CPU
   torch::Device device = torch::Device(torch::kCPU);
 };
@@ -903,6 +987,9 @@ struct MaskedIndexerSelectPagedKVParams {
   // New sparse block table output tensor. Shape: [batch_num] (prefill) or
   // [batch_num] (decode). Type: int32. Must be contiguous.
   torch::Tensor sparse_context_lens;
+  bool is_score_float = false;
+  int64_t compress_ratio = 1;
+  std::optional<torch::Tensor> kv_cache_block_table_offset = std::nullopt;
 };
 
 struct GatherSplitParams {
@@ -1236,6 +1323,102 @@ struct MoeInitRoutingV2Params {
   int row_idx_type;
 };
 
+struct MoeDistributeDispatchV2Params {
+  torch::Tensor x;
+  torch::Tensor expert_ids;
+  std::optional<torch::Tensor> expert_scales = std::nullopt;
+  std::optional<torch::Tensor> x_active_mask = std::nullopt;
+  std::optional<torch::Tensor> scales = std::nullopt;
+  std::string group_ep;
+  int64_t ep_world_size = 1;
+  int64_t ep_rank_id = 0;
+  int64_t moe_expert_num = 1;
+  std::string group_tp;
+  int64_t tp_world_size = 0;
+  int64_t tp_rank_id = 0;
+  int64_t expert_shard_type = 0;
+  int64_t shared_expert_num = 1;
+  int64_t shared_expert_rank_num = 0;
+  int64_t quant_mode = 0;
+  int64_t global_bs = 0;
+  int64_t expert_token_nums_type = 1;
+  std::string comm_alg;
+};
+
+struct MoeDistributeCombineV2Params {
+  torch::Tensor expand_x;
+  torch::Tensor expert_ids;
+  torch::Tensor assist_info_for_combine;
+  torch::Tensor ep_send_counts;
+  torch::Tensor expert_scales;
+  std::optional<torch::Tensor> tp_send_counts = std::nullopt;
+  std::optional<torch::Tensor> x_active_mask = std::nullopt;
+  std::optional<torch::Tensor> expand_scales = std::nullopt;
+  std::optional<torch::Tensor> shared_expert_x = std::nullopt;
+  std::string group_ep;
+  int64_t ep_world_size = 1;
+  int64_t ep_rank_id = 0;
+  int64_t moe_expert_num = 1;
+  std::string group_tp;
+  int64_t tp_world_size = 0;
+  int64_t tp_rank_id = 0;
+  int64_t expert_shard_type = 0;
+  int64_t shared_expert_num = 1;
+  int64_t shared_expert_rank_num = 0;
+  int64_t global_bs = 0;
+  int64_t comm_quant_mode = 0;
+  std::string comm_alg;
+};
+
+struct DispatchFFNCombineParams {
+  // Input hidden states. Shape: [num_tokens, hidden_size].
+  // Dtype: fp16/bf16 for W8A8 dynamic path.
+  torch::Tensor x;
+  // First/second expert weights as TensorList. For W8A8 int8 path the fused
+  // CANN op expects NZ-formatted int8 weights.
+  torch::TensorList weight1;
+  torch::TensorList weight2;
+  // Expert ids. Shape: [num_tokens, topk], dtype int32.
+  torch::Tensor expert_ids;
+  // W8A8 scales as TensorList. CANN DispatchFFNCombine expects the int64
+  // bit-packed representation used by vLLM/sgl wrappers, not raw fp32 scales.
+  torch::TensorList scale1;
+  torch::TensorList scale2;
+  // Router probabilities. Shape: [num_tokens, topk], dtype fp32.
+  torch::Tensor probs;
+  // HCCL communication group name.
+  std::string group;
+  int64_t max_output_size = 0;
+  double swiglu_limit = 0.0;
+  // Optional preallocated outputs. If absent, wrapper allocates them.
+  std::optional<torch::Tensor> output = std::nullopt;
+  std::optional<torch::Tensor> expert_token_nums = std::nullopt;
+};
+
+struct DispatchGmmCombineDecodeParams {
+  // Input hidden states. Shape: [num_tokens, hidden_size].
+  torch::Tensor x;
+  // Expert ids after routing. Shape: [num_tokens, topk], dtype int32.
+  torch::Tensor expert_ids;
+  // W8A8 expert weights and fp32 scales in TensorList form.
+  torch::TensorList gmm1_permuted_weight;
+  torch::TensorList gmm1_permuted_weight_scale;
+  torch::TensorList gmm2_weight;
+  torch::TensorList gmm2_weight_scale;
+  // Router probabilities. Shape: [num_tokens, topk], dtype fp32.
+  torch::Tensor expert_scales;
+  std::optional<torch::Tensor> expert_smooth_scales = std::nullopt;
+  std::optional<torch::Tensor> x_active_mask = std::nullopt;
+  std::string group_ep;
+  int64_t ep_rank_size = 1;
+  int64_t ep_rank_id = 0;
+  int64_t moe_expert_num = 1;
+  int64_t shared_expert_num = 0;
+  int64_t shared_expert_rank_num = 0;
+  int64_t quant_mode = 0;
+  int64_t global_bs = 0;
+};
+
 // FP8 scaled quantize parameters
 // Quantizes input tensor to FP8 e4m3 format with scale
 struct Fp8ScaledQuantizeParams {
@@ -1345,6 +1528,24 @@ struct FusedRecurrentGatedDeltaRuleParams {
   bool use_qk_l2norm_in_kernel = false;
 };
 
+// NPU Fused Sigmoid Gating Delta Rule Update parameters
+struct FusedSigmoidGatingDeltaRuleUpdateParams {
+  torch::Tensor A_log;
+  torch::Tensor a;
+  torch::Tensor dt_bias;
+  torch::Tensor q;
+  torch::Tensor k;
+  torch::Tensor v;
+  torch::Tensor b;
+  torch::Tensor initial_state_source;
+  torch::Tensor initial_state_indices;
+  torch::Tensor cu_seqlens;
+  std::optional<float> scale = std::nullopt;
+  bool use_qk_l2norm_in_kernel = false;
+  float softplus_beta = 1.0f;
+  float softplus_threshold = 20.0f;
+};
+
 // NPU Causal Conv1d Update parameters
 struct CausalConv1dUpdateParams {
   torch::Tensor x;
@@ -1353,6 +1554,7 @@ struct CausalConv1dUpdateParams {
   bool activation = true;
   std::optional<torch::Tensor> bias = std::nullopt;
   std::optional<torch::Tensor> conv_state_indices = std::nullopt;
+  std::optional<torch::Tensor> num_accepted_tokens = std::nullopt;
   std::optional<torch::Tensor> query_start_loc = std::nullopt;
   int32_t max_query_len = -1;
   int32_t pad_slot_id = -1;
@@ -1438,4 +1640,196 @@ struct ChunkGatedDeltaRuleParams {
   // Whether to apply L2 norm to q and k inside the kernel. Default: false.
   bool use_qk_l2norm_in_kernel = false;
 };
+struct HcPostParams {
+  torch::Tensor x;
+  torch::Tensor residual;
+  torch::Tensor post;
+  torch::Tensor comb;
+};
+
+struct QuantLightningIndexerParams {
+  torch::Tensor query;
+  torch::Tensor key;
+  torch::Tensor weights;
+  torch::Tensor query_dequant_scale;
+  torch::Tensor key_dequant_scale;
+  int64_t query_quant_mode = 0;
+  int64_t key_quant_mode = 0;
+  c10::optional<torch::Tensor> actual_seq_lengths_query;
+  c10::optional<torch::Tensor> actual_seq_lengths_key;
+  c10::optional<torch::Tensor> block_table;
+  c10::optional<torch::Tensor> metadata;
+  std::string layout_query;
+  std::string layout_key;
+  int64_t sparse_count = 0;
+  int64_t sparse_mode = 0;
+  int64_t pre_tokens = 0;
+  int64_t next_tokens = 0;
+  int64_t cmp_ratio = 1;
+  bool return_value = false;
+};
+
+struct HcPreInvRmsParams {
+  torch::Tensor x;
+  double epsilon = 1e-6;
+};
+
+struct HcPreSinkhornParams {
+  torch::Tensor mixes;
+  torch::Tensor rsqrt;
+  torch::Tensor hc_scale;
+  torch::Tensor hc_base;
+  torch::Tensor x;
+  int64_t hc_mult = 4;
+  int64_t hc_sinkhorn_iters = 20;
+  double hc_eps = 1e-6;
+};
+
+struct HcPreParams {
+  torch::Tensor x;
+  torch::Tensor hc_fn;
+  torch::Tensor hc_scale;
+  torch::Tensor hc_base;
+  int64_t hc_mult = 4;
+  int64_t hc_sinkhorn_iters = 20;
+  double norm_eps = 1e-6;
+  double hc_eps = 1e-6;
+};
+
+struct MoeGatingTopKHashParams {
+  torch::Tensor x;
+  int64_t k = 0;
+  c10::optional<torch::Tensor> bias;
+  c10::optional<torch::Tensor> input_ids;
+  c10::optional<torch::Tensor> tid2eid;
+  int64_t k_group = 1;
+  int64_t group_count = 1;
+  int64_t group_select_mode = 0;
+  int64_t renorm = 0;
+  int64_t norm_type = 0;
+  bool out_flag = false;
+  double routed_scaling_factor = 1.0;
+  double eps = 1e-20;
+};
+
+struct SparseAttnSharedkvParams {
+  torch::Tensor q;
+  c10::optional<torch::Tensor> ori_kv;
+  c10::optional<torch::Tensor> cmp_kv;
+  c10::optional<torch::Tensor> ori_sparse_indices;
+  c10::optional<torch::Tensor> cmp_sparse_indices;
+  c10::optional<torch::Tensor> ori_block_table;
+  c10::optional<torch::Tensor> cmp_block_table;
+  c10::optional<torch::Tensor> cu_seqlens_q;
+  c10::optional<torch::Tensor> cu_seqlens_ori_kv;
+  c10::optional<torch::Tensor> cu_seqlens_cmp_kv;
+  c10::optional<torch::Tensor> seqused_q;
+  c10::optional<torch::Tensor> seqused_kv;
+  c10::optional<torch::Tensor> sinks;
+  c10::optional<torch::Tensor> metadata;
+  double softmax_scale = 1.0;
+  int64_t cmp_ratio = 1;
+  int64_t ori_mask_mode = 0;
+  int64_t cmp_mask_mode = 0;
+  int64_t ori_win_left = 0;
+  int64_t ori_win_right = 0;
+  std::string layout_q;
+  std::string layout_kv;
+  bool return_softmax_lse = false;
+};
+
+struct SparseFlashAttentionParams {
+  torch::Tensor query;
+  torch::Tensor key;
+  torch::Tensor value;
+  torch::Tensor sparse_indices;
+  c10::optional<torch::Tensor> block_table;
+  c10::optional<torch::Tensor> actual_seq_lengths_query;
+  c10::optional<torch::Tensor> actual_seq_lengths_kv;
+  c10::optional<torch::Tensor> query_rope;
+  c10::optional<torch::Tensor> key_rope;
+  double scale_value = 1.0;
+  int64_t sparse_block_size = 0;
+  std::string layout_query;
+  std::string layout_kv;
+  int64_t sparse_mode = 0;
+};
+
+struct CompressorParams {
+  torch::Tensor x;
+  torch::Tensor wkv;
+  torch::Tensor wgate;
+  torch::Tensor kv_state;
+  torch::Tensor score_state;
+  torch::Tensor ape;
+  torch::Tensor norm_weight;
+  torch::Tensor rope_sin;
+  torch::Tensor rope_cos;
+  c10::optional<torch::Tensor> kv_block_table;
+  c10::optional<torch::Tensor> score_block_table;
+  c10::optional<torch::Tensor> cu_seqlens;
+  c10::optional<torch::Tensor> seqused;
+  c10::optional<torch::Tensor> start_pos;
+  int64_t rope_head_dim = 0;
+  int64_t cmp_ratio = 1;
+  int64_t coff = 1;
+  double norm_eps = 1e-6;
+  int64_t rotary_mode = 0;
+  bool enable_grad = false;
+};
+
+struct QuantLightningIndexerMetadataParams {
+  int64_t num_heads_q = 0;
+  int64_t num_heads_k = 0;
+  int64_t head_dim = 0;
+  int64_t query_quant_mode = 0;
+  int64_t key_quant_mode = 0;
+  c10::optional<torch::Tensor> actual_seq_lengths_query;
+  c10::optional<torch::Tensor> actual_seq_lengths_key;
+  int64_t batch_size = 0;
+  int64_t max_seqlen_q = 0;
+  int64_t max_seqlen_k = 0;
+  std::string layout_query;
+  std::string layout_key;
+  int64_t sparse_count = 0;
+  int64_t sparse_mode = 0;
+  int64_t pre_tokens = 0;
+  int64_t next_tokens = 0;
+  int64_t cmp_ratio = 1;
+  std::string device = "npu";
+};
+
+struct SparseAttnSharedkvMetadataParams {
+  int64_t num_heads_q = 0;
+  int64_t num_heads_kv = 0;
+  int64_t head_dim = 0;
+  c10::optional<torch::Tensor> cu_seqlens_q;
+  c10::optional<torch::Tensor> cu_seqlens_ori_kv;
+  c10::optional<torch::Tensor> cu_seqlens_cmp_kv;
+  c10::optional<torch::Tensor> seqused_q;
+  c10::optional<torch::Tensor> seqused_kv;
+  int64_t batch_size = 0;
+  int64_t max_seqlen_q = 0;
+  int64_t max_seqlen_kv = 0;
+  int64_t ori_topk = 0;
+  int64_t cmp_topk = 0;
+  int64_t cmp_ratio = 1;
+  int64_t ori_mask_mode = 0;
+  int64_t cmp_mask_mode = 0;
+  int64_t ori_win_left = 0;
+  int64_t ori_win_right = 0;
+  std::string layout_q;
+  std::string layout_kv;
+  bool has_ori_kv = false;
+  bool has_cmp_kv = false;
+};
+
+struct NpuInplacePartialRotaryMulParams {
+  torch::Tensor x;
+  torch::Tensor r1;
+  torch::Tensor r2;
+  std::string rotary_mode = "interleave";
+  std::vector<int64_t> partial_slice;
+};
+
 }  // namespace xllm::kernel

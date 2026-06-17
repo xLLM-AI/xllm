@@ -27,13 +27,13 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/types.h"
+#include "core/framework/multimodal/mm_data.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/tokenizer/tokenizer.h"
 #include "core/util/slice.h"
 #include "finish_reason.h"
 #include "framework/block/block.h"
 #include "incremental_decoder.h"
-#include "mm_data.h"
 #include "rec_type.h"
 #include "request_output.h"
 #include "sample_slot.h"
@@ -115,7 +115,8 @@ class Sequence final {
   Sequence(const Sequence& other);
 
   // get mm data
-  const MMData& get_mm_data() const { return mm_data_; }
+  const MMData& mm_data() const { return mm_data_; }
+  MMData& mutable_mm_data() { return mm_data_; }
   void set_mrope_position_delta(int val) { mrope_position_delta_ = val; }
   int get_mrope_position_delta() { return mrope_position_delta_; }
 
@@ -175,6 +176,8 @@ class Sequence final {
                     host_kv_state_.kv_cache_tokens_num());
   }
 
+  size_t num_prefix_cache_tokens() const;
+
   // add a new token id to the sequence and update the count
   // the token would be discarded if the sequence is still in prefill stage
   void append_token(const Token& token);
@@ -189,6 +192,13 @@ class Sequence final {
   void update_mm_embeddings(const std::vector<torch::Tensor>& mm_embeddings);
   // update embeddings to the sequence
   void update_embeddings(const torch::Tensor& embedding);
+  void update_mtp_bootstrap_embedding(const torch::Tensor& embedding);
+  torch::Tensor get_mtp_bootstrap_embedding() const {
+    return mtp_bootstrap_embedding_;
+  }
+  void clear_mtp_bootstrap_embedding() {
+    mtp_bootstrap_embedding_ = torch::Tensor();
+  }
   bool has_single_block_id() const { return single_block_.is_valid(); }
   int32_t get_single_block_id() const {
     return has_single_block_id() ? single_block_.id() : -1;
@@ -470,6 +480,9 @@ class Sequence final {
 
   // embeddings of the sequence
   torch::Tensor output_embedding_;
+
+  // temporary PD handoff bootstrap hidden state for first MTP decode.
+  torch::Tensor mtp_bootstrap_embedding_;
 
   // number of tokens in the sequence
   size_t num_tokens_ = 0;

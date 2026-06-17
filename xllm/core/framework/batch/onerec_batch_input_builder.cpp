@@ -15,20 +15,56 @@ limitations under the License.
 
 #include "onerec_batch_input_builder.h"
 
+#include <glog/logging.h>
+
 #include <algorithm>
 #include <cstring>
 #include <future>
+#include <memory>
 #include <numeric>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "framework/model/model_input_params.h"
 #include "framework/request/sequence.h"
 #include "framework/sampling/sampling_params.h"
 #include "util/tensor_helper.h"
+#include "util/threadpool.h"
 #include "util/utils.h"
 
 namespace xllm {
+namespace {
+
+// Minimum work per parallel sub-task. Smaller chunks would spend more time
+// in pool wakeups than in real work; larger chunks make CPUs sit idle when
+// the total work is light. Picked empirically: ~8 sequences / ~4 group
+// rows give per-task work in the tens of microseconds on aarch64.
+constexpr size_t kSequenceParallelGrain = 32;
+constexpr size_t kGroupParallelGrain = 16;
+
+std::vector<int32_t> build_q_cu_seq_lens_vec(
+    const std::vector<int32_t>& q_seq_lens) {
+  std::vector<int32_t> q_cu_seq_lens;
+  if (q_seq_lens.empty()) {
+    return q_cu_seq_lens;
+  }
+#if defined(USE_NPU)
+  q_cu_seq_lens.reserve(q_seq_lens.size());
+  int32_t cum_seq_len = 0;
+  for (int32_t q_len : q_seq_lens) {
+    cum_seq_len += q_len;
+    q_cu_seq_lens.emplace_back(cum_seq_len);
+  }
+#else
+  CHECK(q_seq_lens.front() == 0)
+      << "q_seq_lens must be cumulative with leading zero";
+  q_cu_seq_lens.assign(q_seq_lens.begin() + 1, q_seq_lens.end());
+#endif
+  return q_cu_seq_lens;
+}
+
+}  // namespace
 
 // Use Meyers' Singleton pattern to avoid static initialization order fiasco
 // This ensures the cache is initialized on first use, after all dependencies
@@ -49,7 +85,7 @@ OneRecBatchInputBuilder::OneRecBatchInputBuilder(
     const uint64_t batch_id,
     const ModelArgs* args,
     BatchForwardType batch_forward_type,
-    ThreadPool* thread_pool)
+    MPMCThreadPool* thread_pool)
     : sequence_groups_(sequence_groups),
       allowed_max_tokens_(allowed_max_tokens),
       input_embeddings_vec_(input_embeddings_vec),
@@ -86,7 +122,7 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
                               return sum + group->sequences().size();
                             })
           : 0;
-  const int32_t THREADPOOL_THRESHOLD = 16;
+  // const int32_t THREADPOOL_THRESHOLD = 16;
   if (num_sequences == 0) {
     return ForwardInput{};
   }
@@ -172,7 +208,7 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
                                            src_ptr + group_encoder_seq_len);
         }
         // Collect sparse_embedding
-        auto mm_data = sequence->get_mm_data();
+        auto mm_data = sequence->mm_data();
         auto sparse_embedding_optional =
             mm_data.get<torch::Tensor>(Sequence::ENCODER_SPARSE_EMBEDDING_NAME);
         if (sparse_embedding_optional.has_value()) {
@@ -194,6 +230,7 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
     return cache_data.encoder_tokens;
   };
 
+  LOG(INFO) << "=== build_decoder_data_optimized";
   // ========== High-performance decoder data construction ==========
   auto build_decoder_data_optimized = [&]() {
     // Pre-allocate all containers to avoid dynamic expansion
@@ -211,28 +248,20 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
 
     // Multi-threading optimization: Use parallel processing when sequence count
     // exceeds threshold and thread pool is available
-    ThreadPool* threadpool = thread_pool_;
-    if (num_sequences >= THREADPOOL_THRESHOLD && threadpool != nullptr) {
+    MPMCThreadPool* threadpool = thread_pool_;
+    if (num_sequences >= kSequenceParallelGrain && threadpool != nullptr) {
       // Thread-safe result containers
       std::vector<std::vector<int32_t>> thread_flatten_tokens(num_sequences);
       std::vector<const RequestSamplingParam*> thread_sampling_params(
           num_sequences);
-      std::vector<int32_t> thread_selected_token_idxes(num_sequences);
       std::vector<int32_t> thread_sample_idxes(num_sequences);
       std::vector<std::vector<int32_t>> thread_generated_tokens(num_sequences);
 
-      // Calculate thread allocation
-      const size_t num_threads =
-          std::min(static_cast<size_t>(num_sequences), static_cast<size_t>(16));
-      const size_t sequences_per_thread =
-          (num_sequences + num_threads - 1) / num_threads;
-
-      std::vector<std::future<void>> futures;
-      std::vector<std::shared_ptr<std::promise<void>>> promises;
-      futures.reserve(num_threads);
-      promises.reserve(num_threads);
-
-      // Parallel processing function
+      // Parallel processing function. Concurrency, chunking and the fast
+      // inline path for small `num_sequences` are handled by `parallel_for`
+      // below — this body is invoked on disjoint `[begin, end)` ranges, so
+      // it only ever writes to the `i`-th slot of the thread-local
+      // containers above and is therefore data-race free.
       auto process_sequences_range = [&](size_t start_idx, size_t end_idx) {
         for (size_t i = start_idx;
              i < end_idx && i < static_cast<size_t>(num_sequences);
@@ -272,33 +301,11 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
         }
       };
 
-      // Launch parallel tasks
-      for (size_t thread_idx = 0; thread_idx < num_threads; ++thread_idx) {
-        size_t start_idx = thread_idx * sequences_per_thread;
-        size_t end_idx = std::min(start_idx + sequences_per_thread,
-                                  static_cast<size_t>(num_sequences));
-
-        if (start_idx >= static_cast<size_t>(num_sequences)) break;
-
-        auto promise = std::make_shared<std::promise<void>>();
-        futures.push_back(promise->get_future());
-        promises.push_back(promise);
-
-        threadpool->schedule(
-            [process_sequences_range, start_idx, end_idx, promise]() mutable {
-              try {
-                process_sequences_range(start_idx, end_idx);
-                promise->set_value();
-              } catch (...) {
-                promise->set_exception(std::current_exception());
-              }
-            });
-      }
-
-      // Wait for all tasks to complete
-      for (auto& future : futures) {
-        future.get();
-      }
+      // Adaptive parallel-for: chunk count is `ceil(num_sequences / grain)`
+      // capped by pool size; when `num_sequences <= grain` it runs inline.
+      threadpool->parallel_for(static_cast<size_t>(num_sequences),
+                               kSequenceParallelGrain,
+                               process_sequences_range);
 
       // Merge results
       size_t start_idx = 0;
@@ -370,7 +377,7 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
   std::vector<int32_t> selected_token_idxes;
   std::vector<int32_t> sample_idxes;
   std::vector<std::vector<int32_t>> generated_tokens;
-  if (thread_pool_ && num_sequences >= THREADPOOL_THRESHOLD) {
+  if (thread_pool_ && num_sequences >= kSequenceParallelGrain) {
     // Use ThreadPool's schedule method to execute independent tasks in parallel
     // build_decoder_data_optimized handles multi-threading internally, no
     // external parallel calls
@@ -414,11 +421,18 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
   const int64_t group_width =
       sequence_groups_.empty() ? 1 : sequence_groups_[0]->sequences().size();
 
-  std::vector<std::future<void>> decoder_embedding_futures;
+  // Coordinator for the parallel `decoder_embedding` segment-copy tasks
+  // below. Constructed lazily inside the parallel branch and waited on
+  // later (in the case-3 fall-through below) where the result is consumed.
+  // We use the cross-scope `TaskGroup` rather than `parallel_for` here so
+  // the main thread can overlap unrelated CPU work (seq-lens, encoder
+  // tensors, sampling params...) with the memcpy fan-out below.
+  std::unique_ptr<TaskGroup> decoder_embedding_group;
+  // std::vector<std::future<void>> decoder_embedding_futures;
   torch::Tensor result_embedding;
 
   // ========== Parallel tensor construction tasks ==========
-  if (thread_pool_ && num_sequences >= THREADPOOL_THRESHOLD) {
+  if (thread_pool_ && num_sequences >= kSequenceParallelGrain) {
     // Only use parallelization for time-consuming tasks (token_ids and
     // encoder_token_ids)
     std::promise<torch::Tensor> token_ids_promise;
@@ -514,24 +528,44 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
       const size_t batch_stride =
           group_width * total_seq_len * hidden_size * element_size;
 
-      // Parallelization strategy: segment by group dimension, consistent with
-      // thread calculations elsewhere
-      const size_t num_threads =
-          std::min(static_cast<size_t>(group_width), static_cast<size_t>(16));
-      const size_t groups_per_thread =
-          (group_width + num_threads - 1) / num_threads;
+      // Adaptive segmentation along the group dimension. Replaces the
+      // previous hard-coded `min(group_width, 16)`:
+      //   * chunk count = ceil(group_width / grain), capped by the pool
+      //     size so larger pools can absorb more work without changing
+      //     call sites;
+      //   * effective_tasks = ceil(group_width / groups_per_task) drops
+      //     any empty trailing chunk so the TaskGroup count is exact.
+      // We deliberately keep using `TaskGroup` (rather than the inline
+      // `parallel_for`) so the main thread can overlap unrelated CPU
+      // work below with this memcpy fan-out before joining at case-3.
+      const size_t group_width_size = static_cast<size_t>(group_width);
+      const size_t pool_size = thread_pool_->size();
+      size_t num_tasks =
+          (group_width_size + kGroupParallelGrain - 1) / kGroupParallelGrain;
+      if (pool_size > 0) {
+        num_tasks = std::min(num_tasks, pool_size);
+      }
+      if (num_tasks == 0) {
+        // Either `group_width == 0` (nothing to copy) or no workers.
+        // Skip dispatch entirely; case-3 wait below sees a null group.
+        num_tasks = 0;
+      }
+      const size_t groups_per_task =
+          num_tasks == 0 ? 0 : (group_width_size + num_tasks - 1) / num_tasks;
+      const size_t effective_tasks =
+          groups_per_task == 0
+              ? 0
+              : (group_width_size + groups_per_task - 1) / groups_per_task;
 
-      for (size_t thread_idx = 0; thread_idx < num_threads; ++thread_idx) {
-        size_t start_group = thread_idx * groups_per_thread;
-        size_t end_group = std::min(start_group + groups_per_thread,
-                                    static_cast<size_t>(group_width));
-
-        if (start_group >= static_cast<size_t>(group_width)) break;
-
-        std::promise<void> promise;
-        decoder_embedding_futures.push_back(promise.get_future());
-
-        thread_pool_->schedule(
+      if (effective_tasks > 0) {
+        decoder_embedding_group =
+            std::make_unique<TaskGroup>(static_cast<int32_t>(effective_tasks));
+      }
+      for (size_t t = 0; t < effective_tasks; ++t) {
+        const size_t start_group = t * groups_per_task;
+        const size_t end_group =
+            std::min(start_group + groups_per_task, group_width_size);
+        thread_pool_->schedule(decoder_embedding_group->wrap(
             [start_group,
              end_group,
              bs,
@@ -543,8 +577,7 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
              group_stride,
              context_size,
              embeddings = perf_cache.cache_data.decoder_context_embeddings,
-             dst_tensor = combined_embedding,
-             promise = std::move(promise)]() mutable {
+             dst_tensor = combined_embedding]() mutable {
               // Copy context_embedding for specified group range of each batch
               for (int64_t b = 0; b < bs; ++b) {
                 // Optimization: Access corresponding batch embedding directly
@@ -558,8 +591,8 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
                       batch_dst + g * group_stride, batch_src, context_size);
                 }
               }
-              promise.set_value();
-            });
+              // promise.set_value();
+            }));
       }
 
       result_embedding = combined_embedding;
@@ -604,9 +637,9 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
     }
 
     // Set basic parameters simultaneously (not dependent on asynchronous tasks)
-    input_params.num_sequences = num_sequences;
-    input_params.kv_max_seq_len = seq_len + num_decoder_embeddings;
-    input_params.q_max_seq_len = seq_len + num_decoder_embeddings;
+    input_params.meta.num_sequences = num_sequences;
+    input_params.meta.kv_max_seq_len = seq_len + num_decoder_embeddings;
+    input_params.meta.q_max_seq_len = seq_len + num_decoder_embeddings;
     forward_input.positions = perf_cache.fixed_positions_tensor;
 
     // Wait and collect results
@@ -618,27 +651,36 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
 
     // Optimization: Use torch::empty+std::memcpy instead of
     // torch::from_blob().clone()
-    input_params.kv_seq_lens =
+    input_params.attention.device.kv_seq_lens =
         torch::empty({static_cast<int64_t>(cu_seq_lens.size())},
                      torch::TensorOptions()
                          .dtype(torch::kInt)
                          .device(torch::kCPU)
                          .pinned_memory(true));
-    std::memcpy(input_params.kv_seq_lens.data_ptr<int>(),
+    std::memcpy(input_params.attention.device.kv_seq_lens.data_ptr<int>(),
                 cu_seq_lens.data(),
                 cu_seq_lens.size() * sizeof(int));
 
-    input_params.q_seq_lens =
+    input_params.attention.device.q_seq_lens =
         torch::empty({static_cast<int64_t>(q_cu_seq_lens.size())},
                      torch::TensorOptions()
                          .dtype(torch::kInt)
                          .device(torch::kCPU)
                          .pinned_memory(true));
-    std::memcpy(input_params.q_seq_lens.data_ptr<int>(),
+    std::memcpy(input_params.attention.device.q_seq_lens.data_ptr<int>(),
                 q_cu_seq_lens.data(),
                 q_cu_seq_lens.size() * sizeof(int));
-    input_params.kv_seq_lens_vec = std::move(cu_seq_lens);
-    input_params.q_seq_lens_vec = std::move(q_cu_seq_lens);
+    std::vector<int32_t> device_q_cu_seq_lens =
+        build_q_cu_seq_lens_vec(q_cu_seq_lens);
+    input_params.attention.device.q_cu_seq_lens =
+        torch::tensor(device_q_cu_seq_lens,
+                      torch::TensorOptions()
+                          .dtype(torch::kInt)
+                          .device(torch::kCPU)
+                          .pinned_memory(true));
+    input_params.attention.host.kv_seq_lens = std::move(cu_seq_lens);
+    input_params.attention.host.q_cu_seq_lens = std::move(device_q_cu_seq_lens);
+    input_params.attention.host.q_seq_lens = std::move(q_cu_seq_lens);
 
     // encoder_seq_lens_tensor has been changed to serial execution, use the
     // constructed variable directly
@@ -697,34 +739,43 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
     }
 #endif
 
-    input_params.num_sequences = num_sequences;
-    input_params.kv_max_seq_len = seq_len + num_decoder_embeddings;
-    input_params.q_max_seq_len = seq_len + num_decoder_embeddings;
+    input_params.meta.num_sequences = num_sequences;
+    input_params.meta.kv_max_seq_len = seq_len + num_decoder_embeddings;
+    input_params.meta.q_max_seq_len = seq_len + num_decoder_embeddings;
 
     // Optimization: Use torch::empty+std::memcpy instead of
     // torch::from_blob().clone()
-    input_params.kv_seq_lens =
+    input_params.attention.device.kv_seq_lens =
         torch::empty({static_cast<int64_t>(cu_seq_lens.size())},
                      torch::TensorOptions()
                          .dtype(torch::kInt)
                          .device(torch::kCPU)
                          .pinned_memory(true));
-    std::memcpy(input_params.kv_seq_lens.data_ptr<int>(),
+    std::memcpy(input_params.attention.device.kv_seq_lens.data_ptr<int>(),
                 cu_seq_lens.data(),
                 cu_seq_lens.size() * sizeof(int));
 
-    input_params.q_seq_lens =
+    input_params.attention.device.q_seq_lens =
         torch::empty({static_cast<int64_t>(q_cu_seq_lens.size())},
                      torch::TensorOptions()
                          .dtype(torch::kInt)
                          .device(torch::kCPU)
                          .pinned_memory(true));
-    std::memcpy(input_params.q_seq_lens.data_ptr<int>(),
+    std::memcpy(input_params.attention.device.q_seq_lens.data_ptr<int>(),
                 q_cu_seq_lens.data(),
                 q_cu_seq_lens.size() * sizeof(int));
 
-    input_params.kv_seq_lens_vec = std::move(cu_seq_lens);
-    input_params.q_seq_lens_vec = std::move(q_cu_seq_lens);
+    std::vector<int32_t> device_q_cu_seq_lens =
+        build_q_cu_seq_lens_vec(q_cu_seq_lens);
+    input_params.attention.device.q_cu_seq_lens =
+        torch::tensor(device_q_cu_seq_lens,
+                      torch::TensorOptions()
+                          .dtype(torch::kInt)
+                          .device(torch::kCPU)
+                          .pinned_memory(true));
+    input_params.attention.host.kv_seq_lens = std::move(cu_seq_lens);
+    input_params.attention.host.q_cu_seq_lens = std::move(device_q_cu_seq_lens);
+    input_params.attention.host.q_seq_lens = std::move(q_cu_seq_lens);
 
     if (!cache_data.encoder_seq_lens.empty()) {
       // Set OneRecModelInputParams encoder data
@@ -745,7 +796,7 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
   }
 
   // ========== Parallel processing of independent code blocks ==========
-  if (thread_pool_ && num_sequences >= THREADPOOL_THRESHOLD) {
+  if (thread_pool_ && num_sequences >= kSequenceParallelGrain) {
     // Define promise/future for parallel tasks
     std::promise<void> block_tables_promise;
     auto block_tables_future = block_tables_promise.get_future();
@@ -759,21 +810,24 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
             util::pad_2d_vector(empty_block_tables, 0);
             // Optimization: Use create_2d_tensor_optimized, has special
             // optimization for all-zero matrices
-            input_params.block_tables =
+            input_params.attention.device.block_tables =
                 create_2d_tensor(empty_block_tables, torch::kInt);
+            input_params.attention.host.block_tables =
+                input_params.attention.device.block_tables;
 
             std::vector<int32_t> paged_kv_indptr(num_sequences + 1, 0);
             // Optimization: Use torch::empty+std::memcpy instead of
             // torch::from_blob().clone()
-            input_params.new_cache_slots =
+            input_params.attention.device.new_cache_slots =
                 torch::empty({static_cast<int64_t>(paged_kv_indptr.size())},
                              torch::TensorOptions()
                                  .dtype(torch::kInt)
                                  .device(torch::kCPU)
                                  .pinned_memory(true));
-            std::memcpy(input_params.new_cache_slots.data_ptr<int>(),
-                        paged_kv_indptr.data(),
-                        paged_kv_indptr.size() * sizeof(int));
+            std::memcpy(
+                input_params.attention.device.new_cache_slots.data_ptr<int>(),
+                paged_kv_indptr.data(),
+                paged_kv_indptr.size() * sizeof(int));
 
             block_tables_promise.set_value();
           } catch (...) {
@@ -814,19 +868,21 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
     util::pad_2d_vector(empty_block_tables, 0);
     // Optimization: Use create_2d_tensor_optimized, has special optimization
     // for all-zero matrices
-    input_params.block_tables =
+    input_params.attention.device.block_tables =
         create_2d_tensor(empty_block_tables, torch::kInt);
+    input_params.attention.host.block_tables =
+        input_params.attention.device.block_tables;
 
     std::vector<int32_t> paged_kv_indptr(num_sequences + 1, 0);
     // Optimization: Use torch::empty+std::memcpy instead of
     // torch::from_blob().clone()
-    input_params.new_cache_slots =
+    input_params.attention.device.new_cache_slots =
         torch::empty({static_cast<int64_t>(paged_kv_indptr.size())},
                      torch::TensorOptions()
                          .dtype(torch::kInt)
                          .device(torch::kCPU)
                          .pinned_memory(true));
-    std::memcpy(input_params.new_cache_slots.data_ptr<int>(),
+    std::memcpy(input_params.attention.device.new_cache_slots.data_ptr<int>(),
                 paged_kv_indptr.data(),
                 paged_kv_indptr.size() * sizeof(int));
 
@@ -857,13 +913,14 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
 
   // ========== Common parameter settings ==========
   // Batch set other parameters
-  input_params.embedding_ids.assign(num_sequences, 0);
-  input_params.batch_id = batch_id_;
-  input_params.request_ids.clear();
-  input_params.request_ids.reserve(static_cast<size_t>(num_sequences));
+  input_params.embedding.embedding_ids.assign(num_sequences, 0);
+  input_params.meta.batch_id = batch_id_;
+  input_params.embedding.request_ids.clear();
+  input_params.embedding.request_ids.reserve(
+      static_cast<size_t>(num_sequences));
   for (auto* group : sequence_groups_) {
     for (const auto& sequence : group->sequences()) {
-      input_params.request_ids.emplace_back(sequence->request_id());
+      input_params.embedding.request_ids.emplace_back(sequence->request_id());
     }
   }
 
@@ -940,13 +997,17 @@ ForwardInput OneRecBatchInputBuilder::build_rec_forward_input(
       }
       onerec_params.decoder_context_embedding = combined_embedding;
     } else {
-      for (auto& future : decoder_embedding_futures) {
-        future.get();
+      if (decoder_embedding_group) {
+        LOG(INFO) << "=== decoder_embedding_group->wait()";
+        decoder_embedding_group->wait();
+        LOG(INFO) << "=== decoder_embedding_group->wait() done";
       }
       onerec_params.decoder_context_embedding = std::move(result_embedding);
     }
   }
 
+  forward_input.token_ids_host = forward_input.token_ids;
+  forward_input.positions_host = forward_input.positions;
   return forward_input;
 }
 

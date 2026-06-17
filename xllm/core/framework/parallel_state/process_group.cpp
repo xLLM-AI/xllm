@@ -19,7 +19,7 @@ limitations under the License.
 #include "npu_process_group.h"
 #elif defined(USE_MLU)
 #include "mlu_process_group.h"
-#elif defined(USE_CUDA)
+#elif defined(USE_CUDA) || defined(USE_DCU)
 #include "cuda_process_group.h"
 #elif defined(USE_MUSA)
 #include "musa_process_group.h"
@@ -57,6 +57,16 @@ std::vector<int64_t> get_gather_shape(int32_t world_size,
 }  // namespace
 
 namespace xllm {
+
+ProcessGroup::~ProcessGroup() { shutdown_backend(); }
+
+void ProcessGroup::shutdown_backend() {
+  if (pg_ == nullptr) {
+    return;
+  }
+  pg_->shutdown();
+  pg_.reset();
+}
 
 std::pair<int, std::vector<uint64_t>> get_group_rank(int world_size,
                                                      int global_rank,
@@ -183,6 +193,12 @@ void ProcessGroup::all_to_all_single(
   } else {
     work->wait();
   }
+}
+
+std::string ProcessGroup::hccl_comm_name(bool init_comm) {
+  (void)init_comm;
+  CHECK(false) << "hccl_comm_name is only supported on NPU HCCL process group.";
+  return "";
 }
 
 std::unique_ptr<ProcessGroup> create_process_group(

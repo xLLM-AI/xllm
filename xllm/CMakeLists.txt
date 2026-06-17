@@ -13,8 +13,10 @@ if(XLLM_BUILD_VERSION STREQUAL "")
   set(XLLM_BUILD_VERSION "unknown")
 endif()
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/core/common")
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/core/common/xllm_build_info.h"
-     "#pragma once\n\n#define XLLM_BUILD_VERSION \"${XLLM_BUILD_VERSION}\"\n")
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/core/common/xllm_build_info.h.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/core/common/xllm_build_info.h"
+  @ONLY)
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
 # Set warning-as-error for xllm code (third-party headers are marked as SYSTEM)
@@ -60,7 +62,7 @@ if(GENERATE_SO)
       c_api/internal/rec.cpp
       c_api/internal/helper.cpp
     DEPS
-      :flags
+      :config
       :master
       absl::strings
       Boost::serialization
@@ -78,7 +80,7 @@ else()
     SRCS
       xllm.cpp
     DEPS
-      :flags
+      :config
       :xllm_server
       :master
       absl::strings
@@ -92,11 +94,11 @@ else()
 endif()
 
 # link brpc
-target_link_libraries(xllm PRIVATE glog::glog brpc leveldb::leveldb protobuf::libprotobuf ${OpenCV_LIBS})
+target_link_libraries(xllm PRIVATE glog::glog brpc leveldb::leveldb protobuf::libprotobuf ${OpenCV_LIBS} ${FFMPEG_LIBRARIES})
 add_dependencies(xllm brpc-static)
 
 if(USE_NPU)
-  set(COMMON_LIBS torch_npu torch_python Python::Python ascendcl atb_customize hccl c_sec nnopbase ms_tools_ext)
+  set(COMMON_LIBS torch_npu torch_python Python::Python ascendcl atb_customize unified_dlog hccl c_sec nnopbase ms_tools_ext)
 elseif(USE_MLU)
   set(COMMON_LIBS Python::Python)
 endif()

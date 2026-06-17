@@ -87,7 +87,9 @@ class XTensorDistService : public proto::XTensorDist {
   int32_t global_rank_;
   int32_t world_size_;
   torch::Device device_;
-  ThreadPool threadpool_{4};
+  ThreadPool threadpool_{/*num_threads=*/4,
+                         /*cpu_binding=*/false,
+                         /*pool_name=*/"XTensorDistService.rpc"};
 };
 
 }  // namespace xllm

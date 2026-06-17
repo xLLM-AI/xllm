@@ -149,6 +149,25 @@ struct ModelArgs {
   PROPERTY(int32_t, index_topk) = 0;
   PROPERTY(bool, indexer_rope_interleave) = false;
 
+  // deepseek v4
+  PROPERTY(int32_t, rope_head_dim) = 0;
+  PROPERTY(int32_t, o_lora_rank) = 0;
+  PROPERTY(int32_t, o_groups) = 0;
+  PROPERTY(std::vector<int32_t>, compress_ratios);
+  PROPERTY(float, compress_rope_theta) = 0.0f;
+  PROPERTY(int32_t, window_size) = 0;
+  PROPERTY(int32_t, n_activated_experts) = 0;
+  PROPERTY(int32_t, n_hash_layers) = 0;
+  PROPERTY(float, factor) = 0.0f;
+  PROPERTY(float, beta_fast) = 0.0f;
+  PROPERTY(float, beta_slow) = 0.0f;
+  PROPERTY(std::string, scale_fmt);
+  PROPERTY(int32_t, hc_mult) = 0;
+  PROPERTY(int32_t, hc_sinkhorn_iters) = 0;
+  PROPERTY(float, hc_eps) = 1e-6f;
+  PROPERTY(int64_t, max_batch_size) = 0;
+  PROPERTY(int64_t, max_seq_len) = 0;
+
   PROPERTY(int32_t, vision_start_token_id) = 0;
   PROPERTY(int32_t, vision_end_token_id) = 0;
   PROPERTY(int32_t, vision_token_id) = 0;
@@ -332,6 +351,24 @@ struct ModelArgs {
   PROPERTY(std::vector<double>, mm_image_normalize_mean) = {};
   PROPERTY(std::vector<double>, mm_image_normalize_std) = {};
 
+  // KIMI_K25
+  PROPERTY(int64_t, mm_init_pos_emb_width) = 64;
+  PROPERTY(int64_t, mm_init_pos_emb_height) = 64;
+  PROPERTY(int64_t, mm_init_pos_emb_time) = 4;
+  PROPERTY(int64_t, mm_km_in_patch_limit) = 16384;
+  PROPERTY(int64_t, mm_km_patch_size) = 14;
+  PROPERTY(std::vector<int64_t>, mm_km_image_mean) = {};
+  PROPERTY(std::vector<int64_t>, mm_km_image_std) = {};
+  PROPERTY(int64_t, mm_km_merge_kernel_size) = 2;
+  PROPERTY(int64_t, mm_km_fixed_output_tokens) = -1;
+  PROPERTY(int64_t, mm_km_patch_limit_on_one_side) = 512;
+  PROPERTY(int64_t, mm_km_in_patch_limit_each_frame) = 4096;
+  PROPERTY(int64_t, mm_km_in_patch_limit_video) = 200;
+  PROPERTY(float, mm_km_sample_fps) = 2.0;
+  PROPERTY(int64_t, mm_km_max_num_frames_each_video) = 2;
+  PROPERTY(int64_t, mm_km_temporal_merge_kernel_size) = 4;
+  PROPERTY(std::string, mm_km_timestamp_mode) = "hh:mm:ss.fff";
+
   // GLM
   PROPERTY(bool, mm_video_do_rescale) = false;
   PROPERTY(std::vector<double>, mm_video_normalize_mean) = {};
@@ -375,7 +412,7 @@ struct ModelArgs {
   PROPERTY(int32_t, max_window_layers) = 0;
 
   PROPERTY(int32_t, query_num) = 0;
-  PROPERTY(bool, image_embedding_mode) = false;
+  PROPERTY(bool, encoder_embedding_mode) = false;
 
   // number of speculative decoding tokens
   PROPERTY(int64_t, num_speculative_tokens) = 0;
@@ -404,12 +441,43 @@ struct ModelArgs {
   PROPERTY(bool, use_quant_conv) = false;
   PROPERTY(bool, use_post_quant_conv) = false;
 
+  // Wan_2.2_ VAE related args
+  PROPERTY(int64_t, vae_in_channels) = -1;
+  PROPERTY(int64_t, vae_out_channels) = -1;
+  PROPERTY(int64_t, vae_base_dim) = 0;
+  PROPERTY(int64_t, vae_z_dim) = 0;
+  PROPERTY(int64_t, vae_scale_factor_temporal) = 0;
+  PROPERTY(int64_t, vae_scale_factor_spatial) = 0;
+  PROPERTY(std::vector<int64_t>, vae_dim_mult) = {};
+  PROPERTY(int64_t, vae_num_res_blocks) = 0;
+  PROPERTY(std::vector<double>, vae_attn_scales) = {};
+  PROPERTY(std::vector<bool>, vae_temporal_downsample) = {};
+  PROPERTY(std::vector<double>, vae_latents_mean) = {};
+  PROPERTY(std::vector<double>, vae_latents_std) = {};
+  PROPERTY(double, vae_dropout) = 0.0;
+  PROPERTY(bool, vae_is_residual) = false;
+
   // dit related args
   PROPERTY(int64_t, joint_attention_dim) = 0;
   PROPERTY(int64_t, pooled_projection_dim) = 0;
   PROPERTY(bool, guidance_embeds) = true;
   PROPERTY(std::vector<int64_t>, axes_dims_rope) = {};
   PROPERTY(int64_t, num_single_layers) = 0;
+  PROPERTY(int, timestep_guidance_channels) = 256;
+  PROPERTY(double, eps) = 1e-6;
+  PROPERTY(int64_t, patch_size) = 1;
+  PROPERTY(std::vector<int64_t>, wan_patch_size) = { 1, 2, 2 };
+  PROPERTY(bool, cross_attn_norm) = true;
+  PROPERTY(int64_t, ffn_dim) = 13824;
+  PROPERTY(int64_t, time_freq_dim) = 256;
+  PROPERTY(int64_t, dit_in_channels) = 36;
+  PROPERTY(int64_t, dit_out_channels) = 16;
+  PROPERTY(std::string, qk_norm) = "rms_norm_across_heads";
+  PROPERTY(int64_t, rope_max_seq_len) = 1024;
+  PROPERTY(int64_t, text_embed_dim) = 4096;
+  PROPERTY(int64_t, image_embed_dim) = -1;
+  PROPERTY(int64_t, added_kv_proj_dim) = -1;
+  PROPERTY(int64_t, pos_embed_seq_len) = -1;
 
   // t5 related args
   PROPERTY(int64_t, d_model) = 0;
@@ -430,6 +498,31 @@ struct ModelArgs {
   PROPERTY(int64_t, base_image_seq_len) = 0;
   PROPERTY(int64_t, max_image_seq_len) = 0;
   PROPERTY(float, shift_terminal) = 0;
+  PROPERTY(float, beta_start) = 0.0001f;
+  PROPERTY(float, beta_end) = 0.02f;
+  PROPERTY(std::string, beta_schedule) = "linear";
+  PROPERTY(std::vector<float>, trained_betas) = {};
+  PROPERTY(int64_t, solver_order) = 2;
+  PROPERTY(std::string, prediction_type) = "flow_prediction";
+  PROPERTY(bool, thresholding) = false;
+  PROPERTY(float, dynamic_thresholding_ratio) = 0.995f;
+  PROPERTY(float, sample_max_value) = 1.0f;
+  PROPERTY(bool, predict_x0) = true;
+  PROPERTY(std::string, solver_type) = "bh2";
+  PROPERTY(bool, lower_order_final) = true;
+  PROPERTY(std::vector<int64_t>, disable_corrector) = {};
+  PROPERTY(bool, use_karras_sigmas) = false;
+  PROPERTY(bool, use_exponential_sigmas) = false;
+  PROPERTY(bool, use_beta_sigmas) = false;
+  PROPERTY(bool, use_flow_sigmas) = true;
+  PROPERTY(float, flow_shift) = 3.0f;
+  PROPERTY(std::string, timestep_spacing) = "linspace";
+  PROPERTY(int64_t, steps_offset) = 0;
+  PROPERTY(std::string, final_sigmas_type) = "zero";
+  PROPERTY(bool, rescale_betas_zero_snr) = false;
+  PROPERTY(std::string, time_shift_type) = "exponential";
+  PROPERTY(float, sigma_min) = 0.0f;
+  PROPERTY(float, sigma_max) = 0.0f;
 
   // qwen_image_edit_2509 vae related args
   PROPERTY(int64_t, base_dim) = 0;
@@ -480,11 +573,15 @@ inline bool has_linear_attention_layers(const ModelArgs& args) {
 
 inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {
   os << "ModelArgs: [model_type: " << args.model_type();
-  os << ", image_embedding_mode: " << args.image_embedding_mode();
+  os << ", encoder_embedding_mode: " << args.encoder_embedding_mode();
   os << ", dtype: " << args.dtype();
   os << ", hidden_size: " << args.hidden_size();
   os << ", hidden_act: " << args.hidden_act();
   os << ", intermediate_size: " << args.intermediate_size();
+  os << ", moe_intermediate_size: " << args.moe_intermediate_size();
+  os << ", n_routed_experts: " << args.n_routed_experts();
+  os << ", n_activated_experts: " << args.n_activated_experts();
+  os << ", num_experts_per_tok: " << args.num_experts_per_tok();
   os << ", n_layers: " << args.n_layers();
   os << ", n_encoder_layers: " << args.n_encoder_layers();
   os << ", head_dim: " << args.head_dim();

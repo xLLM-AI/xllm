@@ -30,7 +30,7 @@ limitations under the License.
 #include "common/macros.h"
 #include "common/metrics.h"
 #include "common/types.h"
-#include "framework/request/mm_data.h"
+#include "core/framework/multimodal/mm_data.h"
 #include "models/model_registry.h"
 #include "rec_engine.h"
 #include "runtime/xservice_client.h"
@@ -563,8 +563,10 @@ RecMaster::RecMaster(const Options& options)
   } else {
     tokenizer_ = nullptr;
   }
-  threadpool_ =
-      std::make_unique<ThreadPool>(options_.num_request_handling_threads());
+  threadpool_ = std::make_unique<ThreadPool>(
+      /*num_threads=*/options_.num_request_handling_threads(),
+      /*cpu_binding=*/false,
+      /*pool_name=*/"RecMaster.request");
 
   // Create pipelines based on rec_type
   auto rec_model_kind = get_rec_model_kind(model_args_.model_type());

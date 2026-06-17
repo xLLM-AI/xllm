@@ -1,3 +1,64 @@
+# Release xllm 0.10.0
+
+## **Major Features and Improvements**
+
+### Model Support
+
+#### NPU
+- Support DeepSeek-V4 model.
+- Support KIMI-K25 model.
+- Support MiniMax-M2.7 model.
+- Support JoyAI-LLM-Flash model.
+- Support QwenImageEditPlus model.
+- Support Qwen3-VL video inference.
+
+#### CUDA
+- Support Qwen3-MoE model.
+- Support MiMo-7B-Base model.
+- Support LongCat-AudioDiT model.
+
+#### MLU
+- Support DeepSeek-V4 model.
+- Support Qwen3.5 model.
+- Support OxygenVLM model.
+- Support Flux model.
+
+### Feature
+- Support CANN 9.0.0 toolkit and torch_npu 2.9.0 for NPU devices.
+- Support DCU backend.
+- Support Torch 2.10.0 + CUDA 13.0 builds.
+- Update the MLU container to version 26.04.
+- Support xLLM service Anthropic PD protocol and improve Anthropic tool-call compatibility.
+- Support online profiling.
+- Support Python-based startup for online and offline services.
+- Support importing and exporting xLLM server startup flags through JSON config files.
+- Support cached token usage in responses and `best_of_n` in normal and disaggregated PD modes.
+- Support pause and resume for fully async RL.
+- Support offline speculative decoding and graph mode in offline inference.
+- Support multi-priority scheduling for PD disaggregation and prefix-cache-aware PD chunk budgeting.
+- Support namespace prefixes and optional authentication for etcd keys.
+- Add typed brpc handlers for API service endpoints and improve xLLM server startup routing.
+- Add encoder cache and request-transfer parallelization for multimodal models.
+- Support prefix cache for multimodal models and embedding interfaces for generate VLM models.
+- Add REC enhancements, including OneRec XAttention on NPU, REC XAttention for Qwen3-MoE on CUDA, constrained top-k sampling, beam-search `num_return_sequences`, extended item information, logprobs, and multi-item outputs.
+- Add Wan2.2 text encoder, scheduler, TP parallelism, VAE, and `/v1/video/generation`.
+- Improve KV cache internals with hybrid attention block manager, separated transfer logic, llmdatadist tensor registration, and centralized NPU allocation paths.
+- Add persistent Triton NPU runtime binary cache and improve xllm_ops incremental build and CI cache behavior.
+- Improve CUDA shared-memory tensor handling and add CUDA block-copy kernel support.
+- Add more manual model loaders and support parsing dtype fields from model config.
+
+### Bugfix
+- Fix DeepSeek-V3.2 graph failures, prefix-cache starvation, and MLA option propagation in speculative paths.
+- Fix Qwen3.5 / Qwen3.6 decode reshape, TileLang gating, causal-conv1d tiling with padded batches, and repeated weight adjustment.
+- Fix NPU int4 MoE / torch communication initialization, prompt/context length limits, xattention accuracy, and offline TP initialization when selecting NPU kernel backend.
+- Fix multimodal build breaks, header paths, encoder-cache linking, QwenImageEdit precision, and preprocessing accuracy.
+- Fix MLU layer tests, MLU build issues, Mooncake PD paths, and local bind address handling.
+- Fix CUDA and ILU build errors, chunked-prefill CUDA failures, and pipeline LongCat Image Edit compile failures.
+- Fix service and API reliability issues including HTTP content types, console script metadata, brpc callback blocking, request cancellation/lifecycle shutdown, and model name extraction.
+- Fix REC XAttention fallback, REC tokenizer forwarding, OneRec input copies, ND format preservation, and beam helper exposure for non-NPU builds.
+- Fix build, CI, submodule cleanup, and release packaging issues around Triton NPU runtime assets and custom xllm math operator install paths.
+
+
 # Release xllm 0.9.0
 
 ## **Major Features and Improvements**

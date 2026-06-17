@@ -20,10 +20,14 @@ limitations under the License.
 #include "common/dense_mlp.h"
 #if defined(USE_MLU)
 #include "layers/mlu/fused_moe.h"
+#elif defined(USE_NPU)
+#include "npu_torch/fused_moe.h"
 #elif defined(USE_ILU)
 #include "layers/ilu/fused_moe.h"
 #elif defined(USE_CUDA)
 #include "layers/cuda/fused_moe.h"
+#elif defined(USE_DCU)
+#include "layers/dcu/fused_moe.h"
 #else
 #include "layers/common/fused_moe.h"
 #endif

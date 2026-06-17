@@ -377,11 +377,11 @@ std::string render_message(const nlohmann::ordered_json& messages,
                            int32_t index,
                            const std::string& thinking_mode) {
   if (index < 0 || index >= static_cast<int32_t>(messages.size())) {
-    throw std::runtime_error("Message index out of range");
+    LOG(FATAL) << "Message index out of range";
   }
   if (thinking_mode != kThinkingModeThinking &&
       thinking_mode != kThinkingModeChat) {
-    throw std::runtime_error("Invalid thinking mode");
+    LOG(FATAL) << "Invalid thinking mode";
   }
 
   std::string prompt;
@@ -418,7 +418,7 @@ std::string render_message(const nlohmann::ordered_json& messages,
 
   if (role == kRoleDeveloper) {
     if (content.empty()) {
-      throw std::runtime_error("Developer message content is empty");
+      LOG(FATAL) << "Developer message content is empty";
     }
     std::string developer_content;
     if (tools.is_array() && !tools.empty()) {
@@ -461,19 +461,19 @@ std::string render_message(const nlohmann::ordered_json& messages,
     }
     if (prev_assistant_idx < 0 ||
         messages[prev_assistant_idx].value("role", "") != kRoleAssistant) {
-      throw std::runtime_error("Tool message does not follow assistant");
+      LOG(FATAL) << "Tool message does not follow assistant";
     }
     const nlohmann::ordered_json& assistant_message =
         messages[prev_assistant_idx];
     if (!assistant_message.contains("tool_calls") ||
         !assistant_message["tool_calls"].is_array()) {
-      throw std::runtime_error("Missing assistant tool calls for tool output");
+      LOG(FATAL) << "Missing assistant tool calls for tool output";
     }
     int32_t tool_call_order = index - prev_assistant_idx;
     int32_t total_tool_calls =
         static_cast<int32_t>(assistant_message["tool_calls"].size());
     if (tool_call_order <= 0 || tool_call_order > total_tool_calls) {
-      throw std::runtime_error("Invalid tool call order");
+      LOG(FATAL) << "Invalid tool call order";
     }
     if (tool_call_order == 1) {
       prompt += "\n\n<function_results>";
@@ -510,9 +510,8 @@ std::string render_message(const nlohmann::ordered_json& messages,
     if (thinking_mode == kThinkingModeThinking && index > last_user_idx) {
       std::string reasoning = msg.value("reasoning", "");
       if (reasoning.empty() && tool_calls.empty()) {
-        throw std::runtime_error(
-            "Thinking mode assistant message must "
-            "contain reasoning/tool_calls");
+        LOG(FATAL) << "Thinking mode assistant message must contain "
+                      "reasoning/tool_calls";
       }
       std::string thinking_tmpl = absl::StrReplaceAll(
           std::string(kThinkingTemplate), {{"{reasoning}", reasoning}});
@@ -529,7 +528,7 @@ std::string render_message(const nlohmann::ordered_json& messages,
     return prompt;
   }
 
-  throw std::runtime_error("Unknown role: " + role);
+  LOG(FATAL) << "Unknown role: " + role;
 }
 
 std::tuple<int32_t, std::string, std::optional<std::string>> read_until_stop(
@@ -598,13 +597,13 @@ parse_tool_calls(int32_t index, const std::string& text) {
         read_until_stop(index, text, {invoke_token, tool_calls_end_token});
     index = new_index;
     if (content != ">\n") {
-      throw std::runtime_error("Tool call format error");
+      LOG(FATAL) << "Tool call format error";
     }
     if (stop_token.has_value() && stop_token.value() == tool_calls_end_token) {
       break;
     }
     if (!stop_token.has_value()) {
-      throw std::runtime_error("Missing invoke special token");
+      LOG(FATAL) << "Missing invoke special token";
     }
 
     std::string tool_name_content;
@@ -613,7 +612,7 @@ parse_tool_calls(int32_t index, const std::string& text) {
     static const std::regex kToolNameRegex(R"re(^\s*name="(.*?)">\n$)re");
     std::smatch tool_name_match;
     if (!std::regex_match(tool_name_content, tool_name_match, kToolNameRegex)) {
-      throw std::runtime_error("Tool name format error");
+      LOG(FATAL) << "Tool name format error";
     }
     std::string tool_name = tool_name_match[1].str();
 
@@ -629,10 +628,10 @@ parse_tool_calls(int32_t index, const std::string& text) {
       std::string param_value;
       if (!parse_dsml_parameter_line(
               param_content, &param_name, &is_string, &param_value)) {
-        throw std::runtime_error("Parameter format error");
+        LOG(FATAL) << "Parameter format error";
       }
       if (tool_args.contains(param_name)) {
-        throw std::runtime_error("Duplicate parameter name");
+        LOG(FATAL) << "Duplicate parameter name";
       }
       tool_args[param_name] = {param_value, is_string};
 
@@ -640,7 +639,7 @@ parse_tool_calls(int32_t index, const std::string& text) {
       std::tie(index, between, stop_token) =
           read_until_stop(index, text, {param_token, invoke_end_token});
       if (between != ">\n") {
-        throw std::runtime_error("Parameter boundary format error");
+        LOG(FATAL) << "Parameter boundary format error";
       }
     }
 

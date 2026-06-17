@@ -63,6 +63,7 @@ cc_library(
     absl::flat_hash_set
     :parallel_state
     $<$<BOOL:${USE_NPU}>:xllm_atb_layers>
+    $<$<BOOL:${USE_NPU}>:unified_dlog>
     :collective_service
     :xtensor
 )

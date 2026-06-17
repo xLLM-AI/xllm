@@ -7,7 +7,6 @@
 #include <iostream>
 
 #include "framework/block/block_manager_impl.h"
-
 namespace xllm {
 
 void test_basic_operation(BlockManagerImpl* block_manager,
@@ -278,10 +277,9 @@ TEST(HashUtilTest, XXHash3) {
     xxh3_128bits_hash(nullptr, tokens_1, hash_value_1);
     xxh3_128bits_hash(nullptr, tokens_2, hash_value_2);
 
-    EXPECT_EQ(strncmp(reinterpret_cast<const char*>(hash_value_1),
-                      reinterpret_cast<const char*>(hash_value_2),
-                      XXH3_128BITS_HASH_VALUE_LEN),
-              0);
+    EXPECT_EQ(
+        std::memcmp(hash_value_1, hash_value_2, XXH3_128BITS_HASH_VALUE_LEN),
+        0);
   }
 
   {
@@ -294,10 +292,9 @@ TEST(HashUtilTest, XXHash3) {
     xxh3_128bits_hash(nullptr, tokens_1, hash_value_1);
     xxh3_128bits_hash(nullptr, tokens_2, hash_value_2);
 
-    EXPECT_NE(strncmp(reinterpret_cast<const char*>(hash_value_1),
-                      reinterpret_cast<const char*>(hash_value_2),
-                      XXH3_128BITS_HASH_VALUE_LEN),
-              0);
+    EXPECT_NE(
+        std::memcmp(hash_value_1, hash_value_2, XXH3_128BITS_HASH_VALUE_LEN),
+        0);
   }
 
   {
@@ -310,10 +307,9 @@ TEST(HashUtilTest, XXHash3) {
     xxh3_128bits_hash(nullptr, tokens_1, hash_value_1);
     xxh3_128bits_hash(nullptr, tokens_2, hash_value_2);
 
-    EXPECT_NE(strncmp(reinterpret_cast<const char*>(hash_value_1),
-                      reinterpret_cast<const char*>(hash_value_2),
-                      XXH3_128BITS_HASH_VALUE_LEN),
-              0);
+    EXPECT_NE(
+        std::memcmp(hash_value_1, hash_value_2, XXH3_128BITS_HASH_VALUE_LEN),
+        0);
   }
 
   {
@@ -326,10 +322,9 @@ TEST(HashUtilTest, XXHash3) {
     xxh3_128bits_hash(nullptr, tokens_1, hash_value_1);
     xxh3_128bits_hash(nullptr, tokens_2, hash_value_2);
 
-    EXPECT_NE(strncmp(reinterpret_cast<const char*>(hash_value_1),
-                      reinterpret_cast<const char*>(hash_value_2),
-                      XXH3_128BITS_HASH_VALUE_LEN),
-              0);
+    EXPECT_NE(
+        std::memcmp(hash_value_1, hash_value_2, XXH3_128BITS_HASH_VALUE_LEN),
+        0);
   }
 
   {
@@ -342,10 +337,9 @@ TEST(HashUtilTest, XXHash3) {
     xxh3_128bits_hash(nullptr, tokens_1, hash_value_1);
     xxh3_128bits_hash(nullptr, tokens_2, hash_value_2);
 
-    EXPECT_NE(strncmp(reinterpret_cast<const char*>(hash_value_1),
-                      reinterpret_cast<const char*>(hash_value_2),
-                      XXH3_128BITS_HASH_VALUE_LEN),
-              0);
+    EXPECT_NE(
+        std::memcmp(hash_value_1, hash_value_2, XXH3_128BITS_HASH_VALUE_LEN),
+        0);
   }
 
   {
@@ -358,10 +352,9 @@ TEST(HashUtilTest, XXHash3) {
     xxh3_128bits_hash(nullptr, tokens_1, hash_value_1);
     xxh3_128bits_hash(nullptr, tokens_2, hash_value_2);
 
-    EXPECT_NE(strncmp(reinterpret_cast<const char*>(hash_value_1),
-                      reinterpret_cast<const char*>(hash_value_2),
-                      XXH3_128BITS_HASH_VALUE_LEN),
-              0);
+    EXPECT_NE(
+        std::memcmp(hash_value_1, hash_value_2, XXH3_128BITS_HASH_VALUE_LEN),
+        0);
   }
 
   {
@@ -374,10 +367,9 @@ TEST(HashUtilTest, XXHash3) {
     xxh3_128bits_hash(nullptr, tokens_1, hash_value_1);
     xxh3_128bits_hash(nullptr, tokens_2, hash_value_2);
 
-    EXPECT_NE(strncmp(reinterpret_cast<const char*>(hash_value_1),
-                      reinterpret_cast<const char*>(hash_value_2),
-                      XXH3_128BITS_HASH_VALUE_LEN),
-              0);
+    EXPECT_NE(
+        std::memcmp(hash_value_1, hash_value_2, XXH3_128BITS_HASH_VALUE_LEN),
+        0);
   }
 }
 

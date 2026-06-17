@@ -64,7 +64,7 @@ class RecWorkerImpl : public LLMWorkerImpl {
       const ForwardInput& input);
 
  protected:
-  std::shared_ptr<ThreadPool> input_builder_thread_pool_;
+  std::shared_ptr<MPMCThreadPool> input_builder_thread_pool_;
 
  private:
   struct RecPipelineRuntime {
@@ -245,7 +245,17 @@ class RecWorkerImpl : public LLMWorkerImpl {
                              const torch::Tensor& top_logprobs,
                              BeamSearchTensors& beam_tensors,
                              int32_t round,
-                             int32_t batch_size);
+                             int32_t batch_size,
+                             int32_t requested_result_width,
+                             int32_t total_rounds);
+
+    void execute_final_beam_search(const torch::Tensor& top_tokens,
+                                   const torch::Tensor& top_logprobs,
+                                   BeamSearchTensors& beam_tensors,
+                                   int32_t round,
+                                   int32_t batch_size,
+                                   int32_t beam_width,
+                                   int32_t requested_result_width);
 
     // Execute cache select kernel
     void execute_cache_select(const BeamSearchTensors& beam_tensors,
@@ -339,6 +349,7 @@ class RecWorkerImpl : public LLMWorkerImpl {
     torch::Tensor cached_two_stage_unshared_lse_;
     torch::Tensor cached_two_stage_unshared_o_;
     torch::Tensor cached_two_stage_q_cu_seq_lens_shared_;
+    torch::Tensor cached_two_stage_qo_indptr_expanded_;
     torch::Tensor cached_two_stage_paged_kv_indptr_expanded_;
     torch::Tensor cached_two_stage_paged_kv_indices_expanded_;
     torch::Tensor cached_two_stage_paged_kv_last_page_len_expanded_;
@@ -347,7 +358,9 @@ class RecWorkerImpl : public LLMWorkerImpl {
     std::unique_ptr<RecSampler> rec_sampler_;
 
     // for async scheduler
-    ThreadPool threadpool_;
+    ThreadPool threadpool_{/*num_threads=*/1,
+                           /*cpu_binding=*/false,
+                           /*pool_name=*/"RecWorkPipeline.schedule"};
 
     int32_t max_seqs_per_batch_;
     int32_t max_tokens_per_batch_;

@@ -43,26 +43,21 @@ class CommChannel {
 
   virtual bool allocate_kv_cache(const KVCacheShape& kv_cache_shape);
 
-  virtual bool get_device_info(std::string& device_ip, uint16_t& port);
-
   virtual bool get_cache_info(uint64_t& cluster_id,
                               std::string& addr,
-                              int64_t& k_cache_id,
-                              int64_t& v_cache_id);
+                              uint16_t& port);
 
   virtual bool link_cluster(const std::vector<uint64_t>& cluster_ids,
                             const std::vector<std::string>& addrs,
-                            const std::vector<std::string>& device_ips,
                             const std::vector<uint16_t>& ports);
 
   virtual bool unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                               const std::vector<std::string>& addrs,
-                              const std::vector<std::string>& device_ips,
                               const std::vector<uint16_t>& ports);
 
-  // D2D link for weight transfer
-  virtual bool link_d2d(const std::string& remote_addr);
-  virtual bool unlink_d2d(const std::string& remote_addr);
+  // P2P link for weight transfer
+  virtual bool link_p2p(const std::string& remote_addr);
+  virtual bool unlink_p2p(const std::string& remote_addr);
 
   virtual bool init_model(const std::string& model_weights_path,
                           int32_t random_seed,
@@ -76,15 +71,16 @@ class CommChannel {
   virtual bool estimate_kv_cache_capacity(int64_t& available_memory,
                                           int64_t& total_memory);
 
-  virtual bool pull_kv_blocks(const uint64_t src_cluster_id,
-                              const std::string& src_addr,
-                              const int64_t src_k_cache_id,
-                              const int64_t src_v_cache_id,
-                              const std::vector<uint64_t>& src_blocks,
-                              const std::vector<uint64_t>& dst_blocks);
+  virtual bool pull_kv_blocks(
+      const uint64_t src_cluster_id,
+      const std::string& src_addr,
+      const std::vector<uint64_t>& src_blocks,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids = {},
+      const std::vector<uint64_t>& dst_linear_state_ids = {});
 
   virtual void execute_model_async(
-      const RawForwardInput& input,
+      const ForwardInput& input,
       folly::Promise<std::optional<RawForwardOutput>>& promise);
 
   virtual bool process_group_test();
@@ -120,9 +116,13 @@ class CommChannel {
 
   virtual bool wakeup(const WakeupOptions& options);
 
+  virtual bool start_profile();
+
+  virtual bool stop_profile();
+
  protected:
   bool execute_model_with_brpc(
-      const RawForwardInput& input,
+      const ForwardInput& input,
       folly::Promise<std::optional<RawForwardOutput>>& promise);
 
  private:

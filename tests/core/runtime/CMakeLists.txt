@@ -46,6 +46,16 @@ cc_test(
     GTest::gtest_main
 )
 
+cc_test(
+  NAME
+    cp_input_partition_test
+  SRCS
+    cp_input_partition_test.cpp
+  DEPS
+    :runtime
+    GTest::gtest_main
+)
+
 if(USE_MLU)
   cc_test(
     NAME
@@ -70,6 +80,7 @@ if(USE_CUDA)
     SRCS
       cuda_graph_executor_test.cpp
     DEPS
+      :config
       :runtime
       :cuda_layers
       :batch
@@ -78,5 +89,23 @@ if(USE_CUDA)
       :kernels
       GTest::gtest_main
       torch
+  )
+endif()
+
+if(USE_DCU)
+  cc_test(
+    NAME
+      dcu_graph_executor_test
+    SRCS
+      dcu_graph_executor_test.cpp
+    DEPS
+      :runtime
+      :batch
+      :block
+      :kv_cache
+      :kernels
+      GTest::gtest_main
+      torch
+      hip::host
   )
 endif()

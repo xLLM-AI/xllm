@@ -20,6 +20,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include "common/global_flags.h"
+#include "core/framework/config/eplb_config.h"
 
 namespace xllm {
 
@@ -29,11 +30,12 @@ EplbPolicy::EplbPolicy(int32_t device_experts_num,
     : device_experts_num_(device_experts_num),
       device_num_(device_num),
       layer_num_(layer_num) {
-  old_expert_load_ =
-      torch::zeros({layer_num_,
-                    device_experts_num * device_num -
-                        device_num * FLAGS_redundant_experts_num},
-                   torch::kInt64);
+  old_expert_load_ = torch::zeros(
+      {layer_num_,
+       device_experts_num * device_num -
+           device_num *
+               ::xllm::EPLBConfig::get_instance().redundant_experts_num()},
+      torch::kInt64);
   expert_distribution_ = torch::full(
       {layer_num_, device_num_, device_experts_num_}, -1, torch::kInt32);
 }
@@ -57,7 +59,7 @@ std::pair<torch::Tensor, std::vector<bool>> EplbPolicy::rebalance_experts(
             prev_load,
             torch::nn::functional::CosineSimilarityFuncOptions().dim(1))
             .item<double>();
-    if (cos_sim < FLAGS_eplb_update_threshold) {
+    if (cos_sim < ::xllm::EPLBConfig::get_instance().eplb_update_threshold()) {
       enable_update_vec[i] = true;
       old_expert_load_[i] = expert_load[i];
     }
@@ -81,7 +83,8 @@ torch::Tensor EplbPolicy::compute_balanced_pack(
 
   // Generate Redundant Experts
   auto [updated_weights, redundancy_map] = update_origin_weights(
-      expert_loads, device_num_ * FLAGS_redundant_experts_num);
+      expert_loads,
+      device_num_ * ::xllm::EPLBConfig::get_instance().redundant_experts_num());
 
   // Initialize Allocation Matrix
   auto options = torch::TensorOptions().dtype(torch::kInt64);

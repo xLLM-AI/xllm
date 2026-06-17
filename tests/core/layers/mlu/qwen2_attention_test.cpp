@@ -27,6 +27,7 @@ limitations under the License.
 #include "framework/state_dict/state_dict.h"
 #include "layers/mlu/tests_utils.h"
 #include "platform/device.h"
+#include "util/net.h"
 
 namespace xllm {
 namespace layer {
@@ -50,8 +51,9 @@ class Qwen2AttentionTest : public ::testing::Test {
 
     options_ = torch::TensorOptions().dtype(torch::kBFloat16).device(device);
 
+    int32_t listen_port = net::get_local_free_port();
     process_group_ = create_process_group(
-        0, 1, 1, 3331, false, "localhost", "tp_group", device);
+        0, 1, 1, listen_port, false, "localhost", "tp_group", device);
     parallel_args_.tp_group_ = process_group_.get();
 
     int64_t block_num = 100;

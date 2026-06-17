@@ -17,6 +17,8 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/metrics.h"
+#include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "framework/batch/batch_factory.h"
 #include "util/timer.h"
 #include "util/utils.h"
@@ -30,7 +32,7 @@ uint32_t ceiling_div(uint32_t left, uint32_t right) {
 }
 
 std::vector<Sequence*> get_running_sequences(
-    const std::unique_ptr<DecodePriorityQueue>& running_queue) {
+    const std::unique_ptr<RequestPriorityQueue>& running_queue) {
   std::vector<Sequence*> running_sequences;
 
   for (auto it = running_queue->rbegin(); it != running_queue->rend(); ++it) {
@@ -117,7 +119,7 @@ void BlockCapacityGuard::compute_reserved_block_num() {
 }
 
 void BlockCapacityGuard::prefix_cache_for_candidate_sequences() {
-  if (FLAGS_enable_prefix_cache) {
+  if (::xllm::KVCacheConfig::get_instance().enable_prefix_cache()) {
     for (auto* sequence : candidate_sequences_) {
       kv_cache_manager_->allocate_shared(sequence);
     }
@@ -125,7 +127,7 @@ void BlockCapacityGuard::prefix_cache_for_candidate_sequences() {
 }
 
 uint32_t BlockCapacityGuard::get_needed_block_num_for_prefill() {
-  if (FLAGS_enable_prefix_cache) {
+  if (::xllm::KVCacheConfig::get_instance().enable_prefix_cache()) {
     return num_reserved_block_for_prefill_;
   }
 
@@ -158,7 +160,7 @@ uint32_t BlockCapacityGuard::num_block_need_to_use_for(
     const Sequence* sequence) {
   constexpr uint32_t MIN_BLOCKS_REQUIRED = 1;
   int32_t remaining_decode_token_num =
-      FLAGS_max_decode_token_per_sequence -
+      ::xllm::SchedulerConfig::get_instance().max_decode_token_per_sequence() -
       (sequence->num_tokens() - sequence->num_prompt_tokens());
   if (remaining_decode_token_num < 0) {
     return MIN_BLOCKS_REQUIRED;
@@ -229,7 +231,7 @@ bool BlockCapacityGuard::simulate_is_satisfied_for_candidate_sequences() {
 
 bool BlockCapacityGuard::if_accept_candidate_sequences(
     const std::vector<Sequence*>& candidate_sequences,
-    const std::unique_ptr<DecodePriorityQueue>& running_queue,
+    const std::unique_ptr<RequestPriorityQueue>& running_queue,
     const std::vector<Sequence*>& running_sequences) {
   num_reserved_block_for_prefill_ = 0;
 
@@ -251,8 +253,8 @@ ZeroEvictionScheduler::ZeroEvictionScheduler(Engine* engine,
 
 ZeroEvictionScheduler::~ZeroEvictionScheduler() {
   // release all requests in the priority queue
-  while (!waiting_priority_queue_.empty()) {
-    waiting_priority_queue_.pop();
+  while (!waiting_priority_queue_->empty()) {
+    waiting_priority_queue_->pop_top();
   }
 
   // release all requests in the running priority queue
@@ -282,7 +284,7 @@ bool ZeroEvictionScheduler::try_allocate_block_for(
     // deallocation is triggered only when prefix_cache is enabled. This is
     // because if prefix_cache is not enabled, blocks are not actually allocated
     // here.
-    if (FLAGS_enable_prefix_cache) {
+    if (::xllm::KVCacheConfig::get_instance().enable_prefix_cache()) {
       for (auto* seq : *prefill_sequences) {
         // release shared blocks
         kv_cache_manager_->deallocate(seq);
@@ -350,24 +352,26 @@ void ZeroEvictionScheduler::handle_prefill_requests(
   // NOTE: preempted requests will be pushed in waiting_priority_queue,
   // they may contian many sequences, so we should check here.
 
-  while (!waiting_priority_queue_.empty() && remaining_seq_budget > 0 &&
+  while (!waiting_priority_queue_->empty() && remaining_seq_budget > 0 &&
          remaining_token_budget > 0 &&
          kv_cache_manager_->kv_cache_utilization() <
-             FLAGS_prefill_scheduling_memory_usage_threshold) {
-    std::shared_ptr<Request> request(waiting_priority_queue_.top());
+             ::xllm::SchedulerConfig::get_instance()
+                 .prefill_scheduling_memory_usage_threshold()) {
+    std::shared_ptr<Request> request(waiting_priority_queue_->top());
     if (request->finished() || request->cancelled()) {
       kv_cache_manager_->deallocate(request.get());
       // release the ownership of the request
       finished_requests.emplace_back(request);
       // remove the request from the priority queue
-      waiting_priority_queue_.pop();
+      waiting_priority_queue_->pop_top();
       continue;
     }
 
     const size_t num_sequences = request->sequences().size();
     if (!request->preempted()) {
-      CHECK(num_sequences == 1)
-          << "Waiting request should have only one sequence.";
+      CHECK(num_sequences == 1 || num_sequences == request->best_of())
+          << "Waiting request should have either 1 or best_of("
+          << request->best_of() << ") sequences, got " << num_sequences;
     }
 
     // TODO: FIXME later
@@ -396,7 +400,7 @@ void ZeroEvictionScheduler::handle_prefill_requests(
 
     remaining_token_budget -= allocated_tokens;
     remaining_seq_budget -= allocated_seqs;
-    waiting_priority_queue_.pop();
+    waiting_priority_queue_->pop_top();
     running_requests_.emplace_back(request);
     running_sequences_.insert(running_sequences_.end(),
                               prefill_sequences.begin(),
@@ -406,14 +410,14 @@ void ZeroEvictionScheduler::handle_prefill_requests(
                                       prefill_sequences_budget.end());
   }
 
-  if (running_sequences_.empty() && !waiting_priority_queue_.empty() &&
+  if (running_sequences_.empty() && !waiting_priority_queue_->empty() &&
       running_queue_->empty() &&
       kv_cache_manager_->kv_cache_utilization() == 0) {
     LOG(ERROR) << "Request prompt is too long, no enough memory to schedule "
                   "a single sequence.";
     // no enough memory to schedule single sequence, just finish the request
-    std::shared_ptr<Request> request(waiting_priority_queue_.top());
-    waiting_priority_queue_.pop();
+    std::shared_ptr<Request> request(waiting_priority_queue_->top());
+    waiting_priority_queue_->pop_top();
     kv_cache_manager_->deallocate(request.get());
     response_processor_->process_failed_request(
         request,

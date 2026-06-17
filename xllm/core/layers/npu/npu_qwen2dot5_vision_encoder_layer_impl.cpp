@@ -22,6 +22,7 @@ limitations under the License.
 #include <map>
 
 #include "common/global_flags.h"
+#include "core/framework/config/load_config.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
 #include "torch_npu/csrc/core/npu/NPUException.h"
 
@@ -65,7 +66,9 @@ NpuQwen2dot5VisionEncoderLayerImpl::NpuQwen2dot5VisionEncoderLayerImpl(
       WEIGHT_COUNT_PER_LAYER,
       context,
       encode_param_.numAttentionHeadsPerRank,
-      FLAGS_enable_manual_loader ? LoadMode::kManual : LoadMode::kEager);
+      ::xllm::LoadConfig::get_instance().enable_manual_loader()
+          ? LoadMode::kManual
+          : LoadMode::kEager);
 }
 
 void NpuQwen2dot5VisionEncoderLayerImpl::merge_loaded_weights() {
@@ -123,20 +126,13 @@ torch::Tensor NpuQwen2dot5VisionEncoderLayerImpl::forward(
     torch::Tensor& sin_pos,
     torch::Tensor& cu_seqlen,
     std::vector<int>& cu_seqlen_vec,
-    ModelInputParams& input_params,
     int node_id,
     aclrtEvent* event,
     std::atomic<bool>* event_flag) {
   atb::Status st;
 
-  build_node_variant_pack(encode_node_,
-                          x,
-                          cos_pos,
-                          sin_pos,
-                          cu_seqlen,
-                          cu_seqlen_vec,
-                          input_params,
-                          true);
+  build_node_variant_pack(
+      encode_node_, x, cos_pos, sin_pos, cu_seqlen, cu_seqlen_vec, true);
   // mstxRangeEnd(id);
   st = execute_node(encode_node_, node_id);
   LOG_IF(FATAL, st != 0) << model_name_
@@ -151,7 +147,6 @@ void NpuQwen2dot5VisionEncoderLayerImpl::build_node_variant_pack(
     torch::Tensor& sin_pos,
     torch::Tensor& cu_seqlen,
     std::vector<int>& cu_seqlen_vec,
-    ModelInputParams& input_params,
     bool is_prefill) {
   internal_tensors_ = atb_speed::Utils::AtTensor2Tensor(x);
 

@@ -17,8 +17,10 @@ limitations under the License.
 
 #include <glog/logging.h>
 #include <pybind11/pybind11.h>
+#include <signal.h>
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -26,22 +28,40 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/common/message.h"
+#include "core/framework/multimodal/mm_data.h"
+#include "core/framework/multimodal/mm_input.h"
+#include "core/platform/device_name_utils.h"
 #include "framework/chat_template/jinja_chat_template.h"
 #include "framework/model/model_args.h"
-#include "framework/request/mm_data.h"
-#include "framework/request/mm_input.h"
 #include "framework/request/request.h"
-#include "models/model_registry.h"
 #include "runtime/xservice_client.h"
 #include "scheduler/scheduler_factory.h"
 #include "server/xllm_server_registry.h"
 #include "speculative_engine.h"
-#include "util/device_name_utils.h"
 #include "util/scope_guard.h"
 #include "util/timer.h"
 #include "vlm_engine.h"
 
 namespace xllm {
+
+namespace {
+
+std::vector<Message> build_user_messages_from_image_urls(
+    std::string prompt,
+    const std::vector<std::string>& image_urls) {
+  MMContentVec contents;
+  contents.reserve(image_urls.size() + 1);
+  for (const auto& url : image_urls) {
+    contents.emplace_back("image_url", ImageURL{url});
+  }
+  contents.emplace_back("text", std::move(prompt));
+
+  std::vector<Message> messages;
+  messages.emplace_back("user", std::move(contents));
+  return messages;
+}
+
+}  // namespace
 
 VLMMaster::VLMMaster(const Options& options)
     : Master(options, EngineType::VLM) {
@@ -65,6 +85,7 @@ VLMMaster::VLMMaster(const Options& options)
       .max_seqs_per_batch(options.max_seqs_per_batch())
       .max_tokens_per_chunk_for_prefill(
           options.max_tokens_per_chunk_for_prefill())
+      .dp_size(options_.dp_size())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_chunked_prefill(options_.enable_chunked_prefill())
       .instance_name(options_.instance_name())
@@ -82,34 +103,15 @@ VLMMaster::VLMMaster(const Options& options)
     XServiceClient::get_instance()->register_instance(instance_info);
   }
 
-  // construct chat template
   chat_template_ =
       std::make_unique<JinjaChatTemplate>(engine_->tokenizer_args());
-
-  // create input processor
-  auto input_processor_factory =
-      ModelRegistry::get_input_processor_factory(model_args_.model_type());
-  if (input_processor_factory == nullptr) {
-    LOG(ERROR) << "No input processor defined for model type: "
-               << model_args_.model_type();
-  } else {
-    input_processor_ = input_processor_factory(model_args_);
-  }
-
-  // create image processor
-  auto image_processor_factory =
-      ModelRegistry::get_image_processor_factory(model_args_.model_type());
-  if (image_processor_factory == nullptr) {
-    LOG(ERROR) << "No image processor defined for model type: "
-               << model_args_.model_type();
-  } else {
-    image_processor_ = image_processor_factory(model_args_);
-  }
-
-  // construct tokenizer and handling threads
   tokenizer_ = engine_->tokenizer()->clone();
-  threadpool_ =
-      std::make_unique<ThreadPool>(options_.num_request_handling_threads());
+  processor_ = create_multimodal_processor(model_args_, tokenizer_);
+
+  threadpool_ = std::make_unique<ThreadPool>(
+      /*num_threads=*/options_.num_request_handling_threads(),
+      /*cpu_binding=*/false,
+      /*pool_name=*/"VLMMaster.request");
 }
 
 VLMMaster::~VLMMaster() {
@@ -233,25 +235,15 @@ void VLMMaster::handle_batch_request_with_image_urls(
   CHECK(prompts.size() == sps.size() || sps.size() == 1)
       << "Number of prompts and sampling parameters should be the same";
 
-  const size_t num_requests = prompts.size();
-  for (size_t i = 0; i < num_requests; ++i) {
-    MMData mm_data;
-    if (!build_mm_data_from_image_urls(image_urls[i], mm_data)) {
-      callback(i,
-               RequestOutput(Status{StatusCode::INVALID_ARGUMENT,
-                                    "Image processor process failed."}));
-      continue;
-    }
-
-    handle_request(std::move(prompts[i]),
-                   std::move(mm_data),
-                   // the sampling parameter may be shared
-                   sps.size() == 1 ? sps[0] : std::move(sps[i]),
-                   [i, callback](const RequestOutput& output) {
-                     output.log_request_status();
-                     return callback(i, output);
-                   });
+  std::vector<std::vector<Message>> conversations;
+  conversations.reserve(prompts.size());
+  for (size_t i = 0; i < prompts.size(); ++i) {
+    conversations.push_back(build_user_messages_from_image_urls(
+        std::move(prompts[i]), image_urls[i]));
   }
+
+  handle_batch_request(
+      std::move(conversations), std::move(sps), std::move(callback));
 }
 
 void VLMMaster::handle_batch_request(
@@ -311,31 +303,40 @@ std::shared_ptr<Request> VLMMaster::generate_request(std::string prompt,
                                                      MMData mm_data,
                                                      RequestParams sp,
                                                      OutputCallback callback) {
-  if (prompt.empty()) {
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, "Prompt is empty");
-    return nullptr;
-  }
-  Timer timer;
-  input_processor_->process(prompt, mm_data);
-
-  std::vector<int> prompt_tokens;
-  if (!tokenizer_->encode(prompt, &prompt_tokens)) {
-    LOG(ERROR) << "Failed to encode prompt: " << prompt;
+  if (prompt.empty() && mm_data.empty()) {
+    LOG(ERROR) << "Prompt and multimodal data cannot be both empty.";
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                        "Failed to encode prompt");
+                        "Prompt and multimodal data are both empty.");
     return nullptr;
   }
-  input_processor_->find_mm_spans(prompt_tokens, mm_data);
 
-  COUNTER_ADD(tokenization_latency_seconds, timer.elapsed_seconds());
-
-  // TODO: prompt_token is not enough, need to add image token size
-  int32_t max_context_len = model_args_.max_position_embeddings();
-  if (!options_.enable_chunked_prefill()) {
-    max_context_len =
-        std::min(max_context_len, options_.max_tokens_per_batch());
+  std::vector<int32_t> prompt_tokens;
+  if (!processor_->process_prompt(prompt, mm_data, prompt_tokens)) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "Failed to process prompt.");
+    return nullptr;
   }
-  if (prompt_tokens.size() >= max_context_len) {
+
+  return build_request(std::move(prompt),
+                       std::move(prompt_tokens),
+                       std::move(mm_data),
+                       std::move(sp),
+                       std::move(callback));
+}
+
+std::shared_ptr<Request> VLMMaster::build_request(
+    std::string prompt,
+    std::vector<int32_t> prompt_tokens,
+    MMData mm_data,
+    RequestParams sp,
+    OutputCallback callback) {
+  const int32_t max_context_len = model_args_.max_position_embeddings();
+  int32_t prompt_token_limit = max_context_len;
+  if (!options_.enable_chunked_prefill()) {
+    prompt_token_limit =
+        std::min(prompt_token_limit, options_.max_tokens_per_batch());
+  }
+  if (prompt_tokens.size() >= static_cast<size_t>(prompt_token_limit)) {
     LOG(ERROR) << "Prompt is too long: " << prompt_tokens.size();
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, "Prompt is too long");
     return nullptr;
@@ -378,7 +379,7 @@ std::shared_ptr<Request> VLMMaster::generate_request(std::string prompt,
   std::vector<std::vector<int32_t>> stop_sequences;
   if (sp.stop.has_value()) {
     for (const auto& s : sp.stop.value()) {
-      std::vector<int> tmp_tokens;
+      std::vector<int32_t> tmp_tokens;
       if (!tokenizer_->encode(s, &tmp_tokens)) {
         CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                             "Failed to encode stop sequence");
@@ -433,32 +434,32 @@ std::shared_ptr<Request> VLMMaster::generate_request(
     RequestParams sp,
     std::string payload,
     OutputCallback callback) {
-  Timer timer;
   static MMInputTransfer mm_input_transfer;
 
   MMInput mm_inputs(std::move(payload));
   MMErrCode code = mm_input_transfer.trans(messages, mm_inputs);
   if (code != MMErrCode::SUCCESS) {
-    std::string msg = MMErrToString(code);
-    LOG(ERROR) << msg;
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, msg);
+    std::string error_message = MMErrToString(code);
+    LOG(ERROR) << error_message;
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, error_message);
     return nullptr;
   }
 
   MMData mm_data;
-  if (!mm_inputs.empty() && !image_processor_->process(mm_inputs, mm_data)) {
-    LOG(ERROR) << " image processor process failed.";
+  if (!mm_inputs.empty() &&
+      !processor_->process_multimodal(mm_inputs, mm_data)) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                        "Image processor process failed.");
+                        "Failed to process multimodal input.");
     return nullptr;
   }
 
-  auto prompt =
+  Timer timer;
+  std::optional<std::string> prompt =
       chat_template_->apply(messages, sp.tools, sp.chat_template_kwargs);
   if (!prompt.has_value()) {
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                        "Failed to construct prompt from messages");
-    LOG(ERROR) << "Failed to construct prompt from messages";
+    std::string error_message = "Failed to construct prompt from messages";
+    LOG(ERROR) << error_message;
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, error_message);
     return nullptr;
   }
   COUNTER_ADD(chat_template_latency_seconds, timer.elapsed_seconds());
@@ -469,35 +470,34 @@ std::shared_ptr<Request> VLMMaster::generate_request(
                           std::move(callback));
 }
 
-bool VLMMaster::build_mm_data_from_image_urls(
-    const std::vector<std::string>& image_urls,
-    MMData& mm_data) {
-  static MMInputTransfer mm_input_transfer;
+volatile bool VLMAssistantMaster::running_ = false;
 
-  MMContentVec contents;
-  contents.reserve(image_urls.size());
-  for (const auto& url : image_urls) {
-    ImageURL image_url;
-    image_url.url = url;
-    contents.emplace_back("image_url", image_url);
+VLMAssistantMaster::VLMAssistantMaster(const Options& options)
+    : Master(options, EngineType::VLM) {
+  auto master_node_addr = options_.master_node_addr().value_or("");
+  if (master_node_addr.empty()) {
+    LOG(FATAL)
+        << "MultiNodeEngine required master_node_addr, current value is empty.";
+    return;
   }
+  running_ = true;
+}
 
-  std::vector<Message> messages;
-  messages.emplace_back("user", std::move(contents));
-
-  MMInput mm_inputs;
-  MMErrCode code = mm_input_transfer.trans(messages, mm_inputs);
-  if (code != MMErrCode::SUCCESS) {
-    LOG(ERROR) << "mm input trans failed.";
-    return false;
+VLMAssistantMaster::~VLMAssistantMaster() {
+  if (loop_thread_.joinable()) {
+    loop_thread_.join();
   }
+}
 
-  if (!mm_inputs.empty() && !image_processor_->process(mm_inputs, mm_data)) {
-    LOG(ERROR) << "image processor process failed.";
-    return false;
-  }
+void VLMAssistantMaster::run() {
+  signal(SIGINT, VLMAssistantMaster::handle_signal);
+  signal(SIGTERM, VLMAssistantMaster::handle_signal);
 
-  return true;
+  loop_thread_ = std::thread([this]() {
+    while (running_) {
+      std::this_thread::sleep_for(std::chrono::seconds(5));
+    }
+  });
 }
 
 }  // namespace xllm

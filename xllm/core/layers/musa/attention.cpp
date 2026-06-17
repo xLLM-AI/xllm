@@ -52,19 +52,19 @@ torch::Tensor AttentionImpl::forward(torch::Tensor& input,
   auto&& cache = fwd_params.kv_cache;
   auto& input_params = const_cast<ModelInputParams&>(fwd_params.input_params);
 
-  auto musa_attn_meta =
-      xllm_musa::AttnMetaData::build(input_params.q_seq_lens_vec,
-                                     input_params.kv_seq_lens_vec,
-                                     num_heads_,
-                                     num_kv_heads_,
-                                     head_dim_,
-                                     input_params.new_cache_slots,
-                                     64);
+  auto musa_attn_meta = xllm_musa::AttnMetaData::build(
+      input_params.attention.host.q_seq_lens,
+      input_params.attention.host.kv_seq_lens,
+      num_heads_,
+      num_kv_heads_,
+      head_dim_,
+      input_params.attention.device.new_cache_slots,
+      64);
 
   return xllm_musa::QWen3Attn(input,
                               cache.get_k_cache(),
                               cache.get_v_cache(),
-                              input_params.block_tables,
+                              input_params.attention.device.block_tables,
                               fwd_params.attn_meta.mrope_cos,
                               fwd_params.positions,
                               weights_,

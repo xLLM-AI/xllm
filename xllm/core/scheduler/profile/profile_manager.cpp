@@ -28,6 +28,11 @@ limitations under the License.
 #include <sstream>
 
 #include "common/global_flags.h"
+#include "core/framework/config/disagg_pd_config.h"
+#include "core/framework/config/execution_config.h"
+#include "core/framework/config/model_config.h"
+#include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/request/request_state.h"
 #include "util/rec_model_utils.h"
@@ -61,9 +66,8 @@ ProfileManager::ProfileManager(Engine* engine, const Options& options)
 
 #if defined(USE_NPU) || defined(USE_CUDA)
   // Warmup ACL graph executor if enabled
-  if (FLAGS_enable_graph) {
+  if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
     if (!is_rec_multi_round_mode()) {
-      LOG(INFO) << "Starting ACL Graph/CUDA Graph warmup.";
       warmup_for_graph();
     }
   }
@@ -146,7 +150,7 @@ void ProfileManager::eval_batch_latency_prediction(const std::string mode) {
     }
   }
   if (mode == "mix") {
-    if (!FLAGS_enable_chunked_prefill) {
+    if (!::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
       LOG(WARNING) << "When chunked prefill is disabled, mixed prefill and "
                       "decode scenarios will not be tested.";
       return;
@@ -325,7 +329,7 @@ void ProfileManager::profile_step_time(bool if_dump_to_file) {
     }
     train_prefill_time_predictor(time_profiling_data);
   }
-  if (FLAGS_enable_disagg_pd) {
+  if (::xllm::DisaggPDConfig::get_instance().enable_disagg_pd()) {
     LOG(INFO) << "Disagg PD enabled, skip decode time profile.";
     return;
   }
@@ -545,7 +549,8 @@ const ProfileManager::CopyBlockProfile* ProfileManager::find_profile(
 
 int32_t ProfileManager::get_max_copy_block_num(double latency_budget) {
   auto block_size = block_manager_pool_->options().block_size();
-  const CopyBlockProfile* profile = find_profile(FLAGS_model_id, block_size);
+  const CopyBlockProfile* profile =
+      find_profile(::xllm::ModelConfig::get_instance().model_id(), block_size);
 
   double a = 1, b = 0;  // default values
   if (profile) {
@@ -561,7 +566,8 @@ double ProfileManager::predict_copy_blocks_time(
     size_t num_copy_blocks,
     bool if_need_add_constant_term) {
   auto block_size = block_manager_pool_->options().block_size();
-  const CopyBlockProfile* profile = find_profile(FLAGS_model_id, block_size);
+  const CopyBlockProfile* profile =
+      find_profile(::xllm::ModelConfig::get_instance().model_id(), block_size);
 
   double a = 1, b = 0;  // default values
   if (profile) {
@@ -643,7 +649,14 @@ std::shared_ptr<Request> ProfileManager::generate_single_decode_request(
 
   RequestState req_state(prompt_token_ids);
   req_state.enable_schedule_overlap = options_.enable_schedule_overlap();
-  req_state.seq_capacity = total_length + 1;
+  const int32_t num_speculative_tokens =
+      ::xllm::SpeculativeConfig::get_instance().num_speculative_tokens();
+  size_t seq_capacity = static_cast<size_t>(total_length) +
+                        static_cast<size_t>(num_speculative_tokens) + 1;
+  if (options_.enable_schedule_overlap()) {
+    seq_capacity += static_cast<size_t>(num_speculative_tokens) + 1;
+  }
+  req_state.seq_capacity = seq_capacity;
   auto request = std::make_shared<Request>(
       /*request_id=*/"",
       /*x_request_id=*/"",
@@ -652,7 +665,7 @@ std::shared_ptr<Request> ProfileManager::generate_single_decode_request(
 
   auto* sequence = request->sequences()[0].get();
   if (!block_manager_pool_->BlockManagerPool::allocate(sequence,
-                                                       total_length + 1)) {
+                                                       seq_capacity)) {
     LOG(FATAL) << "Profiling decode step time failed! Not enough blocks, total "
                   "length: "
                << total_length;
@@ -859,60 +872,45 @@ void ProfileManager::generate_random_decode_batch(
 }
 
 void ProfileManager::warmup_for_graph() {
-  LOG(INFO) << "Starting ACL Graph/CUDA Graph warmup with prefill and decode "
-               "requests...";
-
   auto& model_args = engine_->model_args();
   int32_t max_context_len = model_args.max_position_embeddings();
 
-  // Warmup parameters - align with bucket logic
-  // Prefill: align max_tokens_per_batch to bucket
   int32_t prefill_tokens =
-      std::min(FLAGS_max_tokens_per_batch, max_context_len);
+      std::min(options_.max_tokens_per_batch(), max_context_len);
+  int32_t max_seqs_per_batch = options_.max_seqs_per_batch();
+  int32_t decode_seq_len = std::min(16, max_context_len);
 
-  std::vector<int32_t> decode_seq_lens = {16};
+  double prefill_latency = run_request(prefill_tokens, 0, 1);
+  LOG(INFO) << "Prefill warmup completed: tokens=" << prefill_tokens
+            << ", latency=" << prefill_latency << " ms";
 
-  // Generate decode_batch_sizes aligned with bucket logic
-  // For decode: n_tokens = batch_size * num_decoding_tokens (usually
-  // num_decoding_tokens = 1) So batch_size directly corresponds to n_tokens
-  // bucket values Bucket values: 1, 2, 4, 8, 16, then 32, 48, 64, ...
-  // (multiples of 16)
-  std::vector<int32_t> decode_batch_sizes = {1, 2, 4, 8, 16};
-  int32_t max_seqs_per_batch = FLAGS_max_seqs_per_batch;
-  // From 32 onwards, use multiples of 16 (bucket alignment)
+  // Generate batch sizes aligned with graph bucket logic.
+  std::vector<int32_t> decode_batch_sizes;
+  const std::vector<int32_t> small_decode_batch_sizes = {1, 2, 4, 8, 16};
+  for (int32_t batch_size : small_decode_batch_sizes) {
+    if (batch_size <= max_seqs_per_batch) {
+      decode_batch_sizes.push_back(batch_size);
+    }
+  }
   for (int32_t batch_size = 32; batch_size <= max_seqs_per_batch;
        batch_size += 16) {
     decode_batch_sizes.push_back(batch_size);
   }
-  // Ensure max_seqs_per_batch is included if not already added
   if (decode_batch_sizes.back() != max_seqs_per_batch) {
     decode_batch_sizes.push_back(max_seqs_per_batch);
   }
 
-  // Limit decode seq_lens to max_context_len
-  for (auto& seq_len : decode_seq_lens) {
-    if (seq_len > max_context_len) {
-      seq_len = max_context_len;
-    }
+  double decode_total_latency = 0.0;
+  for (int32_t batch_size : decode_batch_sizes) {
+    std::vector<int32_t> total_length_vec(batch_size, decode_seq_len);
+    decode_total_latency += run_decode_request(total_length_vec);
   }
 
-  // ========== Warmup Prefill Request ==========
-  LOG(INFO) << "Warming up prefill request: tokens=" << prefill_tokens;
-  try {
-    // Prefill: prefix_length = 0 (empty KV cache), batch_size = 10,
-    // sequence_length = prefill_tokens / 10
-    double latency = run_request(prefill_tokens, 0, 1);
-    LOG(INFO) << "Prefill warmup completed: tokens=" << prefill_tokens
-              << ", latency=" << latency << " ms";
-  } catch (const std::exception& e) {
-    LOG(WARNING) << "Prefill warmup failed: tokens=" << prefill_tokens
-                 << ", error: " << e.what();
-  }
-
-  // ========== Warmup Decode Requests ==========
-  // confict with async_schedule, so skip for now
-
-  LOG(INFO) << "ACL Graph/CUDA Graph warmup completed";
+  LOG(INFO) << "Decode warmup completed: bucket_count="
+            << decode_batch_sizes.size() << ", decode_max_batch_size="
+            << (decode_batch_sizes.empty() ? 0 : decode_batch_sizes.back())
+            << ", decode_seq_len=" << decode_seq_len
+            << ", decode_total_latency=" << decode_total_latency << " ms";
 }
 
 }  // namespace xllm

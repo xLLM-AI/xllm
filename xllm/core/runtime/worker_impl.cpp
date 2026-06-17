@@ -42,10 +42,21 @@ limitations under the License.
 #include "common/device_monitor.h"
 #include "common/global_flags.h"
 #include "common/metrics.h"
+#include "core/framework/config/beam_search_config.h"
+#include "core/framework/config/disagg_pd_config.h"
+#include "core/framework/config/eplb_config.h"
+#include "core/framework/config/execution_config.h"
+#include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/load_config.h"
+#include "core/framework/config/profile_config.h"
+#include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/speculative_config.h"
 #if defined(USE_NPU)
 #include "platform/npu/device_capture_lock.h"
-#elif defined(USE_CUDA)
+#elif defined(USE_CUDA) || defined(USE_DCU)
 #include "kernels/cuda/cuda_ops_api.h"
+#include "platform/cuda_profiler.h"
+#include "platform/torch_profiler.h"
 #endif
 #include "core/distributed_runtime/master.h"
 #include "core/runtime/worker_rendezvous.h"
@@ -57,10 +68,10 @@ limitations under the License.
 #include "framework/state_dict/state_dict.h"
 #include "framework/xtensor/global_xtensor.h"
 #include "framework/xtensor/xtensor_allocator.h"
+#include "runtime/cp_input_partition.h"
 #if defined(USE_NPU)
 #include "layers/npu/loader/rolling_weight_buffer.h"
 #endif
-#include "util/net.h"
 #include "util/tensor_helper.h"
 #include "util/threadpool.h"
 #include "util/timer.h"
@@ -118,6 +129,93 @@ class ScopedAtenLoadThreads {
   bool active_ = false;
 };
 
+void move_tensor_to_device_if_needed(torch::Tensor& tensor,
+                                     const torch::Device& device) {
+  if (tensor.defined() && tensor.device() != device) {
+    tensor = tensor.to(device, /*non_blocking=*/false).contiguous();
+  }
+}
+
+// ForwardInput::to(device) returns early when device_tensors_ready is set.
+// Nested step_async (e.g. MTP target/draft) can leave CP-remapped control
+// tensors on CPU while model tensors are already on NPU.
+void ensure_forward_input_device_tensors(ForwardInput& input,
+                                         const torch::Device& device) {
+  move_tensor_to_device_if_needed(input.token_ids, device);
+  move_tensor_to_device_if_needed(input.positions, device);
+  move_tensor_to_device_if_needed(
+      input.input_params.embedding.mtp_shifted_token_ids, device);
+  move_tensor_to_device_if_needed(input.sampling_params.selected_token_idxes,
+                                  device);
+  move_tensor_to_device_if_needed(input.sampling_params.sample_idxes, device);
+  move_tensor_to_device_if_needed(
+      input.decoder_sampling_params.selected_token_idxes, device);
+  move_tensor_to_device_if_needed(input.decoder_sampling_params.sample_idxes,
+                                  device);
+}
+
+#if defined(USE_NPU)
+void prepare_input_params_for_linear_attention(ModelInputParams& input_params) {
+  const std::vector<int32_t>& host_q_seq_lens =
+      input_params.attention.host.q_seq_lens;
+  const bool has_leading_zero =
+      !host_q_seq_lens.empty() && host_q_seq_lens.front() == 0 &&
+      host_q_seq_lens.size() ==
+          static_cast<size_t>(input_params.meta.num_sequences + 1);
+  int64_t batch_size = static_cast<int64_t>(
+      has_leading_zero ? host_q_seq_lens.size() - 1 : host_q_seq_lens.size());
+  if (batch_size == 0) {
+    batch_size = input_params.meta.num_sequences;
+  }
+  if (batch_size == 0 && input_params.attention.device.block_tables.defined()) {
+    batch_size = input_params.attention.device.block_tables.size(0);
+  }
+  input_params.parallel.query_start_loc.resize(batch_size + 1, 0);
+  for (int64_t i = 0; i < batch_size; ++i) {
+    int64_t seq_len =
+        has_leading_zero
+            ? static_cast<int64_t>(host_q_seq_lens[static_cast<size_t>(i + 1)] -
+                                   host_q_seq_lens[static_cast<size_t>(i)])
+            : static_cast<int64_t>(host_q_seq_lens[static_cast<size_t>(i)]);
+    input_params.parallel.query_start_loc[i + 1] =
+        input_params.parallel.query_start_loc[i] + seq_len;
+  }
+
+  torch::Tensor has_initial_state_tensor =
+      input_params.attention.device.kv_cache_tokens_nums > 0;
+  torch::Tensor has_initial_state_int64 = has_initial_state_tensor.contiguous()
+                                              .view({-1})
+                                              .to(torch::kCPU)
+                                              .to(torch::kInt64);
+  const int64_t has_initial_state_size = has_initial_state_int64.size(0);
+  CHECK_GT(has_initial_state_size, 0)
+      << "kv_cache_tokens_nums must not be empty for linear attention";
+  CHECK(batch_size == has_initial_state_size ||
+        batch_size % has_initial_state_size == 0)
+      << "kv_cache_tokens_nums size must match or evenly divide active batch "
+      << "size, kv_cache_tokens_nums_size=" << has_initial_state_size
+      << ", batch_size=" << batch_size;
+  if (batch_size == has_initial_state_size) {
+    input_params.parallel.has_initial_state = std::vector<int64_t>(
+        has_initial_state_int64.data_ptr<int64_t>(),
+        has_initial_state_int64.data_ptr<int64_t>() + batch_size);
+    return;
+  }
+
+  const int64_t repeat_count = batch_size / has_initial_state_size;
+  input_params.parallel.has_initial_state.clear();
+  input_params.parallel.has_initial_state.reserve(batch_size);
+  const int64_t* has_initial_state_ptr =
+      has_initial_state_int64.data_ptr<int64_t>();
+  for (int64_t i = 0; i < has_initial_state_size; ++i) {
+    for (int64_t repeat_idx = 0; repeat_idx < repeat_count; ++repeat_idx) {
+      input_params.parallel.has_initial_state.push_back(
+          has_initial_state_ptr[i]);
+    }
+  }
+}
+#endif
+
 }  // namespace
 
 WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
@@ -141,19 +239,20 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
   device_.init_device_context();
   threadpool_.schedule([this]() mutable { device_.set_device(); });
   prepare_stream_ = device_.get_stream_from_pool();
-  compute_stream_ = device_.get_stream_from_pool();
+  compute_stream_ = device_.current_stream();
   sampler_ = std::make_unique<Sampler>();
 
-#if !defined(USE_NPU) && !defined(USE_CUDA)
-  if (FLAGS_enable_block_copy_kernel) {
-    LOG(WARNING) << "enable_block_copy_kernel is only supported on NPU/CUDA; "
-                    "forcing enable_block_copy_kernel=false.";
-    FLAGS_enable_block_copy_kernel = false;
+#if !defined(USE_NPU) && !defined(USE_CUDA) && !defined(USE_DCU)
+  if (::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel()) {
+    LOG(WARNING)
+        << "enable_block_copy_kernel is only supported on NPU/CUDA/DCU; "
+           "forcing enable_block_copy_kernel=false.";
+    ::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel(false);
   }
 #endif
 
 #if defined(USE_NPU)
-  if (FLAGS_enable_xtensor) {
+  if (::xllm::KVCacheConfig::get_instance().enable_xtensor()) {
     if (!weight_transfer_) {
       weight_transfer_ = std::make_unique<MooncakeWeightTransfer>(
           options_.transfer_listen_port(), device_.unwrap());
@@ -165,7 +264,7 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
       LOG(ERROR) << "Failed to register GlobalXTensor";
     }
   }
-  if (FLAGS_enable_rolling_load) {
+  if (::xllm::LoadConfig::get_instance().enable_rolling_load()) {
     load_stream_ = device_.get_stream_from_pool();
   }
   worker_rendezvous_ =
@@ -177,7 +276,9 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
 
 WorkerImpl::~WorkerImpl() = default;
 
-bool WorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
+bool WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
+                                           bool use_huge_page_allocator,
+                                           bool enable_raw_device_allocator) {
   CHECK(model_ != nullptr) << "Model is not initialized.";
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
   const auto& args = context_.get_model_args();
@@ -224,16 +325,33 @@ bool WorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
       .full_attention_interval(args.full_attention_interval())
       .model_id(options_.model_id())
       .model_type(args.model_type())
-      .enable_xtensor(FLAGS_enable_xtensor)
+      .enable_xtensor(::xllm::KVCacheConfig::get_instance().enable_xtensor())
       .enable_linear_attention(enable_linear_attention)
       .enable_lighting_indexer(enable_lighting_indexer)
-      .enable_kv_cache_quant(enable_kv_cache_quant);
+      .enable_kv_cache_quant(enable_kv_cache_quant)
+      .enable_raw_device_allocator(enable_raw_device_allocator)
+      .block_size(options_.block_size())
+      .head_dim(args.head_dim())
+      .index_head_dim(std::max(args.index_head_dim(), 1))
+      .window_size(std::max(args.window_size(), 1))
+      .compress_ratios(args.compress_ratios());
+#if defined(USE_NPU)
+  create_options.enable_kv_cache_huge_page_allocator(use_huge_page_allocator);
+#endif
 
   allocate_kv_caches(kv_caches_, kv_cache_shape, create_options);
 
-#if defined(USE_CUDA)
+#if defined(USE_CUDA) || defined(USE_DCU)
   refresh_cuda_block_copy_runtime_state();
 #endif
+
+  return true;
+}
+
+bool WorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
+  if (!allocate_kv_cache_storage(kv_cache_shape)) {
+    return false;
+  }
 
   init_hierarchy_kv_cache_transfer();
   status_ = Status::READY;
@@ -245,14 +363,12 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   CHECK(model_ != nullptr) << "Model is not initialized.";
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
 
-  int32_t device_id = device_.index();
   // create a KVCache for each layer
   const int64_t num_layers = context_.get_model_args().n_layers();
   const bool enable_lighting_indexer =
       context_.get_model_args().index_n_heads() > 0;
   kv_cache_transfer_ = KVCacheTransferFactory::create(
-      FLAGS_kv_cache_transfer_type,
-      options_.device_ip().value(),
+      ::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type(),
       options_.transfer_listen_port(),
       options_.instance_role(),
       device_,
@@ -260,7 +376,9 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
       dtype_,
       kv_caches_,
       num_layers,
-      [this](const KVCacheShape& shape) { this->allocate_kv_cache(shape); },
+      [this](const KVCacheShape& shape, bool use_huge_page_allocator) {
+        return this->allocate_kv_cache_storage(shape, use_huge_page_allocator);
+      },
       enable_lighting_indexer,
       context_.get_model_args().model_type(),
       options_.model_id());
@@ -271,7 +389,7 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   return true;
 }
 
-#if defined(USE_NPU)
+#if defined(USE_NPU) || defined(USE_MLU)
 bool WorkerImpl::allocate_kv_cache_with_transfer(
     std::shared_ptr<KVCacheTransfer> kv_cache_transfer,
     const KVCacheShape& kv_cache_shape) {
@@ -280,16 +398,22 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
 
   kv_cache_transfer_ = kv_cache_transfer;
 
-  // create a KVCache for each layer
-  const int64_t num_layers = context_.get_model_args().n_layers();
-  kv_caches_.reserve(num_layers);
-  if (is_spec_draft_) {
-    kv_cache_transfer_->allocate_kv_cache_spec(
-        kv_caches_, num_layers, kv_cache_shape, dtype_);
-  } else {
-    kv_cache_transfer_->allocate_kv_cache(
-        kv_caches_, num_layers, kv_cache_shape, dtype_);
+  if (!allocate_kv_cache_storage(kv_cache_shape,
+                                 /*use_huge_page_allocator=*/true,
+                                 /*enable_raw_device_allocator=*/true)) {
+    return false;
   }
+
+#if defined(USE_NPU)
+  if (is_spec_draft_) {
+    kv_cache_transfer_->register_kv_cache_spec(
+        kv_caches_, kv_cache_shape, dtype_);
+  } else {
+    kv_cache_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
+  }
+#else
+  kv_cache_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
+#endif
 
   init_hierarchy_kv_cache_transfer();
   status_ = Status::READY;
@@ -297,43 +421,37 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
 }
 #endif
 
-void WorkerImpl::get_device_info(std::string& device_ip, uint16_t& port) {
-  // device_ip = options_.device_ip().value();
-  device_ip = net::get_local_ip_addr();
-  port = options_.transfer_listen_port();
-}
-
 void WorkerImpl::get_cache_info(uint64_t& cluster_id,
                                 std::string& addr,
-                                int64_t& k_cache_id,
-                                int64_t& v_cache_id) {
+                                uint16_t& port) {
+  cluster_id = 0;
+  addr.clear();
 #if defined(USE_NPU) || defined(USE_MLU)
-  kv_cache_transfer_->get_cache_info(cluster_id, addr, k_cache_id, v_cache_id);
+  if (kv_cache_transfer_) {
+    kv_cache_transfer_->get_cache_info(cluster_id, addr);
+  }
 #endif
+  port = options_.transfer_listen_port();
 }
 
 bool WorkerImpl::link_cluster(const std::vector<uint64_t>& cluster_ids,
                               const std::vector<std::string>& addrs,
-                              const std::vector<std::string>& device_ips,
                               const std::vector<uint16_t>& ports) {
-  return worker_rendezvous_->link_cluster(
-      cluster_ids, addrs, device_ips, ports);
+  return worker_rendezvous_->link_cluster(cluster_ids, addrs, ports);
 }
 
 bool WorkerImpl::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                                 const std::vector<std::string>& addrs,
-                                const std::vector<std::string>& device_ips,
                                 const std::vector<uint16_t>& ports) {
-  return worker_rendezvous_->unlink_cluster(
-      cluster_ids, addrs, device_ips, ports);
+  return worker_rendezvous_->unlink_cluster(cluster_ids, addrs, ports);
 }
 
-bool WorkerImpl::link_d2d(const std::string& remote_addr) {
-  return worker_rendezvous_->link_d2d(remote_addr);
+bool WorkerImpl::link_p2p(const std::string& remote_addr) {
+  return worker_rendezvous_->link_p2p(remote_addr);
 }
 
-bool WorkerImpl::unlink_d2d(const std::string& remote_addr) {
-  return worker_rendezvous_->unlink_d2d(remote_addr);
+bool WorkerImpl::unlink_p2p(const std::string& remote_addr) {
+  return worker_rendezvous_->unlink_p2p(remote_addr);
 }
 
 std::tuple<int64_t, int64_t> WorkerImpl::estimate_kv_cache_capacity() {
@@ -388,7 +506,7 @@ void WorkerImpl::update_last_step_output(
     last_step_output_ = std::move(output.value());
     last_step_output_valid_ = true;
   } else {
-    if (FLAGS_enable_eplb) {
+    if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
       last_step_output_ = std::move(output.value());
     }
     last_step_output_valid_ = false;
@@ -417,8 +535,138 @@ ForwardInput WorkerImpl::update_input_by_last_step_output(
   return inputs;
 }
 
+std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap(
+    const ForwardInput& input) {
+  return step(input);
+}
+
+ForwardInput WorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
+    ForwardInput& input) {
+  return update_input_by_last_step_output(input);
+}
+
+#if defined(USE_NPU)
+torch::Tensor WorkerImpl::recompute_new_cache_slots(const ForwardInput& input) {
+  auto old_cache_slots = input.input_params.attention.device.new_cache_slots;
+  int64_t numel = old_cache_slots.numel();
+  // The logical block stride that BlockManager hands out is
+  // `block_size * kv_split_size_effective` (see llm_engine init). When KV is
+  // not split (kv_split_size == 1) the stride collapses back to block_size.
+  const int32_t kv_split_size = parallel_args_.kv_split_size_effective();
+  const int32_t block_size_total = options_.block_size() * kv_split_size;
+  // KV-shard ownership predicate: block whose sub-index inside the logical
+  // block matches this rank's KV-split rank (degenerates to "this rank only"
+  // when kv_split_size == 1, since sub_block_idx is always 0 there).
+  const int32_t owner_kv_split_rank = parallel_args_.kv_split_rank();
+
+  torch::Tensor indices = torch::arange(numel, torch::kCPU);
+  torch::Tensor block_offset = indices % block_size_total;
+  torch::Tensor sub_block_idx =
+      torch::floor_divide(block_offset, options_.block_size());
+  torch::Tensor mask = (sub_block_idx == owner_kv_split_rank);
+  torch::Tensor valid_indices = torch::nonzero(mask).squeeze();
+
+  torch::Tensor new_cache_slots = torch::full_like(old_cache_slots, -1);
+  if (valid_indices.numel() > 0) {
+    const torch::Device slots_device = old_cache_slots.device();
+    torch::Tensor valid_indices_on_device =
+        valid_indices.to(slots_device, /*non_blocking=*/false);
+    torch::Tensor old_slotid =
+        old_cache_slots.index_select(0, valid_indices_on_device)
+            .to(torch::kInt);
+    torch::Tensor block_id = torch::floor_divide(old_slotid, block_size_total);
+    torch::Tensor block_offset_mod = old_slotid % options_.block_size();
+    torch::Tensor new_slotid =
+        block_id * options_.block_size() + block_offset_mod;
+    new_cache_slots.index_put_({valid_indices_on_device},
+                               new_slotid.to(new_cache_slots.scalar_type()));
+  }
+  return new_cache_slots;
+}
+
+torch::Tensor WorkerImpl::compute_in_prefix_slots(const ForwardInput& input) {
+  // Derive prefix block count from `kv_cache_tokens_nums` (already-cached
+  // tokens at the start of this forward), which covers prefix-cache hits and
+  // chunked prefill progression.
+  torch::Tensor block_tables = input.input_params.attention.device.block_tables;
+  torch::Tensor kv_cache_tokens_nums =
+      input.input_params.attention.device.kv_cache_tokens_nums;
+  if (block_tables.defined() && !block_tables.device().is_cpu()) {
+    block_tables = block_tables.to(torch::kCPU);
+  }
+  if (kv_cache_tokens_nums.defined() &&
+      !kv_cache_tokens_nums.device().is_cpu()) {
+    kv_cache_tokens_nums = kv_cache_tokens_nums.to(torch::kCPU);
+  }
+  const int32_t block_size = options_.block_size();
+  // Stride here is the KV-split width (how many ranks the KV is sharded
+  // across), NOT cp_size. When kv_split_size == 1 each rank holds the full
+  // prefix and we emit ALL prefix blocks; when kv_split_size == cp_size this
+  // reduces to the legacy round-robin behavior byte-for-byte.
+  const int32_t kv_split_size =
+      std::max(1, parallel_args_.kv_split_size_effective());
+  const int32_t kv_split_rank = parallel_args_.kv_split_rank();
+
+  CHECK(block_tables.defined() && block_tables.dim() == 2)
+      << "block_tables must be a 2D tensor in compute_in_prefix_slots.";
+  CHECK_EQ(block_tables.size(0), kv_cache_tokens_nums.numel())
+      << "block_tables rows (" << block_tables.size(0)
+      << ") must match kv_cache_tokens_nums numel ("
+      << kv_cache_tokens_nums.numel() << ").";
+  CHECK_GT(block_size, 0);
+
+  const int64_t num_sequences = block_tables.size(0);
+  std::vector<int32_t> in_prefix_slots_vec;
+  // HCCL AllGather and downstream ATB Gather op cannot accept a [0]-shaped
+  // tensor; emit at least one padding slot when the batch contributes none.
+  if (num_sequences == 0) {
+    in_prefix_slots_vec.push_back(0);
+    return torch::tensor(in_prefix_slots_vec, torch::kInt);
+  }
+
+  auto block_tables_acc = block_tables.accessor<int32_t, 2>();
+  auto kv_cache_tokens_acc = kv_cache_tokens_nums.accessor<int32_t, 1>();
+
+  // Per-rank prefix count = total_prefix_tokens / kv_split_size. This matches
+  // the legacy behavior byte-for-byte when kv_split_size == cp_size (rank
+  // emits the first `prefix_blocks` entries of block_tables; the ATB reshape
+  // assumes a [kv_split_size, local_len, ...] layout for the subsequent
+  // AllGather). When kv_split_size == 1 every rank emits the FULL prefix
+  // (prefix_blocks == kv_cache_tokens / block_size) and the ATB layer skips
+  // the prefix AllGather entirely (see S6).
+  // (void)kv_split_rank to silence -Wunused-variable on the kv_split_size==1
+  // path; the rank is implicit there.
+  (void)kv_split_rank;
+  in_prefix_slots_vec.reserve(num_sequences * block_size);
+  for (int64_t i = 0; i < num_sequences; ++i) {
+    const int32_t prefix_tokens = kv_cache_tokens_acc[i] / kv_split_size;
+    const int32_t prefix_blocks = prefix_tokens / block_size;
+    if (prefix_blocks <= 0) {
+      in_prefix_slots_vec.push_back(0);
+      continue;
+    }
+    for (int32_t j = 0; j < prefix_blocks; j++) {
+      const int32_t physical_block = block_tables_acc[i][j];
+      const int32_t base_slot = physical_block * block_size;
+      for (int32_t k = 0; k < block_size; ++k) {
+        in_prefix_slots_vec.push_back(base_slot + k);
+      }
+    }
+  }
+  return torch::tensor(in_prefix_slots_vec, torch::kInt);
+}
+#endif
+
 void WorkerImpl::prepare_work_before_execute(const ForwardInput& input,
                                              ForwardInput& processed_input) {
+  prepare_work_before_execute_on_stream(
+      input, processed_input, *prepare_stream_);
+}
+
+void WorkerImpl::prepare_work_before_execute_on_stream(
+    const ForwardInput& input,
+    ForwardInput& processed_input,
+    Stream& prepare_stream) {
 #if defined(USE_NPU)
   // Without device_capture_lock, ACL graph capture will be interrupted by the
   // synchronization H2D of data update streams asynchronously scheduled by
@@ -430,45 +678,177 @@ void WorkerImpl::prepare_work_before_execute(const ForwardInput& input,
   // asynchronously scheduled data update streams.
 
   std::optional<std::unique_lock<std::mutex>> lock_guard;
-  if (FLAGS_enable_graph) {
+  if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
     auto& capture_lock =
         ::xllm::npu::DeviceCaptureLock::get_instance().get_lock(
             device_.index());
     lock_guard.emplace(capture_lock);
   }
 #endif
-  const bool use_default_stream =
-      !enable_schedule_overlap() && options_.backend() == "llm";
-  auto prepare_input_on_current_stream = [&]() {
-    processed_input = input.to(device_, dtype_);
-    auto& input_params = processed_input.input_params;
+  c10::StreamGuard stream_guard = prepare_stream.set_stream_guard();
+  CHECK(prepare_stream.wait_event(input.metadata_ready_event))
+      << "failed to wait input metadata ready event on worker prepare stream";
+
+  // CP partition is now done worker-side (formerly engine-side in
+  // LLMEngine::step). torch::Tensor fields are handles, so assigning new
+  // tensors to the CP working copy does not mutate `input`.
+  // IMPORTANT: every downstream NPU-side prepare call
+  // (prepare_cp_prefill_inputs, CpEpPadding, recompute_new_cache_slots,
+  // compute_in_prefix_slots) reads from the per-rank slice and therefore MUST
+  // consume the CP working copy, not the pre-partition `input.*`. The
+  // `!input.cp_partitioned` guard is critical for nested step_async paths (MTP
+  // target/draft sub-workers) that re-enter prepare_work_before_execute on
+  // already-partitioned device tensors; see ForwardInput::cp_partitioned.
+  // Prefill-side CP (partition + ATB cp tensors) applies to PREFILL,
+  // CHUNKED_PREFILL, and MIXED. `no_decode()` wrongly excludes MIXED.
+  const bool needs_cp_prefill_side =
+      parallel_args_.cp_size() > 1 &&
+      !input.input_params.meta.batch_forward_type.is_decode();
+  const bool needs_cp_partition =
+      needs_cp_prefill_side && !input.cp_partitioned;
+  std::optional<ForwardInput> cp_input;
+  if (needs_cp_prefill_side) {
+    cp_input.emplace(input);
+  }
+#if defined(USE_NPU)
+  if (needs_cp_prefill_side) {
+    ForwardInput& cp_working = *cp_input;
+    // RPC packed_input only carries input_host_buffer until unpack; partition
+    // and prepare_cp_prefill_inputs need materialized token_ids / seq_lens.
+    if (cp_working.input_host_buffer_has_layout &&
+        (!cp_working.token_ids.defined() ||
+         cp_working.token_ids.numel() == 0)) {
+      ForwardInput unpacked;
+      if (detail::unpack_from_input_host_buffer(
+              cp_working, torch::Device(torch::kCPU), unpacked)) {
+        unpacked.cp_partitioned = cp_working.cp_partitioned;
+        cp_working = std::move(unpacked);
+        cp_working.input_host_buffer_has_layout = false;
+      } else {
+        LOG(ERROR) << "[CP_PREP] unpack_from_input_host_buffer failed before "
+                      "cp_partition (cp_rank="
+                   << parallel_args_.cp_rank() << ")";
+      }
+    }
+  }
+#endif
+  if (needs_cp_partition) {
+    ForwardInput& cp_working = *cp_input;
+    const int64_t tokens_before =
+        cp_working.token_ids.defined() ? cp_working.token_ids.numel() : 0;
+    cp::cp_partition_inplace(
+        cp_working, parallel_args_.cp_rank(), parallel_args_.cp_size());
+    const int64_t tokens_after =
+        cp_working.token_ids.defined() ? cp_working.token_ids.numel() : 0;
+    // Mark partitioned only when slice materialized (packed RPC used to skip
+    // partition on empty token_ids yet still set this flag).
+    if (tokens_after > 0) {
+      cp_working.cp_partitioned = true;
+    } else {
+      LOG(ERROR) << "[CP_PREP] cp_partition_inplace produced no tokens "
+                    "(before="
+                 << tokens_before << " cp_rank=" << parallel_args_.cp_rank()
+                 << " host_buffer_has_layout="
+                 << cp_working.input_host_buffer_has_layout << ")";
+    }
+  }
+  const ForwardInput& prep_for_device =
+      needs_cp_prefill_side ? *cp_input : input;
+
+#if defined(USE_NPU)
+  // recompute_new_cache_slots / compute_in_prefix_slots are CP prefill-side
+  // prepares that must run EXACTLY ONCE, on the first (outer) pass that owns
+  // the partition. They both remap slots from the BlockManager logical space
+  // (stride block_size * kv_split_size) into this rank's local physical space,
+  // an operation that is NOT idempotent for kv_split_size > 1. Nested MTP
+  // target/draft sub-workers re-enter prepare_work_before_execute on the
+  // already-partitioned input (cp_partitioned == true) whose new_cache_slots
+  // were already remapped by the outer pass; recomputing again would double
+  // remap and corrupt the KV slots. Gate on !input.cp_partitioned just like
+  // prepare_cp_prefill_inputs below.
+  const bool needs_kv_split_prep = needs_cp_prefill_side &&
+                                   !input.cp_partitioned &&
+                                   util::enable_kvcache_split();
+  const bool have_prefix_slots =
+      needs_cp_prefill_side && !input.cp_partitioned &&
+      (::xllm::KVCacheConfig::get_instance().enable_prefix_cache() ||
+       ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill());
+#endif
+
+  auto prepare_device_on_stream = [&]() {
+    processed_input = prep_for_device.to(device_, dtype_);
+    ensure_forward_input_device_tensors(processed_input, device_);
 
 #if defined(USE_NPU)
     CpPrefillInputs tmp_cp_inputs;
-    if (parallel_args_.cp_size() > 1 &&
-        input.input_params.batch_forward_type.is_prefill()) {
-      tmp_cp_inputs = prepare_cp_prefill_inputs(parallel_args_.cp_size(),
-                                                input.token_ids,
-                                                input.positions,
-                                                input.input_params.q_seq_lens);
-      processed_input.input_params.cp_prefill_inputs =
+    if (needs_cp_prefill_side && !input.cp_partitioned) {
+      const ForwardInput& cp_working = *cp_input;
+      tmp_cp_inputs = prepare_cp_prefill_inputs(
+          parallel_args_.cp_size(),
+          cp_working.host_token_ids(),
+          cp_working.host_positions(),
+          cp_working.input_params.attention.device.q_seq_lens,
+          have_prefix_slots,
+          cp_working.input_params.attention.host.kv_cache_tokens_nums,
+          options_.block_size(),
+          parallel_args_.kv_split_size_effective());
+      processed_input.input_params.parallel.cp_prefill_inputs =
           tmp_cp_inputs.to(device_);
-      CpEpPadding cp_ep_padding(
-          input.token_ids,
-          context_.get_model_args().num_experts_per_tok(),
-          context_.get_parallel_args().mapping_data(),
-          /*device=*/device_,
-          dtype_,
-          /*is_prefill=*/input.input_params.batch_forward_type.is_prefill());
-      processed_input.input_params.cp_ep_padding_data = cp_ep_padding.build();
+      CpEpPadding cp_ep_padding(cp_working.host_token_ids(),
+                                context_.get_model_args().num_experts_per_tok(),
+                                context_.get_parallel_args().mapping_data(),
+                                /*device=*/device_,
+                                dtype_,
+                                /*is_prefill=*/needs_cp_prefill_side);
+      processed_input.input_params.parallel.cp_ep_padding_data =
+          cp_ep_padding.build();
+    }
+
+    if (needs_kv_split_prep) {
+      torch::Tensor new_cache_slots = recompute_new_cache_slots(*cp_input);
+      processed_input.input_params.attention.device.new_cache_slots =
+          new_cache_slots.to(device_);
+    }
+    if (have_prefix_slots) {
+      torch::Tensor in_prefix_slots = compute_in_prefix_slots(*cp_input);
+      processed_input.input_params.attention.device.in_prefix_slots =
+          in_prefix_slots.to(device_);
     }
 #endif
+
+    auto& input_params = processed_input.input_params;
+
+    bool empty_shard = input_params.meta.num_sequences == 0 &&
+                       (!processed_input.token_ids.defined() ||
+                        processed_input.token_ids.numel() == 0);
+    const bool need_fake_input_for_empty_shard =
+        empty_shard && !input_params.meta.batch_forward_type.is_empty() &&
+        (context_.get_parallel_args().cp_size() > 1 ||
+         (context_.get_parallel_args().dp_size() > 1 ||
+          context_.get_parallel_args().ep_size() > 1 ||
+          !context_.get_parallel_args().mapping_data().empty()));
+    if (need_fake_input_for_empty_shard) {
+      auto token_options = processed_input.token_ids.defined()
+                               ? processed_input.token_ids.options()
+                               : torch::TensorOptions().dtype(torch::kInt32);
+      auto position_options = processed_input.positions.defined()
+                                  ? processed_input.positions.options()
+                                  : torch::TensorOptions().dtype(torch::kInt32);
+      processed_input.token_ids =
+          torch::ones({1}, token_options.device(device_));
+      processed_input.positions =
+          torch::zeros({1}, position_options.device(device_));
+      empty_shard = false;
+    }
+    if (empty_shard) {
+      return;
+    }
 
     apply_kv_block_swaps(input_params);
 
 #if defined(USE_NPU)
     if (context_.get_model_args().enable_mla() &&
-        input_params.batch_forward_type.is_chunked_prefill()) {
+        input_params.meta.batch_forward_type.is_chunked_prefill()) {
       prepare_mla_prefixcache_inputs(input_params);
     }
 
@@ -476,44 +856,46 @@ void WorkerImpl::prepare_work_before_execute(const ForwardInput& input,
         !(context_.get_parallel_args().cp_size() > 1) &&
         (context_.get_parallel_args().dp_size() > 1 ||
          context_.get_parallel_args().ep_size() > 1)) {
-      torch::Tensor token_size_per_dp_group =
-          torch::tensor(processed_input.input_params.dp_global_token_nums,
-                        torch::TensorOptions()
-                            .device(torch::kCPU)
-                            .dtype(torch::kInt32)
-                            .pinned_memory(true));
+      torch::Tensor token_size_per_dp_group = torch::tensor(
+          processed_input.input_params.parallel.dp_global_token_nums,
+          torch::TensorOptions()
+              .device(torch::kCPU)
+              .dtype(torch::kInt32)
+              .pinned_memory(true));
       bool is_prefill =
-          processed_input.input_params.batch_forward_type.is_prefill();
+          processed_input.input_params.meta.batch_forward_type.is_prefill();
       DpEpPadding dp_ep_padding(token_size_per_dp_group,
                                 context_.get_model_args().num_experts_per_tok(),
                                 context_.get_parallel_args().mapping_data(),
                                 device_,
                                 dtype_,
                                 is_prefill);
-      processed_input.input_params.dp_ep_padding_data = dp_ep_padding.build();
-      if (FLAGS_enable_eplb) {
-        // expert_load_data_.fill_(0);
-        processed_input.input_params.expert_load_data = expert_load_data_;
+      processed_input.input_params.parallel.dp_ep_padding_data =
+          dp_ep_padding.build();
+      if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
+        processed_input.input_params.expert.expert_load_data =
+            expert_load_data_;
       }
+    }
+
+    if (has_linear_attention_layers(context_.get_model_args())) {
+      prepare_input_params_for_linear_attention(processed_input.input_params);
     }
 #endif
   };
 
-  if (use_default_stream) {
-    prepare_input_on_current_stream();
-  } else {
-    c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
-    prepare_input_on_current_stream();
-  }
+  prepare_device_on_stream();
 
-  if (!use_default_stream) {
-    prepare_stream_->synchronize();
+  StreamEventPtr event = prepare_stream.record_event();
+  if (event == nullptr) {
+    prepare_stream.synchronize();
   }
+  processed_input.metadata_ready_event = event;
 }
 
 void WorkerImpl::apply_kv_block_swaps(const ModelInputParams& input_params) {
-#if defined(USE_CUDA)
-  if (FLAGS_enable_block_copy_kernel &&
+#if defined(USE_CUDA) || defined(USE_DCU)
+  if (::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel() &&
       can_use_cuda_block_copy_kernel(input_params)) {
     execute_cuda_block_copy_kernel(input_params);
     return;
@@ -521,23 +903,24 @@ void WorkerImpl::apply_kv_block_swaps(const ModelInputParams& input_params) {
 #endif
 
 #if defined(USE_NPU)
-  if (input_params.swap_blocks.size() == 0 || FLAGS_enable_block_copy_kernel) {
+  if (input_params.block_copy.swap_blocks.size() == 0 ||
+      ::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel()) {
     return;
   }
-#elif defined(USE_CUDA)
-  if (input_params.swap_blocks.size() == 0) {
+#elif defined(USE_CUDA) || defined(USE_DCU)
+  if (input_params.block_copy.swap_blocks.size() == 0) {
     return;
   }
 #else
   return;
 #endif
 
-#if defined(USE_NPU) || defined(USE_CUDA)
+#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_DCU)
   std::vector<int64_t> src_indices, dst_indices;
-  src_indices.reserve(input_params.swap_blocks.size());
-  dst_indices.reserve(input_params.swap_blocks.size());
+  src_indices.reserve(input_params.block_copy.swap_blocks.size());
+  dst_indices.reserve(input_params.block_copy.swap_blocks.size());
 
-  for (const auto& block : input_params.swap_blocks) {
+  for (const auto& block : input_params.block_copy.swap_blocks) {
     src_indices.push_back(block.src_block_id);
     dst_indices.push_back(block.dst_block_id);
   }
@@ -552,10 +935,11 @@ void WorkerImpl::apply_kv_block_swaps(const ModelInputParams& input_params) {
 #endif
 }
 
-#if defined(USE_CUDA)
+#if defined(USE_CUDA) || defined(USE_DCU)
 void WorkerImpl::refresh_cuda_block_copy_runtime_state() {
   cuda_block_copy_runtime_state_ = {};
-  if (!FLAGS_enable_block_copy_kernel || kv_caches_.empty()) {
+  if (!::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel() ||
+      kv_caches_.empty()) {
     return;
   }
 
@@ -608,12 +992,12 @@ void WorkerImpl::refresh_cuda_block_copy_runtime_state() {
 bool WorkerImpl::can_use_cuda_block_copy_kernel(
     const ModelInputParams& input_params) const {
   return cuda_block_copy_runtime_state_.valid() &&
-         input_params.src_block_indices.defined() &&
-         input_params.dst_block_indices.defined() &&
-         input_params.cum_sum.defined() &&
-         input_params.src_block_indices.numel() > 0 &&
-         input_params.dst_block_indices.numel() > 0 &&
-         input_params.cum_sum.numel() > 0;
+         input_params.block_copy.src_block_indices.defined() &&
+         input_params.block_copy.dst_block_indices.defined() &&
+         input_params.block_copy.cum_sum.defined() &&
+         input_params.block_copy.src_block_indices.numel() > 0 &&
+         input_params.block_copy.dst_block_indices.numel() > 0 &&
+         input_params.block_copy.cum_sum.numel() > 0;
 }
 
 void WorkerImpl::execute_cuda_block_copy_kernel(
@@ -622,9 +1006,9 @@ void WorkerImpl::execute_cuda_block_copy_kernel(
   xllm::kernel::cuda::block_copy(
       cuda_block_copy_runtime_state_.k_cache_ptrs_device,
       cuda_block_copy_runtime_state_.v_cache_ptrs_device,
-      input_params.src_block_indices,
-      input_params.dst_block_indices,
-      input_params.cum_sum,
+      input_params.block_copy.src_block_indices,
+      input_params.block_copy.dst_block_indices,
+      input_params.block_copy.cum_sum,
       cuda_block_copy_runtime_state_.numel_per_block,
       kv_caches_.front().get_k_cache().scalar_type());
 }
@@ -651,14 +1035,14 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
       promise.setValue(output);
     } else {
       if (last_step_output_valid_ && input.token_ids.numel() > 0 &&
-          input.input_params.batch_forward_type.has_decode()) {
+          input.input_params.meta.batch_forward_type.has_decode()) {
         // replace step i model input with true output of step i-1
-        input = update_input_by_last_step_output(input);
+        input = update_input_by_last_step_output_for_schedule_overlap(input);
       }
 
-      const auto output = this->step(input);
+      const auto output = this->step_for_schedule_overlap(input);
       if (output.has_value()) {
-        if (is_driver() || FLAGS_enable_eplb) {
+        if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
           std::unique_lock<std::mutex> lock(mtx_);
           cv_.wait(lock, [this] { return !is_recorded_; });
           update_last_step_output(output);
@@ -668,7 +1052,7 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
           update_last_step_output(output);
         }
       } else {
-        if (is_driver() || FLAGS_enable_eplb) {
+        if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
           std::unique_lock<std::mutex> lock(mtx_);
           cv_.wait(lock, [this] { return !is_recorded_; });
           last_step_output_valid_ = false;
@@ -688,7 +1072,8 @@ ForwardOutput WorkerImpl::get_last_step_result() {
   ForwardOutput output;
   std::unique_lock<std::mutex> lock(mtx_);
   cv_.wait(lock, [this] { return is_recorded_; });
-  if (last_step_output_valid_ || FLAGS_enable_eplb) {
+  if (last_step_output_valid_ ||
+      ::xllm::EPLBConfig::get_instance().enable_eplb()) {
     output = last_step_output_;
   }
   is_recorded_ = false;
@@ -739,6 +1124,49 @@ bool WorkerImpl::sleep(MasterStatus master_status) {
   return true;
 }
 
+bool WorkerImpl::start_profile() {
+#if defined(USE_CUDA)
+  const auto& cfg = ProfileConfig::get_instance();
+  if (cfg.profile_backend() == "cuda") {
+    // Capture-range only; requires the server to run under nsys.
+    return CudaProfiler::get_instance().start();
+  }
+  // Default "torch" backend records in-process via Kineto. CPU-op capture uses
+  // thread-local callbacks, so enable it on the compute thread that runs the
+  // forward pass rather than on the RPC handler thread.
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([promise = std::move(promise)]() mutable {
+    promise.setValue(TorchProfiler::get_instance().start());
+  });
+  return std::move(future).get();
+#else
+  LOG(ERROR) << "Online timeline profiling is only supported on CUDA.";
+  return false;
+#endif
+}
+
+bool WorkerImpl::stop_profile() {
+#if defined(USE_CUDA)
+  const auto& cfg = ProfileConfig::get_instance();
+  if (cfg.profile_backend() == "cuda") {
+    return CudaProfiler::get_instance().stop();
+  }
+  const std::string profile_dir = cfg.profile_dir();
+  const int32_t rank = parallel_args_.rank();
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule(
+      [profile_dir, rank, promise = std::move(promise)]() mutable {
+        promise.setValue(TorchProfiler::get_instance().stop(profile_dir, rank));
+      });
+  return std::move(future).get();
+#else
+  LOG(ERROR) << "Online timeline profiling is only supported on CUDA.";
+  return false;
+#endif
+}
+
 bool WorkerImpl::wakeup(const WakeupOptions& options) {
   if (!options.remote_addrs.empty()) {
 #if defined(USE_NPU)
@@ -754,7 +1182,8 @@ bool WorkerImpl::wakeup(const WakeupOptions& options) {
 bool WorkerImpl::wakeup_local(const WakeupOptions& options) {
   if (options.master_status == MasterStatus::LIGHT_SLEEP) {
 #if defined(USE_NPU)
-    if (FLAGS_enable_rolling_load && !is_spec_draft_) {
+    if (::xllm::LoadConfig::get_instance().enable_rolling_load() &&
+        !is_spec_draft_) {
       // Reuse rolling runtime state and refresh rolling initialization on
       // wakeup without re-reading checkpoint in LIGHT_SLEEP.
       if (!init_rolling_runtime_state()) {
@@ -777,9 +1206,9 @@ bool WorkerImpl::wakeup_local(const WakeupOptions& options) {
 #if defined(USE_NPU)
 bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
   // Prefer segment-based transfer if available, fallback to legacy offsets.
-  if (FLAGS_enable_rolling_load) {
-    LOG(ERROR)
-        << "Remote weight wakeup does not support FLAGS_enable_rolling_load";
+  if (::xllm::LoadConfig::get_instance().enable_rolling_load()) {
+    LOG(ERROR) << "Remote weight wakeup does not support "
+                  "::xllm::LoadConfig::get_instance().enable_rolling_load()";
     return false;
   }
 
@@ -849,7 +1278,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
                             int32_t random_seed,
                             MasterStatus master_status) {
   // set same random seed for all worker
-  FLAGS_random_seed = random_seed;
+  ::xllm::ExecutionConfig::get_instance().random_seed(random_seed);
   device_.set_seed(random_seed);
 
   auto model_loader = ModelLoader::create(model_weights_path);
@@ -874,16 +1303,17 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   }
 
 #if defined(USE_NPU)
-  if (options_.enable_speculative_decode() && FLAGS_enable_atb_spec_kernel) {
+  if (options_.enable_speculative_decode() &&
+      ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
   } else if (options_.enable_speculative_decode() &&
              options_.num_speculative_tokens() == 0 &&
              args.num_nextn_predict_layers() != 0) {
     const std::string& current_type = args.model_type();
     const char* mtp_model_type = nullptr;
-    if (current_type == "qwen3_5") {
+    if (current_type == "qwen3_5_text") {
       mtp_model_type = "qwen3_5_mtp";
-    } else if (current_type == "qwen3_5_moe") {
+    } else if (current_type == "qwen3_5_moe_text") {
       mtp_model_type = "qwen3_5_moe_mtp";
     }
     if (mtp_model_type != nullptr) {
@@ -961,12 +1391,12 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   }
 
   status_ = Status::LOADED;
-  if (FLAGS_enable_eplb) {
+  if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     // todo: support xtensor
     int32_t num_layers = args.n_layers() - args.first_k_dense_replace();
     int32_t num_device_experts =
         args.n_routed_experts() / context_.get_parallel_args().world_size() +
-        FLAGS_redundant_experts_num;
+        ::xllm::EPLBConfig::get_instance().redundant_experts_num();
     expert_load_data_ = torch::zeros({num_layers, num_device_experts})
                             .to(torch::kInt64)
                             .to(device_)
@@ -980,7 +1410,8 @@ void WorkerImpl::load_model(std::unique_ptr<ModelLoader> loader) {
 #if defined(USE_NPU)
   // Rolling mode uses host-pinned weights as the single source of truth:
   // lazy_load_model -> init_rolling_runtime_state() to finish rolling init.
-  if (FLAGS_enable_rolling_load && !is_spec_draft_) {
+  if (::xllm::LoadConfig::get_instance().enable_rolling_load() &&
+      !is_spec_draft_) {
     model_->lazy_load_model(std::move(loader));
     CHECK(init_rolling_runtime_state())
         << "Failed to initialize rolling runtime state during load_model";
@@ -995,7 +1426,8 @@ void WorkerImpl::load_model(std::unique_ptr<ModelLoader> loader) {
 bool WorkerImpl::init_rolling_runtime_state() {
   // Draft model (speculative decoding) has only 1 decoder layer, skip rolling
   // load.
-  if (!FLAGS_enable_rolling_load || is_spec_draft_) {
+  if (!::xllm::LoadConfig::get_instance().enable_rolling_load() ||
+      is_spec_draft_) {
     return true;
   }
 
@@ -1005,8 +1437,10 @@ bool WorkerImpl::init_rolling_runtime_state() {
   // Rolling runtime ownership is moved into model.
   // Worker provides runtime dependencies and delegates
   // initialization/refresh.
-  const int32_t n_slots = FLAGS_rolling_load_num_cached_layers;
-  const int32_t n_rolling_slots = FLAGS_rolling_load_num_rolling_slots;
+  const int32_t n_slots =
+      ::xllm::LoadConfig::get_instance().rolling_load_num_cached_layers();
+  const int32_t n_rolling_slots =
+      ::xllm::LoadConfig::get_instance().rolling_load_num_rolling_slots();
   return model_->init_or_refresh_rolling_runtime(load_stream_.get(),
                                                  compute_stream_.get(),
                                                  n_slots,
@@ -1048,24 +1482,24 @@ folly::SemiFuture<bool> WorkerImpl::allocate_kv_cache_with_transfer_async(
 folly::SemiFuture<bool> WorkerImpl::pull_kv_blocks_async(
     uint64_t src_cluster_id,
     const std::string& src_addr,
-    int64_t src_k_cache_id,
-    int64_t src_v_cache_id,
     const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks) {
+    const std::vector<uint64_t>& dst_blocks,
+    const std::vector<uint64_t>& src_linear_state_ids,
+    const std::vector<uint64_t>& dst_linear_state_ids) {
 #if defined(USE_NPU)
   return kv_cache_transfer_->pull_kv_blocks_async(src_cluster_id,
                                                   src_addr,
-                                                  src_k_cache_id,
-                                                  src_v_cache_id,
                                                   src_blocks,
-                                                  dst_blocks);
+                                                  dst_blocks,
+                                                  src_linear_state_ids,
+                                                  dst_linear_state_ids);
 #elif defined(USE_MLU)
   (void)src_cluster_id;
   (void)src_addr;
-  (void)src_k_cache_id;
-  (void)src_v_cache_id;
   (void)src_blocks;
   (void)dst_blocks;
+  (void)src_linear_state_ids;
+  (void)dst_linear_state_ids;
   LOG(FATAL) << "MLU backend does not support PULL kv cache transfer.";
 #endif
   return false;
@@ -1112,35 +1546,38 @@ void WorkerImpl::init_hierarchy_kv_cache_transfer() {
 }
 void WorkerImpl::prepare_mla_prefixcache_inputs(
     ModelInputParams& input_params) {
-  int32_t sum_prefix = input_params.kv_cache_tokens_nums.sum().item<int>();
-  input_params.history_compressed_kv =
+  int32_t sum_prefix =
+      input_params.attention.device.kv_cache_tokens_nums.sum().item<int>();
+  input_params.attention.device.history_compressed_kv =
       torch::empty({sum_prefix, context_.get_model_args().kv_lora_rank()},
                    torch::TensorOptions().dtype(dtype_).pinned_memory(true))
           .to(device_);
 
-  input_params.history_k_rope =
+  input_params.attention.device.history_k_rope =
       torch::empty({sum_prefix, context_.get_model_args().qk_rope_head_dim()},
                    torch::TensorOptions().dtype(dtype_).pinned_memory(true))
           .to(device_);
   ;
 
-  input_params.ring_cur_seqlen =
-      torch::stack({input_params.q_seq_lens, input_params.q_seq_lens})
+  input_params.attention.device.ring_cur_seqlen =
+      torch::stack({input_params.attention.device.q_seq_lens,
+                    input_params.attention.device.q_seq_lens})
           .to(device_);
 
-  input_params.ring_cache_seqlen =
-      torch::stack({input_params.q_seq_lens,
-                    input_params.kv_cache_tokens_nums.to(device_)})
+  input_params.attention.device.ring_cache_seqlen =
+      torch::stack(
+          {input_params.attention.device.q_seq_lens,
+           input_params.attention.device.kv_cache_tokens_nums.to(device_)})
           .to(device_);
 
   torch::Tensor ring_cur_seqlen_host =
-      input_params.ring_cur_seqlen.cpu().contiguous();
+      input_params.attention.device.ring_cur_seqlen.cpu().contiguous();
   torch::Tensor ring_cache_seqlen_host =
-      input_params.ring_cache_seqlen.cpu().contiguous();
-  input_params.ring_cur_seqlen_host = std::vector<int>(
+      input_params.attention.device.ring_cache_seqlen.cpu().contiguous();
+  input_params.attention.host.ring_cur_seqlen = std::vector<int>(
       ring_cur_seqlen_host.data_ptr<int>(),
       ring_cur_seqlen_host.data_ptr<int>() + ring_cur_seqlen_host.numel());
-  input_params.ring_cache_seqlen_host = std::vector<int>(
+  input_params.attention.host.ring_cache_seqlen = std::vector<int>(
       ring_cache_seqlen_host.data_ptr<int>(),
       ring_cache_seqlen_host.data_ptr<int>() + ring_cache_seqlen_host.numel());
 }

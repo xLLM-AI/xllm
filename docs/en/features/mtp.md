@@ -24,10 +24,12 @@ MTP technology provides a novel efficiency optimization solution for LLM inferen
     - DeepSeek-V3.2 (input model_type: deepseek_v3, exported MTP model_type: deepseek_v32_mtp)
     - DeepSeek-R1 (input model_type: deepseek_v3, exported MTP model_type: deepseek_v3_mtp)
     - GLM4 MoE (e.g., GLM-4.5-Air, exported MTP model_type: glm4_moe_mtp)
+    - Qwen3.5 (for example [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B), input model_type: qwen3_5 or qwen3_5_text, exported MTP model_type: qwen3_5_mtp)
     
     Note:
     - DeepSeek V3 and R1 both have input model_type "deepseek_v3", and the exported MTP model will have model_type "deepseek_v3_mtp"
     - DeepSeek V3.2 has input model_type "deepseek_v3" (but can be auto-detected by index_head_dim fields), and the exported MTP model will have model_type "deepseek_v32_mtp"
+    - Qwen3.5 official checkpoints include native MTP weights. Export them into a standalone draft model before serving with xLLM.
 
 ## Usage Example
 
@@ -63,20 +65,30 @@ python3 tools/export_mtp.py \
     --output-dir /path/to/GLM-4.5-Air-mtp
 ```
 
+#### Qwen3.5
+```bash
+python3 tools/export_mtp.py \
+    --input-dir /path/to/Qwen3.5-9B \
+    --output-dir /path/to/Qwen3.5-9B-mtp
+```
+
+Qwen3.5 export reads the native `mtp.*` or `model.mtp.*` weights from the input checkpoint, keeps the shared embedding and `lm_head` weights required by the draft model, and writes `mtp_layer_parameters.safetensors` plus an MTP config with `model_type=qwen3_5_mtp`.
+
 #### Manually Specify Model Type
 If auto-detection fails, you can manually specify the model type:
 ```bash
 python3 tools/export_mtp.py \
     --input-dir /path/to/model \
     --output-dir /path/to/model-mtp \
-    --model-type deepseek_v3  # Options: deepseek_v3 (for V3/R1), deepseek_v32 (for V3.2), glm4_moe
+    --model-type deepseek_v3  # Options: deepseek_v3 (for V3/R1), deepseek_v32 (for V3.2), glm4_moe, qwen3_5, qwen3_5_moe
 ```
 
-Input model references:
+Example input checkpoints with native MTP weights:
 - [DeepSeek-V3](https://huggingface.co/deepseek-ai/DeepSeek-V3)
 - [DeepSeek-V3.2](https://huggingface.co/deepseek-ai/DeepSeek-V3.2)
 - [DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1)
 - [GLM-4.5-Air](https://huggingface.co/zai-org/GLM-4.5-Air)
+- [Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B)
 
 ### Launch Script
 

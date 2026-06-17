@@ -54,7 +54,7 @@ void block_copy(torch::Tensor key_cache_ptrs,
                 torch::Tensor cum_sum,
                 int64_t numel_per_block,
                 torch::ScalarType cache_dtype);
-
+#if !defined(USE_DCU)
 void batch_prefill(const std::string& uri,
                    ffi::Array<int64_t> plan_info,
                    torch::Tensor float_workspace_buffer,
@@ -142,7 +142,7 @@ void batch_decode(const std::string& uri,
                   std::optional<torch::Tensor>& output_lse,
                   bool use_tensor_core,
                   std::optional<torch::Tensor> qo_indptr = std::nullopt);
-
+#endif  // !defined(USE_DCU)
 void rms_norm(torch::Tensor output,
               torch::Tensor input,
               torch::Tensor weight,

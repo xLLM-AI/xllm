@@ -24,6 +24,7 @@ limitations under the License.
 #include "engine.h"
 #include "framework/batch/batch.h"
 #include "framework/block/block_manager_pool.h"
+#include "framework/kv_cache/kv_cache_utils.h"
 #include "framework/quant_args.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
@@ -99,7 +100,7 @@ class RecEngine : public Engine {
     size_t num_workers() const override;
 
    private:
-    std::vector<RawForwardInput> prepare_inputs(std::vector<Batch>& batch);
+    std::vector<ForwardInput> prepare_inputs(std::vector<Batch>& batch);
 
     // Get max tokens from batch for dynamic step control
     size_t get_max_steps_from_batch(std::vector<Batch>& batches) const;

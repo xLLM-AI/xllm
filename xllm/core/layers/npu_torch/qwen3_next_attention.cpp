@@ -229,7 +229,8 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
 void Qwen3NextAttentionImpl::load_state_dict(const StateDict& state_dict) {
   qkv_proj_->load_state_dict(state_dict, {"q_proj.", "k_proj.", "v_proj."});
 
-  if (attn_output_gate_) {
+  if (attn_output_gate_ && qkv_proj_->is_weight_loaded() &&
+      !qkv_weight_reordered_) {
     // Rearrange q_proj rows from per-head interleaved [q0,g0,q1,g1,...]
     // to grouped [q0,q1,...,g0,g1,...] so forward output is [Q|G|K|V].
     auto w = qkv_proj_->weight();
@@ -242,6 +243,7 @@ void Qwen3NextAttentionImpl::load_state_dict(const StateDict& state_dict) {
         {q_part.reshape({q_size_, hidden}), g_part.reshape({q_size_, hidden})},
         0);
     qg_rows.copy_(reordered);
+    qkv_weight_reordered_ = true;
   }
 
   o_proj_->load_state_dict(state_dict.get_dict_with_prefix("o_proj."));
@@ -256,8 +258,14 @@ void Qwen3NextAttentionImpl::load_state_dict(const StateDict& state_dict) {
   // uses standard RMSNorm (w only). Pre-add 1 so the fused kernel produces
   // the same result as Qwen3NextRMSNorm (gemma_rms_norm).
   if (use_fused_qkv_) {
-    q_norm_->weight().add_(1.0);
-    k_norm_->weight().add_(1.0);
+    if (q_norm_->is_weight_loaded() && !q_norm_weight_adjusted_) {
+      q_norm_->weight().add_(1.0);
+      q_norm_weight_adjusted_ = true;
+    }
+    if (k_norm_->is_weight_loaded() && !k_norm_weight_adjusted_) {
+      k_norm_->weight().add_(1.0);
+      k_norm_weight_adjusted_ = true;
+    }
   }
 }
 

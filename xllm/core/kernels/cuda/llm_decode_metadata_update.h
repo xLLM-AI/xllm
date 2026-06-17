@@ -15,11 +15,21 @@ limitations under the License.
 
 #pragma once
 
+#if defined(USE_DCU)
+#include <hip/hip_runtime.h>
+#else
 #include <cuda_runtime.h>
+#endif
 
 #include <cstdint>
 
 namespace xllm::kernel::cuda {
+
+#if defined(USE_DCU)
+using LlmDecodeMetadataUpdateStream = hipStream_t;
+#else
+using LlmDecodeMetadataUpdateStream = cudaStream_t;
+#endif
 
 struct LlmDecodeMetadataUpdateParams {
   const int32_t* src_tokens;
@@ -44,6 +54,6 @@ struct LlmDecodeMetadataUpdateParams {
 };
 
 void update_llm_decode_metadata(const LlmDecodeMetadataUpdateParams& params,
-                                cudaStream_t stream);
+                                LlmDecodeMetadataUpdateStream stream);
 
 }  // namespace xllm::kernel::cuda

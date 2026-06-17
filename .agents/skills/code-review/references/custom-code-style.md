@@ -295,8 +295,8 @@ for (int32_t i = 0; i < num_layers; ++i) {
 ## 10. Global Flags
 
 - **Do not overuse `FLAGS_` global variables**. Prefer passing configuration through constructor parameters or config structs. Only use global flags for top-level, process-wide settings.
-- **Register new flags in `help_formatter.h`**. When adding a new global flag, always add a corresponding entry in `help_formatter.h` so it appears in `--help` output.
-
+- **Register new flags in their config category**. When adding a flag under `xllm/core/framework/config/`, add it to that config class's `option_category()` so `core/framework/config/help_formatter.h` can print it in `--help`.
+- **Keep config defaults explicit**. Primitive `PROPERTY` fields such as `bool`, `int32_t`, `int64_t`, and `double` must keep an in-class default matching the corresponding `DEFINE_*` default.
 ---
 
 ## 11. Python-Specific Rules
@@ -314,3 +314,35 @@ def load_model(path, device="cuda"):
 ```
 
 - **Private helpers**: prefix with `_` (see Section 6).
+
+---
+
+## 12. Python Logging
+
+All Python diagnostic output **MUST** go through the shared logger at `scripts/logger.py`. Do not use `print()` for logging, do not call `logging.basicConfig`, and do not create per-module loggers via `logging.getLogger(...)`.
+
+- **Import:** `from scripts.logger import logger`. For standalone `tools/*.py`, prepend repo root to `sys.path` first: `sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))`.
+- **Levels:** `debug` (investigation only), `info` (normal progress), `warning` (recoverable anomaly / fallback), `error` (failure, including pre-`exit(1)`), `fatal` (process-fatal). Inside `except`, prefer `logger.exception(...)` to keep the traceback.
+- **No level prefixes in messages.** The formatter already emits `I/W/E/F/D` plus `file:line`. Status emojis (`✅ ❌ ⚠️ 🔨 🚀 ℹ️`) are allowed.
+- **`print()` is only for program output**, not diagnostics: model results in `examples/`, CLI stdout meant to be piped, or verbatim streaming of subprocess output (e.g. `sys.stdout.write(line)` for ctest).
+- **Do not reconfigure the shared logger** from library code: no `setLevel`, no extra handlers, no `propagate` changes.
+
+```python
+# Good
+from scripts.logger import logger
+logger.info(f"compiled kernel: {name}")
+logger.warning("Skip reference check: NPU is not available")
+try:
+    do_work(path)
+except OSError:
+    logger.exception(f"failed to process {path}")
+```
+
+```python
+# Bad
+import logging
+logger = logging.getLogger(__name__)            # re-implementing a logger
+print(f"[INFO] build start: device={device}")   # diagnostic via print
+logger.warning("[WARN] missing --device")       # duplicated level prefix
+logger.info("build failed, exiting")            # wrong level for a failure
+```

@@ -76,8 +76,20 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ./xllm_master_serving --etcd_addr="127.0.
     - `etcd_addr` must match the `etcd_addr` of `xllm_service`
 
 ## Notice
-Disaggregated PD **does not support** enabling prefix cache or chunked prefill. These features must be disabled using the following parameters:
+With the chunked-prefill PD scheduler, the Prefill instance supports prefix cache. When enabled, the scheduler matches existing prefix-cache blocks before calculating the current chunk budget, so cached prompt blocks are not recomputed:
 ```shell
---enable_prefix_cache=false  
---enable_chunked_prefill=false  
+--enable_chunked_prefill=true
+--enable_prefix_cache=true
 ```
+
+## Decode instance: prefix cache is supported (recommended)
+Starting from xLLM v0.x, the Decode instance supports `--enable_prefix_cache=true`. **When a request carries `best_of > 1` (best-of-N sampling), the Decode instance must enable prefix cache**, otherwise the request is rejected. With prefix cache enabled, expanded candidate sequences reuse the first sequence's prompt KV via the prefix cache, avoiding duplicate compute and memory.
+```shell
+--enable_prefix_cache=true
+```
+
+## best_of_n support in disaggregated PD
+- **Requirements**: Decode instance must enable `--enable_prefix_cache=true`. Any request with `best_of > 1` while the Decode instance has `enable_prefix_cache=false` is rejected.
+- **Flow**: The Prefill instance only prefills the first sequence and ships its KV to the Decode instance. On the Decode side, after the first token is received, the prompt KV is registered into the prefix cache so that the expanded `best_of-1` candidate sequences hit it via prefix match.
+- **MLU platform**: PD + best_of_n is not supported yet (gated by `normalize_mlu`).
+- **`best_of != n`**: Streaming is forcibly disabled (same as the non-PD behavior).

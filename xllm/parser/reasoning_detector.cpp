@@ -82,8 +82,9 @@ ReasoningResult ReasoningDetector::parse_streaming_increment(
   // Strip `<think>` token if present
   if (!stripped_think_start_ &&
       absl::StrContains(current_text, think_start_token_)) {
-    current_text = absl::StrReplaceAll(
-        {{absl::string_view(think_start_token_), ""}}, &current_text);
+    absl::StrReplaceAll(
+        {{absl::string_view(think_start_token_), absl::string_view()}},
+        &current_text);
     stripped_think_start_ = true;
     in_reasoning_ = true;
   }
