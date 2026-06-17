@@ -44,6 +44,11 @@ DEFINE_bool(enable_interlayer_addnorm,
 DEFINE_bool(enable_split_rmsnorm_rope,
             false,
             "enable fused split rmsnorm rope ops.");
+
+DEFINE_bool(enable_flash_comm,
+            false,
+            "enable ATB flash communication path for supported NPU "
+            "tensor-parallel decoder layers.");
 #endif
 
 namespace xllm {
@@ -74,6 +79,7 @@ void KernelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_fused_mc2);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_interlayer_addnorm);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_split_rmsnorm_rope);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_flash_comm);
 #endif
 }
 
@@ -85,6 +91,7 @@ void KernelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_fused_mc2);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_interlayer_addnorm);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_split_rmsnorm_rope);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_flash_comm);
 #endif
 }
 
@@ -100,6 +107,12 @@ void KernelConfig::append_config_json(
       config_json, default_config, enable_intralayer_addnorm);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_fused_mc2);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_interlayer_addnorm);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_split_rmsnorm_rope);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_flash_comm);
 #endif
 }
 

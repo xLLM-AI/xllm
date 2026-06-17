@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <chrono>
 #include <optional>
 #include <tuple>
 
@@ -86,21 +87,54 @@ Qwen3HybridDecoderLayerImplBase::Qwen3HybridDecoderLayerImplBase(
 
 void Qwen3HybridDecoderLayerImplBase::load_state_dict(
     const StateDict& state_dict) {
+  const auto start_time = std::chrono::steady_clock::now();
+  LOG(INFO) << "Qwen3HybridDecoderLayer load_state_dict begin, tensors="
+            << state_dict.size();
   if (attention_) {
-    attention_->load_state_dict(state_dict.get_dict_with_prefix("self_attn."));
+    auto attention_state_dict = state_dict.get_dict_with_prefix("self_attn.");
+    LOG(INFO) << "Qwen3HybridDecoderLayer loading self_attn, tensors="
+              << attention_state_dict.size();
+    attention_->load_state_dict(attention_state_dict);
+    LOG(INFO) << "Qwen3HybridDecoderLayer loaded self_attn";
   } else {
-    linear_attention_->load_state_dict(
-        state_dict.get_dict_with_prefix("linear_attn."));
+    auto linear_attention_state_dict =
+        state_dict.get_dict_with_prefix("linear_attn.");
+    LOG(INFO) << "Qwen3HybridDecoderLayer loading linear_attn, tensors="
+              << linear_attention_state_dict.size();
+    linear_attention_->load_state_dict(linear_attention_state_dict);
+    LOG(INFO) << "Qwen3HybridDecoderLayer loaded linear_attn";
   }
-  input_norm_->load_state_dict(
-      state_dict.get_dict_with_prefix("input_layernorm."));
-  post_norm_->load_state_dict(
-      state_dict.get_dict_with_prefix("post_attention_layernorm."));
+  auto input_norm_state_dict =
+      state_dict.get_dict_with_prefix("input_layernorm.");
+  LOG(INFO) << "Qwen3HybridDecoderLayer loading input_layernorm, tensors="
+            << input_norm_state_dict.size();
+  input_norm_->load_state_dict(input_norm_state_dict);
+  LOG(INFO) << "Qwen3HybridDecoderLayer loaded input_layernorm";
+  auto post_norm_state_dict =
+      state_dict.get_dict_with_prefix("post_attention_layernorm.");
+  LOG(INFO) << "Qwen3HybridDecoderLayer loading post_attention_layernorm, "
+            << "tensors=" << post_norm_state_dict.size();
+  post_norm_->load_state_dict(post_norm_state_dict);
+  LOG(INFO) << "Qwen3HybridDecoderLayer loaded post_attention_layernorm";
   if (moe_mlp_) {
-    moe_mlp_->load_state_dict(state_dict.get_dict_with_prefix("mlp."));
+    auto mlp_state_dict = state_dict.get_dict_with_prefix("mlp.");
+    LOG(INFO) << "Qwen3HybridDecoderLayer loading moe mlp, tensors="
+              << mlp_state_dict.size();
+    moe_mlp_->load_state_dict(mlp_state_dict);
+    LOG(INFO) << "Qwen3HybridDecoderLayer loaded moe mlp";
   } else {
-    mlp_->load_state_dict(state_dict.get_dict_with_prefix("mlp."));
+    auto mlp_state_dict = state_dict.get_dict_with_prefix("mlp.");
+    LOG(INFO) << "Qwen3HybridDecoderLayer loading dense mlp, tensors="
+              << mlp_state_dict.size();
+    mlp_->load_state_dict(mlp_state_dict);
+    LOG(INFO) << "Qwen3HybridDecoderLayer loaded dense mlp";
   }
+  const auto elapsed_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - start_time)
+          .count();
+  LOG(INFO) << "Qwen3HybridDecoderLayer load_state_dict done, elapsed_ms="
+            << elapsed_ms;
 }
 
 void Qwen3HybridDecoderLayerImplBase::verify_loaded_weights(

@@ -21,6 +21,8 @@ limitations under the License.
 #include <algorithm>
 #include <cctype>
 
+#include "core/framework/config/kernel_config.h"
+#include "core/framework/config/parallel_config.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "kernels/ops_api.h"
@@ -1330,6 +1332,23 @@ RowParallelLinearImpl::RowParallelLinearImpl(
       output_dtype_(c10::typeMetaToScalarType(options.dtype())) {
   rank_ = process_group_->rank();
   world_size_ = process_group_->world_size();
+  const bool flash_comm_requested =
+      ::xllm::KernelConfig::get_instance().enable_flash_comm();
+  enable_flash_comm_ =
+      enable_result_reduction_ && flash_comm_requested && world_size_ > 1 &&
+      ::xllm::ParallelConfig::get_instance().communication_backend() == "lccl";
+  if (enable_flash_comm_) {
+    LOG_FIRST_N(INFO, 4)
+        << "NPU flash comm row-parallel reduce enabled: rank=" << rank_
+        << ", world_size=" << world_size_;
+  } else if (enable_result_reduction_ && flash_comm_requested &&
+             world_size_ > 1) {
+    LOG_FIRST_N(WARNING, 4)
+        << "NPU flash comm row-parallel reduce requested but skipped: "
+        << "communication_backend="
+        << ::xllm::ParallelConfig::get_instance().communication_backend()
+        << ", world_size=" << world_size_;
+  }
   CHECK(in_features % world_size_ == 0)
       << "in_features " << in_features << " not divisible by world_size "
       << world_size_;
@@ -1508,6 +1527,11 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
     output = xllm::kernel::matmul(matmul_params);
   }
   if (enable_result_reduction_ && world_size_ > 1) {
+    if (enable_flash_comm_) {
+      LOG_FIRST_N(INFO, 8)
+          << "NPU flash comm row-parallel reduce path active, output_shape="
+          << output.sizes();
+    }
     output = xllm::parallel_state::reduce(output, process_group_);
   }
   return output;

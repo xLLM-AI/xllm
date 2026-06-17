@@ -301,6 +301,9 @@ class RowParallelLinearImpl : public torch::nn::Module {
   // whether to reduce the results
   bool enable_result_reduction_;
 
+  // Gated NPU communication experiment for row-parallel result reduction.
+  bool enable_flash_comm_ = false;
+
   // parallel process group
   ProcessGroup* process_group_;
 

@@ -127,7 +127,7 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
     decoder_layer_->set_residual(residual);
   }
 
- private:
+ protected:
   DecoderType decoder_layer_{nullptr};
   layer::NpuBlockCopy block_copy_{nullptr};
   int32_t layer_id_;

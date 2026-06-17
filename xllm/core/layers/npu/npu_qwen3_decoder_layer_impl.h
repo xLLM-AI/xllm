@@ -61,6 +61,11 @@ class NpuQwen3DecoderLayerImpl : public BaseLayer {
                         std::atomic<bool>* event_flag = nullptr,
                         int node_id = 0);
 
+  void set_flash_comm_token_counts(
+      const std::vector<int64_t>& token_counts) {
+    flash_comm_token_counts_ = token_counts;
+  }
+
   void set_layer_id(int32_t layer_id) override {
     prefill_param_.layerId = layer_id;
     decode_graph_param_.layerId = layer_id;
@@ -105,10 +110,14 @@ class NpuQwen3DecoderLayerImpl : public BaseLayer {
   atb::Tensor internal_tensors_;
   atb::Tensor residual_tensors_;
   atb::Tensor placeholder_;
+  atb::Tensor fake_rs_shape_tensor_;
+  atb::Tensor fake_ag_shape_tensor_;
 
   at::Tensor decode_attn_mask_;
 
   at::Tensor at_placeholder_;
+  at::Tensor fake_rs_shape_;
+  at::Tensor fake_ag_shape_;
 
   int device_id_;
   int32_t layer_id_;
@@ -118,6 +127,15 @@ class NpuQwen3DecoderLayerImpl : public BaseLayer {
   std::vector<std::shared_ptr<at::Tensor>> decode_tensor_storage_;
   std::vector<std::shared_ptr<std::vector<int>>> prefill_vector_storage_;
   std::vector<std::shared_ptr<std::vector<int>>> decode_vector_storage_;
+  bool flash_comm_enabled_ = false;
+  int32_t flash_comm_rank_ = 0;
+  std::vector<int64_t> flash_comm_token_counts_;
+  std::vector<int64_t> flash_comm_send_counts_;
+  std::vector<int64_t> flash_comm_sdispls_;
+  std::vector<int64_t> flash_comm_send_count_;
+  std::vector<int64_t> flash_comm_recv_counts_;
+  std::vector<int64_t> flash_comm_rdispls_;
+  std::vector<int64_t> flash_comm_recv_count_;
 };
 TORCH_MODULE(NpuQwen3DecoderLayer);
 

@@ -489,10 +489,14 @@ std::vector<std::unique_ptr<StateDict>>& HFModelLoader::get_state_dicts() {
                   << model_weights_files_[file_id];
         state_dicts_[file_id] = std::move(
             StateDictFromSafeTensor::load(model_weights_files_[file_id]));
+        LOG(INFO) << "Loaded model weights from "
+                  << model_weights_files_[file_id] << ", tensors="
+                  << state_dicts_[file_id]->size();
         counter.decrement_count();
       });
     }
     counter.wait();
+    LOG(INFO) << "Loaded all model weight shards, shard_count=" << file_cnt;
   }
   return state_dicts_;
 }

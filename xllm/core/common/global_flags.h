@@ -366,6 +366,8 @@ DECLARE_int32(enable_fused_mc2);
 DECLARE_bool(enable_interlayer_addnorm);
 
 DECLARE_bool(enable_split_rmsnorm_rope);
+
+DECLARE_bool(enable_flash_comm);
 #endif
 
 // --- chat template config ---

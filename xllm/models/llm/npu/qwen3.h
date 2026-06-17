@@ -23,9 +23,11 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/kernel_config.h"
+#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/parallel_state/parallel_state.h"
 #include "core/layers/npu/npu_qwen3_decoder_layer_impl.h"
 #include "llm_model_base.h"
 
@@ -37,6 +39,11 @@ class QWen3DecoderLayerImpl
   QWen3DecoderLayerImpl(const ModelContext& context, const int32_t layer_id)
       : LlmDecoderLayerImplBase<layer::NpuQwen3DecoderLayer>(context,
                                                              layer_id) {}
+
+  void set_flash_comm_token_counts(
+      const std::vector<int64_t>& token_counts) {
+    decoder_layer_->set_flash_comm_token_counts(token_counts);
+  }
 };
 TORCH_MODULE(QWen3DecoderLayer);
 
@@ -51,6 +58,22 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
     auto dp_local_tp_size =
         parallel_args.world_size() / parallel_args.dp_size();
     dp_rank_ = parallel_args.rank() / dp_local_tp_size;
+    flash_comm_group_ =
+        parallel_args.tp_group_ != nullptr ? parallel_args.tp_group_
+                                           : parallel_args.process_group_;
+    const bool flash_comm_requested =
+        ::xllm::KernelConfig::get_instance().enable_flash_comm();
+    flash_comm_enabled_ =
+        flash_comm_requested &&
+        ::xllm::ParallelConfig::get_instance().communication_backend() ==
+            "lccl" &&
+        parallel_args.world_size() > 1 && parallel_args.dp_size() == 1 &&
+        flash_comm_group_ != nullptr;
+    if (flash_comm_requested && !flash_comm_enabled_) {
+      LOG(WARNING) << "NPU flash comm is enabled by config but skipped for "
+                   << "Qwen3 model because it requires lccl backend, "
+                   << "world_size > 1, dp_size == 1, and a process group.";
+    }
 
     blocks_ = register_module("layers", torch::nn::ModuleList());
     layers_.reserve(model_args.n_layers());
@@ -138,6 +161,26 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
       h = inputs_embeds;
     } else {
       h = npu_embed_tokens_(tokens, 0);
+    }
+
+    if (flash_comm_enabled_) {
+      CHECK(!use_deepstack)
+          << "NPU flash comm for Qwen3 does not support deepstack inputs yet.";
+      CHECK(!capture_aux_hidden_states_)
+          << "NPU flash comm for Qwen3 does not support Eagle3 hidden-state "
+          << "capture yet.";
+    }
+
+    std::vector<int32_t> flash_comm_token_counts_i32;
+    std::vector<int64_t> flash_comm_token_counts_i64;
+    if (flash_comm_enabled_) {
+      flash_comm_token_counts_i32 =
+          build_token_counts(h.size(0), flash_comm_group_->world_size());
+      flash_comm_token_counts_i64.assign(flash_comm_token_counts_i32.begin(),
+                                         flash_comm_token_counts_i32.end());
+      h = shard_hidden_states(h,
+                              flash_comm_token_counts_i32,
+                              flash_comm_group_->rank());
     }
 
     // This residual tensor would be shared by all the layers, as the
@@ -255,6 +298,10 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
       }
       rolling_guard.before_layer(layer_index);
 
+      if (flash_comm_enabled_) {
+        layer->set_flash_comm_token_counts(flash_comm_token_counts_i64);
+      }
+
       layer(h,
             cos_pos,
             sin_pos,
@@ -272,6 +319,10 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
       }
     }
     auto hidden_states = norm_(h, 0);
+    if (flash_comm_enabled_) {
+      hidden_states = ::xllm::parallel_state::gather(
+          hidden_states, flash_comm_group_, flash_comm_token_counts_i32);
+    }
     if (capture_aux_hidden_states_) {
       torch::Tensor aux_hidden_states =
           aux_output_buffer_.slice(0, 0, num_tokens);
@@ -285,6 +336,36 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
   std::unordered_set<int32_t> layers_to_capture_set_;
   bool capture_aux_hidden_states_ = false;
   torch::Tensor aux_output_buffer_;
+  bool flash_comm_enabled_ = false;
+  ProcessGroup* flash_comm_group_ = nullptr;
+
+  static std::vector<int32_t> build_token_counts(int64_t total_tokens,
+                                                 int32_t world_size) {
+    CHECK_GT(world_size, 0);
+    std::vector<int32_t> token_counts(world_size, 0);
+    const int64_t base = total_tokens / world_size;
+    const int64_t remainder = total_tokens % world_size;
+    for (int32_t rank = 0; rank < world_size; ++rank) {
+      token_counts[rank] =
+          static_cast<int32_t>(base + (rank < remainder ? 1 : 0));
+    }
+    return token_counts;
+  }
+
+  static torch::Tensor shard_hidden_states(
+      const torch::Tensor& hidden_states,
+      const std::vector<int32_t>& token_counts,
+      int32_t rank) {
+    CHECK_GE(rank, 0);
+    CHECK_LT(rank, static_cast<int32_t>(token_counts.size()));
+    int64_t start = 0;
+    for (int32_t i = 0; i < rank; ++i) {
+      start += token_counts[i];
+    }
+    const int64_t end = start + token_counts[rank];
+    return hidden_states.slice(/*dim=*/0, /*start=*/start, /*end=*/end)
+        .contiguous();
+  }
 };
 TORCH_MODULE(QWen3Model);
 

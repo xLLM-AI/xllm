@@ -74,8 +74,30 @@ void NpuQwen3DecoderLayerImpl::param_from_args(
   std::optional<long int> optionalValue = args.n_kv_heads();
   param.numKeyValueHeadsPerRank =
       static_cast<int>(optionalValue.value()) / parallel_args.world_size();
-  param.backend =
-      ::xllm::ParallelConfig::get_instance().communication_backend();
+  param.backend = ::xllm::ParallelConfig::get_instance().communication_backend();
+  const bool flash_comm_requested =
+      ::xllm::KernelConfig::get_instance().enable_flash_comm();
+  const bool has_process_group =
+      parallel_args.tp_group_ != nullptr ||
+      parallel_args.process_group_ != nullptr;
+  const bool flash_comm_runtime_supported =
+      param.backend == "lccl" && parallel_args.world_size() > 1 &&
+      parallel_args.dp_size() == 1 && has_process_group;
+  if (flash_comm_requested) {
+    if (!flash_comm_runtime_supported) {
+      LOG(WARNING) << "NPU flash comm is enabled by config but skipped for "
+                   << "Qwen3 decoder layer because it requires lccl backend "
+                   << "and tensor parallel world_size > 1, dp_size == 1, "
+                   << "and a process group for model-level sequence "
+                   << "split/gather. "
+                   << "backend="
+                   << param.backend
+                   << ", world_size=" << parallel_args.world_size()
+                   << ", dp_size=" << parallel_args.dp_size()
+                   << ", has_process_group=" << has_process_group;
+    }
+  }
+  param.enableFlashComm = flash_comm_requested && flash_comm_runtime_supported;
   param.enableLogN = false;
   param.tensorParallelInfo = {
       parallel_args.rank(),
@@ -181,6 +203,10 @@ NpuQwen3DecoderLayerImpl::NpuQwen3DecoderLayerImpl(const ModelContext& context)
   param_from_args(decode_graph_param_, model_args, parallel_args, false);
   decode_eager_param_ = decode_graph_param_;
   decode_eager_param_.enableAclGraphPagedAttention = false;
+  flash_comm_enabled_ = prefill_param_.enableFlashComm;
+  flash_comm_rank_ =
+      parallel_args.tp_group_ != nullptr ? parallel_args.tp_group_->rank()
+                                         : parallel_args.rank();
   atb_weight_tensors_.resize(WEIGHT_COUNT_PER_LAYER);
   placeholder_vec_ = {1};
   dtype_ = c10::typeMetaToScalarType(options.dtype());
@@ -245,6 +271,20 @@ int64_t NpuQwen3DecoderLayerImpl::init_node(
 
   return atb::NO_ERROR;
 }
+
+namespace {
+
+std::vector<int64_t> make_displacements(const std::vector<int64_t>& counts) {
+  std::vector<int64_t> displacements(counts.size(), 0);
+  int64_t offset = 0;
+  for (size_t i = 0; i < counts.size(); ++i) {
+    displacements[i] = offset;
+    offset += counts[i];
+  }
+  return displacements;
+}
+
+}  // namespace
 
 torch::Tensor NpuQwen3DecoderLayerImpl::forward(torch::Tensor& x,
                                                 torch::Tensor& cos_pos,
@@ -381,6 +421,57 @@ void NpuQwen3DecoderLayerImpl::build_node_variant_pack(
   if (::xllm::KernelConfig::get_instance().enable_interlayer_addnorm() &&
       node_id > 0 && residual_.defined()) {
     node.variantPack.inTensors.at(input_idx++) = residual_tensors_;
+  }
+
+  if (flash_comm_enabled_) {
+    CHECK(!flash_comm_token_counts_.empty())
+        << "flash comm token counts must be set before Qwen3 layer forward.";
+    const int64_t local_tokens = x.size(0);
+    const int64_t hidden_size = x.size(-1);
+    CHECK_LT(static_cast<size_t>(flash_comm_rank_),
+             flash_comm_token_counts_.size());
+    CHECK_EQ(local_tokens, flash_comm_token_counts_.at(flash_comm_rank_))
+        << "flash comm local shard token count mismatch.";
+
+    flash_comm_send_counts_.resize(flash_comm_token_counts_.size());
+    flash_comm_recv_counts_ = flash_comm_token_counts_;
+    for (size_t i = 0; i < flash_comm_token_counts_.size(); ++i) {
+      flash_comm_send_counts_[i] = flash_comm_token_counts_[i] * hidden_size;
+    }
+    flash_comm_sdispls_ = make_displacements(flash_comm_send_counts_);
+    flash_comm_rdispls_ = make_displacements(flash_comm_recv_counts_);
+    flash_comm_send_count_ = {local_tokens};
+    flash_comm_recv_count_ = {local_tokens * hidden_size};
+
+    const int64_t total_tokens =
+        flash_comm_rdispls_.back() + flash_comm_recv_counts_.back();
+    fake_rs_shape_ = torch::empty({local_tokens, hidden_size}, x.options());
+    fake_ag_shape_ = torch::empty({total_tokens, hidden_size}, x.options());
+    fake_rs_shape_tensor_ =
+        atb_speed::Utils::AtTensor2Tensor(fake_rs_shape_);
+    fake_ag_shape_tensor_ =
+        atb_speed::Utils::AtTensor2Tensor(fake_ag_shape_);
+
+    node.variantPack.inTensors.at(input_idx++) = placeholder_;
+    node.variantPack.inTensors.at(input_idx - 1).hostData =
+        flash_comm_send_counts_.data();
+    node.variantPack.inTensors.at(input_idx++) = placeholder_;
+    node.variantPack.inTensors.at(input_idx - 1).hostData =
+        flash_comm_sdispls_.data();
+    node.variantPack.inTensors.at(input_idx++) = placeholder_;
+    node.variantPack.inTensors.at(input_idx - 1).hostData =
+        flash_comm_send_count_.data();
+    node.variantPack.inTensors.at(input_idx++) = placeholder_;
+    node.variantPack.inTensors.at(input_idx - 1).hostData =
+        flash_comm_recv_counts_.data();
+    node.variantPack.inTensors.at(input_idx++) = placeholder_;
+    node.variantPack.inTensors.at(input_idx - 1).hostData =
+        flash_comm_rdispls_.data();
+    node.variantPack.inTensors.at(input_idx++) = placeholder_;
+    node.variantPack.inTensors.at(input_idx - 1).hostData =
+        flash_comm_recv_count_.data();
+    node.variantPack.inTensors.at(input_idx++) = fake_rs_shape_tensor_;
+    node.variantPack.inTensors.at(input_idx++) = fake_ag_shape_tensor_;
   }
 
   if (!is_prefill && use_graph_decode_input &&

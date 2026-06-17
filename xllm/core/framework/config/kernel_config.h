@@ -45,7 +45,8 @@ class KernelConfig final {
          "enable_intralayer_addnorm",
          "enable_fused_mc2",
          "enable_interlayer_addnorm",
-         "enable_split_rmsnorm_rope"}};
+         "enable_split_rmsnorm_rope",
+         "enable_flash_comm"}};
     return kOptionCategory;
   }
 
@@ -61,6 +62,8 @@ class KernelConfig final {
   PROPERTY(bool, enable_interlayer_addnorm) = false;
 
   PROPERTY(bool, enable_split_rmsnorm_rope) = false;
+
+  PROPERTY(bool, enable_flash_comm) = false;
 #endif
 };
 

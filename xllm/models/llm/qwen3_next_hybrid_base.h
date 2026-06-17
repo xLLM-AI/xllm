@@ -15,8 +15,10 @@ limitations under the License.
 
 #pragma once
 
+#include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <chrono>
 #include <algorithm>
 #include <memory>
 #include <string>
@@ -151,13 +153,33 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
 
   // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict) override {
-    embed_tokens_->load_state_dict(
-        state_dict.get_dict_with_prefix("embed_tokens."));
+    const auto start_time = std::chrono::steady_clock::now();
+    LOG(INFO) << "Qwen3HybridModel load_state_dict begin, tensors="
+              << state_dict.size();
+
+    auto embed_state_dict = state_dict.get_dict_with_prefix("embed_tokens.");
+    LOG(INFO) << "Qwen3HybridModel loading embed_tokens, tensors="
+              << embed_state_dict.size();
+    embed_tokens_->load_state_dict(embed_state_dict);
+    LOG(INFO) << "Qwen3HybridModel loaded embed_tokens";
     for (int i = 0; i < static_cast<int>(layers_.size()); i++) {
-      layers_[i]->load_state_dict(
-          state_dict.get_dict_with_prefix("layers." + std::to_string(i) + "."));
+      const std::string layer_prefix = "layers." + std::to_string(i) + ".";
+      auto layer_state_dict = state_dict.get_dict_with_prefix(layer_prefix);
+      LOG(INFO) << "Qwen3HybridModel loading layer " << i
+                << ", tensors=" << layer_state_dict.size();
+      layers_[i]->load_state_dict(layer_state_dict);
+      LOG(INFO) << "Qwen3HybridModel loaded layer " << i;
     }
-    norm_->load_state_dict(state_dict.get_dict_with_prefix("norm."));
+    auto norm_state_dict = state_dict.get_dict_with_prefix("norm.");
+    LOG(INFO) << "Qwen3HybridModel loading norm, tensors="
+              << norm_state_dict.size();
+    norm_->load_state_dict(norm_state_dict);
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_time)
+            .count();
+    LOG(INFO) << "Qwen3HybridModel load_state_dict done, elapsed_ms="
+              << elapsed_ms;
   }
 
   void verify_loaded_weights(const std::string& prefix) const override {
@@ -300,12 +322,24 @@ class Qwen3HybridForCausalLMImplBase : public torch::nn::Module {
              dict.get_tensor("qweight").defined();
     };
 
+    LOG(INFO) << "Qwen3HybridForCausalLM load_model begin, model_prefix="
+              << model_prefix << ", lm_head_prefix=" << lm_head_prefix;
+    size_t shard_index = 0;
     for (const auto& state_dict : loader->get_state_dicts()) {
+      const auto shard_start_time = std::chrono::steady_clock::now();
+      LOG(INFO) << "Qwen3HybridForCausalLM loading shard " << shard_index
+                << ", tensors=" << state_dict->size();
       auto model_state_dict = state_dict->get_dict_with_prefix(model_prefix);
+      LOG(INFO) << "Qwen3HybridForCausalLM shard " << shard_index
+                << " model prefix tensors=" << model_state_dict.size();
       model_->load_state_dict(model_state_dict);
+      LOG(INFO) << "Qwen3HybridForCausalLM shard " << shard_index
+                << " model weights loaded";
 
       auto lm_head_state_dict =
           state_dict->get_dict_with_prefix(lm_head_prefix);
+      LOG(INFO) << "Qwen3HybridForCausalLM shard " << shard_index
+                << " lm_head prefix tensors=" << lm_head_state_dict.size();
       if (!has_lm_head_weights(lm_head_state_dict) && tie_word_embeddings_) {
         auto tied_lm_head_state_dict =
             model_state_dict.get_dict_with_prefix("embed_tokens.");
@@ -314,8 +348,17 @@ class Qwen3HybridForCausalLMImplBase : public torch::nn::Module {
         }
       }
       lm_head_->load_state_dict(lm_head_state_dict);
+      const auto shard_elapsed_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - shard_start_time)
+              .count();
+      LOG(INFO) << "Qwen3HybridForCausalLM shard " << shard_index
+                << " load done, elapsed_ms=" << shard_elapsed_ms;
+      ++shard_index;
     }
+    LOG(INFO) << "Qwen3HybridForCausalLM verifying loaded weights";
     model_->verify_loaded_weights(model_prefix);
+    LOG(INFO) << "Qwen3HybridForCausalLM load_model done";
   }
 
   virtual void prepare_expert_weight(int32_t layer_id,

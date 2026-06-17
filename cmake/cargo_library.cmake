@@ -56,6 +56,7 @@ function(cargo_library)
     set(CARGO_ARGS "lipo")
   else()
     set(CARGO_ARGS "build")
+    list(APPEND CARGO_ARGS "--manifest-path" "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml")
     list(APPEND CARGO_ARGS "--target" ${LIB_TARGET})
   endif()
 
@@ -65,7 +66,29 @@ function(cargo_library)
 
   file(GLOB_RECURSE LIB_SOURCES "*.rs")
 
-  set(CARGO_ENV_COMMAND ${CMAKE_COMMAND} -E env "CARGO_TARGET_DIR=${CMAKE_CURRENT_BINARY_DIR}")
+  set(CARGO_HOME_DIR "${CMAKE_BINARY_DIR}/cargo_home")
+  set(CARGO_PARENT_CONFIG "${CMAKE_SOURCE_DIR}/../.cargo/config.toml")
+  file(MAKE_DIRECTORY "${CARGO_HOME_DIR}")
+  if(EXISTS "${CARGO_PARENT_CONFIG}")
+    configure_file("${CARGO_PARENT_CONFIG}" "${CARGO_HOME_DIR}/config.toml" COPYONLY)
+  endif()
+
+  set(CARGO_CONFIG_COMMANDS
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CARGO_HOME_DIR}"
+  )
+  if(EXISTS "${CARGO_PARENT_CONFIG}")
+    list(APPEND CARGO_CONFIG_COMMANDS
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CARGO_PARENT_CONFIG}"
+        "${CARGO_HOME_DIR}/config.toml"
+    )
+  endif()
+
+  set(CARGO_ENV_COMMAND
+    ${CMAKE_COMMAND} -E env
+    "CARGO_HOME=${CARGO_HOME_DIR}"
+    "CARGO_TARGET_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+  )
 
   # build the library target with cargo
   set(STATIC_LIB_NAME
@@ -77,9 +100,10 @@ function(cargo_library)
 
   add_custom_command(
       OUTPUT ${LIB_FILE}
+      ${CARGO_CONFIG_COMMANDS}
       COMMAND ${CARGO_ENV_COMMAND} ${CARGO_EXECUTABLE} ARGS ${CARGO_ARGS}
-      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-      DEPENDS ${LIB_SOURCES}
+      WORKING_DIRECTORY /tmp
+      DEPENDS ${LIB_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml
       COMMENT "Building cargo library ${LIB_FILE}"
   )
   add_custom_target(${CARGO_NAME}_target ALL DEPENDS ${LIB_FILE})
