@@ -78,8 +78,9 @@ void LlmDataDistTransfer::initialize(int32_t device_id) {
   std::map<AscendString, AscendString> options;
   options[OPTION_DEVICE_ID] = std::to_string(device_id).c_str();
 
-  // Prompt(Prefill) must publish listen endpoint; Decoder only needs device_id.
-  if (role_ == LlmRole::kPrompt) {
+  // Prompt(Prefill) and Mix must publish listen endpoint so remote Decoders
+  // can link to them. Decoder-only instances do not need to listen.
+  if (role_ == LlmRole::kPrompt || role_ == LlmRole::kMix) {
     std::string local_ip_info = host_ip_ + ":" + std::to_string(listen_port_);
     options[OPTION_LISTEN_IP_INFO] = local_ip_info.c_str();
   }
