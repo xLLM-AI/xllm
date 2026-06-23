@@ -73,6 +73,19 @@ DEFINE_bool(enable_starve_prevent,
             true,
             "Whether to enable anti-starvation in MixScheduler.");
 
+DEFINE_bool(enable_mix_decode_first,
+            false,
+            "MixScheduler: process decode requests before prefill chunks in "
+            "prepare_batch so decode tpot is not dragged by prefill chunk "
+            "step time. Mitigates colocate (MIX) decode tail latency.");
+
+DEFINE_int32(mix_decode_token_budget,
+             0,
+             "MixScheduler: reserved decode token budget per step. When >0, "
+             "prefill chunks are capped at (max_tokens_per_batch - this) per "
+             "step. 0 disables the cap. Only used when "
+             "enable_mix_decode_first=true.");
+
 namespace xllm {
 
 void SchedulerConfig::from_flags() {
@@ -91,6 +104,8 @@ void SchedulerConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(aggressive_coeff);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(starve_threshold);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_starve_prevent);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mix_decode_first);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(mix_decode_token_budget);
 }
 
 void SchedulerConfig::from_json(const JsonReader& json) {
@@ -109,6 +124,8 @@ void SchedulerConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(aggressive_coeff);
   XLLM_CONFIG_ASSIGN_FROM_JSON(starve_threshold);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_starve_prevent);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mix_decode_first);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(mix_decode_token_budget);
 }
 
 void SchedulerConfig::append_config_json(
@@ -144,6 +161,10 @@ void SchedulerConfig::append_config_json(
       config_json, default_config, starve_threshold);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_starve_prevent);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_mix_decode_first);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, mix_decode_token_budget);
 }
 
 SchedulerConfig& SchedulerConfig::get_instance() {

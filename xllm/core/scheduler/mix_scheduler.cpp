@@ -585,15 +585,89 @@ std::vector<Batch> MixScheduler::prepare_batch() {
   // keep the requests in prefill stage
   std::vector<Sequence*> prefill_stage_sequences;
 
-  handle_running_queue_requests(latency_budget,
-                                estimate_latency,
-                                remaining_token_budget,
-                                remaining_seq_budget,
-                                num_preempted_requests,
-                                prefill_stage_sequences,
-                                running_queue_,
-                                budget_exhausted,
-                                blocks_exhausted);
+  const bool decode_first =
+      ::xllm::SchedulerConfig::get_instance().enable_mix_decode_first();
+
+  if (!decode_first) {
+    // Legacy path: a single pass over running_queue_ that mixes prefill and
+    // decode requests together. Step time is dragged by the longest prefill
+    // chunk so decode tpot suffers in colocate (MIX) mode.
+    handle_running_queue_requests(latency_budget,
+                                  estimate_latency,
+                                  remaining_token_budget,
+                                  remaining_seq_budget,
+                                  num_preempted_requests,
+                                  prefill_stage_sequences,
+                                  running_queue_,
+                                  budget_exhausted,
+                                  blocks_exhausted);
+  } else {
+    // Decode-first scheduling: split running_queue_ into decode-stage and
+    // prefill-stage lists, schedule decode first with the full token budget,
+    // then prefill chunks within the remaining (optionally capped) budget.
+    // This isolates decode tpot from prefill chunk step-time inflation.
+    std::list<std::shared_ptr<Request>> decode_queue;
+    std::list<std::shared_ptr<Request>> prefill_queue;
+    for (auto& req : running_queue_) {
+      if (req->sequences()[0]->kv_state().kv_cache_tokens_num() > 0) {
+        decode_queue.push_back(req);
+      } else {
+        prefill_queue.push_back(req);
+      }
+    }
+    running_queue_.clear();
+
+    // Phase 1: decode requests get full token budget. Each decode contributes
+    // ~1 token so this rarely consumes much of the budget; the cap below
+    // mainly bounds how aggressively the next phase can admit prefill.
+    handle_running_queue_requests(latency_budget,
+                                  estimate_latency,
+                                  remaining_token_budget,
+                                  remaining_seq_budget,
+                                  num_preempted_requests,
+                                  prefill_stage_sequences,
+                                  decode_queue,
+                                  budget_exhausted,
+                                  blocks_exhausted);
+
+    // Phase 2: prefill requests run in the remaining budget. When
+    // mix_decode_token_budget>0 we additionally cap prefill at
+    // (max_tokens_per_batch - reserved) so a future decode can fit even if
+    // one large prefill request slips through. The reservation matters when
+    // many decode requests arrive shortly after prefill admission.
+    const int32_t reserved = ::xllm::SchedulerConfig::get_instance()
+                                 .mix_decode_token_budget();
+    if (reserved > 0 && !budget_exhausted && !blocks_exhausted) {
+      const size_t total_budget = options_.enable_profile_token_budget()
+                                      ? profile_manager_->get_token_budget()
+                                      : options_.max_tokens_per_batch();
+      const size_t prefill_cap =
+          total_budget > static_cast<size_t>(reserved)
+              ? total_budget - static_cast<size_t>(reserved)
+              : 0;
+      if (remaining_token_budget > prefill_cap) {
+        remaining_token_budget = prefill_cap;
+      }
+    }
+    if (!budget_exhausted && !blocks_exhausted &&
+        remaining_token_budget > 0 && remaining_seq_budget > 0) {
+      handle_running_queue_requests(latency_budget,
+                                    estimate_latency,
+                                    remaining_token_budget,
+                                    remaining_seq_budget,
+                                    num_preempted_requests,
+                                    prefill_stage_sequences,
+                                    prefill_queue,
+                                    budget_exhausted,
+                                    blocks_exhausted);
+    }
+
+    // Restore unhandled requests back to running_queue_ so the next step can
+    // pick them up. handle_running_queue_requests pop_front()'s admitted ones,
+    // leaving the deferred ones in the local lists.
+    for (auto& r : decode_queue) running_queue_.push_back(r);
+    for (auto& r : prefill_queue) running_queue_.push_back(r);
+  }
 
   if (!finished_requests.empty()) {
     response_processor_->process_completed_requests(finished_requests);

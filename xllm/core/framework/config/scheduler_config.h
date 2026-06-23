@@ -55,7 +55,9 @@ class SchedulerConfig final {
          "enable_online_preempt_offline",
          "aggressive_coeff",
          "starve_threshold",
-         "enable_starve_prevent"}};
+         "enable_starve_prevent",
+         "enable_mix_decode_first",
+         "mix_decode_token_budget"}};
     return kOptionCategory;
   }
 
@@ -88,6 +90,19 @@ class SchedulerConfig final {
   PROPERTY(double, starve_threshold) = 1.0;
 
   PROPERTY(bool, enable_starve_prevent) = true;
+
+  // MixScheduler decode-first scheduling: when true, prepare_batch processes
+  // decode-stage requests first (so they get the full token budget) before
+  // admitting prefill chunks. Mitigates the "decode tpot dragged by prefill
+  // chunk step time" problem in colocate (MIX) topologies.
+  PROPERTY(bool, enable_mix_decode_first) = false;
+
+  // Reserved token budget for decode in MixScheduler. When >0, prefill chunks
+  // are restricted to (max_tokens_per_batch - mix_decode_token_budget) tokens
+  // per step, giving decode requests guaranteed headroom even when prefill
+  // would otherwise consume the entire batch budget. Only takes effect when
+  // enable_mix_decode_first is true. 0 disables the cap.
+  PROPERTY(int32_t, mix_decode_token_budget) = 0;
 };
 
 }  // namespace xllm
