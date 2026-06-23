@@ -29,13 +29,28 @@ limitations under the License.
 namespace xllm {
 
 MixScheduler::MixScheduler(Engine* engine, const Options& options)
-    : ChunkedPrefillScheduler(engine, options) {}
+    : DisaggPDScheduler(engine, options) {}
 
 MixScheduler::~MixScheduler() {
   // release all requests in the running priority queue
   while (!running_queue_.empty()) {
     running_queue_.pop_front();
   }
+}
+
+bool MixScheduler::add_request(std::shared_ptr<Request>& request) {
+  // Bypass the DisaggPDScheduler::add_request path which enqueues into
+  // prefill_request_queue_ for the prefill->decode dispatch thread.
+  // MIX serves requests locally, so push straight to request_queue_ which
+  // prepare_batch() will drain.
+  return ContinuousScheduler::add_request(request);
+}
+
+void MixScheduler::step(const absl::Duration& timeout) {
+  // Skip DisaggPDScheduler::step which calls prefill_send_first_generation()
+  // for non-DECODE roles. MIX produces tokens locally and never forwards them
+  // to a remote decode instance.
+  ContinuousScheduler::step(timeout);
 }
 
 //----------------------------------
