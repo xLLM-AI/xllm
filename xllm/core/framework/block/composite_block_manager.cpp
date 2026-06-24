@@ -23,6 +23,7 @@ limitations under the License.
 #include "concurrent_block_manager_impl.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "framework/xtensor/xtensor_block_manager_impl.h"
+#include "linear_state_block_manager.h"
 #include "single_block_manager.h"
 #include "sliding_window_block_manager.h"
 
@@ -79,6 +80,31 @@ std::map<BlockType, CompositeBlockManager::LeafEntry> build_composite_leaves(
     const BlockManager::Options& options,
     int32_t dp_rank) {
   std::map<BlockType, CompositeBlockManager::LeafEntry> leaves;
+
+  // Per-sequence resource leaf, additive on top of the KV family built below:
+  // a GDN model holds both KV (full-attention layers) and LINEAR (linear
+  // layers), so LINEAR is never an alternative KV shape. leaves is keyed by
+  // BlockType, so insertion order is irrelevant; emplacing here keeps the
+  // early-returning KV-family branches untouched. participates_in_admission
+  // stays false -- a true here would let capacity_leaf() pick this
+  // block_size==1 leaf and misreport pool capacity as the linear-slot pool.
+  // LINEAR is scheduler-thread only, so unlike the SINGLE leaf it is
+  // deliberately NOT wrapped in ConcurrentBlockManagerImpl.
+  // TODO(refactor): fold the SINGLE leaf (still emplaced by BlockManagerPool)
+  // in here too, once num_single_blocks rides on BlockManager::Options.
+  if (options.enable_linear_state()) {
+    CHECK_GT(options.linear_state_num_slots(), 0)
+        << "linear_state_num_slots must be set when linear state is enabled";
+    leaves.emplace(
+        BlockType::LINEAR,
+        CompositeBlockManager::LeafEntry{
+            std::make_unique<LinearStateBlockManager>(
+                static_cast<uint32_t>(options.linear_state_num_slots()),
+                options.block_size(),
+                options.linear_chunk_stride()),
+            /*participates_in_admission=*/false,
+            /*supports_prefix_cache=*/false});
+  }
 
   if (options.manager_types().empty()) {
     // Normal / Qwen / xtensor model: a single KV leaf. It is the admission
@@ -239,6 +265,52 @@ void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
                            .slice(0, kv_state.shared_blocks_num(BlockType::KV));
   std::vector<Block> shared = kv_leaf.allocate_shared(
       seq->tokens(), existed, seq->mm_data(), seq->block_hashes());
+  // Linear-state clamp: when a linear-state leaf is registered, the KV shared
+  // prefix must be trimmed to what a committed linear-state checkpoint can
+  // recover. The leaf runs right after KV through the SAME allocate_shared
+  // verb (plain virtual dispatch, no downcast): it reports its recoverable
+  // length (its own hash domain, in TOKENS) via matched_tokens and, on a hit,
+  // hands back the single deepest checkpoint block. Unlike KV's allocate_shared
+  // this call is a probe, not an admission: the returned block is a restore
+  // SOURCE and never enters the sequence or admission accounting. The leaf is
+  // KV-blind; the composite owns the cross-leaf clamp: convert the linear reach
+  // to KV blocks and take min(kv_match, .). The linear reach is a whole
+  // multiple of the prefill chunk stride, itself a multiple of the KV block
+  // size, so the division is exact and the result stays chunk-aligned
+  // (batch_input_builder relies on that alignment to emit the restore hash).
+  // The mounted checkpoint is stashed as the class-A restore source
+  // (started_empty first forwards reach the probe; continued chunks do not and
+  // resolve their own checkpoint).
+  auto linear_it = leaves_.find(BlockType::LINEAR);
+  if (linear_it != leaves_.end() && !shared.empty()) {
+    BlockManager& linear_leaf = *linear_it->second.leaf;
+    // Refresh the sequence's linear-state hash cache to cover the whole prefix
+    // before probing, mirroring update_block_hashes() for KV above. The stride
+    // is the leaf's prefill-chunk stride (own hash domain); the match probe
+    // consumes these cached hashes instead of recomputing the chain per call.
+    seq->update_linear_state_hashes(
+        static_cast<uint32_t>(linear_leaf.options().linear_chunk_stride()));
+    size_t recoverable_tokens = 0;
+    std::vector<Block> mounted =
+        linear_leaf.allocate_shared(seq->tokens(),
+                                    /*existed_shared_blocks=*/{},
+                                    MMData(),
+                                    seq->linear_state_hashes(),
+                                    &recoverable_tokens);
+    const size_t kv_block_size = static_cast<size_t>(kv_leaf.block_size());
+    const size_t recoverable_blocks = recoverable_tokens / kv_block_size;
+    const size_t safe_count = std::min(shared.size(), recoverable_blocks);
+    if (safe_count < shared.size()) {
+      kv_leaf.deallocate(Slice<Block>(shared).slice(safe_count));
+      shared.resize(safe_count);
+    }
+    // The mounted checkpoint is a restore SOURCE only; it must never enter the
+    // sequence's LINEAR block vector, whose slot[0] is the live, GDN
+    // in-place-updated slot.
+    if (!mounted.empty()) {
+      seq->set_linear_restore_src_block(std::move(mounted.front()));
+    }
+  }
   seq->add_shared_blocks(BlockType::KV, std::move(shared));
 }
 
@@ -357,7 +429,8 @@ std::vector<Block> CompositeBlockManager::allocate_shared(
     const Slice<int32_t>& /*tokens_ids*/,
     const Slice<Block>& /*existed_shared_blocks*/,
     const MMData& /*mm_data*/,
-    const Slice<XXH3Key>& /*block_hashes*/) {
+    const Slice<XXH3Key>& /*block_hashes*/,
+    size_t* /*matched_tokens*/) {
   NOT_IMPLEMENTED();
   return {};
 }

@@ -25,6 +25,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/macros.h"
+#include "core/common/constants.h"
 #include "util/tensor_helper.h"
 
 #if defined(USE_NPU)

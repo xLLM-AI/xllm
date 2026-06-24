@@ -29,4 +29,5 @@ cc_library(
     :common
     :mposition
     glog::glog
+    xxHash
 )

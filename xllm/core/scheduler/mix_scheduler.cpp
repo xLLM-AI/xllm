@@ -679,8 +679,21 @@ bool MixScheduler::allocate_blocks_for(Sequence* sequence,
 
   // the total number tokens for the sequence can be handled till now.
   // there may some tokens can not be handled once when enable chunked prefill.
+  //
+  // Route through the shared linear-state clamp so this overload keeps the same
+  // guard as ChunkedPrefillScheduler::allocate_blocks_for: for GDN + prefix
+  // cache it rounds the prefill step down to a chunk-end boundary (or defers
+  // via a 0 return) so each step lands where a linear-state checkpoint is
+  // saved. The caller-supplied kv_cache_tokens_num (which may be inflated by
+  // pending host->device kv swaps) is threaded through so the returned budget
+  // and the downstream current_step_handle_tokens accounting stay consistent on
+  // this path. For every non-GDN / non-prefix-cache case the helper returns the
+  // plain std::min, preserving the previous behavior.
   size_t max_handle_num_tokens =
-      std::min(kv_cache_tokens_num + token_budget, sequence->num_tokens());
+      get_prefill_handle_tokens(sequence, token_budget, kv_cache_tokens_num);
+  if (max_handle_num_tokens == 0) {
+    return false;
+  }
 
   // speculative decoding specific logic,
   // prefill stage don't need speculative decoding.

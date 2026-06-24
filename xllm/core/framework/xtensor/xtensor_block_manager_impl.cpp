@@ -269,7 +269,8 @@ std::vector<Block> XTensorBlockManagerImpl::allocate_shared(
     const Slice<int32_t>& /*token_ids*/,
     const Slice<Block>& /*existed_shared_blocks*/,
     const MMData& /*mm_data*/,
-    const Slice<XXH3Key>& /*block_hashes*/) {
+    const Slice<XXH3Key>& /*block_hashes*/,
+    size_t* /*matched_tokens*/) {
   // Prefix cache not supported
   VLOG(1) << "allocate_shared called but prefix cache is not supported";
   return {};

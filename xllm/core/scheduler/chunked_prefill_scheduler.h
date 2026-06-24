@@ -37,6 +37,15 @@ class ChunkedPrefillScheduler : public ContinuousScheduler {
   virtual ~ChunkedPrefillScheduler();
 
  protected:
+  // Returns 0 when no safe boundary can make forward progress.
+  // `kv_cache_tokens_num` is the count of already-processed tokens as seen by
+  // the caller's scheduling accounting; callers pass their own value so this
+  // stays correct under host<->device kv swap, where it may exceed the
+  // sequence's live device kv_cache_tokens_num.
+  size_t get_prefill_handle_tokens(Sequence* sequence,
+                                   size_t token_budget,
+                                   size_t kv_cache_tokens_num) const;
+
   // build a batch of requests from the priority queue
   virtual std::vector<Batch> prepare_batch() override;
   // 1. for prefill sequence: the allocated_tokens will be within

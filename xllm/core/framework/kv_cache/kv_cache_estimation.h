@@ -38,7 +38,7 @@ struct KVCacheEstimateOptions {
   int64_t max_seqs_per_batch = 0;
   int64_t num_speculative_tokens = 0;
   int64_t max_tokens_per_batch = 0;
-  int64_t max_concurrent_requests = 0;
+  int64_t max_linear_state_cache_slots = 0;
   bool is_draft_engine = false;
   bool enable_prefix_cache = false;
   const ModelArgs* draft_model_args = nullptr;

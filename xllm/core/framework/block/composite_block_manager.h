@@ -75,7 +75,8 @@ class CompositeBlockManager : public BlockManager {
       const Slice<int32_t>& tokens_ids,
       const Slice<Block>& existed_shared_blocks = {},
       const MMData& mm_data = MMData(),
-      const Slice<XXH3Key>& block_hashes = {}) override;
+      const Slice<XXH3Key>& block_hashes = {},
+      size_t* matched_tokens = nullptr) override;
   void cache(const Slice<int32_t>& token_ids,
              std::vector<Block>& blocks,
              size_t existed_shared_blocks_num = 0,
@@ -100,8 +101,18 @@ class CompositeBlockManager : public BlockManager {
   size_t num_sub_managers() const { return leaves_.size(); }
 
  private:
-  // Leaf serving `type`, or nullptr if none.
+  // Test-only reach into the LINEAR leaf, mirroring the friend pattern the leaf
+  // itself uses: the test peer seeds checkpoints the way the scheduler does
+  // while resolving cache ops. No production caller reaches a leaf by type --
+  // the composite drives every leaf through its own type-free orchestration --
+  // so leaf_of stays private.
+  friend class BlockManagerPoolTestPeer;
+
+  // Leaf serving `type`, or nullptr if none. Internal helper for the
+  // composite's own orchestration; not a Sequence-aware or externally driven
+  // surface.
   BlockManager* leaf_of(BlockType type) const;
+
   // The single admission leaf whose raw block count defines the pool's
   // scheduler-facing capacity unit. Schedulers treat num_free/used/total_blocks
   // as counts of base (block_size()) blocks, so we must report one leaf's raw

@@ -85,6 +85,7 @@ cc_library(
     :parallel_state
     :kv_cache
     :kv_cache_transfer
+    :linear_state_restore
     :models
     :sampler
     :tokenizer

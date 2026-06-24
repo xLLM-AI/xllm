@@ -74,6 +74,16 @@ class BlockManager {
     PROPERTY(int64_t, num_layers) = 0;
     PROPERTY(int64_t, slot_size) = 0;
     PROPERTY(std::string, model_id);
+    // Linear-state (Qwen3.5 GDN) resource leaf. When enable_linear_state is
+    // set, build_composite_leaves appends a LINEAR leaf on top of the KV
+    // family. linear_state_num_slots is the total physical slot count [0, N)
+    // for the unified slot pool. Both are ignored unless linear state is on.
+    PROPERTY(bool, enable_linear_state) = false;
+    PROPERTY(int32_t, linear_state_num_slots) = 0;
+    // Linear-state checkpoint stride in tokens (one prefill chunk), forwarded
+    // to the LINEAR leaf's prefix cache as its hash-domain step. Ignored unless
+    // linear state is on; -1 makes the linear probe bail out.
+    PROPERTY(int32_t, linear_chunk_stride) = -1;
   };
 
   explicit BlockManager(Options options) : options_(options) {}
@@ -83,11 +93,17 @@ class BlockManager {
 
   virtual std::vector<Block> allocate(size_t num_blocks) = 0;
 
+  // `matched_tokens`, when non-null, receives the matched prefix length in
+  // TOKENS (forwarded straight to PrefixCache::match: the flat-KV leaf writes
+  // blocks.size() * block_size; the LINEAR leaf writes the recoverable
+  // checkpoint prefix in its own chunk-strided hash domain). Callers that only
+  // want the blocks leave it null.
   virtual std::vector<Block> allocate_shared(
       const Slice<int32_t>& token_ids,
       const Slice<Block>& existed_shared_blocks = {},
       const MMData& mm_data = MMData(),
-      const Slice<XXH3Key>& block_hashes = {}) = 0;
+      const Slice<XXH3Key>& block_hashes = {},
+      size_t* matched_tokens = nullptr) = 0;
 
   virtual void cache(const Slice<int32_t>& token_ids,
                      std::vector<Block>& blocks,
