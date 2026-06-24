@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <atb/atb_infer.h>
+#include <c10/core/DeviceGuard.h>
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <torch/torch.h>
@@ -169,8 +170,6 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     }
 
     torch::Tensor hidden_states = embed_tokens_(tokens, 0);
-    hidden_states =
-        restore_quarot_hidden(hidden_states, hidden_states.size(-1));
     // Get hidden_states_extra from input_params.embedding.input_embedding
     // In EAGLE-3, hidden_states_extra comes from verifier layers
     // (3 layers concatenated)
@@ -313,26 +312,13 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     embed_tokens_ = npu_word_embedding;
   }
 
- protected:
-  torch::Tensor restore_quarot_hidden(torch::Tensor hidden_states,
-                                      int64_t hidden_size) {
-    if (!quarot_global_rotation_t_.defined() ||
-        quarot_global_rotation_t_.numel() == 0) {
-      return hidden_states;
-    }
-
-    CHECK_EQ(quarot_global_rotation_t_.dim(), 2)
-        << "QuaRot global_rotation must be a 2D tensor";
-    CHECK_EQ(quarot_global_rotation_t_.size(0), hidden_size)
-        << "QuaRot global_rotation hidden size mismatch, expected "
-        << hidden_size << ", got " << quarot_global_rotation_t_.size(0);
-    CHECK_EQ(quarot_global_rotation_t_.size(1), hidden_size)
-        << "QuaRot global_rotation hidden size mismatch, expected "
-        << hidden_size << ", got " << quarot_global_rotation_t_.size(1);
-
-    return torch::matmul(hidden_states, quarot_global_rotation_t_);
+  virtual void set_restored_npu_word_embedding(
+      layer::NpuWordEmbedding& npu_word_embedding) {
+    embed_tokens_ = npu_word_embedding;
+    quarot_global_rotation_t_ = torch::Tensor();
   }
 
+ protected:
   std::string model_type_;
   torch::TensorOptions options_;
 
@@ -477,6 +463,11 @@ class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
     model_->set_npu_word_embedding(npu_word_embedding);
   }
 
+  virtual void set_restored_npu_word_embedding(
+      layer::NpuWordEmbedding& npu_word_embedding) {
+    model_->set_restored_npu_word_embedding(npu_word_embedding);
+  }
+
  protected:
   void load_optional_quarot_rotation(const std::filesystem::path& model_path) {
     const std::filesystem::path quarot_path =
@@ -498,6 +489,7 @@ class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
     CHECK_EQ(global_rotation.size(0), global_rotation.size(1))
         << "QuaRot global_rotation must be square";
 
+    torch::DeviceGuard device_guard(device_);
     global_rotation =
         global_rotation
             .to(torch::TensorOptions().dtype(dtype_).device(device_),

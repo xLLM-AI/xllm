@@ -131,6 +131,10 @@ class CausalLM : public torch::nn::Module {
   virtual void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
     NOT_IMPLEMENTED();
   }
+  virtual void set_restored_npu_word_embedding(
+      layer::NpuWordEmbedding& embedding) {
+    set_npu_word_embedding(embedding);
+  }
 
   virtual bool init_or_refresh_rolling_runtime(Stream* load_stream,
                                                Stream* compute_stream,
@@ -310,6 +314,15 @@ class CausalLMImpl : public CausalLM {
       model_->set_npu_word_embedding(embedding);
     } else {
       CausalLM::set_npu_word_embedding(embedding);
+    }
+  }
+
+  void set_restored_npu_word_embedding(
+      layer::NpuWordEmbedding& embedding) override {
+    if constexpr (detail::has_set_restored_npu_word_embedding<Model>::value) {
+      model_->set_restored_npu_word_embedding(embedding);
+    } else {
+      CausalLM::set_restored_npu_word_embedding(embedding);
     }
   }
 

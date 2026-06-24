@@ -82,6 +82,10 @@ class LLMWorkerImpl : public WorkerImpl {
     model_->set_npu_word_embedding(embedding);
   };
 
+  void set_restored_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
+    model_->set_restored_npu_word_embedding(embedding);
+  };
+
 #endif
   layer::LmHead get_lm_head() { return model_->get_lm_head(); };
 

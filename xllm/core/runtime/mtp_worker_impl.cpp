@@ -28,6 +28,7 @@ limitations under the License.
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/kv_cache/kv_cache_estimation.h"
 #include "core/framework/multimodal/mm_data.h"
@@ -545,7 +546,12 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
       auto head = target_impl_->get_npu_lm_head();
       draft_impl_->set_npu_lm_head(head);
       auto word_embedding = target_impl_->get_npu_word_embedding();
-      draft_impl_->set_npu_word_embedding(word_embedding);
+      if (::xllm::ModelConfig::get_instance()
+              .has_restored_npu_word_embedding()) {
+        draft_impl_->set_restored_npu_word_embedding(word_embedding);
+      } else {
+        draft_impl_->set_npu_word_embedding(word_embedding);
+      }
     } else {
       auto head = target_impl_->get_lm_head();
       draft_impl_->set_lm_head(head);

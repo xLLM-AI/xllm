@@ -54,6 +54,7 @@ class ModelConfig final {
          "tool_call_parser",
          "enable_qwen3_reranker",
          "enable_return_mm_full_embeddings",
+         "has_restored_npu_word_embedding",
          "mm_download_headers",
          "flashinfer_workspace_buffer_size",
          "use_audio_in_video",
@@ -84,6 +85,8 @@ class ModelConfig final {
   PROPERTY(bool, enable_qwen3_reranker) = false;
 
   PROPERTY(bool, enable_return_mm_full_embeddings) = false;
+
+  PROPERTY(bool, has_restored_npu_word_embedding) = false;
 
   PROPERTY(std::string, mm_download_headers) = "";
 
