@@ -149,6 +149,10 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     quarot_global_rotation_t_ = global_rotation.transpose(0, 1).contiguous();
   }
 
+  void fuse_fc_quarot_input_rotation(torch::Tensor global_rotation) {
+    fc_->fuse_eagle3_quarot_input_rotation(global_rotation);
+  }
+
   // tokens: [num_tokens]
   // positions: [num_tokens] token pos in the sequence
   virtual ModelOutput forward(torch::Tensor tokens,
@@ -443,11 +447,11 @@ class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
         npu_lm_head_->verify_loaded_weights("lm_head.");
       }
     }
+    load_optional_quarot_rotation(model_path);
     model_->merge_loaded_weights();
     if (!load_lm_head_from_target_) {
       npu_lm_head_->merge_loaded_weights();
     }
-    load_optional_quarot_rotation(model_path);
   }
 
   virtual void prepare_expert_weight(int32_t layer_id,
@@ -501,8 +505,10 @@ class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
                 /*copy=*/true)
             .contiguous();
     model_->set_quarot_global_rotation(global_rotation);
+    model_->fuse_fc_quarot_input_rotation(global_rotation);
     LOG(INFO) << "Loaded optional QuaRot global_rotation for Eagle3 from "
-              << quarot_path.string() << ", shape=" << global_rotation.sizes();
+              << quarot_path.string() << ", shape=" << global_rotation.sizes()
+              << ", and fused it into Eagle3 fc weight.";
   }
 
   QWen3Eagle3Model model_{nullptr};

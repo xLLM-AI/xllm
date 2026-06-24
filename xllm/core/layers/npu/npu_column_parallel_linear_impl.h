@@ -54,6 +54,8 @@ class NpuColumnParallelLinearImpl : public BaseLayer {
 
   virtual void merge_loaded_weights() override;
 
+  void fuse_eagle3_quarot_input_rotation(torch::Tensor global_rotation);
+
   virtual int64_t init_layer() override;
 
   virtual torch::Tensor forward(const torch::Tensor& input, int nodeId);

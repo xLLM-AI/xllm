@@ -253,8 +253,7 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
             residual.defined()) {
           aux_h = h + residual;
         }
-        aux_h = restore_quarot_hidden(
-            aux_h.reshape({num_tokens, hidden_size}), hidden_size);
+        aux_h = aux_h.reshape({num_tokens, hidden_size});
         aux_output_buffer_.slice(0, 0, num_tokens)
             .slice(
                 1, capture_idx * hidden_size, (capture_idx + 1) * hidden_size)
@@ -331,17 +330,13 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
-    const std::filesystem::path model_path(loader->model_weights_path());
     LlmForCausalLMImplBase<QWen3Model>::load_model(std::move(loader), prefix);
-    load_optional_quarot_rotation(model_path);
   }
 
   void lazy_load_model(std::unique_ptr<ModelLoader> loader,
                        std::string prefix = "model.") override {
-    const std::filesystem::path model_path(loader->model_weights_path());
     LlmForCausalLMImplBase<QWen3Model>::lazy_load_model(std::move(loader),
                                                         prefix);
-    load_optional_quarot_rotation(model_path);
   }
 
  private:
