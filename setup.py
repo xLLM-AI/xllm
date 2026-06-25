@@ -129,6 +129,103 @@ def _stage_triton_npu_runtime_binaries(base_dir: str, extdir: str, device: str) 
         )
     logger.info(f"Staged {copied_count} Triton NPU runtime asset(s) into {dest_dir}")
 
+
+def _stage_mlu_triton_kernels(base_dir: str, extdir: str, device: str) -> None:
+    if device != "mlu":
+        return
+
+    source_dir = os.path.join(
+        base_dir, "xllm", "core", "kernels", "mlu", "triton_kernel"
+    )
+    if not os.path.isdir(source_dir):
+        raise RuntimeError(
+            f"MLU triton_kernel directory does not exist: {source_dir}\n"
+            "Hint: Ensure the source tree is intact (xllm/core/kernels/mlu/"
+            "triton_kernel must contain the JIT kernel .py files)."
+        )
+
+    # extdir already points at the installed ``xllm`` package dir (it is the
+    # dirname of ``get_ext_fullpath("xllm/")`` and ends in ".../xllm"), so the
+    # kernel package lands directly under it as ``xllm.core.kernels.mlu.
+    # triton_kernel.<name>``. Do NOT add another ``xllm`` segment here -- the
+    # CMake ``xllm`` product is written into extdir itself as a *file*, and
+    # ``extdir/xllm`` would collide with it (NotADirectoryError).
+    dest_dir = os.path.join(
+        extdir, "core", "kernels", "mlu", "triton_kernel"
+    )
+    if os.path.isdir(dest_dir):
+        shutil.rmtree(dest_dir)
+    os.makedirs(dest_dir, exist_ok=True)
+
+    copied_count = 0
+    for item in sorted(os.listdir(source_dir)):
+        if not item.endswith(".py"):
+            continue
+        source_path = os.path.join(source_dir, item)
+        if not os.path.isfile(source_path):
+            continue
+        shutil.copy2(source_path, os.path.join(dest_dir, item))
+        copied_count += 1
+
+    if copied_count == 0:
+        raise RuntimeError(
+            f"No MLU triton kernel .py files were found under: {source_dir}"
+        )
+    logger.info(f"Staged {copied_count} MLU triton kernel(s) into {dest_dir}")
+
+
+def _stage_triton_jit_scripts(base_dir: str, extdir: str) -> None:
+    """Stage the triton_jit compile script as an importable package module.
+
+    triton_compile.py drives JIT compilation and signature dumps from C++ via a
+    direct ``import`` in the embedded interpreter
+    (``xllm.core.triton_jit.scripts.triton_compile``). Shipping it inside the
+    installed xllm package -- instead of baking a build-tree ``__FILE__`` path
+    -- keeps the script resolvable after ``pip install``.
+    """
+    source_dir = os.path.join(
+        base_dir, "xllm", "core", "triton_jit", "scripts"
+    )
+    source_script = os.path.join(source_dir, "triton_compile.py")
+    if not os.path.isfile(source_script):
+        raise RuntimeError(
+            f"triton_jit compile script does not exist: {source_script}\n"
+            "Hint: Ensure the source tree is intact (xllm/core/triton_jit/"
+            "scripts/triton_compile.py must exist)."
+        )
+
+    # Only the script ships; the C++ sources (src/, include/) stay out of the
+    # wheel. __init__.py files make xllm.core.triton_jit.scripts.triton_compile
+    # importable. Create-if-missing so we never overwrite a packaged xllm
+    # __init__.py or a source-tree file.
+    # extdir already points at the installed ``xllm`` package dir, so the
+    # scripts package lands directly under it. Do NOT add another ``xllm``
+    # segment (see _stage_mlu_triton_kernels for the collision rationale).
+    dest_dir = os.path.join(
+        extdir, "core", "triton_jit", "scripts"
+    )
+    os.makedirs(dest_dir, exist_ok=True)
+    shutil.copy2(source_script, os.path.join(dest_dir, "triton_compile.py"))
+
+    pkg_init = (
+        "# Copyright 2026 The xLLM Authors. All Rights Reserved.\n"
+        "# Licensed under the Apache License, Version 2.0 (the \"License\").\n"
+        "# See LICENSE for details.\n"
+        "\"\"\"xllm internal package marker.\"\"\"\n"
+    )
+    for pkg_dir in (
+        os.path.join(extdir, "core"),
+        os.path.join(extdir, "core", "triton_jit"),
+        dest_dir,
+    ):
+        os.makedirs(pkg_dir, exist_ok=True)
+        init_path = os.path.join(pkg_dir, "__init__.py")
+        if not os.path.exists(init_path):
+            with open(init_path, "w", encoding="utf-8") as f:
+                f.write(pkg_init)
+
+    logger.info(f"Staged triton_jit compile script into {dest_dir}")
+
 class CMakeExtension(Extension):
     def __init__(self, name: str, path: str, sourcedir: str = "") -> None:
         super().__init__(name, sources=[])
@@ -359,6 +456,10 @@ class ExtBuild(build_ext):
         )
 
         _stage_triton_npu_runtime_binaries(self.base_dir, extdir, self.device)
+
+        _stage_mlu_triton_kernels(self.base_dir, extdir, self.device)
+
+        _stage_triton_jit_scripts(self.base_dir, extdir)
 
         if BUILD_EXPORT:
             # build export module

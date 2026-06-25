@@ -54,6 +54,14 @@ def _load_xllm_export() -> ModuleType:
     except Exception:
         sys.modules.pop("xllm_export", None)
         raise
+
+    # Export the host interpreter so triton_jit's C++ subprocess (MLU JIT
+    # compile / signature dump) shells out via this venv's python instead of a
+    # build-machine venv path baked into the binary. Set once xllm_export is
+    # loaded, before any pybind submodule import or model construction, so the
+    # value is in place well before the first kernel compile. popenv reads it
+    # at subprocess time; subprocess inherits the parent env.
+    os.environ.setdefault("XLLM_TRITON_JIT_PYTHON", sys.executable)
     return module
 
 

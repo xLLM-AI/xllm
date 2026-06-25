@@ -134,8 +134,6 @@ class ChunkGatedDeltaRuleImpl : public torch::nn::Module {
   int64_t total_core_num_;
   int64_t num_k_heads_;
   int64_t num_v_heads_;
-  int32_t algo_id_;
-  int32_t chunk_algo_id_;
 };
 
 TORCH_MODULE(ChunkGatedDeltaRule);
