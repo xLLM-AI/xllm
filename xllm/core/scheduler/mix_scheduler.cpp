@@ -649,6 +649,20 @@ std::vector<Batch> MixScheduler::prepare_batch() {
         remaining_token_budget = prefill_cap;
       }
     }
+
+    // Path C cap: when mix_max_prefill_chunks_per_step>0, restrict phase 2
+    // to admit at most N prefill sequences per step. This bounds how many
+    // prefill chunks are batched with decode requests in the same forward,
+    // capping decode tpot inflation. Each request currently has 1 sequence,
+    // so seq budget == prefill chunk budget. 0 = no cap (existing behavior).
+    const int32_t max_prefill_chunks =
+        ::xllm::SchedulerConfig::get_instance().mix_max_prefill_chunks_per_step();
+    size_t saved_seq_budget = remaining_seq_budget;
+    if (max_prefill_chunks > 0 &&
+        remaining_seq_budget > static_cast<size_t>(max_prefill_chunks)) {
+      remaining_seq_budget = static_cast<size_t>(max_prefill_chunks);
+    }
+
     if (!budget_exhausted && !blocks_exhausted &&
         remaining_token_budget > 0 && remaining_seq_budget > 0) {
       handle_running_queue_requests(latency_budget,
@@ -660,6 +674,15 @@ std::vector<Batch> MixScheduler::prepare_batch() {
                                     prefill_queue,
                                     budget_exhausted,
                                     blocks_exhausted);
+    }
+    // Restore the original seq budget so subsequent code (if any) sees the
+    // true remaining capacity. Currently nothing reads it after this point,
+    // but keeping the invariant clean prevents future bugs.
+    if (max_prefill_chunks > 0) {
+      const size_t consumed_in_phase2 = saved_seq_budget - remaining_seq_budget;
+      remaining_seq_budget = saved_seq_budget > consumed_in_phase2
+                                 ? saved_seq_budget - consumed_in_phase2
+                                 : 0;
     }
 
     // Restore unhandled requests back to running_queue_ so the next step can

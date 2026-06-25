@@ -86,6 +86,14 @@ DEFINE_int32(mix_decode_token_budget,
              "step. 0 disables the cap. Only used when "
              "enable_mix_decode_first=true.");
 
+DEFINE_int32(mix_max_prefill_chunks_per_step,
+             0,
+             "MixScheduler: cap on prefill chunks admitted per forward step. "
+             "When >0, phase 2 stops after this many prefill sequences enter "
+             "the batch, regardless of remaining token budget. Bounds how "
+             "much prefill drags decode tpot. 0 disables the cap. Only used "
+             "when enable_mix_decode_first=true.");
+
 namespace xllm {
 
 void SchedulerConfig::from_flags() {
@@ -106,6 +114,7 @@ void SchedulerConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_starve_prevent);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mix_decode_first);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(mix_decode_token_budget);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(mix_max_prefill_chunks_per_step);
 }
 
 void SchedulerConfig::from_json(const JsonReader& json) {
@@ -126,6 +135,7 @@ void SchedulerConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_starve_prevent);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mix_decode_first);
   XLLM_CONFIG_ASSIGN_FROM_JSON(mix_decode_token_budget);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(mix_max_prefill_chunks_per_step);
 }
 
 void SchedulerConfig::append_config_json(
@@ -165,6 +175,8 @@ void SchedulerConfig::append_config_json(
       config_json, default_config, enable_mix_decode_first);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, mix_decode_token_budget);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, mix_max_prefill_chunks_per_step);
 }
 
 SchedulerConfig& SchedulerConfig::get_instance() {

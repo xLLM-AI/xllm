@@ -57,7 +57,8 @@ class SchedulerConfig final {
          "starve_threshold",
          "enable_starve_prevent",
          "enable_mix_decode_first",
-         "mix_decode_token_budget"}};
+         "mix_decode_token_budget",
+         "mix_max_prefill_chunks_per_step"}};
     return kOptionCategory;
   }
 
@@ -103,6 +104,14 @@ class SchedulerConfig final {
   // would otherwise consume the entire batch budget. Only takes effect when
   // enable_mix_decode_first is true. 0 disables the cap.
   PROPERTY(int32_t, mix_decode_token_budget) = 0;
+
+  // Path C cap on number of prefill chunks admitted into the same step in
+  // MixScheduler. When >0, phase 2 (prefill admission) stops after this many
+  // prefill sequences enter running_sequences_, regardless of token budget.
+  // Each request has 1 sequence so this directly caps prefill chunks per
+  // forward. Bounds how much prefill drags decode tpot. Only takes effect
+  // when enable_mix_decode_first is true. 0 disables the cap.
+  PROPERTY(int32_t, mix_max_prefill_chunks_per_step) = 0;
 };
 
 }  // namespace xllm
