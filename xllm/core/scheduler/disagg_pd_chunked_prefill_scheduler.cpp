@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <algorithm>
 
+#include "common/metrics.h"
 #include "core/framework/config/scheduler_config.h"
 #include "framework/batch/batch_factory.h"
 #include "util/utils.h"
@@ -40,6 +41,15 @@ bool exceeds_block_capacity(Sequence* sequence, KVCacheManager* manager) {
     max_blocks = std::max(max_blocks, free_blocks[i] + used_blocks[i]);
   }
   return needed_blocks > max_blocks;
+}
+
+void update_block_metrics(KVCacheManager* manager) {
+  CHECK(manager != nullptr);
+  GAUGE_SET(kv_cache_utilization_perc, manager->kv_cache_utilization());
+  GAUGE_SET(num_blocks_in_prefix_cache,
+            util::min(manager->num_blocks_in_prefix_cache()));
+  GAUGE_SET(num_free_blocks, util::max(manager->num_free_blocks()));
+  GAUGE_SET(num_used_blocks, util::min(manager->num_used_blocks()));
 }
 
 }  // namespace
@@ -250,12 +260,16 @@ std::vector<Batch> DisaggPDChunkedPrefillScheduler::prepare_batch() {
   }
 
   if (running_sequences_.empty()) {
+    update_block_metrics(kv_cache_manager_);
     return {};
   }
 
-  return BatchFactory::get_instance(options_.dp_size())
-      ->create_batches(
-          running_requests_, running_sequences_, running_sequences_budgets_);
+  std::vector<Batch> batches = BatchFactory::get_instance(options_.dp_size())
+                                   ->create_batches(running_requests_,
+                                                    running_sequences_,
+                                                    running_sequences_budgets_);
+  update_block_metrics(kv_cache_manager_);
+  return batches;
 }
 
 }  // namespace xllm

@@ -23,6 +23,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "common/metrics.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_pool.h"
@@ -277,6 +278,32 @@ TEST(DisaggPDChunkedPrefillSchedulerTest,
   seq0->kv_state().set_kv_cache_tokens_num(seq0->num_prompt_tokens());
   EXPECT_TRUE(request->expand_sequences(/*share_prefix=*/true));
   EXPECT_EQ(request->sequences().size(), 4u);
+}
+
+TEST(DisaggPDChunkedPrefillSchedulerTest, UpdatesBlockMetrics) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), true);
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  BlockManagerPool* block_manager = engine.block_manager_pool();
+  DisaggPDChunkedPrefillScheduler scheduler(&engine,
+                                            make_options(
+                                                /*max_tokens_per_batch=*/4,
+                                                /*max_chunk=*/4));
+  std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
+  ASSERT_TRUE(scheduler.ContinuousScheduler::add_request(request));
+
+  GAUGE_SET(num_free_blocks, 0);
+  GAUGE_SET(num_used_blocks, 0);
+  std::vector<Batch> batches = scheduler.prepare_batch_test();
+
+  ASSERT_EQ(batches.size(), 1u);
+  ASSERT_EQ(batches[0].size(), 1u);
+  double num_free_blocks = GAUGE_VALUE(num_free_blocks);
+  double num_used_blocks = GAUGE_VALUE(num_used_blocks);
+  EXPECT_EQ(num_free_blocks, 5);
+  EXPECT_EQ(num_used_blocks, 2);
+
+  block_manager->deallocate(request.get());
 }
 
 TEST(DisaggPDChunkedPrefillSchedulerTest,
