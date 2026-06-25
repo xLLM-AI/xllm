@@ -617,54 +617,55 @@ std::vector<Batch> MixScheduler::prepare_batch() {
     }
     running_queue_.clear();
 
-    // Phase 1: decode requests get full token budget. Each decode contributes
-    // ~1 token so this rarely consumes much of the budget; the cap below
-    // mainly bounds how aggressively the next phase can admit prefill.
-    handle_running_queue_requests(latency_budget,
-                                  estimate_latency,
-                                  remaining_token_budget,
-                                  remaining_seq_budget,
-                                  num_preempted_requests,
-                                  prefill_stage_sequences,
-                                  decode_queue,
-                                  budget_exhausted,
-                                  blocks_exhausted);
-
-    // Phase 2: prefill requests run in the remaining budget. When
-    // mix_decode_token_budget>0 we additionally cap prefill at
-    // (max_tokens_per_batch - reserved) so a future decode can fit even if
-    // one large prefill request slips through. The reservation matters when
-    // many decode requests arrive shortly after prefill admission.
-    const int32_t reserved = ::xllm::SchedulerConfig::get_instance()
-                                 .mix_decode_token_budget();
-    if (reserved > 0 && !budget_exhausted && !blocks_exhausted) {
-      const size_t total_budget = options_.enable_profile_token_budget()
-                                      ? profile_manager_->get_token_budget()
-                                      : options_.max_tokens_per_batch();
-      const size_t prefill_cap =
-          total_budget > static_cast<size_t>(reserved)
-              ? total_budget - static_cast<size_t>(reserved)
-              : 0;
-      if (remaining_token_budget > prefill_cap) {
-        remaining_token_budget = prefill_cap;
+    // Path A step isolation: dispatch either decode-only or prefill-only
+    // forward. Decode tpot is no longer dragged by prefill chunk step time.
+    // Decision matrix:
+    //   - prefill_queue empty                          -> decode-only
+    //   - decode_queue empty                           -> prefill-only
+    //   - both non-empty AND consecutive_decode_steps_
+    //     >= max_decode_steps                          -> prefill-only (forced)
+    //   - both non-empty AND below threshold           -> decode-only
+    const bool step_isolation =
+        ::xllm::SchedulerConfig::get_instance().enable_mix_step_isolation();
+    bool dispatch_decode_only = false;
+    bool dispatch_prefill_only = false;
+    if (step_isolation) {
+      const int32_t max_decode_steps =
+          ::xllm::SchedulerConfig::get_instance()
+              .mix_step_isolation_max_decode_steps();
+      const bool decode_empty = decode_queue.empty();
+      const bool prefill_empty = prefill_queue.empty();
+      if (prefill_empty && !decode_empty) {
+        dispatch_decode_only = true;
+      } else if (decode_empty && !prefill_empty) {
+        dispatch_prefill_only = true;
+      } else if (!decode_empty && !prefill_empty) {
+        if (max_decode_steps > 0 &&
+            consecutive_decode_steps_ >= max_decode_steps) {
+          dispatch_prefill_only = true;  // forced for starvation prevention
+        } else {
+          dispatch_decode_only = true;
+        }
       }
+      // both empty -> nothing to dispatch this step (rare)
     }
 
-    // Path C cap: when mix_max_prefill_chunks_per_step>0, restrict phase 2
-    // to admit at most N prefill sequences per step. This bounds how many
-    // prefill chunks are batched with decode requests in the same forward,
-    // capping decode tpot inflation. Each request currently has 1 sequence,
-    // so seq budget == prefill chunk budget. 0 = no cap (existing behavior).
-    const int32_t max_prefill_chunks =
-        ::xllm::SchedulerConfig::get_instance().mix_max_prefill_chunks_per_step();
-    size_t saved_seq_budget = remaining_seq_budget;
-    if (max_prefill_chunks > 0 &&
-        remaining_seq_budget > static_cast<size_t>(max_prefill_chunks)) {
-      remaining_seq_budget = static_cast<size_t>(max_prefill_chunks);
-    }
-
-    if (!budget_exhausted && !blocks_exhausted &&
-        remaining_token_budget > 0 && remaining_seq_budget > 0) {
+    if (step_isolation && dispatch_decode_only) {
+      // Decode-only step: only the decode queue runs this forward. Skip
+      // phase 2 entirely. consecutive_decode_steps_ counter advances.
+      handle_running_queue_requests(latency_budget,
+                                    estimate_latency,
+                                    remaining_token_budget,
+                                    remaining_seq_budget,
+                                    num_preempted_requests,
+                                    prefill_stage_sequences,
+                                    decode_queue,
+                                    budget_exhausted,
+                                    blocks_exhausted);
+      consecutive_decode_steps_++;
+    } else if (step_isolation && dispatch_prefill_only) {
+      // Prefill-only step: only prefill queue runs. Decode queue waits one
+      // step (~50ms). Reset the counter.
       handle_running_queue_requests(latency_budget,
                                     estimate_latency,
                                     remaining_token_budget,
@@ -674,15 +675,80 @@ std::vector<Batch> MixScheduler::prepare_batch() {
                                     prefill_queue,
                                     budget_exhausted,
                                     blocks_exhausted);
-    }
-    // Restore the original seq budget so subsequent code (if any) sees the
-    // true remaining capacity. Currently nothing reads it after this point,
-    // but keeping the invariant clean prevents future bugs.
-    if (max_prefill_chunks > 0) {
-      const size_t consumed_in_phase2 = saved_seq_budget - remaining_seq_budget;
-      remaining_seq_budget = saved_seq_budget > consumed_in_phase2
-                                 ? saved_seq_budget - consumed_in_phase2
-                                 : 0;
+      consecutive_decode_steps_ = 0;
+    } else {
+      // Legacy two-phase mixed batch (B+C decode_first or Path C with cap):
+      // phase 1 decode + phase 2 prefill in the same forward.
+
+      // Phase 1: decode requests get full token budget. Each decode contributes
+      // ~1 token so this rarely consumes much of the budget; the cap below
+      // mainly bounds how aggressively the next phase can admit prefill.
+      handle_running_queue_requests(latency_budget,
+                                    estimate_latency,
+                                    remaining_token_budget,
+                                    remaining_seq_budget,
+                                    num_preempted_requests,
+                                    prefill_stage_sequences,
+                                    decode_queue,
+                                    budget_exhausted,
+                                    blocks_exhausted);
+
+      // Phase 2: prefill requests run in the remaining budget. When
+      // mix_decode_token_budget>0 we additionally cap prefill at
+      // (max_tokens_per_batch - reserved) so a future decode can fit even if
+      // one large prefill request slips through. The reservation matters when
+      // many decode requests arrive shortly after prefill admission.
+      const int32_t reserved = ::xllm::SchedulerConfig::get_instance()
+                                   .mix_decode_token_budget();
+      if (reserved > 0 && !budget_exhausted && !blocks_exhausted) {
+        const size_t total_budget = options_.enable_profile_token_budget()
+                                        ? profile_manager_->get_token_budget()
+                                        : options_.max_tokens_per_batch();
+        const size_t prefill_cap =
+            total_budget > static_cast<size_t>(reserved)
+                ? total_budget - static_cast<size_t>(reserved)
+                : 0;
+        if (remaining_token_budget > prefill_cap) {
+          remaining_token_budget = prefill_cap;
+        }
+      }
+
+      // Path C cap: when mix_max_prefill_chunks_per_step>0, restrict phase 2
+      // to admit at most N prefill sequences per step. This bounds how many
+      // prefill chunks are batched with decode requests in the same forward,
+      // capping decode tpot inflation. Each request currently has 1 sequence,
+      // so seq budget == prefill chunk budget. 0 = no cap (existing behavior).
+      const int32_t max_prefill_chunks =
+          ::xllm::SchedulerConfig::get_instance()
+              .mix_max_prefill_chunks_per_step();
+      size_t saved_seq_budget = remaining_seq_budget;
+      if (max_prefill_chunks > 0 &&
+          remaining_seq_budget > static_cast<size_t>(max_prefill_chunks)) {
+        remaining_seq_budget = static_cast<size_t>(max_prefill_chunks);
+      }
+
+      if (!budget_exhausted && !blocks_exhausted &&
+          remaining_token_budget > 0 && remaining_seq_budget > 0) {
+        handle_running_queue_requests(latency_budget,
+                                      estimate_latency,
+                                      remaining_token_budget,
+                                      remaining_seq_budget,
+                                      num_preempted_requests,
+                                      prefill_stage_sequences,
+                                      prefill_queue,
+                                      budget_exhausted,
+                                      blocks_exhausted);
+      }
+      // Restore the original seq budget so subsequent code (if any) sees the
+      // true remaining capacity. Currently nothing reads it after this point,
+      // but keeping the invariant clean prevents future bugs.
+      if (max_prefill_chunks > 0) {
+        const size_t consumed_in_phase2 =
+            saved_seq_budget - remaining_seq_budget;
+        remaining_seq_budget = saved_seq_budget > consumed_in_phase2
+                                   ? saved_seq_budget - consumed_in_phase2
+                                   : 0;
+      }
     }
 
     // Restore unhandled requests back to running_queue_ so the next step can

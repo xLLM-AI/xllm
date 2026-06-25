@@ -58,7 +58,9 @@ class SchedulerConfig final {
          "enable_starve_prevent",
          "enable_mix_decode_first",
          "mix_decode_token_budget",
-         "mix_max_prefill_chunks_per_step"}};
+         "mix_max_prefill_chunks_per_step",
+         "enable_mix_step_isolation",
+         "mix_step_isolation_max_decode_steps"}};
     return kOptionCategory;
   }
 
@@ -112,6 +114,21 @@ class SchedulerConfig final {
   // forward. Bounds how much prefill drags decode tpot. Only takes effect
   // when enable_mix_decode_first is true. 0 disables the cap.
   PROPERTY(int32_t, mix_max_prefill_chunks_per_step) = 0;
+
+  // Path A step-level prefill/decode isolation: when true, MixScheduler
+  // dispatches either a decode-only forward step or a prefill-only forward
+  // step (never mixed). Decode step time is not dragged by prefill chunks
+  // so decode tpot approaches PD-disagg baseline. Prefill is admitted only
+  // when no decodes are queued, with starvation prevention via
+  // mix_step_isolation_max_decode_steps. Only takes effect when
+  // enable_mix_decode_first is true.
+  PROPERTY(bool, enable_mix_step_isolation) = false;
+
+  // Path A starvation prevention: after this many consecutive decode-only
+  // steps, force one prefill-only step if prefill_queue is non-empty.
+  // Larger -> better decode tpot, longer prefill wait. 16 = ~256ms wait at
+  // 16ms decode step.
+  PROPERTY(int32_t, mix_step_isolation_max_decode_steps) = 16;
 };
 
 }  // namespace xllm

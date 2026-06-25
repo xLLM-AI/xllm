@@ -65,6 +65,12 @@ class MixScheduler : public DisaggPDScheduler {
                            size_t needed_copy_blocks_num,
                            size_t* current_step_handle_tokens);
 
+  // Path A step isolation state: count of consecutive decode-only steps
+  // since the last prefill-only step. Used to enforce starvation prevention
+  // (force a prefill step after mix_step_isolation_max_decode_steps decodes).
+  // Reset to 0 whenever a prefill-only step is dispatched.
+  int32_t consecutive_decode_steps_ = 0;
+
  private:
   void handle_running_queue_requests(
       double& latency_budget,

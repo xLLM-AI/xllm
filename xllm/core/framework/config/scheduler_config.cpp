@@ -94,6 +94,20 @@ DEFINE_int32(mix_max_prefill_chunks_per_step,
              "much prefill drags decode tpot. 0 disables the cap. Only used "
              "when enable_mix_decode_first=true.");
 
+DEFINE_bool(enable_mix_step_isolation,
+            false,
+            "MixScheduler Path A: dispatch either a decode-only or "
+            "prefill-only forward step (never mixed). Decode tpot approaches "
+            "PD-disagg baseline. Only takes effect when "
+            "enable_mix_decode_first=true.");
+
+DEFINE_int32(mix_step_isolation_max_decode_steps,
+             16,
+             "MixScheduler Path A starvation prevention: after this many "
+             "consecutive decode-only steps, force one prefill-only step if "
+             "prefill_queue non-empty. Default 16 ~ 256ms prefill wait at "
+             "16ms decode step.");
+
 namespace xllm {
 
 void SchedulerConfig::from_flags() {
@@ -115,6 +129,8 @@ void SchedulerConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mix_decode_first);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(mix_decode_token_budget);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(mix_max_prefill_chunks_per_step);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mix_step_isolation);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(mix_step_isolation_max_decode_steps);
 }
 
 void SchedulerConfig::from_json(const JsonReader& json) {
@@ -136,6 +152,8 @@ void SchedulerConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mix_decode_first);
   XLLM_CONFIG_ASSIGN_FROM_JSON(mix_decode_token_budget);
   XLLM_CONFIG_ASSIGN_FROM_JSON(mix_max_prefill_chunks_per_step);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mix_step_isolation);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(mix_step_isolation_max_decode_steps);
 }
 
 void SchedulerConfig::append_config_json(
@@ -177,6 +195,10 @@ void SchedulerConfig::append_config_json(
       config_json, default_config, mix_decode_token_budget);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, mix_max_prefill_chunks_per_step);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_mix_step_isolation);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, mix_step_isolation_max_decode_steps);
 }
 
 SchedulerConfig& SchedulerConfig::get_instance() {
