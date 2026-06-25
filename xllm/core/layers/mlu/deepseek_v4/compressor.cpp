@@ -17,29 +17,15 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <algorithm>
 #include <cmath>
 #include <optional>
 #include <tuple>
-#include <vector>
 
 #include "kernels/mlu/mlu_ops_api.h"
 #include "kernels/ops_api.h"
 #include "util/linalg.h"
 
 namespace {
-
-struct PrefillPadPlan {
-  bool needs_padding = false;
-  std::vector<int64_t> q_lens;
-  std::vector<int64_t> prefix_lens;
-  std::vector<bool> has_prev_windows;
-  std::vector<int32_t> padded_cu_lens;
-  std::vector<int64_t> keep_indices;
-  int64_t max_padded_len = 0;
-  int64_t padded_tokens = 0;
-  int64_t padded_rows = 0;
-};
 
 void write_cache(const torch::Tensor& key,
                  torch::Tensor& cache,
@@ -95,135 +81,44 @@ torch::Tensor empty_output(const torch::Tensor& hidden_states,
   return torch::empty({0, head_dim}, hidden_states.options());
 }
 
-PrefillPadPlan make_prefill_pad_plan(
-    const xllm::layer::AttentionMetadata& attn_metadata,
-    int64_t compress_ratio,
-    int64_t coff) {
-  PrefillPadPlan plan;
-  const xllm::layer::DSAMetadata& dsa = *attn_metadata.dsa_metadata;
-  const int64_t batch_size = static_cast<int64_t>(dsa.start_pos_vec.size());
-  plan.q_lens.reserve(static_cast<size_t>(batch_size));
-  plan.prefix_lens.reserve(static_cast<size_t>(batch_size));
-  plan.has_prev_windows.reserve(static_cast<size_t>(batch_size));
-  plan.padded_cu_lens.reserve(static_cast<size_t>(batch_size + 1));
-  plan.padded_cu_lens.emplace_back(0);
-
-  torch::Tensor q_cu_cpu =
-      attn_metadata.q_cu_seq_lens.to(torch::kCPU).to(torch::kInt64);
-  int64_t row_begin = 0;
-  for (int64_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
-    const int64_t q_begin = q_cu_cpu[seq_idx].item<int64_t>();
-    const int64_t q_end = q_cu_cpu[seq_idx + 1].item<int64_t>();
-    const int64_t q_len = q_end - q_begin;
-    const int64_t start_pos = dsa.start_pos_vec[static_cast<size_t>(seq_idx)];
-    const int64_t prefix_len = start_pos % compress_ratio;
-    const bool has_prev_window = coff == 2 && start_pos >= compress_ratio;
-    const int64_t synthetic_len = has_prev_window ? compress_ratio : 0;
-    const int64_t padded_len = synthetic_len + prefix_len + q_len;
-    const int64_t seq_rows = padded_len / compress_ratio;
-
-    plan.q_lens.emplace_back(q_len);
-    plan.prefix_lens.emplace_back(prefix_len);
-    plan.has_prev_windows.emplace_back(has_prev_window);
-    plan.padded_tokens += padded_len;
-    plan.padded_rows += seq_rows;
-    plan.max_padded_len = std::max(plan.max_padded_len, padded_len);
-    plan.padded_cu_lens.emplace_back(static_cast<int32_t>(plan.padded_tokens));
-    plan.needs_padding =
-        plan.needs_padding || prefix_len > 0 || has_prev_window;
-
-    const int64_t drop_rows = has_prev_window ? 1 : 0;
-    for (int64_t row_idx = drop_rows; row_idx < seq_rows; ++row_idx) {
-      plan.keep_indices.emplace_back(row_begin + row_idx);
-    }
-    row_begin += seq_rows;
+// The fused_compress_*_kv operators consume a single paged state_cache of
+// shape [block_num, block_size, 2 * coff_dim] with kv in the first coff_dim
+// lanes and score in the last coff_dim lanes. xllm stores kv and score in two
+// separate paged pools, so we mirror them into one combined tensor for the
+// call and scatter the result back. The two pools share the same block table
+// and (being SLIDING_WINDOW allocations) are physically [batch, seq_len, dim]
+// contiguous, so this mirroring is layout-faithful.
+torch::Tensor& ensure_state_mirror(torch::Tensor& mirror,
+                                   const torch::Tensor& kv_state,
+                                   const torch::Tensor& score_state,
+                                   int64_t coff_dim) {
+  const int64_t block_num = kv_state.size(0);
+  const int64_t block_size = kv_state.size(1);
+  const int64_t combined_dim = 2 * coff_dim;
+  if (!mirror.defined() || mirror.size(0) != block_num ||
+      mirror.size(1) != block_size || mirror.size(2) != combined_dim) {
+    mirror =
+        torch::empty({block_num, block_size, combined_dim}, kv_state.options());
   }
-  return plan;
+  return mirror;
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> pad_prefill_pack(
-    const torch::Tensor& kv_pack,
-    const torch::Tensor& score_pack,
-    const torch::Tensor& kv_state,
-    const torch::Tensor& score_state,
-    const torch::Tensor& q_cu_seq_lens,
-    const torch::Tensor& ape,
-    const PrefillPadPlan& plan,
-    int64_t compress_ratio,
-    int64_t coff) {
-  std::vector<torch::Tensor> kv_parts;
-  std::vector<torch::Tensor> score_parts;
-  kv_parts.reserve(static_cast<size_t>(plan.q_lens.size()) * 3);
-  score_parts.reserve(static_cast<size_t>(plan.q_lens.size()) * 3);
-  torch::Tensor q_cu_cpu = q_cu_seq_lens.to(torch::kCPU).to(torch::kInt64);
-  const int64_t batch_size = static_cast<int64_t>(plan.q_lens.size());
-  for (int64_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
-    torch::Tensor seq_kv_state = kv_state.select(/*dim=*/0, seq_idx);
-    torch::Tensor seq_score_state = score_state.select(/*dim=*/0, seq_idx);
-    if (plan.has_prev_windows[static_cast<size_t>(seq_idx)]) {
-      torch::Tensor prev_kv =
-          seq_kv_state.slice(/*dim=*/0, /*start=*/0, /*end=*/compress_ratio);
-      torch::Tensor prev_score = seq_score_state.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/compress_ratio);
-      kv_parts.emplace_back(prev_kv);
-      score_parts.emplace_back(prev_score - ape.slice(/*dim=*/0,
-                                                      /*start=*/0,
-                                                      /*end=*/compress_ratio));
-    }
-
-    const int64_t prefix_len = plan.prefix_lens[static_cast<size_t>(seq_idx)];
-    if (prefix_len > 0) {
-      const int64_t state_offset = coff == 2 ? compress_ratio : 0;
-      torch::Tensor prefix_kv =
-          seq_kv_state.slice(/*dim=*/0,
-                             /*start=*/state_offset,
-                             /*end=*/state_offset + prefix_len);
-      torch::Tensor prefix_score =
-          seq_score_state.slice(/*dim=*/0,
-                                /*start=*/state_offset,
-                                /*end=*/state_offset + prefix_len);
-      kv_parts.emplace_back(prefix_kv);
-      score_parts.emplace_back(
-          prefix_score - ape.slice(/*dim=*/0, /*start=*/0, /*end=*/prefix_len));
-    }
-
-    const int64_t q_begin = q_cu_cpu[seq_idx].item<int64_t>();
-    const int64_t q_end = q_cu_cpu[seq_idx + 1].item<int64_t>();
-    if (q_end > q_begin) {
-      kv_parts.emplace_back(
-          kv_pack.slice(/*dim=*/0, /*start=*/q_begin, /*end=*/q_end));
-      score_parts.emplace_back(
-          score_pack.slice(/*dim=*/0, /*start=*/q_begin, /*end=*/q_end));
-    }
-  }
-
-  torch::Tensor padded_kv =
-      kv_parts.empty() ? kv_pack.slice(0, 0, 0) : torch::cat(kv_parts, 0);
-  torch::Tensor padded_score = score_parts.empty() ? score_pack.slice(0, 0, 0)
-                                                   : torch::cat(score_parts, 0);
-  torch::Tensor padded_cu_lens =
-      torch::tensor(plan.padded_cu_lens,
-                    torch::TensorOptions()
-                        .dtype(torch::kInt32)
-                        .device(q_cu_seq_lens.device()));
-  return {padded_kv.contiguous(), padded_score.contiguous(), padded_cu_lens};
+void copy_split_to_mirror(const torch::Tensor& mirror,
+                          const torch::Tensor& kv_state,
+                          const torch::Tensor& score_state,
+                          int64_t coff_dim) {
+  mirror.narrow(/*dim=*/2, /*start=*/0, /*length=*/coff_dim).copy_(kv_state);
+  mirror.narrow(/*dim=*/2, /*start=*/coff_dim, /*length=*/coff_dim)
+      .copy_(score_state);
 }
 
-torch::Tensor drop_synthetic_rows(const torch::Tensor& compressed_kv,
-                                  const PrefillPadPlan& plan,
-                                  const torch::TensorOptions& options,
-                                  int64_t head_dim) {
-  if (static_cast<int64_t>(plan.keep_indices.size()) == compressed_kv.size(0)) {
-    return compressed_kv;
-  }
-  if (plan.keep_indices.empty()) {
-    return torch::empty({0, head_dim}, options);
-  }
-  torch::Tensor keep = torch::tensor(plan.keep_indices,
-                                     torch::TensorOptions()
-                                         .dtype(torch::kInt64)
-                                         .device(compressed_kv.device()));
-  return compressed_kv.index_select(/*dim=*/0, keep);
+void copy_mirror_to_split(const torch::Tensor& mirror,
+                          torch::Tensor& kv_state,
+                          torch::Tensor& score_state,
+                          int64_t coff_dim) {
+  kv_state.copy_(mirror.narrow(/*dim=*/2, /*start=*/0, /*length=*/coff_dim));
+  score_state.copy_(
+      mirror.narrow(/*dim=*/2, /*start=*/coff_dim, /*length=*/coff_dim));
 }
 
 }  // namespace
@@ -249,7 +144,6 @@ CompressorImpl::CompressorImpl(int64_t compress_ratio,
       overlap_(compress_ratio == 4 ? true : false),
       coff_(compress_ratio == 4 ? 2 : 1) {
   compress_len_ = compress_ratio_ * coff_;
-  num_spec_tokens_ = args.num_speculative_tokens(),
   wkv_ = register_module("wkv",
                          ReplicatedLinear(hidden_dim_,
                                           coff_ * head_dim_,
@@ -294,75 +188,38 @@ torch::Tensor CompressorImpl::forward_prefill(
 
   torch::Tensor& kv_state = std::get<0>(kv_states);
   torch::Tensor& score_state = std::get<1>(kv_states);
-
   torch::Tensor& kv_block_table = std::get<0>(block_tables);
-  torch::Tensor& score_block_table = std::get<1>(block_tables);
-  const int64_t batch_size =
-      static_cast<int64_t>(attn_metadata.kv_seq_lens.size(0));
-
-  int64_t cache_len = batch_size * compress_len_;
-  auto new_kv_state =
-      kv_state.view({kv_state.size(0) * kv_state.size(1), kv_state.size(2)})
-          .slice(0, 0, cache_len)
-          .view({batch_size, compress_len_, kv_state.size(2)});
-  auto new_score_state =
-      score_state
-          .view(
-              {score_state.size(0) * score_state.size(1), score_state.size(2)})
-          .slice(0, 0, cache_len)
-          .view({batch_size, compress_len_, score_state.size(2)});
-
-  PrefillPadPlan pad_plan =
-      make_prefill_pad_plan(attn_metadata, compress_ratio_, coff_);
-  torch::Tensor fused_kv_pack = kv_pack;
-  torch::Tensor fused_score_pack = score_pack;
-  torch::Tensor fused_q_cu_seq_lens = attn_metadata.q_cu_seq_lens;
-  int64_t fused_max_query_len = attn_metadata.max_query_len;
-  int64_t fused_output_rows = slot_mapping.numel();
-  if (pad_plan.needs_padding) {
-    std::tie(fused_kv_pack, fused_score_pack, fused_q_cu_seq_lens) =
-        pad_prefill_pack(kv_pack,
-                         score_pack,
-                         new_kv_state,
-                         new_score_state,
-                         attn_metadata.q_cu_seq_lens,
-                         ape_,
-                         pad_plan,
-                         compress_ratio_,
-                         coff_);
-    fused_max_query_len = pad_plan.max_padded_len;
-    fused_output_rows = pad_plan.padded_rows;
-  }
-
-  torch::Tensor compressed_kv =
-      torch::empty({fused_output_rows, head_dim_}, hidden_states.options());
-  torch::Tensor state_ids = torch::arange(batch_size,
-                                          torch::TensorOptions()
-                                              .dtype(torch::kInt32)
-                                              .device(hidden_states.device()));
-
-  xllm::kernel::mlu::fused_compress_multi_kv(fused_kv_pack,
-                                             fused_score_pack,
-                                             new_kv_state,
-                                             new_score_state,
-                                             fused_q_cu_seq_lens,
-                                             state_ids,
-                                             ape_,
-                                             fused_max_query_len,
-                                             overlap_,
-                                             compressed_kv);
-  if (pad_plan.needs_padding) {
-    compressed_kv = drop_synthetic_rows(
-        compressed_kv, pad_plan, hidden_states.options(), head_dim_);
-  }
+  const DSAMetadata& dsa = *attn_metadata.dsa_metadata;
+  const int64_t coff_dim = coff_ * head_dim_;
 
   if (slot_mapping.numel() == 0) {
     return empty_output(hidden_states, head_dim_);
   }
+
+  torch::Tensor& mirror =
+      ensure_state_mirror(state_cache_mirror_, kv_state, score_state, coff_dim);
+  copy_split_to_mirror(mirror, kv_state, score_state, coff_dim);
+
+  torch::Tensor compressed_kv =
+      torch::empty({slot_mapping.numel(), head_dim_}, hidden_states.options());
+
+  xllm::kernel::mlu::fused_compress_multi_kv(
+      /*kv=*/kv_pack,
+      /*score=*/score_pack,
+      /*state_cache=*/mirror,
+      /*state_block_table=*/kv_block_table.contiguous(),
+      /*cu_seqlens=*/attn_metadata.q_cu_seq_lens,
+      /*positions=*/dsa.input_positions.to(torch::kInt32).contiguous(),
+      /*ape=*/ape_,
+      /*max_seqlen=*/attn_metadata.max_query_len,
+      /*overlap=*/overlap_,
+      /*compressed_kv=*/compressed_kv);
+
+  copy_mirror_to_split(mirror, kv_state, score_state, coff_dim);
+
   auto kv = compressed_kv.to(torch::kFloat32);
   auto output = std::get<0>(norm_->forward(kv));
   output = output.to(hidden_states.scalar_type());
-  const DSAMetadata& dsa = *attn_metadata.dsa_metadata;
   apply_rotary(output,
                compressed_sin_table,
                compressed_cos_table,
@@ -388,85 +245,56 @@ torch::Tensor CompressorImpl::forward_decode(
   torch::Tensor& kv_state = std::get<0>(kv_states);
   torch::Tensor& score_state = std::get<1>(kv_states);
   torch::Tensor& kv_block_table = std::get<0>(block_tables);
-  torch::Tensor& score_block_table = std::get<1>(block_tables);
 
   const DSAMetadata& dsa = *attn_metadata.dsa_metadata;
   int64_t batch_size = static_cast<int64_t>(attn_metadata.kv_seq_lens.size(0));
+  const int64_t coff_dim = coff_ * head_dim_;
 
-  std::optional<torch::Tensor> cu_query_lens = std::nullopt;
-  if (num_spec_tokens_ > 0) {
-    int64_t step = num_spec_tokens_ + 1;
-    batch_size /= step;
-    cu_query_lens = std::optional<torch::Tensor>(
-        dsa.q_cu_seq_lens.slice(0, 0, dsa.q_cu_seq_lens.size(-1), step)
-            .contiguous());
-  }
   torch::Tensor kv_pack = wkv_->forward(hidden_states);
   torch::Tensor score_pack = wgate_->forward(hidden_states);
-
-  int64_t cache_len = batch_size * (compress_len_ + num_spec_tokens_);
-  auto new_kv_state =
-      kv_state.view({kv_state.size(0) * kv_state.size(1), kv_state.size(2)})
-          .slice(0, 0, cache_len)
-          .view(
-              {batch_size, compress_len_ + num_spec_tokens_, kv_state.size(2)});
-  auto new_score_state = score_state
-                             .view({score_state.size(0) * score_state.size(1),
-                                    score_state.size(2)})
-                             .slice(0, 0, cache_len)
-                             .view({batch_size,
-                                    compress_len_ + num_spec_tokens_,
-                                    score_state.size(2)});
-
-  if (kv_pack.dim() == 2 && num_spec_tokens_ == 0) {
-    kv_pack = kv_pack.unsqueeze(/*dim=*/1);
+  // The rewritten operator takes a 2D kv/score ([total_tokens, coff_dim]).
+  if (kv_pack.dim() == 3) {
+    kv_pack = kv_pack.reshape({-1, kv_pack.size(-1)});
   }
-  if (score_pack.dim() == 2 && num_spec_tokens_ == 0) {
-    score_pack = score_pack.unsqueeze(/*dim=*/1);
+  if (score_pack.dim() == 3) {
+    score_pack = score_pack.reshape({-1, score_pack.size(-1)});
   }
-  torch::Tensor decode_slots = slot_mapping;
-  torch::Tensor positions = dsa.input_positions;
-  torch::Tensor kv_cache_view = kv_cache.reshape({-1, 1, head_dim_});
-  torch::Tensor state_ids = torch::arange(new_kv_state.size(0),
-                                          torch::TensorOptions()
-                                              .dtype(torch::kInt32)
-                                              .device(hidden_states.device()));
+
+  torch::Tensor& mirror =
+      ensure_state_mirror(state_cache_mirror_, kv_state, score_state, coff_dim);
+  copy_split_to_mirror(mirror, kv_state, score_state, coff_dim);
+
+  torch::Tensor positions = dsa.input_positions.to(torch::kInt32).contiguous();
+  torch::Tensor kv_cache_view = kv_cache.squeeze(/*dim=*/1);
+  const int64_t state_block_size = kv_state.size(1);
   std::optional<torch::Tensor> hadamard_matrix = std::nullopt;
   if (rotate_) {
     hadamard_matrix = hadamard_matrix_;
   }
 
-  xllm::kernel::mlu::fused_compress_single_kv(kv_pack,
-                                              score_pack,
-                                              positions,
-                                              state_ids,
-                                              ape_,
-                                              new_kv_state,
-                                              new_score_state,
-                                              norm_->weight(),
-                                              compressed_sin_table,
-                                              compressed_cos_table,
-                                              hadamard_matrix,
-                                              decode_slots,
-                                              kv_cache_view,
-                                              std::nullopt,
-                                              eps_,
-                                              overlap_,
-                                              cu_query_lens,
-                                              num_spec_tokens_);
+  xllm::kernel::mlu::fused_compress_single_kv(
+      /*kv=*/kv_pack,
+      /*score=*/score_pack,
+      /*position=*/positions,
+      /*ape=*/ape_,
+      /*gamma=*/norm_->weight(),
+      /*sin=*/compressed_sin_table,
+      /*cos=*/compressed_cos_table,
+      /*hadamard_matrix=*/hadamard_matrix,
+      /*slot_mapping=*/slot_mapping,
+      /*kv_cache=*/kv_cache_view,
+      /*kv_cache_scale=*/std::nullopt,
+      /*eps=*/eps_,
+      /*overlap=*/overlap_,
+      /*state_cache=*/mirror,
+      /*state_bt=*/kv_block_table.contiguous(),
+      /*state_width=*/coff_dim,
+      /*state_block_size=*/state_block_size,
+      /*cu_query_len=*/dsa.q_cu_seq_lens,
+      /*K=*/0);
 
-  if (num_spec_tokens_ > 0 && compress_ratio_ == 4) {
-    auto accept_tokens =
-        torch::full({state_ids.size(0)}, num_spec_tokens_, positions.options());
-    xllm::kernel::mlu::update_compressor_states(new_kv_state,
-                                                new_score_state,
-                                                accept_tokens,
-                                                state_ids,
-                                                positions,
-                                                cu_query_lens.value(),
-                                                overlap_,
-                                                num_spec_tokens_);
-  }
+  copy_mirror_to_split(mirror, kv_state, score_state, coff_dim);
+
   return empty_output(hidden_states, head_dim_);
 }
 

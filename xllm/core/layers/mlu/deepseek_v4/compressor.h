@@ -85,13 +85,16 @@ class CompressorImpl : public torch::nn::Module {
   RMSNorm norm_{nullptr};
   DEFINE_WEIGHT(ape);
   torch::Tensor hadamard_matrix_;
+  // Combined mirror of the split compress_kv_state / compress_score_state
+  // pools, laid out as [block_num, block_size, 2 * coff_dim] (kv | score) to
+  // satisfy the fused_compress_*_kv operators. Lazily (re)allocated by shape.
+  torch::Tensor state_cache_mirror_;
 
   int64_t compress_ratio_ = 0;
   int64_t hidden_dim_ = 0;
   int64_t head_dim_ = 0;
   int64_t rope_head_dim_ = 0;
   int64_t compress_len_ = 0;
-  int64_t num_spec_tokens_ = 0;
   bool rotate_ = false;
   bool overlap_ = false;
   double eps_ = 1e-6;
