@@ -123,9 +123,14 @@ class DeekseekV32DecoderLoader : public BaseLoader {
                             const std::string& name,
                             bool pre_view);
 
+  torch::Tensor view_indexer_tensor(torch::Tensor weight,
+                                    const std::string& name,
+                                    bool pre_view);
+
   void reserve_experts_weights(int num_of_device_experts);
 
   torch::Tensor trans_rope_weight(torch::Tensor weight);
+  torch::Tensor trans_front_rope_weight(torch::Tensor weight);
 
   int32_t rank_;
   int32_t first_k_dense_replace_;
@@ -145,6 +150,8 @@ class DeekseekV32DecoderLoader : public BaseLoader {
   int32_t qk_nope_head_dim_;
   int32_t kv_lora_rank_;
   int32_t v_head_dim_;
+  int32_t index_n_heads_;
+  int32_t index_head_dim_;
   int32_t num_key_value_heads_;
   int32_t prefill_firstKDenseReplace_;
   int32_t prefill_numOfDeviceExperts_;
@@ -153,6 +160,7 @@ class DeekseekV32DecoderLoader : public BaseLoader {
   int32_t decode_worldSize_;
   bool prefill_isBF16_;
   bool decode_isBF16_;
+  bool indexer_rope_interleave_;
   std::mutex shared_experts_mutex_;
   std::mutex experts_mutex_;
 

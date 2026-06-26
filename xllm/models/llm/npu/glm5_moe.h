@@ -356,14 +356,16 @@ REGISTER_MODEL_ARGS(glm_moe_dsa, [&] {
   LOAD_ARG_OR(q_lora_rank, "q_lora_rank", 2048);
   LOAD_ARG_OR(kv_lora_rank, "kv_lora_rank", 512);
   LOAD_ARG_OR(index_head_dim, "index_head_dim", 128);
-  LOAD_ARG_OR(index_n_heads, "index_n_heads", 0);
+  LOAD_ARG_OR(index_n_heads, "index_n_heads", 32);
   LOAD_ARG_OR(index_topk, "index_topk", 2048);
   LOAD_ARG_OR(index_topk_freq, "index_topk_freq", 1);
   LOAD_ARG_OR(index_topk_pattern, "index_topk_pattern", "");
   LOAD_ARG_OR(index_skip_topk_offset, "index_skip_topk_offset", 0);
 
   LOAD_ARG_OR(use_qk_norm, "use_qk_norm", true);
-  LOAD_ARG_OR(rope_theta, "rope_theta", 1000000.0f);
+  LOAD_ARG_OR(indexer_rope_interleave, "indexer_rope_interleave", true);
+  LOAD_ARG_OR(rope_theta, "rope_parameters.rope_theta", 1000000.0f);
+  LOAD_ARG_OR(rope_theta, "rope_theta", args->rope_theta());
   LOAD_ARG_OR(tie_word_embeddings, "tie_word_embeddings", false);
 
   SET_ARG(head_dim, args->qk_nope_head_dim() + args->qk_rope_head_dim());

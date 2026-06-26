@@ -133,6 +133,38 @@ std::vector<std::pair<size_t, size_t>> Glm47Detector::find_tool_call_ranges(
   return ranges;
 }
 
+std::string Glm47Detector::extract_normal_text(
+    const std::string& text,
+    const std::vector<std::pair<size_t, size_t>>& ranges) const {
+  if (ranges.empty()) {
+    return trim_whitespace(text);
+  }
+
+  std::string normal_text;
+  size_t last_end = 0;
+  const size_t bot_len = bot_token_.length();
+  const size_t eot_len = eot_token_.length();
+
+  for (const auto& range : ranges) {
+    size_t block_start = range.first - bot_len;
+    if (block_start > last_end) {
+      normal_text.append(text, last_end, block_start - last_end);
+    }
+    last_end = range.second + eot_len;
+  }
+
+  if (last_end < text.length()) {
+    size_t trailing_bot = text.find(bot_token_, last_end);
+    if (trailing_bot == std::string::npos) {
+      normal_text.append(text, last_end, std::string::npos);
+    } else if (trailing_bot > last_end) {
+      normal_text.append(text, last_end, trailing_bot - last_end);
+    }
+  }
+
+  return trim_whitespace(normal_text);
+}
+
 std::pair<std::string, std::string> Glm47Detector::parse_tool_call_content(
     const std::string& content) const {
   const std::string arg_key_tag = "<arg_key>";
@@ -324,24 +356,22 @@ Glm47Detector::parse_argument_pairs(
 StreamingParseResult Glm47Detector::detect_and_parse(
     const std::string& text,
     const std::vector<JsonTool>& tools) {
-  size_t idx = text.find(bot_token_);
-  std::string normal_text =
-      (idx != std::string::npos) ? text.substr(0, idx) : text;
-
-  // Trim normal text
-  if (!normal_text.empty()) {
-    normal_text = trim_whitespace(normal_text);
-  }
-
-  if (idx == std::string::npos) {
-    return StreamingParseResult(normal_text, {});
-  }
-
   std::vector<ToolCallItem> calls;
 
   try {
     // Use string-based parsing instead of regex to avoid stack overflow
     auto ranges = find_tool_call_ranges(text);
+
+    if (ranges.empty()) {
+      size_t idx = text.find(bot_token_);
+      std::string normal_text = trim_whitespace(text);
+      if (idx != std::string::npos) {
+        normal_text = trim_whitespace(text.substr(0, idx));
+      }
+      return StreamingParseResult(normal_text, {});
+    }
+
+    std::string normal_text = extract_normal_text(text, ranges);
 
     for (const auto& range : ranges) {
       std::string content =

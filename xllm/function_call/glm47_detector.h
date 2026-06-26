@@ -66,6 +66,10 @@ class Glm47Detector : public BaseFormatDetector {
   std::vector<std::pair<size_t, size_t>> find_tool_call_ranges(
       const std::string& text) const;
 
+  std::string extract_normal_text(
+      const std::string& text,
+      const std::vector<std::pair<size_t, size_t>>& ranges) const;
+
   std::pair<std::string, std::string> parse_tool_call_content(
       const std::string& content) const;
 

@@ -227,7 +227,11 @@ std::optional<ForwardOutput> run_llm_no_sync_impl(
     ForwardInput& processed_input) {
   worker.prepare_work_before_execute_on_stream(
       input, processed_input, prepare_stream);
-  return worker.execute_no_sync_on_stream(processed_input, compute_stream);
+  std::optional<ForwardOutput> output =
+      worker.execute_no_sync_on_stream(processed_input, compute_stream);
+  const int32_t ret = compute_stream.synchronize();
+  CHECK_EQ(ret, 0) << "failed to synchronize MTP compute stream, ret=" << ret;
+  return output;
 }
 
 torch::Tensor clone_host_tensor(const torch::Tensor& tensor) {

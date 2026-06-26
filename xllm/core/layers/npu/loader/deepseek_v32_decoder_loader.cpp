@@ -52,7 +52,8 @@ DeekseekV32DecoderLoader::DeekseekV32DecoderLoader(
       num_key_value_heads_(num_key_value_heads),
       v_head_dim_(v_head_dim),
       prefill_isBF16_(prefill_isBF16),
-      decode_isBF16_(decode_isBF16) {
+      decode_isBF16_(decode_isBF16),
+      indexer_rope_interleave_(false) {
   auto model_args = context.get_model_args();
   auto options = context.get_tensor_options();
 
@@ -60,6 +61,9 @@ DeekseekV32DecoderLoader::DeekseekV32DecoderLoader(
   first_k_dense_replace_ = model_args.first_k_dense_replace();
   n_layers_ = model_args.n_layers();
   num_experts_ = model_args.n_routed_experts();
+  index_n_heads_ = model_args.index_n_heads();
+  index_head_dim_ = model_args.index_head_dim();
+  indexer_rope_interleave_ = model_args.indexer_rope_interleave();
   localWorldSize_ = parallel_args_.mapping().localWorldSize();
   ep_size_ = parallel_args_.ep_size();
   ep_local_tp_size_ = parallel_args_.world_size() / ep_size_;
@@ -241,6 +245,7 @@ void DeekseekV32DecoderLoader::convert_offsets_to_int8() {
   convert_to_int8(IN_Q_PROJ_B_OFFSET);
   convert_to_int8(IN_KV_PROJ_WITH_MQA_OFFSET);
   convert_to_int8(IN_ATTENTION_OUT_OFFSET);
+  convert_to_int8(IN_INDEXER_WQ_B_OFFSET);
 }
 
 void DeekseekV32DecoderLoader::handle_device_specific_bias() {
@@ -546,6 +551,39 @@ void DeekseekV32DecoderLoader::preprocess_linear_for_rope() {
                    ? view_tensor(t[index], name, false).flatten()
                    : view_tensor(t[index], name, false);
   }
+
+  if (indexer_rope_interleave_) {
+    CHECK_GT(prefill_qkRopeHeadDim_, 0)
+        << "GLM indexer rope dim must be positive";
+    CHECK_GE(index_head_dim_, prefill_qkRopeHeadDim_)
+        << "GLM indexer head dim must be greater than or equal to rope dim";
+    CHECK_GT(index_n_heads_, 0) << "GLM indexer head count must be positive";
+
+    std::vector<std::string> indexer_linear_for_rope;
+    indexer_linear_for_rope.reserve(4);
+    indexer_linear_for_rope.emplace_back("self_attn.indexer.wq_b.weight");
+    if (quantize_type_ == "w8a8_dynamic") {
+      indexer_linear_for_rope.emplace_back("self_attn.indexer.wq_b.quant_bias");
+      indexer_linear_for_rope.emplace_back("self_attn.indexer.wq_b.deq_scale");
+    }
+    indexer_linear_for_rope.emplace_back("self_attn.indexer.wk.weight");
+
+    for (const auto& name : indexer_linear_for_rope) {
+      auto index_it = WEIGHT_MAPPING_W8A8.find(name);
+      CHECK(index_it != WEIGHT_MAPPING_W8A8.end())
+          << "GLM5 indexer rope tensor is not mapped: " << name;
+      int32_t index = index_it->second;
+      if (t[index].sizes() == std::vector<int64_t>({1})) {
+        continue;
+      }
+      t[index] = view_indexer_tensor(t[index], name, true);
+      t[index] = trans_front_rope_weight(t[index]);
+      t[index] = view_indexer_tensor(t[index], name, false);
+      if (!absl::EndsWith(name, "weight")) {
+        t[index] = t[index].flatten();
+      }
+    }
+  }
 }
 
 torch::Tensor DeekseekV32DecoderLoader::view_tensor(torch::Tensor weight,
@@ -568,6 +606,22 @@ torch::Tensor DeekseekV32DecoderLoader::view_tensor(torch::Tensor weight,
   } else if (absl::StrContains(name, "kv_a_proj_with_mqa")) {
     return weight.view({kv_lora_rank_ + prefill_qkRopeHeadDim_, -1})
         .contiguous();
+  }
+  return weight;
+}
+
+torch::Tensor DeekseekV32DecoderLoader::view_indexer_tensor(
+    torch::Tensor weight,
+    const std::string& name,
+    bool pre_view) {
+  if (absl::StrContains(name, "indexer.wq_b")) {
+    if (pre_view) {
+      return weight.view({index_n_heads_, index_head_dim_, -1}).contiguous();
+    }
+    return weight.view({index_n_heads_ * index_head_dim_, -1}).contiguous();
+  }
+  if (absl::StrContains(name, "indexer.wk")) {
+    return weight.view({index_head_dim_, -1}).contiguous();
   }
   return weight;
 }
@@ -598,6 +652,17 @@ torch::Tensor DeekseekV32DecoderLoader::trans_rope_weight(
   torch::Tensor combined = torch::cat({weight_1, weight_2}, -2);
   weight.slice(-2, d - rope_dim, d).copy_(combined);
   return weight.contiguous();
+}
+
+torch::Tensor DeekseekV32DecoderLoader::trans_front_rope_weight(
+    torch::Tensor weight) {
+  int64_t rope_dim = prefill_qkRopeHeadDim_;
+  torch::Tensor output = load_to_host() ? weight.clone() : weight;
+  torch::Tensor weight_1 = weight.slice(-2, 0, rope_dim, 2).contiguous();
+  torch::Tensor weight_2 = weight.slice(-2, 1, rope_dim, 2).contiguous();
+  torch::Tensor combined = torch::cat({weight_1, weight_2}, -2);
+  output.slice(-2, 0, rope_dim).copy_(combined);
+  return output.contiguous();
 }
 
 void DeekseekV32DecoderLoader::initialize_device_expert_list(
@@ -634,6 +699,7 @@ void DeekseekV32DecoderLoader::convert_descaled_weights_to_float() {
   convert_to_float(IN_Q_PROJ_A_DESCALE);
   convert_to_float(IN_Q_PROJ_B_DESCALE);
   convert_to_float(IN_KV_PROJ_WITH_MQA_DESCALE);
+  convert_to_float(IN_INDEXER_WQ_B_DESCALE);
   convert_to_float(IN_ATTENTION_OUT_DESCALE);
 }
 
@@ -746,6 +812,11 @@ void DeekseekV32DecoderLoader::merge_host_at_weights() {
   t[IN_Q_PROJ_A_RECOMPUTE_WEIGHT] =
       cast_nz(t[IN_Q_PROJ_A_RECOMPUTE_WEIGHT], IN_Q_PROJ_A_RECOMPUTE_WEIGHT);
   t[IN_Q_PROJ_B_WEIGHT] = cast_nz(t[IN_Q_PROJ_B_WEIGHT], IN_Q_PROJ_B_WEIGHT);
+  if (quantize_type_ == "w8a8_dynamic" &&
+      t[IN_INDEXER_WQ_B_WEIGHT].sizes() != std::vector<int64_t>({1})) {
+    t[IN_INDEXER_WQ_B_WEIGHT] =
+        cast_nz(t[IN_INDEXER_WQ_B_WEIGHT], IN_INDEXER_WQ_B_WEIGHT);
+  }
 
   t[IN_KV_PROJ_WITH_MQA_WEIGHT] = tensor_placeholder_;
   t[IN_KV_PROJ_WITH_MQA_BIAS] = tensor_placeholder_;
@@ -781,6 +852,10 @@ void DeekseekV32DecoderLoader::merge_host_at_weights() {
       t[IN_Q_PROJ_A_RECOMPUTE_DESCALE] =
           convert_fp16_to_int64(t[IN_Q_PROJ_A_RECOMPUTE_DESCALE]);
       t[IN_Q_PROJ_B_DESCALE] = convert_fp16_to_int64(t[IN_Q_PROJ_B_DESCALE]);
+      if (t[IN_INDEXER_WQ_B_DESCALE].sizes() != std::vector<int64_t>({1})) {
+        t[IN_INDEXER_WQ_B_DESCALE] =
+            convert_fp16_to_int64(t[IN_INDEXER_WQ_B_DESCALE]);
+      }
       t[IN_ATTENTION_OUT_DESCALE] =
           convert_fp16_to_int64(t[IN_ATTENTION_OUT_DESCALE]);
 

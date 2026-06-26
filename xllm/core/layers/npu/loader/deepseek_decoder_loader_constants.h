@@ -421,6 +421,10 @@ inline const std::unordered_map<std::string, int> WEIGHT_MAPPING_W8A8 = {
     {"self_attn.o_proj.input_scale", IN_ATTENTION_OUT_SCALE},
 
     {"self_attn.indexer.wq_b.weight", IN_INDEXER_WQ_B_WEIGHT},
+    {"self_attn.indexer.wq_b.quant_bias", IN_INDEXER_WQ_B_BIAS},
+    {"self_attn.indexer.wq_b.deq_scale", IN_INDEXER_WQ_B_DESCALE},
+    {"self_attn.indexer.wq_b.input_offset", IN_INDEXER_WQ_B_OFFSET},
+    {"self_attn.indexer.wq_b.input_scale", IN_INDEXER_WQ_B_SCALE},
     {"self_attn.indexer.wk.weight", IN_INDEXER_WK_WEIGHT},
     {"self_attn.indexer.k_norm.weight", IN_INDEXER_K_NORM_WEIGHT},
     {"self_attn.indexer.k_norm.bias", IN_INDEXER_K_NORM_BIAS},

@@ -21,6 +21,8 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "function_call_parser.h"
+
 namespace xllm {
 namespace function_call {
 
@@ -179,6 +181,67 @@ TEST_F(Glm47DetectorTest, Glm47CompactFormat) {
 
   nlohmann::json params = nlohmann::json::parse(call.parameters);
   EXPECT_EQ(params["city"], "Beijing");
+}
+
+TEST_F(Glm47DetectorTest, Glm52AutoParserUsesGlm5Format) {
+  EXPECT_EQ(FunctionCallParser::get_parser_auto("auto", "glm_moe_dsa"), "glm5");
+  EXPECT_EQ(FunctionCallParser::get_parser_auto("auto", "glm_moe_dsa_mtp"),
+            "glm5");
+}
+
+TEST_F(Glm47DetectorTest, Glm52CompactXmlToolCallParsing) {
+  std::string text =
+      "Need current weather "
+      "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Beijing</"
+      "arg_value>"
+      "<arg_key>date</arg_key><arg_value>2026-06-26</arg_value></tool_call>";
+
+  FunctionCallParser parser(tools_, "glm5");
+  auto [normal_text, calls] = parser.parse_non_stream(text);
+
+  EXPECT_EQ(normal_text, "Need current weather");
+  ASSERT_EQ(calls.size(), 1);
+
+  const ToolCallItem& call = calls[0];
+  EXPECT_TRUE(call.name.has_value());
+  EXPECT_EQ(call.name.value(), "get_weather");
+
+  nlohmann::json params = nlohmann::json::parse(call.parameters);
+  EXPECT_EQ(params["city"], "Beijing");
+  EXPECT_EQ(params["date"], "2026-06-26");
+}
+
+TEST_F(Glm47DetectorTest, KeepsNormalTextBetweenAndAfterToolCalls) {
+  std::string text =
+      "First "
+      "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Beijing</"
+      "arg_value></tool_call>"
+      " middle "
+      "<tool_call>calculate<arg_key>expression</arg_key><arg_value>1 + 2</"
+      "arg_value></tool_call>"
+      " done";
+
+  auto result = detector_->detect_and_parse(text, tools_);
+
+  EXPECT_EQ(result.normal_text, "First  middle  done");
+  ASSERT_EQ(result.calls.size(), 2);
+  EXPECT_EQ(result.calls[0].name.value(), "get_weather");
+  EXPECT_EQ(result.calls[1].name.value(), "calculate");
+}
+
+TEST_F(Glm47DetectorTest, DropsTrailingIncompleteToolCallFromNormalText) {
+  std::string text =
+      "First "
+      "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Beijing</"
+      "arg_value></tool_call>"
+      " after "
+      "<tool_call>calculate<arg_key>expression</arg_key><arg_value>1 +";
+
+  auto result = detector_->detect_and_parse(text, tools_);
+
+  EXPECT_EQ(result.normal_text, "First  after");
+  ASSERT_EQ(result.calls.size(), 1);
+  EXPECT_EQ(result.calls[0].name.value(), "get_weather");
 }
 
 // Test number type coercion
