@@ -331,7 +331,8 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
         beam_search_output =
             beam_searcher_->forward(sampling_params.acc_logprob,
                                     sample_output.top_tokens,
-                                    sample_output.top_logprobs);
+                                    sample_output.top_logprobs,
+                                    sampling_params.beam_width);
       }
 
       // set sample output to output

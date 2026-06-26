@@ -16,12 +16,15 @@ limitations under the License.
 #include "beam_searcher.h"
 
 #include "common/macros.h"
+#if defined(USE_MLU)
+#include "kernels/mlu/mlu_ops_api.h"
+#endif
 
 namespace xllm {
-BeamSearchOutput BeamSearcher::forward(
-    const torch::Tensor& logprobs,
-    const torch::Tensor& top_tokens,
-    const torch::Tensor& top_logprobs) const {
+BeamSearchOutput BeamSearcher::forward(const torch::Tensor& logprobs,
+                                       const torch::Tensor& top_tokens,
+                                       const torch::Tensor& top_logprobs,
+                                       int64_t beam_width) const {
 #if defined(USE_NPU)
   BeamSearchOutput output;
 
@@ -42,6 +45,14 @@ BeamSearchOutput BeamSearcher::forward(
   output.out_logprobs = output.out_logprobs.reshape({-1});
   output.out_tokens = output.out_tokens.reshape({-1});
   return output;
+#elif defined(USE_MLU)
+  // Guard against callers that do not supply beam_width (e.g. rec engine),
+  // which would otherwise divide by zero in the device kernel.
+  if (beam_width <= 0) {
+    return BeamSearchOutput();
+  }
+  return xllm::kernel::mlu::beam_search(
+      logprobs, top_tokens, top_logprobs, beam_width);
 #else
   NOT_IMPLEMENTED();
 #endif

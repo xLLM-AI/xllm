@@ -42,9 +42,11 @@ class BeamSearcher {
   // logprobs: [num_seq]
   // top_tokens: [num_seq, top_k]
   // top_logprobs: [num_seq, top_k]
+  // beam_width: per-group beam count, only consumed by the MLU device path.
   BeamSearchOutput forward(const torch::Tensor& logprobs,
                            const torch::Tensor& top_tokens,
-                           const torch::Tensor& top_logprobs) const;
+                           const torch::Tensor& top_logprobs,
+                           int64_t beam_width = 0) const;
 };
 
 }  // namespace xllm
