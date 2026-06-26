@@ -289,9 +289,13 @@ class DeepseekV4ModelImpl final
       }
     }
 
+    // Stash the pre-hc_head 3D hidden for the MTP draft. 
+    torch::Tensor pre_hc_head_h = h;
     h = hc_head_(h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
-    return ModelOutput(hidden_states, residual_out);
+    ModelOutput out(hidden_states, residual_out);
+    out.aux_hidden_states = pre_hc_head_h.flatten(1);
+    return out;
   }
 
  public:

@@ -38,6 +38,7 @@ limitations under the License.
 #include "framework/request/request_state.h"
 #include "scheduler/profile/graph_warmup.h"
 #include "util/rec_model_utils.h"
+#include "util/utils.h"
 
 namespace xllm {
 
@@ -690,8 +691,16 @@ std::shared_ptr<Request> ProfileManager::generate_single_decode_request(
   // per-token decode state. Inject a placeholder bootstrap embedding so the
   // synthetic warmup/profile request takes the same bootstrap path as a real
   // disagg PD decode request instead of reading stale recycled decode state.
+#if defined(USE_MLU)
+  const int64_t bootstrap_width =
+      util::is_deepseek_v4_model_type(model_args.model_type())
+          ? model_args.hc_mult() * model_args.hidden_size()
+          : model_args.hidden_size();
+#else
+  const int64_t bootstrap_width = model_args.hidden_size();
+#endif
   prepare_warmup_decode_sequence(
-      sequence, model_args.hidden_size(), num_speculative_tokens);
+      sequence, bootstrap_width, num_speculative_tokens);
 
   CHECK(sequence->stage() == SequenceStage::DECODE)
       << "Decode profiling request is not in DECODE stage. total_length: "

@@ -51,7 +51,7 @@ void SlidingWindowBlockManager::release_out_of_window(Sequence* seq) {
   // sequence's existing SWA blocks.
   const size_t cached_tokens = kv_state.kv_cache_tokens_num();
   const size_t num_spec_tokens =
-      std::max<size_t>(options_.num_speculative_tokens());
+      static_cast<size_t>(options_.num_speculative_tokens());
   const size_t sliding_window_tokens =
       std::max<size_t>(options_.sliding_window_size(), 1);
   if (cached_tokens < (sliding_window_tokens + num_spec_tokens)) {
