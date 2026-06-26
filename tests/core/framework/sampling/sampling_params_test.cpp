@@ -115,4 +115,66 @@ TEST(SamplingParamsTest, AbnormalConcat) {
   EXPECT_FALSE(sampling_parameters_1.sample_idxes.defined());
 }
 
+namespace {
+SamplingParameters make_beam_params(int32_t beam_width) {
+  RequestSamplingParam request;
+  request.beam_width = beam_width;
+  std::vector<int32_t> selected_token_idxes{0};
+  std::vector<int32_t> sample_idxes{0};
+  std::vector<std::vector<int64_t>> unique_token_ids_vec{
+      std::vector<int64_t>{1}};
+  std::vector<std::vector<int32_t>> unique_token_counts_vec{
+      std::vector<int32_t>{1}};
+  std::vector<int32_t> unique_token_lens_vec{1};
+
+  SamplingParameters params;
+  params.init(std::vector<const RequestSamplingParam*>{&request},
+              selected_token_idxes,
+              sample_idxes,
+              unique_token_ids_vec,
+              unique_token_counts_vec,
+              unique_token_lens_vec);
+  return params;
+}
+}  // namespace
+
+TEST(SamplingParamsTest, InitAggregatesBeamWidth) {
+  SamplingParameters params = make_beam_params(/*beam_width=*/4);
+  EXPECT_EQ(params.beam_width, 4);
+  EXPECT_TRUE(params.use_beam_search);
+}
+
+TEST(SamplingParamsTest, InitDefaultBeamWidthIsZero) {
+  SamplingParameters params = make_beam_params(/*beam_width=*/0);
+  EXPECT_EQ(params.beam_width, 0);
+  EXPECT_FALSE(params.use_beam_search);
+}
+
+TEST(SamplingParamsTest, ToCarriesBeamWidth) {
+  SamplingParameters params = make_beam_params(/*beam_width=*/3);
+  SamplingParameters device_params = params.to(torch::kCPU, torch::kFloat32);
+  EXPECT_EQ(device_params.beam_width, 3);
+  EXPECT_TRUE(device_params.use_beam_search);
+}
+
+TEST(SamplingParamsTest, ConcatConsistentBeamWidth) {
+  SamplingParameters params_1 = make_beam_params(/*beam_width=*/4);
+  SamplingParameters params_2 = make_beam_params(/*beam_width=*/4);
+  params_1.concat(params_2);
+  EXPECT_EQ(params_1.beam_width, 4);
+}
+
+TEST(SamplingParamsTest, ConcatCarriesBeamWidthWhenOneSideZero) {
+  SamplingParameters params_1 = make_beam_params(/*beam_width=*/0);
+  SamplingParameters params_2 = make_beam_params(/*beam_width=*/4);
+  params_1.concat(params_2);
+  EXPECT_EQ(params_1.beam_width, 4);
+}
+
+TEST(SamplingParamsDeathTest, ConcatInconsistentBeamWidth) {
+  SamplingParameters params_1 = make_beam_params(/*beam_width=*/4);
+  SamplingParameters params_2 = make_beam_params(/*beam_width=*/2);
+  EXPECT_DEATH(params_1.concat(params_2), "beam_width");
+}
+
 }  // namespace xllm

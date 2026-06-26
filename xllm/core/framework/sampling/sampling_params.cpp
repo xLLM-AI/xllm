@@ -52,6 +52,7 @@ void SamplingParameters::init(
   int64_t max_top_logprobs = 0;
   bool is_embeddings = false;
   int32_t num_return_sequences = 0;
+  int32_t beam_width = 0;
   for (const auto* p : req_sampling_params) {
     frequency_penalties.push_back(p->frequency_penalty);
     presence_penalties.push_back(p->presence_penalty);
@@ -64,6 +65,7 @@ void SamplingParameters::init(
     max_top_logprobs = std::max(max_top_logprobs, p->top_logprobs);
     num_return_sequences =
         std::max(num_return_sequences, p->num_return_sequences);
+    beam_width = std::max(beam_width, p->beam_width);
     if (p->beam_width > 0) {
       use_beam_search = true;
     }
@@ -151,6 +153,7 @@ void SamplingParameters::init(
   this->max_top_logprobs = max_top_logprobs;
   this->is_embeddings = is_embeddings;
   this->num_return_sequences = num_return_sequences;
+  this->beam_width = beam_width;
   if (this->do_sample.defined()) {
     this->all_random_sample = this->do_sample.all().item<bool>();
     this->all_greedy_sample = !this->do_sample.any().item<bool>();
@@ -197,6 +200,14 @@ void SamplingParameters::concat(const SamplingParameters& param) {
       std::max(this->max_top_logprobs, param.max_top_logprobs);
   this->num_return_sequences =
       std::max(this->num_return_sequences, param.num_return_sequences);
+  // beam_width is a batch-uniform scalar; merging microbatches must keep a
+  // single value. Two defined (non-zero) widths that differ is a bug.
+  if (this->beam_width != 0 && param.beam_width != 0) {
+    CHECK_EQ(this->beam_width, param.beam_width)
+        << "Inconsistent beam_width during concat: " << this->beam_width
+        << " vs " << param.beam_width;
+  }
+  this->beam_width = std::max(this->beam_width, param.beam_width);
   return;
 }
 

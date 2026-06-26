@@ -283,10 +283,10 @@ size_t get_sampling_params_size(const SamplingParameters& params) {
   total += get_tensor_size(params.sample_idxes);
   total += get_tensor_size(params.do_sample);
   total += get_tensor_size(params.acc_logprob);
-  total += type_size<bool> * 5    // all_random_sample + all_greedy_sample +
-                                  // logprobs + is_embeddings + use_beam_search
-           + type_size<int64_t>   // max_top_logprobs
-           + type_size<int32_t>;  // num_return_sequences
+  total += type_size<bool> * 5   // all_random_sample + all_greedy_sample +
+                                 // logprobs + is_embeddings + use_beam_search
+           + type_size<int64_t>  // max_top_logprobs
+           + type_size<int32_t> * 2;  // num_return_sequences + beam_width
   return total;
 }
 
@@ -2230,6 +2230,7 @@ inline void deserialize_forward_input_payload(
     read_data(context, sampling_params.max_top_logprobs);
     read_data(context, sampling_params.num_return_sequences);
     read_data(context, sampling_params.use_beam_search);
+    read_data(context, sampling_params.beam_width);
   }
   // acc_logprob
   read_tensor(context, forward_input.sampling_params.acc_logprob, stream);
@@ -2571,6 +2572,7 @@ inline void serialize_forward_input_sections(
     write_data(context.descriptor, sampling_params.max_top_logprobs);
     write_data(context.descriptor, sampling_params.num_return_sequences);
     write_data(context.descriptor, sampling_params.use_beam_search);
+    write_data(context.descriptor, sampling_params.beam_width);
   }
 
   write_tensor(context, sampling_params.acc_logprob);
