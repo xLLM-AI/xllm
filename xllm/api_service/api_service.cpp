@@ -90,7 +90,8 @@ void verbose_log_request_failure(brpc::Controller* ctrl,
   // no escaping and no delimiter the body itself could collide with; the
   // millisecond timestamp prefix on the following entry marks where it ends.
   XLLM_VERBOSE_TRACE() << "event=request_failed_context x-request-id="
-                       << x_request_id
+                       << x_request_id << " http="
+                       << api_service::status_code_to_http_status(code)
                        << " path=" << ctrl->http_request().uri().path()
                        << " status=" << api_service::status_code_to_string(code)
                        << " reason=" << message << " request_body=\n"

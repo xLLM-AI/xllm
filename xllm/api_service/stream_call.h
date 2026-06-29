@@ -90,7 +90,7 @@ class StreamCall : public Call {
             response, &json_output, json_options_, &err_msg)) {
       return finish_with_error(StatusCode::UNKNOWN, err_msg);
     }
-    XLLM_VERBOSE_TRACE() << "event=request_completed x-request-id="
+    XLLM_VERBOSE_TRACE() << "event=request_completed http=200 x-request-id="
                          << x_request_id();
     return true;
   }
@@ -137,7 +137,7 @@ class StreamCall : public Call {
     io_buf_.append("data: [DONE]\n\n");
 
     pa_->Write(io_buf_);
-    XLLM_VERBOSE_TRACE() << "event=request_completed x-request-id="
+    XLLM_VERBOSE_TRACE() << "event=request_completed http=200 x-request-id="
                          << x_request_id();
     return true;
   }
@@ -219,7 +219,7 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
       return this->finish_with_error(StatusCode::UNKNOWN, err_msg);
     }
     this->controller_->response_attachment().append(json);
-    XLLM_VERBOSE_TRACE() << "event=request_completed x-request-id="
+    XLLM_VERBOSE_TRACE() << "event=request_completed http=200 x-request-id="
                          << this->x_request_id();
     return true;
   }

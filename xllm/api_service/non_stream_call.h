@@ -77,7 +77,7 @@ class NonStreamCall : public Call {
       return finish_with_error(StatusCode::UNKNOWN, err_msg);
     }
 
-    XLLM_VERBOSE_TRACE() << "event=request_completed x-request-id="
+    XLLM_VERBOSE_TRACE() << "event=request_completed http=200 x-request-id="
                          << x_request_id();
     return true;
   }
