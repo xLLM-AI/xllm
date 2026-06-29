@@ -36,6 +36,30 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+BlockManagerPool::Options make_block_options(int32_t num_blocks,
+                                             int32_t block_size) {
+  BlockManagerPool::Options options;
+  options.num_blocks(num_blocks)
+      .block_size(block_size)
+      .enable_prefix_cache(true)
+      .enable_disagg_pd(true);
+  return options;
+}
+
+class EmptyMetricsBlockManagerPool final : public BlockManagerPool {
+ public:
+  explicit EmptyMetricsBlockManagerPool(const Options& options)
+      : BlockManagerPool(options, /*dp_size=*/1) {}
+
+  std::vector<size_t> num_blocks_in_prefix_cache() const override { return {}; }
+
+  std::vector<size_t> num_free_blocks() const override { return {}; }
+
+  std::vector<size_t> num_used_blocks() const override { return {}; }
+
+  double kv_cache_utilization() const override { return 0.75; }
+};
+
 class FakeTokenizer final : public Tokenizer {
  public:
   bool encode(const std::string_view& /*text*/,
@@ -65,14 +89,18 @@ class FakeTokenizer final : public Tokenizer {
 
 class FakeEngine final : public Engine {
  public:
-  FakeEngine(int32_t num_blocks, int32_t block_size) {
-    BlockManagerPool::Options options;
-    options.num_blocks(num_blocks)
-        .block_size(block_size)
-        .enable_prefix_cache(true)
-        .enable_disagg_pd(true);
+  FakeEngine(int32_t num_blocks,
+             int32_t block_size,
+             bool empty_metrics = false) {
+    BlockManagerPool::Options options =
+        make_block_options(num_blocks, block_size);
     tokenizer_ = std::make_unique<FakeTokenizer>();
-    block_manager_ = std::make_unique<BlockManagerPool>(options, /*dp_size=*/1);
+    if (empty_metrics) {
+      block_manager_ = std::make_unique<EmptyMetricsBlockManagerPool>(options);
+    } else {
+      block_manager_ =
+          std::make_unique<BlockManagerPool>(options, /*dp_size=*/1);
+    }
   }
 
   ForwardOutput step(std::vector<Batch>& /*batch*/) override {
@@ -302,6 +330,38 @@ TEST(DisaggPDChunkedPrefillSchedulerTest, UpdatesBlockMetrics) {
   double num_used_blocks = GAUGE_VALUE(num_used_blocks);
   EXPECT_EQ(num_free_blocks, 5);
   EXPECT_EQ(num_used_blocks, 2);
+
+  block_manager->deallocate(request.get());
+}
+
+TEST(DisaggPDChunkedPrefillSchedulerTest, SkipsEmptyBlockMetrics) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), true);
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2, /*empty_metrics=*/true);
+  BlockManagerPool* block_manager = engine.block_manager_pool();
+  DisaggPDChunkedPrefillScheduler scheduler(&engine,
+                                            make_options(
+                                                /*max_tokens_per_batch=*/4,
+                                                /*max_chunk=*/4));
+  std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
+  ASSERT_TRUE(scheduler.ContinuousScheduler::add_request(request));
+
+  GAUGE_SET(kv_cache_utilization_perc, 0);
+  GAUGE_SET(num_blocks_in_prefix_cache, 11);
+  GAUGE_SET(num_free_blocks, 12);
+  GAUGE_SET(num_used_blocks, 13);
+  std::vector<Batch> batches = scheduler.prepare_batch_test();
+
+  ASSERT_EQ(batches.size(), 1u);
+  ASSERT_EQ(batches[0].size(), 1u);
+  double kv_cache_utilization_perc = GAUGE_VALUE(kv_cache_utilization_perc);
+  double num_blocks_in_prefix_cache = GAUGE_VALUE(num_blocks_in_prefix_cache);
+  double num_free_blocks = GAUGE_VALUE(num_free_blocks);
+  double num_used_blocks = GAUGE_VALUE(num_used_blocks);
+  EXPECT_EQ(kv_cache_utilization_perc, 0.75);
+  EXPECT_EQ(num_blocks_in_prefix_cache, 11);
+  EXPECT_EQ(num_free_blocks, 12);
+  EXPECT_EQ(num_used_blocks, 13);
 
   block_manager->deallocate(request.get());
 }

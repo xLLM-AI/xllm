@@ -46,10 +46,19 @@ bool exceeds_block_capacity(Sequence* sequence, KVCacheManager* manager) {
 void update_block_metrics(KVCacheManager* manager) {
   CHECK(manager != nullptr);
   GAUGE_SET(kv_cache_utilization_perc, manager->kv_cache_utilization());
-  GAUGE_SET(num_blocks_in_prefix_cache,
-            util::min(manager->num_blocks_in_prefix_cache()));
-  GAUGE_SET(num_free_blocks, util::max(manager->num_free_blocks()));
-  GAUGE_SET(num_used_blocks, util::min(manager->num_used_blocks()));
+  const std::vector<size_t> prefix_cache_blocks =
+      manager->num_blocks_in_prefix_cache();
+  if (!prefix_cache_blocks.empty()) {
+    GAUGE_SET(num_blocks_in_prefix_cache, util::min(prefix_cache_blocks));
+  }
+  const std::vector<size_t> free_blocks = manager->num_free_blocks();
+  if (!free_blocks.empty()) {
+    GAUGE_SET(num_free_blocks, util::max(free_blocks));
+  }
+  const std::vector<size_t> used_blocks = manager->num_used_blocks();
+  if (!used_blocks.empty()) {
+    GAUGE_SET(num_used_blocks, util::min(used_blocks));
+  }
 }
 
 }  // namespace
