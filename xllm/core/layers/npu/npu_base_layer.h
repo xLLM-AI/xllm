@@ -84,7 +84,11 @@ enum class PackType : int {
   ALL_W8A8_DYNAMIC = 18,
   ALL_W8A8_DYNAMIC_ANTI = 19,
   MIX_W8A8_DYNAMIC = 20,
-  MIX_W8A8_DYNAMIC_ANTI = 21
+  MIX_W8A8_DYNAMIC_ANTI = 21,
+  ALL_W4A8 = 22,
+  MIX_W4A8 = 23,
+  ALL_W4A8_ANTI = 24,
+  MIX_W4A8_ANTI = 25
 };
 
 enum class LinearTypeV2 : int {

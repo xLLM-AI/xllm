@@ -561,7 +561,8 @@ w4a8_dynamic_moe_preprocess(W4A8DynamicMoePreprocessParams& params) {
                                           params.w2_weight_scale_second,
                                           params.w13_scale_bias,
                                           params.w2_scale_bias,
-                                          params.group_size);
+                                          params.group_size,
+                                          params.pack_weight_to_int32);
 #else
   NOT_IMPLEMENTED();
 #endif

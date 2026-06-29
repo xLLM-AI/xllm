@@ -82,6 +82,9 @@ class ConfigView:
     def get(self, name: str, default: Any = None) -> Any:
         return self._data.get(name, default)
 
+    def __contains__(self, name: str) -> bool:
+        return name in self._data
+
     def get_nested(self, path: str, default: Any = None) -> Any:
         current: Any = self._data
         for name in path.split("."):
@@ -236,6 +239,42 @@ def get_mtp_layer_count(config: ConfigView, model_type: str) -> int:
     )
 
 
+def _is_dsa_mtp_model(model_type: str) -> bool:
+    return model_type in {"deepseek_v32", "glm_moe_dsa"}
+
+
+def _has_dsa_indexer(config: ConfigView) -> bool:
+    return (
+        _is_positive_config_value(config.get("index_n_heads"))
+        and _is_positive_config_value(config.get("index_head_dim"))
+        and _is_positive_config_value(config.get("index_topk"))
+    )
+
+
+def _update_mtp_dsa_topk_config(
+    updates: dict[str, Any],
+    config: ConfigView,
+    model_type: str,
+) -> None:
+    if not _is_dsa_mtp_model(model_type) or not _has_dsa_indexer(config):
+        return
+
+    if not bool(config.get("index_share_for_mtp_iteration", False)):
+        return
+
+    index_topk_freq = int(config.get("index_topk_freq", 1) or 1)
+    mtp_topk_updates = {
+        "index_share_for_mtp_iteration": True,
+        "index_topk_freq": max(index_topk_freq, 2),
+        "index_skip_topk_offset": 0,
+        "index_topk_pattern": "S",
+        "indexer_types": ["full"],
+    }
+    for key, value in mtp_topk_updates.items():
+        if key in config:
+            updates[key] = value
+
+
 def update_and_save_config(config: ConfigView, output_dir: str, model_type: str, mtp_layer_count: int) -> None:
     """Update and save config for MTP model."""
     new_config = config.to_dict()
@@ -256,6 +295,8 @@ def update_and_save_config(config: ConfigView, output_dir: str, model_type: str,
 
     if model_type in QWEN3_5_EXPORT_MODEL_TYPES:
         updates["mtp_num_hidden_layers"] = mtp_layer_count
+
+    _update_mtp_dsa_topk_config(updates, config, model_type)
 
     new_config.update(updates)
 

@@ -293,7 +293,8 @@ w4a8_dynamic_moe_preprocess(
     const std::optional<torch::Tensor>& w2_weight_scale_second,
     const std::optional<torch::Tensor>& w13_scale_bias,
     const std::optional<torch::Tensor>& w2_scale_bias,
-    int64_t group_size);
+    int64_t group_size,
+    bool pack_weight_to_int32);
 
 std::tuple<torch::Tensor, torch::Tensor> rec_constrained_topk(
     const torch::Tensor& logits,
