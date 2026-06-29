@@ -50,7 +50,11 @@ class ServiceConfig final {
          "max_concurrent_requests",
          "num_request_handling_threads",
          "num_response_handling_threads",
-         "health_check_interval_ms"}};
+         "health_check_interval_ms",
+         "enable_verbose_trace_log",
+         "verbose_trace_log_path",
+         "verbose_trace_log_max_size_mb",
+         "verbose_trace_log_max_files"}};
     return kOptionCategory;
   }
 
@@ -73,6 +77,14 @@ class ServiceConfig final {
   PROPERTY(int32_t, num_response_handling_threads) = 4;
 
   PROPERTY(int32_t, health_check_interval_ms) = 3000;
+
+  PROPERTY(bool, enable_verbose_trace_log) = false;
+
+  PROPERTY(std::string, verbose_trace_log_path);
+
+  PROPERTY(int32_t, verbose_trace_log_max_size_mb) = 1024;
+
+  PROPERTY(int32_t, verbose_trace_log_max_files) = 100000;
 };
 
 }  // namespace xllm

@@ -272,7 +272,7 @@ void CompletionServiceImpl::process_async_impl(
   }
 
   RequestParams request_params(
-      rpc_request, call->get_x_request_id(), call->get_x_request_time());
+      rpc_request, call->x_request_id(), call->get_x_request_time());
   bool include_usage = false;
   if (rpc_request.has_stream_options()) {
     include_usage = rpc_request.stream_options().include_usage();

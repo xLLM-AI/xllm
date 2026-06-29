@@ -34,6 +34,7 @@ cc_library(
     type_traits.h
     utils.h
     uuid.h
+    verbose_trace_logger.h
     shared_memory_manager.h
   SRCS
     cpu_affinity.cpp
@@ -53,6 +54,7 @@ cc_library(
     timer.cpp
     utils.cpp
     uuid.cpp
+    verbose_trace_logger.cpp
     shared_memory_manager.cpp
   DEPS
     Folly::folly

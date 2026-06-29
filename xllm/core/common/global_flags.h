@@ -402,3 +402,12 @@ DECLARE_bool(enable_aclnn_swiglu);
 DECLARE_bool(use_cpp_chat_template);
 
 DECLARE_int32(health_check_interval_ms);
+
+// --- verbose trace logging config ---
+DECLARE_bool(enable_verbose_trace_log);
+
+DECLARE_string(verbose_trace_log_path);
+
+DECLARE_int32(verbose_trace_log_max_size_mb);
+
+DECLARE_int32(verbose_trace_log_max_files);

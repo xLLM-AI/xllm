@@ -15,7 +15,9 @@ limitations under the License.
 
 #include "call.h"
 
+#include "api_service/api_error.h"
 #include "core/common/constants.h"
+#include "core/util/verbose_trace_logger.h"
 
 namespace xllm {
 
@@ -23,9 +25,10 @@ Call::Call(brpc::Controller* controller) : controller_(controller) { init(); }
 
 void Call::init() {
   if (controller_->http_request().GetHeader("x-request-id")) {
-    x_request_id_ = *controller_->http_request().GetHeader("x-request-id");
+    raw_header_x_request_id_ =
+        *controller_->http_request().GetHeader("x-request-id");
   } else if (controller_->http_request().GetHeader("x-ms-client-request-id")) {
-    x_request_id_ =
+    raw_header_x_request_id_ =
         *controller_->http_request().GetHeader("x-ms-client-request-id");
   }
 
@@ -35,6 +38,16 @@ void Call::init() {
     x_request_time_ =
         *controller_->http_request().GetHeader("x-request-timems");
   }
+
+  // Resolve the request-scoped x-request-id once, here: the client-supplied
+  // value when present, otherwise a server-generated id. Shared across logs,
+  // the verbose trace and the engine so a request can be correlated end to end.
+  x_request_id_ = raw_header_x_request_id_.empty()
+                      ? api_service::generate_x_request_id()
+                      : raw_header_x_request_id_;
+  XLLM_VERBOSE_TRACE() << "event=request_received x-request-id="
+                       << x_request_id_
+                       << " path=" << controller_->http_request().uri().path();
 
   init_request_payload();
 }

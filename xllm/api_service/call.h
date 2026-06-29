@@ -26,8 +26,13 @@ class Call {
   Call(brpc::Controller* controller);
   virtual ~Call() = default;
 
-  std::string get_x_request_id() { return x_request_id_; }
+  std::string raw_header_x_request_id() { return raw_header_x_request_id_; }
   std::string get_x_request_time() { return x_request_time_; }
+
+  // The request-scoped x-request-id: the client-supplied value when present,
+  // otherwise a server-generated id. Always non-empty after construction and
+  // shared across logs, the verbose trace and the engine.
+  const std::string& x_request_id() const { return x_request_id_; }
 
   std::string take_request_payload() { return std::move(request_payload_); }
   void init_request_payload();
@@ -40,8 +45,9 @@ class Call {
  protected:
   brpc::Controller* controller_;
 
-  std::string x_request_id_;
+  std::string raw_header_x_request_id_;
   std::string x_request_time_;
+  std::string x_request_id_;
 
   std::string request_payload_;
 };

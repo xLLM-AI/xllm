@@ -48,7 +48,7 @@ void Qwen3RerankServiceImpl::process_async_impl(
   }
 
   RequestParams request_params(
-      rpc_request, call->get_x_request_id(), call->get_x_request_time());
+      rpc_request, call->x_request_id(), call->get_x_request_time());
   std::vector<RequestParams> sps(documents.size(), request_params);
   auto request_id = request_params.request_id;
 

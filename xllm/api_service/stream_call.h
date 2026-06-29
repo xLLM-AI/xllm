@@ -27,8 +27,10 @@ limitations under the License.
 
 #include "anthropic.pb.h"
 #include "api_service/anthropic_json.h"
+#include "api_service/api_error.h"
 #include "api_service/call.h"
 #include "core/common/types.h"
+#include "core/util/verbose_trace_logger.h"
 
 namespace xllm {
 
@@ -88,18 +90,25 @@ class StreamCall : public Call {
             response, &json_output, json_options_, &err_msg)) {
       return finish_with_error(StatusCode::UNKNOWN, err_msg);
     }
+    XLLM_VERBOSE_TRACE() << "event=request_completed x-request-id="
+                         << x_request_id();
     return true;
   }
 
-  bool finish_with_error(const StatusCode& code,
-                         const std::string& error_message) {
+  virtual bool finish_with_error(const StatusCode& code,
+                                 const std::string& error_message) {
     if (!stream_) {
-      controller_->SetFailed(error_message);
-
+      api_service::write_openai_error(
+          controller_, code, error_message, x_request_id());
     } else {
+      // The stream has already committed a 200 header, so the error can only be
+      // surfaced as a terminal SSE event carrying the OpenAI error envelope.
       io_buf_.clear();
-      io_buf_.append(error_message);
+      io_buf_.append("data: ");
+      io_buf_.append(api_service::make_openai_error_json(code, error_message));
+      io_buf_.append("\n\n");
       pa_->Write(io_buf_);
+      api_service::log_request_error(code, error_message, x_request_id());
     }
 
     return true;
@@ -128,6 +137,8 @@ class StreamCall : public Call {
     io_buf_.append("data: [DONE]\n\n");
 
     pa_->Write(io_buf_);
+    XLLM_VERBOSE_TRACE() << "event=request_completed x-request-id="
+                         << x_request_id();
     return true;
   }
 
@@ -179,6 +190,26 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
                                                      use_arena) {}
 
   ~AnthropicCall() {}
+
+  // Anthropic uses its own error envelope: a JSON object
+  // {"type":"error","error":{"type":...,"message":...}} for non-stream and an
+  // `error` SSE event for streaming responses.
+  bool finish_with_error(const StatusCode& code,
+                         const std::string& error_message) override {
+    if (!this->stream_) {
+      api_service::write_anthropic_error(
+          this->controller_, code, error_message, this->x_request_id());
+    } else {
+      this->io_buf_.clear();
+      this->io_buf_.append("event: error\ndata: ");
+      this->io_buf_.append(
+          api_service::make_anthropic_error_json(code, error_message));
+      this->io_buf_.append("\n\n");
+      this->pa_->Write(this->io_buf_);
+      api_service::log_request_error(code, error_message, this->x_request_id());
+    }
+    return true;
+  }
 
   bool write_and_finish(proto::AnthropicMessagesResponse& response) {
     std::string json;

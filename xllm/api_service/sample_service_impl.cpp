@@ -403,6 +403,7 @@ void SampleServiceImpl::process_async_impl(std::shared_ptr<SampleCall> call) {
                             "Failed to build sample selector runtime mapping");
     return;
   }
+  request_params.set_x_request_id_if_absent(call->x_request_id());
 
   if (request_params.sample_slots.empty()) {
     if (!sample_service_internal::build_empty_response(

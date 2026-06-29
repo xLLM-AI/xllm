@@ -292,7 +292,7 @@ void RecCompletionServiceImpl::process_async_impl(
   Timer request_timer;
 
   RequestParams request_params(
-      rpc_request, call->get_x_request_id(), call->get_x_request_time());
+      rpc_request, call->x_request_id(), call->get_x_request_time());
   if (::xllm::RecConfig::get_instance().enable_output_sku_logprobs()) {
     request_params.logprobs = true;
   }

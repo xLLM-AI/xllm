@@ -25,8 +25,10 @@ limitations under the License.
 #include <optional>
 #include <string>
 
+#include "api_service/api_error.h"
 #include "call.h"
 #include "core/common/types.h"
+#include "core/util/verbose_trace_logger.h"
 
 namespace xllm {
 
@@ -75,6 +77,8 @@ class NonStreamCall : public Call {
       return finish_with_error(StatusCode::UNKNOWN, err_msg);
     }
 
+    XLLM_VERBOSE_TRACE() << "event=request_completed x-request-id="
+                         << x_request_id();
     return true;
   }
 
@@ -102,7 +106,8 @@ class NonStreamCall : public Call {
   // For non stream response
   bool finish_with_error(const StatusCode& code,
                          const std::string& error_message) {
-    controller_->SetFailed(error_message);
+    api_service::write_openai_error(
+        controller_, code, error_message, x_request_id());
     return true;
   }
 

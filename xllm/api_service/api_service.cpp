@@ -22,6 +22,7 @@ limitations under the License.
 
 #include <filesystem>
 
+#include "api_service/api_error.h"
 #include "api_service/chat_json_parser.h"
 #include "api_service/completion_json_parser.h"
 #include "api_service/service_impl_factory.h"
@@ -40,6 +41,7 @@ limitations under the License.
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/profile_config.h"
 #include "core/util/closure_guard.h"
+#include "core/util/verbose_trace_logger.h"
 #include "embedding.pb.h"
 #include "image_generation.pb.h"
 #include "models.pb.h"
@@ -61,6 +63,62 @@ google::protobuf::Arena* GetArenaWithCheck(
 }
 
 const char* kSampleNotSupportedError = "/v1/sample is only supported for LLM";
+
+// Upper bound on the raw request body captured into the verbose trace log, so a
+// pathologically large payload cannot blow up the off-hot-path record.
+constexpr size_t kVerboseBodyLimit = 8192;
+
+// Emit the failing request's full context (x-request-id, endpoint, raw body) to
+// the asynchronous verbose trace log. Guarded by enabled() so the body string
+// is only materialized when the feature is on.
+void verbose_log_request_failure(brpc::Controller* ctrl,
+                                 StatusCode code,
+                                 const std::string& message,
+                                 const std::string& x_request_id) {
+  if (!VerboseTraceLogger::get_instance().enabled()) {
+    return;
+  }
+  std::string body = ctrl->request_attachment().to_string();
+  if (body.size() > kVerboseBodyLimit) {
+    body.resize(kVerboseBodyLimit);
+    body.append("...(truncated)");
+  }
+  // request_body is arbitrary, fully untrusted user input (it may contain
+  // spaces, braces, quotes, or newlines), so it is emitted last and on its own
+  // line: everything from the trailing "request_body=" newline up to the next
+  // timestamped entry is the verbatim body. This keeps it copy-pasteable with
+  // no escaping and no delimiter the body itself could collide with; the
+  // millisecond timestamp prefix on the following entry marks where it ends.
+  XLLM_VERBOSE_TRACE() << "event=request_failed_context x-request-id="
+                       << x_request_id
+                       << " path=" << ctrl->http_request().uri().path()
+                       << " status=" << api_service::status_code_to_string(code)
+                       << " reason=" << message << " request_body=\n"
+                       << body;
+}
+
+// Finish an HTTP request with a structured OpenAI-style error body plus an
+// x-request-id annotated log line. Centralizes the early-failure path shared by
+// the HTTP entrypoints (JSON parse failure, missing model, disabled feature,
+// ...). These early failures happen before a Call exists, so the x-request-id
+// is resolved here (client header or freshly generated) for the log line.
+void fail_http_request(brpc::Controller* ctrl,
+                       StatusCode code,
+                       const std::string& message) {
+  const std::string x_request_id = api_service::ensure_x_request_id(ctrl);
+  verbose_log_request_failure(ctrl, code, message, x_request_id);
+  api_service::write_openai_error(ctrl, code, message, x_request_id);
+}
+
+// Anthropic HTTP entrypoints surface failures using the Anthropic error
+// envelope instead of the OpenAI one.
+void fail_anthropic_request(brpc::Controller* ctrl,
+                            StatusCode code,
+                            const std::string& message) {
+  const std::string x_request_id = api_service::ensure_x_request_id(ctrl);
+  verbose_log_request_failure(ctrl, code, message, x_request_id);
+  api_service::write_anthropic_error(ctrl, code, message, x_request_id);
+}
 
 // Shared dispatch for brpc-typed (non-Http) APIs that follow the standard
 // service_impl -> process_async pattern.  Performs argument validation,
@@ -212,8 +270,7 @@ void APIService::CompletionsHttp(::google::protobuf::RpcController* controller,
   auto st =
       json2pb::JsonToProtoMessage(processed_json, req_pb, options, &error);
   if (!st) {
-    ctrl->SetFailed(error);
-    LOG(ERROR) << "parse json to proto failed: " << error;
+    fail_http_request(ctrl, StatusCode::INVALID_ARGUMENT, error);
     return;
   }
 
@@ -271,7 +328,8 @@ void APIService::SampleHttp(::google::protobuf::RpcController* controller,
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
   if (!sample_service_impl_) {
-    ctrl->SetFailed(kSampleNotSupportedError);
+    fail_http_request(
+        ctrl, StatusCode::INVALID_ARGUMENT, kSampleNotSupportedError);
     return;
   }
 
@@ -287,8 +345,7 @@ void APIService::SampleHttp(::google::protobuf::RpcController* controller,
   butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
   auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
   if (!st) {
-    ctrl->SetFailed(error);
-    LOG(ERROR) << "parse json to proto failed: " << error;
+    fail_http_request(ctrl, StatusCode::INVALID_ARGUMENT, error);
     return;
   }
 
@@ -334,7 +391,9 @@ void chat_completions_http_impl(std::unique_ptr<Service>& service,
 
   auto content_len = get_json_content_length(ctrl);
   if (content_len == (size_t)-1L) {
-    ctrl->SetFailed("Content-Length header is missing.");
+    fail_http_request(ctrl,
+                      StatusCode::INVALID_ARGUMENT,
+                      "Content-Length header is missing.");
     return;
   }
 
@@ -344,9 +403,8 @@ void chat_completions_http_impl(std::unique_ptr<Service>& service,
   auto [preprocess_status, processed_json] =
       chat_json_parser.preprocess(std::move(attachment));
   if (!preprocess_status.ok()) {
-    ctrl->SetFailed(preprocess_status.message());
-    LOG(ERROR) << "Complex message preprocessing failed: "
-               << preprocess_status.message();
+    fail_http_request(
+        ctrl, preprocess_status.code(), preprocess_status.message());
     return;
   }
 
@@ -355,8 +413,7 @@ void chat_completions_http_impl(std::unique_ptr<Service>& service,
   auto status = google::protobuf::util::JsonStringToMessage(
       processed_json, req_pb, options);
   if (!status.ok()) {
-    ctrl->SetFailed(status.ToString());
-    LOG(ERROR) << "parse json to proto failed: " << status.ToString();
+    fail_http_request(ctrl, StatusCode::INVALID_ARGUMENT, status.ToString());
     return;
   }
 
@@ -514,8 +571,7 @@ void handle_embedding_request(std::unique_ptr<Service>& embedding_service_impl_,
   butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
   auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
   if (!st) {
-    ctrl->SetFailed(error);
-    LOG(ERROR) << "parse json to proto failed: " << error;
+    fail_http_request(ctrl, StatusCode::INVALID_ARGUMENT, error);
     return;
   }
 
@@ -587,8 +643,7 @@ void APIService::ImageGenerationHttp(
   butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
   auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
   if (!st) {
-    ctrl->SetFailed(error);
-    LOG(ERROR) << "parse json to proto failed: " << error;
+    fail_http_request(ctrl, StatusCode::INVALID_ARGUMENT, error);
     return;
   }
   std::shared_ptr<ImageGenerationCall> call =
@@ -641,8 +696,7 @@ void APIService::AudioGenerationHttp(
   butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
   bool st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
   if (!st) {
-    ctrl->SetFailed(error);
-    LOG(ERROR) << "parse json to proto failed: " << error;
+    fail_http_request(ctrl, StatusCode::INVALID_ARGUMENT, error);
     return;
   }
   std::shared_ptr<AudioGenerationCall> call =
@@ -749,8 +803,7 @@ void APIService::VideoGenerationHttp(
   butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
   auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
   if (!st) {
-    ctrl->SetFailed(error);
-    LOG(ERROR) << "parse json to proto failed: " << error;
+    fail_http_request(ctrl, StatusCode::INVALID_ARGUMENT, error);
     return;
   }
   std::shared_ptr<VideoGenerationCall> call =
@@ -795,8 +848,7 @@ void APIService::RerankHttp(::google::protobuf::RpcController* controller,
   butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
   auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
   if (!st) {
-    ctrl->SetFailed(error);
-    LOG(ERROR) << "parse json to proto failed: " << error;
+    fail_http_request(ctrl, StatusCode::INVALID_ARGUMENT, error);
     return;
   }
 
@@ -840,13 +892,13 @@ void APIService::ModelsHttp(::google::protobuf::RpcController* controller,
   auto resp_pb =
       google::protobuf::Arena::CreateMessage<proto::ModelListResponse>(arena);
 
+  auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
   bool st_models = models_service_impl_->list_models(nullptr, resp_pb);
   if (!st_models) {
-    LOG(ERROR) << "list models failed.";
+    fail_http_request(ctrl, StatusCode::UNKNOWN, "list models failed.");
     return;
   }
 
-  auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
   json2pb::Pb2JsonOptions json_options;
   json_options.bytes_to_base64 = false;
   std::string err_msg;
@@ -893,7 +945,9 @@ void handle_anthropic_messages(std::unique_ptr<AnthropicServiceImpl>& service,
 
   auto content_len = get_json_content_length(ctrl);
   if (content_len == (size_t)-1L) {
-    ctrl->SetFailed("Content-Length header is missing.");
+    fail_anthropic_request(ctrl,
+                           StatusCode::INVALID_ARGUMENT,
+                           "Content-Length header is missing.");
     return;
   }
   std::string attachment;
@@ -902,9 +956,8 @@ void handle_anthropic_messages(std::unique_ptr<AnthropicServiceImpl>& service,
   auto [preprocess_status, processed_json] =
       ChatJsonParser::anthropic().preprocess(std::move(attachment));
   if (!preprocess_status.ok()) {
-    ctrl->SetFailed(preprocess_status.message());
-    LOG(ERROR) << "Anthropic JSON preprocessing failed: "
-               << preprocess_status.message();
+    fail_anthropic_request(
+        ctrl, preprocess_status.code(), preprocess_status.message());
     return;
   }
 
@@ -913,8 +966,8 @@ void handle_anthropic_messages(std::unique_ptr<AnthropicServiceImpl>& service,
   auto status = google::protobuf::util::JsonStringToMessage(
       processed_json, req_pb, options);
   if (!status.ok()) {
-    ctrl->SetFailed(status.ToString());
-    LOG(ERROR) << "parse json to proto failed: " << status.ToString();
+    fail_anthropic_request(
+        ctrl, StatusCode::INVALID_ARGUMENT, status.ToString());
     return;
   }
 
@@ -949,8 +1002,10 @@ void APIService::AnthropicMessagesHttp(
     handle_anthropic_messages(
         anthropic_service_impl_, done_guard, ctrl, request, response);
   } else {
-    ctrl->SetFailed("Anthropic messages API is only supported for LLM engine");
-    LOG(ERROR) << "Anthropic messages API is only supported for LLM engine";
+    fail_anthropic_request(
+        ctrl,
+        StatusCode::INVALID_ARGUMENT,
+        "Anthropic messages API is only supported for LLM engine");
   }
 }
 
@@ -1083,15 +1138,13 @@ void APIService::ForkMasterHttp(::google::protobuf::RpcController* controller,
   butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
   auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
   if (!st) {
-    ctrl->SetFailed(error);
-    LOG(ERROR) << "parse json to proto failed: " << error;
+    fail_http_request(ctrl, StatusCode::INVALID_ARGUMENT, error);
     return;
   }
 
   std::string error_message;
   if (!do_fork_master(*req_pb, &error_message)) {
-    LOG(ERROR) << "fork_master failed: " << error_message;
-    ctrl->SetFailed(error_message);
+    fail_http_request(ctrl, StatusCode::UNKNOWN, error_message);
   }
 }
 
@@ -1180,14 +1233,13 @@ void APIService::SleepHttp(::google::protobuf::RpcController* controller,
   butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
   auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
   if (!st) {
-    ctrl->SetFailed(error);
-    LOG(ERROR) << "parse json to proto failed: " << error;
+    fail_http_request(ctrl, StatusCode::INVALID_ARGUMENT, error);
     return;
   }
 
   std::string error_message;
   if (!do_sleep(*req_pb, &error_message)) {
-    ctrl->SetFailed(error_message);
+    fail_http_request(ctrl, StatusCode::UNKNOWN, error_message);
   }
   // Success: return HTTP 200 with empty body
 }
@@ -1289,14 +1341,13 @@ void APIService::WakeupHttp(::google::protobuf::RpcController* controller,
   butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
   auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
   if (!st) {
-    ctrl->SetFailed(error);
-    LOG(ERROR) << "parse json to proto failed: " << error;
+    fail_http_request(ctrl, StatusCode::INVALID_ARGUMENT, error);
     return;
   }
 
   std::string error_message;
   if (!do_wakeup(*req_pb, &error_message)) {
-    ctrl->SetFailed(error_message);
+    fail_http_request(ctrl, StatusCode::UNKNOWN, error_message);
   }
   // Success: return HTTP 200 with empty body
 }
@@ -1314,23 +1365,21 @@ void APIService::StartProfileHttp(::google::protobuf::RpcController* controller,
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
 
   if (!ProfileConfig::get_instance().enable_online_profile()) {
-    LOG(ERROR) << "Profiling is disabled. Start the server with "
-                  "--enable_online_profile=true to use /start_profile.";
-    ctrl->SetFailed(
-        "Profiling is disabled. Start the server with "
-        "--enable_online_profile=true.");
+    fail_http_request(ctrl,
+                      StatusCode::UNAVAILABLE,
+                      "Profiling is disabled. Start the server with "
+                      "--enable_online_profile=true.");
     return;
   }
   if (master_ == nullptr) {
-    LOG(ERROR) << "No master available to start profiling.";
-    ctrl->SetFailed("No master available to start profiling.");
+    fail_http_request(
+        ctrl, StatusCode::UNKNOWN, "No master available to start profiling.");
     return;
   }
 
   LOG(INFO) << "Starting profiler.";
   if (!master_->start_profile()) {
-    LOG(ERROR) << "Failed to start profiler.";
-    ctrl->SetFailed("Failed to start profiler.");
+    fail_http_request(ctrl, StatusCode::UNKNOWN, "Failed to start profiler.");
     return;
   }
   LOG(INFO) << "Profiler started.";
@@ -1350,23 +1399,21 @@ void APIService::StopProfileHttp(::google::protobuf::RpcController* controller,
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
 
   if (!ProfileConfig::get_instance().enable_online_profile()) {
-    LOG(ERROR) << "Profiling is disabled. Start the server with "
-                  "--enable_online_profile=true to use /stop_profile.";
-    ctrl->SetFailed(
-        "Profiling is disabled. Start the server with "
-        "--enable_online_profile=true.");
+    fail_http_request(ctrl,
+                      StatusCode::UNAVAILABLE,
+                      "Profiling is disabled. Start the server with "
+                      "--enable_online_profile=true.");
     return;
   }
   if (master_ == nullptr) {
-    LOG(ERROR) << "No master available to stop profiling.";
-    ctrl->SetFailed("No master available to stop profiling.");
+    fail_http_request(
+        ctrl, StatusCode::UNKNOWN, "No master available to stop profiling.");
     return;
   }
 
   LOG(INFO) << "Stopping profiler.";
   if (!master_->stop_profile()) {
-    LOG(ERROR) << "Failed to stop profiler.";
-    ctrl->SetFailed("Failed to stop profiler.");
+    fail_http_request(ctrl, StatusCode::UNKNOWN, "Failed to stop profiler.");
     return;
   }
   LOG(INFO) << "Profiler stopped.";
@@ -1417,15 +1464,15 @@ void APIService::LinkP2PHttp(::google::protobuf::RpcController* controller,
   butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
   auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
   if (!st) {
-    ctrl->SetFailed(error);
-    LOG(ERROR) << "parse json to proto failed: " << error;
+    fail_http_request(ctrl, StatusCode::INVALID_ARGUMENT, error);
     return;
   }
 
   Master* master = get_model_master(req_pb->model_id());
   if (master == nullptr) {
     LOG(ERROR) << "Master for model " << req_pb->model_id() << " not found";
-    ctrl->SetFailed("Master for model not found");
+    fail_http_request(
+        ctrl, StatusCode::INVALID_ARGUMENT, "Master for model not found");
     return;
   }
   bool status = master->link_p2p(
@@ -1487,15 +1534,15 @@ void APIService::UnlinkP2PHttp(::google::protobuf::RpcController* controller,
   butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
   auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
   if (!st) {
-    ctrl->SetFailed(error);
-    LOG(ERROR) << "parse json to proto failed: " << error;
+    fail_http_request(ctrl, StatusCode::INVALID_ARGUMENT, error);
     return;
   }
 
   Master* master = get_model_master(req_pb->model_id());
   if (master == nullptr) {
     LOG(ERROR) << "Master for model " << req_pb->model_id() << " not found";
-    ctrl->SetFailed("Master for model not found");
+    fail_http_request(
+        ctrl, StatusCode::INVALID_ARGUMENT, "Master for model not found");
     return;
   }
   bool status = master->unlink_p2p(
@@ -1568,8 +1615,7 @@ void APIService::PauseHttp(::google::protobuf::RpcController* controller,
     auto st =
         json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
     if (!st) {
-      ctrl->SetFailed(error);
-      LOG(ERROR) << "PauseHttp: parse json to proto failed: " << error;
+      fail_http_request(ctrl, StatusCode::INVALID_ARGUMENT, error);
       return;
     }
   }

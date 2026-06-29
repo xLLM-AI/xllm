@@ -57,6 +57,7 @@ limitations under the License.
 #include "core/platform/device_name_utils.h"
 #include "core/util/net.h"
 #include "core/util/utils.h"
+#include "core/util/verbose_trace_logger.h"
 #include "function_call/function_call_parser.h"
 #include "parser/reasoning_parser.h"
 #include "server/xllm_server_registry.h"
@@ -502,6 +503,12 @@ int main(int argc, char** argv) {
   google::ParseCommandLineFlags(&argc, &argv, true);
   google::InitGoogleLogging("xllm");
   initialize_configs();
+
+  VerboseTraceLogger::get_instance().initialize(
+      ServiceConfig::get_instance().enable_verbose_trace_log(),
+      ServiceConfig::get_instance().verbose_trace_log_path(),
+      ServiceConfig::get_instance().verbose_trace_log_max_size_mb(),
+      ServiceConfig::get_instance().verbose_trace_log_max_files());
 
   // Check if model path is provided
   if (::xllm::ModelConfig::get_instance().model().empty()) {
