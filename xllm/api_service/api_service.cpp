@@ -905,7 +905,7 @@ void APIService::ModelsHttp(::google::protobuf::RpcController* controller,
   butil::IOBufAsZeroCopyOutputStream json_output(&ctrl->response_attachment());
   if (!json2pb::ProtoMessageToJson(
           *resp_pb, &json_output, json_options, &err_msg)) {
-    LOG(ERROR) << "proto to json failed";
+    fail_http_request(ctrl, StatusCode::UNKNOWN, err_msg);
     return;
   }
 }

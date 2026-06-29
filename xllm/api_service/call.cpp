@@ -24,13 +24,7 @@ namespace xllm {
 Call::Call(brpc::Controller* controller) : controller_(controller) { init(); }
 
 void Call::init() {
-  if (controller_->http_request().GetHeader("x-request-id")) {
-    raw_header_x_request_id_ =
-        *controller_->http_request().GetHeader("x-request-id");
-  } else if (controller_->http_request().GetHeader("x-ms-client-request-id")) {
-    raw_header_x_request_id_ =
-        *controller_->http_request().GetHeader("x-ms-client-request-id");
-  }
+  raw_header_x_request_id_ = api_service::get_header_x_request_id(controller_);
 
   if (controller_->http_request().GetHeader("x-request-time")) {
     x_request_time_ = *controller_->http_request().GetHeader("x-request-time");

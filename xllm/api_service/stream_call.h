@@ -219,6 +219,8 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
       return this->finish_with_error(StatusCode::UNKNOWN, err_msg);
     }
     this->controller_->response_attachment().append(json);
+    XLLM_VERBOSE_TRACE() << "event=request_completed x-request-id="
+                         << this->x_request_id();
     return true;
   }
 
