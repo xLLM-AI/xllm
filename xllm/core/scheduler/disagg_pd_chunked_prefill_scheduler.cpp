@@ -16,6 +16,7 @@ limitations under the License.
 #include "scheduler/disagg_pd_chunked_prefill_scheduler.h"
 
 #include <algorithm>
+#include <atomic>
 
 #include "common/metrics.h"
 #include "core/framework/config/scheduler_config.h"
@@ -197,10 +198,22 @@ void DisaggPDChunkedPrefillScheduler::schedule_waiting_prefill(
   }
 }
 
+void DisaggPDChunkedPrefillScheduler::update_metrics() {
+  GAUGE_SET(num_pending_requests,
+            pending_requests_.load(std::memory_order_relaxed));
+  GAUGE_SET(num_running_requests, running_requests_.size());
+  GAUGE_SET(num_waiting_requests,
+            waiting_priority_queue_->size() +
+                waiting_priority_queue_offline_->size());
+  GAUGE_SET(num_running_sequences, running_sequences_.size());
+  update_block_metrics(kv_cache_manager_);
+}
+
 std::vector<Batch> DisaggPDChunkedPrefillScheduler::prepare_batch() {
   if (options_.instance_role() == InstanceRole::DECODE) {
     return ContinuousScheduler::prepare_batch();
   }
+  Timer timer;
 
   std::shared_ptr<Request> request;
   while (request_queue_.read(request)) {
@@ -269,7 +282,7 @@ std::vector<Batch> DisaggPDChunkedPrefillScheduler::prepare_batch() {
   }
 
   if (running_sequences_.empty()) {
-    update_block_metrics(kv_cache_manager_);
+    update_metrics();
     return {};
   }
 
@@ -277,7 +290,8 @@ std::vector<Batch> DisaggPDChunkedPrefillScheduler::prepare_batch() {
                                    ->create_batches(running_requests_,
                                                     running_sequences_,
                                                     running_sequences_budgets_);
-  update_block_metrics(kv_cache_manager_);
+  COUNTER_ADD(scheduling_latency_seconds, timer.elapsed_seconds());
+  update_metrics();
   return batches;
 }
 

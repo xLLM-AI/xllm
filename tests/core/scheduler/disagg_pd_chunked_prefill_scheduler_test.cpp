@@ -334,6 +334,44 @@ TEST(DisaggPDChunkedPrefillSchedulerTest, UpdatesBlockMetrics) {
   block_manager->deallocate(request.get());
 }
 
+TEST(DisaggPDChunkedPrefillSchedulerTest, UpdatesSchedulerMetrics) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), true);
+  FakeEngine engine(/*num_blocks=*/16, /*block_size=*/2);
+  BlockManagerPool* block_manager = engine.block_manager_pool();
+  DisaggPDChunkedPrefillScheduler scheduler(&engine,
+                                            make_options(
+                                                /*max_tokens_per_batch=*/8,
+                                                /*max_chunk=*/4));
+  std::shared_ptr<Request> first_request = make_request({1, 2, 3, 4});
+  std::shared_ptr<Request> second_request = make_request({5, 6, 7, 8});
+  ASSERT_TRUE(scheduler.ContinuousScheduler::add_request(first_request));
+  ASSERT_TRUE(scheduler.ContinuousScheduler::add_request(second_request));
+  scheduler.incr_pending_requests(/*count=*/2);
+
+  GAUGE_SET(num_pending_requests, 0);
+  GAUGE_SET(num_running_requests, 0);
+  GAUGE_SET(num_waiting_requests, 0);
+  GAUGE_SET(num_running_sequences, 0);
+  std::vector<Batch> batches = scheduler.prepare_batch_test();
+
+  ASSERT_EQ(batches.size(), 1u);
+  ASSERT_EQ(batches[0].size(), 1u);
+  double num_pending_requests = GAUGE_VALUE(num_pending_requests);
+  double num_running_requests = GAUGE_VALUE(num_running_requests);
+  double num_waiting_requests = GAUGE_VALUE(num_waiting_requests);
+  double num_running_sequences = GAUGE_VALUE(num_running_sequences);
+  EXPECT_EQ(num_pending_requests, 2);
+  EXPECT_EQ(num_running_requests, 1);
+  EXPECT_EQ(num_waiting_requests, 1);
+  EXPECT_EQ(num_running_sequences, 1);
+
+  const std::vector<std::shared_ptr<Request>> running_requests =
+      scheduler.get_running_requests();
+  ASSERT_EQ(running_requests.size(), 1u);
+  block_manager->deallocate(running_requests[0].get());
+}
+
 TEST(DisaggPDChunkedPrefillSchedulerTest, SkipsEmptyBlockMetrics) {
   ScopedConfigValue<bool> prefix_cache(
       KVCacheConfig::get_instance().enable_prefix_cache(), true);

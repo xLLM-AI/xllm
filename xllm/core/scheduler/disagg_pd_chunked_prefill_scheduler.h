@@ -53,6 +53,7 @@ class DisaggPDChunkedPrefillScheduler final : public DisaggPDScheduler {
                                 size_t& remaining_token_budget,
                                 size_t& remaining_seq_budget,
                                 std::vector<std::shared_ptr<Request>>& done);
+  void update_metrics();
 };
 
 }  // namespace xllm
