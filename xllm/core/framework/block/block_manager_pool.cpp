@@ -227,6 +227,8 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
   AUTO_COUNTER(allocate_blocks_latency_seconds);
   DCHECK(sequence != nullptr);
   int32_t dp_rank = get_dp_rank(sequence);
+  const size_t original_kv_cache_tokens =
+      sequence->kv_state().kv_cache_tokens_num();
   const bool started_empty = sequence->kv_state().num_kv_blocks() == 0;
   const bool needs_single_block = !sequence->has_single_block_id();
   if (needs_single_block && !allocate_single_block(sequence, dp_rank)) {
@@ -248,6 +250,17 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
   // first try to allocate shared blocks
   if (started_empty) {
     BlockManagerPool::allocate_shared(sequence);
+  }
+
+  const size_t matched_kv_cache_tokens =
+      sequence->kv_state().kv_cache_tokens_num();
+  if (matched_kv_cache_tokens > original_kv_cache_tokens) {
+    const size_t token_budget = num_tokens > original_kv_cache_tokens
+                                    ? num_tokens - original_kv_cache_tokens
+                                    : 0;
+    num_tokens = std::max(num_tokens,
+                          std::min(sequence->num_tokens(),
+                                   matched_kv_cache_tokens + token_budget));
   }
 
   const size_t num_blocks = sequence->kv_state().num_kv_blocks();
