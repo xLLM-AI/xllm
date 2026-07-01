@@ -128,7 +128,10 @@ void NpuQwen3DecoderLayerImpl::param_from_args(
         ::xllm::KVCacheConfig::get_instance().block_size() == 128;
   }
   num_hidden_layers_ = args.n_layers();
-  if (kernel_config.enable_split_rmsnorm_rope()) {
+  // TODO: optimize the split rmsnorm rope path for prefill before enabling it
+  // there again. It regresses long-prompt TTFT today, while decode still
+  // benefits from this fused path.
+  if (kernel_config.enable_split_rmsnorm_rope() && !isPrefill) {
     param.enableSplitRmsNormRope = true;
   }
 }
