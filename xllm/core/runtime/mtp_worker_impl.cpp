@@ -1304,8 +1304,6 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   CHECK_EQ(ret, 0) << "failed to synchronize MTP compute stream, ret=" << ret;
   release_retained_inputs(target_output);
   val_output.next_tokens = val_output.next_tokens.to(torch::kCPU);
-  log_mtp_acceptance(val_output.next_tokens,
-                     options_.num_speculative_tokens());
   write_target_context_to_cache(input, val_output);
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {

@@ -46,13 +46,6 @@ limitations under the License.
 #include "models/llm/mlu/deepseek_v4.h"
 #include "models/llm/mtp_model_base.h"
 
-// Reuse helpers from the MLU main model header:
-//   maybe_to_device(), deepseek_v4_uses_mlu_graph(),
-//   DeepseekV4GraphMetadataState, DSAGroupKey/DSAGroupKeyHash,
-//   normalize_compress_ratio(), next_power_of_two(),
-//   create_hadamard_matrix(), load_deepseek_v4_model_args(),
-//   DeepseekV4ArgsPolicy, build_deepseek_v4_args_policy(),
-//   process_deepseek_v4_args(), validate_deepseek_v4_args()
 
 namespace xllm::mlu::model {
 
