@@ -92,8 +92,8 @@ void check_supported(const torch::Tensor& x,
   CHECK(initial_state_mode.defined())
       << "TileLang causal_conv1d: initial_state_mode must be defined";
 
-  CHECK(x.scalar_type() == c10::ScalarType::BFloat16)
-      << "TileLang causal_conv1d: only bfloat16 is supported, got "
+  CHECK(x.scalar_type() == c10::ScalarType::Half)
+      << "TileLang causal_conv1d: only float16 is supported, got "
       << x.scalar_type();
 
   CHECK(x.device().type() == c10::DeviceType::PrivateUse1 &&

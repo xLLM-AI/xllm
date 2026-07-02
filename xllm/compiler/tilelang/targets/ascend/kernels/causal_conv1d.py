@@ -189,37 +189,21 @@ class CausalConv1dKernel(TilelangKernel):
     ]
     SPECIALIZATIONS = [
         {
-            "variant_key": "bs1_d2048_w4_silu0_f16",
+            "variant_key": f"bs1_d{d}_w4_silu0_f16",
             "batch_size": 1,
-            "dim": 2048,
+            "dim": d,
             "width": 4,
             "has_silu": 0,
             "dtype": "float16",
-        },
-        {
-            "variant_key": "bs1_d4096_w4_silu0_f16",
-            "batch_size": 1,
-            "dim": 4096,
-            "width": 4,
-            "has_silu": 0,
-            "dtype": "float16",
-        },
-        {
-            "variant_key": "bs1_d5120_w4_silu0_f16",
-            "batch_size": 1,
-            "dim": 5120,
-            "width": 4,
-            "has_silu": 0,
-            "dtype": "float16",
-        },
-        {
-            "variant_key": "bs1_d8192_w4_silu0_f16",
-            "batch_size": 1,
-            "dim": 8192,
-            "width": 4,
-            "has_silu": 0,
-            "dtype": "float16",
-        },
+        }
+        for d in sorted(
+            {
+                dim // tp
+                for dim in [2048, 4096, 5120, 6144, 8192]
+                for tp in [1, 2, 4, 8]
+                if dim % tp == 0
+            }
+        )
     ]
 
     @staticmethod
