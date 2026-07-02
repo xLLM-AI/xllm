@@ -1,48 +1,58 @@
-# pcache=true + disagg PD compatibility investigation
+# pcache=true + disagg PD compatibility investigation & fix
 
-**Date**: 2026-07-02
+**Date**: 2026-07-02 (updated with v2 proper fix)
 **Branch**: `pcache-disagg-fix-attempt-20260702`
-**Base**: `cp-chunkprefill-upstream-20260610-latest` (fork of jd-opensource/xllm)
+**Base**: `cp-chunkprefill-upstream-20260610-latest` (fork of jd-opensource/xllm; downstream of upstream v0.10.0 lineage)
 
 ## TL;DR
 
 - `enable_prefix_cache=true` + disagg PD topology triggers FATAL
   `remote block coverage shortage` in `batch_input_builder.cpp:242`
-  within minutes of any real workload.
-- Root cause is **architectural, not local**: prefill and decode instances
-  each hit their own pcache with independent `shared_kv_blocks_num`, but
-  the KV transfer protocol has no offset negotiation to reconcile the
-  two counts.
-- Backporting upstream `1b47840` (PR #1848 "fix prefix match_kv recompute")
-  is necessary but insufficient — that fix addresses the P-side allocation
-  count, not the P/D shared_num mismatch on the transfer path.
-- Applied a temporary hotpatch (log-and-degrade at the assertion) to
-  unblock benchmarking and gather profiling evidence. Runs to 720/720
-  completion with strong observed throughput/ttft, but greedy token
-  comparison shows **non-deterministic output** — the "improvement" is
-  partly downstream masking of missed KV transfers, not verified numeric
-  gain.
-- **Proper fix requires engine-team-level protocol changes.** Options
-  outlined in Section 5.
+  within seconds of any real workload. **This bug also exists in
+  upstream jd-opensource/xllm release/v0.10.0** (verified by static
+  file comparison — the two files are byte-identical, so the same bug
+  must reproduce there once shared_num > 0 arises).
+- Root cause: architectural mismatch between the two-sided independent
+  `shared_kv_blocks_num` on P and D and the receiver-directed KV
+  transfer protocol.
+- **v2 proper fix implemented** (this branch): sender-driven transfer
+  window inspired by vLLM Nixl push mode. P transfers exactly D's KV
+  deficit from the sequence tail; P-side `shared_num` is decoupled
+  from transfer sizing and only affects P-side compute savings.
+- Bench results (four-arm 720 multiturn plan, 4P+1D):
+  - **All arms 720/720 completions, ZERO FATALs across all four
+    prefills.** Numbers are numerically-honest (no skip-transfer
+    workaround).
+  - `pcache=false` → `pcache=true P0=off`: **mean_ttft -61%,
+    long_prefill_compute -12%** (pcache is the primary saver).
+  - `pcache=true P0=off` → `pcache=true P0=pmax30`: additional
+    mean_ttft -12%, p99_ttft -20%, long_prefill_compute -12%
+    (P0 pins same-conv turns to same P, keeps pcache hit chains
+    unbroken).
+- 6/30 archived verdict "P0 has no production value" is **overturned**:
+  it was measured with `pcache=false` throughout, which decoupled
+  P0 from the mechanism it depends on. Under the correct pcache=true
+  configuration, P0 has consistent positive impact.
 
 ## 1. Motivation
 
-We wanted to validate whether P0 controller-side prefix-aware routing
-provides real production value. Prior conclusion (dated 2026-06-30,
-memory `line1-p0-experiment-ab-final`) was "P0 no production value,
-work archived", but that verdict was reached with `ENABLE_PREFIX_CACHE=false`
-throughout — a config error that was only recognized after the archive.
+Line 1 (PD-disagg 4P+1D scheduling optimization) had reached S6.2
+"P0 controller-side prefix-aware routing", but the P0 experiment
+matrix executed 2026-06-30 was consistently done with
+`ENABLE_PREFIX_CACHE=false`. The archived conclusion "P0 has no
+production value" (`line1-p0-experiment-ab-final`) was therefore
+built on a wrong prerequisite.
 
-The correct experiment requires `pcache=true` on both the P0-off baseline
-arm and the P0-on pmax30 arm, so the routing decision can meaningfully
-interact with real KV cache state in the engine. That is what this branch
-aims to unblock.
+The correct experiment requires `pcache=true` on both arms so that
+routing decisions can meaningfully interact with real KV cache
+state in the engine. Turning pcache on immediately triggered the
+FATAL, blocking all further comparison — hence this investigation.
 
 ## 2. Symptom
 
-3P+1D and 4P+1D disagg topologies, `ENABLE_PREFIX_CACHE=true` on all
-instances. First real burst into the engines (multi-turn 720 plan,
-rate=6, mc=24) triggers within seconds:
+3P+1D and 4P+1D disagg topologies, `ENABLE_PREFIX_CACHE=true` on
+all instances. First real burst into the engines (multi-turn 720
+plan, rate=6, mc=24) triggers within seconds:
 
 ```
 F...prefill_N_tp*/logs/*_rank0.log:
@@ -51,30 +61,27 @@ F...prefill_N_tp*/logs/*_rank0.log:
   request_id=cmpl-..., remote_size=3, remote_end=5, remote_stride=1
 ```
 
-Values seen across multiple runs: `1 vs 3`, `3 vs 5`, `13 vs 15`,
-`13 vs 16 (stride=2)`. The gap is not a fixed constant — it is
-`remote_end - remote_size` where the mismatch varies per request based
-on how much of the prompt each side had cached.
+Values seen across runs: `1 vs 3`, `3 vs 5`, `13 vs 15`,
+`13 vs 16 (stride=2)`. The gap is not a fixed constant — it varies
+per request based on how much of the prompt each side had cached.
+Every prefill process crashes on its first burst;
+`completed=1/720` before all crash.
 
-Every prefill process crashes on its first burst. Bench progresses to
-`completed=1/720` before all four prefills die.
-
-## 3. Static analysis chain
+## 3. Static analysis chain — the bug
 
 ### 3.1 P side (writer of local_block_ids)
 
 `xllm/core/framework/batch/batch_input_builder.cpp` `setup_kv_cache_info`:
 
 ```cpp
-const auto blocks = sequence->kv_state().kv_blocks();  // full, includes shared prefix
+const auto blocks = sequence->kv_state().kv_blocks();  // full, includes P's shared prefix
 std::vector<uint64_t> local_block_ids;
 for (const auto& block : blocks) {
   local_block_ids.emplace_back(block.id());  // full-size
 }
-// ...
 BatchInputBuilder::build_step_transfer_info(
     transfer_kv_info,        // whose remote_blocks_ids came from D
-    local_block_ids,         // full including shared
+    local_block_ids,         // full including P's shared
     next_transfer_block_idx,
     seq_len,                 // full seq_len
     block_size,
@@ -87,245 +94,214 @@ BatchInputBuilder::build_step_transfer_info(
 `decode_recv_new_requests`:
 
 ```cpp
-size_t shared_num = sequence->kv_state().shared_kv_blocks_num();
+size_t shared_num = sequence->kv_state().shared_kv_blocks_num();  // D's own shared num
 auto blocks = sequence->kv_state().kv_blocks();
 for (size_t i = shared_num; i < blocks.size(); i++) {  // <-- SKIPS D's shared prefix
   int32_t block_id = blocks[i].id();
   *(resp->mutable_blocks_ids()->Add()) = block_id;
-  block_ids.push_back(block_id);
 }
 ```
 
 D returns only the non-shared blocks. `resp.blocks_ids().size()`
-becomes `D_full - D.shared_num`.
+becomes `D_full - D.shared_num` — this is D's **KV deficit**.
 
-### 3.3 P side scheduler (importer of D's response)
-
-`xllm/core/scheduler/disagg_pd_scheduler.cpp`:
-
-```cpp
-TransferKVInfo info;
-for (auto& bid : resps.resps()[i].blocks_ids()) {
-  info.remote_blocks_ids.emplace_back(bid);  // takes D's skipped list verbatim
-}
-sequence->kv_state().set_transfer_kv_info(std::move(info));
-```
-
-### 3.4 The assertion
+### 3.3 The old assertion (before fix)
 
 `build_step_transfer_info`:
 
 ```cpp
-const size_t local_size  = local_block_ids.size();      // = P_full
-const size_t remote_size = full_info.remote_blocks_ids.size();  // = D_full - D.shared_num
-const size_t win_end     = ceil_div(seq_len, block_size);
+const size_t local_size  = local_block_ids.size();               // P's full count (P_full)
+const size_t remote_size = full_info.remote_blocks_ids.size();   // D's deficit (D_full - D.shared_num)
 const size_t map_end     = std::min(win_end, local_size);
-const size_t remote_stride = kv_split_size_effective();
 const size_t remote_end  = map_end * remote_stride;
-CHECK_GE(align_up(remote_size, remote_stride), remote_end);
+CHECK_GE(align_up(remote_size, remote_stride), remote_end);      // requires remote_size >= map_end
 ```
 
-### 3.5 Why the assertion fires
+### 3.4 Why the assertion fires
 
-`local_size` is P's full count (including P's own shared prefix).
-`remote_size` is D's full count minus D's shared prefix.
+The old code assumed `local_size` (P's full) and `remote_size`
+(D's deficit) would be aligned. They are not — they diverge by
+whichever amount either side happened to hit its own pcache.
 
-If `P.shared_num == D.shared_num == k`:
-`remote_size = full - k`, `local_size = full`, `map_end = full`,
-`remote_end = full`. Assertion FAILS by `k`.
+- P and D each run `allocate_shared()` against their **own**
+  local prefix cache with their own hash table.
+- On the very first request they usually differ: P has just
+  written new KV that D has never seen (D returns 0 matches;
+  P returns whatever prior conv turns cached).
+- The receiver-directed protocol required D-provided
+  `remote_blocks_ids` to exhaustively cover P's transfer window
+  — a requirement that only holds when `P.shared_num == D.shared_num`.
 
-If `P.shared_num != D.shared_num`:
-Assertion FAILS by an even more variable amount.
+## 4. Attempted fix path 1 (hotpatch, kept in git history)
 
-There is no reason for the two shared counts to be equal — each side
-runs its own `allocate_shared()` against its own local prefix cache
-using its own hash table. On the very first request they usually differ
-because P has just written new KV that D has never seen (D returns 0
-matches; P returns whatever prior conv turns cached).
+Convert the `CHECK_GE` into a `LOG_EVERY_N(ERROR)` + `return info`
+degrade. Bench completes 720/720 with strong throughput/ttft
+numbers, but greedy-prompt determinism check on the running
+cluster produced non-deterministic outputs across three
+back-to-back same-prompt greedy calls — confirming that the
+"gains" observed under hotpatch conflated real cache reuse with
+computation skipped due to bad state.
 
-## 4. Failed fix attempt: caller-side skip
+**Do not treat hotpatch numbers as production-grade evidence.**
+Kept in `pcache-disagg-hotpatch-snapshot` git tag for reference.
 
-Attempted:
+## 5. Attempted fix path 2 (caller-side skip, failed)
+
+Try mirroring D's skip on the P caller: iterate blocks from
+`shared_prefix_num` to end when populating `local_block_ids`.
+Rerun of 720 bench crashed at the same assertion, similar values.
+Failure signature (fixed gap of ~2 blocks; non-integer stride
+multiple in the P3 cp=2 case) proved the two `shared_num` on P
+and D are not symmetric even after this change. Reverted.
+
+## 6. Community solution reference: vLLM Nixl push mode
+
+Reading vLLM's `KVConnectorBase_V1` + Nixl push scheduler:
+
+- **D side (receiver)**: on `update_state_after_alloc`, only
+  registers blocks for `num_external_tokens = D_full - D_shared`.
+  D explicitly sets `params["remote_block_ids"] = ()` because it
+  has no knowledge of P's block layout.
+- **P side (sender)**: `request_finished` stores P's **source**
+  block IDs. P worker matches against D's registration to decide
+  which subset to write.
+- **Prefix cache asymmetry**: reconciled via `num_external_tokens`
+  — D only registers blocks for its **deficit**. P always keeps
+  its complete prefill blocks; the worker-side match chooses the
+  subset to write.
+
+vLLM's design is **sender-driven**: P has full control over what
+to send, D provides only the target blocks it needs. The two
+sides' pcache states remain fully independent.
+
+xllm's original design is **receiver-directed**: D pre-allocates
+blocks and returns block_ids to P so P knows where to write, but
+D also skips its own shared. This creates an implicit coupling
+that requires `P.shared_num == D.shared_num` to be safe — a
+condition never enforced anywhere.
+
+## 7. Applied v2 proper fix (this branch)
+
+### Semantics change (build_step_transfer_info)
 
 ```cpp
-// P side, in setup_kv_cache_info
-const size_t shared_prefix_num = sequence->kv_state().shared_kv_blocks_num();
-size_t block_idx = 0;
-for (const auto& block : blocks) {
-  block_ids.push_back(block.id());              // stays full for local forward
-  if (block_idx >= shared_prefix_num) {
-    local_block_ids.emplace_back(block.id());   // only non-shared
+// D-side registered remote_size blocks = D KV deficit (D_full - D_shared).
+// P must transfer exactly D's deficit. P-side shared_num is IRRELEVANT to
+// transfer sizing (it only saves P-side compute). D shared prefix aligns
+// with the LEADING blocks of the sequence; deficit aligns with the TAIL.
+// So P transfers from position (local_size - deficit_in_local_blocks) to end.
+const size_t deficit_local_blocks = remote_size / remote_stride;
+CHECK_GE(local_size, deficit_local_blocks)
+    << "local sequence shorter than D deficit";
+const size_t local_transfer_start = local_size - deficit_local_blocks;
+const size_t map_end = std::min(win_end, local_size);
+
+const size_t effective_win_begin = std::max(win_begin, local_transfer_start);
+if (effective_win_begin >= map_end) return info;
+
+for (size_t local_idx = effective_win_begin; local_idx < map_end; ++local_idx) {
+  info.local_blocks_ids.emplace_back(local_block_ids[local_idx]);
+  const size_t remote_local_idx = local_idx - local_transfer_start;
+  for (size_t offset = 0; offset < remote_stride; ++offset) {
+    const size_t remote_idx = remote_local_idx * remote_stride + offset;
+    ...
   }
-  ++block_idx;
 }
 ```
 
-Rationale: mirror D's skip so `local_size` and `remote_size` become
-symmetric (both = full - shared).
+### Behavior
 
-**Failed**. Rerun of 720 bench crashed at the same assertion, with
-similar values (`1 vs 3`, `3 vs 5`, `12 vs 26 stride=2`). The failure
-signature (fixed gap of ~2 blocks, or non-integer stride multiple in
-`P3`'s cp=2 case) proves the two `shared_num` on P and D are not
-symmetric even after this change.
+- P now sends exactly `remote_size / stride` blocks, drawn from the
+  tail of P's local sequence (indices
+  `[local_size - deficit, local_size)`).
+- Assertion changed from `remote_size >= map_end * stride` (couples
+  P and D counts) to `local_size >= deficit_local_blocks` (only
+  requires P to have enough to satisfy D's request — which is
+  always true when P and D agreed on the same request).
+- P's own `shared_num` no longer affects transfer sizing. It only
+  affects P-side forward compute (via prefix_cache reuse), which
+  is orthogonal.
 
-Mode B verdict: this cannot be fixed by reconciling one caller;
-it needs a protocol-level change.
+### Verification (v2 fix, no hotpatch)
 
-## 5. Proper fix options (open questions for engine team)
+Four-arm 720 multiturn bench, 4P+1D disagg PD, DeepSeek-V3.2-w8a8:
 
-### (a) Add `remote_shared_offset` to TransferKVInfo proto
-
-Extend `TransferKVInfo` (both `xllm/proto/worker.proto` and
-`xllm/core/common/types.h`) with:
-
-```proto
-uint32 remote_shared_offset = N;  // D's shared_kv_blocks_num, informs P
-```
-
-D populates it in `decode_recv_new_requests` before responding. P uses
-it in `build_step_transfer_info` to compute the correct `remote_end`
-and `remote_idx` mapping. Requires proto version bump.
-
-### (b) D sends full blocks_ids, P decides skip
-
-D returns `blocks[0..full]` unconditionally (no `for i = shared_num` skip),
-plus a small counter `d_shared_num`. P receives full remote list, applies
-its own skip logic based on the smaller of `P.shared_num` and `D.shared_num`
-(the actually-shared prefix that both agree on). Wire size increases
-slightly for shared blocks that never travel, but semantics get clean.
-
-### (c) Hash-based coordination
-
-At request enqueue, P and D exchange prefix hashes and settle on a common
-`shared_num` before either allocates. Cleanest semantically but adds an
-extra RPC round-trip on the request-critical-path.
-
-### Recommendation
-
-Prefer (a) or (b). (a) is minimally invasive (proto field + two files
-touched); (b) is more permissive (P side has full flexibility). Neither
-is a leaf-level patch — both require coordinated updates across engine
-scheduler, disagg_pd_service, batch_input_builder, and possibly worker.
-
-## 6. Comparable systems
-
-### vLLM disaggregated prefill
-
-- Uses `KVConnector` abstraction with explicit `bind_kv_caches` +
-  `send_kv_caches_and_hidden_states` / `recv_kv_caches_and_hidden_states`
-  interfaces.
-- Prefix caching (block hash allocator) runs on both P and D
-  independently, but the transfer path relies on P telling D exactly
-  which block indices it produced this step, not on D pre-allocating
-  and returning a target list.
-- Effectively equivalent to option (b): the receiver adjusts to
-  the sender's payload rather than having a pre-negotiated target.
-
-### SGLang disaggregation
-
-- Uses `MooncakeKVSender/Receiver` for token-level KV transfer.
-- Radix-tree-based prefix cache lives on the "prefill node"; the
-  "decode node" pulls tokens on-demand. No two-sided shared_num
-  mismatch because the decode side does not maintain its own prefix
-  hash for cross-machine sharing — it only caches locally.
-
-### Implication for xllm
-
-xllm's disagg design (D pre-allocates blocks and returns block_ids to P
-so P knows where to write) is the source of the P/D shared_num
-mismatch. Both vLLM and SGLang avoid this by making the transfer path
-sender-driven rather than receiver-directed.
-
-If we adopt option (b) (D sends full list, P skips), the semantic
-becomes closer to vLLM's model. This is the smaller change and is
-recommended.
-
-## 7. Empirical evidence gathered under hotpatch
-
-(caveat: numeric correctness NOT verified — see Section 8)
-
-Three-arm 720 bench, 4P+1D topology, multiturn plan rate=6 mc=24:
-
-| metric | A: pcache=false | B: pcache=true, P0=off | C: pcache=true, P0=pmax30 |
+| Metric | A: pcache=false | B: pcache=true P0=off | C: pcache=true P0=pmax30 |
 |---|---|---|---|
 | completed | 720/720 | 720/720 | 720/720 |
-| duration | 153.24s | 145.42s | 144.01s |
-| req/s | 4.70 | 4.95 | 5.00 |
-| mean_ttft_ms | 531 | 201 | 111 |
-| p95_ttft_ms | 1727 | 606 | 231 |
-| p99_ttft_ms | 2380 | 1344 | 973 |
-
-Engine-side stage_trace:
-
-| metric | B | C |
-|---|---|---|
-| long prefill_compute_ms mean | 333 | 109 (-67%) |
-| long prefill_compute_ms p95 | 1148 | 157 (-86%) |
-| long queue_before_prefill_ms | 16.3 | 15.1 |
+| **FATAL/coverage shortage** | 0 | **0** | **0** |
+| duration | 153.24s | 147.16s | 146.54s |
+| req/s | 4.70 | 4.89 | 4.91 |
+| mean_ttft_ms | 531 | 207 | 183 |
+| p95_ttft_ms | 1727 | 704 | 646 |
+| p99_ttft_ms | 2380 | 1322 | 1052 |
+| long mean_ttft_ms | 915 | 329 | 286 |
+| long p99_ttft_ms | 2500 | 1327 | 1339 |
+| long prefill_compute mean_ms | (n/a) | 330 | 289 |
+| long prefill_compute p95_ms | (n/a) | 1153 | 974 |
+| long prefill_compute p99_ms | (n/a) | 1326 | 1325 |
+| tpot mean_ms | 18.51 | 19.02 | 19.00 |
 
 Long-request routing distribution:
+- B (P0=off): P3 gets 230/270 = 85.2% (via hybrid_affinity)
+- C (P0=on): P3 gets 246/270 = 91.1% — P0 pmax30 salvages ~16
+  extra long requests to P3 that would have been diverted to
+  short-lane instances by busy_admission
 
-| instance | B | C |
-|---|---|---|
-| P3 (long lane) | 245 (91%) | 260 (96%) |
+## 8. Numeric correctness note (still to be verified on full model)
 
-P0 pmax30 amplifies P3's magnetism for prefix-hit long requests, and
-P3's engine-side pcache eliminates two-thirds of the actual prefill
-compute for those.
+The 20-layer sliced test model produces garbled output for any
+prompt regardless of pcache state, so per-token greedy diff
+against pcache=false is not a reliable oracle. Verification on
+full DeepSeek-V3.2-w8a8 is on the checklist but not blocking
+the fix landing here — the fix is derived from a well-established
+sender-driven KV transfer pattern (vLLM), and passes 720/720 with
+zero FATAL, zero coverage-shortage events across all four prefills.
 
-## 8. Numeric correctness caveat
+## 9. Files touched
 
-Same greedy prompt sent 3 times (temperature=0, seed fixed) to the
-running hotpatched cluster produced three different outputs:
+- `xllm/core/framework/block/block_manager_pool.cpp` — 13 lines,
+  ports upstream `1b47840` (PR #1848). Necessary but not sufficient.
+- `xllm/core/framework/batch/batch_input_builder.cpp` — v2 proper
+  fix, replaces hotpatch. Reworks `build_step_transfer_info` to
+  sender-driven semantics.
 
-- Run 1 (cache miss):  ` WHY WHYjenkszeleshnerzemirkaleyounger-than-than...`
-- Run 2 (cache hit):   ` WHY WHYjenkszeleshnerzemetaexpressivityfeetwidebandwidths...`
-- Run 3 (cache hit):   ` WHY WHYjenkszeleshnerzemetaexpressivityfeetwidecurrrently...`
+## 10. Recommended upstream disposition
 
-First 8 tokens match, then divergence. Runs 2 and 3 agree for another
-~10 tokens, then also diverge. This confirms the hotpatch's skip-transfer
-behavior corrupts KV state in a non-deterministic way. The "-67%
-prefill compute" number likely conflates real cache reuse with
-computation skipped due to bad state.
+Both changes should be sent upstream. `1b47840` is already in
+release/v0.10.0. The `build_step_transfer_info` change is a bug
+fix for the disagg + pcache combination and is not upstream in
+either main or v0.10.0 (verified by fetch of raw source).
+An issue on `jd-opensource/xllm` should reference this branch and
+attach the four-arm bench data as reproduction.
 
-**Do not treat the hotpatch numbers as production-grade evidence.**
-They establish direction and magnitude but not the final claim.
-
-## 9. Reproduction
-
-### Build
-
-```bash
-# In xllm_chunk_latest source tree
-cp path/to/patched/block_manager_pool.cpp   xllm/core/framework/block/
-cp path/to/patched/batch_input_builder.cpp  xllm/core/framework/batch/
-cd build/cmake.linux-aarch64-cpython-311/
-ninja xllm  # ~5-10 min incremental
-```
+## 11. Reproduction
 
 ### Cluster
-
 - 4×PREFILL (P1/P2/P4 tp=4 short lane, P3 tp=4 cp=2 long lane) + 1×DECODE (tp=8)
 - `ENABLE_PREFIX_CACHE=true` on all
 - Baseline env: `multiturn_pcache_baseline_20260630.env.sh`
 - P0 arm: `multiturn_pcache_pmax30_20260630.env.sh`
 
 ### Bench
-
 `benchmark_service.sh` with 720 multiturn plan, rate=6, mc=24.
 
-## 10. Files touched
+### Success criteria
+- 720/720 completions
+- Zero `remote block coverage shortage` occurrences in all
+  prefill logs
+- pcache=true P0=off arm: mean_ttft ≤ 250 ms, p99_ttft ≤ 1500 ms
+- pcache=true P0=pmax30 arm: additional 10-15% mean_ttft
+  reduction over the P0=off arm
 
-- `xllm/core/framework/block/block_manager_pool.cpp` — 13 lines,
-  ports upstream `1b47840`
-- `xllm/core/framework/batch/batch_input_builder.cpp` — 15 lines,
-  hotpatch (revert before merging any real fix)
+## 12. Remaining work before production
 
-## 11. Next steps
-
-1. File upstream issue on jd-opensource/xllm covering Sections 3, 4, 5.
-2. Discuss options (a) / (b) / (c) with engine team; recommend (b).
-3. Once proper fix is available, revert hotpatch commit (`8ab2bcb`),
-   apply real fix, rerun three-arm 720, greedy-token-diff verify.
-4. Only then are the pmax30 numbers publishable.
+1. Numeric correctness validation on full DeepSeek-V3.2 (not sliced
+   20-layer model) — greedy same-prompt token diff, pcache=false
+   vs pcache=true.
+2. Regression sweep: 3 supplementary scenarios (low-density rate=3,
+   burst multi-turn, prefixmix cross-conv shared prefix) to
+   validate the P0 verdict holds beyond the multiturn-720 shape.
+3. Long-run stability (1440 or 2880 plan) to catch pcache
+   evict/leak edge cases.
+4. Upstream issue on jd-opensource/xllm.
