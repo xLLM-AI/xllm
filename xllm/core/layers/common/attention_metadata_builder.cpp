@@ -72,6 +72,10 @@ AttentionMetadata build_attention_metadata(
   attn_metadata.q_seq_lens_vec = params.attention.host.q_seq_lens;
   attn_metadata.slot_mapping = params.attention.device.new_cache_slots;
   attn_metadata.compute_dtype = compute_dtype;
+#if defined(USE_DCU)
+  attn_metadata.use_dense_flash_attention =
+      params.graph.use_dense_flash_attention;
+#endif
 
   // for flashinfer
   attn_metadata.paged_kv_indptr = params.attention.device.paged_kv_indptr;
@@ -84,7 +88,8 @@ AttentionMetadata build_attention_metadata(
   attn_metadata.unshared_plan_info = std::make_shared<PlanInfo>();
 #endif
 
-#if defined(USE_CUDA) || defined(USE_NPU) || defined(USE_MLU)
+#if defined(USE_CUDA) || defined(USE_DCU) || defined(USE_NPU) || \
+    defined(USE_MLU)
   // Use explicit attn_mask if provided; otherwise fall back to
   // graph_buffer.attn_mask (e.g. Qwen2_5_VL sets graph_buffer.attn_mask for
   // LongCat text encoding)

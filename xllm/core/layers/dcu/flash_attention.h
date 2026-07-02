@@ -26,6 +26,14 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
+torch::Tensor dense_varlen_flash_attention(torch::Tensor query,
+                                           torch::Tensor key,
+                                           torch::Tensor value,
+                                           const torch::Tensor& cu_seqlens_q,
+                                           const torch::Tensor& cu_seqlens_k,
+                                           double softmax_scale,
+                                           bool is_causal);
+
 // FlashAttentionImpl uses the mha_fwd_kvcache_bshd HIP kernel from
 // libflash_attention to compute paged attention directly from KV cache,
 // with zero intermediate tensor copies.

@@ -42,10 +42,7 @@ std::pair<torch::Tensor, torch::Tensor> TorchAttentionImpl::expand_kv_for_mqa(
     const torch::Tensor& value) {
   // key: [seq_len, num_kv_heads, head_size]
   // value: [seq_len, num_kv_heads, head_size]
-  // For multi-query attention (MQA), expand kv_heads to match num_heads.
-
   if (num_kv_heads_ == num_heads_) {
-    // Already have enough heads, no expansion needed.
     return {key, value};
   }
   CHECK_GT(num_kv_heads_, 0) << "num_kv_heads must be positive";
@@ -54,58 +51,62 @@ std::pair<torch::Tensor, torch::Tensor> TorchAttentionImpl::expand_kv_for_mqa(
 
   const int64_t expansion_factor = num_heads_ / num_kv_heads_;
   const int64_t seq_len = key.size(0);
-  const int64_t head_size = key.size(2);
 
-  // Expand: [seq_len, num_kv_heads, head_size] -> [seq_len, num_heads,
-  // head_size] by repeating each head expansion_factor times.
   torch::Tensor key_expanded =
       key.unsqueeze(2)
-          .expand({seq_len, num_kv_heads_, expansion_factor, head_size})
-          .reshape({seq_len, num_heads_, head_size});
-
+          .expand({seq_len, num_kv_heads_, expansion_factor, head_size_})
+          .reshape({seq_len, num_heads_, head_size_});
   torch::Tensor value_expanded =
       value.unsqueeze(2)
-          .expand({seq_len, num_kv_heads_, expansion_factor, head_size})
-          .reshape({seq_len, num_heads_, head_size});
+          .expand({seq_len, num_kv_heads_, expansion_factor, head_size_})
+          .reshape({seq_len, num_heads_, head_size_});
 
   return {key_expanded, value_expanded};
 }
 
-torch::Tensor TorchAttentionImpl::compute_attention(const torch::Tensor& query,
-                                                    const torch::Tensor& key,
-                                                    const torch::Tensor& value,
-                                                    bool is_causal) {
-  // query: [seq_len_q, num_heads, head_size]
-  // key: [seq_len_kv, num_heads, head_size]
-  // value: [seq_len_kv, num_heads, head_size]
-
-  // scaled_dot_product_attention expects 4D tensors:
-  // [batch_size, num_heads, seq_len, head_size]
-
-  // [seq_len_q, num_heads, head_size] -> [1, seq_len_q, num_heads, head_size]
-  // -> [1, num_heads, seq_len_q, head_size]
+torch::Tensor TorchAttentionImpl::compute_attention(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    bool is_causal,
+    const std::optional<torch::Tensor>& attn_mask) {
   torch::Tensor query_4d = query.unsqueeze(0).permute({0, 2, 1, 3});
   torch::Tensor key_4d = key.unsqueeze(0).permute({0, 2, 1, 3});
   torch::Tensor value_4d = value.unsqueeze(0).permute({0, 2, 1, 3});
 
-  // Apply scaled dot product attention.
-  // For causal attention, we need to handle it differently in chunked/decode
-  // scenarios.
-  torch::Tensor attn_output = at::scaled_dot_product_attention(
-      query_4d,      // [1, num_heads, seq_len_q, head_size]
-      key_4d,        // [1, num_heads, seq_len_kv, head_size]
-      value_4d,      // [1, num_heads, seq_len_kv, head_size]
-      c10::nullopt,  // attn_mask: optional
-      0.0,           // dropout_p
-      is_causal      // is_causal: apply causal mask if true
-  );
+  std::optional<torch::Tensor> sdpa_mask = std::nullopt;
+  bool sdpa_is_causal = is_causal;
+  if (attn_mask.has_value() && attn_mask.value().defined()) {
+    torch::Tensor key_mask = attn_mask.value()
+                                 .to(query.device())
+                                 .to(torch::kBool)
+                                 .view({1, 1, 1, key.size(0)});
+    torch::Tensor combined_mask =
+        key_mask.expand({1, 1, query.size(0), key.size(0)});
+    if (is_causal) {
+      CHECK_LE(query.size(0), key.size(0))
+          << "masked causal torch attention expects q_len <= kv_len";
+      auto causal_mask =
+          torch::ones(
+              {query.size(0), key.size(0)},
+              torch::TensorOptions().dtype(torch::kBool).device(query.device()))
+              .tril(key.size(0) - query.size(0))
+              .view({1, 1, query.size(0), key.size(0)});
+      combined_mask = combined_mask.logical_and(causal_mask);
+      sdpa_is_causal = false;
+    }
+    sdpa_mask = combined_mask;
+  }
 
-  // Reshape back to [seq_len_q, num_heads, head_size].
-  attn_output = attn_output.permute(
-      {0, 2, 1, 3});                     // [1, seq_len_q, num_heads, head_size]
-  attn_output = attn_output.squeeze(0);  // [seq_len_q, num_heads, head_size]
+  torch::Tensor attn_output =
+      at::scaled_dot_product_attention(query_4d,
+                                       key_4d,
+                                       value_4d,
+                                       sdpa_mask,
+                                       /*dropout_p=*/0.0,
+                                       sdpa_is_causal);
 
-  return attn_output;
+  return attn_output.permute({0, 2, 1, 3}).squeeze(0);
 }
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>>
@@ -197,9 +198,16 @@ TorchAttentionImpl::forward(const AttentionMetadata& attn_metadata,
             torch::Tensor q_seq = query.slice(0, q_start, q_end);
             torch::Tensor k_seq = key_expanded.slice(0, kv_start, kv_end);
             torch::Tensor v_seq = value_expanded.slice(0, kv_start, kv_end);
+            std::optional<torch::Tensor> attn_mask_seq = std::nullopt;
+            if (replay_metadata.attn_mask.defined()) {
+              CHECK_GE(replay_metadata.attn_mask.numel(), kv_end)
+                  << "attention mask is shorter than kv sequence";
+              attn_mask_seq =
+                  replay_metadata.attn_mask.slice(0, kv_start, kv_end);
+            }
 
             torch::Tensor attn_out = compute_attention(
-                q_seq, k_seq, v_seq, replay_metadata.is_causal);
+                q_seq, k_seq, v_seq, replay_metadata.is_causal, attn_mask_seq);
 
             output.slice(0, q_start, q_end).copy_(attn_out);
           }
