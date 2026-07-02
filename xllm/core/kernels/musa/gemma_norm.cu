@@ -40,7 +40,7 @@ struct __align__(32) Float8Storage {
 };
 
 template <typename T>
-class __align__(16) Vec8 {
+class __align__(16) Vec8 final {
  public:
   union {
     Vec8Storage<T> storage;
@@ -74,7 +74,7 @@ class __align__(16) Vec8 {
   }
 };
 
-class __align__(32) Float8 {
+class __align__(32) Float8 final {
  public:
   union {
     Float8Storage storage;

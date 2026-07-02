@@ -258,7 +258,7 @@ void batch_chunked_prefill(const std::string& uri,
   } else {
     const int64_t batch_size = paged_kv_last_page_len.size(0);
     torch::Tensor qo_indptr_host =
-        get_cache_buffer(batch_size + 1, torch::kCPU);
+        get_cache_buffer(static_cast<int32_t>(batch_size + 1), torch::kCPU);
     qo_indptr_to_use = qo_indptr_host.to(torch::kCUDA);
   }
 

@@ -55,9 +55,7 @@ __global__ void XLLM_KERNEL_ATTR(1024) reshape_paged_cache_kernel(
     const int64_t v_src_idx = bid * v_stride + i;
     const int64_t head_base_idx =
         block_base_idx + block_offset * n_kv_heads * head_dim;
-    const int head_idx = i / head_dim;
-    const int head_offset = i % head_dim;
-    const int64_t dst_idx = head_base_idx + head_idx * head_dim + head_offset;
+    const int64_t dst_idx = head_base_idx + i;
     key_cache[dst_idx] = keys[k_src_idx];
     value_cache[dst_idx] = values[v_src_idx];
   }

@@ -19,16 +19,16 @@ limitations under the License.
 namespace xllm::runtime::cuda {
 
 void PiecewiseGraphs::add_graph(std::unique_ptr<at::cuda::CUDAGraph>&& graph) {
-  graphs_.push_back(std::move(graph));
-  instructions_.push_back(InstructionType::kGraph);
+  graphs_.emplace_back(std::move(graph));
+  instructions_.emplace_back(InstructionType::kGraph);
 }
 
 void PiecewiseGraphs::add_attention_runner(
     ::xllm::kernel::cuda::AttentionRunner&& runner) {
-  attention_runners_.push_back(
+  attention_runners_.emplace_back(
       std::make_unique<::xllm::kernel::cuda::AttentionRunner>(
           std::move(runner)));
-  instructions_.push_back(InstructionType::kRunner);
+  instructions_.emplace_back(InstructionType::kRunner);
 }
 
 size_t PiecewiseGraphs::num_runners() const {

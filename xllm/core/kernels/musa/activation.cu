@@ -44,8 +44,8 @@ template <typename scalar_t,
 __global__ void XLLM_KERNEL_ATTR(1024)
     act_and_mul_kernel(scalar_t* __restrict__ out,
                        const scalar_t* __restrict__ input,
-                       const int d) {
-  constexpr int kVecSize = 16 / sizeof(scalar_t);
+                       const int32_t d) {
+  constexpr int32_t kVecSize = 16 / sizeof(scalar_t);
   const int64_t token_idx = blockIdx.x;
   const scalar_t* x_ptr = input + token_idx * 2 * d;
   const scalar_t* y_ptr = x_ptr + d;
@@ -58,21 +58,21 @@ __global__ void XLLM_KERNEL_ATTR(1024)
     const int4* x_vec = reinterpret_cast<const int4*>(x_ptr);
     const int4* y_vec = reinterpret_cast<const int4*>(y_ptr);
     int4* out_vec = reinterpret_cast<int4*>(out_ptr);
-    const int num_vecs = d / kVecSize;
-    const int vec_end = num_vecs * kVecSize;
+    const int32_t num_vecs = d / kVecSize;
+    const int32_t vec_end = num_vecs * kVecSize;
 
-    for (int i = threadIdx.x; i < num_vecs; i += blockDim.x) {
+    for (int32_t i = threadIdx.x; i < num_vecs; i += blockDim.x) {
       int4 x = xllm_ldg(&x_vec[i]), y = xllm_ldg(&y_vec[i]), r;
       auto* xp = reinterpret_cast<scalar_t*>(&x);
       auto* yp = reinterpret_cast<scalar_t*>(&y);
       auto* rp = reinterpret_cast<scalar_t*>(&r);
 #pragma unroll
-      for (int j = 0; j < kVecSize; j++) {
+      for (int32_t j = 0; j < kVecSize; j++) {
         rp[j] = compute<scalar_t, ACT_FN, act_first>(xp[j], yp[j]);
       }
       out_vec[i] = r;
     }
-    for (int i = vec_end + threadIdx.x; i < d; i += blockDim.x) {
+    for (int32_t i = vec_end + threadIdx.x; i < d; i += blockDim.x) {
       out_ptr[i] = compute<scalar_t, ACT_FN, act_first>(xllm_ldg(&x_ptr[i]),
                                                         xllm_ldg(&y_ptr[i]));
     }
@@ -175,7 +175,8 @@ void launch_mul_sigmoid_gate_inplace(torch::Tensor& out,
   const int64_t out_row_stride = (out.dim() <= 1) ? last_dim : out.stride(-2);
   const int64_t gate_row_stride = (gate.dim() <= 1) ? last_dim : gate.stride(-2);
 
-  const int threads = std::min<int64_t>(last_dim, 1024);
+  const int32_t threads =
+      static_cast<int32_t>(std::min<int64_t>(last_dim, 1024));
   dim3 grid(static_cast<unsigned int>(M));
   dim3 block(static_cast<unsigned int>(threads));
   DISPATCH_FLOATING_TYPES(out.scalar_type(), "mul_sigmoid_gate_inplace", [&] {
