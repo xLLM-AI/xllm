@@ -1035,7 +1035,9 @@ __global__ void __launch_bounds__(256, 1) conv1d_decode_kernel(
   if (batch_idx >= batch || feat >= dim) {
     return;
   }
-  const int cache_idx = cache_indices[batch_idx];
+  const int32_t cache_idx = cache_indices[batch_idx];
+  const int64_t out_base = static_cast<int64_t>(batch_idx) * out_stride_token +
+                           static_cast<int64_t>(feat) * out_stride_dim;
   if (cache_idx == pad_slot_id || cache_idx < 0 ||
       cache_idx >= num_cache_lines) {
     out[out_base] = from_f32<T>(0.f);
@@ -1048,8 +1050,6 @@ __global__ void __launch_bounds__(256, 1) conv1d_decode_kernel(
       static_cast<int64_t>(cache_idx) * state_stride_seq +
       static_cast<int64_t>(feat) * state_stride_dim;
   const int64_t w_base = static_cast<int64_t>(feat) * w_stride_dim;
-  const int64_t out_base = static_cast<int64_t>(batch_idx) * out_stride_token +
-                           static_cast<int64_t>(feat) * out_stride_dim;
   const int state_len = width - 1;
 
   float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;

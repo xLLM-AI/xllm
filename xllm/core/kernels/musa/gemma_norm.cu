@@ -51,7 +51,7 @@ class __align__(16) Vec8 {
 
   template <typename Offset>
   static __device__ __forceinline__ Vec8 load(const T* ptr, Offset idx) {
-    return *(const Vec8*)(ptr + idx);
+    return *reinterpret_cast<const Vec8*>(ptr + idx);
   }
 
   template <typename Offset>
@@ -69,7 +69,7 @@ class __align__(16) Vec8 {
     *reinterpret_cast<uint4*>(&dst) = raw;
     return dst;
 #else
-    return *(const Vec8*)(ptr + idx);
+    return *reinterpret_cast<const Vec8*>(ptr + idx);
 #endif
   }
 };
@@ -254,7 +254,7 @@ __global__ void __launch_bounds__(1024, 1)
       x_float.val.elem[i] = value;
     }
     if constexpr (CACHE) {
-      *(Float8*)(cached + col) = x_float;
+      *reinterpret_cast<Float8*>(cached + col) = x_float;
     }
   }
 
@@ -266,7 +266,7 @@ __global__ void __launch_bounds__(1024, 1)
     const int col = vec_idx * kVec;
     Float8 x_float;
     if constexpr (CACHE) {
-      x_float = *(Float8*)(cached + col);
+      x_float = *reinterpret_cast<Float8*>(cached + col);
     } else {
       Vec8<T> x = Vec8<T>::load(input + input_base, col);
 #pragma unroll
@@ -283,7 +283,7 @@ __global__ void __launch_bounds__(1024, 1)
       dst.val.elem[i] =
           gemma_from_float<T>(x_float.val.elem[i] * scale * weight_value);
     }
-    *(Vec8<T>*)(out + out_base + col) = dst;
+    *reinterpret_cast<Vec8<T>*>(out + out_base + col) = dst;
   }
 }
 
@@ -337,7 +337,7 @@ __global__ void __launch_bounds__(256, 1)
     dst.val.elem[i] =
         gemma_from_float<T>(x_float.val.elem[i] * scale * weight_value);
   }
-  *(Vec8<T>*)(out + out_base + col) = dst;
+  *reinterpret_cast<Vec8<T>*>(out + out_base + col) = dst;
 }
 
 template <typename T, bool GEMMA>
@@ -415,9 +415,10 @@ __global__ void __launch_bounds__(1024, 1)
       residual_out.val.elem[i] = gemma_from_float<T>(value);
       sum_float.val.elem[i] = value;
     }
-    *(Vec8<T>*)(residual + residual_base + col) = residual_out;
+    *reinterpret_cast<Vec8<T>*>(residual + residual_base + col) =
+        residual_out;
     if constexpr (CACHE) {
-      *(Float8*)(cached + col) = sum_float;
+      *reinterpret_cast<Float8*>(cached + col) = sum_float;
     }
   }
 
@@ -429,7 +430,7 @@ __global__ void __launch_bounds__(1024, 1)
     const int col = vec_idx * kVec;
     Float8 sum_float;
     if constexpr (CACHE) {
-      sum_float = *(Float8*)(cached + col);
+      sum_float = *reinterpret_cast<Float8*>(cached + col);
     } else {
       Vec8<T> r = Vec8<T>::load(residual + residual_base, col);
 #pragma unroll
@@ -446,7 +447,7 @@ __global__ void __launch_bounds__(1024, 1)
       dst.val.elem[i] =
           gemma_from_float<T>(sum_float.val.elem[i] * scale * weight_value);
     }
-    *(Vec8<T>*)(input + input_base + col) = dst;
+    *reinterpret_cast<Vec8<T>*>(input + input_base + col) = dst;
   }
 }
 

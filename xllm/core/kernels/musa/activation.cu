@@ -109,10 +109,10 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
 }
 
 #define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL, ACT_FIRST)                   \
-  int d = input.size(-1) / 2;                                              \
+  int32_t d = static_cast<int32_t>(input.size(-1) / 2);                    \
   int64_t num_tokens = input.numel() / input.size(-1);                     \
   dim3 grid(num_tokens);                                                   \
-  dim3 block(std::min(d, 1024));                                           \
+  dim3 block(std::min<int32_t>(d, 1024));                                  \
   if (num_tokens == 0) {                                                   \
     return;                                                                \
   }                                                                        \

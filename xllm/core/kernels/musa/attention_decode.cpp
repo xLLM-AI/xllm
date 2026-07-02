@@ -205,29 +205,7 @@ void batch_decode(const std::string& uri,
                   const torch::Tensor& paged_kv_indptr_host,
                   const torch::Tensor& paged_kv_indices_host,
                   const torch::Tensor& paged_kv_last_page_len_host) {
-#if defined(XLLM_TORCH_MUSA)
   (void)use_tensor_core;
-#else
-  if (use_tensor_core) {
-    batch_chunked_prefill(uri,
-                          plan_info,
-                          float_workspace_buffer,
-                          int_workspace_buffer,
-                          page_locked_int_workspace_buffer,
-                          query,
-                          k_cache,
-                          v_cache,
-                          paged_kv_indptr,
-                          paged_kv_indices,
-                          paged_kv_last_page_len,
-                          window_left,
-                          sm_scale,
-                          output,
-                          output_lse,
-                          qo_indptr,
-                          /*causal=*/false);
-  } else
-#endif
   {
     VLOG(kGraphExecutorLogVerboseLevel) << "plan_info: " << plan_info;
 
