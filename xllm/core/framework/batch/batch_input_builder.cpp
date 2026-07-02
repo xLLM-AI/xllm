@@ -235,32 +235,41 @@ TransferKVInfo BatchInputBuilder::build_step_transfer_info(
   const size_t win_begin = next_transfer_block_idx;
   const size_t win_end =
       static_cast<size_t>(util::ceil_div(seq_len, block_size));
-  const size_t map_end = std::min(win_end, local_size);
   const size_t remote_stride =
       static_cast<size_t>(util::kv_split_size_effective());
-  const size_t remote_end = map_end * remote_stride;
-  CHECK_GE(util::align_up(remote_size, remote_stride), remote_end)
-      << "remote block coverage shortage, request_id=" << full_info.request_id
-      << ", remote_size=" << remote_size << ", remote_end=" << remote_end
-      << ", remote_stride=" << remote_stride;
+
+  // === PROPER FIX (vLLM push-mode inspired):
+  // D-side registered remote_size blocks = D KV deficit (D_full - D_shared).
+  // P must transfer exactly D's deficit. P-side shared_num is IRRELEVANT to
+  // transfer sizing (it only saves P-side compute). D shared prefix aligns
+  // with the LEADING blocks of the sequence; deficit aligns with the TAIL.
+  // So P transfers from position (local_size - deficit_in_local_blocks) to end.
+  const size_t deficit_local_blocks = remote_size / remote_stride;
+  CHECK_GE(local_size, deficit_local_blocks)
+      << "local sequence shorter than D deficit; local_size=" << local_size
+      << " remote_size=" << remote_size << " stride=" << remote_stride;
+  const size_t local_transfer_start = local_size - deficit_local_blocks;
+  const size_t map_end = std::min(win_end, local_size);
 
   const size_t stable_end = static_cast<size_t>(seq_len / block_size);
   *advanced_transfer_block_idx =
       std::max(next_transfer_block_idx, std::min(stable_end, map_end));
 
-  if (win_begin >= map_end) {
+  const size_t effective_win_begin = std::max(win_begin, local_transfer_start);
+  if (effective_win_begin >= map_end) {
     return info;
   }
 
   std::vector<size_t> remote_idxs;
-  const size_t block_cnt = map_end - win_begin;
+  const size_t block_cnt = map_end - effective_win_begin;
   info.local_blocks_ids.reserve(block_cnt);
   info.remote_blocks_ids.reserve(block_cnt * remote_stride);
   remote_idxs.reserve(block_cnt * remote_stride);
-  for (size_t local_idx = win_begin; local_idx < map_end; ++local_idx) {
+  for (size_t local_idx = effective_win_begin; local_idx < map_end; ++local_idx) {
     info.local_blocks_ids.emplace_back(local_block_ids[local_idx]);
+    const size_t remote_local_idx = local_idx - local_transfer_start;
     for (size_t offset = 0; offset < remote_stride; ++offset) {
-      const size_t remote_idx = local_idx * remote_stride + offset;
+      const size_t remote_idx = remote_local_idx * remote_stride + offset;
       if (remote_idx >= full_info.remote_blocks_ids.size()) {
         if (remote_stride > 1) {
           break;
