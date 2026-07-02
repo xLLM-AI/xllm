@@ -19,7 +19,6 @@ limitations under the License.
 
 #include <cmath>
 #include <optional>
-#include <tuple>
 
 #include "kernels/mlu/mlu_ops_api.h"
 #include "kernels/ops_api.h"
@@ -81,46 +80,6 @@ torch::Tensor empty_output(const torch::Tensor& hidden_states,
   return torch::empty({0, head_dim}, hidden_states.options());
 }
 
-// The fused_compress_*_kv operators consume a single paged state_cache of
-// shape [block_num, block_size, 2 * coff_dim] with kv in the first coff_dim
-// lanes and score in the last coff_dim lanes. xllm stores kv and score in two
-// separate paged pools, so we mirror them into one combined tensor for the
-// call and scatter the result back. The two pools share the same block table
-// and (being SLIDING_WINDOW allocations) are physically [batch, seq_len, dim]
-// contiguous, so this mirroring is layout-faithful.
-torch::Tensor& ensure_state_mirror(torch::Tensor& mirror,
-                                   const torch::Tensor& kv_state,
-                                   const torch::Tensor& score_state,
-                                   int64_t coff_dim) {
-  const int64_t block_num = kv_state.size(0);
-  const int64_t block_size = kv_state.size(1);
-  const int64_t combined_dim = 2 * coff_dim;
-  if (!mirror.defined() || mirror.size(0) != block_num ||
-      mirror.size(1) != block_size || mirror.size(2) != combined_dim) {
-    mirror =
-        torch::empty({block_num, block_size, combined_dim}, kv_state.options());
-  }
-  return mirror;
-}
-
-void copy_split_to_mirror(const torch::Tensor& mirror,
-                          const torch::Tensor& kv_state,
-                          const torch::Tensor& score_state,
-                          int64_t coff_dim) {
-  mirror.narrow(/*dim=*/2, /*start=*/0, /*length=*/coff_dim).copy_(kv_state);
-  mirror.narrow(/*dim=*/2, /*start=*/coff_dim, /*length=*/coff_dim)
-      .copy_(score_state);
-}
-
-void copy_mirror_to_split(const torch::Tensor& mirror,
-                          torch::Tensor& kv_state,
-                          torch::Tensor& score_state,
-                          int64_t coff_dim) {
-  kv_state.copy_(mirror.narrow(/*dim=*/2, /*start=*/0, /*length=*/coff_dim));
-  score_state.copy_(
-      mirror.narrow(/*dim=*/2, /*start=*/coff_dim, /*length=*/coff_dim));
-}
-
 }  // namespace
 
 namespace xllm {
@@ -179,26 +138,17 @@ torch::Tensor CompressorImpl::forward_prefill(
     torch::Tensor& hidden_states,
     torch::Tensor& kv_cache,
     const torch::Tensor& slot_mapping,
-    std::tuple<torch::Tensor, torch::Tensor>& kv_states,
-    std::tuple<torch::Tensor, torch::Tensor>& block_tables,
+    torch::Tensor& state_cache,
+    const torch::Tensor& state_block_table,
     const torch::Tensor& compressed_sin_table,
     const torch::Tensor& compressed_cos_table) {
   torch::Tensor kv_pack = wkv_->forward(hidden_states);
   torch::Tensor score_pack = wgate_->forward(hidden_states);
-
-  torch::Tensor& kv_state = std::get<0>(kv_states);
-  torch::Tensor& score_state = std::get<1>(kv_states);
-  torch::Tensor& kv_block_table = std::get<0>(block_tables);
   const DSAMetadata& dsa = *attn_metadata.dsa_metadata;
-  const int64_t coff_dim = coff_ * head_dim_;
 
   if (slot_mapping.numel() == 0) {
     return empty_output(hidden_states, head_dim_);
   }
-
-  torch::Tensor& mirror =
-      ensure_state_mirror(state_cache_mirror_, kv_state, score_state, coff_dim);
-  copy_split_to_mirror(mirror, kv_state, score_state, coff_dim);
 
   torch::Tensor compressed_kv =
       torch::empty({slot_mapping.numel(), head_dim_}, hidden_states.options());
@@ -206,16 +156,14 @@ torch::Tensor CompressorImpl::forward_prefill(
   xllm::kernel::mlu::fused_compress_multi_kv(
       /*kv=*/kv_pack,
       /*score=*/score_pack,
-      /*state_cache=*/mirror,
-      /*state_block_table=*/kv_block_table.contiguous(),
+      /*state_cache=*/state_cache,
+      /*state_block_table=*/state_block_table.contiguous(),
       /*cu_seqlens=*/attn_metadata.q_cu_seq_lens,
       /*positions=*/dsa.input_positions.to(torch::kInt32).contiguous(),
       /*ape=*/ape_,
       /*max_seqlen=*/attn_metadata.max_query_len,
       /*overlap=*/overlap_,
       /*compressed_kv=*/compressed_kv);
-
-  copy_mirror_to_split(mirror, kv_state, score_state, coff_dim);
 
   auto kv = compressed_kv.to(torch::kFloat32);
   auto output = std::get<0>(norm_->forward(kv));
@@ -238,17 +186,12 @@ torch::Tensor CompressorImpl::forward_decode(
     torch::Tensor& hidden_states,
     torch::Tensor& kv_cache,
     const torch::Tensor& slot_mapping,
-    std::tuple<torch::Tensor, torch::Tensor>& kv_states,
-    std::tuple<torch::Tensor, torch::Tensor>& block_tables,
+    torch::Tensor& state_cache,
+    const torch::Tensor& state_block_table,
     const torch::Tensor& compressed_sin_table,
     const torch::Tensor& compressed_cos_table) {
-  torch::Tensor& kv_state = std::get<0>(kv_states);
-  torch::Tensor& score_state = std::get<1>(kv_states);
-  torch::Tensor& kv_block_table = std::get<0>(block_tables);
-
   const DSAMetadata& dsa = *attn_metadata.dsa_metadata;
-  int64_t batch_size = static_cast<int64_t>(attn_metadata.kv_seq_lens.size(0));
-  const int64_t coff_dim = coff_ * head_dim_;
+  const int64_t state_block_size = state_cache.size(1);
 
   torch::Tensor kv_pack = wkv_->forward(hidden_states);
   torch::Tensor score_pack = wgate_->forward(hidden_states);
@@ -260,13 +203,9 @@ torch::Tensor CompressorImpl::forward_decode(
     score_pack = score_pack.reshape({-1, score_pack.size(-1)});
   }
 
-  torch::Tensor& mirror =
-      ensure_state_mirror(state_cache_mirror_, kv_state, score_state, coff_dim);
-  copy_split_to_mirror(mirror, kv_state, score_state, coff_dim);
-
   torch::Tensor positions = dsa.input_positions.to(torch::kInt32).contiguous();
   torch::Tensor kv_cache_view = kv_cache.squeeze(/*dim=*/1);
-  const int64_t state_block_size = kv_state.size(1);
+  const int64_t coff_dim = coff_ * head_dim_;
   std::optional<torch::Tensor> hadamard_matrix = std::nullopt;
   if (rotate_) {
     hadamard_matrix = hadamard_matrix_;
@@ -286,14 +225,12 @@ torch::Tensor CompressorImpl::forward_decode(
       /*kv_cache_scale=*/std::nullopt,
       /*eps=*/eps_,
       /*overlap=*/overlap_,
-      /*state_cache=*/mirror,
-      /*state_bt=*/kv_block_table.contiguous(),
+      /*state_cache=*/state_cache,
+      /*state_bt=*/state_block_table.contiguous(),
       /*state_width=*/coff_dim,
       /*state_block_size=*/state_block_size,
       /*cu_query_len=*/dsa.q_cu_seq_lens,
       /*K=*/0);
-
-  copy_mirror_to_split(mirror, kv_state, score_state, coff_dim);
 
   return empty_output(hidden_states, head_dim_);
 }
@@ -303,33 +240,30 @@ torch::Tensor CompressorImpl::forward(
     torch::Tensor& hidden_states,
     torch::Tensor& kv_cache,
     const torch::Tensor& slot_mapping,
-    std::tuple<torch::Tensor, torch::Tensor>& kv_states,
-    std::tuple<torch::Tensor, torch::Tensor>& block_tables,
+    torch::Tensor& state_cache,
+    const torch::Tensor& state_block_table,
     const torch::Tensor& compressed_sin_table,
     const torch::Tensor& compressed_cos_table) {
   const bool is_prefill =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
-  torch::Tensor output;
   if (is_prefill) {
-    output = forward_prefill(attn_metadata,
-                             hidden_states,
-                             kv_cache,
-                             slot_mapping,
-                             kv_states,
-                             block_tables,
-                             compressed_sin_table,
-                             compressed_cos_table);
-  } else {
-    output = forward_decode(attn_metadata,
-                            hidden_states,
-                            kv_cache,
-                            slot_mapping,
-                            kv_states,
-                            block_tables,
-                            compressed_sin_table,
-                            compressed_cos_table);
+    return forward_prefill(attn_metadata,
+                           hidden_states,
+                           kv_cache,
+                           slot_mapping,
+                           state_cache,
+                           state_block_table,
+                           compressed_sin_table,
+                           compressed_cos_table);
   }
-  return output;
+  return forward_decode(attn_metadata,
+                        hidden_states,
+                        kv_cache,
+                        slot_mapping,
+                        state_cache,
+                        state_block_table,
+                        compressed_sin_table,
+                        compressed_cos_table);
 }
 
 void CompressorImpl::load_state_dict(const StateDict& state_dict) {

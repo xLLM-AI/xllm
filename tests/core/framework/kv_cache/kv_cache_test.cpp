@@ -120,6 +120,17 @@ TEST(KVCacheTest, DeepSeekV4FourDimCachesUseDeviceLayout) {
             (std::vector<int64_t>{kSwaCount, kBlockSize, 2 * kIndexHeadDim}));
   EXPECT_EQ(shape_vec(caches[1].get_compress_index_score_state()),
             (std::vector<int64_t>{kSwaCount, kBlockSize, 2 * kIndexHeadDim}));
+#if defined(USE_MLU)
+  // MLU merges the split states into one owning tensor of shape
+  // [swa_count, block_size, 2 * coff_dim]; the split getters are narrow views
+  // into it (sizes unchanged).
+  EXPECT_EQ(shape_vec(caches[1].get_compress_state()),
+            (std::vector<int64_t>{kSwaCount, kBlockSize, 4 * kHeadDim}));
+  EXPECT_EQ(shape_vec(caches[1].get_compress_index_state()),
+            (std::vector<int64_t>{kSwaCount, kBlockSize, 4 * kIndexHeadDim}));
+  EXPECT_TRUE(caches[1].get_compress_state().is_contiguous());
+  EXPECT_TRUE(caches[1].get_compress_index_state().is_contiguous());
+#endif
 
   EXPECT_EQ(shape_vec(caches[2].get_k_cache()),
             dsv4_block_shape(kC128Count, kBlockSize, 1, kHeadDim));
@@ -129,6 +140,11 @@ TEST(KVCacheTest, DeepSeekV4FourDimCachesUseDeviceLayout) {
             (std::vector<int64_t>{kSwaCount, kBlockSize, kHeadDim}));
   EXPECT_EQ(shape_vec(caches[2].get_compress_score_state()),
             (std::vector<int64_t>{kSwaCount, kBlockSize, kHeadDim}));
+#if defined(USE_MLU)
+  EXPECT_EQ(shape_vec(caches[2].get_compress_state()),
+            (std::vector<int64_t>{kSwaCount, kBlockSize, 2 * kHeadDim}));
+  EXPECT_FALSE(caches[2].get_compress_index_state().defined());
+#endif
 }
 
 TEST(KVCacheTest, DeepSeekV4KVCacheExposesIndexerScaleThroughSharedContract) {

@@ -33,8 +33,9 @@ namespace layer {
 struct DeepseekV4IndexerCacheRefs {
   torch::Tensor index_block_table;
   torch::Tensor index_slot_mapping;
-  torch::Tensor index_state_kv_block_table;
-  torch::Tensor index_state_score_block_table;
+  // Single shared block table for the merged compress_index_state (kv and
+  // score share the same SLIDING_WINDOW block table).
+  torch::Tensor index_state_block_table;
 };
 
 class DeepseekV4IndexerImpl : public torch::nn::Module {
@@ -58,8 +59,7 @@ class DeepseekV4IndexerImpl : public torch::nn::Module {
       const torch::Tensor& x,
       const torch::Tensor& qr,
       torch::Tensor& index_cache,
-      torch::Tensor& compress_index_kv_state,
-      torch::Tensor& compress_index_score_state,
+      torch::Tensor& compress_index_state,
       const AttentionMetadata& attn_metadata,
       const DeepseekV4IndexerCacheRefs& cache_refs,
       bool is_prefill,
@@ -77,8 +77,7 @@ class DeepseekV4IndexerImpl : public torch::nn::Module {
   torch::Tensor preprocess_weights(const torch::Tensor& x);
 
   torch::Tensor compress_kv(torch::Tensor& hidden_states,
-                            torch::Tensor& compress_index_kv_state,
-                            torch::Tensor& compress_index_score_state,
+                            torch::Tensor& compress_index_state,
                             const AttentionMetadata& attn_metadata,
                             torch::Tensor& index_cache,
                             const DeepseekV4IndexerCacheRefs& cache_refs,

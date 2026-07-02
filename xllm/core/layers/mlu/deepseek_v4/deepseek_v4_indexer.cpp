@@ -163,26 +163,20 @@ torch::Tensor DeepseekV4IndexerImpl::preprocess_weights(
 
 torch::Tensor DeepseekV4IndexerImpl::compress_kv(
     torch::Tensor& hidden_states,
-    torch::Tensor& compress_index_kv_state,
-    torch::Tensor& compress_index_score_state,
+    torch::Tensor& compress_index_state,
     const AttentionMetadata& attn_metadata,
     torch::Tensor& index_cache,
     const DeepseekV4IndexerCacheRefs& cache_refs,
     const torch::Tensor& compressed_sin_table,
     const torch::Tensor& compressed_cos_table) {
-  std::tuple<torch::Tensor, torch::Tensor> states(compress_index_kv_state,
-                                                  compress_index_score_state);
-  std::tuple<torch::Tensor, torch::Tensor> block_tables(
-      cache_refs.index_state_kv_block_table,
-      cache_refs.index_state_score_block_table);
   auto output = compressor_->forward(attn_metadata,
-                                     hidden_states,
-                                     index_cache,
-                                     cache_refs.index_slot_mapping,
-                                     states,
-                                     block_tables,
-                                     compressed_sin_table,
-                                     compressed_cos_table);
+                                                 hidden_states,
+                                                 index_cache,
+                                                 cache_refs.index_slot_mapping,
+                                                 compress_index_state,
+                                                 cache_refs.index_state_block_table,
+                                                 compressed_sin_table,
+                                                 compressed_cos_table);
   return output;
 }
 
@@ -292,8 +286,7 @@ std::tuple<torch::Tensor, torch::Tensor> DeepseekV4IndexerImpl::forward(
     const torch::Tensor& x,
     const torch::Tensor& qr,
     torch::Tensor& index_cache,
-    torch::Tensor& compress_index_kv_state,
-    torch::Tensor& compress_index_score_state,
+    torch::Tensor& compress_index_state,
     const AttentionMetadata& attn_metadata,
     const DeepseekV4IndexerCacheRefs& cache_refs,
     bool is_prefill,
@@ -303,8 +296,7 @@ std::tuple<torch::Tensor, torch::Tensor> DeepseekV4IndexerImpl::forward(
       qr, attn_metadata, compressed_sin_table, compressed_cos_table);
   torch::Tensor hidden_states = x;
   torch::Tensor current_kv = compress_kv(hidden_states,
-                                         compress_index_kv_state,
-                                         compress_index_score_state,
+                                         compress_index_state,
                                          attn_metadata,
                                          index_cache,
                                          cache_refs,

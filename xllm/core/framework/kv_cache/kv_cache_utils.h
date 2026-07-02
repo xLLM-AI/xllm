@@ -116,6 +116,16 @@ struct DeepSeekV4KVCacheTensors {
   torch::Tensor compress_score_state;
   torch::Tensor compress_index_kv_state;
   torch::Tensor compress_index_score_state;
+#if defined(USE_MLU)
+  // Owning merged state of shape [block_num, block_size, 2 * coff_dim] with kv
+  // in the [0, coff_dim) lanes and score in the [coff_dim, 2 * coff_dim) lanes.
+  // Backs the narrow-view getters (get_compress_*_state) and is passed directly
+  // to fused_compress_*_kv, which requires an owning contiguous state_cache:
+  // the decode op checks state_cache[0].is_contiguous(), a narrow view would
+  // fail. NPU keeps the split layout and does not populate these fields.
+  torch::Tensor compress_state;
+  torch::Tensor compress_index_state;
+#endif
 };
 
 // for qwen3.5

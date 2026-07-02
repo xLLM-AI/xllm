@@ -405,13 +405,23 @@ class DeepseekV4AttentionTest : public ::testing::Test {
           {batch_size * compressed_blocks, 1, kBlockSize, config.head_dim},
           options_);
       const int64_t coff = config.compress_ratio == 4 ? 2 : 1;
-      tensors.compress_kv_state = torch::zeros(
-          {batch_size, coff * config.compress_ratio, coff * config.head_dim},
+      const int64_t cmp_coff_dim = coff * config.head_dim;
+      // Allocate one owning merged tensor ([batch, seq, 2*coff_dim] with kv in
+      // the [0, coff_dim) lanes and score in the [coff_dim, 2*coff_dim) lanes)
+      // and let the split fields be narrow views of it. This matches the
+      // framework allocator layout so the owning getters resolve to real
+      // tensors and the split getters share the same storage.
+      tensors.compress_state = torch::zeros(
+          {batch_size, coff * config.compress_ratio, 2 * cmp_coff_dim},
           options_.dtype(torch::kFloat32));
-      tensors.compress_score_state = torch::full(
-          {batch_size, coff * config.compress_ratio, coff * config.head_dim},
-          -std::numeric_limits<float>::infinity(),
-          options_.dtype(torch::kFloat32));
+      tensors.compress_kv_state =
+          tensors.compress_state.narrow(/*dim=*/2, /*start=*/0,
+                                        /*length=*/cmp_coff_dim);
+      tensors.compress_score_state =
+          tensors.compress_state.narrow(/*dim=*/2, /*start=*/cmp_coff_dim,
+                                        /*length=*/cmp_coff_dim);
+      tensors.compress_score_state.fill_(
+          -std::numeric_limits<float>::infinity());
     }
     if (config.compress_ratio == 4) {
       tensors.index_cache = torch::zeros({batch_size * compressed_blocks,
@@ -419,13 +429,17 @@ class DeepseekV4AttentionTest : public ::testing::Test {
                                           kBlockSize,
                                           config.index_head_dim},
                                          options_);
+      const int64_t idx_coff_dim = 2 * config.index_head_dim;
+      tensors.compress_index_state = torch::zeros(
+          {batch_size, 8, 2 * idx_coff_dim}, options_.dtype(torch::kFloat32));
       tensors.compress_index_kv_state =
-          torch::zeros({batch_size, 8, 2 * config.index_head_dim},
-                       options_.dtype(torch::kFloat32));
+          tensors.compress_index_state.narrow(/*dim=*/2, /*start=*/0,
+                                              /*length=*/idx_coff_dim);
       tensors.compress_index_score_state =
-          torch::full({batch_size, 8, 2 * config.index_head_dim},
-                      -std::numeric_limits<float>::infinity(),
-                      options_.dtype(torch::kFloat32));
+          tensors.compress_index_state.narrow(/*dim=*/2, /*start=*/idx_coff_dim,
+                                              /*length=*/idx_coff_dim);
+      tensors.compress_index_score_state.fill_(
+          -std::numeric_limits<float>::infinity());
     }
     return KVCache(tensors);
   }
@@ -842,6 +856,11 @@ class DeepseekV4AttentionTest : public ::testing::Test {
     tensors.compress_index_kv_state = source.get_compress_index_kv_state();
     tensors.compress_index_score_state =
         source.get_compress_index_score_state();
+    // Share the owning merged state from source so the split getters resolve
+    // to narrow views of the same storage (layout-faithful with the split
+    // fields above).
+    tensors.compress_state = source.get_compress_state();
+    tensors.compress_index_state = source.get_compress_index_state();
     return KVCache(tensors);
   }
 

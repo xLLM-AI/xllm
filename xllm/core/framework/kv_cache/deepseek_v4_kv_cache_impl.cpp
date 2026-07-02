@@ -93,7 +93,14 @@ DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
       compress_kv_state_(tensors.compress_kv_state),
       compress_score_state_(tensors.compress_score_state),
       compress_index_kv_state_(tensors.compress_index_kv_state),
-      compress_index_score_state_(tensors.compress_index_score_state) {}
+      compress_index_score_state_(tensors.compress_index_score_state)
+#if defined(USE_MLU)
+      ,
+      compress_state_(tensors.compress_state),
+      compress_index_state_(tensors.compress_index_state)
+#endif
+{
+}
 
 torch::Tensor DeepSeekV4KVCacheImpl::get_k_cache() const { return key_cache_; }
 
@@ -114,19 +121,70 @@ torch::Tensor DeepSeekV4KVCacheImpl::get_swa_cache() const {
 }
 
 torch::Tensor DeepSeekV4KVCacheImpl::get_compress_kv_state() const {
+#if defined(USE_MLU)
+  if (compress_state_.defined()) {
+    const int64_t coff_dim = compress_state_.size(2) / 2;
+    return compress_state_.narrow(/*dim=*/2, /*start=*/0, /*length=*/coff_dim);
+  }
   return compress_kv_state_;
+#else
+  return compress_kv_state_;
+#endif
 }
 
 torch::Tensor DeepSeekV4KVCacheImpl::get_compress_score_state() const {
+#if defined(USE_MLU)
+  if (compress_state_.defined()) {
+    const int64_t coff_dim = compress_state_.size(2) / 2;
+    return compress_state_.narrow(
+        /*dim=*/2, /*start=*/coff_dim, /*length=*/coff_dim);
+  }
   return compress_score_state_;
+#else
+  return compress_score_state_;
+#endif
 }
 
 torch::Tensor DeepSeekV4KVCacheImpl::get_compress_index_kv_state() const {
+#if defined(USE_MLU)
+  if (compress_index_state_.defined()) {
+    const int64_t coff_dim = compress_index_state_.size(2) / 2;
+    return compress_index_state_.narrow(
+        /*dim=*/2, /*start=*/0, /*length=*/coff_dim);
+  }
   return compress_index_kv_state_;
+#else
+  return compress_index_kv_state_;
+#endif
 }
 
 torch::Tensor DeepSeekV4KVCacheImpl::get_compress_index_score_state() const {
+#if defined(USE_MLU)
+  if (compress_index_state_.defined()) {
+    const int64_t coff_dim = compress_index_state_.size(2) / 2;
+    return compress_index_state_.narrow(
+        /*dim=*/2, /*start=*/coff_dim, /*length=*/coff_dim);
+  }
   return compress_index_score_state_;
+#else
+  return compress_index_score_state_;
+#endif
+}
+
+torch::Tensor DeepSeekV4KVCacheImpl::get_compress_state() const {
+#if defined(USE_MLU)
+  return compress_state_;
+#else
+  return torch::Tensor();
+#endif
+}
+
+torch::Tensor DeepSeekV4KVCacheImpl::get_compress_index_state() const {
+#if defined(USE_MLU)
+  return compress_index_state_;
+#else
+  return torch::Tensor();
+#endif
 }
 
 bool DeepSeekV4KVCacheImpl::empty() const { return !swa_cache_.defined(); }
@@ -153,6 +211,14 @@ void DeepSeekV4KVCacheImpl::swap_blocks(torch::Tensor& src_tensor,
   indexer_cache_scale_ =
       swap_tensor_blocks(indexer_cache_scale_, src_tensor, dst_tensor);
   swa_cache_ = swap_tensor_blocks(swa_cache_, src_tensor, dst_tensor);
+#if defined(USE_MLU)
+  // Swap the owning merged tensors; the split getters recompute narrow views
+  // from compress_state_ on every call, so they reflect the new storage
+  // automatically after the owning member is rebound.
+  compress_state_ = swap_tensor_blocks(compress_state_, src_tensor, dst_tensor);
+  compress_index_state_ =
+      swap_tensor_blocks(compress_index_state_, src_tensor, dst_tensor);
+#else
   compress_kv_state_ =
       swap_tensor_blocks(compress_kv_state_, src_tensor, dst_tensor);
   compress_score_state_ =
@@ -161,6 +227,7 @@ void DeepSeekV4KVCacheImpl::swap_blocks(torch::Tensor& src_tensor,
       swap_tensor_blocks(compress_index_kv_state_, src_tensor, dst_tensor);
   compress_index_score_state_ =
       swap_tensor_blocks(compress_index_score_state_, src_tensor, dst_tensor);
+#endif
 }
 
 DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
@@ -225,6 +292,25 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
     tensors.swa_cache =
         torch::empty(dsv4_block_shape(swa_count, block_size, n_heads, head_dim),
                      cache_options);
+#if defined(USE_MLU)
+    // coff_dim = 2 * head_dim for ratio==4; merged dim = 2 * coff_dim. The
+    // owning compress_state backs the narrow-view getters and is passed
+    // directly to fused_compress_*_kv (which requires a contiguous state_cache).
+    const int64_t cmp_coff_dim = 2 * head_dim;
+    tensors.compress_state =
+        torch::empty({swa_count, block_size, 2 * cmp_coff_dim}, state_options);
+    tensors.compress_kv_state = tensors.compress_state.narrow(
+        /*dim=*/2, /*start=*/0, /*length=*/cmp_coff_dim);
+    tensors.compress_score_state = tensors.compress_state.narrow(
+        /*dim=*/2, /*start=*/cmp_coff_dim, /*length=*/cmp_coff_dim);
+    const int64_t idx_coff_dim = 2 * index_head_dim;
+    tensors.compress_index_state =
+        torch::empty({swa_count, block_size, 2 * idx_coff_dim}, state_options);
+    tensors.compress_index_kv_state = tensors.compress_index_state.narrow(
+        /*dim=*/2, /*start=*/0, /*length=*/idx_coff_dim);
+    tensors.compress_index_score_state = tensors.compress_index_state.narrow(
+        /*dim=*/2, /*start=*/idx_coff_dim, /*length=*/idx_coff_dim);
+#else
     tensors.compress_kv_state =
         torch::empty({swa_count, block_size, 2 * head_dim}, state_options);
     tensors.compress_score_state =
@@ -233,6 +319,7 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
         {swa_count, block_size, 2 * index_head_dim}, state_options);
     tensors.compress_index_score_state = torch::empty(
         {swa_count, block_size, 2 * index_head_dim}, state_options);
+#endif
   } else if (compress_ratio == 128) {
     tensors.key_cache = torch::empty(
         dsv4_block_shape(c128_count, block_size, n_heads, head_dim),
@@ -240,10 +327,21 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
     tensors.swa_cache =
         torch::empty(dsv4_block_shape(swa_count, block_size, n_heads, head_dim),
                      cache_options);
+#if defined(USE_MLU)
+    // coff_dim = head_dim for ratio==128; merged dim = 2 * coff_dim.
+    const int64_t cmp_coff_dim = head_dim;
+    tensors.compress_state =
+        torch::empty({swa_count, block_size, 2 * cmp_coff_dim}, state_options);
+    tensors.compress_kv_state = tensors.compress_state.narrow(
+        /*dim=*/2, /*start=*/0, /*length=*/cmp_coff_dim);
+    tensors.compress_score_state = tensors.compress_state.narrow(
+        /*dim=*/2, /*start=*/cmp_coff_dim, /*length=*/cmp_coff_dim);
+#else
     tensors.compress_kv_state =
         torch::empty({swa_count, block_size, head_dim}, state_options);
     tensors.compress_score_state =
         torch::empty({swa_count, block_size, head_dim}, state_options);
+#endif
   } else {
     tensors.swa_cache =
         torch::empty(dsv4_block_shape(swa_count, block_size, n_heads, head_dim),
@@ -254,6 +352,14 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
   tensors.index_cache = cast_to_nd_format(tensors.index_cache);
   tensors.indexer_cache_scale = cast_to_nd_format(tensors.indexer_cache_scale);
   tensors.swa_cache = cast_to_nd_format(tensors.swa_cache);
+#if defined(USE_MLU)
+  // Cast the owning merged tensors only; the split getters are narrow views
+  // into them. (cast_to_nd_format is a no-op on MLU but kept for parity, and
+  // never applied to non-contiguous narrow views.)
+  tensors.compress_state = cast_to_nd_format(tensors.compress_state);
+  tensors.compress_index_state =
+      cast_to_nd_format(tensors.compress_index_state);
+#else
   tensors.compress_kv_state = cast_to_nd_format(tensors.compress_kv_state);
   tensors.compress_score_state =
       cast_to_nd_format(tensors.compress_score_state);
@@ -261,6 +367,7 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
       cast_to_nd_format(tensors.compress_index_kv_state);
   tensors.compress_index_score_state =
       cast_to_nd_format(tensors.compress_index_score_state);
+#endif
   return tensors;
 }
 

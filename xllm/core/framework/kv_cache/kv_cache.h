@@ -59,6 +59,8 @@ class KVCache final {
   torch::Tensor get_compress_score_state() const;
   torch::Tensor get_compress_index_kv_state() const;
   torch::Tensor get_compress_index_score_state() const;
+  torch::Tensor get_compress_state() const;
+  torch::Tensor get_compress_index_state() const;
   std::vector<std::vector<int64_t>> get_shapes();
 
   bool empty() const;

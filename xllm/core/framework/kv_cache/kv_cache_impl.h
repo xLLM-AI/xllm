@@ -48,6 +48,13 @@ class KVCacheImpl {
   virtual torch::Tensor get_compress_score_state() const;
   virtual torch::Tensor get_compress_index_kv_state() const;
   virtual torch::Tensor get_compress_index_score_state() const;
+  // Owning merged compress state of shape [block_num, block_size, 2 * coff_dim]
+  // (kv lanes [0, coff_dim), score lanes [coff_dim, 2 * coff_dim)). Populated
+  // only on backends that pass a single combined state_cache to the fused
+  // compress operators (e.g. MLU); other backends return an undefined tensor
+  // and keep using the split getters above.
+  virtual torch::Tensor get_compress_state() const;
+  virtual torch::Tensor get_compress_index_state() const;
 
   virtual bool empty() const;
 

@@ -263,6 +263,14 @@ torch::Tensor KVCache::get_compress_index_score_state() const {
   return impl_->get_compress_index_score_state();
 }
 
+torch::Tensor KVCache::get_compress_state() const {
+  return impl_->get_compress_state();
+}
+
+torch::Tensor KVCache::get_compress_index_state() const {
+  return impl_->get_compress_index_state();
+}
+
 std::vector<std::vector<int64_t>> KVCache::get_shapes() {
   return impl_->get_shapes();
 }

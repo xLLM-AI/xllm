@@ -411,31 +411,24 @@ DeepseekV4AttentionImpl::forward(const AttentionMetadata& attn_metadata,
     torch::Tensor cmp_cache = kv_cache.get_k_cache();
     torch::Tensor cmp_slot =
         layer_tensor(dsa.slot_mappings, layer_id_, mapping.cmp_cache_idx);
-    torch::Tensor kv_state = kv_cache.get_compress_kv_state();
-    torch::Tensor score_state = kv_cache.get_compress_score_state();
-
-    std::tuple<torch::Tensor, torch::Tensor> states(kv_state, score_state);
-    std::tuple<torch::Tensor, torch::Tensor> state_tables(
-        layer_tensor(dsa.block_tables, layer_id_, mapping.kv_state_cache_idx),
-        layer_tensor(
-            dsa.block_tables, layer_id_, mapping.score_state_cache_idx));
+    torch::Tensor cmp_state = kv_cache.get_compress_state();
+    torch::Tensor cmp_state_block_table =
+        layer_tensor(dsa.block_tables, layer_id_, mapping.kv_state_cache_idx);
     compressor_->forward(attn_metadata,
-                         hidden_states,
-                         cmp_cache,
-                         cmp_slot,
-                         states,
-                         state_tables,
-                         dsa.compressed_sin_table,
-                         dsa.compressed_cos_table);
+                                     hidden_states,
+                                     cmp_cache,
+                                     cmp_slot,
+                                     cmp_state,
+                                     cmp_state_block_table,
+                                     dsa.compressed_sin_table,
+                                     dsa.compressed_cos_table);
     torch::Tensor cmp_context_lens;
     torch::Tensor cmp_table_for_attn;
     torch::Tensor cmp_cache_for_attn = cmp_cache;
     int64_t cmp_max_context = 0;
     if (compress_ratio_ == 4) {
       torch::Tensor index_cache = kv_cache.get_index_cache();
-      torch::Tensor index_kv_state = kv_cache.get_compress_index_kv_state();
-      torch::Tensor index_score_state =
-          kv_cache.get_compress_index_score_state();
+      torch::Tensor index_state = kv_cache.get_compress_index_state();
       torch::Tensor index_block_table =
           layer_tensor(dsa.block_tables, layer_id_, mapping.index_cache_idx);
       torch::Tensor index_slot =
@@ -444,18 +437,14 @@ DeepseekV4AttentionImpl::forward(const AttentionMetadata& attn_metadata,
           index_block_table,
           index_slot,
           layer_tensor(
-              dsa.block_tables, layer_id_, mapping.index_kv_state_cache_idx),
-          layer_tensor(dsa.block_tables,
-                       layer_id_,
-                       mapping.index_score_state_cache_idx)};
+              dsa.block_tables, layer_id_, mapping.index_kv_state_cache_idx)};
       AttentionMetadata indexer_metadata =
           make_indexer_metadata(attn_metadata, index_block_table, index_slot);
       std::tie(cmp_table_for_attn, cmp_context_lens) =
           indexer_->forward(hidden_states,
                             qr,
                             index_cache,
-                            index_kv_state,
-                            index_score_state,
+                            index_state,
                             indexer_metadata,
                             refs,
                             is_prefill || is_chunked_prefill,

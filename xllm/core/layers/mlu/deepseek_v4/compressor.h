@@ -52,8 +52,8 @@ class CompressorImpl : public torch::nn::Module {
                         torch::Tensor& hidden_states,
                         torch::Tensor& kv_cache,
                         const torch::Tensor& slot_mapping,
-                        std::tuple<torch::Tensor, torch::Tensor>& kv_states,
-                        std::tuple<torch::Tensor, torch::Tensor>& block_tables,
+                        torch::Tensor& state_cache,
+                        const torch::Tensor& state_block_table,
                         const torch::Tensor& compressed_sin_table,
                         const torch::Tensor& compressed_cos_table);
 
@@ -62,8 +62,8 @@ class CompressorImpl : public torch::nn::Module {
       torch::Tensor& hidden_states,
       torch::Tensor& kv_cache,
       const torch::Tensor& slot_mapping,
-      std::tuple<torch::Tensor, torch::Tensor>& kv_states,
-      std::tuple<torch::Tensor, torch::Tensor>& block_tables,
+      torch::Tensor& state_cache,
+      const torch::Tensor& state_block_table,
       const torch::Tensor& compressed_sin_table,
       const torch::Tensor& compressed_cos_table);
 
@@ -72,8 +72,8 @@ class CompressorImpl : public torch::nn::Module {
       torch::Tensor& hidden_states,
       torch::Tensor& kv_cache,
       const torch::Tensor& slot_mapping,
-      std::tuple<torch::Tensor, torch::Tensor>& kv_states,
-      std::tuple<torch::Tensor, torch::Tensor>& block_tables,
+      torch::Tensor& state_cache,
+      const torch::Tensor& state_block_table,
       const torch::Tensor& compressed_sin_table,
       const torch::Tensor& compressed_cos_table);
 
@@ -85,7 +85,6 @@ class CompressorImpl : public torch::nn::Module {
   RMSNorm norm_{nullptr};
   DEFINE_WEIGHT(ape);
   torch::Tensor hadamard_matrix_;
-  torch::Tensor state_cache_mirror_;
 
   int64_t compress_ratio_ = 0;
   int64_t hidden_dim_ = 0;

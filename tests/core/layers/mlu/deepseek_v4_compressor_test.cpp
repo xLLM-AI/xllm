@@ -160,7 +160,7 @@ torch::Tensor gather_paged_state(const torch::Tensor& paged_state,
 }
 
 void scatter_paged_state(const torch::Tensor& dense,
-                         torch::Tensor& paged_state,
+                         const torch::Tensor& paged_state,
                          const torch::Tensor& block_table,
                          int64_t state_len) {
   torch::Tensor block_table_cpu =
@@ -462,24 +462,30 @@ class DeepseekV4CompressorTest : public ::testing::Test {
         (state_len + kStateBlockSize - 1) / kStateBlockSize;
     torch::Tensor block_table =
         make_paged_table(batch_size, state_blocks, int_options_);
-    torch::Tensor paged_kv =
-        torch::zeros({batch_size * state_blocks, kStateBlockSize, state_dim},
-                     options_.dtype(torch::kFloat32));
-    torch::Tensor paged_score =
-        torch::full({batch_size * state_blocks, kStateBlockSize, state_dim},
-                    -std::numeric_limits<float>::infinity(),
-                    options_.dtype(torch::kFloat32));
-    scatter_paged_state(kv_state, paged_kv, block_table, state_len);
-    scatter_paged_state(score_state, paged_score, block_table, state_len);
-    std::tuple<torch::Tensor, torch::Tensor> states(paged_kv, paged_score);
-    std::tuple<torch::Tensor, torch::Tensor> block_tables(block_table,
-                                                          block_table);
+    // Owning merged state: [batch * state_blocks, kStateBlockSize,
+    // 2 * state_dim] with kv in the [0, state_dim) lanes and score in the
+    // [state_dim, 2 * state_dim) lanes. The compressor forward consumes this
+    // owning tensor directly (the decode op checks state_cache[0].
+    // is_contiguous(), so it must be the owning tensor, never a narrow view).
+    torch::Tensor paged_state = torch::full(
+        {batch_size * state_blocks, kStateBlockSize, 2 * state_dim},
+        -std::numeric_limits<float>::infinity(),
+        options_.dtype(torch::kFloat32));
+    scatter_paged_state(
+        kv_state,
+        paged_state.narrow(/*dim=*/2, /*start=*/0, /*length=*/state_dim),
+        block_table, state_len);
+    scatter_paged_state(
+        score_state,
+        paged_state.narrow(/*dim=*/2, /*start=*/state_dim,
+                           /*length=*/state_dim),
+        block_table, state_len);
     torch::Tensor actual = compressor->forward(attn_metadata,
                                                hidden_states,
                                                compressed_kv_cache,
                                                slot_mapping,
-                                               states,
-                                               block_tables,
+                                               paged_state,
+                                               block_table,
                                                sin_table,
                                                cos_table);
     test::Dsv4CompressorRefResult actual_result;
@@ -488,10 +494,13 @@ class DeepseekV4CompressorTest : public ::testing::Test {
                                                    compressed_slot_mapping,
                                                    config_.head_dim)
                                : actual;
-    actual_result.kv_state =
-        gather_paged_state(paged_kv, block_table, batch_size, state_len);
-    actual_result.score_state =
-        gather_paged_state(paged_score, block_table, batch_size, state_len);
+    actual_result.kv_state = gather_paged_state(
+        paged_state.narrow(/*dim=*/2, /*start=*/0, /*length=*/state_dim),
+        block_table, batch_size, state_len);
+    actual_result.score_state = gather_paged_state(
+        paged_state.narrow(/*dim=*/2, /*start=*/state_dim,
+                           /*length=*/state_dim),
+        block_table, batch_size, state_len);
 
     if (expected.output.numel() == 0) {
       EXPECT_EQ(actual_result.output.sizes(), expected.output.sizes());
