@@ -384,6 +384,12 @@ ChunkGatedDeltaRuleImpl::chunk_gated_delta_rule_fwd_h(
   cnrtDim3_t dim_block = {
       static_cast<uint32_t>(NV), static_cast<uint32_t>(N * H), 1};
   auto queue = torch_mlu::getCurMLUStream();
+  int32_t use_g = g.has_value() ? 1 : 0;
+  int32_t use_gk = gk.has_value() ? 1 : 0;
+  int32_t use_initial_state = initial_state.has_value() ? 1 : 0;
+  int32_t store_final_state = output_final_state ? 1 : 0;
+  int32_t save_new_value_flag = save_new_value ? 1 : 0;
+  int32_t is_varlen = cu_seqlens.has_value() ? 1 : 0;
 
   triton_jit::JITKernel::get(
       /*py_path=*/"torch_mlu_ops.triton.fla.chunk_delta_h",
@@ -411,12 +417,12 @@ ChunkGatedDeltaRuleImpl::chunk_gated_delta_rule_fwd_h(
               /*BT=*/64,
               /*BT_v=*/128,
               /*BC=*/64,
-              /*flags=*/1,
-              0,
-              1,
-              1,
-              1,
-              1);
+              /*USE_G=*/use_g,
+              /*USE_GK=*/use_gk,
+              /*USE_INITIAL_STATE=*/use_initial_state,
+              /*STORE_FINAL_STATE=*/store_final_state,
+              /*SAVE_NEW_VALUE=*/save_new_value_flag,
+              /*IS_VARLEN=*/is_varlen);
   return std::make_tuple(h, v_new, final_state);
 }
 

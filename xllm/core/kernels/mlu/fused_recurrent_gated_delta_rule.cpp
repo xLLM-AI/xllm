@@ -52,9 +52,8 @@ std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
   auto k_contig = k.contiguous();
   auto v_contig = v.contiguous();
   auto g_contig = g.contiguous().to(torch::kFloat32);
-  torch::Tensor beta = beta_opt.has_value()
-                           ? *beta_opt
-                           : torch::ones_like(g_contig.select(-1, 0));
+  torch::Tensor beta = beta_opt.has_value() ? beta_opt->contiguous()
+                                            : torch::ones_like(g_contig);
 
   int32_t B = static_cast<int32_t>(k_contig.size(0));
   int32_t T = static_cast<int32_t>(k_contig.size(1));
@@ -62,6 +61,19 @@ std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
   int32_t K = static_cast<int32_t>(k_contig.size(3));
   int32_t HV = static_cast<int32_t>(v_contig.size(2));
   int32_t V = static_cast<int32_t>(v_contig.size(3));
+  int64_t beta_ndim = beta.ndimension();
+  CHECK(beta_ndim == 3 || beta_ndim == 4)
+      << "beta must have shape [B, T, HV] or [B, T, HV, V].";
+  CHECK_EQ(beta.size(0), static_cast<int64_t>(B))
+      << "beta batch size mismatch.";
+  CHECK_EQ(beta.size(1), static_cast<int64_t>(T))
+      << "beta sequence length mismatch.";
+  CHECK_EQ(beta.size(2), static_cast<int64_t>(HV))
+      << "beta value head size mismatch.";
+  if (beta_ndim == 4) {
+    CHECK_EQ(beta.size(3), static_cast<int64_t>(V))
+        << "beta value dimension mismatch.";
+  }
   int32_t N =
       cu_seqlens.numel() > 0 ? static_cast<int32_t>(cu_seqlens.size(0) - 1) : B;
 
