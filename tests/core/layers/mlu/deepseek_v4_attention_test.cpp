@@ -394,9 +394,9 @@ class DeepseekV4AttentionTest : public ::testing::Test {
             ? config.max_seq_len / config.compress_ratio + 1
             : 1;
     const int64_t swa_blocks =
-        (config.max_seq_len + kBlockSize - 1) / kBlockSize;
+        (config.max_seq_len + kBlockSize - 1) / kBlockSize + 2;
     const int64_t compressed_blocks =
-        (compressed_len + kBlockSize - 1) / kBlockSize;
+        (compressed_len + kBlockSize - 1) / kBlockSize + 2;
     DeepSeekV4KVCacheTensors tensors;
     tensors.swa_cache = torch::zeros(
         {batch_size * swa_blocks, 1, kBlockSize, config.head_dim}, options_);
@@ -411,14 +411,16 @@ class DeepseekV4AttentionTest : public ::testing::Test {
       // and let the split fields be narrow views of it. This matches the
       // framework allocator layout so the owning getters resolve to real
       // tensors and the split getters share the same storage.
-      tensors.compress_state = torch::zeros(
-          {batch_size, coff * config.compress_ratio, 2 * cmp_coff_dim},
-          options_.dtype(torch::kFloat32));
+      tensors.compress_state =
+          torch::zeros({batch_size * swa_blocks, kBlockSize, 2 * cmp_coff_dim},
+                       options_.dtype(torch::kFloat32));
       tensors.compress_kv_state =
-          tensors.compress_state.narrow(/*dim=*/2, /*start=*/0,
+          tensors.compress_state.narrow(/*dim=*/2,
+                                        /*start=*/0,
                                         /*length=*/cmp_coff_dim);
       tensors.compress_score_state =
-          tensors.compress_state.narrow(/*dim=*/2, /*start=*/cmp_coff_dim,
+          tensors.compress_state.narrow(/*dim=*/2,
+                                        /*start=*/cmp_coff_dim,
                                         /*length=*/cmp_coff_dim);
       tensors.compress_score_state.fill_(
           -std::numeric_limits<float>::infinity());
@@ -430,13 +432,16 @@ class DeepseekV4AttentionTest : public ::testing::Test {
                                           config.index_head_dim},
                                          options_);
       const int64_t idx_coff_dim = 2 * config.index_head_dim;
-      tensors.compress_index_state = torch::zeros(
-          {batch_size, 8, 2 * idx_coff_dim}, options_.dtype(torch::kFloat32));
+      tensors.compress_index_state =
+          torch::zeros({batch_size * swa_blocks, kBlockSize, 2 * idx_coff_dim},
+                       options_.dtype(torch::kFloat32));
       tensors.compress_index_kv_state =
-          tensors.compress_index_state.narrow(/*dim=*/2, /*start=*/0,
+          tensors.compress_index_state.narrow(/*dim=*/2,
+                                              /*start=*/0,
                                               /*length=*/idx_coff_dim);
       tensors.compress_index_score_state =
-          tensors.compress_index_state.narrow(/*dim=*/2, /*start=*/idx_coff_dim,
+          tensors.compress_index_state.narrow(/*dim=*/2,
+                                              /*start=*/idx_coff_dim,
                                               /*length=*/idx_coff_dim);
       tensors.compress_index_score_state.fill_(
           -std::numeric_limits<float>::infinity());
@@ -740,7 +745,8 @@ class DeepseekV4AttentionTest : public ::testing::Test {
           make_slots(start_pos, q_lens, config.compress_ratio, compressed_len);
       const int64_t state_len =
           (config.compress_ratio == 4 ? 2 : 1) * config.compress_ratio;
-      torch::Tensor state_table = make_state_table(batch_size);
+      torch::Tensor state_table =
+          make_paged_table(batch_size, config.max_seq_len);
       layer_tables = {cmp_table, ori_table, state_table, state_table};
       layer_slots = {cmp_slots, ori_slots, torch::Tensor(), torch::Tensor()};
       caches_info_ = {{{0,
@@ -764,7 +770,8 @@ class DeepseekV4AttentionTest : public ::testing::Test {
             make_paged_table(batch_size, compressed_len);
         torch::Tensor index_slots =
             make_slots(start_pos, q_lens, /*ratio=*/4, compressed_len);
-        torch::Tensor index_state_table = make_state_table(batch_size);
+        torch::Tensor index_state_table =
+            make_paged_table(batch_size, config.max_seq_len);
         layer_tables = {cmp_table,
                         index_table,
                         ori_table,
@@ -1399,6 +1406,7 @@ TEST_F(DeepseekV4AttentionTest, Ratio128DecodeBoundaryMatchesReference) {
              /*q_lens=*/{127},
              /*is_prefill=*/true,
              /*is_chunked_prefill=*/false);
+
   test::Dsv4AttentionRefResult expected = run_ref(config,
                                                   weights,
                                                   hidden.slice(0, 127, 128),

@@ -146,12 +146,9 @@ torch::Tensor CompressorImpl::forward_prefill(
   torch::Tensor score_pack = wgate_->forward(hidden_states);
   const DSAMetadata& dsa = *attn_metadata.dsa_metadata;
 
-  if (slot_mapping.numel() == 0) {
-    return empty_output(hidden_states, head_dim_);
-  }
-
+  const int64_t num_compressed_rows = slot_mapping.numel();
   torch::Tensor compressed_kv =
-      torch::empty({slot_mapping.numel(), head_dim_}, hidden_states.options());
+      torch::empty({num_compressed_rows, head_dim_}, hidden_states.options());
 
   xllm::kernel::mlu::fused_compress_multi_kv(
       /*kv=*/kv_pack,
@@ -164,6 +161,10 @@ torch::Tensor CompressorImpl::forward_prefill(
       /*max_seqlen=*/attn_metadata.max_query_len,
       /*overlap=*/overlap_,
       /*compressed_kv=*/compressed_kv);
+
+  if (num_compressed_rows == 0) {
+    return empty_output(hidden_states, head_dim_);
+  }
 
   auto kv = compressed_kv.to(torch::kFloat32);
   auto output = std::get<0>(norm_->forward(kv));

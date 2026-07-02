@@ -295,7 +295,8 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
 #if defined(USE_MLU)
     // coff_dim = 2 * head_dim for ratio==4; merged dim = 2 * coff_dim. The
     // owning compress_state backs the narrow-view getters and is passed
-    // directly to fused_compress_*_kv (which requires a contiguous state_cache).
+    // directly to fused_compress_*_kv (which requires a contiguous
+    // state_cache).
     const int64_t cmp_coff_dim = 2 * head_dim;
     tensors.compress_state =
         torch::empty({swa_count, block_size, 2 * cmp_coff_dim}, state_options);

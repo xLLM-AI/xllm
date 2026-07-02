@@ -170,13 +170,13 @@ torch::Tensor DeepseekV4IndexerImpl::compress_kv(
     const torch::Tensor& compressed_sin_table,
     const torch::Tensor& compressed_cos_table) {
   auto output = compressor_->forward(attn_metadata,
-                                                 hidden_states,
-                                                 index_cache,
-                                                 cache_refs.index_slot_mapping,
-                                                 compress_index_state,
-                                                 cache_refs.index_state_block_table,
-                                                 compressed_sin_table,
-                                                 compressed_cos_table);
+                                     hidden_states,
+                                     index_cache,
+                                     cache_refs.index_slot_mapping,
+                                     compress_index_state,
+                                     cache_refs.index_state_block_table,
+                                     compressed_sin_table,
+                                     compressed_cos_table);
   return output;
 }
 

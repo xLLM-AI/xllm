@@ -57,25 +57,23 @@ class CompressorImpl : public torch::nn::Module {
                         const torch::Tensor& compressed_sin_table,
                         const torch::Tensor& compressed_cos_table);
 
-  torch::Tensor forward_decode(
-      const AttentionMetadata& attn_metadata,
-      torch::Tensor& hidden_states,
-      torch::Tensor& kv_cache,
-      const torch::Tensor& slot_mapping,
-      torch::Tensor& state_cache,
-      const torch::Tensor& state_block_table,
-      const torch::Tensor& compressed_sin_table,
-      const torch::Tensor& compressed_cos_table);
+  torch::Tensor forward_decode(const AttentionMetadata& attn_metadata,
+                               torch::Tensor& hidden_states,
+                               torch::Tensor& kv_cache,
+                               const torch::Tensor& slot_mapping,
+                               torch::Tensor& state_cache,
+                               const torch::Tensor& state_block_table,
+                               const torch::Tensor& compressed_sin_table,
+                               const torch::Tensor& compressed_cos_table);
 
-  torch::Tensor forward_prefill(
-      const AttentionMetadata& attn_metadata,
-      torch::Tensor& hidden_states,
-      torch::Tensor& kv_cache,
-      const torch::Tensor& slot_mapping,
-      torch::Tensor& state_cache,
-      const torch::Tensor& state_block_table,
-      const torch::Tensor& compressed_sin_table,
-      const torch::Tensor& compressed_cos_table);
+  torch::Tensor forward_prefill(const AttentionMetadata& attn_metadata,
+                                torch::Tensor& hidden_states,
+                                torch::Tensor& kv_cache,
+                                const torch::Tensor& slot_mapping,
+                                torch::Tensor& state_cache,
+                                const torch::Tensor& state_block_table,
+                                const torch::Tensor& compressed_sin_table,
+                                const torch::Tensor& compressed_cos_table);
 
   void load_state_dict(const StateDict& state_dict);
 

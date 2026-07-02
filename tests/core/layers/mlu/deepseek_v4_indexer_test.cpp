@@ -705,14 +705,17 @@ class DeepseekV4IndexerTest : public ::testing::Test {
     const int64_t idx_coff_dim = 2 * config_.index_head_dim;
     torch::Tensor compress_index_state = torch::zeros(
         {batch_size, 8, 2 * idx_coff_dim}, options_.dtype(torch::kFloat32));
-    compress_index_state.narrow(/*dim=*/2, /*start=*/idx_coff_dim,
-                                /*length=*/idx_coff_dim)
+    compress_index_state
+        .narrow(/*dim=*/2,
+                /*start=*/idx_coff_dim,
+                /*length=*/idx_coff_dim)
         .fill_(-std::numeric_limits<float>::infinity());
     return {index_cache, compress_index_state};
   }
 
-  // Returns [kv, score] narrow views of the owning compress_index_state, sharing
-  // its storage. Used to feed the CPU reference, which expects split pools.
+  // Returns [kv, score] narrow views of the owning compress_index_state,
+  // sharing its storage. Used to feed the CPU reference, which expects split
+  // pools.
   std::tuple<torch::Tensor, torch::Tensor> split_index_state(
       torch::Tensor& compress_index_state) const {
     const int64_t idx_coff_dim = 2 * config_.index_head_dim;
@@ -804,13 +807,11 @@ TEST_F(DeepseekV4IndexerTest, UsesExplicitC4RefsWithDuplicateTokenCaches) {
   DeepseekV4IndexerCacheRefs cache_refs =
       make_cache_refs(selected_block_table, selected_slot_mapping, 1);
 
-  metadata.dsa_metadata->block_tables = {
-      {metadata.block_table,
-       selected_block_table,
-       cache_refs.index_state_block_table}};
-  metadata.dsa_metadata->slot_mappings = {{metadata.slot_mapping,
-                                           selected_slot_mapping,
-                                           torch::Tensor()}};
+  metadata.dsa_metadata->block_tables = {{metadata.block_table,
+                                          selected_block_table,
+                                          cache_refs.index_state_block_table}};
+  metadata.dsa_metadata->slot_mappings = {
+      {metadata.slot_mapping, selected_slot_mapping, torch::Tensor()}};
   caches_info_ = {{{0, DSACacheType::TOKEN, 4, 1},
                    {0, DSACacheType::TOKEN, 4, 1},
                    {1, DSACacheType::SLIDING_WINDOW, 1, 8}}};
@@ -922,6 +923,12 @@ TEST_F(DeepseekV4IndexerTest, DecodeReturnsKernelSparseSlots) {
   auto [kv_view, score_view] = split_index_state(compress_index_state);
   torch::Tensor ref_kv_state = kv_view.cpu().clone();
   torch::Tensor ref_score_state = score_view.cpu().clone();
+  int64_t ratio = 4;
+  ref_kv_state.slice(/*dim=*/1, /*start=*/ratio)
+      .copy_(ref_kv_state.slice(/*dim=*/1, /*start=*/0, /*length=*/ratio));
+  ref_score_state.slice(/*dim=*/1, /*start=*/ratio)
+      .copy_(ref_score_state.slice(
+          /*dim=*/1, /*start=*/0, /*length=*/ratio));
   RefOut expected =
       reference(x, qr, weights, ref_kv_state, ref_score_state, metadata);
 

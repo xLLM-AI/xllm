@@ -44,6 +44,7 @@ struct Dsv4CompressorRefResult {
   torch::Tensor output;
   torch::Tensor kv_state;
   torch::Tensor score_state;
+  torch::Tensor paged_state;
 };
 
 struct Dsv4AttentionRefConfig {

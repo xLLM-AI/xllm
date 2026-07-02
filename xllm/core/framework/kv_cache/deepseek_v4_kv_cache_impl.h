@@ -57,10 +57,6 @@ class DeepSeekV4KVCacheImpl final : public KVCacheImpl {
   torch::Tensor compress_index_kv_state_;
   torch::Tensor compress_index_score_state_;
 #if defined(USE_MLU)
-  // Owning merged state storage. The split getters (get_compress_*_state)
-  // return narrow views into these so that swap_blocks, which rebinds the
-  // owning tensor, keeps the views valid automatically. Do NOT cache the
-  // narrow views as members — always recompute from compress_state_.
   torch::Tensor compress_state_;
   torch::Tensor compress_index_state_;
 #endif

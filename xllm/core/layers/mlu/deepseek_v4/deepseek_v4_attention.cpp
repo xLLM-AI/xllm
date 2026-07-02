@@ -415,13 +415,13 @@ DeepseekV4AttentionImpl::forward(const AttentionMetadata& attn_metadata,
     torch::Tensor cmp_state_block_table =
         layer_tensor(dsa.block_tables, layer_id_, mapping.kv_state_cache_idx);
     compressor_->forward(attn_metadata,
-                                     hidden_states,
-                                     cmp_cache,
-                                     cmp_slot,
-                                     cmp_state,
-                                     cmp_state_block_table,
-                                     dsa.compressed_sin_table,
-                                     dsa.compressed_cos_table);
+                         hidden_states,
+                         cmp_cache,
+                         cmp_slot,
+                         cmp_state,
+                         cmp_state_block_table,
+                         dsa.compressed_sin_table,
+                         dsa.compressed_cos_table);
     torch::Tensor cmp_context_lens;
     torch::Tensor cmp_table_for_attn;
     torch::Tensor cmp_cache_for_attn = cmp_cache;
