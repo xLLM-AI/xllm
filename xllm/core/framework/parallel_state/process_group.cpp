@@ -228,8 +228,8 @@ std::unique_ptr<ProcessGroup> create_process_group(
       rank, world_size, rank_size, port, trans, host, group_name, device);
 }
 
-#if defined(USE_NPU) || defined(USE_MLU)
-// we only support DiT models onNPU and MLU for now.
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
+// We currently support explicit DiT communication groups on NPU, MLU, and DCU.
 // TODO: This function is used by DiT models, since the DiT communication group
 // info have already been calculated by rank_generator, we only need to pass the
 // info to create the process groups. For any device that want to reuse the

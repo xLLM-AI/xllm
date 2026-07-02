@@ -20,6 +20,7 @@ limitations under the License.
 #include <string>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/TCPStore.hpp>
+#include <vector>
 
 #if defined(USE_NPU)
 #include <torch_npu/csrc/distributed/ProcessGroupHCCL.hpp>
@@ -143,7 +144,7 @@ std::unique_ptr<xllm::ProcessGroup> create_process_group(
     const std::string& group_name,
     const torch::Device& device);
 
-#if defined(USE_NPU) || defined(USE_MLU)
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
 // for DiT models
 std::unique_ptr<xllm::ProcessGroup> create_process_group(
     int32_t global_rank,
