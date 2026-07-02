@@ -657,6 +657,7 @@ class WanAttentionBlockImpl : public torch::nn::Module {
     torch::Tensor k = chunks[1];
     torch::Tensor v = chunks[2];
 
+#if defined(USE_NPU)
     auto results = at_npu::native::custom_ops::npu_fusion_attention(
         q,
         k,
@@ -670,7 +671,16 @@ class WanAttentionBlockImpl : public torch::nn::Module {
         /*keep_prob=*/1.0,
         /*pre_tockens=*/65535,
         /*next_tockens=*/65535);
-    auto attn_output = std::get<0>(results);
+    torch::Tensor attn_output = std::get<0>(results);
+#else
+    torch::Tensor attn_output =
+        torch::scaled_dot_product_attention(q,
+                                            k,
+                                            v,
+                                            torch::nullopt,
+                                            /*dropout_p=*/0.0,
+                                            /*is_causal=*/false);
+#endif
 
     auto attn_out = attn_output.squeeze(1).permute({0, 2, 1}).reshape(
         {batch_size * time, channels, height, width});

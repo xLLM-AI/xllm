@@ -18,8 +18,10 @@ limitations under the License.
 #include <torch/nn/modules/linear.h>
 #include <torch/nn/modules/normalization.h>
 #include <torch/torch.h>
+#if defined(USE_NPU)
 #include <torch_npu/csrc/aten/CustomFunctions.h>
 #include <torch_npu/csrc/libs/init_npu.h>
+#endif
 
 #include <iostream>
 #include <memory>
@@ -38,11 +40,13 @@ limitations under the License.
 #include "models/dit/utils/util.h"
 #include "models/model_registry.h"
 
+#if defined(USE_NPU)
 #ifdef TORCH_HIGHER_THAN_PTA6
 #include <torch_npu/csrc/framework/OpCommand.h>
 #else
 #include <torch_npu/csrc/aten/NPUNativeFunctions.h>
 #include <torch_npu/csrc/framework/utils/OpPreparation.h>
+#endif
 #endif
 
 // VAE model compatible with huggingface weights
@@ -149,6 +153,7 @@ class QwenImageRMS_normImpl : public torch::nn::Module {
 
   torch::Tensor forward(const torch::Tensor& x) {
     if (fused_) {
+#if defined(USE_NPU)
       auto [output, rstd] =
           at_npu::native::custom_ops::npu_rms_norm(x, weight_, 0);
 
@@ -156,6 +161,18 @@ class QwenImageRMS_normImpl : public torch::nn::Module {
         output = output + bias_.to(output.device());
       }
       return output;
+#else
+      torch::Tensor normalized =
+          torch::nn::functional::normalize(
+              x.to(torch::kFloat),
+              torch::nn::functional::NormalizeFuncOptions().dim(
+                  channel_first_ ? 1 : -1))
+              .to(x.dtype());
+      if (is_bias_) {
+        return normalized * scale_ * weight_ + bias_;
+      }
+      return normalized * scale_ * weight_;
+#endif
     } else {
       torch::Tensor normalized =
           torch::nn::functional::normalize(
@@ -653,6 +670,7 @@ class QwenImageAttentionBlockImpl : public QwenImageBaseModule {
     auto chunks = qkv.chunk(3, -1);
     auto q = chunks[0], k = chunks[1], v = chunks[2];
 
+#if defined(USE_NPU)
     auto results = at_npu::native::custom_ops::npu_fusion_attention(
         q,
         k,
@@ -666,7 +684,16 @@ class QwenImageAttentionBlockImpl : public QwenImageBaseModule {
         /*keep_prob=*/1.0,
         /*pre_tockens=*/65535,
         /*next_tockens=*/65535);
-    auto attn_output = std::get<0>(results);
+    torch::Tensor attn_output = std::get<0>(results);
+#else
+    torch::Tensor attn_output =
+        torch::scaled_dot_product_attention(q,
+                                            k,
+                                            v,
+                                            torch::nullopt,
+                                            /*dropout_p=*/0.0,
+                                            /*is_causal=*/false);
+#endif
     attn_output =
         attn_output.squeeze(1).permute({0, 2, 1}).reshape({b * t, c, h, w});
 

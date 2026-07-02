@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/nn/functional/linear.h>
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -39,8 +40,10 @@ limitations under the License.
 using xllm::dit::DiTParallelLinear;
 using xllm::dit::SpOptions;
 using xllm::dit::TpOptions;
+#if defined(USE_NPU)
 #include "core/layers/npu/loader/rolling_load_manager.h"
 #include "core/layers/npu/loader/rolling_weight_buffer.h"
+#endif
 #include "framework/model_context.h"
 #include "models/dit/transformers/transformer_flux.h"
 #if defined(USE_NPU)
@@ -640,10 +643,39 @@ class WanAttentionImpl : public torch::nn::Module {
         65535);
     torch::Tensor out = std::get<0>(results).transpose(1, 2);
 #else
-    const double scale = 1.0 / std::sqrt(static_cast<double>(dim_head_));
-    auto attn_weights = torch::matmul(q_t, k_t.transpose(-2, -1)) * scale;
-    attn_weights = torch::softmax(attn_weights, -1);
-    torch::Tensor out = torch::matmul(attn_weights, v_t).transpose(1, 2);
+    constexpr int64_t kAttentionChunkSize = 512;
+    constexpr int64_t kHeadDim = 1;
+    constexpr int64_t kSequenceDim = 2;
+    torch::Tensor out;
+    if (q_t.size(kSequenceDim) <= kAttentionChunkSize) {
+      out = torch::scaled_dot_product_attention(q_t,
+                                                k_t,
+                                                v_t,
+                                                torch::nullopt,
+                                                /*dropout_p=*/0.0,
+                                                /*is_causal=*/false)
+                .transpose(kHeadDim, kSequenceDim);
+    } else {
+      std::vector<torch::Tensor> chunks;
+      const int64_t num_chunks =
+          (q_t.size(kSequenceDim) + kAttentionChunkSize - 1) /
+          kAttentionChunkSize;
+      chunks.reserve(num_chunks);
+      for (int64_t start = 0; start < q_t.size(kSequenceDim);
+           start += kAttentionChunkSize) {
+        int64_t chunk_size =
+            std::min(kAttentionChunkSize, q_t.size(kSequenceDim) - start);
+        torch::Tensor q_chunk = q_t.narrow(kSequenceDim, start, chunk_size);
+        chunks.emplace_back(
+            torch::scaled_dot_product_attention(q_chunk,
+                                                k_t,
+                                                v_t,
+                                                torch::nullopt,
+                                                /*dropout_p=*/0.0,
+                                                /*is_causal=*/false));
+      }
+      out = torch::cat(chunks, kSequenceDim).transpose(kHeadDim, kSequenceDim);
+    }
 #endif
     return out.flatten(2, 3);
   }

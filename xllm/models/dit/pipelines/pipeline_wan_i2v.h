@@ -140,11 +140,10 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
 
     LOG(INFO) << "Wan2_2I2VPipeline model components loaded, start to load "
                  "weights to sub models";
-    auto& load_config = LoadConfig::get_instance();
 #if defined(USE_NPU)
+    auto& load_config = LoadConfig::get_instance();
     use_rolling_load_ = load_config.enable_rolling_load() &&
                         ParallelConfig::get_instance().tp_size() == 1;
-#endif
     if (use_rolling_load_) {
       transformer_->load_model(std::move(transformer_loader),
                                /*rolling=*/true);
@@ -153,11 +152,14 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
       init_rolling_for(transformer_, rolling_transformer_);
       init_rolling_for(transformer_2_, rolling_transformer_2_);
     } else {
+#endif
       transformer_->load_model(std::move(transformer_loader));
       transformer_->to(options_.device());
       transformer_2_->load_model(std::move(transformer_2_loader));
       transformer_2_->to(options_.device());
+#if defined(USE_NPU)
     }
+#endif
     vae_->load_model(std::move(vae_loader));
     vae_->to(options_.device());
     umt5_->load_model(std::move(umt5_loader));
