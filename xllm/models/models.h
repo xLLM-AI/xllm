@@ -106,6 +106,9 @@ limitations under the License.
 #include "llm/musa/qwen3.h"  // IWYU pragma: keep
 #elif defined(USE_DCU)
 #include "dit/pipelines/pipeline_flux.h"
+#include "dit/pipelines/pipeline_longcat_image.h"
+#include "dit/pipelines/pipeline_qwenimage_edit_plus.h"
+#include "dit/pipelines/pipeline_wan_i2v.h"
 #include "llm/deepseek_v2.h"  // IWYU pragma: keep
 #include "llm/mimo.h"         // IWYU pragma: keep
 #include "llm/mimo_mtp.h"     // IWYU pragma: keep
