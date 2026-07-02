@@ -20,7 +20,7 @@ limitations under the License.
 
 namespace xllm::runtime::cuda {
 
-class PiecewiseGraphs {
+class PiecewiseGraphs final {
  public:
   enum class InstructionType { kGraph, kRunner };
 
@@ -32,8 +32,9 @@ class PiecewiseGraphs {
   void add_graph(std::unique_ptr<at::cuda::CUDAGraph>&& graph);
   void add_attention_runner(::xllm::kernel::cuda::AttentionRunner&& runner);
   void replay(const ::xllm::kernel::cuda::AttentionReplayParams& runner_params);
-  size_t size() const { return graphs_.size(); }
-  bool empty() const { return graphs_.empty(); }
+  size_t size() const { return instructions_.size(); }
+  bool empty() const { return instructions_.empty(); }
+  size_t num_graphs() const { return graphs_.size(); }
   size_t num_runners() const;
 
  private:

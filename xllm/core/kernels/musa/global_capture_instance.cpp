@@ -31,7 +31,15 @@ GlobalCaptureInstance& GlobalCaptureInstance::get_instance() {
 }
 
 GlobalCaptureInstance::GlobalCaptureInstance() = default;
-GlobalCaptureInstance::~GlobalCaptureInstance() = default;
+
+GlobalCaptureInstance::~GlobalCaptureInstance() {
+  if (is_capturing_) {
+    LOG(WARNING) << "GlobalCaptureInstance destroyed while capturing; "
+                    "releasing capture state";
+    cleanup_capture_state();
+  }
+  capture_lock_ = std::unique_lock<std::mutex>();
+}
 
 void GlobalCaptureInstance::cleanup_capture_state() {
   is_capturing_ = false;
@@ -42,7 +50,7 @@ void GlobalCaptureInstance::cleanup_capture_state() {
 void GlobalCaptureInstance::begin_capture(const at::cuda::MempoolId_t& pool) {
   CHECK(!is_capturing_) << "Already capturing, call end_capture() first";
 
-  capture_lock_ = std::make_unique<std::lock_guard<std::mutex>>(capture_mutex_);
+  capture_lock_ = std::unique_lock<std::mutex>(capture_mutex_);
   LOG(INFO) << "GlobalCaptureInstance::begin_capture()";
   is_capturing_ = true;
   graph_pool_ = pool;
@@ -66,12 +74,12 @@ std::unique_ptr<PiecewiseGraphs> GlobalCaptureInstance::end_capture() {
   is_capturing_ = false;
 
   LOG(INFO) << "GlobalCaptureInstance::end_capture(), total graphs: "
-            << current_piecewise_graph_->size()
+            << current_piecewise_graph_->num_graphs()
             << ", total runners: " << current_piecewise_graph_->num_runners();
 
   auto result = std::move(current_piecewise_graph_);
 
-  capture_lock_.reset();
+  capture_lock_ = std::unique_lock<std::mutex>();
 
   return result;
 }
@@ -96,7 +104,7 @@ void GlobalCaptureInstance::temporarily_end_graph_locked() {
 
   VLOG(kGraphExecutorLogVerboseLevel)
       << "GlobalCaptureInstance::temporarily_end_graph(), total graphs: "
-      << current_piecewise_graph_->size();
+      << current_piecewise_graph_->num_graphs();
 }
 
 void GlobalCaptureInstance::temporarily_begin_graph_locked() {

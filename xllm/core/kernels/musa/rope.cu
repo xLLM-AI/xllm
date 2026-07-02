@@ -13,11 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/all.h>
 
 #include "core/kernels/musa/torch_musa_ops_api.h"
-#include "device_utils.cuh"
+#include "core/kernels/cuda/device_utils.cuh"
 
 
 namespace {
@@ -241,6 +242,7 @@ void rotary_embedding(
           }
         }
       });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void partial_rotary_embedding_inplace(torch::Tensor& positions,
@@ -250,61 +252,64 @@ void partial_rotary_embedding_inplace(torch::Tensor& positions,
                                       int64_t head_size,
                                       int64_t rotary_dim,
                                       bool is_neox) {
-  TORCH_CHECK(head_size > 0, "partial_rotary_embedding_inplace: head_size must be > 0");
-  TORCH_CHECK(rotary_dim > 0 && rotary_dim <= head_size,
-              "partial_rotary_embedding_inplace: 0 < rotary_dim <= head_size");
-  TORCH_CHECK(rotary_dim % 2 == 0,
-              "partial_rotary_embedding_inplace: rotary_dim must be even");
-  TORCH_CHECK(cos_sin_cache.size(-1) == rotary_dim,
-              "partial_rotary_embedding_inplace: cos_sin_cache last dim (",
-              cos_sin_cache.size(-1), ") must equal rotary_dim (",
-              rotary_dim, ")");
+  CHECK(head_size > 0)
+      << "partial_rotary_embedding_inplace: head_size must be > 0";
+  CHECK(rotary_dim > 0 && rotary_dim <= head_size)
+      << "partial_rotary_embedding_inplace: 0 < rotary_dim <= head_size";
+  CHECK(rotary_dim % 2 == 0)
+      << "partial_rotary_embedding_inplace: rotary_dim must be even";
+  CHECK(cos_sin_cache.size(-1) == rotary_dim)
+      << "partial_rotary_embedding_inplace: cos_sin_cache last dim ("
+      << cos_sin_cache.size(-1) << ") must equal rotary_dim (" << rotary_dim
+      << ")";
 
   const int64_t num_tokens = positions.numel();
-  const int positions_ndim = positions.dim();
-  TORCH_CHECK(positions_ndim == 1 || positions_ndim == 2,
-              "positions must have shape [num_tokens] or [batch_size, seq_len]");
+  const int32_t positions_ndim = static_cast<int32_t>(positions.dim());
+  CHECK(positions_ndim == 1 || positions_ndim == 2)
+      << "positions must have shape [num_tokens] or [batch_size, seq_len]";
 
   const int64_t query_hidden_size = query.numel() / num_tokens;
   const int64_t key_hidden_size = key.numel() / num_tokens;
-  TORCH_CHECK(query_hidden_size % head_size == 0,
-              "partial_rotary_embedding_inplace: query hidden_size must be "
-              "divisible by head_size");
-  TORCH_CHECK(key_hidden_size % head_size == 0,
-              "partial_rotary_embedding_inplace: key hidden_size must be "
-              "divisible by head_size");
-  TORCH_CHECK(query.stride(-1) == 1 && key.stride(-1) == 1,
-              "partial_rotary_embedding_inplace: query/key last dim must be "
-              "contiguous (stride==1)");
-  TORCH_CHECK(cos_sin_cache.is_contiguous(),
-              "partial_rotary_embedding_inplace: cos_sin_cache must be contiguous");
+  CHECK(query_hidden_size % head_size == 0)
+      << "partial_rotary_embedding_inplace: query hidden_size must be "
+         "divisible by head_size";
+  CHECK(key_hidden_size % head_size == 0)
+      << "partial_rotary_embedding_inplace: key hidden_size must be "
+         "divisible by head_size";
+  CHECK(query.stride(-1) == 1 && key.stride(-1) == 1)
+      << "partial_rotary_embedding_inplace: query/key last dim must be "
+         "contiguous (stride==1)";
+  CHECK(cos_sin_cache.is_contiguous())
+      << "partial_rotary_embedding_inplace: cos_sin_cache must be contiguous";
 
-  const int num_heads = static_cast<int>(query_hidden_size / head_size);
-  const int num_kv_heads = static_cast<int>(key_hidden_size / head_size);
-  TORCH_CHECK(num_kv_heads > 0 && num_heads % num_kv_heads == 0,
-              "partial_rotary_embedding_inplace: num_heads must be a multiple "
-              "of num_kv_heads");
+  const int32_t num_heads =
+      static_cast<int32_t>(query_hidden_size / head_size);
+  const int32_t num_kv_heads =
+      static_cast<int32_t>(key_hidden_size / head_size);
+  CHECK(num_kv_heads > 0 && num_heads % num_kv_heads == 0)
+      << "partial_rotary_embedding_inplace: num_heads must be a multiple "
+         "of num_kv_heads";
 
-  const int seq_dim_idx = positions_ndim - 1;
+  const int32_t seq_dim_idx = positions_ndim - 1;
   const int64_t query_stride = query.stride(seq_dim_idx);
   const int64_t key_stride = key.stride(seq_dim_idx);
-  const int query_ndim = query.dim();
+  const int32_t query_ndim = static_cast<int32_t>(query.dim());
   const int64_t head_stride =
       (query_ndim == positions_ndim + 2) ? query.stride(-2) : head_size;
 
   dim3 grid(static_cast<unsigned>(num_tokens));
-  const int rot_dim_i = static_cast<int>(rotary_dim);
-  const int head_size_i = static_cast<int>(head_size);
-  dim3 block(std::min<int64_t>(static_cast<int64_t>(num_heads) * (rot_dim_i / 2),
-                                512));
+  const int32_t rot_dim_i = static_cast<int32_t>(rotary_dim);
+  const int32_t head_size_i = static_cast<int32_t>(head_size);
+  dim3 block(std::min<int64_t>(
+      static_cast<int64_t>(num_heads) * (rot_dim_i / 2), 512));
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  TORCH_CHECK(positions.scalar_type() == torch::kInt32 ||
-                  positions.scalar_type() == torch::kInt64,
-              "partial_rotary_embedding_inplace: positions must be int32 or "
-              "int64, got ", positions.scalar_type());
+  CHECK(positions.scalar_type() == torch::kInt32 ||
+        positions.scalar_type() == torch::kInt64)
+      << "partial_rotary_embedding_inplace: positions must be int32 or "
+         "int64, got " << positions.scalar_type();
   const bool positions_is_int64 = positions.scalar_type() == torch::kInt64;
 
   DISPATCH_FLOATING_TYPES(
@@ -348,6 +353,7 @@ void partial_rotary_embedding_inplace(torch::Tensor& positions,
           }
         }
       });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 }

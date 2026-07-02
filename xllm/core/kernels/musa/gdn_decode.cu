@@ -23,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -43,10 +44,6 @@ torch::Tensor as_long_indices(const torch::Tensor& indices) {
   return indices.to(torch::kLong).contiguous();
 }
 
-}
-
-namespace {
-
 inline torch::Tensor l2norm_last(const torch::Tensor& x, double eps) {
   return x / (x.pow(2).sum(-1, /*keepdim=*/true) + eps).sqrt();
 }
@@ -59,8 +56,7 @@ torch::Tensor gated_layer_norm_ref(GatedLayerNormParams& params) {
   const int64_t N = x_2d.size(1);
   const int64_t group_size_val =
       params.group_size > 0 ? params.group_size : last_dim;
-  TORCH_CHECK(N % group_size_val == 0,
-              "gated_layer_norm: N must be divisible by group_size");
+  CHECK(N % group_size_val == 0) << "gated_layer_norm: N must be divisible by group_size";
   const int64_t ngroups = N / group_size_val;
 
   torch::Tensor z_2d;
@@ -157,27 +153,23 @@ torch::Tensor causal_conv1d_update(CausalConv1dUpdateParams& params) {
   auto x = params.x;
   auto weight = params.weight;
   if (weight.dim() == 3) {
-    TORCH_CHECK(weight.size(1) == 1,
-                "causal_conv1d_update: expected weight [dim, 1, width]");
+    CHECK(weight.size(1) == 1)
+        << "causal_conv1d_update: expected weight [dim, 1, width]";
     weight = weight.squeeze(1);
   }
-  TORCH_CHECK(weight.dim() == 2,
-              "causal_conv1d_update: expected weight [dim, width]");
-  TORCH_CHECK(params.conv_state.dim() == 3,
-              "causal_conv1d_update: expected conv_state "
-              "[num_cache_lines, dim, state_len]");
-  TORCH_CHECK(params.conv_state_indices.has_value(),
-              "causal_conv1d_update: conv_state_indices is required");
-  TORCH_CHECK(params.query_start_loc.has_value(),
-              "causal_conv1d_update: query_start_loc is required");
+  CHECK(weight.dim() == 2)
+      << "causal_conv1d_update: expected weight [dim, width]";
+  CHECK(params.conv_state.dim() == 3)
+      << "causal_conv1d_update: expected conv_state "
+         "[num_cache_lines, dim, state_len]";
+  CHECK(params.conv_state_indices.has_value()) << "causal_conv1d_update: conv_state_indices is required";
+  CHECK(params.query_start_loc.has_value()) << "causal_conv1d_update: query_start_loc is required";
 
   const int64_t dim = weight.size(0);
   const int64_t width = weight.size(1);
   const int64_t state_len = width - 1;
-  TORCH_CHECK(params.conv_state.size(1) == dim,
-              "causal_conv1d_update: conv_state dim mismatch");
-  TORCH_CHECK(params.conv_state.size(2) == state_len,
-              "causal_conv1d_update: conv_state state_len mismatch");
+  CHECK(params.conv_state.size(1) == dim) << "causal_conv1d_update: conv_state dim mismatch";
+  CHECK(params.conv_state.size(2) == state_len) << "causal_conv1d_update: conv_state state_len mismatch";
 
   const auto& cache_indices_raw = params.conv_state_indices.value();
   const int64_t batch = cache_indices_raw.size(0);
@@ -229,13 +221,20 @@ torch::Tensor causal_conv1d_update(CausalConv1dUpdateParams& params) {
     return token_out.to(x.scalar_type());
   }
 
+  auto cache_indices_cpu =
+      cache_indices.to(torch::kCPU, torch::kLong).contiguous();
+  auto query_start_loc_cpu =
+      query_start_loc.to(torch::kCPU, torch::kLong).contiguous();
+  auto cache_indices_acc = cache_indices_cpu.accessor<int64_t, 1>();
+  auto query_start_loc_acc = query_start_loc_cpu.accessor<int64_t, 1>();
+
   for (int64_t seq = 0; seq < batch; ++seq) {
-    const int64_t cache_idx = cache_indices[seq].item<int64_t>();
+    const int64_t cache_idx = cache_indices_acc[seq];
     if (cache_idx == params.pad_slot_id) {
       continue;
     }
-    const int64_t start = query_start_loc[seq].item<int64_t>();
-    const int64_t end = query_start_loc[seq + 1].item<int64_t>();
+    const int64_t start = query_start_loc_acc[seq];
+    const int64_t end = query_start_loc_acc[seq + 1];
     auto history =
         params.conv_state[cache_idx].to(torch::kFloat32).clone();
 
@@ -319,22 +318,15 @@ fused_qkvzba_split_reshape_cat(FusedQkvzbaSplitReshapeParams& params) {
   const int64_t nv = static_cast<int64_t>(params.num_heads_v);
   const int64_t hk = static_cast<int64_t>(params.head_qk);
   const int64_t hv = static_cast<int64_t>(params.head_v);
-  TORCH_CHECK(nk > 0 && nv > 0 && nv % nk == 0,
-              "fused_qkvzba_split_reshape_cat: invalid head counts nk=",
-              nk,
-              " nv=",
-              nv);
+  CHECK(nk > 0 && nv > 0 && nv % nk == 0) << "fused_qkvzba_split_reshape_cat: invalid head counts nk=" << nk << " nv=" << nv;
   const int64_t vpk = nv / nk;
   const int64_t per_group = 2 * hk + 2 * vpk * hv;
 
   const auto& qkvz = params.mixed_qkvz;
   const int64_t n = qkvz.numel() / qkvz.size(-1);
-  TORCH_CHECK(
-      qkvz.size(-1) == nk * per_group,
-      "fused_qkvzba_split_reshape_cat: mixed_qkvz last dim mismatch, got ",
-      qkvz.size(-1),
-      " expected ",
-      nk * per_group);
+  CHECK(qkvz.size(-1) == nk * per_group)
+      << "fused_qkvzba_split_reshape_cat: mixed_qkvz last dim mismatch, got "
+      << qkvz.size(-1) << " expected " << nk * per_group;
 
   auto qkvz_g = qkvz.reshape({n, nk, per_group});
   auto q = qkvz_g.slice(-1, 0, hk);
@@ -343,11 +335,9 @@ fused_qkvzba_split_reshape_cat(FusedQkvzbaSplitReshapeParams& params) {
   auto z = qkvz_g.slice(-1, 2 * hk + vpk * hv, per_group);
 
   const auto& ba = params.mixed_ba;
-  TORCH_CHECK(ba.size(-1) == 2 * nv,
-              "fused_qkvzba_split_reshape_cat: mixed_ba last dim mismatch, got ",
-              ba.size(-1),
-              " expected ",
-              2 * nv);
+  CHECK(ba.size(-1) == 2 * nv)
+      << "fused_qkvzba_split_reshape_cat: mixed_ba last dim mismatch, got "
+      << ba.size(-1) << " expected " << 2 * nv;
   auto ba_g = ba.reshape({n, nk, 2 * vpk});
   auto b_slice = ba_g.slice(-1, 0, vpk);
   auto a_slice = ba_g.slice(-1, vpk, 2 * vpk);
@@ -427,12 +417,9 @@ torch::Tensor recurrent_gated_delta_rule(
   const int64_t Hqk = q.size(1);
   const int64_t Hv = v.size(1);
   if (Hqk != Hv) {
-    TORCH_CHECK(Hv % Hqk == 0,
-                "recurrent_gated_delta_rule: Hv (",
-                Hv,
-                ") must be a multiple of Hqk (",
-                Hqk,
-                ") for GQA expansion");
+    CHECK(Hv % Hqk == 0)
+        << "recurrent_gated_delta_rule: Hv (" << Hv
+        << ") must be a multiple of Hqk (" << Hqk << ") for GQA expansion";
     const int64_t repeat = Hv / Hqk;
     q = q.repeat_interleave(repeat, /*dim=*/1);
     k = k.repeat_interleave(repeat, /*dim=*/1);
@@ -472,17 +459,36 @@ torch::Tensor recurrent_gated_delta_rule(
     return out_v.to(orig_dtype);
   }
 
+  std::optional<torch::Tensor> actual_seq_lengths_cpu;
+  if (actual_seq_lengths.has_value()) {
+    actual_seq_lengths_cpu =
+        actual_seq_lengths.value().to(torch::kCPU, torch::kLong).contiguous();
+  }
+  std::optional<torch::Tensor> ssm_state_indices_cpu;
+  if (ssm_state_indices.has_value()) {
+    ssm_state_indices_cpu =
+        ssm_state_indices.value().to(torch::kCPU, torch::kLong).contiguous();
+  }
+  const int64_t* actual_seq_lengths_data =
+      actual_seq_lengths_cpu.has_value()
+          ? actual_seq_lengths_cpu->data_ptr<int64_t>()
+          : nullptr;
+  const int64_t* ssm_state_indices_data =
+      ssm_state_indices_cpu.has_value()
+          ? ssm_state_indices_cpu->data_ptr<int64_t>()
+          : nullptr;
+
   for (int64_t b = 0; b < batch_size; ++b) {
     int64_t start = b;
     int64_t end = b + 1;
-    if (actual_seq_lengths.has_value()) {
-      start = actual_seq_lengths.value()[b].item<int64_t>();
-      end = actual_seq_lengths.value()[b + 1].item<int64_t>();
+    if (actual_seq_lengths_data != nullptr) {
+      start = actual_seq_lengths_data[b];
+      end = actual_seq_lengths_data[b + 1];
     }
 
     int64_t slot = b;
-    if (ssm_state_indices.has_value()) {
-      slot = ssm_state_indices.value()[b].item<int64_t>();
+    if (ssm_state_indices_data != nullptr) {
+      slot = ssm_state_indices_data[b];
     }
 
     auto st = state[slot].to(torch::kFloat32).transpose(-1, -2).contiguous();
@@ -507,7 +513,7 @@ std::string mate_gdn_dtype_suffix(torch::ScalarType dtype) {
   if (dtype == torch::kFloat16) {
     return "f16";
   }
-  TORCH_CHECK(false, "mate GDN decode expects bfloat16 or float16 q/k/v");
+  LOG(FATAL) << "mate GDN decode expects bfloat16 or float16 q/k/v";
 }
 
 }
@@ -524,7 +530,7 @@ std::string get_mate_gdn_decode_uri(int64_t num_q_heads,
 torch::Tensor mate_gated_delta_rule_decode(
     MateGatedDeltaRuleDecodeParams& params) {
   auto mixed_qkv = params.mixed_qkv.contiguous();
-  TORCH_CHECK(mixed_qkv.dim() == 2, "mate GDN decode expects mixed_qkv [B, D]");
+  CHECK(mixed_qkv.dim() == 2) << "mate GDN decode expects mixed_qkv [B, D]";
   const int64_t batch_size = mixed_qkv.size(0);
   const int64_t num_k_heads = params.num_k_heads;
   const int64_t num_v_heads = params.num_v_heads;
@@ -532,8 +538,7 @@ torch::Tensor mate_gated_delta_rule_decode(
   const int64_t head_v_dim = params.head_v_dim;
   const int64_t qk_cols = num_k_heads * head_k_dim;
   const int64_t v_cols = num_v_heads * head_v_dim;
-  TORCH_CHECK(mixed_qkv.size(1) == 2 * qk_cols + v_cols,
-              "mate GDN decode mixed_qkv dim mismatch");
+  CHECK(mixed_qkv.size(1) == 2 * qk_cols + v_cols) << "mate GDN decode mixed_qkv dim mismatch";
 
   auto query = mixed_qkv.slice(/*dim=*/1, /*start=*/0, /*end=*/qk_cols)
                    .reshape({batch_size, num_k_heads, head_k_dim})
@@ -556,8 +561,8 @@ torch::Tensor mate_gated_delta_rule_decode(
   if (b.dim() == 1) {
     b = b.unsqueeze(0);
   }
-  TORCH_CHECK(a.dim() == 2 && b.dim() == 2,
-              "mate GDN decode expects a/b shaped [B, Hv]");
+  CHECK(a.dim() == 2 && b.dim() == 2)
+      << "mate GDN decode expects a/b shaped [B, Hv]";
 
   auto state_f32 = params.state.to(torch::kFloat32).contiguous();
   auto state_indices = params.state_indices.to(torch::kInt32).contiguous();
@@ -694,13 +699,15 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
   auto g = (-(A_log_f.exp()) * sp).to(params.q.dtype());
   beta = beta.to(params.q.dtype());
 
-  auto idx = params.initial_state_indices.to(torch::kCPU).to(torch::kLong);
+  auto idx_cpu =
+      params.initial_state_indices.to(torch::kCPU, torch::kLong).contiguous();
+  auto idx_acc = idx_cpu.accessor<int64_t, 1>();
   const int64_t bsz = params.q.size(0);
   auto& ssm = params.initial_state_source;
   std::vector<torch::Tensor> cores;
-  cores.reserve(bsz);
+  cores.reserve(static_cast<size_t>(bsz));
   for (int64_t i = 0; i < bsz; ++i) {
-    const int64_t slot = idx[i].item<int64_t>();
+    const int64_t slot = idx_acc[i];
     auto state = ssm.narrow(0, slot, 1).to(torch::kFloat32);
     auto q_i = params.q.narrow(0, i, 1);
     auto k_i = params.k.narrow(0, i, 1);
@@ -801,6 +808,7 @@ void launch(const torch::Tensor& a,
       A_log_f32.data_ptr<float>(), dt_bias_f32.data_ptr<float>(),
       g.data_ptr<scalar_t>(), beta.data_ptr<scalar_t>(), n_elem, H, sp_beta,
       threshold);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 }
@@ -832,8 +840,9 @@ std::pair<torch::Tensor, torch::Tensor> gdn_gating(const torch::Tensor& a,
                          static_cast<int>(H), static_cast<float>(sp_beta),
                          static_cast<float>(threshold), stream);
   } else {
-    TORCH_CHECK(false, "gdn_gating: unsupported dtype ", a_c.scalar_type());
+    LOG(FATAL) << "gdn_gating: unsupported dtype " << a_c.scalar_type();
   }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {g, beta};
 }
 
@@ -945,6 +954,7 @@ void launch_gated_rms_norm(const torch::Tensor& x,
       GATED_RMSNORM_DISPATCH_BLOCK(T, 1024);
       break;
   }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 #undef GATED_RMSNORM_DISPATCH_BLOCK
@@ -956,28 +966,22 @@ void gated_rms_norm_fused(const torch::Tensor& x,
                           const torch::Tensor& z,
                           torch::Tensor output,
                           double eps) {
-  TORCH_CHECK(x.dim() == 2, "gated_rms_norm_fused: x must be 2D [M, N]");
-  TORCH_CHECK(z.dim() == 2, "gated_rms_norm_fused: z must be 2D [M, N]");
-  TORCH_CHECK(output.dim() == 2,
-              "gated_rms_norm_fused: output must be 2D [M, N]");
-  TORCH_CHECK(weight.dim() == 1, "gated_rms_norm_fused: weight must be 1D [N]");
-  TORCH_CHECK(x.size(0) == z.size(0) && x.size(0) == output.size(0),
-              "gated_rms_norm_fused: row count mismatch");
-  TORCH_CHECK(x.size(1) == z.size(1) && x.size(1) == output.size(1),
-              "gated_rms_norm_fused: column count mismatch");
-  TORCH_CHECK(weight.size(0) == x.size(1),
-              "gated_rms_norm_fused: weight size mismatch");
-  TORCH_CHECK(x.scalar_type() == z.scalar_type() &&
+  CHECK(x.dim() == 2) << "gated_rms_norm_fused: x must be 2D [M, N]";
+  CHECK(z.dim() == 2) << "gated_rms_norm_fused: z must be 2D [M, N]";
+  CHECK(output.dim() == 2)
+      << "gated_rms_norm_fused: output must be 2D [M, N]";
+  CHECK(weight.dim() == 1) << "gated_rms_norm_fused: weight must be 1D [N]";
+  CHECK(x.size(0) == z.size(0) && x.size(0) == output.size(0)) << "gated_rms_norm_fused: row count mismatch";
+  CHECK(x.size(1) == z.size(1) && x.size(1) == output.size(1)) << "gated_rms_norm_fused: column count mismatch";
+  CHECK(weight.size(0) == x.size(1)) << "gated_rms_norm_fused: weight size mismatch";
+  CHECK(x.scalar_type() == z.scalar_type() &&
                   x.scalar_type() == output.scalar_type() &&
-                  x.scalar_type() == weight.scalar_type(),
-              "gated_rms_norm_fused: dtype mismatch");
-  TORCH_CHECK(x.stride(-1) == 1 && z.stride(-1) == 1 &&
-                  output.stride(-1) == 1 && weight.stride(0) == 1,
-              "gated_rms_norm_fused: last dim must be contiguous (stride==1)");
+                  x.scalar_type() == weight.scalar_type()) << "gated_rms_norm_fused: dtype mismatch";
+  CHECK(x.stride(-1) == 1 && z.stride(-1) == 1 &&
+                  output.stride(-1) == 1 && weight.stride(0) == 1) << "gated_rms_norm_fused: last dim must be contiguous (stride==1)";
 
   const int N = static_cast<int>(x.size(1));
-  TORCH_CHECK(N > 0,
-              "gated_rms_norm_fused: hidden_size must be > 0 (got ", N, ")");
+  CHECK(N > 0) << "gated_rms_norm_fused: hidden_size must be > 0 (got ", N, ")";
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -994,9 +998,10 @@ void gated_rms_norm_fused(const torch::Tensor& x,
       launch_gated_rms_norm<float>(x, weight, z, output, N, eps, stream);
       break;
     default:
-      TORCH_CHECK(false,
-                  "gated_rms_norm_fused: unsupported dtype ", x.scalar_type());
+      LOG(FATAL) << "gated_rms_norm_fused: unsupported dtype "
+                 << x.scalar_type();
   }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 namespace {
@@ -1033,6 +1038,7 @@ __global__ void __launch_bounds__(256, 1) conv1d_decode_kernel(
   const int cache_idx = cache_indices[batch_idx];
   if (cache_idx == pad_slot_id || cache_idx < 0 ||
       cache_idx >= num_cache_lines) {
+    out[out_base] = from_f32<T>(0.f);
     return;
   }
 
@@ -1159,6 +1165,7 @@ void launch_conv1d_decode(const torch::Tensor& x,
       width,
       bias_or_null != nullptr,
       silu_activation);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 }
@@ -1171,46 +1178,33 @@ void causal_conv1d_decode_fused(const torch::Tensor& x,
                                 torch::Tensor output_buf,
                                 int pad_slot_id,
                                 bool silu_activation) {
-  TORCH_CHECK(x.dim() == 2, "causal_conv1d_decode_fused: x must be 2D");
-  TORCH_CHECK(weight.dim() == 2,
-              "causal_conv1d_decode_fused: weight must be 2D [dim, width]");
-  TORCH_CHECK(conv_state.dim() == 3,
-              "causal_conv1d_decode_fused: conv_state must be 3D");
-  TORCH_CHECK(cache_indices.dim() == 1,
-              "causal_conv1d_decode_fused: cache_indices must be 1D");
-  TORCH_CHECK(cache_indices.scalar_type() == torch::kInt32,
-              "causal_conv1d_decode_fused: cache_indices must be int32");
-  TORCH_CHECK(output_buf.dim() == 2,
-              "causal_conv1d_decode_fused: output_buf must be 2D");
-  TORCH_CHECK(x.scalar_type() == output_buf.scalar_type(),
-              "causal_conv1d_decode_fused: output_buf dtype must match x");
-  TORCH_CHECK(x.scalar_type() == conv_state.scalar_type(),
-              "causal_conv1d_decode_fused: conv_state dtype must match x");
-  TORCH_CHECK(x.scalar_type() == weight.scalar_type(),
-              "causal_conv1d_decode_fused: weight dtype must match x");
+  CHECK(x.dim() == 2) << "causal_conv1d_decode_fused: x must be 2D";
+  CHECK(weight.dim() == 2)
+      << "causal_conv1d_decode_fused: weight must be 2D [dim, width]";
+  CHECK(conv_state.dim() == 3) << "causal_conv1d_decode_fused: conv_state must be 3D";
+  CHECK(cache_indices.dim() == 1) << "causal_conv1d_decode_fused: cache_indices must be 1D";
+  CHECK(cache_indices.scalar_type() == torch::kInt32) << "causal_conv1d_decode_fused: cache_indices must be int32";
+  CHECK(output_buf.dim() == 2) << "causal_conv1d_decode_fused: output_buf must be 2D";
+  CHECK(x.scalar_type() == output_buf.scalar_type()) << "causal_conv1d_decode_fused: output_buf dtype must match x";
+  CHECK(x.scalar_type() == conv_state.scalar_type()) << "causal_conv1d_decode_fused: conv_state dtype must match x";
+  CHECK(x.scalar_type() == weight.scalar_type()) << "causal_conv1d_decode_fused: weight dtype must match x";
 
   const int batch = static_cast<int>(x.size(0));
   const int dim = static_cast<int>(x.size(1));
   const int width = static_cast<int>(weight.size(1));
   const int num_cache_lines = static_cast<int>(conv_state.size(0));
-  TORCH_CHECK(width >= 2 && width <= 5,
-              "causal_conv1d_decode_fused: width must be in [2,5], got ",
-              width);
-  TORCH_CHECK(weight.size(0) == dim,
-              "causal_conv1d_decode_fused: weight dim mismatch");
-  TORCH_CHECK(conv_state.size(1) == dim,
-              "causal_conv1d_decode_fused: conv_state dim mismatch");
-  TORCH_CHECK(conv_state.size(2) == width - 1,
-              "causal_conv1d_decode_fused: conv_state.state_len must be "
-              "width - 1");
-  TORCH_CHECK(cache_indices.size(0) == batch,
-              "causal_conv1d_decode_fused: cache_indices length must match "
-              "batch (=x.size(0))");
-  TORCH_CHECK(output_buf.size(0) == batch && output_buf.size(1) == dim,
-              "causal_conv1d_decode_fused: output_buf shape mismatch");
-  TORCH_CHECK(output_buf.stride(1) == 1,
-              "causal_conv1d_decode_fused: output_buf last dim must be "
-              "contiguous (stride==1)");
+  CHECK(width >= 2 && width <= 5)
+      << "causal_conv1d_decode_fused: width must be in [2,5], got "
+      << width;
+  CHECK(weight.size(0) == dim) << "causal_conv1d_decode_fused: weight dim mismatch";
+  CHECK(conv_state.size(1) == dim) << "causal_conv1d_decode_fused: conv_state dim mismatch";
+  CHECK(conv_state.size(2) == width - 1) << "causal_conv1d_decode_fused: conv_state.state_len must be "
+              "width - 1";
+  CHECK(cache_indices.size(0) == batch) << "causal_conv1d_decode_fused: cache_indices length must match "
+              "batch (=x.size(0))";
+  CHECK(output_buf.size(0) == batch && output_buf.size(1) == dim) << "causal_conv1d_decode_fused: output_buf shape mismatch";
+  CHECK(output_buf.stride(1) == 1) << "causal_conv1d_decode_fused: output_buf last dim must be "
+              "contiguous (stride==1)";
 
   const at::cuda::OptionalCUDAGuard guard(device_of(x));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -1218,10 +1212,8 @@ void causal_conv1d_decode_fused(const torch::Tensor& x,
   const torch::Tensor* bias_ptr = nullptr;
   if (bias.has_value() && bias.value().defined()) {
     bias_ptr = &bias.value();
-    TORCH_CHECK(bias_ptr->scalar_type() == x.scalar_type(),
-                "causal_conv1d_decode_fused: bias dtype must match x");
-    TORCH_CHECK(bias_ptr->numel() == dim,
-                "causal_conv1d_decode_fused: bias must have shape [dim]");
+    CHECK(bias_ptr->scalar_type() == x.scalar_type()) << "causal_conv1d_decode_fused: bias dtype must match x";
+    CHECK(bias_ptr->numel() == dim) << "causal_conv1d_decode_fused: bias must have shape [dim]";
   }
 
   switch (x.scalar_type()) {
@@ -1271,10 +1263,10 @@ void causal_conv1d_decode_fused(const torch::Tensor& x,
                                   stream);
       break;
     default:
-      TORCH_CHECK(false,
-                  "causal_conv1d_decode_fused: unsupported dtype ",
-                  x.scalar_type());
+      LOG(FATAL) << "causal_conv1d_decode_fused: unsupported dtype "
+                 << x.scalar_type();
   }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 namespace {
@@ -1316,15 +1308,20 @@ __global__ void fused_gdn_decode_kernel(
   const int block_threads = blockDim.x;
 
   const int64_t slot = static_cast<int64_t>(state_indices[batch]);
+  const int K = static_cast<int>(head_k_dim);
+  const int V = static_cast<int>(head_v_dim);
   if (slot < 0) {
+    for (int v = tid; v < V; v += block_threads) {
+      const int64_t out_off =
+          (static_cast<int64_t>(batch) * num_v_heads + hv) * head_v_dim +
+          static_cast<int64_t>(v);
+      output[out_off] = static_cast<scalar_t>(0);
+    }
     return;
   }
 
   const int group = static_cast<int>(num_v_heads / num_k_heads);
   const int hk = hv / group;
-
-  const int K = static_cast<int>(head_k_dim);
-  const int V = static_cast<int>(head_v_dim);
 
   __shared__ float q_sh[kFusedGdnDecodeMaxKV];
   __shared__ float k_sh[kFusedGdnDecodeMaxKV];
@@ -1495,6 +1492,7 @@ void launch(const torch::Tensor& mixed_qkv,
       scale,
       softplus_beta,
       softplus_threshold);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 }
@@ -1618,6 +1616,7 @@ torch::Tensor fused_gated_delta_rule_decode(
     LOG(FATAL) << "fused GDN decode: unsupported dtype "
                << mixed_qkv.scalar_type();
   }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   return output;
 }

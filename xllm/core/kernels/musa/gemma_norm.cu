@@ -15,6 +15,7 @@ limitations under the License.
 
 
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <torch/cuda.h>
@@ -39,7 +40,8 @@ struct __align__(32) Float8Storage {
 };
 
 template <typename T>
-struct __align__(16) Vec8 {
+class __align__(16) Vec8 {
+ public:
   union {
     Vec8Storage<T> storage;
     T elem[8];
@@ -72,7 +74,8 @@ struct __align__(16) Vec8 {
   }
 };
 
-struct __align__(32) Float8 {
+class __align__(32) Float8 {
+ public:
   union {
     Float8Storage storage;
     float elem[8];
@@ -706,7 +709,7 @@ void gemma_rms_norm(torch::Tensor output,
   AT_DISPATCH_SWITCH(
       input.scalar_type(),
       "gemma_rms_norm",
-      AT_DISPATCH_CASE(at::ScalarType::Half,
+      AT_DISPATCH_CASE(torch::ScalarType::Half,
                        [&] {
                          launch_rmsnorm_gemma<__half>(
                              reinterpret_cast<const __half*>(
@@ -725,7 +728,7 @@ void gemma_rms_norm(torch::Tensor output,
                              static_cast<float>(eps),
                              stream);
                        })
-      AT_DISPATCH_CASE(at::ScalarType::BFloat16,
+      AT_DISPATCH_CASE(torch::ScalarType::BFloat16,
                        [&] {
                          launch_rmsnorm_gemma<__nv_bfloat16>(
                              reinterpret_cast<const __nv_bfloat16*>(
@@ -744,7 +747,7 @@ void gemma_rms_norm(torch::Tensor output,
                              static_cast<float>(eps),
                              stream);
                        })
-      AT_DISPATCH_CASE(at::ScalarType::Float, [&] {
+      AT_DISPATCH_CASE(torch::ScalarType::Float, [&] {
         launch_rmsnorm_gemma<float>(input.data_ptr<float>(),
                                     weight.data_ptr<float>(),
                                     output.data_ptr<float>(),
@@ -758,6 +761,7 @@ void gemma_rms_norm(torch::Tensor output,
                                     static_cast<float>(eps),
                                     stream);
       }));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void fused_add_gemma_rms_norm(torch::Tensor& input,
@@ -785,7 +789,7 @@ void fused_add_gemma_rms_norm(torch::Tensor& input,
   AT_DISPATCH_SWITCH(
       input.scalar_type(),
       "fused_add_gemma_rms_norm",
-      AT_DISPATCH_CASE(at::ScalarType::Half,
+      AT_DISPATCH_CASE(torch::ScalarType::Half,
                        [&] {
                          launch_fused_add_rmsnorm_gemma<__half>(
                              reinterpret_cast<__half*>(
@@ -802,7 +806,7 @@ void fused_add_gemma_rms_norm(torch::Tensor& input,
                              static_cast<float>(epsilon),
                              stream);
                        })
-      AT_DISPATCH_CASE(at::ScalarType::BFloat16,
+      AT_DISPATCH_CASE(torch::ScalarType::BFloat16,
                        [&] {
                          launch_fused_add_rmsnorm_gemma<__nv_bfloat16>(
                              reinterpret_cast<__nv_bfloat16*>(
@@ -819,7 +823,7 @@ void fused_add_gemma_rms_norm(torch::Tensor& input,
                              static_cast<float>(epsilon),
                              stream);
                        })
-      AT_DISPATCH_CASE(at::ScalarType::Float, [&] {
+      AT_DISPATCH_CASE(torch::ScalarType::Float, [&] {
         launch_fused_add_rmsnorm_gemma<float>(input.data_ptr<float>(),
                                               residual.data_ptr<float>(),
                                               weight.data_ptr<float>(),
@@ -831,6 +835,7 @@ void fused_add_gemma_rms_norm(torch::Tensor& input,
                                               static_cast<float>(epsilon),
                                               stream);
       }));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 }

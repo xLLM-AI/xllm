@@ -59,6 +59,6 @@ class GlobalCaptureInstance {
   std::unique_ptr<at::cuda::CUDAGraph> current_graph_;
   std::unique_ptr<PiecewiseGraphs> current_piecewise_graph_;
   at::cuda::MempoolId_t graph_pool_;
-  std::unique_ptr<std::lock_guard<std::mutex>> capture_lock_;
+  std::unique_lock<std::mutex> capture_lock_;
 };
 }

@@ -26,7 +26,7 @@ limitations under the License.
 
 #include "core/kernels/musa/torch_musa_ops_api.h"
 #include "core/kernels/musa/musa_tvmffi_stream.h"
-#include "device_utils.cuh"
+#include "core/kernels/cuda/device_utils.cuh"
 
 namespace xllm::kernel::cuda {
 
@@ -95,6 +95,7 @@ void reshape_paged_cache(
                 head_dim,
                 block_size);
       });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 namespace {

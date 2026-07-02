@@ -13,12 +13,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 #include <torch/cuda.h>
 
 #include <cstdint>
 
 #include "core/kernels/musa/torch_musa_ops_api.h"
-#include "device_utils.cuh"
+#include "core/kernels/cuda/device_utils.cuh"
 
 
 namespace {
@@ -121,7 +122,8 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
     act_and_mul_kernel<scalar_t, KERNEL<scalar_t>, ACT_FIRST>              \
         <<<grid, block, 0, stream>>>(                                      \
             out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), d);      \
-  });
+  });                                                                      \
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 
 void silu_and_mul(torch::Tensor out,
                   torch::Tensor input)
@@ -184,25 +186,26 @@ void launch_mul_sigmoid_gate_inplace(torch::Tensor& out,
                                      out_row_stride,
                                      gate_row_stride);
   });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 }
 
 namespace xllm::kernel::cuda {
 
 void mul_sigmoid_gate_inplace(torch::Tensor& out, const torch::Tensor& gate) {
-  TORCH_CHECK(out.defined() && gate.defined(), "out and gate must be defined");
-  TORCH_CHECK(out.sizes() == gate.sizes(), "out and gate must have same shape");
-  TORCH_CHECK(out.scalar_type() == gate.scalar_type(), "dtype mismatch");
-  TORCH_CHECK(out.device() == gate.device(), "device mismatch");
-  TORCH_CHECK(out.dim() >= 1, "out must be at least 1D");
-  TORCH_CHECK(out.stride(-1) == 1 && gate.stride(-1) == 1,
-              "out and gate must have last-dim stride == 1");
+  CHECK(out.defined() && gate.defined()) << "out and gate must be defined";
+  CHECK(out.sizes() == gate.sizes()) << "out and gate must have same shape";
+  CHECK(out.scalar_type() == gate.scalar_type()) << "dtype mismatch";
+  CHECK(out.device() == gate.device()) << "device mismatch";
+  CHECK(out.dim() >= 1) << "out must be at least 1D";
+  CHECK(out.stride(-1) == 1 && gate.stride(-1) == 1)
+      << "out and gate must have last-dim stride == 1";
   if (out.dim() > 2) {
     const int64_t numel_per_row = out.size(-1);
-    TORCH_CHECK(out.numel() % numel_per_row == 0,
-                "out shape not collapsible to 2D");
-    TORCH_CHECK(gate.numel() % numel_per_row == 0,
-                "gate shape not collapsible to 2D");
+    CHECK(out.numel() % numel_per_row == 0)
+        << "out shape not collapsible to 2D";
+    CHECK(gate.numel() % numel_per_row == 0)
+        << "gate shape not collapsible to 2D";
   }
   launch_mul_sigmoid_gate_inplace(out, gate);
 }
@@ -235,9 +238,9 @@ torch::Tensor matmul(torch::Tensor a,
     auto& out = *output_buf;
     auto bt = b.t();
     if (bias.has_value() && bias->defined()) {
-      at::addmm_out(out, *bias, a, bt);
+      torch::addmm_out(out, *bias, a, bt);
     } else {
-      at::mm_out(out, a, bt);
+      torch::mm_out(out, a, bt);
     }
     return out;
   }

@@ -33,7 +33,7 @@ struct AttentionReplayParams {
   uint32_t actual_num_tokens;
 };
 
-class AttentionRunner {
+class AttentionRunner final {
  public:
   AttentionRunner() = default;
 

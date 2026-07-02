@@ -34,9 +34,9 @@ size_t PiecewiseGraphs::num_runners() const {
 
 void PiecewiseGraphs::replay(
     const ::xllm::kernel::cuda::AttentionReplayParams& runner_params) {
-  CHECK_GT(attention_runners_.size(), 0)
-      << "Piecewise graph must have at least one attention runner";
-  CHECK_GT(graphs_.size(), 0) << "Piecewise graph must have at least one graph";
+  if (instructions_.empty()) {
+    return;
+  }
 
   size_t graph_idx = 0;
   size_t runner_idx = 0;

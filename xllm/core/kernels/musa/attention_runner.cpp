@@ -42,6 +42,9 @@ void AttentionRunner::run_capture(
     torch::Tensor output,
     std::optional<torch::Tensor>& output_lse,
     uint32_t padded_num_tokens) {
+  // plan_info is supplied per replay via AttentionReplayParams; not stored here.
+  (void)plan_info;
+
   ::xllm::runtime::cuda::GlobalCaptureInstance::get_instance()
       .temporarily_end_graph();
 
