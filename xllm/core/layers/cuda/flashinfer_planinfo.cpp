@@ -101,7 +101,6 @@ void update_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
   auto page_locked_int_workspace_buffer =
       to_ffi_tensor(FlashinferWorkspace::get_instance()
                         .get_page_locked_int_workspace_buffer());
-
   plan_info->uri = get_batch_prefill_uri(backend,
                                          query_dtype,
                                          key_dtype,
@@ -198,7 +197,6 @@ void update_chunked_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
   auto page_locked_int_workspace_buffer =
       to_ffi_tensor(FlashinferWorkspace::get_instance()
                         .get_page_locked_int_workspace_buffer());
-
   plan_info->uri =
       get_batch_prefill_uri(backend,
                             query_dtype,

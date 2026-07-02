@@ -22,6 +22,7 @@ from scripts.build_support.env import (
     get_torch_root_path,
     set_cuda_envs,
     set_ilu_envs,
+    set_maca_envs,
     set_mlu_envs,
     set_musa_envs,
     set_npu_envs,
@@ -137,7 +138,7 @@ class CMakeExtension(Extension):
 class ExtBuild(build_ext):
     user_options = build_ext.user_options + [
         ("base-dir=", None, "base directory of xLLM project"),
-        ("device=", None, "target device type (npu or mlu or cuda or ilu or musa)"),
+        ("device=", None, "target device type (npu or mlu or cuda or ilu or musa or maca)"),
         ("arch=", None, "target arch type (x86 or arm)"),
         ("generate-so=", None, "generate so or binary"),
         ("tilelang-jobs=", None, "maximum parallel TileLang compile workers"),
@@ -227,6 +228,8 @@ class ExtBuild(build_ext):
             f"-DXLLM_ATB_LAYERS_SOURCE_DIR={os.path.join(self.base_dir, 'third_party', 'xllm_atb_layers')}",
             f"-DCMAKE_JOB_POOLS=archive={archive_jobs}",
         ]
+        if self.device != 'maca':
+            cmake_args += ["-DUSE_CCACHE=ON"]
 
         if self.device == "npu":
             cmake_args += ["-DUSE_NPU=ON"]
@@ -281,6 +284,16 @@ class ExtBuild(build_ext):
                     "Please install a PyTorch build with torch.version.hip set, "
                     "or choose a different --device."
                 )
+        elif self.device == "maca":
+            torch_cuda_architectures = os.getenv("TORCH_CUDA_ARCH_LIST")
+            if not torch_cuda_architectures:
+                torch_cuda_architectures = "8.0 8.6+PTX"
+            cmake_args += ["-DUSE_CUDA=ON",
+                           "-DUSE_MACA=ON",
+                           "-DCMAKE_CUDA_STANDARD=17",
+                           "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+                           f"-DTORCH_CUDA_ARCH_LIST={torch_cuda_architectures}"]
+            set_maca_envs()
         elif self.device == "ilu":
             cmake_args += ["-DUSE_ILU=ON"]
             set_ilu_envs()
@@ -290,7 +303,7 @@ class ExtBuild(build_ext):
             global BUILD_TEST_FILE
             BUILD_TEST_FILE = False
         else:
-            raise ValueError("Please set --device to npu, mlu, cuda, dcu, ilu or musa.")
+            raise ValueError("Please set --device to npu, mlu, cuda, dcu, ilu, musa or maca.")
 
         product: str = "xllm"
         if self.generate_so:
@@ -331,12 +344,13 @@ class ExtBuild(build_ext):
     ) -> None:
         """Build CMake targets"""
         cmake_dir = get_cmake_dir()
-        subprocess.check_call(["cmake", self.base_dir] + cmake_args, cwd=cmake_dir, env=env)
+        cmake_cmd = "cmake_maca" if self.device == "maca" else "cmake"
+        subprocess.check_call([cmake_cmd, self.base_dir] + cmake_args, cwd=cmake_dir, env=env)
 
         base_build_args = build_args
         # add build target to speed up the build process
         build_args += ["--target", ext.name, "xllm"]
-        subprocess.check_call(["cmake", "--build", ".", "--verbose"] + build_args, cwd=cmake_dir)
+        subprocess.check_call([cmake_cmd, "--build", ".", "--verbose"] + build_args, cwd=cmake_dir)
 
         os.makedirs(os.path.join(os.path.dirname(cmake_dir), "xllm/core/server/"), exist_ok=True)
         shutil.copy(
@@ -349,12 +363,12 @@ class ExtBuild(build_ext):
         if BUILD_EXPORT:
             # build export module
             build_args = base_build_args + ["--target export_module"]
-            subprocess.check_call(["cmake", "--build", ".", "--verbose"] + build_args, cwd=cmake_dir)
+            subprocess.check_call([cmake_cmd, "--build", ".", "--verbose"] + build_args, cwd=cmake_dir)
 
         if BUILD_TEST_FILE:
             # build tests target
             build_args = base_build_args + ["--target all_tests"]
-            subprocess.check_call(["cmake", "--build", ".", "--verbose"] + build_args, cwd=cmake_dir)
+            subprocess.check_call([cmake_cmd, "--build", ".", "--verbose"] + build_args, cwd=cmake_dir)
 
 class ExtBuildSingleTest(ExtBuild):
     """Inherit ExtBuild, used to build and run a single test"""
@@ -726,9 +740,9 @@ def parse_arguments() -> dict[str, Any]:
     parser.add_argument(
         '--device',
         type=str.lower,
-        choices=['auto', 'npu', 'mlu', 'cuda', 'ilu', 'musa', 'dcu'],
+        choices=['auto', 'npu', 'mlu', 'cuda', 'ilu', 'musa', 'dcu', 'maca'],
         default='auto',
-        help='Device type: npu, mlu, ilu, cuda or musa (case-insensitive)'
+        help='Device type: npu, mlu, ilu, cuda or musa or maca (case-insensitive)'
     )
     parser.add_argument(
         '--generate-so',
