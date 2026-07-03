@@ -55,7 +55,7 @@ void qwen35_mtp_debug_sync(const char*) {}
 #endif
 
 torch::Tensor l2norm(const torch::Tensor& x, int64_t dim, double eps = 1e-6) {
-  auto norm = torch::sqrt(torch::sum(torch::square(x), dim, true) + eps);
+  auto norm = torch::sqrt(torch::sum(torch::square(x), dim, /*keepdim=*/true) + eps);
   return x / norm;
 }
 
