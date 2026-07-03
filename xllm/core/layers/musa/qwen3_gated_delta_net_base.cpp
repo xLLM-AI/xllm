@@ -96,8 +96,8 @@ std::tuple<torch::Tensor, torch::Tensor> torch_recurrent_gated_delta_rule(
   auto initial_dtype = query.dtype();
 
   if (use_qk_l2norm_in_kernel) {
-    query = l2norm(query, -1, 1e-6);
-    key = l2norm(key, -1, 1e-6);
+    query = l2norm(query, /*dim=*/-1, /*eps=*/1e-6);
+    key = l2norm(key, /*dim=*/-1, /*eps=*/1e-6);
   }
 
   auto to_float32_and_transpose = [](torch::Tensor x) {
