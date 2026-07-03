@@ -86,12 +86,12 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
     const int64_t target_rows = query.numel() / last_dim;
     const auto desired_options = query.options();
 
-    const bool need_realloc = !output_buf_.defined() ||
-                              output_buf_.dtype() != desired_options.dtype() ||
-                              output_buf_.device() != desired_options.device() ||
-                              output_buf_.dim() != query.dim() ||
-                              output_buf_.size(-1) != last_dim ||
-                              (output_buf_.numel() / last_dim) < target_rows;
+    const bool need_realloc =
+        !output_buf_.defined() ||
+        output_buf_.dtype() != desired_options.dtype() ||
+        output_buf_.device() != desired_options.device() ||
+        output_buf_.dim() != query.dim() || output_buf_.size(-1) != last_dim ||
+        (output_buf_.numel() / last_dim) < target_rows;
     if (need_realloc) {
       std::vector<int64_t> alloc_shape(target_sizes.begin(),
                                        target_sizes.end());

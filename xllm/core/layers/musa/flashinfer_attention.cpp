@@ -13,20 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <cstdlib>
-#include <string>
+#include "layers/cuda/flashinfer_attention.h"
 
 #include <c10/cuda/CUDAException.h>
 #include <cuda_runtime.h>
 
-#include "layers/cuda/flashinfer_attention.h"
+#include <cstdlib>
+#include <string>
 
-#include "layers/cuda/flashinfer_workspace.h"
-#include "layers/musa/flashinfer_planinfo.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "kernels/musa/musa_ops_api.h"
 #include "kernels/ops_api.h"
 #include "layers/common/attention_metadata.h"
+#include "layers/cuda/flashinfer_workspace.h"
+#include "layers/musa/flashinfer_planinfo.h"
 
 namespace xllm {
 namespace layer {
@@ -171,8 +171,7 @@ FlashInferAttentionImpl::forward(const AttentionMetadata& attn_metadata,
                 << ", v_cache=" << v_cache.sizes()
                 << ", q_cu_seq_lens=" << attn_metadata.q_cu_seq_lens.sizes()
                 << ", kv_cu_seq_lens=" << attn_metadata.kv_cu_seq_lens.sizes()
-                << ", paged_kv_indptr="
-                << attn_metadata.paged_kv_indptr.sizes()
+                << ", paged_kv_indptr=" << attn_metadata.paged_kv_indptr.sizes()
                 << ", paged_kv_indices="
                 << attn_metadata.paged_kv_indices.sizes()
                 << ", paged_kv_last_page_len="
@@ -394,7 +393,8 @@ void FlashInferAttentionImpl::decoder_forward(
       // this to partition work; an inflated value pushes the scheduler to
       // over-allocate splits and confuses causal masking, producing subtly
       // drifted attention even though the kernel runs to completion.
-      const int32_t max_seqlen_k = static_cast<int32_t>(attn_metadata.max_seq_len);
+      const int32_t max_seqlen_k =
+          static_cast<int32_t>(attn_metadata.max_seq_len);
       const int32_t max_seqlen_q = static_cast<int32_t>(
           std::max<int64_t>(attn_metadata.max_query_len, 1));
       CHECK_GT(max_seqlen_k, 0)

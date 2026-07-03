@@ -133,53 +133,51 @@ void update_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
       << " layer_id=" << plan_info->layer_id
       << " sm90a=" << Platform::is_support_sm90a()
       << " enable_cuda_graph=" << enable_cuda_graph
-      << " total_num_rows=" << total_num_rows
-      << " batch_size=" << batch_size << " num_qo_heads=" << num_qo_heads
-      << " num_kv_heads=" << num_kv_heads
+      << " total_num_rows=" << total_num_rows << " batch_size=" << batch_size
+      << " num_qo_heads=" << num_qo_heads << " num_kv_heads=" << num_kv_heads
       << " head_dim_qk=" << head_dim_qk << " head_dim_vo=" << head_dim_vo;
   ffi::Array<int64_t> plan_result;
   try {
     // For sm90 architecture, the plan function doesn't accept
     // fixed_split_size / disable_split_kv / num_colocated_ctas
-    plan_result =
-        Platform::is_support_sm90a()
-            ? plan_func(float_workspace_buffer,
-                        int_workspace_buffer,
-                        page_locked_int_workspace_buffer,
-                        to_ffi_tensor(qo_indptr_host),
-                        to_ffi_tensor(kv_cu_seq_lens_host),
-                        to_ffi_tensor(kv_len_arr_host),
-                        total_num_rows,
-                        batch_size,
-                        num_qo_heads,
-                        num_kv_heads,
-                        /*page_size=*/1,
-                        enable_cuda_graph,
-                        head_dim_qk,
-                        head_dim_vo,
-                        /*causal=*/true,
-                        /*window_size_left=*/-1)
-                  .cast<ffi::Array<int64_t>>()
-            : plan_func(float_workspace_buffer,
-                        int_workspace_buffer,
-                        page_locked_int_workspace_buffer,
-                        to_ffi_tensor(qo_indptr_host),
-                        to_ffi_tensor(kv_cu_seq_lens_host),
-                        to_ffi_tensor(kv_len_arr_host),
-                        total_num_rows,
-                        batch_size,
-                        num_qo_heads,
-                        num_kv_heads,
-                        /*page_size=*/1,
-                        enable_cuda_graph,
-                        head_dim_qk,
-                        head_dim_vo,
-                        /*causal=*/true,
-                        /*window_size_left=*/-1,
-                        /*fixed_split_size=*/-1,
-                        /*disable_split_kv=*/false,
-                        /*num_colocated_ctas=*/0)
-                  .cast<ffi::Array<int64_t>>();
+    plan_result = Platform::is_support_sm90a()
+                      ? plan_func(float_workspace_buffer,
+                                  int_workspace_buffer,
+                                  page_locked_int_workspace_buffer,
+                                  to_ffi_tensor(qo_indptr_host),
+                                  to_ffi_tensor(kv_cu_seq_lens_host),
+                                  to_ffi_tensor(kv_len_arr_host),
+                                  total_num_rows,
+                                  batch_size,
+                                  num_qo_heads,
+                                  num_kv_heads,
+                                  /*page_size=*/1,
+                                  enable_cuda_graph,
+                                  head_dim_qk,
+                                  head_dim_vo,
+                                  /*causal=*/true,
+                                  /*window_size_left=*/-1)
+                            .cast<ffi::Array<int64_t>>()
+                      : plan_func(float_workspace_buffer,
+                                  int_workspace_buffer,
+                                  page_locked_int_workspace_buffer,
+                                  to_ffi_tensor(qo_indptr_host),
+                                  to_ffi_tensor(kv_cu_seq_lens_host),
+                                  to_ffi_tensor(kv_len_arr_host),
+                                  total_num_rows,
+                                  batch_size,
+                                  num_qo_heads,
+                                  num_kv_heads,
+                                  /*page_size=*/1,
+                                  enable_cuda_graph,
+                                  head_dim_qk,
+                                  head_dim_vo,
+                                  /*causal=*/true,
+                                  /*window_size_left=*/-1,
+                                  /*fixed_split_size=*/-1,
+                                  /*disable_split_kv=*/false,
+                                  /*num_colocated_ctas=*/0)
+                            .cast<ffi::Array<int64_t>>();
   } catch (const std::exception& e) {
     LOG(FATAL) << "[FFI-TRACE] prefill plan() THREW: " << e.what()
                << " | uri=" << plan_info->uri
@@ -282,27 +280,27 @@ void update_chunked_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
       << " window_size_left=" << window_size_left;
   ffi::Array<int64_t> chunked_plan_result;
   try {
-    chunked_plan_result =
-        get_function(plan_info->uri, "plan")(float_workspace_buffer,
-                                             int_workspace_buffer,
-                                             page_locked_int_workspace_buffer,
-                                             to_ffi_tensor(qo_indptr_host),
-                                             to_ffi_tensor(paged_kv_indptr_host),
-                                             to_ffi_tensor(kv_len_arr_host),
-                                             causal ? total_num_rows : batch_size,
-                                             batch_size,
-                                             num_qo_heads,  // num_qo_heads
-                                             num_kv_heads,  // num_kv_heads
-                                             block_size,    // block_size
-                                             enable_cuda_graph,
-                                             head_dim_qk,  // head_dim_qk
-                                             head_dim_vo,  // head_dim_vo
-                                             causal,
-                                             window_size_left,
-                                             /*fixed_split_size=*/-1,
-                                             /*disable_split_kv=*/false,
-                                             /*num_colocated_ctas=*/0)
-            .cast<ffi::Array<int64_t>>();
+    chunked_plan_result = get_function(plan_info->uri, "plan")(
+                              float_workspace_buffer,
+                              int_workspace_buffer,
+                              page_locked_int_workspace_buffer,
+                              to_ffi_tensor(qo_indptr_host),
+                              to_ffi_tensor(paged_kv_indptr_host),
+                              to_ffi_tensor(kv_len_arr_host),
+                              causal ? total_num_rows : batch_size,
+                              batch_size,
+                              num_qo_heads,  // num_qo_heads
+                              num_kv_heads,  // num_kv_heads
+                              block_size,    // block_size
+                              enable_cuda_graph,
+                              head_dim_qk,  // head_dim_qk
+                              head_dim_vo,  // head_dim_vo
+                              causal,
+                              window_size_left,
+                              /*fixed_split_size=*/-1,
+                              /*disable_split_kv=*/false,
+                              /*num_colocated_ctas=*/0)
+                              .cast<ffi::Array<int64_t>>();
   } catch (const std::exception& e) {
     LOG(FATAL) << "[FFI-TRACE] chunked_prefill plan() THREW: " << e.what()
                << " | uri=" << plan_info->uri
@@ -379,13 +377,13 @@ void update_decode_plan_info(std::shared_ptr<PlanInfo> plan_info,
                              /*use_sliding_window=*/false,
                              /*use_logits_soft_cap=*/false);
 
-    // Prefer the host mirror pre-staged by AttentionMetadataBuilder (see Plan v2
-    // in attention_metadata.h / batch_input_builder.cpp). The Mate FFI decode
-    // `plan` consumes a kDLCPU pointer; using the cache avoids one more D2H per
-    // forward step (plan runs once at layer 0, gated by plan_info->plan_info
-    // being empty). Critical for CUDA graph capture: any .to(kCPU) inside the
-    // captured region would abort capture. Fall back to a lazy D2H for callers
-    // that have not opted in (e.g. legacy input builders).
+    // Prefer the host mirror pre-staged by AttentionMetadataBuilder (see Plan
+    // v2 in attention_metadata.h / batch_input_builder.cpp). The Mate FFI
+    // decode `plan` consumes a kDLCPU pointer; using the cache avoids one more
+    // D2H per forward step (plan runs once at layer 0, gated by
+    // plan_info->plan_info being empty). Critical for CUDA graph capture: any
+    // .to(kCPU) inside the captured region would abort capture. Fall back to a
+    // lazy D2H for callers that have not opted in (e.g. legacy input builders).
     torch::Tensor paged_kv_indptr_host =
         attn_meta.paged_kv_indptr_host.defined()
             ? attn_meta.paged_kv_indptr_host
@@ -410,8 +408,7 @@ void update_decode_plan_info(std::shared_ptr<PlanInfo> plan_info,
       auto opts = torch::TensorOptions()
                       .dtype(paged_kv_indptr_host.scalar_type())
                       .device(torch::kCPU);
-      torch::Tensor synth_indptr_host =
-          torch::empty({batch_size + 1}, opts);
+      torch::Tensor synth_indptr_host = torch::empty({batch_size + 1}, opts);
       // Fill [0, max, 2*max, ..., bs*max]. Use int32 view since plan() and the
       // upstream pinned-host buffers all use int32 for indptr.
       auto* p = synth_indptr_host.data_ptr<int32_t>();
@@ -452,22 +449,22 @@ void update_decode_plan_info(std::shared_ptr<PlanInfo> plan_info,
         << " window_size_left=" << window_size_left;
     ffi::Array<int64_t> decode_plan_result;
     try {
-      decode_plan_result =
-          get_function(plan_info->uri, "plan")(float_workspace_buffer,
-                                               int_workspace_buffer,
-                                               to_ffi_tensor(paged_kv_indptr_host),
-                                               batch_size,
-                                               num_qo_heads,
-                                               num_kv_heads,
-                                               block_size,
-                                               enable_cuda_graph,
-                                               window_size_left,
-                                               /*logits_soft_cap=*/0.0,
-                                               head_dim_qk,
-                                               head_dim_vo,
-                                               to_ffi_tensor(empty_q_data),
-                                               to_ffi_tensor(empty_kv_data))
-              .cast<ffi::Array<int64_t>>();
+      decode_plan_result = get_function(plan_info->uri, "plan")(
+                               float_workspace_buffer,
+                               int_workspace_buffer,
+                               to_ffi_tensor(paged_kv_indptr_host),
+                               batch_size,
+                               num_qo_heads,
+                               num_kv_heads,
+                               block_size,
+                               enable_cuda_graph,
+                               window_size_left,
+                               /*logits_soft_cap=*/0.0,
+                               head_dim_qk,
+                               head_dim_vo,
+                               to_ffi_tensor(empty_q_data),
+                               to_ffi_tensor(empty_kv_data))
+                               .cast<ffi::Array<int64_t>>();
     } catch (const std::exception& e) {
       LOG(FATAL) << "[FFI-TRACE] decode plan() THREW: " << e.what()
                  << " | uri=" << plan_info->uri

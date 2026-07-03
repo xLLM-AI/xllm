@@ -19,13 +19,13 @@ limitations under the License.
 
 #include <vector>
 
-#include "layers/common/attention.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "kernels/ops_api.h"
+#include "layers/common/attention.h"
 #include "layers/common/linear.h"
 #include "layers/common/partial_rotary_embedding.h"
 #include "layers/common/qwen3_next_rms_norm.h"
