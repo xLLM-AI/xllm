@@ -47,9 +47,12 @@ bool ModelsServiceImpl::list_models(const proto::ModelListRequest* request,
 std::string ModelsServiceImpl::list_model_versions() {
   nlohmann::json model_states_array = nlohmann::json::array();
 
-  for (size_t i = 0; i < model_names_.size(); ++i) {
+  for (size_t i = 0; i < model_versions_.size(); ++i) {
     nlohmann::json model_state;
-    model_state["name"] = model_names_[i];
+    // The repository index reports the model directory name (carried by
+    // model_versions_), so it stays stable regardless of a user-provided
+    // --model_id.
+    model_state["name"] = model_versions_[i];
     model_state["version"] = model_versions_[i];
     model_state["state"] = "READY";
     model_state["reason"] = "normal";
