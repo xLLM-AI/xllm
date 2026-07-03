@@ -1204,9 +1204,9 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     // capture with "operation not permitted when stream is capturing") and
     // writes directly into pre-allocated storage.
     {
-      const int64_t B = fused_params.mixed_qkv.size(0);
-      const int64_t Hv = num_v_heads_ / tp_size_;
-      const int64_t V = head_v_dim_;
+      const int64_t b = fused_params.mixed_qkv.size(0);
+      const int64_t hv = num_v_heads_ / tp_size_;
+      const int64_t v = head_v_dim_;
       const auto opts = mixed_qkv.options();
       const bool needs = !fused_gdn_decode_out_buf_.defined() ||
                          fused_gdn_decode_out_buf_.size(0) < B ||
