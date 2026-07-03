@@ -20,11 +20,11 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
-Qwen3_5DecoderLayerImpl::Qwen3_5DecoderLayerImpl(const ModelContext& context,
+Qwen35DecoderLayerImpl::Qwen35DecoderLayerImpl(const ModelContext& context,
                                                  int32_t layer_id)
     : Qwen3NextDecoderLayerImpl(context,
                                 layer_id,
-                                std::make_shared<Qwen3_5GatedDeltaNetImpl>(
+                                std::make_shared<Qwen35GatedDeltaNetImpl>(
                                     context.get_model_args(),
                                     context.get_quant_args(),
                                     context.get_parallel_args(),
