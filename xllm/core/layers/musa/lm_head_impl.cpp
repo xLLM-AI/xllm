@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "musa_lm_head_impl.h"
+#include "layers/musa/lm_head_impl.h"
 
 #include "MTTOplib/Ops.h"
 #include "MTTOplib/WeightReorder.h"
@@ -28,7 +28,9 @@ MUSALmHeadImpl::MUSALmHeadImpl(const ModelContext& context)
       vocab_size_(context.get_model_args().vocab_size()) {}
 
 void MUSALmHeadImpl::load_state_dict(StateDict const& state_dict) {
-  if (state_dict.size() == 0) return;
+  if (state_dict.size() == 0) {
+    return;
+  }
   DEFINE_WEIGHT(weight);
   weight_ = torch::empty({vocab_size_, hidden_size_}, options_);
   LOAD_WEIGHT(weight);

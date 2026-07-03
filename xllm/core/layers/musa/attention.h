@@ -17,15 +17,72 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+// The musa layer directory hosts two mutually exclusive attention backends
+// selected at build time:
+//   * XLLM_TORCH_MUSA: the CUDA-graph FlashInfer path (torch_musa runtime).
+//   * USE_MUSA:        the native MTTOplib path.
+// Both expose the same `AttentionImpl` / `Attention` module so downstream
+// layers can include this single header regardless of the active backend.
+#if defined(XLLM_TORCH_MUSA)
+
+#include <memory>
+#include <optional>
+#include <tuple>
+
+#include "framework/kv_cache/kv_cache.h"
+#include "layers/common/attention_metadata.h"
+
+namespace xllm {
+namespace layer {
+
+class BaseAttentionImpl;
+
+// CUDA-graph attention entry for XLLM_TORCH_MUSA (FlashInfer-only backend).
+class AttentionImpl final : public torch::nn::Module {
+ public:
+  AttentionImpl() = default;
+
+  AttentionImpl(int64_t num_heads,
+                int64_t head_size,
+                float scale,
+                int64_t num_kv_heads,
+                int64_t sliding_window);
+
+  std::tuple<torch::Tensor, std::optional<torch::Tensor>> forward(
+      const AttentionMetadata& attn_metadata,
+      torch::Tensor& query,
+      torch::Tensor& key,
+      torch::Tensor& value,
+      KVCache& kv_cache);
+
+ private:
+  std::shared_ptr<BaseAttentionImpl> attention_impl_;
+
+  // Caller-owned output scratch so the underlying FlashInfer backend can fill
+  // its result without a per-call `at::empty_strided` call. The libtorch
+  // allocation path is forbidden during MUSA stream capture; the buffer
+  // lazily grows on the leading row dim (see forward() for the realloc rule),
+  // then narrow()-slices for every smaller call so captured graphs hold stable
+  // storage across replays.
+  mutable torch::Tensor output_buf_;
+};
+TORCH_MODULE(Attention);
+
+}  // namespace layer
+}  // namespace xllm
+
+#else  // native USE_MUSA (MTTOplib backend)
+
 #include <cassert>
 #include <cstdint>
 #include <optional>
 
 #include "framework/state_dict/state_dict.h"
 #include "framework/state_dict/utils.h"
-#include "musa_layer_base.h"
+#include "layers/musa/layer_base.h"
 
-namespace xllm::layer {
+namespace xllm {
+namespace layer {
 
 class AttentionImpl : public MUSALayerBaseImpl {
  public:
@@ -67,4 +124,7 @@ class AttentionImpl : public MUSALayerBaseImpl {
 };
 TORCH_MODULE(Attention);
 
-}  // namespace xllm::layer
+}  // namespace layer
+}  // namespace xllm
+
+#endif  // XLLM_TORCH_MUSA
