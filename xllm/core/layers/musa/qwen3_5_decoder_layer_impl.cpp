@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "qwen3_5_decoder_layer_impl.h"
+#include "layers/musa/qwen3_5_decoder_layer_impl.h"
 
 #include <memory>
 
