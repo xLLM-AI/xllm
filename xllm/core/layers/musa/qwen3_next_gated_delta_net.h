@@ -62,7 +62,7 @@ class Qwen3NextGatedDeltaNetImpl : public Qwen3GatedDeltaNetBaseImpl {
 };
 TORCH_MODULE(Qwen3NextGatedDeltaNet);
 
-class Qwen3_5GatedDeltaNetImpl final : public Qwen3NextGatedDeltaNetImpl {
+class Qwen35GatedDeltaNetImpl final : public Qwen3NextGatedDeltaNetImpl {
  public:
   Qwen3_5GatedDeltaNetImpl() = default;
   Qwen3_5GatedDeltaNetImpl(const ModelArgs& args,
