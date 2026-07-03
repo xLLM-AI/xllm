@@ -19,7 +19,7 @@ limitations under the License.
 #include <cstdlib>
 #include <tuple>
 
-#include "xllm/core/kernels/ops_api.h"
+#include "kernels/ops_api.h"
 
 #if defined(USE_CUDA) || defined(USE_MUSA)
 #include <c10/cuda/CUDAException.h>
@@ -120,8 +120,7 @@ std::tuple<torch::Tensor, torch::Tensor> torch_recurrent_gated_delta_rule(
   int64_t v_head_dim = value.size(3);
 
   float scale_val = 1.0 / std::sqrt(static_cast<float>(query.size(-1)));
-  torch::Tensor scale = torch::tensor(scale_val, query.options());
-  query = query * scale;
+  query = query * scale_val;
   torch::Tensor core_attn_out = torch::zeros(
       {batch_size, num_heads, sequence_length, v_head_dim},
       torch::TensorOptions().dtype(torch::kFloat32).device(value.device()));

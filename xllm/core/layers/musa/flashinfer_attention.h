@@ -34,7 +34,7 @@ namespace layer {
 // (layers/musa/flashinfer_attention.cpp provides the definitions); a pure
 // CUDA build links its own layers/cuda copy instead, so the two declarations
 // never coexist in one binary.
-class FlashInferAttentionImpl : public BaseAttentionImpl {
+class FlashInferAttentionImpl final : public BaseAttentionImpl {
  public:
   FlashInferAttentionImpl(int64_t num_heads,
                           int64_t head_size,

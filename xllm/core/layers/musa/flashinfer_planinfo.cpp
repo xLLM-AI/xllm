@@ -261,9 +261,7 @@ void update_chunked_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
   // runtime block count <= max_kv_blocks_per_seq.
   if (enable_cuda_graph && max_kv_blocks_per_seq > 0 && batch_size > 0 &&
       paged_kv_indptr_host.defined()) {
-    auto opts = torch::TensorOptions()
-                    .dtype(paged_kv_indptr_host.scalar_type())
-                    .device(torch::kCPU);
+    auto opts = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
     torch::Tensor synth_indptr_host = torch::empty({batch_size + 1}, opts);
     auto* p = synth_indptr_host.data_ptr<int32_t>();
     for (int64_t i = 0; i <= batch_size; ++i) {
@@ -408,9 +406,8 @@ void update_decode_plan_info(std::shared_ptr<PlanInfo> plan_info,
     // refreshed by update() each call, and the attention kernel iterates over
     // those at runtime.
     if (enable_cuda_graph && max_kv_blocks_per_seq > 0 && batch_size > 0) {
-      auto opts = torch::TensorOptions()
-                      .dtype(paged_kv_indptr_host.scalar_type())
-                      .device(torch::kCPU);
+      auto opts =
+          torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
       torch::Tensor synth_indptr_host = torch::empty({batch_size + 1}, opts);
       // Fill [0, max, 2*max, ..., bs*max]. Use int32 view since plan() and the
       // upstream pinned-host buffers all use int32 for indptr.
