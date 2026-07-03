@@ -1348,7 +1348,7 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::reshape_qkvz_unpad(
       has_host_lens ? torch::Tensor() : ori_seq_lens.to(torch::kCPU);
   for (int64_t b = 0; b < bs; ++b) {
     int64_t ori_len = has_host_lens ? attn_metadata.q_seq_lens_vec[b]
-                                    : host_seq_lens[b].template item<int64_t>();
+                                    : host_seq_lens[b].item<int64_t>();
     torch::Tensor valid_batch =
         reshaped_qkvz[b].slice(/*dim=*/0, /*start=*/0, ori_len);
     valid_batches.emplace_back(valid_batch);
@@ -1402,7 +1402,7 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::reshape_qkvz_with_pad(
       has_host_lens ? torch::Tensor() : start_loc.to(torch::kCPU);
   for (int64_t b = 0; b < bs; ++b) {
     int64_t cur_len = has_host_lens ? attn_metadata.q_seq_lens_vec[b]
-                                    : host_seq_lens[b].template item<int64_t>();
+                                    : host_seq_lens[b].item<int64_t>();
     torch::Tensor batch =
         qkvz.slice(/*dim=*/0, idx, idx + cur_len).contiguous();
     idx = idx + cur_len;
