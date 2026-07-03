@@ -20,7 +20,7 @@ limitations under the License.
 #include <string>
 #include <utility>
 
-#include "qwen3_gated_delta_net_base.h"
+#include "layers/musa/qwen3_gated_delta_net_base.h"
 
 namespace xllm {
 namespace layer {
