@@ -19,7 +19,7 @@ limitations under the License.
 #include <cstdlib>
 #include <tuple>
 
-#include "xllm/core/kernels/ops_api.h"
+#include "core/kernels/ops_api.h"
 
 #if defined(USE_CUDA) || defined(USE_MUSA)
 #include <c10/cuda/CUDAException.h>
