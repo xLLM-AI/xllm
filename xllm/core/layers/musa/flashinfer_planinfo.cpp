@@ -19,7 +19,6 @@ limitations under the License.
 
 #include <vector>
 
-#include "core/common/global_flags.h"
 #include "core/platform/device.h"
 #include "core/platform/platform.h"
 #include "core/util/utils.h"
@@ -28,13 +27,13 @@ limitations under the License.
 
 using namespace xllm::kernel::cuda;
 
-namespace xllm::layer::flashinfer {
+namespace {
 
 // Helper function to deep copy ffi::Array<int64_t> to avoid lifetime issues
 // with TVM runtime memory management
 // This function immediately copies all data to avoid any dependency on TVM
 // runtime
-static ffi::Array<int64_t> deep_copy_plan_info(const ffi::Array<int64_t>& src) {
+ffi::Array<int64_t> deep_copy_plan_info(const ffi::Array<int64_t>& src) {
   // Get size first - this might fail if Array is invalid
   if (!src.defined()) {
     LOG(FATAL) << "src is not defined";
@@ -61,7 +60,7 @@ static ffi::Array<int64_t> deep_copy_plan_info(const ffi::Array<int64_t>& src) {
   return ffi::Array<int64_t>(temp_vec.begin(), temp_vec.end());
 }
 
-static torch::Tensor get_kv_len_arr_host(const AttentionMetadata& attn_meta) {
+torch::Tensor get_kv_len_arr_host(const AttentionMetadata& attn_meta) {
   if (attn_meta.kv_seq_lens.defined()) {
     return attn_meta.kv_seq_lens.to(torch::kCPU);
   }
@@ -71,6 +70,10 @@ static torch::Tensor get_kv_len_arr_host(const AttentionMetadata& attn_meta) {
   torch::Tensor kv_cu_seq_lens_host = attn_meta.kv_cu_seq_lens.to(torch::kCPU);
   return kv_cu_seq_lens_host.slice(0, 1) - kv_cu_seq_lens_host.slice(0, 0, -1);
 }
+
+}  // namespace
+
+namespace xllm::layer::flashinfer {
 
 void update_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
                               const std::string& backend,

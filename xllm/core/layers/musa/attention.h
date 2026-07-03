@@ -38,7 +38,7 @@ namespace layer {
 class BaseAttentionImpl;
 
 // CUDA-graph attention entry for XLLM_TORCH_MUSA (FlashInfer-only backend).
-class AttentionImpl : public torch::nn::Module {
+class AttentionImpl final : public torch::nn::Module {
  public:
   AttentionImpl() = default;
 

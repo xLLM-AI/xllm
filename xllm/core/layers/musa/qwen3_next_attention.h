@@ -33,7 +33,7 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
-class Qwen3NextAttentionImpl : public torch::nn::Module {
+class Qwen3NextAttentionImpl final : public torch::nn::Module {
  public:
   Qwen3NextAttentionImpl() = default;
   Qwen3NextAttentionImpl(const ModelArgs& args,

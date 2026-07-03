@@ -24,8 +24,6 @@ limitations under the License.
 #if defined(USE_CUDA) || defined(USE_MUSA)
 #include <c10/cuda/CUDAException.h>
 #include <cuda_runtime.h>
-
-#include "core/common/global_flags.h"
 #endif
 
 namespace xllm {
@@ -33,6 +31,10 @@ namespace layer {
 
 namespace {
 #if defined(USE_CUDA) || defined(USE_MUSA)
+constexpr bool kEnableFusedGdnDecode = true;
+constexpr bool kEnableMateGdnDecode = false;
+constexpr bool kEnableMateGdnPrefill = false;
+
 bool qwen35_mtp_debug_enabled() {
   static const bool enabled = std::getenv("XLLM_DEBUG_QWEN35_MTP") != nullptr;
   return enabled;
@@ -785,12 +787,10 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
 #if defined(USE_CUDA) || defined(USE_MUSA)
   const bool decode_eligible = !attn_metadata.is_prefill && !use_spec_verify &&
                                seq_len == 1 && checkpoint_stride == 1;
-  // The fused in-house decode kernel takes precedence over mate when both
-  // flags are set so users can A/B between them without restarting.
-  const bool use_fused_gdn_decode =
-      FLAGS_enable_fused_gdn_decode && decode_eligible;
+  // Production defaults: fused decode on, mate decode/prefill off.
+  const bool use_fused_gdn_decode = kEnableFusedGdnDecode && decode_eligible;
   const bool use_mate_gdn_decode =
-      FLAGS_enable_mate_gdn_decode && decode_eligible && !use_fused_gdn_decode;
+      kEnableMateGdnDecode && decode_eligible && !use_fused_gdn_decode;
 #else
   const bool use_fused_gdn_decode = false;
   const bool use_mate_gdn_decode = false;
@@ -999,9 +999,8 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
   torch::Tensor core_attn_out;
   torch::Tensor last_recurrent_state;
 #if defined(USE_CUDA) || defined(USE_MUSA)
-  const bool use_mate_gdn_prefill = FLAGS_enable_mate_gdn_prefill &&
-                                    attn_metadata.is_prefill &&
-                                    !use_spec_verify;
+  const bool use_mate_gdn_prefill =
+      kEnableMateGdnPrefill && attn_metadata.is_prefill && !use_spec_verify;
 #else
   const bool use_mate_gdn_prefill = false;
 #endif

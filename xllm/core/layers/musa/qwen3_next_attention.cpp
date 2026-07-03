@@ -93,8 +93,8 @@ Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
                                              args.max_position_embeddings(),
                                              args.rope_theta(),
                                              head_dim_,
-                                             true,
-                                             false,
+                                             /*is_neox_style=*/true,
+                                             /*interleaved=*/false,
                                              options));
 
   // 6. Attention
