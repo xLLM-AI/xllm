@@ -109,8 +109,8 @@ std::tuple<torch::Tensor, torch::Tensor> torch_recurrent_gated_delta_rule(
   beta = to_float32_and_transpose(beta);
   g = to_float32_and_transpose(g);
   const int64_t value_num_heads = value.size(1);
-  query = repeat_tensor_heads(query, value_num_heads, 1);
-  key = repeat_tensor_heads(key, value_num_heads, 1);
+  query = repeat_tensor_heads(query, value_num_heads, /*head_dim=*/1);
+  key = repeat_tensor_heads(key, value_num_heads, /*head_dim=*/1);
 
   int64_t batch_size = key.size(0);
   int64_t num_heads = key.size(1);
