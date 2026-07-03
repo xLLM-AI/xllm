@@ -13,11 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "musa_qwen3_decoder_layer_impl.h"
+#include "qwen3_decoder_layer_impl.h"
 
 #include "attention.h"
 #include "layers/common/rotary_embedding.h"
-#include "musa_mlp.h"
+#include "mlp.h"
 
 namespace xllm::layer {
 
