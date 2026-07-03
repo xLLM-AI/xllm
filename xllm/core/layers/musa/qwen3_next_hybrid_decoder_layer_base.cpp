@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "qwen3_next_hybrid_decoder_layer_base.h"
+#include "layers/musa/qwen3_next_hybrid_decoder_layer_base.h"
 
 #include <algorithm>
 #include <optional>
