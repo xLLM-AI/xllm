@@ -15,20 +15,20 @@ limitations under the License.
 
 #pragma once
 
-// XLLM_TORCH_MUSA builds place torch_musa kernel sources under kernels/musa/ but
-// expose them in the xllm::kernel::cuda namespace so layers/runtime can share
-// the CUDA graph code path. Native USE_MUSA symbols live in xllm::kernel::musa.
+// XLLM_TORCH_MUSA builds place torch_musa kernel sources under kernels/musa/
+// but expose them in the xllm::kernel::cuda namespace so layers/runtime can
+// share the CUDA graph code path. Native USE_MUSA symbols live in
+// xllm::kernel::musa.
 
 #include <ATen/DynamicLibrary.h>
 #include <ATen/core/dispatch/Dispatcher.h>
 #include <glog/logging.h>
+#include <torch/torch.h>
 
 #include <cstdint>
 #include <optional>
 #include <tuple>
 #include <vector>
-
-#include <torch/torch.h>
 
 #include "core/kernels/musa/musa_tvmffi_stream.h"
 
@@ -59,12 +59,11 @@ void act_and_mul(torch::Tensor out,
 
 void mul_sigmoid_gate_inplace(torch::Tensor& out, const torch::Tensor& gate);
 
-void reshape_paged_cache(
-    torch::Tensor slot_ids,
-    torch::Tensor keys,
-    torch::Tensor values,
-    torch::Tensor key_cache,
-    torch::Tensor value_cache);
+void reshape_paged_cache(torch::Tensor slot_ids,
+                         torch::Tensor keys,
+                         torch::Tensor values,
+                         torch::Tensor key_cache,
+                         torch::Tensor value_cache);
 
 void block_copy(torch::Tensor key_cache_ptrs,
                 torch::Tensor value_cache_ptrs,
@@ -142,27 +141,27 @@ void batch_chunked_prefill(
     std::optional<torch::Tensor> qo_indptr = std::nullopt,
     bool causal = true);
 
-void batch_decode(const std::string& uri,
-                  ffi::Array<int64_t> plan_info,
-                  torch::Tensor float_workspace_buffer,
-                  torch::Tensor int_workspace_buffer,
-                  torch::Tensor page_locked_int_workspace_buffer,
-                  torch::Tensor query,
-                  torch::Tensor k_cache,
-                  torch::Tensor v_cache,
-                  torch::Tensor paged_kv_indptr,
-                  torch::Tensor paged_kv_indices,
-                  torch::Tensor paged_kv_last_page_len,
-                  int64_t window_left,
-                  double sm_scale,
-                  torch::Tensor output,
-                  std::optional<torch::Tensor>& output_lse,
-                  bool use_tensor_core,
-                  std::optional<torch::Tensor> qo_indptr = std::nullopt,
-                  const torch::Tensor& paged_kv_indptr_host = torch::Tensor(),
-                  const torch::Tensor& paged_kv_indices_host = torch::Tensor(),
-                  const torch::Tensor& paged_kv_last_page_len_host =
-                      torch::Tensor());
+void batch_decode(
+    const std::string& uri,
+    ffi::Array<int64_t> plan_info,
+    torch::Tensor float_workspace_buffer,
+    torch::Tensor int_workspace_buffer,
+    torch::Tensor page_locked_int_workspace_buffer,
+    torch::Tensor query,
+    torch::Tensor k_cache,
+    torch::Tensor v_cache,
+    torch::Tensor paged_kv_indptr,
+    torch::Tensor paged_kv_indices,
+    torch::Tensor paged_kv_last_page_len,
+    int64_t window_left,
+    double sm_scale,
+    torch::Tensor output,
+    std::optional<torch::Tensor>& output_lse,
+    bool use_tensor_core,
+    std::optional<torch::Tensor> qo_indptr = std::nullopt,
+    const torch::Tensor& paged_kv_indptr_host = torch::Tensor(),
+    const torch::Tensor& paged_kv_indices_host = torch::Tensor(),
+    const torch::Tensor& paged_kv_last_page_len_host = torch::Tensor());
 void fa3_decode(const torch::Tensor& query,
                 const torch::Tensor& k_cache,
                 const torch::Tensor& v_cache,
@@ -177,19 +176,18 @@ void fa3_decode(const torch::Tensor& query,
                 torch::Tensor& output,
                 torch::Tensor& output_lse);
 
-torch::Tensor fa3_decode_scheduler_metadata(
-    const torch::Device& device,
-    int32_t batch_size,
-    int32_t num_heads_q,
-    int32_t num_heads_kv,
-    int32_t head_dim_qk,
-    int32_t head_dim_vo,
-    int32_t max_seqlen_q,
-    int32_t max_seqlen_k,
-    int32_t window_size_left,
-    int32_t window_size_right,
-    const torch::Tensor& cu_seqlens_q,
-    const torch::Tensor& seqused_k);
+torch::Tensor fa3_decode_scheduler_metadata(const torch::Device& device,
+                                            int32_t batch_size,
+                                            int32_t num_heads_q,
+                                            int32_t num_heads_kv,
+                                            int32_t head_dim_qk,
+                                            int32_t head_dim_vo,
+                                            int32_t max_seqlen_q,
+                                            int32_t max_seqlen_k,
+                                            int32_t window_size_left,
+                                            int32_t window_size_right,
+                                            const torch::Tensor& cu_seqlens_q,
+                                            const torch::Tensor& seqused_k);
 
 void rms_norm(torch::Tensor output,
               torch::Tensor input,
@@ -250,21 +248,18 @@ std::tuple<torch::Tensor, torch::Tensor> fp8_scaled_quantize(
     const std::optional<torch::Tensor>& output = std::nullopt,
     const std::optional<torch::Tensor>& scale = std::nullopt);
 
+void rms_norm_static_fp8_quant(torch::Tensor& out,
+                               torch::Tensor& input,
+                               torch::Tensor& weight,
+                               torch::Tensor& scale,
+                               double epsilon);
 
-void rms_norm_static_fp8_quant(
-    torch::Tensor& out,
-    torch::Tensor& input,
-    torch::Tensor& weight,
-    torch::Tensor& scale,
-    double epsilon);
-
-void fused_add_rms_norm_static_fp8_quant(
-    torch::Tensor& out,
-    torch::Tensor& input,
-    torch::Tensor& residual,
-    torch::Tensor& weight,
-    torch::Tensor& scale,
-    double epsilon);
+void fused_add_rms_norm_static_fp8_quant(torch::Tensor& out,
+                                         torch::Tensor& input,
+                                         torch::Tensor& residual,
+                                         torch::Tensor& weight,
+                                         torch::Tensor& scale,
+                                         double epsilon);
 
 torch::Tensor fp8_scaled_matmul(
     const torch::Tensor& a,
@@ -292,20 +287,17 @@ std::pair<torch::Tensor, torch::Tensor> compute_topk_general(
 torch::Tensor air_log_softmax_last_dim(const torch::Tensor& input,
                                        const torch::Tensor& temperatures);
 
-void fused_qk_norm_rope(
-    torch::Tensor& qkv,
-    int64_t num_heads_q,
-    int64_t num_heads_k,
-    int64_t num_heads_v,
-    int64_t head_dim,
-    double eps,
-    const torch::Tensor& q_weight,
-    const torch::Tensor& k_weight,
-    const torch::Tensor&
-        cos_sin_cache,
-    bool interleaved,
-    const torch::Tensor& position_ids
-);
+void fused_qk_norm_rope(torch::Tensor& qkv,
+                        int64_t num_heads_q,
+                        int64_t num_heads_k,
+                        int64_t num_heads_v,
+                        int64_t head_dim,
+                        double eps,
+                        const torch::Tensor& q_weight,
+                        const torch::Tensor& k_weight,
+                        const torch::Tensor& cos_sin_cache,
+                        bool interleaved,
+                        const torch::Tensor& position_ids);
 
 std::tuple<torch::Tensor, torch::Tensor> moe_fused_topk(
     torch::Tensor& gating_output,
@@ -320,10 +312,8 @@ torch::Tensor cutlass_fused_moe(
     const torch::Tensor& input,
     const torch::Tensor& token_selected_experts,
     const torch::Tensor& token_final_scales,
-    const torch::Tensor&
-        fc1_expert_weights,
-    const torch::Tensor&
-        fc2_expert_weights,
+    const torch::Tensor& fc1_expert_weights,
+    const torch::Tensor& fc2_expert_weights,
     torch::ScalarType output_dtype,
     const std::vector<torch::Tensor>& quant_scales,
     int32_t tp_size,
@@ -357,7 +347,7 @@ torch::Tensor moe_combine_result(const torch::Tensor& gemm2,
                                  int64_t N,
                                  int32_t topk);
 
-}
+}  // namespace xllm::kernel::cuda
 
 #include "core/kernels/musa/attention_runner.h"
 #include "core/kernels/musa/gdn_ops.h"

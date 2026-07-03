@@ -13,14 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-
-#include "core/kernels/musa/musa_ops_api.h"
-
 #include <glog/logging.h>
 
 #include <sstream>
 
 #include "core/common/macros.h"
+#include "core/kernels/musa/musa_ops_api.h"
 #include "core/kernels/param.h"
 
 namespace xllm {
@@ -33,7 +31,7 @@ inline torch::Tensor l2norm_last(const torch::Tensor& x, double eps) {
   return x / (x.pow(2).sum(-1, /*keepdim=*/true) + eps).sqrt();
 }
 
-}
+}  // namespace
 
 std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
     FusedRecurrentGatedDeltaRuleParams& params) {
@@ -147,8 +145,8 @@ std::pair<torch::Tensor, torch::Tensor> chunk_gated_delta_rule(
   const int64_t k_head_dim = key.size(-1);
   const int64_t v_head_dim = value.size(-1);
 
-  const int64_t pad_size = (chunk_size - sequence_length % chunk_size) %
-                           chunk_size;
+  const int64_t pad_size =
+      (chunk_size - sequence_length % chunk_size) % chunk_size;
   using PadOpts = torch::nn::functional::PadFuncOptions;
   if (pad_size != 0) {
     query = torch::nn::functional::pad(query, PadOpts({0, 0, 0, pad_size}));
@@ -165,8 +163,8 @@ std::pair<torch::Tensor, torch::Tensor> chunk_gated_delta_rule(
   auto k_beta = key * beta.unsqueeze(-1);
 
   auto reshape_to_chunks = [chunk_size](const torch::Tensor& x) {
-    return x.reshape({x.size(0), x.size(1), x.size(2) / chunk_size, chunk_size,
-                      x.size(3)});
+    return x.reshape(
+        {x.size(0), x.size(1), x.size(2) / chunk_size, chunk_size, x.size(3)});
   };
   query = reshape_to_chunks(query);
   key = reshape_to_chunks(key);
@@ -176,8 +174,9 @@ std::pair<torch::Tensor, torch::Tensor> chunk_gated_delta_rule(
   g = g.reshape({g.size(0), g.size(1), g.size(2) / chunk_size, chunk_size});
 
   auto mask = torch::triu(
-      torch::ones({chunk_size, chunk_size},
-                  torch::TensorOptions().dtype(torch::kBool).device(query.device())),
+      torch::ones(
+          {chunk_size, chunk_size},
+          torch::TensorOptions().dtype(torch::kBool).device(query.device())),
       0);
   g = g.cumsum(-1);
   auto g_diff = g.unsqueeze(-1) - g.unsqueeze(-2);
@@ -196,9 +195,10 @@ std::pair<torch::Tensor, torch::Tensor> chunk_gated_delta_rule(
                      torch::indexing::Slice(0, i)},
                     row_final.unsqueeze(-2));
   }
-  attn = attn + torch::eye(chunk_size, torch::TensorOptions()
-                                           .dtype(attn.dtype())
-                                           .device(attn.device()));
+  attn = attn +
+         torch::eye(
+             chunk_size,
+             torch::TensorOptions().dtype(attn.dtype()).device(attn.device()));
   value = torch::matmul(attn, v_beta);
   auto k_cumdecay = torch::matmul(attn, k_beta * g.exp().unsqueeze(-1));
 
@@ -215,10 +215,9 @@ std::pair<torch::Tensor, torch::Tensor> chunk_gated_delta_rule(
   const int64_t num_chunks = total_sequence_length / chunk_size;
 
   auto upper_mask = torch::triu(
-      torch::ones({chunk_size, chunk_size},
-                  torch::TensorOptions()
-                      .dtype(torch::kBool)
-                      .device(query.device())),
+      torch::ones(
+          {chunk_size, chunk_size},
+          torch::TensorOptions().dtype(torch::kBool).device(query.device())),
       1);
   for (int64_t i = 0; i < num_chunks; ++i) {
     auto q_i = query.select(2, i);
@@ -227,8 +226,7 @@ std::pair<torch::Tensor, torch::Tensor> chunk_gated_delta_rule(
     auto attn_i =
         (torch::matmul(q_i, k_i.transpose(-1, -2)) * decay_mask.select(2, i))
             .masked_fill_(upper_mask, 0.0);
-    auto v_prime =
-        torch::matmul(k_cumdecay.select(2, i), last_recurrent_state);
+    auto v_prime = torch::matmul(k_cumdecay.select(2, i), last_recurrent_state);
     auto v_new = v_i - v_prime;
     auto attn_inter = torch::matmul(q_i * g.select(2, i).unsqueeze(-1).exp(),
                                     last_recurrent_state);
@@ -246,7 +244,6 @@ std::pair<torch::Tensor, torch::Tensor> chunk_gated_delta_rule(
   return {core_attn_out, last_recurrent_state};
 }
 
-
 namespace {
 
 constexpr int64_t kGdnChunkSize = 64;
@@ -260,8 +257,7 @@ torch::Tensor pad_time_dim_4d(const torch::Tensor& tensor, int64_t pad_size) {
     return tensor;
   }
   return torch::nn::functional::pad(
-      tensor,
-      torch::nn::functional::PadFuncOptions({0, 0, 0, 0, 0, pad_size}));
+      tensor, torch::nn::functional::PadFuncOptions({0, 0, 0, 0, 0, pad_size}));
 }
 
 torch::Tensor pad_time_dim_3d(const torch::Tensor& tensor,
@@ -308,10 +304,11 @@ torch::Tensor chunk_local_cumsum_log_alpha(const torch::Tensor& g_log,
   log_alpha =
       log_alpha.reshape({batch_size, padded_len / chunk_size, chunk_size, -1});
   log_alpha = log_alpha.cumsum(/*dim=*/2);
-  return log_alpha.reshape({batch_size, padded_len, alpha.size(2)}).contiguous();
+  return log_alpha.reshape({batch_size, padded_len, alpha.size(2)})
+      .contiguous();
 }
 
-}
+}  // namespace
 
 std::string get_mate_gdn_prefill_uri(int64_t num_q_heads,
                                      int64_t num_v_heads,
@@ -365,10 +362,10 @@ std::pair<torch::Tensor, torch::Tensor> mate_gated_delta_rule_prefill(
     beta = pad_time_dim_3d(beta, pad_size, 0.0);
   }
   auto g_cumsum = chunk_local_cumsum_log_alpha(
-      pad_size > 0 ? pad_time_dim_3d(params.g.to(torch::kFloat32).contiguous(),
-                                     pad_size,
-                                     0.0)
-                   : params.g.to(torch::kFloat32).contiguous(),
+      pad_size > 0
+          ? pad_time_dim_3d(
+                params.g.to(torch::kFloat32).contiguous(), pad_size, 0.0)
+          : params.g.to(torch::kFloat32).contiguous(),
       kGdnChunkSize);
 
   const std::string uri =
@@ -378,10 +375,9 @@ std::pair<torch::Tensor, torch::Tensor> mate_gated_delta_rule_prefill(
 
   auto a_dummy = torch::empty(
       {batch_size, num_tokens, num_v_heads, kGdnChunkSize}, query.options());
-  auto h0 = torch::zeros({batch_size, num_v_heads, head_v_dim, head_k_dim},
-                         torch::TensorOptions()
-                             .dtype(torch::kFloat32)
-                             .device(query.device()));
+  auto h0 = torch::zeros(
+      {batch_size, num_v_heads, head_v_dim, head_k_dim},
+      torch::TensorOptions().dtype(torch::kFloat32).device(query.device()));
   auto output = torch::empty({batch_size, num_tokens, num_v_heads, head_v_dim},
                              value.options());
   auto final_state = torch::empty(
@@ -464,6 +460,6 @@ torch::Tensor causal_conv1d(
   return output.to(x.dtype());
 }
 
-}
-}
-}
+}  // namespace cuda
+}  // namespace kernel
+}  // namespace xllm

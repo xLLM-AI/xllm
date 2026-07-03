@@ -64,8 +64,8 @@ void set_tvmffi_stream_handle(c10::DeviceIndex device_index, void* stream) {
   constexpr int32_t kDlExtDev = 12;
   for (const int32_t device_type : {kDlCuda, kDlExtDev}) {
     void* original_stream = nullptr;
-    const int rc = TVMFFIEnvSetStream(device_type, device_index, stream,
-                                      &original_stream);
+    const int rc =
+        TVMFFIEnvSetStream(device_type, device_index, stream, &original_stream);
     if (rc != 0) {
       LOG(WARNING) << "[tvmffi.stream] failed to set stream, rc=" << rc
                    << " dev_type=" << device_type << " dev=" << device_index;
@@ -78,7 +78,7 @@ bool is_current_stream_capturing() {
          c10::musa::CaptureStatus::None;
 }
 
-}
+}  // namespace
 
 void bind_musa_tvmffi_stream(const torch::Device& device) {
   if (!is_torch_musa_device(device)) {
@@ -135,7 +135,7 @@ MusaTvmffiStreamGuard::~MusaTvmffiStreamGuard() {
   sync_musa_ffi_stream(device_);
 }
 
-}
+}  // namespace xllm::kernel::cuda
 
 #else
 
@@ -151,7 +151,7 @@ MusaTvmffiStreamGuard::MusaTvmffiStreamGuard(const torch::Device& /*device*/) {}
 
 MusaTvmffiStreamGuard::~MusaTvmffiStreamGuard() {}
 
-}
+}  // namespace xllm::kernel::cuda
 
 #endif
 
@@ -467,9 +467,8 @@ int32_t torch_dlpack_managed_tensor_allocator(
       thread_local int64_t call_idx = 0;
       const int64_t this_call = call_idx++;
 
-      const int64_t dtype_bits =
-          static_cast<int64_t>(prototype->dtype.bits) *
-          static_cast<int64_t>(prototype->dtype.lanes);
+      const int64_t dtype_bits = static_cast<int64_t>(prototype->dtype.bits) *
+                                 static_cast<int64_t>(prototype->dtype.lanes);
       int64_t numel = 1;
       for (int i = 0; i < prototype->ndim; ++i) {
         numel *= prototype->shape[i];
@@ -484,10 +483,12 @@ int32_t torch_dlpack_managed_tensor_allocator(
       }
       shape_oss << "]";
 
-      LOG(INFO) << "[TVMFFI-ALLOC #" << this_call << "] shape=" << shape_oss.str()
+      LOG(INFO) << "[TVMFFI-ALLOC #" << this_call
+                << "] shape=" << shape_oss.str()
                 << " dtype=" << at::toString(at::toScalarType(prototype->dtype))
-                << " device=" << dlpack_device_to_string(prototype->device.device_type)
-                << ":" << static_cast<int>(prototype->device.device_id)
+                << " device="
+                << dlpack_device_to_string(prototype->device.device_type) << ":"
+                << static_cast<int>(prototype->device.device_id)
                 << " bytes=" << bytes;
     }
 
@@ -499,10 +500,12 @@ int32_t torch_dlpack_managed_tensor_allocator(
         const size_t idx = g_ffi_alloc_state.replay_idx;
         CHECK_LT(idx, g_ffi_alloc_state.replay_buf->size())
             << "[TVMFFI-ALLOC] kReplay overrun: requested alloc #" << idx
-            << " but recording only has " << g_ffi_alloc_state.replay_buf->size()
+            << " but recording only has "
+            << g_ffi_alloc_state.replay_buf->size()
             << " entries -- Mate FFI emitted more allocs under capture than "
                "during the recording warmup (non-determinism?). prototype "
-               "shape rank=" << prototype->ndim;
+               "shape rank="
+            << prototype->ndim;
         tensor = (*g_ffi_alloc_state.replay_buf)[idx];
         CHECK_EQ(static_cast<int>(tensor.dim()), prototype->ndim)
             << "[TVMFFI-ALLOC] kReplay rank mismatch at idx=" << idx
@@ -556,7 +559,7 @@ void ensure_tvm_ffi_tensor_allocator() {
     }
   });
 }
-}
+}  // namespace
 
 namespace xllm::kernel::cuda {
 
@@ -618,8 +621,8 @@ void bind_tvmffi_stream_to_current_torch_stream(const torch::Device& device) {
   constexpr int32_t kDlExtDev = 12;
   for (const int32_t device_type : {kDlCuda, kDlExtDev}) {
     void* original_stream = nullptr;
-    const int rc = TVMFFIEnvSetStream(device_type, device.index(), stream,
-                                      &original_stream);
+    const int rc = TVMFFIEnvSetStream(
+        device_type, device.index(), stream, &original_stream);
     if (rc != 0) {
       LOG(WARNING) << "[tvmffi.stream] failed to set stream, rc=" << rc
                    << " dev_type=" << device_type << " dev=" << device.index();
@@ -827,4 +830,4 @@ ffi::Function get_function(const std::string& uri,
   func_cache.emplace(key, func);
   return func;
 }
-}
+}  // namespace xllm::kernel::cuda

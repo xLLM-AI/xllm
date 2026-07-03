@@ -13,7 +13,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-
 #include <glog/logging.h>
 
 #include <cstdint>
@@ -28,44 +27,37 @@ namespace xllm::kernel::cuda {
 
 namespace {
 
-
 constexpr const char* kFa3MetadataUri =
     "fmha_get_metadata_6x1_ragged_q_padded_k_causal_packgqa";
 
 constexpr int32_t kFa3TileM = 32;
 constexpr int32_t kFa3TileN = 64;
 
-
 constexpr const char* kFa3FwdUriHash =
     "9e4f4b2e6574a7a45a93fef39cf9b0485651e39052d9dfd88c2e1439137a9374";
 
-std::string fa3_fwd_uri() {
-  return std::string("fmha_fwd_") + kFa3FwdUriHash;
-}
+std::string fa3_fwd_uri() { return std::string("fmha_fwd_") + kFa3FwdUriHash; }
 
 ffi::Optional<ffi::Tensor> none_tensor() {
   return ffi::Optional<ffi::Tensor>();
 }
 
-ffi::Optional<int64_t> none_int() {
-  return ffi::Optional<int64_t>();
-}
+ffi::Optional<int64_t> none_int() { return ffi::Optional<int64_t>(); }
 
-}
+}  // namespace
 
-torch::Tensor fa3_decode_scheduler_metadata(
-    const torch::Device& device,
-    int32_t batch_size,
-    int32_t num_heads_q,
-    int32_t num_heads_kv,
-    int32_t head_dim_qk,
-    int32_t head_dim_vo,
-    int32_t max_seqlen_q,
-    int32_t max_seqlen_k,
-    int32_t window_size_left,
-    int32_t window_size_right,
-    const torch::Tensor& cu_seqlens_q,
-    const torch::Tensor& seqused_k) {
+torch::Tensor fa3_decode_scheduler_metadata(const torch::Device& device,
+                                            int32_t batch_size,
+                                            int32_t num_heads_q,
+                                            int32_t num_heads_kv,
+                                            int32_t head_dim_qk,
+                                            int32_t head_dim_vo,
+                                            int32_t max_seqlen_q,
+                                            int32_t max_seqlen_k,
+                                            int32_t window_size_left,
+                                            int32_t window_size_right,
+                                            const torch::Tensor& cu_seqlens_q,
+                                            const torch::Tensor& seqused_k) {
   CHECK_GT(batch_size, 0);
   CHECK(cu_seqlens_q.defined() && cu_seqlens_q.scalar_type() == torch::kInt32);
   CHECK(seqused_k.defined() && seqused_k.scalar_type() == torch::kInt32);
@@ -85,31 +77,30 @@ torch::Tensor fa3_decode_scheduler_metadata(
 
   const std::string uri = kFa3MetadataUri;
 
-  get_function(uri, uri)(
-      static_cast<int64_t>(batch_size),
-      static_cast<int64_t>(num_heads_q),
-      static_cast<int64_t>(num_heads_kv),
-      static_cast<int64_t>(head_dim_qk),
-      static_cast<int64_t>(head_dim_vo),
-      static_cast<int64_t>(max_seqlen_q),
-      static_cast<int64_t>(max_seqlen_k),
-      /*max_seqlen_k_new=*/static_cast<int64_t>(0),
-      to_ffi_tensor(cu_seqlens_q),
-      ffi::Optional<ffi::Tensor>(),
-      ffi::Optional<ffi::Tensor>(),
-      to_ffi_tensor(seqused_k),
-      ffi::Optional<ffi::Tensor>(),
-      static_cast<int64_t>(window_size_left),
-      static_cast<int64_t>(window_size_right),
-      ffi::Optional<ffi::Tensor>(),
-      to_ffi_tensor(num_splits_dynamic),
-      to_ffi_tensor(batch_table),
-      to_ffi_tensor(num_m_blocks),
-      to_ffi_tensor(num_nheads_in_l2),
-      /*num_splits=*/static_cast<int64_t>(1),
-      static_cast<int64_t>(kFa3TileM),
-      static_cast<int64_t>(kFa3TileN),
-      /*mp_margin=*/static_cast<int64_t>(0));
+  get_function(uri, uri)(static_cast<int64_t>(batch_size),
+                         static_cast<int64_t>(num_heads_q),
+                         static_cast<int64_t>(num_heads_kv),
+                         static_cast<int64_t>(head_dim_qk),
+                         static_cast<int64_t>(head_dim_vo),
+                         static_cast<int64_t>(max_seqlen_q),
+                         static_cast<int64_t>(max_seqlen_k),
+                         /*max_seqlen_k_new=*/static_cast<int64_t>(0),
+                         to_ffi_tensor(cu_seqlens_q),
+                         ffi::Optional<ffi::Tensor>(),
+                         ffi::Optional<ffi::Tensor>(),
+                         to_ffi_tensor(seqused_k),
+                         ffi::Optional<ffi::Tensor>(),
+                         static_cast<int64_t>(window_size_left),
+                         static_cast<int64_t>(window_size_right),
+                         ffi::Optional<ffi::Tensor>(),
+                         to_ffi_tensor(num_splits_dynamic),
+                         to_ffi_tensor(batch_table),
+                         to_ffi_tensor(num_m_blocks),
+                         to_ffi_tensor(num_nheads_in_l2),
+                         /*num_splits=*/static_cast<int64_t>(1),
+                         static_cast<int64_t>(kFa3TileM),
+                         static_cast<int64_t>(kFa3TileN),
+                         /*mp_margin=*/static_cast<int64_t>(0));
 
   return metadata;
 }
@@ -137,52 +128,50 @@ void fa3_decode(const torch::Tensor& query,
   MusaTvmffiStreamGuard stream_guard(query.device());
 
   const int64_t b = scheduler_metadata.numel() / 4;
-  CHECK_GT(b, 0)
-      << "fa3_decode: scheduler_metadata size must be 4*batch_size";
+  CHECK_GT(b, 0) << "fa3_decode: scheduler_metadata size must be 4*batch_size";
   auto num_splits_dynamic = scheduler_metadata.slice(0, 0, b);
   auto batch_table = scheduler_metadata.slice(0, b, 2 * b);
   auto num_m_blocks = scheduler_metadata.slice(0, 2 * b, 3 * b);
 
-  get_function(uri, uri)(
-      to_ffi_tensor(query),
-      to_ffi_tensor(k_cache),
-      to_ffi_tensor(v_cache),
-      none_tensor(),
-      none_tensor(),
-      none_tensor(),
-      to_ffi_tensor(cu_seqlens_q),
-      none_tensor(),
-      none_tensor(),
-      none_tensor(),
-      to_ffi_tensor(seqused_k),
-      ffi::Optional<int64_t>(max_seqlen_q),
-      none_int(),
-      to_ffi_tensor(page_table),
-      none_tensor(),
-      none_tensor(),
-      none_tensor(),
-      none_tensor(),
-      none_tensor(),
-      none_tensor(),
-      none_tensor(),
-      none_tensor(),
-      sm_scale,
-      /*is_causal=*/true,
-      window_left,
-      window_right,
-      /*attention_chunk=*/static_cast<int64_t>(0),
-      /*softcap=*/0.0,
-      /*mp_margin=*/static_cast<int64_t>(0),
-      /*num_splits=*/static_cast<int64_t>(0),
-      to_ffi_tensor(num_splits_dynamic),
-      to_ffi_tensor(batch_table),
-      to_ffi_tensor(num_m_blocks),
-      none_tensor(),
-      to_ffi_tensor(output),
-      to_ffi_tensor(output_lse),
-      /*cp_world_size=*/static_cast<int64_t>(1),
-      /*cp_rank=*/static_cast<int64_t>(0),
-      none_tensor());
+  get_function(uri, uri)(to_ffi_tensor(query),
+                         to_ffi_tensor(k_cache),
+                         to_ffi_tensor(v_cache),
+                         none_tensor(),
+                         none_tensor(),
+                         none_tensor(),
+                         to_ffi_tensor(cu_seqlens_q),
+                         none_tensor(),
+                         none_tensor(),
+                         none_tensor(),
+                         to_ffi_tensor(seqused_k),
+                         ffi::Optional<int64_t>(max_seqlen_q),
+                         none_int(),
+                         to_ffi_tensor(page_table),
+                         none_tensor(),
+                         none_tensor(),
+                         none_tensor(),
+                         none_tensor(),
+                         none_tensor(),
+                         none_tensor(),
+                         none_tensor(),
+                         none_tensor(),
+                         sm_scale,
+                         /*is_causal=*/true,
+                         window_left,
+                         window_right,
+                         /*attention_chunk=*/static_cast<int64_t>(0),
+                         /*softcap=*/0.0,
+                         /*mp_margin=*/static_cast<int64_t>(0),
+                         /*num_splits=*/static_cast<int64_t>(0),
+                         to_ffi_tensor(num_splits_dynamic),
+                         to_ffi_tensor(batch_table),
+                         to_ffi_tensor(num_m_blocks),
+                         none_tensor(),
+                         to_ffi_tensor(output),
+                         to_ffi_tensor(output_lse),
+                         /*cp_world_size=*/static_cast<int64_t>(1),
+                         /*cp_rank=*/static_cast<int64_t>(0),
+                         none_tensor());
 }
 
 void batch_decode(const std::string& uri,
@@ -238,4 +227,4 @@ void batch_decode(const std::string& uri,
   }
 }
 
-}
+}  // namespace xllm::kernel::cuda

@@ -17,8 +17,8 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include "core/kernels/musa/attention_runner.h"
 #include "core/common/global_flags.h"
+#include "core/kernels/musa/attention_runner.h"
 #include "core/kernels/musa/piecewise_graphs.h"
 
 namespace xllm::runtime::cuda {
@@ -130,4 +130,4 @@ void GlobalCaptureInstance::register_attention_runner(
       << current_piecewise_graph_->num_runners();
 }
 
-}
+}  // namespace xllm::runtime::cuda

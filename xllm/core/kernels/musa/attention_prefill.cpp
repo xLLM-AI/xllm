@@ -13,7 +13,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-
 #include <glog/logging.h>
 
 #include <optional>
@@ -163,7 +162,7 @@ void batch_prefill_impl(const std::string& uri,
   }
 }
 
-}
+}  // namespace
 
 void batch_prefill(const std::string& uri,
                    ffi::Array<int64_t> plan_info,
@@ -297,4 +296,4 @@ void batch_chunked_prefill(const std::string& uri,
       /*token_pos_in_items_len=*/0);
 }
 
-}
+}  // namespace xllm::kernel::cuda

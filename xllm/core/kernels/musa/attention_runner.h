@@ -71,4 +71,4 @@ class AttentionRunner final {
   uint32_t padded_num_tokens_;
 };
 
-}
+}  // namespace xllm::kernel::cuda

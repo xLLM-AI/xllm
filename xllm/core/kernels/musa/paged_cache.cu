@@ -13,7 +13,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -24,24 +23,24 @@ limitations under the License.
 #include <cstdint>
 #include <type_traits>
 
+#include "core/kernels/cuda/device_utils.cuh"
 #include "core/kernels/musa/musa_ops_api.h"
 #include "core/kernels/musa/musa_tvmffi_stream.h"
-#include "core/kernels/cuda/device_utils.cuh"
 
 namespace xllm::kernel::cuda {
 
 template <typename T>
-__global__ void XLLM_KERNEL_ATTR(1024) reshape_paged_cache_kernel(
-    const int* __restrict__ slot_ids,
-    const T* __restrict__ keys,
-    const T* __restrict__ values,
-    T* __restrict__ key_cache,
-    T* __restrict__ value_cache,
-    int64_t k_stride,
-    int64_t v_stride,
-    int64_t n_kv_heads,
-    int64_t head_dim,
-    int64_t block_size) {
+__global__ void XLLM_KERNEL_ATTR(1024)
+    reshape_paged_cache_kernel(const int* __restrict__ slot_ids,
+                               const T* __restrict__ keys,
+                               const T* __restrict__ values,
+                               T* __restrict__ key_cache,
+                               T* __restrict__ value_cache,
+                               int64_t k_stride,
+                               int64_t v_stride,
+                               int64_t n_kv_heads,
+                               int64_t head_dim,
+                               int64_t block_size) {
   const int64_t bid = blockIdx.x;
   const int64_t slot_id = slot_ids[bid];
   if (slot_id < 0) {
@@ -61,12 +60,11 @@ __global__ void XLLM_KERNEL_ATTR(1024) reshape_paged_cache_kernel(
   }
 }
 
-void reshape_paged_cache(
-    torch::Tensor slot_ids,
-    torch::Tensor keys,
-    torch::Tensor values,
-    torch::Tensor key_cache,
-    torch::Tensor value_cache) {
+void reshape_paged_cache(torch::Tensor slot_ids,
+                         torch::Tensor keys,
+                         torch::Tensor values,
+                         torch::Tensor key_cache,
+                         torch::Tensor value_cache) {
   CHECK(keys.stride(-1) == 1 && keys.stride(-2) == keys.size(-1));
   CHECK(values.stride(-1) == 1 && values.stride(-2) == values.size(-1));
   const int64_t n_tokens = keys.size(-3);
@@ -189,7 +187,7 @@ __global__ void block_copy_kernel(const int64_t* __restrict__ key_cache_ptrs,
   }
 }
 
-}
+}  // namespace
 
 void block_copy(torch::Tensor key_cache_ptrs,
                 torch::Tensor value_cache_ptrs,
@@ -275,4 +273,4 @@ void block_copy(torch::Tensor key_cache_ptrs,
   });
 }
 
-}
+}  // namespace xllm::kernel::cuda

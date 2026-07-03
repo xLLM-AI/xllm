@@ -65,7 +65,7 @@ __global__ void llm_decode_metadata_update_kernel(
   }
 }
 
-}
+}  // namespace
 
 void update_llm_decode_metadata(const LlmDecodeMetadataUpdateParams& params,
                                 LlmDecodeMetadataUpdateStream stream) {
@@ -98,4 +98,4 @@ void update_llm_decode_metadata(const LlmDecodeMetadataUpdateParams& params,
       << cudaGetErrorString(error);
 }
 
-}
+}  // namespace xllm::kernel::cuda

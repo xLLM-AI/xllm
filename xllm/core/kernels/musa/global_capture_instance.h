@@ -39,9 +39,7 @@ class GlobalCaptureInstance final {
   void register_attention_runner(
       ::xllm::kernel::cuda::AttentionRunner&& runner);
 
-  bool is_capturing() const {
-    return is_capturing_;
-  }
+  bool is_capturing() const { return is_capturing_; }
   at::cuda::CUDAGraph* get_current_graph() { return current_graph_.get(); }
 
  private:
@@ -61,4 +59,4 @@ class GlobalCaptureInstance final {
   at::cuda::MempoolId_t graph_pool_;
   std::unique_lock<std::mutex> capture_lock_;
 };
-}
+}  // namespace xllm::runtime::cuda

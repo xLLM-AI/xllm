@@ -19,8 +19,8 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
-#include "core/kernels/musa/musa_ops_api.h"
 #include "core/kernels/musa/global_capture_instance.h"
+#include "core/kernels/musa/musa_ops_api.h"
 
 namespace xllm {
 namespace kernel {
@@ -42,7 +42,8 @@ void AttentionRunner::run_capture(
     torch::Tensor output,
     std::optional<torch::Tensor>& output_lse,
     uint32_t padded_num_tokens) {
-  // plan_info is supplied per replay via AttentionReplayParams; not stored here.
+  // plan_info is supplied per replay via AttentionReplayParams; not stored
+  // here.
   (void)plan_info;
 
   ::xllm::runtime::cuda::GlobalCaptureInstance::get_instance()
@@ -60,7 +61,6 @@ void AttentionRunner::run_capture(
   window_size_left_ = window_left;
   scale_ = sm_scale;
   padded_num_tokens_ = padded_num_tokens;
-
 
   ::xllm::runtime::cuda::GlobalCaptureInstance::get_instance()
       .temporarily_begin_graph();
@@ -154,6 +154,6 @@ void batch_prefill_with_optional_piecewise_capture(
                 output_lse);
 }
 
-}
-}
-}
+}  // namespace cuda
+}  // namespace kernel
+}  // namespace xllm

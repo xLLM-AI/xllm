@@ -155,7 +155,6 @@ ffi::Module get_module(const std::string& uri);
 ffi::Function get_function(const std::string& uri,
                            const std::string& func_name);
 
-
 enum class FfiAllocMode { kPassthrough, kRecord, kReplay };
 
 void begin_ffi_alloc_record();
@@ -169,4 +168,4 @@ void end_ffi_alloc_replay();
 FfiAllocMode get_ffi_alloc_mode();
 
 void bind_tvmffi_stream_to_current_torch_stream(const torch::Device& device);
-}
+}  // namespace xllm::kernel::cuda

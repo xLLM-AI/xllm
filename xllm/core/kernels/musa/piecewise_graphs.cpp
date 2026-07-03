@@ -62,4 +62,4 @@ void PiecewiseGraphs::replay(
       << "Not all runners were replayed";
 }
 
-}
+}  // namespace xllm::runtime::cuda

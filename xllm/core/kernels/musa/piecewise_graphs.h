@@ -48,4 +48,4 @@ class PiecewiseGraphs final {
   std::vector<InstructionType> instructions_;
 };
 
-}
+}  // namespace xllm::runtime::cuda

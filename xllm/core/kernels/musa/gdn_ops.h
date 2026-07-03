@@ -96,22 +96,20 @@ torch::Tensor mate_gated_delta_rule_decode(
 torch::Tensor fused_gated_delta_rule_decode(
     MateGatedDeltaRuleDecodeParams& params);
 
-torch::Tensor causal_conv1d(
-    const torch::Tensor& x,
-    const torch::Tensor& weight,
-    const torch::Tensor& conv_state,
-    const std::optional<torch::Tensor>& bias_opt,
-    const torch::IntArrayRef query_start_loc_opt,
-    const torch::IntArrayRef cache_indices_opt,
-    const torch::IntArrayRef initial_state_mode_opt,
-    const torch::IntArrayRef num_accepted_tokens_opt,
-    int64_t activation_mode,
-    int64_t pad_slot_id,
-    int64_t run_mode);
+torch::Tensor causal_conv1d(const torch::Tensor& x,
+                            const torch::Tensor& weight,
+                            const torch::Tensor& conv_state,
+                            const std::optional<torch::Tensor>& bias_opt,
+                            const torch::IntArrayRef query_start_loc_opt,
+                            const torch::IntArrayRef cache_indices_opt,
+                            const torch::IntArrayRef initial_state_mode_opt,
+                            const torch::IntArrayRef num_accepted_tokens_opt,
+                            int64_t activation_mode,
+                            int64_t pad_slot_id,
+                            int64_t run_mode);
 
 torch::Tensor fused_sigmoid_gating_delta_rule_update(
     FusedSigmoidGatingDeltaRuleUpdateParams& params);
-
 
 void causal_conv1d_decode_fused(const torch::Tensor& x,
                                 const torch::Tensor& weight,
@@ -128,6 +126,6 @@ void gated_rms_norm_fused(const torch::Tensor& x,
                           torch::Tensor output,
                           double eps);
 
-}
-}
-}
+}  // namespace cuda
+}  // namespace kernel
+}  // namespace xllm

@@ -13,9 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-
-#include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <torch/cuda.h>
@@ -28,7 +27,6 @@ limitations under the License.
 namespace xllm::kernel::cuda {
 
 namespace {
-
 
 template <typename T>
 struct __align__(16) Vec8Storage {
@@ -56,7 +54,7 @@ class __align__(16) Vec8 final {
 
   template <typename Offset>
   static __device__ __forceinline__ Vec8 load_byp_slc(const T* ptr,
-                                                       Offset idx) {
+                                                      Offset idx) {
 #if defined(__MUSA_ARCH__) && (__MUSA_ARCH__ == 310)
     uint4 raw;
     const T* addr = ptr + idx;
@@ -83,7 +81,6 @@ class __align__(32) Float8 final {
 
   __device__ __forceinline__ Float8() {}
 };
-
 
 template <typename T>
 __device__ __forceinline__ float gemma_to_float(T value) {
@@ -125,7 +122,6 @@ __device__ __forceinline__ void block_sync() {
   __syncthreads();
 #endif
 }
-
 
 __device__ __forceinline__ float block_sum(float value, float* warp_sums) {
   const int tid = static_cast<int>(threadIdx.x);
@@ -213,7 +209,6 @@ __device__ __forceinline__ float block_sum_4warps(float value,
   block_sync();
   return warp_sums[0];
 }
-
 
 template <typename T, bool GEMMA, bool CACHE>
 __global__ void __launch_bounds__(1024, 1)
@@ -342,16 +337,16 @@ __global__ void __launch_bounds__(256, 1)
 
 template <typename T, bool GEMMA>
 __global__ void rmsnorm_scalar_kernel(const T* __restrict__ input,
-                                       const T* __restrict__ weight,
-                                       T* __restrict__ out,
-                                       int rows,
-                                       int hidden,
-                                       int input_outer_dim,
-                                       int64_t input_outer_stride,
-                                       int64_t input_row_stride,
-                                       int64_t out_row_stride,
-                                       float inv_hidden,
-                                       float eps) {
+                                      const T* __restrict__ weight,
+                                      T* __restrict__ out,
+                                      int rows,
+                                      int hidden,
+                                      int input_outer_dim,
+                                      int64_t input_outer_stride,
+                                      int64_t input_row_stride,
+                                      int64_t out_row_stride,
+                                      float inv_hidden,
+                                      float eps) {
   extern __shared__ float warp_sums[];
   const int row = static_cast<int>(blockIdx.x);
   const int tid = static_cast<int>(threadIdx.x);
@@ -396,8 +391,7 @@ __global__ void __launch_bounds__(1024, 1)
   const int tid = static_cast<int>(threadIdx.x);
   const int vec_count = hidden / kVec;
   const int64_t input_base = static_cast<int64_t>(row) * input_row_stride;
-  const int64_t residual_base =
-      static_cast<int64_t>(row) * residual_row_stride;
+  const int64_t residual_base = static_cast<int64_t>(row) * residual_row_stride;
   float sum = 0.0f;
 
   for (int vec_idx = tid; vec_idx < vec_count;
@@ -415,8 +409,7 @@ __global__ void __launch_bounds__(1024, 1)
       residual_out.val.elem[i] = gemma_from_float<T>(value);
       sum_float.val.elem[i] = value;
     }
-    *reinterpret_cast<Vec8<T>*>(residual + residual_base + col) =
-        residual_out;
+    *reinterpret_cast<Vec8<T>*>(residual + residual_base + col) = residual_out;
     if constexpr (CACHE) {
       *reinterpret_cast<Float8*>(cached + col) = sum_float;
     }
@@ -452,28 +445,25 @@ __global__ void __launch_bounds__(1024, 1)
 }
 
 template <typename T, bool GEMMA>
-__global__ void fused_add_rmsnorm_scalar_kernel(
-    T* __restrict__ input,
-    T* __restrict__ residual,
-    const T* __restrict__ weight,
-    int rows,
-    int hidden,
-    int64_t input_row_stride,
-    int64_t residual_row_stride,
-    float inv_hidden,
-    float eps) {
+__global__ void fused_add_rmsnorm_scalar_kernel(T* __restrict__ input,
+                                                T* __restrict__ residual,
+                                                const T* __restrict__ weight,
+                                                int rows,
+                                                int hidden,
+                                                int64_t input_row_stride,
+                                                int64_t residual_row_stride,
+                                                float inv_hidden,
+                                                float eps) {
   extern __shared__ float warp_sums[];
   const int row = static_cast<int>(blockIdx.x);
   const int tid = static_cast<int>(threadIdx.x);
   const int64_t input_base = static_cast<int64_t>(row) * input_row_stride;
-  const int64_t residual_base =
-      static_cast<int64_t>(row) * residual_row_stride;
+  const int64_t residual_base = static_cast<int64_t>(row) * residual_row_stride;
   float sum = 0.0f;
 
   for (int col = tid; col < hidden; col += static_cast<int>(blockDim.x)) {
-    const float value =
-        gemma_to_float<T>(input[input_base + col]) +
-        gemma_to_float<T>(residual[residual_base + col]);
+    const float value = gemma_to_float<T>(input[input_base + col]) +
+                        gemma_to_float<T>(residual[residual_base + col]);
     residual[residual_base + col] = gemma_from_float<T>(value);
     sum += value * value;
   }
@@ -483,12 +473,11 @@ __global__ void fused_add_rmsnorm_scalar_kernel(
   for (int col = tid; col < hidden; col += static_cast<int>(blockDim.x)) {
     const float weight_value =
         gemma_to_float<T>(weight[col]) + (GEMMA ? 1.0f : 0.0f);
-    input[input_base + col] = gemma_from_float<T>(
-        gemma_to_float<T>(residual[residual_base + col]) * scale *
-        weight_value);
+    input[input_base + col] =
+        gemma_from_float<T>(gemma_to_float<T>(residual[residual_base + col]) *
+                            scale * weight_value);
   }
 }
-
 
 inline int vec8_block_threads(int hidden) {
   const int vec_count = hidden / 8;
@@ -675,8 +664,7 @@ void launch_fused_add_rmsnorm_gemma(T* input_ptr,
   }
 }
 
-}
-
+}  // namespace
 
 void gemma_rms_norm(torch::Tensor output,
                     torch::Tensor input,
@@ -688,19 +676,19 @@ void gemma_rms_norm(torch::Tensor output,
   CHECK(weight.is_contiguous());
   CHECK(input.stride(-1) == 1)
       << "gemma_rms_norm requires the last dim to be contiguous "
-         "(stride(-1)==1). Got strides=" << input.strides()
-      << ", sizes=" << input.sizes();
+         "(stride(-1)==1). Got strides="
+      << input.strides() << ", sizes=" << input.sizes();
   CHECK(input.dim() >= 2 && input.dim() <= 3)
       << "gemma_rms_norm supports 2D [rows, hidden] or 3D [outer, mid, "
-         "hidden] inputs only. Got sizes=" << input.sizes();
+         "hidden] inputs only. Got sizes="
+      << input.sizes();
 
   const int hidden = input.size(-1);
   const int rows = input.numel() / hidden;
   const int64_t input_row_stride = input.stride(-2);
   const int input_outer_dim =
       input.dim() == 3 ? static_cast<int>(input.size(-2)) : rows;
-  const int64_t input_outer_stride =
-      input.dim() == 3 ? input.stride(-3) : 0;
+  const int64_t input_outer_stride = input.dim() == 3 ? input.stride(-3) : 0;
   const int64_t out_row_stride = output.stride(-2);
   const float inv_hidden = 1.0f / static_cast<float>(hidden);
 
@@ -710,45 +698,37 @@ void gemma_rms_norm(torch::Tensor output,
   AT_DISPATCH_SWITCH(
       input.scalar_type(),
       "gemma_rms_norm",
-      AT_DISPATCH_CASE(torch::ScalarType::Half,
-                       [&] {
-                         launch_rmsnorm_gemma<__half>(
-                             reinterpret_cast<const __half*>(
-                                 input.data_ptr<c10::Half>()),
-                             reinterpret_cast<const __half*>(
-                                 weight.data_ptr<c10::Half>()),
-                             reinterpret_cast<__half*>(
-                                 output.data_ptr<c10::Half>()),
-                             rows,
-                             hidden,
-                             input_outer_dim,
-                             input_outer_stride,
-                             input_row_stride,
-                             out_row_stride,
-                             inv_hidden,
-                             static_cast<float>(eps),
-                             stream);
-                       })
-      AT_DISPATCH_CASE(torch::ScalarType::BFloat16,
-                       [&] {
-                         launch_rmsnorm_gemma<__nv_bfloat16>(
-                             reinterpret_cast<const __nv_bfloat16*>(
-                                 input.data_ptr<c10::BFloat16>()),
-                             reinterpret_cast<const __nv_bfloat16*>(
-                                 weight.data_ptr<c10::BFloat16>()),
-                             reinterpret_cast<__nv_bfloat16*>(
-                                 output.data_ptr<c10::BFloat16>()),
-                             rows,
-                             hidden,
-                             input_outer_dim,
-                             input_outer_stride,
-                             input_row_stride,
-                             out_row_stride,
-                             inv_hidden,
-                             static_cast<float>(eps),
-                             stream);
-                       })
-      AT_DISPATCH_CASE(torch::ScalarType::Float, [&] {
+      AT_DISPATCH_CASE(torch::ScalarType::Half, [&] {
+        launch_rmsnorm_gemma<__half>(
+            reinterpret_cast<const __half*>(input.data_ptr<c10::Half>()),
+            reinterpret_cast<const __half*>(weight.data_ptr<c10::Half>()),
+            reinterpret_cast<__half*>(output.data_ptr<c10::Half>()),
+            rows,
+            hidden,
+            input_outer_dim,
+            input_outer_stride,
+            input_row_stride,
+            out_row_stride,
+            inv_hidden,
+            static_cast<float>(eps),
+            stream);
+      }) AT_DISPATCH_CASE(torch::ScalarType::BFloat16, [&] {
+        launch_rmsnorm_gemma<__nv_bfloat16>(
+            reinterpret_cast<const __nv_bfloat16*>(
+                input.data_ptr<c10::BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(
+                weight.data_ptr<c10::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(output.data_ptr<c10::BFloat16>()),
+            rows,
+            hidden,
+            input_outer_dim,
+            input_outer_stride,
+            input_row_stride,
+            out_row_stride,
+            inv_hidden,
+            static_cast<float>(eps),
+            stream);
+      }) AT_DISPATCH_CASE(torch::ScalarType::Float, [&] {
         launch_rmsnorm_gemma<float>(input.data_ptr<float>(),
                                     weight.data_ptr<float>(),
                                     output.data_ptr<float>(),
@@ -775,8 +755,8 @@ void fused_add_gemma_rms_norm(torch::Tensor& input,
   CHECK(weight.is_contiguous());
   CHECK(input.is_contiguous())
       << "fused_add_gemma_rms_norm requires a contiguous `input` (in-place "
-         "write back). Got strides=" << input.strides()
-      << ", sizes=" << input.sizes();
+         "write back). Got strides="
+      << input.strides() << ", sizes=" << input.sizes();
 
   const int hidden = input.size(-1);
   const int64_t input_row_stride = input.stride(-2);
@@ -790,41 +770,33 @@ void fused_add_gemma_rms_norm(torch::Tensor& input,
   AT_DISPATCH_SWITCH(
       input.scalar_type(),
       "fused_add_gemma_rms_norm",
-      AT_DISPATCH_CASE(torch::ScalarType::Half,
-                       [&] {
-                         launch_fused_add_rmsnorm_gemma<__half>(
-                             reinterpret_cast<__half*>(
-                                 input.data_ptr<c10::Half>()),
-                             reinterpret_cast<__half*>(
-                                 residual.data_ptr<c10::Half>()),
-                             reinterpret_cast<const __half*>(
-                                 weight.data_ptr<c10::Half>()),
-                             rows,
-                             hidden,
-                             input_row_stride,
-                             residual_row_stride,
-                             inv_hidden,
-                             static_cast<float>(epsilon),
-                             stream);
-                       })
-      AT_DISPATCH_CASE(torch::ScalarType::BFloat16,
-                       [&] {
-                         launch_fused_add_rmsnorm_gemma<__nv_bfloat16>(
-                             reinterpret_cast<__nv_bfloat16*>(
-                                 input.data_ptr<c10::BFloat16>()),
-                             reinterpret_cast<__nv_bfloat16*>(
-                                 residual.data_ptr<c10::BFloat16>()),
-                             reinterpret_cast<const __nv_bfloat16*>(
-                                 weight.data_ptr<c10::BFloat16>()),
-                             rows,
-                             hidden,
-                             input_row_stride,
-                             residual_row_stride,
-                             inv_hidden,
-                             static_cast<float>(epsilon),
-                             stream);
-                       })
-      AT_DISPATCH_CASE(torch::ScalarType::Float, [&] {
+      AT_DISPATCH_CASE(torch::ScalarType::Half, [&] {
+        launch_fused_add_rmsnorm_gemma<__half>(
+            reinterpret_cast<__half*>(input.data_ptr<c10::Half>()),
+            reinterpret_cast<__half*>(residual.data_ptr<c10::Half>()),
+            reinterpret_cast<const __half*>(weight.data_ptr<c10::Half>()),
+            rows,
+            hidden,
+            input_row_stride,
+            residual_row_stride,
+            inv_hidden,
+            static_cast<float>(epsilon),
+            stream);
+      }) AT_DISPATCH_CASE(torch::ScalarType::BFloat16, [&] {
+        launch_fused_add_rmsnorm_gemma<__nv_bfloat16>(
+            reinterpret_cast<__nv_bfloat16*>(input.data_ptr<c10::BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(
+                residual.data_ptr<c10::BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(
+                weight.data_ptr<c10::BFloat16>()),
+            rows,
+            hidden,
+            input_row_stride,
+            residual_row_stride,
+            inv_hidden,
+            static_cast<float>(epsilon),
+            stream);
+      }) AT_DISPATCH_CASE(torch::ScalarType::Float, [&] {
         launch_fused_add_rmsnorm_gemma<float>(input.data_ptr<float>(),
                                               residual.data_ptr<float>(),
                                               weight.data_ptr<float>(),
@@ -839,4 +811,4 @@ void fused_add_gemma_rms_norm(torch::Tensor& input,
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-}
+}  // namespace xllm::kernel::cuda

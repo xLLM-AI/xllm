@@ -36,9 +36,9 @@ torch::Tensor random_sample(const torch::Tensor& probs) {
 
   auto cdf = p.cumsum(/*dim=*/-1);
 
-  auto u = torch::rand(
-      {batch_size, 1},
-      torch::TensorOptions().dtype(torch::kFloat32).device(device));
+  auto u =
+      torch::rand({batch_size, 1},
+                  torch::TensorOptions().dtype(torch::kFloat32).device(device));
   u = u * cdf.narrow(/*dim=*/-1, vocab_size - 1, 1);
 
   auto samples = torch::searchsorted(cdf, u).squeeze(-1).to(torch::kInt64);
@@ -50,4 +50,4 @@ torch::Tensor random_sample(const torch::Tensor& probs) {
   return samples.flatten();
 }
 
-}
+}  // namespace xllm::kernel::cuda
