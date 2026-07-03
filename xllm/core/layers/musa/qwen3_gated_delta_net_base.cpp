@@ -914,8 +914,8 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     // capturing".
     {
       const auto& x_in = conv1d_params.x;
-      const int64_t M = x_in.size(0);
-      const int64_t D = x_in.size(1);
+      const int64_t m = x_in.size(0);
+      const int64_t d = x_in.size(1);
       const bool needs =
           !conv1d_decode_out_buf_.defined() ||
           conv1d_decode_out_buf_.size(0) < M ||
