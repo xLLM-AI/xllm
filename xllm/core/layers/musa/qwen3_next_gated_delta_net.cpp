@@ -10,7 +10,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "qwen3_next_gated_delta_net.h"
+#include "layers/musa/qwen3_next_gated_delta_net.h"
 
 #include <glog/logging.h>
 
