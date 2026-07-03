@@ -79,6 +79,25 @@ PDChunkBudget pick_pd_chunk_budget(size_t kv_tokens,
   return budget;
 }
 
+size_t pd_prefill_remaining_blocks(size_t num_prompt_tokens,
+                                   size_t held_blocks,
+                                   size_t block_size) {
+  if (block_size == 0) {
+    return 0;
+  }
+  const size_t full_blocks = util::ceil_div(num_prompt_tokens, block_size);
+  if (full_blocks <= held_blocks) {
+    return 0;
+  }
+  return full_blocks - held_blocks;
+}
+
+bool pd_prefill_footprint_fits(size_t reserved_blocks,
+                               size_t request_full_blocks,
+                               size_t total_blocks) {
+  return reserved_blocks + request_full_blocks <= total_blocks;
+}
+
 DisaggPDChunkedPrefillScheduler::DisaggPDChunkedPrefillScheduler(
     Engine* engine,
     const Options& options)
@@ -144,7 +163,27 @@ void DisaggPDChunkedPrefillScheduler::schedule_waiting_prefill(
     RequestPriorityQueue& queue,
     size_t& remaining_token_budget,
     size_t& remaining_seq_budget,
+    size_t total_blocks,
+    size_t& reserved_blocks,
     std::vector<std::shared_ptr<Request>>& done) {
+  // Full-footprint admission. `reserved_blocks` (supplied by the caller and
+  // SHARED across the online and offline queues) is the complete footprint
+  // already reserved for the in-flight set plus fresh requests admitted earlier
+  // this step; `total_blocks` is the whole KV capacity. A fresh request starts
+  // only if the whole reserved set plus its own complete footprint fits total,
+  // which serializes near-capacity prompts and stops new starts from outrunning
+  // completions (the PD prefill hold-and-wait deadlock). In-flight requests
+  // (held>0, already reserved before this pass) always continue.
+  const size_t block_size =
+      static_cast<size_t>(kv_cache_manager_->block_size());
+
+  // Fresh requests that do not fit the reservation are held aside and re-pushed
+  // after the pass, rather than breaking the loop, so that lower-priority
+  // in-flight requests queued behind a blocked fresh request still get their
+  // chunk. Breaking instead would let a high-priority fresh request that never
+  // fits starve the in-flight set -- re-creating the deadlock.
+  std::vector<std::shared_ptr<Request>> deferred;
+
   while (!queue.empty() && remaining_token_budget > 0 &&
          remaining_seq_budget > 0) {
     std::shared_ptr<Request> request(queue.top());
@@ -159,11 +198,36 @@ void DisaggPDChunkedPrefillScheduler::schedule_waiting_prefill(
     if (!kv_cache_manager_->update_prefetch_result(
             request, options_.prefetch_timeout())) {
       queue.pop_top();
-      queue.push(request);
-      break;
+      deferred.emplace_back(request);
+      continue;
     }
 
     Sequence* sequence = request->sequences()[0].get();
+    const size_t held_blocks = sequence->kv_state().num_blocks(BlockType::KV);
+    // An already in-flight request (held>0) must continue: its footprint is
+    // already counted in reserved_blocks, and evicting its partial KV is a
+    // preemption decision made elsewhere.
+    const bool is_in_flight = held_blocks > 0;
+    // The sole fresh request in the whole system is admitted so that an
+    // oversized prompt (footprint > total) reaches the exceeds_block_capacity
+    // failure path below instead of being deferred forever.
+    const bool is_sole_fresh_request =
+        running_sequences_.empty() && deferred.empty() &&
+        (waiting_priority_queue_->size() +
+         waiting_priority_queue_offline_->size()) == 1;
+    // Complete footprint of the whole prompt, independent of how much is held.
+    const size_t full_blocks = pd_prefill_remaining_blocks(
+        sequence->num_prompt_tokens(), /*held_blocks=*/0, block_size);
+    // Every other fresh request starts only if the whole reserved set plus its
+    // complete footprint still fits total capacity.
+    if (!is_in_flight && !is_sole_fresh_request &&
+        !pd_prefill_footprint_fits(
+            reserved_blocks, full_blocks, total_blocks)) {
+      queue.pop_top();
+      deferred.emplace_back(request);
+      continue;
+    }
+
     size_t actual_tokens = 0;
     if (!alloc_chunk(sequence, remaining_token_budget, &actual_tokens)) {
       if (running_sequences_.empty() &&
@@ -177,10 +241,12 @@ void DisaggPDChunkedPrefillScheduler::schedule_waiting_prefill(
             {StatusCode::RESOURCE_EXHAUSTED,
              "No enough resource to schedule a single pd chunked prefill "
              "sequence"});
-      } else {
-        queue.pop_top();
-        queue.push(request);
+        continue;
       }
+      // Out of free blocks this step: stop allocating and keep this request for
+      // the next step along with everything still queued.
+      queue.pop_top();
+      deferred.emplace_back(request);
       break;
     }
 
@@ -190,11 +256,21 @@ void DisaggPDChunkedPrefillScheduler::schedule_waiting_prefill(
     running_sequences_budgets_.emplace_back(actual_tokens);
     remaining_token_budget -= actual_tokens;
     --remaining_seq_budget;
+    // Fresh requests newly reserve their full footprint. In-flight requests
+    // were already counted in reserved_blocks before this pass (in
+    // prepare_batch), so they must not be added again here.
+    if (!is_in_flight) {
+      reserved_blocks += full_blocks;
+    }
 
     const size_t kv_tokens = sequence->kv_cache_tokens_num();
     if (kv_tokens + actual_tokens >= sequence->num_prompt_tokens()) {
       last_step_prefill_ = true;
     }
+  }
+
+  for (auto& request : deferred) {
+    queue.push(request);
   }
 }
 
@@ -229,6 +305,14 @@ std::vector<Batch> DisaggPDChunkedPrefillScheduler::prepare_batch() {
     }
   }
 
+  // Reserve the complete footprint of every request that is still in flight
+  // (already prefilling, held>0). A fresh request may only start if the whole
+  // in-flight set plus its own full footprint still fits total capacity, so
+  // near-capacity prompts serialize instead of all starting and wedging.
+  const size_t reserve_block_size =
+      static_cast<size_t>(kv_cache_manager_->block_size());
+  size_t reserved_blocks = 0;
+
   std::vector<std::shared_ptr<Request>> done;
   for (auto it = running_requests_.rbegin(); it != running_requests_.rend();
        ++it) {
@@ -246,6 +330,12 @@ std::vector<Batch> DisaggPDChunkedPrefillScheduler::prepare_batch() {
     }
 
     if (running->is_chunked_prefill_stage()) {
+      if (!running->sequences().empty()) {
+        reserved_blocks += pd_prefill_remaining_blocks(
+            running->sequences()[0]->num_prompt_tokens(),
+            /*held_blocks=*/0,
+            reserve_block_size);
+      }
       if (running->offline()) {
         waiting_priority_queue_offline_->push(running);
       } else {
@@ -268,13 +358,24 @@ std::vector<Batch> DisaggPDChunkedPrefillScheduler::prepare_batch() {
   running_requests_.reserve(max_seq_budget);
   running_sequences_.reserve(max_seq_budget);
   running_sequences_budgets_.reserve(max_seq_budget);
+
+  // One reservation shared by both queues: `total_blocks` is the whole KV
+  // capacity and `reserved_blocks` (seeded above with the in-flight set)
+  // accumulates fresh admissions across both passes, so online and offline
+  // starts cannot each reserve the full capacity independently.
+  const size_t total_blocks =
+      static_cast<size_t>(kv_cache_manager_->num_blocks());
   schedule_waiting_prefill(*waiting_priority_queue_,
                            remaining_token_budget,
                            remaining_seq_budget,
+                           total_blocks,
+                           reserved_blocks,
                            done);
   schedule_waiting_prefill(*waiting_priority_queue_offline_,
                            remaining_token_budget,
                            remaining_seq_budget,
+                           total_blocks,
+                           reserved_blocks,
                            done);
 
   if (!done.empty()) {

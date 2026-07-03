@@ -148,7 +148,8 @@ class ScopedConfigValue final {
 
 DisaggPDChunkedPrefillScheduler::Options make_options(
     int32_t max_tokens_per_batch,
-    int32_t max_chunk) {
+    int32_t max_chunk,
+    int32_t max_seqs = 1) {
   DisaggPDChunkedPrefillScheduler::Options options;
   options.enable_pd_ooc(true)
       .enable_disagg_pd(true)
@@ -156,7 +157,7 @@ DisaggPDChunkedPrefillScheduler::Options make_options(
       .enable_schedule_overlap(false)
       .instance_role(InstanceRole::PREFILL)
       .max_tokens_per_batch(max_tokens_per_batch)
-      .max_seqs_per_batch(1)
+      .max_seqs_per_batch(max_seqs)
       .max_tokens_per_chunk_for_prefill(max_chunk)
       .dp_size(1);
   return options;
@@ -274,6 +275,99 @@ TEST(DisaggPDChunkedPrefillSchedulerTest, EmptyBudgetRejectsSchedule) {
   const PDChunkBudget budget = pick_pd_chunk_budget(32, 96, 40, 0);
   EXPECT_EQ(budget.next_tokens, 0);
   EXPECT_EQ(budget.max_tokens, 32);
+}
+
+// A fresh prefill sequence that holds no blocks yet reserves its whole prompt
+// footprint: ceil(num_prompt_tokens / block_size).
+TEST(DisaggPDChunkedPrefillSchedulerTest, RemainingBlocksReservesFullPrompt) {
+  EXPECT_EQ(pd_prefill_remaining_blocks(/*num_prompt_tokens=*/10,
+                                        /*held_blocks=*/0,
+                                        /*block_size=*/2),
+            5u);
+}
+
+// Blocks already held (which include prefix-cache-shared blocks) are excluded
+// from the reservation, so a request reusing a shared prefix reserves less.
+TEST(DisaggPDChunkedPrefillSchedulerTest, RemainingBlocksExcludesHeldPrefix) {
+  // Full prompt needs ceil(10/2)=5 blocks; 3 already held (e.g. shared prefix)
+  // -> only 2 fresh blocks still required.
+  EXPECT_EQ(pd_prefill_remaining_blocks(/*num_prompt_tokens=*/10,
+                                        /*held_blocks=*/3,
+                                        /*block_size=*/2),
+            2u);
+}
+
+// Once the prompt is fully covered by held blocks nothing more is reserved,
+// and a zero block_size (degenerate config) never reserves.
+TEST(DisaggPDChunkedPrefillSchedulerTest, RemainingBlocksSaturatesAtZero) {
+  EXPECT_EQ(pd_prefill_remaining_blocks(/*num_prompt_tokens=*/10,
+                                        /*held_blocks=*/5,
+                                        /*block_size=*/2),
+            0u);
+  EXPECT_EQ(pd_prefill_remaining_blocks(/*num_prompt_tokens=*/10,
+                                        /*held_blocks=*/8,
+                                        /*block_size=*/2),
+            0u);
+  EXPECT_EQ(pd_prefill_remaining_blocks(/*num_prompt_tokens=*/10,
+                                        /*held_blocks=*/0,
+                                        /*block_size=*/0),
+            0u);
+}
+
+// A fresh request whose complete footprint still fits total capacity on top of
+// the reserved set is admissible.
+TEST(DisaggPDChunkedPrefillSchedulerTest, FootprintFitsWithinCapacity) {
+  EXPECT_TRUE(pd_prefill_footprint_fits(/*reserved_blocks=*/3000,
+                                        /*request_full_blocks=*/4000,
+                                        /*total_blocks=*/8000));
+}
+
+// The check is inclusive: reserved + full exactly equal to total capacity still
+// fits (the started set precisely saturates the cache).
+TEST(DisaggPDChunkedPrefillSchedulerTest, FootprintFitsAtExactCapacity) {
+  EXPECT_TRUE(pd_prefill_footprint_fits(/*reserved_blocks=*/4000,
+                                        /*request_full_blocks=*/4000,
+                                        /*total_blocks=*/8000));
+}
+
+// A footprint that would push the reserved set past total capacity does not
+// fit. Reserving each started request's COMPLETE footprint against TOTAL (not
+// its shrinking remainder against free) is what serializes near-capacity
+// prompts and stops starts outrunning completions.
+TEST(DisaggPDChunkedPrefillSchedulerTest, FootprintDoesNotFitBeyondCapacity) {
+  EXPECT_FALSE(pd_prefill_footprint_fits(/*reserved_blocks=*/5000,
+                                         /*request_full_blocks=*/4000,
+                                         /*total_blocks=*/8000));
+}
+
+// The sole request in the system is admitted even when its own footprint
+// exceeds the whole cache -- the caller bypasses the footprint check for it, so
+// it makes progress (or fails cleanly via exceeds_block_capacity) instead of
+// being deferred forever. This pins the one load-bearing use of that bypass.
+TEST(DisaggPDChunkedPrefillSchedulerTest, AdmitsSoleRequestExceedingCapacity) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), true);
+  // 4 blocks -> 3 usable, block_size 2. A 20-token prompt needs ceil(20/2)=10
+  // blocks, far beyond capacity, so the footprint check alone would defer it.
+  FakeEngine engine(/*num_blocks=*/4, /*block_size=*/2);
+  BlockManagerPool* block_manager = engine.block_manager_pool();
+  DisaggPDChunkedPrefillScheduler scheduler(&engine,
+                                            make_options(
+                                                /*max_tokens_per_batch=*/2,
+                                                /*max_chunk=*/2));
+  std::shared_ptr<Request> request = make_request(
+      {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20});
+  ASSERT_TRUE(scheduler.ContinuousScheduler::add_request(request));
+
+  std::vector<Batch> batches = scheduler.prepare_batch_test();
+
+  // Admitted (making progress on its first chunk), not left waiting forever.
+  EXPECT_EQ(scheduler.get_running_requests().size(), 1u);
+  EXPECT_EQ(scheduler.get_waiting_requests().size(), 0u);
+
+  for (const auto& running : scheduler.get_running_requests()) {
+    block_manager->deallocate(running.get());
+  }
 }
 
 // Regression test: in disagg PD mode, expansion of best_of_n sequences must
@@ -435,6 +529,73 @@ TEST(DisaggPDChunkedPrefillSchedulerTest,
 
   block_manager->deallocate(request.get());
   release_prefix_cache(block_manager);
+}
+
+// Completion-invariant admission gate: when the KV cache can hold at most one
+// request's full prompt footprint, a second concurrent prefill request must be
+// deferred even though a single next-chunk block is still free for it. Without
+// the gate both are admitted, both grow toward their full prompt, and neither
+// can obtain its final chunk -> hold-and-wait deadlock (the PD prefill hang).
+TEST(DisaggPDChunkedPrefillSchedulerTest, DefersSecondWhenCacheHoldsOnlyOne) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), true);
+  // 9 blocks -> 8 data blocks free (block 0 is padding), block_size 2.
+  FakeEngine engine(/*num_blocks=*/9, /*block_size=*/2);
+  BlockManagerPool* block_manager = engine.block_manager_pool();
+  DisaggPDChunkedPrefillScheduler scheduler(&engine,
+                                            make_options(
+                                                /*max_tokens_per_batch=*/4,
+                                                /*max_chunk=*/2,
+                                                /*max_seqs=*/2));
+  // Each prompt needs ceil(10/2)=5 full-footprint blocks; two of them (10) do
+  // not fit in the 8 free blocks, but one does.
+  std::shared_ptr<Request> first =
+      make_request({1, 2, 3, 4, 5, 6, 7, 8, 9, 10});
+  std::shared_ptr<Request> second =
+      make_request({11, 12, 13, 14, 15, 16, 17, 18, 19, 20});
+  ASSERT_TRUE(scheduler.ContinuousScheduler::add_request(first));
+  ASSERT_TRUE(scheduler.ContinuousScheduler::add_request(second));
+
+  std::vector<Batch> batches = scheduler.prepare_batch_test();
+
+  ASSERT_EQ(batches.size(), 1u);
+  ASSERT_EQ(batches[0].size(), 1u);
+  EXPECT_EQ(scheduler.get_running_requests().size(), 1u);
+  EXPECT_EQ(scheduler.get_waiting_requests().size(), 1u);
+
+  for (const auto& running : scheduler.get_running_requests()) {
+    block_manager->deallocate(running.get());
+  }
+}
+
+// The gate must not over-throttle: when the KV cache can hold both requests'
+// full footprints, both are admitted in the same step.
+TEST(DisaggPDChunkedPrefillSchedulerTest, AdmitsBothWhenCacheHoldsBoth) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), true);
+  // 17 blocks -> 16 data blocks free, block_size 2.
+  FakeEngine engine(/*num_blocks=*/17, /*block_size=*/2);
+  BlockManagerPool* block_manager = engine.block_manager_pool();
+  DisaggPDChunkedPrefillScheduler scheduler(&engine,
+                                            make_options(
+                                                /*max_tokens_per_batch=*/8,
+                                                /*max_chunk=*/4,
+                                                /*max_seqs=*/2));
+  // Each prompt needs ceil(4/2)=2 full-footprint blocks; both (4) fit in 16.
+  std::shared_ptr<Request> first = make_request({1, 2, 3, 4});
+  std::shared_ptr<Request> second = make_request({5, 6, 7, 8});
+  ASSERT_TRUE(scheduler.ContinuousScheduler::add_request(first));
+  ASSERT_TRUE(scheduler.ContinuousScheduler::add_request(second));
+
+  std::vector<Batch> batches = scheduler.prepare_batch_test();
+
+  ASSERT_EQ(batches.size(), 1u);
+  EXPECT_EQ(scheduler.get_running_requests().size(), 2u);
+  EXPECT_EQ(scheduler.get_waiting_requests().size(), 0u);
+
+  for (const auto& running : scheduler.get_running_requests()) {
+    block_manager->deallocate(running.get());
+  }
 }
 
 TEST(DisaggPDChunkedPrefillSchedulerTest, FullPrefixHitStillSchedulesStep) {
