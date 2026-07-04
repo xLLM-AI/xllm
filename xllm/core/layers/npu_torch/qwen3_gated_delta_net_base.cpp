@@ -848,13 +848,16 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     double scale = 1.0 / std::sqrt(static_cast<float>(processed_q.size(-1)));
     if (fla_ssm_state_layout) {
       xllm::kernel::FusedSigmoidGatingDeltaRuleUpdateParams params;
-      params.A_log = A_log_.contiguous();
-      params.a = a.contiguous();
-      params.dt_bias = dt_bias_.contiguous();
-      params.q = processed_q.contiguous();
-      params.k = processed_k.contiguous();
-      params.v = processed_v.contiguous();
-      params.b = b.contiguous();
+      params.A_log = A_log_;
+      params.a = a.reshape({-1, a.size(-1)});
+      params.dt_bias = dt_bias_;
+      params.q =
+          processed_q.reshape({-1, processed_q.size(-2), processed_q.size(-1)});
+      params.k =
+          processed_k.reshape({-1, processed_k.size(-2), processed_k.size(-1)});
+      params.v =
+          processed_v.reshape({-1, processed_v.size(-2), processed_v.size(-1)});
+      params.b = b.reshape({-1, b.size(-1)});
       params.initial_state_source = ssm_cache;
       params.initial_state_indices = linear_state_base_indices.contiguous();
       params.cu_seqlens = attn_metadata.q_cu_seq_lens.contiguous();

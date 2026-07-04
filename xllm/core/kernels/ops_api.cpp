@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "ops_api.h"
 
+#include <tuple>
+
 #if defined(USE_MLU)
 #include "mlu/mlu_ops_api.h"
 #elif defined(USE_NPU)
@@ -1278,7 +1280,7 @@ torch::Tensor hc_pre_inv_rms(HcPreInvRmsParams& params) {
 torch::Tensor fused_sigmoid_gating_delta_rule_update(
     FusedSigmoidGatingDeltaRuleUpdateParams& params) {
 #if defined(USE_NPU)
-  return npu::npu_fused_sigmoid_gating_delta_rule_update(
+  auto result = npu::tilelang::fused_sigmoid_gating_delta_rule(
       params.A_log,
       params.a,
       params.dt_bias,
@@ -1293,6 +1295,7 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
       params.use_qk_l2norm_in_kernel,
       params.softplus_beta,
       params.softplus_threshold);
+  return std::get<0>(result);
 #else
   NOT_IMPLEMENTED();
 #endif
