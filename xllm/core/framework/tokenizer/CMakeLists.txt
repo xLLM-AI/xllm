@@ -12,6 +12,7 @@ cc_library(
     tiktoken_tokenizer.h
     sentencepiece_tokenizer.h
     fast_tokenizer.h
+    rwkv_tokenizer.h
     tokenizer_proxy.h
     rec_tokenizer.h
   SRCS
@@ -19,6 +20,7 @@ cc_library(
     tiktoken_tokenizer.cpp
     sentencepiece_tokenizer.cpp
     fast_tokenizer.cpp
+    rwkv_tokenizer.cpp
     tokenizer_proxy.cpp
     rec_tokenizer.cpp
   DEPS
