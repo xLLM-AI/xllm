@@ -31,6 +31,12 @@ DEFINE_string(
     "Choose the backend model type. 'llm' for text-only, "
     "'vlm' for multimodal (text and images), 'dit' for diffusion models.");
 
+DEFINE_string(model_impl,
+              "",
+              "Model executor implementation. Empty/'native' uses the built-in "
+              "C++ model; 'python' runs the graph via the embedded Python "
+              "interpreter (xllm_models package).");
+
 DEFINE_string(task,
               "generate",
               "The task to use the model for(e.g. generate, embed, mm_embed).");

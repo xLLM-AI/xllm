@@ -24,6 +24,9 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/kernel_config.h"
 #include "models.h"
+#if defined(USE_CUDA)
+#include "py_causal_lm.h"
+#endif
 
 namespace {
 
@@ -332,6 +335,19 @@ std::string ModelRegistry::get_model_backend(const std::string& name) {
 }
 
 std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
+  // Python model executor: build the graph via the embedded interpreter instead
+  // of resolving a C++ model class from the registry.
+#if defined(USE_CUDA)
+  if (FLAGS_model_impl == "python" || FLAGS_model_impl == "py") {
+    return std::make_unique<PyCausalLM>(context);
+  }
+#else
+  if (FLAGS_model_impl == "python" || FLAGS_model_impl == "py") {
+    LOG(ERROR) << "--model_impl=python is only supported on CUDA builds.";
+    return nullptr;
+  }
+#endif
+
   std::string resolved_name;
   std::string error_message;
   if (!resolve_model_registration_name(context.get_model_args().model_type(),

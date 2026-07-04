@@ -37,6 +37,8 @@ DECLARE_string(model);
 
 DECLARE_string(backend);
 
+DECLARE_string(model_impl);
+
 DECLARE_string(task);
 
 DECLARE_string(devices);

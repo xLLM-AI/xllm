@@ -69,3 +69,18 @@ cc_test(
     glog::glog
 )
 target_link_libraries(fp8_quant_test PRIVATE brpc)
+
+cc_test(
+  NAME
+    xllm_ops_test
+  SRCS
+    xllm_ops_test.cpp
+  DEPS
+    :cuda_kernels
+    torch
+    GTest::gtest_main
+    glog::glog
+)
+# Embedded-interpreter test path: needs libtorch_python (THPVariable / at::Tensor
+# pybind caster) and libpython.
+target_link_libraries(xllm_ops_test PRIVATE torch_python Python::Python)
