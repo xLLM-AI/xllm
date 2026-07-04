@@ -21,6 +21,7 @@ limitations under the License.
 #include <torch/extension.h>
 
 #include <cmath>
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -239,13 +240,25 @@ ModelOutput PyCausalLM::forward(const torch::Tensor& tokens,
                                 const ModelInputParams& parameters) {
   torch::NoGradGuard no_grad;
 
-  // Build the paged-KV attention metadata once per forward (CUDA path mirrors
-  // the native qwen3 model), then expose it to the attention op via the
-  // thread-local forward context for the duration of the Python call.
-  layer::AttentionMetadata attn_metadata =
-      layer::AttentionMetadataBuilder::build(parameters, enable_mla_);
+  // Paged-KV attention metadata for this forward (CUDA path mirrors the native
+  // qwen3 model): reuse the executor-supplied metadata when present, otherwise
+  // build our own. In CUDA graph mode the CudaGraphExecutorImpl pre-builds a
+  // persistent, bucket-padded and flashinfer-planned AttentionMetadata into
+  // parameters.attn_metadata whose buffers keep fixed device addresses across
+  // capture and replay. It must be reused verbatim: rebuilding here would drop
+  // the flashinfer plan_info and the graph-mode row padding, and the rebuild's
+  // device work (flashinfer plan / q_cu_seq_lens.to(kCUDA)) is illegal while a
+  // stream is capturing. On the eager path parameters.attn_metadata is null and
+  // we build it as before.
+  std::shared_ptr<layer::AttentionMetadata> attn_metadata =
+      parameters.attn_metadata;
+  if (!attn_metadata) {
+    attn_metadata = std::make_shared<layer::AttentionMetadata>(
+        layer::AttentionMetadataBuilder::build(parameters, enable_mla_));
+  }
 
-  PyForwardContextGuard guard(&attn_metadata, &kv_caches, &attn_, tp_group_);
+  PyForwardContextGuard guard(
+      attn_metadata.get(), &kv_caches, &attn_, tp_group_);
 
   py::gil_scoped_acquire gil;
   py::object batch = forward_batch_cls_(py::arg("positions") = positions,
