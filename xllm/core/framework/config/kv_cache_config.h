@@ -44,7 +44,7 @@ class KVCacheConfig final {
         "KV CACHE OPTIONS",
         {"block_size",
          "max_cache_size",
-         "max_memory_utilization",
+         "kv_cache_memory_fraction",
          "kv_cache_dtype",
          "indexer_cache_dtype",
          "enable_prefix_cache",
@@ -60,7 +60,7 @@ class KVCacheConfig final {
 
   PROPERTY(int64_t, max_cache_size) = 0;
 
-  PROPERTY(double, max_memory_utilization) = 0.8;
+  PROPERTY(double, kv_cache_memory_fraction) = 0.9;
 
   PROPERTY(std::string, kv_cache_dtype) = "auto";
 

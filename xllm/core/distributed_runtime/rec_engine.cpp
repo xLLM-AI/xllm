@@ -141,7 +141,7 @@ bool RecEngine::init_model() {
 
 KVCacheCapacity RecEngine::estimate_kv_cache_capacity() {
   const int64_t max_cache_size = options_.max_cache_size();
-  const double max_memory_utilization = options_.max_memory_utilization();
+  const double kv_cache_memory_fraction = options_.kv_cache_memory_fraction();
 
   // compute kv cache slot size
   const int64_t dtype_size = torch::scalarTypeToTypeMeta(dtype_).itemsize();
@@ -178,7 +178,7 @@ KVCacheCapacity RecEngine::estimate_kv_cache_capacity() {
     LOG(INFO) << "OneRec uses minimal metadata kv cache, blocks: "
               << kv_cache_cap.n_blocks() << ", bytes: "
               << readable_size(kv_cache_cap.cache_size_in_bytes())
-              << ", max_memory_utilization: " << max_memory_utilization
+              << ", kv_cache_memory_fraction: " << kv_cache_memory_fraction
               << ", max_cache_size: " << readable_size(max_cache_size);
     return kv_cache_cap;
   }
@@ -186,7 +186,7 @@ KVCacheCapacity RecEngine::estimate_kv_cache_capacity() {
   int64_t cache_size_in_bytes = pipeline_->estimate_min_available_memory();
 
   // apply memory cap from config
-  if (max_memory_utilization < 1.0 || max_cache_size > 0) {
+  if (kv_cache_memory_fraction < 1.0 || max_cache_size > 0) {
     // Re-estimate with caps applied (pipeline returns raw available memory)
     // The caps are applied in estimate_min_available_memory
   }
@@ -296,8 +296,8 @@ bool RecEngine::LlmRecEnginePipeline::init_model_workers(
 
 int64_t RecEngine::LlmRecEnginePipeline::estimate_min_available_memory() {
   const int64_t max_cache_size = engine_.options_.max_cache_size();
-  const double max_memory_utilization =
-      engine_.options_.max_memory_utilization();
+  const double kv_cache_memory_fraction =
+      engine_.options_.kv_cache_memory_fraction();
 
   std::vector<folly::SemiFuture<std::tuple<int64_t, int64_t>>> futures;
   futures.reserve(engine_.worker_clients_.size());
@@ -316,12 +316,13 @@ int64_t RecEngine::LlmRecEnginePipeline::estimate_min_available_memory() {
     LOG(INFO) << "worker #" << i
               << ": available memory: " << readable_size(available_memory)
               << ", total memory: " << readable_size(total_memory)
-              << ". Using max_memory_utilization: " << max_memory_utilization
+              << ". Using kv_cache_memory_fraction: "
+              << kv_cache_memory_fraction
               << ", max_cache_size: " << readable_size(max_cache_size);
-    if (max_memory_utilization < 1.0) {
-      const int64_t buffer_memory =
-          total_memory * (1.0 - max_memory_utilization);
-      available_memory -= buffer_memory;
+    // KV budget = fraction of the memory that is FREE after weights are loaded.
+    if (kv_cache_memory_fraction < 1.0) {
+      available_memory =
+          static_cast<int64_t>(available_memory * kv_cache_memory_fraction);
     }
     if (max_cache_size > 0) {
       available_memory = std::min(available_memory, max_cache_size);
@@ -623,8 +624,8 @@ bool RecEngine::OneRecLocalEnginePipeline::init_model_workers(
 
 int64_t RecEngine::OneRecLocalEnginePipeline::estimate_min_available_memory() {
   const int64_t max_cache_size = engine_.options_.max_cache_size();
-  const double max_memory_utilization =
-      engine_.options_.max_memory_utilization();
+  const double kv_cache_memory_fraction =
+      engine_.options_.kv_cache_memory_fraction();
 
   std::vector<folly::SemiFuture<std::tuple<int64_t, int64_t>>> futures;
   futures.reserve(engine_.workers_.size());
@@ -643,12 +644,13 @@ int64_t RecEngine::OneRecLocalEnginePipeline::estimate_min_available_memory() {
     LOG(INFO) << "worker #" << i
               << ": available memory: " << readable_size(available_memory)
               << ", total memory: " << readable_size(total_memory)
-              << ". Using max_memory_utilization: " << max_memory_utilization
+              << ". Using kv_cache_memory_fraction: "
+              << kv_cache_memory_fraction
               << ", max_cache_size: " << readable_size(max_cache_size);
-    if (max_memory_utilization < 1.0) {
-      const int64_t buffer_memory =
-          total_memory * (1.0 - max_memory_utilization);
-      available_memory -= buffer_memory;
+    // KV budget = fraction of the memory that is FREE after weights are loaded.
+    if (kv_cache_memory_fraction < 1.0) {
+      available_memory =
+          static_cast<int64_t>(available_memory * kv_cache_memory_fraction);
     }
     if (max_cache_size > 0) {
       available_memory = std::min(available_memory, max_cache_size);
@@ -1075,8 +1077,8 @@ bool RecEngine::RecMultiRoundEnginePipeline::init_model_workers(
 int64_t
 RecEngine::RecMultiRoundEnginePipeline::estimate_min_available_memory() {
   const int64_t max_cache_size = engine_.options_.max_cache_size();
-  const double max_memory_utilization =
-      engine_.options_.max_memory_utilization();
+  const double kv_cache_memory_fraction =
+      engine_.options_.kv_cache_memory_fraction();
 
   std::vector<folly::SemiFuture<std::tuple<int64_t, int64_t>>> futures;
   futures.reserve(engine_.workers_.size());
@@ -1095,12 +1097,13 @@ RecEngine::RecMultiRoundEnginePipeline::estimate_min_available_memory() {
     LOG(INFO) << "worker #" << i
               << ": available memory: " << readable_size(available_memory)
               << ", total memory: " << readable_size(total_memory)
-              << ". Using max_memory_utilization: " << max_memory_utilization
+              << ". Using kv_cache_memory_fraction: "
+              << kv_cache_memory_fraction
               << ", max_cache_size: " << readable_size(max_cache_size);
-    if (max_memory_utilization < 1.0) {
-      const int64_t buffer_memory =
-          total_memory * (1.0 - max_memory_utilization);
-      available_memory -= buffer_memory;
+    // KV budget = fraction of the memory that is FREE after weights are loaded.
+    if (kv_cache_memory_fraction < 1.0) {
+      available_memory =
+          static_cast<int64_t>(available_memory * kv_cache_memory_fraction);
     }
     if (max_cache_size > 0) {
       available_memory = std::min(available_memory, max_cache_size);

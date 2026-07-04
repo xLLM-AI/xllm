@@ -56,7 +56,8 @@ class VLM:
         limit_image_per_prompt: int = 8,
         block_size: int = 128,
         max_cache_size: int = 0,
-        max_memory_utilization: float = 0.8,
+        kv_cache_memory_fraction: float = 0.9,
+        max_memory_utilization: Optional[float] = None,
         enable_prefix_cache: bool = True,
         max_encoder_cache_size: int = 0,
         max_tokens_per_batch: int = 10240,
@@ -114,7 +115,9 @@ class VLM:
         options.limit_image_per_prompt = limit_image_per_prompt
         options.block_size = block_size
         options.max_cache_size = max_cache_size
-        options.max_memory_utilization = max_memory_utilization
+        options.kv_cache_memory_fraction = utils._resolve_kv_cache_memory_fraction(
+            kv_cache_memory_fraction, max_memory_utilization
+        )
         options.enable_prefix_cache = enable_prefix_cache
         options.max_encoder_cache_size = max_encoder_cache_size
         options.max_tokens_per_batch = max_tokens_per_batch

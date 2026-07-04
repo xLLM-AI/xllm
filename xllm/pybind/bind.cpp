@@ -48,8 +48,11 @@ PYBIND11_MODULE(xllm_export, m) {
                      &Options::limit_image_per_prompt_)
       .def_readwrite("block_size", &Options::block_size_)
       .def_readwrite("max_cache_size", &Options::max_cache_size_)
+      .def_readwrite("kv_cache_memory_fraction",
+                     &Options::kv_cache_memory_fraction_)
+      // deprecated alias
       .def_readwrite("max_memory_utilization",
-                     &Options::max_memory_utilization_)
+                     &Options::kv_cache_memory_fraction_)
       .def_readwrite("enable_prefix_cache", &Options::enable_prefix_cache_)
       .def_readwrite("max_encoder_cache_size",
                      &Options::max_encoder_cache_size_)

@@ -13,12 +13,38 @@
 # limitations under the License.
 
 import json
+import logging
 import os
 import socket
 from typing import Dict, Optional, Tuple, Union
 
 import psutil
 import xllm_export
+
+
+def _resolve_kv_cache_memory_fraction(
+    kv_cache_memory_fraction: float,
+    max_memory_utilization: Optional[float],
+) -> float:
+    """Resolve the KV-cache memory budget fraction, honoring the deprecated
+    ``max_memory_utilization`` alias.
+
+    ``max_memory_utilization`` was renamed to ``kv_cache_memory_fraction`` and
+    its meaning changed to "fraction of free GPU memory (after loading weights)
+    used for the KV cache" (see ``kv_cache_config.cpp``). The old name is kept
+    as a deprecated alias: when set it overrides ``kv_cache_memory_fraction`` and
+    is reinterpreted under the new semantics, mirroring the C++ gflag alias
+    (which the offline pybind path would otherwise bypass).
+    """
+    if max_memory_utilization is not None:
+        logging.warning(
+            "`max_memory_utilization` is deprecated; use "
+            "`kv_cache_memory_fraction` instead. It now means the fraction of "
+            "free GPU memory (after loading weights) used for the KV cache, and "
+            "overrides `kv_cache_memory_fraction`."
+        )
+        return max_memory_utilization
+    return kv_cache_memory_fraction
 
 
 def terminate_process(pid: int, timeout: Union[int, float] = 30) -> None:

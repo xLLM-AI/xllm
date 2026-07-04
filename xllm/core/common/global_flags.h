@@ -50,6 +50,7 @@ DECLARE_string(mm_download_headers);
 // --- kvcache config ---
 DECLARE_int32(block_size);
 DECLARE_int64(max_cache_size);
+DECLARE_double(kv_cache_memory_fraction);
 DECLARE_double(max_memory_utilization);
 DECLARE_string(kv_cache_dtype);
 DECLARE_string(indexer_cache_dtype);

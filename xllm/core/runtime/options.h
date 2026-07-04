@@ -50,8 +50,9 @@ struct Options {
   // 0 means that cache size is caculated by available memory
   PROPERTY(int64_t, max_cache_size) = 0;
 
-  // maximum memory utilization allowed, default 0.9
-  PROPERTY(double, max_memory_utilization) = 0.9;
+  // fraction of free-after-weights GPU memory allocated to the KV cache,
+  // default 0.9
+  PROPERTY(double, kv_cache_memory_fraction) = 0.9;
 
   // enable prefix cache
   PROPERTY(bool, enable_prefix_cache) = true;

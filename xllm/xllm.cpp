@@ -126,7 +126,7 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .max_encoder_cache_size(model_config.max_encoder_cache_size())
       .block_size(kv_cache_config.block_size())
       .max_cache_size(kv_cache_config.max_cache_size())
-      .max_memory_utilization(kv_cache_config.max_memory_utilization())
+      .kv_cache_memory_fraction(kv_cache_config.kv_cache_memory_fraction())
       .enable_prefix_cache(kv_cache_config.enable_prefix_cache())
       .max_tokens_per_batch(scheduler_config.max_tokens_per_batch())
       .max_seqs_per_batch(scheduler_config.max_seqs_per_batch())
@@ -448,8 +448,9 @@ int run() {
 
     // Initialize PhyPagePool on all workers
     int64_t num_pages =
-        allocator.init_phy_page_pools(kv_cache_config.max_memory_utilization(),
-                                      kv_cache_config.max_cache_size());
+        allocator.init_phy_page_pools(
+            kv_cache_config.kv_cache_memory_fraction(),
+            kv_cache_config.max_cache_size());
     if (num_pages <= 0) {
       LOG(FATAL) << "Failed to initialize PhyPagePool";
     }
