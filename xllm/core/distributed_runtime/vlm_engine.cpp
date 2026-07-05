@@ -209,7 +209,7 @@ bool VLMEngine::init_model() {
 
 KVCacheCapacity VLMEngine::estimate_kv_cache_capacity() {
   const int64_t max_cache_size = options_.max_cache_size();
-  const double kv_cache_memory_fraction = options_.kv_cache_memory_fraction();
+  const double max_memory_utilization = options_.max_memory_utilization();
   const int64_t encoder_cache_reserved_bytes =
       options_.max_encoder_cache_size() * 1024 * 1024;
 
@@ -231,18 +231,18 @@ KVCacheCapacity VLMEngine::estimate_kv_cache_capacity() {
     LOG(INFO) << "worker #" << i
               << ": available memory: " << readable_size(available_memory)
               << ", total memory: " << readable_size(total_memory)
-              << ". Using kv_cache_memory_fraction: "
-              << kv_cache_memory_fraction
+              << ". Using max_memory_utilization: " << max_memory_utilization
               << ", max_cache_size: " << readable_size(max_cache_size)
               << ", encoder_cache_reserved: "
               << readable_size(encoder_cache_reserved_bytes);
     GAUGE_SET(weight_size_in_kilobytes,
               (total_memory - available_memory) / 1024);
     GAUGE_SET(total_memory_size_in_kilobytes, total_memory / 1024);
-    // KV budget = fraction of the memory that is FREE after weights are loaded.
-    if (kv_cache_memory_fraction < 1.0) {
-      available_memory =
-          static_cast<int64_t>(available_memory * kv_cache_memory_fraction);
+    // apply memory cap from config if it is set
+    if (max_memory_utilization < 1.0) {
+      const int64_t buffer_memory =
+          total_memory * (1.0 - max_memory_utilization);
+      available_memory -= buffer_memory;
     }
     if (max_cache_size > 0) {
       available_memory = std::min(available_memory, max_cache_size);

@@ -143,7 +143,7 @@ class XTensorAllocator {
                                      int32_t dp_size);
 
   // Initialize PhyPagePool on all workers
-  int64_t init_phy_page_pools(double kv_cache_memory_fraction = 0.9,
+  int64_t init_phy_page_pools(double max_memory_utilization = 0.9,
                               int64_t max_cache_size = 0);
 
   // ============== Model Parallel Strategy ==============

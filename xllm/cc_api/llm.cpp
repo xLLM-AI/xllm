@@ -80,7 +80,7 @@ bool LLM::Initialize(const std::string& model_path,
         .backend("llm")
         .block_size(init_options.block_size)
         .max_cache_size(init_options.max_cache_size)
-        .kv_cache_memory_fraction(init_options.max_memory_utilization)
+        .max_memory_utilization(init_options.max_memory_utilization)
         .enable_prefix_cache(init_options.enable_prefix_cache)
         .max_tokens_per_batch(init_options.max_tokens_per_batch)
         .max_seqs_per_batch(init_options.max_seqs_per_batch)

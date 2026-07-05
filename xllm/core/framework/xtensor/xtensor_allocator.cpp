@@ -183,7 +183,7 @@ void XTensorAllocator::setup_multi_node_xtensor_dist(
   }
 }
 
-int64_t XTensorAllocator::init_phy_page_pools(double kv_cache_memory_fraction,
+int64_t XTensorAllocator::init_phy_page_pools(double max_memory_utilization,
                                               int64_t max_cache_size) {
   if (world_size_ <= 1) {
     // Single process single GPU, initialize locally
@@ -194,9 +194,10 @@ int64_t XTensorAllocator::init_phy_page_pools(double kv_cache_memory_fraction,
     const auto total_memory = device.total_memory();
 
     int64_t cache_size = available_memory;
-    // KV budget = fraction of the memory that is FREE after weights are loaded.
-    if (kv_cache_memory_fraction < 1.0) {
-      cache_size = static_cast<int64_t>(cache_size * kv_cache_memory_fraction);
+    if (max_memory_utilization < 1.0) {
+      const int64_t buffer_memory =
+          total_memory * (1.0 - max_memory_utilization);
+      cache_size -= buffer_memory;
     }
     if (max_cache_size > 0) {
       cache_size = std::min(cache_size, max_cache_size);
@@ -253,9 +254,10 @@ int64_t XTensorAllocator::init_phy_page_pools(double kv_cache_memory_fraction,
 
   // Step 2: Calculate num_pages based on min available memory
   int64_t cache_size = min_available_memory;
-  // KV budget = fraction of the memory that is FREE after weights are loaded.
-  if (kv_cache_memory_fraction < 1.0) {
-    cache_size = static_cast<int64_t>(cache_size * kv_cache_memory_fraction);
+  if (max_memory_utilization < 1.0) {
+    const int64_t buffer_memory =
+        min_total_memory * (1.0 - max_memory_utilization);
+    cache_size -= buffer_memory;
   }
   if (max_cache_size > 0) {
     cache_size = std::min(cache_size, max_cache_size);

@@ -87,7 +87,7 @@ XLLM_CAPI_EXPORT bool xllm_llm_initialize(
         .backend("llm")
         .block_size(xllm_init_options.block_size)
         .max_cache_size(xllm_init_options.max_cache_size)
-        .kv_cache_memory_fraction(xllm_init_options.max_memory_utilization)
+        .max_memory_utilization(xllm_init_options.max_memory_utilization)
         .enable_prefix_cache(xllm_init_options.enable_prefix_cache)
         .max_tokens_per_batch(xllm_init_options.max_tokens_per_batch)
         .max_seqs_per_batch(xllm_init_options.max_seqs_per_batch)

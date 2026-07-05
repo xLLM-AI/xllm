@@ -153,7 +153,7 @@ TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
   scheduler_config.from_json(json);
 
   EXPECT_EQ(kv_cache_config.block_size(), 16);
-  EXPECT_DOUBLE_EQ(kv_cache_config.kv_cache_memory_fraction(), 0.5);
+  EXPECT_DOUBLE_EQ(kv_cache_config.max_memory_utilization(), 0.5);
   EXPECT_FALSE(kv_cache_config.enable_prefix_cache());
   EXPECT_EQ(scheduler_config.max_tokens_per_batch(), 8192);
   EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 64);
@@ -233,7 +233,7 @@ TEST(ConfigJsonTest, LoadJsonFileReadsConfigFixture) {
 
   EXPECT_EQ(kv_cache_config.block_size(), 24);
   EXPECT_EQ(kv_cache_config.max_cache_size(), 1048576);
-  EXPECT_DOUBLE_EQ(kv_cache_config.kv_cache_memory_fraction(), 0.65);
+  EXPECT_DOUBLE_EQ(kv_cache_config.max_memory_utilization(), 0.65);
   EXPECT_EQ(kv_cache_config.kv_cache_dtype(), "int8");
   EXPECT_EQ(kv_cache_config.indexer_cache_dtype(), "int8");
   EXPECT_FALSE(kv_cache_config.enable_prefix_cache());
@@ -335,7 +335,7 @@ TEST(ConfigJsonTest, MissingJsonFileKeepsFlagDefaults) {
   scheduler_config.initialize();
 
   EXPECT_EQ(kv_cache_config.block_size(), 128);
-  EXPECT_DOUBLE_EQ(kv_cache_config.kv_cache_memory_fraction(), 0.9);
+  EXPECT_DOUBLE_EQ(kv_cache_config.max_memory_utilization(), 0.8);
   EXPECT_EQ(scheduler_config.max_tokens_per_batch(), 10240);
   EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 1024);
 }

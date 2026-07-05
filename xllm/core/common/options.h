@@ -55,12 +55,11 @@ class Options {
   PROPERTY(int32_t, block_size) = 128;
 
   // the maximum cache size in bytes, default is 0 which means cache size is
-  // caculated by free-after-weights available memory * kv_cache_memory_fraction
+  // caculated by available memory * max_memory_utilization
   PROPERTY(int64_t, max_cache_size) = 0;
 
-  // fraction of free-after-weights GPU memory allocated to the KV cache,
-  // default 0.9
-  PROPERTY(double, kv_cache_memory_fraction) = 0.9;
+  // maximum memory utilization allowed, default 0.9
+  PROPERTY(double, max_memory_utilization) = 0.9;
 
   PROPERTY(bool, enable_prefix_cache) = true;
 

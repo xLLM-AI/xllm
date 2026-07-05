@@ -29,20 +29,10 @@ DEFINE_int64(max_cache_size,
              "Max gpu memory size for kv cache. Default is 0, which means "
              "cache size is caculated by available memory.");
 
-DEFINE_double(kv_cache_memory_fraction,
-              0.9,
-              "Fraction of the GPU memory that remains FREE after model weights "
-              "are loaded to allocate to the KV cache (kv_cache_size = "
-              "free_after_weights * fraction). Robust on shared GPUs because it "
-              "is relative to actually-free memory, not total. Set 1.0 to use "
-              "all free memory.");
-
 DEFINE_double(max_memory_utilization,
-              -1.0,
-              "[DEPRECATED] Alias of --kv_cache_memory_fraction. If set (>=0) "
-              "it overrides kv_cache_memory_fraction with a warning. NOTE: "
-              "semantics changed — it is now the fraction of FREE-after-weights "
-              "memory for the KV cache, no longer a total-memory buffer.");
+              0.8,
+              "The fraction of GPU memory to be used for model inference, "
+              "including model weights and kv cache.");
 
 DEFINE_string(
     kv_cache_dtype,
@@ -90,17 +80,7 @@ namespace xllm {
 void KVCacheConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(block_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_cache_size);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_memory_fraction);
-  // Deprecated alias: --max_memory_utilization (default -1.0 = unset). If the
-  // user set it, honor it with a warning. Its meaning is now identical to
-  // kv_cache_memory_fraction (fraction of free-after-weights memory).
-  if (FLAGS_max_memory_utilization >= 0.0) {
-    LOG(WARNING) << "--max_memory_utilization is deprecated; use "
-                    "--kv_cache_memory_fraction. Treating the value as "
-                    "kv_cache_memory_fraction ("
-                 << FLAGS_max_memory_utilization << ").";
-    kv_cache_memory_fraction(FLAGS_max_memory_utilization);
-  }
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(max_memory_utilization);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(indexer_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_prefix_cache);
@@ -114,14 +94,7 @@ void KVCacheConfig::from_flags() {
 void KVCacheConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(block_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_cache_size);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_memory_fraction);
-  // Deprecated json alias
-  if (json.contains("max_memory_utilization")) {
-    LOG(WARNING) << "config key \"max_memory_utilization\" is deprecated; use "
-                    "\"kv_cache_memory_fraction\".";
-    kv_cache_memory_fraction(json.value_or<double>(
-        "max_memory_utilization", kv_cache_memory_fraction()));
-  }
+  XLLM_CONFIG_ASSIGN_FROM_JSON(max_memory_utilization);
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_JSON(indexer_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_prefix_cache);
@@ -140,7 +113,7 @@ void KVCacheConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, max_cache_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, kv_cache_memory_fraction);
+      config_json, default_config, max_memory_utilization);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, kv_cache_dtype);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
