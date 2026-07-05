@@ -73,15 +73,9 @@ DEFINE_string(tool_call_parser,
 DEFINE_bool(enable_qwen3_reranker, false, "Whether to enable qwen3 reranker.");
 
 DEFINE_int32(flashinfer_workspace_buffer_size,
-             512 * 1024 * 1024,
+             128 * 1024 * 1024,
              "The user reserved workspace buffer used to store intermediate "
-             "attention results in split-k algorithm for flashinfer. Sized to "
-             "cover the fa2 batch-prefill plan at the default "
-             "max_tokens_for_graph_mode (8192): fa2's split-k scratch for a "
-             "single long prefill exceeds the previous 128MB and aborts with "
-             "'Buffer overflow ... batch_prefill_tmp_s'. fa2 is the graph-mode "
-             "prefill backend (fa3/SM90 ragged prefill is unusable under "
-             "piecewise graph replay).");
+             "attention results in split-k algorithm for flashinfer.");
 
 DEFINE_bool(enable_return_mm_full_embeddings,
             false,

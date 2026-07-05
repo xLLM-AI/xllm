@@ -87,7 +87,7 @@ class ModelConfig final {
 
   PROPERTY(std::string, mm_download_headers) = "";
 
-  PROPERTY(int32_t, flashinfer_workspace_buffer_size) = 512 * 1024 * 1024;
+  PROPERTY(int32_t, flashinfer_workspace_buffer_size) = 128 * 1024 * 1024;
 
   PROPERTY(bool, use_audio_in_video) = false;
 
