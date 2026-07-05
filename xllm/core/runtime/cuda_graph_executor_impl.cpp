@@ -570,11 +570,12 @@ std::optional<ModelInputParams> CudaGraphPersistentParam::update(
 
   // Get dtype from k_cache
   const auto dtype = k_cache.scalar_type();
-  // Determine backend
-  const std::string backend = xllm::kernel::cuda::determine_attention_backend(
-      /*pos_encoding_mode=*/0,
-      /*use_fp16_qk_reduction=*/false,
-      /*use_custom_mask=*/false);
+  // Graph mode (capture/replay, including piecewise prefill) must use the
+  // graph-compatible "fa2" backend for ALL attention types. The fa3/SM90 ragged
+  // prefill kernel fails under piecewise graph replay (TMA descriptor illegal
+  // memory access), especially at TP>1; decode and chunked-prefill already pin
+  // "fa2" below for the same graph-compatibility reason.
+  const std::string backend = "fa2";
 
   bool use_tensor_core =
       xllm::kernel::cuda::should_use_tensor_core(dtype, n_heads, n_kv_heads);
@@ -1498,14 +1499,21 @@ ModelOutput CudaGraphExecutorImpl::run(const torch::Tensor& tokens,
     VLOG(kGraphExecutorLogVerboseLevel)
         << "CudaGraphExecutorImpl::run() in prefill piecewise capture mode";
 
+    // Piecewise prefill capture must NOT use the SharedVMMAllocator graph pool.
+    // That allocator is a monotonic bump allocator (no-op deallocate) that
+    // reuses physical memory across shapes by switching virtual address spaces
+    // -- sound for decode, which captures a single whole-forward graph per
+    // shape, but unsafe for piecewise prefill, which captures 29 GEMM
+    // sub-graphs interleaved with eager attention under one shape and needs
+    // every captured segment's memory to stay valid simultaneously across the
+    // repeated capture_begin/capture_end cycles on the shared pool. Under the
+    // VMM pool this corrupts captured-segment memory and SIGSEGVs inside
+    // cuGraphLaunch on replay (reproduced at tp>=2 and large buckets, identical
+    // for the cpp and python models). Use torch's standard private graph pool
+    // (graph_pool_), which reference-counts captured blocks correctly; decode
+    // keeps the VMM pool below where its single-graph capture is sound.
     TorchMemPool* pool_ptr = nullptr;
-    if (::xllm::ExecutionConfig::get_instance().enable_graph_vmm_pool()) {
-      reset_vmm_allocator_offset(kPhysicalPoolIdPrefill);
-      const uint32_t shape_id = bucket_num_tokens;
-      pool_ptr = get_or_create_vmm_mempool(kPhysicalPoolIdPrefill, shape_id);
-    }
-    const at::cuda::MempoolId_t mem_pool =
-        get_mem_pool(kPhysicalPoolIdPrefill, bucket_num_tokens);
+    const at::cuda::MempoolId_t mem_pool = graph_pool_;
 
     bool capture_success = graph->capture(model_,
                                           args_,

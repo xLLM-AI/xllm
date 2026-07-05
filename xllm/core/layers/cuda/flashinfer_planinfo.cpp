@@ -121,10 +121,13 @@ void update_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
   const int64_t batch_size = qo_indptr_host.size(0) - 1;
 
   auto plan_func = get_function(plan_info->uri, "plan");
-  // For sm90 architecture, the plan function doesn't accept
-  // fixed_split_size / disable_split_kv / num_colocated_ctas
+  // The fa3/SM90 ragged plan() omits fixed_split_size / disable_split_kv /
+  // num_colocated_ctas (16 args); fa2's plan() requires them (19 args). Branch
+  // on the actual backend, NOT the hardware: on SM90 we deliberately use fa2
+  // for graph-mode (piecewise) prefill, whose plan() still takes the 19-arg
+  // form.
   ffi::Array<int64_t> plan_result =
-      Platform::is_support_sm90a()
+      backend == "fa3"
           ? plan_func(float_workspace_buffer,
                       int_workspace_buffer,
                       page_locked_int_workspace_buffer,

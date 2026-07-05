@@ -90,11 +90,14 @@ void batch_prefill_impl(const std::string& uri,
     }
   }
 
-  bool use_custom_mask = processed_mask.has_value();
-  std::string backend =
-      determine_attention_backend(/*pos_encoding_mode=*/0,
-                                  /*use_fp16_qk_reduction=*/false,
-                                  use_custom_mask);
+  // Use the backend that plan() actually selected, encoded in `uri`
+  // (get_batch_prefill_uri appends "_sm90" only for fa3). Re-deriving the
+  // backend independently here can disagree with the plan under graph mode
+  // (which pins fa2), producing a kernel/plan mismatch and illegal memory
+  // access. `processed_mask` (custom mask) is only ever planned with fa2, so a
+  // fa3 uri never carries a mask.
+  const std::string backend =
+      uri.find("_sm90") != std::string::npos ? "fa3" : "fa2";
 
   if (backend == "fa2") {
     get_function(uri, "ragged_run")(
