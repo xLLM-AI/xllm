@@ -30,13 +30,12 @@ so the single-card parity path is byte-identical to the first version.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 
 from .. import ops
-from ..forward_batch import ForwardBatch
 from ..layers import (
     ColumnParallelLinear,
     HiddenParallelEmbedding,
@@ -44,7 +43,7 @@ from ..layers import (
     RotaryEmbedding,
     RowParallelLinear,
 )
-from ..model_runner import GraphRunner
+from .base import PyModelBase, ShardingPlan
 
 
 def _instr(tag: str, t: torch.Tensor) -> None:
@@ -326,13 +325,13 @@ class Qwen3Model(nn.Module):
         return hidden
 
 
-class Qwen3ForCausalLM(nn.Module):
+class Qwen3ForCausalLM(PyModelBase):
     """Top-level entry the C++ PyCausalLM drives."""
 
     def __init__(self, config: dict):
         super().__init__()
         self.cfg = Qwen3Config.from_dict(config)
-        dtype = _resolve_dtype(config.get("dtype") or config.get("torch_dtype"))
+        dtype = self.resolve_dtype(config.get("dtype") or config.get("torch_dtype"))
         device = torch.device(config.get("device", "cuda"))
         self.dtype = dtype
         self.device = device
@@ -352,40 +351,13 @@ class Qwen3ForCausalLM(nn.Module):
             dtype=dtype,
             device=device,
         )
-        # Graph runner over the pure-GPU graph (self.model): owns torch.compile /
-        # cudagraph capture (XLLM_TC_BACKEND). Capture is lazy (first forward), so
-        # weights loaded via load_assembled_weights are in place before tracing.
-        # GraphRunner is a plain object (not an nn.Module), so assigning it does
-        # not re-register the wrapped (possibly OptimizedModule) callable as a
-        # duplicate submodule — weights stay shared through self.model.
-        self._runner = GraphRunner(self.model)
-
-    # -- inference --------------------------------------------------------
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        batch: ForwardBatch,
-    ) -> torch.Tensor:
-        # `batch` is kept for the C++ bridge's calling convention but no longer
-        # enters the (compilable) model graph; positions is passed explicitly.
-        # Inference no-grad is owned by the C++ bridge: PyCausalLM::forward wraps
-        # this call in torch::NoGradGuard (py_causal_lm.cpp), which shares the
-        # thread-local GradMode with the embedded interpreter. That elides the
-        # AOTAutograd backward graph — whose "pending, uninvoked backwards" would
-        # force cudagraph_trees off its fast-path replay — with no per-model guard.
-        return self._runner(input_ids, positions)
-
-    def compute_logits(
-        self, hidden: torch.Tensor, selected_idxes: Optional[torch.Tensor]
-    ) -> torch.Tensor:
-        # no-grad owned by PyCausalLM::logits (torch::NoGradGuard); see forward().
-        if selected_idxes is not None and selected_idxes.numel() > 0:
-            hidden = hidden.index_select(0, selected_idxes)
-        return self.lm_head(hidden)
+        # Wrap the pure-GPU graph (self.model) in the shared graph runner. Base
+        # owns forward / compute_logits / load_assembled_weights; only the
+        # model-specific sharding_plan lives here.
+        self._init_runner()
 
     # -- weight loading ---------------------------------------------------
-    def sharding_plan(self):
+    def sharding_plan(self) -> ShardingPlan:
         """Declare how each parameter is assembled from checkpoint tensors.
 
         Returns a list of ``(target_param_name, sources, cat_dim)`` where
@@ -499,33 +471,3 @@ class Qwen3ForCausalLM(nn.Module):
         plan.append(("lm_head.weight", [(lm_src, 0, False)], 0))
         return plan
 
-    def load_assembled_weights(
-        self, items: Iterable[Tuple[str, torch.Tensor]]
-    ) -> None:
-        """Copy the C++-assembled per-rank tensors into the matching params.
-
-        ``items`` are ``(target_param_name, tensor)`` produced by executing
-        ``sharding_plan`` in C++; each tensor is already sharded/concatenated for
-        this rank, so this is a pure copy — no sharding logic remains in Python.
-        """
-        params = dict(self.named_parameters())
-        for target, tensor in items:
-            param = params[target]
-            param.data.copy_(tensor.to(dtype=param.dtype, device=param.device))
-
-
-def _resolve_dtype(dtype) -> torch.dtype:
-    if isinstance(dtype, torch.dtype):
-        return dtype
-    mapping = {
-        "bfloat16": torch.bfloat16,
-        "bf16": torch.bfloat16,
-        "float16": torch.float16,
-        "fp16": torch.float16,
-        "half": torch.float16,
-        "float32": torch.float32,
-        "fp32": torch.float32,
-        "": torch.bfloat16,
-        None: torch.bfloat16,
-    }
-    return mapping.get(dtype, torch.bfloat16)

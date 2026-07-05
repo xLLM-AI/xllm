@@ -55,6 +55,70 @@ std::string dtype_to_string(const torch::TensorOptions& options) {
   }
 }
 
+// Writes reflected PROPERTY fields into a Python dict. pybind11 casts each
+// value to its natural Python type (int/float/bool/str, list, set); a
+// disengaged optional becomes None so the Python side can tell "unset" apart
+// from a defaulted value.
+class PyDictVisitor final : public PropertyVisitor {
+ public:
+  explicit PyDictVisitor(py::dict& dict) : dict_(dict) {}
+
+  void visit(const std::string& name, bool value) override { set(name, value); }
+  void visit(const std::string& name, int32_t value) override {
+    set(name, value);
+  }
+  void visit(const std::string& name, int64_t value) override {
+    set(name, value);
+  }
+  void visit(const std::string& name, float value) override {
+    set(name, value);
+  }
+  void visit(const std::string& name, double value) override {
+    set(name, value);
+  }
+  void visit(const std::string& name, const std::string& value) override {
+    set(name, value);
+  }
+  void visit(const std::string& name,
+             const std::vector<int32_t>& value) override {
+    set(name, value);
+  }
+  void visit(const std::string& name,
+             const std::vector<int64_t>& value) override {
+    set(name, value);
+  }
+  void visit(const std::string& name,
+             const std::vector<float>& value) override {
+    set(name, value);
+  }
+  void visit(const std::string& name,
+             const std::vector<double>& value) override {
+    set(name, value);
+  }
+  void visit(const std::string& name, const std::vector<bool>& value) override {
+    set(name, value);
+  }
+  void visit(const std::string& name,
+             const std::vector<std::string>& value) override {
+    set(name, value);
+  }
+  void visit(const std::string& name,
+             const std::unordered_set<int32_t>& value) override {
+    set(name, value);
+  }
+  void visit_absent(const std::string& name) override {
+    dict_[py::str(name)] = py::none();
+  }
+
+ private:
+  template <typename T>
+  void set(const std::string& name, const T& value) {
+    dict_[py::str(name)] = value;
+  }
+
+  py::dict& dict_;
+};
+
 }  // namespace
 
 PyCausalLM::PyCausalLM(const ModelContext& context)
@@ -112,7 +176,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   // the config dict. Keep the object alive for the model's lifetime.
   py::module_ registry = py::module_::import("python.registry");
   py::object model_cls = registry.attr("get_model_class")(py::str(module_name));
-  py_model_ = model_cls(build_config_dict());
+  py_model_ = model_cls(build_config_dict(parallel_args));
   py_model_.attr("eval")();
 
   forward_batch_cls_ =
@@ -126,21 +190,25 @@ PyCausalLM::~PyCausalLM() {
   forward_batch_cls_ = py::object();
 }
 
-py::dict PyCausalLM::build_config_dict() const {
+py::dict PyCausalLM::build_config_dict(
+    const ParallelArgs& parallel_args) const {
   py::dict d;
-  d["model_type"] = model_args_.model_type();
-  d["hidden_size"] = model_args_.hidden_size();
-  d["num_hidden_layers"] = model_args_.n_layers();
-  d["num_attention_heads"] = model_args_.n_heads();
-  d["num_key_value_heads"] =
-      model_args_.n_kv_heads().value_or(model_args_.n_heads());
-  d["head_dim"] = model_args_.head_dim();
-  d["intermediate_size"] = model_args_.intermediate_size();
-  d["rms_norm_eps"] = model_args_.rms_norm_eps();
-  d["rope_theta"] = model_args_.rope_theta();
-  d["max_position_embeddings"] = model_args_.max_position_embeddings();
-  d["vocab_size"] = model_args_.vocab_size();
-  d["tie_word_embeddings"] = model_args_.tie_word_embeddings();
+  PyDictVisitor visitor(d);
+
+  // Full, already-parsed model config (renames, defaults and derived fields
+  // are resolved in the native model-args loader -- the Python side is the
+  // single source of truth's consumer, not a re-implementer).
+  visit_properties(model_args_, visitor);
+  // Parallel-dimension sizes (tp/dp/ep/cp/...). Non-plain-data fields are
+  // skipped by the reflection layer.
+  visit_properties(parallel_args, visitor);
+
+  // Runtime overrides that are authoritative over the reflected config values:
+  //  - dtype: the actual tensor dtype (may differ from model_args.dtype() when
+  //    e.g. quantization forces bfloat16);
+  //  - device: the worker's device string;
+  //  - tp_size/tp_rank: the per-rank TP layout derived from the TP process
+  //    group, which drives the Python-side weight sharding.
   d["dtype"] = dtype_to_string(options_);
   d["device"] = c10::str(device_);
   d["tp_size"] = tp_size_;

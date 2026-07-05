@@ -29,6 +29,12 @@ limitations under the License.
 namespace xllm {
 
 struct ParallelArgs {
+  // Expose the parallel-dimension sizes (tp/dp/ep/cp/...) to the generic
+  // property reflection layer so they can be forwarded to the embedded Python
+  // model executor. Non-plain-data PROPERTY fields (mapping_data, vendor comm
+  // handles) are skipped at compile time (see property_reflect.h).
+  REFLECT_PROPERTIES(ParallelArgs);
+
   ParallelArgs(int32_t rank, int32_t world_size, ProcessGroup* process_group)
       : rank_(rank), world_size_(world_size), process_group_(process_group) {}
 

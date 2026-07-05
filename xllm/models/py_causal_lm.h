@@ -70,8 +70,10 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalLM {
   void update_expert_weight(int32_t /*layer_id*/) override {}
 
  private:
-  // Builds the config dict handed to the Python model constructor.
-  pybind11::dict build_config_dict() const;
+  // Builds the config dict handed to the Python model constructor. Reflects the
+  // full ModelArgs and the parallel-dimension sizes generically, then overlays
+  // the runtime dtype/device and the per-rank TP layout.
+  pybind11::dict build_config_dict(const ParallelArgs& parallel_args) const;
 
   ModelArgs model_args_;
   torch::TensorOptions options_;
