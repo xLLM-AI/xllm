@@ -62,7 +62,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
       options_(context.get_tensor_options()),
       device_(context.get_tensor_options().device()),
       enable_mla_(context.get_model_args().enable_mla()) {
-  // Bring up the embedded interpreter + xllm_models package + xllm_ops library.
+  // Bring up the embedded interpreter + 'python' model package + xllm_ops lib.
   ensure_python_interpreter();
 
   // Tensor parallelism: read the TP group so per-rank head counts (and the
@@ -104,20 +104,19 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   register_module("attn", attn_);
 
   py::gil_scoped_acquire gil;
-  const std::string module_name =
-      context.get_model_args().model_type().empty()
-          ? std::string("Qwen3ForCausalLM")
-          : context.get_model_args().model_type();
+  const std::string module_name = context.get_model_args().model_type().empty()
+                                      ? std::string("Qwen3ForCausalLM")
+                                      : context.get_model_args().model_type();
 
   // Resolve the Python model class via the registry, then instantiate it with
   // the config dict. Keep the object alive for the model's lifetime.
-  py::module_ registry = py::module_::import("xllm_models.registry");
+  py::module_ registry = py::module_::import("python.registry");
   py::object model_cls = registry.attr("get_model_class")(py::str(module_name));
   py_model_ = model_cls(build_config_dict());
   py_model_.attr("eval")();
 
   forward_batch_cls_ =
-      py::module_::import("xllm_models.forward_batch").attr("ForwardBatch");
+      py::module_::import("python.forward_batch").attr("ForwardBatch");
 }
 
 PyCausalLM::~PyCausalLM() {
@@ -154,8 +153,8 @@ void PyCausalLM::load_model(std::unique_ptr<ModelLoader> loader) {
   auto& state_dicts = loader->get_state_dicts();
 
   // GQA KV-head replica coords: when a KV head is shared across ranks
-  // (n_kv_heads < tp_size), K/V shard with the reduced (rank, world) so the same
-  // KV slice is replicated on the ranks that share it — mirrors
+  // (n_kv_heads < tp_size), K/V shard with the reduced (rank, world) so the
+  // same KV slice is replicated on the ranks that share it — mirrors
   // qwen2_attention.cpp:57-65 and the native load_tensor_list KV-replica rule.
   const int64_t total_kv_heads =
       model_args_.n_kv_heads().value_or(model_args_.n_heads());
@@ -275,10 +274,10 @@ torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
   // compute_logits runs lm_head, whose ColumnParallel(gather_output=True) does
   // an all_gather over the vocab dim. That collective reads the TP group from
   // the thread-local forward context via py_all_gather, so establish the
-  // context here too (attention/KV state is unused while computing logits, hence
-  // null). Without it py_all_gather degrades to identity and the logits keep
-  // only this rank's vocab shard — the sampler then never sees the other ranks'
-  // tokens (e.g. a tp=2 rank0 sees only vocab [0, vocab/2)).
+  // context here too (attention/KV state is unused while computing logits,
+  // hence null). Without it py_all_gather degrades to identity and the logits
+  // keep only this rank's vocab shard — the sampler then never sees the other
+  // ranks' tokens (e.g. a tp=2 rank0 sees only vocab [0, vocab/2)).
   PyForwardContextGuard guard(/*attn_metadata=*/nullptr,
                               /*kv_caches=*/nullptr,
                               /*attn=*/nullptr,
@@ -287,8 +286,7 @@ torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
   py::object selected = seleted_idxes.defined()
                             ? py::object(py::cast(seleted_idxes))
                             : py::object(py::none());
-  py::object out =
-      py_model_.attr("compute_logits")(hidden_states, selected);
+  py::object out = py_model_.attr("compute_logits")(hidden_states, selected);
   return out.cast<torch::Tensor>();
 }
 

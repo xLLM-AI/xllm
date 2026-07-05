@@ -12,17 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""xllm_models: Python-defined model graphs executed by xLLM's C++ worker.
+"""python: Python-defined model graphs executed by xLLM's C++ worker.
 
 The C++ ``PyCausalLM`` embeds a CPython interpreter (sharing this process'
 libtorch), loads a model class from this package, streams weights into
 ``load_weights``, and drives ``forward`` / ``compute_logits`` each step.
 
-Hardware-specific fused kernels are reached through :mod:`xllm_models.ops`,
-which calls ``torch.ops.xllm_ops.*`` — the same fused kernels the C++ decoder
-path uses — so the Python graph runs identical operators with no ``#ifdef``.
+Package layout follows ``models -> layers -> ops -> kernels``:
+:mod:`python.models` (per-arch graphs) depend on :mod:`python.layers`, which
+depend on the :mod:`python.ops` dispatch layer, which routes to the
+:mod:`python.kernels` backends. Every op resolves to the single
+``torch.ops.xllm_ops.*`` namespace — the same fused kernels the C++ decoder path
+uses — so the Python graph runs identical operators across hardware backends
+with no ``#ifdef``.
 """
 
-from xllm_models.registry import get_model_class, register_model  # noqa: F401
+from .registry import get_model_class, register_model  # noqa: F401
 
 __all__ = ["get_model_class", "register_model"]

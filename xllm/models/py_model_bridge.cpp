@@ -34,9 +34,10 @@ limitations under the License.
 
 DEFINE_string(python_model_path,
               "",
-              "Filesystem directory that contains the 'xllm_models' Python "
-              "package, prepended to sys.path for the embedded interpreter. "
-              "Falls back to the XLLM_PYTHON_MODEL_PATH env var when empty.");
+              "Filesystem directory that contains the 'python' model package "
+              "(xLLM's Python model executor), prepended to sys.path for the "
+              "embedded interpreter. Falls back to the XLLM_PYTHON_MODEL_PATH "
+              "env var when empty.");
 
 namespace py = pybind11;
 
@@ -60,13 +61,13 @@ torch::Tensor py_attention(const torch::Tensor& q,
   TORCH_CHECK(ctx != nullptr && ctx->attn_metadata != nullptr &&
                   ctx->kv_caches != nullptr && ctx->attn != nullptr,
               "xllm_ops.attention called outside a PyCausalLM forward context");
-  TORCH_CHECK(layer_id >= 0 &&
-                  layer_id < static_cast<int64_t>(ctx->kv_caches->size()),
-              "xllm_ops.attention layer_id ",
-              layer_id,
-              " out of range [0, ",
-              ctx->kv_caches->size(),
-              ")");
+  TORCH_CHECK(
+      layer_id >= 0 && layer_id < static_cast<int64_t>(ctx->kv_caches->size()),
+      "xllm_ops.attention layer_id ",
+      layer_id,
+      " out of range [0, ",
+      ctx->kv_caches->size(),
+      ")");
 
   auto& meta = *ctx->attn_metadata;
 #if defined(USE_CUDA) || defined(USE_MUSA)
@@ -90,14 +91,16 @@ torch::Tensor py_attention(const torch::Tensor& q,
 // torch.ops.xllm_ops.all_reduce(x) -> Tensor
 //
 // SUM all-reduce across the tensor-parallel group (RowParallel output combine).
-// Identity when there is no TP group (single card). Runs on the tp_group carried
-// by the thread-local forward context.
+// Identity when there is no TP group (single card). Runs on the tp_group
+// carried by the thread-local forward context.
 //
-// OUT-OF-PLACE (functional): clones the input and reduces the clone, leaving the
-// input untouched. The op schema is declared functional (``-> Tensor`` with no
-// ``(a!)`` alias), so the impl must not mutate its input — otherwise torch.compile
-// (which trusts the schema when the op is traced via its register_fake) could
-// miscompile under cudagraph static-buffer reuse. This mirrors vLLM's
+// OUT-OF-PLACE (functional): clones the input and reduces the clone, leaving
+// the input untouched. The op schema is declared functional (``-> Tensor`` with
+// no
+// ``(a!)`` alias), so the impl must not mutate its input — otherwise
+// torch.compile (which trusts the schema when the op is traced via its
+// register_fake) could miscompile under cudagraph static-buffer reuse. This
+// mirrors vLLM's
 // ``_all_reduce_out_place`` / SGLang's ``outplace_all_reduce`` (both allocate a
 // fresh output so the collective is safe to trace + capture in a CUDA graph).
 torch::Tensor py_all_reduce(const torch::Tensor& input) {
@@ -113,7 +116,8 @@ torch::Tensor py_all_reduce(const torch::Tensor& input) {
 //
 // All-gather across the tensor-parallel group and concatenate along `dim` in
 // rank order (ColumnParallel / embedding output combine). Identity without a TP
-// group. Out-of-place (``parallel_state::gather`` allocates the gathered tensor).
+// group. Out-of-place (``parallel_state::gather`` allocates the gathered
+// tensor).
 // ``world_size`` is passed by the caller (== tp_size) purely so the Python
 // register_fake can compute the gathered shape (``size(dim) * world_size``) at
 // trace time; the live tp_group is authoritative at runtime (mirrors vLLM's
@@ -143,8 +147,7 @@ void prepend_sys_path(const std::string& dir) {
   py::list path = py::reinterpret_borrow<py::list>(sys.attr("path"));
   // Skip if already present.
   for (auto item : path) {
-    if (py::isinstance<py::str>(item) &&
-        item.cast<std::string>() == dir) {
+    if (py::isinstance<py::str>(item) && item.cast<std::string>() == dir) {
       return;
     }
   }
@@ -183,14 +186,13 @@ PyForwardContextGuard::PyForwardContextGuard(
   t_forward_context.tp_group = tp_group;
 }
 
-PyForwardContextGuard::~PyForwardContextGuard() {
-  t_forward_context = prev_;
-}
+PyForwardContextGuard::~PyForwardContextGuard() { t_forward_context = prev_; }
 
 void ensure_python_interpreter() {
   static std::once_flag flag;
   std::call_once(flag, []() {
-    // Force-link the xllm_ops CUDA kernel registrations (rms_norm, silu_and_mul,
+    // Force-link the xllm_ops CUDA kernel registrations (rms_norm,
+    // silu_and_mul,
     // ...) so the embedded interpreter sees them via torch.ops.xllm_ops.
     ensure_xllm_ops_registered();
 
@@ -213,12 +215,12 @@ void ensure_python_interpreter() {
       // Validate the package is importable now, failing loudly at startup
       // rather than deep inside the first forward.
       try {
-        py::module_::import("xllm_models");
+        py::module_::import("python");
       } catch (const py::error_already_set& e) {
-        LOG(FATAL) << "Failed to import 'xllm_models' for the Python model "
-                      "executor. Set --python_model_path (or "
+        LOG(FATAL) << "Failed to import the 'python' model package for the "
+                      "Python model executor. Set --python_model_path (or "
                       "XLLM_PYTHON_MODEL_PATH) to the directory containing the "
-                      "xllm_models package. Error: "
+                      "'python' package. Error: "
                    << e.what();
       }
     }

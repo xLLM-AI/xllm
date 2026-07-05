@@ -29,65 +29,22 @@ so the single-card parity path is byte-identical to the first version.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Iterable, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
-from xllm_models import ops
-from xllm_models.forward_batch import ForwardBatch
-from xllm_models.layers import (
+from .. import ops
+from ..forward_batch import ForwardBatch
+from ..layers import (
     ColumnParallelLinear,
     HiddenParallelEmbedding,
     RMSNorm,
     RotaryEmbedding,
     RowParallelLinear,
 )
-
-
-# Env switch selecting the torch.compile backend for the pure-GPU model graph
-# (embed + decoder layers + final norm). Default ('off'/unset) leaves the model
-# eager so the parity baseline is byte-identical to C++.
-_TC_BACKEND_ENV = "XLLM_TC_BACKEND"
-
-
-def _maybe_compile(model: nn.Module) -> nn.Module:
-    """Optionally wrap the pure-GPU model graph in ``torch.compile``.
-
-    Selected by ``XLLM_TC_BACKEND``. All backends share the §4.1 prerequisites
-    (``register_fake`` for xllm_ops + attention ``disallow_in_graph``), imported
-    lazily below only when a backend is on so the eager path never registers
-    them. attention graph-breaks each layer; the segments between attentions go
-    to the backend.
-
-    - ``off`` / unset       : no compile (eager parity baseline)
-    - ``eager``             : ``backend="eager"`` — Dynamo trace only, no
-                              cudagraph; verifies tracing + graph-break count
-                              (M7a)
-    - ``cudagraphs``        : ``backend="cudagraphs"`` — pure CUDA graph replay,
-                              removes decode per-step host overhead (M7b)
-    - ``inductor``          : ``backend="inductor"`` — fuse vector segments (M9)
-    - ``reduce-overhead``   : ``mode="reduce-overhead"`` — inductor +
-                              cudagraph_trees (M7c)
-    """
-    backend = os.environ.get(_TC_BACKEND_ENV, "off").strip().lower()
-    if backend in ("", "off", "none", "0"):
-        return model
-
-    # register_fake + attention disallow_in_graph — needed only once a compile
-    # backend is on; importing here keeps the default eager path clean.
-    from xllm_models import _fake_impls  # noqa: F401
-
-    if backend == "reduce-overhead":
-        return torch.compile(model, mode="reduce-overhead")
-    if backend in ("eager", "cudagraphs", "inductor"):
-        return torch.compile(model, backend=backend)
-    raise ValueError(
-        f"{_TC_BACKEND_ENV}={backend!r} not recognized; expected one of "
-        "off|eager|cudagraphs|inductor|reduce-overhead"
-    )
+from ..model_runner import GraphRunner
 
 
 def _instr(tag: str, t: torch.Tensor) -> None:
@@ -395,12 +352,13 @@ class Qwen3ForCausalLM(nn.Module):
             dtype=dtype,
             device=device,
         )
-        # torch.compile entry over the pure-GPU graph (self.model). Compilation
-        # is lazy (first forward), so weights loaded via load_assembled_weights
-        # are in place before tracing. Stored via object.__setattr__ so the
-        # (possibly OptimizedModule) wrapper is not re-registered as a duplicate
-        # submodule of self.model — weights stay shared through self.model.
-        object.__setattr__(self, "_forward_model", _maybe_compile(self.model))
+        # Graph runner over the pure-GPU graph (self.model): owns torch.compile /
+        # cudagraph capture (XLLM_TC_BACKEND). Capture is lazy (first forward), so
+        # weights loaded via load_assembled_weights are in place before tracing.
+        # GraphRunner is a plain object (not an nn.Module), so assigning it does
+        # not re-register the wrapped (possibly OptimizedModule) callable as a
+        # duplicate submodule — weights stay shared through self.model.
+        self._runner = GraphRunner(self.model)
 
     # -- inference --------------------------------------------------------
     def forward(
@@ -416,7 +374,7 @@ class Qwen3ForCausalLM(nn.Module):
         # thread-local GradMode with the embedded interpreter. That elides the
         # AOTAutograd backward graph — whose "pending, uninvoked backwards" would
         # force cudagraph_trees off its fast-path replay — with no per-model guard.
-        return self._forward_model(input_ids, positions)
+        return self._runner(input_ids, positions)
 
     def compute_logits(
         self, hidden: torch.Tensor, selected_idxes: Optional[torch.Tensor]

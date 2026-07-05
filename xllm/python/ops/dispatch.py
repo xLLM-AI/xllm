@@ -72,7 +72,7 @@ def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     if _USE_TRITON:
         # Lazy import registers xllm_triton::silu_and_mul on first use; keeps the
         # default (C++) path free of the triton dependency.
-        from xllm_models import triton_ops
+        from ..kernels import triton_ops
 
         return triton_ops.silu_and_mul(x)
     return torch.ops.xllm_ops.silu_and_mul(x)

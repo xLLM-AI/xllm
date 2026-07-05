@@ -46,7 +46,7 @@ def get_model_class(name: str) -> Type[nn.Module]:
 
 def _register_builtin_models() -> None:
     # Imported lazily to avoid import cycles at module load.
-    from xllm_models.models.qwen3 import Qwen3ForCausalLM
+    from .models.qwen3 import Qwen3ForCausalLM
 
     register_model("Qwen3ForCausalLM", "qwen3")(Qwen3ForCausalLM)
 

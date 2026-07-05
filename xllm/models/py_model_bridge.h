@@ -74,7 +74,7 @@ class PyForwardContextGuard {
 };
 
 // Initializes the embedded CPython interpreter (idempotent, process-wide),
-// makes the ``xllm_models`` package importable, and force-links the xllm_ops
+// makes the ``python`` model package importable, and force-links the xllm_ops
 // torch library. Safe to call from any worker thread; the GIL is released
 // afterwards so subsequent calls use ``py::gil_scoped_acquire``.
 void ensure_python_interpreter();

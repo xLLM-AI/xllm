@@ -28,19 +28,22 @@ limitations under the License.
 
 namespace xllm {
 
-// Tensor-parallel process group (not owned; from ParallelArgs). Forward-declared
-// so the header stays light; full definition in framework/parallel_state.
+// Tensor-parallel process group (not owned; from ParallelArgs).
+// Forward-declared so the header stays light; full definition in
+// framework/parallel_state.
 class ProcessGroup;
 
 // CausalLM implementation whose graph lives in Python (an nn.Module from the
-// xllm_models package) but whose weights, attention (paged-KV flashinfer) and
-// forward orchestration are driven from C++. Selected by --model_impl=python.
+// 'python' model package) but whose weights, attention (paged-KV flashinfer)
+// and forward orchestration are driven from C++. Selected by
+// --model_impl=python.
 //
 // Ownership of the model graph is Python's; this class binds the C++ worker's
 // input tensors into the Python forward and reads back hidden states.
 // Marked hidden-visibility because it holds pybind11::object members, whose
 // types have hidden visibility; matching the class visibility avoids
-// -Werror=attributes (same pattern as processors/pywarpper_input_processor.cpp).
+// -Werror=attributes (same pattern as
+// processors/pywarpper_input_processor.cpp).
 class __attribute__((visibility("hidden"))) PyCausalLM : public CausalLM {
  public:
   explicit PyCausalLM(const ModelContext& context);
@@ -61,9 +64,9 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalLM {
   const torch::TensorOptions& options() const override { return options_; }
 
   // Dense model: no expert weights.
-  void prepare_expert_weight(int32_t /*layer_id*/,
-                             const std::vector<int32_t>& /*expert_ids*/)
-      override {}
+  void prepare_expert_weight(
+      int32_t /*layer_id*/,
+      const std::vector<int32_t>& /*expert_ids*/) override {}
   void update_expert_weight(int32_t /*layer_id*/) override {}
 
  private:
@@ -75,9 +78,10 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalLM {
   torch::Device device_;
   bool enable_mla_ = false;
 
-  // Tensor parallelism (read from ParallelArgs::tp_group_ in the ctor). tp_size_
-  // 1 / tp_group_ null on a single card. tp_group_ is passed into the forward
-  // context so the all_reduce / all_gather ops reach the right NCCL group.
+  // Tensor parallelism (read from ParallelArgs::tp_group_ in the ctor).
+  // tp_size_ 1 / tp_group_ null on a single card. tp_group_ is passed into the
+  // forward context so the all_reduce / all_gather ops reach the right NCCL
+  // group.
   int64_t tp_size_ = 1;
   int64_t tp_rank_ = 0;
   ProcessGroup* tp_group_ = nullptr;

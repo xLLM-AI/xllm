@@ -33,8 +33,8 @@ C++ piecewise cudagraph (``PiecewiseGraphs`` / ``GlobalCaptureInstance``), only
 the owner is torch.compile.
 
 Imported only when a torch.compile backend is enabled (``XLLM_TC_BACKEND`` !=
-off, see ``qwen3._maybe_compile``), so the default eager parity path never
-registers these and stays byte-identical to C++.
+off, see ``model_runner.graph_runner.maybe_compile``), so the default eager
+parity path never registers these and stays byte-identical to C++.
 """
 
 from __future__ import annotations

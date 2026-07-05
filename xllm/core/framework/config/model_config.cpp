@@ -35,7 +35,7 @@ DEFINE_string(model_impl,
               "",
               "Model executor implementation. Empty/'native' uses the built-in "
               "C++ model; 'python' runs the graph via the embedded Python "
-              "interpreter (xllm_models package).");
+              "interpreter ('python' model package).");
 
 DEFINE_string(task,
               "generate",
