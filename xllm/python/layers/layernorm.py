@@ -30,12 +30,20 @@ class RMSNorm(nn.Module):
     - ``forward(x, residual)`` -> (normed(x + residual), x + residual)
     """
 
-    def __init__(self, dim: int, eps: float = 1e-6, dtype=None, device=None):
+    def __init__(
+        self,
+        dim: int,
+        eps: float = 1e-6,
+        dtype: torch.dtype | None = None,
+        device: torch.device | str | None = None,
+    ) -> None:
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim, dtype=dtype, device=device))
 
-    def forward(self, x: torch.Tensor, residual: torch.Tensor | None = None):
+    def forward(
+        self, x: torch.Tensor, residual: torch.Tensor | None = None
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             return ops.rms_norm(x, self.weight, self.eps)
         return ops.fused_add_rms_norm(x, residual, self.weight, self.eps)

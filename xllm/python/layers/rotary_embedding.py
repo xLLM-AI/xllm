@@ -38,9 +38,9 @@ class RotaryEmbedding(nn.Module):
         head_dim: int,
         max_position: int,
         rope_theta: float,
-        dtype=None,
-        device=None,
-    ):
+        dtype: torch.dtype | None = None,
+        device: torch.device | str | None = None,
+    ) -> None:
         super().__init__()
         self.head_dim = head_dim
         inv_freq = 1.0 / (

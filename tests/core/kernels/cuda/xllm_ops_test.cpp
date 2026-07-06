@@ -30,7 +30,7 @@ limitations under the License.
 #include <torch/extension.h>
 #include <torch/torch.h>
 
-#include "xllm_ops_library.h"
+#include "core/kernels/cuda/xllm_ops_library.h"
 
 namespace py = pybind11;
 

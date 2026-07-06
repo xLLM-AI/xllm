@@ -44,7 +44,9 @@ import torch
 
 # rms_norm(Tensor input, Tensor weight, float eps) -> Tensor
 @torch.library.register_fake("xllm_ops::rms_norm")
-def _rms_norm_fake(input, weight, eps):
+def _rms_norm_fake(
+    input: torch.Tensor, weight: torch.Tensor, eps: float
+) -> torch.Tensor:
     return torch.empty_like(input)
 
 
@@ -52,13 +54,18 @@ def _rms_norm_fake(input, weight, eps):
 #   float eps) -> ()    # IN-PLACE: input -> RMSNorm(input+residual),
 #                       #           residual -> input+residual. No output.
 @torch.library.register_fake("xllm_ops::fused_add_rms_norm")
-def _fused_add_rms_norm_fake(input, residual, weight, eps):
+def _fused_add_rms_norm_fake(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> None:
     return None
 
 
 # silu_and_mul(Tensor input) -> Tensor   # [..., 2*d] -> [..., d]
 @torch.library.register_fake("xllm_ops::silu_and_mul")
-def _silu_and_mul_fake(input):
+def _silu_and_mul_fake(input: torch.Tensor) -> torch.Tensor:
     shape = list(input.shape)
     shape[-1] //= 2
     return input.new_empty(shape)
@@ -70,18 +77,18 @@ def _silu_and_mul_fake(input):
 # IN-PLACE: q/k normed+roped in qkv, v untouched. No output.
 @torch.library.register_fake("xllm_ops::fused_qk_norm_rope")
 def _fused_qk_norm_rope_fake(
-    qkv,
-    num_heads_q,
-    num_heads_k,
-    num_heads_v,
-    head_dim,
-    eps,
-    q_weight,
-    k_weight,
-    cos_sin_cache,
-    interleaved,
-    position_ids,
-):
+    qkv: torch.Tensor,
+    num_heads_q: int,
+    num_heads_k: int,
+    num_heads_v: int,
+    head_dim: int,
+    eps: float,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    interleaved: bool,
+    position_ids: torch.Tensor,
+) -> None:
     return None
 
 
@@ -111,14 +118,14 @@ torch._dynamo.disallow_in_graph(getattr(_attention_op, "default", _attention_op)
 
 # all_reduce(Tensor x) -> Tensor   # SUM across the TP group, shape unchanged.
 @torch.library.register_fake("xllm_ops::all_reduce")
-def _all_reduce_fake(x):
+def _all_reduce_fake(x: torch.Tensor) -> torch.Tensor:
     return torch.empty_like(x)
 
 
 # all_gather(Tensor x, int dim, int world_size) -> Tensor
 #   concatenation along ``dim`` in rank order -> size(dim) *= world_size.
 @torch.library.register_fake("xllm_ops::all_gather")
-def _all_gather_fake(x, dim, world_size):
+def _all_gather_fake(x: torch.Tensor, dim: int, world_size: int) -> torch.Tensor:
     shape = list(x.shape)
     shape[dim] *= world_size
     return x.new_empty(shape)

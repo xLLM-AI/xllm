@@ -148,7 +148,8 @@ template <typename Owner>
 int register_property(const char* name,
                       void (*emit)(const void*, PropertyVisitor&)) {
   if constexpr (!std::is_void_v<Owner>) {
-    PropertyTable<Owner>::fields().push_back({name, emit});
+    PropertyTable<Owner>::fields().emplace_back(
+        typename PropertyTable<Owner>::Field{name, emit});
   }
   return 0;
 }

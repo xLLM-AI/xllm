@@ -24,11 +24,12 @@ limitations under the License.
 // thread-local forward context for KV cache + flashinfer plan) is registered
 // separately once that context exists (see py_model_bridge / M3).
 
+#include <glog/logging.h>
 #include <torch/library.h>
 #include <torch/torch.h>
 
-#include "cuda_ops_api.h"
-#include "xllm_ops_library.h"
+#include "core/kernels/cuda/cuda_ops_api.h"
+#include "core/kernels/cuda/xllm_ops_library.h"
 
 namespace xllm {
 namespace {
@@ -75,9 +76,8 @@ void fused_add_rms_norm(torch::Tensor& input,
 // input[..., d:].
 torch::Tensor silu_and_mul(const torch::Tensor& input) {
   auto sizes = input.sizes().vec();
-  TORCH_CHECK(!sizes.empty() && sizes.back() % 2 == 0,
-              "silu_and_mul: last dim must be even, got ",
-              input.sizes());
+  CHECK(!sizes.empty() && sizes.back() % 2 == 0)
+      << "silu_and_mul: last dim must be even, got " << input.sizes();
   sizes.back() /= 2;
   auto out = torch::empty(sizes, input.options());
   xllm::kernel::cuda::act_and_mul(out, input, "silu");

@@ -27,7 +27,9 @@ import torch.nn as nn
 _REGISTRY: Dict[str, Callable[[], Type[nn.Module]]] = {}
 
 
-def register_model(*names: str):
+def register_model(
+    *names: str,
+) -> Callable[[Type[nn.Module]], Type[nn.Module]]:
     def deco(cls: Type[nn.Module]) -> Type[nn.Module]:
         for name in names:
             _REGISTRY[name] = cls

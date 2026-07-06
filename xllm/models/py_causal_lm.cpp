@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "py_causal_lm.h"
+#include "models/py_causal_lm.h"
 
 #include <c10/util/Exception.h>
 #include <glog/logging.h>
@@ -32,7 +32,7 @@ limitations under the License.
 #include "core/framework/state_dict/state_dict.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
-#include "py_model_bridge.h"
+#include "models/py_model_bridge.h"
 
 namespace py = pybind11;
 
@@ -226,13 +226,14 @@ void PyCausalLM::load_model(std::unique_ptr<ModelLoader> loader) {
   // qwen2_attention.cpp:57-65 and the native load_tensor_list KV-replica rule.
   const int64_t total_kv_heads =
       model_args_.n_kv_heads().value_or(model_args_.n_heads());
-  const int kv_replicas = (total_kv_heads < tp_size_)
-                              ? static_cast<int>(tp_size_ / total_kv_heads)
-                              : 1;
-  const int rank = static_cast<int>(tp_rank_);
-  const int world = static_cast<int>(tp_size_);
-  const int kv_rank = (kv_replicas > 1) ? rank / kv_replicas : rank;
-  const int kv_world = (kv_replicas > 1) ? world / kv_replicas : world;
+  const int32_t kv_replicas =
+      (total_kv_heads < tp_size_)
+          ? static_cast<int32_t>(tp_size_ / total_kv_heads)
+          : 1;
+  const int32_t rank = static_cast<int32_t>(tp_rank_);
+  const int32_t world = static_cast<int32_t>(tp_size_);
+  const int32_t kv_rank = (kv_replicas > 1) ? rank / kv_replicas : rank;
+  const int32_t kv_world = (kv_replicas > 1) ? world / kv_replicas : world;
 
   // The Python model declares HOW each parameter is assembled from the
   // checkpoint (source names, shard dim, KV-replica flag, concat dim) via
@@ -264,7 +265,7 @@ void PyCausalLM::load_model(std::unique_ptr<ModelLoader> loader) {
     for (const auto& source_handle : sources) {
       const auto source = source_handle.cast<py::sequence>();
       const auto candidates = source[0].cast<py::sequence>();
-      const int shard_dim = source[1].cast<int>();
+      const int32_t shard_dim = source[1].cast<int32_t>();
       const bool is_kv = source[2].cast<bool>();
 
       std::string chosen;
@@ -284,13 +285,13 @@ void PyCausalLM::load_model(std::unique_ptr<ModelLoader> loader) {
 
       torch::Tensor tensor;
       if (shard_dim >= 0) {
-        const int r = is_kv ? kv_rank : rank;
-        const int w = is_kv ? kv_world : world;
+        const int32_t r = is_kv ? kv_rank : rank;
+        const int32_t w = is_kv ? kv_world : world;
         tensor = owner->get_sharded_tensor(chosen, shard_dim, r, w);
       } else {
         tensor = owner->get_tensor(chosen);  // replicated (full) on every rank
       }
-      parts.push_back(std::move(tensor));
+      parts.emplace_back(std::move(tensor));
     }
 
     torch::Tensor weight =

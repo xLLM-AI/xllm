@@ -18,7 +18,7 @@ limitations under the License.
 
 #include <mutex>
 
-#include "common/property_reflect.h"
+#include "core/common/property_reflect.h"
 
 namespace xllm {
 

@@ -45,9 +45,9 @@ class ColumnParallelLinear(nn.Module):
         out_features_per_partition: int,
         tp_size: int,
         gather_output: bool = False,
-        dtype=None,
-        device=None,
-    ):
+        dtype: torch.dtype | None = None,
+        device: torch.device | str | None = None,
+    ) -> None:
         super().__init__()
         self.tp_size = tp_size
         self.gather_output = gather_output
@@ -80,9 +80,9 @@ class RowParallelLinear(nn.Module):
         in_features_per_partition: int,
         out_features: int,
         tp_size: int,
-        dtype=None,
-        device=None,
-    ):
+        dtype: torch.dtype | None = None,
+        device: torch.device | str | None = None,
+    ) -> None:
         super().__init__()
         self.tp_size = tp_size
         self.weight = nn.Parameter(

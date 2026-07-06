@@ -35,9 +35,9 @@ class HiddenParallelEmbedding(nn.Module):
         num_embeddings: int,
         hidden_per_partition: int,
         tp_size: int,
-        dtype=None,
-        device=None,
-    ):
+        dtype: torch.dtype | None = None,
+        device: torch.device | str | None = None,
+    ) -> None:
         super().__init__()
         self.tp_size = tp_size
         self.weight = nn.Parameter(

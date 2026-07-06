@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "py_model_bridge.h"
+#include "models/py_model_bridge.h"
 
 #include <Python.h>
 #include <gflags/gflags.h>
@@ -58,16 +58,13 @@ torch::Tensor py_attention(const torch::Tensor& q,
                            const torch::Tensor& v,
                            int64_t layer_id) {
   PyForwardContext* ctx = get_py_forward_context();
-  TORCH_CHECK(ctx != nullptr && ctx->attn_metadata != nullptr &&
-                  ctx->kv_caches != nullptr && ctx->attn != nullptr,
-              "xllm_ops.attention called outside a PyCausalLM forward context");
-  TORCH_CHECK(
-      layer_id >= 0 && layer_id < static_cast<int64_t>(ctx->kv_caches->size()),
-      "xllm_ops.attention layer_id ",
-      layer_id,
-      " out of range [0, ",
-      ctx->kv_caches->size(),
-      ")");
+  CHECK(ctx != nullptr && ctx->attn_metadata != nullptr &&
+        ctx->kv_caches != nullptr && ctx->attn != nullptr)
+      << "xllm_ops.attention called outside a PyCausalLM forward context";
+  CHECK(layer_id >= 0 &&
+        layer_id < static_cast<int64_t>(ctx->kv_caches->size()))
+      << "xllm_ops.attention layer_id " << layer_id << " out of range [0, "
+      << ctx->kv_caches->size() << ")";
 
   auto& meta = *ctx->attn_metadata;
 #if defined(USE_CUDA) || defined(USE_MUSA)
@@ -129,12 +126,9 @@ torch::Tensor py_all_gather(const torch::Tensor& input,
   if (ctx == nullptr || ctx->tp_group == nullptr) {
     return input;
   }
-  TORCH_CHECK(ctx->tp_group->world_size() == world_size,
-              "all_gather world_size arg (",
-              world_size,
-              ") != tp group world_size (",
-              ctx->tp_group->world_size(),
-              ")");
+  CHECK(ctx->tp_group->world_size() == world_size)
+      << "all_gather world_size arg (" << world_size
+      << ") != tp group world_size (" << ctx->tp_group->world_size() << ")";
   return parallel_state::gather(
       input, ctx->tp_group, static_cast<int32_t>(dim));
 }

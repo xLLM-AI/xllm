@@ -46,29 +46,6 @@ from ..layers import (
 from .base import PyModelBase, ShardingPlan
 
 
-def _instr(tag: str, t: torch.Tensor) -> None:
-    """Env-gated (XLLM_INSTR) fingerprint dump for TP parity debugging.
-
-    After TP collectives every rank holds the full tensor, so the fingerprint
-    of any rank should match the tp=1 run bit-for-bit (mod float reduction
-    order). Divergence localizes which stage the Python TP path breaks.
-    """
-    import os
-    import sys
-
-    if not os.environ.get("XLLM_INSTR"):
-        return
-    f = t.detach().float().flatten()
-    print(
-        f"[INSTR {tag}] shape={tuple(t.shape)} sum={f.sum().item():.5f} "
-        f"absmean={f.abs().mean().item():.6f} "
-        f"first3={[round(x, 5) for x in f[:3].tolist()]}",
-        file=sys.stderr,
-        flush=True,
-    )
-
-
-
 @dataclass
 class Qwen3Config:
     hidden_size: int = 1024
@@ -142,7 +119,9 @@ class Qwen3Config:
 
 
 class Qwen3MLP(nn.Module):
-    def __init__(self, cfg: Qwen3Config, dtype, device):
+    def __init__(
+        self, cfg: Qwen3Config, dtype: torch.dtype, device: torch.device
+    ) -> None:
         super().__init__()
         tp = cfg.tp_size
         assert cfg.intermediate_size % tp == 0, (
@@ -176,7 +155,9 @@ class Qwen3MLP(nn.Module):
 
 
 class Qwen3Attention(nn.Module):
-    def __init__(self, cfg: Qwen3Config, dtype, device):
+    def __init__(
+        self, cfg: Qwen3Config, dtype: torch.dtype, device: torch.device
+    ) -> None:
         super().__init__()
         num_heads, num_kv_heads, replicas = cfg.head_split()
         tp = cfg.tp_size
@@ -254,7 +235,13 @@ class Qwen3Attention(nn.Module):
 
 
 class Qwen3DecoderLayer(nn.Module):
-    def __init__(self, cfg: Qwen3Config, layer_id: int, dtype, device):
+    def __init__(
+        self,
+        cfg: Qwen3Config,
+        layer_id: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
         super().__init__()
         self.layer_id = layer_id
         self.input_layernorm = RMSNorm(
@@ -286,7 +273,9 @@ class Qwen3DecoderLayer(nn.Module):
 
 
 class Qwen3Model(nn.Module):
-    def __init__(self, cfg: Qwen3Config, dtype, device):
+    def __init__(
+        self, cfg: Qwen3Config, dtype: torch.dtype, device: torch.device
+    ) -> None:
         super().__init__()
         tp = cfg.tp_size
         assert cfg.hidden_size % tp == 0, (
@@ -313,22 +302,17 @@ class Qwen3Model(nn.Module):
         positions: torch.Tensor,
     ) -> torch.Tensor:
         hidden = self.embed_tokens(input_ids)
-        _instr("embed", hidden)
         residual: Optional[torch.Tensor] = None
-        for li, layer in enumerate(self.layers):
+        for layer in self.layers:
             hidden, residual = layer(hidden, residual, positions)
-            if li == 0:
-                _instr("layer0.hidden", hidden)
-                _instr("layer0.residual", residual)
         hidden, _ = self.norm(hidden, residual)
-        _instr("final", hidden)
         return hidden
 
 
 class Qwen3ForCausalLM(PyModelBase):
     """Top-level entry the C++ PyCausalLM drives."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict) -> None:
         super().__init__()
         self.cfg = Qwen3Config.from_dict(config)
         dtype = self.resolve_dtype(config.get("dtype") or config.get("torch_dtype"))
