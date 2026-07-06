@@ -56,6 +56,11 @@ namespace xllm {
 inline torch::Tensor wan_apply_rotary_emb(const torch::Tensor& hidden_states,
                                           const torch::Tensor& freqs_cos,
                                           const torch::Tensor& freqs_sin) {
+#if defined(USE_NPU)
+  auto x_out = at_npu::native::custom_ops::npu_rotary_mul(
+      hidden_states.to(torch::kFloat), freqs_cos, freqs_sin, "interleave");
+  return x_out.to(hidden_states.dtype());
+#else
   auto input_dtype = hidden_states.dtype();
   auto x = hidden_states.to(torch::kFloat32);
   auto x_flat = x.unflatten(-1, std::vector<int64_t>{-1, 2});
@@ -70,6 +75,7 @@ inline torch::Tensor wan_apply_rotary_emb(const torch::Tensor& hidden_states,
   auto out = torch::stack({out1, out2}, -1).flatten(-2, -1);
 
   return out.to(input_dtype);
+#endif
 }
 
 inline int64_t sp_pad_sequence(
@@ -1091,6 +1097,24 @@ class WanRotaryPosEmbedImpl : public torch::nn::Module {
     return {freqs_cos, freqs_sin};
   }
 
+  std::tuple<torch::Tensor, torch::Tensor> forward_cache(
+      const torch::Tensor& hidden_states) {
+    int64_t num_frames = hidden_states.size(2);
+    int64_t height = hidden_states.size(3);
+    int64_t width = hidden_states.size(4);
+
+    if (num_frames != cached_num_frames_ || height != cached_height_ ||
+        width != cached_width_) {
+      auto [cos, sin] = forward(hidden_states);
+      freqs_cos_cache_ = std::move(cos);
+      freqs_sin_cache_ = std::move(sin);
+      cached_num_frames_ = num_frames;
+      cached_height_ = height;
+      cached_width_ = width;
+    }
+    return {freqs_cos_cache_, freqs_sin_cache_};
+  }
+
  private:
   void compute_freqs() {
     std::vector<torch::Tensor> freqs_cos_list;
@@ -1128,6 +1152,12 @@ class WanRotaryPosEmbedImpl : public torch::nn::Module {
 
   torch::Tensor freqs_cos_;
   torch::Tensor freqs_sin_;
+
+  torch::Tensor freqs_cos_cache_;
+  torch::Tensor freqs_sin_cache_;
+  int64_t cached_num_frames_ = -1;
+  int64_t cached_height_ = -1;
+  int64_t cached_width_ = -1;
 
   torch::TensorOptions options_;
 };
@@ -1386,7 +1416,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
 
     torch::Tensor hidden_states = hidden_states_in;
 
-    auto [freqs_cos, freqs_sin] = rope_->forward(hidden_states);
+    auto [freqs_cos, freqs_sin] = rope_->forward_cache(hidden_states);
 
     auto rotary_emb = std::make_pair(freqs_cos, freqs_sin);
 
