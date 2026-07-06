@@ -235,9 +235,10 @@ std::tuple<torch::Tensor, torch::Tensor> torch_chunk_gated_delta_rule(
   auto g_diff = g.unsqueeze(-1) - g.unsqueeze(-2);
   auto decay_mask = g_diff.tril().exp().to(torch::kFloat32);
   decay_mask = decay_mask.tril();
-  auto attn = -(torch::matmul(k_beta, key.transpose(/*dim0=*/-1, /*dim1=*/-2)) * 
+  auto attn = -(torch::matmul(k_beta, key.transpose(/*dim0=*/-1, /*dim1=*/-2)) *
                 decay_mask)
-                   .masked_fill(mask, /*value=*/0.0).contiguous();
+                   .masked_fill(mask, /*value=*/0.0)
+                   .contiguous();
   for (int64_t i = 1; i < chunk_size; ++i) {
     auto row = attn.slice(/*dim=*/-2, /*start=*/i, /*end=*/i + 1)
                    .slice(/*dim=*/-1, /*start=*/0, /*end=*/i)

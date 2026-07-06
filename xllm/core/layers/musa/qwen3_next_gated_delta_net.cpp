@@ -197,7 +197,7 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::merge_qkvz_from_split_activations(
   // Graph-capture-safe replacement for `torch::cat({q,k,v,z_view}, -1)`.
   // Pre-allocated `qkvz_merge_buf_` is reused across replays; each piece is
   // written via a strided `copy_` into its slice along the last dim.
-    const int64_t m = bs * seqlen;
+  const int64_t m = bs * seqlen;
   const int64_t total_last_dim = 2 * head_k_dim_ + 2 * head_v_part;
   const int64_t flat_dim = local_k_heads * total_last_dim;
   const bool needs_realloc =
@@ -253,7 +253,7 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::merge_ba_from_split_activations(
   auto a_view = a.view({bs, seqlen, local_k_heads, num_v_heads_per_k});
 
 #if defined(USE_CUDA) || defined(USE_MUSA)
-    const int64_t m = bs * seqlen;
+  const int64_t m = bs * seqlen;
   const int64_t M = bs * seqlen;
   const int64_t total_last_dim = 2 * num_v_heads_per_k;
   const int64_t flat_dim = local_k_heads * total_last_dim;
