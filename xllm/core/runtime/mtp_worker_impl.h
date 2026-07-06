@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <mutex>
+
 #include "framework/kv_cache/embedding_cache.h"
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #if defined(USE_NPU)
@@ -66,8 +68,10 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
 #endif
 
   ForwardInput update_input_by_last_step_output(ForwardInput& inputs) override;
-  void prepare_work_before_execute(const ForwardInput& inputs,
-                                   ForwardInput& processed_inputs) override;
+  ForwardInput update_input_by_last_step_output_for_schedule_overlap(
+      ForwardInput& inputs) override;
+  folly::SemiFuture<std::optional<ForwardOutput>> step_async(
+      const ForwardInput& inputs) override;
 
  protected:
   std::optional<ForwardOutput> step_prefill(const ForwardInput& input) override;
@@ -136,6 +140,12 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
 
   // Embedding cache for speculative decoding
   std::shared_ptr<EmbeddingCache> embedding_cache_;
+
+  // MTP keeps per-worker speculative state (embedding_cache_, draft/target
+  // worker contexts, and shared prepare/compute streams). Schedule overlap can
+  // dispatch the next step before the previous batch result is consumed, so
+  // serialize MTP step construction to avoid cross-request state mutation.
+  std::recursive_mutex step_mutex_;
 
   // Whether validation directly uses selected-only draft_probs [B, S].
   // If false, selected-only cache values are restored to dense [B, S, V].

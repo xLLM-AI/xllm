@@ -789,6 +789,10 @@ struct MultiModalInput {
 struct ParallelInput {
   // num tokens of all workers, mainly used for dp case
   std::vector<int32_t> dp_global_token_nums;
+  // Original DP token counts before empty ranks are padded to one fake token.
+  // Attention/FFN paths may need the padded counts, while lm_head output
+  // compaction must skip true empty DP ranks.
+  std::vector<int32_t> raw_dp_global_token_nums;
   std::vector<int32_t> dp_is_decode;
 
   DpEpPaddingData dp_ep_padding_data;
@@ -811,6 +815,7 @@ struct ParallelInput {
   ParallelInput to(const torch::Device& device) const {
     ParallelInput out;
     out.dp_global_token_nums = dp_global_token_nums;
+    out.raw_dp_global_token_nums = raw_dp_global_token_nums;
     out.dp_is_decode = dp_is_decode;
     out.dp_ep_padding_data = dp_ep_padding_data;
     out.cp_ep_padding_data

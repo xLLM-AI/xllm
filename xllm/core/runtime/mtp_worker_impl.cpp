@@ -26,6 +26,7 @@ limitations under the License.
 #endif
 #include "core/framework/block/block_utils.h"
 #include "core/framework/config/disagg_pd_config.h"
+#include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/speculative_config.h"
@@ -131,6 +132,22 @@ void wait_metadata_ready_event(const ForwardInput& input, Stream& stream) {
       << "failed to wait speculative metadata ready event";
 }
 
+void wait_output_ready_event(const ForwardOutput& output, Stream& stream) {
+  if (output.ready_event == nullptr) {
+    return;
+  }
+  CHECK(stream.wait_event(output.ready_event))
+      << "failed to wait speculative output ready event";
+}
+
+void record_output_ready_event(ForwardOutput& output, Stream& stream) {
+  StreamEventPtr event = stream.record_event();
+  if (event == nullptr) {
+    stream.synchronize();
+  }
+  output.ready_event = event;
+}
+
 #if defined(USE_NPU)
 void clear_expanded_spec_verify_graph_input(ModelInputParams& input_params) {
   input_params.graph.use_expanded_decode_for_spec_verify_attention = false;
@@ -190,7 +207,7 @@ void build_expanded_spec_verify_graph_input(ModelInputParams& input_params,
                         .pinned_memory(true));
   input_params.graph.use_expanded_decode_for_spec_verify_attention = true;
   input_params.graph.expanded_kv_seq_lens =
-      expanded_kv_seq_lens_host.to(device, /*non_blocking=*/true);
+      expanded_kv_seq_lens_host.to(device, /*non_blocking=*/false);
   input_params.graph.expanded_block_tables =
       torch::stack(expanded_block_rows, 0);
   input_params.graph.expanded_kv_seq_lens_vec = std::move(expanded_kv_seq_lens);
@@ -266,7 +283,10 @@ void set_token_ids_device_tensor(ForwardInput& input,
 }
 
 torch::Tensor to_cpu_int_tensor_for_read(const torch::Tensor& values) {
-  return safe_to(values.flatten(),
+  // The source tensor may still be backed by a short-lived device buffer when
+  // schedule overlap is enabled. Clone first so the CPU read sees a stable
+  // storage independent of the producer's workspace lifetime.
+  return safe_to(values.flatten().clone(),
                  torch::TensorOptions().dtype(torch::kInt).device(torch::kCPU),
                  false)
       .contiguous();
@@ -381,7 +401,7 @@ void apply_cp_mtp_prefill_target_tokens(
       << "unused target next_tokens for CP MTP prefill";
 
   input.token_ids =
-      safe_to(input.token_ids_host, token_options, /*non_blocking=*/true);
+      safe_to(input.token_ids_host, token_options, /*non_blocking=*/false);
   embedding.mtp_shifted_token_ids = input.token_ids;
   input.device_tensors_ready = true;
 }
@@ -423,7 +443,7 @@ void replace_host_token_placeholders(ForwardInput& input,
 
   if (refresh_device) {
     input.token_ids =
-        safe_to(input.token_ids_host, token_options, /*non_blocking=*/true);
+        safe_to(input.token_ids_host, token_options, /*non_blocking=*/false);
     input.device_tensors_ready = true;
   }
 }
@@ -437,9 +457,9 @@ void set_token_position_tensors(ForwardInput& input,
   input.token_ids_host = make_cpu_int_tensor(token_ids);
   input.positions_host = make_cpu_int_tensor(positions);
   input.token_ids =
-      safe_to(input.token_ids_host, token_options, /*non_blocking=*/true);
+      safe_to(input.token_ids_host, token_options, /*non_blocking=*/false);
   input.positions =
-      safe_to(input.positions_host, position_options, /*non_blocking=*/true);
+      safe_to(input.positions_host, position_options, /*non_blocking=*/false);
   input.device_tensors_ready = true;
 }
 
@@ -449,7 +469,7 @@ void set_positions_tensor(ForwardInput& input,
   input.device_tensors_ready = false;
   input.positions_host = make_cpu_int_tensor(positions);
   input.positions =
-      safe_to(input.positions_host, device_options, /*non_blocking=*/true);
+      safe_to(input.positions_host, device_options, /*non_blocking=*/false);
   input.device_tensors_ready = true;
 }
 
@@ -721,13 +741,76 @@ ForwardInput MTPWorkerImpl::update_input_by_last_step_output(
   return inputs;
 }
 
-void MTPWorkerImpl::prepare_work_before_execute(const ForwardInput& input,
-                                                ForwardInput& processed_input) {
-  SpeculativeWorkerImpl::prepare_work_before_execute(input, processed_input);
+ForwardInput
+MTPWorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
+    ForwardInput& inputs) {
+  c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+  wait_output_ready_event(last_step_output_, *compute_stream_);
+  return update_input_by_last_step_output(inputs);
+}
+
+folly::SemiFuture<std::optional<ForwardOutput>> MTPWorkerImpl::step_async(
+    const ForwardInput& input) {
+  folly::Promise<std::optional<ForwardOutput>> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([this, input, promise = std::move(promise)]() mutable {
+    std::lock_guard<std::recursive_mutex> lock(step_mutex_);
+
+    ForwardInput input_on_device;
+    prepare_work_before_execute(input, input_on_device);
+
+    if (hierarchy_kv_cache_transfer_ != nullptr) {
+      hierarchy_kv_cache_transfer_->set_layer_synchronizer(
+          input_on_device.input_params);
+    }
+
+    if (!enable_schedule_overlap()) {
+      const auto output = this->step(input_on_device);
+      promise.setValue(output);
+      return;
+    }
+
+    if (can_use_last_step_output_for_schedule_overlap(input_on_device) &&
+        input_on_device.token_ids.numel() > 0 &&
+        input_on_device.input_params.meta.batch_forward_type.has_decode()) {
+      input_on_device = update_input_by_last_step_output_for_schedule_overlap(
+          input_on_device);
+    }
+
+    const auto output = this->step_for_schedule_overlap(input_on_device);
+    if (output.has_value()) {
+      if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
+        std::unique_lock<std::mutex> output_lock(mtx_);
+        cv_.wait(output_lock, [this] { return !is_recorded_; });
+        update_last_step_output(
+            output, input_on_device.input_params.embedding.request_ids);
+        is_recorded_ = true;
+        cv_.notify_one();
+      } else {
+        update_last_step_output(
+            output, input_on_device.input_params.embedding.request_ids);
+      }
+    } else {
+      if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
+        std::unique_lock<std::mutex> output_lock(mtx_);
+        cv_.wait(output_lock, [this] { return !is_recorded_; });
+        last_step_output_valid_ = false;
+        last_step_request_ids_.clear();
+        is_recorded_ = true;
+        cv_.notify_one();
+      } else {
+        last_step_output_valid_ = false;
+        last_step_request_ids_.clear();
+      }
+    }
+    promise.setValue(output);
+  });
+  return future;
 }
 
 std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
     const ForwardInput& input) {
+  std::lock_guard<std::recursive_mutex> lock(step_mutex_);
   if (!input.input_params.meta.batch_forward_type.is_decode()) {
     ForwardInput target_prepared;
     ForwardInput draft_prepared;
@@ -738,7 +821,9 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
                                              *prepare_stream_,
                                              *compute_stream_,
                                              draft_prepared);
-    (void)draft_output;
+    if (draft_output.has_value()) {
+      wait_output_ready_event(draft_output.value(), *compute_stream_);
+    }
     clear_all_output_embeddings(*output);
     return output;
   } else {
@@ -752,6 +837,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
          new_input.input_params.parallel.dp_global_token_nums) {
       token_num *= 2;
     }
+    for (int32_t& token_num :
+         new_input.input_params.parallel.raw_dp_global_token_nums) {
+      token_num *= 2;
+    }
     ForwardOutput draft_extend_output =
         run_llm_no_sync_impl(*draft_impl_,
                              new_input,
@@ -759,7 +848,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
                              *compute_stream_,
                              draft_extend_prepared)
             .value();
-    (void)draft_extend_output;
+    wait_output_ready_event(draft_extend_output, *compute_stream_);
 
     for (int32_t i = 1; i < options_.num_speculative_tokens(); ++i) {
       ForwardOutput draft_output = run_llm_no_sync_impl(*draft_impl_,
@@ -768,12 +857,16 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
                                                         *compute_stream_,
                                                         draft_step_prepared[i])
                                        .value();
-      (void)draft_output;
+      wait_output_ready_event(draft_output, *compute_stream_);
     }
 
     new_input = input;
     for (int32_t& token_num :
          new_input.input_params.parallel.dp_global_token_nums) {
+      token_num *= options_.num_speculative_tokens() + 1;
+    }
+    for (int32_t& token_num :
+         new_input.input_params.parallel.raw_dp_global_token_nums) {
       token_num *= options_.num_speculative_tokens() + 1;
     }
     ForwardOutput output = run_llm_no_sync_impl(*impl_,
@@ -789,6 +882,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
 
 std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
     const ForwardInput& input) {
+  std::lock_guard<std::recursive_mutex> lock(step_mutex_);
   Timer timer;
   ForwardInput target_prepared;
   ForwardInput draft_prepared;
@@ -798,6 +892,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
       run_llm_no_sync_impl(
           *impl_, input, *prepare_stream_, *compute_stream_, target_prepared)
           .value();
+  wait_output_ready_event(output, *compute_stream_);
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
 
@@ -808,28 +903,30 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
   // prepare input for draft model
   auto& embeddings = output.sample_output.embeddings;
 
-  if (embeddings.defined()) {
-    prefill_input.input_params.embedding.input_embedding = embeddings.clone();
-  }
-  if (output.sample_output.next_tokens.defined()) {
+  {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-    const auto& extra_token_ids =
-        prefill_input.input_params.embedding.extra_token_ids;
-    if (options_.cp_size() > 1 &&
-        has_mtp_prefill_placeholder_extra_token(extra_token_ids, -1)) {
-      apply_cp_mtp_prefill_target_tokens(prefill_input,
-                                         output.sample_output.next_tokens,
-                                         -1,
-                                         prefill_input.token_ids.options());
-    } else {
-      replace_host_token_placeholders(prefill_input,
-                                      -1,
-                                      output.sample_output.next_tokens,
-                                      prefill_input.token_ids.options());
+    if (embeddings.defined()) {
+      prefill_input.input_params.embedding.input_embedding = embeddings.clone();
     }
-  }
-  if (embeddings.defined() || output.sample_output.next_tokens.defined()) {
-    record_current_metadata_ready_event(prefill_input, *compute_stream_);
+    if (output.sample_output.next_tokens.defined()) {
+      const auto& extra_token_ids =
+          prefill_input.input_params.embedding.extra_token_ids;
+      if (options_.cp_size() > 1 &&
+          has_mtp_prefill_placeholder_extra_token(extra_token_ids, -1)) {
+        apply_cp_mtp_prefill_target_tokens(prefill_input,
+                                           output.sample_output.next_tokens,
+                                           -1,
+                                           prefill_input.token_ids.options());
+      } else {
+        replace_host_token_placeholders(prefill_input,
+                                        -1,
+                                        output.sample_output.next_tokens,
+                                        prefill_input.token_ids.options());
+      }
+    }
+    if (embeddings.defined() || output.sample_output.next_tokens.defined()) {
+      record_current_metadata_ready_event(prefill_input, *compute_stream_);
+    }
   }
   // generate kv cache for draft model
   timer.reset();
@@ -839,11 +936,16 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
                                                     *compute_stream_,
                                                     draft_prepared)
                                    .value();
-  process_draft_sample_output(draft_output.sample_output);
+  wait_output_ready_event(draft_output, *compute_stream_);
+  {
+    c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+    process_draft_sample_output(draft_output.sample_output);
+  }
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               timer.elapsed_seconds());
 
   if (input.sampling_params.selected_token_idxes.defined()) {
+    c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     // Under CP the target prefill `embeddings` is the full local token shard,
     // which cannot be indexed by the CP all-gather-space selected indices.
     // Prefer the LmHead-gathered per-sequence hidden when present so the cache
@@ -877,6 +979,9 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
     return std::nullopt;
+  }
+  if (enable_schedule_overlap()) {
+    record_output_ready_event(output, *compute_stream_);
   }
   return output;
 }
@@ -927,13 +1032,14 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
   prefill_input.token_ids_host = make_cpu_int_tensor(new_token_ids);
   prefill_input.token_ids = safe_to(prefill_input.token_ids_host,
                                     prefill_input.positions.options(),
-                                    /*non_blocking=*/true);
+                                    /*non_blocking=*/false);
   prefill_input.device_tensors_ready = true;
   finish_metadata_prepare(*prepare_stream_, prefill_input);
 }
 
 std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
     const ForwardInput& raw_input) {
+  std::lock_guard<std::recursive_mutex> lock(step_mutex_);
   ForwardInput input = raw_input;
   if (use_chunked_prefill_spec_verify_path()) {
     stabilize_decode_host_tensors(input);
@@ -1025,21 +1131,24 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
         << "draft output is empty in speculative step";
 
     draft_outputs.emplace_back(std::move(draft_output_opt.value()));
+    wait_output_ready_event(draft_outputs.back(), *compute_stream_);
     if (reuse_mtp_topk_indices) {
       mtp_topk_indices = draft_outputs.back().dsa_topk_indices;
     }
-    // Unify this step's draft next_tokens across the consensus group before
-    // process_draft_sample_output() compresses the still-full [batch, vocab]
-    // probs into the cache: gathering the cached prob with a unified token
-    // yields a unified prob, so we only broadcast the [batch] token tensor
-    if (get_optimization_config().enable_spec_token_broadcast &&
-        enable_schedule_overlap()) {
+    {
       c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+      // Unify this step's draft next_tokens across the consensus group before
+      // process_draft_sample_output() compresses the still-full [batch, vocab]
+      // probs into the cache: gathering the cached prob with a unified token
+      // yields a unified prob, so we only broadcast the [batch] token tensor.
       SampleOutput& draft_sample = draft_outputs.back().sample_output;
-      broadcast_spec_tokens(draft_sample.next_tokens,
-                            spec_broadcast_group(parallel_args_));
+      if (get_optimization_config().enable_spec_token_broadcast &&
+          enable_schedule_overlap()) {
+        broadcast_spec_tokens(draft_sample.next_tokens,
+                              spec_broadcast_group(parallel_args_));
+      }
+      process_draft_sample_output(draft_sample);
     }
-    process_draft_sample_output(draft_outputs.back().sample_output);
     if (draft_idx == num_speculative_tokens - 1) {
       continue;
     }
@@ -1092,13 +1201,14 @@ void MTPWorkerImpl::fill_validate_input_from_draft_outputs(
     CHECK(next_tokens.defined())
         << "draft next_tokens must be defined for validate token fill";
     torch::Tensor draft_tokens =
-        safe_to(next_tokens.flatten(), token_options, /*non_blocking=*/true);
+        safe_to(next_tokens.flatten(), token_options, /*non_blocking=*/false);
     CHECK_EQ(draft_tokens.numel(), num_sequences)
         << "draft token count must match validate sequence count";
     validate_token_rows.select(/*dim=*/1, /*index=*/i + 1)
-        .copy_(draft_tokens, /*non_blocking=*/true);
+        .copy_(draft_tokens, /*non_blocking=*/false);
   }
   validate_input.device_tensors_ready = true;
+  record_metadata_ready_event(compute_stream, validate_input);
 }
 
 std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
@@ -1116,13 +1226,17 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
                                                      *compute_stream_,
                                                      target_prepared)
                                     .value();
+  wait_output_ready_event(target_output, *compute_stream_);
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
 
   // verify the proposals with target and update the batch
   timer.reset();
-  SampleOutput val_output =
-      validate(input.sampling_params, draft_outputs, target_output);
+  SampleOutput val_output;
+  {
+    c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+    val_output = validate(input.sampling_params, draft_outputs, target_output);
+  }
   COUNTER_ADD(speculative_execution_latency_seconds_validation,
               timer.elapsed_seconds());
 
@@ -1146,6 +1260,9 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   clear_all_output_embeddings(target_output);
   val_output.embeddings = torch::Tensor();
   target_output.sample_output = val_output;
+  if (enable_schedule_overlap()) {
+    record_output_ready_event(target_output, *compute_stream_);
+  }
   return target_output;
 }
 
@@ -1408,6 +1525,9 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
   for (int32_t& token_num : input_params.parallel.dp_global_token_nums) {
     token_num *= num_val_tokens;
   }
+  for (int32_t& token_num : input_params.parallel.raw_dp_global_token_nums) {
+    token_num *= num_val_tokens;
+  }
 
   if (use_chunked_prefill_spec_verify_path()) {
     input_params.embedding.input_embedding = torch::Tensor();
@@ -1485,6 +1605,11 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
   std::vector<int32_t> selected_row_idx;
   expanded_embeddings.reserve(num_sequences * 2);
   selected_row_idx.reserve(num_sequences);
+
+  // Draft-extend reuses target embeddings saved from the previous compute
+  // stream. Wait before any device move/stack so prepare_stream_ does not read
+  // or copy embedding storage while compute_stream_ is still producing it.
+  prepare_stream_->wait_stream(*compute_stream_);
 
   auto to_worker_device = [this](const torch::Tensor& tensor) {
     if (!tensor.defined() || tensor.device() == device_) {
@@ -1613,12 +1738,6 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
   }
   input_params.attention.rebuild_device_buffer(device_);
 
-  // Establish cross-stream ordering before stacking the draft-extend
-  // embeddings. The stack runs on prepare_stream_, but the embedding rows it
-  // reads are produced/finalized by work enqueued on compute_stream_. Make
-  // prepare_stream_ wait on compute_stream_ via an event.
-  prepare_stream_->wait_stream(*compute_stream_);
-
   input_params.embedding.input_embedding = torch::stack(expanded_embeddings);
 
   if (!input_params.parallel.dp_global_token_nums.empty()) {
@@ -1626,9 +1745,17 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
       for (int32_t& token_num : input_params.parallel.dp_global_token_nums) {
         token_num *= 2;
       }
+      for (int32_t& token_num :
+           input_params.parallel.raw_dp_global_token_nums) {
+        token_num *= 2;
+      }
     } else if (dp_enabled) {
       constexpr int32_t num_extend_tokens = 2;
       for (int32_t& token_num : input_params.parallel.dp_global_token_nums) {
+        token_num *= num_extend_tokens;
+      }
+      for (int32_t& token_num :
+           input_params.parallel.raw_dp_global_token_nums) {
         token_num *= num_extend_tokens;
       }
     } else if (input_params.parallel.dp_global_token_nums.size() == 1) {
@@ -1642,9 +1769,12 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
       params.selected_token_idxes.defined()
           ? params.selected_token_idxes.options()
           : torch::dtype(torch::kInt).device(device_);
+  // These index tensors are created from temporaries. Keep the copy
+  // synchronous so the source storage cannot disappear before the device
+  // transfer completes under schedule overlap.
   params.selected_token_idxes = safe_to(make_cpu_int_tensor(selected_row_idx),
                                         idx_options,
-                                        /*non_blocking=*/true);
+                                        /*non_blocking=*/false);
   if (!params.sample_idxes.defined()) {
     std::vector<int32_t> sample_idxes_vec;
     sample_idxes_vec.reserve(num_sequences);
@@ -1653,7 +1783,7 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
     }
     params.sample_idxes = safe_to(make_cpu_int_tensor(sample_idxes_vec),
                                   idx_options,
-                                  /*non_blocking=*/true);
+                                  /*non_blocking=*/false);
   }
   extend_input.device_tensors_ready = true;
   finish_metadata_prepare(*prepare_stream_, extend_input);

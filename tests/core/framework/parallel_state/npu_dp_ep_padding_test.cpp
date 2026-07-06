@@ -40,6 +40,7 @@ TEST(DpEpPaddingTest, Build) {
   nlohmann::json data = mapping.to_json();
   torch::Tensor token_size_per_dp_group = torch::tensor({10, 10});
   DpEpPadding dp_ep_padding(token_size_per_dp_group,
+                            torch::Tensor(),
                             8,
                             data,
                             torch::Device(torch::kCPU),
@@ -57,6 +58,74 @@ TEST(DpEpPaddingTest, Build) {
   LOG(INFO) << "un_padding_idx:" << dp_ep_padding_data.un_padding_idx();
   LOG(INFO) << "dynamic_ep_idx:" << dp_ep_padding_data.dynamic_ep_idx();
   LOG(INFO) << "moe_idx:" << dp_ep_padding_data.moe_idx();
+}
+
+TEST(DpEpPaddingTest, BuildFfnPaddingWithEmptyDpGroup) {
+  std::string rank_table_file;
+  MappingNPU::Options options = get_mapping_options();
+  MappingNPU mapping(rank_table_file, 16, 8, options);
+  nlohmann::json data = mapping.to_json();
+
+  torch::Tensor token_size_per_dp_group = torch::tensor({0, 2});
+  DpEpPadding dp_ep_padding(token_size_per_dp_group,
+                            token_size_per_dp_group,
+                            8,
+                            data,
+                            torch::Device(torch::kCPU),
+                            torch::Dtype(torch::kInt32),
+                            false);
+  DpEpPaddingData dp_ep_padding_data = dp_ep_padding.build();
+
+  EXPECT_LE(dp_ep_padding_data.ffn_padding_idx().max().item<int32_t>(), 1);
+  EXPECT_TRUE(
+      torch::equal(dp_ep_padding_data.lm_head_skip_padding_token_indices(),
+                   torch::tensor({8, 9}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(dp_ep_padding_data.attn_unpadding_idx(),
+                           torch::tensor({8, 9}, torch::kInt32)));
+}
+
+TEST(DpEpPaddingTest, BuildFfnPaddingWithTrailingEmptyDpGroup) {
+  std::string rank_table_file;
+  MappingNPU::Options options = get_mapping_options();
+  MappingNPU mapping(rank_table_file, 16, 0, options);
+  nlohmann::json data = mapping.to_json();
+
+  torch::Tensor token_size_per_dp_group = torch::tensor({1, 0});
+  DpEpPadding dp_ep_padding(token_size_per_dp_group,
+                            token_size_per_dp_group,
+                            8,
+                            data,
+                            torch::Device(torch::kCPU),
+                            torch::Dtype(torch::kInt32),
+                            false);
+  DpEpPaddingData dp_ep_padding_data = dp_ep_padding.build();
+
+  EXPECT_LE(dp_ep_padding_data.ffn_padding_idx().max().item<int32_t>(), 0);
+  EXPECT_TRUE(
+      torch::equal(dp_ep_padding_data.lm_head_skip_padding_token_indices(),
+                   torch::tensor({0}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(dp_ep_padding_data.attn_unpadding_idx(),
+                           torch::tensor({0}, torch::kInt32)));
+}
+
+TEST(DpEpPaddingTest, BuildAttnUnpaddingWithTrailingEmptyDpGroup) {
+  std::string rank_table_file;
+  MappingNPU::Options options = get_mapping_options();
+  MappingNPU mapping(rank_table_file, 16, 0, options);
+  nlohmann::json data = mapping.to_json();
+
+  torch::Tensor token_size_per_dp_group = torch::tensor({2, 0});
+  DpEpPadding dp_ep_padding(token_size_per_dp_group,
+                            token_size_per_dp_group,
+                            8,
+                            data,
+                            torch::Device(torch::kCPU),
+                            torch::Dtype(torch::kInt32),
+                            false);
+  DpEpPaddingData dp_ep_padding_data = dp_ep_padding.build();
+
+  EXPECT_TRUE(torch::equal(dp_ep_padding_data.attn_unpadding_idx(),
+                           torch::tensor({0, 1}, torch::kInt32)));
 }
 
 }  // namespace xllm

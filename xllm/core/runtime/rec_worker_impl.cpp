@@ -441,10 +441,20 @@ void RecWorkerImpl::RecWorkPipeline::prepare_work_before_execute(
             .device(torch::kCPU)
             .dtype(torch::kInt32)
             .pinned_memory(true));
+    const auto& raw_dp_token_nums =
+        processed_inputs.input_params.parallel.raw_dp_global_token_nums;
+    torch::Tensor raw_token_size_per_dp_group =
+        raw_dp_token_nums.empty() ? torch::Tensor()
+                                  : torch::tensor(raw_dp_token_nums,
+                                                  torch::TensorOptions()
+                                                      .device(torch::kCPU)
+                                                      .dtype(torch::kInt32)
+                                                      .pinned_memory(true));
     bool is_prefill =
         processed_inputs.input_params.meta.batch_forward_type.is_prefill();
     DpEpPadding dp_ep_padding(
         token_size_per_dp_group,
+        raw_token_size_per_dp_group,
         runtime_.context->get_model_args().num_experts_per_tok(),
         runtime_.context->get_parallel_args().mapping_data(),
         runtime_.worker.device(),

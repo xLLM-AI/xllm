@@ -319,6 +319,9 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
   for (auto& it : input_params.parallel.dp_global_token_nums) {
     it *= num_val_tokens;
   }
+  for (auto& it : input_params.parallel.raw_dp_global_token_nums) {
+    it *= num_val_tokens;
+  }
   validate_input.device_tensors_ready = true;
 }
 

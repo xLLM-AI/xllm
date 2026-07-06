@@ -549,16 +549,43 @@ WorkerImpl::estimate_kv_cache_capacity_async() {
 }
 
 void WorkerImpl::update_last_step_output(
-    const std::optional<ForwardOutput>& output) {
+    const std::optional<ForwardOutput>& output,
+    const std::vector<std::string>& request_ids) {
   if (output.value().sample_output.next_tokens.defined()) {
     last_step_output_ = std::move(output.value());
+    last_step_request_ids_ = request_ids;
     last_step_output_valid_ = true;
   } else {
     if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
       last_step_output_ = std::move(output.value());
+      last_step_request_ids_ = request_ids;
+    } else {
+      last_step_request_ids_.clear();
     }
     last_step_output_valid_ = false;
   }
+}
+
+bool WorkerImpl::can_use_last_step_output_for_schedule_overlap(
+    const ForwardInput& input) const {
+  if (!last_step_output_valid_) {
+    return false;
+  }
+  const auto& request_ids = input.input_params.embedding.request_ids;
+  if (request_ids.empty() || last_step_request_ids_.empty()) {
+    return true;
+  }
+  for (const auto& request_id : request_ids) {
+    if (request_id.empty()) {
+      continue;
+    }
+    if (std::find(last_step_request_ids_.begin(),
+                  last_step_request_ids_.end(),
+                  request_id) != last_step_request_ids_.end()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 ForwardInput WorkerImpl::update_input_by_last_step_output(
@@ -926,9 +953,19 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
               .device(torch::kCPU)
               .dtype(torch::kInt32)
               .pinned_memory(true));
+      const auto& raw_dp_token_nums =
+          processed_input.input_params.parallel.raw_dp_global_token_nums;
+      torch::Tensor raw_token_size_per_dp_group =
+          raw_dp_token_nums.empty() ? torch::Tensor()
+                                    : torch::tensor(raw_dp_token_nums,
+                                                    torch::TensorOptions()
+                                                        .device(torch::kCPU)
+                                                        .dtype(torch::kInt32)
+                                                        .pinned_memory(true));
       const bool is_prefill =
           processed_input.input_params.meta.batch_forward_type.no_decode();
       DpEpPadding dp_ep_padding(token_size_per_dp_group,
+                                raw_token_size_per_dp_group,
                                 context_.get_model_args().num_experts_per_tok(),
                                 context_.get_parallel_args().mapping_data(),
                                 device_,
@@ -1107,7 +1144,8 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
       const auto output = this->step(input);
       promise.setValue(output);
     } else {
-      if (last_step_output_valid_ && input.token_ids.numel() > 0 &&
+      if (can_use_last_step_output_for_schedule_overlap(input) &&
+          input.token_ids.numel() > 0 &&
           input.input_params.meta.batch_forward_type.has_decode()) {
         // replace step i model input with true output of step i-1
         input = update_input_by_last_step_output_for_schedule_overlap(input);
@@ -1118,21 +1156,25 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
         if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
           std::unique_lock<std::mutex> lock(mtx_);
           cv_.wait(lock, [this] { return !is_recorded_; });
-          update_last_step_output(output);
+          update_last_step_output(output,
+                                  input.input_params.embedding.request_ids);
           is_recorded_ = true;
           cv_.notify_one();
         } else {
-          update_last_step_output(output);
+          update_last_step_output(output,
+                                  input.input_params.embedding.request_ids);
         }
       } else {
         if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
           std::unique_lock<std::mutex> lock(mtx_);
           cv_.wait(lock, [this] { return !is_recorded_; });
           last_step_output_valid_ = false;
+          last_step_request_ids_.clear();
           is_recorded_ = true;
           cv_.notify_one();
         } else {
           last_step_output_valid_ = false;
+          last_step_request_ids_.clear();
         }
       }
       promise.setValue(output);
