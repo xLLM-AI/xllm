@@ -23,10 +23,6 @@ limitations under the License. -->
 
 ---------------------
 
-<p align="center">
-| <a href="https://docs.xllm-ai.com/"><b>Documentation</b></a> | <a href="https://arxiv.org/abs/2510.14686"><b>Technical Report</b></a> |
-</p>
-
 
 ### 📢 News
 - 2026-06-13: 🎉 We day-0 support the [MiniMax-M3](https://huggingface.co/MiniMaxAI/MiniMax-M3) model, please refer to the [Deployment Document](https://github.com/jd-opensource/xllm/blob/preview/minimax-m3/testspace/run_minimax_m3.sh) for deployment.
@@ -39,45 +35,19 @@ limitations under the License. -->
 - 2025-12-05: 🎉 We build hybrid KV cache management based on [Mooncake](https://github.com/kvcache-ai/Mooncake), supporting global KV cache management with intelligent offloading and prefetching.
 - 2025-10-16: 🎉 We recently have released our [xLLM Technical Report](https://arxiv.org/abs/2510.14686) on arXiv, providing comprehensive technical blueprints and implementation insights.
 
-## Project Overview
+## Overview
 
-**xLLM** is an **efficient LLM inference framework**, specifically optimized for **Chinese AI accelerators**, enabling enterprise-grade deployment with enhanced efficiency and reduced cost. The framework adopts a **service-engine decoupled** inference architecture, achieving breakthrough efficiency through several  technologies: at the service layer, including elastic scheduling of online/offline requests, dynamic PD disaggregation, a hybrid EPD mechanism for multimodal and high-availability fault tolerance; and at the engine layer, combined with technologies such as multi-stream parallel computing, graph fusion optimization, speculative inference, dynamic load balancing and global KV cache management. The overall architecture is shown below:
-
+**xLLM** is an **efficient LLM inference framework**, specifically optimized for **Chinese AI accelerators**, enabling enterprise-grade deployment with enhanced efficiency and reduced cost.
 <div align="center">
 <img src="docs/assets/xllm_arch.png" alt="xllm_arch" style="width:90%; height:auto;">
 </div>
 
-**xLLM** already supports efficient deployment of mainstream large models (such as *DeepSeek-V3.1*, *Qwen2/3*, etc.) on Chinese AI accelerators, empowering enterprises to implement high-performance, low-cost AI large model applications. xLLM has been fully deployed in JD.com’s real core retail businesses, covering a variety of scenarios including intelligent customer service, risk control, supply chain optimization, ad recommendation, and more.
+## Why xLLM
 
-
-## Core Features
-
-**xLLM** delivers robust intelligent computing capabilities. By leveraging hardware system optimization and algorithm-driven decision control, it jointly accelerates the inference process, enabling high-throughput, low-latency distributed inference services.
-
-**Full Graph Pipeline Execution Orchestration**
-- Asynchronous decoupled scheduling at the requests scheduling layer, to reduce computational bubbles.
-- Asynchronous parallelism of computation and communication at the model graph layer, overlapping computation and communication.
-- Pipelining of heterogeneous computing units at the operator kernel layer, overlapping computation and memory access.
-
-**Graph Optimization for Dynamic Shapes**
-- Dynamic shape adaptation based on parameterization and multi-graph caching methods to enhance the flexibility of static graph.
-- Controlled tensor memory pool to ensure address security and reusability.
-- Integration and adaptation of performance-critical custom operators (e.g., *PageAttention*, *AllReduce*).
-
-**Efficient Memory Optimization**
-- Mapping management between discrete physical memory and continuous virtual memory.
-- On-demand memory allocation to reduce memory fragmentation.
-- Intelligent scheduling of memory pages to increase memory reusability.
-- Adaptation of corresponding operators for domestic accelerators.
-
-**Global KV Cache Management**
-- Intelligent offloading and prefetching of KV in hierarchical caches.
-- KV cache-centric distributed storage architecture.
-- Intelligent KV routing among computing nodes.
-
-**Algorithm-driven Acceleration**
-- Speculative decoding optimization to improve efficiency through multi-core parallelism.
-- Dynamic load balancing of MoE experts to achieve efficient adjustment of expert distribution.
+* **Top-tier Performance**: Delivers high-throughput, low-latency inference through full-graph multi-stream pipelined execution, graph fusion optimization, speculative decoding, dynamic MoE expert load balancing, and global multi-level KV cache management.
+* **Mainstream Hardware Support**: Purpose-built and deeply optimized for Chinese AI accelerators, running across a broad range of hardware including NPU, MLU, ILU, MUSA, DCU, MACA and more.
+* **Service-Engine Decoupled Architecture**: Adopts a service-engine decoupled design, where the service layer provides elastic online/offline request scheduling, dynamic PD disaggregation, EPD hybrid execution, and high-availability fault tolerance, while the engine layer focuses on efficient computation.
+* **Enterprise-grade Deployment**: Battle-tested at scale across JD.com's core retail business — including intelligent customer service, risk control, supply chain optimization, and ad recommendation — enabling high-performance, low-cost production deployment.
 
 ---
 ## Hardware Support
@@ -101,13 +71,7 @@ Please refer to [Quick Start](docs/en/getting_started/quick_start.md) for more d
 
 --- 
 
-## Contributing
-Please refer to [CONTRIBUTING.md](.github/CONTRIBUTING.md) for contribution guidelines.
-
----
-
 ## Community & Support
-If you encounter any issues along the way, you are welcomed to submit reproducible steps and log snippets in the project's Issues area, or contact the xLLM Core team directly via your internal Slack. In addition, we have established official WeChat groups. You can access the following QR code to join. Welcome to contact us!
 
 <div align="center">
   <img src="docs/assets/wechat_qrcode.png" alt="qrcode3" width="50%" />
@@ -140,13 +104,6 @@ Thanks to all the following [developers](https://github.com/jd-opensource/xllm/g
   <img src="https://contrib.rocks/image?repo=jd-opensource/xllm" />
 </a>
 
----
-
-## License
-[Apache License](LICENSE)
-
-#### xLLM is provided by JD.com 
-#### Thanks for your Contributions!
 
 ## Citation
 
