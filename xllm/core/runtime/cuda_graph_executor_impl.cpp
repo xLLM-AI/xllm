@@ -1512,6 +1512,15 @@ ModelOutput CudaGraphExecutorImpl::run(const torch::Tensor& tokens,
     // for the cpp and python models). Use torch's standard private graph pool
     // (graph_pool_), which reference-counts captured blocks correctly; decode
     // keeps the VMM pool below where its single-graph capture is sound.
+    // TODO: this only sidesteps the VMM/piecewise incompatibility, so prefill
+    // (unlike decode) gives up the VMM pool's cross-shape memory reuse. The
+    // observed failure is an illegal memory access in the eager attention
+    // kernel (BatchPrefillWithRaggedKVCache) at replay, only at tp>=2 with a
+    // piecewise-prefill forward above ~1.3k tokens (tp=1 / small forwards are
+    // safe); the exact corruption is still unresolved -- capture does no
+    // per-segment offset reset, so it is not the simple bump-reuse implied
+    // above. Follow-up: make the VMM allocator safe for piecewise capture and
+    // re-enable it here to restore prefill memory reuse.
     TorchMemPool* pool_ptr = nullptr;
     const at::cuda::MempoolId_t mem_pool = graph_pool_;
 
