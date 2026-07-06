@@ -24,12 +24,13 @@ limitations under the License.
 // thread-local forward context for KV cache + flashinfer plan) is registered
 // separately once that context exists (see py_model_bridge / M3).
 
+#include "core/kernels/cuda/xllm_ops_library.h"
+
 #include <glog/logging.h>
 #include <torch/library.h>
 #include <torch/torch.h>
 
 #include "core/kernels/cuda/cuda_ops_api.h"
-#include "core/kernels/cuda/xllm_ops_library.h"
 
 namespace xllm {
 namespace {
@@ -39,9 +40,9 @@ namespace {
 // output-argument. rms_norm / silu_and_mul are exposed as functional ops
 // (allocate a fresh output via empty/empty_like — no input copy). The two ops
 // whose kernel mutates its INPUT (fused_add_rms_norm, fused_qk_norm_rope) are
-// exposed as honest IN-PLACE ops: (a!) input annotation + void return (no clone),
-// with the Python wrapper returning the mutated tensor. See each impl for the
-// torch.compile-functionalization reason the return must be void.
+// exposed as honest IN-PLACE ops: (a!) input annotation + void return (no
+// clone), with the Python wrapper returning the mutated tensor. See each impl
+// for the torch.compile-functionalization reason the return must be void.
 
 torch::Tensor rms_norm(const torch::Tensor& input,
                        const torch::Tensor& weight,
@@ -126,12 +127,14 @@ TORCH_LIBRARY(xllm_ops, m) {
   m.def("rms_norm(Tensor input, Tensor weight, float eps) -> Tensor");
   // In-place (mutates input & residual); void return — see impl comment.
   m.def(
-      "fused_add_rms_norm(Tensor(a!) input, Tensor(b!) residual, Tensor weight, "
+      "fused_add_rms_norm(Tensor(a!) input, Tensor(b!) residual, Tensor "
+      "weight, "
       "float eps) -> ()");
   m.def("silu_and_mul(Tensor input) -> Tensor");
   // In-place (mutates qkv q/k slices); void return — see impl comment.
   m.def(
-      "fused_qk_norm_rope(Tensor(a!) qkv, int num_heads_q, int num_heads_k, int "
+      "fused_qk_norm_rope(Tensor(a!) qkv, int num_heads_q, int num_heads_k, "
+      "int "
       "num_heads_v, int head_dim, float eps, Tensor q_weight, Tensor k_weight, "
       "Tensor cos_sin_cache, bool interleaved, Tensor position_ids) -> ()");
 }

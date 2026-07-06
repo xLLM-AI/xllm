@@ -226,14 +226,13 @@ void PyCausalLM::load_model(std::unique_ptr<ModelLoader> loader) {
 
   py::list py_state_dicts;
   for (const auto& sd : state_dicts) {
-    py_state_dicts.append(py::cast(PyStateDict(sd.get()),
-                                   py::return_value_policy::move));
+    py_state_dicts.append(
+        py::cast(PyStateDict(sd.get()), py::return_value_policy::move));
   }
 
-  py_model_.attr("load_weights")(
-      py_state_dicts,
-      static_cast<int32_t>(tp_rank_),
-      static_cast<int32_t>(tp_size_));
+  py_model_.attr("load_weights")(py_state_dicts,
+                                 static_cast<int32_t>(tp_rank_),
+                                 static_cast<int32_t>(tp_size_));
 }
 
 ModelOutput PyCausalLM::forward(const torch::Tensor& tokens,

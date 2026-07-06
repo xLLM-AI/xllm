@@ -74,9 +74,8 @@ TEST_F(XllmOpsTest, DispatcherRmsNormMatchesReference) {
 
   auto op =
       c10::Dispatcher::singleton().findSchemaOrThrow("xllm_ops::rms_norm", "");
-  auto out = op.typed<torch::Tensor(const torch::Tensor&,
-                                    const torch::Tensor&,
-                                    double)>()
+  auto out = op.typed<torch::Tensor(
+      const torch::Tensor&, const torch::Tensor&, double)>()
                  .call(input, weight, eps);
 
   auto ref = rms_norm_reference(input, weight, eps);
