@@ -39,7 +39,7 @@ DEFINE_int32(flashcomm1_min_decode_tokens,
              "Minimum decode batch token count to activate FC1.");
 
 DEFINE_bool(enable_mmrs_fusion,
-            true,
+            false,
             "Enable Matmul+ReduceScatter fusion kernel for FC1.");
 
 DEFINE_string(mmrs_comm_mode,

@@ -41,46 +41,6 @@ torch::Tensor reshape_quant_vector_if_compatible(const std::string& name,
   }
   return loaded;
 }
-
-torch::Tensor materialize_cpu_tensor_for_copy(const torch::Tensor& tensor) {
-  if (!tensor.defined() || tensor.device().is_cuda() ||
-      tensor.device().type() != torch::kCPU) {
-    return tensor;
-  }
-  if (tensor.is_contiguous()) {
-    return tensor.clone();
-  }
-  return tensor.contiguous().clone();
-}
-
-void copy_weight_tensor(const std::string& name,
-                        torch::Tensor& target,
-                        const torch::Tensor& source) {
-  auto materialized = materialize_cpu_tensor_for_copy(source);
-  if (target.device().type() != torch::kCPU &&
-      materialized.device().type() == torch::kCPU) {
-    VLOG(1) << "Materialized CPU tensor before weight copy: name=" << name
-            << ", target_device=" << target.device()
-            << ", sizes=" << materialized.sizes();
-  }
-  target.copy_(materialized);
-}
-
-std::string full_weight_name(std::string_view prefix,
-                             const std::string& name) {
-  std::string full_name(prefix);
-  full_name += name;
-  return full_name;
-}
-
-std::string full_weight_name(std::string_view prefix,
-                             const std::string& sub_prefix,
-                             const std::string& name) {
-  std::string full_name(prefix);
-  full_name += sub_prefix;
-  full_name += name;
-  return full_name;
-}
 }  // namespace
 
 void load_weight(const StateDict& state_dict,
@@ -96,8 +56,7 @@ void load_weight(const StateDict& state_dict,
         << "weight already loaded, name: " << state_dict.prefix() << name;
     CHECK_EQ(weight.sizes(), reshaped_tensor.sizes())
         << "weight size mismatch for " << state_dict.prefix() << name;
-    copy_weight_tensor(
-        full_weight_name(state_dict.prefix(), name), weight, reshaped_tensor);
+    weight.copy_(reshaped_tensor);
     weight_is_loaded = true;
   }
 }
@@ -147,8 +106,7 @@ void load_sharded_weight(const StateDict& state_dict,
         reshape_quant_vector_if_compatible(name, weight, tensor);
     CHECK_EQ(weight.sizes(), reshaped_tensor.sizes())
         << "weight size mismatch for " << state_dict.prefix() << name;
-    copy_weight_tensor(
-        full_weight_name(state_dict.prefix(), name), weight, reshaped_tensor);
+    weight.copy_(reshaped_tensor);
     weight_is_loaded = true;
   }
 }
@@ -170,8 +128,7 @@ void load_sharded_weight(const StateDict& state_dict,
         << "weight already loaded, name: " << state_dict.prefix() << name;
     CHECK_EQ(weight.sizes(), reshaped_tensor.sizes())
         << "weight size mismatch for " << state_dict.prefix() << name;
-    copy_weight_tensor(
-        full_weight_name(state_dict.prefix(), name), weight, reshaped_tensor);
+    weight.copy_(reshaped_tensor);
     weight_is_loaded = true;
   }
 }
@@ -206,8 +163,7 @@ void load_fused_weight(const StateDict& state_dict,
         reshape_quant_vector_if_compatible(name, weight, merged_weight);
     CHECK_EQ(weight.sizes(), reshaped_weight.sizes())
         << "weight size mismatch for " << state_dict.prefix() << name;
-    copy_weight_tensor(
-        full_weight_name(state_dict.prefix(), name), weight, reshaped_weight);
+    weight.copy_(reshaped_weight);
     // release the memory for weight_list
     accumulated_tensors.clear();
   }
@@ -319,9 +275,7 @@ void load_moe_weight(const StateDict& state_dict,
     if (transform_func) {
       weight.set_data(transform_func(reshaped_weight));
     } else {
-      copy_weight_tensor(full_weight_name(state_dict.prefix(), sub_prefix, name),
-                         weight,
-                         reshaped_weight);
+      weight.copy_(reshaped_weight);
     }
     // release the memory for weight_list
     accumulated_tensors.clear();
@@ -359,9 +313,7 @@ void load_moe_all_expert_weight(const StateDict& state_dict,
     CHECK_EQ(weight.sizes(), reshaped_weight.sizes())
         << "weight size mismatch for " << state_dict.prefix() << "[" << 0 << ":"
         << (0 + num_total_experts) << "]." << sub_prefix << name;
-    copy_weight_tensor(full_weight_name(state_dict.prefix(), sub_prefix, name),
-                       weight,
-                       reshaped_weight);
+    weight.copy_(reshaped_weight);
     // release the memory for weight_list
     accumulated_tensors.clear();
   }
@@ -449,8 +401,7 @@ void load_moe_fused_weight(const StateDict& state_dict,
     if (transform_func) {
       w13.set_data(transform_func(reshaped_weight));
     } else {
-      copy_weight_tensor(
-          full_weight_name(state_dict.prefix(), name), w13, reshaped_weight);
+      w13.copy_(reshaped_weight);
     }
 
     // release the memory for weight_list
@@ -490,8 +441,7 @@ void load_merged_weight(const StateDict& state_dict,
       reshape_quant_vector_if_compatible(name, weight, merged_weight);
   CHECK_EQ(weight.sizes(), reshaped_weight.sizes())
       << "weight size mismatch for " << state_dict.prefix() << name;
-  copy_weight_tensor(
-      full_weight_name(state_dict.prefix(), name), weight, reshaped_weight);
+  weight.copy_(reshaped_weight);
   weight_is_loaded = true;
 }
 
@@ -550,8 +500,7 @@ void load_merged_weight_v2(const StateDict& state_dict,
       reshape_quant_vector_if_compatible(name, weight, merged_weight);
   CHECK_EQ(weight.sizes(), reshaped_weight.sizes())
       << "weight size mismatch for " << state_dict.prefix() << name;
-  copy_weight_tensor(
-      full_weight_name(state_dict.prefix(), name), weight, reshaped_weight);
+  weight.copy_(reshaped_weight);
   weight_is_loaded = true;
 }
 

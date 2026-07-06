@@ -188,7 +188,7 @@ class Options {
 
   PROPERTY(int32_t, flashcomm1_min_decode_tokens) = 128;
 
-  PROPERTY(bool, enable_mmrs_fusion) = true;
+  PROPERTY(bool, enable_mmrs_fusion) = false;
 
   PROPERTY(std::string, mmrs_comm_mode) = "aiv";
 

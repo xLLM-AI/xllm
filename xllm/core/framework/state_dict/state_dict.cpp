@@ -28,7 +28,6 @@ limitations under the License.
 #include <torch/torch.h>
 #include <unistd.h>
 
-#include <chrono>
 #include <memory>
 
 #include "core/util/env_var.h"
@@ -166,22 +165,11 @@ torch::Tensor StateDict::get_sharded_tensor(const std::string& tensor_name,
 
 // select all the tensors whose name starts with prefix.
 StateDict StateDict::get_dict_with_prefix(const std::string& prefix) const {
-  const auto start_time = std::chrono::steady_clock::now();
   std::unordered_map<std::string, torch::Tensor> tensors;
   for (const auto& [name, tensor] : dict_) {
     if (absl::StartsWith(name, prefix)) {
       tensors[name.substr(prefix.length())] = tensor;
     }
-  }
-  const auto elapsed_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::steady_clock::now() - start_time)
-          .count();
-  if (elapsed_ms >= 1000 || dict_.size() >= 1000) {
-    LOG(INFO) << "StateDict prefix filter prefix=" << prefix_ << prefix
-              << ", input_tensors=" << dict_.size()
-              << ", matched_tensors=" << tensors.size()
-              << ", elapsed_ms=" << elapsed_ms;
   }
   return {std::move(tensors), prefix_ + prefix};
 }
@@ -221,15 +209,12 @@ StateDictFromSafeTensor::~StateDictFromSafeTensor() {
 
 std::unique_ptr<StateDict> StateDictFromSafeTensor::load(
     const std::string& weights_file) {
-  LOG(INFO) << "Creating safetensors memory mapping for " << weights_file;
   std::unique_ptr<MemoryMapping> mem_map = std::unique_ptr<MemoryMapping>(
       create_memory_mapping(weights_file.c_str()));
 
   if (!mem_map) {
     LOG(FATAL) << "Failed to create memory mapping for " << weights_file;
   }
-  LOG(INFO) << "Created safetensors memory mapping for " << weights_file
-            << ", mapped_size=" << mem_map->mapped_size;
 
   if (util::get_bool_env(ENV_MLOCK_ENABLED, DEFAULT_MLOCK_ENABLED)) {
     if (mlock(mem_map->mapped_addr, mem_map->mapped_size) == -1) {
@@ -275,8 +260,6 @@ std::unique_ptr<StateDict> StateDictFromSafeTensor::load(
   CHECK(safetensors_destroy(handle) == Status::Ok)
       << "Failed to destroy safetensors handle";
 
-  LOG(INFO) << "Parsed safetensors file " << weights_file
-            << ", tensors=" << dict.size();
   return std::make_unique<StateDictFromSafeTensor>(std::move(mem_map),
                                                    std::move(dict));
 }

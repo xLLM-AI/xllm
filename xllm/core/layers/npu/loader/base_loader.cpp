@@ -35,26 +35,6 @@ namespace {
 static inline size_t AlignUp(size_t value, size_t alignment) {
   return (value + alignment - 1) & ~(alignment - 1);
 }
-
-at::Tensor copy_tensor_to_device_after_materialize(
-    const at::Tensor& tensor,
-    const c10::Device& device,
-    const std::string& tensor_name) {
-  if (device.type() == c10::DeviceType::CPU ||
-      tensor.device().type() != c10::DeviceType::CPU) {
-    return tensor.to(device);
-  }
-  VLOG(1) << "Materializing CPU tensor before device copy: name="
-          << tensor_name << ", sizes=" << tensor.sizes()
-          << ", dtype=" << tensor.dtype() << ", target_device=" << device;
-  auto materialized = tensor.clone(at::MemoryFormat::Contiguous);
-  VLOG(1) << "Copying materialized tensor to device: name=" << tensor_name
-          << ", target_device=" << device;
-  auto device_tensor = materialized.to(device);
-  VLOG(1) << "Copied tensor to device: name=" << tensor_name
-          << ", target_device=" << device;
-  return device_tensor;
-}
 }  // namespace
 
 BaseLoader::BaseLoader(uint64_t weight_count,
@@ -107,9 +87,7 @@ void BaseLoader::set_weight(const StateDict& state_dict,
       if (to_host) {
         at_host_weight_tensors_[weight_position] = mutable_tensor.to(device);
       } else {
-        at_weight_tensors_[weight_position] =
-            copy_tensor_to_device_after_materialize(
-                mutable_tensor, device, tensor_name);
+        at_weight_tensors_[weight_position] = mutable_tensor.to(device);
       }
     }
   }
@@ -129,9 +107,7 @@ void BaseLoader::set_weight(const StateDict& state_dict,
         if (to_host) {
           at_host_weight_tensors_[weight_position] = mutable_tensor.to(device);
         } else {
-          at_weight_tensors_[weight_position] =
-              copy_tensor_to_device_after_materialize(
-                  mutable_tensor, device, tensor_name);
+          at_weight_tensors_[weight_position] = mutable_tensor.to(device);
         }
       }
     }
@@ -147,9 +123,7 @@ void BaseLoader::set_weight(const StateDict& state_dict,
         if (to_host) {
           at_host_weight_tensors_[weight_position] = mutable_tensor.to(device);
         } else {
-          at_weight_tensors_[weight_position] =
-              copy_tensor_to_device_after_materialize(
-                  mutable_tensor, device, tensor_name);
+          at_weight_tensors_[weight_position] = mutable_tensor.to(device);
         }
       }
     }
@@ -172,9 +146,7 @@ void BaseLoader::set_weight(const StateDict& state_dict,
         if (to_host) {
           at_host_weight_tensors_[weight_position] = mutable_tensor.to(device);
         } else {
-          at_weight_tensors_[weight_position] =
-              copy_tensor_to_device_after_materialize(
-                  mutable_tensor, device, tensor_name);
+          at_weight_tensors_[weight_position] = mutable_tensor.to(device);
         }
       }
     }
@@ -190,9 +162,7 @@ void BaseLoader::set_weight(const StateDict& state_dict,
         if (to_host) {
           at_host_weight_tensors_[weight_position] = mutable_tensor.to(device);
         } else {
-          at_weight_tensors_[weight_position] =
-              copy_tensor_to_device_after_materialize(
-                  mutable_tensor, device, tensor_name);
+          at_weight_tensors_[weight_position] = mutable_tensor.to(device);
         }
       }
     }
@@ -279,9 +249,7 @@ void BaseLoader::set_weight_with_padding(const StateDict& state_dict,
       if (to_host) {
         at_host_weight_tensors_[weight_position] = mutable_tensor.to(device);
       } else {
-        at_weight_tensors_[weight_position] =
-            copy_tensor_to_device_after_materialize(
-                mutable_tensor, device, tensor_name);
+        at_weight_tensors_[weight_position] = mutable_tensor.to(device);
       }
     }
   }
@@ -342,9 +310,7 @@ void BaseLoader::set_weight_with_padding(const StateDict& state_dict,
       if (to_host) {
         at_host_weight_tensors_[weight_position] = mutable_tensor.to(device);
       } else {
-        at_weight_tensors_[weight_position] =
-            copy_tensor_to_device_after_materialize(
-                mutable_tensor, device, tensor_name);
+        at_weight_tensors_[weight_position] = mutable_tensor.to(device);
       }
     }
   }
