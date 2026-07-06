@@ -26,8 +26,10 @@ limitations under the License.
 #include <mutex>
 #include <string>
 #include <tuple>
+#include <vector>
 
 #include "core/framework/parallel_state/parallel_state.h"
+#include "core/framework/state_dict/state_dict.h"
 #include "core/kernels/cuda/xllm_ops_library.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/cuda/attention.h"
@@ -226,6 +228,50 @@ void ensure_python_interpreter() {
       PyEval_SaveThread();
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// PyStateDict — method definitions (class declared in py_model_bridge.h).
+// ---------------------------------------------------------------------------
+
+torch::Tensor PyStateDict::get_tensor(const std::string& name) const {
+  CHECK(sd_ != nullptr) << "PyStateDict: access after release";
+  return sd_->get_tensor(name);
+}
+
+torch::Tensor PyStateDict::get_sharded_tensor(const std::string& name,
+                                              int64_t dim,
+                                              int32_t rank,
+                                              int32_t world_size) const {
+  CHECK(sd_ != nullptr) << "PyStateDict: access after release";
+  return sd_->get_sharded_tensor(name, dim, rank, world_size);
+}
+
+bool PyStateDict::has(const std::string& name) const {
+  CHECK(sd_ != nullptr) << "PyStateDict: access after release";
+  return sd_->has(name);
+}
+
+py::list PyStateDict::keys() const {
+  CHECK(sd_ != nullptr) << "PyStateDict: access after release";
+  py::list result;
+  for (const auto& [key, _] : *sd_) {
+    result.append(py::str(key));
+  }
+  return result;
+}
+
+PYBIND11_EMBEDDED_MODULE(xllm_weight_loader, m) {
+  py::class_<PyStateDict>(m, "StateDict")
+      .def("get_tensor", &PyStateDict::get_tensor, py::arg("name"))
+      .def("get_sharded_tensor",
+           &PyStateDict::get_sharded_tensor,
+           py::arg("name"),
+           py::arg("dim"),
+           py::arg("rank"),
+           py::arg("world_size"))
+      .def("has", &PyStateDict::has, py::arg("name"))
+      .def("keys", &PyStateDict::keys);
 }
 
 }  // namespace xllm

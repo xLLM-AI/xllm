@@ -220,86 +220,20 @@ void PyCausalLM::load_model(std::unique_ptr<ModelLoader> loader) {
   py::gil_scoped_acquire gil;
   auto& state_dicts = loader->get_state_dicts();
 
-  // GQA KV-head replica coords: when a KV head is shared across ranks
-  // (n_kv_heads < tp_size), K/V shard with the reduced (rank, world) so the
-  // same KV slice is replicated on the ranks that share it — mirrors
-  // qwen2_attention.cpp:57-65 and the native load_tensor_list KV-replica rule.
-  const int64_t total_kv_heads =
-      model_args_.n_kv_heads().value_or(model_args_.n_heads());
-  const int32_t kv_replicas =
-      (total_kv_heads < tp_size_)
-          ? static_cast<int32_t>(tp_size_ / total_kv_heads)
-          : 1;
-  const int32_t rank = static_cast<int32_t>(tp_rank_);
-  const int32_t world = static_cast<int32_t>(tp_size_);
-  const int32_t kv_rank = (kv_replicas > 1) ? rank / kv_replicas : rank;
-  const int32_t kv_world = (kv_replicas > 1) ? world / kv_replicas : world;
+  // Ensure the embedded module is imported so pybind11 type_info for
+  // PyStateDict is registered before py::cast.
+  py::module_::import("xllm_weight_loader");
 
-  // The Python model declares HOW each parameter is assembled from the
-  // checkpoint (source names, shard dim, KV-replica flag, concat dim) via
-  // sharding_plan(); this bridge stays model-agnostic and only EXECUTES the
-  // sharding through the native StateDict::get_sharded_tensor, so the Python
-  // graph receives per-rank weights from the single, validated chunk path
-  // (no sharding is re-implemented in Python).
-  const py::object plan = py_model_.attr("sharding_plan")();
-
-  auto find_owner =
-      [&state_dicts](const std::string& name) -> const StateDict* {
-    for (const auto& sd : state_dicts) {
-      if (sd->has(name)) {
-        return sd.get();
-      }
-    }
-    return nullptr;
-  };
-
-  py::list assembled;
-  for (const auto& entry_handle : plan) {
-    const auto entry = entry_handle.cast<py::sequence>();
-    const std::string target = entry[0].cast<std::string>();
-    const auto sources = entry[1].cast<py::sequence>();
-    const int64_t cat_dim = entry[2].cast<int64_t>();
-
-    std::vector<torch::Tensor> parts;
-    parts.reserve(py::len(sources));
-    for (const auto& source_handle : sources) {
-      const auto source = source_handle.cast<py::sequence>();
-      const auto candidates = source[0].cast<py::sequence>();
-      const int32_t shard_dim = source[1].cast<int32_t>();
-      const bool is_kv = source[2].cast<bool>();
-
-      std::string chosen;
-      const StateDict* owner = nullptr;
-      for (const auto& cand_handle : candidates) {
-        const std::string cand = cand_handle.cast<std::string>();
-        const StateDict* hit = find_owner(cand);
-        if (hit != nullptr) {
-          chosen = cand;
-          owner = hit;
-          break;
-        }
-      }
-      CHECK(owner != nullptr)
-          << "PyCausalLM::load_model: no checkpoint tensor found for target '"
-          << target << "'";
-
-      torch::Tensor tensor;
-      if (shard_dim >= 0) {
-        const int32_t r = is_kv ? kv_rank : rank;
-        const int32_t w = is_kv ? kv_world : world;
-        tensor = owner->get_sharded_tensor(chosen, shard_dim, r, w);
-      } else {
-        tensor = owner->get_tensor(chosen);  // replicated (full) on every rank
-      }
-      parts.emplace_back(std::move(tensor));
-    }
-
-    torch::Tensor weight =
-        (parts.size() == 1) ? parts.front() : torch::cat(parts, cat_dim);
-    assembled.append(py::make_tuple(py::str(target), weight));
+  py::list py_state_dicts;
+  for (const auto& sd : state_dicts) {
+    py_state_dicts.append(py::cast(PyStateDict(sd.get()),
+                                   py::return_value_policy::move));
   }
 
-  py_model_.attr("load_assembled_weights")(assembled);
+  py_model_.attr("load_weights")(
+      py_state_dicts,
+      static_cast<int32_t>(tp_rank_),
+      static_cast<int32_t>(tp_size_));
 }
 
 ModelOutput PyCausalLM::forward(const torch::Tensor& tokens,

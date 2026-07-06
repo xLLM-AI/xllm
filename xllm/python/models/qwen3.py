@@ -20,9 +20,9 @@ RoPE (the Qwen3 differentiator), gated-SiLU MLP.
 
 Tensor parallelism (WS1): when ``tp_size>1`` every projection/embedding holds a
 per-partition weight and the parallel layers insert the same all-reduce /
-all-gather the native C++ path uses. Weights are sharded on this rank by the C++
-bridge (``PyCausalLM::load_model``) executing ``sharding_plan`` via the native
-``get_sharded_tensor``; ``load_assembled_weights`` then copies them in.
+all-gather the native C++ path uses. Weight loading (TP slice, QKV/gate-up fuse)
+is driven by ``load_weights`` in Python; C++ only provides raw checkpoint tensor
+access via the ``xllm_weight_loader.StateDict`` binding.
 At ``tp_size==1`` everything degrades to full-size weights with no collectives,
 so the single-card parity path is byte-identical to the first version.
 """
@@ -43,7 +43,7 @@ from ..layers import (
     RotaryEmbedding,
     RowParallelLinear,
 )
-from .base import PyModelBase, ShardingPlan
+from .base import PyModelBase
 
 
 @dataclass
@@ -335,123 +335,95 @@ class Qwen3ForCausalLM(PyModelBase):
             dtype=dtype,
             device=device,
         )
-        # Wrap the pure-GPU graph (self.model) in the shared graph runner. Base
-        # owns forward / compute_logits / load_assembled_weights; only the
-        # model-specific sharding_plan lives here.
+        # Wrap the pure-GPU graph (self.model) in the shared graph runner.
         self._init_runner()
 
     # -- weight loading ---------------------------------------------------
-    def sharding_plan(self) -> ShardingPlan:
-        """Declare how each parameter is assembled from checkpoint tensors.
-
-        Returns a list of ``(target_param_name, sources, cat_dim)`` where
-        ``sources`` is a list of ``(candidate_names, shard_dim, is_kv)``:
-          * ``candidate_names`` — checkpoint tensor names tried in order;
-          * ``shard_dim`` — dim to shard on this rank, or ``< 0`` for replicated;
-          * ``is_kv`` — shard with the GQA KV-replica ``(rank, world)`` coords.
-
-        The C++ bridge (``PyCausalLM::load_model``) EXECUTES this plan via the
-        native ``StateDict::get_sharded_tensor`` and feeds back per-rank tensors.
-        Keeping the sharding RULES here (the model knows its own layout) while
-        the EXECUTION reuses the validated native chunk means Python no longer
-        re-implements sharding — there is a single chunk path, removing the
-        two-implementation parity risk. ``cat_dim`` concatenates fused sources
-        (QKV / gate-up) exactly as the native fused-weight loader does.
-        """
+    def load_weights(
+        self,
+        state_dicts: list,
+        tp_rank: int,
+        tp_size: int,
+    ) -> None:
         cfg = self.cfg
-        plan = []
-        # Embedding: shard the hidden dim (1) — matches HiddenParallelEmbedding.
-        plan.append(
-            (
-                "model.embed_tokens.weight",
-                [(["model.embed_tokens.weight", "embed_tokens.weight"], 1, False)],
-                0,
-            )
-        )
+
+        # GQA KV-replica coords: when n_kv_heads < tp_size, K/V heads are
+        # replicated across ranks that share them.
+        total_kv_heads = cfg.n_kv_heads
+        kv_replicas = tp_size // total_kv_heads if total_kv_heads < tp_size else 1
+        kv_rank = tp_rank // kv_replicas if kv_replicas > 1 else tp_rank
+        kv_world = tp_size // kv_replicas if kv_replicas > 1 else tp_size
+
+        def find(name: str):
+            for sd in state_dicts:
+                if sd.has(name):
+                    return sd
+            return None
+
+        def load_tensor(name: str) -> "torch.Tensor":
+            sd = find(name)
+            assert sd is not None, f"checkpoint tensor not found: {name}"
+            return sd.get_tensor(name)
+
+        def shard(name: str, dim: int, kv: bool = False) -> "torch.Tensor":
+            sd = find(name)
+            assert sd is not None, f"checkpoint tensor not found: {name}"
+            r = kv_rank if kv else tp_rank
+            w = kv_world if kv else tp_size
+            return sd.get_sharded_tensor(name, dim, r, w)
+
+        def copy_in(param_name: str, tensor: "torch.Tensor") -> None:
+            param = self.get_parameter(param_name)
+            param.data.copy_(tensor.to(dtype=param.dtype, device=param.device))
+
+        # Embedding: shard hidden dim (1).
+        embed_name = "model.embed_tokens.weight"
+        if not find(embed_name):
+            embed_name = "embed_tokens.weight"
+        copy_in("model.embed_tokens.weight", shard(embed_name, dim=1))
+
         for i in range(cfg.n_layers):
             p = f"model.layers.{i}."
-            # Norms are replicated (full) on every rank.
-            plan.append(
-                (
-                    p + "input_layernorm.weight",
-                    [([p + "input_layernorm.weight"], -1, False)],
-                    0,
-                )
-            )
-            plan.append(
-                (
-                    p + "post_attention_layernorm.weight",
-                    [([p + "post_attention_layernorm.weight"], -1, False)],
-                    0,
-                )
-            )
-            # QKV fused on dim 0; K/V use the KV-replica coords (is_kv=True).
-            plan.append(
-                (
-                    p + "self_attn.qkv_proj.weight",
-                    [
-                        ([p + "self_attn.q_proj.weight"], 0, False),
-                        ([p + "self_attn.k_proj.weight"], 0, True),
-                        ([p + "self_attn.v_proj.weight"], 0, True),
-                    ],
-                    0,
-                )
-            )
-            # o_proj RowParallel: shard the input dim (1).
-            plan.append(
-                (
-                    p + "self_attn.o_proj.weight",
-                    [([p + "self_attn.o_proj.weight"], 1, False)],
-                    0,
-                )
-            )
-            # q/k norm over head_dim: replicated (full).
-            plan.append(
-                (
-                    p + "self_attn.q_norm.weight",
-                    [([p + "self_attn.q_norm.weight"], -1, False)],
-                    0,
-                )
-            )
-            plan.append(
-                (
-                    p + "self_attn.k_norm.weight",
-                    [([p + "self_attn.k_norm.weight"], -1, False)],
-                    0,
-                )
-            )
-            # gate/up fused on dim 0.
-            plan.append(
-                (
-                    p + "mlp.gate_up_proj.weight",
-                    [
-                        ([p + "mlp.gate_proj.weight"], 0, False),
-                        ([p + "mlp.up_proj.weight"], 0, False),
-                    ],
-                    0,
-                )
-            )
-            # down_proj RowParallel: shard the input dim (1).
-            plan.append(
-                (
-                    p + "mlp.down_proj.weight",
-                    [([p + "mlp.down_proj.weight"], 1, False)],
-                    0,
-                )
-            )
-        plan.append(
-            (
-                "model.norm.weight",
-                [(["model.norm.weight", "norm.weight"], -1, False)],
-                0,
-            )
-        )
-        # lm_head: ColumnParallel over vocab (dim 0). Tied -> the source is the
-        # embedding, but sharded on dim 0 here (vs the embedding's dim-1 shard).
+
+            # Norms: replicated.
+            copy_in(p + "input_layernorm.weight",
+                    load_tensor(p + "input_layernorm.weight"))
+            copy_in(p + "post_attention_layernorm.weight",
+                    load_tensor(p + "post_attention_layernorm.weight"))
+            copy_in(p + "self_attn.q_norm.weight",
+                    load_tensor(p + "self_attn.q_norm.weight"))
+            copy_in(p + "self_attn.k_norm.weight",
+                    load_tensor(p + "self_attn.k_norm.weight"))
+
+            # QKV fused: shard each on dim 0, K/V use kv coords, concat.
+            q = shard(p + "self_attn.q_proj.weight", dim=0)
+            k = shard(p + "self_attn.k_proj.weight", dim=0, kv=True)
+            v = shard(p + "self_attn.v_proj.weight", dim=0, kv=True)
+            copy_in(p + "self_attn.qkv_proj.weight", torch.cat([q, k, v], dim=0))
+
+            # o_proj RowParallel: shard input dim (1).
+            copy_in(p + "self_attn.o_proj.weight",
+                    shard(p + "self_attn.o_proj.weight", dim=1))
+
+            # gate/up fused: shard each on dim 0, concat.
+            gate = shard(p + "mlp.gate_proj.weight", dim=0)
+            up = shard(p + "mlp.up_proj.weight", dim=0)
+            copy_in(p + "mlp.gate_up_proj.weight", torch.cat([gate, up], dim=0))
+
+            # down_proj RowParallel: shard input dim (1).
+            copy_in(p + "mlp.down_proj.weight",
+                    shard(p + "mlp.down_proj.weight", dim=1))
+
+        # Final norm: replicated.
+        norm_name = "model.norm.weight"
+        if not find(norm_name):
+            norm_name = "norm.weight"
+        copy_in("model.norm.weight", load_tensor(norm_name))
+
+        # lm_head: ColumnParallel over vocab dim (0).
         if cfg.tie_word_embeddings:
-            lm_src = ["model.embed_tokens.weight", "embed_tokens.weight"]
+            lm_name = embed_name
         else:
-            lm_src = ["lm_head.weight"]
-        plan.append(("lm_head.weight", [(lm_src, 0, False)], 0))
-        return plan
+            lm_name = "lm_head.weight"
+        copy_in("lm_head.weight", shard(lm_name, dim=0))
 

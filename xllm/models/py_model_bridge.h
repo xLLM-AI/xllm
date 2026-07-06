@@ -15,11 +15,14 @@ limitations under the License.
 
 #pragma once
 
+#include <pybind11/pybind11.h>
 #include <torch/torch.h>
 
+#include <string>
 #include <vector>
 
 #include "core/framework/kv_cache/kv_cache.h"
+#include "core/framework/state_dict/state_dict.h"
 
 // Bridge between xLLM's C++ worker and a Python-interpreter-based model
 // executor. It owns the embedded CPython lifecycle and the thread-local
@@ -78,5 +81,25 @@ class PyForwardContextGuard {
 // torch library. Safe to call from any worker thread; the GIL is released
 // afterwards so subsequent calls use ``py::gil_scoped_acquire``.
 void ensure_python_interpreter();
+
+// Thin pybind11-visible wrapper around a StateDict pointer, exposing raw
+// checkpoint tensor access to the Python model's ``load_weights``.  The
+// pointer is non-owning; the ModelLoader keeps the StateDict alive for the
+// duration of ``PyCausalLM::load_model``.
+class PyStateDict {
+ public:
+  explicit PyStateDict(const StateDict* sd) : sd_(sd) {}
+
+  torch::Tensor get_tensor(const std::string& name) const;
+  torch::Tensor get_sharded_tensor(const std::string& name,
+                                   int64_t dim,
+                                   int32_t rank,
+                                   int32_t world_size) const;
+  bool has(const std::string& name) const;
+  pybind11::list keys() const;
+
+ private:
+  const StateDict* sd_;
+};
 
 }  // namespace xllm
