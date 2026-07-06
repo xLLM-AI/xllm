@@ -78,8 +78,12 @@ class FluxFillPipelineImpl : public FluxPipelineBaseImpl {
                          ? std::nullopt
                          : std::make_optional(input.prompts_2);
 
-    auto image = input.images.defined() ? std::make_optional(input.images)
-                                        : std::nullopt;
+    std::optional<torch::Tensor> image = std::nullopt;
+    if (input.images.defined()) {
+      image = input.images;
+    } else if (!input.images_list.empty()) {
+      image = input.images_list[0];
+    }
     auto mask_image = input.mask_images.defined()
                           ? std::make_optional(input.mask_images)
                           : std::nullopt;
@@ -97,6 +101,12 @@ class FluxFillPipelineImpl : public FluxPipelineBaseImpl {
         input.pooled_prompt_embeds.defined()
             ? std::make_optional(input.pooled_prompt_embeds)
             : std::nullopt;
+
+    CHECK(image.has_value())
+        << "FluxFill pipeline requires an input image in images or "
+           "images_list.";
+    CHECK(mask_image.has_value())
+        << "FluxFill pipeline requires an input mask_image.";
 
     auto output = forward_impl(prompts,
                                prompts_2,
@@ -424,4 +434,7 @@ class FluxFillPipelineImpl : public FluxPipelineBaseImpl {
 TORCH_MODULE(FluxFillPipeline);
 
 REGISTER_DIT_MODEL(fluxfill, FluxFillPipeline);
+REGISTER_DIT_MODEL_WITH_VARNAME(flux_fill_pipeline,
+                                FluxFillPipeline,
+                                FluxFillPipeline);
 }  // namespace xllm

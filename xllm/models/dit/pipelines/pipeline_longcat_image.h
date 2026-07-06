@@ -55,6 +55,13 @@ constexpr const char* PROMPT_TEMPLATE_ENCODE_PREFIX =
 constexpr const char* PROMPT_TEMPLATE_ENCODE_SUFFIX =
     "<|im_end|>\n<|im_start|>assistant\n";
 
+inline int32_t get_longcat_vlm_tp_port(int32_t base_port, int32_t rank) {
+  const int32_t port = base_port + rank;
+  CHECK_LE(port, 65535) << "LongCat VLM ProcessGroup port overflow: base_port="
+                        << base_port << ", rank=" << rank;
+  return port;
+}
+
 inline float calculate_longcat_shift(int64_t image_seq_len,
                                      int64_t base_seq_len = 256,
                                      int64_t max_seq_len = 4096,
@@ -134,15 +141,19 @@ class LongCatImagePipelineImpl : public torch::nn::Module {
     const auto& original_parallel_args = context.get_parallel_args();
     ParallelArgs vlm_parallel_args = original_parallel_args;
     if (original_parallel_args.tp_group_ == nullptr) {
+      constexpr int32_t kLongCatImageVlmTpBasePort = 29500;
+      const int32_t vlm_tp_port = get_longcat_vlm_tp_port(
+          kLongCatImageVlmTpBasePort, original_parallel_args.rank());
       LOG(INFO)
-          << "Creating real ProcessGroup for single-device VLM initialization.";
-      vlm_tp_group_ = create_process_group(0,
-                                           1,
-                                           1,
-                                           29500,
-                                           false,
-                                           "127.0.0.1",
-                                           "vlm_tp_group",
+          << "Creating real ProcessGroup for single-device VLM initialization "
+          << "on 127.0.0.1:" << vlm_tp_port;
+      vlm_tp_group_ = create_process_group(/*rank=*/0,
+                                           /*world_size=*/1,
+                                           /*rank_size=*/1,
+                                           vlm_tp_port,
+                                           /*trans=*/false,
+                                           /*host=*/"127.0.0.1",
+                                           /*group_name=*/"vlm_tp_group",
                                            options_.device());
       vlm_parallel_args.tp_group_ = vlm_tp_group_.get();
     }
@@ -637,6 +648,9 @@ class LongCatImagePipelineImpl : public torch::nn::Module {
       const torch::Tensor& positions,
       const torch::Tensor& attention_mask) {
     ModelInputParams params;
+#if defined(USE_DCU)
+    params.graph.use_dense_flash_attention = true;
+#endif
 
     int64_t actual_seq_len;
     if (positions.dim() == 2) {
@@ -866,13 +880,14 @@ TORCH_MODULE(LongCatImagePipeline);
 // code.
 namespace {
 const bool longcat_image_dit_registered = []() {
-  ModelRegistry::register_dit_model_factory(
-      "LongCat-Image", [](const DiTModelContext& context) {
-        LongCatImagePipeline model(context);
-        model->eval();
-        return std::make_unique<DiTModelImpl<LongCatImagePipeline>>(
-            std::move(model), context.get_tensor_options());
-      });
+  auto factory = [](const DiTModelContext& context) {
+    LongCatImagePipeline model(context);
+    model->eval();
+    return std::make_unique<DiTModelImpl<LongCatImagePipeline>>(
+        std::move(model), context.get_tensor_options());
+  };
+  ModelRegistry::register_dit_model_factory("LongCat-Image", factory);
+  ModelRegistry::register_dit_model_factory("LongCatImagePipeline", factory);
   return true;
 }();
 }  // namespace

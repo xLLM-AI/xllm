@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/nn/functional/linear.h>
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <memory>
@@ -33,6 +34,9 @@ limitations under the License.
 #include "core/framework/state_dict/utils.h"
 #include "core/layers/common/add_matmul.h"
 #include "core/layers/common/rms_norm.h"
+#if defined(USE_DCU)
+#include "core/layers/dcu/flash_attention.h"
+#endif
 #include "framework/model_context.h"
 #include "models/model_registry.h"
 #if defined(USE_NPU)
@@ -78,6 +82,80 @@ inline torch::Tensor apply_rotary_emb(const torch::Tensor& x,
 #else
   NOT_IMPLEMENTED();
 #endif
+}
+
+inline torch::Tensor flux_scaled_dot_product_attention(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value) {
+#if defined(USE_DCU)
+  static thread_local bool logged = false;
+  if (!logged) {
+    LOG(INFO) << "Flux attention uses dense varlen flash attention on DCU.";
+    logged = true;
+  }
+
+  CHECK_EQ(query.dim(), 4) << "Flux query must be [B,H,S,D]";
+  CHECK_EQ(key.dim(), 4) << "Flux key must be [B,H,S,D]";
+  CHECK_EQ(value.dim(), 4) << "Flux value must be [B,H,S,D]";
+  CHECK_EQ(query.size(0), key.size(0)) << "Flux q/k batch mismatch";
+  CHECK_EQ(query.size(0), value.size(0)) << "Flux q/v batch mismatch";
+  CHECK_EQ(query.size(1), key.size(1)) << "Flux q/k head mismatch";
+  CHECK_EQ(key.size(1), value.size(1)) << "Flux k/v head mismatch";
+  CHECK_EQ(query.size(3), key.size(3)) << "Flux q/k head dim mismatch";
+  CHECK_EQ(query.size(3), value.size(3)) << "Flux q/v head dim mismatch";
+  CHECK_EQ(key.size(2), value.size(2)) << "Flux k/v seq mismatch";
+
+  const int64_t batch_size = query.size(0);
+  const int64_t num_heads = query.size(1);
+  const int64_t q_seq_len = query.size(2);
+  const int64_t kv_seq_len = key.size(2);
+  const int64_t head_dim = query.size(3);
+
+  const auto output_dtype = query.scalar_type();
+  torch::Tensor attn_query = query;
+  torch::Tensor attn_key = key;
+  torch::Tensor attn_value = value;
+  if (output_dtype == at::kFloat) {
+    attn_query = query.to(torch::kBFloat16);
+    attn_key = key.to(torch::kBFloat16);
+    attn_value = value.to(torch::kBFloat16);
+  }
+
+  auto cu_options =
+      torch::TensorOptions().dtype(torch::kInt32).device(query.device());
+  auto cu_seqlens_q =
+      torch::arange(batch_size + 1, cu_options).mul_(q_seq_len).contiguous();
+  auto cu_seqlens_k =
+      torch::arange(batch_size + 1, cu_options).mul_(kv_seq_len).contiguous();
+
+  auto dense_query = attn_query.transpose(1, 2).contiguous().view(
+      {batch_size * q_seq_len, num_heads, head_dim});
+  auto dense_key = attn_key.transpose(1, 2).contiguous().view(
+      {batch_size * kv_seq_len, key.size(1), head_dim});
+  auto dense_value = attn_value.transpose(1, 2).contiguous().view(
+      {batch_size * kv_seq_len, value.size(1), head_dim});
+
+  auto output = layer::dense_varlen_flash_attention(
+      dense_query,
+      dense_key,
+      dense_value,
+      cu_seqlens_q,
+      cu_seqlens_k,
+      std::pow(static_cast<double>(head_dim), -0.5),
+      /*is_causal=*/false);
+  return output.view({batch_size, q_seq_len, num_heads, head_dim})
+      .transpose(1, 2)
+      .contiguous()
+      .to(output_dtype);
+#endif
+
+  return torch::scaled_dot_product_attention(query,
+                                             key,
+                                             value,
+                                             torch::nullopt,
+                                             /*dropout_p=*/0.0,
+                                             /*is_causal=*/false);
 }
 
 // Helper function for rotary position embedding
@@ -290,8 +368,8 @@ class FluxSingleAttentionImpl : public torch::nn::Module {
     query = apply_rotary_emb(query, image_rotary_emb);
     key = apply_rotary_emb(key, image_rotary_emb);
     // Compute scaled dot-product attention (no mask, no dropout)
-    torch::Tensor attn_output = torch::scaled_dot_product_attention(
-        query, key, value, torch::nullopt, 0.0, false);
+    torch::Tensor attn_output =
+        flux_scaled_dot_product_attention(query, key, value);
     attn_output = attn_output.to(query.dtype());
     return attn_output.transpose(1, 2).flatten(2);
 #else
@@ -465,8 +543,8 @@ class FluxAttentionImpl : public torch::nn::Module {
     query1 = query1.transpose(1, 2);
     key1 = key1.transpose(1, 2);
     value1 = value1.transpose(1, 2);
-    torch::Tensor attn_output = torch::scaled_dot_product_attention(
-        query1, key1, value1, torch::nullopt, 0.0, false);
+    torch::Tensor attn_output =
+        flux_scaled_dot_product_attention(query1, key1, value1);
     attn_output = attn_output.transpose(1, 2).reshape(
         {batch_size, -1, attn_heads * head_dim});
 #else

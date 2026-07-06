@@ -81,6 +81,9 @@ class FluxControlPipelineImpl : public FluxPipelineBaseImpl {
             ? std::make_optional(input.pooled_prompt_embeds)
             : std::nullopt;
 
+    CHECK(control_image.defined())
+        << "FluxControl pipeline requires an input control_image.";
+
     auto output = forward_impl(prompts,
                                prompts_2,
                                control_image,
@@ -351,4 +354,7 @@ class FluxControlPipelineImpl : public FluxPipelineBaseImpl {
 TORCH_MODULE(FluxControlPipeline);
 
 REGISTER_DIT_MODEL(flux_control, FluxControlPipeline);
+REGISTER_DIT_MODEL_WITH_VARNAME(flux_control_pipeline,
+                                FluxControlPipeline,
+                                FluxControlPipeline);
 }  // namespace xllm

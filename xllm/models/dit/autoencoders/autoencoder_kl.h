@@ -1024,6 +1024,15 @@ class VAEImpl : public torch::nn::Module {
     return posterior.sample(seed);
   }
 
+  torch::Tensor encode_mode(const torch::Tensor& images) {
+    auto enc = encoder_(images);
+    if (args_.use_quant_conv()) {
+      enc = quant_conv_(enc);
+    }
+    auto posterior = DiagonalGaussianDistribution(enc);
+    return posterior.mode();
+  }
+
   torch::Tensor decode(const torch::Tensor& latents) {
     torch::Tensor processed_latents = latents;
 

@@ -500,7 +500,11 @@ class LongCatAudioDiTPipelineImpl final : public torch::nn::Module {
 
       load_module_from_state_dicts(*vae_loader, vae_.ptr().get());
       vae_->to(options_.device());
+#if defined(USE_DCU)
+      vae_->to(torch::kFloat32);
+#else
       vae_->to_half();
+#endif
 
       text_encoder_->load_model(std::move(text_encoder_loader));
       text_encoder_->to(options_.device());
@@ -521,7 +525,11 @@ class LongCatAudioDiTPipelineImpl final : public torch::nn::Module {
 
       load_module_from_state_dicts(*flat_loader, vae_.ptr().get(), "vae.");
       vae_->to(options_.device());
+#if defined(USE_DCU)
+      vae_->to(torch::kFloat32);
+#else
       vae_->to_half();
+#endif
 
       text_encoder_->load_model_from_state_dicts(
           flat_loader->get_state_dicts());
@@ -605,13 +613,15 @@ TORCH_MODULE(LongCatAudioDiTPipeline);
 // Register under "audiodit" to match the model_type field in config.json.
 namespace {
 const bool longcat_audio_dit_registered = []() {
-  ModelRegistry::register_dit_model_factory(
-      "audiodit", [](const DiTModelContext& context) {
-        LongCatAudioDiTPipeline model(context);
-        model->eval();
-        return std::make_unique<DiTModelImpl<LongCatAudioDiTPipeline>>(
-            std::move(model), context.get_tensor_options());
-      });
+  auto factory = [](const DiTModelContext& context) {
+    LongCatAudioDiTPipeline model(context);
+    model->eval();
+    return std::make_unique<DiTModelImpl<LongCatAudioDiTPipeline>>(
+        std::move(model), context.get_tensor_options());
+  };
+  ModelRegistry::register_dit_model_factory("audiodit", factory);
+  ModelRegistry::register_dit_model_factory("LongCat-AudioDiT", factory);
+  ModelRegistry::register_dit_model_factory("LongCatAudioDiTPipeline", factory);
   return true;
 }();
 }  // namespace
