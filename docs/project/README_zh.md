@@ -22,13 +22,17 @@ limitations under the License. -->
 </div>
 
 ---------------------
-<p align="center">
-| <a href="https://docs.xllm-ai.com/"><b>Documentation</b></a> |  <a href="https://arxiv.org/abs/2510.14686"><b>Technical Report</b></a> |
-</p>
+
 
 ### 📢 新闻
+<!-- only keep the latest 3 news, others should be folded -->
+- 2026-07-06: 🎉 xLLM 正式捐赠给开放原子开源基金会！
 - 2026-06-13: 🎉 我们 day-0 支持了[MiniMax-M3](https://huggingface.co/MiniMaxAI/MiniMax-M3) 模型的推理服务，部署请参考[部署文档](https://github.com/jd-opensource/xllm/blob/preview/minimax-m3/testspace/run_minimax_m3.sh)。
 - 2026-04-24: 🎉 我们 day-0 支持了[DeepSeek-V4](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) 模型的推理服务，部署请参考[部署文档](https://github.com/jd-opensource/xllm/blob/preview/deepseek-v4-mlu/testspace/run_deepseek_v4.sh)。
+
+
+<details>
+<summary>更多新闻</summary>
 - 2026-02-12: 🎉 我们 day-0 支持了最新的[GLM-5](https://github.com/zai-org/GLM-5) 模型的高效推理服务，部署请参考[部署文档](https://github.com/zai-org/GLM-5/blob/main/example/ascend.md)。
 - 2025-12-21: 🎉 我们在第一时间内支持了[GLM-4.7](https://github.com/zai-org)模型的高效推理。
 - 2025-12-08: 🎉 我们在第一时间内支持了[GLM-4.6V](https://github.com/zai-org/GLM-V)模型的高效推理。
@@ -36,6 +40,8 @@ limitations under the License. -->
 - 2025-12-05: 🎉 我们支持了[VLM-R1](https://github.com/om-ai-lab/VLM-R1) 模型.
 - 2025-12-05: 🎉 我们基于[Mooncake](https://github.com/kvcache-ai/Mooncake)构建了混合 KV 缓存管理机制，支持具备智能卸载与预取能力的全局 KV 缓存管理。
 - 2025-10-16: 🎉 我们最近在 arXiv 上发布了我们的 [xLLM 技术报告](https://arxiv.org/abs/2510.14686)，提供了全面的技术蓝图和实施见解。
+
+</details>
 
 ## 简介
 
@@ -45,34 +51,32 @@ limitations under the License. -->
 <img src="../assets/xllm_arch.png" alt="xllm_arch" style="width:90%; height:auto;">
 </div>
 
-## 为什么选择 xLLM
+## 亮点
 
-* **顶尖性能**：通过全图化多流水线执行编排、图融合优化、投机推理、MoE专家动态负载均衡以及全局多级KV缓存管理，实现高吞吐、低延迟的推理服务。
-* **主流硬件支持**：专为国产AI加速卡深度优化设计，广泛支持 NPU、MLU、ILU、MUSA、DCU、MACA 等多种硬件。
-* **服务-引擎分离架构**：采用服务-引擎分离的架构设计，服务层提供在离线请求弹性调度、动态PD分离、EPD混合执行及高可用容错能力，引擎层专注于高效计算。
-* **企业级部署**：已全面落地京东零售核心业务——涵盖智能客服、风控、供应链优化、广告推荐等场景——实现高性能、低成本的生产级部署。
+* **顶尖性能**：通过众多先进特性，提供高吞吐、低延迟的推理服务。
+* **主流硬件支持**：专为国产AI加速卡打造并深度优化。
+* **服务-引擎分离架构**：服务层负责调度与可用性，引擎层专注于计算。
+* **企业级部署**：已在京东零售核心业务中大规模落地验证。
 
----
 ## 硬件支持
 
-| 硬件类型 | 型号   | 备注            |
-| -------- | ------ | --------------- |
-| NPU      | A2, A3 | HDK Driver 25.2.0 + |
-| MLU      |        |                 |
-| ILU      | BI150  |                 |
-| MUSA     | S5000  |                 |
-| DCU      | BW1000 |                 |
-| MACA     | MXC500 |                 |
+| 硬件类型           | 简称 | 型号   | 备注                |
+| ------------------ | ---- | ------ | ------------------- |
+| Ascend NPU         | NPU  | A2, A3 | HDK Driver 25.2.0 + |
+| Cambricon MLU      | MLU  | MLU590 |                     |
+| Moore Threads GPU  | MUSA | S5000  |                     |
+| Hygon DCU          | DCU  | BW1000 |                     |
+| MetaX MACA         | MACA | MXC500 |                     |
+| Iluvatar CoreX GPU | ILU  | BI150  |                     |
 
-此外，请在[模型支持列表](../zh/supported_models.md)查看不同硬件上的模型支持情况。
+## 入门指南
 
----
+* [快速开始](https://docs.xllm-ai.com/zh/getting_started/quick_start/)
+* [启动xLLM](https://docs.xllm-ai.com/zh/getting_started/launch_xllm/)
+* [在线服务](https://docs.xllm-ai.com/zh/getting_started/online_service/)
+* [离线推理](https://docs.xllm-ai.com/zh/getting_started/offline_service/)
+* [模型支持](https://docs.xllm-ai.com/zh/supported_models/)
 
-## 快速开始
-
-请参考[快速开始文档](../zh/getting_started/quick_start.md)。
-
----
 
 ## 社区支持
 
@@ -80,7 +84,6 @@ limitations under the License. -->
   <img src="../assets/wechat_qrcode.png" alt="qrcode3" width="50%" />
 </div>
 
----
 
 ## 致谢
 本项目的实现得益于以下开源项目: 

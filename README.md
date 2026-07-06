@@ -25,8 +25,13 @@ limitations under the License. -->
 
 
 ### 📢 News
+<!-- only keep the latest 3 news, others should be folded -->
+- 2026-07-06: 🎉 xLLM is officially donated to the OpenAtom Foundation!
 - 2026-06-13: 🎉 We day-0 support the [MiniMax-M3](https://huggingface.co/MiniMaxAI/MiniMax-M3) model, please refer to the [Deployment Document](https://github.com/jd-opensource/xllm/blob/preview/minimax-m3/testspace/run_minimax_m3.sh) for deployment.
 - 2026-04-24: 🎉 We day-0 support the [DeepSeek-V4](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) model, please refer to the [Deployment Document](https://github.com/jd-opensource/xllm/blob/preview/deepseek-v4-mlu/testspace/run_deepseek_v4.sh) for deployment.
+
+<details>
+<summary>More News</summary>
 - 2026-02-12: 🎉 We day-0 support high-performance inference for the [GLM-5](https://github.com/zai-org/GLM-5) model, please refer to the [Deployment Document](https://github.com/zai-org/GLM-5/blob/main/example/ascend.md) for deployment.
 - 2025-12-21: 🎉 We day-0 support high-performance inference for the [GLM-4.7](https://github.com/zai-org) model.
 - 2025-12-08: 🎉 We day-0 support high-performance inference for the [GLM-4.6V](https://github.com/zai-org/GLM-V) model.
@@ -35,6 +40,8 @@ limitations under the License. -->
 - 2025-12-05: 🎉 We build hybrid KV cache management based on [Mooncake](https://github.com/kvcache-ai/Mooncake), supporting global KV cache management with intelligent offloading and prefetching.
 - 2025-10-16: 🎉 We recently have released our [xLLM Technical Report](https://arxiv.org/abs/2510.14686) on arXiv, providing comprehensive technical blueprints and implementation insights.
 
+</details>
+
 ## Overview
 
 **xLLM** is an **efficient LLM inference framework**, specifically optimized for **Chinese AI accelerators**, enabling enterprise-grade deployment with enhanced efficiency and reduced cost.
@@ -42,34 +49,32 @@ limitations under the License. -->
 <img src="docs/assets/xllm_arch.png" alt="xllm_arch" style="width:90%; height:auto;">
 </div>
 
-## Why xLLM
+## Highlights
 
-* **Top-tier Performance**: Delivers high-throughput, low-latency inference through full-graph multi-stream pipelined execution, graph fusion optimization, speculative decoding, dynamic MoE expert load balancing, and global multi-level KV cache management.
-* **Mainstream Hardware Support**: Purpose-built and deeply optimized for Chinese AI accelerators, running across a broad range of hardware including NPU, MLU, ILU, MUSA, DCU, MACA and more.
-* **Service-Engine Decoupled Architecture**: Adopts a service-engine decoupled design, where the service layer provides elastic online/offline request scheduling, dynamic PD disaggregation, EPD hybrid execution, and high-availability fault tolerance, while the engine layer focuses on efficient computation.
-* **Enterprise-grade Deployment**: Battle-tested at scale across JD.com's core retail business — including intelligent customer service, risk control, supply chain optimization, and ad recommendation — enabling high-performance, low-cost production deployment.
+* **Top-tier Performance**: Delivers high-throughput, low-latency inference through many advanced features.
+* **Mainstream Hardware Support**: Purpose-built and deeply optimized for Chinese AI accelerators.
+* **Service-Engine Decoupled Architecture**: Service layer handles scheduling and availability; engine layer handles computation.
+* **Enterprise-grade Deployment**: Battle-tested at scale across JD.com's core retail business.
 
----
 ## Hardware Support
 
-| Hardware | Example | Remark          |
-| -------- | ------- | --------------- |
-| NPU      | A2, A3  | HDK Driver 25.2.0 + |
-| MLU      |         |                 |
-| ILU      | BI150   |                 |
-| MUSA     | S5000   |                 |
-| DCU      | BW1000  |                 |
-| MACA     | MXC500  |                 |
+| Hardware           | Abbreviation | Example | Remark              |
+| ------------------ | ------------ | ------- | ------------------- |
+| Ascend NPU         | NPU          | A2, A3  | HDK Driver 25.2.0 + |
+| Cambricon MLU      | MLU          | MLU590  |                     |
+| Moore Threads GPU  | MUSA         | S5000   |                     |
+| Hygon DCU          | DCU          | BW1000  |                     |
+| MetaX MACA         | MACA         | MXC500  |                     |
+| Iluvatar CoreX GPU | ILU          | BI150   |                     |
 
-Besides, please check the supported models on different hardwares at [Supported Models List](docs/en/supported_models.md).
 
----
+## Getting Started
 
-## Quick Start
-
-Please refer to [Quick Start](docs/en/getting_started/quick_start.md) for more details.
-
---- 
+* [Quick Start](https://docs.xllm-ai.com/en/getting_started/quick_start/)
+* [Launch xLLM](https://docs.xllm-ai.com/en/getting_started/launch_xllm/)
+* [Online Service](https://docs.xllm-ai.com/en/getting_started/online_service/)
+* [Offline Inference](https://docs.xllm-ai.com/en/getting_started/offline_service/)
+* [Supported Models](https://docs.xllm-ai.com/en/supported_models/)
 
 ## Community & Support
 
