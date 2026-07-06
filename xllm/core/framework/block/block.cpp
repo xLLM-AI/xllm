@@ -25,7 +25,7 @@ limitations under the License.
 
 namespace xllm {
 Block::Block(int32_t id, BlockManager* manager)
-    : id_(id), ref_count_(new uint32_t(1)), manager_(manager) {
+    : id_(id), ref_count_(new std::atomic<uint32_t>(1)), manager_(manager) {
   // get the block size from the manager
   size_ = manager_ == nullptr ? 0 : manager_->block_size();
 }
@@ -100,12 +100,20 @@ Block& Block::operator=(Block&& other) noexcept {
 
 void Block::inc_ref_count() {
   if (ref_count_ != nullptr) {
-    ++(*ref_count_);
+    // Another alias appearing only needs atomicity, not ordering, so relaxed.
+    ref_count_->fetch_add(1, std::memory_order_relaxed);
   }
 }
 
 void Block::dec_ref_count() {
-  if (ref_count_ != nullptr && --(*ref_count_) == 0) {
+  if (ref_count_ == nullptr) {
+    return;
+  }
+  // acq_rel pairs the releasing decrements with the acquiring final one, so the
+  // thread that drives the count to zero observes all prior alias writes before
+  // it frees. fetch_sub returns the previous value; == 1 means we just hit
+  // zero.
+  if (ref_count_->fetch_sub(1, std::memory_order_acq_rel) == 1) {
     // release the reference count memory
     delete ref_count_;
     // return the block id to the manager
