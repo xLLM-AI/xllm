@@ -141,9 +141,17 @@ torch::Tensor CompressorImpl::forward_prefill(
     torch::Tensor& state_cache,
     const torch::Tensor& state_block_table,
     const torch::Tensor& compressed_sin_table,
-    const torch::Tensor& compressed_cos_table) {
-  torch::Tensor kv_pack = wkv_->forward(hidden_states);
-  torch::Tensor score_pack = wgate_->forward(hidden_states);
+    const torch::Tensor& compressed_cos_table,
+    std::optional<torch::Tensor> projected_kv,
+    std::optional<torch::Tensor> projected_score) {
+  // When the caller (DeepseekV4Attention fused GEMM) has already projected
+  // hidden_states, reuse the precomputed tensors instead of redoing the GEMM.
+  torch::Tensor kv_pack = projected_kv.has_value()
+                              ? projected_kv.value()
+                              : wkv_->forward(hidden_states);
+  torch::Tensor score_pack = projected_score.has_value()
+                                 ? projected_score.value()
+                                 : wgate_->forward(hidden_states);
   const DSAMetadata& dsa = *attn_metadata.dsa_metadata;
 
   const int64_t num_compressed_rows = slot_mapping.numel();
@@ -190,12 +198,19 @@ torch::Tensor CompressorImpl::forward_decode(
     torch::Tensor& state_cache,
     const torch::Tensor& state_block_table,
     const torch::Tensor& compressed_sin_table,
-    const torch::Tensor& compressed_cos_table) {
+    const torch::Tensor& compressed_cos_table,
+    std::optional<torch::Tensor> projected_kv,
+    std::optional<torch::Tensor> projected_score) {
   const DSAMetadata& dsa = *attn_metadata.dsa_metadata;
   const int64_t state_block_size = state_cache.size(1);
 
-  torch::Tensor kv_pack = wkv_->forward(hidden_states);
-  torch::Tensor score_pack = wgate_->forward(hidden_states);
+  // Reuse the fused projection output when provided; otherwise compute it.
+  torch::Tensor kv_pack = projected_kv.has_value()
+                              ? projected_kv.value()
+                              : wkv_->forward(hidden_states);
+  torch::Tensor score_pack = projected_score.has_value()
+                                 ? projected_score.value()
+                                 : wgate_->forward(hidden_states);
   // The rewritten operator takes a 2D kv/score ([total_tokens, coff_dim]).
   if (kv_pack.dim() == 3) {
     kv_pack = kv_pack.reshape({-1, kv_pack.size(-1)});
@@ -244,7 +259,9 @@ torch::Tensor CompressorImpl::forward(
     torch::Tensor& state_cache,
     const torch::Tensor& state_block_table,
     const torch::Tensor& compressed_sin_table,
-    const torch::Tensor& compressed_cos_table) {
+    const torch::Tensor& compressed_cos_table,
+    std::optional<torch::Tensor> projected_kv,
+    std::optional<torch::Tensor> projected_score) {
   const bool is_prefill =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
   if (is_prefill) {
@@ -255,7 +272,9 @@ torch::Tensor CompressorImpl::forward(
                            state_cache,
                            state_block_table,
                            compressed_sin_table,
-                           compressed_cos_table);
+                           compressed_cos_table,
+                           projected_kv,
+                           projected_score);
   }
   return forward_decode(attn_metadata,
                         hidden_states,
@@ -264,15 +283,22 @@ torch::Tensor CompressorImpl::forward(
                         state_cache,
                         state_block_table,
                         compressed_sin_table,
-                        compressed_cos_table);
+                        compressed_cos_table,
+                        projected_kv,
+                        projected_score);
 }
 
-void CompressorImpl::load_state_dict(const StateDict& state_dict) {
+void CompressorImpl::load_state_dict(const StateDict& state_dict,
+                                     bool skip_proj_weights) {
   if (state_dict.size() == 0) {
     return;
   }
-  wkv_->load_state_dict(state_dict.get_dict_with_prefix("wkv."));
-  wgate_->load_state_dict(state_dict.get_dict_with_prefix("wgate."));
+  // When the projection weights have been merged into the attention layer's
+  // fused GEMM, skip loading them here; norm/ape are always loaded.
+  if (!skip_proj_weights) {
+    wkv_->load_state_dict(state_dict.get_dict_with_prefix("wkv."));
+    wgate_->load_state_dict(state_dict.get_dict_with_prefix("wgate."));
+  }
   norm_->load_state_dict(state_dict.get_dict_with_prefix("norm."));
   LOAD_WEIGHT(ape);
 }

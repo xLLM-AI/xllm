@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
+#include <optional>
 #include <tuple>
 
 #include "framework/model/model_args.h"
@@ -55,7 +56,10 @@ class CompressorImpl : public torch::nn::Module {
                         torch::Tensor& state_cache,
                         const torch::Tensor& state_block_table,
                         const torch::Tensor& compressed_sin_table,
-                        const torch::Tensor& compressed_cos_table);
+                        const torch::Tensor& compressed_cos_table,
+                        std::optional<torch::Tensor> projected_kv = std::nullopt,
+                        std::optional<torch::Tensor> projected_score =
+                            std::nullopt);
 
   torch::Tensor forward_decode(const AttentionMetadata& attn_metadata,
                                torch::Tensor& hidden_states,
@@ -64,7 +68,11 @@ class CompressorImpl : public torch::nn::Module {
                                torch::Tensor& state_cache,
                                const torch::Tensor& state_block_table,
                                const torch::Tensor& compressed_sin_table,
-                               const torch::Tensor& compressed_cos_table);
+                               const torch::Tensor& compressed_cos_table,
+                               std::optional<torch::Tensor> projected_kv =
+                                   std::nullopt,
+                               std::optional<torch::Tensor> projected_score =
+                                   std::nullopt);
 
   torch::Tensor forward_prefill(const AttentionMetadata& attn_metadata,
                                 torch::Tensor& hidden_states,
@@ -73,9 +81,14 @@ class CompressorImpl : public torch::nn::Module {
                                 torch::Tensor& state_cache,
                                 const torch::Tensor& state_block_table,
                                 const torch::Tensor& compressed_sin_table,
-                                const torch::Tensor& compressed_cos_table);
+                                const torch::Tensor& compressed_cos_table,
+                                std::optional<torch::Tensor> projected_kv =
+                                    std::nullopt,
+                                std::optional<torch::Tensor> projected_score =
+                                    std::nullopt);
 
-  void load_state_dict(const StateDict& state_dict);
+  void load_state_dict(const StateDict& state_dict,
+                       bool skip_proj_weights = false);
 
  private:
   ReplicatedLinear wkv_{nullptr};

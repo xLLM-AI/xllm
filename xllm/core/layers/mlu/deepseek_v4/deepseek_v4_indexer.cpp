@@ -157,7 +157,11 @@ torch::Tensor DeepseekV4IndexerImpl::preprocess_q(
 }
 
 torch::Tensor DeepseekV4IndexerImpl::preprocess_weights(
-    const torch::Tensor& x) {
+    const torch::Tensor& x,
+    std::optional<torch::Tensor> projected_weights) {
+  if (projected_weights.has_value()) {
+    return projected_weights.value();
+  }
   return weights_proj_->forward(x);
 }
 
@@ -168,7 +172,9 @@ torch::Tensor DeepseekV4IndexerImpl::compress_kv(
     torch::Tensor& index_cache,
     const DeepseekV4IndexerCacheRefs& cache_refs,
     const torch::Tensor& compressed_sin_table,
-    const torch::Tensor& compressed_cos_table) {
+    const torch::Tensor& compressed_cos_table,
+    std::optional<torch::Tensor> projected_kv,
+    std::optional<torch::Tensor> projected_score) {
   auto output = compressor_->forward(attn_metadata,
                                      hidden_states,
                                      index_cache,
@@ -176,7 +182,9 @@ torch::Tensor DeepseekV4IndexerImpl::compress_kv(
                                      compress_index_state,
                                      cache_refs.index_state_block_table,
                                      compressed_sin_table,
-                                     compressed_cos_table);
+                                     compressed_cos_table,
+                                     projected_kv,
+                                     projected_score);
   return output;
 }
 
@@ -291,7 +299,10 @@ std::tuple<torch::Tensor, torch::Tensor> DeepseekV4IndexerImpl::forward(
     const DeepseekV4IndexerCacheRefs& cache_refs,
     bool is_prefill,
     const torch::Tensor& compressed_sin_table,
-    const torch::Tensor& compressed_cos_table) {
+    const torch::Tensor& compressed_cos_table,
+    std::optional<torch::Tensor> projected_weights,
+    std::optional<torch::Tensor> projected_kv,
+    std::optional<torch::Tensor> projected_score) {
   torch::Tensor q = preprocess_q(
       qr, attn_metadata, compressed_sin_table, compressed_cos_table);
   torch::Tensor hidden_states = x;
@@ -301,8 +312,10 @@ std::tuple<torch::Tensor, torch::Tensor> DeepseekV4IndexerImpl::forward(
                                          index_cache,
                                          cache_refs,
                                          compressed_sin_table,
-                                         compressed_cos_table);
-  torch::Tensor weights = preprocess_weights(x);
+                                         compressed_cos_table,
+                                         projected_kv,
+                                         projected_score);
+  torch::Tensor weights = preprocess_weights(x, projected_weights);
   return select_topk(q,
                      weights,
                      current_kv,
@@ -312,14 +325,22 @@ std::tuple<torch::Tensor, torch::Tensor> DeepseekV4IndexerImpl::forward(
                      is_prefill);
 }
 
-void DeepseekV4IndexerImpl::load_state_dict(const StateDict& state_dict) {
+void DeepseekV4IndexerImpl::load_state_dict(const StateDict& state_dict,
+                                            bool skip_proj_weights) {
   if (state_dict.size() == 0) {
     return;
   }
+  // wq_b_ projects qr (not hidden), so it never participates in the attention
+  // layer's fused GEMM and must always be loaded. Only weights_proj_ (hidden
+  // -> n_heads) is skipped when its weights have been merged into the fused
+  // projection.
   wq_b_->load_state_dict(state_dict.get_dict_with_prefix("wq_b."));
-  weights_proj_->load_state_dict(
-      state_dict.get_dict_with_prefix("weights_proj."));
-  compressor_->load_state_dict(state_dict.get_dict_with_prefix("compressor."));
+  if (!skip_proj_weights) {
+    weights_proj_->load_state_dict(
+        state_dict.get_dict_with_prefix("weights_proj."));
+  }
+  compressor_->load_state_dict(state_dict.get_dict_with_prefix("compressor."),
+                               /*skip_proj_weights=*/skip_proj_weights);
 }
 
 }  // namespace layer
