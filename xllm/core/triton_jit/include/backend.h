@@ -68,6 +68,11 @@ inline constexpr const char* kTritonCompileModule =
 // GIL themselves before touching Python state.
 void ensure_embedded_interpreter();
 
+// Ensure the embedded interpreter can import the packaged Triton compile
+// helper from a build-tree or installed xllm package. Callers must hold the
+// GIL.
+void prepare_triton_compile_import_path();
+
 TritonBackend& get_backend();
 
 }  // namespace xllm::triton_jit

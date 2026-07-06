@@ -35,6 +35,7 @@ std::vector<ParamInfo> fetch_signature(const std::string& path,
                                        const std::string& name) {
   ensure_embedded_interpreter();
   py::gil_scoped_acquire gil;
+  prepare_triton_compile_import_path();
   py::module_ mod = py::module_::import(kTritonCompileModule);
   std::vector<ParamInfo> sig;
   try {
@@ -49,8 +50,8 @@ std::vector<ParamInfo> fetch_signature(const std::string& path,
     }
   } catch (py::error_already_set& e) {
     e.restore();
-    LOG(FATAL) << "triton_jit: dump-sig failed for " << name << " from "
-               << path << ": " << e.what();
+    LOG(FATAL) << "triton_jit: dump-sig failed for " << name << " from " << path
+               << ": " << e.what();
   }
   if (sig.empty()) {
     LOG(FATAL) << "triton_jit: dump-sig returned no parameters for " << name
@@ -136,8 +137,7 @@ CompiledKernel& JITKernel::compile_or_get(const SpecList& specs,
   }
   LOG(INFO) << "triton_jit: compiling " << name_
             << " (backend=" << backend.name() << ", key=" << key << ")";
-  std::string cache_dir =
-      backend.compile(path_, name_, specs, use_cfg, dev);
+  std::string cache_dir = backend.compile(path_, name_, specs, use_cfg, dev);
   std::unique_ptr<CompiledKernel> compiled =
       backend.load_kernel(cache_dir, name_);
   {

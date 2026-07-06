@@ -49,6 +49,8 @@ target_include_directories(triton_jit PUBLIC
   ${TRITON_JIT_DIR}/include
 )
 
+target_link_libraries(triton_jit PRIVATE ${CMAKE_DL_LIBS})
+
 if(USE_MLU)
   target_link_libraries(triton_jit PRIVATE cnclep cndrv cnrt torch_mlu torch_mlu_ops)
 endif()
