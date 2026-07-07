@@ -18,7 +18,6 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -34,6 +33,24 @@ namespace xllm::layer {
 namespace {
 
 constexpr int64_t kIndexC4Ratio = 4;
+constexpr int64_t kC128Ratio = 128;
+
+void build_compressed_pad_positions(const torch::Tensor& input_positions,
+                                    int64_t ratio,
+                                    int32_t batch_size,
+                                    int64_t num_tokens,
+                                    torch::Tensor& out) {
+  torch::Tensor mask = ((input_positions + 1) % ratio).eq(0);
+  torch::Tensor cmp_pos = input_positions.index({mask});
+  cmp_pos = (cmp_pos + 1) - ratio;
+  const int64_t target = std::min(num_tokens, num_tokens / ratio + batch_size);
+  const int64_t pad_right = target - cmp_pos.size(0);
+  if (pad_right > 0) {
+    out = torch::cat({cmp_pos, torch::zeros({pad_right}, cmp_pos.options())});
+  } else {
+    out = cmp_pos.slice(0, 0, target);
+  }
+}
 
 std::vector<int32_t> tensor_to_vec(const torch::Tensor& tensor,
                                    const char* name) {
@@ -41,12 +58,14 @@ std::vector<int32_t> tensor_to_vec(const torch::Tensor& tensor,
   CHECK_EQ(tensor.dim(), 1)
       << "DSAMetadataBuilderMlu expects " << name << " to be 1D.";
   torch::Tensor cpu_tensor =
-      tensor.to(torch::kCPU).to(torch::kInt32).contiguous();
+      tensor.to(torch::TensorOptions().device(torch::kCPU).dtype(torch::kInt32))
+          .contiguous();
+  const int64_t numel = cpu_tensor.numel();
   std::vector<int32_t> values;
-  values.reserve(static_cast<size_t>(cpu_tensor.numel()));
-  auto tensor_acc = cpu_tensor.accessor<int32_t, 1>();
-  for (int64_t idx = 0; idx < cpu_tensor.numel(); ++idx) {
-    values.emplace_back(tensor_acc[idx]);
+  values.reserve(static_cast<size_t>(numel));
+  if (numel > 0) {
+    const int32_t* data = cpu_tensor.data_ptr<int32_t>();
+    values.assign(data, data + numel);
   }
   return values;
 }
@@ -55,7 +74,7 @@ torch::Tensor sanitize_block_table(const torch::Tensor& table) {
   if (!table.defined()) {
     return table;
   }
-  return torch::where(table.lt(0), torch::zeros_like(table), table);
+  return table.clamp_min(0);
 }
 
 torch::Tensor sanitize_swa_table(const torch::Tensor& table,
@@ -138,29 +157,25 @@ torch::Tensor build_decode_slot_mapping(const torch::Tensor& cache_block_table,
       << "DSAMetadataBuilderMlu: query_start_offsets size must equal "
          "batch_size + 1.";
 
-  std::vector<torch::Tensor> per_seq_slots;
-  per_seq_slots.reserve(static_cast<size_t>(batch_size));
+  auto block_table_cpu = cache_block_table.contiguous().to(torch::kCPU);
+  auto block_table_acc = block_table_cpu.accessor<int32_t, 2>();
+  auto pos_cpu = dsa.input_positions.contiguous().to(torch::kCPU);
+  auto pos_acc = pos_cpu.accessor<int32_t, 1>();
+  std::vector<int32_t> slot_mapping_vec;
+  slot_mapping_vec.reserve(static_cast<size_t>(dsa.input_positions.numel()));
   for (int64_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
     const int64_t q_begin = dsa.query_start_offsets[seq_idx];
     const int64_t q_end = dsa.query_start_offsets[seq_idx + 1];
-    if (q_end <= q_begin) {
-      continue;
+    for (int64_t ci = q_begin; ci < q_end; ++ci) {
+      int32_t lid = pos_acc[ci] / compress_ratio;
+      int32_t block_col = lid / block_size;
+      slot_mapping_vec.push_back(
+          block_table_acc[seq_idx][block_col] * block_size + lid % block_size);
     }
-    torch::Tensor seq_positions = dsa.input_positions.slice(0, q_begin, q_end);
-    torch::Tensor compressed_row = seq_positions / compress_ratio;
-    torch::Tensor block_col =
-        (compressed_row / block_size).to(torch::kInt64).unsqueeze(0);
-    torch::Tensor block_offset = compressed_row % block_size;
-    torch::Tensor block_id =
-        cache_block_table[seq_idx].unsqueeze(0).gather(1, block_col).squeeze(0);
-    per_seq_slots.emplace_back(
-        (block_id * block_size + block_offset).to(torch::kInt32));
   }
-  if (per_seq_slots.empty()) {
-    return torch::empty(
-        {0}, torch::TensorOptions().dtype(torch::kInt32).device(device));
-  }
-  return torch::cat(per_seq_slots, 0).to(device);
+  return torch::tensor(
+      slot_mapping_vec,
+      torch::TensorOptions().dtype(torch::kInt32).device(device));
 }
 
 }  // namespace
@@ -217,11 +232,8 @@ void DSAMetadataBuilderMlu::build_dsa_fields(
 
   // Build per-batch sequence length metadata.
   build_seq_lengths(attn_metadata, batch_size, dsa, q_lens_vec, kv_lens_vec);
-  if (window_size > 0) {
-    build_swa_plan(dsa, q_lens_vec, window_size);
-  }
 
-  if (positions.defined()) {
+  if (positions.defined() && !is_decode) {
     build_positions(params, batch_size, dsa);
   }
 
@@ -413,8 +425,7 @@ void DSAMetadataBuilderMlu::process_group(const torch::Tensor& raw_bt,
   } else {
     torch::Tensor raw_slots =
         expand_blocks_to_slots(raw_bt, gi, ctx_lens, batch_size, total_tokens);
-    out_slots =
-        torch::where(raw_slots.eq(-1), torch::zeros_like(raw_slots), raw_slots);
+    out_slots = raw_slots.clamp_min(0);
     out_bt = raw_bt;
   }
 }
@@ -578,8 +589,7 @@ void DSAMetadataBuilderMlu::process_swa_group(
 
   int32_t max_dst_len = 0;
   for (int32_t s = 0; s < batch_size; ++s) {
-    const int32_t dst_len = static_cast<int32_t>(
-        std::ceil(static_cast<double>(ctx_lens[s]) / block_size));
+    const int32_t dst_len = (ctx_lens[s] + block_size - 1) / block_size;
     max_dst_len = std::max(max_dst_len, dst_len);
   }
   max_dst_len = std::max(max_dst_len, static_cast<int32_t>(current_cols));
@@ -587,7 +597,7 @@ void DSAMetadataBuilderMlu::process_swa_group(
   // To adapt to the fused_compress_single_kv and fused_compress_multi_kv
   // operators, the input cache tensor must have a shape of [bs, compress_len,
   // dim]. So the max_dst_len can not be less than C128 compress_len.
-  int32_t min_compress_len = 128 / block_size;
+  int32_t min_compress_len = static_cast<int32_t>(kC128Ratio / block_size);
   max_dst_len = std::max(max_dst_len, min_compress_len);
 
   if (current_cols >= max_dst_len && raw_bt.size(0) == batch_size) {
@@ -617,7 +627,7 @@ void DSAMetadataBuilderMlu::build_c128_meta(
   int32_t c128_gid = -1;
   for (int32_t gid = 0; gid < static_cast<int32_t>(group_infos.size()); ++gid) {
     if (group_infos[gid].type == DSACacheType::TOKEN &&
-        group_infos[gid].ratio == 128) {
+        group_infos[gid].ratio == kC128Ratio) {
       c128_gid = gid;
       break;
     }
@@ -640,7 +650,7 @@ void DSAMetadataBuilderMlu::build_c128_meta(
     const int64_t q_len = q_end - q_begin;
     if (q_len > 0) {
       const int64_t last_context_len =
-          (dsa_metadata.start_pos_vec[seq_idx] + q_len) / 128;
+          (dsa_metadata.start_pos_vec[seq_idx] + q_len) / kC128Ratio;
       max_context_len = std::max(max_context_len, last_context_len);
     }
   }
@@ -652,7 +662,9 @@ void DSAMetadataBuilderMlu::build_c128_meta(
   torch::Tensor table =
       torch::full({total_tokens, table_cols}, -1, int_options);
   torch::Tensor src =
-      block_table.to(torch::kCPU).to(torch::kInt32).contiguous();
+      block_table
+          .to(torch::TensorOptions().device(torch::kCPU).dtype(torch::kInt32))
+          .contiguous();
   auto table_acc = table.accessor<int32_t, 2>();
   auto src_acc = src.accessor<int32_t, 2>();
 
@@ -664,7 +676,7 @@ void DSAMetadataBuilderMlu::build_c128_meta(
                           dsa_metadata.query_start_offsets[seq_idx];
     for (int64_t token_idx = 0; token_idx < q_len; ++token_idx) {
       const int64_t context_len =
-          (dsa_metadata.start_pos_vec[seq_idx] + token_idx + 1) / 128;
+          (dsa_metadata.start_pos_vec[seq_idx] + token_idx + 1) / kC128Ratio;
       context_lens.emplace_back(static_cast<int32_t>(context_len));
       const int64_t blocks = (context_len + block_size - 1) / block_size;
       const int64_t cols = std::min<int64_t>(blocks, src.size(1));
@@ -686,16 +698,11 @@ void DSAMetadataBuilderMlu::build_seq_lengths(
     DSAMetadata& dsa_metadata,
     std::vector<int32_t>& q_lens_vec,
     std::vector<int32_t>& kv_lens_vec) {
-  std::vector<int32_t> q_cu_lens_vec;
-  std::vector<int32_t> kv_cu_lens_vec;
   torch::Tensor q_cu_lens;
   torch::Tensor kv_cu_lens;
   torch::Tensor q_lens;
   torch::Tensor kv_lens;
 
-  q_cu_lens_vec = tensor_to_vec(attn_metadata.q_cu_seq_lens, "q_cu_seq_lens");
-  kv_cu_lens_vec =
-      tensor_to_vec(attn_metadata.kv_cu_seq_lens, "kv_cu_seq_lens");
   q_lens_vec = tensor_to_vec(attn_metadata.q_seq_lens, "q_seq_lens");
   kv_lens_vec = tensor_to_vec(attn_metadata.kv_seq_lens, "kv_seq_lens");
 
@@ -729,7 +736,6 @@ void DSAMetadataBuilderMlu::build_seq_lengths(
   dsa_metadata.kv_seq_lens = kv_lens;
   dsa_metadata.index_c4_seq_lens = index_c4_lens;
   dsa_metadata.seq_lens = kv_lens;
-  dsa_metadata.actual_seq_lengths_kv = kv_lens;
 
   dsa_metadata.query_start_offsets.clear();
   dsa_metadata.query_start_offsets.reserve(static_cast<size_t>(batch_size) + 1);
@@ -744,107 +750,31 @@ void DSAMetadataBuilderMlu::build_seq_lengths(
     dsa_metadata.query_start_offsets.emplace_back(query_offset);
     dsa_metadata.start_pos_vec.emplace_back(kv_len - q_len);
   }
-
-  // cumsum with leading 0: shape (batch_size+1,)
-  dsa_metadata.actual_seq_lengths_query = q_cu_lens;
-  dsa_metadata.seq_lens_q = q_lens;
-
-  auto int_options = torch::TensorOptions().dtype(torch::kInt32);
-  if (kv_lens.numel() > 0) {
-    dsa_metadata.max_seqlen_kv = torch::max(kv_lens).to(torch::kInt32);
-  } else {
-    dsa_metadata.max_seqlen_kv = torch::zeros({1}, int_options);
-  }
-
-  if (q_lens.numel() > 0) {
-    dsa_metadata.max_seqlen_q = torch::max(q_lens).to(torch::kInt32);
-  } else {
-    dsa_metadata.max_seqlen_q = torch::zeros({1}, int_options);
-  }
-}
-
-void DSAMetadataBuilderMlu::build_swa_plan(
-    DSAMetadata& dsa_metadata,
-    const std::vector<int32_t>& q_lens_vec,
-    int64_t window_size) {
-  const int64_t batch_size =
-      static_cast<int64_t>(dsa_metadata.start_pos_vec.size());
-  CHECK_EQ(static_cast<int64_t>(q_lens_vec.size()), batch_size)
-      << "DSAMetadataBuilderMlu: q_lens size must match start_pos size.";
-
-  std::vector<int32_t> history_lens;
-  std::vector<int32_t> context_lens;
-  history_lens.reserve(static_cast<size_t>(batch_size));
-  context_lens.reserve(
-      static_cast<size_t>(dsa_metadata.query_start_offsets.back()));
-  dsa_metadata.swa_start_pos_vec.clear();
-  dsa_metadata.swa_start_pos_vec.reserve(static_cast<size_t>(batch_size));
-  dsa_metadata.swa_max_history_len = 0;
-  dsa_metadata.swa_max_context_len = 0;
-
-  const bool has_window = window_size > 0;
-  const int64_t window_left =
-      has_window ? std::max<int64_t>(window_size - 1, 0) : 0;
-  for (int64_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
-    const int64_t start_pos = dsa_metadata.start_pos_vec[seq_idx];
-    const int64_t swa_start =
-        has_window ? std::max<int64_t>(0, start_pos - window_left) : 0;
-    const int64_t history_len = start_pos - swa_start;
-    dsa_metadata.swa_start_pos_vec.emplace_back(swa_start);
-    history_lens.emplace_back(static_cast<int32_t>(history_len));
-    dsa_metadata.swa_max_history_len =
-        std::max(dsa_metadata.swa_max_history_len, history_len);
-
-    const int64_t q_len = static_cast<int64_t>(q_lens_vec[seq_idx]);
-    for (int64_t token_idx = 0; token_idx < q_len; ++token_idx) {
-      const int64_t token_abs_pos = start_pos + token_idx;
-      const int64_t context_len = token_abs_pos - swa_start + 1;
-      context_lens.emplace_back(static_cast<int32_t>(context_len));
-      dsa_metadata.swa_max_context_len =
-          std::max(dsa_metadata.swa_max_context_len, context_len);
-    }
-  }
-
-  dsa_metadata.swa_history_lens =
-      torch::tensor(history_lens, torch::TensorOptions().dtype(torch::kInt32));
-  dsa_metadata.swa_context_lens =
-      torch::tensor(context_lens, torch::TensorOptions().dtype(torch::kInt32));
 }
 
 void DSAMetadataBuilderMlu::build_positions(const ModelInputParams& params,
                                             int32_t batch_size,
                                             DSAMetadata& dsa_metadata) {
   (void)params;
-  if (!dsa_metadata.input_positions.defined()) return;
-
-  auto input_positions = dsa_metadata.input_positions;
-  int64_t num_tokens = input_positions.size(0);
-
-  // C4 compressed positions
-  auto c4_mask = ((input_positions + 1) % 4).eq(0);
-  auto c4_pos = input_positions.index({c4_mask});
-  c4_pos = (c4_pos + 1) - 4;
-  int64_t c4_target = std::min(num_tokens, num_tokens / 4 + batch_size);
-  int64_t c4_pad_right = c4_target - c4_pos.size(0);
-  if (c4_pad_right > 0) {
-    dsa_metadata.c4_pad_positions =
-        torch::cat({c4_pos, torch::zeros({c4_pad_right}, c4_pos.options())});
-  } else {
-    dsa_metadata.c4_pad_positions = c4_pos.slice(0, 0, c4_target);
+  if (!dsa_metadata.input_positions.defined()) {
+    return;
   }
 
-  // C128 compressed positions
-  auto c128_mask = ((input_positions + 1) % 128).eq(0);
-  auto c128_pos = input_positions.index({c128_mask});
-  c128_pos = (c128_pos + 1) - 128;
-  int64_t c128_target = std::min(num_tokens, num_tokens / 128 + batch_size);
-  int64_t c128_pad_right = c128_target - c128_pos.size(0);
-  if (c128_pad_right > 0) {
-    dsa_metadata.c128_pad_positions = torch::cat(
-        {c128_pos, torch::zeros({c128_pad_right}, c128_pos.options())});
-  } else {
-    dsa_metadata.c128_pad_positions = c128_pos.slice(0, 0, c128_target);
-  }
+  const torch::Tensor input_positions = dsa_metadata.input_positions;
+  const int64_t num_tokens = input_positions.size(0);
+
+  // C4 / C128 compressed positions share the same construction; only the
+  // compression ratio differs.
+  build_compressed_pad_positions(input_positions,
+                                 /*ratio=*/kIndexC4Ratio,
+                                 batch_size,
+                                 num_tokens,
+                                 dsa_metadata.c4_pad_positions);
+  build_compressed_pad_positions(input_positions,
+                                 /*ratio=*/kC128Ratio,
+                                 batch_size,
+                                 num_tokens,
+                                 dsa_metadata.c128_pad_positions);
 }
 
 }  // namespace xllm::layer

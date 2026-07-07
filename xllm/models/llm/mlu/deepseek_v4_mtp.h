@@ -360,16 +360,6 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
       DeepseekV4GraphMetadataState::DSAMetadataPersistent& persistent) {
     // Scalar metadata tensors
     dsa.seq_lens = copy_to_persistent_tensor(dsa.seq_lens, persistent.seq_lens);
-    dsa.seq_lens_q =
-        copy_to_persistent_tensor(dsa.seq_lens_q, persistent.seq_lens_q);
-    dsa.actual_seq_lengths_kv = copy_to_persistent_tensor(
-        dsa.actual_seq_lengths_kv, persistent.actual_seq_lengths_kv);
-    dsa.actual_seq_lengths_query = copy_to_persistent_tensor(
-        dsa.actual_seq_lengths_query, persistent.actual_seq_lengths_query);
-    dsa.max_seqlen_kv =
-        copy_to_persistent_tensor(dsa.max_seqlen_kv, persistent.max_seqlen_kv);
-    dsa.max_seqlen_q =
-        copy_to_persistent_tensor(dsa.max_seqlen_q, persistent.max_seqlen_q);
     dsa.input_positions = copy_to_persistent_tensor(dsa.input_positions,
                                                     persistent.input_positions);
     dsa.c4_pad_positions = copy_to_persistent_tensor(
@@ -386,10 +376,6 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
         copy_to_persistent_tensor(dsa.kv_seq_lens, persistent.kv_seq_lens);
     dsa.index_c4_seq_lens = copy_to_persistent_tensor(
         dsa.index_c4_seq_lens, persistent.index_c4_seq_lens);
-    dsa.swa_history_lens = copy_to_persistent_tensor(
-        dsa.swa_history_lens, persistent.swa_history_lens);
-    dsa.swa_context_lens = copy_to_persistent_tensor(
-        dsa.swa_context_lens, persistent.swa_context_lens);
 
     // c128 metadata
     dsa.c128_attn_metadata.context_lens = copy_to_persistent_tensor(
@@ -398,10 +384,6 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
         copy_to_persistent_tensor(dsa.c128_attn_metadata.block_table_for_attn,
                                   persistent.c128_block_table_for_attn,
                                   -1);
-
-    // start_pos
-    dsa.start_pos =
-        copy_to_persistent_tensor(dsa.start_pos, persistent.start_pos);
 
     // block_tables/slot_mappings: copy data into persistent buffers once per
     // group, then assign the persistent buffers back to all dsa entries sharing
@@ -484,18 +466,11 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     persistent.c4_pad_positions = torch::zeros({num_tokens}, int_options);
     persistent.c128_pad_positions = torch::zeros({num_tokens}, int_options);
     persistent.index_c4_seq_lens = torch::zeros({num_tokens}, int_options);
-    persistent.swa_history_lens = torch::zeros({num_tokens}, int_options);
-    persistent.swa_context_lens = torch::zeros({num_tokens}, int_options);
     persistent.q_seq_lens = torch::zeros({num_tokens}, int_options);
     persistent.kv_seq_lens = torch::zeros({num_tokens}, int_options);
     persistent.q_cu_seq_lens = torch::zeros({num_tokens + 1}, int_options);
     persistent.kv_cu_seq_lens = torch::zeros({num_tokens + 1}, int_options);
     persistent.seq_lens = torch::zeros({num_tokens}, int_options);
-    persistent.seq_lens_q = torch::zeros({num_tokens}, int_options);
-    persistent.actual_seq_lengths_kv = torch::zeros({num_tokens}, int_options);
-    persistent.actual_seq_lengths_query =
-        torch::zeros({num_tokens + 1}, int_options);
-    persistent.start_pos = torch::zeros({num_tokens}, int_options);
   }
 
   static bool tensor_aliases_storage(const torch::Tensor& lhs,
@@ -730,13 +705,6 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
 
     layer::DSAMetadata& dsa = *(attn_metadata.dsa_metadata);
     dsa.seq_lens = maybe_to_device(dsa.seq_lens, runtime_device);
-    dsa.seq_lens_q = maybe_to_device(dsa.seq_lens_q, runtime_device);
-    dsa.actual_seq_lengths_query =
-        maybe_to_device(dsa.actual_seq_lengths_query, runtime_device);
-    dsa.actual_seq_lengths_kv =
-        maybe_to_device(dsa.actual_seq_lengths_kv, runtime_device);
-    dsa.max_seqlen_q = maybe_to_device(dsa.max_seqlen_q, runtime_device);
-    dsa.max_seqlen_kv = maybe_to_device(dsa.max_seqlen_kv, runtime_device);
     dsa.input_positions = maybe_to_device(dsa.input_positions, runtime_device)
                               .to(torch::kInt32)
                               .contiguous();
@@ -750,10 +718,6 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     dsa.kv_seq_lens = maybe_to_device(dsa.kv_seq_lens, runtime_device);
     dsa.index_c4_seq_lens =
         maybe_to_device(dsa.index_c4_seq_lens, runtime_device);
-    dsa.swa_history_lens =
-        maybe_to_device(dsa.swa_history_lens, runtime_device);
-    dsa.swa_context_lens =
-        maybe_to_device(dsa.swa_context_lens, runtime_device);
     dsa.c128_attn_metadata.context_lens =
         maybe_to_device(dsa.c128_attn_metadata.context_lens, runtime_device);
     dsa.c128_attn_metadata.block_table_for_attn = maybe_to_device(
@@ -784,10 +748,6 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     dsa.compressed_inverse_sin_table =
         maybe_to_device(compressed_inverse_sin_, runtime_device);
 
-    if (dsa.actual_seq_lengths_kv.defined() && dsa.seq_lens_q.defined()) {
-      dsa.start_pos =
-          (dsa.actual_seq_lengths_kv - dsa.seq_lens_q).to(torch::kInt32);
-    }
     sync_dsa_seq_metadata(attn_metadata, dsa);
   }
 
