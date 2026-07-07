@@ -528,7 +528,8 @@ ColumnParallelLinearImpl::ColumnParallelLinearImpl(
     const QuantArgs& quant_args,
     ProcessGroup* process_group,
     const torch::TensorOptions& options,
-    const LinearExtraArgs& linear_extra_args)
+    const LinearExtraArgs& linear_extra_args,
+    int32_t output_replicas)
     : gather_output_(gather_output),
       device_(options.device()),
       process_group_(process_group),
@@ -538,10 +539,17 @@ ColumnParallelLinearImpl::ColumnParallelLinearImpl(
       output_dtype_(c10::typeMetaToScalarType(options.dtype())) {
   rank_ = process_group_->rank();
   world_size_ = process_group_->world_size();
-  CHECK(out_features % world_size_ == 0)
-      << "out_features " << out_features << " not divisible by world_size "
-      << world_size_;
-  const int64_t out_features_per_partition = out_features / world_size_;
+  int32_t valid_output_replicas = output_replicas;
+  if (valid_output_replicas <= 0 || world_size_ % valid_output_replicas != 0 ||
+      (valid_output_replicas != 1 && gather_output)) {
+    valid_output_replicas = 1;
+  }
+  weight_rank_ = rank_ / valid_output_replicas;
+  weight_world_size_ = world_size_ / valid_output_replicas;
+  CHECK(out_features % weight_world_size_ == 0)
+      << "out_features " << out_features
+      << " not divisible by weight_world_size " << weight_world_size_;
+  const int64_t out_features_per_partition = out_features / weight_world_size_;
   // Note: torch.nn.functional.linear performs XA^T + b and as a result
   // we allocate the transpose.
   if (quant_args_.quant_method() == kQuantMethodSmoothquant) {
@@ -731,8 +739,8 @@ void ColumnParallelLinearImpl::load_state_dict(const StateDict& state_dict) {
   if (state_dict.size() == 0) {
     return;
   }
-  const int64_t rank = world_size_ == 1 ? 0 : rank_;
-  const int64_t world_size = world_size_;
+  const int64_t rank = weight_world_size_ == 1 ? 0 : weight_rank_;
+  const int64_t world_size = weight_world_size_;
   resolve_weight_quant_method_for_linear_load(
       quant_args_, state_dict, nullptr, resolved_weight_quant_method_);
   ensure_w8a8_params_for_linear_load(
@@ -800,8 +808,8 @@ void ColumnParallelLinearImpl::load_state_dict(
   if (state_dict.size() == 0) {
     return;
   }
-  const int64_t rank = world_size_ == 1 ? 0 : rank_;
-  const int64_t world_size = world_size_;
+  const int64_t rank = weight_world_size_ == 1 ? 0 : weight_rank_;
+  const int64_t world_size = weight_world_size_;
   resolve_weight_quant_method_for_linear_load(
       quant_args_, state_dict, &prefixes, resolved_weight_quant_method_);
   ensure_w8a8_params_for_linear_load(
@@ -940,8 +948,8 @@ void ColumnParallelLinearImpl::load_state_dict(
   if (state_dict.size() == 0) {
     return;
   }
-  const int64_t rank = rank_;
-  const int64_t world_size = world_size_;
+  const int64_t rank = weight_rank_;
+  const int64_t world_size = weight_world_size_;
   resolve_weight_quant_method_for_linear_load(
       quant_args_, state_dict, nullptr, resolved_weight_quant_method_);
   ensure_w8a8_params_for_linear_load(

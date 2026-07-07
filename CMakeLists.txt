@@ -7,6 +7,7 @@ option(USE_ILU "Enable ILU support" OFF)
 option(USE_CUDA "Enable CUDA support" OFF)
 option(USE_MUSA "Enable MUSA support" OFF)
 option(USE_DCU "Enable DCU support" OFF)
+option(USE_MACA "Enable MACA support" OFF)
 add_compile_definitions(YLT_ENABLE_IBV)
 add_definitions(-DYLT_ENABLE_IBV)
 set(YLT_ENABLE_IBV ON)
@@ -14,6 +15,22 @@ set(YLT_ENABLE_IBV ON)
 if(DEVICE_ARCH STREQUAL "ARM")
     set(CMAKE_SYSTEM_PROCESSOR aarch64)
     set(RUST_TARGET aarch64-unknown-linux-gnu)
+endif()
+
+if(USE_MACA)
+    Set(Python_EXECUTABLE $ENV{PYTHON_EXECUTABLE})
+    add_definitions(-DUSE_MACA)
+    include_directories(
+      $ENV{CUDA_PATH}/include
+    )
+    include_directories(SYSTEM
+      $ENV{PYTORCH_INSTALL_PATH}/../tvm_ffi/include
+    )
+    link_directories(
+      $ENV{CUDA_PATH}/lib
+      $ENV{MACA_PATH}/lib
+      $ENV{PYTORCH_INSTALL_PATH}/../tvm_ffi/lib
+    )
 endif()
 
 if(USE_NPU)

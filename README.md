@@ -23,14 +23,15 @@ limitations under the License. -->
 
 ---------------------
 
-<p align="center">
-| <a href="https://docs.xllm-ai.com/"><b>Documentation</b></a> | <a href="https://arxiv.org/abs/2510.14686"><b>Technical Report</b></a> |
-</p>
-
 
 ### 📢 News
+<!-- only keep the latest 3 news, others should be folded -->
+- 2026-07-06: 🎉 xLLM is officially donated to the OpenAtom Foundation!
 - 2026-06-13: 🎉 We day-0 support the [MiniMax-M3](https://huggingface.co/MiniMaxAI/MiniMax-M3) model, please refer to the [Deployment Document](https://github.com/jd-opensource/xllm/blob/preview/minimax-m3/testspace/run_minimax_m3.sh) for deployment.
 - 2026-04-24: 🎉 We day-0 support the [DeepSeek-V4](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) model, please refer to the [Deployment Document](https://github.com/jd-opensource/xllm/blob/preview/deepseek-v4-mlu/testspace/run_deepseek_v4.sh) for deployment.
+
+<details>
+<summary>More News</summary>
 - 2026-02-12: 🎉 We day-0 support high-performance inference for the [GLM-5](https://github.com/zai-org/GLM-5) model, please refer to the [Deployment Document](https://github.com/zai-org/GLM-5/blob/main/example/ascend.md) for deployment.
 - 2025-12-21: 🎉 We day-0 support high-performance inference for the [GLM-4.7](https://github.com/zai-org) model.
 - 2025-12-08: 🎉 We day-0 support high-performance inference for the [GLM-4.6V](https://github.com/zai-org/GLM-V) model.
@@ -39,74 +40,43 @@ limitations under the License. -->
 - 2025-12-05: 🎉 We build hybrid KV cache management based on [Mooncake](https://github.com/kvcache-ai/Mooncake), supporting global KV cache management with intelligent offloading and prefetching.
 - 2025-10-16: 🎉 We recently have released our [xLLM Technical Report](https://arxiv.org/abs/2510.14686) on arXiv, providing comprehensive technical blueprints and implementation insights.
 
-## Project Overview
+</details>
 
-**xLLM** is an **efficient LLM inference framework**, specifically optimized for **Chinese AI accelerators**, enabling enterprise-grade deployment with enhanced efficiency and reduced cost. The framework adopts a **service-engine decoupled** inference architecture, achieving breakthrough efficiency through several  technologies: at the service layer, including elastic scheduling of online/offline requests, dynamic PD disaggregation, a hybrid EPD mechanism for multimodal and high-availability fault tolerance; and at the engine layer, combined with technologies such as multi-stream parallel computing, graph fusion optimization, speculative inference, dynamic load balancing and global KV cache management. The overall architecture is shown below:
+## Overview
 
+**xLLM** is an **efficient LLM inference framework**, specifically optimized for **Chinese AI accelerators**, enabling enterprise-grade deployment with enhanced efficiency and reduced cost.
 <div align="center">
 <img src="docs/assets/xllm_arch.png" alt="xllm_arch" style="width:90%; height:auto;">
 </div>
 
-**xLLM** already supports efficient deployment of mainstream large models (such as *DeepSeek-V3.1*, *Qwen2/3*, etc.) on Chinese AI accelerators, empowering enterprises to implement high-performance, low-cost AI large model applications. xLLM has been fully deployed in JD.com’s real core retail businesses, covering a variety of scenarios including intelligent customer service, risk control, supply chain optimization, ad recommendation, and more.
+## Highlights
 
+* **Top-tier Performance**: Delivers high-throughput, low-latency inference through many advanced features.
+* **Mainstream Hardware Support**: Purpose-built and deeply optimized for Chinese AI accelerators.
+* **Service-Engine Decoupled Architecture**: Service layer handles scheduling and availability; engine layer handles computation.
+* **Enterprise-grade Deployment**: Battle-tested at scale across JD.com's core retail business.
 
-## Core Features
-
-**xLLM** delivers robust intelligent computing capabilities. By leveraging hardware system optimization and algorithm-driven decision control, it jointly accelerates the inference process, enabling high-throughput, low-latency distributed inference services.
-
-**Full Graph Pipeline Execution Orchestration**
-- Asynchronous decoupled scheduling at the requests scheduling layer, to reduce computational bubbles.
-- Asynchronous parallelism of computation and communication at the model graph layer, overlapping computation and communication.
-- Pipelining of heterogeneous computing units at the operator kernel layer, overlapping computation and memory access.
-
-**Graph Optimization for Dynamic Shapes**
-- Dynamic shape adaptation based on parameterization and multi-graph caching methods to enhance the flexibility of static graph.
-- Controlled tensor memory pool to ensure address security and reusability.
-- Integration and adaptation of performance-critical custom operators (e.g., *PageAttention*, *AllReduce*).
-
-**Efficient Memory Optimization**
-- Mapping management between discrete physical memory and continuous virtual memory.
-- On-demand memory allocation to reduce memory fragmentation.
-- Intelligent scheduling of memory pages to increase memory reusability.
-- Adaptation of corresponding operators for domestic accelerators.
-
-**Global KV Cache Management**
-- Intelligent offloading and prefetching of KV in hierarchical caches.
-- KV cache-centric distributed storage architecture.
-- Intelligent KV routing among computing nodes.
-
-**Algorithm-driven Acceleration**
-- Speculative decoding optimization to improve efficiency through multi-core parallelism.
-- Dynamic load balancing of MoE experts to achieve efficient adjustment of expert distribution.
-
----
 ## Hardware Support
 
-| Hardware | Example | Remark          |
-| -------- | ------- | --------------- |
-| NPU      | A2, A3  | HDK Driver 25.2.0 + |
-| MLU      |         |                 |
-| ILU      | BI150   |                 |
-| MUSA     | S5000   |                 |
-| DCU      | BW1000  |                 |
+| Hardware           | Abbreviation | Example | Remark              |
+| ------------------ | ------------ | ------- | ------------------- |
+| Ascend NPU         | NPU          | A2, A3  | HDK Driver 25.2.0 + |
+| Cambricon MLU      | MLU          | MLU590  |                     |
+| Moore Threads GPU  | MUSA         | S5000   |                     |
+| Hygon DCU          | DCU          | BW1000  |                     |
+| MetaX MACA         | MACA         | MXC500  |                     |
+| Iluvatar CoreX GPU | ILU          | BI150   |                     |
 
-Besides, please check the supported models on different hardwares at [Supported Models List](docs/en/supported_models.md).
 
----
+## Getting Started
 
-## Quick Start
-
-Please refer to [Quick Start](docs/en/getting_started/quick_start.md) for more details.
-
---- 
-
-## Contributing
-Please refer to [CONTRIBUTING.md](.github/CONTRIBUTING.md) for contribution guidelines.
-
----
+* [Quick Start](https://docs.xllm-ai.com/en/getting_started/quick_start/)
+* [Launch xLLM](https://docs.xllm-ai.com/en/getting_started/launch_xllm/)
+* [Online Service](https://docs.xllm-ai.com/en/getting_started/online_service/)
+* [Offline Inference](https://docs.xllm-ai.com/en/getting_started/offline_service/)
+* [Supported Models](https://docs.xllm-ai.com/en/supported_models/)
 
 ## Community & Support
-If you encounter any issues along the way, you are welcomed to submit reproducible steps and log snippets in the project's Issues area, or contact the xLLM Core team directly via your internal Slack. In addition, we have established official WeChat groups. You can access the following QR code to join. Welcome to contact us!
 
 <div align="center">
   <img src="docs/assets/wechat_qrcode.png" alt="qrcode3" width="50%" />
@@ -139,13 +109,6 @@ Thanks to all the following [developers](https://github.com/jd-opensource/xllm/g
   <img src="https://contrib.rocks/image?repo=jd-opensource/xllm" />
 </a>
 
----
-
-## License
-[Apache License](LICENSE)
-
-#### xLLM is provided by JD.com 
-#### Thanks for your Contributions!
 
 ## Citation
 

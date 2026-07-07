@@ -499,7 +499,9 @@ ForwardInput WorkerImpl::prepare_inputs(Batch& batch) {
 bool WorkerImpl::can_prepare_npu_graph_decode_input(
     const ModelInputParams& input_params) const {
 #if defined(USE_NPU)
-  return FLAGS_enable_graph && FLAGS_enable_graph_double_buffer &&
+  return !options_.enable_speculative_decode() &&
+         ::xllm::ExecutionConfig::get_instance().enable_graph() &&
+         ::xllm::ExecutionConfig::get_instance().enable_graph_double_buffer() &&
          enable_schedule_overlap() && options_.backend() == "llm" &&
          input_params.meta.batch_forward_type.has_decode();
 #else
@@ -512,8 +514,10 @@ bool WorkerImpl::can_prepare_without_compute_stream_wait(
     const ModelInputParams& input_params) const {
 #if defined(USE_NPU)
   (void)input_params;
-  return !options_.enable_speculative_decode() && FLAGS_enable_graph &&
-         FLAGS_enable_graph_double_buffer && options_.backend() == "llm";
+  return !options_.enable_speculative_decode() &&
+         ::xllm::ExecutionConfig::get_instance().enable_graph() &&
+         ::xllm::ExecutionConfig::get_instance().enable_graph_double_buffer() &&
+         options_.backend() == "llm";
 #else
   (void)input_params;
   return false;

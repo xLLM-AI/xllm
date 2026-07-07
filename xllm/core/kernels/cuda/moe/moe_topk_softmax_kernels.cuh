@@ -22,7 +22,8 @@ limitations under the License.
 #include <torch/all.h>
 
 #include <cub/util_type.cuh>
-#if !defined(USE_DCU)
+
+#if !defined(USE_DCU) && !defined(USE_MACA)
 #include <cuda/functional>
 #endif
 

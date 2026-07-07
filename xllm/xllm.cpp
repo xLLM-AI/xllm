@@ -249,6 +249,8 @@ void validate_config(const std::string& model_type) {
   SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
   ParallelConfig& parallel_config = ParallelConfig::get_instance();
   DisaggPDConfig& disagg_pd_config = DisaggPDConfig::get_instance();
+  SpeculativeConfig& speculative_config = SpeculativeConfig::get_instance();
+  ExecutionConfig& execution_config = ExecutionConfig::get_instance();
 
   if (model_config.backend().empty()) {
     LOG(FATAL) << "Model is not supported currently, model type: "
@@ -301,6 +303,13 @@ void validate_config(const std::string& model_type) {
 #endif
 
 #if defined(USE_NPU)
+  if (speculative_config.num_speculative_tokens() > 0 &&
+      execution_config.enable_graph_double_buffer()) {
+    LOG(WARNING) << "enable_graph_double_buffer is not compatible with "
+                    "speculative decoding. "
+                 << "Disabling enable_graph_double_buffer.";
+    execution_config.enable_graph_double_buffer(false);
+  }
   // enable_xtensor / enable_rolling_load imply enable_manual_loader
   if ((kv_cache_config.enable_xtensor() || load_config.enable_rolling_load()) &&
       !load_config.enable_manual_loader()) {

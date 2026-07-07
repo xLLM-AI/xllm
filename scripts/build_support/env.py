@@ -237,6 +237,32 @@ def set_dcu_envs() -> None:
         if aiter_cpp_api_lib:
             os.environ["AITER_CPP_API_LIB"] = aiter_cpp_api_lib
 
+def set_maca_envs():
+    os.environ["PYTHON_INCLUDE_PATH"] = get_python_include_path()
+    os.environ["PYTHON_LIB_PATH"] = get_torch_root_path()
+    os.environ["LIBTORCH_ROOT"] = get_torch_root_path()
+    os.environ["PYTORCH_INSTALL_PATH"] = get_torch_root_path()
+
+    MACA_PATH = os.getenv("MACA_PATH", "/opt/maca")
+    os.environ["CUCC_CMAKE_ENTRY"] = "2"
+    os.environ["CUCC_PATH"] = MACA_PATH + "/tools/cu-bridge"
+    os.environ["CUDA_PATH"] = MACA_PATH + "/tools/cu-bridge"
+    PATH = os.getenv("PATH", "")
+    PATH = MACA_PATH + "/mxgpu_llvm/bin" + ":" + \
+        MACA_PATH + "/bin" + ":" + \
+        MACA_PATH + "/tools/cu-bridge/bin" + ":" + \
+        MACA_PATH + "/tools/cu-bridge/tools" + ":" + \
+        ":" + PATH
+    os.environ["PATH"] = PATH
+    LD_LIBRARY_PATH = os.getenv("LD_LIBRARY_PATH", "")
+    LD_LIBRARY_PATH = MACA_PATH + "/lib" + ":" + \
+        MACA_PATH + "/ompi/lib" + ":" + \
+        MACA_PATH + "/mxgpu_llvm/lib" + ":" + \
+        MACA_PATH + "/tools/cu-bridge/lib" + ":" + \
+        LD_LIBRARY_PATH
+    os.environ["LD_LIBRARY_PATH"] = LD_LIBRARY_PATH
+    os.environ["PYTHON_EXECUTABLE"] = "/opt/conda/bin/python"
+
 def set_ilu_envs() -> None:
     set_common_envs()
     os.environ["IXFORMER_INSTALL_PATH"] = get_ixformer_root_path() or ""

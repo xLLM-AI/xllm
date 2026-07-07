@@ -62,8 +62,12 @@ class Qwen3_5AttentionImpl : public torch::nn::Module {
   bool attn_output_gate_;
   int32_t layer_id_;
   int32_t rank_;
+  bool use_split_qkv_ = false;
 
   QKVParallelLinear qkv_proj_{nullptr};
+  ColumnParallelLinear q_proj_{nullptr};
+  ColumnParallelLinear k_proj_{nullptr};
+  ColumnParallelLinear v_proj_{nullptr};
   RowParallelLinear o_proj_{nullptr};
 
   Qwen3NextRMSNorm q_norm_{nullptr};

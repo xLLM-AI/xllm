@@ -52,18 +52,56 @@ Qwen3_5AttentionImpl::Qwen3_5AttentionImpl(const ModelArgs& args,
   scaling_ = 1.0f / std::sqrt(static_cast<float>(head_dim_));
   attn_output_gate_ = args.attn_output_gate();
   mrope_cu_seq_lens_ = torch::zeros(2, torch::kInt32).to(options.device());
+  use_split_qkv_ = quant_args.quant_method() == kQuantMethodSmoothquant;
   // 1. QKV linear
-  qkv_proj_ = register_module(
-      "qkv_proj",
-      QKVParallelLinear(args.hidden_size(),
-                        attn_output_gate_ ? num_heads_ * 2 : num_heads_,
-                        num_kv_heads_,
-                        args.head_dim(),
-                        num_kv_head_replicas_,
-                        /*bias=*/args.attention_bias(),
-                        /*gather_output=*/false,
-                        parallel_args,
-                        options));
+  if (use_split_qkv_) {
+    q_proj_ = register_module(
+        "q_proj",
+        ColumnParallelLinear(
+            args.hidden_size(),
+            (attn_output_gate_ ? total_num_heads * 2 : total_num_heads) *
+                args.head_dim(),
+            /*bias=*/args.attention_bias(),
+            /*gather_output=*/false,
+            quant_args,
+            parallel_args.tp_group_,
+            options));
+    k_proj_ = register_module(
+        "k_proj",
+        ColumnParallelLinear(args.hidden_size(),
+                             total_num_kv_heads * args.head_dim(),
+                             /*bias=*/args.attention_bias(),
+                             /*gather_output=*/false,
+                             quant_args,
+                             parallel_args.tp_group_,
+                             options,
+                             LinearExtraArgs(),
+                             num_kv_head_replicas_));
+    v_proj_ = register_module(
+        "v_proj",
+        ColumnParallelLinear(args.hidden_size(),
+                             total_num_kv_heads * args.head_dim(),
+                             /*bias=*/args.attention_bias(),
+                             /*gather_output=*/false,
+                             quant_args,
+                             parallel_args.tp_group_,
+                             options,
+                             LinearExtraArgs(),
+                             num_kv_head_replicas_));
+  } else {
+    qkv_proj_ = register_module(
+        "qkv_proj",
+        QKVParallelLinear(args.hidden_size(),
+                          attn_output_gate_ ? num_heads_ * 2 : num_heads_,
+                          num_kv_heads_,
+                          args.head_dim(),
+                          num_kv_head_replicas_,
+                          /*bias=*/args.attention_bias(),
+                          /*gather_output=*/false,
+                          parallel_args,
+                          options,
+                          quant_args));
+  }
 
   // 2. O proj
   o_proj_ = register_module("o_proj",
@@ -138,19 +176,34 @@ torch::Tensor Qwen3_5AttentionImpl::forward(
     const torch::Tensor& hidden_states,
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache) {
-  // 1. qkv projection
-  auto qkv = qkv_proj_->forward(hidden_states);
   torch::Tensor q, k, v;
   torch::Tensor gate;
 
+  if (use_split_qkv_) {
+    q = q_proj_->forward(hidden_states);
+    k = k_proj_->forward(hidden_states);
+    v = v_proj_->forward(hidden_states).contiguous();
+  } else {
+    // 1. qkv projection
+    auto qkv = qkv_proj_->forward(hidden_states);
+    if (attn_output_gate_) {
+      // Split qkv for attn_output_gate case: [q_size*2, kv_size, kv_size]
+      q = qkv.slice(/*dim=*/-1, 0, q_size_ * 2);
+      k = qkv.slice(/*dim=*/-1, q_size_ * 2, q_size_ * 2 + kv_size_);
+      v = qkv.slice(
+          /*dim=*/-1, q_size_ * 2 + kv_size_, q_size_ * 2 + kv_size_ * 2);
+      v = v.contiguous();
+    } else {
+      // Normal case: [q_size, kv_size, kv_size]
+      q = qkv.slice(/*dim=*/-1, 0, q_size_);
+      k = qkv.slice(/*dim=*/-1, q_size_, q_size_ + kv_size_);
+      v = qkv.slice(/*dim=*/-1, q_size_ + kv_size_, q_size_ + 2 * kv_size_);
+    }
+  }
+
   if (attn_output_gate_) {
     // Split qkv for attn_output_gate case: [q_size*2, kv_size, kv_size]
-    auto q_gate = qkv.slice(/*dim=*/-1, 0, q_size_ * 2);
-    k = qkv.slice(/*dim=*/-1, q_size_ * 2, q_size_ * 2 + kv_size_);
-    v = qkv.slice(
-        /*dim=*/-1, q_size_ * 2 + kv_size_, q_size_ * 2 + kv_size_ * 2);
-    v = v.contiguous();
-
+    torch::Tensor q_gate = q;
     std::vector<int64_t> orig_shape;
     for (int64_t i = 0; i < q_gate.dim() - 1; i++) {
       orig_shape.push_back(q_gate.size(i));
@@ -170,11 +223,6 @@ torch::Tensor Qwen3_5AttentionImpl::forward(
     std::vector<int64_t> gate_new_shape = orig_shape;
     gate_new_shape.push_back(-1);
     gate = gate.reshape(gate_new_shape);
-  } else {
-    // Normal case: [q_size, kv_size, kv_size]
-    q = qkv.slice(/*dim=*/-1, 0, q_size_);
-    k = qkv.slice(/*dim=*/-1, q_size_, q_size_ + kv_size_);
-    v = qkv.slice(/*dim=*/-1, q_size_ + kv_size_, q_size_ + 2 * kv_size_);
   }
 
   const int64_t T = q.size(0);
@@ -199,7 +247,13 @@ torch::Tensor Qwen3_5AttentionImpl::forward(
 }
 
 void Qwen3_5AttentionImpl::load_state_dict(const StateDict& state_dict) {
-  qkv_proj_->load_state_dict(state_dict, {"q_proj.", "k_proj.", "v_proj."});
+  if (use_split_qkv_) {
+    q_proj_->load_state_dict(state_dict.get_dict_with_prefix("q_proj."));
+    k_proj_->load_state_dict(state_dict.get_dict_with_prefix("k_proj."));
+    v_proj_->load_state_dict(state_dict.get_dict_with_prefix("v_proj."));
+  } else {
+    qkv_proj_->load_state_dict(state_dict, {"q_proj.", "k_proj.", "v_proj."});
+  }
   o_proj_->load_state_dict(state_dict.get_dict_with_prefix("o_proj."));
   if (auto w = state_dict.get_tensor("q_norm.weight"); w.defined()) {
     q_norm_->load_state_dict(StateDict({{"weight", w}}));

@@ -20,6 +20,7 @@ limitations under the License.
 #include <string.h>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -74,7 +75,10 @@ class Block final {
   constexpr uint32_t size() const { return size_; }
 
   // get the reference count, 0 if the block is invalid after move
-  uint32_t ref_count() const { return ref_count_ == nullptr ? 0 : *ref_count_; }
+  uint32_t ref_count() const {
+    return ref_count_ == nullptr ? 0
+                                 : ref_count_->load(std::memory_order_acquire);
+  }
 
   // check if the block is shared
   bool is_shared() const { return ref_count() > 1; }
@@ -118,8 +122,11 @@ class Block final {
   // block size
   uint32_t size_ = 0;
 
-  // reference count
-  uint32_t* ref_count_ = nullptr;
+  // reference count, shared across Block aliases of the same physical block.
+  // Atomic because aliases are copied/destroyed across threads outside the
+  // owning BlockManager's lock (e.g. disagg-PD scheduler match vs. prefill
+  // threadpool sequence teardown), so inc/dec must not race.
+  std::atomic<uint32_t>* ref_count_ = nullptr;
 
   // manager that manages this block
   BlockManager* manager_ = nullptr;

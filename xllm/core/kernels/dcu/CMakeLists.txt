@@ -116,6 +116,7 @@ target_include_directories(dcu_kernels
     ${CMAKE_CURRENT_BINARY_DIR}
   PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/..
+    ${AITER_CPP_API_LIB_DIR}/../../aiter_meta/csrc/include
 )
 
 target_compile_definitions(dcu_kernels PRIVATE
@@ -123,9 +124,8 @@ target_compile_definitions(dcu_kernels PRIVATE
 )
 
 # ---- CK Tile grouped_gemm: pre-compiled shared library ----
-# The CK template code (ck_tile) is compiled separately with aicc into
-# libck_grouped_gemm.so and installed at /opt/dtk/lib/.
-# Build script: /opt/dtk/ck_tile/build_ck_gg_so.sh
-# The bridge (group_gemm.cpp) uses forward declarations and links
-# against this shared library at runtime.
-target_link_libraries(dcu_kernels PRIVATE /opt/dtk/lib/libck_grouped_gemm.so)
+add_library(module_cpp_api SHARED IMPORTED)
+set_target_properties(module_cpp_api PROPERTIES
+    IMPORTED_LOCATION "${AITER_CPP_API_LIB_DIR}/module_cpp_api.so"
+)
+target_link_libraries(dcu_kernels PRIVATE module_cpp_api)

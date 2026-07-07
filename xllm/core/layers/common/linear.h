@@ -51,7 +51,8 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
       const QuantArgs& quant_args,
       ProcessGroup* process_group,
       const torch::TensorOptions& options,
-      const LinearExtraArgs& linear_extra_args = LinearExtraArgs());
+      const LinearExtraArgs& linear_extra_args = LinearExtraArgs(),
+      int32_t output_replicas = 1);
 
   ColumnParallelLinearImpl(const ModelContext& context);
 
@@ -92,7 +93,13 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
     return std::nullopt;
   }
 
-  bool is_weight_loaded() const { return weight_is_loaded_; }
+  bool is_weight_loaded() const {
+    if (quant_args_.quant_method() == kQuantMethodSmoothquant) {
+      return qweight_is_loaded_ && per_channel_scale_is_loaded_ &&
+             smooth_is_loaded_;
+    }
+    return weight_is_loaded_;
+  }
 
   // Get FP8 input scale for fused RMSNorm+FP8 quantization
   std::optional<torch::Tensor> get_input_scale() const;
@@ -125,6 +132,8 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
 
   int64_t rank_;
   int64_t world_size_;
+  int64_t weight_rank_;
+  int64_t weight_world_size_;
   // whether to gather the output
   bool gather_output_;
   at::Device device_;
