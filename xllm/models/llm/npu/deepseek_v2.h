@@ -15,7 +15,11 @@ limitations under the License.
 
 #pragma once
 
+#include <unordered_set>
+#include <vector>
+
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_output.h"
 #include "core/layers/npu/npu_deepseek_v2_decoder_layer_impl.h"
 #include "llm_model_base.h"
@@ -139,6 +143,17 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
       blocks_->push_back(block);
     }
 
+    const bool enable_eagle3_aux_capture =
+        ::xllm::SpeculativeConfig::get_instance().speculative_algorithm() ==
+            "Eagle3" ||
+        (model_args.model_type() == "kimi_k25" &&
+         model_args.num_speculative_tokens() > 0);
+    if (enable_eagle3_aux_capture) {
+      const auto& layer_ids_from_config = model_args.layers_to_capture();
+      set_eagle3_layers_to_capture(
+          layer_ids_from_config.empty() ? nullptr : &layer_ids_from_config);
+    }
+
     norm_ = register_module("norm", layer::NpuRMSNorm(context));
 
     dp_size_ = parallel_args.dp_size();
@@ -148,15 +163,37 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     num_experts_per_tok_ = model_args.num_experts_per_tok();
   }
 
+  void set_eagle3_layers_to_capture(
+      const std::vector<int32_t>* layer_ids = nullptr) {
+    capture_aux_hidden_states_ = true;
+    layers_to_capture_set_.clear();
+    if (layer_ids == nullptr) {
+      const int32_t num_layers = static_cast<int32_t>(layers_.size());
+      layers_to_capture_set_.insert(2);
+      layers_to_capture_set_.insert(num_layers / 2);
+      layers_to_capture_set_.insert(num_layers - 3);
+    } else {
+      for (const int32_t layer_id : *layer_ids) {
+        layers_to_capture_set_.insert(layer_id);
+      }
+    }
+
+    CHECK_EQ(layers_to_capture_set_.size(), 3)
+        << "Eagle3 requires exactly three target layers to capture";
+    for (const int32_t layer_id : layers_to_capture_set_) {
+      CHECK_GE(layer_id, 0) << "Eagle3 layer id must be non-negative";
+      CHECK_LT(layer_id, static_cast<int32_t>(layers_.size()))
+          << "Eagle3 layer id exceeds target layer count";
+    }
+  }
+
   ModelOutput forward(torch::Tensor tokens,
                       torch::Tensor positions,
                       std::vector<KVCache>& kv_caches,
                       const ModelInputParams& input_params) {
-    if (dp_size_ > 1) {
-      if (tokens.sizes() == 0) {
-        tokens = torch::tensor({1}).to(torch::kInt32).to(device_);
-        positions = torch::tensor({0}).to(torch::kInt32).to(device_);
-      }
+    if (dp_size_ > 1 && (!tokens.defined() || tokens.numel() == 0)) {
+      tokens = torch::tensor({1}).to(torch::kInt32).to(device_);
+      positions = torch::tensor({0}).to(torch::kInt32).to(device_);
     }
 
     auto inputs_embeds = input_params.embedding.input_embedding;
@@ -172,15 +209,30 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     auto sin_pos = cos_sin_chunks[1].contiguous();
 
     torch::Tensor attn_mask;
+    const bool is_spec_verify_chunked =
+        input_params.is_spec_verify &&
+        input_params.meta.batch_forward_type.is_chunked_prefill();
     if (::xllm::KVCacheConfig::get_instance().enable_prefix_cache() &&
         !input_params.meta.batch_forward_type.is_decode()) {
       attn_mask = attn_mask_.get_attn_mask(512, dtype_, device_);
-    } else if (input_params.meta.batch_forward_type.is_prefill()) {
+    } else if (input_params.meta.batch_forward_type.is_prefill() ||
+               is_spec_verify_chunked) {
       attn_mask = attn_mask_.get_attn_mask(128, dtype_, device_);
     } else if (num_speculative_tokens_ > 0) {
       // TODO :the judgement of gen_free_mask need more check
       attn_mask = attn_mask_.gen_free_mask(
           num_speculative_tokens_ + 1, dtype_, device_);
+    }
+
+    const int64_t num_tokens = h.size(0);
+    const int64_t hidden_size = h.size(-1);
+    int64_t capture_idx = 0;
+    torch::Tensor aux_output_buffer;
+    if (capture_aux_hidden_states_) {
+      aux_output_buffer = torch::empty(
+          {num_tokens,
+           hidden_size * static_cast<int64_t>(layers_to_capture_set_.size())},
+          h.options());
     }
 
     RollingLayerGuard rolling_guard(rolling_mgr_);
@@ -197,7 +249,15 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
       }
 
       auto& layer = layers_[i];
-      const int32_t layer_index = i;
+      const int32_t layer_index = static_cast<int32_t>(i);
+      if (capture_aux_hidden_states_ &&
+          layers_to_capture_set_.count(layer_index) != 0) {
+        aux_output_buffer.slice(0, 0, num_tokens)
+            .slice(
+                1, capture_idx * hidden_size, (capture_idx + 1) * hidden_size)
+            .copy_(h.reshape({num_tokens, hidden_size}));
+        ++capture_idx;
+      }
       rolling_guard.before_layer(layer_index);
       layer(h,
             cos_pos,
@@ -210,6 +270,11 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
       rolling_guard.after_layer(layer_index);
     }
     auto hidden_states = norm_(h, 0);
+    if (capture_aux_hidden_states_) {
+      CHECK_EQ(capture_idx, static_cast<int64_t>(layers_to_capture_set_.size()))
+          << "captured Eagle3 layer count mismatch";
+      return ModelOutput(hidden_states, torch::Tensor(), aux_output_buffer);
+    }
     return ModelOutput(hidden_states);
   }
 
@@ -321,6 +386,8 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
   int32_t dp_local_tp_size_;
   int32_t num_experts_per_tok_;
   int32_t num_speculative_tokens_ = 0;
+  std::unordered_set<int32_t> layers_to_capture_set_;
+  bool capture_aux_hidden_states_ = false;
   at::Device device_;
   torch::Dtype dtype_;
   layer::NpuWordEmbedding npu_embed_tokens_{nullptr};

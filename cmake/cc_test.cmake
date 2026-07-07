@@ -118,6 +118,28 @@ function(cc_test)
     )
     set(COMMON_LIBS ascendcl Python::Python torch_npu torch_python)
     target_link_libraries(${CC_TEST_NAME} PRIVATE ${COMMON_LIBS})
+
+    set(_XLLM_TEST_NEEDS_BATCH_REQUEST_RESCAN FALSE)
+    foreach(dep IN LISTS CC_TEST_DEPS)
+      if(dep STREQUAL ":batch" OR dep STREQUAL "batch" OR
+         dep STREQUAL ":profile" OR dep STREQUAL "profile" OR
+         dep STREQUAL ":scheduler" OR dep STREQUAL "scheduler" OR
+         dep STREQUAL ":distributed_runtime" OR
+         dep STREQUAL "distributed_runtime" OR
+         dep STREQUAL ":master" OR dep STREQUAL "master" OR
+         dep STREQUAL ":api_service" OR dep STREQUAL "api_service")
+        set(_XLLM_TEST_NEEDS_BATCH_REQUEST_RESCAN TRUE)
+      endif()
+    endforeach()
+    if(_XLLM_TEST_NEEDS_BATCH_REQUEST_RESCAN)
+      target_link_libraries(${CC_TEST_NAME} PRIVATE
+        -Wl,--start-group
+        "${CMAKE_BINARY_DIR}/xllm/core/framework/batch/libbatch.a"
+        "${CMAKE_BINARY_DIR}/xllm/core/framework/request/librequest.a"
+        -Wl,--end-group
+      )
+    endif()
+    unset(_XLLM_TEST_NEEDS_BATCH_REQUEST_RESCAN)
   endif()
 
   add_dependencies(all_tests ${CC_TEST_NAME})

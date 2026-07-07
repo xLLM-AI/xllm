@@ -103,6 +103,18 @@ else()
 
 endif()
 
+# libbatch.a calls SequencesGroup methods implemented in librequest.a. Some
+# build paths put request before batch through transitive static-library deps,
+# which GNU ld will not rescan. Repeat the archive pair in order without adding
+# target-level deps, because these targets already participate in the project's
+# existing static-library dependency cycle.
+target_link_libraries(xllm PRIVATE
+  -Wl,--start-group
+  "${CMAKE_BINARY_DIR}/xllm/core/framework/batch/libbatch.a"
+  "${CMAKE_BINARY_DIR}/xllm/core/framework/request/librequest.a"
+  -Wl,--end-group
+)
+
 # link brpc
 target_link_libraries(xllm PRIVATE glog::glog brpc leveldb::leveldb protobuf::libprotobuf ${OpenCV_LIBS} ${FFMPEG_LIBRARIES})
 add_dependencies(xllm brpc-static)

@@ -50,7 +50,13 @@ void Eagle3DecoderLoader::load_state_dict(const StateDict& state_dict) {
   if (quantize_type_ == "w8a8") {
     for (const auto& [index, name] : WEIGHT_MAPPING_W8A8) {
       if (WEIGHT_SHARD_W8A8.find(index) != WEIGHT_SHARD_W8A8.end()) {
-        set_weight(state_dict, name, index, WEIGHT_SHARD_W8A8[index], to_host);
+        set_weight(state_dict,
+                   name,
+                   index,
+                   WEIGHT_SHARD_W8A8[index],
+                   dp_local_tp_rank_,
+                   dp_local_tp_size_,
+                   to_host);
       } else {
         set_weight(state_dict, name, index, to_host);
       }
@@ -66,7 +72,13 @@ void Eagle3DecoderLoader::load_state_dict(const StateDict& state_dict) {
 
   for (const auto& [index, name] : WEIGHT_MAPPING) {
     if (WEIGHT_SHARD.find(index) != WEIGHT_SHARD.end()) {
-      set_weight(state_dict, name, index, WEIGHT_SHARD[index], to_host);
+      set_weight(state_dict,
+                 name,
+                 index,
+                 WEIGHT_SHARD[index],
+                 dp_local_tp_rank_,
+                 dp_local_tp_size_,
+                 to_host);
     } else {
       set_weight(state_dict, name, index, to_host);
     }

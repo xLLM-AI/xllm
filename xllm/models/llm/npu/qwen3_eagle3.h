@@ -177,7 +177,6 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     // (3 layers concatenated)
     torch::Tensor hidden_states_extra = input_params.embedding.input_embedding;
     if (!hidden_states_extra.defined() || hidden_states_extra.size(0) == 0) {
-      LOG(WARNING) << "hidden_states_extra use embedding from tokens.";
       hidden_states_extra = hidden_states;
     }
 

@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/framework/config/load_config.h"
+#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 
 // #include "attn_mask.h"
@@ -66,7 +67,10 @@ void NpuEagle3DecoderLayerImpl::param_from_args(
   param.kvQuant = false;
   param.quantGroupSize = 0;
   param.rmsNormEps = args.rms_norm_eps();
-  param.worldSize = parallel_args.world_size();
+  CHECK_GT(dp_local_tp_size_, 0);
+  CHECK_EQ(args.n_heads() % dp_local_tp_size_, 0)
+      << "Eagle3 attention heads must be divisible by local TP size";
+  param.worldSize = dp_local_tp_size_;
   param.numAttentionHeadsPerRank = args.n_heads() / param.worldSize;
   // param.hiddenSizePerAttentionHead = args.hidden_size() / args.n_heads();
   param.hiddenSizePerAttentionHead = args.head_dim();
@@ -74,13 +78,32 @@ void NpuEagle3DecoderLayerImpl::param_from_args(
   param.enableInterLayerAddNorm = false;
   // param.numKeyValueHeadsPerRank = args.n_kv_heads();
   std::optional<long int> optionalValue = args.n_kv_heads();
+  CHECK(optionalValue.has_value()) << "Eagle3 requires n_kv_heads";
+  CHECK_EQ(optionalValue.value() % param.worldSize, 0)
+      << "Eagle3 KV heads must be divisible by local TP size";
   param.numKeyValueHeadsPerRank =
       static_cast<int>(optionalValue.value()) / param.worldSize;
   ;
   // param.numKeyValueHeadsPerRank = static_cast<int>(args.n_kv_heads());
 
-  param.rank = parallel_args.rank();
-  param.backend = "lccl";
+  param.rank = dp_local_tp_rank_;
+  param.backend =
+      ::xllm::ParallelConfig::get_instance().communication_backend();
+  if (parallel_args.mapping_data().empty()) {
+    param.tensorParallelInfo.rank = param.rank;
+    param.tensorParallelInfo.worldSize = param.worldSize;
+    param.tensorParallelInfo.backend = param.backend;
+    param.tensorParallelInfo.commDomain =
+        std::to_string(parallel_args.rank() / dp_local_tp_size_);
+  } else {
+    atb_speed::common::ParallelInfo parallel_info =
+        parallel_args.mapping().Get(atb_speed::base::ATTN_TP);
+    param.tensorParallelInfo.rank = parallel_info.rank;
+    param.tensorParallelInfo.worldSize = parallel_info.rankIds.size();
+    param.tensorParallelInfo.backend = param.backend;
+    parallel_info.InitCommDomain(param.tensorParallelInfo.hcommInfo,
+                                 param.tensorParallelInfo.commDomain);
+  }
   param.enableLogN = false;
 }
 
@@ -101,6 +124,10 @@ NpuEagle3DecoderLayerImpl::NpuEagle3DecoderLayerImpl(
   decode_tensor_storage_.resize(4);
   prefill_vector_storage_.resize(1);
   decode_vector_storage_.resize(1);
+  int_tensor_placeholder_ = torch::ones({1}).to(torch::kInt32).to(device_);
+  slot_tensor_placeholder_ = torch::full({1}, 0).to(torch::kInt32).to(device_);
+  block_tables_placeholder_ =
+      torch::zeros({1, 1}).to(torch::kInt32).to(device_);
   placeholder_ = atb_speed::Utils::AtTensor2Tensor(
       torch::zeros({1}).to(device_).to(dtype_));
   at_placeholder_ = torch::zeros({1}).to(device_).to(dtype_);
@@ -194,10 +221,28 @@ int64_t NpuEagle3DecoderLayerImpl::init_node(
     atb_speed::Model::Node& node,
     atb_speed::eagle3::DecoderLayerParam& param) {
   atb::Operation* operation = nullptr;
-  atb_speed::eagle3::DecoderLayer(param, &operation);
+  atb::Status create_status =
+      atb_speed::eagle3::DecoderLayer(param, &operation);
+  if (create_status != atb::NO_ERROR) {
+    LOG(ERROR) << "Create Eagle3 decoder ATB operation failed, status="
+               << create_status << ", is_prefill=" << param.isPrefill
+               << ", enableSplitFuse=" << param.enableSplitFuse
+               << ", supportSpeculate=" << param.supportSpeculate
+               << ", qkvHasBias=" << param.qkvHasBias
+               << ", selfAttnHasBias=" << param.selfAttnHasBias
+               << ", worldSize=" << param.worldSize << ", rank=" << param.rank
+               << ", numAttentionHeadsPerRank="
+               << param.numAttentionHeadsPerRank
+               << ", numKeyValueHeadsPerRank=" << param.numKeyValueHeadsPerRank
+               << ", hiddenSizePerAttentionHead="
+               << param.hiddenSizePerAttentionHead;
+    return create_status;
+  }
   node.operation.reset(operation);
   if (node.operation == nullptr) {
-    LOG(ERROR) << "node.operation is null";
+    LOG(ERROR) << "Eagle3 decoder ATB operation is null after successful "
+                  "create, is_prefill="
+               << param.isPrefill;
     return -1;
   }
   if (node.operation->GetInputNum() < 1) {
@@ -279,6 +324,9 @@ void NpuEagle3DecoderLayerImpl::build_node_variant_pack(
   internal_tensors_ = atb_speed::Utils::AtTensor2Tensor(hidden_states);
   internal_tensors_extra_ =
       atb_speed::Utils::AtTensor2Tensor(hidden_states_extra);
+  const bool has_attention_metadata =
+      input_params.attention.device.block_tables.defined() &&
+      input_params.attention.device.block_tables.storage().data() != nullptr;
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER) = internal_tensors_;
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 1) =
       atb_speed::Utils::AtTensor2Tensor(cos_pos);
@@ -290,30 +338,53 @@ void NpuEagle3DecoderLayerImpl::build_node_variant_pack(
       atb_speed::Utils::AtTensor2Tensor(kv_cache.get_k_cache());
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 5) =
       atb_speed::Utils::AtTensor2Tensor(kv_cache.get_v_cache());
-  node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 6) =
-      atb_speed::Utils::AtTensor2Tensor(
-          input_params.attention.device.kv_seq_lens);
-  node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 6).hostData =
-      input_params.attention.host.kv_seq_lens.data();
+  if (has_attention_metadata) {
+    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 6) =
+        atb_speed::Utils::AtTensor2Tensor(
+            input_params.attention.device.kv_seq_lens);
+    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 6).hostData =
+        const_cast<int32_t*>(input_params.attention.host.kv_seq_lens.data());
+  } else {
+    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 6) =
+        atb_speed::Utils::AtTensor2Tensor(int_tensor_placeholder_);
+    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 6).hostData =
+        placeholder_vec_.data();
+  }
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 7) = placeholder_;
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 7).hostData =
       placeholder_vec_.data();
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 8) = placeholder_;
-  node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 9) =
-      atb_speed::Utils::AtTensor2Tensor(
-          input_params.attention.device.block_tables);
-  node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 10) =
-      atb_speed::Utils::AtTensor2Tensor(
-          input_params.attention.device.new_cache_slots);
+  if (has_attention_metadata) {
+    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 9) =
+        atb_speed::Utils::AtTensor2Tensor(
+            input_params.attention.device.block_tables);
+    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 10) =
+        atb_speed::Utils::AtTensor2Tensor(
+            input_params.attention.device.new_cache_slots);
+  } else {
+    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 9) =
+        atb_speed::Utils::AtTensor2Tensor(block_tables_placeholder_);
+    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 10) =
+        atb_speed::Utils::AtTensor2Tensor(slot_tensor_placeholder_);
+  }
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11) =
       internal_tensors_extra_;
+  int input_idx = WEIGHT_COUNT_PER_LAYER + 12;
   if (is_prefill &&
       ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
-    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 12) =
-        atb_speed::Utils::AtTensor2Tensor(
-            input_params.attention.device.q_seq_lens);
-    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 12).hostData =
-        input_params.attention.host.q_seq_lens.data();
+    if (input_idx < static_cast<int>(node.variantPack.inTensors.size())) {
+      node.variantPack.inTensors.at(input_idx) =
+          atb_speed::Utils::AtTensor2Tensor(
+              input_params.attention.device.q_seq_lens);
+      node.variantPack.inTensors.at(input_idx).hostData =
+          input_params.attention.host.q_seq_lens.data();
+    } else {
+      LOG_FIRST_N(WARNING, 1)
+          << "Eagle3 prefill ATB operation does not expose q_seq_lens input; "
+          << "skip optional chunked-prefill input, input_num="
+          << node.variantPack.inTensors.size()
+          << ", required_index=" << input_idx;
+    }
   }
 
   for (size_t i = 0; i < WEIGHT_COUNT_PER_LAYER; ++i) {
