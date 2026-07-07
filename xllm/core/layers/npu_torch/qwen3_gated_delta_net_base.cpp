@@ -535,7 +535,7 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     const ModelInputParams& input_params) {
   const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
   torch::Tensor h = hidden_states;
-  if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
+  if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
     h = gather_sequence(hidden_states, *fc1_ctx);
   }
 
@@ -914,7 +914,7 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     rearranged_norm =
         rearranged_norm.slice(0, 0, original_num_tokens).contiguous();
   }
-  if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
+  if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
     LOG_FIRST_N(INFO, 16)
         << "FC1 MMRS callsite Qwen3GatedDeltaNet.o_proj: input="
         << rearranged_norm.sizes();

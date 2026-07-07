@@ -21,6 +21,7 @@ limitations under the License.
 #include <algorithm>
 #include <cctype>
 
+#include "common/flash_comm1_context.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "kernels/ops_api.h"
@@ -59,21 +60,6 @@ inline float compute_max_scale(const std::vector<float>& scales) {
 inline bool is_unfused_checkpoint(const std::vector<float>& scales) {
   return scales.size() > 1 &&
          scales.back() > std::numeric_limits<float>::lowest();
-}
-
-torch::Tensor pad_rows_by_copy(const torch::Tensor& input,
-                               int64_t padded_rows) {
-  CHECK_GE(padded_rows, input.size(0));
-  if (padded_rows == input.size(0)) {
-    return input;
-  }
-
-  auto output_shape = input.sizes().vec();
-  output_shape[0] = padded_rows;
-  auto output = torch::empty(output_shape, input.options());
-  output.slice(0, 0, input.size(0)).copy_(input);
-  output.slice(0, input.size(0), padded_rows).zero_();
-  return output;
 }
 
 // Realigns FP8 partitions to a unified global scale to enable fusion.
@@ -276,7 +262,7 @@ void log_mmrs_quant_skip(RowParallelReduceMode reduce_mode,
       << " path: fused matmul_reduce_scatter is currently wired only for "
          "non-quant linear. input=" << input.sizes()
       << ", sequence_sharded="
-      << (fc1_ctx != nullptr && fc1_ctx->is_sequence_sharded())
+      << (fc1_ctx != nullptr && is_sequence_sharded(*fc1_ctx))
       << ", enable_mmrs_fusion="
       << (fc1_ctx != nullptr && fc1_ctx->enable_mmrs_fusion);
 }
@@ -1577,7 +1563,7 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input,
                   ? std::optional<torch::Tensor>(bias_)
                   : std::nullopt;
 
-  const bool skip_scatter = fc1_ctx && fc1_ctx->is_sequence_sharded();
+  const bool skip_scatter = fc1_ctx && is_sequence_sharded(*fc1_ctx);
 
   torch::Tensor output;
   if (quant_args_.quant_method() == kQuantMethodSmoothquant) {
@@ -1685,7 +1671,8 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input,
     if (!input_is_parallelized_ && !skip_scatter) {
       input = xllm::parallel_state::scatter(input, process_group_);
     }
-    if (wants_mmrs(reduce_mode) && fc1_ctx && fc1_ctx->is_sequence_sharded() &&
+    if (wants_mmrs(reduce_mode) && fc1_ctx &&
+        is_sequence_sharded(*fc1_ctx) &&
         fc1_ctx->enable_mmrs_fusion) {
       bool can_try_mmrs = input.dim() == 2 &&
                           input.size(0) == fc1_ctx->original_num_tokens &&
@@ -1751,7 +1738,7 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input,
             << "FC1 MMRS skipped before row-parallel matmul: fc1_ctx="
             << (fc1_ctx != nullptr)
             << ", sequence_sharded="
-            << (fc1_ctx != nullptr && fc1_ctx->is_sequence_sharded())
+            << (fc1_ctx != nullptr && is_sequence_sharded(*fc1_ctx))
             << ", enable_mmrs_fusion="
             << (fc1_ctx != nullptr && fc1_ctx->enable_mmrs_fusion)
             << ", reduce_mode=" << static_cast<int>(reduce_mode)

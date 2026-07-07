@@ -39,6 +39,12 @@ bool can_call_torch_npu_mmrs(
         << "FC1 MMRS torch_npu skipped: output tensor is missing.";
     return false;
   }
+  if (!a.defined() || !b.defined()) {
+    LOG_FIRST_N(WARNING, 8)
+        << "FC1 MMRS torch_npu skipped: input tensor is missing. a_defined="
+        << a.defined() << ", b_defined=" << b.defined();
+    return false;
+  }
   if (a.dim() != 2 || b.dim() != 2 || output->dim() != 2) {
     LOG_FIRST_N(WARNING, 8)
         << "FC1 MMRS torch_npu skipped: expected 2D tensors, got a_dim="

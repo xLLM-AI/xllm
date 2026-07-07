@@ -116,7 +116,7 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
       h = embed_tokens_(tokens);
     }
 
-    if (fc1_ctx.is_sequence_sharded()) {
+    if (is_sequence_sharded(fc1_ctx)) {
       h = shard_sequence(h, fc1_ctx);
     }
 
@@ -146,7 +146,7 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
     }
     auto [hidden_states, residual_out] = norm_->forward(h, residual);
     h = hidden_states;
-    if (fc1_ctx.is_sequence_sharded()) {
+    if (is_sequence_sharded(fc1_ctx)) {
       h = gather_and_unpad_sequence(h, fc1_ctx);
     }
     return ModelOutput(h);

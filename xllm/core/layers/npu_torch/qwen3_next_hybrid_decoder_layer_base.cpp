@@ -121,11 +121,11 @@ torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
     residual = x;
     x = std::get<0>(input_norm_->forward(x));
   } else {
-    if (fc1_ctx && fc1_ctx->is_sequence_sharded() &&
+    if (fc1_ctx && is_sequence_sharded(*fc1_ctx) &&
         residual.value().size(0) != x.size(0)) {
       residual = maybe_shard_residual(residual.value(), *fc1_ctx);
     }
-    if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
+    if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
       CHECK_EQ(residual.value().size(0), x.size(0))
           << "FC1 input residual and hidden states must share the same "
           << "padded local sequence layout.";
@@ -142,7 +142,7 @@ torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
   }
 
   // Before post_norm, ensure residual shape matches x shape
-  if (fc1_ctx && fc1_ctx->is_sequence_sharded() && residual.has_value() &&
+  if (fc1_ctx && is_sequence_sharded(*fc1_ctx) && residual.has_value() &&
       residual.value().size(0) != x.size(0)) {
     residual = maybe_shard_residual(residual.value(), *fc1_ctx);
     CHECK_EQ(residual.value().size(0), x.size(0))

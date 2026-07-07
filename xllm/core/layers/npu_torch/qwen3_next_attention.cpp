@@ -150,7 +150,7 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
   const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
   torch::Tensor h = hidden_states;
 
-  if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
+  if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
     h = gather_sequence(hidden_states, *fc1_ctx);
   }
 
@@ -179,7 +179,7 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
         attn_->forward(attn_metadata, q_flat, k_flat, v_flat, kv_cache));
     out = out * torch::sigmoid(gate.view({T, q_size_}));
 
-    if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
+    if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
       LOG_FIRST_N(INFO, 16)
           << "FC1 MMRS callsite Qwen3NextAttention.o_proj(mrope): input="
           << out.sizes();
@@ -216,7 +216,7 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
     out = out * torch::sigmoid(gate);
   }
 
-  if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
+  if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
     LOG_FIRST_N(INFO, 16)
         << "FC1 MMRS callsite Qwen3NextAttention.o_proj: input="
         << out.sizes();
