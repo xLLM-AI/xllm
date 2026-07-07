@@ -63,6 +63,75 @@ StreamEventPtr record_current_stream_event(const Device& device) {
   return event;
 }
 
+torch::Tensor choose_lm_head_selected_token_idxes(
+    const torch::Tensor& selected_token_idxes,
+    const ModelInputParams& input_params,
+    const ParallelArgs& parallel_args,
+    int64_t hidden_num_rows,
+    const torch::Device& device) {
+  const auto& mapping = parallel_args.mapping_data();
+  if (!selected_token_idxes.defined() || selected_token_idxes.numel() == 0 ||
+      mapping.empty() || !mapping.contains("attnDp") ||
+      !mapping["attnDp"].contains("rank") ||
+      input_params.parallel.dp_global_token_nums.size() <= 1 ||
+      hidden_num_rows <= 0) {
+    return selected_token_idxes;
+  }
+
+  const int64_t dp_rank = mapping["attnDp"]["rank"].get<int64_t>();
+  CHECK_GE(dp_rank, 0) << "invalid attnDp rank";
+  CHECK_LT(
+      dp_rank,
+      static_cast<int64_t>(input_params.parallel.dp_global_token_nums.size()))
+      << "attnDp rank exceeds dp_global_token_nums";
+
+  const int64_t local_selected_rows = selected_token_idxes.numel();
+  const int64_t local_token_count =
+      input_params.parallel.dp_global_token_nums.at(dp_rank);
+  if (hidden_num_rows == local_token_count ||
+      hidden_num_rows == local_selected_rows) {
+    return selected_token_idxes;
+  }
+
+  int64_t dp_offset = 0;
+  for (int64_t i = 0; i < dp_rank; ++i) {
+    dp_offset += input_params.parallel.dp_global_token_nums[i];
+  }
+
+  torch::Tensor selected_cpu =
+      selected_token_idxes.to(torch::dtype(torch::kLong).device(torch::kCPU));
+  torch::Tensor logical_selected_cpu = selected_cpu + dp_offset;
+
+  const auto& padding_idx = input_params.parallel.dp_ep_padding_data
+                                .lm_head_skip_padding_token_indices();
+  if (padding_idx.defined() && padding_idx.numel() > 0 &&
+      hidden_num_rows > padding_idx.numel()) {
+    torch::Tensor padding_cpu =
+        padding_idx.to(torch::dtype(torch::kLong).device(torch::kCPU));
+    const int64_t max_logical_selected =
+        logical_selected_cpu.max().item<int64_t>();
+    if (max_logical_selected < padding_cpu.numel()) {
+      return padding_cpu.index_select(/*dim=*/0, logical_selected_cpu)
+          .to(torch::dtype(selected_token_idxes.scalar_type()).device(device),
+              /*non_blocking=*/false)
+          .contiguous();
+    }
+  }
+
+  if (dp_offset == 0) {
+    return selected_token_idxes;
+  }
+
+  const int64_t max_selected_idx = selected_cpu.max().item<int64_t>();
+  if (max_selected_idx + dp_offset >= hidden_num_rows) {
+    return selected_token_idxes;
+  }
+
+  torch::Tensor remapped =
+      selected_token_idxes.to(device, /*non_blocking=*/false).contiguous();
+  return (remapped + dp_offset).to(remapped.scalar_type()).contiguous();
+}
+
 }  // namespace
 
 LLMWorkerImpl::LLMWorkerImpl(const ParallelArgs& parallel_args,
@@ -310,8 +379,15 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   }
 
   torch::Tensor logits;
+  torch::Tensor selected_hidden_from_lm_head;
+  torch::Tensor lm_head_selected_token_idxes;
   if (sampling_params.selected_token_idxes.defined()) {
-    torch::Tensor selected_token_idxes = sampling_params.selected_token_idxes;
+    torch::Tensor selected_token_idxes = choose_lm_head_selected_token_idxes(
+        sampling_params.selected_token_idxes,
+        input.input_params,
+        context_.get_parallel_args(),
+        model_output.hidden_states.size(0),
+        model_output.hidden_states.device());
     if (model_output.hidden_states.defined() &&
         selected_token_idxes.device() != model_output.hidden_states.device()) {
       selected_token_idxes = selected_token_idxes
@@ -319,7 +395,14 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
                                      /*non_blocking=*/false)
                                  .contiguous();
     }
-    logits = model_->logits(model_output.hidden_states, selected_token_idxes);
+    lm_head_selected_token_idxes = selected_token_idxes;
+    if (options_.cp_size() > 1) {
+      logits = model_->logits(model_output.hidden_states,
+                              selected_token_idxes,
+                              selected_hidden_from_lm_head);
+    } else {
+      logits = model_->logits(model_output.hidden_states, selected_token_idxes);
+    }
   }
 
   ForwardOutput output;
@@ -387,8 +470,15 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       // Target prefill: keep full embeddings (global-real under model-side CP).
       output.sample_output.embeddings = embeddings;
     } else if (sampling_params.selected_token_idxes.defined()) {
-      output.sample_output.embeddings = embeddings.index_select(
-          /*dim=*/0, sampling_params.selected_token_idxes);
+      if (options_.cp_size() > 1) {
+        CHECK(selected_hidden_from_lm_head.defined())
+            << "selected_hidden_from_lm_head must be defined when "
+               "selected_token_idxes is defined.";
+        output.sample_output.embeddings = selected_hidden_from_lm_head;
+      } else {
+        output.sample_output.embeddings = embeddings.index_select(
+            /*dim=*/0, lm_head_selected_token_idxes);
+      }
     }
   }
 

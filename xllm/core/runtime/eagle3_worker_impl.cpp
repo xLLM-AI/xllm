@@ -39,7 +39,10 @@ runtime::Options eagle3_draft_options(const runtime::Options& options) {
       .is_draft_engine(true)
       .num_decoding_tokens(1)
       .num_speculative_tokens(0)
-      .enable_graph_aux_hidden_states(false)
+      .enable_graph(false)
+      .enable_graph_mode_decode_no_padding(false)
+      .enable_prefill_piecewise_graph(false)
+      .enable_graph_aux_hidden_states(true)
       .backend("llm");
   return opts;
 }
@@ -78,6 +81,14 @@ bool Eagle3WorkerImpl::init_model(const std::string& model_weights_path,
   // Load hot_token_id_ directly from state_dict (EAGLE-3 specific)
   // This should be done after draft model is loaded
   if (draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
+    use_draft_token_mapping_ =
+        draft_impl_->context_.get_model_args().model_type() !=
+        "kimi_k25_eagle3";
+    if (!use_draft_token_mapping_) {
+      hot_token_id_ = torch::Tensor();
+      return result;
+    }
+
     // d2t stores diffs between draft id and target id
     // hot_token_id = d2t + arange(d2t.size(0))
     auto model_loader = ModelLoader::create(model_weights_path);
@@ -110,7 +121,8 @@ void Eagle3WorkerImpl::process_draft_sample_output(
   MTPWorkerImpl::process_draft_sample_output(sample_output);
 
   // EAGLE-3 specific: map draft token IDs to target token IDs.
-  if (!hot_token_id_.defined() || !sample_output.next_tokens.defined() ||
+  if (!use_draft_token_mapping_ || !hot_token_id_.defined() ||
+      !sample_output.next_tokens.defined() ||
       sample_output.next_tokens.numel() == 0) {
     return;
   }
@@ -123,6 +135,9 @@ void Eagle3WorkerImpl::check_draft_input_embedding(
     const torch::Tensor& embedding,
     const std::string& phase) const {
   if (!embedding.defined()) {
+    CHECK_NE(phase, "prefill")
+        << "Eagle3 prefill requires verifier aux hidden-state embeddings. "
+        << "Check that target model captures three aux hidden-state layers.";
     return;
   }
 
@@ -133,6 +148,8 @@ void Eagle3WorkerImpl::check_draft_input_embedding(
   CHECK_EQ(embedding.dim(), 2)
       << "Eagle3 " << phase << " embedding must be a 2-D tensor, got dim "
       << embedding.dim();
+  CHECK_GT(embedding.size(0), 0)
+      << "Eagle3 " << phase << " embedding must contain at least one row.";
   if (phase == "decode") {
     CHECK(embedding.size(-1) == expected_hidden_size ||
           embedding.size(-1) == draft_hidden_size)

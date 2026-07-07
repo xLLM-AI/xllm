@@ -47,10 +47,12 @@ class Eagle3WorkerImpl : public MTPWorkerImpl {
 
   void check_draft_input_embedding(const torch::Tensor& embedding,
                                    const std::string& phase) const override;
+  bool share_target_lm_head_with_draft() const override { return false; }
 
   // EAGLE-3 specific: hot_token_id for draft-to-target token mapping
   // hot_token_id = d2t + arange(d2t.size(0))
   torch::Tensor hot_token_id_;
+  bool use_draft_token_mapping_ = true;
 };
 
 }  // namespace xllm

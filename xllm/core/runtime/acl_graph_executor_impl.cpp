@@ -223,6 +223,13 @@ ModelOutput forward_eager(CausalLM* model,
   return model->forward(materialized_tokens, positions, kv_cache, params);
 }
 
+bool is_kimi_k25_eagle3_target_graph(const ModelArgs& args,
+                                     const runtime::Options& options) {
+  return args.model_type() == "kimi_k25" &&
+         options.enable_speculative_decode() && !options.is_draft_engine() &&
+         options.speculative_algorithm() == "Eagle3";
+}
+
 void hash_graph_key_value(uint64_t& hash, uint64_t value) {
   constexpr uint64_t kFnvPrime = 1099511628211ull;
   for (int32_t i = 0; i < 8; ++i) {
@@ -859,6 +866,14 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
         << options_.cp_size()
         << ") shards prefill rows, which the captured graph shape does not "
            "describe.";
+    COUNTER_INC(num_model_execution_total_eager);
+    return model_->forward(tokens, positions, kv_caches, params);
+  }
+  if (is_kimi_k25_eagle3_target_graph(args_, options_)) {
+    LOG_FIRST_N(WARNING, 1)
+        << "Falling back to eager mode for kimi_k25 Eagle3 target validation; "
+           "the ACL graph path is not adapted for Eagle3 aux hidden-state "
+           "validation yet.";
     COUNTER_INC(num_model_execution_total_eager);
     return model_->forward(tokens, positions, kv_caches, params);
   }

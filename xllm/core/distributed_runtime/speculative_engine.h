@@ -98,6 +98,8 @@ class SpeculativeEngineBase : public Engine {
 
   bool allocate_kv_cache();
 
+  bool should_skip_external_draft_kv_cache() const;
+
   int64_t calculate_kv_cache(const KVCacheCapacity& target_kv_cache_cap,
                              const KVCacheCapacity& draft_kv_cache_cap) const;
 

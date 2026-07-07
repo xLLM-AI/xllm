@@ -67,6 +67,15 @@ Token make_empty_logprob_placeholder(const Sequence& seq) {
   return Token(placeholder_token_id);
 }
 
+void update_sequence_embedding(Sequence* seq, const torch::Tensor& embedding) {
+  if (!embedding.defined()) {
+    return;
+  }
+  torch::Tensor cur_seq_embed = safe_to(embedding, torch::kFloat32);
+  seq->update_embeddings(cur_seq_embed);
+  seq->update_mtp_bootstrap_embedding(cur_seq_embed);
+}
+
 }  // namespace
 
 Batch::Batch(Sequence* sequence) { add(sequence); }
@@ -612,16 +621,48 @@ void Batch::process_beam_sequence_group(const ForwardOutput& output) {
 void Batch::process_sample_output(const SampleOutput& sample_output,
                                   bool replace_fake_token,
                                   bool force_requested_beam_result_size) {
-  if (sample_output.embeddings.defined()) {
+  const bool has_next_tokens = sample_output.next_tokens.defined() &&
+                               sample_output.next_tokens.numel() > 0;
+  const bool next_tokens_are_spec_width =
+      has_next_tokens && sample_output.next_tokens.dim() == 2;
+  if (sample_output.embeddings.defined() && !next_tokens_are_spec_width) {
     const int64_t num_seqs = sample_output.embeddings.size(0);
     int64_t output_idx = 0;
     const auto sequences = get_sequences();
     for (auto* seq : sequences) {
       CHECK_LT(output_idx, num_seqs);
-      auto cur_seq_embed =
-          safe_to(sample_output.embeddings[output_idx++], torch::kFloat32);
-      seq->update_embeddings(cur_seq_embed);
-      seq->update_mtp_bootstrap_embedding(cur_seq_embed);
+      update_sequence_embedding(seq, sample_output.embeddings[output_idx++]);
+    }
+  }
+  if (sample_output.embeddings.defined() && next_tokens_are_spec_width) {
+    const int64_t num_embedding_rows = sample_output.embeddings.size(0);
+    const int64_t num_token_rows = sample_output.next_tokens.size(0);
+    int64_t output_idx = 0;
+    const auto sequences = get_sequences();
+    for (auto* seq : sequences) {
+      CHECK_LT(output_idx, num_token_rows);
+      CHECK_LT(output_idx, num_embedding_rows);
+      const auto curr_next_tokens = sample_output.next_tokens[output_idx];
+
+      int64_t last_token_idx = -1;
+      const int64_t num_tokens = curr_next_tokens.size(0);
+      for (int64_t token_idx = 0; token_idx < num_tokens; ++token_idx) {
+        if (curr_next_tokens[token_idx].item<int64_t>() < 0) {
+          break;
+        }
+        last_token_idx = token_idx;
+      }
+
+      if (last_token_idx >= 0) {
+        torch::Tensor token_embeddings = sample_output.embeddings[output_idx];
+        if (token_embeddings.dim() > 1) {
+          CHECK_LT(last_token_idx, token_embeddings.size(0))
+              << "speculative embedding token index out of range";
+          token_embeddings = token_embeddings[last_token_idx];
+        }
+        update_sequence_embedding(seq, token_embeddings);
+      }
+      ++output_idx;
     }
   }
 
@@ -646,6 +687,46 @@ void Batch::process_sample_output(const SampleOutput& sample_output,
 
     if (output_idx >= static_cast<size_t>(num_outputs)) {
       if (target.from_sample_slot) {
+        append_token_for_sequence(
+            seq, make_empty_logprob_placeholder(*seq), 0, replace_fake_token);
+      }
+      continue;
+    }
+
+    if (next_tokens_are_spec_width) {
+      const auto curr_next_tokens = sample_output.next_tokens[output_idx];
+      const auto curr_logprobs = sample_output.logprobs.defined()
+                                     ? sample_output.logprobs[output_idx]
+                                     : sample_output.logprobs;
+      const auto curr_top_tokens = sample_output.top_tokens.defined()
+                                       ? sample_output.top_tokens[output_idx]
+                                       : sample_output.top_tokens;
+      const auto curr_top_logprobs =
+          sample_output.top_logprobs.defined()
+              ? sample_output.top_logprobs[output_idx]
+              : sample_output.top_logprobs;
+
+      const int64_t num_tokens = curr_next_tokens.size(0);
+      bool appended_token = false;
+      for (int64_t token_idx = 0; token_idx < num_tokens; ++token_idx) {
+        const auto token = build_token(token_idx,
+                                       curr_next_tokens,
+                                       curr_logprobs,
+                                       curr_top_tokens,
+                                       curr_top_logprobs);
+        if (token.id < 0) {
+          break;
+        }
+
+        append_token_for_sequence(
+            seq, token, static_cast<int>(token_idx), replace_fake_token);
+        appended_token = true;
+        if (!target.from_sample_slot && seq->finished()) {
+          break;
+        }
+      }
+
+      if (!appended_token && target.from_sample_slot) {
         append_token_for_sequence(
             seq, make_empty_logprob_placeholder(*seq), 0, replace_fake_token);
       }
