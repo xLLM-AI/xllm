@@ -44,8 +44,12 @@ BeamSearchOutput beam_search(const torch::Tensor& logprobs,
   // MLU torch::topk returns int64 indices.
   torch::Tensor idx = std::get<1>(topk_result);  // [num_group, beam_width]
 
-  torch::Tensor src_local = idx / topk;  // source beam within the group
-  torch::Tensor cand_col = idx % topk;   // candidate column within that beam
+  // Use floor division so src_local stays int64 (integer operator/ performs
+  // true division and yields a float tensor, which is invalid as a gather
+  // index).
+  torch::Tensor src_local =
+      torch::div(idx, topk, /*rounding_mode=*/"floor");  // source beam in group
+  torch::Tensor cand_col = idx % topk;  // candidate column within that beam
 
   // Global source sequence index = group_id * beam_width + src_local.
   torch::Tensor group_id =
