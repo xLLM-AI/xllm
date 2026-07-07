@@ -22,11 +22,13 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/common/flash_comm1_context.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_context.h"
 #include "core/framework/model_loader.h"
+#include "core/framework/parallel_state/parallel_args.h"
 #include "core/layers/common/attention_mask.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/lm_head.h"
@@ -54,7 +56,9 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
  public:
   explicit Qwen3HybridModelImplBase(const ModelContext& context)
       : device_(context.get_tensor_options().device()),
-        model_args_(context.get_model_args()) {
+        model_args_(context.get_model_args()),
+        parallel_args_(context.get_parallel_args()),
+        flash_comm1_options_(context.get_flash_comm1_options()) {
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
 
@@ -97,11 +101,22 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
             input_params,
             model_args_.enable_mla(),
             build_attention_mask(input_params));
+    const int32_t num_tokens = static_cast<int32_t>(tokens.size(0));
+    const auto& batch_forward_type = input_params.meta.batch_forward_type;
+    const bool is_prefill_side = batch_forward_type.no_decode();
+    FlashComm1Options fc1_options = flash_comm1_options_;
+    FlashComm1Context fc1_ctx = build_flash_comm1_context(
+        num_tokens, is_prefill_side, parallel_args_, fc1_options);
+
     torch::Tensor h;
     if (input_params.embedding.input_embedding.defined()) {
       h = input_params.embedding.input_embedding;
     } else {
       h = embed_tokens_(tokens);
+    }
+
+    if (fc1_ctx.is_sequence_sharded()) {
+      h = shard_sequence(h, fc1_ctx);
     }
 
     torch::Tensor mrope_cos_sin;
@@ -119,7 +134,8 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
                          attn_metadata,
                          kv_caches[i],
                          input_params,
-                         mrope_cos_sin);
+                         mrope_cos_sin,
+                         &fc1_ctx);
 #if defined(USE_NPU)
       if (input_params.parallel.layer_synchronizer != nullptr &&
           !input_params.parallel.layer_synchronizer->record_event(
@@ -130,6 +146,9 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
     }
     auto [hidden_states, residual_out] = norm_->forward(h, residual);
     h = hidden_states;
+    if (fc1_ctx.is_sequence_sharded()) {
+      h = gather_and_unpad_sequence(h, fc1_ctx);
+    }
     return ModelOutput(h);
   }
 
@@ -217,6 +236,8 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
   std::vector<layer::Qwen3HybridDecoderLayerModulePtr> layers_;
   int32_t max_seq_len_ = 0;
   int32_t dp_size_ = 1;
+  ParallelArgs parallel_args_;
+  FlashComm1Options flash_comm1_options_;
   torch::Device device_;
   torch::ScalarType dtype_ = torch::kFloat;
   layer::Qwen3NextRMSNorm norm_{nullptr};

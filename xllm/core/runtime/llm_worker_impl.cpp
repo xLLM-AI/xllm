@@ -250,9 +250,15 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     eplb_executor_->eplb_execute(input.input_params.expert.eplb_info);
   }
 
+  ModelInputParams model_input_params = input.input_params;
+  if (sampling_params.selected_token_idxes.defined()) {
+    model_input_params.selected_token_idxes =
+        sampling_params.selected_token_idxes;
+  }
+
   // call model executor forward to get hidden states
   auto model_output = model_executor_->forward(
-      input.token_ids, input.positions, kv_caches_, input.input_params);
+      input.token_ids, input.positions, kv_caches_, model_input_params);
   if (!model_output.hidden_states.defined()) {
     return std::nullopt;
   }
@@ -261,7 +267,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   torch::Tensor selected_hidden_from_lm_head;
   if (sampling_params.selected_token_idxes.defined()) {
     torch::Tensor selected_token_idxes = sampling_params.selected_token_idxes;
-    if (model_output.hidden_states.defined() &&
+    if (model_output.hidden_states.defined() && selected_token_idxes.defined() &&
         selected_token_idxes.device() != model_output.hidden_states.device()) {
       selected_token_idxes = selected_token_idxes
                                  .to(model_output.hidden_states.device(),

@@ -40,6 +40,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/device_monitor.h"
+#include "core/common/flash_comm1_context.h"
 #include "common/global_flags.h"
 #include "common/metrics.h"
 #include "core/framework/config/beam_search_config.h"
@@ -232,6 +233,7 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
   driver_ = parallel_args.rank() == 0;
   int32_t tp_size = parallel_args.world_size() /
                     (parallel_args.dp_size() * parallel_args.cp_size());
+
   dp_driver_ = parallel_args.dp_size() > 1 &&
                parallel_args.rank() % (tp_size * parallel_args.cp_size()) == 0;
 
@@ -1499,6 +1501,15 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   auto tensor_options = torch::dtype(dtype_).device(device_);
   context_ = ModelContext(parallel_args_, args, quant_args, tensor_options);
   context_.set_model_id(options_.model_id());
+  FlashComm1Options flash_comm1_options;
+  flash_comm1_options.enable_flashcomm1 = options_.enable_flashcomm1();
+  flash_comm1_options.min_prefill_tokens =
+      options_.flashcomm1_min_prefill_tokens();
+  flash_comm1_options.min_decode_tokens =
+      options_.flashcomm1_min_decode_tokens();
+  flash_comm1_options.enable_mmrs_fusion = options_.enable_mmrs_fusion();
+  flash_comm1_options.mmrs_comm_mode = options_.mmrs_comm_mode();
+  context_.set_flash_comm1_options(flash_comm1_options);
 
   // init model, create model executor
   bool status = this->init_model(context_);

@@ -56,6 +56,12 @@ std::string Options::to_string() const {
      << ", task_type: " << task_type() << ", enable_mla: " << enable_mla()
      << ", enable_chunked_prefill: " << enable_chunked_prefill()
      << ", enable_prefill_sp: " << enable_prefill_sp()
+     << ", enable_flashcomm1: " << enable_flashcomm1()
+     << ", flashcomm1_min_prefill_tokens: "
+     << flashcomm1_min_prefill_tokens()
+     << ", flashcomm1_min_decode_tokens: " << flashcomm1_min_decode_tokens()
+     << ", enable_mmrs_fusion: " << enable_mmrs_fusion()
+     << ", mmrs_comm_mode: " << mmrs_comm_mode()
      << ", master_node_addr: " << master_node_addr().value_or("null")
      << ", instance_role: " << instance_role().to_string()
      << ", transfer_listen_port: " << transfer_listen_port()

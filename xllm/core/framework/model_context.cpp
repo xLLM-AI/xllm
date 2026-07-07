@@ -96,6 +96,7 @@ ModelContext ModelContext::with_parallel_args(
 #endif
   derived.model_id_ = model_id_;
   derived.optimization_config_ = optimization_config_;
+  derived.flash_comm1_options_ = flash_comm1_options_;
   return derived;
 }
 

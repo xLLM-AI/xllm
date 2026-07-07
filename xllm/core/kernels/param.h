@@ -21,6 +21,10 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+namespace xllm {
+class ProcessGroup;
+}  // namespace xllm
+
 namespace xllm::layer {
 struct AttentionMetadata;
 }  // namespace xllm::layer
@@ -310,6 +314,26 @@ struct MatmulParams {
   // Scaling factor for tensor c (if provided). Default: 0.0
   // Result: alpha * (a @ b) + beta * c (if c provided)
   double beta = 0.0;
+};
+
+struct MatmulReduceScatterParams {
+  // RFC-visible inputs. For the currently wired BF16/FP16 path, b is passed in
+  // K-N layout to match torch_npu::npu_mm_reduce_scatter_base.
+  torch::Tensor a;
+  torch::Tensor b;
+  std::optional<torch::Tensor> bias;
+  ProcessGroup* process_group = nullptr;
+  int64_t original_num_tokens = 0;
+  std::optional<torch::Tensor> deq_scale;
+  std::optional<at::ScalarType> output_dtype;
+
+  // Optional compatibility fields used by callers for expected shape checks.
+  // The torch_npu op allocates and returns the output tensor itself.
+  std::optional<torch::Tensor> output;
+  std::string reduce_op = "sum";
+  int64_t comm_turn = 0;
+  int64_t stream_mode = 1;
+  std::string comm_mode = "ai_cpu";
 };
 
 // Quantized matmul parameters (NPU aclnnQuantMatmulV4 path).

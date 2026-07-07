@@ -413,6 +413,26 @@ torch::Tensor matmul(MatmulParams& params) {
 #endif
 }
 
+torch::Tensor matmul_reduce_scatter(MatmulReduceScatterParams& params) {
+#if defined(USE_NPU)
+  return npu::matmul_reduce_scatter(params.a,
+                                    params.b,
+                                    params.bias,
+                                    params.output,
+                                    params.process_group,
+                                    params.reduce_op,
+                                    params.comm_turn,
+                                    params.stream_mode,
+                                    params.comm_mode);
+#else
+  MatmulParams matmul_params;
+  matmul_params.a = params.a;
+  matmul_params.b = params.b;
+  matmul_params.bias = params.bias;
+  return matmul(matmul_params);
+#endif
+}
+
 torch::Tensor quant_matmul(QuantMatmulParams& params) {
 #if defined(USE_NPU)
   return npu::quant_matmul(params.x1,

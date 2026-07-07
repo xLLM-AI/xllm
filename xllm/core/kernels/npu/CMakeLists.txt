@@ -15,6 +15,7 @@ cc_library(
     attention.cpp
     fused_layernorm.cpp
     matmul.cpp
+    matmul_reduce_scatter.cpp
     npu_causal_conv1d.cpp
     npu_fused_infer_attention.cpp
     npu_gemma_rms_norm.cpp

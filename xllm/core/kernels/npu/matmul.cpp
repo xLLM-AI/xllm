@@ -14,7 +14,6 @@ limitations under the License.
 ==============================================================================*/
 
 #include "npu_ops_api.h"
-#include "ops_npu/npu_ops.h"
 
 namespace xllm::kernel::npu {
 

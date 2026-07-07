@@ -142,6 +142,17 @@ struct Options {
   // enable prefill-only sequence parallel.
   PROPERTY(bool, enable_prefill_sp) = false;
 
+  // Flash Communication 1 (FC1) sequence-parallel optimization.
+  PROPERTY(bool, enable_flashcomm1) = false;
+
+  PROPERTY(int32_t, flashcomm1_min_prefill_tokens) = 1000;
+
+  PROPERTY(int32_t, flashcomm1_min_decode_tokens) = 128;
+
+  PROPERTY(bool, enable_mmrs_fusion) = false;
+
+  PROPERTY(std::string, mmrs_comm_mode) = "aiv";
+
   // enable returning aux_hidden_states in graph executor output.
   PROPERTY(bool, enable_graph_aux_hidden_states) = false;
 

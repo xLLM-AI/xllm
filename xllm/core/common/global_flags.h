@@ -387,3 +387,14 @@ DECLARE_bool(enable_aclnn_swiglu);
 DECLARE_bool(use_cpp_chat_template);
 
 DECLARE_int32(health_check_interval_ms);
+
+// --- Flash Communication 1 (FC1) config ---
+DECLARE_bool(enable_flashcomm1);
+
+DECLARE_int32(flashcomm1_min_prefill_tokens);
+
+DECLARE_int32(flashcomm1_min_decode_tokens);
+
+DECLARE_bool(enable_mmrs_fusion);
+
+DECLARE_string(mmrs_comm_mode);

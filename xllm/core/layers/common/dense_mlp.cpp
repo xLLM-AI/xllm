@@ -17,9 +17,9 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include "common/flash_comm1_context.h"
 #include "kernels/ops_api.h"
 #include "platform/device.h"
-#include "platform/platform.h"
 
 namespace xllm {
 namespace layer {
@@ -94,25 +94,44 @@ DenseMLPImpl::DenseMLPImpl(int64_t hidden_size,
                                                  down_proj_extra_args));
 }
 
-torch::Tensor DenseMLPImpl::forward(const torch::Tensor& hidden_states) {
-  // input shape: [num_tokens, hidden_size]
-  auto gate_up = gate_up_proj_->forward(hidden_states);
+torch::Tensor DenseMLPImpl::forward(torch::Tensor hidden_states,
+                                    const FlashComm1Context* fc1_ctx) {
+  torch::Tensor h = hidden_states;
+
+  if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
+    h = gather_sequence(hidden_states, *fc1_ctx);
+  }
+
+  auto gate_up = gate_up_proj_->forward(h);
 
   if (is_smoothquant_) {
-    // For w8a8 quantization, the active operation is fused with the down_proj
-    return down_proj_->forward(gate_up);
-  } else {
-    torch::Tensor output;
-    if (!Platform::is_npu()) {
-      int64_t batch_size = gate_up.sizes()[0];
-      output = torch::empty(
-          {batch_size, intermediate_size_ / process_group_->world_size()},
-          gate_up.options());
+    if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
+      LOG_FIRST_N(INFO, 16)
+          << "FC1 MMRS callsite DenseMLP.down_proj(smoothquant): input="
+          << gate_up.sizes();
+      return down_proj_->forward(
+          gate_up, row_parallel_reduce_mode_for_fc1(*fc1_ctx), fc1_ctx);
     }
-
-    act_->forward(gate_up, output);
-    return down_proj_->forward(output);
+    return down_proj_->forward(gate_up);
   }
+
+  torch::Tensor output;
+  if (Device::type_str() != "npu") {
+    int64_t batch_size = gate_up.sizes()[0];
+    output = torch::empty(
+        {batch_size, intermediate_size_ / process_group_->world_size()},
+        gate_up.options());
+  }
+
+  act_->forward(gate_up, output);
+
+  if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
+    LOG_FIRST_N(INFO, 16)
+        << "FC1 MMRS callsite DenseMLP.down_proj: input=" << output.sizes();
+    return down_proj_->forward(
+        output, row_parallel_reduce_mode_for_fc1(*fc1_ctx), fc1_ctx);
+  }
+  return down_proj_->forward(output);
 }
 
 void DenseMLPImpl::load_state_dict(const StateDict& state_dict) {

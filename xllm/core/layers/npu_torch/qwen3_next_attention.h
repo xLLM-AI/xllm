@@ -20,6 +20,7 @@ limitations under the License.
 #include <vector>
 
 #include "attention.h"
+#include "common/flash_comm1_context.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
@@ -42,11 +43,18 @@ class Qwen3NextAttentionImpl : public torch::nn::Module {
                          const torch::TensorOptions& options,
                          int32_t layer_id);
 
+torch::Tensor forward(const torch::Tensor& positions,
+                         const torch::Tensor& hidden_states,
+                         const AttentionMetadata& attn_metadata,
+                         KVCache& kv_cache,
+                         const torch::Tensor& mrope_cos_sin);
+
   torch::Tensor forward(const torch::Tensor& positions,
-                        const torch::Tensor& hidden_states,
-                        const AttentionMetadata& attn_metadata,
-                        KVCache& kv_cache,
-                        const torch::Tensor& mrope_cos_sin);
+                         const torch::Tensor& hidden_states,
+                         const AttentionMetadata& attn_metadata,
+                         KVCache& kv_cache,
+                         const torch::Tensor& mrope_cos_sin,
+                         const FlashComm1Context* fc1_ctx);
 
   torch::Tensor build_mrope_cos_sin(const torch::Tensor& positions) const;
 
