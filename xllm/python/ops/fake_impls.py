@@ -1,12 +1,11 @@
 """FakeTensor (meta) impls for xllm_ops — torch.compile prerequisite.
 
-Graph-break semantics:
   - fused_add_rms_norm, fused_qk_norm_rope: register_fake (in-graph capable),
-    return the mutated input so piecewise cudagraph segments have outputs.
-  - reshape_paged_cache: disallow_in_graph (runs in eager attention section,
-    accesses kv_cache from forward_context outside the compiled graph).
+    return the mutated input.
+  - reshape_paged_cache: disallow_in_graph (accesses kv_cache from
+    forward_context outside the compiled graph).
   - batch_prefill / batch_decode / batch_chunked_prefill: disallow_in_graph
-    (split points, run eager between compiled segments)
+    (attention ops run in eager section)
   - update_*_plan: not traced (called conditionally in eager Python)
 """
 

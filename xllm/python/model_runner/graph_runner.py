@@ -4,10 +4,8 @@ Selected by the C++ ``--python_graph_backend`` flag (passed via config dict):
 
 - ``off`` (default): eager pass-through, parity baseline.
 - ``cudagraphs``: decode = manual full CUDA-graph capture bucketed by batch
-  size; prefill / chunked-prefill = breakable piecewise CUDA-graph (manual
-  capture with eager break points at attention ops, shared graph pool for
-  address stability). This mirrors the C++ ``CudaGraphExecutorImpl`` design but
-  keeps all capture/replay orchestration on the Python side.
+  size; prefill = eager (same as ``off``). Decode graphs mirror the C++
+  ``CudaGraphExecutorImpl`` design but orchestration is fully on Python side.
 - any other value: ``torch.compile(model, backend=<value>)``.
 
 Decode full graph:
@@ -19,14 +17,6 @@ Decode full graph:
   The flashinfer plan runs OUTSIDE the capture region with
   ``enable_cuda_graph=True`` (fixed-layout schedule) once before capture and
   again before every replay.
-
-Prefill piecewise graph:
-  Captures the model forward as a sequence of CUDA graph segments. At each
-  attention layer, the ``@eager_break`` decorator on ``_attention_dispatch``
-  ends the current segment, runs attention eagerly (KV write + kernel), and
-  starts the next segment. All segments share one ``graph_pool_handle()`` so
-  intermediate tensor addresses (including the pre-allocated attention output)
-  are stable across replays. Bucketed by total num_tokens.
 """
 
 from __future__ import annotations
@@ -69,6 +59,7 @@ class _DecodeGraphEntry:
         "static_paged_kv_indices",
         "static_paged_kv_last_page_len",
         "static_meta",
+        "pad_indptr_buf",
     )
 
 
@@ -179,6 +170,9 @@ class DecodeFullGraphRunner:
         )
         # A single AttentionMetadata bound to the static buffers; reused every
         # step (the buffers' contents change, their addresses do not).
+        e.pad_indptr_buf = torch.empty(
+            batch_pad, dtype=meta.paged_kv_indptr.dtype, device=dev
+        )
         e.static_meta = AttentionMetadata(
             {
                 "slot_mapping": e.static_slot_mapping,
@@ -216,20 +210,21 @@ class DecodeFullGraphRunner:
             # Pad each dummy seq with one reserved block (id 0). Block 0 is the
             # block manager's reserved padding block, so real seqs are unaffected.
             # n_idx == real total blocks == indptr[batch].
-            dev = entry.static_input_ids.device
+            pad_count = batch_pad - batch
             entry.static_input_ids[batch:batch_pad].zero_()
             entry.static_positions[batch:batch_pad].zero_()
             entry.static_slot_mapping[batch:batch_pad].zero_()
-            pad_indptr = torch.arange(
+            torch.arange(
                 n_idx + 1,
-                n_idx + 1 + (batch_pad - batch),
+                n_idx + 1 + pad_count,
                 dtype=entry.static_paged_kv_indptr.dtype,
-                device=dev,
+                device=entry.static_input_ids.device,
+                out=entry.pad_indptr_buf[:pad_count],
             )
             entry.static_paged_kv_indptr[batch + 1 : batch_pad + 1].copy_(
-                pad_indptr
+                entry.pad_indptr_buf[:pad_count]
             )
-            entry.static_paged_kv_indices[n_idx : n_idx + (batch_pad - batch)].zero_()
+            entry.static_paged_kv_indices[n_idx : n_idx + pad_count].zero_()
             entry.static_paged_kv_last_page_len[batch:batch_pad].fill_(1)
 
     def _capture(self, entry: _DecodeGraphEntry) -> None:
@@ -244,152 +239,6 @@ class DecodeFullGraphRunner:
         entry.graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(entry.graph, stream=self._stream):
             entry.static_output = model(ii, pp)
-
-
-_PREFILL_BUCKETS: list[int] = (
-    list(range(128, 513, 128))          # 128,256,384,512        step 128
-    + list(range(768, 2049, 256))       # 768,1024,...,2048      step 256
-    + list(range(2560, 4097, 512))      # 2560,3072,3584,4096   step 512
-    + list(range(5120, 8193, 1024))     # 5120,6144,7168,8192   step 1024
-)
-
-
-def _prefill_bucket(num_tokens: int) -> int:
-    """Padded bucket for prefill num_tokens.
-
-    Progressive granularity (SGLang-style): denser at low token counts
-    (less padding waste), sparser at high counts (fewer buckets to capture).
-    """
-    for b in _PREFILL_BUCKETS:
-        if num_tokens <= b:
-            return b
-    return 0
-
-
-class _PrefillGraphEntry:
-    """Per-bucket captured breakable graph plus its fixed-address static buffers."""
-
-    __slots__ = (
-        "num_tokens_pad",
-        "graph",
-        "static_output",
-        "static_input_ids",
-        "static_positions",
-    )
-
-
-class PrefillPiecewiseRunner:
-    """Breakable piecewise CUDA graph for prefill/chunked-prefill.
-
-    Captures the model forward as segmented CUDA graphs with eager break
-    points at attention ops. All segments share one graph pool so intermediate
-    tensor addresses are stable across replays.
-
-    Bucketed by num_tokens (= total tokens in the prefill batch). Unlike
-    decode (which is per-sequence, q_len=1), prefill processes variable-length
-    prompts so the primary bucketing dimension is total token count.
-
-    Runs on the CURRENT stream (no dedicated stream) — prefill is synchronous
-    and doesn't overlap with other work, so stream switching would add pure
-    overhead from event synchronization.
-    """
-
-    _MAX_PREFILL_TOKENS = 4096
-
-    def __init__(self, model: nn.Module) -> None:
-        self._model = model
-        self._graphs: dict[int, _PrefillGraphEntry] = {}
-        self._pool: tuple[int, int] | None = None
-        self._capture_stream: torch.cuda.Stream | None = None
-
-    def __call__(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        meta: AttentionMetadata,
-        kv_caches: list,
-    ) -> torch.Tensor:
-        num_tokens = input_ids.shape[0]
-        num_tokens_pad = _prefill_bucket(num_tokens)
-
-        if num_tokens_pad == 0:
-            self._model.plan_attention(meta, kv_caches)
-            set_forward_context(meta, kv_caches)
-            return self._model(input_ids, positions)
-
-        if self._pool is None:
-            self._pool = torch.cuda.graph_pool_handle()
-
-        entry = self._graphs.get(num_tokens_pad)
-        first_capture = entry is None
-        if first_capture:
-            entry = self._alloc_entry(num_tokens_pad, input_ids)
-            self._graphs[num_tokens_pad] = entry
-
-        self._fill_buffers(entry, input_ids, positions, num_tokens)
-        set_forward_context(meta, kv_caches)
-        self._model.plan_attention(meta, kv_caches)
-
-        if first_capture:
-            self._capture(entry)
-
-        entry.graph.replay()
-        return entry.static_output[:num_tokens].clone()
-
-    def _alloc_entry(
-        self, num_tokens_pad: int, input_ids: torch.Tensor
-    ) -> _PrefillGraphEntry:
-        dev = input_ids.device
-        e = _PrefillGraphEntry()
-        e.num_tokens_pad = num_tokens_pad
-        e.graph = None
-        e.static_output = None
-        e.static_input_ids = torch.zeros(
-            num_tokens_pad, dtype=input_ids.dtype, device=dev
-        )
-        e.static_positions = torch.zeros(
-            num_tokens_pad, dtype=torch.long, device=dev
-        )
-        return e
-
-    def _fill_buffers(
-        self,
-        entry: _PrefillGraphEntry,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        num_tokens: int,
-    ) -> None:
-        entry.static_input_ids[:num_tokens].copy_(input_ids)
-        entry.static_positions[:num_tokens].copy_(positions)
-        if num_tokens < entry.num_tokens_pad:
-            entry.static_input_ids[num_tokens:].zero_()
-            entry.static_positions[num_tokens:].zero_()
-
-    def _capture(self, entry: _PrefillGraphEntry) -> None:
-        from .breakable_cuda_graph import BreakableCUDAGraph, BreakableCUDAGraphCapture
-
-        if self._capture_stream is None:
-            self._capture_stream = torch.cuda.Stream(
-                device=entry.static_input_ids.device
-            )
-
-        model = self._model
-        ii, pp = entry.static_input_ids, entry.static_positions
-
-        # Capture must happen on a non-default stream. Warmup + capture run
-        # here once; the hot-path replay runs on the caller's stream directly.
-        self._capture_stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(self._capture_stream):
-            for _ in range(_CAPTURE_WARMUP_STEPS):
-                model(ii, pp)
-
-            graph = BreakableCUDAGraph()
-            with BreakableCUDAGraphCapture(
-                graph, pool=self._pool, stream=self._capture_stream
-            ):
-                entry.static_output = model(ii, pp)
-            entry.graph = graph
-        torch.cuda.current_stream().wait_stream(self._capture_stream)
 
 
 class GraphRunner:
