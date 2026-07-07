@@ -40,6 +40,7 @@ limitations under the License.
 #include "util/net.h"
 #include "util/scope_guard.h"
 #include "util/timer.h"
+#include "util/utils.h"
 
 namespace xllm {
 namespace {
@@ -288,7 +289,10 @@ std::shared_ptr<Request> LLMMaster::generate_request(
     const RequestParams& sp,
     std::optional<Call*> call,
     OutputCallback callback) {
-  if (prompt.empty()) {
+  // A request is valid as long as it carries either text or pre-tokenized
+  // prompt tokens; pure-token input (no text) is a first-class input.
+  const bool has_prompt_tokens = prompt_tokens.has_value();
+  if (prompt.empty() && !has_prompt_tokens) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "Prompt is empty",
                         sp.service_request_id,
@@ -300,7 +304,7 @@ std::shared_ptr<Request> LLMMaster::generate_request(
   Timer timer;
   std::vector<int> local_prompt_tokens;
 
-  if (prompt_tokens.has_value()) {
+  if (has_prompt_tokens) {
     local_prompt_tokens = std::move(prompt_tokens.value());
   } else {
     if (!tokenizer_->encode(
@@ -315,6 +319,23 @@ std::shared_ptr<Request> LLMMaster::generate_request(
   }
 
   COUNTER_ADD(tokenization_latency_seconds, timer.elapsed_seconds());
+
+  // Validate directly-supplied prompt tokens against the vocabulary range to
+  // avoid out-of-bounds embedding lookups. Encoded tokens are trusted, so only
+  // scan when tokens were provided and the vocab range is known.
+  const int64_t vocab_size = model_args_.vocab_size();
+  if (has_prompt_tokens && vocab_size > 0) {
+    const auto invalid_token =
+        util::find_out_of_vocab_token(local_prompt_tokens, vocab_size);
+    if (invalid_token.has_value()) {
+      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                          "Prompt token id out of vocabulary range: " +
+                              std::to_string(invalid_token.value()),
+                          sp.service_request_id,
+                          sp.source_xservice_addr);
+      return nullptr;
+    }
+  }
 
   const int32_t max_context_len = model_args_.max_position_embeddings();
   int32_t prompt_token_limit = max_context_len;
