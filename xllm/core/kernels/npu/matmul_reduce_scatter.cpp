@@ -18,73 +18,69 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch_npu/csrc/aten/CustomFunctions.h>
 
-#include <sstream>
-
 #include "core/framework/parallel_state/process_group.h"
 
 namespace xllm::kernel::npu {
 namespace {
 
-std::string matmul_reduce_scatter_reject_reason(
+bool can_call_torch_npu_mmrs(
     const torch::Tensor& a,
     const torch::Tensor& b,
     const std::optional<torch::Tensor>& bias,
     const std::optional<torch::Tensor>& output,
     ProcessGroup* process_group) {
   if (process_group == nullptr) {
-    return "process_group is null";
+    LOG_FIRST_N(WARNING, 8)
+        << "FC1 MMRS torch_npu skipped: process_group is null.";
+    return false;
   }
   if (!output.has_value() || !output->defined()) {
-    return "output tensor is missing";
+    LOG_FIRST_N(WARNING, 8)
+        << "FC1 MMRS torch_npu skipped: output tensor is missing.";
+    return false;
   }
   if (a.dim() != 2 || b.dim() != 2 || output->dim() != 2) {
-    std::ostringstream oss;
-    oss << "expected 2D tensors, got a_dim=" << a.dim()
-        << ", b_dim=" << b.dim() << ", output_dim=" << output->dim();
-    return oss.str();
+    LOG_FIRST_N(WARNING, 8)
+        << "FC1 MMRS torch_npu skipped: expected 2D tensors, got a_dim="
+        << a.dim() << ", b_dim=" << b.dim()
+        << ", output_dim=" << output->dim();
+    return false;
   }
   if (a.scalar_type() != at::kHalf && a.scalar_type() != at::kBFloat16) {
-    std::ostringstream oss;
-    oss << "unsupported input dtype=" << a.scalar_type();
-    return oss.str();
+    LOG_FIRST_N(WARNING, 8)
+        << "FC1 MMRS torch_npu skipped: unsupported input dtype="
+        << a.scalar_type();
+    return false;
   }
   if (a.scalar_type() != b.scalar_type() ||
       a.scalar_type() != output->scalar_type()) {
-    std::ostringstream oss;
-    oss << "dtype mismatch: a=" << a.scalar_type()
-        << ", b=" << b.scalar_type()
+    LOG_FIRST_N(WARNING, 8)
+        << "FC1 MMRS torch_npu skipped: dtype mismatch. a="
+        << a.scalar_type() << ", b=" << b.scalar_type()
         << ", output=" << output->scalar_type();
-    return oss.str();
+    return false;
   }
   if (bias.has_value() && bias->defined() &&
       bias->scalar_type() != a.scalar_type()) {
-    std::ostringstream oss;
-    oss << "bias dtype mismatch: bias=" << bias->scalar_type()
-        << ", input=" << a.scalar_type();
-    return oss.str();
+    LOG_FIRST_N(WARNING, 8)
+        << "FC1 MMRS torch_npu skipped: bias dtype mismatch. bias="
+        << bias->scalar_type() << ", input=" << a.scalar_type();
+    return false;
   }
   if (a.size(1) != b.size(0)) {
-    std::ostringstream oss;
-    oss << "matmul K mismatch: a=" << a.sizes() << ", b=" << b.sizes();
-    return oss.str();
+    LOG_FIRST_N(WARNING, 8)
+        << "FC1 MMRS torch_npu skipped: matmul K mismatch. a=" << a.sizes()
+        << ", b=" << b.sizes();
+    return false;
   }
   if (output->size(1) != b.size(1)) {
-    std::ostringstream oss;
-    oss << "output N mismatch: output=" << output->sizes()
+    LOG_FIRST_N(WARNING, 8)
+        << "FC1 MMRS torch_npu skipped: output N mismatch. output="
+        << output->sizes()
         << ", b=" << b.sizes();
-    return oss.str();
+    return false;
   }
-  return "";
-}
-
-torch::Tensor matmul_kn(const torch::Tensor& a,
-                        const torch::Tensor& b,
-                        const std::optional<torch::Tensor>& bias) {
-  torch::Tensor out = torch::matmul(a, b);
-  if (bias.has_value() && bias->defined()) {
-    out = out + bias.value();
-  }
-  return out;
+  return true;
 }
 
 bool should_use_ai_cpu_for_aiv_risky_shape(const torch::Tensor& a,
@@ -121,17 +117,8 @@ torch::Tensor matmul_reduce_scatter(
     int64_t comm_turn,
     int64_t stream_mode,
     const std::string& comm_mode) {
-  const std::string reject_reason =
-      matmul_reduce_scatter_reject_reason(a, b, bias, output, process_group);
-  if (!reject_reason.empty()) {
-    LOG_FIRST_N(WARNING, 8)
-        << "FC1 MMRS torch_npu skipped: " << reject_reason
-        << "; fallback to matmul + reduce_scatter path. a=" << a.sizes()
-        << ", b=" << b.sizes()
-        << ", output="
-        << (output.has_value() && output->defined() ? output->sizes()
-                                                    : c10::IntArrayRef{});
-    return matmul_kn(a, b, bias);
+  if (!can_call_torch_npu_mmrs(a, b, bias, output, process_group)) {
+    return torch::Tensor();
   }
 
   std::string group = process_group->hccl_comm_name(/*init_comm=*/true);
@@ -139,7 +126,7 @@ torch::Tensor matmul_reduce_scatter(
     LOG_FIRST_N(WARNING, 8)
         << "FC1 MMRS torch_npu skipped: HCCL group name is empty; fallback to "
            "matmul + reduce_scatter path.";
-    return matmul_kn(a, b, bias);
+    return torch::Tensor();
   }
 
   std::string effective_comm_mode = comm_mode;
