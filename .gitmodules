@@ -37,3 +37,6 @@
 [submodule "third_party/xxHash"]
 	path = third_party/xxHash
 	url = https://gitcode.com/xLLM-AI/xxHash.git
+[submodule "third_party/gperftools"]
+	path = third_party/gperftools
+	url = https://gitcode.com/xLLM-AI/gperftools.git

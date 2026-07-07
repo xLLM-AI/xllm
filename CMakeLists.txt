@@ -277,6 +277,11 @@ find_package(Threads REQUIRED)
 # find all dependencies from vcpkg
 find_package(glog CONFIG REQUIRED)
 find_package(gflags CONFIG REQUIRED)
+
+# Bundled shared tcmalloc (gperftools 2.10 submodule). Must exist before leveldb,
+# which links the imported target named "tcmalloc".
+include(gperftools)
+
 find_package(leveldb CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(absl CONFIG REQUIRED)
@@ -302,8 +307,19 @@ endif()
 # before including libtorch, as doing so afterwards may lead to
 # unexpected linker errors.
 if (DEFINED ENV{LIBTORCH_ROOT})
-  find_package(Torch REQUIRED HINTS "$ENV{LIBTORCH_ROOT}")
+  # Drop stale Torch/Caffe2 cache entries (e.g. FetchContent x86 libtorch under _deps/).
+  unset(Torch_DIR CACHE)
+  unset(Caffe2_DIR CACHE)
+  unset(TORCH_LIBRARY CACHE)
+  unset(c10_LIBRARY CACHE)
+  unset(kineto_LIBRARY CACHE)
+  find_package(Torch REQUIRED PATHS "$ENV{LIBTORCH_ROOT}" NO_DEFAULT_PATH)
   message(STATUS "Using libtorch at $ENV{LIBTORCH_ROOT}")
+elseif(USE_NPU OR USE_MLU OR USE_CUDA OR USE_MUSA)
+  message(FATAL_ERROR
+    "LIBTORCH_ROOT is not set. Device builds must use the installed PyTorch "
+    "(e.g. export LIBTORCH_ROOT=$(python -c \"import torch, os; "
+    "print(os.path.dirname(torch.__file__))\")).")
 else()
   include(FetchContent)
   if (USE_CXX11_ABI)
