@@ -12,13 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""JIT kernel backends for the op dispatch layer.
+"""Python-authored kernel implementations.
 
-Portable Python-authored kernels (currently Triton) that the :mod:`python.ops`
-dispatch layer can route to as an alternative to the C++ vendor kernels. Each
-kernel module registers its own op (e.g. ``xllm_triton::silu_and_mul``) with a
-``register_fake`` so it stays a single capturable node under torch.compile /
-cudagraph. Kept import-light on purpose: the Triton dependency is only pulled in
-when :mod:`python.kernels.triton_ops` is actually imported (gated by
-``XLLM_USE_TRITON`` in :mod:`python.ops.dispatch`).
+Each kernel module registers its own op (e.g. ``xllm_triton::silu_and_mul``)
+with a ``register_fake`` so it stays a single capturable node under
+torch.compile / cudagraph.
 """

@@ -12,23 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Op dispatch layer for the Python model graph.
+"""Op dispatch layer for the Python model executor.
 
-Each op forwards to the fused kernel exposed under ``torch.ops.xllm_ops.*``.
-Attention is no longer a single opaque op here — it lives in the
-``PagedAttention`` layer (``python.layers.attention``) which calls
-``kv_cache_write`` + ``paged_attention`` kernel ops directly with explicit
-parameters.
+Each op is a direct binding to the C++ ``torch.ops.xllm_ops.*`` kernel (routed
+by PyTorch DispatchKey per device).  FakeTensor / disallow_in_graph semantics
+are registered as import-time side effects in the submodules.
 """
 
-from .dispatch import (
-    all_gather,
-    all_reduce,
+from .compute import (
     fused_add_rms_norm,
     fused_qk_norm_rope,
     rms_norm,
-    set_tp_group,
     silu_and_mul,
+)
+from .attention import (
+    batch_chunked_prefill,
+    batch_decode,
+    batch_prefill,
+    reshape_paged_cache,
+    update_chunked_prefill_plan,
+    update_decode_plan,
+    update_prefill_plan,
+)
+from .collectives import (
+    all_gather,
+    all_reduce,
+    set_tp_group,
 )
 
 __all__ = [
@@ -36,6 +45,13 @@ __all__ = [
     "fused_add_rms_norm",
     "silu_and_mul",
     "fused_qk_norm_rope",
+    "reshape_paged_cache",
+    "batch_prefill",
+    "batch_decode",
+    "batch_chunked_prefill",
+    "update_prefill_plan",
+    "update_decode_plan",
+    "update_chunked_prefill_plan",
     "all_reduce",
     "all_gather",
     "set_tp_group",

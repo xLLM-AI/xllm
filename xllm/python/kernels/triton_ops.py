@@ -12,19 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Triton implementations of select xLLM ops (WS4 / M8).
+"""Triton implementations of select xLLM ops.
 
-A gray-scale alternative to the C++ ``xllm_ops`` fused kernels for validating
-that a Python-authored Triton kernel can (a) run inside the embedded-interpreter
-model graph with parity to the vendor kernel, and (b) be captured/replayed by
-the torch.compile cudagraph backend. Selected at runtime by ``XLLM_USE_TRITON``
-in :mod:`ops`; the C++ ``xllm_ops`` path stays the default baseline.
-
-Each kernel is wrapped as a ``torch.library.custom_op`` (opaque to Dynamo, with a
-``register_fake`` for shape inference) so it behaves like the other fused ops: it
-stays a single node in the compiled graph rather than being traced into. The
-kernel uses a fixed ``BLOCK`` (no autotune) so that after warmup the launch is
-CUDA-graph capturable (autotune / first-call JIT are not capturable).
+Each kernel is wrapped as a ``torch.library.custom_op`` (opaque to Dynamo, with
+a ``register_fake`` for shape inference) so it stays a single node in the
+compiled graph. Fixed BLOCK size (no autotune) ensures CUDA-graph capturability.
 """
 
 from __future__ import annotations

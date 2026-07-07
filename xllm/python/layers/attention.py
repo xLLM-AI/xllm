@@ -14,6 +14,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from .. import ops
 from ..attn_metadata import AttentionMetadata
 from ..forward_context import get_forward_context
 
@@ -68,12 +69,12 @@ class PagedAttention(nn.Module):
         v_3d = v.view(-1, self.num_kv_heads, self.head_dim)
         output = torch.empty_like(q_3d)
 
-        torch.ops.xllm_ops.reshape_paged_cache(
+        ops.reshape_paged_cache(
             attn_metadata.slot_mapping, k_3d, v_3d, k_cache, v_cache
         )
 
         if attn_metadata.is_prefill:
-            torch.ops.xllm_ops.batch_prefill(
+            ops.batch_prefill(
                 q_3d, k_3d, v_3d,
                 attn_metadata.q_cu_seq_lens,
                 attn_metadata.kv_cu_seq_lens,
@@ -82,7 +83,7 @@ class PagedAttention(nn.Module):
                 output,
             )
         elif attn_metadata.is_chunked_prefill:
-            torch.ops.xllm_ops.batch_chunked_prefill(
+            ops.batch_chunked_prefill(
                 q_3d, k_cache, v_cache,
                 attn_metadata.paged_kv_indptr,
                 attn_metadata.paged_kv_indices,
@@ -93,7 +94,7 @@ class PagedAttention(nn.Module):
                 output,
             )
         else:
-            torch.ops.xllm_ops.batch_decode(
+            ops.batch_decode(
                 q_3d, k_cache, v_cache,
                 attn_metadata.paged_kv_indptr,
                 attn_metadata.paged_kv_indices,
@@ -116,7 +117,7 @@ class PagedAttention(nn.Module):
         """Compute the attention plan for this batch."""
         block_size = k_cache.size(1) if k_cache.dim() >= 2 else 1
         if attn_metadata.is_prefill:
-            new_info, self.uri = torch.ops.xllm_ops.update_prefill_plan(
+            new_info, self.uri = ops.update_prefill_plan(
                 attn_metadata.q_cu_seq_lens,
                 attn_metadata.kv_cu_seq_lens,
                 self.num_heads,
@@ -128,7 +129,7 @@ class PagedAttention(nn.Module):
             )
         elif attn_metadata.is_chunked_prefill:
             new_info, self.uri = (
-                torch.ops.xllm_ops.update_chunked_prefill_plan(
+                ops.update_chunked_prefill_plan(
                     attn_metadata.paged_kv_indptr,
                     attn_metadata.paged_kv_last_page_len,
                     self.num_heads,
@@ -142,7 +143,7 @@ class PagedAttention(nn.Module):
                 )
             )
         else:
-            new_info, self.uri = torch.ops.xllm_ops.update_decode_plan(
+            new_info, self.uri = ops.update_decode_plan(
                 attn_metadata.paged_kv_indptr,
                 attn_metadata.paged_kv_last_page_len,
                 self.num_heads,

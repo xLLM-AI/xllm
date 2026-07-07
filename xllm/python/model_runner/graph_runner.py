@@ -257,7 +257,6 @@ class GraphRunner:
             self._mode = "graph"
             self._decode_runner = DecodeFullGraphRunner(model, max_batch)
         else:
-            from ..ops import fake_impls  # noqa: F401
             self._mode = "compile"
             self._compiled = torch.compile(model, backend=self._backend)
 
