@@ -147,16 +147,7 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
     const torch::Tensor& mrope_cos_sin) {
-  return forward(positions, hidden_states, attn_metadata, kv_cache, mrope_cos_sin, nullptr);
-}
-
-torch::Tensor Qwen3NextAttentionImpl::forward(
-    const torch::Tensor& positions,
-    const torch::Tensor& hidden_states,
-    const AttentionMetadata& attn_metadata,
-    KVCache& kv_cache,
-    const torch::Tensor& mrope_cos_sin,
-    const FlashComm1Context* fc1_ctx) {
+  const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
   torch::Tensor h = hidden_states;
 
   if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
@@ -193,7 +184,7 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
           << "FC1 MMRS callsite Qwen3NextAttention.o_proj(mrope): input="
           << out.sizes();
       return o_proj_->forward(
-          out, row_parallel_reduce_mode_for_fc1(*fc1_ctx), fc1_ctx);
+          out, row_parallel_reduce_mode_for_fc1(*fc1_ctx));
     }
     return o_proj_->forward(out);
   }
@@ -230,7 +221,7 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
         << "FC1 MMRS callsite Qwen3NextAttention.o_proj: input="
         << out.sizes();
     return o_proj_->forward(
-        out, row_parallel_reduce_mode_for_fc1(*fc1_ctx), fc1_ctx);
+        out, row_parallel_reduce_mode_for_fc1(*fc1_ctx));
   }
   return o_proj_->forward(out);
 }

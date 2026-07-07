@@ -73,8 +73,6 @@ PYBIND11_MODULE(xllm_export, m) {
       .def_readwrite("enable_flashcomm1", &Options::enable_flashcomm1_)
       .def_readwrite("flashcomm1_min_prefill_tokens",
                      &Options::flashcomm1_min_prefill_tokens_)
-      .def_readwrite("flashcomm1_min_decode_tokens",
-                     &Options::flashcomm1_min_decode_tokens_)
       .def_readwrite("enable_mmrs_fusion", &Options::enable_mmrs_fusion_)
       .def_readwrite("mmrs_comm_mode", &Options::mmrs_comm_mode_)
       .def_readwrite("master_node_addr", &Options::master_node_addr_)

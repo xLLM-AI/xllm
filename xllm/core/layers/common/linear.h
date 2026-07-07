@@ -261,8 +261,7 @@ class RowParallelLinearImpl : public torch::nn::Module {
   torch::Tensor forward(torch::Tensor input);
 
   torch::Tensor forward(torch::Tensor input,
-                        RowParallelReduceMode reduce_mode,
-                        const FlashComm1Context* fc1_ctx);
+                        RowParallelReduceMode reduce_mode);
 
   // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict);

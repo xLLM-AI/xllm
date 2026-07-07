@@ -1571,8 +1571,8 @@ torch::Tensor RowParallelLinearImpl::mmrs_weight_transposed() const {
 }
 
 torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input,
-                                             RowParallelReduceMode reduce_mode,
-                                             const FlashComm1Context* fc1_ctx) {
+                                             RowParallelReduceMode reduce_mode) {
+  const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
   auto bias = bias_.defined() && rank_ == 0
                   ? std::optional<torch::Tensor>(bias_)
                   : std::nullopt;

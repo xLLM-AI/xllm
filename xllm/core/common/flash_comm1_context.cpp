@@ -21,9 +21,6 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "framework/parallel_state/parallel_state.h"
-#if defined(USE_NPU)
-#include "platform/device.h"
-#endif
 
 DEFINE_bool(enable_flashcomm1,
             false,
@@ -31,12 +28,8 @@ DEFINE_bool(enable_flashcomm1,
             "for tensor parallel inference on NPU.");
 
 DEFINE_int32(flashcomm1_min_prefill_tokens,
-             1000,
+             8192,
              "Minimum prefill token count to activate FC1.");
-
-DEFINE_int32(flashcomm1_min_decode_tokens,
-             128,
-             "Minimum decode batch token count to activate FC1.");
 
 DEFINE_bool(enable_mmrs_fusion,
             false,
@@ -52,6 +45,8 @@ namespace xllm {
 namespace {
 
 constexpr int32_t kFc1LocalTokenAlignment = 16;
+constexpr int32_t kFc1MinTpSize = 8;
+thread_local const FlashComm1Context* current_flash_comm1_context = nullptr;
 
 int32_t round_up_to_multiple(int32_t value, int32_t multiple) {
   CHECK_GT(multiple, 0);
@@ -91,6 +86,20 @@ torch::Tensor pad_rows_by_copy(const torch::Tensor& input,
 }
 
 }  // namespace
+
+FlashComm1ContextScope::FlashComm1ContextScope(
+    const FlashComm1Context* ctx)
+    : previous_(current_flash_comm1_context) {
+  current_flash_comm1_context = ctx;
+}
+
+FlashComm1ContextScope::~FlashComm1ContextScope() {
+  current_flash_comm1_context = previous_;
+}
+
+const FlashComm1Context* get_current_flash_comm1_context() {
+  return current_flash_comm1_context;
+}
 
 int32_t FlashComm1Context::local_num_tokens_for_rank(int32_t rank) const {
   CHECK_GE(rank, 0);
@@ -133,11 +142,7 @@ FlashComm1Context build_flash_comm1_context(
     return ctx;
   }
 
-#if defined(USE_NPU)
-  if (Device::type_str() != "npu") {
-    return ctx;
-  }
-#else
+#if !defined(USE_NPU)
   return ctx;
 #endif
 
@@ -145,7 +150,7 @@ FlashComm1Context build_flash_comm1_context(
     return ctx;
   }
 
-  if (actual_tp_size <= 1) {
+  if (actual_tp_size < kFc1MinTpSize) {
     return ctx;
   }
 
@@ -156,7 +161,7 @@ FlashComm1Context build_flash_comm1_context(
 
   int32_t threshold = options.min_prefill_tokens;
 
-  if (num_tokens <= threshold) {
+  if (num_tokens < threshold) {
     return ctx;
   }
 
@@ -185,7 +190,6 @@ FlashComm1Context build_flash_comm1_context(int32_t num_tokens,
   FlashComm1Options options;
   options.enable_flashcomm1 = FLAGS_enable_flashcomm1;
   options.min_prefill_tokens = FLAGS_flashcomm1_min_prefill_tokens;
-  options.min_decode_tokens = FLAGS_flashcomm1_min_decode_tokens;
   options.enable_mmrs_fusion = FLAGS_enable_mmrs_fusion;
   options.mmrs_comm_mode = FLAGS_mmrs_comm_mode;
   return build_flash_comm1_context(

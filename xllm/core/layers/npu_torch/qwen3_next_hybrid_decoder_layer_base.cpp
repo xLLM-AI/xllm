@@ -116,25 +116,7 @@ torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
     KVCache& kv_cache,
     const ModelInputParams& input_params,
     const torch::Tensor& mrope_cos_sin) {
-  return forward(x,
-                 residual,
-                 positions,
-                 attn_metadata,
-                 kv_cache,
-                 input_params,
-                 mrope_cos_sin,
-                 nullptr);
-}
-
-torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
-    torch::Tensor& x,
-    std::optional<torch::Tensor>& residual,
-    torch::Tensor& positions,
-    const AttentionMetadata& attn_metadata,
-    KVCache& kv_cache,
-    const ModelInputParams& input_params,
-    const torch::Tensor& mrope_cos_sin,
-    const FlashComm1Context* fc1_ctx) {
+  const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
   if (!residual.has_value()) {
     residual = x;
     x = std::get<0>(input_norm_->forward(x));
@@ -153,10 +135,10 @@ torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
 
   if (attention_) {
     x = attention_->forward(
-        positions, x, attn_metadata, kv_cache, mrope_cos_sin, fc1_ctx);
+        positions, x, attn_metadata, kv_cache, mrope_cos_sin);
   } else {
     x = linear_attention_->forward(
-        x, attn_metadata, kv_cache, input_params, fc1_ctx);
+        x, attn_metadata, kv_cache, input_params);
   }
 
   // Before post_norm, ensure residual shape matches x shape
@@ -173,7 +155,7 @@ torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
   if (moe_mlp_) {
     x = moe_mlp_(x, input_params);
   } else {
-    x = mlp_->forward(x, fc1_ctx);
+    x = mlp_->forward(x);
   }
 
   return x;

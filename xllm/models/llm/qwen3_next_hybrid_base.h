@@ -107,6 +107,7 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
     FlashComm1Options fc1_options = flash_comm1_options_;
     FlashComm1Context fc1_ctx = build_flash_comm1_context(
         num_tokens, is_prefill_side, parallel_args_, fc1_options);
+    FlashComm1ContextScope fc1_scope(&fc1_ctx);
 
     torch::Tensor h;
     if (input_params.embedding.input_embedding.defined()) {
@@ -134,8 +135,7 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
                          attn_metadata,
                          kv_caches[i],
                          input_params,
-                         mrope_cos_sin,
-                         &fc1_ctx);
+                         mrope_cos_sin);
 #if defined(USE_NPU)
       if (input_params.parallel.layer_synchronizer != nullptr &&
           !input_params.parallel.layer_synchronizer->record_event(

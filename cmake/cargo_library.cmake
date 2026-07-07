@@ -65,7 +65,9 @@ function(cargo_library)
 
   file(GLOB_RECURSE LIB_SOURCES "*.rs")
 
-  set(CARGO_ENV_COMMAND ${CMAKE_COMMAND} -E env "CARGO_TARGET_DIR=${CMAKE_CURRENT_BINARY_DIR}")
+  set(CARGO_ENV_COMMAND ${CMAKE_COMMAND} -E env
+      "CARGO_HOME=${CARGO_HOME}"
+      "CARGO_TARGET_DIR=${CMAKE_CURRENT_BINARY_DIR}")
 
   # build the library target with cargo
   set(STATIC_LIB_NAME

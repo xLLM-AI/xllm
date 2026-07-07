@@ -19,7 +19,6 @@ limitations under the License.
 
 #include "common/flash_comm1_context.h"
 #include "kernels/ops_api.h"
-#include "platform/device.h"
 
 namespace xllm {
 namespace layer {
@@ -94,8 +93,8 @@ DenseMLPImpl::DenseMLPImpl(int64_t hidden_size,
                                                  down_proj_extra_args));
 }
 
-torch::Tensor DenseMLPImpl::forward(torch::Tensor hidden_states,
-                                    const FlashComm1Context* fc1_ctx) {
+torch::Tensor DenseMLPImpl::forward(torch::Tensor hidden_states) {
+  const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
   torch::Tensor h = hidden_states;
 
   if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
@@ -110,18 +109,20 @@ torch::Tensor DenseMLPImpl::forward(torch::Tensor hidden_states,
           << "FC1 MMRS callsite DenseMLP.down_proj(smoothquant): input="
           << gate_up.sizes();
       return down_proj_->forward(
-          gate_up, row_parallel_reduce_mode_for_fc1(*fc1_ctx), fc1_ctx);
+          gate_up, row_parallel_reduce_mode_for_fc1(*fc1_ctx));
     }
     return down_proj_->forward(gate_up);
   }
 
   torch::Tensor output;
-  if (Device::type_str() != "npu") {
+#if !defined(USE_NPU)
+  {
     int64_t batch_size = gate_up.sizes()[0];
     output = torch::empty(
         {batch_size, intermediate_size_ / process_group_->world_size()},
         gate_up.options());
   }
+#endif
 
   act_->forward(gate_up, output);
 
@@ -129,7 +130,7 @@ torch::Tensor DenseMLPImpl::forward(torch::Tensor hidden_states,
     LOG_FIRST_N(INFO, 16)
         << "FC1 MMRS callsite DenseMLP.down_proj: input=" << output.sizes();
     return down_proj_->forward(
-        output, row_parallel_reduce_mode_for_fc1(*fc1_ctx), fc1_ctx);
+        output, row_parallel_reduce_mode_for_fc1(*fc1_ctx));
   }
   return down_proj_->forward(output);
 }

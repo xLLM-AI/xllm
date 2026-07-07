@@ -51,12 +51,6 @@ class Qwen3GatedDeltaNetBaseImpl : public torch::nn::Module {
                         KVCache& kv_cache,
                         const ModelInputParams& input_params);
 
-  torch::Tensor forward(const torch::Tensor& hidden_states,
-                        const AttentionMetadata& attn_metadata,
-                        KVCache& kv_cache,
-                        const ModelInputParams& input_params,
-                        const FlashComm1Context* fc1_ctx);
-
  protected:
   virtual std::pair<torch::Tensor, torch::Tensor> project_decode_inputs(
       const torch::Tensor& hidden_states) = 0;

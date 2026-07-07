@@ -10,12 +10,10 @@ else()
 	set(USER_HOME "$ENV{HOME}")
 endif()
 
-if(NOT DEFINED CARGO_HOME)
-	if("$ENV{CARGO_HOME}" STREQUAL "")
-		set(CARGO_HOME "${USER_HOME}/.cargo")
-	else()
-		set(CARGO_HOME "$ENV{CARGO_HOME}")
-	endif()
+if(NOT "$ENV{CARGO_HOME}" STREQUAL "")
+	set(CARGO_HOME "$ENV{CARGO_HOME}" CACHE PATH "Rust Cargo Home" FORCE)
+elseif(NOT DEFINED CARGO_HOME)
+	set(CARGO_HOME "${USER_HOME}/.cargo")
 endif()
 
 # Find cargo executable

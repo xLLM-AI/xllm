@@ -160,7 +160,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .enable_prefill_sp(parallel_config.enable_prefill_sp())
       .enable_flashcomm1(FLAGS_enable_flashcomm1)
       .flashcomm1_min_prefill_tokens(FLAGS_flashcomm1_min_prefill_tokens)
-      .flashcomm1_min_decode_tokens(FLAGS_flashcomm1_min_decode_tokens)
       .enable_mmrs_fusion(FLAGS_enable_mmrs_fusion)
       .mmrs_comm_mode(FLAGS_mmrs_comm_mode)
       .master_node_addr(distributed_config.master_node_addr())

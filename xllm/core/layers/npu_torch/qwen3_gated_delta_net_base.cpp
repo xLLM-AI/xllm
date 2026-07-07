@@ -533,15 +533,7 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
     const ModelInputParams& input_params) {
-  return forward(hidden_states, attn_metadata, kv_cache, input_params, nullptr);
-}
-
-torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
-    const torch::Tensor& hidden_states,
-    const AttentionMetadata& attn_metadata,
-    KVCache& kv_cache,
-    const ModelInputParams& input_params,
-    const FlashComm1Context* fc1_ctx) {
+  const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
   torch::Tensor h = hidden_states;
   if (fc1_ctx && fc1_ctx->is_sequence_sharded()) {
     h = gather_sequence(hidden_states, *fc1_ctx);
@@ -927,7 +919,7 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
         << "FC1 MMRS callsite Qwen3GatedDeltaNet.o_proj: input="
         << rearranged_norm.sizes();
     return o_proj_->forward(
-        rearranged_norm, row_parallel_reduce_mode_for_fc1(*fc1_ctx), fc1_ctx);
+        rearranged_norm, row_parallel_reduce_mode_for_fc1(*fc1_ctx));
   }
   return o_proj_->forward(rearranged_norm);
 }

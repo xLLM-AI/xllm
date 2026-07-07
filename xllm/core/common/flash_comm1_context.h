@@ -61,11 +61,24 @@ struct FlashComm1Context {
 
 struct FlashComm1Options {
     bool enable_flashcomm1 = false;
-    int32_t min_prefill_tokens = 1000;
-    int32_t min_decode_tokens = 128;
+    int32_t min_prefill_tokens = 8192;
     bool enable_mmrs_fusion = false;
     std::string mmrs_comm_mode = "aiv";
 };
+
+class FlashComm1ContextScope {
+ public:
+  explicit FlashComm1ContextScope(const FlashComm1Context* ctx);
+  ~FlashComm1ContextScope();
+
+  FlashComm1ContextScope(const FlashComm1ContextScope&) = delete;
+  FlashComm1ContextScope& operator=(const FlashComm1ContextScope&) = delete;
+
+ private:
+  const FlashComm1Context* previous_;
+};
+
+const FlashComm1Context* get_current_flash_comm1_context();
 
 FlashComm1Context build_flash_comm1_context(
     int32_t num_tokens,

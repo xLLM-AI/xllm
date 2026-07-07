@@ -1505,8 +1505,6 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   flash_comm1_options.enable_flashcomm1 = options_.enable_flashcomm1();
   flash_comm1_options.min_prefill_tokens =
       options_.flashcomm1_min_prefill_tokens();
-  flash_comm1_options.min_decode_tokens =
-      options_.flashcomm1_min_decode_tokens();
   flash_comm1_options.enable_mmrs_fusion = options_.enable_mmrs_fusion();
   flash_comm1_options.mmrs_comm_mode = options_.mmrs_comm_mode();
   context_.set_flash_comm1_options(flash_comm1_options);

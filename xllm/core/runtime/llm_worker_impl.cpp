@@ -251,10 +251,6 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   }
 
   ModelInputParams model_input_params = input.input_params;
-  if (sampling_params.selected_token_idxes.defined()) {
-    model_input_params.selected_token_idxes =
-        sampling_params.selected_token_idxes;
-  }
 
   // call model executor forward to get hidden states
   auto model_output = model_executor_->forward(
