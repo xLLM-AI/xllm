@@ -139,10 +139,6 @@ CudaGraphPersistentParam::CudaGraphPersistentParam(
   // the largest configured decode batch can be padded safely.
   int64_t max_seqs_per_batch;
   if (is_rec_multi_round_mode()) {
-    // max_seqs_per_batch is the max sequence count per Batch in a scheduler
-    // group.
-    // When is_rec_multi_round_mode() == true, multiply by beam_width to account
-    // for beam search.
     max_seqs_per_batch = options.max_seqs_per_batch() * options_.beam_width();
   } else {
     max_seqs_per_batch = options.max_seqs_per_batch();
@@ -190,18 +186,15 @@ CudaGraphPersistentParam::CudaGraphPersistentParam(
                                 torch::dtype(dtype).device(device));
 
   // FlashInfer decode mode parameters
-  // paged_kv_indptr: shape [max_seqs_per_batch + 1]
   persistent_paged_kv_indptr_ = torch::zeros(
       {max_seqs_per_batch + 1}, torch::dtype(torch::kInt).device(device));
 
   // paged_kv_indices: maximum size based on max blocks
-  // Estimate max blocks: max_seqs_per_batch * max_block_table_len
   const int64_t max_paged_kv_indices_size =
       max_seqs_per_batch * max_block_table_len;
   persistent_paged_kv_indices_ = torch::zeros(
       {max_paged_kv_indices_size}, torch::dtype(torch::kInt).device(device));
 
-  // paged_kv_last_page_len: shape [max_seqs_per_batch]
   persistent_paged_kv_last_page_len_ = torch::zeros(
       {max_seqs_per_batch}, torch::dtype(torch::kInt).device(device));
 
@@ -211,8 +204,6 @@ CudaGraphPersistentParam::CudaGraphPersistentParam(
       0, max_seqs_per_batch + 1, torch::dtype(torch::kInt).device(device));
   persistent_kv_seq_lens_delta_ = torch::zeros(
       {max_seqs_per_batch}, torch::dtype(torch::kInt).device(device));
-  // will be updated by q_cu_seq_lens, q_cu_seq_lens is the cumulative sum of
-  // q_seq_lens
   persistent_chunked_prefill_qo_indptr_ = torch::zeros(
       {max_seqs_per_batch + 1}, torch::dtype(torch::kInt).device(device));
   // aux_hidden_states will be lazily initialized when needed

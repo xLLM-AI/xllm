@@ -8,23 +8,22 @@ Workspace buffers live in the C++ FlashinferWorkspace singleton (thread-local,
 128MB float + 8MB int + 8MB page-locked). The ops access it internally —
 Python never allocates or passes workspace.
 
-The forward method is decorated with torch._dynamo.disable so the entire
-attention section (reshape_paged_cache + kernel dispatch) runs in eager,
-outside the compiled graph. This allows kv_cache and attn_metadata to be
-accessed from forward_context without becoming graph inputs (keeping the
-compiled graph stable at (input_ids, positions) and enabling Dynamo loop-caching
-across 28 decoder layers).
+The dispatch function ``_attention_dispatch`` is decorated with ``@eager_break``
+from the breakable CUDA graph infrastructure. During piecewise capture, this
+ends the current graph segment, runs attention eagerly (KV cache write + kernel
+dispatch), and starts the next segment. On replay, the closure re-executes with
+volatile metadata re-read from forward_context. Outside capture, it's a no-op
+wrapper.
 """
 
 from __future__ import annotations
-
-from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 
 from ..attn_metadata import AttentionMetadata
 from ..forward_context import get_forward_context
+from ..model_runner.breakable_cuda_graph import eager_break
 
 
 class PagedAttention(nn.Module):
@@ -74,60 +73,27 @@ class PagedAttention(nn.Module):
         layer_id: int,
     ) -> torch.Tensor:
         ctx = get_forward_context()
-        attn_metadata = ctx.attn_metadata
         k_cache, v_cache = ctx.kv_caches[layer_id]
 
         q_3d = q.view(-1, self.num_heads, self.head_dim)
         k_3d = k.view(-1, self.num_kv_heads, self.head_dim)
         v_3d = v.view(-1, self.num_kv_heads, self.head_dim)
 
-        # 1. KV cache write.
-        torch.ops.xllm_ops.reshape_paged_cache(
-            attn_metadata.slot_mapping, k_3d, v_3d, k_cache, v_cache
-        )
+        # Pre-allocate output INSIDE the current cudagraph segment (fixed
+        # address from the shared graph pool). The attention break function
+        # writes into it in-place; the next segment reads it at the same addr.
+        output = torch.empty_like(q_3d)
 
-        # 2. Kernel dispatch.
-        if attn_metadata.is_prefill:
-            output = torch.ops.xllm_ops.batch_prefill(
-                q_3d,
-                k_3d,
-                v_3d,
-                attn_metadata.q_cu_seq_lens,
-                attn_metadata.kv_cu_seq_lens,
-                self.plan_info,
-                self.uri,
-                self.scale,
-                self.sliding_window,
-            )
-        elif attn_metadata.is_chunked_prefill:
-            output = torch.ops.xllm_ops.batch_chunked_prefill(
-                q_3d,
-                k_cache,
-                v_cache,
-                attn_metadata.paged_kv_indptr,
-                attn_metadata.paged_kv_indices,
-                attn_metadata.paged_kv_last_page_len,
-                self.plan_info,
-                self.uri,
-                self.scale,
-                self.sliding_window,
-                attn_metadata.qo_indptr,
-            )
-        else:
-            output = torch.ops.xllm_ops.batch_decode(
-                q_3d,
-                k_cache,
-                v_cache,
-                attn_metadata.paged_kv_indptr,
-                attn_metadata.paged_kv_indices,
-                attn_metadata.paged_kv_last_page_len,
-                self.plan_info,
-                self.uri,
-                self.scale,
-                self.sliding_window,
-                attn_metadata.use_tensor_core,
-                attn_metadata.qo_indptr,
-            )
+        # The actual attention dispatch is a graph-break point: during
+        # piecewise capture this ends the current segment, runs eagerly
+        # (KV write + kernel), then starts the next segment.
+        # Only captures stable-address tensors and constants in the closure;
+        # volatile attn_metadata is re-read from forward_context each call.
+        _attention_dispatch(
+            q_3d, k_3d, v_3d, output, layer_id,
+            self.plan_info, self.uri,
+            self.scale, self.sliding_window,
+        )
 
         return output.view(-1, self.num_heads * self.head_dim)
 
@@ -194,3 +160,62 @@ class PagedAttention(nn.Module):
         n = new_info.numel()
         self._plan_info_buf[:n].copy_(new_info)
         self._plan_info_len = n
+
+
+@eager_break
+def _attention_dispatch(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    output: torch.Tensor,
+    layer_id: int,
+    plan_info: torch.Tensor,
+    uri: str,
+    scale: float,
+    sliding_window: int,
+) -> None:
+    """Graph-break point: KV cache write + attention kernel dispatch.
+
+    During piecewise capture, @eager_break ends the current cudagraph segment
+    before this runs, then starts a new segment after. On replay, the closure
+    re-runs this function — volatile attn_metadata is re-read from
+    forward_context (refreshed before each replay), while q/k/v/output have
+    stable addresses from the shared graph pool.
+    """
+    ctx = get_forward_context()
+    attn_metadata = ctx.attn_metadata
+    k_cache, v_cache = ctx.kv_caches[layer_id]
+
+    torch.ops.xllm_ops.reshape_paged_cache(
+        attn_metadata.slot_mapping, k, v, k_cache, v_cache
+    )
+
+    if attn_metadata.is_prefill:
+        torch.ops.xllm_ops.batch_prefill(
+            q, k, v,
+            attn_metadata.q_cu_seq_lens,
+            attn_metadata.kv_cu_seq_lens,
+            plan_info, uri, scale, sliding_window,
+            output,
+        )
+    elif attn_metadata.is_chunked_prefill:
+        torch.ops.xllm_ops.batch_chunked_prefill(
+            q, k_cache, v_cache,
+            attn_metadata.paged_kv_indptr,
+            attn_metadata.paged_kv_indices,
+            attn_metadata.paged_kv_last_page_len,
+            plan_info, uri, scale, sliding_window,
+            attn_metadata.qo_indptr,
+            output,
+        )
+    else:
+        torch.ops.xllm_ops.batch_decode(
+            q, k_cache, v_cache,
+            attn_metadata.paged_kv_indptr,
+            attn_metadata.paged_kv_indices,
+            attn_metadata.paged_kv_last_page_len,
+            plan_info, uri, scale, sliding_window,
+            attn_metadata.use_tensor_core,
+            attn_metadata.qo_indptr,
+            output,
+        )

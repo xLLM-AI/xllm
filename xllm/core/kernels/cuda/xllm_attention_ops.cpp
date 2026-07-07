@@ -198,9 +198,9 @@ torch::Tensor batch_prefill_op(const torch::Tensor& q,
                                const torch::Tensor& plan_info_tensor,
                                const std::string& uri,
                                double scale,
-                               int64_t sliding_window) {
+                               int64_t sliding_window,
+                               torch::Tensor output) {
   auto& ws = layer::flashinfer::FlashinferWorkspace::get_instance();
-  torch::Tensor output = torch::empty_like(q);
   std::optional<torch::Tensor> output_lse = std::nullopt;
   auto plan_info = tensor_to_plan_info(plan_info_tensor);
 
@@ -241,9 +241,9 @@ torch::Tensor batch_decode_op(const torch::Tensor& q,
                               double scale,
                               int64_t sliding_window,
                               bool use_tensor_core,
-                              const std::optional<torch::Tensor>& qo_indptr) {
+                              const std::optional<torch::Tensor>& qo_indptr,
+                              torch::Tensor output) {
   auto& ws = layer::flashinfer::FlashinferWorkspace::get_instance();
-  torch::Tensor output = torch::empty_like(q);
   std::optional<torch::Tensor> output_lse = std::nullopt;
   auto plan_info = tensor_to_plan_info(plan_info_tensor);
 
@@ -288,9 +288,9 @@ torch::Tensor batch_chunked_prefill_op(
     const std::string& uri,
     double scale,
     int64_t sliding_window,
-    const std::optional<torch::Tensor>& qo_indptr) {
+    const std::optional<torch::Tensor>& qo_indptr,
+    torch::Tensor output) {
   auto& ws = layer::flashinfer::FlashinferWorkspace::get_instance();
-  torch::Tensor output = torch::empty_like(q);
   std::optional<torch::Tensor> output_lse = std::nullopt;
   auto plan_info = tensor_to_plan_info(plan_info_tensor);
 
@@ -355,19 +355,19 @@ TORCH_LIBRARY_FRAGMENT(xllm_ops, m) {
       "batch_prefill(Tensor q, Tensor k, Tensor v, "
       "Tensor q_cu_seq_lens, Tensor kv_cu_seq_lens, "
       "Tensor plan_info, str uri, "
-      "float scale, int sliding_window) -> Tensor");
+      "float scale, int sliding_window, Tensor(a!) output) -> Tensor");
   m.def(
       "batch_decode(Tensor q, Tensor k_cache, Tensor v_cache, "
       "Tensor paged_kv_indptr, Tensor paged_kv_indices, "
       "Tensor paged_kv_last_page_len, "
       "Tensor plan_info, str uri, float scale, int sliding_window, "
-      "bool use_tensor_core, Tensor? qo_indptr) -> Tensor");
+      "bool use_tensor_core, Tensor? qo_indptr, Tensor(a!) output) -> Tensor");
   m.def(
       "batch_chunked_prefill(Tensor q, Tensor k_cache, Tensor v_cache, "
       "Tensor paged_kv_indptr, Tensor paged_kv_indices, "
       "Tensor paged_kv_last_page_len, "
       "Tensor plan_info, str uri, float scale, int sliding_window, "
-      "Tensor? qo_indptr) -> Tensor");
+      "Tensor? qo_indptr, Tensor(a!) output) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, CUDA, m) {
