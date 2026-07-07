@@ -12,10 +12,10 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. -->
 
-[English](./README.md) | [中文](./docs/project/README_zh.md)
+[English](./README.md) | [中文](./README_zh.md)
 
 <div align="center">
-<img src="docs/assets/logo_with_llm.png" alt="xLLM" style="width:50%; height:auto;">
+<img src="assets/logo_with_llm.png" alt="xLLM" style="width:50%; height:auto;">
     
 [![Document](https://img.shields.io/badge/Document-black?logo=html5&labelColor=grey&color=red)](https://docs.xllm-ai.com/) [![Docker](https://img.shields.io/badge/Docker-black?logo=docker&labelColor=grey&color=%231E90FF)](https://quay.io/repository/jd_xllm/xllm-ai?tab=tags) [![License](https://img.shields.io/badge/license-Apache%202.0-brightgreen?labelColor=grey)](https://opensource.org/licenses/Apache-2.0) [![report](https://img.shields.io/badge/Technical%20Report-red?logo=arxiv&logoColor=%23B31B1B&labelColor=%23F0EBEB&color=%23D42626)](https://arxiv.org/abs/2510.14686) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/jd-opensource/xllm)
     
@@ -47,7 +47,7 @@ limitations under the License. -->
 
 **xLLM** is an **efficient LLM inference framework**, specifically optimized for **Chinese AI accelerators**, enabling enterprise-grade deployment with enhanced efficiency and reduced cost.
 <div align="center">
-<img src="docs/assets/xllm_arch.png" alt="xllm_arch" style="width:90%; height:auto;">
+<img src="assets/xllm_arch.png" alt="xllm_arch" style="width:90%; height:auto;">
 </div>
 
 ## Highlights
@@ -80,7 +80,7 @@ limitations under the License. -->
 ## Community & Support
 
 <div align="center">
-  <img src="docs/assets/wechat_qrcode.png" alt="qrcode3" width="50%" />
+  <img src="assets/wechat_qrcode.png" alt="qrcode3" width="50%" />
 </div>
 
 ## Acknowledgment

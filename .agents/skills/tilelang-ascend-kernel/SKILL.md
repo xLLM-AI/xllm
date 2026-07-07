@@ -133,7 +133,7 @@ Prefer the narrowest command first:
 
 ## References
 
-Read `docs/en/dev_guide/tilelang_ascend_kernel_dev.md` for mechanism details.
+Read [tilelang_ascend_kernel_dev](https://docs.xllm-ai.com/en/dev_guide/tilelang_ascend_kernel_dev/) for mechanism details.
 Use `rope` as the concrete template:
 - `xllm/compiler/tilelang/targets/ascend/kernels/rope.py`
 - `xllm/core/kernels/npu/tilelang/rope_wrapper.cpp`
