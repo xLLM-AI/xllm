@@ -51,12 +51,11 @@ using xllm::dit::TpOptions;
 #include "models/dit/transformers/transformer_flux.h"
 #if defined(USE_NPU)
 #include "models/dit/utils/dit_block_weight_manager.h"
-#endif
-#include "models/model_registry.h"
-#if defined(USE_NPU)
 #include "core/kernels/npu/xllm_ops/xllm_ops_api.h"
 #include "torch_npu/csrc/aten/CustomFunctions.h"
 #endif
+#include "core/framework/quant_args.h"
+#include "models/model_registry.h"
 
 namespace xllm {
 
@@ -208,11 +207,13 @@ TORCH_MODULE(FP32LayerNorm);
 
 class WanTimestepEmbeddingImpl : public torch::nn::Module {
  public:
-  WanTimestepEmbeddingImpl(int64_t in_channels,
+  WanTimestepEmbeddingImpl(const ModelContext& context,
+                           int64_t in_channels,
                            int64_t time_embed_dim,
                            int64_t out_dim = -1,
                            bool sample_proj_bias = true)
       : options_(torch::dtype(torch::kFloat32)) {
+    quant_args_ = context.get_quant_args();
     linear_1_ = register_module(
         "linear_1",
         layer::AddMatmul(
@@ -241,16 +242,20 @@ class WanTimestepEmbeddingImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    linear_1_->load_state_dict(state_dict.get_dict_with_prefix("linear_1."));
-    linear_2_->load_state_dict(state_dict.get_dict_with_prefix("linear_2."));
+    linear_1_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("0.", "linear_1.")));
+    linear_2_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("2.", "linear_2.")));
   }
-
   void verify_loaded_weights(const std::string& prefix) const {
-    linear_1_->verify_loaded_weights(prefix + "linear_1.");
-    linear_2_->verify_loaded_weights(prefix + "linear_2.");
+    linear_1_->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("0.", "linear_1."));
+    linear_2_->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("2.", "linear_2."));
   }
 
  private:
+  QuantArgs quant_args_;
   torch::TensorOptions options_;
   layer::AddMatmul linear_1_{nullptr};
   torch::nn::SiLU act_{nullptr};
@@ -330,6 +335,7 @@ class WanGELUImpl : public torch::nn::Module {
       : approximate_(approximate),
         options_(context.get_tensor_options()),
         parallel_args_(parallel_args) {
+    quant_args_ = context.get_quant_args();
     std::optional<TpOptions> tp = std::nullopt;
     if (::xllm::ParallelConfig::get_instance().tp_size() > 1) {
       tp = TpOptions::col(parallel_args_.dit_tp_group_,
@@ -340,7 +346,8 @@ class WanGELUImpl : public torch::nn::Module {
                                   with_bias,
                                   options_,
                                   /*sp=*/std::nullopt,
-                                  tp);
+                                  tp,
+                                  quant_args_);
     proj_ = register_module("proj", proj);
   }
 
@@ -355,15 +362,23 @@ class WanGELUImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    proj_->as<DiTParallelLinear>()->load_state_dict(
-        state_dict.get_dict_with_prefix("proj."));
+    if (quant_args_.is_quantized()) {
+      // Quantized checkpoint stores weights directly under the module's
+      // own prefix — no additional sub-prefix wrapping.
+      proj_->as<DiTParallelLinear>()->load_state_dict(state_dict);
+    } else {
+      proj_->as<DiTParallelLinear>()->load_state_dict(
+          state_dict.get_dict_with_prefix("proj."));
+    }
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    proj_->as<DiTParallelLinear>()->verify_loaded_weights(prefix + "proj.");
+    proj_->as<DiTParallelLinear>()->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("", "proj."));
   }
 
  private:
+  QuantArgs quant_args_;
   bool approximate_;
   torch::TensorOptions options_;
   ParallelArgs parallel_args_;
@@ -387,6 +402,7 @@ class WanFeedForwardImpl : public torch::nn::Module {
     int64_t actual_inner_dim =
         (inner_dim > 0) ? inner_dim : static_cast<int64_t>(dim * mult);
     int64_t actual_dim_out = (dim_out > 0) ? dim_out : dim;
+    quant_args_ = context.get_quant_args();
 
     if (activation_fn == "gelu") {
       act_fn_ = register_module("act_fn",
@@ -423,7 +439,8 @@ class WanFeedForwardImpl : public torch::nn::Module {
                                       with_bias,
                                       options_,
                                       /*sp=*/std::nullopt,
-                                      tp_out);
+                                      tp_out,
+                                      quant_args_);
     proj_out_ = register_module("proj_out", proj_out);
 
     if (final_dropout) {
@@ -443,16 +460,21 @@ class WanFeedForwardImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    act_fn_->load_state_dict(state_dict.get_dict_with_prefix("net.0."));
-    proj_out_->load_state_dict(state_dict.get_dict_with_prefix("net.2."));
+    act_fn_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("0.", "net.0.")));
+    proj_out_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("2.", "net.2.")));
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    act_fn_->verify_loaded_weights(prefix + "net.0.");
-    proj_out_->verify_loaded_weights(prefix + "net.2.");
+    act_fn_->verify_loaded_weights(prefix +
+                                   quant_args_.resolve_prefix("0.", "net.0."));
+    proj_out_->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("2.", "net.2."));
   }
 
  private:
+  QuantArgs quant_args_;
   torch::TensorOptions options_;
   ParallelArgs parallel_args_;
   WanGELU act_fn_{nullptr};
@@ -464,11 +486,13 @@ TORCH_MODULE(WanFeedForward);
 
 class WanPixArtAlphaTextProjectionImpl : public torch::nn::Module {
  public:
-  WanPixArtAlphaTextProjectionImpl(int64_t in_features,
+  WanPixArtAlphaTextProjectionImpl(const ModelContext& context,
+                                   int64_t in_features,
                                    int64_t hidden_size,
                                    int64_t out_features = -1,
                                    const std::string& act_fn = "gelu_tanh")
       : options_(torch::dtype(torch::kFloat32)) {
+    quant_args_ = context.get_quant_args();
     int64_t actual_out_features =
         (out_features > 0) ? out_features : hidden_size;
 
@@ -508,16 +532,21 @@ class WanPixArtAlphaTextProjectionImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    linear_1_->load_state_dict(state_dict.get_dict_with_prefix("linear_1."));
-    linear_2_->load_state_dict(state_dict.get_dict_with_prefix("linear_2."));
+    linear_1_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("0.", "linear_1.")));
+    linear_2_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("2.", "linear_2.")));
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    linear_1_->verify_loaded_weights(prefix + "linear_1.");
-    linear_2_->verify_loaded_weights(prefix + "linear_2.");
+    linear_1_->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("0.", "linear_1."));
+    linear_2_->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("2.", "linear_2."));
   }
 
  private:
+  QuantArgs quant_args_;
   torch::TensorOptions options_;
   layer::AddMatmul linear_1_{nullptr};
   torch::nn::AnyModule act_1_;
@@ -536,6 +565,7 @@ class WanAttentionImpl : public torch::nn::Module {
         parallel_args_(parallel_args),
         rainfusion_config_(rainfusion_config) {
     auto model_args = context.get_model_args();
+    quant_args_ = context.get_quant_args();
     dim_ = model_args.head_dim() * model_args.n_heads();
     heads_ = model_args.n_heads();
     dim_head_ = model_args.head_dim();
@@ -579,14 +609,16 @@ class WanAttentionImpl : public torch::nn::Module {
                                               true,
                                               options_,
                                               /*sp=*/std::nullopt,
-                                              tp_qk));
+                                              tp_qk,
+                                              quant_args_));
     to_k_ = register_module("to_k",
                             DiTParallelLinear(dim_,
                                               kv_inner_dim_,
                                               true,
                                               options_,
                                               /*sp=*/std::nullopt,
-                                              tp_qk));
+                                              tp_qk,
+                                              quant_args_));
 
     // V: TP+SP for self-attention, TP only for cross-attention
     bool is_self_attn = cross_attention_dim_head <= 0;
@@ -597,13 +629,18 @@ class WanAttentionImpl : public torch::nn::Module {
                           true,
                           options_,
                           is_self_attn ? sp_before : std::optional<SpOptions>{},
-                          tp_v));
+                          tp_v,
+                          quant_args_));
 
     // to_out: TP+SP row parallel
-    to_out_ = register_module(
-        "to_out",
-        DiTParallelLinear(
-            heads_ * dim_head_, dim_, true, options_, sp_after, tp_out));
+    to_out_ = register_module("to_out",
+                              DiTParallelLinear(heads_ * dim_head_,
+                                                dim_,
+                                                true,
+                                                options_,
+                                                sp_after,
+                                                tp_out,
+                                                quant_args_));
     norm_q_ = register_module(
         "norm_q", layer::RMSNorm(dim_head_ * heads_, eps_, options_));
     norm_k_ = register_module(
@@ -862,11 +899,14 @@ class WanAttentionImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    to_q_->load_state_dict(state_dict.get_dict_with_prefix("to_q."));
-    to_k_->load_state_dict(state_dict.get_dict_with_prefix("to_k."));
-    to_v_->load_state_dict(state_dict.get_dict_with_prefix("to_v."));
-
-    to_out_->load_state_dict(state_dict.get_dict_with_prefix("to_out.0."));
+    to_q_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("q.", "to_q.")));
+    to_k_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("k.", "to_k.")));
+    to_v_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("v.", "to_v.")));
+    to_out_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("o.", "to_out.0.")));
 
     norm_q_->load_state_dict(state_dict.get_dict_with_prefix("norm_q."));
     norm_k_->load_state_dict(state_dict.get_dict_with_prefix("norm_k."));
@@ -882,12 +922,14 @@ class WanAttentionImpl : public torch::nn::Module {
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    to_q_->verify_loaded_weights(prefix + "to_q.");
-    to_k_->verify_loaded_weights(prefix + "to_k.");
-    to_v_->verify_loaded_weights(prefix + "to_v.");
-
-    to_out_->verify_loaded_weights(prefix + "to_out.0.");
-
+    to_q_->verify_loaded_weights(prefix +
+                                 quant_args_.resolve_prefix("q.", "to_q."));
+    to_k_->verify_loaded_weights(prefix +
+                                 quant_args_.resolve_prefix("k.", "to_k."));
+    to_v_->verify_loaded_weights(prefix +
+                                 quant_args_.resolve_prefix("v.", "to_v."));
+    to_out_->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("o.", "to_out.0."));
     if (add_k_proj_) {
       add_k_proj_->verify_loaded_weights(prefix + "add_k_proj.");
       add_v_proj_->verify_loaded_weights(prefix + "add_v_proj.");
@@ -895,6 +937,7 @@ class WanAttentionImpl : public torch::nn::Module {
   }
 
  private:
+  QuantArgs quant_args_;
   int64_t dim_;
   int64_t heads_;
   int64_t dim_head_;
@@ -1017,17 +1060,20 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
     image_embed_dim_ = model_args.image_embed_dim();
     pos_embed_seq_len_ = model_args.pos_embed_seq_len();
 
+    quant_args_ = context.get_quant_args();
     timesteps_proj_ = register_module(
         "timesteps_proj", WanTimesteps(time_freq_dim_, true, 0.0f, 1));
     time_embedder_ = register_module(
-        "time_embedder", WanTimestepEmbedding(time_freq_dim_, dim_, -1, true));
+        "time_embedder",
+        WanTimestepEmbedding(context, time_freq_dim_, dim_, -1, true));
     act_fn_ = register_module("act_fn", torch::nn::SiLU());
     time_proj_ = register_module(
         "time_proj", layer::AddMatmul(dim_, time_proj_dim_, true, options_));
 
-    text_embedder_ = register_module(
-        "text_embedder",
-        WanPixArtAlphaTextProjection(text_embed_dim_, dim_, dim_, "gelu_tanh"));
+    text_embedder_ =
+        register_module("text_embedder",
+                        WanPixArtAlphaTextProjection(
+                            context, text_embed_dim_, dim_, dim_, "gelu_tanh"));
 
     if (image_embed_dim_ > 0) {
       image_embedder_ =
@@ -1069,11 +1115,12 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    time_embedder_->load_state_dict(
-        state_dict.get_dict_with_prefix("time_embedder."));
-    time_proj_->load_state_dict(state_dict.get_dict_with_prefix("time_proj."));
-    text_embedder_->load_state_dict(
-        state_dict.get_dict_with_prefix("text_embedder."));
+    time_embedder_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("time_embedding.", "time_embedder.")));
+    time_proj_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("time_projection.1.", "time_proj.")));
+    text_embedder_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("text_embedding.", "text_embedder.")));
     if (image_embedder_) {
       image_embedder_->load_state_dict(
           state_dict.get_dict_with_prefix("image_embedder."));
@@ -1081,9 +1128,15 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    time_embedder_->verify_loaded_weights(prefix + "time_embedder.");
-    time_proj_->verify_loaded_weights(prefix + "time_proj.");
-    text_embedder_->verify_loaded_weights(prefix + "text_embedder.");
+    time_embedder_->verify_loaded_weights(
+        prefix +
+        quant_args_.resolve_prefix("time_embedding.", "time_embedder."));
+    time_proj_->verify_loaded_weights(
+        prefix +
+        quant_args_.resolve_prefix("time_projection.1.", "time_proj."));
+    text_embedder_->verify_loaded_weights(
+        prefix +
+        quant_args_.resolve_prefix("text_embedding.", "text_embedder."));
     if (image_embedder_) {
       image_embedder_->verify_loaded_weights(prefix + "image_embedder.");
     }
@@ -1097,6 +1150,7 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
   int64_t image_embed_dim_;
   int64_t pos_embed_seq_len_;
 
+  QuantArgs quant_args_;
   WanTimesteps timesteps_proj_{nullptr};
   WanTimestepEmbedding time_embedder_{nullptr};
   torch::nn::SiLU act_fn_{nullptr};
@@ -1262,6 +1316,7 @@ class WanTransformerBlockImpl : public torch::nn::Module {
         parallel_args_(parallel_args),
         block_idx_(block_idx) {
     auto model_args = context.get_model_args();
+    quant_args_ = context.get_quant_args();
     dim_ = model_args.head_dim() * model_args.n_heads();
     ffn_dim_ = model_args.ffn_dim();
     num_heads_ = model_args.n_heads();
@@ -1372,27 +1427,38 @@ class WanTransformerBlockImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    attn1_->load_state_dict(state_dict.get_dict_with_prefix("attn1."));
-    attn2_->load_state_dict(state_dict.get_dict_with_prefix("attn2."));
-    if (cross_attn_norm_) {
-      norm2_->load_state_dict(state_dict.get_dict_with_prefix("norm2."));
+    attn1_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("self_attn.", "attn1.")));
+    attn2_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("cross_attn.", "attn2.")));
+    if (cross_attn_norm_ && norm2_) {
+      norm2_->load_state_dict(state_dict.get_dict_with_prefix(
+          quant_args_.resolve_prefix("norm3.", "norm2.")));
     }
-    ff_->load_state_dict(state_dict.get_dict_with_prefix("ffn."));
-    weight::load_weight(state_dict,
-                        "scale_shift_table",
-                        scale_shift_table_,
-                        scale_shift_table_loaded_);
+    ff_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("ffn.", "ffn.")));
+    weight::load_weight(
+        state_dict,
+        quant_args_.resolve_prefix("modulation", "scale_shift_table"),
+        scale_shift_table_,
+        scale_shift_table_loaded_);
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    attn1_->verify_loaded_weights(prefix + "attn1.");
+    attn1_->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("self_attn.", "attn1."));
     if (cross_attn_norm_) {
-      norm2_->verify_loaded_weights(prefix + "norm2.");
+      norm2_->verify_loaded_weights(
+          prefix + quant_args_.resolve_prefix("norm3.", "norm2."));
     }
-    attn2_->verify_loaded_weights(prefix + "attn2.");
-    ff_->verify_loaded_weights(prefix + "ffn.");
-    CHECK(scale_shift_table_loaded_) << "scale_shift_table is not loaded for "
-                                     << prefix + "scale_shift_table";
+    attn2_->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("cross_attn.", "attn2."));
+    ff_->verify_loaded_weights(prefix +
+                               quant_args_.resolve_prefix("ffn.", "ffn."));
+    auto scale_key =
+        quant_args_.resolve_prefix("modulation", "scale_shift_table");
+    CHECK(scale_shift_table_loaded_)
+        << scale_key << " is not loaded for " << prefix + scale_key;
   }
 
 #if defined(USE_NPU)
@@ -1425,6 +1491,7 @@ class WanTransformerBlockImpl : public torch::nn::Module {
   torch::Tensor scale_shift_table_;
   bool scale_shift_table_loaded_{false};
 
+  QuantArgs quant_args_;
   torch::TensorOptions options_;
   ParallelArgs parallel_args_;
 #if defined(USE_NPU)
@@ -1462,6 +1529,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     if (out_channels_ <= 0) {
       out_channels_ = in_channels_;
     }
+    quant_args_ = context.get_quant_args();
     rope_ = register_module("rope", WanRotaryPosEmbed(context));
     patch_embedding_ = register_module(
         "patch_embedding",
@@ -1660,17 +1728,25 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                         patch_embedding_->bias,
                         pad_embedding_bias_loaded_);
 
-    condition_embedder_->load_state_dict(
-        state_dict.get_dict_with_prefix("condition_embedder."));
+    if (quant_args_.is_quantized()) {
+      // Quantized checkpoint stores condition_embedder weights directly
+      // under the top-level prefix — no "condition_embedder." wrapper.
+      condition_embedder_->load_state_dict(state_dict);
+      proj_out_->load_state_dict(state_dict.get_dict_with_prefix("head.head."));
+    } else {
+      condition_embedder_->load_state_dict(
+          state_dict.get_dict_with_prefix("condition_embedder."));
+      proj_out_->load_state_dict(state_dict.get_dict_with_prefix("proj_out."));
+    }
     for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
       transformer_layers_[i]->load_state_dict(
           state_dict.get_dict_with_prefix("blocks." + std::to_string(i) + "."));
     }
-    proj_out_->load_state_dict(state_dict.get_dict_with_prefix("proj_out."));
-    weight::load_weight(state_dict,
-                        "scale_shift_table",
-                        scale_shift_table_,
-                        scale_shift_table_loaded_);
+    weight::load_weight(
+        state_dict,
+        quant_args_.resolve_prefix("head.modulation", "scale_shift_table"),
+        scale_shift_table_,
+        scale_shift_table_loaded_);
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
@@ -1679,14 +1755,22 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     CHECK(pad_embedding_bias_loaded_) << "patch_embedding is not loaded for"
                                       << prefix << "pad_embedding.bias";
 
-    condition_embedder_->verify_loaded_weights(prefix + "condition_embedder.");
+    if (quant_args_.is_quantized()) {
+      condition_embedder_->verify_loaded_weights(prefix);
+      proj_out_->verify_loaded_weights(prefix + "head.head.");
+    } else {
+      condition_embedder_->verify_loaded_weights(prefix +
+                                                 "condition_embedder.");
+      proj_out_->verify_loaded_weights(prefix + "proj_out.");
+    }
     for (size_t i = 0; i < transformer_layers_.size(); ++i) {
       transformer_layers_[i]->verify_loaded_weights(prefix + "blocks." +
                                                     std::to_string(i) + ".");
     }
-    proj_out_->verify_loaded_weights(prefix + "proj_out.");
-    CHECK(scale_shift_table_loaded_) << "scale_shift_table is not loaded for "
-                                     << prefix + "scale_shift_table";
+    auto scale_key =
+        quant_args_.resolve_prefix("head.modulation", "scale_shift_table");
+    CHECK(scale_shift_table_loaded_)
+        << scale_key << " is not loaded for " << prefix + scale_key;
   }
 
   int64_t in_channels() const { return in_channels_; }
@@ -1695,15 +1779,15 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
 
   void load_model(std::unique_ptr<DiTFolderLoader> loader,
                   bool rolling = false) {
+    auto freqs_cos_fp32 = rope_->get_freqs_cos().clone();
+    auto freqs_sin_fp32 = rope_->get_freqs_sin().clone();
+    this->to(rolling ? torch::kCPU : options_.device(), torch::kBFloat16);
     for (const auto& state_dict : loader->get_state_dicts()) {
       load_state_dict(*state_dict);
     }
     verify_loaded_weights("");
 
-    auto freqs_cos_fp32 = rope_->get_freqs_cos().clone();
-    auto freqs_sin_fp32 = rope_->get_freqs_sin().clone();
-
-    this->to(rolling ? torch::kCPU : options_.device(), torch::kBFloat16);
+    // Restore fp32 RoPE frequencies that were cloned before dtype conversion.
     rope_->set_freqs_cos(freqs_cos_fp32);
     rope_->set_freqs_sin(freqs_sin_fp32);
 
@@ -1757,6 +1841,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
   int64_t inner_dim_;
   bool cross_attn_norm_;
   std::string qk_norm_;
+  QuantArgs quant_args_;
   ProcessGroup* sp_group_ = nullptr;
   torch::nn::Conv3d patch_embedding_{nullptr};
   WanTimeTextImageEmbedding condition_embedder_{nullptr};
