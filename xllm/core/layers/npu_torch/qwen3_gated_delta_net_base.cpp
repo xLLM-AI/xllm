@@ -15,6 +15,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <optional>
 #include <tuple>
 
 #include "xllm/core/kernels/ops_api.h"
@@ -535,31 +536,47 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     const ModelInputParams& input_params) {
   // Save original hidden_states size for potential padding later
   const int64_t original_num_tokens = hidden_states.size(0);
-  auto [qkvz_padded, ba_padded] =
-      project_padded_inputs(hidden_states, attn_metadata);
-  int64_t batch_size = qkvz_padded.size(0);
-  int64_t seq_len = qkvz_padded.size(1);
-
-  torch::Tensor qkvz_flat =
-      qkvz_padded.view({batch_size * seq_len, qkvz_padded.size(-1)});
-  torch::Tensor ba_flat =
-      ba_padded.view({batch_size * seq_len, ba_padded.size(-1)});
-  xllm::kernel::FusedQkvzbaSplitReshapeParams fused_params;
-  fused_params.mixed_qkvz = qkvz_flat;
-  fused_params.mixed_ba = ba_flat;
-  fused_params.num_heads_qk = static_cast<int32_t>(num_k_heads_ / tp_size_);
-  fused_params.num_heads_v = static_cast<int32_t>(num_v_heads_ / tp_size_);
-  fused_params.head_qk = static_cast<int32_t>(head_k_dim_);
-  fused_params.head_v = static_cast<int32_t>(head_v_dim_);
-
+  const bool use_spec_verify = input_params.is_spec_verify;
+  const bool is_any_prefill =
+      attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
   torch::Tensor mixed_qkv, z, b, a;
-  std::tie(mixed_qkv, z, b, a) =
-      xllm::kernel::fused_qkvzba_split_reshape_cat(fused_params);
+  int64_t batch_size = 0;
+  int64_t seq_len = 0;
 
-  mixed_qkv = mixed_qkv.view({batch_size, seq_len, mixed_qkv.size(-1)});
-  z = z.view({batch_size, seq_len, num_v_heads_ / tp_size_, head_v_dim_});
-  b = b.view({batch_size, seq_len, num_v_heads_ / tp_size_});
-  a = a.view({batch_size, seq_len, num_v_heads_ / tp_size_});
+  auto prefill_split_inputs =
+      (!use_spec_verify && is_any_prefill)
+          ? project_prefill_split_inputs(hidden_states, attn_metadata)
+          : std::nullopt;
+  if (prefill_split_inputs.has_value()) {
+    std::tie(mixed_qkv, z, b, a) = prefill_split_inputs.value();
+    batch_size = mixed_qkv.size(0);
+    seq_len = mixed_qkv.size(1);
+  } else {
+    auto [qkvz_padded, ba_padded] =
+        project_padded_inputs(hidden_states, attn_metadata);
+    batch_size = qkvz_padded.size(0);
+    seq_len = qkvz_padded.size(1);
+
+    torch::Tensor qkvz_flat =
+        qkvz_padded.view({batch_size * seq_len, qkvz_padded.size(-1)});
+    torch::Tensor ba_flat =
+        ba_padded.view({batch_size * seq_len, ba_padded.size(-1)});
+    xllm::kernel::FusedQkvzbaSplitReshapeParams fused_params;
+    fused_params.mixed_qkvz = qkvz_flat;
+    fused_params.mixed_ba = ba_flat;
+    fused_params.num_heads_qk = static_cast<int32_t>(num_k_heads_ / tp_size_);
+    fused_params.num_heads_v = static_cast<int32_t>(num_v_heads_ / tp_size_);
+    fused_params.head_qk = static_cast<int32_t>(head_k_dim_);
+    fused_params.head_v = static_cast<int32_t>(head_v_dim_);
+
+    std::tie(mixed_qkv, z, b, a) =
+        xllm::kernel::fused_qkvzba_split_reshape_cat(fused_params);
+
+    mixed_qkv = mixed_qkv.view({batch_size, seq_len, mixed_qkv.size(-1)});
+    z = z.view({batch_size, seq_len, num_v_heads_ / tp_size_, head_v_dim_});
+    b = b.view({batch_size, seq_len, num_v_heads_ / tp_size_});
+    a = a.view({batch_size, seq_len, num_v_heads_ / tp_size_});
+  }
 
   torch::Tensor conv_cache = kv_cache.get_conv_cache();
   torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
@@ -571,9 +588,6 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
       get_checkpoint_stride(conv_cache, ssm_cache);
   torch::Tensor linear_state_base_indices =
       build_linear_state_base_indices(logical_state_indices, checkpoint_stride);
-  const bool use_spec_verify = input_params.is_spec_verify;
-  const bool is_any_prefill =
-      attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
   auto graph_context = input_params.graph.acl_graph_task_update_context;
   const bool register_conv1d_graph_update =
       graph_context != nullptr && graph_context->capturing;
@@ -975,6 +989,10 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::reshape_qkvz_with_pad(
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
   if (!need_padding) {
     return qkvz.view({bs, -1, qkvz.size(-1)});
+  }
+  if (has_host_lens && bs == 1 && attn_metadata.q_seq_lens_vec[0] == max_len &&
+      qkvz.dim() == 2 && qkvz.size(0) == max_len) {
+    return qkvz.view({1, max_len, qkvz.size(-1)});
   }
   std::vector<torch::Tensor> batches;
   batches.reserve(bs);
