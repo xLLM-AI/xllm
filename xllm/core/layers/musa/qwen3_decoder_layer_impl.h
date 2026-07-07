@@ -23,7 +23,7 @@ limitations under the License.
 #include "framework/state_dict/state_dict.h"
 #include "framework/state_dict/utils.h"
 #include "layers/common/attention_metadata.h"
-#include "musa_layer_base.h"
+#include "layers/musa/layer_base.h"
 
 namespace xllm {
 namespace layer {

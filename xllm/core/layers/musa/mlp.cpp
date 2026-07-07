@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "musa_mlp.h"
+#include "layers/musa/mlp.h"
 
 #include <cstdint>
 

@@ -18,7 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include "framework/state_dict/state_dict.h"
-#include "musa_layer_base.h"
+#include "layers/musa/layer_base.h"
 
 namespace xllm {
 namespace layer {

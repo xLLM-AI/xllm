@@ -1,0 +1,354 @@
+/* Copyright 2025-2026 The xLLM Authors.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include "layers/musa/qwen3_next_gated_delta_net.h"
+
+#include <glog/logging.h>
+
+namespace xllm {
+namespace layer {
+
+Qwen3NextGatedDeltaNetImpl::Qwen3NextGatedDeltaNetImpl(
+    const ModelArgs& args,
+    const QuantArgs& quant_args,
+    const ParallelArgs& parallel_args,
+    const torch::TensorOptions& options)
+    : Qwen3NextGatedDeltaNetImpl(args,
+                                 quant_args,
+                                 parallel_args,
+                                 options,
+                                 /*init_projections=*/true) {}
+
+Qwen3NextGatedDeltaNetImpl::Qwen3NextGatedDeltaNetImpl(
+    const ModelArgs& args,
+    const QuantArgs& quant_args,
+    const ParallelArgs& parallel_args,
+    const torch::TensorOptions& options,
+    bool init_projections)
+    : Qwen3GatedDeltaNetBaseImpl(args, quant_args, parallel_args, options) {
+  if (init_projections) {
+    init_next_projections(args, quant_args, parallel_args, options);
+  }
+}
+
+void Qwen3NextGatedDeltaNetImpl::init_next_projections(
+    const ModelArgs& args,
+    const QuantArgs& quant_args,
+    const ParallelArgs& parallel_args,
+    const torch::TensorOptions& options) {
+  // QKVZ projection used by Qwen3-Next linear attention.
+  qkvz_proj_ = register_module("in_proj_qkvz",
+                               ColumnParallelLinear(args.hidden_size(),
+                                                    k_size_ * 2 + v_size_ * 2,
+                                                    /*bias=*/false,
+                                                    /*gather_output=*/false,
+                                                    quant_args,
+                                                    parallel_args.tp_group_,
+                                                    options));
+  // BA projection used to derive gating and beta terms.
+  ba_proj_ = register_module("in_proj_ba",
+                             ColumnParallelLinear(args.hidden_size(),
+                                                  num_v_heads_ * 2,
+                                                  /*bias=*/false,
+                                                  /*gather_output=*/false,
+                                                  quant_args,
+                                                  parallel_args.tp_group_,
+                                                  options));
+}
+
+std::pair<torch::Tensor, torch::Tensor>
+Qwen3NextGatedDeltaNetImpl::project_decode_inputs(
+    const torch::Tensor& hidden_states) {
+  auto qkvz = qkvz_proj_->forward(hidden_states);
+  auto ba = ba_proj_->forward(hidden_states);
+  return {qkvz.view({qkvz.size(0), -1, qkvz.size(-1)}),
+          ba.view({ba.size(0), -1, ba.size(-1)})};
+}
+
+std::pair<torch::Tensor, torch::Tensor>
+Qwen3NextGatedDeltaNetImpl::project_flat_inputs(
+    const torch::Tensor& hidden_states) {
+  return {qkvz_proj_->forward(hidden_states), ba_proj_->forward(hidden_states)};
+}
+
+void Qwen3NextGatedDeltaNetImpl::load_state_dict(const StateDict& state_dict) {
+  load_projection_state_dict(state_dict);
+  load_common_state_dict(state_dict);
+}
+
+void Qwen3NextGatedDeltaNetImpl::load_projection_state_dict(
+    const StateDict& state_dict) {
+  auto qkvz_state_dict = state_dict.get_dict_with_prefix("in_proj_qkvz.");
+  if (qkvz_state_dict.size() > 0 && !qkvz_proj_->is_weight_loaded()) {
+    qkvz_proj_->load_state_dict(qkvz_state_dict);
+  }
+
+  auto ba_state_dict = state_dict.get_dict_with_prefix("in_proj_ba.");
+  if (ba_state_dict.size() > 0 && !ba_proj_->is_weight_loaded()) {
+    ba_proj_->load_state_dict(ba_state_dict);
+  }
+}
+
+void Qwen3NextGatedDeltaNetImpl::verify_loaded_weights(
+    const std::string& prefix) const {
+  verify_projection_weights(prefix);
+  verify_common_loaded_weights(prefix);
+}
+
+void Qwen3NextGatedDeltaNetImpl::verify_projection_weights(
+    const std::string& prefix) const {
+  CHECK(qkvz_proj_ && qkvz_proj_->is_weight_loaded())
+      << "Missing required weight after all shards loaded: " << prefix
+      << "in_proj_qkvz.weight";
+  CHECK(ba_proj_ && ba_proj_->is_weight_loaded())
+      << "Missing required weight after all shards loaded: " << prefix
+      << "in_proj_ba.weight";
+}
+
+Qwen3_5GatedDeltaNetImpl::Qwen3_5GatedDeltaNetImpl(
+    const ModelArgs& args,
+    const QuantArgs& quant_args,
+    const ParallelArgs& parallel_args,
+    const torch::TensorOptions& options)
+    : Qwen3NextGatedDeltaNetImpl(args,
+                                 quant_args,
+                                 parallel_args,
+                                 options,
+                                 /*init_projections=*/false) {
+  in_proj_qkv_ = register_module("in_proj_qkv",
+                                 ColumnParallelLinear(args.hidden_size(),
+                                                      k_size_ * 2 + v_size_,
+                                                      /*bias=*/false,
+                                                      /*gather_output=*/false,
+                                                      quant_args,
+                                                      parallel_args.tp_group_,
+                                                      options));
+  in_proj_z_ = register_module("in_proj_z",
+                               ColumnParallelLinear(args.hidden_size(),
+                                                    v_size_,
+                                                    /*bias=*/false,
+                                                    /*gather_output=*/false,
+                                                    quant_args,
+                                                    parallel_args.tp_group_,
+                                                    options));
+  in_proj_b_ = register_module("in_proj_b",
+                               ColumnParallelLinear(args.hidden_size(),
+                                                    num_v_heads_,
+                                                    /*bias=*/false,
+                                                    /*gather_output=*/false,
+                                                    quant_args,
+                                                    parallel_args.tp_group_,
+                                                    options));
+  in_proj_a_ = register_module("in_proj_a",
+                               ColumnParallelLinear(args.hidden_size(),
+                                                    num_v_heads_,
+                                                    /*bias=*/false,
+                                                    /*gather_output=*/false,
+                                                    quant_args,
+                                                    parallel_args.tp_group_,
+                                                    options));
+}
+
+torch::Tensor Qwen3_5GatedDeltaNetImpl::merge_qkvz_from_split_activations(
+    const torch::Tensor& qkv,
+    const torch::Tensor& z) const {
+  CHECK_EQ(qkv.dim(), 3) << "Expected qkv activation to be 3D, got "
+                         << qkv.sizes();
+  CHECK_EQ(z.dim(), 3) << "Expected z activation to be 3D, got " << z.sizes();
+  CHECK_EQ(qkv.size(0), z.size(0)) << "qkv/z batch size mismatch.";
+  CHECK_EQ(qkv.size(1), z.size(1)) << "qkv/z sequence size mismatch.";
+  CHECK_EQ(qkv.size(2), (2 * k_size_ + v_size_) / tp_size_)
+      << "Unexpected qkv hidden size for Qwen3.5.";
+  CHECK_EQ(z.size(2), v_size_ / tp_size_)
+      << "Unexpected z hidden size for Qwen3.5.";
+  CHECK_GT(num_k_heads_, 0) << "linear_num_key_heads must be positive.";
+  CHECK_EQ(num_v_heads_ % num_k_heads_, 0)
+      << "linear_num_value_heads must be divisible by linear_num_key_heads.";
+
+  const int64_t bs = qkv.size(0);
+  const int64_t seqlen = qkv.size(1);
+  const int64_t local_k_heads = num_k_heads_ / tp_size_;
+  const int64_t local_v_heads = num_v_heads_ / tp_size_;
+  const int64_t num_v_heads_per_k = num_v_heads_ / num_k_heads_;
+  const int64_t head_v_part = num_v_heads_per_k * head_v_dim_;
+
+  auto qkv_split =
+      torch::split(qkv,
+                   {k_size_ / tp_size_, k_size_ / tp_size_, v_size_ / tp_size_},
+                   /*dim=*/2);
+  auto q = qkv_split[0].view({bs, seqlen, local_k_heads, head_k_dim_});
+  auto k = qkv_split[1].view({bs, seqlen, local_k_heads, head_k_dim_});
+  auto v = qkv_split[2].view({bs, seqlen, local_v_heads, head_v_dim_});
+  auto z_view = z.view({bs, seqlen, local_v_heads, head_v_dim_});
+
+  v = v.view({bs, seqlen, local_k_heads, head_v_part});
+  z_view = z_view.view({bs, seqlen, local_k_heads, head_v_part});
+
+#if defined(USE_CUDA) || defined(USE_MUSA)
+  // Graph-capture-safe replacement for `torch::cat({q,k,v,z_view}, -1)`.
+  // Pre-allocated `qkvz_merge_buf_` is reused across replays; each piece is
+  // written via a strided `copy_` into its slice along the last dim.
+  const int64_t m = bs * seqlen;
+  const int64_t total_last_dim = 2 * head_k_dim_ + 2 * head_v_part;
+  const int64_t flat_dim = local_k_heads * total_last_dim;
+  const bool needs_realloc =
+      !qkvz_merge_buf_.defined() || qkvz_merge_buf_.size(0) < M ||
+      qkvz_merge_buf_.size(1) != flat_dim ||
+      qkvz_merge_buf_.scalar_type() != qkv.scalar_type() ||
+      qkvz_merge_buf_.device() != qkv.device();
+  if (needs_realloc) {
+    // Grow-only so views handed out for already-captured smaller-bucket
+    // graphs stay valid.
+    const int64_t target_M =
+        qkvz_merge_buf_.defined() ? std::max(M, qkvz_merge_buf_.size(0)) : M;
+    qkvz_merge_buf_ = torch::empty({target_M, flat_dim}, qkv.options());
+  }
+  auto buf_4d = qkvz_merge_buf_.narrow(/*dim=*/0, /*start=*/0, /*length=*/M)
+                    .view({M, local_k_heads, total_last_dim});
+  buf_4d.narrow(/*dim=*/-1, /*start=*/0, /*length=*/head_k_dim_)
+      .copy_(q.reshape({M, local_k_heads, head_k_dim_}));
+  buf_4d.narrow(/*dim=*/-1, head_k_dim_, head_k_dim_)
+      .copy_(k.reshape({M, local_k_heads, head_k_dim_}));
+  buf_4d.narrow(/*dim=*/-1, 2 * head_k_dim_, head_v_part)
+      .copy_(v.reshape({M, local_k_heads, head_v_part}));
+  buf_4d.narrow(/*dim=*/-1, 2 * head_k_dim_ + head_v_part, head_v_part)
+      .copy_(z_view.reshape({M, local_k_heads, head_v_part}));
+  return qkvz_merge_buf_.narrow(/*dim=*/0, /*start=*/0, /*length=*/M)
+      .view({bs, seqlen, flat_dim});
+#else
+  return torch::cat({q, k, v, z_view}, -1).view({bs, seqlen, -1}).contiguous();
+#endif
+}
+
+torch::Tensor Qwen3_5GatedDeltaNetImpl::merge_ba_from_split_activations(
+    const torch::Tensor& b,
+    const torch::Tensor& a) const {
+  CHECK_EQ(b.dim(), 3) << "Expected b activation to be 3D, got " << b.sizes();
+  CHECK_EQ(a.dim(), 3) << "Expected a activation to be 3D, got " << a.sizes();
+  CHECK_EQ(b.size(0), a.size(0)) << "b/a batch size mismatch.";
+  CHECK_EQ(b.size(1), a.size(1)) << "b/a sequence size mismatch.";
+  CHECK_EQ(b.size(2), num_v_heads_ / tp_size_)
+      << "Unexpected b hidden size for Qwen3.5.";
+  CHECK_EQ(a.size(2), num_v_heads_ / tp_size_)
+      << "Unexpected a hidden size for Qwen3.5.";
+  CHECK_GT(num_k_heads_, 0) << "linear_num_key_heads must be positive.";
+  CHECK_EQ(num_v_heads_ % num_k_heads_, 0)
+      << "linear_num_value_heads must be divisible by linear_num_key_heads.";
+
+  const int64_t bs = b.size(0);
+  const int64_t seqlen = b.size(1);
+  const int64_t local_k_heads = num_k_heads_ / tp_size_;
+  const int64_t num_v_heads_per_k = num_v_heads_ / num_k_heads_;
+
+  auto b_view = b.view({bs, seqlen, local_k_heads, num_v_heads_per_k});
+  auto a_view = a.view({bs, seqlen, local_k_heads, num_v_heads_per_k});
+
+#if defined(USE_CUDA) || defined(USE_MUSA)
+  const int64_t m = bs * seqlen;
+  const int64_t M = bs * seqlen;
+  const int64_t total_last_dim = 2 * num_v_heads_per_k;
+  const int64_t flat_dim = local_k_heads * total_last_dim;
+  const bool needs_realloc = !ba_merge_buf_.defined() ||
+                             ba_merge_buf_.size(0) < M ||
+                             ba_merge_buf_.size(1) != flat_dim ||
+                             ba_merge_buf_.scalar_type() != b.scalar_type() ||
+                             ba_merge_buf_.device() != b.device();
+  if (needs_realloc) {
+    const int64_t target_M =
+        ba_merge_buf_.defined() ? std::max(M, ba_merge_buf_.size(0)) : M;
+    ba_merge_buf_ = torch::empty({target_M, flat_dim}, b.options());
+  }
+  auto buf_4d = ba_merge_buf_.narrow(/*dim=*/0, /*start=*/0, /*length=*/M)
+                    .view({M, local_k_heads, total_last_dim});
+  buf_4d.narrow(/*dim=*/-1, /*start=*/0, /*length=*/num_v_heads_per_k)
+      .copy_(b_view.reshape({M, local_k_heads, num_v_heads_per_k}));
+  buf_4d.narrow(/*dim=*/-1, num_v_heads_per_k, num_v_heads_per_k)
+      .copy_(a_view.reshape({M, local_k_heads, num_v_heads_per_k}));
+  return ba_merge_buf_.narrow(/*dim=*/0, /*start=*/0, /*length=*/M)
+      .view({bs, seqlen, flat_dim});
+#else
+  return torch::cat({b_view, a_view}, -1).view({bs, seqlen, -1}).contiguous();
+#endif
+}
+
+std::pair<torch::Tensor, torch::Tensor>
+Qwen3_5GatedDeltaNetImpl::project_decode_inputs(
+    const torch::Tensor& hidden_states) {
+  const auto reshape_projection = [](const torch::Tensor& projection) {
+    return projection.view({projection.size(0), -1, projection.size(-1)});
+  };
+  auto qkv = reshape_projection(in_proj_qkv_->forward(hidden_states));
+  auto z_proj = reshape_projection(in_proj_z_->forward(hidden_states));
+  auto b_proj = reshape_projection(in_proj_b_->forward(hidden_states));
+  auto a_proj = reshape_projection(in_proj_a_->forward(hidden_states));
+  return {merge_qkvz_from_split_activations(qkv, z_proj),
+          merge_ba_from_split_activations(b_proj, a_proj)};
+}
+
+std::pair<torch::Tensor, torch::Tensor>
+Qwen3_5GatedDeltaNetImpl::project_flat_inputs(
+    const torch::Tensor& hidden_states) {
+  auto qkv = in_proj_qkv_->forward(hidden_states).unsqueeze(0);
+  auto z_proj = in_proj_z_->forward(hidden_states).unsqueeze(0);
+  auto b_proj = in_proj_b_->forward(hidden_states).unsqueeze(0);
+  auto a_proj = in_proj_a_->forward(hidden_states).unsqueeze(0);
+  auto qkvz = merge_qkvz_from_split_activations(qkv, z_proj);
+  auto ba = merge_ba_from_split_activations(b_proj, a_proj);
+  return {qkvz.view({hidden_states.size(0), qkvz.size(-1)}).contiguous(),
+          ba.view({hidden_states.size(0), ba.size(-1)}).contiguous()};
+}
+
+void Qwen3_5GatedDeltaNetImpl::load_projection_state_dict(
+    const StateDict& state_dict) {
+  auto in_proj_qkv_state_dict = state_dict.get_dict_with_prefix("in_proj_qkv.");
+  if (in_proj_qkv_state_dict.size() > 0 && !in_proj_qkv_->is_weight_loaded()) {
+    in_proj_qkv_->load_state_dict(
+        in_proj_qkv_state_dict,
+        /*shard_tensor_count=*/3,
+        /*shard_sizes=*/
+        {k_size_ / tp_size_, k_size_ / tp_size_, v_size_ / tp_size_});
+  }
+
+  auto in_proj_z_state_dict = state_dict.get_dict_with_prefix("in_proj_z.");
+  if (in_proj_z_state_dict.size() > 0 && !in_proj_z_->is_weight_loaded()) {
+    in_proj_z_->load_state_dict(in_proj_z_state_dict);
+  }
+
+  auto in_proj_b_state_dict = state_dict.get_dict_with_prefix("in_proj_b.");
+  if (in_proj_b_state_dict.size() > 0 && !in_proj_b_->is_weight_loaded()) {
+    in_proj_b_->load_state_dict(in_proj_b_state_dict);
+  }
+
+  auto in_proj_a_state_dict = state_dict.get_dict_with_prefix("in_proj_a.");
+  if (in_proj_a_state_dict.size() > 0 && !in_proj_a_->is_weight_loaded()) {
+    in_proj_a_->load_state_dict(in_proj_a_state_dict);
+  }
+}
+
+void Qwen3_5GatedDeltaNetImpl::verify_projection_weights(
+    const std::string& prefix) const {
+  CHECK(in_proj_qkv_ && in_proj_qkv_->is_weight_loaded())
+      << "Missing required weight after all shards loaded: " << prefix
+      << "in_proj_qkv.weight";
+  CHECK(in_proj_z_ && in_proj_z_->is_weight_loaded())
+      << "Missing required weight after all shards loaded: " << prefix
+      << "in_proj_z.weight";
+  CHECK(in_proj_b_ && in_proj_b_->is_weight_loaded())
+      << "Missing required weight after all shards loaded: " << prefix
+      << "in_proj_b.weight";
+  CHECK(in_proj_a_ && in_proj_a_->is_weight_loaded())
+      << "Missing required weight after all shards loaded: " << prefix
+      << "in_proj_a.weight";
+}
+
+}  // namespace layer
+}  // namespace xllm

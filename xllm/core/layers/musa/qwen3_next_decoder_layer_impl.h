@@ -15,18 +15,24 @@ limitations under the License.
 
 #pragma once
 
-#if defined(USE_MLU)
-#include "layers/mlu/attention.h"
-#elif defined(USE_NPU)
-#include "layers/npu_torch/attention.h"
-#elif defined(USE_CUDA) && defined(XLLM_TORCH_MUSA)
-#include "layers/musa/attention.h"
-#elif defined(USE_CUDA)
-#include "layers/cuda/attention.h"
-#elif defined(USE_ILU)
-#include "layers/ilu/attention.h"
-#elif defined(USE_MUSA)
-#include "layers/musa/attention.h"
-#elif defined(USE_DCU)
-#include "layers/dcu/attention.h"
-#endif
+#include "layers/musa/qwen3_next_gated_delta_net.h"
+#include "layers/musa/qwen3_next_hybrid_decoder_layer_base.h"
+
+namespace xllm {
+namespace layer {
+
+class Qwen3NextDecoderLayerImpl : public Qwen3HybridDecoderLayerImplBase {
+ public:
+  explicit Qwen3NextDecoderLayerImpl(const ModelContext& context,
+                                     int32_t layer_id);
+
+ protected:
+  Qwen3NextDecoderLayerImpl(
+      const ModelContext& context,
+      int32_t layer_id,
+      std::shared_ptr<Qwen3GatedDeltaNetBaseImpl> linear_attention_module);
+};
+TORCH_MODULE(Qwen3NextDecoderLayer);
+
+}  // namespace layer
+}  // namespace xllm

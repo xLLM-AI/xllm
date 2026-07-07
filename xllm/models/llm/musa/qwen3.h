@@ -17,7 +17,7 @@ limitations under the License.
 
 #include "core/framework/model/model_output.h"
 #include "core/layers/common/rotary_embedding.h"
-#include "core/layers/musa/musa_qwen3_decoder_layer_impl.h"
+#include "core/layers/musa/qwen3_decoder_layer_impl.h"
 #include "core/util/rec_model_utils.h"
 #include "models/llm/llm_model_base.h"
 
