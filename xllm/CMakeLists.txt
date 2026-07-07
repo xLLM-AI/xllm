@@ -102,9 +102,9 @@ else()
 
 endif()
 
-# link brpc
-target_link_libraries(xllm PRIVATE glog::glog brpc leveldb::leveldb protobuf::libprotobuf ${OpenCV_LIBS})
-add_dependencies(xllm brpc-static)
+# link brpc; tcmalloc is bundled from third_party/gperftools (shared libtcmalloc.so.4)
+target_link_libraries(xllm PRIVATE glog::glog brpc leveldb::leveldb protobuf::libprotobuf tcmalloc ${OpenCV_LIBS})
+add_dependencies(xllm brpc-static gperftools_ep)
 
 if(USE_NPU)
   set(COMMON_LIBS torch_npu torch_python Python::Python ascendcl atb_customize hccl c_sec nnopbase ms_tools_ext)
