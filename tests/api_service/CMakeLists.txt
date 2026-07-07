@@ -43,6 +43,17 @@ cc_test(
 
 cc_test(
   NAME
+    completion_json_parser_test
+  SRCS
+    completion_json_parser_test.cpp
+  DEPS
+    api_service
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
+
+cc_test(
+  NAME
     anthropic_json_test
   SRCS
     anthropic_json_test.cpp
