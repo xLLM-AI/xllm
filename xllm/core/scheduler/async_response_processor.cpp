@@ -26,6 +26,7 @@ limitations under the License.
 #include "core/framework/config/service_config.h"
 #include "framework/request/finish_reason.h"
 #include "framework/request/request.h"
+#include "framework/request/request_tracer.h"
 #include "framework/request/sequence.h"
 #include "util/blocking_counter.h"
 #include "util/env_var.h"
@@ -110,6 +111,7 @@ void AsyncResponseProcessor::process_completed_request(
     if (!disable_log_stats_) {
       request->log_statistic(end_2_end_latency_seconds);
     }
+    RequestTracer::get_instance().trace_completed_request(*request, req_output);
     request->state().output_func(req_output);
   };
   if (request->state().response_thread_id < 0) {
@@ -150,6 +152,8 @@ void AsyncResponseProcessor::batch_process_completed_requests(
         // currently only support one sequence when enable_service_routing
         request_output->finished_on_prefill_instance = true;
       }
+      RequestTracer::get_instance().trace_completed_request(*request,
+                                                            *request_output);
       counter->decrement_count();
     };
     if (request->state().response_thread_id < 0) {
@@ -231,6 +235,7 @@ void AsyncResponseProcessor::process_stream_request(
           req_output.outputs.push_back(std::move(seq_output.value()));
         }
       }
+      RequestTracer::get_instance().trace_stream_output(*request, req_output);
       if (!request->state().output_func(req_output)) {
         // cancel the request if on_stream returns false
         request->set_cancel();
@@ -306,6 +311,7 @@ void AsyncResponseProcessor::batch_process_stream_requests(
           }
         }
       }
+      RequestTracer::get_instance().trace_stream_output(*request, *req_output);
       counter->decrement_count();
     };
     if (request->state().response_thread_id < 0) {

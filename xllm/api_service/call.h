@@ -32,6 +32,15 @@ class Call {
   std::string take_request_payload() { return std::move(request_payload_); }
   void init_request_payload();
 
+  void set_raw_request_body(std::string body) {
+    raw_request_body_ = std::move(body);
+  }
+  void set_request_endpoint(std::string path) {
+    request_endpoint_ = std::move(path);
+  }
+  const std::string& raw_request_body() const { return raw_request_body_; }
+  const std::string& request_endpoint() const { return request_endpoint_; }
+
   virtual bool is_disconnected() const = 0;
 
  protected:
@@ -44,6 +53,8 @@ class Call {
   std::string x_request_time_;
 
   std::string request_payload_;
+  std::string raw_request_body_;
+  std::string request_endpoint_;
 };
 
 }  // namespace xllm

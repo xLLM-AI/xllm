@@ -16,6 +16,7 @@ cc_library(
     dit_request_output.h
     dit_request_params.h
     request_params.h
+    request_tracer.h
     sample_slot.h
     sequence.h
     sequence_logprob_state.h
@@ -34,6 +35,7 @@ cc_library(
     request_output.cpp
     dit_request_output.cpp
     request_params.cpp
+    request_tracer.cpp
     sample_slot.cpp
     dit_request_params.cpp
     sequence.cpp
@@ -55,5 +57,6 @@ cc_library(
     absl::strings
     absl::time
     proto::xllm_proto
+    nlohmann_json::nlohmann_json
     torch
 )
