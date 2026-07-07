@@ -38,11 +38,11 @@ namespace {
 // -------- wrappers over the in-place CUDA kernels --------
 // The underlying xllm::kernel::cuda::* kernels write in place / take an
 // output-argument. rms_norm / silu_and_mul are exposed as functional ops
-// (allocate a fresh output via empty/empty_like — no input copy). The two ops
-// whose kernel mutates its INPUT (fused_add_rms_norm, fused_qk_norm_rope) are
-// exposed as honest IN-PLACE ops: (a!) input annotation + void return (no
-// clone), with the Python wrapper returning the mutated tensor. See each impl
-// for the torch.compile-functionalization reason the return must be void.
+// (allocate a fresh output via empty/empty_like — no input copy). The in-place
+// ops (fused_add_rms_norm, fused_qk_norm_rope) mutate their input AND return
+// the mutated tensor(s). Returning the input is required for piecewise
+// cudagraph: torch.compile's cudagraphs backend needs each graph segment to
+// have non-void tensor outputs; void-return ops produce "empty graphs".
 
 torch::Tensor rms_norm(const torch::Tensor& input,
                        const torch::Tensor& weight,
@@ -55,22 +55,16 @@ torch::Tensor rms_norm(const torch::Tensor& input,
 
 // Fused residual-add + RMSNorm. IN-PLACE: mutates `input` -> RMSNorm(input +
 // residual) and `residual` -> input + residual (the underlying kernel writes
-// both). Declared with (a!)/(b!) alias annotations and a VOID return: the
-// Python wrapper hands the (mutated) input/residual back to the caller.
-//
-// Why void instead of returning the results: torch.compile's functionalization
-// pass REJECTS a custom op whose *output* carries an alias annotation
-// (``-> Tensor(a!)``) — it only functionalizes ops whose outputs do not share
-// storage with inputs. A mutating op must therefore return nothing and expose
-// the mutation solely through the ``(a!)`` input annotation. This drops the two
-// per-call clones (18147 device-to-device copies in the M6 host profile, 0 on
-// the C++ path) that were the quantified root cause of the eager host overhead.
-void fused_add_rms_norm(torch::Tensor& input,
-                        torch::Tensor& residual,
-                        const torch::Tensor& weight,
-                        double eps) {
+// both). Returns the mutated (input, residual) so piecewise cudagraph segments
+// have proper tensor outputs (avoids empty graphs from void-return ops).
+std::tuple<torch::Tensor, torch::Tensor> fused_add_rms_norm(
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    const torch::Tensor& weight,
+    double eps) {
   auto w = weight;
   xllm::kernel::cuda::fused_add_rms_norm(input, residual, w, eps);
+  return std::make_tuple(input, residual);
 }
 
 // Gated SiLU: input is [..., 2*d]; output is [..., d] = silu(input[..., :d]) *
@@ -87,19 +81,19 @@ torch::Tensor silu_and_mul(const torch::Tensor& input) {
 
 // Qwen3 fused q/k RMSNorm (on head_dim) + RoPE. `qkv` is [num_tokens,
 // (nq+nk+nv)*head_dim]. IN-PLACE: q/k slices are normalized+roped in `qkv`, v
-// left untouched. Same (a!) + void-return rationale as fused_add_rms_norm above
-// (drops the qkv.clone() per call); the Python wrapper returns the mutated qkv.
-void fused_qk_norm_rope(torch::Tensor& qkv,
-                        int64_t num_heads_q,
-                        int64_t num_heads_k,
-                        int64_t num_heads_v,
-                        int64_t head_dim,
-                        double eps,
-                        const torch::Tensor& q_weight,
-                        const torch::Tensor& k_weight,
-                        const torch::Tensor& cos_sin_cache,
-                        bool interleaved,
-                        const torch::Tensor& position_ids) {
+// left untouched. Returns the mutated qkv so piecewise cudagraph segments have
+// proper tensor outputs.
+torch::Tensor fused_qk_norm_rope(torch::Tensor& qkv,
+                                 int64_t num_heads_q,
+                                 int64_t num_heads_k,
+                                 int64_t num_heads_v,
+                                 int64_t head_dim,
+                                 double eps,
+                                 const torch::Tensor& q_weight,
+                                 const torch::Tensor& k_weight,
+                                 const torch::Tensor& cos_sin_cache,
+                                 bool interleaved,
+                                 const torch::Tensor& position_ids) {
   xllm::kernel::cuda::fused_qk_norm_rope(qkv,
                                          num_heads_q,
                                          num_heads_k,
@@ -111,6 +105,7 @@ void fused_qk_norm_rope(torch::Tensor& qkv,
                                          cos_sin_cache,
                                          interleaved,
                                          position_ids);
+  return qkv;
 }
 
 }  // namespace
@@ -125,18 +120,16 @@ void ensure_xllm_ops_registered() {
 // Schemas are declared once (device-agnostic); CUDA impls are bound below.
 TORCH_LIBRARY(xllm_ops, m) {
   m.def("rms_norm(Tensor input, Tensor weight, float eps) -> Tensor");
-  // In-place (mutates input & residual); void return — see impl comment.
   m.def(
       "fused_add_rms_norm(Tensor(a!) input, Tensor(b!) residual, Tensor "
       "weight, "
-      "float eps) -> ()");
+      "float eps) -> (Tensor, Tensor)");
   m.def("silu_and_mul(Tensor input) -> Tensor");
-  // In-place (mutates qkv q/k slices); void return — see impl comment.
   m.def(
       "fused_qk_norm_rope(Tensor(a!) qkv, int num_heads_q, int num_heads_k, "
       "int "
       "num_heads_v, int head_dim, float eps, Tensor q_weight, Tensor k_weight, "
-      "Tensor cos_sin_cache, bool interleaved, Tensor position_ids) -> ()");
+      "Tensor cos_sin_cache, bool interleaved, Tensor position_ids) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, CUDA, m) {

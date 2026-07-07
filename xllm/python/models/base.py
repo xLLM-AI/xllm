@@ -14,11 +14,9 @@
 
 """Shared base for Python model-executor causal LMs.
 
-A concrete model only builds its own graph (``self.model``), its ``self.lm_head``
-and its config, then calls ``self._init_runner()``; the wiring that is identical
-across models -- GraphRunner (torch.compile / cudagraph) hookup, the C++ bridge
-calling convention for ``forward`` / ``compute_logits``, and the weight-loading
-entry point -- lives here so adding a model does not re-implement it.
+A concrete model builds its own graph, lm_head, and config; the wiring that is
+identical across models -- the C++ bridge calling convention for ``forward`` /
+``compute_logits``, and the weight-loading entry point -- lives here.
 """
 
 from __future__ import annotations
@@ -28,7 +26,7 @@ from typing import TYPE_CHECKING, List, Optional
 import torch
 import torch.nn as nn
 
-from ..forward_batch import ForwardBatch
+from ..attn_metadata import AttentionMetadata
 from ..model_runner import GraphRunner
 
 if TYPE_CHECKING:
@@ -39,7 +37,7 @@ class PyModelBase(nn.Module):
     """Base class for causal LMs the C++ ``PyCausalLM`` bridge drives.
 
     Subclass contract:
-      * build ``self.model`` (the pure-GPU forward graph) and ``self.lm_head``;
+      * build ``self.model`` and ``self.lm_head``;
       * call ``self._init_runner()`` once, after ``self.model`` exists;
       * implement ``load_weights()``.
     """
@@ -47,6 +45,18 @@ class PyModelBase(nn.Module):
     model: nn.Module
     lm_head: nn.Module
     _runner: GraphRunner
+
+    def _init_runner(self, config: dict | None = None) -> None:
+        """Wrap ``self.model`` in the graph runner (torch.compile / cudagraph).
+
+        The backend is selected by the C++ --python_graph_backend flag
+        (passed in config["python_graph_backend"]). The max decode batch for
+        graph capture is --python_graph_max_batch.
+        """
+        cfg = config or {}
+        backend = cfg.get("python_graph_backend", "off")
+        max_batch = int(cfg.get("python_graph_max_batch", 256))
+        self._runner = GraphRunner(self.model, backend=backend, max_batch=max_batch)
 
     @staticmethod
     def resolve_dtype(dtype: object) -> torch.dtype:
@@ -59,18 +69,29 @@ class PyModelBase(nn.Module):
             raise ValueError(f"Unknown dtype: {dtype!r}")
         return resolved
 
-    def _init_runner(self) -> None:
-        """Wrap ``self.model`` in the graph runner (torch.compile / cudagraph)."""
-        self._runner = GraphRunner(self.model)
-
     # -- inference ------------------------------------------------------------
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        batch: ForwardBatch,
+        attn_metadata_dict: dict,
+        kv_caches: list,
     ) -> torch.Tensor:
-        return self._runner(input_ids, positions)
+        """Called by C++ PyCausalLM::forward with explicit metadata + kv_caches.
+
+        Args:
+            input_ids: [num_tokens] token IDs
+            positions: [num_tokens] position IDs
+            attn_metadata_dict: dict built by C++ with all attention metadata
+            kv_caches: list of (k_cache, v_cache) tuples, one per layer
+
+        The runner owns plan + forward-context setup and graph orchestration:
+        the decode full-graph path re-plans against fixed-address static buffers
+        (not the raw C++ tensors), so this method just wraps the metadata and
+        delegates everything to the runner.
+        """
+        meta = AttentionMetadata(attn_metadata_dict)
+        return self._runner(input_ids, positions, meta, kv_caches)
 
     def compute_logits(
         self, hidden: torch.Tensor, selected_idxes: Optional[torch.Tensor]
@@ -88,14 +109,8 @@ class PyModelBase(nn.Module):
     ) -> None:
         """Load checkpoint weights into this model's parameters.
 
-        Called by the C++ bridge (``PyCausalLM::load_model``) with:
-          * ``state_dicts`` — list of ``xllm_weight_loader.StateDict`` objects
-            wrapping the raw checkpoint shards (supports ``get_tensor``,
-            ``get_sharded_tensor``, ``has``, ``keys``).
-          * ``tp_rank`` / ``tp_size`` — this rank's position in the TP group.
-
+        Called by the C++ bridge (``PyCausalLM::load_model``).
         The model owns ALL weight transform logic: TP slicing, fused-weight
-        concatenation, format conversion (NZ, quantization), etc.  C++ only
-        provides the raw tensor access; no sharding knowledge lives there.
+        concatenation, format conversion, etc.
         """
         raise NotImplementedError

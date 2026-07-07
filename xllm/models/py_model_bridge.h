@@ -19,82 +19,20 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <string>
-#include <vector>
 
-#include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/state_dict/state_dict.h"
-
-// Bridge between xLLM's C++ worker and a Python-interpreter-based model
-// executor. It owns the embedded CPython lifecycle and the thread-local
-// forward context that the ``torch.ops.xllm_ops.attention`` op reads to reach
-// the C++ paged-KV attention (flashinfer) while the model graph is driven from
-// Python. The Python side stays hardware-agnostic: it always calls the single
-// ``xllm_ops.attention`` symbol with no ``#ifdef``.
 
 namespace xllm {
 
-namespace layer {
-struct AttentionMetadata;
-class Attention;
-}  // namespace layer
-
-// Tensor-parallel process group (not owned; from CollectiveCommunicator via
-// ParallelArgs). Full definition lives in framework/parallel_state.
-class ProcessGroup;
-
-// Per-forward state consulted by the attention op. Set on the worker thread for
-// the duration of a single PyCausalLM::forward (the embedded interpreter runs
-// the model synchronously on that same thread), then cleared.
-struct PyForwardContext {
-  layer::AttentionMetadata* attn_metadata = nullptr;
-  std::vector<KVCache>* kv_caches = nullptr;
-  // Shared config-only attention module (num_heads/head_dim/scale/...); the
-  // per-layer plan and KV cache are selected via layer_id at call time.
-  layer::Attention* attn = nullptr;
-  // TP group for the collective ops (all_reduce / all_gather). Null at
-  // tp_size==1, in which case the collectives are identity.
-  ProcessGroup* tp_group = nullptr;
-};
-
-// Returns the calling thread's forward context (thread-local).
-PyForwardContext* get_py_forward_context();
-
-// Scopes a forward context on the current thread; restores the previous value
-// on destruction so nested/re-entrant forwards stay correct.
-class PyForwardContextGuard {
- public:
-  PyForwardContextGuard(layer::AttentionMetadata* attn_metadata,
-                        std::vector<KVCache>* kv_caches,
-                        layer::Attention* attn,
-                        ProcessGroup* tp_group);
-  ~PyForwardContextGuard();
-
-  PyForwardContextGuard(const PyForwardContextGuard&) = delete;
-  PyForwardContextGuard& operator=(const PyForwardContextGuard&) = delete;
-
- private:
-  PyForwardContext prev_;
-};
-
-// Initializes the embedded CPython interpreter (idempotent, process-wide),
-// makes the ``python`` model package importable, and force-links the xllm_ops
-// torch library. Safe to call from any worker thread; the GIL is released
-// afterwards so subsequent calls use ``py::gil_scoped_acquire``.
+// Initializes the embedded CPython interpreter (idempotent, process-wide).
 void ensure_python_interpreter();
 
-// Thin pybind11-visible wrapper around a StateDict pointer, exposing raw
-// checkpoint tensor access to the Python model's ``load_weights``.  The
-// pointer is non-owning; the ModelLoader keeps the StateDict alive for the
-// duration of ``PyCausalLM::load_model``.
+// pybind11-visible wrapper around StateDict for Python weight loading.
 class PyStateDict {
  public:
   explicit PyStateDict(const StateDict* sd) : sd_(sd) {}
 
   torch::Tensor get_tensor(const std::string& name) const;
-  torch::Tensor get_sharded_tensor(const std::string& name,
-                                   int64_t dim,
-                                   int32_t rank,
-                                   int32_t world_size) const;
   bool has(const std::string& name) const;
   pybind11::list keys() const;
 

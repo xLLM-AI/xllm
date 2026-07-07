@@ -14,31 +14,29 @@
 
 """Qwen3 dense causal LM (Python model executor target).
 
-Layer structure and residual flow mirror xLLM's C++ Qwen2/Qwen3 decoder layer:
-fused add + RMSNorm carrying (hidden, residual) between layers, QK-norm before
-RoPE (the Qwen3 differentiator), gated-SiLU MLP.
+Architecture: fused add + RMSNorm carrying (hidden, residual) between layers,
+QK-norm before RoPE, gated-SiLU MLP. Tensor parallelism when tp_size>1.
 
-Tensor parallelism (WS1): when ``tp_size>1`` every projection/embedding holds a
-per-partition weight and the parallel layers insert the same all-reduce /
-all-gather the native C++ path uses. Weight loading (TP slice, QKV/gate-up fuse)
-is driven by ``load_weights`` in Python; C++ only provides raw checkpoint tensor
-access via the ``xllm_weight_loader.StateDict`` binding.
-At ``tp_size==1`` everything degrades to full-size weights with no collectives,
-so the single-card parity path is byte-identical to the first version.
+Attention is now explicit: the forward signature receives ``attn_metadata`` and
+``kv_caches`` from C++, and each layer's attention calls the ``PagedAttention``
+layer which dispatches to ``kv_cache_write`` + ``paged_attention`` kernel ops
+with all state passed as explicit parameters.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
 from .. import ops
+from ..attn_metadata import AttentionMetadata
 from ..layers import (
     ColumnParallelLinear,
     HiddenParallelEmbedding,
+    PagedAttention,
     RMSNorm,
     RotaryEmbedding,
     RowParallelLinear,
@@ -59,8 +57,7 @@ class Qwen3Config:
     max_position_embeddings: int = 40960
     vocab_size: int = 151936
     tie_word_embeddings: bool = True
-    # Tensor parallelism (passed from C++ build_config_dict; default = single
-    # card). Weights/heads are split per rank exactly as the native path.
+    sliding_window: int = 0
     tp_size: int = 1
     tp_rank: int = 0
 
@@ -88,16 +85,13 @@ class Qwen3Config:
             ),
             vocab_size=int(pick("vocab_size", default=151936)),
             tie_word_embeddings=bool(pick("tie_word_embeddings", default=True)),
+            sliding_window=int(pick("sliding_window", default=0)),
             tp_size=int(pick("tp_size", default=1)),
             tp_rank=int(pick("tp_rank", default=0)),
         )
 
     def head_split(self) -> Tuple[int, int, int]:
-        """Per-rank ``(num_heads, num_kv_heads, num_kv_head_replicas)``,
-        replicating native ``qwen2_attention.cpp:47-65``: heads split evenly;
-        for GQA with ``n_kv_heads < tp_size`` a single KV head is replicated
-        across the ranks that share it.
-        """
+        """Per-rank ``(num_heads, num_kv_heads, num_kv_head_replicas)``."""
         tp = self.tp_size
         assert self.n_heads % tp == 0, (
             f"n_heads {self.n_heads} not divisible by tp_size {tp}"
@@ -124,13 +118,8 @@ class Qwen3MLP(nn.Module):
     ) -> None:
         super().__init__()
         tp = cfg.tp_size
-        assert cfg.intermediate_size % tp == 0, (
-            f"intermediate_size {cfg.intermediate_size} not divisible by "
-            f"tp_size {tp}"
-        )
+        assert cfg.intermediate_size % tp == 0
         inter_per_rank = cfg.intermediate_size // tp
-        # gate/up fused ColumnParallel: per-rank weight is
-        # cat([gate_shard, up_shard], dim=0) -> [2*inter_per_rank, hidden].
         self.gate_up_proj = ColumnParallelLinear(
             cfg.hidden_size,
             2 * inter_per_rank,
@@ -138,8 +127,6 @@ class Qwen3MLP(nn.Module):
             dtype=dtype,
             device=device,
         )
-        # down RowParallel: input already partitioned to inter_per_rank; output
-        # is SUM all-reduced back to full hidden.
         self.down_proj = RowParallelLinear(
             inter_per_rank,
             cfg.hidden_size,
@@ -156,21 +143,18 @@ class Qwen3MLP(nn.Module):
 
 class Qwen3Attention(nn.Module):
     def __init__(
-        self, cfg: Qwen3Config, dtype: torch.dtype, device: torch.device
+        self, cfg: Qwen3Config, layer_id: int, dtype: torch.dtype, device: torch.device
     ) -> None:
         super().__init__()
+        self.layer_id = layer_id
         num_heads, num_kv_heads, replicas = cfg.head_split()
         tp = cfg.tp_size
-        self.num_heads = num_heads  # per-rank
-        self.num_kv_heads = num_kv_heads  # per-rank
-        self.num_kv_head_replicas = replicas
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
         self.head_dim = cfg.head_dim
-        self.q_size = num_heads * self.head_dim  # per-rank
-        self.kv_size = num_kv_heads * self.head_dim  # per-rank
+        self.q_size = num_heads * self.head_dim
+        self.kv_size = num_kv_heads * self.head_dim
 
-        # qkv fused ColumnParallel: per-rank weight is
-        # cat([q_shard, k_shard, v_shard], dim=0). No gather here — the o_proj
-        # RowParallel all-reduce combines the per-rank attention outputs.
         self.qkv_proj = ColumnParallelLinear(
             cfg.hidden_size,
             self.q_size + 2 * self.kv_size,
@@ -178,8 +162,6 @@ class Qwen3Attention(nn.Module):
             dtype=dtype,
             device=device,
         )
-        # o_proj RowParallel: input is the per-rank head slice (q_size), output
-        # is SUM all-reduced back to full hidden.
         self.o_proj = RowParallelLinear(
             self.q_size,
             cfg.hidden_size,
@@ -187,8 +169,6 @@ class Qwen3Attention(nn.Module):
             dtype=dtype,
             device=device,
         )
-        # Qwen3 QK-norm: RMSNorm over head_dim, applied per head before RoPE.
-        # Replicated on every rank (not sharded).
         self.q_norm = RMSNorm(
             self.head_dim, cfg.rms_norm_eps, dtype=dtype, device=device
         )
@@ -203,17 +183,23 @@ class Qwen3Attention(nn.Module):
             device=device,
         )
 
+        import math
+
+        scale = math.sqrt(1.0 / self.head_dim)
+        # PagedAttention instance is set externally (shared across all layers).
+        self.attn: Optional[PagedAttention] = None
+        self._scale = scale
+        self._sliding_window = cfg.sliding_window
+        self._device = device
+        self._dtype = dtype
+
     def forward(
         self,
         positions: torch.Tensor,
         hidden: torch.Tensor,
-        layer_id: int,
     ) -> torch.Tensor:
         qkv = self.qkv_proj(hidden)
 
-        # Fused per-head QK-RMSNorm + RoPE on the packed qkv — the same
-        # xllm_ops.fused_qk_norm_rope the C++ qwen3 path uses, with per-rank
-        # head counts. q/k are normed+roped in place; v is untouched.
         qkv = ops.fused_qk_norm_rope(
             qkv,
             num_heads_q=self.num_heads,
@@ -230,7 +216,7 @@ class Qwen3Attention(nn.Module):
         k = qkv[:, self.q_size : self.q_size + self.kv_size]
         v = qkv[:, self.q_size + self.kv_size :]
 
-        attn_out = ops.attention(q, k, v, layer_id)
+        attn_out = self.attn(q, k, v, self.layer_id)
         return self.o_proj(attn_out)
 
 
@@ -247,7 +233,7 @@ class Qwen3DecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm(
             cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device
         )
-        self.self_attn = Qwen3Attention(cfg, dtype, device)
+        self.self_attn = Qwen3Attention(cfg, layer_id, dtype, device)
         self.post_attention_layernorm = RMSNorm(
             cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device
         )
@@ -265,7 +251,9 @@ class Qwen3DecoderLayer(nn.Module):
         else:
             hidden, residual = self.input_layernorm(hidden, residual)
 
-        hidden = self.self_attn(positions, hidden, self.layer_id)
+        hidden = self.self_attn(
+            positions, hidden
+        )
 
         hidden, residual = self.post_attention_layernorm(hidden, residual)
         hidden = self.mlp(hidden)
@@ -278,11 +266,7 @@ class Qwen3Model(nn.Module):
     ) -> None:
         super().__init__()
         tp = cfg.tp_size
-        assert cfg.hidden_size % tp == 0, (
-            f"hidden_size {cfg.hidden_size} not divisible by tp_size {tp}"
-        )
-        # Embedding sharded on the hidden dim (dim 1) + all-gather, matching
-        # native WordEmbedding.
+        assert cfg.hidden_size % tp == 0
         self.embed_tokens = HiddenParallelEmbedding(
             cfg.vocab_size, cfg.hidden_size // tp, tp, dtype=dtype, device=device
         )
@@ -295,6 +279,31 @@ class Qwen3Model(nn.Module):
         self.norm = RMSNorm(
             cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device
         )
+
+        # Single shared PagedAttention (workspace allocated once, used by all layers).
+        import math
+        num_heads, num_kv_heads, _ = cfg.head_split()
+        scale = math.sqrt(1.0 / cfg.head_dim)
+        self.paged_attn = PagedAttention(
+            num_heads, num_kv_heads, cfg.head_dim, scale, cfg.sliding_window,
+            device, dtype
+        )
+        for layer in self.layers:
+            layer.self_attn.attn = self.paged_attn
+
+    def plan_attention(
+        self,
+        attn_metadata: AttentionMetadata,
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        enable_cuda_graph: bool = False,
+    ) -> None:
+        """Compute the shared attention plan once per batch, OUTSIDE the
+        compiled/captured region (called by the GraphRunner before dispatch).
+        block_size is identical across layers, so layer 0's k_cache suffices.
+        enable_cuda_graph=True (decode full-graph capture) makes the plan emit a
+        fixed-layout schedule so a single captured graph replays across seqlens.
+        """
+        self.paged_attn.plan(attn_metadata, kv_caches[0][0], enable_cuda_graph)
 
     def forward(
         self,
@@ -321,12 +330,8 @@ class Qwen3ForCausalLM(PyModelBase):
         self.device = device
 
         tp = self.cfg.tp_size
-        assert self.cfg.vocab_size % tp == 0, (
-            f"vocab_size {self.cfg.vocab_size} not divisible by tp_size {tp}"
-        )
+        assert self.cfg.vocab_size % tp == 0
         self.model = Qwen3Model(self.cfg, dtype, device)
-        # lm_head ColumnParallel over vocab (dim 0) + gather_output all-gather to
-        # reconstruct the full [tokens, vocab] logits, matching native LmHead.
         self.lm_head = ColumnParallelLinear(
             self.cfg.hidden_size,
             self.cfg.vocab_size // tp,
@@ -335,8 +340,7 @@ class Qwen3ForCausalLM(PyModelBase):
             dtype=dtype,
             device=device,
         )
-        # Wrap the pure-GPU graph (self.model) in the shared graph runner.
-        self._init_runner()
+        self._init_runner(config)
 
     # -- weight loading ---------------------------------------------------
     def load_weights(
@@ -347,8 +351,6 @@ class Qwen3ForCausalLM(PyModelBase):
     ) -> None:
         cfg = self.cfg
 
-        # GQA KV-replica coords: when n_kv_heads < tp_size, K/V heads are
-        # replicated across ranks that share them.
         total_kv_heads = cfg.n_kv_heads
         kv_replicas = tp_size // total_kv_heads if total_kv_heads < tp_size else 1
         kv_rank = tp_rank // kv_replicas if kv_replicas > 1 else tp_rank
@@ -370,13 +372,16 @@ class Qwen3ForCausalLM(PyModelBase):
             assert sd is not None, f"checkpoint tensor not found: {name}"
             r = kv_rank if kv else tp_rank
             w = kv_world if kv else tp_size
-            return sd.get_sharded_tensor(name, dim, r, w)
+            t = sd.get_tensor(name)
+            if w <= 1:
+                return t
+            chunk_size = t.size(dim) // w
+            return t.narrow(dim, r * chunk_size, chunk_size).contiguous()
 
         def copy_in(param_name: str, tensor: "torch.Tensor") -> None:
             param = self.get_parameter(param_name)
             param.data.copy_(tensor.to(dtype=param.dtype, device=param.device))
 
-        # Embedding: shard hidden dim (1).
         embed_name = "model.embed_tokens.weight"
         if not find(embed_name):
             embed_name = "embed_tokens.weight"
@@ -385,7 +390,6 @@ class Qwen3ForCausalLM(PyModelBase):
         for i in range(cfg.n_layers):
             p = f"model.layers.{i}."
 
-            # Norms: replicated.
             copy_in(p + "input_layernorm.weight",
                     load_tensor(p + "input_layernorm.weight"))
             copy_in(p + "post_attention_layernorm.weight",
@@ -395,35 +399,28 @@ class Qwen3ForCausalLM(PyModelBase):
             copy_in(p + "self_attn.k_norm.weight",
                     load_tensor(p + "self_attn.k_norm.weight"))
 
-            # QKV fused: shard each on dim 0, K/V use kv coords, concat.
             q = shard(p + "self_attn.q_proj.weight", dim=0)
             k = shard(p + "self_attn.k_proj.weight", dim=0, kv=True)
             v = shard(p + "self_attn.v_proj.weight", dim=0, kv=True)
             copy_in(p + "self_attn.qkv_proj.weight", torch.cat([q, k, v], dim=0))
 
-            # o_proj RowParallel: shard input dim (1).
             copy_in(p + "self_attn.o_proj.weight",
                     shard(p + "self_attn.o_proj.weight", dim=1))
 
-            # gate/up fused: shard each on dim 0, concat.
             gate = shard(p + "mlp.gate_proj.weight", dim=0)
             up = shard(p + "mlp.up_proj.weight", dim=0)
             copy_in(p + "mlp.gate_up_proj.weight", torch.cat([gate, up], dim=0))
 
-            # down_proj RowParallel: shard input dim (1).
             copy_in(p + "mlp.down_proj.weight",
                     shard(p + "mlp.down_proj.weight", dim=1))
 
-        # Final norm: replicated.
         norm_name = "model.norm.weight"
         if not find(norm_name):
             norm_name = "norm.weight"
         copy_in("model.norm.weight", load_tensor(norm_name))
 
-        # lm_head: ColumnParallel over vocab dim (0).
         if cfg.tie_word_embeddings:
             lm_name = embed_name
         else:
             lm_name = "lm_head.weight"
         copy_in("lm_head.weight", shard(lm_name, dim=0))
-

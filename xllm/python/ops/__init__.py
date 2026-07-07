@@ -14,25 +14,20 @@
 
 """Op dispatch layer for the Python model graph.
 
-Each op forwards to the fused kernel exposed under the single
-``torch.ops.xllm_ops.*`` namespace (the *same* vendor kernel the C++ decoder
-path uses), which torch dispatches to the per-device implementation by tensor
-device — so the Python graph reuses one symbol per op across hardware backends
-with no ``#ifdef`` (CUDA today; NPU/others register into the same namespace).
-
-The FakeTensor (meta) impls needed for ``torch.compile`` / graph capture live in
-:mod:`python.ops.fake_impls` and are registered lazily (only once a compile
-backend is enabled) so the default eager parity path stays clean. The op
-dispatch layer depends only on the kernel backends (:mod:`python.kernels`).
+Each op forwards to the fused kernel exposed under ``torch.ops.xllm_ops.*``.
+Attention is no longer a single opaque op here — it lives in the
+``PagedAttention`` layer (``python.layers.attention``) which calls
+``kv_cache_write`` + ``paged_attention`` kernel ops directly with explicit
+parameters.
 """
 
 from .dispatch import (
     all_gather,
     all_reduce,
-    attention,
     fused_add_rms_norm,
     fused_qk_norm_rope,
     rms_norm,
+    set_tp_group,
     silu_and_mul,
 )
 
@@ -41,7 +36,7 @@ __all__ = [
     "fused_add_rms_norm",
     "silu_and_mul",
     "fused_qk_norm_rope",
-    "attention",
     "all_reduce",
     "all_gather",
+    "set_tp_group",
 ]

@@ -17,6 +17,6 @@ graph. Mirrors SGLang's ``model_executor`` runners; a model constructs a
 ``GraphRunner`` and calls it, staying free of graph-capture concerns.
 """
 
-from .graph_runner import GraphRunner, TC_BACKEND_ENV, maybe_compile
+from .graph_runner import GraphRunner
 
-__all__ = ["GraphRunner", "TC_BACKEND_ENV", "maybe_compile"]
+__all__ = ["GraphRunner"]

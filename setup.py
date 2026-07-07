@@ -469,7 +469,7 @@ class ExtBuild(build_ext):
         # which launch_server.py defaults to the packaged xllm/ dir).
         py_pkg_src = os.path.join(self.base_dir, "xllm", "python")
         if os.path.isdir(py_pkg_src):
-            py_pkg_dst = os.path.join(extdir, "xllm", "python")
+            py_pkg_dst = os.path.join(extdir, "python")
             if os.path.isdir(py_pkg_dst):
                 shutil.rmtree(py_pkg_dst)
             shutil.copytree(

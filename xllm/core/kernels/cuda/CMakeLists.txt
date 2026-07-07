@@ -37,6 +37,7 @@ set(CUDA_HEADER_FILES
   topk_last_dim.cuh
   type_convert.cuh
   utils.h
+  xllm_attention_ops.h
   xllm_ops_library.h
   device_utils.cuh
   xattention/xattention_ops_api.h
@@ -120,6 +121,7 @@ set(CUDA_SOURCE_FILES
   rope.cu
   random_sample.cpp
   utils.cpp
+  xllm_attention_ops.cpp
   xllm_ops_library.cpp
   xattention/beam_search.cpp
   xattention/cache_select.cu
