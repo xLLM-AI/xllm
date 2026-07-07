@@ -71,6 +71,15 @@ class PrefixCache {
       const MMData& mm_data = MMData(),
       const Slice<XXH3Key>& block_hashes = {});
 
+  // Read-only probe of how many leading blocks of `token_ids` would be matched
+  // by `match()` (including `existed_shared_blocks`), without mutating the LRU
+  // order, hit/total metrics, or block ref counts. Used by cache-aware DP
+  // routing to score a rank before committing a sequence to it.
+  virtual size_t match_length(const Slice<int32_t>& token_ids,
+                              const Slice<Block>& existed_shared_blocks = {},
+                              const MMData& mm_data = MMData(),
+                              const Slice<XXH3Key>& block_hashes = {}) const;
+
   // insert the token ids and blocks into the prefix tree
   // and set hash key to the corresponding block
   // return the length of new inserted tokens.

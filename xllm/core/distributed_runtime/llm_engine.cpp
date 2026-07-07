@@ -509,6 +509,13 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
           ::xllm::KVCacheConfig::get_instance().enable_xtensor()
               ? false
               : options_.enable_prefix_cache())
+      .enable_cache_aware_dp(::xllm::KVCacheConfig::get_instance()
+                                 .enable_prefix_cache_aware_dp_routing())
+      .cache_aware_match_threshold(::xllm::KVCacheConfig::get_instance()
+                                       .prefix_cache_aware_dp_match_threshold())
+      .cache_aware_imbalance_threshold(
+          ::xllm::KVCacheConfig::get_instance()
+              .prefix_cache_aware_dp_imbalance_threshold())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_kvcache_store(options_.enable_kvcache_store())
       .enable_xtensor(::xllm::KVCacheConfig::get_instance().enable_xtensor())

@@ -469,4 +469,178 @@ TEST(BlockManagerPoolTest,
   EXPECT_EQ(pool->num_blocks_in_prefix_cache()[0], 1u);
 }
 
+// prefix_cache_match_length() reports the leading prefix-hit length in blocks
+// and must leave the cache (size, LRU, ref counts -> utilization) untouched.
+TEST(BlockManagerTest, PrefixCacheMatchLengthIsReadOnly) {
+  BlockManager::Options options;
+  options.num_blocks(16).block_size(2).enable_prefix_cache(true);
+  // Leak intentionally: the prefix cache keeps the cached blocks referenced at
+  // teardown, which would otherwise trip the free-list check in
+  // ~BlockManagerImpl.
+  auto* manager = new BlockManagerImpl(options);
+
+  // Three full blocks: [1,2] [3,4] [5,6].
+  const std::vector<int32_t> tokens = {1, 2, 3, 4, 5, 6};
+  std::vector<Block> blocks = manager->allocate(/*num_blocks=*/3);
+  ASSERT_EQ(blocks.size(), 3u);
+  manager->cache(
+      Slice<int32_t>(tokens), blocks, /*existed_shared_blocks_num=*/0);
+  ASSERT_EQ(manager->num_blocks_in_prefix_cache(), 3u);
+
+  const size_t cached_before = manager->num_blocks_in_prefix_cache();
+  const double util_before = manager->kv_cache_utilization();
+
+  // Full hit, and repeated probing is idempotent.
+  const size_t matched1 =
+      manager->prefix_cache_match_length(Slice<int32_t>(tokens));
+  const size_t matched2 =
+      manager->prefix_cache_match_length(Slice<int32_t>(tokens));
+  EXPECT_EQ(matched1, 3u);
+  EXPECT_EQ(matched2, matched1);
+
+  // A shorter prefix matches only its leading full blocks.
+  const std::vector<int32_t> short_tokens = {1, 2, 3, 4};
+  EXPECT_EQ(manager->prefix_cache_match_length(Slice<int32_t>(short_tokens)),
+            2u);
+
+  // A diverging prefix matches only the shared leading block.
+  const std::vector<int32_t> diverged = {1, 2, 9, 9};
+  EXPECT_EQ(manager->prefix_cache_match_length(Slice<int32_t>(diverged)), 1u);
+
+  // Probing mutated nothing.
+  EXPECT_EQ(manager->num_blocks_in_prefix_cache(), cached_before);
+  EXPECT_DOUBLE_EQ(manager->kv_cache_utilization(), util_before);
+}
+
+// With cache-aware routing on, a request sharing a cached prefix is routed to
+// the rank holding that prefix even when another rank has more free blocks.
+TEST(BlockManagerPoolTest, CacheAwareDpRoutingPrefersLongestPrefixRank) {
+  ScopedValue<int32_t> max_seqs_guard(
+      &SchedulerConfig::get_instance().max_seqs_per_batch(), 2);
+
+  BlockManagerPool::Options options;
+  options.num_blocks(32)
+      .host_num_blocks(0)
+      .block_size(2)
+      .enable_prefix_cache(true)
+      .enable_cache_aware_dp(true)
+      .cache_aware_match_threshold(0.5)
+      // Disable the imbalance guard so this test isolates affinity behavior.
+      .cache_aware_imbalance_threshold(1.0);
+  // Leak: prefix cache holds block refs at teardown (see test above).
+  auto* pool = new BlockManagerPool(options, /*dp_size=*/2);
+
+  // First allocation ties on free blocks across ranks, so it lands on rank 0;
+  // publishing its blocks seeds rank 0's prefix cache.
+  Sequence seq_a = MakeSequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6});
+  ASSERT_TRUE(pool->allocate(&seq_a));
+  ASSERT_EQ(seq_a.dp_rank(), 0);
+  pool->cache(&seq_a, /*num_tokens=*/6);
+  ASSERT_GT(pool->num_blocks_in_prefix_cache()[0], 0u);
+
+  const std::vector<size_t> cached_before = pool->num_blocks_in_prefix_cache();
+
+  // Rank 1 has more free blocks now, but the shared prefix wins: route to 0.
+  Sequence seq_b = MakeSequence(1, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6});
+  pool->allocate_shared(&seq_b);
+  EXPECT_EQ(seq_b.dp_rank(), 0);
+
+  // Routing only probes the prefix cache; it must not change cache contents.
+  EXPECT_EQ(pool->num_blocks_in_prefix_cache(), cached_before);
+
+  // A request with no cached prefix falls back to the rank with more free
+  // blocks (rank 1, since rank 0 still holds seq_a's blocks).
+  Sequence seq_c = MakeSequence(2, /*prompt_tokens=*/{7, 8, 9, 10});
+  pool->allocate_shared(&seq_c);
+  EXPECT_EQ(seq_c.dp_rank(), 1);
+}
+
+// Cold start: a rank holding a tiny shared prefix (one block out of a long
+// request) must NOT attract the request. The match-fraction threshold keeps
+// routing load-balanced until a meaningful prefix accumulates.
+TEST(BlockManagerPoolTest, CacheAwareDpRoutingIgnoresTinyPrefixOnColdStart) {
+  ScopedValue<int32_t> max_seqs_guard(
+      &SchedulerConfig::get_instance().max_seqs_per_batch(), 2);
+
+  BlockManagerPool::Options options;
+  options.num_blocks(64)
+      .host_num_blocks(0)
+      .block_size(2)
+      .enable_prefix_cache(true)
+      .enable_cache_aware_dp(true)
+      .cache_aware_match_threshold(0.5)
+      // Isolate the match-fraction guard from the imbalance guard.
+      .cache_aware_imbalance_threshold(1.0);
+  auto* pool = new BlockManagerPool(options, /*dp_size=*/2);
+
+  // Seed rank 0 with a single cached block [1,2].
+  Sequence seq_a = MakeSequence(0, /*prompt_tokens=*/{1, 2});
+  ASSERT_TRUE(pool->allocate(&seq_a));
+  ASSERT_EQ(seq_a.dp_rank(), 0);
+  pool->cache(&seq_a, /*num_tokens=*/2);
+  ASSERT_GT(pool->num_blocks_in_prefix_cache()[0], 0u);
+
+  // A long request shares only that one leading block (1/5 = 20% < 50%), so it
+  // is routed by free blocks (rank 1) instead of being herded to rank 0.
+  Sequence seq_b =
+      MakeSequence(1, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8, 9, 10});
+  pool->allocate_shared(&seq_b);
+  EXPECT_EQ(seq_b.dp_rank(), 1);
+}
+
+// A popular prefix that fully matches still yields to load balancing once the
+// holding rank becomes too loaded relative to the emptiest rank.
+TEST(BlockManagerPoolTest, CacheAwareDpRoutingRebalancesWhenOverloaded) {
+  ScopedValue<int32_t> max_seqs_guard(
+      &SchedulerConfig::get_instance().max_seqs_per_batch(), 2);
+
+  BlockManagerPool::Options options;
+  options.num_blocks(32)
+      .host_num_blocks(0)
+      .block_size(2)
+      .enable_prefix_cache(true)
+      .enable_cache_aware_dp(true)
+      .cache_aware_match_threshold(0.5)
+      // Tight imbalance budget: rank 0 holding a few blocks already trips it.
+      .cache_aware_imbalance_threshold(0.05);
+  auto* pool = new BlockManagerPool(options, /*dp_size=*/2);
+
+  Sequence seq_a = MakeSequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6});
+  ASSERT_TRUE(pool->allocate(&seq_a));
+  ASSERT_EQ(seq_a.dp_rank(), 0);
+  pool->cache(&seq_a, /*num_tokens=*/6);
+
+  // Same full prefix, but rank 0 is now too loaded vs rank 1, so the imbalance
+  // guard routes the request to the least-loaded rank (rank 1).
+  Sequence seq_b = MakeSequence(1, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6});
+  pool->allocate_shared(&seq_b);
+  EXPECT_EQ(seq_b.dp_rank(), 1);
+}
+
+// With cache-aware routing off, routing ignores the prefix and follows free
+// blocks, so the same shared-prefix request lands on the emptier rank.
+TEST(BlockManagerPoolTest, CacheAwareDpRoutingDisabledUsesMaxFreeRank) {
+  ScopedValue<int32_t> max_seqs_guard(
+      &SchedulerConfig::get_instance().max_seqs_per_batch(), 2);
+
+  BlockManagerPool::Options options;
+  options.num_blocks(32)
+      .host_num_blocks(0)
+      .block_size(2)
+      .enable_prefix_cache(true)
+      .enable_cache_aware_dp(false);
+  auto* pool = new BlockManagerPool(options, /*dp_size=*/2);
+
+  Sequence seq_a = MakeSequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6});
+  ASSERT_TRUE(pool->allocate(&seq_a));
+  ASSERT_EQ(seq_a.dp_rank(), 0);
+  pool->cache(&seq_a, /*num_tokens=*/6);
+
+  // Same prefix, but routing ignores it and picks the rank with more free
+  // blocks (rank 1).
+  Sequence seq_b = MakeSequence(1, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6});
+  pool->allocate_shared(&seq_b);
+  EXPECT_EQ(seq_b.dp_rank(), 1);
+}
+
 }  // namespace xllm

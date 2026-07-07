@@ -310,6 +310,13 @@ bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .block_size(block_size)
       .enable_linear_state(has_linear_attention_layers(args_))
       .enable_prefix_cache(options_.enable_prefix_cache())
+      .enable_cache_aware_dp(::xllm::KVCacheConfig::get_instance()
+                                 .enable_prefix_cache_aware_dp_routing())
+      .cache_aware_match_threshold(::xllm::KVCacheConfig::get_instance()
+                                       .prefix_cache_aware_dp_match_threshold())
+      .cache_aware_imbalance_threshold(
+          ::xllm::KVCacheConfig::get_instance()
+              .prefix_cache_aware_dp_imbalance_threshold())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .hasher_type(BlockHasherType::MM)
       .max_concurrent_requests(

@@ -48,6 +48,28 @@ DEFINE_bool(enable_in_batch_prefix_cache,
             "Whether to cache admitted prefill full blocks into the prefix "
             "cache so that later requests in the same batch can share them.");
 
+DEFINE_bool(enable_prefix_cache_aware_dp_routing,
+            false,
+            "When data parallel and prefix cache are enabled, route a new "
+            "sequence to the dp rank that can hold the whole prefill request "
+            "and has the longest prefix-cache hit, instead of the rank with "
+            "the most free blocks.");
+
+DEFINE_double(prefix_cache_aware_dp_match_threshold,
+              0.5,
+              "Cache-aware dp routing: minimum fraction of a request's blocks "
+              "that must hit a rank's prefix cache before affinity prefers it. "
+              "Below this, routing balances by free blocks. Prevents a tiny "
+              "shared prefix from herding every request onto one rank.");
+
+DEFINE_double(
+    prefix_cache_aware_dp_imbalance_threshold,
+    0.1,
+    "Cache-aware dp routing: maximum tolerated (max_used - min_used) "
+    "/ total_blocks before affinity is suspended in favor of the "
+    "least-loaded rank. Prevents a popular shared prefix from pinning "
+    "all traffic onto a single rank.");
+
 DEFINE_int64(max_linear_state_cache_slots,
              0,
              "Maximum active linear-attention state cache slots. 0 derives an "
@@ -75,6 +97,9 @@ void KVCacheConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_prefix_cache);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_in_batch_prefix_cache);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_prefix_cache_aware_dp_routing);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(prefix_cache_aware_dp_match_threshold);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(prefix_cache_aware_dp_imbalance_threshold);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_linear_state_cache_slots);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(xxh3_128bits_seed);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_xtensor);
@@ -88,6 +113,9 @@ void KVCacheConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_prefix_cache);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_in_batch_prefix_cache);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_prefix_cache_aware_dp_routing);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(prefix_cache_aware_dp_match_threshold);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(prefix_cache_aware_dp_imbalance_threshold);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_linear_state_cache_slots);
   XLLM_CONFIG_ASSIGN_FROM_JSON(xxh3_128bits_seed);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_xtensor);
@@ -109,6 +137,12 @@ void KVCacheConfig::append_config_json(
       config_json, default_config, enable_prefix_cache);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_in_batch_prefix_cache);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_prefix_cache_aware_dp_routing);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, prefix_cache_aware_dp_match_threshold);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, prefix_cache_aware_dp_imbalance_threshold);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, max_linear_state_cache_slots);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

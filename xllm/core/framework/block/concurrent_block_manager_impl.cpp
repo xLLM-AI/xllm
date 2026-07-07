@@ -109,6 +109,16 @@ void ConcurrentBlockManagerImpl::reset_prefix_cache() {
   inner_->reset_prefix_cache();
 }
 
+size_t ConcurrentBlockManagerImpl::prefix_cache_match_length(
+    const Slice<int32_t>& token_ids,
+    const Slice<Block>& existed_shared_blocks,
+    const MMData& mm_data,
+    const Slice<XXH3Key>& block_hashes) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  return inner_->prefix_cache_match_length(
+      token_ids, existed_shared_blocks, mm_data, block_hashes);
+}
+
 size_t ConcurrentBlockManagerImpl::num_blocks_in_prefix_cache() const {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   return inner_->num_blocks_in_prefix_cache();

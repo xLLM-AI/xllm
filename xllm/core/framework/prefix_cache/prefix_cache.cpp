@@ -103,6 +103,58 @@ std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
   return blocks;
 }
 
+size_t PrefixCache::match_length(const Slice<int32_t>& token_ids,
+                                 const Slice<Block>& existed_shared_blocks,
+                                 const MMData& mm_data,
+                                 const Slice<XXH3Key>& block_hashes) const {
+  // allign tokens to block boundary
+  const size_t n_tokens = round_down(token_ids.size(), block_size_);
+  if (n_tokens == 0) {
+    return 0;
+  }
+
+  const size_t n_blocks = n_tokens / block_size_;
+  const size_t start_block = existed_shared_blocks.size();
+  // The already-shared blocks are guaranteed hits; start counting from there.
+  size_t matched = start_block;
+
+  // Read-only counterpart of match()'s match_block lambda: it only probes the
+  // hash table and never touches the LRU list or ref counts.
+  auto probe = [&](const XXH3Key& token_hash_key) -> bool {
+    return cached_blocks_.find(token_hash_key) != cached_blocks_.end();
+  };
+
+  // Fast path: precomputed chained hash covers every matchable block.
+  if (block_hashes.size() >= n_blocks) {
+    for (size_t b = start_block; b < n_blocks; ++b) {
+      if (!probe(block_hashes[b])) {
+        break;
+      }
+      ++matched;
+    }
+    return matched;
+  }
+
+  // Fallback: compute the chained hash on the fly.
+  XXH3Key token_hash_key =
+      existed_shared_blocks.empty()
+          ? XXH3Key{}
+          : XXH3Key{existed_shared_blocks.back().get_immutable_hash_value()};
+  auto hasher =
+      BlockHasher::create(hasher_type_, mm_data, start_block * block_size_);
+  for (size_t b = start_block; b < n_blocks; ++b) {
+    const size_t i = b * block_size_;
+    const uint8_t* pre_hash_value = (b == 0) ? nullptr : token_hash_key.data;
+    hasher->compute(
+        token_ids, i, i + block_size_, pre_hash_value, token_hash_key);
+    if (!probe(token_hash_key)) {
+      break;
+    }
+    ++matched;
+  }
+  return matched;
+}
+
 size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
                            std::vector<Block>& blocks,
                            size_t existed_shared_blocks_num,

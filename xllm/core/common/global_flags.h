@@ -58,6 +58,12 @@ DECLARE_bool(enable_prefix_cache);
 
 DECLARE_bool(enable_in_batch_prefix_cache);
 
+DECLARE_bool(enable_prefix_cache_aware_dp_routing);
+
+DECLARE_double(prefix_cache_aware_dp_match_threshold);
+
+DECLARE_double(prefix_cache_aware_dp_imbalance_threshold);
+
 DECLARE_int64(max_encoder_cache_size);
 
 DECLARE_uint32(xxh3_128bits_seed);

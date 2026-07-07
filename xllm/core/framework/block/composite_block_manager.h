@@ -55,6 +55,12 @@ class CompositeBlockManager : public BlockManager {
   bool allocate_sequence(Sequence* seq, size_t num_tokens);
   void deallocate_for_sequence(Sequence* seq);
   void allocate_shared_for_sequence(Sequence* seq);
+  // Read-only counterpart of allocate_shared_for_sequence: returns how many
+  // prefix-cache blocks the KV leaf would share for `seq` without allocating
+  // or mutating any block-manager state (it does refresh the sequence's cached
+  // block hashes, which a subsequent allocation needs anyway). Returns 0 when
+  // there is no prefix-capable KV leaf. Used by cache-aware DP routing.
+  size_t prefix_match_length_for_sequence(Sequence* seq) const;
   void cache_for_sequence(Sequence* seq);
   void cache_for_sequence(Sequence* seq, size_t num_tokens);
 
