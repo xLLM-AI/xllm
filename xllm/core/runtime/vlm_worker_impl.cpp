@@ -52,6 +52,87 @@ StreamEventPtr record_current_stream_event(const Device& device) {
   return event;
 }
 
+torch::Tensor choose_lm_head_selected_token_idxes(
+    const torch::Tensor& selected_token_idxes,
+    const ModelInputParams& input_params,
+    const ParallelArgs& parallel_args,
+    int64_t hidden_num_rows,
+    const torch::Device& device) {
+  const auto& mapping = parallel_args.mapping_data();
+  if (!selected_token_idxes.defined() || selected_token_idxes.numel() == 0 ||
+      mapping.empty() || !mapping.contains("attnDp") ||
+      !mapping["attnDp"].contains("rank") ||
+      input_params.parallel.dp_global_token_nums.size() <= 1 ||
+      hidden_num_rows <= 0) {
+    return selected_token_idxes;
+  }
+
+  const int64_t dp_rank = mapping["attnDp"]["rank"].get<int64_t>();
+  CHECK_GE(dp_rank, 0) << "invalid attnDp rank";
+  CHECK_LT(
+      dp_rank,
+      static_cast<int64_t>(input_params.parallel.dp_global_token_nums.size()))
+      << "attnDp rank exceeds dp_global_token_nums";
+
+  const int64_t local_selected_rows = selected_token_idxes.numel();
+  const int64_t local_token_count =
+      input_params.parallel.dp_global_token_nums.at(dp_rank);
+  if (hidden_num_rows == local_token_count ||
+      hidden_num_rows == local_selected_rows) {
+    return selected_token_idxes;
+  }
+
+  int64_t dp_offset = 0;
+  for (int64_t i = 0; i < dp_rank; ++i) {
+    dp_offset += input_params.parallel.dp_global_token_nums[i];
+  }
+
+  torch::Tensor selected_cpu =
+      selected_token_idxes.to(torch::dtype(torch::kLong).device(torch::kCPU));
+  torch::Tensor logical_selected_cpu = selected_cpu + dp_offset;
+
+  const auto& padding_idx = input_params.parallel.dp_ep_padding_data
+                                .lm_head_skip_padding_token_indices();
+  if (padding_idx.defined() && padding_idx.numel() > 0 &&
+      hidden_num_rows > padding_idx.numel()) {
+    torch::Tensor padding_cpu =
+        padding_idx.to(torch::dtype(torch::kLong).device(torch::kCPU));
+    const int64_t max_logical_selected =
+        logical_selected_cpu.max().item<int64_t>();
+    if (max_logical_selected < padding_cpu.numel()) {
+      return padding_cpu.index_select(/*dim=*/0, logical_selected_cpu)
+          .to(torch::dtype(selected_token_idxes.scalar_type()).device(device),
+              /*non_blocking=*/false)
+          .contiguous();
+    }
+  }
+
+  if (dp_offset == 0) {
+    return selected_token_idxes;
+  }
+
+  const int64_t max_selected_idx = selected_cpu.max().item<int64_t>();
+  if (max_selected_idx + dp_offset >= hidden_num_rows) {
+    return selected_token_idxes;
+  }
+
+  torch::Tensor remapped =
+      selected_token_idxes.to(device, /*non_blocking=*/false).contiguous();
+  return (remapped + dp_offset).to(remapped.scalar_type()).contiguous();
+}
+
+torch::Tensor select_hidden_rows(const torch::Tensor& hidden_states,
+                                 const torch::Tensor& selected_idxes) {
+  if (!hidden_states.defined() || !selected_idxes.defined() ||
+      selected_idxes.numel() == 0) {
+    return torch::Tensor();
+  }
+  torch::Tensor idxes = selected_idxes.to(
+      torch::dtype(torch::kLong).device(hidden_states.device()),
+      /*non_blocking=*/false);
+  return hidden_states.index_select(/*dim=*/0, idxes).contiguous();
+}
+
 }  // namespace
 
 VLMWorkerImpl::VLMWorkerImpl(const ParallelArgs& parallel_args,
@@ -146,10 +227,39 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
   auto model_output = model_executor_->forward(
       input.token_ids, input.positions, kv_caches_, input.input_params);
   auto& sampling_params = input.sampling_params;
+  const bool has_aux_hidden_states = model_output.aux_hidden_states.defined();
   torch::Tensor logits;
+  torch::Tensor lm_head_selected_token_idxes;
+  torch::Tensor selected_hidden_from_lm_head;
+  torch::Tensor selected_aux_hidden;
+  torch::Tensor selected_hidden_for_target_cache;
   if (sampling_params.selected_token_idxes.defined()) {
-    logits = model_->logits(model_output.hidden_states,
-                            sampling_params.selected_token_idxes);
+    lm_head_selected_token_idxes = choose_lm_head_selected_token_idxes(
+        sampling_params.selected_token_idxes,
+        input.input_params,
+        context_.get_parallel_args(),
+        model_output.hidden_states.size(0),
+        model_output.hidden_states.device());
+    if (options_.enable_speculative_decode()) {
+      logits = model_->logits(model_output.hidden_states,
+                              lm_head_selected_token_idxes,
+                              selected_hidden_from_lm_head);
+      if (has_aux_hidden_states) {
+        selected_aux_hidden = select_hidden_rows(model_output.aux_hidden_states,
+                                                 lm_head_selected_token_idxes);
+      } else if (selected_hidden_from_lm_head.defined()) {
+        selected_hidden_for_target_cache = selected_hidden_from_lm_head;
+      } else if (!input.input_params.meta.batch_forward_type.is_decode() &&
+                 !is_spec_draft_) {
+        selected_hidden_for_target_cache = select_hidden_rows(
+            has_aux_hidden_states ? model_output.aux_hidden_states
+                                  : model_output.hidden_states,
+            lm_head_selected_token_idxes);
+      }
+    } else {
+      logits = model_->logits(model_output.hidden_states,
+                              lm_head_selected_token_idxes);
+    }
   }
 
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
@@ -180,7 +290,7 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
 
   if (options_.enable_speculative_decode()) {
     torch::Tensor embeddings;
-    if (model_output.aux_hidden_states.defined()) {
+    if (has_aux_hidden_states) {
       embeddings = model_output.aux_hidden_states;
     } else {
       embeddings = model_output.hidden_states;
@@ -188,9 +298,19 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
     if (!input.input_params.meta.batch_forward_type.is_decode() &&
         !is_spec_draft_) {
       output.sample_output.embeddings = embeddings;
+      if (selected_hidden_for_target_cache.defined()) {
+        output.sample_output.selected_embeddings =
+            selected_hidden_for_target_cache;
+      }
     } else if (sampling_params.selected_token_idxes.defined()) {
-      output.sample_output.embeddings = embeddings.index_select(
-          /*dim=*/0, sampling_params.selected_token_idxes);
+      if (selected_aux_hidden.defined()) {
+        output.sample_output.embeddings = selected_aux_hidden;
+      } else if (selected_hidden_from_lm_head.defined()) {
+        output.sample_output.embeddings = selected_hidden_from_lm_head;
+      } else {
+        output.sample_output.embeddings =
+            select_hidden_rows(embeddings, lm_head_selected_token_idxes);
+      }
     }
   }
 
