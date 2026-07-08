@@ -50,10 +50,16 @@ void apply_repetition_penalties(torch::Tensor& logits,
 void apply_temperatures(torch::Tensor& logits,
                         const torch::Tensor& temperatures) {
   auto unsqueezed_temperatures = temperatures.unsqueeze(1);
-  unsqueezed_temperatures =
-      torch::where(unsqueezed_temperatures == 0,
-                   torch::tensor(1.0).to(unsqueezed_temperatures.device()),
-                   unsqueezed_temperatures);
+  // Cache device-side scalar to avoid synchronous H2D copy that forces
+  // aclrtSynchronizeStream per forward.
+  static thread_local torch::Tensor one_scalar;
+  const torch::Device& target_device = unsqueezed_temperatures.device();
+  if (!one_scalar.defined() || one_scalar.device() != target_device) {
+    one_scalar =
+        torch::full({}, 1.0, torch::TensorOptions().device(target_device));
+  }
+  unsqueezed_temperatures = torch::where(
+      unsqueezed_temperatures == 0, one_scalar, unsqueezed_temperatures);
 
   logits.div_(unsqueezed_temperatures);
 }
@@ -107,12 +113,17 @@ void apply_top_k_top_p(torch::Tensor& logits,
 
   if (top_k.defined() && top_p.defined()) {
 #if defined(USE_NPU)
-    auto max_value = std::numeric_limits<int64_t>::max();
+    constexpr int64_t kMaxInt64 = std::numeric_limits<int64_t>::max();
+    static thread_local torch::Tensor max_value_scalar;
+    const torch::Device& top_k_device = top_k.device();
+    if (!max_value_scalar.defined() ||
+        max_value_scalar.device() != top_k_device) {
+      max_value_scalar = torch::full(
+          {}, kMaxInt64, torch::TensorOptions().device(top_k_device));
+    }
 
     auto processed_top_k =
-        torch::where(
-            top_k <= 0, torch::tensor(max_value).to(top_k.device()), top_k)
-            .to(torch::kInt32);
+        torch::where(top_k <= 0, max_value_scalar, top_k).to(torch::kInt32);
     xllm::kernel::npu::top_k_top_p(logits, processed_top_k, top_p);
 #elif defined(USE_MLU)
     apply_top_k_top_p_torch_impl(logits, top_k, top_p);
@@ -125,12 +136,17 @@ void apply_top_k_top_p(torch::Tensor& logits,
 
     if (top_k.defined()) {
       auto processed_top_k = top_k.unsqueeze(1);
-      auto max_value = std::numeric_limits<int64_t>::max();
+      constexpr int64_t kMaxInt64Else = std::numeric_limits<int64_t>::max();
+      static thread_local torch::Tensor max_value_scalar_else;
+      const torch::Device& top_k_device = processed_top_k.device();
+      if (!max_value_scalar_else.defined() ||
+          max_value_scalar_else.device() != top_k_device) {
+        max_value_scalar_else = torch::full(
+            {}, kMaxInt64Else, torch::TensorOptions().device(top_k_device));
+      }
 
-      processed_top_k =
-          torch::where(processed_top_k <= 0,
-                       torch::tensor(max_value).to(processed_top_k.device()),
-                       processed_top_k);
+      processed_top_k = torch::where(
+          processed_top_k <= 0, max_value_scalar_else, processed_top_k);
 
       auto vocab_size = logits.size(-1);
       auto top_k_mask = torch::arange(vocab_size, sorted_logits.device())
