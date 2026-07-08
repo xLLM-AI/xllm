@@ -23,9 +23,19 @@ limitations under the License.
 #include <vector>
 
 #include "ATen/Tensor.h"
+#include "framework/sampling/beam_searcher.h"
 #include "torch_mlu_ops.h"
 
 namespace xllm::kernel::mlu {
+
+// Selects `beam_width` beams per group from per-sequence candidates using
+// torch-native ops. Inputs: logprobs [num_seq], top_tokens/top_logprobs
+// [num_seq, topk]. Returns BeamSearchOutput with src_seq_idxes (int32),
+// out_tokens (int32) and out_logprobs (float32), each shaped [num_seq].
+BeamSearchOutput beam_search(const torch::Tensor& logprobs,
+                             const torch::Tensor& top_tokens,
+                             const torch::Tensor& top_logprobs,
+                             int64_t beam_width);
 
 void apply_rotary(torch::Tensor& q,
                   torch::Tensor& k,

@@ -87,6 +87,7 @@ struct SamplingParameters {
 
     // for beam search
     params.use_beam_search = use_beam_search;
+    params.beam_width = beam_width;
     return params;
   }
 
@@ -161,6 +162,10 @@ struct SamplingParameters {
 
   // for beam search
   bool use_beam_search = false;
+
+  // beam width for device-side beam search grouping. Batch-uniform scalar;
+  // 0 when beam search is disabled.
+  int32_t beam_width = 0;
 };
 
 struct SampleOutput {
