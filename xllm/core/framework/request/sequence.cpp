@@ -309,11 +309,13 @@ Sequence::Sequence(const Sequence& other)
   logprob_state_ = std::make_unique<LogprobState>(*other.logprob_state_);
   // A forked sequence (beam / best_of) shares the prompt KV prefix by
   // ref-counting those blocks, but its linear-state / embedding resource block
-  // is private: drop the copied Single block so this sequence allocates its own
-  // on the next allocate. Preserves the pre-map behavior where single_block_
-  // was never copied by this constructor.
+  // is private: drop the copied Single and Linear blocks so this sequence
+  // allocates its own on the next allocate. Preserves the pre-map behavior
+  // where single_block_ was never copied by this constructor.
   kv_state_.erase_blocks(BlockType::SINGLE);
+  kv_state_.erase_blocks(BlockType::LINEAR);
   host_kv_state_.erase_blocks(BlockType::SINGLE);
+  host_kv_state_.erase_blocks(BlockType::LINEAR);
 }
 
 // The first token will be only used in disagg pd mode.

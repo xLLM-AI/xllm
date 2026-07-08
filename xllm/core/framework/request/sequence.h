@@ -200,9 +200,42 @@ class Sequence final {
   void clear_mtp_bootstrap_embedding() {
     mtp_bootstrap_embedding_ = torch::Tensor();
   }
-  // Single per-sequence resource block id (linear-state / embedding), or -1.
+  // Single per-sequence resource block id (embedding), or -1.
   int32_t get_single_block_id() const {
     return kv_state_.get_single_block_id();
+  }
+
+  // Linear-state (Qwen3.5 GDN) live slot, stored in composite_blocks_ under
+  // BlockType::LINEAR. Drawn from the dedicated LinearStatePrefixCache id
+  // space.
+  bool has_linear_state_slot() const {
+    return kv_state_.get_linear_block_id() >= 0;
+  }
+  int32_t get_linear_state_slot_id() const {
+    return kv_state_.get_linear_block_id();
+  }
+  void set_linear_state_slot(Block&& slot) {
+    auto* vec = kv_state_.mutable_blocks(BlockType::LINEAR);
+    vec->clear();
+    vec->push_back(std::move(slot));
+  }
+  Block reset_linear_state_slot() {
+    auto* vec = kv_state_.mutable_blocks(BlockType::LINEAR);
+    if (vec->empty()) {
+      return Block();
+    }
+    Block slot = std::move((*vec)[0]);
+    vec->clear();
+    return slot;
+  }
+  bool linear_state_initialized() const {
+    return kv_state_.linear_state_initialized();
+  }
+  void mark_linear_state_initialized() {
+    kv_state_.mark_linear_state_initialized();
+  }
+  void reset_linear_state_initialized() {
+    kv_state_.reset_linear_state_initialized();
   }
   const std::string& request_id() const { return request_id_; }
   // get input embedding

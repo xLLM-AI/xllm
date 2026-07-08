@@ -53,6 +53,14 @@ namespace xllm {
   void operator=(const TypeName&) = delete
 #endif
 
+#ifndef MOVE_ONLY
+#define MOVE_ONLY(TypeName)                      \
+  TypeName(const TypeName&) = delete;            \
+  TypeName& operator=(const TypeName&) = delete; \
+  TypeName(TypeName&&) noexcept = default;       \
+  TypeName& operator=(TypeName&&) noexcept = default
+#endif
+
 // Define a macro to simplify adding elements from a vector to a repeated field
 #define ADD_VECTOR_TO_PROTO(proto_field, vec) \
   do {                                        \

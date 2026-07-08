@@ -26,6 +26,7 @@ if(USE_NPU)
       :config
       :kv_cache
       :prefix_cache
+      :linear_state_prefix_cache
       absl::random_random
       Boost::serialization
       GTest::gtest_main

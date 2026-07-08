@@ -91,9 +91,17 @@ class KVCacheState {
 
   // Single per-sequence resource block (BlockType::SINGLE). The only per-type
   // id convenience accessor: returns the Single block id, or -1 when absent.
-  // Used for linear_state_ids / embedding_ids export and disagg-PD's
-  // linear_state_id. Other block types read via blocks(type).
+  // Used for embedding_ids export and disagg-PD's linear_state_id fallback.
+  // Other block types read via blocks(type).
   int32_t get_single_block_id() const;
+
+  // Linear-state live slot id (BlockType::LINEAR), or -1 when absent.
+  int32_t get_linear_block_id() const;
+
+  // Whether the linear-state live slot holds valid recurrent state.
+  bool linear_state_initialized() const { return linear_state_initialized_; }
+  void mark_linear_state_initialized() { linear_state_initialized_ = true; }
+  void reset_linear_state_initialized() { linear_state_initialized_ = false; }
 
   void set_transfer_kv_info(TransferKVInfo&& info);
   std::optional<TransferKVInfo>& transfer_kv_info();
@@ -149,6 +157,10 @@ class KVCacheState {
   // Number of local KV blocks already pushed to the decode instance.
   // Used for incremental push in chunked prefill + PD disagg mode.
   uint32_t pushed_local_block_count_ = 0;
+
+  // Whether the LINEAR live slot holds valid recurrent state for its sequence.
+  // Cleared by erase_blocks(LINEAR) and reset().
+  bool linear_state_initialized_ = false;
 };
 
 }  // namespace xllm

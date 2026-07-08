@@ -13,7 +13,7 @@ cc_library(
 )
 
 cc_library(
-  NAME 
+  NAME
     block
   HDRS
     block.h
@@ -43,6 +43,7 @@ cc_library(
     :request
     :common
     :prefix_cache
+    :linear_state_prefix_cache
     glog::glog
     Boost::serialization
     SMHasherSupport

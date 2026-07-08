@@ -26,6 +26,20 @@ cc_library(
 
 
 
+cc_library(
+  NAME
+    linear_state_prefix_cache
+  HDRS
+    linear_state_prefix_cache.h
+  SRCS
+    linear_state_prefix_cache.cpp
+  DEPS
+    :block
+    :request
+    :common
+    glog::glog
+)
+
 cc_binary(
   NAME
     prefix_cache_benchmark
