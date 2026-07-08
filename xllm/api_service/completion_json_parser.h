@@ -1,4 +1,4 @@
-/* Copyright 2025-2026 The xLLM Authors.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,18 +15,18 @@ limitations under the License.
 
 #pragma once
 
-#if defined(USE_MLU)
-#include "layers/mlu/attention.h"
-#elif defined(USE_NPU)
-#include "layers/npu_torch/attention.h"
-#elif defined(USE_CUDA) && defined(XLLM_TORCH_MUSA)
-#include "layers/musa/attention.h"
-#elif defined(USE_CUDA)
-#include "layers/cuda/attention.h"
-#elif defined(USE_ILU)
-#include "layers/ilu/attention.h"
-#elif defined(USE_MUSA)
-#include "layers/musa/attention.h"
-#elif defined(USE_DCU)
-#include "layers/dcu/attention.h"
-#endif
+#include <string>
+#include <utility>
+
+#include "core/common/types.h"
+
+namespace xllm {
+
+// Normalizes OpenAI-style completion JSON before protobuf parsing. An integer
+// array prompt is moved into "token_ids" and "prompt" is cleared; a string
+// prompt (or a missing/scalar prompt) is passed through unchanged. Batch and
+// malformed array forms are rejected with INVALID_ARGUMENT.
+std::pair<Status, std::string> preprocess_completion_prompt(
+    std::string json_str);
+
+}  // namespace xllm

@@ -230,13 +230,11 @@ void CompletionServiceImpl::process_async_rpc_impl(
   RequestParams request_params(rpc_request, "", "");
 
   std::optional<std::vector<int>> prompt_tokens = std::nullopt;
+  if (rpc_request.token_ids_size() > 0) {
+    prompt_tokens = std::vector<int>(rpc_request.token_ids().begin(),
+                                     rpc_request.token_ids().end());
+  }
   if (rpc_request.has_routing()) {
-    prompt_tokens = std::vector<int>{};
-    prompt_tokens->reserve(rpc_request.token_ids_size());
-    for (int i = 0; i < rpc_request.token_ids_size(); i++) {
-      prompt_tokens->emplace_back(rpc_request.token_ids(i));
-    }
-
     request_params.decode_address = rpc_request.routing().decode_name();
   }
 
@@ -281,13 +279,11 @@ void CompletionServiceImpl::process_async_impl(
   }
 
   std::optional<std::vector<int>> prompt_tokens = std::nullopt;
+  if (rpc_request.token_ids_size() > 0) {
+    prompt_tokens = std::vector<int>(rpc_request.token_ids().begin(),
+                                     rpc_request.token_ids().end());
+  }
   if (rpc_request.has_routing()) {
-    prompt_tokens = std::vector<int>{};
-    prompt_tokens->reserve(rpc_request.token_ids_size());
-    for (int i = 0; i < rpc_request.token_ids_size(); i++) {
-      prompt_tokens->emplace_back(rpc_request.token_ids(i));
-    }
-
     request_params.decode_address = rpc_request.routing().decode_name();
   }
 

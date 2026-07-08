@@ -23,6 +23,7 @@ limitations under the License.
 #include <filesystem>
 
 #include "api_service/chat_json_parser.h"
+#include "api_service/completion_json_parser.h"
 #include "api_service/service_impl_factory.h"
 #include "api_service/serving_mode.h"
 #include "call.h"
@@ -195,11 +196,20 @@ void APIService::CompletionsHttp(::google::protobuf::RpcController* controller,
       google::protobuf::Arena::CreateMessage<proto::CompletionResponse>(arena);
 
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+
+  auto [preprocess_status, processed_json] =
+      preprocess_completion_prompt(ctrl->request_attachment().to_string());
+  if (!preprocess_status.ok()) {
+    ctrl->SetFailed(preprocess_status.message());
+    LOG(ERROR) << "completion prompt preprocessing failed: "
+               << preprocess_status.message();
+    return;
+  }
+
   std::string error;
   json2pb::Json2PbOptions options;
-  butil::IOBuf& buf = ctrl->request_attachment();
-  butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
-  auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
+  auto st =
+      json2pb::JsonToProtoMessage(processed_json, req_pb, options, &error);
   if (!st) {
     ctrl->SetFailed(error);
     LOG(ERROR) << "parse json to proto failed: " << error;

@@ -120,6 +120,18 @@ void PrefillOnlyScheduler::handle_prefill_requests(
         continue;
       }
 
+      // Match shared prefix blocks before sizing this step's allocation. The
+      // match advances kv_cache_tokens_num() to the cached prefix length, so
+      // both the per-step token budget below and get_prefill_allocate_tokens()
+      // observe the post-match kv state. Without it, a new sequence whose
+      // per-step budget is clamped below its cached prefix would under-request:
+      // the prefix match still bumps kv inside allocate(), but the requested
+      // token count stays below the matched prefix, so capacity never grows to
+      // cover kv_cache_tokens_num() + budget (batch_input_builder invariant).
+      if (prefill_sequence->kv_state().num_blocks(BlockType::KV) == 0) {
+        kv_cache_manager_->allocate_shared(prefill_sequence.get());
+      }
+
       // FIXME: use actual num_tokens to handle
       // Currently overestimating the number of tokens actually processed when
       // enable prefix cache

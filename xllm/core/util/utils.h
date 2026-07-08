@@ -93,6 +93,20 @@ static inline int64_t align_up(int64_t value, int64_t alignment) {
   return ((value + alignment - 1) / alignment) * alignment;
 }
 
+// Returns the first token id in `token_ids` that falls outside the valid
+// vocabulary range [0, vocab_size); std::nullopt if all ids are in range.
+// Callers must skip the scan when vocab_size <= 0 (range unknown).
+inline std::optional<int32_t> find_out_of_vocab_token(
+    const std::vector<int32_t>& token_ids,
+    int64_t vocab_size) {
+  for (int32_t token_id : token_ids) {
+    if (token_id < 0 || token_id >= vocab_size) {
+      return token_id;
+    }
+  }
+  return std::nullopt;
+}
+
 bool match_suffix(const Slice<int32_t>& data, const Slice<int32_t>& suffix);
 
 std::vector<uint32_t> cal_vec_split_index(uint32_t vec_size, uint32_t part_num);
