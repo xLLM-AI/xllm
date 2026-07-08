@@ -119,8 +119,6 @@ class FusedMoEImpl : public torch::nn::Module {
                              const torch::Tensor& hidden_states,
                              int64_t num_token_expand);
 
-  std::pair<torch::Tensor, std::optional<torch::List<int64_t>>>
-  prepare_group_gemm_weight_scale(const torch::Tensor& b_scale) const;
   RouteInfo get_route(torch::Tensor& hidden_states_2d,
                       bool enable_all2all_communication,
                       const std::optional<RouteInfo>& route_info,
@@ -186,7 +184,14 @@ class FusedMoEImpl : public torch::nn::Module {
   DEFINE_FUSED_WEIGHT(input_smooth);
   DEFINE_FUSED_WEIGHT(act_smooth);
 
+  torch::List<int64_t> w13_scale_quant_flag_;
+  torch::List<int64_t> w2_scale_quant_flag_;
+  bool scale_layout_prepared_ = false;
+
   void load_experts(const StateDict& state_dict);
+
+  void prepare_scale_layout();
+
   // create the group gemm output tensor with the workspace
   torch::Tensor create_group_gemm_output(const torch::Tensor& a,
                                          const torch::Tensor& b,
