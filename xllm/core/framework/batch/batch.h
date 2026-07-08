@@ -158,7 +158,14 @@ class Batch {
                                  bool replace_fake_token);
 
   void process_beam_search(bool force_requested_result_size = false);
-  bool has_partial_finished_beam_group() const;
+
+  // Returns true only when the batch is a clean, uniform beam-search batch that
+  // the device beam-search kernel can safely consume: every sequence group is a
+  // beam group, all groups share one beam_width, each group is fully expanded
+  // to exactly beam_width active (unfinished, already-decoding) sequences, and
+  // no non-beam sequence is mixed in. When this is false, the kernel path would
+  // mis-index across requests, so callers fall back to the host beam path.
+  bool beam_kernel_batch_eligible() const;
 
   std::unordered_map<uint32_t, uint32_t> cal_seq_exchange_index(
       std::vector<uint32_t>& kv_cache_tokens_num);

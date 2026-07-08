@@ -148,8 +148,14 @@ ForwardInput Batch::prepare_forward_input(uint32_t num_decoding_tokens,
                             &args,
                             batch_forward_type_,
                             cp_size);
-  return builder.build_forward_input(num_decoding_tokens,
-                                     min_decoding_batch_size);
+  ForwardInput forward_input =
+      builder.build_forward_input(num_decoding_tokens, min_decoding_batch_size);
+  if (!beam_kernel_batch_eligible()) {
+    // See the sibling overload: only a uniform beam batch is safe for the
+    // device kernel; otherwise drop acc_logprob to fall back to the host path.
+    forward_input.sampling_params.acc_logprob = torch::Tensor();
+  }
+  return forward_input;
 }
 
 ForwardInput Batch::prepare_rec_forward_input(uint32_t num_decoding_tokens,
@@ -205,30 +211,56 @@ std::vector<Sequence*> Batch::get_sequences() {
   return result;
 }
 
-bool Batch::has_partial_finished_beam_group() const {
+bool Batch::beam_kernel_batch_eligible() const {
+  // The device beam-search kernel assumes the batch is exactly num_groups
+  // blocks of `beam_width` contiguous rows, all decoding, one shared width.
+  // Continuous batching breaks that (mid-flight expansion, per-beam early
+  // finish, mixed widths, mixed prefill/decode stages, non-beam sequences). Any
+  // deviation makes `group * beam_width + i` index into a foreign request, so
+  // we only green-light the kernel when the batch is perfectly uniform and fall
+  // back to the host beam path otherwise.
   if (sequence_groups_.empty()) {
     return false;
   }
 
+  int32_t beam_width = 0;
+  size_t total_beam_sequences = 0;
   for (auto* seq_group : sequence_groups_) {
     if (!seq_group->check_beam_search()) {
-      continue;
+      return false;
     }
 
     const auto& sequences = seq_group->sequences();
     if (sequences.empty()) {
-      continue;
+      return false;
     }
 
-    const size_t finished_cnt = static_cast<size_t>(
-        std::count_if(sequences.begin(), sequences.end(), [](const auto& seq) {
-          return seq->finished();
-        }));
-    if (finished_cnt > 0 && finished_cnt < sequences.size()) {
-      return true;
+    const int32_t group_width = sequences[0]->sampling_param()->beam_width;
+    if (group_width <= 1) {
+      return false;
     }
+    if (beam_width == 0) {
+      beam_width = group_width;
+    } else if (group_width != beam_width) {
+      return false;
+    }
+
+    // The group must be fully expanded to beam_width active rows, all already
+    // decoding (num_generated > 0 so they feed acc_logprob) and none finished.
+    if (static_cast<int32_t>(sequences.size()) != beam_width) {
+      return false;
+    }
+    for (const auto& seq : sequences) {
+      if (seq->finished() || seq->num_generated_tokens() == 0) {
+        return false;
+      }
+    }
+    total_beam_sequences += sequences.size();
   }
-  return false;
+
+  // Catch non-beam sequences that live only in the flattened sequences_ list
+  // (kernel row space must equal exactly the grouped beam rows).
+  return total_beam_sequences == sequences_.size();
 }
 
 void Batch::refresh_sequences_from_groups() {
@@ -364,9 +396,10 @@ ForwardInput Batch::prepare_forward_input(const ModelArgs& args,
   ForwardInput forward_input =
       builder.build_forward_input(/*num_decoding_tokens=*/0,
                                   /*min_decoding_batch_size=*/0);
-  if (has_partial_finished_beam_group()) {
-    // Beam-search kernel assumes fixed beam width per group. When only part of
-    // a group is active, fall back to software beam merge.
+  if (!beam_kernel_batch_eligible()) {
+    // The device beam-search kernel can only consume a perfectly uniform beam
+    // batch. Clearing acc_logprob makes the worker skip the kernel (leaving
+    // src_seq_idxes empty), so the engine falls back to the host beam path.
     forward_input.sampling_params.acc_logprob = torch::Tensor();
   }
   return forward_input;
@@ -765,7 +798,7 @@ void Batch::process_beam_search_output(const RawForwardOutput& raw_output,
     for (size_t i = 0; i < beam_width; i++) {
       size_t task_id = sequence_group_id * beam_width + i;
       int32_t src_seq_idx = raw_output.src_seq_idxes[task_id];
-      CHECK_LE(src_seq_idx, sequences_.size());
+      CHECK_LT(src_seq_idx, static_cast<int32_t>(sequences_.size()));
       auto src_seq = sequences_[src_seq_idx];
       src_acc_logprob_vec[i] = src_seq->get_acc_logprob();
       src_token_ids[i] = std::vector<int32_t>(src_seq->tokens());
@@ -775,7 +808,7 @@ void Batch::process_beam_search_output(const RawForwardOutput& raw_output,
     for (size_t i = 0; i < beam_width; i++) {
       size_t task_id = sequence_group_id * beam_width + i;
       int32_t src_seq_idx = raw_output.src_seq_idxes[task_id];
-      CHECK_LE(src_seq_idx, sequences_.size());
+      CHECK_LT(src_seq_idx, static_cast<int32_t>(sequences_.size()));
       auto& base_seq = sequences_[task_id];
       auto& src_seq = sequences_[src_seq_idx];
 
