@@ -24,6 +24,7 @@ limitations under the License.
 #include <string>
 
 #include "backend.h"
+#include "core/common/macros.h"
 
 namespace xllm::triton_jit {
 
@@ -39,10 +40,7 @@ class MluCompiledKernel final : public CompiledKernel {
   MluCompiledKernel(std::string dir, std::string name);
   ~MluCompiledKernel() override;
 
-  MluCompiledKernel(const MluCompiledKernel&) = delete;
-  MluCompiledKernel& operator=(const MluCompiledKernel&) = delete;
-  MluCompiledKernel(MluCompiledKernel&&) = delete;
-  MluCompiledKernel& operator=(MluCompiledKernel&&) = delete;
+  DISALLOW_COPY_AND_ASSIGN(MluCompiledKernel);
 
   void launch(void* stream, Grid g, const void* const* args) override;
 
