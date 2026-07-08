@@ -71,7 +71,9 @@ fused_recurrent_gated_delta_rule_packed_decode(
   cnrtQueue_t queue = torch_mlu::getCurMLUStream();
 
   JITKernel& f = JITKernel::get(
-      /*py_path=*/"xllm.core.kernels.mlu.triton_kernel.fused_recurrent_gated_delta_rule_packed_decode",
+      /*py_path=*/
+      "xllm.core.kernels.mlu.triton_kernel.fused_recurrent_gated_delta_rule_"
+      "packed_decode",
       /*fn_name=*/"tmo_fused_recurrent_gated_delta_rule_packed_decode_kernel");
 
   f.launch(

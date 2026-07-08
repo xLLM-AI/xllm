@@ -81,7 +81,8 @@ torch::Tensor causal_conv1d_update_decode(
   cnrtQueue_t queue = torch_mlu::getCurMLUStream();
 
   JITKernel& f = JITKernel::get(
-      /*py_path=*/"xllm.core.kernels.mlu.triton_kernel.causal_conv1d_update_decode",
+      /*py_path=*/
+      "xllm.core.kernels.mlu.triton_kernel.causal_conv1d_update_decode",
       /*fn_name=*/"tmo_causal_conv1d_update_decode_kernel");
 
   f.launch(static_cast<void*>(queue),
