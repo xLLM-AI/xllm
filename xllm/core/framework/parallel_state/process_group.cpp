@@ -209,6 +209,20 @@ void ProcessGroup::all_to_all_single(
   }
 }
 
+void ProcessGroup::send(const torch::Tensor& tensor, int dst, int tag) {
+  CHECK(pg_ != nullptr) << "Process group is not initialized.";
+  CHECK(tensor.defined()) << "send tensor is not defined";
+  std::vector<torch::Tensor> tensors = {tensor};
+  pg_->send(tensors, dst, tag)->wait();
+}
+
+void ProcessGroup::recv(torch::Tensor& tensor, int src, int tag) {
+  CHECK(pg_ != nullptr) << "Process group is not initialized.";
+  CHECK(tensor.defined()) << "recv tensor is not defined";
+  std::vector<torch::Tensor> tensors = {tensor};
+  pg_->recv(tensors, src, tag)->wait();
+}
+
 std::string ProcessGroup::hccl_comm_name(bool init_comm) {
   (void)init_comm;
   CHECK(false) << "hccl_comm_name is only supported on NPU HCCL process group.";
