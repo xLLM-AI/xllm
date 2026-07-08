@@ -20,7 +20,6 @@ limitations under the License.
 #include <optional>
 
 #include "activation.h"
-#include "common/flash_comm1_context.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/quant_args.h"

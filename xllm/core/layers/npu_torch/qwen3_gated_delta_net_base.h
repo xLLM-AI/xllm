@@ -22,7 +22,6 @@ limitations under the License.
 #include <utility>
 
 #include "attention.h"
-#include "common/flash_comm1_context.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"

@@ -1693,15 +1693,10 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input,
         mmrs_params.b = mmrs_weight_transposed();
         mmrs_params.bias = bias;
         mmrs_params.process_group = process_group_;
-        mmrs_params.original_num_tokens = fc1_ctx->original_num_tokens;
         mmrs_params.output = mmrs_output;
         mmrs_params.comm_mode = fc1_ctx->mmrs_comm_mode;
         output = xllm::kernel::matmul_reduce_scatter(mmrs_params);
         if (output.sizes() == torch::IntArrayRef(output_shape)) {
-          LOG_FIRST_N(INFO, 16)
-              << "FC1 MMRS row-parallel fused output accepted: input="
-              << input.sizes() << ", weight=" << weight_.sizes()
-              << ", output=" << output.sizes();
           return output;
         }
         LOG_FIRST_N(WARNING, 8)

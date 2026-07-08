@@ -180,9 +180,6 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
     out = out * torch::sigmoid(gate.view({T, q_size_}));
 
     if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
-      LOG_FIRST_N(INFO, 16)
-          << "FC1 MMRS callsite Qwen3NextAttention.o_proj(mrope): input="
-          << out.sizes();
       return o_proj_->forward(
           out, row_parallel_reduce_mode_for_fc1(*fc1_ctx));
     }
@@ -217,9 +214,6 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
   }
 
   if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
-    LOG_FIRST_N(INFO, 16)
-        << "FC1 MMRS callsite Qwen3NextAttention.o_proj: input="
-        << out.sizes();
     return o_proj_->forward(
         out, row_parallel_reduce_mode_for_fc1(*fc1_ctx));
   }

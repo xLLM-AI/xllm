@@ -147,17 +147,6 @@ torch::Tensor matmul_reduce_scatter(
         << ", dtype=" << a.scalar_type();
   }
 
-  LOG_FIRST_N(INFO, 16)
-      << "FC1 MMRS torch_npu hit: a=" << a.sizes() << ", b=" << b.sizes()
-      << ", expected_out=" << output->sizes() << ", dtype=" << a.scalar_type()
-      << ", rank=" << process_group->rank()
-      << ", world_size=" << process_group->world_size()
-      << ", reduce_op=" << (reduce_op.empty() ? "sum" : reduce_op)
-      << ", comm_turn=" << comm_turn << ", stream_mode=" << stream_mode
-      << ", comm_mode=" << (comm_mode.empty() ? "none" : comm_mode)
-      << ", effective_comm_mode="
-      << (effective_comm_mode.empty() ? "none" : effective_comm_mode);
-
   std::optional<c10::string_view> torch_comm_mode = std::nullopt;
   if (effective_comm_mode == "ai_cpu" || effective_comm_mode == "aiv") {
     torch_comm_mode = c10::string_view(effective_comm_mode);

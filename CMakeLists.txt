@@ -334,52 +334,8 @@ find_package(benchmark CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(OpenCV CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
-find_package(Python COMPONENTS Interpreter Development REQUIRED)
+find_package(Python COMPONENTS Development REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
-
-if(USE_NPU)
-  function(xllm_set_env_from_python VAR PYTHON_CODE)
-    if("$ENV{${VAR}}" STREQUAL "")
-      execute_process(
-        COMMAND ${Python_EXECUTABLE} -c "${PYTHON_CODE}"
-        OUTPUT_VARIABLE XLLM_INFERRED_ENV_VALUE
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_VARIABLE XLLM_INFERRED_ENV_ERROR
-        RESULT_VARIABLE XLLM_INFERRED_ENV_RESULT
-      )
-      if(NOT XLLM_INFERRED_ENV_RESULT EQUAL 0 OR "${XLLM_INFERRED_ENV_VALUE}" STREQUAL "")
-        message(FATAL_ERROR "Failed to infer ${VAR}: ${XLLM_INFERRED_ENV_ERROR}")
-      endif()
-      set(ENV{${VAR}} "${XLLM_INFERRED_ENV_VALUE}")
-      message(STATUS "Inferred ${VAR}: $ENV{${VAR}}")
-    endif()
-  endfunction()
-
-  if("$ENV{PYTHON_INCLUDE_PATH}" STREQUAL "")
-    set(ENV{PYTHON_INCLUDE_PATH} "${Python_INCLUDE_DIRS}")
-  endif()
-  if("$ENV{PYTHON_LIB_PATH}" STREQUAL "")
-    execute_process(
-      COMMAND ${Python_EXECUTABLE} -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR') or '')"
-      OUTPUT_VARIABLE XLLM_PYTHON_LIB_PATH
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    set(ENV{PYTHON_LIB_PATH} "${XLLM_PYTHON_LIB_PATH}")
-  endif()
-  xllm_set_env_from_python(PYTORCH_INSTALL_PATH "import importlib.util; spec = importlib.util.find_spec('torch'); print(spec.submodule_search_locations[0])")
-  xllm_set_env_from_python(PYTORCH_NPU_INSTALL_PATH "import importlib.util; spec = importlib.util.find_spec('torch_npu'); print(spec.submodule_search_locations[0])")
-  if(NOT EXISTS "$ENV{PYTORCH_NPU_INSTALL_PATH}/include/torch_npu/torch_npu.h"
-      AND EXISTS "/usr/local/libtorch_npu/include/torch_npu/torch_npu.h")
-    set(ENV{PYTORCH_NPU_INSTALL_PATH} "/usr/local/libtorch_npu")
-    message(STATUS "Using PYTORCH_NPU_INSTALL_PATH with compatibility header: $ENV{PYTORCH_NPU_INSTALL_PATH}")
-  endif()
-  if("$ENV{LIBTORCH_ROOT}" STREQUAL "")
-    set(ENV{LIBTORCH_ROOT} "$ENV{PYTORCH_INSTALL_PATH}")
-  endif()
-  if("$ENV{NPU_HOME_PATH}" STREQUAL "" AND NOT "$ENV{ASCEND_HOME_PATH}" STREQUAL "")
-    set(ENV{NPU_HOME_PATH} "$ENV{ASCEND_HOME_PATH}")
-  endif()
-endif()
 
 if (USE_CXX11_ABI)
   # only use jemalloc if using the new C++-11 ABI

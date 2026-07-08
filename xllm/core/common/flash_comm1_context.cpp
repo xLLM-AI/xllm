@@ -289,11 +289,6 @@ torch::Tensor reduce_scatter_padded_local(const torch::Tensor& input,
   auto output_shape = padded_input.sizes().vec();
   output_shape[0] = ctx.padded_local_num_tokens;
   torch::Tensor output = torch::empty(output_shape, padded_input.options());
-  LOG_FIRST_N(INFO, 16)
-      << "FC1 reduce_scatter active: rank=" << ctx.tp_rank
-      << ", original_tokens=" << ctx.original_num_tokens
-      << ", padded_tokens=" << ctx.padded_num_tokens
-      << ", local_tokens=" << ctx.padded_local_num_tokens;
   ctx.tp_group->reduce_scatter(padded_input, output);
   return output;
 }
