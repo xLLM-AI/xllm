@@ -77,6 +77,37 @@ DEFINE_int64(
     1048576,
     "Qwen Image Edit Plus VAE image size used to calculate dimensions.");
 
+DEFINE_bool(dit_sparse_attention_enabled,
+            false,
+            "Enable block-wise sparse attention / RainFusion for WAN.");
+
+DEFINE_double(dit_sparse_attention_sparsity,
+              0.5,
+              "Sparse attention sparsity ratio in [0.0, 1.0). 0.0 = dense "
+              "attention, 0.5 = drop 50 percent blocks.");
+
+DEFINE_int64(
+    dit_sparse_attention_pool_size,
+    128,
+    "Sparse attention pooling window size for block-wise mask generation.");
+
+DEFINE_int64(dit_sparse_attention_sparse_start_step,
+             0,
+             "Sparse attention step index to start sparse attention. "
+             "Steps before this use dense attention.");
+
+DEFINE_string(
+    dit_sparse_attention_version,
+    "rain_fusion",
+    "Sparse attention version: 'rain_fusion' (frame-pairing + "
+    "aclnnRainFusionAttention) or 'sparse_attention' (block-decompose + "
+    "aclnnBlockSparseAttention).");
+
+DEFINE_int64(dit_sparse_attention_mask_refresh_steps,
+             1,
+             "Sparse attention: recompute block sparse mask every N diffusion "
+             "steps. 1 = every step (default), higher = reuse mask longer.");
+
 namespace xllm {
 
 void DiTConfig::from_flags() {
@@ -95,6 +126,12 @@ void DiTConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_generation_image_area_max);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_vae_image_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_enable_vae_tiling);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sparse_attention_enabled);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sparse_attention_sparsity);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sparse_attention_pool_size);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sparse_attention_sparse_start_step);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sparse_attention_version);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sparse_attention_mask_refresh_steps);
 }
 
 void DiTConfig::from_json(const JsonReader& json) {
@@ -113,6 +150,12 @@ void DiTConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_generation_image_area_max);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_vae_image_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_enable_vae_tiling);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sparse_attention_enabled);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sparse_attention_sparsity);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sparse_attention_pool_size);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sparse_attention_sparse_start_step);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sparse_attention_version);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sparse_attention_mask_refresh_steps);
 }
 
 void DiTConfig::append_config_json(nlohmann::ordered_json& config_json) const {
@@ -147,6 +190,18 @@ void DiTConfig::append_config_json(nlohmann::ordered_json& config_json) const {
       config_json, default_config, dit_vae_image_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_enable_vae_tiling);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_sparse_attention_enabled);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_sparse_attention_sparsity);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_sparse_attention_pool_size);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_sparse_attention_sparse_start_step);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_sparse_attention_version);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_sparse_attention_mask_refresh_steps);
 }
 
 DiTConfig& DiTConfig::get_instance() {

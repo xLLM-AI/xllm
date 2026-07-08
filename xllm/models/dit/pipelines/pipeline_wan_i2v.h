@@ -19,6 +19,7 @@ limitations under the License.
 #include <cstring>
 #include <memory>
 
+#include "core/framework/config/dit_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/dit_model_loader.h"
@@ -55,12 +56,26 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
     const auto& scheduler_args = context.get_model_args("scheduler");
     num_train_timesteps_ = scheduler_args.num_train_timesteps();
 
+    // RainFusion config is static (derived from flags) — build it once here
+    // and pass to the transformers via constructor. It never changes per
+    // request, unlike RainFusionState which is per-inference dynamic state.
+    auto& dit_config = DiTConfig::get_instance();
+    rf_config_.enabled = dit_config.dit_sparse_attention_enabled();
+    rf_config_.sparsity =
+        static_cast<float>(dit_config.dit_sparse_attention_sparsity());
+    rf_config_.pool_size = dit_config.dit_sparse_attention_pool_size();
+    rf_config_.sparse_start_step =
+        dit_config.dit_sparse_attention_sparse_start_step();
+    rf_config_.version = dit_config.dit_sparse_attention_version();
+    rf_config_.mask_refresh_steps =
+        dit_config.dit_sparse_attention_mask_refresh_steps();
+
     LOG(INFO) << "Initializing Wan2_2I2V pipeline...";
     vae_ = AutoencoderKLWan(context.get_model_context("vae"));
-    transformer_ =
-        WanTransformer3DModel(context.get_model_context("transformer"));
-    transformer_2_ =
-        WanTransformer3DModel(context.get_model_context("transformer_2"));
+    transformer_ = WanTransformer3DModel(
+        context.get_model_context("transformer"), rf_config_);
+    transformer_2_ = WanTransformer3DModel(
+        context.get_model_context("transformer_2"), rf_config_);
     umt5_ = UMT5EncoderModel(context.get_model_context("text_encoder"));
     scheduler_ =
         UniPCMultistepScheduler(context.get_model_context("scheduler"));
@@ -481,6 +496,10 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
     float boundary_timestep =
         boundary_ratio_ > 0.0f ? boundary_ratio_ * num_train_timesteps_ : -1.0f;
 
+    // RainFusion config is static and already bound to the transformers in the
+    // constructor. Only the per-inference dynamic state lives here.
+    xllm::dit::RainFusionState rf_state;
+
     for (int64_t i = 0; i < timesteps.numel(); ++i) {
       torch::Tensor t = timesteps[i];
       int64_t total_steps = timesteps.numel();
@@ -496,6 +515,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
         current_guidance = guidance_scale_2;
       }
 
+      rf_state.current_step = i;
       torch::Tensor latent_model_input;
       torch::Tensor timestep_input;
 
@@ -532,6 +552,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
             timestep_input,
             embeds,
             torch::Tensor(),
+            rf_state,
             [&rolling](int32_t i) { rolling.wait_h2d(i); },
             [&rolling](int32_t i) { rolling.schedule_next_h2d(i); });
       };
@@ -552,7 +573,9 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
                   : current_model->forward(latent_model_input,
                                            timestep_input,
                                            rank == 0 ? encoded_prompt_embeds
-                                                     : encoded_negative_embeds);
+                                                     : encoded_negative_embeds,
+                                           torch::Tensor(),
+                                           rf_state);
           auto gathered = xllm::parallel_state::gather(
               noise_pred, parallel_args_.dit_cfg_group_, /*dim=*/0);
           auto chunks = torch::chunk(gathered, 2, 0);
@@ -563,10 +586,16 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
             noise_pred = rolling_forward(encoded_prompt_embeds);
             noise_uncond = rolling_forward(encoded_negative_embeds);
           } else {
-            noise_pred = current_model->forward(
-                latent_model_input, timestep_input, encoded_prompt_embeds);
-            noise_uncond = current_model->forward(
-                latent_model_input, timestep_input, encoded_negative_embeds);
+            noise_pred = current_model->forward(latent_model_input,
+                                                timestep_input,
+                                                encoded_prompt_embeds,
+                                                torch::Tensor(),
+                                                rf_state);
+            noise_uncond = current_model->forward(latent_model_input,
+                                                  timestep_input,
+                                                  encoded_negative_embeds,
+                                                  torch::Tensor(),
+                                                  rf_state);
           }
         }
 
@@ -580,7 +609,9 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
                          ? rolling_forward(encoded_prompt_embeds)
                          : current_model->forward(latent_model_input,
                                                   timestep_input,
-                                                  encoded_prompt_embeds);
+                                                  encoded_prompt_embeds,
+                                                  torch::Tensor(),
+                                                  rf_state);
       }
       auto prev_latents = scheduler_->step(noise_pred, t, prepared_latents);
       prepared_latents = prev_latents.detach();
@@ -616,7 +647,6 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
     prepared_latents = prepared_latents + latents_mean;
     video = vae_->decode(prepared_latents.to(torch::kFloat32)).sample;
     video = video_processor_->postprocess_video(video);
-
     return video;
   }
 
@@ -722,6 +752,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
   std::vector<double> latents_std_;
   torch::TensorOptions options_;
   const ParallelArgs parallel_args_;
+  xllm::dit::RainFusionConfig rf_config_;
 };
 TORCH_MODULE(WanImageToVideoPipeline);
 
