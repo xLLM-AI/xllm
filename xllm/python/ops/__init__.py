@@ -17,6 +17,9 @@
 Each op is a direct binding to the C++ ``torch.ops.xllm_ops.*`` kernel (routed
 by PyTorch DispatchKey per device).  FakeTensor / disallow_in_graph semantics
 are registered as import-time side effects in the submodules.
+
+Attention kernels (batch_prefill/batch_decode) are provided by the flashinfer
+Python package directly via ``layers/attention.py``, not through this module.
 """
 
 from .compute import (
@@ -25,15 +28,7 @@ from .compute import (
     rms_norm,
     silu_and_mul,
 )
-from .attention import (
-    batch_chunked_prefill,
-    batch_decode,
-    batch_prefill,
-    reshape_paged_cache,
-    update_chunked_prefill_plan,
-    update_decode_plan,
-    update_prefill_plan,
-)
+from .attention import reshape_paged_cache
 from .collectives import (
     all_gather,
     all_reduce,
@@ -46,12 +41,6 @@ __all__ = [
     "silu_and_mul",
     "fused_qk_norm_rope",
     "reshape_paged_cache",
-    "batch_prefill",
-    "batch_decode",
-    "batch_chunked_prefill",
-    "update_prefill_plan",
-    "update_decode_plan",
-    "update_chunked_prefill_plan",
     "all_reduce",
     "all_gather",
     "set_tp_group",

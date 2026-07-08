@@ -1,12 +1,10 @@
-"""Paged attention layer — Python owns the full attention lifecycle.
+"""Paged attention layer — uses flashinfer Python API directly.
 
-Equivalent to SGLang's BatchDecodeWithPagedKVCacheWrapper: this layer
-manages plan computation (via update_*_plan ops) and kernel dispatch
-(via batch_prefill/decode/chunked_prefill ops).
+Wraps flashinfer's BatchDecodeWithPagedKVCacheWrapper and
+BatchPrefillWithRaggedKVCacheWrapper / BatchPrefillWithPagedKVCacheWrapper.
+Plan is called once per batch; run is called once per layer.
 
-Workspace buffers live in the C++ FlashinferWorkspace singleton (thread-local,
-128MB float + 8MB int + 8MB page-locked). The ops access it internally —
-Python never allocates or passes workspace.
+KV cache layout: [num_blocks, page_size=1, num_kv_heads, head_dim] (NHD).
 """
 
 from __future__ import annotations
@@ -14,13 +12,17 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+import flashinfer
+
 from .. import ops
 from ..attn_metadata import AttentionMetadata
 from ..forward_context import get_forward_context
 
+_WORKSPACE_SIZE = 128 * 1024 * 1024  # 128 MB
+
 
 class PagedAttention(nn.Module):
-    """Python owns attention: plan, dispatch. Workspace is C++ singleton."""
+    """Flashinfer-backed paged attention. Plan once per batch, run per layer."""
 
     def __init__(
         self,
@@ -38,20 +40,19 @@ class PagedAttention(nn.Module):
         self.head_dim = head_dim
         self.scale = scale
         self.sliding_window = sliding_window
-        self.dtype_str = {
-            torch.bfloat16: "bfloat16",
-            torch.float16: "float16",
-            torch.float32: "float32",
-        }[dtype]
+        self.dtype = dtype
 
-        # Plan state: fixed-address buffer for cudagraph compatibility.
-        self._plan_info_buf: torch.Tensor = torch.zeros(16, dtype=torch.int64)
-        self._plan_info_len: int = 0
-        self.uri: str = ""
+        workspace = torch.empty(_WORKSPACE_SIZE, dtype=torch.uint8, device=device)
 
-    @property
-    def plan_info(self) -> torch.Tensor:
-        return self._plan_info_buf[: self._plan_info_len]
+        self._decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+            workspace, "NHD"
+        )
+        self._prefill_ragged_wrapper = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
+            torch.empty(_WORKSPACE_SIZE, dtype=torch.uint8, device=device), "NHD"
+        )
+        self._prefill_paged_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+            torch.empty(_WORKSPACE_SIZE, dtype=torch.uint8, device=device), "NHD"
+        )
 
     def forward(
         self,
@@ -67,44 +68,17 @@ class PagedAttention(nn.Module):
         q_3d = q.view(-1, self.num_heads, self.head_dim)
         k_3d = k.view(-1, self.num_kv_heads, self.head_dim)
         v_3d = v.view(-1, self.num_kv_heads, self.head_dim)
-        output = torch.empty_like(q_3d)
 
         ops.reshape_paged_cache(
             attn_metadata.slot_mapping, k_3d, v_3d, k_cache, v_cache
         )
 
         if attn_metadata.is_prefill:
-            ops.batch_prefill(
-                q_3d, k_3d, v_3d,
-                attn_metadata.q_cu_seq_lens,
-                attn_metadata.kv_cu_seq_lens,
-                self.plan_info, self.uri,
-                self.scale, self.sliding_window,
-                output,
-            )
+            output = self._prefill_ragged_wrapper.run(q_3d, k_3d, v_3d)
         elif attn_metadata.is_chunked_prefill:
-            ops.batch_chunked_prefill(
-                q_3d, k_cache, v_cache,
-                attn_metadata.paged_kv_indptr,
-                attn_metadata.paged_kv_indices,
-                attn_metadata.paged_kv_last_page_len,
-                self.plan_info, self.uri,
-                self.scale, self.sliding_window,
-                attn_metadata.qo_indptr,
-                output,
-            )
+            output = self._prefill_paged_wrapper.run(q_3d, (k_cache, v_cache))
         else:
-            ops.batch_decode(
-                q_3d, k_cache, v_cache,
-                attn_metadata.paged_kv_indptr,
-                attn_metadata.paged_kv_indices,
-                attn_metadata.paged_kv_last_page_len,
-                self.plan_info, self.uri,
-                self.scale, self.sliding_window,
-                attn_metadata.use_tensor_core,
-                attn_metadata.qo_indptr,
-                output,
-            )
+            output = self._decode_wrapper.run(q_3d, (k_cache, v_cache))
 
         return output.view(-1, self.num_heads * self.head_dim)
 
@@ -115,48 +89,46 @@ class PagedAttention(nn.Module):
         enable_cuda_graph: bool = False,
     ) -> None:
         """Compute the attention plan for this batch."""
-        block_size = k_cache.size(1) if k_cache.dim() >= 2 else 1
+        page_size = k_cache.size(1) if k_cache.dim() >= 2 else 1
+        window_left = self.sliding_window if self.sliding_window > 0 else -1
+
         if attn_metadata.is_prefill:
-            new_info, self.uri = ops.update_prefill_plan(
+            self._prefill_ragged_wrapper.plan(
                 attn_metadata.q_cu_seq_lens,
                 attn_metadata.kv_cu_seq_lens,
                 self.num_heads,
                 self.num_kv_heads,
                 self.head_dim,
-                self.dtype_str,
-                self.dtype_str,
-                self.dtype_str,
+                causal=True,
+                sm_scale=self.scale,
+                window_left=window_left,
+                q_data_type=self.dtype,
             )
         elif attn_metadata.is_chunked_prefill:
-            new_info, self.uri = (
-                ops.update_chunked_prefill_plan(
-                    attn_metadata.paged_kv_indptr,
-                    attn_metadata.paged_kv_last_page_len,
-                    self.num_heads,
-                    self.num_kv_heads,
-                    self.head_dim,
-                    block_size,
-                    self.sliding_window,
-                    self.dtype_str,
-                    self.dtype_str,
-                    self.dtype_str,
-                )
-            )
-        else:
-            new_info, self.uri = ops.update_decode_plan(
+            self._prefill_paged_wrapper.plan(
+                attn_metadata.qo_indptr,
                 attn_metadata.paged_kv_indptr,
+                attn_metadata.paged_kv_indices,
                 attn_metadata.paged_kv_last_page_len,
                 self.num_heads,
                 self.num_kv_heads,
                 self.head_dim,
-                block_size,
-                self.sliding_window,
-                attn_metadata.use_tensor_core,
-                enable_cuda_graph,
-                self.dtype_str,
-                self.dtype_str,
-                self.dtype_str,
+                page_size,
+                causal=True,
+                sm_scale=self.scale,
+                window_left=window_left,
+                q_data_type=self.dtype,
             )
-        n = new_info.numel()
-        self._plan_info_buf[:n].copy_(new_info)
-        self._plan_info_len = n
+        else:
+            self._decode_wrapper.plan(
+                attn_metadata.paged_kv_indptr,
+                attn_metadata.paged_kv_indices,
+                attn_metadata.paged_kv_last_page_len,
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                page_size,
+                sm_scale=self.scale,
+                window_left=window_left,
+                q_data_type=self.dtype,
+            )

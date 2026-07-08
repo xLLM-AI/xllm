@@ -23,10 +23,8 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/kernel_config.h"
+#include "llm/py_causal_lm.h"
 #include "models.h"
-#if defined(USE_CUDA)
-#include "py_causal_lm.h"
-#endif
 
 namespace {
 

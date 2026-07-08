@@ -16,15 +16,14 @@ cc_library(
     models.h
     dit/utils/lanczos_resample.h
     $<$<BOOL:${USE_NPU}>:dit/utils/dit_block_weight_manager.h>
-    $<$<BOOL:${USE_CUDA}>:py_causal_lm.h>
-    $<$<BOOL:${USE_CUDA}>:py_model_bridge.h>
+    py_model_helper.h
   SRCS
     model_registry.cpp
     dit/utils/lanczos_resample.cpp
     $<$<BOOL:${USE_NPU}>:dit/utils/dit_block_weight_manager.cpp>
     vlm/utils/multimodal_utils.cpp
-    $<$<BOOL:${USE_CUDA}>:py_causal_lm.cpp>
-    $<$<BOOL:${USE_CUDA}>:py_model_bridge.cpp>
+    llm/py_causal_lm.cpp
+    py_model_helper.cpp
   DEPS
     :model
     :mposition
@@ -35,6 +34,6 @@ cc_library(
     :layers
     $<$<BOOL:${USE_NPU}>:npu_layers>
     $<$<BOOL:${USE_CUDA}>:cuda_kernels>
-    $<$<BOOL:${USE_CUDA}>:torch_python>
-    $<$<BOOL:${USE_CUDA}>:Python::Python>
+    torch_python
+    Python::Python
 )

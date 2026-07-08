@@ -76,11 +76,13 @@ LLMWorkerImpl::LLMWorkerImpl(const ParallelArgs& parallel_args,
     : WorkerImpl(parallel_args, device, options) {
   device_.set_device();
 #if defined(USE_CUDA) || defined(USE_MUSA)
-  threadpool_.schedule([this]() mutable {
-    // initialize flashinfer workspace
-    ::xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
-        device_);
-  });
+  if (FLAGS_model_impl != "python") {
+    threadpool_.schedule([this]() mutable {
+      // initialize flashinfer workspace
+      ::xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
+          device_);
+    });
+  }
 #endif
 }
 
@@ -96,9 +98,15 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
   // FlashinferWorkspace is thread_local, so T_MTP's instance must be
   // explicitly initialized here; otherwise FlashInferAttentionImpl captures
   // an undefined int_workspace_buffer_ and crashes at prefill time.
-  auto& ws = ::xllm::layer::flashinfer::FlashinferWorkspace::get_instance();
-  if (!ws.get_int_workspace_buffer().defined()) {
-    ws.initialize(device_);
+  //
+  // Skip when model_impl=python: Python executor uses flashinfer's Python API
+  // directly; initializing the C++ workspace would conflict with Python-side
+  // TVM-FFI type registration.
+  if (FLAGS_model_impl != "python") {
+    auto& ws = ::xllm::layer::flashinfer::FlashinferWorkspace::get_instance();
+    if (!ws.get_int_workspace_buffer().defined()) {
+      ws.initialize(device_);
+    }
   }
 #endif
 

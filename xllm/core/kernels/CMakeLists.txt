@@ -36,6 +36,7 @@ cc_library(
   HDRS
     param.h
     ops_api.h
+    xllm_torch_ops.h
   SRCS
     ops_api.cpp
   DEPS

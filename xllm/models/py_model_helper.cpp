@@ -13,12 +13,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-// Minimal bridge: embedded Python interpreter lifecycle + PyStateDict for
-// weight loading. No attention or collective logic here.
+// Infrastructure for the embedded Python model executor:
+// - Interpreter lifecycle (ensure_python_interpreter)
+// - Weight loading (PyStateDict + PYBIND11_EMBEDDED_MODULE)
+// - Config serialization (dtype_to_string, PyDictVisitor)
 
-#include "models/py_model_bridge.h"
+#include "models/py_model_helper.h"
 
 #include <Python.h>
+#include <c10/util/Exception.h>
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <pybind11/embed.h>
@@ -29,8 +32,7 @@ limitations under the License.
 #include <string>
 
 #include "core/framework/state_dict/state_dict.h"
-#include "core/kernels/cuda/xllm_attention_ops.h"
-#include "core/kernels/cuda/xllm_ops_library.h"
+#include "core/kernels/xllm_torch_ops.h"
 
 DEFINE_string(python_model_path,
               "",
@@ -61,11 +63,33 @@ void prepend_sys_path(const std::string& dir) {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// dtype_to_string
+// ---------------------------------------------------------------------------
+
+std::string dtype_to_string(const torch::TensorOptions& options) {
+  switch (c10::typeMetaToScalarType(options.dtype())) {
+    case torch::kBFloat16:
+      return "bfloat16";
+    case torch::kFloat16:
+      return "float16";
+    case torch::kFloat32:
+      return "float32";
+    case torch::kFloat64:
+      return "float64";
+    default:
+      return "bfloat16";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ensure_python_interpreter
+// ---------------------------------------------------------------------------
+
 void ensure_python_interpreter() {
   static std::once_flag flag;
   std::call_once(flag, []() {
-    ensure_xllm_ops_registered();
-    ensure_xllm_attention_ops_registered();
+    ensure_xllm_torch_ops_registered();
 
     const bool we_initialized = !Py_IsInitialized();
     if (we_initialized) {

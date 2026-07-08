@@ -13,14 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "models/py_causal_lm.h"
+#include "models/llm/py_causal_lm.h"
 
-#include <c10/util/Exception.h>
 #include <glog/logging.h>
 #include <pybind11/stl.h>
 #include <torch/extension.h>
 
-#include <cmath>
 #include <memory>
 #include <string>
 #include <utility>
@@ -32,90 +30,11 @@ limitations under the License.
 #include "core/framework/state_dict/state_dict.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
-#include "models/py_model_bridge.h"
+#include "models/py_model_helper.h"
 
 namespace py = pybind11;
 
 namespace xllm {
-
-namespace {
-
-std::string dtype_to_string(const torch::TensorOptions& options) {
-  switch (c10::typeMetaToScalarType(options.dtype())) {
-    case torch::kBFloat16:
-      return "bfloat16";
-    case torch::kFloat16:
-      return "float16";
-    case torch::kFloat32:
-      return "float32";
-    case torch::kFloat64:
-      return "float64";
-    default:
-      return "bfloat16";
-  }
-}
-
-class PyDictVisitor final : public PropertyVisitor {
- public:
-  explicit PyDictVisitor(py::dict& dict) : dict_(dict) {}
-
-  void visit(const std::string& name, bool value) override { set(name, value); }
-  void visit(const std::string& name, int32_t value) override {
-    set(name, value);
-  }
-  void visit(const std::string& name, int64_t value) override {
-    set(name, value);
-  }
-  void visit(const std::string& name, float value) override {
-    set(name, value);
-  }
-  void visit(const std::string& name, double value) override {
-    set(name, value);
-  }
-  void visit(const std::string& name, const std::string& value) override {
-    set(name, value);
-  }
-  void visit(const std::string& name,
-             const std::vector<int32_t>& value) override {
-    set(name, value);
-  }
-  void visit(const std::string& name,
-             const std::vector<int64_t>& value) override {
-    set(name, value);
-  }
-  void visit(const std::string& name,
-             const std::vector<float>& value) override {
-    set(name, value);
-  }
-  void visit(const std::string& name,
-             const std::vector<double>& value) override {
-    set(name, value);
-  }
-  void visit(const std::string& name, const std::vector<bool>& value) override {
-    set(name, value);
-  }
-  void visit(const std::string& name,
-             const std::vector<std::string>& value) override {
-    set(name, value);
-  }
-  void visit(const std::string& name,
-             const std::unordered_set<int32_t>& value) override {
-    set(name, value);
-  }
-  void visit_absent(const std::string& name) override {
-    dict_[py::str(name)] = py::none();
-  }
-
- private:
-  template <typename T>
-  void set(const std::string& name, const T& value) {
-    dict_[py::str(name)] = value;
-  }
-
-  py::dict& dict_;
-};
-
-}  // namespace
 
 PyCausalLM::PyCausalLM(const ModelContext& context)
     : model_args_(context.get_model_args()),
@@ -193,7 +112,6 @@ ModelOutput PyCausalLM::forward(const torch::Tensor& tokens,
 
   py::gil_scoped_acquire gil;
 
-  // Pass raw metadata tensors — Python owns the full attention lifecycle.
   py::dict meta;
   meta["slot_mapping"] = attn_metadata->slot_mapping;
   meta["paged_kv_indptr"] = attn_metadata->paged_kv_indptr;

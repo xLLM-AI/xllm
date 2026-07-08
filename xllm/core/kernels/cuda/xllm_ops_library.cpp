@@ -20,9 +20,8 @@ limitations under the License.
 // by tensor device to the registered backend impl.
 //
 // First-version scope (Qwen3 dense / CUDA / eager): only the stateless fused
-// kernels are exposed here. The stateful paged-attention op (which reads the
-// thread-local forward context for KV cache + flashinfer plan) is registered
-// separately once that context exists (see py_model_bridge / M3).
+// kernels are exposed here. Attention is handled by the flashinfer Python
+// package directly (see layers/attention.py).
 
 #include "core/kernels/cuda/xllm_ops_library.h"
 
@@ -108,6 +107,17 @@ torch::Tensor fused_qk_norm_rope(torch::Tensor& qkv,
   return qkv;
 }
 
+// reshape_paged_cache: write K/V into paged cache at slot_mapping positions.
+torch::Tensor reshape_paged_cache_op(const torch::Tensor& slot_mapping,
+                                     const torch::Tensor& keys,
+                                     const torch::Tensor& values,
+                                     torch::Tensor& key_cache,
+                                     torch::Tensor& value_cache) {
+  xllm::kernel::cuda::reshape_paged_cache(
+      slot_mapping, keys, values, key_cache, value_cache);
+  return key_cache;
+}
+
 }  // namespace
 
 void ensure_xllm_ops_registered() {
@@ -130,6 +140,9 @@ TORCH_LIBRARY(xllm_ops, m) {
       "int "
       "num_heads_v, int head_dim, float eps, Tensor q_weight, Tensor k_weight, "
       "Tensor cos_sin_cache, bool interleaved, Tensor position_ids) -> Tensor");
+  m.def(
+      "reshape_paged_cache(Tensor slot_mapping, Tensor keys, Tensor values, "
+      "Tensor(a!) key_cache, Tensor(b!) value_cache) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, CUDA, m) {
@@ -137,4 +150,5 @@ TORCH_LIBRARY_IMPL(xllm_ops, CUDA, m) {
   m.impl("fused_add_rms_norm", TORCH_FN(xllm::fused_add_rms_norm));
   m.impl("silu_and_mul", TORCH_FN(xllm::silu_and_mul));
   m.impl("fused_qk_norm_rope", TORCH_FN(xllm::fused_qk_norm_rope));
+  m.impl("reshape_paged_cache", TORCH_FN(xllm::reshape_paged_cache_op));
 }
