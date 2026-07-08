@@ -34,6 +34,7 @@ limitations under the License.
 #include "models/dit/autoencoders/autoencoder_kl_wan.h"
 #include "models/dit/encoders/umt5_encoder.h"
 #include "models/dit/processors/vae_video_processor.h"
+#include "models/dit/schedulers/flowmatch_euler_discrete_scheduler.h"
 #include "models/dit/schedulers/uni_pc_multi_step_scheduler.h"
 #include "models/dit/transformers/transformer_wan.h"
 #if defined(USE_NPU)
@@ -55,7 +56,6 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
     zdim_ = vae_args.z_dim();
     latents_mean_ = vae_args.latents_mean();
     latents_std_ = vae_args.latents_std();
-
     const auto& scheduler_args = context.get_model_args("scheduler");
     num_train_timesteps_ = scheduler_args.num_train_timesteps();
 
@@ -73,6 +73,11 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
     sparse_attn_config_.mask_refresh_steps =
         dit_config.dit_sparse_attention_mask_refresh_steps();
 
+    // is_distill from --dit_distill_enable flag: true selects FlowMatch scheduler
+    // + torch RMSNorm for norm_q/k; false uses UniPC + aclnn fused kernel.
+    // (The transformer reads the same flag directly from DiTConfig.)
+    is_distill_ = DiTConfig::get_instance().dit_distill_enable();
+
     LOG(INFO) << "Initializing Wan2_2I2V pipeline...";
     vae_ = AutoencoderKLWan(context.get_model_context("vae"));
     transformer_ = WanTransformer3DModel(
@@ -80,7 +85,9 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
     transformer_2_ = WanTransformer3DModel(
         context.get_model_context("transformer_2"), sparse_attn_config_);
     umt5_ = UMT5EncoderModel(context.get_model_context("text_encoder"));
-    scheduler_ =
+    flow_scheduler_ =
+        FlowMatchEulerDiscreteScheduler(context.get_model_context("scheduler"));
+    unipc_scheduler_ =
         UniPCMultistepScheduler(context.get_model_context("scheduler"));
     video_processor_ = VAEVideoProcessor(context.get_model_context("vae"),
                                          true,
@@ -94,7 +101,8 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
     register_module("transformer", transformer_);
     register_module("transformer_2", transformer_2_);
     register_module("umt5", umt5_);
-    register_module("scheduler", scheduler_);
+    register_module("flow_scheduler", flow_scheduler_);
+    register_module("unipc_scheduler", unipc_scheduler_);
     register_module("video_processor_", video_processor_);
   }
 
@@ -149,7 +157,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
 
   void load_model(std::unique_ptr<DiTModelLoader> loader) {
     LOG(INFO) << "Wan2_2I2VPipeline loading model from"
-              << loader->model_root_path();
+              << loader->model_root_path() << " is_distill=" << is_distill_;
     auto transformer_loader = loader->take_component_loader("transformer");
     auto transformer_2_loader = loader->take_component_loader("transformer_2");
     auto vae_loader = loader->take_component_loader("vae");
@@ -450,11 +458,27 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
                       do_classifier_free_guidance,
                       num_videos_per_prompt,
                       max_sequence_length);
-    scheduler_->set_timesteps(num_inference_steps,
-                              options_.device(),
-                              /*sigmas*/ std::nullopt,
-                              /*mu*/ std::nullopt);
-    torch::Tensor timesteps = scheduler_->timesteps();
+    torch::Tensor timesteps;
+    if (is_distill_) {
+      // Explicit raw sigmas (N-i)/N = [1,0.75,0.5,0.25] to match LightX2V.
+      std::vector<float> raw_sigmas(num_inference_steps);
+      for (int i = 0; i < num_inference_steps; ++i) {
+        raw_sigmas[i] = static_cast<float>(num_inference_steps - i) /
+                        static_cast<float>(num_inference_steps);
+      }
+      flow_scheduler_->set_timesteps(num_inference_steps,
+                                options_.device(),
+                                /*sigmas*/ raw_sigmas,
+                                /*mu*/ std::nullopt);
+      timesteps = flow_scheduler_->timesteps().to(options_.device());
+    } else {
+      // Original: UniPC computes its own sigma schedule.
+      unipc_scheduler_->set_timesteps(num_inference_steps,
+                                      options_.device(),
+                                      /*sigmas*/ std::nullopt,
+                                      /*mu*/ std::nullopt);
+      timesteps = unipc_scheduler_->timesteps().to(options_.device());
+    }
 
     int64_t num_channels_latents = zdim_;
     torch::Tensor input_image;
@@ -507,7 +531,6 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
 
     for (int64_t i = 0; i < timesteps.numel(); ++i) {
       torch::Tensor t = timesteps[i];
-      int64_t total_steps = timesteps.numel();
 
       WanTransformer3DModel current_model = nullptr;
       float current_guidance;
@@ -592,7 +615,10 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
                                                   torch::Tensor(),
                                                   sparse_attn_state);
       }
-      auto prev_latents = scheduler_->step(noise_pred, t, prepared_latents);
+      auto prev_latents =
+          is_distill_
+              ? flow_scheduler_->step(noise_pred, t, prepared_latents)
+              : unipc_scheduler_->step(noise_pred, t, prepared_latents);
       prepared_latents = prev_latents.detach();
       noise_pred.reset();
       prev_latents = torch::Tensor();
@@ -713,7 +739,9 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
   }
 #endif
 
-  UniPCMultistepScheduler scheduler_{nullptr};
+  // distill mode uses flow_scheduler_; otherwise unipc_scheduler_.
+  FlowMatchEulerDiscreteScheduler flow_scheduler_{nullptr};
+  UniPCMultistepScheduler unipc_scheduler_{nullptr};
   AutoencoderKLWan vae_{nullptr};
   WanTransformer3DModel transformer_{nullptr};
   WanTransformer3DModel transformer_2_{nullptr};
@@ -732,6 +760,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
   torch::TensorOptions options_;
   const ParallelArgs parallel_args_;
   xllm::dit::SparseAttnConfig sparse_attn_config_;
+  bool is_distill_{false};
 };
 TORCH_MODULE(WanImageToVideoPipeline);
 
