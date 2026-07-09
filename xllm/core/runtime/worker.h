@@ -20,6 +20,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include "common/types.h"
+#include "core/framework/speculative/speculative_profile_registry.h"
 #include "forward_params.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/model/causal_lm.h"
@@ -29,7 +30,6 @@ limitations under the License.
 #include "framework/state_dict/state_dict.h"
 #include "runtime/executor.h"
 #include "runtime/options.h"
-#include "runtime/speculative_profile_registry.h"
 #include "runtime/worker_impl.h"
 #include "util/threadpool.h"
 

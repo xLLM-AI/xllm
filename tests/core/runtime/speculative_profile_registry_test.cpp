@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "runtime/speculative_profile_registry.h"
+#include "core/framework/speculative/speculative_profile_registry.h"
 
 #include <gtest/gtest.h>
 

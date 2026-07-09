@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "runtime/adaptive_speculative_controller.h"
+#include "core/framework/speculative/adaptive_speculative_controller.h"
 
 #include <glog/logging.h>
 
@@ -23,7 +23,7 @@ limitations under the License.
 #include <string>
 #include <utility>
 
-#include "runtime/speculative_profile_registry.h"
+#include "core/framework/speculative/speculative_profile_registry.h"
 #include "util/tensor_helper.h"
 
 namespace xllm {

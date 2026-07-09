@@ -39,7 +39,7 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/kv_cache/kv_cache_estimation.h"
 #include "core/framework/multimodal/mm_data.h"
-#include "runtime/speculative_profile_registry.h"
+#include "core/framework/speculative/speculative_profile_registry.h"
 #include "spec_input_builder.h"
 #include "util/env_var.h"
 #include "util/pretty_print.h"

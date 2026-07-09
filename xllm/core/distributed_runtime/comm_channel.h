@@ -24,11 +24,11 @@ limitations under the License.
 #include <vector>
 
 #include "common/types.h"
+#include "core/framework/speculative/speculative_profile_registry.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/xtensor/xtensor.h"
 #include "runtime/forward_params.h"
 #include "runtime/params_utils.h"
-#include "runtime/speculative_profile_registry.h"
 #include "worker.pb.h"
 
 namespace xllm {

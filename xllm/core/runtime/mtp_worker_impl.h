@@ -25,7 +25,7 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "framework/kv_cache_transfer/spec_kv_cache_transfer.h"
 #endif
-#include "runtime/adaptive_speculative_controller.h"
+#include "core/framework/speculative/adaptive_speculative_controller.h"
 #include "runtime/speculative_worker_impl.h"
 
 namespace xllm {

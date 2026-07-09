@@ -32,8 +32,6 @@ cc_library(
     mm_embed_vlm_worker_impl.h
     worker_client.h
     xservice_client.h
-    adaptive_speculative_controller.h
-    speculative_profile_registry.h
     speculative_worker_impl.h
     mtp_worker_impl.h
     suffix_worker_impl.h
@@ -66,8 +64,6 @@ cc_library(
     worker_client.cpp
     xservice_client.cpp
     params_utils.cpp
-    adaptive_speculative_controller.cpp
-    speculative_profile_registry.cpp
     speculative_worker_impl.cpp
     mtp_worker_impl.cpp
     suffix_worker_impl.cpp
@@ -82,6 +78,7 @@ cc_library(
     :platform
     :model_context
     :request
+    :speculative
     :encoder_cache
     :state_dict
     :dit_cache

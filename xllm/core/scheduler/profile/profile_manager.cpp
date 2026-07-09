@@ -37,9 +37,9 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/speculative/speculative_profile_registry.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/request/request_state.h"
-#include "runtime/speculative_profile_registry.h"
 #include "scheduler/profile/graph_warmup.h"
 #include "util/rec_model_utils.h"
 

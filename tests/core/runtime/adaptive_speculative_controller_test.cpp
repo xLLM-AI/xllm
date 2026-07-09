@@ -13,15 +13,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "runtime/adaptive_speculative_controller.h"
+#include "core/framework/speculative/adaptive_speculative_controller.h"
 
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
 #include <vector>
 
+#include "core/framework/speculative/speculative_profile_registry.h"
 #include "runtime/options.h"
-#include "runtime/speculative_profile_registry.h"
 
 namespace xllm {
 namespace {
