@@ -112,24 +112,24 @@ ModelOutput PyCausalLM::forward(const torch::Tensor& tokens,
 
   py::gil_scoped_acquire gil;
 
-  py::dict meta;
-  meta["slot_mapping"] = attn_metadata->slot_mapping;
-  meta["paged_kv_indptr"] = attn_metadata->paged_kv_indptr;
-  meta["paged_kv_indices"] = attn_metadata->paged_kv_indices;
-  meta["paged_kv_last_page_len"] = attn_metadata->paged_kv_last_page_len;
-  meta["is_prefill"] = attn_metadata->is_prefill;
-  meta["is_chunked_prefill"] = attn_metadata->is_chunked_prefill;
-  meta["enable_cuda_graph"] = attn_metadata->enable_cuda_graph;
-  meta["use_tensor_core"] = false;
+  py::dict attn_meta;
+  attn_meta["slot_mapping"] = attn_metadata->slot_mapping;
+  attn_meta["paged_kv_indptr"] = attn_metadata->paged_kv_indptr;
+  attn_meta["paged_kv_indices"] = attn_metadata->paged_kv_indices;
+  attn_meta["paged_kv_last_page_len"] = attn_metadata->paged_kv_last_page_len;
+  attn_meta["is_prefill"] = attn_metadata->is_prefill;
+  attn_meta["is_chunked_prefill"] = attn_metadata->is_chunked_prefill;
+  attn_meta["enable_cuda_graph"] = attn_metadata->enable_cuda_graph;
+  attn_meta["use_tensor_core"] = false;
   if (attn_metadata->q_cu_seq_lens.defined()) {
-    meta["q_cu_seq_lens"] = attn_metadata->q_cu_seq_lens;
+    attn_meta["q_cu_seq_lens"] = attn_metadata->q_cu_seq_lens;
   }
   if (attn_metadata->kv_cu_seq_lens.defined()) {
-    meta["kv_cu_seq_lens"] = attn_metadata->kv_cu_seq_lens;
+    attn_meta["kv_cu_seq_lens"] = attn_metadata->kv_cu_seq_lens;
   }
   if (attn_metadata->qo_indptr.has_value() &&
       attn_metadata->qo_indptr->defined()) {
-    meta["qo_indptr"] = attn_metadata->qo_indptr.value();
+    attn_meta["qo_indptr"] = attn_metadata->qo_indptr.value();
   }
 
   py::list kv_caches_py;
@@ -138,7 +138,7 @@ ModelOutput PyCausalLM::forward(const torch::Tensor& tokens,
   }
 
   py::object hidden_obj =
-      py_model_.attr("forward")(tokens, positions, meta, kv_caches_py);
+      py_model_.attr("forward")(tokens, positions, attn_meta, kv_caches_py);
   return ModelOutput(hidden_obj.cast<torch::Tensor>());
 }
 
