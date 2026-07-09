@@ -550,21 +550,13 @@ size_t FixedStepsScheduler::OneRecXAttentionSchedulerPipeline::
 bool FixedStepsScheduler::OneRecXAttentionSchedulerPipeline::allocate_kv_cache(
     KVCacheManager* kv_cache_manager,
     Sequence* sequence) {
-  const size_t num_tokens = sequence->num_tokens();
-  size_t max_generated_tokens =
-      FLAGS_max_decode_rounds > 0 ? static_cast<size_t>(FLAGS_max_decode_rounds)
-                                  : kRecDecodeSteps;
-  if (const auto* stopping_checker = sequence->stopping_checker()) {
-    max_generated_tokens = std::max(
-        max_generated_tokens, stopping_checker->get_max_generated_tokens());
-  }
-  if (std::numeric_limits<size_t>::max() - num_tokens < max_generated_tokens) {
-    LOG(ERROR) << "Integer overflow detected in OneRec xattention KV cache "
-                  "allocation";
+  const size_t encoder_tokens = sequence->encoder_seq_len();
+  if (encoder_tokens == 0) {
+    LOG(ERROR) << "OneRec xattention Cross KV cache requires non-empty encoder "
+                  "input.";
     return false;
   }
-  return kv_cache_manager->allocate(sequence,
-                                    num_tokens + max_generated_tokens);
+  return kv_cache_manager->allocate(sequence, encoder_tokens);
 }
 
 bool FixedStepsScheduler::OneRecXAttentionSchedulerPipeline::

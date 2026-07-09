@@ -159,6 +159,25 @@ class OneRecModelImpl final : public torch::nn::Module {
     decoder_->merge_loaded_weights();
   }
 
+  bool supports_onerec_prefill_graph() const { return true; }
+
+  torch::Tensor get_onerec_graph_encoder_output() const {
+    std::lock_guard<std::mutex> lock(encoder_output_mutex_);
+    return encoder_output_;
+  }
+
+  void bind_onerec_prefill_graph_buffers(
+      const torch::Tensor& encoder_output,
+      const std::vector<torch::Tensor>& cross_k_caches,
+      const std::vector<torch::Tensor>& cross_v_caches) {
+    if (encoder_output.defined()) {
+      std::lock_guard<std::mutex> lock(encoder_output_mutex_);
+      encoder_output_ = encoder_output;
+    }
+    decoder_->bind_onerec_prefill_graph_cross_kv_caches(cross_k_caches,
+                                                        cross_v_caches);
+  }
+
   layer::WordEmbedding get_word_embedding() { return shared_; }
 
   void set_word_embedding(layer::WordEmbedding& embedding) {
@@ -257,7 +276,7 @@ class OneRecModelImpl final : public torch::nn::Module {
   OneRecStack encoder_{nullptr};
   OneRecStack decoder_{nullptr};
   torch::Tensor encoder_output_;
-  std::mutex encoder_output_mutex_;
+  mutable std::mutex encoder_output_mutex_;
 };
 TORCH_MODULE(OneRecModel);
 
@@ -266,6 +285,22 @@ class OneRecForConditionalGenerationImpl final
  public:
   explicit OneRecForConditionalGenerationImpl(const ModelContext& context)
       : RecForCausalLMImplBase<OneRecModel>(context) {}
+
+  bool supports_onerec_prefill_graph() const {
+    return this->model_->supports_onerec_prefill_graph();
+  }
+
+  torch::Tensor get_onerec_graph_encoder_output() const {
+    return this->model_->get_onerec_graph_encoder_output();
+  }
+
+  void bind_onerec_prefill_graph_buffers(
+      const torch::Tensor& encoder_output,
+      const std::vector<torch::Tensor>& cross_k_caches,
+      const std::vector<torch::Tensor>& cross_v_caches) {
+    this->model_->bind_onerec_prefill_graph_buffers(
+        encoder_output, cross_k_caches, cross_v_caches);
+  }
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {

@@ -64,6 +64,9 @@ class NpuOneRecBlockLayerImpl final : public BaseLayer {
                         std::atomic<bool>* event_flag = nullptr,
                         const torch::Tensor& expert_array = torch::Tensor());
 
+  void set_cross_kv_cache_for_graph(const torch::Tensor& k_cache,
+                                    const torch::Tensor& v_cache);
+
  private:
   void param_from_args(atb_speed::onerec::BlockLayerParam& param,
                        const ModelArgs& args,

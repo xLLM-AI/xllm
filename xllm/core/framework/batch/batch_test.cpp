@@ -30,6 +30,7 @@ limitations under the License.
 #include "framework/request/sequences_group.h"
 #include "framework/request/stopping_checker.h"
 #include "framework/sampling/sampling_params.h"
+#include "onerec_xattention_batch_input_builder.h"
 #include "platform/device.h"
 
 namespace xllm {
@@ -398,6 +399,66 @@ TEST(BatchTest, SampleRequestKeepsThreadedRawBuilderOffsetsStable) {
   EXPECT_EQ(raw_forward_input.selected_token_idxes,
             expected_selected_token_idxes);
   EXPECT_EQ(raw_forward_input.sample_idxes, expected_sample_idxes);
+}
+
+TEST(BatchTest, OneRecXAttentionBuildsCrossBlockCacheMetadata) {
+  const uint32_t block_size = 4;
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(block_size).enable_prefix_cache(false);
+  BlockManagerImpl manager(options);
+
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(1);
+  SequenceParams seq_params;
+  seq_params.seq_capacity = 16;
+  seq_params.stopping_checker = &stopping_checker;
+  seq_params.sampling_param = &sampling_param;
+  seq_params.skip_special_tokens = true;
+  seq_params.enable_schedule_overlap = false;
+  seq_params.rec_type = RecType::kOneRec;
+
+  std::string prompt = "onerec";
+  std::vector<int32_t> encoder_tokens = {11, 12, 13, 14, 15};
+  torch::Tensor input_embedding;
+  MMData mm_data;
+  SequencesGroup group(
+      prompt, encoder_tokens, input_embedding, mm_data, seq_params);
+  auto blocks = manager.allocate(2);
+  ASSERT_EQ(blocks.size(), 2u);
+  const std::vector<int32_t> expected_block_ids = {blocks[0].id(),
+                                                   blocks[1].id()};
+  group.sequences()[0]->add_kv_blocks(blocks);
+  const std::vector<int32_t> expected_slots =
+      group.sequences()[0]->kv_state().kv_cache_slots(0, encoder_tokens.size());
+
+  std::vector<SequencesGroup*> groups = {&group};
+  std::vector<uint32_t> allowed_max_tokens = {
+      std::numeric_limits<uint32_t>::max()};
+  std::vector<torch::Tensor> input_embeddings = {input_embedding};
+  std::vector<MMData> mm_data_vec = {mm_data};
+  ModelArgs args;
+  MPMCThreadPool thread_pool(1);
+  OneRecBatchInputBuilderCache perf_cache;
+  OneRecXAttentionBatchInputBuilder builder(groups,
+                                            allowed_max_tokens,
+                                            input_embeddings,
+                                            mm_data_vec,
+                                            nullptr,
+                                            1,
+                                            &args,
+                                            BatchForwardType::PREFILL,
+                                            &thread_pool,
+                                            &perf_cache);
+
+  ForwardInput input = builder.build_rec_forward_input(1, 0);
+  const auto* params = input.input_params.onerec_xattention_params();
+  ASSERT_NE(params, nullptr);
+  EXPECT_TRUE(equal<int64_t>(params->cross_attn_kv_cu_seq_lens, {5}));
+  EXPECT_TRUE(
+      equal<int32_t>(params->cross_attn_block_tables, expected_block_ids));
+  EXPECT_TRUE(
+      equal<int32_t>(params->cross_attn_new_cache_slots, expected_slots));
 }
 
 TEST(BatchTest, SampleRequestProcessesAllMatchedRawOutputs) {

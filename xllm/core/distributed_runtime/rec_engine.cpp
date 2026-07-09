@@ -915,8 +915,9 @@ RecEngine::OneRecXAttentionEnginePipeline::OneRecXAttentionEnginePipeline(
 
 int64_t RecEngine::OneRecXAttentionEnginePipeline::minimal_kv_cache_blocks()
     const {
-  return kMinimalOneRecMetadataKVBlocks *
-         std::max<int32_t>(engine_.options_.rec_worker_max_concurrency(), 1);
+  // OneRec xAttention uses the worker KV cache as the physical Cross KV block
+  // pool. Let the standard capacity estimator size it from available memory.
+  return 0;
 }
 
 ForwardOutput RecEngine::OneRecXAttentionEnginePipeline::step(

@@ -358,6 +358,21 @@ class OneRecStackImpl : public torch::nn::Module {
     return h;
   }
 
+  void bind_onerec_prefill_graph_cross_kv_caches(
+      const std::vector<torch::Tensor>& cross_k_caches,
+      const std::vector<torch::Tensor>& cross_v_caches) {
+    if (cross_k_caches.empty() && cross_v_caches.empty()) {
+      return;
+    }
+    CHECK(is_decoder_) << "Only OneRec decoder owns cross attention caches.";
+    CHECK_EQ(cross_k_caches.size(), layers_.size());
+    CHECK_EQ(cross_v_caches.size(), layers_.size());
+    for (size_t i = 0; i < layers_.size(); ++i) {
+      layers_[i]->set_cross_kv_cache_for_graph(cross_k_caches[i],
+                                               cross_v_caches[i]);
+    }
+  }
+
   void load_state_dict(const StateDict& state_dict) {
     auto embed_dict = state_dict.get_dict_with_prefix("embed_tokens.");
     if (embed_dict.size() > 0) {

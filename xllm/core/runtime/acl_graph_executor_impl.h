@@ -21,7 +21,10 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <string>
+#include <vector>
 
 #include "core/common/macros.h"
 #include "core/framework/kv_cache/kv_cache.h"
@@ -52,6 +55,8 @@ struct TilingBufferInfo;
 }  // namespace atb
 
 namespace xllm::npu {
+
+class OneRecAclGraph;
 
 // Helper class to hold persistent parameters for graph execution
 // Multiple AclGraph instances can share the same GraphPersistentParam object
@@ -307,7 +312,7 @@ class AclGraphExecutorImpl : public ExecutorImpl {
                        const torch::Device& device,
                        const runtime::Options& options);
 
-  ~AclGraphExecutorImpl() override = default;
+  ~AclGraphExecutorImpl() override;
 
   ForwardInput prepare_inputs(Batch& batch) override;
 
@@ -330,6 +335,18 @@ class AclGraphExecutorImpl : public ExecutorImpl {
 
   // Persistent parameters shared across all AclGraph instances
   std::unique_ptr<GraphPersistentParam> persistent_param_;
+
+  absl::flat_hash_map<std::string, std::unique_ptr<OneRecAclGraph>>
+      onerec_graphs_;
+  // Protect this executor's graph cache. Device-wide NPUGraph generator state
+  // is protected separately by DeviceCaptureLock.
+  std::mutex onerec_graph_mutex_;
+  bool onerec_last_first_prefill_graph_ready_ = false;
+
+  ModelOutput run_onerec_graph(const torch::Tensor& tokens,
+                               const torch::Tensor& positions,
+                               std::vector<KVCache>& kv_caches,
+                               const ModelInputParams& params);
 
   // Get bucket num_tokens for given num_tokens
   // For num_tokens < 8: use 1, 2, 4, 8
