@@ -375,6 +375,12 @@ class ExtBuild(build_ext):
                 aiter_cpp_api_lib = os.getenv("AITER_CPP_API_LIB")
                 if aiter_cpp_api_lib:
                     cmake_args += [f"-DAITER_CPP_API_LIB={aiter_cpp_api_lib}"]
+
+                aiter_moe_c_kernel_lib = os.getenv("AITER_MOE_C_KERNEL_LIB")
+                if aiter_moe_c_kernel_lib:
+                    cmake_args += [
+                        f"-DAITER_MOE_C_KERNEL_LIB={aiter_moe_c_kernel_lib}"
+                    ]
             else:
                 raise RuntimeError(
                     "DCU build requires a HIP/ROCm PyTorch environment. "

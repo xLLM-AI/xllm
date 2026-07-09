@@ -44,6 +44,7 @@ set(DCU_LOCAL_HIP_SOURCES
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/scaled_quantize.hip
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/scaled_matmul.cpp
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/build_block_table_from_paged_kv.hip
+  ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/gather_mla_latent_cache.hip
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/random_sample.hip
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/rejection_sample.hip
 
@@ -52,6 +53,9 @@ set(DCU_LOCAL_HIP_SOURCES
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/global_capture_instance.cpp
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/group_gemm.cpp
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/flash_mla_adapter.cpp
+  ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/aiter_moe_adapter.cpp
+  ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/aiter_quant_adapter.cpp
+  ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/hipblaslt_fp8_adapter.cpp
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/topk_gate.cpp
 )
 
@@ -79,12 +83,22 @@ set_target_properties(flash_mla PROPERTIES IMPORTED_LOCATION "${FLASH_MLA_LIB}")
 
 if(NOT DEFINED AITER_CPP_API_LIB OR NOT EXISTS "${AITER_CPP_API_LIB}")
   message(FATAL_ERROR
-    "AITER_CPP_API_LIB is required for DCU grouped topk. Install aiter and set "
-    "AITER_CPP_API_LIB before invoking setup.py.")
+    "AITER_CPP_API_LIB is required for DCU grouped topk and FP8 activation "
+    "quantization. Install aiter and set AITER_CPP_API_LIB before invoking "
+    "setup.py.")
 endif()
 add_library(aiter_cpp_api SHARED IMPORTED)
 set_target_properties(aiter_cpp_api PROPERTIES
   IMPORTED_LOCATION "${AITER_CPP_API_LIB}")
+
+if(NOT DEFINED AITER_MOE_C_KERNEL_LIB OR NOT EXISTS "${AITER_MOE_C_KERNEL_LIB}")
+  message(FATAL_ERROR
+    "AITER_MOE_C_KERNEL_LIB is required for DCU AITER MoE FP8 kernels. "
+    "Install aiter and set AITER_MOE_C_KERNEL_LIB before invoking setup.py.")
+endif()
+add_library(aiter_moe_c_kernel SHARED IMPORTED)
+set_target_properties(aiter_moe_c_kernel PROPERTIES
+  IMPORTED_LOCATION "${AITER_MOE_C_KERNEL_LIB}")
 
 cc_library(
   NAME
@@ -100,6 +114,7 @@ cc_library(
     glog::glog
     :platform
     aiter_cpp_api
+    aiter_moe_c_kernel
     flash_mla
 )
 
@@ -107,8 +122,12 @@ add_dependencies(dcu_kernels ${DCU_HIPIFY_TARGET})
 
 get_filename_component(FLASH_MLA_LIB_DIR "${FLASH_MLA_LIB}" DIRECTORY)
 get_filename_component(AITER_CPP_API_LIB_DIR "${AITER_CPP_API_LIB}" DIRECTORY)
+get_filename_component(AITER_MOE_C_KERNEL_LIB_DIR
+                       "${AITER_MOE_C_KERNEL_LIB}" DIRECTORY)
 set_property(TARGET dcu_kernels APPEND PROPERTY BUILD_RPATH "${FLASH_MLA_LIB_DIR}")
 set_property(TARGET dcu_kernels APPEND PROPERTY BUILD_RPATH "${AITER_CPP_API_LIB_DIR}")
+set_property(TARGET dcu_kernels APPEND PROPERTY BUILD_RPATH
+             "${AITER_MOE_C_KERNEL_LIB_DIR}")
 
 target_include_directories(dcu_kernels
   PUBLIC

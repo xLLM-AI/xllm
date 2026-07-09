@@ -44,9 +44,9 @@ limitations under the License.
 //   block_table:    (batch_size, max_num_blocks_per_seq) int32, -1 padded
 //   output:         same shape as q
 //
-// prefix_prefill_varlen_fwd is used for the prefill phase.
+// hg_prefix_prefill_varlen_fwd is used for the prefill phase.
 // Q may contain many tokens per sequence. Uses the general fwd kernel.
-std::vector<torch::Tensor> prefix_prefill_varlen_fwd(
+std::vector<torch::Tensor> hg_prefix_prefill_varlen_fwd(
     const torch::Tensor& q,
     const torch::Tensor& k,
     const torch::Tensor& v,
@@ -70,12 +70,13 @@ std::vector<torch::Tensor> prefix_prefill_varlen_fwd(
     std::optional<torch::Tensor> scales_q_ = std::nullopt,
     std::optional<torch::Tensor> scales_k_ = std::nullopt,
     std::optional<torch::Tensor> scales_v_ = std::nullopt,
+    std::optional<torch::Tensor> s_aux_ = std::nullopt,
     const bool is_bf16_output = false);
 
-// prefix_decode_varlen_fwd is used for the decode phase and chunked prefill.
+// hg_prefix_decode_varlen_fwd is used for decode and short chunked prefill.
 // Q is typically short (often 1 token per sequence). Uses the KV-cache kernel
 // with GQA to MQA ngroups optimization and split parallelism for small batches.
-std::vector<torch::Tensor> prefix_decode_varlen_fwd(
+std::vector<torch::Tensor> hg_prefix_decode_varlen_fwd(
     torch::Tensor& q,
     const torch::Tensor& k,
     const torch::Tensor& v,
@@ -95,23 +96,28 @@ std::vector<torch::Tensor> prefix_decode_varlen_fwd(
     int32_t window_size_right,
     const float softcap,
     const bool return_softmax,
-    const int32_t layout);
+    const int32_t layout,
+    std::optional<torch::Tensor> scales_q_ = std::nullopt,
+    std::optional<torch::Tensor> scales_k_ = std::nullopt,
+    std::optional<torch::Tensor> scales_v_ = std::nullopt,
+    std::optional<torch::Tensor> s_aux_ = std::nullopt,
+    const bool is_bf16_output = false);
 
-// Dense varlen forward kernel from flash_api.cpp. This is the non-KV-cache
-// path used by full-sequence DiT attention.
+// Plain FlashAttention varlen forward from libflash_attention.so. This is used
+// by MLA implementations that expand prefill into ordinary MHA.
 std::vector<torch::Tensor> varlen_fwd(
     const torch::Tensor& q,
     const torch::Tensor& k,
     const torch::Tensor& v,
-    const int32_t num_heads,
-    const int32_t num_heads_k,
+    int32_t num_heads,
+    int32_t num_heads_k,
     std::optional<torch::Tensor>& out_,
     const torch::Tensor& cu_seqlens_q,
     const torch::Tensor& cu_seqlens_k,
     std::optional<torch::Tensor>& seqused_k,
     std::optional<torch::Tensor>& alibi_slopes_,
-    const int32_t max_seqlen_q,
-    const int32_t max_seqlen_k,
+    int32_t max_seqlen_q,
+    int32_t max_seqlen_k,
     const float p_dropout,
     const float softmax_scale,
     const bool zero_tensors,
@@ -121,14 +127,68 @@ std::vector<torch::Tensor> varlen_fwd(
     const float softcap,
     const bool return_softmax,
     std::optional<at::Generator> gen_,
-    const int32_t layout,
+    int32_t layout,
     std::optional<torch::Tensor> q_descale_ = std::nullopt,
     std::optional<torch::Tensor> k_descale_ = std::nullopt,
     std::optional<torch::Tensor> v_descale_ = std::nullopt,
-    const bool is_bf16_output = true);
+    const bool is_bf16_output = false);
 
 namespace xllm {
 namespace layer {
+
+std::vector<torch::Tensor> flash_attention_varlen_forward(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    int64_t num_heads,
+    int64_t num_kv_heads,
+    const torch::Tensor& cu_seqlens_q,
+    const torch::Tensor& cu_seqlens_k,
+    int64_t max_seqlen_q,
+    int64_t max_seqlen_k,
+    float softmax_scale,
+    bool is_causal,
+    int64_t window_size_left,
+    int64_t window_size_right,
+    bool is_bf16_output,
+    std::optional<torch::Tensor> output,
+    std::optional<torch::Tensor> seqused_k,
+    std::optional<torch::Tensor> alibi_slopes,
+    std::optional<torch::Tensor> q_descale,
+    std::optional<torch::Tensor> k_descale,
+    std::optional<torch::Tensor> v_descale) {
+  CHECK_GT(num_heads, 0) << "num_heads must be positive.";
+  CHECK_GT(num_kv_heads, 0) << "num_kv_heads must be positive.";
+  CHECK_GT(max_seqlen_q, 0) << "max_seqlen_q must be positive.";
+  CHECK_GT(max_seqlen_k, 0) << "max_seqlen_k must be positive.";
+  std::optional<at::Generator> generator = std::nullopt;
+  return varlen_fwd(query,
+                    key,
+                    value,
+                    static_cast<int32_t>(num_heads),
+                    static_cast<int32_t>(num_kv_heads),
+                    output,
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    seqused_k,
+                    alibi_slopes,
+                    static_cast<int32_t>(max_seqlen_q),
+                    static_cast<int32_t>(max_seqlen_k),
+                    /*p_dropout=*/0.0f,
+                    softmax_scale,
+                    /*zero_tensors=*/false,
+                    is_causal,
+                    static_cast<int32_t>(window_size_left),
+                    static_cast<int32_t>(window_size_right),
+                    /*softcap=*/0.0f,
+                    /*return_softmax=*/false,
+                    generator,
+                    /*layout=*/1,
+                    q_descale,
+                    k_descale,
+                    v_descale,
+                    is_bf16_output);
+}
 
 namespace {
 
@@ -340,7 +400,7 @@ void FlashAttentionImpl::prefill_forward(const AttentionMetadata& attn_metadata,
 
   // Prefill: KV has been stored into paged cache by reshape_paged_cache.
   // Q is already in packed format [total_tokens, nh, hd], no padding needed.
-  // prefix_prefill_varlen_fwd reads Q, K/V cache, cu_seqlens_q, seqused_k,
+  // hg_prefix_prefill_varlen_fwd reads Q, K/V cache, cu_seqlens_q, seqused_k,
   // and block_table directly.
   torch::Tensor kv_seq_lens = get_or_compute_seqlens(
       attn_metadata.kv_seq_lens, attn_metadata.kv_cu_seq_lens);
@@ -358,7 +418,7 @@ void FlashAttentionImpl::prefill_forward(const AttentionMetadata& attn_metadata,
   std::optional<torch::Tensor> cu_seqlens_k_opt = std::nullopt;
   std::optional<torch::Tensor> alibi_opt = std::nullopt;
 
-  std::vector<torch::Tensor> result = prefix_prefill_varlen_fwd(
+  std::vector<torch::Tensor> result = hg_prefix_prefill_varlen_fwd(
       query,
       k_cache,
       v_cache,
@@ -414,7 +474,7 @@ void FlashAttentionImpl::paged_forward(const AttentionMetadata& attn_metadata,
     max_q_len = 1;
   }
 
-  // For prefix_decode_varlen_fwd, the window semantics are:
+  // For hg_prefix_decode_varlen_fwd, the window semantics are:
   //   - window_left = -1 means infinite lookback (converted to seqlen_k
   //   internally)
   //   - window_left >= 0 enables a sliding window of that size
@@ -428,27 +488,57 @@ void FlashAttentionImpl::paged_forward(const AttentionMetadata& attn_metadata,
   std::optional<torch::Tensor> cu_seqlens_k_opt = std::nullopt;
   std::optional<torch::Tensor> alibi_opt = std::nullopt;
 
-  std::vector<torch::Tensor> result = prefix_decode_varlen_fwd(
-      query,
-      k_cache,
-      v_cache,
-      out_opt,
-      cu_seqlens_q,
-      cu_seqlens_k_opt,
-      kv_seq_lens,
-      alibi_opt,
-      block_table,
-      /*max_seqlen_q=*/static_cast<int32_t>(max_q_len),
-      /*max_seqlen_k=*/static_cast<int32_t>(max_kv_len),
-      /*p_dropout=*/0.0f,
-      /*softmax_scale=*/scale_,
-      /*zero_tensors=*/false,
-      /*is_causal=*/attn_metadata.is_causal,
-      /*window_size_left=*/static_cast<int32_t>(window_left),
-      /*window_size_right=*/static_cast<int32_t>(window_right),
-      /*softcap=*/0.0f,
-      /*return_softmax=*/false,
-      /*layout=*/1);
+  constexpr int64_t kHgPrefixDecodeMaxQueryLen = 16;
+  const bool use_prefill_kernel =
+      is_chunked_prefill && max_q_len > kHgPrefixDecodeMaxQueryLen;
+  std::vector<torch::Tensor> result;
+  if (use_prefill_kernel) {
+    // Match HG flash-attention's own prefix varlen dispatch: long query chunks
+    // use the prefill kernel, while decode/short chunks stay on decode kernel.
+    result = hg_prefix_prefill_varlen_fwd(
+        query,
+        k_cache,
+        v_cache,
+        out_opt,
+        cu_seqlens_q,
+        cu_seqlens_k_opt,
+        kv_seq_lens,
+        alibi_opt,
+        block_table,
+        /*max_seqlen_q=*/static_cast<int32_t>(max_q_len),
+        /*max_seqlen_k=*/static_cast<int32_t>(max_kv_len),
+        /*p_dropout=*/0.0f,
+        /*softmax_scale=*/scale_,
+        /*zero_tensors=*/false,
+        /*is_causal=*/attn_metadata.is_causal,
+        /*window_size_left=*/static_cast<int32_t>(window_left),
+        /*window_size_right=*/static_cast<int32_t>(window_right),
+        /*softcap=*/0.0f,
+        /*return_softmax=*/false,
+        /*layout=*/1);
+  } else {
+    result = hg_prefix_decode_varlen_fwd(
+        query,
+        k_cache,
+        v_cache,
+        out_opt,
+        cu_seqlens_q,
+        cu_seqlens_k_opt,
+        kv_seq_lens,
+        alibi_opt,
+        block_table,
+        /*max_seqlen_q=*/static_cast<int32_t>(max_q_len),
+        /*max_seqlen_k=*/static_cast<int32_t>(max_kv_len),
+        /*p_dropout=*/0.0f,
+        /*softmax_scale=*/scale_,
+        /*zero_tensors=*/false,
+        /*is_causal=*/attn_metadata.is_causal,
+        /*window_size_left=*/static_cast<int32_t>(window_left),
+        /*window_size_right=*/static_cast<int32_t>(window_right),
+        /*softcap=*/0.0f,
+        /*return_softmax=*/false,
+        /*layout=*/1);
+  }
 
   // Output is already packed, matching query shape.
   output.copy_(result[0]);

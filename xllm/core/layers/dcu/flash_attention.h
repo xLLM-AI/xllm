@@ -17,7 +17,9 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <optional>
 #include <tuple>
+#include <vector>
 
 #include "framework/kv_cache/kv_cache.h"
 #include "layers/common/attention_metadata.h"
@@ -33,6 +35,28 @@ torch::Tensor dense_varlen_flash_attention(torch::Tensor query,
                                            const torch::Tensor& cu_seqlens_k,
                                            double softmax_scale,
                                            bool is_causal);
+
+std::vector<torch::Tensor> flash_attention_varlen_forward(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    int64_t num_heads,
+    int64_t num_kv_heads,
+    const torch::Tensor& cu_seqlens_q,
+    const torch::Tensor& cu_seqlens_k,
+    int64_t max_seqlen_q,
+    int64_t max_seqlen_k,
+    float softmax_scale,
+    bool is_causal,
+    int64_t window_size_left,
+    int64_t window_size_right,
+    bool is_bf16_output,
+    std::optional<torch::Tensor> output = std::nullopt,
+    std::optional<torch::Tensor> seqused_k = std::nullopt,
+    std::optional<torch::Tensor> alibi_slopes = std::nullopt,
+    std::optional<torch::Tensor> q_descale = std::nullopt,
+    std::optional<torch::Tensor> k_descale = std::nullopt,
+    std::optional<torch::Tensor> v_descale = std::nullopt);
 
 // FlashAttentionImpl uses the mha_fwd_kvcache_bshd HIP kernel from
 // libflash_attention to compute paged attention directly from KV cache,

@@ -21,7 +21,9 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
+#if defined(USE_NPU)
 #include "core/kernels/npu/npu_ops_api.h"
+#endif
 
 namespace xllm::dit {
 
@@ -105,6 +107,7 @@ inline torch::Tensor avgpool(const torch::Tensor& input,
 //  Internal helpers live in the rain_fusion namespace to scope
 //  preprocessing from the sparse_attention variant.
 // =========================================================================
+#if defined(USE_NPU)
 namespace rain_fusion {
 
 // Layout helpers: merge B*N for NPU 8-dim compliance.
@@ -777,5 +780,6 @@ inline std::tuple<torch::Tensor, torch::Tensor> attention(
 }
 
 }  // namespace sparse_attention
+#endif  // defined(USE_NPU)
 
 }  // namespace xllm::dit

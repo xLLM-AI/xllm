@@ -32,7 +32,9 @@ limitations under the License.
 #include "musa/musa_ops_api.h"
 #elif defined(USE_DCU)
 #include "cuda/cuda_ops_api.h"
+#include "dcu/aiter_quant_adapter.h"
 #include "dcu/dcu_ops_api.h"
+#include "dcu/hipblaslt_fp8_adapter.h"
 #endif
 
 #include <numeric>
@@ -1187,6 +1189,11 @@ std::tuple<torch::Tensor, torch::Tensor> fp8_scaled_quantize(
     Fp8ScaledQuantizeParams& params) {
 #if defined(USE_CUDA)
   return cuda::fp8_scaled_quantize(params.input, params.output, params.scale);
+#elif defined(USE_DCU)
+  CHECK(!params.scale.has_value() || !params.scale.value().defined())
+      << "DCU fp8_scaled_quantize currently supports only dynamic per-token "
+         "quantization.";
+  return dcu::aiter::per_token_quant_fp8(params.input, params.output);
 #else
   NOT_IMPLEMENTED();
 #endif
@@ -1315,8 +1322,22 @@ torch::Tensor fp8_scaled_matmul(Fp8ScaledMatmulParams& params) {
     return out_2d.view(out_shape);
   }
   return out_2d;
+#elif defined(USE_DCU)
+  torch::Tensor out_2d = dcu::hipblaslt_fp8::fp8_gemm_nt(params.a,
+                                                         params.b,
+                                                         params.a_scale,
+                                                         params.b_scale,
+                                                         params.output_dtype,
+                                                         params.bias,
+                                                         params.output);
+  if (params.input_shape.has_value()) {
+    std::vector<int64_t> out_shape = params.input_shape.value();
+    out_shape.back() = params.b.size(0);
+    return out_2d.view(out_shape);
+  }
+  return out_2d;
 #else
-  LOG(FATAL) << "fp8_scaled_matmul is only supported on CUDA";
+  LOG(FATAL) << "fp8_scaled_matmul is only supported on CUDA/DCU";
   return torch::Tensor();
 #endif
 }
