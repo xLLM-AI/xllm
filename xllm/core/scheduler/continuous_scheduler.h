@@ -384,10 +384,6 @@ class ContinuousScheduler : public Scheduler {
   std::mutex pause_mutex_;
   std::condition_variable pause_cv_;
 
-  // Returns false (and rate-limited warns) for negative samples so a corrupted
-  // tbt never reaches the histograms or the recent_tbt_ routing feed.
-  bool should_record_token_latency(int64_t tbt_milliseconds);
-
  private:
   std::vector<Batch> schedule_request(const absl::Duration& timeout);
 

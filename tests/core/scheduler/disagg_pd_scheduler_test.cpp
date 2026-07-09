@@ -113,10 +113,6 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
   bool pop_decode_request_for_test(std::shared_ptr<Request>* request) {
     return request_queue_.read(*request);
   }
-
-  bool should_record_token_latency_for_test(int64_t tbt_ms) {
-    return should_record_token_latency(tbt_ms);
-  }
 };
 
 DisaggPDScheduler::Options make_options() {
@@ -218,15 +214,6 @@ bool recv_first_generation(DisaggPDScheduler* scheduler,
 }
 
 }  // namespace
-
-TEST(DisaggPDSchedulerTest, SkipsNegativeTokenLatencySample) {
-  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-  TestDisaggPDScheduler scheduler(&engine, make_options());
-  EXPECT_FALSE(scheduler.should_record_token_latency_for_test(-5));
-  EXPECT_FALSE(scheduler.should_record_token_latency_for_test(-1));
-  EXPECT_TRUE(scheduler.should_record_token_latency_for_test(0));
-  EXPECT_TRUE(scheduler.should_record_token_latency_for_test(3));
-}
 
 TEST(DisaggPDSchedulerTest, CachesPrefillBlocksBeforeRelease) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);

@@ -943,7 +943,10 @@ void DisaggPDScheduler::update_token_latency_metrics(
       continue;
     }
     int64_t tbt_milliseconds = sequence->tbt(now);
-    if (!should_record_token_latency(tbt_milliseconds)) {
+    if (tbt_milliseconds < 0) {
+      LOG_EVERY_N(WARNING, 1000)
+          << "Skipping negative inter-token latency sample: "
+          << tbt_milliseconds << "ms";
       continue;
     }
     if (sequence->is_first_token()) {
