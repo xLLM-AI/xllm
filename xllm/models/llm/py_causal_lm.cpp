@@ -112,24 +112,27 @@ ModelOutput PyCausalLM::forward(const torch::Tensor& tokens,
 
   py::gil_scoped_acquire gil;
 
-  py::dict attn_meta;
-  attn_meta["slot_mapping"] = attn_metadata->slot_mapping;
-  attn_meta["paged_kv_indptr"] = attn_metadata->paged_kv_indptr;
-  attn_meta["paged_kv_indices"] = attn_metadata->paged_kv_indices;
-  attn_meta["paged_kv_last_page_len"] = attn_metadata->paged_kv_last_page_len;
-  attn_meta["is_prefill"] = attn_metadata->is_prefill;
-  attn_meta["is_chunked_prefill"] = attn_metadata->is_chunked_prefill;
-  attn_meta["enable_cuda_graph"] = attn_metadata->enable_cuda_graph;
-  attn_meta["use_tensor_core"] = false;
+  py::dict attention_metadata_dict;
+  attention_metadata_dict["slot_mapping"] = attn_metadata->slot_mapping;
+  attention_metadata_dict["paged_kv_indptr"] = attn_metadata->paged_kv_indptr;
+  attention_metadata_dict["paged_kv_indices"] = attn_metadata->paged_kv_indices;
+  attention_metadata_dict["paged_kv_last_page_len"] =
+      attn_metadata->paged_kv_last_page_len;
+  attention_metadata_dict["is_prefill"] = attn_metadata->is_prefill;
+  attention_metadata_dict["is_chunked_prefill"] =
+      attn_metadata->is_chunked_prefill;
+  attention_metadata_dict["enable_cuda_graph"] =
+      attn_metadata->enable_cuda_graph;
+  attention_metadata_dict["use_tensor_core"] = false;
   if (attn_metadata->q_cu_seq_lens.defined()) {
-    attn_meta["q_cu_seq_lens"] = attn_metadata->q_cu_seq_lens;
+    attention_metadata_dict["q_cu_seq_lens"] = attn_metadata->q_cu_seq_lens;
   }
   if (attn_metadata->kv_cu_seq_lens.defined()) {
-    attn_meta["kv_cu_seq_lens"] = attn_metadata->kv_cu_seq_lens;
+    attention_metadata_dict["kv_cu_seq_lens"] = attn_metadata->kv_cu_seq_lens;
   }
   if (attn_metadata->qo_indptr.has_value() &&
       attn_metadata->qo_indptr->defined()) {
-    attn_meta["qo_indptr"] = attn_metadata->qo_indptr.value();
+    attention_metadata_dict["qo_indptr"] = attn_metadata->qo_indptr.value();
   }
 
   py::list kv_caches_py;
@@ -137,8 +140,8 @@ ModelOutput PyCausalLM::forward(const torch::Tensor& tokens,
     kv_caches_py.append(py::make_tuple(kv.get_k_cache(), kv.get_v_cache()));
   }
 
-  py::object hidden_obj =
-      py_model_.attr("forward")(tokens, positions, attn_meta, kv_caches_py);
+  py::object hidden_obj = py_model_.attr("forward")(
+      tokens, positions, attention_metadata_dict, kv_caches_py);
   return ModelOutput(hidden_obj.cast<torch::Tensor>());
 }
 
