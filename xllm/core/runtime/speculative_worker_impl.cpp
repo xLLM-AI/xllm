@@ -201,6 +201,40 @@ void SpeculativeWorkerImpl::update_sampling_params(
   TENSOR_REPEAT(sampling_params.do_sample, num_val_tokens);
 }
 
+void SpeculativeWorkerImpl::update_sampling_params(
+    SamplingParameters& sampling_params,
+    const std::vector<int32_t>& per_seq_val_tokens,
+    const int32_t total_num_val_tokens) {
+  std::vector<int32_t> selected_token_idxes_vec;
+  selected_token_idxes_vec.reserve(total_num_val_tokens);
+  for (int32_t i = 0; i < total_num_val_tokens; i++) {
+    selected_token_idxes_vec.emplace_back(i);
+  }
+  torch::Tensor selected_token_idxes = torch::tensor(selected_token_idxes_vec);
+  sampling_params.selected_token_idxes = selected_token_idxes.to(device_);
+  sampling_params.sample_idxes = selected_token_idxes.to(device_);
+
+  torch::Tensor repeats_tensor =
+      torch::tensor(std::vector<int64_t>(per_seq_val_tokens.begin(),
+                                         per_seq_val_tokens.end()),
+                    torch::kLong)
+          .to(device_);
+  auto repeat_per_seq = [&](torch::Tensor& tensor) {
+    if (!tensor.defined()) return;
+    tensor = tensor.repeat_interleave(repeats_tensor, /*dim=*/0);
+  };
+  repeat_per_seq(sampling_params.frequency_penalties);
+  repeat_per_seq(sampling_params.presence_penalties);
+  repeat_per_seq(sampling_params.repetition_penalties);
+  repeat_per_seq(sampling_params.temperatures);
+  repeat_per_seq(sampling_params.top_p);
+  repeat_per_seq(sampling_params.top_k);
+  repeat_per_seq(sampling_params.unique_token_ids);
+  repeat_per_seq(sampling_params.unique_token_counts);
+  repeat_per_seq(sampling_params.unique_token_ids_lens);
+  repeat_per_seq(sampling_params.do_sample);
+}
+
 void SpeculativeWorkerImpl::prepare_validate_inputs(
     const ForwardInput& input,
     ForwardInput& validate_input) {

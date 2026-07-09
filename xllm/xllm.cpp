@@ -146,6 +146,10 @@ Options create_options(const std::string& instance_name, bool is_local) {
           speculative_config.speculative_suffix_max_cached_requests())
       .speculative_suffix_use_tree_spec(
           speculative_config.speculative_suffix_use_tree_spec())
+      .enable_adaptive_speculative_decode(
+          speculative_config.enable_adaptive_speculative_decode())
+      .adaptive_speculative_min_gain(
+          speculative_config.adaptive_speculative_min_gain())
       .num_request_handling_threads(
           service_config.num_request_handling_threads())
       .communication_backend(parallel_config.communication_backend())

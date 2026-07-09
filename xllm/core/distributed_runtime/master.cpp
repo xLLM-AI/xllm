@@ -304,6 +304,9 @@ Master::Master(const Options& options, EngineType type)
             options_.speculative_suffix_max_cached_requests())
         .speculative_suffix_use_tree_spec(
             options_.speculative_suffix_use_tree_spec())
+        .enable_adaptive_speculative_decode(
+            options_.enable_adaptive_speculative_decode())
+        .adaptive_speculative_min_gain(options_.adaptive_speculative_min_gain())
         .task_type(options_.task_type())
         .enable_mla(options_.enable_mla())
         .npu_kernel_backend(options_.npu_kernel_backend())

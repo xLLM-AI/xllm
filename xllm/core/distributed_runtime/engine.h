@@ -25,6 +25,7 @@ limitations under the License.
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
 #include "runtime/options.h"
+#include "runtime/speculative_profile_registry.h"
 
 namespace xllm {
 class Engine {
@@ -54,6 +55,13 @@ class Engine {
 
   // return the model args
   virtual const ModelArgs& model_args() const { return args_; }
+
+  virtual const ModelArgs* draft_model_args() const { return nullptr; }
+
+  virtual bool set_speculative_validate_time_predictor(
+      const SpeculativeProfileRegistry::ValidateTimePredictor&) {
+    return false;
+  }
 
   // return the tokenizer args
   virtual const TokenizerArgs& tokenizer_args() const {

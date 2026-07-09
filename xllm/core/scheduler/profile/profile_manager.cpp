@@ -19,8 +19,11 @@ limitations under the License.
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 
+#include <Eigen/Dense>
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -36,6 +39,7 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/request/request_state.h"
+#include "runtime/speculative_profile_registry.h"
 #include "scheduler/profile/graph_warmup.h"
 #include "util/rec_model_utils.h"
 
@@ -53,6 +57,7 @@ ProfileManager::ProfileManager(Engine* engine, const Options& options)
   if (options.enable_profile_step_time()) {
     LOG(INFO) << "Starting profiliing step time.";
     profile_step_time(false);
+    profile_speculative_validate_time();
     // test accuracy
     // eval_sequence_latency_prediction();
     // eval_batch_latency_prediction("only_prefill");
@@ -369,6 +374,178 @@ void ProfileManager::train_prefill_time_predictor(
 void ProfileManager::train_decode_time_predictor(
     std::vector<std::tuple<int32_t, int32_t, double>> time_profiling_data) {
   decode_time_predictor_->fit_for_decode(time_profiling_data);
+}
+
+void ProfileManager::train_speculative_validate_time_predictor(
+    const std::vector<std::tuple<int32_t, int32_t, int32_t, double>>&
+        time_profiling_data) {
+  if (time_profiling_data.empty()) {
+    return;
+  }
+
+  constexpr int32_t kNumCoefficients = 4;
+  Eigen::MatrixXd matrix(time_profiling_data.size(), kNumCoefficients);
+  Eigen::VectorXd target(time_profiling_data.size());
+  for (int32_t i = 0; i < static_cast<int32_t>(time_profiling_data.size());
+       ++i) {
+    const int32_t batch_size = std::get<0>(time_profiling_data[i]);
+    const int32_t query_len = std::get<1>(time_profiling_data[i]);
+    const int32_t prefix_len = std::get<2>(time_profiling_data[i]);
+    const double batch = static_cast<double>(batch_size);
+    const double query = static_cast<double>(query_len);
+    const double prefix = static_cast<double>(prefix_len);
+    matrix(i, 0) = 1.0;
+    matrix(i, 1) = batch;
+    matrix(i, 2) = batch * query;
+    matrix(i, 3) = batch * query * prefix;
+    target(i) = std::get<3>(time_profiling_data[i]);
+  }
+
+  Eigen::VectorXd coefficients = matrix.colPivHouseholderQr().solve(target);
+  double sum_abs_error = 0.0;
+  double sum_percentage_error = 0.0;
+  for (int32_t i = 0; i < static_cast<int32_t>(time_profiling_data.size());
+       ++i) {
+    const double actual = std::get<3>(time_profiling_data[i]);
+    const double prediction = matrix.row(i).dot(coefficients);
+    const double abs_error = std::abs(prediction - actual);
+    sum_abs_error += abs_error;
+    if (actual > 0.0) {
+      sum_percentage_error += abs_error / actual;
+    }
+  }
+  const double mae =
+      sum_abs_error / static_cast<double>(time_profiling_data.size());
+  const double mape = sum_percentage_error /
+                      static_cast<double>(time_profiling_data.size()) * 100.0;
+
+  for (int32_t i = 0; i < kNumCoefficients; ++i) {
+    if (coefficients(i) < 0.0) {
+      LOG(ERROR) << "Negative speculative validate coefficient: "
+                 << coefficients(i) << ", set it to 0.";
+      coefficients(i) = 0.0;
+    }
+  }
+
+  SpeculativeProfileRegistry::ValidateTimePredictor predictor;
+  predictor.intercept_ms = coefficients(0);
+  predictor.batch_ms = coefficients(1);
+  predictor.query_token_ms = coefficients(2);
+  predictor.query_prefix_ms = coefficients(3);
+  SpeculativeProfileRegistry::get_instance().set_validate_time_predictor(
+      predictor);
+  if (!engine_->set_speculative_validate_time_predictor(predictor)) {
+    LOG(WARNING)
+        << "Failed to broadcast speculative validate predictor to workers. "
+        << "Adaptive speculative decode will fallback to runtime EWMA on "
+        << "workers without the profile.";
+  }
+
+  LOG(INFO) << "Fitted speculative validate equation: time = "
+            << predictor.batch_ms << " * batch_size + "
+            << predictor.query_token_ms << " * batch_size * query_len + "
+            << predictor.query_prefix_ms
+            << " * batch_size * query_len * prefix_len + "
+            << predictor.intercept_ms << ", MAE: " << mae << ", MAPE: " << mape
+            << "%";
+}
+
+void ProfileManager::profile_speculative_validate_time() {
+  const SpeculativeConfig& speculative_config =
+      ::xllm::SpeculativeConfig::get_instance();
+  std::string speculative_algorithm =
+      speculative_config.speculative_algorithm();
+  std::transform(
+      speculative_algorithm.begin(),
+      speculative_algorithm.end(),
+      speculative_algorithm.begin(),
+      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (speculative_config.num_speculative_tokens() <= 1 ||
+      speculative_algorithm != "mtp") {
+    return;
+  }
+  LOG(INFO) << "Starting speculative validate profile for MTP, "
+            << "adaptive_enabled="
+            << speculative_config.enable_adaptive_speculative_decode();
+
+  auto& model_args = engine_->model_args();
+  const int32_t max_context_len = model_args.max_position_embeddings();
+  const int32_t profile_max_prompt_length =
+      std::min(max_context_len, options_.profile_max_prompt_length());
+  if (profile_max_prompt_length <= 16) {
+    LOG(WARNING)
+        << "Skip speculative validate profile because prompt length is too "
+        << "small: " << profile_max_prompt_length;
+    return;
+  }
+
+  const int32_t max_query_len =
+      std::min<int32_t>(speculative_config.num_speculative_tokens() + 1, 10);
+  const int32_t max_batch_size =
+      std::min<int32_t>(options_.max_seqs_per_batch(), 256);
+  std::vector<int32_t> query_lens;
+  query_lens.push_back(1);
+  if (max_query_len > 2) {
+    query_lens.push_back((max_query_len + 1) / 2);
+  }
+  if (max_query_len > 1) {
+    query_lens.push_back(max_query_len);
+  }
+  query_lens.erase(std::unique(query_lens.begin(), query_lens.end()),
+                   query_lens.end());
+
+  constexpr int32_t kMaxProfileBatchSize = 32;
+  std::vector<int32_t> candidate_batch_sizes = {1, 16, 32};
+  std::vector<int32_t> batch_sizes;
+  for (const int32_t batch_size : candidate_batch_sizes) {
+    if (batch_size <= max_batch_size && batch_size <= kMaxProfileBatchSize) {
+      batch_sizes.push_back(batch_size);
+    }
+  }
+  if (batch_sizes.empty()) {
+    batch_sizes.push_back(std::min<int32_t>(
+        std::max<int32_t>(max_batch_size, 1), kMaxProfileBatchSize));
+  }
+
+  std::vector<int32_t> prefix_lens;
+  prefix_lens.push_back(profile_max_prompt_length);
+  if (profile_max_prompt_length >= 64) {
+    prefix_lens.push_back(profile_max_prompt_length / 4);
+  }
+  prefix_lens.push_back(16);
+  for (int32_t& prefix_len : prefix_lens) {
+    prefix_len = std::clamp(prefix_len, 16, profile_max_prompt_length);
+  }
+  std::sort(prefix_lens.begin(), prefix_lens.end());
+  prefix_lens.erase(std::unique(prefix_lens.begin(), prefix_lens.end()),
+                    prefix_lens.end());
+
+  std::vector<std::tuple<int32_t, int32_t, int32_t, double>>
+      time_profiling_data;
+  const int32_t total_blocks =
+      static_cast<int32_t>(block_manager_pool_->num_blocks());
+  const auto block_size = block_manager_pool_->options().block_size();
+  for (const int32_t prefix_len : prefix_lens) {
+    for (const int32_t query_len : query_lens) {
+      for (const int32_t batch_size : batch_sizes) {
+        const int32_t token_length = prefix_len + query_len;
+        const int32_t blocks_per_seq =
+            (prefix_len + block_size - 1) / block_size +
+            (token_length + block_size - 1) / block_size;
+        if (batch_size * blocks_per_seq > total_blocks * 9 / 10) {
+          continue;
+        }
+        double latency_mean = 0.0;
+        for (int32_t k = 0; k < profile_count_per_step_; ++k) {
+          latency_mean += run_request(token_length, prefix_len, batch_size);
+        }
+        latency_mean /= static_cast<double>(profile_count_per_step_);
+        time_profiling_data.emplace_back(
+            batch_size, query_len, prefix_len, latency_mean);
+      }
+    }
+  }
+  train_speculative_validate_time_predictor(time_profiling_data);
 }
 
 // ----------------------predict step time-----------------------

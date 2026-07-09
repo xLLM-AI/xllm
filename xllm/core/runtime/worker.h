@@ -29,6 +29,7 @@ limitations under the License.
 #include "framework/state_dict/state_dict.h"
 #include "runtime/executor.h"
 #include "runtime/options.h"
+#include "runtime/speculative_profile_registry.h"
 #include "runtime/worker_impl.h"
 #include "util/threadpool.h"
 
@@ -69,6 +70,9 @@ class Worker {
 
   // allocate kv cache. blocking call
   bool allocate_kv_cache(const KVCacheShape& kv_cache_shape);
+
+  bool set_speculative_validate_time_predictor(
+      const SpeculativeProfileRegistry::ValidateTimePredictor& predictor);
 
   void get_cache_info(uint64_t& cluster_id, std::string& addr, uint16_t& port);
 

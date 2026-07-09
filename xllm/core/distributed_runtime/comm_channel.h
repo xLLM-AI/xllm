@@ -28,6 +28,7 @@ limitations under the License.
 #include "framework/xtensor/xtensor.h"
 #include "runtime/forward_params.h"
 #include "runtime/params_utils.h"
+#include "runtime/speculative_profile_registry.h"
 #include "worker.pb.h"
 
 namespace xllm {
@@ -42,6 +43,9 @@ class CommChannel {
   virtual bool hello();
 
   virtual bool allocate_kv_cache(const KVCacheShape& kv_cache_shape);
+
+  virtual bool set_speculative_validate_time_predictor(
+      const SpeculativeProfileRegistry::ValidateTimePredictor& predictor);
 
   virtual bool get_cache_info(uint64_t& cluster_id,
                               std::string& addr,

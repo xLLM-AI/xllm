@@ -600,6 +600,20 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
   return true;
 }
 
+bool LLMEngine::set_speculative_validate_time_predictor(
+    const SpeculativeProfileRegistry::ValidateTimePredictor& predictor) {
+  bool success = true;
+  for (size_t i = 0; i < worker_clients_.size(); ++i) {
+    if (!worker_clients_[i]->set_speculative_validate_time_predictor(
+            predictor)) {
+      LOG(ERROR) << "Failed to set speculative validate predictor for worker "
+                 << i;
+      success = false;
+    }
+  }
+  return success;
+}
+
 bool LLMEngine::pull_kv_blocks(
     const int32_t src_dp_size,
     const int32_t src_dp_rank,

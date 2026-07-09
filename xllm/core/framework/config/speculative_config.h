@@ -52,7 +52,9 @@ class SpeculativeConfig final {
          "speculative_suffix_max_cached_requests",
          "speculative_suffix_use_tree_spec",
          "enable_opt_validate_probs",
-         "enable_atb_spec_kernel"}};
+         "enable_atb_spec_kernel",
+         "enable_adaptive_speculative_decode",
+         "adaptive_speculative_min_gain"}};
     return kOptionCategory;
   }
 
@@ -79,6 +81,10 @@ class SpeculativeConfig final {
   PROPERTY(bool, enable_opt_validate_probs) = false;
 
   PROPERTY(bool, enable_atb_spec_kernel) = false;
+
+  PROPERTY(bool, enable_adaptive_speculative_decode) = false;
+
+  PROPERTY(double, adaptive_speculative_min_gain) = 0.0;
 };
 
 }  // namespace xllm

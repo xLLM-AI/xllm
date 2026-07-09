@@ -55,6 +55,10 @@ class RemoteWorker : public WorkerClient {
 
   virtual bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;
 
+  bool set_speculative_validate_time_predictor(
+      const SpeculativeProfileRegistry::ValidateTimePredictor& predictor)
+      override;
+
   virtual void get_cache_info(uint64_t& cluster_id,
                               std::string& addr,
                               uint16_t& port) override;

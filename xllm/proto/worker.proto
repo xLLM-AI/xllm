@@ -56,6 +56,13 @@ message AllocateKVCacheRequest {
   KVCacheShape kv_cache_shape = 1;
 }
 
+message SpeculativeValidateTimePredictor {
+  double intercept_ms = 1;
+  double batch_ms = 2;
+  double query_token_ms = 3;
+  double query_prefix_ms = 4;
+}
+
 message SleepRequest {
   MasterStatus master_status = 1;
 }
@@ -354,6 +361,8 @@ service DistributeWorker {
   rpc ProcessGroupTest (Empty) returns (Status);
   rpc ProfileDeviceMemory (Empty) returns (DeviceMemory);
   rpc AllocateKVCache (AllocateKVCacheRequest) returns (Status);
+  rpc SetSpeculativeValidateTimePredictor(SpeculativeValidateTimePredictor)
+      returns (Status) {}
   rpc AllocateKVCacheWithTransfer(AllocateKVCacheRequest) returns (Status) {}
   rpc PullKVCache(PullKVCacheRequest) returns (Status) {}
   rpc GetCacheInfo(Empty) returns (CacheInfo) {}

@@ -14,6 +14,7 @@ cc_library(
     time_predictor.cpp
   DEPS
     :batch
+    :distributed_runtime
     :request
     :runtime
     glog::glog

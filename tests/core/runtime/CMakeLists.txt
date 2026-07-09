@@ -79,6 +79,31 @@ cc_test(
 
 cc_test(
   NAME
+    adaptive_speculative_controller_test
+  SRCS
+    adaptive_speculative_controller_test.cpp
+    "${PROJECT_SOURCE_DIR}/xllm/core/runtime/adaptive_speculative_controller.cpp"
+    "${PROJECT_SOURCE_DIR}/xllm/core/runtime/speculative_profile_registry.cpp"
+  DEPS
+    torch
+    glog::glog
+    proto::xllm_proto
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    speculative_profile_registry_test
+  SRCS
+    speculative_profile_registry_test.cpp
+    "${PROJECT_SOURCE_DIR}/xllm/core/runtime/speculative_profile_registry.cpp"
+  DEPS
+    glog::glog
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     cp_input_partition_test
   SRCS
     cp_input_partition_test.cpp

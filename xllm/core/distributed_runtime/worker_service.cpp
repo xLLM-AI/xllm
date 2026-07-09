@@ -440,6 +440,24 @@ void WorkerService::AllocateKVCache(
   return;
 }
 
+void WorkerService::SetSpeculativeValidateTimePredictor(
+    ::google::protobuf::RpcController* controller,
+    const proto::SpeculativeValidateTimePredictor* request,
+    proto::Status* response,
+    ::google::protobuf::Closure* done) {
+  threadpool_->schedule([this, controller, request, response, done]() mutable {
+    brpc::ClosureGuard done_guard(done);
+    SpeculativeProfileRegistry::ValidateTimePredictor predictor;
+    predictor.intercept_ms = request->intercept_ms();
+    predictor.batch_ms = request->batch_ms();
+    predictor.query_token_ms = request->query_token_ms();
+    predictor.query_prefix_ms = request->query_prefix_ms();
+    response->set_ok(
+        worker_->set_speculative_validate_time_predictor(predictor));
+  });
+  return;
+}
+
 void WorkerService::AllocateKVCacheWithTransfer(
     ::google::protobuf::RpcController* controller,
     const proto::AllocateKVCacheRequest* req,
