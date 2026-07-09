@@ -1357,6 +1357,9 @@ void ContinuousScheduler::update_token_latency_metrics(
       continue;
     }
     int64_t tbt_milliseconds = sequence->tbt(now);
+    if (!should_record_token_latency(tbt_milliseconds)) {
+      continue;
+    }
     if (sequence->is_first_token()) {
       HISTOGRAM_OBSERVE(time_to_first_token_latency_milliseconds,
                         tbt_milliseconds);
@@ -1366,6 +1369,17 @@ void ContinuousScheduler::update_token_latency_metrics(
       HISTOGRAM_OBSERVE(inter_token_latency_milliseconds, tbt_milliseconds);
     }
   }
+}
+
+bool ContinuousScheduler::should_record_token_latency(
+    int64_t tbt_milliseconds) {
+  if (tbt_milliseconds < 0) {
+    LOG_EVERY_N(WARNING, 1000)
+        << "Skipping negative inter-token latency sample: " << tbt_milliseconds
+        << "ms";
+    return false;
+  }
+  return true;
 }
 
 void ContinuousScheduler::process_batch_output(bool enable_schedule_overlap) {
