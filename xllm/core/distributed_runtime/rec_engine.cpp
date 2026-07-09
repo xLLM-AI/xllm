@@ -413,8 +413,8 @@ ForwardOutput RecEngine::LlmRecEnginePipeline::step(
   auto run_one_step = [this, &batches](int step_idx) -> bool {
     Timer timer;
     auto forward_inputs = prepare_inputs(batches);
-    COUNTER_ADD(prepare_input_latency_microseconds,
-                timer.elapsed_microseconds());
+    HISTOGRAM_OBSERVE(prepare_input_latency_microseconds,
+                      static_cast<int64_t>(timer.elapsed_microseconds()));
 
     const bool all_empty = std::all_of(forward_inputs.begin(),
                                        forward_inputs.end(),
@@ -440,14 +440,14 @@ ForwardOutput RecEngine::LlmRecEnginePipeline::step(
     auto results = folly::collectAll(futures).get();
 
     if (step_idx == 0) {
-      COUNTER_ADD(rec_first_token_latency_microseconds,
-                  timer.elapsed_microseconds());
+      HISTOGRAM_OBSERVE(rec_first_token_latency_microseconds,
+                        timer.elapsed_microseconds());
     } else if (step_idx == 1) {
-      COUNTER_ADD(rec_second_token_latency_microseconds,
-                  timer.elapsed_microseconds());
+      HISTOGRAM_OBSERVE(rec_second_token_latency_microseconds,
+                        timer.elapsed_microseconds());
     } else if (step_idx == 2) {
-      COUNTER_ADD(rec_third_token_latency_microseconds,
-                  timer.elapsed_microseconds());
+      HISTOGRAM_OBSERVE(rec_third_token_latency_microseconds,
+                        timer.elapsed_microseconds());
     }
 
     timer.reset();
@@ -478,8 +478,8 @@ ForwardOutput RecEngine::LlmRecEnginePipeline::step(
       batches[dp_rank].refresh_sequences_from_groups();
       ++dp_rank;
     }
-    COUNTER_ADD(rec_sampling_latency_microseconds,
-                timer.elapsed_microseconds());
+    HISTOGRAM_OBSERVE(rec_sampling_latency_microseconds,
+                      timer.elapsed_microseconds());
     return true;
   };
 
@@ -703,7 +703,8 @@ ForwardOutput RecEngine::OneRecPrefillOnlyEnginePipeline::step(
   Timer timer_total;
   // OneRec does not need refresh_forward_type
   auto forward_inputs = engine_.workers_[0]->prepare_inputs(batches[0]);
-  COUNTER_ADD(prepare_input_latency_microseconds, timer.elapsed_microseconds());
+  HISTOGRAM_OBSERVE(prepare_input_latency_microseconds,
+                    timer.elapsed_microseconds());
 
   if (!forward_inputs.token_ids.defined()) {
     return {};
@@ -711,29 +712,30 @@ ForwardOutput RecEngine::OneRecPrefillOnlyEnginePipeline::step(
 
   timer.reset();
   const auto& prefill_output = get_model_output(forward_inputs);
-  COUNTER_ADD(rec_first_token_latency_microseconds,
-              timer.elapsed_microseconds());
+  HISTOGRAM_OBSERVE(rec_first_token_latency_microseconds,
+                    timer.elapsed_microseconds());
 
   timer.reset();
   batches[0].process_sample_output(prefill_output.sample_output, false);
-  COUNTER_ADD(rec_sampling_latency_microseconds, timer.elapsed_microseconds());
+  HISTOGRAM_OBSERVE(rec_sampling_latency_microseconds,
+                    timer.elapsed_microseconds());
 
   ForwardOutput decode_output;
   for (size_t i = 0; i < kRecDecodeSteps; ++i) {
     timer.reset();
     // OneRec does not need refresh_forward_type
     forward_inputs = engine_.workers_[0]->prepare_inputs(batches[0]);
-    COUNTER_ADD(prepare_input_latency_microseconds,
-                timer.elapsed_microseconds());
+    HISTOGRAM_OBSERVE(prepare_input_latency_microseconds,
+                      timer.elapsed_microseconds());
 
     timer.reset();
     decode_output = get_model_output(forward_inputs);
     if (i == 0) {
-      COUNTER_ADD(rec_second_token_latency_microseconds,
-                  timer.elapsed_microseconds());
+      HISTOGRAM_OBSERVE(rec_second_token_latency_microseconds,
+                        timer.elapsed_microseconds());
     } else if (i == 1) {
-      COUNTER_ADD(rec_third_token_latency_microseconds,
-                  timer.elapsed_microseconds());
+      HISTOGRAM_OBSERVE(rec_third_token_latency_microseconds,
+                        timer.elapsed_microseconds());
     }
 
     timer.reset();
@@ -741,8 +743,8 @@ ForwardOutput RecEngine::OneRecPrefillOnlyEnginePipeline::step(
         decode_output.sample_output,
         false,
         /*force_requested_beam_result_size=*/i + 1 == kRecDecodeSteps);
-    COUNTER_ADD(rec_sampling_latency_microseconds,
-                timer.elapsed_microseconds());
+    HISTOGRAM_OBSERVE(rec_sampling_latency_microseconds,
+                      timer.elapsed_microseconds());
   }
 
   batches[0].finish();
@@ -845,7 +847,8 @@ ForwardOutput RecEngine::OneRecXAttentionEnginePipeline::step(
 
   Timer timer;
   auto forward_inputs = engine_.workers_[0]->prepare_inputs(batches[0]);
-  COUNTER_ADD(prepare_input_latency_microseconds, timer.elapsed_microseconds());
+  HISTOGRAM_OBSERVE(prepare_input_latency_microseconds,
+                    timer.elapsed_microseconds());
 
   if (!forward_inputs.token_ids.defined()) {
     return {};
@@ -853,8 +856,8 @@ ForwardOutput RecEngine::OneRecXAttentionEnginePipeline::step(
 
   timer.reset();
   const auto& output = get_model_output(forward_inputs);
-  COUNTER_ADD(rec_first_token_latency_microseconds,
-              timer.elapsed_microseconds());
+  HISTOGRAM_OBSERVE(rec_first_token_latency_microseconds,
+                    timer.elapsed_microseconds());
 
   timer.reset();
   if (output.beam_sequence_group.defined() &&
@@ -863,7 +866,8 @@ ForwardOutput RecEngine::OneRecXAttentionEnginePipeline::step(
   } else {
     batches[0].process_sample_output(output.sample_output, false);
   }
-  COUNTER_ADD(rec_sampling_latency_microseconds, timer.elapsed_microseconds());
+  HISTOGRAM_OBSERVE(rec_sampling_latency_microseconds,
+                    timer.elapsed_microseconds());
 
   batches[0].finish();
   return output;
@@ -1135,7 +1139,8 @@ ForwardOutput RecEngine::RecMultiRoundEnginePipeline::step(
   Timer timer;
   // Call worker's prepare_inputs (multi-round logic is inside worker)
   auto forward_inputs = engine_.workers_[0]->prepare_inputs(batches[0]);
-  COUNTER_ADD(prepare_input_latency_microseconds, timer.elapsed_microseconds());
+  HISTOGRAM_OBSERVE(prepare_input_latency_microseconds,
+                    timer.elapsed_microseconds());
 
   if (!forward_inputs.token_ids.defined()) {
     return {};
@@ -1144,14 +1149,15 @@ ForwardOutput RecEngine::RecMultiRoundEnginePipeline::step(
   timer.reset();
   // Execute model inference (only one step, multi-round handled by worker)
   const auto& output = get_model_output(forward_inputs);
-  COUNTER_ADD(rec_first_token_latency_microseconds,
-              timer.elapsed_microseconds());
+  HISTOGRAM_OBSERVE(rec_first_token_latency_microseconds,
+                    timer.elapsed_microseconds());
 
   timer.reset();
   // Use process_beam_sequence_group for multi-round beam search results
   // instead of process_sample_output which would call append_token()
   batches[0].process_beam_sequence_group(output);
-  COUNTER_ADD(rec_sampling_latency_microseconds, timer.elapsed_microseconds());
+  HISTOGRAM_OBSERVE(rec_sampling_latency_microseconds,
+                    timer.elapsed_microseconds());
 
   batches[0].finish();
   return output;

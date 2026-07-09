@@ -180,6 +180,10 @@ bool need_dp_moe_gather(const ParallelArgs& args, bool enable_moe_all2all) {
   return args.dp_size() > 1 && args.ep_size() > 1 && !enable_moe_all2all;
 }
 
+bool need_selected_moe_dp_gather(const ParallelArgs& args) {
+  return args.dp_size() > 1 && args.ep_size() > 1;
+}
+
 torch::Tensor gather_dp_tokens(const torch::Tensor& input,
                                const ModelInputParams& params,
                                const ParallelArgs& args) {
@@ -190,6 +194,58 @@ torch::Tensor gather_dp_tokens(const torch::Tensor& input,
   return parallel_state::gather(input,
                                 args.dp_local_process_group_,
                                 params.parallel.dp_global_token_nums);
+}
+
+SelectedMoeInputs gather_selected_moe_inputs(
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& topk_weights,
+    const torch::Tensor& topk_ids,
+    const std::vector<int32_t>& dp_token_nums,
+    const ParallelArgs& args) {
+  if (!need_selected_moe_dp_gather(args)) {
+    return {hidden_states, topk_weights, topk_ids, false};
+  }
+
+  CHECK(args.dp_local_process_group_ != nullptr)
+      << "dp_local_process_group_ is not initialized";
+  const int64_t rank = args.dp_local_process_group_->rank();
+  CHECK_LT(rank, static_cast<int64_t>(dp_token_nums.size()))
+      << "rank " << rank << " must be less than dp_token_nums size "
+      << dp_token_nums.size();
+  CHECK_EQ(hidden_states.size(0), static_cast<int64_t>(dp_token_nums[rank]))
+      << "selected MoE local rows " << hidden_states.size(0)
+      << " must match dp_token_nums[" << rank << "] " << dp_token_nums[rank];
+
+  return {parallel_state::gather(
+              hidden_states, args.dp_local_process_group_, dp_token_nums),
+          parallel_state::gather(
+              topk_weights, args.dp_local_process_group_, dp_token_nums),
+          parallel_state::gather(
+              topk_ids, args.dp_local_process_group_, dp_token_nums),
+          true};
+}
+
+torch::Tensor slice_selected_moe_output(
+    torch::Tensor output,
+    const std::vector<int32_t>& dp_token_nums,
+    const ParallelArgs& args) {
+  if (!need_selected_moe_dp_gather(args)) {
+    return output;
+  }
+
+  CHECK(args.dp_local_process_group_ != nullptr)
+      << "dp_local_process_group_ is not initialized";
+  const int64_t rank = args.dp_local_process_group_->rank();
+  CHECK_LT(rank, static_cast<int64_t>(dp_token_nums.size()))
+      << "rank " << rank << " must be less than dp_token_nums size "
+      << dp_token_nums.size();
+
+  int64_t start = 0;
+  for (int64_t i = 0; i < rank; ++i) {
+    start += dp_token_nums[i];
+  }
+  const int64_t end = start + dp_token_nums[rank];
+  return output.slice(0, start, end);
 }
 
 torch::Tensor get_dp_local_slice(const torch::Tensor& input,

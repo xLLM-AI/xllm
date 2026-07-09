@@ -80,6 +80,7 @@ struct SamplingParameters {
     params.all_random_sample = all_random_sample;
     params.all_greedy_sample = all_greedy_sample;
     params.logprobs = logprobs;
+    params.return_probs = return_probs;
     params.max_top_logprobs = max_top_logprobs;
     params.is_embeddings = is_embeddings;
     params.num_return_sequences = num_return_sequences;
@@ -143,6 +144,10 @@ struct SamplingParameters {
 
   // whether to output logprobs for each generated token.
   bool logprobs = false;
+
+  // whether downstream validation needs sampled probabilities even when the
+  // request itself does not ask for logprobs.
+  bool return_probs = false;
 
   // wheteher to get the embeddings of the tokens. used by embeddings model.
   bool is_embeddings = false;

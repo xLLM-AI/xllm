@@ -61,7 +61,13 @@ class GraphPersistentParam final {
                                          const torch::Tensor& positions,
                                          const ModelInputParams& params,
                                          uint32_t padded_num_tokens,
-                                         bool return_capture_params = false);
+                                         bool return_capture_params = false,
+                                         bool skip_token_update = false);
+
+  void update_tokens(const torch::Tensor& tokens,
+                     const ModelInputParams& params,
+                     uint32_t actual_num_tokens,
+                     uint32_t padded_num_tokens);
 
   // Getter methods for persistent tensors
   torch::Tensor persistent_tokens(uint32_t actual_tokens = 0) const {

@@ -82,6 +82,21 @@ def get_torch_musa_root_path() -> Optional[str]:
     except ImportError:
         return None
 
+
+def _find_dcu_so(package: str, pattern: str) -> Optional[str]:
+    try:
+        import glob
+        import importlib.util
+        import os
+        spec = importlib.util.find_spec(package)
+    except Exception:
+        return None
+    if not spec or not spec.submodule_search_locations:
+        return None
+    files = glob.glob(os.path.join(spec.submodule_search_locations[0], pattern))
+    return files[0] if files else None
+
+
 def prepend_path_env(var_name: str, path: str, sep: str = os.pathsep) -> None:
     """Prepend a path into a path env var without duplicates."""
     if not path:
@@ -213,6 +228,40 @@ def set_cuda_envs() -> None:
 def set_dcu_envs() -> None:
     set_common_envs()
     os.environ["DCU_PATH"] = get_dcu_root_path() or ""
+    if not os.getenv("FLASH_MLA_LIB"):
+        flash_mla_lib = _find_dcu_so("flash_mla", "cuda*.so")
+        if flash_mla_lib:
+            os.environ["FLASH_MLA_LIB"] = flash_mla_lib
+    if not os.getenv("AITER_CPP_API_LIB"):
+        aiter_cpp_api_lib = _find_dcu_so("aiter", "jit/module_cpp_api.so")
+        if aiter_cpp_api_lib:
+            os.environ["AITER_CPP_API_LIB"] = aiter_cpp_api_lib
+
+def set_maca_envs():
+    os.environ["PYTHON_INCLUDE_PATH"] = get_python_include_path()
+    os.environ["PYTHON_LIB_PATH"] = get_torch_root_path()
+    os.environ["LIBTORCH_ROOT"] = get_torch_root_path()
+    os.environ["PYTORCH_INSTALL_PATH"] = get_torch_root_path()
+
+    MACA_PATH = os.getenv("MACA_PATH", "/opt/maca")
+    os.environ["CUCC_CMAKE_ENTRY"] = "2"
+    os.environ["CUCC_PATH"] = MACA_PATH + "/tools/cu-bridge"
+    os.environ["CUDA_PATH"] = MACA_PATH + "/tools/cu-bridge"
+    PATH = os.getenv("PATH", "")
+    PATH = MACA_PATH + "/mxgpu_llvm/bin" + ":" + \
+        MACA_PATH + "/bin" + ":" + \
+        MACA_PATH + "/tools/cu-bridge/bin" + ":" + \
+        MACA_PATH + "/tools/cu-bridge/tools" + ":" + \
+        ":" + PATH
+    os.environ["PATH"] = PATH
+    LD_LIBRARY_PATH = os.getenv("LD_LIBRARY_PATH", "")
+    LD_LIBRARY_PATH = MACA_PATH + "/lib" + ":" + \
+        MACA_PATH + "/ompi/lib" + ":" + \
+        MACA_PATH + "/mxgpu_llvm/lib" + ":" + \
+        MACA_PATH + "/tools/cu-bridge/lib" + ":" + \
+        LD_LIBRARY_PATH
+    os.environ["LD_LIBRARY_PATH"] = LD_LIBRARY_PATH
+    os.environ["PYTHON_EXECUTABLE"] = "/opt/conda/bin/python"
 
 def set_ilu_envs() -> None:
     set_common_envs()

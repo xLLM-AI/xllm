@@ -17,6 +17,7 @@ def build_kernel_family(
     output_root: str | Path,
     force: bool = False,
     device: str | None = None,
+    jobs: int | str | None = None,
 ) -> KernelFamilyManifest:
     context = resolve_build_context(
         device=device,
@@ -27,6 +28,7 @@ def build_kernel_family(
         output_root=output_root,
         context=context,
         force=force,
+        jobs=jobs,
     )
 
 
@@ -35,6 +37,7 @@ def build_kernels(
     kernel_names: list[str] | None = None,
     force: bool = False,
     device: str | None = None,
+    jobs: int | str | None = None,
 ) -> list[KernelFamilyManifest]:
     context = resolve_build_context(
         device=device,
@@ -48,6 +51,7 @@ def build_kernels(
                 output_root=output_root,
                 context=context,
                 force=force,
+                jobs=jobs,
             )
         )
     return manifests

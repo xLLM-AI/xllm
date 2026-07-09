@@ -66,28 +66,30 @@ TEST(SingleBlockManagerTest, AllocateSingleDiesWhenExhausted) {
   EXPECT_DEATH(manager.allocate(), "No more single blocks available");
 }
 
-TEST(SingleBlockManagerTest, PrefixCacheStyleApisAreSafeNoopsWhenDisabled) {
+TEST(SingleBlockManagerTest, PrefixCacheApisAreNotImplemented) {
   SingleBlockManager manager(2, "single");
 
   const int32_t token_ids_arr[] = {1, 2, 3};
   const Slice<int32_t> token_ids(token_ids_arr, 3);
 
-  // allocate_shared should be safely substitutable with BlockManager behavior
-  // when prefix cache is disabled.
-  const auto shared = manager.allocate_shared(token_ids);
-  EXPECT_TRUE(shared.empty());
+  // SINGLE never serves the prefix cache. These APIs are explicitly
+  // NOT_IMPLEMENTED so a stray caller fails loudly instead of silently
+  // mis-routing (the composite only calls them on prefix-capable leaves).
+  EXPECT_DEATH(manager.allocate_shared(token_ids), "not implemented");
 
   std::vector<Block> blocks = manager.allocate(1);
   ASSERT_EQ(blocks.size(), 1u);
-
-  // cache() overloads should be safe no-ops.
-  EXPECT_NO_FATAL_FAILURE(manager.cache(token_ids, blocks));
-  EXPECT_NO_FATAL_FAILURE(manager.cache(blocks));
+  EXPECT_DEATH(manager.cache(token_ids, blocks), "not implemented");
+  EXPECT_DEATH(manager.cache(blocks), "not implemented");
 }
 
-TEST(SingleBlockManagerTest, UsedBlocksAccountingDoesNotLeakWithAliases) {
-  // id 0 is reserved internally, so 2 physical slots expose a single usable
-  // block.
+TEST(SingleBlockManagerTest, UsedBlocksAccountingRoundTrips) {
+  // SingleBlockManager now reuses BlockManagerImpl's free list. With prefix
+  // cache disabled there is no aliasing scenario (single blocks live only in
+  // the owning sequence, never in a prefix cache), so deallocate drops
+  // effective usage immediately and the physical id returns when the Block is
+  // destroyed. id 0 is reserved internally, so 2 physical slots expose a single
+  // usable block.
   SingleBlockManager manager(2, "single");
   EXPECT_EQ(manager.num_used_blocks(), 0u);
   EXPECT_EQ(manager.num_free_blocks(), 1u);
@@ -97,23 +99,16 @@ TEST(SingleBlockManagerTest, UsedBlocksAccountingDoesNotLeakWithAliases) {
     EXPECT_EQ(manager.num_used_blocks(), 1u);
     EXPECT_EQ(manager.num_free_blocks(), 0u);
 
-    // Create an alias to simulate an external holder (e.g. prefix-cache style
-    // reference) that outlives the "sequence-owned" reference.
-    Block alias = block;
-    EXPECT_EQ(block.ref_count(), 2u);
-
-    // Deallocate the sequence-owned reference while an alias still exists.
+    // Deallocate the owning reference: effective usage drops immediately.
     manager.deallocate(Slice<Block>(&block, 1));
-    EXPECT_EQ(manager.num_used_blocks(), 1u);
+    EXPECT_EQ(manager.num_used_blocks(), 0u);
 
-    // Drop the sequence-owned reference without calling deallocate again.
+    // Physical id returns to the free list when the Block is destroyed.
     block = Block();
-    EXPECT_EQ(alias.ref_count(), 1u);
-    EXPECT_EQ(manager.num_used_blocks(), 1u);
-    EXPECT_EQ(manager.num_free_blocks(), 0u);
+    EXPECT_EQ(manager.num_used_blocks(), 0u);
+    EXPECT_EQ(manager.num_free_blocks(), 1u);
   }
 
-  // When the last alias is released, used block accounting should converge.
   EXPECT_EQ(manager.num_used_blocks(), 0u);
   EXPECT_EQ(manager.num_free_blocks(), 1u);
 }

@@ -8,6 +8,19 @@ file(GLOB_RECURSE MLU_SOURCE_FILES
   "${CMAKE_CURRENT_LIST_DIR}/*.cpp"
 )
 
+set(MLU_KERNEL_DEPS
+  torch
+  :platform
+  :triton_jit
+  cnclep
+  torch_mlu
+  -Wl,--no-as-needed
+  torch_mlu_ops
+  ${MLU_CNRT_LIBRARY}
+  -Wl,--as-needed
+  Python::Python
+)
+
 cc_library(
   NAME
     mlu_kernels
@@ -16,8 +29,5 @@ cc_library(
   SRCS
     ${MLU_SOURCE_FILES}
   DEPS
-    torch
-    cnclep
-    torch_mlu_ops
-    Python::Python
+    ${MLU_KERNEL_DEPS}
 )

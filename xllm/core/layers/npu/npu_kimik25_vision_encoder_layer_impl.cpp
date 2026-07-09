@@ -21,6 +21,7 @@ limitations under the License.
 #include <iostream>
 #include <map>
 
+#include "core/framework/config/parallel_config.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
 #include "torch_npu/csrc/core/npu/NPUException.h"
 #include "xllm_atb_layers/models/kimik25/kimik25_encoder.h"
@@ -60,7 +61,7 @@ void NpuKimik25VisionEncoderLayerImpl::param_from_args(
   param.numKeyValueHeadsPerRank =
       static_cast<int>(optionalValue.value()) / param.worldSize;
   param.rank = dp_local_tp_rank;
-  param.backend = FLAGS_communication_backend;
+  param.backend = ParallelConfig::get_instance().communication_backend();
   param.enableLogN = false;
   param.MLPActivationType = atb::infer::ActivationType::ACTIVATION_GELU;
   param.mapping = parallel_args.mapping();

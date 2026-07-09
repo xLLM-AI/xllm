@@ -56,7 +56,8 @@ class _typeConvert<float> {
   }
 };
 
-#if defined(USE_DCU) || (defined(CUDA_VERSION) && (CUDA_VERSION >= 12000))
+#if defined(USE_DCU) || (defined(CUDA_VERSION) && (CUDA_VERSION >= 12000)) || \
+    defined(USE_MACA)
 // CUDA < 12.0 runs into issues with packed type conversion
 template <>
 class _typeConvert<c10::Half> {
@@ -101,8 +102,9 @@ class _typeConvert<c10::BFloat16> {
     return __float22bfloat162_rn(x);
   }
 };
-#elif defined(CUDA_VERSION) && (CUDA_VERSION >= 12000) && \
-    defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+#elif defined(CUDA_VERSION) && (CUDA_VERSION >= 12000) &&   \
+        defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800) || \
+    defined(USE_MACA)
 
 // CUDA_ARCH < 800 does not have BF16 support.
 template <>

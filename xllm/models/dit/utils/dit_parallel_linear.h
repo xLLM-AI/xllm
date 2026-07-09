@@ -37,6 +37,9 @@ enum class LinearType {
   // Megatron-style tensor parallelism with column/row splitting +
   // gather/reduce.
   TensorParallel,
+  // Combined TP+SP: TP shards weights (column/row) while SP handles
+  // all2all communication for sequence/head distribution.
+  TensorAndSequenceParallel,
 };
 
 // ── Sequence Parallel Options ──────────────────────────────────────────────
@@ -92,8 +95,6 @@ struct SpOptions {
 //   Each rank holds in_features/tp_size columns. Reduces output across ranks.
 struct TpOptions {
   bool column_parallel = true;
-  int64_t tp_rank = 0;
-  int64_t tp_size = 1;
   bool gather_output = false;
   bool need_scatter = false;
   ProcessGroup* process_group = nullptr;
@@ -101,23 +102,33 @@ struct TpOptions {
   TpOptions() = default;
 
   TpOptions(bool column_parallel,
-            int64_t tp_rank,
-            int64_t tp_size,
-            bool gather_output = false,
-            bool need_scatter = false,
-            ProcessGroup* process_group = nullptr)
+            bool gather_output,
+            bool need_scatter,
+            ProcessGroup* process_group)
       : column_parallel(column_parallel),
-        tp_rank(tp_rank),
-        tp_size(tp_size),
         gather_output(gather_output),
         need_scatter(need_scatter),
         process_group(process_group) {}
 
+  int64_t tp_size() const {
+    return process_group ? process_group->world_size() : 1;
+  }
+  int64_t tp_rank() const { return process_group ? process_group->rank() : 0; }
+
+  static TpOptions col(ProcessGroup* pg, bool gather_output = false) {
+    return TpOptions(
+        /*column_parallel=*/true, gather_output, /*need_scatter=*/false, pg);
+  }
+  static TpOptions row(ProcessGroup* pg, bool gather_output = true) {
+    return TpOptions(
+        /*column_parallel=*/false, gather_output, /*need_scatter=*/false, pg);
+  }
+
   void validate() const {
-    CHECK(tp_size > 0) << "TpOptions: tp_size must be > 0, got " << tp_size;
-    CHECK(tp_rank >= 0 && tp_rank < tp_size)
-        << "TpOptions: tp_rank (" << tp_rank
-        << ") must be in [0, tp_size=" << tp_size << ")";
+    CHECK(tp_size() > 0) << "TpOptions: tp_size must be > 0, got " << tp_size();
+    CHECK(tp_rank() >= 0 && tp_rank() < tp_size())
+        << "TpOptions: tp_rank (" << tp_rank()
+        << ") must be in [0, tp_size=" << tp_size() << ")";
     if (!process_group) {
       LOG(ERROR) << "TpOptions: process_group is nullptr — "
                  << "tensor parallel communication requires a valid process "
@@ -128,54 +139,33 @@ struct TpOptions {
 
 class DiTParallelLinearImpl : public torch::nn::Module {
  public:
-  DiTParallelLinearImpl(layer::AddMatmulWeightTransposed linear,
-                        const std::string& module_name,
-                        LinearType linear_type = LinearType::Default,
-                        const SpOptions& sp_options = SpOptions())
-      : in_features_(0),
-        out_features_(0),
-        has_bias_(false),
-        linear_type_(linear_type),
-        sp_options_(sp_options),
-        tp_options_(std::nullopt) {
-    linear_ = register_module(module_name, std::move(linear));
-    if (linear_type_ == LinearType::SequenceParallel) {
-      sp_options_.validate();
-    }
-  }
-
   DiTParallelLinearImpl(
       int64_t in_features,
       int64_t out_features,
       bool bias,
       const torch::TensorOptions& options,
-      LinearType linear_type = LinearType::Default,
       const std::optional<SpOptions>& sp_options = std::nullopt,
       const std::optional<TpOptions>& tp_options = std::nullopt)
       : in_features_(in_features),
         out_features_(out_features),
         has_bias_(bias),
         tensor_options_(options),
-        linear_type_(linear_type),
+        linear_type_(infer_linear_type(sp_options, tp_options)),
         sp_options_(sp_options.value_or(SpOptions())),
         tp_options_(tp_options) {
-    switch (linear_type_) {
-      case LinearType::Default:
-      case LinearType::SequenceParallel:
-        linear_ =
-            register_module("linear",
-                            layer::AddMatmulWeightTransposed(
-                                in_features, out_features, bias, options));
-        if (linear_type_ == LinearType::SequenceParallel) {
-          sp_options_.validate();
-        }
-        break;
-      case LinearType::TensorParallel:
-        CHECK(tp_options_.has_value())
-            << "DiTParallelLinear: TpOptions required for TensorParallel mode";
-        tp_options_->validate();
-        init_tp_weights();
-        break;
+    if (linear_type_ == LinearType::SequenceParallel ||
+        linear_type_ == LinearType::TensorAndSequenceParallel) {
+      sp_options_.validate();
+    }
+    if (has_tp_weights()) {
+      CHECK(tp_options_.has_value())
+          << "DiTParallelLinear: TpOptions required for the current LinearType";
+      tp_options_->validate();
+      init_tp_weights();
+    } else {
+      linear_ = register_module("linear",
+                                layer::AddMatmulWeightTransposed(
+                                    in_features, out_features, bias, options));
     }
   }
 
@@ -187,15 +177,17 @@ class DiTParallelLinearImpl : public torch::nn::Module {
         return forward_sp(input);
       case LinearType::TensorParallel:
         return forward_tp(input);
+      case LinearType::TensorAndSequenceParallel:
+        return forward_tp_sp(input);
       default:
         LOG(FATAL) << "DiTParallelLinear: unknown LinearType "
-                   << static_cast<int64_t>(linear_type_);
+                   << static_cast<int32_t>(linear_type_);
         return input;
     }
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    if (linear_type_ == LinearType::TensorParallel) {
+    if (has_tp_weights()) {
       load_tp_weights(state_dict);
     } else {
       linear_->load_state_dict(state_dict);
@@ -203,7 +195,7 @@ class DiTParallelLinearImpl : public torch::nn::Module {
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    if (linear_type_ == LinearType::TensorParallel) {
+    if (has_tp_weights()) {
       CHECK(tp_weight_loaded_)
           << "DiTParallelLinear: weight not loaded for " << prefix << "weight";
       if (has_bias_) {
@@ -216,8 +208,7 @@ class DiTParallelLinearImpl : public torch::nn::Module {
   }
 
   torch::Tensor get_weight() const {
-    return linear_type_ == LinearType::TensorParallel ? tp_weight_
-                                                      : torch::Tensor();
+    return has_tp_weights() ? tp_weight_ : torch::Tensor();
   }
 
  private:
@@ -257,7 +248,7 @@ class DiTParallelLinearImpl : public torch::nn::Module {
   void init_tp_weights() {
     const auto& tp = tp_options_.value();
     if (tp.column_parallel) {
-      int64_t out_per_partition = out_features_ / tp.tp_size;
+      int64_t out_per_partition = out_features_ / tp.tp_size();
       tp_weight_ = register_parameter(
           "weight",
           torch::empty({out_per_partition, in_features_}, tensor_options_),
@@ -269,7 +260,7 @@ class DiTParallelLinearImpl : public torch::nn::Module {
             /*is_buffer=*/false);
       }
     } else {
-      int64_t in_per_partition = in_features_ / tp.tp_size;
+      int64_t in_per_partition = in_features_ / tp.tp_size();
       tp_weight_ = register_parameter(
           "weight",
           torch::empty({out_features_, in_per_partition}, tensor_options_),
@@ -285,7 +276,7 @@ class DiTParallelLinearImpl : public torch::nn::Module {
 
   torch::Tensor forward_tp(const torch::Tensor& input) {
     const auto& tp = tp_options_.value();
-    if (tp.tp_size <= 1) {
+    if (tp.tp_size() <= 1) {
       return linear_->forward(input);
     }
     return tp.column_parallel ? forward_tp_column(input)
@@ -329,22 +320,95 @@ class DiTParallelLinearImpl : public torch::nn::Module {
     return output;
   }
 
+  torch::Tensor forward_tp_sp(const torch::Tensor& input) {
+    CHECK(input.dim() == 3)
+        << "TP+SP linear expects 3D input {batch, seq, hidden}, got shape "
+        << input.sizes();
+
+    const auto& tp = tp_options_.value();
+    const auto group_size = sp_options_.process_group->world_size();
+
+    if (tp.column_parallel && sp_options_.before_attention) {
+      // TP column output: {batch, seq_per_sp, heads / tp_size, dim_head}
+      // SP all2all: scatter heads (dim=2), gather seq (dim=1)
+      // → {batch, seq_all, heads / (tp_size * sp_size), dim_head}
+      auto out = forward_tp_column(input);
+      auto fn = parallel_state::all_to_all_4D(
+          out.view({input.size(0),
+                    -1,
+                    sp_options_.head_num / tp.tp_size(),
+                    sp_options_.head_dim}),
+          /*scatter_dim=*/2,
+          /*gather_dim=*/1,
+          /*async=*/false,
+          sp_options_.process_group);
+      return fn().view({input.size(0),
+                        -1,
+                        sp_options_.hidden_size / (tp.tp_size() * group_size)});
+    } else if (!tp.column_parallel && !sp_options_.before_attention) {
+      // Input: {batch, seq_per_sp, heads / (tp_size * sp_size), dim_head}
+      // SP all2all: scatter seq (dim=1), gather heads (dim=2)
+      // → {batch, seq_all, heads / tp_size, dim_head}
+      auto fn = parallel_state::all_to_all_4D(
+          input.view({input.size(0),
+                      -1,
+                      sp_options_.head_num / (tp.tp_size() * group_size),
+                      sp_options_.head_dim}),
+          /*scatter_dim=*/1,
+          /*gather_dim=*/2,
+          /*async=*/false,
+          sp_options_.process_group);
+      auto gathered = fn().view(
+          {input.size(0), -1, sp_options_.hidden_size / tp.tp_size()});
+      return forward_tp_row(gathered);
+    } else {
+      LOG(FATAL) << "TP+SP: unsupported combination, column_parallel="
+                 << tp.column_parallel
+                 << ", before_attention=" << sp_options_.before_attention;
+      return input;
+    }
+  }
+
+  static LinearType infer_linear_type(const std::optional<SpOptions>& sp,
+                                      const std::optional<TpOptions>& tp) {
+    bool has_sp = sp.has_value() && sp->process_group &&
+                  sp->process_group->world_size() > 1;
+    bool has_tp = tp.has_value() && tp->process_group &&
+                  tp->process_group->world_size() > 1;
+
+    if (has_tp && has_sp) {
+      return LinearType::TensorAndSequenceParallel;
+    }
+    if (has_tp) {
+      return LinearType::TensorParallel;
+    }
+    if (has_sp) {
+      return LinearType::SequenceParallel;
+    }
+    return LinearType::Default;
+  }
+
+  bool has_tp_weights() const {
+    return linear_type_ == LinearType::TensorParallel ||
+           linear_type_ == LinearType::TensorAndSequenceParallel;
+  }
+
   void load_tp_weights(const StateDict& state_dict) {
     const auto& tp = tp_options_.value();
     if (tp.column_parallel) {
       weight::load_sharded_weight(state_dict,
                                   "weight",
                                   /*axis=*/0,
-                                  tp.tp_rank,
-                                  tp.tp_size,
+                                  tp.tp_rank(),
+                                  tp.tp_size(),
                                   tp_weight_,
                                   tp_weight_loaded_);
       if (has_bias_) {
         weight::load_sharded_weight(state_dict,
                                     "bias",
                                     /*axis=*/0,
-                                    tp.tp_rank,
-                                    tp.tp_size,
+                                    tp.tp_rank(),
+                                    tp.tp_size(),
                                     tp_bias_,
                                     tp_bias_loaded_);
       }
@@ -352,8 +416,8 @@ class DiTParallelLinearImpl : public torch::nn::Module {
       weight::load_sharded_weight(state_dict,
                                   "weight",
                                   /*axis=*/1,
-                                  tp.tp_rank,
-                                  tp.tp_size,
+                                  tp.tp_rank(),
+                                  tp.tp_size(),
                                   tp_weight_,
                                   tp_weight_loaded_);
       if (has_bias_) {
@@ -377,6 +441,30 @@ class DiTParallelLinearImpl : public torch::nn::Module {
 };
 
 TORCH_MODULE(DiTParallelLinear);
+
+// ── Shared SP sequence utilities ─────────────────────────────────────────
+//
+// Split a tensor along a dimension for sequence parallelism: each rank
+// gets its own slice via narrow (no copy).
+inline torch::Tensor sp_split_sequence(const torch::Tensor& input,
+                                       int64_t dim,
+                                       ProcessGroup* sp_group) {
+  if (!sp_group || sp_group->world_size() <= 1) return input;
+  int64_t dim_size = input.size(dim);
+  return input.narrow(dim,
+                      sp_group->rank() * (dim_size / sp_group->world_size()),
+                      dim_size / sp_group->world_size());
+}
+
+// Gather a tensor along a dimension for sequence parallelism via
+// all-gather + cat on the target dim.
+inline torch::Tensor sp_gather_sequence(const torch::Tensor& input,
+                                        int64_t dim,
+                                        ProcessGroup* sp_group) {
+  if (!sp_group || sp_group->world_size() <= 1) return input;
+  auto tensor_list = parallel_state::gather(input.contiguous(), sp_group, dim);
+  return torch::cat(tensor_list, dim);
+}
 
 // TP-aware RMSNorm: performs RMSNorm on a TP-sharded tensor using only
 // scalar all-reduce communication, avoiding the all-gather + scatter

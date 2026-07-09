@@ -271,6 +271,9 @@ void DeepseekScalingRotaryEmbeddingImpl::forward(
   if (is_prompt) {
     discrete = false;
     position_ids = std::nullopt;
+    if (Platform::is_dcu()) {
+      position_ids = positions;
+    }
   } else {
     discrete = true;
     position_ids = positions;

@@ -70,6 +70,19 @@ size_t KVCacheState::num_blocks(BlockType type) const {
   return it == composite_blocks_.end() ? 0 : it->second.size();
 }
 
+bool KVCacheState::has_any_blocks() const {
+  // Cache-bearing types only; SINGLE is a per-sequence resource block, not
+  // token cache, and must not count toward "the sequence already holds cache".
+  for (const BlockType type :
+       {BlockType::KV, BlockType::SWA, BlockType::C4, BlockType::C128}) {
+    const auto it = composite_blocks_.find(type);
+    if (it != composite_blocks_.end() && !it->second.empty()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::vector<int32_t> KVCacheState::cache_slots(BlockType type,
                                                int32_t pos_start,
                                                int32_t pos_end) {

@@ -15,7 +15,7 @@ limitations under the License.
 
 #include "hash_util.h"
 
-#include "core/common/global_flags.h"
+#include "core/framework/config/kv_cache_config.h"
 
 namespace xllm {
 
@@ -25,7 +25,7 @@ XXH3Key hash_tensor(const torch::Tensor& tensor) {
   XXH128_hash_t hash = XXH3_128bits_withSeed(
       reinterpret_cast<const void*>(contiguous_tensor.data_ptr()),
       tensor.numel() * tensor.element_size(),
-      FLAGS_xxh3_128bits_seed);
+      KVCacheConfig::get_instance().xxh3_128bits_seed());
   std::memcpy(key.data, &hash, sizeof(hash));
   return key;
 }
@@ -35,7 +35,7 @@ XXH3Key hash_string(const std::string& str) {
   XXH128_hash_t hash =
       XXH3_128bits_withSeed(reinterpret_cast<const void*>(str.data()),
                             str.size(),
-                            FLAGS_xxh3_128bits_seed);
+                            KVCacheConfig::get_instance().xxh3_128bits_seed());
   std::memcpy(key.data, &hash, sizeof(hash));
   return key;
 }

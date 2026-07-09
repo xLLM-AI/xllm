@@ -883,6 +883,9 @@ struct ExpertInput {
 struct GraphInput {
   torch::Tensor attn_mask;
   torch::Tensor tiling_data;
+#if defined(USE_DCU)
+  bool use_dense_flash_attention = false;
+#endif
   bool use_expanded_decode_for_spec_verify_attention = false;
   torch::Tensor expanded_kv_seq_lens;
   torch::Tensor expanded_block_tables;
@@ -891,11 +894,15 @@ struct GraphInput {
 #if defined(USE_NPU)
   std::shared_ptr<npu::AclGraphTaskUpdateContext> acl_graph_task_update_context;
 #endif
+  torch::Tensor input_tokens_override;
 
   GraphInput to(const torch::Device& device) const {
     GraphInput out;
     out.attn_mask = safe_to(attn_mask, device, true);
     out.tiling_data = safe_to(tiling_data, device, true);
+#if defined(USE_DCU)
+    out.use_dense_flash_attention = use_dense_flash_attention;
+#endif
     out.use_expanded_decode_for_spec_verify_attention =
         use_expanded_decode_for_spec_verify_attention;
     out.expanded_kv_seq_lens = safe_to(expanded_kv_seq_lens, device, true);
@@ -905,6 +912,8 @@ struct GraphInput {
 #if defined(USE_NPU)
     out.acl_graph_task_update_context = acl_graph_task_update_context;
 #endif
+    out.input_tokens_override =
+        safe_to(input_tokens_override, device, /*non_blocking=*/true);
     return out;
   }
 };

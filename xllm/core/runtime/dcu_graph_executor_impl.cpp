@@ -22,9 +22,9 @@ limitations under the License.
 #include <numeric>
 #include <vector>
 
-#include "core/common/global_flags.h"
 #include "core/common/metrics.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/util/rec_model_utils.h"
@@ -101,7 +101,8 @@ DcuGraphPersistentParam::DcuGraphPersistentParam(
       device_(device),
       options_(options),
       num_decoding_tokens_(options.num_decoding_tokens()) {
-  const int64_t max_tokens_per_batch = FLAGS_max_tokens_per_batch;
+  const int64_t max_tokens_per_batch =
+      SchedulerConfig::get_instance().max_tokens_per_batch();
 
   int64_t max_seqs_per_batch = options.max_seqs_per_batch();
   if (is_rec_multi_round_mode()) {
@@ -353,7 +354,7 @@ std::optional<ModelInputParams> DcuGraphPersistentParam::update(
   if (params.embedding.input_embedding.defined()) {
     if (!input_embeds_.defined() || input_embeds_.numel() == 0) {
       auto shape = params.embedding.input_embedding.sizes().vec();
-      shape[0] = FLAGS_max_tokens_per_batch;
+      shape[0] = SchedulerConfig::get_instance().max_tokens_per_batch();
       input_embeds_ = torch::zeros(
           shape, params.embedding.input_embedding.options().device(device_));
     }
@@ -533,7 +534,7 @@ void DcuGraphPersistentParam::update_decode_input_buffer(
   if (params.embedding.input_embedding.defined()) {
     if (!input_embeds_.defined() || input_embeds_.numel() == 0) {
       auto shape = params.embedding.input_embedding.sizes().vec();
-      shape[0] = FLAGS_max_tokens_per_batch;
+      shape[0] = SchedulerConfig::get_instance().max_tokens_per_batch();
       input_embeds_ = torch::zeros(
           shape, params.embedding.input_embedding.options().device(device_));
     }
@@ -623,7 +624,7 @@ void DcuGraphPersistentParam::set_aux_hidden_states(
 
   if (!aux_hidden_states_.defined() || aux_hidden_states_.numel() == 0) {
     auto shape = value.sizes().vec();
-    shape[0] = FLAGS_max_tokens_per_batch;
+    shape[0] = SchedulerConfig::get_instance().max_tokens_per_batch();
     aux_hidden_states_ = torch::zeros(shape, value.options().device(device_));
   }
 

@@ -270,7 +270,6 @@ class UniPCMultistepSchedulerImpl final : public torch::nn::Module {
         convert_model_output(model_output, sample);
 
     if (use_corrector) {
-      LOG(INFO) << "scheduler step use_corrector";
       sample = multistep_uni_c_bh_update(
           model_output_convert, last_sample_, sample, this_order_);
     }
@@ -292,8 +291,6 @@ class UniPCMultistepSchedulerImpl final : public torch::nn::Module {
     }
     this_order_ =
         std::min(this_order_calc, static_cast<int64_t>(lower_order_nums_ + 1));
-
-    LOG(INFO) << "self.this_order = " << this_order_;
 
     last_sample_ = sample;
     torch::Tensor prev_sample =

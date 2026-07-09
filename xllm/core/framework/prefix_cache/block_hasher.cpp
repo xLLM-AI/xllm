@@ -18,7 +18,6 @@ limitations under the License.
 #include <string.h>
 #include <xxHash/xxhash.h>
 
-#include "common/global_flags.h"
 #include "core/framework/config/kv_cache_config.h"
 
 namespace xllm {
@@ -76,7 +75,7 @@ void mm_xxh3_128bits_hash(const std::vector<const uint8_t*>& mm_hash_values,
   XXH128_hash_t mm_hash =
       XXH3_128bits_withSeed(reinterpret_cast<const void*>(key_buffer.data()),
                             key_buffer.size(),
-                            FLAGS_xxh3_128bits_seed);
+                            KVCacheConfig::get_instance().xxh3_128bits_seed());
   std::memcpy(hash_value, &mm_hash, sizeof(mm_hash));
 }
 

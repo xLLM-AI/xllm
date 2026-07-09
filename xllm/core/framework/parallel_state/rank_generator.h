@@ -1,3 +1,19 @@
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#pragma once
 #include <glog/logging.h>
 
 #include <string>
@@ -7,73 +23,93 @@
 #include "core/common/global_flags.h"
 #include "core/framework/config/dit_config.h"
 
+namespace xllm {
+
+/*
+group_ranks: the rank sizes of the sub groups
+group_order: the priority of the sub groups, the group with a
+    higher priority will be assigned closer rank ids.
+world_size: the global world_size
+*/
 class RankGenerator {
  public:
-  RankGenerator(int32_t tp,
-                int32_t sp,
-                int32_t cfg,
-                int32_t dp,
-                const std::string& group_order = "tp-sp-cfg-dp",
-                int32_t rank_offset = 0)
-      : tp_(tp), sp_(sp), cfg_(cfg), dp_(dp), rank_offset_(rank_offset) {
-    world_size_ = tp * sp * cfg * dp;
+  explicit RankGenerator(int32_t world_size = 1, int32_t rank_offset = 0)
+      : rank_offset_(rank_offset), world_size_(world_size) {}
 
-    group_size_map_["tp"] = tp;
-    group_size_map_["sp"] = sp;
-    group_size_map_["cfg"] = cfg;
-    group_size_map_["dp"] = dp;
+  std::unordered_map<std::string, std::vector<std::vector<int32_t>>>
+  get_ranks_mapping(std::vector<int32_t>& group_ranks,
+                    std::vector<std::string>& group_order) {
+    CHECK(!group_ranks.empty() && group_ranks.size() != 0)
+        << "The RankGenerator expected to initialize with group_ranks that "
+           "contains the ranks of sub groups"
+        << ", but got an empty group_ranks";
 
-    auto full_order = group_order;
-    for (const auto& group_size_pair : group_size_map_) {
-      const std::string& group_name = group_size_pair.first;
-      int32_t group_size = group_size_pair.second;
+    CHECK(!group_order.empty() && group_order.size() != 0)
+        << "The RankGenerator expected to initialize with group_order that "
+           "indicates the priority of sub groups"
+        << ", but got empty string";
 
-      if (full_order.find(group_name) == std::string::npos) {
-        if (group_size != 1) {
-          LOG(FATAL) << "The size of (" << group_name << ") is (" << group_size
-                     << "), but you haven't specified it in order ("
-                     << full_order << ").";
-        } else {
-          full_order = full_order + "-" + group_name;
-        }
-      }
+    int32_t product_size = 1;
+    for (const auto& group_rank : group_ranks) {
+      product_size *= group_rank;
     }
 
-    group_order_ = full_order;
-
-    auto split = [](const std::string& s,
-                    char delimiter) -> std::vector<std::string> {
-      std::vector<std::string> tokens;
-      std::string token;
-      std::istringstream tokenStream(s);
-      while (std::getline(tokenStream, token, delimiter)) {
-        tokens.push_back(token);
+    bool is_single_group = (group_ranks.size() == 1);
+    if (is_single_group && group_ranks[0] != world_size_) {
+      if (world_size_ % group_ranks[0] != 0) {
+        LOG(FATAL) << "The world_size could not be divided by "
+                   << group_order[0] << "_size, "
+                   << "got world_size: " << world_size_ << ", "
+                   << group_order[0] << "_size: " << group_ranks[0] << ".";
       }
-      return tokens;
-    };
-
-    ordered_group_name_ = split(group_order_, '-');
-    for (const std::string& token : ordered_group_name_) {
-      auto it = group_size_map_.find(token);
-      if (it != group_size_map_.end()) {
-        ordered_group_size_.push_back(it->second);
-      }
+      LOG(WARNING) << "The sub group size does not equal world_size"
+                   << ", we will assign the " << group_order[0]
+                   << ", with sub group size: " << group_ranks[0];
+      group_ranks.emplace_back(world_size_ / group_ranks[0]);
+      group_order.emplace_back("place_holder");
+    } else if (world_size_ != product_size) {
+      LOG(FATAL) << "The world_size does not equals the product of sub "
+                    "group sizes, "
+                 << "got world_size: " << world_size_
+                 << ", sub groups: " << group_order[0]
+                 << "sub groups sizes: " << group_ranks[0];
     }
 
-    LOG(INFO) << "RankGenerator initialized with tp=" << tp << ", sp=" << sp
-              << ", cfg=" << cfg << ", dp=" << dp << ", order=" << group_order_
-              << ", world_size=" << world_size_;
+    CHECK(group_order.size() == group_ranks.size())
+        << "The size of group_ranks does not equals the size of group_order.";
 
-    if (::xllm::DiTConfig::get_instance().dit_debug_print()) {
-      debug_print();
+    std::stringstream ss;
+    for (size_t i = 0; i < group_ranks.size(); i++) {
+      ss << group_order[i] << "=" << group_ranks[i] << ", ";
     }
+
+    LOG(INFO) << "RankGenerator initialized with " << ss.str()
+              << "world_size=" << world_size_;
+
+    auto group_mapping =
+        std::unordered_map<std::string, std::vector<std::vector<int32_t>>>();
+    group_mapping.reserve(group_order.size());
+
+    for (auto& group_name : group_order) {
+      auto sub_group_ranks = get_ranks(group_name, group_ranks, group_order);
+      if (::xllm::DiTConfig::get_instance().dit_debug_print()) {
+        print_ranks(group_name, sub_group_ranks);
+      }
+      group_mapping.insert({group_name, sub_group_ranks});
+    }
+    return group_mapping;
   }
 
-  std::vector<std::vector<int32_t>> get_ranks(const std::string& group_query) {
-    std::vector<bool> mask = get_mask(group_query);
+  int32_t get_world_size() const { return world_size_; }
+
+ private:
+  std::vector<std::vector<int32_t>> get_ranks(
+      const std::string& group_query,
+      const std::vector<int32_t>& group_ranks,
+      const std::vector<std::string>& group_order) {
+    std::vector<bool> mask = get_mask(group_query, group_order);
     std::vector<std::vector<int32_t>> ranks =
-        generate_masked_orthogonal_rank_groups(
-            world_size_, ordered_group_size_, mask);
+        generate_masked_orthogonal_rank_groups(world_size_, group_ranks, mask);
     if (rank_offset_ > 0) {
       for (auto& rank_group : ranks) {
         for (size_t i = 0; i < rank_group.size(); i++) {
@@ -85,23 +121,8 @@ class RankGenerator {
     return ranks;
   }
 
-  int32_t get_world_size() const { return world_size_; }
-  const std::string& get_order() const { return group_order_; }
-  int32_t get_tp() const { return tp_; }
-  int32_t get_sp() const { return sp_; }
-  int32_t get_cfg() const { return cfg_; }
-  int32_t get_dp() const { return dp_; }
-
-  void debug_print() {
-    print_ranks("cfg");
-    print_ranks("tp");
-    print_ranks("sp");
-    print_ranks("dp");
-  }
-
-  void print_ranks(const std::string& group_query) {
-    auto ranks = get_ranks(group_query);
-
+  void print_ranks(const std::string& group_query,
+                   const std::vector<std::vector<int32_t>>& ranks) {
     std::stringstream ss;
     ss << "Ranks for query '" << group_query << "':" << std::endl;
     for (size_t i = 0; i < ranks.size(); i++) {
@@ -115,7 +136,6 @@ class RankGenerator {
     LOG(INFO) << ss.str();
   }
 
- private:
   std::vector<int32_t> prefix_product(const std::vector<int32_t>& group_size,
                                       int32_t init = 1) {
     std::vector<int32_t> prefix_product_sizes;
@@ -206,7 +226,6 @@ class RankGenerator {
     // group size equals to the product of queryed group type sizes;
     int32_t group_size = queried_group_prefix.back();
     int32_t num_of_group = world_size / group_size;
-
     std::vector<std::vector<int32_t>> ranks;
     for (int32_t group_index = 0; group_index < num_of_group; group_index++) {
       std::vector<int32_t> decomposed_group_idx =
@@ -227,15 +246,25 @@ class RankGenerator {
     return ranks;
   }
 
-  std::vector<bool> get_mask(const std::string& group_query) {
+  std::vector<bool> get_mask(const std::string& group_query,
+                             const std::vector<std::string>& group_order) {
+    auto split = [](const std::string& s,
+                    char delimiter) -> std::vector<std::string> {
+      std::vector<std::string> tokens;
+      std::string token;
+      std::istringstream tokenStream(s);
+      while (std::getline(tokenStream, token, delimiter)) {
+        tokens.push_back(token);
+      }
+      return tokens;
+    };
     std::vector<std::string> query_group_name = split(group_query, '-');
-    std::vector<bool> mask(ordered_group_name_.size(), false);
+    std::vector<bool> mask(group_order.size(), false);
 
     for (const std::string& group_name : query_group_name) {
-      auto it = std::find(
-          ordered_group_name_.begin(), ordered_group_name_.end(), group_name);
-      if (it != ordered_group_name_.end()) {
-        size_t index = std::distance(ordered_group_name_.begin(), it);
+      auto it = std::find(group_order.begin(), group_order.end(), group_name);
+      if (it != group_order.end()) {
+        size_t index = std::distance(group_order.begin(), it);
         mask[index] = true;
       }
     }
@@ -253,15 +282,8 @@ class RankGenerator {
     return tokens;
   }
 
- private:
-  int32_t tp_;
-  int32_t sp_;
-  int32_t cfg_;
-  int32_t dp_;
   int32_t rank_offset_;
   int32_t world_size_;
-  std::string group_order_;
-  std::vector<int32_t> ordered_group_size_;
-  std::vector<std::string> ordered_group_name_;
-  std::unordered_map<std::string, int32_t> group_size_map_;
 };
+
+}  // namespace xllm

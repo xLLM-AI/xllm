@@ -32,8 +32,8 @@ limitations under the License.
 #include <unordered_set>
 #include <utility>
 
-#include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/state_dict/utils.h"
 #include "core/kernels/ops_api.h"
 #include "core/layers/common/dsa_metadata.h"
@@ -334,7 +334,7 @@ inline void deepseek_v4_build_cache_specs(
   const auto& compress_ratios = model_args.compress_ratios();
   const int32_t window_size = model_args.window_size();
   const int32_t base_block_size = 128;
-  CHECK_EQ(FLAGS_block_size, base_block_size)
+  CHECK_EQ(KVCacheConfig::get_instance().block_size(), base_block_size)
       << "DeepSeek V4 currently only supports block_size=128.";
 
   std::unordered_map<DSAGroupKey, int32_t, DSAGroupKeyHash> group_key_map;
@@ -497,7 +497,7 @@ class DeepseekV4ModelImpl
     // TODO: Wire runtime block_size into model metadata so this stays aligned
     // with the DSv4 KV cache and block manager when the default changes.
     const int32_t base_block_size = 128;  // default block size
-    CHECK_EQ(FLAGS_block_size, base_block_size)
+    CHECK_EQ(KVCacheConfig::get_instance().block_size(), base_block_size)
         << "DeepSeek V4 currently only supports block_size=128.";
 
     std::unordered_map<DSAGroupKey, int32_t, DSAGroupKeyHash> group_key_map;

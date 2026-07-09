@@ -34,7 +34,6 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
-#include "core/common/global_flags.h"
 #include "core/common/version_singleton.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/rec_config.h"
@@ -780,8 +779,10 @@ bool HFModelLoader::load_model_args(const std::string& model_weights_path) {
     return false;
   }
 
-  const std::string model_type = util::get_model_type(
-      reader, std::filesystem::path(model_weights_path), FLAGS_backend);
+  const std::string model_type =
+      util::get_model_type(reader,
+                           std::filesystem::path(model_weights_path),
+                           ModelConfig::get_instance().backend());
 
   std::string resolved_model_type;
   std::string error_message;
@@ -800,8 +801,9 @@ bool HFModelLoader::load_model_args(const std::string& model_weights_path) {
   }
   const JsonReader config_reader = normalize_config_torch_dtype(reader);
   model_args_loader(config_reader, &args_);
-  args_.enable_mla(util::should_enable_mla(
-      std::filesystem::path(model_weights_path), FLAGS_backend));
+  args_.enable_mla(
+      util::should_enable_mla(std::filesystem::path(model_weights_path),
+                              ModelConfig::get_instance().backend()));
 
   return true;
 }

@@ -23,16 +23,92 @@ limitations under the License.
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "common/metrics.h"
 #include "distributed_runtime/dit_engine.h"
 #include "framework/request/dit_request.h"
+#include "util/tensor_helper.h"
 #include "util/utils.h"
 
 namespace xllm {
 
 namespace {
 constexpr size_t kRequestQueueSize = 100;
+
+bool image_batch_signature_matches(const DiTInputParams& lhs,
+                                   const DiTInputParams& rhs) {
+  if (!tensor_batch_signature_matches(lhs.image, rhs.image)) {
+    return false;
+  }
+  if (lhs.images.size() != rhs.images.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < lhs.images.size(); ++i) {
+    if (!tensor_batch_signature_matches(lhs.images[i], rhs.images[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool stacked_tensor_inputs_match(const DiTInputParams& lhs,
+                                 const DiTInputParams& rhs) {
+  return tensor_batch_signature_matches(lhs.prompt_embed, rhs.prompt_embed) &&
+         tensor_batch_signature_matches(lhs.pooled_prompt_embed,
+                                        rhs.pooled_prompt_embed) &&
+         tensor_batch_signature_matches(lhs.negative_prompt_embed,
+                                        rhs.negative_prompt_embed) &&
+         tensor_batch_signature_matches(lhs.negative_pooled_prompt_embed,
+                                        rhs.negative_pooled_prompt_embed) &&
+         tensor_batch_signature_matches(lhs.latent, rhs.latent) &&
+         tensor_batch_signature_matches(lhs.mask_image, rhs.mask_image) &&
+         tensor_batch_signature_matches(lhs.control_image, rhs.control_image) &&
+         tensor_batch_signature_matches(lhs.masked_image_latent,
+                                        rhs.masked_image_latent) &&
+         tensor_batch_signature_matches(lhs.last_image, rhs.last_image);
+}
+
+bool prompt_audio_allows_batching(const DiTInputParams& lhs,
+                                  const DiTInputParams& rhs) {
+  return !lhs.prompt_audio.defined() && !rhs.prompt_audio.defined() &&
+         lhs.audio_prompt_text.empty() && rhs.audio_prompt_text.empty();
+}
+
+int32_t true_cfg_condition_type(const std::shared_ptr<DiTRequest>& request) {
+  const auto& generation_params = request->state().generation_params();
+  if (generation_params.true_cfg_scale <= 1.0) {
+    return 0;
+  }
+
+  const auto& input_params = request->state().input_params();
+  if (!input_params.negative_prompt.empty()) {
+    return 1;
+  }
+  if (input_params.negative_prompt_embed.defined()) {
+    return 2;
+  }
+  return 3;
+}
+
+bool is_compatible_dit_batch_request(
+    const std::shared_ptr<DiTRequest>& batch_request,
+    const std::shared_ptr<DiTRequest>& candidate_request) {
+  const auto& batch_state = batch_request->state();
+  const auto& candidate_state = candidate_request->state();
+  if (candidate_state.generation_params() != batch_state.generation_params()) {
+    return false;
+  }
+  if (true_cfg_condition_type(candidate_request) !=
+      true_cfg_condition_type(batch_request)) {
+    return false;
+  }
+  const auto& batch_input = batch_state.input_params();
+  const auto& candidate_input = candidate_state.input_params();
+  return image_batch_signature_matches(batch_input, candidate_input) &&
+         stacked_tensor_inputs_match(batch_input, candidate_input) &&
+         prompt_audio_allows_batching(batch_input, candidate_input);
+}
 }  // namespace
 
 void DiTAsyncResponseProcessor::process_completed_request(
@@ -107,10 +183,30 @@ std::vector<DiTBatch> DiTDynamicBatchScheduler::prepare_batch() {
 
   int count = 0;
   std::shared_ptr<DiTRequest> request;
-  while (request_queue_.read(request)) {
-    running_requests_.emplace_back(request);
+  auto read_next_request = [this](std::shared_ptr<DiTRequest>& next_request) {
+    if (!deferred_requests_.empty()) {
+      next_request = std::move(deferred_requests_.front());
+      deferred_requests_.pop_front();
+      return true;
+    }
+    return request_queue_.read(next_request);
+  };
 
-    if (++count == options_.max_request_per_batch()) break;
+  if (read_next_request(request)) {
+    std::shared_ptr<DiTRequest> batch_request = request;
+    running_requests_.emplace_back(request);
+    count = 1;
+
+    while (count < options_.max_request_per_batch() &&
+           read_next_request(request)) {
+      if (!is_compatible_dit_batch_request(batch_request, request)) {
+        deferred_requests_.emplace_back(std::move(request));
+        break;
+      }
+
+      running_requests_.emplace_back(request);
+      ++count;
+    }
   }
 
   DiTBatch batches;
@@ -122,7 +218,8 @@ std::vector<DiTBatch> DiTDynamicBatchScheduler::prepare_batch() {
   GAUGE_SET(num_pending_requests,
             pending_requests_.load(std::memory_order_relaxed));
   GAUGE_SET(num_running_requests, running_requests_.size());
-  GAUGE_SET(num_waiting_requests, request_queue_.size());
+  GAUGE_SET(num_waiting_requests,
+            request_queue_.size() + deferred_requests_.size());
 
   return {batches};
 }

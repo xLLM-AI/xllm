@@ -151,28 +151,22 @@ std::optional<ForwardOutput> LLMWorkerImpl::execute_no_sync_on_stream(
 }
 
 std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
-  if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
 #if defined(USE_NPU)
+  if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
     if (!enable_schedule_overlap() && options_.backend() == "llm") {
       aclrtStream current_stream =
           c10_npu::getCurrentNPUStream(device_.index()).stream();
       atb::Context* atb_context =
           const_cast<atb::Context*>(context_.get_atb_context());
       atb_context->SetExecuteStream(current_stream);
-      std::unique_ptr<Stream> stream = device_.current_stream();
-      wait_input_ready_events(input, *stream);
-      return step_internal(input, ForwardSyncPolicy::LEGACY);
     } else {
       SET_ATB_EXECUTE_STREAM(compute_stream_, device_, context_);
       wait_input_ready_events(input, *compute_stream_);
       return step_internal(input, ForwardSyncPolicy::LEGACY);
     }
-#else
-    std::unique_ptr<Stream> stream = device_.current_stream();
-    wait_input_ready_events(input, *stream);
-    return step_internal(input, ForwardSyncPolicy::LEGACY);
-#endif
   }
+#endif
+
   std::unique_ptr<Stream> stream = device_.current_stream();
   wait_input_ready_events(input, *stream);
   return step_internal(input, ForwardSyncPolicy::LEGACY);
@@ -299,7 +293,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
       return std::nullopt;
     }
-    auto ret = device_.synchronize_default_stream();
+    int ret = device_.synchronize_default_stream();
     // in p-d disaggregation scene, all micro batches should be in same
     // prefill/decode stage, so, to judge transfer_kv_infos.empty,
     if (options_.kv_cache_transfer_mode() == "PUSH" &&
@@ -380,6 +374,11 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   }
 
   MULTI_MODEL_STEP_UNLOCK();
+  bool should_sync_default_stream = true;
+#if defined(USE_NPU)
+  should_sync_default_stream =
+      !can_skip_npu_graph_decode_sync(input.input_params);
+#endif
   if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
     output.retained_input = std::make_shared<ForwardInput>(input);
     if (enable_schedule_overlap()) {
@@ -387,7 +386,10 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     }
     return output;
   }
-  auto ret = device_.synchronize_default_stream();
+  if (should_sync_default_stream) {
+    int ret = device_.synchronize_default_stream();
+    CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
+  }
 
   if (options_.kv_cache_transfer_mode() == "PUSH" &&
       !input.transfer_kv_infos.empty()) {
@@ -403,8 +405,10 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   }
 
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
-  DeviceMonitor::get_instance().update_active_activation_memory(
-      device_.index());
+  if (should_sync_default_stream) {
+    DeviceMonitor::get_instance().update_active_activation_memory(
+        device_.index());
+  }
 
   return output;
 }

@@ -474,4 +474,65 @@ void fused_compress_multi_kv(const torch::Tensor& kv,
                              bool overlap,
                              torch::Tensor& compressed_kv);
 
+torch::Tensor causal_conv1d_fn(
+    const torch::Tensor& x,
+    const torch::Tensor& weight,
+    const torch::Tensor& conv_states,
+    const torch::Tensor& query_start_loc,
+    const torch::Tensor& batch,
+    const torch::Tensor& token_block_offset,
+    int32_t nt,
+    const std::optional<torch::Tensor>& bias_opt = std::nullopt,
+    const std::optional<torch::Tensor>& cache_indices_opt = std::nullopt,
+    const std::optional<torch::Tensor>& has_initial_state_opt = std::nullopt,
+    const std::optional<torch::Tensor>& initial_state_idx_opt = std::nullopt,
+    const std::optional<torch::Tensor>& num_accepted_tokens_opt = std::nullopt,
+    bool inplace_final_state = true);
+
+std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& g,
+    const std::optional<torch::Tensor>& beta_opt = std::nullopt,
+    const std::optional<torch::Tensor>& initial_state_opt = std::nullopt,
+    bool inplace_final_state = true,
+    const std::optional<torch::Tensor>& cu_seqlens_opt = std::nullopt,
+    const std::optional<torch::Tensor>& ssm_state_indices_opt = std::nullopt,
+    const std::optional<torch::Tensor>& num_accepted_tokens_opt = std::nullopt,
+    bool use_qk_l2norm_in_kernel = true);
+
+std::pair<torch::Tensor, torch::Tensor>
+fused_recurrent_gated_delta_rule_packed_decode(
+    const torch::Tensor& mixed_qkv,
+    const torch::Tensor& a,
+    const torch::Tensor& b,
+    const torch::Tensor& A_log,
+    const torch::Tensor& dt_bias,
+    double scale,
+    torch::Tensor& ssm_cache,
+    const torch::Tensor& ssm_state_indices,
+    bool use_qk_l2norm_in_kernel = true);
+
+torch::Tensor causal_conv1d_update_decode(
+    const torch::Tensor& x,
+    torch::Tensor& conv_state,
+    const torch::Tensor& weight,
+    const std::optional<torch::Tensor>& bias_opt,
+    const torch::Tensor& conv_state_indices,
+    int32_t pad_slot_id = -1,
+    const std::optional<torch::Tensor>& query_start_loc_opt = std::nullopt,
+    int32_t max_query_len = -1,
+    const std::optional<torch::Tensor>& num_accepted_tokens_opt = std::nullopt,
+    const std::optional<torch::Tensor>& block_idx_last_scheduled_token_opt =
+        std::nullopt,
+    const std::optional<torch::Tensor>& initial_state_idx_opt = std::nullopt);
+
+std::pair<torch::Tensor, torch::Tensor> fused_gdn_gating(
+    const torch::Tensor& A_log,
+    const torch::Tensor& a,
+    const torch::Tensor& b,
+    const torch::Tensor& dt_bias,
+    float beta = 1.0f,
+    float threshold = 20.0f);
 }  // namespace xllm::kernel::mlu

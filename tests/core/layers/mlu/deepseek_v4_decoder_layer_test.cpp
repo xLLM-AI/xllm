@@ -241,6 +241,20 @@ class DeepseekV4DecoderLayerTest : public ::testing::Test {
     return StateDict(tensors);
   }
 
+  StateDict make_ffn_alias_state_dict(const ModelArgs& args) const {
+    std::unordered_map<std::string, torch::Tensor> tensors;
+    StateDict state_dict = make_state_dict(args);
+    for (const auto& item : state_dict) {
+      const std::string& key = item.first;
+      if (key.rfind("mlp.", 0) == 0) {
+        tensors.emplace("ffn." + key.substr(4), item.second);
+      } else {
+        tensors.emplace(key, item.second);
+      }
+    }
+    return StateDict(tensors);
+  }
+
   KVCache make_kv_cache(const ModelArgs& args, int64_t batch_size) const {
     DeepSeekV4KVCacheTensors tensors;
     tensors.swa_cache =
@@ -331,7 +345,31 @@ class DeepseekV4DecoderLayerTest : public ::testing::Test {
     return metadata;
   }
 
-  void run_case(int32_t layer_id, bool pass_input_ids) {
+  void use_dp_ep_parallel_args() {
+    process_group_ = std::make_unique<test::MockProcessGroup>(
+        device_, /*rank=*/0, /*world_size=*/2);
+    dp_process_group_ = std::make_unique<test::MockProcessGroup>(
+        device_, /*rank=*/0, /*world_size=*/2);
+    tp_process_group_ = std::make_unique<test::MockProcessGroup>(
+        device_, /*rank=*/0, /*world_size=*/1);
+    ep_process_group_ = std::make_unique<test::MockProcessGroup>(
+        device_, /*rank=*/0, /*world_size=*/2);
+    single_rank_process_group_ = std::make_unique<test::MockProcessGroup>(
+        device_, /*rank=*/0, /*world_size=*/1);
+
+    parallel_args_ = ParallelArgs(
+        /*rank=*/0, /*world_size=*/2, /*dp_size=*/2, process_group_.get());
+    parallel_args_.process_group_ = process_group_.get();
+    parallel_args_.dp_local_process_group_ = dp_process_group_.get();
+    parallel_args_.tp_group_ = tp_process_group_.get();
+    parallel_args_.single_rank_group_ = single_rank_process_group_.get();
+    parallel_args_.sp_group_ = tp_process_group_.get();
+    parallel_args_.ep_size_ = 2;
+    parallel_args_.moe_ep_group_ = ep_process_group_.get();
+    parallel_args_.moe_tp_group_ = tp_process_group_.get();
+  }
+
+  void run_case(int32_t layer_id, bool pass_input_ids, bool use_ffn_alias) {
     ModelArgs args = make_args();
     QuantArgs quant_args;
     ModelContext context(parallel_args_, args, quant_args, options_);
@@ -343,7 +381,9 @@ class DeepseekV4DecoderLayerTest : public ::testing::Test {
     DSACacheMapping mapping;
     mapping.ori_cache_idx = 0;
     layer->set_cache_mapping(mapping);
-    layer->load_state_dict(make_state_dict(args));
+    layer->load_state_dict(use_ffn_alias ? make_ffn_alias_state_dict(args)
+                                         : make_state_dict(args));
+    layer->verify_loaded_weights();
 
     const int64_t seq_len = 4;
     torch::Tensor hidden =
@@ -394,16 +434,34 @@ class DeepseekV4DecoderLayerTest : public ::testing::Test {
   torch::TensorOptions options_;
   torch::ScalarType dtype_ = torch::kBFloat16;
   std::unique_ptr<ProcessGroup> process_group_;
+  std::unique_ptr<ProcessGroup> dp_process_group_;
+  std::unique_ptr<ProcessGroup> tp_process_group_;
+  std::unique_ptr<ProcessGroup> ep_process_group_;
+  std::unique_ptr<ProcessGroup> single_rank_process_group_;
   ParallelArgs parallel_args_{0, 1, nullptr};
   std::vector<std::vector<DSACacheInfo>> caches_info_;
 };
 
 TEST_F(DeepseekV4DecoderLayerTest, NonHashRoutingForwardSmoke) {
-  run_case(/*layer_id=*/1, /*pass_input_ids=*/false);
+  run_case(/*layer_id=*/1, /*pass_input_ids=*/false, /*use_ffn_alias=*/false);
 }
 
 TEST_F(DeepseekV4DecoderLayerTest, HashRoutingForwardSmoke) {
-  run_case(/*layer_id=*/0, /*pass_input_ids=*/true);
+  run_case(/*layer_id=*/0, /*pass_input_ids=*/true, /*use_ffn_alias=*/false);
+}
+
+TEST_F(DeepseekV4DecoderLayerTest, FfnAliasForwardSmoke) {
+  run_case(/*layer_id=*/1, /*pass_input_ids=*/false, /*use_ffn_alias=*/true);
+}
+
+TEST_F(DeepseekV4DecoderLayerTest, DpEpMoeRequiresDpTokenNums) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  use_dp_ep_parallel_args();
+
+  EXPECT_DEATH(run_case(/*layer_id=*/1,
+                        /*pass_input_ids=*/false,
+                        /*use_ffn_alias=*/false),
+               "dp_global_token_nums is empty");
 }
 
 }  // namespace layer

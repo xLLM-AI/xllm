@@ -32,7 +32,7 @@ limitations under the License.
 #include <torch_npu/csrc/aten/NPUNativeFunctions.h>
 #endif
 
-#include "common/global_flags.h"
+#include "framework/config/eplb_config.h"
 #include "framework/config/kernel_config.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "kernels/ops_api.h"
@@ -396,7 +396,9 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
   num_experts_per_rank_ = num_experts / ep_size;
   start_expert_id_ = ep_rank * num_experts_per_rank_;
   enable_ep2_dispatch_combine_ =
-      is_deepseek_v4_ && FLAGS_expert_parallel_degree == 2 && ep_size > 1;
+      is_deepseek_v4_ &&
+      ::xllm::EPLBConfig::get_instance().expert_parallel_degree() == 2 &&
+      ep_size > 1;
   if (enable_ep2_dispatch_combine_) {
     CHECK(parallel_args_.moe_ep_group_ != nullptr)
         << "DeepSeek-V4 NPU EP2 dispatch/combine requires moe_ep_group.";
@@ -1081,20 +1083,38 @@ torch::Tensor FusedMoEImpl::forward_expert(
   // reshape the final hidden states to the original shape
   final_hidden_states = final_hidden_states.reshape(hidden_states_shape);
 
-  if (tp_pg_->world_size() > 1) {
-    final_hidden_states = parallel_state::reduce(final_hidden_states, tp_pg_);
-  }
-  if (parallel_args_.ep_size() > 1) {
-    final_hidden_states = parallel_state::reduce(final_hidden_states,
-                                                 parallel_args_.moe_ep_group_);
-  }
   if (shared_output.has_value()) {
-    auto reduced_shared_output = shared_output.value();
-    if (tp_pg_->world_size() > 1) {
-      reduced_shared_output =
-          parallel_state::reduce(reduced_shared_output, tp_pg_);
+    if (parallel_args_.ep_size() == 1) {
+      // reduce(a) + reduce(b) == reduce(a + b). Combining the routed and shared
+      // partial outputs avoids one small TP allreduce in each MoE decode layer.
+      final_hidden_states.add_(shared_output.value());
+      if (tp_pg_->world_size() > 1) {
+        final_hidden_states =
+            parallel_state::reduce(final_hidden_states, tp_pg_);
+      }
+    } else {
+      if (tp_pg_->world_size() > 1) {
+        final_hidden_states =
+            parallel_state::reduce(final_hidden_states, tp_pg_);
+      }
+      final_hidden_states = parallel_state::reduce(
+          final_hidden_states, parallel_args_.moe_ep_group_);
+
+      auto reduced_shared_output = shared_output.value();
+      if (tp_pg_->world_size() > 1) {
+        reduced_shared_output =
+            parallel_state::reduce(reduced_shared_output, tp_pg_);
+      }
+      final_hidden_states = final_hidden_states + reduced_shared_output;
     }
-    final_hidden_states = final_hidden_states + reduced_shared_output;
+  } else {
+    if (tp_pg_->world_size() > 1) {
+      final_hidden_states = parallel_state::reduce(final_hidden_states, tp_pg_);
+    }
+    if (parallel_args_.ep_size() > 1) {
+      final_hidden_states = parallel_state::reduce(
+          final_hidden_states, parallel_args_.moe_ep_group_);
+    }
   }
   return final_hidden_states;
 }

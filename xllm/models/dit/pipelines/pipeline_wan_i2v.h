@@ -19,17 +19,26 @@ limitations under the License.
 #include <cstring>
 #include <memory>
 
+#include "core/framework/config/dit_config.h"
+#include "core/framework/config/load_config.h"
+#include "core/framework/config/parallel_config.h"
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/model_context.h"
 #include "core/framework/request/dit_request_state.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/state_dict/utils.h"
+#if defined(USE_NPU)
+#include "core/layers/npu/loader/rolling_weight_buffer.h"
+#endif
 #include "framework/parallel_state/parallel_state.h"
 #include "models/dit/autoencoders/autoencoder_kl_wan.h"
 #include "models/dit/encoders/umt5_encoder.h"
 #include "models/dit/processors/vae_video_processor.h"
 #include "models/dit/schedulers/uni_pc_multi_step_scheduler.h"
 #include "models/dit/transformers/transformer_wan.h"
+#if defined(USE_NPU)
+#include "models/dit/utils/dit_block_weight_manager.h"
+#endif
 #include "models/model_registry.h"
 
 namespace xllm {
@@ -47,12 +56,26 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
     const auto& scheduler_args = context.get_model_args("scheduler");
     num_train_timesteps_ = scheduler_args.num_train_timesteps();
 
+    // RainFusion config is static (derived from flags) — build it once here
+    // and pass to the transformers via constructor. It never changes per
+    // request, unlike RainFusionState which is per-inference dynamic state.
+    auto& dit_config = DiTConfig::get_instance();
+    rf_config_.enabled = dit_config.dit_sparse_attention_enabled();
+    rf_config_.sparsity =
+        static_cast<float>(dit_config.dit_sparse_attention_sparsity());
+    rf_config_.pool_size = dit_config.dit_sparse_attention_pool_size();
+    rf_config_.sparse_start_step =
+        dit_config.dit_sparse_attention_sparse_start_step();
+    rf_config_.version = dit_config.dit_sparse_attention_version();
+    rf_config_.mask_refresh_steps =
+        dit_config.dit_sparse_attention_mask_refresh_steps();
+
     LOG(INFO) << "Initializing Wan2_2I2V pipeline...";
     vae_ = AutoencoderKLWan(context.get_model_context("vae"));
-    transformer_ =
-        WanTransformer3DModel(context.get_model_context("transformer"));
-    transformer_2_ =
-        WanTransformer3DModel(context.get_model_context("transformer_2"));
+    transformer_ = WanTransformer3DModel(
+        context.get_model_context("transformer"), rf_config_);
+    transformer_2_ = WanTransformer3DModel(
+        context.get_model_context("transformer_2"), rf_config_);
     umt5_ = UMT5EncoderModel(context.get_model_context("text_encoder"));
     scheduler_ =
         UniPCMultistepScheduler(context.get_model_context("scheduler"));
@@ -71,6 +94,8 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
     register_module("scheduler", scheduler_);
     register_module("video_processor_", video_processor_);
   }
+
+  ~WanImageToVideoPipelineImpl() = default;
 
   DiTForwardOutput forward(const DiTForwardInput& input) {
     const auto& generation_params = input.generation_params;
@@ -130,10 +155,26 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
 
     LOG(INFO) << "Wan2_2I2VPipeline model components loaded, start to load "
                  "weights to sub models";
-    transformer_->load_model(std::move(transformer_loader));
-    transformer_->to(options_.device());
-    transformer_2_->load_model(std::move(transformer_2_loader));
-    transformer_2_->to(options_.device());
+#if defined(USE_NPU)
+    auto& load_config = LoadConfig::get_instance();
+    use_rolling_load_ = load_config.enable_rolling_load() &&
+                        ParallelConfig::get_instance().tp_size() == 1;
+    if (use_rolling_load_) {
+      transformer_->load_model(std::move(transformer_loader),
+                               /*rolling=*/true);
+      transformer_2_->load_model(std::move(transformer_2_loader),
+                                 /*rolling=*/true);
+      init_rolling_for(transformer_, rolling_transformer_);
+      init_rolling_for(transformer_2_, rolling_transformer_2_);
+    } else {
+#endif
+      transformer_->load_model(std::move(transformer_loader));
+      transformer_->to(options_.device());
+      transformer_2_->load_model(std::move(transformer_2_loader));
+      transformer_2_->to(options_.device());
+#if defined(USE_NPU)
+    }
+#endif
     vae_->load_model(std::move(vae_loader));
     vae_->to(options_.device());
     umt5_->load_model(std::move(umt5_loader));
@@ -256,10 +297,6 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
     std::vector<std::vector<int32_t>> text_input_ids;
     text_input_ids.reserve(batch_size);
 
-    for (int32_t i = 0; i < static_cast<int32_t>(prompt.size()); i++) {
-      LOG(INFO) << "get_t5_prompt_embeds prompt content" << prompt[i];
-    }
-
     CHECK(tokenizer_->batch_encode(prompt, &text_input_ids));
     for (auto& ids : text_input_ids) {
       ids.push_back(1);  // EOS token </s>
@@ -285,10 +322,6 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
     prompt_embeds = prompt_embeds.to(options_);
 
     auto seq_lens = (input_ids > 0).sum(1).to(torch::kLong);
-    LOG(INFO) << "prompt_embeds shape" << prompt_embeds.sizes();
-    for (int64_t i = 0; i < batch_size; ++i) {
-      LOG(INFO) << "seq_lens[" << i << "] = " << seq_lens[i].item<int64_t>();
-    }
 
     std::vector<torch::Tensor> trimmed_embeds;
     trimmed_embeds.reserve(batch_size);
@@ -465,6 +498,10 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
     float boundary_timestep =
         boundary_ratio_ > 0.0f ? boundary_ratio_ * num_train_timesteps_ : -1.0f;
 
+    // RainFusion config is static and already bound to the transformers in the
+    // constructor. Only the per-inference dynamic state lives here.
+    xllm::dit::RainFusionState rf_state;
+
     for (int64_t i = 0; i < timesteps.numel(); ++i) {
       torch::Tensor t = timesteps[i];
       int64_t total_steps = timesteps.numel();
@@ -473,17 +510,14 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
       float current_guidance;
 
       if (boundary_timestep < 0 || t.item<float>() >= boundary_timestep) {
-        LOG(INFO) << "high-noise t:" << t << "boundary_timestep"
-                  << boundary_timestep;
         current_model = transformer_;
         current_guidance = guidance_scale;
       } else {
-        LOG(INFO) << "low-noise t:" << t << "boundary_timestep"
-                  << boundary_timestep;
         current_model = transformer_2_;
         current_guidance = guidance_scale_2;
       }
 
+      rf_state.current_step = i;
       torch::Tensor latent_model_input;
       torch::Tensor timestep_input;
 
@@ -510,35 +544,61 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
       }
       torch::Tensor noise_pred;
       torch::Tensor noise_uncond;
+#if defined(USE_NPU)
+      auto& rolling = (current_model.get() == transformer_.get())
+                          ? rolling_transformer_
+                          : rolling_transformer_2_;
+      auto rolling_forward = [&](const torch::Tensor& embeds) {
+        return current_model->forward(
+            latent_model_input,
+            timestep_input,
+            embeds,
+            torch::Tensor(),
+            rf_state,
+            [&rolling](int32_t i) { rolling.wait_h2d(i); },
+            [&rolling](int32_t i) { rolling.schedule_next_h2d(i); });
+      };
+#else
+      auto rolling_forward = [&](const torch::Tensor& /*embeds*/) {
+        LOG(FATAL) << "Rolling load requires USE_NPU";
+        return torch::Tensor{};
+      };
+#endif
+
       if (do_classifier_free_guidance) {
-        if (FLAGS_cfg_size == 2) {
+        if (ParallelConfig::get_instance().cfg_size() == 2) {
           int32_t rank = parallel_args_.dit_cfg_group_->rank();
-          if (rank == 0) {
-            noise_pred = current_model->forward(latent_model_input,
-                                                timestep_input,
-                                                encoded_prompt_embeds,
-                                                torch::Tensor());
-          } else {
-            noise_pred = current_model->forward(latent_model_input,
-                                                timestep_input,
-                                                encoded_negative_embeds,
-                                                torch::Tensor());
-          }
+          noise_pred =
+              use_rolling_load_
+                  ? rolling_forward(rank == 0 ? encoded_prompt_embeds
+                                              : encoded_negative_embeds)
+                  : current_model->forward(latent_model_input,
+                                           timestep_input,
+                                           rank == 0 ? encoded_prompt_embeds
+                                                     : encoded_negative_embeds,
+                                           torch::Tensor(),
+                                           rf_state);
           auto gathered = xllm::parallel_state::gather(
               noise_pred, parallel_args_.dit_cfg_group_, /*dim=*/0);
           auto chunks = torch::chunk(gathered, 2, 0);
           noise_pred = chunks[0];
           noise_uncond = chunks[1];
         } else {
-          noise_pred = current_model->forward(latent_model_input,
-                                              timestep_input,
-                                              encoded_prompt_embeds,
-                                              torch::Tensor());
-
-          noise_uncond = current_model->forward(latent_model_input,
+          if (use_rolling_load_) {
+            noise_pred = rolling_forward(encoded_prompt_embeds);
+            noise_uncond = rolling_forward(encoded_negative_embeds);
+          } else {
+            noise_pred = current_model->forward(latent_model_input,
                                                 timestep_input,
-                                                encoded_negative_embeds,
-                                                torch::Tensor());
+                                                encoded_prompt_embeds,
+                                                torch::Tensor(),
+                                                rf_state);
+            noise_uncond = current_model->forward(latent_model_input,
+                                                  timestep_input,
+                                                  encoded_negative_embeds,
+                                                  torch::Tensor(),
+                                                  rf_state);
+          }
         }
 
         noise_pred = noise_uncond.to(torch::kFloat32) +
@@ -546,6 +606,14 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
                          (noise_pred.to(torch::kFloat32) -
                           noise_uncond.to(torch::kFloat32));
         noise_uncond.reset();
+      } else {
+        noise_pred = use_rolling_load_
+                         ? rolling_forward(encoded_prompt_embeds)
+                         : current_model->forward(latent_model_input,
+                                                  timestep_input,
+                                                  encoded_prompt_embeds,
+                                                  torch::Tensor(),
+                                                  rf_state);
       }
       auto prev_latents = scheduler_->step(noise_pred, t, prepared_latents);
       prepared_latents = prev_latents.detach();
@@ -581,7 +649,6 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
     prepared_latents = prepared_latents + latents_mean;
     video = vae_->decode(prepared_latents.to(torch::kFloat32)).sample;
     video = video_processor_->postprocess_video(video);
-
     return video;
   }
 
@@ -642,6 +709,33 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
   }
 
  private:
+  // WAN rolling load state.
+  bool use_rolling_load_ = false;
+#if defined(USE_NPU)
+  dit::DitRollingLoadManager rolling_transformer_;
+  dit::DitRollingLoadManager rolling_transformer_2_;
+
+  void init_rolling_for(WanTransformer3DModel model,
+                        dit::DitRollingLoadManager& manager) {
+    at::DeviceGuard guard(options_.device());
+    auto loaders = model->get_block_weight_loaders();
+    CHECK(!loaders.empty()) << "No block weight managers";
+
+    size_t max_storage = 0;
+    for (auto* loader : loaders) {
+      max_storage = std::max(max_storage, loader->storage_size());
+    }
+
+    auto& load_config = LoadConfig::get_instance();
+    int32_t num_slots =
+        std::max(load_config.rolling_load_num_rolling_slots(), 2);
+    auto buffer =
+        std::make_shared<layer::RollingWeightBuffer>(num_slots, max_storage);
+    manager.init(std::move(loaders), std::move(buffer), num_slots);
+    manager.preload();
+  }
+#endif
+
   UniPCMultistepScheduler scheduler_{nullptr};
   AutoencoderKLWan vae_{nullptr};
   WanTransformer3DModel transformer_{nullptr};
@@ -660,6 +754,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
   std::vector<double> latents_std_;
   torch::TensorOptions options_;
   const ParallelArgs parallel_args_;
+  xllm::dit::RainFusionConfig rf_config_;
 };
 TORCH_MODULE(WanImageToVideoPipeline);
 

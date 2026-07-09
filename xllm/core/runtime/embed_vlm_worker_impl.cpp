@@ -85,7 +85,6 @@ std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
       input.sampling_params.is_embeddings) {
     auto embeddings =
         model_->pooler(hidden_states, sampling_params.selected_token_idxes);
-    sample_output.embeddings = embeddings;
     // split full embeddings and add them to mm_embeddings
     // so that the user could receive embeddings of images and texts
     if (::xllm::ModelConfig::get_instance()
@@ -99,10 +98,12 @@ std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
         sample_output.mm_embeddings.emplace_back(image_embed);
         token_start_idx += seq_len;
       }
+      output.sample_output = sample_output;
+    } else {
+      sample_output.embeddings = embeddings;
+      output.sample_output = sample_output;
+      output.embedding = embeddings;
     }
-
-    output.sample_output = sample_output;
-    output.embedding = embeddings;
   }
   ret = device_.synchronize_default_stream();
   return output;

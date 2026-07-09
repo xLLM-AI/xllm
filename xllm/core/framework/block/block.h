@@ -20,6 +20,7 @@ limitations under the License.
 #include <string.h>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -74,7 +75,10 @@ class Block final {
   constexpr uint32_t size() const { return size_; }
 
   // get the reference count, 0 if the block is invalid after move
-  uint32_t ref_count() const { return ref_count_ == nullptr ? 0 : *ref_count_; }
+  uint32_t ref_count() const {
+    return ref_count_ == nullptr ? 0
+                                 : ref_count_->load(std::memory_order_acquire);
+  }
 
   // check if the block is shared
   bool is_shared() const { return ref_count() > 1; }
@@ -84,6 +88,12 @@ class Block final {
 
   // owner manager that allocated this block.
   BlockManager* manager() const { return manager_; }
+
+  // Reassign this block's owning manager. Used by concurrency wrappers (e.g.
+  // ConcurrentBlockManagerImpl) to route Block dtor -> free() through the
+  // wrapper layer so the wrapper's lock covers the free path too. Must not be
+  // used to transfer ownership across pools.
+  void set_manager(BlockManager* manager) { manager_ = manager; }
 
   // NOTE: Below block `hash_value_` is used for prefix cache and
   // for recording the hash value of the current block and previous blocks.
@@ -112,8 +122,11 @@ class Block final {
   // block size
   uint32_t size_ = 0;
 
-  // reference count
-  uint32_t* ref_count_ = nullptr;
+  // reference count, shared across Block aliases of the same physical block.
+  // Atomic because aliases are copied/destroyed across threads outside the
+  // owning BlockManager's lock (e.g. disagg-PD scheduler match vs. prefill
+  // threadpool sequence teardown), so inc/dec must not race.
+  std::atomic<uint32_t>* ref_count_ = nullptr;
 
   // manager that manages this block
   BlockManager* manager_ = nullptr;

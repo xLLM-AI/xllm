@@ -1,0 +1,144 @@
+name: xLLM Build arm_64 NPU
+
+on: 
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '.github/**'
+      - 'cibuild/**'
+      - 'cmake/**'
+      - 'docs/**'
+      - 'third_party/**'
+      - 'tools/**'
+      - '*.md'
+      - '*.txt'
+      - '*.yml'
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths-ignore:
+      - 'cmake/**'
+      - 'docs/**'
+      - 'third_party/**'
+      - 'tools/**'
+      - '*.md'
+      - '*.txt'
+      - '*.yml'
+  pull_request_review:
+    types: [submitted]
+    paths:
+      - '.github/**.yaml'
+      - 'cibuild/**.sh'
+      - 'setup.py'
+      - 'examples/generate.py'
+
+env:
+  JOBNAME: xllm-arm64-npu-cibuild-${{ github.run_id }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+
+jobs:
+  # need to review code first when sensitive files are modified.
+  check-sensitive:
+    runs-on: [self-hosted, ARM64]
+    outputs:
+      requires_approval: ${{ steps.check_sensitive.outputs.requires_approval }}
+      do_build: ${{ steps.decide.outputs.do_build }}
+    steps:
+      - name: Github Proxy
+        run: git config --global url."https://gh-proxy.com/github.com".insteadOf "https://github.com"
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Ensure we can compare commits
+
+      - name: Install jq
+        run: sudo yum install -y jq
+
+      - name: Check if sensitive files were changed
+        id: check_sensitive
+        run: |
+          sensitive_files=(
+            ".github/**.yaml"
+            "cibuild/**.sh"
+            "setup.py"
+            "examples/generate.py"
+          )
+          changed_files=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }})
+          requires_approval="false"
+          while IFS= read -r changed_file; do
+            [[ -z "$changed_file" ]] && continue
+            for pattern in "${sensitive_files[@]}"; do
+              if [[ "$changed_file" == $pattern ]]; then
+                requires_approval="true"
+                break 2
+              fi
+          done
+          done < <(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}")
+          echo "requires_approval=$requires_approval" >> $GITHUB_OUTPUT
+
+      - name: Decide whether to check build
+        id: decide
+        run: |
+          event="${{ github.event_name }}"
+          if [[ "$event" == "workflow_dispatch" || "$event" == "push" ]]; then
+            echo "do_build=true" >> $GITHUB_OUTPUT
+          elif [[ "$event" == "pull_request" ]]; then
+            if  [ "${{ steps.check_sensitive.outputs.requires_approval }}" == "true" ]; then
+              echo "do_build=false" >> $GITHUB_OUTPUT
+            else
+              echo "do_build=true" >> $GITHUB_OUTPUT
+            fi
+          elif [[ "$event" == "pull_request_review" ]]; then
+            # Since pull_request_review now only triggers when sensitive files are modified,
+            # we only need to check if the review is approved
+            if [[ "${{ github.event.review.state }}" == "approved" ]]; then
+              echo "do_build=true" >> $GITHUB_OUTPUT
+            else
+              echo "do_build=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "do_build=false" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: check-sensitive
+    if: >
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'push') ||
+      needs.check-sensitive.outputs.do_build == 'true'
+    runs-on: [self-hosted, ARM64]
+    steps:
+    - name: Github Proxy
+      run: git config --global url."https://gh-proxy.com/github.com".insteadOf "https://github.com"
+
+    - name: Prepare submodule checkout
+      run: |
+        if [ -d .git/modules ]; then
+          find .git/modules -type f -name '*.lock' -print -delete || true
+          sudo rm -rf third_party || true
+        fi
+
+    - name: Checkout Code
+      timeout-minutes: 10
+      uses: actions/checkout@v4
+      with:
+        clean: true
+        submodules: recursive
+
+    - name: Build
+      if: ${{ success() }}
+      timeout-minutes: 60
+      run: |
+        chmod +x /export/home/tools/build_npu.sh
+        sudo bash /export/home/tools/build_npu.sh 'git config --global --add safe.directory /workspace; pip install pre-commit -i http://mirrors.aliyun.com/pypi/simple; python setup.py bdist_wheel;'
+        sudo chown -R admin:admin /home/admin/actions-runner/_work/xllm/xllm/
+
+    - name: SmokeTest
+      if: ${{ success() }}
+      timeout-minutes: 60
+      run: |
+        cd /export/home/xTask; sudo python3 main.py --case_group smoke_case_group --host_addr 0.0.0.0

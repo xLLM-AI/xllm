@@ -14,6 +14,8 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
+#include <torch/torch.h>
+
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -48,6 +50,8 @@ std::pair<torch::Tensor, PaddingInfo> reduce_scatter_attn_input(
 int64_t get_dp_gather_tokens(const std::vector<int32_t>& dp_tokens,
                              const ParallelArgs& args);
 
+// V2 TP-sharded/global gather path: dp_tokens are model-level token counts and
+// data is gathered across the global process group after TP padding.
 torch::Tensor gather_global_tokens(const torch::Tensor& input,
                                    const std::vector<int32_t>& dp_tokens,
                                    const ParallelArgs& args);
@@ -63,6 +67,29 @@ bool need_dp_moe_gather(const ParallelArgs& args, bool enable_moe_all2all);
 torch::Tensor gather_dp_tokens(const torch::Tensor& input,
                                const ModelInputParams& params,
                                const ParallelArgs& args);
+
+struct SelectedMoeInputs {
+  torch::Tensor hidden_states;
+  torch::Tensor topk_weights;
+  torch::Tensor topk_ids;
+  bool need_slice = false;
+};
+
+// Selected-experts DP-local path: dp_token_nums are explicit first-dimension
+// row counts for hidden/topk tensors, and are used without normalization.
+bool need_selected_moe_dp_gather(const ParallelArgs& args);
+
+SelectedMoeInputs gather_selected_moe_inputs(
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& topk_weights,
+    const torch::Tensor& topk_ids,
+    const std::vector<int32_t>& dp_token_nums,
+    const ParallelArgs& args);
+
+torch::Tensor slice_selected_moe_output(
+    torch::Tensor output,
+    const std::vector<int32_t>& dp_token_nums,
+    const ParallelArgs& args);
 
 // given a tensor containing data from all DP ranks,
 // returns a slice containing only the tokens for the current DP rank

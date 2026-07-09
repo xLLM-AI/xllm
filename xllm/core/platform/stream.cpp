@@ -64,6 +64,15 @@ c10::StreamGuard Stream::set_stream_guard() const {
   return c10::StreamGuard(to_c10_stream(stream_));
 }
 
+void Stream::wait_event(const c10::Event& event) {
+#if defined(USE_CUDA) || defined(USE_ILU) || defined(USE_MUSA)
+  const c10::Stream& current_c10_stream = stream_;
+#else
+  c10::Stream current_c10_stream = stream_.unwrap();
+#endif
+  event.block(current_c10_stream);
+}
+
 void Stream::wait_stream(const Stream& other_stream) {
   // get the c10::Stream objects for the current stream and the other stream
   c10::Stream current_c10_stream = to_c10_stream(stream_);

@@ -15,33 +15,49 @@ limitations under the License.
 
 #pragma once
 
-#include <atomic>
-#include <cstdint>
-#include <mutex>
 #include <string>
-#include <vector>
 
-#include "block_manager.h"
+#include "block_manager_impl.h"
 
 namespace xllm {
 
-class SingleBlockManager final : public BlockManager {
+// Per-sequence single-resource leaf (BlockType::SINGLE): linear-state /
+// embedding row id, exactly one block per sequence, reused for its lifetime.
+//
+// The physical id pool (free list, allocate / deallocate / free, num_*
+// accounting, id-0 padding) is identical to BlockManagerImpl, so this derives
+// from it and reuses that machinery. block_size is 1 (each id is one block) and
+// there is no prefix cache. What differs is the sequence-level policy: grow
+// allocates one block only when the sequence does not already hold one.
+class SingleBlockManager final : public BlockManagerImpl {
  public:
   SingleBlockManager(uint32_t num_blocks,
                      std::string resource_name,
                      std::string exhaustion_message = "");
   ~SingleBlockManager() override = default;
 
-  std::vector<Block> allocate(size_t num_blocks) override;
-  Block allocate() override;
-  void deallocate(const Slice<Block>& blocks) override;
+  // One block per sequence: empty when already held, else a single block (or
+  // std::nullopt when the pool is exhausted). Does not insert into the sequence
+  // -- the composite commits the returned block under BlockType::SINGLE.
+  std::optional<std::vector<Block>> allocate_for_sequence(
+      Sequence* seq,
+      size_t num_tokens) override;
 
+  // Single-block allocate: reuses the base free list but reports exhaustion
+  // with this resource's name / message. Only this leaf calls it directly (the
+  // base ctor's padding reservation runs before the vtable points here, so it
+  // still uses BlockManagerImpl::allocate()). Bring the base allocate(size_t)
+  // overload back into scope: declaring the zero-arg allocate() here would
+  // otherwise hide it (name hiding).
+  using BlockManagerImpl::allocate;
+  Block allocate() override;
+
+  // SINGLE never serves prefix cache; these must not be reached.
   std::vector<Block> allocate_shared(
       const Slice<int32_t>& token_ids,
       const Slice<Block>& existed_shared_blocks = {},
       const MMData& mm_data = MMData(),
       const Slice<XXH3Key>& block_hashes = {}) override;
-
   void cache(const Slice<int32_t>& token_ids,
              std::vector<Block>& blocks,
              size_t existed_shared_blocks_num = 0,
@@ -49,27 +65,9 @@ class SingleBlockManager final : public BlockManager {
              const Slice<XXH3Key>& block_hashes = {}) override;
   void cache(const std::vector<Block>& blocks) override;
 
-  size_t num_blocks_in_prefix_cache() const override;
-  size_t num_free_blocks() const override;
-  size_t num_used_blocks() const override;
-  double kv_cache_utilization() const override;
-  void free(int32_t block_id) override;
-  size_t num_total_blocks() const override;
-
  private:
-  std::vector<int32_t> free_ids_;
-  std::vector<bool> in_use_ids_;
-  // Tracks whether `num_used_blocks_` currently includes this block id.
-  // Semantics: `num_used_blocks()` reports logical/effective usage. It may
-  // temporarily differ from `num_free_blocks()` because `deallocate()` can
-  // drop effective usage before the last `Block` reference is released and
-  // the id is physically returned to `free_ids_` via `free()`.
-  std::vector<bool> usage_accounted_ids_;
-  std::atomic<size_t> num_free_blocks_{0};
-  std::atomic<size_t> num_used_blocks_{0};
   std::string resource_name_;
   std::string exhaustion_message_;
-  mutable std::mutex mutex_;
 };
 
 }  // namespace xllm

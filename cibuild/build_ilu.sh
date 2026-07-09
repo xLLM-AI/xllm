@@ -21,9 +21,14 @@ RUN_OPTS=(
   -w /export/home
 )
 
+if [[ -d /data/export-home ]]; then
+  RUN_OPTS+=(-v /data/export-home:/data/export-home)
+fi
+
 CMD="$*"
 [[ -z "${CMD}" ]] && error
 
 [[ ! -x $(command -v docker) ]] && echo "ERROR: 'docker' command is missing." && exit 1
 
-docker run "${RUN_OPTS[@]}" "${IMAGE}" bash -c "set -euo pipefail; cd $(pwd); ${CMD}"
+WORKDIR="$(pwd)"
+docker run "${RUN_OPTS[@]}" "${IMAGE}" bash -c "set -euo pipefail; cd \"${WORKDIR}\"; ${CMD}"

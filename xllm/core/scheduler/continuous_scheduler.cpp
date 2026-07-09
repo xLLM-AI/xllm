@@ -30,7 +30,6 @@ limitations under the License.
 #include <sstream>
 #include <vector>
 
-#include "common/global_flags.h"
 #include "common/metrics.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
@@ -226,7 +225,7 @@ void ContinuousScheduler::get_latency_budget_and_request_order(
     latency_budget = std::max(min_remaining_time, latency_budget_threshold);
   }
 
-  const double lambda = FLAGS_aggressive_coeff;
+  const double lambda = SchedulerConfig::get_instance().aggressive_coeff();
   double load_judge_func = 0.0;
   if (for_prefill) {
     load_judge_func = total_exec_time + constant_overhead;
@@ -242,12 +241,13 @@ void ContinuousScheduler::get_latency_budget_and_request_order(
     auto request = *it;
     auto& sequence = request->sequences()[0];
 
-    if (FLAGS_enable_starve_prevent) {
+    if (SchedulerConfig::get_instance().enable_starve_prevent()) {
       const int32_t starve_unit_time = sequence->is_prefill_stage()
                                            ? -request->ttft_slo_ms()
                                            : -request->tpot_slo_ms();
-      const int32_t starve_time_threshold =
-          static_cast<int32_t>(FLAGS_starve_threshold * starve_unit_time);
+      const int32_t starve_time_threshold = static_cast<int32_t>(
+          SchedulerConfig::get_instance().starve_threshold() *
+          starve_unit_time);
       if (request->get_remaining_time() < starve_time_threshold) {
         request->set_starved(true);
       }

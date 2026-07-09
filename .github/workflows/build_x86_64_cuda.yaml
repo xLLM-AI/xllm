@@ -43,7 +43,7 @@ concurrency:
 jobs:
   # need to review code first when sensitive files are modified.
   check-sensitive:
-    runs-on: [self-hosted]
+    runs-on: [xllm-a2-x86-cicd]
     outputs:
       requires_approval: ${{ steps.check_sensitive.outputs.requires_approval }}
       do_build: ${{ steps.decide.outputs.do_build }}
@@ -54,7 +54,7 @@ jobs:
           fetch-depth: 0  # Ensure we can compare commits
 
       - name: Install jq
-        run: yum install -y jq
+        run: sudo yum install -y jq
 
       - name: Check if sensitive files were changed
         id: check_sensitive
@@ -106,7 +106,7 @@ jobs:
     if: >
       (github.event_name == 'workflow_dispatch' || github.event_name == 'push') ||
       needs.check-sensitive.outputs.do_build == 'true'
-    runs-on: [self-hosted]
+    runs-on: [xllm-a2-x86-cicd]
     steps:
     - name: Checkout Code
       timeout-minutes: 5

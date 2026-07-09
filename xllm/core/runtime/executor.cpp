@@ -44,4 +44,11 @@ ModelOutput Executor::forward(const torch::Tensor& tokens,
   return impl_->run(tokens, positions, kv_caches, params);
 }
 
+void Executor::prepare_graph_input(const torch::Tensor& tokens,
+                                   const torch::Tensor& positions,
+                                   std::vector<KVCache>& kv_caches,
+                                   const ModelInputParams& params) {
+  impl_->prepare_graph_input(tokens, positions, kv_caches, params);
+}
+
 }  // namespace xllm

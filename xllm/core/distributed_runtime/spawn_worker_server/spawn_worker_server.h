@@ -52,7 +52,11 @@ class SpawnWorkerServer final {
                              bool enable_graph_mode_decode_no_padding,
                              bool enable_prefill_piecewise_graph,
                              int32_t max_tokens_for_graph_mode,
-                             int64_t max_encoder_cache_size);
+                             int64_t max_encoder_cache_size,
+                             int32_t dp_size,
+                             int32_t tp_size,
+                             int32_t sp_size,
+                             int32_t cfg_size);
 
   ~SpawnWorkerServer();
 

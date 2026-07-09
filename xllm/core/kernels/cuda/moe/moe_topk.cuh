@@ -25,6 +25,10 @@
 #include <cooperative_groups/reduce.h>
 #endif
 
+#if defined(USE_MACA)
+#include <cuda_bf16.h>
+#endif
+
 #if !defined(USE_DCU)
 #include <cub/cub.cuh>
 #else

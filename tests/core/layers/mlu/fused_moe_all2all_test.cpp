@@ -369,7 +369,7 @@ int32_t run_all2all_smoothquant_test_child(All2AllTestParams params) {
   return run_all2all_basic_test_child(params);
 }
 
-int32_t run_all2all_route_guard_test_child(All2AllTestParams params) {
+int32_t run_all2all_selected_route_test_child(All2AllTestParams params) {
   try {
     EPLBConfig::get_instance().expert_parallel_degree(2);
 
@@ -422,16 +422,23 @@ int32_t run_all2all_route_guard_test_child(All2AllTestParams params) {
 
     int64_t num_tokens = params.batch_size * params.seq_len;
     auto hidden_states =
-        test::seeded_tensor("fused_moe_all2all_tests.guard.hidden_states",
+        test::seeded_tensor("fused_moe_all2all_tests.selected.hidden_states",
                             {num_tokens, params.hidden_size},
                             torch::kBFloat16,
                             device);
-    auto route_info = fused_moe->prep_route(hidden_states);
-    fused_moe->forward_experts(hidden_states,
-                               /*enable_all2all_communication=*/true,
-                               route_info);
+    FusedMoEImpl::RouteInfo route_info = fused_moe->prep_route(hidden_states);
+    route_info.expert_id = route_info.expert_id.to(torch::kLong);
+    torch::Tensor expected =
+        fused_moe->forward_experts(hidden_states,
+                                   /*enable_all2all_communication=*/true);
+    torch::Tensor actual =
+        fused_moe->forward_experts(hidden_states,
+                                   /*enable_all2all_communication=*/true,
+                                   route_info);
 
     xllm_device.synchronize_default_stream();
+    CHECK(torch::allclose(actual, expected, /*rtol=*/1e-3, /*atol=*/1e-4))
+        << "Selected MoE route all2all output mismatch";
     return 0;
   } catch (const std::exception& e) {
     LOG(ERROR) << "Rank " << params.rank << ": Exception: " << e.what();
@@ -484,50 +491,6 @@ class FusedMoEAll2AllMultiDeviceTest : public ::testing::Test {
       int32_t (*test_fn)(All2AllTestParams),
       std::function<All2AllTestParams(int32_t rank)> params_factory) {
     run_test_impl(test_fn, params_factory);
-  }
-
-  void run_fail_test(
-      int32_t (*test_fn)(All2AllTestParams),
-      std::function<All2AllTestParams(int32_t rank)> params_factory) {
-    std::vector<pid_t> child_pids;
-
-    for (int32_t rank = 0; rank < world_size_; ++rank) {
-      pid_t pid = fork();
-      if (pid == 0) {
-        All2AllTestParams params = params_factory(rank);
-        params.rank = rank;
-        params.world_size = world_size_;
-        int32_t exit_code = test_fn(params);
-        _exit(exit_code);
-      } else if (pid > 0) {
-        child_pids.push_back(pid);
-      } else {
-        LOG(FATAL) << "Failed to fork rank " << rank;
-      }
-    }
-
-    bool any_skipped = false;
-    bool any_succeeded = false;
-
-    for (size_t i = 0; i < child_pids.size(); ++i) {
-      int32_t status;
-      waitpid(child_pids[i], &status, 0);
-      if (WIFEXITED(status)) {
-        int32_t exit_code = WEXITSTATUS(status);
-        if (exit_code == EXIT_CODE_SKIP) {
-          any_skipped = true;
-        } else if (exit_code == 0) {
-          any_succeeded = true;
-          LOG(ERROR) << "Rank " << i << " unexpectedly succeeded.";
-        }
-      }
-    }
-
-    if (any_skipped) {
-      GTEST_SKIP() << "Test skipped due to insufficient devices.";
-    } else {
-      ASSERT_FALSE(any_succeeded) << "All2All route guard did not trigger.";
-    }
   }
 
  private:
@@ -673,23 +636,24 @@ TEST_F(FusedMoEAll2AllMultiDeviceTest, W4A8All2AllSmoke) {
                        });
 }
 
-TEST_F(FusedMoEAll2AllMultiDeviceTest, ExternalRouteGuard) {
-  run_fail_test(run_all2all_route_guard_test_child, [](int32_t /*rank*/) {
-    All2AllTestParams params;
-    params.rank = 0;
-    params.world_size = 2;
-    params.port = 29506;
-    params.host = "127.0.0.1";
-    params.device_index = -1;
-    params.hidden_size = 512;
-    params.intermediate_size = 256;
-    params.num_experts = 4;
-    params.top_k = 2;
-    params.batch_size = 2;
-    params.seq_len = 4;
-    params.is_smoothquant = false;
-    return params;
-  });
+TEST_F(FusedMoEAll2AllMultiDeviceTest, SelectedRouteMatchesGateRouteAll2All) {
+  run_test_with_params(run_all2all_selected_route_test_child,
+                       [](int32_t /*rank*/) {
+                         All2AllTestParams params;
+                         params.rank = 0;
+                         params.world_size = 2;
+                         params.port = 29506;
+                         params.host = "127.0.0.1";
+                         params.device_index = -1;
+                         params.hidden_size = 512;
+                         params.intermediate_size = 256;
+                         params.num_experts = 4;
+                         params.top_k = 2;
+                         params.batch_size = 2;
+                         params.seq_len = 4;
+                         params.is_smoothquant = false;
+                         return params;
+                       });
 }
 
 }  // namespace test

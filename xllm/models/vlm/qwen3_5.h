@@ -93,7 +93,8 @@ class Qwen3_5ModelImpl final
     auto target_cos_sin_chunks = target_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
     auto cos_pos = target_cos_sin_chunks[0].contiguous();
     auto sin_pos = target_cos_sin_chunks[1].contiguous();
-    auto apply = [this](torch::Tensor x) {
+    auto options = positions.options().dtype(torch::kLong);
+    auto apply = [this, options](torch::Tensor x) {
       auto freqs_t = x[0].clone();
       int64_t mrop_length = static_cast<int64_t>(freqs_t.size(-1) / 2);
 
@@ -102,9 +103,9 @@ class Qwen3_5ModelImpl final
         int64_t section_len = mrope_section_[dim_idx];
         int64_t length = section_len * 3;
 
-        auto idx_first_half = torch::arange(offset, length, 3, torch::kLong);
+        auto idx_first_half = torch::arange(offset, length, 3, options);
         auto idx_second_half = torch::arange(
-            offset + mrop_length, length + mrop_length, 3, torch::kLong);
+            offset + mrop_length, length + mrop_length, 3, options);
 
         auto idx_tensor =
             torch::cat({idx_first_half, idx_second_half}, 0).to(x.device());
@@ -150,12 +151,8 @@ class Qwen3_5ModelImpl final
     }
 
     auto& attn_metadata = *(input_params_new.attn_metadata);
-    bool only_prefill =
-        (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill);
-    if (positions.dim() == 2 && only_prefill && !mrope_section_.empty()) {
-      std::tie(attn_metadata.mrope_cos, attn_metadata.mrope_sin) =
-          apply_mrope(positions);
-    }
+    std::tie(attn_metadata.mrope_cos, attn_metadata.mrope_sin) =
+        apply_mrope(positions);
 
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_.size(); i++) {
@@ -180,8 +177,76 @@ class Qwen3_5ModelImpl final
   layer::AttentionMetadata get_attention_metadata(
       const ModelInputParams& params,
       const torch::Tensor& h) {
-    auto attn_metadata = layer::AttentionMetadataBuilder::build(params, false);
-    // TODO: support linear attention
+    auto attn_metadata =
+        layer::AttentionMetadataBuilder::build(params, /*enable_mla=*/false);
+    // Init batch and token_block_offset for GDN attention
+    if (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill) {
+      constexpr int32_t block_size = 8;
+      constexpr int64_t pad_slot_id = -1;
+      constexpr int64_t default_max_num_programs = 1024;
+      constexpr int64_t chunk_size = 64;
+      auto seqlens = attn_metadata.q_cu_seq_lens.diff();
+      auto nums = (seqlens + block_size - 1) / block_size;
+      nums = nums.to(torch::kLong);
+      int32_t tot = nums.sum().item<int32_t>();
+      torch::Tensor range_batch = torch::arange(nums.size(0), nums.options());
+      torch::Tensor mlist_tensor = torch::repeat_interleave(range_batch, nums);
+      int64_t mlist_len = mlist_tensor.size(0);
+      int64_t max_num_programs =
+          std::max(default_max_num_programs, mlist_len) * 2;
+      torch::Tensor batch_ptr =
+          torch::full({max_num_programs},
+                      pad_slot_id,
+                      torch::dtype(torch::kInt32).device(seqlens.device()));
+      torch::Tensor token_block_offset_ptr =
+          torch::full({max_num_programs},
+                      pad_slot_id,
+                      torch::dtype(torch::kInt32).device(seqlens.device()));
+
+      std::vector<torch::Tensor> vec;
+      vec.reserve(nums.size(0));
+      for (int64_t i = 0; i < nums.size(0); ++i) {
+        vec.emplace_back(
+            torch::arange(nums[i].item<int64_t>(), nums.options()));
+      }
+      torch::Tensor offsetlist_tensor = torch::cat(vec, -1).to(torch::kInt32);
+      batch_ptr.narrow(0, 0, mlist_len).copy_(mlist_tensor);
+      token_block_offset_ptr.narrow(0, 0, mlist_len).copy_(offsetlist_tensor);
+
+      // Compute chunk indices for the chunked GDN kernel
+      {
+        torch::Tensor lengths = seqlens;
+        torch::Tensor num_chunks = (lengths + chunk_size - 1) / chunk_size;
+        num_chunks = num_chunks.to(torch::kLong);
+        torch::Tensor cumsum = torch::cumsum(num_chunks, 0);
+        int64_t total_chunks = cumsum[-1].item<int64_t>();
+        torch::Tensor arange_total =
+            torch::arange(total_chunks, attn_metadata.q_cu_seq_lens.options());
+        torch::Tensor zeros = torch::zeros({1}, cumsum.options());
+        torch::Tensor prefix = torch::cat(
+            {zeros, cumsum.slice(/*dim=*/0, /*start=*/0, /*end=*/-1)});
+        torch::Tensor repeats_prefix =
+            torch::repeat_interleave(prefix, num_chunks);
+        torch::Tensor indices = arange_total - repeats_prefix;
+        torch::Tensor mask = indices == 0;
+        torch::Tensor col0 = mask.cumsum(0) - 1;
+        attn_metadata.chunk_indices = torch::stack({col0, indices}, /*dim=*/1)
+                                          .to(attn_metadata.q_cu_seq_lens)
+                                          .to(torch::kInt32);
+      }
+      attn_metadata.tot = tot;
+      attn_metadata.batch = batch_ptr;
+      attn_metadata.token_block_offset = token_block_offset_ptr;
+      if (params.attention.device.kv_cache_tokens_nums.defined() &&
+          params.attention.device.kv_cache_tokens_nums.numel() > 0) {
+        attn_metadata.has_initial_states =
+            (params.attention.device.kv_cache_tokens_nums > 0).to(torch::kBool);
+      } else {
+        attn_metadata.has_initial_states =
+            torch::zeros({seqlens.size(0)},
+                         torch::dtype(torch::kBool).device(seqlens.device()));
+      }
+    }
     return attn_metadata;
   }
 };

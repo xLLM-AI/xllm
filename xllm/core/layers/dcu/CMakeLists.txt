@@ -36,12 +36,16 @@ cc_library(
     torch_attention.h
     flash_attention.h
     fused_moe.h
+    deepseek_v2_attention.h
+    deepseek_v2_decoder_layer_impl.h
   SRCS
     attention.cpp
     base_attention_impl.cpp
     torch_attention.cpp
     flash_attention.cpp
     fused_moe.cpp
+    deepseek_v2_attention.cpp
+    deepseek_v2_decoder_layer_impl.cpp
   DEPS
     :common_layers
     flash_attention

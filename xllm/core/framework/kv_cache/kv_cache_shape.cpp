@@ -353,7 +353,7 @@ void KVCacheShape::apply_device_layout(const ModelArgs& model_args) {
   }
 #endif
 
-#if defined(USE_MLU)
+#if defined(USE_MLU) || defined(USE_DCU)
   if (model_args.enable_mla()) {
     CHECK(key_cache_shape_.has_value())
         << "key_cache_shape is not initialized.";

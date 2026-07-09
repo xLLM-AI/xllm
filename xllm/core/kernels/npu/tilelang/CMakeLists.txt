@@ -142,6 +142,21 @@ tilelang_register_runtime_kernel(
   WRAPPER_SRCS chunk_gated_delta_rule_fwd_h_wrapper.cpp
 )
 
+tilelang_register_runtime_kernel(
+  NAME causal_conv1d_decode
+  WRAPPER_SRCS causal_conv1d_decode_wrapper.cpp
+)
+
+tilelang_register_runtime_kernel(
+  NAME causal_conv1d
+  WRAPPER_SRCS causal_conv1d_wrapper.cpp
+)
+
+tilelang_register_runtime_kernel(
+  NAME fused_sigmoid_gating_delta_rule
+  WRAPPER_SRCS fused_sigmoid_gating_delta_rule_wrapper.cpp
+)
+
 cc_library(
   NAME
     tilelang_kernels

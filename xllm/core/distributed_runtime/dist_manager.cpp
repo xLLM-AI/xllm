@@ -188,12 +188,13 @@ void DistManager::setup_multi_node_workers(
     const int32_t tp_size = options.tp_size();
     const int32_t sp_size = options.sp_size();
     const int32_t cfg_size = options.cfg_size();
+    const int32_t vae_size = options.vae_size();
     LOG(INFO) << "Multi-node serving world_size = " << world_size
               << ", each_node_ranks = " << each_node_ranks
               << ", current node rank = " << options.node_rank()
               << ", nnodes = " << options.nnodes() << ", dp_size = " << dp_size
               << ", tp_size = " << tp_size << ", sp_size = " << sp_size
-              << ", cfg_size = " << cfg_size;
+              << ", cfg_size = " << cfg_size << ", vae_size = " << vae_size;
   } else {
     LOG(INFO) << "Multi-node serving world_size = " << world_size
               << ", each_node_ranks = " << each_node_ranks

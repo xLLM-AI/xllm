@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 import importlib
+import multiprocessing
 import os
 from pathlib import Path
 
@@ -15,6 +16,37 @@ from .kernel_registry import RegisteredKernelFamily
 from .kernels import utils as kernel_utils
 from .kernels.utils import render_family_registry_inc, render_family_variants_inc
 from .toolchain import AscendBuildContext, TILELANG_BISHENG_COMMON_FLAGS
+
+
+# TileLang variant compilation is much heavier than ordinary C++ compilation:
+# each worker may lower Python/TVM IR and launch bisheng.  Keep the automatic
+# default conservative on large hosts; for example, a 640-CPU build machine uses
+# 16 workers by default instead of trying to spawn hundreds of workers.  The
+# default mapping is <=4 -> 1, <=8 -> 2, <=16 -> 4, <=64 -> 8, and >64 -> 16.
+_DEFAULT_TILELANG_JOB_LIMITS = (
+    (4, 1),
+    (8, 2),
+    (16, 4),
+    (64, 8),
+)
+_DEFAULT_TILELANG_JOBS_FOR_LARGE_HOST = 16
+
+
+def default_tilelang_jobs(cpu_count: int | None = None) -> int:
+    cpus = cpu_count or os.cpu_count() or 1
+    for max_cpus, jobs in _DEFAULT_TILELANG_JOB_LIMITS:
+        if cpus <= max_cpus:
+            return jobs
+    return _DEFAULT_TILELANG_JOBS_FOR_LARGE_HOST
+
+
+def _resolve_tilelang_jobs(jobs: int | str | None) -> int:
+    if jobs is None:
+        return default_tilelang_jobs()
+    resolved_jobs = int(jobs)
+    if resolved_jobs < 1:
+        raise ValueError(f"TileLang jobs must be positive, got: {jobs}")
+    return resolved_jobs
 
 
 @dataclass(frozen=True)
@@ -196,6 +228,7 @@ def build_kernel_family(
     output_root: str | Path,
     context: AscendBuildContext,
     force: bool = False,
+    jobs: int | str | None = None,
 ) -> KernelFamilyManifest:
     family_output_dir = Path(output_root) / "targets" / "ascend" / family.kernel_name
     family_output_dir.mkdir(parents=True, exist_ok=True)
@@ -303,8 +336,17 @@ def build_kernel_family(
         )
 
     if worker_args_list:
-        max_workers = max(1, os.cpu_count() or 1)
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        max_workers = _resolve_tilelang_jobs(jobs)
+        # Use spawn rather than Linux's default fork.  Fork can inherit
+        # TileLang/TVM lowering state from the parent process; in repeated full
+        # builds this intermittently stalled after 242 variants
+        # (fused_gdn_gating 240 + rope 2), before split_qkv_rmsnorm_mrope made
+        # bisheng progress.
+        multiprocessing_context = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=max_workers,
+            mp_context=multiprocessing_context,
+        ) as executor:
             future_to_args = {
                 executor.submit(_run_variant_worker, args): args
                 for args in worker_args_list

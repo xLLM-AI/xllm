@@ -27,11 +27,13 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/instance_name.h"
+#include "common/metrics.h"
 #include "completion.pb.h"
 #include "core/distributed_runtime/llm_master.h"
 #include "core/distributed_runtime/rec_master.h"
 #include "core/framework/config/rec_config.h"
 #include "core/framework/request/request_output.h"
+#include "util/timer.h"
 
 #ifdef likely
 #undef likely
@@ -283,6 +285,12 @@ void RecCompletionServiceImpl::process_async_impl(
     return;
   }
 
+  if (rpc_request.beam_width() > 0) {
+    GAUGE_SET(rec_beam_search_width, rpc_request.beam_width());
+  }
+
+  Timer request_timer;
+
   RequestParams request_params(
       rpc_request, call->get_x_request_id(), call->get_x_request_time());
   if (::xllm::RecConfig::get_instance().enable_output_sku_logprobs()) {
@@ -308,6 +316,11 @@ void RecCompletionServiceImpl::process_async_impl(
   std::optional<std::vector<proto::InferInputTensor>> input_tensors =
       std::nullopt;
   if (rpc_request_ref.input_tensors_size()) {
+    if (rpc_request_ref.input_tensors(0).shape_size() > 0) {
+      HISTOGRAM_OBSERVE(rec_input_token_num_per_request,
+                        rpc_request_ref.input_tensors(0).shape(0));
+    }
+
     std::vector<proto::InferInputTensor> tensors;
     tensors.reserve(rpc_request_ref.input_tensors_size());
     for (int i = 0; i < rpc_request_ref.input_tensors_size(); ++i) {
@@ -330,6 +343,7 @@ void RecCompletionServiceImpl::process_async_impl(
        stream = std::move(saved_streaming),
        include_usage = include_usage,
        request_id = saved_request_id,
+       request_timer = std::move(request_timer),
        created_time = absl::ToUnixSeconds(absl::Now())](
           const RequestOutput& req_output) -> bool {
         if (req_output.status.has_value()) {
@@ -338,6 +352,9 @@ void RecCompletionServiceImpl::process_async_impl(
             // Reduce the number of concurrent requests when a request is
             // finished with error.
             master->get_rate_limiter()->decrease_one_request();
+            HISTOGRAM_OBSERVE(
+                rec_total_latency_microseconds,
+                static_cast<int64_t>(request_timer.elapsed_microseconds()));
 
             return call->finish_with_error(status.code(), status.message());
           }
@@ -347,6 +364,9 @@ void RecCompletionServiceImpl::process_async_impl(
         // or canceled.
         if (req_output.finished || req_output.cancelled) {
           master->get_rate_limiter()->decrease_one_request();
+          HISTOGRAM_OBSERVE(
+              rec_total_latency_microseconds,
+              static_cast<int64_t>(request_timer.elapsed_microseconds()));
         }
 
         return send_result_to_client_brpc_rec(

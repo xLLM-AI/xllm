@@ -169,6 +169,7 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .tp_size(static_cast<int32_t>(parallel_config.tp_size()))
       .sp_size(static_cast<int32_t>(parallel_config.sp_size()))
       .cfg_size(static_cast<int32_t>(parallel_config.cfg_size()))
+      .vae_size(static_cast<int32_t>(parallel_config.vae_size()))
       .instance_name(instance_name)
       .enable_disagg_pd(disagg_pd_config.enable_disagg_pd())
       .enable_pd_ooc(disagg_pd_config.enable_pd_ooc())
@@ -248,6 +249,8 @@ void validate_config(const std::string& model_type) {
   SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
   ParallelConfig& parallel_config = ParallelConfig::get_instance();
   DisaggPDConfig& disagg_pd_config = DisaggPDConfig::get_instance();
+  SpeculativeConfig& speculative_config = SpeculativeConfig::get_instance();
+  ExecutionConfig& execution_config = ExecutionConfig::get_instance();
 
   if (model_config.backend().empty()) {
     LOG(FATAL) << "Model is not supported currently, model type: "
@@ -300,6 +303,13 @@ void validate_config(const std::string& model_type) {
 #endif
 
 #if defined(USE_NPU)
+  if (speculative_config.num_speculative_tokens() > 0 &&
+      execution_config.enable_graph_double_buffer()) {
+    LOG(WARNING) << "enable_graph_double_buffer is not compatible with "
+                    "speculative decoding. "
+                 << "Disabling enable_graph_double_buffer.";
+    execution_config.enable_graph_double_buffer(false);
+  }
   // enable_xtensor / enable_rolling_load imply enable_manual_loader
   if ((kv_cache_config.enable_xtensor() || load_config.enable_rolling_load()) &&
       !load_config.enable_manual_loader()) {
@@ -456,7 +466,7 @@ int run() {
   if (options.node_rank() != 0) {
     if (model_config.backend() == "dit") {
       master = std::make_unique<DiTAssistantMaster>(options);
-    } else if (FLAGS_backend == "vlm") {
+    } else if (model_config.backend() == "vlm") {
       master = std::make_unique<VLMAssistantMaster>(options);
     } else {
       master = std::make_unique<LLMAssistantMaster>(options);

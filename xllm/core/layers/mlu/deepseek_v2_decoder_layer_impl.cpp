@@ -15,7 +15,6 @@ limitations under the License.
 
 #include "deepseek_v2_decoder_layer_impl.h"
 
-#include <algorithm>
 #include <utility>
 
 namespace xllm {
@@ -232,12 +231,6 @@ bool DeepseekV2DecoderLayerImpl::can_keep_local_output(
   return same_sp_topology(pg, sp_pg);
 }
 
-bool DeepseekV2DecoderLayerImpl::can_sp_chunk(
-    const ModelInputParams& input_params) const {
-  return sequence_parallel_context_ != nullptr && sp_ffn_chunk_size_ > 0 &&
-         input_params.meta.batch_forward_type.no_decode();
-}
-
 torch::Tensor DeepseekV2DecoderLayerImpl::comm_out(
     torch::Tensor x,
     const PostAttnCarrier& carrier,
@@ -253,24 +246,6 @@ torch::Tensor DeepseekV2DecoderLayerImpl::comm_out(
   CHECK(sequence_parallel_context_ != nullptr)
       << "sequence parallel fast path requires sequence parallel context";
   return v32_sp::slice_local_packed(x, *sequence_parallel_context_);
-}
-
-torch::Tensor DeepseekV2DecoderLayerImpl::run_mlp(
-    torch::Tensor x,
-    const ModelInputParams& input_params) {
-  if (!can_sp_chunk(input_params) || !x.defined() || x.dim() == 0 ||
-      x.size(0) <= sp_ffn_chunk_size_) {
-    return mlp_(x);
-  }
-
-  auto out_sizes = x.sizes().vec();
-  torch::Tensor full_out = torch::empty(out_sizes, x.options());
-  for (int64_t start = 0; start < x.size(0); start += sp_ffn_chunk_size_) {
-    const int64_t end = std::min(start + sp_ffn_chunk_size_, x.size(0));
-    torch::Tensor chunk_out = mlp_(x.slice(0, start, end));
-    full_out.slice(0, start, end).copy_(chunk_out, /*non_blocking=*/true);
-  }
-  return full_out;
 }
 
 torch::Tensor DeepseekV2DecoderLayerImpl::restore_ffn_output(
@@ -333,8 +308,6 @@ torch::Tensor DeepseekV2DecoderLayerImpl::forward(
 
   // MLP forward
   bool keep_local_output = false;
-  const int64_t sp_chunk_size =
-      can_sp_chunk(input_params) ? sp_ffn_chunk_size_ : -1;
   if (sparse_moe_) {
     auto can_keep_local = [&](ProcessGroup* pg) {
       return carrier.has_value() && can_keep_local_output(*carrier, pg);
@@ -362,15 +335,14 @@ torch::Tensor DeepseekV2DecoderLayerImpl::forward(
     auto moe_result =
         prep.use_sp_moe_overlap
             ? sparse_moe_->forward_sp(
-                  x, *sequence_parallel_context_, moe_comm_fns, sp_chunk_size)
-            : sparse_moe_->forward(
-                  x, exec_cfg->enable_all2all, moe_comm_fns, sp_chunk_size);
+                  x, *sequence_parallel_context_, moe_comm_fns)
+            : sparse_moe_->forward(x, exec_cfg->enable_all2all, moe_comm_fns);
     x = std::move(moe_result.output);
     keep_local_output = moe_result.keep_local_output;
   } else {
     keep_local_output =
         can_keep_local_output(*carrier, parallel_args_.tp_group_);
-    x = run_mlp(std::move(x), input_params);
+    x = mlp_(std::move(x));
     x = keep_local_output ? comm_out(x, *carrier, parallel_args_.tp_group_)
                           : reduce_out(x, parallel_args_.tp_group_);
   }

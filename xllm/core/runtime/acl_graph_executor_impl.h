@@ -19,8 +19,11 @@ limitations under the License.
 #include <acl/acl.h>
 #include <torch/torch.h>
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -77,6 +80,11 @@ class AclGraph {
                      std::vector<KVCache>& kv_cache,
                      const ModelInputParams& params);
 
+  void prepare_replay_inputs(const torch::Tensor& tokens,
+                             const torch::Tensor& positions,
+                             std::vector<KVCache>& kv_cache,
+                             const ModelInputParams& params);
+
   // Get the hidden states from the last capture
   torch::Tensor get_hidden_states(uint32_t actual_num_tokens = 0) const {
     return persistent_param_.hidden_states(actual_num_tokens);
@@ -110,8 +118,8 @@ class AclGraph {
   aclrtEvent replay_done_event_ = nullptr;
   c10::DeviceIndex device_index_;
   std::shared_ptr<AclGraphTaskUpdateContext> graph_task_context_;
-
   std::optional<c10_npu::NPUStream> update_stream_;
+  std::atomic<bool> replay_inputs_prepared_{false};
 };
 
 // Executor implementation using ACL graph optimization
@@ -133,6 +141,15 @@ class AclGraphExecutorImpl : public ExecutorImpl {
                   std::vector<KVCache>& kv_caches,
                   const ModelInputParams& params) override;
 
+  void prepare_graph_input(const torch::Tensor& tokens,
+                           const torch::Tensor& positions,
+                           std::vector<KVCache>& kv_caches,
+                           const ModelInputParams& params) override;
+
+  [[nodiscard]] int32_t graph_slot_count_for_test() const {
+    return graph_slot_count_;
+  }
+
  private:
   // not own
   CausalLM* model_;
@@ -141,11 +158,16 @@ class AclGraphExecutorImpl : public ExecutorImpl {
   torch::Device device_;
   runtime::Options options_;
 
-  // Lazy-loaded ACL graphs for different graph keys.
-  absl::flat_hash_map<uint64_t, std::unique_ptr<AclGraph>> graphs_;
-
-  // Persistent parameters shared across all AclGraph instances
-  std::unique_ptr<GraphPersistentParam> persistent_param_;
+  struct GraphSlot {
+    std::unique_ptr<GraphPersistentParam> persistent_param;
+    absl::flat_hash_map<uint64_t, std::unique_ptr<AclGraph>> graphs;
+    bool is_prepared = false;
+  };
+  std::array<GraphSlot, 2> graph_slots_;
+  std::mutex graph_slots_mutex_;
+  int32_t graph_slot_count_ = 2;
+  int32_t next_replay_slot_ = 0;
+  int32_t last_started_replay_slot_ = -1;
 
   // Get bucket num_tokens for given num_tokens
   // For num_tokens < 8: use 1, 2, 4, 8

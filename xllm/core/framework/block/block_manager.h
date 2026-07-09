@@ -23,6 +23,7 @@ limitations under the License.
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -58,6 +59,21 @@ class BlockManager {
     PROPERTY(uint32_t, max_seqs_per_batch) = 0;
     // Hasher type bound to the engine (TEXT for LLM, MM for VLM).
     PROPERTY(BlockHasherType, hasher_type) = BlockHasherType::TEXT;
+    // The block category used as the composite's map key for this leaf. The
+    // leaf itself is type-free (no block_type() accessor); the spec builder
+    // carries this value to decide the map key. Flat KV uses KV.
+    PROPERTY(BlockType, block_type) = BlockType::KV;
+    // Whether the kvcache-store (host offload) path is enabled. Composite
+    // leaves are wrapped in ConcurrentBlockManagerImpl when this (or
+    // enable_disagg_pd) is set.
+    PROPERTY(bool, enable_kvcache_store) = false;
+    // xtensor (VMM) KV leaf parameters. When enable_xtensor is set, the KV leaf
+    // is an XTensorBlockManagerImpl instead of a flat BlockManagerImpl; these
+    // carry the construction args the spec builder needs.
+    PROPERTY(bool, enable_xtensor) = false;
+    PROPERTY(int64_t, num_layers) = 0;
+    PROPERTY(int64_t, slot_size) = 0;
+    PROPERTY(std::string, model_id);
   };
 
   explicit BlockManager(Options options) : options_(options) {}
@@ -96,6 +112,12 @@ class BlockManager {
   // get number of slots per block
   size_t block_size() const { return options_.block_size(); }
 
+  // The block category this leaf serves (KV / SWA / C4 / C128 / SINGLE). A leaf
+  // reads its own held-block count from the sequence under this type, and the
+  // CompositeBlockManager inserts the returned blocks into the sequence under
+  // this type. Carried via Options by the spec builder.
+  BlockType block_type() const { return options_.block_type(); }
+
   // call BlockManager to free block used by Block.
   virtual void free(int32_t block_id) = 0;
 
@@ -108,12 +130,34 @@ class BlockManager {
   // get number of total blocks
   virtual size_t num_total_blocks() const = 0;
 
-  // CompositeBlockManager: Pool calls these when is_composite() is true.
+  // True only for CompositeBlockManager. Leaves and flat managers return false.
   virtual bool is_composite() const { return false; }
-  virtual bool allocate_for_sequence(Sequence* seq, size_t num_tokens) {
-    return false;
-  }
-  virtual void deallocate_sequence(Sequence* seq) {}
+
+  // —— Sequence-level growth interface (pure: every concrete manager defines
+  // its own policy) ——
+  // Grows this manager's block_type() blocks for a sequence and returns the
+  // blocks it newly allocated this round (empty when nothing is needed),
+  // std::nullopt on shortage. The flat-KV default lives in BlockManagerImpl;
+  // SlidingWindow / Single override; CompositeBlockManager fans out to leaves.
+  // Most managers do NOT insert into the sequence -- the composite stages the
+  // returned blocks and commits them under block_type() (the SWA leaf also
+  // releases its own slid-out blocks in place as part of this call).
+  virtual std::optional<std::vector<Block>> allocate_for_sequence(
+      Sequence* seq,
+      size_t num_tokens) = 0;
+
+  // Sliding-window hook: release leading blocks that have slid out of the
+  // window. The composite calls this on every leaf AFTER a successful
+  // allocate_sequence commit; non-SWA leaves keep the empty default (no-op).
+  // Running post-commit means a failed round never releases existing blocks.
+  virtual void release_out_of_window(Sequence* /*seq*/) {}
+
+  // Post-construction init hook: only the xtensor leaf needs it (KV tensors
+  // must be created on the worker before VMM physical pages can be mapped to
+  // reserve the padding block). Empty base default; the composite fans it out
+  // to every leaf, so non-xtensor leaves are a no-op. This keeps the
+  // out-of-band timing free of any dynamic_cast through the composite.
+  virtual void reserve_xtensor_padding_blocks() {}
 
  protected:
   // the options for the block manager

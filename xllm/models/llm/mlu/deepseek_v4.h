@@ -31,8 +31,8 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/state_dict/utils.h"
 #include "core/layers/common/attention_metadata.h"
@@ -42,6 +42,7 @@ limitations under the License.
 #include "core/layers/common/word_embedding.h"
 #include "core/layers/mlu/deepseek_v4/deepseek_v4_decoder_layer.h"
 #include "core/layers/mlu/deepseek_v4/dsa_cache_mapping.h"
+#include "core/layers/mlu/deepseek_v4/dsa_empty_dp_input.h"
 #include "core/layers/mlu/deepseek_v4/dsa_metadata_builder_mlu.h"
 #include "core/layers/mlu/deepseek_v4/hyper_connection.h"
 #include "models/llm/llm_model_base.h"
@@ -214,6 +215,9 @@ class DeepseekV4ModelImpl final
                       std::vector<KVCache>& kv_caches,
                       const ModelInputParams& input_params) override {
     torch::NoGradGuard no_grad;
+    const bool is_empty_dp_rank = input_params.meta.q_max_seq_len == 0 ||
+                                  input_params.meta.num_sequences == 0 ||
+                                  tokens.numel() == 0;
     if (tokens.numel() == 0) {
       tokens = torch::tensor(
           {1},
@@ -237,6 +241,10 @@ class DeepseekV4ModelImpl final
     const bool mlu_graph_forward = deepseek_v4_uses_mlu_graph(input_params);
 
     ModelInputParams modified_input_params = input_params;
+    if (is_empty_dp_rank && !mlu_graph_forward) {
+      layer::fill_dsv4_empty_dp_params(
+          modified_input_params, group_infos_, window_size_);
+    }
     std::vector<int32_t>& dp_token_nums =
         modified_input_params.parallel.dp_global_token_nums;
     std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
@@ -255,6 +263,11 @@ class DeepseekV4ModelImpl final
     }
     layer::AttentionMetadata& attn_metadata =
         *(modified_input_params.attn_metadata);
+    if (is_empty_dp_rank && !mlu_graph_forward) {
+      // Empty-DP inputs only preserve local shape and collective participation.
+      // They must not write dummy KV rows into real cache slots.
+      attn_metadata.is_dummy = true;
+    }
 
     if (!mlu_graph_forward) {
       prepare_dsa_metadata(attn_metadata, runtime_device);
@@ -592,7 +605,8 @@ class DeepseekV4ModelImpl final
 
   void build_dsa_cache_info(const ModelArgs& model_args) {
     const std::vector<int32_t>& compress_ratios = model_args.compress_ratios();
-    const int32_t base_block_size = FLAGS_block_size;
+    const int32_t base_block_size =
+        ::xllm::KVCacheConfig::get_instance().block_size();
     CHECK_GT(base_block_size, 0) << "DeepSeek V4 block_size must be positive.";
 
     std::unordered_map<DSAGroupKey, int32_t, DSAGroupKeyHash> group_key_map;

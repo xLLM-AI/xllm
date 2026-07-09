@@ -63,7 +63,8 @@ Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
                         /*bias=*/args.attention_bias(),
                         /*gather_output=*/false,
                         parallel_args,
-                        options));
+                        options,
+                        quant_args));
 
   // 2. O proj
   o_proj_ = register_module("o_proj",
@@ -218,6 +219,31 @@ void Qwen3NextAttentionImpl::load_state_dict(const StateDict& state_dict) {
         {q_part.reshape({q_size_, hidden}), g_part.reshape({q_size_, hidden})},
         0);
     qg_rows.copy_(reordered);
+
+    // Reorder weight_scale and weight_offset for W8A8 dynamic quantization.
+    // These are per-channel (per output row) tensors that must match the
+    // reordered weight layout for correct dequantization.
+    const int64_t qg_size = q_size_ * 2;
+    auto reorder_per_channel = [this, qg_size](torch::Tensor tensor) {
+      if (!tensor.defined() || tensor.numel() == 0) {
+        return;
+      }
+      auto qg_part = tensor.slice(0, 0, qg_size);
+      auto qg_2d = qg_part.view({num_heads_, 2 * head_dim_});
+      auto q_scale = qg_2d.slice(1, 0, head_dim_);
+      auto g_scale = qg_2d.slice(1, head_dim_, 2 * head_dim_);
+      auto reordered_scale = torch::cat(
+          {q_scale.reshape({q_size_}), g_scale.reshape({q_size_})}, 0);
+      qg_part.copy_(reordered_scale);
+    };
+
+    if (qkv_proj_->is_weight_scale_loaded()) {
+      reorder_per_channel(qkv_proj_->weight_scale());
+    }
+    if (qkv_proj_->is_weight_offset_loaded()) {
+      reorder_per_channel(qkv_proj_->weight_offset());
+    }
+
     qkv_weight_reordered_ = true;
   }
 

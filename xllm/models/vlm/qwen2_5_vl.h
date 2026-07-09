@@ -702,6 +702,9 @@ REGISTER_MPOSITION_GENERATOR(qwen2_5_vl, QwenVLMPositionGenerator);
     LOAD_ARG_OR(mm_projection_dim, "vision_config.out_hidden_size", 3584);     \
     LOAD_ARG_OR(mm_patch_size, "vision_config.patch_size", 14);                \
     LOAD_ARG_OR(mm_spatial_merge_size, "vision_config.spatial_merge_size", 2); \
+    LOAD_ARG_OR_FUNC(mm_image_merge_size,                                      \
+                     "vision_config.image_merge_size",                         \
+                     [&] { return args->mm_spatial_merge_size(); });           \
     LOAD_ARG_OR(                                                               \
         mm_spatial_patch_size, "vision_config.spatial_patch_size", 14);        \
     LOAD_ARG_OR(mm_window_size, "vision_config.window_size", 112);             \

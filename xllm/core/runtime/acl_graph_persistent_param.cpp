@@ -48,6 +48,12 @@ namespace {
 int64_t get_decode_graph_capacity(const runtime::Options& options) {
   CHECK_GT(options.num_decoding_tokens(), 0)
       << "num_decoding_tokens must be > 0 for graph capacity";
+  return options.max_seqs_per_batch();
+}
+
+int64_t get_decode_graph_token_capacity(const runtime::Options& options) {
+  CHECK_GT(options.num_decoding_tokens(), 0)
+      << "num_decoding_tokens must be > 0 for graph token capacity";
   if (::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
     return options.max_seqs_per_batch();
   }
@@ -78,7 +84,7 @@ float get_dp_ep_all2all_buffer_factor(int64_t length) {
 int64_t get_dp_ep_padding_buffer_capacity(const ModelArgs& args,
                                           const runtime::Options& options) {
   const int64_t dp_size = std::max<int64_t>(options.dp_size(), 1);
-  const int64_t graph_capacity = get_decode_graph_capacity(options);
+  const int64_t graph_capacity = get_decode_graph_token_capacity(options);
   const int64_t topk = std::max<int64_t>(args.num_experts_per_tok(), 1);
   const int64_t base_length = graph_capacity * topk;
   const int64_t global_length = base_length * dp_size;
@@ -155,7 +161,7 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // Graph-mode token capacity is narrower than max_tokens_per_batch: ACL graph
   // only serves decode / spec-verify batches, so the relevant row upper bound
   // comes from decode graph capacity instead.
-  const int64_t max_graph_tokens = get_decode_graph_capacity(options);
+  const int64_t max_graph_tokens = get_decode_graph_token_capacity(options);
   const int64_t max_seqs_per_batch = get_decode_graph_capacity(options);
 
   const int64_t max_seq_len = args_.max_position_embeddings();
@@ -559,6 +565,32 @@ GraphPersistentParam::update_expanded_spec_decode_attention(
   return expanded_kv_seq_lens_vec;
 }
 
+void GraphPersistentParam::update_tokens(const torch::Tensor& tokens,
+                                         const ModelInputParams& params,
+                                         uint32_t actual_num_tokens,
+                                         uint32_t padded_num_tokens) {
+  CHECK_GT(padded_num_tokens, 0) << "padded_num_tokens must be > 0";
+  const torch::Tensor& graph_tokens =
+      params.graph.input_tokens_override.defined()
+          ? params.graph.input_tokens_override
+          : tokens;
+  CHECK(graph_tokens.defined()) << "graph tokens must be defined";
+  CHECK_GE(graph_tokens.size(0), static_cast<int64_t>(actual_num_tokens))
+      << "graph token override is shorter than actual decode tokens";
+  if (actual_num_tokens > 0) {
+    persistent_tokens_.slice(/*dim=*/0, /*start=*/0, /*end=*/actual_num_tokens)
+        .copy_(graph_tokens.slice(/*dim=*/0,
+                                  /*start=*/0,
+                                  /*end=*/actual_num_tokens),
+               /*non_blocking=*/true);
+  }
+  if (padded_num_tokens > actual_num_tokens) {
+    zero_tensor_tail(persistent_tokens_,
+                     actual_num_tokens,
+                     static_cast<int64_t>(padded_num_tokens));
+  }
+}
+
 std::optional<ModelInputParams> GraphPersistentParam::update(
     const torch::Tensor& tokens,
     const torch::Tensor& k_cache,
@@ -566,7 +598,8 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     const torch::Tensor& positions,
     const ModelInputParams& params,
     uint32_t padded_num_tokens,
-    bool return_capture_params) {
+    bool return_capture_params,
+    bool skip_token_update) {
   CHECK_GT(padded_num_tokens, 0) << "padded_num_tokens must be > 0";
   const uint32_t actual_num_tokens = tokens.size(0);
   const bool is_decode = params.meta.batch_forward_type.is_decode();
@@ -605,15 +638,11 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
           ? 0
           : (is_chunked_prefill ? actual_batch_size : actual_num_tokens);
 
-  // Copy data from input parameters to persistent graph tensors
-  if (actual_num_tokens > 0) {
-    persistent_tokens_.slice(/*dim=*/0, /*start=*/0, /*end=*/actual_num_tokens)
-        .copy_(tokens, /*non_blocking=*/true);
-  }
-  if (padded_num_tokens > actual_num_tokens) {
-    zero_tensor_tail(persistent_tokens_,
-                     actual_num_tokens,
-                     static_cast<int64_t>(padded_num_tokens));
+  // Copy data from input parameters to persistent graph tensors.
+  // Schedule-overlap prepare can defer token copy until replay because tokens
+  // are replaced asynchronously from the previous step output.
+  if (!skip_token_update) {
+    update_tokens(tokens, params, actual_num_tokens, padded_num_tokens);
   }
   // mRoPE positions have shape [3, num_tokens], slice on dim 1
   if (actual_num_tokens > 0) {

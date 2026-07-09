@@ -56,8 +56,12 @@ void dump_startup_config();
     property(FLAGS_##property);                \
   } while (false)
 
+// Assign a config property from JSON, then write the resolved value back to
+// the corresponding FLAGS_ global so that code reading FLAGS_##property
+// directly observes the JSON-provided value instead of the gflags default.
 #define XLLM_CONFIG_ASSIGN_FROM_JSON(property)                               \
   do {                                                                       \
     property(json.value_or<std::decay_t<decltype(property())>>(#property,    \
                                                                property())); \
+    FLAGS_##property = property();                                           \
   } while (false)

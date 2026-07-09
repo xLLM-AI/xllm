@@ -474,7 +474,8 @@ Master::Master(const Options& options, EngineType type)
         .ep_size(options_.ep_size())
         .tp_size(options_.tp_size())
         .sp_size(options_.sp_size())
-        .cfg_size(options_.cfg_size());
+        .cfg_size(options_.cfg_size())
+        .vae_size(options_.vae_size());
 
     auto dit_engine = std::make_unique<DiTEngine>(eng_options);
     engine_ = std::move(dit_engine);

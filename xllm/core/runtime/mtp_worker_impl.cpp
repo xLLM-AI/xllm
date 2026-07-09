@@ -18,10 +18,8 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
-#include <cctype>
 #include <memory>
 
-#include "common/global_flags.h"
 #include "common/metrics.h"
 #if defined(USE_MLU)
 #include "framework/kv_cache_transfer/mooncake_kv_cache_transfer.h"
@@ -35,7 +33,6 @@ limitations under the License.
 #include "core/framework/multimodal/mm_data.h"
 #include "spec_input_builder.h"
 #include "util/env_var.h"
-#include "util/json_reader.h"
 #include "util/pretty_print.h"
 #include "util/slice.h"
 #include "util/timer.h"
@@ -481,38 +478,6 @@ bool is_mimo_target_model_type(const std::string& model_type) {
   return model_type == "mimo";
 }
 
-#if defined(USE_NPU)
-std::string read_model_type_from_config(const std::string& model_weights_path) {
-  JsonReader reader;
-  const std::string config_path = model_weights_path + "/config.json";
-  if (!reader.parse(config_path)) {
-    LOG(WARNING) << "Failed to parse model config: " << config_path;
-    return "";
-  }
-
-  std::string model_type = reader.value_or<std::string>("model_type", "");
-  if (model_type.empty()) {
-    model_type = reader.value_or<std::string>("text_config.model_type", "");
-  }
-  std::transform(
-      model_type.begin(),
-      model_type.end(),
-      model_type.begin(),
-      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return model_type;
-}
-
-void force_atb_spec_kernel_for_qwen3_5_mtp(
-    const std::string& model_weights_path) {
-  const std::string model_type =
-      read_model_type_from_config(model_weights_path);
-  if (!is_qwen3_5_target_model_type(model_type)) {
-    return;
-  }
-  FLAGS_enable_atb_spec_kernel = true;
-}
-#endif
-
 }  // namespace
 
 MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
@@ -545,11 +510,6 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
   bool result = true;
   const bool loading_target =
       impl_->get_status() == WorkerImpl::Status::UNINITIALIZED;
-#if defined(USE_NPU)
-  if (loading_target) {
-    force_atb_spec_kernel_for_qwen3_5_mtp(model_weights_path);
-  }
-#endif
   if (loading_target) {
     result = SpeculativeWorkerImpl::init_model(
         model_weights_path, random_seed, master_status);
@@ -925,6 +885,7 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
                                            ForwardInput& prefill_input) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   prefill_input = input.to(device_, dtype_);
+  prefill_input.sampling_params.return_probs = true;
   clear_ready_events(prefill_input);
   auto& input_params = prefill_input.input_params;
   if (options_.cp_size() > 1) {
@@ -1488,6 +1449,7 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
     ForwardInput& extend_input) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   extend_input = base_input;
+  extend_input.sampling_params.return_probs = true;
   clear_ready_events(extend_input);
   extend_input.device_tensors_ready = false;
   auto& input_params = extend_input.input_params;
@@ -1702,6 +1664,7 @@ void MTPWorkerImpl::prepare_draft_inputs(const ForwardInput& input,
                                          int32_t position_offset) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   draft_input = input;
+  draft_input.sampling_params.return_probs = true;
   clear_ready_events(draft_input);
   draft_input.device_tensors_ready = false;
 

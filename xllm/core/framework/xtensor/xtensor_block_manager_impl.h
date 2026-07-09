@@ -61,6 +61,16 @@ class XTensorBlockManagerImpl : public BlockManager {
   // Deallocate blocks
   void deallocate(const Slice<Block>& blocks) override;
 
+  // Flat incremental growth: allocate ceil(num_tokens/block_size) - held blocks
+  // (physical allocate() maps VMM pages) and return them; the
+  // CompositeBlockManager commits them under BlockType::KV. std::nullopt on
+  // shortage. XTensor derives from BlockManager (the pure interface), not
+  // BlockManagerImpl (whose pool is a free list, not VMM pages), so it
+  // implements this directly.
+  std::optional<std::vector<Block>> allocate_for_sequence(
+      Sequence* seq,
+      size_t num_tokens) override;
+
   // Allocate shared blocks (prefix cache not supported)
   std::vector<Block> allocate_shared(
       const Slice<int32_t>& token_ids,
@@ -114,7 +124,7 @@ class XTensorBlockManagerImpl : public BlockManager {
 
   // Reserve padding block for padding tokens.
   // Should be called after KV tensors are created.
-  void reserve_xtensor_padding_blocks();
+  void reserve_xtensor_padding_blocks() override;
 
  private:
   DISALLOW_COPY_AND_ASSIGN(XTensorBlockManagerImpl);

@@ -40,6 +40,11 @@ class KVCacheState {
   std::vector<Block>* mutable_blocks(BlockType type);
   // Number of blocks held under `type`.
   size_t num_blocks(BlockType type) const;
+  // True if the sequence holds any cache-bearing blocks (KV / SWA / C4 / C128).
+  // Excludes SINGLE, which is a per-sequence resource, not token cache. Used to
+  // decide whether an allocation that started from an empty sequence should be
+  // fully rolled back on failure (vs. a grow on an already-populated sequence).
+  bool has_any_blocks() const;
   // token <-> physical slot mapping for `type` (paged attention). CHECKs the
   // type is present.
   std::vector<int32_t> cache_slots(BlockType type,

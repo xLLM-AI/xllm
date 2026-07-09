@@ -89,7 +89,8 @@ bool AclGraph::capture(CausalLM* model,
   // have valid kv caches. Using layer 0's cache directly would be incorrect
   // if layer 0 is a GDN layer.
   auto [k_cache, v_cache] = find_attention_plan_kv_cache(kv_cache);
-  const uint32_t actual_num_tokens = tokens.size(0);
+  const uint32_t actual_num_tokens =
+      static_cast<uint32_t>(tokens.size(/*dim=*/0));
   CHECK_GE(num_tokens_, actual_num_tokens)
       << "num_tokens_ >= actual_num_tokens";
   auto graph_params = persistent_param_.update(tokens,
@@ -300,7 +301,8 @@ ModelOutput AclGraph::replay(CausalLM* model,
                              const torch::Tensor& positions,
                              std::vector<KVCache>& kv_cache,
                              const ModelInputParams& params) {
-  const uint32_t actual_num_tokens = tokens.size(0);
+  const uint32_t actual_num_tokens =
+      static_cast<uint32_t>(tokens.size(/*dim=*/0));
   CHECK_LE(actual_num_tokens, num_tokens_)
       << "num_tokens mismatch: expected <= " << num_tokens_ << ", got "
       << actual_num_tokens;
@@ -310,24 +312,34 @@ ModelOutput AclGraph::replay(CausalLM* model,
   // (e.g., qwen3_next with mixed GDN/attention layers), tiling should only
   // be updated when Full Attention layers are involved, which is determined
   // by k_cache being valid and non-empty
-  auto [k_cache, v_cache] = find_attention_plan_kv_cache(kv_cache);
   const bool needs_graph_metadata = model->requires_graph_forward_metadata() ||
                                     model->is_hybrid_linear_attention();
-  std::optional<ModelInputParams> graph_params =
-      persistent_param_.update(tokens,
-                               k_cache,
-                               v_cache,
-                               positions,
-                               params,
-                               num_tokens_,
-                               needs_graph_metadata);
-  if (needs_graph_metadata) {
-    CHECK(graph_params.has_value())
-        << "ACL graph replay requires persistent params for graph metadata";
-    prepare_model_graph_metadata(
-        model,
-        persistent_param_.persistent_positions(num_tokens_),
-        graph_params.value());
+  const bool replay_inputs_prepared =
+      replay_inputs_prepared_.exchange(false, std::memory_order_acq_rel);
+  const bool can_use_prepared_inputs =
+      replay_inputs_prepared && params.graph.input_tokens_override.defined() &&
+      !needs_graph_metadata;
+  std::optional<ModelInputParams> graph_params;
+  if (can_use_prepared_inputs) {
+    persistent_param_.update_tokens(
+        tokens, params, actual_num_tokens, num_tokens_);
+  } else {
+    auto [k_cache, v_cache] = find_attention_plan_kv_cache(kv_cache);
+    graph_params = persistent_param_.update(tokens,
+                                            k_cache,
+                                            v_cache,
+                                            positions,
+                                            params,
+                                            num_tokens_,
+                                            needs_graph_metadata);
+    if (needs_graph_metadata) {
+      CHECK(graph_params.has_value())
+          << "ACL graph replay requires persistent params for graph metadata";
+      prepare_model_graph_metadata(
+          model,
+          persistent_param_.persistent_positions(num_tokens_),
+          graph_params.value());
+    }
   }
 
   // Replay captured graph - NPUGraph mempool reuses temporary tensors
@@ -348,6 +360,27 @@ ModelOutput AclGraph::replay(CausalLM* model,
   return ModelOutput(get_hidden_states(actual_num_tokens));
 }
 
+void AclGraph::prepare_replay_inputs(const torch::Tensor& tokens,
+                                     const torch::Tensor& positions,
+                                     std::vector<KVCache>& kv_cache,
+                                     const ModelInputParams& params) {
+  const uint32_t actual_num_tokens =
+      static_cast<uint32_t>(tokens.size(/*dim=*/0));
+  CHECK_LE(actual_num_tokens, num_tokens_)
+      << "num_tokens mismatch: expected <= " << num_tokens_ << ", got "
+      << actual_num_tokens;
+  auto [k_cache, v_cache] = find_attention_plan_kv_cache(kv_cache);
+  persistent_param_.update(tokens,
+                           k_cache,
+                           v_cache,
+                           positions,
+                           params,
+                           num_tokens_,
+                           /*return_capture_params=*/false,
+                           /*skip_token_update=*/true);
+  replay_inputs_prepared_.store(true, std::memory_order_release);
+}
+
 AclGraphExecutorImpl::AclGraphExecutorImpl(CausalLM* model,
                                            const ModelArgs& args,
                                            const torch::Device& device,
@@ -355,8 +388,17 @@ AclGraphExecutorImpl::AclGraphExecutorImpl(CausalLM* model,
     : model_(model), args_(args), device_(device), options_(options) {
   const bool need_update_attn_mask = model->is_hybrid_linear_attention();
   const bool is_hybrid_linear_attn = model->is_hybrid_linear_attention();
-  persistent_param_ = std::make_unique<GraphPersistentParam>(
-      args_, device_, options_, need_update_attn_mask, is_hybrid_linear_attn);
+  graph_slot_count_ =
+      ::xllm::ExecutionConfig::get_instance().enable_graph_double_buffer() ? 2
+                                                                           : 1;
+  for (int32_t slot_idx = 0; slot_idx < graph_slot_count_; ++slot_idx) {
+    graph_slots_[slot_idx].persistent_param =
+        std::make_unique<GraphPersistentParam>(args_,
+                                               device_,
+                                               options_,
+                                               need_update_attn_mask,
+                                               is_hybrid_linear_attn);
+  }
 }
 
 ForwardInput AclGraphExecutorImpl::prepare_inputs(Batch& batch) {
@@ -491,16 +533,33 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   const uint64_t graph_key = get_graph_key(bucket_num_tokens, params_single);
 
   // Check if captured graph exists for this bucket num_tokens
-  auto it = graphs_.find(graph_key);
-  if (it != graphs_.end()) {
+  int32_t slot_idx = 0;
+  AclGraph* replay_graph = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(graph_slots_mutex_);
+    slot_idx = next_replay_slot_;
+    next_replay_slot_ = (next_replay_slot_ + 1) % graph_slot_count_;
+    last_started_replay_slot_ = slot_idx;
+    auto& slot = graph_slots_[slot_idx];
+    slot.is_prepared = false;
+    auto it = slot.graphs.find(graph_key);
+    if (it != slot.graphs.end()) {
+      replay_graph = it->second.get();
+    }
+  }
+  auto& active_slot = graph_slots_[slot_idx];
+  auto& active_persistent_param = *active_slot.persistent_param;
+
+  if (replay_graph != nullptr) {
     // Replay the existing graph
     VLOG(kGraphExecutorLogVerboseLevel)
         << "AclGraphExecutorImpl::run() in replay mode";
-    auto result = it->second->replay(
+    ModelOutput result = replay_graph->replay(
         model_, tokens_tensor, positions_tensor, kv_caches, params_single);
     // Handle aux_hidden_states based on options
     if (options_.enable_graph_aux_hidden_states()) {
-      auto aux_hidden_states = persistent_param_->aux_hidden_states(n_tokens);
+      torch::Tensor aux_hidden_states =
+          active_persistent_param.aux_hidden_states(n_tokens);
       if (aux_hidden_states.defined() && aux_hidden_states.numel() > 0) {
         return ModelOutput(
             result.hidden_states, torch::Tensor(), aux_hidden_states);
@@ -510,7 +569,8 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   }
 
   // Graph doesn't exist for this bucket num_tokens, try to create it lazily
-  auto graph = std::make_unique<AclGraph>(*persistent_param_, device_.index());
+  auto graph =
+      std::make_unique<AclGraph>(active_persistent_param, device_.index());
   VLOG(kGraphExecutorLogVerboseLevel)
       << "AclGraphExecutorImpl::run() in capture mode";
   bool capture_success = false;
@@ -536,13 +596,15 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
               << ") done";
 
     // Save the graph for future reuse
-    graphs_[graph_key] = std::move(graph);
+    active_slot.graphs[graph_key] = std::move(graph);
 
     // Return the output from capture (no need to replay since capture
     // already executed)
-    auto hidden_states = graphs_[graph_key]->get_hidden_states(n_tokens);
+    torch::Tensor hidden_states =
+        active_slot.graphs[graph_key]->get_hidden_states(n_tokens);
     if (options_.enable_graph_aux_hidden_states()) {
-      auto aux_hidden_states = persistent_param_->aux_hidden_states(n_tokens);
+      torch::Tensor aux_hidden_states =
+          active_persistent_param.aux_hidden_states(n_tokens);
       if (aux_hidden_states.defined() && aux_hidden_states.numel() > 0) {
         return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);
       }
@@ -555,6 +617,73 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
              << bucket_num_tokens;
   COUNTER_INC(num_model_execution_total_eager);
   return model_->forward(tokens, positions, kv_caches, params);
+}
+
+void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
+                                               const torch::Tensor& positions,
+                                               std::vector<KVCache>& kv_caches,
+                                               const ModelInputParams& params) {
+  const bool in_decoding_phase = params.meta.batch_forward_type.is_decode();
+  const bool in_spec_verify_phase =
+      params.is_spec_verify &&
+      params.meta.batch_forward_type.is_chunked_prefill();
+  if ((!in_decoding_phase && !in_spec_verify_phase) || args_.n_layers() == 1) {
+    return;
+  }
+  if (model_->requires_graph_forward_metadata()) {
+    return;
+  }
+  if (in_spec_verify_phase && !model_->is_hybrid_linear_attention()) {
+    return;
+  }
+  if (in_decoding_phase && params.parallel.dp_global_token_nums.size() > 1) {
+    if (params.parallel.dp_is_decode.size() !=
+        params.parallel.dp_global_token_nums.size()) {
+      return;
+    }
+    if (std::find(params.parallel.dp_is_decode.begin(),
+                  params.parallel.dp_is_decode.end(),
+                  0) != params.parallel.dp_is_decode.end()) {
+      return;
+    }
+  }
+  if (params.meta.kv_max_seq_len > args_.max_position_embeddings()) {
+    return;
+  }
+  if (graph_slot_count_ <= 1) {
+    return;
+  }
+
+  uint32_t graph_num_tokens = tokens.size(/*dim=*/0);
+  if (params.parallel.dp_global_token_nums.size() > 1) {
+    graph_num_tokens = util::max(params.parallel.dp_global_token_nums);
+  }
+  if (graph_num_tokens == 0) {
+    return;
+  }
+  const uint32_t bucket_num_tokens = get_bucket_num_tokens(graph_num_tokens);
+  const uint64_t graph_key = get_graph_key(bucket_num_tokens, params);
+
+  AclGraph* graph = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(graph_slots_mutex_);
+    if (last_started_replay_slot_ < 0) {
+      return;
+    }
+    const int32_t prepare_slot =
+        (last_started_replay_slot_ + 1) % graph_slot_count_;
+    auto& slot = graph_slots_[prepare_slot];
+    if (slot.is_prepared) {
+      return;
+    }
+    auto it = slot.graphs.find(graph_key);
+    if (it == slot.graphs.end()) {
+      return;
+    }
+    graph = it->second.get();
+    slot.is_prepared = true;
+  }
+  graph->prepare_replay_inputs(tokens, positions, kv_caches, params);
 }
 
 void AclGraph::print_graph_tensors() const {

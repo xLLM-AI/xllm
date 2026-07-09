@@ -190,6 +190,7 @@ void SamplingParameters::concat(const SamplingParameters& param) {
   this->do_sample = safe_concat(this->do_sample, param.do_sample, 0);
   this->acc_logprob = safe_concat(this->acc_logprob, param.acc_logprob, 0);
   this->logprobs = this->logprobs || param.logprobs;
+  this->return_probs = this->return_probs || param.return_probs;
   this->is_embeddings = this->is_embeddings || param.is_embeddings;
   this->use_beam_search = this->use_beam_search || param.use_beam_search;
   this->max_top_logprobs =

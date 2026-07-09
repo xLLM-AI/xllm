@@ -32,6 +32,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/request/request_state.h"
@@ -960,11 +961,17 @@ void ProfileManager::warmup_unified_for_graph() {
 void ProfileManager::warmup_decode_for_graph() {
   auto& model_args = engine_->model_args();
   int32_t max_context_len = model_args.max_position_embeddings();
-  int32_t max_seqs_per_batch = options_.max_seqs_per_batch();
+  int32_t max_decode_batch_size = options_.max_seqs_per_batch();
+  const int32_t max_concurrent_requests =
+      ::xllm::ServiceConfig::get_instance().max_concurrent_requests();
+  if (max_concurrent_requests > 0) {
+    max_decode_batch_size =
+        std::min(max_decode_batch_size, max_concurrent_requests);
+  }
   int32_t decode_seq_len = std::min(16, max_context_len);
 
   std::vector<int32_t> decode_batch_sizes =
-      graph_decode_buckets(max_seqs_per_batch, options_.dp_size());
+      graph_decode_buckets(max_decode_batch_size, options_.dp_size());
   const int32_t decode_bucket_count =
       static_cast<int32_t>(decode_batch_sizes.size());
 

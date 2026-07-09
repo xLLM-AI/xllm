@@ -217,6 +217,13 @@ class WorkerImpl {
   // hierarchy temporarily disabled during the block-manager refactor
   // void init_hierarchy_kv_cache_transfer();
 
+  bool can_prepare_npu_graph_decode_input(
+      const ModelInputParams& input_params) const;
+  bool can_prepare_without_compute_stream_wait(
+      const ModelInputParams& input_params) const;
+  bool can_skip_npu_graph_decode_sync(
+      const ModelInputParams& input_params) const;
+
   bool allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
                                  bool use_huge_page_allocator = false,
                                  bool enable_raw_device_allocator = false);

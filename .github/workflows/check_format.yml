@@ -23,7 +23,7 @@ on:
 
 jobs:
   format-check:
-    runs-on: [self-hosted]
+    runs-on: [xllm-cpu-only-cicd]
     steps:
       - name: Install clang-format
         run: |
@@ -101,4 +101,3 @@ jobs:
           printf "\n\033[1mSuggested changes:\n\n"
           echo "$diff"
           exit 1
-

@@ -129,6 +129,10 @@ struct Options {
   // Default set as 1
   PROPERTY(int32_t, cfg_size) = 1;
 
+  // vae patch parallelism size
+  // Default set as 1
+  PROPERTY(int32_t, vae_size) = 1;
+
   // enable enable_schedule_overlap to improve runtime execution efficiency.
   PROPERTY(bool, enable_schedule_overlap) = true;
 

@@ -107,12 +107,9 @@ class BlockManagerPool : public KVCacheManager {
   int32_t get_dp_rank(Sequence* sequence) const;
 
   bool process_beam_search(Sequence* sequence, bool need_swap = false);
-  bool allocate_single_block(Sequence* sequence, int32_t dp_rank);
-  void deallocate_single_block(Sequence* sequence, int32_t dp_rank);
 
  private:
   std::vector<std::vector<BlockTransferInfo>> swap_block_transfer_infos_;
-  std::vector<std::unique_ptr<SingleBlockManager>> single_block_managers_;
 
  protected:
   // the options for the block manager

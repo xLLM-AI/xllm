@@ -106,11 +106,10 @@ std::optional<ForwardOutput> SpeculativeWorkerImpl::step(
     return step_empty(input);
   }
 
-  if (!input.input_params.meta.batch_forward_type.is_decode()) {
-    return step_prefill(input);
-  } else {
+  if (input.input_params.meta.batch_forward_type.is_decode()) {
     return step_decode(input);
   }
+  return step_prefill(input);
 }
 
 ForwardInput SpeculativeWorkerImpl::update_input_by_last_step_output(

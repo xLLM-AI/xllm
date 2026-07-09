@@ -94,12 +94,10 @@ DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
       DeepseekV4Attention(
           model_args, quant_args, parallel_args, options, layer_id_));
 
-  FusedMoEArgs moe_args;
-  moe_args.is_gated = true;
-  moe_args.use_hash = use_hash_;
-  moe_mlp_ = register_module(
+  sparse_moe_ = register_module(
       "mlp",
-      FusedMoE(model_args, moe_args, quant_args, parallel_args, options));
+      DeepseekV4SparseMoEBlock(
+          model_args, quant_args, parallel_args, options, use_hash_));
 }
 
 void DeepseekV4DecoderLayerImpl::set_cache_mapping(
@@ -127,13 +125,17 @@ void DeepseekV4DecoderLayerImpl::load_state_dict(const StateDict& state_dict) {
 
   StateDict moe_state = get_alias_dict(state_dict, {"mlp.", "ffn."});
   if (moe_state.size() > 0) {
-    moe_mlp_->load_state_dict(moe_state);
+    sparse_moe_->load_state_dict(moe_state);
   }
 
   attn_hc_pre_->load_state_dict(
       get_hc_state(state_dict, "attn_hc_pre.", "hc_attn_"));
   ffn_hc_pre_->load_state_dict(
       get_hc_state(state_dict, "ffn_hc_pre.", "hc_ffn_"));
+}
+
+void DeepseekV4DecoderLayerImpl::verify_loaded_weights() const {
+  sparse_moe_->verify_loaded_weights();
 }
 
 std::optional<torch::Tensor> DeepseekV4DecoderLayerImpl::route_input_ids(
@@ -171,7 +173,6 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
     const ModelInputParams& input_params,
     const std::optional<torch::Tensor>& input_ids) {
   (void)positions;
-  (void)input_params;
 
   residual = std::nullopt;
 
@@ -190,11 +191,9 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
   torch::Tensor ffn_input = ffn_hc.output;
   ffn_input = std::get<0>(ffn_norm_->forward(ffn_input));
   std::optional<torch::Tensor> ids = route_input_ids(ffn_input, input_ids);
-  torch::Tensor ffn_output =
-      moe_mlp_->forward_experts(ffn_input,
-                                /*enable_all2all_communication=*/false,
-                                /*route_info=*/std::nullopt,
-                                ids);
+  FusedMoEImpl::RouteInfo route_info = sparse_moe_->prep_route(ffn_input, ids);
+  torch::Tensor ffn_output = sparse_moe_->forward_selected(
+      ffn_input, route_info.reduce_weight, route_info.expert_id, input_params);
   std::tie(x, std::ignore) =
       hc_post_->forward(ffn_output, residual_ffn, ffn_hc.post, ffn_hc.comb);
   return x;

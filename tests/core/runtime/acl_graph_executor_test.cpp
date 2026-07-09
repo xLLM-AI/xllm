@@ -26,6 +26,7 @@ limitations under the License.
 #include "core/framework/batch/batch.h"
 #include "core/framework/block/block.h"
 #include "core/framework/block/block_manager_impl.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
@@ -746,6 +747,27 @@ TEST_F(AclGraphExecutorTest, BatchInputCarriesLinearStateIds) {
   ASSERT_EQ(forward_input.input_params.embedding.embedding_ids.size(), 1);
   EXPECT_EQ(forward_input.input_params.embedding.embedding_ids[0],
             expected_linear_state_id);
+}
+
+TEST_F(AclGraphExecutorTest, GraphDoubleBufferFlagControlsSlotCount) {
+  ExecutionConfig& execution_config = ExecutionConfig::get_instance();
+  const bool original_enable_graph_double_buffer =
+      execution_config.enable_graph_double_buffer();
+
+  execution_config.enable_graph_double_buffer(true);
+  std::unique_ptr<::xllm::npu::AclGraphExecutorImpl> double_buffer_executor =
+      std::make_unique<::xllm::npu::AclGraphExecutorImpl>(
+          model_.get(), model_args_, *device_, options_);
+  EXPECT_EQ(double_buffer_executor->graph_slot_count_for_test(), 2);
+
+  execution_config.enable_graph_double_buffer(false);
+  std::unique_ptr<::xllm::npu::AclGraphExecutorImpl> single_buffer_executor =
+      std::make_unique<::xllm::npu::AclGraphExecutorImpl>(
+          model_.get(), model_args_, *device_, options_);
+  EXPECT_EQ(single_buffer_executor->graph_slot_count_for_test(), 1);
+
+  execution_config.enable_graph_double_buffer(
+      original_enable_graph_double_buffer);
 }
 
 TEST(AclGraphExecutorHybridTest, KvCacheSupportsLinearOnlyLayers) {

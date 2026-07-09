@@ -94,6 +94,7 @@ struct ParallelArgs {
                int32_t tp_size,
                int32_t sp_size,
                int32_t cfg_size,
+               int32_t vae_size,
                ProcessGroup* process_group)
       : rank_(rank),
         world_size_(world_size),
@@ -101,7 +102,30 @@ struct ParallelArgs {
         tp_size_(tp_size),
         sp_size_(sp_size),
         cfg_size_(cfg_size),
+        vae_size_(vae_size),
         process_group_(process_group) {}
+
+  int32_t get_group_size_by_type(const std::string& group_type) const {
+    if (group_type == "tp") {
+      return tp_size();
+    } else if (group_type == "sp") {
+      return sp_size();
+    } else if (group_type == "cfg") {
+      return cfg_size();
+    } else if (group_type == "dp") {
+      return dp_size();
+    } else if (group_type == "ep") {
+      return ep_size();
+    } else if (group_type == "vae") {
+      return vae_size();
+    } else if (group_type == "cp") {
+      return cp_size();
+    } else {
+      LOG(FATAL) << "get unexpected group_type: " << group_type;
+      return 1;
+    }
+    return 1;
+  }
 
   // rank of current process
   PROPERTY(int32_t, rank) = 0;
@@ -161,6 +185,9 @@ struct ParallelArgs {
   // cfg size
   PROPERTY(int32_t, cfg_size) = 1;
 
+  // cfg size
+  PROPERTY(int32_t, vae_size) = 1;
+
   // atb hccl mapping json data
   PROPERTY(nlohmann::json, mapping_data);
 
@@ -195,6 +222,7 @@ struct ParallelArgs {
   ProcessGroup* dit_sp_group_ = nullptr;
   ProcessGroup* dit_cfg_group_ = nullptr;
   ProcessGroup* dit_dp_group_ = nullptr;
+  ProcessGroup* dit_vae_group_ = nullptr;
 };
 
 }  // namespace xllm

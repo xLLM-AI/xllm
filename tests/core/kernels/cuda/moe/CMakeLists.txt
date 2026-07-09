@@ -7,5 +7,6 @@ cc_test(
     moe_topk_test.cu
   DEPS
     :cuda_kernels
+    :config
     GTest::gtest_main
 )

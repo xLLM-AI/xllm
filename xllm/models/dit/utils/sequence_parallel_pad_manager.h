@@ -24,13 +24,13 @@ namespace xllm::dit {
 
 class SequenceParallelPadManager {
  public:
-  static SequenceParallelPadManager& getInstance() {
+  static SequenceParallelPadManager& get_instance() {
     static SequenceParallelPadManager instance;
     return instance;
   }
 
   torch::Tensor pad_tensor(const torch::Tensor& ref_tensor,
-                           const string& tensor_name,
+                           const std::string& tensor_name,
                            int64_t dim = -1,
                            bool right_pad = true) {
     auto pad_dim = dim;
@@ -60,7 +60,7 @@ class SequenceParallelPadManager {
   }
 
   void unpad_tensor(torch::Tensor& ref_tensor,
-                    const string& tensor_name,
+                    const std::string& tensor_name,
                     int64_t dim = -1,
                     bool right_pad = true) {
     if (ref_tensor.defined()) {

@@ -329,6 +329,15 @@ torch::Tensor run_causal_conv1d_graph_update(
     xllm::npu::CausalConv1dGraphBranch branch) {
   CHECK(graph_context != nullptr && graph_context->capturing)
       << "causal_conv1d graph update can only be registered during capture";
+
+  c10_npu::NPUStream stream = c10_npu::getCurrentNPUStream();
+  auto event = std::make_shared<c10_npu::NPUEvent>(ACL_EVENT_EXTERNAL);
+  event->block(stream);
+  event->reset(stream);
+
+  torch::Tensor output;
+  c10_npu::graph_task_group_begin(stream);
+  const std::vector<int64_t> empty_host_args;
   CHECK(!query_start_loc.empty())
       << "query_start_loc must be populated for causal_conv1d graph update";
   CHECK_EQ(query_start_loc.back(), x.size(0))
@@ -340,14 +349,7 @@ torch::Tensor run_causal_conv1d_graph_update(
         << "num_accepted_tokens must be sequence-scoped for spec verify";
   }
 
-  const std::vector<int64_t> empty_host_args;
-  torch::Tensor output = torch::empty_like(x);
-  c10_npu::NPUStream stream = c10_npu::getCurrentNPUStream();
-  auto event = std::make_shared<c10_npu::NPUEvent>(ACL_EVENT_EXTERNAL);
-  event->block(stream);
-  event->reset(stream);
-
-  c10_npu::graph_task_group_begin(stream);
+  output = torch::empty_like(x);
   xllm::kernel::causal_conv1d_out(output,
                                   x,
                                   weight,
@@ -491,7 +493,10 @@ void Qwen3GatedDeltaNetBaseImpl::load_common_state_dict(
 
   if (auto w = state_dict.get_tensor("conv1d.weight"); w.defined()) {
     conv1d_->load_state_dict(
-        StateDict({{"weight", w.squeeze(1)}}), shard_tensor_count, shard_sizes);
+        StateDict({{"weight", w.squeeze(1)}},
+                  static_cast<std::string>(state_dict.prefix()) + "conv1d."),
+        shard_tensor_count,
+        shard_sizes);
     conv1d_->weight().set_(conv1d_->weight().transpose(0, 1).contiguous());
   }
   o_proj_->load_state_dict(state_dict.get_dict_with_prefix("out_proj."));
@@ -607,35 +612,70 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
         input_params.embedding.linear_state_ids.begin(),
         input_params.embedding.linear_state_ids.end());
     if (register_conv1d_graph_update) {
-      const auto conv1d_branch =
-          use_spec_verify ? xllm::npu::CausalConv1dGraphBranch::kSpecVerify
-                          : xllm::npu::CausalConv1dGraphBranch::kDecode;
-      mixed_qkv =
-          run_causal_conv1d_graph_update(graph_context,
-                                         conv_input,
-                                         conv_weight,
-                                         conv_cache,
-                                         std::optional<torch::Tensor>(),
-                                         input_params.parallel.query_start_loc,
-                                         linear_state_indices_host,
-                                         num_accepted,
-                                         conv1d_branch);
+      if (use_spec_verify) {
+        const auto conv1d_branch =
+            xllm::npu::CausalConv1dGraphBranch::kSpecVerify;
+        mixed_qkv = run_causal_conv1d_graph_update(
+            graph_context,
+            conv_input,
+            conv_weight,
+            conv_cache,
+            std::optional<torch::Tensor>(),
+            input_params.parallel.query_start_loc,
+            linear_state_indices_host,
+            num_accepted,
+            conv1d_branch);
+      } else {
+        auto conv_input_2d = conv_input.dim() == 3
+                                 ? conv_input.reshape({-1, conv_input.size(-1)})
+                                 : conv_input;
+        xllm::kernel::CausalConv1dUpdateParams conv1d_params;
+        conv1d_params.x = conv_input_2d;
+        conv1d_params.conv_state = conv_cache;
+        conv1d_params.weight = conv_weight;
+        conv1d_params.conv_state_indices = logical_state_indices;
+        conv1d_params.query_start_loc = attn_metadata.q_cu_seq_lens;
+        conv1d_params.max_query_len = attn_metadata.max_query_len;
+        mixed_qkv = xllm::kernel::causal_conv1d_update(conv1d_params);
+        if (conv_input.dim() == 3) {
+          mixed_qkv =
+              mixed_qkv.view({conv_input.size(0), -1, mixed_qkv.size(-1)});
+        }
+      }
     } else {
-      torch::Tensor output = torch::empty_like(conv_input);
-      xllm::kernel::causal_conv1d_out(
-          output,
-          conv_input,
-          conv_weight,
-          conv_cache,
-          std::optional<torch::Tensor>(),
-          torch::IntArrayRef(input_params.parallel.query_start_loc),
-          torch::IntArrayRef(linear_state_indices_host),
-          torch::IntArrayRef(std::vector<int64_t>()),
-          torch::IntArrayRef(num_accepted),
-          xllm::npu::kCausalConv1dActivationSilu,
-          xllm::npu::kCausalConv1dGraphPadSlotId,
-          xllm::npu::kCausalConv1dRunModeUpdate);
-      mixed_qkv = output;
+      if (use_spec_verify) {
+        torch::Tensor output = torch::empty_like(conv_input);
+        xllm::kernel::causal_conv1d_out(
+            output,
+            conv_input,
+            conv_weight,
+            conv_cache,
+            std::optional<torch::Tensor>(),
+            torch::IntArrayRef(input_params.parallel.query_start_loc),
+            torch::IntArrayRef(linear_state_indices_host),
+            torch::IntArrayRef(std::vector<int64_t>()),
+            torch::IntArrayRef(num_accepted),
+            xllm::npu::kCausalConv1dActivationSilu,
+            xllm::npu::kCausalConv1dGraphPadSlotId,
+            xllm::npu::kCausalConv1dRunModeUpdate);
+        mixed_qkv = output;
+      } else {
+        auto conv_input_2d = conv_input.dim() == 3
+                                 ? conv_input.reshape({-1, conv_input.size(-1)})
+                                 : conv_input;
+        xllm::kernel::CausalConv1dUpdateParams conv1d_params;
+        conv1d_params.x = conv_input_2d;
+        conv1d_params.conv_state = conv_cache;
+        conv1d_params.weight = conv_weight;
+        conv1d_params.conv_state_indices = logical_state_indices;
+        conv1d_params.query_start_loc = attn_metadata.q_cu_seq_lens;
+        conv1d_params.max_query_len = attn_metadata.max_query_len;
+        mixed_qkv = xllm::kernel::causal_conv1d_update(conv1d_params);
+        if (conv_input.dim() == 3) {
+          mixed_qkv =
+              mixed_qkv.view({conv_input.size(0), -1, mixed_qkv.size(-1)});
+        }
+      }
     }
     mixed_qkv = reshape_qkvz_with_pad(attn_metadata, mixed_qkv);
     mixed_qkv = mixed_qkv.transpose(1, 2);
@@ -744,12 +784,12 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     torch::Tensor packed_g_tensor = torch::cat(packed_g, 0).unsqueeze(0);
     torch::Tensor packed_beta_tensor = torch::cat(packed_beta, 0).unsqueeze(0);
 
-    xllm::kernel::ChunkGatedDeltaRuleParams chunk_gated_delta_params;
-    chunk_gated_delta_params.q = packed_processed_q;
-    chunk_gated_delta_params.k = packed_processed_k;
-    chunk_gated_delta_params.v = packed_processed_v;
-    chunk_gated_delta_params.g = packed_g_tensor;
-    chunk_gated_delta_params.beta = packed_beta_tensor;
+    xllm::kernel::MegaChunkGdnParams mega_chunk_gdn_params;
+    mega_chunk_gdn_params.q = packed_processed_q;
+    mega_chunk_gdn_params.k = packed_processed_k;
+    mega_chunk_gdn_params.v = packed_processed_v;
+    mega_chunk_gdn_params.g = packed_g_tensor;
+    mega_chunk_gdn_params.beta = packed_beta_tensor;
     // Get initial state from ssm_cache for sequences with previous state
     // Shape: [batch_size, num_heads, head_k_dim, head_v_dim]
     torch::Tensor initial_state_tensor =
@@ -767,14 +807,13 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
       initial_state_tensor =
           initial_state_tensor.transpose(-1, -2).contiguous();
     }
-    chunk_gated_delta_params.initial_state = initial_state_tensor;
-    chunk_gated_delta_params.output_final_state = true;
-    chunk_gated_delta_params.cu_seqlens = attn_metadata.q_cu_seq_lens;
-    chunk_gated_delta_params.head_first = false;
-    chunk_gated_delta_params.use_qk_l2norm_in_kernel = true;
+    mega_chunk_gdn_params.initial_state = initial_state_tensor;
+    mega_chunk_gdn_params.output_final_state = true;
+    mega_chunk_gdn_params.cu_seqlens = attn_metadata.q_cu_seq_lens;
+    mega_chunk_gdn_params.use_qk_l2norm_in_kernel = true;
     torch::Tensor packed_core_attn_out;
     std::tie(packed_core_attn_out, last_recurrent_state) =
-        xllm::kernel::chunk_gated_delta_rule(chunk_gated_delta_params);
+        xllm::kernel::mega_chunk_gdn(mega_chunk_gdn_params);
     core_attn_out = torch::zeros_like(processed_v);
     int64_t packed_offset = 0;
     for (int64_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {

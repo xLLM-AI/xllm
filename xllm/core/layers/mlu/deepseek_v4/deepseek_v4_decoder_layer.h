@@ -27,8 +27,8 @@ limitations under the License.
 #include "layers/common/attention_metadata.h"
 #include "layers/common/rms_norm.h"
 #include "layers/mlu/deepseek_v4/deepseek_v4_attention.h"
+#include "layers/mlu/deepseek_v4/deepseek_v4_sparse_moe_block.h"
 #include "layers/mlu/deepseek_v4/hyper_connection.h"
-#include "layers/mlu/fused_moe.h"
 
 namespace xllm {
 namespace layer {
@@ -38,6 +38,7 @@ class DeepseekV4DecoderLayerImpl final : public torch::nn::Module {
   DeepseekV4DecoderLayerImpl(const ModelContext& context, int32_t layer_id);
 
   void load_state_dict(const StateDict& state_dict);
+  void verify_loaded_weights() const;
 
   void set_cache_mapping(const DSACacheMapping& mapping);
 
@@ -64,7 +65,7 @@ class DeepseekV4DecoderLayerImpl final : public torch::nn::Module {
   RMSNorm attn_norm_{nullptr};
   RMSNorm ffn_norm_{nullptr};
   DeepseekV4Attention attention_{nullptr};
-  FusedMoE moe_mlp_{nullptr};
+  DeepseekV4SparseMoEBlock sparse_moe_{nullptr};
 };
 
 TORCH_MODULE(DeepseekV4DecoderLayer);

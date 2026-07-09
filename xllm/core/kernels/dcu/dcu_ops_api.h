@@ -79,6 +79,26 @@ torch::Tensor rejection_sample(const torch::Tensor& draft_token_ids,
                                const torch::Tensor& uniform_probs,
                                int64_t max_spec_len);
 
+std::tuple<torch::Tensor, torch::Tensor> moe_grouped_topk(
+    torch::Tensor& gating_output,
+    int64_t topk,
+    int64_t num_expert_group,
+    int64_t topk_group,
+    bool renormalize,
+    const std::optional<torch::Tensor>& correction_bias,
+    const std::string& scoring_func,
+    double routed_scaling_factor);
+
+std::tuple<torch::Tensor, torch::Tensor> moe_active_topk(
+    torch::Tensor& gating_output,
+    int64_t topk,
+    int64_t num_expert_group,
+    int64_t topk_group,
+    bool renormalize,
+    const std::optional<torch::Tensor>& correction_bias,
+    const std::string& scoring_func,
+    double routed_scaling_factor);
+
 // DCU W8A8 dynamic activation quantization.
 // Current DCU implementation supports only no-smooth per-token INT8
 // quantization and returns one fp32 scale per token row.

@@ -79,7 +79,7 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
       CHECK(parallel_args_.ep_size() == parallel_args_.world_size())
           << "Models with shared experts only support ep_size equal to "
              "world size for now.";
-      shared_expert_pg = parallel_args.moe_tp_group_;
+      shared_expert_pg = parallel_args.tp_group_;
     } else {
       shared_expert_pg = parallel_args.process_group_;
     }

@@ -15,9 +15,11 @@ cc_library(
     model_registry.h
     models.h
     dit/utils/lanczos_resample.h
+    $<$<BOOL:${USE_NPU}>:dit/utils/dit_block_weight_manager.h>
   SRCS
     model_registry.cpp
     dit/utils/lanczos_resample.cpp
+    $<$<BOOL:${USE_NPU}>:dit/utils/dit_block_weight_manager.cpp>
     vlm/utils/multimodal_utils.cpp
   DEPS
     :model

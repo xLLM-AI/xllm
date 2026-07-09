@@ -244,6 +244,9 @@ torch::Tensor build_split_qkv_rmsnorm_mrope_gather_pattern(
 std::pair<torch::Tensor, torch::Tensor> chunk_gated_delta_rule(
     ChunkGatedDeltaRuleParams& params);
 
+std::pair<torch::Tensor, torch::Tensor> mega_chunk_gdn(
+    MegaChunkGdnParams& params);
+
 torch::Tensor recurrent_gated_delta_rule(
     const torch::Tensor& query,
     const torch::Tensor& key,

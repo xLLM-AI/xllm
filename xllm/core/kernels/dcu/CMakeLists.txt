@@ -51,6 +51,8 @@ set(DCU_LOCAL_HIP_SOURCES
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/piecewise_graphs.cpp
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/global_capture_instance.cpp
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/group_gemm.cpp
+  ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/flash_mla_adapter.cpp
+  ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/topk_gate.cpp
 )
 
 hipify_sources_target(
@@ -67,6 +69,23 @@ set(DCU_SOURCE_FILES
   ${DCU_LOCAL_HIP_SOURCES}
 )
 
+if(NOT DEFINED FLASH_MLA_LIB OR NOT EXISTS "${FLASH_MLA_LIB}")
+  message(FATAL_ERROR
+    "FLASH_MLA_LIB is required for DCU FlashMLA. Install flash_mla and set "
+    "FLASH_MLA_LIB before invoking setup.py.")
+endif()
+add_library(flash_mla SHARED IMPORTED)
+set_target_properties(flash_mla PROPERTIES IMPORTED_LOCATION "${FLASH_MLA_LIB}")
+
+if(NOT DEFINED AITER_CPP_API_LIB OR NOT EXISTS "${AITER_CPP_API_LIB}")
+  message(FATAL_ERROR
+    "AITER_CPP_API_LIB is required for DCU grouped topk. Install aiter and set "
+    "AITER_CPP_API_LIB before invoking setup.py.")
+endif()
+add_library(aiter_cpp_api SHARED IMPORTED)
+set_target_properties(aiter_cpp_api PROPERTIES
+  IMPORTED_LOCATION "${AITER_CPP_API_LIB}")
+
 cc_library(
   NAME
     dcu_kernels
@@ -80,9 +99,16 @@ cc_library(
     torch
     glog::glog
     :platform
+    aiter_cpp_api
+    flash_mla
 )
 
 add_dependencies(dcu_kernels ${DCU_HIPIFY_TARGET})
+
+get_filename_component(FLASH_MLA_LIB_DIR "${FLASH_MLA_LIB}" DIRECTORY)
+get_filename_component(AITER_CPP_API_LIB_DIR "${AITER_CPP_API_LIB}" DIRECTORY)
+set_property(TARGET dcu_kernels APPEND PROPERTY BUILD_RPATH "${FLASH_MLA_LIB_DIR}")
+set_property(TARGET dcu_kernels APPEND PROPERTY BUILD_RPATH "${AITER_CPP_API_LIB_DIR}")
 
 target_include_directories(dcu_kernels
   PUBLIC
@@ -90,6 +116,7 @@ target_include_directories(dcu_kernels
     ${CMAKE_CURRENT_BINARY_DIR}
   PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/..
+    ${AITER_CPP_API_LIB_DIR}/../../aiter_meta/csrc/include
 )
 
 target_compile_definitions(dcu_kernels PRIVATE
@@ -97,9 +124,8 @@ target_compile_definitions(dcu_kernels PRIVATE
 )
 
 # ---- CK Tile grouped_gemm: pre-compiled shared library ----
-# The CK template code (ck_tile) is compiled separately with aicc into
-# libck_grouped_gemm.so and installed at /opt/dtk/lib/.
-# Build script: /opt/dtk/ck_tile/build_ck_gg_so.sh
-# The bridge (group_gemm.cpp) uses forward declarations and links
-# against this shared library at runtime.
-target_link_libraries(dcu_kernels PRIVATE /opt/dtk/lib/libck_grouped_gemm.so)
+add_library(module_cpp_api SHARED IMPORTED)
+set_target_properties(module_cpp_api PROPERTIES
+    IMPORTED_LOCATION "${AITER_CPP_API_LIB_DIR}/module_cpp_api.so"
+)
+target_link_libraries(dcu_kernels PRIVATE module_cpp_api)

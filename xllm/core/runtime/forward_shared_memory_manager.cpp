@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/model_config.h"
 #include "platform/stream.h"
 #if defined(USE_CUDA)
 #include <cuda_runtime_api.h>
@@ -137,15 +138,6 @@ inline size_t get_tensor_size(const torch::Tensor& tensor) {
   size += type_size<int8_t>;                       // dtype
   size += type_size<uint64_t>;                     // databytes
   size += tensor.numel() * tensor.element_size();  // data
-  return size;
-}
-
-inline size_t get_vector_tensor_size(
-    const std::vector<torch::Tensor>& tensor_vec) {
-  size_t size = type_size<int32_t>;  // tensor_num
-  for (const auto& tensor : tensor_vec) {
-    size += get_tensor_size(tensor);
-  }
   return size;
 }
 
@@ -325,6 +317,15 @@ inline size_t get_mm_batch_data_size(const MMBatchData& mm_data) {
   return total;
 }
 
+inline size_t get_vector_tensor_size(
+    const std::vector<torch::Tensor>& tensor_vec) {
+  size_t size = type_size<int32_t>;  // vector size
+  for (const auto& tensor : tensor_vec) {
+    size += get_tensor_size(tensor);
+  }
+  return size;
+}
+
 // calculate dit input size
 inline size_t get_dit_generation_params_size(
     const DiTGenerationParams& params) {
@@ -365,6 +366,8 @@ inline size_t get_dit_forward_input_size(const DiTForwardInput& input) {
   size += get_tensor_size(input.negative_pooled_prompt_embeds);
   size += get_tensor_size(input.latents);
   size += get_tensor_size(input.last_images);
+  size += get_tensor_size(input.prompt_audio);
+  size += get_string_size(input.audio_prompt_text);
 
   // Generation params
   size += get_dit_generation_params_size(input.generation_params);
@@ -1043,6 +1046,8 @@ inline void write_dit_forward_input(char*& buffer,
   write_tensor(buffer, input.negative_pooled_prompt_embeds);
   write_tensor(buffer, input.latents);
   write_tensor(buffer, input.last_images);
+  write_tensor(buffer, input.prompt_audio);
+  write_string(buffer, input.audio_prompt_text);
 
   write_dit_generation_params(buffer, input.generation_params);
 }
@@ -1066,6 +1071,9 @@ inline void write_dit_forward_input(RawInputSerializeContext& context,
   write_tensor(context, input.negative_prompt_embeds);
   write_tensor(context, input.negative_pooled_prompt_embeds);
   write_tensor(context, input.latents);
+  write_tensor(context, input.last_images);
+  write_tensor(context, input.prompt_audio);
+  write_string(context.descriptor, input.audio_prompt_text);
 
   write_dit_generation_params(context, input.generation_params);
 }
@@ -1933,8 +1941,37 @@ inline void read_dit_generation_params(ReadContext& context,
   read_data(context, params.num_videos_per_prompt);
 }
 
+inline void clone_tensor_if_defined(torch::Tensor& tensor) {
+  if (tensor.defined()) {
+    tensor = tensor.clone();
+  }
+}
+
+inline void clone_vector_tensor_if_defined(
+    std::vector<torch::Tensor>& tensors) {
+  for (auto& tensor : tensors) {
+    clone_tensor_if_defined(tensor);
+  }
+}
+
+inline void stabilize_dit_forward_input_tensors(DiTForwardInput& input) {
+  clone_tensor_if_defined(input.images);
+  clone_vector_tensor_if_defined(input.images_list);
+  clone_tensor_if_defined(input.mask_images);
+  clone_tensor_if_defined(input.control_image);
+  clone_tensor_if_defined(input.masked_image_latents);
+  clone_tensor_if_defined(input.prompt_embeds);
+  clone_tensor_if_defined(input.pooled_prompt_embeds);
+  clone_tensor_if_defined(input.negative_prompt_embeds);
+  clone_tensor_if_defined(input.negative_pooled_prompt_embeds);
+  clone_tensor_if_defined(input.latents);
+  clone_tensor_if_defined(input.last_images);
+  clone_tensor_if_defined(input.prompt_audio);
+}
+
 inline void read_dit_forward_input(const char*& buffer,
-                                   DiTForwardInput& input) {
+                                   DiTForwardInput& input,
+                                   bool stabilize_host_tensors = false) {
   read_data(buffer, input.batch_size);
 
   read_string_vector(buffer, input.prompts);
@@ -1953,12 +1990,18 @@ inline void read_dit_forward_input(const char*& buffer,
   read_tensor(buffer, input.negative_pooled_prompt_embeds);
   read_tensor(buffer, input.latents);
   read_tensor(buffer, input.last_images);
+  read_tensor(buffer, input.prompt_audio);
+  read_string(buffer, input.audio_prompt_text);
 
   read_dit_generation_params(buffer, input.generation_params);
+  if (stabilize_host_tensors) {
+    stabilize_dit_forward_input_tensors(input);
+  }
 }
 
 inline void read_dit_forward_input(ReadContext& context,
-                                   DiTForwardInput& input) {
+                                   DiTForwardInput& input,
+                                   bool stabilize_host_tensors = false) {
   read_data(context, input.batch_size);
 
   read_string_vector(context, input.prompts);
@@ -2006,13 +2049,30 @@ inline void read_dit_forward_input(ReadContext& context,
               input.latents,
               /*stream=*/nullptr,
               /*force_host_materialize=*/true);
+  read_tensor(context,
+              input.last_images,
+              /*stream=*/nullptr,
+              /*force_host_materialize=*/true);
+  read_tensor(context,
+              input.prompt_audio,
+              /*stream=*/nullptr,
+              /*force_host_materialize=*/true);
+  read_string(context, input.audio_prompt_text);
 
   read_dit_generation_params(context, input.generation_params);
+  if (stabilize_host_tensors) {
+    stabilize_dit_forward_input_tensors(input);
+  }
 }
 
 inline void read_dit_forward_output(const char*& buffer,
                                     DiTForwardOutput& output) {
   read_vector_tensor(buffer, output.tensors);
+  for (auto& tensor : output.tensors) {
+    if (tensor.defined()) {
+      tensor = tensor.clone();
+    }
+  }
 }
 
 inline void initialize_device_buffer_session(ReadContext& context,
@@ -2112,7 +2172,8 @@ inline void deserialize_forward_input_payload(
     ForwardInput& forward_input,
     const torch::Device& device,
     Stream* stream,
-    bool materialize_device_buffer = true) {
+    bool materialize_device_buffer = true,
+    bool stabilize_dit_host_tensors = false) {
   const char* payload_base = buffer;
   RawInputLayoutHeader layout;
   read_data(buffer, layout.descriptor_bytes);
@@ -2267,7 +2328,12 @@ inline void deserialize_forward_input_payload(
     input_params.multi_block_tables.emplace_back(manager_table.clone());
   }
 
-  read_dit_forward_input(context, input_params.dit_forward_input);
+  bool has_dit_forward_input = false;
+  read_data(context, has_dit_forward_input);
+  if (has_dit_forward_input) {
+    read_dit_forward_input(
+        context, input_params.dit_forward_input, stabilize_dit_host_tensors);
+  }
 
   finalize_device_buffer_session(device_session, stream);
   forward_input.input_host_buffer_has_layout = true;
@@ -2343,8 +2409,14 @@ size_t calculate_raw_forward_output_size(const RawForwardOutput& output) {
   size += get_vector_size(output.out_tokens);
   size += get_vector_size(output.out_logprobs);
   size += type_size<int32_t>;  // prepared_layer_id
-  // dit output data
-  size += get_dit_forward_output_size(output.dit_forward_output);
+  // mm_embedding_data
+  size += get_vector_tensor_size(output.mm_embeddings);
+  const bool has_dit_forward_output =
+      !output.dit_forward_output.tensors.empty();
+  size += type_size<bool>;
+  if (has_dit_forward_output) {
+    size += get_dit_forward_output_size(output.dit_forward_output);
+  }
 
   return size;
 }
@@ -2406,12 +2478,19 @@ void deserialize_raw_forward_output(const char* buffer,
   }
 
   read_vector(buffer, output.expert_load_data);
+  read_vector(buffer, output.src_seq_idxes);
+  read_vector(buffer, output.out_tokens);
+  read_vector(buffer, output.out_logprobs);
 
   read_data(buffer, output.prepared_layer_id);
 
   read_vector_tensor(buffer, output.mm_embeddings);
-  // read dit output
-  read_dit_forward_output(buffer, output.dit_forward_output);
+
+  bool has_dit_forward_output = false;
+  read_data(buffer, has_dit_forward_output);
+  if (has_dit_forward_output) {
+    read_dit_forward_output(buffer, output.dit_forward_output);
+  }
 }
 
 void serialize_raw_forward_output(const RawForwardOutput& output,
@@ -2422,12 +2501,19 @@ void serialize_raw_forward_output(const RawForwardOutput& output,
   }
 
   write_vector(buffer, output.expert_load_data);
+  write_vector(buffer, output.src_seq_idxes);
+  write_vector(buffer, output.out_tokens);
+  write_vector(buffer, output.out_logprobs);
 
   write_data(buffer, output.prepared_layer_id);
 
   write_vector_tensor(buffer, output.mm_embeddings);
-  // write dit output
-  write_dit_forward_output(buffer, output.dit_forward_output);
+  const bool has_dit_forward_output =
+      !output.dit_forward_output.tensors.empty();
+  write_data(buffer, has_dit_forward_output);
+  if (has_dit_forward_output) {
+    write_dit_forward_output(buffer, output.dit_forward_output);
+  }
 }
 
 template <typename T>
@@ -2583,7 +2669,11 @@ inline void serialize_forward_input_sections(
     write_tensor(context, manager_table);
   }
 
-  write_dit_forward_input(context, input_params.dit_forward_input);
+  const bool has_dit_forward_input = input_params.dit_forward_input.valid();
+  write_data(context.descriptor, has_dit_forward_input);
+  if (has_dit_forward_input) {
+    write_dit_forward_input(context, input_params.dit_forward_input);
+  }
 }
 
 inline RawInputLayoutHeader calculate_forward_input_layout(
@@ -2947,7 +3037,8 @@ void ForwardSharedMemoryManager::input_read(ForwardInput& input,
                                     input,
                                     device,
                                     stream_.get(),
-                                    materialize_device_buffer);
+                                    materialize_device_buffer,
+                                    /*stabilize_dit_host_tensors=*/true);
 
   return;
 }
@@ -2989,7 +3080,6 @@ bool ForwardSharedMemoryManager::raw_output_write(
 
   char* data_ptr = static_cast<char*>(base_address()) + sizeof(ControlMetadata);
   serialize_raw_forward_output(output, data_ptr);
-  char* test = static_cast<char*>(base_address()) + sizeof(ControlMetadata);
   std::atomic_thread_fence(std::memory_order_release);
   control_ptr_->version = ++last_version_;
   return true;
@@ -3007,7 +3097,6 @@ void ForwardSharedMemoryManager::raw_output_read(RawForwardOutput& output) {
 
   const char* data_ptr =
       static_cast<char*>(base_address()) + sizeof(ControlMetadata);
-  char* test = static_cast<char*>(base_address()) + sizeof(ControlMetadata);
   deserialize_raw_forward_output(data_ptr, output);
 
   return;

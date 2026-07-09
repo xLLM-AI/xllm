@@ -34,6 +34,13 @@ class BlockManagerImpl : public BlockManager {
 
   void deallocate(const Slice<Block>& blocks) override;
 
+  // Flat incremental growth: allocate ceil(num_tokens/block_size) - held blocks
+  // and return them (does not insert into the sequence). The shared default for
+  // flat-KV / compressed / xtensor leaves; SlidingWindow and Single override.
+  std::optional<std::vector<Block>> allocate_for_sequence(
+      Sequence* seq,
+      size_t num_tokens) override;
+
   // allocate shared blocks when enable prefix cache
   std::vector<Block> allocate_shared(
       const Slice<int32_t>& token_ids,

@@ -30,7 +30,6 @@ limitations under the License.
 #elif defined(USE_MUSA)
 #include "musa_process_group.h"
 #endif
-#include "common/global_flags.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/parallel_config.h"
@@ -162,12 +161,15 @@ DispatchAndCombineComm create_dispatch_and_combine_comm(int32_t global_rank,
       .sp_size(1)
       .cp_size(normalized_cp_size);
 
-  MappingNPU mapping_npu(
-      FLAGS_rank_tablefile, world_size, global_rank, mapping_options);
+  MappingNPU mapping_npu(EPLBConfig::get_instance().rank_tablefile(),
+                         world_size,
+                         global_rank,
+                         mapping_options);
   DispatchAndCombineComm result;
   result.mapping_data = mapping_npu.to_json();
   result.mapping.ParseParam(result.mapping_data);
-  result.mapping.InitGlobalCommDomain(FLAGS_communication_backend);
+  result.mapping.InitGlobalCommDomain(
+      ParallelConfig::get_instance().communication_backend());
 
   auto moe_ep_parallel_info = result.mapping.Get(atb_speed::base::MOE_EP);
   const bool moe_ep_is_world =
@@ -180,7 +182,7 @@ DispatchAndCombineComm create_dispatch_and_combine_comm(int32_t global_rank,
           moe_ep_parallel_info.groupId,
           moe_ep_parallel_info.rankIds,
           moe_ep_parallel_info.rank,
-          FLAGS_communication_backend,
+          ParallelConfig::get_instance().communication_backend(),
           comm_buffer_size,
           0,
           reuse_comm_domain);
@@ -440,7 +442,8 @@ void CollectiveCommunicator::create_process_groups(
 
 #if defined(USE_NPU)
   if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&
-      FLAGS_expert_parallel_degree == 2 && ep_size == world_size) {
+      ::xllm::EPLBConfig::get_instance().expert_parallel_degree() == 2 &&
+      ep_size == world_size) {
     auto dispatch_and_combine_comm = create_dispatch_and_combine_comm(
         global_rank, world_size, dp_size, ep_size, cp_size);
     parallel_args_->mapping_data(dispatch_and_combine_comm.mapping_data);

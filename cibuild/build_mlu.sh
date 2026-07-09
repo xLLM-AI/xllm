@@ -17,14 +17,22 @@ RUN_OPTS=(
   --pid=host
   --shm-size '128gb'
   -v /export/home:/export/home
-  -v /usr/bin/cnmon:/usr/bin/cnmon
   -v /export/home/mlu_vcpkg_cache:/root/.cache/vcpkg # cached vcpkg installed dir
   -w /export/home
 )
+
+if [[ -d /data/export-home ]]; then
+  RUN_OPTS+=(-v /data/export-home:/data/export-home)
+fi
+
+if [[ -e /usr/bin/cnmon ]]; then
+  RUN_OPTS+=(-v /usr/bin/cnmon:/usr/bin/cnmon)
+fi
 
 CMD="$*"
 [[ -z "${CMD}" ]] && error
 
 [[ ! -x $(command -v docker) ]] && echo "ERROR: 'docker' command is missing." && exit 1
 
-docker run "${RUN_OPTS[@]}" "${IMAGE}" bash -c "set -euo pipefail; cd $(pwd); ${CMD}"
+WORKDIR="$(pwd)"
+docker run "${RUN_OPTS[@]}" "${IMAGE}" bash -c "set -euo pipefail; cd \"${WORKDIR}\"; ${CMD}"

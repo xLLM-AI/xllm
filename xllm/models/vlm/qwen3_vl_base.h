@@ -207,6 +207,14 @@ class Qwen3VLForConditionalGenerationBase : public torch::nn::Module {
     }
   }
 
+  bool is_hybrid_linear_attention() {
+    if constexpr (detail::has_is_hybrid_linear_attention<
+                      LanguageModel>::value) {
+      return language_model_->is_hybrid_linear_attention();
+    }
+    return false;
+  }
+
   layer::LmHead get_lm_head() { return language_model_->get_lm_head(); }
   void set_lm_head(layer::LmHead& head) { language_model_->set_lm_head(head); }
 

@@ -46,6 +46,11 @@ class Executor final {
                       std::vector<KVCache>& kv_caches,
                       const ModelInputParams& params);
 
+  void prepare_graph_input(const torch::Tensor& tokens,
+                           const torch::Tensor& positions,
+                           std::vector<KVCache>& kv_caches,
+                           const ModelInputParams& params);
+
  private:
   std::unique_ptr<ExecutorImpl> impl_;
 };

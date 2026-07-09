@@ -496,6 +496,47 @@ ForwardInput WorkerImpl::prepare_inputs(Batch& batch) {
   return model_executor_->prepare_inputs(batch);
 }
 
+bool WorkerImpl::can_prepare_npu_graph_decode_input(
+    const ModelInputParams& input_params) const {
+#if defined(USE_NPU)
+  return !options_.enable_speculative_decode() &&
+         ::xllm::ExecutionConfig::get_instance().enable_graph() &&
+         ::xllm::ExecutionConfig::get_instance().enable_graph_double_buffer() &&
+         enable_schedule_overlap() && options_.backend() == "llm" &&
+         input_params.meta.batch_forward_type.has_decode();
+#else
+  (void)input_params;
+  return false;
+#endif
+}
+
+bool WorkerImpl::can_prepare_without_compute_stream_wait(
+    const ModelInputParams& input_params) const {
+#if defined(USE_NPU)
+  (void)input_params;
+  return !options_.enable_speculative_decode() &&
+         ::xllm::ExecutionConfig::get_instance().enable_graph() &&
+         ::xllm::ExecutionConfig::get_instance().enable_graph_double_buffer() &&
+         options_.backend() == "llm";
+#else
+  (void)input_params;
+  return false;
+#endif
+}
+
+bool WorkerImpl::can_skip_npu_graph_decode_sync(
+    const ModelInputParams& input_params) const {
+#if defined(USE_NPU)
+  return can_prepare_npu_graph_decode_input(input_params) &&
+         input_params.meta.batch_forward_type.is_decode() &&
+         options_.kv_cache_transfer_mode() != "PUSH" &&
+         !options_.enable_speculative_decode();
+#else
+  (void)input_params;
+  return false;
+#endif
+}
+
 folly::SemiFuture<std::tuple<int64_t, int64_t>>
 WorkerImpl::estimate_kv_cache_capacity_async() {
   folly::Promise<std::tuple<int64_t, int64_t>> promise;
@@ -523,8 +564,17 @@ void WorkerImpl::update_last_step_output(
 ForwardInput WorkerImpl::update_input_by_last_step_output(
     ForwardInput& inputs) {
 #if defined(USE_NPU)
+  if (can_prepare_npu_graph_decode_input(inputs.input_params)) {
+    xllm::kernel::npu::replace_token(
+        inputs.token_ids,
+        last_step_output_.sample_output.next_tokens,
+        /*synchronize_stream=*/false);
+    inputs.input_params.graph.input_tokens_override = inputs.token_ids;
+    return inputs;
+  }
   xllm::kernel::npu::replace_token(inputs.token_ids,
-                                   last_step_output_.sample_output.next_tokens);
+                                   last_step_output_.sample_output.next_tokens,
+                                   /*synchronize_stream=*/true);
 #else
   auto& flatten_tokens = inputs.token_ids;
   auto neg_mask = (flatten_tokens < 0);
@@ -693,7 +743,11 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
   }
 #endif
   c10::StreamGuard stream_guard = prepare_stream.set_stream_guard();
-  if (enable_schedule_overlap() && compute_stream_) {
+  if (enable_schedule_overlap() &&
+      !can_prepare_without_compute_stream_wait(input.input_params) &&
+      compute_stream_) {
+    // MTP updates reuse shared prepare/compute streams and need this ordering;
+    // only graph double-buffer decode can prepare the next slot independently.
     prepare_stream.wait_stream(*compute_stream_);
   }
   CHECK(prepare_stream.wait_event(input.metadata_ready_event))
@@ -891,6 +945,14 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
     if (has_linear_attention_layers(context_.get_model_args())) {
       prepare_input_params_for_linear_attention(processed_input.input_params);
     }
+
+    if (can_prepare_npu_graph_decode_input(input_params)) {
+      model_executor_->prepare_graph_input(processed_input.token_ids,
+                                           processed_input.positions,
+                                           kv_caches_,
+                                           processed_input.input_params);
+    }
+
 #endif
   };
 

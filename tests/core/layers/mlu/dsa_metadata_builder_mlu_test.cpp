@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "framework/model/model_input_params.h"
 #include "layers/common/attention_metadata.h"
+#include "layers/mlu/deepseek_v4/dsa_empty_dp_input.h"
 
 namespace xllm {
 namespace layer {
@@ -106,6 +107,48 @@ TEST(DSAMetadataBuilderMluTest, BuildsCanonicalSeqMetadataFromCuLens) {
   EXPECT_TRUE(torch::equal(dsa.actual_seq_lengths_kv, dsa.kv_seq_lens));
   EXPECT_EQ(dsa.max_seqlen_q.item<int32_t>(), 2);
   EXPECT_EQ(dsa.max_seqlen_kv.item<int32_t>(), 5);
+}
+
+TEST(DSAMetadataBuilderMluTest, EmptyDpRankParamsBuildOneTokenDsaMetadata) {
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  params.meta.num_sequences = 0;
+  params.meta.actual_num_sequences = 0;
+  params.meta.q_max_seq_len = 0;
+  params.meta.kv_max_seq_len = 0;
+  params.parallel.dp_global_token_nums = {1, 0, 1, 0};
+  std::vector<DSAGroupInfo> group_infos = {{DSACacheType::SLIDING_WINDOW, 1, 1},
+                                           {DSACacheType::TOKEN, 4, 1},
+                                           {DSACacheType::TOKEN, 128, 1}};
+
+  fill_dsv4_empty_dp_params(params, group_infos, /*window_size=*/128);
+
+  ASSERT_EQ(params.meta.num_sequences, 1);
+  ASSERT_EQ(params.meta.actual_num_sequences, 1);
+  ASSERT_EQ(params.meta.q_max_seq_len, 1);
+  ASSERT_GE(params.meta.kv_max_seq_len, 128);
+  ASSERT_TRUE(params.attention.device.new_cache_slots.defined());
+  ASSERT_TRUE(params.attention.device.q_seq_lens.defined());
+  ASSERT_TRUE(params.attention.device.kv_seq_lens.defined());
+  ASSERT_EQ(params.multi_block_tables.size(), group_infos.size());
+
+  std::vector<std::vector<DSACacheInfo>> caches_info = {
+      {{0, DSACacheType::SLIDING_WINDOW, 1, 1},
+       {1, DSACacheType::TOKEN, 4, 1},
+       {2, DSACacheType::TOKEN, 128, 1}}};
+  AttentionMetadata metadata =
+      DSAMetadataBuilderMlu::build(params,
+                                   torch::tensor({0}, torch::kInt32),
+                                   caches_info,
+                                   group_infos,
+                                   /*window_size=*/128);
+
+  ASSERT_NE(metadata.dsa_metadata, nullptr);
+  EXPECT_FALSE(metadata.is_dummy);
+  EXPECT_EQ(tensor_vec(metadata.q_seq_lens), std::vector<int64_t>({1}));
+  EXPECT_EQ(tensor_vec(metadata.kv_seq_lens), std::vector<int64_t>({128}));
+  EXPECT_TRUE(
+      torch::equal(metadata.slot_mapping, torch::tensor({0}, torch::kInt32)));
 }
 
 TEST(DSAMetadataBuilderMluTest, UsesAttentionMetadataSeqLens) {

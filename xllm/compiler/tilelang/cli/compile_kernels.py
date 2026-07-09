@@ -38,6 +38,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Force recompilation even when cache is hit.",
     )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=None,
+        help="Maximum parallel workers for compiling TileLang variants, e.g. --jobs 16.",
+    )
     return parser.parse_args(argv)
 
 
@@ -59,6 +65,7 @@ def main(argv: list[str] | None = None) -> None:
             kernel_names=args.kernels,
             force=args.force,
             device=args.device,
+            jobs=args.jobs,
         )
     elif args.target == "cuda":
         from ..targets.cuda.build import build_kernels

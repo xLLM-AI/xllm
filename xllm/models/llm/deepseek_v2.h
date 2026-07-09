@@ -22,7 +22,11 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/model/model_output.h"
+#if defined(USE_DCU)
+#include "core/layers/dcu/deepseek_v2_decoder_layer_impl.h"
+#elif defined(USE_MLU)
 #include "core/layers/mlu/deepseek_v2_decoder_layer_impl.h"
+#endif
 #include "llm_model_base.h"
 
 namespace xllm {
@@ -224,6 +228,8 @@ REGISTER_MODEL_ARGS(deepseek_v2, [&] {
   LOAD_ARG_OR(first_k_dense_replace, "first_k_dense_replace", 1);
   LOAD_ARG_OR(moe_layer_freq, "moe_layer_freq", 1);
   LOAD_ARG_OR(topk_method, "topk_method", "greedy");
+  LOAD_ARG_OR(hidden_act, "hidden_act", "silu");
+  LOAD_ARG_OR(scoring_func, "scoring_func", "softmax");
   LOAD_ARG_OR(n_routed_experts, "n_routed_experts", 64);
   LOAD_ARG_OR(n_shared_experts, "n_shared_experts", 2);
   LOAD_ARG_OR(num_experts_per_tok, "num_experts_per_tok", 6);
@@ -240,7 +246,7 @@ REGISTER_MODEL_ARGS(deepseek_v2, [&] {
   LOAD_ARG_OR(num_nextn_predict_layers, "num_nextn_predict_layers", 1);
 
   LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {
-    return 256;  // args->qk_nope_head_dim() + args->qk_rope_head_dim();
+    return args->qk_nope_head_dim() + args->qk_rope_head_dim();
   });
   LOAD_ARG_OR_FUNC(
       rotary_dim, "rotary_dim", [&] { return args->qk_rope_head_dim(); });

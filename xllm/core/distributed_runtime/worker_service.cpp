@@ -23,6 +23,7 @@ limitations under the License.
 #include <boost/algorithm/string.hpp>
 #include <vector>
 
+#include "common/device_monitor.h"
 #include "common/global_flags.h"
 #include "common/metrics.h"
 #include "common/types.h"
@@ -339,18 +340,20 @@ void WorkerService::create_polling_shm_thread(
                out_tokens,
                out_logprobs);
 
-          output_shm_manager->raw_output_write(next_tokens,
-                                               logprobs,
-                                               top_tokens,
-                                               top_logprobs,
-                                               embeddings,
-                                               mm_embeddings,
-                                               dit_images,
-                                               expert_load_data,
-                                               prepared_layer_id,
-                                               src_seq_idxes,
-                                               out_tokens,
-                                               out_logprobs);
+          const bool shm_write_ok =
+              output_shm_manager->raw_output_write(next_tokens,
+                                                   logprobs,
+                                                   top_tokens,
+                                                   top_logprobs,
+                                                   embeddings,
+                                                   mm_embeddings,
+                                                   dit_images,
+                                                   expert_load_data,
+                                                   prepared_layer_id,
+                                                   src_seq_idxes,
+                                                   out_tokens,
+                                                   out_logprobs);
+          CHECK(shm_write_ok) << "Worker output shared memory write failed.";
           COUNTER_ADD(worker_service_latency_seconds, timer.elapsed_seconds());
         }
       });
@@ -867,12 +870,20 @@ void WorkerService::GetLastStepResult(
             copy_output_to_host();
           } else {
             c10::StreamGuard stream_guard = stream_->set_stream_guard();
+            if (forward_outputs.value().ready_event != nullptr) {
+              CHECK(stream_->wait_event(forward_outputs.value().ready_event))
+                  << "wait forward output ready event failed.";
+            }
             copy_output_to_host();
           }
           if (use_default_stream) {
             device_.synchronize_default_stream();
           } else {
             stream_->synchronize();
+#if defined(USE_NPU)
+            DeviceMonitor::get_instance().update_active_activation_memory(
+                device_.index());
+#endif
           }
           record_speculative_metrics_from_output(next_tokens, options_);
 

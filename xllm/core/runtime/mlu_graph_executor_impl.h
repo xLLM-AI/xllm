@@ -68,12 +68,25 @@ class GraphPersistentParam {
   torch::Tensor new_cache_slots_;
   torch::Tensor block_table_;
   uint32_t num_decoding_tokens_;
+  torch::Tensor linear_state_indices_;
 
   // for vl
   torch::Tensor input_embeds_;
 
   // for mtp model
   torch::Tensor embedding_;
+
+  // linear state indices for GDN models
+  torch::Tensor linear_state_indices(uint32_t actual_batch_size = 0) const {
+    if (linear_state_indices_.numel() == 0) {
+      return linear_state_indices_;
+    }
+    if (actual_batch_size > 0) {
+      return linear_state_indices_.slice(
+          /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size);
+    }
+    return linear_state_indices_;
+  }
 };
 
 // graph executor using libtorch MLUGraph for memory management
