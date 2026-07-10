@@ -28,7 +28,7 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "models/llm/qwen3_5.h"
 #include "models/vlm/npu/qwen3_vl.h"
-#elif defined(USE_MLU)
+#elif defined(USE_MLU) || defined(USE_DCU)
 #include "core/layers/common/qwen3_next_rms_norm.h"
 #include "core/layers/common/rms_norm.h"
 #include "core/layers/qwen3_5_decoder_layer.h"
@@ -420,6 +420,48 @@ REGISTER_MODEL_ARGS(qwen3_5_moe, [&] {
   SET_ARG(stop_token_ids,
           std::unordered_set<int32_t>({args->eos_token_id(), 248046}));
 });
+
+// Text-only model registrations. On NPU these are handled by llm/qwen3_5.h.
+#if !defined(USE_NPU)
+// qwen3_5 without vision config (text-only serving).
+// Model args are already registered by the VLM registration above.
+REGISTER_CAUSAL_MODEL_WITH_VARNAME(qwen3_5_lm, qwen3_5, Qwen3_5ForCausalLM);
+
+REGISTER_CAUSAL_MODEL(qwen3_5_text, Qwen3_5ForCausalLM);
+REGISTER_MODEL_ARGS(qwen3_5_text, [&] {
+  LOAD_QWEN3_5_COMMON_ARGS();
+  SET_ARG(num_experts, 0);
+  SET_ARG(n_routed_experts, 0);
+  SET_ARG(n_shared_experts, 0);
+  SET_ARG(decoder_sparse_step, 1);
+  SET_ARG(stop_token_ids,
+          std::unordered_set<int32_t>({args->eos_token_id(), 248046}));
+});
+
+REGISTER_CAUSAL_MODEL(qwen3_5_moe_text, Qwen3_5ForCausalLM);
+REGISTER_MODEL_ARGS(qwen3_5_moe_text, [&] {
+  LOAD_QWEN3_5_COMMON_ARGS();
+  LOAD_ARG_OR(decoder_sparse_step, "text_config.decoder_sparse_step", 1);
+  LOAD_ARG_OR(moe_intermediate_size, "text_config.moe_intermediate_size", 512);
+  LOAD_ARG_OR(num_experts, "text_config.num_experts", 512);
+  LOAD_ARG_OR(num_experts_per_tok, "text_config.num_experts_per_tok", 10);
+  LOAD_ARG_OR(shared_expert_intermediate_size,
+              "text_config.shared_expert_intermediate_size",
+              512);
+  LOAD_ARG_OR(norm_topk_prob, "text_config.norm_topk_prob", true);
+  LOAD_ARG_OR(
+      n_routed_experts, "text_config.n_routed_experts", args->num_experts());
+  SET_ARG(n_shared_experts,
+          args->shared_expert_intermediate_size() > 0 ? 1 : 0);
+  SET_ARG(scoring_func, "softmax");
+  SET_ARG(topk_method, "");
+  SET_ARG(n_group, -1);
+  SET_ARG(topk_group, 0);
+  SET_ARG(routed_scaling_factor, 1.0f);
+  SET_ARG(stop_token_ids,
+          std::unordered_set<int32_t>({args->eos_token_id(), 248046}));
+});
+#endif  // !defined(USE_NPU)
 
 #undef LOAD_QWEN3_5_VISION_ARGS
 #undef LOAD_QWEN3_5_COMMON_ARGS

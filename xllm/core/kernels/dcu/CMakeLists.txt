@@ -53,6 +53,8 @@ set(DCU_LOCAL_HIP_SOURCES
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/group_gemm.cpp
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/flash_mla_adapter.cpp
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/topk_gate.cpp
+  ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/gated_layer_norm.cpp
+  ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/gemma_rms_norm.cpp
 )
 
 hipify_sources_target(

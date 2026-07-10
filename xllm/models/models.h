@@ -117,6 +117,7 @@ limitations under the License.
 #include "llm/qwen3_moe.h"
 #include "vlm/qwen2_5_vl.h"
 #include "vlm/qwen2_vl.h"
+#include "vlm/qwen3_5.h"
 #include "vlm/qwen3_vl.h"
 #include "vlm/qwen3_vl_moe.h"
 #else

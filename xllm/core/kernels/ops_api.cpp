@@ -1611,6 +1611,14 @@ torch::Tensor gated_layer_norm(GatedLayerNormParams& params) {
                                params.z,
                                params.group_size,
                                params.norm_before_gate);
+#elif defined(USE_DCU)
+  return dcu::gated_layer_norm(params.x,
+                               params.weight,
+                               params.bias,
+                               params.eps,
+                               params.z,
+                               params.group_size,
+                               params.norm_before_gate);
 #else
   NOT_IMPLEMENTED();
 #endif
@@ -1703,6 +1711,8 @@ void gemma_rms_norm(GemmaRMSNormParams& params) {
       params.x, params.gamma, params.epsilon, params.rstd_out, params.norm_out);
 #elif defined(USE_MLU)
   mlu::gemma_rms_norm(params.x, params.gamma, params.epsilon, params.norm_out);
+#elif defined(USE_DCU)
+  dcu::gemma_rms_norm(params.x, params.gamma, params.epsilon, params.norm_out);
 #else
   NOT_IMPLEMENTED();
 #endif
