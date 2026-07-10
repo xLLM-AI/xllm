@@ -170,12 +170,14 @@ torch::Tensor compress_for_cache(const torch::Tensor& draft_probs,
 //         enable_opt_validate_probs=true
 //       * recovered-dense [batch_size, n_speculative_tokens, vocab_size], if
 //         enable_opt_validate_probs=false
+//       * undefined, if draft_probs_required=false
 std::pair<torch::Tensor, torch::Tensor> build_validate_tensors(
     const std::vector<torch::Tensor>& draft_token_ids_steps,
     const std::vector<torch::Tensor>& draft_probs_steps,
     int32_t batch_size,
     int32_t vocab_size,
-    bool enable_opt_validate_probs);
+    bool enable_opt_validate_probs,
+    bool draft_probs_required = true);
 
 }  // namespace draftProbs
 

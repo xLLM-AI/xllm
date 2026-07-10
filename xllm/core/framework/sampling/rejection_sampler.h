@@ -42,6 +42,7 @@ class RejectionSampler final {
   // draft_probs:
   //   1) dense format: [batch_size, n_speculative_tokens, vocab_size]
   //   2) selected-only format: [batch_size, n_speculative_tokens]
+  //   3) undefined for all-greedy sampling
   // target_logits: [batch_size, n_speculative_tokens + 1, vocab_size]
   // bonus_token_ids: [batch_size, 1]
   SampleOutput forward(const torch::Tensor& draft_token_ids,
@@ -73,7 +74,13 @@ class RejectionSampler final {
 
   static std::tuple<torch::Tensor, torch::Tensor> greedy_sample(
       const torch::Tensor& draft_token_ids,
-      const torch::Tensor& target_probs,
+      const torch::Tensor& target_scores,
+      const torch::Tensor& bonus_token_ids,
+      bool mask_out_rejected_tokens);
+
+  static std::tuple<torch::Tensor, torch::Tensor> greedy_sample_from_token_ids(
+      const torch::Tensor& draft_token_ids,
+      const torch::Tensor& target_token_ids,
       const torch::Tensor& bonus_token_ids,
       bool mask_out_rejected_tokens);
 

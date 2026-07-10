@@ -202,6 +202,53 @@ TEST(RejectionSamplerTest, Greedy) {
                               bonus_token_ids));
 }
 
+TEST(RejectionSamplerTest, GreedyFromTokenIds) {
+  const auto device = get_test_device();
+  const auto draft_token_ids = torch::tensor({{1, 2, 3}, {3, 1, 0}}, device);
+  const auto target_token_ids = torch::tensor({{1, 4, 3}, {3, 2, 0}}, device);
+  const auto bonus_token_ids = torch::tensor({{5}, {6}}, device);
+
+  auto [output, masked_output] = RejectionSampler::greedy_sample_from_token_ids(
+      draft_token_ids,
+      target_token_ids,
+      bonus_token_ids,
+      /*mask_out_rejected_tokens=*/true);
+
+  EXPECT_TRUE(torch::equal(
+      output, torch::tensor({{1, 4, 3, 5}, {3, 2, 0, 6}}, device)));
+  EXPECT_TRUE(torch::equal(
+      masked_output, torch::tensor({{1, 4, -1, -1}, {3, 2, -1, -1}}, device)));
+}
+
+TEST(RejectionSamplerTest, GreedyForwardAllowsUndefinedDraftProbs) {
+  const auto options = get_test_options(torch::kFloat32);
+  const auto device = get_test_device();
+  const auto do_sample = torch::tensor({false, false}, device);
+  RejectionSampler sampler(do_sample,
+                           /*all_random_sample=*/false,
+                           /*all_greedy_sample=*/true,
+                           /*logprobs=*/false,
+                           /*max_top_logprobs=*/0);
+  const auto draft_token_ids = torch::tensor({{1, 2}, {3, 4}}, device);
+  const auto target_logits = torch::tensor({{{0.0f, 4.0f, 1.0f, 2.0f, 3.0f},
+                                             {0.0f, 1.0f, 2.0f, 4.0f, 3.0f},
+                                             {4.0f, 0.0f, 1.0f, 2.0f, 3.0f}},
+                                            {{0.0f, 1.0f, 2.0f, 4.0f, 3.0f},
+                                             {0.0f, 1.0f, 2.0f, 3.0f, 4.0f},
+                                             {0.0f, 4.0f, 1.0f, 2.0f, 3.0f}}},
+                                           options);
+  const auto bonus_token_ids = torch::tensor({{0}, {1}}, device);
+
+  SampleOutput output = sampler.forward(draft_token_ids,
+                                        torch::Tensor(),
+                                        target_logits,
+                                        bonus_token_ids,
+                                        /*mask_out_rejected_tokens=*/true);
+
+  EXPECT_TRUE(torch::equal(output.next_tokens,
+                           torch::tensor({{1, 3, -1}, {3, 4, 1}}, device)));
+}
+
 TEST(RejectionSamplerTest, LogProbs) {
   const auto options = get_test_options(torch::kFloat32);
   const auto device = get_test_device();

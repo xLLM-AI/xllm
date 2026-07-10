@@ -468,7 +468,8 @@ std::pair<torch::Tensor, torch::Tensor> build_validate_tensors(
     const std::vector<torch::Tensor>& draft_probs_steps,
     int32_t batch_size,
     int32_t vocab_size,
-    bool enable_opt_validate_probs) {
+    bool enable_opt_validate_probs,
+    bool draft_probs_required) {
   CHECK_GT(batch_size, 0) << "batch_size must be > 0";
   CHECK_GT(vocab_size, 0) << "vocab_size must be > 0";
   CHECK_EQ(draft_token_ids_steps.size(), draft_probs_steps.size())
@@ -483,11 +484,14 @@ std::pair<torch::Tensor, torch::Tensor> build_validate_tensors(
   for (size_t i = 0; i < draft_token_ids_steps.size(); ++i) {
     auto draft_token_ids =
         draft_token_ids_steps[i].view({batch_size, 1}).to(torch::kLong);
-    auto selected_probs =
+    token_ids_vec.emplace_back(draft_token_ids);
+    if (!draft_probs_required) {
+      continue;
+    }
+
+    torch::Tensor selected_probs =
         extract_selected_probs(draft_probs_steps[i], draft_token_ids)
             .view({batch_size, 1});
-
-    token_ids_vec.emplace_back(draft_token_ids);
     if (enable_opt_validate_probs) {
       probs_vec.emplace_back(selected_probs);
     } else {
@@ -502,6 +506,9 @@ std::pair<torch::Tensor, torch::Tensor> build_validate_tensors(
   }
 
   auto draft_token_ids = torch::cat(token_ids_vec, /*dim=*/1);
+  if (!draft_probs_required) {
+    return {draft_token_ids, torch::Tensor()};
+  }
   auto draft_probs = torch::cat(probs_vec, /*dim=*/1);
   return {draft_token_ids, draft_probs};
 }

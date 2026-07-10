@@ -1624,7 +1624,8 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
     ForwardInput& extend_input) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   extend_input = base_input;
-  extend_input.sampling_params.return_probs = true;
+  extend_input.sampling_params.return_probs =
+      !extend_input.sampling_params.all_greedy_sample;
   clear_ready_events(extend_input);
   extend_input.device_tensors_ready = false;
   auto& input_params = extend_input.input_params;
@@ -1839,7 +1840,8 @@ void MTPWorkerImpl::prepare_draft_inputs(const ForwardInput& input,
                                          int32_t position_offset) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   draft_input = input;
-  draft_input.sampling_params.return_probs = true;
+  draft_input.sampling_params.return_probs =
+      !draft_input.sampling_params.all_greedy_sample;
   clear_ready_events(draft_input);
   draft_input.device_tensors_ready = false;
 
@@ -1919,7 +1921,8 @@ SampleOutput MTPWorkerImpl::validate(
           draft_probs_steps,
           batch_size,
           vocab_size,
-          enable_opt_validate_probs_);
+          enable_opt_validate_probs_,
+          /*draft_probs_required=*/!sampling_params.all_greedy_sample);
   return validate(sampling_params, draft_token_ids, draft_probs, target_output);
 }
 
@@ -1941,6 +1944,28 @@ SampleOutput MTPWorkerImpl::validate(const SamplingParameters& sampling_params,
           .index({"...", ISlice(num_val_tokens - 1, None, num_val_tokens)})
           .view({-1, 1});
 
+  if (sampling_params.all_greedy_sample && !target_output.logprobs) {
+    torch::Tensor target_token_ids =
+        target_output.sample_output.next_tokens.view(
+            {batch_size, num_val_tokens});
+    torch::Tensor target_draft_token_ids = target_token_ids.slice(
+        /*dim=*/1, /*start=*/0, /*end=*/num_val_tokens - 1);
+    auto [accepted_token_ids, masked_accepted_token_ids] =
+        RejectionSampler::greedy_sample_from_token_ids(
+            draft_token_ids.to(target_draft_token_ids),
+            target_draft_token_ids,
+            bonus_token_ids,
+            /*mask_out_rejected_tokens=*/true);
+    (void)accepted_token_ids;
+
+    SampleOutput sample_output;
+    sample_output.next_tokens = masked_accepted_token_ids;
+    torch::Tensor embeddings = target_output.sample_output.embeddings;
+    sample_output.embeddings =
+        embeddings.view({batch_size, num_val_tokens, embeddings.size(-1)});
+    return sample_output;
+  }
+
   auto target_logits =
       target_output.logits.view({batch_size, num_val_tokens, vocab_size});
 
@@ -1954,12 +1979,13 @@ SampleOutput MTPWorkerImpl::validate(const SamplingParameters& sampling_params,
                                          enable_fused_kernel_);
 
   // get the accepted tokens
-  SampleOutput sample_output =
-      rejection_sampler->forward(draft_token_ids.to(bonus_token_ids),
-                                 draft_probs.to(target_logits.device()),
-                                 target_logits,
-                                 bonus_token_ids,
-                                 /*mask_out_rejected_tokens=*/true);
+  SampleOutput sample_output = rejection_sampler->forward(
+      draft_token_ids.to(bonus_token_ids),
+      draft_probs.defined() ? draft_probs.to(target_logits.device())
+                            : torch::Tensor(),
+      target_logits,
+      bonus_token_ids,
+      /*mask_out_rejected_tokens=*/true);
 
   // process embedding
   auto embeddings = target_output.sample_output.embeddings;
