@@ -129,7 +129,7 @@ DEFINE_HISTOGRAM(inter_token_latency_milliseconds,
 // the per-step wall-clock latency divided by the tokens committed that step
 // (per-step amortized, not token-weighted).
 DEFINE_HISTOGRAM(
-    speculative_normalized_inter_token_latency_milliseconds,
+    speculative_per_token_latency_milliseconds,
     "Histogram of speculative per-token amortized inter token latency in "
     "milliseconds (per-step amortized, not token-weighted)");
 

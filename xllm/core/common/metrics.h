@@ -169,7 +169,7 @@ DECLARE_HISTOGRAM(num_generated_tokens_per_request);
 
 DECLARE_HISTOGRAM(time_to_first_token_latency_milliseconds);
 DECLARE_HISTOGRAM(inter_token_latency_milliseconds);
-DECLARE_HISTOGRAM(speculative_normalized_inter_token_latency_milliseconds);
+DECLARE_HISTOGRAM(speculative_per_token_latency_milliseconds);
 
 // latency of responding in seconds
 DECLARE_COUNTER(responsing_latency_seconds_stream);

@@ -1387,7 +1387,7 @@ void ContinuousScheduler::accumulate_speculative_token_latency(
   if (options_.num_speculative_tokens() <= 0 || num_tokens == 0) {
     return;
   }
-  HISTOGRAM_OBSERVE(speculative_normalized_inter_token_latency_milliseconds,
+  HISTOGRAM_OBSERVE(speculative_per_token_latency_milliseconds,
                     amortized_token_latency_ms(tbt_ms, num_tokens));
   step_committed_tokens += static_cast<int64_t>(num_tokens);
   step_decode_seqs += 1;
