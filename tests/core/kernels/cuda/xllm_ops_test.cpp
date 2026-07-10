@@ -32,7 +32,7 @@ limitations under the License.
 
 #include <filesystem>
 
-#include "core/kernels/cuda/xllm_ops_library.h"
+#include "core/kernels/cuda/cuda_ops_library.h"
 
 namespace py = pybind11;
 

@@ -2,7 +2,7 @@
 #pragma once
 
 #if defined(USE_CUDA) || defined(USE_MUSA)
-#include "core/kernels/cuda/xllm_ops_library.h"
+#include "core/kernels/cuda/cuda_ops_library.h"
 #endif
 
 namespace xllm {

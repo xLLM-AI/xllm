@@ -23,7 +23,7 @@ limitations under the License.
 // kernels are exposed here. Attention is handled by the flashinfer Python
 // package directly (see layers/attention.py).
 
-#include "core/kernels/cuda/xllm_ops_library.h"
+#include "core/kernels/cuda/cuda_ops_library.h"
 
 #include <glog/logging.h>
 #include <torch/library.h>
