@@ -469,6 +469,40 @@ TEST_F(DeepSeek32DetectorTest, IncrementalArgumentStreaming) {
   }
 }
 
+TEST_F(DeepSeek32DetectorTest,
+       StreamingPartialNonStringParameterWaitsForValue) {
+  std::vector<std::string> chunks = {
+      "<｜DSML｜function_calls><｜DSML｜invoke name=\"calculate\">",
+      "<｜DSML｜parameter name=\"expression\" string=\"true\">1 + "
+      "1</｜DSML｜parameter>",
+      "<｜DSML｜parameter name=\"precision\" string=\"false\">",
+      "2</｜DSML｜parameter></｜DSML｜invoke></"
+      "｜DSML｜function_calls>"};
+
+  std::string accumulated_args;
+  bool tool_name_sent = false;
+
+  for (const auto& chunk : chunks) {
+    auto result = detector_->parse_streaming_increment(chunk, tools_);
+    EXPECT_EQ(result.normal_text.find("<｜DSML"), std::string::npos);
+
+    for (const auto& call : result.calls) {
+      if (call.name.has_value()) {
+        tool_name_sent = true;
+        EXPECT_EQ(call.name.value(), "calculate");
+      } else {
+        accumulated_args += call.parameters;
+      }
+    }
+  }
+
+  ASSERT_TRUE(tool_name_sent);
+  nlohmann::json params = nlohmann::json::parse(accumulated_args);
+  EXPECT_EQ(params["expression"], "1 + 1");
+  EXPECT_TRUE(params["precision"].is_number());
+  EXPECT_EQ(params["precision"], 2);
+}
+
 // Test normal text handling during streaming
 TEST_F(DeepSeek32DetectorTest, StreamingNormalTextHandling) {
   std::vector<std::string> chunks = {
