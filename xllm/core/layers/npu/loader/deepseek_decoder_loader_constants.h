@@ -392,6 +392,8 @@ inline const std::unordered_map<std::string, int> WEIGHT_MAPPING_W8A8 = {
     {"self_attn.q_a_proj.deq_scale", IN_Q_PROJ_A_DESCALE},
     {"self_attn.q_a_proj.input_offset", IN_Q_PROJ_A_OFFSET},
     {"self_attn.q_a_proj.input_scale", IN_Q_PROJ_A_SCALE},
+    {"self_attn.q_a_proj.weight_offset", IN_Q_PROJ_A_OFFSET},
+    {"self_attn.q_a_proj.weight_scale", IN_Q_PROJ_A_SCALE},
     {"self_attn.q_a_layernorm.weight", IN_Q_PROJ_A_LAYERNORM_WEIGHT},
     {"self_attn.q_a_layernorm.bias", IN_Q_PROJ_A_LAYERNORM_BIAS},
 
@@ -401,12 +403,16 @@ inline const std::unordered_map<std::string, int> WEIGHT_MAPPING_W8A8 = {
     {"self_attn.q_b_proj.input_scale", IN_Q_PROJ_B_SCALE},
     {"self_attn.q_b_proj.deq_scale", IN_Q_PROJ_B_DESCALE},
     {"self_attn.q_b_proj.input_offset", IN_Q_PROJ_B_OFFSET},
+    {"self_attn.q_b_proj.weight_offset", IN_Q_PROJ_B_OFFSET},
+    {"self_attn.q_b_proj.weight_scale", IN_Q_PROJ_B_SCALE},
 
     {"self_attn.kv_a_proj_with_mqa.weight", IN_KV_PROJ_WITH_MQA_WEIGHT},
     {"self_attn.kv_a_proj_with_mqa.quant_bias", IN_KV_PROJ_WITH_MQA_BIAS},
     {"self_attn.kv_a_proj_with_mqa.deq_scale", IN_KV_PROJ_WITH_MQA_DESCALE},
     {"self_attn.kv_a_proj_with_mqa.input_offset", IN_KV_PROJ_WITH_MQA_OFFSET},
     {"self_attn.kv_a_proj_with_mqa.input_scale", IN_KV_PROJ_WITH_MQA_SCALE},
+    {"self_attn.kv_a_proj_with_mqa.weight_offset", IN_KV_PROJ_WITH_MQA_OFFSET},
+    {"self_attn.kv_a_proj_with_mqa.weight_scale", IN_KV_PROJ_WITH_MQA_SCALE},
 
     {"self_attn.kv_a_layernorm.weight", IN_KV_PROJ_A_LAYERNORM_WEIGHT},
     {"self_attn.kv_a_layernorm.bias", IN_KV_PROJ_A_LAYERNORM_BIAS},
@@ -419,8 +425,16 @@ inline const std::unordered_map<std::string, int> WEIGHT_MAPPING_W8A8 = {
     {"self_attn.o_proj.deq_scale", IN_ATTENTION_OUT_DESCALE},
     {"self_attn.o_proj.input_offset", IN_ATTENTION_OUT_OFFSET},
     {"self_attn.o_proj.input_scale", IN_ATTENTION_OUT_SCALE},
+    {"self_attn.o_proj.weight_offset", IN_ATTENTION_OUT_OFFSET},
+    {"self_attn.o_proj.weight_scale", IN_ATTENTION_OUT_SCALE},
 
     {"self_attn.indexer.wq_b.weight", IN_INDEXER_WQ_B_WEIGHT},
+    {"self_attn.indexer.wq_b.quant_bias", IN_INDEXER_WQ_B_BIAS},
+    {"self_attn.indexer.wq_b.deq_scale", IN_INDEXER_WQ_B_DESCALE},
+    {"self_attn.indexer.wq_b.input_offset", IN_INDEXER_WQ_B_OFFSET},
+    {"self_attn.indexer.wq_b.input_scale", IN_INDEXER_WQ_B_SCALE},
+    {"self_attn.indexer.wq_b.weight_offset", IN_INDEXER_WQ_B_OFFSET},
+    {"self_attn.indexer.wq_b.weight_scale", IN_INDEXER_WQ_B_SCALE},
     {"self_attn.indexer.wk.weight", IN_INDEXER_WK_WEIGHT},
     {"self_attn.indexer.k_norm.weight", IN_INDEXER_K_NORM_WEIGHT},
     {"self_attn.indexer.k_norm.bias", IN_INDEXER_K_NORM_BIAS},
@@ -432,32 +446,39 @@ inline const std::unordered_map<std::string, int> WEIGHT_MAPPING_W8A8 = {
     {"mlp.gate_proj.weight", IN_MLP_GATEUP_WEIGHT_SHARED_EXPERT},
     {"mlp.gate_proj.weight_offset", IN_MLP_GATEUP_OFFSET_SHARED_EXPERT},
     {"mlp.gate_proj.weight_scale", IN_MLP_GATEUP_SCALE_SHARED_EXPERT},
+    {"mlp.gate_proj.scale_bias", IN_MLP_GATEUP_BIAS_SHARED_EXPERT},
 
     {"mlp.up_proj.weight", IN_MLP_GATEUP_WEIGHT_SHARED_EXPERT},
     {"mlp.up_proj.weight_offset", IN_MLP_GATEUP_OFFSET_SHARED_EXPERT},
     {"mlp.up_proj.weight_scale", IN_MLP_GATEUP_SCALE_SHARED_EXPERT},
+    {"mlp.up_proj.scale_bias", IN_MLP_GATEUP_BIAS_SHARED_EXPERT},
 
     {"mlp.down_proj.weight", IN_MLP_DOWN_WEIGHT_SHARED_EXPERT},
     {"mlp.down_proj.weight_offset", IN_MLP_DOWN_OFFSET_SHARED_EXPERT},
     {"mlp.down_proj.weight_scale", IN_MLP_DOWN_SCALE_SHARED_EXPERT},
+    {"mlp.down_proj.scale_bias", IN_MLP_DOWN_BIAS_SHARED_EXPERT},
 
     {"mlp.shared_experts.gate_proj.weight", IN_MLP_GATEUP_WEIGHT_SHARED_EXPERT},
     {"mlp.shared_experts.gate_proj.weight_offset",
      IN_MLP_GATEUP_OFFSET_SHARED_EXPERT},
     {"mlp.shared_experts.gate_proj.weight_scale",
      IN_MLP_GATEUP_SCALE_SHARED_EXPERT},
+    {"mlp.shared_experts.gate_proj.scale_bias",
+     IN_MLP_GATEUP_BIAS_SHARED_EXPERT},
 
     {"mlp.shared_experts.up_proj.weight", IN_MLP_GATEUP_WEIGHT_SHARED_EXPERT},
     {"mlp.shared_experts.up_proj.weight_offset",
      IN_MLP_GATEUP_OFFSET_SHARED_EXPERT},
     {"mlp.shared_experts.up_proj.weight_scale",
      IN_MLP_GATEUP_SCALE_SHARED_EXPERT},
+    {"mlp.shared_experts.up_proj.scale_bias", IN_MLP_GATEUP_BIAS_SHARED_EXPERT},
 
     {"mlp.shared_experts.down_proj.weight", IN_MLP_DOWN_WEIGHT_SHARED_EXPERT},
     {"mlp.shared_experts.down_proj.weight_offset",
      IN_MLP_DOWN_OFFSET_SHARED_EXPERT},
     {"mlp.shared_experts.down_proj.weight_scale",
      IN_MLP_DOWN_SCALE_SHARED_EXPERT},
+    {"mlp.shared_experts.down_proj.scale_bias", IN_MLP_DOWN_BIAS_SHARED_EXPERT},
 
     {"mlp.gate.weight", IN_BLOCK_SPARSE_MOE_GATE_WEIGHT},
     {"mlp.gate.e_score_correction_bias", IN_BLOCK_SPARSE_MOE_GATE_BIAS},
@@ -481,6 +502,8 @@ inline const std::unordered_map<std::string, int>
         {"self_attn.q_a_proj.deq_scale", IN_Q_PROJ_A_RECOMPUTE_DESCALE},
         {"self_attn.q_a_proj.input_offset", IN_Q_PROJ_A_RECOMPUTE_OFFSET},
         {"self_attn.q_a_proj.input_scale", IN_Q_PROJ_A_RECOMPUTE_SCALE},
+        {"self_attn.q_a_proj.weight_offset", IN_Q_PROJ_A_RECOMPUTE_OFFSET},
+        {"self_attn.q_a_proj.weight_scale", IN_Q_PROJ_A_RECOMPUTE_SCALE},
 };
 
 inline const std::map<int, int> WEIGHT_SHARD = {};

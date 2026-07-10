@@ -20,6 +20,7 @@ limitations under the License.
 #include <string>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/TCPStore.hpp>
+#include <vector>
 
 #if defined(USE_NPU)
 #include <torch_npu/csrc/distributed/ProcessGroupHCCL.hpp>
@@ -106,6 +107,12 @@ class ProcessGroup {
       bool async_op = false,
       c10::intrusive_ptr<c10d::Work>* async_work = nullptr);
 
+  // Point-to-point: send tensor to dst rank, recv tensor from src rank.
+  // Both are synchronous (block until complete).
+  // src/dst are group-local ranks.
+  virtual void send(const torch::Tensor& tensor, int dst, int tag = 0);
+  virtual void recv(torch::Tensor& tensor, int src, int tag = 0);
+
   virtual std::string hccl_comm_name(bool init_comm = true);
 
  private:
@@ -143,7 +150,7 @@ std::unique_ptr<xllm::ProcessGroup> create_process_group(
     const std::string& group_name,
     const torch::Device& device);
 
-#if defined(USE_NPU) || defined(USE_MLU)
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
 // for DiT models
 std::unique_ptr<xllm::ProcessGroup> create_process_group(
     int32_t global_rank,

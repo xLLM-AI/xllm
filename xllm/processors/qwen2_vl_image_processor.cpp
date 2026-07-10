@@ -80,9 +80,15 @@ Qwen2VLImageProcessor::Qwen2VLImageProcessor(const ModelArgs& args) {
     min_pixels_ = args.mm_image_shortest_edge();
     max_pixels_ = args.mm_image_longest_edge();
   }
-  patch_size_ = args.mm_image_patch_size();
-  temporal_patch_size_ = args.mm_image_temporal_patch_size();
-  merge_size_ = args.mm_image_merge_size();
+  if (args.mm_image_patch_size() > 0) {
+    patch_size_ = args.mm_image_patch_size();
+  }
+  if (args.mm_image_temporal_patch_size() > 0) {
+    temporal_patch_size_ = args.mm_image_temporal_patch_size();
+  }
+  if (args.mm_image_merge_size() > 0) {
+    merge_size_ = args.mm_image_merge_size();
+  }
 
   if (do_rescale_ && do_normalize_) {
     image_mean_.mul_(1.0 / rescale_factor_);

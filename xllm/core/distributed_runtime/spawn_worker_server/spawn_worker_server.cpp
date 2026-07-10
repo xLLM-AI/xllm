@@ -83,12 +83,19 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
                                      bool enable_graph_mode_decode_no_padding,
                                      bool enable_prefill_piecewise_graph,
                                      int32_t max_tokens_for_graph_mode,
-                                     int64_t max_encoder_cache_size) {
+                                     int64_t max_encoder_cache_size,
+                                     int32_t dp_size,
+                                     int32_t tp_size,
+                                     int32_t sp_size,
+                                     int32_t cfg_size) {
   // TODO: pass whole xllm::runtime::Options here from main process.
   xllm::runtime::Options runner_options;
   const std::string backend = get_backend_from_worker_type(worker_type);
   CHECK(!backend.empty()) << "Unsupported worker_type for backend mapping: "
                           << worker_type;
+  const bool is_dit_backend = backend == "dit";
+  const int32_t effective_sp_size = is_dit_backend ? sp_size : 1;
+  const int32_t effective_cfg_size = is_dit_backend ? cfg_size : 1;
   runner_options.block_size(block_size)
       .backend(backend)
       .world_size(world_size)
@@ -102,6 +109,10 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
       .enable_schedule_overlap(/*enable_schedule_overlap=*/false)
       .enable_offline_inference(/*enable_offline_inference=*/true)
       .master_node_addr(master_node_addr)
+      .dp_size(dp_size)
+      .tp_size(tp_size)
+      .sp_size(effective_sp_size)
+      .cfg_size(effective_cfg_size)
       .enable_shm(enable_shm)
       .input_shm_size(input_shm_size)
       .output_shm_size(output_shm_size)
@@ -119,6 +130,10 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
       .enable_schedule_overlap(false);
   ParallelConfig::get_instance()
       .enable_prefill_sp(enable_prefill_sp)
+      .dp_size(dp_size)
+      .tp_size(tp_size)
+      .sp_size(effective_sp_size)
+      .cfg_size(effective_cfg_size)
       .communication_backend(communication_backend);
   DistributedConfig::get_instance().master_node_addr(master_node_addr);
   KVCacheConfig::get_instance().block_size(block_size);
@@ -153,7 +168,7 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
 
   ParallelArgs parallel_args(global_rank,
                              world_size,
-                             /* dp_size = */ 1,
+                             dp_size,
                              /* cp_size = */ 1,
                              /* process_group = */ nullptr,
                              /* ep_size = */ 1);

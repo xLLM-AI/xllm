@@ -281,6 +281,17 @@ bool try_parse_layer_id(const std::string& tensor_name, int64_t* layer_id) {
   return false;
 }
 
+std::string infer_quantize_type_from_desc(bool has_w4a8_dynamic,
+                                          bool has_w8a8_dynamic) {
+  if (has_w4a8_dynamic) {
+    return "w4a8_dynamic";
+  }
+  if (has_w8a8_dynamic) {
+    return "w8a8_dynamic";
+  }
+  return "";
+}
+
 class ScopedMmap {
  public:
   ~ScopedMmap() {
@@ -823,7 +834,8 @@ bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
   }
 
   // load quantization args for npu if exists
-  if (config_reader.contains("quantize")) {
+  const bool has_config_quantize = config_reader.contains("quantize");
+  if (has_config_quantize) {
     quant_args_.quantize_type() =
         config_reader.value_or<std::string>("quantize", "");
   }
@@ -862,6 +874,7 @@ bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
     bool desc_has_w4a8 = false;
     bool desc_has_w8a8 = false;
     bool desc_has_w4a8_dynamic = false;
+    bool desc_has_w8a8_dynamic = false;
     if (!quant_desc_data.is_object()) {
       LOG(WARNING) << "quant_model_description is not a JSON object: "
                    << quant_desc_file_path;
@@ -887,6 +900,8 @@ bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
         }
         if (boost::iequals(quant_type, "w4a8_dynamic")) {
           desc_has_w4a8_dynamic = true;
+        } else if (boost::iequals(quant_type, "w8a8_dynamic")) {
+          desc_has_w8a8_dynamic = true;
         }
         quant_descs.emplace(it.key(), quant_type);
         std::string mapped_key = it.key();
@@ -911,6 +926,12 @@ bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
                       ? "<empty>"
                       : quant_args_.quant_method());
 
+    const std::string desc_inferred_quantize_type =
+        infer_quantize_type_from_desc(desc_has_w4a8_dynamic,
+                                      desc_has_w8a8_dynamic);
+    if (!has_config_quantize && !desc_inferred_quantize_type.empty()) {
+      quant_args_.quantize_type() = desc_inferred_quantize_type;
+    }
     if (quant_args_.quantize_type().empty()) {
       if (auto v = quant_desc_reader.value<std::string>("model_quant_type")) {
         auto quantize_type = v.value();

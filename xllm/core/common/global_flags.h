@@ -362,6 +362,18 @@ DECLARE_bool(dit_debug_print);
 
 DECLARE_bool(dit_enable_vae_tiling);
 
+DECLARE_bool(dit_sparse_attention_enabled);
+
+DECLARE_double(dit_sparse_attention_sparsity);
+
+DECLARE_int64(dit_sparse_attention_pool_size);
+
+DECLARE_int64(dit_sparse_attention_sparse_start_step);
+
+DECLARE_string(dit_sparse_attention_version);
+
+DECLARE_int64(dit_sparse_attention_mask_refresh_steps);
+
 DECLARE_bool(use_audio_in_video);
 
 // --- kernel config ---

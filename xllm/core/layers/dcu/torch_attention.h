@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <optional>
 #include <tuple>
 #include <utility>
 
@@ -52,7 +53,8 @@ class TorchAttentionImpl final : public BaseAttentionImpl {
       const torch::Tensor& query,  // [seq_len, num_heads, head_size]
       const torch::Tensor& key,    // [seq_len, num_kv_heads, head_size]
       const torch::Tensor& value,  // [seq_len, num_kv_heads, head_size]
-      bool is_causal);
+      bool is_causal,
+      const std::optional<torch::Tensor>& attn_mask = std::nullopt);
 
   // Helper function to expand kv heads to match query heads.
   std::pair<torch::Tensor, torch::Tensor> expand_kv_for_mqa(

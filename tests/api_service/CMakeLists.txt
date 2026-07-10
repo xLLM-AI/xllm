@@ -1,5 +1,10 @@
 include(cc_test)
 
+if(USE_MLU)
+  set(_api_json_test_env
+    "LD_LIBRARY_PATH=$ENV{PYTORCH_MLU_INSTALL_PATH}/csrc/lib:$ENV{LD_LIBRARY_PATH}")
+endif()
+
 cc_test(
   NAME
     anthropic_protocol_test
@@ -39,6 +44,8 @@ cc_test(
     api_service
     GTest::gtest_main
     nlohmann_json::nlohmann_json
+  ENVIRONMENT
+    "${_api_json_test_env}"
 )
 
 cc_test(
@@ -61,6 +68,8 @@ cc_test(
     api_service
     GTest::gtest_main
     nlohmann_json::nlohmann_json
+  ENVIRONMENT
+    "${_api_json_test_env}"
 )
 
 cc_test(
@@ -83,6 +92,8 @@ cc_test(
     api_service
     GTest::gtest_main
     nlohmann_json::nlohmann_json
+  ENVIRONMENT
+    "${_api_json_test_env}"
 )
 
 cc_test(

@@ -20,19 +20,21 @@ limitations under the License.
 #include <framework/core/device.h>
 
 #include <cmath>
+#include <optional>
 #include <unordered_map>
 
-#include "chunk_fwd_o.h"
-#include "chunk_gated_delta_rule_fwd_h.h"
-#include "chunk_local_cumsum.h"
-#include "chunk_scaled_dot_kkt_fwd.h"
 #include "kernels/mlu/mlu_ops_api.h"
-#include "kernels/mlu/utils.h"
-#include "recompute_w_u_fwd.h"
+#include "triton_jit/include/jit_kernel.h"
 
 namespace xllm {
 namespace kernel {
 namespace mlu {
+
+namespace {
+std::optional<torch::Tensor> opt_tensor(const torch::Tensor& t) {
+  return t.numel() > 0 ? std::optional<torch::Tensor>(t) : std::nullopt;
+}
+}  // namespace
 
 ChunkGatedDeltaRuleImpl::ChunkGatedDeltaRuleImpl(int64_t num_k_heads,
                                                  int64_t num_v_heads)
@@ -41,36 +43,6 @@ ChunkGatedDeltaRuleImpl::ChunkGatedDeltaRuleImpl(int64_t num_k_heads,
   auto device_prop = torch_mlu::getDeviceProperties(device);
   total_core_num_ =
       device_prop->cluster_count * device_prop->core_num_per_cluster;
-  static const std::unordered_map<int64_t, int32_t> kNumVHeadToIdx = {
-      {1, 0},
-      {2, 1},
-      {4, 2},
-      {6, 3},
-      {8, 4},
-      {12, 5},
-      {16, 6},
-      {24, 7},
-      {32, 8},
-      {48, 9},
-      {64, 10},
-  };
-  static const std::unordered_map<int64_t, int32_t> kNumKHeadToIdx = {
-      {1, 0},
-      {2, 11},
-      {4, 22},
-      {8, 33},
-      {16, 44},
-      {32, 55},
-  };
-  algo_id_ = lookup_algo_id(kNumKHeadToIdx,
-                            num_k_heads_,
-                            /*dim_name=*/"num_k_heads") +
-             lookup_algo_id(kNumVHeadToIdx,
-                            num_v_heads_,
-                            /*dim_name=*/"num_v_heads");
-  chunk_algo_id_ = lookup_algo_id(kNumVHeadToIdx,
-                                  num_v_heads_,
-                                  /*dim_name=*/"num_v_heads");
 }
 
 std::tuple<torch::Tensor, torch::Tensor> ChunkGatedDeltaRuleImpl::forward(
@@ -213,17 +185,26 @@ torch::Tensor ChunkGatedDeltaRuleImpl::chunk_local_cumsum(
   auto queue = torch_mlu::getCurMLUStream();
   auto dim = compute_grid_dim(chunk_num);
 
-  tmo_chunk_local_cumsum_scalar_kernel(queue,
-                                       &dim,
-                                       g.data_ptr(),
-                                       output.data_ptr(),
-                                       cu_seqlens.data_ptr(),
-                                       chunk_indices.data_ptr(),
-                                       static_cast<int32_t>(T),
-                                       static_cast<int32_t>(B),
-                                       static_cast<int32_t>(NT),
-                                       static_cast<int32_t>(chunk_num),
-                                       chunk_algo_id_);
+  // cumsum.py: *fp32, *fp32, *i32, *i32, i32, i32, [H], 64, i32, i32, 0, 1, 0
+  triton_jit::JITKernel::get(
+      /*py_path=*/"torch_mlu_ops.triton.fla.cumsum",
+      /*fn_name=*/"tmo_chunk_local_cumsum_scalar_kernel")
+      .launch(static_cast<void*>(queue),
+              /*grid=*/{dim.x, dim.y, dim.z},
+              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/1},
+              g,
+              output,
+              cu_seqlens,
+              chunk_indices,
+              static_cast<int32_t>(T),
+              static_cast<int32_t>(B),
+              static_cast<int32_t>(num_v_heads_),
+              /*BT=*/64,
+              static_cast<int32_t>(NT),
+              static_cast<int32_t>(chunk_num),
+              /*flags=*/0,
+              1,
+              0);
   return output;
 }
 
@@ -250,20 +231,29 @@ torch::Tensor ChunkGatedDeltaRuleImpl::chunk_scaled_dot_kkt_fwd(
   auto queue = torch_mlu::getCurMLUStream();
   auto dim = compute_grid_dim(chunk_num);
 
-  tmo_chunk_scaled_dot_kkt_fwd_kernel(queue,
-                                      &dim,
-                                      k.data_ptr(),
-                                      beta.data_ptr(),
-                                      g.data_ptr(),
-                                      A.data_ptr(),
-                                      cu_seqlens.data_ptr(),
-                                      chunk_indices.data_ptr(),
-                                      static_cast<int32_t>(T),
-                                      static_cast<int32_t>(B),
-                                      static_cast<int32_t>(NT),
-                                      static_cast<int32_t>(chunk_num),
-                                      algo_id_);
-
+  triton_jit::JITKernel::get(
+      /*py_path=*/"torch_mlu_ops.triton.fla.chunk_scaled_dot_kkt",
+      /*fn_name=*/"tmo_chunk_scaled_dot_kkt_fwd_kernel")
+      .launch(static_cast<void*>(queue),
+              /*grid=*/{dim.x, dim.y, dim.z},
+              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/1},
+              k,
+              beta,
+              g,
+              A,
+              cu_seqlens,
+              chunk_indices,
+              static_cast<int32_t>(T),
+              static_cast<int32_t>(B),
+              static_cast<int32_t>(num_v_heads_),
+              static_cast<int32_t>(num_k_heads_),
+              /*BK=*/128,
+              /*BT=*/64,
+              /*BV=*/128,
+              static_cast<int32_t>(NT),
+              static_cast<int32_t>(chunk_num),
+              /*flags=*/1,
+              1);
   return A;
 }
 
@@ -319,23 +309,33 @@ ChunkGatedDeltaRuleImpl::recompute_w_fwd(const torch::Tensor& k,
   auto queue = torch_mlu::getCurMLUStream();
   auto dim = compute_grid_dim(chunk_num);
 
-  tmo_recompute_w_u_fwd_kernel(queue,
-                               &dim,
-                               k.data_ptr(),
-                               v.data_ptr(),
-                               trans_beta.data_ptr(),
-                               w.data_ptr(),
-                               u.data_ptr(),
-                               A.data_ptr(),
-                               get_ptr_or_null(g_cumsum),
-                               get_ptr_or_null(cu_seqlens),
-                               get_ptr_or_null(chunk_indices),
-                               static_cast<int32_t>(T),
-                               static_cast<int32_t>(B),
-                               static_cast<int32_t>(NT),
-                               static_cast<int32_t>(chunk_num),
-                               algo_id_);
-
+  triton_jit::JITKernel::get(
+      /*py_path=*/"torch_mlu_ops.triton.fla.wy_fast",
+      /*fn_name=*/"tmo_recompute_w_u_fwd_kernel")
+      .launch(static_cast<void*>(queue),
+              /*grid=*/{dim.x, dim.y, dim.z},
+              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/1},
+              k,
+              v,
+              trans_beta,
+              w,
+              u,
+              A,
+              opt_tensor(g_cumsum),
+              opt_tensor(cu_seqlens),
+              opt_tensor(chunk_indices),
+              static_cast<int32_t>(T),
+              static_cast<int32_t>(B),
+              static_cast<int32_t>(num_v_heads_),
+              static_cast<int32_t>(num_k_heads_),
+              /*BK=*/128,
+              /*BV=*/128,
+              /*BT=*/64,
+              /*BT_v=*/128,
+              /*BC=*/128,
+              static_cast<int32_t>(NT),
+              static_cast<int32_t>(chunk_num),
+              /*flag=*/1);
   return std::make_pair(w, u);
 }
 
@@ -384,25 +384,45 @@ ChunkGatedDeltaRuleImpl::chunk_gated_delta_rule_fwd_h(
   cnrtDim3_t dim_block = {
       static_cast<uint32_t>(NV), static_cast<uint32_t>(N * H), 1};
   auto queue = torch_mlu::getCurMLUStream();
+  int32_t use_g = g.has_value() ? 1 : 0;
+  int32_t use_gk = gk.has_value() ? 1 : 0;
+  int32_t use_initial_state = initial_state.has_value() ? 1 : 0;
+  int32_t store_final_state = output_final_state ? 1 : 0;
+  int32_t save_new_value_flag = save_new_value ? 1 : 0;
+  int32_t is_varlen = cu_seqlens.has_value() ? 1 : 0;
 
-  tmo_chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
-      queue,
-      &dim_block,
-      k.data_ptr(),
-      u.data_ptr(),
-      w.data_ptr(),
-      get_ptr_or_null(v_new),
-      get_ptr_or_null(g),
-      get_ptr_or_null(gk),
-      h.data_ptr(),
-      get_ptr_or_null(initial_state),
-      get_ptr_or_null(final_state),
-      get_ptr_or_null(cu_seqlens_tensor),
-      get_ptr_or_null(chunk_offsets),
-      static_cast<int32_t>(T),
-      static_cast<int32_t>(B),
-      algo_id_);
-
+  triton_jit::JITKernel::get(
+      /*py_path=*/"torch_mlu_ops.triton.fla.chunk_delta_h",
+      /*fn_name=*/"tmo_chunk_gated_delta_rule_fwd_kernel_h_blockdim64")
+      .launch(static_cast<void*>(queue),
+              /*grid=*/{dim_block.x, dim_block.y, dim_block.z},
+              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/1},
+              k,
+              u,
+              w,
+              opt_tensor(v_new),
+              g,
+              gk,
+              h,
+              initial_state,
+              opt_tensor(final_state),
+              cu_seqlens,
+              opt_tensor(chunk_offsets),
+              static_cast<int32_t>(T),
+              static_cast<int32_t>(B),
+              static_cast<int32_t>(num_v_heads_),
+              static_cast<int32_t>(num_k_heads_),
+              /*BK=*/128,
+              /*BV=*/128,
+              /*BT=*/64,
+              /*BT_v=*/128,
+              /*BC=*/64,
+              /*USE_G=*/use_g,
+              /*USE_GK=*/use_gk,
+              /*USE_INITIAL_STATE=*/use_initial_state,
+              /*STORE_FINAL_STATE=*/store_final_state,
+              /*SAVE_NEW_VALUE=*/save_new_value_flag,
+              /*IS_VARLEN=*/is_varlen);
   return std::make_tuple(h, v_new, final_state);
 }
 
@@ -440,23 +460,34 @@ torch::Tensor ChunkGatedDeltaRuleImpl::chunk_fwd_o(
   auto queue = torch_mlu::getCurMLUStream();
   auto dim = compute_grid_dim(chunk_num);
 
-  tmo_chunk_fwd_kernel_o(queue,
-                         &dim,
-                         q.data_ptr(),
-                         k.data_ptr(),
-                         v.data_ptr(),
-                         h.data_ptr(),
-                         get_ptr_or_null(g_internal),
-                         o.data_ptr(),
-                         get_ptr_or_null(cu_seqlens_internal),
-                         get_ptr_or_null(chunk_indices),
-                         scale_value,
-                         static_cast<int32_t>(T),
-                         static_cast<int32_t>(B),
-                         static_cast<int32_t>(NT),
-                         static_cast<int32_t>(chunk_num),
-                         algo_id_);
-
+  triton_jit::JITKernel::get(
+      /*py_path=*/"torch_mlu_ops.triton.fla.chunk_o",
+      /*fn_name=*/"tmo_chunk_fwd_kernel_o")
+      .launch(static_cast<void*>(queue),
+              /*grid=*/{dim.x, dim.y, dim.z},
+              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/1},
+              q,
+              k,
+              v,
+              h,
+              opt_tensor(g_internal),
+              o,
+              opt_tensor(cu_seqlens_internal),
+              chunk_indices,
+              scale_value,
+              static_cast<int32_t>(T),
+              static_cast<int32_t>(B),
+              static_cast<int32_t>(num_v_heads_),
+              static_cast<int32_t>(num_k_heads_),
+              /*BK=*/128,
+              /*BV=*/128,
+              /*BT=*/64,
+              /*BT_v=*/128,
+              /*BC=*/128,
+              static_cast<int32_t>(NT),
+              static_cast<int32_t>(chunk_num),
+              /*flags=*/1,
+              1);
   return o;
 }
 }  // namespace mlu

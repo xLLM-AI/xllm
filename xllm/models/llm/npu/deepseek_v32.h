@@ -91,17 +91,20 @@ class DeepseekV32DecoderLayerImpl : public torch::nn::Module {
     const bool topk_sharing_enabled = is_topk_sharing_enabled();
     const bool should_skip_topk = skip_topk();
     const bool should_output_topk = output_topk();
+    const bool use_mtp_topk_fallback = should_skip_topk &&
+                                       !topk_indices.defined() &&
+                                       decoder_layer_->has_mtp_topk_fallback();
     torch::Tensor current_topk_indices;
     torch::Tensor shared_topk_indices;
     torch::Tensor* output_topk_indices = nullptr;
     if (topk_sharing_enabled) {
-      if (should_skip_topk) {
+      if (should_skip_topk && !use_mtp_topk_fallback) {
         CHECK(topk_indices.defined())
             << "DSA top-k sharing requires previous top-k indices at MTP layer "
             << layer_index;
         shared_topk_indices = topk_indices;
       }
-      if (should_output_topk) {
+      if (should_output_topk || use_mtp_topk_fallback) {
         torch::Tensor index_cache = kv_cache.get_index_cache();
         CHECK(index_cache.defined())
             << "DSA top-k sharing requires index cache at MTP layer "
@@ -114,7 +117,17 @@ class DeepseekV32DecoderLayerImpl : public torch::nn::Module {
         output_topk_indices = &current_topk_indices;
       }
     }
-    if (topk_sharing_enabled) {
+    if (use_mtp_topk_fallback) {
+      decoder_layer_->forward_with_mtp_topk_fallback(x,
+                                                     cos_pos,
+                                                     sin_pos,
+                                                     attn_mask,
+                                                     kv_cache,
+                                                     input_params,
+                                                     output_topk_indices,
+                                                     event,
+                                                     event_flag);
+    } else if (topk_sharing_enabled) {
       forward_with_topk(x,
                         cos_pos,
                         sin_pos,
@@ -135,8 +148,10 @@ class DeepseekV32DecoderLayerImpl : public torch::nn::Module {
               event,
               event_flag);
     }
-    if (should_output_topk) {
+    if (use_mtp_topk_fallback || should_output_topk) {
       topk_indices = current_topk_indices;
+    } else if (should_skip_topk) {
+      topk_indices = shared_topk_indices;
     }
   }
 

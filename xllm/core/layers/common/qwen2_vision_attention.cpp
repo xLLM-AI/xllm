@@ -115,9 +115,9 @@ int32_t Qwen2VisionAttentionImpl::get_max_sequence_length(
 
 namespace {
 
-#if defined(USE_CUDA)
+#if defined(USE_CUDA) || defined(USE_DCU)
 // Pure PyTorch scaled dot-product attention for Qwen2 vision.
-void compute_qwen2_vision_attention_cuda(
+void compute_qwen2_vision_attention_torch(
     torch::Tensor& q,
     torch::Tensor& k,
     torch::Tensor& v,
@@ -155,7 +155,7 @@ void compute_qwen2_vision_attention_cuda(
     output.slice(/*dim=*/0, /*start=*/start, /*end=*/end).copy_(out_i);
   }
 }
-#endif  // defined(USE_CUDA)
+#endif  // defined(USE_CUDA) || defined(USE_DCU)
 
 }  // namespace
 
@@ -199,7 +199,16 @@ torch::Tensor Qwen2VisionAttentionImpl::forward(
   rotary_params.cos = m_cos_pos;
   rotary_params.interleaved = false;
   rotary_params.discrete = false;
+#if defined(USE_CUDA) || defined(USE_DCU) || defined(USE_MUSA)
+  rotary_params.position_ids =
+      torch::arange(
+          q.size(0),
+          torch::TensorOptions().dtype(torch::kInt64).device(q.device()))
+          .contiguous();
+  rotary_params.cu_query_lens = std::nullopt;
+#else
   rotary_params.cu_query_lens = cu_seq_len;
+#endif
   rotary_params.max_query_len = max_seqlen;
   xllm::kernel::apply_rotary(rotary_params);
   q = rotary_params.q.reshape(
@@ -239,12 +248,12 @@ torch::Tensor Qwen2VisionAttentionImpl::forward(
                                    /*window_size_right=*/-1,
                                    /*compute_dtype=*/"half",
                                    /*return_lse=*/false);
-#elif defined(USE_CUDA)
-  // CUDA path: use a pure PyTorch vision attention implementation that matches
-  // Transformers Qwen2.5-VL VisionAttention. FlashInfer's precompiled AOT
-  // kernels in this project do not support head_dim=80, so we intentionally do
-  // not call FlashInfer here and run attention entirely in PyTorch instead.
-  compute_qwen2_vision_attention_cuda(q, k, v, output, cu_seq_len_vec, scale_);
+#elif defined(USE_CUDA) || defined(USE_DCU)
+  // CUDA/DCU path: use a pure PyTorch vision attention implementation that
+  // matches Transformers Qwen2.5-VL VisionAttention. FlashInfer's precompiled
+  // AOT kernels in this project do not support head_dim=80, so we intentionally
+  // do not call FlashInfer here and run attention entirely in PyTorch instead.
+  compute_qwen2_vision_attention_torch(q, k, v, output, cu_seq_len_vec, scale_);
 #endif
 
   // context_layer = rearrange(output, "(b s) h d -> s b (h d)", b=batch_size)

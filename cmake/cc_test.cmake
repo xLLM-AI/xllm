@@ -40,7 +40,7 @@ function(cc_test)
   cmake_parse_arguments(
     CC_TEST # prefix
     "" # options
-    "NAME" # one value args
+    "NAME;ENVIRONMENT" # one value args
     "SRCS;COPTS;LINKOPTS;DEPS;INCLUDES;ARGS;DATA" # multi value args
     ${ARGN}
   )
@@ -122,6 +122,12 @@ function(cc_test)
   gtest_add_tests(
     TARGET ${CC_TEST_NAME}
     EXTRA_ARGS ${CC_TEST_ARGS}
+    TEST_LIST _cc_test_${CC_TEST_NAME}_tests
   )
+
+  if(CC_TEST_ENVIRONMENT)
+    set_tests_properties(${_cc_test_${CC_TEST_NAME}_tests}
+      PROPERTIES ENVIRONMENT "${CC_TEST_ENVIRONMENT}")
+  endif()
   #add_test(NAME ${CC_TEST_NAME} COMMAND ${CC_TEST_NAME} ${CC_TEST_ARGS})
 endfunction()
