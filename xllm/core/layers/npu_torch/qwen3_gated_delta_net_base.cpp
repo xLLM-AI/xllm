@@ -523,8 +523,8 @@ Qwen3GatedDeltaNetBaseImpl::project_padded_inputs(
     const AttentionMetadata& attn_metadata) {
   if (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill) {
     auto [qkvz_flat, ba_flat] = project_flat_inputs(hidden_states);
-    return {reshape_qkvz_with_pad(attn_metadata, qkvz_flat),
-            reshape_qkvz_with_pad(attn_metadata, ba_flat)};
+    return {reshape_projected_tokens_with_pad(attn_metadata, qkvz_flat),
+            reshape_projected_tokens_with_pad(attn_metadata, ba_flat)};
   }
   return project_decode_inputs(hidden_states);
 }
@@ -543,12 +543,12 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
   int64_t batch_size = 0;
   int64_t seq_len = 0;
 
-  auto prefill_split_inputs =
-      (!use_spec_verify && is_any_prefill)
-          ? project_prefill_split_inputs(hidden_states, attn_metadata)
-          : std::nullopt;
-  if (prefill_split_inputs.has_value()) {
-    std::tie(mixed_qkv, z, b, a) = prefill_split_inputs.value();
+  // Qwen3.5 stores qkv, z, b, and a as separate projection weights, so it can
+  // use their outputs directly in every forward mode. Qwen3Next stores qkvz
+  // and ba as packed weights and uses the fused-split fallback below.
+  auto split_inputs = project_split_inputs(hidden_states, attn_metadata);
+  if (split_inputs.has_value()) {
+    std::tie(mixed_qkv, z, b, a) = split_inputs.value();
     batch_size = mixed_qkv.size(0);
     seq_len = mixed_qkv.size(1);
   } else {
@@ -611,7 +611,7 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
         xllm::npu::kCausalConv1dGraphPadSlotId,
         xllm::npu::kCausalConv1dRunModeForward);
 
-    mixed_qkv = reshape_qkvz_with_pad(attn_metadata, mixed_qkv);
+    mixed_qkv = reshape_projected_tokens_with_pad(attn_metadata, mixed_qkv);
     mixed_qkv = mixed_qkv.transpose(1, 2);
   } else {
     if (use_spec_verify) {
@@ -691,7 +691,7 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
         }
       }
     }
-    mixed_qkv = reshape_qkvz_with_pad(attn_metadata, mixed_qkv);
+    mixed_qkv = reshape_projected_tokens_with_pad(attn_metadata, mixed_qkv);
     mixed_qkv = mixed_qkv.transpose(1, 2);
   }
   const bool fla_ssm_state_layout = use_fla_ssm_state_layout();
@@ -940,9 +940,9 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
   auto rearranged_norm =
       norm_out.reshape({norm_out.size(0), norm_out.size(1) * norm_out.size(2)});
   rearranged_norm = reshape_qkvz_unpad(attn_metadata, rearranged_norm);
-  // For chunked prefill or spec verify, reshape_qkvz_with_pad may pad each
-  // batch to max_len, causing output tokens > original_num_tokens. We need to
-  // slice back to original_num_tokens to match residual shape for add_rms_norm.
+  // For chunked prefill or spec verify, reshape_projected_tokens_with_pad may
+  // pad each batch to max_len, causing output tokens > original_num_tokens. We
+  // need to slice back to original_num_tokens to match the residual shape.
   if (rearranged_norm.size(0) > original_num_tokens) {
     // Slice excess padding tokens
     rearranged_norm =
@@ -1001,9 +1001,9 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::get_linear_state_indices(
       torch::TensorOptions().dtype(torch::kInt).device(device));
 }
 
-torch::Tensor Qwen3GatedDeltaNetBaseImpl::reshape_qkvz_with_pad(
+torch::Tensor Qwen3GatedDeltaNetBaseImpl::reshape_projected_tokens_with_pad(
     const AttentionMetadata& attn_metadata,
-    const torch::Tensor& qkvz) const {
+    const torch::Tensor& projected_tokens) const {
   const bool has_host_lens = !attn_metadata.q_seq_lens_vec.empty();
   int64_t bs = has_host_lens
                    ? static_cast<int64_t>(attn_metadata.q_seq_lens_vec.size())
@@ -1013,11 +1013,11 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::reshape_qkvz_with_pad(
   const bool need_padding =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
   if (!need_padding) {
-    return qkvz.view({bs, -1, qkvz.size(-1)});
+    return projected_tokens.view({bs, -1, projected_tokens.size(-1)});
   }
   if (has_host_lens && bs == 1 && attn_metadata.q_seq_lens_vec[0] == max_len &&
-      qkvz.dim() == 2 && qkvz.size(0) == max_len) {
-    return qkvz.view({1, max_len, qkvz.size(-1)});
+      projected_tokens.dim() == 2 && projected_tokens.size(0) == max_len) {
+    return projected_tokens.view({1, max_len, projected_tokens.size(-1)});
   }
   std::vector<torch::Tensor> batches;
   batches.reserve(bs);
@@ -1026,7 +1026,7 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::reshape_qkvz_with_pad(
     int64_t cur_len = has_host_lens ? attn_metadata.q_seq_lens_vec[b]
                                     : start_loc[b].template item<int64_t>();
     torch::Tensor batch =
-        qkvz.slice(/*dim=*/0, idx, idx + cur_len).contiguous();
+        projected_tokens.slice(/*dim=*/0, idx, idx + cur_len).contiguous();
     idx = idx + cur_len;
     if (batch.size(0) != max_len) {
       batch = batch.size(0) > max_len
