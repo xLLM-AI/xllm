@@ -88,6 +88,9 @@ struct AttentionMetadata {
   bool is_dummy;
   // Whether to apply causal mask. Default: true.
   bool is_causal = true;
+#if defined(USE_DCU)
+  bool use_dense_flash_attention = false;
+#endif
 
   // Spec-verify ACL graph can run full attention as expanded decode while GDN
   // layers keep the original spec-verify metadata.

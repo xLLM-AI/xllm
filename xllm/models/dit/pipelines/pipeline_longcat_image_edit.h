@@ -118,7 +118,7 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
     pos_embed_ = register_module(
         "pos_embed",
         LongCatImagePosEmbed(
-            ROPE_SCALE_BASE,
+            kLongCatRopeScaleBase,
             context.get_model_args("transformer").axes_dims_rope()));
     transformer_ = LongCatImageTransformer2DModel(
         ModelContext(context.get_parallel_args(),
@@ -974,13 +974,13 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
     }
 
     int64_t image_seq_len = prepared_latents.size(1);
-    float mu = calculate_shift(image_seq_len,
-                               scheduler_->base_image_seq_len(),
-                               scheduler_->max_image_seq_len(),
-                               scheduler_->base_shift(),
-                               scheduler_->max_shift());
+    float mu = calculate_longcat_shift(image_seq_len,
+                                       scheduler_->base_image_seq_len(),
+                                       scheduler_->max_image_seq_len(),
+                                       scheduler_->base_shift(),
+                                       scheduler_->max_shift());
 
-    auto [timesteps, _] = retrieve_timesteps(
+    auto [timesteps, _] = retrieve_longcat_timesteps(
         scheduler_, num_inference_steps, options_.device(), sigmas, mu);
 
     scheduler_->set_begin_index(0);

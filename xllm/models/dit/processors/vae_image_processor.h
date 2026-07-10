@@ -206,13 +206,18 @@ class VAEImageProcessorImpl : public torch::nn::Module {
                                int64_t width) {
     auto options = image.options();
 
-    image = image.cpu().to(torch::kFloat32);
-
     // BCHW || CHW
-    bool has_batch = (image.dim() == 4);
-    if (has_batch) {
-      image = image.squeeze(0);  // [C, H, W]
+    if (image.dim() == 4) {
+      std::vector<torch::Tensor> resized_images;
+      resized_images.reserve(image.size(0));
+      for (int64_t i = 0; i < image.size(0); ++i) {
+        resized_images.emplace_back(lanczos_resize(image[i], height, width));
+      }
+      return torch::stack(resized_images).to(options);
     }
+    CHECK_EQ(image.dim(), 3) << "lanczos_resize expects CHW or BCHW image";
+
+    image = image.cpu().to(torch::kFloat32);
 
     image = image.permute({1, 2, 0}).contiguous();  // [H, W, C]
 
@@ -230,7 +235,7 @@ class VAEImageProcessorImpl : public torch::nn::Module {
     out = out.permute({2, 0, 1});  // [C, dstH, dstW]
     out = out.to(options);
 
-    return has_batch ? out.unsqueeze(0) : out;  // BCHW 或 CHW
+    return out;
   }
 
  private:

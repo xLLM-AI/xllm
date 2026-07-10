@@ -340,18 +340,20 @@ void WorkerService::create_polling_shm_thread(
                out_tokens,
                out_logprobs);
 
-          output_shm_manager->raw_output_write(next_tokens,
-                                               logprobs,
-                                               top_tokens,
-                                               top_logprobs,
-                                               embeddings,
-                                               mm_embeddings,
-                                               dit_images,
-                                               expert_load_data,
-                                               prepared_layer_id,
-                                               src_seq_idxes,
-                                               out_tokens,
-                                               out_logprobs);
+          const bool shm_write_ok =
+              output_shm_manager->raw_output_write(next_tokens,
+                                                   logprobs,
+                                                   top_tokens,
+                                                   top_logprobs,
+                                                   embeddings,
+                                                   mm_embeddings,
+                                                   dit_images,
+                                                   expert_load_data,
+                                                   prepared_layer_id,
+                                                   src_seq_idxes,
+                                                   out_tokens,
+                                                   out_logprobs);
+          CHECK(shm_write_ok) << "Worker output shared memory write failed.";
           COUNTER_ADD(worker_service_latency_seconds, timer.elapsed_seconds());
         }
       });

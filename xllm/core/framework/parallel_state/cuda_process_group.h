@@ -34,10 +34,7 @@ class ProcessGroupImpl : public ProcessGroup {
       : ProcessGroup(global_rank, world_size, device) {
     c10::intrusive_ptr<c10d::ProcessGroupNCCL::Options> pg_options =
         c10d::ProcessGroupNCCL::Options::create();
-#if TORCH_VERSION_MAJOR > 2 || \
-    (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 7)
     pg_options->group_name = group_name;
-#endif
     int32_t rank = global_rank;
     if (world_size != rank_size) {
       auto [local_rank, group_ranks] =
@@ -49,6 +46,31 @@ class ProcessGroupImpl : public ProcessGroup {
     auto store = create_tcp_store(host, port, rank);
     pg_ = std::make_unique<c10d::ProcessGroupNCCL>(
         store, rank, rank_size, pg_options);
+  }
+
+  ProcessGroupImpl(int32_t global_rank,
+                   int32_t local_rank,
+                   const std::vector<int32_t>& group_ranks,
+                   int32_t world_size,
+                   int32_t rank_size,
+                   int32_t port,
+                   const std::string& host,
+                   const std::string& group_name,
+                   const torch::Device& device)
+      : ProcessGroup(global_rank, world_size, device) {
+    c10::intrusive_ptr<c10d::ProcessGroupNCCL::Options> pg_options =
+        c10d::ProcessGroupNCCL::Options::create();
+    pg_options->group_name = group_name;
+    std::vector<uint64_t> ranks_unsigned;
+    ranks_unsigned.reserve(group_ranks.size());
+    for (int32_t rank : group_ranks) {
+      ranks_unsigned.push_back(static_cast<uint64_t>(rank));
+    }
+    pg_options->global_ranks_in_group = ranks_unsigned;
+
+    auto store = create_tcp_store(host, port, local_rank);
+    pg_ = std::make_unique<c10d::ProcessGroupNCCL>(
+        store, local_rank, rank_size, pg_options);
   }
 };
 

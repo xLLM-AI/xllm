@@ -1,12 +1,14 @@
 include(cc_test)
 
+get_filename_component(_xllm_build_import_root
+  "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}" DIRECTORY)
+
 # Add test for Qwen3.5 MLU layers (gated delta net operators, GDN layer, and
 # hybrid attention layer).
 cc_test(
   NAME
     qwen3_5_layer_test
   SRCS
-    qwen3_5_gated_delta_net_ops_test.cpp
     qwen3_5_gated_delta_net_test.cpp
     qwen3_5_attention_test.cpp
     tests_utils.cpp
@@ -22,6 +24,8 @@ cc_test(
     glog::glog
     torch
     GTest::gtest_main
+  ENVIRONMENT
+    "PYTHONPATH=${_xllm_build_import_root}:$ENV{PYTHONPATH}"
 )
 
 # Add test for MLU layers

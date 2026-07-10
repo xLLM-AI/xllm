@@ -102,7 +102,7 @@ ProcessGroup* DiTCollectiveCommunicator::create_process_group_by_type(
     auto local_rank = parallel_info.rank();
     auto& rank_per_group = parallel_info.rank_per_group()[group_id];
     int port_offset = group_id + 1;
-#if defined(USE_NPU) || defined(USE_MLU)
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
     member_group = std::move(create_process_group(global_rank_,
                                                   local_rank,
                                                   rank_per_group,

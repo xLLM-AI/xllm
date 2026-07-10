@@ -17,9 +17,12 @@ limitations under the License.
 #include "dit_batch.h"
 
 #include <c10/core/DeviceType.h>
+#include <glog/logging.h>
 #include <torch/torch.h>
 
 #include <vector>
+
+#include "core/framework/config/dit_config.h"
 
 namespace {
 
@@ -49,6 +52,9 @@ namespace xllm {
 
 DiTForwardInput DiTBatch::prepare_forward_input() {
   CHECK(!request_vec_.empty());
+  if (::xllm::DiTConfig::get_instance().dit_debug_print()) {
+    LOG(INFO) << "DiT batch_size=" << request_vec_.size();
+  }
 
   DiTForwardInput input;
   input.batch_size = request_vec_.size();
@@ -66,6 +72,7 @@ DiTForwardInput DiTBatch::prepare_forward_input() {
   std::vector<torch::Tensor> latents;
   std::vector<torch::Tensor> masked_image_latents;
   std::vector<torch::Tensor> last_images;
+  std::vector<std::vector<torch::Tensor>> per_request_images;
   const auto batch_size = request_vec_.size();
   prompt_embeds.reserve(batch_size);
   pooled_prompt_embeds.reserve(batch_size);
@@ -77,15 +84,16 @@ DiTForwardInput DiTBatch::prepare_forward_input() {
   latents.reserve(batch_size);
   masked_image_latents.reserve(batch_size);
   last_images.reserve(batch_size);
+  per_request_images.reserve(batch_size);
 
   std::vector<torch::Tensor> images_list;
-  size_t images_size = request_vec_[0]->state().input_params().images.size();
-  bool images_size_valid = images_size > 0;
+  size_t images_size = 0;
+  bool images_size_valid = true;
+  bool images_size_initialized = false;
   for (const auto& request : request_vec_) {
     const auto& generation_params = request->state().generation_params();
-    if (input.generation_params != generation_params) {
-      LOG(WARNING) << " dit generation params not equal";
-    }
+    CHECK(input.generation_params == generation_params)
+        << "DiT generation params must be equal in the same batch";
 
     const auto& input_params = request->state().input_params();
     if (!input_params.prompt.empty())
@@ -115,9 +123,18 @@ DiTForwardInput DiTBatch::prepare_forward_input() {
     control_images.emplace_back(input_params.control_image);
     last_images.emplace_back(input_params.last_image);
 
-    if (input_params.images.size() != images_size) {
+    std::vector<torch::Tensor> request_images = input_params.images;
+    if (request_images.empty() && input_params.image.defined()) {
+      request_images.emplace_back(input_params.image);
+    }
+    if (!images_size_initialized) {
+      images_size = request_images.size();
+      images_size_valid = images_size > 0;
+      images_size_initialized = true;
+    } else if (request_images.size() != images_size) {
       images_size_valid = false;
     }
+    per_request_images.emplace_back(std::move(request_images));
 
     // Voice cloning: prompt_audio is per-request (batch_size==1 in practice).
     // Forward the first defined tensor; multi-batch voice cloning is not
@@ -139,7 +156,9 @@ DiTForwardInput DiTBatch::prepare_forward_input() {
     input.prompts_2.clear();
   }
 
-  if (input.negative_prompts.size() != request_vec_.size()) {
+  const bool has_full_negative_prompts =
+      input.negative_prompts.size() == request_vec_.size();
+  if (!has_full_negative_prompts) {
     input.negative_prompts.clear();
   }
 
@@ -159,8 +178,8 @@ DiTForwardInput DiTBatch::prepare_forward_input() {
     bool all_valid = true;
     for (size_t idx = 0; idx < images_size; ++idx) {
       vec.clear();
-      for (const auto& req : request_vec_) {
-        vec.emplace_back(req->state().input_params().images[idx]);
+      for (const auto& request_images : per_request_images) {
+        vec.emplace_back(request_images[idx]);
       }
       if (!check_tensors_valid(vec)) {
         all_valid = false;

@@ -13,19 +13,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "fused_recurrent_gated_delta_rule.h"
-
-#include <cnrt.h>
 #include <framework/core/MLUStream.h>
 #include <glog/logging.h>
+#include <torch/torch.h>
 
 #include <cmath>
+#include <cstdint>
+#include <optional>
+#include <utility>
 
 #include "kernels/mlu/mlu_ops_api.h"
+#include "triton_jit/include/jit_kernel.h"
 
-namespace xllm {
-namespace kernel {
-namespace mlu {
+namespace xllm::kernel::mlu {
+
+using xllm::triton_jit::JITKernel;
 
 std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
     const torch::Tensor& q,
@@ -39,8 +41,6 @@ std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
     const std::optional<torch::Tensor>& ssm_state_indices_opt,
     const std::optional<torch::Tensor>& num_accepted_tokens_opt,
     bool use_qk_l2norm_in_kernel) {
-  torch::Tensor beta = beta_opt.has_value() ? beta_opt.value()
-                                            : torch::ones_like(q.select(-1, 0));
   torch::Tensor initial_state = initial_state_opt.value_or(torch::Tensor());
   torch::Tensor cu_seqlens = cu_seqlens_opt.value_or(torch::Tensor());
   torch::Tensor ssm_state_indices =
@@ -48,49 +48,37 @@ std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
   torch::Tensor num_accepted_tokens =
       num_accepted_tokens_opt.value_or(torch::Tensor());
 
-  torch::Tensor q_contig = q.contiguous();
-  torch::Tensor k_contig = k.contiguous();
-  torch::Tensor v_contig = v.contiguous();
-  torch::Tensor g_contig = g.contiguous().to(torch::kFloat32);
-  beta = beta.contiguous();
+  auto q_contig = q.contiguous();
+  auto k_contig = k.contiguous();
+  auto v_contig = v.contiguous();
+  auto g_contig = g.contiguous().to(torch::kFloat32);
+  torch::Tensor beta = beta_opt.has_value() ? beta_opt->contiguous()
+                                            : torch::ones_like(g_contig);
 
-  // Set dimensions from input tensors
-  int64_t B = k_contig.size(0);
-  int64_t T = k_contig.size(1);
-  int64_t H = k_contig.size(2);
-  int64_t K = k_contig.size(3);
-  int64_t HV = v_contig.size(2);
-  int64_t V = v_contig.size(3);
-  int64_t N = cu_seqlens.numel() > 0 ? cu_seqlens.size(0) - 1 : B;
-
-  // Calculate block sizes
-  int64_t bv = 1;
-  while (bv < V) {
-    bv <<= 1;
+  int32_t B = static_cast<int32_t>(k_contig.size(0));
+  int32_t T = static_cast<int32_t>(k_contig.size(1));
+  int32_t H = static_cast<int32_t>(k_contig.size(2));
+  int32_t K = static_cast<int32_t>(k_contig.size(3));
+  int32_t HV = static_cast<int32_t>(v_contig.size(2));
+  int32_t V = static_cast<int32_t>(v_contig.size(3));
+  int64_t beta_ndim = beta.ndimension();
+  CHECK(beta_ndim == 3 || beta_ndim == 4)
+      << "beta must have shape [B, T, HV] or [B, T, HV, V].";
+  CHECK_EQ(beta.size(0), static_cast<int64_t>(B))
+      << "beta batch size mismatch.";
+  CHECK_EQ(beta.size(1), static_cast<int64_t>(T))
+      << "beta sequence length mismatch.";
+  CHECK_EQ(beta.size(2), static_cast<int64_t>(HV))
+      << "beta value head size mismatch.";
+  if (beta_ndim == 4) {
+    CHECK_EQ(beta.size(3), static_cast<int64_t>(V))
+        << "beta value dimension mismatch.";
   }
-  bv = std::min(bv, static_cast<int64_t>(8));
+  int32_t N =
+      cu_seqlens.numel() > 0 ? static_cast<int32_t>(cu_seqlens.size(0) - 1) : B;
 
-  // Set strides for indices
-  int64_t stride_indices_seq = 1;
-  int64_t stride_indices_tok = 1;
-  if (ssm_state_indices.numel() > 0) {
-    if (ssm_state_indices.ndimension() == 1) {
-      stride_indices_seq = ssm_state_indices.stride(0);
-      stride_indices_tok = 1;
-    } else {
-      stride_indices_seq = ssm_state_indices.stride(0);
-      stride_indices_tok = ssm_state_indices.stride(1);
-    }
-  }
-
-  // Set configuration flags
-  bool is_kda = false;
-  bool is_beta_headwise = (beta.ndimension() == v.ndimension());
-
-  // Create output tensor
   torch::Tensor o = torch::empty_like(v_contig);
 
-  // Set final state
   torch::Tensor ht;
   torch::Tensor h0;
   if (inplace_final_state && initial_state.numel() > 0) {
@@ -109,65 +97,88 @@ std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
     }
     ht = ht.to(torch::kFloat32);
   }
-  h0 = h0.to(torch::kFloat32);
+  ht = ht.to(torch::kFloat32);
+  if (h0.numel() > 0) {
+    h0 = h0.to(torch::kFloat32);
+  } else {
+    h0 = torch::empty({0},
+                      torch::TensorOptions()
+                          .dtype(torch::kFloat32)
+                          .device(v_contig.device()));
+  }
 
-  // Set strides
-  int64_t stride_init_state_token = h0.numel() > 0 ? h0.stride(0) : 0;
-  int64_t stride_final_state_token = ht.stride(0);
-  float scale = 1.0f / std::sqrt(static_cast<float>(k_contig.size(-1)));
-  auto queue = torch_mlu::getCurMLUStream();
+  int32_t stride_init_state_token =
+      h0.numel() > 0 ? static_cast<int32_t>(h0.stride(0)) : 0;
+  int32_t stride_final_state_token = static_cast<int32_t>(ht.stride(0));
+  int32_t stride_indices_seq = 1;
+  int32_t stride_indices_tok = 1;
+  if (ssm_state_indices.numel() > 0) {
+    if (ssm_state_indices.ndimension() == 1) {
+      stride_indices_seq = static_cast<int32_t>(ssm_state_indices.stride(0));
+    } else {
+      stride_indices_seq = static_cast<int32_t>(ssm_state_indices.stride(0));
+      stride_indices_tok = static_cast<int32_t>(ssm_state_indices.stride(1));
+    }
+  }
 
-  // Grid calculation: (NV, N * HV)
-  int64_t NV = (V + bv - 1) / bv;
-  int32_t num_programs_x = static_cast<int32_t>(NV);
-  int32_t num_programs_y = static_cast<int32_t>(N * HV);
-  cnrtDim3_t dim_block = {static_cast<uint32_t>(num_programs_x),
-                          static_cast<uint32_t>(num_programs_y),
-                          1};
+  int32_t use_initial_state = (initial_state.numel() > 0) ? 1 : 0;
+  int32_t inplace_final = inplace_final_state ? 1 : 0;
+  int32_t is_beta_headwise =
+      (beta.ndimension() == v_contig.ndimension()) ? 1 : 0;
+  int32_t use_qk_l2norm = use_qk_l2norm_in_kernel ? 1 : 0;
+  int32_t is_varlen = cu_seqlens.numel() > 0 ? 1 : 0;
+  int32_t is_continuous_batching = ssm_state_indices.numel() > 0 ? 1 : 0;
+  int32_t is_spec_decoding = num_accepted_tokens.numel() > 0 ? 1 : 0;
+  int32_t is_kda = 0;
 
-  auto beta_ptr = beta_opt.has_value() ? beta_opt.value().data_ptr() : nullptr;
-  auto cu_seqlens_ptr =
-      cu_seqlens_opt.has_value() ? cu_seqlens_opt.value().data_ptr() : nullptr;
-  auto ssm_state_indices_ptr = ssm_state_indices_opt.has_value()
-                                   ? ssm_state_indices_opt.value().data_ptr()
-                                   : nullptr;
-  auto num_accepted_tokens_ptr =
-      num_accepted_tokens_opt.has_value()
-          ? num_accepted_tokens_opt.value().data_ptr()
-          : nullptr;
+  int32_t BV = 8;
+  int32_t NV = (V + BV - 1) / BV;
+  float scale = 1.0f / std::sqrt(static_cast<float>(K));
+  cnrtQueue_t queue = torch_mlu::getCurMLUStream();
 
-  constexpr int32_t kAlgoId = 0;
-  tmo_fused_recurrent_gated_delta_rule_fwd_kernel(
-      queue,
-      &dim_block,
-      q_contig.data_ptr(),
-      k_contig.data_ptr(),
-      v_contig.data_ptr(),
-      g_contig.data_ptr(),
-      beta_ptr,
-      o.data_ptr(),
-      h0.data_ptr(),
-      ht.data_ptr(),
-      cu_seqlens_ptr,
-      ssm_state_indices_ptr,
-      num_accepted_tokens_ptr,
+  JITKernel& f = JITKernel::get(
+      /*py_path=*/"torch_mlu_ops.triton.fla.fused_recurrent_fn",
+      /*fn_name=*/"tmo_fused_recurrent_gated_delta_rule_fwd_kernel");
+
+  f.launch(
+      static_cast<void*>(queue),
+      /*grid=*/{static_cast<uint32_t>(NV), static_cast<uint32_t>(N * HV), 1},
+      /*cfg=*/{/*num_warps=*/1, /*num_stages=*/1},
+      q_contig,
+      k_contig,
+      v_contig,
+      g_contig,
+      beta,
+      o,
+      h0,
+      ht,
+      cu_seqlens_opt,
+      ssm_state_indices_opt,
+      num_accepted_tokens_opt,
       scale,
-      static_cast<int32_t>(N),
-      static_cast<int32_t>(T),
-      static_cast<int32_t>(B),
-      static_cast<int32_t>(H),
-      static_cast<int32_t>(HV),
-      static_cast<int32_t>(K),
-      static_cast<int32_t>(V),
-      static_cast<int32_t>(stride_init_state_token),
-      static_cast<int32_t>(stride_final_state_token),
-      static_cast<int32_t>(stride_indices_seq),
-      static_cast<int32_t>(stride_indices_tok),
-      kAlgoId);
+      N,
+      T,
+      B,
+      H,
+      HV,
+      K,
+      V,
+      /*BK=*/128,
+      /*BV=*/BV,
+      stride_init_state_token,
+      stride_final_state_token,
+      stride_indices_seq,
+      stride_indices_tok,
+      use_initial_state,
+      inplace_final,
+      is_beta_headwise,
+      use_qk_l2norm,
+      is_varlen,
+      is_continuous_batching,
+      is_spec_decoding,
+      is_kda);
 
   return std::make_pair(o, ht);
 }
 
-}  // namespace mlu
-}  // namespace kernel
-}  // namespace xllm
+}  // namespace xllm::kernel::mlu

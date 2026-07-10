@@ -153,6 +153,7 @@ bool DiTFolderLoader::load_model_args(const std::string& model_weights_path) {
     std::filesystem::path tokenizer_config_path =
         model_dir / "tokenizer_config.json";
     if (std::filesystem::exists(tokenizer_config_path)) {
+      load_image_preprocessor_args(model_weights_path);
       return true;
     }
     std::vector<std::filesystem::path> json_file_paths;
