@@ -28,11 +28,11 @@ limitations under the License.
 #include "common/device_monitor.h"
 #include "common/metrics.h"
 #include "common/types.h"
-#include "core/common/global_flags.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/platform/platform.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/kv_cache/linear_state_restore.h"
@@ -76,7 +76,8 @@ LLMWorkerImpl::LLMWorkerImpl(const ParallelArgs& parallel_args,
     : WorkerImpl(parallel_args, device, options) {
   device_.set_device();
 #if defined(USE_CUDA) || defined(USE_MUSA)
-  if (FLAGS_model_impl != "python") {
+  const auto& model_config = ModelConfig::get_instance();
+  if (!ModelConfig::is_python_model_impl(model_config.model_impl())) {
     threadpool_.schedule([this]() mutable {
       // initialize flashinfer workspace
       ::xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
@@ -88,6 +89,7 @@ LLMWorkerImpl::LLMWorkerImpl(const ParallelArgs& parallel_args,
 
 bool LLMWorkerImpl::init_model(ModelContext& context) {
   CHECK(model_ == nullptr) << "Model is already initialized.";
+  const auto& model_config = ModelConfig::get_instance();
 
 #if defined(USE_CUDA)
   // Ensure FlashinferWorkspace is initialized on the calling thread before
@@ -102,7 +104,7 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
   // Skip when model_impl=python: Python executor uses flashinfer's Python API
   // directly; initializing the C++ workspace would conflict with Python-side
   // TVM-FFI type registration.
-  if (FLAGS_model_impl != "python") {
+  if (!ModelConfig::is_python_model_impl(model_config.model_impl())) {
     auto& ws = ::xllm::layer::flashinfer::FlashinferWorkspace::get_instance();
     if (!ws.get_int_workspace_buffer().defined()) {
       ws.initialize(device_);
@@ -111,7 +113,7 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
 #endif
 
   // Try to create a causal LM model
-  context.set_model_impl(FLAGS_model_impl);
+  context.set_model_impl(model_config.model_impl());
   model_ = create_llm_model(context);
 
   // Dont find model in causal models

@@ -24,6 +24,7 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_loader.h"
@@ -49,6 +50,16 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   tp_rank_ = (tp_group_ != nullptr) ? tp_group_->rank() : 0;
 
   py::gil_scoped_acquire gil;
+  if (tp_size_ > 1) {
+    CHECK(!parallel_args.python_tp_rendezvous_host_.empty());
+    CHECK_GT(parallel_args.python_tp_rendezvous_port_, 0);
+    py::module_::import("python.ops")
+        .attr("init_tp_group")(parallel_args.python_tp_rendezvous_host_,
+                               parallel_args.python_tp_rendezvous_port_,
+                               tp_rank_,
+                               tp_size_,
+                               c10::str(device_));
+  }
   const std::string module_name = context.get_model_args().model_type().empty()
                                       ? std::string("Qwen3ForCausalLM")
                                       : context.get_model_args().model_type();
@@ -76,8 +87,8 @@ py::dict PyCausalLM::build_config_dict(
   d["tp_rank"] = tp_rank_;
   d["python_graph_backend"] =
       ExecutionConfig::get_instance().python_graph_backend();
-  d["python_graph_max_batch"] =
-      ExecutionConfig::get_instance().python_graph_max_batch();
+  d["max_seqs_per_batch"] =
+      SchedulerConfig::get_instance().max_seqs_per_batch();
   return d;
 }
 

@@ -22,7 +22,6 @@ limitations under the License.
 
 #include <Python.h>
 #include <c10/util/Exception.h>
-#include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <pybind11/embed.h>
 #include <torch/extension.h>
@@ -31,15 +30,9 @@ limitations under the License.
 #include <mutex>
 #include <string>
 
+#include "core/framework/config/model_config.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/kernels/xllm_torch_ops.h"
-
-DEFINE_string(python_model_path,
-              "",
-              "Filesystem directory that contains the 'python' model package "
-              "(xLLM's Python model executor), prepended to sys.path for the "
-              "embedded interpreter. Falls back to the XLLM_PYTHON_MODEL_PATH "
-              "env var when empty.");
 
 namespace py = pybind11;
 
@@ -98,7 +91,7 @@ void ensure_python_interpreter() {
 
     {
       py::gil_scoped_acquire gil;
-      std::string model_path = FLAGS_python_model_path;
+      std::string model_path = ModelConfig::get_instance().python_model_path();
       if (model_path.empty()) {
         const char* env = std::getenv("XLLM_PYTHON_MODEL_PATH");
         if (env != nullptr) {

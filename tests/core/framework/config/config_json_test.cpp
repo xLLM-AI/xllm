@@ -23,7 +23,9 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 
@@ -35,7 +37,10 @@ inline constexpr std::string_view kInlineConfig = R"json({
   "max_memory_utilization": 0.5,
   "enable_prefix_cache": false,
   "max_tokens_per_batch": 8192,
-  "max_seqs_per_batch": 64
+  "max_seqs_per_batch": 64,
+  "model_impl": "py",
+  "python_model_path": "/tmp/xllm-python-model",
+  "python_graph_backend": "cudagraphs"
 })json";
 
 inline constexpr std::string_view kUpdatedConfig = R"json({
@@ -87,30 +92,80 @@ class CpSizeFlagGuard final {
   int32_t old_cp_size_;
 };
 
+class ConfigFlagGuard final {
+ public:
+  ConfigFlagGuard()
+      : old_block_size_(FLAGS_block_size),
+        old_max_memory_utilization_(FLAGS_max_memory_utilization),
+        old_enable_prefix_cache_(FLAGS_enable_prefix_cache),
+        old_max_tokens_per_batch_(FLAGS_max_tokens_per_batch),
+        old_max_seqs_per_batch_(FLAGS_max_seqs_per_batch),
+        old_model_impl_(FLAGS_model_impl),
+        old_python_model_path_(FLAGS_python_model_path),
+        old_python_graph_backend_(FLAGS_python_graph_backend) {}
+
+  ~ConfigFlagGuard() {
+    FLAGS_block_size = old_block_size_;
+    FLAGS_max_memory_utilization = old_max_memory_utilization_;
+    FLAGS_enable_prefix_cache = old_enable_prefix_cache_;
+    FLAGS_max_tokens_per_batch = old_max_tokens_per_batch_;
+    FLAGS_max_seqs_per_batch = old_max_seqs_per_batch_;
+    FLAGS_model_impl = old_model_impl_;
+    FLAGS_python_model_path = old_python_model_path_;
+    FLAGS_python_graph_backend = old_python_graph_backend_;
+  }
+
+ private:
+  int32_t old_block_size_;
+  double old_max_memory_utilization_;
+  bool old_enable_prefix_cache_;
+  int32_t old_max_tokens_per_batch_;
+  int32_t old_max_seqs_per_batch_;
+  std::string old_model_impl_;
+  std::string old_python_model_path_;
+  std::string old_python_graph_backend_;
+};
+
 class StartupConfigGuard final {
  public:
   StartupConfigGuard()
-      : kv_cache_config_(KVCacheConfig::get_instance()),
+      : model_config_(ModelConfig::get_instance()),
+        execution_config_(ExecutionConfig::get_instance()),
+        kv_cache_config_(KVCacheConfig::get_instance()),
         scheduler_config_(SchedulerConfig::get_instance()),
+        old_model_impl_(model_config_.model_impl()),
+        old_python_model_path_(model_config_.python_model_path()),
+        old_python_graph_backend_(execution_config_.python_graph_backend()),
         old_block_size_(kv_cache_config_.block_size()),
         old_enable_prefix_cache_(kv_cache_config_.enable_prefix_cache()),
         old_max_tokens_per_batch_(scheduler_config_.max_tokens_per_batch()),
+        old_max_seqs_per_batch_(scheduler_config_.max_seqs_per_batch()),
         old_enable_chunked_prefill_(
             scheduler_config_.enable_chunked_prefill()) {}
 
   ~StartupConfigGuard() {
+    model_config_.model_impl(old_model_impl_)
+        .python_model_path(old_python_model_path_);
+    execution_config_.python_graph_backend(old_python_graph_backend_);
     kv_cache_config_.block_size(old_block_size_)
         .enable_prefix_cache(old_enable_prefix_cache_);
     scheduler_config_.max_tokens_per_batch(old_max_tokens_per_batch_)
+        .max_seqs_per_batch(old_max_seqs_per_batch_)
         .enable_chunked_prefill(old_enable_chunked_prefill_);
   }
 
  private:
+  ModelConfig& model_config_;
+  ExecutionConfig& execution_config_;
   KVCacheConfig& kv_cache_config_;
   SchedulerConfig& scheduler_config_;
+  std::string old_model_impl_;
+  std::string old_python_model_path_;
+  std::string old_python_graph_backend_;
   int32_t old_block_size_;
   bool old_enable_prefix_cache_;
   int32_t old_max_tokens_per_batch_;
+  int32_t old_max_seqs_per_batch_;
   bool old_enable_chunked_prefill_;
 };
 
@@ -143,6 +198,14 @@ std::filesystem::path config_test_file_path() {
 
 TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
   const JsonReader json = config::parse_json_string(kInlineConfig);
+  ConfigFlagGuard flag_guard;
+
+  ModelConfig model_config;
+  model_config.from_json(json);
+  model_config.normalize_model_impl();
+
+  ExecutionConfig execution_config;
+  execution_config.from_json(json);
 
   KVCacheConfig kv_cache_config;
   kv_cache_config.from_flags();
@@ -157,6 +220,13 @@ TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
   EXPECT_FALSE(kv_cache_config.enable_prefix_cache());
   EXPECT_EQ(scheduler_config.max_tokens_per_batch(), 8192);
   EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 64);
+  EXPECT_EQ(model_config.model_impl(), "python");
+  EXPECT_EQ(model_config.python_model_path(), "/tmp/xllm-python-model");
+  EXPECT_EQ(execution_config.python_graph_backend(), "cudagraphs");
+
+  EXPECT_EQ(FLAGS_model_impl, "python");
+  EXPECT_EQ(FLAGS_python_model_path, "/tmp/xllm-python-model");
+  EXPECT_EQ(FLAGS_python_graph_backend, "cudagraphs");
 
   EXPECT_EQ(kv_cache_config.kv_cache_dtype(), "auto");
   EXPECT_EQ(kv_cache_config.indexer_cache_dtype(), "auto");
@@ -218,6 +288,7 @@ TEST(ConfigJsonTest, RegistersOnlyContextParallelCommandLineOption) {
 }
 
 TEST(ConfigJsonTest, LoadJsonFileReadsConfigFixture) {
+  ConfigFlagGuard flag_guard;
   const std::filesystem::path config_path = config_test_file_path();
   ASSERT_TRUE(std::filesystem::exists(config_path)) << config_path;
 
@@ -260,6 +331,7 @@ TEST(ConfigJsonTest, LoadJsonFileReadsConfigFixture) {
 }
 
 TEST(ConfigJsonTest, InitializeLoadsConfigJsonFileFromFlag) {
+  ConfigFlagGuard config_flag_guard;
   const std::filesystem::path config_path =
       std::filesystem::temp_directory_path() / "xllm_config_json_test.json";
   write_config_file(config_path, kInlineConfig);
@@ -279,6 +351,7 @@ TEST(ConfigJsonTest, InitializeLoadsConfigJsonFileFromFlag) {
 }
 
 TEST(ConfigJsonTest, InitializeReusesCachedConfigJsonForSameFile) {
+  ConfigFlagGuard config_flag_guard;
   const std::filesystem::path config_path =
       std::filesystem::temp_directory_path() /
       "xllm_config_json_test_cached.json";
@@ -361,9 +434,13 @@ TEST(ConfigJsonTest, DumpStartupConfigWritesNonDefaultValuesOnly) {
   DumpConfigJsonFlagGuard flag_guard(dump_path.string());
   StartupConfigGuard startup_config_guard;
 
+  ModelConfig::get_instance().model_impl("python").python_model_path(
+      "/tmp/xllm-python-model");
+  ExecutionConfig::get_instance().python_graph_backend("cudagraphs");
   KVCacheConfig::get_instance().block_size(256).enable_prefix_cache(false);
   SchedulerConfig::get_instance()
       .max_tokens_per_batch(2048)
+      .max_seqs_per_batch(128)
       .enable_chunked_prefill(false);
   FLAGS_enable_dump_config_json = true;
 
@@ -371,15 +448,20 @@ TEST(ConfigJsonTest, DumpStartupConfigWritesNonDefaultValuesOnly) {
 
   ASSERT_TRUE(std::filesystem::exists(dump_path));
   const nlohmann::ordered_json config_json = read_json_file(dump_path);
+  EXPECT_EQ(config_json.at("model_impl").get<std::string>(), "python");
+  EXPECT_EQ(config_json.at("python_model_path").get<std::string>(),
+            "/tmp/xllm-python-model");
+  EXPECT_EQ(config_json.at("python_graph_backend").get<std::string>(),
+            "cudagraphs");
   EXPECT_EQ(config_json.at("block_size").get<int32_t>(), 256);
   EXPECT_FALSE(config_json.at("enable_prefix_cache").get<bool>());
   EXPECT_EQ(config_json.at("max_tokens_per_batch").get<int32_t>(), 2048);
+  EXPECT_EQ(config_json.at("max_seqs_per_batch").get<int32_t>(), 128);
   EXPECT_FALSE(config_json.at("enable_chunked_prefill").get<bool>());
 
   EXPECT_FALSE(config_json.contains("max_cache_size"));
   EXPECT_FALSE(config_json.contains("kv_cache_dtype"));
   EXPECT_FALSE(config_json.contains("indexer_cache_dtype"));
-  EXPECT_FALSE(config_json.contains("max_seqs_per_batch"));
   EXPECT_FALSE(config_json.contains("priority_strategy"));
 
   std::filesystem::remove(dump_path);

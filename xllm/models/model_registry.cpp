@@ -22,6 +22,7 @@ limitations under the License.
 #include <unordered_set>
 
 #include "core/framework/config/kernel_config.h"
+#include "core/framework/config/model_config.h"
 #include "llm/py_causal_lm.h"
 #include "models.h"
 
@@ -336,11 +337,11 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
   // of resolving a C++ model class from the registry.
   const auto& model_impl = context.get_model_impl();
 #if defined(USE_CUDA)
-  if (model_impl == "python" || model_impl == "py") {
+  if (ModelConfig::is_python_model_impl(model_impl)) {
     return std::make_unique<PyCausalLM>(context);
   }
 #else
-  if (model_impl == "python" || model_impl == "py") {
+  if (ModelConfig::is_python_model_impl(model_impl)) {
     LOG(ERROR) << "--model_impl=python is only supported on CUDA builds.";
     return nullptr;
   }

@@ -15,7 +15,7 @@ C++ ModelArgs/ParallelArgs → PROPERTY 反射 → PyDictVisitor → py::dict co
 - 所有 `ParallelArgs` 字段（`tp_size`、`tp_rank`）
 - `dtype`（字符串：`"bfloat16"` / `"float16"`）
 - `device`（字符串：`"cuda:0"` / `"npu:0"`）
-- `python_graph_backend`、`python_graph_max_batch`
+- `python_graph_backend`、`max_seqs_per_batch`（decode graph 捕获上限）
 
 Python 模型类通过 `registry.get_model_class(model_type)` 查找，用 `config` dict 构造。
 

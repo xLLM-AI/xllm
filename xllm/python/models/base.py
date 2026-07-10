@@ -50,12 +50,12 @@ class PyModelBase(nn.Module):
         """Wrap ``self.model`` in the graph runner (torch.compile / cudagraph).
 
         The backend is selected by the C++ --python_graph_backend flag
-        (passed in config["python_graph_backend"]). The max decode batch for
-        graph capture is --python_graph_max_batch.
+        (passed in config["python_graph_backend"]). Decode graph capture uses
+        the scheduler's max_seqs_per_batch as its batch limit.
         """
         cfg = config or {}
         backend = cfg.get("python_graph_backend", "off")
-        max_batch = int(cfg.get("python_graph_max_batch", 256))
+        max_batch = int(cfg.get("max_seqs_per_batch", 1024))
         self._runner = GraphRunner(self.model, backend=backend, max_batch=max_batch)
 
     @staticmethod

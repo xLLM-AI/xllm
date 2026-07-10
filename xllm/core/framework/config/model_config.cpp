@@ -25,6 +25,13 @@ DEFINE_string(model_id, "", "hf model name.");
 
 DEFINE_string(model, "", "Name or path of the huggingface model to use.");
 
+DEFINE_string(python_model_path,
+              "",
+              "Filesystem directory that contains the 'python' model package "
+              "(xLLM's Python model executor), prepended to sys.path for the "
+              "embedded interpreter. Falls back to the XLLM_PYTHON_MODEL_PATH "
+              "env var when empty.");
+
 DEFINE_string(
     backend,
     "",
@@ -112,6 +119,8 @@ bool is_cpp_chat_template_supported_model(const std::string& model_type) {
 void ModelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(model_id);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(model);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(model_impl);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(python_model_path);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(backend);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(task);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(device_id);
@@ -139,6 +148,17 @@ void ModelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(use_cpp_chat_template);
 }
 
+bool ModelConfig::is_python_model_impl(std::string_view model_impl) {
+  return model_impl == "python" || model_impl == "py";
+}
+
+void ModelConfig::normalize_model_impl() {
+  if (model_impl() == "py") {
+    model_impl("python");
+  }
+  FLAGS_model_impl = model_impl();
+}
+
 void ModelConfig::normalize_cpp_chat_template(const std::string& model_type) {
   if (!use_cpp_chat_template()) {
     return;
@@ -156,6 +176,8 @@ void ModelConfig::normalize_cpp_chat_template(const std::string& model_type) {
 void ModelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(model_id);
   XLLM_CONFIG_ASSIGN_FROM_JSON(model);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(model_impl);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(python_model_path);
   XLLM_CONFIG_ASSIGN_FROM_JSON(backend);
   XLLM_CONFIG_ASSIGN_FROM_JSON(task);
   // don't read rank-related config
@@ -179,6 +201,10 @@ void ModelConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, model_id);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, model);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, model_impl);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, python_model_path);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, backend);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, task);
   // don't dump rank-related config
@@ -218,6 +244,7 @@ void ModelConfig::initialize() {
   if (const auto& json_config = config::get_parsed_json_config()) {
     from_json(*json_config);
   }
+  normalize_model_impl();
 }
 
 }  // namespace xllm

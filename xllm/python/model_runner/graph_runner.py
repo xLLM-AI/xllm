@@ -142,8 +142,9 @@ class DecodeFullGraphRunner:
         kv_caches: list,
     ) -> _DecodeGraphEntry:
         dev = input_ids.device
-        # paged_kv_indices upper bound = total blocks in the KV cache: block ids
-        # across a batch can never exceed the cache's block count.
+        # Real indices can consume every KV block. Reserve one extra dummy index
+        # per padded sequence so graph-bucket padding remains in bounds even
+        # when the real cache is full.
         num_kv_blocks = kv_caches[0][0].size(0)
 
         e = _DecodeGraphEntry()
@@ -163,7 +164,9 @@ class DecodeFullGraphRunner:
             batch_pad + 1, dtype=meta.paged_kv_indptr.dtype, device=dev
         )
         e.static_paged_kv_indices = torch.zeros(
-            num_kv_blocks, dtype=meta.paged_kv_indices.dtype, device=dev
+            num_kv_blocks + batch_pad,
+            dtype=meta.paged_kv_indices.dtype,
+            device=dev,
         )
         e.static_paged_kv_last_page_len = torch.zeros(
             batch_pad, dtype=meta.paged_kv_last_page_len.dtype, device=dev
@@ -298,8 +301,10 @@ class GraphRunner:
         self._warmed_up = True
 
         # --- Decode buckets ---
-        decode_buckets = [1, 2, 4, 8]
         max_batch = self._decode_runner._max_batch
+        decode_buckets = [
+            batch for batch in (1, 2, 4, 8) if batch <= max_batch
+        ]
         b = 16
         while b <= max_batch:
             decode_buckets.append(b)

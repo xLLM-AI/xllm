@@ -32,7 +32,7 @@ from .attention import reshape_paged_cache
 from .collectives import (
     all_gather,
     all_reduce,
-    set_tp_group,
+    init_tp_group,
 )
 
 __all__ = [
@@ -43,5 +43,5 @@ __all__ = [
     "reshape_paged_cache",
     "all_reduce",
     "all_gather",
-    "set_tp_group",
+    "init_tp_group",
 ]
