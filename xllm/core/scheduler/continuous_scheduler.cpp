@@ -1373,15 +1373,49 @@ void ContinuousScheduler::generate() {
   response_processor_->wait_completion();
 }
 
+int64_t ContinuousScheduler::amortized_token_latency_ms(int64_t tbt_ms,
+                                                        size_t num_tokens) {
+  const int64_t n = static_cast<int64_t>(num_tokens);
+  return (tbt_ms + n / 2) / n;
+}
+
+void ContinuousScheduler::accumulate_speculative_token_latency(
+    int64_t tbt_ms,
+    size_t num_tokens,
+    int64_t& step_committed_tokens,
+    int64_t& step_decode_seqs) {
+  if (options_.num_speculative_tokens() <= 0 || num_tokens == 0) {
+    return;
+  }
+  HISTOGRAM_OBSERVE(speculative_normalized_inter_token_latency_milliseconds,
+                    amortized_token_latency_ms(tbt_ms, num_tokens));
+  step_committed_tokens += static_cast<int64_t>(num_tokens);
+  step_decode_seqs += 1;
+}
+
+void ContinuousScheduler::publish_speculative_tokens_per_step(
+    int64_t step_committed_tokens,
+    int64_t step_decode_seqs) {
+  if (options_.num_speculative_tokens() <= 0 || step_decode_seqs == 0) {
+    return;
+  }
+  GAUGE_SET(speculative_mean_tokens_per_decode_step,
+            static_cast<double>(step_committed_tokens) / step_decode_seqs);
+}
+
 void ContinuousScheduler::update_token_latency_metrics(
     std::vector<Sequence*>& sequences) {
   const auto now = absl::Now();
+  int64_t step_committed_tokens = 0;
+  int64_t step_decode_seqs = 0;
   for (Sequence* sequence : sequences) {
     if (sequence->is_chunked_prefill_stage() ||
         sequence->last_token_handled()) {
       // skip chunked prefill stage
       continue;
     }
+    // Read the committed-token count before tbt(), which resets it.
+    const size_t committed_tokens = sequence->generated_tokens_since_latency();
     int64_t tbt_milliseconds = sequence->tbt(now);
     if (sequence->is_first_token()) {
       HISTOGRAM_OBSERVE(time_to_first_token_latency_milliseconds,
@@ -1390,8 +1424,13 @@ void ContinuousScheduler::update_token_latency_metrics(
           static_cast<double>(tbt_milliseconds) / 1000);
     } else {
       HISTOGRAM_OBSERVE(inter_token_latency_milliseconds, tbt_milliseconds);
+      accumulate_speculative_token_latency(tbt_milliseconds,
+                                           committed_tokens,
+                                           step_committed_tokens,
+                                           step_decode_seqs);
     }
   }
+  publish_speculative_tokens_per_step(step_committed_tokens, step_decode_seqs);
 }
 
 void ContinuousScheduler::process_batch_output(bool enable_schedule_overlap) {

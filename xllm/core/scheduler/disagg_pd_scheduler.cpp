@@ -937,11 +937,15 @@ void DisaggPDScheduler::update_token_latency_metrics(
   std::lock_guard<std::mutex> lock(latency_metrics_mutex_);
 
   const auto now = absl::Now();
+  int64_t step_committed_tokens = 0;
+  int64_t step_decode_seqs = 0;
   for (Sequence* sequence : sequences) {
     if (sequence->is_chunked_prefill_stage() ||
         sequence->last_token_handled()) {
       continue;
     }
+    // Read the committed-token count before tbt(), which resets it.
+    const size_t committed_tokens = sequence->generated_tokens_since_latency();
     int64_t tbt_milliseconds = sequence->tbt(now);
     if (sequence->is_first_token()) {
       HISTOGRAM_OBSERVE(time_to_first_token_latency_milliseconds,
@@ -952,8 +956,13 @@ void DisaggPDScheduler::update_token_latency_metrics(
     } else {
       HISTOGRAM_OBSERVE(inter_token_latency_milliseconds, tbt_milliseconds);
       recent_tbt_.emplace_back(tbt_milliseconds);
+      accumulate_speculative_token_latency(tbt_milliseconds,
+                                           committed_tokens,
+                                           step_committed_tokens,
+                                           step_decode_seqs);
     }
   }
+  publish_speculative_tokens_per_step(step_committed_tokens, step_decode_seqs);
 }
 
 void DisaggPDScheduler::get_latency_metrics(std::vector<int64_t>& ttft,

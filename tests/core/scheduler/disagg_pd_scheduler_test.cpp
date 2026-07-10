@@ -24,6 +24,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "common/metrics.h"
 #include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/request/request.h"
@@ -112,6 +113,27 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
 
   bool pop_decode_request_for_test(std::shared_ptr<Request>* request) {
     return request_queue_.read(*request);
+  }
+
+  static int64_t amortized_token_latency_for_test(int64_t tbt_ms,
+                                                  size_t num_tokens) {
+    return amortized_token_latency_ms(tbt_ms, num_tokens);
+  }
+
+  void accumulate_speculative_token_latency_for_test(
+      int64_t tbt_ms,
+      size_t num_tokens,
+      int64_t& step_committed_tokens,
+      int64_t& step_decode_seqs) {
+    accumulate_speculative_token_latency(
+        tbt_ms, num_tokens, step_committed_tokens, step_decode_seqs);
+  }
+
+  void publish_speculative_tokens_per_step_for_test(
+      int64_t step_committed_tokens,
+      int64_t step_decode_seqs) {
+    publish_speculative_tokens_per_step(step_committed_tokens,
+                                        step_decode_seqs);
   }
 };
 
@@ -321,6 +343,72 @@ TEST(DisaggPDSchedulerTest, FirstDecodeTokenLatencyIsNonNegative) {
   // pre-fix it was created_time + ttft (~now+100ms), yielding a negative ITL.
   int64_t first_itl = queued->sequences()[0]->tbt(absl::Now());
   EXPECT_GE(first_itl, 0);
+}
+
+TEST(DisaggPDSchedulerTest, AmortizedTokenLatencyRoundsHalfUp) {
+  // Amortized per-token latency is round(tbt_ms / n) via (tbt_ms + n/2) / n.
+  EXPECT_EQ(TestDisaggPDScheduler::amortized_token_latency_for_test(100, 4),
+            25);
+  EXPECT_EQ(TestDisaggPDScheduler::amortized_token_latency_for_test(101, 4),
+            25);
+  EXPECT_EQ(TestDisaggPDScheduler::amortized_token_latency_for_test(102, 4),
+            26);
+  EXPECT_EQ(TestDisaggPDScheduler::amortized_token_latency_for_test(50, 5), 10);
+  EXPECT_EQ(TestDisaggPDScheduler::amortized_token_latency_for_test(53, 5), 11);
+  // With a single committed token amortized latency equals the raw latency.
+  EXPECT_EQ(TestDisaggPDScheduler::amortized_token_latency_for_test(37, 1), 37);
+}
+
+TEST(DisaggPDSchedulerTest, SpeculativeGaugeReportsBatchMeanTokensPerStep) {
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  TestDisaggPDScheduler scheduler(&engine, make_mtp_decode_options());
+
+  int64_t step_committed_tokens = 0;
+  int64_t step_decode_seqs = 0;
+  scheduler.accumulate_speculative_token_latency_for_test(
+      /*tbt_ms=*/40, /*num_tokens=*/5, step_committed_tokens, step_decode_seqs);
+  scheduler.accumulate_speculative_token_latency_for_test(
+      /*tbt_ms=*/40, /*num_tokens=*/3, step_committed_tokens, step_decode_seqs);
+  EXPECT_EQ(step_committed_tokens, 8);
+  EXPECT_EQ(step_decode_seqs, 2);
+
+  scheduler.publish_speculative_tokens_per_step_for_test(step_committed_tokens,
+                                                         step_decode_seqs);
+  EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_tokens_per_decode_step.get_value(),
+                   4.0);
+}
+
+TEST(DisaggPDSchedulerTest, SpeculativeAccumulateSkipsZeroTokenSequences) {
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  TestDisaggPDScheduler scheduler(&engine, make_mtp_decode_options());
+
+  int64_t step_committed_tokens = 0;
+  int64_t step_decode_seqs = 0;
+  scheduler.accumulate_speculative_token_latency_for_test(
+      /*tbt_ms=*/40, /*num_tokens=*/0, step_committed_tokens, step_decode_seqs);
+
+  EXPECT_EQ(step_committed_tokens, 0);
+  EXPECT_EQ(step_decode_seqs, 0);
+}
+
+TEST(DisaggPDSchedulerTest, SpeculativeMetricsSilentWhenDisabled) {
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  // make_options() keeps num_speculative_tokens at its default of 0.
+  TestDisaggPDScheduler scheduler(&engine, make_options());
+
+  GAUGE_SET(speculative_mean_tokens_per_decode_step, -1.0);
+
+  int64_t step_committed_tokens = 0;
+  int64_t step_decode_seqs = 0;
+  scheduler.accumulate_speculative_token_latency_for_test(
+      /*tbt_ms=*/40, /*num_tokens=*/5, step_committed_tokens, step_decode_seqs);
+  EXPECT_EQ(step_committed_tokens, 0);
+  EXPECT_EQ(step_decode_seqs, 0);
+
+  scheduler.publish_speculative_tokens_per_step_for_test(
+      /*step_committed_tokens=*/10, /*step_decode_seqs=*/2);
+  EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_tokens_per_decode_step.get_value(),
+                   -1.0);
 }
 
 }  // namespace xllm

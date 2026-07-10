@@ -255,6 +255,27 @@ class ContinuousScheduler : public Scheduler {
   void clear_mtp_bootstrap(Request* request);
 
  protected:
+  // Rounds a per-step wall-clock latency to an amortized per-token latency,
+  // i.e. round(tbt_ms / num_tokens). num_tokens must be > 0.
+  static int64_t amortized_token_latency_ms(int64_t tbt_ms, size_t num_tokens);
+
+  // For a decode sequence that committed `num_tokens` real tokens this step,
+  // observes the amortized per-token inter-token-latency histogram and
+  // accumulates the step-level committed-token / sequence counters used to
+  // publish the mean-tokens-per-decode-step gauge. No-op unless speculative
+  // decoding is enabled and num_tokens > 0. Callers already holding a latency
+  // metrics lock must not expect this helper to lock.
+  void accumulate_speculative_token_latency(int64_t tbt_ms,
+                                            size_t num_tokens,
+                                            int64_t& step_committed_tokens,
+                                            int64_t& step_decode_seqs);
+
+  // Publishes the batch-mean committed-tokens-per-decode-step gauge for the
+  // current step. No-op unless speculative decoding is enabled and at least one
+  // decode sequence was observed this step.
+  void publish_speculative_tokens_per_step(int64_t step_committed_tokens,
+                                           int64_t step_decode_seqs);
+
   const Options options_;
 
   // the engine to run the batch

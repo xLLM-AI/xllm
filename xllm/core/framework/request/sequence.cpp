@@ -362,6 +362,9 @@ void Sequence::append_token(const Token& token) {
     return;
   }
 
+  // A real token was committed (overlap-fake placeholders returned above).
+  ++generated_tokens_since_latency_;
+
   if (need_unique_tokens_) {
     token_to_count_map_[token_id]++;
   }
@@ -400,6 +403,10 @@ void Sequence::update_last_step_token(const Token& token, size_t token_offset) {
         tokens_[cur_generated_token_idx_ + 1];
     tokens_[cur_generated_token_idx_ + 1] = tokens_[cur_generated_token_idx_];
   }
+
+  // A real token is committed here (one per call, including the extra accepted
+  // MTP token when token_offset > 0); preempted MTP steps returned above.
+  ++generated_tokens_since_latency_;
 
   const int32_t token_id = static_cast<int32_t>(token.id);
   tokens_[cur_generated_token_idx_] = token_id;
@@ -813,6 +820,9 @@ int64_t Sequence::tbt(const absl::Time& now) {
   const int64_t latency =
       absl::ToInt64Milliseconds(now - latest_generate_time_);
   latest_generate_time_ = now;
+  // Reset the committed-token counter so the next tbt() interval amortizes only
+  // the tokens generated within that interval.
+  generated_tokens_since_latency_ = 0;
   return latency;
 }
 
