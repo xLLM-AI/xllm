@@ -21,6 +21,7 @@ limitations under the License.
 #include <nlohmann/json.hpp>
 
 #include "anthropic.pb.h"
+#include "chat.pb.h"
 
 namespace xllm {
 
@@ -269,6 +270,54 @@ TEST_F(PreprocessChatJsonTest, PreservesOtherFields) {
   expect_success(input, llm_parser, expected);
   // For multimodal, array is preserved
   expect_success(input, vlm_parser, input);
+}
+
+TEST_F(PreprocessChatJsonTest, OpenAIObjectToolChoiceRemapped) {
+  std::string input = R"({
+    "model": "test-model",
+    "messages": [{"role": "user", "content": "Submit the result."}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "submit",
+        "description": "Submit the final answer.",
+        "parameters": {"type": "object", "properties": {}}
+      }
+    }],
+    "tool_choice": {
+      "type": "function",
+      "function": {"name": "submit"}
+    }
+  })";
+
+  LlmChatJsonParser parser;
+  auto [status, processed_json] = parser.preprocess(input);
+  ASSERT_TRUE(status.ok()) << "Unexpected error: " << status.message();
+
+  proto::ChatRequest request;
+  google::protobuf::util::JsonParseOptions options;
+  options.ignore_unknown_fields = true;
+  auto parse_status = google::protobuf::util::JsonStringToMessage(
+      processed_json, &request, options);
+  ASSERT_TRUE(parse_status.ok()) << parse_status.ToString();
+  ASSERT_TRUE(request.has_tool_choice());
+
+  nlohmann::json expected_tool_choice = {{"type", "function"},
+                                         {"function", {{"name", "submit"}}}};
+  EXPECT_EQ(nlohmann::json::parse(request.tool_choice()), expected_tool_choice);
+}
+
+TEST_F(PreprocessChatJsonTest, InvalidObjectToolChoiceReturnsError) {
+  std::string input = R"({
+    "messages": [{"role": "user", "content": "Hello"}],
+    "tool_choice": {
+      "type": "function",
+      "function": {}
+    }
+  })";
+
+  LlmChatJsonParser parser;
+  expect_error(input, parser, "function.name");
 }
 
 TEST_F(PreprocessChatJsonTest, UnknownContentTypeOnMultimodal) {

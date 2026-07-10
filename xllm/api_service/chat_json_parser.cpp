@@ -20,6 +20,56 @@ limitations under the License.
 #include <nlohmann/json.hpp>
 
 namespace xllm {
+namespace {
+
+Status normalize_tool_choice(nlohmann::json* json, bool* modified) {
+  if (!json->contains("tool_choice")) {
+    return Status();
+  }
+
+  nlohmann::json& tool_choice = (*json)["tool_choice"];
+  if (tool_choice.is_string()) {
+    return Status();
+  }
+  if (!tool_choice.is_object()) {
+    return Status(StatusCode::INVALID_ARGUMENT,
+                  "tool_choice must be a string or an object.");
+  }
+
+  if (!tool_choice.contains("type") || !tool_choice["type"].is_string()) {
+    return Status(StatusCode::INVALID_ARGUMENT,
+                  "Object tool_choice must contain a string 'type' field.");
+  }
+
+  const std::string type = tool_choice["type"].get<std::string>();
+  if (type != "function") {
+    return Status(StatusCode::INVALID_ARGUMENT,
+                  "Unsupported object tool_choice type: " + type);
+  }
+
+  if (!tool_choice.contains("function") ||
+      !tool_choice["function"].is_object()) {
+    return Status(StatusCode::INVALID_ARGUMENT,
+                  "Function tool_choice must contain a function object.");
+  }
+
+  const nlohmann::json& function = tool_choice["function"];
+  if (!function.contains("name") || !function["name"].is_string() ||
+      function["name"].get_ref<const std::string&>().empty()) {
+    return Status(
+        StatusCode::INVALID_ARGUMENT,
+        "Function tool_choice must contain a non-empty function.name string.");
+  }
+
+  nlohmann::json normalized_tool_choice = {
+      {"type", "function"},
+      {"function", {{"name", function["name"].get<std::string>()}}}};
+  tool_choice = normalized_tool_choice.dump();
+  *modified = true;
+  return Status();
+}
+
+}  // namespace
 
 const ChatJsonParser& ChatJsonParser::get(ServingMode mode) {
   if (mode == ServingMode::VLM) {
@@ -39,11 +89,17 @@ std::pair<Status, std::string> VlmChatJsonParser::preprocess(
     std::string json_str) const {
   try {
     auto json = nlohmann::json::parse(json_str);
-    if (!json.contains("messages") || !json["messages"].is_array()) {
-      return {Status(), std::move(json_str)};
+    bool modified = false;
+    Status status = normalize_tool_choice(&json, &modified);
+    if (!status.ok()) {
+      return {status, ""};
     }
 
-    bool modified = false;
+    if (!json.contains("messages") || !json["messages"].is_array()) {
+      return modified ? std::make_pair(Status(), json.dump())
+                      : std::make_pair(Status(), std::move(json_str));
+    }
+
     for (auto& msg : json["messages"]) {
       if (!msg.is_object()) {
         return {Status(StatusCode::INVALID_ARGUMENT,
@@ -78,11 +134,17 @@ std::pair<Status, std::string> LlmChatJsonParser::preprocess(
     std::string json_str) const {
   try {
     auto json = nlohmann::json::parse(json_str);
-    if (!json.contains("messages") || !json["messages"].is_array()) {
-      return {Status(), std::move(json_str)};
+    bool modified = false;
+    Status status = normalize_tool_choice(&json, &modified);
+    if (!status.ok()) {
+      return {status, ""};
     }
 
-    bool modified = false;
+    if (!json.contains("messages") || !json["messages"].is_array()) {
+      return modified ? std::make_pair(Status(), json.dump())
+                      : std::make_pair(Status(), std::move(json_str));
+    }
+
     for (auto& msg : json["messages"]) {
       if (!msg.is_object()) {
         return {Status(StatusCode::INVALID_ARGUMENT,
