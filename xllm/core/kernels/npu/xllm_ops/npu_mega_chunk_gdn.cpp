@@ -72,6 +72,7 @@ std::pair<torch::Tensor, torch::Tensor> npu_mega_chunk_gdn(
     const std::optional<torch::Tensor>& initial_state,
     bool output_final_state,
     const std::optional<torch::Tensor>& cu_seqlens,
+    c10::ArrayRef<int32_t> q_seq_lens,
     bool use_qk_l2norm_in_kernel) {
   const torch::ScalarType input_dtype = q.scalar_type();
 
@@ -93,12 +94,23 @@ std::pair<torch::Tensor, torch::Tensor> npu_mega_chunk_gdn(
   int64_t num_chunks = 0;
   if (cu_seqlens.has_value() && cu_seqlens->defined()) {
     cu_seqlens_int32 = cu_seqlens->to(torch::kInt32);
-    num_sequences = cu_seqlens_int32.numel() - 1;
-    auto cu_cpu = cu_seqlens_int32.to(torch::kCPU);
-    auto cu_data = cu_cpu.accessor<int32_t, 1>();
-    for (int64_t i = 0; i < num_sequences; ++i) {
-      const int64_t seq_len = cu_data[i + 1] - cu_data[i];
-      num_chunks += (seq_len + kMegaChunkSize - 1) / kMegaChunkSize;
+    if (!q_seq_lens.empty()) {
+      num_sequences = static_cast<int64_t>(q_seq_lens.size());
+      CHECK_EQ(cu_seqlens_int32.numel(), num_sequences + 1)
+          << "cu_seqlens and q_seq_lens must describe the same sequences.";
+      for (const int32_t seq_len : q_seq_lens) {
+        CHECK_GE(seq_len, 0) << "q_seq_lens must be non-negative.";
+        num_chunks += (static_cast<int64_t>(seq_len) + kMegaChunkSize - 1) /
+                      kMegaChunkSize;
+      }
+    } else {
+      num_sequences = cu_seqlens_int32.numel() - 1;
+      auto cu_cpu = cu_seqlens_int32.to(torch::kCPU);
+      auto cu_data = cu_cpu.accessor<int32_t, 1>();
+      for (int64_t i = 0; i < num_sequences; ++i) {
+        const int64_t seq_len = cu_data[i + 1] - cu_data[i];
+        num_chunks += (seq_len + kMegaChunkSize - 1) / kMegaChunkSize;
+      }
     }
   } else {
     const int64_t total_tokens = q.size(1);

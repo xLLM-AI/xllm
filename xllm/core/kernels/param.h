@@ -1678,6 +1678,9 @@ struct MegaChunkGdnParams {
   // Optional cumulative sequence lengths. Shape: [num_sequences + 1]. Dtype:
   // int32.
   std::optional<torch::Tensor> cu_seqlens = std::nullopt;
+  // Optional non-owning host sequence lengths. When provided, these avoid
+  // copying cu_seqlens from the device merely to derive the chunk count.
+  c10::ArrayRef<int32_t> q_seq_lens = {};
   // Whether to apply L2 norm to q and k inside the kernel. Default: false.
   bool use_qk_l2norm_in_kernel = false;
 };

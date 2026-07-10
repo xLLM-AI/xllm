@@ -840,6 +840,8 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     mega_chunk_gdn_params.initial_state = initial_state_tensor;
     mega_chunk_gdn_params.output_final_state = true;
     mega_chunk_gdn_params.cu_seqlens = attn_metadata.q_cu_seq_lens;
+    mega_chunk_gdn_params.q_seq_lens = c10::ArrayRef<int32_t>(
+        attn_metadata.q_seq_lens_vec.data(), static_cast<size_t>(batch_size));
     mega_chunk_gdn_params.use_qk_l2norm_in_kernel = true;
     torch::Tensor packed_core_attn_out;
     std::tie(packed_core_attn_out, last_recurrent_state) =
