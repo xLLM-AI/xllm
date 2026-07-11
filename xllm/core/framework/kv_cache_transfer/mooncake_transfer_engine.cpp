@@ -72,6 +72,28 @@ bool check_buf_range(uint64_t buf_len,
   return true;
 }
 
+bool wait_batch(TransferEngine* engine, BatchID batch_id) {
+  while (true) {
+    TransferStatus status;
+    mooncake::Status result = engine->getBatchTransferStatus(batch_id, status);
+    if (!result.ok()) {
+      LOG(ERROR) << "getBatchTransferStatus not ok";
+      return false;
+    }
+    if (status.s == TransferStatusEnum::COMPLETED) {
+      return true;
+    }
+    if (status.s == TransferStatusEnum::FAILED) {
+      LOG(ERROR) << "getBatchTransferStatus failed";
+      return false;
+    }
+    if (status.s == TransferStatusEnum::TIMEOUT) {
+      LOG(ERROR) << "Sync data transfer timeout";
+      return false;
+    }
+  }
+}
+
 }  // namespace
 
 // ============================================================================
@@ -544,37 +566,7 @@ bool MooncakeTransferEngine::move_memory_blocks(
     return false;
   }
 
-  TransferStatus status;
-  bool completed = false;
-#if defined(USE_DCU)
-  bool transfer_success = true;
-#endif
-  while (!completed) {
-    s = engine->getBatchTransferStatus(batch_id, status);
-    if (!s.ok()) {
-      LOG(ERROR) << "getBatchTransferStatus not ok";
-#if defined(USE_DCU)
-      transfer_success = false;
-#endif
-      completed = true;
-    }
-
-    if (status.s == TransferStatusEnum::COMPLETED) {
-      completed = true;
-    } else if (status.s == TransferStatusEnum::FAILED) {
-      LOG(ERROR) << "getBatchTransferStatus failed";
-#if defined(USE_DCU)
-      transfer_success = false;
-#endif
-      completed = true;
-    } else if (status.s == TransferStatusEnum::TIMEOUT) {
-      LOG(ERROR) << "Sync data transfer timeout";
-#if defined(USE_DCU)
-      transfer_success = false;
-#endif
-      completed = true;
-    }
-  }
+  const bool transfer_success = wait_batch(engine, batch_id);
 
   s = engine->freeBatchID(batch_id);
   if (!s.ok()) {
@@ -582,11 +574,7 @@ bool MooncakeTransferEngine::move_memory_blocks(
     return false;
   }
 
-#if defined(USE_DCU)
   return transfer_success;
-#else
-  return true;
-#endif
 }
 
 bool MooncakeTransferEngine::move_memory_by_global_offsets(
@@ -656,25 +644,7 @@ bool MooncakeTransferEngine::move_memory_by_global_offsets(
     return false;
   }
 
-  TransferStatus status;
-  bool completed = false;
-  while (!completed) {
-    s = engine->getBatchTransferStatus(batch_id, status);
-    if (!s.ok()) {
-      LOG(ERROR) << "getBatchTransferStatus not ok";
-      completed = true;
-    }
-
-    if (status.s == TransferStatusEnum::COMPLETED) {
-      completed = true;
-    } else if (status.s == TransferStatusEnum::FAILED) {
-      LOG(ERROR) << "getBatchTransferStatus failed";
-      completed = true;
-    } else if (status.s == TransferStatusEnum::TIMEOUT) {
-      LOG(ERROR) << "Sync data transfer timeout";
-      completed = true;
-    }
-  }
+  const bool transfer_success = wait_batch(engine, batch_id);
 
   s = engine->freeBatchID(batch_id);
   if (!s.ok()) {
@@ -682,7 +652,7 @@ bool MooncakeTransferEngine::move_memory_by_global_offsets(
     return false;
   }
 
-  return true;
+  return transfer_success;
 }
 
 bool MooncakeTransferEngine::pull_memory_blocks(
