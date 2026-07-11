@@ -40,7 +40,7 @@ limitations under the License.
 namespace xllm::kernel::npu {
 namespace {
 
-constexpr int64_t kRecConstrainedTopKFusedMaxK = 256;
+constexpr int64_t kRecConstrainedTopKFusedMaxK = 512;
 
 bool tensors_on_same_device(const torch::Tensor& first,
                             const torch::Tensor& second) {
