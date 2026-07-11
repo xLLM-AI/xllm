@@ -99,6 +99,18 @@ inline size_t maybe_align_cp_prefill_tokens(const Sequence* sequence,
 
 }  // namespace
 
+void CancelRequestQueue::submit(std::shared_ptr<Request> request) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  requests_.emplace_back(std::move(request));
+}
+
+std::vector<std::shared_ptr<Request>> CancelRequestQueue::take_all() {
+  std::vector<std::shared_ptr<Request>> requests;
+  std::lock_guard<std::mutex> lock(mutex_);
+  requests.swap(requests_);
+  return requests;
+}
+
 ContinuousScheduler::ContinuousScheduler(Engine* engine, const Options& options)
     : options_(options),
       engine_(engine),
@@ -130,11 +142,16 @@ ContinuousScheduler::ContinuousScheduler(Engine* engine, const Options& options)
   profile_manager_ =
       std::make_unique<ProfileManager>(engine, profile_manager_options);
 
+  cancel_request_queue_ = std::make_shared<CancelRequestQueue>();
   response_processor_ = std::make_unique<AsyncResponseProcessor>(
       engine_->tokenizer(),
       options_.instance_role(),
       options_.enable_service_routing(),
-      options_.disable_log_stats());
+      options_.disable_log_stats(),
+      [cancel_request_queue =
+           cancel_request_queue_](std::shared_ptr<Request> request) {
+        cancel_request_queue->submit(std::move(request));
+      });
   create_waiting_queue(options);
   create_running_queue(options);
   if (options_.enable_service_routing()) {
@@ -1210,6 +1227,7 @@ std::vector<Batch> ContinuousScheduler::schedule_request(
   const auto deadline = absl::Now() + timeout;
   std::vector<Batch> batch;
   while (true) {
+    apply_cancel_requests();
     batch = prepare_batch();
     bool all_empty =
         std::all_of(batch.begin(), batch.end(), [](const Batch& one_batch) {
@@ -1235,6 +1253,14 @@ std::vector<Batch> ContinuousScheduler::schedule_request(
   }
   // return an empty batch
   return batch;
+}
+
+void ContinuousScheduler::apply_cancel_requests() {
+  std::vector<std::shared_ptr<Request>> requests =
+      cancel_request_queue_->take_all();
+  for (const std::shared_ptr<Request>& request : requests) {
+    request->set_cancel();
+  }
 }
 
 // step the scheduler forward by one step
