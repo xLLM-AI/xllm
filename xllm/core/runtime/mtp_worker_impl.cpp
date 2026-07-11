@@ -546,6 +546,54 @@ runtime::Options MTPDraftOptions(const runtime::Options& options) {
   return opts;
 }
 
+bool use_replicated_qwen35_mtp_draft(bool enabled_by_config) {
+#if defined(USE_NPU)
+  return enabled_by_config ||
+         util::get_bool_env("XLLM_NPU_REPLICATE_QWEN35_MTP_DRAFT", false);
+#else
+  return false;
+#endif
+}
+
+bool use_replicated_qwen35_mtp_draft(const runtime::Options& options) {
+  return use_replicated_qwen35_mtp_draft(options.enable_mtp_draft_tp1());
+}
+
+ParallelArgs MTPDraftParallelArgs(const ParallelArgs& parallel_args,
+                                  const runtime::Options& options) {
+  if (!use_replicated_qwen35_mtp_draft(options)) {
+    return parallel_args;
+  }
+  CHECK(parallel_args.single_rank_group_ != nullptr)
+      << "replicated Qwen3.5 MTP draft requires a single-rank process group";
+  ParallelArgs draft_args = parallel_args;
+  draft_args.rank(0)
+      .world_size(1)
+      .dp_size(1)
+      .ep_size(1)
+      .cp_size(1)
+      .tp_size(1)
+      .sp_size(1);
+  draft_args.mapping_data(nlohmann::json{});
+  draft_args.process_group_ = parallel_args.single_rank_group_;
+  draft_args.dp_local_process_group_ = parallel_args.single_rank_group_;
+  draft_args.lm_head_group_ = parallel_args.tp_group_;
+  draft_args.tp_group_ = parallel_args.single_rank_group_;
+  draft_args.sp_group_ = parallel_args.single_rank_group_;
+  draft_args.moe_ep_group_ = parallel_args.single_rank_group_;
+  draft_args.moe_tp_group_ = parallel_args.single_rank_group_;
+  return draft_args;
+}
+
+KVCacheShape MTPDraftKVCacheShape(const KVCacheShape& target_shape,
+                                  const ModelArgs& draft_model_args,
+                                  int64_t block_size) {
+  KVCacheCapacity draft_capacity;
+  draft_capacity.n_blocks(target_shape.key_cache_shape()[0])
+      .block_size(block_size);
+  return KVCacheShape(draft_capacity, draft_model_args, /*world_size=*/1);
+}
+
 bool is_qwen3_5_target_model_type(const std::string& model_type) {
   return model_type == "qwen3_5" || model_type == "qwen3_5_moe" ||
          model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text" ||
@@ -577,8 +625,8 @@ MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
                              bool enable_opt_validate_probs)
     : SpeculativeWorkerImpl(parallel_args, device, options, target_options),
       enable_opt_validate_probs_(enable_opt_validate_probs) {
-  draft_impl_ =
-      std::make_unique<LLMWorkerImpl>(parallel_args, device, draft_options);
+  draft_impl_ = std::make_unique<LLMWorkerImpl>(
+      MTPDraftParallelArgs(parallel_args, options), device, draft_options);
 }
 
 bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
@@ -604,24 +652,27 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
   if (draft_impl_ != nullptr &&
       draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
     // Share lm_head and word_embedding between target and draft models
+    if (!use_replicated_qwen35_mtp_draft(options_)) {
 #if defined(USE_NPU)
-    if (::xllm::KernelConfig::get_instance().npu_kernel_backend() != "TORCH") {
-      auto head = impl_->get_npu_lm_head();
-      draft_impl_->set_npu_lm_head(head);
-      auto word_embedding = impl_->get_npu_word_embedding();
-      draft_impl_->set_npu_word_embedding(word_embedding);
-    } else {
+      if (::xllm::KernelConfig::get_instance().npu_kernel_backend() !=
+          "TORCH") {
+        auto head = impl_->get_npu_lm_head();
+        draft_impl_->set_npu_lm_head(head);
+        auto word_embedding = impl_->get_npu_word_embedding();
+        draft_impl_->set_npu_word_embedding(word_embedding);
+      } else {
+        auto head = impl_->get_lm_head();
+        draft_impl_->set_lm_head(head);
+        auto word_embedding = impl_->get_word_embedding();
+        draft_impl_->set_word_embedding(word_embedding);
+      }
+#else
       auto head = impl_->get_lm_head();
       draft_impl_->set_lm_head(head);
       auto word_embedding = impl_->get_word_embedding();
       draft_impl_->set_word_embedding(word_embedding);
-    }
-#else
-    auto head = impl_->get_lm_head();
-    draft_impl_->set_lm_head(head);
-    auto word_embedding = impl_->get_word_embedding();
-    draft_impl_->set_word_embedding(word_embedding);
 #endif
+    }
   }
 #if defined(USE_NPU)
   if (result && use_qwen3_5_spec_verify_path()) {
@@ -727,7 +778,16 @@ bool MTPWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   bool draft_allocated = true;
   const auto draft_status = draft_impl_->get_status();
   if (draft_status == WorkerImpl::Status::LOADED) {
-    draft_allocated = draft_impl_->allocate_kv_cache(kv_cache_shape);
+    if (use_replicated_qwen35_mtp_draft(options_)) {
+      const KVCacheShape draft_shape =
+          MTPDraftKVCacheShape(kv_cache_shape,
+                               draft_impl_->context_.get_model_args(),
+                               options_.block_size());
+      draft_shape.print_shapes();
+      draft_allocated = draft_impl_->allocate_kv_cache(draft_shape);
+    } else {
+      draft_allocated = draft_impl_->allocate_kv_cache(kv_cache_shape);
+    }
   } else {
     CHECK_EQ(draft_status, WorkerImpl::Status::READY);
   }
@@ -776,8 +836,18 @@ bool MTPWorkerImpl::allocate_kv_cache_with_transfer(
   bool draft_allocated = true;
   const auto draft_status = draft_impl_->get_status();
   if (draft_status == WorkerImpl::Status::LOADED) {
-    draft_allocated = draft_impl_->allocate_kv_cache_with_transfer(
-        kv_cache_transfer_, kv_cache_shape);
+    if (use_replicated_qwen35_mtp_draft(options_)) {
+      const KVCacheShape draft_shape =
+          MTPDraftKVCacheShape(kv_cache_shape,
+                               draft_impl_->context_.get_model_args(),
+                               options_.block_size());
+      draft_shape.print_shapes();
+      draft_allocated = draft_impl_->allocate_kv_cache_with_transfer(
+          kv_cache_transfer_, draft_shape);
+    } else {
+      draft_allocated = draft_impl_->allocate_kv_cache_with_transfer(
+          kv_cache_transfer_, kv_cache_shape);
+    }
   } else {
     CHECK_EQ(draft_status, WorkerImpl::Status::READY);
   }

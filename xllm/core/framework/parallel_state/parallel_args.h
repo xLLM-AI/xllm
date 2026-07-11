@@ -207,6 +207,9 @@ struct ParallelArgs {
   ProcessGroup* process_group_ = nullptr;
   ProcessGroup* dp_local_process_group_ = nullptr;
   ProcessGroup* tp_group_ = nullptr;
+  // Optional output-projection group for models whose body and LMHead use
+  // different tensor-parallel strategies.
+  ProcessGroup* lm_head_group_ = nullptr;
   ProcessGroup* encoder_dp_group_ = nullptr;
   ProcessGroup* single_rank_group_ = nullptr;
   // Sequence-parallel communication group used by prefill attention.

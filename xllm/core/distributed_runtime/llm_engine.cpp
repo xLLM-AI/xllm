@@ -459,6 +459,15 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
   estimate_options.enable_rdma_scale_padding =
       options_.instance_role() != InstanceRole::DEFAULT;
+  if ((options_.enable_mtp_draft_tp1() ||
+       util::get_bool_env("XLLM_NPU_REPLICATE_QWEN35_MTP_DRAFT", false)) &&
+      options_.is_draft_engine()) {
+    estimate_options.world_size = 1;
+    estimate_options.n_local_kv_heads =
+        args_.n_kv_heads().value_or(args_.n_heads());
+    estimate_options.n_local_linear_k_heads = args_.linear_num_key_heads();
+    estimate_options.n_local_linear_v_heads = args_.linear_num_value_heads();
+  }
 
   KVCacheCapacity kv_cache_cap =
       ::xllm::estimate_kv_cache_capacity(args_, estimate_options);

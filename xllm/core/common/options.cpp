@@ -49,6 +49,7 @@ std::string Options::to_string() const {
      << speculative_suffix_max_cached_requests()
      << ", speculative_suffix_use_tree_spec: "
      << speculative_suffix_use_tree_spec()
+     << ", enable_mtp_draft_tp1: " << enable_mtp_draft_tp1()
      << ", num_request_handling_threads: " << num_request_handling_threads()
      << ", communication_backend: " << communication_backend().value_or("null")
      << ", rank_tablefile: " << rank_tablefile().value_or("null")

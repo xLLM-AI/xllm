@@ -295,6 +295,9 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
   const std::string& indexer_cache_dtype =
       KVCacheConfig::get_instance().indexer_cache_dtype();
   const char* indexer_cache_dtype_ptr = indexer_cache_dtype.c_str();
+  std::string enable_mtp_draft_tp1_str =
+      std::to_string(options.enable_mtp_draft_tp1());
+  const char* enable_mtp_draft_tp1_ptr = enable_mtp_draft_tp1_str.c_str();
   const char* worker_type_ptr = worker_type.to_string();
   std::string spawn_worker_bin_path =
       options.spawn_worker_path() + "/spawn_worker";
@@ -332,6 +335,7 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         sp_size_ptr,
                         cfg_size_ptr,
                         indexer_cache_dtype_ptr,
+                        enable_mtp_draft_tp1_ptr,
                         nullptr};
   static_assert(std::size(argv) == spawn_worker_protocol::kArgumentCount + 1);
   pid_t pid;

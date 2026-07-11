@@ -57,7 +57,8 @@ class SpawnWorkerServer final {
                              int32_t dp_size,
                              int32_t tp_size,
                              int32_t sp_size,
-                             int32_t cfg_size);
+                             int32_t cfg_size,
+                             bool enable_mtp_draft_tp1);
 
   ~SpawnWorkerServer();
 

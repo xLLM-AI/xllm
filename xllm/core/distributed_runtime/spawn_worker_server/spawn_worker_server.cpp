@@ -88,7 +88,8 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
                                      int32_t dp_size,
                                      int32_t tp_size,
                                      int32_t sp_size,
-                                     int32_t cfg_size) {
+                                     int32_t cfg_size,
+                                     bool enable_mtp_draft_tp1) {
   // TODO: pass whole xllm::runtime::Options here from main process.
   xllm::runtime::Options runner_options;
   const std::string backend = get_backend_from_worker_type(worker_type);
@@ -105,6 +106,7 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
       .num_decoding_tokens(num_decoding_tokens)
       .enable_prefill_sp(enable_prefill_sp)
       .enable_speculative_decode(enable_speculative_decode)
+      .enable_mtp_draft_tp1(enable_mtp_draft_tp1)
       .num_speculative_tokens(num_speculative_tokens)
       .speculative_algorithm(speculative_algorithm)
       .enable_schedule_overlap(/*enable_schedule_overlap=*/false)

@@ -541,7 +541,9 @@ ColumnParallelLinearImpl::ColumnParallelLinearImpl(const ModelContext& context)
           /*bias=*/false,
           /*gather_output=*/true,
           QuantArgs{},  // do not use quantization for lm_head
-          context.get_parallel_args().tp_group_,
+          context.get_parallel_args().lm_head_group_ != nullptr
+              ? context.get_parallel_args().lm_head_group_
+              : context.get_parallel_args().tp_group_,
           context.get_tensor_options()) {}
 
 // Linear layer with column parallelism.

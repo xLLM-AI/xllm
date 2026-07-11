@@ -95,6 +95,8 @@ class Options {
 
   PROPERTY(bool, speculative_suffix_use_tree_spec) = false;
 
+  PROPERTY(bool, enable_mtp_draft_tp1) = false;
+
   // thread num to handle requests
   PROPERTY(size_t, num_request_handling_threads) = 4;
 
