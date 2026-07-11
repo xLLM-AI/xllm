@@ -73,6 +73,7 @@ class DiTAssistantMaster : public Master {
   DiTAssistantMaster(const Options& options);
   ~DiTAssistantMaster();
   void run() override;
+  void wait() override;
 
   static void handle_signal(int signum) { running_ = false; }
 

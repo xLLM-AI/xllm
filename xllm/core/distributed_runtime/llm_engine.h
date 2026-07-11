@@ -117,6 +117,8 @@ class LLMEngine : public Engine {
 
   bool unlink_p2p(const std::vector<std::string>& remote_addrs) override;
 
+  bool shutdown_remote_workers() override;
+
   std::shared_ptr<DistManager> get_dist_manager() { return dist_manager_; };
 
   bool sleep(MasterStatus master_status) override;

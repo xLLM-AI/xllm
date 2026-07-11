@@ -150,6 +150,13 @@ class WorkerService : public proto::DistributeWorker {
                    proto::Status* resp,
                    ::google::protobuf::Closure* done) override;
 
+  // Shutdown RPC handler for multi-machine offline inference. Sends SIGTERM to
+  // self after a short delay (to allow the RPC response to be sent first).
+  void Shutdown(::google::protobuf::RpcController* controller,
+                const proto::Empty* req,
+                proto::Status* resp,
+                ::google::protobuf::Closure* done) override;
+
  private:
   void step(ForwardInput& fwd_input,
             torch::Tensor& next_tokens,

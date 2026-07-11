@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "distributed_runtime/dist_manager.h"
 
+#include <folly/futures/Future.h>
 #include <glog/logging.h>
 
 #include "comm_channel.h"
@@ -47,11 +48,13 @@ DistManager::DistManager(const runtime::Options& options)
 }
 
 DistManager::~DistManager() {
+  shutdown_remote_workers();
+
   // Stop health check
   HealthCheckManager::instance().stop_health_check_thread();
 
   XllmServer* collective_server =
-      ServerRegistry::get_instance().get_server(server_name_);
+      ServerRegistry::get_instance().try_get_server(server_name_);
   if (collective_server != nullptr) {
     collective_server->stop();
 
@@ -177,6 +180,8 @@ void DistManager::setup_multi_node_workers(
   const int32_t each_node_ranks = static_cast<int32_t>(devices.size());
   const int32_t world_size = each_node_ranks * options.nnodes();
   const int32_t base_rank = options.node_rank() * each_node_ranks;
+  local_rank_start_ = base_rank;
+  local_rank_count_ = each_node_ranks;
   const int32_t dp_size = options.dp_size();
   const int32_t cp_size = options.cp_size();
   const int32_t ep_size = options.ep_size();
@@ -334,5 +339,43 @@ void DistManager::setup_multi_node_workers(
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
   }
+}
+
+bool DistManager::shutdown_remote_workers() {
+  if (remote_workers_shutdown_) {
+    return true;
+  }
+  remote_workers_shutdown_ = true;
+
+  if (worker_clients_.empty()) {
+    return true;
+  }
+
+  std::vector<folly::SemiFuture<bool>> futures;
+  futures.reserve(worker_clients_.size());
+  const int32_t local_rank_end = local_rank_start_ + local_rank_count_;
+  for (size_t worker_rank = 0; worker_rank < worker_clients_.size();
+       ++worker_rank) {
+    const int32_t global_rank = static_cast<int32_t>(worker_rank);
+    if (global_rank >= local_rank_start_ && global_rank < local_rank_end) {
+      continue;
+    }
+    if (local_rank_count_ > 1 && global_rank % local_rank_count_ != 0) {
+      continue;
+    }
+    futures.emplace_back(worker_clients_[worker_rank]->shutdown_async());
+  }
+  if (futures.empty()) {
+    return true;
+  }
+
+  bool success = true;
+  auto results = folly::collectAll(futures).get();
+  for (const auto& result : results) {
+    if (!result.hasValue() || !result.value()) {
+      success = false;
+    }
+  }
+  return success;
 }
 }  // namespace xllm

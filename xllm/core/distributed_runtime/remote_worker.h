@@ -157,6 +157,10 @@ class RemoteWorker : public WorkerClient {
 
   virtual folly::SemiFuture<bool> stop_profile_async() override;
 
+  // Asynchronously request this remote worker to shut down
+  // (multi-machine offline inference only).
+  virtual folly::SemiFuture<bool> shutdown_async() override;
+
  private:
   DISALLOW_COPY_AND_ASSIGN(RemoteWorker);
 

@@ -17,10 +17,14 @@ limitations under the License.
 #include <brpc/closure_guard.h>
 #include <brpc/controller.h>
 #include <glog/logging.h>
+#include <signal.h>
 #include <torch/torch.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
+#include <chrono>
+#include <thread>
 #include <vector>
 
 #include "common/device_monitor.h"
@@ -716,6 +720,20 @@ void WorkerService::StopProfile(::google::protobuf::RpcController* controller,
   });
 
   return;
+}
+
+void WorkerService::Shutdown(::google::protobuf::RpcController* controller,
+                             const proto::Empty* req,
+                             proto::Status* resp,
+                             ::google::protobuf::Closure* done) {
+  (void)controller;
+  (void)req;
+  brpc::ClosureGuard done_guard(done);
+  resp->set_ok(true);
+  std::thread([]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    kill(getpid(), SIGTERM);
+  }).detach();
 }
 
 void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,

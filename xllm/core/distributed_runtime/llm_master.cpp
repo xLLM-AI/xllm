@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <atomic>
 #include <boost/algorithm/string.hpp>
+#include <chrono>
 #include <csignal>
 #include <memory>
 #include <thread>
@@ -593,6 +594,10 @@ bool LLMMaster::unlink_p2p(const std::vector<std::string>& remote_addrs) {
   return engine_->unlink_p2p(remote_addrs);
 }
 
+bool LLMMaster::shutdown_remote_workers() {
+  return engine_->shutdown_remote_workers();
+}
+
 LLMAssistantMaster::LLMAssistantMaster(const Options& options)
     : Master(
           options,
@@ -610,10 +615,8 @@ LLMAssistantMaster::LLMAssistantMaster(const Options& options)
 }
 
 LLMAssistantMaster::~LLMAssistantMaster() {
-  // wait for the loop thread to finish
-  if (loop_thread_.joinable()) {
-    loop_thread_.join();
-  }
+  running_ = false;
+  wait();
 }
 
 void LLMAssistantMaster::run() {
@@ -625,6 +628,12 @@ void LLMAssistantMaster::run() {
       std::this_thread::sleep_for(std::chrono::seconds(5));
     }
   });
+}
+
+void LLMAssistantMaster::wait() {
+  if (loop_thread_.joinable()) {
+    loop_thread_.join();
+  }
 }
 
 // ============== Async RL training support: Pause/Resume ==============

@@ -20,7 +20,7 @@ import time
 from . import utils
 from typing import Any, List, Optional, Union
 
-from xllm_export import (LLMMaster, Options, RequestOutput,
+from xllm_export import (LLMAssistantMaster, LLMMaster, Options, RequestOutput,
                          RequestParams)
 from .errors import ValidationError
 
@@ -44,6 +44,7 @@ class Embedding:
         expert_parallel_degree: int = 0,
         enable_chunked_prefill: bool = True,
         enable_prefill_sp: bool = False,
+        master_node_addr: str = '',
         instance_role: str = 'DEFAULT',
         nnodes: int = 1,
         node_rank: int = 0,
@@ -95,8 +96,12 @@ class Embedding:
         options.expert_parallel_degree = expert_parallel_degree
         options.enable_chunked_prefill = enable_chunked_prefill
         options.enable_prefill_sp = enable_prefill_sp
-        free_port = utils.get_free_port()
-        options.master_node_addr = "127.0.0.1:" + str(free_port)
+        utils.require_multi_node_master_addr(nnodes, master_node_addr)
+        if master_node_addr:
+            options.master_node_addr = master_node_addr
+        else:
+            free_port = utils.get_free_port()
+            options.master_node_addr = "127.0.0.1:" + str(free_port)
         options.nnodes = nnodes
         options.node_rank = node_rank
         options.dp_size = dp_size
@@ -114,10 +119,18 @@ class Embedding:
         options.input_shm_size = input_shm_size
         options.output_shm_size = output_shm_size
         utils._configure_cpp_chat_template(use_cpp_chat_template, model_type)
+        self._is_driver = not utils.is_offline_worker_node(nnodes, node_rank)
+        if not self._is_driver:
+            self.master = LLMAssistantMaster(options)
+            self.master.run()
+            self.master.wait()
+            sys.exit(0)
         self.master = LLMMaster(options)
 
     def finish(self) -> None:
         try:
+            if getattr(self, "_is_driver", True):
+                self.master.shutdown_remote_workers()
             #os.kill(os.getpid(), signal.SIGTERM)
             #os.kill(os.getpid(), signal.SIGKILL)
             utils.terminate_process(os.getpid())
@@ -130,6 +143,8 @@ class Embedding:
         request_params: Optional[Union[RequestParams, List[RequestParams]]] = None,
         wait_for_schedule: bool = True,
     ) -> List[RequestOutput]:
+        if not getattr(self, "_is_driver", True):
+            raise RuntimeError("Only node_rank=0 can call embedding().")
         if request_params is None:
             request_params = RequestParams()
         if isinstance(inputs, str):

@@ -57,6 +57,11 @@ class WorkerClient {
 
   virtual folly::SemiFuture<bool> stop_profile_async();
 
+  // Request the worker to terminate. Currently only used by multi-machine
+  // offline inference. Base implementation is a no-op; RemoteWorker overrides
+  // to send the Shutdown RPC.
+  virtual folly::SemiFuture<bool> shutdown_async();
+
   virtual std::tuple<int64_t, int64_t> estimate_kv_cache_capacity();
 
   // allocate kv cache. blocking call

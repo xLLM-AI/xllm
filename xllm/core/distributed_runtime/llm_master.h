@@ -100,6 +100,8 @@ class LLMMaster : public Master {
   void resume_scheduler();
   bool is_scheduler_paused() const;
 
+  bool shutdown_remote_workers() override;
+
  private:
   std::shared_ptr<Request> generate_request(
       std::string prompt,
@@ -150,6 +152,7 @@ class LLMAssistantMaster : public Master {
   LLMAssistantMaster(const Options& options);
   ~LLMAssistantMaster();
   void run() override;
+  void wait() override;
 
   static void handle_signal(int signum) { running_ = false; }
 

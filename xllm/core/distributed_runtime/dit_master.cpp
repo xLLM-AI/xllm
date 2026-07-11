@@ -165,10 +165,8 @@ DiTAssistantMaster::DiTAssistantMaster(const Options& options)
 }
 
 DiTAssistantMaster::~DiTAssistantMaster() {
-  // wait for the loop thread to finish
-  if (loop_thread_.joinable()) {
-    loop_thread_.join();
-  }
+  running_ = false;
+  wait();
 }
 
 void DiTAssistantMaster::run() {
@@ -180,6 +178,12 @@ void DiTAssistantMaster::run() {
       std::this_thread::sleep_for(std::chrono::seconds(5));
     }
   });
+}
+
+void DiTAssistantMaster::wait() {
+  if (loop_thread_.joinable()) {
+    loop_thread_.join();
+  }
 }
 
 }  // namespace xllm

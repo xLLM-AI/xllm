@@ -84,6 +84,8 @@ class SpeculativeEngine : public Engine {
                       const int32_t src_dp_size,
                       const int32_t src_kv_split_size = 1) override;
 
+  bool shutdown_remote_workers() override;
+
  protected:
   SpeculativeEngine(const runtime::Options& options, bool use_draft_engine);
 

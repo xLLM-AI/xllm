@@ -53,6 +53,8 @@ class VLMEngine : public Engine {
   // return the active activation memory
   std::vector<int64_t> get_active_activation_memory() const override;
 
+  bool shutdown_remote_workers() override;
+
  private:
   bool init_model();
   KVCacheCapacity estimate_kv_cache_capacity();

@@ -32,6 +32,11 @@ class DistManager {
     return worker_clients_;
   };
 
+  // Shut down all remote (non-local) worker processes via the Shutdown RPC.
+  // Currently only used by multi-machine offline inference. Sends shutdown
+  // only to workers on other machines; skips local ranks. Idempotent.
+  bool shutdown_remote_workers();
+
  private:
   DISALLOW_COPY_AND_ASSIGN(DistManager);
   void setup_multi_node_workers(const runtime::Options& options,
@@ -57,5 +62,8 @@ class DistManager {
   std::vector<std::unique_ptr<WorkerServer>> servers_;
 
   std::string server_name_;
+  int32_t local_rank_start_ = 0;
+  int32_t local_rank_count_ = 0;
+  bool remote_workers_shutdown_ = false;
 };
 }  // namespace xllm

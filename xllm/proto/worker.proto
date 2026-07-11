@@ -371,4 +371,8 @@ service DistributeWorker {
   rpc UpdateWeights (UpdateWeightsRequest) returns (Status);
   rpc StartProfile (Empty) returns (Status);
   rpc StopProfile (Empty) returns (Status);
+  // Gracefully terminate a remote worker process. Currently only used by
+  // multi-machine offline inference: the driver node (node_rank=0) calls this
+  // on every remote worker after generation completes so all processes exit.
+  rpc Shutdown (Empty) returns (Status);
 }

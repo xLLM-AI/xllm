@@ -82,6 +82,8 @@ class VLMMaster : public Master {
   // generate will run all requests, this is an blocking call
   void generate();
 
+  bool shutdown_remote_workers() override;
+
   int get_image_limit() { return options_.limit_image_per_prompt(); }
 
  private:
@@ -129,6 +131,7 @@ class VLMAssistantMaster : public Master {
   explicit VLMAssistantMaster(const Options& options);
   ~VLMAssistantMaster();
   void run() override;
+  void wait() override;
 
   static void handle_signal(int signum) { running_ = false; }
 

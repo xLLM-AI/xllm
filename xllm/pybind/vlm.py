@@ -19,7 +19,7 @@ import sys
 import threading
 from . import utils
 from typing import Any, Callable, Dict, List, Optional, Union
-from xllm_export import (VLMMaster, Options, RequestOutput,
+from xllm_export import (VLMAssistantMaster, VLMMaster, Options, RequestOutput,
                          RequestParams, MMData)
 from .errors import ValidationError
 from .params import (
@@ -70,6 +70,7 @@ class VLM:
         expert_parallel_degree: int = 0,
         enable_chunked_prefill: bool = True,
         enable_prefill_sp: bool = False,
+        master_node_addr: str = '',
         instance_role: str = 'DEFAULT',
         transfer_listen_port: int = 26000,
         nnodes: int = 1,
@@ -128,8 +129,12 @@ class VLM:
         options.expert_parallel_degree = expert_parallel_degree
         options.enable_chunked_prefill = enable_chunked_prefill
         options.enable_prefill_sp = enable_prefill_sp
-        free_port = utils.get_free_port()
-        options.master_node_addr = "127.0.0.1:" + str(free_port)
+        utils.require_multi_node_master_addr(nnodes, master_node_addr)
+        if master_node_addr:
+            options.master_node_addr = master_node_addr
+        else:
+            free_port = utils.get_free_port()
+            options.master_node_addr = "127.0.0.1:" + str(free_port)
         options.transfer_listen_port = transfer_listen_port
         options.nnodes = nnodes
         options.node_rank = node_rank
@@ -151,10 +156,18 @@ class VLM:
         options.output_shm_size = output_shm_size
         options.disable_log_stats = disable_log_stats
         utils._configure_cpp_chat_template(use_cpp_chat_template, model_type)
+        self._is_driver = not utils.is_offline_worker_node(nnodes, node_rank)
+        if not self._is_driver:
+            self.master = VLMAssistantMaster(options)
+            self.master.run()
+            self.master.wait()
+            sys.exit(0)
         self.master = VLMMaster(options)
 
     def finish(self) -> None:
         try:
+            if getattr(self, "_is_driver", True):
+                self.master.shutdown_remote_workers()
             #os.kill(os.getpid(), signal.SIGTERM)
             #os.kill(os.getpid(), signal.SIGKILL)
             utils.terminate_process(os.getpid())
@@ -177,6 +190,8 @@ class VLM:
         use_tqdm: Union[bool, Callable[..., Any]] = True,
         **kwargs: Any,
     ) -> List[RequestOutput]:
+        if not getattr(self, "_is_driver", True):
+            raise RuntimeError("Only node_rank=0 can call generate().")
         from . import mm_utils
         prompts, mm_datas, image_urls = mm_utils.normalize_vllm_style_inputs(prompts)
 

@@ -70,6 +70,20 @@ bool CommChannel::check_health() {
   return resp.ok();
 }
 
+bool CommChannel::shutdown() {
+  proto::Empty req;
+  proto::Status resp;
+  brpc::Controller cntl;
+
+  cntl.set_timeout_ms(5000);
+  stub_->Shutdown(&cntl, &req, &resp, nullptr);
+  if (cntl.Failed() || !resp.ok()) {
+    LOG(ERROR) << "Shutdown failed: " << cntl.ErrorText();
+    return false;
+  }
+  return true;
+}
+
 bool CommChannel::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   if (!kv_cache_shape.has_key_cache_shape() ||
       kv_cache_shape.key_cache_shape().empty()) {

@@ -194,6 +194,10 @@ folly::SemiFuture<bool> WorkerClient::stop_profile_async() {
   return worker_->stop_profile_async();
 }
 
+folly::SemiFuture<bool> WorkerClient::shutdown_async() {
+  return folly::makeSemiFuture(true);
+}
+
 const torch::Device& WorkerClient::device() const { return worker_->device(); }
 
 folly::SemiFuture<std::optional<RawForwardOutput>>

@@ -63,6 +63,14 @@ class Master {
     return false;
   }
 
+  // Shut down all remote worker machines. Currently only used by
+  // multi-machine offline inference: the driver (node_rank=0) calls this
+  // inside LLM.finish() to terminate assistant machines so all processes
+  // exit cleanly.
+  virtual bool shutdown_remote_workers() { return false; }
+
+  virtual void wait() {}
+
   MasterStatus get_master_status() const { return master_status_; }
 
   bool is_sleeping() const { return master_status_ != MasterStatus::WAKEUP; }

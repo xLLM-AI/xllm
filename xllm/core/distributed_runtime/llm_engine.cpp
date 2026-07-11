@@ -910,6 +910,13 @@ bool LLMEngine::unlink_p2p(const std::vector<std::string>& remote_addrs) {
   return true;
 }
 
+bool LLMEngine::shutdown_remote_workers() {
+  if (!dist_manager_) {
+    return true;
+  }
+  return dist_manager_->shutdown_remote_workers();
+}
+
 ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
   if (worker_clients_.empty()) {
     // empty worker, return

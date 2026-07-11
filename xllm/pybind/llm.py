@@ -22,8 +22,8 @@ import uuid
 from . import utils
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
-from xllm_export import (LLMMaster, VLMMaster, Options, RequestOutput,
-                         RequestParams)
+from xllm_export import (LLMAssistantMaster, LLMMaster, VLMAssistantMaster,
+                         VLMMaster, Options, RequestOutput, RequestParams)
 from .errors import ValidationError
 from .params import (
     BeamSearchParams,
@@ -185,6 +185,7 @@ class LLM:
         options.expert_parallel_degree = expert_parallel_degree
         options.enable_chunked_prefill = enable_chunked_prefill
         options.enable_prefill_sp = enable_prefill_sp
+        utils.require_multi_node_master_addr(nnodes, master_node_addr)
         if master_node_addr:
             options.master_node_addr = master_node_addr
         else:
@@ -216,6 +217,15 @@ class LLM:
         options.disable_log_stats = disable_log_stats
         options.enable_sleep_mode = enable_sleep_mode
         self._backend = backend
+        self._is_driver = not utils.is_offline_worker_node(nnodes, node_rank)
+        if not self._is_driver:
+            if backend == "vlm":
+                self.master = VLMAssistantMaster(options)
+            else:
+                self.master = LLMAssistantMaster(options)
+            self.master.run()
+            self.master.wait()
+            sys.exit(0)
         if backend == "vlm":
             self.master = VLMMaster(options)
         else:
@@ -223,6 +233,8 @@ class LLM:
 
     def finish(self) -> None:
         try:
+            if getattr(self, "_is_driver", True):
+                self.master.shutdown_remote_workers()
             #os.kill(os.getpid(), signal.SIGTERM)
             #os.kill(os.getpid(), signal.SIGKILL)
             utils.terminate_process(os.getpid())
@@ -279,6 +291,8 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., Any]] = True,
         **kwargs: Any,
     ) -> List[RequestOutput]:
+        if not getattr(self, "_is_driver", True):
+            raise RuntimeError("Only node_rank=0 can call generate().")
         request_params = kwargs.pop("request_params", None)
         if kwargs:
             unknown = ", ".join(kwargs.keys())

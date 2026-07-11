@@ -445,6 +445,13 @@ void VLMEngine::setup_workers(const runtime::Options& options) {
   worker_clients_ = dist_manager_->get_worker_clients();
 }
 
+bool VLMEngine::shutdown_remote_workers() {
+  if (!dist_manager_) {
+    return true;
+  }
+  return dist_manager_->shutdown_remote_workers();
+}
+
 std::vector<int64_t> VLMEngine::get_active_activation_memory() const {
   // call worker to get active activation memory
   std::vector<folly::SemiFuture<int64_t>> futures;

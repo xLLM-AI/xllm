@@ -144,6 +144,9 @@ PYBIND11_MODULE(xllm_export, m) {
       .def("options",
            &LLMMaster::options,
            py::call_guard<py::gil_scoped_release>())
+      .def("shutdown_remote_workers",
+           &LLMMaster::shutdown_remote_workers,
+           py::call_guard<py::gil_scoped_release>())
       .def(
           "build_sample_slots",
           [](const LLMMaster& self,
@@ -193,6 +196,20 @@ PYBIND11_MODULE(xllm_export, m) {
           py::call_guard<py::gil_scoped_release>())
       .def("__repr__", [](const LLMMaster& self) {
         return "LLMMaster({})"_s.format(self.options());
+      });
+
+  py::class_<LLMAssistantMaster>(m, "LLMAssistantMaster")
+      .def(py::init<const Options&>(),
+           py::arg("options"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("run",
+           &LLMAssistantMaster::run,
+           py::call_guard<py::gil_scoped_release>())
+      .def("wait",
+           &LLMAssistantMaster::wait,
+           py::call_guard<py::gil_scoped_release>())
+      .def("__repr__", [](const LLMAssistantMaster& self) {
+        return "LLMAssistantMaster({})"_s.format(self.options());
       });
 
   // 3. export SampleSlot
@@ -391,8 +408,25 @@ PYBIND11_MODULE(xllm_export, m) {
       .def("generate",
            &VLMMaster::generate,
            py::call_guard<py::gil_scoped_release>())
+      .def("shutdown_remote_workers",
+           &VLMMaster::shutdown_remote_workers,
+           py::call_guard<py::gil_scoped_release>())
       .def("__repr__", [](const VLMMaster& self) {
         return "VLMMaster({})"_s.format(self.options());
+      });
+
+  py::class_<VLMAssistantMaster>(m, "VLMAssistantMaster")
+      .def(py::init<const Options&>(),
+           py::arg("options"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("run",
+           &VLMAssistantMaster::run,
+           py::call_guard<py::gil_scoped_release>())
+      .def("wait",
+           &VLMAssistantMaster::wait,
+           py::call_guard<py::gil_scoped_release>())
+      .def("__repr__", [](const VLMAssistantMaster& self) {
+        return "VLMAssistantMaster({})"_s.format(self.options());
       });
 
   // 12. export helpers

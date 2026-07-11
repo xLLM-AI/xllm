@@ -293,4 +293,11 @@ bool SpeculativeEngine::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
   return engine_->unlink_cluster(
       cluster_ids, addrs, ports, src_dp_size, src_kv_split_size);
 };
+
+bool SpeculativeEngine::shutdown_remote_workers() {
+  if (!dist_manager_) {
+    return true;
+  }
+  return dist_manager_->shutdown_remote_workers();
+}
 }  // namespace xllm
