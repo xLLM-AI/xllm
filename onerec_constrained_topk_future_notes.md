@@ -146,6 +146,72 @@ perf-clean:
 Do not retry this as a production patch unless a new profiler shows the larger
 sort block changes a different shape favorably.
 
+## Post-P6 Follow-up Plan
+
+The next useful optimization is not another constant tweak. The only
+evidence-backed mainline is a real P3 merge redesign inside
+`RecConstrainedTopK`.
+
+### Priority 1: P3 Merge Redesign
+
+Goal: reduce the scalar-heavy merge after block-local topK, especially for
+`top_k=384/512`.
+
+Why this is first:
+
+- P6 already removed the old composite `SearchSorted + large GatherV3 + TopKV2`
+  path.
+- The remaining fused kernel still uses existing one-pass/block-sort/scalar
+  merge logic.
+- The `2048 -> 4096` block-size experiment regressed, so the next attempt must
+  change the merge algorithm, not only the block size.
+
+Required design:
+
+- Keep block-local topK as the producer stage.
+- Add a two-stage merge that keeps block topK candidates in UB when possible.
+- Prefer vector compare/select merge over scalar heap maintenance.
+- Use the current scalar heap as the fallback for unsupported degree/topK/UB
+  shapes.
+- Keep output token/logprob order and tie handling compatible with the
+  composite oracle.
+
+Before coding:
+
+- Capture or reuse a P6 fused profile that shows `RecConstrainedTopK` scalar
+  time is material for beam384/512.
+- Identify exact row/degree/topK shapes that enter the merge path.
+- Estimate UB usage for block topK buffers, merge temp buffers, output tokens,
+  output logprobs, and candidate logits under `K=512`.
+- Define a development-only guard for the prototype so the current P6 path
+  remains the default until perf-clean passes.
+
+Validation gate:
+
+- Full custom-op correctness for `top_k=128/256/384/512`.
+- Temperature coverage: no temperature plus scalar or per-row temperature.
+- HTTP/debug composite-vs-fused compare for beam384 and beam512.
+- Profiler shows lower `RecConstrainedTopK` total/avg and lower scalar
+  contribution, without offsetting MTE/UB traffic.
+- Perf-clean must improve QPS or p99 at beam512 c1/c2. If only profiler
+  improves but end-to-end regresses, reject the patch.
+
+### Deferred Experiments
+
+These are not part of the next code patch. Each needs its own profiler trigger
+and rollback plan.
+
+| Direction | Why deferred | Reopen trigger |
+| --- | --- | --- |
+| Step0 multi-core split | Prior prototype improved local `rows=1` kernel time but regressed perf-clean because `SyncAll`, workspace merge, and resource contention erased the win. | Reopen only if post-P3 profile shows step0 is still a dominant p99 tail. |
+| Candidate-plan side-stream overlap | Candidate range lookup is only a subset of fused work; step0 is slow even though range lookup is trivial. Side-stream work can steal AIV resource from forward. | Reopen only if stage attribution proves range lookup itself is material and a plan-only kernel is cheap. |
+| Constraint-table layout/prepack | This changes model artifact format or preprocessing, not just kernel code. The old 3B_git locality report also showed many candidates are already sorted/local. | Reopen only after parsing the 3B_pyby extended 8.21 GiB filter format and proving locality/table access dominates. |
+| `top_k > 512` support | This is a new maxK contract with UB/output/tiling changes, not an optimization of current P6. | Reopen only with a real business beam requirement above 512 and a fresh maxK capacity design. |
+
+The rule is strict: do not combine these with P3 merge redesign. If P3 fails,
+record that result and then pick exactly one deferred experiment with a clear
+profile trigger.
+
 ## Measurement Gotchas
 
 - `start_rec_git.sh` currently hardcodes `MODEL_PATH=.../3B_git`. Use a
