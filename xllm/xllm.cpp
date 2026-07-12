@@ -112,6 +112,11 @@ Options create_options(const std::string& instance_name, bool is_local) {
   const DiTConfig& dit_config = DiTConfig::get_instance();
   const RecConfig& rec_config = RecConfig::get_instance();
 
+#if !defined(USE_NPU)
+  CHECK(!speculative_config.enable_mtp_draft_tp1())
+      << "enable_mtp_draft_tp1 is only supported on the NPU backend";
+#endif
+
   Options options;
 #if defined(USE_NPU)
   options.npu_kernel_backend(kernel_config.npu_kernel_backend());
