@@ -190,12 +190,16 @@ bool LLMEngine::init_model(MasterStatus master_status) {
   auto model_loader = ModelLoader::create(model_path);
   LOG(INFO) << "Initializing model from: " << model_path;
 
-  tokenizer_ = model_loader->tokenizer();
-  CHECK(tokenizer_ != nullptr);
-
   args_ = model_loader->model_args();
   quant_args_ = model_loader->quant_args();
-  tokenizer_args_ = model_loader->tokenizer_args();
+
+  // A draft engine is fed token ids and detokenized by the target, so it
+  // shares the target vocabulary and loads no tokenizer of its own.
+  if (!options_.is_draft_engine()) {
+    tokenizer_ = model_loader->tokenizer();
+    CHECK(tokenizer_ != nullptr);
+    tokenizer_args_ = model_loader->tokenizer_args();
+  }
 
   // compute the number of local kv heads and head dim
   const uint32_t world_size = dp_local_tp_size_;
@@ -221,21 +225,23 @@ bool LLMEngine::init_model(MasterStatus master_status) {
             << ", dtype: " << dtype_
             << ", kv_cache_dtype: " << options_.kv_cache_dtype();
 
-  const int64_t tokenizer_vocab_size = tokenizer_->vocab_size();
-  int64_t model_vocab_size = args_.vocab_size();
-  if (tokenizer_vocab_size != model_vocab_size) {
-    // use tokenizer vocab size if model vocab size is not set
-    if (model_vocab_size <= 0) {
-      LOG(WARNING) << "Model vocab size is not set, using tokenizer vocab "
-                      "size: "
-                   << tokenizer_vocab_size;
-      args_.vocab_size(tokenizer_vocab_size);
-    } else if (tokenizer_vocab_size > model_vocab_size) {
-      LOG(WARNING) << "Unsafe vocab mismatch: tokenizer: "
-                   << tokenizer_vocab_size << ", model: " << model_vocab_size;
-    } else {
-      LOG(INFO) << "Tokenizer/model vocab differ: tokenizer="
-                << tokenizer_vocab_size << ", model=" << model_vocab_size;
+  if (tokenizer_ != nullptr) {
+    const int64_t tokenizer_vocab_size = tokenizer_->vocab_size();
+    int64_t model_vocab_size = args_.vocab_size();
+    if (tokenizer_vocab_size != model_vocab_size) {
+      // use tokenizer vocab size if model vocab size is not set
+      if (model_vocab_size <= 0) {
+        LOG(WARNING) << "Model vocab size is not set, using tokenizer vocab "
+                        "size: "
+                     << tokenizer_vocab_size;
+        args_.vocab_size(tokenizer_vocab_size);
+      } else if (tokenizer_vocab_size > model_vocab_size) {
+        LOG(WARNING) << "Unsafe vocab mismatch: tokenizer: "
+                     << tokenizer_vocab_size << ", model: " << model_vocab_size;
+      } else {
+        LOG(INFO) << "Tokenizer/model vocab differ: tokenizer="
+                  << tokenizer_vocab_size << ", model=" << model_vocab_size;
+      }
     }
   }
 

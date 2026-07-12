@@ -27,7 +27,7 @@ namespace xllm {
 // Base class for all speculative decoding workers.
 // Provides common logic: target model management, step dispatch, and
 // sampling parameter updates. Subclasses implement algorithm-specific
-// draft generation and validation (MTP, Eagle3, Suffix, etc.).
+// draft generation and validation (MTP, Eagle3, Suffix, DFlash, etc.).
 class SpeculativeWorkerImpl : public WorkerImpl {
  public:
   ~SpeculativeWorkerImpl() override = default;

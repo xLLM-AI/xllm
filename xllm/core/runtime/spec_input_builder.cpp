@@ -513,6 +513,44 @@ std::pair<torch::Tensor, torch::Tensor> build_validate_tensors(
   return {draft_token_ids, draft_probs};
 }
 
+std::pair<torch::Tensor, torch::Tensor> build_validate_tensors_from_block(
+    const torch::Tensor& token_ids_block,
+    const torch::Tensor& probs_block,
+    int32_t vocab_size,
+    bool enable_opt_validate_probs) {
+  CHECK(token_ids_block.defined()) << "token_ids_block must be defined";
+  CHECK(probs_block.defined()) << "probs_block must be defined";
+  CHECK_EQ(token_ids_block.dim(), 2)
+      << "token_ids_block must be [batch, n_speculative_tokens], got "
+      << token_ids_block.sizes();
+  CHECK_EQ(probs_block.dim(), 2)
+      << "probs_block must be selected-only [batch, n_speculative_tokens], got "
+      << probs_block.sizes();
+  CHECK_EQ(probs_block.size(0), token_ids_block.size(0))
+      << "probs/token block batch mismatch";
+  CHECK_EQ(probs_block.size(1), token_ids_block.size(1))
+      << "probs/token block width mismatch";
+
+  auto draft_token_ids = token_ids_block.to(torch::kLong);
+  if (enable_opt_validate_probs) {
+    // The draft block is already stacked as [batch, n_speculative_tokens]; pass
+    // the selected-only probs straight to the rejection sampler.
+    return {draft_token_ids, probs_block};
+  }
+
+  // Default path: scatter the selected probs into a dense
+  // [batch, n_speculative_tokens, vocab_size] tensor, matching MTP's
+  // build_validate_tensors output so the shared rejection sampler (and its
+  // fused kernel) always receives dense draft_probs.
+  CHECK_GT(vocab_size, 0) << "vocab_size must be > 0 for dense draft probs";
+  auto dense_probs = torch::zeros(
+      {draft_token_ids.size(0), draft_token_ids.size(1), vocab_size},
+      probs_block.options());
+  dense_probs.scatter_(
+      /*dim=*/-1, draft_token_ids.unsqueeze(-1), probs_block.unsqueeze(-1));
+  return {draft_token_ids, dense_probs};
+}
+
 }  // namespace draftProbs
 
 }  // namespace xllm::specBuilder

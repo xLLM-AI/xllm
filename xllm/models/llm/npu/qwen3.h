@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/nn/functional/normalization.h>
 
 #include <optional>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -80,11 +81,19 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
       blocks_->push_back(block);
     }
 
-    // Eagle3: layer ids to capture (can be read from layers_to_capture in
-    // config.json)
-    if (::xllm::SpeculativeConfig::get_instance().speculative_algorithm() ==
-        "Eagle3") {
-      const auto& layer_ids_from_config = model_args.layers_to_capture();
+    // Eagle3/DFlash target captures intermediate-layer aux hidden states to
+    // drive the draft. The layer ids come from layers_to_capture (config.json
+    // for Eagle3, or derived from the draft config for DFlash). The DFlash
+    // draft model itself never captures.
+    const std::string& speculative_algorithm =
+        ::xllm::SpeculativeConfig::get_instance().speculative_algorithm();
+    const bool is_dflash_draft_model =
+        model_args.model_type() == "DFlashDraftModel";
+    const auto& layer_ids_from_config = model_args.layers_to_capture();
+    const bool enable_aux_hidden_capture =
+        !is_dflash_draft_model && (speculative_algorithm == "Eagle3" ||
+                                   speculative_algorithm == "DFlash");
+    if (enable_aux_hidden_capture) {
       if (!layer_ids_from_config.empty()) {
         set_eagle3_layers_to_capture(
             std::make_optional<std::vector<int32_t>>(layer_ids_from_config));
@@ -196,19 +205,19 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
     // for chunked prefill, generate the attn mask.
     if (!input_params.meta.batch_forward_type.is_decode()) {
       if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
-        int max_kv_seq = input_params.meta.kv_max_seq_len;
-        int num_sequences = input_params.meta.num_sequences;
+        int32_t max_kv_seq = input_params.meta.kv_max_seq_len;
+        int32_t num_sequences = input_params.meta.num_sequences;
         if (num_sequences > 0) {
           std::vector<torch::Tensor> req_mask_vec;
           req_mask_vec.reserve(num_sequences);
 
-          for (int j = 0; j < num_sequences; j++) {
-            auto mask = attn_mask_.gen_append_mask(
-                input_params.attention.host.q_seq_lens[j],
-                input_params.attention.host.kv_seq_lens[j],
-                max_kv_seq,
-                cos_pos.dtype().toScalarType(),
-                cos_pos.device());
+          for (int32_t j = 0; j < num_sequences; j++) {
+            torch::Tensor mask =
+                gen_append_attn_mask(input_params.attention.host.q_seq_lens[j],
+                                     input_params.attention.host.kv_seq_lens[j],
+                                     max_kv_seq,
+                                     cos_pos.dtype().toScalarType(),
+                                     cos_pos.device());
             req_mask_vec.emplace_back(mask);
           }
           attn_mask = torch::cat(req_mask_vec, 0);
@@ -273,11 +282,22 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
     }
     auto hidden_states = norm_(h, 0);
     if (capture_aux_hidden_states_) {
+      CHECK_EQ(capture_idx, static_cast<int64_t>(layers_to_capture_set_.size()))
+          << "Captured aux hidden layer count mismatch.";
       torch::Tensor aux_hidden_states =
           aux_output_buffer_.slice(0, 0, num_tokens);
       return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);
     }
     return ModelOutput(hidden_states);
+  }
+
+ protected:
+  virtual torch::Tensor gen_append_attn_mask(int32_t q_len,
+                                             int32_t kv_len,
+                                             int32_t max_kv_len,
+                                             torch::Dtype dtype,
+                                             torch::Device device) {
+    return attn_mask_.gen_append_mask(q_len, kv_len, max_kv_len, dtype, device);
   }
 
  private:

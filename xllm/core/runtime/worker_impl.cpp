@@ -75,6 +75,7 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "layers/npu/loader/rolling_weight_buffer.h"
 #endif
+#include "util/json_reader.h"
 #include "util/tensor_helper.h"
 #include "util/threadpool.h"
 #include "util/timer.h"
@@ -131,6 +132,25 @@ class ScopedAtenLoadThreads {
   int32_t prev_threads_ = 0;
   bool active_ = false;
 };
+
+// DFlash draft config lists target_layer_ids as the target-model layer indices
+// (0-based) whose output the draft consumes. xLLM's capture hook fires BEFORE
+// layer i runs, so capturing layer L's output means putting L+1 in the capture
+// set (matched against layer index i in the forward loop). Returns those L+1
+// ids.
+std::vector<int32_t> read_dflash_capture_layer_ids(
+    const std::string& model_weights_path) {
+  JsonReader reader;
+  const std::string config_path = model_weights_path + "/config.json";
+  CHECK(reader.parse(config_path))
+      << "Failed to parse DFlash config: " << config_path;
+  std::vector<int32_t> capture_layer_ids;
+  for (int32_t layer_id : reader.value_or<std::vector<int32_t>>(
+           "dflash_config.target_layer_ids", std::vector<int32_t>{})) {
+    capture_layer_ids.emplace_back(layer_id + 1);
+  }
+  return capture_layer_ids;
+}
 
 void move_tensor_to_device_if_needed(torch::Tensor& tensor,
                                      const torch::Device& device) {
@@ -1449,8 +1469,6 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 
   auto model_loader = ModelLoader::create(model_weights_path);
   model_weights_path_ = std::move(model_weights_path);
-  auto tokenizer = model_loader->tokenizer();
-  CHECK(tokenizer != nullptr);
 
   auto args = model_loader->model_args();
   auto quant_args = model_loader->quant_args();
@@ -1458,21 +1476,47 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   args.embedding_mode(embedding_mode);
   torch::ScalarType dtype = util::parse_dtype(args.dtype(), device_);
 
-  const int64_t tokenizer_vocab_size = tokenizer->vocab_size();
-  int64_t model_vocab_size = args.vocab_size();
-  // use tokenizer vocab size if model vocab size is not set
-  if (model_vocab_size <= 0) {
-    LOG(WARNING) << "Model vocab size is not set, using tokenizer vocab size: "
-                 << tokenizer_vocab_size;
-    args.vocab_size(tokenizer_vocab_size);
-  } else if (tokenizer_vocab_size > model_vocab_size) {
-    LOG(WARNING) << "Unsafe vocab mismatch: tokenizer: " << tokenizer_vocab_size
-                 << ", model: " << model_vocab_size;
+  // Draft engine is fed token ids and detokenized by the target, so it loads
+  // no tokenizer of its own (not universal: Eagle3 keeps its own draft vocab;
+  // see speculative_engine.cpp).
+  if (!options_.is_draft_engine()) {
+    std::unique_ptr<Tokenizer> tokenizer = model_loader->tokenizer();
+    CHECK(tokenizer != nullptr);
+    const int64_t tokenizer_vocab_size = tokenizer->vocab_size();
+    int64_t model_vocab_size = args.vocab_size();
+    // use tokenizer vocab size if model vocab size is not set
+    if (model_vocab_size <= 0) {
+      LOG(WARNING)
+          << "Model vocab size is not set, using tokenizer vocab size: "
+          << tokenizer_vocab_size;
+      args.vocab_size(tokenizer_vocab_size);
+    } else if (tokenizer_vocab_size > model_vocab_size) {
+      LOG(WARNING) << "Unsafe vocab mismatch: tokenizer: "
+                   << tokenizer_vocab_size << ", model: " << model_vocab_size;
+    }
   }
 
 #if defined(USE_NPU)
-  if (options_.enable_speculative_decode() &&
-      ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
+  if (options_.speculative_algorithm() == "DFlash") {
+    // Both engines capture the same target layers, whose ids live in the draft
+    // config: the draft engine reads its own weights path, the target engine
+    // reads --draft_model. The draft engine additionally swaps in the
+    // DFlashDraftModel body.
+    std::string draft_config_path;
+    if (options_.is_draft_engine()) {
+      LOG(INFO) << "Overriding draft model_type from " << args.model_type()
+                << " to DFlashDraftModel for DFlash speculative decoding";
+      args.model_type("DFlashDraftModel");
+      draft_config_path = model_weights_path_;
+    } else {
+      CHECK(options_.draft_model_path().has_value())
+          << "DFlash requires --draft_model.";
+      draft_config_path = options_.draft_model_path().value();
+    }
+    args.layers_to_capture(read_dflash_capture_layer_ids(draft_config_path));
+  } else if (options_.enable_speculative_decode() &&
+             ::xllm::SpeculativeConfig::get_instance()
+                 .enable_atb_spec_kernel()) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
   } else if (options_.enable_speculative_decode() &&
              options_.num_speculative_tokens() == 0 &&

@@ -33,7 +33,7 @@ DEFINE_int32(num_speculative_tokens, 0, "Number of speculative tokens.");
 DEFINE_string(speculative_algorithm,
               "MTP",
               "Speculative decoding algorithm. Supported options: MTP, Eagle3, "
-              "Suffix. Default is MTP.");
+              "Suffix, DFlash. Default is MTP.");
 
 DEFINE_int32(speculative_suffix_cache_max_depth,
              64,

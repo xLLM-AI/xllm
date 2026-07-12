@@ -36,6 +36,7 @@ cc_library(
     mtp_worker_impl.h
     suffix_worker_impl.h
     eagle3_worker_impl.h
+    dflash_worker_impl.h
     spec_input_builder.h
     forward_shared_memory_manager.h
     worker_rendezvous.h
@@ -68,6 +69,7 @@ cc_library(
     mtp_worker_impl.cpp
     suffix_worker_impl.cpp
     eagle3_worker_impl.cpp
+    dflash_worker_impl.cpp
     spec_input_builder.cpp
     forward_shared_memory_manager.cpp
     cp_input_partition.cpp

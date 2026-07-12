@@ -169,11 +169,19 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
       indices.push_back(i);
     }
 
-    // Eagle3: layer ids to capture (can be read from layers_to_capture in
-    // config.json)
-    if (::xllm::SpeculativeConfig::get_instance().speculative_algorithm() ==
-        "Eagle3") {
-      const auto& layer_ids_from_config = model_args.layers_to_capture();
+    // Eagle3/DFlash target captures intermediate-layer aux hidden states to
+    // drive the draft. The layer ids come from layers_to_capture (config.json
+    // for Eagle3, or derived from the draft config for DFlash). The DFlash
+    // draft model itself never captures.
+    const bool is_dflash_draft_model =
+        model_args.model_type() == "DFlashDraftModel";
+    const auto& layer_ids_from_config = model_args.layers_to_capture();
+    const std::string& speculative_algorithm =
+        ::xllm::SpeculativeConfig::get_instance().speculative_algorithm();
+    const bool enable_aux_hidden_capture =
+        !is_dflash_draft_model && (speculative_algorithm == "Eagle3" ||
+                                   speculative_algorithm == "DFlash");
+    if (enable_aux_hidden_capture) {
       if (!layer_ids_from_config.empty()) {
         set_eagle3_layers_to_capture(
             std::make_optional<std::vector<int32_t>>(layer_ids_from_config));
@@ -370,6 +378,8 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
       h = h + residual.value();
     auto hidden_states = norm_(h, 0);
     if (capture_aux_hidden_states_) {
+      CHECK_EQ(capture_idx, layers_to_capture_set_.size())
+          << "Captured aux hidden layer count mismatch.";
       torch::Tensor aux_hidden_states =
           aux_output_buffer_.slice(0, 0, num_tokens);
       return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);

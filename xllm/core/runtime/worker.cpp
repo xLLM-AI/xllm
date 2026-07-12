@@ -29,6 +29,7 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
+#include "runtime/dflash_worker_impl.h"
 #include "runtime/dit_worker_impl.h"
 #include "runtime/eagle3_worker_impl.h"
 #include "runtime/embed_vlm_worker_impl.h"
@@ -51,6 +52,8 @@ Worker::Worker(const ParallelArgs& parallel_args,
     LOG(INFO) << "Speculative decode is enabled, algorithm: " << algo;
     if (algo == "Eagle3") {
       impl_ = new Eagle3WorkerImpl(parallel_args, device, options);
+    } else if (algo == "DFlash") {
+      impl_ = new DFlashWorkerImpl(parallel_args, device, options);
     } else if (algo == "Suffix") {
       impl_ = new SuffixWorkerImpl(parallel_args, device, options);
     } else {
