@@ -38,7 +38,7 @@ XTensorDistClient::XTensorDistClient(int32_t global_rank,
     LOG(ERROR) << "Failed to initialize brpc channel to " << server_address;
     return;
   }
-  stub_.reset(new proto::XTensorDist_Stub(&channel_));
+  stub_ = std::make_unique<proto::XTensorDist_Stub>(&channel_);
   wait_for_server_ready(server_address);
 }
 

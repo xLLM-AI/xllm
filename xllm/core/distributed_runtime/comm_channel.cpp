@@ -35,7 +35,7 @@ bool CommChannel::init_brpc(const std::string& server_address) {
     return false;
   }
 
-  stub_.reset(new proto::DistributeWorker_Stub(&channel_));
+  stub_ = std::make_unique<proto::DistributeWorker_Stub>(&channel_);
   return true;
 }
 
