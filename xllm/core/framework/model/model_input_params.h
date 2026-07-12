@@ -661,7 +661,7 @@ struct BlockTransferInfo {
     memcpy(hash_key, other.hash_key, XXH3_128BITS_HASH_VALUE_LEN);
   }
 
-  BlockTransferInfo(BlockTransferInfo&& other)
+  BlockTransferInfo(BlockTransferInfo&& other) noexcept
       : src_block_id(other.src_block_id),
         dst_block_id(other.dst_block_id),
         transfer_type(other.transfer_type) {
@@ -679,7 +679,7 @@ struct BlockTransferInfo {
     return *this;
   }
 
-  BlockTransferInfo& operator=(BlockTransferInfo&& other) {
+  BlockTransferInfo& operator=(BlockTransferInfo&& other) noexcept {
     src_block_id = other.src_block_id;
     dst_block_id = other.dst_block_id;
     transfer_type = other.transfer_type;
