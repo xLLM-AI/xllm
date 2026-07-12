@@ -108,7 +108,7 @@ enum class LinearTypeV2 : int {
 class BaseLayer : public torch::nn::Module {
  public:
   explicit BaseLayer(const ModelContext& context);
-  virtual ~BaseLayer() override = default;
+  ~BaseLayer() override = default;
 
   atb::Status execute_node(atb_speed::Model::Node& node,
                            int nodeId = 0,

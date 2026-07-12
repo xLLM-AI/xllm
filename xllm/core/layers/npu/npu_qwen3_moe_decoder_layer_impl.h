@@ -44,9 +44,9 @@ class NpuQwen3MoeDecoderLayerImpl : public BaseLayer {
 
   ~NpuQwen3MoeDecoderLayerImpl() override = default;
 
-  virtual void merge_loaded_weights();
+  void merge_loaded_weights() override;
 
-  virtual int64_t init_layer() override;
+  int64_t init_layer() override;
 
   torch::Tensor forward(torch::Tensor& x,
                         std::optional<torch::Tensor>& residual,

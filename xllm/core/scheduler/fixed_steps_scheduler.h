@@ -49,7 +49,7 @@ struct ScheduleResult {
 class FixedStepsScheduler final : public ContinuousScheduler {
  public:
   FixedStepsScheduler(Engine* engine, const Options& options);
-  virtual ~FixedStepsScheduler() = default;
+  ~FixedStepsScheduler() override = default;
 
   bool add_request(std::shared_ptr<Request>& request) override;
 
@@ -118,7 +118,7 @@ class FixedStepsScheduler final : public ContinuousScheduler {
   ScheduleResult schedule_request(const absl::Duration& timeout);
 
   // build a batch of requests from the priority queue
-  virtual std::vector<Batch> prepare_batch();
+  std::vector<Batch> prepare_batch() override;
 
   void handle_prefill_requests(
       size_t& remaining_token_budget,

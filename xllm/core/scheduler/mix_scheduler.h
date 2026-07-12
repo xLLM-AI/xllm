@@ -32,15 +32,15 @@ namespace xllm {
 class MixScheduler : public ChunkedPrefillScheduler {
  public:
   MixScheduler(Engine* engine, const Options& options);
-  virtual ~MixScheduler();
+  ~MixScheduler() override;
 
  protected:
   std::list<std::shared_ptr<Request>> running_queue_;
 
   // build a batch of requests from the priority queue
-  virtual std::vector<Batch> prepare_batch() override;
+  std::vector<Batch> prepare_batch() override;
 
-  virtual bool if_queue_not_empty() override;
+  bool if_queue_not_empty() override;
 
   bool allocate_blocks_for(Sequence* sequence,
                            size_t token_budget,

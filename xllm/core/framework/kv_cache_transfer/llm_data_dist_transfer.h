@@ -36,30 +36,30 @@ class LlmDataDistTransfer : public KVCacheTransfer {
                       const InstanceRole& instance_role,
                       const std::string& model_type = "",
                       bool enable_lighting_indexer = false);
-  virtual ~LlmDataDistTransfer() = default;
+  ~LlmDataDistTransfer() override = default;
 
-  virtual void initialize(int32_t device_id) override;
+  void initialize(int32_t device_id) override;
 
-  virtual void finalize() override;
+  void finalize() override;
 
-  virtual void register_kv_cache(std::vector<xllm::KVCache>& kv_caches,
-                                 const KVCacheShape& kv_cache_shape,
-                                 const torch::ScalarType dtype) override;
+  void register_kv_cache(std::vector<xllm::KVCache>& kv_caches,
+                         const KVCacheShape& kv_cache_shape,
+                         const torch::ScalarType dtype) override;
 
-  virtual void free_kv_cache() override;
+  void free_kv_cache() override;
 
-  virtual void get_cache_info(uint64_t& cluster_id, std::string& addr) override;
+  void get_cache_info(uint64_t& cluster_id, std::string& addr) override;
 
-  virtual bool link_cluster(const uint64_t cluster_id,
-                            const std::string& remote_addr,
-                            const uint16_t port) override;
+  bool link_cluster(const uint64_t cluster_id,
+                    const std::string& remote_addr,
+                    const uint16_t port) override;
 
-  virtual bool unlink_cluster(const uint64_t& cluster_id,
-                              const std::string& remote_addr,
-                              const uint16_t port,
-                              bool force_flag = true) override;
+  bool unlink_cluster(const uint64_t& cluster_id,
+                      const std::string& remote_addr,
+                      const uint16_t port,
+                      bool force_flag = true) override;
 
-  virtual bool pull_kv_blocks(
+  bool pull_kv_blocks(
       const uint64_t src_cluster_id,
       const std::string& src_addr,
       const std::vector<uint64_t>& src_blocks,
@@ -67,7 +67,7 @@ class LlmDataDistTransfer : public KVCacheTransfer {
       const std::vector<uint64_t>& src_linear_state_ids,
       const std::vector<uint64_t>& dst_linear_state_ids) override;
 
-  virtual bool push_kv_blocks(
+  bool push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
       std::shared_ptr<NPULayerSynchronizerImpl>& layer_synchronizer,
       bool is_spec_draft,

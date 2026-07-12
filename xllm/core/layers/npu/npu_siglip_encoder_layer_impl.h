@@ -34,7 +34,7 @@ class NpuSiglipEncoderLayerUpImpl : public BaseLayer {
 
   ~NpuSiglipEncoderLayerUpImpl() override = default;
 
-  virtual void load_state_dict(const StateDict& state_dict) override;
+  void load_state_dict(const StateDict& state_dict) override;
 
   torch::Tensor forward(const torch::Tensor& x);
 
@@ -59,7 +59,7 @@ class NpuSiglipEncoderLayerDownImpl : public BaseLayer {
 
   ~NpuSiglipEncoderLayerDownImpl() override = default;
 
-  virtual void load_state_dict(const StateDict& state_dict) override;
+  void load_state_dict(const StateDict& state_dict) override;
 
   torch::Tensor forward(torch::Tensor& x, torch::Tensor& y);
 
@@ -84,7 +84,7 @@ class NpuSiglipEncoderLayerImpl : public BaseLayer {
 
   ~NpuSiglipEncoderLayerImpl() override = default;
 
-  virtual void load_state_dict(const StateDict& state_dict) override;
+  void load_state_dict(const StateDict& state_dict) override;
 
   void verify_loaded_weights(const std::string& weight_str) const {};
 

@@ -270,13 +270,12 @@ class CausalLMImpl : public CausalLM {
     }
   }
 
-  virtual void prepare_expert_weight(
-      int32_t layer_id,
-      const std::vector<int32_t>& expert_ids) override {
+  void prepare_expert_weight(int32_t layer_id,
+                             const std::vector<int32_t>& expert_ids) override {
     return model_->prepare_expert_weight(layer_id, expert_ids);
   }
 
-  virtual void update_expert_weight(int32_t layer_id) {
+  void update_expert_weight(int32_t layer_id) override {
     return model_->update_expert_weight(layer_id);
   }
 
