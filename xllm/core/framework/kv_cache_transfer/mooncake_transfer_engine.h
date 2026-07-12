@@ -150,17 +150,17 @@ class MooncakeTransferEngineService
  public:
   MooncakeTransferEngineService() = default;
 
-  virtual ~MooncakeTransferEngineService() = default;
+  ~MooncakeTransferEngineService() override = default;
 
-  virtual void OpenSession(google::protobuf::RpcController* controller,
-                           const proto::SessionInfo* request,
-                           proto::Status* response,
-                           google::protobuf::Closure* done) override;
+  void OpenSession(google::protobuf::RpcController* controller,
+                   const proto::SessionInfo* request,
+                   proto::Status* response,
+                   google::protobuf::Closure* done) override;
 
-  virtual void CloseSession(google::protobuf::RpcController* controller,
-                            const proto::SessionInfo* request,
-                            proto::Status* response,
-                            google::protobuf::Closure* done) override;
+  void CloseSession(google::protobuf::RpcController* controller,
+                    const proto::SessionInfo* request,
+                    proto::Status* response,
+                    google::protobuf::Closure* done) override;
 };
 
 }  // namespace xllm
