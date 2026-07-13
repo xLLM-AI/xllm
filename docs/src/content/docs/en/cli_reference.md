@@ -183,7 +183,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `draft_model` | `string` | `""` | Draft model path. See [MTP](/en/features/mtp/) for MTP usage. |
 | `draft_devices` | `string` | `""` | Devices used by the draft model, for example `npu:0` or `npu:0,npu:1`. If omitted, uses the target model devices when speculative decoding is enabled. |
 | `num_speculative_tokens` | `int32` | `0` | Number of speculative tokens generated per speculative decoding step. |
-| `speculative_algorithm` | `string` | `"MTP"` | Speculative decoding algorithm. Supported values: `MTP`, `Eagle3`, `Suffix`. |
+| `speculative_algorithm` | `string` | `"MTP"` | Speculative decoding algorithm. Supported values: `MTP`, `Eagle3`, `Suffix`, `DFlash`. |
 | `speculative_suffix_cache_max_depth` | `int32` | `64` | Maximum suffix-tree depth for suffix speculative decoding. |
 | `speculative_suffix_max_spec_factor` | `double` | `1.0` | Maximum suffix speculation token factor relative to match length. |
 | `speculative_suffix_max_spec_offset` | `double` | `0.0` | Maximum additive token offset for suffix speculation. |
