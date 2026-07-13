@@ -123,7 +123,8 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_no_sync(
 
 std::optional<ForwardOutput> LLMWorkerImpl::execute_no_sync_on_stream(
     const ForwardInput& input,
-    Stream& compute_stream) {
+    Stream& compute_stream,
+    bool record_ready_event) {
   const ForwardSyncPolicy sync_policy = ForwardSyncPolicy::NO_SYNC;
   c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
   if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
@@ -135,19 +136,19 @@ std::optional<ForwardOutput> LLMWorkerImpl::execute_no_sync_on_stream(
           const_cast<atb::Context*>(context_.get_atb_context());
       atb_context->SetExecuteStream(current_acl_stream);
       wait_input_ready_events(input, compute_stream);
-      return step_internal(input, sync_policy);
+      return step_internal(input, sync_policy, record_ready_event);
     } else {
       SET_ATB_EXECUTE_STREAM((&compute_stream), device_, context_);
       wait_input_ready_events(input, compute_stream);
-      return step_internal(input, sync_policy);
+      return step_internal(input, sync_policy, record_ready_event);
     }
 #else
     wait_input_ready_events(input, compute_stream);
-    return step_internal(input, sync_policy);
+    return step_internal(input, sync_policy, record_ready_event);
 #endif
   }
   wait_input_ready_events(input, compute_stream);
-  return step_internal(input, sync_policy);
+  return step_internal(input, sync_policy, record_ready_event);
 }
 
 std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
@@ -212,7 +213,8 @@ LLMWorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
 
 std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     const ForwardInput& input,
-    ForwardSyncPolicy sync_policy) {
+    ForwardSyncPolicy sync_policy,
+    bool record_ready_event) {
   MULTI_MODEL_STEP_LOCK(::xllm::KVCacheConfig::get_instance().enable_xtensor());
 
   Timer timer;
@@ -381,7 +383,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
 #endif
   if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
     output.retained_input = std::make_shared<ForwardInput>(input);
-    if (enable_schedule_overlap()) {
+    if (enable_schedule_overlap() && record_ready_event) {
       output.ready_event = record_current_stream_event(device_);
     }
     return output;

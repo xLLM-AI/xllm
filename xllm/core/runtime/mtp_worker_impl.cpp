@@ -131,6 +131,51 @@ void wait_metadata_ready_event(const ForwardInput& input, Stream& stream) {
       << "failed to wait speculative metadata ready event";
 }
 
+void record_output_ready_event(ForwardOutput& output, Stream& stream) {
+  StreamEventPtr event = stream.record_event();
+  if (event == nullptr) {
+    const int32_t ret = stream.synchronize();
+    CHECK_EQ(ret, 0) << "failed to synchronize MTP compute stream, ret=" << ret;
+  }
+  output.ready_event = event;
+}
+
+void transfer_retained_inputs(ForwardOutput& destination,
+                              ForwardOutput& source) {
+  const size_t retained_input_count =
+      source.retained_input_dependencies.size() +
+      (source.retained_input != nullptr ? 1 : 0);
+  destination.retained_input_dependencies.reserve(
+      destination.retained_input_dependencies.size() + retained_input_count);
+  if (source.retained_input != nullptr) {
+    destination.retained_input_dependencies.emplace_back(
+        std::move(source.retained_input));
+  }
+  for (std::shared_ptr<ForwardInput>& retained_input :
+       source.retained_input_dependencies) {
+    destination.retained_input_dependencies.emplace_back(
+        std::move(retained_input));
+  }
+  source.retained_input_dependencies.clear();
+}
+
+void release_retained_inputs(ForwardOutput& output) {
+  output.retained_input.reset();
+  output.retained_input_dependencies.clear();
+}
+
+void finalize_output_on_stream(ForwardOutput& output,
+                               Stream& stream,
+                               bool allow_async) {
+  if (allow_async) {
+    record_output_ready_event(output, stream);
+    return;
+  }
+  const int32_t ret = stream.synchronize();
+  CHECK_EQ(ret, 0) << "failed to synchronize MTP compute stream, ret=" << ret;
+  release_retained_inputs(output);
+}
+
 #if defined(USE_NPU)
 void clear_expanded_spec_verify_graph_input(ModelInputParams& input_params) {
   input_params.graph.use_expanded_decode_for_spec_verify_attention = false;
@@ -255,11 +300,8 @@ std::optional<ForwardOutput> run_llm_no_sync_impl(
     ForwardInput& processed_input) {
   worker.prepare_work_before_execute_on_stream(
       input, processed_input, prepare_stream);
-  std::optional<ForwardOutput> output =
-      worker.execute_no_sync_on_stream(processed_input, compute_stream);
-  const int32_t ret = compute_stream.synchronize();
-  CHECK_EQ(ret, 0) << "failed to synchronize MTP compute stream, ret=" << ret;
-  return output;
+  return worker.execute_no_sync_on_stream(
+      processed_input, compute_stream, /*record_ready_event=*/false);
 }
 
 torch::Tensor clone_host_tensor(const torch::Tensor& tensor) {
@@ -770,37 +812,40 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
                                              *prepare_stream_,
                                              *compute_stream_,
                                              draft_prepared);
-    (void)draft_output;
+    if (draft_output.has_value()) {
+      transfer_retained_inputs(*output, draft_output.value());
+    }
     clear_all_output_embeddings(*output);
+    finalize_output_on_stream(
+        *output, *compute_stream_, enable_schedule_overlap());
     return output;
   } else {
     ForwardInput draft_extend_prepared;
     std::vector<ForwardInput> draft_step_prepared(
         options_.num_speculative_tokens());
     ForwardInput target_prepared;
+    std::vector<ForwardOutput> draft_outputs;
+    draft_outputs.reserve(options_.num_speculative_tokens());
 
     ForwardInput new_input = input;
     for (int32_t& token_num :
          new_input.input_params.parallel.dp_global_token_nums) {
       token_num *= 2;
     }
-    ForwardOutput draft_extend_output =
-        run_llm_no_sync_impl(*draft_impl_,
-                             new_input,
-                             *prepare_stream_,
-                             *compute_stream_,
-                             draft_extend_prepared)
-            .value();
-    (void)draft_extend_output;
+    draft_outputs.emplace_back(run_llm_no_sync_impl(*draft_impl_,
+                                                    new_input,
+                                                    *prepare_stream_,
+                                                    *compute_stream_,
+                                                    draft_extend_prepared)
+                                   .value());
 
     for (int32_t i = 1; i < options_.num_speculative_tokens(); ++i) {
-      ForwardOutput draft_output = run_llm_no_sync_impl(*draft_impl_,
-                                                        input,
-                                                        *prepare_stream_,
-                                                        *compute_stream_,
-                                                        draft_step_prepared[i])
-                                       .value();
-      (void)draft_output;
+      draft_outputs.emplace_back(run_llm_no_sync_impl(*draft_impl_,
+                                                      input,
+                                                      *prepare_stream_,
+                                                      *compute_stream_,
+                                                      draft_step_prepared[i])
+                                     .value());
     }
 
     new_input = input;
@@ -814,7 +859,12 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
                                                 *compute_stream_,
                                                 target_prepared)
                                .value();
+    for (ForwardOutput& draft_output : draft_outputs) {
+      transfer_retained_inputs(output, draft_output);
+    }
     clear_all_output_embeddings(output);
+    finalize_output_on_stream(
+        output, *compute_stream_, enable_schedule_overlap());
     return output;
   }
 }
@@ -840,28 +890,30 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
   // prepare input for draft model
   auto& embeddings = output.sample_output.embeddings;
 
-  if (embeddings.defined()) {
-    prefill_input.input_params.embedding.input_embedding = embeddings.clone();
-  }
-  if (output.sample_output.next_tokens.defined()) {
+  {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-    const auto& extra_token_ids =
-        prefill_input.input_params.embedding.extra_token_ids;
-    if (options_.cp_size() > 1 &&
-        has_mtp_prefill_placeholder_extra_token(extra_token_ids, -1)) {
-      apply_cp_mtp_prefill_target_tokens(prefill_input,
-                                         output.sample_output.next_tokens,
-                                         -1,
-                                         prefill_input.token_ids.options());
-    } else {
-      replace_host_token_placeholders(prefill_input,
-                                      -1,
-                                      output.sample_output.next_tokens,
-                                      prefill_input.token_ids.options());
+    if (embeddings.defined()) {
+      prefill_input.input_params.embedding.input_embedding = embeddings.clone();
     }
-  }
-  if (embeddings.defined() || output.sample_output.next_tokens.defined()) {
-    record_current_metadata_ready_event(prefill_input, *compute_stream_);
+    if (output.sample_output.next_tokens.defined()) {
+      const auto& extra_token_ids =
+          prefill_input.input_params.embedding.extra_token_ids;
+      if (options_.cp_size() > 1 &&
+          has_mtp_prefill_placeholder_extra_token(extra_token_ids, -1)) {
+        apply_cp_mtp_prefill_target_tokens(prefill_input,
+                                           output.sample_output.next_tokens,
+                                           -1,
+                                           prefill_input.token_ids.options());
+      } else {
+        replace_host_token_placeholders(prefill_input,
+                                        -1,
+                                        output.sample_output.next_tokens,
+                                        prefill_input.token_ids.options());
+      }
+    }
+    if (embeddings.defined() || output.sample_output.next_tokens.defined()) {
+      record_current_metadata_ready_event(prefill_input, *compute_stream_);
+    }
   }
   // generate kv cache for draft model
   timer.reset();
@@ -871,11 +923,15 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
                                                     *compute_stream_,
                                                     draft_prepared)
                                    .value();
-  process_draft_sample_output(draft_output.sample_output);
+  {
+    c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+    process_draft_sample_output(draft_output.sample_output);
+  }
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               timer.elapsed_seconds());
 
   if (input.sampling_params.selected_token_idxes.defined()) {
+    c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     // Under CP the target prefill `embeddings` is the full local token shard,
     // which cannot be indexed by the CP all-gather-space selected indices.
     // Prefer the LmHead-gathered per-sequence hidden when present so the cache
@@ -906,6 +962,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
   } else {
     clear_all_output_embeddings(output);
   }
+
+  transfer_retained_inputs(output, draft_output);
+  finalize_output_on_stream(
+      output, *compute_stream_, enable_schedule_overlap());
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
     return std::nullopt;
@@ -1057,23 +1117,25 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
         << "draft output is empty in speculative step";
 
     draft_outputs.emplace_back(std::move(draft_output_opt.value()));
-    if (reuse_mtp_topk_indices) {
-      mtp_topk_indices = select_mtp_topk_indices_for_next_step(
-          draft_outputs.back().dsa_topk_indices,
-          current_draft_input.sampling_params);
-    }
-    // Unify this step's draft next_tokens across the consensus group before
-    // process_draft_sample_output() compresses the still-full [batch, vocab]
-    // probs into the cache: gathering the cached prob with a unified token
-    // yields a unified prob, so we only broadcast the [batch] token tensor
-    if (get_optimization_config().enable_spec_token_broadcast &&
-        enable_schedule_overlap()) {
+    {
       c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-      SampleOutput& draft_sample = draft_outputs.back().sample_output;
-      broadcast_spec_tokens(draft_sample.next_tokens,
-                            spec_broadcast_group(parallel_args_));
+      if (reuse_mtp_topk_indices) {
+        mtp_topk_indices = select_mtp_topk_indices_for_next_step(
+            draft_outputs.back().dsa_topk_indices,
+            current_draft_input.sampling_params);
+      }
+      // Unify this step's draft next_tokens across the consensus group before
+      // process_draft_sample_output() compresses the still-full [batch, vocab]
+      // probs into the cache: gathering the cached prob with a unified token
+      // yields a unified prob, so we only broadcast the [batch] token tensor.
+      if (get_optimization_config().enable_spec_token_broadcast &&
+          enable_schedule_overlap()) {
+        SampleOutput& draft_sample = draft_outputs.back().sample_output;
+        broadcast_spec_tokens(draft_sample.next_tokens,
+                              spec_broadcast_group(parallel_args_));
+      }
+      process_draft_sample_output(draft_outputs.back().sample_output);
     }
-    process_draft_sample_output(draft_outputs.back().sample_output);
     if (draft_idx == num_speculative_tokens - 1) {
       continue;
     }
@@ -1087,9 +1149,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
     if (last_output.embeddings.defined()) {
       current_draft_input.input_params.embedding.input_embedding =
           last_output.embeddings;
-      record_current_metadata_ready_event(current_draft_input,
-                                          *compute_stream_);
     }
+    record_current_metadata_ready_event(current_draft_input, *compute_stream_);
   }
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               timer.elapsed_seconds());
@@ -1133,6 +1194,7 @@ void MTPWorkerImpl::fill_validate_input_from_draft_outputs(
         .copy_(draft_tokens, /*non_blocking=*/true);
   }
   validate_input.device_tensors_ready = true;
+  record_metadata_ready_event(compute_stream, validate_input);
 }
 
 std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
@@ -1155,8 +1217,11 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
 
   // verify the proposals with target and update the batch
   timer.reset();
-  SampleOutput val_output =
-      validate(input.sampling_params, draft_outputs, target_output);
+  SampleOutput val_output;
+  {
+    c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+    val_output = validate(input.sampling_params, draft_outputs, target_output);
+  }
   COUNTER_ADD(speculative_execution_latency_seconds_validation,
               timer.elapsed_seconds());
 
@@ -1170,7 +1235,9 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
                           spec_broadcast_group(parallel_args_));
   }
 
-  compute_stream_->synchronize();
+  const int32_t ret = compute_stream_->synchronize();
+  CHECK_EQ(ret, 0) << "failed to synchronize MTP compute stream, ret=" << ret;
+  release_retained_inputs(target_output);
   val_output.next_tokens = val_output.next_tokens.to(torch::kCPU);
   write_target_context_to_cache(input, val_output);
 

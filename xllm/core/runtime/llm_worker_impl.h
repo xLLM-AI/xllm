@@ -51,14 +51,16 @@ class LLMWorkerImpl : public WorkerImpl {
   std::optional<ForwardOutput> step_no_sync(const ForwardInput& input);
   std::optional<ForwardOutput> execute_no_sync_on_stream(
       const ForwardInput& input,
-      Stream& compute_stream);
+      Stream& compute_stream,
+      bool record_ready_event = true);
 
   folly::SemiFuture<std::optional<ForwardOutput>> step_async_no_sync(
       const ForwardInput& input);
 
   std::optional<ForwardOutput> step_internal(
       const ForwardInput& input,
-      ForwardSyncPolicy sync_policy = ForwardSyncPolicy::LEGACY);
+      ForwardSyncPolicy sync_policy = ForwardSyncPolicy::LEGACY,
+      bool record_ready_event = true);
 
  protected:
   std::optional<ForwardOutput> step_for_schedule_overlap(
