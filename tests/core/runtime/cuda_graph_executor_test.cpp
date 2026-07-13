@@ -417,7 +417,8 @@ TEST(CudaGraphExecutorTest, DecodeMetadataFastPathUpdatesPersistentBuffers) {
   torch::TensorOptions iopt =
       torch::TensorOptions().dtype(torch::kInt32).device(device);
   torch::Tensor tokens = torch::tensor({10, 11}, iopt);
-  torch::Tensor positions = torch::tensor({20, 21}, iopt);
+  torch::Tensor positions = torch::tensor(
+      {20, 21}, torch::TensorOptions().dtype(torch::kInt64).device(device));
   ModelInputParams params = make_multi_sequence_decode_params(device);
   std::vector<KVCache> kv = MakeKvCaches(device,
                                          /*num_pages=*/16,
@@ -442,7 +443,7 @@ TEST(CudaGraphExecutorTest, DecodeMetadataFastPathUpdatesPersistentBuffers) {
                    torch::tensor({10, 11, 0, 0}, torch::dtype(torch::kInt32))));
   EXPECT_TRUE(
       torch::equal(persistent.persistent_positions(/*actual_tokens=*/4).cpu(),
-                   torch::tensor({20, 21, 0, 0}, torch::dtype(torch::kInt32))));
+                   torch::tensor({20, 21, 0, 0}, torch::dtype(torch::kInt64))));
   EXPECT_TRUE(torch::equal(
       persistent.persistent_new_cache_slots(/*actual_tokens=*/4).cpu(),
       torch::tensor({5, 7, -1, -1}, torch::dtype(torch::kInt32))));
@@ -502,7 +503,8 @@ TEST(CudaGraphExecutorTest, DecodeMetadataFastPathUpdatesLinearStateIndices) {
   torch::TensorOptions iopt =
       torch::TensorOptions().dtype(torch::kInt32).device(device);
   torch::Tensor tokens = torch::tensor({10, 11}, iopt);
-  torch::Tensor positions = torch::tensor({20, 21}, iopt);
+  torch::Tensor positions = torch::tensor(
+      {20, 21}, torch::TensorOptions().dtype(torch::kInt64).device(device));
   ModelInputParams params = make_multi_sequence_decode_params(device);
   params.embedding.linear_state_ids = {8, 6};
   params.embedding.linear_state_indices = torch::tensor({8, 6}, iopt);
@@ -548,7 +550,9 @@ TEST(CudaGraphExecutorTest, DecodeMetadataFastPathFallbackMatchesLegacyPath) {
   torch::TensorOptions iopt =
       torch::TensorOptions().dtype(torch::kInt32).device(device);
   torch::Tensor tokens = torch::tensor({10, 11, 12}, iopt);
-  torch::Tensor positions = torch::tensor({20, 21, 22}, iopt);
+  torch::Tensor positions = torch::tensor(
+      {20, 21, 22},
+      torch::TensorOptions().dtype(torch::kInt64).device(device));
   ModelInputParams fast_params = MakeBatchDecodeParams(device, 3);
   ModelInputParams fallback_params = MakeBatchDecodeParams(device, 3);
   torch::Tensor new_cache_slots_base =

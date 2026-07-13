@@ -153,7 +153,7 @@ TEST_F(XllmOpsTest, EmbeddedPythonCollectivesUseTorchDistributed) {
   EXPECT_TRUE(torch::equal(gathered, input));
 }
 
-TEST_F(XllmOpsTest, DecodeGraphPaddingReservesKvIndexCapacity) {
+TEST_F(XllmOpsTest, DecodeGraphMetadataKernelMatchesReferenceAcrossShapes) {
   if (!Py_IsInitialized()) {
     Py_InitializeEx(0);
   }
@@ -163,32 +163,145 @@ TEST_F(XllmOpsTest, DecodeGraphPaddingReservesKvIndexCapacity) {
   py::exec(R"PY(
 import torch
 
-from python.attn_metadata import AttentionMetadata
-from python.model_runner.graph_runner import DecodeFullGraphRunner
+device = "cuda"
+shapes = [
+    (1, 1), (2, 2), (3, 4), (5, 8), (7, 8), (8, 8),
+    (13, 16), (16, 16), (31, 32), (47, 48), (100, 112),
+]
 
-runner = DecodeFullGraphRunner(torch.nn.Identity(), max_batch=4)
-input_ids = torch.zeros(1, dtype=torch.int64)
-positions = torch.zeros(1, dtype=torch.int64)
-meta = AttentionMetadata({
-    "slot_mapping": torch.zeros(1, dtype=torch.int32),
-    "paged_kv_indptr": torch.tensor([0, 4], dtype=torch.int32),
-    "paged_kv_indices": torch.tensor([0, 1, 2, 3], dtype=torch.int32),
-    "paged_kv_last_page_len": torch.ones(1, dtype=torch.int32),
-    "is_prefill": False,
-    "is_chunked_prefill": False,
-    "enable_cuda_graph": False,
-    "use_tensor_core": False,
-})
-kv_cache = torch.empty((4, 1, 1, 1))
-entry = runner._alloc_entry(
-    4, input_ids, positions, meta, [(kv_cache, kv_cache.clone())]
-)
-runner._fill_buffers(entry, input_ids, positions, meta, batch=1)
+for position_dtype in (torch.int32, torch.int64):
+  for dst_position_dtype in (torch.int32, torch.int64):
+    for actual_batch, padded_batch in shapes:
+        page_counts = torch.arange(1, actual_batch + 1, dtype=torch.int32) % 7 + 1
+        if actual_batch == 31:
+            page_counts[0] = 5000  # Exercise the kernel's grid-stride loop.
+        indptr_cpu = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.int32),
+                torch.cumsum(page_counts, dim=0, dtype=torch.int32),
+            ]
+        )
+        num_indices = int(indptr_cpu[-1])
+        padding = padded_batch - actual_batch
 
-assert entry.static_paged_kv_indices.numel() == 8
-assert entry.static_paged_kv_indptr.tolist() == [0, 4, 5, 6, 7]
-assert entry.static_paged_kv_indices[:4].tolist() == [0, 1, 2, 3]
-assert entry.static_paged_kv_indices[4:7].tolist() == [0, 0, 0]
+        position_base = (
+            1 << 33
+            if position_dtype == torch.int64 and dst_position_dtype == torch.int64
+            else 1000
+        )
+        src = {
+            "tokens": torch.arange(
+                11, 11 + actual_batch, dtype=torch.int32, device=device
+            ),
+            "positions": torch.arange(
+                position_base,
+                position_base + actual_batch,
+                dtype=position_dtype,
+                device=device,
+            ),
+            "slots": torch.arange(
+                101, 101 + actual_batch, dtype=torch.int32, device=device
+            ),
+            "kv_lens": indptr_cpu.to(device),
+            "indptr": indptr_cpu.to(device),
+            "indices": torch.arange(
+                10000, 10000 + num_indices, dtype=torch.int32, device=device
+            ),
+            "last_page": torch.ones(
+                actual_batch, dtype=torch.int32, device=device
+            ),
+        }
+        dst = {
+            "tokens": torch.empty(padded_batch, dtype=torch.int32, device=device),
+            "positions": torch.empty(
+                padded_batch, dtype=dst_position_dtype, device=device
+            ),
+            "slots": torch.empty(padded_batch, dtype=torch.int32, device=device),
+            "kv_lens": torch.empty(
+                padded_batch + 1, dtype=torch.int32, device=device
+            ),
+            "kv_lens_delta": torch.empty(
+                padded_batch, dtype=torch.int32, device=device
+            ),
+            "indptr": torch.empty(
+                padded_batch + 1, dtype=torch.int32, device=device
+            ),
+            "indices": torch.empty(
+                num_indices + padding, dtype=torch.int32, device=device
+            ),
+            "last_page": torch.empty(
+                padded_batch, dtype=torch.int32, device=device
+            ),
+        }
+
+        out = torch.ops.xllm_ops.update_decode_graph_metadata(
+            src["tokens"], src["positions"], src["slots"], src["kv_lens"],
+            src["indptr"], src["indices"], src["last_page"], dst["tokens"],
+            dst["positions"], dst["slots"], dst["kv_lens"],
+            dst["kv_lens_delta"], dst["indptr"], dst["indices"],
+            dst["last_page"], padded_batch, True,
+        )
+
+        padded_cu = torch.cat([
+            indptr_cpu,
+            torch.arange(
+                num_indices + 1,
+                num_indices + padding + 1,
+                dtype=torch.int32,
+            ),
+        ])
+        expected = {
+            "tokens": torch.cat([
+                src["tokens"].cpu(), torch.zeros(padding, dtype=torch.int32)
+            ]),
+            "positions": torch.cat([
+                src["positions"].cpu().to(dst_position_dtype),
+                torch.zeros(padding, dtype=dst_position_dtype),
+            ]),
+            "slots": torch.cat([
+                src["slots"].cpu(), torch.zeros(padding, dtype=torch.int32)
+            ]),
+            "kv_lens": padded_cu,
+            "kv_lens_delta": torch.diff(padded_cu),
+            "indptr": padded_cu,
+            "indices": torch.cat([
+                src["indices"].cpu(), torch.zeros(padding, dtype=torch.int32)
+            ]),
+            "last_page": torch.ones(padded_batch, dtype=torch.int32),
+        }
+
+        assert out.data_ptr() == dst["tokens"].data_ptr()
+        for name, expected_tensor in expected.items():
+            torch.testing.assert_close(dst[name].cpu(), expected_tensor, rtol=0, atol=0)
+
+        # Native CUDA graph padding keeps dummy sequences empty instead of
+        # assigning a dummy page. Exercise that mode through the same kernel.
+        native_dst = {
+            name: torch.full_like(tensor, -1) for name, tensor in dst.items()
+        }
+        torch.ops.xllm_ops.update_decode_graph_metadata(
+            src["tokens"], src["positions"], src["slots"], src["kv_lens"],
+            src["indptr"], src["indices"], src["last_page"],
+            native_dst["tokens"], native_dst["positions"], native_dst["slots"],
+            native_dst["kv_lens"], native_dst["kv_lens_delta"],
+            native_dst["indptr"], native_dst["indices"],
+            native_dst["last_page"], padded_batch, False,
+        )
+        repeated_cu = torch.cat([
+            indptr_cpu,
+            torch.full((padding,), num_indices, dtype=torch.int32),
+        ])
+        native_expected = dict(expected)
+        native_expected["kv_lens"] = repeated_cu
+        native_expected["kv_lens_delta"] = torch.diff(repeated_cu)
+        native_expected["indptr"] = repeated_cu
+        native_expected["indices"] = torch.cat([
+            src["indices"].cpu(), -torch.ones(padding, dtype=torch.int32)
+        ])
+        for name, expected_tensor in native_expected.items():
+            torch.testing.assert_close(
+                native_dst[name].cpu(), expected_tensor, rtol=0, atol=0
+            )
 )PY");
 }
 
