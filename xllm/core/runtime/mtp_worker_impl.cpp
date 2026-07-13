@@ -131,9 +131,46 @@ void wait_output_ready_event(const ForwardOutput& output, Stream& stream) {
 void record_output_ready_event(ForwardOutput& output, Stream& stream) {
   StreamEventPtr event = stream.record_event();
   if (event == nullptr) {
-    stream.synchronize();
+    const int32_t ret = stream.synchronize();
+    CHECK_EQ(ret, 0) << "failed to synchronize MTP compute stream, ret=" << ret;
   }
   output.ready_event = event;
+}
+
+void transfer_retained_inputs(ForwardOutput& destination,
+                              ForwardOutput& source) {
+  const size_t retained_input_count =
+      source.retained_input_dependencies.size() +
+      (source.retained_input != nullptr ? 1 : 0);
+  destination.retained_input_dependencies.reserve(
+      destination.retained_input_dependencies.size() + retained_input_count);
+  if (source.retained_input != nullptr) {
+    destination.retained_input_dependencies.emplace_back(
+        std::move(source.retained_input));
+  }
+  for (std::shared_ptr<ForwardInput>& retained_input :
+       source.retained_input_dependencies) {
+    destination.retained_input_dependencies.emplace_back(
+        std::move(retained_input));
+  }
+  source.retained_input_dependencies.clear();
+}
+
+void release_retained_inputs(ForwardOutput& output) {
+  output.retained_input.reset();
+  output.retained_input_dependencies.clear();
+}
+
+void finalize_output_on_stream(ForwardOutput& output,
+                               Stream& stream,
+                               bool allow_async) {
+  if (allow_async) {
+    record_output_ready_event(output, stream);
+    return;
+  }
+  const int32_t ret = stream.synchronize();
+  CHECK_EQ(ret, 0) << "failed to synchronize MTP compute stream, ret=" << ret;
+  release_retained_inputs(output);
 }
 
 #if defined(USE_NPU)
@@ -260,11 +297,8 @@ std::optional<ForwardOutput> run_llm_no_sync_impl(
     ForwardInput& processed_input) {
   worker.prepare_work_before_execute_on_stream(
       input, processed_input, prepare_stream);
-  std::optional<ForwardOutput> output =
-      worker.execute_no_sync_on_stream(processed_input, compute_stream);
-  const int32_t ret = compute_stream.synchronize();
-  CHECK_EQ(ret, 0) << "failed to synchronize MTP compute stream, ret=" << ret;
-  return output;
+  return worker.execute_no_sync_on_stream(
+      processed_input, compute_stream, /*record_ready_event=*/false);
 }
 
 torch::Tensor clone_host_tensor(const torch::Tensor& tensor) {
@@ -789,9 +823,7 @@ folly::SemiFuture<std::optional<ForwardOutput>> MTPWorkerImpl::step_async(
     const ForwardInput& input) {
   folly::Promise<std::optional<ForwardOutput>> promise;
   auto future = promise.getSemiFuture();
-  threadpool_.schedule([this,
-                        input,
-                        promise = std::move(promise)]() mutable {
+  threadpool_.schedule([this, input, promise = std::move(promise)]() mutable {
     std::lock_guard<std::recursive_mutex> lock(step_mutex_);
 
     ForwardInput input_on_device;
@@ -811,8 +843,8 @@ folly::SemiFuture<std::optional<ForwardOutput>> MTPWorkerImpl::step_async(
     if (can_use_last_step_output_for_schedule_overlap(input_on_device) &&
         input_on_device.token_ids.numel() > 0 &&
         input_on_device.input_params.meta.batch_forward_type.has_decode()) {
-      input_on_device =
-          update_input_by_last_step_output_for_schedule_overlap(input_on_device);
+      input_on_device = update_input_by_last_step_output_for_schedule_overlap(
+          input_on_device);
     }
 
     const auto output = this->step_for_schedule_overlap(input_on_device);
@@ -860,15 +892,19 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
                                              *compute_stream_,
                                              draft_prepared);
     if (draft_output.has_value()) {
-      wait_output_ready_event(draft_output.value(), *compute_stream_);
+      transfer_retained_inputs(*output, draft_output.value());
     }
     clear_all_output_embeddings(*output);
+    finalize_output_on_stream(
+        *output, *compute_stream_, enable_schedule_overlap());
     return output;
   } else {
     ForwardInput draft_extend_prepared;
     std::vector<ForwardInput> draft_step_prepared(
         options_.num_speculative_tokens());
     ForwardInput target_prepared;
+    std::vector<ForwardOutput> draft_outputs;
+    draft_outputs.reserve(options_.num_speculative_tokens());
 
     ForwardInput new_input = input;
     for (int32_t& token_num :
@@ -879,23 +915,20 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
          new_input.input_params.parallel.raw_dp_global_token_nums) {
       token_num *= 2;
     }
-    ForwardOutput draft_extend_output =
-        run_llm_no_sync_impl(*draft_impl_,
-                             new_input,
-                             *prepare_stream_,
-                             *compute_stream_,
-                             draft_extend_prepared)
-            .value();
-    wait_output_ready_event(draft_extend_output, *compute_stream_);
+    draft_outputs.emplace_back(run_llm_no_sync_impl(*draft_impl_,
+                                                    new_input,
+                                                    *prepare_stream_,
+                                                    *compute_stream_,
+                                                    draft_extend_prepared)
+                                   .value());
 
     for (int32_t i = 1; i < options_.num_speculative_tokens(); ++i) {
-      ForwardOutput draft_output = run_llm_no_sync_impl(*draft_impl_,
-                                                        input,
-                                                        *prepare_stream_,
-                                                        *compute_stream_,
-                                                        draft_step_prepared[i])
-                                       .value();
-      wait_output_ready_event(draft_output, *compute_stream_);
+      draft_outputs.emplace_back(run_llm_no_sync_impl(*draft_impl_,
+                                                      input,
+                                                      *prepare_stream_,
+                                                      *compute_stream_,
+                                                      draft_step_prepared[i])
+                                     .value());
     }
 
     new_input = input;
@@ -913,7 +946,12 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
                                                 *compute_stream_,
                                                 target_prepared)
                                .value();
+    for (ForwardOutput& draft_output : draft_outputs) {
+      transfer_retained_inputs(output, draft_output);
+    }
     clear_all_output_embeddings(output);
+    finalize_output_on_stream(
+        output, *compute_stream_, enable_schedule_overlap());
     return output;
   }
 }
@@ -930,7 +968,6 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
       run_llm_no_sync_impl(
           *impl_, input, *prepare_stream_, *compute_stream_, target_prepared)
           .value();
-  wait_output_ready_event(output, *compute_stream_);
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
 
@@ -974,7 +1011,6 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
                                                     *compute_stream_,
                                                     draft_prepared)
                                    .value();
-  wait_output_ready_event(draft_output, *compute_stream_);
   {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     process_draft_sample_output(draft_output.sample_output);
@@ -1015,11 +1051,12 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
     clear_all_output_embeddings(output);
   }
 
+  transfer_retained_inputs(output, draft_output);
+  finalize_output_on_stream(
+      output, *compute_stream_, enable_schedule_overlap());
+
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
     return std::nullopt;
-  }
-  if (enable_schedule_overlap()) {
-    record_output_ready_event(output, *compute_stream_);
   }
   return output;
 }
@@ -1171,14 +1208,13 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
         << "draft output is empty in speculative step";
 
     draft_outputs.emplace_back(std::move(draft_output_opt.value()));
-    wait_output_ready_event(draft_outputs.back(), *compute_stream_);
-    if (reuse_mtp_topk_indices) {
-      mtp_topk_indices = select_mtp_topk_indices_for_next_step(
-          draft_outputs.back().dsa_topk_indices,
-          current_draft_input.sampling_params);
-    }
     {
       c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+      if (reuse_mtp_topk_indices) {
+        mtp_topk_indices = select_mtp_topk_indices_for_next_step(
+            draft_outputs.back().dsa_topk_indices,
+            current_draft_input.sampling_params);
+      }
       process_draft_sample_output(draft_outputs.back().sample_output);
     }
     if (draft_idx == num_speculative_tokens - 1) {
@@ -1194,9 +1230,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
     if (last_output.embeddings.defined()) {
       current_draft_input.input_params.embedding.input_embedding =
           last_output.embeddings;
-      record_current_metadata_ready_event(current_draft_input,
-                                          *compute_stream_);
     }
+    record_current_metadata_ready_event(current_draft_input, *compute_stream_);
   }
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               timer.elapsed_seconds());
@@ -1258,7 +1293,6 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
                                                      *compute_stream_,
                                                      target_prepared)
                                     .value();
-  wait_output_ready_event(target_output, *compute_stream_);
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
 
@@ -1272,7 +1306,9 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   COUNTER_ADD(speculative_execution_latency_seconds_validation,
               timer.elapsed_seconds());
 
-  compute_stream_->synchronize();
+  const int32_t ret = compute_stream_->synchronize();
+  CHECK_EQ(ret, 0) << "failed to synchronize MTP compute stream, ret=" << ret;
+  release_retained_inputs(target_output);
   val_output.next_tokens = val_output.next_tokens.to(torch::kCPU);
   write_target_context_to_cache(input, val_output);
 
@@ -1282,9 +1318,6 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   clear_all_output_embeddings(target_output);
   val_output.embeddings = torch::Tensor();
   target_output.sample_output = val_output;
-  if (enable_schedule_overlap()) {
-    record_output_ready_event(target_output, *compute_stream_);
-  }
   return target_output;
 }
 
