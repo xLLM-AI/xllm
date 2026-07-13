@@ -124,6 +124,26 @@ TEST(KVCacheEstimationTest, Qwen35TextMtpUsesSsmCheckpointStride) {
   EXPECT_EQ(capacity.linear_cache_size_in_bytes(), 8960);
 }
 
+TEST(KVCacheEstimationTest, MiniMaxM3SparseAttentionReservesIndexSlots) {
+  ModelArgs model_args;
+  model_args.model_type("minimax_m3_vl")
+      .n_layers(60)
+      .head_dim(128)
+      .index_head_dim(128)
+      .index_n_heads(4);
+  KVCacheEstimateOptions options = make_estimate_options();
+  options.dtype = torch::kBFloat16;
+  options.cache_size_in_bytes = 60LL * 128 * (512 + 256) * 10;
+  options.block_size = 128;
+  options.n_local_kv_heads = 1;
+
+  KVCacheCapacity capacity = estimate_kv_cache_capacity(model_args, options);
+
+  EXPECT_EQ(capacity.slot_size(), 512);
+  EXPECT_EQ(capacity.index_slot_size(), 256);
+  EXPECT_EQ(capacity.n_blocks(), 10);
+}
+
 TEST(KVCacheEstimationTest, EstimatesDeepSeekV4Pools) {
   ModelArgs model_args;
   model_args.model_type("deepseek_v4")

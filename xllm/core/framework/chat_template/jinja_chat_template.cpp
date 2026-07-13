@@ -152,15 +152,17 @@ nlohmann::ordered_json JinjaChatTemplate::get_mm_content(
 
   for (const auto& item : vec) {
     nlohmann::ordered_json item_json;
-    item_json["type"] = item.type;
-    if (item.type == "text") {
-      item_json["text"] = item.text;
-    } else if (auto it = type_to_modality.find(item.type);
-               it != type_to_modality.end()) {
+    if (auto it = type_to_modality.find(item.type);
+        it != type_to_modality.end()) {
       const std::string& modality = it->second;
+      item_json["type"] = modality;
       item_json[modality] = "mm place holder";
       item_json[item.type] = "mm place holder";
+    } else if (item.type == "text") {
+      item_json["type"] = item.type;
+      item_json["text"] = item.text;
     } else {
+      item_json["type"] = item.type;
       item_json[item.type] = "mm place holder";
     }
 

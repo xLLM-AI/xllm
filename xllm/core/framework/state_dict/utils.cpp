@@ -188,12 +188,14 @@ bool load_tensor_list(const StateDict& state_dict,
       continue;
     }
 
+    int32_t shard_rank = rank;
+    int32_t shard_world_size = world_size;
     // When the number of key/value heads is smaller than the number of query
-    // heads (e.g., multi-query/grouped-query attention), the key/value head may
-    // be replicated while the query heads are partitioned.
-    if (i == 1 && num_kv_head_replicas > 1) {
-      rank = rank / num_kv_head_replicas;
-      world_size = world_size / num_kv_head_replicas;
+    // heads, both K and V use replicated KV-head partitioning. Compute this per
+    // tensor so split checkpoint shards load K and V consistently.
+    if (i > 0 && num_kv_head_replicas > 1) {
+      shard_rank = rank / num_kv_head_replicas;
+      shard_world_size = world_size / num_kv_head_replicas;
     }
 
     const std::string tensor_name = prefixes[i] + name;
@@ -201,8 +203,8 @@ bool load_tensor_list(const StateDict& state_dict,
     if (dim < 0) {
       tensor = state_dict.get_tensor(tensor_name);
     } else {
-      tensor =
-          state_dict.get_sharded_tensor(tensor_name, dim, rank, world_size);
+      tensor = state_dict.get_sharded_tensor(
+          tensor_name, dim, shard_rank, shard_world_size);
     }
     if (tensor.defined()) {
       tensors[i] = tensor;

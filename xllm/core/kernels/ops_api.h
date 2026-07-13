@@ -23,6 +23,7 @@ static const std::string kActModeSilu = "silu";
 static const std::string kActModeGelu = "gelu";
 static const std::string kActModeQuickGelu = "quick_gelu";
 static const std::string kActModeSwish = "swish";
+static const std::string kActModeSwigluOai = "swigluoai";
 
 void apply_rotary(RotaryParams& params);
 

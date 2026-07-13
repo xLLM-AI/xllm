@@ -61,6 +61,21 @@ if(USE_NPU)
     set(XLLM_OPS_BUILD_DIR "${CMAKE_SOURCE_DIR}/third_party/xllm_ops/build")
   endif()
 
+  set(XLLM_OPS_THIRD_PARTY_DIR "${CMAKE_SOURCE_DIR}/third_party/xllm_ops/third_party")
+  if(DEFINED ENV{XLLM_OPS_BUILD_DIR} AND
+      (NOT EXISTS "${XLLM_OPS_THIRD_PARTY_DIR}/json/include/nlohmann/json.hpp" OR
+       NOT EXISTS "${XLLM_OPS_THIRD_PARTY_DIR}/abseil-cpp/absl/log/absl_log.h" OR
+       NOT EXISTS "${XLLM_OPS_THIRD_PARTY_DIR}/ascend_protobuf/src/google/protobuf/port_def.inc"))
+    message(STATUS "xllm_ops third-party sources are missing; refreshing third-party build stamps")
+    file(REMOVE_RECURSE
+      "${XLLM_OPS_BUILD_DIR}/third_party_json-prefix"
+      "${XLLM_OPS_BUILD_DIR}/CMakeFiles/third_party_json.dir"
+      "${XLLM_OPS_BUILD_DIR}/abseil_build_xllm-prefix"
+      "${XLLM_OPS_BUILD_DIR}/CMakeFiles/abseil_build_xllm.dir"
+      "${XLLM_OPS_BUILD_DIR}/ascend_protobuf_build_xllm-prefix"
+      "${XLLM_OPS_BUILD_DIR}/CMakeFiles/ascend_protobuf_build_xllm.dir")
+  endif()
+
   if(NOT DEFINED XLLM_OPS_GIT_HEAD_CACHED OR NOT XLLM_OPS_GIT_HEAD STREQUAL XLLM_OPS_GIT_HEAD_CACHED)
     message(STATUS "xllm_ops git HEAD changed; running precompile via execute_process")
     execute_process(

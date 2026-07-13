@@ -27,6 +27,17 @@ std::vector<int64_t> get_index_cache_shape(
   return get_tensor_shape(tensors.index_cache);
 }
 
+void swap_tensor_blocks(torch::Tensor& tensor,
+                        const torch::Tensor& src_tensor,
+                        const torch::Tensor& dst_tensor) {
+  if (!tensor.defined()) {
+    return;
+  }
+
+  torch::Tensor selected = torch::index_select(tensor, 0, src_tensor);
+  tensor.index_copy_(0, dst_tensor, selected);
+}
+
 }  // namespace
 
 IndexedKVCacheImpl::IndexedKVCacheImpl(const IndexedKVCacheTensors& tensors)
@@ -62,6 +73,13 @@ std::vector<std::vector<int64_t>> IndexedKVCacheImpl::get_shapes() const {
   shapes.emplace_back(value_cache_shape_);
   shapes.emplace_back(index_cache_shape_);
   return shapes;
+}
+
+void IndexedKVCacheImpl::swap_blocks(torch::Tensor& src_tensor,
+                                     torch::Tensor& dst_tensor) {
+  swap_tensor_blocks(key_cache_, src_tensor, dst_tensor);
+  swap_tensor_blocks(value_cache_, src_tensor, dst_tensor);
+  swap_tensor_blocks(index_cache_, src_tensor, dst_tensor);
 }
 
 }  // namespace xllm

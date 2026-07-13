@@ -11,3 +11,14 @@ cc_test(
     GTest::gtest_main
     glog::glog
 )
+
+cc_test(
+  NAME
+    state_dict_utils_test
+  SRCS
+    state_dict_utils_test.cpp
+  DEPS
+    :state_dict
+    GTest::gtest_main
+    torch
+)

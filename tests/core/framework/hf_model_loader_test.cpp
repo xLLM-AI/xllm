@@ -211,6 +211,29 @@ TEST(HFModelLoaderTest, RegisterRecFactoryAcceptsRecCausalLmReturnType) {
   EXPECT_TRUE(static_cast<bool>(factory));
 }
 
+TEST(HFModelLoaderTest, VlmRegistrationDoesNotOverrideExistingDefaultBackend) {
+  const std::string factory_name = "dual_backend_default_contract_test";
+  ModelRegistry::register_causallm_factory(
+      factory_name,
+      [](const ModelContext& context) -> std::unique_ptr<CausalLM> {
+        UNUSED_PARAMETER(context);
+        return nullptr;
+      });
+
+  EXPECT_EQ(ModelRegistry::get_model_backend(factory_name), "llm");
+
+  ModelRegistry::register_causalvlm_factory(
+      factory_name,
+      [](const ModelContext& context) -> std::unique_ptr<CausalVLM> {
+        UNUSED_PARAMETER(context);
+        return nullptr;
+      });
+
+  EXPECT_EQ(ModelRegistry::get_model_backend(factory_name), "llm");
+  EXPECT_TRUE(
+      static_cast<bool>(ModelRegistry::get_causalvlm_factory(factory_name)));
+}
+
 TEST(HFModelLoaderTest, RecFactoryCreatesRecCausalLmInstance) {
   const std::string kFactoryName = "rec_causallm_instance_contract_test";
   ModelRegistry::register_rec_model_factory(

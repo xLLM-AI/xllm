@@ -155,6 +155,16 @@ struct ModelArgs {
   PROPERTY(int32_t, index_skip_topk_offset) = 0;
   PROPERTY(bool, index_share_for_mtp_iteration) = false;
 
+  // MiniMax sparse attention
+  PROPERTY(bool, use_sparse_attention) = false;
+  PROPERTY(int32_t, sparse_index_dim) = 0;
+  PROPERTY(int32_t, sparse_num_index_heads) = 0;
+  PROPERTY(int32_t, sparse_topk_blocks) = 0;
+  PROPERTY(int32_t, sparse_block_size) = 0;
+  PROPERTY(int32_t, sparse_init_block) = 0;
+  PROPERTY(int32_t, sparse_local_block) = 0;
+  PROPERTY(std::vector<int32_t>, sparse_attention_freq);
+
   // deepseek v4
   PROPERTY(int32_t, rope_head_dim) = 0;
   PROPERTY(int32_t, o_lora_rank) = 0;

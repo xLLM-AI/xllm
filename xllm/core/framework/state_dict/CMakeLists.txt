@@ -16,6 +16,7 @@ cc_library(
     utils.cpp
     rec_vocab_dict.cpp
   DEPS
+    :config
     rust_safetensors
     torch
     glog::glog

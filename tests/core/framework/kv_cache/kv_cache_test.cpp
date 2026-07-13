@@ -109,4 +109,38 @@ TEST(KVCacheTest, DeepSeekV4FourDimCachesUseDeviceLayout) {
             (std::vector<int64_t>{kSwaCount, kBlockSize, kHeadDim}));
 }
 
+TEST(KVCacheTest, IndexedCacheSwapBlocksCopiesKeyValueAndIndex) {
+  torch::Tensor key_cache = torch::arange(16, torch::kFloat32).reshape({4, 4});
+  torch::Tensor value_cache =
+      (torch::arange(16, torch::kFloat32) + 100).reshape({4, 4});
+  torch::Tensor index_cache =
+      (torch::arange(12, torch::kFloat32) + 200).reshape({4, 3});
+  const torch::Tensor original_key_cache = key_cache.clone();
+  const torch::Tensor original_value_cache = value_cache.clone();
+  const torch::Tensor original_index_cache = index_cache.clone();
+
+  KVCache cache(IndexedKVCacheTensors{KVCacheTensors{key_cache, value_cache},
+                                      index_cache});
+
+  torch::Tensor src_tensor =
+      torch::tensor({0, 2}, torch::TensorOptions().dtype(torch::kLong));
+  torch::Tensor dst_tensor =
+      torch::tensor({3, 1}, torch::TensorOptions().dtype(torch::kLong));
+  cache.swap_blocks(src_tensor, dst_tensor);
+
+  torch::Tensor expected_key_cache = original_key_cache.clone();
+  expected_key_cache.index_copy_(
+      0, dst_tensor, original_key_cache.index_select(0, src_tensor));
+  torch::Tensor expected_value_cache = original_value_cache.clone();
+  expected_value_cache.index_copy_(
+      0, dst_tensor, original_value_cache.index_select(0, src_tensor));
+  torch::Tensor expected_index_cache = original_index_cache.clone();
+  expected_index_cache.index_copy_(
+      0, dst_tensor, original_index_cache.index_select(0, src_tensor));
+
+  EXPECT_TRUE(torch::equal(cache.get_k_cache(), expected_key_cache));
+  EXPECT_TRUE(torch::equal(cache.get_v_cache(), expected_value_cache));
+  EXPECT_TRUE(torch::equal(cache.get_index_cache(), expected_index_cache));
+}
+
 }  // namespace xllm

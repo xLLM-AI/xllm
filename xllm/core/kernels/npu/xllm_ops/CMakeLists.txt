@@ -23,6 +23,7 @@ cc_library(
     sparse_attn_sharedkv_metadata.cpp
     npu_inplace_partial_rotary_mul.cpp
     scatter_nd_update.cpp
+    moe_gating_top_k.cpp
     moe_gating_top_k_hash.cpp
     sparse_attn_sharedkv.cpp
     sparse_flash_attention.cpp

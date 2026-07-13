@@ -16,4 +16,23 @@ include(cc_test)
 #     glog::glog
 # )
 
+cc_test(
+  NAME
+    npu_activation_test
+  SRCS
+    activation_test.cpp
+  DEPS
+    :npu_kernels
+    torch
+    GTest::gtest_main
+)
+
+target_link_libraries(npu_activation_test
+                      PRIVATE
+                      ascendcl
+                      hccl
+                      c_sec
+                      nnopbase
+                      atb)
+
 add_subdirectory(tilelang)

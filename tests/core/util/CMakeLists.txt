@@ -11,6 +11,7 @@ cc_test(
     threadpool_test.cpp
     vocab_validation_test.cpp
   DEPS
+    :config
     util
     :platform
     absl::synchronization

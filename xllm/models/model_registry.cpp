@@ -77,7 +77,9 @@ bool is_torch_only_model_type(const std::string& model_type) {
       "qwen3_5_mtp",
       "qwen3_5_moe_mtp",
       "qwen3_next",
-      "minimax_m2"};
+      "minimax_m2",
+      "minimax_m3",
+      "minimax_m3_vl"};
   return kTorchOnlyModelTypes.count(model_type) != 0;
 }
 #endif
@@ -205,7 +207,9 @@ void ModelRegistry::register_causalvlm_factory(const std::string& name,
                                                << " already registered.");
   } else {
     instance->model_registry_[name].causal_vlm_factory = factory;
-    instance->model_backend_[name] = "vlm";
+    if (!instance->model_backend_.contains(name)) {
+      instance->model_backend_[name] = "vlm";
+    }
   }
 }
 

@@ -155,6 +155,10 @@ void ensure_forward_input_device_tensors(ForwardInput& input,
                                   device);
 }
 
+bool is_minimax_m3_model_type(const std::string& model_type) {
+  return model_type == "minimax_m3_vl" || model_type == "minimax_m3";
+}
+
 #if defined(USE_NPU)
 void prepare_input_params_for_linear_attention(ModelInputParams& input_params) {
   const std::vector<int32_t>& host_q_seq_lens =
@@ -975,8 +979,11 @@ void WorkerImpl::apply_kv_block_swaps(const ModelInputParams& input_params) {
 #endif
 
 #if defined(USE_NPU)
+  const bool use_worker_block_swap =
+      is_minimax_m3_model_type(context_.get_model_args().model_type());
   if (input_params.block_copy.swap_blocks.size() == 0 ||
-      ::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel()) {
+      (::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel() &&
+       !use_worker_block_swap)) {
     return;
   }
 #elif defined(USE_CUDA) || defined(USE_DCU)

@@ -582,13 +582,45 @@ std::tuple<torch::Tensor, torch::Tensor> moe_active_topk(
                               params.route_scale,
                               params.e_score_correction_bias);
 #elif defined(USE_NPU)
-  CHECK_EQ(params.scoring_func, "softmax")
-      << "Only softmax is supported for NPU";
-  auto [topk_weights, topk_ids, row_ids] = npu::apply_moe_gating_topk_softmax(
-      params.input, params.finished, params.topk);
-  (void)row_ids;
-  if (params.normalize) {
-    topk_weights = topk_weights / topk_weights.sum(-1, true);
+  torch::Tensor topk_weights;
+  torch::Tensor topk_ids;
+  std::optional<torch::Tensor> e_score_correction_bias = std::nullopt;
+  if (params.e_score_correction_bias.has_value() &&
+      params.e_score_correction_bias->defined()) {
+    e_score_correction_bias = params.e_score_correction_bias.value();
+  }
+  const bool use_moe_gating_topk =
+      params.scoring_func == "sigmoid" || e_score_correction_bias.has_value() ||
+      params.num_expert_group > 1 || params.topk_group > 1;
+  if (use_moe_gating_topk) {
+    CHECK(params.scoring_func == "softmax" || params.scoring_func == "sigmoid")
+        << "Only softmax and sigmoid are supported for NPU MoeGatingTopK.";
+    const int64_t norm_type = params.scoring_func == "sigmoid" ? 1 : 0;
+    torch::Tensor norm_out;
+    std::tie(topk_weights, topk_ids, norm_out) =
+        npu::moe_gating_top_k(params.input,
+                              params.topk,
+                              e_score_correction_bias,
+                              params.topk_group,
+                              params.num_expert_group,
+                              1.0,
+                              1e-6,
+                              /*group_select_mode=*/0,
+                              static_cast<int64_t>(params.normalize),
+                              norm_type,
+                              /*out_flag=*/false);
+    (void)norm_out;
+  } else {
+    CHECK_EQ(params.scoring_func, "softmax")
+        << "Only softmax is supported for NPU gating topk softmax.";
+    torch::Tensor row_ids;
+    std::tie(topk_weights, topk_ids, row_ids) =
+        npu::apply_moe_gating_topk_softmax(
+            params.input, params.finished, params.topk);
+    (void)row_ids;
+    if (params.normalize) {
+      topk_weights = topk_weights / topk_weights.sum(-1, true);
+    }
   }
   return std::make_tuple(topk_weights, topk_ids);
 #elif defined(USE_ILU)
