@@ -61,6 +61,11 @@ DEFINE_bool(dit_debug_print,
             false,
             "whether print the debug info for dit models");
 
+DEFINE_bool(dit_laser_attention_enabled,
+            false,
+            "whether to use the laser attention kernel (MindIE-SD, tuned for "
+            "Wan2.2) in place of npu_fusion_attention for DiT attention.");
+
 DEFINE_int64(dit_generation_image_area_max,
              0,
              "Maximum allowed image area (width * height) for image generation "
@@ -123,6 +128,7 @@ void DiTConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cache_end_blocks);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sp_communication_overlap);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_debug_print);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_laser_attention_enabled);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_generation_image_area_max);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_vae_image_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_enable_vae_tiling);
@@ -147,6 +153,7 @@ void DiTConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cache_end_blocks);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sp_communication_overlap);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_debug_print);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_laser_attention_enabled);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_generation_image_area_max);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_vae_image_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_enable_vae_tiling);
@@ -184,6 +191,8 @@ void DiTConfig::append_config_json(nlohmann::ordered_json& config_json) const {
       config_json, default_config, dit_sp_communication_overlap);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_debug_print);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_laser_attention_enabled);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_generation_image_area_max);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

@@ -62,6 +62,14 @@ void replace_token(torch::Tensor& dst,
                    torch::Tensor& src,
                    bool synchronize_stream = true);
 
+// Laser attention (MindIE-SD kernel tuned for Wan2.2). q/k/v in BNSD layout;
+// returns attention output in BNSD layout, cast back to the input dtype.
+torch::Tensor laser_attention(const torch::Tensor& q_bnsd,
+                              const torch::Tensor& k_bnsd,
+                              const torch::Tensor& v_bnsd,
+                              double scale_value,
+                              int64_t head_num);
+
 void beam_search_rec(const torch::Tensor& logprobs,
                      const torch::Tensor& top_tokens,
                      const torch::Tensor& top_logprobs,
