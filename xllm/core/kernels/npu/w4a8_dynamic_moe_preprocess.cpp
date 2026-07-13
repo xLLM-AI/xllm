@@ -166,7 +166,8 @@ w4a8_dynamic_moe_preprocess(
     const std::optional<at::Tensor>& w2_weight_scale_second,
     const std::optional<at::Tensor>& w13_scale_bias,
     const std::optional<at::Tensor>& w2_scale_bias,
-    int64_t group_size) {
+    int64_t group_size,
+    bool pack_weight_to_int32) {
   TORCH_CHECK(group_size >= 0,
               "W4A8_DYNAMIC group_size must be >= 0, got ",
               group_size);
@@ -195,8 +196,10 @@ w4a8_dynamic_moe_preprocess(
 
   processed_w13 = maybe_trans_nz(processed_w13);
   processed_w2 = maybe_trans_nz(processed_w2);
-  processed_w13 = pack_to_int32(processed_w13);
-  processed_w2 = pack_to_int32(processed_w2);
+  if (pack_weight_to_int32) {
+    processed_w13 = pack_to_int32(processed_w13);
+    processed_w2 = pack_to_int32(processed_w2);
+  }
 
   return std::make_tuple(processed_w13,
                          processed_w2,

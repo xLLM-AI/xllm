@@ -13,7 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-// DCU DeepSeek-V2 MLA attention. Prefill uses SDPA and decode uses FlashMLA.
+// DCU DeepSeek-V2 MLA attention. Prefill expands MLA to MHA with
+// FlashAttention varlen; decode uses FlashMLA.
 
 #pragma once
 
@@ -63,12 +64,20 @@ class DeepseekV2AttentionImpl final : public torch::nn::Module {
                                  const AttentionMetadata& attn_metadata,
                                  KVCache& kv_cache);
 
-  torch::Tensor prefill_sdpa(const torch::Tensor& q_nope_absorbed,
-                             const torch::Tensor& q_pe,
-                             const torch::Tensor& latent_cache,
-                             const AttentionMetadata& attn_metadata);
+  torch::Tensor prefill_mha(const torch::Tensor& q_nope,
+                            const torch::Tensor& q_pe,
+                            const torch::Tensor& c_kv_normed,
+                            const torch::Tensor& k_pe,
+                            const AttentionMetadata& attn_metadata);
+
+  torch::Tensor prefill_mha_with_full_context(
+      const torch::Tensor& q_nope,
+      const torch::Tensor& q_pe,
+      const AttentionMetadata& attn_metadata,
+      const torch::Tensor& k_cache);
 
   torch::Tensor project_output(const torch::Tensor& attn_latent);
+  void refresh_kv_b_proj_weights();
 
   int64_t q_lora_rank_;
   int64_t kv_lora_rank_;
@@ -80,6 +89,7 @@ class DeepseekV2AttentionImpl final : public torch::nn::Module {
   double eps_;
   float softmax_scale_;
   bool interleaved_;
+  torch::ScalarType runtime_dtype_;
 
   ReplicatedLinear q_a_proj_{nullptr};
   RMSNorm q_a_layernorm_{nullptr};

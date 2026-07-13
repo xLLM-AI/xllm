@@ -17,15 +17,18 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/nn/functional/linear.h>
 #include <torch/torch.h>
+#if defined(USE_NPU)
 #include <torch_npu/csrc/aten/CustomFunctions.h>
-#include <torch_npu/csrc/libs/init_npu.h>
+#endif
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "core/framework/config/dit_config.h"
@@ -36,12 +39,16 @@ limitations under the License.
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/state_dict/utils.h"
 #include "core/layers/common/add_matmul.h"
+#if defined(USE_DCU)
+#include "core/layers/dcu/flash_attention.h"
+#endif
 #include "framework/model_context.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "models/dit/utils/dit_parallel_linear.h"
 #include "models/dit/utils/sequence_parallel_pad_manager.h"
 #include "models/model_registry.h"
 
+#if defined(USE_NPU)
 #ifdef TORCH_HIGHER_THAN_PTA6
 #include <torch_npu/csrc/framework/OpCommand.h>
 #else
@@ -51,13 +58,103 @@ limitations under the License.
 
 #include <torch_npu/csrc/libs/init_npu.h>
 #include <torch_npu/torch_npu.h>
+#endif
 
-#include <cstdlib>
 namespace xllm {
 
 inline bool use_dit_sp_communication_overlap() {
   return DiTConfig::get_instance().dit_sp_communication_overlap() &&
          ParallelConfig::get_instance().sp_size() > 1;
+}
+
+inline torch::Tensor qwen_image_scaled_dot_product_attention(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value) {
+#if defined(USE_DCU)
+  CHECK_EQ(query.dim(), 4) << "Qwen-Image query must be [B,H,S,D]";
+  CHECK_EQ(key.dim(), 4) << "Qwen-Image key must be [B,H,S,D]";
+  CHECK_EQ(value.dim(), 4) << "Qwen-Image value must be [B,H,S,D]";
+  CHECK_EQ(query.size(0), key.size(0)) << "Qwen-Image q/k batch mismatch";
+  CHECK_EQ(query.size(0), value.size(0)) << "Qwen-Image q/v batch mismatch";
+  CHECK_EQ(query.size(1), key.size(1)) << "Qwen-Image q/k head mismatch";
+  CHECK_EQ(key.size(1), value.size(1)) << "Qwen-Image k/v head mismatch";
+  CHECK_EQ(query.size(3), key.size(3)) << "Qwen-Image q/k head dim mismatch";
+  CHECK_EQ(query.size(3), value.size(3)) << "Qwen-Image q/v head dim mismatch";
+  CHECK_EQ(key.size(2), value.size(2)) << "Qwen-Image k/v seq mismatch";
+
+  const int64_t batch_size = query.size(0);
+  const int64_t num_heads = query.size(1);
+  const int64_t q_seq_len = query.size(2);
+  const int64_t kv_seq_len = key.size(2);
+  const int64_t head_dim = query.size(3);
+
+  auto cu_options =
+      torch::TensorOptions().dtype(torch::kInt32).device(query.device());
+  auto cu_seqlens_q =
+      torch::arange(batch_size + 1, cu_options).mul_(q_seq_len).contiguous();
+  auto cu_seqlens_k =
+      torch::arange(batch_size + 1, cu_options).mul_(kv_seq_len).contiguous();
+
+  auto dense_query = query.transpose(1, 2).contiguous().view(
+      {batch_size * q_seq_len, num_heads, head_dim});
+  auto dense_key = key.transpose(1, 2).contiguous().view(
+      {batch_size * kv_seq_len, key.size(1), head_dim});
+  auto dense_value = value.transpose(1, 2).contiguous().view(
+      {batch_size * kv_seq_len, value.size(1), head_dim});
+
+  auto output = layer::dense_varlen_flash_attention(
+      dense_query,
+      dense_key,
+      dense_value,
+      cu_seqlens_q,
+      cu_seqlens_k,
+      std::pow(static_cast<double>(head_dim), -0.5),
+      /*is_causal=*/false);
+  return output.view({batch_size, q_seq_len, num_heads, head_dim})
+      .transpose(1, 2)
+      .contiguous();
+#else
+  return torch::scaled_dot_product_attention(query,
+                                             key,
+                                             value,
+                                             torch::nullopt,
+                                             /*dropout_p=*/0.0,
+                                             /*is_causal=*/false);
+#endif
+}
+
+inline torch::Tensor qwen_image_joint_attention(
+    const torch::Tensor& joint_query,
+    const torch::Tensor& joint_key,
+    const torch::Tensor& joint_value) {
+  constexpr int64_t kAttentionChunkSize = 512;
+  auto query = joint_query.transpose(1, 2);
+  auto key = joint_key.transpose(1, 2);
+  auto value = joint_value.transpose(1, 2);
+  auto attention_output_dtype = query.dtype();
+
+  torch::Tensor output;
+  if (query.size(2) <= kAttentionChunkSize) {
+    output = qwen_image_scaled_dot_product_attention(query, key, value);
+  } else {
+    std::vector<torch::Tensor> attention_chunks;
+    const int64_t num_chunks =
+        (query.size(2) + kAttentionChunkSize - 1) / kAttentionChunkSize;
+    attention_chunks.reserve(num_chunks);
+    for (int64_t start = 0; start < query.size(2);
+         start += kAttentionChunkSize) {
+      int64_t chunk_size = std::min(kAttentionChunkSize, query.size(2) - start);
+      auto query_chunk = query.narrow(2, start, chunk_size);
+      attention_chunks.emplace_back(
+          qwen_image_scaled_dot_product_attention(query_chunk, key, value));
+    }
+    output = torch::cat(attention_chunks, 2);
+  }
+  if (output.dtype() != attention_output_dtype) {
+    output = output.to(attention_output_dtype);
+  }
+  return output.transpose(1, 2);
 }
 
 namespace qwenimage {
@@ -78,8 +175,18 @@ class RMSNormImpl final : public torch::nn::Module {
   }
 
   torch::Tensor forward(const torch::Tensor& hidden_states) {
+#if defined(USE_NPU)
     auto [output, rstd] =
         at_npu::native::custom_ops::npu_rms_norm(hidden_states, weight_, eps_);
+#else
+    torch::Tensor output = hidden_states.to(torch::kFloat32);
+    output =
+        output * torch::rsqrt(output.pow(2).mean(-1, /*keepdim=*/true) + eps_);
+    if (elementwise_affine_) {
+      output = output * weight_.to(output.device(), output.dtype());
+    }
+    output = output.to(hidden_states.dtype());
+#endif
     if (is_bias_ && bias_.defined()) {
       output = output + bias_;
     }
@@ -788,9 +895,23 @@ torch::Tensor apply_rotary_emb_qwen(const torch::Tensor& x,
                           .unsqueeze(-1)
                           .expand({-1, -1, -1, -1, 2})
                           .reshape({1, seqlen, 1, -1});
+#if defined(USE_NPU)
   auto x_out = at_npu::native::custom_ops::npu_rotary_mul(
       x.to(torch::kFloat), cos_expanded, sin_expanded, "interleave");
   return x_out.to(x.dtype());
+#else
+  auto input_dtype = x.dtype();
+  auto x_float = x.to(torch::kFloat32);
+  auto x_flat = x_float.unflatten(-1, std::vector<int64_t>{-1, 2});
+  auto x1 = x_flat.select(-1, 0);
+  auto x2 = x_flat.select(-1, 1);
+  auto cos_half = cos.unsqueeze(0).unsqueeze(2);
+  auto sin_half = sin.unsqueeze(0).unsqueeze(2);
+  auto out1 = x1 * cos_half - x2 * sin_half;
+  auto out2 = x1 * sin_half + x2 * cos_half;
+  auto out = torch::stack({out1, out2}, -1).flatten(-2, -1);
+  return out.to(input_dtype);
+#endif
 }
 
 std::tuple<int64_t, std::optional<torch::Tensor>, std::optional<torch::Tensor>>
@@ -1483,6 +1604,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto joint_key = torch::cat({txt_key, img_key}, 1);
     auto joint_value = torch::cat({txt_value, img_value}, 1);
 
+#if defined(USE_NPU)
     auto results = at_npu::native::custom_ops::npu_fusion_attention(
         joint_query,
         joint_key,
@@ -1498,6 +1620,10 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
         /*next_tockens=*/65535);
 
     auto joint_hidden_states = std::get<0>(results);
+#else
+    auto joint_hidden_states =
+        qwen_image_joint_attention(joint_query, joint_key, joint_value);
+#endif
     // Reshape back
     joint_hidden_states = joint_hidden_states.flatten(2, 3);
     joint_hidden_states = joint_hidden_states.to(joint_query.dtype());
@@ -1658,6 +1784,7 @@ class QwenDoubleStreamAttnProcessorCMO2_0Impl : public torch::nn::Module {
     auto joint_key = torch::cat({txt_key, img_key}, 1);
     auto joint_value = torch::cat({txt_value, img_value}, 1);
 
+#if defined(USE_NPU)
     auto results = at_npu::native::custom_ops::npu_fusion_attention(
         joint_query,
         joint_key,
@@ -1673,6 +1800,10 @@ class QwenDoubleStreamAttnProcessorCMO2_0Impl : public torch::nn::Module {
         /*next_tockens=*/65535);
 
     auto joint_hidden_states = std::get<0>(results);
+#else
+    auto joint_hidden_states =
+        qwen_image_joint_attention(joint_query, joint_key, joint_value);
+#endif
     joint_hidden_states = joint_hidden_states.flatten(2, 3);
     joint_hidden_states = joint_hidden_states.to(joint_query.dtype());
 

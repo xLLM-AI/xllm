@@ -23,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "base_executor_impl.h"
+#include "core/common/constants.h"
 #include "core/framework/batch/batch.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/kv_cache/kv_cache.h"
@@ -436,6 +437,43 @@ TEST_F(MluGraphExecutorTest, PersistentTensorBytesIncludeLazyAux) {
 
   EXPECT_GT(base_bytes, output_bytes);
   EXPECT_EQ(param.get_persistent_tensor_bytes(), base_bytes + output_bytes);
+}
+
+TEST_F(MluGraphExecutorTest, LinearStatePaddingTailUsesPaddingId) {
+  ::xllm::mlu::GraphPersistentParam param(
+      model_args_, tensor_options_.device(), options_);
+
+  ForwardInput first_input = prepare_inputs(/*batch_size=*/4, /*seed=*/83);
+  first_input.input_params.embedding.linear_state_ids = {10, 20, 30, 40};
+  first_input.input_params.embedding.linear_state_indices =
+      torch::tensor(first_input.input_params.embedding.linear_state_ids,
+                    tensor_options_.dtype(torch::kInt32));
+
+  param.init_params(first_input.input_params,
+                    /*padding_num_tokens=*/4,
+                    /*padding_needed=*/0);
+  param.update_input_buffer(first_input.token_ids,
+                            first_input.positions,
+                            first_input.input_params,
+                            /*padding_needed=*/0);
+
+  ForwardInput second_input = prepare_inputs(/*batch_size=*/3, /*seed=*/89);
+  second_input.input_params.embedding.linear_state_ids = {11, 21, 31};
+  second_input.input_params.embedding.linear_state_indices =
+      torch::tensor(second_input.input_params.embedding.linear_state_ids,
+                    tensor_options_.dtype(torch::kInt32));
+
+  param.update_input_buffer(second_input.token_ids,
+                            second_input.positions,
+                            second_input.input_params,
+                            /*padding_needed=*/1);
+
+  torch_mlu::synchronize();
+  torch::Tensor linear_state_indices =
+      param.params_.embedding.linear_state_indices.cpu();
+  EXPECT_TRUE(torch::equal(linear_state_indices,
+                           torch::tensor({11, 21, 31, kPaddingLinearStateId},
+                                         torch::dtype(torch::kInt32))));
 }
 
 TEST_F(MluGraphExecutorTest, PrefillThenDecodeCapturesAndReplays) {

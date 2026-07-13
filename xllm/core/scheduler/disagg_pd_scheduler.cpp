@@ -865,9 +865,11 @@ bool DisaggPDScheduler::decode_recv_first_generation(
   // update latency metrics
   sequence->set_time_to_first_token_latency_seconds(
       time_to_first_token_latency_seconds);
-  // update latest_generate_time_ for sequence
-  sequence->tbt(request->created_time() +
-                absl::Seconds(time_to_first_token_latency_seconds));
+  // Rebase the ITL clock to the moment Decode receives the first token. The
+  // prefill->decode transfer cost is attributed to TTFT, not ITL;
+  // reconstructing prefill's first-token timestamp would require cross-machine
+  // clock sync.
+  sequence->tbt(absl::Now());
 
   // TODO: we only support one sequence for currently.
   if (enable_schedule_overlap()) {

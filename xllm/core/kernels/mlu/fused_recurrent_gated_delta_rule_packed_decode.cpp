@@ -13,19 +13,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "fused_recurrent_gated_delta_rule_packed_decode.h"
-
-#include <cnrt.h>
 #include <framework/core/MLUStream.h>
+#include <framework/core/device.h>
 #include <glog/logging.h>
+#include <torch/torch.h>
 
-#include <cmath>
+#include <cstdint>
+#include <mutex>
+#include <utility>
 
 #include "kernels/mlu/mlu_ops_api.h"
+#include "triton_jit/include/jit_kernel.h"
 
-namespace xllm {
-namespace kernel {
-namespace mlu {
+namespace xllm::kernel::mlu {
+
+using xllm::triton_jit::JITKernel;
 
 std::pair<torch::Tensor, torch::Tensor>
 fused_recurrent_gated_delta_rule_packed_decode(
@@ -42,70 +44,68 @@ fused_recurrent_gated_delta_rule_packed_decode(
   torch::Tensor a_contig = a.contiguous();
   torch::Tensor b_contig = b.contiguous();
 
-  int64_t B = mixed_qkv_contig.size(0);
-  int64_t qkv_dim = mixed_qkv_contig.size(1);
-  int64_t HV = ssm_cache.size(1);
-  int64_t V = ssm_cache.size(2);
-  int64_t K = ssm_cache.size(3);
-  int64_t qk_dim = qkv_dim - HV * V;
-  int64_t H = qk_dim / (2 * K);
+  int32_t B = static_cast<int32_t>(mixed_qkv.size(0));
+  int32_t qkv_dim = static_cast<int32_t>(mixed_qkv.size(1));
+  int32_t HV = static_cast<int32_t>(ssm_cache.size(1));
+  int32_t V = static_cast<int32_t>(ssm_cache.size(2));
+  int32_t K = static_cast<int32_t>(ssm_cache.size(3));
+  int32_t qk_dim = qkv_dim - HV * V;
+  int32_t H = qk_dim / (2 * K);
 
-  constexpr int64_t kBlockSizeV = 128;
-  int64_t bv = kBlockSizeV;
-
-  // Create output tensor: [B, 1, HV, V] in same dtype as mixed_qkv
   torch::Tensor out =
       torch::empty({B, 1, HV, V},
                    mixed_qkv_contig.options().dtype(mixed_qkv_contig.dtype()));
 
-  // Strides
-  int64_t stride_mixed_qkv_tok = mixed_qkv_contig.stride(0);
-  int64_t stride_a_tok = a_contig.stride(0);
-  int64_t stride_b_tok = b_contig.stride(0);
-  int64_t stride_init_state_token = ssm_cache.stride(0);
-  int64_t stride_final_state_token = ssm_cache.stride(0);
-  int64_t stride_indices_seq = ssm_state_indices.stride(0);
+  int32_t stride_mixed_qkv_tok = static_cast<int32_t>(mixed_qkv.stride(0));
+  int32_t stride_a_tok = static_cast<int32_t>(a.stride(0));
+  int32_t stride_b_tok = static_cast<int32_t>(b.stride(0));
+  int32_t stride_init_state_token = static_cast<int32_t>(ssm_cache.stride(0));
+  int32_t stride_final_state_token = static_cast<int32_t>(ssm_cache.stride(0));
+  int32_t stride_indices_seq =
+      static_cast<int32_t>(ssm_state_indices.stride(0));
 
-  // Grid: (NV, B * HV)
-  int64_t NV = (V + bv - 1) / bv;
-  int32_t num_programs_x = static_cast<int32_t>(NV);
-  int32_t num_programs_y = static_cast<int32_t>(B * HV);
-  cnrtDim3_t dim_block = {static_cast<uint32_t>(num_programs_x),
-                          static_cast<uint32_t>(num_programs_y),
-                          1};
+  // BV fixed at 128 (matches AOT); grid tiles V by BV.
+  int32_t BV = 128;
+  int32_t NV = (V + BV - 1) / BV;
 
-  auto queue = torch_mlu::getCurMLUStream();
+  cnrtQueue_t queue = torch_mlu::getCurMLUStream();
 
-  constexpr int32_t kAlgoId = 0;
+  JITKernel& f = JITKernel::get(
+      /*py_path=*/
+      "xllm.core.kernels.mlu.triton_kernel.fused_recurrent_gated_delta_rule_"
+      "packed_decode",
+      /*fn_name=*/"tmo_fused_recurrent_gated_delta_rule_packed_decode_kernel");
 
-  tmo_fused_recurrent_gated_delta_rule_packed_decode_kernel(
-      queue,
-      &dim_block,
-      mixed_qkv_contig.data_ptr(),
-      a_contig.data_ptr(),
-      b_contig.data_ptr(),
-      A_log.data_ptr(),
-      dt_bias.data_ptr(),
-      out.data_ptr(),
-      ssm_cache.data_ptr(),  // h0 (float32, [num_slots, HV, V, K])
-      ssm_cache.data_ptr(),  // ht (same tensor, in-place update)
-      ssm_state_indices.data_ptr(),
+  f.launch(
+      static_cast<void*>(queue),
+      /*grid=*/{static_cast<uint32_t>(NV), static_cast<uint32_t>(B * HV), 1},
+      /*cfg=*/{/*num_warps=*/1, /*num_stages=*/1},
+      mixed_qkv,
+      a,
+      b,
+      A_log,
+      dt_bias,
+      out,
+      ssm_cache,
+      ssm_cache,
+      ssm_state_indices,
       static_cast<float>(scale),
-      static_cast<int32_t>(stride_mixed_qkv_tok),
-      static_cast<int32_t>(stride_a_tok),
-      static_cast<int32_t>(stride_b_tok),
-      static_cast<int32_t>(stride_init_state_token),
-      static_cast<int32_t>(stride_final_state_token),
-      static_cast<int32_t>(stride_indices_seq),
-      static_cast<int32_t>(H),
-      static_cast<int32_t>(HV),
-      static_cast<int32_t>(K),
-      static_cast<int32_t>(V),
-      kAlgoId);
+      stride_mixed_qkv_tok,
+      stride_a_tok,
+      stride_b_tok,
+      stride_init_state_token,
+      stride_final_state_token,
+      stride_indices_seq,
+      H,
+      HV,
+      K,
+      V,
+      /*BK=*/128,
+      /*BV=*/BV,
+      /*SOFTPLUS_THRESHOLD=*/20.0f,
+      /*USE_QK_L2NORM_IN_KERNEL=*/use_qk_l2norm_in_kernel ? 1 : 0);
 
   return std::make_pair(out, ssm_cache);
 }
 
-}  // namespace mlu
-}  // namespace kernel
-}  // namespace xllm
+}  // namespace xllm::kernel::mlu

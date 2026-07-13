@@ -26,7 +26,9 @@ limitations under the License.
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/request/dit_request_state.h"
 #include "core/framework/tokenizer/tokenizer.h"
+#if defined(USE_CUDA)
 #include "core/layers/cuda/flashinfer_workspace.h"
+#endif
 #include "models/dit/autoencoders/autoencoder_kl.h"
 #include "models/dit/schedulers/flowmatch_euler_discrete_scheduler.h"
 #include "models/dit/transformers/transformer_longcat_image.h"
@@ -39,7 +41,7 @@ namespace xllm {
 class LongCatImagePipelineImpl;
 
 // Utility constants
-constexpr int64_t ROPE_SCALE_BASE = 10000;
+constexpr int64_t kLongCatRopeScaleBase = 10000;
 // FlowMatch/Euler scheduler timestep scaling (model expects [0, 1000])
 constexpr float kLongCatTimestepScale = 1000.0f;
 
@@ -53,11 +55,11 @@ constexpr const char* PROMPT_TEMPLATE_ENCODE_PREFIX =
 constexpr const char* PROMPT_TEMPLATE_ENCODE_SUFFIX =
     "<|im_end|>\n<|im_start|>assistant\n";
 
-float calculate_shift(int64_t image_seq_len,
-                      int64_t base_seq_len = 256,
-                      int64_t max_seq_len = 4096,
-                      float base_shift = 0.5f,
-                      float max_shift = 1.15f) {
+inline float calculate_longcat_shift(int64_t image_seq_len,
+                                     int64_t base_seq_len = 256,
+                                     int64_t max_seq_len = 4096,
+                                     float base_shift = 0.5f,
+                                     float max_shift = 1.15f) {
   float m =
       (max_shift - base_shift) / static_cast<float>(max_seq_len - base_seq_len);
   float b = base_shift - m * static_cast<float>(base_seq_len);
@@ -65,7 +67,7 @@ float calculate_shift(int64_t image_seq_len,
   return mu;
 }
 
-std::pair<torch::Tensor, int64_t> retrieve_timesteps(
+inline std::pair<torch::Tensor, int64_t> retrieve_longcat_timesteps(
     FlowMatchEulerDiscreteScheduler scheduler,
     int64_t num_inference_steps = 0,
     torch::Device device = torch::kCPU,
@@ -93,10 +95,11 @@ class LongCatImagePipelineImpl : public torch::nn::Module {
     const auto& model_args = context.get_model_args("vae");
     options_ = context.get_tensor_options();
 
-    // Initialize FlashinferWorkspace for attention operations
-    // This is required for batch_prefill to work correctly
+#if defined(USE_CUDA)
+    // Initialize FlashinferWorkspace for CUDA attention operations.
     layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
         options_.device());
+#endif
 
     vae_scale_factor_ = 1 << (model_args.block_out_channels().size() - 1);
     vae_shift_factor_ = model_args.shift_factor();
@@ -120,7 +123,7 @@ class LongCatImagePipelineImpl : public torch::nn::Module {
     pos_embed_ = register_module(
         "pos_embed",
         LongCatImagePosEmbed(
-            ROPE_SCALE_BASE,
+            kLongCatRopeScaleBase,
             context.get_model_args("transformer").axes_dims_rope()));
     transformer_ = LongCatImageTransformer2DModel(
         ModelContext(context.get_parallel_args(),
@@ -744,12 +747,12 @@ class LongCatImagePipelineImpl : public torch::nn::Module {
     }
 
     int64_t image_seq_len = prepared_latents.size(1);
-    float mu = calculate_shift(image_seq_len,
-                               scheduler_->base_image_seq_len(),
-                               scheduler_->max_image_seq_len(),
-                               scheduler_->base_shift(),
-                               scheduler_->max_shift());
-    auto [timesteps, _] = retrieve_timesteps(
+    float mu = calculate_longcat_shift(image_seq_len,
+                                       scheduler_->base_image_seq_len(),
+                                       scheduler_->max_image_seq_len(),
+                                       scheduler_->base_shift(),
+                                       scheduler_->max_shift());
+    auto [timesteps, _] = retrieve_longcat_timesteps(
         scheduler_, num_inference_steps, options_.device(), new_sigmas, mu);
 
     scheduler_->set_begin_index(0);

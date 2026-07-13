@@ -13,21 +13,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "causal_conv1d_update_decode.h"
-
-#include <cnrt.h>
 #include <framework/core/MLUStream.h>
+#include <framework/core/device.h>
 #include <glog/logging.h>
+#include <torch/torch.h>
 
-#include <algorithm>
-#include <unordered_map>
+#include <cstdint>
+#include <mutex>
+#include <optional>
 
 #include "kernels/mlu/mlu_ops_api.h"
-#include "kernels/mlu/utils.h"
+#include "triton_jit/include/jit_kernel.h"
 
-namespace xllm {
-namespace kernel {
-namespace mlu {
+namespace xllm::kernel::mlu {
+
+using xllm::triton_jit::JITKernel;
 
 torch::Tensor causal_conv1d_update_decode(
     const torch::Tensor& x,
@@ -37,7 +37,7 @@ torch::Tensor causal_conv1d_update_decode(
     const torch::Tensor& conv_state_indices,
     int32_t pad_slot_id,
     const std::optional<torch::Tensor>& query_start_loc_opt,
-    int32_t max_query_len,
+    int32_t /*max_query_len*/,
     const std::optional<torch::Tensor>& num_accepted_tokens_opt,
     const std::optional<torch::Tensor>& block_idx_last_scheduled_token_opt,
     const std::optional<torch::Tensor>& initial_state_idx_opt) {
@@ -54,108 +54,81 @@ torch::Tensor causal_conv1d_update_decode(
   int32_t state_len = width - 1;
   int32_t num_cache_lines = static_cast<int32_t>(conv_state.size(0));
 
-  // Create output tensor with same shape and dtype as x
   torch::Tensor out = torch::empty_like(x_input);
 
-  // Strides for x (batch, dim, seqlen)
   int32_t stride_x_seq = static_cast<int32_t>(x_input.stride(0));
   int32_t stride_x_dim = static_cast<int32_t>(x_input.stride(1));
   int32_t stride_x_token = static_cast<int32_t>(x_input.stride(2));
-  // Strides for weight (dim, width)
   int32_t stride_w_dim = static_cast<int32_t>(weight.stride(0));
   int32_t stride_w_width = static_cast<int32_t>(weight.stride(1));
-  // Strides for conv_state (num_cache_lines, dim, state_len)
   int32_t stride_istate_seq = static_cast<int32_t>(conv_state.stride(0));
   int32_t stride_istate_dim = static_cast<int32_t>(conv_state.stride(1));
   int32_t stride_istate_tok = static_cast<int32_t>(conv_state.stride(2));
-  // Strides for conv_state_indices (batch)
   int32_t stride_state_indices =
       static_cast<int32_t>(conv_state_indices.stride(0));
-  // Strides for out (batch, dim, seqlen)
   int32_t stride_o_seq = static_cast<int32_t>(out.stride(0));
   int32_t stride_o_dim = static_cast<int32_t>(out.stride(1));
   int32_t stride_o_token = static_cast<int32_t>(out.stride(2));
 
-  // Data pointers
-  void* x_ptr = x_input.data_ptr();
-  void* weight_ptr = weight.data_ptr();
-  void* bias_ptr = bias_opt.has_value() ? bias_opt->data_ptr() : nullptr;
-  void* conv_state_ptr = conv_state.data_ptr();
-  void* conv_state_indices_ptr = conv_state_indices.data_ptr();
-  void* num_accepted_tokens_ptr = num_accepted_tokens_opt.has_value()
-                                      ? num_accepted_tokens_opt->data_ptr()
-                                      : nullptr;
-  void* query_start_loc_ptr = query_start_loc_opt.has_value()
-                                  ? query_start_loc_opt->data_ptr()
-                                  : nullptr;
-  void* block_idx_last_scheduled_token_ptr =
-      block_idx_last_scheduled_token_opt.has_value()
-          ? block_idx_last_scheduled_token_opt->data_ptr()
-          : nullptr;
-  void* initial_state_idx_ptr = initial_state_idx_opt.has_value()
-                                    ? initial_state_idx_opt->data_ptr()
-                                    : nullptr;
-  void* out_ptr = out.data_ptr();
+  int32_t bd = 8;
+  int32_t num_feature_blocks = (dim + bd - 1) / bd;
+  // NP2_STATELEN: next power of two >= state_len.
+  int32_t np2_statelen = 1;
+  while (np2_statelen < state_len) {
+    np2_statelen <<= 1;
+  }
 
-  bool has_bias = bias_opt.has_value();
+  cnrtQueue_t queue = torch_mlu::getCurMLUStream();
 
-  constexpr int32_t kBd = 8;
-  int32_t num_feature_blocks = (dim + kBd - 1) / kBd;
-  cnrtDim3_t dim_block = {static_cast<uint32_t>(num_feature_blocks),
-                          static_cast<uint32_t>(batch),
-                          1};
+  JITKernel& f = JITKernel::get(
+      /*py_path=*/
+      "xllm.core.kernels.mlu.triton_kernel.causal_conv1d_update_decode",
+      /*fn_name=*/"tmo_causal_conv1d_update_decode_kernel");
 
-  auto queue = torch_mlu::getCurMLUStream();
-
-  // algo_id: select pre-compiled kernel variant based on dim value
-  static const std::unordered_map<int32_t, int32_t> kDimToAlgoId = {
-      {384, 0},
-      {512, 1},
-      {640, 2},
-      {768, 3},
-      {1024, 4},
-      {1280, 5},
-      {1536, 6},
-      {2048, 7},
-      {2560, 8},
-      {3072, 9},
-      {4096, 10},
-      {5120, 11},
-      {6144, 12},
-      {8192, 13},
-      {10240, 14},
-      {12288, 15},
-  };
-  int32_t algo_id = lookup_algo_id(kDimToAlgoId, dim, /*dim_name=*/"dim");
-
-  tmo_causal_conv1d_update_decode_kernel(queue,
-                                         &dim_block,
-                                         x_ptr,
-                                         weight_ptr,
-                                         bias_ptr,
-                                         conv_state_ptr,
-                                         conv_state_indices_ptr,
-                                         num_accepted_tokens_ptr,
-                                         query_start_loc_ptr,
-                                         block_idx_last_scheduled_token_ptr,
-                                         initial_state_idx_ptr,
-                                         out_ptr,
-                                         batch,
-                                         num_cache_lines,
-                                         stride_x_seq,
-                                         stride_x_dim,
-                                         stride_x_token,
-                                         stride_w_dim,
-                                         stride_w_width,
-                                         stride_istate_seq,
-                                         stride_istate_dim,
-                                         stride_istate_tok,
-                                         stride_state_indices,
-                                         stride_o_seq,
-                                         stride_o_dim,
-                                         stride_o_token,
-                                         pad_slot_id,
-                                         algo_id);
+  f.launch(static_cast<void*>(queue),
+           /*grid=*/
+           {static_cast<uint32_t>(num_feature_blocks),
+            static_cast<uint32_t>(batch),
+            1},
+           /*cfg=*/{/*num_warps=*/1, /*num_stages=*/1},
+           x,
+           weight,
+           bias_opt,
+           conv_state,
+           conv_state_indices,
+           num_accepted_tokens_opt,
+           query_start_loc_opt,
+           block_idx_last_scheduled_token_opt,
+           initial_state_idx_opt,
+           out,
+           batch,
+           num_cache_lines,
+           dim,
+           seqlen,
+           state_len,
+           stride_x_seq,
+           stride_x_dim,
+           stride_x_token,
+           stride_w_dim,
+           stride_w_width,
+           stride_istate_seq,
+           stride_istate_dim,
+           stride_istate_tok,
+           stride_state_indices,
+           stride_o_seq,
+           stride_o_dim,
+           stride_o_token,
+           pad_slot_id,
+           /*HAS_BIAS=*/bias_opt.has_value() ? 1 : 0,
+           /*KERNEL_WIDTH=*/width,
+           /*SILU_ACTIVATION=*/1,
+           /*IS_VARLEN=*/0,
+           /*IS_APC_ENABLED=*/0,
+           /*IS_SPEC_DECODING=*/0,
+           /*NP2_STATELEN=*/np2_statelen,
+           /*USE_PAD_SLOT=*/1,
+           /*BD=*/bd,
+           /*BW=*/4);
 
   if (unsqueeze) {
     out = out.squeeze(-1);
@@ -163,6 +136,4 @@ torch::Tensor causal_conv1d_update_decode(
   return out;
 }
 
-}  // namespace mlu
-}  // namespace kernel
-}  // namespace xllm
+}  // namespace xllm::kernel::mlu

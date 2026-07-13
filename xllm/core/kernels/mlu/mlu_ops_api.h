@@ -514,14 +514,6 @@ fused_recurrent_gated_delta_rule_packed_decode(
     const torch::Tensor& ssm_state_indices,
     bool use_qk_l2norm_in_kernel = true);
 
-torch::Tensor causal_conv1d_update(
-    torch::Tensor x,
-    torch::Tensor conv_state,
-    torch::Tensor weight,
-    const c10::optional<torch::Tensor>& bias_opt = c10::nullopt,
-    const c10::optional<torch::Tensor>& conv_state_indices_opt = c10::nullopt,
-    int32_t pad_slot_id = -1);
-
 torch::Tensor causal_conv1d_update_decode(
     const torch::Tensor& x,
     torch::Tensor& conv_state,

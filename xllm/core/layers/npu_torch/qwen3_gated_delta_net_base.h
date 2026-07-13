@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -55,6 +56,12 @@ class Qwen3GatedDeltaNetBaseImpl : public torch::nn::Module {
       const torch::Tensor& hidden_states) = 0;
   virtual std::pair<torch::Tensor, torch::Tensor> project_flat_inputs(
       const torch::Tensor& hidden_states) = 0;
+  virtual std::optional<
+      std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>
+  project_prefill_split_inputs(const torch::Tensor& hidden_states,
+                               const AttentionMetadata& attn_metadata) {
+    return std::nullopt;
+  }
   virtual bool use_fla_ssm_state_layout() const { return false; }
 
   void load_common_state_dict(const StateDict& state_dict);

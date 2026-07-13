@@ -20,11 +20,86 @@ limitations under the License.
 #include <numeric>
 
 #include "framework/parallel_state/parallel_state.h"
+#include "kernels/dcu/aiter_moe_adapter.h"
+#include "kernels/dcu/aiter_quant_adapter.h"
 #include "kernels/ops_api.h"
 #include "layers/common/dp_utils.h"
 
 namespace xllm {
 namespace layer {
+namespace {
+
+constexpr int64_t kAiterMoeBlockSize = 16;
+
+struct LocalFp8ExpertRouting {
+  torch::Tensor token_ids;
+  torch::Tensor expert_ids;
+  torch::Tensor weights;
+  int64_t num_assignments = 0;
+};
+
+bool is_fp8_channelwise_moe(const QuantArgs& quant_args) {
+  return quant_args.quant_method() == kQuantMethodFp8 &&
+         quant_args.activation_dynamic();
+}
+
+torch::Tensor shuffle_moe_gemm1_weight(const torch::Tensor& weight) {
+  return xllm::kernel::dcu::aiter::moe_layout_shuffle_gemm1(weight);
+}
+
+torch::Tensor shuffle_moe_gemm2_weight(const torch::Tensor& weight) {
+  return xllm::kernel::dcu::aiter::moe_layout_shuffle_gemm2(weight);
+}
+
+torch::Tensor materialize_fp8_moe_weight(torch::Tensor shuffled_weight,
+                                         const torch::Tensor& parameter) {
+  CHECK(shuffled_weight.defined()) << "shuffled FP8 MoE weight is undefined.";
+  CHECK(parameter.defined()) << "target FP8 MoE parameter is undefined.";
+  CHECK_EQ(parameter.sizes(), shuffled_weight.sizes())
+      << "shuffled FP8 MoE weight size mismatch.";
+  if (shuffled_weight.device() == parameter.device() &&
+      shuffled_weight.scalar_type() == parameter.scalar_type() &&
+      shuffled_weight.is_contiguous()) {
+    return shuffled_weight;
+  }
+  return shuffled_weight.to(parameter.options()).contiguous();
+}
+
+LocalFp8ExpertRouting select_local_fp8_experts(
+    const torch::Tensor& expert_id,
+    const torch::Tensor& reduce_weight,
+    int64_t topk,
+    int64_t start_expert_id,
+    int64_t num_experts_per_rank) {
+  CHECK_EQ(expert_id.sizes(), reduce_weight.sizes())
+      << "FP8 MoE expert id/reduce weight shape mismatch.";
+  const int64_t end_expert_id = start_expert_id + num_experts_per_rank;
+  torch::Tensor local_mask = torch::logical_and(expert_id.ge(start_expert_id),
+                                                expert_id.lt(end_expert_id));
+  torch::Tensor flat_indices =
+      torch::nonzero(local_mask.reshape({-1})).reshape({-1}).to(torch::kInt64);
+  LocalFp8ExpertRouting routing;
+  routing.num_assignments = flat_indices.numel();
+  if (routing.num_assignments == 0) {
+    return routing;
+  }
+
+  torch::Tensor flat_expert_id = expert_id.reshape({-1});
+  torch::Tensor flat_reduce_weight = reduce_weight.reshape({-1});
+  routing.token_ids = flat_indices.div(topk, "floor").to(torch::kInt64);
+  routing.expert_ids =
+      (flat_expert_id.index_select(0, flat_indices).to(torch::kInt64) -
+       start_expert_id)
+          .to(torch::kInt32)
+          .view({routing.num_assignments, 1})
+          .contiguous();
+  routing.weights = flat_reduce_weight.index_select(0, flat_indices)
+                        .view({routing.num_assignments, 1})
+                        .contiguous();
+  return routing;
+}
+
+}  // namespace
 
 FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
                            const FusedMoEArgs& moe_args,
@@ -52,11 +127,18 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
   const std::string& topk_method = model_args.topk_method();
   int64_t ep_size = parallel_args.ep_size();
   int64_t ep_rank = 0;
+  CHECK_GT(ep_size, 0) << "ep_size must be positive.";
   tp_pg_ = parallel_args.tp_group_;
   if (ep_size > 1) {
+    CHECK(parallel_args.moe_ep_group_ != nullptr)
+        << "DCU FusedMoE requires a MoE EP process group when ep_size > 1.";
+    CHECK(parallel_args.moe_tp_group_ != nullptr)
+        << "DCU FusedMoE requires a MoE TP process group when ep_size > 1.";
     ep_rank = parallel_args.moe_ep_group_->rank();
     tp_pg_ = parallel_args.moe_tp_group_;
   }
+  CHECK_EQ(num_experts % ep_size, 0)
+      << "n_routed_experts must be divisible by ep_size.";
 
   num_experts_per_rank_ = num_experts / ep_size;
   start_expert_id_ = ep_rank * num_experts_per_rank_;
@@ -97,21 +179,40 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
   }
 
   const int64_t world_size = tp_pg_->world_size();
-  int64_t local_intermediate_size = intermediate_size / world_size;
+  CHECK_EQ(intermediate_size % world_size, 0)
+      << "moe_intermediate_size must be divisible by TP world size.";
+  const int64_t local_intermediate_size = intermediate_size / world_size;
+  torch::TensorOptions expert_weight_options = options_;
+  if (is_fp8_channelwise_moe(quant_args_)) {
+    expert_weight_options = options_.dtype(torch::kFloat8_e4m3fn);
+  }
 
   w13_ = register_parameter(
       "w13",
       torch::empty(
           {num_experts_per_rank_, local_intermediate_size * 2, hidden_size_},
-          options_),
+          expert_weight_options),
       false);
 
   w2_ = register_parameter(
       "w2",
       torch::empty(
           {num_experts_per_rank_, hidden_size_, local_intermediate_size},
-          options_),
+          expert_weight_options),
       false);
+
+  if (is_fp8_channelwise_moe(quant_args_)) {
+    w13_scale_ = register_parameter(
+        "w13_scale",
+        torch::empty({num_experts_per_rank_, local_intermediate_size * 2, 1},
+                     options_.dtype(torch::kFloat32)),
+        false);
+    w2_scale_ = register_parameter(
+        "w2_scale",
+        torch::empty({num_experts_per_rank_, hidden_size_, 1},
+                     options_.dtype(torch::kFloat32)),
+        false);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -140,31 +241,35 @@ torch::Tensor FusedMoEImpl::expert_gemm(const torch::Tensor& input,
 //   step 2 — moe_gen_idx     → cuda::moe_fused_compute_index (fused)
 //   step 3 — moe_expand_input → torch index_select
 // ---------------------------------------------------------------------------
-torch::Tensor FusedMoEImpl::select_experts(
-    const torch::Tensor& hidden_states_2d,
-    const torch::Tensor& router_logits_2d,
-    SelectedExpertInfo& selected_expert_info) {
+std::pair<torch::Tensor, torch::Tensor> FusedMoEImpl::route_experts(
+    const torch::Tensor& router_logits_2d) {
   std::optional<torch::Tensor> e_score_correction_bias = std::nullopt;
   if (e_score_correction_bias_.defined()) {
     e_score_correction_bias = e_score_correction_bias_;
   }
 
-  // ---- Step 1: moe_active_topk ----
   torch::Tensor reduce_weight;
   torch::Tensor expert_id;
-  {
-    xllm::kernel::MoeFusedTopkParams params;
-    params.input = router_logits_2d;
-    params.topk = topk_;
-    params.num_expert_group = num_expert_group_;
-    params.topk_group = topk_group_;
-    params.normalize = renormalize_;
-    params.normed_by = "topk_logit";
-    params.scoring_func = scoring_func_;
-    params.route_scale = route_scale_;
-    params.e_score_correction_bias = e_score_correction_bias;
-    std::tie(reduce_weight, expert_id) = xllm::kernel::moe_active_topk(params);
-  }
+  xllm::kernel::MoeFusedTopkParams params;
+  params.input = router_logits_2d;
+  params.topk = topk_;
+  params.num_expert_group = num_expert_group_;
+  params.topk_group = topk_group_;
+  params.normalize = renormalize_;
+  params.normed_by = "topk_logit";
+  params.scoring_func = scoring_func_;
+  params.route_scale = route_scale_;
+  params.e_score_correction_bias = e_score_correction_bias;
+  std::tie(reduce_weight, expert_id) = xllm::kernel::moe_active_topk(params);
+  return {reduce_weight, expert_id};
+}
+
+torch::Tensor FusedMoEImpl::select_experts(
+    const torch::Tensor& hidden_states_2d,
+    const torch::Tensor& router_logits_2d,
+    SelectedExpertInfo& selected_expert_info) {
+  // ---- Step 1: moe_active_topk ----
+  auto [reduce_weight, expert_id] = route_experts(router_logits_2d);
 
   // ---- Step 2: moe_gen_idx (fused kernel) ----
   torch::Tensor src_dst, dst_src, expert_sizes;
@@ -211,6 +316,169 @@ torch::Tensor FusedMoEImpl::select_experts(
   return expand_all;
 }
 
+torch::Tensor FusedMoEImpl::forward_fp8_channelwise_experts(
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& hidden_states_2d,
+    const torch::Tensor& router_logits_2d) {
+  CHECK(w13_.defined() && w2_.defined())
+      << "FP8 MoE weights must be loaded before forward.";
+  CHECK(w13_scale_.defined() && w2_scale_.defined())
+      << "FP8 MoE weight scales must be loaded before forward.";
+
+  const int64_t num_tokens = hidden_states_2d.size(0);
+  const torch::ScalarType output_dtype = hidden_states.dtype().toScalarType();
+  auto [reduce_weight, expert_id] = route_experts(router_logits_2d);
+  if (parallel_args_.ep_size() > 1) {
+    LocalFp8ExpertRouting routing =
+        select_local_fp8_experts(expert_id,
+                                 reduce_weight,
+                                 topk_,
+                                 start_expert_id_,
+                                 num_experts_per_rank_);
+    torch::Tensor final_hidden_states_2d =
+        torch::zeros({num_tokens, hidden_size_},
+                     hidden_states_2d.options().dtype(output_dtype));
+    if (routing.num_assignments == 0) {
+      return final_hidden_states_2d.reshape(hidden_states.sizes());
+    }
+
+    xllm::kernel::dcu::aiter::MoeSortedTokens sorted_tokens =
+        xllm::kernel::dcu::aiter::moe_align_block_size(routing.expert_ids,
+                                                       routing.weights,
+                                                       num_experts_per_rank_,
+                                                       kAiterMoeBlockSize);
+    torch::Tensor local_hidden_states =
+        hidden_states_2d.index_select(0, routing.token_ids).contiguous();
+    torch::Tensor quantized_input;
+    torch::Tensor input_scale;
+    std::tie(quantized_input, input_scale) =
+        xllm::kernel::dcu::aiter::per_token_quant_fp8(local_hidden_states,
+                                                      std::nullopt);
+
+    torch::Tensor gemm1_out =
+        torch::empty({routing.num_assignments, 1, w13_.size(1)},
+                     hidden_states_2d.options().dtype(output_dtype));
+    xllm::kernel::dcu::aiter::moe_gemm_fp8_channelwise(
+        quantized_input,
+        w13_,
+        gemm1_out,
+        input_scale,
+        w13_scale_,
+        std::nullopt,
+        sorted_tokens,
+        /*topk=*/1,
+        xllm::kernel::dcu::aiter::select_moe_gemm1_mode(
+            routing.num_assignments),
+        /*delta=*/1,
+        xllm::kernel::dcu::aiter::select_moe_m_key(routing.num_assignments));
+
+    torch::Tensor act_out =
+        torch::empty({routing.num_assignments, w13_.size(1) / 2},
+                     hidden_states_2d.options().dtype(output_dtype));
+    {
+      xllm::kernel::ActivationParams activation_params;
+      activation_params.input =
+          gemm1_out.view({routing.num_assignments, w13_.size(1)});
+      activation_params.output = act_out;
+      activation_params.act_mode = hidden_act_;
+      activation_params.is_gated = is_gated_;
+      xllm::kernel::active(activation_params);
+    }
+
+    torch::Tensor quantized_act;
+    torch::Tensor act_scale;
+    std::tie(quantized_act, act_scale) =
+        xllm::kernel::dcu::aiter::per_token_quant_fp8(act_out.contiguous(),
+                                                      std::nullopt);
+
+    torch::Tensor gemm2_out =
+        torch::empty({routing.num_assignments, 1, hidden_size_},
+                     hidden_states_2d.options().dtype(output_dtype));
+    xllm::kernel::dcu::aiter::moe_gemm_fp8_channelwise(
+        quantized_act,
+        w2_,
+        gemm2_out,
+        act_scale,
+        w2_scale_,
+        routing.weights,
+        sorted_tokens,
+        /*topk=*/1,
+        xllm::kernel::dcu::aiter::select_moe_gemm2_mode(
+            routing.num_assignments),
+        /*delta=*/1,
+        xllm::kernel::dcu::aiter::select_moe_m_key(routing.num_assignments));
+
+    torch::Tensor local_output =
+        gemm2_out.view({routing.num_assignments, hidden_size_});
+    final_hidden_states_2d.index_add_(0, routing.token_ids, local_output);
+    return final_hidden_states_2d.reshape(hidden_states.sizes());
+  }
+
+  xllm::kernel::dcu::aiter::MoeSortedTokens sorted_tokens =
+      xllm::kernel::dcu::aiter::moe_align_block_size(
+          expert_id, reduce_weight, num_total_experts_, kAiterMoeBlockSize);
+
+  torch::Tensor quantized_input;
+  torch::Tensor input_scale;
+  std::tie(quantized_input, input_scale) =
+      xllm::kernel::dcu::aiter::per_token_quant_fp8(
+          hidden_states_2d.contiguous(), std::nullopt);
+
+  torch::Tensor gemm1_out =
+      torch::empty({num_tokens, topk_, w13_.size(1)},
+                   hidden_states_2d.options().dtype(output_dtype));
+  xllm::kernel::dcu::aiter::moe_gemm_fp8_channelwise(
+      quantized_input,
+      w13_,
+      gemm1_out,
+      input_scale,
+      w13_scale_,
+      std::nullopt,
+      sorted_tokens,
+      topk_,
+      xllm::kernel::dcu::aiter::select_moe_gemm1_mode(num_tokens),
+      topk_,
+      xllm::kernel::dcu::aiter::select_moe_m_key(num_tokens));
+
+  torch::Tensor act_out =
+      torch::empty({num_tokens * topk_, w13_.size(1) / 2},
+                   hidden_states_2d.options().dtype(output_dtype));
+  {
+    xllm::kernel::ActivationParams activation_params;
+    activation_params.input =
+        gemm1_out.view({num_tokens * topk_, w13_.size(1)});
+    activation_params.output = act_out;
+    activation_params.act_mode = hidden_act_;
+    activation_params.is_gated = is_gated_;
+    xllm::kernel::active(activation_params);
+  }
+
+  torch::Tensor quantized_act;
+  torch::Tensor act_scale;
+  std::tie(quantized_act, act_scale) =
+      xllm::kernel::dcu::aiter::per_token_quant_fp8(act_out.contiguous(),
+                                                    std::nullopt);
+
+  torch::Tensor gemm2_out =
+      torch::empty({num_tokens, topk_, hidden_size_},
+                   hidden_states_2d.options().dtype(output_dtype));
+  xllm::kernel::dcu::aiter::moe_gemm_fp8_channelwise(
+      quantized_act,
+      w2_,
+      gemm2_out,
+      act_scale,
+      w2_scale_,
+      reduce_weight.contiguous(),
+      sorted_tokens,
+      /*topk=*/1,
+      xllm::kernel::dcu::aiter::select_moe_gemm2_mode(num_tokens),
+      topk_,
+      xllm::kernel::dcu::aiter::select_moe_m_key(num_tokens));
+
+  torch::Tensor final_hidden_states = gemm2_out.sum(/*dim=*/1);
+  return final_hidden_states.reshape(hidden_states.sizes());
+}
+
 // ---------------------------------------------------------------------------
 // forward_experts
 // ---------------------------------------------------------------------------
@@ -228,6 +496,43 @@ torch::Tensor FusedMoEImpl::forward_experts(
   auto hidden_states_dtype = hidden_states.dtype().toScalarType();
   auto hidden_states_2d = hidden_states.reshape({-1, hidden_states.size(-1)});
   auto router_logits_2d = router_logits.reshape({-1, router_logits.size(-1)});
+
+  if (is_fp8_channelwise_moe(quant_args_)) {
+    auto final_hidden_states = forward_fp8_channelwise_experts(
+        hidden_states, hidden_states_2d, router_logits_2d);
+
+    auto current_stream = device_.current_stream();
+    routed_stream_->wait_stream(*current_stream);
+    {
+      torch::StreamGuard stream_guard = routed_stream_->set_stream_guard();
+      if (parallel_args_.ep_size() > 1) {
+        final_hidden_states = parallel_state::reduce(
+            final_hidden_states, parallel_args_.moe_ep_group_);
+      }
+      if (tp_pg_->world_size() > 1) {
+        final_hidden_states =
+            parallel_state::reduce(final_hidden_states, tp_pg_);
+      }
+    }
+
+    torch::Tensor shared_expert_output;
+    if (n_shared_experts_ > 0) {
+      shared_stream_->wait_stream(*current_stream);
+      {
+        torch::StreamGuard stream_guard = shared_stream_->set_stream_guard();
+        shared_expert_output = shared_experts_(hidden_states);
+        shared_expert_output =
+            shared_expert_output.reshape({-1, shared_expert_output.size(-1)});
+      }
+    }
+
+    current_stream->wait_stream(*routed_stream_);
+    if (n_shared_experts_ > 0) {
+      current_stream->wait_stream(*shared_stream_);
+      final_hidden_states += shared_expert_output.reshape(hidden_states_shape);
+    }
+    return final_hidden_states;
+  }
 
   // ---- Steps 1-3: select experts ----
   SelectedExpertInfo selected_expert_info;
@@ -378,6 +683,19 @@ void FusedMoEImpl::load_experts(const StateDict& state_dict) {
   const int64_t num_experts_per_rank = num_experts_per_rank_;
   const int64_t num_total_experts = num_total_experts_;
   std::vector<std::string> prefixes = {"gate_proj.", "up_proj."};
+  if (is_fp8_channelwise_moe(quant_args_)) {
+    auto shuffle_w13 = [this](const torch::Tensor& weight) {
+      return materialize_fp8_moe_weight(shuffle_moe_gemm1_weight(weight), w13_);
+    };
+    auto shuffle_w2 = [this](const torch::Tensor& weight) {
+      return materialize_fp8_moe_weight(shuffle_moe_gemm2_weight(weight), w2_);
+    };
+    LOAD_MOE_FUSED_WEIGHT_TRANSFORM("weight", w1, w3, w13, shuffle_w13);
+    LOAD_MOE_WEIGHT_TRANSFORM("down_proj.", "weight", w2, shuffle_w2, 1);
+    LOAD_MOE_FUSED_WEIGHT("weight_scale", w1_scale, w3_scale, w13_scale);
+    LOAD_MOE_WEIGHT("down_proj.", "weight_scale", w2_scale, -1);
+    return;
+  }
   LOAD_MOE_FUSED_WEIGHT("weight", w1, w3, w13);
   LOAD_MOE_WEIGHT("down_proj.", "weight", w2, 1);
 }

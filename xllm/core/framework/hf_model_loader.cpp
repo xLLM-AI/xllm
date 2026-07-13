@@ -93,28 +93,45 @@ bool is_compressed_tensors_int8_scheme(const nlohmann::json& config,
          num_bits_it->get<int64_t>() == 8 && dynamic == expected_dynamic;
 }
 
-bool try_load_compressed_tensors_quant_cfg(const JsonReader& reader,
-                                           QuantArgs& quant_args) {
+const nlohmann::json* get_compressed_tensors_config(
+    const nlohmann::json& data,
+    const JsonReader& reader,
+    const std::string& config_key) {
   const auto quant_method =
-      reader.value<std::string>("quantization_config.quant_method");
+      reader.value<std::string>(config_key + ".quant_method");
   if (!quant_method.has_value() ||
       !boost::iequals(*quant_method, "compressed-tensors")) {
-    return false;
+    return nullptr;
   }
 
-  const auto& data = reader.data();
-  auto quant_config_it = data.find("quantization_config");
+  auto quant_config_it = data.find(config_key);
   if (quant_config_it == data.end() || !quant_config_it->is_object()) {
-    LOG(ERROR) << "quantization_config must be an object for "
-                  "compressed-tensors quantization.";
+    LOG(ERROR) << config_key << " must be an object for "
+               << "compressed-tensors quantization.";
+    return nullptr;
+  }
+  return &(*quant_config_it);
+}
+
+bool try_load_compressed_tensors_quant_cfg(const JsonReader& reader,
+                                           QuantArgs& quant_args) {
+  const nlohmann::json data = reader.data();
+  std::string config_key = "quantization_config";
+  const nlohmann::json* quant_config =
+      get_compressed_tensors_config(data, reader, config_key);
+  if (quant_config == nullptr && Platform::is_dcu()) {
+    config_key = "compression_config";
+    quant_config = get_compressed_tensors_config(data, reader, config_key);
+  }
+  if (quant_config == nullptr) {
     return false;
   }
 
-  auto config_groups_it = quant_config_it->find("config_groups");
-  if (config_groups_it == quant_config_it->end() ||
+  auto config_groups_it = quant_config->find("config_groups");
+  if (config_groups_it == quant_config->end() ||
       !config_groups_it->is_object()) {
-    LOG(ERROR) << "quantization_config.config_groups must be an object for "
-                  "compressed-tensors quantization.";
+    LOG(ERROR) << config_key << ".config_groups must be an object for "
+               << "compressed-tensors quantization.";
     return false;
   }
 
@@ -142,8 +159,8 @@ bool try_load_compressed_tensors_quant_cfg(const JsonReader& reader,
         quant_args.moe_weight_bits() = 8;
         quant_args.activation_dynamic() = true;
         quant_args.is_compressed_tensors_w8a8_dynamic() = true;
-        if (const auto ignore = reader.value<std::vector<std::string>>(
-                "quantization_config.ignore");
+        if (const auto ignore =
+                reader.value<std::vector<std::string>>(config_key + ".ignore");
             ignore.has_value()) {
           quant_args.ignored_modules() = *ignore;
         }
@@ -160,17 +177,16 @@ bool try_load_compressed_tensors_quant_cfg(const JsonReader& reader,
     if (dynamic_it != input_activations_it->end() && !dynamic_it->is_null()) {
       quant_args.activation_dynamic() = dynamic_it->get<bool>();
     }
-    if (const auto ignore = reader.value<std::vector<std::string>>(
-            "quantization_config.ignore");
+    if (const auto ignore =
+            reader.value<std::vector<std::string>>(config_key + ".ignore");
         ignore.has_value()) {
       quant_args.ignored_modules() = *ignore;
     }
     return true;
   }
 
-  LOG(ERROR) << "Failed to find an FP8 config_group in "
-                "quantization_config.config_groups for compressed-tensors "
-                "quantization.";
+  LOG(ERROR) << "Failed to find an FP8 config_group in " << config_key
+             << ".config_groups for compressed-tensors quantization.";
   return false;
 }
 
@@ -281,6 +297,17 @@ bool try_parse_layer_id(const std::string& tensor_name, int64_t* layer_id) {
   return false;
 }
 
+std::string infer_quantize_type_from_desc(bool has_w4a8_dynamic,
+                                          bool has_w8a8_dynamic) {
+  if (has_w4a8_dynamic) {
+    return "w4a8_dynamic";
+  }
+  if (has_w8a8_dynamic) {
+    return "w8a8_dynamic";
+  }
+  return "";
+}
+
 class ScopedMmap {
  public:
   ~ScopedMmap() {
@@ -382,7 +409,8 @@ void check_safetensors_cleanup(::Status status,
 }  // namespace
 
 bool load_quant_cfg(const JsonReader& reader, QuantArgs& quant_args) {
-  if (!reader.contains("quantization_config")) {
+  if (!reader.contains("quantization_config") &&
+      !reader.contains("compression_config")) {
     return true;
   }
 
@@ -823,7 +851,8 @@ bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
   }
 
   // load quantization args for npu if exists
-  if (config_reader.contains("quantize")) {
+  const bool has_config_quantize = config_reader.contains("quantize");
+  if (has_config_quantize) {
     quant_args_.quantize_type() =
         config_reader.value_or<std::string>("quantize", "");
   }
@@ -862,6 +891,7 @@ bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
     bool desc_has_w4a8 = false;
     bool desc_has_w8a8 = false;
     bool desc_has_w4a8_dynamic = false;
+    bool desc_has_w8a8_dynamic = false;
     if (!quant_desc_data.is_object()) {
       LOG(WARNING) << "quant_model_description is not a JSON object: "
                    << quant_desc_file_path;
@@ -887,6 +917,8 @@ bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
         }
         if (boost::iequals(quant_type, "w4a8_dynamic")) {
           desc_has_w4a8_dynamic = true;
+        } else if (boost::iequals(quant_type, "w8a8_dynamic")) {
+          desc_has_w8a8_dynamic = true;
         }
         quant_descs.emplace(it.key(), quant_type);
         std::string mapped_key = it.key();
@@ -911,6 +943,12 @@ bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
                       ? "<empty>"
                       : quant_args_.quant_method());
 
+    const std::string desc_inferred_quantize_type =
+        infer_quantize_type_from_desc(desc_has_w4a8_dynamic,
+                                      desc_has_w8a8_dynamic);
+    if (!has_config_quantize && !desc_inferred_quantize_type.empty()) {
+      quant_args_.quantize_type() = desc_inferred_quantize_type;
+    }
     if (quant_args_.quantize_type().empty()) {
       if (auto v = quant_desc_reader.value<std::string>("model_quant_type")) {
         auto quantize_type = v.value();

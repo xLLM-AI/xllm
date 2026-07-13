@@ -49,10 +49,14 @@ limitations under the License.
 // @enable_prefill_piecewise_graph
 // @max_tokens_for_graph_mode
 // @max_encoder_cache_size
+// @dp_size
+// @tp_size
+// @sp_size
+// @cfg_size
 int main(int argc, char* argv[]) {
-  if (argc < 28) {
+  if (argc < 32) {
     LOG(ERROR)
-        << "Spawn worker process receive wrong args. Need 28 args, receive "
+        << "Spawn worker process receive wrong args. Need 32 args, receive "
         << argc;
     return 1;
   }
@@ -86,6 +90,10 @@ int main(int argc, char* argv[]) {
       static_cast<int32_t>(atoi(argv[25])) > 0;
   int32_t max_tokens_for_graph_mode = static_cast<int32_t>(atoi(argv[26]));
   int64_t max_encoder_cache_size = static_cast<int64_t>(atoll(argv[27]));
+  int32_t dp_size = static_cast<int32_t>(atoi(argv[28]));
+  int32_t tp_size = static_cast<int32_t>(atoi(argv[29]));
+  int32_t sp_size = static_cast<int32_t>(atoi(argv[30]));
+  int32_t cfg_size = static_cast<int32_t>(atoi(argv[31]));
 
   LOG(INFO) << "Spawn worker: "
             << "master_node_addr = " << master_node_addr
@@ -116,7 +124,9 @@ int main(int argc, char* argv[]) {
             << ", enable_prefill_piecewise_graph = "
             << enable_prefill_piecewise_graph
             << ", max_tokens_for_graph_mode = " << max_tokens_for_graph_mode
-            << ", max_encoder_cache_size = " << max_encoder_cache_size << "\n";
+            << ", max_encoder_cache_size = " << max_encoder_cache_size
+            << ", dp_size = " << dp_size << ", tp_size = " << tp_size
+            << ", sp_size = " << sp_size << ", cfg_size = " << cfg_size << "\n";
 
   xllm::SpawnWorkerServer worker(master_node_addr,
                                  local_rank,
@@ -144,7 +154,11 @@ int main(int argc, char* argv[]) {
                                  enable_graph_mode_decode_no_padding,
                                  enable_prefill_piecewise_graph,
                                  max_tokens_for_graph_mode,
-                                 max_encoder_cache_size);
+                                 max_encoder_cache_size,
+                                 dp_size,
+                                 tp_size,
+                                 sp_size,
+                                 cfg_size);
 
   worker.run();
 

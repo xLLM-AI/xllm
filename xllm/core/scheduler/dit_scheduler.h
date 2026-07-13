@@ -19,6 +19,7 @@ limitations under the License.
 #include <folly/MPMCQueue.h>
 #include <folly/futures/Future.h>
 
+#include <deque>
 #include <limits>
 #include <memory>
 #include <queue>
@@ -113,6 +114,10 @@ class DiTDynamicBatchScheduler : public DiTScheduler {
 
   // a batch of requests in running state
   std::vector<std::shared_ptr<DiTRequest>> running_requests_;
+
+  // requests popped from request_queue_ but deferred because they are not
+  // compatible with the current DiT batch.
+  std::deque<std::shared_ptr<DiTRequest>> deferred_requests_;
 
   // response handler
   std::unique_ptr<DiTAsyncResponseProcessor> response_handler_;

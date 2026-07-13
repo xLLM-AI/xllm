@@ -171,7 +171,11 @@ struct DiTRequestState {
         call_(call) {}
   DiTRequestState() {}
   DiTInputParams& input_params() { return input_params_; }
+  const DiTInputParams& input_params() const { return input_params_; }
   DiTGenerationParams& generation_params() { return generation_params_; }
+  const DiTGenerationParams& generation_params() const {
+    return generation_params_;
+  }
   DiTOutputFunc& output_func() { return output_func_; }
   DiTOutputsFunc& outputs_func() { return outputs_func_; }
   std::optional<Call*>& call() { return call_; }

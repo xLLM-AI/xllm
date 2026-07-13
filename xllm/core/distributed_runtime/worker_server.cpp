@@ -281,6 +281,14 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
   std::string max_encoder_cache_size_str =
       std::to_string(options.max_encoder_cache_size());
   const char* max_encoder_cache_size_ptr = max_encoder_cache_size_str.c_str();
+  std::string dp_size_str = std::to_string(options.dp_size());
+  const char* dp_size_ptr = dp_size_str.c_str();
+  std::string tp_size_str = std::to_string(options.tp_size());
+  const char* tp_size_ptr = tp_size_str.c_str();
+  std::string sp_size_str = std::to_string(options.sp_size());
+  const char* sp_size_ptr = sp_size_str.c_str();
+  std::string cfg_size_str = std::to_string(options.cfg_size());
+  const char* cfg_size_ptr = cfg_size_str.c_str();
   const char* worker_type_ptr = worker_type.to_string();
   std::string spawn_worker_bin_path =
       options.spawn_worker_path() + "/spawn_worker";
@@ -313,6 +321,10 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         enable_prefill_piecewise_graph_ptr,
                         max_tokens_for_graph_mode_ptr,
                         max_encoder_cache_size_ptr,
+                        dp_size_ptr,
+                        tp_size_ptr,
+                        sp_size_ptr,
+                        cfg_size_ptr,
                         nullptr};
   pid_t pid;
   int status = posix_spawnp(

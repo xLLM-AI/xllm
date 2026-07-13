@@ -304,4 +304,23 @@ TEST(DisaggPDSchedulerTest, MtpFirstGenerationStoresBootstrapThenQueues) {
       queued->sequences()[0]->get_mtp_bootstrap_embedding(), embedding));
 }
 
+TEST(DisaggPDSchedulerTest, FirstDecodeTokenLatencyIsNonNegative) {
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  TestDisaggPDScheduler scheduler(&engine, make_options());
+  std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
+  Sequence* sequence = request->sequences()[0].get();
+  ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
+  sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
+  ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
+
+  EXPECT_TRUE(recv_first_generation(&scheduler, torch::Tensor()));
+
+  std::shared_ptr<Request> queued;
+  ASSERT_TRUE(scheduler.pop_decode_request_for_test(&queued));
+  // Base rebuilt in decode_recv_first_generation must not sit in the future:
+  // pre-fix it was created_time + ttft (~now+100ms), yielding a negative ITL.
+  int64_t first_itl = queued->sequences()[0]->tbt(absl::Now());
+  EXPECT_GE(first_itl, 0);
+}
+
 }  // namespace xllm

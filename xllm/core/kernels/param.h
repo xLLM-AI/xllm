@@ -493,9 +493,10 @@ struct DequantSwigluQuantParams {
 };
 
 // Ascend W4A8_DYNAMIC MoE weight post-load processing for version 1.0.0.
-// Mirrors vllm-ascend's Python path: transpose/NZ-convert int4 weights, pack
-// them to int32, and fold first-level + second-level scales into the int64
-// dtype/layout consumed by npu_grouped_matmul.
+// Transpose/NZ-convert int4 weights and fold first-level + second-level scales
+// into the int64 dtype/layout consumed by npu_grouped_matmul. Torch fused MoE
+// additionally packs weights to int32; the ATB grouped-matmul wrapper expects
+// the original int8-packed tensor.
 struct W4A8DynamicMoePreprocessParams {
   torch::Tensor w13_weight;
   torch::Tensor w2_weight;
@@ -506,6 +507,7 @@ struct W4A8DynamicMoePreprocessParams {
   std::optional<torch::Tensor> w13_scale_bias;
   std::optional<torch::Tensor> w2_scale_bias;
   int64_t group_size = 256;
+  bool pack_weight_to_int32 = true;
 };
 
 struct MoeFusedTopkParams {
@@ -1693,6 +1695,9 @@ struct MegaChunkGdnParams {
   // Optional cumulative sequence lengths. Shape: [num_sequences + 1]. Dtype:
   // int32.
   std::optional<torch::Tensor> cu_seqlens = std::nullopt;
+  // Optional non-owning host sequence lengths. When provided, these avoid
+  // copying cu_seqlens from the device merely to derive the chunk count.
+  c10::ArrayRef<int32_t> q_seq_lens = {};
   // Whether to apply L2 norm to q and k inside the kernel. Default: false.
   bool use_qk_l2norm_in_kernel = false;
 };

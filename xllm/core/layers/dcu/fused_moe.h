@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <utility>
+
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
 #include "framework/parallel_state/parallel_args.h"
@@ -67,6 +69,14 @@ class FusedMoEImpl final : public torch::nn::Module {
                                const torch::Tensor& router_logits_2d,
                                SelectedExpertInfo& selected_expert_info);
 
+  std::pair<torch::Tensor, torch::Tensor> route_experts(
+      const torch::Tensor& router_logits_2d);
+
+  torch::Tensor forward_fp8_channelwise_experts(
+      const torch::Tensor& hidden_states,
+      const torch::Tensor& hidden_states_2d,
+      const torch::Tensor& router_logits_2d);
+
   // per-expert matmul: groups input by token_count, multiplies by weight[e]
   torch::Tensor expert_gemm(const torch::Tensor& input,
                             const torch::Tensor& weight,
@@ -106,6 +116,10 @@ class FusedMoEImpl final : public torch::nn::Module {
   DEFINE_FUSED_WEIGHT(w1);
   DEFINE_FUSED_WEIGHT(w3);
   DEFINE_FUSED_WEIGHT(w2);
+  DEFINE_FUSED_WEIGHT(w1_scale);
+  DEFINE_FUSED_WEIGHT(w3_scale);
+  DEFINE_WEIGHT(w13_scale);
+  DEFINE_FUSED_WEIGHT(w2_scale);
   DEFINE_WEIGHT(e_score_correction_bias);
 
   void load_e_score_correction_bias(const StateDict& state_dict);

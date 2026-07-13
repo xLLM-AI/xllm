@@ -122,6 +122,36 @@ void npu_gemma_rms_norm(const torch::Tensor& x,
                         torch::Tensor& rstd_out,
                         torch::Tensor& y_out);
 
+std::tuple<torch::Tensor, torch::Tensor> npu_block_sparse_attention(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const torch::Tensor& block_sparse_mask,
+    torch::IntArrayRef block_shape,
+    const std::string& q_input_layout,
+    const std::string& kv_input_layout,
+    int64_t num_key_value_heads,
+    double scale_value,
+    int64_t inner_precise,
+    int64_t softmax_lse_flag = 0,
+    std::optional<torch::IntArrayRef> actual_seq_lengths = std::nullopt,
+    std::optional<torch::IntArrayRef> actual_seq_lengths_kv = std::nullopt);
+
+std::tuple<torch::Tensor, torch::Tensor> npu_rain_fusion_attention(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const torch::Tensor& select_idx,
+    const torch::Tensor& select_num_idx,
+    torch::IntArrayRef blockshape,
+    const std::string& q_input_layout,
+    const std::string& kv_input_layout,
+    int64_t head_num,
+    double scale,
+    int64_t inner_precise,
+    std::optional<torch::IntArrayRef> actual_seq_lengths = std::nullopt,
+    std::optional<torch::IntArrayRef> actual_seq_lengths_kv = std::nullopt);
+
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> add_rms_norm(
     const torch::Tensor& x1,
     const torch::Tensor& x2,
@@ -308,7 +338,8 @@ w4a8_dynamic_moe_preprocess(
     const std::optional<torch::Tensor>& w2_weight_scale_second,
     const std::optional<torch::Tensor>& w13_scale_bias,
     const std::optional<torch::Tensor>& w2_scale_bias,
-    int64_t group_size);
+    int64_t group_size,
+    bool pack_weight_to_int32);
 
 std::tuple<torch::Tensor, torch::Tensor> rec_constrained_topk(
     const torch::Tensor& logits,

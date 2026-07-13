@@ -129,6 +129,23 @@ inline bool file_exists(const std::string& path) {
   return file.good();
 }
 
+inline bool tensor_batch_signature_matches(const torch::Tensor& lhs,
+                                           const torch::Tensor& rhs) {
+  if (!lhs.defined() || !rhs.defined()) {
+    return lhs.defined() == rhs.defined();
+  }
+  if (lhs.scalar_type() != rhs.scalar_type() || lhs.device() != rhs.device() ||
+      lhs.dim() != rhs.dim()) {
+    return false;
+  }
+  for (int64_t i = 0; i < lhs.dim(); ++i) {
+    if (lhs.size(i) != rhs.size(i)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 inline torch::Tensor safe_concat(const torch::Tensor& t1,
                                  const torch::Tensor& t2,
                                  const uint32_t dim) {
