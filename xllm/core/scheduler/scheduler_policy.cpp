@@ -866,6 +866,8 @@ std::unique_ptr<SchedulerPolicy> create_scheduler_policy(
     return std::make_unique<UnifiedPolicy>(mode, options);
   } else if (mode.enable_mix_batch) {
     return std::make_unique<DecodeFirstPolicy>(mode, options);
+  } else if (SchedulerConfig::get_instance().enable_short_request_first()) {
+    return std::make_unique<ShortRequestFirstPolicy>(mode, options);
   } else {
     return std::make_unique<PrefillFirstPolicy>(mode, options);
   }

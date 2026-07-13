@@ -6,6 +6,7 @@ cc_test(
   NAME
     scheduler_test
   SRCS
+    short_request_first_policy_test.cpp
     disagg_pd_scheduler_test.cpp
     continuous_scheduler_test.cpp
     fixed_steps_scheduler_test.cpp

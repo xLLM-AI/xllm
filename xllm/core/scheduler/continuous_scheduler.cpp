@@ -47,6 +47,27 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
+namespace {
+
+void validate_short_request_first_options(
+    const ContinuousScheduler::Options& options) {
+  if (!options.enable_disagg_pd()) {
+    LOG(FATAL) << "ShortRequestFirst requires enable_disagg_pd=true.";
+  }
+  if (!options.enable_chunked_prefill()) {
+    LOG(FATAL) << "ShortRequestFirst requires enable_chunked_prefill=true.";
+  }
+  if (options.instance_role() == InstanceRole::DECODE) {
+    LOG(FATAL) << "ShortRequestFirst is only supported on PD prefill or mix "
+               << "instances, not decode instances.";
+  }
+  if (options.priority_strategy() != "fcfs") {
+    LOG(FATAL) << "ShortRequestFirst requires priority_strategy=fcfs, got "
+               << options.priority_strategy();
+  }
+}
+
+}  // namespace
 
 void CancelRequestQueue::submit(std::shared_ptr<Request> request) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -187,6 +208,14 @@ bool ContinuousScheduler::add_request(std::shared_ptr<Request>& request) {
 }
 
 void ContinuousScheduler::create_queues(const Options& options) {
+  const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+  if (scheduler_config.enable_short_request_first()) {
+    validate_short_request_first_options(options);
+    LOG(INFO) << "Enable PD-prefill ShortRequestFirst scheduling: threshold="
+              << scheduler_config.short_request_first_threshold()
+              << ", long_max_wait_ms="
+              << scheduler_config.short_request_first_long_max_wait_ms();
+  }
   if (options.priority_strategy() == "multi_slo_and_prio" ||
       options.priority_strategy() == "fcfs") {
     prefill_queue_ = std::make_unique<DequeQueue>();
@@ -199,6 +228,35 @@ void ContinuousScheduler::create_queues(const Options& options) {
     chunk_queue_ = std::make_unique<SetQueue>(decode_cmp);
     decode_queue_ = std::make_unique<SetQueue>(decode_cmp);
   }
+}
+
+void ContinuousScheduler::report_short_request_first_metrics() {
+  const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+  if (!scheduler_config.enable_short_request_first()) {
+    GAUGE_SET(num_short_request_first_immediate_waiting, 0);
+    GAUGE_SET(num_short_request_first_short_waiting, 0);
+    GAUGE_SET(num_short_request_first_long_waiting, 0);
+    return;
+  }
+
+  const int32_t threshold = scheduler_config.short_request_first_threshold();
+  size_t immediate_waiting = 0;
+  size_t short_waiting = 0;
+  size_t long_waiting = 0;
+  for (auto it = prefill_queue_->begin(); it != prefill_queue_->end(); ++it) {
+    const ShortRequestFirstRequestClass request_class =
+        classify_short_request_first(**it, threshold);
+    if (request_class == ShortRequestFirstRequestClass::IMMEDIATE) {
+      ++immediate_waiting;
+    } else if (request_class == ShortRequestFirstRequestClass::SHORT) {
+      ++short_waiting;
+    } else {
+      ++long_waiting;
+    }
+  }
+  GAUGE_SET(num_short_request_first_immediate_waiting, immediate_waiting);
+  GAUGE_SET(num_short_request_first_short_waiting, short_waiting);
+  GAUGE_SET(num_short_request_first_long_waiting, long_waiting);
 }
 
 void ContinuousScheduler::clear_mtp_bootstrap(Request* request) {
@@ -219,6 +277,7 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
 
   // Common phases (strategy-independent)
   policy_->drain_request_queue(state, request_queue_);
+  report_short_request_first_metrics();
   auto finished = policy_->collect_finished(state);
 
   // Initialize budget

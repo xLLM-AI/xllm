@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <absl/time/time.h>
 #include <folly/MPMCQueue.h>
 
 #include <cstdint>
@@ -217,6 +218,20 @@ class PrefillFirstPolicy : public SchedulerPolicy {
                                          const SchedulerState& state) override;
 };
 
+// ShortRequestFirstPolicy: PrefillFirstPolicy with ShortRequestFirst ordering
+// for the PD-prefill waiting queue. Before delegating to PrefillFirstPolicy it
+// stable-sorts the prefill queue so that immediate requests, then (at most) the
+// single aged LONG head, then SHORT requests, then remaining LONG requests are
+// scheduled in that order.
+class ShortRequestFirstPolicy : public PrefillFirstPolicy {
+ public:
+  using PrefillFirstPolicy::PrefillFirstPolicy;
+
+  void schedule(SchedulerState& state,
+                ScheduleBudget& budget,
+                std::vector<std::shared_ptr<Request>>& finished) override;
+};
+
 // DecodeFirstPolicy: mixed batch mode with fcfs/priority/deadline.
 // Decode requests fill the batch first ("decode-maximal batching"),
 // remaining token budget goes to chunked prefill.
@@ -279,6 +294,33 @@ class UnifiedPolicy : public SchedulerPolicy {
                         int32_t latency_budget,
                         const SchedulerState& state);
 };
+
+// =============================================================================
+// ShortRequestFirst helpers
+// =============================================================================
+
+enum class ShortRequestFirstRequestClass : int8_t {
+  IMMEDIATE = 0,
+  SHORT = 1,
+  LONG = 2,
+};
+
+// Classify a PD-prefill waiting request for ShortRequestFirst ordering.
+// IMMEDIATE covers preempted requests only: chunked prefill continuations
+// with partial KV are handled by the separate chunk queue and never enter the
+// prefill queue.
+ShortRequestFirstRequestClass classify_short_request_first(Request& request,
+                                                           int32_t threshold);
+
+// Stable-sort `queue` with ShortRequestFirst ordering: IMMEDIATE requests
+// first, then (at most) the single LONG request whose wait exceeds
+// `long_max_wait_ms`, then SHORT requests, then the remaining LONG requests.
+// Within the same class requests are ordered by created_time (oldest first).
+// `now` defaults to the current time and is injectable for tests.
+void sort_short_request_first_queue(RequestPriorityQueue& queue,
+                                    int32_t threshold,
+                                    double long_max_wait_ms,
+                                    absl::Time now = absl::Now());
 
 // Factory function: creates the appropriate policy based on BatchMode.
 std::unique_ptr<SchedulerPolicy> create_scheduler_policy(

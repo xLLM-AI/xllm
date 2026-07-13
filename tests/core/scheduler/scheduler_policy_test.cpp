@@ -631,4 +631,67 @@ TEST(SchedulerPolicyTest, FullFootprintAdmitsBothWhenFits) {
   EXPECT_EQ(batch[0].size(), 2);  // Both admitted.
 }
 
+TEST(SchedulerPolicyTest, ShortRequestFirstSchedulesShortBeforeLong) {
+  SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+  ScopedConfigValue<bool> enable_srf(
+      scheduler_config.enable_short_request_first(), true);
+  ScopedConfigValue<int32_t> threshold(
+      scheduler_config.short_request_first_threshold(), 256);
+  ScopedConfigValue<double> long_wait(
+      scheduler_config.short_request_first_long_max_wait_ms(), 0.0);
+
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(10000, 256, 0, 1024, 1);
+  opt.enable_disagg_pd_ = true;
+  opt.enable_chunked_prefill_ = true;
+  opt.instance_role_ = InstanceRole::PREFILL;
+  auto engine = std::make_unique<FakeEngine>(1024, 32);
+  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+
+  // The long request is admitted first; ShortRequestFirst must still schedule
+  // the short request ahead of it.
+  auto requests =
+      generate_request({512, 64}, {10, 10}, std::nullopt, std::nullopt, 30000);
+  for (auto& request : requests) {
+    scheduler->add_request(request);
+  }
+
+  auto batch = scheduler->prepare_batch_test();
+  ASSERT_EQ(batch.size(), 1u);
+  ASSERT_EQ(batch[0].size(), 2u);
+  EXPECT_EQ(batch[0][0]->num_prompt_tokens(), 64u);
+  EXPECT_EQ(batch[0][1]->num_prompt_tokens(), 512u);
+}
+
+TEST(SchedulerPolicyTest, ShortRequestFirstSchedulesPreemptedBeforeShort) {
+  SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+  ScopedConfigValue<bool> enable_srf(
+      scheduler_config.enable_short_request_first(), true);
+  ScopedConfigValue<int32_t> threshold(
+      scheduler_config.short_request_first_threshold(), 256);
+  ScopedConfigValue<double> long_wait(
+      scheduler_config.short_request_first_long_max_wait_ms(), 0.0);
+
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(10000, 256, 0, 1024, 1);
+  opt.enable_disagg_pd_ = true;
+  opt.enable_chunked_prefill_ = true;
+  opt.instance_role_ = InstanceRole::PREFILL;
+  auto engine = std::make_unique<FakeEngine>(1024, 32);
+  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+
+  auto requests =
+      generate_request({512, 64}, {10, 10}, std::nullopt, std::nullopt, 30000);
+  requests[0]->set_preempted();
+  for (auto& request : requests) {
+    scheduler->add_request(request);
+  }
+
+  auto batch = scheduler->prepare_batch_test();
+  ASSERT_EQ(batch.size(), 1u);
+  ASSERT_EQ(batch[0].size(), 2u);
+  EXPECT_EQ(batch[0][0]->num_prompt_tokens(), 512u);
+  EXPECT_EQ(batch[0][1]->num_prompt_tokens(), 64u);
+}
+
 }  // namespace xllm
