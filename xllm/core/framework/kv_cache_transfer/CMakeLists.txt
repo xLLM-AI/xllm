@@ -23,6 +23,18 @@ cc_library(
 
 cc_library(
   NAME
+    kv_transfer_completion
+  HDRS
+    kv_transfer_completion.h
+  SRCS
+    kv_transfer_completion.cpp
+  DEPS
+    glog::glog
+    Folly::folly
+)
+
+cc_library(
+  NAME
     kv_cache_transfer
   HDRS
     kv_cache_transfer.h
