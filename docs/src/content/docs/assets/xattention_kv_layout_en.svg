@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760">
+  <style>
+    .title { font: 700 24px Arial, sans-serif; fill: #111827; }
+    .section { font: 700 20px Arial, sans-serif; fill: #111827; }
+    .label { font: 16px Arial, sans-serif; fill: #111827; }
+    .small { font: 14px Arial, sans-serif; fill: #374151; }
+    .box { fill: #ffffff; stroke: #94a3b8; stroke-width: 2; }
+    .shared { fill: #dcfce7; }
+    .unshared { fill: #dbeafe; }
+    .active { fill: #fecaca; }
+    .arrow { stroke: #64748b; stroke-width: 3; fill: none; marker-end: url(#m); }
+    .node { fill: #fff; stroke: #64748b; stroke-width: 2; }
+  </style>
+  <defs>
+    <marker id="m" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#64748b" />
+    </marker>
+  </defs>
+  <text x="600" y="34" text-anchor="middle" class="title">Separated KV Cache: Shared KV and Unshared KV</text>
+  <text x="190" y="90" text-anchor="middle" class="section">Shared Cache</text>
+  <rect x="90" y="120" width="200" height="180" class="box"/>
+  <rect x="118" y="148" width="38" height="38" class="box"/><rect x="156" y="148" width="38" height="38" class="box"/><rect x="194" y="148" width="38" height="38" class="box"/><rect x="232" y="148" width="38" height="38" class="box"/>
+  <rect x="118" y="186" width="38" height="38" class="box"/><rect x="156" y="186" width="38" height="38" class="box"/><rect x="194" y="186" width="38" height="38" class="box"/><rect x="232" y="186" width="38" height="38" class="box"/>
+  <rect x="118" y="224" width="38" height="38" class="box"/><rect x="156" y="224" width="38" height="38" class="box"/><rect x="194" y="224" width="38" height="38" class="box"/><rect x="232" y="224" width="38" height="38" class="box"/>
+  <text x="190" y="284" text-anchor="middle" class="small">one physical copy for shared prefix</text>
+
+  <text x="710" y="90" text-anchor="middle" class="section">Unshared Cache Across Decode Rounds</text>
+  <g transform="translate(430,120)">
+    <rect x="0" y="0" width="120" height="120" class="box"/>
+    <rect x="10" y="10" width="30" height="30" class="box shared"/><rect x="40" y="10" width="30" height="30" class="box"/><rect x="70" y="10" width="30" height="30" class="box"/>
+    <rect x="10" y="40" width="30" height="30" class="box shared"/><rect x="40" y="40" width="30" height="30" class="box"/><rect x="70" y="40" width="30" height="30" class="box"/>
+    <rect x="10" y="70" width="30" height="30" class="box shared"/><rect x="40" y="70" width="30" height="30" class="box"/><rect x="70" y="70" width="30" height="30" class="box"/>
+    <text x="60" y="145" text-anchor="middle" class="small">Round 0</text>
+  </g>
+  <g transform="translate(610,120)">
+    <rect x="0" y="0" width="120" height="120" class="box"/>
+    <rect x="10" y="10" width="30" height="30" class="box shared"/><rect x="40" y="10" width="30" height="30" class="box unshared"/><rect x="70" y="10" width="30" height="30" class="box"/>
+    <rect x="10" y="40" width="30" height="30" class="box shared"/><rect x="40" y="40" width="30" height="30" class="box unshared"/><rect x="70" y="40" width="30" height="30" class="box"/>
+    <rect x="10" y="70" width="30" height="30" class="box shared"/><rect x="40" y="70" width="30" height="30" class="box unshared"/><rect x="70" y="70" width="30" height="30" class="box"/>
+    <text x="60" y="145" text-anchor="middle" class="small">Round 1</text>
+  </g>
+  <g transform="translate(790,120)">
+    <rect x="0" y="0" width="120" height="120" class="box"/>
+    <rect x="10" y="10" width="30" height="30" class="box shared"/><rect x="40" y="10" width="30" height="30" class="box unshared"/><rect x="70" y="10" width="30" height="30" class="box unshared"/>
+    <rect x="10" y="40" width="30" height="30" class="box shared"/><rect x="40" y="40" width="30" height="30" class="box unshared"/><rect x="70" y="40" width="30" height="30" class="box unshared"/>
+    <rect x="10" y="70" width="30" height="30" class="box shared"/><rect x="40" y="70" width="30" height="30" class="box unshared"/><rect x="70" y="70" width="30" height="30" class="box active"/>
+    <text x="60" y="145" text-anchor="middle" class="small">Round 2</text>
+  </g>
+  <path d="M550 180 C575 180, 585 180, 610 180" class="arrow"/>
+  <path d="M730 180 C755 180, 765 180, 790 180" class="arrow"/>
+  <text x="580" y="170" text-anchor="middle" class="small">decode</text>
+  <text x="760" y="170" text-anchor="middle" class="small">decode</text>
+
+  <text x="600" y="360" text-anchor="middle" class="section">Beam Expansion Tree</text>
+  <path d="M180 450 C230 430, 280 420, 340 410" class="arrow"/>
+  <path d="M180 450 C260 470, 300 500, 340 520" class="arrow"/>
+  <path d="M180 450 C250 430, 300 590, 340 630" class="arrow"/>
+  <path d="M180 450 C250 470, 300 650, 340 680" class="arrow"/>
+  <circle cx="160" cy="450" r="18" fill="#111827"/>
+  <circle cx="340" cy="410" r="18" class="node shared"/>
+  <circle cx="340" cy="520" r="18" class="node shared"/>
+  <circle cx="340" cy="630" r="18" class="node shared"/>
+  <circle cx="340" cy="680" r="18" class="node shared"/>
+  <text x="340" y="416" text-anchor="middle" class="label">a</text>
+  <text x="340" y="526" text-anchor="middle" class="label">b</text>
+  <text x="340" y="636" text-anchor="middle" class="label">c</text>
+  <text x="340" y="686" text-anchor="middle" class="label">d</text>
+
+  <g>
+    <circle cx="530" cy="380" r="18" class="node unshared"/><text x="530" y="386" text-anchor="middle" class="label">0</text>
+    <circle cx="530" cy="450" r="18" class="node unshared"/><text x="530" y="456" text-anchor="middle" class="label">1</text>
+    <circle cx="530" cy="520" r="18" class="node unshared"/><text x="530" y="526" text-anchor="middle" class="label">2</text>
+    <circle cx="530" cy="590" r="18" class="node unshared"/><text x="530" y="596" text-anchor="middle" class="label">3</text>
+    <circle cx="530" cy="660" r="18" class="node unshared"/><text x="530" y="666" text-anchor="middle" class="label">4</text>
+  </g>
+  <path d="M358 410 L512 380" class="arrow"/><path d="M358 410 L512 450" class="arrow"/>
+  <path d="M358 520 L512 520" class="arrow"/><path d="M358 520 L512 590" class="arrow"/>
+  <path d="M358 630 L512 660" class="arrow"/>
+  <path d="M358 680 L512 660" class="arrow"/>
+
+  <text x="600" y="730" text-anchor="middle" class="small">Shared KV is kept once; unshared KV grows with decode rounds and beam choices.</text>
+</svg>

@@ -1,0 +1,23 @@
+---
+import Favicons from '../components/Favicons.astro';
+
+const defaultLocalePath = '/en/';
+---
+
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta http-equiv="refresh" content={`0;url=${defaultLocalePath}`} />
+		<meta name="robots" content="noindex" />
+		<link rel="canonical" href={defaultLocalePath} />
+		<Favicons />
+		<title>Redirecting to English docs</title>
+		<script is:inline>
+			window.location.replace('/en/');
+		</script>
+	</head>
+	<body>
+		<a href={defaultLocalePath}>Redirecting to English docs</a>
+	</body>
+</html>

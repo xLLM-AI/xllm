@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <style>
+    .title { font: 700 24px Arial, sans-serif; fill: #111827; }
+    .section { font: 700 20px Arial, sans-serif; fill: #111827; }
+    .label { font: 16px Arial, sans-serif; fill: #111827; }
+    .small { font: 14px Arial, sans-serif; fill: #374151; }
+    .lane { fill: #ffffff; stroke: #94a3b8; stroke-width: 2; rx: 18; }
+    .stage { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 2; rx: 20; }
+    .mcu { fill: #dbeafe; stroke: #60a5fa; stroke-width: 2; rx: 10; }
+    .vcu { fill: #dcfce7; stroke: #4ade80; stroke-width: 2; rx: 10; }
+    .merge { fill: #fef3c7; stroke: #f59e0b; stroke-width: 2; rx: 10; }
+    .post { fill: #fecaca; stroke: #ef4444; stroke-width: 2; rx: 10; }
+  </style>
+  <text x="640" y="36" text-anchor="middle" class="title">xAttention Three-stage Execution Pipeline</text>
+
+  <rect x="90" y="90" width="1100" height="150" class="stage" />
+  <text x="120" y="125" class="section">Shared Stage</text>
+  <rect x="180" y="130" width="920" height="40" class="lane" />
+  <text x="205" y="156" class="label">MCU</text>
+  <rect x="280" y="138" width="150" height="24" class="mcu" /><text x="355" y="155" text-anchor="middle" class="small">BatchMatmul</text>
+  <rect x="450" y="138" width="150" height="24" class="mcu" /><text x="525" y="155" text-anchor="middle" class="small">BatchMatmul</text>
+  <rect x="620" y="138" width="150" height="24" class="mcu" /><text x="695" y="155" text-anchor="middle" class="small">BatchMatmul</text>
+  <rect x="790" y="138" width="150" height="24" class="mcu" /><text x="865" y="155" text-anchor="middle" class="small">BatchMatmul</text>
+  <rect x="180" y="180" width="920" height="40" class="lane" />
+  <text x="205" y="206" class="label">VCU</text>
+  <rect x="520" y="188" width="120" height="24" class="vcu" /><text x="580" y="205" text-anchor="middle" class="small">Softmax</text>
+  <rect x="680" y="188" width="120" height="24" class="vcu" /><text x="740" y="205" text-anchor="middle" class="small">Softmax</text>
+
+  <rect x="90" y="285" width="1100" height="150" class="stage" />
+  <text x="120" y="320" class="section">Unshared Stage</text>
+  <rect x="180" y="325" width="920" height="40" class="lane" />
+  <text x="205" y="351" class="label">MCU</text>
+  <rect x="280" y="333" width="150" height="24" class="mcu" /><text x="355" y="350" text-anchor="middle" class="small">BatchMatmul</text>
+  <rect x="450" y="333" width="150" height="24" class="mcu" /><text x="525" y="350" text-anchor="middle" class="small">BatchMatmul</text>
+  <rect x="620" y="333" width="150" height="24" class="mcu" /><text x="695" y="350" text-anchor="middle" class="small">BatchMatmul</text>
+  <rect x="790" y="333" width="150" height="24" class="mcu" /><text x="865" y="350" text-anchor="middle" class="small">BatchMatmul</text>
+  <rect x="180" y="375" width="920" height="40" class="lane" />
+  <text x="205" y="401" class="label">VCU</text>
+  <rect x="520" y="383" width="120" height="24" class="vcu" /><text x="580" y="400" text-anchor="middle" class="small">Softmax</text>
+  <rect x="680" y="383" width="120" height="24" class="vcu" /><text x="740" y="400" text-anchor="middle" class="small">Softmax</text>
+
+  <rect x="90" y="480" width="1100" height="150" class="stage" />
+  <text x="120" y="515" class="section">Merging Stage</text>
+  <rect x="180" y="520" width="920" height="40" class="lane" />
+  <text x="205" y="546" class="label">MCU</text>
+  <rect x="700" y="528" width="150" height="24" class="post" /><text x="775" y="545" text-anchor="middle" class="small">Post-processing</text>
+  <rect x="870" y="528" width="150" height="24" class="post" /><text x="945" y="545" text-anchor="middle" class="small">Post-processing</text>
+  <rect x="180" y="570" width="920" height="40" class="lane" />
+  <text x="205" y="596" class="label">VCU</text>
+  <rect x="520" y="578" width="150" height="24" class="merge" /><text x="595" y="595" text-anchor="middle" class="small">OnlineSoftmax</text>
+  <rect x="700" y="578" width="150" height="24" class="merge" /><text x="775" y="595" text-anchor="middle" class="small">OnlineSoftmax</text>
+  <rect x="880" y="578" width="150" height="24" class="merge" /><text x="955" y="595" text-anchor="middle" class="small">OnlineSoftmax</text>
+
+  <text x="640" y="680" text-anchor="middle" class="small">Shared and unshared attention are computed separately, then merged with OnlineSoftmax.</text>
+</svg>

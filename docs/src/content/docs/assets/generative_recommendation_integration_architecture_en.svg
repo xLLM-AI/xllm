@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="560" viewBox="0 0 1280 560">
+  <style>
+    .title { font: 700 24px Arial, sans-serif; fill: #1f2937; }
+    .section { font: 700 20px Arial, sans-serif; fill: #111827; }
+    .label { font: 16px Arial, sans-serif; fill: #111827; }
+    .small { font: 14px Arial, sans-serif; fill: #374151; }
+    .box { fill: #ffffff; stroke: #94a3b8; stroke-width: 2; rx: 12; }
+    .blue { fill: #dbeafe; stroke: #60a5fa; }
+    .green { fill: #dcfce7; stroke: #4ade80; }
+    .orange { fill: #ffedd5; stroke: #fb923c; }
+    .gray { fill: #f8fafc; stroke: #cbd5e1; }
+    .arrow { stroke: #64748b; stroke-width: 3; fill: none; marker-end: url(#m); }
+  </style>
+  <defs>
+    <marker id="m" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#64748b" />
+    </marker>
+  </defs>
+
+  <text x="640" y="36" text-anchor="middle" class="title">Generative Recommendation Integration Architecture</text>
+
+  <rect x="40" y="80" width="350" height="390" class="box blue" />
+  <text x="215" y="116" text-anchor="middle" class="section">Predictor Side</text>
+  <rect x="80" y="150" width="270" height="70" class="box gray" />
+  <text x="215" y="192" text-anchor="middle" class="label">Sparse feature processing</text>
+  <rect x="80" y="245" width="270" height="70" class="box gray" />
+  <text x="215" y="287" text-anchor="middle" class="label">Sample construction / feature assembly</text>
+  <rect x="80" y="340" width="270" height="90" class="box gray" />
+  <text x="215" y="382" text-anchor="middle" class="label">Online service integration</text>
+  <text x="215" y="407" text-anchor="middle" class="small">Recall, ranking, and request orchestration</text>
+
+  <rect x="460" y="165" width="360" height="220" class="box orange" />
+  <text x="640" y="205" text-anchor="middle" class="section">Shared Library Integration (.so)</text>
+  <text x="640" y="242" text-anchor="middle" class="label">Model body subgraph handoff</text>
+  <text x="640" y="274" text-anchor="middle" class="small">Prompt / tokens / tensors</text>
+  <text x="640" y="302" text-anchor="middle" class="small">Context handoff + runtime options</text>
+  <text x="640" y="340" text-anchor="middle" class="label">Low-overhead path without extra RPC</text>
+
+  <rect x="890" y="80" width="350" height="390" class="box green" />
+  <text x="1065" y="116" text-anchor="middle" class="section">xLLM Side</text>
+  <rect x="930" y="150" width="270" height="70" class="box gray" />
+  <text x="1065" y="192" text-anchor="middle" class="label">LLM main-body inference</text>
+  <rect x="930" y="245" width="270" height="70" class="box gray" />
+  <text x="1065" y="287" text-anchor="middle" class="label">Operators / KV cache / scheduling</text>
+  <rect x="930" y="340" width="270" height="90" class="box gray" />
+  <text x="1065" y="382" text-anchor="middle" class="label">Candidate expansion and response generation</text>
+  <text x="1065" y="407" text-anchor="middle" class="small">REC runtime path</text>
+
+  <path d="M350 275 C390 275, 420 275, 460 275" class="arrow" />
+  <path d="M820 275 C850 275, 860 275, 890 275" class="arrow" />
+
+  <text x="420" y="255" text-anchor="middle" class="small">subgraph offload</text>
+  <text x="855" y="255" text-anchor="middle" class="small">runtime execution</text>
+</svg>

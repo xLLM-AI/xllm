@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="xLLM">
+  <defs>
+    <filter id="mark-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="8" dy="8" stdDeviation="7" flood-color="#080808" flood-opacity="0.32" />
+    </filter>
+  </defs>
+  <rect x="6" y="6" width="500" height="500" rx="96" fill="#ffffff" />
+  <g fill="#EB2700" filter="url(#mark-shadow)">
+    <polygon points="62 62 193 62 321 256 193 450 62 450 191 256" />
+    <polygon points="268 64 430 64 349 200" />
+    <polygon points="268 448 430 448 349 312" />
+  </g>
+</svg>
