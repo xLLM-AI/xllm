@@ -109,47 +109,42 @@ int main(int argc, char* argv[]) {
   int32_t cfg_size = static_cast<int32_t>(atoi(argv[31]));
   const std::string& indexer_cache_dtype = parsed_indexer_cache_dtype.value();
   const bool enable_mtp_draft_body_tp1 =
-      argc >
-          xllm::spawn_worker_protocol::kEnableMtpDraftBodyTp1ArgumentIndex &&
-      static_cast<int32_t>(atoi(argv[xllm::spawn_worker_protocol::
-                                         kEnableMtpDraftBodyTp1ArgumentIndex])) >
-          0;
+      argc > xllm::spawn_worker_protocol::kEnableMtpDraftBodyTp1ArgumentIndex &&
+      static_cast<int32_t>(
+          atoi(argv[xllm::spawn_worker_protocol::
+                        kEnableMtpDraftBodyTp1ArgumentIndex])) > 0;
 
-  LOG(INFO) << "Spawn worker: "
-            << "master_node_addr = " << master_node_addr
-            << ", local_rank = " << local_rank
-            << ", world_size = " << world_size
-            << ", device_idx = " << device_idx
-            << ", num_decoding_tokens = " << num_decoding_tokens
-            << ", block_size = " << block_size
-            << ", max_tokens_per_batch = " << max_tokens_per_batch
-            << ", max_seqs_per_batch = " << max_seqs_per_batch
-            << ", enable_shm = " << (enable_shm > 0)
-            << ", input_shm_size = " << input_shm_size
-            << ", output_shm_size = " << output_shm_size
-            << ", is_local = " << (is_local > 0)
-            << ", enable_prefill_sp = " << (enable_prefill_sp > 0)
-            << ", task_type = " << task_type
-            << ", worker_type = " << worker_type
-            << ", enable_speculative_decode = "
-            << (enable_speculative_decode > 0)
-            << ", num_speculative_tokens = " << num_speculative_tokens
-            << ", speculative_algorithm = " << speculative_algorithm
-            << ", communication_backend = " << communication_backend
-            << ", npu_kernel_backend = " << npu_kernel_backend
-            << ", rank_tablefile = " << rank_tablefile
-            << ", enable_graph = " << enable_graph
-            << ", enable_graph_mode_decode_no_padding = "
-            << enable_graph_mode_decode_no_padding
-            << ", enable_prefill_piecewise_graph = "
-            << enable_prefill_piecewise_graph
-            << ", max_tokens_for_graph_mode = " << max_tokens_for_graph_mode
-            << ", max_encoder_cache_size = " << max_encoder_cache_size
-            << ", dp_size = " << dp_size << ", tp_size = " << tp_size
-            << ", sp_size = " << sp_size << ", cfg_size = " << cfg_size
-            << ", indexer_cache_dtype = " << indexer_cache_dtype
-            << ", enable_mtp_draft_body_tp1 = "
-            << enable_mtp_draft_body_tp1 << "\n";
+  LOG(INFO)
+      << "Spawn worker: "
+      << "master_node_addr = " << master_node_addr
+      << ", local_rank = " << local_rank << ", world_size = " << world_size
+      << ", device_idx = " << device_idx
+      << ", num_decoding_tokens = " << num_decoding_tokens
+      << ", block_size = " << block_size
+      << ", max_tokens_per_batch = " << max_tokens_per_batch
+      << ", max_seqs_per_batch = " << max_seqs_per_batch
+      << ", enable_shm = " << (enable_shm > 0)
+      << ", input_shm_size = " << input_shm_size
+      << ", output_shm_size = " << output_shm_size
+      << ", is_local = " << (is_local > 0)
+      << ", enable_prefill_sp = " << (enable_prefill_sp > 0)
+      << ", task_type = " << task_type << ", worker_type = " << worker_type
+      << ", enable_speculative_decode = " << (enable_speculative_decode > 0)
+      << ", num_speculative_tokens = " << num_speculative_tokens
+      << ", speculative_algorithm = " << speculative_algorithm
+      << ", communication_backend = " << communication_backend
+      << ", npu_kernel_backend = " << npu_kernel_backend
+      << ", rank_tablefile = " << rank_tablefile
+      << ", enable_graph = " << enable_graph
+      << ", enable_graph_mode_decode_no_padding = "
+      << enable_graph_mode_decode_no_padding
+      << ", enable_prefill_piecewise_graph = " << enable_prefill_piecewise_graph
+      << ", max_tokens_for_graph_mode = " << max_tokens_for_graph_mode
+      << ", max_encoder_cache_size = " << max_encoder_cache_size
+      << ", dp_size = " << dp_size << ", tp_size = " << tp_size
+      << ", sp_size = " << sp_size << ", cfg_size = " << cfg_size
+      << ", indexer_cache_dtype = " << indexer_cache_dtype
+      << ", enable_mtp_draft_body_tp1 = " << enable_mtp_draft_body_tp1 << "\n";
 
   xllm::SpawnWorkerServer worker(master_node_addr,
                                  local_rank,
