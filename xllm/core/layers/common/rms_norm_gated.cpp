@@ -15,13 +15,37 @@ limitations under the License.
 
 #include "rms_norm_gated.h"
 
+#if defined(USE_NPU)
+#include <ATen/ops/silu.h>
+
+#include <cstdlib>
+#include <cstring>
+#endif
+
 #include <glog/logging.h>
 
 #include "framework/state_dict/utils.h"
+#if defined(USE_NPU)
+#include "xllm/core/kernels/npu/npu_ops_api.h"
+#endif
 #include "xllm/core/kernels/ops_api.h"
 
 namespace xllm {
 namespace layer {
+
+#if defined(USE_NPU)
+namespace {
+
+bool enable_native_split_gated_rms_norm() {
+  static const bool enabled = []() {
+    const char* value = std::getenv("XLLM_NATIVE_SPLIT_GATED_RMS_NORM");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+  }();
+  return enabled;
+}
+
+}  // namespace
+#endif
 
 RmsNormGatedImpl::RmsNormGatedImpl(int64_t dim,
                                    double eps,
@@ -33,6 +57,17 @@ RmsNormGatedImpl::RmsNormGatedImpl(int64_t dim,
 
 torch::Tensor RmsNormGatedImpl::forward(torch::Tensor& input,
                                         std::optional<torch::Tensor> gate) {
+#if defined(USE_NPU)
+  if (enable_native_split_gated_rms_norm() && gate.has_value() &&
+      input.dim() == 2 && input.size(0) >= 1024 && input.size(1) == norm_dim_) {
+    auto normalized =
+        xllm::kernel::npu::rms_norm(input, weight_, eps_, "rmsnorm");
+    auto gate_value = gate.value();
+    at::silu_(gate_value);
+    normalized.mul_(gate_value);
+    return normalized;
+  }
+#endif
   xllm::kernel::GatedLayerNormParams params;
   params.x = input;
   params.weight = weight_;
