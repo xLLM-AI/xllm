@@ -21,7 +21,6 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/platform/device.h"
-#include "core/platform/platform.h"
 #include "core/util/utils.h"
 #include "flashinfer_workspace.h"
 #include "kernels/cuda/utils.h"
@@ -121,47 +120,47 @@ void update_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
   const int64_t batch_size = qo_indptr_host.size(0) - 1;
 
   auto plan_func = get_function(plan_info->uri, "plan");
-  // For sm90 architecture, the plan function doesn't accept
-  // fixed_split_size / disable_split_kv / num_colocated_ctas
+  // The FA3 SM90 plan has 16 parameters, while FA2 uses the common 19-parameter
+  // schema even when it runs on SM90 hardware.
+  const bool use_sm90_short_plan_args = backend == "fa3";
   ffi::Array<int64_t> plan_result =
-      Platform::is_support_sm90a()
-          ? plan_func(float_workspace_buffer,
-                      int_workspace_buffer,
-                      page_locked_int_workspace_buffer,
-                      to_ffi_tensor(qo_indptr_host),
-                      to_ffi_tensor(kv_cu_seq_lens_host),
-                      to_ffi_tensor(kv_len_arr_host),
-                      total_num_rows,
-                      batch_size,
-                      num_qo_heads,
-                      num_kv_heads,
-                      /*page_size=*/1,
-                      enable_cuda_graph,
-                      head_dim_qk,
-                      head_dim_vo,
-                      /*causal=*/true,
-                      /*window_size_left=*/-1)
-                .cast<ffi::Array<int64_t>>()
-          : plan_func(float_workspace_buffer,
-                      int_workspace_buffer,
-                      page_locked_int_workspace_buffer,
-                      to_ffi_tensor(qo_indptr_host),
-                      to_ffi_tensor(kv_cu_seq_lens_host),
-                      to_ffi_tensor(kv_len_arr_host),
-                      total_num_rows,
-                      batch_size,
-                      num_qo_heads,
-                      num_kv_heads,
-                      /*page_size=*/1,
-                      enable_cuda_graph,
-                      head_dim_qk,
-                      head_dim_vo,
-                      /*causal=*/true,
-                      /*window_size_left=*/-1,
-                      /*fixed_split_size=*/-1,
-                      /*disable_split_kv=*/false,
-                      /*num_colocated_ctas=*/0)
-                .cast<ffi::Array<int64_t>>();
+      use_sm90_short_plan_args ? plan_func(float_workspace_buffer,
+                                           int_workspace_buffer,
+                                           page_locked_int_workspace_buffer,
+                                           to_ffi_tensor(qo_indptr_host),
+                                           to_ffi_tensor(kv_cu_seq_lens_host),
+                                           to_ffi_tensor(kv_len_arr_host),
+                                           total_num_rows,
+                                           batch_size,
+                                           num_qo_heads,
+                                           num_kv_heads,
+                                           /*page_size=*/1,
+                                           enable_cuda_graph,
+                                           head_dim_qk,
+                                           head_dim_vo,
+                                           /*causal=*/true,
+                                           /*window_size_left=*/-1)
+                                     .cast<ffi::Array<int64_t>>()
+                               : plan_func(float_workspace_buffer,
+                                           int_workspace_buffer,
+                                           page_locked_int_workspace_buffer,
+                                           to_ffi_tensor(qo_indptr_host),
+                                           to_ffi_tensor(kv_cu_seq_lens_host),
+                                           to_ffi_tensor(kv_len_arr_host),
+                                           total_num_rows,
+                                           batch_size,
+                                           num_qo_heads,
+                                           num_kv_heads,
+                                           /*page_size=*/1,
+                                           enable_cuda_graph,
+                                           head_dim_qk,
+                                           head_dim_vo,
+                                           /*causal=*/true,
+                                           /*window_size_left=*/-1,
+                                           /*fixed_split_size=*/-1,
+                                           /*disable_split_kv=*/false,
+                                           /*num_colocated_ctas=*/0)
+                                     .cast<ffi::Array<int64_t>>();
   plan_info->plan_info = deep_copy_plan_info(plan_result);
 }
 

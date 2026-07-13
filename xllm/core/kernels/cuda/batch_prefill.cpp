@@ -90,13 +90,12 @@ void batch_prefill_impl(const std::string& uri,
     }
   }
 
-  bool use_custom_mask = processed_mask.has_value();
-  std::string backend =
-      determine_attention_backend(/*pos_encoding_mode=*/0,
-                                  /*use_fp16_qk_reduction=*/false,
-                                  use_custom_mask);
+  // get_batch_prefill_uri() encodes the FA3 ABI in the module URI. Select the
+  // call schema from the loaded module instead of re-evaluating the backend
+  // from the current hardware and mask.
+  const bool use_fa3_abi = uri.ends_with("_sm90");
 
-  if (backend == "fa2") {
+  if (!use_fa3_abi) {
     get_function(uri, "ragged_run")(
         to_ffi_tensor(float_workspace_buffer),
         to_ffi_tensor(int_workspace_buffer),
@@ -126,7 +125,7 @@ void batch_prefill_impl(const std::string& uri,
         /*rope_rcp_scale=*/1.0,
         /*rope_rcp_theta=*/1.0 / 10000.0,
         /*token_pos_in_items_len=*/0);
-  } else if (backend == "fa3") {
+  } else {
     // for fp8 attention, append scale tensors
     torch::Tensor v_scale = torch::Tensor();
 
