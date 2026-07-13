@@ -53,7 +53,6 @@ limitations under the License.
 #include "runtime/params_utils.h"
 #include "runtime/worker.h"
 #include "server/xllm_server_registry.h"
-#include "util/env_var.h"
 #include "util/pretty_print.h"
 #include "util/tensor_helper.h"
 #include "util/utils.h"
@@ -459,9 +458,7 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
   estimate_options.enable_rdma_scale_padding =
       options_.instance_role() != InstanceRole::DEFAULT;
-  if ((options_.enable_mtp_draft_tp1() ||
-       util::get_bool_env("XLLM_NPU_REPLICATE_QWEN35_MTP_DRAFT", false)) &&
-      options_.is_draft_engine()) {
+  if (options_.enable_mtp_draft_body_tp1() && options_.is_draft_engine()) {
     estimate_options.world_size = 1;
     estimate_options.n_local_kv_heads =
         args_.n_kv_heads().value_or(args_.n_heads());

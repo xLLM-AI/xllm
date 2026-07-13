@@ -24,7 +24,6 @@ limitations under the License.
 #include "common/metrics.h"
 #include "llm_engine.h"
 #include "runtime/forward_params.h"
-#include "runtime/mtp_draft_tp1.h"
 #include "util/timer.h"
 #include "util/utils.h"
 
@@ -209,8 +208,7 @@ int64_t SpeculativeEngine::calculate_kv_cache(
   const int64_t draft_full_attention_slot_size =
       draft_kv_cache_cap.slot_size() + draft_kv_cache_cap.index_slot_size() +
       draft_kv_cache_cap.scale_slot_size();
-  const bool replicated_qwen35_mtp_draft =
-      use_replicated_qwen35_mtp_draft(options_.enable_mtp_draft_tp1());
+  const bool replicated_qwen35_mtp_draft = options_.enable_mtp_draft_body_tp1();
   if (!replicated_qwen35_mtp_draft) {
     CHECK_LE(draft_full_attention_slot_size, target_full_attention_slot_size)
         << "draft full-attention kv cache slot size must not exceed target "

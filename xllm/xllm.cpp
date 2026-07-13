@@ -113,8 +113,8 @@ Options create_options(const std::string& instance_name, bool is_local) {
   const RecConfig& rec_config = RecConfig::get_instance();
 
 #if !defined(USE_NPU)
-  CHECK(!speculative_config.enable_mtp_draft_tp1())
-      << "enable_mtp_draft_tp1 is only supported on the NPU backend";
+  CHECK(!speculative_config.enable_mtp_draft_body_tp1())
+      << "enable_mtp_draft_body_tp1 is only supported on the NPU backend";
 #endif
 
   Options options;
@@ -151,7 +151,7 @@ Options create_options(const std::string& instance_name, bool is_local) {
           speculative_config.speculative_suffix_max_cached_requests())
       .speculative_suffix_use_tree_spec(
           speculative_config.speculative_suffix_use_tree_spec())
-      .enable_mtp_draft_tp1(speculative_config.enable_mtp_draft_tp1())
+      .enable_mtp_draft_body_tp1(speculative_config.enable_mtp_draft_body_tp1())
       .num_request_handling_threads(
           service_config.num_request_handling_threads())
       .communication_backend(parallel_config.communication_backend())

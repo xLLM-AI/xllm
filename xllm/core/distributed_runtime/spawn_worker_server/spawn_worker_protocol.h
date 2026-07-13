@@ -24,7 +24,7 @@ namespace xllm::spawn_worker_protocol {
 inline constexpr int32_t kArgumentCount = 34;
 inline constexpr int32_t kMinimumArgumentCount = 32;
 inline constexpr int32_t kIndexerCacheDtypeArgumentIndex = 32;
-inline constexpr int32_t kEnableMtpDraftTp1ArgumentIndex = 33;
+inline constexpr int32_t kEnableMtpDraftBodyTp1ArgumentIndex = 33;
 inline constexpr char kDefaultIndexerCacheDtype[] = "auto";
 
 inline std::optional<std::string> parse_indexer_cache_dtype(

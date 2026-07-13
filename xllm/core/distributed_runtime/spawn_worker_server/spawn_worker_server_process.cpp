@@ -57,7 +57,7 @@ limitations under the License.
 // @sp_size
 // @cfg_size
 // @indexer_cache_dtype
-// @enable_mtp_draft_tp1
+// @enable_mtp_draft_body_tp1
 int main(int argc, char* argv[]) {
   const std::optional<std::string> parsed_indexer_cache_dtype =
       xllm::spawn_worker_protocol::parse_indexer_cache_dtype(argc, argv);
@@ -108,10 +108,11 @@ int main(int argc, char* argv[]) {
   int32_t sp_size = static_cast<int32_t>(atoi(argv[30]));
   int32_t cfg_size = static_cast<int32_t>(atoi(argv[31]));
   const std::string& indexer_cache_dtype = parsed_indexer_cache_dtype.value();
-  const bool enable_mtp_draft_tp1 =
-      argc > xllm::spawn_worker_protocol::kEnableMtpDraftTp1ArgumentIndex &&
-      static_cast<int32_t>(atoi(
-          argv[xllm::spawn_worker_protocol::kEnableMtpDraftTp1ArgumentIndex])) >
+  const bool enable_mtp_draft_body_tp1 =
+      argc >
+          xllm::spawn_worker_protocol::kEnableMtpDraftBodyTp1ArgumentIndex &&
+      static_cast<int32_t>(atoi(argv[xllm::spawn_worker_protocol::
+                                         kEnableMtpDraftBodyTp1ArgumentIndex])) >
           0;
 
   LOG(INFO) << "Spawn worker: "
@@ -147,7 +148,8 @@ int main(int argc, char* argv[]) {
             << ", dp_size = " << dp_size << ", tp_size = " << tp_size
             << ", sp_size = " << sp_size << ", cfg_size = " << cfg_size
             << ", indexer_cache_dtype = " << indexer_cache_dtype
-            << ", enable_mtp_draft_tp1 = " << enable_mtp_draft_tp1 << "\n";
+            << ", enable_mtp_draft_body_tp1 = "
+            << enable_mtp_draft_body_tp1 << "\n";
 
   xllm::SpawnWorkerServer worker(master_node_addr,
                                  local_rank,
@@ -181,7 +183,7 @@ int main(int argc, char* argv[]) {
                                  tp_size,
                                  sp_size,
                                  cfg_size,
-                                 enable_mtp_draft_tp1);
+                                 enable_mtp_draft_body_tp1);
 
   worker.run();
 

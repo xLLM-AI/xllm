@@ -31,7 +31,6 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/kv_cache/kv_cache_estimation.h"
 #include "core/framework/multimodal/mm_data.h"
-#include "mtp_draft_tp1.h"
 #include "spec_input_builder.h"
 #include "util/pretty_print.h"
 #include "util/slice.h"
@@ -548,7 +547,7 @@ runtime::Options MTPDraftOptions(const runtime::Options& options) {
 
 ParallelArgs MTPDraftParallelArgs(const ParallelArgs& parallel_args,
                                   const runtime::Options& options) {
-  if (!use_replicated_qwen35_mtp_draft(options.enable_mtp_draft_tp1())) {
+  if (!options.enable_mtp_draft_body_tp1()) {
     return parallel_args;
   }
   CHECK(parallel_args.single_rank_group_ != nullptr)
@@ -634,10 +633,10 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
 
   if (impl_ != nullptr && impl_->get_status() == WorkerImpl::Status::LOADED) {
     context_ = impl_->context_;
-    if (use_replicated_qwen35_mtp_draft(options_.enable_mtp_draft_tp1())) {
+    if (options_.enable_mtp_draft_body_tp1()) {
       const std::string& model_type = context_.get_model_args().model_type();
       CHECK(is_qwen3_5_target_model_type(model_type))
-          << "enable_mtp_draft_tp1 only supports Qwen3.5 MTP models, got: "
+          << "enable_mtp_draft_body_tp1 only supports Qwen3.5 MTP models, got: "
           << model_type;
     }
   }
@@ -645,7 +644,7 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
   if (draft_impl_ != nullptr &&
       draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
     // Share lm_head and word_embedding between target and draft models
-    if (!use_replicated_qwen35_mtp_draft(options_.enable_mtp_draft_tp1())) {
+    if (!options_.enable_mtp_draft_body_tp1()) {
 #if defined(USE_NPU)
       if (::xllm::KernelConfig::get_instance().npu_kernel_backend() !=
           "TORCH") {
@@ -771,7 +770,7 @@ bool MTPWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   bool draft_allocated = true;
   const auto draft_status = draft_impl_->get_status();
   if (draft_status == WorkerImpl::Status::LOADED) {
-    if (use_replicated_qwen35_mtp_draft(options_.enable_mtp_draft_tp1())) {
+    if (options_.enable_mtp_draft_body_tp1()) {
       const KVCacheShape draft_shape =
           MTPDraftKVCacheShape(kv_cache_shape,
                                draft_impl_->context_.get_model_args(),
@@ -829,7 +828,7 @@ bool MTPWorkerImpl::allocate_kv_cache_with_transfer(
   bool draft_allocated = true;
   const auto draft_status = draft_impl_->get_status();
   if (draft_status == WorkerImpl::Status::LOADED) {
-    if (use_replicated_qwen35_mtp_draft(options_.enable_mtp_draft_tp1())) {
+    if (options_.enable_mtp_draft_body_tp1()) {
       const KVCacheShape draft_shape =
           MTPDraftKVCacheShape(kv_cache_shape,
                                draft_impl_->context_.get_model_args(),

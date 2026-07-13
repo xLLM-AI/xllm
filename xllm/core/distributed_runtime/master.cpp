@@ -292,7 +292,7 @@ Master::Master(const Options& options, EngineType type)
         .max_linear_state_cache_slots(options_.max_linear_state_cache_slots())
         .num_speculative_tokens(options_.num_speculative_tokens())
         .speculative_algorithm(options_.speculative_algorithm())
-        .enable_mtp_draft_tp1(options_.enable_mtp_draft_tp1())
+        .enable_mtp_draft_body_tp1(options_.enable_mtp_draft_body_tp1())
         .speculative_suffix_cache_max_depth(
             options_.speculative_suffix_cache_max_depth())
         .speculative_suffix_max_spec_factor(

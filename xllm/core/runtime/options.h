@@ -86,7 +86,7 @@ struct Options {
   // enable speculative decode
   PROPERTY(bool, enable_speculative_decode) = false;
 
-  PROPERTY(bool, enable_mtp_draft_tp1) = false;
+  PROPERTY(bool, enable_mtp_draft_body_tp1) = false;
 
   PROPERTY(bool, is_draft_engine) = false;
 
