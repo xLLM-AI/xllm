@@ -153,6 +153,100 @@ TEST_F(XllmOpsTest, EmbeddedPythonCollectivesUseTorchDistributed) {
   EXPECT_TRUE(torch::equal(gathered, input));
 }
 
+TEST_F(XllmOpsTest, DecodeGraphSharesMaximumBlockTableBufferAcrossBuckets) {
+  if (!Py_IsInitialized()) {
+    Py_InitializeEx(0);
+  }
+  py::gil_scoped_acquire gil;
+  prepend_python_model_path();
+
+  py::exec(R"PY(
+from types import SimpleNamespace
+
+import torch
+
+from python.model_executor.runners.decode_cuda_graph import DecodeCudaGraphRunner
+
+device = torch.device("cuda")
+backend = SimpleNamespace(page_size=4, num_kv_blocks=6)
+runner = DecodeCudaGraphRunner(
+    torch.nn.Identity(), backend, max_batch=4, max_model_len=24
+)
+metadata = SimpleNamespace(
+    slot_mapping=torch.zeros(2, dtype=torch.int32, device=device),
+    kv_cu_seq_lens=torch.tensor([0, 24, 48], dtype=torch.int32, device=device),
+    kv_seq_lens_host=torch.tensor([0, 24, 48], dtype=torch.int32),
+    paged_kv_indptr=torch.tensor([0, 6, 12], dtype=torch.int32, device=device),
+    paged_kv_indices=torch.tensor(
+        list(range(6)) * 2, dtype=torch.int32, device=device
+    ),
+    paged_kv_last_page_len=torch.ones(2, dtype=torch.int32, device=device),
+)
+input_ids = torch.zeros(2, dtype=torch.int32, device=device)
+positions = torch.zeros(2, dtype=torch.int64, device=device)
+
+small_entry = runner._allocate_entry(2, input_ids, positions, metadata)
+runner._fill_entry(small_entry, input_ids, positions, metadata, batch_size=2)
+large_entry = runner._allocate_entry(4, input_ids, positions, metadata)
+
+# Four sequences, six model blocks, plus one append slot per sequence.
+expected_capacity = 4 * (6 + 1)
+assert small_entry.static_metadata.paged_kv_indices.numel() == expected_capacity
+torch.testing.assert_close(
+    small_entry.static_metadata.paged_kv_indices[:12], metadata.paged_kv_indices
+)
+assert (
+    small_entry.static_metadata.paged_kv_indices.data_ptr()
+    == large_entry.static_metadata.paged_kv_indices.data_ptr()
+)
+)PY");
+}
+
+TEST_F(XllmOpsTest, ModelExecutorUsesExplicitRuntimeBatchLimit) {
+  if (!Py_IsInitialized()) {
+    Py_InitializeEx(0);
+  }
+  py::gil_scoped_acquire gil;
+  prepend_python_model_path();
+
+  py::exec(R"PY(
+import torch
+
+from python.layers.attention import Attention
+from python.model_executor import executor as executor_module
+
+
+class FakeBackend:
+    def __init__(self, **kwargs):
+        pass
+
+
+class FakeModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(1, device="cuda"))
+        self.attention = Attention(1, 1, 8, 1.0, 0, 0)
+        self.model = torch.nn.Identity()
+
+
+original_backend = executor_module.FlashInferBackend
+executor_module.FlashInferBackend = FakeBackend
+try:
+    model_executor = executor_module.ModelExecutor(
+        FakeModel(),
+        {
+            "python_graph_backend": "cudagraphs",
+            "max_position_embeddings": 64,
+            "max_seqs_per_batch": 1024,
+        },
+        max_seqs_per_batch=3,
+    )
+    assert model_executor.decode_cuda_graph_runner.max_batch == 3
+finally:
+    executor_module.FlashInferBackend = original_backend
+)PY");
+}
+
 TEST_F(XllmOpsTest, DecodeGraphMetadataKernelMatchesReferenceAcrossShapes) {
   if (!Py_IsInitialized()) {
     Py_InitializeEx(0);

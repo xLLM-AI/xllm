@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/layers/cuda/attention.h"
+#include "core/layers/cuda/flashinfer_planinfo.h"
 #include "core/layers/cuda/flashinfer_workspace.h"
 #include "core/platform/device.h"
 #include "core/runtime/cuda_graph_executor_impl.h"
@@ -321,6 +322,33 @@ ModelInputParams MakePrefillParams(const torch::Device& device,
   p.attention.device.paged_kv_last_page_len = torch::tensor({1}, iopt);
 
   return p;
+}
+
+// Piecewise graph prefill pins FA2 because the FA3 kernel is not graph-safe.
+// Use the same backend for eager references so these tests measure graph
+// capture/replay correctness rather than FA2-vs-FA3 numerical differences.
+ModelInputParams MakeFa2PrefillParams(const torch::Device& device,
+                                      int32_t num_tokens,
+                                      const ModelArgs& args) {
+  auto params = MakePrefillParams(device, num_tokens);
+  auto attn_metadata = std::make_shared<layer::AttentionMetadata>(
+      layer::AttentionMetadataBuilder::build(params, /*enable_mla=*/false));
+  attn_metadata->enable_cuda_graph = true;
+  attn_metadata->plan_info->layer_id = 0;
+  layer::flashinfer::update_prefill_plan_info(
+      attn_metadata->plan_info,
+      /*backend=*/"fa2",
+      *attn_metadata,
+      torch::kBFloat16,
+      torch::kBFloat16,
+      torch::kBFloat16,
+      args.head_dim(),
+      args.head_dim(),
+      args.n_heads(),
+      args.n_kv_heads().value_or(args.n_heads()),
+      /*enable_cuda_graph=*/true);
+  params.attn_metadata = std::move(attn_metadata);
+  return params;
 }
 
 std::vector<KVCache> MakeKvCaches(const torch::Device& device,
@@ -945,6 +973,7 @@ TEST(CudaGraphExecutorTest, PrefillPiecewiseCaptureAndReplay) {
   auto tokens = torch::arange(1, kNumTokens + 1, iopt);
   auto positions = torch::arange(0, kNumTokens, iopt);
   auto params = MakePrefillParams(device, kNumTokens);
+  auto eager_params = MakeFa2PrefillParams(device, kNumTokens, args);
 
   auto kv = MakeKvCaches(device,
                          /*num_pages=*/128,
@@ -959,8 +988,8 @@ TEST(CudaGraphExecutorTest, PrefillPiecewiseCaptureAndReplay) {
   auto kv_graph_second = MakeSingleKvCaches(kv[0].get_k_cache().clone(),
                                             kv[0].get_v_cache().clone());
 
-  auto eager_out =
-      model->forward(tokens, positions, kv_eager, params).hidden_states.clone();
+  auto eager_out = model->forward(tokens, positions, kv_eager, eager_params)
+                       .hidden_states.clone();
   torch::cuda::synchronize();
 
   auto out1 =
@@ -1040,6 +1069,7 @@ TEST(CudaGraphExecutorTest, CompareMqa2v1AndMqa8v1) {
         model.get(), args, device, options);
 
     auto params = MakePrefillParams(device, kNumTokens);
+    auto eager_params = MakeFa2PrefillParams(device, kNumTokens, args);
     auto kv = MakeKvCaches(device,
                            /*num_pages=*/128,
                            /*page_size=*/1,
@@ -1050,7 +1080,7 @@ TEST(CudaGraphExecutorTest, CompareMqa2v1AndMqa8v1) {
     auto kv_graph = MakeSingleKvCaches(kv[0].get_k_cache().clone(),
                                        kv[0].get_v_cache().clone());
 
-    auto eager_out = model->forward(tokens, positions, kv_eager, params)
+    auto eager_out = model->forward(tokens, positions, kv_eager, eager_params)
                          .hidden_states.clone();
     torch::cuda::synchronize();
 
@@ -1243,6 +1273,7 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolEnabledPrefillCorrectness) {
     auto positions =
         all_positions.slice(/*dim=*/0, /*start=*/0, /*end=*/num_tokens);
     auto params = MakePrefillParams(device, num_tokens);
+    auto eager_params = MakeFa2PrefillParams(device, num_tokens, args);
 
     auto kv_base = MakeKvCaches(device,
                                 /*num_pages=*/256,
@@ -1254,7 +1285,7 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolEnabledPrefillCorrectness) {
     auto kv_graph = MakeSingleKvCaches(kv_base[0].get_k_cache().clone(),
                                        kv_base[0].get_v_cache().clone());
 
-    auto eager_out = model->forward(tokens, positions, kv_eager, params)
+    auto eager_out = model->forward(tokens, positions, kv_eager, eager_params)
                          .hidden_states.clone();
     auto graph_out =
         exec->run(tokens, positions, kv_graph, params).hidden_states.clone();
@@ -1268,7 +1299,10 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolEnabledPrefillCorrectness) {
                                 /*rtol=*/1e-2,
                                 /*atol=*/1e-2))
         << "With enable_graph_vmm_pool=true, graph output should match eager "
-        << "output at num_tokens=" << num_tokens;
+        << "output at num_tokens=" << num_tokens << ", max_abs_diff="
+        << (graph_out - eager_out).abs().max().item<float>()
+        << ", mean_abs_diff="
+        << (graph_out - eager_out).abs().mean().item<float>();
   }
 }
 
