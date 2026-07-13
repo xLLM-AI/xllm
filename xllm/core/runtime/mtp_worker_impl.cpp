@@ -551,7 +551,7 @@ ParallelArgs MTPDraftParallelArgs(const ParallelArgs& parallel_args,
     return parallel_args;
   }
   CHECK(parallel_args.single_rank_group_ != nullptr)
-      << "replicated Qwen3.5 MTP draft requires a single-rank process group";
+      << "MTP draft body TP1 requires a single-rank process group";
   ParallelArgs draft_args = parallel_args;
   draft_args.rank(0)
       .world_size(1)
@@ -584,6 +584,10 @@ bool is_qwen3_5_target_model_type(const std::string& model_type) {
   return model_type == "qwen3_5" || model_type == "qwen3_5_moe" ||
          model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text" ||
          model_type.rfind("qwen3_5_", 0) == 0;
+}
+
+bool is_qwen3_5_draft_model_type(const std::string& model_type) {
+  return model_type == "qwen3_5_mtp" || model_type == "qwen3_5_moe_mtp";
 }
 
 bool is_mimo_target_model_type(const std::string& model_type) {
@@ -633,18 +637,18 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
 
   if (impl_ != nullptr && impl_->get_status() == WorkerImpl::Status::LOADED) {
     context_ = impl_->context_;
-    if (options_.enable_mtp_draft_body_tp1()) {
-      const std::string& model_type = context_.get_model_args().model_type();
-      CHECK(is_qwen3_5_target_model_type(model_type))
-          << "enable_mtp_draft_body_tp1 only supports Qwen3.5 MTP models, got: "
-          << model_type;
-    }
   }
 
   if (draft_impl_ != nullptr &&
       draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
-    // Share lm_head and word_embedding between target and draft models
-    if (!options_.enable_mtp_draft_body_tp1()) {
+    const bool draft_owns_shared_weights =
+        options_.enable_mtp_draft_body_tp1() &&
+        is_qwen3_5_draft_model_type(
+            draft_impl_->context_.get_model_args().model_type());
+    // Qwen3.5 draft checkpoints contain complete embedding and LMHead weights.
+    // Other MTP drafts retain their existing target-weight sharing contract;
+    // only their transformer body is replicated with TP1 parallel arguments.
+    if (!draft_owns_shared_weights) {
 #if defined(USE_NPU)
       if (::xllm::KernelConfig::get_instance().npu_kernel_backend() !=
           "TORCH") {
