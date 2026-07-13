@@ -57,10 +57,13 @@ def fused_qk_norm_rope(
     position_ids: torch.Tensor,
     interleaved: bool = False,
 ) -> torch.Tensor:
+    # position_ids must already be int64 and contiguous (see the kernel's
+    # scalar-type check). Callers hoist this conversion out of the per-layer
+    # loop, so it is not repeated here.
     return _fused_qk_norm_rope_impl(
         qkv, num_heads_q, num_heads_k, num_heads_v, head_dim, eps,
         q_weight, k_weight, cos_sin_cache, interleaved,
-        position_ids.to(torch.int64).contiguous(),
+        position_ids,
     )
 
 

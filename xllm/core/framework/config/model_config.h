@@ -38,7 +38,6 @@ class ModelConfig final {
   void from_json(const JsonReader& json);
   void append_config_json(nlohmann::ordered_json& config_json) const;
   void initialize();
-  void normalize_model_impl();
   void normalize_cpp_chat_template(const std::string& model_type);
 
   [[nodiscard]] static bool is_python_model_impl(std::string_view model_impl);

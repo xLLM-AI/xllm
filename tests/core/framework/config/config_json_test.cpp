@@ -202,7 +202,6 @@ TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
 
   ModelConfig model_config;
   model_config.from_json(json);
-  model_config.normalize_model_impl();
 
   ExecutionConfig execution_config;
   execution_config.from_json(json);
@@ -220,11 +219,15 @@ TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
   EXPECT_FALSE(kv_cache_config.enable_prefix_cache());
   EXPECT_EQ(scheduler_config.max_tokens_per_batch(), 8192);
   EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 64);
-  EXPECT_EQ(model_config.model_impl(), "python");
+  // model_impl is no longer canonicalized: the raw "py" alias is preserved and
+  // recognized via is_python_model_impl(). from_json still mirrors it into the
+  // matching gflag.
+  EXPECT_EQ(model_config.model_impl(), "py");
+  EXPECT_TRUE(ModelConfig::is_python_model_impl(model_config.model_impl()));
   EXPECT_EQ(model_config.python_model_path(), "/tmp/xllm-python-model");
   EXPECT_EQ(execution_config.python_graph_backend(), "cudagraphs");
 
-  EXPECT_EQ(FLAGS_model_impl, "python");
+  EXPECT_EQ(FLAGS_model_impl, "py");
   EXPECT_EQ(FLAGS_python_model_path, "/tmp/xllm-python-model");
   EXPECT_EQ(FLAGS_python_graph_backend, "cudagraphs");
 

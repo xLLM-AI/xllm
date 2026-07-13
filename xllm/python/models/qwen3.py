@@ -55,6 +55,7 @@ class Qwen3Config:
     vocab_size: int = 151936
     tie_word_embeddings: bool = True
     sliding_window: int = 0
+    attention_bias: bool = False
     tp_size: int = 1
     tp_rank: int = 0
 
@@ -83,6 +84,7 @@ class Qwen3Config:
             vocab_size=int(pick("vocab_size", default=151936)),
             tie_word_embeddings=bool(pick("tie_word_embeddings", default=True)),
             sliding_window=int(pick("sliding_window", default=0)),
+            attention_bias=bool(pick("attention_bias", default=False)),
             tp_size=int(pick("tp_size", default=1)),
             tp_rank=int(pick("tp_rank", default=0)),
         )
@@ -156,6 +158,7 @@ class Qwen3Attention(nn.Module):
             cfg.hidden_size,
             self.q_size + 2 * self.kv_size,
             tp,
+            bias=cfg.attention_bias,
             dtype=dtype,
             device=device,
         )
@@ -163,6 +166,7 @@ class Qwen3Attention(nn.Module):
             self.q_size,
             cfg.hidden_size,
             tp,
+            bias=cfg.attention_bias,
             dtype=dtype,
             device=device,
         )
@@ -281,6 +285,12 @@ class Qwen3Model(nn.Module):
         positions: torch.Tensor,
     ) -> torch.Tensor:
         hidden = self.embed_tokens(input_ids)
+        # The fused QK-norm+RoPE kernel requires int64 position ids, but C++
+        # passes them as int32. Cast once here instead of once per layer. In the
+        # captured decode graph this single cast is recorded inside the graph
+        # (its output lives in the graph memory pool), so replay re-casts the
+        # updated static_positions correctly.
+        positions = positions.to(torch.int64).contiguous()
         residual: Optional[torch.Tensor] = None
         for layer in self.layers:
             hidden, residual = layer(hidden, residual, positions)
@@ -375,6 +385,17 @@ class Qwen3ForCausalLM(PyModelBase):
 
             copy_in(p + "self_attn.o_proj.weight",
                     shard(p + "self_attn.o_proj.weight", dim=1))
+
+            if cfg.attention_bias:
+                qb = shard(p + "self_attn.q_proj.bias", dim=0)
+                kb = shard(p + "self_attn.k_proj.bias", dim=0, kv=True)
+                vb = shard(p + "self_attn.v_proj.bias", dim=0, kv=True)
+                copy_in(p + "self_attn.qkv_proj.bias",
+                        torch.cat([qb, kb, vb], dim=0))
+                # o_proj bias is replicated and added after the all-reduce, so
+                # every rank loads the full (unsharded) bias.
+                copy_in(p + "self_attn.o_proj.bias",
+                        load_tensor(p + "self_attn.o_proj.bias"))
 
             gate = shard(p + "mlp.gate_proj.weight", dim=0)
             up = shard(p + "mlp.up_proj.weight", dim=0)

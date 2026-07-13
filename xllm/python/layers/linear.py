@@ -33,10 +33,11 @@ class ColumnParallelLinear(nn.Module):
     """Linear sharded on the output dim (dim 0): each rank owns
     ``[out_per_partition, in]`` and computes its slice of the output. No
     communication unless ``gather_output`` (then an all-gather along the last
-    dim reconstructs the full output — used by lm_head). Bias-free (Qwen3
-    projections carry no bias). Mirrors native ColumnParallelLinear /
-    QKVParallelLinear (which set gather_output=False so the following
-    RowParallel all-reduce combines the partial outputs).
+    dim reconstructs the full output — used by lm_head). An optional bias is
+    sharded on the output dim like the weight and applied per partition (before
+    any gather). Mirrors native ColumnParallelLinear / QKVParallelLinear (which
+    set gather_output=False so the following RowParallel all-reduce combines the
+    partial outputs).
     """
 
     def __init__(
@@ -45,6 +46,7 @@ class ColumnParallelLinear(nn.Module):
         out_features_per_partition: int,
         tp_size: int,
         gather_output: bool = False,
+        bias: bool = False,
         dtype: torch.dtype | None = None,
         device: torch.device | str | None = None,
     ) -> None:
@@ -59,9 +61,15 @@ class ColumnParallelLinear(nn.Module):
                 device=device,
             )
         )
+        if bias:
+            self.bias = nn.Parameter(
+                torch.empty(out_features_per_partition, dtype=dtype, device=device)
+            )
+        else:
+            self.register_parameter("bias", None)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = torch.nn.functional.linear(x, self.weight)
+        out = torch.nn.functional.linear(x, self.weight, self.bias)
         if self.gather_output and self.tp_size > 1:
             out = ops.all_gather(out, dim=-1, world_size=self.tp_size)
         return out
@@ -71,8 +79,9 @@ class RowParallelLinear(nn.Module):
     """Linear sharded on the input dim (dim 1): each rank owns
     ``[out, in_per_partition]`` and consumes its slice of an already-partitioned
     input, producing a partial output that is SUM all-reduced across the TP
-    group. Bias-free (Qwen3). Mirrors native RowParallelLinear (o_proj /
-    down_proj with enable_result_reduction=true).
+    group. An optional bias is replicated (full ``out``) and added once AFTER
+    the all-reduce, so it is not summed ``tp_size`` times. Mirrors native
+    RowParallelLinear (o_proj / down_proj with enable_result_reduction=true).
     """
 
     def __init__(
@@ -80,6 +89,7 @@ class RowParallelLinear(nn.Module):
         in_features_per_partition: int,
         out_features: int,
         tp_size: int,
+        bias: bool = False,
         dtype: torch.dtype | None = None,
         device: torch.device | str | None = None,
     ) -> None:
@@ -93,9 +103,17 @@ class RowParallelLinear(nn.Module):
                 device=device,
             )
         )
+        if bias:
+            self.bias = nn.Parameter(
+                torch.empty(out_features, dtype=dtype, device=device)
+            )
+        else:
+            self.register_parameter("bias", None)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.nn.functional.linear(x, self.weight)
         if self.tp_size > 1:
             out = ops.all_reduce(out)
+        if self.bias is not None:
+            out = out + self.bias
         return out

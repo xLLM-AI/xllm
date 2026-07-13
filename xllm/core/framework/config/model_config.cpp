@@ -149,14 +149,10 @@ void ModelConfig::from_flags() {
 }
 
 bool ModelConfig::is_python_model_impl(std::string_view model_impl) {
+  // Single place that tolerates the "py" alias for "python". All callers route
+  // their model_impl comparison through here, so the raw config value is never
+  // normalized: no separate canonicalization step is needed.
   return model_impl == "python" || model_impl == "py";
-}
-
-void ModelConfig::normalize_model_impl() {
-  if (model_impl() == "py") {
-    model_impl("python");
-  }
-  FLAGS_model_impl = model_impl();
 }
 
 void ModelConfig::normalize_cpp_chat_template(const std::string& model_type) {
@@ -244,7 +240,6 @@ void ModelConfig::initialize() {
   if (const auto& json_config = config::get_parsed_json_config()) {
     from_json(*json_config);
   }
-  normalize_model_impl();
 }
 
 }  // namespace xllm

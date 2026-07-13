@@ -105,7 +105,10 @@ class FlashInferBackend(AttentionBackend):
             raise RuntimeError("KV caches are not bound")
 
         self._metadata = metadata
-        window_left = self.sliding_window if self.sliding_window > 0 else -1
+        # FlashInfer's window_left is the count of preceding tokens attended to,
+        # so a sliding window of size W maps to window_left = W - 1 (matching the
+        # native attention convention). -1 disables the sliding window.
+        window_left = self.sliding_window - 1 if self.sliding_window > 0 else -1
 
         if metadata.is_prefill:
             self._prefill_ragged_wrapper.plan(
