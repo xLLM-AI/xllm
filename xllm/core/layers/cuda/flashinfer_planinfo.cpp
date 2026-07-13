@@ -120,8 +120,30 @@ void update_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
   const int64_t batch_size = qo_indptr_host.size(0) - 1;
 
   auto plan_func = get_function(plan_info->uri, "plan");
-  // The FA3 SM90 plan has 16 parameters, while FA2 uses the common 19-parameter
-  // schema even when it runs on SM90 hardware.
+  // The prefill "plan" ABI is selected by the loaded module (i.e. the backend),
+  // NOT by the runtime GPU architecture:
+  //   - FA3 module (BatchPrefillWithKVCacheSM90Plan): 16 parameters, ending at
+  //     window_left.
+  //   - FA2 module (BatchPrefillWithKVCachePlan): 19 parameters, with three
+  //     extra required trailing args fixed_split_size / disable_split_kv /
+  //     num_colocated_ctas.
+  // get_batch_prefill_uri() only appends the "_sm90" suffix when
+  // backend=="fa3", so the URI/module (and therefore the required arg count) is
+  // a pure function of `backend`. FlashInfer's own Python wrapper mirrors this:
+  // it appends the three extra args iff self._backend == "fa2"
+  // (flashinfer/prefill.py), with no hardware check.
+  //
+  // The previous implementation keyed on Platform::is_support_sm90a(). That
+  // only worked because eager prefill lets determine_attention_backend()
+  // auto-pick "fa3" on SM90, so "is sm90" happened to coincide with "backend is
+  // fa3". It silently breaks the intended fast path where FA2 is forced on SM90
+  // (graph piecewise prefill pins backend="fa2" because the FA3 kernel is not
+  // graph-safe, and FA2 prefill is also faster on SM90): calling the 19-arg FA2
+  // plan with only 16 args aborts with a TVM-FFI arity error
+  // ("Expected 19 but got 16 arguments"; the C++ num_colocated_ctas default
+  // does not apply across the FFI boundary). Verified against flashinfer 0.6.14
+  // by loading the compiled FA2 module and calling plan() with 16 vs 19 args.
+  // Select the schema from `backend` so FA2-on-SM90 works correctly.
   const bool use_sm90_short_plan_args = backend == "fa3";
   ffi::Array<int64_t> plan_result =
       use_sm90_short_plan_args ? plan_func(float_workspace_buffer,

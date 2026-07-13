@@ -90,9 +90,19 @@ void batch_prefill_impl(const std::string& uri,
     }
   }
 
-  // get_batch_prefill_uri() encodes the FA3 ABI in the module URI. Select the
-  // call schema from the loaded module instead of re-evaluating the backend
-  // from the current hardware and mask.
+  // The "ragged_run" ABI is selected by the loaded module (i.e. the backend),
+  // NOT by the runtime GPU architecture. get_batch_prefill_uri() appends the
+  // "_sm90" suffix only for backend=="fa3", so the URI itself tells us which
+  // run schema the module expects. Derive it from the URI instead of
+  // re-deriving the backend from the current hardware + mask via
+  // determine_attention_backend().
+  //
+  // This matters when FA2 is forced on SM90 hardware (e.g. graph piecewise
+  // prefill pins "fa2" because the FA3 kernel is not graph-safe, and FA2 is
+  // also faster on SM90 for prefill). In that case the loaded module is FA2 but
+  // determine_attention_backend() would return "fa3" from the SM90 hardware
+  // probe, selecting the wrong call schema. See the matching rationale in
+  // flashinfer_planinfo.cpp::update_prefill_plan_info().
   const bool use_fa3_abi = uri.ends_with("_sm90");
 
   if (!use_fa3_abi) {
