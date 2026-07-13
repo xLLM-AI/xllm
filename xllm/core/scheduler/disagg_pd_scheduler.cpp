@@ -937,6 +937,8 @@ void DisaggPDScheduler::update_token_latency_metrics(
   std::lock_guard<std::mutex> lock(latency_metrics_mutex_);
 
   const auto now = absl::Now();
+  const bool speculative_metrics_enabled =
+      options_.num_speculative_tokens() > 0;
   int64_t step_committed_tokens = 0;
   int64_t step_decode_seqs = 0;
   for (Sequence* sequence : sequences) {
@@ -956,13 +958,19 @@ void DisaggPDScheduler::update_token_latency_metrics(
     } else {
       HISTOGRAM_OBSERVE(inter_token_latency_milliseconds, tbt_milliseconds);
       recent_tbt_.emplace_back(tbt_milliseconds);
-      accumulate_speculative_token_latency(tbt_milliseconds,
-                                           committed_tokens,
-                                           step_committed_tokens,
-                                           step_decode_seqs);
+      if (speculative_metrics_enabled && committed_tokens > 0) {
+        HISTOGRAM_OBSERVE(
+            speculative_per_token_latency_milliseconds,
+            amortized_token_latency_ms(tbt_milliseconds, committed_tokens));
+        step_committed_tokens += static_cast<int64_t>(committed_tokens);
+        ++step_decode_seqs;
+      }
     }
   }
-  publish_speculative_tokens_per_step(step_committed_tokens, step_decode_seqs);
+  if (step_decode_seqs > 0) {
+    GAUGE_SET(speculative_mean_tokens_per_decode_step,
+              static_cast<double>(step_committed_tokens) / step_decode_seqs);
+  }
 }
 
 void DisaggPDScheduler::get_latency_metrics(std::vector<int64_t>& ttft,

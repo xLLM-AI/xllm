@@ -120,20 +120,8 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
     return amortized_token_latency_ms(tbt_ms, num_tokens);
   }
 
-  void accumulate_speculative_token_latency_for_test(
-      int64_t tbt_ms,
-      size_t num_tokens,
-      int64_t& step_committed_tokens,
-      int64_t& step_decode_seqs) {
-    accumulate_speculative_token_latency(
-        tbt_ms, num_tokens, step_committed_tokens, step_decode_seqs);
-  }
-
-  void publish_speculative_tokens_per_step_for_test(
-      int64_t step_committed_tokens,
-      int64_t step_decode_seqs) {
-    publish_speculative_tokens_per_step(step_committed_tokens,
-                                        step_decode_seqs);
+  void update_metrics(std::vector<Sequence*>& sequences) {
+    update_token_latency_metrics(sequences);
   }
 };
 
@@ -363,32 +351,29 @@ TEST(DisaggPDSchedulerTest, SpeculativeGaugeReportsBatchMeanTokensPerStep) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
   TestDisaggPDScheduler scheduler(&engine, make_mtp_decode_options());
 
-  int64_t step_committed_tokens = 0;
-  int64_t step_decode_seqs = 0;
-  scheduler.accumulate_speculative_token_latency_for_test(
-      /*tbt_ms=*/40, /*num_tokens=*/5, step_committed_tokens, step_decode_seqs);
-  scheduler.accumulate_speculative_token_latency_for_test(
-      /*tbt_ms=*/40, /*num_tokens=*/3, step_committed_tokens, step_decode_seqs);
-  EXPECT_EQ(step_committed_tokens, 8);
-  EXPECT_EQ(step_decode_seqs, 2);
+  std::shared_ptr<Request> first_request = make_request({1, 2, 3, 4});
+  Sequence* first_sequence = first_request->sequences()[0].get();
+  first_sequence->kv_state().set_kv_cache_tokens_num(
+      first_sequence->num_prompt_tokens());
+  for (int32_t token_id = 10; token_id < 15; ++token_id) {
+    first_sequence->append_token(Token(token_id));
+  }
 
-  scheduler.publish_speculative_tokens_per_step_for_test(step_committed_tokens,
-                                                         step_decode_seqs);
+  std::shared_ptr<Request> second_request = make_request({5, 6, 7, 8});
+  Sequence* second_sequence = second_request->sequences()[0].get();
+  second_sequence->kv_state().set_kv_cache_tokens_num(
+      second_sequence->num_prompt_tokens());
+  for (int32_t token_id = 20; token_id < 23; ++token_id) {
+    second_sequence->append_token(Token(token_id));
+  }
+
+  std::vector<Sequence*> sequences = {first_sequence, second_sequence};
+  scheduler.update_metrics(sequences);
+
   EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_tokens_per_decode_step.get_value(),
                    4.0);
-}
-
-TEST(DisaggPDSchedulerTest, SpeculativeAccumulateSkipsZeroTokenSequences) {
-  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-  TestDisaggPDScheduler scheduler(&engine, make_mtp_decode_options());
-
-  int64_t step_committed_tokens = 0;
-  int64_t step_decode_seqs = 0;
-  scheduler.accumulate_speculative_token_latency_for_test(
-      /*tbt_ms=*/40, /*num_tokens=*/0, step_committed_tokens, step_decode_seqs);
-
-  EXPECT_EQ(step_committed_tokens, 0);
-  EXPECT_EQ(step_decode_seqs, 0);
+  EXPECT_EQ(first_sequence->generated_tokens_since_latency(), 0u);
+  EXPECT_EQ(second_sequence->generated_tokens_since_latency(), 0u);
 }
 
 TEST(DisaggPDSchedulerTest, SpeculativeMetricsSilentWhenDisabled) {
@@ -398,15 +383,15 @@ TEST(DisaggPDSchedulerTest, SpeculativeMetricsSilentWhenDisabled) {
 
   GAUGE_SET(speculative_mean_tokens_per_decode_step, -1.0);
 
-  int64_t step_committed_tokens = 0;
-  int64_t step_decode_seqs = 0;
-  scheduler.accumulate_speculative_token_latency_for_test(
-      /*tbt_ms=*/40, /*num_tokens=*/5, step_committed_tokens, step_decode_seqs);
-  EXPECT_EQ(step_committed_tokens, 0);
-  EXPECT_EQ(step_decode_seqs, 0);
+  std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
+  Sequence* sequence = request->sequences()[0].get();
+  sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
+  sequence->append_token(Token(10));
+  sequence->append_token(Token(11));
+  std::vector<Sequence*> sequences = {sequence};
 
-  scheduler.publish_speculative_tokens_per_step_for_test(
-      /*step_committed_tokens=*/10, /*step_decode_seqs=*/2);
+  scheduler.update_metrics(sequences);
+
   EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_tokens_per_decode_step.get_value(),
                    -1.0);
 }
