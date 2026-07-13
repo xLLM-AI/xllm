@@ -36,7 +36,8 @@ AsyncResponseProcessor::AsyncResponseProcessor(
     const Tokenizer* tokenizer,
     const std::optional<InstanceRole>& role,
     bool enable_service_routing,
-    bool disable_log_stats)
+    bool disable_log_stats,
+    std::function<void(std::shared_ptr<Request>)> cancel_request)
     : response_threadpool_(
           /*num_threads=*/::xllm::ServiceConfig::get_instance()
               .num_response_handling_threads(),
@@ -52,7 +53,10 @@ AsyncResponseProcessor::AsyncResponseProcessor(
       tokenizer_(tokenizer->clone()),
       role_(role.value_or(InstanceRole::DEFAULT)),
       enable_batch_response_(enable_service_routing),
-      disable_log_stats_(disable_log_stats) {}
+      disable_log_stats_(disable_log_stats),
+      cancel_request_(std::move(cancel_request)) {}
+
+AsyncResponseProcessor::~AsyncResponseProcessor() { wait_completion(); }
 
 void AsyncResponseProcessor::process_failed_request(
     std::shared_ptr<Request> request,
@@ -214,7 +218,8 @@ void AsyncResponseProcessor::process_stream_request(
   if (!is_all_seqs_closed) {
     // output the delta text til the end of the sequence to the client
 
-    auto runnable = [request,
+    auto runnable = [cancel_request = cancel_request_,
+                     request,
                      this,
                      indexes = std::move(indexes),
                      num_tokens = std::move(num_tokens)]() {
@@ -232,8 +237,7 @@ void AsyncResponseProcessor::process_stream_request(
         }
       }
       if (!request->state().output_func(req_output)) {
-        // cancel the request if on_stream returns false
-        request->set_cancel();
+        cancel_request(request);
       }
     };
     if (request->state().response_thread_id < 0) {
@@ -318,7 +322,8 @@ void AsyncResponseProcessor::batch_process_stream_requests(
   }
 
   rpc_threadpool_.schedule(
-      [counter = std::unique_ptr<BlockingCounter>(counter),
+      [cancel_request = cancel_request_,
+       counter = std::unique_ptr<BlockingCounter>(counter),
        requests = std::move(requests),
        request_outputs = std::move(request_outputs)]() mutable {
         auto& resp_callback = requests[0]->state().outputs_func;
@@ -326,8 +331,7 @@ void AsyncResponseProcessor::batch_process_stream_requests(
         std::vector<bool> status_set = resp_callback(request_outputs);
         for (size_t i = 0; i < requests.size(); ++i) {
           if (!status_set[i]) {
-            // cancel the request if on_stream returns false
-            requests[i]->set_cancel();
+            cancel_request(requests[i]);
           }
         }
       });
