@@ -24,7 +24,6 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/config/execution_config.h"
-#include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_loader.h"
 #include "core/framework/state_dict/state_dict.h"
@@ -85,8 +84,6 @@ py::dict PyCausalLM::build_config_dict(
   d["tp_rank"] = tp_rank_;
   d["python_graph_backend"] =
       ExecutionConfig::get_instance().python_graph_backend();
-  d["max_seqs_per_batch"] =
-      SchedulerConfig::get_instance().max_seqs_per_batch();
   return d;
 }
 

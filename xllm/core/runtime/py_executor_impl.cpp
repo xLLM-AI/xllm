@@ -130,8 +130,10 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   py::module_::import("xllm_runtime");
   py::module_ executor_module =
       py::module_::import("python.model_executor.executor");
-  py_executor_ = executor_module.attr("ModelExecutor")(
-      py_causal_lm_->python_model(), py_causal_lm_->config_dict());
+  py_executor_ =
+      executor_module.attr("ModelExecutor")(py_causal_lm_->python_model(),
+                                            py_causal_lm_->config_dict(),
+                                            options_.max_seqs_per_batch());
 }
 
 PyExecutorImpl::~PyExecutorImpl() {

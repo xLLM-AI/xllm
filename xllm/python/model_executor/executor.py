@@ -26,7 +26,12 @@ from .runners.inductor import InductorRunner
 
 
 class ModelExecutor:
-    def __init__(self, model: nn.Module, config: dict) -> None:
+    def __init__(
+        self,
+        model: nn.Module,
+        config: dict,
+        max_seqs_per_batch: int,
+    ) -> None:
         self.model = model
         self._kv_bound = False
 
@@ -69,7 +74,8 @@ class ModelExecutor:
             self.decode_cuda_graph_runner = DecodeCudaGraphRunner(
                 execution_model,
                 self.attention_backend,
-                int(config.get("max_seqs_per_batch", 1024)),
+                max_seqs_per_batch,
+                int(config["max_position_embeddings"]),
             )
         else:
             self.inductor_runner = InductorRunner(

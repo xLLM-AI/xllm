@@ -17,9 +17,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import torch.nn as nn
 
 from ... import ops
-from ...attention.backend import AttentionMetadata
+from ...attention.backend import AttentionBackend, AttentionMetadata
 from ..forward_context import ForwardContext, forward_context
 from .base import BaseRunner
 
@@ -69,10 +70,18 @@ class _DecodeGraphEntry:
 
 
 class DecodeCudaGraphRunner(BaseRunner):
-    def __init__(self, model, attention_backend, max_batch: int) -> None:
+    def __init__(
+        self,
+        model: nn.Module,
+        attention_backend: AttentionBackend,
+        max_batch: int,
+        max_model_len: int,
+    ) -> None:
         super().__init__(model, attention_backend)
         self.max_batch = max_batch
+        self.max_model_len = max_model_len
         self._graphs: dict[int, _DecodeGraphEntry] = {}
+        self._paged_kv_indices_buffer: torch.Tensor | None = None
         self._stream: torch.cuda.Stream | None = None
         self._warmed_up = False
 
@@ -162,6 +171,17 @@ class DecodeCudaGraphRunner(BaseRunner):
         metadata: AttentionMetadata,
     ) -> _DecodeGraphEntry:
         device = input_ids.device
+        if self._paged_kv_indices_buffer is None:
+            page_size = self.attention_backend.page_size
+            max_blocks_per_sequence = (
+                (self.max_model_len + page_size - 1) // page_size + 1
+            )
+            self._paged_kv_indices_buffer = torch.zeros(
+                self.max_batch * max_blocks_per_sequence,
+                dtype=metadata.paged_kv_indices.dtype,
+                device=device,
+            )
+
         entry = _DecodeGraphEntry()
         entry.batch_size = padded_batch_size
         entry.graph = None
@@ -183,11 +203,7 @@ class DecodeCudaGraphRunner(BaseRunner):
                 dtype=metadata.paged_kv_indptr.dtype,
                 device=device,
             ),
-            paged_kv_indices=torch.zeros(
-                self.attention_backend.num_kv_blocks + padded_batch_size,
-                dtype=metadata.paged_kv_indices.dtype,
-                device=device,
-            ),
+            paged_kv_indices=self._paged_kv_indices_buffer,
             paged_kv_last_page_len=torch.zeros(
                 padded_batch_size,
                 dtype=metadata.paged_kv_last_page_len.dtype,
