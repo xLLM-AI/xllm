@@ -20,6 +20,16 @@ cc_test(
     GTest::gtest_main
 )
 
+cc_test(
+  NAME
+    kv_transfer_completion_test
+  SRCS
+    kv_transfer_completion_test.cpp
+  DEPS
+    :kv_transfer_completion
+    GTest::gtest_main
+)
+
 if(USE_NPU OR USE_MLU)
 cc_test(
   NAME

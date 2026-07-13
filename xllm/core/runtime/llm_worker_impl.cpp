@@ -34,6 +34,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "framework/kv_cache/kv_cache.h"
+#include "framework/kv_cache_transfer/kv_transfer_completion.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
 #if defined(USE_CUDA) || defined(USE_ILU) || defined(USE_MUSA)
@@ -208,7 +209,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   Timer timer;
   auto& sampling_params = input.sampling_params;
 
-  std::vector<folly::SemiFuture<bool>> futures;
+  KVTransferCompletion kv_transfers;
 
   if (options_.kv_cache_transfer_mode() == "PUSH" &&
       !input.transfer_kv_infos.empty()) {
@@ -225,13 +226,16 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     const_cast<ModelInputParams*>(&(input.input_params))
         ->parallel.layer_synchronizer = layer_synchronizer;
 
-    futures.emplace_back(
+    kv_transfers.add(
         kv_cache_transfer_->push_kv_blocks_async(input.transfer_kv_infos,
                                                  context_.get_parallel_args(),
                                                  layer_synchronizer,
                                                  is_spec_draft_));
 #endif
   }
+  auto wait_kv_push = [&kv_transfers]() {
+    CHECK(kv_transfers.wait()) << "KV cache push failed";
+  };
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     eplb_executor_->eplb_execute(input.input_params.expert.eplb_info);
   }
@@ -240,6 +244,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   auto model_output = model_executor_->forward(
       input.token_ids, input.positions, kv_caches_, input.input_params);
   if (!model_output.hidden_states.defined()) {
+    wait_kv_push();
     return std::nullopt;
   }
 
@@ -277,23 +282,12 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       !options_.enable_speculative_decode()) {
     MULTI_MODEL_STEP_UNLOCK();
     if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
+      wait_kv_push();
       return std::nullopt;
     }
-    auto ret = device_.synchronize_default_stream();
-    // in p-d disaggregation scene, all micro batches should be in same
-    // prefill/decode stage, so, to judge transfer_kv_infos.empty,
-    if (options_.kv_cache_transfer_mode() == "PUSH" &&
-        !input.transfer_kv_infos.empty()) {
-      auto results =
-          folly::collectAll(futures).within(std::chrono::seconds(60)).get();
-      for (const auto& result : results) {
-        // TODO: Add error handling
-        if (!result.value()) {
-          LOG(ERROR) << "kv_cache_transfer_ failed";
-          break;
-        }
-      }
-    }
+    int ret = device_.synchronize_default_stream();
+    CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
+    wait_kv_push();
     if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
       return output;
     }
@@ -361,26 +355,17 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
 
   MULTI_MODEL_STEP_UNLOCK();
   if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
+    wait_kv_push();
     output.retained_input = std::make_shared<ForwardInput>(input);
     if (enable_schedule_overlap()) {
       output.ready_event = record_current_stream_event(device_);
     }
     return output;
   }
-  auto ret = device_.synchronize_default_stream();
+  int ret = device_.synchronize_default_stream();
+  CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
 
-  if (options_.kv_cache_transfer_mode() == "PUSH" &&
-      !input.transfer_kv_infos.empty()) {
-    auto results =
-        folly::collectAll(futures).within(std::chrono::seconds(60)).get();
-    for (const auto& result : results) {
-      // TODO: Add error handling
-      if (!result.value()) {
-        LOG(ERROR) << "kv_cache_transfer_ failed";
-        break;
-      }
-    }
-  }
+  wait_kv_push();
 
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
   DeviceMonitor::get_instance().update_active_activation_memory(
