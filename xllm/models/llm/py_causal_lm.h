@@ -50,6 +50,9 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalLM {
   void prepare_expert_weight(int32_t, const std::vector<int32_t>&) override {}
   void update_expert_weight(int32_t) override {}
 
+  pybind11::object& python_model() { return py_model_; }
+  const pybind11::object& config_dict() const { return config_dict_; }
+
  private:
   pybind11::dict build_config_dict(const ParallelArgs& parallel_args) const;
 
@@ -63,6 +66,7 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalLM {
   ProcessGroup* tp_group_ = nullptr;
 
   pybind11::object py_model_;
+  pybind11::object config_dict_;
 };
 
 }  // namespace xllm

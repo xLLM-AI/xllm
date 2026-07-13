@@ -1,4 +1,4 @@
-# Copyright 2025-2026 The xLLM Authors.
+# Copyright 2026 The xLLM Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,11 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Model-runner subpackage: graph capture / replay over the pure-GPU model
-graph. Mirrors SGLang's ``model_executor`` runners; a model constructs a
-``GraphRunner`` and calls it, staying free of graph-capture concerns.
-"""
-
-from .graph_runner import GraphRunner
-
-__all__ = ["GraphRunner"]
+"""Attention backend interfaces and implementations."""

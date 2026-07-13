@@ -33,14 +33,14 @@ using LlmDecodeMetadataUpdateStream = cudaStream_t;
 
 struct LlmDecodeMetadataUpdateParams {
   const int32_t* src_tokens;
-  const int32_t* src_positions;
+  const void* src_positions;
   const int32_t* src_new_cache_slots;
   const int32_t* src_kv_seq_lens;
   const int32_t* src_paged_kv_indptr;
   const int32_t* src_paged_kv_indices;
   const int32_t* src_paged_kv_last_page_len;
   int32_t* dst_tokens;
-  int32_t* dst_positions;
+  void* dst_positions;
   int32_t* dst_new_cache_slots;
   int32_t* dst_kv_seq_lens;
   int32_t* dst_kv_seq_lens_delta;
@@ -51,6 +51,9 @@ struct LlmDecodeMetadataUpdateParams {
   int64_t padded_num_tokens;
   int64_t actual_batch_size;
   int64_t actual_indices_size;
+  bool src_positions_are_int64 = false;
+  bool dst_positions_are_int64 = false;
+  bool add_dummy_pages_for_padding = false;
 };
 
 void update_llm_decode_metadata(const LlmDecodeMetadataUpdateParams& params,

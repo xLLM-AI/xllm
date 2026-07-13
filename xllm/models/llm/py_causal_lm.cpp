@@ -25,12 +25,9 @@ limitations under the License.
 
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/scheduler_config.h"
-#include "core/framework/model/model_input_params.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_loader.h"
 #include "core/framework/state_dict/state_dict.h"
-#include "core/layers/common/attention_metadata.h"
-#include "core/layers/common/attention_metadata_builder.h"
 #include "models/py_model_helper.h"
 
 namespace py = pybind11;
@@ -66,7 +63,8 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
 
   py::module_ registry = py::module_::import("python.registry");
   py::object model_cls = registry.attr("get_model_class")(py::str(module_name));
-  py_model_ = model_cls(build_config_dict(parallel_args));
+  config_dict_ = build_config_dict(parallel_args);
+  py_model_ = model_cls(config_dict_);
   py_model_.attr("eval")();
 }
 
@@ -112,48 +110,9 @@ ModelOutput PyCausalLM::forward(const torch::Tensor& tokens,
                                 const torch::Tensor& positions,
                                 std::vector<KVCache>& kv_caches,
                                 const ModelInputParams& parameters) {
-  torch::NoGradGuard no_grad;
-
-  std::shared_ptr<layer::AttentionMetadata> attn_metadata =
-      parameters.attn_metadata;
-  if (!attn_metadata) {
-    attn_metadata = std::make_shared<layer::AttentionMetadata>(
-        layer::AttentionMetadataBuilder::build(parameters, enable_mla_));
-  }
-
-  py::gil_scoped_acquire gil;
-
-  py::dict attention_metadata_dict;
-  attention_metadata_dict["slot_mapping"] = attn_metadata->slot_mapping;
-  attention_metadata_dict["paged_kv_indptr"] = attn_metadata->paged_kv_indptr;
-  attention_metadata_dict["paged_kv_indices"] = attn_metadata->paged_kv_indices;
-  attention_metadata_dict["paged_kv_last_page_len"] =
-      attn_metadata->paged_kv_last_page_len;
-  attention_metadata_dict["is_prefill"] = attn_metadata->is_prefill;
-  attention_metadata_dict["is_chunked_prefill"] =
-      attn_metadata->is_chunked_prefill;
-  attention_metadata_dict["enable_cuda_graph"] =
-      attn_metadata->enable_cuda_graph;
-  attention_metadata_dict["use_tensor_core"] = false;
-  if (attn_metadata->q_cu_seq_lens.defined()) {
-    attention_metadata_dict["q_cu_seq_lens"] = attn_metadata->q_cu_seq_lens;
-  }
-  if (attn_metadata->kv_cu_seq_lens.defined()) {
-    attention_metadata_dict["kv_cu_seq_lens"] = attn_metadata->kv_cu_seq_lens;
-  }
-  if (attn_metadata->qo_indptr.has_value() &&
-      attn_metadata->qo_indptr->defined()) {
-    attention_metadata_dict["qo_indptr"] = attn_metadata->qo_indptr.value();
-  }
-
-  py::list kv_caches_py;
-  for (auto& kv : kv_caches) {
-    kv_caches_py.append(py::make_tuple(kv.get_k_cache(), kv.get_v_cache()));
-  }
-
-  py::object hidden_obj = py_model_.attr("forward")(
-      tokens, positions, attention_metadata_dict, kv_caches_py);
-  return ModelOutput(hidden_obj.cast<torch::Tensor>());
+  LOG(FATAL) << "PyCausalLM::forward() must not be called directly. "
+             << "Python model forward goes through PyExecutorImpl.";
+  return ModelOutput(torch::Tensor());
 }
 
 torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,

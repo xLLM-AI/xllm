@@ -17,10 +17,8 @@
 Architecture: fused add + RMSNorm carrying (hidden, residual) between layers,
 QK-norm before RoPE, gated-SiLU MLP. Tensor parallelism when tp_size>1.
 
-Attention is now explicit: the forward signature receives ``attn_metadata`` and
-``kv_caches`` from C++, and each layer's attention calls the ``PagedAttention``
-layer which dispatches to ``kv_cache_write`` + ``paged_attention`` kernel ops
-with all state passed as explicit parameters.
+Attention is delegated to the FlashInferBackend via the scoped ForwardContext.
+The model does not import FlashInfer, own wrappers, or call plan.
 """
 
 from __future__ import annotations
@@ -32,11 +30,10 @@ import torch
 import torch.nn as nn
 
 from .. import ops
-from ..attn_metadata import AttentionMetadata
 from ..layers import (
+    Attention,
     ColumnParallelLinear,
     HiddenParallelEmbedding,
-    PagedAttention,
     RMSNorm,
     RotaryEmbedding,
     RowParallelLinear,
@@ -182,16 +179,14 @@ class Qwen3Attention(nn.Module):
             dtype=dtype,
             device=device,
         )
-
-        import math
-
-        scale = math.sqrt(1.0 / self.head_dim)
-        # PagedAttention instance is set externally (shared across all layers).
-        self.attn: Optional[PagedAttention] = None
-        self._scale = scale
-        self._sliding_window = cfg.sliding_window
-        self._device = device
-        self._dtype = dtype
+        self.attn = Attention(
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_dim=self.head_dim,
+            scale=self.head_dim**-0.5,
+            sliding_window=cfg.sliding_window,
+            layer_id=layer_id,
+        )
 
     def forward(
         self,
@@ -216,7 +211,7 @@ class Qwen3Attention(nn.Module):
         k = qkv[:, self.q_size : self.q_size + self.kv_size]
         v = qkv[:, self.q_size + self.kv_size :]
 
-        attn_out = self.attn(q, k, v, self.layer_id)
+        attn_out = self.attn(q, k, v)
         return self.o_proj(attn_out)
 
 
@@ -280,31 +275,6 @@ class Qwen3Model(nn.Module):
             cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device
         )
 
-        # Single shared PagedAttention (workspace allocated once, used by all layers).
-        import math
-        num_heads, num_kv_heads, _ = cfg.head_split()
-        scale = math.sqrt(1.0 / cfg.head_dim)
-        self.paged_attn = PagedAttention(
-            num_heads, num_kv_heads, cfg.head_dim, scale, cfg.sliding_window,
-            device, dtype
-        )
-        for layer in self.layers:
-            layer.self_attn.attn = self.paged_attn
-
-    def plan_attention(
-        self,
-        attn_metadata: AttentionMetadata,
-        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-        enable_cuda_graph: bool = False,
-    ) -> None:
-        """Compute the shared attention plan once per batch, OUTSIDE the
-        compiled/captured region (called by the GraphRunner before dispatch).
-        block_size is identical across layers, so layer 0's k_cache suffices.
-        enable_cuda_graph=True (decode full-graph capture) makes the plan emit a
-        fixed-layout schedule so a single captured graph replays across seqlens.
-        """
-        self.paged_attn.plan(attn_metadata, kv_caches[0][0], enable_cuda_graph)
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -340,7 +310,6 @@ class Qwen3ForCausalLM(PyModelBase):
             dtype=dtype,
             device=device,
         )
-        self._init_runner(config)
 
     # -- weight loading ---------------------------------------------------
     def load_weights(

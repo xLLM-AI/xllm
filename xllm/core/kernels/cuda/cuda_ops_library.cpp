@@ -30,6 +30,11 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include "core/kernels/cuda/cuda_ops_api.h"
+#if defined(USE_CUDA)
+#include <c10/cuda/CUDAStream.h>
+
+#include "core/kernels/cuda/llm_decode_metadata_update.h"
+#endif
 
 namespace xllm {
 namespace {
@@ -118,6 +123,119 @@ torch::Tensor reshape_paged_cache_op(const torch::Tensor& slot_mapping,
   return key_cache;
 }
 
+#if defined(USE_CUDA)
+torch::Tensor update_decode_graph_metadata(
+    const torch::Tensor& tokens,
+    const torch::Tensor& positions,
+    const torch::Tensor& slot_mapping,
+    const torch::Tensor& kv_seq_lens,
+    const torch::Tensor& paged_kv_indptr,
+    const torch::Tensor& paged_kv_indices,
+    const torch::Tensor& paged_kv_last_page_len,
+    torch::Tensor& dst_tokens,
+    torch::Tensor& dst_positions,
+    torch::Tensor& dst_slot_mapping,
+    torch::Tensor& dst_kv_seq_lens,
+    torch::Tensor& dst_kv_seq_lens_delta,
+    torch::Tensor& dst_paged_kv_indptr,
+    torch::Tensor& dst_paged_kv_indices,
+    torch::Tensor& dst_paged_kv_last_page_len,
+    int64_t padded_num_tokens,
+    bool add_dummy_pages_for_padding) {
+  CHECK(tokens.defined()) << "tokens must be defined";
+  const torch::Device device = tokens.device();
+  const auto check_int32_cuda = [&device](const torch::Tensor& tensor,
+                                          const char* name) {
+    CHECK(tensor.defined()) << name << " must be defined";
+    CHECK(tensor.is_cuda()) << name << " must be a CUDA tensor";
+    CHECK_EQ(tensor.device(), device) << name << " must be on " << device;
+    CHECK_EQ(tensor.scalar_type(), torch::kInt32)
+        << name << " must have dtype int32";
+    CHECK(tensor.is_contiguous()) << name << " must be contiguous";
+  };
+
+  check_int32_cuda(tokens, "tokens");
+  CHECK(positions.defined()) << "positions must be defined";
+  CHECK(positions.is_cuda()) << "positions must be a CUDA tensor";
+  CHECK_EQ(positions.device(), device) << "positions must be on " << device;
+  CHECK(positions.scalar_type() == torch::kInt32 ||
+        positions.scalar_type() == torch::kInt64)
+      << "positions must have dtype int32 or int64";
+  CHECK(positions.is_contiguous()) << "positions must be contiguous";
+  check_int32_cuda(slot_mapping, "slot_mapping");
+  check_int32_cuda(kv_seq_lens, "kv_seq_lens");
+  check_int32_cuda(paged_kv_indptr, "paged_kv_indptr");
+  check_int32_cuda(paged_kv_indices, "paged_kv_indices");
+  check_int32_cuda(paged_kv_last_page_len, "paged_kv_last_page_len");
+  check_int32_cuda(dst_tokens, "dst_tokens");
+  CHECK(dst_positions.defined()) << "dst_positions must be defined";
+  CHECK(dst_positions.is_cuda()) << "dst_positions must be a CUDA tensor";
+  CHECK_EQ(dst_positions.device(), device)
+      << "dst_positions must be on " << device;
+  CHECK(dst_positions.scalar_type() == torch::kInt32 ||
+        dst_positions.scalar_type() == torch::kInt64)
+      << "dst_positions must have dtype int32 or int64";
+  CHECK(dst_positions.is_contiguous()) << "dst_positions must be contiguous";
+  check_int32_cuda(dst_slot_mapping, "dst_slot_mapping");
+  check_int32_cuda(dst_kv_seq_lens, "dst_kv_seq_lens");
+  check_int32_cuda(dst_kv_seq_lens_delta, "dst_kv_seq_lens_delta");
+  check_int32_cuda(dst_paged_kv_indptr, "dst_paged_kv_indptr");
+  check_int32_cuda(dst_paged_kv_indices, "dst_paged_kv_indices");
+  check_int32_cuda(dst_paged_kv_last_page_len, "dst_paged_kv_last_page_len");
+
+  const int64_t actual_num_tokens = tokens.numel();
+  const int64_t actual_batch_size = paged_kv_last_page_len.numel();
+  const int64_t actual_indices_size = paged_kv_indices.numel();
+  const int64_t padding = padded_num_tokens - actual_batch_size;
+  CHECK_EQ(actual_num_tokens, actual_batch_size)
+      << "decode graph requires one token per sequence";
+  CHECK_GE(padded_num_tokens, actual_num_tokens);
+  CHECK_GE(positions.numel(), actual_num_tokens);
+  CHECK_GE(slot_mapping.numel(), actual_num_tokens);
+  CHECK_GE(kv_seq_lens.numel(), actual_batch_size + 1);
+  CHECK_GE(paged_kv_indptr.numel(), actual_batch_size + 1);
+  CHECK_GE(dst_tokens.numel(), padded_num_tokens);
+  CHECK_GE(dst_positions.numel(), padded_num_tokens);
+  CHECK_GE(dst_slot_mapping.numel(), padded_num_tokens);
+  CHECK_GE(dst_kv_seq_lens.numel(), padded_num_tokens + 1);
+  CHECK_GE(dst_kv_seq_lens_delta.numel(), padded_num_tokens);
+  CHECK_GE(dst_paged_kv_indptr.numel(), padded_num_tokens + 1);
+  CHECK_GE(dst_paged_kv_indices.numel(),
+           actual_indices_size + (add_dummy_pages_for_padding ? padding : 0));
+  CHECK_GE(dst_paged_kv_last_page_len.numel(), padded_num_tokens);
+
+  xllm::kernel::cuda::LlmDecodeMetadataUpdateParams params{
+      .src_tokens = tokens.data_ptr<int32_t>(),
+      .src_positions = positions.data_ptr(),
+      .src_new_cache_slots = slot_mapping.data_ptr<int32_t>(),
+      .src_kv_seq_lens = kv_seq_lens.data_ptr<int32_t>(),
+      .src_paged_kv_indptr = paged_kv_indptr.data_ptr<int32_t>(),
+      .src_paged_kv_indices = paged_kv_indices.data_ptr<int32_t>(),
+      .src_paged_kv_last_page_len = paged_kv_last_page_len.data_ptr<int32_t>(),
+      .dst_tokens = dst_tokens.data_ptr<int32_t>(),
+      .dst_positions = dst_positions.data_ptr(),
+      .dst_new_cache_slots = dst_slot_mapping.data_ptr<int32_t>(),
+      .dst_kv_seq_lens = dst_kv_seq_lens.data_ptr<int32_t>(),
+      .dst_kv_seq_lens_delta = dst_kv_seq_lens_delta.data_ptr<int32_t>(),
+      .dst_paged_kv_indptr = dst_paged_kv_indptr.data_ptr<int32_t>(),
+      .dst_paged_kv_indices = dst_paged_kv_indices.data_ptr<int32_t>(),
+      .dst_paged_kv_last_page_len =
+          dst_paged_kv_last_page_len.data_ptr<int32_t>(),
+      .actual_num_tokens = actual_num_tokens,
+      .padded_num_tokens = padded_num_tokens,
+      .actual_batch_size = actual_batch_size,
+      .actual_indices_size = actual_indices_size,
+      .src_positions_are_int64 = positions.scalar_type() == torch::kInt64,
+      .dst_positions_are_int64 = dst_positions.scalar_type() == torch::kInt64,
+      .add_dummy_pages_for_padding = add_dummy_pages_for_padding,
+  };
+  const cudaStream_t stream =
+      c10::cuda::getCurrentCUDAStream(tokens.device().index());
+  xllm::kernel::cuda::update_llm_decode_metadata(params, stream);
+  return dst_tokens;
+}
+#endif
+
 }  // namespace
 
 void ensure_xllm_ops_registered() {
@@ -143,6 +261,15 @@ TORCH_LIBRARY(xllm_ops, m) {
   m.def(
       "reshape_paged_cache(Tensor slot_mapping, Tensor keys, Tensor values, "
       "Tensor(a!) key_cache, Tensor(b!) value_cache) -> Tensor");
+  m.def(
+      "update_decode_graph_metadata(Tensor tokens, Tensor positions, Tensor "
+      "slot_mapping, Tensor kv_seq_lens, Tensor paged_kv_indptr, Tensor "
+      "paged_kv_indices, Tensor paged_kv_last_page_len, Tensor(a!) dst_tokens, "
+      "Tensor(b!) dst_positions, Tensor(c!) dst_slot_mapping, Tensor(d!) "
+      "dst_kv_seq_lens, Tensor(e!) dst_kv_seq_lens_delta, Tensor(f!) "
+      "dst_paged_kv_indptr, Tensor(g!) dst_paged_kv_indices, Tensor(h!) "
+      "dst_paged_kv_last_page_len, int padded_num_tokens, bool "
+      "add_dummy_pages_for_padding) -> Tensor(a!)");
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, CUDA, m) {
@@ -151,4 +278,8 @@ TORCH_LIBRARY_IMPL(xllm_ops, CUDA, m) {
   m.impl("silu_and_mul", TORCH_FN(xllm::silu_and_mul));
   m.impl("fused_qk_norm_rope", TORCH_FN(xllm::fused_qk_norm_rope));
   m.impl("reshape_paged_cache", TORCH_FN(xllm::reshape_paged_cache_op));
+#if defined(USE_CUDA)
+  m.impl("update_decode_graph_metadata",
+         TORCH_FN(xllm::update_decode_graph_metadata));
+#endif
 }

@@ -28,7 +28,7 @@ from .compute import (
     rms_norm,
     silu_and_mul,
 )
-from .attention import reshape_paged_cache
+from .attention import reshape_paged_cache, update_decode_graph_metadata
 from .collectives import (
     all_gather,
     all_reduce,
@@ -41,6 +41,7 @@ __all__ = [
     "silu_and_mul",
     "fused_qk_norm_rope",
     "reshape_paged_cache",
+    "update_decode_graph_metadata",
     "all_reduce",
     "all_gather",
     "init_tp_group",

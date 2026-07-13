@@ -15,8 +15,11 @@
 """Shared base for Python model-executor causal LMs.
 
 A concrete model builds its own graph, lm_head, and config; the wiring that is
-identical across models -- the C++ bridge calling convention for ``forward`` /
-``compute_logits``, and the weight-loading entry point -- lives here.
+identical across models -- the weight-loading entry point and logits
+computation -- lives here.
+
+Model forward is driven by the runners owned by Python ModelExecutor;
+PyCausalLM no longer calls model.forward() directly.
 """
 
 from __future__ import annotations
@@ -25,9 +28,6 @@ from typing import TYPE_CHECKING, List, Optional
 
 import torch
 import torch.nn as nn
-
-from ..attn_metadata import AttentionMetadata
-from ..model_runner import GraphRunner
 
 if TYPE_CHECKING:
     from xllm_weight_loader import StateDict
@@ -38,25 +38,11 @@ class PyModelBase(nn.Module):
 
     Subclass contract:
       * build ``self.model`` and ``self.lm_head``;
-      * call ``self._init_runner()`` once, after ``self.model`` exists;
       * implement ``load_weights()``.
     """
 
     model: nn.Module
     lm_head: nn.Module
-    _runner: GraphRunner
-
-    def _init_runner(self, config: dict | None = None) -> None:
-        """Wrap ``self.model`` in the graph runner (torch.compile / cudagraph).
-
-        The backend is selected by the C++ --python_graph_backend flag
-        (passed in config["python_graph_backend"]). Decode graph capture uses
-        the scheduler's max_seqs_per_batch as its batch limit.
-        """
-        cfg = config or {}
-        backend = cfg.get("python_graph_backend", "off")
-        max_batch = int(cfg.get("max_seqs_per_batch", 1024))
-        self._runner = GraphRunner(self.model, backend=backend, max_batch=max_batch)
 
     @staticmethod
     def resolve_dtype(dtype: object) -> torch.dtype:
@@ -68,30 +54,6 @@ class PyModelBase(nn.Module):
         if not isinstance(resolved, torch.dtype):
             raise ValueError(f"Unknown dtype: {dtype!r}")
         return resolved
-
-    # -- inference ------------------------------------------------------------
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        attn_metadata_dict: dict,
-        kv_caches: list,
-    ) -> torch.Tensor:
-        """Called by C++ PyCausalLM::forward with explicit metadata + kv_caches.
-
-        Args:
-            input_ids: [num_tokens] token IDs
-            positions: [num_tokens] position IDs
-            attn_metadata_dict: dict built by C++ with all attention metadata
-            kv_caches: list of (k_cache, v_cache) tuples, one per layer
-
-        The runner owns plan + forward-context setup and graph orchestration:
-        the decode full-graph path re-plans against fixed-address static buffers
-        (not the raw C++ tensors), so this method just wraps the metadata and
-        delegates everything to the runner.
-        """
-        meta = AttentionMetadata(attn_metadata_dict)
-        return self._runner(input_ids, positions, meta, kv_caches)
 
     def compute_logits(
         self, hidden: torch.Tensor, selected_idxes: Optional[torch.Tensor]
