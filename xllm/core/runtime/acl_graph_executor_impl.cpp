@@ -424,14 +424,11 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   const bool in_spec_verify_phase =
       params_single.is_spec_verify &&
       params_single.meta.batch_forward_type.is_chunked_prefill();
-  // DFlash context-KV write projects+scatters with no attention; keep it eager.
-  const bool is_context_kv_write = params_single.embedding.write_context_kv;
   VLOG(50) << "in_decoding_phase: " << in_decoding_phase
            << " in_spec_verify_phase: " << in_spec_verify_phase
            << " q_max_seq_len: " << params_single.meta.q_max_seq_len
            << " n_layers: " << args_.n_layers();
-  if ((!in_decoding_phase && !in_spec_verify_phase) || is_context_kv_write ||
-      args_.n_layers() == 1) {
+  if ((!in_decoding_phase && !in_spec_verify_phase) || args_.n_layers() == 1) {
     VLOG(kGraphExecutorLogVerboseLevel)
         << "AclGraphExecutorImpl::run() in eager mode";
     COUNTER_INC(num_model_execution_total_eager);

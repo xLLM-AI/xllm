@@ -105,7 +105,6 @@ class DFlashWorkerImpl final : public SpeculativeWorkerImpl {
 
   void write_context_kv(const ForwardInput& input,
                         const torch::Tensor& context_hidden,
-                        std::vector<int32_t> new_cache_slots,
                         const torch::Tensor& positions_device,
                         const torch::Tensor& new_cache_slots_device);
 

@@ -68,20 +68,6 @@ class DFlashQwen3ModelImpl final : public QWen3ModelImpl {
         tensor_options_);
   }
 
-  ModelOutput forward(torch::Tensor tokens,
-                      torch::Tensor positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelInputParams& input_params) override {
-    torch::Tensor input_embedding = input_params.embedding.input_embedding;
-    if (input_embedding.defined()) {
-      // Context-KV write pass: project the target hidden into the draft's KV
-      // cache once; later draft decode steps reuse it via normal attention.
-      return write_context_kv(
-          input_embedding, positions, kv_caches, input_params);
-    }
-    return QWen3ModelImpl::forward(tokens, positions, kv_caches, input_params);
-  }
-
   void load_state_dict(const StateDict& state_dict) override {
     fc_->load_state_dict(state_dict.get_dict_with_prefix("fc."));
     hidden_norm_->load_state_dict(
@@ -129,20 +115,21 @@ class DFlashQwen3ModelImpl final : public QWen3ModelImpl {
     return non_causal_mask.repeat({q_len, 1});
   }
 
- private:
+ public:
   // Projects the target's captured hidden states into the draft's dense KV
   // cache: fc -> hidden_norm -> fused per-layer K/V linear -> per-layer k_norm
   // + RoPE -> ATB ReshapeAndCache. The projection/norm/rope run here in the
   // model layer (as Eagle3 keeps its fc in the model); only the KV scatter is
-  // delegated to the ATB operator wrapper.
-  ModelOutput write_context_kv(const torch::Tensor& target_hidden,
-                               const torch::Tensor& positions,
-                               std::vector<KVCache>& kv_caches,
-                               const ModelInputParams& input_params) {
+  // delegated to the ATB operator wrapper. Sits outside forward() because it
+  // has no attention and its shape doesn't match the decode graph.
+  ModelOutput precompute_and_store_context_kv(
+      const torch::Tensor& target_hidden,
+      const torch::Tensor& positions,
+      const torch::Tensor& device_cache_slots,
+      std::vector<KVCache>& kv_caches,
+      const ModelInputParams& input_params) {
     const int64_t num_layers = static_cast<int64_t>(layers_.size());
     CHECK_EQ(static_cast<int64_t>(kv_caches.size()), num_layers);
-    const torch::Tensor& device_cache_slots =
-        input_params.attention.device.new_cache_slots;
     CHECK(device_cache_slots.defined())
         << "DFlash context K/V requires device new_cache_slots.";
     CHECK_EQ(device_cache_slots.numel(), target_hidden.size(0))
@@ -155,8 +142,8 @@ class DFlashQwen3ModelImpl final : public QWen3ModelImpl {
     CHECK_GT(local_kv_heads_, 0) << "DFlash local KV heads is invalid.";
 
     const int64_t num_context = projected_hidden.size(0);
-    namespace F = torch::nn::functional;
-    torch::Tensor all_kv = F::linear(projected_hidden, fused_kv_weight_);
+    torch::Tensor all_kv =
+        torch::nn::functional::linear(projected_hidden, fused_kv_weight_);
     // fused output: [num_context, num_layers, 2(k/v), local_kv_heads, head_dim]
     // -> permute to [2(k/v), num_layers, num_context, local_kv_heads, head_dim]
     // so the selects below peel k/v first, then per-layer. The single
@@ -216,6 +203,7 @@ class DFlashQwen3ModelImpl final : public QWen3ModelImpl {
     return ModelOutput(projected_hidden);
   }
 
+ private:
   // Batched fp32 RMSNorm over the trailing head_dim. `weight` broadcasts over
   // the leading dims (per-layer weights stacked to [num_layers,1,1,head_dim]).
   torch::Tensor apply_k_norm(const torch::Tensor& key,
@@ -385,6 +373,16 @@ class DFlashQwen3ForCausalLMImpl final
     }
     model_->verify_loaded_weights("");
     model_->merge_loaded_weights();
+  }
+
+  ModelOutput precompute_and_store_context_kv(
+      const torch::Tensor& target_hidden,
+      const torch::Tensor& positions,
+      const torch::Tensor& device_cache_slots,
+      std::vector<KVCache>& kv_caches,
+      const ModelInputParams& input_params) {
+    return model_->precompute_and_store_context_kv(
+        target_hidden, positions, device_cache_slots, kv_caches, input_params);
   }
 };
 TORCH_MODULE(DFlashQwen3ForCausalLM);

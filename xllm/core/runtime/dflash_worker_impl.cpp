@@ -90,6 +90,17 @@ torch::Tensor make_cpu_int_tensor(const std::vector<int32_t>& values) {
                            .pinned_memory(true));
 }
 
+// Pack a host int32 vector into a pinned CPU tensor and stage an async H2D
+// copy onto the caller's active stream. Consolidates the three-line idiom
+// `TensorOptions(int, device) + make_cpu_int_tensor(vec) + safe_to(...)`.
+torch::Tensor cpu_int_vec_to_device(const std::vector<int32_t>& values,
+                                    const Device& device) {
+  return safe_to(
+      make_cpu_int_tensor(values),
+      torch::TensorOptions().dtype(torch::kInt).device(device.unwrap()),
+      /*non_blocking=*/true);
+}
+
 void set_token_position_tensors(ForwardInput& input,
                                 const std::vector<int32_t>& token_ids,
                                 const std::vector<int32_t>& positions,
@@ -528,13 +539,10 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_prefill(
     CHECK_EQ(processed_new_cache_slots.size(), positions.size())
         << "DFlash prefill hidden/cache slot count mismatch.";
 
-    std::vector<int32_t> new_cache_slots(processed_new_cache_slots.begin(),
-                                         processed_new_cache_slots.end());
     timer.reset();
     write_context_kv(
         processed_target_input,
         embeddings,
-        std::move(new_cache_slots),
         processed_target_input.positions,
         processed_target_input.input_params.attention.device.new_cache_slots);
     COUNTER_ADD(speculative_execution_latency_seconds_draft,
@@ -873,10 +881,12 @@ void DFlashWorkerImpl::update_decode_step_input(
     const EmbeddingCache::DecodeState& state = last_states[seq_id];
     const int32_t input_token_id = input_token_ids[seq_id];
     const bool input_is_fake_token = input_token_id < 0;
-    const bool use_cache_correction =
-        enable_cache_correction && input_is_fake_token && state.valid;
-    const bool use_fake_context =
-        enable_cache_correction && input_is_fake_token && !state.valid;
+    // Rewrite fake input tokens to the last committed real token so KV cache
+    // scatter has a valid id; only apply the recorded position offset when the
+    // cached state is still valid.
+    const bool rewrite_fake_token =
+        enable_cache_correction && input_is_fake_token;
+    const bool use_cache_correction = rewrite_fake_token && state.valid;
     const int32_t position_offset =
         use_cache_correction ? state.position_offset : 0;
     const int32_t current_position = input_positions[seq_id] + position_offset;
@@ -889,9 +899,8 @@ void DFlashWorkerImpl::update_decode_step_input(
         << ", current_position=" << current_position
         << ", current_kv_len=" << current_kv_len;
 
-    token_ids_vec.emplace_back((use_cache_correction || use_fake_context)
-                                   ? state.token_id
-                                   : input_token_id);
+    token_ids_vec.emplace_back(rewrite_fake_token ? state.token_id
+                                                  : input_token_id);
     positions_vec.emplace_back(current_position);
     specBuilder::append_seq_len_by_layout(kv_seq_lens_vec, current_kv_len);
   }
@@ -920,7 +929,6 @@ void DFlashWorkerImpl::prepare_query_inputs(const ForwardInput& input,
   query_input.device_tensors_ready = false;
   ModelInputParams& input_params = query_input.input_params;
   input_params.embedding.input_embedding = torch::Tensor();
-  input_params.embedding.write_context_kv = false;
 
   specBuilder::DecodeBuildBuffers buf;
   std::vector<int32_t> selected_idxes;
@@ -981,7 +989,6 @@ void DFlashWorkerImpl::prepare_query_inputs(const ForwardInput& input,
 void DFlashWorkerImpl::write_context_kv(
     const ForwardInput& input,
     const torch::Tensor& context_hidden,
-    std::vector<int32_t> new_cache_slots,
     const torch::Tensor& positions_device,
     const torch::Tensor& new_cache_slots_device) {
   CHECK(context_hidden.defined()) << "DFlash context hidden is undefined.";
@@ -989,37 +996,20 @@ void DFlashWorkerImpl::write_context_kv(
   CHECK_EQ(context_hidden.size(1), expected_context_hidden_size_)
       << "DFlash context hidden size must be hidden_size * "
       << "target_layer_ids.size().";
-  CHECK_EQ(new_cache_slots.size(), static_cast<size_t>(context_hidden.size(0)))
-      << "DFlash context hidden/cache slot count mismatch.";
 
-  StreamEventPtr context_hidden_ready_event = compute_stream_->record_event();
-  if (context_hidden_ready_event == nullptr) {
-    compute_stream_->synchronize();
-  }
-  c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
-  CHECK(prepare_stream_->wait_event(context_hidden_ready_event))
-      << "failed to wait DFlash context hidden ready event";
-  ForwardInput context_input = input;
-  context_input.device_tensors_ready = false;
-  // The draft is driven by the captured target hidden (input_embedding +
-  // write_context_kv); the model never reads token_ids on this path. The
-  // shared forward pipeline still calls token_ids.numel(), so supply a
-  // defined, correctly-sized placeholder without an H2D content fill.
-  context_input.token_ids = torch::empty(
-      {context_hidden.size(0)}, torch::dtype(torch::kInt).device(device_));
-  ModelInputParams& input_params = context_input.input_params;
-  input_params.embedding.input_embedding = context_hidden.to(device_);
-  input_params.embedding.write_context_kv = true;
-  context_input.positions = positions_device;
-  input_params.attention.host.new_cache_slots = std::move(new_cache_slots);
-  input_params.attention.device.new_cache_slots = new_cache_slots_device;
-  context_input.sampling_params.selected_token_idxes = torch::Tensor();
-  context_input.sampling_params.sample_idxes = torch::Tensor();
-  context_input.device_tensors_ready = true;
-  std::optional<ForwardOutput> output = run_llm_no_sync_impl(
-      *draft_impl_, context_input, *prepare_stream_, *compute_stream_);
-  CHECK(output.has_value())
-      << "DFlash context K/V write produced no forward output.";
+  CHECK(context_hidden.device() == device_.unwrap())
+      << "DFlash context hidden must already be on the compute device.";
+
+  // Both the target forward that produced context_hidden and this pass run
+  // on compute_stream_, so no explicit event dance is needed — the stream
+  // orders them. Model methods below use torch ops on the same stream.
+  c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+
+  draft_impl_->precompute_and_store_context_kv(context_hidden,
+                                               positions_device,
+                                               new_cache_slots_device,
+                                               input.input_params);
+
   // The context-KV scatter is the last device op of the step and is launched
   // no-sync. Under schedule-overlap the scheduler dispatches the next step's
   // host prep as soon as this step's host call returns, while this scatter may
@@ -1042,7 +1032,10 @@ void DFlashWorkerImpl::write_target_context_to_cache(
   if (accepted_tokens.scalar_type() != torch::kInt64) {
     accepted_tokens = accepted_tokens.to(torch::kInt64);
   }
-  accepted_tokens = accepted_tokens.contiguous();
+  DCHECK(accepted_tokens.is_contiguous())
+      << "DFlash accepted tokens must be contiguous (guaranteed by upstream "
+         ".to(kCPU) and .to(kInt64) branches); check for stride changes if "
+         "this fires.";
 
   CHECK_EQ(accepted_tokens.dim(), 2)
       << "DFlash accepted tokens must be [batch,width].";
@@ -1073,21 +1066,25 @@ void DFlashWorkerImpl::write_target_context_to_cache(
       {batch_size * token_width, accepted_embeddings.size(/*dim=*/2)});
   torch::Tensor context_hidden =
       flat_embeddings.index_select(/*dim=*/0, accepted_index);
-  torch::TensorOptions int_device_options =
-      torch::TensorOptions().dtype(torch::kInt).device(device_);
   torch::Tensor positions_device =
-      safe_to(make_cpu_int_tensor(buf.out_positions),
-              int_device_options,
-              /*non_blocking=*/true);
+      cpu_int_vec_to_device(buf.out_positions, device_);
   torch::Tensor new_cache_slots_device =
-      safe_to(make_cpu_int_tensor(buf.out_new_cache_slots),
-              int_device_options,
-              /*non_blocking=*/true);
-  write_context_kv(input,
-                   context_hidden,
-                   std::move(buf.out_new_cache_slots),
-                   positions_device,
-                   new_cache_slots_device);
+      cpu_int_vec_to_device(buf.out_new_cache_slots, device_);
+  // Publish the prepare_stream_ work (index_select producing context_hidden +
+  // pinned H2D copies for positions/slots) so compute_stream_ waits for it
+  // before the model reads these tensors. Without this, torch does not
+  // enforce cross-stream ordering: the write_context_kv scatter could launch
+  // before index_select finishes, producing corrupt KV cache. The prefill
+  // caller runs its producer on compute_stream_, so no event is needed there.
+  StreamEventPtr context_hidden_ready_event = prepare_stream_->record_event();
+  if (context_hidden_ready_event != nullptr) {
+    CHECK(compute_stream_->wait_event(context_hidden_ready_event))
+        << "failed to wait DFlash context hidden ready event";
+  } else {
+    prepare_stream_->synchronize();
+  }
+  write_context_kv(
+      input, context_hidden, positions_device, new_cache_slots_device);
   CHECK(!input.input_params.embedding.embedding_ids.empty())
       << "DFlash target context cache write requires embedding ids";
   embedding_cache_->write_target_context(

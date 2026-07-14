@@ -713,10 +713,6 @@ struct ModelEmbeddingInput {
   // input embedding
   mutable torch::Tensor input_embedding;
 
-  // Input is target hidden fed through the context-K/V materialization path
-  // (the model reads input_embedding, not token_ids).
-  bool write_context_kv = false;
-
   // embedding ids of each sequence
   std::vector<int32_t> embedding_ids;
 
@@ -743,7 +739,6 @@ struct ModelEmbeddingInput {
   ModelEmbeddingInput to(const torch::Device& device) const {
     ModelEmbeddingInput out;
     out.input_embedding = safe_to(input_embedding, device);
-    out.write_context_kv = write_context_kv;
     out.embedding_ids = embedding_ids;
     out.linear_state_ids = linear_state_ids;
     out.linear_state_indices = safe_to(linear_state_indices, device, true);

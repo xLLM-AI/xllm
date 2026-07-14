@@ -97,6 +97,18 @@ class LLMWorkerImpl : public WorkerImpl {
     model_->set_word_embedding(embedding);
   };
 
+  // DFlash-specific delegate: eagerly project target hidden into the draft's
+  // per-layer KV cache. Runs outside the executor because the pass has no
+  // attention and its shape doesn't match the decode graph. See CausalLM.
+  ModelOutput precompute_and_store_context_kv(
+      const torch::Tensor& target_hidden,
+      const torch::Tensor& positions,
+      const torch::Tensor& device_cache_slots,
+      const ModelInputParams& input_params) {
+    return model_->precompute_and_store_context_kv(
+        target_hidden, positions, device_cache_slots, kv_caches_, input_params);
+  }
+
  protected:
   std::unique_ptr<BeamSearcher> beam_searcher_;
 };
