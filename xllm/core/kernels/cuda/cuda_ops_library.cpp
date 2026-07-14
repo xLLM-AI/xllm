@@ -140,8 +140,7 @@ torch::Tensor update_decode_graph_metadata(
     torch::Tensor& dst_paged_kv_indptr,
     torch::Tensor& dst_paged_kv_indices,
     torch::Tensor& dst_paged_kv_last_page_len,
-    int64_t padded_num_tokens,
-    bool add_dummy_pages_for_padding) {
+    int64_t padded_num_tokens) {
   CHECK(tokens.defined()) << "tokens must be defined";
   const torch::Device device = tokens.device();
   const auto check_int32_cuda = [&device](const torch::Tensor& tensor,
@@ -173,7 +172,6 @@ torch::Tensor update_decode_graph_metadata(
   const int64_t actual_num_tokens = tokens.numel();
   const int64_t actual_batch_size = paged_kv_last_page_len.numel();
   const int64_t actual_indices_size = paged_kv_indices.numel();
-  const int64_t padding = padded_num_tokens - actual_batch_size;
   CHECK_EQ(actual_num_tokens, actual_batch_size)
       << "decode graph requires one token per sequence";
   CHECK_GE(padded_num_tokens, actual_num_tokens);
@@ -187,8 +185,7 @@ torch::Tensor update_decode_graph_metadata(
   CHECK_GE(dst_kv_seq_lens.numel(), padded_num_tokens + 1);
   CHECK_GE(dst_kv_seq_lens_delta.numel(), padded_num_tokens);
   CHECK_GE(dst_paged_kv_indptr.numel(), padded_num_tokens + 1);
-  CHECK_GE(dst_paged_kv_indices.numel(),
-           actual_indices_size + (add_dummy_pages_for_padding ? padding : 0));
+  CHECK_GE(dst_paged_kv_indices.numel(), actual_indices_size);
   CHECK_GE(dst_paged_kv_last_page_len.numel(), padded_num_tokens);
 
   xllm::kernel::cuda::LlmDecodeMetadataUpdateParams params{
@@ -212,7 +209,6 @@ torch::Tensor update_decode_graph_metadata(
       .padded_num_tokens = padded_num_tokens,
       .actual_batch_size = actual_batch_size,
       .actual_indices_size = actual_indices_size,
-      .add_dummy_pages_for_padding = add_dummy_pages_for_padding,
   };
   const cudaStream_t stream =
       c10::cuda::getCurrentCUDAStream(tokens.device().index());
@@ -253,8 +249,7 @@ TORCH_LIBRARY(xllm_ops, m) {
       "Tensor(b!) dst_positions, Tensor(c!) dst_slot_mapping, Tensor(d!) "
       "dst_kv_seq_lens, Tensor(e!) dst_kv_seq_lens_delta, Tensor(f!) "
       "dst_paged_kv_indptr, Tensor(g!) dst_paged_kv_indices, Tensor(h!) "
-      "dst_paged_kv_last_page_len, int padded_num_tokens, bool "
-      "add_dummy_pages_for_padding) -> Tensor(a!)");
+      "dst_paged_kv_last_page_len, int padded_num_tokens) -> Tensor(a!)");
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, CUDA, m) {

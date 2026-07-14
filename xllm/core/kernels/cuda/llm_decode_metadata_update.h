@@ -51,7 +51,6 @@ struct LlmDecodeMetadataUpdateParams {
   int64_t padded_num_tokens;
   int64_t actual_batch_size;
   int64_t actual_indices_size;
-  bool add_dummy_pages_for_padding = false;
 };
 
 void update_llm_decode_metadata(const LlmDecodeMetadataUpdateParams& params,

@@ -190,8 +190,8 @@ runner._fill_entry(small_entry, input_ids, positions, metadata, batch_size=2)
 assert small_entry.static_positions.dtype == torch.int32
 large_entry = runner._allocate_entry(4, input_ids, positions, metadata)
 
-# Four sequences, six model blocks, plus one append slot per sequence.
-expected_capacity = 4 * (6 + 1)
+# Four sequences with at most six model blocks each.
+expected_capacity = 4 * 6
 assert small_entry.static_metadata.paged_kv_indices.numel() == expected_capacity
 torch.testing.assert_close(
     small_entry.static_metadata.paged_kv_indices[:12], metadata.paged_kv_indices
@@ -315,7 +315,7 @@ for actual_batch, padded_batch in shapes:
             padded_batch + 1, dtype=torch.int32, device=device
         ),
         "indices": torch.empty(
-            num_indices + padding, dtype=torch.int32, device=device
+            num_indices, dtype=torch.int32, device=device
         ),
         "last_page": torch.empty(
             padded_batch, dtype=torch.int32, device=device
@@ -327,16 +327,12 @@ for actual_batch, padded_batch in shapes:
         src["indptr"], src["indices"], src["last_page"], dst["tokens"],
         dst["positions"], dst["slots"], dst["kv_lens"],
         dst["kv_lens_delta"], dst["indptr"], dst["indices"],
-        dst["last_page"], padded_batch, True,
+        dst["last_page"], padded_batch,
     )
 
-    padded_cu = torch.cat([
+    repeated_cu = torch.cat([
         indptr_cpu,
-        torch.arange(
-            num_indices + 1,
-            num_indices + padding + 1,
-            dtype=torch.int32,
-        ),
+        torch.full((padding,), num_indices, dtype=torch.int32),
     ])
     expected = {
         "tokens": torch.cat([
@@ -346,52 +342,18 @@ for actual_batch, padded_batch in shapes:
             src["positions"].cpu(), torch.zeros(padding, dtype=torch.int32)
         ]),
         "slots": torch.cat([
-            src["slots"].cpu(), torch.zeros(padding, dtype=torch.int32)
+            src["slots"].cpu(), -torch.ones(padding, dtype=torch.int32)
         ]),
-        "kv_lens": padded_cu,
-        "kv_lens_delta": torch.diff(padded_cu),
-        "indptr": padded_cu,
-        "indices": torch.cat([
-            src["indices"].cpu(), torch.zeros(padding, dtype=torch.int32)
-        ]),
+        "kv_lens": repeated_cu,
+        "kv_lens_delta": torch.diff(repeated_cu),
+        "indptr": repeated_cu,
+        "indices": src["indices"].cpu(),
         "last_page": torch.ones(padded_batch, dtype=torch.int32),
     }
 
     assert out.data_ptr() == dst["tokens"].data_ptr()
     for name, expected_tensor in expected.items():
         torch.testing.assert_close(dst[name].cpu(), expected_tensor, rtol=0, atol=0)
-
-    # Native CUDA graph padding keeps dummy sequences empty instead of
-    # assigning a dummy page. Exercise that mode through the same kernel.
-    native_dst = {
-        name: torch.full_like(tensor, -1) for name, tensor in dst.items()
-    }
-    torch.ops.xllm_ops.update_decode_graph_metadata(
-        src["tokens"], src["positions"], src["slots"], src["kv_lens"],
-        src["indptr"], src["indices"], src["last_page"],
-        native_dst["tokens"], native_dst["positions"], native_dst["slots"],
-        native_dst["kv_lens"], native_dst["kv_lens_delta"],
-        native_dst["indptr"], native_dst["indices"],
-        native_dst["last_page"], padded_batch, False,
-    )
-    repeated_cu = torch.cat([
-        indptr_cpu,
-        torch.full((padding,), num_indices, dtype=torch.int32),
-    ])
-    native_expected = dict(expected)
-    native_expected["slots"] = torch.cat([
-        src["slots"].cpu(), -torch.ones(padding, dtype=torch.int32)
-    ])
-    native_expected["kv_lens"] = repeated_cu
-    native_expected["kv_lens_delta"] = torch.diff(repeated_cu)
-    native_expected["indptr"] = repeated_cu
-    native_expected["indices"] = torch.cat([
-        src["indices"].cpu(), -torch.ones(padding, dtype=torch.int32)
-    ])
-    for name, expected_tensor in native_expected.items():
-        torch.testing.assert_close(
-            native_dst[name].cpu(), expected_tensor, rtol=0, atol=0
-        )
 )PY");
 }
 

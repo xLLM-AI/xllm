@@ -41,8 +41,7 @@ __global__ void llm_decode_metadata_update_kernel(
     if (idx >= params.actual_num_tokens && idx < params.padded_num_tokens) {
       params.dst_tokens[idx] = 0;
       params.dst_positions[idx] = 0;
-      params.dst_new_cache_slots[idx] =
-          params.add_dummy_pages_for_padding ? 0 : -1;
+      params.dst_new_cache_slots[idx] = -1;
     }
     if (idx < params.actual_batch_size + 1) {
       params.dst_kv_seq_lens[idx] = params.src_kv_seq_lens[idx];
@@ -50,14 +49,10 @@ __global__ void llm_decode_metadata_update_kernel(
     }
     if (idx >= params.actual_batch_size + 1 &&
         idx < params.padded_num_tokens + 1) {
-      const int64_t padding_offset = idx - params.actual_batch_size;
       params.dst_kv_seq_lens[idx] =
-          params.src_kv_seq_lens[params.actual_batch_size] +
-          (params.add_dummy_pages_for_padding ? padding_offset : 0);
+          params.src_kv_seq_lens[params.actual_batch_size];
       params.dst_paged_kv_indptr[idx] =
-          params.add_dummy_pages_for_padding
-              ? params.actual_indices_size + padding_offset
-              : params.src_paged_kv_indptr[params.actual_batch_size];
+          params.src_paged_kv_indptr[params.actual_batch_size];
     }
     if (idx < params.actual_batch_size) {
       params.dst_kv_seq_lens_delta[idx] =
@@ -66,18 +61,11 @@ __global__ void llm_decode_metadata_update_kernel(
           params.src_paged_kv_last_page_len[idx];
     }
     if (idx >= params.actual_batch_size && idx < params.padded_num_tokens) {
-      params.dst_kv_seq_lens_delta[idx] =
-          params.add_dummy_pages_for_padding ? 1 : 0;
+      params.dst_kv_seq_lens_delta[idx] = 0;
       params.dst_paged_kv_last_page_len[idx] = 1;
     }
     if (idx < params.actual_indices_size) {
       params.dst_paged_kv_indices[idx] = params.src_paged_kv_indices[idx];
-    }
-    if (params.add_dummy_pages_for_padding &&
-        idx >= params.actual_indices_size &&
-        idx < params.actual_indices_size + params.padded_num_tokens -
-                  params.actual_batch_size) {
-      params.dst_paged_kv_indices[idx] = 0;
     }
   }
 }
@@ -95,12 +83,6 @@ void update_llm_decode_metadata(const LlmDecodeMetadataUpdateParams& params,
   }
   if (params.actual_indices_size > max_work_size) {
     max_work_size = params.actual_indices_size;
-  }
-  if (params.add_dummy_pages_for_padding) {
-    max_work_size =
-        std::max(max_work_size,
-                 params.actual_indices_size + params.padded_num_tokens -
-                     params.actual_batch_size);
   }
   if (max_work_size <= 0) {
     return;

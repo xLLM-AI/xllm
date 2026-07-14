@@ -32,6 +32,5 @@ def _(
     dst_paged_kv_indices,
     dst_paged_kv_last_page_len,
     padded_num_tokens,
-    add_dummy_pages_for_padding,
 ):
     return dst_tokens
