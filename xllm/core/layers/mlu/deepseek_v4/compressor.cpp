@@ -227,6 +227,8 @@ torch::Tensor CompressorImpl::forward_decode(
     hadamard_matrix = hadamard_matrix_;
   }
 
+  // The MLU backend expands spec tokens into the batch dimension during MTP
+  // inference, so K selection (K > 0) is not needed here.
   xllm::kernel::mlu::fused_compress_single_kv(
       /*kv=*/kv_pack,
       /*score=*/score_pack,
