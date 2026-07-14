@@ -25,7 +25,6 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/scheduler_config.h"
-#include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_output.h"
 #include "core/layers/npu/npu_qwen3_decoder_layer_impl.h"
 #include "llm_model_base.h"
@@ -82,24 +81,17 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
     }
 
     // Eagle3/DFlash target captures intermediate-layer aux hidden states to
-    // drive the draft. The layer ids come from layers_to_capture (config.json
-    // for Eagle3, or derived from the draft config for DFlash). The DFlash
-    // draft model itself never captures.
-    const std::string& speculative_algorithm =
-        ::xllm::SpeculativeConfig::get_instance().speculative_algorithm();
+    // drive the draft. The worker fills layers_to_capture (from config.json for
+    // Eagle3, or the draft config for DFlash) before construction, so a
+    // non-empty list is the capture signal. The DFlash draft model itself never
+    // captures.
     const bool is_dflash_draft_model =
         model_args.model_type() == "DFlashDraftModel";
     const auto& layer_ids_from_config = model_args.layers_to_capture();
     const bool enable_aux_hidden_capture =
-        !is_dflash_draft_model && (speculative_algorithm == "Eagle3" ||
-                                   speculative_algorithm == "DFlash");
+        !is_dflash_draft_model && !layer_ids_from_config.empty();
     if (enable_aux_hidden_capture) {
-      if (!layer_ids_from_config.empty()) {
-        set_eagle3_layers_to_capture(
-            std::make_optional<std::vector<int32_t>>(layer_ids_from_config));
-      } else {
-        set_eagle3_layers_to_capture();
-      }
+      set_aux_hidden_capture_layers(layer_ids_from_config);
       // Pre-allocate aux output buffer [max_tokens_per_batch, hidden_size *
       // num_captured]
       const int64_t num_captured = layers_to_capture_set_.size();
@@ -111,20 +103,12 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
     }
   }
 
-  void set_eagle3_layers_to_capture(
-      const std::optional<std::vector<int32_t>>& layer_ids = std::nullopt) {
+  void set_aux_hidden_capture_layers(const std::vector<int32_t>& layer_ids) {
     capture_aux_hidden_states_ = true;
     layers_to_capture_set_.clear();
-    if (!layer_ids.has_value()) {
-      int32_t num_layers = layers_.size();
-      layers_to_capture_set_.insert(2);
-      layers_to_capture_set_.insert(num_layers / 2);
-      layers_to_capture_set_.insert(num_layers - 3);
-    } else {
-      // Config uses 0-based layer indices, same as default {2, n/2, n-3}
-      for (int32_t val : layer_ids.value()) {
-        layers_to_capture_set_.insert(val);
-      }
+    // Config uses 0-based layer indices.
+    for (int32_t val : layer_ids) {
+      layers_to_capture_set_.insert(val);
     }
     LOG(INFO) << "layers_to_capture_set_ size: "
               << layers_to_capture_set_.size();

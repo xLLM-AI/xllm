@@ -42,6 +42,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/service_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/platform/platform.h"
 #if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
 #include "core/platform/numa_utils.h"
@@ -422,8 +423,7 @@ WorkerServer::WorkerServer(int32_t local_worker_idx,
   // workers yet.
   const std::string& speculative_algorithm = options.speculative_algorithm();
   if (use_spawn_worker && options.enable_speculative_decode() &&
-      (speculative_algorithm == "Eagle3" ||
-       speculative_algorithm == "DFlash")) {
+      SpeculativeConfig::requires_aux_hidden_capture(speculative_algorithm)) {
     LOG(FATAL) << speculative_algorithm
                << " does not support spawned workers yet. Disable offline "
                   "spawn workers or use --speculative_algorithm=MTP.";

@@ -18,6 +18,7 @@ limitations under the License.
 #include <cstdint>
 #include <nlohmann/json_fwd.hpp>
 #include <string>
+#include <string_view>
 
 #include "core/common/macros.h"
 #include "core/framework/config/option_category.h"
@@ -32,6 +33,18 @@ class SpeculativeConfig final {
   ~SpeculativeConfig() = default;
 
   static SpeculativeConfig& get_instance();
+
+  // Whether a speculative algorithm requires the target model to capture
+  // intermediate-layer aux hidden states to drive the draft (Eagle3 and
+  // DFlash). Centralizes the algorithm-string classification in one place. The
+  // worker consults it to decide whether to populate the target's
+  // layers_to_capture; the model then keys off that list alone, never the
+  // algorithm string. Takes the algorithm explicitly so a spawned worker
+  // process, which reads its own Options rather than this global config, can
+  // classify without an initialized singleton.
+  static bool requires_aux_hidden_capture(std::string_view algorithm) {
+    return algorithm == "Eagle3" || algorithm == "DFlash";
+  }
 
   void from_flags();
   void from_json(const JsonReader& json);
