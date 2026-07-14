@@ -337,6 +337,8 @@ void KVCacheState::reset() {
   num_owned_shared_blocks_.clear();
   pushed_local_block_count_ = 0;
   composite_blocks_.clear();
+  src_blocks_.clear();
+  need_swap_ = false;
   transfer_kv_info_.reset();
   next_transfer_block_idx_ = 0;
   pending_linear_save_hash_.reset();
