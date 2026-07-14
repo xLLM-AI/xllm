@@ -295,6 +295,9 @@ class DecodeCudaGraphRunner(BaseRunner):
                 out=entry.host_seq_lens[:batch_size],
             )
             if padded_batch_size > batch_size:
+                # Keep padding sequences empty in FlashInfer's host planner
+                # metadata. Using seq_len=1 dummy sequences would schedule the
+                # padding rows as real decode work and add unnecessary overhead.
                 entry.host_seq_lens[batch_size:padded_batch_size].zero_()
             torch.add(
                 entry.host_seq_lens,
