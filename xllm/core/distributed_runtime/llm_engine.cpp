@@ -513,6 +513,8 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .enable_kvcache_store(options_.enable_kvcache_store())
       .enable_xtensor(::xllm::KVCacheConfig::get_instance().enable_xtensor())
       .num_layers(args_.n_layers())
+      .linear_state_num_slots(
+          static_cast<int32_t>(kv_cache_cap.num_linear_state_blocks()))
       .slot_size(kv_cache_cap.slot_size())
       .model_id(options_.model_id())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
