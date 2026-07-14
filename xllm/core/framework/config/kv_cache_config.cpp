@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "core/framework/config/kv_cache_config.h"
 
+#include <glog/logging.h>
+
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 
@@ -38,6 +40,13 @@ DEFINE_string(
     "KV cache data type for quantization. \"auto\" (default): KV "
     "cache dtype aligns with model dtype (no quantization). "
     "\"int8\": Enables INT8 quantization. Only supported on MLU backend.");
+
+DEFINE_string(indexer_cache_dtype,
+              "auto",
+              "Indexer cache data type for quantization. \"auto\" (default): "
+              "Indexer cache dtype aligns with model dtype (no "
+              "quantization). \"int8\": Enables INT8 quantization when "
+              "supported. Only supported on MLU backend.");
 
 DEFINE_bool(enable_prefix_cache,
             true,
@@ -73,6 +82,7 @@ void KVCacheConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_cache_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_memory_utilization);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_dtype);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(indexer_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_prefix_cache);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_in_batch_prefix_cache);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_linear_state_cache_slots);
@@ -86,6 +96,7 @@ void KVCacheConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_cache_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_memory_utilization);
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_dtype);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(indexer_cache_dtype);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_prefix_cache);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_in_batch_prefix_cache);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_linear_state_cache_slots);
@@ -105,6 +116,8 @@ void KVCacheConfig::append_config_json(
       config_json, default_config, max_memory_utilization);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, kv_cache_dtype);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, indexer_cache_dtype);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_prefix_cache);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
@@ -128,6 +141,14 @@ void KVCacheConfig::initialize() {
   from_flags();
   if (const auto& json_config = config::get_parsed_json_config()) {
     from_json(*json_config);
+  }
+  validate();
+}
+
+void KVCacheConfig::validate() const {
+  if (indexer_cache_dtype_ != "auto" && indexer_cache_dtype_ != "int8") {
+    LOG(FATAL) << "Invalid indexer_cache_dtype=\"" << indexer_cache_dtype_
+               << "\". Supported values are exactly \"auto\" and \"int8\".";
   }
 }
 

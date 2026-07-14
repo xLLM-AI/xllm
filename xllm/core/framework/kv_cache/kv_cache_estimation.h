@@ -20,7 +20,7 @@ limitations under the License.
 #include <cstdint>
 #include <string>
 
-#include "framework/kv_cache/kv_cache_utils.h"
+#include "framework/kv_cache/kv_cache_capacity.h"
 
 namespace xllm {
 
@@ -29,6 +29,7 @@ class ModelArgs;
 struct KVCacheEstimateOptions {
   torch::ScalarType dtype = torch::kBFloat16;
   std::string kv_cache_dtype = "auto";
+  std::string indexer_cache_dtype = "auto";
   int64_t cache_size_in_bytes = 0;
   int64_t block_size = 0;
   int64_t world_size = 1;
@@ -41,6 +42,7 @@ struct KVCacheEstimateOptions {
   int64_t max_concurrent_requests = 0;
   bool is_draft_engine = false;
   bool enable_prefix_cache = false;
+  bool enable_rdma_scale_padding = false;
   const ModelArgs* draft_model_args = nullptr;
   const KVCacheEstimateOptions* draft_options = nullptr;
 };

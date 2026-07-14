@@ -48,15 +48,15 @@ std::optional<torch::Tensor> KVCacheImpl::get_v_cache_scale() const {
   return std::nullopt;
 }
 
+std::optional<torch::Tensor> KVCacheImpl::get_indexer_cache_scale() const {
+  return std::nullopt;
+}
+
 torch::Tensor KVCacheImpl::get_index_cache() const { return torch::Tensor(); }
 
 torch::Tensor KVCacheImpl::get_conv_cache() const { return torch::Tensor(); }
 
 torch::Tensor KVCacheImpl::get_ssm_cache() const { return torch::Tensor(); }
-
-torch::Tensor KVCacheImpl::get_indexer_cache_scale() const {
-  return torch::Tensor();
-}
 
 torch::Tensor KVCacheImpl::get_swa_cache() const { return torch::Tensor(); }
 

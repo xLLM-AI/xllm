@@ -30,13 +30,16 @@ limitations under the License.
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
+#include <iterator>
 #include <memory>
 #include <utility>
 
 #include "common/metrics.h"
+#include "core/distributed_runtime/spawn_worker_server/spawn_worker_protocol.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/service_config.h"
 #if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
@@ -289,6 +292,9 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
   const char* sp_size_ptr = sp_size_str.c_str();
   std::string cfg_size_str = std::to_string(options.cfg_size());
   const char* cfg_size_ptr = cfg_size_str.c_str();
+  const std::string& indexer_cache_dtype =
+      KVCacheConfig::get_instance().indexer_cache_dtype();
+  const char* indexer_cache_dtype_ptr = indexer_cache_dtype.c_str();
   const char* worker_type_ptr = worker_type.to_string();
   std::string spawn_worker_bin_path =
       options.spawn_worker_path() + "/spawn_worker";
@@ -325,7 +331,10 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         tp_size_ptr,
                         sp_size_ptr,
                         cfg_size_ptr,
+                        indexer_cache_dtype_ptr,
                         nullptr};
+  static_assert(std::size(argv) ==
+                spawn_worker_protocol::kArgumentCount + 1);
   pid_t pid;
   int status = posix_spawnp(
       &pid, argv[0], nullptr, nullptr, const_cast<char**>(argv), environ);

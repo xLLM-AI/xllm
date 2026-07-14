@@ -18,8 +18,11 @@ limitations under the License.
 
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
+#include <string>
 
-#include "spawn_worker_server.h"
+#include "core/distributed_runtime/spawn_worker_server/spawn_worker_protocol.h"
+#include "core/distributed_runtime/spawn_worker_server/spawn_worker_server.h"
 
 // Worker argv from engine process:
 // @master_node_addr
@@ -53,12 +56,21 @@ limitations under the License.
 // @tp_size
 // @sp_size
 // @cfg_size
+// @indexer_cache_dtype
 int main(int argc, char* argv[]) {
-  if (argc < 32) {
-    LOG(ERROR)
-        << "Spawn worker process receive wrong args. Need 32 args, receive "
-        << argc;
+  const std::optional<std::string> parsed_indexer_cache_dtype =
+      xllm::spawn_worker_protocol::parse_indexer_cache_dtype(argc, argv);
+  if (!parsed_indexer_cache_dtype.has_value()) {
+    LOG(ERROR) << "Spawn worker process received invalid args. Need at least "
+               << xllm::spawn_worker_protocol::kMinimumArgumentCount
+               << " args, received " << argc;
     return 1;
+  }
+  if (argc == xllm::spawn_worker_protocol::kMinimumArgumentCount) {
+    LOG(WARNING) << "Spawn worker process received legacy args without "
+                    "indexer_cache_dtype. Defaulting indexer_cache_dtype to "
+                 << xllm::spawn_worker_protocol::kDefaultIndexerCacheDtype
+                 << ".";
   }
 
   std::string master_node_addr = std::string(argv[1]);
@@ -94,6 +106,7 @@ int main(int argc, char* argv[]) {
   int32_t tp_size = static_cast<int32_t>(atoi(argv[29]));
   int32_t sp_size = static_cast<int32_t>(atoi(argv[30]));
   int32_t cfg_size = static_cast<int32_t>(atoi(argv[31]));
+  const std::string& indexer_cache_dtype = parsed_indexer_cache_dtype.value();
 
   LOG(INFO) << "Spawn worker: "
             << "master_node_addr = " << master_node_addr
@@ -126,7 +139,8 @@ int main(int argc, char* argv[]) {
             << ", max_tokens_for_graph_mode = " << max_tokens_for_graph_mode
             << ", max_encoder_cache_size = " << max_encoder_cache_size
             << ", dp_size = " << dp_size << ", tp_size = " << tp_size
-            << ", sp_size = " << sp_size << ", cfg_size = " << cfg_size << "\n";
+            << ", sp_size = " << sp_size << ", cfg_size = " << cfg_size
+            << ", indexer_cache_dtype = " << indexer_cache_dtype << "\n";
 
   xllm::SpawnWorkerServer worker(master_node_addr,
                                  local_rank,
@@ -135,6 +149,7 @@ int main(int argc, char* argv[]) {
                                  device_idx,
                                  num_decoding_tokens,
                                  block_size,
+                                 indexer_cache_dtype,
                                  max_tokens_per_batch,
                                  max_seqs_per_batch,
                                  enable_shm > 0,

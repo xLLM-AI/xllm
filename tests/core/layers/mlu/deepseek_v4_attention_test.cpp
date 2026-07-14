@@ -835,7 +835,8 @@ class DeepseekV4AttentionTest : public ::testing::Test {
     }
     tensors.key_cache = source.get_k_cache();
     tensors.index_cache = source.get_index_cache();
-    tensors.indexer_cache_scale = source.get_indexer_cache_scale();
+    tensors.indexer_cache_scale =
+        source.get_indexer_cache_scale().value_or(torch::Tensor());
     tensors.compress_kv_state = source.get_compress_kv_state();
     tensors.compress_score_state = source.get_compress_score_state();
     tensors.compress_index_kv_state = source.get_compress_index_kv_state();

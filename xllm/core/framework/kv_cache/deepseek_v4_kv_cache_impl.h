@@ -31,7 +31,7 @@ class DeepSeekV4KVCacheImpl final : public KVCacheImpl {
 
   torch::Tensor get_k_cache() const override;
   torch::Tensor get_index_cache() const override;
-  torch::Tensor get_indexer_cache_scale() const override;
+  std::optional<torch::Tensor> get_indexer_cache_scale() const override;
   torch::Tensor get_swa_cache() const override;
   torch::Tensor get_compress_kv_state() const override;
   torch::Tensor get_compress_score_state() const override;

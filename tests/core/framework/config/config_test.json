@@ -3,6 +3,7 @@
   "max_cache_size": 1048576,
   "max_memory_utilization": 0.65,
   "kv_cache_dtype": "int8",
+  "indexer_cache_dtype": "int8",
   "enable_prefix_cache": false,
   "xxh3_128bits_seed": 2048,
   "enable_xtensor": true,

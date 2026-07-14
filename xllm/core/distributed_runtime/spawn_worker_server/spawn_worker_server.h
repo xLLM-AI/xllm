@@ -33,6 +33,7 @@ class SpawnWorkerServer final {
                              int32_t device_idx,
                              int32_t num_decoding_tokens,
                              int32_t block_size,
+                             const std::string& indexer_cache_dtype,
                              int32_t max_tokens_per_batch,
                              int32_t max_seqs_per_batch,
                              bool enable_shm,

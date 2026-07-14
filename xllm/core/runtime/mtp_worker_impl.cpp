@@ -77,6 +77,8 @@ KVCacheEstimateOptions make_kv_cache_estimate_options(
   KVCacheEstimateOptions estimate_options;
   estimate_options.dtype = dtype;
   estimate_options.kv_cache_dtype = options.kv_cache_dtype();
+  estimate_options.indexer_cache_dtype =
+      ::xllm::KVCacheConfig::get_instance().indexer_cache_dtype();
   estimate_options.cache_size_in_bytes = cache_size_in_bytes;
   estimate_options.block_size = options.block_size();
   estimate_options.world_size = dp_local_tp_size;
@@ -97,6 +99,8 @@ KVCacheEstimateOptions make_kv_cache_estimate_options(
   estimate_options.is_draft_engine = options.is_draft_engine();
   estimate_options.enable_prefix_cache =
       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
+  estimate_options.enable_rdma_scale_padding =
+      options.instance_role() != InstanceRole::DEFAULT;
   return estimate_options;
 }
 

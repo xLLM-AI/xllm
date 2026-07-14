@@ -74,6 +74,7 @@ class KVCacheStore {
   uint64_t k_cache_size_per_block_ = 0;
   uint64_t v_cache_size_per_block_ = 0;
   uint64_t index_cache_size_per_block_ = 0;
+  uint64_t index_cache_scale_size_per_block_ = 0;
 
   std::shared_ptr<mooncake::Client> client_ptr_;
 };

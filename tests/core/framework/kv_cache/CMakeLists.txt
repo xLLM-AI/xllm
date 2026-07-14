@@ -26,6 +26,13 @@ cc_test(
     :kv_cache_estimation
     GTest::gtest_main
 )
+target_link_libraries(kv_cache_estimation_test
+                      PUBLIC
+                      Python::Python
+                      $<$<BOOL:${USE_NPU}>:ascendcl>
+                      $<$<BOOL:${USE_NPU}>:hccl>
+                      $<$<BOOL:${USE_NPU}>:c_sec>
+                      $<$<BOOL:${USE_NPU}>:nnopbase>)
 
 cc_test(
   NAME

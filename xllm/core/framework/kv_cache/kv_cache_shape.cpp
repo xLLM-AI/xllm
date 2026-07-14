@@ -21,7 +21,6 @@ limitations under the License.
 #include <cstddef>
 #include <utility>
 
-#include "core/framework/config/kv_cache_config.h"
 #include "framework/kv_cache/kv_cache_utils.h"
 #include "util/utils.h"
 #include "worker.pb.h"
@@ -92,6 +91,10 @@ KVCacheShape::KVCacheShape(const KVCacheCapacity& kv_cache_cap,
   }
 
   apply_device_layout(model_args);
+
+  if (enable_lighting_indexer && kv_cache_cap.enable_indexer_cache_quant()) {
+    init_index_cache_scale_shape();
+  }
 }
 
 const std::vector<int64_t>& KVCacheShape::key_cache_shape() const {
@@ -111,6 +114,13 @@ const std::vector<int64_t>& KVCacheShape::index_cache_shape() const {
     return empty_shape();
   }
   return *index_cache_shape_;
+}
+
+const std::vector<int64_t>& KVCacheShape::index_cache_scale_shape() const {
+  if (!index_cache_scale_shape_.has_value()) {
+    return empty_shape();
+  }
+  return *index_cache_scale_shape_;
 }
 
 const std::vector<int64_t>& KVCacheShape::conv_cache_shape() const {
@@ -139,6 +149,10 @@ bool KVCacheShape::has_index_cache_shape() const {
   return index_cache_shape_.has_value();
 }
 
+bool KVCacheShape::has_index_cache_scale_shape() const {
+  return index_cache_scale_shape_.has_value();
+}
+
 bool KVCacheShape::has_conv_cache_shape() const {
   return conv_cache_shape_.has_value();
 }
@@ -164,6 +178,10 @@ void KVCacheShape::print_shapes() const {
   if (has_index_cache_shape()) {
     LOG(INFO) << "Initializing indexer cache with shape: ["
               << index_cache_shape() << "]";
+  }
+  if (has_index_cache_scale_shape()) {
+    LOG(INFO) << "Initializing indexer cache scale with shape: ["
+              << index_cache_scale_shape() << "]";
   }
   if (has_conv_cache_shape()) {
     LOG(INFO) << "Initializing conv cache with shape: [" << conv_cache_shape()
@@ -205,6 +223,10 @@ void KVCacheShape::to_proto(proto::KVCacheShape* proto_shape) const {
     add_shape_to_proto(index_cache_shape(),
                        proto_shape->mutable_index_cache_shape());
   }
+  if (has_index_cache_scale_shape()) {
+    add_shape_to_proto(index_cache_scale_shape(),
+                       proto_shape->mutable_index_cache_scale_shape());
+  }
   if (has_conv_cache_shape()) {
     add_shape_to_proto(conv_cache_shape(),
                        proto_shape->mutable_conv_cache_shape());
@@ -224,6 +246,10 @@ KVCacheShape KVCacheShape::from_proto(const proto::KVCacheShape& proto_shape) {
   if (proto_shape.index_cache_shape_size() > 0) {
     kv_cache_shape.index_cache_shape_ =
         repeated_field_to_vector(proto_shape.index_cache_shape());
+  }
+  if (proto_shape.index_cache_scale_shape_size() > 0) {
+    kv_cache_shape.index_cache_scale_shape_ =
+        repeated_field_to_vector(proto_shape.index_cache_scale_shape());
   }
   if (proto_shape.conv_cache_shape_size() > 0) {
     kv_cache_shape.conv_cache_shape_ =
@@ -304,6 +330,16 @@ void KVCacheShape::init_index_cache_shape(const KVCacheCapacity& kv_cache_cap,
                                             kv_cache_cap.block_size(),
                                             1,
                                             model_args.index_head_dim()};
+}
+
+void KVCacheShape::init_index_cache_scale_shape() {
+  CHECK(index_cache_shape_.has_value())
+      << "index_cache_shape must be initialized before index cache scale.";
+  CHECK_EQ(index_cache_shape_->size(), 4)
+      << "index_cache_shape must be [blocks, heads, block_size, head_dim].";
+  index_cache_scale_shape_ = std::vector<int64_t>{(*index_cache_shape_)[0],
+                                                  (*index_cache_shape_)[1],
+                                                  (*index_cache_shape_)[2]};
 }
 
 void KVCacheShape::init_conv_cache_shape(const KVCacheCapacity& kv_cache_cap,

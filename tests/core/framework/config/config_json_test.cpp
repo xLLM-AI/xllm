@@ -149,7 +149,42 @@ TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
   EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 64);
 
   EXPECT_EQ(kv_cache_config.kv_cache_dtype(), "auto");
+  EXPECT_EQ(kv_cache_config.indexer_cache_dtype(), "auto");
   EXPECT_EQ(scheduler_config.max_decode_token_per_sequence(), 256);
+}
+
+TEST(KVCacheConfigValidationTest, AcceptsSupportedIndexerCacheDtypes) {
+  KVCacheConfig config;
+
+  config.indexer_cache_dtype("auto");
+  config.validate();
+
+  config.indexer_cache_dtype("int8");
+  config.validate();
+}
+
+TEST(KVCacheConfigValidationTest, RejectsUnsupportedIndexerCacheDtypes) {
+  EXPECT_DEATH(
+      {
+        KVCacheConfig config;
+        config.indexer_cache_dtype("fp8");
+        config.validate();
+      },
+      "indexer_cache_dtype.*auto.*int8");
+  EXPECT_DEATH(
+      {
+        KVCacheConfig config;
+        config.indexer_cache_dtype("INT8");
+        config.validate();
+      },
+      "indexer_cache_dtype.*auto.*int8");
+  EXPECT_DEATH(
+      {
+        KVCacheConfig config;
+        config.indexer_cache_dtype(" int8 ");
+        config.validate();
+      },
+      "indexer_cache_dtype.*auto.*int8");
 }
 
 TEST(ConfigJsonTest, LoadJsonFileReadsConfigFixture) {
@@ -170,6 +205,7 @@ TEST(ConfigJsonTest, LoadJsonFileReadsConfigFixture) {
   EXPECT_EQ(kv_cache_config.max_cache_size(), 1048576);
   EXPECT_DOUBLE_EQ(kv_cache_config.max_memory_utilization(), 0.65);
   EXPECT_EQ(kv_cache_config.kv_cache_dtype(), "int8");
+  EXPECT_EQ(kv_cache_config.indexer_cache_dtype(), "int8");
   EXPECT_FALSE(kv_cache_config.enable_prefix_cache());
   EXPECT_EQ(kv_cache_config.xxh3_128bits_seed(), 2048);
   EXPECT_TRUE(kv_cache_config.enable_xtensor());
@@ -312,6 +348,7 @@ TEST(ConfigJsonTest, DumpStartupConfigWritesNonDefaultValuesOnly) {
 
   EXPECT_FALSE(config_json.contains("max_cache_size"));
   EXPECT_FALSE(config_json.contains("kv_cache_dtype"));
+  EXPECT_FALSE(config_json.contains("indexer_cache_dtype"));
   EXPECT_FALSE(config_json.contains("max_seqs_per_batch"));
   EXPECT_FALSE(config_json.contains("priority_strategy"));
 

@@ -13,6 +13,7 @@ cc_library(
   NAME
     kv_cache_estimation
   HDRS
+    kv_cache_capacity.h
     kv_cache_estimation.h
   SRCS
     kv_cache_estimation.cpp
@@ -20,6 +21,7 @@ cc_library(
     :common
     :deepseek_v4_cache_policy
     :block_utils
+    :mlu_rdma_memory_plan
     glog::glog
     proto::xllm_proto
     torch

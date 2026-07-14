@@ -50,6 +50,7 @@ message KVCacheShape {
   repeated int64 index_cache_shape = 3;
   repeated int64 conv_cache_shape = 4;
   repeated int64 ssm_cache_shape = 5;
+  repeated int64 index_cache_scale_shape = 6;
 }
 
 message AllocateKVCacheRequest {

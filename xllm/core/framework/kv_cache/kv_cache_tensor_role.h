@@ -28,6 +28,7 @@ class KVCacheTensorRole {
     INDEX = 2,
     CONV = 3,
     SSM = 4,
+    INDEX_SCALE = 5,
     INVALID = -1,
   };
 
@@ -39,6 +40,8 @@ class KVCacheTensorRole {
       value_ = VALUE;
     } else if (str == "INDEX" || str == "index") {
       value_ = INDEX;
+    } else if (str == "INDEX_SCALE" || str == "index_scale") {
+      value_ = INDEX_SCALE;
     } else if (str == "CONV" || str == "conv") {
       value_ = CONV;
     } else if (str == "SSM" || str == "ssm") {
@@ -65,6 +68,8 @@ class KVCacheTensorRole {
       return "value";
     } else if (this->value_ == INDEX) {
       return "index";
+    } else if (this->value_ == INDEX_SCALE) {
+      return "index_scale";
     } else if (this->value_ == CONV) {
       return "conv";
     } else if (this->value_ == SSM) {

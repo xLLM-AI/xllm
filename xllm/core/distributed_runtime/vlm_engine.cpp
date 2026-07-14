@@ -256,6 +256,8 @@ KVCacheCapacity VLMEngine::estimate_kv_cache_capacity() {
   KVCacheEstimateOptions estimate_options;
   estimate_options.dtype = dtype_;
   estimate_options.kv_cache_dtype = options_.kv_cache_dtype();
+  estimate_options.indexer_cache_dtype =
+      ::xllm::KVCacheConfig::get_instance().indexer_cache_dtype();
   estimate_options.cache_size_in_bytes = cache_size_in_bytes;
   estimate_options.block_size = options_.block_size();
   estimate_options.world_size = dp_local_tp_size_;
@@ -269,6 +271,8 @@ KVCacheCapacity VLMEngine::estimate_kv_cache_capacity() {
   estimate_options.is_draft_engine = options_.is_draft_engine();
   estimate_options.enable_prefix_cache =
       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
+  estimate_options.enable_rdma_scale_padding =
+      options_.instance_role() != InstanceRole::DEFAULT;
 
   KVCacheCapacity kv_cache_cap =
       ::xllm::estimate_kv_cache_capacity(args_, estimate_options);

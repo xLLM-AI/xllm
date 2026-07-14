@@ -207,6 +207,13 @@ std::vector<KVCacheTensor> KVCache::get_cache_tensors() const {
     tensors.emplace_back(KVCacheTensorRole::INDEX, index_cache);
   }
 
+  const std::optional<torch::Tensor> index_cache_scale =
+      get_indexer_cache_scale();
+  if (index_cache_scale.has_value()) {
+    tensors.emplace_back(KVCacheTensorRole::INDEX_SCALE,
+                         index_cache_scale.value());
+  }
+
   const torch::Tensor conv_cache = get_conv_cache();
   if (conv_cache.defined() && conv_cache.numel() > 0) {
     tensors.emplace_back(KVCacheTensorRole::CONV, conv_cache);
@@ -228,15 +235,15 @@ std::optional<torch::Tensor> KVCache::get_v_cache_scale() const {
   return impl_->get_v_cache_scale();
 }
 
+std::optional<torch::Tensor> KVCache::get_indexer_cache_scale() const {
+  return impl_->get_indexer_cache_scale();
+}
+
 torch::Tensor KVCache::get_conv_cache() const {
   return impl_->get_conv_cache();
 }
 
 torch::Tensor KVCache::get_ssm_cache() const { return impl_->get_ssm_cache(); }
-
-torch::Tensor KVCache::get_indexer_cache_scale() const {
-  return impl_->get_indexer_cache_scale();
-}
 
 torch::Tensor KVCache::get_swa_cache() const { return impl_->get_swa_cache(); }
 

@@ -91,6 +91,24 @@ torch::Tensor alloc_npu_huge_page_tensor(const std::vector<int64_t>& dims,
 }
 #endif
 
+// Per-token fp32 scale tensor, shaped as the cache shape with the trailing
+// (head_dim) dimension removed.
+torch::Tensor alloc_scale(const std::vector<int64_t>& cache_shape,
+                          const torch::Device& device) {
+  std::vector<int64_t> scale_shape(cache_shape.begin(), cache_shape.end() - 1);
+  return torch::zeros(scale_shape,
+                      torch::dtype(torch::kFloat32).device(device));
+}
+
+#if defined(USE_MLU)
+torch::Tensor alloc_mlu_scale_for_transfer(
+    const std::vector<int64_t>& scale_shape,
+    const torch::Device& device) {
+  return mlu::alloc_rdma_registerable_zero_tensor(
+      scale_shape, torch::kFloat32, device);
+}
+#endif
+
 }  // namespace
 
 bool is_linear_attention_layer(int64_t layer_idx,
@@ -176,19 +194,30 @@ IndexedKVCacheTensors create_indexed_kv_cache_tensors(
   CHECK(kv_cache_shape.has_index_cache_shape())
       << "index_cache_shape must be initialized.";
   IndexedKVCacheTensors tensors;
-  tensors.kv_cache_tensors =
-      create_kv_cache_tensors(kv_cache_shape, create_options);
+  if (create_options.enable_kv_cache_quant()) {
+    QuantizedKVCacheTensors quantized_tensors =
+        create_quantized_kv_cache_tensors(kv_cache_shape, create_options);
+    tensors.kv_cache_tensors = quantized_tensors.kv_cache_tensors;
+    tensors.key_cache_scale = quantized_tensors.key_cache_scale;
+    tensors.value_cache_scale = quantized_tensors.value_cache_scale;
+  } else {
+    tensors.kv_cache_tensors =
+        create_kv_cache_tensors(kv_cache_shape, create_options);
+  }
 
 #if defined(USE_MLU)
+  const torch::ScalarType index_dtype =
+      create_options.enable_indexer_cache_quant() ? torch::kChar
+                                                  : create_options.dtype();
   if (create_options.enable_raw_device_allocator()) {
     tensors.index_cache =
         mlu::alloc_zero_tensor(kv_cache_shape.index_cache_shape(),
-                               create_options.dtype(),
+                               index_dtype,
                                create_options.device());
   } else {
-    tensors.index_cache = torch::zeros(
-        kv_cache_shape.index_cache_shape(),
-        torch::dtype(create_options.dtype()).device(create_options.device()));
+    tensors.index_cache =
+        torch::zeros(kv_cache_shape.index_cache_shape(),
+                     torch::dtype(index_dtype).device(create_options.device()));
   }
 #elif defined(USE_NPU)
   const aclFormat npu_format_type =
@@ -210,6 +239,43 @@ IndexedKVCacheTensors create_indexed_kv_cache_tensors(
       kv_cache_shape.index_cache_shape(),
       torch::dtype(create_options.dtype()).device(create_options.device()));
 #endif
+  if (create_options.enable_indexer_cache_quant()) {
+#if !defined(USE_MLU)
+    CHECK(false) << "Indexer cache INT8 is only supported on MLU backend.";
+#endif
+    if (kv_cache_shape.has_index_cache_scale_shape()) {
+#if defined(USE_MLU)
+      if (create_options.enable_raw_device_allocator()) {
+        tensors.index_cache_scale = alloc_mlu_scale_for_transfer(
+            kv_cache_shape.index_cache_scale_shape(), create_options.device());
+      } else {
+        tensors.index_cache_scale = torch::zeros(
+            kv_cache_shape.index_cache_scale_shape(),
+            torch::dtype(torch::kFloat32).device(create_options.device()));
+      }
+#else
+      tensors.index_cache_scale = torch::zeros(
+          kv_cache_shape.index_cache_scale_shape(),
+          torch::dtype(torch::kFloat32).device(create_options.device()));
+#endif
+    } else {
+#if defined(USE_MLU)
+      if (create_options.enable_raw_device_allocator()) {
+        std::vector<int64_t> scale_shape(
+            kv_cache_shape.index_cache_shape().begin(),
+            kv_cache_shape.index_cache_shape().end() - 1);
+        tensors.index_cache_scale =
+            alloc_mlu_scale_for_transfer(scale_shape, create_options.device());
+      } else {
+        tensors.index_cache_scale = alloc_scale(
+            kv_cache_shape.index_cache_shape(), create_options.device());
+      }
+#else
+      tensors.index_cache_scale = alloc_scale(
+          kv_cache_shape.index_cache_shape(), create_options.device());
+#endif
+    }
+  }
   return tensors;
 }
 
@@ -222,8 +288,10 @@ QuantizedKVCacheTensors create_quantized_kv_cache_tensors(
 #endif
 
   QuantizedKVCacheTensors tensors;
+  KVCacheCreateOptions quantized_options = create_options;
+  quantized_options.dtype(torch::kChar);
   tensors.kv_cache_tensors =
-      create_kv_cache_tensors(kv_cache_shape, create_options);
+      create_kv_cache_tensors(kv_cache_shape, quantized_options);
 
   const std::vector<int64_t>& key_cache_shape =
       kv_cache_shape.key_cache_shape();

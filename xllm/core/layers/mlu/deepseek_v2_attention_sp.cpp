@@ -34,6 +34,7 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
   CHECK(is_prefill_or_chunked_prefill)
       << "deepseek_v32 sequence parallel only supports prefill batches.";
   auto k_cache_scale = kv_cache.get_k_cache_scale();
+  auto index_cache_scale = kv_cache.get_indexer_cache_scale();
   auto query_prep = prep_query(hidden_states, full_heads());
 
   std::optional<torch::Tensor> new_block_tables = std::nullopt;
@@ -51,7 +52,8 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
                                query_prep.q_norm,
                                positions,
                                sp_ctx.local_attn_metadata,
-                               sp_ctx);
+                               sp_ctx,
+                               /*quantize_output=*/false);
   auto compute_stream = device.current_stream();
   sp_comm_stream_->wait_stream(*compute_stream);
   {
@@ -75,7 +77,8 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
                                      index_cache,
                                      attn_metadata,
                                      sp_ctx.gathered_slot_mapping,
-                                     sp_ctx);
+                                     sp_ctx,
+                                     index_cache_scale);
   new_block_tables = std::get<0>(index_out);
   new_context_lens = std::get<1>(index_out);
   finish_sp_k_gather(mla_inputs, mla_handle, sp_ctx);

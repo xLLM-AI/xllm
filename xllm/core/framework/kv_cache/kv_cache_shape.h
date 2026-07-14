@@ -39,12 +39,14 @@ class KVCacheShape final {
   const std::vector<int64_t>& key_cache_shape() const;
   const std::vector<int64_t>& value_cache_shape() const;
   const std::vector<int64_t>& index_cache_shape() const;
+  const std::vector<int64_t>& index_cache_scale_shape() const;
   const std::vector<int64_t>& conv_cache_shape() const;
   const std::vector<int64_t>& ssm_cache_shape() const;
 
   bool has_key_cache_shape() const;
   bool has_value_cache_shape() const;
   bool has_index_cache_shape() const;
+  bool has_index_cache_scale_shape() const;
   bool has_conv_cache_shape() const;
   bool has_ssm_cache_shape() const;
 
@@ -68,6 +70,7 @@ class KVCacheShape final {
                               int64_t world_size);
   void init_index_cache_shape(const KVCacheCapacity& kv_cache_cap,
                               const ModelArgs& model_args);
+  void init_index_cache_scale_shape();
   void init_conv_cache_shape(const KVCacheCapacity& kv_cache_cap,
                              const ModelArgs& model_args,
                              int64_t world_size);
@@ -86,6 +89,7 @@ class KVCacheShape final {
 
   // for index cache
   std::optional<std::vector<int64_t>> index_cache_shape_;
+  std::optional<std::vector<int64_t>> index_cache_scale_shape_;
 
   // for linear attention
   std::optional<std::vector<int64_t>> conv_cache_shape_;

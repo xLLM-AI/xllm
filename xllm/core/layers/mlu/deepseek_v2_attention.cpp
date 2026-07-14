@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <tuple>
 
+#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "kernels/ops_api.h"
 
@@ -156,6 +157,12 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
   }
 
   use_fused_mla_qkv_ = optimization_config.enable_fused_mla_kernel;
+  if (::xllm::KVCacheConfig::get_instance().indexer_cache_dtype() == "int8") {
+    CHECK(enable_lighting_indexer_)
+        << "Indexer cache INT8 requires lighting indexer.";
+    CHECK(optimization_config.enable_fused_indexer_qk)
+        << "Indexer cache INT8 requires fused indexer Q/K.";
+  }
 
   attn_ = register_module("attn",
                           Attention(active_heads().attn,
@@ -388,12 +395,14 @@ AttentionMetadata DeepseekV2AttentionImpl::build_mla_attention_metadata(
       attn_indexer_metadata.max_seq_len = index_topk_;
     } else if (enable_lighting_indexer_) {
       auto index_cache = kv_cache.get_index_cache();
+      auto index_cache_scale = kv_cache.get_indexer_cache_scale();
       auto [new_block_tables, new_context_lens] = indexer_(hidden_states,
                                                            q_norm,
                                                            positions,
                                                            index_cache,
                                                            attn_metadata,
                                                            is_prefill_phase,
+                                                           index_cache_scale,
                                                            std::nullopt);
       attn_indexer_metadata.block_table = new_block_tables;
       attn_indexer_metadata.kv_seq_lens = new_context_lens;

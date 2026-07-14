@@ -295,6 +295,14 @@ bool WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
   // "int8": enables INT8 quantization
   const bool enable_kv_cache_quant = options_.kv_cache_dtype() == "int8";
 
+  const bool enable_indexer_cache_quant =
+      ::xllm::KVCacheConfig::get_instance().indexer_cache_dtype() == "int8";
+  if (enable_lighting_indexer) {
+    CHECK_EQ(kv_cache_shape.has_index_cache_scale_shape(),
+             enable_indexer_cache_quant)
+        << "Indexer cache shape and worker quantization config must agree.";
+  }
+
   if (enable_kv_cache_quant) {
 #if !defined(USE_MLU)
     LOG(FATAL) << "KV Cache quantization is only supported on MLU backend. "
@@ -330,6 +338,7 @@ bool WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
       .enable_linear_attention(enable_linear_attention)
       .enable_lighting_indexer(enable_lighting_indexer)
       .enable_kv_cache_quant(enable_kv_cache_quant)
+      .enable_indexer_cache_quant(enable_indexer_cache_quant)
       .enable_raw_device_allocator(enable_raw_device_allocator)
       .block_size(options_.block_size())
       .head_dim(args.head_dim())

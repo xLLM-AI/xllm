@@ -17,11 +17,13 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 #include "framework/block/block_utils.h"
 #include "framework/kv_cache/deepseek_v4_cache_policy.h"
 #include "framework/model/model_args.h"
+#include "platform/mlu/mlu_rdma_memory_plan.h"
 #include "util/pretty_print.h"
 #include "util/tensor_helper.h"
 #include "util/utils.h"
@@ -69,12 +71,21 @@ int64_t kv_slot_size(const ModelArgs& model_args,
          options.n_local_kv_heads;
 }
 
-int64_t index_slot_size(const ModelArgs& model_args, int64_t dtype_size) {
+int64_t index_slot_size(const ModelArgs& model_args,
+                        bool enable_indexer_cache_quantization,
+                        int64_t dtype_size) {
   if (model_args.index_n_heads() <= 0) {
     return 0;
   }
 
   const int64_t index_n_head = 1;
+  if (enable_indexer_cache_quantization) {
+    // int8 index cache: one byte per element, plus an independent per-token
+    // fp32 scale (kept separate from the main-KV scale_slot_size path).
+    return static_cast<int64_t>(sizeof(int8_t)) * index_n_head *
+               model_args.index_head_dim() +
+           static_cast<int64_t>(sizeof(float));
+  }
   return dtype_size * index_n_head * model_args.index_head_dim();
 }
 
@@ -87,6 +98,69 @@ int64_t scale_slot_size(const ModelArgs& model_args,
     return sizeof(float);
   }
   return 2 * sizeof(float) * options.n_local_kv_heads;
+}
+
+bool use_rdma_indexer_scale_padding(const KVCacheEstimateOptions& options,
+                                    const KVCacheCapacity& kv_cache_cap) {
+#if defined(USE_MLU)
+  return options.enable_rdma_scale_padding &&
+         kv_cache_cap.enable_indexer_cache_quant();
+#else
+  (void)options;
+  (void)kv_cache_cap;
+  return false;
+#endif
+}
+
+size_t checked_product(size_t lhs, size_t rhs, const char* description) {
+  if (lhs > static_cast<size_t>(0)) {
+    CHECK_LE(rhs, std::numeric_limits<size_t>::max() / lhs)
+        << description << " overflow";
+  }
+  return lhs * rhs;
+}
+
+size_t standard_full_cache_allocation_bytes(const KVCacheCapacity& kv_cache_cap,
+                                            int64_t n_blocks,
+                                            bool enable_rdma_scale_padding) {
+  CHECK_GT(n_blocks, 0) << "n_blocks must be positive";
+  const int64_t full_attention_layers =
+      std::max<int64_t>(kv_cache_cap.num_full_attention_layers(), 1);
+  const int64_t logical_block_bytes =
+      kv_cache_cap.block_size() *
+      (kv_cache_cap.slot_size() + kv_cache_cap.index_slot_size() +
+       kv_cache_cap.scale_slot_size());
+  CHECK_GT(logical_block_bytes, 0) << "logical block bytes must be positive";
+
+  const size_t logical_bytes = checked_product(
+      checked_product(static_cast<size_t>(n_blocks),
+                      static_cast<size_t>(full_attention_layers),
+                      "full cache block count"),
+      static_cast<size_t>(logical_block_bytes),
+      "full cache logical bytes");
+  if (!enable_rdma_scale_padding) {
+    return logical_bytes;
+  }
+
+  const size_t scale_block_bytes =
+      checked_product(static_cast<size_t>(kv_cache_cap.block_size()),
+                      static_cast<size_t>(sizeof(float)),
+                      "indexer scale block bytes");
+  const size_t scale_logical_bytes =
+      checked_product(static_cast<size_t>(n_blocks),
+                      scale_block_bytes,
+                      "indexer scale logical bytes");
+  const mlu::RdmaMemoryPlan scale_plan = mlu::make_rdma_memory_plan(
+      scale_logical_bytes, static_cast<size_t>(n_blocks));
+  const size_t padding_per_layer =
+      scale_plan.registered_bytes - scale_plan.logical_bytes;
+  const size_t total_padding =
+      checked_product(static_cast<size_t>(full_attention_layers),
+                      padding_per_layer,
+                      "indexer scale RDMA padding");
+  CHECK_LE(total_padding, std::numeric_limits<size_t>::max() - logical_bytes)
+      << "full cache allocation bytes overflow";
+  return logical_bytes + total_padding;
 }
 
 bool is_qwen3_5_target_model_type(const std::string& model_type) {
@@ -348,8 +422,62 @@ void init_standard_counts(const ModelArgs& model_args,
          "state cache";
   const int64_t full_attention_layers =
       std::max<int64_t>(kv_cache_cap->num_full_attention_layers(), 1);
-  kv_cache_cap->n_blocks(available_full_cache_size_in_bytes /
-                         (full_attention_layers * block_size_in_bytes));
+  const int64_t logical_n_blocks =
+      available_full_cache_size_in_bytes /
+      (full_attention_layers * block_size_in_bytes);
+  const bool enable_rdma_scale_padding =
+      use_rdma_indexer_scale_padding(options, *kv_cache_cap);
+  if (!enable_rdma_scale_padding) {
+    kv_cache_cap->n_blocks(logical_n_blocks);
+    CHECK_GT(kv_cache_cap->n_blocks(), 0) << "no n_blocks for kv cache";
+    return;
+  }
+
+  CHECK_GT(logical_n_blocks, 0) << "no logical n_blocks for kv cache";
+  const size_t available_bytes =
+      static_cast<size_t>(available_full_cache_size_in_bytes);
+  const size_t minimum_allocation_bytes =
+      standard_full_cache_allocation_bytes(*kv_cache_cap,
+                                           /*n_blocks=*/1,
+                                           enable_rdma_scale_padding);
+  const mlu::RdmaMemoryPlan minimum_scale_plan = mlu::make_rdma_memory_plan(
+      static_cast<size_t>(block_size) * sizeof(float),
+      /*block_count=*/1);
+  CHECK_LE(minimum_allocation_bytes, available_bytes)
+      << "no memory for one KV cache block with RDMA-registerable indexer "
+         "scales: available_bytes="
+      << available_full_cache_size_in_bytes
+      << ", full_attention_layers=" << full_attention_layers
+      << ", scale_registered_bytes_per_layer="
+      << minimum_scale_plan.registered_bytes
+      << ", minimum_allocation_bytes=" << minimum_allocation_bytes;
+
+  int64_t low = 1;
+  int64_t high = logical_n_blocks;
+  while (low < high) {
+    const int64_t mid = low + (high - low + 1) / 2;
+    const size_t allocation_bytes = standard_full_cache_allocation_bytes(
+        *kv_cache_cap, mid, enable_rdma_scale_padding);
+    if (allocation_bytes <= available_bytes) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  kv_cache_cap->n_blocks(low);
+
+  const size_t scale_logical_bytes =
+      checked_product(static_cast<size_t>(kv_cache_cap->n_blocks()),
+                      static_cast<size_t>(block_size) * sizeof(float),
+                      "indexer scale logical bytes");
+  const mlu::RdmaMemoryPlan scale_plan = mlu::make_rdma_memory_plan(
+      scale_logical_bytes, static_cast<size_t>(kv_cache_cap->n_blocks()));
+  LOG(INFO) << "RDMA indexer scale capacity adjusted from " << logical_n_blocks
+            << " to " << kv_cache_cap->n_blocks()
+            << " blocks, scale_logical_bytes_per_layer="
+            << scale_plan.logical_bytes << ", scale_registered_bytes_per_layer="
+            << scale_plan.registered_bytes
+            << ", full_attention_layers=" << full_attention_layers;
   CHECK_GT(kv_cache_cap->n_blocks(), 0) << "no n_blocks for kv cache";
 }
 
@@ -378,9 +506,13 @@ KVCacheCapacity estimate_kv_cache_capacity(
       torch::scalarTypeToTypeMeta(options.dtype).itemsize());
   const int64_t cache_dtype_size =
       kv_cache_dtype_size(options.kv_cache_dtype, dtype_size);
+  const bool enable_indexer_cache_quantization =
+      options.indexer_cache_dtype == "int8";
 
   kv_cache_cap.slot_size(kv_slot_size(model_args, options, cache_dtype_size))
-      .index_slot_size(index_slot_size(model_args, dtype_size))
+      .index_slot_size(index_slot_size(
+          model_args, enable_indexer_cache_quantization, dtype_size))
+      .enable_indexer_cache_quant(enable_indexer_cache_quantization)
       .scale_slot_size(scale_slot_size(model_args, options))
       .linear_slot_size(linear_slot_size(model_args, options, dtype_size))
       .n_layers(model_args.n_layers())

@@ -985,10 +985,16 @@ struct MaskedIndexerSelectPagedKVParams {
   // Query quantization scale tensor. Must be contiguous.
   // - Required (numel > 0) when query dtype is int8 or fp8
   // - Must be empty (numel == 0) when query dtype is bfloat16 or half
+  // - INT8 prefill shape: [total_q, head_num, 1]
+  // - INT8 decode shape: [batch, seq_q, head_num, 1]
   std::optional<torch::Tensor> q_scale;
   // Key cache quantization scale tensor. Must be contiguous.
   // - Required (numel > 0) when k_cache dtype is int8 or fp8
   // - Must be empty (numel == 0) when k_cache dtype is bfloat16 or half
+  // - Paged INT8 K scale is the cache scale shape with a trailing dim added
+  //   before select.
+  // - Dense INT8 K scale keeps the layout returned by
+  //   scaled_quantize(k.unsqueeze(-2)).
   std::optional<torch::Tensor> k_scale_cache;
   // New sparse block table output tensor. Must be contiguous.
   // - Prefill mode: 2D [total_seq_q, kv_cache_max_blkn]

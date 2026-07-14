@@ -4,6 +4,7 @@ cc_binary(
   NAME 
     spawn_worker
   HDRS
+    spawn_worker_protocol.h
     spawn_worker_server.h
   SRCS
     spawn_worker_server.cpp

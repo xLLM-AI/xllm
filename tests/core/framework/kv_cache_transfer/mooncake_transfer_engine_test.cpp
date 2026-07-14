@@ -18,10 +18,22 @@ limitations under the License.
 #include <brpc/controller.h>
 #include <gtest/gtest.h>
 
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
+#include "platform/device.h"
+#if defined(USE_MLU)
+#include "platform/mlu/mlu_tensor_alloc.h"
+#endif
+#include "platform/platform.h"
+#include "util/net.h"
+#include "worker.pb.h"
 
 #define private public
 #define protected public
@@ -32,6 +44,9 @@ limitations under the License.
 namespace xllm {
 
 namespace {
+
+constexpr size_t kScaleBlockBytes = 96 * sizeof(float);
+constexpr size_t kAlignedRegisterBytes = 2097408;
 
 TransferKVInfo make_info(int32_t dst_dp_size,
                          int32_t dst_tp_size,
@@ -71,6 +86,23 @@ void expect_same_merge(
     EXPECT_EQ(lhs_info.dst_blocks, rhs_info.dst_blocks);
   }
 }
+
+#if defined(USE_MLU)
+KVCacheShape make_indexer_int8_transfer_shape() {
+  proto::KVCacheShape proto_shape;
+  for (int64_t dim : std::vector<int64_t>{2, 1, 1, 16}) {
+    proto_shape.add_key_cache_shape(dim);
+    proto_shape.add_value_cache_shape(dim);
+  }
+  for (int64_t dim : std::vector<int64_t>{2, 96, 1, 8}) {
+    proto_shape.add_index_cache_shape(dim);
+  }
+  for (int64_t dim : std::vector<int64_t>{2, 96, 1}) {
+    proto_shape.add_index_cache_scale_shape(dim);
+  }
+  return KVCacheShape::from_proto(proto_shape);
+}
+#endif
 
 }  // namespace
 
@@ -196,6 +228,135 @@ TEST(MooncakeKVCacheTransferDefaultTest, SpecDraftBufIdsUseSpecOffset) {
 
   EXPECT_EQ(transfer.get_buf_ids({0}, false), (std::vector<int64_t>{0, 1}));
   EXPECT_EQ(transfer.get_buf_ids({0}, true), (std::vector<int64_t>{80, 81}));
+}
+
+TEST(MooncakeKVCacheTransferDefaultTest,
+     AddBufUsesRdmaRegisterableLengthWithoutChangingBlockBytes) {
+  if (Platform::device_count() < 1) {
+    GTEST_SKIP() << "MLU device is required for Mooncake registration tests.";
+  }
+  Device device(/*device_id=*/0);
+  device.set_device();
+  const torch::Device torch_device = device.unwrap();
+  MooncakeKVCacheTransferDefault transfer(
+      /*device_id=*/0,
+      /*listen_port=*/0,
+      torch_device,
+      /*model_type=*/"test");
+  const torch::Tensor tensor = mlu::alloc_rdma_registerable_zero_tensor(
+      {2, 96, 1}, torch::kFloat32, torch_device);
+  std::vector<void*> addrs;
+  std::vector<size_t> lens;
+  std::vector<uint64_t> block_bytes;
+
+  transfer.add_buf(tensor,
+                   addrs,
+                   lens,
+                   block_bytes,
+                   MooncakeKVCacheTransferDefault::RegisterLengthPolicy::
+                       RDMA_REGISTERABLE_BYTES);
+
+  ASSERT_EQ(addrs.size(), 1U);
+  EXPECT_EQ(addrs[0], tensor.data_ptr());
+  EXPECT_EQ(lens[0], kAlignedRegisterBytes);
+  EXPECT_EQ(block_bytes[0], kScaleBlockBytes);
+}
+
+TEST(MooncakeKVCacheTransferDefaultTest, AddBufRejectsNonContiguousTensor) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  MooncakeKVCacheTransferDefault transfer(
+      /*device_id=*/0,
+      /*listen_port=*/0,
+      torch::Device(torch::kCPU),
+      /*model_type=*/"test");
+  torch::Tensor tensor =
+      torch::zeros({2, 96, 2}, torch::kFloat32)
+          .transpose(/*dim0=*/1, /*dim1=*/2);
+  std::vector<void*> addrs;
+  std::vector<size_t> lens;
+  std::vector<uint64_t> block_bytes;
+
+  EXPECT_DEATH(transfer.add_buf(tensor, addrs, lens, block_bytes),
+               "contiguous");
+}
+
+TEST(MooncakeKVCacheTransferDefaultTest,
+     IndexScaleRegistersAndRoundTripsWithKvBlocks) {
+  if (Platform::device_count() < 1) {
+    GTEST_SKIP() << "MLU device is required for Mooncake memory transfer.";
+  }
+
+  Device device(/*device_id=*/0);
+  device.set_device();
+  const torch::Device torch_device = device.unwrap();
+  const int32_t listen_port = net::get_local_free_port();
+  ASSERT_GT(listen_port, 0);
+
+  MooncakeKVCacheTransferDefault transfer(
+      /*device_id=*/0,
+      static_cast<uint16_t>(listen_port),
+      torch_device,
+      /*model_type=*/"deepseek_v32");
+  transfer.initialize(/*device_id=*/0);
+
+  const KVCacheShape shape = make_indexer_int8_transfer_shape();
+  std::vector<KVCache> caches;
+  transfer.allocate_kv_cache(
+      caches, /*num_layers=*/1, shape, torch::kBFloat16);
+  ASSERT_EQ(caches.size(), 1U);
+
+  KVCache& cache = caches[0];
+  torch::Tensor key_cache = cache.get_k_cache();
+  torch::Tensor value_cache = cache.get_v_cache();
+  torch::Tensor index_cache = cache.get_index_cache();
+  std::optional<torch::Tensor> index_scale =
+      cache.get_indexer_cache_scale();
+  ASSERT_TRUE(index_scale.has_value());
+  ASSERT_EQ(index_cache.scalar_type(), torch::kChar);
+  ASSERT_EQ(index_scale->scalar_type(), torch::kFloat32);
+  EXPECT_EQ(index_scale->nbytes(), 2 * kScaleBlockBytes);
+  EXPECT_EQ(index_scale->storage().nbytes(), kAlignedRegisterBytes);
+
+  key_cache.index({0}).fill_(1.25);
+  key_cache.index({1}).zero_();
+  value_cache.index({0}).fill_(-2.5);
+  value_cache.index({1}).zero_();
+  index_cache.index({0}).fill_(42);
+  index_cache.index({1}).zero_();
+  index_scale->index({0}).fill_(0.125);
+  index_scale->index({1}).zero_();
+  device.synchronize_default_stream();
+
+  transfer.register_kv_cache(caches, shape, torch::kBFloat16);
+
+  EXPECT_EQ(transfer.main_layout_.buf_cnt, 4);
+  EXPECT_EQ(transfer.get_buf_ids({0}, /*is_spec_draft=*/false),
+            (std::vector<int64_t>{0, 1, 2, 3}));
+
+  uint64_t cluster_id = 0;
+  std::string addr;
+  transfer.get_cache_info(cluster_id, addr);
+  ASSERT_FALSE(addr.empty());
+  ASSERT_TRUE(transfer.link_cluster(
+      /*cluster_id=*/0, addr, static_cast<uint16_t>(listen_port)));
+  ASSERT_TRUE(transfer.pull_kv_blocks(/*src_cluster_id=*/0,
+                                     addr,
+                                     /*src_blocks=*/{0},
+                                     /*dst_blocks=*/{1},
+                                     /*src_linear_state_ids=*/{},
+                                     /*dst_linear_state_ids=*/{}));
+  device.synchronize_default_stream();
+
+  EXPECT_TRUE(torch::equal(key_cache.index({1}), key_cache.index({0})));
+  EXPECT_TRUE(torch::equal(value_cache.index({1}), value_cache.index({0})));
+  EXPECT_TRUE(torch::equal(index_cache.index({1}), index_cache.index({0})));
+  EXPECT_TRUE(torch::equal(index_scale->index({1}), index_scale->index({0})));
+
+  EXPECT_TRUE(transfer.unlink_cluster(
+      /*cluster_id=*/0,
+      addr,
+      static_cast<uint16_t>(listen_port),
+      /*force_flag=*/true));
 }
 #endif
 
