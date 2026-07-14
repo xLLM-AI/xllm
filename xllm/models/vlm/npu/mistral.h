@@ -273,10 +273,18 @@ class MistralModelImpl : public torch::nn::Module {
 
     std::vector<torch::Tensor> all_layer_hidden_states;
     all_layer_hidden_states.reserve(layers_.size());
-
+    torch::save(h,
+                "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/"
+                "dump_flux2_tensor/01_cpp_mistral3_relatives_tensor/"
+                "01_cpp_mistral_layer_pre_intensor.pt");
     for (size_t i = 0; i < layers_.size(); i++) {
       auto& layer = layers_[i];
       layer(h, cos_pos, sin_pos, attn_mask, kv_caches[i], input_params_new, i);
+      torch::save(h,
+                  "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/"
+                  "dump_flux2_tensor/02_cpp_per_mistral_layer_out/" +
+                      std::to_string(i + 1) + "_modify_mistral_out_" +
+                      std::to_string(i + 1) + ".pt");
       all_layer_hidden_states.emplace_back(
           h.clone());  // Collect the output of each layer
     }
