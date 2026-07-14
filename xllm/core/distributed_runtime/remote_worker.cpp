@@ -78,6 +78,11 @@ bool RemoteWorker::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   return channel_->allocate_kv_cache(kv_cache_shape);
 }
 
+bool RemoteWorker::set_speculative_validate_time_predictor(
+    const SpeculativeProfileRegistry::ValidateTimePredictor& predictor) {
+  return channel_->set_speculative_validate_time_predictor(predictor);
+}
+
 void RemoteWorker::get_cache_info(uint64_t& cluster_id,
                                   std::string& addr,
                                   uint16_t& port) {

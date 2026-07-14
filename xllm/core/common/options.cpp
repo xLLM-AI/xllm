@@ -49,6 +49,9 @@ std::string Options::to_string() const {
      << speculative_suffix_max_cached_requests()
      << ", speculative_suffix_use_tree_spec: "
      << speculative_suffix_use_tree_spec()
+     << ", enable_adaptive_speculative_decode: "
+     << enable_adaptive_speculative_decode()
+     << ", adaptive_speculative_min_gain: " << adaptive_speculative_min_gain()
      << ", num_request_handling_threads: " << num_request_handling_threads()
      << ", communication_backend: " << communication_backend().value_or("null")
      << ", rank_tablefile: " << rank_tablefile().value_or("null")

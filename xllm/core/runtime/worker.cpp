@@ -88,6 +88,13 @@ bool Worker::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   return impl_->allocate_kv_cache(kv_cache_shape);
 }
 
+bool Worker::set_speculative_validate_time_predictor(
+    const SpeculativeProfileRegistry::ValidateTimePredictor& predictor) {
+  SpeculativeProfileRegistry::get_instance().set_validate_time_predictor(
+      predictor);
+  return true;
+}
+
 void Worker::get_cache_info(uint64_t& cluster_id,
                             std::string& addr,
                             uint16_t& port) {

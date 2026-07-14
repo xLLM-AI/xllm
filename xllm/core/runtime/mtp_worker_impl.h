@@ -15,11 +15,17 @@ limitations under the License.
 
 #pragma once
 
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "framework/kv_cache/embedding_cache.h"
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #if defined(USE_NPU)
 #include "framework/kv_cache_transfer/spec_kv_cache_transfer.h"
 #endif
+#include "core/framework/speculative/adaptive_speculative_controller.h"
 #include "runtime/speculative_worker_impl.h"
 
 namespace xllm {
@@ -49,7 +55,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                 const runtime::Options& options,
                 const runtime::Options& target_options,
                 const runtime::Options& draft_options,
-                bool enable_opt_validate_probs = false);
+                bool enable_opt_validate_probs = false,
+                bool enable_adaptive_speculative_decode = false);
 
  public:
   bool init_model(const std::string& model_weights_path,
@@ -77,24 +84,45 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   void fill_validate_input_from_draft_outputs(
       const std::vector<ForwardOutput>& draft_outputs,
       ForwardInput& validate_input,
+      int32_t num_speculative_tokens,
+      Stream& compute_stream);
+  void fill_validate_input_from_draft_outputs(
+      const std::vector<ForwardOutput>& draft_outputs,
+      ForwardInput& validate_input,
+      const std::vector<int32_t>& per_seq_val_tokens,
       Stream& compute_stream);
   std::optional<ForwardOutput> run_validate(
       const ForwardInput& input,
       const std::vector<ForwardOutput>& draft_outputs,
-      ForwardInput& validate_input);
+      ForwardInput& validate_input,
+      int32_t num_speculative_tokens,
+      const std::vector<int32_t>* pruned_prefix_lengths = nullptr);
+  std::optional<ForwardOutput> run_validate(
+      const ForwardInput& input,
+      const std::vector<ForwardOutput>& draft_outputs,
+      ForwardInput& validate_input,
+      int32_t num_speculative_tokens,
+      const std::vector<int32_t>& per_seq_val_tokens,
+      const std::vector<int32_t>* pruned_prefix_lengths = nullptr);
 
-  virtual SampleOutput validate(const SamplingParameters& sampling_params,
-                                const std::vector<ForwardOutput>& draft_outputs,
-                                const ForwardOutput& target_output);
+  virtual SampleOutput validate(
+      const SamplingParameters& sampling_params,
+      const std::vector<ForwardOutput>& draft_outputs,
+      const ForwardOutput& target_output,
+      int32_t num_speculative_tokens,
+      const std::vector<int32_t>* pruned_prefix_lengths = nullptr);
 
   // Hook for algorithm-specific draft output post-processing during decode.
   // Default MTP behavior always compresses probs for cache storage.
   virtual void process_draft_sample_output(SampleOutput& sample_output);
 
-  SampleOutput validate(const SamplingParameters& sampling_params,
-                        const torch::Tensor& draft_token_ids,
-                        const torch::Tensor& draft_probs,
-                        const ForwardOutput& target_output);
+  SampleOutput validate(
+      const SamplingParameters& sampling_params,
+      const torch::Tensor& draft_token_ids,
+      const torch::Tensor& draft_probs,
+      const ForwardOutput& target_output,
+      int32_t num_speculative_tokens,
+      const std::vector<int32_t>* pruned_prefix_lengths = nullptr);
 
   // PD separation: placeholder size for empty embedding slot. Default: 1x
   // hidden_size. Eagle3 overrides to 3 * target_hidden_size.
@@ -111,7 +139,11 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
 
   // Prepare target validate input from cached target context.
   void prepare_validate_inputs(const ForwardInput& inputs,
-                               ForwardInput& validate_inputs);
+                               ForwardInput& validate_inputs,
+                               int32_t num_speculative_tokens);
+  void prepare_validate_inputs(const ForwardInput& inputs,
+                               ForwardInput& validate_inputs,
+                               const std::vector<int32_t>& per_seq_val_tokens);
 
   // prepare inputs for draft model at Decode phase.
   void prepare_draft_inputs(const ForwardInput& inputs,
@@ -128,7 +160,15 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       ForwardInput& extend_input);
 
   void write_target_context_to_cache(const ForwardInput& input,
-                                     const SampleOutput& validate_output);
+                                     const SampleOutput& validate_output,
+                                     int32_t num_speculative_tokens);
+  void record_validate_metrics(
+      const SampleOutput& validate_output,
+      int32_t num_speculative_tokens,
+      const std::vector<int32_t>* pruned_prefix_lengths = nullptr) const;
+  bool adaptive_enabled() const;
+  double adaptive_step_time_estimate(const ForwardInput& input,
+                                     int32_t max_speculative_tokens) const;
 
  protected:
   // Draft model worker
@@ -140,6 +180,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // Whether validation directly uses selected-only draft_probs [B, S].
   // If false, selected-only cache values are restored to dense [B, S, V].
   bool enable_opt_validate_probs_ = false;
+  std::unique_ptr<AdaptiveSpeculativeController> adaptive_spec_controller_;
 
 #if defined(USE_NPU) || defined(USE_MLU)
   std::shared_ptr<KVCacheTransfer> kv_cache_transfer_;
