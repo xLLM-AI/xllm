@@ -70,6 +70,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
 PyCausalLM::~PyCausalLM() {
   py::gil_scoped_acquire gil;
   py_model_ = py::object();
+  config_dict_ = py::object();
 }
 
 py::dict PyCausalLM::build_config_dict(
