@@ -62,7 +62,7 @@ limitations under the License. -->
 | Hardware           | Abbreviation | Example | Remark              |
 | ------------------ | ------------ | ------- | ------------------- |
 | Ascend NPU         | NPU          | A2, A3  | HDK Driver 25.2.0 + |
-| Cambricon MLU      | MLU          | MLU590  |                     |
+| Cambricon MLU      | MLU          | MLU     |                     |
 | Moore Threads GPU  | MUSA         | S5000   |                     |
 | Hygon DCU          | DCU          | BW1000  |                     |
 | MetaX MACA         | MACA         | MXC500  |                     |
