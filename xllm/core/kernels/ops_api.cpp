@@ -37,6 +37,8 @@ limitations under the License.
 #include "dcu/hipblaslt_fp8_adapter.h"
 #endif
 
+#include <cstdlib>
+#include <cstring>
 #include <numeric>
 
 #include "common/macros.h"
@@ -48,6 +50,24 @@ namespace {
 #if defined(USE_NPU)
 bool is_supported_initial_state_dtype(torch::ScalarType dtype) {
   return dtype == torch::kBFloat16 || dtype == torch::kFloat32;
+}
+
+bool env_flag_enabled(const char* name, bool default_value) {
+  const char* value = std::getenv(name);
+  if (value == nullptr) {
+    return default_value;
+  }
+  if (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0 ||
+      std::strcmp(value, "TRUE") == 0 || std::strcmp(value, "on") == 0 ||
+      std::strcmp(value, "ON") == 0) {
+    return true;
+  }
+  if (std::strcmp(value, "0") == 0 || std::strcmp(value, "false") == 0 ||
+      std::strcmp(value, "FALSE") == 0 || std::strcmp(value, "off") == 0 ||
+      std::strcmp(value, "OFF") == 0) {
+    return false;
+  }
+  return default_value;
 }
 #endif
 
@@ -1616,6 +1636,16 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> moe_gating_top_k_hash(
 
 torch::Tensor gated_layer_norm(GatedLayerNormParams& params) {
 #if defined(USE_NPU)
+  if (env_flag_enabled("XLLM_USE_ACLNN_LAYER_NORM_FWD", true)) {
+    return npu::layer_norm_fwd_aclnn(params.x,
+                                     params.weight,
+                                     params.bias,
+                                     params.eps,
+                                     params.z,
+                                     params.group_size,
+                                     params.norm_before_gate,
+                                     params.is_rms_norm);
+  }
   return npu::layer_norm_fwd(params.x,
                              params.weight,
                              params.bias,
