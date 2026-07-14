@@ -96,6 +96,8 @@ KVCacheEstimateOptions make_kv_cache_estimate_options(
       static_cast<int64_t>(options.num_speculative_tokens());
   estimate_options.max_tokens_per_batch =
       static_cast<int64_t>(options.max_tokens_per_batch());
+  estimate_options.max_linear_state_cache_slots =
+      options.max_linear_state_cache_slots();
   estimate_options.is_draft_engine = options.is_draft_engine();
   estimate_options.enable_prefix_cache =
       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();

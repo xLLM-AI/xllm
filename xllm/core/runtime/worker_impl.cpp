@@ -62,6 +62,7 @@ limitations under the License.
 #include "core/distributed_runtime/master.h"
 #include "core/runtime/worker_rendezvous.h"
 #include "framework/kv_cache/kv_cache.h"
+#include "framework/kv_cache/linear_state_restore.h"
 #include "framework/model/model_input_params.h"
 #include "framework/model_loader.h"
 #include "framework/parallel_state/npu_cp_ep_padding.h"
@@ -603,6 +604,12 @@ ForwardInput WorkerImpl::update_input_by_last_step_output(
 
 std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap(
     const ForwardInput& input) {
+  // No linear-state restore here on purpose. LLMWorkerImpl overrides this to
+  // copy checkpoints on compute_stream_; speculative/MTP workers keep this base
+  // version but run every forward through an inner LLMWorkerImpl built with
+  // schedule-overlap off, so the checkpoint copy fires on that inner worker's
+  // non-overlap prepare_work_before_execute_on_stream path. The outer
+  // speculative worker owns no kv_caches_, so restoring here would be a no-op.
   return step(input);
 }
 
@@ -953,6 +960,18 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
 
     if (has_linear_attention_layers(context_.get_model_args())) {
       prepare_input_params_for_linear_attention(processed_input.input_params);
+      // Under schedule_overlap chunked prefill the previous chunk's forward
+      // runs on compute_stream_ from a worker thread that may not have
+      // enqueued its kernels yet when this prepare runs on the main thread.
+      // Defer the slot-restore copy to step_for_schedule_overlap (worker
+      // thread, on compute_stream_) so stream ordering between chunk N-1
+      // writes and chunk N restore is automatic.
+      if (!enable_schedule_overlap()) {
+        restore_linear_state_slots(
+            kv_caches_,
+            processed_input.input_params.linear_state_cache_ops,
+            processed_input.input_params.parallel.has_initial_state);
+      }
     }
 
     if (can_prepare_npu_graph_decode_input(input_params)) {
