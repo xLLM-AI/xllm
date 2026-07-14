@@ -35,25 +35,12 @@ __global__ void llm_decode_metadata_update_kernel(
   for (int64_t idx = thread_idx; idx < max_work_size; idx += step) {
     if (idx < params.actual_num_tokens) {
       params.dst_tokens[idx] = params.src_tokens[idx];
-      const int64_t position =
-          params.src_positions_are_int64
-              ? static_cast<const int64_t*>(params.src_positions)[idx]
-              : static_cast<const int32_t*>(params.src_positions)[idx];
-      if (params.dst_positions_are_int64) {
-        static_cast<int64_t*>(params.dst_positions)[idx] = position;
-      } else {
-        static_cast<int32_t*>(params.dst_positions)[idx] =
-            static_cast<int32_t>(position);
-      }
+      params.dst_positions[idx] = params.src_positions[idx];
       params.dst_new_cache_slots[idx] = params.src_new_cache_slots[idx];
     }
     if (idx >= params.actual_num_tokens && idx < params.padded_num_tokens) {
       params.dst_tokens[idx] = 0;
-      if (params.dst_positions_are_int64) {
-        static_cast<int64_t*>(params.dst_positions)[idx] = 0;
-      } else {
-        static_cast<int32_t*>(params.dst_positions)[idx] = 0;
-      }
+      params.dst_positions[idx] = 0;
       params.dst_new_cache_slots[idx] =
           params.add_dummy_pages_for_padding ? 0 : -1;
     }

@@ -139,6 +139,10 @@ CudaGraphPersistentParam::CudaGraphPersistentParam(
   // the largest configured decode batch can be padded safely.
   int64_t max_seqs_per_batch;
   if (is_rec_multi_round_mode()) {
+    // max_seqs_per_batch is the max sequence count per Batch in a scheduler
+    // group.
+    // When is_rec_multi_round_mode() == true, multiply by beam_width to account
+    // for beam search.
     max_seqs_per_batch = options.max_seqs_per_batch() * options_.beam_width();
   } else {
     max_seqs_per_batch = options.max_seqs_per_batch();
@@ -153,7 +157,7 @@ CudaGraphPersistentParam::CudaGraphPersistentParam(
   persistent_tokens_ = torch::zeros({max_tokens_per_batch},
                                     torch::dtype(torch::kInt).device(device));
   persistent_positions_ = torch::zeros(
-      {max_tokens_per_batch}, torch::dtype(torch::kLong).device(device));
+      {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
   persistent_new_cache_slots_ = torch::zeros(
       {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
   persistent_linear_state_indices_ = torch::zeros(
@@ -186,15 +190,18 @@ CudaGraphPersistentParam::CudaGraphPersistentParam(
                                 torch::dtype(dtype).device(device));
 
   // FlashInfer decode mode parameters
+  // paged_kv_indptr: shape [max_seqs_per_batch + 1]
   persistent_paged_kv_indptr_ = torch::zeros(
       {max_seqs_per_batch + 1}, torch::dtype(torch::kInt).device(device));
 
   // paged_kv_indices: maximum size based on max blocks
+  // Estimate max blocks: max_seqs_per_batch * max_block_table_len
   const int64_t max_paged_kv_indices_size =
       max_seqs_per_batch * max_block_table_len;
   persistent_paged_kv_indices_ = torch::zeros(
       {max_paged_kv_indices_size}, torch::dtype(torch::kInt).device(device));
 
+  // paged_kv_last_page_len: shape [max_seqs_per_batch]
   persistent_paged_kv_last_page_len_ = torch::zeros(
       {max_seqs_per_batch}, torch::dtype(torch::kInt).device(device));
 
@@ -204,6 +211,8 @@ CudaGraphPersistentParam::CudaGraphPersistentParam(
       0, max_seqs_per_batch + 1, torch::dtype(torch::kInt).device(device));
   persistent_kv_seq_lens_delta_ = torch::zeros(
       {max_seqs_per_batch}, torch::dtype(torch::kInt).device(device));
+  // will be updated by q_cu_seq_lens, q_cu_seq_lens is the cumulative sum of
+  // q_seq_lens
   persistent_chunked_prefill_qo_indptr_ = torch::zeros(
       {max_seqs_per_batch + 1}, torch::dtype(torch::kInt).device(device));
   // aux_hidden_states will be lazily initialized when needed
@@ -218,11 +227,8 @@ bool CudaGraphPersistentParam::can_use_llm_decode_fast_path(
       params.embedding.input_embedding.defined()) {
     return false;
   }
-  const bool positions_supported = positions.defined() && positions.is_cuda() &&
-                                   positions.is_contiguous() &&
-                                   (positions.scalar_type() == torch::kInt32 ||
-                                    positions.scalar_type() == torch::kInt64);
-  return is_cuda_contiguous_int32_tensor(tokens) && positions_supported &&
+  return is_cuda_contiguous_int32_tensor(tokens) &&
+         is_cuda_contiguous_int32_tensor(positions) &&
          is_cuda_contiguous_int32_tensor(
              params.attention.device.new_cache_slots) &&
          is_cuda_contiguous_int32_tensor(params.attention.device.kv_seq_lens) &&
@@ -247,7 +253,7 @@ void CudaGraphPersistentParam::update_llm_decode_metadata_fast_path(
       params.attention.device.paged_kv_indices.size(0);
   xllm::kernel::cuda::LlmDecodeMetadataUpdateParams update_params{
       .src_tokens = tokens.data_ptr<int32_t>(),
-      .src_positions = positions.data_ptr(),
+      .src_positions = positions.data_ptr<int32_t>(),
       .src_new_cache_slots =
           params.attention.device.new_cache_slots.data_ptr<int32_t>(),
       .src_kv_seq_lens =
@@ -259,7 +265,7 @@ void CudaGraphPersistentParam::update_llm_decode_metadata_fast_path(
       .src_paged_kv_last_page_len =
           params.attention.device.paged_kv_last_page_len.data_ptr<int32_t>(),
       .dst_tokens = persistent_tokens_.data_ptr<int32_t>(),
-      .dst_positions = persistent_positions_.data_ptr(),
+      .dst_positions = persistent_positions_.data_ptr<int32_t>(),
       .dst_new_cache_slots = persistent_new_cache_slots_.data_ptr<int32_t>(),
       .dst_kv_seq_lens = kv_seq_lens_.data_ptr<int32_t>(),
       .dst_kv_seq_lens_delta =
@@ -272,9 +278,6 @@ void CudaGraphPersistentParam::update_llm_decode_metadata_fast_path(
       .padded_num_tokens = static_cast<int64_t>(padded_num_tokens),
       .actual_batch_size = actual_batch_size,
       .actual_indices_size = actual_indices_size,
-      .src_positions_are_int64 = positions.scalar_type() == torch::kInt64,
-      .dst_positions_are_int64 =
-          persistent_positions_.scalar_type() == torch::kInt64,
   };
   const cudaStream_t stream = c10::cuda::getCurrentCUDAStream(device_.index());
   xllm::kernel::cuda::update_llm_decode_metadata(update_params, stream);

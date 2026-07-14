@@ -155,27 +155,14 @@ torch::Tensor update_decode_graph_metadata(
   };
 
   check_int32_cuda(tokens, "tokens");
-  CHECK(positions.defined()) << "positions must be defined";
-  CHECK(positions.is_cuda()) << "positions must be a CUDA tensor";
-  CHECK_EQ(positions.device(), device) << "positions must be on " << device;
-  CHECK(positions.scalar_type() == torch::kInt32 ||
-        positions.scalar_type() == torch::kInt64)
-      << "positions must have dtype int32 or int64";
-  CHECK(positions.is_contiguous()) << "positions must be contiguous";
+  check_int32_cuda(positions, "positions");
   check_int32_cuda(slot_mapping, "slot_mapping");
   check_int32_cuda(kv_seq_lens, "kv_seq_lens");
   check_int32_cuda(paged_kv_indptr, "paged_kv_indptr");
   check_int32_cuda(paged_kv_indices, "paged_kv_indices");
   check_int32_cuda(paged_kv_last_page_len, "paged_kv_last_page_len");
   check_int32_cuda(dst_tokens, "dst_tokens");
-  CHECK(dst_positions.defined()) << "dst_positions must be defined";
-  CHECK(dst_positions.is_cuda()) << "dst_positions must be a CUDA tensor";
-  CHECK_EQ(dst_positions.device(), device)
-      << "dst_positions must be on " << device;
-  CHECK(dst_positions.scalar_type() == torch::kInt32 ||
-        dst_positions.scalar_type() == torch::kInt64)
-      << "dst_positions must have dtype int32 or int64";
-  CHECK(dst_positions.is_contiguous()) << "dst_positions must be contiguous";
+  check_int32_cuda(dst_positions, "dst_positions");
   check_int32_cuda(dst_slot_mapping, "dst_slot_mapping");
   check_int32_cuda(dst_kv_seq_lens, "dst_kv_seq_lens");
   check_int32_cuda(dst_kv_seq_lens_delta, "dst_kv_seq_lens_delta");
@@ -206,14 +193,14 @@ torch::Tensor update_decode_graph_metadata(
 
   xllm::kernel::cuda::LlmDecodeMetadataUpdateParams params{
       .src_tokens = tokens.data_ptr<int32_t>(),
-      .src_positions = positions.data_ptr(),
+      .src_positions = positions.data_ptr<int32_t>(),
       .src_new_cache_slots = slot_mapping.data_ptr<int32_t>(),
       .src_kv_seq_lens = kv_seq_lens.data_ptr<int32_t>(),
       .src_paged_kv_indptr = paged_kv_indptr.data_ptr<int32_t>(),
       .src_paged_kv_indices = paged_kv_indices.data_ptr<int32_t>(),
       .src_paged_kv_last_page_len = paged_kv_last_page_len.data_ptr<int32_t>(),
       .dst_tokens = dst_tokens.data_ptr<int32_t>(),
-      .dst_positions = dst_positions.data_ptr(),
+      .dst_positions = dst_positions.data_ptr<int32_t>(),
       .dst_new_cache_slots = dst_slot_mapping.data_ptr<int32_t>(),
       .dst_kv_seq_lens = dst_kv_seq_lens.data_ptr<int32_t>(),
       .dst_kv_seq_lens_delta = dst_kv_seq_lens_delta.data_ptr<int32_t>(),
@@ -225,8 +212,6 @@ torch::Tensor update_decode_graph_metadata(
       .padded_num_tokens = padded_num_tokens,
       .actual_batch_size = actual_batch_size,
       .actual_indices_size = actual_indices_size,
-      .src_positions_are_int64 = positions.scalar_type() == torch::kInt64,
-      .dst_positions_are_int64 = dst_positions.scalar_type() == torch::kInt64,
       .add_dummy_pages_for_padding = add_dummy_pages_for_padding,
   };
   const cudaStream_t stream =

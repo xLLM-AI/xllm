@@ -124,7 +124,7 @@ class DecodeCudaGraphRunner(BaseRunner):
             )
             self.execute(
                 torch.zeros(batch_size, dtype=torch.int32, device=device),
-                torch.zeros(batch_size, dtype=torch.int64, device=device),
+                torch.zeros(batch_size, dtype=torch.int32, device=device),
                 metadata,
             )
 
@@ -190,7 +190,7 @@ class DecodeCudaGraphRunner(BaseRunner):
             padded_batch_size, dtype=input_ids.dtype, device=device
         )
         entry.static_positions = torch.zeros(
-            padded_batch_size, dtype=positions.dtype, device=device
+            padded_batch_size, dtype=torch.int32, device=device
         )
         entry.static_metadata = _StaticAttentionMetadata(
             slot_mapping=torch.zeros(
@@ -245,9 +245,10 @@ class DecodeCudaGraphRunner(BaseRunner):
         if metadata.kv_cu_seq_lens is None:
             raise RuntimeError("decode CUDA graph requires device cumulative KV lengths")
         num_indices = metadata.paged_kv_indices.numel()
+        graph_positions = positions.to(torch.int32).contiguous()
         ops.update_decode_graph_metadata(
             input_ids,
-            positions,
+            graph_positions,
             metadata.slot_mapping,
             metadata.kv_cu_seq_lens,
             metadata.paged_kv_indptr,
