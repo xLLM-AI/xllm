@@ -609,36 +609,28 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
                       const ModelInputParams& input_params) {
     auto model_output =
         language_model_->forward(tokens, positions, kv_caches, input_params);
-    // Mistral3 is used for Flux2 text_encoder
-    if (FLAGS_enable_mistral_prompt_to_message) {
-      // Embedding mode: select 3 intermediate layers (9, 19, 29)
-      CHECK_GE(model_output.aux_hidden_states.size(0), 30)
-          << "Model must have at least 30 layers for embedding mode";
-      auto indices = torch::tensor({9, 19, 29}, torch::kLong)
-                         .to(model_output.aux_hidden_states.device());
-      auto selected =
-          model_output.aux_hidden_states.index_select(/*dim=*/0, indices);
-
-      return ModelOutput(selected);
-    }
-    return model_output;
+    // Mistral3 is used for Flux2 text_encoder:
+    // select 3 intermediate layers (9, 19, 29) as embeddings
+    CHECK_GE(model_output.aux_hidden_states.size(0), 30)
+        << "Model must have at least 30 layers for embedding mode";
+    auto indices = torch::tensor({9, 19, 29}, torch::kLong)
+                       .to(model_output.aux_hidden_states.device());
+    auto selected =
+        model_output.aux_hidden_states.index_select(/*dim=*/0, indices);
+    torch::save(selected,
+                "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/"
+                "dump_flux2_tensor/01_cpp_mistral3_relatives_tensor/"
+                "02_modify_mistral3_out.pt");
+    return ModelOutput(selected);
   }
 
   // ==================== Pooler / Logits ====================
 
   virtual torch::Tensor pooler(const torch::Tensor& hidden_states,
                                const torch::Tensor& seleted_idxes) {
-    auto h = hidden_states;
-    if (::xllm::ModelConfig::get_instance()
-            .enable_return_mm_full_embeddings()) {
-      return h;
-    }
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
-    }
-    auto pooler_output = torch::nn::functional::normalize(
-        h, torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
-    return pooler_output;
+    // Flux2 text encoder: return raw hidden states without L2 normalization
+    // hidden_states shape: [3, seq_len, hidden_size] (layers 9, 19, 29)
+    return hidden_states;
   }
 
   torch::Tensor logits(const torch::Tensor& hidden_states,
