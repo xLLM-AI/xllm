@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "core/framework/config/kv_cache_config.h"
 #include "kv_cache_estimation.h"
+#include "framework/kv_cache/deepseek_v4_kv_cache_impl.h"
 #include "kv_cache_shape.h"
 #include "worker.pb.h"
 
@@ -61,6 +62,71 @@ class IndexerCacheDtypeConfigGuard final {
 };
 
 }  // namespace
+
+TEST(Dsv4StateCacheTest, SplitStateReturnsInputsAndSwapsBoth) {
+  torch::Tensor kv = torch::tensor({{{1.0F}}, {{2.0F}}, {{3.0F}}});
+  torch::Tensor score = torch::tensor({{{4.0F}}, {{5.0F}}, {{6.0F}}});
+  Dsv4StateCache state = Dsv4StateCache::from_split(kv, score);
+
+  EXPECT_EQ(state.kv().data_ptr(), kv.data_ptr());
+  EXPECT_EQ(state.score().data_ptr(), score.data_ptr());
+  EXPECT_FALSE(state.packed().defined());
+
+  torch::Tensor src = torch::tensor({0}, torch::kLong);
+  torch::Tensor dst = torch::tensor({2}, torch::kLong);
+  state.swap_blocks(src, dst);
+
+  EXPECT_TRUE(
+      torch::equal(state.kv(), torch::tensor({{{1.0F}}, {{2.0F}}, {{1.0F}}})));
+  EXPECT_TRUE(torch::equal(state.score(),
+                           torch::tensor({{{4.0F}}, {{5.0F}}, {{4.0F}}})));
+}
+
+TEST(Dsv4StateCacheTest, PackedStateReturnsWritableViewsAndSwapsOwner) {
+  torch::Tensor packed = torch::arange(24, torch::kFloat32).reshape({3, 2, 4});
+  Dsv4StateCache state =
+      Dsv4StateCache::from_packed(packed, torch::Tensor(), torch::Tensor());
+
+  EXPECT_EQ(shape_vec(state.kv()), (std::vector<int64_t>{3, 2, 2}));
+  EXPECT_EQ(shape_vec(state.score()), (std::vector<int64_t>{3, 2, 2}));
+  EXPECT_EQ(state.kv().storage().unsafeGetStorageImpl(),
+            state.packed().storage().unsafeGetStorageImpl());
+  EXPECT_EQ(state.score().storage().unsafeGetStorageImpl(),
+            state.packed().storage().unsafeGetStorageImpl());
+  state.kv().fill_(42.0F);
+  EXPECT_TRUE(torch::equal(
+      state.packed().narrow(/*dim=*/2, /*start=*/0, /*length=*/2), state.kv()));
+  state.packed().narrow(/*dim=*/2, /*start=*/2, /*length=*/2).fill_(17.0F);
+  EXPECT_TRUE(torch::equal(state.score(), torch::full({3, 2, 2}, 17.0F)));
+
+  torch::Tensor src = torch::tensor({0}, torch::kLong);
+  torch::Tensor dst = torch::tensor({2}, torch::kLong);
+  torch::Tensor expected = state.packed().clone();
+  expected.index_copy_(0, dst, torch::index_select(expected, 0, src));
+  state.swap_blocks(src, dst);
+
+  EXPECT_TRUE(torch::equal(state.packed(), expected));
+  EXPECT_TRUE(torch::equal(
+      state.kv(), expected.narrow(/*dim=*/2, /*start=*/0, /*length=*/2)));
+}
+
+TEST(Dsv4StateCacheTest, MissingPackedFallsBackWithoutSwappingSplit) {
+  torch::Tensor kv = torch::tensor({{{1.0F}}, {{2.0F}}});
+  torch::Tensor score = torch::tensor({{{3.0F}}, {{4.0F}}});
+  Dsv4StateCache state =
+      Dsv4StateCache::from_packed(torch::Tensor(), kv, score);
+
+  EXPECT_EQ(state.kv().data_ptr(), kv.data_ptr());
+  EXPECT_EQ(state.score().data_ptr(), score.data_ptr());
+  EXPECT_FALSE(state.packed().defined());
+
+  torch::Tensor src = torch::tensor({0}, torch::kLong);
+  torch::Tensor dst = torch::tensor({1}, torch::kLong);
+  state.swap_blocks(src, dst);
+
+  EXPECT_TRUE(torch::equal(state.kv(), kv));
+  EXPECT_TRUE(torch::equal(state.score(), score));
+}
 
 TEST(KVCacheTest, DeepSeekV4FourDimCachesUseDeviceLayout) {
   constexpr int64_t kSwaCount = 10;
