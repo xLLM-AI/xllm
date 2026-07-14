@@ -432,7 +432,7 @@ torch::Tensor DeepseekV2AttentionImpl::forward(
     const torch::Tensor& hidden_states,
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
-    const v32_sp::DeepseekV32SPContext* sp_ctx) {
+    const v32_cp::DeepseekV32CPContext* sp_ctx) {
   bool is_prefill_or_chunked_prefill =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
   if (sp_ctx != nullptr && can_use_sp()) {

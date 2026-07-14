@@ -239,9 +239,9 @@ class DeepseekV2SparseMoEBlockTest : public ::testing::Test {
   std::unique_ptr<test::MockProcessGroup> tp_pg_;
   std::unique_ptr<test::MockProcessGroup> single_rank_pg_;
 
-  v32_sp::DeepseekV32SPContext make_sp_ctx(
+  v32_cp::DeepseekV32CPContext make_sp_ctx(
       std::vector<int32_t> tokens_per_rank = {2, 2}) const {
-    v32_sp::DeepseekV32SPContext sp_ctx;
+    v32_cp::DeepseekV32CPContext sp_ctx;
     sp_ctx.rank = 0;
     sp_ctx.process_group = tp_pg_.get();
     sp_ctx.comm_plan.tokens_per_rank = std::move(tokens_per_rank);

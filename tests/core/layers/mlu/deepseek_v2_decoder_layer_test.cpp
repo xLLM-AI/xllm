@@ -719,7 +719,7 @@ class DeepseekV2DecoderLayerTest : public ::testing::Test {
     sp_ctx_.comm_plan.token_num_offset = 0;
     sp_ctx_.comm_plan.ffn_can_rs =
         v32_sp::can_ffn_rs(sp_ctx_.comm_plan.tokens_per_rank);
-    decoder->set_sequence_parallel_context(&sp_ctx_);
+    decoder->set_context_parallel_context(&sp_ctx_);
   }
 
   ModelInputParams build_prefill_params(int64_t batch_size, int64_t seq_len) {
@@ -834,7 +834,7 @@ class DeepseekV2DecoderLayerTest : public ::testing::Test {
   std::unique_ptr<test::MockProcessGroup> single_rank_pg_;
   std::unique_ptr<test::MockProcessGroup> sp_pg_;
   ModelContext context_{};
-  v32_sp::DeepseekV32SPContext sp_ctx_{};
+  v32_cp::DeepseekV32CPContext sp_ctx_{};
 };
 
 namespace {

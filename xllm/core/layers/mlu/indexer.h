@@ -31,7 +31,7 @@ limitations under the License.
 #include "layers/common/linear.h"
 #include "layers/common/rms_norm.h"
 #include "layers/common/rotary_embedding.h"
-#include "layers/mlu/deepseek_v32_sp_context.h"
+#include "layers/mlu/deepseek_v32_cp_context.h"
 
 namespace xllm {
 namespace layer {
@@ -94,16 +94,16 @@ class IndexerImpl : public torch::nn::Module {
                          const torch::Tensor& q_norm,
                          const torch::Tensor& positions,
                          const AttentionMetadata& attn_metadata,
-                         const v32_sp::DeepseekV32SPContext& sp_ctx,
+                         const v32_cp::DeepseekV32CPContext& sp_ctx,
                          bool quantize_output = false);
 
-  v32_sp::PaddedGatherHandle sp_comm(
+  v32_cp::PaddedGatherHandle sp_comm(
       const torch::Tensor& k_local,
-      const v32_sp::DeepseekV32SPContext& sp_ctx);
+      const v32_cp::DeepseekV32CPContext& sp_ctx);
 
   torch::Tensor sp_wait_k(const torch::Tensor& k_local,
-                          const v32_sp::PaddedGatherHandle& gather_handle,
-                          const v32_sp::DeepseekV32SPContext& sp_ctx);
+                          const v32_cp::PaddedGatherHandle& gather_handle,
+                          const v32_cp::DeepseekV32CPContext& sp_ctx);
 
   std::tuple<torch::Tensor, torch::Tensor> sp_post(
       const IndexerSPPreOut& pre_out,
@@ -111,7 +111,7 @@ class IndexerImpl : public torch::nn::Module {
       torch::Tensor& k_cache,
       const AttentionMetadata& attn_metadata,
       const torch::Tensor& gathered_slot_mapping,
-      const v32_sp::DeepseekV32SPContext& sp_ctx,
+      const v32_cp::DeepseekV32CPContext& sp_ctx,
       const std::optional<torch::Tensor>& k_cache_scale = std::nullopt);
 
   // load the weight from the checkpoint
@@ -213,7 +213,7 @@ class IndexerImpl : public torch::nn::Module {
       const torch::Tensor& k_source,
       const std::optional<torch::Tensor>& k_source_scale,
       const AttentionMetadata& attn_metadata,
-      const v32_sp::DeepseekV32SPContext& sp_ctx);
+      const v32_cp::DeepseekV32CPContext& sp_ctx);
 };
 
 TORCH_MODULE(Indexer);

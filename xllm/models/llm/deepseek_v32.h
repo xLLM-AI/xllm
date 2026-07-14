@@ -20,7 +20,7 @@ limitations under the License.
 
 #include "deepseek_v2.h"
 #include "layers/common/attention_metadata_builder.h"
-#include "layers/mlu/deepseek_v32_sp_context.h"
+#include "layers/mlu/deepseek_v32_cp_context.h"
 #include "platform/platform.h"
 
 namespace xllm {
@@ -71,7 +71,7 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
                                                      /*device=*/device_));
     }
     auto& attn_metadata = *modified_input_params.attn_metadata;
-    std::optional<layer::v32_sp::DeepseekV32SPContext> cp_ctx;
+    std::optional<layer::v32_cp::DeepseekV32CPContext> cp_ctx;
     const bool use_model_partition =
         cp_size_ > 1 && Platform::uses_model_cp_partition();
     if (use_model_partition) {
@@ -79,7 +79,7 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
         CHECK_EQ(parallel_world_size_, 1)
             << "deepseek_v32 Prefill CP requires cp_group_.";
       } else if (cp_group_->world_size() > 1) {
-        cp_ctx = layer::v32_sp::build_deepseek_v32_sp_context(
+        cp_ctx = layer::v32_cp::build_deepseek_v32_cp_context(
             cp_size_,
             attn_metadata,
             input_params.meta.batch_forward_type,
@@ -100,9 +100,9 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
     active_cp_context_ = &cp_ctx.value();
     torch::Tensor hidden_states = embed_mod()(tokens);
     hidden_states =
-        layer::v32_sp::reorder_to_local_shard(hidden_states, cp_ctx.value());
+        layer::v32_cp::reorder_to_local_shard(hidden_states, cp_ctx.value());
     torch::Tensor positions_local =
-        layer::v32_sp::reorder_to_local_shard(positions, cp_ctx.value());
+        layer::v32_cp::reorder_to_local_shard(positions, cp_ctx.value());
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_ref().size(); ++i) {
 #if defined(USE_CUDA) || defined(USE_MUSA)
@@ -123,7 +123,7 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
       }
     }
     hidden_states =
-        layer::v32_sp::gather_and_restore_global(hidden_states, cp_ctx.value());
+        layer::v32_cp::gather_and_restore_global(hidden_states, cp_ctx.value());
     auto [h, res] = norm_mod()(hidden_states, residual);
     active_cp_context_ = nullptr;
     return ModelOutput(h, res);
@@ -135,7 +135,7 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
       layer::DeepseekV2DecoderLayer& layer,
       const layer::AttentionMetadata& /*attn_metadata*/) override {
 #if defined(USE_MLU)
-    layer->set_sequence_parallel_context(active_cp_context_);
+    layer->set_context_parallel_context(active_cp_context_);
 #endif
   }
 
@@ -144,7 +144,7 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
   ProcessGroup* cp_group_ = nullptr;
   int32_t parallel_world_size_ = 1;
   int32_t cp_size_ = 1;
-  const layer::v32_sp::DeepseekV32SPContext* active_cp_context_ = nullptr;
+  const layer::v32_cp::DeepseekV32CPContext* active_cp_context_ = nullptr;
 };
 TORCH_MODULE(DeepseekV32Model);
 

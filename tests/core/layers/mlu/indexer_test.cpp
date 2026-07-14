@@ -401,7 +401,7 @@ class IndexerTest : public ::testing::Test {
     EXPECT_TRUE(k_cache_scale_cpu.ne(0).any().item<bool>());
   }
 
-  v32_sp::DeepseekV32SPContext make_single_rank_sp_context(
+  v32_cp::DeepseekV32CPContext make_single_rank_sp_context(
       const TestInputs& inputs,
       int64_t token_num) const {
     const int32_t token_num_i32 = static_cast<int32_t>(token_num);
@@ -420,7 +420,7 @@ class IndexerTest : public ::testing::Test {
         torch::tensor({0, token_num_i32}, int_option_).view({1, 2});
     torch::Tensor context_prefix =
         torch::tensor({0, context_len}, int_option_).view({1, 2});
-    v32_sp::DeepseekV32SPContext sp_ctx;
+    v32_cp::DeepseekV32CPContext sp_ctx;
     sp_ctx.local_attn_metadata = inputs.metadata;
     sp_ctx.batch_forward_type = inputs.metadata.is_chunked_prefill
                                     ? BatchForwardType::CHUNKED_PREFILL
@@ -634,7 +634,7 @@ TEST_F(IndexerTest, Int8SpPrefillWritesCacheScaleAndSelectsBlocks) {
   TestInputs inputs = create_quantized_inputs(
       /*batch_size=*/1, kTokenNum, /*is_prefill=*/true);
   Indexer indexer = create_indexer(inputs, /*enable_fused_qk=*/true);
-  v32_sp::DeepseekV32SPContext sp_ctx =
+  v32_cp::DeepseekV32CPContext sp_ctx =
       make_single_rank_sp_context(inputs, kTokenNum);
 
   IndexerSPPreOut pre_out = indexer->sp_pre(inputs.x,
@@ -684,7 +684,7 @@ TEST_F(IndexerTest, Int8SpChunkedPrefillMatchesSingleRankNormalPath) {
                   /*enable_fused_qk=*/true);
 
   Indexer indexer = create_indexer(sp_inputs, /*enable_fused_qk=*/true);
-  v32_sp::DeepseekV32SPContext sp_ctx =
+  v32_cp::DeepseekV32CPContext sp_ctx =
       make_single_rank_sp_context(sp_inputs, kQueryLen);
   IndexerSPPreOut pre_out = indexer->sp_pre(sp_inputs.x,
                                             sp_inputs.q_norm,

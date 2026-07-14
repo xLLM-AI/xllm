@@ -33,7 +33,7 @@ limitations under the License.
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "layers/mlu/deepseek_v2_attention.h"
-#include "layers/mlu/deepseek_v32_sp_context.h"
+#include "layers/mlu/deepseek_v32_cp_context.h"
 #include "layers/mlu/tests_utils.h"
 #include "platform/device.h"
 #include "platform/platform.h"
@@ -503,7 +503,7 @@ AttentionRunResult run_attention_prefill_once(
     bool enable_fused_mla_kernel,
     BatchForwardType batch_forward_type = BatchForwardType::PREFILL,
     int32_t prefix_len = 0,
-    bool build_sp_context = true) {
+    bool build_cp_context = true) {
   ParallelArgs effective_parallel_args = parallel_args;
   effective_parallel_args.cp_size() =
       enable_full_weight_path ? parallel_args.world_size() : 1;
@@ -518,14 +518,14 @@ AttentionRunResult run_attention_prefill_once(
       batch_forward_type.is_chunked_prefill()
           ? create_chunked_metadata(options, prefix_len, token_num)
           : create_prefill_metadata(options, token_num);
-  std::optional<layer::v32_sp::DeepseekV32SPContext> sp_ctx;
+  std::optional<layer::v32_cp::DeepseekV32CPContext> sp_ctx;
   torch::Tensor local_positions = positions;
   torch::Tensor local_hidden_states = hidden_states;
-  if (build_sp_context && enable_full_weight_path && args.index_n_heads() > 0) {
+  if (build_cp_context && enable_full_weight_path && args.index_n_heads() > 0) {
     ProcessGroup* cp_group = parallel_args.cp_group_ != nullptr
                                  ? parallel_args.cp_group_
                                  : parallel_args.process_group_;
-    sp_ctx = layer::v32_sp::build_deepseek_v32_sp_context(
+    sp_ctx = layer::v32_cp::build_deepseek_v32_cp_context(
         effective_parallel_args.cp_size(),
         metadata,
         batch_forward_type,
@@ -535,9 +535,9 @@ AttentionRunResult run_attention_prefill_once(
         parallel_args.world_size());
     if (sp_ctx.has_value()) {
       local_positions =
-          layer::v32_sp::reorder_to_local_shard(positions, sp_ctx.value());
+          layer::v32_cp::reorder_to_local_shard(positions, sp_ctx.value());
       local_hidden_states =
-          layer::v32_sp::reorder_to_local_shard(hidden_states, sp_ctx.value());
+          layer::v32_cp::reorder_to_local_shard(hidden_states, sp_ctx.value());
     }
   }
   AttentionRunResult result;
@@ -552,8 +552,8 @@ AttentionRunResult run_attention_prefill_once(
       sp_ctx.has_value() ? sp_ctx->comm_plan.tokens_per_rank.at(sp_ctx->rank)
                          : result.local_output.size(0);
   if (sp_ctx.has_value()) {
-    result.global_output = layer::v32_sp::restore_gathered_to_global_order(
-        layer::v32_sp::all_gather_across_ranks(result.local_output,
+    result.global_output = layer::v32_cp::restore_gathered_to_global_order(
+        layer::v32_cp::all_gather_across_ranks(result.local_output,
                                                sp_ctx.value()),
         sp_ctx.value());
   }
@@ -959,7 +959,7 @@ int32_t run_attention_prefill_sp_baseline_test_child(int32_t rank,
                                    /*enable_fused_mla_kernel=*/false,
                                    BatchForwardType::PREFILL,
                                    /*prefix_len=*/0,
-                                   /*build_sp_context=*/false);
+                                   /*build_cp_context=*/false);
     auto sp_result =
         run_attention_prefill_once(model_args,
                                    quant_args,

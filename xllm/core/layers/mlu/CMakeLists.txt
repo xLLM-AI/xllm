@@ -18,7 +18,7 @@ cc_library(
     deepseek_v4/deepseek_v4_decoder_layer.h
     deepseek_v4/deepseek_v4_sparse_moe_block.h
     deepseek_v4/hyper_connection.h
-    deepseek_v32_sp_context.h
+    deepseek_v32_cp_context.h
     deepseek_v32_sp_plan.h
     moe_gate.h
     fused_moe.h

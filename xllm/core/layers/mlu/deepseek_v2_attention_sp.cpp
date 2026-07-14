@@ -25,7 +25,7 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
     const torch::Tensor& positions,
     const torch::Tensor& hidden_states,
     const AttentionMetadata& attn_metadata,
-    const v32_sp::DeepseekV32SPContext& sp_ctx,
+    const v32_cp::DeepseekV32CPContext& sp_ctx,
     KVCache& kv_cache,
     bool is_prefill_or_chunked_prefill) {
   CHECK(can_use_sp())
@@ -39,10 +39,10 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
 
   std::optional<torch::Tensor> new_block_tables = std::nullopt;
   std::optional<torch::Tensor> new_context_lens = std::nullopt;
-  v32_sp::PaddedGatherHandle mla_handle;
+  v32_cp::PaddedGatherHandle mla_handle;
   torch::Tensor index_cache = kv_cache.get_index_cache();
   IndexerSPPreOut index_pre;
-  v32_sp::PaddedGatherHandle index_handle;
+  v32_cp::PaddedGatherHandle index_handle;
 
   Device device(hidden_states.device());
   if (sp_comm_stream_ == nullptr) {
@@ -111,7 +111,7 @@ DeepseekV2AttentionImpl::MlaInputs DeepseekV2AttentionImpl::build_sp_mla_inputs(
     const torch::Tensor& hidden_states,
     const torch::Tensor& positions,
     const QueryPrep& query_prep,
-    const v32_sp::DeepseekV32SPContext& sp_ctx) {
+    const v32_cp::DeepseekV32CPContext& sp_ctx) {
   MlaInputs out;
   out.q_input = torch::empty({hidden_states.size(0),
                               full_heads().attn,
@@ -136,17 +136,17 @@ DeepseekV2AttentionImpl::MlaInputs DeepseekV2AttentionImpl::build_sp_mla_inputs(
   return out;
 }
 
-v32_sp::PaddedGatherHandle DeepseekV2AttentionImpl::sp_mla_comm(
+v32_cp::PaddedGatherHandle DeepseekV2AttentionImpl::sp_mla_comm(
     const torch::Tensor& k_input,
-    const v32_sp::DeepseekV32SPContext& sp_ctx) const {
+    const v32_cp::DeepseekV32CPContext& sp_ctx) const {
   return parallel_state::launch_gather(
       k_input, sp_ctx.process_group, sp_ctx.comm_plan.tokens_per_rank);
 }
 
 void DeepseekV2AttentionImpl::finish_sp_k_gather(
     MlaInputs& mla_inputs,
-    const v32_sp::PaddedGatherHandle& k_handle,
-    const v32_sp::DeepseekV32SPContext& sp_ctx) const {
+    const v32_cp::PaddedGatherHandle& k_handle,
+    const v32_cp::DeepseekV32CPContext& sp_ctx) const {
   (void)sp_ctx;
   mla_inputs.k_input = parallel_state::finish_gather(k_handle);
   mla_inputs.v_input = mla_inputs.k_input.slice(-1, 0, kv_lora_rank_);

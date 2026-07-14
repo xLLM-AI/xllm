@@ -27,7 +27,7 @@ limitations under the License.
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "layers/common/dp_utils.h"
-#include "layers/mlu/deepseek_v32_sp_context.h"
+#include "layers/mlu/deepseek_v32_cp_context.h"
 #include "layers/mlu/fused_moe.h"
 
 namespace xllm {
@@ -90,7 +90,7 @@ class DeepseekV2SparseMoEBlockImpl : public torch::nn::Module {
                         bool enable_moe_all2all,
                         const CommFns& comm_fns);
   ForwardResult forward_sp(torch::Tensor x,
-                           const v32_sp::DeepseekV32SPContext& sp_ctx,
+                           const v32_cp::DeepseekV32CPContext& sp_ctx,
                            const CommFns& comm_fns);
 
  private:

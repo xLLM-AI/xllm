@@ -394,7 +394,7 @@ IndexerSPPreOut IndexerImpl::sp_pre(const torch::Tensor& x,
                                     const torch::Tensor& q_norm,
                                     const torch::Tensor& positions,
                                     const AttentionMetadata& attn_metadata,
-                                    const v32_sp::DeepseekV32SPContext& sp_ctx,
+                                    const v32_cp::DeepseekV32CPContext& sp_ctx,
                                     bool quantize_output) {
   (void)sp_ctx;
   IndexerSPPreOut out;
@@ -412,9 +412,9 @@ IndexerSPPreOut IndexerImpl::sp_pre(const torch::Tensor& x,
   return out;
 }
 
-v32_sp::PaddedGatherHandle IndexerImpl::sp_comm(
+v32_cp::PaddedGatherHandle IndexerImpl::sp_comm(
     const torch::Tensor& k_local,
-    const v32_sp::DeepseekV32SPContext& sp_ctx) {
+    const v32_cp::DeepseekV32CPContext& sp_ctx) {
   if (!k_local.defined()) {
     return {};
   }
@@ -424,8 +424,8 @@ v32_sp::PaddedGatherHandle IndexerImpl::sp_comm(
 
 torch::Tensor IndexerImpl::sp_wait_k(
     const torch::Tensor& k_local,
-    const v32_sp::PaddedGatherHandle& gather_handle,
-    const v32_sp::DeepseekV32SPContext& sp_ctx) {
+    const v32_cp::PaddedGatherHandle& gather_handle,
+    const v32_cp::DeepseekV32CPContext& sp_ctx) {
   if (gather_handle.stacked.defined()) {
     (void)sp_ctx;
     return parallel_state::finish_gather(gather_handle);
@@ -439,7 +439,7 @@ std::tuple<torch::Tensor, torch::Tensor> IndexerImpl::sp_post(
     torch::Tensor& k_cache,
     const AttentionMetadata& attn_metadata,
     const torch::Tensor& gathered_slot_mapping,
-    const v32_sp::DeepseekV32SPContext& sp_ctx,
+    const v32_cp::DeepseekV32CPContext& sp_ctx,
     const std::optional<torch::Tensor>& k_cache_scale) {
   CHECK(attn_metadata.is_prefill || attn_metadata.is_chunked_prefill)
       << "deepseek_v32 sequence parallel indexer only supports prefill "
@@ -477,7 +477,7 @@ std::tuple<torch::Tensor, torch::Tensor> IndexerImpl::sp_post(
     std::tie(k_source, k_source_scale) =
         gather_dense_indexer_cache(k_cache, attn_metadata, k_cache_scale);
   } else {
-    k_source = v32_sp::restore_gathered_to_global_order(k_gathered, sp_ctx);
+    k_source = v32_cp::restore_gathered_to_global_order(k_gathered, sp_ctx);
   }
   IndexerSPPreOut select_pre = pre_out;
   if (k_cache_scale.has_value()) {
@@ -659,7 +659,7 @@ IndexerImpl::run_indexer_select_kernel_sp_segmented(
     const torch::Tensor& k_source,
     const std::optional<torch::Tensor>& k_source_scale,
     const AttentionMetadata& attn_metadata,
-    const v32_sp::DeepseekV32SPContext& sp_ctx) {
+    const v32_cp::DeepseekV32CPContext& sp_ctx) {
   auto device = attn_metadata.block_table.device();
   auto int32_options =
       torch::TensorOptions().dtype(torch::kInt32).device(device);
