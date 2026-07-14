@@ -99,7 +99,7 @@ XLLM_CAPI_EXPORT bool xllm_llm_initialize(
         .communication_backend(xllm_init_options.communication_backend)
         .expert_parallel_degree(xllm_init_options.expert_parallel_degree)
         .enable_chunked_prefill(xllm_init_options.enable_chunked_prefill)
-        .enable_prefill_sp(xllm_init_options.enable_prefill_sp)
+        .cp_size(static_cast<int32_t>(xllm_init_options.cp_size))
         .master_node_addr(xllm_init_options.master_node_addr)
         .transfer_listen_port(xllm_init_options.transfer_listen_port)
         .nnodes(xllm_init_options.nnodes)

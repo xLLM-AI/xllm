@@ -51,6 +51,7 @@ limitations under the License.
 #include "core/framework/config/profile_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/platform/platform.h"
 #include "core/platform/sleepable_allocator.h"
 #if defined(USE_NPU)
 #include "platform/npu/device_capture_lock.h"
@@ -782,7 +783,7 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
   // Prefill-side CP (partition + ATB cp tensors) applies to PREFILL,
   // CHUNKED_PREFILL, and MIXED. `no_decode()` wrongly excludes MIXED.
   const bool needs_cp_prefill_side =
-      parallel_args_.cp_size() > 1 &&
+      parallel_args_.cp_size() > 1 && !Platform::uses_model_cp_partition() &&
       !input.input_params.meta.batch_forward_type.is_decode();
   const bool needs_cp_partition =
       needs_cp_prefill_side && !input.cp_partitioned;
@@ -903,7 +904,8 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
                         processed_input.token_ids.numel() == 0);
     const bool need_fake_input_for_empty_shard =
         empty_shard && !input_params.meta.batch_forward_type.is_empty() &&
-        (context_.get_parallel_args().cp_size() > 1 ||
+        ((context_.get_parallel_args().cp_size() > 1 &&
+          !Platform::uses_model_cp_partition()) ||
          (context_.get_parallel_args().dp_size() > 1 ||
           context_.get_parallel_args().ep_size() > 1 ||
           !context_.get_parallel_args().mapping_data().empty()));

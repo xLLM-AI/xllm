@@ -645,7 +645,7 @@ class DeepseekV2DecoderLayerTest : public ::testing::Test {
     parallel_args_.tp_group_ = tp_pg_.get();
     parallel_args_.single_rank_group_ =
         tp_size > 1 ? build_single_rank_pg() : tp_pg_.get();
-    parallel_args_.sp_group_ = tp_pg_.get();
+    parallel_args_.cp_group_ = tp_pg_.get();
     refresh_ctx();
   }
 
@@ -664,7 +664,7 @@ class DeepseekV2DecoderLayerTest : public ::testing::Test {
     parallel_args_.tp_group_ = tp_pg_.get();
     parallel_args_.single_rank_group_ =
         world_size > 1 ? build_single_rank_pg() : tp_pg_.get();
-    parallel_args_.sp_group_ = tp_pg_.get();
+    parallel_args_.cp_group_ = tp_pg_.get();
     refresh_ctx();
   }
 
@@ -683,7 +683,7 @@ class DeepseekV2DecoderLayerTest : public ::testing::Test {
     parallel_args_.dp_local_process_group_ = dp_pg_.get();
     parallel_args_.tp_group_ = tp_pg_.get();
     parallel_args_.single_rank_group_ = tp_pg_.get();
-    parallel_args_.sp_group_ = tp_pg_.get();
+    parallel_args_.cp_group_ = tp_pg_.get();
     parallel_args_.moe_ep_group_ = global_pg_.get();
     parallel_args_.moe_tp_group_ = tp_pg_.get();
     refresh_ctx();

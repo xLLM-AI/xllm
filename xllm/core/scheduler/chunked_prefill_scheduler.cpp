@@ -24,6 +24,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/platform/platform.h"
 #include "framework/batch/batch_factory.h"
 #include "util/timer.h"
 #include "util/utils.h"
@@ -401,8 +402,10 @@ void ChunkedPrefillScheduler::handle_prefill_requests(
       // FLAGS directly here because the scheduler holds no ParallelArgs.
       const int32_t kv_split_for_align =
           ::xllm::ParallelConfig::get_instance().kv_split_size_effective();
+      const int32_t worker_cp_size =
+          Platform::uses_model_cp_partition() ? 1 : options_.cp_size();
       num_tokens = maybe_align_cp_chunk_tokens(num_tokens,
-                                               options_.cp_size(),
+                                               worker_cp_size,
                                                kv_split_for_align,
                                                kv_cache_manager_->block_size(),
                                                remaining_in_seq);

@@ -122,8 +122,6 @@ class Options {
 
   PROPERTY(bool, enable_chunked_prefill) = true;
 
-  PROPERTY(bool, enable_prefill_sp) = false;
-
   PROPERTY(std::optional<std::string>, master_node_addr);
 
   PROPERTY(int32_t, nnodes) = 1;

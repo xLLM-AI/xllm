@@ -52,6 +52,10 @@ class Platform final {
 #endif
   }
 
+  // Temporary compatibility boundary for MLU CP. Remove this capability
+  // after MLU moves CP input preparation into WorkerImpl.
+  static constexpr bool uses_model_cp_partition() { return is_mlu(); }
+
   static constexpr bool is_ilu() {
 #if defined(USE_ILU)
     return true;

@@ -24,6 +24,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 
 namespace xllm {
@@ -75,6 +76,15 @@ class DumpConfigJsonFlagGuard final {
  private:
   bool old_enable_dump_config_json_;
   std::string old_dump_config_json_file_;
+};
+
+class CpSizeFlagGuard final {
+ public:
+  CpSizeFlagGuard() : old_cp_size_(FLAGS_cp_size) {}
+  ~CpSizeFlagGuard() { FLAGS_cp_size = old_cp_size_; }
+
+ private:
+  int32_t old_cp_size_;
 };
 
 class StartupConfigGuard final {
@@ -185,6 +195,35 @@ TEST(KVCacheConfigValidationTest, RejectsUnsupportedIndexerCacheDtypes) {
         config.validate();
       },
       "indexer_cache_dtype.*auto.*int8");
+}
+
+TEST(ConfigJsonTest, ParallelConfigReadsContextParallelSize) {
+  CpSizeFlagGuard flag_guard;
+  const JsonReader json =
+      config::parse_json_string(R"json({"cp_size": 4})json");
+  ParallelConfig parallel_config;
+  parallel_config.from_json(json);
+
+  EXPECT_EQ(parallel_config.cp_size(), 4);
+}
+
+TEST(ConfigJsonTest, RegistersOnlyContextParallelCommandLineOption) {
+  google::CommandLineFlagInfo flag_info;
+  EXPECT_TRUE(google::GetCommandLineFlagInfo("cp_size", &flag_info));
+  EXPECT_EQ(flag_info.default_value, "1");
+
+  const std::string removed_flag = std::string("enable_") + "prefill_sp";
+  EXPECT_FALSE(
+      google::GetCommandLineFlagInfo(removed_flag.c_str(), &flag_info));
+}
+
+TEST(ConfigJsonTest, RejectsRemovedPrefillSequenceParallelKey) {
+  const std::string removed_key = std::string("enable_") + "prefill_sp";
+  const JsonReader json =
+      config::parse_json_string("{\"" + removed_key + "\": true}");
+  ParallelConfig parallel_config;
+
+  EXPECT_DEATH(parallel_config.from_json(json), "unsupported.*configuration");
 }
 
 TEST(ConfigJsonTest, LoadJsonFileReadsConfigFixture) {

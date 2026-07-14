@@ -20,6 +20,8 @@ limitations under the License.
 #include <memory>
 #include <string>
 
+#include "core/common/types.h"
+
 namespace xllm {
 
 class WorkerServer;
@@ -40,7 +42,6 @@ class SpawnWorkerServer final {
                              uint64_t input_shm_size,
                              uint64_t output_shm_size,
                              bool is_local,
-                             bool enable_prefill_sp,
                              const std::string& task_type,
                              const std::string& worker_type,
                              bool enable_speculative_decode,
@@ -58,6 +59,9 @@ class SpawnWorkerServer final {
                              int32_t tp_size,
                              int32_t sp_size,
                              int32_t cfg_size,
+                             int32_t cp_size,
+                             int32_t ep_size,
+                             const InstanceRole& instance_role,
                              bool enable_mtp_draft_body_tp1);
 
   ~SpawnWorkerServer();

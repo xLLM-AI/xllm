@@ -41,10 +41,10 @@ class CollectiveCommunicator : public CollectiveCommunicatorBase {
   std::unique_ptr<ProcessGroup> tp_group_;
   std::unique_ptr<ProcessGroup> encoder_dp_group_;
   std::unique_ptr<ProcessGroup> single_rank_group_;
-  // Reserved owner for a future standalone SP group. The current code path
-  // aliases ParallelArgs::sp_group_ to tp_group_ instead of constructing a
-  // separate communicator, so this stays empty for now.
-  std::unique_ptr<ProcessGroup> sp_group_;
+  // Reserved owner for a future standalone CP group. The current MLU
+  // model-side CP path aliases ParallelArgs::cp_group_ to tp_group_ instead of
+  // constructing a separate communicator, so this stays empty for now.
+  std::unique_ptr<ProcessGroup> cp_group_;
   std::unique_ptr<ProcessGroup> moe_tp_group_;
   std::unique_ptr<ProcessGroup> moe_ep_group_;
 };

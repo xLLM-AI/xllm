@@ -39,6 +39,7 @@ limitations under the License.
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/service_config.h"
+#include "core/platform/platform.h"
 #include "framework/block/block_utils.h"
 // hierarchy temporarily disabled during the block-manager refactor
 // #include "framework/block/hierarchy_block_manager_pool.h"
@@ -95,7 +96,14 @@ LLMEngine::LLMEngine(const runtime::Options& options,
   cp_size_ = options_.cp_size();
   worker_clients_num_ = worker_clients_.size();
   dp_local_size_ = worker_clients_num_ / dp_size_;
-  dp_local_tp_size_ = dp_local_size_ / cp_size_;
+  const bool use_model_partition =
+      cp_size_ > 1 && Platform::uses_model_cp_partition();
+  // MLU model-side CP temporarily overlaps the CP and TP rank sets, so all
+  // DP-local ranks still form the effective TP execution width. Once MLU
+  // adopts orthogonal worker-side CP x TP, remove this special case and use
+  // dp_local_size_ / cp_size_ for every backend.
+  dp_local_tp_size_ =
+      use_model_partition ? dp_local_size_ : dp_local_size_ / cp_size_;
 
   // create ThreadPool for link cluster
   link_threadpool_ = std::make_unique<ThreadPool>(
@@ -660,7 +668,7 @@ std::vector<folly::SemiFuture<uint32_t>> LLMEngine::transfer_kv_blocks(
   std::vector<folly::SemiFuture<uint32_t>> futures;
   futures.reserve(dp_local_tp_size_);
 
-  for (auto tp_rank = 0; tp_rank < dp_local_tp_size_; ++tp_rank) {
+  for (uint32_t tp_rank = 0; tp_rank < dp_local_tp_size_; ++tp_rank) {
     futures.emplace_back(worker_clients_[tp_rank + dp_local_tp_size_ * dp_rank]
                              ->transfer_kv_blocks(block_transfer_info));
   }
@@ -672,7 +680,7 @@ void LLMEngine::transfer_kv_blocks(
     const uint32_t dp_rank,
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
-  for (auto tp_rank = 0; tp_rank < dp_local_tp_size_; ++tp_rank) {
+  for (uint32_t tp_rank = 0; tp_rank < dp_local_tp_size_; ++tp_rank) {
     worker_clients_[tp_rank + dp_local_tp_size_ * dp_rank]->transfer_kv_blocks(
         batch_id, block_transfer_info);
   }
@@ -685,7 +693,7 @@ void LLMEngine::prefetch_from_storage(
     std::vector<std::shared_ptr<std::atomic<uint32_t>>>* prefetch_results) {
   prefetch_results->reserve(dp_local_tp_size_);
   flag->store(dp_local_tp_size_, std::memory_order_relaxed);
-  for (auto tp_rank = 0; tp_rank < dp_local_tp_size_; ++tp_rank) {
+  for (uint32_t tp_rank = 0; tp_rank < dp_local_tp_size_; ++tp_rank) {
     prefetch_results->emplace_back(std::make_shared<std::atomic<uint32_t>>(0));
     worker_clients_[tp_rank + dp_local_tp_size_ * dp_rank]
         ->prefetch_from_storage(
@@ -999,7 +1007,7 @@ void LLMEngine::update_last_step_result(std::vector<Batch>& last_batch) {
   // cause the output on other workers is the same as that on driver.
   // Under data parallelism (DP), we need to get dp_size outputs.
   // The `stride` means the workers num we can skip.
-  int stride = dp_local_tp_size_;
+  uint32_t stride = dp_local_tp_size_;
   // If EPLB is enabled, we need to get results from all workers,
   // because the experts on each worker are different,
   // and the tokens load of all experts needs to be returned to engine.

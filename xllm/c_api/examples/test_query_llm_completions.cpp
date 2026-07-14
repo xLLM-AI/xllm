@@ -31,6 +31,7 @@ XLLM_LLM_Handler* service_startup_hook() {
   // the default value(XLLM_INIT_LLM_OPTIONS_DEFAULT) will be used
   XLLM_InitOptions init_options;
   xllm_llm_init_options_default(&init_options);
+  init_options.cp_size = 1;
   snprintf(
       init_options.log_dir, sizeof(init_options.log_dir), "/export/xllm/log");
 

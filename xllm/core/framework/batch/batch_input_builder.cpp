@@ -31,6 +31,7 @@ limitations under the License.
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/multimodal/mm_visitor.h"
+#include "core/platform/platform.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
 #include "framework/request/sequence.h"
@@ -191,7 +192,7 @@ BatchInputBuilder::BatchInputBuilder(
       num_sequences_(sequences.size()),
       swap_block_transfer_infos_(swap_block_transfer_infos),
       batch_id_(batch_id),
-      cp_size_(std::max(1, cp_size)) {
+      cp_size_(Platform::uses_model_cp_partition() ? 1 : std::max(1, cp_size)) {
   // Reserve space for better performance
   const size_t reserve_size = 1024;
   state_.flatten_tokens_vec.reserve(reserve_size);

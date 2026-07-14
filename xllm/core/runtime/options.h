@@ -141,9 +141,6 @@ struct Options {
   // enable chunked prefill.
   PROPERTY(bool, enable_chunked_prefill) = true;
 
-  // enable prefill-only sequence parallel.
-  PROPERTY(bool, enable_prefill_sp) = false;
-
   // enable returning aux_hidden_states in graph executor output.
   PROPERTY(bool, enable_graph_aux_hidden_states) = false;
 

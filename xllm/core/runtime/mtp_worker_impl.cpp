@@ -538,13 +538,13 @@ runtime::Options MTPTargetOptions(const runtime::Options& options) {
   return opts;
 }
 
-runtime::Options MTPDraftOptions(const runtime::Options& options) {
-  auto opts = options;
-  opts.enable_schedule_overlap(false)
+runtime::Options mtp_draft_options(const runtime::Options& options) {
+  runtime::Options draft_options = options;
+  draft_options.enable_schedule_overlap(false)
       .is_draft_engine(true)
       .num_decoding_tokens(1)
       .num_speculative_tokens(0);
-  return opts;
+  return draft_options;
 }
 
 ParallelArgs MTPDraftParallelArgs(const ParallelArgs& parallel_args,
@@ -567,7 +567,7 @@ ParallelArgs MTPDraftParallelArgs(const ParallelArgs& parallel_args,
   draft_args.dp_local_process_group_ = parallel_args.single_rank_group_;
   draft_args.lm_head_group_ = parallel_args.tp_group_;
   draft_args.tp_group_ = parallel_args.single_rank_group_;
-  draft_args.sp_group_ = parallel_args.single_rank_group_;
+  draft_args.cp_group_ = parallel_args.single_rank_group_;
   draft_args.moe_ep_group_ = parallel_args.single_rank_group_;
   draft_args.moe_tp_group_ = parallel_args.single_rank_group_;
   return draft_args;
@@ -605,7 +605,7 @@ MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
                     device,
                     options,
                     MTPTargetOptions(options),
-                    MTPDraftOptions(options),
+                    mtp_draft_options(options),
                     ::xllm::SpeculativeConfig::get_instance()
                         .enable_opt_validate_probs()) {}
 
@@ -618,7 +618,9 @@ MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
     : SpeculativeWorkerImpl(parallel_args, device, options, target_options),
       enable_opt_validate_probs_(enable_opt_validate_probs) {
   draft_impl_ = std::make_unique<LLMWorkerImpl>(
-      MTPDraftParallelArgs(parallel_args, options), device, draft_options);
+      MTPDraftParallelArgs(parallel_args, options),
+      device,
+      mtp_draft_options(draft_options));
 }
 
 bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
@@ -711,7 +713,7 @@ std::tuple<int64_t, int64_t> MTPWorkerImpl::estimate_kv_cache_capacity() {
                                      cache_size_in_bytes);
   const KVCacheEstimateOptions draft_options =
       make_kv_cache_estimate_options(draft_model_args,
-                                     MTPDraftOptions(options_),
+                                     mtp_draft_options(options_),
                                      parallel_args_,
                                      dtype_,
                                      cache_size_in_bytes);

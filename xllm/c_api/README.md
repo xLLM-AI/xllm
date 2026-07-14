@@ -1,5 +1,13 @@
 ### How to compile xllm dynamic library
 
+The C ABI is version 1. `XLLM_InitOptions` now exposes `cp_size` with a default
+of `1`. This is an ABI-breaking structure change, so applications must be
+recompiled against the installed version 1 headers and library.
+
+MLU Context Parallel is available only for supported text-generation models.
+Set `cp_size` to the global world size. In disaggregated PD deployments, set it
+to `N` for the Prefill instance and `1` for the Decode instance.
+
 Run the following command in root directory:
 
 ```

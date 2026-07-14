@@ -89,7 +89,7 @@ class DeepseekV2SparseMoEBlockTest : public ::testing::Test {
     parallel_args_.process_group_ = global_pg_.get();
     parallel_args_.tp_group_ = tp_pg_.get();
     parallel_args_.single_rank_group_ = single_rank_pg_.get();
-    parallel_args_.sp_group_ = tp_pg_.get();
+    parallel_args_.cp_group_ = tp_pg_.get();
     parallel_args_.ep_size_ = 1;
   }
 
@@ -107,7 +107,7 @@ class DeepseekV2SparseMoEBlockTest : public ::testing::Test {
     parallel_args_.process_group_ = global_pg_.get();
     parallel_args_.tp_group_ = tp_pg_.get();
     parallel_args_.single_rank_group_ = single_rank_pg_.get();
-    parallel_args_.sp_group_ = tp_pg_.get();
+    parallel_args_.cp_group_ = tp_pg_.get();
     parallel_args_.dp_local_process_group_ = nullptr;
     parallel_args_.ep_size_ = ep_size;
     parallel_args_.moe_ep_group_ = global_pg_.get();
@@ -132,7 +132,7 @@ class DeepseekV2SparseMoEBlockTest : public ::testing::Test {
     parallel_args_.process_group_ = global_pg_.get();
     parallel_args_.tp_group_ = tp_pg_.get();
     parallel_args_.single_rank_group_ = single_rank_pg_.get();
-    parallel_args_.sp_group_ = tp_pg_.get();
+    parallel_args_.cp_group_ = tp_pg_.get();
     parallel_args_.dp_local_process_group_ = dp_pg_.get();
     parallel_args_.ep_size_ = ep_size;
     parallel_args_.moe_ep_group_ = global_pg_.get();

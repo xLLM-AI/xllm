@@ -115,8 +115,6 @@ DECLARE_int64(cfg_size);
 
 DECLARE_int64(vae_size);
 
-DECLARE_bool(enable_prefill_sp);
-
 DECLARE_bool(enable_mm_encoder_dp);
 
 DECLARE_bool(enable_multi_stream_parallel);

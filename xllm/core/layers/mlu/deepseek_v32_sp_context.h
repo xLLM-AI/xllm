@@ -23,8 +23,6 @@ limitations under the License.
 #include <optional>
 #include <vector>
 
-#include "core/common/global_flags.h"
-#include "core/framework/config/parallel_config.h"
 #include "framework/batch/batch_forward_type.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/parallel_state/process_group.h"
@@ -153,19 +151,21 @@ inline torch::Tensor reorder_by_index(const torch::Tensor& tensor,
                                       const torch::Tensor& reorder_index);
 
 inline std::optional<DeepseekV32SPContext> build_deepseek_v32_sp_context(
+    int32_t cp_size,
     const AttentionMetadata& base_attn_metadata,
     BatchForwardType batch_forward_type,
     const torch::Tensor& tokens,
-    ProcessGroup* sp_group,
+    ProcessGroup* cp_group,
     int32_t curr_rank,
     int32_t world_size) {
-  if (!::xllm::ParallelConfig::get_instance().enable_prefill_sp() ||
-      !batch_forward_type.no_decode() || world_size <= 1) {
+  if (cp_size <= 1 || world_size <= 1) {
     return std::nullopt;
   }
 
-  CHECK(sp_group != nullptr)
-      << "deepseek_v32 sequence parallel requires sp_group.";
+  CHECK(batch_forward_type.no_decode())
+      << "Prefill CP requires a prefill-only batch.";
+  CHECK(cp_group != nullptr) << "deepseek_v32 Prefill CP requires cp_group.";
+  CHECK_EQ(cp_size, world_size) << "cp_size must match cp_group world_size.";
   CHECK_EQ(tokens.dim(), 1)
       << "deepseek_v32 sequence parallel expects 1D tokens.";
   CHECK_GE(curr_rank, 0) << "curr_rank must be non-negative.";
@@ -217,7 +217,7 @@ inline std::optional<DeepseekV32SPContext> build_deepseek_v32_sp_context(
   context.batch_forward_type = batch_forward_type;
   context.total_tokens = total_tokens;
   context.rank = curr_rank;
-  context.process_group = sp_group;
+  context.process_group = cp_group;
 
   CHECK_EQ(context.seg_q_starts_cpu.size(), context.local_segments.size())
       << "deepseek_v32 sequence parallel expects one q start per segment.";

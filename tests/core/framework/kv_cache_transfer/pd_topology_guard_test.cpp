@@ -49,6 +49,28 @@ TEST(PdTopologyGuardTest, HomoTopoBypass) {
   EXPECT_TRUE(result.reason.empty());
 }
 
+TEST(PdTopologyGuardTest, RegistrationOmitsCpAndKeepsTopologyCompatible) {
+  InstanceInfo prefill = make_info(1, {0, 1, 2, 3});
+  prefill.name = "prefill";
+  prefill.type = "PREFILL";
+  prefill.kv_split_size = 1;
+  InstanceInfo decode = make_info(1, {4, 5, 6, 7});
+  decode.name = "decode";
+  decode.type = "DECODE";
+  decode.kv_split_size = 1;
+
+  const nlohmann::json prefill_registration = prefill.serialize_to_json();
+  const nlohmann::json decode_registration = decode.serialize_to_json();
+  EXPECT_FALSE(prefill_registration.contains("cp_size"));
+  EXPECT_FALSE(prefill_registration.contains("requested_cp_size"));
+  EXPECT_FALSE(decode_registration.contains("cp_size"));
+  EXPECT_FALSE(decode_registration.contains("requested_cp_size"));
+
+  const PdTopoResult result = check_pd_topo(prefill, decode, "PUSH", true);
+  EXPECT_EQ(result.status, PdTopoStatus::ALLOW_HOMO);
+  EXPECT_TRUE(result.reason.empty());
+}
+
 TEST(PdTopologyGuardTest, TryGetPdTopoReturnTopo) {
   const InstanceInfo info = make_info(2, {0, 1, 2, 3});
 

@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
+#include "core/platform/platform.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/kv_cache/linear_state_restore.h"
 #include "framework/kv_cache_transfer/kv_transfer_completion.h"
@@ -48,6 +49,10 @@ limitations under the License.
 namespace xllm {
 
 namespace {
+
+bool uses_worker_cp_partition(const runtime::Options& options) {
+  return options.cp_size() > 1 && !Platform::uses_model_cp_partition();
+}
 
 void wait_input_ready_events(const ForwardInput& input, const Stream& stream) {
   CHECK(stream.wait_event(input.metadata_ready_event))
@@ -291,7 +296,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
                                      /*non_blocking=*/false)
                                  .contiguous();
     }
-    if (options_.cp_size() > 1) {
+    if (uses_worker_cp_partition(options_)) {
       logits = model_->logits(model_output.hidden_states,
                               selected_token_idxes,
                               selected_hidden_from_lm_head);
@@ -369,11 +374,12 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       // separately so the embedding cache stores it without re-selecting on
       // the local shard.
       output.sample_output.embeddings = embeddings;
-      if (options_.cp_size() > 1 && selected_hidden_from_lm_head.defined()) {
+      if (uses_worker_cp_partition(options_) &&
+          selected_hidden_from_lm_head.defined()) {
         output.sample_output.selected_embeddings = selected_hidden_from_lm_head;
       }
     } else if (sampling_params.selected_token_idxes.defined()) {
-      if (options_.cp_size() > 1) {
+      if (uses_worker_cp_partition(options_)) {
         CHECK(selected_hidden_from_lm_head.defined())
             << "selected_hidden_from_lm_head must be defined when "
                "selected_token_idxes is defined.";

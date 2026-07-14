@@ -26,6 +26,7 @@ limitations under the License.
 #include <cstdio>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -47,6 +48,7 @@ limitations under the License.
 #include "llm_engine.h"
 #include "llm_master.h"
 #include "models/model_registry.h"
+#include "platform/platform.h"
 #include "rec_engine.h"
 #include "rec_master.h"
 #include "speculative_engine.h"
@@ -64,6 +66,52 @@ DECLARE_bool(graceful_quit_on_sighup);
 
 namespace xllm {
 namespace {
+
+std::optional<std::string> validate_model_cp(const Options& options,
+                                             EngineType engine_type,
+                                             const std::string& model_type,
+                                             int32_t global_world_size) {
+  if (options.cp_size() < 1) {
+    return "cp_size must be greater than or equal to 1";
+  }
+  const bool use_model_partition =
+      options.cp_size() > 1 && Platform::uses_model_cp_partition();
+  if (!use_model_partition) {
+    return std::nullopt;
+  }
+  if (engine_type != EngineType::LLM && engine_type != EngineType::SSM) {
+    return "MLU CP supports only LLM text generation";
+  }
+  if (options.task_type() != "generate") {
+    return "MLU CP supports only the generate task";
+  }
+  if (engine_type == EngineType::SSM &&
+      options.speculative_algorithm() != "Suffix") {
+    return "Current MLU model-side CP does not support MTPWorkerImpl-based "
+           "speculative algorithms such as MTP or Eagle3; disable CP, disable "
+           "the speculative algorithm, or wait for MLU worker-side CP";
+  }
+  if (model_type != "deepseek_v32" && model_type != "glm_moe_dsa") {
+    return "MLU CP does not support model_type=" + model_type;
+  }
+  if (options.instance_role() != InstanceRole::DEFAULT &&
+      options.instance_role() != InstanceRole::PREFILL) {
+    return "MLU CP supports only DEFAULT or PREFILL roles";
+  }
+  if (options.dp_size() != 1) {
+    return "MLU CP requires dp_size == 1";
+  }
+  if (options.cp_size() != global_world_size) {
+    return "MLU CP requires cp_size == global world size";
+  }
+  if (ParallelConfig::get_instance().kv_split_size() != 1) {
+    return "MLU CP requires kv_split_size == 1";
+  }
+  if (options.ep_size() != 1 && options.ep_size() != global_world_size) {
+    return "MLU CP requires ep_size == 1 or global world size";
+  }
+  return std::nullopt;
+}
 
 void print_startup_banner(const std::filesystem::path& model_path,
                           const std::string& backend,
@@ -151,6 +199,17 @@ Master::Master(const Options& options, EngineType type)
       master_status_(options.master_status()) {
   const auto model_path =
       std::filesystem::path(options_.model_path()).lexically_normal();
+  const auto devices =
+      DeviceNameUtils::parse_devices(options_.devices().value_or("auto"));
+  const int32_t global_world_size =
+      options_.nnodes() * static_cast<int32_t>(devices.size());
+  std::string cp_model_type;
+  if (options_.cp_size() > 1 && Platform::uses_model_cp_partition()) {
+    cp_model_type = util::get_model_type(model_path, options_.backend());
+  }
+  const std::optional<std::string> cp_error =
+      validate_model_cp(options_, type, cp_model_type, global_world_size);
+  CHECK(!cp_error.has_value()) << cp_error.value();
   if (options_.enable_prefix_cache() && options_.backend() == "llm") {
     const std::string model_type = util::get_model_type(model_path);
     if (util::is_deepseek_v4_model_type(model_type)) {
@@ -165,8 +224,17 @@ Master::Master(const Options& options, EngineType type)
   options_.enable_mla(util::should_enable_mla(model_path, options_.backend()));
   print_startup_banner(model_path, options_.backend(), options_.node_rank());
   LOG(INFO) << "Master init options: " << options_.to_string();
-  ParallelConfig::get_instance().enable_prefill_sp(
-      options_.enable_prefill_sp());
+  ParallelConfig::get_instance().cp_size(options_.cp_size());
+  const char* cp_partition_stage =
+      options_.cp_size() <= 1
+          ? "disabled"
+          : (Platform::uses_model_cp_partition() ? "model" : "worker");
+  LOG(INFO) << "Resolved CP config: cp_size=" << options_.cp_size()
+            << ", world_size=" << global_world_size
+            << ", dp_size=" << options_.dp_size()
+            << ", ep_size=" << options_.ep_size()
+            << ", cp_partition_stage=" << cp_partition_stage
+            << ", instance_role=" << options_.instance_role().to_string();
 
   // Allow brpc receive SIGTREM and SIGINT signal.
   brpc::FLAGS_graceful_quit_on_sigterm = true;
@@ -210,8 +278,6 @@ Master::Master(const Options& options, EngineType type)
         << "Multi-stream parallel is refactoring now, will be supported later.";
   }
   // construct engine
-  const auto devices =
-      DeviceNameUtils::parse_devices(options_.devices().value_or("auto"));
   LOG(INFO) << "Creating engine with devices: "
             << DeviceNameUtils::to_string(devices);
 
@@ -239,7 +305,7 @@ Master::Master(const Options& options, EngineType type)
         .max_linear_state_cache_slots(options.max_linear_state_cache_slots())
         .task_type(options.task_type())
         .enable_mla(options_.enable_mla())
-        .enable_prefill_sp(options_.enable_prefill_sp())
+        .cp_size(options_.cp_size())
         .npu_kernel_backend(options_.npu_kernel_backend())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .enable_offline_inference(options_.enable_offline_inference())
@@ -313,8 +379,7 @@ Master::Master(const Options& options, EngineType type)
         .node_rank(options.node_rank())
         .dp_size(options.dp_size())
         .ep_size(options.ep_size())
-        .enable_prefill_sp(options_.enable_prefill_sp())
-        .cp_size(options.cp_size())
+        .cp_size(options_.cp_size())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .max_tokens_per_batch(options_.max_tokens_per_batch())
         .max_seqs_per_batch(options_.max_seqs_per_batch())
@@ -368,7 +433,6 @@ Master::Master(const Options& options, EngineType type)
         .node_rank(options_.node_rank())
         .dp_size(options_.dp_size())
         .ep_size(options_.ep_size())
-        .enable_prefill_sp(options_.enable_prefill_sp())
         .cp_size(options_.cp_size())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .max_tokens_per_batch(options_.max_tokens_per_batch())
@@ -435,7 +499,7 @@ Master::Master(const Options& options, EngineType type)
         .node_rank(options_.node_rank())
         .dp_size(options_.dp_size())
         .ep_size(options_.ep_size())
-        .enable_prefill_sp(options_.enable_prefill_sp())
+        .cp_size(options_.cp_size())
         .max_seqs_per_batch(options_.max_seqs_per_batch())
         .beam_width(options_.beam_width())
         .max_tokens_per_batch(options_.max_tokens_per_batch())

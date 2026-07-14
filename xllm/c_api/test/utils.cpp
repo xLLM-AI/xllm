@@ -37,7 +37,6 @@ DEFINE_string(backend,
               "(c_api/rec.h); only one is loaded");
 
 DEFINE_bool(enable_chunked_prefill, false, "");
-DEFINE_bool(enable_prefill_sp, false, "");
 DEFINE_bool(enable_prefix_cache, false, "");
 DEFINE_bool(enable_disagg_pd, false, "");
 DEFINE_bool(enable_pd_ooc, false, "");
@@ -48,6 +47,7 @@ DEFINE_uint32(transfer_listen_port, 26000, "");
 DEFINE_uint32(nnodes, 1, "");
 DEFINE_uint32(node_rank, 0, "");
 DEFINE_uint32(dp_size, 1, "");
+DEFINE_uint32(cp_size, 1, "");
 DEFINE_uint32(ep_size, 1, "");
 DEFINE_uint32(block_size, 1, "");
 DEFINE_uint32(max_cache_size, 1000000, "");
@@ -145,7 +145,6 @@ size_t DTypeSize(XLLM_DataType dt) {
 
 void ApplyGflagsToXllmInitOptions(XLLM_InitOptions* o) {
   o->enable_chunked_prefill = FLAGS_enable_chunked_prefill;
-  o->enable_prefill_sp = FLAGS_enable_prefill_sp;
   o->enable_prefix_cache = FLAGS_enable_prefix_cache;
   o->enable_disagg_pd = FLAGS_enable_disagg_pd;
   o->enable_pd_ooc = FLAGS_enable_pd_ooc;
@@ -156,6 +155,7 @@ void ApplyGflagsToXllmInitOptions(XLLM_InitOptions* o) {
   o->nnodes = FLAGS_nnodes;
   o->node_rank = FLAGS_node_rank;
   o->dp_size = FLAGS_dp_size;
+  o->cp_size = FLAGS_cp_size;
   o->ep_size = FLAGS_ep_size;
   o->block_size = FLAGS_block_size;
   o->max_cache_size = FLAGS_max_cache_size;

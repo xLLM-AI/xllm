@@ -1,4 +1,9 @@
 ### How to compile xllm dynamic library
+
+`XLLM_InitLLMOptions::cp_size` defaults to `1`. MLU Context Parallel requires a
+supported text-generation model and the global world size. For disaggregated
+PD, configure `N` on Prefill and `1` on Decode.
+
 Run the following command in root directory:
 ```
 python setup.py build --generate-so true

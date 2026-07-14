@@ -35,6 +35,7 @@ limitations under the License.
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/rec_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/platform/platform.h"
 #include "distributed_runtime/engine.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/request/priority_comparator.h"
@@ -485,8 +486,10 @@ void ContinuousScheduler::handle_prefill_requests(
       // Currently overestimating the number of tokens actually processed when
       // enable prefix cache
       size_t num_tokens = prefill_sequence->num_need_compute_tokens();
+      const int32_t worker_cp_size =
+          Platform::uses_model_cp_partition() ? 1 : options_.cp_size();
       num_tokens = maybe_align_cp_prefill_tokens(
-          prefill_sequence.get(), num_tokens, options_.cp_size());
+          prefill_sequence.get(), num_tokens, worker_cp_size);
       const size_t target_num_tokens =
           prefill_sequence->kv_cache_tokens_num() + num_tokens;
       if (remaining_token_budget < allocated_tokens + num_tokens ||

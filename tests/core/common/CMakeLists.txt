@@ -4,6 +4,7 @@ cc_test(
   NAME
     common_test
   SRCS
+    options_test.cpp
     rate_limiter_test.cpp
   DEPS
     :config

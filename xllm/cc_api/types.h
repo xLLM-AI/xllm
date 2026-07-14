@@ -37,8 +37,8 @@ struct XLLM_CAPI_EXPORT XLLM_ChatMessage {
 struct XLLM_CAPI_EXPORT XLLM_InitLLMOptions {
   bool enable_chunked_prefill = false;
 
-  // Whether to enable prefill-only sequence parallel
-  bool enable_prefill_sp = false;
+  // Context parallel size. Backend and model support is required.
+  int32_t cp_size = 1;
 
   bool enable_prefix_cache = false;
 

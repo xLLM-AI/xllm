@@ -385,9 +385,10 @@ void CollectiveCommunicator::create_process_groups(
   } else {
     parallel_args_->single_rank_group_ = tp_group_.get();
   }
-  // SP and TP share the same rank set during prefill today. Keep a distinct
-  // handle so SP call sites do not depend on TP wiring directly.
-  parallel_args_->sp_group_ = tp_group_.get();
+  // The current MLU model-side CP path spans the full DP-local rank set, which
+  // is also represented by tp_group_ today. Keep a distinct CP handle so a
+  // future orthogonal CP x TP topology can provide its own process group.
+  parallel_args_->cp_group_ = tp_group_.get();
   port += dp_size + single_rank_group_port_gap + single_rank_group_count;
 
   if (dp_size > 1) {

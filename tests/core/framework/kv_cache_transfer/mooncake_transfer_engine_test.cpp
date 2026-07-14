@@ -160,6 +160,26 @@ TEST(MooncakeKVCacheTransferDefaultTest, OwnerRankMergesSingleDst) {
   EXPECT_EQ(kv_info.dst_blocks, info.remote_blocks_ids);
 }
 
+TEST(MooncakeKVCacheTransferDefaultTest, MluCpKeepsCompleteKvBlockMapping) {
+  MooncakeKVCacheTransferDefault transfer(
+      0, 0, torch::Device(torch::kCPU), "test");
+  transfer.has_v_cache_ = false;
+
+  const TransferKVInfo info = make_info(1, 4, 0);
+  ParallelArgs parallel_args(
+      2, 4, 1, 4, /*process_group=*/nullptr, /*ep_size=*/1);
+  parallel_args.kv_split_size(1);
+  std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo> merged_kv_infos;
+
+  transfer.merge_kv_blocks(merged_kv_infos, {info}, parallel_args);
+
+  ASSERT_EQ(merged_kv_infos.size(), 1U);
+  const KVCacheTransfer::KVCacheInfo& kv_info = merged_kv_infos.begin()->second;
+  EXPECT_EQ(kv_info.dst_cluster_id, 102U);
+  EXPECT_EQ(kv_info.src_blocks, info.local_blocks_ids);
+  EXPECT_EQ(kv_info.dst_blocks, info.remote_blocks_ids);
+}
+
 TEST(MooncakeKVCacheTransferDefaultTest, WrappedOwnerRankKeepsMerge) {
   MooncakeKVCacheTransferDefault transfer(
       0, 0, torch::Device(torch::kCPU), "test");

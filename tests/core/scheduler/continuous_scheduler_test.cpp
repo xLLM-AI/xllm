@@ -11,6 +11,7 @@
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/platform/platform.h"
 #include "distributed_runtime/engine.h"
 #include "prefill_only_scheduler.h"
 #include "scheduler_factory.h"
@@ -299,8 +300,6 @@ void set_chunk_kv(const std::shared_ptr<Request>& request, size_t kv_tokens) {
 
 TEST(ContinuousSchedulerFactoryTest,
      ChunkedPrefillWithoutSPUsesChunkedScheduler) {
-  ScopedConfigValue<bool> enable_sp(
-      ParallelConfig::get_instance().enable_prefill_sp(), false);
   ContinuousScheduler::Options opt =
       create_scheduler_options(10000, 256, 0, 1024, 1);
   opt.enable_chunked_prefill() = true;
@@ -313,27 +312,30 @@ TEST(ContinuousSchedulerFactoryTest,
 }
 
 TEST(ContinuousSchedulerFactoryTest,
-     ChunkedPrefillWithSPUsesPrefillOnlyScheduler) {
-  ScopedConfigValue<bool> enable_sp(
-      ParallelConfig::get_instance().enable_prefill_sp(), true);
+     ChunkedPrefillWithCpUsesBackendPartitionScheduler) {
   ContinuousScheduler::Options opt =
       create_scheduler_options(10000, 256, 0, 1024, 1);
   opt.enable_chunked_prefill() = true;
+  opt.cp_size() = 2;
 
   auto engine = std::make_unique<FakeEngine>(32, 32);
   auto scheduler = create_continuous_scheduler(engine.get(), opt);
 
-  EXPECT_NE(dynamic_cast<PrefillOnlyScheduler*>(scheduler.get()), nullptr);
-  EXPECT_EQ(dynamic_cast<ChunkedPrefillScheduler*>(scheduler.get()), nullptr);
+  if (Platform::uses_model_cp_partition()) {
+    EXPECT_NE(dynamic_cast<PrefillOnlyScheduler*>(scheduler.get()), nullptr);
+    EXPECT_EQ(dynamic_cast<ChunkedPrefillScheduler*>(scheduler.get()), nullptr);
+  } else {
+    EXPECT_NE(dynamic_cast<ChunkedPrefillScheduler*>(scheduler.get()), nullptr);
+    EXPECT_EQ(dynamic_cast<PrefillOnlyScheduler*>(scheduler.get()), nullptr);
+  }
 }
 
 TEST(ContinuousSchedulerFactoryTest,
-     ChunkedPrefillWithSPAndSpeculativeUsesPrefillOnlyScheduler) {
-  ScopedConfigValue<bool> enable_sp(
-      ParallelConfig::get_instance().enable_prefill_sp(), true);
+     ChunkedPrefillWithCpAndSpeculativeUsesPrefillOnlyScheduler) {
   ContinuousScheduler::Options opt =
       create_scheduler_options(10000, 256, 4, 1024, 1);
   opt.enable_chunked_prefill() = true;
+  opt.cp_size() = 2;
 
   auto engine = std::make_unique<FakeEngine>(32, 32);
   auto scheduler = create_continuous_scheduler(engine.get(), opt);
@@ -342,12 +344,13 @@ TEST(ContinuousSchedulerFactoryTest,
   EXPECT_EQ(dynamic_cast<ChunkedPrefillScheduler*>(scheduler.get()), nullptr);
 }
 
-TEST(ContinuousSchedulerFactoryTest,
-     ChunkedPrefillWithSPDoesNotBuildMixedBatch) {
-  ScopedConfigValue<bool> enable_sp(
-      ParallelConfig::get_instance().enable_prefill_sp(), true);
+TEST(ContinuousSchedulerFactoryTest, ModelPartitionCpDoesNotBuildMixedBatch) {
+  if (!Platform::uses_model_cp_partition()) {
+    GTEST_SKIP() << "model-side CP partition is not enabled on this backend";
+  }
   ContinuousScheduler::Options opt = create_scheduler_options(8, 8, 0, 4, 1);
   opt.enable_chunked_prefill() = true;
+  opt.cp_size() = 2;
 
   auto engine = std::make_unique<FakeEngine>(32, 32);
   auto scheduler = create_continuous_scheduler(engine.get(), opt);
@@ -388,7 +391,7 @@ TEST(ContinuousSchedulerFactoryTest,
             opt.max_tokens_per_chunk_for_prefill());
 }
 
-TEST(SchedulerFactoryTest, DisaggPDChunkedPrefillKind) {
+TEST(SchedulerFactoryTest, DisaggPDChunkedPrefillTakesPriorityOverCp) {
   ScopedConfigValue<bool> use_mix_scheduler(
       SchedulerConfig::get_instance().use_mix_scheduler(), false);
   ContinuousScheduler::Options opt =
@@ -396,9 +399,23 @@ TEST(SchedulerFactoryTest, DisaggPDChunkedPrefillKind) {
   opt.enable_disagg_pd() = true;
   opt.enable_pd_ooc() = false;
   opt.enable_chunked_prefill() = true;
+  opt.cp_size() = 2;
 
   EXPECT_EQ(select_scheduler_kind(opt),
             SchedulerKind::DISAGG_PD_CHUNKED_PREFILL);
+}
+
+TEST(SchedulerFactoryTest, DisaggPDTakesPriorityOverCp) {
+  ScopedConfigValue<bool> use_mix_scheduler(
+      SchedulerConfig::get_instance().use_mix_scheduler(), false);
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(10000, 256, 0, 1024, 1);
+  opt.enable_disagg_pd() = true;
+  opt.enable_pd_ooc() = false;
+  opt.enable_chunked_prefill() = false;
+  opt.cp_size() = 2;
+
+  EXPECT_EQ(select_scheduler_kind(opt), SchedulerKind::DISAGG_PD);
 }
 
 TEST(SchedulerFactoryTest, DisaggPDOOCKeepsPDOOCKind) {

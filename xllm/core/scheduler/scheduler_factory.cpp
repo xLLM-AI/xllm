@@ -16,8 +16,8 @@ limitations under the License.
 #include "scheduler/scheduler_factory.h"
 
 #include "core/common/global_flags.h"
-#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/platform/platform.h"
 #include "scheduler/chunked_prefill_scheduler.h"
 #include "scheduler/continuous_scheduler.h"
 #include "scheduler/disagg_pd_chunked_prefill_scheduler.h"
@@ -48,8 +48,9 @@ SchedulerKind select_scheduler_kind(
   }
 
   if (options.enable_chunked_prefill()) {
-    if (::xllm::ParallelConfig::get_instance().enable_prefill_sp() ||
-        options.num_speculative_tokens() > 0) {
+    const bool use_model_partition =
+        options.cp_size() > 1 && Platform::uses_model_cp_partition();
+    if (use_model_partition || options.num_speculative_tokens() > 0) {
       return SchedulerKind::PREFILL_ONLY;
     }
     return SchedulerKind::CHUNKED_PREFILL;

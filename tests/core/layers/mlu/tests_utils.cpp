@@ -144,7 +144,7 @@ ParallelArgs create_default_parallel_args(
   // Set tp_group_ for MLU environment
   parallel_args.tp_group_ = mock_process_group.get();
   parallel_args.single_rank_group_ = mock_process_group.get();
-  parallel_args.sp_group_ = mock_process_group.get();
+  parallel_args.cp_group_ = mock_process_group.get();
 
   return parallel_args;
 }
