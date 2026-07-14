@@ -105,14 +105,6 @@ KVCacheEstimateOptions make_kv_cache_estimate_options(
   return estimate_options;
 }
 
-torch::Tensor make_cpu_int_tensor(const std::vector<int32_t>& values) {
-  return torch::tensor(values,
-                       torch::TensorOptions()
-                           .dtype(torch::kInt)
-                           .device(torch::kCPU)
-                           .pinned_memory(true));
-}
-
 void record_metadata_ready_event(Stream& stream, ForwardInput& input) {
   StreamEventPtr event = stream.record_event();
   if (event == nullptr) {
@@ -507,26 +499,11 @@ void replace_host_token_placeholders(ForwardInput& input,
   }
 }
 
-void set_token_position_tensors(ForwardInput& input,
-                                const std::vector<int32_t>& token_ids,
-                                const std::vector<int32_t>& positions,
-                                const torch::TensorOptions& token_options,
-                                const torch::TensorOptions& position_options) {
-  input.device_tensors_ready = false;
-  input.token_ids_host = make_cpu_int_tensor(token_ids);
-  input.positions_host = make_cpu_int_tensor(positions);
-  input.token_ids =
-      safe_to(input.token_ids_host, token_options, /*non_blocking=*/true);
-  input.positions =
-      safe_to(input.positions_host, position_options, /*non_blocking=*/true);
-  input.device_tensors_ready = true;
-}
-
 void set_positions_tensor(ForwardInput& input,
                           const std::vector<int32_t>& positions,
                           const torch::TensorOptions& device_options) {
   input.device_tensors_ready = false;
-  input.positions_host = make_cpu_int_tensor(positions);
+  input.positions_host = specBuilder::make_cpu_int_tensor(positions);
   input.positions =
       safe_to(input.positions_host, device_options, /*non_blocking=*/true);
   input.device_tensors_ready = true;
@@ -1090,7 +1067,8 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
     new_token_ids.emplace_back(extra_token_ids[i]);
   }
   prefill_input.device_tensors_ready = false;
-  prefill_input.token_ids_host = make_cpu_int_tensor(new_token_ids);
+  prefill_input.token_ids_host =
+      specBuilder::make_cpu_int_tensor(new_token_ids);
   prefill_input.token_ids = safe_to(prefill_input.token_ids_host,
                                     prefill_input.positions.options(),
                                     /*non_blocking=*/true);
@@ -1464,8 +1442,8 @@ void MTPWorkerImpl::update_decode_step_input(
     specBuilder::append_seq_len_by_layout(kv_seq_lens_vec, current_kv_len);
   }
 
-  input.token_ids_host = make_cpu_int_tensor(token_ids_vec);
-  input.positions_host = make_cpu_int_tensor(positions_vec);
+  input.token_ids_host = specBuilder::make_cpu_int_tensor(token_ids_vec);
+  input.positions_host = specBuilder::make_cpu_int_tensor(positions_vec);
   input.input_params.attention.host.kv_seq_lens = std::move(kv_seq_lens_vec);
   input.device_tensors_ready = false;
 }
@@ -1547,11 +1525,11 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
   CHECK_EQ(buf.out_positions.size(), buf.out_token_ids.size())
       << "validate positions/tokens mismatch";
 
-  set_token_position_tensors(validate_input,
-                             buf.out_token_ids,
-                             buf.out_positions,
-                             token_options,
-                             position_options);
+  specBuilder::set_token_position_tensors(validate_input,
+                                          buf.out_token_ids,
+                                          buf.out_positions,
+                                          token_options,
+                                          position_options);
   if (!use_atb_spec_kernel) {
     input_params.meta.num_sequences = total_num_val_tokens;
     input_params.meta.batch_forward_type = BatchForwardType::DECODE;
@@ -1740,11 +1718,11 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
   CHECK_EQ(expanded_embeddings.size(), buf.out_positions.size())
       << "draft extend embeddings/positions mismatch";
 
-  set_token_position_tensors(extend_input,
-                             buf.out_token_ids,
-                             buf.out_positions,
-                             token_options,
-                             position_options);
+  specBuilder::set_token_position_tensors(extend_input,
+                                          buf.out_token_ids,
+                                          buf.out_positions,
+                                          token_options,
+                                          position_options);
   if (use_chunked_prefill) {
     input_params.meta.num_sequences = num_sequences;
     input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
@@ -1818,18 +1796,20 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
       params.selected_token_idxes.defined()
           ? params.selected_token_idxes.options()
           : torch::dtype(torch::kInt).device(device_);
-  params.selected_token_idxes = safe_to(make_cpu_int_tensor(selected_row_idx),
-                                        idx_options,
-                                        /*non_blocking=*/true);
+  params.selected_token_idxes =
+      safe_to(specBuilder::make_cpu_int_tensor(selected_row_idx),
+              idx_options,
+              /*non_blocking=*/true);
   if (!params.sample_idxes.defined()) {
     std::vector<int32_t> sample_idxes_vec;
     sample_idxes_vec.reserve(num_sequences);
     for (int32_t i = 0; i < num_sequences; ++i) {
       sample_idxes_vec.emplace_back(i);
     }
-    params.sample_idxes = safe_to(make_cpu_int_tensor(sample_idxes_vec),
-                                  idx_options,
-                                  /*non_blocking=*/true);
+    params.sample_idxes =
+        safe_to(specBuilder::make_cpu_int_tensor(sample_idxes_vec),
+                idx_options,
+                /*non_blocking=*/true);
   }
   extend_input.device_tensors_ready = true;
   finish_metadata_prepare(*prepare_stream_, extend_input);

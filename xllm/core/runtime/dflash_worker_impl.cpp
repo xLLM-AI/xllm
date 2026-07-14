@@ -82,38 +82,16 @@ runtime::Options draft_options(const runtime::Options& options) {
   return opts;
 }
 
-torch::Tensor make_cpu_int_tensor(const std::vector<int32_t>& values) {
-  return torch::tensor(values,
-                       torch::TensorOptions()
-                           .dtype(torch::kInt)
-                           .device(torch::kCPU)
-                           .pinned_memory(true));
-}
-
 // Pack a host int32 vector into a pinned CPU tensor and stage an async H2D
 // copy onto the caller's active stream. Consolidates the three-line idiom
-// `TensorOptions(int, device) + make_cpu_int_tensor(vec) + safe_to(...)`.
+// `TensorOptions(int, device) + specBuilder::make_cpu_int_tensor(vec) +
+// safe_to(...)`.
 torch::Tensor cpu_int_vec_to_device(const std::vector<int32_t>& values,
                                     const Device& device) {
   return safe_to(
-      make_cpu_int_tensor(values),
+      specBuilder::make_cpu_int_tensor(values),
       torch::TensorOptions().dtype(torch::kInt).device(device.unwrap()),
       /*non_blocking=*/true);
-}
-
-void set_token_position_tensors(ForwardInput& input,
-                                const std::vector<int32_t>& token_ids,
-                                const std::vector<int32_t>& positions,
-                                const torch::TensorOptions& token_options,
-                                const torch::TensorOptions& position_options) {
-  input.device_tensors_ready = false;
-  input.token_ids_host = make_cpu_int_tensor(token_ids);
-  input.positions_host = make_cpu_int_tensor(positions);
-  input.token_ids =
-      safe_to(input.token_ids_host, token_options, /*non_blocking=*/true);
-  input.positions =
-      safe_to(input.positions_host, position_options, /*non_blocking=*/true);
-  input.device_tensors_ready = true;
 }
 
 void repeat_sampling_tensor(torch::Tensor& tensor, int32_t repeats) {
@@ -139,10 +117,6 @@ void repeat_sampling_params(SamplingParameters& sampling_params,
 void clear_all_output_embeddings(ForwardOutput& output) {
   output.sample_output.embeddings = torch::Tensor();
   output.sample_output.selected_embeddings = torch::Tensor();
-}
-
-void clear_ready_events(ForwardInput& input) {
-  input.metadata_ready_event.reset();
 }
 
 void record_metadata_ready_event(Stream& stream, ForwardInput& input) {
@@ -182,13 +156,13 @@ std::optional<ForwardOutput> run_llm_no_sync_impl(
   return output;
 }
 
-int32_t build_query_rows(const ForwardInput& input,
-                         int32_t mask_token_id,
-                         int32_t num_speculative_tokens,
-                         int32_t block_size,
-                         specBuilder::DecodeBuildBuffers& buf,
-                         std::vector<int32_t>& selected_idxes,
-                         std::vector<int32_t>& q_cu_seq_lens) {
+void build_query_rows(const ForwardInput& input,
+                      int32_t mask_token_id,
+                      int32_t num_speculative_tokens,
+                      int32_t block_size,
+                      specBuilder::DecodeBuildBuffers& buf,
+                      std::vector<int32_t>& selected_idxes,
+                      std::vector<int32_t>& q_cu_seq_lens) {
   const int32_t num_sequences = input.input_params.meta.num_sequences;
   const int32_t query_width = num_speculative_tokens + 1;
   specBuilder::DecodeRowContext row_ctx =
@@ -234,8 +208,6 @@ int32_t build_query_rows(const ForwardInput& input,
     specBuilder::update_kv_seq_lens_and_max(
         buf.out_kv_seq_lens, kv_len, buf.meta.kv_max_seq_len);
   }
-
-  return query_width;
 }
 
 std::vector<int64_t> build_accepted_context_rows(
@@ -357,9 +329,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
 #else
     share_torch_head_and_embedding();
 #endif
-  }
 
-  if (draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
     JsonReader reader;
     const std::string config_path = model_weights_path + "/config.json";
     CHECK(reader.parse(config_path))
@@ -712,6 +682,11 @@ void DFlashWorkerImpl::fill_validate_input_from_draft_outputs(
   validate_token_rows.index({ISlice(), ISlice(1, num_val_tokens)})
       .copy_(draft_tokens, /*non_blocking=*/true);
   validate_input.device_tensors_ready = true;
+  // Publish this compute-stream write so the target's prepare stage (which
+  // consumes validate_input.token_ids under ACL-graph double buffering) waits
+  // for the copy to complete before staging into the graph's persistent
+  // buffer. Without this, prepare could read stale/placeholder token ids.
+  record_metadata_ready_event(compute_stream, validate_input);
 }
 
 std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
@@ -905,8 +880,8 @@ void DFlashWorkerImpl::update_decode_step_input(
     specBuilder::append_seq_len_by_layout(kv_seq_lens_vec, current_kv_len);
   }
 
-  input.token_ids_host = make_cpu_int_tensor(token_ids_vec);
-  input.positions_host = make_cpu_int_tensor(positions_vec);
+  input.token_ids_host = specBuilder::make_cpu_int_tensor(token_ids_vec);
+  input.positions_host = specBuilder::make_cpu_int_tensor(positions_vec);
   input.input_params.attention.host.kv_seq_lens = std::move(kv_seq_lens_vec);
   input.device_tensors_ready = false;
 }
@@ -915,7 +890,7 @@ void DFlashWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
                                                ForwardInput& validate_input) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   ForwardInput prepared_input = input;
-  clear_ready_events(prepared_input);
+  prepared_input.metadata_ready_event.reset();
   SpeculativeWorkerImpl::prepare_validate_inputs(prepared_input,
                                                  validate_input);
   validate_input.input_params.embedding.input_embedding = torch::Tensor();
@@ -933,14 +908,14 @@ void DFlashWorkerImpl::prepare_query_inputs(const ForwardInput& input,
   specBuilder::DecodeBuildBuffers buf;
   std::vector<int32_t> selected_idxes;
   std::vector<int32_t> q_cu_seq_lens;
-  const int32_t query_width =
-      build_query_rows(input,
-                       mask_token_id_,
-                       options_.num_speculative_tokens(),
-                       options_.block_size(),
-                       buf,
-                       selected_idxes,
-                       q_cu_seq_lens);
+  build_query_rows(input,
+                   mask_token_id_,
+                   options_.num_speculative_tokens(),
+                   options_.block_size(),
+                   buf,
+                   selected_idxes,
+                   q_cu_seq_lens);
+  const int32_t query_width = options_.num_speculative_tokens() + 1;
   // DFlash emits query_width rows per seq unconditionally, so DP shape
   // symmetry holds by construction. Catch scheduler regressions that break
   // the invariant (see MTP dp_enabled idle-rank branch).
@@ -950,11 +925,11 @@ void DFlashWorkerImpl::prepare_query_inputs(const ForwardInput& input,
       << "DFlash per-seq row count must be uniform (query_width=" << query_width
       << ", num_sequences=" << num_sequences_query << ")";
 
-  set_token_position_tensors(query_input,
-                             buf.out_token_ids,
-                             buf.out_positions,
-                             input.token_ids.options(),
-                             input.positions.options());
+  specBuilder::set_token_position_tensors(query_input,
+                                          buf.out_token_ids,
+                                          buf.out_positions,
+                                          input.token_ids.options(),
+                                          input.positions.options());
   input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
   specBuilder::update_input_params(input_params,
                                    buf,
@@ -972,7 +947,7 @@ void DFlashWorkerImpl::prepare_query_inputs(const ForwardInput& input,
   // Pinned-host + async H2D on prepare_stream_ (the file's idiom), so the copy
   // overlaps instead of a blocking non-pinned transfer every decode step.
   query_input.sampling_params.selected_token_idxes =
-      safe_to(make_cpu_int_tensor(selected_idxes),
+      safe_to(specBuilder::make_cpu_int_tensor(selected_idxes),
               idx_options,
               /*non_blocking=*/true);
   query_input.sampling_params.sample_idxes =
@@ -1005,10 +980,19 @@ void DFlashWorkerImpl::write_context_kv(
   // orders them. Model methods below use torch ops on the same stream.
   c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
 
-  draft_impl_->precompute_and_store_context_kv(context_hidden,
-                                               positions_device,
-                                               new_cache_slots_device,
-                                               input.input_params);
+  ModelOutput scatter_output =
+      draft_impl_->precompute_and_store_context_kv(context_hidden,
+                                                   positions_device,
+                                                   new_cache_slots_device,
+                                                   input.input_params);
+  // Model returns an empty ModelOutput (hidden_states undefined) when the
+  // per-layer NPULayerSynchronizer::record_event fails mid-scatter under
+  // PD-PUSH transfer. Fail fast instead of silently continuing: subsequent
+  // layers won't have been scattered and the PD transfer side would block
+  // forever waiting on the missing per-layer event.
+  CHECK(scatter_output.hidden_states.defined())
+      << "DFlash context-KV scatter failed (layer_synchronizer record_event "
+         "returned false); PD-PUSH transfer would deadlock.";
 
   // The context-KV scatter is the last device op of the step and is launched
   // no-sync. Under schedule-overlap the scheduler dispatches the next step's
