@@ -1,3 +1,19 @@
+# Release xllm 0.10.1
+
+## **Release Notes**
+
+### Highlights
+- Improve MTP correctness and stability during asynchronous execution.
+- Harden request cancellation, KV transfer completion, and disaggregated PD scheduling.
+- Improve OpenAI-compatible tool-call handling and DeepSeek streaming behavior.
+
+### Bugfix
+- Preserve MTP inputs and persistent graph parameters across asynchronous execution.
+- Fix request cancellation races and guard KV transfer completion callbacks.
+- Fix chunked-prefill scheduling races in disaggregated PD deployments.
+- Handle OpenAI named tool choices and incomplete DeepSeek streaming payloads correctly.
+- Correct model version handling in the model-list API.
+
 # Release xllm 0.10.0
 
 ## **Major Features and Improvements**
