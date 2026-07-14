@@ -24,6 +24,7 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/util/slice.h"
 #include "framework/block/block.h"
+#include "util/hash_util.h"
 
 namespace xllm {
 
@@ -59,6 +60,7 @@ class KVCacheState {
   // Drop all blocks held under `type` (releases their Block refs and removes
   // the map entry).
   void erase_blocks(BlockType type);
+
   // Number of shared (prefix-cache-hit) blocks held under `type`.
   size_t shared_blocks_num(BlockType type) const;
   // Number of shared tokens for this sequence. Sequence-level: the value is the
@@ -89,11 +91,55 @@ class KVCacheState {
   // (SWA / C4 / C128).
   bool has_multi_block_export() const;
 
-  // Single per-sequence resource block (BlockType::SINGLE). The only per-type
-  // id convenience accessor: returns the Single block id, or -1 when absent.
-  // Used for linear_state_ids / embedding_ids export and disagg-PD's
-  // linear_state_id. Other block types read via blocks(type).
+  // Single per-sequence resource block (BlockType::SINGLE): returns the Single
+  // block id, or -1 when absent. Used for embedding_ids export and disagg-PD's
+  // linear_state_id fallback. Other block types read via blocks(type).
   int32_t get_single_block_id() const;
+
+  // Linear-state live slot id (BlockType::LINEAR), or -1 when absent.
+  int32_t get_linear_block_id() const;
+
+  // Deferred linear-state save: the hash to checkpoint at the next step's
+  // prepare_inputs entry, after the current forward writes the slot's
+  // end-of-step contents.
+  void set_pending_linear_save(const XXH3Key& hash) {
+    pending_linear_save_hash_ = hash;
+  }
+  std::optional<XXH3Key> take_pending_linear_save() {
+    auto h = std::move(pending_linear_save_hash_);
+    pending_linear_save_hash_.reset();
+    return h;
+  }
+  bool has_pending_linear_save() const {
+    return pending_linear_save_hash_.has_value();
+  }
+
+  // Linear-state restore source, mounted on the scheduler thread before build.
+  //
+  // Two producers mount here, both stashing a refcount+1 handle that pins the
+  // checkpoint slot against eviction:
+  //   - Class A (fresh sequence, first forward): allocate_shared_for_sequence
+  //     mounts the deepest historical checkpoint at admission.
+  //   - Class B (continued chunk): allocate_for_sequence mounts the slot it
+  //     just checkpointed at the previous step's save-rotation.
+  // The batch builder consumes it to fill the cache op's restore_src_slot_id,
+  // then releases it -- a block-carried transport that replaces the former
+  // scheduler-side find() in resolve. Cleared by erase_blocks(LINEAR) and
+  // reset().
+  void set_linear_restore_src_block(Block&& block) {
+    linear_restore_src_block_ = std::move(block);
+  }
+  bool has_linear_restore_src_block() const {
+    return linear_restore_src_block_.has_value();
+  }
+  std::optional<Block> take_linear_restore_src_block() {
+    std::optional<Block> block = std::move(linear_restore_src_block_);
+    linear_restore_src_block_.reset();
+    return block;
+  }
+
+  // Return a Block copy (refcount+1) of the singleton slot without removing it.
+  Block copy_block(BlockType type) const;
 
   void set_transfer_kv_info(TransferKVInfo&& info);
   std::optional<TransferKVInfo>& transfer_kv_info();
@@ -149,6 +195,18 @@ class KVCacheState {
   // Number of local KV blocks already pushed to the decode instance.
   // Used for incremental push in chunked prefill + PD disagg mode.
   uint32_t pushed_local_block_count_ = 0;
+
+  // Hash to checkpoint at the next step's entry (set by the batch builder,
+  // consumed by the LINEAR leaf's allocate_for_sequence). Cleared by
+  // erase_blocks(LINEAR) and reset().
+  std::optional<XXH3Key> pending_linear_save_hash_;
+
+  // Restore source checkpoint block, mounted on the scheduler thread by
+  // allocate_shared_for_sequence (class A) or allocate_for_sequence (class
+  // B) and consumed by the batch builder. Holds a refcount+1 handle so the
+  // checkpoint slot cannot be evicted while pending. Cleared by
+  // erase_blocks(LINEAR) and reset().
+  std::optional<Block> linear_restore_src_block_;
 };
 
 }  // namespace xllm

@@ -35,11 +35,6 @@ void mm_xxh3_128bits_hash(const std::vector<const uint8_t*>& mm_hash_values,
                           const Slice<int32_t>& token_ids,
                           uint8_t* hash_value);
 
-std::vector<PrefixHash> compute_linear_state_prefix_hashes(
-    const Slice<int32_t>& token_ids,
-    size_t block_size,
-    size_t boundary_tokens);
-
 // Type tag bound to the engine: LLM uses TEXT, VLM uses MM.
 enum class BlockHasherType {
   TEXT,
@@ -93,5 +88,21 @@ class MMBlockHasher : public BlockHasher {
   const MMData& mm_data_;
   int32_t next_item_idx_;
 };
+
+// Incrementally extend a chained prefix hash shared by both hash domains: KV
+// hashes one entry per KV block, linear-state one entry per prefill chunk. The
+// only real difference is the digest, so the chaining loop lives here once and
+// the per-block digest is delegated to the engine-bound hasher (TEXT vs MM)
+// built from |type| and |mm_data|. Hashes already present in |hashes| are kept;
+// only blocks from hashes.size() up to |boundary_blocks| are appended, resuming
+// the chain from the last present hash. A no-op when nothing new is covered, so
+// it is safe to call before every match()/save. |boundary_blocks| *
+// |block_size| must be within |token_ids|.
+void extend_prefix_hashes(BlockHasherType type,
+                          const MMData& mm_data,
+                          const Slice<int32_t>& token_ids,
+                          size_t block_size,
+                          size_t boundary_blocks,
+                          std::vector<XXH3Key>& hashes);
 
 }  // namespace xllm

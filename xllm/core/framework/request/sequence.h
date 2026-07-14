@@ -204,6 +204,36 @@ class Sequence final {
   int32_t get_single_block_id() const {
     return kv_state_.get_single_block_id();
   }
+
+  // Linear-state (Qwen3.5 GDN) live slot, stored in composite_blocks_ under
+  // BlockType::LINEAR. Drawn from the dedicated LinearStateBlockManager id
+  // space.
+  bool has_linear_state_slot() const {
+    return kv_state_.get_linear_block_id() >= 0;
+  }
+  int32_t get_linear_state_slot_id() const {
+    return kv_state_.get_linear_block_id();
+  }
+
+  void set_pending_linear_save(const XXH3Key& hash) {
+    kv_state_.set_pending_linear_save(hash);
+  }
+  std::optional<XXH3Key> take_pending_linear_save() {
+    return kv_state_.take_pending_linear_save();
+  }
+  bool has_pending_linear_save() const {
+    return kv_state_.has_pending_linear_save();
+  }
+  void set_linear_restore_src_block(Block&& block) {
+    kv_state_.set_linear_restore_src_block(std::move(block));
+  }
+  bool has_linear_restore_src_block() const {
+    return kv_state_.has_linear_restore_src_block();
+  }
+  std::optional<Block> take_linear_restore_src_block() {
+    return kv_state_.take_linear_restore_src_block();
+  }
+  Block copy_block(BlockType type) const { return kv_state_.copy_block(type); }
   const std::string& request_id() const { return request_id_; }
   // get input embedding
   torch::Tensor get_input_embedding() const { return input_embedding_; }
@@ -222,6 +252,18 @@ class Sequence final {
   // (no-op) when no new full block is available, so it is safe to call before
   // every match()/cache().
   void update_block_hashes(uint32_t block_size, BlockHasherType hasher_type);
+
+  // Precomputed chained per-chunk hashes for the linear-state checkpoint index.
+  // Separate hash domain from `block_hashes_`: the stride is one prefill chunk
+  // (a multiple of the KV block size), not a KV block, so a linear checkpoint
+  // is a sparse overlay on the per-block KV cache. Consumed by the batch
+  // builder (save/restore boundaries) and the LINEAR leaf's match probe.
+  Slice<XXH3Key> linear_state_hashes() const { return linear_state_hashes_; }
+
+  // Extend `linear_state_hashes_` to cover any newly completed full chunks at
+  // the given stride. Cheap (no-op) when no new full chunk is available, so it
+  // is safe to call before every match()/save-boundary check.
+  void update_linear_state_hashes(uint32_t chunk_stride);
 
   // whether the prefill stage has been cached.
   bool if_cache_block_for_prefill() {
@@ -435,6 +477,10 @@ class Sequence final {
   // `token_index` was rewritten (beam search / speculative / disagg PD).
   void invalidate_block_hashes_from(size_t token_index);
 
+  // Same as above for the linear-state hash domain: drop cached chunk hashes
+  // from the chunk containing `token_index` onward.
+  void invalidate_linear_state_hashes_from(size_t token_index);
+
   SequenceOutputType output_type();
   void generate_embeddings_output(SequenceOutput& output);
   void generate_mm_embeddings_output(SequenceOutput& output);
@@ -521,6 +567,15 @@ class Sequence final {
 
   // Block size used to compute `block_hashes_` (0 until first computed).
   uint32_t hash_block_size_ = 0;
+
+  // Precomputed chained per-chunk hashes for the linear-state checkpoint index
+  // (own hash domain, chunk-strided). Extended incrementally, invalidated on
+  // token rewrite; see linear_state_hashes()/update_linear_state_hashes().
+  std::vector<XXH3Key> linear_state_hashes_;
+
+  // Chunk stride used to compute `linear_state_hashes_` (0 until first
+  // computed).
+  uint32_t linear_hash_stride_ = 0;
 
   std::optional<OneRecState> onerec_state_;
 

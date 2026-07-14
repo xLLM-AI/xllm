@@ -854,16 +854,16 @@ using LinearStatePrefixHash = PrefixHash;
 struct LinearStateCacheOp {
   // Live slot the sequence advances its recurrent state in.
   int32_t linear_state_id = -1;
-  // Restore: prefix hash to restore from, and the checkpoint slot the
-  // scheduler resolved it to. The worker copies `restore_src_slot_id`
-  // -> `linear_state_id`.
-  LinearStatePrefixHash restore_prefix_hash{};
+  // Restore request flag and the checkpoint slot the scheduler resolved it to.
+  // The worker copies `restore_src_slot_id` -> `linear_state_id`. This mirrors
+  // KV, which sends the worker only the resolved block-swap descriptor and
+  // never the prefix hash. Kept as a bool (not derived from
+  // `restore_src_slot_id >= 0`) so the "restore requested but the scheduler
+  // could not resolve a source -> force cold start" state survives the IPC
+  // boundary; the worker's copy-in relies on that bit
+  // (linear_state_restore.cpp).
+  bool restore_requested = false;
   int32_t restore_src_slot_id = -1;
-  // Save: prefix hash to checkpoint, and the checkpoint slot the scheduler
-  // allocated for it. The worker copies `linear_state_id` ->
-  // `save_dst_slot_id`.
-  LinearStatePrefixHash save_prefix_hash{};
-  int32_t save_dst_slot_id = -1;
 };
 
 struct ExpertInput {
