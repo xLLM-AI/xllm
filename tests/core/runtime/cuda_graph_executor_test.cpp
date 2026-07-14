@@ -767,6 +767,82 @@ TEST(CudaGraphExecutorTest, BatchDecodePaddedBucket100CaptureAndReplay) {
       << "100 -> 112 graph replay should match eager";
 }
 
+TEST(CudaGraphExecutorTest, BatchDecodeNoPaddingBucket100CaptureAndReplay) {
+  if (!torch::cuda::is_available()) {
+    GTEST_SKIP() << "CUDA is not available at runtime.";
+  }
+
+  ScopedConfigSnapshot config_snapshot;
+  ExecutionConfig::get_instance()
+      .enable_graph(true)
+      .enable_graph_vmm_pool(false)
+      .enable_graph_mode_decode_no_padding(true);
+  SchedulerConfig::get_instance().max_tokens_per_batch(128);
+
+  const torch::Device device = InitXllmCudaDeviceForTest(/*device_index=*/0);
+  xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
+      device);
+
+  ModelArgs args = make_test_model_args();
+  args.max_position_embeddings(16);
+  runtime::Options options =
+      make_test_runtime_options(/*max_seqs_per_batch=*/100);
+
+  runtime::cuda::CudaGraphPersistentParam persistent(args, device, options);
+  EXPECT_EQ(persistent.q_seq_lens(/*actual_batch_size=*/0).size(0), 101);
+  EXPECT_EQ(persistent.kv_seq_lens(/*actual_batch_size=*/0).size(0), 101);
+  EXPECT_EQ(
+      persistent.persistent_paged_kv_indptr(/*actual_batch_size=*/0).size(0),
+      101);
+  EXPECT_EQ(
+      persistent.persistent_paged_kv_last_page_len(/*actual_batch_size=*/0)
+          .size(0),
+      100);
+  EXPECT_EQ(
+      persistent.persistent_decode_qo_indptr(/*actual_batch_size=*/0).size(0),
+      101);
+  EXPECT_EQ(persistent.persistent_block_tables(/*actual_batch_size=*/0).size(0),
+            100);
+
+  auto model = std::make_unique<FakeAttnCausalLM>(args, device);
+  auto graph_exec = std::make_unique<runtime::cuda::CudaGraphExecutorImpl>(
+      model.get(), args, device, options);
+
+  constexpr int32_t kActualBatchSize = 100;
+  torch::TensorOptions iopt =
+      torch::TensorOptions().dtype(torch::kInt32).device(device);
+  torch::Tensor tokens = torch::arange(1, kActualBatchSize + 1, iopt);
+  torch::Tensor positions = torch::zeros({kActualBatchSize}, iopt);
+  ModelInputParams params = MakeBatchDecodeParams(device, kActualBatchSize);
+
+  std::vector<KVCache> kv = MakeKvCaches(device,
+                                         /*num_pages=*/kActualBatchSize,
+                                         /*page_size=*/1,
+                                         /*num_kv_heads=*/1,
+                                         /*head_dim=*/128);
+  std::vector<KVCache> eager_kv = MakeSingleKvCaches(
+      kv[0].get_k_cache().clone(), kv[0].get_v_cache().clone());
+  torch::Tensor eager_out =
+      model->forward(tokens, positions, eager_kv, params).hidden_states.clone();
+  torch::cuda::synchronize();
+
+  torch::Tensor first_out =
+      graph_exec->run(tokens, positions, kv, params).hidden_states.clone();
+  torch::cuda::synchronize();
+  EXPECT_EQ(first_out.size(0), kActualBatchSize);
+  EXPECT_TRUE(
+      torch::allclose(first_out, eager_out, /*rtol=*/1e-3, /*atol=*/1e-3))
+      << "100-token no-padding graph capture and first replay should match "
+         "eager";
+
+  torch::Tensor second_out =
+      graph_exec->run(tokens, positions, kv, params).hidden_states.clone();
+  torch::cuda::synchronize();
+  EXPECT_TRUE(
+      torch::allclose(second_out, eager_out, /*rtol=*/1e-3, /*atol=*/1e-3))
+      << "100-token no-padding graph replay should match eager";
+}
+
 TEST(CudaGraphExecutorTest,
      BatchDecodeCaptureAndReplayWithLinearOnlyLayerZero) {
   if (!torch::cuda::is_available()) {
@@ -831,6 +907,7 @@ TEST(CudaGraphExecutorTest, PrefillPiecewiseCaptureAndReplay) {
   ScopedConfigSnapshot config_snapshot;
   ExecutionConfig::get_instance()
       .enable_graph(true)
+      .enable_graph_mode_decode_no_padding(true)
       .enable_prefill_piecewise_graph(true)
       .enable_graph_vmm_pool(false)
       .max_tokens_for_graph_mode(128);

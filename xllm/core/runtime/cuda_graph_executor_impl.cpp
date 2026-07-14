@@ -103,7 +103,13 @@ bool is_cuda_contiguous_int32_tensor(const torch::Tensor& tensor) {
          tensor.scalar_type() == torch::kInt32 && tensor.is_contiguous();
 }
 
-int64_t get_graph_bucket_num_tokens(int64_t num_tokens) {
+int64_t get_graph_bucket_num_tokens(int64_t num_tokens, bool is_prefill) {
+  // no_padding only works for decode, prefill requires padding for graph reuse
+  if (::xllm::ExecutionConfig::get_instance()
+          .enable_graph_mode_decode_no_padding() &&
+      !is_prefill) {
+    return num_tokens;
+  }
   if (num_tokens <= 1) {
     return 1;
   }
@@ -141,7 +147,8 @@ CudaGraphPersistentParam::CudaGraphPersistentParam(
   } else {
     max_seqs_per_batch = options.max_seqs_per_batch();
   }
-  max_seqs_per_batch = get_graph_bucket_num_tokens(max_seqs_per_batch);
+  max_seqs_per_batch =
+      get_graph_bucket_num_tokens(max_seqs_per_batch, /*is_prefill=*/false);
   auto tensor_options = torch::TensorOptions().device(device);
 
   const int64_t max_seq_len = args_.max_position_embeddings();
@@ -1633,13 +1640,8 @@ ModelOutput CudaGraphExecutorImpl::run(const torch::Tensor& tokens,
 // bucket will be [1, 2, 4, 8, 16, 32, 48, 64, ..., max_seqs_per_batch]
 uint32_t CudaGraphExecutorImpl::get_bucket_num_tokens(uint32_t num_tokens,
                                                       bool is_prefill) const {
-  // no_padding only works for decode, prefill requires padding for graph reuse
-  if (::xllm::ExecutionConfig::get_instance()
-          .enable_graph_mode_decode_no_padding() &&
-      !is_prefill) {
-    return num_tokens;
-  }
-  return static_cast<uint32_t>(get_graph_bucket_num_tokens(num_tokens));
+  return static_cast<uint32_t>(
+      get_graph_bucket_num_tokens(num_tokens, is_prefill));
 }
 
 }  // namespace xllm::runtime::cuda
