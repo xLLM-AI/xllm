@@ -543,8 +543,7 @@ IndexerImpl::gather_dense_indexer_cache(
       << "Indexer cache gather requires exactly one K head.";
   CHECK_EQ(k_cache.size(3), head_dim_)
       << "Indexer cache head dimension does not match the indexer.";
-  CHECK_EQ(k_cache.size(2),
-           ::xllm::KVCacheConfig::get_instance().block_size())
+  CHECK_EQ(k_cache.size(2), ::xllm::KVCacheConfig::get_instance().block_size())
       << "Indexer cache block size does not match the global cache config.";
   CHECK(k_cache.is_contiguous()) << "Indexer cache must be contiguous.";
   CHECK(k_cache.device() == attn_metadata.block_table.device())
@@ -703,15 +702,15 @@ IndexerImpl::run_indexer_select_kernel_sp_segmented(
     if (attn_metadata.is_chunked_prefill) {
       k_seg = k_select.narrow(0, req_ctx_start, segment.ctx_k_len);
       if (k_select_scale.has_value()) {
-        k_scale_seg = k_select_scale->narrow(
-            0, req_ctx_start, segment.ctx_k_len);
+        k_scale_seg =
+            k_select_scale->narrow(0, req_ctx_start, segment.ctx_k_len);
       }
       cu_seq_k_lens_seg = sp_ctx.seg_ctx_k_cu_lens_2col.select(0, i);
     } else {
       k_seg = k_select.narrow(0, req_q_start, segment.suffix_k_len);
       if (k_select_scale.has_value()) {
-        k_scale_seg = k_select_scale->narrow(
-            0, req_q_start, segment.suffix_k_len);
+        k_scale_seg =
+            k_select_scale->narrow(0, req_q_start, segment.suffix_k_len);
       }
       cu_seq_k_lens_seg = sp_ctx.seg_suffix_k_cu_lens_2col.select(0, i);
     }

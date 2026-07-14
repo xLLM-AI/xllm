@@ -85,8 +85,8 @@ std::optional<torch::Tensor> IndexedKVCacheImpl::get_v_cache_scale() const {
   return std::nullopt;
 }
 
-std::optional<torch::Tensor>
-IndexedKVCacheImpl::get_indexer_cache_scale() const {
+std::optional<torch::Tensor> IndexedKVCacheImpl::get_indexer_cache_scale()
+    const {
   if (index_cache_scale_.has_value() && index_cache_scale_->defined() &&
       index_cache_scale_->numel() > 0) {
     return index_cache_scale_;

@@ -502,8 +502,7 @@ void HierarchyKVCacheTransfer::create_page_aligned_host_cache() {
   }
 
   if (!tensor_shapes[3].empty()) {
-    auto index_cache_scale =
-        kv_caches_ptr_->at(0).get_indexer_cache_scale();
+    auto index_cache_scale = kv_caches_ptr_->at(0).get_indexer_cache_scale();
     CHECK(index_cache_scale.has_value())
         << "index cache scale shape exists but tensor is missing.";
     cache_size_per_layer_[3] = index_cache_scale.value()[0].numel() *

@@ -300,9 +300,7 @@ void MooncakeKVCacheTransferDefault::allocate_kv_cache_impl(
     }
     if (kv_cache_shape.has_index_cache_scale_shape()) {
       index_cache_scale = mlu::alloc_rdma_registerable_zero_tensor(
-          kv_cache_shape.index_cache_scale_shape(),
-          torch::kFloat32,
-          device_);
+          kv_cache_shape.index_cache_scale_shape(), torch::kFloat32, device_);
     }
     if (index_cache.defined()) {
       kv_caches.emplace_back(
@@ -383,12 +381,12 @@ void MooncakeKVCacheTransferDefault::allocate_kv_cache_impl(
 #endif
 }
 
-void MooncakeKVCacheTransferDefault::add_buf(const torch::Tensor& tensor,
-                                             std::vector<void*>& addrs,
-                                             std::vector<size_t>& lens,
-                                             std::vector<uint64_t>& buf_bytes,
-                                             RegisterLengthPolicy
-                                                 register_length_policy) const {
+void MooncakeKVCacheTransferDefault::add_buf(
+    const torch::Tensor& tensor,
+    std::vector<void*>& addrs,
+    std::vector<size_t>& lens,
+    std::vector<uint64_t>& buf_bytes,
+    RegisterLengthPolicy register_length_policy) const {
   if (!tensor.defined() || tensor.numel() == 0) {
     return;
   }
@@ -418,8 +416,7 @@ void MooncakeKVCacheTransferDefault::add_buf(const torch::Tensor& tensor,
   CHECK_EQ(logical_bytes % static_cast<size_t>(block_count),
            static_cast<size_t>(0))
       << "cache tensor bytes must be divisible by block count";
-  const size_t block_bytes =
-      logical_bytes / static_cast<size_t>(block_count);
+  const size_t block_bytes = logical_bytes / static_cast<size_t>(block_count);
   CHECK_GT(block_bytes, static_cast<size_t>(0))
       << "cache tensor block byte size must be positive";
 

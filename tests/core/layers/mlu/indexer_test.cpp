@@ -202,9 +202,9 @@ class IndexerTest : public ::testing::Test {
       for (int64_t position = history_len; position < total_len; ++position) {
         int64_t logical_block = position / block_size;
         int64_t block_offset = position % block_size;
-        int64_t slot = static_cast<int64_t>(block_ids[logical_block]) *
-                           block_size +
-                       block_offset;
+        int64_t slot =
+            static_cast<int64_t>(block_ids[logical_block]) * block_size +
+            block_offset;
         slot_mapping.emplace_back(static_cast<int32_t>(slot));
       }
     }
@@ -288,14 +288,12 @@ class IndexerTest : public ::testing::Test {
                                               test_config_.index_head_dim};
     if (quantized_cache) {
       inputs.k_cache = torch::zeros(cache_shape, options_.dtype(torch::kChar));
-      inputs.k_cache_scale = torch::zeros(
-          {test_config_.block_num,
-           test_config_.head_kv,
-           test_config_.block_size},
-          options_.dtype(torch::kFloat32));
+      inputs.k_cache_scale = torch::zeros({test_config_.block_num,
+                                           test_config_.head_kv,
+                                           test_config_.block_size},
+                                          options_.dtype(torch::kFloat32));
     } else {
-      inputs.k_cache =
-          create_random_tensor(cache_shape, -0.5f, 0.5f);
+      inputs.k_cache = create_random_tensor(cache_shape, -0.5f, 0.5f);
     }
 
     inputs.weights = create_random_weights(test_config_.dim,
@@ -342,16 +340,13 @@ class IndexerTest : public ::testing::Test {
   void fill_quantized_cache(TestInputs& inputs) {
     CHECK(inputs.k_cache_scale.has_value());
     torch::Tensor cache_values =
-        torch::randint(-64,
-                       64,
-                       inputs.k_cache.sizes(),
-                       options_.dtype(torch::kInt32))
+        torch::randint(
+            -64, 64, inputs.k_cache.sizes(), options_.dtype(torch::kInt32))
             .to(torch::kChar);
     inputs.k_cache.copy_(cache_values);
-    inputs.k_cache_scale->copy_(
-        torch::rand(inputs.k_cache_scale->sizes(),
-                    options_.dtype(torch::kFloat32)) +
-        0.01f);
+    inputs.k_cache_scale->copy_(torch::rand(inputs.k_cache_scale->sizes(),
+                                            options_.dtype(torch::kFloat32)) +
+                                0.01f);
   }
 
   Indexer create_indexer(TestInputs& inputs, bool enable_fused_qk) {
@@ -590,8 +585,8 @@ TEST_F(IndexerTest, DefaultRopeDecodePath) {
 TEST_F(IndexerTest, Int8NormalPrefillWritesCacheScaleAndSelectsBlocks) {
   constexpr int64_t kBatchSize = 1;
   constexpr int64_t kQueryLen = 128;
-  TestInputs inputs = create_quantized_inputs(
-      kBatchSize, kQueryLen, /*is_prefill=*/true);
+  TestInputs inputs =
+      create_quantized_inputs(kBatchSize, kQueryLen, /*is_prefill=*/true);
 
   auto [block_tables, context_lens] =
       run_indexer(inputs, /*is_prefill=*/true, /*enable_fused_qk=*/true);
@@ -605,13 +600,14 @@ TEST_F(IndexerTest, Int8ChunkedPrefillSelectsAcrossNoncontiguousPages) {
   constexpr int64_t kHistoryLen = 24;
   constexpr int64_t kQueryLen = 24;
   constexpr int64_t kBlockSize = 16;
-  TestInputs inputs = create_quantized_inputs(kBatchSize,
-                                              kQueryLen,
-                                              /*is_prefill=*/true,
-                                              /*chunked_prefill=*/true,
-                                              kHistoryLen,
-                                              kBlockSize,
-                                              /*use_noncontiguous_blocks=*/true);
+  TestInputs inputs =
+      create_quantized_inputs(kBatchSize,
+                              kQueryLen,
+                              /*is_prefill=*/true,
+                              /*chunked_prefill=*/true,
+                              kHistoryLen,
+                              kBlockSize,
+                              /*use_noncontiguous_blocks=*/true);
   fill_quantized_cache(inputs);
 
   auto [block_tables, context_lens] =
@@ -668,14 +664,14 @@ TEST_F(IndexerTest, Int8SpChunkedPrefillMatchesSingleRankNormalPath) {
   constexpr int64_t kHistoryLen = 24;
   constexpr int64_t kQueryLen = 24;
   constexpr int64_t kBlockSize = 16;
-  TestInputs normal_inputs = create_quantized_inputs(
-      kBatchSize,
-      kQueryLen,
-      /*is_prefill=*/true,
-      /*chunked_prefill=*/true,
-      kHistoryLen,
-      kBlockSize,
-      /*use_noncontiguous_blocks=*/true);
+  TestInputs normal_inputs =
+      create_quantized_inputs(kBatchSize,
+                              kQueryLen,
+                              /*is_prefill=*/true,
+                              /*chunked_prefill=*/true,
+                              kHistoryLen,
+                              kBlockSize,
+                              /*use_noncontiguous_blocks=*/true);
   fill_quantized_cache(normal_inputs);
 
   TestInputs sp_inputs = normal_inputs;

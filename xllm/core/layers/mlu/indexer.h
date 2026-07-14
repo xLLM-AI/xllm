@@ -198,10 +198,9 @@ class IndexerImpl : public torch::nn::Module {
                              const std::optional<torch::Tensor>& k_cache_scale);
 
   std::tuple<torch::Tensor, std::optional<torch::Tensor>>
-  gather_dense_indexer_cache(
-      const torch::Tensor& k_cache,
-      const AttentionMetadata& attn_metadata,
-      const std::optional<torch::Tensor>& k_cache_scale);
+  gather_dense_indexer_cache(const torch::Tensor& k_cache,
+                             const AttentionMetadata& attn_metadata,
+                             const std::optional<torch::Tensor>& k_cache_scale);
 
   std::tuple<torch::Tensor, torch::Tensor> run_indexer_select_kernel(
       const AttentionMetadata& attn_metadata,

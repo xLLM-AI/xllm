@@ -333,8 +333,7 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         cfg_size_ptr,
                         indexer_cache_dtype_ptr,
                         nullptr};
-  static_assert(std::size(argv) ==
-                spawn_worker_protocol::kArgumentCount + 1);
+  static_assert(std::size(argv) == spawn_worker_protocol::kArgumentCount + 1);
   pid_t pid;
   int status = posix_spawnp(
       &pid, argv[0], nullptr, nullptr, const_cast<char**>(argv), environ);

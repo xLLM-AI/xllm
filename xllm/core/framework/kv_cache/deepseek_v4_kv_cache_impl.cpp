@@ -101,8 +101,8 @@ torch::Tensor DeepSeekV4KVCacheImpl::get_index_cache() const {
   return index_cache_;
 }
 
-std::optional<torch::Tensor>
-DeepSeekV4KVCacheImpl::get_indexer_cache_scale() const {
+std::optional<torch::Tensor> DeepSeekV4KVCacheImpl::get_indexer_cache_scale()
+    const {
   if (indexer_cache_scale_.defined() && indexer_cache_scale_.numel() > 0) {
     return indexer_cache_scale_;
   }

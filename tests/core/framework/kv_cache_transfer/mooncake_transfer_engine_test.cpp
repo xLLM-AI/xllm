@@ -269,9 +269,8 @@ TEST(MooncakeKVCacheTransferDefaultTest, AddBufRejectsNonContiguousTensor) {
       /*listen_port=*/0,
       torch::Device(torch::kCPU),
       /*model_type=*/"test");
-  torch::Tensor tensor =
-      torch::zeros({2, 96, 2}, torch::kFloat32)
-          .transpose(/*dim0=*/1, /*dim1=*/2);
+  torch::Tensor tensor = torch::zeros({2, 96, 2}, torch::kFloat32)
+                             .transpose(/*dim0=*/1, /*dim1=*/2);
   std::vector<void*> addrs;
   std::vector<size_t> lens;
   std::vector<uint64_t> block_bytes;
@@ -301,16 +300,14 @@ TEST(MooncakeKVCacheTransferDefaultTest,
 
   const KVCacheShape shape = make_indexer_int8_transfer_shape();
   std::vector<KVCache> caches;
-  transfer.allocate_kv_cache(
-      caches, /*num_layers=*/1, shape, torch::kBFloat16);
+  transfer.allocate_kv_cache(caches, /*num_layers=*/1, shape, torch::kBFloat16);
   ASSERT_EQ(caches.size(), 1U);
 
   KVCache& cache = caches[0];
   torch::Tensor key_cache = cache.get_k_cache();
   torch::Tensor value_cache = cache.get_v_cache();
   torch::Tensor index_cache = cache.get_index_cache();
-  std::optional<torch::Tensor> index_scale =
-      cache.get_indexer_cache_scale();
+  std::optional<torch::Tensor> index_scale = cache.get_indexer_cache_scale();
   ASSERT_TRUE(index_scale.has_value());
   ASSERT_EQ(index_cache.scalar_type(), torch::kChar);
   ASSERT_EQ(index_scale->scalar_type(), torch::kFloat32);
@@ -340,11 +337,11 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   ASSERT_TRUE(transfer.link_cluster(
       /*cluster_id=*/0, addr, static_cast<uint16_t>(listen_port)));
   ASSERT_TRUE(transfer.pull_kv_blocks(/*src_cluster_id=*/0,
-                                     addr,
-                                     /*src_blocks=*/{0},
-                                     /*dst_blocks=*/{1},
-                                     /*src_linear_state_ids=*/{},
-                                     /*dst_linear_state_ids=*/{}));
+                                      addr,
+                                      /*src_blocks=*/{0},
+                                      /*dst_blocks=*/{1},
+                                      /*src_linear_state_ids=*/{},
+                                      /*dst_linear_state_ids=*/{}));
   device.synchronize_default_stream();
 
   EXPECT_TRUE(torch::equal(key_cache.index({1}), key_cache.index({0})));
