@@ -1020,6 +1020,12 @@ void DFlashWorkerImpl::write_context_kv(
       *draft_impl_, context_input, *prepare_stream_, *compute_stream_);
   CHECK(output.has_value())
       << "DFlash context K/V write produced no forward output.";
+  // The context-KV scatter is the last device op of the step and is launched
+  // no-sync. Under schedule-overlap the scheduler dispatches the next step's
+  // host prep as soon as this step's host call returns, while this scatter may
+  // still be in flight. Sync so the next step's draft query reads a fully
+  // written context-KV cache instead of a partially scattered one.
+  compute_stream_->synchronize();
 }
 
 void DFlashWorkerImpl::write_target_context_to_cache(

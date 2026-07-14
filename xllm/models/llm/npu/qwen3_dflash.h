@@ -76,9 +76,6 @@ class DFlashQwen3ModelImpl final : public QWen3ModelImpl {
     if (input_embedding.defined()) {
       // Context-KV write pass: project the target hidden into the draft's KV
       // cache once; later draft decode steps reuse it via normal attention.
-      CHECK(input_params.embedding.write_context_kv)
-          << "DFlashDraftModel only accepts target hidden as context K/V "
-             "input.";
       return write_context_kv(
           input_embedding, positions, kv_caches, input_params);
     }
