@@ -90,22 +90,13 @@ void batch_prefill_impl(const std::string& uri,
     }
   }
 
-  // The "ragged_run" ABI is selected by the loaded module (i.e. the backend),
-  // NOT by the runtime GPU architecture. get_batch_prefill_uri() appends the
-  // "_sm90" suffix only for backend=="fa3", so the URI itself tells us which
-  // run schema the module expects. Derive it from the URI instead of
-  // re-deriving the backend from the current hardware + mask via
-  // determine_attention_backend().
-  //
-  // This matters when FA2 is forced on SM90 hardware (e.g. graph piecewise
-  // prefill pins "fa2" because the FA3 kernel is not graph-safe, and FA2 is
-  // also faster on SM90 for prefill). In that case the loaded module is FA2 but
-  // determine_attention_backend() would return "fa3" from the SM90 hardware
-  // probe, selecting the wrong call schema. See the matching rationale in
-  // flashinfer_planinfo.cpp::update_prefill_plan_info().
-  const bool use_fa3_abi = uri.ends_with("_sm90");
+  bool use_custom_mask = processed_mask.has_value();
+  std::string backend =
+      determine_attention_backend(/*pos_encoding_mode=*/0,
+                                  /*use_fp16_qk_reduction=*/false,
+                                  use_custom_mask);
 
-  if (!use_fa3_abi) {
+  if (backend == "fa2") {
     get_function(uri, "ragged_run")(
         to_ffi_tensor(float_workspace_buffer),
         to_ffi_tensor(int_workspace_buffer),
@@ -135,7 +126,7 @@ void batch_prefill_impl(const std::string& uri,
         /*rope_rcp_scale=*/1.0,
         /*rope_rcp_theta=*/1.0 / 10000.0,
         /*token_pos_in_items_len=*/0);
-  } else {
+  } else if (backend == "fa3") {
     // for fp8 attention, append scale tensors
     torch::Tensor v_scale = torch::Tensor();
 

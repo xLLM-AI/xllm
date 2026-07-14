@@ -386,6 +386,9 @@ for position_dtype in (torch.int32, torch.int64):
             torch.full((padding,), num_indices, dtype=torch.int32),
         ])
         native_expected = dict(expected)
+        native_expected["slots"] = torch.cat([
+            src["slots"].cpu(), -torch.ones(padding, dtype=torch.int32)
+        ])
         native_expected["kv_lens"] = repeated_cu
         native_expected["kv_lens_delta"] = torch.diff(repeated_cu)
         native_expected["indptr"] = repeated_cu
