@@ -110,8 +110,8 @@ void VLMEngine::process_group_test() {
 #endif
 }
 
-bool VLMEngine::init() {
-  if (!init_model()) {
+bool VLMEngine::init(MasterStatus master_status) {
+  if (!init_model(master_status)) {
     LOG(ERROR) << "Failed to init model from: " << options_.model_path();
     return false;
   }
@@ -126,7 +126,7 @@ bool VLMEngine::init() {
   return true;
 }
 
-bool VLMEngine::init_model() {
+bool VLMEngine::init_model(MasterStatus master_status) {
   const std::string& model_path = options_.model_path();
   auto model_loader = ModelLoader::create(model_path);
   LOG(INFO) << "Initializing model from: " << model_path;

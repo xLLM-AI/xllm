@@ -53,6 +53,19 @@ std::vector<int32_t> tensor_to_vec_int32(const torch::Tensor& tensor) {
   return {data, data + cpu_tensor.numel()};
 }
 
+void expect_position_ids(const DecodeBuildBuffers& buf,
+                         const std::vector<int32_t>& expected) {
+  EXPECT_EQ(buf.position_helper.out_position_id_vec, expected);
+  const int32_t expected_columns =
+      buf.position_helper.use_mrope_positions
+          ? static_cast<int32_t>(expected.size() / 3)
+          : static_cast<int32_t>(expected.size());
+  if (buf.position_helper.use_mrope_positions) {
+    EXPECT_EQ(expected.size() % 3, 0);
+  }
+  EXPECT_EQ(buf.position_helper.out_position_columns, expected_columns);
+}
+
 ForwardInput make_forward_input(const torch::Tensor& token_ids,
                                 const torch::Tensor& positions,
                                 const torch::Tensor& block_tables,
@@ -104,7 +117,7 @@ TEST(SpecDecodeInputBuilderTest, DraftInputsSingleRowPerSeq) {
   }
 
   EXPECT_TRUE(buf.out_token_ids.empty());
-  EXPECT_EQ(buf.out_positions, std::vector<int32_t>({5, 9}));
+  expect_position_ids(buf, {5, 9});
   EXPECT_EQ(buf.out_new_cache_slots, std::vector<int32_t>({5, 21}));
   EXPECT_EQ(buf.out_kv_seq_lens, to_layout_seq_lens({6, 10}));
 }
@@ -142,7 +155,7 @@ TEST(SpecDecodeInputBuilderTest, ValidateInputsNonAtbExpansion) {
   }
 
   EXPECT_EQ(buf.out_token_ids, std::vector<int32_t>({10, -1, -2, 20, -1, -2}));
-  EXPECT_EQ(buf.out_positions, std::vector<int32_t>({5, 6, 7, 9, 10, 11}));
+  expect_position_ids(buf, {5, 6, 7, 9, 10, 11});
   EXPECT_EQ(buf.out_new_cache_slots,
             std::vector<int32_t>({5, 6, 7, 21, 22, 23}));
   EXPECT_EQ(buf.out_kv_seq_lens, to_layout_seq_lens({6, 7, 8, 10, 11, 12}));
@@ -195,7 +208,7 @@ TEST(SpecDecodeInputBuilderTest, AppendDecodeRowUsesInputBlockTableLayout) {
                     /*block_size=*/4,
                     buf);
 
-  EXPECT_EQ(buf.out_positions, std::vector<int32_t>({10}));
+  expect_position_ids(buf, {10});
   EXPECT_EQ(buf.out_new_cache_slots, std::vector<int32_t>({22}));
   ASSERT_EQ(buf.out_block_tables.size(), 0);
 }
@@ -231,7 +244,7 @@ TEST(SpecDecodeInputBuilderTest, ValidateRowsStartFromCorrectedCurrentView) {
       buf);
 
   EXPECT_EQ(buf.out_token_ids, std::vector<int32_t>({31, -1, 41}));
-  EXPECT_EQ(buf.out_positions, std::vector<int32_t>({6, 7, 9}));
+  expect_position_ids(buf, {6, 7, 9});
   EXPECT_EQ(buf.out_new_cache_slots, std::vector<int32_t>({6, 7, 21}));
   EXPECT_EQ(buf.out_kv_seq_lens, to_layout_seq_lens({7, 8, 10}));
 }
@@ -291,7 +304,7 @@ TEST(SpecDecodeInputBuilderTest, FirstDecodeInputsFixAndNonFixMix) {
   select_row_idx[1] = static_cast<int32_t>(buf.out_token_ids.size()) - 1;
 
   EXPECT_EQ(buf.out_token_ids, std::vector<int32_t>({90, 100, 200}));
-  EXPECT_EQ(buf.out_positions, std::vector<int32_t>({4, 5, 8}));
+  expect_position_ids(buf, {4, 5, 8});
   EXPECT_EQ(buf.out_new_cache_slots, std::vector<int32_t>({4, 5, 20}));
   EXPECT_EQ(buf.out_q_seq_lens, to_layout_seq_lens({1, 1, 1}));
   EXPECT_EQ(buf.out_kv_seq_lens, to_layout_seq_lens({5, 6, 9}));
@@ -332,7 +345,7 @@ TEST(SpecDecodeInputBuilderTest, AppendDecodeRowWithInputTokenSource) {
                     buf);
 
   EXPECT_EQ(buf.out_token_ids, std::vector<int32_t>({10, -2}));
-  EXPECT_EQ(buf.out_positions, std::vector<int32_t>({5, 10}));
+  expect_position_ids(buf, {5, 10});
   EXPECT_EQ(buf.out_new_cache_slots, std::vector<int32_t>({5, 22}));
   EXPECT_EQ(buf.out_kv_seq_lens, to_layout_seq_lens({6, 11}));
   EXPECT_EQ(buf.out_q_seq_lens, to_layout_seq_lens({1, 1}));
@@ -404,7 +417,7 @@ TEST(SpecDecodeInputBuilderTest, AppendDecodeRowFromLastStep) {
                                    buf);
 
   EXPECT_EQ(buf.out_token_ids, std::vector<int32_t>({100, 202}));
-  EXPECT_EQ(buf.out_positions, std::vector<int32_t>({5, 9}));
+  expect_position_ids(buf, {5, 9});
   EXPECT_EQ(buf.out_new_cache_slots, std::vector<int32_t>({5, 21}));
   EXPECT_EQ(buf.out_kv_seq_lens, to_layout_seq_lens({6, 10}));
 }
@@ -556,7 +569,7 @@ TEST(SpecDecodeInputBuilderTest, MultiBlockDraftSingleRowPerSeq) {
   }
 
   EXPECT_TRUE(buf.out_token_ids.empty());
-  EXPECT_EQ(buf.out_positions, std::vector<int32_t>({5, 9}));
+  expect_position_ids(buf, {5, 9});
   EXPECT_EQ(buf.out_new_cache_slots, std::vector<int32_t>({0, 0}));
   EXPECT_TRUE(buf.out_block_tables.empty());
 
@@ -632,7 +645,7 @@ TEST(SpecDecodeInputBuilderTest, MultiBlockValidateExpansion) {
   }
 
   EXPECT_EQ(buf.out_token_ids, std::vector<int32_t>({10, -1, -2, 20, -1, -2}));
-  EXPECT_EQ(buf.out_positions, std::vector<int32_t>({5, 6, 7, 9, 10, 11}));
+  expect_position_ids(buf, {5, 6, 7, 9, 10, 11});
   EXPECT_EQ(buf.out_new_cache_slots, std::vector<int32_t>({0, 0, 0, 0, 0, 0}));
   EXPECT_EQ(buf.out_kv_seq_lens, to_layout_seq_lens({6, 7, 8, 10, 11, 12}));
   EXPECT_EQ(buf.out_q_seq_lens, to_layout_seq_lens({1, 1, 1, 1, 1, 1}));

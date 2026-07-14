@@ -638,6 +638,7 @@ AnthropicServiceImpl::AnthropicServiceImpl(
       reasoning_parser_format_(
           master->options().reasoning_parser().value_or("")) {}
 
+
 void AnthropicServiceImpl::process_async_impl(
     std::shared_ptr<AnthropicCall> call) {
   const auto& rpc_request = call->request();

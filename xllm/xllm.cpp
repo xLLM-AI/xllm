@@ -476,7 +476,6 @@ int run() {
     master = create_master(model_config.backend(), options);
   }
   master->run();
-
   // supported models
   std::vector<std::string> model_names = {model_config.model_id()};
   std::string model_version = default_model_name;

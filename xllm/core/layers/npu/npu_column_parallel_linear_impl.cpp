@@ -80,11 +80,21 @@ NpuColumnParallelLinearImpl::NpuColumnParallelLinearImpl(
 }
 
 void NpuColumnParallelLinearImpl::merge_loaded_weights() {
+  loader_->merge_loaded_weights();
   auto& at_weight_tensors = loader_->get_at_weight_tensors();
 
   atb_weight_tensors_[0] =
       atb_speed::Utils::AtTensor2Tensor(at_weight_tensors[0]);
   init_layer();
+}
+
+void NpuColumnParallelLinearImpl::fuse_eagle3_quarot_input_rotation(
+    torch::Tensor global_rotation) {
+  auto* column_loader =
+      dynamic_cast<ColumParallelLinearLoader*>(loader_.get());
+  CHECK(column_loader != nullptr)
+      << "NpuColumnParallelLinear loader is not ColumParallelLinearLoader";
+  column_loader->fuse_eagle3_quarot_input_rotation(global_rotation);
 }
 
 int64_t NpuColumnParallelLinearImpl::init_layer() {

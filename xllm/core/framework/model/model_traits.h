@@ -205,6 +205,15 @@ struct has_set_npu_word_embedding<
         std::declval<layer::NpuWordEmbedding&>()))>> : std::true_type {};
 
 template <typename T, typename = void>
+struct has_set_restored_npu_word_embedding : std::false_type {};
+
+template <typename T>
+struct has_set_restored_npu_word_embedding<
+    T,
+    std::void_t<decltype(std::declval<T>()->set_restored_npu_word_embedding(
+        std::declval<layer::NpuWordEmbedding&>()))>> : std::true_type {};
+
+template <typename T, typename = void>
 struct has_init_or_refresh_rolling_runtime : std::false_type {};
 
 template <typename T>

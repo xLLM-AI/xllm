@@ -61,5 +61,48 @@ void ColumParallelLinearLoader::verify_loaded_weights(
       << "weight is not loaded for " << weight_str;
 }
 
+void ColumParallelLinearLoader::fuse_eagle3_quarot_input_rotation(
+    torch::Tensor global_rotation) {
+  auto& weight = working_tensors()[0];
+  CHECK(weight.defined()) << "Eagle3 fc weight is not loaded";
+  CHECK(weight.sizes() != std::vector<int64_t>({1}))
+      << "Eagle3 fc weight is not loaded";
+  CHECK_EQ(weight.dim(), 2) << "Eagle3 fc weight must be 2D, got "
+                            << weight.sizes();
+  CHECK_EQ(global_rotation.dim(), 2)
+      << "QuaRot global_rotation must be a 2D tensor";
+  CHECK_EQ(global_rotation.size(0), global_rotation.size(1))
+      << "QuaRot global_rotation must be square";
+  CHECK_EQ(weight.size(1) % 3, 0)
+      << "Eagle3 fc input dim must be 3 * target hidden size, got "
+      << weight.sizes();
+
+  const int64_t hidden_size = weight.size(1) / 3;
+  CHECK_EQ(global_rotation.size(0), hidden_size)
+      << "QuaRot global_rotation hidden size mismatch, expected "
+      << hidden_size << ", got " << global_rotation.size(0);
+
+  const auto weight_device = weight.device();
+  const auto weight_dtype = weight.scalar_type();
+  auto weight_cpu = weight.to(torch::kCPU).to(torch::kFloat32).contiguous();
+  auto rotation_cpu =
+      global_rotation.to(torch::kCPU).to(torch::kFloat32).contiguous();
+
+  std::vector<torch::Tensor> fused_chunks;
+  fused_chunks.reserve(3);
+  for (int64_t i = 0; i < 3; ++i) {
+    auto chunk =
+        weight_cpu.slice(/*dim=*/1, i * hidden_size, (i + 1) * hidden_size);
+    fused_chunks.emplace_back(torch::matmul(chunk, rotation_cpu));
+  }
+
+  auto fused_weight = torch::cat(fused_chunks, /*dim=*/1)
+                          .to(torch::TensorOptions()
+                                  .dtype(weight_dtype)
+                                  .device(weight_device))
+                          .contiguous();
+  weight = fused_weight;
+}
+
 }  // namespace layer
 }  // namespace xllm

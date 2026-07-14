@@ -344,6 +344,8 @@ DECLARE_int32(total_conversion_threshold);
 
 DECLARE_bool(enable_return_mm_full_embeddings);
 
+DECLARE_bool(has_restored_npu_word_embedding);
+
 DECLARE_int64(dit_cache_start_steps);
 
 DECLARE_int64(dit_cache_end_steps);

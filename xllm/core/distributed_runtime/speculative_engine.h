@@ -24,15 +24,17 @@ limitations under the License.
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
 #include "llm_engine.h"
+#include "vlm_engine.h"
 
 namespace xllm {
 
-class SpeculativeEngine : public Engine {
+template <typename TargetEngine>
+class SpeculativeEngineBase : public Engine {
  public:
   // create an engine with the given devices
-  SpeculativeEngine(const runtime::Options& options);
+  explicit SpeculativeEngineBase(const runtime::Options& options);
 
-  virtual ~SpeculativeEngine() = default;
+  ~SpeculativeEngineBase() override;
 
   bool init(MasterStatus master_status) override;
 
@@ -85,10 +87,10 @@ class SpeculativeEngine : public Engine {
                       const int32_t src_kv_split_size = 1) override;
 
  protected:
-  SpeculativeEngine(const runtime::Options& options, bool use_draft_engine);
+  SpeculativeEngineBase(const runtime::Options& options, bool use_draft_engine);
 
  private:
-  bool init_model();
+  bool init_model(MasterStatus master_status);
 
   bool allocate_kv_cache();
 
@@ -102,7 +104,7 @@ class SpeculativeEngine : public Engine {
   const runtime::Options options_;
 
   // engine
-  std::unique_ptr<LLMEngine> engine_;
+  std::unique_ptr<TargetEngine> engine_;
 
   // draft engine
   std::unique_ptr<LLMEngine> draft_engine_;
@@ -118,7 +120,7 @@ class SpeculativeEngine : public Engine {
   std::shared_ptr<DistManager> dist_manager_ = nullptr;
 };
 
-class SuffixSpeculativeEngine : public SpeculativeEngine {
+class SuffixSpeculativeEngine : public SpeculativeEngineBase<LLMEngine> {
  public:
   explicit SuffixSpeculativeEngine(const runtime::Options& options);
   ~SuffixSpeculativeEngine() override = default;
