@@ -107,11 +107,12 @@ torch::Tensor causal_conv1d_fn(
            stride_o_token,
            /*stride_block_m=*/0,
            /*pad_slot_id=*/-1,
+           /*null_block_id=*/-1,
            /*HAS_BIAS=*/0,
            /*KERNEL_WIDTH=*/4,
            /*SILU_ACTIVATION=*/1,
            /*IS_APC_ENABLED=*/0,
-           /*USE_PAD_SLOT=*/1,
+           /*HAS_NULL_BLOCK=*/1,
            /*NP2_STATELEN=*/4,
            /*BLOCK_M=*/8,
            /*BLOCK_N=*/256);

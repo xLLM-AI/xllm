@@ -252,8 +252,9 @@ torch::Tensor ChunkGatedDeltaRuleImpl::chunk_scaled_dot_kkt_fwd(
               /*BV=*/128,
               static_cast<int32_t>(NT),
               static_cast<int32_t>(chunk_num),
-              /*flags=*/1,
-              1);
+              /*ALLOW_TF32=*/1,
+              /*IS_VARLEN=*/1,
+              /*USE_G=*/1);
   return A;
 }
 
@@ -335,7 +336,8 @@ ChunkGatedDeltaRuleImpl::recompute_w_fwd(const torch::Tensor& k,
               /*BC=*/128,
               static_cast<int32_t>(NT),
               static_cast<int32_t>(chunk_num),
-              /*flag=*/1);
+              /*ALLOW_TF32=*/1,
+              /*IS_VARLEN=*/1);
   return std::make_pair(w, u);
 }
 
@@ -422,7 +424,9 @@ ChunkGatedDeltaRuleImpl::chunk_gated_delta_rule_fwd_h(
               /*USE_INITIAL_STATE=*/use_initial_state,
               /*STORE_FINAL_STATE=*/store_final_state,
               /*SAVE_NEW_VALUE=*/save_new_value_flag,
-              /*IS_VARLEN=*/is_varlen);
+              /*IS_VARLEN=*/is_varlen,
+              /*ALLOW_TF32=*/1,
+              /*STATE_V_FIRST=*/0);
   return std::make_tuple(h, v_new, final_state);
 }
 
@@ -486,8 +490,10 @@ torch::Tensor ChunkGatedDeltaRuleImpl::chunk_fwd_o(
               /*BC=*/128,
               static_cast<int32_t>(NT),
               static_cast<int32_t>(chunk_num),
-              /*flags=*/1,
-              1);
+              /*USE_G=*/1,
+              /*IS_VARLEN=*/1,
+              /*ALLOW_TF32=*/1,
+              /*STATE_V_FIRST=*/0);
   return o;
 }
 }  // namespace mlu
