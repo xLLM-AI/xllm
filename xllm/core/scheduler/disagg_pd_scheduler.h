@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <brpc/channel.h>
 
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -122,6 +123,10 @@ class DisaggPDScheduler : public ChunkedPrefillScheduler {
   // xservice client connection.
   void initialize_rpc_server(const std::string& server_name);
 
+  // On decode instance: evict requests that waited too long for FirstGeneration
+  // and deallocate their blocks to avoid leak.
+  void evict_stale_received_requests();
+
   // Register instance information including name, RPC address, type, and cache
   // info
   void register_instance_info(const std::string& server_name, Engine* engine);
@@ -175,6 +180,12 @@ class DisaggPDScheduler : public ChunkedPrefillScheduler {
   // instance_to_received_requests_map_ when the request is processed.
   std::unordered_map<std::string, std::string> request_to_instance_map_;
   std::mutex received_request_map_mutex_;
+
+  // Requests in received_request_map_ waiting for FirstGeneration. If P never
+  // sends FirstGeneration, we evict after timeout to avoid leak.
+  static constexpr int64_t kReceivedRequestPendingTimeoutMicros =
+      120 * 1000 * 1000;  // 120 seconds
+  std::unordered_map<std::string, int64_t> received_request_pending_since_;
 
   // Lock for multi-threaded read-write latency metrics
   std::vector<int64_t> recent_ttft_;

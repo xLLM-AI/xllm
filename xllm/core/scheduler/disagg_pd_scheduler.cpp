@@ -23,6 +23,7 @@ limitations under the License.
 
 #include <limits>
 #include <random>
+#include <string>
 
 #include "common/global_flags.h"
 #include "common/macros.h"
@@ -286,6 +287,9 @@ void DisaggPDScheduler::start_rpc_server() {
 }
 
 void DisaggPDScheduler::step(const absl::Duration& timeout) {
+  if (options_.instance_role() == InstanceRole::DECODE) {
+    evict_stale_received_requests();
+  }
   ContinuousScheduler::step(timeout);
   // Send first generation token to decode instance.
   // Always check (not gated on last_step_prefill_) because
@@ -773,6 +777,8 @@ bool DisaggPDScheduler::decode_schedule(
     instance_to_received_requests_map_[prefill_instance_name].insert(
         request->request_id());
     request_to_instance_map_[request->request_id()] = prefill_instance_name;
+    received_request_pending_since_[request->request_id()] =
+        absl::ToUnixMicros(absl::Now());
   }
 
   return true;
@@ -811,6 +817,7 @@ bool DisaggPDScheduler::decode_recv_first_generation(
       instance_to_received_requests_map_[inst_it->second].erase(req_id);
       request_to_instance_map_.erase(inst_it);
     }
+    received_request_pending_since_.erase(req_id);
   }
   auto& sequences = request->sequences();
   if (sequences.empty() || sequences[0] == nullptr) {
@@ -918,6 +925,38 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     return false;
   }
   return true;
+}
+
+void DisaggPDScheduler::evict_stale_received_requests() {
+  const int64_t now_us = absl::ToUnixMicros(absl::Now());
+  std::vector<std::shared_ptr<Request>> to_deallocate;
+  {
+    std::lock_guard<std::mutex> lock(received_request_map_mutex_);
+    for (auto it = received_request_pending_since_.begin();
+         it != received_request_pending_since_.end();) {
+      if (now_us - it->second > kReceivedRequestPendingTimeoutMicros) {
+        const std::string& req_id = it->first;
+        auto req_it = received_request_map_.find(req_id);
+        if (req_it != received_request_map_.end()) {
+          to_deallocate.push_back(req_it->second);
+          received_request_map_.erase(req_it);
+        }
+        auto inst_it = request_to_instance_map_.find(req_id);
+        if (inst_it != request_to_instance_map_.end()) {
+          instance_to_received_requests_map_[inst_it->second].erase(req_id);
+          request_to_instance_map_.erase(inst_it);
+        }
+        it = received_request_pending_since_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  for (const auto& request : to_deallocate) {
+    LOG(WARNING) << "Evicting request " << request->request_id()
+                 << ": FirstGeneration did not arrive within timeout";
+    kv_cache_manager_->deallocate(request.get());
+  }
 }
 
 bool DisaggPDScheduler::try_allocate(Sequence* sequence) {
