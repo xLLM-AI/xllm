@@ -125,10 +125,41 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   void prepare_draft_extend_inputs(
       const ForwardInput& base_input,
       const std::vector<EmbeddingCache::DecodeState>& last_states,
-      ForwardInput& extend_input);
+      ForwardInput& extend_input,
+      Stream& preparation_stream);
 
-  void write_target_context_to_cache(const ForwardInput& input,
-                                     const SampleOutput& validate_output);
+  struct PendingTargetContext {
+    std::vector<int32_t> embedding_ids;
+    std::vector<std::string> request_ids;
+    // Both tensors stay on device.  A steady-state overlap step consumes them
+    // by queueing gather/update ops behind rejection sampling on the same
+    // stream.  They are materialized on CPU only when the batch shape/order
+    // changes and the host cache fallback is required.
+    torch::Tensor accepted_tokens;
+    torch::Tensor accepted_tokens_host;
+    torch::Tensor accepted_embeddings;
+    StreamEventPtr ready_event;
+  };
+
+  struct PendingDraftContext {
+    std::vector<int32_t> embedding_ids;
+    std::vector<std::string> request_ids;
+    std::optional<ForwardOutput> output;
+    ForwardInput prepared_input;
+  };
+
+  void stage_target_context_write(const ForwardInput& input,
+                                  const SampleOutput& validate_output,
+                                  StreamEventPtr ready_event,
+                                  torch::Tensor accepted_tokens_host);
+  bool pending_target_context_matches(const ForwardInput& input) const;
+  void flush_pending_target_context();
+  void prepare_next_first_draft_template(const ForwardInput& input,
+                                         ForwardInput& draft_input);
+  void enqueue_next_first_draft(const ForwardInput& input,
+                                const SampleOutput& validate_output,
+                                ForwardInput draft_input);
+  bool pending_draft_context_matches(const ForwardInput& input) const;
 
  protected:
   // Draft model worker
@@ -136,6 +167,15 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
 
   // Embedding cache for speculative decoding
   std::shared_ptr<EmbeddingCache> embedding_cache_;
+
+  // Rejection sampling produces accepted state on the compute stream.  Keep
+  // that state device-resident so the next overlap task can be fully enqueued
+  // without waiting for target verification to finish.
+  PendingTargetContext pending_target_context_;
+  // Draft step 0 is submitted at the tail of the preceding target validation,
+  // before control returns to the scheduler.  The following scheduler turn
+  // consumes this output and only submits draft steps 1..N-1.
+  PendingDraftContext pending_draft_context_;
 
   // Whether validation directly uses selected-only draft_probs [B, S].
   // If false, selected-only cache values are restored to dense [B, S, V].
