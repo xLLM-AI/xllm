@@ -48,6 +48,19 @@ int32_t get_device_numa_node(int32_t device_index);
 int32_t bind_process_to_numa_node(int32_t numa_node);
 
 /**
+ * @brief Save current CPU affinity so spawned workers can restore it after
+ * exec.
+ * @return 0 on success, non-zero on failure
+ */
+int32_t preserve_current_cpu_affinity_for_spawn_worker();
+
+/**
+ * @brief Prepare spawn worker before binding it to a device-local NUMA node.
+ * @return 0 on success, non-zero on failure
+ */
+int32_t prepare_spawn_worker_for_numa_binding();
+
+/**
  * @brief Bind current thread to a specific NUMA node
  * @param numa_node The NUMA node ID to bind to
  * @return 0 on success, non-zero on failure

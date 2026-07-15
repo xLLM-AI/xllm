@@ -327,6 +327,8 @@ DECLARE_int32(flashinfer_workspace_buffer_size);
 
 DECLARE_int32(random_seed);
 
+DECLARE_string(spawn_worker_dir);
+
 DECLARE_string(dit_cache_policy);
 
 DECLARE_int64(dit_cache_warmup_steps);

@@ -28,14 +28,21 @@ limitations under the License.
 #include <sched.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <sstream>
 #include <string>
 
 namespace xllm {
 namespace numa {
 namespace {
+
+constexpr const char* kSpawnWorkerAllowedCpusEnv =
+    "XLLM_SPAWN_WORKER_ALLOWED_CPUS";
 
 bool read_numa_node(const std::string& numa_path, int32_t* numa_node) {
   if (numa_node == nullptr) {
@@ -55,7 +62,14 @@ bool read_numa_node(const std::string& numa_path, int32_t* numa_node) {
 int32_t get_numa_node_from_sysfs(const std::string& backend,
                                  int32_t device_index,
                                  const std::string& pci_bus_id) {
-  std::string numa_path = "/sys/bus/pci/devices/" + pci_bus_id + "/numa_node";
+  // Device APIs may return uppercase hex, but sysfs PCI dirs require lowercase.
+  std::string lower_bus_id = pci_bus_id;
+  std::transform(
+      lower_bus_id.begin(),
+      lower_bus_id.end(),
+      lower_bus_id.begin(),
+      [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  std::string numa_path = "/sys/bus/pci/devices/" + lower_bus_id + "/numa_node";
   LOG(INFO) << backend << " device " << device_index
             << " NUMA sysfs path: " << numa_path;
 
@@ -127,6 +141,76 @@ bool build_cpu_set_for_numa_node(int32_t numa_node,
 
   numa_free_cpumask(node_cpu_mask);
   return (*nr_cpus > 0);
+}
+
+std::string cpu_set_to_string(const cpu_set_t& cpu_set) {
+  std::ostringstream oss;
+  bool is_first_cpu = true;
+  for (int32_t cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+    if (!CPU_ISSET(cpu, &cpu_set)) {
+      continue;
+    }
+    if (!is_first_cpu) {
+      oss << ",";
+    }
+    oss << cpu;
+    is_first_cpu = false;
+  }
+  return oss.str();
+}
+
+bool parse_cpu_set_string(const std::string& cpu_set_str,
+                          cpu_set_t* cpu_set,
+                          int32_t* nr_cpus) {
+  if (cpu_set == nullptr || nr_cpus == nullptr) {
+    return false;
+  }
+
+  CPU_ZERO(cpu_set);
+  *nr_cpus = 0;
+
+  std::stringstream ss(cpu_set_str);
+  std::string token;
+  while (std::getline(ss, token, ',')) {
+    if (token.empty()) {
+      LOG(WARNING) << "Empty CPU id in preserved spawn worker affinity";
+      return false;
+    }
+
+    char* end = nullptr;
+    errno = 0;
+    int64_t parsed_cpu = std::strtol(token.c_str(), &end, 10);
+    if (errno != 0 || end == token.c_str() || *end != '\0' || parsed_cpu < 0 ||
+        parsed_cpu >= CPU_SETSIZE) {
+      LOG(WARNING) << "Invalid CPU id in preserved spawn worker affinity: "
+                   << token;
+      return false;
+    }
+
+    int32_t cpu = static_cast<int32_t>(parsed_cpu);
+    if (!CPU_ISSET(cpu, cpu_set)) {
+      CPU_SET(cpu, cpu_set);
+      ++(*nr_cpus);
+    }
+  }
+
+  return (*nr_cpus > 0);
+}
+
+bool get_preserved_cpu_affinity_for_spawn_worker(cpu_set_t* cpu_set,
+                                                 int32_t* nr_cpus) {
+  const char* env_value = std::getenv(kSpawnWorkerAllowedCpusEnv);
+  if (env_value == nullptr || env_value[0] == '\0') {
+    return false;
+  }
+  return parse_cpu_set_string(std::string(env_value), cpu_set, nr_cpus);
+}
+
+void clear_inherited_memory_policy() {
+  // Clear inherited strict membind so bind_process_to_numa_node can
+  // install a fresh policy without bad_alloc.
+  numa_set_strict(0);
+  numa_set_localalloc();
 }
 
 void apply_process_memory_policy(int32_t numa_node) {
@@ -220,6 +304,69 @@ int32_t get_device_numa_node(int32_t device_index) {
 #endif
 
   return -1;
+}
+
+int32_t preserve_current_cpu_affinity_for_spawn_worker() {
+  cpu_set_t current_affinity;
+  CPU_ZERO(&current_affinity);
+  if (sched_getaffinity(0, sizeof(cpu_set_t), &current_affinity) != 0) {
+    LOG(ERROR) << "Failed to preserve CPU affinity for spawn worker: "
+               << strerror(errno);
+    return -1;
+  }
+
+  std::string cpu_set_str = cpu_set_to_string(current_affinity);
+  if (cpu_set_str.empty()) {
+    LOG(ERROR) << "Current CPU affinity is empty, cannot preserve for spawn "
+                  "worker";
+    return -1;
+  }
+
+  if (::setenv(kSpawnWorkerAllowedCpusEnv,
+               cpu_set_str.c_str(),
+               /*overwrite=*/1) != 0) {
+    LOG(ERROR) << "Failed to set " << kSpawnWorkerAllowedCpusEnv << ": "
+               << strerror(errno);
+    return -1;
+  }
+
+  LOG(INFO) << "Preserved spawn worker CPU affinity in "
+            << kSpawnWorkerAllowedCpusEnv << ": " << cpu_set_str;
+  return 0;
+}
+
+int32_t prepare_spawn_worker_for_numa_binding() {
+  if (!is_numa_available()) {
+    LOG(WARNING) << "NUMA not available, skipping spawn worker NUMA binding "
+                    "preparation";
+    return -1;
+  }
+
+  cpu_set_t preserved_cpus;
+  CPU_ZERO(&preserved_cpus);
+  int32_t nr_preserved_cpus = 0;
+  if (!get_preserved_cpu_affinity_for_spawn_worker(&preserved_cpus,
+                                                   &nr_preserved_cpus)) {
+    clear_inherited_memory_policy();
+    LOG(WARNING) << "No preserved CPU affinity found for spawn worker, "
+                    "cleared inherited memory policy only";
+    return -1;
+  }
+
+  // Restore the pre-binding CPU set so build_cpu_set_for_numa_node can pick
+  // the target NUMA's CPUs without escaping external cpuset constraints.
+  if (sched_setaffinity(0, sizeof(cpu_set_t), &preserved_cpus) != 0) {
+    LOG(ERROR) << "Failed to restore preserved CPU affinity: "
+               << strerror(errno);
+    clear_inherited_memory_policy();
+    return -1;
+  }
+
+  clear_inherited_memory_policy();
+
+  LOG(INFO) << "Prepared spawn worker for NUMA binding with "
+            << nr_preserved_cpus << " preserved CPUs and cleared memory policy";
+  return 0;
 }
 
 int32_t bind_process_to_numa_node(int32_t numa_node) {

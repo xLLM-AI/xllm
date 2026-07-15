@@ -119,6 +119,10 @@ void setup_numa_affinity_and_isolation(
   }
 
   if (engine_numa_node >= 0) {
+    if (numa::preserve_current_cpu_affinity_for_spawn_worker() != 0) {
+      LOG(WARNING) << "Failed to preserve CPU affinity before NUMA binding, "
+                      "spawn workers may fail to reset inherited NUMA binding";
+    }
     if (numa::bind_process_to_numa_node(engine_numa_node) != 0) {
       LOG(WARNING) << "Failed to pin engine process to NUMA node "
                    << engine_numa_node

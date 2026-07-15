@@ -51,7 +51,8 @@ class ExecutionConfig final {
          "use_contiguous_input_buffer",
          "input_shm_size",
          "output_shm_size",
-         "random_seed"}};
+         "random_seed",
+         "spawn_worker_dir"}};
     return kOptionCategory;
   }
 
@@ -78,6 +79,8 @@ class ExecutionConfig final {
   PROPERTY(uint64_t, output_shm_size) = 128;
 
   PROPERTY(int32_t, random_seed) = -1;
+
+  PROPERTY(std::string, spawn_worker_dir) = "";
 };
 
 }  // namespace xllm

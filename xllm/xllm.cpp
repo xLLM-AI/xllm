@@ -231,6 +231,8 @@ Options create_options(const std::string& instance_name, bool is_local) {
     options.draft_devices(draft_devices);
   }
 
+  options.spawn_worker_path(execution_config.spawn_worker_dir());
+
   return options;
 }
 
