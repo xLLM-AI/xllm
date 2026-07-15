@@ -41,7 +41,8 @@ bool should_enable_async_tiling_copy_stream() {
   // ATB copy-stream teardown is not reversible for the same context on the
   // current CANN/PTA stack, so contexts that may enter graph capture must not
   // pre-create the helper stream.
-  if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
+  if (::xllm::ExecutionConfig::get_instance().enable_graph() ||
+      ::xllm::ExecutionConfig::get_instance().enable_encoder_graph()) {
     return false;
   }
   return util::get_bool_env("ATB_USE_TILING_COPY_STREAM", false);

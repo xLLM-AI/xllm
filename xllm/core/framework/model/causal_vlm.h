@@ -36,6 +36,8 @@ class CausalVLM : public CausalLM {
   virtual torch::Tensor get_input_embeddings(
       const torch::Tensor& input_ids,
       const ModelInputParams& input_params) = 0;
+  virtual void init_encoder_graph_manager(const ModelArgs& args,
+                                          const torch::Device& device) {}
 };
 
 template <typename Model>
@@ -160,6 +162,13 @@ class CausalVLMImpl : public CausalVLM {
   }
 
   torch::Device device() const override { return options_.device(); }
+
+  void init_encoder_graph_manager(const ModelArgs& args,
+                                  const torch::Device& device) override {
+    if constexpr (detail::has_init_encoder_graph_manager<Model>::value) {
+      model_->init_encoder_graph_manager(args, device);
+    }
+  }
 
   const torch::TensorOptions& options() const override { return options_; }
 

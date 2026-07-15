@@ -81,7 +81,8 @@ atb::Status BaseLayer::execute_node(atb_speed::Model::Node& node,
   //   However, libtorch_npu current stream is set to default stream after
   //   capture ends, causing inconsistency between ATB context and the actual
   //   execution stream
-  if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
+  if (::xllm::ExecutionConfig::get_instance().enable_graph() ||
+      ::xllm::ExecutionConfig::get_instance().enable_encoder_graph()) {
     void* stream = c10_npu::getCurrentNPUStream(device_.index()).stream();
     context_->SetExecuteStream(stream);
   }

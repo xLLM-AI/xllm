@@ -17,9 +17,11 @@ limitations under the License.
 
 #include <atb/atb_infer.h>
 
+#include <sstream>
 #include <string>
 
 #include "core/common/global_flags.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model/model_output.h"
@@ -27,7 +29,7 @@ limitations under the License.
 #include "core/layers/npu/npu_qwen3_vision_encoder_layer_impl.h"
 #include "core/layers/npu/npu_rms_norm_impl.h"
 #include "core/platform/device.h"
-#include "core/util/timer.h"
+#include "core/runtime/vision_encoder_acl_graph_manager.h"
 #include "models/llm/npu/qwen3.h"
 #include "models/model_registry.h"
 #include "models/vlm/mposition/mposition.h"
@@ -309,7 +311,8 @@ class Qwen3_VisionPatchMergerImpl : public torch::nn::Module {
 };
 TORCH_MODULE(Qwen3_VisionPatchMerger);
 
-class Qwen3_VisionTransformerImpl : public torch::nn::Module {
+class Qwen3_VisionTransformerImpl : public torch::nn::Module,
+                                    public VisionEncoderGraphAdapter {
  public:
   Qwen3_VisionTransformerImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
@@ -516,17 +519,36 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
         cu_seqlens_cpu.data_ptr<int>() + cu_seqlens_cpu.numel());
     std::vector<torch::Tensor> deepstack_feature_lists;
     deepstack_feature_lists.reserve(deepstack_visual_indexes_.size());
-    for (int idx = 0; idx < blocks_->size(); ++idx) {
-      hidden_states = layers_[idx](
-          hidden_states, m_cos, m_sin, cu_seqlens, cu_seqlens_vec, idx);
-      auto it = std::find(deepstack_visual_indexes_.begin(),
-                          deepstack_visual_indexes_.end(),
-                          idx);
 
-      if (it != deepstack_visual_indexes_.end()) {
-        int index = std::distance(deepstack_visual_indexes_.begin(), it);
-        deepstack_feature_lists.push_back(
-            deepstack_merger_layers_[index](hidden_states));
+    int64_t actual_tokens = hidden_states.size(0);
+    bool replayed = false;
+    if (encoder_graph_manager_ &&
+        encoder_graph_manager_->can_replay(actual_tokens)) {
+      auto result = encoder_graph_manager_->replay(hidden_states,
+                                                   m_cos,
+                                                   m_sin,
+                                                   cu_seqlens,
+                                                   cu_seqlens_vec,
+                                                   actual_tokens);
+      if (result.has_value()) {
+        hidden_states = result->hidden_states;
+        deepstack_feature_lists = std::move(result->deepstack_features);
+        replayed = true;
+      }
+    }
+    if (!replayed) {
+      for (int32_t idx = 0; idx < static_cast<int32_t>(layers_.size()); ++idx) {
+        hidden_states = layers_[idx](
+            hidden_states, m_cos, m_sin, cu_seqlens, cu_seqlens_vec, idx);
+        auto it = std::find(deepstack_visual_indexes_.begin(),
+                            deepstack_visual_indexes_.end(),
+                            idx);
+        if (it != deepstack_visual_indexes_.end()) {
+          int32_t index = static_cast<int32_t>(
+              std::distance(deepstack_visual_indexes_.begin(), it));
+          deepstack_feature_lists.push_back(
+              deepstack_merger_layers_[index](hidden_states));
+        }
       }
     }
     // adapter
@@ -588,6 +610,52 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
     }
   }
 
+  void init_encoder_graph_manager(const ModelArgs& args,
+                                  const torch::Device& device) {
+    std::string budgets_str =
+        ::xllm::ExecutionConfig::get_instance().encoder_graph_budgets();
+    LOG(INFO) << "[EncoderGraph] init_encoder_graph_manager called, "
+              << "budgets_str='" << budgets_str << "', device=" << device;
+    std::vector<int64_t> budgets;
+    std::istringstream iss(budgets_str);
+    std::string tok;
+    while (std::getline(iss, tok, ',')) {
+      if (tok.empty()) continue;
+      budgets.push_back(std::stoll(tok));
+    }
+    CHECK(!budgets.empty())
+        << "[EncoderGraph] --encoder_graph_budgets has no valid values: '"
+        << budgets_str << "'";
+    encoder_graph_manager_ =
+        std::make_unique<VisionEncoderAclGraphManager>(args, device, budgets);
+    encoder_graph_manager_->set_adapter(this);
+    LOG(INFO) << "[EncoderGraph] encoder_graph_manager_ created successfully, "
+              << "layers=" << layers_.size()
+              << ", deepstack_mergers=" << deepstack_merger_layers_.size()
+              << ", deepstack_indexes=" << deepstack_visual_indexes_.size();
+  }
+
+  int32_t num_encoder_layers() const override {
+    return static_cast<int32_t>(layers_.size());
+  }
+  const std::vector<int64_t>& deepstack_indexes() const override {
+    return deepstack_visual_indexes_;
+  }
+  torch::Tensor forward_encoder_layer(
+      int32_t layer_idx,
+      torch::Tensor& hidden,
+      torch::Tensor& cos_pos,
+      torch::Tensor& sin_pos,
+      torch::Tensor& cu_seqlens,
+      std::vector<int>& cu_seqlens_vec) override {
+    return layers_[layer_idx](
+        hidden, cos_pos, sin_pos, cu_seqlens, cu_seqlens_vec, layer_idx);
+  }
+  torch::Tensor forward_deepstack_merger(int32_t deepstack_slot,
+                                         const torch::Tensor& hidden) override {
+    return deepstack_merger_layers_[deepstack_slot](hidden);
+  }
+
  private:
   int hidden_size_ = 0;
   int num_heads_ = 0;
@@ -615,6 +683,7 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
   int device_id = 0;
   bool is_emb_weight_loaded = false;
   torch::TensorOptions options_;
+  std::unique_ptr<VisionEncoderAclGraphManager> encoder_graph_manager_;
 };
 TORCH_MODULE(Qwen3_VisionTransformer);
 
@@ -825,6 +894,11 @@ class Qwen3_VLForConditionalGenerationImpl : public torch::nn::Module {
 
   void set_npu_word_embedding(layer::NpuWordEmbedding& npu_word_embedding) {
     language_model_->set_npu_word_embedding(npu_word_embedding);
+  }
+
+  void init_encoder_graph_manager(const ModelArgs& args,
+                                  const torch::Device& device) {
+    visual_->init_encoder_graph_manager(args, device);
   }
 
  private:

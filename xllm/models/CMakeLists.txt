@@ -16,11 +16,14 @@ cc_library(
     models.h
     dit/utils/lanczos_resample.h
     $<$<BOOL:${USE_NPU}>:dit/utils/dit_block_weight_manager.h>
+    $<$<BOOL:${USE_NPU}>:../core/runtime/vision_encoder_acl_graph_manager.h>
+    $<$<BOOL:${USE_NPU}>:../core/runtime/vision_encoder_graph_adapter.h>
   SRCS
     model_registry.cpp
     dit/utils/lanczos_resample.cpp
     $<$<BOOL:${USE_NPU}>:dit/utils/dit_block_weight_manager.cpp>
     vlm/utils/multimodal_utils.cpp
+    $<$<BOOL:${USE_NPU}>:../core/runtime/vision_encoder_acl_graph_manager.cpp>
   DEPS
     :model
     :mposition
@@ -30,4 +33,5 @@ cc_library(
     :model_loader
     :layers
     $<$<BOOL:${USE_NPU}>:npu_layers>
+    $<$<BOOL:${USE_NPU}>:torch_npu>
 )

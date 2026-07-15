@@ -43,6 +43,19 @@ VlmExecutorImpl::VlmExecutorImpl(CausalLM* model,
     llm_executor_ = ExecutorImplFactory::get_instance().create_executor_impl(
         model, args, device, options, Platform::type_str());
   }
+  if (::xllm::ExecutionConfig::get_instance().enable_encoder_graph()) {
+    if (model_) {
+      model_->init_encoder_graph_manager(args, device);
+      LOG(INFO) << "[EncoderGraph] encoder graph manager initialized, "
+                << "enable_encoder_graph=true";
+    } else {
+      LOG(WARNING) << "[EncoderGraph] enable_encoder_graph=true but model is "
+                      "not CausalVLM, skip init";
+    }
+  } else {
+    LOG(INFO) << "[EncoderGraph] enable_encoder_graph=false, encoder graph "
+              << "disabled (use --enable_encoder_graph=True to enable)";
+  }
 }
 
 ForwardInput VlmExecutorImpl::prepare_inputs(Batch& batch) {

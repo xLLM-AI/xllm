@@ -47,6 +47,8 @@ class ExecutionConfig final {
          "enable_graph_vmm_pool",
          "max_tokens_for_graph_mode",
          "acl_graph_decode_batch_size_limit",
+         "enable_encoder_graph",
+         "encoder_graph_budgets",
          "enable_shm",
          "use_contiguous_input_buffer",
          "input_shm_size",
@@ -68,6 +70,10 @@ class ExecutionConfig final {
   PROPERTY(int32_t, max_tokens_for_graph_mode) = 2048;
 
   PROPERTY(int32_t, acl_graph_decode_batch_size_limit) = 16;
+
+  PROPERTY(bool, enable_encoder_graph) = false;
+
+  PROPERTY(std::string, encoder_graph_budgets) = "256,512";
 
   PROPERTY(bool, enable_shm) = false;
 

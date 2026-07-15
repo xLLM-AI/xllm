@@ -25,6 +25,8 @@ namespace xllm {
 struct ModelInputParams;
 struct ModelGraphMetadataState;
 
+class ModelLoader;
+
 namespace layer {
 class LmHead;
 class WordEmbedding;
@@ -166,6 +168,16 @@ struct has_pooler<T,
                       std::declval<const torch::Tensor&>(),
                       std::declval<const torch::Tensor&>()))>>
     : std::true_type {};
+
+template <typename T, typename = void>
+struct has_init_encoder_graph_manager : std::false_type {};
+
+template <typename T>
+struct has_init_encoder_graph_manager<
+    T,
+    std::void_t<decltype(std::declval<T>()->init_encoder_graph_manager(
+        std::declval<const ModelArgs&>(),
+        std::declval<const torch::Device&>()))>> : std::true_type {};
 
 #if defined(USE_NPU)
 template <typename T, typename = void>

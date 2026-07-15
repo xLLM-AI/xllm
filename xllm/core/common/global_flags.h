@@ -151,6 +151,9 @@ DECLARE_int32(max_tokens_for_graph_mode);
 
 DECLARE_int32(acl_graph_decode_batch_size_limit);
 
+DECLARE_bool(enable_encoder_graph);
+DECLARE_string(encoder_graph_budgets);
+
 DECLARE_bool(enable_chunked_prefill);
 
 DECLARE_string(master_node_addr);
