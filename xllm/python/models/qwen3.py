@@ -29,8 +29,8 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from .. import ops
-from ..layers import (
+from xllm.python import ops
+from xllm.python.layers import (
     Attention,
     ColumnParallelLinear,
     HiddenParallelEmbedding,
@@ -38,7 +38,7 @@ from ..layers import (
     RotaryEmbedding,
     RowParallelLinear,
 )
-from .base import PyModelBase
+from xllm.python.models.base import PyModelBase
 
 
 @dataclass

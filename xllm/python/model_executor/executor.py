@@ -17,12 +17,14 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ..attention.backend import AttentionMetadata, KVCache
-from ..attention.flashinfer import FlashInferBackend
-from ..layers.attention import Attention
-from .runners.decode_cuda_graph import DecodeCudaGraphRunner
-from .runners.eager import EagerRunner
-from .runners.inductor import InductorRunner
+from xllm.python.attention.backend import AttentionMetadata, KVCache
+from xllm.python.attention.flashinfer import FlashInferBackend
+from xllm.python.layers.attention import Attention
+from xllm.python.model_executor.runners.decode_cuda_graph import (
+    DecodeCudaGraphRunner,
+)
+from xllm.python.model_executor.runners.eager import EagerRunner
+from xllm.python.model_executor.runners.inductor import InductorRunner
 
 
 class ModelExecutor:

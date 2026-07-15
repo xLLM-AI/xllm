@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import torch
 
-from ...attention.backend import AttentionMetadata
-from ..forward_context import ForwardContext, forward_context
-from .base import BaseRunner
+from xllm.python.attention.backend import AttentionMetadata
+from xllm.python.model_executor.forward_context import (
+    ForwardContext,
+    forward_context,
+)
+from xllm.python.model_executor.runners.base import BaseRunner
 
 
 class EagerRunner(BaseRunner):

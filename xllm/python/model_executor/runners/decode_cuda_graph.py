@@ -19,10 +19,13 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from ... import ops
-from ...attention.backend import AttentionBackend, AttentionMetadata
-from ..forward_context import ForwardContext, forward_context
-from .base import BaseRunner
+from xllm.python import ops
+from xllm.python.attention.backend import AttentionBackend, AttentionMetadata
+from xllm.python.model_executor.forward_context import (
+    ForwardContext,
+    forward_context,
+)
+from xllm.python.model_executor.runners.base import BaseRunner
 
 _CAPTURE_WARMUP_STEPS = 2
 

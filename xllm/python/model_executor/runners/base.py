@@ -19,7 +19,7 @@ from abc import ABC, abstractmethod
 import torch
 import torch.nn as nn
 
-from ...attention.backend import AttentionBackend, AttentionMetadata
+from xllm.python.attention.backend import AttentionBackend, AttentionMetadata
 
 
 class BaseRunner(ABC):

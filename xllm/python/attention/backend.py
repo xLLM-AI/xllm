@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Protocol
 import torch
 
 if TYPE_CHECKING:
-    from ..layers.attention import Attention
+    from xllm.python.layers.attention import Attention
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
 

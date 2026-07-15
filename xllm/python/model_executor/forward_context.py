@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
-from ..attention.backend import AttentionBackend
+from xllm.python.attention.backend import AttentionBackend
 
 
 @dataclass(frozen=True, slots=True)

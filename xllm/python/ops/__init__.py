@@ -22,14 +22,17 @@ Attention kernels (batch_prefill/batch_decode) are provided by the flashinfer
 Python package directly via ``layers/attention.py``, not through this module.
 """
 
-from .compute import (
+from xllm.python.ops.compute import (
     fused_add_rms_norm,
     fused_qk_norm_rope,
     rms_norm,
     silu_and_mul,
 )
-from .attention import reshape_paged_cache, update_decode_graph_metadata
-from .collectives import (
+from xllm.python.ops.attention import (
+    reshape_paged_cache,
+    update_decode_graph_metadata,
+)
+from xllm.python.ops.collectives import (
     all_gather,
     all_reduce,
     init_tp_group,

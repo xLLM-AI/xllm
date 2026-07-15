@@ -22,11 +22,15 @@ import flashinfer
 import torch
 from flashinfer.decode import fast_decode_plan
 
-from .. import ops
-from .backend import AttentionBackend, AttentionMetadata, KVCache
+from xllm.python import ops
+from xllm.python.attention.backend import (
+    AttentionBackend,
+    AttentionMetadata,
+    KVCache,
+)
 
 if TYPE_CHECKING:
-    from ..layers.attention import Attention
+    from xllm.python.layers.attention import Attention
 
 _WORKSPACE_SIZE = 128 * 1024 * 1024
 

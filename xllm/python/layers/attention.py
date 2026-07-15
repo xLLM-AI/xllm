@@ -23,7 +23,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ..model_executor.forward_context import get_forward_context
+from xllm.python.model_executor.forward_context import get_forward_context
 
 
 class Attention(nn.Module):

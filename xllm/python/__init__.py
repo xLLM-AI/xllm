@@ -27,6 +27,6 @@ uses — so the Python graph runs identical operators across hardware backends
 with no ``#ifdef``.
 """
 
-from .registry import get_model_class, register_model  # noqa: F401
+from xllm.python.registry import get_model_class, register_model  # noqa: F401
 
 __all__ = ["get_model_class", "register_model"]

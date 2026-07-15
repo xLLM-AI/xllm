@@ -20,11 +20,11 @@ touch the kernel backends directly. The dependency direction is
 ``models -> layers -> ops -> kernels``.
 """
 
-from .attention import Attention
-from .embedding import HiddenParallelEmbedding
-from .layernorm import RMSNorm
-from .linear import ColumnParallelLinear, RowParallelLinear
-from .rotary_embedding import RotaryEmbedding
+from xllm.python.layers.attention import Attention
+from xllm.python.layers.embedding import HiddenParallelEmbedding
+from xllm.python.layers.layernorm import RMSNorm
+from xllm.python.layers.linear import ColumnParallelLinear, RowParallelLinear
+from xllm.python.layers.rotary_embedding import RotaryEmbedding
 
 __all__ = [
     "Attention",
