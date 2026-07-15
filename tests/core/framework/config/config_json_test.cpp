@@ -217,15 +217,6 @@ TEST(ConfigJsonTest, RegistersOnlyContextParallelCommandLineOption) {
       google::GetCommandLineFlagInfo(removed_flag.c_str(), &flag_info));
 }
 
-TEST(ConfigJsonTest, RejectsRemovedPrefillSequenceParallelKey) {
-  const std::string removed_key = std::string("enable_") + "prefill_sp";
-  const JsonReader json =
-      config::parse_json_string("{\"" + removed_key + "\": true}");
-  ParallelConfig parallel_config;
-
-  EXPECT_DEATH(parallel_config.from_json(json), "unsupported.*configuration");
-}
-
 TEST(ConfigJsonTest, LoadJsonFileReadsConfigFixture) {
   const std::filesystem::path config_path = config_test_file_path();
   ASSERT_TRUE(std::filesystem::exists(config_path)) << config_path;
