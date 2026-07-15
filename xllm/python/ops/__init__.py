@@ -34,7 +34,7 @@ from xllm.python.ops.attention import (
 )
 from xllm.python.ops.collectives import (
     all_gather,
-    all_reduce,
+    all_reduce_,
     init_tp_group,
 )
 
@@ -45,7 +45,7 @@ __all__ = [
     "fused_qk_norm_rope",
     "reshape_paged_cache",
     "update_decode_graph_metadata",
-    "all_reduce",
+    "all_reduce_",
     "all_gather",
     "init_tp_group",
 ]

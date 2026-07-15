@@ -143,8 +143,12 @@ TEST_F(XllmOpsTest, EmbeddedPythonCollectivesUseTorchDistributed) {
       torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
   auto input = torch::ones({2, 3}, options);
 
-  auto reduced = collectives.attr("all_reduce")(input).cast<torch::Tensor>();
-  EXPECT_TRUE(torch::equal(reduced, input));
+  py::object all_reduce = collectives.attr("all_reduce_");
+  const std::string all_reduce_schema =
+      py::str(all_reduce.attr("_opoverload").attr("_schema"))
+          .cast<std::string>();
+  EXPECT_NE(all_reduce_schema.find("Tensor(a0!) x"), std::string::npos);
+  EXPECT_TRUE(all_reduce(input).is_none());
   EXPECT_TRUE(torch::equal(input, torch::ones_like(input)));
 
   auto gathered =

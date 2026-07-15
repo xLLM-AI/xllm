@@ -113,7 +113,7 @@ class RowParallelLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.nn.functional.linear(x, self.weight)
         if self.tp_size > 1:
-            out = ops.all_reduce(out)
+            ops.all_reduce_(out)
         if self.bias is not None:
             out = out + self.bias
         return out

@@ -56,17 +56,15 @@ def _require_tp_group(x: torch.Tensor):
     return group
 
 
-@torch.library.custom_op("xllm_ops::all_reduce", mutates_args=())
-def all_reduce(x: torch.Tensor) -> torch.Tensor:
+@torch.library.custom_op("xllm_ops::all_reduce_", mutates_args={"x"})
+def all_reduce_(x: torch.Tensor) -> None:
     group = _require_tp_group(x)
-    out = x.clone()
-    dist.all_reduce(out, group=group)
-    return out
+    dist.all_reduce(x, group=group)
 
 
-@all_reduce.register_fake
-def _(x: torch.Tensor) -> torch.Tensor:
-    return torch.empty_like(x)
+@all_reduce_.register_fake
+def _(x: torch.Tensor) -> None:
+    return None
 
 
 @torch.library.custom_op("xllm_ops::all_gather", mutates_args=())
