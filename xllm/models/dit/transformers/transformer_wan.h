@@ -148,13 +148,11 @@ class FP32LayerNormImpl : public torch::nn::Module {
   FP32LayerNormImpl(const ModelContext& context,
                     int64_t normalized_shape,
                     double eps = 1e-6,
-                    bool elementwise_affine = true,
-                    bool use_fp32 = true)
+                    bool elementwise_affine = true)
       : options_(context.get_tensor_options()),
         normalized_shape_(normalized_shape),
         eps_(eps),
-        elementwise_affine_(elementwise_affine),
-        use_fp32_(use_fp32) {
+        elementwise_affine_(elementwise_affine) {
     if (elementwise_affine) {
       weight_ = register_parameter("weight", torch::ones({normalized_shape}));
       bias_ = register_parameter("bias", torch::zeros({normalized_shape}));
@@ -162,14 +160,6 @@ class FP32LayerNormImpl : public torch::nn::Module {
   }
 
   torch::Tensor forward(const torch::Tensor& x, bool keep_fp32 = false) {
-    if (!use_fp32_) {
-      // Compute directly in the input dtype (bf16/fp16). No fp32 cast.
-      if (elementwise_affine_) {
-        return torch::layer_norm(x, {normalized_shape_}, weight_, bias_, eps_);
-      }
-      return torch::layer_norm(
-          x, {normalized_shape_}, torch::nullopt, torch::nullopt, eps_);
-    }
     auto origin_dtype = x.dtype();
     auto x_fp32 = x.to(torch::kFloat32);
     torch::Tensor result;
@@ -213,7 +203,6 @@ class FP32LayerNormImpl : public torch::nn::Module {
   int64_t normalized_shape_;
   double eps_;
   bool elementwise_affine_;
-  bool use_fp32_{true};
 };
 TORCH_MODULE(FP32LayerNorm);
 
@@ -1293,13 +1282,8 @@ class WanTransformerBlockImpl : public torch::nn::Module {
         WanAttention(
             context, parallel_args, dim_ / num_heads_, rainfusion_config));
     if (cross_attn_norm_) {
-      // Cross-attn pre-norm is a plain LayerNorm (no scale/shift modulation).
-      norm2_ = register_module("norm2",
-                               FP32LayerNorm(context,
-                                             dim_,
-                                             eps_,
-                                             /*elementwise_affine=*/true,
-                                             /*use_fp32=*/false));
+      norm2_ =
+          register_module("norm2", FP32LayerNorm(context, dim_, eps_, true));
     }
     ff_ = register_module("ff",
                           WanFeedForward(context,
