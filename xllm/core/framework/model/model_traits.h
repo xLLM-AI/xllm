@@ -222,12 +222,12 @@ struct has_init_or_refresh_rolling_runtime<
 #endif
 
 template <typename T, typename = void>
-struct has_precompute_and_store_context_kv : std::false_type {};
+struct has_write_context_kv : std::false_type {};
 
 template <typename T>
-struct has_precompute_and_store_context_kv<
+struct has_write_context_kv<
     T,
-    std::void_t<decltype(std::declval<T>()->precompute_and_store_context_kv(
+    std::void_t<decltype(std::declval<T>()->write_context_kv(
         std::declval<const torch::Tensor&>(),
         std::declval<const torch::Tensor&>(),
         std::declval<const torch::Tensor&>(),

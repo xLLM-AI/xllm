@@ -1538,14 +1538,12 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       args.full_attention_interval(1);
     }
   }
-  // Eagle3/DFlash targets capture intermediate-layer aux hidden states to drive
-  // the draft, from the layers named in layers_to_capture. Materialize the
-  // default {2, n/2, n-3} here (previously done in the model constructor) so a
-  // non-empty layers_to_capture becomes the model's sole capture signal. DFlash
-  // filled the list from the draft config above; only an Eagle3 target lacking
-  // an explicit config.json list falls back to the default. The DFlash draft
-  // body (model_type swapped to DFlashDraftModel) consumes context-KV and never
-  // captures, so it is excluded.
+  // Eagle3/DFlash targets capture intermediate-layer aux hidden from the layers
+  // in layers_to_capture, the model's sole capture signal. Fill the default
+  // {2, n/2, n-3} for an Eagle3 target whose config omits the list; DFlash
+  // already filled it from the draft config. The DFlash draft body
+  // (DFlashDraftModel) consumes context-KV rather than capturing, so exclude
+  // it.
   if (options_.enable_speculative_decode() &&
       SpeculativeConfig::requires_aux_hidden_capture(
           options_.speculative_algorithm()) &&

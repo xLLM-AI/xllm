@@ -35,6 +35,7 @@ limitations under the License.
 #include "framework/kv_cache_transfer/mooncake_kv_cache_transfer.h"
 #endif
 #if defined(USE_NPU)
+#include "framework/kv_cache_transfer/kv_transfer_completion.h"
 #include "framework/kv_cache_transfer/spec_kv_cache_transfer.h"
 #endif
 #include "runtime/spec_input_builder.h"
@@ -114,9 +115,13 @@ void repeat_sampling_params(SamplingParameters& sampling_params,
   repeat_sampling_tensor(sampling_params.do_sample, repeats);
 }
 
+void clear_selected_embeddings(ForwardOutput& output) {
+  output.sample_output.selected_embeddings = torch::Tensor();
+}
+
 void clear_all_output_embeddings(ForwardOutput& output) {
   output.sample_output.embeddings = torch::Tensor();
-  output.sample_output.selected_embeddings = torch::Tensor();
+  clear_selected_embeddings(output);
 }
 
 void record_metadata_ready_event(Stream& stream, ForwardInput& input) {
@@ -318,14 +323,13 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
       draft_impl_->set_word_embedding(word_embedding);
     };
 #if defined(USE_NPU)
-    if (::xllm::KernelConfig::get_instance().npu_kernel_backend() != "TORCH") {
-      auto head = impl_->get_npu_lm_head();
-      draft_impl_->set_npu_lm_head(head);
-      auto word_embedding = impl_->get_npu_word_embedding();
-      draft_impl_->set_npu_word_embedding(word_embedding);
-    } else {
-      share_torch_head_and_embedding();
-    }
+    // The DFlash draft body is registered ATB-only, so a TORCH-backend run
+    // aborts in create_llm_model before reaching here; the draft always uses
+    // the target's NPU (ATB) head and embedding.
+    auto head = impl_->get_npu_lm_head();
+    draft_impl_->set_npu_lm_head(head);
+    auto word_embedding = impl_->get_npu_word_embedding();
+    draft_impl_->set_npu_word_embedding(word_embedding);
 #else
     share_torch_head_and_embedding();
 #endif
@@ -453,9 +457,16 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   if (!input.input_params.meta.batch_forward_type.is_decode()) {
     std::optional<ForwardOutput> output =
         run_llm_no_sync_impl(*impl_, input, *prepare_stream_, *compute_stream_);
-    // Warmup only: prime the draft; its output is unused.
-    run_llm_no_sync_impl(
+    // Warmup only: prime the draft; its output is unused. Keep it alive until
+    // the sync below so the no-sync draft input is not freed while its kernel
+    // is still in flight.
+    std::optional<ForwardOutput> draft_output = run_llm_no_sync_impl(
         *draft_impl_, input, *prepare_stream_, *compute_stream_);
+    // Both forwards launched no-sync, so their staged inputs and the returned
+    // target output are still in flight. Sync before returning so a DP idle
+    // rank or graph warmup cannot reuse the input buffers, and non-overlap
+    // callers do not observe an unfinished target output.
+    compute_stream_->synchronize();
     if (output.has_value()) {
       clear_all_output_embeddings(output.value());
     }
@@ -468,8 +479,10 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
       BatchForwardType::CHUNKED_PREFILL;
   query_input.input_params.meta.q_max_seq_len = query_width;
   scale_dp_global_token_nums(query_input.input_params, query_width);
-  // Warmup only: prime the draft; its output is unused.
-  run_llm_no_sync_impl(
+  // Warmup only: prime the draft; its output is unused. Keep it alive until the
+  // sync below so the no-sync draft input is not freed while the target forward
+  // launched next can reuse the buffer.
+  std::optional<ForwardOutput> draft_output = run_llm_no_sync_impl(
       *draft_impl_, query_input, *prepare_stream_, *compute_stream_);
 
   ForwardInput validate_input = input;
@@ -478,6 +491,8 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
       run_llm_no_sync_impl(
           *impl_, validate_input, *prepare_stream_, *compute_stream_)
           .value();
+  // See above: sync the no-sync draft and target forwards before returning.
+  compute_stream_->synchronize();
   clear_all_output_embeddings(output);
   return output;
 }
@@ -520,18 +535,31 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_prefill(
   }
 
   if (input.sampling_params.selected_token_idxes.defined()) {
-    const torch::Tensor& target_hidden =
-        output.sample_output.selected_embeddings.defined()
-            ? output.sample_output.selected_embeddings
-            : embeddings;
     embedding_cache_->write_prefill_target_context(
         input.input_params.embedding.embedding_ids,
         input.input_params.embedding.request_ids,
         output.sample_output.next_tokens,
-        target_hidden,
+        embeddings,
         input.sampling_params.selected_token_idxes);
+    // PD handoff: the decode instance requires get_mtp_bootstrap_embedding()
+    // defined before it accepts the request (disagg_pd_scheduler). Compress the
+    // full prefill hidden to one row per sequence, as
+    // write_prefill_target_context stores it.
+    torch::Tensor bootstrap_embeddings = embeddings;
+    if (bootstrap_embeddings.size(0) !=
+        static_cast<int64_t>(
+            input.input_params.embedding.embedding_ids.size())) {
+      torch::Tensor bootstrap_idxes =
+          input.sampling_params.selected_token_idxes.to(
+              torch::dtype(torch::kLong).device(bootstrap_embeddings.device()));
+      bootstrap_embeddings =
+          bootstrap_embeddings.index_select(/*dim=*/0, bootstrap_idxes);
+    }
+    output.sample_output.embeddings = bootstrap_embeddings.detach();
+    clear_selected_embeddings(output);
+  } else {
+    clear_all_output_embeddings(output);
   }
-  clear_all_output_embeddings(output);
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
     return std::nullopt;
@@ -641,6 +669,9 @@ DFlashWorkerImpl::DraftBlock DFlashWorkerImpl::run_decode_draft(
       {batch_size, num_speculative_tokens});
   draft_block.probs = draft_output.sample_output.probs.view(
       {batch_size, num_speculative_tokens});
+  // Keep the draft's no-sync input alive past run_validate's compute-stream
+  // sync (see DraftBlock::draft_retained_input).
+  draft_block.draft_retained_input = std::move(draft_output.retained_input);
   return draft_block;
 }
 
@@ -980,11 +1011,34 @@ void DFlashWorkerImpl::write_context_kv(
   // orders them. Model methods below use torch ops on the same stream.
   c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
 
+#if defined(USE_NPU)
+  // PD PUSH: the draft context-KV scattered below is not covered by the target
+  // push, so wire the draft push here. Overwrite layer_synchronizer with a
+  // draft-sized one (one event per draft layer); the target's was already
+  // waited on before this runs, so the overwrite is safe. No-op when
+  // transfer_kv_infos is empty. NPU-only: the scatter's record_event loop is
+  // NPU-gated, so a non-NPU push would stall on events that never record.
+  KVTransferCompletion kv_transfers;
+  if (options_.kv_cache_transfer_mode() == "PUSH" &&
+      !input.transfer_kv_infos.empty()) {
+    std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer =
+        std::make_shared<NPULayerSynchronizerImpl>(
+            draft_impl_->context_.get_model_args().n_layers());
+    const_cast<ModelInputParams*>(&(input.input_params))
+        ->parallel.layer_synchronizer = layer_synchronizer;
+    kv_transfers.add(kv_cache_transfer_->push_kv_blocks_async(
+        input.transfer_kv_infos,
+        draft_impl_->context_.get_parallel_args(),
+        layer_synchronizer,
+        /*is_spec_draft=*/true));
+  }
+#endif
+
   ModelOutput scatter_output =
-      draft_impl_->precompute_and_store_context_kv(context_hidden,
-                                                   positions_device,
-                                                   new_cache_slots_device,
-                                                   input.input_params);
+      draft_impl_->write_context_kv(context_hidden,
+                                    positions_device,
+                                    new_cache_slots_device,
+                                    input.input_params);
   // Model returns an empty ModelOutput (hidden_states undefined) when the
   // per-layer NPULayerSynchronizer::record_event fails mid-scatter under
   // PD-PUSH transfer. Fail fast instead of silently continuing: subsequent
@@ -1000,6 +1054,13 @@ void DFlashWorkerImpl::write_context_kv(
   // still be in flight. Sync so the next step's draft query reads a fully
   // written context-KV cache instead of a partially scattered one.
   compute_stream_->synchronize();
+
+#if defined(USE_NPU)
+  // Wait for the draft KV push (if any) so the source draft cache is not
+  // overwritten by the next step while the transfer is still reading it
+  // (mirrors step_internal's wait_kv_push()). No-op when no push was issued.
+  CHECK(kv_transfers.wait()) << "DFlash draft context-KV push failed";
+#endif
 }
 
 void DFlashWorkerImpl::write_target_context_to_cache(

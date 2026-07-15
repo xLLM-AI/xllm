@@ -64,6 +64,12 @@ class DFlashWorkerImpl final : public SpeculativeWorkerImpl {
   struct DraftBlock {
     torch::Tensor token_ids;
     torch::Tensor probs;
+    // The draft runs no-sync, so execute_no_sync_on_stream stashes its still
+    // in-flight input in ForwardOutput::retained_input. Anchor it here so the
+    // draft input outlives run_validate's unconditional compute-stream sync;
+    // otherwise the buffer frees when run_decode_draft returns and the validate
+    // stage could reuse memory the draft kernel is still reading.
+    std::shared_ptr<ForwardInput> draft_retained_input;
   };
 
   DraftBlock run_decode_draft(const ForwardInput& input,

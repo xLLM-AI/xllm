@@ -122,12 +122,11 @@ class DFlashQwen3ModelImpl final : public QWen3ModelImpl {
   // model layer (as Eagle3 keeps its fc in the model); only the KV scatter is
   // delegated to the ATB operator wrapper. Sits outside forward() because it
   // has no attention and its shape doesn't match the decode graph.
-  ModelOutput precompute_and_store_context_kv(
-      const torch::Tensor& target_hidden,
-      const torch::Tensor& positions,
-      const torch::Tensor& device_cache_slots,
-      std::vector<KVCache>& kv_caches,
-      const ModelInputParams& input_params) {
+  ModelOutput write_context_kv(const torch::Tensor& target_hidden,
+                               const torch::Tensor& positions,
+                               const torch::Tensor& device_cache_slots,
+                               std::vector<KVCache>& kv_caches,
+                               const ModelInputParams& input_params) {
     const int64_t num_layers = static_cast<int64_t>(layers_.size());
     CHECK_EQ(static_cast<int64_t>(kv_caches.size()), num_layers);
     CHECK(device_cache_slots.defined())
@@ -375,13 +374,12 @@ class DFlashQwen3ForCausalLMImpl final
     model_->merge_loaded_weights();
   }
 
-  ModelOutput precompute_and_store_context_kv(
-      const torch::Tensor& target_hidden,
-      const torch::Tensor& positions,
-      const torch::Tensor& device_cache_slots,
-      std::vector<KVCache>& kv_caches,
-      const ModelInputParams& input_params) {
-    return model_->precompute_and_store_context_kv(
+  ModelOutput write_context_kv(const torch::Tensor& target_hidden,
+                               const torch::Tensor& positions,
+                               const torch::Tensor& device_cache_slots,
+                               std::vector<KVCache>& kv_caches,
+                               const ModelInputParams& input_params) {
+    return model_->write_context_kv(
         target_hidden, positions, device_cache_slots, kv_caches, input_params);
   }
 };

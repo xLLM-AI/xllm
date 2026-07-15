@@ -161,12 +161,11 @@ class CausalLM : public torch::nn::Module {
   // because it has no attention and its shape doesn't match forward's decode
   // graph; sits outside the executor to avoid a per-flag branch in the eager
   // gate. Default: NOT_IMPLEMENTED. Overridden by DFlashDraftModel.
-  virtual ModelOutput precompute_and_store_context_kv(
-      const torch::Tensor& target_hidden,
-      const torch::Tensor& positions,
-      const torch::Tensor& device_cache_slots,
-      std::vector<KVCache>& kv_caches,
-      const ModelInputParams& input_params) {
+  virtual ModelOutput write_context_kv(const torch::Tensor& target_hidden,
+                                       const torch::Tensor& positions,
+                                       const torch::Tensor& device_cache_slots,
+                                       std::vector<KVCache>& kv_caches,
+                                       const ModelInputParams& input_params) {
     NOT_IMPLEMENTED();
     return {};
   }
@@ -253,24 +252,23 @@ class CausalLMImpl : public CausalLM {
     model_->load_model(std::move(loader));
   }
 
-  ModelOutput precompute_and_store_context_kv(
-      const torch::Tensor& target_hidden,
-      const torch::Tensor& positions,
-      const torch::Tensor& device_cache_slots,
-      std::vector<KVCache>& kv_caches,
-      const ModelInputParams& input_params) override {
-    if constexpr (detail::has_precompute_and_store_context_kv<Model>::value) {
-      return model_->precompute_and_store_context_kv(target_hidden,
-                                                     positions,
-                                                     device_cache_slots,
-                                                     kv_caches,
-                                                     input_params);
+  ModelOutput write_context_kv(const torch::Tensor& target_hidden,
+                               const torch::Tensor& positions,
+                               const torch::Tensor& device_cache_slots,
+                               std::vector<KVCache>& kv_caches,
+                               const ModelInputParams& input_params) override {
+    if constexpr (detail::has_write_context_kv<Model>::value) {
+      return model_->write_context_kv(target_hidden,
+                                      positions,
+                                      device_cache_slots,
+                                      kv_caches,
+                                      input_params);
     } else {
-      return CausalLM::precompute_and_store_context_kv(target_hidden,
-                                                       positions,
-                                                       device_cache_slots,
-                                                       kv_caches,
-                                                       input_params);
+      return CausalLM::write_context_kv(target_hidden,
+                                        positions,
+                                        device_cache_slots,
+                                        kv_caches,
+                                        input_params);
     }
   }
 
