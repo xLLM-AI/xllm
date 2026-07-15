@@ -770,9 +770,6 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
     auto index_cache = kv_cache.get_index_cache();
     std::optional<torch::Tensor> indexer_cache_scale =
         kv_cache.get_indexer_cache_scale();
-    CHECK(indexer_cache_scale.has_value())
-        << "DSAttention requires indexer cache scale for quantized index "
-           "cache when compress_ratio==4.";
     torch::Tensor& indexer_cache_scale_tensor = indexer_cache_scale.value();
 
     std::tuple<torch::Tensor, torch::Tensor> indexer_states{index_kv_state,
