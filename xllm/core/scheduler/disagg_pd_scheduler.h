@@ -151,6 +151,12 @@ class DisaggPDScheduler : public ChunkedPrefillScheduler {
   moodycamel::BlockingConcurrentQueue<std::shared_ptr<Request>>
       prefill_request_queue_offline_;
 
+  // Max retries when D returns 404 (e.g. try_allocate failed), avoid infinite
+  // retry.
+  static constexpr int kAddNewRequestsMaxRetryOnReject = 3;
+  std::unordered_map<std::string, int> add_new_requests_retry_count_;
+  std::mutex add_new_requests_retry_mutex_;
+
   // use threadpool to handle prefill-completed request
   ThreadPool prefill_threadpool_{/*num_threads=*/1,
                                  /*cpu_binding=*/false,

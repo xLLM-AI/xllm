@@ -23,6 +23,7 @@ limitations under the License.
 
 #include <limits>
 #include <random>
+#include <string>
 
 #include "common/global_flags.h"
 #include "common/macros.h"
@@ -542,7 +543,28 @@ void DisaggPDScheduler::dispatch_requests() {
     }
     for (size_t i = 0; i < requests.size(); ++i) {
       if (resps.resps()[i].status_code() != 200) {
-        // push back to prefill_request_queue_
+        // D returned reject (e.g. 404 when try_allocate failed). Cap retries
+        // to avoid infinite retry.
+        const std::string& req_id = requests[i]->request_id();
+        int retry_count = 0;
+        {
+          std::lock_guard<std::mutex> lock(add_new_requests_retry_mutex_);
+          retry_count = ++add_new_requests_retry_count_[req_id];
+        }
+        if (retry_count >= kAddNewRequestsMaxRetryOnReject) {
+          {
+            std::lock_guard<std::mutex> lock(add_new_requests_retry_mutex_);
+            add_new_requests_retry_count_.erase(req_id);
+          }
+          response_processor_->process_failed_request(
+              requests[i],
+              {StatusCode::RESOURCE_EXHAUSTED,
+               "Decode instance rejected AddNewRequests (e.g. 404) after " +
+                   std::to_string(kAddNewRequestsMaxRetryOnReject) +
+                   " retries"});
+          continue;
+        }
+        // push back to prefill_request_queue_ for retry
         if (requests[i]->offline()) {
           prefill_request_queue_offline_.enqueue(requests[i]);
         } else {
@@ -550,6 +572,11 @@ void DisaggPDScheduler::dispatch_requests() {
         }
 
       } else {
+        // success: clear retry count so map does not grow
+        {
+          std::lock_guard<std::mutex> lock(add_new_requests_retry_mutex_);
+          add_new_requests_retry_count_.erase(requests[i]->request_id());
+        }
         for (auto& sequence : requests[i]->sequences()) {
           TransferKVInfo info;
           info.request_id = requests[i]->request_id();
