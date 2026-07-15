@@ -60,7 +60,9 @@ void prepend_python_model_path() {
   for (int i = 0; i < 5; ++i) {
     repo_root = repo_root.parent_path();
   }
-  const std::string python_model_path = (repo_root / "xllm").string();
+  // sys.path must contain the directory holding the 'xllm' package so the
+  // 'xllm.python' subpackage resolves (same contract as --python_model_path).
+  const std::string python_model_path = repo_root.string();
   py::list sys_path = py::module_::import("sys").attr("path");
   sys_path.attr("insert")(0, python_model_path);
 }
@@ -133,7 +135,7 @@ TEST_F(XllmOpsTest, EmbeddedPythonCollectivesUseTorchDistributed) {
   py::gil_scoped_acquire gil;
   prepend_python_model_path();
 
-  py::module_ collectives = py::module_::import("python.ops.collectives");
+  py::module_ collectives = py::module_::import("xllm.python.ops.collectives");
   py::object group =
       collectives.attr("init_tp_group")("127.0.0.1", 0, 0, 1, "cuda:0");
 
@@ -165,7 +167,9 @@ from types import SimpleNamespace
 
 import torch
 
-from python.model_executor.runners.decode_cuda_graph import DecodeCudaGraphRunner
+from xllm.python.model_executor.runners.decode_cuda_graph import (
+    DecodeCudaGraphRunner,
+)
 
 device = torch.device("cuda")
 backend = SimpleNamespace(page_size=4, num_kv_blocks=6)
@@ -213,8 +217,8 @@ TEST_F(XllmOpsTest, ModelExecutorUsesExplicitRuntimeBatchLimit) {
   py::exec(R"PY(
 import torch
 
-from python.layers.attention import Attention
-from python.model_executor import executor as executor_module
+from xllm.python.layers.attention import Attention
+from xllm.python.model_executor import executor as executor_module
 
 
 class FakeBackend:

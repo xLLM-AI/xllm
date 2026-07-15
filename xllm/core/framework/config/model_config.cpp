@@ -27,10 +27,10 @@ DEFINE_string(model, "", "Name or path of the huggingface model to use.");
 
 DEFINE_string(python_model_path,
               "",
-              "Filesystem directory that contains the 'python' model package "
-              "(xLLM's Python model executor), prepended to sys.path for the "
-              "embedded interpreter. Falls back to the XLLM_PYTHON_MODEL_PATH "
-              "env var when empty.");
+              "Filesystem directory that contains the 'xllm' package, "
+              "prepended to sys.path so the embedded interpreter can import "
+              "the 'xllm.python' model executor subpackage. Falls back to the "
+              "XLLM_PYTHON_MODEL_PATH env var when empty.");
 
 DEFINE_string(
     backend,

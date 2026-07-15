@@ -100,12 +100,12 @@ void ensure_python_interpreter() {
       }
       prepend_sys_path(model_path);
       try {
-        py::module_::import("python");
+        py::module_::import("xllm.python");
       } catch (const py::error_already_set& e) {
-        LOG(FATAL) << "Failed to import the 'python' model package for the "
-                      "Python model executor. Set --python_model_path (or "
+        LOG(FATAL) << "Failed to import the 'xllm.python' model package for "
+                      "the Python model executor. Set --python_model_path (or "
                       "XLLM_PYTHON_MODEL_PATH) to the directory containing the "
-                      "'python' package. Error: "
+                      "'xllm' package. Error: "
                    << e.what();
       }
     }

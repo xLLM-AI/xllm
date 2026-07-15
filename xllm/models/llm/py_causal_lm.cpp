@@ -49,7 +49,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   if (tp_size_ > 1) {
     CHECK(!parallel_args.python_tp_rendezvous_host_.empty());
     CHECK_GT(parallel_args.python_tp_rendezvous_port_, 0);
-    py::module_::import("python.ops")
+    py::module_::import("xllm.python.ops")
         .attr("init_tp_group")(parallel_args.python_tp_rendezvous_host_,
                                parallel_args.python_tp_rendezvous_port_,
                                tp_rank_,
@@ -60,7 +60,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
                                       ? std::string("Qwen3ForCausalLM")
                                       : context.get_model_args().model_type();
 
-  py::module_ registry = py::module_::import("python.registry");
+  py::module_ registry = py::module_::import("xllm.python.registry");
   py::object model_cls = registry.attr("get_model_class")(py::str(module_name));
   config_dict_ = build_config_dict(parallel_args);
   py_model_ = model_cls(config_dict_);

@@ -461,12 +461,12 @@ class ExtBuild(build_ext):
             os.path.join(os.path.dirname(cmake_dir), "xllm/core/server/"),
         )
 
-        # Stage the Python model-executor package into the wheel under the xLLM
-        # install tree (xllm/python/...). It is deliberately NOT declared as a
-        # top-level site-packages package (that would make ``import python``
-        # shadow globally); it is imported only when the containing xllm/ dir is
-        # prepended to sys.path (see --python_model_path / XLLM_PYTHON_MODEL_PATH,
-        # which launch_server.py defaults to the packaged xllm/ dir).
+        # Stage the Python model-executor package into the wheel as the
+        # ``xllm.python`` subpackage (xllm/python/...). The installed ``xllm``
+        # package is a regular package, so ``import xllm.python`` resolves
+        # straight from site-packages with no sys.path manipulation;
+        # --python_model_path / XLLM_PYTHON_MODEL_PATH only overrides the
+        # directory containing the ``xllm`` package (e.g. source-tree runs).
         py_pkg_src = os.path.join(self.base_dir, "xllm", "python")
         if os.path.isdir(py_pkg_src):
             py_pkg_dst = os.path.join(extdir, "python")

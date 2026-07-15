@@ -129,7 +129,7 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   py::gil_scoped_acquire gil;
   py::module_::import("xllm_runtime");
   py::module_ executor_module =
-      py::module_::import("python.model_executor.executor");
+      py::module_::import("xllm.python.model_executor.executor");
   py_executor_ =
       executor_module.attr("ModelExecutor")(py_causal_lm_->python_model(),
                                             py_causal_lm_->config_dict(),
