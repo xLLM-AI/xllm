@@ -88,9 +88,6 @@ void ParallelConfig::from_flags() {
 }
 
 void ParallelConfig::from_json(const JsonReader& json) {
-  const std::string removed_key = std::string("enable_") + "prefill_sp";
-  CHECK(!json.contains(removed_key))
-      << "unsupported parallel configuration: " << removed_key;
   XLLM_CONFIG_ASSIGN_FROM_JSON(dp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(ep_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(cp_size);
