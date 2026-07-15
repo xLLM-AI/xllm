@@ -261,8 +261,10 @@ void RecMultiRoundBatchInputBuilder::extract_tokens_and_positions(
   }
 
   // `linear_state_ids` is consumed per sequence, so preserve one entry per
-  // logical batch row even when this slice is not the last prefill chunk.
-  base_state.linear_state_ids.push_back(sequence->get_single_block_id());
+  // logical batch row even when this slice is not the last prefill chunk. The
+  // slot is drawn from the dedicated LinearStateBlockManager and is -1 when
+  // linear state is disabled.
+  base_state.linear_state_ids.push_back(sequence->get_linear_state_slot_id());
 
   // Add extra token id
   if (n_tokens == seq_len) {

@@ -25,7 +25,9 @@ limitations under the License.
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/platform/platform.h"
+#include "distributed_runtime/engine.h"
 #include "framework/batch/batch_factory.h"
+#include "framework/model/model_args.h"
 #include "util/timer.h"
 #include "util/utils.h"
 
@@ -832,6 +834,30 @@ std::vector<Batch> ChunkedPrefillScheduler::prepare_batch() {
   return batches;
 }
 
+size_t ChunkedPrefillScheduler::get_prefill_handle_tokens(
+    Sequence* sequence,
+    size_t token_budget,
+    size_t kv_cache_tokens_num) const {
+  size_t max_handle_num_tokens =
+      std::min(kv_cache_tokens_num + token_budget, sequence->num_tokens());
+  if (!has_linear_attention_layers_ || !enable_prefix_cache_ ||
+      !sequence->is_prefill_stage()) {
+    return max_handle_num_tokens;
+  }
+
+  const size_t block_size = kv_cache_manager_->block_size();
+  const size_t aligned_handle_num_tokens =
+      block_size == 0 ? max_handle_num_tokens
+                      : (max_handle_num_tokens / block_size) * block_size;
+  if (aligned_handle_num_tokens <= kv_cache_tokens_num) {
+    if (max_handle_num_tokens == sequence->num_tokens()) {
+      return max_handle_num_tokens;
+    }
+    return 0;
+  }
+  return aligned_handle_num_tokens;
+}
+
 bool ChunkedPrefillScheduler::allocate_blocks_for(
     Sequence* sequence,
     size_t token_budget,
@@ -846,7 +872,10 @@ bool ChunkedPrefillScheduler::allocate_blocks_for(
   // the total number tokens for the sequence can be handled till now.
   // there may some tokens can not be handled once when enable chunked prefill.
   size_t max_handle_num_tokens =
-      std::min(kv_cache_tokens_num + token_budget, sequence->num_tokens());
+      get_prefill_handle_tokens(sequence, token_budget, kv_cache_tokens_num);
+  if (max_handle_num_tokens == 0) {
+    return false;
+  }
 
   // speculative decoding specific logic,
   // prefill stage don't need speculative decoding.
@@ -874,6 +903,13 @@ void ChunkedPrefillScheduler::allocate_shared_blocks_for(Sequence* sequence) {
     return;
   }
   if (sequence->is_chunked_prefill_stage()) {
+    if (has_linear_attention_layers_ && enable_prefix_cache_) {
+      // Linear-state prefix cache can only resume at saved state checkpoints.
+      // Re-match at every chunk boundary and let BlockManagerPool truncate the
+      // hit to checkpoint-backed blocks.
+      kv_cache_manager_->allocate_shared(sequence);
+      return;
+    }
     const size_t max_tokens_per_chunk_for_prefill =
         std::max(options_.max_tokens_per_chunk_for_prefill(), 64);
     size_t total_chunked_size =

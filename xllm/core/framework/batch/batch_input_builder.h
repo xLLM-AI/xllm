@@ -123,6 +123,7 @@ class BatchInputBuilder {
     // Additional data
     std::vector<int32_t> embedding_ids;
     std::vector<int32_t> linear_state_ids;
+    std::vector<LinearStateCacheOp> linear_state_cache_ops;
     std::vector<std::string> request_ids;
     std::vector<int32_t> extra_token_ids;
     std::vector<int32_t> mtp_shifted_token_ids;
@@ -150,6 +151,13 @@ class BatchInputBuilder {
                                     uint32_t seq_len,
                                     uint32_t padded_seq_len,
                                     BuilderState* state_ptr = nullptr);
+  // Append this batch row's linear-state transport fields: the live slot id
+  // (always, so rows stay aligned) plus a LinearStateCacheOp carrying the
+  // resolved restore/save plan for linear-attention models.
+  void append_linear_state_row(Sequence* sequence,
+                               uint32_t n_kv_cache_tokens,
+                               uint32_t seq_len,
+                               BuilderState& state);
   torch::Tensor get_mrope_positions(Sequence* sequence,
                                     uint32_t start,
                                     uint32_t end);

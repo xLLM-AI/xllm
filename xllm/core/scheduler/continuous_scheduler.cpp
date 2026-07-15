@@ -38,6 +38,7 @@ limitations under the License.
 #include "core/platform/platform.h"
 #include "distributed_runtime/engine.h"
 #include "framework/batch/batch_factory.h"
+#include "framework/model/model_args.h"
 #include "framework/request/priority_comparator.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
@@ -123,6 +124,8 @@ ContinuousScheduler::ContinuousScheduler(Engine* engine, const Options& options)
 
   enable_prefix_cache_ =
       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
+  has_linear_attention_layers_ =
+      ::xllm::has_linear_attention_layers(engine_->model_args());
   enable_in_batch_prefix_cache_ =
       ::xllm::KVCacheConfig::get_instance().enable_in_batch_prefix_cache();
 

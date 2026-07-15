@@ -170,6 +170,23 @@ torch::Tensor build_pinned_int_tensor(const std::vector<int32_t>& values) {
                            .pinned_memory(true));
 }
 
+// Whether the current prefill step end should hold a linear-state checkpoint.
+// Checkpoints are saved at prefill step ends that land on a chunk-end boundary
+// (stride = max_tokens_per_chunk_for_prefill). The linear-state cache is a
+// sparse per-chunk overlay: KV may cache every block boundary while
+// linear-state saves only at chunk ends.
+bool should_save_linear_checkpoint(Sequence* sequence,
+                                   uint32_t boundary_tokens,
+                                   uint32_t chunk_stride) {
+  if (sequence == nullptr || !sequence->is_prefill_stage()) {
+    return false;
+  }
+  if (boundary_tokens == 0 || chunk_stride == 0) {
+    return false;
+  }
+  return boundary_tokens % chunk_stride == 0;
+}
+
 }  // namespace
 
 BatchInputBuilder::BatchInputBuilder(
@@ -432,6 +449,9 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     state_.linear_state_ids.insert(state_.linear_state_ids.end(),
                                    state.linear_state_ids.begin(),
                                    state.linear_state_ids.end());
+    state_.linear_state_cache_ops.insert(state_.linear_state_cache_ops.end(),
+                                         state.linear_state_cache_ops.begin(),
+                                         state.linear_state_cache_ops.end());
     state_.request_ids.insert(state_.request_ids.end(),
                               state.request_ids.begin(),
                               state.request_ids.end());
@@ -620,9 +640,7 @@ void BatchInputBuilder::extract_tokens_and_positions(Sequence* sequence,
     }
   }
 
-  // `linear_state_ids` is sequence-scoped metadata and must stay aligned with
-  // logical batch rows even for non-terminal chunked-prefill slices.
-  state.linear_state_ids.emplace_back(sequence->get_single_block_id());
+  append_linear_state_row(sequence, n_kv_cache_tokens, seq_len, state);
 
   // Add extra token id
   int32_t extra_token_id = -1;
@@ -683,6 +701,94 @@ void BatchInputBuilder::extract_tokens_and_positions(Sequence* sequence,
                                          pad_token_id);
     }
   }
+}
+
+void BatchInputBuilder::append_linear_state_row(Sequence* sequence,
+                                                uint32_t n_kv_cache_tokens,
+                                                uint32_t seq_len,
+                                                BuilderState& state) {
+  // linear_state_ids must stay aligned with logical batch rows even when the
+  // model has no linear-attention layers, because downstream consumers index by
+  // batch row. Prefer the dedicated linear-state slot. Linear-attention decode
+  // paths that only carry a scheduler-side single block still share that live
+  // slot value across embedding and linear-state transport fields.
+  const bool has_linear_attention =
+      args_ && has_linear_attention_layers(*args_);
+  int32_t linear_state_id = sequence->get_linear_state_slot_id();
+  if (linear_state_id < 0 && has_linear_attention) {
+    linear_state_id = sequence->get_single_block_id();
+  }
+  state.linear_state_ids.emplace_back(linear_state_id);
+  if (!has_linear_attention) {
+    return;
+  }
+
+  LinearStateCacheOp linear_state_cache_op;
+  linear_state_cache_op.linear_state_id = state.linear_state_ids.back();
+  // Linear-state checkpoints live on chunk-end boundaries, so the prefix hash
+  // is chained per chunk (stride = max_tokens_per_chunk_for_prefill), not per
+  // KV block. The engine enforces this stride is a positive multiple of
+  // block_size when linear prefix cache is on (llm_engine.cpp); guard against
+  // an unset (<= 0) stride so a misconfigured run simply skips cache ops.
+  const int32_t chunk_stride = ::xllm::SchedulerConfig::get_instance()
+                                   .max_tokens_per_chunk_for_prefill();
+  // Cold-start restore: emit a restore hash only when a restore source
+  // checkpoint is mounted on this sequence -- class A at admission
+  // (allocate_shared_for_sequence) or class B at the previous step's
+  // save-rotation (allocate_for_sequence) -- AND the reused prefix lands
+  // on a chunk-end boundary, where the recurrent state lives in a checkpoint.
+  // A mounted source is present exactly on a slot that is cold and needs
+  // copy-in; continued forwards keep their live slot warm with no source
+  // mounted, so they emit no restore and are not reset to cold by the worker.
+  // The source slot id is taken from that mounted block below.
+  const bool needs_restore_hash = sequence->has_linear_restore_src_block() &&
+                                  n_kv_cache_tokens > 0 && chunk_stride > 0 &&
+                                  n_kv_cache_tokens % chunk_stride == 0;
+  // Exit-boundary save: persist the live state only when this prefill step
+  // lands on a chunk-end boundary, so the linear-state cache stays a sparse
+  // per-chunk overlay on top of the per-block KV cache.
+  const bool needs_save_hash =
+      should_save_linear_checkpoint(sequence, seq_len, chunk_stride);
+  // Refresh the sequence's cached chunk hashes to cover this step's deepest
+  // boundary, then read them back. The cache is chained and incremental, so
+  // this only hashes chunks not seen on a previous step; the match probe and
+  // this builder now share the one hash source instead of each recomputing.
+  Slice<XXH3Key> linear_state_hashes;
+  if (needs_restore_hash || needs_save_hash) {
+    sequence->update_linear_state_hashes(static_cast<uint32_t>(chunk_stride));
+    linear_state_hashes = sequence->linear_state_hashes();
+  }
+  // Restore source (block-carried): allocate_shared_for_sequence mounts the
+  // deepest-hit checkpoint at admission (class A); allocate_for_sequence
+  // mounts the slot it just checkpointed at the previous step's save-rotation
+  // (class B). Take it unconditionally so the pin never outlives the step
+  // that consumed the match; its id is used below only when a restore hash is
+  // actually emitted, otherwise the handle drops here and releases the pin.
+  std::optional<Block> mounted_restore_src =
+      sequence->take_linear_restore_src_block();
+  if (needs_restore_hash) {
+    const size_t restore_chunk_idx =
+        static_cast<size_t>(n_kv_cache_tokens) / chunk_stride - 1;
+    if (restore_chunk_idx < linear_state_hashes.size()) {
+      linear_state_cache_op.restore_requested = true;
+      if (mounted_restore_src.has_value()) {
+        linear_state_cache_op.restore_src_slot_id = mounted_restore_src->id();
+      }
+    }
+  }
+  if (needs_save_hash) {
+    const size_t save_chunk_idx =
+        static_cast<size_t>(seq_len) / chunk_stride - 1;
+    if (save_chunk_idx < linear_state_hashes.size()) {
+      // Record the boundary hash on the sequence. The LINEAR leaf executes
+      // the save at the next step's allocate_for_sequence, after this step's
+      // forward writes the boundary state into the live slot. Writing only
+      // the sequence's own pending-save field keeps this safe inside the
+      // parallel build loop.
+      sequence->set_pending_linear_save(linear_state_hashes[save_chunk_idx]);
+    }
+  }
+  state.linear_state_cache_ops.emplace_back(std::move(linear_state_cache_op));
 }
 
 void BatchInputBuilder::handle_sampling_parameters(Sequence* sequence,
@@ -951,6 +1057,8 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
 
   input_params.embedding.embedding_ids = std::move(state_.embedding_ids);
   input_params.embedding.linear_state_ids = std::move(state_.linear_state_ids);
+  input_params.linear_state_cache_ops =
+      std::move(state_.linear_state_cache_ops);
   if (!input_params.embedding.linear_state_ids.empty()) {
     input_params.embedding.linear_state_indices =
         torch::tensor(input_params.embedding.linear_state_ids, torch::kInt);

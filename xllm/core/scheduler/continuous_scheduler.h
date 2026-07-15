@@ -294,6 +294,11 @@ class ContinuousScheduler : public Scheduler {
 
   bool enable_prefix_cache_ = false;
 
+  // Cached once at construction (mirrors enable_prefix_cache_): the model's
+  // layer set is immutable, so the hot scheduling path must not re-scan
+  // layer_types() with std::any_of on every allocate.
+  bool has_linear_attention_layers_ = false;
+
   bool enable_in_batch_prefix_cache_ = false;
 
   // the number of requests that are waiting to be scheduled

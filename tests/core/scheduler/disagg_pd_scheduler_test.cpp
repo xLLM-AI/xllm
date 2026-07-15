@@ -27,6 +27,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_pool.h"
+#include "framework/model/model_args.h"
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"
 #include "framework/tokenizer/tokenizer.h"
@@ -68,7 +69,8 @@ class FakeEngine final : public Engine {
     options.num_blocks(num_blocks)
         .block_size(block_size)
         .enable_prefix_cache(true)
-        .enable_disagg_pd(true);
+        .enable_disagg_pd(true)
+        .max_seqs_per_batch(1024);
     tokenizer_ = std::make_unique<FakeTokenizer>();
     block_manager_ = std::make_unique<BlockManagerPool>(options, /*dp_size=*/1);
   }
@@ -87,7 +89,7 @@ class FakeEngine final : public Engine {
     return block_manager_.get();
   }
 
-  const ModelArgs& model_args() const override { NOT_IMPLEMENTED(); }
+  const ModelArgs& model_args() const override { return model_args_; }
 
   const TokenizerArgs& tokenizer_args() const override { NOT_IMPLEMENTED(); }
 
@@ -100,6 +102,7 @@ class FakeEngine final : public Engine {
  private:
   std::unique_ptr<Tokenizer> tokenizer_;
   std::unique_ptr<BlockManagerPool> block_manager_;
+  ModelArgs model_args_;
 };
 
 class TestDisaggPDScheduler final : public DisaggPDScheduler {
