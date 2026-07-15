@@ -62,6 +62,26 @@ done
 
 For a single-device run, `<device-id>` usually starts from `0`. For larger deployments, keep the selected device ids aligned with `--node_rank`, `--nnodes`, and per-worker ports.
 
+## Context Parallelism
+
+MLU Context Parallel (CP) is configured with `--cp_size`.
+
+For MLU, the configured `cp_size` must equal the global world size, calculated
+as `nnodes` multiplied by the number of devices used by each process. Current
+MLU model-side CP has the following constraints:
+
+- Supported model types are `deepseek_v32` and `glm_moe_dsa` (GLM-5).
+- Only the `generate` task of text-generation models is supported.
+- `dp_size` must be `1`, and `kv_split_size` must be `1`.
+- `ep_size` must be either `1` or the global world size.
+- Only the `DEFAULT` and `PREFILL` instance roles support CP.
+- MTP- and Eagle3-based speculative decoding are not supported with MLU CP.
+  Suffix speculative decoding is supported.
+
+In a disaggregated Prefill/Decode deployment, configure `cp_size=N` on the
+Prefill instance and `cp_size=1` on the Decode instance. The Decode instance
+does not participate in MLU model-side CP.
+
 ## Notes
 
 - xLLM does not currently provide a public MLU image in the docs. Use an available MLU development image with the container startup command above.

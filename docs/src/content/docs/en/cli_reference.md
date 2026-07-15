@@ -126,14 +126,13 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 |:----------|:-----|:--------|:------------|
 | `dp_size` | `int32` | `1` | Data parallel size for MLA attention. |
 | `ep_size` | `int32` | `1` | Expert parallel size for MoE models. |
-| `cp_size` | `int32` | `1` | Context parallel size for DSA attention. |
+| `cp_size` | `int32` | `1` | Context parallel size. Backend and model support is required; `1` disables context parallelism. See [Cambricon MLU](/en/hardware/cambricon_mlu/) for MLU-specific constraints. |
 | `kv_split_size` | `int32` | `1` | KV Cache split width. `0` falls back to `cp_size` (legacy). `1` disables KV split: each CP rank stores the full KV and skips the prefix AllGather. Other K values (K divides `cp_size`) shard KV across K ranks while token-CP still uses `cp_size`. |
 | `tp_size` | `int64` | `1` | Tensor parallelism size. Only used for DiT models. |
 | `sp_size` | `int64` | `1` | Sequence parallelism size. Only used for DiT models. |
 | `cfg_size` | `int64` | `1` | Classifier-free guidance parallelism size. Only used for DiT models. |
 | `vae_size` | `int64` | `1` | VAE patch parallelism size. Only used for DiT models. |
 | `communication_backend` | `string` | `"hccl"` | NPU communication backend, for example `lccl` or `hccl`. Uses `hccl` when DP is enabled. |
-| `enable_prefill_sp` | `bool` | `false` | Whether to enable prefill-only sequence parallel. Supports `enable_chunked_prefill=true`, but only for prefill-only batches (`PREFILL` / `CHUNKED_PREFILL`). |
 | `enable_mm_encoder_dp` | `bool` | `false` | Whether to enable encoder data parallelism for multimodal models. |
 | `enable_multi_stream_parallel` | `bool` | `false` | Whether to enable computation/communication parallelism with two streams and two micro batches in the prefill stage. See [Multi-Stream Parallelism](/en/features/multi_streams/). |
 | `micro_batch_num` | `int32` | `1` | Number of micro batches used for multi-stream parallelism. |
