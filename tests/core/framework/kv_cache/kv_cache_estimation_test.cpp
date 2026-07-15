@@ -17,6 +17,9 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <vector>
+
 #include "framework/model/model_args.h"
 
 namespace xllm {
@@ -37,7 +40,6 @@ KVCacheEstimateOptions make_estimate_options() {
   options.world_size = 1;
   options.n_local_kv_heads = 2;
   options.max_seqs_per_batch = 8;
-  options.max_concurrent_requests = 8;
   return options;
 }
 
@@ -113,17 +115,32 @@ TEST(KVCacheEstimationTest, RdmaScalePaddingFailsWhenOneBlockExceedsBudget) {
 }
 #endif
 
-TEST(KVCacheEstimationTest, ReservesLinearAttentionState) {
+namespace {
+
+ModelArgs make_linear_attention_args(int64_t head_dim = 16) {
   ModelArgs model_args = make_standard_args();
-  model_args.full_attention_interval(2)
+  model_args.head_dim(head_dim)
+      .full_attention_interval(2)
       .linear_num_key_heads(2)
       .linear_num_value_heads(2)
       .linear_key_head_dim(4)
       .linear_value_head_dim(8)
       .linear_conv_kernel_dim(3);
+  return model_args;
+}
+
+KVCacheEstimateOptions make_linear_attention_options() {
   KVCacheEstimateOptions options = make_estimate_options();
   options.n_local_linear_k_heads = 2;
   options.n_local_linear_v_heads = 2;
+  return options;
+}
+
+}  // namespace
+
+TEST(KVCacheEstimationTest, ReservesLinearAttentionState) {
+  ModelArgs model_args = make_linear_attention_args();
+  KVCacheEstimateOptions options = make_linear_attention_options();
 
   KVCacheCapacity capacity = estimate_kv_cache_capacity(model_args, options);
 
@@ -133,6 +150,98 @@ TEST(KVCacheEstimationTest, ReservesLinearAttentionState) {
   EXPECT_EQ(capacity.linear_slot_size(), 256);
   EXPECT_EQ(capacity.linear_cache_size_in_bytes(), 5120);
   EXPECT_EQ(capacity.n_blocks(), 254);
+}
+
+TEST(KVCacheEstimationTest, LinearStateCapacityVariants) {
+  struct TestCase {
+    const char* name;
+    int64_t head_dim;
+    int64_t cache_size_in_bytes;
+    int64_t block_size;
+    int64_t n_local_kv_heads;
+    int64_t max_seqs_per_batch;
+    bool enable_prefix_cache;
+    int64_t max_linear_state_cache_slots;
+    int64_t expected_num_linear_state_blocks;
+    int64_t min_num_linear_state_blocks;
+  };
+
+  const std::vector<TestCase> test_cases = {
+      {"PrefixCacheGrowsLinearStateCheckpointPool",
+       /*head_dim=*/16,
+       /*cache_size_in_bytes=*/64LL << 30,
+       /*block_size=*/16,
+       /*n_local_kv_heads=*/2,
+       /*max_seqs_per_batch=*/200,
+       /*enable_prefix_cache=*/true,
+       /*max_linear_state_cache_slots=*/0,
+       /*expected_num_linear_state_blocks=*/-1,
+       /*min_num_linear_state_blocks=*/202},
+      {"PrefixCacheUsesLinearStateMemoryRatio",
+       /*head_dim=*/1,
+       /*cache_size_in_bytes=*/1024 * 1024,
+       /*block_size=*/1,
+       /*n_local_kv_heads=*/1,
+       /*max_seqs_per_batch=*/8,
+       /*enable_prefix_cache=*/true,
+       /*max_linear_state_cache_slots=*/0,
+       /*expected_num_linear_state_blocks=*/970,
+       /*min_num_linear_state_blocks=*/-1},
+      {"NoPrefixCacheCapsLinearStateBlocksByBudget",
+       /*head_dim=*/16,
+       /*cache_size_in_bytes=*/1024 * 1024,
+       /*block_size=*/16,
+       /*n_local_kv_heads=*/2,
+       /*max_seqs_per_batch=*/100000,
+       /*enable_prefix_cache=*/false,
+       /*max_linear_state_cache_slots=*/0,
+       /*expected_num_linear_state_blocks=*/229,
+       /*min_num_linear_state_blocks=*/-1},
+      {"UnlimitedConcurrencyFallsBackToPaddingSlots",
+       /*head_dim=*/16,
+       /*cache_size_in_bytes=*/1024 * 1024,
+       /*block_size=*/16,
+       /*n_local_kv_heads=*/2,
+       /*max_seqs_per_batch=*/0,
+       /*enable_prefix_cache=*/false,
+       /*max_linear_state_cache_slots=*/0,
+       /*expected_num_linear_state_blocks=*/2,
+       /*min_num_linear_state_blocks=*/-1},
+      {"ExplicitLinearStateSlotsOverrideAutoSizing",
+       /*head_dim=*/16,
+       /*cache_size_in_bytes=*/64LL << 30,
+       /*block_size=*/16,
+       /*n_local_kv_heads=*/2,
+       /*max_seqs_per_batch=*/200,
+       /*enable_prefix_cache=*/true,
+       /*max_linear_state_cache_slots=*/32,
+       /*expected_num_linear_state_blocks=*/34,
+       /*min_num_linear_state_blocks=*/-1},
+  };
+
+  for (const TestCase& test_case : test_cases) {
+    SCOPED_TRACE(test_case.name);
+    ModelArgs model_args = make_linear_attention_args(test_case.head_dim);
+    KVCacheEstimateOptions options = make_linear_attention_options();
+    options.cache_size_in_bytes = test_case.cache_size_in_bytes;
+    options.block_size = test_case.block_size;
+    options.n_local_kv_heads = test_case.n_local_kv_heads;
+    options.max_seqs_per_batch = test_case.max_seqs_per_batch;
+    options.enable_prefix_cache = test_case.enable_prefix_cache;
+    options.max_linear_state_cache_slots =
+        test_case.max_linear_state_cache_slots;
+
+    KVCacheCapacity capacity = estimate_kv_cache_capacity(model_args, options);
+
+    if (test_case.expected_num_linear_state_blocks >= 0) {
+      EXPECT_EQ(capacity.num_linear_state_blocks(),
+                test_case.expected_num_linear_state_blocks);
+    }
+    if (test_case.min_num_linear_state_blocks >= 0) {
+      EXPECT_GT(capacity.num_linear_state_blocks(),
+                test_case.min_num_linear_state_blocks);
+    }
+  }
 }
 
 TEST(KVCacheEstimationTest, Qwen35MtpExpandsConvStateLen) {

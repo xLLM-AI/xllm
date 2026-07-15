@@ -1021,6 +1021,10 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
       params_for_capture->embedding.linear_state_indices =
           persistent_linear_state_indices(
               static_cast<uint32_t>(padded_batch_size));
+      params_for_capture->parallel.has_initial_state =
+          params.parallel.has_initial_state;
+      params_for_capture->parallel.has_initial_state.resize(
+          static_cast<size_t>(padded_batch_size), 0);
     }
 
     // Only set attn_mask if need_update_attn_mask_ is true

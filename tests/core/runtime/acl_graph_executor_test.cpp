@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/kv_cache/kv_cache.h"
+#include "core/framework/kv_cache/linear_state_restore.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_loader.h"
@@ -749,6 +750,51 @@ TEST_F(AclGraphExecutorTest, BatchInputCarriesLinearStateIds) {
   ASSERT_EQ(forward_input.input_params.embedding.embedding_ids.size(), 1);
   EXPECT_EQ(forward_input.input_params.embedding.embedding_ids[0],
             expected_linear_state_id);
+}
+
+TEST(LinearStateRestoreTest, RestoreCopiesCheckpointSlot) {
+  std::vector<KVCache> kv_caches;
+  torch::Tensor conv_cache = torch::zeros({3, 2, 2}, torch::kFloat32);
+  torch::Tensor ssm_cache = torch::zeros({3, 2, 2}, torch::kFloat32);
+  conv_cache.select(0, 1).fill_(7.0);
+  ssm_cache.select(0, 1).fill_(11.0);
+  kv_caches.emplace_back(LinearAttentionKVCacheTensors{conv_cache, ssm_cache});
+
+  LinearStateCacheOp restore;
+  restore.linear_state_id = 2;
+  restore.restore_requested = true;
+  restore.restore_src_slot_id = 1;
+  std::vector<int64_t> has_initial_state(1, 0);
+  restore_linear_state_slots(kv_caches, {restore}, has_initial_state);
+
+  EXPECT_EQ(has_initial_state[0], 1);
+  EXPECT_TRUE(
+      torch::allclose(conv_cache.select(0, 2), conv_cache.select(0, 1)));
+  EXPECT_TRUE(torch::allclose(ssm_cache.select(0, 2), ssm_cache.select(0, 1)));
+}
+
+TEST(LinearStateRestoreTest, RestoreRequestedButUnresolvedColdStarts) {
+  std::vector<KVCache> kv_caches;
+  kv_caches.emplace_back(LinearAttentionKVCacheTensors{
+      torch::zeros({2, 4, 3}, torch::dtype(torch::kFloat32)),
+      torch::zeros({2, 4, 4}, torch::dtype(torch::kFloat32))});
+
+  LinearStateCacheOp no_restore;
+  no_restore.linear_state_id = 1;
+  LinearStateCacheOp missing_restore;
+  missing_restore.linear_state_id = 1;
+  missing_restore.restore_requested = true;
+  missing_restore.restore_src_slot_id = -1;
+
+  const std::vector<LinearStateCacheOp> cache_ops = {no_restore,
+                                                     missing_restore};
+  // Pre-fill both entries with the kv-cache default of 1 so the test can
+  // distinguish "SKIPPED leaves the default untouched" from "COLD_START
+  // overrides it to 0".
+  std::vector<int64_t> has_initial_state = {1, 1};
+  restore_linear_state_slots(kv_caches, cache_ops, has_initial_state);
+  EXPECT_EQ(has_initial_state[0], 1);
+  EXPECT_EQ(has_initial_state[1], 0);
 }
 
 TEST_F(AclGraphExecutorTest, GraphDoubleBufferFlagControlsSlotCount) {

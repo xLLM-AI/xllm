@@ -290,6 +290,12 @@ class WorkerImpl {
   // make sure only 1 thread in the pool
   // if enable_schedule_overlap, two step tasks might be dispatched to
   // the task queue, step need to be executed one-by-one
+  // INVARIANT: num_threads must remain 1. The linear-state prefix cache (both
+  // the in-worker restore on compute_stream_ and the lockless save fast-path
+  // in worker_service) relies on FIFO single-thread ordering to chain
+  // consecutive step tasks on compute_stream_ without an extra cross-stream
+  // barrier. Raising num_threads above 1 would re-introduce the cross-thread
+  // race fixed in commit 6e350f8f and silently break linear-state correctness.
   ThreadPool threadpool_{/*num_threads=*/1,
                          /*cpu_binding=*/false,
                          /*pool_name=*/"WorkerImpl.schedule"};

@@ -34,6 +34,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "framework/kv_cache/kv_cache.h"
+#include "framework/kv_cache/linear_state_restore.h"
 #include "framework/kv_cache_transfer/kv_transfer_completion.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
@@ -200,6 +201,21 @@ LLMWorkerImpl::step_async_no_sync(const ForwardInput& input) {
 
 std::optional<ForwardOutput> LLMWorkerImpl::step_for_schedule_overlap(
     const ForwardInput& input) {
+#if defined(USE_NPU)
+  // Restore live recurrent-state slots from saved checkpoints here (worker
+  // thread, on compute_stream_) instead of in prepare_work_before_execute on
+  // prepare_stream_. The single-threaded worker pool guarantees the previous
+  // chunk's forward kernels are already enqueued on compute_stream_ before
+  // this task runs, so the restore copy is automatically stream-ordered
+  // after those writes without needing a cross-stream barrier.
+  if (has_linear_attention_layers(context_.get_model_args())) {
+    c10::StreamGuard restore_guard = compute_stream_->set_stream_guard();
+    auto& mutable_params = const_cast<ModelInputParams&>(input.input_params);
+    restore_linear_state_slots(kv_caches_,
+                               mutable_params.linear_state_cache_ops,
+                               mutable_params.parallel.has_initial_state);
+  }
+#endif
   return execute_no_sync_on_stream(input, *compute_stream_);
 }
 
