@@ -476,6 +476,9 @@ DeepSeekV32Detector::parse_parameters_from_xml(
         if (param_type == "true") {
           parameters[param_name] = param_value;
         } else {
+          if (param_value.empty()) {
+            return parameters;
+          }
           // Use partial_json_loads for non-string types
           auto [parsed_value, _] = partial_json_loads(param_value, Allow::ALL);
           parameters[param_name] = parsed_value;

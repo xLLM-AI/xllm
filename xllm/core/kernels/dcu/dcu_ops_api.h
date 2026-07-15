@@ -68,6 +68,15 @@ torch::Tensor group_gemm(const torch::Tensor& input,
 torch::Tensor build_block_table_from_paged_kv_cuda(
     const torch::Tensor& paged_kv_indptr,
     const torch::Tensor& paged_kv_indices);
+
+// Gather DCU DeepSeek MLA latent cache from paged layout to a contiguous
+// [total_kv_len, latent_dim] tensor for full-context prefill.
+torch::Tensor gather_mla_latent_cache(const torch::Tensor& k_cache,
+                                      const torch::Tensor& block_table,
+                                      const torch::Tensor& kv_cu_seq_lens,
+                                      int64_t total_kv_len,
+                                      int64_t max_seq_len);
+
 torch::Tensor random_sample(const torch::Tensor& probs);
 torch::Tensor rejection_sample(const torch::Tensor& draft_token_ids,
                                const torch::Tensor& num_draft_tokens,
@@ -115,6 +124,23 @@ std::tuple<torch::Tensor, torch::Tensor> scaled_quantize(
     double active_coef,
     bool is_gated,
     torch::ScalarType quant_type);
+
+// Torch fallback for gated RMSNorm / LayerNorm (with optional SiLU-gated
+// residual). DCU does not have a fused kernel yet.
+torch::Tensor gated_layer_norm(torch::Tensor& x,
+                               const torch::Tensor& weight,
+                               const torch::Tensor& bias,
+                               double eps,
+                               const std::optional<torch::Tensor>& gate,
+                               int64_t group_size,
+                               bool norm_before_gate);
+
+// Torch fallback for Gemma-style RMSNorm (weight is applied as `1 + gamma`).
+// DCU does not have a fused kernel yet.
+torch::Tensor gemma_rms_norm(const torch::Tensor& x,
+                             const torch::Tensor& gamma,
+                             double eps,
+                             torch::Tensor& norm_out);
 
 // W8A8: INT8 x INT8 scaled matmul via hipBLASLt.
 // Equivalent to lmslim's hipblaslt_w8a8_gemm.

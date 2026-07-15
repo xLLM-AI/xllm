@@ -118,6 +118,20 @@ void KVCacheState::incr_shared_blocks_num(BlockType type, size_t num) {
 void KVCacheState::erase_blocks(BlockType type) {
   composite_blocks_.erase(type);
   num_owned_shared_blocks_.erase(type);
+  if (type == BlockType::LINEAR) {
+    pending_linear_save_hash_.reset();
+    linear_restore_src_block_.reset();
+  }
+}
+
+Block KVCacheState::copy_block(BlockType type) const {
+  DCHECK(type == BlockType::SINGLE || type == BlockType::LINEAR)
+      << "copy_block is for singleton block types only";
+  auto it = composite_blocks_.find(type);
+  if (it == composite_blocks_.end() || it->second.empty()) {
+    return Block();
+  }
+  return it->second[0];
 }
 
 size_t KVCacheState::shared_blocks_num(BlockType type) const {
@@ -260,6 +274,15 @@ int32_t KVCacheState::get_single_block_id() const {
   return it->second[0].id();
 }
 
+int32_t KVCacheState::get_linear_block_id() const {
+  const auto it = composite_blocks_.find(BlockType::LINEAR);
+  if (it == composite_blocks_.end() || it->second.empty() ||
+      !it->second[0].is_valid()) {
+    return -1;
+  }
+  return it->second[0].id();
+}
+
 void KVCacheState::set_transfer_kv_info(TransferKVInfo&& info) {
   transfer_kv_info_ = std::move(info);
 }
@@ -287,6 +310,8 @@ void KVCacheState::reset() {
   composite_blocks_.clear();
   transfer_kv_info_.reset();
   next_transfer_block_idx_ = 0;
+  pending_linear_save_hash_.reset();
+  linear_restore_src_block_.reset();
 }
 
 void KVCacheState::process_beam_search(std::optional<Block> new_block) {

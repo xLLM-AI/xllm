@@ -19,13 +19,16 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cmath>
+#include <cstdint>
 #include <optional>
 #include <tuple>
 #include <vector>
 
+#include "kernels/dcu/dcu_ops_api.h"
 #include "kernels/dcu/flash_mla_adapter.h"
 #include "layers/common/rotary_embedding.h"
 #include "layers/common/rotary_embedding_util.h"
+#include "layers/dcu/flash_attention.h"
 
 namespace xllm {
 namespace layer {
@@ -45,6 +48,58 @@ torch::Tensor to_deepseek_rope_layout(const torch::Tensor& tensor) {
       .contiguous();
 }
 
+bool is_fp8_dtype(torch::ScalarType dtype) {
+  return dtype == torch::kFloat8_e4m3fn || dtype == torch::kFloat8_e5m2;
+}
+
+bool has_prefill_context(const AttentionMetadata& attn_metadata) {
+  if (attn_metadata.is_chunked_prefill) {
+    return true;
+  }
+  CHECK(attn_metadata.q_cu_seq_lens.defined())
+      << "DeepSeek MHA prefill requires q_cu_seq_lens.";
+  CHECK(attn_metadata.kv_cu_seq_lens.defined())
+      << "DeepSeek MHA prefill requires kv_cu_seq_lens.";
+  return !torch::equal(attn_metadata.q_cu_seq_lens,
+                       attn_metadata.kv_cu_seq_lens);
+}
+
+void check_first_phase_prefill_metadata(
+    const AttentionMetadata& attn_metadata) {
+  CHECK(attn_metadata.is_prefill || attn_metadata.is_chunked_prefill)
+      << "DeepSeek MHA prefill must run in prefill/chunked prefill phase.";
+  CHECK(!attn_metadata.is_chunked_prefill)
+      << "DCU DeepSeek MHA prefill phase 1 does not support chunked "
+         "prefill/context yet.";
+  CHECK(attn_metadata.q_cu_seq_lens.defined())
+      << "DeepSeek MHA prefill requires q_cu_seq_lens.";
+  CHECK(attn_metadata.kv_cu_seq_lens.defined())
+      << "DeepSeek MHA prefill requires kv_cu_seq_lens.";
+  CHECK(torch::equal(attn_metadata.q_cu_seq_lens, attn_metadata.kv_cu_seq_lens))
+      << "DCU DeepSeek MHA prefill phase 1 only supports no prefix/cache "
+         "context; q_cu_seq_lens must equal kv_cu_seq_lens.";
+}
+
+void check_context_prefill_metadata(const AttentionMetadata& attn_metadata) {
+  CHECK(attn_metadata.is_prefill || attn_metadata.is_chunked_prefill)
+      << "DeepSeek context prefill must run in prefill/chunked prefill phase.";
+  CHECK(attn_metadata.q_cu_seq_lens.defined())
+      << "DeepSeek context prefill requires q_cu_seq_lens.";
+  CHECK(attn_metadata.kv_cu_seq_lens.defined())
+      << "DeepSeek context prefill requires kv_cu_seq_lens.";
+  CHECK(attn_metadata.kv_seq_lens.defined() ||
+        attn_metadata.kv_cu_seq_lens.defined())
+      << "DeepSeek context prefill requires KV sequence lengths.";
+  CHECK_GT(attn_metadata.total_kv_len, 0)
+      << "DeepSeek context prefill requires total KV length.";
+  CHECK(attn_metadata.block_table.defined())
+      << "DeepSeek context prefill requires block_table.";
+  CHECK(attn_metadata.slot_mapping.defined())
+      << "DeepSeek context prefill requires slot_mapping.";
+  CHECK_GE(attn_metadata.max_seq_len, attn_metadata.max_query_len)
+      << "context prefill expects max_seq_len >= max_query_len.";
+}
+
 }  // namespace
 
 DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
@@ -58,7 +113,8 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
       qk_rope_head_dim_(args.qk_rope_head_dim()),
       v_head_dim_(args.v_head_dim()),
       eps_(args.rms_norm_eps()),
-      interleaved_(false) {
+      interleaved_(false),
+      runtime_dtype_(c10::typeMetaToScalarType(options.dtype())) {
   const int64_t tp_size = parallel_args.tp_group_->world_size();
   const int64_t num_heads = args.n_heads();
   const int64_t hidden_size = args.hidden_size();
@@ -75,7 +131,7 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
     q_a_proj_ = register_module(
         "q_a_proj",
         ReplicatedLinear(
-            hidden_size, q_lora_rank_, /*bias=*/false, QuantArgs(), options));
+            hidden_size, q_lora_rank_, /*bias=*/false, quant_args, options));
     q_a_layernorm_ =
         register_module("q_a_layernorm", RMSNorm(q_lora_rank_, eps_, options));
     q_b_proj_ =
@@ -106,7 +162,7 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
                       ReplicatedLinear(hidden_size,
                                        kv_lora_rank_ + qk_rope_head_dim_,
                                        /*bias=*/false,
-                                       QuantArgs(),
+                                       quant_args,
                                        options));
   kv_a_layernorm_ =
       register_module("kv_a_layernorm", RMSNorm(kv_lora_rank_, eps_, options));
@@ -116,15 +172,10 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
                            num_heads * (qk_nope_head_dim_ + v_head_dim_),
                            /*bias=*/false,
                            /*gather_output=*/false,
-                           QuantArgs(),
+                           quant_args,
                            weight_group,
                            options,
                            attention_linear_extra_args));
-
-  torch::Tensor weights = kv_b_proj_->weight().unflatten(
-      0, {tp_heads_, qk_nope_head_dim_ + v_head_dim_});
-  w_kc_ = weights.slice(1, 0, qk_nope_head_dim_);
-  w_vc_ = weights.slice(1, qk_nope_head_dim_, qk_nope_head_dim_ + v_head_dim_);
 
   rotary_emb_ =
       register_module("rotary_emb",
@@ -179,10 +230,12 @@ void DeepseekV2AttentionImpl::store_latent_cache(
 
 torch::Tensor DeepseekV2AttentionImpl::project_output(
     const torch::Tensor& attn_latent) {
+  CHECK(w_vc_.defined()) << "DeepSeek MLA absorbed value weight is not loaded.";
   torch::Tensor attn_bmm =
       torch::bmm(attn_latent.transpose(0, 1), w_vc_);  // [tp_heads, tokens, v]
   attn_bmm = attn_bmm.transpose(0, 1);                 // [tokens, tp_heads, v]
-  torch::Tensor proj_input = attn_bmm.flatten(1, 2);   // [tokens, tp_heads*v]
+  torch::Tensor proj_input =
+      attn_bmm.flatten(1, 2).contiguous();  // [tokens, tp_heads*v]
   return o_proj_->forward(proj_input);
 }
 
@@ -209,56 +262,113 @@ torch::Tensor DeepseekV2AttentionImpl::decode_flash_mla(
   return project_output(attn_latent);
 }
 
-torch::Tensor DeepseekV2AttentionImpl::prefill_sdpa(
-    const torch::Tensor& q_nope_absorbed,
+torch::Tensor DeepseekV2AttentionImpl::prefill_mha(
+    const torch::Tensor& q_nope,
     const torch::Tensor& q_pe,
-    const torch::Tensor& latent_cache,
+    const torch::Tensor& c_kv_normed,
+    const torch::Tensor& k_pe,
     const AttentionMetadata& attn_metadata) {
-  const int64_t head_dim = kv_lora_rank_ + qk_rope_head_dim_;
-  torch::Tensor q_input = torch::cat({q_nope_absorbed, q_pe}, /*dim=*/-1);
-  const int64_t num_tokens = q_input.size(0);
+  check_first_phase_prefill_metadata(attn_metadata);
 
-  torch::Tensor q_cu = attn_metadata.q_cu_seq_lens.cpu().to(torch::kInt64);
-  torch::Tensor kv_cu = attn_metadata.kv_cu_seq_lens.cpu().to(torch::kInt64);
-  const int64_t batch_size = q_cu.size(0) - 1;
+  torch::Tensor kv =
+      kv_b_proj_->forward(c_kv_normed)
+          .view({-1, tp_heads_, qk_nope_head_dim_ + v_head_dim_});
+  std::vector<torch::Tensor> kv_vec =
+      kv.split({qk_nope_head_dim_, v_head_dim_}, /*dim=*/-1);
+  torch::Tensor k_nope = kv_vec[0].contiguous();
+  torch::Tensor value = kv_vec[1].contiguous();
 
-  torch::Tensor out_latent =
-      torch::empty({num_tokens, tp_heads_, kv_lora_rank_}, q_input.options());
+  torch::Tensor query = torch::cat({q_nope, q_pe}, /*dim=*/-1).contiguous();
+  torch::Tensor key =
+      torch::cat({k_nope, k_pe.unsqueeze(1).expand({-1, tp_heads_, -1})},
+                 /*dim=*/-1)
+          .contiguous();
 
-  for (int64_t i = 0; i < batch_size; ++i) {
-    const int64_t q_start = q_cu[i].item<int64_t>();
-    const int64_t q_end = q_cu[i + 1].item<int64_t>();
-    const int64_t kv_start = kv_cu[i].item<int64_t>();
-    const int64_t kv_end = kv_cu[i + 1].item<int64_t>();
-    const int64_t sq = q_end - q_start;
-    const int64_t sk = kv_end - kv_start;
-    if (sk == 0) {
-      continue;
-    }
+  torch::Tensor cu_seqlens =
+      attn_metadata.q_cu_seq_lens.to(torch::kInt32).contiguous();
+  std::vector<torch::Tensor> result = flash_attention_varlen_forward(
+      query,
+      key,
+      value,
+      /*num_heads=*/tp_heads_,
+      /*num_kv_heads=*/tp_heads_,
+      cu_seqlens,
+      cu_seqlens,
+      /*max_seqlen_q=*/attn_metadata.max_query_len,
+      /*max_seqlen_k=*/attn_metadata.max_query_len,
+      /*softmax_scale=*/softmax_scale_,
+      /*is_causal=*/attn_metadata.is_causal,
+      /*window_size_left=*/-1,
+      /*window_size_right=*/attn_metadata.is_causal ? 0 : -1,
+      /*is_bf16_output=*/query.scalar_type() == torch::kBFloat16);
 
-    torch::Tensor q_seq = q_input.slice(0, q_start, q_end);          // [sq,H,D]
-    torch::Tensor kv_seq = latent_cache.slice(0, kv_start, kv_end);  // [sk,D]
+  CHECK(!result.empty()) << "DeepSeek MHA prefill returned no output.";
+  torch::Tensor proj_input = result[0].flatten(1, 2).contiguous();
+  return o_proj_->forward(proj_input);
+}
 
-    torch::Tensor q4 = q_seq.permute({1, 0, 2}).unsqueeze(0).contiguous();
-    torch::Tensor kv4 = kv_seq.view({1, 1, sk, head_dim});
+torch::Tensor DeepseekV2AttentionImpl::prefill_mha_with_full_context(
+    const torch::Tensor& q_nope,
+    const torch::Tensor& q_pe,
+    const AttentionMetadata& attn_metadata,
+    const torch::Tensor& k_cache) {
+  check_context_prefill_metadata(attn_metadata);
 
-    torch::Tensor attn = torch::scaled_dot_product_attention(
-        q4,
-        kv4,
-        kv4,
-        std::nullopt,
-        /*dropout_p=*/0.0,
-        /*is_causal=*/attn_metadata.is_causal,
-        /*scale=*/static_cast<double>(softmax_scale_),
-        /*enable_gqa=*/true);                // [1, H, sq, D]
-    attn = attn.slice(-1, 0, kv_lora_rank_)  // keep o_latent cols
-               .squeeze(0)
-               .permute({1, 0, 2})
-               .contiguous();  // [sq, H, kv_lora]
-    out_latent.slice(0, q_start, q_end).copy_(attn);
-  }
+  const int64_t batch_size = attn_metadata.block_table.size(0);
+  CHECK_GT(batch_size, 0) << "DeepSeek context prefill batch size must be > 0.";
+  const int64_t required_blocks =
+      (attn_metadata.max_seq_len + k_cache.size(1) - 1) / k_cache.size(1);
+  CHECK_LE(required_blocks, attn_metadata.block_table.size(1))
+      << "DeepSeek context prefill block_table does not contain enough blocks.";
+  torch::Tensor latent_cache =
+      kernel::dcu::gather_mla_latent_cache(k_cache,
+                                           attn_metadata.block_table,
+                                           attn_metadata.kv_cu_seq_lens,
+                                           attn_metadata.total_kv_len,
+                                           attn_metadata.max_seq_len);
+  torch::Tensor c_kv_normed =
+      latent_cache.slice(/*dim=*/-1, /*start=*/0, kv_lora_rank_).contiguous();
+  torch::Tensor k_pe =
+      latent_cache.slice(/*dim=*/-1, /*start=*/kv_lora_rank_).contiguous();
 
-  return project_output(out_latent);
+  torch::Tensor kv =
+      kv_b_proj_->forward(c_kv_normed)
+          .view({-1, tp_heads_, qk_nope_head_dim_ + v_head_dim_});
+  std::vector<torch::Tensor> kv_vec =
+      kv.split({qk_nope_head_dim_, v_head_dim_}, /*dim=*/-1);
+  torch::Tensor k_nope = kv_vec[0].contiguous();
+  torch::Tensor value = kv_vec[1].contiguous();
+
+  torch::Tensor query = torch::cat({q_nope, q_pe}, /*dim=*/-1).contiguous();
+  torch::Tensor key =
+      torch::cat({k_nope, k_pe.unsqueeze(1).expand({-1, tp_heads_, -1})},
+                 /*dim=*/-1)
+          .contiguous();
+
+  torch::Tensor q_cu_seqlens =
+      attn_metadata.q_cu_seq_lens.to(torch::kInt32).contiguous();
+  torch::Tensor kv_cu_seqlens =
+      attn_metadata.kv_cu_seq_lens.to(torch::kInt32).contiguous();
+  std::vector<torch::Tensor> result = flash_attention_varlen_forward(
+      query,
+      key,
+      value,
+      /*num_heads=*/tp_heads_,
+      /*num_kv_heads=*/tp_heads_,
+      q_cu_seqlens,
+      kv_cu_seqlens,
+      /*max_seqlen_q=*/attn_metadata.max_query_len,
+      /*max_seqlen_k=*/attn_metadata.max_seq_len,
+      /*softmax_scale=*/softmax_scale_,
+      /*is_causal=*/attn_metadata.is_causal,
+      /*window_size_left=*/-1,
+      /*window_size_right=*/attn_metadata.is_causal ? 0 : -1,
+      /*is_bf16_output=*/query.scalar_type() == torch::kBFloat16);
+
+  CHECK(!result.empty())
+      << "DeepSeek full-context MHA prefill returned no output.";
+  torch::Tensor proj_input = result[0].flatten(1, 2).contiguous();
+  return o_proj_->forward(proj_input);
 }
 
 torch::Tensor DeepseekV2AttentionImpl::forward(
@@ -266,9 +376,8 @@ torch::Tensor DeepseekV2AttentionImpl::forward(
     const torch::Tensor& hidden_states,
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache) {
-  const bool is_prefill = attn_metadata.is_prefill;
-  CHECK(!attn_metadata.is_chunked_prefill)
-      << "DCU DeepSeek-V2 chunked prefill is not supported yet.";
+  const bool use_prefill_attention =
+      attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
   CHECK_EQ(positions.numel(), hidden_states.size(0))
       << "DCU DeepSeek-V2 position/token mismatch, positions: "
       << positions.sizes() << ", hidden_states: " << hidden_states.sizes()
@@ -287,7 +396,7 @@ torch::Tensor DeepseekV2AttentionImpl::forward(
                        positions,
                        attn_metadata.q_cu_seq_lens,
                        attn_metadata.max_query_len,
-                       /*is_prompt=*/is_prefill);
+                       /*is_prompt=*/use_prefill_attention);
   k_pe = k_pe_3d.squeeze(1).contiguous();
   torch::Tensor latent_normed = torch::cat({c_kv_normed, k_pe}, /*dim=*/-1);
 
@@ -306,13 +415,20 @@ torch::Tensor DeepseekV2AttentionImpl::forward(
                        positions,
                        attn_metadata.q_cu_seq_lens,
                        attn_metadata.max_query_len,
-                       /*is_prompt=*/is_prefill);
+                       /*is_prompt=*/use_prefill_attention);
+
+  if (use_prefill_attention) {
+    if (has_prefill_context(attn_metadata)) {
+      return prefill_mha_with_full_context(
+          q_nope, q_pe, attn_metadata, k_cache);
+    }
+    return prefill_mha(q_nope, q_pe, c_kv_normed, k_pe, attn_metadata);
+  }
+
+  CHECK(w_kc_.defined()) << "DeepSeek MLA absorbed key weight is not loaded.";
   torch::Tensor q_nope_absorbed =
       torch::bmm(q_nope.transpose(0, 1), w_kc_).transpose(0, 1);
 
-  if (is_prefill) {
-    return prefill_sdpa(q_nope_absorbed, q_pe, latent_normed, attn_metadata);
-  }
   return decode_flash_mla(q_nope_absorbed, q_pe, attn_metadata, kv_cache);
 }
 
@@ -332,11 +448,41 @@ void DeepseekV2AttentionImpl::load_state_dict(const StateDict& state_dict) {
   kv_b_proj_->load_state_dict(state_dict.get_dict_with_prefix("kv_b_proj."));
   o_proj_->load_state_dict(state_dict.get_dict_with_prefix("o_proj."));
 
-  if (kv_b_proj_->is_weight_loaded() && !has_trans_) {
-    w_vc_ = w_vc_.transpose(1, 2)
-                .contiguous();  // [H, v_head, kv_lora] -> [H, kv_lora, v_head]
-    has_trans_ = true;
+  if (kv_b_proj_->is_weight_loaded()) {
+    refresh_kv_b_proj_weights();
   }
+}
+
+void DeepseekV2AttentionImpl::refresh_kv_b_proj_weights() {
+  torch::Tensor kv_b_weight = kv_b_proj_->weight();
+  CHECK(kv_b_weight.defined())
+      << "DeepSeek MLA kv_b_proj weight must be loaded.";
+  if (is_fp8_dtype(kv_b_weight.scalar_type())) {
+    torch::Tensor weight_scale = kv_b_proj_->weight_scale();
+    CHECK(weight_scale.defined())
+        << "DeepSeek MLA FP8 kv_b_proj requires weight_scale.";
+    torch::Tensor scale = weight_scale;
+    if (scale.dim() == 2) {
+      CHECK_EQ(scale.size(1), 1)
+          << "DeepSeek MLA kv_b_proj weight_scale must be [N] or [N,1].";
+      scale = scale.squeeze(1);
+    }
+    CHECK_EQ(scale.dim(), 1)
+        << "DeepSeek MLA kv_b_proj weight_scale must be [N] or [N,1].";
+    CHECK_EQ(scale.size(0), kv_b_weight.size(0))
+        << "DeepSeek MLA kv_b_proj weight_scale output dim mismatch.";
+    kv_b_weight = (kv_b_weight.to(runtime_dtype_) *
+                   scale.to(kv_b_weight.device(), runtime_dtype_).view({-1, 1}))
+                      .contiguous();
+  }
+
+  torch::Tensor weights =
+      kv_b_weight.unflatten(0, {tp_heads_, qk_nope_head_dim_ + v_head_dim_});
+  w_kc_ = weights.slice(1, 0, qk_nope_head_dim_).contiguous();
+  w_vc_ = weights.slice(1, qk_nope_head_dim_, qk_nope_head_dim_ + v_head_dim_)
+              .transpose(1, 2)
+              .contiguous();
+  has_trans_ = true;
 }
 
 }  // namespace layer

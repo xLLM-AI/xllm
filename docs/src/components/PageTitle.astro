@@ -1,0 +1,182 @@
+---
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const { entry } = Astro.locals.starlightRoute;
+const title = entry.data.title;
+const sourcePath = entry.filePath ? join(process.cwd(), entry.filePath) : undefined;
+const sourceMarkdown =
+	sourcePath && existsSync(sourcePath) ? readFileSync(sourcePath, 'utf-8') : '';
+const bodyMarkdown = stripFrontmatter(sourceMarkdown).trim();
+const copyMarkdown = [`# ${title}`, bodyMarkdown].filter(Boolean).join('\n\n') + '\n';
+const copyPayload = JSON.stringify(copyMarkdown).replace(/</g, '\\u003c');
+
+function stripFrontmatter(markdown: string) {
+	const normalized = markdown.replace(/^\uFEFF/, '');
+	return normalized.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
+}
+---
+
+<div class="copy-page-title-row">
+	<h1 id="_top">{title}</h1>
+	<div class="copy-page-control" data-copy-page>
+		<button class="copy-page-button" type="button" aria-label="Copy page">
+			<svg aria-hidden="true" viewBox="0 0 18 18">
+				<path d="M14.25 5.25H7.25C6.14543 5.25 5.25 6.14543 5.25 7.25V14.25C5.25 15.3546 6.14543 16.25 7.25 16.25H14.25C15.3546 16.25 16.25 15.3546 16.25 14.25V7.25C16.25 6.14543 15.3546 5.25 14.25 5.25Z" />
+				<path d="M2.801 11.998 1.772 5.074C1.61 3.981 2.364 2.964 3.456 2.802L10.38 1.773C11.313 1.634 12.19 2.163 12.528 3.001" />
+			</svg>
+			<span data-copy-page-label>Copy page</span>
+		</button>
+			<script is:inline type="application/json" data-copy-page-markdown set:html={copyPayload}></script>
+	</div>
+</div>
+
+<script>
+	const copiedLabel = 'Copied';
+	const defaultLabel = 'Copy page';
+	const failedLabel = 'Copy failed';
+
+	async function writeClipboard(text: string) {
+		if (!navigator.clipboard?.writeText) throw new Error('Clipboard API is unavailable.');
+
+		await navigator.clipboard.writeText(text);
+	}
+
+	for (const control of document.querySelectorAll('[data-copy-page]')) {
+		if (!(control instanceof HTMLElement) || control.dataset.copyPageBound === 'true') continue;
+
+		const button = control.querySelector('button');
+		const label = control.querySelector('[data-copy-page-label]');
+		const data = control.querySelector('[data-copy-page-markdown]');
+		if (!(button instanceof HTMLButtonElement) || !(data instanceof HTMLScriptElement)) continue;
+
+		control.dataset.copyPageBound = 'true';
+
+		button.addEventListener('click', async () => {
+			const nextLabel = label instanceof HTMLElement ? label : button;
+			const text = JSON.parse(data.textContent || '""');
+
+			try {
+				await writeClipboard(text);
+				button.dataset.state = 'copied';
+				button.setAttribute('aria-label', copiedLabel);
+				nextLabel.textContent = copiedLabel;
+			} catch {
+				button.dataset.state = 'failed';
+				button.setAttribute('aria-label', failedLabel);
+				nextLabel.textContent = failedLabel;
+			}
+
+			window.setTimeout(() => {
+				delete button.dataset.state;
+				button.setAttribute('aria-label', defaultLabel);
+				nextLabel.textContent = defaultLabel;
+			}, 1600);
+		});
+	}
+</script>
+
+<style>
+	@layer starlight.core {
+		.copy-page-title-row {
+			align-items: center;
+			display: flex;
+			gap: 1rem;
+			justify-content: space-between;
+			margin-top: 1rem;
+			min-width: 0;
+		}
+
+		h1 {
+			color: var(--sl-color-white);
+			font-size: var(--sl-text-h1);
+			font-weight: 600;
+			line-height: var(--sl-line-height-headings);
+			margin: 0;
+			min-width: 0;
+			overflow-wrap: anywhere;
+		}
+
+		.copy-page-control {
+			flex: 0 0 auto;
+		}
+
+		.copy-page-button {
+			align-items: center;
+			background: transparent;
+			background-clip: padding-box;
+			border: 1px solid transparent;
+			border-radius: 0.625rem;
+			color: var(--sl-color-gray-2);
+			cursor: pointer;
+			display: inline-flex;
+			font-family: inherit;
+			font-size: var(--sl-text-sm);
+			font-weight: 500;
+			gap: 0.45rem;
+			justify-content: center;
+			line-height: 1;
+			min-width: 7.5rem;
+			padding: 0.55rem 0.75rem;
+			position: relative;
+			text-decoration: none;
+			transform: scale(1);
+			transform-origin: center;
+			transition:
+				background-color 160ms ease,
+				border-color 160ms ease,
+				color 160ms ease,
+				transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+			white-space: nowrap;
+			will-change: transform;
+		}
+
+		.copy-page-button svg {
+			flex: 0 0 auto;
+			fill: none;
+			height: 1rem;
+			stroke: currentColor;
+			stroke-linecap: round;
+			stroke-linejoin: round;
+			stroke-width: 1.5;
+			width: 1rem;
+		}
+
+		.copy-page-button:is(:hover, :focus-visible),
+		.copy-page-button[data-state='copied'] {
+			background-color: color-mix(in srgb, var(--sl-color-accent) 8%, transparent);
+			border-color: color-mix(in srgb, var(--sl-color-accent) 26%, transparent);
+			color: var(--sl-color-text-accent);
+			outline: none;
+			transform: scale(1.045);
+		}
+
+		.copy-page-button[data-state='failed'] {
+			background-color: color-mix(in srgb, var(--docs-red) 8%, transparent);
+			border-color: color-mix(in srgb, var(--docs-red) 26%, transparent);
+			color: var(--docs-red);
+		}
+
+		@media (max-width: 34rem) {
+			.copy-page-title-row {
+				align-items: flex-start;
+				flex-direction: column;
+				gap: 0.75rem;
+			}
+		}
+
+		@media (prefers-reduced-motion: reduce) {
+			.copy-page-button {
+				transition:
+					background-color 160ms ease,
+					border-color 160ms ease,
+					color 160ms ease;
+			}
+
+			.copy-page-button:is(:hover, :focus-visible),
+			.copy-page-button[data-state='copied'] {
+				transform: none;
+			}
+		}
+	}
+</style>

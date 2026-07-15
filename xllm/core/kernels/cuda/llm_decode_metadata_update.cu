@@ -40,17 +40,29 @@ __global__ void llm_decode_metadata_update_kernel(
     }
     if (idx >= params.actual_num_tokens && idx < params.padded_num_tokens) {
       params.dst_tokens[idx] = 0;
-      params.dst_new_cache_slots[idx] = 0;
+      params.dst_positions[idx] = 0;
+      params.dst_new_cache_slots[idx] = -1;
     }
     if (idx < params.actual_batch_size + 1) {
       params.dst_kv_seq_lens[idx] = params.src_kv_seq_lens[idx];
       params.dst_paged_kv_indptr[idx] = params.src_paged_kv_indptr[idx];
+    }
+    if (idx >= params.actual_batch_size + 1 &&
+        idx < params.padded_num_tokens + 1) {
+      params.dst_kv_seq_lens[idx] =
+          params.src_kv_seq_lens[params.actual_batch_size];
+      params.dst_paged_kv_indptr[idx] =
+          params.src_paged_kv_indptr[params.actual_batch_size];
     }
     if (idx < params.actual_batch_size) {
       params.dst_kv_seq_lens_delta[idx] =
           params.src_kv_seq_lens[idx + 1] - params.src_kv_seq_lens[idx];
       params.dst_paged_kv_last_page_len[idx] =
           params.src_paged_kv_last_page_len[idx];
+    }
+    if (idx >= params.actual_batch_size && idx < params.padded_num_tokens) {
+      params.dst_kv_seq_lens_delta[idx] = 0;
+      params.dst_paged_kv_last_page_len[idx] = 1;
     }
     if (idx < params.actual_indices_size) {
       params.dst_paged_kv_indices[idx] = params.src_paged_kv_indices[idx];
@@ -63,8 +75,8 @@ __global__ void llm_decode_metadata_update_kernel(
 void update_llm_decode_metadata(const LlmDecodeMetadataUpdateParams& params,
                                 LlmDecodeMetadataUpdateStream stream) {
   int64_t max_work_size = params.actual_num_tokens;
-  if (params.padded_num_tokens > max_work_size) {
-    max_work_size = params.padded_num_tokens;
+  if (params.padded_num_tokens + 1 > max_work_size) {
+    max_work_size = params.padded_num_tokens + 1;
   }
   if (params.actual_batch_size + 1 > max_work_size) {
     max_work_size = params.actual_batch_size + 1;

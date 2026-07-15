@@ -28,7 +28,7 @@ class FakeTokenizer : public Tokenizer {
   }
   std::string decode(const Slice<int32_t>& ids,
                      bool skip_special_tokens) const {
-    NOT_IMPLEMENTED();
+    return "";
   }
   std::optional<int32_t> token_to_id(const std::string_view& token) const {
     NOT_IMPLEMENTED();
@@ -52,7 +52,7 @@ class FakeEngine : public Engine {
     fake_tokenizer_ = std::make_unique<FakeTokenizer>();
     fake_block_manager_ = std::make_unique<BlockManagerPool>(opt, 1);
   }
-  ForwardOutput step(std::vector<Batch>& batch) { NOT_IMPLEMENTED(); }
+  ForwardOutput step(std::vector<Batch>& batch) { return {}; }
   void update_last_step_result(std::vector<Batch>& batch) { NOT_IMPLEMENTED(); }
   const Tokenizer* tokenizer() const { return fake_tokenizer_.get(); }
   BlockManagerPool* block_manager_pool() const {
@@ -60,14 +60,29 @@ class FakeEngine : public Engine {
   }
   const ModelArgs& model_args() const { NOT_IMPLEMENTED(); }
   const TokenizerArgs& tokenizer_args() const { NOT_IMPLEMENTED(); }
-  std::vector<int64_t> get_active_activation_memory() const {
-    NOT_IMPLEMENTED();
-  }
+  std::vector<int64_t> get_active_activation_memory() const { return {0}; }
   bool init() override { return true; }
 
  private:
   std::unique_ptr<Tokenizer> fake_tokenizer_;
   std::unique_ptr<BlockManagerPool> fake_block_manager_;
+};
+
+class TestContinuousScheduler final : public ContinuousScheduler {
+ public:
+  TestContinuousScheduler(Engine* engine, const Options& options)
+      : ContinuousScheduler(engine, options) {}
+
+  void reject_stream(const std::shared_ptr<Request>& request) {
+    response_processor_->process_stream_request(request);
+    response_processor_->wait_completion();
+  }
+
+  void reject_streams(const std::vector<std::shared_ptr<Request>>& requests) {
+    std::vector<std::shared_ptr<Request>> request_copy = requests;
+    response_processor_->batch_process_stream_requests(request_copy);
+    response_processor_->wait_completion();
+  }
 };
 
 template <typename T>
@@ -879,6 +894,105 @@ TEST(ContinuousSchedulerTest, PDDecodeBestOfOneSkipsExpansionAndShares) {
   // teardown (BlockManagerImpl checks all blocks are on the free list).
   block_manager_pool->deallocate_without_cache(seq0);
   (void)engine.release();
+}
+
+TEST(ContinuousSchedulerTest, RejectedStreamCancelsAtSchedulingBoundary) {
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(1024, 16, 0, 1024, 1);
+  opt.enable_schedule_overlap() = false;
+  auto engine = std::make_unique<FakeEngine>(32, 4);
+  auto scheduler = std::make_unique<TestContinuousScheduler>(engine.get(), opt);
+  BlockManagerPool* block_manager_pool = engine->block_manager_pool();
+  const size_t initial_free_blocks =
+      util::max(block_manager_pool->num_free_blocks());
+
+  auto request = generate_request_with_prompt_tokens({1, 2, 3, 4}, 4, 30000);
+  request->state().stream = true;
+  request->state().output_func = [](const RequestOutput&) { return false; };
+  make_request_decode_ready(request);
+  scheduler->add_request(request);
+
+  std::vector<Batch> batch = scheduler->prepare_batch_test();
+  ASSERT_EQ(batch.size(), 1u);
+  ASSERT_EQ(batch[0].size(), 1u);
+  EXPECT_LT(util::max(block_manager_pool->num_free_blocks()),
+            initial_free_blocks);
+
+  scheduler->reject_stream(request);
+
+  EXPECT_FALSE(request->cancelled());
+
+  scheduler->step(absl::ZeroDuration());
+
+  EXPECT_TRUE(request->cancelled());
+  EXPECT_TRUE(scheduler->get_running_requests().empty());
+  EXPECT_EQ(util::max(block_manager_pool->num_free_blocks()),
+            initial_free_blocks);
+
+  scheduler->reject_stream(request);
+  scheduler->step(absl::ZeroDuration());
+
+  EXPECT_TRUE(request->cancelled());
+  EXPECT_TRUE(scheduler->get_running_requests().empty());
+  EXPECT_EQ(util::max(block_manager_pool->num_free_blocks()),
+            initial_free_blocks);
+}
+
+TEST(ContinuousSchedulerTest, BatchRejectedStreamsCancelAtSchedulingBoundary) {
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(1024, 16, 0, 1024, 1);
+  opt.enable_schedule_overlap() = false;
+  auto engine = std::make_unique<FakeEngine>(32, 4);
+  auto scheduler = std::make_unique<TestContinuousScheduler>(engine.get(), opt);
+  BlockManagerPool* block_manager_pool = engine->block_manager_pool();
+
+  std::vector<std::shared_ptr<Request>> requests =
+      generate_request({4, 4},
+                       {4, 4},
+                       std::nullopt,
+                       std::nullopt,
+                       std::nullopt,
+                       std::nullopt,
+                       30000);
+  for (std::shared_ptr<Request>& request : requests) {
+    request->state().stream = true;
+    request->state().output_func = [](const RequestOutput&) { return true; };
+    make_request_decode_ready(request);
+    scheduler->add_request(request);
+  }
+  requests[0]->state().outputs_func = [](const std::vector<RequestOutput>&) {
+    return std::vector<bool>{false, true};
+  };
+
+  std::vector<Batch> batch = scheduler->prepare_batch_test();
+  ASSERT_EQ(batch.size(), 1u);
+  ASSERT_EQ(batch[0].size(), 2u);
+  const size_t free_blocks_before_cancel =
+      util::max(block_manager_pool->num_free_blocks());
+
+  scheduler->reject_streams(requests);
+  scheduler->reject_streams(requests);
+
+  EXPECT_FALSE(requests[0]->cancelled());
+  EXPECT_FALSE(requests[1]->cancelled());
+
+  scheduler->step(absl::ZeroDuration());
+
+  EXPECT_TRUE(requests[0]->cancelled());
+  EXPECT_FALSE(requests[1]->cancelled());
+  ASSERT_EQ(scheduler->get_running_requests().size(), 1u);
+  EXPECT_EQ(scheduler->get_running_requests()[0], requests[1]);
+  EXPECT_GT(util::max(block_manager_pool->num_free_blocks()),
+            free_blocks_before_cancel);
+
+  requests[1]->state().outputs_func = [](const std::vector<RequestOutput>&) {
+    return std::vector<bool>{false};
+  };
+  scheduler->reject_streams({requests[1]});
+  EXPECT_FALSE(requests[1]->cancelled());
+  scheduler->step(absl::ZeroDuration());
+  EXPECT_TRUE(requests[1]->cancelled());
+  EXPECT_TRUE(scheduler->get_running_requests().empty());
 }
 // ============== Async RL training: Pause/Resume tests ==============
 

@@ -29,10 +29,14 @@ namespace xllm {
 std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
                                       const Slice<Block>& existed_shared_blocks,
                                       const MMData& mm_data,
-                                      const Slice<XXH3Key>& block_hashes) {
+                                      const Slice<XXH3Key>& block_hashes,
+                                      size_t* matched_tokens) {
   // allign tokens to block boundary
   const size_t n_tokens = round_down(token_ids.size(), block_size_);
   if (n_tokens == 0) {
+    if (matched_tokens != nullptr) {
+      *matched_tokens = 0;
+    }
     return std::vector<Block>();
   }
 
@@ -94,6 +98,10 @@ std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
   }
 
   matched_blocks_.fetch_add(blocks.size());
+
+  if (matched_tokens != nullptr) {
+    *matched_tokens = blocks.size() * block_size_;
+  }
 
   int64_t int_rate_percent = static_cast<int64_t>(
       static_cast<double>(blocks.size()) * 100.0 / n_blocks);
@@ -221,6 +229,19 @@ size_t PrefixCache::insert(Slice<Block>& blocks) {
   }
 
   return blocks.size() * block_size_;
+}
+
+Block PrefixCache::find(const XXH3Key& hash) {
+  auto iter = cached_blocks_.find(hash);
+  if (iter == cached_blocks_.end()) {
+    return Block();
+  }
+  lru_lst_.move_back(iter->second);
+  return iter->second->block;
+}
+
+bool PrefixCache::contains(const XXH3Key& hash) const {
+  return cached_blocks_.find(hash) != cached_blocks_.end();
 }
 
 size_t PrefixCache::evict(size_t n_blocks) {

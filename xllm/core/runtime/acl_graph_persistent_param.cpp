@@ -162,7 +162,11 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // only serves decode / spec-verify batches, so the relevant row upper bound
   // comes from decode graph capacity instead.
   const int64_t max_graph_tokens = get_decode_graph_token_capacity(options);
-  const int64_t max_seqs_per_batch = get_decode_graph_capacity(options);
+  // Hybrid spec verify keeps sequence-scoped metadata, while non-hybrid MTP
+  // expands every proposal token into its own decode metadata row.
+  const int64_t metadata_capacity = is_hybrid_linear_attention
+                                        ? get_decode_graph_capacity(options)
+                                        : max_graph_tokens;
 
   const int64_t max_seq_len = args_.max_position_embeddings();
 
@@ -182,18 +186,17 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   persistent_new_cache_slots_default_ = torch::zeros(
       {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
   persistent_linear_state_indices_ = torch::zeros(
-      {max_seqs_per_batch}, torch::dtype(torch::kInt).device(device));
+      {metadata_capacity}, torch::dtype(torch::kInt).device(device));
   persistent_num_accepted_tokens_ = torch::ones(
-      {max_seqs_per_batch}, torch::dtype(torch::kInt).device(device));
+      {metadata_capacity}, torch::dtype(torch::kInt).device(device));
 
-  // Sequence length tensors with max_seqs_per_batch
-  q_seq_lens_ = torch::zeros({max_seqs_per_batch},
+  q_seq_lens_ = torch::zeros({metadata_capacity},
                              torch::dtype(torch::kInt).device(device));
-  kv_seq_lens_ = torch::zeros({max_seqs_per_batch},
+  kv_seq_lens_ = torch::zeros({metadata_capacity},
                               torch::dtype(torch::kInt).device(device));
-  q_seq_lens_default_ = torch::ones({max_seqs_per_batch},
+  q_seq_lens_default_ = torch::ones({metadata_capacity},
                                     torch::dtype(torch::kInt).device(device));
-  kv_seq_lens_default_ = torch::ones({max_seqs_per_batch},
+  kv_seq_lens_default_ = torch::ones({metadata_capacity},
                                      torch::dtype(torch::kInt).device(device));
   expanded_kv_seq_lens_ = torch::zeros(
       {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
@@ -203,10 +206,10 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   const int64_t max_block_table_len =
       (max_seq_len + block_size - 1) / block_size + 1;
   persistent_block_tables_ =
-      torch::zeros({max_seqs_per_batch, max_block_table_len},
+      torch::zeros({metadata_capacity, max_block_table_len},
                    torch::dtype(torch::kInt).device(device));
   persistent_block_tables_default_ =
-      torch::zeros({max_seqs_per_batch, max_block_table_len},
+      torch::zeros({metadata_capacity, max_block_table_len},
                    torch::dtype(torch::kInt).device(device));
   persistent_expanded_block_tables_ =
       torch::zeros({max_tokens_per_batch, max_block_table_len},
@@ -243,8 +246,8 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   }
 
   q_cu_seq_lens_default_ = torch::zeros(
-      {max_seqs_per_batch + 1}, torch::dtype(torch::kInt).device(device));
-  q_cu_seq_lens_ = torch::zeros({max_seqs_per_batch + 1},
+      {metadata_capacity + 1}, torch::dtype(torch::kInt).device(device));
+  q_cu_seq_lens_ = torch::zeros({metadata_capacity + 1},
                                 torch::dtype(torch::kInt).device(device));
 
   // Pre-allocate persistent dp/cp ep padding buffers with maximum capacity.
@@ -782,9 +785,15 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
 
   if (persistent_block_tables_default_.defined() &&
       persistent_block_tables_default_.sizes() ==
-          persistent_block_tables_.sizes()) {
-    persistent_block_tables_.copy_(persistent_block_tables_default_,
-                                   /*non_blocking=*/true);
+          persistent_block_tables_.sizes() &&
+      padded_batch_size > 0) {
+    CHECK_LE(padded_batch_size, persistent_block_tables_.size(0))
+        << "padded graph metadata rows exceed persistent block table capacity";
+    persistent_block_tables_
+        .slice(/*dim=*/0, /*start=*/0, /*end=*/padded_batch_size)
+        .copy_(persistent_block_tables_default_.slice(
+                   /*dim=*/0, /*start=*/0, /*end=*/padded_batch_size),
+               /*non_blocking=*/true);
   }
   if (actual_seq_len_rows > 0 &&
       params.attention.device.block_tables.defined() &&

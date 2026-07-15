@@ -228,6 +228,10 @@ def set_cuda_envs() -> None:
 def set_dcu_envs() -> None:
     set_common_envs()
     os.environ["DCU_PATH"] = get_dcu_root_path() or ""
+    if not os.getenv("FLASH_ATTENTION_LIB"):
+        flash_attn_lib = _find_dcu_so("flash_attn", "lib/libflash_attention.so")
+        if flash_attn_lib:
+            os.environ["FLASH_ATTENTION_LIB"] = flash_attn_lib
     if not os.getenv("FLASH_MLA_LIB"):
         flash_mla_lib = _find_dcu_so("flash_mla", "cuda*.so")
         if flash_mla_lib:
@@ -236,6 +240,12 @@ def set_dcu_envs() -> None:
         aiter_cpp_api_lib = _find_dcu_so("aiter", "jit/module_cpp_api.so")
         if aiter_cpp_api_lib:
             os.environ["AITER_CPP_API_LIB"] = aiter_cpp_api_lib
+    if not os.getenv("AITER_MOE_C_KERNEL_LIB"):
+        aiter_moe_c_kernel_lib = _find_dcu_so(
+            "aiter", "jit/module_moe_c_kernel.so"
+        )
+        if aiter_moe_c_kernel_lib:
+            os.environ["AITER_MOE_C_KERNEL_LIB"] = aiter_moe_c_kernel_lib
 
 def set_maca_envs():
     os.environ["PYTHON_INCLUDE_PATH"] = get_python_include_path()

@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/framework/block/block.h"
 #include "core/framework/block/block_manager_impl.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
@@ -37,6 +38,7 @@ limitations under the License.
 #include "core/layers/npu/npu_lm_head_impl.h"
 #include "core/layers/npu/npu_word_embedding_impl.h"
 #include "core/runtime/acl_graph_executor_impl.h"
+#include "core/runtime/acl_graph_persistent_param.h"
 #include "core/runtime/base_executor_impl.h"
 #include "core/runtime/options.h"
 
@@ -768,6 +770,86 @@ TEST_F(AclGraphExecutorTest, GraphDoubleBufferFlagControlsSlotCount) {
 
   execution_config.enable_graph_double_buffer(
       original_enable_graph_double_buffer);
+}
+
+TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
+  SpeculativeConfig& speculative_config = SpeculativeConfig::get_instance();
+  const bool original_enable_atb_spec_kernel =
+      speculative_config.enable_atb_spec_kernel();
+  speculative_config.enable_atb_spec_kernel(false);
+
+  ModelArgs args;
+  args.model_type("deepseek_v4");
+  args.dtype("float32");
+  args.hidden_size(8);
+  args.max_position_embeddings(32);
+
+  runtime::Options options;
+  options.block_size(4);
+  options.max_seqs_per_batch(10);
+  options.max_tokens_per_batch(64);
+  options.num_decoding_tokens(3);
+  options.enable_speculative_decode(true);
+  options.is_draft_engine(false);
+
+  const torch::Device device("npu:0");
+  ::xllm::npu::GraphPersistentParam persistent_param(
+      args,
+      device,
+      options,
+      /*need_update_attn_mask=*/false,
+      /*is_hybrid_linear_attention=*/false);
+  EXPECT_EQ(persistent_param.q_seq_lens().size(0), 30);
+  EXPECT_EQ(persistent_param.kv_seq_lens().size(0), 30);
+  EXPECT_EQ(persistent_param.persistent_block_tables().size(0), 30);
+
+  constexpr int64_t kValidateRows = 12;
+  const torch::TensorOptions int_options =
+      torch::dtype(torch::kInt).device(device);
+  const torch::Tensor tokens = torch::arange(kValidateRows, int_options);
+  const torch::Tensor positions = torch::arange(kValidateRows, int_options);
+  ModelInputParams params;
+  params.is_spec_verify = true;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  params.meta.num_sequences = kValidateRows;
+  params.attention.host.q_seq_lens.assign(kValidateRows, 1);
+  params.attention.host.kv_seq_lens.assign(kValidateRows, 8);
+  params.attention.device.q_seq_lens =
+      torch::ones({kValidateRows}, int_options);
+  params.attention.device.kv_seq_lens =
+      torch::full({kValidateRows}, 8, int_options);
+  params.attention.device.new_cache_slots =
+      torch::zeros({kValidateRows}, int_options);
+  params.attention.device.block_tables =
+      torch::zeros({kValidateRows, 2}, int_options);
+
+  std::optional<ModelInputParams> capture_params;
+  EXPECT_NO_THROW(capture_params = persistent_param.update(
+                      tokens,
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      positions,
+                      params,
+                      /*padded_num_tokens=*/kValidateRows,
+                      /*return_capture_params=*/true));
+  EXPECT_TRUE(capture_params.has_value());
+  if (capture_params.has_value()) {
+    EXPECT_EQ(capture_params->attention.device.q_seq_lens.size(0),
+              kValidateRows);
+    EXPECT_EQ(capture_params->attention.device.block_tables.size(0),
+              kValidateRows);
+  }
+
+  ::xllm::npu::GraphPersistentParam hybrid_persistent_param(
+      args,
+      device,
+      options,
+      /*need_update_attn_mask=*/false,
+      /*is_hybrid_linear_attention=*/true);
+  EXPECT_EQ(hybrid_persistent_param.q_seq_lens().size(0), 10);
+  EXPECT_EQ(hybrid_persistent_param.persistent_block_tables().size(0), 10);
+
+  speculative_config.enable_atb_spec_kernel(original_enable_atb_spec_kernel);
 }
 
 TEST(AclGraphExecutorHybridTest, KvCacheSupportsLinearOnlyLayers) {

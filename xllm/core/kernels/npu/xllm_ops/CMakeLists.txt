@@ -8,6 +8,7 @@ cc_library(
     ../utils.h
   SRCS
     replace_token.cpp
+    laser_attention.cpp
     top_k_top_p.cpp
     quant_matmul.cpp
     quantize.cpp

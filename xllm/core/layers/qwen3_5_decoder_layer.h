@@ -19,4 +19,6 @@ limitations under the License.
 #include "layers/npu_torch/qwen3_5_decoder_layer_impl.h"
 #elif defined(USE_MLU)
 #include "layers/mlu/qwen3_5/qwen3_5_decoder_layer.h"
+#elif defined(USE_DCU)
+#include "layers/dcu/qwen3_5_decoder_layer.h"
 #endif

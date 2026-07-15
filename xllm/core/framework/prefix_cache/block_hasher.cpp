@@ -79,37 +79,44 @@ void mm_xxh3_128bits_hash(const std::vector<const uint8_t*>& mm_hash_values,
   std::memcpy(hash_value, &mm_hash, sizeof(mm_hash));
 }
 
-std::vector<PrefixHash> compute_linear_state_prefix_hashes(
-    const Slice<int32_t>& token_ids,
-    size_t block_size,
-    size_t boundary_tokens) {
-  if (block_size == 0 || boundary_tokens == 0) {
-    return {};
+void extend_prefix_hashes(BlockHasherType type,
+                          const MMData& mm_data,
+                          const Slice<int32_t>& token_ids,
+                          size_t block_size,
+                          size_t boundary_blocks,
+                          std::vector<XXH3Key>& hashes) {
+  if (block_size == 0 || boundary_blocks <= hashes.size()) {
+    return;
   }
-  if (boundary_tokens % block_size != 0 || boundary_tokens > token_ids.size()) {
-    return {};
+  if (boundary_blocks * block_size > token_ids.size()) {
+    return;
   }
-
-  const size_t boundary_blocks = boundary_tokens / block_size;
-  std::vector<PrefixHash> hashes;
+  const size_t start_block = hashes.size();
+  std::unique_ptr<BlockHasher> hasher = BlockHasher::create(
+      type, mm_data, static_cast<int32_t>(start_block * block_size));
   hashes.reserve(boundary_blocks);
-  // Keep the previous block's hash in a stable local rather than a pointer into
-  // `hashes`, so the chaining stays valid regardless of vector reallocation. A
-  // null pointer (not a zero hash) marks the first block, since an all-zero
-  // hash is itself a valid digest.
-  PrefixHash previous_hash{};
+  // Keep the parent hash in a stable local rather than a pointer into `hashes`:
+  // the emplace_back below may reallocate the vector and invalidate any
+  // interior pointer. A null pointer (not a zero hash) marks the first block,
+  // since an all-zero hash is itself a valid digest.
+  XXH3Key previous_hash{};
   const uint8_t* previous_hash_ptr = nullptr;
-  for (size_t block_idx = 0; block_idx < boundary_blocks; ++block_idx) {
-    PrefixHash hash{};
-    xxh3_128bits_hash(
-        previous_hash_ptr,
-        token_ids.slice(block_idx * block_size, (block_idx + 1) * block_size),
-        hash.data());
-    hashes.emplace_back(hash);
-    previous_hash = hash;
-    previous_hash_ptr = previous_hash.data();
+  if (start_block > 0) {
+    previous_hash = hashes.back();
+    previous_hash_ptr = previous_hash.data;
   }
-  return hashes;
+  for (size_t block_idx = start_block; block_idx < boundary_blocks;
+       ++block_idx) {
+    XXH3Key key;
+    hasher->compute(token_ids,
+                    static_cast<int32_t>(block_idx * block_size),
+                    static_cast<int32_t>((block_idx + 1) * block_size),
+                    previous_hash_ptr,
+                    key);
+    hashes.emplace_back(key);
+    previous_hash = key;
+    previous_hash_ptr = previous_hash.data;
+  }
 }
 
 std::unique_ptr<BlockHasher> BlockHasher::create(BlockHasherType type,

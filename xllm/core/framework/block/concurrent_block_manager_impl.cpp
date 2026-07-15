@@ -58,10 +58,11 @@ std::vector<Block> ConcurrentBlockManagerImpl::allocate_shared(
     const Slice<int32_t>& token_ids,
     const Slice<Block>& existed_shared_blocks,
     const MMData& mm_data,
-    const Slice<XXH3Key>& block_hashes) {
+    const Slice<XXH3Key>& block_hashes,
+    size_t* matched_tokens) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   std::vector<Block> blocks = inner_->allocate_shared(
-      token_ids, existed_shared_blocks, mm_data, block_hashes);
+      token_ids, existed_shared_blocks, mm_data, block_hashes, matched_tokens);
   for (Block& block : blocks) {
     block.set_manager(this);
   }

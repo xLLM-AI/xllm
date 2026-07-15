@@ -52,6 +52,7 @@ using xllm::dit::TpOptions;
 #endif
 #include "models/model_registry.h"
 #if defined(USE_NPU)
+#include "core/kernels/npu/xllm_ops/xllm_ops_api.h"
 #include "torch_npu/csrc/aten/CustomFunctions.h"
 #endif
 
@@ -672,20 +673,32 @@ class WanAttentionImpl : public torch::nn::Module {
 
     const int64_t head_num = q_t.size(1);
     const int64_t head_dim = q_t.size(-1);
-    const auto results = at_npu::native::custom_ops::npu_fusion_attention(
-        q_t,
-        k_t,
-        v_t,
-        head_num,
-        "BNSD",
-        torch::nullopt,
-        torch::nullopt,
-        torch::nullopt,
-        std::pow(head_dim, -0.5),
-        1.0,
-        65535,
-        65535);
-    torch::Tensor out = std::get<0>(results).transpose(1, 2);
+    torch::Tensor out;
+    // Laser attention only supports equal-length q/k (self-attention); cross
+    // attention (q/k different seq len) falls back to npu_fusion_attention.
+    const bool laser_enable =
+        DiTConfig::get_instance().dit_laser_attention_enabled() &&
+        q_t.size(2) == k_t.size(2);
+    if (laser_enable) {
+      out = xllm::kernel::npu::laser_attention(
+                q_t, k_t, v_t, std::pow(head_dim, -0.5), head_num)
+                .transpose(1, 2);
+    } else {
+      const auto results = at_npu::native::custom_ops::npu_fusion_attention(
+          q_t,
+          k_t,
+          v_t,
+          head_num,
+          "BNSD",
+          torch::nullopt,
+          torch::nullopt,
+          torch::nullopt,
+          std::pow(head_dim, -0.5),
+          1.0,
+          65535,
+          65535);
+      out = std::get<0>(results).transpose(1, 2);
+    }
 #else
     constexpr int64_t kAttentionChunkSize = 512;
     constexpr int64_t kHeadDim = 1;

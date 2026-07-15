@@ -44,6 +44,16 @@ namespace xllm {
 class Engine;
 class RequestPriorityQueue;
 
+class CancelRequestQueue final {
+ public:
+  void submit(std::shared_ptr<Request> request);
+  std::vector<std::shared_ptr<Request>> take_all();
+
+ private:
+  std::mutex mutex_;
+  std::vector<std::shared_ptr<Request>> requests_;
+};
+
 class ContinuousScheduler : public Scheduler {
  public:
   struct Options {
@@ -245,6 +255,10 @@ class ContinuousScheduler : public Scheduler {
   void clear_mtp_bootstrap(Request* request);
 
  protected:
+  // Rounds a per-step wall-clock latency to an amortized per-token latency,
+  // i.e. round(tbt_ms / num_tokens). num_tokens must be > 0.
+  static int64_t amortized_token_latency_ms(int64_t tbt_ms, size_t num_tokens);
+
   const Options options_;
 
   // the engine to run the batch
@@ -271,6 +285,8 @@ class ContinuousScheduler : public Scheduler {
   // preemptable requests that hold cache slots, sorted by priority from high to
   // low.
   std::deque<std::shared_ptr<Request>> preemptable_requests_;
+
+  std::shared_ptr<CancelRequestQueue> cancel_request_queue_;
 
   std::unique_ptr<AsyncResponseProcessor> response_processor_;
 
@@ -385,6 +401,8 @@ class ContinuousScheduler : public Scheduler {
   std::condition_variable pause_cv_;
 
  private:
+  void apply_cancel_requests();
+
   std::vector<Batch> schedule_request(const absl::Duration& timeout);
 
   virtual void update_token_latency_metrics(std::vector<Sequence*>& sequences);

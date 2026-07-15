@@ -309,6 +309,8 @@ bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .host_num_blocks(0)  // no host cache for vlm engine currently.
       .block_size(block_size)
       .enable_linear_state(has_linear_attention_layers(args_))
+      .linear_state_num_slots(
+          static_cast<int32_t>(kv_cache_cap.num_linear_state_blocks()))
       .enable_prefix_cache(options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .hasher_type(BlockHasherType::MM)

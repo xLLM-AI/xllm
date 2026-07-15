@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 #include <cstdint>
+#include <functional>
 
 #include "common/macros.h"
 #include "common/types.h"
@@ -28,11 +29,13 @@ class Sequence;
 class Tokenizer;
 class AsyncResponseProcessor final {
  public:
-  AsyncResponseProcessor(const Tokenizer* tokenizer,
-                         const std::optional<InstanceRole>& role,
-                         bool enable_service_routing,
-                         bool disable_log_stats);
-  virtual ~AsyncResponseProcessor() = default;
+  AsyncResponseProcessor(
+      const Tokenizer* tokenizer,
+      const std::optional<InstanceRole>& role,
+      bool enable_service_routing,
+      bool disable_log_stats,
+      std::function<void(std::shared_ptr<Request>)> cancel_request);
+  ~AsyncResponseProcessor();
 
   void process_completed_request(std::shared_ptr<Request> request);
 
@@ -77,6 +80,8 @@ class AsyncResponseProcessor final {
   bool enable_batch_response_ = false;
 
   bool disable_log_stats_ = false;
+
+  std::function<void(std::shared_ptr<Request>)> cancel_request_;
 };
 
 }  // namespace xllm

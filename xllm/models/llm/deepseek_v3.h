@@ -26,14 +26,17 @@ class DeepseekV3ForCausalLMImpl
  public:
   DeepseekV3ForCausalLMImpl(const ModelContext& context)
       : LlmForCausalLMImplBase<DeepseekV2Model>(context) {
+#if !defined(USE_DCU)
     // Check if prefix cache or chunked prefill is enabled for unsupported
-    // models
+    // models. DCU DeepSeek context prefill is handled by the DCU
+    // attention implementation.
     CHECK(!::xllm::KVCacheConfig::get_instance().enable_prefix_cache())
         << "deepseek_v3 have not supported "
            "enable_prefix_cache yet. Please disable it.";
     CHECK(!::xllm::SchedulerConfig::get_instance().enable_chunked_prefill())
         << "deepseek_v3 have not supported "
            "enable_chunked_prefill yet. Please disable it.";
+#endif
   }
 };
 TORCH_MODULE(DeepseekV3ForCausalLM);
