@@ -27,8 +27,6 @@ namespace xllm {
 
 class DeviceNameUtils {
  public:
-  static std::string to_device_string(int32_t device_id);
-
   static std::vector<torch::Device> parse_devices(
       const std::string& device_str);
 

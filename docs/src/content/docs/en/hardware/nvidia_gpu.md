@@ -41,7 +41,6 @@ set -e
 
 rm -rf core.*
 
-export CUDA_VISIBLE_DEVICES=0
 # for debug
 # export CUDA_LAUNCH_BLOCKING=1
 
@@ -59,9 +58,8 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  xllm \
+  CUDA_VISIBLE_DEVICES=$DEVICE xllm \
     --model $MODEL_PATH \
-    --devices="cuda:$DEVICE" \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \

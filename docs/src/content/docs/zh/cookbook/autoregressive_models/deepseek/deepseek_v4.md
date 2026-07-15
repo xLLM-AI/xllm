@@ -140,11 +140,10 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  nohup $XLLM_PATH -model-id ds \
+  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup $XLLM_PATH -model-id ds \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --node_rank=$i \
@@ -166,7 +165,6 @@ done
 
     # 开启mtp时需要的变量
     # --draft_model=$DRAFT_MODEL_PATH \
-    # --draft_devices="npu:$DEVICE" \
     # --num_speculative_tokens=1 \
 
 # numactl -C xxxxx          亲和性绑核(NUMA亲和性查询命令： npu-smi info -t topo)
@@ -179,7 +177,6 @@ done
 #--enable_chunked_prefill   开启chunked_prefill
 #--enable_graph             开启aclgraph
 #--draft_model              mtp - mtp权重路径
-#--draft_devices            mtp - mtp推理设备(与主模型同一)
 #--num_speculative_tokens   mtp - 预测token数
 ```
 
@@ -216,11 +213,10 @@ unset HCCL_OP_EXPANSION_MODE
 for (( i=0; i<$LOCAL_NODES; i++ )); do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i)); LOG_FILE="$LOG_DIR/node_$i.log"
-  nohup $XLLM_PATH \
+  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup $XLLM_PATH \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --node_rank=$i \
@@ -246,11 +242,10 @@ unset HCCL_OP_EXPANSION_MODE
 for (( i=0; i<$LOCAL_NODES; i++ )); do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i)); LOG_FILE="$LOG_DIR/node_$i.log"
-  nohup  $XLLM_PATH \
+  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup  $XLLM_PATH \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --node_rank=$((i + LOCAL_NODES)) \

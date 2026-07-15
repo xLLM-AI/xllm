@@ -132,10 +132,9 @@ do
   LOG_FILE="$LOG_DIR/node_$i.log"
   # Optional: bind CPU cores with numactl. Query NUMA affinity with: npu-smi info -t topo
   #nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
-  nohup $XLLM_PATH \
+  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup $XLLM_PATH \
     --model $MODEL_PATH \
     --port $PORT \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --node_rank=$i \
@@ -150,7 +149,6 @@ do
     --communication_backend="hccl" \
     --graph_decode_batch_size_limit=2 \
     --draft_model=$DRAFT_MODEL_PATH \
-    --draft_devices="npu:$DEVICE" \
     --num_speculative_tokens=3 \
     --ep_size=16 \
     --dp_size=2 \
@@ -168,7 +166,6 @@ done
 # --enable_graph             Enable aclgraph. It requires extra memory.
 # --acl_graph_decode_batch_size_limit    Maximum decode batch size for graph capture. It must be <= 32 / (number of speculative tokens + 1).
 # --draft_model              MTP draft-model weight path.
-# --draft_devices            MTP inference device, the same as the main model.
 # --num_speculative_tokens   Number of speculative tokens predicted by MTP.
 ```
 
@@ -207,11 +204,10 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
+  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --node_rank=$i \
@@ -226,7 +222,6 @@ do
     --enable_graph=true \
     --acl_graph_decode_batch_size_limit=4 \
     --draft_model=$DRAFT_MODEL_PATH \
-    --draft_devices="npu:$DEVICE" \
     --num_speculative_tokens=3 \
     --ep_size=32 \
     --dp_size=4 \
@@ -254,11 +249,10 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
+  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --node_rank=$((i + LOCAL_NODES)) \
@@ -273,7 +267,6 @@ do
     --enable_graph=true \
     --acl_graph_decode_batch_size_limit=4 \
     --draft_model=$DRAFT_MODEL_PATH \
-    --draft_devices="npu:$DEVICE" \
     --num_speculative_tokens=3 \
     --ep_size=32 \
     --dp_size=4 \
@@ -438,11 +431,10 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ../xllm-service/build/xllm_service/xllm_m
     PORT=$((START_PORT + i))
     DEVICE=$((START_DEVICE + i))
     LOG_FILE="$LOG_DIR/node_$i.log"
-    nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
+    ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
       --model $MODEL_PATH  --model_id glmmoe \
       --host $LOCAL_HOST \
       --port $PORT \
-      --devices="npu:$DEVICE" \
       --master_node_addr=$MASTER_NODE_ADDR \
       --nnodes=$NNODES \
       --node_rank=$i \
@@ -455,7 +447,6 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ../xllm-service/build/xllm_service/xllm_m
       --enable_chunked_prefill=false \
       --enable_graph=true \
       --draft_model $DRAFT_MODEL_PATH \
-      --draft_devices="npu:$DEVICE" \
       --num_speculative_tokens 1 \
       --tool_call_parser=auto \
       --enable_disagg_pd=true \
@@ -494,11 +485,10 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ../xllm-service/build/xllm_service/xllm_m
     PORT=$((START_PORT + i))
     DEVICE=$((START_DEVICE + i))
     LOG_FILE="$LOG_DIR/node_$i.log"
-    nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
+    ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
       --model $MODEL_PATH  --model_id glmmoe \
       --host $LOCAL_HOST \
       --port $PORT \
-      --devices="npu:$DEVICE" \
       --master_node_addr=$MASTER_NODE_ADDR \
       --nnodes=$NNODES \
       --node_rank=$i \
@@ -511,7 +501,6 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ../xllm-service/build/xllm_service/xllm_m
       --enable_chunked_prefill=false \
       --enable_graph=true \
       --draft_model $DRAFT_MODEL_PATH \
-      --draft_devices="npu:$DEVICE" \
       --num_speculative_tokens 1 \
       --tool_call_parser=auto \
       --enable_disagg_pd=true \

@@ -199,8 +199,7 @@ Master::Master(const Options& options, EngineType type)
       master_status_(options.master_status()) {
   const auto model_path =
       std::filesystem::path(options_.model_path()).lexically_normal();
-  const auto devices =
-      DeviceNameUtils::parse_devices(options_.devices().value_or("auto"));
+  const auto devices = DeviceNameUtils::parse_devices("auto");
   const int32_t global_world_size =
       options_.nnodes() * static_cast<int32_t>(devices.size());
   std::string cp_model_type;
@@ -341,8 +340,8 @@ Master::Master(const Options& options, EngineType type)
     const bool use_suffix_spec = options_.speculative_algorithm() == "Suffix";
     CHECK(use_suffix_spec || !draft_model_path.empty())
         << "draft model path is required unless --speculative_algorithm=Suffix";
-    const auto draft_devices = DeviceNameUtils::parse_devices(
-        options_.draft_devices().value_or("auto"));
+    // Draft model shares the same devices as the target model.
+    const auto& draft_devices = devices;
     LOG(INFO) << "Using draft devices: "
               << DeviceNameUtils::to_string(draft_devices);
     runtime::Options spec_options;

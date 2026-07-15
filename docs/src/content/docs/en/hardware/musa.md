@@ -5,7 +5,7 @@ sidebar:
   order: 7
 ---
 
-Use the MUSA device backend (`--devices=musa:<id>`) when running xLLM on Mthreads MUSA hardware.
+Use the MUSA device backend when running xLLM on Mthreads MUSA hardware; select the visible card(s) with `MUSA_VISIBLE_DEVICES`.
 
 ## Image and Container Startup
 
@@ -44,8 +44,6 @@ set -e
 
 rm -rf core.*
 
-export MUSA_VISIBLE_DEVICES=0
-
 MODEL_PATH="/path/to/model/Qwen3.5-27B"
 MASTER_NODE_ADDR="127.0.0.1:9748"
 START_PORT=18000
@@ -60,9 +58,8 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  xllm \
+  MUSA_VISIBLE_DEVICES=$DEVICE xllm \
     --model $MODEL_PATH \
-    --devices="musa:$DEVICE" \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \

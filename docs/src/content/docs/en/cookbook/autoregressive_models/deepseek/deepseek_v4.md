@@ -140,11 +140,10 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  nohup $XLLM_PATH -model-id ds \
+  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup $XLLM_PATH -model-id ds \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --node_rank=$i \
@@ -166,7 +165,6 @@ done
 
     # Variables required when MTP is enabled
     # --draft_model=$DRAFT_MODEL_PATH \
-    # --draft_devices="npu:$DEVICE" \
     # --num_speculative_tokens=1 \
 
 # numactl -C xxxxx          NUMA core binding (query with: npu-smi info -t topo)
@@ -179,7 +177,6 @@ done
 #--enable_chunked_prefill   Enable chunked prefill
 #--enable_graph             Enable aclgraph
 #--draft_model              MTP - MTP weights path
-#--draft_devices            MTP - MTP inference device (same as main model)
 #--num_speculative_tokens   MTP - Number of speculative tokens
 ```
 
@@ -216,11 +213,10 @@ unset HCCL_OP_EXPANSION_MODE
 for (( i=0; i<$LOCAL_NODES; i++ )); do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i)); LOG_FILE="$LOG_DIR/node_$i.log"
-  nohup $XLLM_PATH \
+  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup $XLLM_PATH \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --node_rank=$i \
@@ -246,11 +242,10 @@ unset HCCL_OP_EXPANSION_MODE
 for (( i=0; i<$LOCAL_NODES; i++ )); do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i)); LOG_FILE="$LOG_DIR/node_$i.log"
-  nohup  $XLLM_PATH \
+  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup  $XLLM_PATH \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --node_rank=$((i + LOCAL_NODES)) \

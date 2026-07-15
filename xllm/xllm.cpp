@@ -119,7 +119,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
   options.model_path(model_config.model())
       .model_id(model_config.model_id())
       .task_type(model_config.task())
-      .devices(model_config.devices())
       .draft_model_path(speculative_config.draft_model())
       .backend(model_config.backend())
       .limit_image_per_prompt(model_config.limit_image_per_prompt())
@@ -225,13 +224,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .rec_worker_max_concurrency(
           static_cast<int32_t>(rec_config.rec_worker_max_concurrency()))
       .is_local(is_local);
-
-  if (speculative_config.num_speculative_tokens() > 0) {
-    const std::string draft_devices = speculative_config.draft_devices().empty()
-                                          ? model_config.devices()
-                                          : speculative_config.draft_devices();
-    options.draft_devices(draft_devices);
-  }
 
   return options;
 }
@@ -429,8 +421,7 @@ int run() {
   // init XTensor allocator and PhyPagePool for xtensor mode
   if (kv_cache_config.enable_xtensor()) {
     // Parse devices
-    const auto devices =
-        DeviceNameUtils::parse_devices(options.devices().value_or("auto"));
+    const auto devices = DeviceNameUtils::parse_devices("auto");
 
     // Initialize XTensorAllocator with first device
     auto& allocator = XTensorAllocator::get_instance();

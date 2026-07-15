@@ -50,9 +50,7 @@ class VLM:
         self,
         model: str,
         task: str = "generate",
-        devices: str = 'npu:0',
         draft_model: Optional[str] = '',
-        draft_devices: Optional[str] = 'npu:0',
         limit_image_per_prompt: int = 8,
         block_size: int = 128,
         max_cache_size: int = 0,
@@ -107,9 +105,7 @@ class VLM:
         options = Options()
         options.model_path = model
         options.task_type = task
-        options.devices = devices
         options.draft_model_path = draft_model
-        options.draft_devices = draft_devices
         options.backend ="vlm"
         options.limit_image_per_prompt = limit_image_per_prompt
         options.block_size = block_size

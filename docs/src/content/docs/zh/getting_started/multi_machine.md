@@ -34,11 +34,10 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  /path/to/xllm \
+  ASCEND_RT_VISIBLE_DEVICES=$DEVICE /path/to/xllm \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --max_memory_utilization=0.86 \
@@ -86,11 +85,10 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  /path/to/xllm \
+  ASCEND_RT_VISIBLE_DEVICES=$DEVICE /path/to/xllm \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --max_memory_utilization=0.86 \

@@ -22,12 +22,6 @@ limitations under the License.
 
 DEFINE_string(draft_model, "", "draft hf model path to the model file.");
 
-DEFINE_string(draft_devices,
-              "",
-              "Devices to run the draft model on, e.g. npu:0, npu:0,npu:1. "
-              "If omitted, uses the target model devices when speculative "
-              "decoding is enabled.");
-
 DEFINE_int32(num_speculative_tokens, 0, "Number of speculative tokens.");
 
 DEFINE_string(speculative_algorithm,
@@ -80,11 +74,6 @@ namespace xllm {
 
 void SpeculativeConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(draft_model);
-  if (config::is_flag_specified("draft_devices")) {
-    LOG(WARNING) << "--draft_devices is deprecated and will be removed in a "
-                    "future release. Because it's same as --devices.";
-  }
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(draft_devices);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(num_speculative_tokens);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_algorithm);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_cache_max_depth);
@@ -100,8 +89,6 @@ void SpeculativeConfig::from_flags() {
 
 void SpeculativeConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(draft_model);
-  // don't read rank-related config
-  // XLLM_CONFIG_ASSIGN_FROM_JSON(draft_devices);
   XLLM_CONFIG_ASSIGN_FROM_JSON(num_speculative_tokens);
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_algorithm);
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_cache_max_depth);
@@ -120,9 +107,6 @@ void SpeculativeConfig::append_config_json(
   const SpeculativeConfig default_config;
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, draft_model);
-  // don't dump rank-related config
-  //  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-  //      config_json, default_config, draft_devices);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, num_speculative_tokens);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

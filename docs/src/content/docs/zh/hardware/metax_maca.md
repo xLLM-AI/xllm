@@ -47,7 +47,6 @@ set -e
 
 rm -rf core.*
 
-export CUDA_VISIBLE_DEVICES=0
 export FLASHINFER_OPS_PATH=/opt/conda/lib/python3.10/site-packages/flashinfer/data/aot/
 
 MODEL_PATH="/path/to/model/Qwen3-8B"
@@ -64,9 +63,8 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  xllm \
+  CUDA_VISIBLE_DEVICES=$DEVICE xllm \
     --model $MODEL_PATH \
-    --devices="cuda:$DEVICE" \
     --port $PORT \
     --nnodes=$NNODES \
     --master_node_addr=$MASTER_NODE_ADDR \

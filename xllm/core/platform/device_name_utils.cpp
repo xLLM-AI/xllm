@@ -29,10 +29,6 @@ limitations under the License.
 
 namespace xllm {
 
-std::string DeviceNameUtils::to_device_string(int32_t device_id) {
-  return Platform::type_str() + ":" + std::to_string(device_id);
-}
-
 std::vector<torch::Device> DeviceNameUtils::parse_devices(
     const std::string& device_str) {
   std::vector<torch::Device> devices;

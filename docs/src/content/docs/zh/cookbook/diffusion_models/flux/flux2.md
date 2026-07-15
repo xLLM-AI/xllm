@@ -126,9 +126,8 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/mistral_node_$i.log"
-  ./build/xllm/core/server/xllm \
+  ASCEND_RT_VISIBLE_DEVICES=$DEVICE ./build/xllm/core/server/xllm \
     --model $MODEL_PATH \
-    --devices="npu:$DEVICE" \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
@@ -195,12 +194,11 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/dit_node_$i.log"
-  ./build/xllm/core/server/xllm \
+  ASCEND_RT_VISIBLE_DEVICES=$DEVICE ./build/xllm/core/server/xllm \
     --model="/path/to/flux2/" \
     --max_memory_utilization=0.6 \
     --backend="dit" \
     --tp_size=2 \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --port $PORT \

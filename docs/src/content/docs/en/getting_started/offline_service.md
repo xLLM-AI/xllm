@@ -16,7 +16,9 @@ Use `BeamSearchParams` with `beam_width` greater than `1`, then call `llm.beam_s
 ```python
 from xllm import BeamSearchParams, LLM
 
-llm = LLM(model="/path/models/Qwen2-7B-Instruct", devices="npu:0")
+# The devices to run on are selected via ASCEND_RT_VISIBLE_DEVICES
+# (or CUDA_VISIBLE_DEVICES / MLU_VISIBLE_DEVICES for other platforms).
+llm = LLM(model="/path/models/Qwen2-7B-Instruct")
 params = BeamSearchParams(
     beam_width=2,
     top_logprobs=4,

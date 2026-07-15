@@ -15,7 +15,6 @@ rm -rf core.*
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh 
 source /usr/local/Ascend/nnal/atb/set_env.sh
-export ASCEND_RT_VISIBLE_DEVICES=0
 export HCCL_IF_BASE_PORT=43432  # HCCL 通信基础端口
 
 MODEL_PATH="/path/to/model/Qwen3-8B"               # 模型路径
@@ -32,9 +31,8 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  xllm \
+  ASCEND_RT_VISIBLE_DEVICES=$DEVICE xllm \
     --model $MODEL_PATH \
-    --devices="npu:$DEVICE" \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
@@ -57,7 +55,6 @@ set -e
 
 rm -rf core.*
 
-export CUDA_VISIBLE_DEVICES=0
 # for debug
 # export CUDA_LAUNCH_BLOCKING=1
 
@@ -75,9 +72,8 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  xllm \
+  CUDA_VISIBLE_DEVICES=$DEVICE xllm \
     --model $MODEL_PATH \
-    --devices="cuda:$DEVICE" \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
@@ -98,8 +94,6 @@ set -e
 
 rm -rf core.*
 
-export MLU_VISIBLE_DEVICES=0
-
 MODEL_PATH="/path/to/model/Qwen3-8B"
 MASTER_NODE_ADDR="127.0.0.1:9748"
 START_PORT=18000
@@ -114,9 +108,8 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  xllm \
+  MLU_VISIBLE_DEVICES=$DEVICE xllm \
     --model $MODEL_PATH \
-    --devices="mlu:$DEVICE" \
     --port $PORT \
     --nnodes=$NNODES \
     --master_node_addr=$MASTER_NODE_ADDR \
@@ -133,8 +126,6 @@ set -e
 
 rm -rf core.*
 
-export HIP_VISIBLE_DEVICES=0
-
 MODEL_PATH="/path/to/model/Qwen3-8B"
 MASTER_NODE_ADDR="127.0.0.1:9748"
 START_PORT=18000
@@ -149,9 +140,8 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  xllm \
+  HIP_VISIBLE_DEVICES=$DEVICE xllm \
     --model $MODEL_PATH \
-    --devices="dcu:$DEVICE" \
     --port $PORT \
     --nnodes=$NNODES \
     --master_node_addr=$MASTER_NODE_ADDR \
@@ -168,7 +158,6 @@ set -e
 
 rm -rf core.*
 
-export CUDA_VISIBLE_DEVICES=0
 export FLASHINFER_OPS_PATH=/opt/conda/lib/python3.10/site-packages/flashinfer/data/aot/
 
 MODEL_PATH="/path/to/model/Qwen3-8B"
@@ -185,9 +174,8 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  xllm \
+  CUDA_VISIBLE_DEVICES=$DEVICE xllm \
     --model $MODEL_PATH \
-    --devices="cuda:$DEVICE" \
     --port $PORT \
     --nnodes=$NNODES \
     --master_node_addr=$MASTER_NODE_ADDR \
@@ -208,8 +196,6 @@ set -e
 
 rm -rf core.*
 
-export MUSA_VISIBLE_DEVICES=0
-
 MODEL_PATH="/path/to/model/Qwen3.5-27B"
 MASTER_NODE_ADDR="127.0.0.1:9748"
 START_PORT=18000
@@ -224,9 +210,8 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  xllm \
+  MUSA_VISIBLE_DEVICES=$DEVICE xllm \
     --model $MODEL_PATH \
-    --devices="musa:$DEVICE" \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \

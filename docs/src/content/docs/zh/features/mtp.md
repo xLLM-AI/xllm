@@ -101,14 +101,12 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  nohup ./xllm \
+  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup ./xllm \
     --model $MODEL_PATH \
-    --devices="npu:$DEVICE" \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --draft_model $DRAFT_MODEL_PATH \
-    --draft_devices="npu:$DEVICE" \
     --num_speculative_tokens 1 \
     --max_memory_utilization=0.90 \
     --max_tokens_per_batch=10000 \
