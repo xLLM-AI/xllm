@@ -89,7 +89,6 @@ TEST_F(MluTensorAllocTest,
   options.block_size = kBlockSize;
   options.n_local_kv_heads = 2;
   options.max_seqs_per_batch = 8;
-  options.max_concurrent_requests = 8;
   options.enable_rdma_scale_padding = true;
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);

@@ -466,7 +466,7 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
       static_cast<int64_t>(options_.num_speculative_tokens());
   estimate_options.max_tokens_per_batch =
       static_cast<int64_t>(options_.max_tokens_per_batch());
-  estimate_options.max_concurrent_requests = static_cast<int64_t>(
+  estimate_options.max_linear_state_cache_slots = static_cast<int64_t>(
       ::xllm::ServiceConfig::get_instance().max_concurrent_requests());
   estimate_options.is_draft_engine = options_.is_draft_engine();
   estimate_options.enable_prefix_cache =
