@@ -78,7 +78,7 @@ struct MtpPrepareNextDraftOutput {
   torch::Tensor cache_slots;
 };
 
-MtpPrepareNextDraftOutput mtp_prepare_next_draft(
+std::optional<MtpPrepareNextDraftOutput> try_mtp_prepare_next_draft(
     const torch::Tensor& accepted_tokens,
     const torch::Tensor& accepted_embeddings,
     const torch::Tensor& embedding_placeholder,

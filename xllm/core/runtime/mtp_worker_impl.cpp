@@ -336,41 +336,15 @@ void apply_device_row_metadata(ForwardInput& input,
 }
 
 #if defined(USE_NPU)
-bool can_use_mtp_prepare_next_draft(
-    const ForwardInput& input,
-    const torch::Tensor& accepted_tokens,
-    const torch::Tensor& accepted_embeddings,
-    const torch::Tensor& embedding_placeholder) {
-  const int64_t batch_size = accepted_tokens.size(0);
-  const torch::Tensor& kv_seq_lens =
-      input.input_params.attention.device.kv_seq_lens;
-  const torch::Tensor& block_tables =
-      input.input_params.attention.device.block_tables;
-  return input.input_params.multi_block_tables.empty() &&
-         accepted_tokens.dim() == 2 && accepted_tokens.is_contiguous() &&
-         accepted_tokens.scalar_type() == torch::kLong &&
-         accepted_embeddings.dim() == 3 &&
-         accepted_embeddings.size(0) == batch_size &&
-         accepted_embeddings.size(1) == accepted_tokens.size(1) &&
-         accepted_embeddings.is_contiguous() &&
-         (accepted_embeddings.scalar_type() == torch::kFloat16 ||
-          accepted_embeddings.scalar_type() == torch::kBFloat16) &&
-         (accepted_embeddings.size(2) * accepted_embeddings.element_size()) %
-                 32 ==
-             0 &&
-         embedding_placeholder.defined() &&
-         embedding_placeholder.numel() == accepted_embeddings.size(2) &&
-         embedding_placeholder.scalar_type() ==
-             accepted_embeddings.scalar_type() &&
-         embedding_placeholder.is_contiguous() && input.positions.defined() &&
-         input.positions.scalar_type() == torch::kInt &&
-         input.positions.is_contiguous() &&
-         input.positions.numel() >= batch_size && kv_seq_lens.defined() &&
-         kv_seq_lens.scalar_type() == torch::kInt &&
-         kv_seq_lens.is_contiguous() && kv_seq_lens.numel() >= batch_size &&
-         block_tables.defined() && block_tables.dim() == 2 &&
-         block_tables.scalar_type() == torch::kInt &&
-         block_tables.is_contiguous() && block_tables.size(0) >= batch_size;
+void apply_mtp_prepare_output(
+    ForwardInput& draft_input,
+    const kernel::npu::MtpPrepareNextDraftOutput& output) {
+  draft_input.token_ids = output.token_ids;
+  draft_input.input_params.embedding.input_embedding = output.embeddings;
+  draft_input.positions = output.positions;
+  draft_input.input_params.attention.device.kv_seq_lens = output.kv_seq_lens;
+  draft_input.input_params.attention.device.new_cache_slots =
+      output.cache_slots;
 }
 #endif
 
@@ -385,28 +359,19 @@ void prepare_next_draft_from_accepted_state(
     const torch::Tensor& embedding_placeholder,
     int32_t block_size) {
 #if defined(USE_NPU)
-  if (can_use_mtp_prepare_next_draft(input,
-                                     accepted_tokens,
-                                     accepted_embeddings,
-                                     embedding_placeholder)) {
-    const int64_t batch_size = accepted_tokens.size(0);
-    const auto output = kernel::npu::mtp_prepare_next_draft(
+  if (input.input_params.multi_block_tables.empty()) {
+    const auto output = kernel::npu::try_mtp_prepare_next_draft(
         accepted_tokens,
         accepted_embeddings,
         embedding_placeholder,
-        input.positions.flatten().slice(0, 0, batch_size),
-        input.input_params.attention.device.kv_seq_lens.flatten().slice(
-            0, 0, batch_size),
+        input.positions,
+        input.input_params.attention.device.kv_seq_lens,
         input.input_params.attention.device.block_tables,
         block_size);
-    draft_input.token_ids = output.token_ids;
-    draft_input.input_params.embedding.input_embedding = output.embeddings;
-    draft_input.positions = output.positions;
-    draft_input.input_params.attention.device.kv_seq_lens =
-        output.kv_seq_lens;
-    draft_input.input_params.attention.device.new_cache_slots =
-        output.cache_slots;
-    return;
+    if (output.has_value()) {
+      apply_mtp_prepare_output(draft_input, *output);
+      return;
+    }
   }
 #endif
 
