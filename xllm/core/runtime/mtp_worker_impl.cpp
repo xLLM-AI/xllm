@@ -2374,7 +2374,9 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
         /*start=*/0, /*end=*/num_sequences, idx_options);
   }
   extend_input.device_tensors_ready = true;
-  // Decode preparation and execution share compute_stream_; FIFO is enough.
+  // When the caller selects compute_stream_, preparation and execution are
+  // ordered by same-stream FIFO. Auxiliary-stream callers record a metadata
+  // ready event after this function returns.
 }
 
 void MTPWorkerImpl::prepare_draft_inputs(const ForwardInput& input,
