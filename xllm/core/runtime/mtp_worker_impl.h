@@ -152,6 +152,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                                   const SampleOutput& validate_output,
                                   StreamEventPtr ready_event,
                                   torch::Tensor accepted_tokens_host);
+  torch::Tensor acquire_accepted_tokens_host_buffer(
+      const torch::Tensor& accepted_tokens);
   bool pending_target_context_matches(const ForwardInput& input) const;
   void flush_pending_target_context();
   void prepare_next_first_draft_template(const ForwardInput& input,
@@ -172,6 +174,12 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // that state device-resident so the next overlap task can be fully enqueued
   // without waiting for target verification to finish.
   PendingTargetContext pending_target_context_;
+  // A single persistent pinned destination is sufficient for accepted-token
+  // D2H: the preceding pending target context is always flushed before the
+  // next validation can submit another copy. The pending context holds a view
+  // into this storage until the copy event is synchronized and CPU consumers
+  // have finished reading it.
+  torch::Tensor accepted_tokens_host_buffer_;
   // Draft step 0 is submitted at the tail of the preceding target validation,
   // before control returns to the scheduler.  The following scheduler turn
   // consumes this output and only submits draft steps 1..N-1.

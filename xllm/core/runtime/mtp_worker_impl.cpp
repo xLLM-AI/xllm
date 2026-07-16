@@ -1654,9 +1654,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
                           spec_broadcast_group(parallel_args_));
   }
 
-  torch::Tensor accepted_tokens_host = torch::empty(
-      val_output.next_tokens.sizes(),
-      val_output.next_tokens.options().device(torch::kCPU).pinned_memory(true));
+  torch::Tensor accepted_tokens_host =
+      acquire_accepted_tokens_host_buffer(val_output.next_tokens);
   torch::Tensor accepted_tokens_cpu_result = accepted_tokens_host;
   StreamEventPtr handoff_ready_event;
   {
@@ -1717,6 +1716,8 @@ void MTPWorkerImpl::stage_target_context_write(
     const SampleOutput& validate_output,
     StreamEventPtr ready_event,
     torch::Tensor accepted_tokens_host) {
+  CHECK(!pending_target_context_.accepted_tokens.defined())
+      << "previous MTP target context must be flushed before staging another";
   pending_target_context_.embedding_ids =
       input.input_params.embedding.embedding_ids;
   pending_target_context_.request_ids =
@@ -1726,6 +1727,35 @@ void MTPWorkerImpl::stage_target_context_write(
       std::move(accepted_tokens_host);
   pending_target_context_.accepted_embeddings = validate_output.embeddings;
   pending_target_context_.ready_event = std::move(ready_event);
+}
+
+torch::Tensor MTPWorkerImpl::acquire_accepted_tokens_host_buffer(
+    const torch::Tensor& accepted_tokens) {
+  CHECK(accepted_tokens.defined()) << "accepted tokens must be defined";
+  CHECK_GT(accepted_tokens.numel(), 0) << "accepted tokens must not be empty";
+  CHECK(!pending_target_context_.accepted_tokens.defined())
+      << "accepted-token host buffer is still in use";
+
+  const int64_t required_capacity = accepted_tokens.numel();
+  const int64_t configured_capacity =
+      static_cast<int64_t>(options_.max_seqs_per_batch()) *
+      (static_cast<int64_t>(options_.num_speculative_tokens()) + 1);
+  const bool needs_allocation =
+      !accepted_tokens_host_buffer_.defined() ||
+      accepted_tokens_host_buffer_.scalar_type() !=
+          accepted_tokens.scalar_type() ||
+      accepted_tokens_host_buffer_.numel() < required_capacity;
+  if (needs_allocation) {
+    const int64_t capacity =
+        std::max(required_capacity, configured_capacity);
+    accepted_tokens_host_buffer_ = torch::empty(
+        {capacity},
+        accepted_tokens.options().device(torch::kCPU).pinned_memory(true));
+  }
+
+  return accepted_tokens_host_buffer_
+      .narrow(/*dim=*/0, /*start=*/0, required_capacity)
+      .view(accepted_tokens.sizes());
 }
 
 bool MTPWorkerImpl::pending_target_context_matches(
@@ -2338,15 +2368,10 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
                 /*non_blocking=*/true);
   }
   if (!params.sample_idxes.defined()) {
-    std::vector<int32_t> sample_idxes_vec;
-    sample_idxes_vec.reserve(num_sequences);
-    for (int32_t i = 0; i < num_sequences; ++i) {
-      sample_idxes_vec.emplace_back(i);
-    }
-    params.sample_idxes =
-        safe_to(specBuilder::make_cpu_int_tensor(sample_idxes_vec),
-                idx_options,
-                /*non_blocking=*/true);
+    // This control tensor is always the identity mapping. Generate it directly
+    // on device instead of allocating a short-lived pinned H2D source.
+    params.sample_idxes = torch::arange(
+        /*start=*/0, /*end=*/num_sequences, idx_options);
   }
   extend_input.device_tensors_ready = true;
   // Decode preparation and execution share compute_stream_; FIFO is enough.
