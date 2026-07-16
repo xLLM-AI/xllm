@@ -43,18 +43,18 @@ bool enable_constrained_topk_trace() {
   return enabled;
 }
 
-bool env_enabled(const char* name) {
+bool env_enabled(const char* name, bool default_value = false) {
   const char* value = std::getenv(name);
   if (value == nullptr) {
-    return false;
+    return default_value;
   }
   return value[0] == '1' || value[0] == 't' || value[0] == 'T' ||
          value[0] == 'y' || value[0] == 'Y';
 }
 
 bool enable_fused_constrained_topk() {
-  static const bool enabled =
-      env_enabled("XLLM_ENABLE_ONEREC_FUSED_CONSTRAINED_TOPK");
+  static const bool enabled = env_enabled(
+      "XLLM_ENABLE_ONEREC_FUSED_CONSTRAINED_TOPK", /*default_value=*/true);
   return enabled;
 }
 
