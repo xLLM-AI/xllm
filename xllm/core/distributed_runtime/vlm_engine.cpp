@@ -319,8 +319,7 @@ bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .enable_disagg_pd(options_.enable_disagg_pd())
       .hasher_type(BlockHasherType::MM)
       .max_concurrent_requests(
-          ::xllm::ServiceConfig::get_instance().max_concurrent_requests())
-      .num_speculative_tokens(options_.num_speculative_tokens());
+          ::xllm::ServiceConfig::get_instance().max_concurrent_requests());
   kv_cache_manager_ = std::make_unique<BlockManagerPool>(options, dp_size_);
 
   // init kv cache for each worker in parallel
