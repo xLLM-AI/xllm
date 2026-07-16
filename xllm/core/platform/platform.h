@@ -56,6 +56,14 @@ class Platform final {
   // after MLU moves CP input preparation into WorkerImpl.
   static constexpr bool uses_model_cp_partition() { return is_mlu(); }
 
+  // DSA-CP (DeepSeek-V4) uses model-side token partitioning: the DSAttention
+  // layer keeps the local token slice for q while AllGathering the full token
+  // stream for KV/compressor inside the layer (vllm-ascend dsa_cp.py style).
+  // Whether this path is actually taken at runtime is additionally gated by
+  // FLAGS_enable_dsa_cp and cp_size > 1 at the call sites; this hook only
+  // reports platform capability. NPU-only for now.
+  static constexpr bool supports_dsa_cp_model_partition() { return is_npu(); }
+
   static constexpr bool is_ilu() {
 #if defined(USE_ILU)
     return true;

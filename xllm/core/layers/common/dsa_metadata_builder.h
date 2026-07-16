@@ -28,6 +28,7 @@ namespace layer {
 
 struct AttentionMetadata;
 struct DSAMetadata;
+struct DSACPMetadata;
 
 // Builder class for DSAMetadata.
 // Builds a complete AttentionMetadata (with dsa_metadata populated) from
@@ -53,6 +54,38 @@ class DSAMetadataBuilder {
       const std::vector<DSAGroupInfo>& group_infos,
       const torch::Tensor& dsa_c4_cos_sin = torch::Tensor(),
       const torch::Tensor& dsa_c128_cos_sin = torch::Tensor());
+
+  // Build per-rank DSA-CP local token metadata (M0 of the DSA-CP plan).
+  //
+  // Splits the flattened query-token stream evenly across cp_size ranks and
+  // returns the CURRENT rank's (cp_rank) local view. This mirrors vllm-ascend
+  // _build_local_token_metadata and is intentionally a pure function over
+  // plain tensors so it can be unit-tested on CPU without a full
+  // ModelInputParams / RoPE pipeline.
+  //
+  //   query_start_loc : (num_reqs+1,) int32/int64, global cumulative query
+  //                     starts with a leading 0 (i.e.
+  //                     DSAMetadata::actual_seq_lengths_query).
+  //                     query_start_loc.back() == num_input_tokens.
+  //   seq_lens        : (num_reqs,) int32/int64, per-request KV context
+  //                     length (DSAMetadata::actual_seq_lengths_kv).
+  //   cp_size         : CP group width (>= 1).
+  //   cp_rank         : this rank's index within the CP group ([0, cp_size)).
+  //   full_cos/full_sin : optional RoPE tables over the PADDED global token
+  //                     stream (length == num_tokens_pad). When defined, the
+  //                     result's local_cos/local_sin are sliced to
+  //                     [local_start, local_end). Pass undefined tensors to
+  //                     skip (e.g. in pure metadata unit tests).
+  //
+  // When cp_size == 1 the returned metadata is the identity view (local ==
+  // global) so callers can use a single code path.
+  static DSACPMetadata build_cp_local_metadata(
+      const torch::Tensor& query_start_loc,
+      const torch::Tensor& seq_lens,
+      int32_t cp_size,
+      int32_t cp_rank,
+      const torch::Tensor& full_cos = torch::Tensor(),
+      const torch::Tensor& full_sin = torch::Tensor());
 
  private:
   // Build DSA-specific fields into dsa_metadata.

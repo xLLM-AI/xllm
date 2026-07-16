@@ -406,7 +406,9 @@ torch::Tensor DeepseekV4IndexerImpl::select_qli(
     const std::optional<torch::Tensor>& qli_metadata,
     bool with_prefill,
     std::tuple<torch::Tensor, torch::Tensor>* compressor_states,
-    std::tuple<torch::Tensor, torch::Tensor>* compressor_block_tables) {
+    std::tuple<torch::Tensor, torch::Tensor>* compressor_block_tables,
+    const std::optional<torch::Tensor>& compress_x,
+    const std::optional<torch::Tensor>& compress_cu_seqlens) {
   CHECK(index_cache.defined())
       << "DeepseekV4Indexer::select_qli: index_cache is undefined";
 
@@ -421,11 +423,20 @@ torch::Tensor DeepseekV4IndexerImpl::select_qli(
   auto hadamard = get_hadamard_matrix(attn_metadata, hadamard_matrix_);
   q = rotate_activation_with_hadamard(q, hadamard, hadamard_scale_);
 
-  auto kv = compress_kv(x,
+  // DSA-CP: the index-key cache is written for the FULL token stream
+  // (replicated per CP rank, like vllm-ascend _update_indexer_cache),
+  // so the compressor sees full hidden + full cu-seqlens; its full c4
+  // RoPE row count then matches. query/weights/top-k below stay local.
+  const torch::Tensor& compress_hidden =
+      compress_x.has_value() ? compress_x.value() : x;
+  const std::optional<torch::Tensor>& compress_q_cu =
+      compress_cu_seqlens.has_value() ? compress_cu_seqlens
+                                      : actual_seq_lengths_query;
+  auto kv = compress_kv(compress_hidden,
                         attn_metadata,
                         compressed_cos,
                         compressed_sin,
-                        actual_seq_lengths_query,
+                        compress_q_cu,
                         compressor_states,
                         compressor_block_tables);
   if (kv.numel() > 0) {

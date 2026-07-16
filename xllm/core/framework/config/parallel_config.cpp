@@ -33,6 +33,20 @@ DEFINE_int32(kv_split_size,
              "AllGather); other K (K divides cp_size) means KV is sharded "
              "across K ranks while token-CP still uses cp_size.");
 
+DEFINE_bool(enable_dsa_cp,
+            false,
+            "Enable DeepSeek-V4 DSA context parallel (prefill-only, M1). "
+            "Only takes effect when cp_size > 1 and the model is DeepSeek-V4 "
+            "(DSA). When false, DSA attention runs its original non-CP path "
+            "even if cp_size > 1.");
+
+DEFINE_int32(dsa_cp_kv_interleave_size,
+             1,
+             "KV-cache interleave granularity for DSA-CP, aligned with "
+             "vllm-ascend cp_kv_cache_interleave_size. Must divide block_size. "
+             "Default 1 (token interleave). Reserved for M2 decode KV "
+             "sharding; ignored in the M1 prefill-only path.");
+
 DEFINE_int64(tp_size, 1, "Tensor parallelism size, only used for DiT model.");
 
 DEFINE_int64(sp_size, 1, "Sequence parallelism size, only used for DiT model.");

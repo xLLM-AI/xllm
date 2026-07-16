@@ -24,10 +24,13 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
+#include "framework/parallel_state/parallel_state.h"
 #include "kernels/ops_api.h"
+#include "layers/common/dsa_metadata_builder.h"
 #include "xllm/core/kernels/npu/xllm_ops/xllm_ops_api.h"
 
 DECLARE_bool(enable_chunked_prefill);
+DECLARE_bool(enable_dsa_cp);
 namespace xllm {
 namespace layer {
 namespace {
@@ -346,10 +349,21 @@ Dsv4PreprocessOutputs run_dsv4_preprocess_fallback(
     double eps,
     const torch::Tensor& q_rms_gamma,
     const torch::Tensor& cos,
-    const torch::Tensor& sin) {
+    const torch::Tensor& sin,
+    // DSA-CP: when q_hidden_states is defined, the q path is computed from it
+    // (the local token slice) with q_cos/q_sin, while the kv path keeps using
+    // the full hidden_states with cos/sin. Undefined => single-input behavior.
+    const torch::Tensor& q_hidden_states = torch::Tensor(),
+    const torch::Tensor& q_cos = torch::Tensor(),
+    const torch::Tensor& q_sin = torch::Tensor()) {
   Dsv4PreprocessOutputs outputs;
 
-  auto q_down = q_a_proj->forward(hidden_states);
+  const bool split_qkv = q_hidden_states.defined();
+  const torch::Tensor& q_input = split_qkv ? q_hidden_states : hidden_states;
+  const torch::Tensor& q_rope_cos = split_qkv ? q_cos : cos;
+  const torch::Tensor& q_rope_sin = split_qkv ? q_sin : sin;
+
+  auto q_down = q_a_proj->forward(q_input);
   if (q_b_proj->uses_w8a8_dynamic_quant()) {
     xllm::kernel::RmsNormDynamicQuantParams rms_quant_params;
     rms_quant_params.input = q_down;
@@ -365,7 +379,7 @@ Dsv4PreprocessOutputs run_dsv4_preprocess_fallback(
                                     q_b_proj->w8a8_dynamic_weight_scale(),
                                     q_pertoken_scale,
                                     q_b_proj->bias(),
-                                    hidden_states.scalar_type())
+                                    q_input.scalar_type())
             .view({-1, n_local_heads, head_dim});
   } else {
     outputs.qr = std::get<0>(q_layernorm->forward(q_down));
@@ -385,7 +399,8 @@ Dsv4PreprocessOutputs run_dsv4_preprocess_fallback(
   outputs.kv = std::get<0>(kv_layernorm->forward(kv_down));
   outputs.kv = outputs.kv.view({-1, 1, qk_head_dim});
 
-  apply_partial_rope(outputs.q, nope_head_dim, rope_head_dim, cos, sin);
+  apply_partial_rope(
+      outputs.q, nope_head_dim, rope_head_dim, q_rope_cos, q_rope_sin);
   apply_partial_rope(outputs.kv, nope_head_dim, rope_head_dim, cos, sin);
 
   return outputs;
@@ -498,6 +513,15 @@ DSAttentionImpl::DSAttentionImpl(const ModelArgs& args,
   const int64_t tp_size = parallel_args.tp_group_->world_size();
   tp_rank_ = parallel_args.tp_group_->rank();
   tp_size_ = tp_size;
+
+  // DSA-CP: read the context-parallel group geometry. cp_group_ may alias the
+  // TP group today (see ParallelArgs::cp_group_); the DSA-CP prefill path only
+  // engages when cp_size_ > 1 AND FLAGS_enable_dsa_cp is set, so leaving this
+  // wired is safe for the default (cp_size_ == 1) configuration.
+  cp_size_ = parallel_args.cp_size();
+  cp_rank_ = parallel_args.cp_rank();
+  cp_group_ = parallel_args.cp_group_;
+  cp_enabled_ = FLAGS_enable_dsa_cp && cp_size_ > 1 && cp_group_ != nullptr;
   int64_t hidden_size = args.hidden_size();
   int64_t num_heads = args.n_heads();
 
@@ -622,6 +646,49 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
       compress_metadata;
   auto cos = attn_metadata.cos;
   auto sin = attn_metadata.sin;
+
+  // ===== DSA-CP (prefill-only) local token setup =====
+  // Model-side partitioning: worker keeps the FULL token stream, so
+  // hidden_states here spans all query tokens. Under CP the q path is computed
+  // only for this rank's local token slice (with RoPE sliced to that range),
+  // while kv / compressor keep using the full stream. The local attention
+  // output is gathered back to full-token order before o_proj (see below).
+  const bool cp_prefill = is_prefill || is_chunked_prefill;
+  const bool cp_active = cp_enabled_ && cp_prefill;
+  DSACPMetadata cp_meta;
+  torch::Tensor q_hidden_local;
+  torch::Tensor q_cos_local;
+  torch::Tensor q_sin_local;
+  int64_t cp_num_full_tokens =
+      hidden_states.defined() ? hidden_states.size(0) : 0;
+  if (cp_active) {
+    cp_meta = DSAMetadataBuilder::build_cp_local_metadata(
+        attn_metadata.actual_seq_lengths_query,
+        attn_metadata.actual_seq_lengths_kv,
+        static_cast<int32_t>(cp_size_),
+        static_cast<int32_t>(cp_rank_));
+    // Clamp the local interval to the real (unpadded) token count so the last
+    // rank does not slice past the end of hidden_states.
+    const int64_t local_start =
+        std::min<int64_t>(cp_meta.local_start, cp_num_full_tokens);
+    const int64_t local_end =
+        std::min<int64_t>(cp_meta.local_end, cp_num_full_tokens);
+    const int64_t local_len = std::max<int64_t>(local_end - local_start, 0);
+    // Materialize a contiguous local slice: slicing dim-0 at a nonzero
+    // start yields a storage-offset view, which some NPU matmul/quant
+    // kernels mishandle (surfaces later as an async blockDim=0 launch
+    // failure in a downstream op such as the compressor).
+    q_hidden_local =
+        hidden_states.slice(/*dim=*/0, local_start, local_end).contiguous();
+    if (cos.defined() && cos.size(0) >= local_end) {
+      q_cos_local = cos.slice(/*dim=*/0, local_start, local_end).contiguous();
+    }
+    if (sin.defined() && sin.size(0) >= local_end) {
+      q_sin_local = sin.slice(/*dim=*/0, local_start, local_end).contiguous();
+    }
+    (void)local_len;
+  }
+
   Dsv4PreprocessOutputs preprocess_outputs =
       run_dsv4_preprocess_fallback(q_a_proj_,
                                    q_layernorm_,
@@ -637,11 +704,28 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                                    eps_,
                                    q_rms_gamma_,
                                    cos,
-                                   sin);
+                                   sin,
+                                   q_hidden_local,
+                                   q_cos_local,
+                                   q_sin_local);
   auto qr = preprocess_outputs.qr;
   auto qr_pertoken_scale = preprocess_outputs.qr_pertoken_scale;
   auto q = preprocess_outputs.q;
   auto kv = preprocess_outputs.kv;
+
+  // DSA-CP local cu-seqlens for the indexer / sparse attention, moved to the
+  // same device as the full metadata tensors. local_query_start_loc sums to
+  // this rank's local query-token count; local_seq_lens is the per-request KV
+  // length visible to the local queries (vllm-ascend semantics).
+  torch::Tensor cp_local_q_cu;
+  torch::Tensor cp_local_kv;
+  if (cp_active) {
+    const auto cp_dev = attn_metadata.actual_seq_lengths_query.defined()
+                            ? attn_metadata.actual_seq_lengths_query.device()
+                            : torch::Device(torch::kCPU);
+    cp_local_q_cu = cp_meta.local_query_start_loc.to(cp_dev);
+    cp_local_kv = cp_meta.local_seq_lens.to(cp_dev);
+  }
 
   // 4) resolve per-layer cache mapping
   const int64_t compress_ratio_i = static_cast<int64_t>(compress_ratio_);
@@ -715,7 +799,12 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   torch::Tensor ori_block_table_for_attn = ori_block_table;
   const std::string ori_kv_layout = "PA_ND";
   const bool use_prefill_attn = is_prefill || is_chunked_prefill;
-  const bool use_temporary_prefill_kv = is_prefill && !is_chunked_prefill;
+  // DSA-CP writes the FULL KV into the persistent SWA cache and reads it back
+  // through the block table, because the temporary PA_ND build assumes q and
+  // kv share the same (full) token range - which is false under CP (local q,
+  // full kv). So the temporary-prefill-KV shortcut is disabled when CP is on.
+  const bool use_temporary_prefill_kv =
+      is_prefill && !is_chunked_prefill && !cp_active;
   if (use_temporary_prefill_kv) {
     const int64_t block_size =
         ori_kv.defined() && ori_kv.dim() > 1 ? ori_kv.size(1) : 128;
@@ -735,19 +824,70 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   // Token compressed cache is PA_ND for both prefill and decode.
   torch::Tensor cmp_kv_for_attn;
   auto cmp_kv = kv_cache.get_k_cache();
+  torch::Tensor compress_cos;
+  torch::Tensor compress_sin;
+  if (compress_ratio_i == 4) {
+    compress_cos = attn_metadata.c4_cos;
+    compress_sin = attn_metadata.c4_sin;
+  } else if (compress_ratio_i == 128) {
+    compress_cos = attn_metadata.c128_cos;
+    compress_sin = attn_metadata.c128_sin;
+  }
+  // Skip the compressor when there are no compressed positions to write
+  // (empty / fake warmup shard, common under cp_size>1 where the worker
+  // injects a 1-token placeholder without rebuilding the compressed-
+  // position RoPE). cmp_s == rope_sin.size(0); a 0-row rope makes
+  // aclnnCompressor launch with blockDim=0 and abort.
+  // blockDim=0 in aclnnCompressor comes from an empty work grid: either no
+  // compressed positions (rope_sin rows == 0) OR an empty query batch
+  // (actual_seq_lengths_query has < 2 entries => batch_size 0). The
+  // cp_size>1 warmup injects a 1-token placeholder without rebuilding the
+  // DSA metadata, so hidden_states has 1 row while the cu-seqlens/rope
+  // stay empty. Guard on BOTH so the placeholder shard skips the kernel.
+  const auto& cmp_q_cu = attn_metadata.actual_seq_lengths_query;
+  const bool has_compress_positions =
+      compress_sin.defined() && compress_sin.size(0) > 0 &&
+      hidden_states.defined() && hidden_states.size(0) > 0 &&
+      cmp_q_cu.defined() && cmp_q_cu.numel() > 1;
+  static thread_local bool dsa_cp_dbg_logged = false;
+  if (!dsa_cp_dbg_logged && compress_ratio_i > 1) {
+    dsa_cp_dbg_logged = true;
+    LOG(ERROR) << "[DSA-CP-DBG] layer=" << attn_metadata.layer_id
+               << " cp_active=" << cp_active << " ratio=" << compress_ratio_i
+               << " hidden="
+               << (hidden_states.defined() ? hidden_states.sizes()
+                                           : c10::IntArrayRef{})
+               << " compress_sin="
+               << (compress_sin.defined() ? compress_sin.sizes()
+                                          : c10::IntArrayRef{})
+               << " q_cu.numel=" << (cmp_q_cu.defined() ? cmp_q_cu.numel() : -1)
+               << " start_pos="
+               << (attn_metadata.start_pos.defined()
+                       ? attn_metadata.start_pos.sizes()
+                       : c10::IntArrayRef{})
+               << " cmp_slot=" << (cmp_slot.defined() ? cmp_slot.numel() : -1)
+               << " has_compress_positions=" << has_compress_positions;
+    auto dump1 = [](const char* nm, const torch::Tensor& t) {
+      if (!t.defined() || t.numel() == 0) {
+        LOG(ERROR) << "[DSA-CP-DBG]   " << nm << "=<empty>";
+        return;
+      }
+      auto c = t.to(torch::kCPU).to(torch::kLong).contiguous();
+      std::string v;
+      const int64_t n = std::min<int64_t>(c.numel(), 6);
+      for (int64_t i = 0; i < n; ++i)
+        v += std::to_string(c.data_ptr<int64_t>()[i]) + ",";
+      LOG(ERROR) << "[DSA-CP-DBG]   " << nm << "(numel=" << c.numel() << ")=["
+                 << v << "]";
+    };
+    dump1("start_pos", attn_metadata.start_pos);
+    dump1("actual_seq_lengths_query", attn_metadata.actual_seq_lengths_query);
+    dump1("actual_seq_lengths_kv", attn_metadata.actual_seq_lengths_kv);
+    dump1("seq_lens_q", attn_metadata.seq_lens_q);
+  }
   if (compress_ratio_i > 1 && compressor_ && cmp_kv.defined() &&
       cmp_slot.defined() && compressor_kv_state.defined() &&
-      compressor_score_state.defined()) {
-    torch::Tensor compress_cos;
-    torch::Tensor compress_sin;
-    if (compress_ratio_i == 4) {
-      compress_cos = attn_metadata.c4_cos;
-      compress_sin = attn_metadata.c4_sin;
-    } else if (compress_ratio_i == 128) {
-      compress_cos = attn_metadata.c128_cos;
-      compress_sin = attn_metadata.c128_sin;
-    }
-
+      compressor_score_state.defined() && has_compress_positions) {
     std::tuple<torch::Tensor, torch::Tensor> compressor_states{
         compressor_kv_state, compressor_score_state};
     std::tuple<torch::Tensor, torch::Tensor> compressor_block_tables{
@@ -766,7 +906,10 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   }
 
   torch::Tensor compress_topk_idxs;
-  if (compress_ratio_i == 4 && cmp_kv.defined()) {
+  // Same empty/fake-shard guard as the compressor: the indexer selects
+  // top-k over compressed positions, so with no compressed positions it
+  // has nothing to do and select_qli would launch a 0-block kernel.
+  if (compress_ratio_i == 4 && cmp_kv.defined() && has_compress_positions) {
     auto index_cache = kv_cache.get_index_cache();
     std::optional<torch::Tensor> indexer_cache_scale =
         kv_cache.get_indexer_cache_scale();
@@ -786,23 +929,44 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
     CHECK(qli_metadata.defined()) << "DSAttention requires precomputed "
                                      "qli_metadata for compress_ratio==4.";
     auto qli_metadata_opt = std::optional<torch::Tensor>(qli_metadata);
-    compress_topk_idxs =
-        indexer_->select_qli(hidden_states,
-                             qr,
-                             qr_pertoken_scale,
-                             index_cache,
-                             &indexer_cache_scale_tensor,
-                             indexer_metadata,
-                             cos,
-                             sin,
-                             attn_metadata.c4_cos,
-                             attn_metadata.c4_sin,
-                             attn_metadata.actual_seq_lengths_query,
-                             attn_metadata.actual_seq_lengths_kv,
-                             qli_metadata_opt,
-                             use_prefill_attn,
-                             &indexer_states,
-                             &indexer_block_tables);
+    // DSA-CP: the indexer selects top-k for the LOCAL query tokens, so it
+    // consumes the local q hidden slice, local q RoPE and local cu-seqlens.
+    // NOTE: index-key cache completeness across CP ranks (each rank needs
+    // the full index keys when kv_split_size==1) must be validated on
+    // multi-card NPU; that is the M1 acceptance gate (see design doc 9.1).
+    const torch::Tensor& idx_hidden =
+        cp_active ? q_hidden_local : hidden_states;
+    const torch::Tensor& idx_cos = cp_active ? q_cos_local : cos;
+    const torch::Tensor& idx_sin = cp_active ? q_sin_local : sin;
+    const torch::Tensor& idx_q_cu =
+        cp_active ? cp_local_q_cu : attn_metadata.actual_seq_lengths_query;
+    const torch::Tensor& idx_kv =
+        cp_active ? cp_local_kv : attn_metadata.actual_seq_lengths_kv;
+    compress_topk_idxs = indexer_->select_qli(
+        idx_hidden,
+        qr,
+        qr_pertoken_scale,
+        index_cache,
+        &indexer_cache_scale_tensor,
+        indexer_metadata,
+        idx_cos,
+        idx_sin,
+        attn_metadata.c4_cos,
+        attn_metadata.c4_sin,
+        idx_q_cu,
+        idx_kv,
+        qli_metadata_opt,
+        use_prefill_attn,
+        &indexer_states,
+        &indexer_block_tables,
+        // DSA-CP: index-cache update (compress_kv)
+        // must use FULL hidden + FULL cu-seqlens so
+        // its full c4 RoPE row count matches; the
+        // local idx_hidden above only drives the
+        // query/weights/top-k path.
+        cp_active ? std::optional<torch::Tensor>(hidden_states) : std::nullopt,
+        cp_active ? as_optional(attn_metadata.actual_seq_lengths_query)
+                  : std::nullopt);
     CHECK(compress_topk_idxs.defined())
         << "DSAttention indexer returned undefined topk indices for "
            "compress_ratio==4.";
@@ -825,8 +989,10 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   std::optional<torch::Tensor> cu_seqlens_ori_kv_for_attn = std::nullopt;
   if (use_prefill_attn) {
     // Prefill-style sparse metadata uses query cu-seqlens for ori_kv.
+    // Under CP this is the LOCAL query cu-seqlens (paired with local q).
     cu_seqlens_ori_kv_for_attn =
-        as_optional(attn_metadata.actual_seq_lengths_query);
+        cp_active ? as_optional(cp_local_q_cu)
+                  : as_optional(attn_metadata.actual_seq_lengths_query);
   }
 
   auto [attn_output, output_lse] = xllm::kernel::npu::sparse_attn_sharedkv(
@@ -840,11 +1006,15 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
       /*ori_block_table=*/as_optional(ori_block_table_for_attn),
       /*cmp_block_table=*/
       compress_ratio_i > 1 ? as_optional(cmp_block_table) : std::nullopt,
-      /*cu_seqlens_q=*/as_optional(attn_metadata.actual_seq_lengths_query),
+      /*cu_seqlens_q=*/
+      cp_active ? as_optional(cp_local_q_cu)
+                : as_optional(attn_metadata.actual_seq_lengths_query),
       /*cu_seqlens_ori_kv=*/cu_seqlens_ori_kv_for_attn,
       /*cu_seqlens_cmp_kv=*/std::nullopt,
       /*seqused_q=*/std::nullopt,
-      /*seqused_kv=*/as_optional(attn_metadata.actual_seq_lengths_kv),
+      /*seqused_kv=*/
+      cp_active ? as_optional(cp_local_kv)
+                : as_optional(attn_metadata.actual_seq_lengths_kv),
       /*sinks=*/attn_sink_loaded_ ? as_optional(attn_sink_) : std::nullopt,
       /*metadata=*/sparse_metadata,
       /*softmax_scale=*/softmax_scale_,
@@ -863,15 +1033,40 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   }
 
   // 9) output RoPE + projection
+  // Under CP attn_output holds only this rank's LOCAL query tokens, so the
+  // inverse RoPE must use the local cos/sin slice (same token range as q).
   auto o = attn_output.view({-1, n_local_heads_, head_dim_});
+  const torch::Tensor& out_cos = cp_active ? q_cos_local : cos;
+  const torch::Tensor& out_sin = cp_active ? q_sin_local : sin;
   apply_partial_rope(
-      o, nope_head_dim_, rope_head_dim_, cos, sin, /*inverse=*/true);
+      o, nope_head_dim_, rope_head_dim_, out_cos, out_sin, /*inverse=*/true);
 
   const int64_t num_tokens = o.size(0);
   auto o_group = o.view({num_tokens, n_local_groups_, -1});
   auto wo_a = o_a_proj_->weight().view({n_local_groups_, o_lora_rank_, -1});
   auto o_low_rank = torch::einsum("tgd,grd->tgr", {o_group, wo_a});
   auto output = o_b_proj_->forward(o_low_rank.reshape({num_tokens, -1}));
+
+  // DSA-CP: o_proj ran on the LOCAL token slice ([local_len, hidden]). Restore
+  // the full token order for the next layer by an AllGather over the CP group.
+  // Each rank owns a contiguous equal partition [rank*tpr, (rank+1)*tpr), so
+  // padding every local output up to tokens_per_rank and concatenating in rank
+  // order yields the padded full stream; slice back to the real token count.
+  // (o_proj is a per-token op, so running it before the gather is equivalent
+  // to running it after and avoids gathering the wider pre-projection tensor.)
+  if (cp_active && cp_group_ != nullptr && cp_size_ > 1) {
+    const int64_t tpr = cp_meta.tokens_per_rank;
+    const int64_t local_len = output.size(0);
+    if (tpr > local_len) {
+      output = torch::constant_pad_nd(
+          output, /*pad=*/{0, 0, 0, tpr - local_len}, /*value=*/0);
+    }
+    output = parallel_state::gather(output, cp_group_, /*dim=*/0);
+    if (output.size(0) > cp_num_full_tokens) {
+      output = output.slice(/*dim=*/0, /*start=*/0, /*end=*/cp_num_full_tokens);
+    }
+    output = output.contiguous();
+  }
   std::optional<torch::Tensor> final_lse = std::nullopt;
   (void)output_lse;
 

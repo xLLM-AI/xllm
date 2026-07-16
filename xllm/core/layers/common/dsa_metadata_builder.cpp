@@ -776,4 +776,119 @@ void DSAMetadataBuilder::build_positions(const ModelInputParams& params,
   dsa_metadata.c128_pad_positions = build_compressed_positions(128);
 }
 
+DSACPMetadata DSAMetadataBuilder::build_cp_local_metadata(
+    const torch::Tensor& query_start_loc,
+    const torch::Tensor& seq_lens,
+    int32_t cp_size,
+    int32_t cp_rank,
+    const torch::Tensor& full_cos,
+    const torch::Tensor& full_sin) {
+  TORCH_CHECK(cp_size >= 1, "cp_size must be >= 1, got ", cp_size);
+  TORCH_CHECK(cp_rank >= 0 && cp_rank < cp_size,
+              "cp_rank must be in [0, cp_size), got cp_rank=",
+              cp_rank,
+              ", cp_size=",
+              cp_size);
+  TORCH_CHECK(query_start_loc.defined() && query_start_loc.dim() == 1,
+              "query_start_loc must be a defined 1-D tensor");
+  TORCH_CHECK(query_start_loc.numel() >= 1,
+              "query_start_loc must have at least one element (leading 0)");
+  TORCH_CHECK(seq_lens.defined() && seq_lens.dim() == 1,
+              "seq_lens must be a defined 1-D tensor");
+
+  // Work in int64 on CPU for exact host-side index math, then cast back to
+  // the caller's dtype at the end so the result matches DSAMetadata
+  // conventions.
+  const auto in_dtype = query_start_loc.scalar_type() == torch::kInt64
+                            ? torch::kInt64
+                            : torch::kInt32;
+  auto qsl = query_start_loc.to(torch::kCPU).to(torch::kInt64).contiguous();
+  auto slens = seq_lens.to(torch::kCPU).to(torch::kInt64).contiguous();
+
+  const int64_t num_reqs = qsl.numel() - 1;
+  TORCH_CHECK(slens.numel() == num_reqs,
+              "seq_lens size (",
+              slens.numel(),
+              ") must equal num_reqs (",
+              num_reqs,
+              ") implied by query_start_loc");
+
+  const int64_t num_input_tokens =
+      num_reqs > 0 ? qsl[num_reqs].item<int64_t>() : 0;
+
+  // Split the flattened token stream evenly across CP ranks. Padding keeps
+  // every rank's local slice the same length, matching vllm-ascend.
+  const int64_t num_tokens_pad =
+      ((num_input_tokens + cp_size - 1) / cp_size) * cp_size;
+  const int64_t tokens_per_rank = num_tokens_pad / cp_size;
+  const int64_t local_start = static_cast<int64_t>(cp_rank) * tokens_per_rank;
+  const int64_t local_end = local_start + tokens_per_rank;
+
+  auto int_cpu =
+      torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
+
+  DSACPMetadata cp;
+  cp.local_start = local_start;
+  cp.local_end = local_end;
+  cp.tokens_per_rank = tokens_per_rank;
+  cp.num_tokens_pad = num_tokens_pad;
+
+  if (num_reqs <= 0) {
+    cp.local_query_start_loc = torch::zeros({1}, int_cpu).to(in_dtype);
+    cp.local_seq_lens = torch::zeros({0}, int_cpu).to(in_dtype);
+  } else {
+    // Intersect each request's global token interval with this rank's local
+    // token interval, then build the per-rank query_start_loc from lengths.
+    auto q_start = qsl.slice(/*dim=*/0, /*start=*/0, /*end=*/num_reqs);
+    auto q_end = qsl.slice(/*dim=*/0, /*start=*/1, /*end=*/num_reqs + 1);
+    auto local_q_start = q_start.clamp(local_start, local_end);
+    auto local_q_end = q_end.clamp(local_start, local_end);
+    auto local_q_lens = local_q_end - local_q_start;  // (num_reqs,)
+
+    auto local_qsl = torch::zeros({num_reqs + 1}, int_cpu);
+    // NOTE: assigning to a slice temporary does NOT write into local_qsl.
+    // Use narrow().copy_() to write into the underlying storage.
+    local_qsl.narrow(/*dim=*/0, /*start=*/1, /*length=*/num_reqs)
+        .copy_(torch::cumsum(local_q_lens, /*dim=*/0));
+
+    // For requests that cross the local slice boundary, offset removes the
+    // tokens that live on later ranks so local_seq_lens matches local
+    // queries.
+    auto offset = q_end - local_q_end;  // (num_reqs,)
+    auto has_local = (local_q_lens > 0).to(torch::kInt64);
+    auto local_slens = has_local * (slens - offset);  // (num_reqs,)
+
+    cp.local_query_start_loc = local_qsl.to(in_dtype);
+    cp.local_seq_lens = local_slens.to(in_dtype);
+  }
+
+  // Slice RoPE tables to the local token interval when provided. Tables are
+  // expected to cover the PADDED global token stream (length
+  // num_tokens_pad).
+  if (full_cos.defined() && full_cos.numel() > 0) {
+    TORCH_CHECK(full_cos.size(0) >= local_end,
+                "full_cos length (",
+                full_cos.size(0),
+                ") must cover local_end (",
+                local_end,
+                "); pass a table padded to num_tokens_pad");
+    cp.local_cos =
+        full_cos.slice(/*dim=*/0, /*start=*/local_start, /*end=*/local_end)
+            .contiguous();
+  }
+  if (full_sin.defined() && full_sin.numel() > 0) {
+    TORCH_CHECK(full_sin.size(0) >= local_end,
+                "full_sin length (",
+                full_sin.size(0),
+                ") must cover local_end (",
+                local_end,
+                "); pass a table padded to num_tokens_pad");
+    cp.local_sin =
+        full_sin.slice(/*dim=*/0, /*start=*/local_start, /*end=*/local_end)
+            .contiguous();
+  }
+
+  return cp;
+}
+
 }  // namespace xllm::layer

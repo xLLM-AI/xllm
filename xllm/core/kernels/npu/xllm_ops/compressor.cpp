@@ -136,6 +136,46 @@ compressor(const at::Tensor& x,
   at::Tensor norm_x = std::get<3>(output);
   at::Tensor norm_rstd = std::get<4>(output);
 
+  {
+    static thread_local bool k_logged = false;
+    if (!k_logged) {
+      k_logged = true;
+      auto shp = [](const at::Tensor& t) {
+        return t.defined() ? t.sizes() : c10::IntArrayRef{};
+      };
+      auto oshp = [](const c10::optional<at::Tensor>& t) {
+        return (t.has_value() && t->defined()) ? t->sizes()
+                                               : c10::IntArrayRef{};
+      };
+      LOG(ERROR) << "[CMP-KERNEL] x=" << shp(x) << " wkv=" << shp(wkv)
+                 << " kv_state=" << shp(kv_state)
+                 << " score_state=" << shp(score_state)
+                 << " rope_sin=" << shp(rope_sin)
+                 << " kv_block_table=" << oshp(kv_block_table)
+                 << " score_block_table=" << oshp(score_block_table)
+                 << " cu_seqlens=" << oshp(cu_seqlens)
+                 << " seqused=" << oshp(seqused)
+                 << " start_pos=" << oshp(start_pos)
+                 << " rope_head_dim=" << rope_head_dim
+                 << " cmp_ratio=" << cmp_ratio << " coff=" << coff;
+      auto dumpv = [](const char* nm, const c10::optional<at::Tensor>& t) {
+        if (!t.has_value() || !t->defined() || t->numel() == 0) {
+          LOG(ERROR) << "[CMP-KERNEL]   " << nm << "=<empty>";
+          return;
+        }
+        auto c = t->to(torch::kCPU).to(torch::kLong).contiguous();
+        std::string v;
+        const int64_t n = std::min<int64_t>(c.numel(), 70);
+        for (int64_t i = 0; i < n; ++i)
+          v += std::to_string(c.data_ptr<int64_t>()[i]) + ",";
+        LOG(ERROR) << "[CMP-KERNEL]   " << nm << "(numel=" << c.numel() << ")=["
+                   << v << "]";
+      };
+      dumpv("kv_block_table", kv_block_table);
+      dumpv("cu_seqlens", cu_seqlens);
+      dumpv("start_pos", start_pos);
+    }
+  }
   EXEC_NPU_CMD(aclnnCompressor,
                x,
                wkv,

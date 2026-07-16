@@ -53,6 +53,34 @@ struct DSACompressedAttentionMetadata {
   int64_t max_context_len = 0;
 };
 
+// Context-parallel (DSA-CP) per-rank metadata. Aligned with vllm-ascend
+// DSACPMetadata (vllm_ascend/attention/context_parallel/dsa_cp.py). Produced
+// by DSAMetadataBuilder::build_cp_local_metadata when cp_size > 1.
+//
+// The query token stream is split evenly across the CP group. Each field
+// below describes the CURRENT rank's local token slice:
+//   - local_query_start_loc: (num_reqs+1,) rebased cumulative query starts
+//     for the local slice, always starting at 0.
+//   - local_seq_lens:        (num_reqs,)   per-request KV length visible to
+//     the local slice (0 for requests with no local query tokens).
+//   - local_start / local_end: [start, end) token interval owned by this rank
+//     in the padded global token stream.
+//   - tokens_per_rank:       num_tokens_pad / cp_size.
+//   - num_tokens_pad:        num_input_tokens padded to a multiple of
+//     cp_size.
+//   - local_cos / local_sin: RoPE tables sliced to [local_start, local_end).
+//     Undefined when no full RoPE table is supplied to the builder.
+struct DSACPMetadata {
+  torch::Tensor local_query_start_loc;
+  torch::Tensor local_seq_lens;
+  int64_t local_start = 0;
+  int64_t local_end = 0;
+  int64_t tokens_per_rank = 0;
+  int64_t num_tokens_pad = 0;
+  torch::Tensor local_cos;
+  torch::Tensor local_sin;
+};
+
 // DSAMetadata contains DeepSeek V4 sparse attention specific metadata,
 // aligned with Python DSAMetadata(AttentionMetadata) class.
 // It is built once at the beginning of model forward pass and reused by
@@ -80,8 +108,18 @@ struct DSAMetadata {
   // not perform host/device copies in this mode.
   bool is_acl_graph = false;
 
-  // cp_input_dict: context-parallel inputs placeholder (reserved, optional)
+  // cp_input_dict: context-parallel inputs placeholder (reserved, optional).
+  // Kept for backward compatibility with any callers that still read it;
+  // structured CP metadata lives in cp_metadata below.
   std::unordered_map<std::string, torch::Tensor> cp_input_dict;
+
+  // ===== DSA-CP (context-parallel) fields =====
+  // cp_enabled: true when cp_size > 1 and DSA-CP is active for this forward.
+  bool cp_enabled = false;
+  int32_t cp_size = 1;
+  int32_t cp_rank = 0;
+  // Per-rank local token metadata; only meaningful when cp_enabled == true.
+  DSACPMetadata cp_metadata;
 
   // NPU-only DSA metadata fields.
   // RoPE caches selected for the current layer's q/kv/output RoPE.

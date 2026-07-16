@@ -95,6 +95,16 @@ class DSAttentionImpl : public torch::nn::Module {
   int64_t n_local_groups_;
   int64_t tp_rank_ = 0;
   int64_t tp_size_ = 1;
+
+  // ===== DSA-CP (context-parallel) members =====
+  // cp_size_ / cp_rank_ describe this rank's position in the CP group; when
+  // cp_size_ > 1 and cp_enabled_ is set the prefill path splits query tokens
+  // across cp_group_ (vllm-ascend dsa_cp.py style). cp_enabled_ additionally
+  // requires FLAGS_enable_dsa_cp at construction time.
+  int64_t cp_size_ = 1;
+  int64_t cp_rank_ = 0;
+  bool cp_enabled_ = false;
+  ProcessGroup* cp_group_ = nullptr;
   int64_t index_n_heads_ = 0;
   int64_t index_head_dim_ = 0;
   int64_t index_topk_ = 0;

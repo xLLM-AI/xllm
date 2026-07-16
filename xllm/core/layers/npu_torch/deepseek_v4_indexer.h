@@ -65,7 +65,13 @@ class DeepseekV4IndexerImpl : public torch::nn::Module {
       bool with_prefill = false,
       std::tuple<torch::Tensor, torch::Tensor>* compressor_states = nullptr,
       std::tuple<torch::Tensor, torch::Tensor>* compressor_block_tables =
-          nullptr);
+          nullptr,
+      // DSA-CP: when defined, the index-cache-update path (compress_kv)
+      // uses these FULL-token tensors while query/weights/top-k keep using
+      // the LOCAL `x`/`actual_seq_lengths_query`. Mirrors vllm-ascend
+      // _update_indexer_cache(full) vs _indexer_select_topk(local).
+      const std::optional<torch::Tensor>& compress_x = std::nullopt,
+      const std::optional<torch::Tensor>& compress_cu_seqlens = std::nullopt);
 
   torch::Tensor select_qli(
       const torch::Tensor& x,

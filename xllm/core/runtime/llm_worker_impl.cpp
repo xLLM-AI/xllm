@@ -51,7 +51,16 @@ namespace xllm {
 namespace {
 
 bool uses_worker_cp_partition(const runtime::Options& options) {
-  return options.cp_size() > 1 && !Platform::uses_model_cp_partition();
+  // DSA-CP (DeepSeek-V4) partitions tokens MODEL-side: the DSAttention
+  // layer keeps full tokens and gathers its local attention output back
+  // to full-token layout internally, so the worker must NOT take the
+  // worker-side CP path (LmHead all-gather + 3-arg logits(out_hidden),
+  // which V4 does not implement). Mirrors the same gate in
+  // WorkerImpl::prepare_work_before_execute.
+  const bool dsa_cp_model_side = FLAGS_enable_dsa_cp && options.cp_size() > 1 &&
+                                 Platform::supports_dsa_cp_model_partition();
+  return options.cp_size() > 1 && !Platform::uses_model_cp_partition() &&
+         !dsa_cp_model_side;
 }
 
 void wait_input_ready_events(const ForwardInput& input, const Stream& stream) {
