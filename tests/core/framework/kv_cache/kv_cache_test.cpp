@@ -21,8 +21,8 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/kv_cache_config.h"
-#include "kv_cache_estimation.h"
 #include "framework/kv_cache/deepseek_v4_kv_cache_impl.h"
+#include "kv_cache_estimation.h"
 #include "kv_cache_shape.h"
 #include "worker.pb.h"
 

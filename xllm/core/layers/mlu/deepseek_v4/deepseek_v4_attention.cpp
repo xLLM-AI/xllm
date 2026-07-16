@@ -185,25 +185,29 @@ DeepseekV4AttentionImpl::DeepseekV4AttentionImpl(
   hidden_proj_sizes_.push_back(head_dim_);     // segment 1: wkv
   if (compress_ratio_ == 4 || compress_ratio_ == 128) {
     const int64_t coff = (compress_ratio_ == 4) ? 2 : 1;
-    hidden_proj_sizes_.push_back(coff * head_dim_);  // segment 2: compressor.wkv
-    hidden_proj_sizes_.push_back(coff * head_dim_);  // segment 3: compressor.wgate
+    hidden_proj_sizes_.push_back(coff *
+                                 head_dim_);  // segment 2: compressor.wkv
+    hidden_proj_sizes_.push_back(coff *
+                                 head_dim_);  // segment 3: compressor.wgate
     if (compress_ratio_ == 4) {
-      hidden_proj_sizes_.push_back(index_n_heads_);         // seg 4: indexer.weights_proj
-      hidden_proj_sizes_.push_back(2 * index_head_dim_);    // seg 5: indexer.compressor.wkv (coff=2)
-      hidden_proj_sizes_.push_back(2 * index_head_dim_);    // seg 6: indexer.compressor.wgate (coff=2)
+      hidden_proj_sizes_.push_back(
+          index_n_heads_);  // seg 4: indexer.weights_proj
+      hidden_proj_sizes_.push_back(
+          2 * index_head_dim_);  // seg 5: indexer.compressor.wkv (coff=2)
+      hidden_proj_sizes_.push_back(
+          2 * index_head_dim_);  // seg 6: indexer.compressor.wgate (coff=2)
     }
   }
   int64_t fused_out = 0;
   for (auto s : hidden_proj_sizes_) {
     fused_out += s;
   }
-  fused_wqa_wkv_ = register_module(
-      "fused_wqa_wkv",
-      ReplicatedLinear(hidden_dim_,
-                       fused_out,
-                       /*bias=*/false,
-                       empty_quant_args,
-                       options));
+  fused_wqa_wkv_ = register_module("fused_wqa_wkv",
+                                   ReplicatedLinear(hidden_dim_,
+                                                    fused_out,
+                                                    /*bias=*/false,
+                                                    empty_quant_args,
+                                                    options));
 
   q_norm_ = register_module("q_norm", RMSNorm(q_lora_rank_, eps_, options));
   wq_b_ = register_module("wq_b",
@@ -314,8 +318,7 @@ torch::Tensor DeepseekV4AttentionImpl::project_q(torch::Tensor& q_down,
   return output;
 }
 
-torch::Tensor DeepseekV4AttentionImpl::project_kv(
-    torch::Tensor& kv_down) {
+torch::Tensor DeepseekV4AttentionImpl::project_kv(torch::Tensor& kv_down) {
   // kv_down is the segment-1 slice of the fused hidden->* projection.
   torch::Tensor kv = std::get<0>(kv_norm_->forward(kv_down));
   return kv.view({-1, 1, head_dim_});
@@ -526,18 +529,20 @@ void DeepseekV4AttentionImpl::load_state_dict(const StateDict& state_dict) {
   // original checkpoint keys) into the single fused_wqa_wkv_ weight along the
   // output dim. The order must match hidden_proj_sizes_ exactly.
   std::vector<torch::Tensor> proj_parts;
-  proj_parts.push_back(state_dict.get_tensor("wq_a.weight"));       // segment 0
-  proj_parts.push_back(state_dict.get_tensor("wkv.weight"));        // segment 1
+  proj_parts.push_back(state_dict.get_tensor("wq_a.weight"));  // segment 0
+  proj_parts.push_back(state_dict.get_tensor("wkv.weight"));   // segment 1
   if (compress_ratio_ == 4 || compress_ratio_ == 128) {
-    proj_parts.push_back(state_dict.get_tensor("compressor.wkv.weight"));    // seg 2
-    proj_parts.push_back(state_dict.get_tensor("compressor.wgate.weight"));  // seg 3
+    proj_parts.push_back(
+        state_dict.get_tensor("compressor.wkv.weight"));  // seg 2
+    proj_parts.push_back(
+        state_dict.get_tensor("compressor.wgate.weight"));  // seg 3
     if (compress_ratio_ == 4) {
       proj_parts.push_back(
-          state_dict.get_tensor("indexer.weights_proj.weight"));          // seg 4
+          state_dict.get_tensor("indexer.weights_proj.weight"));  // seg 4
       proj_parts.push_back(
-          state_dict.get_tensor("indexer.compressor.wkv.weight"));        // seg 5
+          state_dict.get_tensor("indexer.compressor.wkv.weight"));  // seg 5
       proj_parts.push_back(
-          state_dict.get_tensor("indexer.compressor.wgate.weight"));      // seg 6
+          state_dict.get_tensor("indexer.compressor.wgate.weight"));  // seg 6
     }
   }
   for (size_t i = 0; i < proj_parts.size(); ++i) {
@@ -574,9 +579,8 @@ void DeepseekV4AttentionImpl::load_state_dict(const StateDict& state_dict) {
   // The projection weights (wkv/wgate/weights_proj) have been merged into the
   // fused GEMM, so skip loading them here; norm/ape/wq_b are still loaded.
   if (compressor_) {
-    compressor_->load_state_dict(
-        state_dict.get_dict_with_prefix("compressor."),
-        /*skip_proj_weights=*/true);
+    compressor_->load_state_dict(state_dict.get_dict_with_prefix("compressor."),
+                                 /*skip_proj_weights=*/true);
   }
   if (indexer_) {
     indexer_->load_state_dict(state_dict.get_dict_with_prefix("indexer."),
