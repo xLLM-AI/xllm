@@ -302,12 +302,12 @@ void AsyncResponseProcessor::batch_process_stream_requests(
         auto seq_output = seq->generate_streaming_output(size, *tokenizer_);
         if (seq_output.has_value()) {
           req_output->outputs.push_back(std::move(seq_output.value()));
-          if (seq->num_generated_tokens() == 1) {
-            // currently only support one sequence when enable_service_routing
-            // IMPROVE LATER: support enable_schedule_overlap in Default mode
-            // for stream request
-            req_output->finished_on_prefill_instance = true;
-          }
+        }
+        if (seq->num_generated_tokens() == 1) {
+          // currently only support one sequence when enable_service_routing
+          // IMPROVE LATER: support enable_schedule_overlap in Default mode
+          // for stream request
+          req_output->finished_on_prefill_instance = true;
         }
       }
       counter->decrement_count();
