@@ -963,9 +963,11 @@ RecWorkerImpl::OneRecXAttentionWorkPipeline::OneRecXAttentionWorkPipeline(
           RecPipelineType::kOneRecXAttentionPipeline)),
       filter_mask_threadpool_(std::make_unique<ThreadPool>(1)) {
   max_seqs_per_batch_ = runtime_.worker.options_.max_seqs_per_batch();
+  max_tokens_per_batch_ = runtime_.worker.options_.max_tokens_per_batch();
   beam_width_ = std::max<int32_t>(1, runtime_.worker.options_.beam_width());
   max_decode_step_ =
       std::max<int32_t>(0, get_rec_multi_round_decode_rounds() - 1);
+  allocate_shared_kv_caches();
   allocate_unshared_kv_caches();
 
   if (!FLAGS_enable_constrained_decoding) {
@@ -1133,6 +1135,70 @@ void RecWorkerImpl::OneRecXAttentionWorkPipeline::
                       static_cast<int64_t>(max_decode_step_),
                       head_dim},
                      cache_options);
+  }
+}
+
+void RecWorkerImpl::OneRecXAttentionWorkPipeline::allocate_shared_kv_caches() {
+  if (max_tokens_per_batch_ <= 0) {
+    return;
+  }
+
+  const auto& args = runtime_.context->get_model_args();
+  const auto& parallel_args = runtime_.context->get_parallel_args();
+  const int32_t num_layers = static_cast<int32_t>(args.n_layers());
+  const int64_t decoder_kv_heads = args.decoder_n_kv_heads().value_or(
+      args.n_kv_heads().value_or(args.decoder_n_heads()));
+  const int64_t local_kv_heads =
+      decoder_kv_heads / std::max<int64_t>(parallel_args.world_size(), 1);
+  const int64_t head_dim = args.decoder_head_dim();
+  auto cache_options = torch::TensorOptions()
+                           .dtype(runtime_.worker.dtype())
+                           .device(runtime_.worker.device());
+
+  cached_shared_k_caches_.resize(num_layers);
+  cached_shared_v_caches_.resize(num_layers);
+  for (int32_t layer_id = 0; layer_id < num_layers; ++layer_id) {
+    cached_shared_k_caches_[layer_id] =
+        torch::zeros({static_cast<int64_t>(max_tokens_per_batch_),
+                      std::max<int64_t>(local_kv_heads, 1),
+                      std::max<int64_t>(head_dim, 1)},
+                     cache_options);
+    cached_shared_v_caches_[layer_id] =
+        torch::zeros({static_cast<int64_t>(max_tokens_per_batch_),
+                      std::max<int64_t>(local_kv_heads, 1),
+                      std::max<int64_t>(head_dim, 1)},
+                     cache_options);
+  }
+}
+
+void RecWorkerImpl::OneRecXAttentionWorkPipeline::
+    prepare_shared_kv_caches_for_input(
+        int64_t shared_kv_tokens,
+        OneRecXAttentionParams& onerec_params) {
+  if (cached_shared_k_caches_.empty() || cached_shared_v_caches_.empty()) {
+    allocate_shared_kv_caches();
+  }
+  CHECK(!cached_shared_k_caches_.empty() && !cached_shared_v_caches_.empty())
+      << "OneRec xattention shared kv cache is not initialized.";
+  CHECK_LE(shared_kv_tokens, static_cast<int64_t>(max_tokens_per_batch_))
+      << "OneRec xattention shared kv tokens exceed max_tokens_per_batch, "
+      << "shared_kv_tokens=" << shared_kv_tokens
+      << ", max_tokens_per_batch=" << max_tokens_per_batch_;
+
+  onerec_params.shared_k_caches.clear();
+  onerec_params.shared_v_caches.clear();
+  onerec_params.shared_k_caches.reserve(cached_shared_k_caches_.size());
+  onerec_params.shared_v_caches.reserve(cached_shared_v_caches_.size());
+  for (size_t layer_id = 0; layer_id < cached_shared_k_caches_.size();
+       ++layer_id) {
+    auto shared_k =
+        cached_shared_k_caches_[layer_id].slice(0, 0, shared_kv_tokens);
+    auto shared_v =
+        cached_shared_v_caches_[layer_id].slice(0, 0, shared_kv_tokens);
+    shared_k.zero_();
+    shared_v.zero_();
+    onerec_params.shared_k_caches.emplace_back(std::move(shared_k));
+    onerec_params.shared_v_caches.emplace_back(std::move(shared_v));
   }
 }
 
@@ -1314,7 +1380,6 @@ void RecWorkerImpl::OneRecXAttentionWorkPipeline::prepare_work_before_execute(
 
   auto& onerec_params =
       processed_inputs.input_params.mutable_onerec_xattention_params();
-  const auto& args = runtime_.context->get_model_args();
   const int64_t batch_size = std::max<int64_t>(
       onerec_params.bs > 0 ? onerec_params.bs
                            : inputs.input_params.num_sequences,
@@ -1333,33 +1398,7 @@ void RecWorkerImpl::OneRecXAttentionWorkPipeline::prepare_work_before_execute(
         batch_size *
         std::max<int64_t>(processed_inputs.input_params.q_max_seq_len, 1);
   }
-  const auto& parallel_args = runtime_.context->get_parallel_args();
-  const int64_t decoder_kv_heads = args.decoder_n_kv_heads().value_or(
-      args.n_kv_heads().value_or(args.decoder_n_heads()));
-  const int64_t local_kv_heads =
-      decoder_kv_heads / std::max<int64_t>(parallel_args.world_size(), 1);
-  const int64_t head_dim = args.decoder_head_dim();
-  const int32_t decoder_layers = static_cast<int32_t>(args.n_layers());
-  auto fp_options = torch::TensorOptions()
-                        .dtype(runtime_.worker.dtype())
-                        .device(runtime_.worker.device());
-
-  onerec_params.shared_k_caches.clear();
-  onerec_params.shared_v_caches.clear();
-  onerec_params.shared_k_caches.reserve(decoder_layers);
-  onerec_params.shared_v_caches.reserve(decoder_layers);
-  for (int32_t layer_id = 0; layer_id < decoder_layers; ++layer_id) {
-    onerec_params.shared_k_caches.emplace_back(
-        torch::zeros({shared_kv_tokens,
-                      std::max<int64_t>(local_kv_heads, 1),
-                      std::max<int64_t>(head_dim, 1)},
-                     fp_options));
-    onerec_params.shared_v_caches.emplace_back(
-        torch::zeros({shared_kv_tokens,
-                      std::max<int64_t>(local_kv_heads, 1),
-                      std::max<int64_t>(head_dim, 1)},
-                     fp_options));
-  }
+  prepare_shared_kv_caches_for_input(shared_kv_tokens, onerec_params);
   prepare_unshared_kv_caches_for_input(inputs, onerec_params);
   processed_inputs.input_params.block_tables =
       torch::arange(batch_size,
@@ -1374,9 +1413,16 @@ void RecWorkerImpl::OneRecXAttentionWorkPipeline::prepare_work_before_execute(
   const auto int_options = torch::TensorOptions()
                                .dtype(torch::kInt32)
                                .device(runtime_.worker.device());
-  onerec_params.beam_width_tensor = torch::tensor({beam_width}, int_options);
-  onerec_params.current_round_tensor =
-      torch::tensor({get_onerec_decode_round(onerec_params)}, int_options);
+  if (!beam_width_tensor_.defined()) {
+    beam_width_tensor_ = torch::empty({1}, int_options);
+  }
+  if (!current_round_tensor_.defined()) {
+    current_round_tensor_ = torch::empty({1}, int_options);
+  }
+  beam_width_tensor_.fill_(beam_width);
+  current_round_tensor_.fill_(get_onerec_decode_round(onerec_params));
+  onerec_params.beam_width_tensor = beam_width_tensor_;
+  onerec_params.current_round_tensor = current_round_tensor_;
   if (enable_onerec_selected_token_cpu_check() &&
       processed_inputs.sampling_params.selected_token_idxes.defined()) {
     onerec_params.debug_selected_token_idxes =
