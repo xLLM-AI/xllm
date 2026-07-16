@@ -126,7 +126,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       const ForwardInput& base_input,
       const std::vector<EmbeddingCache::DecodeState>& last_states,
       ForwardInput& extend_input,
-      Stream& preparation_stream);
+      Stream& preparation_stream,
+      bool force_two_rows = false);
 
   struct PendingTargetContext {
     std::vector<int32_t> embedding_ids;
@@ -138,6 +139,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
     torch::Tensor accepted_tokens;
     torch::Tensor accepted_tokens_host;
     torch::Tensor accepted_embeddings;
+    torch::Tensor base_positions;
+    torch::Tensor base_kv_seq_lens;
     StreamEventPtr ready_event;
   };
 
@@ -150,6 +153,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
 
   void stage_target_context_write(const ForwardInput& input,
                                   const SampleOutput& validate_output,
+                                  torch::Tensor base_positions,
+                                  torch::Tensor base_kv_seq_lens,
                                   StreamEventPtr ready_event,
                                   torch::Tensor accepted_tokens_host);
   torch::Tensor acquire_accepted_tokens_host_buffer(
@@ -160,6 +165,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                                          ForwardInput& draft_input);
   void enqueue_next_first_draft(const ForwardInput& input,
                                 const SampleOutput& validate_output,
+                                const torch::Tensor& base_positions,
+                                const torch::Tensor& base_kv_seq_lens,
                                 ForwardInput draft_input);
   bool pending_draft_context_matches(const ForwardInput& input) const;
 

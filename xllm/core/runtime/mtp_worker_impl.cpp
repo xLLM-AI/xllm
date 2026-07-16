@@ -236,15 +236,17 @@ torch::Tensor gather_sequence_rows(const torch::Tensor& values,
 }
 
 DeviceDecodeState build_device_decode_state(
-    const ForwardInput& input,
     const torch::Tensor& accepted_tokens,
     const torch::Tensor& accepted_embeddings,
-    const torch::Tensor& embedding_placeholder) {
+    const torch::Tensor& embedding_placeholder,
+    const torch::Tensor& base_positions,
+    const torch::Tensor& base_kv_seq_lens) {
   CHECK_EQ(accepted_tokens.dim(), 2);
   CHECK_EQ(accepted_embeddings.dim(), 3);
   const int64_t batch_size = accepted_tokens.size(0);
   CHECK_EQ(accepted_embeddings.size(0), batch_size);
-  CHECK_EQ(input.input_params.meta.num_sequences, batch_size);
+  CHECK_GE(base_positions.numel(), batch_size);
+  CHECK_GE(base_kv_seq_lens.numel(), batch_size);
 
   DeviceDecodeState state;
   state.accepted_lengths =
@@ -271,16 +273,14 @@ DeviceDecodeState build_device_decode_state(
       gathered_previous_embeddings,
       placeholder);
 
-  CHECK(input.positions.defined());
   state.base_positions =
-      input.positions.flatten().slice(0, 0, batch_size).to(torch::kLong) +
+      base_positions.flatten().slice(0, 0, batch_size).to(torch::kLong) +
       state.accepted_lengths - 1;
-  CHECK(input.input_params.attention.device.kv_seq_lens.defined());
-  state.base_kv_seq_lens = input.input_params.attention.device.kv_seq_lens
-                               .flatten()
-                               .slice(0, 0, batch_size)
-                               .to(torch::kLong) +
-                           state.accepted_lengths - 1;
+  state.base_kv_seq_lens =
+      base_kv_seq_lens.flatten()
+          .slice(0, 0, batch_size)
+          .to(torch::kLong) +
+      state.accepted_lengths - 1;
   return state;
 }
 
@@ -325,24 +325,38 @@ void apply_device_row_metadata(ForwardInput& input,
                                const DeviceDecodeState& state,
                                const torch::Tensor& offsets,
                                int32_t block_size,
-                               int64_t kv_offset) {
+                               bool use_chunked_prefill) {
   torch::Tensor row_positions = make_row_positions(state, offsets);
   input.positions = row_positions.flatten().to(input.positions.options());
   input.input_params.attention.device.new_cache_slots =
       build_device_cache_slots(block_table_source, row_positions, block_size);
-  input.input_params.attention.device.kv_seq_lens =
-      (state.base_kv_seq_lens + kv_offset)
-          .to(input.input_params.attention.device.kv_seq_lens.options());
+  torch::Tensor kv_seq_lens = state.base_kv_seq_lens;
+  if (!use_chunked_prefill) {
+    kv_seq_lens =
+        (state.base_kv_seq_lens.unsqueeze(1) +
+         offsets.to(state.base_kv_seq_lens.options()).unsqueeze(0))
+            .flatten();
+  }
+  input.input_params.attention.device.kv_seq_lens = kv_seq_lens.to(
+      input.input_params.attention.device.kv_seq_lens.options());
 }
 
 #if defined(USE_NPU)
 void apply_mtp_prepare_output(
     ForwardInput& draft_input,
-    const kernel::npu::MtpPrepareNextDraftOutput& output) {
+    const kernel::npu::MtpPrepareNextDraftOutput& output,
+    bool use_chunked_prefill) {
   draft_input.token_ids = output.token_ids;
   draft_input.input_params.embedding.input_embedding = output.embeddings;
   draft_input.positions = output.positions;
-  draft_input.input_params.attention.device.kv_seq_lens = output.kv_seq_lens;
+  if (use_chunked_prefill) {
+    draft_input.input_params.attention.device.kv_seq_lens =
+        output.kv_seq_lens;
+  } else {
+    draft_input.input_params.attention.device.kv_seq_lens =
+        torch::stack({output.kv_seq_lens - 1, output.kv_seq_lens}, /*dim=*/1)
+            .flatten();
+  }
   draft_input.input_params.attention.device.new_cache_slots =
       output.cache_slots;
 }
@@ -353,30 +367,37 @@ void apply_mtp_prepare_output(
 // as a portability and uncommon-layout fallback.
 void prepare_next_draft_from_accepted_state(
     ForwardInput& draft_input,
-    const ForwardInput& input,
+    const ForwardInput& block_table_source,
     const torch::Tensor& accepted_tokens,
     const torch::Tensor& accepted_embeddings,
     const torch::Tensor& embedding_placeholder,
+    const torch::Tensor& base_positions,
+    const torch::Tensor& base_kv_seq_lens,
+    bool use_chunked_prefill,
     int32_t block_size) {
 #if defined(USE_NPU)
-  if (input.input_params.multi_block_tables.empty()) {
+  if (block_table_source.input_params.multi_block_tables.empty()) {
     const auto output = kernel::npu::try_mtp_prepare_next_draft(
         accepted_tokens,
         accepted_embeddings,
         embedding_placeholder,
-        input.positions,
-        input.input_params.attention.device.kv_seq_lens,
-        input.input_params.attention.device.block_tables,
+        base_positions,
+        base_kv_seq_lens,
+        block_table_source.input_params.attention.device.block_tables,
         block_size);
     if (output.has_value()) {
-      apply_mtp_prepare_output(draft_input, *output);
+      apply_mtp_prepare_output(draft_input, *output, use_chunked_prefill);
       return;
     }
   }
 #endif
 
   DeviceDecodeState state = build_device_decode_state(
-      input, accepted_tokens, accepted_embeddings, embedding_placeholder);
+      accepted_tokens,
+      accepted_embeddings,
+      embedding_placeholder,
+      base_positions,
+      base_kv_seq_lens);
   // arange is generated by a device op; unlike torch::tensor({-1, 0}, npu),
   // it does not introduce a synchronous host-to-device memcpy here.
   torch::Tensor extend_offsets = torch::arange(
@@ -386,11 +407,11 @@ void prepare_next_draft_from_accepted_state(
           .dtype(torch::kLong)
           .device(accepted_tokens.device()));
   apply_device_row_metadata(draft_input,
-                            input,
+                            block_table_source,
                             state,
                             extend_offsets,
                             block_size,
-                            /*kv_offset=*/0);
+                            use_chunked_prefill);
   draft_input.token_ids =
       torch::stack({state.previous_tokens, state.last_tokens}, /*dim=*/1)
           .flatten()
@@ -1404,8 +1425,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
 
     // Build fixed-shape host metadata immediately while target verification is
-    // still running.  Use the maximum acceptance offset for conservative graph
-    // planning; actual per-request values replace every device tensor below.
+    // still running. Use the maximum accepted draft offset for conservative
+    // graph planning; actual values replace every device tensor below.
     int32_t* template_positions =
         metadata_template.positions_host.data_ptr<int32_t>();
     int32_t* template_tokens =
@@ -1438,7 +1459,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
         metadata_template,
         template_states,
         current_draft_input,
-        *compute_stream_);
+        *compute_stream_,
+        /*force_two_rows=*/true);
 
     prepare_next_draft_from_accepted_state(
         current_draft_input,
@@ -1446,6 +1468,9 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
         pending_target_context_.accepted_tokens,
         pending_target_context_.accepted_embeddings,
         embedding_cache_->embedding_placeholder(),
+        pending_target_context_.base_positions,
+        pending_target_context_.base_kv_seq_lens,
+        ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel(),
         options_.block_size());
   } else {
     // First decode after prefill and batch transitions use the host cache.
@@ -1535,8 +1560,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
       // process_draft_sample_output() compresses the still-full [batch, vocab]
       // probs into the cache: gathering the cached prob with a unified token
       // yields a unified prob, so we only broadcast the [batch] token tensor.
-      if (get_optimization_config().enable_spec_token_broadcast &&
-          enable_schedule_overlap()) {
+      // Overlapped MTP keeps rank-local target state for the next iteration.
+      // Stochastic sampling may advance each rank's RNG differently, so TP
+      // ranks must agree on the sampled token before updating that state.
+      if (enable_schedule_overlap()) {
         SampleOutput& draft_sample = draft_outputs.back().sample_output;
         broadcast_spec_tokens(draft_sample.next_tokens,
                               spec_broadcast_group(parallel_args_));
@@ -1644,11 +1671,29 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   COUNTER_ADD(speculative_execution_latency_seconds_validation,
               timer.elapsed_seconds());
 
+  const int64_t batch_size = val_output.next_tokens.size(0);
+  const int64_t num_val_tokens = options_.num_speculative_tokens() + 1;
+  CHECK_EQ(validate_input.positions.numel(), batch_size * num_val_tokens)
+      << "validate positions must contain one row per speculative token";
+  torch::Tensor base_positions =
+      validate_input.positions.view({batch_size, num_val_tokens})
+          .select(/*dim=*/1, /*index=*/0)
+          .contiguous();
+  const torch::Tensor& validate_kv_seq_lens =
+      validate_input.input_params.attention.device.kv_seq_lens;
+  CHECK_GE(validate_kv_seq_lens.numel(), batch_size)
+      << "validate KV lengths must be sequence-scoped";
+  torch::Tensor base_kv_seq_lens =
+      validate_kv_seq_lens.flatten().slice(0, 0, batch_size) -
+      options_.num_speculative_tokens();
+
   // Catch-all for cross-rank RNG divergence: unify the accepted next_tokens to
   // the consensus group's rank 0 so all_draft_accepted and the next
   // draft-extend row layout agree across ranks.
-  if (get_optimization_config().enable_spec_token_broadcast &&
-      enable_schedule_overlap()) {
+  // Keep the accepted target state identical on every TP rank.  The helper is
+  // a no-op for TP1, while TP>1 requires this even when the platform-wide
+  // speculative broadcast optimization is disabled.
+  if (enable_schedule_overlap()) {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     broadcast_spec_tokens(val_output.next_tokens,
                           spec_broadcast_group(parallel_args_));
@@ -1670,6 +1715,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   }
   stage_target_context_write(input,
                              val_output,
+                             base_positions,
+                             base_kv_seq_lens,
                              handoff_ready_event,
                              std::move(accepted_tokens_host));
   if (prelaunch_next_first_draft) {
@@ -1678,7 +1725,11 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
     // accepted-state work can no longer sit between target validation and the
     // next draft launch.
     enqueue_next_first_draft(
-        input, val_output, std::move(next_first_draft_input));
+        input,
+        val_output,
+        base_positions,
+        base_kv_seq_lens,
+        std::move(next_first_draft_input));
   }
   target_output.ready_event = handoff_ready_event;
 
@@ -1714,6 +1765,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
 void MTPWorkerImpl::stage_target_context_write(
     const ForwardInput& input,
     const SampleOutput& validate_output,
+    torch::Tensor base_positions,
+    torch::Tensor base_kv_seq_lens,
     StreamEventPtr ready_event,
     torch::Tensor accepted_tokens_host) {
   CHECK(!pending_target_context_.accepted_tokens.defined())
@@ -1726,6 +1779,8 @@ void MTPWorkerImpl::stage_target_context_write(
   pending_target_context_.accepted_tokens_host =
       std::move(accepted_tokens_host);
   pending_target_context_.accepted_embeddings = validate_output.embeddings;
+  pending_target_context_.base_positions = std::move(base_positions);
+  pending_target_context_.base_kv_seq_lens = std::move(base_kv_seq_lens);
   pending_target_context_.ready_event = std::move(ready_event);
 }
 
@@ -1821,13 +1876,19 @@ void MTPWorkerImpl::prepare_next_first_draft_template(
   }
 
   prepare_draft_extend_inputs(
-      metadata_template, template_states, draft_input, *prepare_stream_);
+      metadata_template,
+      template_states,
+      draft_input,
+      *prepare_stream_,
+      /*force_two_rows=*/true);
   finish_metadata_prepare(*prepare_stream_, draft_input);
 }
 
 void MTPWorkerImpl::enqueue_next_first_draft(
     const ForwardInput& input,
     const SampleOutput& validate_output,
+    const torch::Tensor& base_positions,
+    const torch::Tensor& base_kv_seq_lens,
     ForwardInput draft_input) {
   CHECK(!pending_draft_context_.output.has_value())
       << "MTP first-draft prelaunch was not consumed";
@@ -1847,6 +1908,9 @@ void MTPWorkerImpl::enqueue_next_first_draft(
       validate_output.next_tokens,
       validate_output.embeddings,
       embedding_cache_->embedding_placeholder(),
+      base_positions,
+      base_kv_seq_lens,
+      ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel(),
       options_.block_size());
 
   pending_draft_context_.embedding_ids =
@@ -2157,7 +2221,8 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
     const ForwardInput& base_input,
     const std::vector<EmbeddingCache::DecodeState>& last_states,
     ForwardInput& extend_input,
-    Stream& preparation_stream) {
+    Stream& preparation_stream,
+    bool force_two_rows) {
   c10::StreamGuard stream_guard = preparation_stream.set_stream_guard();
   extend_input = base_input;
   extend_input.sampling_params.return_probs =
@@ -2254,7 +2319,8 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
       selected_row_idx.emplace_back(2 * seq_id + 1);
       continue;
     }
-    const bool use_two_rows = dp_enabled || state.all_draft_accepted;
+    const bool use_two_rows =
+        force_two_rows || dp_enabled || state.all_draft_accepted;
     if (use_two_rows) {
       int32_t prev_token_id = state.prev_token_id;
       int32_t prev_position_offset = -1;
@@ -2351,7 +2417,7 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
       params.selected_token_idxes.defined()
           ? params.selected_token_idxes.options()
           : torch::dtype(torch::kInt).device(device_);
-  if (use_chunked_prefill || dp_enabled) {
+  if (use_chunked_prefill || dp_enabled || force_two_rows) {
     // These layouts always append two rows per sequence and select the second
     // row.  Build the tiny control tensor directly on device; copying a
     // temporary pinned CPU tensor forces its allocator to synchronize before
