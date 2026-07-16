@@ -1011,6 +1011,36 @@ TEST(ContinuousSchedulerTest, BatchRejectedStreamsCancelAtSchedulingBoundary) {
   EXPECT_TRUE(requests[1]->cancelled());
   EXPECT_TRUE(scheduler->get_running_requests().empty());
 }
+
+TEST(ContinuousSchedulerTest,
+     BatchStreamMarksPrefillFinishedWhenFirstTokenDecodesEmpty) {
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(1024, 16, 0, 1024, 1);
+  auto engine = std::make_unique<FakeEngine>(32, 4);
+  auto scheduler = std::make_unique<TestContinuousScheduler>(engine.get(), opt);
+
+  auto request = generate_request_with_prompt_tokens({1, 2, 3, 4}, 4, 30000);
+  request->state().stream = true;
+  make_request_decode_ready(request);
+
+  bool callback_called = false;
+  bool outputs_empty = false;
+  bool finished_on_prefill_instance = false;
+  request->state().outputs_func =
+      [&](const std::vector<RequestOutput>& outputs) {
+        callback_called = true;
+        outputs_empty = outputs.size() == 1 && outputs[0].outputs.empty();
+        finished_on_prefill_instance =
+            outputs.size() == 1 && outputs[0].finished_on_prefill_instance;
+        return std::vector<bool>{true};
+      };
+
+  scheduler->reject_streams({request});
+
+  EXPECT_TRUE(callback_called);
+  EXPECT_TRUE(outputs_empty);
+  EXPECT_TRUE(finished_on_prefill_instance);
+}
 // ============== Async RL training: Pause/Resume tests ==============
 
 // TEST: pause()/resume() state transitions are correct and idempotent.
