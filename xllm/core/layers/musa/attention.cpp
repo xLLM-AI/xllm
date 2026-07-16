@@ -33,7 +33,6 @@ BaseAttentionImpl::BaseAttentionImpl(int64_t num_heads,
       scale_(scale),
       num_kv_heads_(num_kv_heads),
       sliding_window_(sliding_window) {
-
   decode_use_tensor_core_ = false;
 }
 
@@ -52,7 +51,6 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
     torch::Tensor& key,
     torch::Tensor& value,
     KVCache& kv_cache) {
-
   torch::Tensor output;
   const bool decode_path =
       !attn_metadata.is_prefill && !attn_metadata.is_chunked_prefill;
