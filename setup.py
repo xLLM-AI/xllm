@@ -336,12 +336,34 @@ class ExtBuild(build_ext):
             cmake_args += ["-DUSE_MLU=ON"]
             set_mlu_envs()
         elif self.device == "cuda":
+            use_musa = os.getenv("USE_MUSA", "").lower() in (
+                "1",
+                "on",
+                "true",
+                "yes",
+            ) or "-DUSE_MUSA" in os.getenv("CMAKE_ARGS", "")
             torch_cuda_architectures = os.getenv("TORCH_CUDA_ARCH_LIST")
-            if not torch_cuda_architectures:
-                raise ValueError("Please set TORCH_CUDA_ARCH_LIST environment variable, e.g. export TORCH_CUDA_ARCH_LIST=\"8.0 8.9 9.0 10.0 12.0\"")
-            cmake_args += ["-DUSE_CUDA=ON",
-                           f"-DTORCH_CUDA_ARCH_LIST={torch_cuda_architectures}"]
-            set_cuda_envs()
+            if use_musa:
+                if not torch_cuda_architectures:
+                    torch_cuda_architectures = "9.0"
+                cmake_args += [
+                    "-DUSE_MUSA:BOOL=ON",
+                    f"-DTORCH_CUDA_ARCH_LIST={torch_cuda_architectures}",
+                    "-DCMAKE_CUDA_ARCHITECTURES=90",
+                    "-DBUILD_TESTING=OFF",
+                ]
+                set_musa_envs()
+            else:
+                if not torch_cuda_architectures:
+                    raise ValueError(
+                        "Please set TORCH_CUDA_ARCH_LIST environment variable, "
+                        'e.g. export TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 10.0 12.0"'
+                    )
+                cmake_args += [
+                    "-DUSE_CUDA=ON",
+                    f"-DTORCH_CUDA_ARCH_LIST={torch_cuda_architectures}",
+                ]
+                set_cuda_envs()
 
         elif self.device == "dcu":
             import torch

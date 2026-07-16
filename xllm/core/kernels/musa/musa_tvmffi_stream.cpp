@@ -19,7 +19,7 @@ limitations under the License.
 #include <c10/core/Device.h>
 #include <glog/logging.h>
 #include <tvm/ffi/extra/c_env_api.h>
-#if !defined(XLLM_TORCH_MUSA)
+#if !defined(USE_MUSA)
 #include <c10/cuda/CUDAGuard.h>
 #endif
 #include <dlfcn.h>
@@ -37,7 +37,7 @@ limitations under the License.
 #include "core/util/env_var.h"
 #include "core/util/utils.h"
 
-#if defined(XLLM_TORCH_MUSA)
+#if defined(USE_MUSA)
 
 #include <array>
 #include <optional>
@@ -78,6 +78,17 @@ bool is_current_stream_capturing() {
          c10::musa::CaptureStatus::None;
 }
 
+// Returns true when the current per-thread MUSA stream has a valid
+// (non-null) handle.  In eager mode on worker threads that have not yet
+// executed any PyTorch MUSA op, the stream pool is uninitialized and
+// getCurrentMUSAStream returns a null handle.
+bool current_musa_stream_is_valid(c10::DeviceIndex device_index) {
+  c10::musa::MUSAGuard device_guard(device_index);
+  void* const stream = reinterpret_cast<void*>(
+      c10::musa::getCurrentMUSAStream(device_index).stream());
+  return stream != nullptr;
+}
+
 }  // namespace
 
 void bind_musa_tvmffi_stream(const torch::Device& device) {
@@ -86,15 +97,24 @@ void bind_musa_tvmffi_stream(const torch::Device& device) {
   }
   c10::musa::MUSAGuard device_guard(device.index());
   c10::musa::MUSAStream musa_stream =
-      is_current_stream_capturing()
-          ? c10::musa::getCurrentMUSAStream(device.index())
-          : get_or_create_tvmffi_musa_stream(device.index());
+      c10::musa::getCurrentMUSAStream(device.index());
   void* const stream = reinterpret_cast<void*>(musa_stream.stream());
-  if (stream == nullptr) {
+  if (stream != nullptr) {
+    set_tvmffi_stream_handle(device.index(), stream);
+    return;
+  }
+  // Eager-mode fallback: the per-thread MUSA stream pool is not yet
+  // initialized on this thread, so getCurrentMUSAStream returns null.
+  // Fall back to the dedicated FFI pool stream.  Callers that use the
+  // guard must sync before/after because the FFI kernel now runs on a
+  // different stream from the PyTorch compute stream.
+  musa_stream = get_or_create_tvmffi_musa_stream(device.index());
+  void* const pool_stream = reinterpret_cast<void*>(musa_stream.stream());
+  if (pool_stream == nullptr) {
     LOG(ERROR) << "[tvmffi.stream] MUSA stream handle is null on " << device;
     return;
   }
-  set_tvmffi_stream_handle(device.index(), stream);
+  set_tvmffi_stream_handle(device.index(), pool_stream);
 }
 
 void sync_current_musa_stream(const torch::Device& device) {
@@ -124,7 +144,19 @@ MusaTvmffiStreamGuard::MusaTvmffiStreamGuard(const torch::Device& device)
   if (!active_) {
     return;
   }
-  sync_current_musa_stream(device_);
+  // When the current MUSA stream is valid (graph capture or eager mode on
+  // the main inference thread), the FFI kernel runs on the same stream as
+  // PyTorch ops.  Stream ordering guarantees correctness without syncs.
+  // When the current stream is null (eager mode on a worker thread without
+  // an initialized stream pool), bind_musa_tvmffi_stream falls back to the
+  // pool stream.  In that case we must sync the compute stream before the
+  // FFI kernel so it sees prior PyTorch outputs, and sync the FFI stream
+  // after (in the destructor) so subsequent ops see FFI results.
+  const bool capturing = is_current_stream_capturing();
+  needs_sync_ = !capturing && !current_musa_stream_is_valid(device_.index());
+  if (needs_sync_) {
+    sync_current_musa_stream(device_);
+  }
   bind_musa_tvmffi_stream(device_);
 }
 
@@ -132,7 +164,9 @@ MusaTvmffiStreamGuard::~MusaTvmffiStreamGuard() {
   if (!active_) {
     return;
   }
-  sync_musa_ffi_stream(device_);
+  if (needs_sync_) {
+    sync_musa_ffi_stream(device_);
+  }
 }
 
 }  // namespace xllm::kernel::cuda
@@ -563,6 +597,50 @@ void ensure_tvm_ffi_tensor_allocator() {
 
 namespace xllm::kernel::cuda {
 
+bool ensure_tilelang_musa_loader() {
+  static const bool loaded = []() {
+    std::vector<std::string> candidates;
+    const char* explicit_lib = std::getenv("XLLM_TILELANG_LIB");
+    if (explicit_lib != nullptr && explicit_lib[0] != '\0') {
+      candidates.emplace_back(explicit_lib);
+    }
+
+    const char* tvm_library_path = std::getenv("TVM_LIBRARY_PATH");
+    if (tvm_library_path != nullptr && tvm_library_path[0] != '\0') {
+      std::stringstream paths(tvm_library_path);
+      std::string path;
+      while (std::getline(paths, path, ':')) {
+        if (!path.empty()) {
+          candidates.emplace_back(path + "/libtilelang.so");
+        }
+      }
+    }
+    candidates.emplace_back("libtilelang.so");
+
+    std::string last_error;
+    for (const std::string& candidate : candidates) {
+      dlerror();
+      void* handle = dlopen(candidate.c_str(), RTLD_NOW | RTLD_GLOBAL);
+      if (handle != nullptr) {
+        VLOG(1) << "[tvmffi] registered TileLang MUSA module loader from "
+                << candidate;
+        return true;
+      }
+      const char* error = dlerror();
+      if (error != nullptr) {
+        last_error = error;
+      }
+    }
+
+    LOG_FIRST_N(WARNING, 1)
+        << "[tvmffi] failed to load libtilelang; TileLang FFI kernels are "
+           "unavailable. Set XLLM_TILELANG_LIB to libtilelang.so. dlerror="
+        << (last_error.empty() ? "unknown" : last_error);
+    return false;
+  }();
+  return loaded;
+}
+
 void begin_ffi_alloc_record() {
   CHECK(g_ffi_alloc_state.mode == FfiAllocMode::kPassthrough)
       << "begin_ffi_alloc_record: must be entered from kPassthrough; current="
@@ -603,12 +681,11 @@ FfiAllocMode get_ffi_alloc_mode() { return g_ffi_alloc_state.mode; }
 
 void bind_tvmffi_stream_to_current_torch_stream(const torch::Device& device) {
   if (is_torch_musa_device(device)) {
-    sync_current_musa_stream(device);
     bind_musa_tvmffi_stream(device);
     return;
   }
 
-#if !defined(XLLM_TORCH_MUSA)
+#if !defined(USE_MUSA)
   const c10::cuda::CUDAStream cur =
       c10::cuda::getCurrentCUDAStream(device.index());
   void* const stream = reinterpret_cast<void*>(cur.stream());
@@ -801,6 +878,12 @@ ffi::Module get_module(const std::string& uri) {
 
   ensure_tvm_ffi_global_symbols();
   ensure_tvm_ffi_tensor_allocator();
+  // TileLang device kernels are packaged as ffi.Module.load_from_bytes.musa;
+  // without this registration LoadFromFile aborts the process.
+  CHECK(ensure_tilelang_musa_loader())
+      << "TileLang MUSA FFI loader unavailable; set XLLM_TILELANG_LIB to "
+         "libtilelang.so before loading Mate/FlashInfer ops (uri="
+      << uri << ")";
   std::string so_file_path = path_to_uri_so_lib(uri);
   auto mod = ffi::Module::LoadFromFile(so_file_path);
   module_cache.emplace(uri, mod);
