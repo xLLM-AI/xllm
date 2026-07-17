@@ -189,7 +189,7 @@ class CausalConv1dDecodeKernel(TilelangKernel):
         for d in sorted(
             {
                 dim // tp
-                for dim in [2048, 4096, 5120, 8192, 10240]
+                for dim in [2048, 4096, 5120, 6144, 8192, 10240]
                 for tp in [1, 2, 4, 8]
                 if dim % tp == 0
             }
