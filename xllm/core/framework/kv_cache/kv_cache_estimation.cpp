@@ -244,6 +244,9 @@ int64_t calculate_linear_state_blocks(int64_t cache_size_in_bytes,
                                       bool enable_prefix_cache) {
   CHECK_GE(max_linear_state_cache_slots, 0)
       << "max_linear_state_cache_slots must be greater than or equal to 0.";
+  if (num_linear_attention_layers <= 0 || linear_slot_size <= 0) {
+    return kPaddingLinearStateBlocks;
+  }
   const int64_t max_blocks =
       max_linear_state_blocks(cache_size_in_bytes,
                               num_linear_attention_layers,
