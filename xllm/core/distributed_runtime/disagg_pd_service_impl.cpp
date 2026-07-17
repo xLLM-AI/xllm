@@ -177,16 +177,32 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
       resp->set_dp_rank(dp_rank);
       resp->set_linear_state_id(sequence->get_single_block_id());
 
-      size_t shared_num = sequence->kv_state().shared_blocks_num(BlockType::KV);
-      auto blocks = sequence->kv_state().blocks(BlockType::KV);
-
-      // Collect block IDs
       std::vector<int32_t> block_ids;
-      block_ids.reserve(blocks.size() - shared_num);
-      for (size_t i = shared_num; i < blocks.size(); i++) {
-        int32_t block_id = blocks[i].id();
-        *(resp->mutable_blocks_ids()->Add()) = block_id;
-        block_ids.push_back(block_id);
+      if (sequence->kv_state().has_multi_block_export()) {
+        const auto export_view = sequence->kv_state().multi_block_export_view();
+        for (const auto& [block_type, blocks_ptr] : export_view) {
+          auto* group = resp->mutable_kv_block_groups()->Add();
+          group->set_group_id(cache_group_id(block_type));
+          group->mutable_block_ids()->Reserve(blocks_ptr->size());
+          for (const auto& block : *blocks_ptr) {
+            CHECK(block.is_valid())
+                << "Decode allocated an invalid grouped KV block, group_id="
+                << cache_group_id(block_type);
+            group->mutable_block_ids()->Add(block.id());
+          }
+        }
+      } else {
+        const size_t shared_num =
+            sequence->kv_state().shared_blocks_num(BlockType::KV);
+        const auto blocks = sequence->kv_state().blocks(BlockType::KV);
+
+        // Collect block IDs
+        block_ids.reserve(blocks.size() - shared_num);
+        for (size_t i = shared_num; i < blocks.size(); i++) {
+          int32_t block_id = blocks[i].id();
+          *(resp->mutable_blocks_ids()->Add()) = block_id;
+          block_ids.push_back(block_id);
+        }
       }
       // XTensor mode: calculate and return GlobalXTensor offsets
       if (::xllm::KVCacheConfig::get_instance().enable_xtensor() &&

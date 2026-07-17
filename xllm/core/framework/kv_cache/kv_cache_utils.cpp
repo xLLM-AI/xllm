@@ -59,7 +59,29 @@ void free_acl_tensor(void* ptr) {
   CHECK(acl_ret == ACL_SUCCESS)
       << "aclrtFree failed, ret=" << std::hex << acl_ret << ", ptr=" << ptr;
 }
+#endif
 
+// Per-token fp32 scale tensor, shaped as the cache shape with the trailing
+// (head_dim) dimension removed.
+torch::Tensor alloc_scale(const std::vector<int64_t>& cache_shape,
+                          const torch::Device& device) {
+  std::vector<int64_t> scale_shape(cache_shape.begin(), cache_shape.end() - 1);
+  return torch::zeros(scale_shape,
+                      torch::dtype(torch::kFloat32).device(device));
+}
+
+#if defined(USE_MLU)
+torch::Tensor alloc_mlu_scale_for_transfer(
+    const std::vector<int64_t>& scale_shape,
+    const torch::Device& device) {
+  return mlu::alloc_rdma_registerable_zero_tensor(
+      scale_shape, torch::kFloat32, device);
+}
+#endif
+
+}  // namespace
+
+#if defined(USE_NPU)
 torch::Tensor alloc_npu_huge_page_tensor(const std::vector<int64_t>& dims,
                                          torch::ScalarType dtype,
                                          aclFormat format) {
@@ -90,26 +112,6 @@ torch::Tensor alloc_npu_huge_page_tensor(const std::vector<int64_t>& dims,
   return tensor;
 }
 #endif
-
-// Per-token fp32 scale tensor, shaped as the cache shape with the trailing
-// (head_dim) dimension removed.
-torch::Tensor alloc_scale(const std::vector<int64_t>& cache_shape,
-                          const torch::Device& device) {
-  std::vector<int64_t> scale_shape(cache_shape.begin(), cache_shape.end() - 1);
-  return torch::zeros(scale_shape,
-                      torch::dtype(torch::kFloat32).device(device));
-}
-
-#if defined(USE_MLU)
-torch::Tensor alloc_mlu_scale_for_transfer(
-    const std::vector<int64_t>& scale_shape,
-    const torch::Device& device) {
-  return mlu::alloc_rdma_registerable_zero_tensor(
-      scale_shape, torch::kFloat32, device);
-}
-#endif
-
-}  // namespace
 
 bool is_linear_attention_layer(int64_t layer_idx,
                                int64_t full_attention_interval) {

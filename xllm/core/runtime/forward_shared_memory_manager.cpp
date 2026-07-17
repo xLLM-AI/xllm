@@ -208,6 +208,16 @@ inline size_t get_xtensor_layer_offsets_size(
   return total;
 }
 
+inline size_t get_block_transfer_groups_size(
+    const std::vector<KVBlockTransferGroup>& groups) {
+  size_t total = type_size<uint64_t>;
+  for (const auto& group : groups) {
+    total += type_size<int32_t> + get_vector_size(group.local_blocks_ids) +
+             get_vector_size(group.remote_blocks_ids);
+  }
+  return total;
+}
+
 inline size_t get_transfer_kv_info_size(const TransferKVInfo& info) {
   return get_string_size(info.request_id) +
          get_vector_size(info.local_blocks_ids) +
@@ -216,7 +226,8 @@ inline size_t get_transfer_kv_info_size(const TransferKVInfo& info) {
          get_vector_size(info.remote_linear_state_ids) +
          type_size<int32_t>  // dp_rank
          + get_instance_info_size(info.remote_instance_info) +
-         get_xtensor_layer_offsets_size(info.dst_xtensor_layer_offsets);
+         get_xtensor_layer_offsets_size(info.dst_xtensor_layer_offsets) +
+         get_block_transfer_groups_size(info.block_transfer_groups);
 }
 
 inline size_t get_eplb_info_size(const EplbInfo& info) {
@@ -756,6 +767,28 @@ inline void write_xtensor_layer_offsets(
   }
 }
 
+inline void write_block_transfer_groups(
+    char*& buffer,
+    const std::vector<KVBlockTransferGroup>& groups) {
+  write_data(buffer, static_cast<uint64_t>(groups.size()));
+  for (const auto& group : groups) {
+    write_data(buffer, group.group_id);
+    write_vector(buffer, group.local_blocks_ids);
+    write_vector(buffer, group.remote_blocks_ids);
+  }
+}
+
+inline void write_block_transfer_groups(
+    RawInputSerializeContext& context,
+    const std::vector<KVBlockTransferGroup>& groups) {
+  write_data(context.descriptor, static_cast<uint64_t>(groups.size()));
+  for (const auto& group : groups) {
+    write_data(context.descriptor, group.group_id);
+    write_vector(context.descriptor, group.local_blocks_ids);
+    write_vector(context.descriptor, group.remote_blocks_ids);
+  }
+}
+
 inline void write_xtensor_layer_offsets(
     RawInputSerializeContext& context,
     const std::vector<XTensorLayerOffsets>& offsets) {
@@ -775,6 +808,7 @@ inline void write_transfer_kv_info(char*& buffer, const TransferKVInfo& info) {
   write_data(buffer, info.dp_rank);
   write_instance_info(buffer, info.remote_instance_info);
   write_xtensor_layer_offsets(buffer, info.dst_xtensor_layer_offsets);
+  write_block_transfer_groups(buffer, info.block_transfer_groups);
 }
 
 inline void write_transfer_kv_info(RawInputSerializeContext& context,
@@ -787,6 +821,7 @@ inline void write_transfer_kv_info(RawInputSerializeContext& context,
   write_data(context.descriptor, info.dp_rank);
   write_instance_info(context, info.remote_instance_info);
   write_xtensor_layer_offsets(context, info.dst_xtensor_layer_offsets);
+  write_block_transfer_groups(context, info.block_transfer_groups);
 }
 
 inline void write_eplb_info(char*& buffer, const EplbInfo& info) {
@@ -1622,6 +1657,32 @@ inline void read_xtensor_layer_offsets(
   }
 }
 
+inline void read_block_transfer_groups(
+    const char*& buffer,
+    std::vector<KVBlockTransferGroup>& groups) {
+  uint64_t group_count;
+  read_data(buffer, group_count);
+  groups.resize(group_count);
+  for (auto& group : groups) {
+    read_data(buffer, group.group_id);
+    read_vector(buffer, group.local_blocks_ids);
+    read_vector(buffer, group.remote_blocks_ids);
+  }
+}
+
+inline void read_block_transfer_groups(
+    ReadContext& context,
+    std::vector<KVBlockTransferGroup>& groups) {
+  uint64_t group_count;
+  read_data(context, group_count);
+  groups.resize(group_count);
+  for (auto& group : groups) {
+    read_data(context, group.group_id);
+    read_vector(context, group.local_blocks_ids);
+    read_vector(context, group.remote_blocks_ids);
+  }
+}
+
 inline void read_xtensor_layer_offsets(
     ReadContext& context,
     std::vector<XTensorLayerOffsets>& offsets) {
@@ -1643,6 +1704,7 @@ inline void read_transfer_kv_info(const char*& buffer, TransferKVInfo& info) {
   read_data(buffer, info.dp_rank);
   read_instance_info(buffer, info.remote_instance_info);
   read_xtensor_layer_offsets(buffer, info.dst_xtensor_layer_offsets);
+  read_block_transfer_groups(buffer, info.block_transfer_groups);
 }
 
 inline void read_transfer_kv_info(ReadContext& context, TransferKVInfo& info) {
@@ -1654,6 +1716,7 @@ inline void read_transfer_kv_info(ReadContext& context, TransferKVInfo& info) {
   read_data(context, info.dp_rank);
   read_instance_info(context, info.remote_instance_info);
   read_xtensor_layer_offsets(context, info.dst_xtensor_layer_offsets);
+  read_block_transfer_groups(context, info.block_transfer_groups);
 }
 
 inline void read_eplb_info(const char*& buffer, EplbInfo& info) {

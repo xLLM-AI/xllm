@@ -797,7 +797,6 @@ bool MTPWorkerImpl::allocate_kv_cache_with_transfer(
     kv_cache_transfer_ = std::make_shared<SpecKVCacheTransfer>(
         options_.transfer_listen_port(),
         options_.instance_role(),
-        context_.get_model_args().model_type(),
         context_.get_model_args().index_n_heads() > 0);
 #elif defined(USE_MLU)
     CHECK_EQ(::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type(),

@@ -302,6 +302,13 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
                                      kv_caches[i],
                                      modified_input_params,
                                      tokens);
+#if defined(USE_NPU)
+      if (modified_input_params.parallel.layer_synchronizer != nullptr &&
+          !modified_input_params.parallel.layer_synchronizer->record_event(
+              static_cast<int64_t>(i), runtime_device.index())) {
+        return ModelOutput();
+      }
+#endif
     }
 
     auto [output, _] = final_norm_(hidden_states, std::nullopt);

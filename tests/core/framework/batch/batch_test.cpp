@@ -61,6 +61,22 @@ class BatchInputBuilderTestPeer final {
         block_size,
         advanced_transfer_block_idx);
   }
+
+  static KVBlockTransferGroup build_group_step_transfer(
+      const KVBlockTransferGroup& full_group,
+      const std::vector<int32_t>& local_block_ids,
+      size_t next_transfer_block_idx,
+      uint32_t seq_len,
+      uint32_t block_size,
+      size_t* advanced_transfer_block_idx) {
+    return BatchInputBuilder::build_group_step_transfer(
+        full_group,
+        local_block_ids,
+        next_transfer_block_idx,
+        seq_len,
+        block_size,
+        advanced_transfer_block_idx);
+  }
 };
 
 template <typename T>
@@ -146,6 +162,14 @@ LinearStatePrefixHash compute_linear_state_prefix_hash_for_test(
     previous_hash = hash.data();
   }
   return hash;
+}
+
+KVBlockTransferGroup make_dsv4_group(
+    const std::vector<uint64_t>& remote_block_ids) {
+  KVBlockTransferGroup group;
+  group.group_id = cache_group_id(BlockType::C4);
+  group.remote_blocks_ids = remote_block_ids;
+  return group;
 }
 
 Sequence make_basic_sequence(const std::vector<int32_t>& prompt_token_ids) {
@@ -320,6 +344,62 @@ TEST(BatchInputBuilderTest, RemoteCoverageShortageDies) {
         (void)info;
       },
       "remote");
+}
+
+TEST(BatchInputBuilderTest, DSV4FirstChunkSlicesFullRemoteAllocation) {
+  const KVBlockTransferGroup full_group = make_dsv4_group({100, 101, 102, 103});
+  size_t advanced_transfer_block_idx = 0;
+
+  const KVBlockTransferGroup step_group =
+      BatchInputBuilderTestPeer::build_group_step_transfer(
+          full_group,
+          /*local_block_ids=*/{10, 11},
+          /*next_transfer_block_idx=*/0,
+          /*seq_len=*/32,
+          /*block_size=*/16,
+          &advanced_transfer_block_idx);
+
+  EXPECT_EQ(step_group.local_blocks_ids, (std::vector<uint64_t>{10, 11}));
+  EXPECT_EQ(step_group.remote_blocks_ids, (std::vector<uint64_t>{100, 101}));
+  EXPECT_EQ(advanced_transfer_block_idx, 2u);
+}
+
+TEST(BatchInputBuilderTest, DSV4LaterChunkSkipsExpiredSWABlocks) {
+  KVBlockTransferGroup full_group = make_dsv4_group({100, 101, 102, 103});
+  full_group.group_id = cache_group_id(BlockType::SWA);
+  size_t advanced_transfer_block_idx = 2;
+
+  const KVBlockTransferGroup step_group =
+      BatchInputBuilderTestPeer::build_group_step_transfer(
+          full_group,
+          /*local_block_ids=*/{-1, -1, 12, 13},
+          /*next_transfer_block_idx=*/2,
+          /*seq_len=*/64,
+          /*block_size=*/16,
+          &advanced_transfer_block_idx);
+
+  EXPECT_EQ(step_group.local_blocks_ids, (std::vector<uint64_t>{12, 13}));
+  EXPECT_EQ(step_group.remote_blocks_ids, (std::vector<uint64_t>{102, 103}));
+  EXPECT_EQ(advanced_transfer_block_idx, 4u);
+}
+
+TEST(BatchInputBuilderTest, DSV4PartialBlockIsRepeatedOnNextChunk) {
+  const KVBlockTransferGroup full_group = make_dsv4_group({100, 101, 102});
+  size_t advanced_transfer_block_idx = 0;
+
+  const KVBlockTransferGroup step_group =
+      BatchInputBuilderTestPeer::build_group_step_transfer(
+          full_group,
+          /*local_block_ids=*/{10, 11, 12},
+          /*next_transfer_block_idx=*/0,
+          /*seq_len=*/33,
+          /*block_size=*/16,
+          &advanced_transfer_block_idx);
+
+  EXPECT_EQ(step_group.local_blocks_ids, (std::vector<uint64_t>{10, 11, 12}));
+  EXPECT_EQ(step_group.remote_blocks_ids,
+            (std::vector<uint64_t>{100, 101, 102}));
+  EXPECT_EQ(advanced_transfer_block_idx, 2u);
 }
 
 TEST(BatchTest, ProcessSampleOutputStoresMtpBootstrapEmbedding) {
@@ -1491,6 +1571,15 @@ TEST(BatchTest, SharedMemoryRoundTripPreservesLinearStateIds) {
       forward_input.input_params.attention.device.block_tables;
   forward_input.input_params.embedding.linear_state_ids = {4, 6};
 
+  TransferKVInfo transfer_info;
+  transfer_info.request_id = "dsv4-round-trip";
+  KVBlockTransferGroup transfer_group;
+  transfer_group.group_id = cache_group_id(BlockType::C128);
+  transfer_group.local_blocks_ids = {11, 12};
+  transfer_group.remote_blocks_ids = {101, 102, 103, 104};
+  transfer_info.block_transfer_groups.emplace_back(std::move(transfer_group));
+  forward_input.transfer_kv_infos.emplace_back(std::move(transfer_info));
+
   bool is_creator = false;
   auto shm_name =
       ForwardSharedMemoryManager::create_unique_name("batch_test_linear_state",
@@ -1508,6 +1597,15 @@ TEST(BatchTest, SharedMemoryRoundTripPreservesLinearStateIds) {
   reader_manager.input_read(from_shm, torch::Device(torch::kCPU));
   EXPECT_EQ(from_shm.input_params.embedding.linear_state_ids,
             std::vector<int32_t>({4, 6}));
+  ASSERT_EQ(from_shm.transfer_kv_infos.size(), 1u);
+  EXPECT_EQ(from_shm.transfer_kv_infos[0].request_id, "dsv4-round-trip");
+  ASSERT_EQ(from_shm.transfer_kv_infos[0].block_transfer_groups.size(), 1u);
+  const auto& from_shm_group =
+      from_shm.transfer_kv_infos[0].block_transfer_groups[0];
+  EXPECT_EQ(from_shm_group.group_id, cache_group_id(BlockType::C128));
+  EXPECT_EQ(from_shm_group.local_blocks_ids, (std::vector<uint64_t>{11, 12}));
+  EXPECT_EQ(from_shm_group.remote_blocks_ids,
+            (std::vector<uint64_t>{101, 102, 103, 104}));
 
   forward_input.input_params.embedding.linear_state_ids.clear();
   ASSERT_TRUE(writer_manager.input_write(forward_input));

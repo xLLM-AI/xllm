@@ -303,6 +303,17 @@ void KVCacheState::advance_transfer_block_idx(size_t idx) {
   next_transfer_block_idx_ = std::max(next_transfer_block_idx_, idx);
 }
 
+size_t KVCacheState::next_group_transfer_block_idx(BlockType type) const {
+  const auto it = next_group_transfer_block_idxes_.find(type);
+  return it == next_group_transfer_block_idxes_.end() ? 0 : it->second;
+}
+
+void KVCacheState::advance_group_transfer_block_idx(BlockType type,
+                                                    size_t idx) {
+  size_t& cursor = next_group_transfer_block_idxes_[type];
+  cursor = std::max(cursor, idx);
+}
+
 void KVCacheState::reset() {
   kv_cache_tokens_num_ = 0;
   num_owned_shared_blocks_.clear();
@@ -312,6 +323,7 @@ void KVCacheState::reset() {
   next_transfer_block_idx_ = 0;
   pending_linear_save_hash_.reset();
   linear_restore_src_block_.reset();
+  next_group_transfer_block_idxes_.clear();
 }
 
 void KVCacheState::process_beam_search(std::optional<Block> new_block) {

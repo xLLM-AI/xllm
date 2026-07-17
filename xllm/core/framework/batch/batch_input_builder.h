@@ -75,6 +75,14 @@ class BatchInputBuilder {
       uint32_t block_size,
       size_t* advanced_transfer_block_idx);
 
+  static KVBlockTransferGroup build_group_step_transfer(
+      const KVBlockTransferGroup& full_group,
+      const std::vector<int32_t>& local_block_ids,
+      size_t next_transfer_block_idx,
+      uint32_t seq_len,
+      uint32_t block_size,
+      size_t* advanced_transfer_block_idx);
+
   void process_swap_block_infos(ForwardInput& forward_input);
 
   // State management
@@ -113,7 +121,7 @@ class BatchInputBuilder {
     // Cache and block data
     std::vector<int32_t> new_token_slot_ids;
     std::vector<std::vector<int32_t>> block_tables_vec;
-    // multi block manager support for DeepSeek V4
+    // Grouped cache block tables.
     // [manager_num][batch_size][block_ids]
     std::vector<std::vector<std::vector<int32_t>>> multi_block_tables;
 

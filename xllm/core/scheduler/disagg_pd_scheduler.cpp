@@ -15,7 +15,6 @@ limitations under the License.
 
 #include "scheduler/disagg_pd_scheduler.h"
 
-#include <absl/strings/str_join.h>
 #include <absl/time/clock.h>
 #include <absl/time/time.h>
 #include <brpc/server.h>
@@ -553,24 +552,40 @@ void DisaggPDScheduler::dispatch_requests() {
         for (auto& sequence : requests[i]->sequences()) {
           TransferKVInfo info;
           info.request_id = requests[i]->request_id();
-          for (auto& bid : resps.resps()[i].blocks_ids()) {
-            info.remote_blocks_ids.emplace_back(bid);
+          const auto& resp = resps.resps()[i];
+          const bool has_grouped_cache = resp.kv_block_groups_size() > 0;
+          if (has_grouped_cache) {
+            for (const auto& resp_group : resp.kv_block_groups()) {
+              KVBlockTransferGroup group;
+              group.group_id = resp_group.group_id();
+              group.remote_blocks_ids.reserve(resp_group.block_ids_size());
+              for (const int32_t block_id : resp_group.block_ids()) {
+                group.remote_blocks_ids.emplace_back(
+                    static_cast<uint64_t>(block_id));
+              }
+              info.block_transfer_groups.emplace_back(std::move(group));
+            }
+          } else {
+            for (const int32_t block_id : resp.blocks_ids()) {
+              info.remote_blocks_ids.emplace_back(
+                  static_cast<uint64_t>(block_id));
+            }
           }
-          if (resps.resps()[i].linear_state_id() >= 0) {
-            info.remote_linear_state_ids.emplace_back(
-                resps.resps()[i].linear_state_id());
+          if (resp.linear_state_id() >= 0) {
+            info.remote_linear_state_ids.emplace_back(resp.linear_state_id());
           }
-          const size_t prompt_blocks =
-              (requests[i]->state().prompt_tokens.size() +
-               kv_cache_manager_->block_size() - 1) /
-              kv_cache_manager_->block_size();
-          info.local_blocks_ids.resize(prompt_blocks);
+          if (!has_grouped_cache) {
+            const size_t prompt_blocks =
+                (requests[i]->state().prompt_tokens.size() +
+                 kv_cache_manager_->block_size() - 1) /
+                kv_cache_manager_->block_size();
+            info.local_blocks_ids.resize(prompt_blocks);
+          }
           info.dp_rank = resps.resps()[i].dp_rank();
           // TODO: remote_instances_info_ is not multi-thread safe.
           info.remote_instance_info = remote_instances_info_[selected_instance];
 
           // XTensor mode: save destination offsets from D-node
-          const auto& resp = resps.resps()[i];
           if (resp.xtensor_layer_offsets_size() > 0) {
             info.dst_xtensor_layer_offsets.reserve(
                 resp.xtensor_layer_offsets_size());
@@ -590,7 +605,7 @@ void DisaggPDScheduler::dispatch_requests() {
           sequence->kv_state().set_transfer_kv_info(std::move(info));
         }
 
-        // push to request_queue_, and will be executed by engine.
+        // Push to request_queue_; it will be executed by the engine.
         request_queue_.write(requests[i]);
       }
     }

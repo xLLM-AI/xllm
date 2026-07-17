@@ -297,6 +297,56 @@ TransferKVInfo BatchInputBuilder::build_step_transfer_info(
   return info;
 }
 
+KVBlockTransferGroup BatchInputBuilder::build_group_step_transfer(
+    const KVBlockTransferGroup& full_group,
+    const std::vector<int32_t>& local_block_ids,
+    size_t next_transfer_block_idx,
+    uint32_t seq_len,
+    uint32_t block_size,
+    size_t* advanced_transfer_block_idx) {
+  CHECK(advanced_transfer_block_idx != nullptr);
+  *advanced_transfer_block_idx = next_transfer_block_idx;
+
+  KVBlockTransferGroup step_group;
+  step_group.group_id = full_group.group_id;
+  if (block_size == 0 || local_block_ids.empty()) {
+    return step_group;
+  }
+
+  const size_t local_size = local_block_ids.size();
+  const size_t remote_size = full_group.remote_blocks_ids.size();
+  const size_t win_begin = next_transfer_block_idx;
+  const size_t win_end =
+      static_cast<size_t>(util::ceil_div(seq_len, block_size));
+  const size_t map_end = std::min(win_end, local_size);
+  CHECK_GE(remote_size, map_end)
+      << "Grouped KV remote block coverage shortage, group_id="
+      << full_group.group_id << ", remote_size=" << remote_size
+      << ", remote_end=" << map_end;
+
+  const size_t stable_end = static_cast<size_t>(seq_len / block_size);
+  *advanced_transfer_block_idx =
+      std::max(next_transfer_block_idx, std::min(stable_end, map_end));
+  if (win_begin >= map_end) {
+    return step_group;
+  }
+
+  const size_t block_count = map_end - win_begin;
+  step_group.local_blocks_ids.reserve(block_count);
+  step_group.remote_blocks_ids.reserve(block_count);
+  for (size_t local_idx = win_begin; local_idx < map_end; ++local_idx) {
+    const int32_t local_block_id = local_block_ids[local_idx];
+    if (local_block_id < 0) {
+      continue;
+    }
+    step_group.local_blocks_ids.emplace_back(
+        static_cast<uint64_t>(local_block_id));
+    step_group.remote_blocks_ids.emplace_back(
+        full_group.remote_blocks_ids[local_idx]);
+  }
+  return step_group;
+}
+
 ForwardInput BatchInputBuilder::build_forward_input(
     uint32_t num_decoding_tokens,
     uint32_t min_decoding_batch_size) {
@@ -875,6 +925,65 @@ void BatchInputBuilder::setup_kv_cache_info(
       }
       state.multi_block_tables[m].emplace_back(std::move(block_ids));
     }
+    const auto& transfer_kv_info = sequence->kv_state().transfer_kv_info();
+    if (transfer_kv_info.has_value() &&
+        !transfer_kv_info->block_transfer_groups.empty()) {
+      TransferKVInfo step_info;
+      step_info.request_id = transfer_kv_info->request_id;
+      step_info.dp_rank = transfer_kv_info->dp_rank;
+      step_info.remote_instance_info = transfer_kv_info->remote_instance_info;
+      step_info.local_linear_state_ids =
+          transfer_kv_info->local_linear_state_ids;
+      step_info.remote_linear_state_ids =
+          transfer_kv_info->remote_linear_state_ids;
+      for (const auto& full_group : transfer_kv_info->block_transfer_groups) {
+        const auto block_type =
+            block_type_from_cache_group_id(full_group.group_id);
+        if (!block_type.has_value()) {
+          LOG(ERROR) << "Unknown KV cache transfer group: "
+                     << full_group.group_id;
+          continue;
+        }
+        const BlockType group_block_type = block_type.value();
+        const auto blocks = sequence->kv_state().blocks(group_block_type);
+        if (blocks.empty() || full_group.remote_blocks_ids.empty()) {
+          continue;
+        }
+
+        uint32_t block_size = 0;
+        std::vector<int32_t> local_block_ids;
+        local_block_ids.reserve(blocks.size());
+        for (const auto& block : blocks) {
+          local_block_ids.emplace_back(block.id());
+          if (block.is_valid()) {
+            block_size = block.size();
+          }
+        }
+        if (block_size == 0) {
+          continue;
+        }
+
+        const size_t next_transfer_block_idx =
+            sequence->kv_state().next_group_transfer_block_idx(
+                group_block_type);
+        size_t advanced_transfer_block_idx = next_transfer_block_idx;
+        KVBlockTransferGroup step_group =
+            build_group_step_transfer(full_group,
+                                      local_block_ids,
+                                      next_transfer_block_idx,
+                                      seq_len,
+                                      block_size,
+                                      &advanced_transfer_block_idx);
+        sequence->kv_state().advance_group_transfer_block_idx(
+            group_block_type, advanced_transfer_block_idx);
+        if (!step_group.local_blocks_ids.empty()) {
+          step_info.block_transfer_groups.emplace_back(std::move(step_group));
+        }
+      }
+      if (!step_info.block_transfer_groups.empty()) {
+        state.transfer_kv_infos.emplace_back(std::move(step_info));
+      }
+    }
     return;
   }
 
@@ -1044,7 +1153,7 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
   input_params.attention.host.block_tables =
       input_params.attention.device.block_tables;
 
-  // Setup multi block tables for DeepSeek V4
+  // Setup grouped cache block tables.
   for (auto& mgr_tables : state_.multi_block_tables) {
     util::pad_2d_vector(mgr_tables, /*pad_value=*/-1);
     input_params.multi_block_tables.push_back(

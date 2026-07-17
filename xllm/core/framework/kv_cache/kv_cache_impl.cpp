@@ -84,6 +84,42 @@ torch::Tensor KVCacheImpl::get_compress_index_state() const {
   return torch::Tensor();
 }
 
+std::vector<KVCacheTensor> KVCacheImpl::get_cache_tensors() const {
+  std::vector<KVCacheTensor> tensors;
+  tensors.reserve(8);
+  auto add_tensor = [&tensors](KVCacheTensorRole role,
+                               const torch::Tensor& tensor,
+                               BlockType block_type) {
+    if (tensor.defined() && tensor.numel() > 0) {
+      tensors.emplace_back(KVCacheTensor{role,
+                                         tensor,
+                                         cache_group_id(block_type),
+                                         block_type == BlockType::SINGLE});
+    }
+  };
+
+  add_tensor(KVCacheTensorRole::KEY, get_k_cache(), BlockType::KV);
+  add_tensor(KVCacheTensorRole::VALUE, get_v_cache(), BlockType::KV);
+  add_tensor(KVCacheTensorRole::INDEX, get_index_cache(), BlockType::KV);
+  const auto index_scale = get_indexer_cache_scale();
+  if (index_scale.has_value()) {
+    add_tensor(
+        KVCacheTensorRole::INDEX_SCALE, index_scale.value(), BlockType::KV);
+  }
+  add_tensor(KVCacheTensorRole::CONV, get_conv_cache(), BlockType::SINGLE);
+  add_tensor(KVCacheTensorRole::SSM, get_ssm_cache(), BlockType::SINGLE);
+  const auto key_scale = get_k_cache_scale();
+  if (key_scale.has_value()) {
+    add_tensor(KVCacheTensorRole::KEY_SCALE, key_scale.value(), BlockType::KV);
+  }
+  const auto value_scale = get_v_cache_scale();
+  if (value_scale.has_value()) {
+    add_tensor(
+        KVCacheTensorRole::VALUE_SCALE, value_scale.value(), BlockType::KV);
+  }
+  return tensors;
+}
+
 bool KVCacheImpl::empty() const {
   return !key_cache_.defined() || !value_cache_.defined();
 }

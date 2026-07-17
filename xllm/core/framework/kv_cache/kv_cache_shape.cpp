@@ -162,7 +162,7 @@ bool KVCacheShape::has_ssm_cache_shape() const {
 }
 
 void KVCacheShape::print_shapes() const {
-  if (shape_kind_ == ShapeKind::DSV4_POOL) {
+  if (shape_kind_ == ShapeKind::GROUPED_POOL) {
     print_dsv4_pool_shape();
     return;
   }
@@ -194,7 +194,7 @@ void KVCacheShape::print_shapes() const {
 }
 
 void KVCacheShape::init_dsv4_pool_shape(const KVCacheCapacity& kv_cache_cap) {
-  shape_kind_ = ShapeKind::DSV4_POOL;
+  shape_kind_ = ShapeKind::GROUPED_POOL;
   key_cache_shape_ = std::vector<int64_t>{kv_cache_cap.swa_count(),
                                           kv_cache_cap.c4_count(),
                                           kv_cache_cap.c128_count()};
@@ -214,6 +214,7 @@ void KVCacheShape::print_dsv4_pool_shape() const {
 void KVCacheShape::to_proto(proto::KVCacheShape* proto_shape) const {
   CHECK(proto_shape != nullptr) << "proto_shape must not be nullptr.";
   proto_shape->Clear();
+  proto_shape->set_grouped_cache_layout(has_grouped_cache_layout());
   add_shape_to_proto(key_cache_shape(), proto_shape->mutable_key_cache_shape());
   if (has_value_cache_shape()) {
     add_shape_to_proto(value_cache_shape(),
@@ -237,6 +238,9 @@ void KVCacheShape::to_proto(proto::KVCacheShape* proto_shape) const {
 
 KVCacheShape KVCacheShape::from_proto(const proto::KVCacheShape& proto_shape) {
   KVCacheShape kv_cache_shape;
+  if (proto_shape.grouped_cache_layout()) {
+    kv_cache_shape.shape_kind_ = ShapeKind::GROUPED_POOL;
+  }
   kv_cache_shape.key_cache_shape_ =
       repeated_field_to_vector(proto_shape.key_cache_shape());
   if (proto_shape.value_cache_shape_size() > 0) {

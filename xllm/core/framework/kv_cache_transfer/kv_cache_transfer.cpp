@@ -190,6 +190,28 @@ void KVCacheTransfer::merge_kv_blocks(
   int32_t src_world_size = parallel_args.world_size();
   int32_t src_tp_size = src_world_size / src_dp_size / src_kv_split_size;
   int32_t src_dp_local_tp_rank = src_rank % src_tp_size;
+  auto append_transfer_groups =
+      [](std::vector<KVBlockTransferGroup>& dst,
+         const std::vector<KVBlockTransferGroup>& src) {
+        for (const auto& src_group : src) {
+          auto it =
+              std::find_if(dst.begin(),
+                           dst.end(),
+                           [&src_group](const KVBlockTransferGroup& group) {
+                             return group.group_id == src_group.group_id;
+                           });
+          if (it == dst.end()) {
+            dst.emplace_back(src_group);
+            continue;
+          }
+          it->local_blocks_ids.insert(it->local_blocks_ids.end(),
+                                      src_group.local_blocks_ids.begin(),
+                                      src_group.local_blocks_ids.end());
+          it->remote_blocks_ids.insert(it->remote_blocks_ids.end(),
+                                       src_group.remote_blocks_ids.begin(),
+                                       src_group.remote_blocks_ids.end());
+        }
+      };
   for (auto& info : transfer_kv_infos) {
     // Obtain the parallel parameters of the destination instance.
     int32_t dst_dp_rank = info.dp_rank;
@@ -242,6 +264,8 @@ void KVCacheTransfer::merge_kv_blocks(
         if (!info.dst_xtensor_layer_offsets.empty()) {
           kv_info.dst_xtensor_layer_offsets = info.dst_xtensor_layer_offsets;
         }
+        append_transfer_groups(kv_info.block_transfer_groups,
+                               info.block_transfer_groups);
 
         merged_kv_infos[key] = std::move(kv_info);
       } else {
@@ -285,6 +309,8 @@ void KVCacheTransfer::merge_kv_blocks(
             }
           }
         }
+        append_transfer_groups(merged_kv_infos[key].block_transfer_groups,
+                               info.block_transfer_groups);
       }
     }
   }
@@ -354,10 +380,8 @@ std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
             << ::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type();
   if (transfer_type == "LlmDataDist") {
 #if defined(USE_NPU)
-    transfer = std::make_shared<LlmDataDistTransfer>(transfer_listen_port,
-                                                     instance_role,
-                                                     model_type,
-                                                     enable_lighting_indexer);
+    transfer = std::make_shared<LlmDataDistTransfer>(
+        transfer_listen_port, instance_role, enable_lighting_indexer);
 
     transfer->initialize(device_id);
     CHECK(allocate_kv_cache_func(kv_cache_shape,

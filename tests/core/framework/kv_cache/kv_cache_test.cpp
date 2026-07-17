@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -211,6 +212,44 @@ TEST(KVCacheTest, DeepSeekV4FourDimCachesUseDeviceLayout) {
             (std::vector<int64_t>{kSwaCount, kBlockSize, 2 * kHeadDim}));
   EXPECT_FALSE(caches[2].get_compress_index_state().defined());
 #endif
+
+  auto expect_tensor_group = [](const KVCache& cache,
+                                KVCacheTensorRole role,
+                                BlockType expected_block_type) {
+    const auto tensors = cache.get_cache_tensors();
+    const auto it = std::find_if(
+        tensors.begin(), tensors.end(), [role](const KVCacheTensor& tensor) {
+          return tensor.role == role;
+        });
+    ASSERT_NE(it, tensors.end()) << "missing role=" << role.to_string();
+    EXPECT_EQ(it->group_id, cache_group_id(expected_block_type))
+        << "role=" << role.to_string();
+    EXPECT_FALSE(it->sequence_scoped);
+  };
+  expect_tensor_group(caches[0], KVCacheTensorRole::WINDOW, BlockType::SWA);
+  expect_tensor_group(caches[1], KVCacheTensorRole::KEY, BlockType::C4);
+  expect_tensor_group(caches[1], KVCacheTensorRole::INDEX, BlockType::C4);
+  expect_tensor_group(caches[1], KVCacheTensorRole::KV_STATE, BlockType::SWA);
+  expect_tensor_group(caches[2], KVCacheTensorRole::KEY, BlockType::C128);
+  expect_tensor_group(
+      caches[2], KVCacheTensorRole::SCORE_STATE, BlockType::SWA);
+}
+
+TEST(KVCacheTest, GroupedCacheCapabilitySurvivesProtoRoundTrip) {
+  KVCacheCapacity capacity;
+  capacity.block_size(128).swa_count(10).c4_count(32).c128_count(1);
+
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4");
+  const KVCacheShape original(capacity, model_args, /*world_size=*/1);
+  ASSERT_TRUE(original.has_grouped_cache_layout());
+
+  proto::KVCacheShape serialized;
+  original.to_proto(&serialized);
+  const KVCacheShape restored = KVCacheShape::from_proto(serialized);
+
+  EXPECT_TRUE(restored.has_grouped_cache_layout());
+  EXPECT_EQ(restored.key_cache_shape(), original.key_cache_shape());
 }
 
 TEST(KVCacheTest, DeepSeekV4KVCacheExposesIndexerScaleThroughSharedContract) {
@@ -229,11 +268,12 @@ TEST(KVCacheTest, DeepSeekV4KVCacheExposesIndexerScaleThroughSharedContract) {
   EXPECT_EQ(shape_vec(cached_scale.value()), (std::vector<int64_t>{2, 4, 1}));
 
   const std::vector<KVCacheTensor> cache_tensors = cache.get_cache_tensors();
-  ASSERT_EQ(cache_tensors.size(), 3U);
-  EXPECT_EQ(cache_tensors[0].role, KVCacheTensorRole::KEY);
-  EXPECT_EQ(cache_tensors[1].role, KVCacheTensorRole::INDEX);
-  EXPECT_EQ(cache_tensors[2].role, KVCacheTensorRole::INDEX_SCALE);
-  EXPECT_EQ(shape_vec(cache_tensors[2].tensor),
+  ASSERT_EQ(cache_tensors.size(), 4U);
+  EXPECT_EQ(cache_tensors[0].role, KVCacheTensorRole::WINDOW);
+  EXPECT_EQ(cache_tensors[1].role, KVCacheTensorRole::KEY);
+  EXPECT_EQ(cache_tensors[2].role, KVCacheTensorRole::INDEX);
+  EXPECT_EQ(cache_tensors[3].role, KVCacheTensorRole::INDEX_SCALE);
+  EXPECT_EQ(shape_vec(cache_tensors[3].tensor),
             (std::vector<int64_t>{2, 4, 1}));
 }
 

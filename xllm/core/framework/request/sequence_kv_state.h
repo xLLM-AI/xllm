@@ -155,6 +155,9 @@ class KVCacheState {
   void set_next_transfer_block_idx(size_t idx);
   void advance_transfer_block_idx(size_t idx);
 
+  size_t next_group_transfer_block_idx(BlockType type) const;
+  void advance_group_transfer_block_idx(BlockType type, size_t idx);
+
   void reset();
 
   void process_beam_search(std::optional<Block> new_block = std::nullopt);
@@ -181,6 +184,10 @@ class KVCacheState {
 
   // next logical prompt block index that needs PD PUSH transfer.
   size_t next_transfer_block_idx_ = 0;
+
+  // Cache groups can have different block sizes, so each group advances its
+  // transfer cursor independently.
+  std::map<BlockType, size_t> next_group_transfer_block_idxes_;
 
   // shared blocks number per block type.
   std::map<BlockType, uint32_t> num_owned_shared_blocks_;

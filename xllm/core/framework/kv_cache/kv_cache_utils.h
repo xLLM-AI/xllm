@@ -38,6 +38,7 @@ limitations under the License.
 #endif
 #endif
 
+#include "framework/block/block.h"
 #include "framework/kv_cache/kv_cache_capacity.h"
 #include "framework/kv_cache/kv_cache_tensor_role.h"
 
@@ -105,6 +106,8 @@ struct LinearAttentionKVCacheTensors {
 struct KVCacheTensor {
   KVCacheTensorRole role;
   torch::Tensor tensor;
+  int32_t group_id = cache_group_id(BlockType::KV);
+  bool sequence_scoped = false;
 };
 
 struct DeepSeekV4KVCacheTensors {
@@ -120,6 +123,7 @@ struct DeepSeekV4KVCacheTensors {
   torch::Tensor compress_state;
   torch::Tensor compress_index_state;
 #endif
+  BlockType compressed_block_type = BlockType::KV;
 };
 
 // for qwen3.5
@@ -147,6 +151,12 @@ LinearAttentionKVCacheTensors create_linear_attention_kv_cache_tensors(
 
 #if defined(USE_NPU)
 aclFormat get_npu_kv_cache_format(const std::string& model_type);
+
+// Allocate an NPU tensor from the huge-page device allocator. The returned
+// tensor owns the ACL allocation and carries the requested NPU format.
+torch::Tensor alloc_npu_huge_page_tensor(const std::vector<int64_t>& dims,
+                                         torch::ScalarType dtype,
+                                         aclFormat format);
 #endif
 
 }  // namespace xllm

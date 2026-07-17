@@ -51,6 +51,8 @@ message KVCacheShape {
   repeated int64 conv_cache_shape = 4;
   repeated int64 ssm_cache_shape = 5;
   repeated int64 index_cache_scale_shape = 6;
+  // Capability metadata used by workers to validate transfer/backend support.
+  bool grouped_cache_layout = 7;
 }
 
 message AllocateKVCacheRequest {
@@ -154,6 +156,15 @@ message TransferKVInfo {
   // Sequence-scoped cache rows used by linear attention caches.
   repeated uint64 local_linear_state_ids = 7;
   repeated uint64 remote_linear_state_ids = 8;
+
+  repeated KVBlockTransferGroup block_transfer_groups = 22;
+}
+
+message KVBlockTransferGroup {
+  int32 group_id = 1;
+  reserved 2;
+  repeated uint64 local_blocks_ids = 3;
+  repeated uint64 remote_blocks_ids = 4;
 }
 
 message EplbInfo {

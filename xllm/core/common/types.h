@@ -224,8 +224,8 @@ struct InstanceInfo {
   // remote kv cache info
   std::vector<uint64_t> cluster_ids;
   std::vector<std::string> addrs;
-  int32_t dp_size;
-  int32_t kv_split_size;
+  int32_t dp_size = 1;
+  int32_t kv_split_size = 1;
   // transfer listen ports
   std::vector<uint16_t> ports;
   // ttft profiling data
@@ -291,6 +291,15 @@ struct XTensorLayerOffsets {
   std::vector<uint64_t> v_offsets;  // V cache offsets in GlobalXTensor
 };
 
+// Block mapping for one cache group. group_id is an opaque, stable identifier
+// shared by the P/D cache layouts; transfer code does not interpret model
+// semantics such as compression ratios.
+struct KVBlockTransferGroup {
+  int32_t group_id = 0;
+  std::vector<uint64_t> local_blocks_ids;
+  std::vector<uint64_t> remote_blocks_ids;
+};
+
 struct TransferKVInfo {
   std::string request_id;
   // Before batch build this may carry the full logical block table length as a
@@ -305,6 +314,9 @@ struct TransferKVInfo {
   // XTensor mode: destination offsets from D-node (per-layer)
   // Only populated when KVCacheConfig::enable_xtensor is true.
   std::vector<XTensorLayerOffsets> dst_xtensor_layer_offsets;
+
+  // Group-aware transfer mappings, one entry per exported block manager.
+  std::vector<KVBlockTransferGroup> block_transfer_groups;
 };
 
 // in bytes

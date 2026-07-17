@@ -303,6 +303,26 @@ bool WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
                                            bool enable_raw_device_allocator) {
   CHECK(model_ != nullptr) << "Model is not initialized.";
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
+
+  const bool has_grouped_cache = kv_cache_shape.has_grouped_cache_layout();
+  if (has_grouped_cache && options_.enable_disagg_pd()) {
+    CHECK_EQ(::xllm::ParallelConfig::get_instance().cp_size(), 1)
+        << "Grouped KV cache PD does not support context parallelism.";
+    CHECK_EQ(::xllm::ParallelConfig::get_instance().kv_split_size_effective(),
+             1)
+        << "Grouped KV cache PD does not support KV-split.";
+    CHECK_EQ(::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type(),
+             "LlmDataDist")
+        << "Grouped KV cache PD requires LlmDataDist transfer.";
+    CHECK_EQ(options_.kv_cache_transfer_mode(), "PUSH")
+        << "Grouped KV cache PD requires PUSH transfer mode.";
+    CHECK(!options_.enable_pd_ooc())
+        << "Grouped KV cache PD does not support PD-OOC yet.";
+  }
+  if (has_grouped_cache) {
+    CHECK(!::xllm::KVCacheConfig::get_instance().enable_xtensor())
+        << "Grouped KV cache layout does not support XTensor cache.";
+  }
   const auto& args = context_.get_model_args();
   const bool enable_linear_attention = has_linear_attention_layers(args);
   const bool enable_lighting_indexer = args.index_n_heads() > 0;

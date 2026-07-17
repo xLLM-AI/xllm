@@ -130,6 +130,14 @@ bool SpeculativeEngine::allocate_kv_cache() {
 
   KVCacheCapacity draft_kv_cache_cap =
       draft_engine_->estimate_kv_cache_capacity();
+
+  if (target_kv_cache_cap.c4_count() > 0 ||
+      target_kv_cache_cap.c128_count() > 0) {
+    draft_kv_cache_cap.n_blocks() = target_kv_cache_cap.n_blocks();
+    return engine_->allocate_kv_cache(target_kv_cache_cap) &&
+           draft_engine_->allocate_kv_cache(draft_kv_cache_cap);
+  }
+
   const int64_t kv_cache_size =
       std::min(target_kv_cache_cap.cache_size_in_bytes(),
                draft_kv_cache_cap.cache_size_in_bytes());
