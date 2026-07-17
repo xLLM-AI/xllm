@@ -167,24 +167,16 @@ void DistManager::setup_multi_node_workers(
   // class. In this class, we create processes, initialize NCCL ProcessGroup,
   // set up GRPC servers, and so on.
 
-  std::vector<std::atomic<bool>> dones(1);
-  dones[0].store(false, std::memory_order_relaxed);
+  std::vector<std::atomic<bool>> dones(devices.size());
+  for (size_t i = 0; i < devices.size(); ++i) {
+    dones[i].store(false, std::memory_order_relaxed);
+  }
 
   CHECK_GE(options.nnodes(), 1) << "At least one node is required";
   CHECK_GE(options.node_rank(), 0) << "Node rank must >= 0.";
-  // Multi-process serving: each process runs exactly one worker. `devices` is
-  // the visible-device pool (all cards each process can see, required so ATB
-  // can build the cross-card HCCL comm group); this process binds the single
-  // card selected by its node_rank. World size is therefore the node count.
-  const int32_t each_node_ranks = 1;
-  const int32_t world_size = options.nnodes();
-  const int32_t base_rank = options.node_rank();
-  const int32_t local_device_index = options.node_rank();
-  CHECK_LT(local_device_index, static_cast<int32_t>(devices.size()))
-      << "node_rank " << local_device_index << " exceeds the number of visible "
-      << "devices " << devices.size()
-      << ". Ensure *_VISIBLE_DEVICES exposes all cards used across processes.";
-  const torch::Device local_device = devices[local_device_index];
+  const int32_t each_node_ranks = static_cast<int32_t>(devices.size());
+  const int32_t world_size = each_node_ranks * options.nnodes();
+  const int32_t base_rank = options.node_rank() * each_node_ranks;
   const int32_t dp_size = options.dp_size();
   const int32_t cp_size = options.cp_size();
   const int32_t ep_size = options.ep_size();
@@ -246,22 +238,26 @@ void DistManager::setup_multi_node_workers(
   } else {
     LOG(FATAL) << "Unsupported " << model_backend << " in multi-node.";
   }
-  // create the single local worker for this process
-  {
-    const int32_t i = 0;
-    const int32_t rank = base_rank;
+  // create local workers
+  for (int32_t i = 0; i < each_node_ranks; ++i) {
+    // worldsize = 8
+    // Node1: 0, 1, 2, 3
+    // Node2: 0+4, 1+4, 2+4, 3+4
+    const int32_t rank = i + base_rank;
     worker_server_options.server_idx(rank);
 
+    // we use spawn process worker to launch a xllm instance
+    // when start a offline inference task with multi-gpu/npu/mpu/...
 #if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
-    bool use_spawn_worker = force_spawn_for_numa_isolation[local_device_index];
-    if (use_spawn_worker) {
-      LOG(INFO) << "Force spawn worker for node_rank " << local_device_index
-                << " (device " << local_device.index() << ", NUMA "
-                << device_numa_nodes[local_device_index]
+    bool use_spawn_worker = (options.enable_offline_inference() && i > 0) ||
+                            force_spawn_for_numa_isolation[i];
+    if (force_spawn_for_numa_isolation[i]) {
+      LOG(INFO) << "Force spawn worker for local rank " << i << " (device "
+                << devices[i].index() << ", NUMA " << device_numa_nodes[i]
                 << ") to keep each process within a single NUMA region";
     }
 #else
-    bool use_spawn_worker = false;
+    bool use_spawn_worker = options.enable_offline_inference() && i > 0;
 #endif
     ParallelArgs parallel_args(
         rank, world_size, dp_size, cp_size, nullptr, ep_size);
@@ -269,9 +265,9 @@ void DistManager::setup_multi_node_workers(
     servers_.emplace_back(std::make_unique<WorkerServer>(i,
                                                          master_node_addr,
                                                          // done,
-                                                         dones[0],
+                                                         dones[i],
                                                          parallel_args,
-                                                         local_device,
+                                                         devices[i],
                                                          worker_server_options,
                                                          worker_type,
                                                          use_spawn_worker));
@@ -301,9 +297,6 @@ void DistManager::setup_multi_node_workers(
 
     // check if all workers connected
     // and then create worker clients
-    CHECK_LE(static_cast<size_t>(world_size), devices.size())
-        << "world_size " << world_size << " exceeds the visible-device pool "
-        << devices.size() << "; each global rank maps to one visible card.";
     for (size_t r = 0; r < world_size; ++r) {
       if (worker_addrs_map.find(r) == worker_addrs_map.end()) {
         LOG(FATAL) << "Not all worker connect to engine server. Miss rank is "
@@ -313,10 +306,11 @@ void DistManager::setup_multi_node_workers(
       /* TODO(CP): support smem  + CP */
       auto channel =
           create_channel(worker_addrs_map[r], r, dp_local_tp_size, options);
-      // Global rank r runs on the process whose node_rank == r, which binds the
-      // card devices[r] from the shared visible-device pool.
-      worker_clients_.emplace_back(std::make_unique<RemoteWorker>(
-          r, worker_addrs_map[r], devices[r], std::move(channel)));
+      worker_clients_.emplace_back(
+          std::make_unique<RemoteWorker>(r,
+                                         worker_addrs_map[r],
+                                         devices[r % each_node_ranks],
+                                         std::move(channel)));
     }
 
     // Register health check for each worker and start background health check
