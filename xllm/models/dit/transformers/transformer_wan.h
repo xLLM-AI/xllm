@@ -50,8 +50,8 @@ using xllm::dit::TpOptions;
 #include "framework/model_context.h"
 #include "models/dit/transformers/transformer_flux.h"
 #if defined(USE_NPU)
-#include "models/dit/utils/dit_block_weight_manager.h"
 #include "core/kernels/npu/xllm_ops/xllm_ops_api.h"
+#include "models/dit/utils/dit_block_weight_manager.h"
 #include "torch_npu/csrc/aten/CustomFunctions.h"
 #endif
 #include "core/framework/quant_args.h"
