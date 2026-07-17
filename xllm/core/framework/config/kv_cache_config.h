@@ -49,6 +49,9 @@ class KVCacheConfig final {
          "indexer_cache_dtype",
          "enable_prefix_cache",
          "enable_in_batch_prefix_cache",
+         "enable_prefix_cache_aware_dp_routing",
+         "prefix_cache_aware_dp_match_threshold",
+         "prefix_cache_aware_dp_imbalance_threshold",
          "max_linear_state_cache_slots",
          "xxh3_128bits_seed",
          "enable_xtensor",
@@ -69,6 +72,12 @@ class KVCacheConfig final {
   PROPERTY(bool, enable_prefix_cache) = true;
 
   PROPERTY(bool, enable_in_batch_prefix_cache) = false;
+
+  PROPERTY(bool, enable_prefix_cache_aware_dp_routing) = false;
+
+  PROPERTY(double, prefix_cache_aware_dp_match_threshold) = 0.5;
+
+  PROPERTY(double, prefix_cache_aware_dp_imbalance_threshold) = 0.1;
 
   PROPERTY(int64_t, max_linear_state_cache_slots) = 0;
 

@@ -58,6 +58,12 @@ class BlockManagerImpl : public BlockManager {
              const Slice<XXH3Key>& block_hashes = {}) override;
   void cache(const std::vector<Block>& blocks) override;
 
+  size_t prefix_cache_match_length(
+      const Slice<int32_t>& token_ids,
+      const Slice<Block>& existed_shared_blocks = {},
+      const MMData& mm_data = MMData(),
+      const Slice<XXH3Key>& block_hashes = {}) const override;
+
   size_t num_blocks_in_prefix_cache() const override {
     if (options_.enable_prefix_cache()) {
       CHECK(prefix_cache_);

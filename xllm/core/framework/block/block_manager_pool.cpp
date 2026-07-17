@@ -16,6 +16,7 @@ limitations under the License.
 #include "block_manager_pool.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 #include "block_manager_impl.h"
@@ -117,12 +118,102 @@ int32_t BlockManagerPool::get_manager_with_max_free_blocks() const {
   return max_index;
 }
 
+int32_t BlockManagerPool::get_cache_aware_dp_rank(Sequence* sequence) const {
+  const size_t block_size = options_.block_size();
+  CHECK_GT(block_size, 0u);
+  const size_t needed_blocks =
+      (sequence->num_tokens() + block_size - 1) / block_size;
+  const size_t num_managers = block_managers_.size();
+
+  // One pass collects, per rank: the prefix-cache hit length, free blocks,
+  // whether the whole request fits (free + evictable-but-unmatched cache), the
+  // least-loaded rank (load-balance baseline), and the used-block spread.
+  std::vector<size_t> matched(num_managers, 0);
+  std::vector<size_t> free_blocks(num_managers, 0);
+  std::vector<bool> can_fit(num_managers, false);
+  int32_t least_loaded_rank = 0;
+  size_t max_free = 0;
+  size_t max_used = 0;
+  size_t min_used = std::numeric_limits<size_t>::max();
+  size_t total_blocks = 0;
+  for (size_t i = 0; i < num_managers; ++i) {
+    auto* composite =
+        static_cast<CompositeBlockManager*>(block_managers_[i].get());
+    matched[i] = composite->prefix_match_length_for_sequence(sequence);
+    free_blocks[i] = composite->num_free_blocks();
+    const size_t used = composite->num_used_blocks();
+    const size_t cached = composite->num_blocks_in_prefix_cache();
+    total_blocks = std::max(total_blocks, composite->num_total_blocks());
+
+    // Matched blocks are reused (not evicted); only the rest of the cache could
+    // be reclaimed to make room for the request.
+    const size_t evictable = cached > matched[i] ? cached - matched[i] : 0;
+    const size_t available = free_blocks[i] + evictable;
+    const size_t net_needed =
+        needed_blocks > matched[i] ? needed_blocks - matched[i] : 0;
+    can_fit[i] = net_needed <= available;
+
+    if (i == 0 || free_blocks[i] > max_free) {
+      max_free = free_blocks[i];
+      least_loaded_rank = static_cast<int32_t>(i);
+    }
+    max_used = std::max(max_used, used);
+    min_used = std::min(min_used, used);
+  }
+
+  // Guard 1 (popular-prefix overload): when ranks are already too imbalanced,
+  // ignore affinity and refill the least-loaded rank. Without this, a prefix
+  // shared by every request would pin all traffic onto a single rank.
+  if (total_blocks > 0 && max_used > min_used) {
+    const double imbalance = static_cast<double>(max_used - min_used) /
+                             static_cast<double>(total_blocks);
+    if (imbalance > options_.cache_aware_imbalance_threshold()) {
+      return least_loaded_rank;
+    }
+  }
+
+  // Guard 2 (cold-start tiny-prefix herding): only honor affinity when the hit
+  // covers a meaningful fraction of the request. A 1-block prefix shared at
+  // cold start does not qualify, so requests spread by load instead.
+  const size_t min_match_blocks =
+      static_cast<size_t>(std::ceil(options_.cache_aware_match_threshold() *
+                                    static_cast<double>(needed_blocks)));
+
+  int32_t best_rank = -1;
+  size_t best_matched = 0;
+  size_t best_free = 0;
+  for (size_t i = 0; i < num_managers; ++i) {
+    if (!can_fit[i] || matched[i] == 0 || matched[i] < min_match_blocks) {
+      continue;
+    }
+    const bool better =
+        best_rank < 0 || matched[i] > best_matched ||
+        (matched[i] == best_matched && free_blocks[i] > best_free);
+    if (better) {
+      best_rank = static_cast<int32_t>(i);
+      best_matched = matched[i];
+      best_free = free_blocks[i];
+    }
+  }
+  if (best_rank >= 0) {
+    return best_rank;
+  }
+
+  // No rank offers a meaningful, fitting prefix -> balance by free blocks.
+  return least_loaded_rank;
+}
+
 int32_t BlockManagerPool::get_dp_rank(Sequence* sequence) const {
   int32_t dp_rank;
   if (sequence->dp_rank() >= 0) {
     dp_rank = sequence->dp_rank();
   } else {
-    dp_rank = get_manager_with_max_free_blocks();
+    if (options_.enable_prefix_cache() && options_.enable_cache_aware_dp() &&
+        block_managers_.size() > 1) {
+      dp_rank = get_cache_aware_dp_rank(sequence);
+    } else {
+      dp_rank = get_manager_with_max_free_blocks();
+    }
     sequence->set_dp_rank(dp_rank);
   }
   return dp_rank;

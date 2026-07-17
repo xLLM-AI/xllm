@@ -314,6 +314,25 @@ void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
   seq->add_shared_blocks(BlockType::KV, std::move(shared));
 }
 
+size_t CompositeBlockManager::prefix_match_length_for_sequence(
+    Sequence* seq) const {
+  if (seq == nullptr) {
+    return 0;
+  }
+  auto it = leaves_.find(BlockType::KV);
+  if (it == leaves_.end() || !it->second.supports_prefix_cache) {
+    return 0;
+  }
+  BlockManager& kv_leaf = *it->second.leaf;
+  seq->update_block_hashes(static_cast<uint32_t>(kv_leaf.block_size()),
+                           kv_leaf.options().hasher_type());
+  KVCacheState& kv_state = seq->kv_state();
+  const auto existed = kv_state.blocks(BlockType::KV)
+                           .slice(0, kv_state.shared_blocks_num(BlockType::KV));
+  return kv_leaf.prefix_cache_match_length(
+      seq->tokens(), existed, seq->mm_data(), seq->block_hashes());
+}
+
 void CompositeBlockManager::cache_for_sequence(Sequence* seq) {
   if (seq == nullptr) {
     return;

@@ -64,6 +64,12 @@ class ConcurrentBlockManagerImpl : public BlockManager {
 
   void reset_prefix_cache() override;
 
+  size_t prefix_cache_match_length(
+      const Slice<int32_t>& token_ids,
+      const Slice<Block>& existed_shared_blocks = {},
+      const MMData& mm_data = MMData(),
+      const Slice<XXH3Key>& block_hashes = {}) const override;
+
   size_t num_blocks_in_prefix_cache() const override;
   size_t num_free_blocks() const override;
   size_t num_used_blocks() const override;

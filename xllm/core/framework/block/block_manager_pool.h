@@ -63,6 +63,19 @@ class BlockManagerPool : public KVCacheManager {
     // Hasher type bound to the engine (TEXT for LLM, MM for VLM).
     PROPERTY(BlockHasherType, hasher_type) = BlockHasherType::TEXT;
     PROPERTY(uint32_t, num_single_blocks) = 0;
+    // When true (and prefix cache is on with dp_size > 1), a new sequence is
+    // routed to the dp rank that can fit the whole prefill request and has the
+    // longest prefix-cache hit, instead of the rank with the most free blocks.
+    PROPERTY(bool, enable_cache_aware_dp) = false;
+    // Minimum fraction of the prefill request's blocks that must hit a rank's
+    // prefix cache before cache-affinity prefers that rank. Below this, routing
+    // balances by free blocks. Prevents a tiny shared prefix (e.g. a one-block
+    // system prompt) from herding every request onto one rank at cold start.
+    PROPERTY(double, cache_aware_match_threshold) = 0.5;
+    // Maximum tolerated (max_used - min_used) / total_blocks before cache
+    // affinity is suspended in favor of the least-loaded rank. Prevents a
+    // popular shared prefix from pinning all traffic to a single rank.
+    PROPERTY(double, cache_aware_imbalance_threshold) = 0.1;
   };
 
   explicit BlockManagerPool(const Options& options, int32_t dp_size = 1);
@@ -115,6 +128,11 @@ class BlockManagerPool : public KVCacheManager {
 
  protected:
   int32_t get_manager_with_max_free_blocks() const;
+  // Prefix-cache-affinity routing: pick the dp rank by the ordered key
+  // (can_fit_whole_prefill, prefix_match_blocks, free_blocks), preferring a
+  // rank that fits the request and shares the longest prefix. Falls back to the
+  // longest-prefix rank when none can fit.
+  int32_t get_cache_aware_dp_rank(Sequence* sequence) const;
   int32_t get_dp_rank(Sequence* sequence) const;
 
   bool process_beam_search(Sequence* sequence, bool need_swap = false);
