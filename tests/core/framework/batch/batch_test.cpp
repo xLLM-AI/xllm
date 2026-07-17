@@ -36,6 +36,7 @@ limitations under the License.
 #include "framework/prefix_cache/block_hasher.h"
 #include "framework/request/stopping_checker.h"
 #include "framework/sampling/sampling_params.h"
+#include "framework/tokenizer/tokenizer.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "runtime/cp_input_partition.h"
@@ -95,6 +96,8 @@ RawSampleOutput make_raw_sample_output(int64_t token_id,
 }
 
 namespace {
+
+class EmptyTokenizer final : public Tokenizer {};
 
 TransferKVInfo make_info(const std::vector<uint64_t>& remote_block_ids) {
   TransferKVInfo info;
@@ -370,6 +373,77 @@ TEST(BatchTest, ProcessRawOutputStoresMtpBootstrapEmbedding) {
   torch::Tensor stored = sequence.get_mtp_bootstrap_embedding();
   ASSERT_TRUE(stored.defined());
   EXPECT_TRUE(torch::equal(stored, torch::tensor({3.0f, 4.0f})));
+}
+
+TEST(BatchTest, ProcessRawOutputStoresPerSampleMmEmbeddings) {
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(4);
+  BlockManagerImpl manager(options);
+
+  RequestSamplingParam sampling_param;
+  sampling_param.is_embeddings = true;
+  StoppingChecker stopping_checker;
+
+  SequenceParams seq_params;
+  seq_params.seq_capacity = 8;
+  seq_params.stopping_checker = &stopping_checker;
+  seq_params.sampling_param = &sampling_param;
+  seq_params.skip_special_tokens = true;
+  seq_params.echo = false;
+  seq_params.logprobs = false;
+  seq_params.enable_schedule_overlap = false;
+
+  torch::Tensor input_embedding;
+  MMData mm_data;
+  Sequence seq1(/*index=*/0,
+                /*token_ids=*/{1, 2},
+                input_embedding,
+                mm_data,
+                IncrementalDecoder(/*prompt=*/"",
+                                   /*num_prompt_tokens=*/2,
+                                   /*echo=*/false,
+                                   /*skip_special_tokens=*/true),
+                seq_params);
+  Sequence seq2(/*index=*/1,
+                /*token_ids=*/{3, 4},
+                input_embedding,
+                mm_data,
+                IncrementalDecoder(/*prompt=*/"",
+                                   /*num_prompt_tokens=*/2,
+                                   /*echo=*/false,
+                                   /*skip_special_tokens=*/true),
+                seq_params);
+  seq1.add_blocks(BlockType::KV, manager.allocate(1));
+  seq2.add_blocks(BlockType::KV, manager.allocate(1));
+
+  Batch batch({&seq1, &seq2});
+  (void)batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
+
+  torch::Tensor seq1_embedding = torch::tensor({{1.0f, 2.0f}, {3.0f, 4.0f}});
+  torch::Tensor seq2_embedding = torch::tensor({{5.0f, 6.0f}});
+  RawForwardOutput raw_output;
+  RawSampleOutput seq1_output;
+  seq1_output.mm_embeddings.push_back(seq1_embedding);
+  RawSampleOutput seq2_output;
+  seq2_output.mm_embeddings.push_back(seq2_embedding);
+  raw_output.outputs.push_back(std::move(seq1_output));
+  raw_output.outputs.push_back(std::move(seq2_output));
+
+  batch.process_sample_output(raw_output, /*replace_fake_token=*/false);
+
+  EmptyTokenizer tokenizer;
+  SequenceOutput seq1_result = seq1.generate_output(tokenizer);
+  SequenceOutput seq2_result = seq2.generate_output(tokenizer);
+
+  ASSERT_TRUE(seq1_result.mm_embeddings.has_value());
+  ASSERT_TRUE(seq2_result.mm_embeddings.has_value());
+  ASSERT_EQ(seq1_result.mm_embeddings->size(), 1);
+  ASSERT_EQ(seq2_result.mm_embeddings->size(), 1);
+  EXPECT_TRUE(
+      torch::equal((*seq1_result.mm_embeddings)[0].embedding, seq1_embedding));
+  EXPECT_TRUE(
+      torch::equal((*seq2_result.mm_embeddings)[0].embedding, seq2_embedding));
 }
 
 TEST(BatchTest, DecodeForwardInputConsumesMtpBootstrap) {

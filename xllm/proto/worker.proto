@@ -330,6 +330,7 @@ message Token {
 
 message SquenceOutput {
   repeated Token tokens = 1;
+  repeated Tensor mm_embeddings = 2;
 }
 
 message ForwardOutput {

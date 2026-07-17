@@ -21,6 +21,8 @@ limitations under the License.
 
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
+#include <limits>
+#include <numeric>
 #include <vector>
 
 #include "common/device_monitor.h"
@@ -29,6 +31,8 @@ limitations under the License.
 #include "common/types.h"
 #include "core/distributed_runtime/comm_channel.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/config/model_config.h"
+#include "core/framework/multimodal/mm_data.h"
 #include "core/runtime/params_utils.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/request/sequence.h"
@@ -70,6 +74,75 @@ int64_t count_negative_tokens(const torch::Tensor& tokens) {
     }
   }
   return count;
+}
+
+std::vector<int32_t> build_mm_embedding_counts(
+    const ForwardInput& input,
+    const std::vector<torch::Tensor>& mm_embeddings) {
+  if (mm_embeddings.empty()) {
+    return {};
+  }
+
+  const int32_t num_sequences =
+      input.input_params.meta.actual_num_sequences > 0
+          ? input.input_params.meta.actual_num_sequences
+          : input.input_params.meta.num_sequences;
+  CHECK_GT(num_sequences, 0);
+
+  const bool return_full_mm_embeddings =
+      ::xllm::ModelConfig::get_instance().enable_return_mm_full_embeddings();
+  if (return_full_mm_embeddings) {
+    CHECK_EQ(static_cast<int64_t>(mm_embeddings.size()),
+             static_cast<int64_t>(num_sequences));
+    return std::vector<int32_t>(static_cast<size_t>(num_sequences), 1);
+  }
+
+  const auto& mm_datas = input.input_params.multimodal.mm_data.mm_data_vec();
+  CHECK(!mm_datas.empty())
+      << "Cannot split mm_embeddings without per-sequence mm_data.";
+
+  std::vector<int32_t> mm_embedding_counts(static_cast<size_t>(num_sequences),
+                                           0);
+  bool counted_by_seq_index = false;
+  bool missing_seq_index = false;
+  for (const auto& mm_data : mm_datas) {
+    if (!mm_data.hold<MMItemVec>()) {
+      missing_seq_index = true;
+      break;
+    }
+    const auto& mm_items = mm_data.items<MMItemVec>();
+    for (const auto& mm_item : mm_items) {
+      const int32_t seq_index = mm_item.state().seq_index();
+      if (seq_index < 0) {
+        missing_seq_index = true;
+        break;
+      }
+      CHECK_LT(seq_index, num_sequences);
+      ++mm_embedding_counts[static_cast<size_t>(seq_index)];
+      counted_by_seq_index = true;
+    }
+    if (missing_seq_index) {
+      break;
+    }
+  }
+
+  if (!counted_by_seq_index || missing_seq_index) {
+    CHECK_EQ(mm_datas.size(), static_cast<size_t>(num_sequences))
+        << "Cannot split mm_embeddings because mm_data seq_index is missing.";
+    std::fill(mm_embedding_counts.begin(), mm_embedding_counts.end(), 0);
+    for (size_t i = 0; i < mm_datas.size(); ++i) {
+      const size_t mm_item_count = mm_datas[i].size();
+      CHECK_LE(mm_item_count,
+               static_cast<size_t>(std::numeric_limits<int32_t>::max()));
+      mm_embedding_counts[i] = static_cast<int32_t>(mm_item_count);
+    }
+  }
+
+  const int64_t total_mm_embedding_count = std::accumulate(
+      mm_embedding_counts.begin(), mm_embedding_counts.end(), int64_t{0});
+  CHECK_EQ(total_mm_embedding_count, static_cast<int64_t>(mm_embeddings.size()))
+      << "mm_embeddings size does not match per-sequence mm_data counts.";
+  return mm_embedding_counts;
 }
 
 void record_speculative_metrics_from_output(const torch::Tensor& next_tokens,
@@ -340,6 +413,8 @@ void WorkerService::create_polling_shm_thread(
                out_tokens,
                out_logprobs);
 
+          const std::vector<int32_t> mm_embedding_counts =
+              build_mm_embedding_counts(fwd_input, mm_embeddings);
           const bool shm_write_ok =
               output_shm_manager->raw_output_write(next_tokens,
                                                    logprobs,
@@ -347,6 +422,7 @@ void WorkerService::create_polling_shm_thread(
                                                    top_logprobs,
                                                    embeddings,
                                                    mm_embeddings,
+                                                   mm_embedding_counts,
                                                    dit_images,
                                                    expert_load_data,
                                                    prepared_layer_id,
@@ -764,6 +840,8 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
              src_seq_idxes,
              out_tokens,
              out_logprobs);
+        const std::vector<int32_t> mm_embedding_counts =
+            build_mm_embedding_counts(forward_input, mm_embeddings);
         // convert to proto output
         forward_output_to_proto(next_tokens,
                                 logprobs,
@@ -775,6 +853,8 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
                                 src_seq_idxes,
                                 out_tokens,
                                 out_logprobs,
+                                mm_embeddings,
+                                mm_embedding_counts,
                                 dit_images,
                                 pb_forward_output);
         COUNTER_ADD(worker_service_latency_seconds, timer.elapsed_seconds());
@@ -889,6 +969,8 @@ void WorkerService::GetLastStepResult(
 
           if (next_tokens.defined() ||
               ::xllm::EPLBConfig::get_instance().enable_eplb()) {
+            const std::vector<torch::Tensor> empty_mm_embeddings;
+            const std::vector<int32_t> empty_mm_embedding_counts;
             forward_output_to_proto(next_tokens,
                                     logprobs,
                                     top_tokens,
@@ -899,6 +981,8 @@ void WorkerService::GetLastStepResult(
                                     src_seq_idxes,
                                     out_tokens,
                                     out_logprobs,
+                                    empty_mm_embeddings,
+                                    empty_mm_embedding_counts,
                                     dit_images,
                                     pb_forward_output);
           }

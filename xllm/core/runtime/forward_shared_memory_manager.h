@@ -111,6 +111,7 @@ class ForwardSharedMemoryManager : public SharedMemoryManager {
                         const torch::Tensor& top_logprobs,
                         const torch::Tensor& embeddings,
                         const std::vector<torch::Tensor>& mm_embeddings,
+                        const std::vector<int32_t>& mm_embedding_counts,
                         const std::vector<torch::Tensor>& dit_images,
                         const torch::Tensor& expert_load_data,
                         int32_t prepared_layer_id,
