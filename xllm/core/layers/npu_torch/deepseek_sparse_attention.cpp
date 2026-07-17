@@ -725,6 +725,34 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                             : torch::Device(torch::kCPU);
     cp_local_q_cu = cp_meta.local_query_start_loc.to(cp_dev);
     cp_local_kv = cp_meta.local_seq_lens.to(cp_dev);
+    static thread_local bool dsa_cp_swa_dbg = false;
+    if (!dsa_cp_swa_dbg) {
+      dsa_cp_swa_dbg = true;
+      auto dv = [](const char* nm, const torch::Tensor& t) {
+        if (!t.defined() || t.numel() == 0) {
+          LOG(ERROR) << "[DSA-CP-SWA] " << nm << "=<empty>";
+          return;
+        }
+        auto c = t.to(torch::kCPU).to(torch::kLong).contiguous();
+        std::string v;
+        int64_t n = std::min<int64_t>(c.numel(), 40);
+        for (int64_t i = 0; i < n; ++i)
+          v += std::to_string(c.data_ptr<int64_t>()[i]) + ",";
+        LOG(ERROR) << "[DSA-CP-SWA] " << nm << "(numel=" << c.numel() << ")=["
+                   << v << "]";
+      };
+      LOG(ERROR) << "[DSA-CP-SWA] layer=" << attn_metadata.layer_id
+                 << " ratio=" << compress_ratio_ << " cp_size=" << cp_size_
+                 << " cp_rank=" << cp_rank_
+                 << " num_full_tokens=" << cp_num_full_tokens
+                 << " tokens_per_rank=" << cp_meta.tokens_per_rank
+                 << " local_start=" << cp_meta.local_start
+                 << " local_end=" << cp_meta.local_end;
+      dv("full_q_cu", attn_metadata.actual_seq_lengths_query);
+      dv("full_kv", attn_metadata.actual_seq_lengths_kv);
+      dv("cp_local_q_cu", cp_local_q_cu);
+      dv("cp_local_kv", cp_local_kv);
+    }
   }
 
   // 4) resolve per-layer cache mapping
@@ -995,6 +1023,39 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                   : as_optional(attn_metadata.actual_seq_lengths_query);
   }
 
+  if (cp_active) {
+    static thread_local bool dsa_cp_bt_dbg = false;
+    if (!dsa_cp_bt_dbg) {
+      dsa_cp_bt_dbg = true;
+      auto shp = [](const char* nm, const torch::Tensor& t) {
+        LOG(ERROR) << "[DSA-CP-BT] " << nm << "="
+                   << (t.defined() ? t.sizes() : c10::IntArrayRef{});
+      };
+      auto val = [](const char* nm, const torch::Tensor& t) {
+        if (!t.defined() || t.numel() == 0) {
+          LOG(ERROR) << "[DSA-CP-BT] " << nm << "=<empty>";
+          return;
+        }
+        auto c = t.to(torch::kCPU).to(torch::kLong).contiguous();
+        std::string v;
+        int64_t n = std::min<int64_t>(c.numel(), 80);
+        for (int64_t i = 0; i < n; ++i)
+          v += std::to_string(c.data_ptr<int64_t>()[i]) + ",";
+        LOG(ERROR) << "[DSA-CP-BT] " << nm << "(numel=" << c.numel() << ")=["
+                   << v << "]";
+      };
+      LOG(ERROR) << "[DSA-CP-BT] layer=" << attn_metadata.layer_id
+                 << " ratio=" << compress_ratio_
+                 << " use_prefill_attn=" << use_prefill_attn
+                 << " use_temp_prefill_kv=" << use_temporary_prefill_kv
+                 << " window_size=" << window_size_
+                 << " ori_kv_layout=" << ori_kv_layout;
+      shp("q", q);
+      shp("ori_kv_for_attn", ori_kv_for_attn);
+      shp("ori_block_table_for_attn", ori_block_table_for_attn);
+      val("ori_block_table_for_attn", ori_block_table_for_attn);
+    }
+  }
   auto [attn_output, output_lse] = xllm::kernel::npu::sparse_attn_sharedkv(
       /*q=*/q,
       /*ori_kv=*/as_optional(ori_kv_for_attn),
