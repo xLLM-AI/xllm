@@ -23,7 +23,6 @@ limitations under the License.
 #include <vector>
 
 #include "batch_input_builder.h"
-#include "common/global_flags.h"
 #include "common/metrics.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"
@@ -475,11 +474,13 @@ void Batch::process_sample_output(const RawForwardOutput& raw_output,
                                   bool replace_fake_token) {
   if (raw_output.mm_embeddings.size() > 0) {
     // mm embed task
+    const bool return_full_mm_embeddings =
+        ::xllm::ModelConfig::get_instance().enable_return_mm_full_embeddings();
     int64_t mm_embedding_idx = 0;
     const auto sequences = get_sequences();
     for (auto* seq : sequences) {
       int64_t mm_item_count = seq->mm_data().size();
-      if (!FLAGS_enable_mistral_prompt_to_message && mm_item_count <= 0) {
+      if (!return_full_mm_embeddings && mm_item_count <= 0) {
         continue;
       }
       std::vector<torch::Tensor> seq_mm_embeddings;
@@ -487,9 +488,7 @@ void Batch::process_sample_output(const RawForwardOutput& raw_output,
       // the output is a single embedding tensor, else it would be a vector of
       // image embeddings
       int64_t output_tensor_size =
-          ::xllm::ModelConfig::get_instance().enable_return_mm_full_embeddings()
-              ? 1
-              : mm_item_count;
+          return_full_mm_embeddings ? 1 : mm_item_count;
       seq_mm_embeddings.reserve(output_tensor_size);
       for (int64_t i = mm_embedding_idx;
            i < mm_embedding_idx + output_tensor_size;

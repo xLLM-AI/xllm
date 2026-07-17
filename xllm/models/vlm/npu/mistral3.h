@@ -32,8 +32,8 @@ limitations under the License.
 #include "core/layers/npu/npu_rms_norm_impl.h"
 #include "core/util/timer.h"
 #include "framework/state_dict/state_dict.h"
-#include "mistral.h"
 #include "models/llm/npu/llm_model_base.h"
+#include "models/llm/npu/mistral.h"
 #include "models/model_registry.h"
 #include "processors/mistral3_image_processor.h"
 #include "processors/mistral3_prompt_processor.h"
@@ -372,20 +372,29 @@ class Mistral3_VisionTransformerImpl : public torch::nn::Module {
 
     hidden_states = hidden_states.to(torch::kBFloat16);
     hidden_states = ln_pre_(hidden_states, 0);
-    // compute cu_seqlens from image_grid_thw
+    // compute sequence lengths from image_grid_thw
     auto grid_thw_cpu = image_grid_thw.cpu();
     int64_t num_images = grid_thw_cpu.size(0);
-    std::vector<int> cu_seqlens_vec;
-    cu_seqlens_vec.reserve(num_images + 1);
-    cu_seqlens_vec.push_back(0);
+    int64_t total_frames = 0;
+    for (int64_t idx = 0; idx < num_images; ++idx) {
+      total_frames += grid_thw_cpu[idx][0].item<int64_t>();
+    }
 
+    std::vector<int> seq_lens_vec;
+    seq_lens_vec.reserve(static_cast<size_t>(total_frames));
+
+    int64_t total_tokens = 0;
     for (int64_t idx = 0; idx < num_images; ++idx) {
       int64_t t = grid_thw_cpu[idx][0].item<int64_t>();
       int64_t h = grid_thw_cpu[idx][1].item<int64_t>();
       int64_t w = grid_thw_cpu[idx][2].item<int64_t>();
-      cu_seqlens_vec.push_back(cu_seqlens_vec.back() +
-                               static_cast<int>(t * h * w));
+      for (int64_t frame = 0; frame < t; ++frame) {
+        seq_lens_vec.push_back(static_cast<int>(h * w));
+      }
+      total_tokens += t * h * w;
     }
+    CHECK_EQ(total_tokens, hidden_states.size(0))
+        << "image_grid_thw token count mismatch with vision hidden states";
 
     // compute 2D RoPE cos/sin per image
     std::vector<torch::Tensor> cos_vec;
@@ -421,7 +430,7 @@ class Mistral3_VisionTransformerImpl : public torch::nn::Module {
     torch::TensorOptions opts = torch::TensorOptions()
                                     .dtype(torch::kInt32)
                                     .device(hidden_states.device());
-    torch::Tensor cu_seqlens = torch::tensor(cu_seqlens_vec, opts);
+    torch::Tensor seq_lens = torch::tensor(seq_lens_vec, opts);
 
     ModelInputParams& input_params_new =
         const_cast<ModelInputParams&>(input_params);
@@ -431,14 +440,19 @@ class Mistral3_VisionTransformerImpl : public torch::nn::Module {
       hidden_states = layers_[idx](hidden_states,
                                    m_cos,
                                    m_sin,
-                                   cu_seqlens,
-                                   cu_seqlens_vec,
+                                   seq_lens,
+                                   seq_lens_vec,
                                    input_params_new,
                                    idx);
     }
 
     // PatchMerger: RMSNorm + unfold + Linear + MLP
     hidden_states = merger_(hidden_states, image_grid_thw);
+    torch::save(hidden_states,
+                "/export/home/weinan5/wangshuibin/mistral3_vision_tensor/"
+                "01_cpp_mistral_vision_tensor/"
+                "03_mistral3_generate_vision_transformer/"
+                "03_02_0715_after_merger_mistral3_vision_output.pt");
     return hidden_states;
   }
 
@@ -611,17 +625,27 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
         language_model_->forward(tokens, positions, kv_caches, input_params);
     // Mistral3 is used for Flux2 text_encoder:
     // select 3 intermediate layers (9, 19, 29) as embeddings
-    CHECK_GE(model_output.aux_hidden_states.size(0), 30)
-        << "Model must have at least 30 layers for embedding mode";
-    auto indices = torch::tensor({9, 19, 29}, torch::kLong)
-                       .to(model_output.aux_hidden_states.device());
-    auto selected =
-        model_output.aux_hidden_states.index_select(/*dim=*/0, indices);
-    torch::save(selected,
-                "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/"
-                "dump_flux2_tensor/01_cpp_mistral3_relatives_tensor/"
-                "02_modify_mistral3_out.pt");
-    return ModelOutput(selected);
+    bool is_embedding_task =
+        ::xllm::ModelConfig::get_instance().task() == "embed";
+    bool return_full_embeddings =
+        ::xllm::ModelConfig::get_instance().enable_return_mm_full_embeddings();
+    bool return_flux2_embeddings =
+        model_args_.encoder_embedding_mode() ||
+        (is_embedding_task && return_full_embeddings);
+    if (return_flux2_embeddings) {
+      CHECK_GE(model_output.aux_hidden_states.size(0), 30)
+          << "Model must have at least 30 layers for embedding mode";
+      auto indices = torch::tensor({9, 19, 29}, torch::kLong)
+                         .to(model_output.aux_hidden_states.device());
+      auto selected =
+          model_output.aux_hidden_states.index_select(/*dim=*/0, indices);
+      torch::save(selected,
+                  "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/"
+                  "dump_flux2_tensor/01_cpp_mistral3_relatives_tensor/"
+                  "02_modify_mistral3_out.pt");
+      return ModelOutput(selected);
+    }
+    return model_output;
   }
 
   // ==================== Pooler / Logits ====================
@@ -630,7 +654,17 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
                                const torch::Tensor& seleted_idxes) {
     // Flux2 text encoder: return raw hidden states without L2 normalization
     // hidden_states shape: [3, seq_len, hidden_size] (layers 9, 19, 29)
-    return hidden_states;
+    auto h = hidden_states;
+    if (::xllm::ModelConfig::get_instance()
+            .enable_return_mm_full_embeddings()) {
+      return h;
+    }
+    if (seleted_idxes.defined()) {
+      h = h.index_select(/*dim=*/0, seleted_idxes);
+    }
+    auto pooler_output = torch::nn::functional::normalize(
+        h, torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
+    return pooler_output;
   }
 
   torch::Tensor logits(const torch::Tensor& hidden_states,

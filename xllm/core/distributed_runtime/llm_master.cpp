@@ -299,91 +299,16 @@ std::shared_ptr<Request> LLMMaster::generate_request(
                         sp.source_xservice_addr);
     return nullptr;
   }
-  if (FLAGS_enable_mistral_prompt_to_message) {
-    // Check if prompt is already a formatted chat template string (not JSON)
-    // If it starts with '<' (e.g., "<s>[SYSTEM_PROMPT]..."), skip JSON parsing
-    bool is_json_input = false;
-    std::string trimmed = prompt;
-    // Trim leading whitespace
-    size_t start = trimmed.find_first_not_of(" \t\n\r");
-    if (start != std::string::npos && start > 0) {
-      trimmed = trimmed.substr(start);
-    }
-    is_json_input =
-        !trimmed.empty() && (trimmed[0] == '{' || trimmed[0] == '[');
 
-    if (is_json_input) {
-      LOG(INFO) << "llm_master prompt (JSON input):" << prompt;
-      // 1. Preprocess using LlmChatJsonParser
-      const ChatJsonParser& parser =
-          xllm::ChatJsonParser::get(ServingMode::LLM);
-      auto [status, processed_json] = parser.preprocess(prompt);
-      if (!status.ok()) {
-        CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                            "Preprocess failed: " + status.message(),
-                            sp.service_request_id,
-                            sp.source_xservice_addr);
-        LOG(ERROR) << "Preprocess failed: " << status.message();
-        return nullptr;
-      }
-
-      // 2. Parse into Message objects
-      std::vector<Message> messages;
-      try {
-        auto json = nlohmann::json::parse(processed_json);
-        if (json.contains("messages")) {
-          for (const auto& msg : json["messages"]) {
-            messages.emplace_back(msg["role"].get<std::string>(),
-                                  msg["content"].get<std::string>());
-          }
-        }
-      } catch (const nlohmann::json::exception& e) {
-        CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                            "JSON parse failed: " + std::string(e.what()),
-                            sp.service_request_id,
-                            sp.source_xservice_addr);
-        LOG(ERROR) << "JSON parse failed: " << e.what();
-        return nullptr;
-      }
-      // 3. Call the message version of generate_request
-      Timer timer;
-      std::optional<std::string> formatted_prompt;
-      formatted_prompt =
-          chat_template_->apply(messages, sp.tools, sp.chat_template_kwargs);
-
-      if (!formatted_prompt.has_value()) {
-        CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                            "Failed to construct prompt from messages",
-                            sp.service_request_id,
-                            sp.source_xservice_addr);
-        LOG(ERROR) << "Failed to construct prompt from messages";
-        return nullptr;
-      }
-
-      COUNTER_ADD(chat_template_latency_seconds, timer.elapsed_seconds());
-
-      prompt = std::move(formatted_prompt.value());
-      prompt_tokens = std::nullopt;
-    } else {
-      // Prompt is already a formatted chat template string, use directly
-      LOG(INFO) << "llm_master prompt (already formatted):" << prompt;
-    }
-  }
   // encode the prompt
   Timer timer;
-  std::vector<int32_t> local_prompt_tokens;
+  std::vector<int> local_prompt_tokens;
 
   if (has_prompt_tokens) {
     local_prompt_tokens = std::move(prompt_tokens.value());
   } else {
-    if (!tokenizer_->encode(prompt,
-                            &local_prompt_tokens,
-                            FLAGS_enable_mistral_prompt_to_message
-                                ? /*add_special_tokens=*/false
-                                : sp.add_special_tokens,
-                            FLAGS_enable_mistral_prompt_to_message
-                                ? /*max_sequence_length=*/512
-                                : /*max_sequence_length=*/0)) {
+    if (!tokenizer_->encode(
+            prompt, &local_prompt_tokens, sp.add_special_tokens)) {
       LOG(ERROR) << "Failed to encode prompt: " << prompt;
       CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                           "Failed to encode prompt",

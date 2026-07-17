@@ -73,7 +73,8 @@ void NpuMistralDecoderLayerImpl::param_from_args(
   param.enableSplitFuse = FLAGS_enable_chunked_prefill && is_prefill;
   param.enableLora = false;
   param.loraEnableGMM = false;
-
+  // flux2 module text encoder disable isTriuMask
+  param.disableisTriuMask = true;
   // Quantization settings (adjust as needed)
   param.packQuantType = {1, 1};
   param.linearQuantType = {0, -1, -1, 0, 0, -1, 0};

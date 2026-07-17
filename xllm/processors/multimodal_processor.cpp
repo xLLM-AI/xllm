@@ -35,7 +35,10 @@ MultimodalProcessorBase::~MultimodalProcessorBase() = default;
 bool MultimodalProcessorBase::tokenize(const std::string& prompt,
                                        std::vector<int32_t>& token_ids) const {
   Timer timer;
-  if (!tokenizer_->encode(prompt, &token_ids)) {
+  if (!tokenizer_->encode(prompt,
+                          &token_ids,
+                          /*add_special_tokens=*/false,
+                          /*max_sequence_length=*/512)) {
     LOG(ERROR) << "Failed to encode prompt: " + prompt;
     return false;
   }
