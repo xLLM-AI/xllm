@@ -83,7 +83,8 @@ class DeepseekV4MultiTokenPredictorLayerImpl
                         layer::AttentionMetadata& attn_metadata,
                         KVCache& kv_cache,
                         const ModelInputParams& input_params,
-                        torch::Tensor tokens) {
+                        torch::Tensor tokens,
+                        torch::Tensor* aux_hidden_states) {
     ModelInputParams modified_input_params = input_params;
     modified_input_params.embedding.input_embedding = previous_hidden_states;
     std::optional<torch::Tensor> residual;
@@ -94,7 +95,8 @@ class DeepseekV4MultiTokenPredictorLayerImpl
         attn_metadata,
         kv_cache,
         modified_input_params,
-        tokens);
+        tokens,
+        aux_hidden_states);
   }
 };
 TORCH_MODULE(DeepseekV4MultiTokenPredictorLayer);
@@ -252,6 +254,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module,
         << "[DeepseekV4Mtp] deepseek_v4_mtp requires kv_caches size >= "
            "mtp layer count";
 
+    torch::Tensor aux_hidden_states;
     for (size_t i = 0; i < mtp_layers_.size(); ++i) {
       const int32_t layer_id = static_cast<int32_t>(i);
       prepare_layer_metadata(attn_metadata, layer_id);
@@ -261,7 +264,8 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module,
                                      attn_metadata,
                                      kv_caches[i],
                                      modified_input_params,
-                                     tokens);
+                                     tokens,
+                                     &aux_hidden_states);
       if (!modified_input_params.record_layer(static_cast<uint32_t>(i),
                                               hidden_states.device())) {
         return ModelOutput();
@@ -270,7 +274,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module,
 
     // Apply final normalization
     auto [output, _] = final_norm_(hidden_states, std::nullopt);
-    return ModelOutput(output, std::nullopt);
+    return ModelOutput(output, torch::Tensor(), aux_hidden_states.flatten(1));
   }
 
   // Re-export base class graph metadata interface as public.

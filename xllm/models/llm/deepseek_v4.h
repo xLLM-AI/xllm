@@ -44,40 +44,11 @@ limitations under the License.
 #include "core/util/tensor_helper.h"
 #include "layers/npu/deepseek_v4_rotary_embedding.h"
 #include "llm_model_base.h"
+#include "models/llm/deepseek_v4_common.h"
 
 namespace xllm {
 
 inline constexpr int64_t kDeepseekV4DsaMetadataBufferElements = 1024;
-
-inline int64_t deepseek_v4_next_power_of_two(int64_t n) {
-  int64_t value = 1;
-  while (value < n) {
-    value <<= 1;
-  }
-  return value;
-}
-
-inline torch::Tensor deepseek_v4_create_hadamard_matrix(
-    int64_t n,
-    torch::ScalarType dtype,
-    const torch::Device& device) {
-  auto options = torch::TensorOptions().dtype(dtype).device(device);
-  torch::Tensor matrix = torch::ones({1, 1}, options);
-  for (int64_t m = 1; m < n; m <<= 1) {
-    auto top = torch::cat({matrix, matrix}, 1);
-    auto bottom = torch::cat({matrix, -matrix}, 1);
-    matrix = torch::cat({top, bottom}, 0);
-  }
-  return matrix;
-}
-
-inline torch::Tensor maybe_to_device(const torch::Tensor& tensor,
-                                     const torch::Device& device) {
-  if (!tensor.defined() || tensor.device() == device) {
-    return tensor;
-  }
-  return tensor.to(device);
-}
 
 inline bool deepseek_v4_uses_acl_graph(
     const xllm::ModelInputParams& input_params) {
@@ -300,32 +271,6 @@ struct DeepseekV4GraphMetadataState : ModelGraphMetadataState {
 
   DSAMetadataPersistent dsa_metadata_persistent;
 };
-
-// Group key: (ratio, type, block_size) -> group_id
-class DSAGroupKey {
- public:
-  int32_t ratio;
-  DSACacheType type;
-  int32_t block_size;
-
-  bool operator==(const DSAGroupKey& o) const {
-    return ratio == o.ratio && type == o.type && block_size == o.block_size;
-  }
-};
-
-class DSAGroupKeyHash {
- public:
-  size_t operator()(const DSAGroupKey& k) const {
-    size_t h = std::hash<int32_t>()(k.ratio);
-    h ^= std::hash<int32_t>()(static_cast<int32_t>(k.type)) << 16;
-    h ^= std::hash<int32_t>()(k.block_size) << 8;
-    return h;
-  }
-};
-
-inline int32_t deepseek_v4_normalize_compress_ratio(int32_t ratio) {
-  return ratio <= 1 ? 1 : ratio;
-}
 
 inline void deepseek_v4_build_cache_specs(
     const ModelArgs& model_args,
@@ -820,8 +765,16 @@ class DeepseekV4ModelImpl
       }
 #endif
     }
+    torch::Tensor pre_hc_head_hidden_states;
+    if (model_args_.num_speculative_tokens() > 0) {
+      pre_hc_head_hidden_states = h;
+    }
     h = hc_head(h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
+    if (pre_hc_head_hidden_states.defined()) {
+      return make_deepseek_v4_mtp_target_output(
+          hidden_states, residual_out, pre_hc_head_hidden_states);
+    }
     return ModelOutput(hidden_states, residual_out);
   }
 

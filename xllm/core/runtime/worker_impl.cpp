@@ -1517,6 +1517,12 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   }
 
 #if defined(USE_NPU)
+  if (options_.enable_speculative_decode() &&
+      util::is_deepseek_v4_model_type(args.model_type()) &&
+      (options_.speculative_algorithm() == "MTP" ||
+      options_.speculative_algorithm() == "mtp")) {
+    args.num_speculative_tokens(options_.num_speculative_tokens());
+  }
   if (options_.speculative_algorithm() == "DFlash") {
     // Both engines capture the same target layers, whose ids live in the draft
     // config: the draft engine reads its own weights path, the target engine
