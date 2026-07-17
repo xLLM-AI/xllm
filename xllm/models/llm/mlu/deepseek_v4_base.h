@@ -37,17 +37,81 @@ limitations under the License.
 #include "core/layers/common/word_embedding.h"
 #include "core/layers/mlu/deepseek_v4/dsa_metadata_builder_mlu.h"
 #include "layers/mlu/deepseek_v4/dsa_cache_mapping.h"
-#include "models/llm/deepseek_v4_common.h"
 
 namespace xllm {
 namespace mlu {
 namespace model {
 
-// MLU graph execution requires both global and per-request enablement.
+// ============================================================================
+// Free helper functions — shared between DeepseekV4ModelImpl and
+// DeepseekV4MtpModelImpl.
+// ============================================================================
+
+inline torch::Tensor maybe_to_device(const torch::Tensor& tensor,
+                                     const torch::Device& device) {
+  if (!tensor.defined() || tensor.device() == device) {
+    return tensor;
+  }
+  return tensor.to(device);
+}
+
 inline bool deepseek_v4_uses_mlu_graph(const ModelInputParams& input_params) {
   return ExecutionConfig::get_instance().enable_graph() &&
          input_params.enable_graph;
 }
+
+inline int32_t normalize_compress_ratio(int32_t ratio) {
+  return ratio <= 1 ? 1 : ratio;
+}
+
+inline int64_t next_power_of_two(int64_t value) {
+  int64_t result = 1;
+  while (result < value) {
+    result <<= 1;
+  }
+  return result;
+}
+
+inline torch::Tensor create_hadamard_matrix(int64_t size,
+                                            torch::ScalarType dtype,
+                                            const torch::Device& device) {
+  torch::TensorOptions options =
+      torch::TensorOptions().dtype(dtype).device(device);
+  torch::Tensor matrix = torch::ones({1, 1}, options);
+  for (int64_t dim = 1; dim < size; dim <<= 1) {
+    torch::Tensor top = torch::cat({matrix, matrix}, 1);
+    torch::Tensor bottom = torch::cat({matrix, -matrix}, 1);
+    matrix = torch::cat({top, bottom}, 0);
+  }
+  return matrix;
+}
+
+// ============================================================================
+// DSA cache group key — used by build_dsa_cache_info to deduplicate cache
+// groups across layers.
+// ============================================================================
+
+class DSAGroupKey final {
+ public:
+  int32_t ratio_ = 1;
+  DSACacheType type_ = DSACacheType::SLIDING_WINDOW;
+  int32_t block_size_ = 0;
+
+  bool operator==(const DSAGroupKey& other) const {
+    return ratio_ == other.ratio_ && type_ == other.type_ &&
+           block_size_ == other.block_size_;
+  }
+};
+
+class DSAGroupKeyHash final {
+ public:
+  size_t operator()(const DSAGroupKey& key) const {
+    size_t hash = std::hash<int32_t>()(key.ratio_);
+    hash ^= std::hash<int32_t>()(static_cast<int32_t>(key.type_)) << 16;
+    hash ^= std::hash<int32_t>()(key.block_size_) << 8;
+    return hash;
+  }
+};
 
 // ============================================================================
 // Weight loading utilities — shared by DeepseekV4ForCausalLMImpl and
@@ -211,9 +275,8 @@ class DeepseekV4Base {
     if (model_args.index_head_dim() <= 0) {
       return;
     }
-    const int64_t hadamard_dim =
-        deepseek_v4_next_power_of_two(model_args.index_head_dim());
-    dsa_hadamard_ = deepseek_v4_create_hadamard_matrix(
+    const int64_t hadamard_dim = next_power_of_two(model_args.index_head_dim());
+    dsa_hadamard_ = create_hadamard_matrix(
         hadamard_dim, options.dtype().toScalarType(), options.device());
   }
 
@@ -225,7 +288,10 @@ class DeepseekV4Base {
     std::unordered_map<DSAGroupKey, int32_t, DSAGroupKeyHash> group_key_map;
     auto register_group =
         [&](DSACacheType type, int32_t ratio, int32_t block_size) -> int32_t {
-      DSAGroupKey key{ratio, type, block_size};
+      DSAGroupKey key;
+      key.ratio_ = ratio;
+      key.type_ = type;
+      key.block_size_ = block_size;
       auto it = group_key_map.find(key);
       if (it != group_key_map.end()) {
         return it->second;
@@ -238,7 +304,7 @@ class DeepseekV4Base {
 
     register_group(DSACacheType::SLIDING_WINDOW, 1, base_block_size);
     for (const int32_t raw_ratio : compress_ratios) {
-      const int32_t ratio = deepseek_v4_normalize_compress_ratio(raw_ratio);
+      const int32_t ratio = normalize_compress_ratio(raw_ratio);
       if (ratio == 4 || ratio == 128) {
         register_group(DSACacheType::TOKEN, ratio, base_block_size);
       }
@@ -251,7 +317,7 @@ class DeepseekV4Base {
           layer_id < static_cast<int32_t>(compress_ratios.size())
               ? compress_ratios[static_cast<size_t>(layer_id)]
               : 1;
-      const int32_t ratio = deepseek_v4_normalize_compress_ratio(raw_ratio);
+      const int32_t ratio = normalize_compress_ratio(raw_ratio);
       const std::vector<CacheEntry> layer_caches =
           cache_entries_for_ratio(ratio, base_block_size);
       cache_mappings_[static_cast<size_t>(layer_id)] =

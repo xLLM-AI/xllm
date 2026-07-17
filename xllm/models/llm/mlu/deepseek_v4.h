@@ -45,7 +45,6 @@ limitations under the License.
 #include "core/layers/mlu/deepseek_v4/dsa_empty_dp_input.h"
 #include "core/layers/mlu/deepseek_v4/dsa_metadata_builder_mlu.h"
 #include "core/layers/mlu/deepseek_v4/hyper_connection.h"
-#include "models/llm/deepseek_v4_common.h"
 #include "models/llm/llm_model_base.h"
 #include "models/llm/mlu/deepseek_v4_base.h"
 
@@ -221,18 +220,15 @@ class DeepseekV4ModelImpl final
       }
     }
 
-    torch::Tensor pre_hc_head_h;
-    if (model_args_.num_speculative_tokens() > 0) {
-      // Stash the pre-hc_head 3D hidden for the MTP draft.
-      pre_hc_head_h = h;
-    }
+    // Stash the pre-hc_head 3D hidden for the MTP draft.
+    torch::Tensor pre_hc_head_h = h;
     h = hc_head_(h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
-    if (pre_hc_head_h.defined()) {
-      return make_deepseek_v4_mtp_target_output(
-          hidden_states, residual_out, pre_hc_head_h);
+    ModelOutput out(hidden_states, residual_out);
+    if (model_args_.num_speculative_tokens() > 0) {
+      out.aux_hidden_states = pre_hc_head_h.flatten(1);
     }
-    return ModelOutput(hidden_states, residual_out);
+    return out;
   }
 
   // Re-export base class graph metadata interface as public.
@@ -480,7 +476,7 @@ inline void validate_deepseek_v4_args(const ModelArgs& args,
     CHECK(policy.supported_compress_ratios.count(ratio) > 0)
         << "deepseek_v4 config compress_ratios[" << layer_id
         << "] must be in supported_compress_ratios, got " << ratio;
-    const int32_t effective_ratio = deepseek_v4_normalize_compress_ratio(ratio);
+    const int32_t effective_ratio = normalize_compress_ratio(ratio);
     CHECK(policy.supported_effective_ratios.count(effective_ratio) > 0)
         << "deepseek_v4 config effective compress_ratios[" << layer_id
         << "] must be one of 1/4/128, got " << effective_ratio;
