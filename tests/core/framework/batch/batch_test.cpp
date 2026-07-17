@@ -2056,7 +2056,7 @@ TEST(BatchTest, OverlapMTPReplacementKeepsCompositeKvBlocks) {
       .max_seqs_per_batch(max_seqs_per_batch)
       .manager_types({1, 0, 0})
       .compress_ratios({0, 4, 128});
-  CompositeBlockManager manager(options);
+  CompositeBlockManager manager(build_composite_leaves(options));
 
   RequestSamplingParam sampling_param;
   StoppingChecker stopping_checker;
@@ -2064,8 +2064,8 @@ TEST(BatchTest, OverlapMTPReplacementKeepsCompositeKvBlocks) {
 
   Sequence seq = make_overlap_sequence(
       {1, 10, 11}, /*seq_capacity=*/128, &sampling_param, &stopping_checker);
-  ASSERT_TRUE(manager.allocate_for_sequence(&seq, seq.num_prompt_tokens()));
-  ASSERT_EQ(seq.kv_state().num_kv_blocks(), 0u);
+  ASSERT_TRUE(manager.allocate_sequence(&seq, seq.num_prompt_tokens()));
+  ASSERT_EQ(seq.kv_state().num_blocks(BlockType::KV), 0u);
   ASSERT_GT(seq.kv_state().current_max_tokens_capacity(), 0u);
   seq.kv_state().incr_kv_cache_tokens_num(seq.num_prompt_tokens() - 1);
 
