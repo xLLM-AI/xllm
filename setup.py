@@ -125,6 +125,33 @@ def _stage_triton_npu_runtime_binaries(base_dir: str, extdir: str, device: str) 
         )
     logger.info(f"Staged {copied_count} Triton NPU runtime asset(s) into {dest_dir}")
 
+
+try:
+    from setuptools.command.build_scripts import build_scripts as _build_scripts
+except ModuleNotFoundError:
+    from distutils.command.build_scripts import build_scripts as _build_scripts
+
+
+class BuildBinaryScripts(_build_scripts):
+    """Ship the xllm cpp ELF as a wheel script verbatim.
+
+    The default copy_scripts calls tokenize.open() to rewrite shebangs, which
+    raises SyntaxError on a raw ELF. Copy the file byte-for-byte instead so it
+    installs to bin/xllm and the cpp binary -- not a python wrapper -- owns the
+    `xllm` command.
+    """
+
+    def copy_scripts(self) -> tuple[list[str], list[str]]:
+        self.mkpath(self.build_dir)
+        outfiles: list[str] = []
+        for script in self.scripts:
+            outfile = os.path.join(self.build_dir, os.path.basename(script))
+            self.copy_file(script, outfile)
+            outfiles.append(outfile)
+        self._change_modes(outfiles)
+        return outfiles, []
+
+
 class CMakeExtension(Extension):
     def __init__(self, name: str, path: str, sourcedir: str = "") -> None:
         super().__init__(name, sources=[])
@@ -478,6 +505,12 @@ class BuildDistWheel(bdist_wheel):
                 path = os.path.join(root, item)
                 if '_test' in item and os.path.isfile(path):
                     os.remove(path)
+        # The cpp ELF ships as a wheel script (bin/xllm) instead. Drop the
+        # in-package copy so the wheel carries a single binary and nothing
+        # shadows the `xllm` command on PATH.
+        in_pkg_binary = os.path.join(tmp_path, 'xllm')
+        if os.path.isfile(in_pkg_binary):
+            os.remove(in_pkg_binary)
         global BUILD_TEST_FILE
         BUILD_TEST_FILE = False
 
@@ -753,7 +786,9 @@ if __name__ == "__main__":
             "Topic :: Scientific/Engineering :: Artificial Intelligence",
         ],
         ext_modules=[CMakeExtension("xllm", "xllm/")],
+        scripts=[os.path.join(get_base_dir(), "build", "xllm", "core", "server", "xllm")],
         cmdclass={"build_ext": ExtBuild,
+                  "build_scripts": BuildBinaryScripts,
                   "test": test_cmd,
                   'bdist_wheel': BuildDistWheel},
         options=options,
