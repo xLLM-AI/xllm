@@ -201,6 +201,17 @@ bool ContinuousScheduler::add_request(std::shared_ptr<Request>& request) {
 
   kv_cache_manager_->prefetch_from_storage(request);
 
+  // Record the incoming request's prompt token count into the rolling
+  // window that AutoFlipController consumes to compute long_ratio. This
+  // is unconditional (cheap: one mutex + deque push) so the reader gets
+  // representative samples regardless of which decision policy is enabled
+  // on the reader side.
+  const auto& seqs = request->sequences();
+  if (!seqs.empty() && seqs[0] != nullptr) {
+    auto_flip_stats_.record_request(
+        static_cast<int64_t>(seqs[0]->num_prompt_tokens()));
+  }
+
   if (request_queue_.write(request)) {
     return true;
   }

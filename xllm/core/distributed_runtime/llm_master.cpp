@@ -29,6 +29,7 @@ limitations under the License.
 
 #include "api_service/call.h"
 #include "common/metrics.h"
+#include "core/distributed_runtime/auto_flip_controller.h"
 #include "core/distributed_runtime/mode_switch_service.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/service_config.h"
@@ -145,8 +146,20 @@ LLMMaster::LLMMaster(const Options& options)
     auto* cs = dynamic_cast<ContinuousScheduler*>(scheduler_.get());
     auto mode_switch = std::make_unique<ModeSwitchService>(
         static_cast<LLMEngine*>(engine_.get()), cs);
+    // Retain a raw ptr for AutoFlipController before rpc_server takes
+    // ownership. brpc keeps mode_switch alive for the life of the server
+    // (which outlives LLMMaster), so this ptr stays valid until dtor.
+    ModeSwitchService* mode_switch_raw = mode_switch.get();
     if (!rpc_server->start(std::move(mode_switch), addr)) {
       LOG(ERROR) << "Failed to start standalone ModeSwitchService on " << addr;
+    } else if (cs != nullptr) {
+      // Bring up the autonomous flip driver. Feature-gated via
+      // FLAGS_enable_auto_flip so the tick is a no-op unless explicitly
+      // enabled -- construction is cheap and always-on so operators can
+      // toggle at runtime via /flags without restart.
+      auto_flip_controller_ = std::make_unique<AutoFlipController>(
+          static_cast<LLMEngine*>(engine_.get()), cs, mode_switch_raw);
+      auto_flip_controller_->start();
     }
   }
 
@@ -163,6 +176,13 @@ LLMMaster::LLMMaster(const Options& options)
 
 LLMMaster::~LLMMaster() {
   stoped_.store(true, std::memory_order_relaxed);
+  // Stop the auto-flip driver first so its tick can't race with scheduler
+  // teardown. The controller only needs `engine_` and `scheduler_` while
+  // it's ticking; stop() joins its thread before those drop.
+  if (auto_flip_controller_) {
+    auto_flip_controller_->stop();
+    auto_flip_controller_.reset();
+  }
   // wait for the loop thread to finish
   LOG(INFO) << "LLMMaster stopping...";
   if (loop_thread_.joinable()) {

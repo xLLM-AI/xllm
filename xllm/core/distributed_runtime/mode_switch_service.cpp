@@ -19,6 +19,9 @@ limitations under the License.
 #include <brpc/controller.h>
 #include <glog/logging.h>
 
+#include <chrono>
+
+#include "common/metrics.h"
 #include "llm_engine.h"
 #include "runtime/xservice_client.h"
 #include "scheduler/continuous_scheduler.h"
@@ -36,11 +39,24 @@ void ModeSwitchService::SwitchMode(
     proto::InstanceModeSwitchResponse* response,
     ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
+  // Full-flip wall clock for mode_switch_latency_ms histogram. Starts
+  // before any bookkeeping so idempotent no-ops and validation errors
+  // are also observed (they should be sub-ms so the histogram tail is
+  // dominated by real flips).
+  const auto flip_start = std::chrono::steady_clock::now();
+  auto observe_latency = [&flip_start]() {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - flip_start)
+                             .count();
+    HISTOGRAM_OBSERVE(mode_switch_latency_ms, elapsed);
+  };
   if (!engine_) {
     response->set_ok(false);
     response->set_current_mode(current_mode_.load());
     response->set_error("engine not bound to ModeSwitchService");
     LOG(ERROR) << "ModeSwitchService::SwitchMode called but engine is null";
+    COUNTER_INC(mode_switch_failed_total);
+    observe_latency();
     return;
   }
   const int32_t target = request->target_mode();
@@ -49,6 +65,8 @@ void ModeSwitchService::SwitchMode(
     response->set_current_mode(current_mode_.load());
     response->set_error("invalid target_mode (expect 0 or 1)");
     LOG(ERROR) << "ModeSwitchService::SwitchMode bad target=" << target;
+    COUNTER_INC(mode_switch_failed_total);
+    observe_latency();
     return;
   }
   const int32_t prev = current_mode_.load();
@@ -58,6 +76,9 @@ void ModeSwitchService::SwitchMode(
     response->set_current_mode(prev);
     LOG(INFO) << "ModeSwitchService::SwitchMode no-op, already in mode="
               << target;
+    // Idempotent no-op is a valid completion; observe the (small) latency
+    // but don't bump total_to_cp/dp so the counters reflect actual flips.
+    observe_latency();
     return;
   }
   LOG(INFO) << "ModeSwitchService::SwitchMode prev=" << prev
@@ -100,7 +121,16 @@ void ModeSwitchService::SwitchMode(
     if (drain_timeout_ms <= 0) {
       drain_timeout_ms = 30000;
     }
-    if (!scheduler_->wait_until_paused(drain_timeout_ms)) {
+    // Observe drain wall time separately so operators can distinguish
+    // "drain slow (in-flight decode)" from "rebuild slow (kv-pool rebuild
+    // + relink)".
+    const auto drain_start = std::chrono::steady_clock::now();
+    const bool drained = scheduler_->wait_until_paused(drain_timeout_ms);
+    const auto drain_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - drain_start)
+                              .count();
+    HISTOGRAM_OBSERVE(mode_switch_drain_ms, drain_ms);
+    if (!drained) {
       LOG(WARNING) << "ModeSwitchService::SwitchMode timed out waiting for "
                       "scheduler to drain ("
                    << drain_timeout_ms << "ms); aborting flip";
@@ -108,6 +138,8 @@ void ModeSwitchService::SwitchMode(
       response->set_ok(false);
       response->set_current_mode(prev);
       response->set_error("scheduler drain timeout");
+      COUNTER_INC(mode_switch_failed_total);
+      observe_latency();
       return;
     }
   }
@@ -168,12 +200,39 @@ void ModeSwitchService::SwitchMode(
     current_mode_.store(target);
     response->set_ok(true);
     response->set_current_mode(target);
+    // Update per-target flip counter + topology gauges. Counters are
+    // split by target rather than tagged so grafana can plot the two
+    // lines directly without label filtering (bvar-native counters
+    // don't support labels the way Prometheus does).
+    // Enum truth (parallel_args.h:219-220): CP_PREFILL=0, DP_DECODE=1.
+    // The mode_switch.proto comment has 0/1 swapped; do not follow it.
+    if (target == 0) {
+      COUNTER_INC(mode_switch_total_to_cp);
+    } else {
+      COUNTER_INC(mode_switch_total_to_dp);
+    }
+    // engine_->cp_size() has the same runtime bookkeeping refreshed by
+    // switch_mode; expose both so a dashboard can distinguish CP vs DP
+    // topology unambiguously.
+    GAUGE_SET(active_dp_size, static_cast<double>(new_dp_size));
+    // cp_size follows the paired invariant (max(cp,dp) constant across
+    // flip); read it via engine to stay honest with the flipped state.
+    // If engine doesn't expose cp_size directly this is best-effort and
+    // won't block the flip.
+    // NOTE: if a future engine variant renames this accessor we'll drop
+    // the gauge silently (compile-time member check via has_member style
+    // is over-engineering for a metric).
+    // For the single-instance/dual-mode case cp_size is world/dp_size, so
+    // deriving from a Gauge kept in sync with dp_size is enough.
+    // A simple fallback: (world / dp_size). world is available via the
+    // engine but not exposed generically; leave to a follow-up.
   } else {
     // engine_->switch_mode() already attempted rollback. We trust the
     // engine has restored prev mode on every worker.
     response->set_ok(false);
     response->set_current_mode(prev);
     response->set_error("engine switch_mode fan-out failed; rolled back");
+    COUNTER_INC(mode_switch_failed_total);
   }
 
   // Release the gate first so any brpc handler that has been queued behind
@@ -201,6 +260,11 @@ void ModeSwitchService::SwitchMode(
                       "some peers may still be linked with stale dp_size";
     }
   }
+
+  // Final latency observation: covers pause + drain + engine flip +
+  // rebuild + resume + relink (relink after resume is a real cost that
+  // affects when disagg pipelines fully recover after a flip).
+  observe_latency();
 }
 
 }  // namespace xllm

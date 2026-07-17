@@ -1001,6 +1001,7 @@ void NpuDeepseekV32DecoderLayerImpl::update_expert_weight() {
 int64_t NpuDeepseekV32DecoderLayerImpl::init_layer() {
   name_ = "deepseek_v2_decoder_layer " + std::to_string(layer_id_);
   model_name_ = "DeepSeek_V2";
+
   CHECK_OPERATION_STATUS_RETURN(init_node(prefill_node_, prefill_param_));
   CHECK_OPERATION_STATUS_RETURN(init_node(decode_node_, decode_param_));
   if (has_mtp_topk_fallback_) {

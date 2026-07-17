@@ -37,6 +37,7 @@ limitations under the License.
 #include "framework/request/sequence.h"
 #include "runtime/xservice_client.h"
 #include "scheduler.h"
+#include "scheduler/auto_flip_stats.h"
 #include "scheduler/profile/profile_manager.h"
 #include "scheduler/request_priority_queue.h"
 
@@ -245,6 +246,21 @@ class ContinuousScheduler : public Scheduler {
   void preempt_all_running_requests_test() { preempt_all_running_requests(); }
   void abort_all_running_requests_test() { abort_all_running_requests(); }
 
+  // AutoFlipController tick reads this rolling window every few seconds
+  // to decide whether to trigger a CP<->DP mode switch. Every add_request
+  // records the incoming request's prompt_tokens here; the window prunes
+  // itself on read. Non-owning, safe to expose by reference: AutoFlipStats
+  // is internally mutex-guarded.
+  AutoFlipStats& auto_flip_stats() { return auto_flip_stats_; }
+  const AutoFlipStats& auto_flip_stats() const { return auto_flip_stats_; }
+
+  // Live dp_size the batching pipeline is currently built for. Distinct from
+  // options_.dp_size(): a runtime CP<->DP flip updates active_dp_size_ in
+  // step() when engine_->dp_size() changes. AutoFlipController reads this
+  // to decide whether pending_requests can fill every dp_rank; if not, it
+  // heals back to CP to avoid the DP-lopsided-batch backdoor path.
+  int32_t active_dp_size() const { return active_dp_size_; }
+
  private:
   // Drive the PAUSING -> PAUSED transition from within step(). Returns true if
   // the scheduler is paused (caller should skip normal scheduling).
@@ -414,6 +430,13 @@ class ContinuousScheduler : public Scheduler {
   // wait_until_paused(). Notified by the scheduler loop thread.
   std::mutex pause_mutex_;
   std::condition_variable pause_cv_;
+
+  // Rolling-window statistics fed by add_request; consumed by
+  // AutoFlipController on its tick to decide whether long_ratio has
+  // crossed a threshold that warrants a CP<->DP flip. Feature-gated via
+  // FLAGS_enable_auto_flip on the reader side, so the write side is
+  // always active (cost is a mutex + deque push per add_request).
+  AutoFlipStats auto_flip_stats_;
 
  private:
   void apply_cancel_requests();

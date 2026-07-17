@@ -11,6 +11,7 @@ cc_library(
     chunked_prefill_scheduler.h
     zero_eviction_scheduler.h
     continuous_scheduler.h
+    auto_flip_stats.h
     disagg_pd_chunked_prefill_scheduler.h
     disagg_pd_scheduler.h
     pd_ooc_scheduler.h

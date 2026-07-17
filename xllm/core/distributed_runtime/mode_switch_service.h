@@ -43,6 +43,13 @@ class ModeSwitchService : public proto::ModeSwitchService {
                   proto::InstanceModeSwitchResponse* response,
                   ::google::protobuf::Closure* done) override;
 
+  // Read the mode SwitchMode most recently completed. Truthful even
+  // between engine.switch_mode returning and the subsequent gauge
+  // updates, unlike (dp_size==1)?1:0 which lags on the caller side.
+  // Used by AutoFlipController tick() to avoid a self-flip storm when
+  // the derived-from-engine cur_mode reads pre-flip state.
+  int32_t current_mode() const { return current_mode_.load(); }
+
  private:
   LLMEngine* engine_;
   // Optional; if the deployment is disaggregated PD this points at the
