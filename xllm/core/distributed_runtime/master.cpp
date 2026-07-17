@@ -200,8 +200,9 @@ Master::Master(const Options& options, EngineType type)
   const auto model_path =
       std::filesystem::path(options_.model_path()).lexically_normal();
   const auto devices = DeviceNameUtils::parse_devices("auto");
-  const int32_t global_world_size =
-      options_.nnodes() * static_cast<int32_t>(devices.size());
+  // Multi-process serving runs one worker per process, so the global world
+  // size is the node count. `devices` is only the visible-card pool here.
+  const int32_t global_world_size = options_.nnodes();
   std::string cp_model_type;
   if (options_.cp_size() > 1 && Platform::uses_model_cp_partition()) {
     cp_model_type = util::get_model_type(model_path, options_.backend());
