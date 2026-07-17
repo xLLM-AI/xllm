@@ -206,13 +206,6 @@ uint32_t get_graph_dp_tokens(uint32_t actual_tokens,
   return align_tokens(std::max(bucket_tokens, tp_size), tp_size);
 }
 
-int64_t get_seq_lens_capacity(const xllm::runtime::Options& options) {
-  const int64_t max_seqs = options.max_seqs_per_batch();
-  const int64_t seq_expand =
-      std::max<int64_t>(1, options.num_speculative_tokens() + 1);
-  return max_seqs * seq_expand + 1;
-}
-
 xllm::ModelInputParams make_graph_params(const xllm::ModelInputParams& params,
                                          uint32_t padding_num_tokens) {
   xllm::ModelInputParams graph_params = params;
@@ -277,7 +270,9 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
     : num_decoding_tokens_(options.num_decoding_tokens()) {
   const int64_t max_tokens = options.max_tokens_per_batch();
   const int64_t graph_tokens_capacity = get_graph_token_capacity(options);
-  const int64_t max_seq_lens = get_seq_lens_capacity(options);
+  // Sequence lengths are cumulative offsets for graph token rows, including
+  // the terminal offset.
+  const int64_t max_seq_lens = graph_tokens_capacity + 1;
   const int64_t max_seq_len = args.max_position_embeddings();
   const uint32_t block_size = options.block_size();
   const int64_t max_num_blocks_per_req =
