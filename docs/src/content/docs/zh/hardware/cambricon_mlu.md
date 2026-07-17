@@ -47,7 +47,7 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  MLU_VISIBLE_DEVICES=$DEVICE xllm \
+  xllm \
     --model $MODEL_PATH \
     --port $PORT \
     --nnodes=$NNODES \

@@ -176,7 +176,7 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
+  nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \

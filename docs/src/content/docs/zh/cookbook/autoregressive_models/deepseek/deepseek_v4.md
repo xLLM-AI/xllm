@@ -140,7 +140,7 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup $XLLM_PATH -model-id ds \
+  nohup $XLLM_PATH -model-id ds \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
@@ -213,7 +213,7 @@ unset HCCL_OP_EXPANSION_MODE
 for (( i=0; i<$LOCAL_NODES; i++ )); do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i)); LOG_FILE="$LOG_DIR/node_$i.log"
-  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup $XLLM_PATH \
+  nohup $XLLM_PATH \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
@@ -242,7 +242,7 @@ unset HCCL_OP_EXPANSION_MODE
 for (( i=0; i<$LOCAL_NODES; i++ )); do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i)); LOG_FILE="$LOG_DIR/node_$i.log"
-  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup  $XLLM_PATH \
+  nohup  $XLLM_PATH \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \

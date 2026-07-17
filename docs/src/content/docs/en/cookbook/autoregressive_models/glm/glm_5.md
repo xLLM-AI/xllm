@@ -132,7 +132,7 @@ do
   LOG_FILE="$LOG_DIR/node_$i.log"
   # Optional: bind CPU cores with numactl. Query NUMA affinity with: npu-smi info -t topo
   #nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
-  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup $XLLM_PATH \
+  nohup $XLLM_PATH \
     --model $MODEL_PATH \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
@@ -204,7 +204,7 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
+  nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
@@ -249,7 +249,7 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
+  nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
@@ -431,7 +431,7 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ../xllm-service/build/xllm_service/xllm_m
     PORT=$((START_PORT + i))
     DEVICE=$((START_DEVICE + i))
     LOG_FILE="$LOG_DIR/node_$i.log"
-    ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
+    nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
       --model $MODEL_PATH  --model_id glmmoe \
       --host $LOCAL_HOST \
       --port $PORT \
@@ -485,7 +485,7 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ../xllm-service/build/xllm_service/xllm_m
     PORT=$((START_PORT + i))
     DEVICE=$((START_DEVICE + i))
     LOG_FILE="$LOG_DIR/node_$i.log"
-    ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
+    nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
       --model $MODEL_PATH  --model_id glmmoe \
       --host $LOCAL_HOST \
       --port $PORT \

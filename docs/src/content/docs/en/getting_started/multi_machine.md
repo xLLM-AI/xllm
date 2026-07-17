@@ -37,7 +37,7 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  ASCEND_RT_VISIBLE_DEVICES=$DEVICE /path/to/xllm \
+  /path/to/xllm \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
@@ -88,7 +88,7 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  ASCEND_RT_VISIBLE_DEVICES=$DEVICE /path/to/xllm \
+  /path/to/xllm \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \

@@ -101,7 +101,7 @@ do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup ./xllm \
+  nohup ./xllm \
     --model $MODEL_PATH \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \

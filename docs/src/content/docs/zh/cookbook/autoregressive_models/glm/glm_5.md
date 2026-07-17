@@ -133,7 +133,7 @@ do
   LOG_FILE="$LOG_DIR/node_$i.log"
   #可选：numactl绑核 (NUMA亲和性查询命令： npu-smi info -t topo)
   #nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
-  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup $XLLM_PATH \
+  nohup $XLLM_PATH \
     --model $MODEL_PATH \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
@@ -203,7 +203,8 @@ unset HCCL_OP_EXPANSION_MODE
 for (( i=0; i<$LOCAL_NODES; i++ ))do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i));  LOG_FILE="$LOG_DIR/node_$i.log"
-  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \    --model $MODEL_PATH \
+  nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
+    --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
@@ -245,7 +246,8 @@ unset HCCL_OP_EXPANSION_MODE
 for (( i=0; i<$LOCAL_NODES; i++ ))do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i));  LOG_FILE="$LOG_DIR/node_$i.log"
-  ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \    --model $MODEL_PATH \
+  nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
+    --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
@@ -419,7 +421,7 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ../xllm-service/build/xllm_service/xllm_m
     PORT=$((START_PORT + i))
     DEVICE=$((START_DEVICE + i))
     LOG_FILE="$LOG_DIR/node_$i.log"
-    ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
+    nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
       --model $MODEL_PATH  --model_id glmmoe \
       --host $LOCAL_HOST \
       --port $PORT \
@@ -473,7 +475,7 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ../xllm-service/build/xllm_service/xllm_m
     PORT=$((START_PORT + i))
     DEVICE=$((START_DEVICE + i))
     LOG_FILE="$LOG_DIR/node_$i.log"
-    ASCEND_RT_VISIBLE_DEVICES=$DEVICE nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
+    nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
       --model $MODEL_PATH  --model_id glmmoe \
       --host $LOCAL_HOST \
       --port $PORT \
