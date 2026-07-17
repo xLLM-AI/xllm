@@ -150,6 +150,15 @@ class WorkerService : public proto::DistributeWorker {
                    proto::Status* resp,
                    ::google::protobuf::Closure* done) override;
 
+  // Runtime CP<->DP switch RPC handler. Validates the target_mode value
+  // and forwards to Worker::switch_mode; returns Status.ok=false when
+  // the worker is in legacy single-mode (no DualParallelArgs attached)
+  // or target_mode is out of range.
+  void SwitchMode(::google::protobuf::RpcController* controller,
+                  const proto::SwitchModeRequest* req,
+                  proto::Status* resp,
+                  ::google::protobuf::Closure* done) override;
+
  private:
   void step(ForwardInput& fwd_input,
             torch::Tensor& next_tokens,

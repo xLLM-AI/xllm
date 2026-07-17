@@ -29,6 +29,7 @@ limitations under the License.
 #include <memory>
 
 #include "common/device_monitor.h"
+#include "common/global_flags.h"
 #include "common/interruption_bus.h"
 #include "common/metrics.h"
 #include "common/options.h"
@@ -41,8 +42,6 @@ limitations under the License.
 #include "core/framework/config/service_config.h"
 #include "core/platform/platform.h"
 #include "framework/block/block_utils.h"
-// hierarchy temporarily disabled during the block-manager refactor
-// #include "framework/block/hierarchy_block_manager_pool.h"
 #include "framework/kv_cache/kv_cache_estimation.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/model/model_args.h"
@@ -53,6 +52,7 @@ limitations under the License.
 #include "runtime/llm_worker_impl.h"
 #include "runtime/params_utils.h"
 #include "runtime/worker.h"
+#include "runtime/xservice_client.h"
 #include "server/xllm_server_registry.h"
 #include "util/env_var.h"
 #include "util/pretty_print.h"
@@ -953,6 +953,24 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
       << "The processed forward inputs size " << forward_inputs.size()
       << " is not equal to dp size " << dp_size_ << ".";
 
+  // FLIPDIAG: log per-dp_rank forward input token count. For a hanging
+  // forward we want to see whether one dp_rank is dispatched with 0
+  // tokens (the empty-shard path) vs a real batch. If the empty-shard
+  // path is not producing fake input then that dp_rank fans out to a
+  // worker that never touches the layer's ATB node -> collective ops
+  // in the OTHER dp_rank block waiting for the empty rank to enter.
+  if (FLAGS_enable_flip_verbose_log) {
+    std::string tokens_dbg;
+    for (size_t i = 0; i < forward_inputs.size(); ++i) {
+      if (i > 0) tokens_dbg += ",";
+      tokens_dbg += std::to_string(forward_inputs[i].host_token_ids().numel());
+    }
+    LOG(INFO) << "FLIPDIAG engine_step_dp_tokens: dp_size=" << dp_size_
+              << " tokens_per_dp=[" << tokens_dbg
+              << "] worker_clients_num=" << worker_clients_num_
+              << " dp_local_size=" << dp_local_size_;
+  }
+
   std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;
   futures.reserve(worker_clients_num_);
 
@@ -1123,6 +1141,22 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
         batched_inputs[dp_rank].input_params.meta.batch_forward_type;
     dp_global_token_nums[dp_rank] =
         static_cast<int32_t>(batched_inputs[dp_rank].host_token_ids().numel());
+    // FLIPDIAG: DP collective ops require every dp_rank to enter with a
+    // consistent shape. When one dp_rank has 0 tokens the empty-shard
+    // path in worker_impl fabricates a 1-token fake input; but the
+    // dp_global_token_nums vector we broadcast to all workers still says
+    // 0 for that rank, so the layer's dp_ep_padding / allgather /
+    // all-to-all pads based on 0 while the shard actually holds 1 token.
+    // Any peer that reads a different length blocks. Clamp to 1 here so
+    // every worker's view matches what the empty-shard path will run.
+    // Only clamp when the flipped layout has dp>1; single-DP has no dp
+    // collective. We can't gate on batch_forward_type here because for an
+    // empty dp_rank it's still ::EMPTY; the aggregate promotion to
+    // PREFILL happens after this loop, and worker's need_fake gate keys
+    // off that promoted value.
+    if (dp_size_ > 1 && dp_global_token_nums[dp_rank] == 0) {
+      dp_global_token_nums[dp_rank] = 1;
+    }
     if (util::is_deepseek_v4_model_type(args_.model_type())) {
       const int64_t actual_scheduled_tokens = static_cast<int64_t>(
           batched_inputs[dp_rank].host_token_ids().numel());
@@ -1183,6 +1217,19 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
       batched_inputs[dp_rank].input_params.meta.batch_forward_type =
           batch_forward_type;
     }
+  }
+
+  // FLIPDIAG: log the actual dp_global_token_nums broadcast to workers
+  // (post-clamp). host_token_ids().numel() reflects the shard content;
+  // this vector is what layer's dp_ep_padding / allgather actually uses.
+  if (FLAGS_enable_flip_verbose_log) {
+    std::string dbg;
+    for (size_t i = 0; i < dp_global_token_nums.size(); ++i) {
+      if (i > 0) dbg += ",";
+      dbg += std::to_string(dp_global_token_nums[i]);
+    }
+    LOG(INFO) << "FLIPDIAG engine_step_dp_broadcast: dp_size=" << dp_size_
+              << " dp_global_token_nums=[" << dbg << "]";
   }
 
   return batched_inputs;
@@ -1365,8 +1412,150 @@ bool LLMEngine::rl_wakeup(const WakeupOptions& options) {
   return true;
 }
 
+bool LLMEngine::switch_mode(int32_t target_mode) {
+  if (target_mode != 0 && target_mode != 1) {
+    LOG(ERROR) << "switch_mode: invalid target_mode=" << target_mode
+               << " (expect 0=DP_DECODE or 1=CP_PREFILL)";
+    return false;
+  }
+  if (worker_clients_.empty()) {
+    LOG(ERROR) << "switch_mode: no worker clients";
+    return false;
+  }
+  LOG(INFO) << "switch_mode: target=" << target_mode << ", fanning out to "
+            << worker_clients_num_ << " worker(s)";
+
+  std::vector<folly::SemiFuture<bool>> futures;
+  futures.reserve(worker_clients_num_);
+  for (auto& worker : worker_clients_) {
+    futures.push_back(worker->switch_mode_async(target_mode));
+  }
+
+  auto results = folly::collectAll(futures).get();
+
+  // Detect partial failure. If any worker fan-out returned false we
+  // consider the switch incomplete and try to roll the survivors back.
+  std::vector<size_t> failed_idx;
+  for (size_t i = 0; i < results.size(); ++i) {
+    if (!results[i].hasValue() || !results[i].value()) {
+      failed_idx.push_back(i);
+    }
+  }
+  if (failed_idx.empty()) {
+    // Workers flipped their DualParallelArgs; the engine's own parallel
+    // bookkeeping (cp_size_/dp_size_/dp_local_size_) is fixed at startup and
+    // does NOT follow the flip on its own. prepare_inputs() builds one
+    // ForwardInput per dp_rank using cp_size_, and split_batch() maps workers
+    // to dp groups via `worker_rank / dp_local_size_`; leaving these stale
+    // makes the engine construct/dispatch batches with the pre-flip layout
+    // while workers run the post-flip layout -> q_seq_len==0 crashes on the
+    // first decode after a DP_DECODE flip. Mirror the worker-side layout
+    // (worker_server.cpp: CP side is cp=paired/dp=1, DP side is cp=1/dp=paired;
+    // tp is mode-invariant, so dp_local_tp_size_ never changes).
+    const uint32_t paired = std::max(options_.cp_size(), options_.dp_size());
+    if (target_mode ==
+        static_cast<int32_t>(DualParallelArgs::Mode::CP_PREFILL)) {
+      cp_size_ = paired;
+      dp_size_ = 1;
+    } else {
+      cp_size_ = 1;
+      dp_size_ = paired;
+    }
+    dp_local_size_ = worker_clients_num_ / dp_size_;
+    LOG(INFO) << "switch_mode: all " << worker_clients_num_
+              << " worker(s) flipped to mode=" << target_mode
+              << "; engine layout now cp_size=" << cp_size_
+              << " dp_size=" << dp_size_ << " dp_local_size=" << dp_local_size_
+              << " dp_local_tp_size=" << dp_local_tp_size_;
+    return true;
+  }
+
+  LOG(WARNING) << "switch_mode: " << failed_idx.size() << "/"
+               << worker_clients_num_
+               << " worker(s) failed; rolling survivors back";
+  const int32_t prev_mode = (target_mode == 0 ? 1 : 0);
+  std::vector<folly::SemiFuture<bool>> rb_futures;
+  rb_futures.reserve(worker_clients_num_);
+  for (size_t i = 0; i < worker_clients_.size(); ++i) {
+    // Only roll back workers that actually flipped (those that failed
+    // never moved). Best-effort: if a rollback also fails the engine
+    // ends up in an inconsistent state and the controller will treat
+    // the next inference attempt as a fatal-instance condition.
+    bool flipped =
+        std::find(failed_idx.begin(), failed_idx.end(), i) == failed_idx.end();
+    if (flipped) {
+      rb_futures.push_back(worker_clients_[i]->switch_mode_async(prev_mode));
+    }
+  }
+  if (!rb_futures.empty()) {
+    auto rb_results = folly::collectAll(rb_futures).get();
+    for (const auto& r : rb_results) {
+      if (!r.hasValue() || !r.value()) {
+        LOG(ERROR) << "switch_mode: rollback fan-out also failed on a worker; "
+                      "engine is in INCONSISTENT mode state";
+      }
+    }
+  }
+  return false;
+}
+
+void LLMEngine::rebuild_block_manager_pool(int32_t new_dp_size) {
+  // Called from the scheduler loop thread after a CP<->DP flip changed
+  // dp_size_. The BlockManagerPool is a vector<BlockManager> of size dp_size
+  // fixed at construction, so a flip that changes dp_size leaves the pool the
+  // wrong shape (scheduler dispatches to batches[dp_rank] / indexes metrics by
+  // dp_rank). Rebuild it for the new dp_size. Safe because the drain contract
+  // guarantees no in-flight step and every KV block is free, so there is no
+  // free-list state to migrate -- the physical per-worker KV tensors are
+  // untouched (block ids are logical offsets), only the logical allocator is
+  // reconstructed. Reuse the existing pool's Options so we don't recompute the
+  // (complex) kv-cache-cap-derived config.
+  auto* old_pool = reinterpret_cast<BlockManagerPool*>(kv_cache_manager_.get());
+  CHECK(old_pool != nullptr) << "rebuild_block_manager_pool: no existing pool";
+  const BlockManagerPool::Options opts = old_pool->options();
+  dp_size_ = static_cast<uint32_t>(new_dp_size);
+  if (options_.host_blocks_factor() > 1.0 || options_.enable_kvcache_store()) {
+    // hierarchy temporarily disabled during the block-manager refactor
+    // (upstream disabled HierarchyBlockManagerPool in PR#1787). The
+    // runtime CP<->DP switch path used to rebuild through the hierarchy
+    // pool here; while the refactor lands we fail loudly rather than
+    // silently degrading to a device-only pool for host-offload flows.
+    LOG(FATAL) << "host-offload / kvcache-store is temporarily disabled "
+                  "during the block-manager refactor. Runtime CP<->DP "
+                  "switch requires --host_blocks_factor<=1.0 and "
+                  "--enable_kvcache_store=false in the current xLLM main "
+                  "branch (hierarchy rebuild pending upstream).";
+  }
+  kv_cache_manager_ = std::make_unique<BlockManagerPool>(opts, new_dp_size);
+  // Publish the new pool to XServiceClient. Its heartbeat/reconcile threads
+  // hold a not-owning pointer captured at init(); without this update they
+  // keep dereferencing the destroyed pool right after unique_ptr::reset above,
+  // which lands rank0 in a silent SIGSEGV ~5s post-flip (observed 2026-07-02
+  // on 99: `Application startup complete` -> flip ok -> ~1.4s later heartbeat
+  // reads dangling `block_manager_pool_->options()` -> disappears).
+  auto* xservice = XServiceClient::get_instance();
+  if (xservice != nullptr) {
+    xservice->set_block_manager_pool(
+        reinterpret_cast<BlockManagerPool*>(kv_cache_manager_.get()));
+  }
+  LOG(INFO) << "rebuild_block_manager_pool: rebuilt for dp_size="
+            << new_dp_size;
+}
+
 bool LLMEngine::xtensor_wakeup(const WakeupOptions& options) {
   // sleep/wakeup/fork_master (xtensor path) requires
+  // ::xllm::KVCacheConfig::get_instance().enable_xtensor()
+  if (!::xllm::KVCacheConfig::get_instance().enable_xtensor()) {
+    LOG(WARNING) << "wakeup requires --enable_xtensor=true";
+    return false;
+  }
+
+  LOG(INFO) << "Starting to wakeup. Worker clients count: "
+            << worker_clients_num_;
+  if (worker_clients_.empty()) {
+    LOG(ERROR) << "No worker clients available to wakeup.";
+    return false;
+  }
   // ::xllm::KVCacheConfig::get_instance().enable_xtensor()
   if (!::xllm::KVCacheConfig::get_instance().enable_xtensor()) {
     LOG(WARNING) << "wakeup requires --enable_xtensor=true";

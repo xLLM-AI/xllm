@@ -171,6 +171,15 @@ class Engine {
     return false;
   };
 
+  // Runtime CP<->DP switch (dual-graph mode). Returns true iff every
+  // local worker successfully flipped its DualParallelArgs::Mode flag.
+  // On any worker failure the implementation must roll the surviving
+  // workers back to the previous mode before returning false.
+  virtual bool switch_mode(int32_t target_mode) {
+    LOG(ERROR) << "switch_mode is not implemented for this engine!";
+    return false;
+  };
+
   // XTensor mode: get GlobalXTensor offsets for allocated blocks
   // Returns per-layer K/V offsets for each block
   // Output: offsets[layer_id] = {k_offsets, v_offsets}
@@ -183,6 +192,20 @@ class Engine {
           layer_offsets) {
     return false;
   };
+
+  // NOTE: keep these two at the END of the vtable. They were added for runtime
+  // CP<->DP switching; appending (rather than inserting) avoids shifting the
+  // vtable slots of the virtuals above, so translation units that were not
+  // recompiled still dispatch the existing virtuals correctly.
+
+  // Current data-parallel size. Fixed at startup for a plain engine; LLMEngine
+  // overrides this so callers can observe a runtime CP<->DP flip.
+  virtual int32_t dp_size() const { return 1; }
+
+  // Rebuild the KV-cache BlockManagerPool for a new dp_size after a flip.
+  // No-op for engines that do not support runtime switching. Must be called
+  // from the scheduler loop thread while drained (no in-flight step).
+  virtual void rebuild_block_manager_pool(int32_t /*new_dp_size*/) {}
 
  protected:
   // model args

@@ -564,10 +564,15 @@ void BatchInputBuilder::process_single_sequence(
       sequence, n_kv_cache_tokens, logical_seq_len, seq_len, state_ptr);
 
   // Setup KV cache
+  // FIX (dual-mode trial-launch): pass actual q_seq_len, NOT padded_q_seq_len.
+  // CP padding aligns q_seq_len up to 2*cp_size for the forward kernel, but
+  // kv_cache_tokens_num must reflect the actual prompt tokens cached. Using
+  // padded_q_seq_len here causes kv_cache_tokens_num > n_tokens on the next
+  // step, which is the phantom seq we were patching around.
   setup_kv_cache_info(sequence,
                       n_kv_cache_tokens,
                       seq_len,
-                      padded_q_seq_len,
+                      q_seq_len,
                       state_ptr,
                       write_block_ids_ptr);
 

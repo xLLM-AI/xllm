@@ -25,4 +25,5 @@ proto_library(
     embedding_data.proto
     anthropic.proto
     xtensor_dist.proto
+    mode_switch.proto
 )

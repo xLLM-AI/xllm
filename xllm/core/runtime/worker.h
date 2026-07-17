@@ -41,6 +41,15 @@ class Worker {
          const runtime::Options& options,
          WorkerType worker_type);
 
+  // Dual-mode constructor. Builds the underlying WorkerImpl from
+  // dual_args->active() and then attaches the dual source so
+  // switch_mode() can flip the active configuration without rebuilding
+  // anything. The DualParallelArgs must outlive the Worker.
+  Worker(DualParallelArgs* dual_args,
+         const torch::Device& device,
+         const runtime::Options& options,
+         WorkerType worker_type);
+
   ~Worker();
 
   // initialize model, cache manager. blocking call
@@ -138,6 +147,15 @@ class Worker {
   int64_t get_active_activation_memory();
 
   folly::SemiFuture<int64_t> get_active_activation_memory_async();
+
+  // Runtime CP<->DP switching. Returns false if the worker was not built
+  // with dual-mode support (see DualParallelArgs / runtime/options.h
+  // enable_runtime_cp_dp_switch flag).
+  bool switch_mode(DualParallelArgs::Mode target);
+
+  folly::SemiFuture<bool> switch_mode_async(int32_t target_mode);
+
+  [[nodiscard]] DualParallelArgs::Mode current_mode() const;
 
  private:
   WorkerImpl* impl_ = nullptr;

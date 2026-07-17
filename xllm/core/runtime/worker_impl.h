@@ -63,6 +63,16 @@ class WorkerImpl {
              const torch::Device& device,
              const runtime::Options& options);
 
+  // Dual-mode constructor used by the runtime CP<->DP switch feature.
+  // The DualParallelArgs is owned by worker_server (which also owns the
+  // two CollectiveCommunicator instances feeding it); WorkerImpl keeps a
+  // non-owning pointer and copies the active() snapshot into
+  // parallel_args_ for the singular-API readers. When dual_args is non-
+  // null, switch_mode() can flip the active mode at runtime.
+  WorkerImpl(DualParallelArgs* dual_args,
+             const torch::Device& device,
+             const runtime::Options& options);
+
   virtual ~WorkerImpl();
 
   // initialize model, cache manager. blocking call
@@ -75,6 +85,23 @@ class WorkerImpl {
   virtual void load_model(std::unique_ptr<ModelLoader> loader);
 
   virtual void lazy_load_model(std::unique_ptr<ModelLoader> loader);
+
+  // Switch between CP-prefill and DP-decode modes. No-op when the worker
+  // was constructed without a DualParallelArgs (legacy single-mode);
+  // returns false in that case so callers can detect the mismatch.
+  // Caller must drain inflight requests before invoking; this only flips
+  // the discriminator, it does not block on inflight forwards.
+  virtual bool switch_mode(DualParallelArgs::Mode target);
+
+  // Current active mode. Always CP_PREFILL when the worker is single-mode.
+  [[nodiscard]] DualParallelArgs::Mode current_mode() const;
+
+  // Late-bind the DualParallelArgs source for a worker that was first
+  // constructed via the legacy single-arg ctor. Used by Worker (the
+  // facade) to attach dual support without touching every WorkerImpl
+  // subclass's ctor signature. Idempotent; no-op if already set to the
+  // same pointer. The DualParallelArgs must outlive this WorkerImpl.
+  void attach_dual_parallel_args(DualParallelArgs* dual_args);
 
   virtual std::tuple<int64_t, int64_t> estimate_kv_cache_capacity();
 
@@ -311,6 +338,13 @@ class WorkerImpl {
 
   // parallel args of current instance
   ParallelArgs parallel_args_;
+
+  // Optional dual-mode source. When non-null, parallel_args_ above is a
+  // snapshot of dual_parallel_args_->active() taken at construction
+  // time; future switch_mode() calls update both this snapshot AND the
+  // atomic flag inside dual_parallel_args_. When null, the worker is in
+  // legacy single-mode and parallel_args_ is the only source of truth.
+  DualParallelArgs* dual_parallel_args_ = nullptr;
 
   // kv caches
   std::vector<xllm::KVCache> kv_caches_;

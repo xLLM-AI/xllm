@@ -296,7 +296,69 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
 #endif
 }
 
+WorkerImpl::WorkerImpl(DualParallelArgs* dual_args,
+                       const torch::Device& device,
+                       const runtime::Options& options)
+    : WorkerImpl(dual_args->active(), device, options) {
+  // The single-arg ctor above already snapshotted the active() ParallelArgs
+  // into parallel_args_; we just retain the pointer so switch_mode() can
+  // refresh the snapshot after a flip.
+  dual_parallel_args_ = dual_args;
+}
+
 WorkerImpl::~WorkerImpl() = default;
+
+bool WorkerImpl::switch_mode(DualParallelArgs::Mode target) {
+  if (dual_parallel_args_ == nullptr) {
+    LOG(WARNING) << "Worker rank=" << parallel_args_.rank()
+                 << " switch_mode requested but the worker was constructed "
+                    "in single-mode; ignoring.";
+    return false;
+  }
+  if (dual_parallel_args_->mode() == target) {
+    return true;
+  }
+  dual_parallel_args_->set_mode(target);
+  // Refresh the snapshot so legacy parallel_args_ readers (rank/world_size
+  // are mode-invariant; cp_size/dp_size and the ProcessGroup pointers do
+  // change) see the post-flip configuration. This is safe to do without
+  // holding a lock because the scheduler's drain protocol guarantees no
+  // forward is in flight on this worker when switch_mode runs.
+  parallel_args_ = dual_parallel_args_->active();
+  // ModelContext holds its OWN copy of ParallelArgs (not a reference), and the
+  // forward path reads cp_size/dp_size/ep_size/mapping_data through it (e.g.
+  // the DpEpPadding gate in prepare_work_before_execute_on_stream). Without
+  // this refresh the context keeps the pre-flip cp_size, so after a flip to
+  // DP_DECODE the gate `!(cp_size > 1)` stays false, DpEpPadding is never
+  // built, and the DP decode ATB node faults on placeholder tensors.
+  context_.set_parallel_args(parallel_args_);
+  // dp_driver_ depends on cp_size/dp_size and must be recomputed.
+  const int32_t tp_size = parallel_args_.world_size() /
+                          (parallel_args_.dp_size() * parallel_args_.cp_size());
+  dp_driver_ =
+      parallel_args_.dp_size() > 1 &&
+      parallel_args_.rank() % (tp_size * parallel_args_.cp_size()) == 0;
+  return true;
+}
+
+DualParallelArgs::Mode WorkerImpl::current_mode() const {
+  if (dual_parallel_args_ == nullptr) {
+    return DualParallelArgs::Mode::CP_PREFILL;
+  }
+  return dual_parallel_args_->mode();
+}
+
+void WorkerImpl::attach_dual_parallel_args(DualParallelArgs* dual_args) {
+  if (dual_parallel_args_ == dual_args) {
+    return;
+  }
+  dual_parallel_args_ = dual_args;
+  if (dual_args != nullptr) {
+    // Refresh the singular snapshot from the dual source so subsequent
+    // reads are consistent with whatever mode the dual is currently in.
+    parallel_args_ = dual_args->active();
+  }
+}
 
 bool WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
                                            bool use_huge_page_allocator,
@@ -802,20 +864,22 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
   // already-partitioned device tensors; see ForwardInput::cp_partitioned.
   // Prefill-side CP (partition + ATB cp tensors) applies to PREFILL,
   // CHUNKED_PREFILL, and MIXED. `no_decode()` wrongly excludes MIXED.
-  const bool needs_cp_prefill_side =
-      parallel_args_.cp_size() > 1 && !Platform::uses_model_cp_partition() &&
-      !input.input_params.meta.batch_forward_type.is_decode();
-  const bool needs_cp_partition =
-      needs_cp_prefill_side && !input.cp_partitioned;
+  //
+  // The multi-node RPC path delivers `input` as a packed host buffer whose
+  // `meta.batch_forward_type` is still the default EMPTY until unpacked. The
+  // CP gate below MUST see the true batch type, so materialize the CP working
+  // copy (and thus its meta) BEFORE deciding needs_cp_prefill_side. Reading
+  // the pre-unpack meta made every RPC batch look non-decode (EMPTY), which
+  // wrongly drove pure-decode steps into prepare_cp_prefill_inputs and crashed
+  // on a 1-token seq (input_lengths=[1] -> cumsum-1 = -1 -> index_select(-1)).
   std::optional<ForwardInput> cp_input;
-  if (needs_cp_prefill_side) {
+  if (parallel_args_.cp_size() > 1) {
     cp_input.emplace(input);
-  }
 #if defined(USE_NPU)
-  if (needs_cp_prefill_side) {
     ForwardInput& cp_working = *cp_input;
-    // RPC packed_input only carries input_host_buffer until unpack; partition
-    // and prepare_cp_prefill_inputs need materialized token_ids / seq_lens.
+    // RPC packed_input only carries input_host_buffer until unpack; the gate,
+    // partition, and prepare_cp_prefill_inputs all need the materialized meta /
+    // token_ids / seq_lens.
     if (cp_working.input_host_buffer_has_layout &&
         (!cp_working.token_ids.defined() ||
          cp_working.token_ids.numel() == 0)) {
@@ -827,12 +891,31 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
         cp_working.input_host_buffer_has_layout = false;
       } else {
         LOG(ERROR) << "[CP_PREP] unpack_from_input_host_buffer failed before "
-                      "cp_partition (cp_rank="
+                      "cp gate (cp_rank="
                    << parallel_args_.cp_rank() << ")";
       }
     }
-  }
 #endif
+  }
+
+  // Resolve the true batch type from the (possibly just-unpacked) CP working
+  // copy; fall back to `input` when CP is disabled and no copy was made.
+  const BatchForwardType& resolved_batch_type =
+      cp_input ? cp_input->input_params.meta.batch_forward_type
+               : input.input_params.meta.batch_forward_type;
+  // Upstream Platform::uses_model_cp_partition() gate: when the platform
+  // does CP partition at the model layer, worker-side partition must be
+  // skipped (introduced by upstream after our probe branch forked).
+  const bool needs_cp_prefill_side = parallel_args_.cp_size() > 1 &&
+                                     !Platform::uses_model_cp_partition() &&
+                                     !resolved_batch_type.is_decode();
+  const bool needs_cp_partition =
+      needs_cp_prefill_side && !input.cp_partitioned;
+  // Release the CP working copy if the resolved type turned out to be pure
+  // decode (or empty) so downstream code uses the untouched `input`.
+  if (cp_input && !needs_cp_prefill_side) {
+    cp_input.reset();
+  }
   if (needs_cp_partition) {
     ForwardInput& cp_working = *cp_input;
     const int64_t tokens_before =
@@ -929,6 +1012,31 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
          (context_.get_parallel_args().dp_size() > 1 ||
           context_.get_parallel_args().ep_size() > 1 ||
           !context_.get_parallel_args().mapping_data().empty()));
+    // FLIPDIAG: DP-mode empty shard tracing. In DP forward the collective
+    // ops require every rank in the DP group to enter; if this rank has
+    // an empty shard AND the fake-input path did not fire, we return
+    // early below and hang the OTHER rank's collective wait. Log which
+    // path we take so we can pin down whether the flip propagates the
+    // right cp_size/dp_size/mapping_data into the context.
+    // Gated by enable_flip_verbose_log (fires per-rank per-step).
+    if (FLAGS_enable_flip_verbose_log) {
+      LOG(INFO) << "FLIPDIAG worker_forward_shard: rank="
+                << parallel_args_.rank()
+                << " num_sequences=" << input_params.meta.num_sequences
+                << " tokens="
+                << (processed_input.token_ids.defined()
+                        ? processed_input.token_ids.numel()
+                        : -1)
+                << " empty_shard=" << empty_shard
+                << " need_fake=" << need_fake_input_for_empty_shard
+                << " cp_size=" << context_.get_parallel_args().cp_size()
+                << " dp_size=" << context_.get_parallel_args().dp_size()
+                << " ep_size=" << context_.get_parallel_args().ep_size()
+                << " mapping_empty="
+                << context_.get_parallel_args().mapping_data().empty()
+                << " batch_type="
+                << input_params.meta.batch_forward_type.to_string();
+    }
     if (need_fake_input_for_empty_shard) {
       auto token_options = processed_input.token_ids.defined()
                                ? processed_input.token_ids.options()
@@ -941,8 +1049,22 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
       processed_input.positions =
           torch::zeros({1}, position_options.device(device_));
       empty_shard = false;
+      // Fabricates a 1-token forward for the empty shard so the DP
+      // collective sees a shape-consistent input on every rank; llm_engine
+      // clamps dp_global_token_nums[dp_rank] to 1 for empty ranks, matching
+      // this fake token count. attention.device.block_tables is deliberately
+      // not filled here -- the decoder layer's placeholder branch handles
+      // the empty shard, and any KV-block dummy would race with dp_rank=0's
+      // real sequences (v15 experiment: rtMemcpyAsync vector core exception).
+      // In practice this branch is rare because ContinuousScheduler defers
+      // lopsided DP batches (see step() in continuous_scheduler.cpp);
+      // reaching here means the >100ms backdoor fired.
     }
     if (empty_shard) {
+      LOG(WARNING) << "FLIPDIAG worker_forward_shard EARLY_RETURN: rank="
+                   << parallel_args_.rank()
+                   << " (this rank will NOT enter collective; other DP "
+                      "ranks that expect it will hang)";
       return;
     }
 
@@ -1588,6 +1710,12 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   auto tensor_options = torch::dtype(dtype_).device(device_);
   context_ = ModelContext(parallel_args_, args, quant_args, tensor_options);
   context_.set_model_id(options_.model_id());
+  // Plumb the optional DualParallelArgs through to ModelContext so
+  // dual-aware layers (DeepSeek V32) can see the OTHER mode's args
+  // and build the second pair of ATB graphs at init_layer time.
+  // dual_parallel_args_ is null in legacy single-mode and the layer
+  // ctor short-circuits accordingly.
+  context_.set_dual_parallel_args(dual_parallel_args_);
 
   // init model, create model executor
   bool status = this->init_model(context_);

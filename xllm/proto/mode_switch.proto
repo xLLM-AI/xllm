@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+option go_package = "jd.com/jd-infer/xllm;xllm";
+package xllm.proto;
+option cc_generic_services = true;
+
+// Runtime CP<->DP mode switch. This proto is intentionally independent
+// of disagg_pd.proto / worker.proto so that adding it does not invalidate
+// the 1116 cpp files that transitively include disagg_pd.pb.h.
+
+// `target_mode` mirrors xllm::DualParallelArgs::Mode:
+//     0 = DP_DECODE  (cp_size = 1,    dp_size = world)
+//     1 = CP_PREFILL (cp_size = world, dp_size = 1)
+//
+// Caller (xllm_service) is responsible for draining inflight forwards
+// on the target instance before issuing the RPC. The engine fans out to
+// every local worker and only returns ok=true after every worker
+// successfully flipped its DualParallelArgs::Mode flag.
+//
+// Names are prefixed with InstanceModeSwitch to avoid clashing with
+// xllm.proto.SwitchModeRequest defined in worker.proto (master <-> worker).
+message InstanceModeSwitchRequest {
+  int32 target_mode = 1;
+  int32 timeout_ms = 2;
+}
+
+message InstanceModeSwitchResponse {
+  bool ok = 1;
+  // Mode actually held after the call. On failure this is the mode the
+  // engine rolled back to (which should match what the caller was
+  // tracking as current_mode).
+  int32 current_mode = 2;
+  string error = 3;
+}
+
+service ModeSwitchService {
+  rpc SwitchMode(InstanceModeSwitchRequest) returns (InstanceModeSwitchResponse);
+}
