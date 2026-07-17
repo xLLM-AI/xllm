@@ -52,6 +52,7 @@ def _dispatch_field_suffix(name: str) -> str:
 def _dtype_enum_suffix(dtype_name: str) -> str:
     common_suffixes = {
         "bf16": "BF16",
+        "bfloat16": "BF16",
         "fp16": "Float16",
         "fp32": "Float32",
         "float16": "Float16",

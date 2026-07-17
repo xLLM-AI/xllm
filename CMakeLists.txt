@@ -283,7 +283,6 @@ endif()
 
 # setup CMake module path, defines path for include() and find_package()
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
-enable_language(Rust)
 find_package(Rust REQUIRED)
 
 if(UNIX)

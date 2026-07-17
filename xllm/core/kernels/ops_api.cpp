@@ -1281,24 +1281,152 @@ std::tuple<torch::Tensor, torch::Tensor> fused_add_rms_norm_static_fp8_quant(
 
 torch::Tensor causal_conv1d_update(CausalConv1dUpdateParams& params) {
 #if defined(USE_NPU)
-  if (params.conv_state_indices.has_value()) {
-    CHECK(params.conv_state_indices.value().is_contiguous())
-        << "causal_conv1d_update: conv_state_indices must be contiguous.";
-  }
-  return npu::npu_causal_conv1d_update_v2(params.x,
-                                          params.conv_state,
-                                          params.weight,
-                                          params.activation,
-                                          params.bias,
-                                          params.conv_state_indices,
-                                          params.query_start_loc,
-                                          params.max_query_len,
-                                          params.pad_slot_id,
-                                          params.block_idx_last_scheduled_token,
-                                          params.initial_state_idx,
-                                          params.validate_data,
-                                          params.num_accepted_tokens);
+  const bool has_silu = params.activation;
 
+  auto x_work = params.x;
+  auto weight_work = params.weight;
+  auto conv_state_work = params.conv_state;
+
+  const int32_t dim = static_cast<int32_t>(x_work.size(1));
+
+  auto bias_work = params.bias.has_value() && params.bias.value().defined()
+                       ? params.bias.value()
+                       : torch::zeros({dim}, x_work.options());
+
+  auto conv_state_t = conv_state_work;
+  auto weight_t = weight_work;
+
+  auto cu_seqlens =
+      params.query_start_loc.has_value()
+          ? params.query_start_loc.value().to(torch::kInt32)
+          : torch::arange(0,
+                          x_work.size(0) + 1,
+                          std::max(params.max_query_len, int32_t{1}),
+                          torch::TensorOptions()
+                              .dtype(torch::kInt32)
+                              .device(x_work.device()));
+
+  int64_t batch = cu_seqlens.size(0) - 1;
+  if (batch <= 0) {
+    return x_work;
+  }
+
+  auto i32_opts =
+      torch::TensorOptions().dtype(torch::kInt32).device(x_work.device());
+
+  torch::Tensor init_indices;
+  torch::Tensor current_indices;
+  if (params.conv_state_indices.has_value()) {
+    auto ci = params.conv_state_indices.value().to(torch::kInt32);
+    if (ci.dim() == 1) {
+      init_indices = ci;
+      current_indices = ci;
+    } else {
+      auto ci_0 = ci.select(1, 0);
+      auto ci_1 = ci.select(1, 1);
+      if (params.initial_state_idx.has_value()) {
+        auto isi = params.initial_state_idx.value().to(torch::kInt32);
+        init_indices = torch::where(isi == 0, ci_0, ci_1);
+      } else {
+        init_indices = ci_0;
+      }
+      if (params.block_idx_last_scheduled_token.has_value()) {
+        auto bilt =
+            params.block_idx_last_scheduled_token.value().to(torch::kInt32);
+        current_indices = torch::where(bilt == 0, ci_0, ci_1);
+      } else {
+        current_indices = ci_0;
+      }
+    }
+  } else {
+    init_indices = torch::arange(batch, i32_opts);
+    current_indices = init_indices;
+  }
+
+  torch::Tensor initial_state_mode;
+  if (params.initial_state_mode.has_value()) {
+    initial_state_mode = params.initial_state_mode.value().to(torch::kInt32);
+  } else {
+    initial_state_mode = torch::ones({batch}, i32_opts);
+  }
+
+  const bool is_3d = (x_work.dim() == 3);
+  auto x_flat = is_3d ? x_work.reshape({-1, dim}) : x_work;
+
+  if (npu::tilelang::has_causal_conv1d_decode_specialization(
+          batch, dim, has_silu)) {
+    auto conv_state_t_nonconst = conv_state_t;
+    auto y = npu::tilelang::causal_conv1d_decode(
+        /*conv_state=*/conv_state_t_nonconst,
+        /*x=*/x_flat,
+        /*weight=*/weight_t,
+        /*bias=*/bias_work,
+        /*init_indices=*/init_indices,
+        /*current_indices=*/current_indices,
+        /*initial_state_mode=*/initial_state_mode,
+        /*has_silu=*/has_silu);
+
+    if (is_3d) {
+      y = y.view(x_work.sizes());
+    }
+    return y;
+  }
+
+  // Fallback: per-batch loop using causal_conv1d (batch=1 kernel, fp16).
+  auto original_dtype = x_work.scalar_type();
+  bool need_cast = (original_dtype != torch::kFloat16);
+
+  auto x_fp16 = need_cast ? x_flat.to(torch::kFloat16) : x_flat;
+  auto weight_fp16 = need_cast ? weight_work.to(torch::kFloat16) : weight_work;
+  auto conv_state_fp16 = need_cast ? conv_state_work.to(torch::kFloat16).clone()
+                                   : conv_state_work.clone();
+  auto bias_fp16 = need_cast ? bias_work.to(torch::kFloat16) : bias_work;
+
+  auto y_fp16 = torch::empty({x_flat.size(0), dim}, x_fp16.options());
+  auto cu_seqlens_cpu = cu_seqlens.to(torch::kCPU);
+  const int32_t* cu_ptr = cu_seqlens_cpu.data_ptr<int32_t>();
+
+  for (int64_t b = 0; b < batch; ++b) {
+    int32_t seq_start_b = cu_ptr[b];
+    int32_t seq_end_b = cu_ptr[b + 1];
+    int32_t sb_len = seq_end_b - seq_start_b;
+    if (sb_len <= 0) {
+      continue;
+    }
+
+    auto x_b = x_fp16.slice(0, seq_start_b, seq_end_b);
+    auto init_b = init_indices.slice(0, b, b + 1);
+    auto curr_b = current_indices.slice(0, b, b + 1);
+    auto ism_b = initial_state_mode.slice(0, b, b + 1);
+
+    auto cu_b = torch::tensor(
+        {0, sb_len},
+        torch::TensorOptions().dtype(torch::kInt32).device(x_work.device()));
+
+    auto y_b = npu::tilelang::causal_conv1d(conv_state_fp16,
+                                            x_b,
+                                            weight_fp16,
+                                            bias_fp16,
+                                            cu_b,
+                                            init_b,
+                                            curr_b,
+                                            ism_b,
+                                            has_silu);
+
+    y_fp16.slice(0, seq_start_b, seq_end_b).copy_(y_b);
+  }
+
+  if (need_cast) {
+    params.conv_state.copy_(conv_state_fp16.to(original_dtype));
+  } else {
+    params.conv_state.copy_(conv_state_fp16);
+  }
+  auto y = need_cast ? y_fp16.to(original_dtype) : y_fp16;
+
+  if (is_3d) {
+    y = y.view(x_work.sizes());
+  }
+  return y;
 #else
   NOT_IMPLEMENTED();
 #endif
