@@ -129,6 +129,10 @@ class BlockManagerPool : public KVCacheManager {
   // the options for the block manager
   Options options_;
   std::vector<std::unique_ptr<BlockManager>> block_managers_;
+  // Round-robin cursor for get_dp_rank. Tracked here (not in the free-block
+  // heuristic) so a burst of concurrent short requests spreads across dp
+  // ranks evenly. See get_dp_rank() in the .cpp.
+  mutable std::atomic<uint64_t> next_rr_dp_rank_{0};
 };
 
 }  // namespace xllm

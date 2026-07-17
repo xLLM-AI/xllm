@@ -204,6 +204,95 @@ bool XllmServer::start(std::unique_ptr<DisaggPDService> service) {
   return true;
 }
 
+bool XllmServer::start(std::unique_ptr<DisaggPDService> disagg_pd_service,
+                       std::unique_ptr<ModeSwitchService> mode_switch_service) {
+  // Build a single brpc::Server hosting both services so they share the
+  // disagg_pd_port (already advertised in instance.rpc_address). Mirrors
+  // create_server() but adds two services before Start().
+  std::string addr("");
+  if (!::xllm::ServiceConfig::get_instance().host().empty()) {
+    addr =
+        ::xllm::ServiceConfig::get_instance().host() + ":" +
+        std::to_string(::xllm::DisaggPDConfig::get_instance().disagg_pd_port());
+  }
+  const int port = ::xllm::DisaggPDConfig::get_instance().disagg_pd_port();
+
+  server_ = std::make_unique<brpc::Server>();
+  if (!configure_generic_server(
+          server_.get(),
+          static_cast<google::protobuf::Service*>(disagg_pd_service.get()),
+          "Disagg PD")) {
+    return false;
+  }
+  if (!configure_generic_server(
+          server_.get(),
+          static_cast<google::protobuf::Service*>(mode_switch_service.get()),
+          "Mode Switch")) {
+    return false;
+  }
+
+  brpc::ServerOptions options;
+  options.idle_timeout_sec =
+      ::xllm::ServiceConfig::get_instance().rpc_idle_timeout_s();
+  options.num_threads = ::xllm::ServiceConfig::get_instance().num_threads();
+  butil::EndPoint endpoint;
+  if (!addr.empty()) {
+    listen_address_ = addr;
+    if (butil::str2endpoint(listen_address_.c_str(), &endpoint) < 0) {
+      LOG(FATAL) << "Convert listen_address_ to endpoint failed: "
+                 << listen_address_;
+      return false;
+    }
+  } else {
+    endpoint = butil::EndPoint(butil::IP_ANY, port);
+  }
+  if (server_->Start(endpoint, &options) != 0) {
+    LOG(ERROR) << "Failed to start Disagg PD + Mode Switch server on "
+               << endpoint;
+    return false;
+  }
+
+  listen_address_ =
+      std::string(butil::endpoint2str(server_->listen_address()).c_str());
+  listen_port_ = server_->listen_address().port;
+  LOG(INFO) << "Disagg PD + Mode Switch server started on address "
+            << server_->listen_address();
+
+  // Both services live for the brpc server's lifetime. Release ownership
+  // -- we explicitly tell brpc not to own them via SERVER_DOESNT_OWN_SERVICE,
+  // so we keep raw pointers alive by leaking the unique_ptrs into static
+  // storage (tied to the server's lifetime via has_initialized_).
+  static std::vector<std::unique_ptr<google::protobuf::Service>> service_keep;
+  service_keep.emplace_back(std::move(disagg_pd_service));
+  service_keep.emplace_back(std::move(mode_switch_service));
+
+  has_initialized_ = true;
+  server_->Join();
+  return true;
+}
+
+bool XllmServer::start(std::unique_ptr<ModeSwitchService> mode_switch_service,
+                       const std::string& addr) {
+  if (!create_server(
+          static_cast<google::protobuf::Service*>(mode_switch_service.get()),
+          addr,
+          -1,
+          "Mode Switch")) {
+    return false;
+  }
+
+  // brpc holds the service via SERVER_DOESNT_OWN_SERVICE, so keep it alive
+  // by moving ownership into the join thread's capture. The thread lives for
+  // the server's lifetime (until stop() breaks the Join()).
+  running_thread_ = std::make_unique<std::thread>(
+      [this, service = std::move(mode_switch_service)]() {
+        has_initialized_ = true;
+        server_->Join();
+      });
+
+  return true;
+}
+
 bool XllmServer::start(std::unique_ptr<PDOOCService> service) {
   std::string addr("");
   if (!::xllm::ServiceConfig::get_instance().host().empty()) {

@@ -127,6 +127,10 @@ class ContinuousScheduler : public Scheduler {
     PROPERTY(bool, disable_ttft_profiling) = false;
     // true if enable forward interruption
     PROPERTY(bool, enable_forward_interruption) = false;
+    // Runtime CP<->DP dual-graph mode. When true, the disagg_pd brpc
+    // server (started by start_rpc_server) also exposes
+    // ModeSwitchService so xllm_service can drive runtime mode flips.
+    PROPERTY(bool, enable_runtime_cp_dp_switch) = false;
     // all requests use single global ttft
     PROPERTY(int32_t, max_global_ttft_ms) = std::numeric_limits<int32_t>::max();
     // all requests use single global tpot
@@ -265,6 +269,12 @@ class ContinuousScheduler : public Scheduler {
   Engine* engine_;
 
   KVCacheManager* kv_cache_manager_;
+
+  // dp_size the batching pipeline (BatchFactory, BlockManagerPool, last_batch_,
+  // per-dp_rank metrics) is currently built for. Initialized to the startup
+  // dp_size; updated in step() when a runtime CP<->DP flip changes
+  // engine_->dp_size(). Distinct from options_.dp_size(), which is immutable.
+  int32_t active_dp_size_ = 1;
 
   // a thread safe queue of requests, bounded by
   // ::xllm::RecConfig::get_instance().request_queue_size() the schedule

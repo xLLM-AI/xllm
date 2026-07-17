@@ -119,6 +119,11 @@ ContinuousScheduler::ContinuousScheduler(Engine* engine, const Options& options)
       request_queue_(::xllm::RecConfig::get_instance().request_queue_size()) {
   CHECK(engine_ != nullptr);
 
+  // Tracks the dp_size the scheduler's batching pipeline is currently built
+  // for. Starts at the startup dp_size and is updated in step() when a runtime
+  // CP<->DP flip changes engine_->dp_size().
+  active_dp_size_ = options_.dp_size();
+
   kv_cache_manager_ = engine_->block_manager_pool();
   CHECK(kv_cache_manager_ != nullptr);
 
@@ -129,7 +134,7 @@ ContinuousScheduler::ContinuousScheduler(Engine* engine, const Options& options)
   enable_in_batch_prefix_cache_ =
       ::xllm::KVCacheConfig::get_instance().enable_in_batch_prefix_cache();
 
-  last_batch_.resize(options_.dp_size());
+  last_batch_.resize(active_dp_size_);
 
   ProfileManager::Options profile_manager_options;
   profile_manager_options.dp_size(options.dp_size())
@@ -489,10 +494,21 @@ void ContinuousScheduler::handle_prefill_requests(
       // Currently overestimating the number of tokens actually processed when
       // enable prefix cache
       size_t num_tokens = prefill_sequence->num_need_compute_tokens();
-      const int32_t worker_cp_size =
-          Platform::uses_model_cp_partition() ? 1 : options_.cp_size();
+      // CP prefill token alignment only applies when this worker actually
+      // performs worker-side CP partition with cp_size > 1. Two conditions
+      // can zero out that need:
+      //   1. Runtime flip to DP_DECODE makes the live cp_size 1
+      //      (active_dp_size_ > 1 => DP mode). Do NOT read the immutable
+      //      options_.cp_size() here.
+      //   2. Platform does CP partition at the model layer (upstream
+      //      Platform::uses_model_cp_partition() gate). Worker-side
+      //      alignment must be skipped in that case.
+      const int32_t live_cp_size =
+          (active_dp_size_ > 1 || Platform::uses_model_cp_partition())
+              ? 1
+              : options_.cp_size();
       num_tokens = maybe_align_cp_prefill_tokens(
-          prefill_sequence.get(), num_tokens, worker_cp_size);
+          prefill_sequence.get(), num_tokens, live_cp_size);
       const size_t target_num_tokens =
           prefill_sequence->kv_cache_tokens_num() + num_tokens;
       if (remaining_token_budget < allocated_tokens + num_tokens ||
@@ -1183,7 +1199,7 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
   }
 
   auto batches =
-      BatchFactory::get_instance(options_.dp_size())
+      BatchFactory::get_instance(active_dp_size_)
           ->create_batches(running_requests_,
                            running_sequences_,
                            running_sequences_budgets_,
@@ -1297,6 +1313,25 @@ void ContinuousScheduler::step(const absl::Duration& timeout) {
     return;  // Stay paused (or fall through to shutdown check on next loop)
   }
 
+  // Detect a runtime CP<->DP flip: the engine's dp_size is the source of truth
+  // (updated by LLMEngine::switch_mode). The scheduler's batching pipeline
+  // (BatchFactory, BlockManagerPool, last_batch_, per-dp_rank metrics vectors)
+  // is built around the startup dp_size and must be rebuilt to the new one,
+  // otherwise create_batches produces the wrong number of Batches and
+  // prepare_inputs / metrics index out of bounds. Done here on the loop thread
+  // (not the RPC thread that flips the flag) so the pool teardown never races a
+  // forward. The switch RPC's drain contract guarantees no in-flight step here.
+  const int32_t engine_dp = engine_->dp_size();
+  if (engine_dp != active_dp_size_) {
+    LOG(INFO) << "ContinuousScheduler: dp_size flip detected "
+              << active_dp_size_ << " -> " << engine_dp << ", rebuilding pool";
+    engine_->rebuild_block_manager_pool(engine_dp);
+    kv_cache_manager_ = engine_->block_manager_pool();
+    BatchFactory::get_instance(active_dp_size_)->set_dp_size(engine_dp);
+    active_dp_size_ = engine_dp;
+    last_batch_.assign(active_dp_size_, {});
+  }
+
   if (!options_.enable_schedule_overlap()) {
     // get a new batch of requests
     last_batch_lengths_.clear();
@@ -1309,10 +1344,73 @@ void ContinuousScheduler::step(const absl::Duration& timeout) {
       return;
     }
 
+    // DP-mode lopsided-batch defer. When one dp_rank has an empty batch
+    // and the other has work, entering engine.step() would either (a)
+    // return early on the empty side and hang the peer's DP collective,
+    // or (b) fabricate a 1-token fake input on the empty side that races
+    // with the peer's real KV blocks. Both hurt. Defer this step and let
+    // the next tick (~1ms later) find both sides ready. If we've been
+    // stuck lopsided for >100ms, force the step -- better to risk a
+    // fake-input path than to starve the requests indefinitely (this
+    // backdoor has never fired in verify_switch.sh runs; DP dispatch
+    // typically converges in <10ms).
+    if (active_dp_size_ > 1) {
+      const bool any_empty =
+          std::any_of(batch.begin(), batch.end(), [](const Batch& one_batch) {
+            return one_batch.empty();
+          });
+      // Function-local static: keeping this off the class avoids changing
+      // sizeof(ContinuousScheduler), which would force every subclass
+      // (ChunkedPrefillScheduler, DisaggPDScheduler, ...) to be recompiled
+      // in lockstep. thread_local is defensive -- schedulers are
+      // single-threaded per instance, but this makes the invariant obvious.
+      static thread_local absl::Time last_lopsided_defer_start =
+          absl::InfinitePast();
+      if (any_empty) {
+        const auto now = absl::Now();
+        if (last_lopsided_defer_start == absl::InfinitePast()) {
+          last_lopsided_defer_start = now;
+        }
+        const bool exceeded_backdoor =
+            (now - last_lopsided_defer_start) > absl::Milliseconds(100);
+        if (!exceeded_backdoor) {
+          if (FLAGS_enable_flip_verbose_log) {
+            LOG_EVERY_N(INFO, 20)
+                << "FLIPDIAG lopsided_defer: active_dp_size=" << active_dp_size_
+                << " (waiting for both dp_ranks)";
+          }
+          return;
+        }
+        LOG(WARNING) << "FLIPDIAG lopsided_backdoor: active_dp_size="
+                     << active_dp_size_ << " forcing step after >100ms wait";
+      } else {
+        last_lopsided_defer_start = absl::InfinitePast();
+      }
+    }
+
+    // FLIPDIAG: log batch shape before engine.step. Gated by
+    // enable_flip_verbose_log because this fires every step (potentially
+    // hundreds of times/sec under DP burst); flip lifecycle events elsewhere
+    // in this file (dp_size flip detected, rebuild_pool) stay unconditional.
+    if (FLAGS_enable_flip_verbose_log) {
+      std::string sizes;
+      for (size_t i = 0; i < batch.size(); ++i) {
+        if (i > 0) sizes += ",";
+        sizes += std::to_string(batch[i].size());
+      }
+      LOG(INFO) << "FLIPDIAG step_pre_engine: active_dp_size="
+                << active_dp_size_ << " batch_sizes=[" << sizes << "]";
+    }
+
     if (!options_.enable_pd_ooc()) {
       engine_->step(batch);
     } else {
       step_with_pd_ooc(batch);
+    }
+
+    if (FLAGS_enable_flip_verbose_log) {
+      LOG(INFO) << "FLIPDIAG step_post_engine: active_dp_size="
+                << active_dp_size_;
     }
 
     // process request output in batch
@@ -1487,8 +1585,8 @@ void ContinuousScheduler::refresh_sequences_from_requests(
 
 std::vector<int64_t> ContinuousScheduler::get_num_occupied_slots(
     std::vector<Sequence*>& sequences) const {
-  std::vector<int64_t> num_occupied_slots(options_.dp_size());
-  std::vector<int64_t> num_unfilled_blocks(options_.dp_size());
+  std::vector<int64_t> num_occupied_slots(active_dp_size_);
+  std::vector<int64_t> num_unfilled_blocks(active_dp_size_);
   std::vector<size_t> num_used_blocks = kv_cache_manager_->num_used_blocks();
 
   auto block_size = kv_cache_manager_->block_size();
@@ -1503,7 +1601,7 @@ std::vector<int64_t> ContinuousScheduler::get_num_occupied_slots(
     num_unfilled_blocks[dp_rank] += last_block_len > 0 ? 1 : 0;
   }
 
-  for (int32_t dp_rank = 0; dp_rank < options_.dp_size(); ++dp_rank) {
+  for (int32_t dp_rank = 0; dp_rank < active_dp_size_; ++dp_rank) {
     num_occupied_slots[dp_rank] +=
         (num_used_blocks[dp_rank] - num_unfilled_blocks[dp_rank]) * block_size;
   }
@@ -1513,12 +1611,12 @@ std::vector<int64_t> ContinuousScheduler::get_num_occupied_slots(
 std::vector<int64_t> ContinuousScheduler::get_active_activation_in_bytes() {
   std::vector<int64_t> all_active_activation_in_bytes =
       engine_->get_active_activation_memory();
-  std::vector<int64_t> active_activation_in_bytes(options_.dp_size());
+  std::vector<int64_t> active_activation_in_bytes(active_dp_size_);
 
   const int32_t dp_local_tp_size =
-      all_active_activation_in_bytes.size() / options_.dp_size();
+      all_active_activation_in_bytes.size() / active_dp_size_;
 
-  for (int32_t dp_rank = 0; dp_rank < options_.dp_size(); ++dp_rank) {
+  for (int32_t dp_rank = 0; dp_rank < active_dp_size_; ++dp_rank) {
     active_activation_in_bytes[dp_rank] =
         all_active_activation_in_bytes[dp_rank * dp_local_tp_size];
   }
@@ -1536,7 +1634,7 @@ void ContinuousScheduler::update_memory_metrics(
   int64_t num_total_slots =
       kv_cache_manager_->num_blocks() * kv_cache_manager_->block_size();
 
-  for (int32_t dp_rank = 0; dp_rank < options_.dp_size(); ++dp_rank) {
+  for (int32_t dp_rank = 0; dp_rank < active_dp_size_; ++dp_rank) {
     double occupied_slots_ratio =
         static_cast<double>(num_occupied_slots[dp_rank]) / num_total_slots;
     double active_kv_cache_size_in_kilobytes =
@@ -1642,7 +1740,7 @@ bool ContinuousScheduler::try_complete_pause() {
     }
     // Reset overlap pipeline bookkeeping so resume starts clean.
     last_batch_.clear();
-    last_batch_.resize(options_.dp_size());
+    last_batch_.resize(active_dp_size_);
     last_running_requests_.clear();
     last_running_sequences_.clear();
     is_first_step_ = true;

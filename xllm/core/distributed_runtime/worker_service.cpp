@@ -718,6 +718,34 @@ void WorkerService::StopProfile(::google::protobuf::RpcController* controller,
   return;
 }
 
+void WorkerService::SwitchMode(::google::protobuf::RpcController* controller,
+                               const proto::SwitchModeRequest* req,
+                               proto::Status* resp,
+                               ::google::protobuf::Closure* done) {
+  threadpool_->schedule([this, controller, req, resp, done]() mutable {
+    brpc::ClosureGuard done_guard(done);
+    const int32_t mode_int = req->target_mode();
+    if (mode_int != static_cast<int32_t>(DualParallelArgs::Mode::CP_PREFILL) &&
+        mode_int != static_cast<int32_t>(DualParallelArgs::Mode::DP_DECODE)) {
+      LOG(WARNING) << "SwitchMode RPC received invalid target_mode="
+                   << mode_int;
+      resp->set_ok(false);
+      return;
+    }
+    const auto target = static_cast<DualParallelArgs::Mode>(mode_int);
+    const bool ok = worker_->switch_mode(target);
+    if (!ok) {
+      LOG(WARNING) << "SwitchMode RPC: worker rejected the flip "
+                      "(legacy single-mode worker?). target="
+                   << mode_int;
+    } else {
+      LOG(INFO) << "SwitchMode RPC: flipped to mode=" << mode_int;
+    }
+    resp->set_ok(ok);
+  });
+  return;
+}
+
 void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
                                  const proto::ForwardInput* pb_forward_input,
                                  proto::ForwardOutput* pb_forward_output,

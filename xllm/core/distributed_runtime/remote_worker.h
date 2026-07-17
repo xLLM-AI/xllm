@@ -157,6 +157,9 @@ class RemoteWorker : public WorkerClient {
 
   virtual folly::SemiFuture<bool> stop_profile_async() override;
 
+  virtual folly::SemiFuture<bool> switch_mode_async(
+      int32_t target_mode) override;
+
  private:
   DISALLOW_COPY_AND_ASSIGN(RemoteWorker);
 

@@ -420,6 +420,29 @@ bool CommChannel::stop_profile() {
   return true;
 }
 
+bool CommChannel::switch_mode(int32_t target_mode) {
+  proto::SwitchModeRequest req;
+  req.set_target_mode(target_mode);
+  proto::Status s;
+  brpc::Controller cntl;
+
+  stub_->SwitchMode(&cntl, &req, &s, nullptr);
+  if (cntl.Failed()) {
+    LOG(ERROR) << "SwitchMode RPC failed: " << cntl.ErrorText();
+    return false;
+  }
+  if (!s.ok()) {
+    // The remote side already logged a more specific reason; surface a
+    // short ack here so the engine can decide whether to retry or
+    // fall back to single-mode behaviour.
+    LOG(WARNING) << "SwitchMode RPC: remote worker did not flip "
+                    "(target_mode="
+                 << target_mode << ")";
+    return false;
+  }
+  return true;
+}
+
 class ClientStreamReceiver : public brpc::StreamInputHandler {
  private:
   std::shared_ptr<std::atomic<int32_t>> termination_flag_;

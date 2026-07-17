@@ -36,6 +36,7 @@ cc_library(
     scheduler_factory.cpp
     perf_model.cpp
     fixed_steps_scheduler.cpp
+    mode_switch_service.cpp
   DEPS
     :batch
     :distributed_runtime

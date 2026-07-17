@@ -63,6 +63,12 @@ class LLMEngine : public Engine {
   // return the active activation memory
   std::vector<int64_t> get_active_activation_memory() const override;
 
+  // Current data-parallel size; follows a runtime CP<->DP flip.
+  int32_t dp_size() const override { return static_cast<int32_t>(dp_size_); }
+
+  // Rebuild the KV-cache BlockManagerPool for a new dp_size after a flip.
+  void rebuild_block_manager_pool(int32_t new_dp_size) override;
+
   // P/D
   bool pull_kv_blocks(
       const int32_t src_dp_size,
@@ -128,6 +134,14 @@ class LLMEngine : public Engine {
   bool start_profile() override;
 
   bool stop_profile() override;
+
+  // Runtime CP<->DP switch. Drains nothing here -- caller (xllm_service
+  // mode-switch controller) is responsible for ensuring inflight
+  // forwards have completed before invoking this. Fans out to every
+  // local worker via worker_client->switch_mode_async, awaits all
+  // futures, and on any failure tries best-effort rollback to the
+  // previous mode on the surviving workers.
+  bool switch_mode(int32_t target_mode) override;
 
   // XTensor mode: get GlobalXTensor offsets for allocated blocks via RPC
   // Calls worker in the specified DP group to compute offsets

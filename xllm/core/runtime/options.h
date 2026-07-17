@@ -260,6 +260,21 @@ struct Options {
 
   // max concurrency for rec worker
   PROPERTY(int32_t, rec_worker_max_concurrency) = 1;
+
+  // Enable runtime CP<->DP switching (dual-graph mode). When true,
+  // worker_server brings up TWO CollectiveCommunicator instances at
+  // startup -- one in CP=N config, one in DP=N config -- and the
+  // worker holds a DualParallelArgs that lets switch_mode() flip
+  // between them at runtime without service restart. Comes with a
+  // ~600 MB / NPU memory overhead (two ATB commDomains + their HCCL
+  // SubComm buffers); see DESIGN_DOC_v0.2.md for the full budget.
+  PROPERTY(bool, enable_runtime_cp_dp_switch) = false;
+
+  // Port stride between the CP and DP communicator master_addr bases
+  // when enable_runtime_cp_dp_switch=true. Must clear the inner
+  // fan-out (~world_size + dp + tp + single-rank) plus a TIME_WAIT
+  // safety margin. 256 is the value validated by tests/probes/*.
+  PROPERTY(int32_t, dual_mode_port_stride) = 256;
 };
 
 }  // namespace runtime

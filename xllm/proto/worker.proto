@@ -367,6 +367,16 @@ message ForwardOutput {
   DiTForwardOutput dit_forward_output = 8;
 }
 
+// SwitchModeRequest -- runtime CP<->DP feature.
+// `target_mode` mirrors xllm::DualParallelArgs::Mode:
+//     0 = CP_PREFILL (cp_size = world, dp_size = 1)
+//     1 = DP_DECODE  (cp_size = 1, dp_size = world)
+// Caller (engine / scheduler) is responsible for draining inflight
+// forwards on the target worker before issuing the RPC.
+message SwitchModeRequest {
+  int32 target_mode = 1;
+}
+
 // master create Collective service
 // to sync all workers.
 service Collective {
@@ -397,4 +407,7 @@ service DistributeWorker {
   rpc UpdateWeights (UpdateWeightsRequest) returns (Status);
   rpc StartProfile (Empty) returns (Status);
   rpc StopProfile (Empty) returns (Status);
+  // Runtime CP<->DP switch (dual-graph mode). Status.ok=false when the
+  // worker is single-mode or the target_mode value is invalid.
+  rpc SwitchMode(SwitchModeRequest) returns (Status);
 }

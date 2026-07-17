@@ -18,6 +18,7 @@ limitations under the License.
 #include <brpc/channel.h>
 
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -98,7 +99,57 @@ class DisaggPDScheduler : public ChunkedPrefillScheduler {
                        const int32_t dp_size,
                        const int32_t src_kv_split_size);
 
+  // Runtime CP<->DP switch orchestration hooks. Called by ModeSwitchService.
+  //
+  // The scheduler owns three async surfaces that must be quiesced before the
+  // engine tears down and rebuilds the BlockManagerPool: the main scheduler
+  // loop (already covered by ContinuousScheduler::pause), the dispatch_thread
+  // for prefill dispatch, and brpc worker threads driving DisaggPDService
+  // handlers (AddNewRequests / FirstGeneration / Link*). Any of these can hold
+  // pointers into the pool or into per-request kv_state; letting them run
+  // concurrent with rebuild is a use-after-free (silent SIGSEGV → rank0
+  // zombie, observed on 82 CP=2 flip test).
+  //
+  // switch_gate_ is a shared_mutex: dispatch_thread and brpc handlers take
+  // shared_lock at their entry points; rebuild takes unique_lock. begin_switch
+  // hands the caller a unique_lock (blocking until every in-flight shared
+  // holder releases). end_switch releases it. rebuild_after_flip performs
+  // engine->rebuild_block_manager_pool + refreshes the scheduler-side
+  // active_dp_size_/last_batch_/BatchFactory bookkeeping that step() would
+  // otherwise do; after this ModeSwitchService can end_switch and resume.
+  std::unique_lock<std::shared_mutex> begin_switch();
+  void rebuild_after_flip(int32_t new_dp_size);
+
+  // Rebuild every LlmDataDist P<->D link after this instance flipped.
+  // The startup-time link topology encodes the peer's dp_size (see
+  // LLMEngine::link_cluster: fan-out is dp_size wide per D-worker); once
+  // either end flips, the (src_worker -> dst_worker) pairs shift and the
+  // pre-flip links no longer cover the required pairs. The next
+  // PushKvBlocks then returns LLM_NOT_YET_LINK (0x5010b007), which we
+  // observed as "60 push errors, decode receives nothing, all DP requests
+  // 90s timeout".
+  //
+  // The rebuild pattern for each linked peer:
+  //   1. get_instance_info(peer)  -- pull peer's post-flip dp_size from
+  //      etcd. The peer must have re-registered its dp_size before this
+  //      call; ModeSwitchService orchestrates that ordering.
+  //   2. engine_->unlink_cluster(peer_cluster_ids, peer_addrs, peer_ports,
+  //                              old peer dp_size, kv_split_size)
+  //   3. engine_->link_cluster(peer_cluster_ids, peer_addrs, peer_ports,
+  //                            new peer dp_size, kv_split_size)
+  //   4. remote_instances_info_[peer] = fresh InstanceInfo (so subsequent
+  //      dispatch_requests / push_kv_blocks_async use the new dp_size).
+  //
+  // Callers must be holding switch_gate_ unique. Best-effort: a per-peer
+  // failure logs and continues; on any relink failure returns false so
+  // ModeSwitchService can surface it in the SwitchMode response.
+  bool relink_after_flip();
+
  protected:
+  // Reader-side accessor for the shared gate. The concurrent surfaces
+  // (dispatch_thread, brpc-driven Disagg handlers) grab this at their entry
+  // points so they cannot race a rebuild in flight.
+  std::shared_mutex& switch_gate() { return switch_gate_; }
   // Pre-execute prefill requests of different lengths at startup and obtain the
   // corresponding TTFT for calculating the estimated TTFT of requests.
   void profile_ttft();
@@ -184,6 +235,13 @@ class DisaggPDScheduler : public ChunkedPrefillScheduler {
   // Lock for multi-threaded read-write linked instances
   std::mutex linked_instances_mutex_;
   std::unordered_set<std::string> linked_instance_;
+
+  // Serializes runtime CP<->DP flip against dispatch_thread and brpc handlers.
+  // See begin_switch/rebuild_after_flip comments in the public section.
+  // Held shared by dispatch_requests / try_allocate / decode_schedule /
+  // decode_recv_first_generation / link_instance / unlink_instance.
+  // Held unique by begin_switch during the flip+rebuild window.
+  std::shared_mutex switch_gate_;
 
   std::string server_name_;
 };

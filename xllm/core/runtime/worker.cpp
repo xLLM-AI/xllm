@@ -79,7 +79,29 @@ Worker::Worker(const ParallelArgs& parallel_args,
   }
 }
 
+Worker::Worker(DualParallelArgs* dual_args,
+               const torch::Device& device,
+               const runtime::Options& options,
+               WorkerType worker_type)
+    : Worker(dual_args->active(), device, options, worker_type) {
+  // Forwards to the legacy ctor to avoid duplicating the per-WorkerType
+  // dispatch table; then late-binds the dual source so switch_mode can
+  // see it. This matches the WorkerImpl pattern.
+  if (impl_ != nullptr) {
+    impl_->attach_dual_parallel_args(dual_args);
+  }
+}
+
 Worker::~Worker() { delete impl_; }
+
+bool Worker::switch_mode(DualParallelArgs::Mode target) {
+  return impl_ != nullptr ? impl_->switch_mode(target) : false;
+}
+
+DualParallelArgs::Mode Worker::current_mode() const {
+  return impl_ != nullptr ? impl_->current_mode()
+                          : DualParallelArgs::Mode::CP_PREFILL;
+}
 
 bool Worker::init_model(const std::string& model_weights_path,
                         int32_t random_seed,
@@ -256,6 +278,26 @@ folly::SemiFuture<bool> Worker::stop_profile_async() {
   threadpool_.schedule([this, promise = std::move(promise)]() mutable {
     promise.setValue(this->stop_profile());
   });
+  return future;
+}
+
+folly::SemiFuture<bool> Worker::switch_mode_async(int32_t target_mode) {
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule(
+      [this, target_mode, promise = std::move(promise)]() mutable {
+        if (target_mode !=
+                static_cast<int32_t>(DualParallelArgs::Mode::CP_PREFILL) &&
+            target_mode !=
+                static_cast<int32_t>(DualParallelArgs::Mode::DP_DECODE)) {
+          LOG(WARNING) << "switch_mode_async invalid target_mode="
+                       << target_mode;
+          promise.setValue(false);
+          return;
+        }
+        promise.setValue(this->switch_mode(
+            static_cast<DualParallelArgs::Mode>(target_mode)));
+      });
   return future;
 }
 }  // namespace xllm

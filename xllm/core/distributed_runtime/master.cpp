@@ -469,7 +469,9 @@ Master::Master(const Options& options, EngineType type)
         .max_tokens_for_graph_mode(options_.max_tokens_for_graph_mode())
         .kv_cache_dtype(options_.kv_cache_dtype())
         .enable_sleep_mode(options_.enable_sleep_mode())
-        .model_id(options_.model_id());
+        .model_id(options_.model_id())
+        .enable_runtime_cp_dp_switch(options_.enable_runtime_cp_dp_switch())
+        .dual_mode_port_stride(options_.dual_mode_port_stride());
 
     engine_ = std::make_unique<LLMEngine>(eng_options);
   } else if (type == EngineType::REC) {
