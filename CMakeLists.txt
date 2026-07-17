@@ -8,11 +8,6 @@ option(USE_CUDA "Enable CUDA support" OFF)
 option(USE_MUSA "Enable MUSA support" OFF)
 option(USE_DCU "Enable DCU support" OFF)
 option(USE_MACA "Enable MACA support" OFF)
-
-if(USE_MUSA)
-  set(USE_CUDA ON CACHE BOOL "Enable CUDA support" FORCE)
-endif()
-
 add_compile_definitions(YLT_ENABLE_IBV)
 add_definitions(-DYLT_ENABLE_IBV)
 set(YLT_ENABLE_IBV ON)
@@ -260,29 +255,8 @@ endif()
 set(CPPREST_EXCLUDE_WEBSOCKETS ON CACHE BOOL "Exclude websockets functionality." FORCE)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-format-truncation")
 
-if(USE_MUSA)
-  if(DEFINED ENV{MUSAMAPPING_PATH} AND
-     NOT "$ENV{MUSAMAPPING_PATH}" STREQUAL "")
-    set(_XLLM_MCC_WRAPPER "$ENV{MUSAMAPPING_PATH}/mcc_wrapper")
-  elseif(DEFINED ENV{MUSA_HOME} AND NOT "$ENV{MUSA_HOME}" STREQUAL "")
-    set(_XLLM_MCC_WRAPPER
-        "$ENV{MUSA_HOME}/tools/musamapping/mcc_wrapper")
-  else()
-    set(_XLLM_MCC_WRAPPER
-        "/usr/local/musa/tools/musamapping/mcc_wrapper")
-  endif()
-  set(CMAKE_CXX_COMPILER
-      "${_XLLM_MCC_WRAPPER}"
-      CACHE FILEPATH "C++ compiler" FORCE)
-  message(STATUS
-          "USE_MUSA: CMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}")
-endif()
-
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/cmake)
-if(USE_MUSA)
-  project("xllm" LANGUAGES C CXX CUDA)
-  add_compile_options(-Wno-c++11-narrowing)
-elseif(USE_CUDA)
+if(USE_CUDA)
   project("xllm" LANGUAGES C CXX CUDA)
   find_package(CUDAToolkit REQUIRED)
 elseif(USE_DCU)
@@ -294,6 +268,11 @@ elseif(USE_DCU)
     list(APPEND CMAKE_PREFIX_PATH "/opt/dtk")
     set(DCU_ROOT "/opt/dtk")
   endif()
+elseif(USE_MUSA)
+  project("xllm" LANGUAGES C CXX MUSA)
+  add_compile_options(
+        -Wno-c++11-narrowing
+      )
 else()
   project("xllm" LANGUAGES C CXX)
 endif()
@@ -536,32 +515,26 @@ endif()
 
 if(USE_MUSA)
   add_definitions(-DUSE_MUSA)
-  add_definitions(-DUSE_CUDA)
   add_compile_definitions(TORCH_CUDA=1)
 
   if(NOT DEFINED MUSA_PATH)
-    if(DEFINED ENV{MUSA_HOME} AND NOT "$ENV{MUSA_HOME}" STREQUAL "")
-      set(MUSA_PATH "$ENV{MUSA_HOME}")
-    else()
-      set(MUSA_PATH /usr/local/musa)
-    endif()
+    set(MUSA_PATH /usr/local/musa)
   endif()
   list(APPEND CMAKE_MODULE_PATH "${MUSA_PATH}/cmake")
   find_package(MUSA REQUIRED)
 
-  find_package(Python COMPONENTS Interpreter REQUIRED)
-  if(NOT DEFINED ENV{TORCH_MUSA_PYTHONPATH} OR
-     "$ENV{TORCH_MUSA_PYTHONPATH}" STREQUAL "")
-    message(FATAL_ERROR
-            "TORCH_MUSA_PYTHONPATH is required for USE_MUSA builds")
+  if(NOT DEFINED ENV{MTT_OPLIB_PATH})
+    set(ENV{MTT_OPLIB_PATH} $ENV{MUSA_HOME}/tools/MTTOplib)
   endif()
+
+  message(STATUS  "using MTT Oplib at: $ENV{MTT_OPLIB_PATH}")
+  set(MTTOplib_DIR $ENV{MTT_OPLIB_PATH}/cmake)
+  find_package(MTTOplib REQUIRED)
+
+  find_package(Python COMPONENTS Interpreter REQUIRED)
   list(APPEND CMAKE_PREFIX_PATH $ENV{TORCH_MUSA_PYTHONPATH})
   find_package(TorchMusa REQUIRED CONFIG)
   list(POP_BACK CMAKE_PREFIX_PATH)
-  get_filename_component(
-    _TORCH_MUSA_ROOT
-    "$ENV{TORCH_MUSA_PYTHONPATH}/../.."
-    ABSOLUTE)
 
   find_package(MKL REQUIRED)
   execute_process(
@@ -576,39 +549,33 @@ if(USE_MUSA)
   )
   string(REGEX MATCH "[^\n]*/include[^\n]*" tvm_ffi_INCLUDE_DIR "${tvm_ffi_INCLUDE_DIR}")
   string(REGEX MATCH "[^\n]*/lib[^\n]*" tvm_ffi_LIB_DIR "${tvm_ffi_LIB_DIR}")
+  
 
   include_directories(
       ${MUSA_INCLUDE_DIRS}
       ${TorchMusa_INCLUDE_DIRS}
       ${Python_SITELIB}/torch_musa_compiled/share/torch_musa_codegen
-      ${tvm_ffi_INCLUDE_DIR}
-      ${MUSA_PATH}/include
-      ${_TORCH_MUSA_ROOT}/share/torch_musa_codegen
-      ${_TORCH_MUSA_ROOT}/share/generated_cuda_compatible/include
-      ${_TORCH_MUSA_ROOT}/share/generated_cuda_compatible/include/torch/csrc/api/include
-      ${_TORCH_MUSA_ROOT}/share/generated_cuda_compatible/include/torch/csrc/musa
+
       $ENV{PYTHON_INCLUDE_PATH}
       $ENV{PYTORCH_INSTALL_PATH}/include
       $ENV{PYTORCH_INSTALL_PATH}/include/torch/csrc/api/include
+      ${MTTOplib_INCLUDE_DIRS}
+      ${tvm_ffi_INCLUDE_DIR}
   )
 
   link_directories(
     ${MUSA_LIB_PATH}
-    ${MUSA_PATH}/lib
-    ${_TORCH_MUSA_ROOT}/lib
-    /opt/intel/oneapi/mkl/lib/intel64
     $ENV{PYTHON_LIB_PATH}
     $ENV{PYTORCH_INSTALL_PATH}/lib
     ${TorchMusa_LIB_PATH}
     ${MKL_LIB_PATH}
     ${tvm_ffi_LIB_DIR}
     ${TorchMusa_INSTALL_PREFIX}/lib
-  )
-  set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -O3)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=parentheses")
+    )
+  set(MUSA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -O3)
 endif()
 
-if(USE_CUDA AND NOT USE_MUSA)
+if(USE_CUDA)
   message(STATUS "TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST}")
   add_definitions(-DUSE_CUDA)
   add_compile_definitions(TORCH_CUDA=1)
@@ -765,7 +732,7 @@ include_directories(SYSTEM ${CMAKE_CURRENT_SOURCE_DIR}/third_party/Mooncake/moon
 include_directories(SYSTEM ${CMAKE_CURRENT_SOURCE_DIR}/third_party/Mooncake/mooncake-store/include)
 
 # CUTLASS - CUDA kernel library for scaled matmul
-if(USE_CUDA AND NOT USE_MUSA)
+if(USE_CUDA)
   set(CUTLASS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cutlass)
   set(CUTLASS_INCLUDE_DIR ${CUTLASS_DIR}/include)
   set(CUTLASS_TOOLS_UTIL_INCLUDE_DIR ${CUTLASS_DIR}/tools/util/include)
@@ -778,9 +745,16 @@ endif()
 include_directories(SYSTEM ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sentencepiece)
 # Also add other commonly used third_party directories as system headers
 include_directories(SYSTEM ${CMAKE_CURRENT_SOURCE_DIR}/third_party/minja)
+if(USE_MUSA)
+  set(CMAKE_MUSA_FLAGS_DEBUG "-g -std=gnu++20 -fPIC --offload-arch=mp_31")
+  set(CMAKE_MUSA_FLAGS_RELEASE "-O2 -DNDEBUG -std=gnu++20 -fPIC --offload-arch=mp_31")
+endif()
 
 # add subdirectories
 # Configure third_party first so xllm can link against real CMake targets.
+# add subdirectories
+# Configure third_party first so xllm can link against real CMake targets.
+
 add_subdirectory(third_party)
 if(TARGET brpc-static AND NOT TARGET brpc)
   add_library(brpc ALIAS brpc-static)

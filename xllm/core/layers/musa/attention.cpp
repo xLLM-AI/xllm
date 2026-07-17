@@ -15,7 +15,7 @@ limitations under the License.
 
 #include "layers/musa/attention.h"
 
-#if defined(USE_MUSA)
+#if defined(XLLM_TORCH_MUSA)
 
 #include "layers/cuda/base_attention_impl.h"
 #include "layers/musa/flashinfer_attention.h"
@@ -33,6 +33,10 @@ BaseAttentionImpl::BaseAttentionImpl(int64_t num_heads,
       scale_(scale),
       num_kv_heads_(num_kv_heads),
       sliding_window_(sliding_window) {
+  // MUSA/Mate FlashInfer does not support the tensor-core decode path
+  // (paged_run on prefill URI throws "Back optional access" for decode
+  // shapes). Force the dedicated decode URI ("run" on batch_decode_*) which
+  // matches the working 0526 reference path.
   decode_use_tensor_core_ = false;
 }
 
@@ -51,6 +55,27 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
     torch::Tensor& key,
     torch::Tensor& value,
     KVCache& kv_cache) {
+  // Provide a persistent output buffer so the FlashInfer backend can write
+  // into stable storage without triggering an `at::empty_strided` allocation
+  // under stream capture (forbidden on MUSA graph capture mode).
+  //
+  // Why this is keyed on the decode path only:
+  //   * Decode is the only forward that runs under graph capture; replays
+  //     reuse the captured GPU pointer to `output_buf_`, so the storage
+  //     must be stable for the lifetime of every captured decode graph.
+  //   * Prefill always runs eager, often at batch sizes far larger than
+  //     the largest decode bucket. Routing prefill through `output_buf_`
+  //     would force a re-grow whose freed storage could invalidate the
+  //     captured decode pointers and corrupt later replays. Letting
+  //     prefill fall back to `torch::empty_like` keeps it eager-safe and
+  //     leaves the decode buffer untouched.
+  //
+  // Sizing strategy for the decode path: profile_manager warmups capture
+  // decode buckets in descending order (largest bucket first), so the very
+  // first call grows the buffer to the max bucket and every subsequent
+  // smaller call simply narrows on the leading row dim. The eager
+  // pre-capture warmup pass runs outside capture, which is where the
+  // one-time alloc lands.
   torch::Tensor output;
   const bool decode_path =
       !attn_metadata.is_prefill && !attn_metadata.is_chunked_prefill;
@@ -70,7 +95,9 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
     if (need_realloc) {
       std::vector<int64_t> alloc_shape(target_sizes.begin(),
                                        target_sizes.end());
-
+      // Grow exactly to the requested rows. Descending bucket-capture order
+      // means the first warmup pass already requests the max bucket, so we
+      // never realloc during stream capture.
       alloc_shape[0] = target_rows;
       output_buf_ = torch::empty(alloc_shape, desired_options);
     }
@@ -79,6 +106,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
                  ? output_buf_
                  : output_buf_.narrow(0, 0, target_rows);
   } else {
+    // Prefill / chunked prefill / unusual layouts: eager allocation is
+    // always legal here and avoids disturbing the captured decode buffer.
     output = torch::empty_like(query);
   }
 
@@ -89,4 +118,100 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
 }  // namespace layer
 }  // namespace xllm
 
-#endif  // USE_MUSA
+#else  // native USE_MUSA (MTTOplib backend)
+
+#include <cstdint>
+#include <tuple>
+#include <vector>
+
+#include "MTTOplib/Attention.h"
+#include "MTTOplib/Ops.h"
+#include "MTTOplib/WeightReorder.h"
+
+namespace xllm {
+namespace layer {
+AttentionImpl::AttentionImpl(ModelArgs const& args,
+                             QuantArgs const& quant_args,
+                             ParallelArgs const& parallel_args,
+                             torch::TensorOptions const& options)
+    : MUSALayerBaseImpl(options),
+      num_heads_(args.n_heads()),
+      num_kv_heads_(args.n_kv_heads().value_or(args.n_heads())),
+      head_dim_(args.head_dim()),
+      q_size_(num_heads_ * head_dim_),
+      kv_size_(num_kv_heads_ * head_dim_),
+      rms_eps(args.rms_norm_eps()),
+      scaling_(std::sqrt(1.0f / head_dim_)),
+      hidden_size_(args.hidden_size()) {
+  weights_.resize(weight_num_);
+}
+
+AttentionImpl::AttentionImpl(int64_t num_heads,
+                             int64_t head_size,
+                             float scale,
+                             int64_t num_kv_heads,
+                             int64_t sliding_window) {}
+
+torch::Tensor AttentionImpl::forward(torch::Tensor& input,
+                                     ForwardParams& fwd_params) {
+  auto&& cache = fwd_params.kv_cache;
+  auto& input_params = const_cast<ModelInputParams&>(fwd_params.input_params);
+
+  auto musa_attn_meta = xllm_musa::AttnMetaData::build(
+      input_params.attention.host.q_seq_lens,
+      input_params.attention.host.kv_seq_lens,
+      num_heads_,
+      num_kv_heads_,
+      head_dim_,
+      input_params.attention.device.new_cache_slots,
+      64);
+
+  return xllm_musa::QWen3Attn(input,
+                              cache.get_k_cache(),
+                              cache.get_v_cache(),
+                              input_params.attention.device.block_tables,
+                              fwd_params.attn_meta.mrope_cos,
+                              fwd_params.positions,
+                              weights_,
+                              rms_eps,
+                              musa_attn_meta);
+}
+
+std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
+    const AttentionMetadata& attn_metadata,
+    torch::Tensor& query,
+    torch::Tensor& key,
+    torch::Tensor& value,
+    KVCache& kv_cache) {
+  // This method is not used in the current implementation
+  return std::make_tuple(torch::Tensor(), std::nullopt);
+}
+
+void AttentionImpl::load_state_dict(StateDict const& state_dict) {
+  using WeightMeta = std::pair<std::string, std::vector<int64_t>>;
+  static int32_t all_loaded = 0;
+  std::vector<WeightMeta> meta = {{"q_proj.", {q_size_, hidden_size_}},
+                                  {"k_proj.", {kv_size_, hidden_size_}},
+                                  {"v_proj.", {kv_size_, hidden_size_}},
+                                  {"o_proj.", {hidden_size_, hidden_size_}},
+                                  {"q_norm.", {128}},
+                                  {"k_norm.", {128}}};
+
+  for (int32_t i = 0; i < meta.size(); ++i) {
+    all_loaded += load_weight_common(
+        state_dict.get_dict_with_prefix("self_attn." + meta[i].first),
+        meta[i].second,
+        i);
+  }
+  all_loaded += load_weight_common(
+      state_dict.get_dict_with_prefix("input_layernorm."), {hidden_size_}, 6);
+
+  if (all_loaded == weight_num_) {
+    all_loaded = 0;
+    weights_ = xllm_musa::ReorderAttn(weights_);
+  }
+}
+}  // namespace layer
+}  // namespace xllm
+
+#endif  // XLLM_TORCH_MUSA

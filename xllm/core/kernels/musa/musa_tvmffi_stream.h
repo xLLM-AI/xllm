@@ -42,7 +42,7 @@ namespace ffi = tvm::ffi;
 namespace xllm::kernel::cuda {
 
 inline bool is_torch_musa_device(const torch::Device& device) {
-#if defined(USE_MUSA)
+#if defined(XLLM_TORCH_MUSA)
   return device.is_privateuseone() || device.is_cuda();
 #else
   return device.is_privateuseone();
@@ -66,10 +66,6 @@ class MusaTvmffiStreamGuard final {
  private:
   torch::Device device_;
   bool active_ = false;
-  // True when the FFI kernel was bound to the pool stream (eager-mode
-  // fallback). In that case the destructor must sync the FFI stream so
-  // subsequent PyTorch ops on the compute stream see the FFI results.
-  bool needs_sync_ = false;
 };
 
 template <typename T>
@@ -158,10 +154,6 @@ ffi::Module get_module(const std::string& uri);
 
 ffi::Function get_function(const std::string& uri,
                            const std::string& func_name);
-
-// Registers TileLang's embedded MUSA-module loader with TVM FFI. Returns false
-// when libtilelang is unavailable so callers can use a non-TileLang fallback.
-bool ensure_tilelang_musa_loader();
 
 enum class FfiAllocMode { kPassthrough, kRecord, kReplay };
 
