@@ -81,7 +81,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   std::optional<ForwardOutput> run_validate(
       const ForwardInput& input,
       const std::vector<ForwardOutput>& draft_outputs,
-      ForwardInput& validate_input);
+      ForwardInput& validate_input,
+      bool correct_host_transition_base);
 
   virtual SampleOutput validate(const SamplingParameters& sampling_params,
                                 const std::vector<ForwardOutput>& draft_outputs,
@@ -160,14 +161,18 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   torch::Tensor acquire_accepted_tokens_host_buffer(
       const torch::Tensor& accepted_tokens);
   bool pending_target_context_matches(const ForwardInput& input) const;
+  bool device_target_context_is_primed(const ForwardInput& input) const;
   void flush_pending_target_context();
+  bool can_prelaunch_split_first_draft() const;
   void prepare_next_first_draft_template(const ForwardInput& input,
-                                         ForwardInput& draft_input);
+                                         ForwardInput& repair_input,
+                                         ForwardInput& current_input);
   void enqueue_next_first_draft(const ForwardInput& input,
                                 const SampleOutput& validate_output,
                                 const torch::Tensor& base_positions,
                                 const torch::Tensor& base_kv_seq_lens,
-                                ForwardInput draft_input);
+                                ForwardInput repair_input,
+                                ForwardInput current_input);
   bool pending_draft_context_matches(const ForwardInput& input) const;
 
  protected:
@@ -181,6 +186,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // that state device-resident so the next overlap task can be fully enqueued
   // without waiting for target verification to finish.
   PendingTargetContext pending_target_context_;
+  std::vector<int32_t> primed_embedding_ids_;
+  std::vector<std::string> primed_request_ids_;
   // A single persistent pinned destination is sufficient for accepted-token
   // D2H: the preceding pending target context is always flushed before the
   // next validation can submit another copy. The pending context holds a view
@@ -191,7 +198,6 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // before control returns to the scheduler.  The following scheduler turn
   // consumes this output and only submits draft steps 1..N-1.
   PendingDraftContext pending_draft_context_;
-
   // Whether validation directly uses selected-only draft_probs [B, S].
   // If false, selected-only cache values are restored to dense [B, S, V].
   bool enable_opt_validate_probs_ = false;
