@@ -1698,10 +1698,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
       // process_draft_sample_output() compresses the still-full [batch, vocab]
       // probs into the cache: gathering the cached prob with a unified token
       // yields a unified prob, so we only broadcast the [batch] token tensor.
-      // Overlapped MTP keeps rank-local target state for the next iteration.
-      // Stochastic sampling may advance each rank's RNG differently, so TP
-      // ranks must agree on the sampled token before updating that state.
-      if (enable_schedule_overlap()) {
+      if (get_optimization_config().enable_spec_token_broadcast &&
+          enable_schedule_overlap()) {
         SampleOutput& draft_sample = draft_outputs.back().sample_output;
         broadcast_spec_tokens(draft_sample.next_tokens,
                               spec_broadcast_group(parallel_args_));
@@ -1852,10 +1850,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   // Catch-all for cross-rank RNG divergence: unify the accepted next_tokens to
   // the consensus group's rank 0 so all_draft_accepted and the next
   // draft-extend row layout agree across ranks.
-  // Keep the accepted target state identical on every TP rank.  The helper is
-  // a no-op for TP1, while TP>1 requires this even when the platform-wide
-  // speculative broadcast optimization is disabled.
-  if (enable_schedule_overlap()) {
+  if (get_optimization_config().enable_spec_token_broadcast &&
+      enable_schedule_overlap()) {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     broadcast_spec_tokens(val_output.next_tokens,
                           spec_broadcast_group(parallel_args_));
