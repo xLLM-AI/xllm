@@ -119,15 +119,14 @@ DRAFT_MODEL_PATH="/path/to/Qwen3.5-27B-mtp"
 
 MASTER_NODE_ADDR="<master-host>:32764"
 START_PORT=18076
-START_DEVICE=14
 NNODES=2
 
+export ASCEND_RT_VISIBLE_DEVICES=14,15
 export HCCL_IF_BASE_PORT=53433
 
 for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
   ./xllm/build/xllm/core/server/xllm \
     --model $MODEL_PATH \

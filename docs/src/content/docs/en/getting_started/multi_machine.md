@@ -25,7 +25,6 @@ MODEL_PATH="/path/to/your/DeepSeek-R1"             # Model path
 MASTER_NODE_ADDR="123.123.123.123:9748"            # Master node address (must be globally consistent)
 LOCAL_HOST=123.123.123.123                         # Local IP for service launch
 START_PORT=18000                                   # Service starting port
-START_DEVICE=0                                     # Starting NPU logical device number
 LOCAL_NODES=16                                     # Number of local processes (this script launches 16 processes)
 LOG_DIR="log"                                      # Log directory
 NNODES=32                                          # Total number of GPUs/NPUs (32 in this 2-machine example)
@@ -35,7 +34,6 @@ mkdir -p $LOG_DIR
 for (( i=0; i<$LOCAL_NODES; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
   /path/to/xllm \
     --model $MODEL_PATH \
@@ -76,7 +74,6 @@ MODEL_PATH="/path/to/your/DeepSeek-R1"             # Model path
 MASTER_NODE_ADDR="123.123.123.123:9748"            # Master node address (must be globally consistent)
 LOCAL_HOST=456.456.456.456                         # Local IP for service launch
 START_PORT=18000                                   # Service starting port
-START_DEVICE=0                                     # Starting NPU logical device number
 LOCAL_NODES=16                                     # Number of local processes (this script launches 16 processes)
 LOG_DIR="log"                                      # Log directory
 NNODES=32                                          # Total number of GPUs/NPUs (32 in this 2-machine example)
@@ -86,7 +83,6 @@ mkdir -p $LOG_DIR
 for (( i=0; i<$LOCAL_NODES; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
   /path/to/xllm \
     --model $MODEL_PATH \

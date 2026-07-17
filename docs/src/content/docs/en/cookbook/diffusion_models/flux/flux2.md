@@ -114,7 +114,6 @@ export HCCL_IF_BASE_PORT=43432  # HCCL communication base port
 MODEL_PATH="/path/to/flux2/text_encoder/"          # text_encoder path
 MASTER_NODE_ADDR="127.0.0.1:9748"                  # Master node address (must be consistent globally)
 START_PORT=18001                                   # Service starting port
-START_DEVICE=2                                     # Starting logical device ID
 LOG_DIR="log"                                      # Log directory
 NNODES=2                                           # Number of nodes (this script starts 1 process)
 
@@ -123,7 +122,6 @@ mkdir -p $LOG_DIR
 for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/mistral_node_$i.log"
   ./build/xllm/core/server/xllm \
     --model $MODEL_PATH \
@@ -184,14 +182,12 @@ export HCCL_IF_BASE_PORT=43432  # HCCL communication base port
 ```bash
 MASTER_NODE_ADDR="127.0.0.1:8999"                  # Master node address (must be consistent globally)
 START_PORT=18018                                   # Service starting port
-START_DEVICE=4                                     # Starting NPU logical device ID
 LOG_DIR="log"                                      # Log directory
 NNODES=2                                           # Number of nodes (this script starts 2 processes)
 
 for (( i=0; i<2; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/dit_node_$i.log"
   ./build/xllm/core/server/xllm \
     --model="/path/to/flux2/" \

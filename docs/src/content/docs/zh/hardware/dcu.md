@@ -45,10 +45,11 @@ set -e
 
 rm -rf core.*
 
+export HIP_VISIBLE_DEVICES=0
+
 MODEL_PATH="/path/to/model/Qwen3-8B"
 MASTER_NODE_ADDR="127.0.0.1:9748"
 START_PORT=18000
-START_DEVICE=0
 LOG_DIR="log"
 NNODES=1
 
@@ -57,7 +58,6 @@ mkdir -p $LOG_DIR
 for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
   xllm \
     --model $MODEL_PATH \

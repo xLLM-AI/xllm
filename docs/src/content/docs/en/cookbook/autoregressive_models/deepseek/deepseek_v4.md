@@ -131,14 +131,12 @@ MASTER_NODE_ADDR="11.87.49.110:10015"
 LOCAL_HOST="11.87.49.110"
 # Service Port
 START_PORT=18994
-START_DEVICE=0
 LOG_DIR="logs"
 NNODES=8
 
 for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
   nohup $XLLM_PATH -model-id ds \
     --model $MODEL_PATH \
@@ -203,7 +201,6 @@ export ATB_MATMUL_SHUFFLE_K_ENABLE=0
 MASTER_NODE_ADDR="11.87.49.110:19990"
 LOCAL_HOST="11.87.49.110"
 START_PORT=15890
-START_DEVICE=0
 LOG_DIR="logs"
 NNODES=32
 LOCAL_NODES=16
@@ -212,7 +209,7 @@ unset HCCL_OP_EXPANSION_MODE
 
 for (( i=0; i<$LOCAL_NODES; i++ )); do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i)); LOG_FILE="$LOG_DIR/node_$i.log"
+  LOG_FILE="$LOG_DIR/node_$i.log"
   nohup $XLLM_PATH \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
@@ -232,7 +229,6 @@ done
 MASTER_NODE_ADDR="11.87.49.110:19990"
 LOCAL_HOST="11.87.49.111"
 START_PORT=15890
-START_DEVICE=0
 LOG_DIR="logs"
 NNODES=32
 LOCAL_NODES=16
@@ -241,7 +237,7 @@ unset HCCL_OP_EXPANSION_MODE
 
 for (( i=0; i<$LOCAL_NODES; i++ )); do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i)); LOG_FILE="$LOG_DIR/node_$i.log"
+  LOG_FILE="$LOG_DIR/node_$i.log"
   nohup  $XLLM_PATH \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
