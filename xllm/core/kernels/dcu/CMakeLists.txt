@@ -59,6 +59,11 @@ set(DCU_LOCAL_HIP_SOURCES
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/topk_gate.cpp
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/gated_layer_norm.cpp
   ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/gemma_rms_norm.cpp
+
+  ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/causal_conv1d_adapter.cpp
+  ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/causal_conv1d/causal_conv1d_fwd.hip
+  ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/causal_conv1d/causal_conv1d_update.hip
+  ${CMAKE_SOURCE_DIR}/xllm/core/kernels/dcu/causal_conv1d/causal_conv1d_new_interface.hip
 )
 
 hipify_sources_target(
@@ -135,9 +140,9 @@ target_include_directories(dcu_kernels
   PUBLIC
     ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}
+    ${AITER_CPP_API_LIB_DIR}/../../csrc/include
   PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/..
-    ${AITER_CPP_API_LIB_DIR}/../../aiter_meta/csrc/include
 )
 
 target_compile_definitions(dcu_kernels PRIVATE

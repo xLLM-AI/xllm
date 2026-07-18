@@ -28,6 +28,8 @@ cc_library(
     deepseek_v2_decoder_layer_impl.h
     qwen3_5_decoder_layer.h
     qwen3_gated_delta_net_base.h
+    qwen3_gated_delta_net_helpers.h
+    qwen3_gated_delta_net_impls.h
     qwen3_5_gated_delta_net.h
   SRCS
     attention.cpp
@@ -39,6 +41,8 @@ cc_library(
     deepseek_v2_decoder_layer_impl.cpp
     qwen3_5_decoder_layer.cpp
     qwen3_gated_delta_net_base.cpp
+    qwen3_gated_delta_net_torch_impl.cpp
+    qwen3_gated_delta_net_kernel_impl.cpp
     qwen3_5_gated_delta_net.cpp
   DEPS
     :common_layers
