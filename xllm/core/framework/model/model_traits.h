@@ -25,6 +25,7 @@ limitations under the License.
 namespace xllm {
 struct ModelInputParams;
 struct ModelGraphMetadataState;
+struct SpeculativeVerifyCapabilities;
 class KVCache;
 
 namespace layer {
@@ -136,6 +137,15 @@ template <typename T>
 struct has_is_hybrid_linear_attention<
     T,
     std::void_t<decltype(std::declval<T>()->is_hybrid_linear_attention())>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_speculative_verify_capabilities : std::false_type {};
+
+template <typename T>
+struct has_speculative_verify_capabilities<
+    T,
+    std::void_t<decltype(std::declval<T>()->speculative_verify_capabilities())>>
     : std::true_type {};
 
 template <typename T, typename = void>
