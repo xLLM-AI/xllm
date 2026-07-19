@@ -522,6 +522,14 @@ inline aclTensorList* convert_type(const at::TensorList& at_tensor_list) {
   return acl_tensor_list;
 }
 
+inline aclTensorList* convert_type(
+    const c10::optional<at::TensorList>& opt_tensor_list) {
+  if (opt_tensor_list.has_value()) {
+    return convert_type(opt_tensor_list.value());
+  }
+  return nullptr;
+}
+
 inline aclTensor* convert_type(const c10::optional<at::Tensor>& opt_tensor) {
   if (opt_tensor.has_value() && opt_tensor.value().defined()) {
     return convert_type(opt_tensor.value());
@@ -609,6 +617,9 @@ inline void release(aclBoolArray* p) {
 }
 
 inline void release(aclTensorList* p) {
+  if (p == nullptr) {
+    return;
+  }
   static const auto acl_destroy_tensor_list =
       get_op_api_func<AclDestroyTensorListFn>("aclDestroyTensorList");
   if (acl_destroy_tensor_list == nullptr) {

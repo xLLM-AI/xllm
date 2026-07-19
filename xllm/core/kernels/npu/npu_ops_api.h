@@ -265,6 +265,49 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_dispatch_ffn_combine(
 
 bool has_dispatch_ffn_combine();
 
+std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
+    const torch::Tensor& context,
+    const torch::Tensor& x,
+    const torch::Tensor& topk_ids,
+    const torch::Tensor& topk_weights,
+    const torch::TensorList weight1,
+    const torch::TensorList weight2,
+    int64_t moe_expert_num,
+    int64_t ep_world_size,
+    int64_t ccl_buffer_size,
+    const std::optional<torch::TensorList>& weight_scales1 = std::nullopt,
+    const std::optional<torch::TensorList>& weight_scales2 = std::nullopt,
+    const std::optional<torch::TensorList>& bias1 = std::nullopt,
+    const std::optional<torch::TensorList>& bias2 = std::nullopt,
+    const std::optional<torch::Tensor>& x_active_mask = std::nullopt,
+    int64_t max_recv_token_num = 0,
+    int64_t dispatch_quant_mode = 0,
+    int64_t combine_quant_mode = 0,
+    const std::string& comm_alg = "",
+    int64_t num_max_tokens_per_rank = 0,
+    const std::string& activation = "swiglu",
+    float activation_clamp = 3.402823466e+38F,
+    int64_t dispatch_quant_out_dtype = 28,
+    int64_t topo_type = 0,
+    int64_t rank_num_per_server = 2);
+
+struct MegaMoeOpApiProvenance {
+  bool compatible = false;
+  bool same_library = false;
+  std::string expected_library;
+  std::string workspace_library;
+  std::string execute_library;
+};
+
+MegaMoeOpApiProvenance validate_mega_moe_op_api_paths(
+    const std::string& expected_library,
+    const std::string& workspace_library,
+    const std::string& execute_library);
+
+MegaMoeOpApiProvenance inspect_mega_moe_op_api_provenance();
+
+bool has_mega_moe();
+
 std::tuple<torch::Tensor, torch::Tensor> apply_npu_dispatch_gmm_combine_decode(
     const torch::Tensor& x,
     const torch::Tensor& expert_ids,

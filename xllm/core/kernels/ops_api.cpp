@@ -1144,6 +1144,45 @@ bool has_dispatch_ffn_combine() {
 #endif
 }
 
+std::tuple<torch::Tensor, torch::Tensor> mega_moe(MegaMoeParams& params) {
+#if defined(USE_NPU)
+  return npu::apply_npu_mega_moe(params.context,
+                                 params.x,
+                                 params.topk_ids,
+                                 params.topk_weights,
+                                 params.weight1,
+                                 params.weight2,
+                                 params.moe_expert_num,
+                                 params.ep_world_size,
+                                 params.ccl_buffer_size,
+                                 params.weight_scales1,
+                                 params.weight_scales2,
+                                 params.bias1,
+                                 params.bias2,
+                                 params.x_active_mask,
+                                 params.max_recv_token_num,
+                                 params.dispatch_quant_mode,
+                                 params.combine_quant_mode,
+                                 params.comm_alg,
+                                 params.num_max_tokens_per_rank,
+                                 params.activation,
+                                 params.activation_clamp,
+                                 params.dispatch_quant_out_dtype,
+                                 params.topo_type,
+                                 params.rank_num_per_server);
+#else
+  NOT_IMPLEMENTED();
+#endif
+}
+
+bool has_mega_moe() {
+#if defined(USE_NPU)
+  return npu::has_mega_moe();
+#else
+  return false;
+#endif
+}
+
 std::tuple<torch::Tensor, torch::Tensor> dispatch_gmm_combine_decode(
     DispatchGmmCombineDecodeParams& params) {
 #if defined(USE_NPU)

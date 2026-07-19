@@ -1,5 +1,24 @@
 include(cc_library)
 
+if(USE_NPU)
+  cc_library(
+    NAME
+      mega_moe_comm_resource
+    HDRS
+      mega_moe_comm_resource.h
+    SRCS
+      mega_moe_comm_resource.cpp
+    DEPS
+      torch
+      torch_npu
+      hccl
+      hcomm
+      glog::glog
+  )
+  target_link_libraries(mega_moe_comm_resource PRIVATE ${CMAKE_DL_LIBS})
+
+endif()
+
 cc_library(
   NAME
     parallel_state
@@ -44,6 +63,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:hccl>
     $<$<BOOL:${USE_NPU}>:hcomm>
     $<$<BOOL:${USE_NPU}>:xllm_atb_layers>
+    $<$<BOOL:${USE_NPU}>:mega_moe_comm_resource>
     gflags::gflags
     glog::glog
 )

@@ -37,6 +37,19 @@ if(USE_NPU)
                                hccl
                                c_sec
                                nnopbase)
+
+  cc_test(
+    NAME
+      mega_moe_comm_resource_test
+    SRCS
+      mega_moe_comm_resource_test.cpp
+    DEPS
+      mega_moe_comm_resource
+      torch
+      GTest::gtest_main
+      hccl
+      hcomm
+  )
 endif()
 
 if(USE_MLU)

@@ -38,6 +38,13 @@ DEFINE_int32(enable_fused_mc2,
              "MC2, positive values enable dense matmul-allreduce, 1 uses "
              "DispatchFFNCombine for MoE, 2 uses DispatchGmmCombineDecode for "
              "MoE.");
+DEFINE_string(mega_moe_mode,
+              "off",
+              "MegaMoe mode for NPU: off, auto, or on. Default is off.");
+DEFINE_int64(mega_moe_weight_cache_budget_bytes,
+             4LL * 1024 * 1024 * 1024,
+             "Process-wide byte budget for independent contiguous MegaMoe "
+             "weight caches.");
 DEFINE_bool(enable_interlayer_addnorm,
             false,
             "enable fused interlayer addnorm ops.");
@@ -71,6 +78,17 @@ int32_t resolve_fused_mc2_mode(int32_t mode) {
   }
   return 0;
 }
+
+void validate_mega_moe_mode(const std::string& mode) {
+  CHECK(mode == "off" || mode == "auto" || mode == "on")
+      << "--mega_moe_mode must be off, auto, or on; got " << mode;
+}
+
+void validate_mega_moe_weight_cache_budget(int64_t budget_bytes) {
+  CHECK_GE(budget_bytes, 0)
+      << "--mega_moe_weight_cache_budget_bytes must be >= 0; got "
+      << budget_bytes;
+}
 #endif
 
 }  // namespace
@@ -81,6 +99,8 @@ void KernelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(npu_kernel_backend);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_intralayer_addnorm);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_fused_mc2);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(mega_moe_mode);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(mega_moe_weight_cache_budget_bytes);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_interlayer_addnorm);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_split_rmsnorm_rope);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_aclnn_matmul);
@@ -94,6 +114,8 @@ void KernelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(npu_kernel_backend);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_intralayer_addnorm);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_fused_mc2);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(mega_moe_mode);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(mega_moe_weight_cache_budget_bytes);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_interlayer_addnorm);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_split_rmsnorm_rope);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_aclnn_matmul);
@@ -113,6 +135,10 @@ void KernelConfig::append_config_json(
       config_json, default_config, enable_intralayer_addnorm);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_fused_mc2);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, mega_moe_mode);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, mega_moe_weight_cache_budget_bytes);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_interlayer_addnorm);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
@@ -136,6 +162,9 @@ void KernelConfig::initialize() {
   }
 #if defined(USE_NPU)
   enable_fused_mc2(resolve_fused_mc2_mode(enable_fused_mc2()));
+  validate_mega_moe_mode(mega_moe_mode());
+  validate_mega_moe_weight_cache_budget(
+      mega_moe_weight_cache_budget_bytes());
 #endif
 }
 

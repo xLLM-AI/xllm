@@ -29,6 +29,11 @@ limitations under the License.
 namespace xllm {
 
 class ProcessGroupImpl;
+#if defined(USE_NPU)
+struct MegaMoeCommSpec;
+class MegaMoeCommResource;
+class MegaMoeCommResourceSlot;
+#endif
 
 std::pair<int, std::vector<uint64_t>> get_group_rank(int world_size,
                                                      int global_rank,
@@ -41,8 +46,7 @@ c10::intrusive_ptr<c10d::Store> create_tcp_store(const std::string& host,
 
 class ProcessGroup {
  public:
-  ProcessGroup(int32_t rank, int32_t world_size, const torch::Device& device)
-      : rank_(rank), world_size_(world_size), device_(device) {}
+  ProcessGroup(int32_t rank, int32_t world_size, const torch::Device& device);
 
   virtual ~ProcessGroup();
 
@@ -115,6 +119,12 @@ class ProcessGroup {
 
   virtual std::string hccl_comm_name(bool init_comm = true);
 
+#if defined(USE_NPU)
+  virtual HcclComm hccl_comm();
+  std::shared_ptr<MegaMoeCommResource> acquire_mega_moe_comm_resource(
+      const MegaMoeCommSpec& spec);
+#endif
+
  private:
   // rank of current process.
   int32_t rank_ = 0;
@@ -125,8 +135,16 @@ class ProcessGroup {
   // device of current process.
   torch::Device device_;
 
+#if defined(USE_NPU)
+  // Bounded to one cache entry and explicitly released before HCCL teardown.
+  std::unique_ptr<MegaMoeCommResourceSlot> mega_moe_comm_resource_slot_;
+#endif
+
  protected:
   void shutdown_backend();
+#if defined(USE_NPU)
+  void release_mega_moe_comm_resource();
+#endif
 
 #if defined(USE_NPU) &&         \
     (TORCH_VERSION_MAJOR < 2 || \

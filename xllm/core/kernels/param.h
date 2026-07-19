@@ -1411,6 +1411,43 @@ struct DispatchFFNCombineParams {
   std::optional<torch::Tensor> expert_token_nums = std::nullopt;
 };
 
+// MegaMoe fuses EP dispatch, expert FFN, and EP combine. The policy layer
+// admits only the verified A16W16 envelope; these defaults mirror the
+// upstream torch extension and keep unsupported quantization paths disabled.
+struct MegaMoeParams {
+  // Communication context from MegaMoeCommResource. Shape: [context_words],
+  // dtype int32, device NPU.
+  torch::Tensor context;
+  // Local input and global router results.
+  torch::Tensor x;
+  torch::Tensor topk_ids;
+  torch::Tensor topk_weights;
+  // Per-rank expert weights. W1[e]: [hidden, 2 * intermediate],
+  // W2[e]: [intermediate, hidden].
+  torch::TensorList weight1;
+  torch::TensorList weight2;
+  int64_t moe_expert_num = 0;
+  int64_t ep_world_size = 0;
+  int64_t ccl_buffer_size = 0;
+
+  std::optional<torch::TensorList> weight_scales1 = std::nullopt;
+  std::optional<torch::TensorList> weight_scales2 = std::nullopt;
+  std::optional<torch::TensorList> bias1 = std::nullopt;
+  std::optional<torch::TensorList> bias2 = std::nullopt;
+  std::optional<torch::Tensor> x_active_mask = std::nullopt;
+  int64_t max_recv_token_num = 0;
+  int64_t dispatch_quant_mode = 0;
+  int64_t combine_quant_mode = 0;
+  std::string comm_alg;
+  int64_t num_max_tokens_per_rank = 0;
+  std::string activation = "swiglu";
+  float activation_clamp = 3.402823466e+38F;
+  // 28 is the non-quantized sentinel used by the upstream torch bridge.
+  int64_t dispatch_quant_out_dtype = 28;
+  int64_t topo_type = 0;
+  int64_t rank_num_per_server = 2;
+};
+
 struct DispatchGmmCombineDecodeParams {
   // Input hidden states. Shape: [num_tokens, hidden_size].
   torch::Tensor x;

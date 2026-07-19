@@ -44,6 +44,8 @@ class KernelConfig final {
          "npu_kernel_backend",
          "enable_intralayer_addnorm",
          "enable_fused_mc2",
+         "mega_moe_mode",
+         "mega_moe_weight_cache_budget_bytes",
          "enable_interlayer_addnorm",
          "enable_split_rmsnorm_rope",
          "enable_aclnn_matmul",
@@ -59,6 +61,11 @@ class KernelConfig final {
   PROPERTY(bool, enable_intralayer_addnorm) = false;
 
   PROPERTY(int32_t, enable_fused_mc2) = 0;
+
+  PROPERTY(std::string, mega_moe_mode) = "off";
+
+  PROPERTY(int64_t, mega_moe_weight_cache_budget_bytes) =
+      4LL * 1024 * 1024 * 1024;
 
   PROPERTY(bool, enable_interlayer_addnorm) = false;
 

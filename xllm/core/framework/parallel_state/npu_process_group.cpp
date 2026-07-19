@@ -169,6 +169,7 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
 
 // Destructor.
 ProcessGroupImpl::~ProcessGroupImpl() {
+  release_mega_moe_comm_resource();
   if (pg_) {
     shutdown_backend();
   } else if (comm_ != nullptr) {
@@ -197,6 +198,24 @@ std::string ProcessGroupImpl::hccl_comm_name(bool init_comm) {
   CHECK(hccl_pg != nullptr) << "Process group is not NPU HCCL.";
   return hccl_pg->getHcclCommName(pg_->getRank(), init_comm);
 #endif
+}
+
+HcclComm ProcessGroupImpl::hccl_comm() {
+  if (comm_ != nullptr) {
+    return comm_;
+  }
+  CHECK(pg_ != nullptr) << "HCCL communicator requires an initialized group.";
+#if defined(USE_NPU) &&         \
+    (TORCH_VERSION_MAJOR < 2 || \
+     (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR < 7))
+  const int64_t comm_handle = pg_->getHcclComm(pg_->getRank());
+#else
+  auto* hccl_pg = dynamic_cast<c10d_npu::ProcessGroupHCCL*>(pg_.get());
+  CHECK(hccl_pg != nullptr) << "Process group is not NPU HCCL.";
+  const int64_t comm_handle = hccl_pg->getHcclComm(pg_->getRank());
+#endif
+  CHECK(comm_handle != 0) << "NPU HCCL process group returned a null comm.";
+  return reinterpret_cast<HcclComm>(comm_handle);
 }
 
 }  // namespace xllm

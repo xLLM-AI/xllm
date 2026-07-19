@@ -15,6 +15,7 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -24,6 +25,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
@@ -235,6 +237,38 @@ TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
   EXPECT_EQ(kv_cache_config.indexer_cache_dtype(), "auto");
   EXPECT_EQ(scheduler_config.max_decode_token_per_sequence(), 256);
 }
+
+#if defined(USE_NPU)
+TEST(KernelConfigTest, MegaMoeDefaultsOffAndReadsJsonOverride) {
+  KernelConfig kernel_config;
+  EXPECT_EQ(kernel_config.mega_moe_mode(), "off");
+  EXPECT_EQ(kernel_config.mega_moe_weight_cache_budget_bytes(),
+            4LL * 1024 * 1024 * 1024);
+
+  const JsonReader json = config::parse_json_string(
+      R"json({"mega_moe_mode": "on", "mega_moe_weight_cache_budget_bytes": 123456})json");
+  kernel_config.from_json(json);
+  EXPECT_EQ(kernel_config.mega_moe_mode(), "on");
+  EXPECT_EQ(kernel_config.mega_moe_weight_cache_budget_bytes(), 123456);
+
+  nlohmann::ordered_json dumped_config;
+  kernel_config.append_config_json(dumped_config);
+  ASSERT_TRUE(dumped_config.contains("mega_moe_mode"));
+  EXPECT_EQ(dumped_config.at("mega_moe_mode").get<std::string>(), "on");
+  ASSERT_TRUE(
+      dumped_config.contains("mega_moe_weight_cache_budget_bytes"));
+  EXPECT_EQ(dumped_config.at("mega_moe_weight_cache_budget_bytes")
+                .get<int64_t>(),
+            123456);
+
+  const auto& names = KernelConfig::option_category().option_names;
+  EXPECT_NE(std::find(names.begin(), names.end(), "mega_moe_mode"),
+            names.end());
+  EXPECT_NE(std::find(names.begin(), names.end(),
+                      "mega_moe_weight_cache_budget_bytes"),
+            names.end());
+}
+#endif
 
 TEST(KVCacheConfigValidationTest, AcceptsSupportedIndexerCacheDtypes) {
   KVCacheConfig config;

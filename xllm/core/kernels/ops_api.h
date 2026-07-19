@@ -141,6 +141,10 @@ std::tuple<torch::Tensor, torch::Tensor> dispatch_ffn_combine(
 
 bool has_dispatch_ffn_combine();
 
+std::tuple<torch::Tensor, torch::Tensor> mega_moe(MegaMoeParams& params);
+
+bool has_mega_moe();
+
 std::tuple<torch::Tensor, torch::Tensor> dispatch_gmm_combine_decode(
     DispatchGmmCombineDecodeParams& params);
 

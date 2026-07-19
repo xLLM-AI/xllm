@@ -395,6 +395,10 @@ DECLARE_bool(enable_intralayer_addnorm);
 
 DECLARE_int32(enable_fused_mc2);
 
+DECLARE_string(mega_moe_mode);
+
+DECLARE_int64(mega_moe_weight_cache_budget_bytes);
+
 DECLARE_bool(enable_interlayer_addnorm);
 
 DECLARE_bool(enable_split_rmsnorm_rope);

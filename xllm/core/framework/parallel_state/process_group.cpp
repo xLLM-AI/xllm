@@ -16,6 +16,7 @@ limitations under the License.
 #include "process_group.h"
 
 #if defined(USE_NPU)
+#include "mega_moe_comm_resource.h"
 #include "npu_process_group.h"
 #elif defined(USE_MLU)
 #include "mlu_process_group.h"
@@ -58,7 +59,22 @@ std::vector<int64_t> get_gather_shape(int32_t world_size,
 
 namespace xllm {
 
-ProcessGroup::~ProcessGroup() { shutdown_backend(); }
+ProcessGroup::ProcessGroup(int32_t rank,
+                           int32_t world_size,
+                           const torch::Device& device)
+    : rank_(rank), world_size_(world_size), device_(device) {
+#if defined(USE_NPU)
+  mega_moe_comm_resource_slot_ =
+      std::make_unique<MegaMoeCommResourceSlot>();
+#endif
+}
+
+ProcessGroup::~ProcessGroup() {
+#if defined(USE_NPU)
+  release_mega_moe_comm_resource();
+#endif
+  shutdown_backend();
+}
 
 void ProcessGroup::shutdown_backend() {
   if (pg_ == nullptr) {
@@ -67,6 +83,23 @@ void ProcessGroup::shutdown_backend() {
   pg_->shutdown();
   pg_.reset();
 }
+
+#if defined(USE_NPU)
+std::shared_ptr<MegaMoeCommResource>
+ProcessGroup::acquire_mega_moe_comm_resource(
+    const MegaMoeCommSpec& spec) {
+  CHECK(mega_moe_comm_resource_slot_ != nullptr)
+      << "MegaMoe communication resource slot is unavailable.";
+  return mega_moe_comm_resource_slot_->acquire(spec);
+}
+
+void ProcessGroup::release_mega_moe_comm_resource() {
+  if (mega_moe_comm_resource_slot_ != nullptr) {
+    mega_moe_comm_resource_slot_->reset_for_teardown();
+    mega_moe_comm_resource_slot_.reset();
+  }
+}
+#endif
 
 std::pair<int, std::vector<uint64_t>> get_group_rank(int world_size,
                                                      int global_rank,
@@ -228,6 +261,13 @@ std::string ProcessGroup::hccl_comm_name(bool init_comm) {
   CHECK(false) << "hccl_comm_name is only supported on NPU HCCL process group.";
   return "";
 }
+
+#if defined(USE_NPU)
+HcclComm ProcessGroup::hccl_comm() {
+  CHECK(false) << "hccl_comm is only supported on NPU HCCL process group.";
+  return nullptr;
+}
+#endif
 
 std::unique_ptr<ProcessGroup> create_process_group(
     int32_t rank,

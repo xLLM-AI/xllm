@@ -2,6 +2,27 @@ include(cc_library)
 
 cc_library(
   NAME
+    mega_moe_policy
+  HDRS
+    mega_moe_policy.h
+  SRCS
+    mega_moe_policy.cpp
+)
+
+cc_library(
+  NAME
+    mega_moe_runtime
+  HDRS
+    mega_moe_runtime.h
+  SRCS
+    mega_moe_runtime.cpp
+  DEPS
+    torch
+)
+
+
+cc_library(
+  NAME
     npu_torch_layers
   HDRS
     fused_moe.h
@@ -39,6 +60,9 @@ cc_library(
     deepseek_v4_gate.cpp
   DEPS
     :common_layers
+    :mega_moe_policy
+    :mega_moe_comm_resource
+    :mega_moe_runtime
     :npu_layers
     :xllm_ops
     :triton_adapter

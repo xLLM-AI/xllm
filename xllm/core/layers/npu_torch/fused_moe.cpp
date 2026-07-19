@@ -15,12 +15,16 @@ limitations under the License.
 
 #include "fused_moe.h"
 
+#include <acl/acl.h>
 #include <glog/logging.h>
+#include <version/cann_version.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <fstream>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -32,11 +36,17 @@ limitations under the License.
 #include <torch_npu/csrc/aten/NPUNativeFunctions.h>
 #endif
 
+#include "framework/config/execution_config.h"
 #include "framework/config/eplb_config.h"
 #include "framework/config/kernel_config.h"
+#include "framework/config/scheduler_config.h"
+#include "framework/parallel_state/mega_moe_comm_resource.h"
 #include "framework/parallel_state/parallel_state.h"
+#include "kernels/npu/npu_ops_api.h"
 #include "kernels/ops_api.h"
 #include "layers/common/dp_utils.h"
+#include "layers/npu_torch/mega_moe_policy.h"
+#include "layers/npu_torch/mega_moe_runtime.h"
 #include "platform/device.h"
 #include "util/utils.h"
 
@@ -61,6 +71,31 @@ torch::Tensor slice_expert_weights(const torch::Tensor& weight,
   return weight
       .slice(0, start_expert_id, start_expert_id + num_experts_per_rank)
       .contiguous();
+}
+
+std::string read_mega_moe_vendor_version() {
+  const char* custom_opp_path = std::getenv("ASCEND_CUSTOM_OPP_PATH");
+  if (custom_opp_path == nullptr || custom_opp_path[0] == '\0') {
+    return "";
+  }
+  std::string root(custom_opp_path);
+  const size_t path_separator = root.find(':');
+  if (path_separator != std::string::npos) {
+    root.resize(path_separator);
+  }
+  std::ifstream version_file(root + "/version.info");
+  std::string line;
+  constexpr char kVersionPrefix[] = "custom_opp_compiler_version=";
+  while (std::getline(version_file, line)) {
+    if (line.rfind(kVersionPrefix, 0) == 0) {
+      return line.substr(sizeof(kVersionPrefix) - 1);
+    }
+  }
+  return "";
+}
+
+std::string mega_moe_rejection_text(MegaMoeRejectionReason reason) {
+  return std::to_string(static_cast<int32_t>(reason));
 }
 
 std::optional<std::string> resolve_moe_quant_method(
@@ -524,6 +559,103 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
             options_),
         false);
   }
+  initialize_mega_moe();
+}
+
+void FusedMoEImpl::initialize_mega_moe() {
+  const auto mode = parse_mega_moe_mode(
+      KernelConfig::get_instance().mega_moe_mode());
+  CHECK(mode.has_value()) << "Invalid MegaMoe mode.";
+  if (mode.value() == MegaMoeMode::OFF) {
+    return;
+  }
+
+  const int64_t weight_budget_limit =
+      KernelConfig::get_instance().mega_moe_weight_cache_budget_bytes();
+  const int64_t estimated_weight_bytes =
+      estimate_mega_moe_weight_cache_bytes(w13_, w2_);
+  const auto weight_budget = inspect_mega_moe_weight_budget(
+      estimated_weight_bytes, weight_budget_limit);
+  if (!weight_budget.allowed) {
+    if (mode.value() == MegaMoeMode::AUTO) {
+      LOG(WARNING) << "MegaMoe auto fallback before HCCL: weight cache "
+                   << "budget exceeded, estimated="
+                   << weight_budget.estimated_bytes
+                   << ", current=" << weight_budget.current_bytes
+                   << ", limit=" << weight_budget.limit_bytes;
+      return;
+    }
+    CHECK(weight_budget.allowed)
+        << "MegaMoe forced-on weight cache budget exceeded: estimated="
+        << weight_budget.estimated_bytes
+        << ", current=" << weight_budget.current_bytes
+        << ", limit=" << weight_budget.limit_bytes;
+  }
+  if (mode.value() == MegaMoeMode::AUTO) {
+    LOG(WARNING) << "MegaMoe auto mode is not enabled by this validation "
+                    "gate; falling back to legacy before HCCL access.";
+    return;
+  }
+
+  const char* soc_name = aclrtGetSocName();
+  const auto comm_symbols = probe_mega_moe_comm_symbols();
+  const auto op_provenance =
+      xllm::kernel::npu::inspect_mega_moe_op_api_provenance();
+  const bool op_symbols = op_provenance.compatible;
+  const bool unquantized =
+      quant_args_.quant_method().empty() && quant_args_.quant_descs().empty();
+  const bool swiglu =
+      is_gated_ && (hidden_act_ == "silu" || hidden_act_ == "swiglu");
+  MegaMoeCapability capability;
+  capability.soc_name = soc_name == nullptr ? "" : soc_name;
+  capability.cann_version = CANN_VERSION_STR;
+  capability.vendor_version = read_mega_moe_vendor_version();
+  capability.dtype = options_.dtype() == torch::kBFloat16
+                         ? MegaMoeDType::BFLOAT16
+                         : MegaMoeDType::OTHER;
+  capability.activation = swiglu ? "swiglu" : hidden_act_;
+  capability.hidden_size = hidden_size_;
+  capability.intermediate_size = local_intermediate_size_;
+  capability.num_experts = num_total_experts_;
+  capability.topk = topk_;
+  capability.ep_size = parallel_args_.ep_size();
+  capability.tp_size = tp_pg_->world_size();
+  capability.dp_size = parallel_args_.dp_size();
+  capability.graph_enabled = ExecutionConfig::get_instance().enable_graph();
+  capability.quantization_enabled = !unquantized;
+  capability.workspace_symbol_ready = op_symbols;
+  capability.execute_symbol_ready = op_symbols;
+  capability.comm_context_ready = comm_symbols.available &&
+                                  parallel_args_.moe_ep_group_ != nullptr;
+  capability.fused_mc2_enabled = fused_mc2_mode() != 0;
+  capability.collectives_started = false;
+  capability.weight_budget_ready = weight_budget.allowed;
+
+  const MegaMoeDecision decision = decide_mega_moe(mode.value(), capability);
+  CHECK(!decision.fatal)
+      << "MegaMoe forced-on preflight failed, reason="
+      << mega_moe_rejection_text(decision.reason)
+      << ", expected_op_library=" << op_provenance.expected_library
+      << ", workspace_library=" << op_provenance.workspace_library
+      << ", execute_library=" << op_provenance.execute_library
+      << ". Source CANN 9.1 and exactly one validated custom vendor; set "
+         "ASCEND_CUSTOM_OPP_PATH to that vendor root.";
+  CHECK(decision.use_mega_moe);
+
+  ProcessGroup* ep_group = parallel_args_.moe_ep_group_;
+  MegaMoeCommSpec comm_spec;
+  comm_spec.group_name = ep_group->hccl_comm_name(/*init_comm=*/true);
+  comm_spec.hccl_comm = ep_group->hccl_comm();
+  comm_spec.ep_world_size = ep_group->world_size();
+  comm_spec.device_index = options_.device().index();
+  comm_spec.max_num_tokens_per_rank =
+      SchedulerConfig::get_instance().max_tokens_per_batch();
+  mega_moe_comm_resource_ = ep_group->acquire_mega_moe_comm_resource(comm_spec);
+  mega_moe_enabled_ = true;
+  LOG(INFO) << "MegaMoe forced-on path enabled for EP="
+            << comm_spec.ep_world_size
+            << ", max_tokens_per_rank="
+            << comm_spec.max_num_tokens_per_rank;
 }
 
 void FusedMoEImpl::validate_resolved_quant_method() const {
@@ -742,10 +874,10 @@ void FusedMoEImpl::ensure_group_gemm_weight_layout(torch::Tensor& weight,
       << weight.sizes() << ", expected dim2=" << output_dim;
 }
 
-torch::Tensor FusedMoEImpl::select_experts(
+std::pair<torch::Tensor, torch::Tensor>
+FusedMoEImpl::select_global_experts(
     const torch::Tensor& hidden_states_2d,
-    const torch::Tensor& router_logits_2d,
-    SelectedExpertInfo& selected_expert_info) {
+    const torch::Tensor& router_logits_2d) {
   torch::Tensor topk_weights;
   torch::Tensor topk_ids;
   std::optional<torch::Tensor> e_score_correction_bias = std::nullopt;
@@ -805,6 +937,16 @@ torch::Tensor FusedMoEImpl::select_experts(
     }
   }
 
+  return std::make_pair(topk_weights.contiguous(), topk_ids.contiguous());
+}
+
+torch::Tensor FusedMoEImpl::select_experts(
+    const torch::Tensor& hidden_states_2d,
+    const torch::Tensor& router_logits_2d,
+    SelectedExpertInfo& selected_expert_info) {
+  auto [topk_weights, topk_ids] =
+      select_global_experts(hidden_states_2d, router_logits_2d);
+
   const int64_t local_expert_start = start_expert_id_;
   const int64_t local_expert_end = start_expert_id_ + num_experts_per_rank_;
   if (parallel_args_.ep_size() > 1) {
@@ -849,10 +991,92 @@ torch::Tensor FusedMoEImpl::select_experts(
   return expand_hidden_states;
 }
 
+void FusedMoEImpl::ensure_mega_moe_weight_cache(
+    bool require_complete_weights) {
+  const auto action = plan_mega_moe_weight_cache(
+      mega_moe_enabled_,
+      mega_moe_weight_cache_.ready(),
+      w13_is_loaded_,
+      w2_is_loaded_,
+      require_complete_weights);
+  if (action == MegaMoeWeightCacheAction::SKIP ||
+      action == MegaMoeWeightCacheAction::WAIT_FOR_WEIGHTS) {
+    return;
+  }
+  CHECK(action != MegaMoeWeightCacheAction::FAIL_MISSING_WEIGHTS)
+      << "MegaMoe weights must be loaded before first execution.";
+  CHECK(action == MegaMoeWeightCacheAction::BUILD);
+  MegaMoeWeightBudgetStatus budget_status;
+  auto weight_cache = try_build_mega_moe_weight_cache(
+      w13_,
+      w2_,
+      hidden_size_,
+      local_intermediate_size_,
+      KernelConfig::get_instance().mega_moe_weight_cache_budget_bytes(),
+      &budget_status);
+  CHECK(weight_cache.has_value())
+      << "MegaMoe forced-on weight cache reservation failed before "
+         "contiguous allocation: estimated="
+      << budget_status.estimated_bytes
+      << ", current=" << budget_status.current_bytes
+      << ", limit=" << budget_status.limit_bytes;
+  mega_moe_weight_cache_ = std::move(weight_cache.value());
+  LOG(INFO) << "MegaMoe materialized independent contiguous weight caches: "
+            << mega_moe_weight_cache_.memory_bytes
+            << " bytes; process_total="
+            << current_mega_moe_weight_cache_bytes() << ".";
+}
+
+torch::Tensor FusedMoEImpl::forward_mega_moe(
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& router_logits,
+    const std::optional<torch::Tensor>& shared_output) {
+  CHECK(mega_moe_enabled_);
+  auto comm_resource = mega_moe_comm_resource_.lock();
+  CHECK(comm_resource != nullptr)
+      << "MegaMoe communication resource expired before collective launch.";
+
+  ensure_mega_moe_weight_cache(/*require_complete_weights=*/true);
+  const auto hidden_states_shape = hidden_states.sizes();
+  auto input_2d =
+      hidden_states.reshape({-1, hidden_states.size(-1)}).contiguous();
+  auto router_logits_2d =
+      router_logits.reshape({-1, router_logits.size(-1)});
+  auto [topk_weights, topk_ids] =
+      select_global_experts(input_2d, router_logits_2d);
+
+  xllm::kernel::MegaMoeParams params;
+  params.context = comm_resource->context_tensor();
+  params.x = input_2d;
+  params.topk_ids = topk_ids;
+  params.topk_weights = topk_weights;
+  params.weight1 = torch::TensorList(mega_moe_weight_cache_.weight1);
+  params.weight2 = torch::TensorList(mega_moe_weight_cache_.weight2);
+  params.moe_expert_num = num_total_experts_;
+  params.ep_world_size = parallel_args_.ep_size();
+  params.ccl_buffer_size = comm_resource->ccl_buffer_size();
+  params.num_max_tokens_per_rank =
+      comm_resource->max_num_tokens_per_rank();
+  params.activation = "swiglu";
+
+  torch::Tensor routed_output;
+  torch::Tensor expert_token_nums;
+  std::tie(routed_output, expert_token_nums) = xllm::kernel::mega_moe(params);
+  (void)expert_token_nums;
+  auto output = routed_output.reshape(hidden_states_shape);
+  if (shared_output.has_value()) {
+    output = output + shared_output.value();
+  }
+  return output;
+}
+
 torch::Tensor FusedMoEImpl::forward_expert(
     const torch::Tensor& hidden_states,
     const torch::Tensor& router_logits,
     const std::optional<torch::Tensor>& shared_output) {
+  if (mega_moe_enabled_) {
+    return forward_mega_moe(hidden_states, router_logits, shared_output);
+  }
   // prepare the parameters for MoE computation
   torch::IntArrayRef hidden_states_shape = hidden_states.sizes();
   torch::ScalarType hidden_states_dtype = hidden_states.dtype().toScalarType();
@@ -1962,6 +2186,7 @@ void FusedMoEImpl::load_state_dict(const StateDict& state_dict) {
   }
   load_experts(state_dict.get_dict_with_prefix("experts."));
   preprocess_w4a8_dynamic_weights();
+  ensure_mega_moe_weight_cache(/*require_complete_weights=*/false);
 }
 
 }  // namespace layer

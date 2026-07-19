@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -31,8 +32,13 @@ limitations under the License.
 #include "layers/common/dense_mlp.h"
 #include "layers/common/fused_moe_base.h"
 #include "layers/common/linear.h"
+#include "layers/npu_torch/mega_moe_policy.h"
+#include "layers/npu_torch/mega_moe_runtime.h"
 
 namespace xllm {
+
+class MegaMoeCommResource;
+
 namespace layer {
 
 class FusedMoEImpl : public torch::nn::Module {
@@ -67,12 +73,27 @@ class FusedMoEImpl : public torch::nn::Module {
     std::optional<torch::Tensor> input_scale;
   };
 
+  // Computes router choices in the global expert-id space. MegaMoe consumes
+  // these values before the legacy per-rank expert mask is applied.
+  std::pair<torch::Tensor, torch::Tensor> select_global_experts(
+      const torch::Tensor& hidden_states_2d,
+      const torch::Tensor& router_logits_2d);
   // initial steps for MoE computation, select the experts for each token
   torch::Tensor select_experts(const torch::Tensor& hidden_states_2d,
                                const torch::Tensor& router_logits_2d,
                                SelectedExpertInfo& selected_expert_info);
 
- private:
+  void initialize_mega_moe();
+  void ensure_mega_moe_weight_cache(bool require_complete_weights);
+  torch::Tensor forward_mega_moe(
+      const torch::Tensor& hidden_states,
+      const torch::Tensor& router_logits,
+      const std::optional<torch::Tensor>& shared_output);
+
+  bool mega_moe_enabled_ = false;
+  std::weak_ptr<MegaMoeCommResource> mega_moe_comm_resource_;
+  MegaMoeWeightCache mega_moe_weight_cache_;
+
   int64_t num_total_experts_;
   int64_t topk_;
   int64_t num_expert_group_;

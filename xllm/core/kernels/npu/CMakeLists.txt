@@ -23,6 +23,7 @@ cc_library(
     npu_grouped_matmul.cpp
     npu_moe_gating_topk_softmax.cpp
     npu_dispatch_ffn_combine.cpp
+    npu_mega_moe.cpp
     npu_dispatch_gmm_combine_decode.cpp
     npu_moe_distribute_combine_v2.cpp
     npu_moe_distribute_dispatch_v2.cpp
