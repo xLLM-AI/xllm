@@ -15,6 +15,45 @@ cc_test(
 
 cc_test(
   NAME
+    spec_verify_token_update_wrapper_test
+  SRCS
+    spec_verify_token_update_wrapper_test.cpp
+  DEPS
+    :tilelang_kernels
+    torch
+    GTest::gtest_main
+    glog::glog
+    unified_dlog
+)
+
+cc_test(
+  NAME
+    spec_verify_attention_tiling_update_wrapper_test
+  SRCS
+    spec_verify_attention_tiling_update_wrapper_test.cpp
+  DEPS
+    :tilelang_kernels
+    torch
+    GTest::gtest_main
+    glog::glog
+    unified_dlog
+)
+
+cc_test(
+  NAME
+    spec_verify_metadata_update_wrapper_test
+  SRCS
+    spec_verify_metadata_update_wrapper_test.cpp
+  DEPS
+    :tilelang_kernels
+    torch
+    GTest::gtest_main
+    glog::glog
+    unified_dlog
+)
+
+cc_test(
+  NAME
     fused_gdn_gating_wrapper_test
   SRCS
     fused_gdn_gating_wrapper_test.cpp
