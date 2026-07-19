@@ -251,35 +251,39 @@ MegaMoeCommContext build_context(const MegaMoeCommSpec& spec,
   context.ep_rank_id = rank_id;
 
   std::vector<void*> rank_buffer_addresses(rank_size, nullptr);
-  std::vector<uint64_t> rank_buffer_sizes(rank_size, 0);
+  std::vector<uint64_t> rank_accessible_spans(rank_size, 0);
   for (uint32_t remote_rank_id = 0; remote_rank_id < rank_size;
        ++remote_rank_id) {
     void* remote_address = nullptr;
     uint64_t remote_size = 0;
+    const char* buffer_query = nullptr;
     HcclResult result = HCCL_E_INTERNAL;
     if (remote_rank_id == rank_id) {
       result = apis.get_hccl_buffer()(
           spec.hccl_comm, &remote_address, &remote_size);
       ccl_buffer_size = static_cast<int64_t>(remote_size);
+      buffer_query = "HcclGetHcclBuffer";
     } else {
       result = apis.get_remote_ipc_hccl_buffer()(spec.hccl_comm,
                                                   remote_rank_id,
                                                   &remote_address,
                                                   &remote_size);
+      buffer_query = "HcclGetRemoteIpcHcclBuf";
     }
-    check_hccl_result(result, "HcclGetHcclBuffer");
+    check_hccl_result(result, buffer_query);
     CHECK(remote_address != nullptr);
     rank_buffer_addresses[remote_rank_id] = remote_address;
-    rank_buffer_sizes[remote_rank_id] = remote_size;
+    rank_accessible_spans[remote_rank_id] = remote_size;
   }
 
-  const auto size_validation = validate_mega_moe_buffer_sizes(
-      static_cast<uint64_t>(ccl_buffer_size), rank_buffer_sizes);
-  CHECK(size_validation.valid)
-      << "MegaMoe HCCL buffer size mismatch at rank "
-      << size_validation.mismatched_rank
-      << ": expected=" << size_validation.expected_size
-      << ", actual=" << size_validation.actual_size;
+  const auto span_validation = validate_mega_moe_buffer_accessible_spans(
+      static_cast<uint64_t>(ccl_buffer_size), rank_accessible_spans);
+  CHECK(span_validation.valid)
+      << "MegaMoe HCCL accessible span is smaller than the local payload at "
+         "rank "
+      << span_validation.mismatched_rank
+      << ": required_payload=" << span_validation.required_payload_size
+      << ", accessible_span=" << span_validation.accessible_span;
 
   for (uint32_t remote_rank_id = 0; remote_rank_id < rank_size;
        ++remote_rank_id) {
@@ -317,25 +321,25 @@ MegaMoeCommSymbolStatus probe_mega_moe_comm_symbols() {
   return {apis.available(), apis.missing_symbol()};
 }
 
-MegaMoeBufferSizeValidation validate_mega_moe_buffer_sizes(
-    uint64_t expected_size,
-    const std::vector<uint64_t>& rank_buffer_sizes) {
-  if (expected_size == 0) {
-    return {false, -1, expected_size, expected_size};
+MegaMoeBufferSpanValidation validate_mega_moe_buffer_accessible_spans(
+    uint64_t local_payload_size,
+    const std::vector<uint64_t>& rank_accessible_spans) {
+  if (local_payload_size == 0) {
+    return {false, -1, local_payload_size, 0};
   }
-  if (rank_buffer_sizes.empty()) {
-    return {false, -1, expected_size, 0};
+  if (rank_accessible_spans.empty()) {
+    return {false, -1, local_payload_size, 0};
   }
-  for (size_t rank = 0; rank < rank_buffer_sizes.size(); ++rank) {
-    const uint64_t actual_size = rank_buffer_sizes[rank];
-    if (actual_size == 0 || actual_size != expected_size) {
+  for (size_t rank = 0; rank < rank_accessible_spans.size(); ++rank) {
+    const uint64_t accessible_span = rank_accessible_spans[rank];
+    if (accessible_span < local_payload_size) {
       return {false,
               static_cast<int32_t>(rank),
-              expected_size,
-              actual_size};
+              local_payload_size,
+              accessible_span};
     }
   }
-  return {true, -1, expected_size, expected_size};
+  return {true, -1, local_payload_size, 0};
 }
 
 class MegaMoeCommResource::Impl final {

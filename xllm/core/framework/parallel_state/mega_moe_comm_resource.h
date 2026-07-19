@@ -63,18 +63,20 @@ MegaMoeCommValidation validate_mega_moe_comm_spec(
 
 MegaMoeCommSymbolStatus probe_mega_moe_comm_symbols();
 
-struct MegaMoeBufferSizeValidation {
+struct MegaMoeBufferSpanValidation {
   bool valid = false;
   int32_t mismatched_rank = -1;
-  uint64_t expected_size = 0;
-  uint64_t actual_size = 0;
+  uint64_t required_payload_size = 0;
+  uint64_t accessible_span = 0;
 };
 
-// Validates the local size (expected_size) and every rank's IPC buffer before
-// the communication context is copied to an NPU tensor.
-MegaMoeBufferSizeValidation validate_mega_moe_buffer_sizes(
-    uint64_t expected_size,
-    const std::vector<uint64_t>& rank_buffer_sizes);
+// HcclGetHcclBuffer returns the local communication payload while
+// HcclGetRemoteIpcHcclBuf may return a larger accessible span that includes
+// auxiliary MC2 memory. Validate that every returned span covers the complete
+// local payload before copying the communication context to an NPU tensor.
+MegaMoeBufferSpanValidation validate_mega_moe_buffer_accessible_spans(
+    uint64_t local_payload_size,
+    const std::vector<uint64_t>& rank_accessible_spans);
 
 class MegaMoeCommResource final {
  public:

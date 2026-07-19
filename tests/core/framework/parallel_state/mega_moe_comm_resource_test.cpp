@@ -85,34 +85,75 @@ TEST(MegaMoeCommResourceTest, FindsRequiredCann91KfcSymbols) {
   EXPECT_TRUE(status.missing_symbol.empty());
 }
 
-TEST(MegaMoeCommResourceTest, AcceptsOnlyUniformNonZeroHcclBufferSizes) {
-  const auto validation = validate_mega_moe_buffer_sizes(
+TEST(MegaMoeCommResourceTest, AcceptsAccessibleSpansEqualToLocalPayload) {
+  const auto validation = validate_mega_moe_buffer_accessible_spans(
       4096, std::vector<uint64_t>(16, 4096));
 
   EXPECT_TRUE(validation.valid);
-  EXPECT_EQ(validation.expected_size, 4096);
-  EXPECT_EQ(validation.actual_size, 4096);
+  EXPECT_EQ(validation.required_payload_size, 4096);
 }
 
-TEST(MegaMoeCommResourceTest, RejectsZeroLocalHcclBufferSize) {
-  const auto validation = validate_mega_moe_buffer_sizes(
+TEST(MegaMoeCommResourceTest,
+     AcceptsLocalPayloadAndLargerRemoteIpcAccessibleSpans) {
+  constexpr uint64_t kLocalPayloadSize = 512ULL * 1024 * 1024;
+  constexpr uint64_t kObservedRemoteIpcOverhead = 1ULL * 1024 * 1024;
+  std::vector<uint64_t> accessible_spans(
+      16, kLocalPayloadSize + kObservedRemoteIpcOverhead);
+  accessible_spans[7] = kLocalPayloadSize;
+
+  const auto validation = validate_mega_moe_buffer_accessible_spans(
+      kLocalPayloadSize, accessible_spans);
+
+  EXPECT_TRUE(validation.valid);
+  EXPECT_EQ(validation.required_payload_size, kLocalPayloadSize);
+}
+
+TEST(MegaMoeCommResourceTest, RejectsZeroLocalHcclPayloadSize) {
+  const auto validation = validate_mega_moe_buffer_accessible_spans(
       0, std::vector<uint64_t>(16, 4096));
 
   EXPECT_FALSE(validation.valid);
-  EXPECT_EQ(validation.expected_size, 0);
+  EXPECT_EQ(validation.required_payload_size, 0);
 }
 
-TEST(MegaMoeCommResourceTest, RejectsAnyRemoteHcclBufferSizeMismatch) {
-  std::vector<uint64_t> remote_sizes(16, 4096);
-  remote_sizes[7] = 2048;
+TEST(MegaMoeCommResourceTest,
+     RejectsRemoteIpcAccessibleSpanSmallerThanLocalPayload) {
+  std::vector<uint64_t> accessible_spans(16, 4096);
+  accessible_spans[7] = 2048;
 
-  const auto validation =
-      validate_mega_moe_buffer_sizes(4096, remote_sizes);
+  const auto validation = validate_mega_moe_buffer_accessible_spans(
+      4096, accessible_spans);
 
   EXPECT_FALSE(validation.valid);
   EXPECT_EQ(validation.mismatched_rank, 7);
-  EXPECT_EQ(validation.expected_size, 4096);
-  EXPECT_EQ(validation.actual_size, 2048);
+  EXPECT_EQ(validation.required_payload_size, 4096);
+  EXPECT_EQ(validation.accessible_span, 2048);
+}
+
+TEST(MegaMoeCommResourceTest,
+     AcceptsDifferentRemoteIpcSpansThatCoverLocalPayload) {
+  std::vector<uint64_t> accessible_spans(16, 4096);
+  accessible_spans[2] = 4097;
+  accessible_spans[9] = 64ULL * 1024 * 1024;
+
+  const auto validation = validate_mega_moe_buffer_accessible_spans(
+      4096, accessible_spans);
+
+  EXPECT_TRUE(validation.valid);
+  EXPECT_EQ(validation.required_payload_size, 4096);
+}
+
+TEST(MegaMoeCommResourceTest, RejectsZeroRemoteIpcAccessibleSpan) {
+  std::vector<uint64_t> accessible_spans(16, 4096);
+  accessible_spans[11] = 0;
+
+  const auto validation = validate_mega_moe_buffer_accessible_spans(
+      4096, accessible_spans);
+
+  EXPECT_FALSE(validation.valid);
+  EXPECT_EQ(validation.mismatched_rank, 11);
+  EXPECT_EQ(validation.required_payload_size, 4096);
+  EXPECT_EQ(validation.accessible_span, 0);
 }
 
 std::shared_ptr<MegaMoeCommResource> fake_resource(int value) {
