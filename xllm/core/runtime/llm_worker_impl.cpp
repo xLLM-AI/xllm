@@ -131,6 +131,33 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
   return true;
 }
 
+#if defined(USE_NPU)
+bool LLMWorkerImpl::prepare_static_graph_tasks(const ForwardInput& input,
+                                               const Stream& signal_stream) {
+  if (model_executor_ == nullptr || !input.token_ids.defined()) {
+    return false;
+  }
+  return model_executor_->prepare_static_graph_tasks(
+      input.token_ids, input.input_params, signal_stream);
+}
+
+bool LLMWorkerImpl::prepare_static_mtp_graph_tasks(
+    int64_t linear_state_id,
+    int64_t num_accepted_tokens,
+    int64_t spec_width,
+    int64_t block_table_width,
+    const Stream& signal_stream) {
+  if (model_executor_ == nullptr) {
+    return false;
+  }
+  return model_executor_->prepare_static_mtp_graph_tasks(linear_state_id,
+                                                         num_accepted_tokens,
+                                                         spec_width,
+                                                         block_table_width,
+                                                         signal_stream);
+}
+#endif
+
 std::optional<ForwardOutput> LLMWorkerImpl::step_no_sync(
     const ForwardInput& input) {
   ForwardInput input_on_device;

@@ -85,6 +85,13 @@ class AclGraph {
                              std::vector<KVCache>& kv_cache,
                              const ModelInputParams& params);
 
+  bool prepare_static_graph_tasks(const ModelInputParams& params,
+                                  const c10_npu::NPUStream& signal_stream);
+  bool prepare_static_mtp_graph_tasks(int64_t linear_state_id,
+                                      int64_t num_accepted_tokens,
+                                      int64_t spec_width,
+                                      const c10_npu::NPUStream& signal_stream);
+
   // Get the hidden states from the last capture
   torch::Tensor get_hidden_states(uint32_t actual_num_tokens = 0) const {
     return persistent_param_.hidden_states(actual_num_tokens);
@@ -96,12 +103,17 @@ class AclGraph {
 
   // Initialize capture stream if not already initialized
   void initialize_capture_stream(c10::DeviceIndex device_index);
+  void make_graph_wait_for_current_stream(aclrtStream current_stream);
   void make_current_stream_wait_for_graph(aclrtStream current_stream);
   void prepare_model_graph_metadata(CausalLM* model,
                                     const torch::Tensor& positions,
                                     ModelInputParams& params);
 
-  void update_graph_tasks(const ModelInputParams& params);
+  bool update_graph_tasks(const ModelInputParams& params);
+  void signal_static_graph_tasks(const c10_npu::NPUStream& signal_stream);
+  bool static_graph_task_signature_matches(
+      const ModelInputParams& params) const;
+  void capture_static_graph_task_signature(const ModelInputParams& params);
 
   // NPUGraph with mempool for managing temporary tensors during forward pass
   c10_npu::NPUGraph graph_;
@@ -115,11 +127,18 @@ class AclGraph {
   // Fallback non-default stream for capture when callers are on default stream.
   std::optional<c10_npu::NPUStream> capture_stream_;
   aclrtStream graph_stream_ = nullptr;
+  aclrtEvent replay_input_ready_event_ = nullptr;
   aclrtEvent replay_done_event_ = nullptr;
   c10::DeviceIndex device_index_;
   std::shared_ptr<AclGraphTaskUpdateContext> graph_task_context_;
   std::optional<c10_npu::NPUStream> update_stream_;
   std::atomic<bool> replay_inputs_prepared_{false};
+  bool has_static_graph_task_signature_ = false;
+  std::vector<int64_t> static_query_start_loc_;
+  std::vector<int32_t> static_linear_state_ids_;
+  std::vector<int64_t> static_num_accepted_tokens_;
+  bool has_internal_spec_verify_input_update_ = false;
+  std::vector<torch::Tensor> internal_spec_verify_input_sources_;
 };
 
 // Executor implementation using ACL graph optimization
@@ -145,6 +164,15 @@ class AclGraphExecutorImpl : public ExecutorImpl {
                            const torch::Tensor& positions,
                            std::vector<KVCache>& kv_caches,
                            const ModelInputParams& params) override;
+
+  bool prepare_static_graph_tasks(const torch::Tensor& tokens,
+                                  const ModelInputParams& params,
+                                  const Stream& signal_stream) override;
+  bool prepare_static_mtp_graph_tasks(int64_t linear_state_id,
+                                      int64_t num_accepted_tokens,
+                                      int64_t spec_width,
+                                      int64_t block_table_width,
+                                      const Stream& signal_stream) override;
 
   [[nodiscard]] int32_t graph_slot_count_for_test() const {
     return graph_slot_count_;
