@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/model/speculative_verify_capabilities.h"
 #include "core/layers/qwen2_decoder_layer.h"
 #include "llm_model_base.h"
 
@@ -81,6 +82,14 @@ class MiMoForCausalLMImpl final : public LlmForCausalLMImplBase<MiMoModel> {
  public:
   explicit MiMoForCausalLMImpl(const ModelContext& context)
       : LlmForCausalLMImplBase<MiMoModel>(context) {}
+
+  SpeculativeVerifyCapabilities speculative_verify_capabilities() const {
+    // MiMo also needs causal chunked prefill for correct bonus-token ordering,
+    // but it does not expose the hybrid linear-state layout consumed by the
+    // current NPU graph input updater.
+    return {/*requires_causal_chunked_prefill=*/true,
+            /*supports_in_graph_input_update=*/false};
+  }
 };
 TORCH_MODULE(MiMoForCausalLM);
 

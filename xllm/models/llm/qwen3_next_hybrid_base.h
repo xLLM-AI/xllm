@@ -25,6 +25,7 @@ limitations under the License.
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/model/speculative_verify_capabilities.h"
 #include "core/framework/model_context.h"
 #include "core/framework/model_loader.h"
 #include "core/layers/common/attention_mask.h"
@@ -33,6 +34,9 @@ limitations under the License.
 #include "core/layers/common/qwen3_next_rms_norm.h"
 #include "core/layers/common/word_embedding.h"
 #include "core/layers/npu_torch/qwen3_next_hybrid_decoder_layer_base.h"
+#if defined(USE_NPU)
+#include "core/kernels/npu/tilelang/tilelang_ops_api.h"
+#endif
 
 namespace xllm {
 
@@ -97,6 +101,18 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
             input_params,
             model_args_.enable_mla(),
             build_attention_mask(input_params));
+#if defined(USE_NPU)
+    if (attn_metadata.use_expanded_decode_for_spec_verify_attention &&
+        attn_metadata.expanded_kv_seq_lens.defined() &&
+        attn_metadata.expanded_kv_seq_lens.numel() >= 4 &&
+        attn_metadata.expanded_kv_seq_lens.numel() <= 6 &&
+        attn_metadata.expanded_paged_attention_tiling_data.defined()) {
+      kernel::npu::tilelang::spec_verify_attention_tiling_update(
+          attn_metadata.expanded_kv_seq_lens,
+          attn_metadata.expanded_paged_attention_tiling_data,
+          /*block_size=*/128);
+    }
+#endif
     torch::Tensor h;
     if (input_params.embedding.input_embedding.defined()) {
       h = input_params.embedding.input_embedding;
@@ -308,6 +324,14 @@ class Qwen3HybridForCausalLMImplBase : public torch::nn::Module {
   virtual void update_expert_weight(int32_t layer_id) { return; }
 
   bool is_hybrid_linear_attention() { return true; }
+
+  SpeculativeVerifyCapabilities speculative_verify_capabilities() const {
+    // Hybrid linear-attention verification uses causal chunked prefill and
+    // exposes the expanded attention plus linear-state layout required by the
+    // NPU graph input updater.
+    return {/*requires_causal_chunked_prefill=*/true,
+            /*supports_in_graph_input_update=*/true};
+  }
 
   layer::LmHead get_lm_head() { return lm_head_; }
 
