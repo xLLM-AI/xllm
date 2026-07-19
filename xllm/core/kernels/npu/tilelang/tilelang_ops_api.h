@@ -24,6 +24,37 @@ limitations under the License.
 
 namespace xllm::kernel::npu::tilelang {
 
+void spec_verify_token_update(const torch::Tensor& base_token,
+                              const std::vector<torch::Tensor>& draft_tokens,
+                              torch::Tensor& persistent_tokens);
+
+bool has_spec_verify_token_update_specialization(int64_t spec_width);
+
+bool has_spec_verify_metadata_update_specialization(int64_t spec_width,
+                                                    int64_t block_table_width);
+
+void spec_verify_metadata_update(
+    const torch::Tensor& positions,
+    const torch::Tensor& kv_seq_lens,
+    const torch::Tensor& new_cache_slots,
+    const torch::Tensor& block_table,
+    const torch::Tensor& linear_state_index,
+    const torch::Tensor& num_accepted,
+    const std::vector<torch::Tensor>& persistent_position_rows,
+    torch::Tensor& persistent_q_seq_lens,
+    torch::Tensor& persistent_kv_seq_lens,
+    torch::Tensor& persistent_new_cache_slots,
+    torch::Tensor& persistent_block_table,
+    torch::Tensor& persistent_linear_state_index,
+    torch::Tensor& persistent_num_accepted,
+    torch::Tensor& persistent_q_cu_seq_lens,
+    torch::Tensor& persistent_expanded_kv_seq_lens,
+    const std::vector<torch::Tensor>& persistent_expanded_block_rows);
+
+void spec_verify_attention_tiling_update(const torch::Tensor& src_kv_seq_lens,
+                                         torch::Tensor& tiling_data,
+                                         int64_t block_size);
+
 // Public TileLang kernel APIs exported to the xLLM NPU runtime.
 //
 // Apply TileLang RoPE kernel in-place on a single input tensor.
