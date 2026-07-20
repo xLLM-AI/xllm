@@ -109,6 +109,10 @@ message DisaggResponse {
   repeated XTensorLayerOffsets xtensor_layer_offsets = 5;
   // Sequence-scoped cache row used by linear attention caches.
   int32 linear_state_id = 6;
+
+  // Group-aware block allocation. group_id is defined by the cache layout and
+  // is opaque to the PD protocol.
+  repeated KVBlockGroup kv_block_groups = 20;
 }
 
 // XTensor mode: offsets for one layer
@@ -117,6 +121,12 @@ message XTensorLayerOffsets {
   repeated uint64 k_offsets = 1;
   // V cache offsets for each block in GlobalXTensor
   repeated uint64 v_offsets = 2;
+}
+
+message KVBlockGroup {
+  int32 group_id = 1;
+  reserved 2;
+  repeated int32 block_ids = 3;
 }
 
 // Deprecated: Use DisaggGenerationsRequest instead

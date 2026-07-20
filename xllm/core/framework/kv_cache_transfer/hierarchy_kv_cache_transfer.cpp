@@ -221,6 +221,8 @@ bool HierarchyKVCacheTransfer::d2h_batch_copy(
     auto dst_v_cache = host_kv_caches_.at(info.dst_block_id).get_v_cache();
     auto dst_index_cache =
         host_kv_caches_.at(info.dst_block_id).get_index_cache();
+    auto dst_index_cache_scale =
+        host_kv_caches_.at(info.dst_block_id).get_indexer_cache_scale();
 
     for (int layer_id = 0; layer_id < num_layers; layer_id++) {
       auto src_k_cache = kv_caches_ptr_->at(layer_id).get_k_cache();
@@ -242,6 +244,20 @@ bool HierarchyKVCacheTransfer::d2h_batch_copy(
         srcs[curr_index] = src_index_cache[info.src_block_id].data_ptr();
         dsts[curr_index] = dst_index_cache[layer_id].data_ptr();
         copy_size[curr_index] = cache_size_per_layer_[2];
+        curr_index++;
+      }
+
+      if (cache_size_per_layer_[3] != 0) {
+        auto src_index_cache_scale =
+            kv_caches_ptr_->at(layer_id).get_indexer_cache_scale();
+        CHECK(src_index_cache_scale.has_value())
+            << "index cache scale is required for D2H copy.";
+        CHECK(dst_index_cache_scale.has_value())
+            << "host index cache scale is required for D2H copy.";
+        srcs[curr_index] =
+            src_index_cache_scale.value()[info.src_block_id].data_ptr();
+        dsts[curr_index] = dst_index_cache_scale.value()[layer_id].data_ptr();
+        copy_size[curr_index] = cache_size_per_layer_[3];
         curr_index++;
       }
     }
@@ -338,6 +354,8 @@ bool HierarchyKVCacheTransfer::h2d_batch_copy(
       auto dst_k_cache = kv_caches_ptr_->at(layer_id).get_k_cache();
       auto dst_v_cache = kv_caches_ptr_->at(layer_id).get_v_cache();
       auto dst_index_cache = kv_caches_ptr_->at(layer_id).get_index_cache();
+      auto dst_index_cache_scale =
+          kv_caches_ptr_->at(layer_id).get_indexer_cache_scale();
 
       for (const auto& info : block_transfer_info) {
         auto src_k_cache = host_kv_caches_.at(info.src_block_id).get_k_cache();
@@ -361,6 +379,20 @@ bool HierarchyKVCacheTransfer::h2d_batch_copy(
           srcs[curr_index] = src_index_cache[layer_id].data_ptr();
           dsts[curr_index] = dst_index_cache[info.dst_block_id].data_ptr();
           copy_size[curr_index] = cache_size_per_layer_[2];
+          curr_index++;
+        }
+
+        if (cache_size_per_layer_[3] != 0) {
+          auto src_index_cache_scale =
+              host_kv_caches_.at(info.src_block_id).get_indexer_cache_scale();
+          CHECK(src_index_cache_scale.has_value())
+              << "host index cache scale is required for H2D copy.";
+          CHECK(dst_index_cache_scale.has_value())
+              << "index cache scale is required for H2D copy.";
+          srcs[curr_index] = src_index_cache_scale.value()[layer_id].data_ptr();
+          dsts[curr_index] =
+              dst_index_cache_scale.value()[info.dst_block_id].data_ptr();
+          copy_size[curr_index] = cache_size_per_layer_[3];
           curr_index++;
         }
       }
@@ -431,6 +463,7 @@ void HierarchyKVCacheTransfer::create_page_aligned_host_cache() {
 
   std::vector<std::vector<int64_t>> tensor_shapes =
       kv_caches_ptr_->at(0).get_shapes();
+  tensor_shapes.resize(4);
 
   CHECK(!tensor_shapes[0].empty()) << "k cache should not be empty!";
 
@@ -449,7 +482,7 @@ void HierarchyKVCacheTransfer::create_page_aligned_host_cache() {
   memset(d2h_attrs_.rsv, 0, 16);
 #endif
 
-  cache_size_per_layer_.resize(3, 0);
+  cache_size_per_layer_.resize(4, 0);
   cache_size_per_layer_[0] =
       kv_caches_ptr_->at(0).get_k_cache()[0].numel() *
       kv_caches_ptr_->at(0).get_k_cache()[0].element_size();
@@ -468,9 +501,17 @@ void HierarchyKVCacheTransfer::create_page_aligned_host_cache() {
     cache_tensor_cnt_++;
   }
 
-  auto dtype = kv_caches_ptr_->at(0).get_k_cache().dtype();
+  if (!tensor_shapes[3].empty()) {
+    auto index_cache_scale = kv_caches_ptr_->at(0).get_indexer_cache_scale();
+    CHECK(index_cache_scale.has_value())
+        << "index cache scale shape exists but tensor is missing.";
+    cache_size_per_layer_[3] = index_cache_scale.value()[0].numel() *
+                               index_cache_scale.value()[0].element_size();
+    cache_tensor_cnt_++;
+  }
+
   uint64_t num_blocks = tensor_shapes[0][0] * options_.host_blocks_factor();
-  std::vector<uint64_t> cache_size_per_tensor(3, 0);
+  std::vector<uint64_t> cache_size_per_tensor(4, 0);
 
   for (size_t i = 0; i < tensor_shapes.size(); i++) {
     if (!tensor_shapes[i].empty()) {
@@ -517,20 +558,42 @@ void HierarchyKVCacheTransfer::create_page_aligned_host_cache() {
 #endif
 
   size_t current_offset = 0;
-  auto options = torch::TensorOptions().dtype(dtype).device(torch::kCPU);
+  auto k_options = torch::TensorOptions()
+                       .dtype(kv_caches_ptr_->at(0).get_k_cache().scalar_type())
+                       .device(torch::kCPU);
+  torch::ScalarType v_dtype =
+      kv_caches_ptr_->at(0).get_v_cache().defined()
+          ? kv_caches_ptr_->at(0).get_v_cache().scalar_type()
+          : kv_caches_ptr_->at(0).get_k_cache().scalar_type();
+  torch::ScalarType index_dtype =
+      kv_caches_ptr_->at(0).get_index_cache().defined()
+          ? kv_caches_ptr_->at(0).get_index_cache().scalar_type()
+          : kv_caches_ptr_->at(0).get_k_cache().scalar_type();
+  auto v_options = torch::TensorOptions().dtype(v_dtype).device(torch::kCPU);
+  auto index_options =
+      torch::TensorOptions().dtype(index_dtype).device(torch::kCPU);
+  std::optional<torch::Tensor> first_index_cache_scale =
+      kv_caches_ptr_->at(0).get_indexer_cache_scale();
+  auto index_scale_options =
+      torch::TensorOptions()
+          .dtype(first_index_cache_scale.has_value()
+                     ? first_index_cache_scale->scalar_type()
+                     : kv_caches_ptr_->at(0).get_k_cache().scalar_type())
+          .device(torch::kCPU);
   host_kv_caches_.reserve(num_blocks);
 
   for (size_t i = 0; i < num_blocks; ++i) {
     torch::Tensor key_cache, value_cache, index_cache;
+    std::optional<torch::Tensor> index_cache_scale;
     void* k_tensor_ptr =
         static_cast<char*>(page_aligned_data_) + current_offset;
-    key_cache = torch::from_blob(k_tensor_ptr, tensor_shapes[0], options);
+    key_cache = torch::from_blob(k_tensor_ptr, tensor_shapes[0], k_options);
     current_offset += cache_size_per_tensor[0];
 
     if (!tensor_shapes[1].empty()) {
       void* v_tensor_ptr =
           static_cast<char*>(page_aligned_data_) + current_offset;
-      value_cache = torch::from_blob(v_tensor_ptr, tensor_shapes[1], options);
+      value_cache = torch::from_blob(v_tensor_ptr, tensor_shapes[1], v_options);
       current_offset += cache_size_per_tensor[1];
     }
 
@@ -538,13 +601,23 @@ void HierarchyKVCacheTransfer::create_page_aligned_host_cache() {
       void* index_tensor_ptr =
           static_cast<char*>(page_aligned_data_) + current_offset;
       index_cache =
-          torch::from_blob(index_tensor_ptr, tensor_shapes[2], options);
+          torch::from_blob(index_tensor_ptr, tensor_shapes[2], index_options);
       current_offset += cache_size_per_tensor[2];
     }
 
+    if (!tensor_shapes[3].empty()) {
+      void* index_scale_tensor_ptr =
+          static_cast<char*>(page_aligned_data_) + current_offset;
+      index_cache_scale = torch::from_blob(
+          index_scale_tensor_ptr, tensor_shapes[3], index_scale_options);
+      current_offset += cache_size_per_tensor[3];
+    }
+
     if (index_cache.defined()) {
-      host_kv_caches_.emplace_back(IndexedKVCacheTensors{
-          KVCacheTensors{key_cache, value_cache}, index_cache});
+      host_kv_caches_.emplace_back(
+          IndexedKVCacheTensors{KVCacheTensors{key_cache, value_cache},
+                                index_cache,
+                                index_cache_scale});
       continue;
     }
 
@@ -557,6 +630,10 @@ void HierarchyKVCacheTransfer::create_page_aligned_host_cache() {
             << host_kv_caches_[0].get_v_cache().sizes();
   LOG(INFO) << "host index cache shape: "
             << host_kv_caches_[0].get_index_cache().sizes();
+  if (host_kv_caches_[0].get_indexer_cache_scale().has_value()) {
+    LOG(INFO) << "host index cache scale shape: "
+              << host_kv_caches_[0].get_indexer_cache_scale().value().sizes();
+  }
 
   LOG(INFO) << "Host block init finish, total size: " << num_blocks;
 }

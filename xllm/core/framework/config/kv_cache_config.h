@@ -37,6 +37,7 @@ class KVCacheConfig final {
   void from_json(const JsonReader& json);
   void append_config_json(nlohmann::ordered_json& config_json) const;
   void initialize();
+  void validate() const;
 
   [[nodiscard]] static const OptionCategory& option_category() {
     static const OptionCategory kOptionCategory = {
@@ -45,6 +46,7 @@ class KVCacheConfig final {
          "max_cache_size",
          "max_memory_utilization",
          "kv_cache_dtype",
+         "indexer_cache_dtype",
          "enable_prefix_cache",
          "enable_in_batch_prefix_cache",
          "max_linear_state_cache_slots",
@@ -61,6 +63,8 @@ class KVCacheConfig final {
   PROPERTY(double, max_memory_utilization) = 0.8;
 
   PROPERTY(std::string, kv_cache_dtype) = "auto";
+
+  PROPERTY(std::string, indexer_cache_dtype) = "auto";
 
   PROPERTY(bool, enable_prefix_cache) = true;
 

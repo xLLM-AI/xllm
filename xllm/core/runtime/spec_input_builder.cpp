@@ -429,6 +429,29 @@ void update_input_params(ModelInputParams& input_params,
   }
 }
 
+torch::Tensor make_cpu_int_tensor(const std::vector<int32_t>& values) {
+  return torch::tensor(values,
+                       torch::TensorOptions()
+                           .dtype(torch::kInt)
+                           .device(torch::kCPU)
+                           .pinned_memory(true));
+}
+
+void set_token_position_tensors(ForwardInput& input,
+                                const std::vector<int32_t>& token_ids,
+                                const std::vector<int32_t>& positions,
+                                const torch::TensorOptions& token_options,
+                                const torch::TensorOptions& position_options) {
+  input.device_tensors_ready = false;
+  input.token_ids_host = make_cpu_int_tensor(token_ids);
+  input.positions_host = make_cpu_int_tensor(positions);
+  input.token_ids =
+      safe_to(input.token_ids_host, token_options, /*non_blocking=*/true);
+  input.positions =
+      safe_to(input.positions_host, position_options, /*non_blocking=*/true);
+  input.device_tensors_ready = true;
+}
+
 namespace draftProbs {
 
 namespace {
@@ -456,6 +479,22 @@ torch::Tensor extract_selected_probs(const torch::Tensor& draft_probs,
   return torch::Tensor();
 }
 
+// Scatter selected-only probs into a dense last-vocab-dim tensor. `ids` and
+// `selected_probs` share shape [..., width]; the result is [..., width, vocab],
+// with each selected id's prob placed at its vocab slot and zeros elsewhere.
+torch::Tensor scatter_selected_to_dense(const torch::Tensor& ids,
+                                        const torch::Tensor& selected_probs,
+                                        int32_t vocab_size) {
+  CHECK_GT(vocab_size, 0) << "vocab_size must be > 0 for dense draft probs";
+  std::vector<int64_t> dense_shape(ids.sizes().begin(), ids.sizes().end());
+  dense_shape.emplace_back(vocab_size);
+  torch::Tensor dense_probs =
+      torch::zeros(dense_shape, selected_probs.options());
+  dense_probs.scatter_(
+      /*dim=*/-1, ids.unsqueeze(-1), selected_probs.unsqueeze(-1));
+  return dense_probs;
+}
+
 }  // namespace
 
 torch::Tensor compress_for_cache(const torch::Tensor& draft_probs,
@@ -468,7 +507,8 @@ std::pair<torch::Tensor, torch::Tensor> build_validate_tensors(
     const std::vector<torch::Tensor>& draft_probs_steps,
     int32_t batch_size,
     int32_t vocab_size,
-    bool enable_opt_validate_probs) {
+    bool enable_opt_validate_probs,
+    bool draft_probs_required) {
   CHECK_GT(batch_size, 0) << "batch_size must be > 0";
   CHECK_GT(vocab_size, 0) << "vocab_size must be > 0";
   CHECK_EQ(draft_token_ids_steps.size(), draft_probs_steps.size())
@@ -483,27 +523,61 @@ std::pair<torch::Tensor, torch::Tensor> build_validate_tensors(
   for (size_t i = 0; i < draft_token_ids_steps.size(); ++i) {
     auto draft_token_ids =
         draft_token_ids_steps[i].view({batch_size, 1}).to(torch::kLong);
-    auto selected_probs =
+    token_ids_vec.emplace_back(draft_token_ids);
+    if (!draft_probs_required) {
+      continue;
+    }
+
+    torch::Tensor selected_probs =
         extract_selected_probs(draft_probs_steps[i], draft_token_ids)
             .view({batch_size, 1});
-
-    token_ids_vec.emplace_back(draft_token_ids);
     if (enable_opt_validate_probs) {
       probs_vec.emplace_back(selected_probs);
     } else {
-      auto dense_probs =
-          torch::zeros({batch_size, 1, vocab_size}, selected_probs.options());
-      dense_probs.scatter_(
-          /*dim=*/-1,
-          draft_token_ids.unsqueeze(-1),
-          selected_probs.unsqueeze(-1));
-      probs_vec.emplace_back(dense_probs);
+      probs_vec.emplace_back(scatter_selected_to_dense(
+          draft_token_ids, selected_probs, vocab_size));
     }
   }
 
   auto draft_token_ids = torch::cat(token_ids_vec, /*dim=*/1);
+  if (!draft_probs_required) {
+    return {draft_token_ids, torch::Tensor()};
+  }
   auto draft_probs = torch::cat(probs_vec, /*dim=*/1);
   return {draft_token_ids, draft_probs};
+}
+
+std::pair<torch::Tensor, torch::Tensor> build_validate_tensors_from_block(
+    const torch::Tensor& token_ids_block,
+    const torch::Tensor& probs_block,
+    int32_t vocab_size,
+    bool enable_opt_validate_probs) {
+  CHECK(token_ids_block.defined()) << "token_ids_block must be defined";
+  CHECK(probs_block.defined()) << "probs_block must be defined";
+  CHECK_EQ(token_ids_block.dim(), 2)
+      << "token_ids_block must be [batch, n_speculative_tokens], got "
+      << token_ids_block.sizes();
+  CHECK_EQ(probs_block.dim(), 2)
+      << "probs_block must be selected-only [batch, n_speculative_tokens], got "
+      << probs_block.sizes();
+  CHECK_EQ(probs_block.size(0), token_ids_block.size(0))
+      << "probs/token block batch mismatch";
+  CHECK_EQ(probs_block.size(1), token_ids_block.size(1))
+      << "probs/token block width mismatch";
+
+  auto draft_token_ids = token_ids_block.to(torch::kLong);
+  if (enable_opt_validate_probs) {
+    // The draft block is already stacked as [batch, n_speculative_tokens]; pass
+    // the selected-only probs straight to the rejection sampler.
+    return {draft_token_ids, probs_block};
+  }
+
+  // Default path: scatter the selected probs into a dense
+  // [batch, n_speculative_tokens, vocab_size] tensor, matching MTP's
+  // build_validate_tensors output so the shared rejection sampler (and its
+  // fused kernel) always receives dense draft_probs.
+  return {draft_token_ids,
+          scatter_selected_to_dense(draft_token_ids, probs_block, vocab_size)};
 }
 
 }  // namespace draftProbs

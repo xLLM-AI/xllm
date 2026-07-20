@@ -17,8 +17,9 @@ limitations under the License.
 
 #include <tuple>
 
-#include "core/framework/config/parallel_config.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "kernels/ops_api.h"
+#include "platform/platform.h"
 
 namespace xllm {
 namespace layer {
@@ -39,7 +40,7 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
       eps_(args.rms_norm_eps()),
       interleaved_(true) {
   use_full_replicated_attention_weights_ =
-      ::xllm::ParallelConfig::get_instance().enable_prefill_sp();
+      parallel_args.cp_size() > 1 && Platform::uses_model_cp_partition();
   const int64_t tp_size = parallel_args.tp_group_->world_size();
   int64_t hidden_size = args.hidden_size();
   int64_t num_heads = args.n_heads();
@@ -156,6 +157,12 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
   }
 
   use_fused_mla_qkv_ = optimization_config.enable_fused_mla_kernel;
+  if (::xllm::KVCacheConfig::get_instance().indexer_cache_dtype() == "int8") {
+    CHECK(enable_lighting_indexer_)
+        << "Indexer cache INT8 requires lighting indexer.";
+    CHECK(optimization_config.enable_fused_indexer_qk)
+        << "Indexer cache INT8 requires fused indexer Q/K.";
+  }
 
   attn_ = register_module("attn",
                           Attention(active_heads().attn,
@@ -388,12 +395,14 @@ AttentionMetadata DeepseekV2AttentionImpl::build_mla_attention_metadata(
       attn_indexer_metadata.max_seq_len = index_topk_;
     } else if (enable_lighting_indexer_) {
       auto index_cache = kv_cache.get_index_cache();
+      auto index_cache_scale = kv_cache.get_indexer_cache_scale();
       auto [new_block_tables, new_context_lens] = indexer_(hidden_states,
                                                            q_norm,
                                                            positions,
                                                            index_cache,
                                                            attn_metadata,
                                                            is_prefill_phase,
+                                                           index_cache_scale,
                                                            std::nullopt);
       attn_indexer_metadata.block_table = new_block_tables;
       attn_indexer_metadata.kv_seq_lens = new_context_lens;
@@ -423,7 +432,7 @@ torch::Tensor DeepseekV2AttentionImpl::forward(
     const torch::Tensor& hidden_states,
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
-    const v32_sp::DeepseekV32SPContext* sp_ctx) {
+    const v32_cp::DeepseekV32CPContext* sp_ctx) {
   bool is_prefill_or_chunked_prefill =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
   if (sp_ctx != nullptr && can_use_sp()) {

@@ -95,6 +95,8 @@ class Options {
 
   PROPERTY(bool, speculative_suffix_use_tree_spec) = false;
 
+  PROPERTY(bool, enable_mtp_draft_body_tp1) = false;
+
   // thread num to handle requests
   PROPERTY(size_t, num_request_handling_threads) = 4;
 
@@ -120,7 +122,6 @@ class Options {
 
   PROPERTY(bool, enable_chunked_prefill) = true;
 
-  PROPERTY(bool, enable_prefill_sp) = false;
 
   // Flash Communication 1 (FC1) sequence-parallel optimization.
   PROPERTY(bool, enable_flashcomm1) = false;

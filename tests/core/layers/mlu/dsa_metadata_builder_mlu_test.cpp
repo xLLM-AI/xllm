@@ -102,11 +102,6 @@ TEST(DSAMetadataBuilderMluTest, BuildsCanonicalSeqMetadataFromCuLens) {
   EXPECT_EQ(dsa.query_start_offsets, std::vector<int64_t>({0, 2, 3}));
   EXPECT_EQ(dsa.start_pos_vec, std::vector<int64_t>({3, 3}));
   EXPECT_TRUE(torch::equal(dsa.seq_lens, dsa.kv_seq_lens));
-  EXPECT_TRUE(torch::equal(dsa.seq_lens_q, dsa.q_seq_lens));
-  EXPECT_TRUE(torch::equal(dsa.actual_seq_lengths_query, dsa.q_cu_seq_lens));
-  EXPECT_TRUE(torch::equal(dsa.actual_seq_lengths_kv, dsa.kv_seq_lens));
-  EXPECT_EQ(dsa.max_seqlen_q.item<int32_t>(), 2);
-  EXPECT_EQ(dsa.max_seqlen_kv.item<int32_t>(), 5);
 }
 
 TEST(DSAMetadataBuilderMluTest, EmptyDpRankParamsBuildOneTokenDsaMetadata) {
@@ -192,20 +187,6 @@ TEST(DSAMetadataBuilderMluTest, PreservesAttentionFlags) {
   AttentionMetadata dummy_metadata =
       build_metadata(dummy, torch::empty({0}, torch::kInt32));
   EXPECT_TRUE(dummy_metadata.is_dummy);
-}
-
-TEST(DSAMetadataBuilderMluTest, BuildsSwaPlan) {
-  ModelInputParams params =
-      make_params(BatchForwardType::CHUNKED_PREFILL, {0, 2, 3}, {0, 5, 12});
-  AttentionMetadata metadata =
-      build_metadata(params, torch::tensor({3, 4, 11}, torch::kInt32), 4);
-  const DSAMetadata& dsa = *metadata.dsa_metadata;
-
-  EXPECT_EQ(dsa.swa_start_pos_vec, std::vector<int64_t>({0, 3}));
-  EXPECT_EQ(tensor_vec(dsa.swa_history_lens), std::vector<int64_t>({3, 3}));
-  EXPECT_EQ(tensor_vec(dsa.swa_context_lens), std::vector<int64_t>({4, 5, 4}));
-  EXPECT_EQ(dsa.swa_max_history_len, 3);
-  EXPECT_EQ(dsa.swa_max_context_len, 5);
 }
 
 TEST(DSAMetadataBuilderMluTest, BuildsCompressedPositionMetadata) {

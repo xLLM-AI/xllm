@@ -340,6 +340,19 @@ def launch_server(argv: Sequence[str] | None = None) -> int:
     _validate_args(parser, args)
 
     binary_path = _resolve_binary_path(args.binary_path)
+
+    # The Python model executor (--model_impl=python) imports the 'xllm.python'
+    # subpackage. --python_model_path (or XLLM_PYTHON_MODEL_PATH when the flag
+    # is empty) must point at the directory containing the 'xllm' package. For
+    # a wheel install that is site-packages — the parent of this launcher's
+    # directory. The embedded interpreter does not reliably pick up venv
+    # site-packages on its own, so default the env var explicitly; an explicit
+    # --python_model_path or a pre-set env var still takes precedence.
+    os.environ.setdefault(
+        "XLLM_PYTHON_MODEL_PATH",
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+    )
+
     launches_all_local_ranks = args.node_rank is None
     ranks = _resolve_ranks(args)
     commands = [

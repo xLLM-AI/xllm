@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <nlohmann/json_fwd.hpp>
+#include <string>
 
 #include "core/common/macros.h"
 #include "core/framework/config/option_category.h"
@@ -51,7 +52,8 @@ class ExecutionConfig final {
          "use_contiguous_input_buffer",
          "input_shm_size",
          "output_shm_size",
-         "random_seed"}};
+         "random_seed",
+         "python_graph_backend"}};
     return kOptionCategory;
   }
 
@@ -78,6 +80,8 @@ class ExecutionConfig final {
   PROPERTY(uint64_t, output_shm_size) = 128;
 
   PROPERTY(int32_t, random_seed) = -1;
+
+  PROPERTY(std::string, python_graph_backend) = "off";
 };
 
 }  // namespace xllm

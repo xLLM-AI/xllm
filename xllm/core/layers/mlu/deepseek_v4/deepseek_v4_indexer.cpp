@@ -95,6 +95,7 @@ DeepseekV4IndexerImpl::DeepseekV4IndexerImpl(
     int64_t q_lora_rank,
     double norm_eps,
     const torch::TensorOptions& options,
+    const ModelArgs& args,
     const QuantArgs& quant_args)
     : dim_(dim),
       n_heads_(index_n_heads),
@@ -125,6 +126,7 @@ DeepseekV4IndexerImpl::DeepseekV4IndexerImpl(
                                            /*rotate=*/true,
                                            norm_eps,
                                            options,
+                                           args,
                                            quant_args));
 
   const double log_dim = std::ceil(std::log2(static_cast<double>(head_dim_)));
@@ -155,32 +157,34 @@ torch::Tensor DeepseekV4IndexerImpl::preprocess_q(
 }
 
 torch::Tensor DeepseekV4IndexerImpl::preprocess_weights(
-    const torch::Tensor& x) {
+    const torch::Tensor& x,
+    std::optional<torch::Tensor> projected_weights) {
+  if (projected_weights.has_value()) {
+    return projected_weights.value();
+  }
   return weights_proj_->forward(x);
 }
 
 torch::Tensor DeepseekV4IndexerImpl::compress_kv(
     torch::Tensor& hidden_states,
-    torch::Tensor& compress_index_kv_state,
-    torch::Tensor& compress_index_score_state,
+    torch::Tensor& compress_index_state,
     const AttentionMetadata& attn_metadata,
     torch::Tensor& index_cache,
     const DeepseekV4IndexerCacheRefs& cache_refs,
     const torch::Tensor& compressed_sin_table,
-    const torch::Tensor& compressed_cos_table) {
-  std::tuple<torch::Tensor, torch::Tensor> states(compress_index_kv_state,
-                                                  compress_index_score_state);
-  std::tuple<torch::Tensor, torch::Tensor> block_tables(
-      cache_refs.index_state_kv_block_table,
-      cache_refs.index_state_score_block_table);
+    const torch::Tensor& compressed_cos_table,
+    std::optional<torch::Tensor> projected_kv,
+    std::optional<torch::Tensor> projected_score) {
   auto output = compressor_->forward(attn_metadata,
                                      hidden_states,
                                      index_cache,
                                      cache_refs.index_slot_mapping,
-                                     states,
-                                     block_tables,
+                                     compress_index_state,
+                                     cache_refs.index_state_block_table,
                                      compressed_sin_table,
-                                     compressed_cos_table);
+                                     compressed_cos_table,
+                                     projected_kv,
+                                     projected_score);
   return output;
 }
 
@@ -290,25 +294,28 @@ std::tuple<torch::Tensor, torch::Tensor> DeepseekV4IndexerImpl::forward(
     const torch::Tensor& x,
     const torch::Tensor& qr,
     torch::Tensor& index_cache,
-    torch::Tensor& compress_index_kv_state,
-    torch::Tensor& compress_index_score_state,
+    torch::Tensor& compress_index_state,
     const AttentionMetadata& attn_metadata,
     const DeepseekV4IndexerCacheRefs& cache_refs,
     bool is_prefill,
     const torch::Tensor& compressed_sin_table,
-    const torch::Tensor& compressed_cos_table) {
+    const torch::Tensor& compressed_cos_table,
+    std::optional<torch::Tensor> projected_weights,
+    std::optional<torch::Tensor> projected_kv,
+    std::optional<torch::Tensor> projected_score) {
   torch::Tensor q = preprocess_q(
       qr, attn_metadata, compressed_sin_table, compressed_cos_table);
   torch::Tensor hidden_states = x;
   torch::Tensor current_kv = compress_kv(hidden_states,
-                                         compress_index_kv_state,
-                                         compress_index_score_state,
+                                         compress_index_state,
                                          attn_metadata,
                                          index_cache,
                                          cache_refs,
                                          compressed_sin_table,
-                                         compressed_cos_table);
-  torch::Tensor weights = preprocess_weights(x);
+                                         compressed_cos_table,
+                                         projected_kv,
+                                         projected_score);
+  torch::Tensor weights = preprocess_weights(x, projected_weights);
   return select_topk(q,
                      weights,
                      current_kv,
@@ -318,14 +325,22 @@ std::tuple<torch::Tensor, torch::Tensor> DeepseekV4IndexerImpl::forward(
                      is_prefill);
 }
 
-void DeepseekV4IndexerImpl::load_state_dict(const StateDict& state_dict) {
+void DeepseekV4IndexerImpl::load_state_dict(const StateDict& state_dict,
+                                            bool skip_proj_weights) {
   if (state_dict.size() == 0) {
     return;
   }
+  // wq_b_ projects qr (not hidden), so it never participates in the attention
+  // layer's fused GEMM and must always be loaded. Only weights_proj_ (hidden
+  // -> n_heads) is skipped when its weights have been merged into the fused
+  // projection.
   wq_b_->load_state_dict(state_dict.get_dict_with_prefix("wq_b."));
-  weights_proj_->load_state_dict(
-      state_dict.get_dict_with_prefix("weights_proj."));
-  compressor_->load_state_dict(state_dict.get_dict_with_prefix("compressor."));
+  if (!skip_proj_weights) {
+    weights_proj_->load_state_dict(
+        state_dict.get_dict_with_prefix("weights_proj."));
+  }
+  compressor_->load_state_dict(state_dict.get_dict_with_prefix("compressor."),
+                               /*skip_proj_weights=*/skip_proj_weights);
 }
 
 }  // namespace layer

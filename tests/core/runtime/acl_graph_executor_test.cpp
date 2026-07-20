@@ -21,13 +21,17 @@ limitations under the License.
 
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "core/framework/batch/batch.h"
 #include "core/framework/block/block.h"
 #include "core/framework/block/block_manager_impl.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/kv_cache/kv_cache.h"
+#include "core/framework/kv_cache/kv_cache_utils.h"
+#include "core/framework/kv_cache/linear_state_restore.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_loader.h"
@@ -37,6 +41,7 @@ limitations under the License.
 #include "core/layers/npu/npu_lm_head_impl.h"
 #include "core/layers/npu/npu_word_embedding_impl.h"
 #include "core/runtime/acl_graph_executor_impl.h"
+#include "core/runtime/acl_graph_persistent_param.h"
 #include "core/runtime/base_executor_impl.h"
 #include "core/runtime/options.h"
 
@@ -732,11 +737,20 @@ TEST_F(AclGraphExecutorTest, BatchInputCarriesLinearStateIds) {
   ASSERT_FALSE(batch->empty());
   ASSERT_FALSE(sequences_.empty());
 
+  // embedding_ids come from the single_block slot, while linear_state_ids come
+  // from the dedicated linear_state_slot slot; the two are decoupled and carry
+  // independent ids through transport.
   auto& seq = sequences_.back();
-  auto linear_state_block = block_manager_->allocate(1);
-  ASSERT_EQ(linear_state_block.size(), 1);
-  const int32_t expected_linear_state_id = linear_state_block[0].id();
-  seq.add_blocks(BlockType::SINGLE, linear_state_block);
+  auto embedding_block = block_manager_->allocate(1);
+  ASSERT_EQ(embedding_block.size(), 1);
+  const int32_t expected_embedding_id = embedding_block[0].id();
+  seq.add_blocks(BlockType::SINGLE, embedding_block);
+
+  auto linear_state_slot = block_manager_->allocate(1);
+  ASSERT_EQ(linear_state_slot.size(), 1);
+  const int32_t expected_linear_state_id = linear_state_slot[0].id();
+  seq.add_blocks(BlockType::LINEAR, linear_state_slot);
+  ASSERT_NE(expected_embedding_id, expected_linear_state_id);
 
   auto forward_input = batch->prepare_forward_input(
       options_.num_decoding_tokens(), 0, model_args_);
@@ -746,7 +760,72 @@ TEST_F(AclGraphExecutorTest, BatchInputCarriesLinearStateIds) {
             expected_linear_state_id);
   ASSERT_EQ(forward_input.input_params.embedding.embedding_ids.size(), 1);
   EXPECT_EQ(forward_input.input_params.embedding.embedding_ids[0],
-            expected_linear_state_id);
+            expected_embedding_id);
+
+  forward_input.input_params.parallel.has_initial_state = {0};
+  forward_input = forward_input.to(*device_, torch::kFloat32);
+  npu::GraphPersistentParam persistent_param(model_args_, *device_, options_);
+  std::optional<ModelInputParams> params_for_capture = persistent_param.update(
+      forward_input.token_ids,
+      first_full_attention_cache(kv_caches_).get_k_cache(),
+      first_full_attention_cache(kv_caches_).get_v_cache(),
+      forward_input.positions,
+      forward_input.input_params,
+      /*padded_num_tokens=*/2,
+      /*return_capture_params=*/true);
+  ASSERT_TRUE(params_for_capture.has_value());
+  EXPECT_EQ(params_for_capture->meta.num_sequences, 2);
+  EXPECT_EQ(
+      params_for_capture->embedding.linear_state_ids,
+      std::vector<int32_t>({expected_linear_state_id, kPaddingLinearStateId}));
+  ASSERT_EQ(params_for_capture->parallel.has_initial_state.size(), 2);
+  EXPECT_EQ(params_for_capture->parallel.has_initial_state[0], 0);
+  EXPECT_EQ(params_for_capture->parallel.has_initial_state[1], 0);
+}
+
+TEST(LinearStateRestoreTest, RestoreCopiesCheckpointSlot) {
+  std::vector<KVCache> kv_caches;
+  torch::Tensor conv_cache = torch::zeros({3, 2, 2}, torch::kFloat32);
+  torch::Tensor ssm_cache = torch::zeros({3, 2, 2}, torch::kFloat32);
+  conv_cache.select(0, 1).fill_(7.0);
+  ssm_cache.select(0, 1).fill_(11.0);
+  kv_caches.emplace_back(LinearAttentionKVCacheTensors{conv_cache, ssm_cache});
+
+  LinearStateCacheOp restore;
+  restore.linear_state_id = 2;
+  restore.restore_requested = true;
+  restore.restore_src_slot_id = 1;
+  std::vector<int64_t> has_initial_state(1, 0);
+  restore_linear_state_slots(kv_caches, {restore}, has_initial_state);
+
+  EXPECT_EQ(has_initial_state[0], 1);
+  EXPECT_TRUE(
+      torch::allclose(conv_cache.select(0, 2), conv_cache.select(0, 1)));
+  EXPECT_TRUE(torch::allclose(ssm_cache.select(0, 2), ssm_cache.select(0, 1)));
+}
+
+TEST(LinearStateRestoreTest, RestoreRequestedButUnresolvedColdStarts) {
+  std::vector<KVCache> kv_caches;
+  kv_caches.emplace_back(LinearAttentionKVCacheTensors{
+      torch::zeros({2, 4, 3}, torch::dtype(torch::kFloat32)),
+      torch::zeros({2, 4, 4}, torch::dtype(torch::kFloat32))});
+
+  LinearStateCacheOp no_restore;
+  no_restore.linear_state_id = 1;
+  LinearStateCacheOp missing_restore;
+  missing_restore.linear_state_id = 1;
+  missing_restore.restore_requested = true;
+  missing_restore.restore_src_slot_id = -1;
+
+  const std::vector<LinearStateCacheOp> cache_ops = {no_restore,
+                                                     missing_restore};
+  // Pre-fill both entries with the kv-cache default of 1 so the test can
+  // distinguish "SKIPPED leaves the default untouched" from "COLD_START
+  // overrides it to 0".
+  std::vector<int64_t> has_initial_state = {1, 1};
+  restore_linear_state_slots(kv_caches, cache_ops, has_initial_state);
+  EXPECT_EQ(has_initial_state[0], 1);
+  EXPECT_EQ(has_initial_state[1], 0);
 }
 
 TEST_F(AclGraphExecutorTest, GraphDoubleBufferFlagControlsSlotCount) {
@@ -768,6 +847,86 @@ TEST_F(AclGraphExecutorTest, GraphDoubleBufferFlagControlsSlotCount) {
 
   execution_config.enable_graph_double_buffer(
       original_enable_graph_double_buffer);
+}
+
+TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
+  SpeculativeConfig& speculative_config = SpeculativeConfig::get_instance();
+  const bool original_enable_atb_spec_kernel =
+      speculative_config.enable_atb_spec_kernel();
+  speculative_config.enable_atb_spec_kernel(false);
+
+  ModelArgs args;
+  args.model_type("deepseek_v4");
+  args.dtype("float32");
+  args.hidden_size(8);
+  args.max_position_embeddings(32);
+
+  runtime::Options options;
+  options.block_size(4);
+  options.max_seqs_per_batch(10);
+  options.max_tokens_per_batch(64);
+  options.num_decoding_tokens(3);
+  options.enable_speculative_decode(true);
+  options.is_draft_engine(false);
+
+  const torch::Device device("npu:0");
+  ::xllm::npu::GraphPersistentParam persistent_param(
+      args,
+      device,
+      options,
+      /*need_update_attn_mask=*/false,
+      /*is_hybrid_linear_attention=*/false);
+  EXPECT_EQ(persistent_param.q_seq_lens().size(0), 30);
+  EXPECT_EQ(persistent_param.kv_seq_lens().size(0), 30);
+  EXPECT_EQ(persistent_param.persistent_block_tables().size(0), 30);
+
+  constexpr int64_t kValidateRows = 12;
+  const torch::TensorOptions int_options =
+      torch::dtype(torch::kInt).device(device);
+  const torch::Tensor tokens = torch::arange(kValidateRows, int_options);
+  const torch::Tensor positions = torch::arange(kValidateRows, int_options);
+  ModelInputParams params;
+  params.is_spec_verify = true;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  params.meta.num_sequences = kValidateRows;
+  params.attention.host.q_seq_lens.assign(kValidateRows, 1);
+  params.attention.host.kv_seq_lens.assign(kValidateRows, 8);
+  params.attention.device.q_seq_lens =
+      torch::ones({kValidateRows}, int_options);
+  params.attention.device.kv_seq_lens =
+      torch::full({kValidateRows}, 8, int_options);
+  params.attention.device.new_cache_slots =
+      torch::zeros({kValidateRows}, int_options);
+  params.attention.device.block_tables =
+      torch::zeros({kValidateRows, 2}, int_options);
+
+  std::optional<ModelInputParams> capture_params;
+  EXPECT_NO_THROW(capture_params = persistent_param.update(
+                      tokens,
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      positions,
+                      params,
+                      /*padded_num_tokens=*/kValidateRows,
+                      /*return_capture_params=*/true));
+  EXPECT_TRUE(capture_params.has_value());
+  if (capture_params.has_value()) {
+    EXPECT_EQ(capture_params->attention.device.q_seq_lens.size(0),
+              kValidateRows);
+    EXPECT_EQ(capture_params->attention.device.block_tables.size(0),
+              kValidateRows);
+  }
+
+  ::xllm::npu::GraphPersistentParam hybrid_persistent_param(
+      args,
+      device,
+      options,
+      /*need_update_attn_mask=*/false,
+      /*is_hybrid_linear_attention=*/true);
+  EXPECT_EQ(hybrid_persistent_param.q_seq_lens().size(0), 10);
+  EXPECT_EQ(hybrid_persistent_param.persistent_block_tables().size(0), 10);
+
+  speculative_config.enable_atb_spec_kernel(original_enable_atb_spec_kernel);
 }
 
 TEST(AclGraphExecutorHybridTest, KvCacheSupportsLinearOnlyLayers) {

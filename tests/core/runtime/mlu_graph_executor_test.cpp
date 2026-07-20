@@ -602,6 +602,35 @@ TEST_F(MluGraphExecutorTest, MtpSeqLensCapacityUsesSpecFactor) {
   EXPECT_TRUE(torch::allclose(first_output, second_output, 1e-5, 1e-6));
 }
 
+TEST_F(MluGraphExecutorTest, MtpSeqLensCapacityIncludesGraphPadding) {
+  options_.is_draft_engine(false);
+  options_.num_speculative_tokens(2);
+  options_.num_decoding_tokens(options_.num_speculative_tokens() + 1);
+  options_.enable_speculative_decode(true);
+  options_.max_seqs_per_batch(8);
+  rebuild_impl();
+
+  // Eight MTP validation requests produce 24 token rows. The MLU graph
+  // executor pads that input to the 32-token bucket, so cumulative sequence
+  // lengths need 33 entries.
+  auto forward_input = prepare_inputs(/*batch_size=*/24, /*seed=*/73);
+
+  EXPECT_NO_THROW({
+    ModelOutput first_output = impl_->run({forward_input.token_ids},
+                                          {forward_input.positions},
+                                          kv_caches_,
+                                          {forward_input.input_params});
+    ModelOutput second_output = impl_->run({forward_input.token_ids},
+                                           {forward_input.positions},
+                                           kv_caches_,
+                                           {forward_input.input_params});
+
+    torch_mlu::synchronize();
+    EXPECT_TRUE(torch::allclose(
+        first_output.hidden_states, second_output.hidden_states, 1e-5, 1e-6));
+  });
+}
+
 TEST_F(MluGraphExecutorTest, DpDummyFallsBackToEager) {
   options_.is_draft_engine(false);
   rebuild_impl();

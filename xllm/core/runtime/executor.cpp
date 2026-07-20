@@ -16,6 +16,7 @@ limitations under the License.
 #include "executor.h"
 
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/model_config.h"
 #include "executor_impl_factory.h"
 #include "platform/device.h"
 #include "platform/platform.h"
@@ -26,9 +27,15 @@ Executor::Executor(CausalLM* model,
                    const ModelArgs& args,
                    const torch::Device& device,
                    const runtime::Options& options) {
-  std::string backend = (options.backend() != "vlm" && options.enable_graph())
-                            ? Platform::type_str()
-                            : options.backend();
+  const auto& model_config = ModelConfig::get_instance();
+  std::string backend;
+  if (ModelConfig::is_python_model_impl(model_config.model_impl())) {
+    backend = "python";
+  } else if (options.backend() != "vlm" && options.enable_graph()) {
+    backend = Platform::type_str();
+  } else {
+    backend = options.backend();
+  }
   impl_ = ExecutorImplFactory::get_instance().create_executor_impl(
       model, args, device, options, backend);
 }

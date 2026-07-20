@@ -160,7 +160,7 @@ TEST(GraphWarmupTest, PresetDpRankControlsBlockAllocation) {
   options.num_blocks(/*num_blocks=*/8)
       .block_size(/*block_size=*/2)
       .enable_prefix_cache(/*enable_prefix_cache=*/false)
-      .max_concurrent_requests(/*max_concurrent_requests=*/4);
+      .max_seqs_per_batch(/*max_seqs_per_batch=*/4);
   BlockManagerPool pool(options, /*dp_size=*/2);
   Sequence sequence = make_sequence(/*index=*/0, /*tokens=*/{1, 2, 3});
   sequence.set_dp_rank(/*dp_rank=*/1);

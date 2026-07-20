@@ -27,6 +27,9 @@ extern "C" {
 // Maximum length for meta string fields (includes '\0' terminator)
 #define XLLM_META_STRING_FIELD_MAX_LEN 128
 
+// Major version of the public C ABI. A mismatch requires recompilation.
+#define XLLM_C_ABI_VERSION_MAJOR 1
+
 // Export Macro Definition
 #ifndef XLLM_CAPI_EXPORT
 #define XLLM_CAPI_EXPORT __attribute__((visibility("default")))
@@ -43,8 +46,8 @@ typedef struct XLLM_CAPI_EXPORT XLLM_InitOptions {
   /** Whether to enable chunked prefill for inference */
   bool enable_chunked_prefill;
 
-  /** Whether to enable prefill-only sequence parallel */
-  bool enable_prefill_sp;
+  /** Context parallel size. Backend and model support is required. */
+  uint32_t cp_size;
 
   /** Whether to enable prefix cache optimization */
   bool enable_prefix_cache;

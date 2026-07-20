@@ -31,7 +31,9 @@ void apply_frequency_presence_penalties(
   score.sub_(unique_token_counts * frequency_penalties.unsqueeze(1));
   score.sub_((unique_token_counts > 0) * presence_penalties.unsqueeze(1));
 
-  logits.scatter_(/*dim=*/1, /*index=*/unique_token_ids, /*core=*/score);
+  logits.scatter_(/*dim=*/1,
+                  /*index=*/unique_token_ids,
+                  /*core=*/score.to(logits.scalar_type()));
 }
 
 void apply_repetition_penalties(torch::Tensor& logits,
@@ -39,12 +41,13 @@ void apply_repetition_penalties(torch::Tensor& logits,
                                 const torch::Tensor& penalties) {
   auto unsqueezed_penalties = penalties.unsqueeze(1);
   auto score = logits.gather(/*dim=*/1, /*index=*/unique_token_ids);
-  logits.scatter_(/*dim=*/1,
-                  /*index=*/unique_token_ids,
-                  /*core=*/
-                  torch::where(score < 0,
-                               score * unsqueezed_penalties,
-                               score / unsqueezed_penalties));
+  logits.scatter_(
+      /*dim=*/1,
+      /*index=*/unique_token_ids,
+      /*core=*/
+      torch::where(
+          score < 0, score * unsqueezed_penalties, score / unsqueezed_penalties)
+          .to(logits.scalar_type()));
 }
 
 void apply_temperatures(torch::Tensor& logits,
@@ -86,7 +89,7 @@ void apply_top_k_top_p_torch_impl(torch::Tensor& logits,
   p_mask.index_put_({torch::indexing::Ellipsis, 0}, false);
   sorted.masked_fill_(p_mask, inf);
 
-  logits.scatter_(-1, idx, sorted);
+  logits.scatter_(-1, idx, sorted.to(logits.scalar_type()));
 }
 
 void apply_top_k_top_p(torch::Tensor& logits,
@@ -164,9 +167,10 @@ void apply_top_k_top_p(torch::Tensor& logits,
 
       sorted_logits.masked_fill_(mask, filter_value);
     }
-    logits =
-        torch::empty_like(sorted_logits)
-            .scatter_(/*dim=*/-1, /*index=*/logits_idx, /*core=*/sorted_logits);
+    logits = torch::empty_like(sorted_logits)
+                 .scatter_(/*dim=*/-1,
+                           /*index=*/logits_idx,
+                           /*core=*/sorted_logits.to(logits.scalar_type()));
   }
 }
 

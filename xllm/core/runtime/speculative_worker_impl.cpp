@@ -33,26 +33,6 @@ namespace {
                   : tensor_;                                                  \
   } while (0)
 
-torch::Tensor make_cpu_int_tensor(const std::vector<int32_t>& values) {
-  return torch::tensor(values,
-                       torch::TensorOptions()
-                           .dtype(torch::kInt)
-                           .device(torch::kCPU)
-                           .pinned_memory(true));
-}
-
-void set_token_position_tensors(ForwardInput& input,
-                                const std::vector<int32_t>& token_ids,
-                                const std::vector<int32_t>& positions,
-                                const torch::TensorOptions& token_options,
-                                const torch::TensorOptions& position_options) {
-  input.device_tensors_ready = false;
-  input.token_ids_host = make_cpu_int_tensor(token_ids);
-  input.positions_host = make_cpu_int_tensor(positions);
-  input.token_ids = safe_to(input.token_ids_host, token_options, true);
-  input.positions = safe_to(input.positions_host, position_options, true);
-}
-
 Slice<int32_t> tensor_slice(const torch::Tensor& tensor) {
   return {tensor.data_ptr<int32_t>(), static_cast<size_t>(tensor.numel())};
 }
@@ -158,11 +138,11 @@ ForwardInput SpeculativeWorkerImpl::update_input_by_last_step_output(
   CHECK_EQ(buf.out_positions.size(), buf.out_token_ids.size())
       << "step-update positions/tokens mismatch";
 
-  set_token_position_tensors(new_inputs,
-                             buf.out_token_ids,
-                             buf.out_positions,
-                             inputs.token_ids.options(),
-                             inputs.positions.options());
+  specBuilder::set_token_position_tensors(new_inputs,
+                                          buf.out_token_ids,
+                                          buf.out_positions,
+                                          inputs.token_ids.options(),
+                                          inputs.positions.options());
   // update the input_params
   input_params.meta.kv_max_seq_len = buf.meta.kv_max_seq_len;
   input_params.attention.host.kv_seq_lens = std::move(buf.out_kv_seq_lens);
@@ -277,11 +257,11 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
   CHECK_EQ(buf.out_positions.size(), buf.out_token_ids.size())
       << "validate positions/tokens mismatch";
 
-  set_token_position_tensors(validate_input,
-                             buf.out_token_ids,
-                             buf.out_positions,
-                             token_options,
-                             position_options);
+  specBuilder::set_token_position_tensors(validate_input,
+                                          buf.out_token_ids,
+                                          buf.out_positions,
+                                          token_options,
+                                          position_options);
   // update the input_params
   if (!::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
     input_params.meta.num_sequences = total_num_val_tokens;

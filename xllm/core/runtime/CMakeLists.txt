@@ -20,6 +20,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:acl_graph_persistent_param.h>
     $<$<BOOL:${USE_MLU}>:mlu_graph_executor_impl.h>
     $<$<BOOL:${USE_CUDA}>:cuda_graph_executor_impl.h>
+    py_executor_impl.h
     $<$<BOOL:${USE_DCU}>:dcu_graph_executor_impl.h>
     worker.h
     worker_impl.h
@@ -36,6 +37,7 @@ cc_library(
     mtp_worker_impl.h
     suffix_worker_impl.h
     eagle3_worker_impl.h
+    dflash_worker_impl.h
     spec_input_builder.h
     forward_shared_memory_manager.h
     worker_rendezvous.h
@@ -50,6 +52,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:acl_graph_persistent_param.cpp>
     $<$<BOOL:${USE_MLU}>:mlu_graph_executor_impl.cpp>
     $<$<BOOL:${USE_CUDA}>:cuda_graph_executor_impl.cpp>
+    py_executor_impl.cpp
     $<$<BOOL:${USE_DCU}>:dcu_graph_executor_impl.cpp>
     worker.cpp
     worker_impl.cpp
@@ -68,6 +71,7 @@ cc_library(
     mtp_worker_impl.cpp
     suffix_worker_impl.cpp
     eagle3_worker_impl.cpp
+    dflash_worker_impl.cpp
     spec_input_builder.cpp
     forward_shared_memory_manager.cpp
     cp_input_partition.cpp
@@ -85,6 +89,7 @@ cc_library(
     :parallel_state
     :kv_cache
     :kv_cache_transfer
+    :linear_state_restore
     :kv_transfer_completion
     :models
     :sampler

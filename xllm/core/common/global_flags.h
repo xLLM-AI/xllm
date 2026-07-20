@@ -37,6 +37,10 @@ DECLARE_string(model);
 
 DECLARE_string(backend);
 
+DECLARE_string(model_impl);
+
+DECLARE_string(python_model_path);
+
 DECLARE_string(task);
 
 DECLARE_string(devices);
@@ -52,6 +56,7 @@ DECLARE_int32(block_size);
 DECLARE_int64(max_cache_size);
 DECLARE_double(max_memory_utilization);
 DECLARE_string(kv_cache_dtype);
+DECLARE_string(indexer_cache_dtype);
 DECLARE_int64(max_linear_state_cache_slots);
 
 DECLARE_bool(enable_prefix_cache);
@@ -78,6 +83,8 @@ DECLARE_int32(num_speculative_tokens);
 DECLARE_string(speculative_algorithm);
 
 DECLARE_bool(enable_opt_validate_probs);
+
+DECLARE_bool(enable_mtp_draft_body_tp1);
 
 DECLARE_int32(speculative_suffix_cache_max_depth);
 
@@ -111,8 +118,6 @@ DECLARE_int64(sp_size);
 DECLARE_int64(cfg_size);
 
 DECLARE_int64(vae_size);
-
-DECLARE_bool(enable_prefill_sp);
 
 DECLARE_bool(enable_mm_encoder_dp);
 
@@ -150,6 +155,8 @@ DECLARE_bool(enable_graph_vmm_pool);
 DECLARE_int32(max_tokens_for_graph_mode);
 
 DECLARE_int32(acl_graph_decode_batch_size_limit);
+
+DECLARE_string(python_graph_backend);
 
 DECLARE_bool(enable_chunked_prefill);
 
@@ -373,6 +380,8 @@ DECLARE_int64(dit_sparse_attention_sparse_start_step);
 DECLARE_string(dit_sparse_attention_version);
 
 DECLARE_int64(dit_sparse_attention_mask_refresh_steps);
+
+DECLARE_bool(dit_laser_attention_enabled);
 
 DECLARE_bool(use_audio_in_video);
 

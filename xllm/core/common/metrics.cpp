@@ -125,6 +125,13 @@ DEFINE_HISTOGRAM(time_to_first_token_latency_milliseconds,
 // inter token latency histogram
 DEFINE_HISTOGRAM(inter_token_latency_milliseconds,
                  "Histogram of inter token latency in milliseconds");
+// speculative/MTP amortized inter token latency histogram. Each observation is
+// the per-step wall-clock latency divided by the tokens committed that step
+// (per-step amortized, not token-weighted).
+DEFINE_HISTOGRAM(
+    speculative_per_token_latency_milliseconds,
+    "Histogram of speculative per-token amortized inter token latency in "
+    "milliseconds (per-step amortized, not token-weighted)");
 
 // response metrics
 DEFINE_COUNTER(responsing_latency_seconds_stream,
@@ -166,6 +173,9 @@ DEFINE_COUNTER(speculative_num_accepted_tokens_total,
                "Total number of accepted tokens in validation");
 DEFINE_COUNTER(speculative_num_draft_tokens_total,
                "Total number of draft tokens");
+DEFINE_GAUGE(speculative_mean_tokens_per_decode_step,
+             "Batch-mean tokens committed per decode step, i.e. the TPOT "
+             "speedup factor (1.0 without speculative decoding)");
 
 // proto metrics
 DEFINE_COUNTER(proto_latency_seconds_proto2i,

@@ -908,6 +908,9 @@ struct ForwardOutput {
   // Keep no-sync input tensor handles alive until downstream consumers finish
   // using outputs on the same compute stream.
   std::shared_ptr<ForwardInput> retained_input;
+  // Composite workers retain nested no-sync inputs until their final output is
+  // synchronized or its ready event is consumed.
+  std::vector<std::shared_ptr<ForwardInput>> retained_input_dependencies;
   // Device-side readiness dependency for no-sync outputs. This local runtime
   // handle is intentionally not included in proto or shared-memory transport.
   StreamEventPtr ready_event;

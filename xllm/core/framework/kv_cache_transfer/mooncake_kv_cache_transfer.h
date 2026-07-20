@@ -111,6 +111,11 @@ class MooncakeKVCacheTransferDefault final
     bool registered = false;
   };
 
+  enum class RegisterLengthPolicy : int8_t {
+    LOGICAL_BYTES = 0,
+    RDMA_REGISTERABLE_BYTES = 1,
+  };
+
   void allocate_kv_cache_impl(std::vector<xllm::KVCache>& kv_caches,
                               int64_t num_layers,
                               const KVCacheShape& kv_cache_shape,
@@ -119,7 +124,9 @@ class MooncakeKVCacheTransferDefault final
   void add_buf(const torch::Tensor& tensor,
                std::vector<void*>& addrs,
                std::vector<size_t>& lens,
-               std::vector<uint64_t>& buf_bytes) const;
+               std::vector<uint64_t>& buf_bytes,
+               RegisterLengthPolicy register_length_policy =
+                   RegisterLengthPolicy::LOGICAL_BYTES) const;
   std::vector<int64_t> get_buf_ids(const std::vector<int64_t>& layer_ids,
                                    bool is_spec_draft) const;
   std::vector<int64_t> get_buf_ids(const std::vector<int64_t>& layer_ids,

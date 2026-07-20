@@ -28,12 +28,14 @@ limitations under the License.
 #include "common/device_monitor.h"
 #include "common/metrics.h"
 #include "common/types.h"
-#include "core/common/global_flags.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
+#include "core/framework/config/model_config.h"
+#include "core/platform/platform.h"
 #include "framework/kv_cache/kv_cache.h"
+#include "framework/kv_cache/linear_state_restore.h"
 #include "framework/kv_cache_transfer/kv_transfer_completion.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
@@ -47,6 +49,10 @@ limitations under the License.
 namespace xllm {
 
 namespace {
+
+bool uses_worker_cp_partition(const runtime::Options& options) {
+  return options.cp_size() > 1 && !Platform::uses_model_cp_partition();
+}
 
 void wait_input_ready_events(const ForwardInput& input, const Stream& stream) {
   CHECK(stream.wait_event(input.metadata_ready_event))
@@ -70,16 +76,20 @@ LLMWorkerImpl::LLMWorkerImpl(const ParallelArgs& parallel_args,
     : WorkerImpl(parallel_args, device, options) {
   device_.set_device();
 #if defined(USE_CUDA) || defined(USE_MUSA)
-  threadpool_.schedule([this]() mutable {
-    // initialize flashinfer workspace
-    ::xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
-        device_);
-  });
+  const auto& model_config = ModelConfig::get_instance();
+  if (!ModelConfig::is_python_model_impl(model_config.model_impl())) {
+    threadpool_.schedule([this]() mutable {
+      // initialize flashinfer workspace
+      ::xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
+          device_);
+    });
+  }
 #endif
 }
 
 bool LLMWorkerImpl::init_model(ModelContext& context) {
   CHECK(model_ == nullptr) << "Model is already initialized.";
+  const auto& model_config = ModelConfig::get_instance();
 
 #if defined(USE_CUDA)
   // Ensure FlashinferWorkspace is initialized on the calling thread before
@@ -90,13 +100,20 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
   // FlashinferWorkspace is thread_local, so T_MTP's instance must be
   // explicitly initialized here; otherwise FlashInferAttentionImpl captures
   // an undefined int_workspace_buffer_ and crashes at prefill time.
-  auto& ws = ::xllm::layer::flashinfer::FlashinferWorkspace::get_instance();
-  if (!ws.get_int_workspace_buffer().defined()) {
-    ws.initialize(device_);
+  //
+  // Skip when model_impl=python: Python executor uses flashinfer's Python API
+  // directly; initializing the C++ workspace would conflict with Python-side
+  // TVM-FFI type registration.
+  if (!ModelConfig::is_python_model_impl(model_config.model_impl())) {
+    auto& ws = ::xllm::layer::flashinfer::FlashinferWorkspace::get_instance();
+    if (!ws.get_int_workspace_buffer().defined()) {
+      ws.initialize(device_);
+    }
   }
 #endif
 
   // Try to create a causal LM model
+  context.set_model_impl(model_config.model_impl());
   model_ = create_llm_model(context);
 
   // Dont find model in causal models
@@ -124,7 +141,8 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_no_sync(
 
 std::optional<ForwardOutput> LLMWorkerImpl::execute_no_sync_on_stream(
     const ForwardInput& input,
-    Stream& compute_stream) {
+    Stream& compute_stream,
+    bool record_ready_event) {
   const ForwardSyncPolicy sync_policy = ForwardSyncPolicy::NO_SYNC;
   c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
   if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
@@ -136,19 +154,19 @@ std::optional<ForwardOutput> LLMWorkerImpl::execute_no_sync_on_stream(
           const_cast<atb::Context*>(context_.get_atb_context());
       atb_context->SetExecuteStream(current_acl_stream);
       wait_input_ready_events(input, compute_stream);
-      return step_internal(input, sync_policy);
+      return step_internal(input, sync_policy, record_ready_event);
     } else {
       SET_ATB_EXECUTE_STREAM((&compute_stream), device_, context_);
       wait_input_ready_events(input, compute_stream);
-      return step_internal(input, sync_policy);
+      return step_internal(input, sync_policy, record_ready_event);
     }
 #else
     wait_input_ready_events(input, compute_stream);
-    return step_internal(input, sync_policy);
+    return step_internal(input, sync_policy, record_ready_event);
 #endif
   }
   wait_input_ready_events(input, compute_stream);
-  return step_internal(input, sync_policy);
+  return step_internal(input, sync_policy, record_ready_event);
 }
 
 std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
@@ -199,6 +217,21 @@ LLMWorkerImpl::step_async_no_sync(const ForwardInput& input) {
 
 std::optional<ForwardOutput> LLMWorkerImpl::step_for_schedule_overlap(
     const ForwardInput& input) {
+#if defined(USE_NPU)
+  // Restore live recurrent-state slots from saved checkpoints here (worker
+  // thread, on compute_stream_) instead of in prepare_work_before_execute on
+  // prepare_stream_. The single-threaded worker pool guarantees the previous
+  // chunk's forward kernels are already enqueued on compute_stream_ before
+  // this task runs, so the restore copy is automatically stream-ordered
+  // after those writes without needing a cross-stream barrier.
+  if (has_linear_attention_layers(context_.get_model_args())) {
+    c10::StreamGuard restore_guard = compute_stream_->set_stream_guard();
+    auto& mutable_params = const_cast<ModelInputParams&>(input.input_params);
+    restore_linear_state_slots(kv_caches_,
+                               mutable_params.linear_state_cache_ops,
+                               mutable_params.parallel.has_initial_state);
+  }
+#endif
   return execute_no_sync_on_stream(input, *compute_stream_);
 }
 
@@ -213,7 +246,8 @@ LLMWorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
 
 std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     const ForwardInput& input,
-    ForwardSyncPolicy sync_policy) {
+    ForwardSyncPolicy sync_policy,
+    bool record_ready_event) {
   MULTI_MODEL_STEP_LOCK(::xllm::KVCacheConfig::get_instance().enable_xtensor());
 
   Timer timer;
@@ -273,7 +307,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
                                      /*non_blocking=*/false)
                                  .contiguous();
     }
-    if (options_.cp_size() > 1) {
+    if (uses_worker_cp_partition(options_)) {
       logits = model_->logits(model_output.hidden_states,
                               selected_token_idxes,
                               selected_hidden_from_lm_head);
@@ -351,11 +385,12 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       // separately so the embedding cache stores it without re-selecting on
       // the local shard.
       output.sample_output.embeddings = embeddings;
-      if (options_.cp_size() > 1 && selected_hidden_from_lm_head.defined()) {
+      if (uses_worker_cp_partition(options_) &&
+          selected_hidden_from_lm_head.defined()) {
         output.sample_output.selected_embeddings = selected_hidden_from_lm_head;
       }
     } else if (sampling_params.selected_token_idxes.defined()) {
-      if (options_.cp_size() > 1) {
+      if (uses_worker_cp_partition(options_)) {
         CHECK(selected_hidden_from_lm_head.defined())
             << "selected_hidden_from_lm_head must be defined when "
                "selected_token_idxes is defined.";
@@ -376,7 +411,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
     wait_kv_push();
     output.retained_input = std::make_shared<ForwardInput>(input);
-    if (enable_schedule_overlap()) {
+    if (enable_schedule_overlap() && record_ready_event) {
       output.ready_event = record_current_stream_event(device_);
     }
     return output;

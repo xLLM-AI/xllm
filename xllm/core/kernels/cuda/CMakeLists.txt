@@ -37,6 +37,7 @@ set(CUDA_HEADER_FILES
   topk_last_dim.cuh
   type_convert.cuh
   utils.h
+  cuda_ops_library.h
   device_utils.cuh
   xattention/xattention_ops_api.h
   moe/moe_topk.cuh
@@ -119,6 +120,7 @@ set(CUDA_SOURCE_FILES
   rope.cu
   random_sample.cpp
   utils.cpp
+  cuda_ops_library.cpp
   xattention/beam_search.cpp
   xattention/cache_select.cu
   xattention/decoder_reshape_and_cache.cu

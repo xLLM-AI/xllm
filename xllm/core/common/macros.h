@@ -18,28 +18,58 @@ limitations under the License.
 
 #include <mutex>
 
+#include "core/common/property_reflect.h"
+
 namespace xllm {
 
-#define PROPERTY(T, property)                                                 \
- public:                                                                      \
-  [[nodiscard]] const T& property() const& noexcept { return property##_; }   \
-  [[nodiscard]] T& property() & noexcept { return property##_; }              \
-  [[nodiscard]] T&& property() && noexcept { return std::move(property##_); } \
-                                                                              \
-  auto property(const T& value) & -> decltype(*this) {                        \
-    property##_ = value;                                                      \
-    return *this;                                                             \
-  }                                                                           \
-                                                                              \
-  auto property(T&& value) & -> decltype(*this) {                             \
-    property##_ = std::move(value);                                           \
-    return *this;                                                             \
-  }                                                                           \
-                                                                              \
-  void property(const T& value) && = delete;                                  \
-  void property(T&& value) && = delete;                                       \
-                                                                              \
+// PROPERTY generates the const/non-const/rvalue getters and fluent setters for
+// a field, plus a lightweight reflection registration so the field can be
+// iterated generically (see property_reflect.h). The registration targets
+// `xllm_property_owner_t`, which is `void` (a no-op) unless the struct opts in
+// via REFLECT_PROPERTIES(<StructName>) -- so this augmentation is inert for
+// every struct that does not reflect. The field member stays the last token so
+// callers can still write `PROPERTY(T, name) = <default>;`.
+#define PROPERTY(T, property)                                                  \
+ public:                                                                       \
+  [[nodiscard]] const T& property() const& noexcept { return property##_; }    \
+  [[nodiscard]] T& property() & noexcept { return property##_; }               \
+  [[nodiscard]] T&& property() && noexcept { return std::move(property##_); }  \
+                                                                               \
+  auto property(const T& value) & -> decltype(*this) {                         \
+    property##_ = value;                                                       \
+    return *this;                                                              \
+  }                                                                            \
+                                                                               \
+  auto property(T&& value) & -> decltype(*this) {                              \
+    property##_ = std::move(value);                                            \
+    return *this;                                                              \
+  }                                                                            \
+                                                                               \
+  void property(const T& value) && = delete;                                   \
+  void property(T&& value) && = delete;                                        \
+                                                                               \
+  template <typename XllmReflectOwner_ = xllm_property_owner_t>                \
+  static void xllm_reflect_emit_##property(const void* xllm_reflect_owner_,    \
+                                           ::xllm::PropertyVisitor& xllm_v_) { \
+    if constexpr (!::std::is_void_v<XllmReflectOwner_>) {                      \
+      ::xllm::reflect::emit(                                                   \
+          xllm_v_,                                                             \
+          #property,                                                           \
+          static_cast<const XllmReflectOwner_*>(xllm_reflect_owner_)           \
+              ->property());                                                   \
+    }                                                                          \
+  }                                                                            \
+  static inline const int xllm_reflect_reg_##property =                        \
+      ::xllm::reflect::register_property<xllm_property_owner_t>(               \
+          #property, &xllm_reflect_emit_##property<>);                         \
+                                                                               \
   T property##_
+
+// Opt a PROPERTY-bearing struct into field reflection. Place once at the top of
+// the struct body, e.g. `REFLECT_PROPERTIES(ModelArgs);`. It names the owning
+// type so PROPERTY registers each field into reflect::PropertyTable<OwnerType>;
+// without it the struct keeps the `void` owner and registers nothing.
+#define REFLECT_PROPERTIES(OwnerType) using xllm_property_owner_t = OwnerType
 
 #define SAFE_CONCAT(a, b) (a##b)
 

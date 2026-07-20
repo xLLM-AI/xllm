@@ -7,10 +7,12 @@ cc_library(
   HDRS
     block_hasher.h
     prefix_cache.h
+    linear_state_prefix_cache.h
     prefix_cache_factory.h
   SRCS
     block_hasher.cpp
     prefix_cache.cpp
+    linear_state_prefix_cache.cpp
     prefix_cache_factory.cpp
   DEPS
     $<$<BOOL:${USE_NPU}>:torch_npu>

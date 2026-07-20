@@ -583,10 +583,8 @@ class DeepseekV4IndexerTest : public ::testing::Test {
       rows.push_back({static_cast<int32_t>(i)});
     }
     torch::Tensor state_block_table = make_block_table(rows).to(device_);
-    return {index_block_table,
-            index_slot_mapping,
-            state_block_table,
-            state_block_table};
+    // kv and score share the single merged compress_index_state block table.
+    return {index_block_table, index_slot_mapping, state_block_table};
   }
 
   DeepseekV4IndexerCacheRefs make_cache_refs(const AttentionMetadata& metadata,
@@ -695,18 +693,37 @@ class DeepseekV4IndexerTest : public ::testing::Test {
     return {q, kv, weights_proj, topk.topk, topk.context_lens};
   }
 
-  std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> make_states(
-      int64_t batch_size) {
+  // Returns [index_cache, compress_index_state] where compress_index_state is
+  // the owning merged tensor of shape [batch, 8, 4*index_head_dim] with kv in
+  // the [0, 2*index_head_dim) lanes and score in the [2*index_head_dim,
+  // 4*index_head_dim) lanes (idx_coff_dim = 2*index_head_dim). The indexer
+  // forward consumes the owning tensor directly; the reference path uses
+  // split_index_state() to obtain narrow views of the same storage.
+  std::tuple<torch::Tensor, torch::Tensor> make_states(int64_t batch_size) {
     torch::Tensor index_cache =
         torch::zeros({16, 1, 1, config_.index_head_dim}, options_);
-    torch::Tensor kv_state =
-        torch::zeros({batch_size, 8, 2 * config_.index_head_dim},
-                     options_.dtype(torch::kFloat32));
-    torch::Tensor score_state =
-        torch::full({batch_size, 8, 2 * config_.index_head_dim},
-                    -std::numeric_limits<float>::infinity(),
-                    options_.dtype(torch::kFloat32));
-    return {index_cache, kv_state, score_state};
+    const int64_t idx_coff_dim = 2 * config_.index_head_dim;
+    torch::Tensor compress_index_state = torch::zeros(
+        {batch_size, 8, 2 * idx_coff_dim}, options_.dtype(torch::kFloat32));
+    compress_index_state
+        .narrow(/*dim=*/2,
+                /*start=*/idx_coff_dim,
+                /*length=*/idx_coff_dim)
+        .fill_(-std::numeric_limits<float>::infinity());
+    return {index_cache, compress_index_state};
+  }
+
+  // Returns [kv, score] narrow views of the owning compress_index_state,
+  // sharing its storage. Used to feed the CPU reference, which expects split
+  // pools.
+  std::tuple<torch::Tensor, torch::Tensor> split_index_state(
+      torch::Tensor& compress_index_state) const {
+    const int64_t idx_coff_dim = 2 * config_.index_head_dim;
+    torch::Tensor kv = compress_index_state.narrow(
+        /*dim=*/2, /*start=*/0, /*length=*/idx_coff_dim);
+    torch::Tensor score = compress_index_state.narrow(
+        /*dim=*/2, /*start=*/idx_coff_dim, /*length=*/idx_coff_dim);
+    return {kv, score};
   }
 
   TestConfig config_;
@@ -739,7 +756,7 @@ TEST_F(DeepseekV4IndexerTest, PrefillReturnsKernelSparseSlots) {
   RefOut expected =
       reference(x, qr, weights, ref_kv_state, ref_score_state, metadata);
 
-  auto [index_cache, kv_state, score_state] = make_states(2);
+  auto [index_cache, compress_index_state] = make_states(2);
   DeepseekV4IndexerCacheRefs cache_refs = make_cache_refs(metadata, 2);
   auto [compressed_sin, compressed_cos] =
       make_compressed_tables(*metadata.dsa_metadata, device_);
@@ -756,8 +773,7 @@ TEST_F(DeepseekV4IndexerTest, PrefillReturnsKernelSparseSlots) {
   auto [actual_topk, context_lens] = indexer->forward(x.to(device_),
                                                       qr.to(device_),
                                                       index_cache,
-                                                      kv_state,
-                                                      score_state,
+                                                      compress_index_state,
                                                       metadata,
                                                       cache_refs,
                                                       true,
@@ -791,18 +807,13 @@ TEST_F(DeepseekV4IndexerTest, UsesExplicitC4RefsWithDuplicateTokenCaches) {
   DeepseekV4IndexerCacheRefs cache_refs =
       make_cache_refs(selected_block_table, selected_slot_mapping, 1);
 
-  metadata.dsa_metadata->block_tables = {
-      {metadata.block_table,
-       selected_block_table,
-       cache_refs.index_state_kv_block_table,
-       cache_refs.index_state_score_block_table}};
-  metadata.dsa_metadata->slot_mappings = {{metadata.slot_mapping,
-                                           selected_slot_mapping,
-                                           torch::Tensor(),
-                                           torch::Tensor()}};
+  metadata.dsa_metadata->block_tables = {{metadata.block_table,
+                                          selected_block_table,
+                                          cache_refs.index_state_block_table}};
+  metadata.dsa_metadata->slot_mappings = {
+      {metadata.slot_mapping, selected_slot_mapping, torch::Tensor()}};
   caches_info_ = {{{0, DSACacheType::TOKEN, 4, 1},
                    {0, DSACacheType::TOKEN, 4, 1},
-                   {1, DSACacheType::SLIDING_WINDOW, 1, 8},
                    {1, DSACacheType::SLIDING_WINDOW, 1, 8}}};
   metadata.dsa_metadata->caches_info = &caches_info_;
 
@@ -822,7 +833,7 @@ TEST_F(DeepseekV4IndexerTest, UsesExplicitC4RefsWithDuplicateTokenCaches) {
   RefOut expected =
       reference(x, qr, weights, ref_kv_state, ref_score_state, metadata);
 
-  auto [index_cache, kv_state, score_state] = make_states(1);
+  auto [index_cache, compress_index_state] = make_states(1);
   auto [compressed_sin, compressed_cos] =
       make_compressed_tables(*metadata.dsa_metadata, device_);
   DeepseekV4Indexer indexer =
@@ -838,8 +849,7 @@ TEST_F(DeepseekV4IndexerTest, UsesExplicitC4RefsWithDuplicateTokenCaches) {
   auto [actual_topk, context_lens] = indexer->forward(x.to(device_),
                                                       qr.to(device_),
                                                       index_cache,
-                                                      kv_state,
-                                                      score_state,
+                                                      compress_index_state,
                                                       metadata,
                                                       cache_refs,
                                                       true,
@@ -865,7 +875,7 @@ TEST_F(DeepseekV4IndexerTest, UsesExplicitC4RefsWithDuplicateTokenCaches) {
 
 TEST_F(DeepseekV4IndexerTest, DecodeReturnsKernelSparseSlots) {
   std::unordered_map<std::string, torch::Tensor> weights = make_weights();
-  auto [index_cache, kv_state, score_state] = make_states(1);
+  auto [index_cache, compress_index_state] = make_states(1);
   DeepseekV4IndexerCacheRefs warmup_refs = make_cache_refs(
       make_block_table({{1}}).to(device_),
       torch::empty({0},
@@ -893,8 +903,7 @@ TEST_F(DeepseekV4IndexerTest, DecodeReturnsKernelSparseSlots) {
   indexer->forward(warmup_x.to(device_),
                    warmup_qr.to(device_),
                    index_cache,
-                   kv_state,
-                   score_state,
+                   compress_index_state,
                    warmup_metadata,
                    warmup_refs,
                    true,
@@ -911,16 +920,22 @@ TEST_F(DeepseekV4IndexerTest, DecodeReturnsKernelSparseSlots) {
       seeded("dsv4.indexer.decode.x", {1, config_.dim}, torch::kBFloat16);
   torch::Tensor qr = seeded(
       "dsv4.indexer.decode.qr", {1, config_.q_lora_rank}, torch::kBFloat16);
-  torch::Tensor ref_kv_state = kv_state.cpu().clone();
-  torch::Tensor ref_score_state = score_state.cpu().clone();
+  auto [kv_view, score_view] = split_index_state(compress_index_state);
+  torch::Tensor ref_kv_state = kv_view.cpu().clone();
+  torch::Tensor ref_score_state = score_view.cpu().clone();
+  int64_t ratio = 4;
+  ref_kv_state.slice(/*dim=*/1, /*start=*/ratio)
+      .copy_(ref_kv_state.slice(/*dim=*/1, /*start=*/0, /*length=*/ratio));
+  ref_score_state.slice(/*dim=*/1, /*start=*/ratio)
+      .copy_(ref_score_state.slice(
+          /*dim=*/1, /*start=*/0, /*length=*/ratio));
   RefOut expected =
       reference(x, qr, weights, ref_kv_state, ref_score_state, metadata);
 
   auto [actual_topk, context_lens] = indexer->forward(x.to(device_),
                                                       qr.to(device_),
                                                       index_cache,
-                                                      kv_state,
-                                                      score_state,
+                                                      compress_index_state,
                                                       metadata,
                                                       cache_refs,
                                                       false,
@@ -944,7 +959,7 @@ TEST_F(DeepseekV4IndexerTest, DecodeReturnsKernelSparseSlots) {
 
 TEST_F(DeepseekV4IndexerTest, ChunkedPrefillReturnsKernelSparseSlots) {
   std::unordered_map<std::string, torch::Tensor> weights = make_weights();
-  auto [index_cache, kv_state, score_state] = make_states(1);
+  auto [index_cache, compress_index_state] = make_states(1);
   DeepseekV4IndexerCacheRefs history_refs = make_cache_refs(
       make_block_table({{1, 2}}).to(device_),
       torch::tensor(
@@ -985,8 +1000,7 @@ TEST_F(DeepseekV4IndexerTest, ChunkedPrefillReturnsKernelSparseSlots) {
   indexer->forward(history_x.to(device_),
                    history_qr.to(device_),
                    index_cache,
-                   kv_state,
-                   score_state,
+                   compress_index_state,
                    history_metadata,
                    history_refs,
                    true,
@@ -1011,8 +1025,7 @@ TEST_F(DeepseekV4IndexerTest, ChunkedPrefillReturnsKernelSparseSlots) {
   auto [actual_topk, context_lens] = indexer->forward(x.to(device_),
                                                       qr.to(device_),
                                                       index_cache,
-                                                      kv_state,
-                                                      score_state,
+                                                      compress_index_state,
                                                       metadata,
                                                       cache_refs,
                                                       true,

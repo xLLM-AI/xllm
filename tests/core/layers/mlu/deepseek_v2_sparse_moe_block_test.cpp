@@ -89,7 +89,7 @@ class DeepseekV2SparseMoEBlockTest : public ::testing::Test {
     parallel_args_.process_group_ = global_pg_.get();
     parallel_args_.tp_group_ = tp_pg_.get();
     parallel_args_.single_rank_group_ = single_rank_pg_.get();
-    parallel_args_.sp_group_ = tp_pg_.get();
+    parallel_args_.cp_group_ = tp_pg_.get();
     parallel_args_.ep_size_ = 1;
   }
 
@@ -107,7 +107,7 @@ class DeepseekV2SparseMoEBlockTest : public ::testing::Test {
     parallel_args_.process_group_ = global_pg_.get();
     parallel_args_.tp_group_ = tp_pg_.get();
     parallel_args_.single_rank_group_ = single_rank_pg_.get();
-    parallel_args_.sp_group_ = tp_pg_.get();
+    parallel_args_.cp_group_ = tp_pg_.get();
     parallel_args_.dp_local_process_group_ = nullptr;
     parallel_args_.ep_size_ = ep_size;
     parallel_args_.moe_ep_group_ = global_pg_.get();
@@ -132,7 +132,7 @@ class DeepseekV2SparseMoEBlockTest : public ::testing::Test {
     parallel_args_.process_group_ = global_pg_.get();
     parallel_args_.tp_group_ = tp_pg_.get();
     parallel_args_.single_rank_group_ = single_rank_pg_.get();
-    parallel_args_.sp_group_ = tp_pg_.get();
+    parallel_args_.cp_group_ = tp_pg_.get();
     parallel_args_.dp_local_process_group_ = dp_pg_.get();
     parallel_args_.ep_size_ = ep_size;
     parallel_args_.moe_ep_group_ = global_pg_.get();
@@ -239,9 +239,9 @@ class DeepseekV2SparseMoEBlockTest : public ::testing::Test {
   std::unique_ptr<test::MockProcessGroup> tp_pg_;
   std::unique_ptr<test::MockProcessGroup> single_rank_pg_;
 
-  v32_sp::DeepseekV32SPContext make_sp_ctx(
+  v32_cp::DeepseekV32CPContext make_sp_ctx(
       std::vector<int32_t> tokens_per_rank = {2, 2}) const {
-    v32_sp::DeepseekV32SPContext sp_ctx;
+    v32_cp::DeepseekV32CPContext sp_ctx;
     sp_ctx.rank = 0;
     sp_ctx.process_group = tp_pg_.get();
     sp_ctx.comm_plan.tokens_per_rank = std::move(tokens_per_rank);

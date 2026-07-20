@@ -86,7 +86,8 @@ std::vector<Block> SingleBlockManager::allocate_shared(
     const Slice<int32_t>& /*token_ids*/,
     const Slice<Block>& /*existed_shared_blocks*/,
     const MMData& /*mm_data*/,
-    const Slice<XXH3Key>& /*block_hashes*/) {
+    const Slice<XXH3Key>& /*block_hashes*/,
+    size_t* /*matched_tokens*/) {
   NOT_IMPLEMENTED();
   return {};
 }

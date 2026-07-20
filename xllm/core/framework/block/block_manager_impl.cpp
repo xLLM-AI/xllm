@@ -52,8 +52,18 @@ BlockManagerImpl::BlockManagerImpl(const Options& options)
   CHECK_GT(options.block_size(), 0) << "Block size must be positive";
   if (options_.enable_prefix_cache()) {
     PrefixCache::Options prefix_cache_options;
-    prefix_cache_options.block_size(options.block_size())
-        .hasher_type(options.hasher_type());
+    // A prefix cache indexes on a single block-boundary stride. For KV that is
+    // the KV block size; for the linear-state checkpoint index it is the
+    // prefill chunk stride. Feed the right one into the cache's single
+    // block_size slot so the LINEAR cache reuses the base by-block machinery
+    // verbatim.
+    const int32_t prefix_cache_block_size =
+        options.block_type() == BlockType::LINEAR
+            ? options.linear_chunk_stride()
+            : options.block_size();
+    prefix_cache_options.block_size(prefix_cache_block_size)
+        .hasher_type(options.hasher_type())
+        .block_type(options.block_type());
     prefix_cache_ = create_prefix_cache(prefix_cache_options);
     CHECK(prefix_cache_) << "Failed to create prefix cache!";
   }
@@ -159,24 +169,32 @@ std::vector<Block> BlockManagerImpl::allocate_shared(
     const Slice<int32_t>& token_ids,
     const Slice<Block>& existed_shared_blocks,
     const MMData& mm_data,
-    const Slice<XXH3Key>& block_hashes) {
+    const Slice<XXH3Key>& block_hashes,
+    size_t* matched_tokens) {
   // only allocate shared blocks for prefill sequences
   if (options_.enable_prefix_cache()) {
     AUTO_COUNTER(prefix_cache_latency_seconds_match);
 
-    std::vector<Block> shared_blocks = prefix_cache_->match(
-        token_ids, existed_shared_blocks, mm_data, block_hashes);
+    size_t prefix_length = 0;
+    std::vector<Block> shared_blocks =
+        prefix_cache_->match(token_ids,
+                             existed_shared_blocks,
+                             mm_data,
+                             block_hashes,
+                             &prefix_length);
 
-    const size_t prefix_length =
-        shared_blocks.empty() ? 0
-                              : shared_blocks.size() * shared_blocks[0].size();
     COUNTER_ADD(prefix_cache_match_length_total, prefix_length);
+    VLOG(1) << "Prefix cache matched " << shared_blocks.size()
+            << " blocks, prefix_length=" << prefix_length;
 
     // update effective block usage
     for (const auto& block : shared_blocks) {
       if (mark_used(&usage_accounted_ids_, block.id())) {
         num_used_blocks_.fetch_add(1, std::memory_order_relaxed);
       }
+    }
+    if (matched_tokens != nullptr) {
+      *matched_tokens = prefix_length;
     }
     return shared_blocks;
   }

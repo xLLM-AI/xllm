@@ -169,6 +169,7 @@ DECLARE_HISTOGRAM(num_generated_tokens_per_request);
 
 DECLARE_HISTOGRAM(time_to_first_token_latency_milliseconds);
 DECLARE_HISTOGRAM(inter_token_latency_milliseconds);
+DECLARE_HISTOGRAM(speculative_per_token_latency_milliseconds);
 
 // latency of responding in seconds
 DECLARE_COUNTER(responsing_latency_seconds_stream);
@@ -195,6 +196,7 @@ DECLARE_COUNTER(speculative_execution_latency_seconds_target);
 DECLARE_COUNTER(speculative_execution_latency_seconds_validation);
 DECLARE_COUNTER(speculative_num_accepted_tokens_total);
 DECLARE_COUNTER(speculative_num_draft_tokens_total);
+DECLARE_GAUGE(speculative_mean_tokens_per_decode_step);
 
 // latency of proto conversion in seconds
 DECLARE_COUNTER(proto_latency_seconds_proto2i);

@@ -26,19 +26,24 @@ class IndexedKVCacheImpl final : public KVCacheImpl {
                      const KVCacheCreateOptions& create_options);
 
   torch::Tensor get_index_cache() const override;
+  std::optional<torch::Tensor> get_k_cache_scale() const override;
+  std::optional<torch::Tensor> get_v_cache_scale() const override;
+  std::optional<torch::Tensor> get_indexer_cache_scale() const override;
 
   bool empty() const override;
 
   std::vector<std::vector<int64_t>> get_shapes() const override;
 
   void swap_blocks(torch::Tensor& src_tensor,
-                   torch::Tensor& dst_tensor) override {
-    NOT_IMPLEMENTED();
-  };
+                   torch::Tensor& dst_tensor) override;
 
  private:
   torch::Tensor index_cache_;
+  std::optional<torch::Tensor> index_cache_scale_;
+  std::optional<torch::Tensor> key_cache_scale_;
+  std::optional<torch::Tensor> value_cache_scale_;
   std::vector<int64_t> index_cache_shape_;
+  std::vector<int64_t> index_cache_scale_shape_;
 };
 
 }  // namespace xllm

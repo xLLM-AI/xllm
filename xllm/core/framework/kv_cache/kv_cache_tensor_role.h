@@ -28,6 +28,15 @@ class KVCacheTensorRole {
     INDEX = 2,
     CONV = 3,
     SSM = 4,
+    INDEX_SCALE = 5,
+    KEY_SCALE = 6,
+    VALUE_SCALE = 7,
+    WINDOW = 8,
+    CACHE_SCALE = 9,
+    KV_STATE = 10,
+    SCORE_STATE = 11,
+    INDEX_KV_STATE = 12,
+    INDEX_SCORE_STATE = 13,
     INVALID = -1,
   };
 
@@ -39,10 +48,28 @@ class KVCacheTensorRole {
       value_ = VALUE;
     } else if (str == "INDEX" || str == "index") {
       value_ = INDEX;
+    } else if (str == "INDEX_SCALE" || str == "index_scale") {
+      value_ = INDEX_SCALE;
     } else if (str == "CONV" || str == "conv") {
       value_ = CONV;
     } else if (str == "SSM" || str == "ssm") {
       value_ = SSM;
+    } else if (str == "KEY_SCALE" || str == "key_scale") {
+      value_ = KEY_SCALE;
+    } else if (str == "VALUE_SCALE" || str == "value_scale") {
+      value_ = VALUE_SCALE;
+    } else if (str == "WINDOW" || str == "window") {
+      value_ = WINDOW;
+    } else if (str == "CACHE_SCALE" || str == "cache_scale") {
+      value_ = CACHE_SCALE;
+    } else if (str == "KV_STATE" || str == "kv_state") {
+      value_ = KV_STATE;
+    } else if (str == "SCORE_STATE" || str == "score_state") {
+      value_ = SCORE_STATE;
+    } else if (str == "INDEX_KV_STATE" || str == "index_kv_state") {
+      value_ = INDEX_KV_STATE;
+    } else if (str == "INDEX_SCORE_STATE" || str == "index_score_state") {
+      value_ = INDEX_SCORE_STATE;
     } else {
       value_ = INVALID;
     }
@@ -65,10 +92,28 @@ class KVCacheTensorRole {
       return "value";
     } else if (this->value_ == INDEX) {
       return "index";
+    } else if (this->value_ == INDEX_SCALE) {
+      return "index_scale";
     } else if (this->value_ == CONV) {
       return "conv";
     } else if (this->value_ == SSM) {
       return "ssm";
+    } else if (this->value_ == KEY_SCALE) {
+      return "key_scale";
+    } else if (this->value_ == VALUE_SCALE) {
+      return "value_scale";
+    } else if (this->value_ == WINDOW) {
+      return "window";
+    } else if (this->value_ == CACHE_SCALE) {
+      return "cache_scale";
+    } else if (this->value_ == KV_STATE) {
+      return "kv_state";
+    } else if (this->value_ == SCORE_STATE) {
+      return "score_state";
+    } else if (this->value_ == INDEX_KV_STATE) {
+      return "index_kv_state";
+    } else if (this->value_ == INDEX_SCORE_STATE) {
+      return "index_score_state";
     } else {
       return "invalid";
     }

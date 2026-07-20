@@ -49,16 +49,18 @@ class KVCache final {
 
   std::optional<torch::Tensor> get_k_cache_scale() const;
   std::optional<torch::Tensor> get_v_cache_scale() const;
+  std::optional<torch::Tensor> get_indexer_cache_scale() const;
 
   torch::Tensor get_conv_cache() const;
   torch::Tensor get_ssm_cache() const;
   std::vector<KVCacheTensor> get_cache_tensors() const;
-  torch::Tensor get_indexer_cache_scale() const;
   torch::Tensor get_swa_cache() const;
   torch::Tensor get_compress_kv_state() const;
   torch::Tensor get_compress_score_state() const;
   torch::Tensor get_compress_index_kv_state() const;
   torch::Tensor get_compress_index_score_state() const;
+  torch::Tensor get_compress_state() const;
+  torch::Tensor get_compress_index_state() const;
   std::vector<std::vector<int64_t>> get_shapes();
 
   bool empty() const;

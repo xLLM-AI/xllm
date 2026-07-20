@@ -19,15 +19,39 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <memory>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
 
+#include "common/global_flags.h"
 #include "core/framework/config/scheduler_config.h"
 #include "distributed_runtime/engine.h"
+#include "framework/block/block_manager_pool_test_peer.h"
+#include "framework/block/linear_state_block_manager.h"
 #include "util/utils.h"
 
 namespace xllm {
 
 namespace {
+
+template <typename T>
+class ScopedValue final {
+ public:
+  ScopedValue(T* target, T value) : target_(target), old_(*target) {
+    *target_ = value;
+  }
+  ~ScopedValue() { *target_ = old_; }
+
+  ScopedValue(const ScopedValue&) = delete;
+  ScopedValue& operator=(const ScopedValue&) = delete;
+
+ private:
+  T* target_;
+  T old_;
+};
+
 class FakeTokenizer : public Tokenizer {
  public:
   bool encode(const std::string_view& text,
@@ -51,11 +75,27 @@ class FakeTokenizer : public Tokenizer {
 
 class FakeEngine : public Engine {
  public:
-  FakeEngine(int32_t num_blocks, int32_t block_size) {
+  FakeEngine(int32_t num_blocks,
+             int32_t block_size,
+             bool enable_linear_attention = false,
+             bool enable_prefix_cache = false,
+             int32_t linear_chunk_stride = -1) {
     BlockManagerPool::Options opt;
     opt.num_blocks_ = num_blocks;
     opt.block_size_ = block_size;
-    opt.enable_prefix_cache_ = false;  // we dont consider prefix cache here
+    opt.max_seqs_per_batch_ = 1024;
+    opt.enable_prefix_cache_ = enable_prefix_cache;
+    opt.enable_linear_state_ = enable_linear_attention;
+    if (enable_linear_attention) {
+      model_args_.layer_types({"linear_attention"});
+      // The unified linear-state slot pool needs a positive physical capacity;
+      // size it generously so tests never hit slot pressure.
+      opt.linear_state_num_slots_ = num_blocks + 2;
+      // Chunk stride the LINEAR checkpoint index probes with. Mirrors the
+      // engine, which captures it from the scheduler config at construction so
+      // the override never reads a global singleton.
+      opt.linear_chunk_stride_ = linear_chunk_stride;
+    }
     fake_tokenizer_ = std::make_unique<FakeTokenizer>();
     fake_block_manager_ = std::make_unique<BlockManagerPool>(opt, 1);
   }
@@ -65,7 +105,7 @@ class FakeEngine : public Engine {
   BlockManagerPool* block_manager_pool() const {
     return fake_block_manager_.get();
   }
-  const ModelArgs& model_args() const { NOT_IMPLEMENTED(); }
+  const ModelArgs& model_args() const { return model_args_; }
   const TokenizerArgs& tokenizer_args() const { NOT_IMPLEMENTED(); }
   std::vector<int64_t> get_active_activation_memory() const {
     NOT_IMPLEMENTED();
@@ -75,20 +115,17 @@ class FakeEngine : public Engine {
  private:
   std::unique_ptr<Tokenizer> fake_tokenizer_;
   std::unique_ptr<BlockManagerPool> fake_block_manager_;
+  ModelArgs model_args_;
 };
 
-template <typename T>
-class ScopedConfigValue final {
+class TestableChunkedPrefillScheduler : public ChunkedPrefillScheduler {
  public:
-  ScopedConfigValue(T& value, T new_value) : value_(value), old_(value) {
-    value_ = new_value;
-  }
+  using ChunkedPrefillScheduler::allocate_shared_blocks_for;
+  using ChunkedPrefillScheduler::get_prefill_handle_tokens;
 
-  ~ScopedConfigValue() { value_ = old_; }
-
- private:
-  T& value_;
-  T old_;
+  TestableChunkedPrefillScheduler(Engine* engine,
+                                  const ContinuousScheduler::Options& options)
+      : ChunkedPrefillScheduler(engine, options) {}
 };
 
 ContinuousScheduler::Options create_scheduler_options(
@@ -486,9 +523,9 @@ TEST(ChunkedPrefillSchedulerTest, OnPrefillPreemptOffDecode) {
   // set chunked max_tokens budgets 10000 per step
   ContinuousScheduler::Options opt = create_scheduler_options(
       10000, 256, 0, max_tokens_per_chunk_for_prefill, 1);
-  ScopedConfigValue<double> memory_threshold(
-      SchedulerConfig::get_instance()
-          .prefill_scheduling_memory_usage_threshold(),
+  ScopedValue<double> memory_threshold(
+      &SchedulerConfig::get_instance()
+           .prefill_scheduling_memory_usage_threshold(),
       2.0);
 
   {
@@ -712,6 +749,156 @@ TEST(ChunkedPrefillSchedulerTest, LatencySchedule) {
   EXPECT_EQ(scheduler->get_running_requests().size(), 4);
   EXPECT_EQ(running_sequences_budgets.size(), 4);
   EXPECT_EQ(running_sequences_budgets[3], max_tokens_per_chunk_for_prefill);
+}
+
+TEST(ChunkedPrefillSchedulerTest, LinearStateSafePrefillTokens) {
+  struct TestCase {
+    const char* name;
+    int32_t block_num;
+    int32_t block_size;
+    int32_t max_tokens_per_batch;
+    int32_t max_tokens_per_chunk_for_prefill;
+    int32_t prompt_len;
+    size_t allocated_tokens;
+    size_t cached_tokens;
+    size_t token_budget;
+    size_t expected_handle_tokens;
+  };
+
+  const std::vector<TestCase> test_cases = {
+      {"DefersWhenBudgetCannotReachBlockBoundary",
+       /*block_num=*/32,
+       /*block_size=*/128,
+       /*max_tokens_per_batch=*/64,
+       /*max_tokens_per_chunk_for_prefill=*/64,
+       /*prompt_len=*/512,
+       /*allocated_tokens=*/128,
+       /*cached_tokens=*/128,
+       /*token_budget=*/64,
+       /*expected_handle_tokens=*/0},
+      {"StopsAtLastBlockBoundaryBeforeTail",
+       /*block_num=*/32,
+       /*block_size=*/128,
+       /*max_tokens_per_batch=*/2048,
+       /*max_tokens_per_chunk_for_prefill=*/2048,
+       /*prompt_len=*/1200,
+       /*allocated_tokens=*/0,
+       /*cached_tokens=*/0,
+       /*token_budget=*/2048,
+       /*expected_handle_tokens=*/1152},
+      {"KeepsChunkBudgetAtBlockBoundary",
+       /*block_num=*/32,
+       /*block_size=*/4,
+       /*max_tokens_per_batch=*/64,
+       /*max_tokens_per_chunk_for_prefill=*/16,
+       /*prompt_len=*/64,
+       /*allocated_tokens=*/0,
+       /*cached_tokens=*/0,
+       /*token_budget=*/16,
+       /*expected_handle_tokens=*/16},
+      {"RoundsChunkBudgetDownToBlockBoundary",
+       /*block_num=*/32,
+       /*block_size=*/4,
+       /*max_tokens_per_batch=*/64,
+       /*max_tokens_per_chunk_for_prefill=*/17,
+       /*prompt_len=*/64,
+       /*allocated_tokens=*/0,
+       /*cached_tokens=*/0,
+       /*token_budget=*/17,
+       /*expected_handle_tokens=*/16},
+  };
+
+  ScopedValue<bool> prefix_cache_guard(&FLAGS_enable_prefix_cache, true);
+  for (const TestCase& test_case : test_cases) {
+    SCOPED_TRACE(test_case.name);
+    ContinuousScheduler::Options opt =
+        create_scheduler_options(test_case.max_tokens_per_batch,
+                                 /*max_seqs_per_batch=*/256,
+                                 /*num_speculative_tokens=*/0,
+                                 test_case.max_tokens_per_chunk_for_prefill,
+                                 /*dp_size=*/1);
+    auto engine = std::make_unique<FakeEngine>(test_case.block_num,
+                                               test_case.block_size,
+                                               /*enable_linear_attention=*/true,
+                                               /*enable_prefix_cache=*/true);
+    auto scheduler =
+        std::make_unique<TestableChunkedPrefillScheduler>(engine.get(), opt);
+
+    auto requests = generate_request(
+        {test_case.prompt_len}, {10}, std::nullopt, std::nullopt, 30000);
+    Sequence* sequence = requests[0]->sequences()[0].get();
+    if (test_case.allocated_tokens > 0) {
+      ASSERT_TRUE(engine->block_manager_pool()->allocate(
+          sequence, test_case.allocated_tokens));
+    }
+    sequence->kv_state().set_kv_cache_tokens_num(test_case.cached_tokens);
+
+    EXPECT_EQ(scheduler->get_prefill_handle_tokens(
+                  sequence, test_case.token_budget, test_case.cached_tokens),
+              test_case.expected_handle_tokens);
+  }
+}
+
+TEST(ChunkedPrefillSchedulerTest,
+     LinearStateChunkedPrefillMatchesAtEveryChunkBoundary) {
+  ScopedValue<bool> prefix_cache_guard(&FLAGS_enable_prefix_cache, true);
+  ScopedValue<int32_t> match_frequency_guard(&FLAGS_chunked_match_frequency, 2);
+
+  int32_t block_num = 32;
+  int32_t block_size = 128;
+  int32_t max_tokens_per_chunk_for_prefill = 128;
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(max_tokens_per_chunk_for_prefill,
+                               256,
+                               0,
+                               max_tokens_per_chunk_for_prefill,
+                               1);
+  // The LINEAR checkpoint index probes its hash domain with the chunk stride
+  // the engine captures at construction. Thread the same stride into the pool
+  // here so match() runs with the real domain instead of bailing on the -1
+  // default.
+  auto engine = std::make_unique<FakeEngine>(block_num,
+                                             block_size,
+                                             /*enable_linear_attention=*/true,
+                                             /*enable_prefix_cache=*/true,
+                                             max_tokens_per_chunk_for_prefill);
+  auto scheduler =
+      std::make_unique<TestableChunkedPrefillScheduler>(engine.get(), opt);
+  EXPECT_TRUE(scheduler != nullptr);
+
+  auto active_requests =
+      generate_request({512}, {10}, std::nullopt, std::nullopt, 30000);
+  auto* active_seq = active_requests[0]->sequences()[0].get();
+  ASSERT_TRUE(engine->block_manager_pool()->allocate(active_seq, 128));
+  active_seq->kv_state().set_kv_cache_tokens_num(128);
+
+  auto cached_requests =
+      generate_request({256}, {10}, std::nullopt, std::nullopt, 30000);
+  auto* cached_seq = cached_requests[0]->sequences()[0].get();
+  ASSERT_TRUE(engine->block_manager_pool()->allocate(cached_seq,
+                                                     cached_seq->num_tokens()));
+  cached_seq->kv_state().set_kv_cache_tokens_num(cached_seq->num_tokens());
+  engine->block_manager_pool()->cache(cached_seq);
+  const XXH3Key checkpoint_hash(cached_seq->kv_state()
+                                    .blocks(BlockType::KV)[1]
+                                    .get_immutable_hash_value());
+  LinearStateBlockManager* linear_leaf = BlockManagerPoolTestPeer::linear_leaf(
+      *engine->block_manager_pool(), /*dp_rank=*/0);
+  ASSERT_NE(linear_leaf, nullptr);
+  Block checkpoint_block = linear_leaf->allocate();
+  ASSERT_TRUE(checkpoint_block.is_valid());
+  const int32_t checkpoint_slot = checkpoint_block.id();
+  ASSERT_GE(checkpoint_slot, 1);
+  checkpoint_block.set_hash_value(checkpoint_hash.data);
+  std::vector<Block> checkpoint;
+  checkpoint.emplace_back(std::move(checkpoint_block));
+  linear_leaf->cache(checkpoint);
+  engine->block_manager_pool()->deallocate_without_cache(cached_seq);
+
+  scheduler->allocate_shared_blocks_for(active_seq);
+  EXPECT_EQ(active_seq->kv_state().shared_blocks_num(BlockType::KV), 2u);
+  EXPECT_EQ(active_seq->kv_state().num_blocks(BlockType::KV), 2u);
+  EXPECT_EQ(active_seq->kv_state().kv_cache_tokens_num(), 256u);
 }
 
 }  // namespace xllm

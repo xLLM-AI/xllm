@@ -56,10 +56,13 @@ class Qwen3GatedDeltaNetBaseImpl : public torch::nn::Module {
       const torch::Tensor& hidden_states) = 0;
   virtual std::pair<torch::Tensor, torch::Tensor> project_flat_inputs(
       const torch::Tensor& hidden_states) = 0;
+  // Qwen3.5 overrides this to project and reshape its separate qkv/z/b/a
+  // weights in every forward mode. Qwen3Next keeps qkvz/ba packed and returns
+  // nullopt to select the fused-split fallback.
   virtual std::optional<
       std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>
-  project_prefill_split_inputs(const torch::Tensor& hidden_states,
-                               const AttentionMetadata& attn_metadata) {
+  project_split_inputs(const torch::Tensor& hidden_states,
+                       const AttentionMetadata& attn_metadata) {
     return std::nullopt;
   }
   virtual bool use_fla_ssm_state_layout() const { return false; }
@@ -77,8 +80,12 @@ class Qwen3GatedDeltaNetBaseImpl : public torch::nn::Module {
   torch::Tensor reshape_qkvz_unpad(const AttentionMetadata& attn_metadata,
                                    const torch::Tensor& padded_qkvz) const;
 
-  torch::Tensor reshape_qkvz_with_pad(const AttentionMetadata& attn_metadata,
-                                      const torch::Tensor& qkvz) const;
+  // Projection outputs are packed as [total_tokens, dim], while GDN kernels
+  // consume dense [batch, max_query_len, dim] tensors. Split the packed tokens
+  // by query length and pad each sequence before entering the kernels.
+  torch::Tensor reshape_projected_tokens_with_pad(
+      const AttentionMetadata& attn_metadata,
+      const torch::Tensor& projected_tokens) const;
 
   std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> process_mixed_qkv(
       torch::Tensor& mixed_qkv) const;

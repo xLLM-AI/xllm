@@ -18,8 +18,10 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
+#include <optional>
 #include <tuple>
 
+#include "framework/model/model_args.h"
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "framework/state_dict/utils.h"
@@ -44,38 +46,47 @@ class CompressorImpl : public torch::nn::Module {
       double norm_eps,
       const torch::TensorOptions& options =
           torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCPU),
+      const ModelArgs& args = ModelArgs{},
       const QuantArgs& quant_args = QuantArgs{});
 
-  torch::Tensor forward(const AttentionMetadata& attn_metadata,
-                        torch::Tensor& hidden_states,
-                        torch::Tensor& kv_cache,
-                        const torch::Tensor& slot_mapping,
-                        std::tuple<torch::Tensor, torch::Tensor>& kv_states,
-                        std::tuple<torch::Tensor, torch::Tensor>& block_tables,
-                        const torch::Tensor& compressed_sin_table,
-                        const torch::Tensor& compressed_cos_table);
+  torch::Tensor forward(
+      const AttentionMetadata& attn_metadata,
+      torch::Tensor& hidden_states,
+      torch::Tensor& kv_cache,
+      const torch::Tensor& slot_mapping,
+      torch::Tensor& state_cache,
+      const torch::Tensor& state_block_table,
+      const torch::Tensor& compressed_sin_table,
+      const torch::Tensor& compressed_cos_table,
+      std::optional<torch::Tensor> projected_kv = std::nullopt,
+      std::optional<torch::Tensor> projected_score = std::nullopt);
 
   torch::Tensor forward_decode(
       const AttentionMetadata& attn_metadata,
       torch::Tensor& hidden_states,
       torch::Tensor& kv_cache,
       const torch::Tensor& slot_mapping,
-      std::tuple<torch::Tensor, torch::Tensor>& kv_states,
-      std::tuple<torch::Tensor, torch::Tensor>& block_tables,
+      torch::Tensor& state_cache,
+      const torch::Tensor& state_block_table,
       const torch::Tensor& compressed_sin_table,
-      const torch::Tensor& compressed_cos_table);
+      const torch::Tensor& compressed_cos_table,
+      std::optional<torch::Tensor> projected_kv = std::nullopt,
+      std::optional<torch::Tensor> projected_score = std::nullopt);
 
   torch::Tensor forward_prefill(
       const AttentionMetadata& attn_metadata,
       torch::Tensor& hidden_states,
       torch::Tensor& kv_cache,
       const torch::Tensor& slot_mapping,
-      std::tuple<torch::Tensor, torch::Tensor>& kv_states,
-      std::tuple<torch::Tensor, torch::Tensor>& block_tables,
+      torch::Tensor& state_cache,
+      const torch::Tensor& state_block_table,
       const torch::Tensor& compressed_sin_table,
-      const torch::Tensor& compressed_cos_table);
+      const torch::Tensor& compressed_cos_table,
+      std::optional<torch::Tensor> projected_kv = std::nullopt,
+      std::optional<torch::Tensor> projected_score = std::nullopt);
 
-  void load_state_dict(const StateDict& state_dict);
+  void load_state_dict(const StateDict& state_dict,
+                       bool skip_proj_weights = false);
 
  private:
   ReplicatedLinear wkv_{nullptr};

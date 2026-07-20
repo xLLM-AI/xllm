@@ -278,24 +278,39 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
   }
 }
 
-std::pair<torch::Tensor, std::optional<torch::List<int64_t>>>
-FusedMoEImpl::prepare_group_gemm_weight_scale(
-    const torch::Tensor& b_scale) const {
-  if (moe_weight_bits_ != 4 || b_scale.dim() != 3) {
-    return {b_scale, std::nullopt};
+void FusedMoEImpl::prepare_scale_layout() {
+  if (scale_layout_prepared_) {
+    return;
+  }
+  scale_layout_prepared_ = true;
+
+  // Only the groupwise W4 path carries a 3D scale; the per-channel path keeps
+  // a 2D scale with no per-group quant_flag, so it needs no permute.
+  const bool needs_layout = is_smoothquant_ && moe_weight_bits_ == 4 &&
+                            w13_scale_.defined() && w13_scale_.dim() == 3;
+  if (!needs_layout) {
+    return;
   }
 
-  torch::List<int64_t> quant_flag;
-  const int64_t num_k_groups = b_scale.size(2);
-  const int64_t num_experts = b_scale.size(0);
+  auto permute_in_place = [](torch::Tensor& scale) {
+    scale.set_data(scale.permute({2, 0, 1}).contiguous());
+  };
+  permute_in_place(w13_scale_);
+  permute_in_place(w2_scale_);
+
+  const int64_t num_experts = w13_scale_.size(1);
+  const int64_t num_w13_groups = w13_scale_.size(0);
+  const int64_t num_w2_groups = w2_scale_.size(0);
+  w13_scale_quant_flag_ = torch::List<int64_t>();
+  w2_scale_quant_flag_ = torch::List<int64_t>();
   for (int64_t expert_id = 0; expert_id < num_experts; ++expert_id) {
-    for (int64_t group_id = 0; group_id < num_k_groups; ++group_id) {
-      quant_flag.emplace_back(4);
+    for (int64_t group_id = 0; group_id < num_w13_groups; ++group_id) {
+      w13_scale_quant_flag_.emplace_back(4);
+    }
+    for (int64_t group_id = 0; group_id < num_w2_groups; ++group_id) {
+      w2_scale_quant_flag_.emplace_back(4);
     }
   }
-
-  // torch_mlu_ops quant_flag path expects b_scale as [group_cols, experts, n].
-  return {b_scale.permute({2, 0, 1}).contiguous(), quant_flag};
 }
 
 torch::Tensor FusedMoEImpl::create_group_gemm_output(
@@ -377,14 +392,16 @@ torch::Tensor FusedMoEImpl::compute_routed_experts(
     group_gemm_params.b = w13_;
     group_gemm_params.token_count = selected_expert_info.token_count_slice;
     if (is_smoothquant_) {
-      auto [b_scale, quant_flag] = prepare_group_gemm_weight_scale(w13_scale_);
+      prepare_scale_layout();
       torch::Tensor a_scale =
           selected_expert_info.input_scale.value().flatten();
       selected_expert_info.input_scale =
           view_as_dtype(a_scale, torch::kFloat32);
       group_gemm_params.a_scale = selected_expert_info.input_scale;
-      group_gemm_params.b_scale = b_scale;
-      group_gemm_params.quant_flag = quant_flag;
+      group_gemm_params.b_scale = w13_scale_;
+      if (!w13_scale_quant_flag_.empty()) {
+        group_gemm_params.quant_flag = w13_scale_quant_flag_;
+      }
     }
     group_gemm_params.max_dim = group_gemm_max_dim;
     group_gemm_params.trans_a = false;
@@ -452,10 +469,12 @@ torch::Tensor FusedMoEImpl::compute_routed_experts(
     group_gemm_params.b = w2_;
     group_gemm_params.token_count = selected_expert_info.token_count_slice;
     if (is_smoothquant_) {
-      auto [b_scale, quant_flag] = prepare_group_gemm_weight_scale(w2_scale_);
+      prepare_scale_layout();
       group_gemm_params.a_scale = act_out_scale;
-      group_gemm_params.b_scale = b_scale;
-      group_gemm_params.quant_flag = quant_flag;
+      group_gemm_params.b_scale = w2_scale_;
+      if (!w2_scale_quant_flag_.empty()) {
+        group_gemm_params.quant_flag = w2_scale_quant_flag_;
+      }
     }
     group_gemm_params.max_dim = group_gemm_max_dim;
     group_gemm_params.trans_a = false;

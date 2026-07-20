@@ -475,6 +475,25 @@ TEST(DraftProbsBuilderTest, BuildValidateTensorsSelectedOnly) {
       torch::tensor({{0.3f, 0.5f}, {0.4f, 0.6f}}, torch::kFloat32)));
 }
 
+TEST(DraftProbsBuilderTest, BuildValidateTensorsSkipsGreedyProbs) {
+  std::vector<torch::Tensor> token_steps = {
+      torch::tensor({3, 4}, torch::kInt64),
+      torch::tensor({5, 6}, torch::kInt64)};
+  std::vector<torch::Tensor> probs_steps(token_steps.size());
+
+  auto [draft_token_ids, draft_probs] =
+      draftProbs::build_validate_tensors(token_steps,
+                                         probs_steps,
+                                         /*batch_size=*/2,
+                                         /*vocab_size=*/8,
+                                         /*enable_opt_validate_probs=*/true,
+                                         /*draft_probs_required=*/false);
+
+  EXPECT_TRUE(torch::equal(draft_token_ids,
+                           torch::tensor({{3, 5}, {4, 6}}, torch::kInt64)));
+  EXPECT_FALSE(draft_probs.defined());
+}
+
 TEST(DraftProbsBuilderTest, BuildValidateTensorsRecoveredDense) {
   std::vector<torch::Tensor> token_steps = {
       torch::tensor({1, 2}, torch::kInt64),

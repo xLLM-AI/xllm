@@ -255,6 +255,10 @@ class ContinuousScheduler : public Scheduler {
   void clear_mtp_bootstrap(Request* request);
 
  protected:
+  // Rounds a per-step wall-clock latency to an amortized per-token latency,
+  // i.e. round(tbt_ms / num_tokens). num_tokens must be > 0.
+  static int64_t amortized_token_latency_ms(int64_t tbt_ms, size_t num_tokens);
+
   const Options options_;
 
   // the engine to run the batch
@@ -289,6 +293,11 @@ class ContinuousScheduler : public Scheduler {
   std::unique_ptr<ProfileManager> profile_manager_;
 
   bool enable_prefix_cache_ = false;
+
+  // Cached once at construction (mirrors enable_prefix_cache_): the model's
+  // layer set is immutable, so the hot scheduling path must not re-scan
+  // layer_types() with std::any_of on every allocate.
+  bool has_linear_attention_layers_ = false;
 
   bool enable_in_batch_prefix_cache_ = false;
 

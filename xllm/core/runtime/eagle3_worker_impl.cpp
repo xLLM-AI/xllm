@@ -54,7 +54,16 @@ Eagle3WorkerImpl::Eagle3WorkerImpl(const ParallelArgs& parallel_args,
                     eagle3_main_options(options),
                     eagle3_draft_options(options),
                     ::xllm::SpeculativeConfig::get_instance()
-                        .enable_opt_validate_probs()) {}
+                        .enable_opt_validate_probs()) {
+  // EAGLE-3 drives the draft from the target's captured intermediate-layer
+  // aux hidden states. Context parallelism only exposes the lm_head-gathered
+  // final hidden (see llm_worker_impl.cpp), not the aux hidden, so the draft
+  // would silently receive the wrong tensor. Reject cp_size > 1 until
+  // aux-hidden plumbing under CP is implemented.
+  CHECK_LE(parallel_args.cp_size(), 1)
+      << "EAGLE-3 speculative decoding does not support context parallelism "
+         "(cp_size > 1).";
+}
 
 bool Eagle3WorkerImpl::init_model(const std::string& model_weights_path,
                                   int32_t random_seed,

@@ -30,6 +30,11 @@ limitations under the License.
 namespace xllm {
 
 struct ModelArgs {
+  // Expose every plain-data field to the generic property reflection layer so
+  // the embedded Python model executor can receive the full, already-parsed
+  // config without a hand-maintained field whitelist (see property_reflect.h).
+  REFLECT_PROPERTIES(ModelArgs);
+
   PROPERTY(std::string, model_type);
 
   PROPERTY(std::string, dtype);

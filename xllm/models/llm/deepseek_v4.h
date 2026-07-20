@@ -812,6 +812,13 @@ class DeepseekV4ModelImpl
                      kv_caches[i],
                      modified_input_params,
                      tokens);
+#if defined(USE_NPU)
+      if (modified_input_params.parallel.layer_synchronizer != nullptr &&
+          !modified_input_params.parallel.layer_synchronizer->record_event(
+              static_cast<int64_t>(i), runtime_device.index())) {
+        return ModelOutput();
+      }
+#endif
     }
     h = hc_head(h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);

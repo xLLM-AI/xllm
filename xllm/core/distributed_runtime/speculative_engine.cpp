@@ -97,27 +97,9 @@ bool SpeculativeEngine::init_model() {
       return false;
     }
 
-    // check if the tokenizers are compatible
-    const auto* draft_tokenizer = draft_engine_->tokenizer();
-    const auto* target_tokenizer = engine_->tokenizer();
-    if (draft_tokenizer->vocab_size() != target_tokenizer->vocab_size()) {
-      LOG(ERROR) << "draft and target tokenizers have different vocab sizes, "
-                    "draft vocab_size: "
-                 << draft_tokenizer->vocab_size()
-                 << ", target vocab_size: " << target_tokenizer->vocab_size();
-      return false;
-    }
-
-    const std::string test_text = "hello from xllm!";
-    std::vector<int32_t> draft_token_ids;
-    std::vector<int32_t> target_token_ids;
-    if (!draft_tokenizer->encode(test_text, &draft_token_ids) ||
-        !target_tokenizer->encode(test_text, &target_token_ids)) {
-      if (draft_token_ids != target_token_ids) {
-        LOG(ERROR) << "draft and target tokenizers are not compatible";
-        return false;
-      }
-    }
+    // Draft tokens are detokenized by the target, so the draft engine needs no
+    // tokenizer and no draft/target vocab-compatibility check (not universal;
+    // see llm_engine.cpp).
 
     // check if the max context length are the same
     const auto& draft_model_args = draft_engine_->model_args();
@@ -148,6 +130,14 @@ bool SpeculativeEngine::allocate_kv_cache() {
 
   KVCacheCapacity draft_kv_cache_cap =
       draft_engine_->estimate_kv_cache_capacity();
+
+  if (target_kv_cache_cap.c4_count() > 0 ||
+      target_kv_cache_cap.c128_count() > 0) {
+    draft_kv_cache_cap.n_blocks() = target_kv_cache_cap.n_blocks();
+    return engine_->allocate_kv_cache(target_kv_cache_cap) &&
+           draft_engine_->allocate_kv_cache(draft_kv_cache_cap);
+  }
+
   const int64_t kv_cache_size =
       std::min(target_kv_cache_cap.cache_size_in_bytes(),
                draft_kv_cache_cap.cache_size_in_bytes());
@@ -208,14 +198,16 @@ int64_t SpeculativeEngine::calculate_kv_cache(
   const int64_t draft_full_attention_slot_size =
       draft_kv_cache_cap.slot_size() + draft_kv_cache_cap.index_slot_size() +
       draft_kv_cache_cap.scale_slot_size();
-  CHECK_LE(draft_full_attention_slot_size, target_full_attention_slot_size)
-      << "draft full-attention kv cache slot size must not exceed target slot "
-         "size because the current speculative worker allocates draft KV "
-         "tensors with the target KVCacheShape";
-  // The current speculative worker allocates draft KV tensors with the
-  // target KVCacheShape, so draft physical allocation uses target slot size.
+  const bool draft_body_uses_tp1 = options_.enable_mtp_draft_body_tp1();
+  if (!draft_body_uses_tp1) {
+    CHECK_LE(draft_full_attention_slot_size, target_full_attention_slot_size)
+        << "draft full-attention kv cache slot size must not exceed target "
+           "slot size because the current speculative worker allocates draft "
+           "KV tensors with the target KVCacheShape";
+  }
   const int64_t draft_allocated_full_attention_slot_size =
-      target_full_attention_slot_size;
+      draft_body_uses_tp1 ? draft_full_attention_slot_size
+                          : target_full_attention_slot_size;
   CHECK_GT(target_full_attention_slot_size, 0)
       << "target full-attention kv cache slot size must be greater than 0";
   CHECK_GT(draft_allocated_full_attention_slot_size, 0)

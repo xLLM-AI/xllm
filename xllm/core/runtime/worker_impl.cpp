@@ -52,6 +52,7 @@ limitations under the License.
 #include "core/framework/config/profile_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/platform/platform.h"
 #include "core/platform/sleepable_allocator.h"
 #if defined(USE_NPU)
 #include "platform/npu/device_capture_lock.h"
@@ -63,6 +64,7 @@ limitations under the License.
 #include "core/distributed_runtime/master.h"
 #include "core/runtime/worker_rendezvous.h"
 #include "framework/kv_cache/kv_cache.h"
+#include "framework/kv_cache/linear_state_restore.h"
 #include "framework/model/model_input_params.h"
 #include "framework/model_loader.h"
 #include "framework/parallel_state/npu_cp_ep_padding.h"
@@ -74,6 +76,7 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "layers/npu/loader/rolling_weight_buffer.h"
 #endif
+#include "util/json_reader.h"
 #include "util/tensor_helper.h"
 #include "util/threadpool.h"
 #include "util/timer.h"
@@ -130,6 +133,25 @@ class ScopedAtenLoadThreads {
   int32_t prev_threads_ = 0;
   bool active_ = false;
 };
+
+// DFlash draft config lists target_layer_ids as the target-model layer indices
+// (0-based) whose output the draft consumes. xLLM's capture hook fires BEFORE
+// layer i runs, so capturing layer L's output means putting L+1 in the capture
+// set (matched against layer index i in the forward loop). Returns those L+1
+// ids.
+std::vector<int32_t> read_dflash_capture_layer_ids(
+    const std::string& model_weights_path) {
+  JsonReader reader;
+  const std::string config_path = model_weights_path + "/config.json";
+  CHECK(reader.parse(config_path))
+      << "Failed to parse DFlash config: " << config_path;
+  std::vector<int32_t> capture_layer_ids;
+  for (int32_t layer_id : reader.value_or<std::vector<int32_t>>(
+           "dflash_config.target_layer_ids", std::vector<int32_t>{})) {
+    capture_layer_ids.emplace_back(layer_id + 1);
+  }
+  return capture_layer_ids;
+}
 
 void move_tensor_to_device_if_needed(torch::Tensor& tensor,
                                      const torch::Device& device) {
@@ -283,6 +305,26 @@ bool WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
                                            bool enable_raw_device_allocator) {
   CHECK(model_ != nullptr) << "Model is not initialized.";
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
+
+  const bool has_grouped_cache = kv_cache_shape.has_grouped_cache_layout();
+  if (has_grouped_cache && options_.enable_disagg_pd()) {
+    CHECK_EQ(::xllm::ParallelConfig::get_instance().cp_size(), 1)
+        << "Grouped KV cache PD does not support context parallelism.";
+    CHECK_EQ(::xllm::ParallelConfig::get_instance().kv_split_size_effective(),
+             1)
+        << "Grouped KV cache PD does not support KV-split.";
+    CHECK_EQ(::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type(),
+             "LlmDataDist")
+        << "Grouped KV cache PD requires LlmDataDist transfer.";
+    CHECK_EQ(options_.kv_cache_transfer_mode(), "PUSH")
+        << "Grouped KV cache PD requires PUSH transfer mode.";
+    CHECK(!options_.enable_pd_ooc())
+        << "Grouped KV cache PD does not support PD-OOC yet.";
+  }
+  if (has_grouped_cache) {
+    CHECK(!::xllm::KVCacheConfig::get_instance().enable_xtensor())
+        << "Grouped KV cache layout does not support XTensor cache.";
+  }
   const auto& args = context_.get_model_args();
   const bool enable_linear_attention = has_linear_attention_layers(args);
   const bool enable_lighting_indexer = args.index_n_heads() > 0;
@@ -296,6 +338,14 @@ bool WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
   // "auto" (default): cache dtype aligns with model dtype (no quantization)
   // "int8": enables INT8 quantization
   const bool enable_kv_cache_quant = options_.kv_cache_dtype() == "int8";
+
+  const bool enable_indexer_cache_quant =
+      ::xllm::KVCacheConfig::get_instance().indexer_cache_dtype() == "int8";
+  if (enable_lighting_indexer) {
+    CHECK_EQ(kv_cache_shape.has_index_cache_scale_shape(),
+             enable_indexer_cache_quant)
+        << "Indexer cache shape and worker quantization config must agree.";
+  }
 
   if (enable_kv_cache_quant) {
 #if !defined(USE_MLU)
@@ -332,6 +382,7 @@ bool WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
       .enable_linear_attention(enable_linear_attention)
       .enable_lighting_indexer(enable_lighting_indexer)
       .enable_kv_cache_quant(enable_kv_cache_quant)
+      .enable_indexer_cache_quant(enable_indexer_cache_quant)
       .enable_raw_device_allocator(enable_raw_device_allocator)
       .block_size(options_.block_size())
       .head_dim(args.head_dim())
@@ -596,6 +647,12 @@ ForwardInput WorkerImpl::update_input_by_last_step_output(
 
 std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap(
     const ForwardInput& input) {
+  // No linear-state restore here on purpose. LLMWorkerImpl overrides this to
+  // copy checkpoints on compute_stream_; speculative/MTP workers keep this base
+  // version but run every forward through an inner LLMWorkerImpl built with
+  // schedule-overlap off, so the checkpoint copy fires on that inner worker's
+  // non-overlap prepare_work_before_execute_on_stream path. The outer
+  // speculative worker owns no kv_caches_, so restoring here would be a no-op.
   return step(input);
 }
 
@@ -768,7 +825,7 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
   // Prefill-side CP (partition + ATB cp tensors) applies to PREFILL,
   // CHUNKED_PREFILL, and MIXED. `no_decode()` wrongly excludes MIXED.
   const bool needs_cp_prefill_side =
-      parallel_args_.cp_size() > 1 &&
+      parallel_args_.cp_size() > 1 && !Platform::uses_model_cp_partition() &&
       !input.input_params.meta.batch_forward_type.is_decode();
   const bool needs_cp_partition =
       needs_cp_prefill_side && !input.cp_partitioned;
@@ -889,7 +946,8 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
                         processed_input.token_ids.numel() == 0);
     const bool need_fake_input_for_empty_shard =
         empty_shard && !input_params.meta.batch_forward_type.is_empty() &&
-        (context_.get_parallel_args().cp_size() > 1 ||
+        ((context_.get_parallel_args().cp_size() > 1 &&
+          !Platform::uses_model_cp_partition()) ||
          (context_.get_parallel_args().dp_size() > 1 ||
           context_.get_parallel_args().ep_size() > 1 ||
           !context_.get_parallel_args().mapping_data().empty()));
@@ -946,6 +1004,18 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
 
     if (has_linear_attention_layers(context_.get_model_args())) {
       prepare_input_params_for_linear_attention(processed_input.input_params);
+      // Under schedule_overlap chunked prefill the previous chunk's forward
+      // runs on compute_stream_ from a worker thread that may not have
+      // enqueued its kernels yet when this prepare runs on the main thread.
+      // Defer the slot-restore copy to step_for_schedule_overlap (worker
+      // thread, on compute_stream_) so stream ordering between chunk N-1
+      // writes and chunk N restore is automatic.
+      if (!enable_schedule_overlap()) {
+        restore_linear_state_slots(
+            kv_caches_,
+            processed_input.input_params.linear_state_cache_ops,
+            processed_input.input_params.parallel.has_initial_state);
+      }
     }
 
     if (can_prepare_npu_graph_decode_input(input_params)) {
@@ -1421,8 +1491,6 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 
   auto model_loader = ModelLoader::create(model_weights_path);
   model_weights_path_ = std::move(model_weights_path);
-  auto tokenizer = model_loader->tokenizer();
-  CHECK(tokenizer != nullptr);
 
   auto args = model_loader->model_args();
   auto quant_args = model_loader->quant_args();
@@ -1430,21 +1498,47 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   args.embedding_mode(embedding_mode);
   torch::ScalarType dtype = util::parse_dtype(args.dtype(), device_);
 
-  const int64_t tokenizer_vocab_size = tokenizer->vocab_size();
-  int64_t model_vocab_size = args.vocab_size();
-  // use tokenizer vocab size if model vocab size is not set
-  if (model_vocab_size <= 0) {
-    LOG(WARNING) << "Model vocab size is not set, using tokenizer vocab size: "
-                 << tokenizer_vocab_size;
-    args.vocab_size(tokenizer_vocab_size);
-  } else if (tokenizer_vocab_size > model_vocab_size) {
-    LOG(WARNING) << "Unsafe vocab mismatch: tokenizer: " << tokenizer_vocab_size
-                 << ", model: " << model_vocab_size;
+  // Draft engine is fed token ids and detokenized by the target, so it loads
+  // no tokenizer of its own (not universal: Eagle3 keeps its own draft vocab;
+  // see speculative_engine.cpp).
+  if (!options_.is_draft_engine()) {
+    std::unique_ptr<Tokenizer> tokenizer = model_loader->tokenizer();
+    CHECK(tokenizer != nullptr);
+    const int64_t tokenizer_vocab_size = tokenizer->vocab_size();
+    int64_t model_vocab_size = args.vocab_size();
+    // use tokenizer vocab size if model vocab size is not set
+    if (model_vocab_size <= 0) {
+      LOG(WARNING)
+          << "Model vocab size is not set, using tokenizer vocab size: "
+          << tokenizer_vocab_size;
+      args.vocab_size(tokenizer_vocab_size);
+    } else if (tokenizer_vocab_size > model_vocab_size) {
+      LOG(WARNING) << "Unsafe vocab mismatch: tokenizer: "
+                   << tokenizer_vocab_size << ", model: " << model_vocab_size;
+    }
   }
 
 #if defined(USE_NPU)
-  if (options_.enable_speculative_decode() &&
-      ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
+  if (options_.speculative_algorithm() == "DFlash") {
+    // Both engines capture the same target layers, whose ids live in the draft
+    // config: the draft engine reads its own weights path, the target engine
+    // reads --draft_model. The draft engine additionally swaps in the
+    // DFlashDraftModel body.
+    std::string draft_config_path;
+    if (options_.is_draft_engine()) {
+      LOG(INFO) << "Overriding draft model_type from " << args.model_type()
+                << " to DFlashDraftModel for DFlash speculative decoding";
+      args.model_type("DFlashDraftModel");
+      draft_config_path = model_weights_path_;
+    } else {
+      CHECK(options_.draft_model_path().has_value())
+          << "DFlash requires --draft_model.";
+      draft_config_path = options_.draft_model_path().value();
+    }
+    args.layers_to_capture(read_dflash_capture_layer_ids(draft_config_path));
+  } else if (options_.enable_speculative_decode() &&
+             ::xllm::SpeculativeConfig::get_instance()
+                 .enable_atb_spec_kernel()) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
   } else if (options_.enable_speculative_decode() &&
              options_.num_speculative_tokens() == 0 &&
@@ -1466,6 +1560,20 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       args.full_attention_interval(1);
     }
   }
+  // Eagle3/DFlash targets capture intermediate-layer aux hidden from the layers
+  // in layers_to_capture, the model's sole capture signal. Fill the default
+  // {2, n/2, n-3} for an Eagle3 target whose config omits the list; DFlash
+  // already filled it from the draft config. The DFlash draft body
+  // (DFlashDraftModel) consumes context-KV rather than capturing, so exclude
+  // it.
+  if (options_.enable_speculative_decode() &&
+      SpeculativeConfig::requires_aux_hidden_capture(
+          options_.speculative_algorithm()) &&
+      args.model_type() != "DFlashDraftModel" &&
+      args.layers_to_capture().empty()) {
+    const int32_t num_layers = static_cast<int32_t>(args.n_layers());
+    args.layers_to_capture({2, num_layers / 2, num_layers - 3});
+  }
 #else
   if (options_.enable_speculative_decode()) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
@@ -1479,6 +1587,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
           kModelTypeToMtpType = {
               {"deepseek_v3", "deepseek_v3_mtp"},
               {"deepseek_v32", "deepseek_v3_mtp"},
+              {"deepseek_v4", "deepseek_v4_mtp"},
               {"glm_moe_dsa", "glm_moe_dsa_mtp"},
               {"joyai_llm_flash", "joyai_llm_flash_mtp"},
               {"mimo", "mimo_mtp"},

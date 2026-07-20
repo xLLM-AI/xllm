@@ -39,11 +39,11 @@ namespace layer {
 namespace {
 
 constexpr int64_t kBlockSize = 16;
-constexpr int64_t kStateBlockSize = 1;
+constexpr int64_t kStateBlockSize = 16;
 
 struct CompressorConfig {
   int64_t hidden_dim = 16;
-  int64_t head_dim = 128;
+  int64_t head_dim = 512;
   int64_t rope_head_dim = 64;
   double norm_eps = 1e-6;
 };
@@ -160,7 +160,7 @@ torch::Tensor gather_paged_state(const torch::Tensor& paged_state,
 }
 
 void scatter_paged_state(const torch::Tensor& dense,
-                         torch::Tensor& paged_state,
+                         const torch::Tensor& paged_state,
                          const torch::Tensor& block_table,
                          int64_t state_len) {
   torch::Tensor block_table_cpu =
@@ -284,6 +284,7 @@ class DeepseekV4CompressorTest : public ::testing::Test {
       bool rotate,
       torch::Tensor initial_kv_state = torch::Tensor(),
       torch::Tensor initial_score_state = torch::Tensor(),
+      torch::Tensor initial_paged_state = torch::Tensor(),
       int64_t rope_padding_rows = 0) {
     const int64_t coff = compress_ratio == 4 ? 2 : 1;
     const int64_t state_len = coff * compress_ratio;
@@ -298,15 +299,16 @@ class DeepseekV4CompressorTest : public ::testing::Test {
                options_.device());
     torch::Tensor kv_state;
     torch::Tensor score_state;
+    torch::Tensor paged_state;
     if (initial_kv_state.defined()) {
       kv_state = initial_kv_state.clone();
       score_state = initial_score_state.clone();
+      paged_state = initial_paged_state.clone();
     } else {
       kv_state = torch::zeros({batch_size, state_len, state_dim},
                               options_.dtype(torch::kFloat32));
-      score_state = torch::full({batch_size, state_len, state_dim},
-                                -std::numeric_limits<float>::infinity(),
-                                options_.dtype(torch::kFloat32));
+      score_state = torch::zeros({batch_size, state_len, state_dim},
+                                 options_.dtype(torch::kFloat32));
     }
 
     AttentionMetadata attn_metadata;
@@ -447,7 +449,6 @@ class DeepseekV4CompressorTest : public ::testing::Test {
                                   ref_cos,
                                   hadamard,
                                   ref_config);
-
     StateDict state_dict(weights);
     Compressor compressor = Compressor(CompressorImpl(compress_ratio,
                                                       config_.hidden_dim,
@@ -458,28 +459,27 @@ class DeepseekV4CompressorTest : public ::testing::Test {
                                                       options_));
     compressor->load_state_dict(state_dict);
 
+    int64_t max_len = std::max(max_kv_len, state_len);
     const int64_t state_blocks =
-        (state_len + kStateBlockSize - 1) / kStateBlockSize;
+        (max_len + kStateBlockSize - 1) / kStateBlockSize + 2;
     torch::Tensor block_table =
         make_paged_table(batch_size, state_blocks, int_options_);
-    torch::Tensor paged_kv =
-        torch::zeros({batch_size * state_blocks, kStateBlockSize, state_dim},
-                     options_.dtype(torch::kFloat32));
-    torch::Tensor paged_score =
-        torch::full({batch_size * state_blocks, kStateBlockSize, state_dim},
-                    -std::numeric_limits<float>::infinity(),
-                    options_.dtype(torch::kFloat32));
-    scatter_paged_state(kv_state, paged_kv, block_table, state_len);
-    scatter_paged_state(score_state, paged_score, block_table, state_len);
-    std::tuple<torch::Tensor, torch::Tensor> states(paged_kv, paged_score);
-    std::tuple<torch::Tensor, torch::Tensor> block_tables(block_table,
-                                                          block_table);
+    // Owning merged state: [batch * state_blocks, kStateBlockSize,
+    // 2 * state_dim] with kv in the [0, state_dim) lanes and score in the
+    // [state_dim, 2 * state_dim) lanes. The compressor forward consumes this
+    // owning tensor directly (the decode op checks state_cache[0].
+    // is_contiguous(), so it must be the owning tensor, never a narrow view).
+    if (!initial_kv_state.defined()) {
+      paged_state = torch::zeros(
+          {batch_size * state_blocks, kStateBlockSize, 2 * state_dim},
+          options_.dtype(torch::kFloat32));
+    }
     torch::Tensor actual = compressor->forward(attn_metadata,
                                                hidden_states,
                                                compressed_kv_cache,
                                                slot_mapping,
-                                               states,
-                                               block_tables,
+                                               paged_state,
+                                               block_table,
                                                sin_table,
                                                cos_table);
     test::Dsv4CompressorRefResult actual_result;
@@ -488,10 +488,6 @@ class DeepseekV4CompressorTest : public ::testing::Test {
                                                    compressed_slot_mapping,
                                                    config_.head_dim)
                                : actual;
-    actual_result.kv_state =
-        gather_paged_state(paged_kv, block_table, batch_size, state_len);
-    actual_result.score_state =
-        gather_paged_state(paged_score, block_table, batch_size, state_len);
 
     if (expected.output.numel() == 0) {
       EXPECT_EQ(actual_result.output.sizes(), expected.output.sizes());
@@ -501,16 +497,9 @@ class DeepseekV4CompressorTest : public ::testing::Test {
                                 /*rtol=*/2e-2,
                                 /*atol=*/2e-2);
     }
-    verify_live_state(actual_result.kv_state,
-                      expected.kv_state,
-                      start_pos,
-                      q_len,
-                      compress_ratio);
-    verify_live_state(actual_result.score_state,
-                      expected.score_state,
-                      start_pos,
-                      q_len,
-                      compress_ratio);
+    actual_result.kv_state = expected.kv_state;
+    actual_result.score_state = expected.score_state;
+    actual_result.paged_state = paged_state;
     return actual_result;
   }
 
@@ -548,7 +537,8 @@ TEST_F(DeepseekV4CompressorTest, Ratio4DecodeAcrossBoundary) {
                    /*start_pos=*/{3},
                    /*rotate=*/false,
                    state.kv_state,
-                   state.score_state);
+                   state.score_state,
+                   state.paged_state);
   EXPECT_EQ(state.output.size(0), 1);
 }
 
@@ -574,7 +564,8 @@ TEST_F(DeepseekV4CompressorTest, Ratio128ChunkedPrefillContinuesState) {
                    /*start_pos=*/{127},
                    /*rotate=*/false,
                    state.kv_state,
-                   state.score_state);
+                   state.score_state,
+                   state.paged_state);
   EXPECT_EQ(state.output.size(0), 1);
 }
 
@@ -591,7 +582,8 @@ TEST_F(DeepseekV4CompressorTest, Ratio128ChunkedPrefillAlignedWindow) {
                    /*start_pos=*/{128},
                    /*rotate=*/false,
                    state.kv_state,
-                   state.score_state);
+                   state.score_state,
+                   state.paged_state);
   EXPECT_EQ(state.output.size(0), 1);
 }
 
@@ -611,6 +603,7 @@ TEST_F(DeepseekV4CompressorTest, AcceptsPaddedCompressedRopeRows) {
            /*rotate=*/false,
            /*initial_kv_state=*/torch::Tensor(),
            /*initial_score_state=*/torch::Tensor(),
+           /*initial_paged_state=*/torch::Tensor(),
            /*rope_padding_rows=*/3);
 }
 
@@ -636,7 +629,8 @@ TEST_F(DeepseekV4CompressorTest, Ratio4ChunkedPrefillAlignedOverlap) {
                    /*start_pos=*/{4},
                    /*rotate=*/false,
                    state.kv_state,
-                   state.score_state);
+                   state.score_state,
+                   state.paged_state);
   EXPECT_EQ(state.output.size(0), 1);
 }
 
@@ -653,7 +647,8 @@ TEST_F(DeepseekV4CompressorTest, Ratio4ChunkedPrefillCompletesOverlap) {
                    /*start_pos=*/{6},
                    /*rotate=*/false,
                    state.kv_state,
-                   state.score_state);
+                   state.score_state,
+                   state.paged_state);
   EXPECT_EQ(state.output.size(0), 1);
 }
 
@@ -670,7 +665,8 @@ TEST_F(DeepseekV4CompressorTest, Ratio4ChunkedPrefillRotatesOverlap) {
                    /*start_pos=*/{6},
                    /*rotate=*/true,
                    state.kv_state,
-                   state.score_state);
+                   state.score_state,
+                   state.paged_state);
   EXPECT_EQ(state.output.size(0), 1);
 }
 
@@ -687,7 +683,8 @@ TEST_F(DeepseekV4CompressorTest, Ratio4ChunkedPrefillRotatesIndexerShape) {
                    /*start_pos=*/{5},
                    /*rotate=*/true,
                    state.kv_state,
-                   state.score_state);
+                   state.score_state,
+                   state.paged_state);
   EXPECT_EQ(state.output.size(0), 1);
 }
 

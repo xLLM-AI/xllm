@@ -49,4 +49,32 @@ struct LlmDecodeMetadataUpdateParams {
 void update_llm_decode_metadata(const LlmDecodeMetadataUpdateParams& params,
                                 LlmDecodeMetadataUpdateStream stream);
 
+// CPU-direct graph replay path: H2D paged-KV / kv_seq_lens from host mirrors,
+// D2D tokens / positions / new_cache_slots from device inputs.
+struct LlmDecodeMetadataHostUpdateParams {
+  const int32_t* src_tokens;
+  const int32_t* src_positions;
+  const int32_t* src_new_cache_slots;
+  const int32_t* host_kv_seq_lens;
+  const int32_t* host_paged_kv_indptr;
+  const int32_t* host_paged_kv_indices;
+  const int32_t* host_paged_kv_last_page_len;
+  int32_t* dst_tokens;
+  int32_t* dst_positions;
+  int32_t* dst_new_cache_slots;
+  int32_t* dst_kv_seq_lens;
+  int32_t* dst_kv_seq_lens_delta;
+  int32_t* dst_paged_kv_indptr;
+  int32_t* dst_paged_kv_indices;
+  int32_t* dst_paged_kv_last_page_len;
+  int64_t actual_num_tokens;
+  int64_t padded_num_tokens;
+  int64_t actual_batch_size;
+  int64_t actual_indices_size;
+};
+
+void update_llm_decode_metadata_from_host(
+    const LlmDecodeMetadataHostUpdateParams& params,
+    LlmDecodeMetadataUpdateStream stream);
+
 }  // namespace xllm::kernel::cuda

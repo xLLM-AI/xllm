@@ -114,26 +114,49 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
     torch::Tensor embedding_data = input_params.embedding.input_embedding;
     // for dummy data parallel run, we set a empty embedding
     if (attn_metadata.is_dummy) {
-      embedding_data = torch::zeros({embed.size(0), model_args_.hidden_size()},
-                                    embed.options());
+      int64_t embed_cols = model_args_.hidden_size();
+#if defined(USE_MLU)
+      // MLU's DeepseekV4 target stashes the pre-hc_head 3D hidden flattened
+      // to [num_tokens, hc_mult*hidden] as aux_hidden_states, so the dummy
+      // bootstrap must match that width.
+      if (is_deepseek_v4_mtp_model(model_args_)) {
+        embed_cols = model_args_.hc_mult() * model_args_.hidden_size();
+      }
+#endif
+      embedding_data =
+          torch::zeros({embed.size(0), embed_cols}, embed.options());
     }
     CHECK(embedding_data.defined())
         << "embedding is not defined in input_params.embedding.input_embedding";
     torch::Tensor previous_hidden_states = embedding_data;
-    previous_hidden_states = std::get<0>(hnorm_(previous_hidden_states));
-
     torch::Tensor hidden_states;
-    if (projection_type_ == MtpProjectionType::ADD_EH_PROJ) {
-      hidden_states = e_proj_(enorm_out) + h_proj_(previous_hidden_states);
+    if (is_deepseek_v4_mtp_model(model_args_)) {
+      const int64_t hidden = model_args_.hidden_size();
+      const int64_t hc_mult = model_args_.hc_mult();
+      if (previous_hidden_states.size(-1) == hc_mult * hidden) {
+        // Target feeds the draft the pre-hc_head 3D hidden flattened to
+        // [N, hc_mult*hidden].
+        torch::Tensor prev = previous_hidden_states.reshape({-1, hidden});
+        prev = std::get<0>(hnorm_(prev));          // [N*hc_mult, hidden]
+        torch::Tensor e_out = e_proj_(enorm_out);  // [N, hidden]
+        torch::Tensor h_out = h_proj_(prev);       // [N*hc_mult, hidden]
+        hidden_states =
+            e_out.unsqueeze(1) + h_out.reshape({-1, hc_mult, hidden});
+      } else {
+        // Draft step output is the post-hc_head 2D hidden [N, hidden].
+        previous_hidden_states = std::get<0>(hnorm_(previous_hidden_states));
+        hidden_states = e_proj_(enorm_out) + h_proj_(previous_hidden_states);
+        hidden_states = hidden_states.unsqueeze(1).repeat({1, hc_mult, 1});
+      }
     } else {
-      // Concatenate along last dimension and project
-      hidden_states =
-          eh_proj_(torch::cat({enorm_out, previous_hidden_states}, -1));
-    }
-
-    if (is_deepseek_v4_mtp_model(model_args_) && hidden_states.dim() == 2) {
-      hidden_states =
-          hidden_states.unsqueeze(1).repeat({1, model_args_.hc_mult(), 1});
+      previous_hidden_states = std::get<0>(hnorm_(previous_hidden_states));
+      if (projection_type_ == MtpProjectionType::ADD_EH_PROJ) {
+        hidden_states = e_proj_(enorm_out) + h_proj_(previous_hidden_states);
+      } else {
+        // Concatenate along last dimension and project
+        hidden_states =
+            eh_proj_(torch::cat({enorm_out, previous_hidden_states}, -1));
+      }
     }
 
     // Pass through mtp block
@@ -195,7 +218,21 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
   }
 
   virtual void verify_loaded_weights() const {
-    mtp_block_->verify_loaded_weights();
+    // Not all decoder layer types provide verify_loaded_weights();
+    // only call it when the method exists.
+    if constexpr (requires { mtp_block_->verify_loaded_weights(); }) {
+      mtp_block_->verify_loaded_weights();
+    }
+  }
+
+  // Forward cache mapping to the underlying decoder layer block.
+  // Only applicable for decoder layers that support set_cache_mapping
+  // (e.g. MLU DeepseekV4DecoderLayer with DSACacheMapping).
+  template <typename MappingType>
+  void set_cache_mapping(const MappingType& mapping) {
+    if constexpr (requires { mtp_block_->set_cache_mapping(mapping); }) {
+      mtp_block_->set_cache_mapping(mapping);
+    }
   }
 
   virtual void prepare_expert_weight(int32_t layer_id,

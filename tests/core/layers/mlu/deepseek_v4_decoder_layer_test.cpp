@@ -363,7 +363,7 @@ class DeepseekV4DecoderLayerTest : public ::testing::Test {
     parallel_args_.dp_local_process_group_ = dp_process_group_.get();
     parallel_args_.tp_group_ = tp_process_group_.get();
     parallel_args_.single_rank_group_ = single_rank_process_group_.get();
-    parallel_args_.sp_group_ = tp_process_group_.get();
+    parallel_args_.cp_group_ = tp_process_group_.get();
     parallel_args_.ep_size_ = 2;
     parallel_args_.moe_ep_group_ = ep_process_group_.get();
     parallel_args_.moe_tp_group_ = tp_process_group_.get();

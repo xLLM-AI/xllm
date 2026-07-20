@@ -1,0 +1,374 @@
+---
+import config from 'virtual:starlight/user-config';
+
+import Search from 'virtual:starlight/components/Search';
+import SiteTitle from 'virtual:starlight/components/SiteTitle';
+import SocialIcons from 'virtual:starlight/components/SocialIcons';
+import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
+import type { StarlightRouteData } from '@astrojs/starlight/route-data';
+
+type SidebarEntry = StarlightRouteData['sidebar'][number];
+
+const { sidebar } = Astro.locals.starlightRoute;
+const currentLocale = Astro.locals.starlightRoute.locale;
+
+const shouldRenderSearch =
+	config.pagefind || config.components.Search !== '@astrojs/starlight/components/Search.astro';
+
+const getFirstHref = (entry: SidebarEntry): string | undefined => {
+	if (entry.type === 'link') return entry.href;
+
+	for (const child of entry.entries) {
+		const href = getFirstHref(child);
+		if (href) return href;
+	}
+};
+
+const isCurrentEntry = (entry: SidebarEntry): boolean => {
+	if (entry.type === 'link') return entry.isCurrent;
+
+	return entry.entries.some(isCurrentEntry);
+};
+
+const isHomeHref = (href: string): boolean => {
+	const url = new URL(href, Astro.url);
+	const normalizedPathname = url.pathname.replace(/\/+$/, '');
+	const currentLocalePath = currentLocale ? `/${currentLocale}` : '';
+
+	return normalizedPathname === '' || normalizedPathname === currentLocalePath;
+};
+
+const navItems = sidebar
+	.map((entry) => ({ label: entry.label, href: getFirstHref(entry), isCurrent: isCurrentEntry(entry) }))
+	.filter((entry) => entry.href && !isHomeHref(entry.href));
+
+const localeEntries = Object.entries(config.locales ?? {}).map(([code, locale]) => ({
+	code,
+	label: locale?.label ?? code,
+	href: getLocalizedPathname(code),
+	isCurrent: code === currentLocale,
+}));
+
+function getLocalizedPathname(locale: string): string {
+	const url = new URL(Astro.url);
+	const pathSegments = url.pathname.split('/');
+	const currentLocaleIndex = pathSegments.findIndex((segment) => segment in (config.locales ?? {}));
+
+	if (currentLocaleIndex === -1) {
+		pathSegments.splice(1, 0, locale);
+	} else {
+		pathSegments[currentLocaleIndex] = locale;
+	}
+
+	return pathSegments.join('/') + url.search + url.hash;
+}
+---
+
+<div class="header">
+	<div class="title-wrapper sl-flex">
+		<SiteTitle />
+	</div>
+	<nav class="top-tabs print:hidden" aria-label="主导航">
+		{
+			navItems.map((item) => (
+				<a href={item.href} aria-current={item.isCurrent ? 'page' : undefined}>
+					{item.label}
+				</a>
+			))
+		}
+	</nav>
+	<div class="header-actions sl-flex print:hidden">
+		{shouldRenderSearch && <div class="search-wrapper sl-flex"><Search /></div>}
+		<div class="sl-hidden md:sl-flex right-group">
+			<div class="sl-flex social-icons">
+				<SocialIcons />
+			</div>
+			<ThemeSelect />
+			{
+				config.isMultilingual && (
+					<details class="language-menu">
+						<summary aria-label={Astro.locals.t('languageSelect.accessibleLabel')}>
+							<svg aria-hidden="true" class="language-icon" height="16" viewBox="0 0 24 24" width="16">
+								<path d="m5 8 6 6" />
+								<path d="m4 14 6-6 2-3" />
+								<path d="M2 5h12" />
+								<path d="M7 2h1" />
+								<path d="m22 22-5-10-5 10" />
+								<path d="M14 18h6" />
+							</svg>
+							<span>{localeEntries.find((locale) => locale.isCurrent)?.label}</span>
+							<svg aria-hidden="true" class="chevron-icon" height="16" viewBox="0 0 24 24" width="16">
+								<path d="m6 9 6 6 6-6" />
+							</svg>
+						</summary>
+						<div class="language-options" role="menu">
+							{
+								localeEntries.map((locale) => (
+									<a
+										aria-current={locale.isCurrent ? 'true' : undefined}
+										href={locale.href}
+										role="menuitem"
+									>
+										<span>{locale.label}</span>
+									</a>
+								))
+							}
+						</div>
+					</details>
+				)
+			}
+		</div>
+	</div>
+</div>
+
+<script>
+	document.addEventListener('click', (event) => {
+		const target = event.target;
+		if (!(target instanceof Element)) return;
+
+		for (const menu of document.querySelectorAll('header.header .language-menu[open]')) {
+			if (!menu.contains(target) && menu instanceof HTMLDetailsElement) menu.open = false;
+		}
+	});
+
+	document.addEventListener('keydown', (event) => {
+		if (event.key !== 'Escape') return;
+
+		for (const menu of document.querySelectorAll('header.header .language-menu[open]')) {
+			if (menu instanceof HTMLDetailsElement) menu.open = false;
+		}
+	});
+</script>
+
+<style>
+	@layer starlight.core {
+		.header {
+			--docs-title-height: min(
+				calc(var(--sl-nav-height) - 2 * var(--sl-nav-pad-y)),
+				2.5rem
+			);
+			display: flex;
+			gap: var(--sl-nav-gap);
+			justify-content: space-between;
+			align-items: center;
+			height: 100%;
+		}
+
+		.title-wrapper {
+			align-items: center;
+			overflow: clip;
+			padding: 0.25rem;
+			margin: -0.25rem;
+			min-width: 0;
+		}
+
+		.title-wrapper :global(.site-title) {
+			gap: 0.5rem;
+		}
+
+		.title-wrapper :global(.site-title img) {
+			height: var(--docs-title-height);
+		}
+
+		.title-wrapper :global(.site-title::after) {
+			content: 'Docs';
+			color: transparent;
+			font-size: calc(var(--docs-title-height) * 0.8);
+			font-weight: 700;
+			letter-spacing: 0;
+			line-height: 1;
+			-webkit-text-fill-color: transparent;
+			-webkit-text-stroke: 1.5px color-mix(in srgb, var(--docs-red) 55%, transparent);
+		}
+
+		.top-tabs {
+			display: none;
+			align-items: center;
+			gap: 0.25rem;
+			margin-block: -0.3rem;
+			min-width: 0;
+			overflow-x: auto;
+			padding-block: 0.3rem;
+			padding-inline-start: 0.25rem;
+			scrollbar-width: none;
+		}
+
+		.top-tabs::-webkit-scrollbar {
+			display: none;
+		}
+
+		.top-tabs a {
+			border: 1px solid transparent;
+			border-radius: 0.625rem;
+			background-clip: padding-box;
+			color: var(--sl-color-gray-2);
+			font-size: var(--sl-text-sm);
+			font-weight: 500;
+			line-height: 1;
+			padding: 0.55rem 0.75rem;
+			position: relative;
+			text-decoration: none;
+			transform: scale(1);
+			transform-origin: center;
+			transition:
+				background-color 160ms ease,
+				border-color 160ms ease,
+				color 160ms ease,
+				transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+			white-space: nowrap;
+			will-change: transform;
+		}
+
+		.top-tabs a:is(:hover, :focus-visible) {
+			background-color: color-mix(in srgb, var(--sl-color-accent) 8%, transparent);
+			color: var(--sl-color-text-accent);
+			transform: scale(1.045);
+		}
+
+		.top-tabs a[aria-current='page'] {
+			background-color: color-mix(in srgb, var(--sl-color-accent) 12%, transparent);
+			border-color: color-mix(in srgb, var(--sl-color-accent) 26%, transparent);
+			color: var(--sl-color-text-accent);
+		}
+
+		@media (prefers-reduced-motion: reduce) {
+			.top-tabs a {
+				transition:
+					background-color 160ms ease,
+					border-color 160ms ease,
+					color 160ms ease;
+			}
+
+			.top-tabs a:is(:hover, :focus-visible) {
+				transform: none;
+			}
+		}
+
+		.header-actions,
+		.right-group,
+		.social-icons {
+			align-items: center;
+		}
+
+		.header-actions {
+			gap: 1rem;
+			margin-inline-start: auto;
+			min-width: 0;
+		}
+
+		.search-wrapper {
+			justify-content: flex-end;
+			min-width: 0;
+		}
+
+		.search-wrapper :global(site-search > button[data-open-modal]) {
+			transform: scale(1);
+			transform-origin: center;
+			transition:
+				border-color 160ms ease,
+				box-shadow 220ms ease,
+				color 160ms ease,
+				transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+			will-change: transform, box-shadow;
+		}
+
+		.search-wrapper:hover :global(site-search > button[data-open-modal]),
+		.search-wrapper :global(site-search > button[data-open-modal]:focus-visible) {
+			box-shadow: 0 0.35rem 0.85rem color-mix(in srgb, var(--docs-red) 30%, transparent);
+			transform: scale(1.035);
+		}
+
+		@media (prefers-reduced-motion: reduce) {
+			.search-wrapper :global(site-search > button[data-open-modal]) {
+				transition: box-shadow 160ms ease;
+			}
+
+			.search-wrapper:hover :global(site-search > button[data-open-modal]),
+			.search-wrapper :global(site-search > button[data-open-modal]:focus-visible) {
+				transform: none;
+			}
+		}
+
+		.right-group,
+		.social-icons {
+			gap: 1rem;
+		}
+
+		.social-icons::after {
+			content: '';
+			height: 2rem;
+			border-inline-end: 1px solid var(--sl-color-gray-5);
+		}
+
+		@media (min-width: 50rem) {
+			.top-tabs {
+				display: flex;
+			}
+
+			.header-actions {
+				justify-self: end;
+			}
+
+			div.search-wrapper:has(> site-search) {
+				justify-content: flex-end;
+				width: clamp(13rem, 28vw, 20rem);
+			}
+		}
+
+		@media (min-width: 50rem) and (max-width: 79.999rem) {
+			:global(:root) {
+				--sl-nav-height: 6.75rem;
+			}
+
+			.header {
+				display: grid;
+				grid-template-areas:
+					'title actions'
+					'tabs tabs';
+				grid-template-columns: minmax(0, 1fr) auto;
+				row-gap: 0.45rem;
+				column-gap: clamp(0.75rem, 2vw, 1.5rem);
+				align-content: center;
+			}
+
+			.title-wrapper {
+				grid-area: title;
+			}
+
+			.top-tabs {
+				grid-area: tabs;
+				justify-self: start;
+				max-width: 100%;
+				margin-inline-start: -0.25rem;
+				padding-inline-end: 0.25rem;
+			}
+
+			.header-actions {
+				grid-area: actions;
+			}
+		}
+
+		@media (min-width: 80rem) {
+			.header {
+				display: grid;
+				grid-template-columns: minmax(max-content, auto) minmax(0, 1fr) auto;
+				column-gap: clamp(1rem, 2vw, 2rem);
+				align-content: center;
+			}
+
+			.top-tabs {
+				justify-self: start;
+				margin-inline-start: 0.75rem;
+			}
+
+			.header-actions {
+				justify-self: end;
+			}
+
+			div.search-wrapper:has(> site-search) {
+				justify-content: flex-end;
+				width: clamp(14rem, 20vw, 22rem);
+			}
+		}
+	}
+</style>

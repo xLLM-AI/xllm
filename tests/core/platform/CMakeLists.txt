@@ -20,3 +20,7 @@ endif()
 if(USE_DCU)
   add_subdirectory(dcu)
 endif()
+
+if(USE_MLU)
+  add_subdirectory(mlu)
+endif()

@@ -11,7 +11,9 @@
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/platform/platform.h"
 #include "distributed_runtime/engine.h"
+#include "framework/model/model_args.h"
 #include "prefill_only_scheduler.h"
 #include "scheduler_factory.h"
 #include "util/utils.h"
@@ -49,6 +51,7 @@ class FakeEngine : public Engine {
     opt.num_blocks_ = num_blocks;
     opt.block_size_ = block_size;
     opt.enable_prefix_cache_ = enable_prefix_cache;
+    opt.max_seqs_per_batch_ = 1024;
     fake_tokenizer_ = std::make_unique<FakeTokenizer>();
     fake_block_manager_ = std::make_unique<BlockManagerPool>(opt, 1);
   }
@@ -58,7 +61,7 @@ class FakeEngine : public Engine {
   BlockManagerPool* block_manager_pool() const {
     return fake_block_manager_.get();
   }
-  const ModelArgs& model_args() const { NOT_IMPLEMENTED(); }
+  const ModelArgs& model_args() const { return model_args_; }
   const TokenizerArgs& tokenizer_args() const { NOT_IMPLEMENTED(); }
   std::vector<int64_t> get_active_activation_memory() const { return {0}; }
   bool init() override { return true; }
@@ -66,6 +69,7 @@ class FakeEngine : public Engine {
  private:
   std::unique_ptr<Tokenizer> fake_tokenizer_;
   std::unique_ptr<BlockManagerPool> fake_block_manager_;
+  ModelArgs model_args_;
 };
 
 class TestContinuousScheduler final : public ContinuousScheduler {
@@ -299,8 +303,6 @@ void set_chunk_kv(const std::shared_ptr<Request>& request, size_t kv_tokens) {
 
 TEST(ContinuousSchedulerFactoryTest,
      ChunkedPrefillWithoutSPUsesChunkedScheduler) {
-  ScopedConfigValue<bool> enable_sp(
-      ParallelConfig::get_instance().enable_prefill_sp(), false);
   ContinuousScheduler::Options opt =
       create_scheduler_options(10000, 256, 0, 1024, 1);
   opt.enable_chunked_prefill() = true;
@@ -313,27 +315,30 @@ TEST(ContinuousSchedulerFactoryTest,
 }
 
 TEST(ContinuousSchedulerFactoryTest,
-     ChunkedPrefillWithSPUsesPrefillOnlyScheduler) {
-  ScopedConfigValue<bool> enable_sp(
-      ParallelConfig::get_instance().enable_prefill_sp(), true);
+     ChunkedPrefillWithCpUsesBackendPartitionScheduler) {
   ContinuousScheduler::Options opt =
       create_scheduler_options(10000, 256, 0, 1024, 1);
   opt.enable_chunked_prefill() = true;
+  opt.cp_size() = 2;
 
   auto engine = std::make_unique<FakeEngine>(32, 32);
   auto scheduler = create_continuous_scheduler(engine.get(), opt);
 
-  EXPECT_NE(dynamic_cast<PrefillOnlyScheduler*>(scheduler.get()), nullptr);
-  EXPECT_EQ(dynamic_cast<ChunkedPrefillScheduler*>(scheduler.get()), nullptr);
+  if (Platform::uses_model_cp_partition()) {
+    EXPECT_NE(dynamic_cast<PrefillOnlyScheduler*>(scheduler.get()), nullptr);
+    EXPECT_EQ(dynamic_cast<ChunkedPrefillScheduler*>(scheduler.get()), nullptr);
+  } else {
+    EXPECT_NE(dynamic_cast<ChunkedPrefillScheduler*>(scheduler.get()), nullptr);
+    EXPECT_EQ(dynamic_cast<PrefillOnlyScheduler*>(scheduler.get()), nullptr);
+  }
 }
 
 TEST(ContinuousSchedulerFactoryTest,
-     ChunkedPrefillWithSPAndSpeculativeUsesPrefillOnlyScheduler) {
-  ScopedConfigValue<bool> enable_sp(
-      ParallelConfig::get_instance().enable_prefill_sp(), true);
+     ChunkedPrefillWithCpAndSpeculativeUsesPrefillOnlyScheduler) {
   ContinuousScheduler::Options opt =
       create_scheduler_options(10000, 256, 4, 1024, 1);
   opt.enable_chunked_prefill() = true;
+  opt.cp_size() = 2;
 
   auto engine = std::make_unique<FakeEngine>(32, 32);
   auto scheduler = create_continuous_scheduler(engine.get(), opt);
@@ -342,12 +347,13 @@ TEST(ContinuousSchedulerFactoryTest,
   EXPECT_EQ(dynamic_cast<ChunkedPrefillScheduler*>(scheduler.get()), nullptr);
 }
 
-TEST(ContinuousSchedulerFactoryTest,
-     ChunkedPrefillWithSPDoesNotBuildMixedBatch) {
-  ScopedConfigValue<bool> enable_sp(
-      ParallelConfig::get_instance().enable_prefill_sp(), true);
+TEST(ContinuousSchedulerFactoryTest, ModelPartitionCpDoesNotBuildMixedBatch) {
+  if (!Platform::uses_model_cp_partition()) {
+    GTEST_SKIP() << "model-side CP partition is not enabled on this backend";
+  }
   ContinuousScheduler::Options opt = create_scheduler_options(8, 8, 0, 4, 1);
   opt.enable_chunked_prefill() = true;
+  opt.cp_size() = 2;
 
   auto engine = std::make_unique<FakeEngine>(32, 32);
   auto scheduler = create_continuous_scheduler(engine.get(), opt);
@@ -388,7 +394,7 @@ TEST(ContinuousSchedulerFactoryTest,
             opt.max_tokens_per_chunk_for_prefill());
 }
 
-TEST(SchedulerFactoryTest, DisaggPDChunkedPrefillKind) {
+TEST(SchedulerFactoryTest, DisaggPDChunkedPrefillTakesPriorityOverCp) {
   ScopedConfigValue<bool> use_mix_scheduler(
       SchedulerConfig::get_instance().use_mix_scheduler(), false);
   ContinuousScheduler::Options opt =
@@ -396,9 +402,23 @@ TEST(SchedulerFactoryTest, DisaggPDChunkedPrefillKind) {
   opt.enable_disagg_pd() = true;
   opt.enable_pd_ooc() = false;
   opt.enable_chunked_prefill() = true;
+  opt.cp_size() = 2;
 
   EXPECT_EQ(select_scheduler_kind(opt),
             SchedulerKind::DISAGG_PD_CHUNKED_PREFILL);
+}
+
+TEST(SchedulerFactoryTest, DisaggPDTakesPriorityOverCp) {
+  ScopedConfigValue<bool> use_mix_scheduler(
+      SchedulerConfig::get_instance().use_mix_scheduler(), false);
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(10000, 256, 0, 1024, 1);
+  opt.enable_disagg_pd() = true;
+  opt.enable_pd_ooc() = false;
+  opt.enable_chunked_prefill() = false;
+  opt.cp_size() = 2;
+
+  EXPECT_EQ(select_scheduler_kind(opt), SchedulerKind::DISAGG_PD);
 }
 
 TEST(SchedulerFactoryTest, DisaggPDOOCKeepsPDOOCKind) {
@@ -993,6 +1013,36 @@ TEST(ContinuousSchedulerTest, BatchRejectedStreamsCancelAtSchedulingBoundary) {
   scheduler->step(absl::ZeroDuration());
   EXPECT_TRUE(requests[1]->cancelled());
   EXPECT_TRUE(scheduler->get_running_requests().empty());
+}
+
+TEST(ContinuousSchedulerTest,
+     BatchStreamMarksPrefillFinishedWhenFirstTokenDecodesEmpty) {
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(1024, 16, 0, 1024, 1);
+  auto engine = std::make_unique<FakeEngine>(32, 4);
+  auto scheduler = std::make_unique<TestContinuousScheduler>(engine.get(), opt);
+
+  auto request = generate_request_with_prompt_tokens({1, 2, 3, 4}, 4, 30000);
+  request->state().stream = true;
+  make_request_decode_ready(request);
+
+  bool callback_called = false;
+  bool outputs_empty = false;
+  bool finished_on_prefill_instance = false;
+  request->state().outputs_func =
+      [&](const std::vector<RequestOutput>& outputs) {
+        callback_called = true;
+        outputs_empty = outputs.size() == 1 && outputs[0].outputs.empty();
+        finished_on_prefill_instance =
+            outputs.size() == 1 && outputs[0].finished_on_prefill_instance;
+        return std::vector<bool>{true};
+      };
+
+  scheduler->reject_streams({request});
+
+  EXPECT_TRUE(callback_called);
+  EXPECT_TRUE(outputs_empty);
+  EXPECT_TRUE(finished_on_prefill_instance);
 }
 // ============== Async RL training: Pause/Resume tests ==============
 

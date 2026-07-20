@@ -13,13 +13,14 @@ cc_library(
 )
 
 cc_library(
-  NAME 
+  NAME
     block
   HDRS
     block.h
     block_manager.h
     single_block_manager.h
     block_manager_pool.h
+    linear_state_block_manager.h
     block_manager_impl.h
     concurrent_block_manager_impl.h
     # hierarchy temporarily disabled during the block-manager refactor
@@ -30,6 +31,7 @@ cc_library(
     block.cpp
     single_block_manager.cpp
     block_manager_pool.cpp
+    linear_state_block_manager.cpp
     concurrent_block_manager_impl.cpp
     block_manager_impl.cpp
     # hierarchy temporarily disabled during the block-manager refactor

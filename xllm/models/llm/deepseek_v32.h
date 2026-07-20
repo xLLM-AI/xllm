@@ -18,25 +18,26 @@ limitations under the License.
 #include <optional>
 #include <string>
 
-#include "core/common/global_flags.h"
-#include "core/framework/config/parallel_config.h"
 #include "deepseek_v2.h"
 #include "layers/common/attention_metadata_builder.h"
-#include "layers/mlu/deepseek_v32_sp_context.h"
+#include "layers/mlu/deepseek_v32_cp_context.h"
+#include "platform/platform.h"
 
 namespace xllm {
 
-inline std::optional<std::string> validate_deepseek_v32_sp_flags(
+inline std::optional<std::string> validate_deepseek_v32_cp_config(
     const ParallelArgs& parallel_args) {
-  if (!::xllm::ParallelConfig::get_instance().enable_prefill_sp()) {
+  const bool use_model_partition =
+      parallel_args.cp_size() > 1 && Platform::uses_model_cp_partition();
+  if (!use_model_partition) {
     return std::nullopt;
   }
   if (parallel_args.dp_size() != 1) {
-    return "enable_prefill_sp requires dp_size == 1 for now.";
+    return "Prefill CP requires dp_size == 1 for now.";
   }
-  if (parallel_args.sp_group_ == nullptr ||
-      parallel_args.sp_group_->world_size() <= 1) {
-    return "enable_prefill_sp requires sequence parallel world_size > 1.";
+  if (parallel_args.cp_group_ == nullptr ||
+      parallel_args.cp_group_->world_size() <= 1) {
+    return "Prefill CP requires cp_group world_size > 1.";
   }
 
   return std::nullopt;
@@ -47,11 +48,12 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
   explicit DeepseekV32ModelImpl(const ModelContext& context)
       : DeepseekV2ModelImpl(context),
         device_(context.get_tensor_options().device()),
-        sequence_parallel_group_(context.get_parallel_args().sp_group_),
-        parallel_world_size_(context.get_parallel_args().world_size()) {
-    const auto sp_config_error =
-        validate_deepseek_v32_sp_flags(context.get_parallel_args());
-    CHECK(!sp_config_error.has_value()) << sp_config_error.value();
+        cp_group_(context.get_parallel_args().cp_group_),
+        parallel_world_size_(context.get_parallel_args().world_size()),
+        cp_size_(context.get_parallel_args().cp_size()) {
+    const std::optional<std::string> cp_config_error =
+        validate_deepseek_v32_cp_config(context.get_parallel_args());
+    CHECK(!cp_config_error.has_value()) << cp_config_error.value();
   }
 
   ModelOutput forward(const torch::Tensor& tokens,
@@ -69,38 +71,38 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
                                                      /*device=*/device_));
     }
     auto& attn_metadata = *modified_input_params.attn_metadata;
-    std::optional<layer::v32_sp::DeepseekV32SPContext> sp_ctx;
-    const bool requested_sequence_parallel =
-        ::xllm::ParallelConfig::get_instance().enable_prefill_sp() &&
-        input_params.meta.batch_forward_type.no_decode();
-    if (requested_sequence_parallel) {
-      if (sequence_parallel_group_ == nullptr) {
+    std::optional<layer::v32_cp::DeepseekV32CPContext> cp_ctx;
+    const bool use_model_partition =
+        cp_size_ > 1 && Platform::uses_model_cp_partition();
+    if (use_model_partition) {
+      if (cp_group_ == nullptr) {
         CHECK_EQ(parallel_world_size_, 1)
-            << "deepseek_v32 sequence parallel requires sp_group_.";
-      } else if (sequence_parallel_group_->world_size() > 1) {
-        sp_ctx = layer::v32_sp::build_deepseek_v32_sp_context(
+            << "deepseek_v32 Prefill CP requires cp_group_.";
+      } else if (cp_group_->world_size() > 1) {
+        cp_ctx = layer::v32_cp::build_deepseek_v32_cp_context(
+            cp_size_,
             attn_metadata,
             input_params.meta.batch_forward_type,
             tokens,
-            sequence_parallel_group_,
-            sequence_parallel_group_->rank(),
-            sequence_parallel_group_->world_size());
+            cp_group_,
+            cp_group_->rank(),
+            cp_group_->world_size());
       }
     }
-    if (!sp_ctx.has_value()) {
-      // Fallback to the normal TP path when SP is disabled or the current
-      // prefill batch cannot be split across all SP ranks.
-      active_sequence_parallel_context_ = nullptr;
+    if (!cp_ctx.has_value()) {
+      // Fall back to the normal TP path when Prefill CP is disabled or the
+      // current batch cannot be split across all CP ranks.
+      active_cp_context_ = nullptr;
       return DeepseekV2ModelImpl::forward(
           tokens, positions, kv_caches, modified_input_params);
     }
 
-    active_sequence_parallel_context_ = &sp_ctx.value();
+    active_cp_context_ = &cp_ctx.value();
     torch::Tensor hidden_states = embed_mod()(tokens);
     hidden_states =
-        layer::v32_sp::reorder_to_local_shard(hidden_states, sp_ctx.value());
+        layer::v32_cp::reorder_to_local_shard(hidden_states, cp_ctx.value());
     torch::Tensor positions_local =
-        layer::v32_sp::reorder_to_local_shard(positions, sp_ctx.value());
+        layer::v32_cp::reorder_to_local_shard(positions, cp_ctx.value());
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_ref().size(); ++i) {
 #if defined(USE_CUDA) || defined(USE_MUSA)
@@ -116,14 +118,14 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
                             modified_input_params);
       if (!modified_input_params.record_layer(static_cast<uint32_t>(i),
                                               hidden_states.device())) {
-        active_sequence_parallel_context_ = nullptr;
+        active_cp_context_ = nullptr;
         return ModelOutput();
       }
     }
     hidden_states =
-        layer::v32_sp::gather_and_restore_global(hidden_states, sp_ctx.value());
+        layer::v32_cp::gather_and_restore_global(hidden_states, cp_ctx.value());
     auto [h, res] = norm_mod()(hidden_states, residual);
-    active_sequence_parallel_context_ = nullptr;
+    active_cp_context_ = nullptr;
     return ModelOutput(h, res);
   }
 
@@ -133,16 +135,16 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
       layer::DeepseekV2DecoderLayer& layer,
       const layer::AttentionMetadata& /*attn_metadata*/) override {
 #if defined(USE_MLU)
-    layer->set_sequence_parallel_context(active_sequence_parallel_context_);
+    layer->set_context_parallel_context(active_cp_context_);
 #endif
   }
 
  private:
   torch::Device device_;
-  ProcessGroup* sequence_parallel_group_ = nullptr;
+  ProcessGroup* cp_group_ = nullptr;
   int32_t parallel_world_size_ = 1;
-  const layer::v32_sp::DeepseekV32SPContext* active_sequence_parallel_context_ =
-      nullptr;
+  int32_t cp_size_ = 1;
+  const layer::v32_cp::DeepseekV32CPContext* active_cp_context_ = nullptr;
 };
 TORCH_MODULE(DeepseekV32Model);
 

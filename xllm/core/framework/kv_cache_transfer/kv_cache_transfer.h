@@ -69,6 +69,9 @@ class KVCacheTransfer {
     // XTensor mode: destination offsets from D-node (per-layer)
     // dst_xtensor_layer_offsets[layer_id] = {k_offsets, v_offsets}
     std::vector<XTensorLayerOffsets> dst_xtensor_layer_offsets;
+
+    // Group-aware block mappings keyed by cache-layout group id.
+    std::vector<KVBlockTransferGroup> block_transfer_groups;
   };
 
   static std::vector<std::string> rotate_dst_rank(

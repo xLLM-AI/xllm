@@ -563,7 +563,9 @@ ColumnParallelLinearImpl::ColumnParallelLinearImpl(const ModelContext& context)
           /*bias=*/false,
           /*gather_output=*/true,
           QuantArgs{},  // do not use quantization for lm_head
-          context.get_parallel_args().tp_group_,
+          context.get_parallel_args().lm_head_group_ != nullptr
+              ? context.get_parallel_args().lm_head_group_
+              : context.get_parallel_args().tp_group_,
           context.get_tensor_options()) {}
 
 // Linear layer with column parallelism.
@@ -1705,7 +1707,8 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input,
     if (wants_mmrs(reduce_mode) && fc1_ctx &&
         is_sequence_sharded(*fc1_ctx) &&
         fc1_ctx->enable_mmrs_fusion) {
-      bool can_try_mmrs = input.dim() == 2 &&
+      bool can_try_mmrs = input.defined() && weight_.defined() &&
+                          input.dim() == 2 &&
                           input.size(0) == fc1_ctx->original_num_tokens &&
                           (!bias.has_value() || fc1_ctx->pad_size == 0);
       if (can_try_mmrs) {
@@ -1726,19 +1729,26 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input,
         mmrs_params.process_group = process_group_;
         mmrs_params.output = mmrs_output;
         mmrs_params.comm_mode = fc1_ctx->mmrs_comm_mode;
-        output = xllm::kernel::matmul_reduce_scatter(mmrs_params);
-        if (output.sizes() == torch::IntArrayRef(output_shape)) {
+        try {
+          output = xllm::kernel::matmul_reduce_scatter(mmrs_params);
+        } catch (const c10::Error& error) {
+          LOG_FIRST_N(WARNING, 8)
+              << "FC1 MMRS call failed; fallback reduction will run: "
+              << error.what_without_backtrace();
+          output = torch::Tensor();
+        }
+        if (output.defined() &&
+            output.sizes() == torch::IntArrayRef(output_shape)) {
           return output;
         }
-        LOG_FIRST_N(WARNING, 8)
-            << "FC1 MMRS returned non-local shape; fallback reduction will run. "
-            << "input=" << input.sizes() << ", weight=" << weight_.sizes()
-            << ", returned_output=" << output.sizes()
-            << ", expected_local_output=" << output_shape;
-        if (fc1_ctx->pad_size > 0 &&
-            output.size(0) == fc1_ctx->padded_num_tokens) {
-          output = output.slice(0, 0, fc1_ctx->original_num_tokens)
-                       .contiguous();
+        if (output.defined()) {
+          LOG_FIRST_N(WARNING, 8)
+              << "FC1 MMRS returned non-local shape; fallback reduction will "
+                 "run. input="
+              << input.sizes() << ", weight=" << weight_.sizes()
+              << ", returned_output=" << output.sizes()
+              << ", expected_local_output=" << output_shape;
+          output = torch::Tensor();
         }
       } else {
         LOG_FIRST_N(WARNING, 8)

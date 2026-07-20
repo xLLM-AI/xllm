@@ -30,15 +30,20 @@ limitations under the License.
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
+#include <iterator>
 #include <memory>
 #include <utility>
 
 #include "common/metrics.h"
+#include "core/distributed_runtime/spawn_worker_server/spawn_worker_protocol.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/service_config.h"
+#include "core/framework/config/speculative_config.h"
+#include "core/platform/platform.h"
 #if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
 #include "core/platform/numa_utils.h"
 #endif
@@ -80,7 +85,6 @@ void WorkerServer::create_server(const runtime::Options& options,
                                  int32_t ep_size,
                                  int32_t cp_size,
                                  WorkerType worker_type) {
-  ParallelConfig::get_instance().enable_prefill_sp(options.enable_prefill_sp());
   if (options.enable_offline_inference()) {
     ExecutionConfig::get_instance()
         .enable_graph(options.enable_graph())
@@ -175,8 +179,22 @@ void WorkerServer::create_server(const runtime::Options& options,
   comm->create_process_groups(master_node_addr, device);
   parallel_args = comm->parallel_args();
 
-  std::unique_ptr<Worker> worker =
-      std::make_unique<Worker>(*parallel_args, device, options, worker_type);
+  ParallelArgs worker_parallel_args = *parallel_args;
+  const int32_t cp_group_size =
+      worker_parallel_args.cp_group_ == nullptr
+          ? 1
+          : worker_parallel_args.cp_group_->world_size();
+  const char* cp_partition_stage =
+      options.cp_size() <= 1
+          ? "disabled"
+          : (Platform::uses_model_cp_partition() ? "model" : "worker");
+  LOG(INFO) << "Worker CP config: cp_size=" << options.cp_size()
+            << ", cp_group_size=" << cp_group_size
+            << ", cp_partition_stage=" << cp_partition_stage
+            << ", instance_role=" << options.instance_role().to_string();
+
+  std::unique_ptr<Worker> worker = std::make_unique<Worker>(
+      worker_parallel_args, device, options, worker_type);
   worker_service->set_worker(std::move(worker));
   bool create_shm =
       options.enable_shm() && input_shm_manager && output_shm_manager;
@@ -246,9 +264,12 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
   const char* output_shm_size_ptr = output_shm_size_str.c_str();
   std::string is_local_str = std::to_string(options.is_local());
   const char* is_local_ptr = is_local_str.c_str();
-  std::string enable_prefill_sp_str =
-      std::to_string(options.enable_prefill_sp());
-  const char* enable_prefill_sp_ptr = enable_prefill_sp_str.c_str();
+  std::string cp_size_str = std::to_string(options.cp_size());
+  const char* cp_size_ptr = cp_size_str.c_str();
+  std::string ep_size_str = std::to_string(parallel_args.ep_size());
+  const char* ep_size_ptr = ep_size_str.c_str();
+  std::string instance_role_str = options.instance_role().to_string();
+  const char* instance_role_ptr = instance_role_str.c_str();
   std::string enable_speculative_decode_str =
       std::to_string(options.enable_speculative_decode());
   const char* enable_speculative_decode_ptr =
@@ -289,10 +310,27 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
   const char* sp_size_ptr = sp_size_str.c_str();
   std::string cfg_size_str = std::to_string(options.cfg_size());
   const char* cfg_size_ptr = cfg_size_str.c_str();
+  const std::string& indexer_cache_dtype =
+      KVCacheConfig::get_instance().indexer_cache_dtype();
+  const char* indexer_cache_dtype_ptr = indexer_cache_dtype.c_str();
+  std::string enable_mtp_draft_body_tp1_str =
+      std::to_string(options.enable_mtp_draft_body_tp1());
+  const char* enable_mtp_draft_body_tp1_ptr =
+      enable_mtp_draft_body_tp1_str.c_str();
   const char* worker_type_ptr = worker_type.to_string();
   std::string spawn_worker_bin_path =
       options.spawn_worker_path() + "/spawn_worker";
   LOG(INFO) << "Spawn worker path: " << spawn_worker_bin_path;
+  const char* cp_partition_stage =
+      options.cp_size() <= 1
+          ? "disabled"
+          : (Platform::uses_model_cp_partition() ? "model" : "worker");
+  LOG(INFO) << "Spawn worker CP config: cp_size=" << options.cp_size()
+            << ", global_world_size=" << parallel_args.world_size()
+            << ", global_rank=" << parallel_args.rank()
+            << ", ep_size=" << parallel_args.ep_size()
+            << ", cp_partition_stage=" << cp_partition_stage
+            << ", instance_role=" << options.instance_role().to_string();
   const char* argv[] = {spawn_worker_bin_path.c_str(),
                         master_node_addr.c_str(),
                         local_rank_ptr,
@@ -305,7 +343,6 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         max_seqs_per_batch_ptr,
                         enable_shm_ptr,
                         is_local_ptr,
-                        enable_prefill_sp_ptr,
                         options.task_type().c_str(),
                         worker_type_ptr,
                         enable_speculative_decode_ptr,
@@ -325,7 +362,13 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         tp_size_ptr,
                         sp_size_ptr,
                         cfg_size_ptr,
+                        cp_size_ptr,
+                        ep_size_ptr,
+                        instance_role_ptr,
+                        indexer_cache_dtype_ptr,
+                        enable_mtp_draft_body_tp1_ptr,
                         nullptr};
+  static_assert(std::size(argv) == spawn_worker_protocol::kArgumentCount + 1);
   pid_t pid;
   int status = posix_spawnp(
       &pid, argv[0], nullptr, nullptr, const_cast<char**>(argv), environ);
@@ -376,6 +419,15 @@ WorkerServer::WorkerServer(int32_t local_worker_idx,
                            bool use_spawn_worker)
     : server_name_("DistributeWorkerServer") {
   server_name_.append(std::to_string(options.server_idx()));
+  // Eagle3/DFlash targets capture aux hidden states and don't support spawned
+  // workers yet.
+  const std::string& speculative_algorithm = options.speculative_algorithm();
+  if (use_spawn_worker && options.enable_speculative_decode() &&
+      SpeculativeConfig::requires_aux_hidden_capture(speculative_algorithm)) {
+    LOG(FATAL) << speculative_algorithm
+               << " does not support spawned workers yet. Disable offline "
+                  "spawn workers or use --speculative_algorithm=MTP.";
+  }
 
   if (worker_type == WorkerType::LLM || worker_type == WorkerType::ELM ||
       worker_type == WorkerType::VLM || worker_type == WorkerType::EVLM ||

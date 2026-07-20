@@ -1,5 +1,16 @@
 include(cc_library)
 
+cc_library(
+  NAME
+    mlu_rdma_memory_plan
+  HDRS
+    mlu/mlu_rdma_memory_plan.h
+  SRCS
+    mlu/mlu_rdma_memory_plan.cpp
+  DEPS
+    glog::glog
+)
+
 if(USE_NPU)
   add_subdirectory(npu)
 endif()
@@ -41,6 +52,7 @@ cc_library(
     $<$<OR:$<BOOL:${USE_CUDA}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:numa_utils.cpp>
   DEPS
     :config
+    :mlu_rdma_memory_plan
     absl::strings
     torch
     glog::glog

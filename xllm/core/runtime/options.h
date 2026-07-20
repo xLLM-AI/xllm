@@ -86,6 +86,8 @@ struct Options {
   // enable speculative decode
   PROPERTY(bool, enable_speculative_decode) = false;
 
+  PROPERTY(bool, enable_mtp_draft_body_tp1) = false;
+
   PROPERTY(bool, is_draft_engine) = false;
 
   PROPERTY(int32_t, world_size) = 1;
@@ -139,8 +141,6 @@ struct Options {
   // enable chunked prefill.
   PROPERTY(bool, enable_chunked_prefill) = true;
 
-  // enable prefill-only sequence parallel.
-  PROPERTY(bool, enable_prefill_sp) = false;
 
   // Flash Communication 1 (FC1) sequence-parallel optimization.
   PROPERTY(bool, enable_flashcomm1) = false;

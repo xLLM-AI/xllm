@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "spawn_worker_server.h"
+#include "core/distributed_runtime/spawn_worker_server/spawn_worker_server.h"
 
 #if defined(USE_NPU)
 #include <acl/acl.h>
@@ -64,13 +64,13 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
                                      int32_t device_idx,
                                      int32_t num_decoding_tokens,
                                      int32_t block_size,
+                                     const std::string& indexer_cache_dtype,
                                      int32_t max_tokens_per_batch,
                                      int32_t max_seqs_per_batch,
                                      bool enable_shm,
                                      uint64_t input_shm_size,
                                      uint64_t output_shm_size,
                                      bool is_local,
-                                     bool enable_prefill_sp,
                                      const std::string& task_type,
                                      const std::string& worker_type,
                                      bool enable_speculative_decode,
@@ -87,7 +87,11 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
                                      int32_t dp_size,
                                      int32_t tp_size,
                                      int32_t sp_size,
-                                     int32_t cfg_size) {
+                                     int32_t cfg_size,
+                                     int32_t cp_size,
+                                     int32_t ep_size,
+                                     const InstanceRole& instance_role,
+                                     bool enable_mtp_draft_body_tp1) {
   // TODO: pass whole xllm::runtime::Options here from main process.
   xllm::runtime::Options runner_options;
   const std::string backend = get_backend_from_worker_type(worker_type);
@@ -102,14 +106,16 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
       .max_tokens_per_batch(max_tokens_per_batch)
       .max_seqs_per_batch(max_seqs_per_batch)
       .num_decoding_tokens(num_decoding_tokens)
-      .enable_prefill_sp(enable_prefill_sp)
       .enable_speculative_decode(enable_speculative_decode)
+      .enable_mtp_draft_body_tp1(enable_mtp_draft_body_tp1)
       .num_speculative_tokens(num_speculative_tokens)
       .speculative_algorithm(speculative_algorithm)
       .enable_schedule_overlap(/*enable_schedule_overlap=*/false)
       .enable_offline_inference(/*enable_offline_inference=*/true)
       .master_node_addr(master_node_addr)
       .dp_size(dp_size)
+      .ep_size(ep_size)
+      .cp_size(cp_size)
       .tp_size(tp_size)
       .sp_size(effective_sp_size)
       .cfg_size(effective_cfg_size)
@@ -123,20 +129,25 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
       .enable_prefill_piecewise_graph(enable_prefill_piecewise_graph)
       .max_tokens_for_graph_mode(max_tokens_for_graph_mode)
       .task_type(task_type)
+      .instance_role(instance_role)
       .max_encoder_cache_size(max_encoder_cache_size);
   SchedulerConfig::get_instance()
       .max_tokens_per_batch(max_tokens_per_batch)
       .max_seqs_per_batch(max_seqs_per_batch)
       .enable_schedule_overlap(false);
   ParallelConfig::get_instance()
-      .enable_prefill_sp(enable_prefill_sp)
       .dp_size(dp_size)
+      .ep_size(ep_size)
+      .cp_size(cp_size)
       .tp_size(tp_size)
       .sp_size(effective_sp_size)
       .cfg_size(effective_cfg_size)
       .communication_backend(communication_backend);
   DistributedConfig::get_instance().master_node_addr(master_node_addr);
-  KVCacheConfig::get_instance().block_size(block_size);
+  KVCacheConfig::get_instance()
+      .block_size(block_size)
+      .indexer_cache_dtype(indexer_cache_dtype);
+  KVCacheConfig::get_instance().validate();
   EPLBConfig::get_instance().rank_tablefile(rank_tablefile);
 
   xllm::Device device{device_idx};
@@ -169,9 +180,9 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
   ParallelArgs parallel_args(global_rank,
                              world_size,
                              dp_size,
-                             /* cp_size = */ 1,
+                             cp_size,
                              /* process_group = */ nullptr,
-                             /* ep_size = */ 1);
+                             ep_size);
   worker_server_ = std::make_unique<WorkerServer>(local_rank,
                                                   master_node_addr,
                                                   done_,

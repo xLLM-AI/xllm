@@ -20,10 +20,12 @@ limitations under the License.
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace xllm {
 struct ModelInputParams;
 struct ModelGraphMetadataState;
+class KVCache;
 
 namespace layer {
 class LmHead;
@@ -218,5 +220,19 @@ struct has_init_or_refresh_rolling_runtime<
         std::declval<const std::string&>()))>> : std::true_type {};
 
 #endif
+
+template <typename T, typename = void>
+struct has_write_context_kv : std::false_type {};
+
+template <typename T>
+struct has_write_context_kv<
+    T,
+    std::void_t<decltype(std::declval<T>()->write_context_kv(
+        std::declval<const torch::Tensor&>(),
+        std::declval<const torch::Tensor&>(),
+        std::declval<const torch::Tensor&>(),
+        std::declval<std::vector<KVCache>&>(),
+        std::declval<const ModelInputParams&>()))>> : std::true_type {};
+
 }  // namespace detail
 }  // namespace xllm

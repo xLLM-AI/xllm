@@ -111,13 +111,13 @@ class LLM:
         rank_tablefile: str = '',
         expert_parallel_degree: int = 0,
         enable_chunked_prefill: bool = True,
-        enable_prefill_sp: bool = False,
         master_node_addr: str = '',
         instance_role: str = 'DEFAULT',
         transfer_listen_port: int = 26000,
         nnodes: int = 1,
         node_rank: int = 0,
         dp_size: int = 1,
+        cp_size: int = 1,
         ep_size: int = 1,
         instance_name: str = '',
         enable_disagg_pd: bool = False,
@@ -184,7 +184,6 @@ class LLM:
         options.rank_tablefile = rank_tablefile
         options.expert_parallel_degree = expert_parallel_degree
         options.enable_chunked_prefill = enable_chunked_prefill
-        options.enable_prefill_sp = enable_prefill_sp
         if master_node_addr:
             options.master_node_addr = master_node_addr
         else:
@@ -194,6 +193,7 @@ class LLM:
         options.nnodes = nnodes
         options.node_rank = node_rank
         options.dp_size = dp_size
+        options.cp_size = cp_size
         options.ep_size = ep_size
         options.instance_name = instance_name
         options.enable_disagg_pd = enable_disagg_pd

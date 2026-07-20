@@ -39,6 +39,7 @@ limitations under the License.
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/service_config.h"
+#include "core/platform/platform.h"
 #include "framework/block/block_utils.h"
 // hierarchy temporarily disabled during the block-manager refactor
 // #include "framework/block/hierarchy_block_manager_pool.h"
@@ -95,7 +96,14 @@ LLMEngine::LLMEngine(const runtime::Options& options,
   cp_size_ = options_.cp_size();
   worker_clients_num_ = worker_clients_.size();
   dp_local_size_ = worker_clients_num_ / dp_size_;
-  dp_local_tp_size_ = dp_local_size_ / cp_size_;
+  const bool use_model_partition =
+      cp_size_ > 1 && Platform::uses_model_cp_partition();
+  // MLU model-side CP temporarily overlaps the CP and TP rank sets, so all
+  // DP-local ranks still form the effective TP execution width. Once MLU
+  // adopts orthogonal worker-side CP x TP, remove this special case and use
+  // dp_local_size_ / cp_size_ for every backend.
+  dp_local_tp_size_ =
+      use_model_partition ? dp_local_size_ : dp_local_size_ / cp_size_;
 
   // create ThreadPool for link cluster
   link_threadpool_ = std::make_unique<ThreadPool>(
@@ -182,12 +190,16 @@ bool LLMEngine::init_model(MasterStatus master_status) {
   auto model_loader = ModelLoader::create(model_path);
   LOG(INFO) << "Initializing model from: " << model_path;
 
-  tokenizer_ = model_loader->tokenizer();
-  CHECK(tokenizer_ != nullptr);
-
   args_ = model_loader->model_args();
   quant_args_ = model_loader->quant_args();
-  tokenizer_args_ = model_loader->tokenizer_args();
+
+  // A draft engine is fed token ids and detokenized by the target, so it
+  // shares the target vocabulary and loads no tokenizer of its own.
+  if (!options_.is_draft_engine()) {
+    tokenizer_ = model_loader->tokenizer();
+    CHECK(tokenizer_ != nullptr);
+    tokenizer_args_ = model_loader->tokenizer_args();
+  }
 
   // compute the number of local kv heads and head dim
   const uint32_t world_size = dp_local_tp_size_;
@@ -213,21 +225,23 @@ bool LLMEngine::init_model(MasterStatus master_status) {
             << ", dtype: " << dtype_
             << ", kv_cache_dtype: " << options_.kv_cache_dtype();
 
-  const int64_t tokenizer_vocab_size = tokenizer_->vocab_size();
-  int64_t model_vocab_size = args_.vocab_size();
-  if (tokenizer_vocab_size != model_vocab_size) {
-    // use tokenizer vocab size if model vocab size is not set
-    if (model_vocab_size <= 0) {
-      LOG(WARNING) << "Model vocab size is not set, using tokenizer vocab "
-                      "size: "
-                   << tokenizer_vocab_size;
-      args_.vocab_size(tokenizer_vocab_size);
-    } else if (tokenizer_vocab_size > model_vocab_size) {
-      LOG(WARNING) << "Unsafe vocab mismatch: tokenizer: "
-                   << tokenizer_vocab_size << ", model: " << model_vocab_size;
-    } else {
-      LOG(INFO) << "Tokenizer/model vocab differ: tokenizer="
-                << tokenizer_vocab_size << ", model=" << model_vocab_size;
+  if (tokenizer_ != nullptr) {
+    const int64_t tokenizer_vocab_size = tokenizer_->vocab_size();
+    int64_t model_vocab_size = args_.vocab_size();
+    if (tokenizer_vocab_size != model_vocab_size) {
+      // use tokenizer vocab size if model vocab size is not set
+      if (model_vocab_size <= 0) {
+        LOG(WARNING) << "Model vocab size is not set, using tokenizer vocab "
+                        "size: "
+                     << tokenizer_vocab_size;
+        args_.vocab_size(tokenizer_vocab_size);
+      } else if (tokenizer_vocab_size > model_vocab_size) {
+        LOG(WARNING) << "Unsafe vocab mismatch: tokenizer: "
+                     << tokenizer_vocab_size << ", model: " << model_vocab_size;
+      } else {
+        LOG(INFO) << "Tokenizer/model vocab differ: tokenizer="
+                  << tokenizer_vocab_size << ", model=" << model_vocab_size;
+      }
     }
   }
 
@@ -438,6 +452,8 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
   KVCacheEstimateOptions estimate_options;
   estimate_options.dtype = dtype_;
   estimate_options.kv_cache_dtype = options_.kv_cache_dtype();
+  estimate_options.indexer_cache_dtype =
+      ::xllm::KVCacheConfig::get_instance().indexer_cache_dtype();
   estimate_options.cache_size_in_bytes = cache_size_in_bytes;
   estimate_options.block_size = options_.block_size();
   estimate_options.world_size = dp_local_tp_size_;
@@ -450,11 +466,20 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
       static_cast<int64_t>(options_.num_speculative_tokens());
   estimate_options.max_tokens_per_batch =
       static_cast<int64_t>(options_.max_tokens_per_batch());
-  estimate_options.max_concurrent_requests = static_cast<int64_t>(
+  estimate_options.max_linear_state_cache_slots = static_cast<int64_t>(
       ::xllm::ServiceConfig::get_instance().max_concurrent_requests());
   estimate_options.is_draft_engine = options_.is_draft_engine();
   estimate_options.enable_prefix_cache =
       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
+  estimate_options.enable_rdma_scale_padding =
+      options_.instance_role() != InstanceRole::DEFAULT;
+  if (options_.enable_mtp_draft_body_tp1() && options_.is_draft_engine()) {
+    estimate_options.world_size = 1;
+    estimate_options.n_local_kv_heads =
+        args_.n_kv_heads().value_or(args_.n_heads());
+    estimate_options.n_local_linear_k_heads = args_.linear_num_key_heads();
+    estimate_options.n_local_linear_v_heads = args_.linear_num_value_heads();
+  }
 
   KVCacheCapacity kv_cache_cap =
       ::xllm::estimate_kv_cache_capacity(args_, estimate_options);
@@ -513,11 +538,14 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .enable_kvcache_store(options_.enable_kvcache_store())
       .enable_xtensor(::xllm::KVCacheConfig::get_instance().enable_xtensor())
       .num_layers(args_.n_layers())
+      .linear_state_num_slots(
+          static_cast<int32_t>(kv_cache_cap.num_linear_state_blocks()))
       .slot_size(kv_cache_cap.slot_size())
       .model_id(options_.model_id())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .max_concurrent_requests(
-          ::xllm::ServiceConfig::get_instance().max_concurrent_requests());
+          ::xllm::ServiceConfig::get_instance().max_concurrent_requests())
+      .num_speculative_tokens(options_.num_speculative_tokens());
   if (util::is_deepseek_v4_model_type(args_.model_type())) {
     constexpr uint32_t kManagerTypeBlockManagerImpl = 0;
     constexpr uint32_t kManagerTypeSlidingWindowBlockManager = 1;
@@ -647,7 +675,7 @@ std::vector<folly::SemiFuture<uint32_t>> LLMEngine::transfer_kv_blocks(
   std::vector<folly::SemiFuture<uint32_t>> futures;
   futures.reserve(dp_local_tp_size_);
 
-  for (auto tp_rank = 0; tp_rank < dp_local_tp_size_; ++tp_rank) {
+  for (uint32_t tp_rank = 0; tp_rank < dp_local_tp_size_; ++tp_rank) {
     futures.emplace_back(worker_clients_[tp_rank + dp_local_tp_size_ * dp_rank]
                              ->transfer_kv_blocks(block_transfer_info));
   }
@@ -659,7 +687,7 @@ void LLMEngine::transfer_kv_blocks(
     const uint32_t dp_rank,
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
-  for (auto tp_rank = 0; tp_rank < dp_local_tp_size_; ++tp_rank) {
+  for (uint32_t tp_rank = 0; tp_rank < dp_local_tp_size_; ++tp_rank) {
     worker_clients_[tp_rank + dp_local_tp_size_ * dp_rank]->transfer_kv_blocks(
         batch_id, block_transfer_info);
   }
@@ -672,7 +700,7 @@ void LLMEngine::prefetch_from_storage(
     std::vector<std::shared_ptr<std::atomic<uint32_t>>>* prefetch_results) {
   prefetch_results->reserve(dp_local_tp_size_);
   flag->store(dp_local_tp_size_, std::memory_order_relaxed);
-  for (auto tp_rank = 0; tp_rank < dp_local_tp_size_; ++tp_rank) {
+  for (uint32_t tp_rank = 0; tp_rank < dp_local_tp_size_; ++tp_rank) {
     prefetch_results->emplace_back(std::make_shared<std::atomic<uint32_t>>(0));
     worker_clients_[tp_rank + dp_local_tp_size_ * dp_rank]
         ->prefetch_from_storage(
@@ -986,7 +1014,7 @@ void LLMEngine::update_last_step_result(std::vector<Batch>& last_batch) {
   // cause the output on other workers is the same as that on driver.
   // Under data parallelism (DP), we need to get dp_size outputs.
   // The `stride` means the workers num we can skip.
-  int stride = dp_local_tp_size_;
+  uint32_t stride = dp_local_tp_size_;
   // If EPLB is enabled, we need to get results from all workers,
   // because the experts on each worker are different,
   // and the tokens load of all experts needs to be returned to engine.

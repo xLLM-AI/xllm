@@ -23,7 +23,6 @@ limitations under the License.
 #include <filesystem>
 #include <memory>
 #include <random>
-#include <unordered_set>
 
 #include "api_service/api_service.h"
 #include "core/common/global_flags.h"
@@ -65,10 +64,6 @@ limitations under the License.
 using namespace xllm;
 
 static std::atomic<uint32_t> signal_received{0};
-
-static const std::unordered_set<std::string> prefill_sp_supported_model_set = {
-    "deepseek_v32",
-    "glm_moe_dsa"};
 
 namespace {
 
@@ -113,6 +108,11 @@ Options create_options(const std::string& instance_name, bool is_local) {
   const DiTConfig& dit_config = DiTConfig::get_instance();
   const RecConfig& rec_config = RecConfig::get_instance();
 
+#if !defined(USE_NPU)
+  CHECK(!speculative_config.enable_mtp_draft_body_tp1())
+      << "enable_mtp_draft_body_tp1 is only supported on the NPU backend";
+#endif
+
   Options options;
 #if defined(USE_NPU)
   options.npu_kernel_backend(kernel_config.npu_kernel_backend());
@@ -147,6 +147,7 @@ Options create_options(const std::string& instance_name, bool is_local) {
           speculative_config.speculative_suffix_max_cached_requests())
       .speculative_suffix_use_tree_spec(
           speculative_config.speculative_suffix_use_tree_spec())
+      .enable_mtp_draft_body_tp1(speculative_config.enable_mtp_draft_body_tp1())
       .num_request_handling_threads(
           service_config.num_request_handling_threads())
       .communication_backend(parallel_config.communication_backend())
@@ -157,7 +158,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .rank_tablefile(eplb_config.rank_tablefile())
       .expert_parallel_degree(eplb_config.expert_parallel_degree())
       .enable_chunked_prefill(scheduler_config.enable_chunked_prefill())
-      .enable_prefill_sp(parallel_config.enable_prefill_sp())
       .enable_flashcomm1(FLAGS_enable_flashcomm1)
       .flashcomm1_min_prefill_tokens(FLAGS_flashcomm1_min_prefill_tokens)
       .enable_mmrs_fusion(FLAGS_enable_mmrs_fusion)
@@ -259,11 +259,6 @@ void validate_config(const std::string& model_type) {
 
   if (model_config.backend().empty()) {
     LOG(FATAL) << "Model is not supported currently, model type: "
-               << model_type;
-  }
-  if (parallel_config.enable_prefill_sp() &&
-      !prefill_sp_supported_model_set.contains(model_type)) {
-    LOG(FATAL) << "enable_prefill_sp is not supported for model_type="
                << model_type;
   }
   if (model_config.max_encoder_cache_size() < 0) {

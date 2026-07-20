@@ -120,8 +120,8 @@ DeepseekV2DecoderLayerImpl::PostAttnCarrier
 DeepseekV2DecoderLayerImpl::build_post_attn_local(
     torch::Tensor x,
     const torch::Tensor& residual) {
-  CHECK(sequence_parallel_context_ != nullptr)
-      << "sequence parallel carrier requires sequence parallel context";
+  CHECK(context_parallel_context_ != nullptr)
+      << "SP carrier requires CP context";
   auto [ffn_in, skip_local] = post_norm_->forward(x, residual);
 
   PostAttnCarrier carrier;
@@ -139,8 +139,8 @@ DeepseekV2DecoderLayerImpl::build_post_attn_carrier(
   PostAttnCarrier carrier;
   if (attn_layout == DeepseekV2AttentionImpl::PostAttnLayout::kPackedLocal) {
     carrier = build_post_attn_local(x, residual);
-    carrier.ffn_in = v32_sp::all_gather_across_ranks(
-        carrier.ffn_in, *sequence_parallel_context_);
+    carrier.ffn_in = v32_cp::all_gather_across_ranks(
+        carrier.ffn_in, *context_parallel_context_);
     return carrier;
   }
 
@@ -213,13 +213,13 @@ bool DeepseekV2DecoderLayerImpl::can_keep_local_output(
     const PostAttnCarrier& carrier,
     ProcessGroup* pg) const {
   const bool can_use_sp_fast = carrier.mode == PostAttnMode::kPackedLocal &&
-                               sequence_parallel_context_ != nullptr &&
-                               sequence_parallel_context_->comm_plan.ffn_can_rs;
+                               context_parallel_context_ != nullptr &&
+                               context_parallel_context_->comm_plan.ffn_can_rs;
   if (!can_use_sp_fast) {
     return false;
   }
 
-  ProcessGroup* const sp_pg = sequence_parallel_context_->process_group;
+  ProcessGroup* const sp_pg = context_parallel_context_->process_group;
   if (!pg || pg->world_size() <= 1 || pg == sp_pg) {
     return true;
   }
@@ -243,18 +243,18 @@ torch::Tensor DeepseekV2DecoderLayerImpl::comm_out(
     return parallel_state::reduce_scatter(x, pg);
   }
 
-  CHECK(sequence_parallel_context_ != nullptr)
-      << "sequence parallel fast path requires sequence parallel context";
-  return v32_sp::slice_local_packed(x, *sequence_parallel_context_);
+  CHECK(context_parallel_context_ != nullptr)
+      << "SP fast path requires CP context";
+  return v32_cp::slice_local_packed(x, *context_parallel_context_);
 }
 
 torch::Tensor DeepseekV2DecoderLayerImpl::restore_ffn_output(
     torch::Tensor x,
     const PostAttnCarrier& carrier) {
   if (carrier.mode == PostAttnMode::kPackedLocal) {
-    CHECK(sequence_parallel_context_ != nullptr)
-        << "packed restore requires sequence parallel context";
-    x = v32_sp::slice_local_packed(x, *sequence_parallel_context_);
+    CHECK(context_parallel_context_ != nullptr)
+        << "packed restore requires CP context";
+    x = v32_cp::slice_local_packed(x, *context_parallel_context_);
     return x + carrier.skip_local;
   }
   return x + carrier.skip_local;
@@ -282,9 +282,9 @@ torch::Tensor DeepseekV2DecoderLayerImpl::forward(
 
   // Attention
   x = attention_->forward(
-      positions, x, attn_metadata, kv_cache, sequence_parallel_context_);
+      positions, x, attn_metadata, kv_cache, context_parallel_context_);
   const bool use_sp_output =
-      sequence_parallel_context_ != nullptr && attention_->can_use_sp();
+      context_parallel_context_ != nullptr && attention_->can_use_sp();
   const auto attn_layout = attention_->post_attn_layout(use_sp_output);
   auto prep = prepare_moe_inputs(
       std::move(x), residual.value(), input_params, attn_layout);
@@ -335,7 +335,7 @@ torch::Tensor DeepseekV2DecoderLayerImpl::forward(
     auto moe_result =
         prep.use_sp_moe_overlap
             ? sparse_moe_->forward_sp(
-                  x, *sequence_parallel_context_, moe_comm_fns)
+                  x, *context_parallel_context_, moe_comm_fns)
             : sparse_moe_->forward(x, exec_cfg->enable_all2all, moe_comm_fns);
     x = std::move(moe_result.output);
     keep_local_output = moe_result.keep_local_output;

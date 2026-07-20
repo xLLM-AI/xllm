@@ -189,35 +189,7 @@ torch::Tensor KVCache::get_index_cache() const {
 }
 
 std::vector<KVCacheTensor> KVCache::get_cache_tensors() const {
-  std::vector<KVCacheTensor> tensors;
-  tensors.reserve(5);
-
-  const torch::Tensor key_cache = get_k_cache();
-  if (key_cache.defined() && key_cache.numel() > 0) {
-    tensors.emplace_back(KVCacheTensorRole::KEY, key_cache);
-  }
-
-  const torch::Tensor value_cache = get_v_cache();
-  if (value_cache.defined() && value_cache.numel() > 0) {
-    tensors.emplace_back(KVCacheTensorRole::VALUE, value_cache);
-  }
-
-  const torch::Tensor index_cache = get_index_cache();
-  if (index_cache.defined() && index_cache.numel() > 0) {
-    tensors.emplace_back(KVCacheTensorRole::INDEX, index_cache);
-  }
-
-  const torch::Tensor conv_cache = get_conv_cache();
-  if (conv_cache.defined() && conv_cache.numel() > 0) {
-    tensors.emplace_back(KVCacheTensorRole::CONV, conv_cache);
-  }
-
-  const torch::Tensor ssm_cache = get_ssm_cache();
-  if (ssm_cache.defined() && ssm_cache.numel() > 0) {
-    tensors.emplace_back(KVCacheTensorRole::SSM, ssm_cache);
-  }
-
-  return tensors;
+  return impl_->get_cache_tensors();
 }
 
 std::optional<torch::Tensor> KVCache::get_k_cache_scale() const {
@@ -228,15 +200,15 @@ std::optional<torch::Tensor> KVCache::get_v_cache_scale() const {
   return impl_->get_v_cache_scale();
 }
 
+std::optional<torch::Tensor> KVCache::get_indexer_cache_scale() const {
+  return impl_->get_indexer_cache_scale();
+}
+
 torch::Tensor KVCache::get_conv_cache() const {
   return impl_->get_conv_cache();
 }
 
 torch::Tensor KVCache::get_ssm_cache() const { return impl_->get_ssm_cache(); }
-
-torch::Tensor KVCache::get_indexer_cache_scale() const {
-  return impl_->get_indexer_cache_scale();
-}
 
 torch::Tensor KVCache::get_swa_cache() const { return impl_->get_swa_cache(); }
 
@@ -254,6 +226,14 @@ torch::Tensor KVCache::get_compress_index_kv_state() const {
 
 torch::Tensor KVCache::get_compress_index_score_state() const {
   return impl_->get_compress_index_score_state();
+}
+
+torch::Tensor KVCache::get_compress_state() const {
+  return impl_->get_compress_state();
+}
+
+torch::Tensor KVCache::get_compress_index_state() const {
+  return impl_->get_compress_index_state();
 }
 
 std::vector<std::vector<int64_t>> KVCache::get_shapes() {

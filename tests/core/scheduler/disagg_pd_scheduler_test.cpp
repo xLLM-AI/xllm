@@ -24,8 +24,10 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "common/metrics.h"
 #include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_pool.h"
+#include "framework/model/model_args.h"
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"
 #include "framework/tokenizer/tokenizer.h"
@@ -67,7 +69,8 @@ class FakeEngine final : public Engine {
     options.num_blocks(num_blocks)
         .block_size(block_size)
         .enable_prefix_cache(true)
-        .enable_disagg_pd(true);
+        .enable_disagg_pd(true)
+        .max_seqs_per_batch(1024);
     tokenizer_ = std::make_unique<FakeTokenizer>();
     block_manager_ = std::make_unique<BlockManagerPool>(options, /*dp_size=*/1);
   }
@@ -86,7 +89,7 @@ class FakeEngine final : public Engine {
     return block_manager_.get();
   }
 
-  const ModelArgs& model_args() const override { NOT_IMPLEMENTED(); }
+  const ModelArgs& model_args() const override { return model_args_; }
 
   const TokenizerArgs& tokenizer_args() const override { NOT_IMPLEMENTED(); }
 
@@ -99,6 +102,7 @@ class FakeEngine final : public Engine {
  private:
   std::unique_ptr<Tokenizer> tokenizer_;
   std::unique_ptr<BlockManagerPool> block_manager_;
+  ModelArgs model_args_;
 };
 
 class TestDisaggPDScheduler final : public DisaggPDScheduler {
@@ -112,6 +116,15 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
 
   bool pop_decode_request_for_test(std::shared_ptr<Request>* request) {
     return request_queue_.read(*request);
+  }
+
+  static int64_t amortized_token_latency_for_test(int64_t tbt_ms,
+                                                  size_t num_tokens) {
+    return amortized_token_latency_ms(tbt_ms, num_tokens);
+  }
+
+  void update_metrics(std::vector<Sequence*>& sequences) {
+    update_token_latency_metrics(sequences);
   }
 };
 
@@ -321,6 +334,69 @@ TEST(DisaggPDSchedulerTest, FirstDecodeTokenLatencyIsNonNegative) {
   // pre-fix it was created_time + ttft (~now+100ms), yielding a negative ITL.
   int64_t first_itl = queued->sequences()[0]->tbt(absl::Now());
   EXPECT_GE(first_itl, 0);
+}
+
+TEST(DisaggPDSchedulerTest, AmortizedTokenLatencyRoundsHalfUp) {
+  // Amortized per-token latency is round(tbt_ms / n) via (tbt_ms + n/2) / n.
+  EXPECT_EQ(TestDisaggPDScheduler::amortized_token_latency_for_test(100, 4),
+            25);
+  EXPECT_EQ(TestDisaggPDScheduler::amortized_token_latency_for_test(101, 4),
+            25);
+  EXPECT_EQ(TestDisaggPDScheduler::amortized_token_latency_for_test(102, 4),
+            26);
+  EXPECT_EQ(TestDisaggPDScheduler::amortized_token_latency_for_test(50, 5), 10);
+  EXPECT_EQ(TestDisaggPDScheduler::amortized_token_latency_for_test(53, 5), 11);
+  // With a single committed token amortized latency equals the raw latency.
+  EXPECT_EQ(TestDisaggPDScheduler::amortized_token_latency_for_test(37, 1), 37);
+}
+
+TEST(DisaggPDSchedulerTest, SpeculativeGaugeReportsBatchMeanTokensPerStep) {
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  TestDisaggPDScheduler scheduler(&engine, make_mtp_decode_options());
+
+  std::shared_ptr<Request> first_request = make_request({1, 2, 3, 4});
+  Sequence* first_sequence = first_request->sequences()[0].get();
+  first_sequence->kv_state().set_kv_cache_tokens_num(
+      first_sequence->num_prompt_tokens());
+  for (int32_t token_id = 10; token_id < 15; ++token_id) {
+    first_sequence->append_token(Token(token_id));
+  }
+
+  std::shared_ptr<Request> second_request = make_request({5, 6, 7, 8});
+  Sequence* second_sequence = second_request->sequences()[0].get();
+  second_sequence->kv_state().set_kv_cache_tokens_num(
+      second_sequence->num_prompt_tokens());
+  for (int32_t token_id = 20; token_id < 23; ++token_id) {
+    second_sequence->append_token(Token(token_id));
+  }
+
+  std::vector<Sequence*> sequences = {first_sequence, second_sequence};
+  scheduler.update_metrics(sequences);
+
+  EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_tokens_per_decode_step.get_value(),
+                   4.0);
+  EXPECT_EQ(first_sequence->generated_tokens_since_latency(), 0u);
+  EXPECT_EQ(second_sequence->generated_tokens_since_latency(), 0u);
+}
+
+TEST(DisaggPDSchedulerTest, SpeculativeMetricsSilentWhenDisabled) {
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  // make_options() keeps num_speculative_tokens at its default of 0.
+  TestDisaggPDScheduler scheduler(&engine, make_options());
+
+  GAUGE_SET(speculative_mean_tokens_per_decode_step, -1.0);
+
+  std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
+  Sequence* sequence = request->sequences()[0].get();
+  sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
+  sequence->append_token(Token(10));
+  sequence->append_token(Token(11));
+  std::vector<Sequence*> sequences = {sequence};
+
+  scheduler.update_metrics(sequences);
+
+  EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_tokens_per_decode_step.get_value(),
+                   -1.0);
 }
 
 }  // namespace xllm

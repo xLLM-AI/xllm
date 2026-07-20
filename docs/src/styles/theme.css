@@ -1,0 +1,229 @@
+:root,
+::backdrop,
+:root[data-theme='light'],
+[data-theme='light'] ::backdrop {
+	--docs-red: #EB2700;
+	--docs-red-muted: color-mix(in srgb, var(--docs-red) 80%, transparent);
+	--docs-black: #080808;
+	--sl-color-accent-low: color-mix(in srgb, var(--docs-red) 18%, var(--sl-color-black));
+	--sl-color-accent: var(--docs-red);
+	--sl-color-accent-high: var(--docs-red);
+	--sl-color-bg-accent: var(--docs-red);
+	--sl-color-text-accent: var(--docs-red);
+	--sl-content-width: 60rem;
+}
+
+:root:not([data-theme='light']),
+:root:not([data-theme='light']) ::backdrop {
+	--sl-color-white: #f7f7f7;
+	--sl-color-gray-1: #e8e8e8;
+	--sl-color-gray-2: #d0d0d0;
+	--sl-color-gray-3: #a8a8a8;
+	--sl-color-gray-4: #747474;
+	--sl-color-gray-5: #343434;
+	--sl-color-gray-6: #1d1d1d;
+	--sl-color-gray-7: #111111;
+	--sl-color-black: var(--docs-black);
+	--sl-color-bg: var(--docs-black);
+	--sl-color-bg-nav: var(--docs-black);
+	--sl-color-bg-sidebar: var(--docs-black);
+	--sl-color-bg-inline-code: var(--sl-color-gray-6);
+	--sl-color-text: var(--sl-color-gray-2);
+	--sl-color-text-invert: var(--docs-black);
+	--sl-color-hairline-light: var(--sl-color-gray-5);
+	--sl-color-hairline: var(--sl-color-gray-6);
+	--sl-color-hairline-shade: var(--docs-black);
+	--sl-color-backdrop-overlay: color-mix(in srgb, var(--docs-black) 72%, transparent);
+	--sl-rapide-ui-bg-color: var(--docs-black);
+	--sl-rapide-ui-header-bg-color: color-mix(in srgb, var(--docs-black) 88%, transparent);
+	--sl-rapide-ui-border-color: color-mix(in srgb, var(--docs-red) 20%, var(--sl-color-gray-6));
+}
+
+.sidebar-pane a > span:first-child,
+.sidebar-pane summary .group-label {
+	display: inline-block;
+	transform: scale(1);
+	transform-origin: left center;
+	transition:
+		color 160ms ease,
+		transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.sidebar-pane summary .group-label .large {
+	transition: color 160ms ease;
+}
+
+.sidebar-pane a:is(:hover, :focus-visible),
+.sidebar-pane summary:is(:hover, :focus-visible),
+.sidebar-pane a:is(:hover, :focus-visible) > span:first-child,
+.sidebar-pane summary:is(:hover, :focus-visible) .group-label,
+.sidebar-pane summary:is(:hover, :focus-visible) .group-label .large {
+	color: var(--docs-red) !important;
+}
+
+.sidebar-pane a:is(:hover, :focus-visible) > span:first-child,
+.sidebar-pane summary:is(:hover, :focus-visible) .group-label {
+	transform: scale(1.035);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.sidebar-pane a > span:first-child,
+	.sidebar-pane summary .group-label,
+	.sidebar-pane summary .group-label .large {
+		transition: color 160ms ease;
+	}
+
+	.sidebar-pane a:is(:hover, :focus-visible) > span:first-child,
+	.sidebar-pane summary:is(:hover, :focus-visible) .group-label {
+		transform: none;
+	}
+}
+
+starlight-toc a > span {
+	display: inline-block;
+	transform: scale(1);
+	transform-origin: left center;
+	transition:
+		color 160ms ease,
+		transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+starlight-toc a:is(:hover, :focus-visible) {
+	color: var(--docs-red-muted);
+}
+
+starlight-toc a[aria-current='true'],
+starlight-toc a[aria-current='true']:is(:hover, :focus-visible) {
+	color: var(--docs-red) !important;
+}
+
+.sl-markdown-content .simple-icon {
+	display: inline-block;
+	flex: 0 0 auto;
+	height: 1em;
+	margin-inline-end: 0.25em;
+	vertical-align: -0.125em;
+	width: 1em;
+}
+
+starlight-toc a:is(:hover, :focus-visible) > span {
+	transform: scale(1.035);
+}
+
+header.header .language-menu {
+	position: relative;
+}
+
+header.header .language-menu summary {
+	align-items: center;
+	background-clip: padding-box;
+	border: 1px solid transparent;
+	border-radius: 0.625rem;
+	color: var(--sl-color-gray-2);
+	cursor: pointer;
+	display: flex;
+	font-size: var(--sl-text-sm);
+	font-weight: 500;
+	gap: 0.35rem;
+	line-height: 1;
+	list-style: none;
+	padding: 0.55rem 0.75rem;
+	transform: scale(1);
+	transform-origin: center;
+	transition:
+		background-color 160ms ease,
+		border-color 160ms ease,
+		color 160ms ease,
+		transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+	user-select: none;
+	white-space: nowrap;
+	will-change: transform;
+}
+
+header.header .language-menu summary::-webkit-details-marker {
+	display: none;
+}
+
+header.header .language-menu summary:is(:hover, :focus-visible),
+header.header .language-menu[open] summary {
+	background-color: color-mix(in srgb, var(--sl-color-accent) 8%, transparent);
+	border-color: color-mix(in srgb, var(--sl-color-accent) 26%, transparent);
+	color: var(--sl-color-text-accent);
+	transform: scale(1.045);
+}
+
+header.header .language-menu svg {
+	fill: none;
+	flex: 0 0 auto;
+	height: 1rem;
+	stroke: currentColor;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 2;
+	width: 1rem;
+}
+
+header.header .language-menu .chevron-icon {
+	transition: transform 160ms ease;
+}
+
+header.header .language-menu[open] .chevron-icon {
+	transform: rotate(180deg);
+}
+
+header.header .language-options {
+	background-color: color-mix(in srgb, var(--sl-color-bg-nav) 96%, transparent);
+	border: 1px solid var(--sl-color-gray-5);
+	border-radius: 0.625rem;
+	box-shadow: 0 0.85rem 2rem rgba(0, 0, 0, 0.12);
+	display: grid;
+	gap: 0.125rem;
+	inset-block-start: calc(100% + 0.4rem);
+	inset-inline-end: 0;
+	min-width: 100%;
+	padding: 0.25rem;
+	position: absolute;
+	z-index: calc(var(--sl-z-index-navbar) + 1);
+}
+
+header.header .language-options a {
+	border-radius: 0.5rem;
+	color: var(--sl-color-gray-2);
+	font-size: var(--sl-text-sm);
+	font-weight: 500;
+	line-height: 1;
+	padding: 0.55rem 0.75rem;
+	text-align: start;
+	text-decoration: none;
+	white-space: nowrap;
+}
+
+header.header .language-options a:is(:hover, :focus-visible),
+header.header .language-options a[aria-current='true'] {
+	background-color: color-mix(in srgb, var(--sl-color-accent) 10%, transparent);
+	color: var(--sl-color-text-accent);
+	outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	starlight-toc a > span {
+		transition: color 160ms ease;
+	}
+
+	starlight-toc a:is(:hover, :focus-visible) > span,
+	header.header .language-menu summary:is(:hover, :focus-visible),
+	header.header .language-menu[open] summary {
+		transform: none;
+	}
+
+	header.header .language-menu summary {
+		transition:
+			background-color 160ms ease,
+			border-color 160ms ease,
+			color 160ms ease;
+	}
+
+	header.header .language-menu .chevron-icon {
+		transition: none;
+	}
+}

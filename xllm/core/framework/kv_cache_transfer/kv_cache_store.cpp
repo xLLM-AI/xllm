@@ -60,6 +60,15 @@ bool KVCacheStore::init(const KVCacheStoreInitConfig& config,
     LOG(INFO) << "index cache size per block: " << index_cache_size_per_block_;
   }
 
+  auto index_cache_scale = host_kv_caches_->at(0).get_indexer_cache_scale();
+  if (index_cache_scale.has_value() && index_cache_scale->defined() &&
+      index_cache_scale->numel() != 0) {
+    index_cache_scale_size_per_block_ =
+        index_cache_scale->numel() * index_cache_scale->element_size();
+    LOG(INFO) << "index cache scale size per block: "
+              << index_cache_scale_size_per_block_;
+  }
+
   if (config_.protocol == "rdma") {
     if (config_.total_size > 0 && config_.tensor_data != nullptr) {
       auto result = client_ptr_->RegisterLocalMemory(
@@ -185,7 +194,7 @@ uint32_t KVCacheStore::batch_exist(std::vector<std::string>&& keys) {
 std::vector<mooncake::Slice> KVCacheStore::genarate_mooncake_slice(
     int32_t block_id) {
   std::vector<mooncake::Slice> slice;
-  slice.reserve(3);
+  slice.reserve(4);
 
   void* k_cache = host_kv_caches_->at(block_id).get_k_cache().data_ptr();
   slice.emplace_back(mooncake::Slice{k_cache, k_cache_size_per_block_});
@@ -200,6 +209,16 @@ std::vector<mooncake::Slice> KVCacheStore::genarate_mooncake_slice(
         host_kv_caches_->at(block_id).get_index_cache().data_ptr();
     slice.emplace_back(
         mooncake::Slice{index_cache, index_cache_size_per_block_});
+  }
+
+  if (index_cache_scale_size_per_block_ != 0) {
+    auto index_cache_scale =
+        host_kv_caches_->at(block_id).get_indexer_cache_scale();
+    CHECK(index_cache_scale.has_value())
+        << "index cache scale is required for KVCacheStore.";
+    void* index_scale = index_cache_scale->data_ptr();
+    slice.emplace_back(
+        mooncake::Slice{index_scale, index_cache_scale_size_per_block_});
   }
   return slice;
 }

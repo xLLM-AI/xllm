@@ -22,6 +22,7 @@ limitations under the License.
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "util/hash_util.h"
@@ -42,9 +43,11 @@ enum class BlockType : int8_t {
   SWA = 1,     // DSV4 sliding window, exported to multi_block_tables[0]
   C4 = 2,      // DSV4 compressed, exported to multi_block_tables[1]
   C128 = 3,    // DSV4 compressed, exported to multi_block_tables[2]
-  SINGLE = 4,  // per-sequence linear-state / embedding resource block, exported
-               // via get_single_block_id() (linear_state_ids / embedding_ids),
-               // not to block_tables / multi_block_tables
+  SINGLE = 4,  // per-sequence embedding resource block, exported via
+               // get_single_block_id() (embedding_ids)
+  LINEAR = 5,  // per-sequence linear-state (GDN recurrent) live slot, drawn
+               // from LinearStateBlockManager; exported via
+               // get_linear_block_id() (linear_state_ids)
 };
 
 // Fixed column order of worker multi_block_tables. The exported tables must
@@ -54,6 +57,31 @@ inline constexpr std::array<BlockType, 3> kMultiBlockExportOrder = {
     BlockType::SWA,
     BlockType::C4,
     BlockType::C128};
+
+// Stable cache-group identity used by PD transfer. BlockType remains a local
+// storage key; the serialized group id is intentionally opaque to transfer
+// backends.
+inline constexpr int32_t cache_group_id(BlockType type) {
+  return static_cast<int32_t>(type);
+}
+
+inline constexpr std::optional<BlockType> block_type_from_cache_group_id(
+    int32_t group_id) {
+  switch (group_id) {
+    case cache_group_id(BlockType::KV):
+      return BlockType::KV;
+    case cache_group_id(BlockType::SWA):
+      return BlockType::SWA;
+    case cache_group_id(BlockType::C4):
+      return BlockType::C4;
+    case cache_group_id(BlockType::C128):
+      return BlockType::C128;
+    case cache_group_id(BlockType::SINGLE):
+      return BlockType::SINGLE;
+    default:
+      return std::nullopt;
+  }
+}
 
 class Block final {
  public:

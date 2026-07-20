@@ -26,6 +26,9 @@ cc_library(
     fused_moe.h
     deepseek_v2_attention.h
     deepseek_v2_decoder_layer_impl.h
+    qwen3_5_decoder_layer.h
+    qwen3_gated_delta_net_base.h
+    qwen3_5_gated_delta_net.h
   SRCS
     attention.cpp
     base_attention_impl.cpp
@@ -34,6 +37,9 @@ cc_library(
     fused_moe.cpp
     deepseek_v2_attention.cpp
     deepseek_v2_decoder_layer_impl.cpp
+    qwen3_5_decoder_layer.cpp
+    qwen3_gated_delta_net_base.cpp
+    qwen3_5_gated_delta_net.cpp
   DEPS
     :common_layers
     flash_attention

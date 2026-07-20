@@ -16,11 +16,14 @@ cc_library(
     models.h
     dit/utils/lanczos_resample.h
     $<$<BOOL:${USE_NPU}>:dit/utils/dit_block_weight_manager.h>
+    py_model_helper.h
   SRCS
     model_registry.cpp
     dit/utils/lanczos_resample.cpp
     $<$<BOOL:${USE_NPU}>:dit/utils/dit_block_weight_manager.cpp>
     vlm/utils/multimodal_utils.cpp
+    llm/py_causal_lm.cpp
+    py_model_helper.cpp
   DEPS
     :model
     :mposition
@@ -30,4 +33,7 @@ cc_library(
     :model_loader
     :layers
     $<$<BOOL:${USE_NPU}>:npu_layers>
+    $<$<BOOL:${USE_CUDA}>:cuda_kernels>
+    torch_python
+    Python::Python
 )

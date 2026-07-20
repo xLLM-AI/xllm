@@ -25,7 +25,7 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
     const torch::Tensor& positions,
     const torch::Tensor& hidden_states,
     const AttentionMetadata& attn_metadata,
-    const v32_sp::DeepseekV32SPContext& sp_ctx,
+    const v32_cp::DeepseekV32CPContext& sp_ctx,
     KVCache& kv_cache,
     bool is_prefill_or_chunked_prefill) {
   CHECK(can_use_sp())
@@ -34,14 +34,15 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
   CHECK(is_prefill_or_chunked_prefill)
       << "deepseek_v32 sequence parallel only supports prefill batches.";
   auto k_cache_scale = kv_cache.get_k_cache_scale();
+  auto index_cache_scale = kv_cache.get_indexer_cache_scale();
   auto query_prep = prep_query(hidden_states, full_heads());
 
   std::optional<torch::Tensor> new_block_tables = std::nullopt;
   std::optional<torch::Tensor> new_context_lens = std::nullopt;
-  v32_sp::PaddedGatherHandle mla_handle;
+  v32_cp::PaddedGatherHandle mla_handle;
   torch::Tensor index_cache = kv_cache.get_index_cache();
   IndexerSPPreOut index_pre;
-  v32_sp::PaddedGatherHandle index_handle;
+  v32_cp::PaddedGatherHandle index_handle;
 
   Device device(hidden_states.device());
   if (sp_comm_stream_ == nullptr) {
@@ -51,7 +52,8 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
                                query_prep.q_norm,
                                positions,
                                sp_ctx.local_attn_metadata,
-                               sp_ctx);
+                               sp_ctx,
+                               /*quantize_output=*/false);
   auto compute_stream = device.current_stream();
   sp_comm_stream_->wait_stream(*compute_stream);
   {
@@ -75,7 +77,8 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
                                      index_cache,
                                      attn_metadata,
                                      sp_ctx.gathered_slot_mapping,
-                                     sp_ctx);
+                                     sp_ctx,
+                                     index_cache_scale);
   new_block_tables = std::get<0>(index_out);
   new_context_lens = std::get<1>(index_out);
   finish_sp_k_gather(mla_inputs, mla_handle, sp_ctx);
@@ -108,7 +111,7 @@ DeepseekV2AttentionImpl::MlaInputs DeepseekV2AttentionImpl::build_sp_mla_inputs(
     const torch::Tensor& hidden_states,
     const torch::Tensor& positions,
     const QueryPrep& query_prep,
-    const v32_sp::DeepseekV32SPContext& sp_ctx) {
+    const v32_cp::DeepseekV32CPContext& sp_ctx) {
   MlaInputs out;
   out.q_input = torch::empty({hidden_states.size(0),
                               full_heads().attn,
@@ -133,17 +136,17 @@ DeepseekV2AttentionImpl::MlaInputs DeepseekV2AttentionImpl::build_sp_mla_inputs(
   return out;
 }
 
-v32_sp::PaddedGatherHandle DeepseekV2AttentionImpl::sp_mla_comm(
+v32_cp::PaddedGatherHandle DeepseekV2AttentionImpl::sp_mla_comm(
     const torch::Tensor& k_input,
-    const v32_sp::DeepseekV32SPContext& sp_ctx) const {
+    const v32_cp::DeepseekV32CPContext& sp_ctx) const {
   return parallel_state::launch_gather(
       k_input, sp_ctx.process_group, sp_ctx.comm_plan.tokens_per_rank);
 }
 
 void DeepseekV2AttentionImpl::finish_sp_k_gather(
     MlaInputs& mla_inputs,
-    const v32_sp::PaddedGatherHandle& k_handle,
-    const v32_sp::DeepseekV32SPContext& sp_ctx) const {
+    const v32_cp::PaddedGatherHandle& k_handle,
+    const v32_cp::DeepseekV32CPContext& sp_ctx) const {
   (void)sp_ctx;
   mla_inputs.k_input = parallel_state::finish_gather(k_handle);
   mla_inputs.v_input = mla_inputs.k_input.slice(-1, 0, kv_lora_rank_);

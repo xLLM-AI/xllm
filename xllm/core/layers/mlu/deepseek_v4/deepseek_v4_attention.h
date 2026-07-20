@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <optional>
 #include <tuple>
+#include <vector>
 
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
@@ -55,9 +56,12 @@ class DeepseekV4AttentionImpl final : public torch::nn::Module {
   void set_cache_mapping(const DSACacheMapping& mapping);
 
  private:
-  torch::Tensor project_q(torch::Tensor& hidden_states, torch::Tensor& qr);
+  // q_down / kv_down are the precomputed fused-projection slices for the q_a
+  // and kv projections (segments 0 and 1 of hidden_proj); the attention layer
+  // merges the hidden->* GEMMs into a single fused_wqa_wkv_ call and splits.
+  torch::Tensor project_q(torch::Tensor& q_down, torch::Tensor& qr);
 
-  torch::Tensor project_kv(torch::Tensor& hidden_states);
+  torch::Tensor project_kv(torch::Tensor& kv_down);
 
   torch::Tensor project_output(torch::Tensor& attn_output);
 
@@ -89,10 +93,14 @@ class DeepseekV4AttentionImpl final : public torch::nn::Module {
   float scale_ = 1.0f;
   bool attn_sink_loaded_ = false;
 
-  ReplicatedLinear wq_a_{nullptr};
+  ReplicatedLinear fused_wqa_wkv_{nullptr};  // merged hidden->{wq_a,wkv,
+                                             // compressor.wkv/wgate,
+                                             // indexer.weights_proj,
+                                             // indexer.compressor.wkv/wgate}
+  std::vector<int64_t> hidden_proj_sizes_;   // per-segment output dims, drives
+                                             // both split() and checkpoint cat
   RMSNorm q_norm_{nullptr};
   ColumnParallelLinear wq_b_{nullptr};
-  ReplicatedLinear wkv_{nullptr};
   RMSNorm kv_norm_{nullptr};
   ColumnParallelLinear wo_a_{nullptr};
   RowParallelLinear wo_b_{nullptr};

@@ -768,7 +768,9 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   torch::Tensor compress_topk_idxs;
   if (compress_ratio_i == 4 && cmp_kv.defined()) {
     auto index_cache = kv_cache.get_index_cache();
-    auto indexer_cache_scale = kv_cache.get_indexer_cache_scale();
+    std::optional<torch::Tensor> indexer_cache_scale =
+        kv_cache.get_indexer_cache_scale();
+    torch::Tensor& indexer_cache_scale_tensor = indexer_cache_scale.value();
 
     std::tuple<torch::Tensor, torch::Tensor> indexer_states{index_kv_state,
                                                             index_score_state};
@@ -789,7 +791,7 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                              qr,
                              qr_pertoken_scale,
                              index_cache,
-                             &indexer_cache_scale,
+                             &indexer_cache_scale_tensor,
                              indexer_metadata,
                              cos,
                              sin,

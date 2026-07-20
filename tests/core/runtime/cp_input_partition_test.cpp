@@ -120,6 +120,29 @@ TEST(CpInputPartitionTest, NoOpWhenCpSizeOne) {
   EXPECT_EQ(fi.input_params.attention.host.q_seq_lens, orig_q_seq);
 }
 
+TEST(CpInputPartitionTest, MluMtpDraftKeepsUnevenChunkedLayout) {
+  auto input = make_forward_input({10, 11, 20, 21, 22, 23, 24},
+                                  {0, 1, 0, 1, 2, 3, 4},
+                                  /*q_seq_lens=*/{2, 5},
+                                  /*selected_idxes=*/{1, 6},
+                                  /*mtp_shifted=*/{11, -1, 21, 22, 23, 24, -1},
+                                  BatchForwardType::CHUNKED_PREFILL);
+  const std::vector<int32_t> expected_tokens = tensor_to_vec(input.token_ids);
+  const std::vector<int32_t> expected_shifted =
+      tensor_to_vec(input.input_params.embedding.mtp_shifted_token_ids);
+  const std::vector<int32_t> expected_q_lens =
+      input.input_params.attention.host.q_seq_lens;
+
+  cp_partition_inplace(input, /*cp_rank=*/0, /*cp_size=*/1);
+
+  EXPECT_EQ(tensor_to_vec(input.token_ids), expected_tokens);
+  EXPECT_EQ(tensor_to_vec(input.input_params.embedding.mtp_shifted_token_ids),
+            expected_shifted);
+  EXPECT_EQ(input.input_params.attention.host.q_seq_lens, expected_q_lens);
+  EXPECT_EQ(tensor_to_vec(input.sampling_params.selected_token_idxes),
+            std::vector<int32_t>({1, 6}));
+}
+
 TEST(CpInputPartitionTest, CpPartitionedFlagPropagatesThroughCopy) {
   // Confirms ForwardInput::cp_partitioned propagates through
   // ForwardInput::to(device, dtype). This is what stops sub-worker calls

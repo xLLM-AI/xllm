@@ -33,7 +33,7 @@ limitations under the License.
 #include "layers/common/dp_utils.h"
 #include "layers/common/rms_norm.h"
 #include "layers/mlu/deepseek_v2_sparse_moe_block.h"
-#include "layers/mlu/deepseek_v32_sp_context.h"
+#include "layers/mlu/deepseek_v32_cp_context.h"
 
 namespace xllm {
 namespace layer {
@@ -50,9 +50,9 @@ class DeepseekV2DecoderLayerImpl : public torch::nn::Module {
   void load_state_dict(const StateDict& state_dict);
   void verify_loaded_weights() const;
 
-  void set_sequence_parallel_context(
-      const v32_sp::DeepseekV32SPContext* sp_ctx) {
-    sequence_parallel_context_ = sp_ctx;
+  void set_context_parallel_context(
+      const v32_cp::DeepseekV32CPContext* cp_ctx) {
+    context_parallel_context_ = cp_ctx;
   }
 
   torch::Tensor forward(
@@ -117,7 +117,7 @@ class DeepseekV2DecoderLayerImpl : public torch::nn::Module {
   DeepseekV2SparseMoEBlock sparse_moe_{nullptr};
   RMSNorm input_norm_{nullptr};
   RMSNorm post_norm_{nullptr};
-  const v32_sp::DeepseekV32SPContext* sequence_parallel_context_ = nullptr;
+  const v32_cp::DeepseekV32CPContext* context_parallel_context_ = nullptr;
 };
 
 TORCH_MODULE(DeepseekV2DecoderLayer);

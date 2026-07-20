@@ -43,11 +43,11 @@ class Embedding:
         rank_tablefile: str = '',
         expert_parallel_degree: int = 0,
         enable_chunked_prefill: bool = True,
-        enable_prefill_sp: bool = False,
         instance_role: str = 'DEFAULT',
         nnodes: int = 1,
         node_rank: int = 0,
         dp_size: int = 1,
+        cp_size: int = 1,
         ep_size: int = 1,
         enable_schedule_overlap: bool = False,
         enable_graph: bool = False,
@@ -94,12 +94,12 @@ class Embedding:
         options.rank_tablefile = rank_tablefile
         options.expert_parallel_degree = expert_parallel_degree
         options.enable_chunked_prefill = enable_chunked_prefill
-        options.enable_prefill_sp = enable_prefill_sp
         free_port = utils.get_free_port()
         options.master_node_addr = "127.0.0.1:" + str(free_port)
         options.nnodes = nnodes
         options.node_rank = node_rank
         options.dp_size = dp_size
+        options.cp_size = cp_size
         options.ep_size = ep_size
         options.enable_disagg_pd = False
         options.enable_schedule_overlap = enable_schedule_overlap

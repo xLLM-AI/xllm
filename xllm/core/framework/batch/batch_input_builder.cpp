@@ -31,6 +31,7 @@ limitations under the License.
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/multimodal/mm_visitor.h"
+#include "core/platform/platform.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
 #include "framework/request/sequence.h"
@@ -169,6 +170,23 @@ torch::Tensor build_pinned_int_tensor(const std::vector<int32_t>& values) {
                            .pinned_memory(true));
 }
 
+// Whether the current prefill step end should hold a linear-state checkpoint.
+// Checkpoints are saved at prefill step ends that land on a chunk-end boundary
+// (stride = max_tokens_per_chunk_for_prefill). The linear-state cache is a
+// sparse per-chunk overlay: KV may cache every block boundary while
+// linear-state saves only at chunk ends.
+bool should_save_linear_checkpoint(Sequence* sequence,
+                                   uint32_t boundary_tokens,
+                                   uint32_t chunk_stride) {
+  if (sequence == nullptr || !sequence->is_prefill_stage()) {
+    return false;
+  }
+  if (boundary_tokens == 0 || chunk_stride == 0) {
+    return false;
+  }
+  return boundary_tokens % chunk_stride == 0;
+}
+
 }  // namespace
 
 BatchInputBuilder::BatchInputBuilder(
@@ -191,7 +209,7 @@ BatchInputBuilder::BatchInputBuilder(
       num_sequences_(sequences.size()),
       swap_block_transfer_infos_(swap_block_transfer_infos),
       batch_id_(batch_id),
-      cp_size_(std::max(1, cp_size)) {
+      cp_size_(Platform::uses_model_cp_partition() ? 1 : std::max(1, cp_size)) {
   // Reserve space for better performance
   const size_t reserve_size = 1024;
   state_.flatten_tokens_vec.reserve(reserve_size);
@@ -277,6 +295,56 @@ TransferKVInfo BatchInputBuilder::build_step_transfer_info(
 
   append_xtensor_offsets(&info, full_info, remote_idxs);
   return info;
+}
+
+KVBlockTransferGroup BatchInputBuilder::build_group_step_transfer(
+    const KVBlockTransferGroup& full_group,
+    const std::vector<int32_t>& local_block_ids,
+    size_t next_transfer_block_idx,
+    uint32_t seq_len,
+    uint32_t block_size,
+    size_t* advanced_transfer_block_idx) {
+  CHECK(advanced_transfer_block_idx != nullptr);
+  *advanced_transfer_block_idx = next_transfer_block_idx;
+
+  KVBlockTransferGroup step_group;
+  step_group.group_id = full_group.group_id;
+  if (block_size == 0 || local_block_ids.empty()) {
+    return step_group;
+  }
+
+  const size_t local_size = local_block_ids.size();
+  const size_t remote_size = full_group.remote_blocks_ids.size();
+  const size_t win_begin = next_transfer_block_idx;
+  const size_t win_end =
+      static_cast<size_t>(util::ceil_div(seq_len, block_size));
+  const size_t map_end = std::min(win_end, local_size);
+  CHECK_GE(remote_size, map_end)
+      << "Grouped KV remote block coverage shortage, group_id="
+      << full_group.group_id << ", remote_size=" << remote_size
+      << ", remote_end=" << map_end;
+
+  const size_t stable_end = static_cast<size_t>(seq_len / block_size);
+  *advanced_transfer_block_idx =
+      std::max(next_transfer_block_idx, std::min(stable_end, map_end));
+  if (win_begin >= map_end) {
+    return step_group;
+  }
+
+  const size_t block_count = map_end - win_begin;
+  step_group.local_blocks_ids.reserve(block_count);
+  step_group.remote_blocks_ids.reserve(block_count);
+  for (size_t local_idx = win_begin; local_idx < map_end; ++local_idx) {
+    const int32_t local_block_id = local_block_ids[local_idx];
+    if (local_block_id < 0) {
+      continue;
+    }
+    step_group.local_blocks_ids.emplace_back(
+        static_cast<uint64_t>(local_block_id));
+    step_group.remote_blocks_ids.emplace_back(
+        full_group.remote_blocks_ids[local_idx]);
+  }
+  return step_group;
 }
 
 ForwardInput BatchInputBuilder::build_forward_input(
@@ -431,6 +499,9 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     state_.linear_state_ids.insert(state_.linear_state_ids.end(),
                                    state.linear_state_ids.begin(),
                                    state.linear_state_ids.end());
+    state_.linear_state_cache_ops.insert(state_.linear_state_cache_ops.end(),
+                                         state.linear_state_cache_ops.begin(),
+                                         state.linear_state_cache_ops.end());
     state_.request_ids.insert(state_.request_ids.end(),
                               state.request_ids.begin(),
                               state.request_ids.end());
@@ -619,9 +690,7 @@ void BatchInputBuilder::extract_tokens_and_positions(Sequence* sequence,
     }
   }
 
-  // `linear_state_ids` is sequence-scoped metadata and must stay aligned with
-  // logical batch rows even for non-terminal chunked-prefill slices.
-  state.linear_state_ids.emplace_back(sequence->get_single_block_id());
+  append_linear_state_row(sequence, n_kv_cache_tokens, seq_len, state);
 
   // Add extra token id
   int32_t extra_token_id = -1;
@@ -682,6 +751,94 @@ void BatchInputBuilder::extract_tokens_and_positions(Sequence* sequence,
                                          pad_token_id);
     }
   }
+}
+
+void BatchInputBuilder::append_linear_state_row(Sequence* sequence,
+                                                uint32_t n_kv_cache_tokens,
+                                                uint32_t seq_len,
+                                                BuilderState& state) {
+  // linear_state_ids must stay aligned with logical batch rows even when the
+  // model has no linear-attention layers, because downstream consumers index by
+  // batch row. Prefer the dedicated linear-state slot. Linear-attention decode
+  // paths that only carry a scheduler-side single block still share that live
+  // slot value across embedding and linear-state transport fields.
+  const bool has_linear_attention =
+      args_ && has_linear_attention_layers(*args_);
+  int32_t linear_state_id = sequence->get_linear_state_slot_id();
+  if (linear_state_id < 0 && has_linear_attention) {
+    linear_state_id = sequence->get_single_block_id();
+  }
+  state.linear_state_ids.emplace_back(linear_state_id);
+  if (!has_linear_attention) {
+    return;
+  }
+
+  LinearStateCacheOp linear_state_cache_op;
+  linear_state_cache_op.linear_state_id = state.linear_state_ids.back();
+  // Linear-state checkpoints live on chunk-end boundaries, so the prefix hash
+  // is chained per chunk (stride = max_tokens_per_chunk_for_prefill), not per
+  // KV block. The engine enforces this stride is a positive multiple of
+  // block_size when linear prefix cache is on (llm_engine.cpp); guard against
+  // an unset (<= 0) stride so a misconfigured run simply skips cache ops.
+  const int32_t chunk_stride = ::xllm::SchedulerConfig::get_instance()
+                                   .max_tokens_per_chunk_for_prefill();
+  // Cold-start restore: emit a restore hash only when a restore source
+  // checkpoint is mounted on this sequence -- class A at admission
+  // (allocate_shared_for_sequence) or class B at the previous step's
+  // save-rotation (allocate_for_sequence) -- AND the reused prefix lands
+  // on a chunk-end boundary, where the recurrent state lives in a checkpoint.
+  // A mounted source is present exactly on a slot that is cold and needs
+  // copy-in; continued forwards keep their live slot warm with no source
+  // mounted, so they emit no restore and are not reset to cold by the worker.
+  // The source slot id is taken from that mounted block below.
+  const bool needs_restore_hash = sequence->has_linear_restore_src_block() &&
+                                  n_kv_cache_tokens > 0 && chunk_stride > 0 &&
+                                  n_kv_cache_tokens % chunk_stride == 0;
+  // Exit-boundary save: persist the live state only when this prefill step
+  // lands on a chunk-end boundary, so the linear-state cache stays a sparse
+  // per-chunk overlay on top of the per-block KV cache.
+  const bool needs_save_hash =
+      should_save_linear_checkpoint(sequence, seq_len, chunk_stride);
+  // Refresh the sequence's cached chunk hashes to cover this step's deepest
+  // boundary, then read them back. The cache is chained and incremental, so
+  // this only hashes chunks not seen on a previous step; the match probe and
+  // this builder now share the one hash source instead of each recomputing.
+  Slice<XXH3Key> linear_state_hashes;
+  if (needs_restore_hash || needs_save_hash) {
+    sequence->update_linear_state_hashes(static_cast<uint32_t>(chunk_stride));
+    linear_state_hashes = sequence->linear_state_hashes();
+  }
+  // Restore source (block-carried): allocate_shared_for_sequence mounts the
+  // deepest-hit checkpoint at admission (class A); allocate_for_sequence
+  // mounts the slot it just checkpointed at the previous step's save-rotation
+  // (class B). Take it unconditionally so the pin never outlives the step
+  // that consumed the match; its id is used below only when a restore hash is
+  // actually emitted, otherwise the handle drops here and releases the pin.
+  std::optional<Block> mounted_restore_src =
+      sequence->take_linear_restore_src_block();
+  if (needs_restore_hash) {
+    const size_t restore_chunk_idx =
+        static_cast<size_t>(n_kv_cache_tokens) / chunk_stride - 1;
+    if (restore_chunk_idx < linear_state_hashes.size()) {
+      linear_state_cache_op.restore_requested = true;
+      if (mounted_restore_src.has_value()) {
+        linear_state_cache_op.restore_src_slot_id = mounted_restore_src->id();
+      }
+    }
+  }
+  if (needs_save_hash) {
+    const size_t save_chunk_idx =
+        static_cast<size_t>(seq_len) / chunk_stride - 1;
+    if (save_chunk_idx < linear_state_hashes.size()) {
+      // Record the boundary hash on the sequence. The LINEAR leaf executes
+      // the save at the next step's allocate_for_sequence, after this step's
+      // forward writes the boundary state into the live slot. Writing only
+      // the sequence's own pending-save field keeps this safe inside the
+      // parallel build loop.
+      sequence->set_pending_linear_save(linear_state_hashes[save_chunk_idx]);
+    }
+  }
+  state.linear_state_cache_ops.emplace_back(std::move(linear_state_cache_op));
 }
 
 void BatchInputBuilder::handle_sampling_parameters(Sequence* sequence,
@@ -767,6 +924,65 @@ void BatchInputBuilder::setup_kv_cache_info(
         block_ids.push_back(block.id());
       }
       state.multi_block_tables[m].emplace_back(std::move(block_ids));
+    }
+    const auto& transfer_kv_info = sequence->kv_state().transfer_kv_info();
+    if (transfer_kv_info.has_value() &&
+        !transfer_kv_info->block_transfer_groups.empty()) {
+      TransferKVInfo step_info;
+      step_info.request_id = transfer_kv_info->request_id;
+      step_info.dp_rank = transfer_kv_info->dp_rank;
+      step_info.remote_instance_info = transfer_kv_info->remote_instance_info;
+      step_info.local_linear_state_ids =
+          transfer_kv_info->local_linear_state_ids;
+      step_info.remote_linear_state_ids =
+          transfer_kv_info->remote_linear_state_ids;
+      for (const auto& full_group : transfer_kv_info->block_transfer_groups) {
+        const auto block_type =
+            block_type_from_cache_group_id(full_group.group_id);
+        if (!block_type.has_value()) {
+          LOG(ERROR) << "Unknown KV cache transfer group: "
+                     << full_group.group_id;
+          continue;
+        }
+        const BlockType group_block_type = block_type.value();
+        const auto blocks = sequence->kv_state().blocks(group_block_type);
+        if (blocks.empty() || full_group.remote_blocks_ids.empty()) {
+          continue;
+        }
+
+        uint32_t block_size = 0;
+        std::vector<int32_t> local_block_ids;
+        local_block_ids.reserve(blocks.size());
+        for (const auto& block : blocks) {
+          local_block_ids.emplace_back(block.id());
+          if (block.is_valid()) {
+            block_size = block.size();
+          }
+        }
+        if (block_size == 0) {
+          continue;
+        }
+
+        const size_t next_transfer_block_idx =
+            sequence->kv_state().next_group_transfer_block_idx(
+                group_block_type);
+        size_t advanced_transfer_block_idx = next_transfer_block_idx;
+        KVBlockTransferGroup step_group =
+            build_group_step_transfer(full_group,
+                                      local_block_ids,
+                                      next_transfer_block_idx,
+                                      seq_len,
+                                      block_size,
+                                      &advanced_transfer_block_idx);
+        sequence->kv_state().advance_group_transfer_block_idx(
+            group_block_type, advanced_transfer_block_idx);
+        if (!step_group.local_blocks_ids.empty()) {
+          step_info.block_transfer_groups.emplace_back(std::move(step_group));
+        }
+      }
+      if (!step_info.block_transfer_groups.empty()) {
+        state.transfer_kv_infos.emplace_back(std::move(step_info));
+      }
     }
     return;
   }
@@ -937,7 +1153,7 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
   input_params.attention.host.block_tables =
       input_params.attention.device.block_tables;
 
-  // Setup multi block tables for DeepSeek V4
+  // Setup grouped cache block tables.
   for (auto& mgr_tables : state_.multi_block_tables) {
     util::pad_2d_vector(mgr_tables, /*pad_value=*/-1);
     input_params.multi_block_tables.push_back(
@@ -950,6 +1166,8 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
 
   input_params.embedding.embedding_ids = std::move(state_.embedding_ids);
   input_params.embedding.linear_state_ids = std::move(state_.linear_state_ids);
+  input_params.linear_state_cache_ops =
+      std::move(state_.linear_state_cache_ops);
   if (!input_params.embedding.linear_state_ids.empty()) {
     input_params.embedding.linear_state_indices =
         torch::tensor(input_params.embedding.linear_state_ids, torch::kInt);

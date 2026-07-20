@@ -27,7 +27,19 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-size_t get_prefill_allocate_tokens(Sequence* sequence, size_t step_tokens) {
+// Linear-state models (Qwen3.5 GDN) must size the KV allocation by the full
+// prompt: a prefix-cache hit clamps the committed KV position down to the
+// linear-recoverable length, so a later chunk would advance
+// kv_cache_tokens_num() past a capacity grown only for this step's budget
+// (tripping batch_input_builder's current_max_tokens_capacity >= seq_len
+// invariant). Pure-KV models keep the original per-step sizing, so their
+// scheduling / memory behavior is unchanged.
+size_t get_prefill_allocate_tokens(Sequence* sequence,
+                                   size_t step_tokens,
+                                   bool is_linear_state_prefix_cache) {
+  if (is_linear_state_prefix_cache) {
+    return sequence->num_tokens();
+  }
   return sequence->kv_state().kv_cache_tokens_num() + step_tokens;
 }
 
@@ -146,8 +158,11 @@ void PrefillOnlyScheduler::handle_prefill_requests(
       }
 
       // preempt offline decode
-      const size_t max_handle_num_tokens =
-          get_prefill_allocate_tokens(prefill_sequence.get(), num_tokens);
+      const size_t max_handle_num_tokens = get_prefill_allocate_tokens(
+          prefill_sequence.get(),
+          num_tokens,
+          /*is_linear_state_prefix_cache=*/
+          has_linear_attention_layers_ && enable_prefix_cache_);
       if (!kv_cache_manager_->allocate(prefill_sequence.get(),
                                        max_handle_num_tokens)) {
         can_schedule = false;
@@ -340,8 +355,11 @@ void PrefillOnlyScheduler::handle_last_step_prefill_requests(
       }
 
       // preempt offline decode
-      const size_t max_handle_num_tokens =
-          get_prefill_allocate_tokens(prefill_sequence.get(), num_tokens);
+      const size_t max_handle_num_tokens = get_prefill_allocate_tokens(
+          prefill_sequence.get(),
+          num_tokens,
+          /*is_linear_state_prefix_cache=*/
+          has_linear_attention_layers_ && enable_prefix_cache_);
       if (!kv_cache_manager_->allocate(prefill_sequence.get(),
                                        max_handle_num_tokens)) {
         can_schedule = false;

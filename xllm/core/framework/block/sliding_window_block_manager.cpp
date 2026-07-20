@@ -50,12 +50,15 @@ void SlidingWindowBlockManager::release_out_of_window(Sequence* seq) {
   // successful allocation, so a failed allocate_sequence never releases the
   // sequence's existing SWA blocks.
   const size_t cached_tokens = kv_state.kv_cache_tokens_num();
+  const size_t num_spec_tokens =
+      static_cast<size_t>(options_.num_speculative_tokens());
   const size_t sliding_window_tokens =
       std::max<size_t>(options_.sliding_window_size(), 1);
-  if (cached_tokens < sliding_window_tokens) {
+  if (cached_tokens < (sliding_window_tokens + num_spec_tokens)) {
     return;
   }
-  const size_t skipped_tokens = cached_tokens - sliding_window_tokens + 1;
+  const size_t skipped_tokens =
+      cached_tokens - sliding_window_tokens - num_spec_tokens + 1;
   const size_t skipped_blocks = skipped_tokens / block_size;
   const size_t release_blocks = std::min(skipped_blocks, swa_blocks.size());
   if (release_blocks == 0) {
@@ -80,7 +83,8 @@ std::vector<Block> SlidingWindowBlockManager::allocate_shared(
     const Slice<int32_t>& /*token_ids*/,
     const Slice<Block>& /*existed_shared_blocks*/,
     const MMData& /*mm_data*/,
-    const Slice<XXH3Key>& /*block_hashes*/) {
+    const Slice<XXH3Key>& /*block_hashes*/,
+    size_t* /*matched_tokens*/) {
   NOT_IMPLEMENTED();
   return {};
 }

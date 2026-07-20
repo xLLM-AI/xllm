@@ -34,14 +34,7 @@ bool exceeds_block_capacity(Sequence* sequence, KVCacheManager* manager) {
   }
   const size_t needed_blocks = util::ceil_div(
       static_cast<size_t>(sequence->num_prompt_tokens()), block_size);
-  const std::vector<size_t> free_blocks = manager->num_free_blocks();
-  const std::vector<size_t> used_blocks = manager->num_used_blocks();
-  size_t max_blocks = 0;
-  const size_t num_ranks = std::min(free_blocks.size(), used_blocks.size());
-  for (size_t i = 0; i < num_ranks; ++i) {
-    max_blocks = std::max(max_blocks, free_blocks[i] + used_blocks[i]);
-  }
-  return needed_blocks > max_blocks;
+  return needed_blocks > static_cast<size_t>(manager->num_blocks());
 }
 
 void update_block_metrics(KVCacheManager* manager) {
@@ -203,11 +196,10 @@ void DisaggPDChunkedPrefillScheduler::schedule_waiting_prefill(
     }
 
     Sequence* sequence = request->sequences()[0].get();
-    const size_t held_blocks = sequence->kv_state().num_blocks(BlockType::KV);
+    const bool is_in_flight = sequence->kv_state().has_any_blocks();
     // An already in-flight request (held>0) must continue: its footprint is
     // already counted in reserved_blocks, and evicting its partial KV is a
     // preemption decision made elsewhere.
-    const bool is_in_flight = held_blocks > 0;
     // The sole fresh request in the whole system is admitted so that an
     // oversized prompt (footprint > total) reaches the exceeds_block_capacity
     // failure path below instead of being deferred forever.

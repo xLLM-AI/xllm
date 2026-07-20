@@ -42,6 +42,7 @@ limitations under the License.
 #include "llm/npu/oxygen.h"                              // IWYU pragma: keep
 #include "llm/npu/qwen2.h"                               // IWYU pragma: keep
 #include "llm/npu/qwen3.h"                               // IWYU pragma: keep
+#include "llm/npu/qwen3_dflash.h"                        // IWYU pragma: keep
 #include "llm/npu/qwen3_eagle3.h"                        // IWYU pragma: keep
 #include "llm/npu/qwen3_moe.h"                           // IWYU pragma: keep
 #include "llm/qwen3.h"                                   // IWYU pragma: keep
@@ -74,6 +75,7 @@ limitations under the License.
 #include "llm/joyai_llm_flash.h"                  // IWYU pragma: keep
 #include "llm/joyai_llm_flash_mtp.h"              // IWYU pragma: keep
 #include "llm/mlu/deepseek_v4.h"                  // IWYU pragma: keep
+#include "llm/mlu/deepseek_v4_mtp.h"              // IWYU pragma: keep
 #include "llm/mtp_model_base.h"                   // IWYU pragma: keep
 #include "llm/oxygen.h"                           // IWYU pragma: keep
 #include "llm/qwen2.h"                            // IWYU pragma: keep
@@ -118,6 +120,7 @@ limitations under the License.
 #include "llm/qwen3_moe.h"
 #include "vlm/qwen2_5_vl.h"
 #include "vlm/qwen2_vl.h"
+#include "vlm/qwen3_5.h"
 #include "vlm/qwen3_vl.h"
 #include "vlm/qwen3_vl_moe.h"
 #else

@@ -125,6 +125,23 @@ std::tuple<torch::Tensor, torch::Tensor> scaled_quantize(
     bool is_gated,
     torch::ScalarType quant_type);
 
+// Torch fallback for gated RMSNorm / LayerNorm (with optional SiLU-gated
+// residual). DCU does not have a fused kernel yet.
+torch::Tensor gated_layer_norm(torch::Tensor& x,
+                               const torch::Tensor& weight,
+                               const torch::Tensor& bias,
+                               double eps,
+                               const std::optional<torch::Tensor>& gate,
+                               int64_t group_size,
+                               bool norm_before_gate);
+
+// Torch fallback for Gemma-style RMSNorm (weight is applied as `1 + gamma`).
+// DCU does not have a fused kernel yet.
+torch::Tensor gemma_rms_norm(const torch::Tensor& x,
+                             const torch::Tensor& gamma,
+                             double eps,
+                             torch::Tensor& norm_out);
+
 // W8A8: INT8 x INT8 scaled matmul via hipBLASLt.
 // Equivalent to lmslim's hipblaslt_w8a8_gemm.
 torch::Tensor scaled_matmul(const torch::Tensor& a,

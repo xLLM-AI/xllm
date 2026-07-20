@@ -30,7 +30,7 @@ limitations under the License.
 #include "layers/common/linear.h"
 #include "layers/common/rms_norm.h"
 #include "layers/common/rotary_embedding.h"
-#include "layers/mlu/deepseek_v32_sp_context.h"
+#include "layers/mlu/deepseek_v32_cp_context.h"
 #include "layers/mlu/indexer.h"
 #include "platform/stream.h"
 
@@ -56,7 +56,7 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
                         const torch::Tensor& hidden_states,
                         const AttentionMetadata& attn_metadata,
                         KVCache& kv_cache,
-                        const v32_sp::DeepseekV32SPContext* sp_ctx = nullptr);
+                        const v32_cp::DeepseekV32CPContext* sp_ctx = nullptr);
 
   bool use_replicated_attn_weights() const {
     return use_full_replicated_attention_weights_;
@@ -106,7 +106,7 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   torch::Tensor forward_sp(const torch::Tensor& positions,
                            const torch::Tensor& hidden_states,
                            const AttentionMetadata& attn_metadata,
-                           const v32_sp::DeepseekV32SPContext& sp_ctx,
+                           const v32_cp::DeepseekV32CPContext& sp_ctx,
                            KVCache& kv_cache,
                            bool is_prefill_or_chunked_prefill);
   QueryPrep prep_query(const torch::Tensor& hidden_states,
@@ -119,13 +119,13 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   MlaInputs build_sp_mla_inputs(const torch::Tensor& hidden_states,
                                 const torch::Tensor& positions,
                                 const QueryPrep& query_prep,
-                                const v32_sp::DeepseekV32SPContext& sp_ctx);
-  v32_sp::PaddedGatherHandle sp_mla_comm(
+                                const v32_cp::DeepseekV32CPContext& sp_ctx);
+  v32_cp::PaddedGatherHandle sp_mla_comm(
       const torch::Tensor& k_input,
-      const v32_sp::DeepseekV32SPContext& sp_ctx) const;
+      const v32_cp::DeepseekV32CPContext& sp_ctx) const;
   void finish_sp_k_gather(MlaInputs& mla_inputs,
-                          const v32_sp::PaddedGatherHandle& k_handle,
-                          const v32_sp::DeepseekV32SPContext& sp_ctx) const;
+                          const v32_cp::PaddedGatherHandle& k_handle,
+                          const v32_cp::DeepseekV32CPContext& sp_ctx) const;
   void decode_kv_pre_base(torch::Tensor& latent_cache,
                           const torch::Tensor& positions,
                           const AttentionMetadata& attn_metadata,

@@ -42,8 +42,8 @@ class Qwen3_5GatedDeltaNetImpl : public Qwen3NextGatedDeltaNetImpl {
       const torch::Tensor& hidden_states) override;
   std::optional<
       std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>
-  project_prefill_split_inputs(const torch::Tensor& hidden_states,
-                               const AttentionMetadata& attn_metadata) override;
+  project_split_inputs(const torch::Tensor& hidden_states,
+                       const AttentionMetadata& attn_metadata) override;
   bool use_fla_ssm_state_layout() const override { return true; }
 
   void load_projection_state_dict(const StateDict& state_dict) override;

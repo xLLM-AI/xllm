@@ -187,6 +187,9 @@ class LLMEngine : public Engine {
   uint32_t dp_size_ = 1;
   uint32_t cp_size_ = 1;
   uint32_t worker_clients_num_;
+  // Effective TP execution width. MLU model-side CP currently overlaps CP and
+  // TP ranks; after MLU adopts orthogonal CP x TP this is dp_local_size_ /
+  // cp_size_ for every backend.
   uint32_t dp_local_tp_size_;
   uint32_t dp_local_size_;
 

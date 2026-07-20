@@ -114,6 +114,7 @@ TEST(RequestCachedTokensTest, RecordsCachedTokensFromPrefixCache) {
   BlockManagerPool::Options options;
   options.num_blocks(16).host_num_blocks(0).block_size(4).enable_prefix_cache(
       true);
+  options.max_seqs_per_batch(1024);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
   {
@@ -145,6 +146,7 @@ TEST(RequestCachedTokensTest, CachedTokensSurvivesKVBlockRelease) {
   BlockManagerPool::Options options;
   options.num_blocks(16).host_num_blocks(0).block_size(4).enable_prefix_cache(
       true);
+  options.max_seqs_per_batch(1024);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
   std::shared_ptr<Request> request;
@@ -197,6 +199,7 @@ TEST(RequestCachedTokensTest, RecordIsIdempotentWithMaxSemantics) {
   BlockManagerPool::Options options;
   options.num_blocks(16).host_num_blocks(0).block_size(4).enable_prefix_cache(
       true);
+  options.max_seqs_per_batch(1024);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
   std::shared_ptr<Request> request;

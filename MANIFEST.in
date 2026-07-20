@@ -6,7 +6,6 @@ recursive-include src *.*
 recursive-include xllm *.py
 recursive-include examples *.py
 recursive-include third_party *
-recursive-include docs *.*
 recursive-include tools *.*
 recursive-include scripts *.*
 recursive-include proto *.*

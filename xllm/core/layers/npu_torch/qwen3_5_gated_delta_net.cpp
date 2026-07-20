@@ -151,17 +151,17 @@ Qwen3_5GatedDeltaNetImpl::project_flat_inputs(
 
 std::optional<
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>
-Qwen3_5GatedDeltaNetImpl::project_prefill_split_inputs(
+Qwen3_5GatedDeltaNetImpl::project_split_inputs(
     const torch::Tensor& hidden_states,
     const AttentionMetadata& attn_metadata) {
-  auto qkv = reshape_qkvz_with_pad(attn_metadata,
-                                   in_proj_qkv_->forward(hidden_states));
-  auto z_proj =
-      reshape_qkvz_with_pad(attn_metadata, in_proj_z_->forward(hidden_states));
-  auto b_proj =
-      reshape_qkvz_with_pad(attn_metadata, in_proj_b_->forward(hidden_states));
-  auto a_proj =
-      reshape_qkvz_with_pad(attn_metadata, in_proj_a_->forward(hidden_states));
+  auto qkv = reshape_projected_tokens_with_pad(
+      attn_metadata, in_proj_qkv_->forward(hidden_states));
+  auto z_proj = reshape_projected_tokens_with_pad(
+      attn_metadata, in_proj_z_->forward(hidden_states));
+  auto b_proj = reshape_projected_tokens_with_pad(
+      attn_metadata, in_proj_b_->forward(hidden_states));
+  auto a_proj = reshape_projected_tokens_with_pad(
+      attn_metadata, in_proj_a_->forward(hidden_states));
 
   const int64_t batch_size = qkv.size(0);
   const int64_t seq_len = qkv.size(1);

@@ -17,29 +17,14 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <algorithm>
 #include <cmath>
 #include <optional>
-#include <tuple>
-#include <vector>
 
 #include "kernels/mlu/mlu_ops_api.h"
 #include "kernels/ops_api.h"
 #include "util/linalg.h"
 
 namespace {
-
-struct PrefillPadPlan {
-  bool needs_padding = false;
-  std::vector<int64_t> q_lens;
-  std::vector<int64_t> prefix_lens;
-  std::vector<bool> has_prev_windows;
-  std::vector<int32_t> padded_cu_lens;
-  std::vector<int64_t> keep_indices;
-  int64_t max_padded_len = 0;
-  int64_t padded_tokens = 0;
-  int64_t padded_rows = 0;
-};
 
 void write_cache(const torch::Tensor& key,
                  torch::Tensor& cache,
@@ -95,137 +80,6 @@ torch::Tensor empty_output(const torch::Tensor& hidden_states,
   return torch::empty({0, head_dim}, hidden_states.options());
 }
 
-PrefillPadPlan make_prefill_pad_plan(
-    const xllm::layer::AttentionMetadata& attn_metadata,
-    int64_t compress_ratio,
-    int64_t coff) {
-  PrefillPadPlan plan;
-  const xllm::layer::DSAMetadata& dsa = *attn_metadata.dsa_metadata;
-  const int64_t batch_size = static_cast<int64_t>(dsa.start_pos_vec.size());
-  plan.q_lens.reserve(static_cast<size_t>(batch_size));
-  plan.prefix_lens.reserve(static_cast<size_t>(batch_size));
-  plan.has_prev_windows.reserve(static_cast<size_t>(batch_size));
-  plan.padded_cu_lens.reserve(static_cast<size_t>(batch_size + 1));
-  plan.padded_cu_lens.emplace_back(0);
-
-  torch::Tensor q_cu_cpu =
-      attn_metadata.q_cu_seq_lens.to(torch::kCPU).to(torch::kInt64);
-  int64_t row_begin = 0;
-  for (int64_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
-    const int64_t q_begin = q_cu_cpu[seq_idx].item<int64_t>();
-    const int64_t q_end = q_cu_cpu[seq_idx + 1].item<int64_t>();
-    const int64_t q_len = q_end - q_begin;
-    const int64_t start_pos = dsa.start_pos_vec[static_cast<size_t>(seq_idx)];
-    const int64_t prefix_len = start_pos % compress_ratio;
-    const bool has_prev_window = coff == 2 && start_pos >= compress_ratio;
-    const int64_t synthetic_len = has_prev_window ? compress_ratio : 0;
-    const int64_t padded_len = synthetic_len + prefix_len + q_len;
-    const int64_t seq_rows = padded_len / compress_ratio;
-
-    plan.q_lens.emplace_back(q_len);
-    plan.prefix_lens.emplace_back(prefix_len);
-    plan.has_prev_windows.emplace_back(has_prev_window);
-    plan.padded_tokens += padded_len;
-    plan.padded_rows += seq_rows;
-    plan.max_padded_len = std::max(plan.max_padded_len, padded_len);
-    plan.padded_cu_lens.emplace_back(static_cast<int32_t>(plan.padded_tokens));
-    plan.needs_padding =
-        plan.needs_padding || prefix_len > 0 || has_prev_window;
-
-    const int64_t drop_rows = has_prev_window ? 1 : 0;
-    for (int64_t row_idx = drop_rows; row_idx < seq_rows; ++row_idx) {
-      plan.keep_indices.emplace_back(row_begin + row_idx);
-    }
-    row_begin += seq_rows;
-  }
-  return plan;
-}
-
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> pad_prefill_pack(
-    const torch::Tensor& kv_pack,
-    const torch::Tensor& score_pack,
-    const torch::Tensor& kv_state,
-    const torch::Tensor& score_state,
-    const torch::Tensor& q_cu_seq_lens,
-    const torch::Tensor& ape,
-    const PrefillPadPlan& plan,
-    int64_t compress_ratio,
-    int64_t coff) {
-  std::vector<torch::Tensor> kv_parts;
-  std::vector<torch::Tensor> score_parts;
-  kv_parts.reserve(static_cast<size_t>(plan.q_lens.size()) * 3);
-  score_parts.reserve(static_cast<size_t>(plan.q_lens.size()) * 3);
-  torch::Tensor q_cu_cpu = q_cu_seq_lens.to(torch::kCPU).to(torch::kInt64);
-  const int64_t batch_size = static_cast<int64_t>(plan.q_lens.size());
-  for (int64_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
-    torch::Tensor seq_kv_state = kv_state.select(/*dim=*/0, seq_idx);
-    torch::Tensor seq_score_state = score_state.select(/*dim=*/0, seq_idx);
-    if (plan.has_prev_windows[static_cast<size_t>(seq_idx)]) {
-      torch::Tensor prev_kv =
-          seq_kv_state.slice(/*dim=*/0, /*start=*/0, /*end=*/compress_ratio);
-      torch::Tensor prev_score = seq_score_state.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/compress_ratio);
-      kv_parts.emplace_back(prev_kv);
-      score_parts.emplace_back(prev_score - ape.slice(/*dim=*/0,
-                                                      /*start=*/0,
-                                                      /*end=*/compress_ratio));
-    }
-
-    const int64_t prefix_len = plan.prefix_lens[static_cast<size_t>(seq_idx)];
-    if (prefix_len > 0) {
-      const int64_t state_offset = coff == 2 ? compress_ratio : 0;
-      torch::Tensor prefix_kv =
-          seq_kv_state.slice(/*dim=*/0,
-                             /*start=*/state_offset,
-                             /*end=*/state_offset + prefix_len);
-      torch::Tensor prefix_score =
-          seq_score_state.slice(/*dim=*/0,
-                                /*start=*/state_offset,
-                                /*end=*/state_offset + prefix_len);
-      kv_parts.emplace_back(prefix_kv);
-      score_parts.emplace_back(
-          prefix_score - ape.slice(/*dim=*/0, /*start=*/0, /*end=*/prefix_len));
-    }
-
-    const int64_t q_begin = q_cu_cpu[seq_idx].item<int64_t>();
-    const int64_t q_end = q_cu_cpu[seq_idx + 1].item<int64_t>();
-    if (q_end > q_begin) {
-      kv_parts.emplace_back(
-          kv_pack.slice(/*dim=*/0, /*start=*/q_begin, /*end=*/q_end));
-      score_parts.emplace_back(
-          score_pack.slice(/*dim=*/0, /*start=*/q_begin, /*end=*/q_end));
-    }
-  }
-
-  torch::Tensor padded_kv =
-      kv_parts.empty() ? kv_pack.slice(0, 0, 0) : torch::cat(kv_parts, 0);
-  torch::Tensor padded_score = score_parts.empty() ? score_pack.slice(0, 0, 0)
-                                                   : torch::cat(score_parts, 0);
-  torch::Tensor padded_cu_lens =
-      torch::tensor(plan.padded_cu_lens,
-                    torch::TensorOptions()
-                        .dtype(torch::kInt32)
-                        .device(q_cu_seq_lens.device()));
-  return {padded_kv.contiguous(), padded_score.contiguous(), padded_cu_lens};
-}
-
-torch::Tensor drop_synthetic_rows(const torch::Tensor& compressed_kv,
-                                  const PrefillPadPlan& plan,
-                                  const torch::TensorOptions& options,
-                                  int64_t head_dim) {
-  if (static_cast<int64_t>(plan.keep_indices.size()) == compressed_kv.size(0)) {
-    return compressed_kv;
-  }
-  if (plan.keep_indices.empty()) {
-    return torch::empty({0, head_dim}, options);
-  }
-  torch::Tensor keep = torch::tensor(plan.keep_indices,
-                                     torch::TensorOptions()
-                                         .dtype(torch::kInt64)
-                                         .device(compressed_kv.device()));
-  return compressed_kv.index_select(/*dim=*/0, keep);
-}
-
 }  // namespace
 
 namespace xllm {
@@ -238,6 +92,7 @@ CompressorImpl::CompressorImpl(int64_t compress_ratio,
                                bool rotate,
                                double norm_eps,
                                const torch::TensorOptions& options,
+                               const ModelArgs& args,
                                const QuantArgs& quant_args)
     : compress_ratio_(compress_ratio),
       hidden_dim_(hidden_dim),
@@ -271,10 +126,8 @@ CompressorImpl::CompressorImpl(int64_t compress_ratio,
     const double log_dim = std::ceil(std::log2(static_cast<double>(head_dim_)));
     const int64_t padded_dim =
         static_cast<int64_t>(1ull << static_cast<uint64_t>(log_dim));
-    hadamard_matrix_ = util::create_hadamard_matrix(padded_dim,
-                                                    torch::kFloat32,
-                                                    torch::Device(torch::kCPU),
-                                                    /*normalize=*/true);
+    hadamard_matrix_ = util::create_hadamard_matrix(
+        padded_dim, torch::kFloat32, torch::Device(torch::kCPU), true);
     hadamard_matrix_ =
         hadamard_matrix_.to(options.device(), options.dtype().toScalarType());
   }
@@ -285,84 +138,45 @@ torch::Tensor CompressorImpl::forward_prefill(
     torch::Tensor& hidden_states,
     torch::Tensor& kv_cache,
     const torch::Tensor& slot_mapping,
-    std::tuple<torch::Tensor, torch::Tensor>& kv_states,
-    std::tuple<torch::Tensor, torch::Tensor>& block_tables,
+    torch::Tensor& state_cache,
+    const torch::Tensor& state_block_table,
     const torch::Tensor& compressed_sin_table,
-    const torch::Tensor& compressed_cos_table) {
-  torch::Tensor kv_pack = wkv_->forward(hidden_states);
-  torch::Tensor score_pack = wgate_->forward(hidden_states);
+    const torch::Tensor& compressed_cos_table,
+    std::optional<torch::Tensor> projected_kv,
+    std::optional<torch::Tensor> projected_score) {
+  // When the caller (DeepseekV4Attention fused GEMM) has already projected
+  // hidden_states, reuse the precomputed tensors instead of redoing the GEMM.
+  torch::Tensor kv_pack = projected_kv.has_value()
+                              ? projected_kv.value()
+                              : wkv_->forward(hidden_states);
+  torch::Tensor score_pack = projected_score.has_value()
+                                 ? projected_score.value()
+                                 : wgate_->forward(hidden_states);
+  const DSAMetadata& dsa = *attn_metadata.dsa_metadata;
 
-  torch::Tensor& kv_state = std::get<0>(kv_states);
-  torch::Tensor& score_state = std::get<1>(kv_states);
-
-  torch::Tensor& kv_block_table = std::get<0>(block_tables);
-  torch::Tensor& score_block_table = std::get<1>(block_tables);
-  const int64_t batch_size =
-      static_cast<int64_t>(attn_metadata.kv_seq_lens.size(0));
-
-  int64_t cache_len = batch_size * compress_len_;
-  auto new_kv_state =
-      kv_state.view({kv_state.size(0) * kv_state.size(1), kv_state.size(2)})
-          .slice(0, 0, cache_len)
-          .view({batch_size, compress_len_, kv_state.size(2)});
-  auto new_score_state =
-      score_state
-          .view(
-              {score_state.size(0) * score_state.size(1), score_state.size(2)})
-          .slice(0, 0, cache_len)
-          .view({batch_size, compress_len_, score_state.size(2)});
-
-  PrefillPadPlan pad_plan =
-      make_prefill_pad_plan(attn_metadata, compress_ratio_, coff_);
-  torch::Tensor fused_kv_pack = kv_pack;
-  torch::Tensor fused_score_pack = score_pack;
-  torch::Tensor fused_q_cu_seq_lens = attn_metadata.q_cu_seq_lens;
-  int64_t fused_max_query_len = attn_metadata.max_query_len;
-  int64_t fused_output_rows = slot_mapping.numel();
-  if (pad_plan.needs_padding) {
-    std::tie(fused_kv_pack, fused_score_pack, fused_q_cu_seq_lens) =
-        pad_prefill_pack(kv_pack,
-                         score_pack,
-                         new_kv_state,
-                         new_score_state,
-                         attn_metadata.q_cu_seq_lens,
-                         ape_,
-                         pad_plan,
-                         compress_ratio_,
-                         coff_);
-    fused_max_query_len = pad_plan.max_padded_len;
-    fused_output_rows = pad_plan.padded_rows;
-  }
-
+  const int64_t num_compressed_rows = slot_mapping.numel();
   torch::Tensor compressed_kv =
-      torch::empty({fused_output_rows, head_dim_}, hidden_states.options());
-  torch::Tensor state_ids = torch::arange(batch_size,
-                                          torch::TensorOptions()
-                                              .dtype(torch::kInt32)
-                                              .device(hidden_states.device()));
+      torch::empty({num_compressed_rows, head_dim_}, hidden_states.options());
 
-  xllm::kernel::mlu::fused_compress_multi_kv(fused_kv_pack,
-                                             fused_score_pack,
-                                             new_kv_state,
-                                             new_score_state,
-                                             fused_q_cu_seq_lens,
-                                             state_ids,
-                                             ape_,
-                                             fused_max_query_len,
-                                             overlap_,
-                                             compressed_kv);
-  if (pad_plan.needs_padding) {
-    compressed_kv = drop_synthetic_rows(
-        compressed_kv, pad_plan, hidden_states.options(), head_dim_);
-  }
+  xllm::kernel::mlu::fused_compress_multi_kv(
+      /*kv=*/kv_pack,
+      /*score=*/score_pack,
+      /*state_cache=*/state_cache,
+      /*state_block_table=*/state_block_table.contiguous(),
+      /*cu_seqlens=*/attn_metadata.q_cu_seq_lens,
+      /*positions=*/dsa.input_positions.to(torch::kInt32).contiguous(),
+      /*ape=*/ape_,
+      /*max_seqlen=*/attn_metadata.max_query_len,
+      /*overlap=*/overlap_,
+      /*compressed_kv=*/compressed_kv);
 
-  if (slot_mapping.numel() == 0) {
+  if (num_compressed_rows == 0) {
     return empty_output(hidden_states, head_dim_);
   }
+
   auto kv = compressed_kv.to(torch::kFloat32);
   auto output = std::get<0>(norm_->forward(kv));
   output = output.to(hidden_states.scalar_type());
-  const DSAMetadata& dsa = *attn_metadata.dsa_metadata;
   apply_rotary(output,
                compressed_sin_table,
                compressed_cos_table,
@@ -381,76 +195,60 @@ torch::Tensor CompressorImpl::forward_decode(
     torch::Tensor& hidden_states,
     torch::Tensor& kv_cache,
     const torch::Tensor& slot_mapping,
-    std::tuple<torch::Tensor, torch::Tensor>& kv_states,
-    std::tuple<torch::Tensor, torch::Tensor>& block_tables,
+    torch::Tensor& state_cache,
+    const torch::Tensor& state_block_table,
     const torch::Tensor& compressed_sin_table,
-    const torch::Tensor& compressed_cos_table) {
-  torch::Tensor& kv_state = std::get<0>(kv_states);
-  torch::Tensor& score_state = std::get<1>(kv_states);
-  torch::Tensor& kv_block_table = std::get<0>(block_tables);
-  torch::Tensor& score_block_table = std::get<1>(block_tables);
-
+    const torch::Tensor& compressed_cos_table,
+    std::optional<torch::Tensor> projected_kv,
+    std::optional<torch::Tensor> projected_score) {
   const DSAMetadata& dsa = *attn_metadata.dsa_metadata;
-  const int64_t batch_size =
-      static_cast<int64_t>(attn_metadata.kv_seq_lens.size(0));
+  const int64_t state_block_size = state_cache.size(1);
 
-  torch::Tensor kv_pack = wkv_->forward(hidden_states);
-  torch::Tensor score_pack = wgate_->forward(hidden_states);
-
-  int64_t cache_len = batch_size * compress_len_;
-  auto new_kv_state =
-      kv_state.view({kv_state.size(0) * kv_state.size(1), kv_state.size(2)})
-          .slice(0, 0, cache_len)
-          .view({batch_size, compress_len_, kv_state.size(2)});
-  auto new_score_state =
-      score_state
-          .view(
-              {score_state.size(0) * score_state.size(1), score_state.size(2)})
-          .slice(0, 0, cache_len)
-          .view({batch_size, compress_len_, score_state.size(2)});
-
-  if (kv_pack.dim() == 2) {
-    kv_pack = kv_pack.unsqueeze(/*dim=*/1);
+  // Reuse the fused projection output when provided; otherwise compute it.
+  torch::Tensor kv_pack = projected_kv.has_value()
+                              ? projected_kv.value()
+                              : wkv_->forward(hidden_states);
+  torch::Tensor score_pack = projected_score.has_value()
+                                 ? projected_score.value()
+                                 : wgate_->forward(hidden_states);
+  // The rewritten operator takes a 2D kv/score ([total_tokens, coff_dim]).
+  if (kv_pack.dim() == 3) {
+    kv_pack = kv_pack.reshape({-1, kv_pack.size(-1)});
   }
-  if (score_pack.dim() == 2) {
-    score_pack = score_pack.unsqueeze(/*dim=*/1);
+  if (score_pack.dim() == 3) {
+    score_pack = score_pack.reshape({-1, score_pack.size(-1)});
   }
 
-  CHECK(slot_mapping.defined())
-      << "CompressorImpl::forward_decode requires decode slot_mapping.";
-  CHECK_EQ(slot_mapping.numel(), batch_size)
-      << "CompressorImpl::forward_decode expects one decode slot per "
-         "sequence.";
-  torch::Tensor decode_slots = slot_mapping;
-  torch::Tensor positions = dsa.input_positions;
-  torch::Tensor kv_cache_view = kv_cache.reshape({-1, 1, head_dim_});
-  torch::Tensor state_ids = torch::arange(new_kv_state.size(0),
-                                          torch::TensorOptions()
-                                              .dtype(torch::kInt32)
-                                              .device(hidden_states.device()));
+  torch::Tensor positions = dsa.input_positions.to(torch::kInt32).contiguous();
+  torch::Tensor kv_cache_view = kv_cache.squeeze(/*dim=*/1);
+  const int64_t coff_dim = coff_ * head_dim_;
   std::optional<torch::Tensor> hadamard_matrix = std::nullopt;
   if (rotate_) {
     hadamard_matrix = hadamard_matrix_;
   }
 
-  xllm::kernel::mlu::fused_compress_single_kv(kv_pack,
-                                              score_pack,
-                                              positions,
-                                              state_ids,
-                                              ape_,
-                                              new_kv_state,
-                                              new_score_state,
-                                              norm_->weight(),
-                                              compressed_sin_table,
-                                              compressed_cos_table,
-                                              hadamard_matrix,
-                                              decode_slots,
-                                              kv_cache_view,
-                                              std::nullopt,
-                                              eps_,
-                                              overlap_,
-                                              std::nullopt,
-                                              /*mtp_token_num=*/0);
+  // The MLU backend expands spec tokens into the batch dimension during MTP
+  // inference, so K selection (K > 0) is not needed here.
+  xllm::kernel::mlu::fused_compress_single_kv(
+      /*kv=*/kv_pack,
+      /*score=*/score_pack,
+      /*position=*/positions,
+      /*ape=*/ape_,
+      /*gamma=*/norm_->weight(),
+      /*sin=*/compressed_sin_table,
+      /*cos=*/compressed_cos_table,
+      /*hadamard_matrix=*/hadamard_matrix,
+      /*slot_mapping=*/slot_mapping,
+      /*kv_cache=*/kv_cache_view,
+      /*kv_cache_scale=*/std::nullopt,
+      /*eps=*/eps_,
+      /*overlap=*/overlap_,
+      /*state_cache=*/state_cache,
+      /*state_bt=*/state_block_table.contiguous(),
+      /*state_width=*/coff_dim,
+      /*state_block_size=*/state_block_size,
+      /*cu_query_len=*/dsa.q_cu_seq_lens,
+      /*K=*/0);
 
   return empty_output(hidden_states, head_dim_);
 }
@@ -460,41 +258,49 @@ torch::Tensor CompressorImpl::forward(
     torch::Tensor& hidden_states,
     torch::Tensor& kv_cache,
     const torch::Tensor& slot_mapping,
-    std::tuple<torch::Tensor, torch::Tensor>& kv_states,
-    std::tuple<torch::Tensor, torch::Tensor>& block_tables,
+    torch::Tensor& state_cache,
+    const torch::Tensor& state_block_table,
     const torch::Tensor& compressed_sin_table,
-    const torch::Tensor& compressed_cos_table) {
+    const torch::Tensor& compressed_cos_table,
+    std::optional<torch::Tensor> projected_kv,
+    std::optional<torch::Tensor> projected_score) {
   const bool is_prefill =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
-  torch::Tensor output;
   if (is_prefill) {
-    output = forward_prefill(attn_metadata,
-                             hidden_states,
-                             kv_cache,
-                             slot_mapping,
-                             kv_states,
-                             block_tables,
-                             compressed_sin_table,
-                             compressed_cos_table);
-  } else {
-    output = forward_decode(attn_metadata,
-                            hidden_states,
-                            kv_cache,
-                            slot_mapping,
-                            kv_states,
-                            block_tables,
-                            compressed_sin_table,
-                            compressed_cos_table);
+    return forward_prefill(attn_metadata,
+                           hidden_states,
+                           kv_cache,
+                           slot_mapping,
+                           state_cache,
+                           state_block_table,
+                           compressed_sin_table,
+                           compressed_cos_table,
+                           projected_kv,
+                           projected_score);
   }
-  return output;
+  return forward_decode(attn_metadata,
+                        hidden_states,
+                        kv_cache,
+                        slot_mapping,
+                        state_cache,
+                        state_block_table,
+                        compressed_sin_table,
+                        compressed_cos_table,
+                        projected_kv,
+                        projected_score);
 }
 
-void CompressorImpl::load_state_dict(const StateDict& state_dict) {
+void CompressorImpl::load_state_dict(const StateDict& state_dict,
+                                     bool skip_proj_weights) {
   if (state_dict.size() == 0) {
     return;
   }
-  wkv_->load_state_dict(state_dict.get_dict_with_prefix("wkv."));
-  wgate_->load_state_dict(state_dict.get_dict_with_prefix("wgate."));
+  // When the projection weights have been merged into the attention layer's
+  // fused GEMM, skip loading them here; norm/ape are always loaded.
+  if (!skip_proj_weights) {
+    wkv_->load_state_dict(state_dict.get_dict_with_prefix("wkv."));
+    wgate_->load_state_dict(state_dict.get_dict_with_prefix("wgate."));
+  }
   norm_->load_state_dict(state_dict.get_dict_with_prefix("norm."));
   LOAD_WEIGHT(ape);
 }

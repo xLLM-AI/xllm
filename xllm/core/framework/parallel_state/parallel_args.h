@@ -29,6 +29,12 @@ limitations under the License.
 namespace xllm {
 
 struct ParallelArgs {
+  // Expose the parallel-dimension sizes (tp/dp/ep/cp/...) to the generic
+  // property reflection layer so they can be forwarded to the embedded Python
+  // model executor. Non-plain-data PROPERTY fields (mapping_data, vendor comm
+  // handles) are skipped at compile time (see property_reflect.h).
+  REFLECT_PROPERTIES(ParallelArgs);
+
   ParallelArgs(int32_t rank, int32_t world_size, ProcessGroup* process_group)
       : rank_(rank), world_size_(world_size), process_group_(process_group) {}
 
@@ -207,15 +213,23 @@ struct ParallelArgs {
   ProcessGroup* process_group_ = nullptr;
   ProcessGroup* dp_local_process_group_ = nullptr;
   ProcessGroup* tp_group_ = nullptr;
+  // Optional output-projection group for models whose body and LMHead use
+  // different tensor-parallel strategies.
+  ProcessGroup* lm_head_group_ = nullptr;
   ProcessGroup* encoder_dp_group_ = nullptr;
   ProcessGroup* single_rank_group_ = nullptr;
-  // Sequence-parallel communication group used by prefill attention.
-  // In the current implementation this aliases the TP group because SP uses
-  // the same rank set during prefill, but it remains a separate handle so the
-  // SP communication policy can evolve independently from TP.
-  ProcessGroup* sp_group_ = nullptr;
+  // Context-parallel communication group used by prefill attention.
+  // The current MLU model-side CP path requires CP to span the full DP-local
+  // rank set, so this temporarily aliases the TP group. Keep a distinct handle
+  // for a future orthogonal CP x TP topology with a standalone CP group.
+  ProcessGroup* cp_group_ = nullptr;
   ProcessGroup* moe_ep_group_ = nullptr;
   ProcessGroup* moe_tp_group_ = nullptr;
+
+  // PyTorch creates its own TP process group. These fields only reserve the
+  // TCPStore endpoint after the native process-group port range.
+  std::string python_tp_rendezvous_host_;
+  int32_t python_tp_rendezvous_port_ = 0;
 
   // ProcessGroups for DiT models
   ProcessGroup* dit_tp_group_ = nullptr;

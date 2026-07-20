@@ -81,6 +81,13 @@ DEFINE_uint64(output_shm_size,
 
 DEFINE_int32(random_seed, -1, "Random seed for random number generator.");
 
+DEFINE_string(
+    python_graph_backend,
+    "off",
+    "Graph backend for the Python model executor. "
+    "Values: off (eager), cudagraphs (decode full graph with eager prefill), "
+    "or any torch.compile backend name.");
+
 namespace xllm {
 
 void ExecutionConfig::from_flags() {
@@ -96,6 +103,7 @@ void ExecutionConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(input_shm_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(output_shm_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(random_seed);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(python_graph_backend);
 }
 
 void ExecutionConfig::from_json(const JsonReader& json) {
@@ -111,6 +119,7 @@ void ExecutionConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(input_shm_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(output_shm_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(random_seed);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(python_graph_backend);
 }
 
 void ExecutionConfig::append_config_json(
@@ -140,6 +149,8 @@ void ExecutionConfig::append_config_json(
       config_json, default_config, output_shm_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, random_seed);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, python_graph_backend);
 }
 
 ExecutionConfig& ExecutionConfig::get_instance() {

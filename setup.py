@@ -461,6 +461,23 @@ class ExtBuild(build_ext):
             os.path.join(os.path.dirname(cmake_dir), "xllm/core/server/"),
         )
 
+        # Stage the Python model-executor package into the wheel as the
+        # ``xllm.python`` subpackage (xllm/python/...). The installed ``xllm``
+        # package is a regular package, so ``import xllm.python`` resolves
+        # straight from site-packages with no sys.path manipulation;
+        # --python_model_path / XLLM_PYTHON_MODEL_PATH only overrides the
+        # directory containing the ``xllm`` package (e.g. source-tree runs).
+        py_pkg_src = os.path.join(self.base_dir, "xllm", "python")
+        if os.path.isdir(py_pkg_src):
+            py_pkg_dst = os.path.join(extdir, "python")
+            if os.path.isdir(py_pkg_dst):
+                shutil.rmtree(py_pkg_dst)
+            shutil.copytree(
+                py_pkg_src,
+                py_pkg_dst,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+
         _stage_triton_npu_runtime_binaries(self.base_dir, extdir, self.device)
 
         _stage_mlu_triton_kernels(self.base_dir, extdir, self.device)

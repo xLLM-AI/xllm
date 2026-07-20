@@ -17,7 +17,9 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <chrono>
+#include <limits>
 #include <numeric>
 #include <unordered_set>
 
@@ -222,14 +224,21 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
       kv_cache_shape.key_cache_shape();
   bool has_v_cache = true;
   bool has_index_cache = false;
+  bool has_index_cache_scale = false;
   if (!kv_caches.empty()) {
     torch::Tensor value_cache = kv_caches[0].get_v_cache();
     torch::Tensor index_cache = kv_caches[0].get_index_cache();
+    std::optional<torch::Tensor> index_cache_scale =
+        kv_caches[0].get_indexer_cache_scale();
     has_v_cache = value_cache.defined() && value_cache.numel() > 0;
     has_index_cache = index_cache.defined() && index_cache.numel() > 0;
+    has_index_cache_scale = index_cache_scale.has_value() &&
+                            index_cache_scale->defined() &&
+                            index_cache_scale->numel() > 0;
   }
   const int64_t buf_cnt_per_layer = 1 + static_cast<int64_t>(has_v_cache) +
-                                    static_cast<int64_t>(has_index_cache);
+                                    static_cast<int64_t>(has_index_cache) +
+                                    static_cast<int64_t>(has_index_cache_scale);
 
   int64_t data_size = torch::scalarTypeToTypeMeta(dtype).itemsize();
   int64_t count_per_block = 1;
@@ -279,16 +288,25 @@ void MooncakeKVCacheTransferDefault::allocate_kv_cache_impl(
         mlu::alloc_zero_tensor(key_cache_shape, dtype, device_);
     torch::Tensor value_cache;
     torch::Tensor index_cache;
+    std::optional<torch::Tensor> index_cache_scale;
     if (kv_cache_shape.has_value_cache_shape()) {
       value_cache = mlu::alloc_zero_tensor(value_cache_shape, dtype, device_);
     }
     if (kv_cache_shape.has_index_cache_shape()) {
+      const torch::ScalarType index_dtype =
+          kv_cache_shape.has_index_cache_scale_shape() ? torch::kChar : dtype;
       index_cache = mlu::alloc_zero_tensor(
-          kv_cache_shape.index_cache_shape(), dtype, device_);
+          kv_cache_shape.index_cache_shape(), index_dtype, device_);
+    }
+    if (kv_cache_shape.has_index_cache_scale_shape()) {
+      index_cache_scale = mlu::alloc_rdma_registerable_zero_tensor(
+          kv_cache_shape.index_cache_scale_shape(), torch::kFloat32, device_);
     }
     if (index_cache.defined()) {
-      kv_caches.emplace_back(IndexedKVCacheTensors{
-          KVCacheTensors{key_cache, value_cache}, index_cache});
+      kv_caches.emplace_back(
+          IndexedKVCacheTensors{KVCacheTensors{key_cache, value_cache},
+                                index_cache,
+                                index_cache_scale});
     } else {
       kv_caches.emplace_back(KVCacheTensors{key_cache, value_cache});
     }
@@ -367,18 +385,65 @@ void MooncakeKVCacheTransferDefault::add_buf(
     const torch::Tensor& tensor,
     std::vector<void*>& addrs,
     std::vector<size_t>& lens,
-    std::vector<uint64_t>& buf_bytes) const {
+    std::vector<uint64_t>& buf_bytes,
+    RegisterLengthPolicy register_length_policy) const {
   if (!tensor.defined() || tensor.numel() == 0) {
     return;
   }
 
   CHECK_GT(tensor.dim(), 0) << "cache tensor dim must be positive";
-  int64_t block_cnt = tensor.size(0);
-  CHECK_GT(block_cnt, 0) << "cache tensor block dim must be positive";
+  CHECK(tensor.is_contiguous())
+      << "Mooncake registration requires a contiguous cache tensor";
+  const int64_t block_count = tensor.size(0);
+  CHECK_GT(block_count, 0) << "cache tensor block dim must be positive";
+
+  const int64_t storage_offset = tensor.storage_offset();
+  CHECK_GE(storage_offset, 0) << "tensor storage offset must be non-negative";
+  const size_t element_size = tensor.element_size();
+  CHECK_GT(element_size, static_cast<size_t>(0))
+      << "tensor element byte size must be positive";
+  CHECK_LE(static_cast<size_t>(storage_offset),
+           std::numeric_limits<size_t>::max() / element_size)
+      << "tensor storage offset byte size overflow";
+  const size_t storage_offset_bytes =
+      static_cast<size_t>(storage_offset) * element_size;
+  const size_t storage_bytes = tensor.storage().nbytes();
+  CHECK_LE(storage_offset_bytes, storage_bytes)
+      << "tensor storage offset exceeds storage capacity";
+  const size_t available_bytes = storage_bytes - storage_offset_bytes;
+
+  const size_t logical_bytes = static_cast<size_t>(tensor.nbytes());
+  CHECK_EQ(logical_bytes % static_cast<size_t>(block_count),
+           static_cast<size_t>(0))
+      << "cache tensor bytes must be divisible by block count";
+  const size_t block_bytes = logical_bytes / static_cast<size_t>(block_count);
+  CHECK_GT(block_bytes, static_cast<size_t>(0))
+      << "cache tensor block byte size must be positive";
+
+  size_t registered_bytes = logical_bytes;
+  switch (register_length_policy) {
+    case RegisterLengthPolicy::LOGICAL_BYTES:
+      break;
+    case RegisterLengthPolicy::RDMA_REGISTERABLE_BYTES:
+#if defined(USE_MLU)
+      registered_bytes = mlu::get_rdma_registerable_nbytes(tensor);
+#else
+      LOG(FATAL) << "RDMA registerable storage is only supported on MLU";
+#endif
+      break;
+  }
+  CHECK_EQ(registered_bytes % block_bytes, static_cast<size_t>(0))
+      << "registered bytes must be divisible by block bytes";
+  CHECK_GE(available_bytes, registered_bytes)
+      << "Mooncake registration exceeds tensor storage capacity: "
+      << "logical_bytes=" << logical_bytes
+      << ", registered_bytes=" << registered_bytes
+      << ", available_bytes=" << available_bytes
+      << ", block_bytes=" << block_bytes;
 
   addrs.emplace_back(tensor.data_ptr());
-  lens.emplace_back(static_cast<size_t>(tensor.nbytes()));
-  buf_bytes.emplace_back(static_cast<uint64_t>(tensor.nbytes() / block_cnt));
+  lens.emplace_back(registered_bytes);
+  buf_bytes.emplace_back(static_cast<uint64_t>(block_bytes));
 }
 
 std::vector<int64_t> MooncakeKVCacheTransferDefault::get_buf_ids(
@@ -421,14 +486,27 @@ void MooncakeKVCacheTransferDefault::register_kv_cache_impl(
   std::vector<void*> addrs;
   std::vector<size_t> lens;
   std::vector<uint64_t> buf_bytes;
-  addrs.reserve(kv_caches.size() * 3);
-  lens.reserve(kv_caches.size() * 3);
-  buf_bytes.reserve(kv_caches.size() * 3);
+  addrs.reserve(kv_caches.size() * 4);
+  lens.reserve(kv_caches.size() * 4);
+  buf_bytes.reserve(kv_caches.size() * 4);
 
   for (int64_t i = 0; i < static_cast<int64_t>(kv_caches.size()); ++i) {
     add_buf(kv_caches[i].get_k_cache(), addrs, lens, buf_bytes);
     add_buf(kv_caches[i].get_v_cache(), addrs, lens, buf_bytes);
     add_buf(kv_caches[i].get_index_cache(), addrs, lens, buf_bytes);
+    std::optional<torch::Tensor> index_cache_scale =
+        kv_caches[i].get_indexer_cache_scale();
+    if (index_cache_scale.has_value()) {
+#if defined(USE_MLU)
+      add_buf(index_cache_scale.value(),
+              addrs,
+              lens,
+              buf_bytes,
+              RegisterLengthPolicy::RDMA_REGISTERABLE_BYTES);
+#else
+      add_buf(index_cache_scale.value(), addrs, lens, buf_bytes);
+#endif
+    }
   }
 
   if (!mooncake_te_->register_memory(addrs, lens, buf_bytes)) {
