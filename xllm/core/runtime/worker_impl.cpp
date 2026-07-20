@@ -1523,10 +1523,10 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   }
 
 #if defined(USE_NPU)
+  const std::string& speculative_algorithm = options_.speculative_algorithm();
   if (options_.enable_speculative_decode() &&
-      util::is_deepseek_v4_model_type(args.model_type()) &&
-      (options_.speculative_algorithm() == "MTP" ||
-       options_.speculative_algorithm() == "mtp")) {
+      SpeculativeConfig::is_mtp_algorithm(speculative_algorithm) &&
+      util::is_deepseek_v4_model_type(args.model_type())) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
   }
   if (options_.speculative_algorithm() == "DFlash") {

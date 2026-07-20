@@ -34,6 +34,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/model/mtp_utils.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/request/request_state.h"
 #include "scheduler/profile/graph_warmup.h"
@@ -691,10 +692,7 @@ std::shared_ptr<Request> ProfileManager::generate_single_decode_request(
   // per-token decode state. Inject a placeholder bootstrap embedding so the
   // synthetic warmup/profile request takes the same bootstrap path as a real
   // disagg PD decode request instead of reading stale recycled decode state.
-  const int64_t bootstrap_width =
-      util::is_deepseek_v4_model_type(model_args.model_type())
-          ? model_args.hc_mult() * model_args.hidden_size()
-          : model_args.hidden_size();
+  const int64_t bootstrap_width = mtp_hidden_state_width(model_args);
   prepare_warmup_decode_sequence(
       sequence, bootstrap_width, num_speculative_tokens);
 

@@ -24,6 +24,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model/mtp_topk_state.h"
+#include "core/framework/model/mtp_utils.h"
 #include "core/framework/state_dict/utils.h"
 #include "core/util/utils.h"
 #include "llm_model_base.h"
@@ -171,12 +172,7 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
     torch::Tensor embedding_data = input_params.embedding.input_embedding;
     // for dummy data parallel run, we set a empty embedding
     if (attn_metadata.is_dummy) {
-      int64_t embed_cols = model_args_.hidden_size();
-      // DeepSeek-V4 targets stash the pre-hc_head 3D hidden flattened to
-      // [num_tokens, hc_mult*hidden] as aux_hidden_states.
-      if (is_deepseek_v4_mtp_model(model_args_)) {
-        embed_cols = model_args_.hc_mult() * model_args_.hidden_size();
-      }
+      const int64_t embed_cols = mtp_hidden_state_width(model_args_);
       embedding_data =
           torch::zeros({embed.size(0), embed_cols}, embed.options());
     }
@@ -203,7 +199,8 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
         hidden_states =
             e_out.unsqueeze(1) + h_out.reshape({-1, hc_mult, hidden});
       } else {
-        // Draft step output is the post-hc_head 2D hidden [N, hidden].
+        // Preserve compatibility with callers that provide the post-hc_head
+        // 2D hidden [N, hidden].
         previous_hidden_states = std::get<0>(hnorm_(previous_hidden_states));
         hidden_states = e_proj_(enorm_out) + h_proj_(previous_hidden_states);
         hidden_states = hidden_states.unsqueeze(1).repeat({1, hc_mult, 1});

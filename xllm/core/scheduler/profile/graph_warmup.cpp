@@ -122,18 +122,18 @@ std::string next_warmup_request_id() {
 }
 
 void prepare_warmup_decode_sequence(Sequence* sequence,
-                                    int64_t hidden_size,
+                                    int64_t embedding_width,
                                     int32_t num_speculative_tokens) {
   CHECK(sequence != nullptr);
   if (num_speculative_tokens <= 0) {
     return;
   }
 
-  CHECK_GT(hidden_size, 0);
+  CHECK_GT(embedding_width, 0);
   // Placeholder bootstrap hidden states; the worker converts dtype/device and
-  // only the [1, hidden_size] shape matters for the batch input builder.
+  // only the [1, embedding_width] shape matters for the batch input builder.
   sequence->update_mtp_bootstrap_embedding(
-      torch::zeros({1, hidden_size}, torch::kFloat));
+      torch::zeros({1, embedding_width}, /*options=*/torch::kFloat));
 }
 
 }  // namespace xllm
