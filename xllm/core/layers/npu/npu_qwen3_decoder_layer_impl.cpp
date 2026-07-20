@@ -237,6 +237,20 @@ int64_t NpuQwen3DecoderLayerImpl::init_layer() {
       update_down_proj(decode_graph_param_);
       update_down_proj(decode_eager_param_);
     }
+    if (qwen3_loader && !qwen3_loader->o_proj_quantized()) {
+      // o_proj is bf16: change linearDescs[kDenseLinearIndex] from W8A8 to
+      // BFLOAT16, same pattern as down_proj non-quantized adaptation
+      constexpr uint64_t kDenseLinearIndex = 3;
+      auto update_o_proj = [](atb_speed::qwen::QwenLayerParam& p) {
+        p.linearDescs[kDenseLinearIndex] =
+            static_cast<int>(LinearTypeV2::BFLOAT16);
+        p.linearQuantType[kDenseLinearIndex] =
+            static_cast<int>(LinearType::INVALID);
+      };
+      update_o_proj(prefill_param_);
+      update_o_proj(decode_graph_param_);
+      update_o_proj(decode_eager_param_);
+    }
   }
 
   CHECK_OPERATION_STATUS_RETURN(init_node(prefill_node_, prefill_param_));
