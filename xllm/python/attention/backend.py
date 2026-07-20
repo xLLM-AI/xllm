@@ -36,6 +36,8 @@ class AttentionMetadata(Protocol):
     kv_seq_lens_host: torch.Tensor | None
     paged_kv_indptr_host: torch.Tensor | None
     paged_kv_last_page_len_host: torch.Tensor | None
+    block_table: torch.Tensor | None
+    kv_seq_lens: torch.Tensor | None
     is_prefill: bool
     is_chunked_prefill: bool
 
