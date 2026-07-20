@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <string>
+#include <vector>
 
 #include "common/instance_name.h"
 #include "distributed_runtime/llm_master.h"
@@ -80,6 +81,78 @@ bool send_result_to_client_brpc(std::shared_ptr<EmbeddingCall> call,
 
 }  // namespace
 
+void BatchEmbeddingContext::on_complete(size_t index, RequestOutput output) {
+  req_outputs_[index] = std::move(output);
+  if (pending_count_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+    finalize();
+  }
+}
+
+void BatchEmbeddingContext::finalize() {
+  auto call = std::move(call_);
+  auto& response = call->response();
+  response.set_object("list");
+  response.set_id(request_id_);
+  response.set_created(created_time_);
+  response.set_model(model_);
+
+  std::string encoding_format = call->request().encoding_format();
+  bool use_binary_format = encoding_format == "binary";
+  EmbeddingOutputBuilder mm_embeddings_output_builder(use_binary_format, false);
+  std::string binary_payload;
+
+  int32_t total_prompt_tokens = 0;
+  int32_t total_generated_tokens = 0;
+  int32_t total_tokens = 0;
+
+  response.mutable_data()->Reserve(static_cast<int32_t>(req_outputs_.size()));
+  for (size_t i = 0; i < req_outputs_.size(); ++i) {
+    const auto& req_output = req_outputs_[i];
+
+    if (req_output.status.has_value()) {
+      const auto& status = req_output.status.value();
+      if (!status.ok()) {
+        call->finish_with_error(status.code(), status.message());
+        return;
+      }
+    }
+
+    for (const auto& output : req_output.outputs) {
+      auto* data = response.add_data();
+      data->set_index(static_cast<int32_t>(i));
+      data->set_object("embedding");
+      if (output.embeddings.has_value()) {
+        data->mutable_embedding()->Add(
+            output.embeddings->data(),
+            output.embeddings->data() + output.embeddings->size());
+      }
+      if (output.mm_embeddings.has_value()) {
+        call->set_bytes_to_base64(true);
+        mm_embeddings_output_builder.build_repeated_embedding_output(
+            *output.mm_embeddings,
+            *(data->mutable_mm_embeddings()),
+            binary_payload);
+      }
+    }
+
+    if (req_output.usage.has_value()) {
+      const auto& usage = req_output.usage.value();
+      total_prompt_tokens += usage.num_prompt_tokens;
+      total_generated_tokens += usage.num_generated_tokens;
+      total_tokens += usage.num_total_tokens;
+    }
+  }
+
+  if (total_tokens > 0) {
+    auto* proto_usage = response.mutable_usage();
+    proto_usage->set_prompt_tokens(total_prompt_tokens);
+    proto_usage->set_completion_tokens(total_generated_tokens);
+    proto_usage->set_total_tokens(total_tokens);
+  }
+
+  call->write_and_finish(response, binary_payload);
+}
+
 EmbeddingServiceImpl::EmbeddingServiceImpl(
     LLMMaster* master,
     const std::vector<std::string>& models)
@@ -128,6 +201,40 @@ void EmbeddingServiceImpl::process_async_impl(
         return send_result_to_client_brpc<EmbeddingCall>(
             call, request_id, created_time, model, req_output);
       });
+}
+
+void EmbeddingServiceImpl::process_batch_async(
+    std::shared_ptr<EmbeddingCall> call,
+    std::vector<std::string> inputs) {
+  const auto& rpc_request = call->request();
+  std::string model = rpc_request.model();
+  if (!models_.contains(model)) {
+    call->finish_with_error(StatusCode::UNKNOWN, "Model not supported");
+    return;
+  }
+
+  RequestParams request_params(
+      rpc_request, call->get_x_request_id(), call->get_x_request_time());
+  std::string request_id = request_params.request_id;
+  int64_t created_time = absl::ToUnixSeconds(absl::Now());
+
+  size_t num_requests = inputs.size();
+  std::vector<RequestParams> sps(num_requests, request_params);
+
+  auto ctx = std::make_shared<BatchEmbeddingContext>(
+      std::move(call),
+      std::move(model),
+      std::move(request_id),
+      created_time,
+      num_requests);
+
+  auto batch_callback = [ctx](size_t index, RequestOutput output) -> bool {
+    ctx->on_complete(index, std::move(output));
+    return true;
+  };
+
+  master_->handle_batch_request(
+      std::move(inputs), std::move(sps), batch_callback);
 }
 
 MMEmbeddingServiceImpl::MMEmbeddingServiceImpl(

@@ -21,6 +21,7 @@ limitations under the License.
 #include <json2pb/pb_to_json.h>
 
 #include <filesystem>
+#include <nlohmann/json.hpp>
 
 #include "api_service/chat_json_parser.h"
 #include "api_service/completion_json_parser.h"
@@ -527,6 +528,96 @@ void handle_embedding_request(std::unique_ptr<Service>& embedding_service_impl_,
       ctrl, done_guard.release(), req_pb, resp_pb, arena != nullptr);
   embedding_service_impl_->process_async(call);
 }
+
+void handle_text_embedding_request(
+    std::unique_ptr<EmbeddingServiceImpl>& embedding_service_impl_,
+    ::google::protobuf::RpcController* controller,
+    const proto::HttpRequest* request,
+    proto::HttpResponse* response,
+    ::google::protobuf::Closure* done) {
+  xllm::ClosureGuard done_guard(
+      done,
+      [](void* /*unused*/) { request_in_metric(nullptr); },
+      [controller](void* /*unused*/) {
+        request_out_metric(static_cast<void*>(controller));
+      });
+  if (!request || !response || !controller) {
+    LOG(ERROR) << "brpc request | respose | controller is null";
+    return;
+  }
+
+  auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
+  butil::IOBuf& buf = ctrl->request_attachment();
+  std::string json_str = buf.to_string();
+
+  nlohmann::json json_body;
+  try {
+    json_body = nlohmann::json::parse(json_str);
+  } catch (const nlohmann::json::exception& e) {
+    ctrl->SetFailed(e.what());
+    LOG(ERROR) << "parse json failed: " << e.what();
+    return;
+  }
+
+  std::vector<std::string> inputs;
+  bool is_batch = false;
+  if (json_body.contains("input")) {
+    const auto& input_field = json_body["input"];
+    if (input_field.is_array()) {
+      is_batch = true;
+      inputs.reserve(input_field.size());
+      for (const auto& item : input_field) {
+        if (item.is_string()) {
+          inputs.emplace_back(item.get<std::string>());
+        } else {
+          ctrl->SetFailed("input array elements must be strings");
+          LOG(ERROR) << "input array elements must be strings";
+          return;
+        }
+      }
+      if (inputs.empty()) {
+        ctrl->SetFailed("input array must not be empty");
+        LOG(ERROR) << "input array must not be empty";
+        return;
+      }
+      // Normalize input to first element for proto parsing compatibility
+      json_body["input"] = inputs[0];
+      json_str = json_body.dump();
+    }
+  }
+
+  auto arena = GetArenaWithCheck<EmbeddingCall>(response);
+  auto req_pb =
+      google::protobuf::Arena::CreateMessage<proto::EmbeddingRequest>(arena);
+  auto resp_pb =
+      google::protobuf::Arena::CreateMessage<proto::EmbeddingResponse>(arena);
+
+  std::string error;
+  json2pb::Json2PbOptions options;
+  butil::IOBuf normalized_buf;
+  normalized_buf.append(json_str);
+  butil::IOBufAsZeroCopyInputStream iobuf_stream(normalized_buf);
+  auto st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
+  if (!st) {
+    ctrl->SetFailed(error);
+    LOG(ERROR) << "parse json to proto failed: " << error;
+    return;
+  }
+
+  if (req_pb->encoding_format().empty()) {
+    req_pb->set_encoding_format("float");
+  }
+
+  std::shared_ptr<EmbeddingCall> call = std::make_shared<EmbeddingCall>(
+      ctrl, done_guard.release(), req_pb, resp_pb, arena != nullptr);
+
+  if (is_batch) {
+    embedding_service_impl_->process_batch_async(std::move(call),
+                                                 std::move(inputs));
+  } else {
+    embedding_service_impl_->process_async(std::move(call));
+  }
+}
 }  // namespace
 
 void APIService::EmbeddingsHttp(::google::protobuf::RpcController* controller,
@@ -534,7 +625,7 @@ void APIService::EmbeddingsHttp(::google::protobuf::RpcController* controller,
                                 proto::HttpResponse* response,
                                 ::google::protobuf::Closure* done) {
   if (embedding_service_impl_) {
-    handle_embedding_request<EmbeddingCall, EmbeddingServiceImpl>(
+    handle_text_embedding_request(
         embedding_service_impl_, controller, request, response, done);
   } else if (mm_embedding_service_impl_) {
     handle_embedding_request<MMEmbeddingCall, MMEmbeddingServiceImpl>(
