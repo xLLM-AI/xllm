@@ -19,6 +19,8 @@ limitations under the License.
 #include <torch_npu/csrc/libs/init_npu.h>
 #include <torch_npu/torch_npu.h>
 
+#include <chrono>
+#include <cstdlib>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -39,6 +41,19 @@ limitations under the License.
 
 namespace xllm::kernel::npu {
 namespace {
+
+constexpr int64_t kRecConstrainedTopKFusedMaxK = 512;
+
+int64_t monotonic_time_us() {
+  const auto now = std::chrono::steady_clock::now().time_since_epoch();
+  return std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+}
+
+bool env_flag_enabled(const char* name) {
+  const char* value = std::getenv(name);
+  return value != nullptr && value[0] != '\0' &&
+         !(value[0] == '0' && value[1] == '\0');
+}
 
 bool tensors_on_same_device(const torch::Tensor& first,
                             const torch::Tensor& second) {
@@ -72,8 +87,11 @@ std::optional<std::string> fused_inputs_unsupported_reason(
   if (!logits.defined() || logits.dim() != 2 || logits.numel() == 0) {
     return "logits must be defined non-empty 2-D";
   }
-  if (current_step < 0 || current_step > 2 || top_k <= 0 || top_k > 1024) {
+  if (current_step < 0 || current_step > 2 || top_k <= 0) {
     return "current_step/top_k out of supported range";
+  }
+  if (top_k > kRecConstrainedTopKFusedMaxK) {
+    return "top_k exceeds fused kernel max";
   }
   const torch::ScalarType logits_dtype = logits.scalar_type();
   if (logits_dtype != torch::kFloat16 && logits_dtype != torch::kBFloat16 &&
@@ -177,6 +195,21 @@ rec_constrained_topk_fused(const torch::Tensor& logits,
     return std::nullopt;
   }
 
+  static const bool host_trace =
+      env_flag_enabled("XLLM_DEBUG_ONEREC_CONSTRAINED_TOPK_HOST_TRACE");
+  static const bool host_trace_sync =
+      host_trace &&
+      env_flag_enabled("XLLM_DEBUG_ONEREC_CONSTRAINED_TOPK_HOST_TRACE_SYNC");
+  const int64_t host_start_us = host_trace ? monotonic_time_us() : 0;
+  int64_t stage_start_us = host_start_us;
+  int64_t contiguous_us = 0;
+  int64_t create_acltensor_us = 0;
+  int64_t workspace_query_us = 0;
+  int64_t workspace_alloc_us = 0;
+  int64_t launch_us = 0;
+  int64_t sync_us = 0;
+  int64_t cleanup_us = 0;
+
   torch::Tensor logits_contiguous = logits.contiguous();
   torch::Tensor sequence_group_contiguous =
       sequence_group.defined() ? sequence_group.contiguous()
@@ -204,6 +237,11 @@ rec_constrained_topk_fused(const torch::Tensor& logits,
   torch::Tensor out_logprobs = torch::empty(
       {logits.size(0), top_k},
       torch::TensorOptions().dtype(torch::kFloat32).device(logits.device()));
+  if (host_trace) {
+    const int64_t stage_end_us = monotonic_time_us();
+    contiguous_us = stage_end_us - stage_start_us;
+    stage_start_us = stage_end_us;
+  }
 
   aclTensor* logits_ids = nullptr;
   aclTensor* sequence_group_ids = nullptr;
@@ -229,6 +267,11 @@ rec_constrained_topk_fused(const torch::Tensor& logits,
   create_acltensor(&temperatures_ids, fused_temperatures);
   create_acltensor(&out_tokens_ids, out_tokens);
   create_acltensor(&out_logprobs_ids, out_logprobs);
+  if (host_trace) {
+    const int64_t stage_end_us = monotonic_time_us();
+    create_acltensor_us = stage_end_us - stage_start_us;
+    stage_start_us = stage_end_us;
+  }
 
   uint64_t workspace_size = 0;
   aclOpExecutor* executor = nullptr;
@@ -250,6 +293,11 @@ rec_constrained_topk_fused(const torch::Tensor& logits,
                                               out_logprobs_ids,
                                               &workspace_size,
                                               &executor);
+  if (host_trace) {
+    const int64_t stage_end_us = monotonic_time_us();
+    workspace_query_us = stage_end_us - stage_start_us;
+    stage_start_us = stage_end_us;
+  }
   if (workspace_status != 0) {
     LOG(WARNING) << "rec_constrained_topk_fused: failed to get workspace, "
                  << "status=" << workspace_status
@@ -289,14 +337,34 @@ rec_constrained_topk_fused(const torch::Tensor& logits,
       return std::nullopt;
     }
   }
+  if (host_trace) {
+    const int64_t stage_end_us = monotonic_time_us();
+    workspace_alloc_us = stage_end_us - stage_start_us;
+    stage_start_us = stage_end_us;
+  }
 
   const int32_t device_id = logits.device().index();
   const aclrtStream stream = c10_npu::getCurrentNPUStream(device_id).stream();
   const aclnnStatus run_status =
       aclnnRecConstrainedTopK(workspace_addr, workspace_size, executor, stream);
+  if (host_trace) {
+    const int64_t stage_end_us = monotonic_time_us();
+    launch_us = stage_end_us - stage_start_us;
+    stage_start_us = stage_end_us;
+  }
   if (run_status != 0) {
     LOG(WARNING) << "rec_constrained_topk_fused: failed to execute, status="
                  << run_status << ", detail=" << aclGetRecentErrMsg();
+  }
+  if (host_trace_sync && run_status == 0) {
+    const int64_t sync_start_us = monotonic_time_us();
+    const aclError sync_status = aclrtSynchronizeStream(stream);
+    sync_us = monotonic_time_us() - sync_start_us;
+    if (sync_status != ACL_ERROR_NONE) {
+      LOG(WARNING) << "rec_constrained_topk_fused: debug stream sync failed, "
+                   << "status=" << sync_status;
+    }
+    stage_start_us = monotonic_time_us();
   }
 
   if (workspace_size > 0) {
@@ -317,6 +385,24 @@ rec_constrained_topk_fused(const torch::Tensor& logits,
   destroy_tensor_if_needed(temperatures_ids);
   destroy_tensor_if_needed(out_tokens_ids);
   destroy_tensor_if_needed(out_logprobs_ids);
+  if (host_trace) {
+    const int64_t host_end_us = monotonic_time_us();
+    cleanup_us = host_end_us - stage_start_us;
+    LOG_FIRST_N(INFO, 64)
+        << "rec_constrained_topk_fused host_trace: current_step="
+        << current_step << ", top_k=" << top_k << ", rows=" << logits.size(0)
+        << ", vocab=" << logits.size(1)
+        << ", temperature_count=" << fused_temperatures.numel()
+        << ", workspace_size=" << workspace_size
+        << ", sync_enabled=" << (host_trace_sync ? 1 : 0)
+        << ", contiguous_us=" << contiguous_us
+        << ", create_acltensor_us=" << create_acltensor_us
+        << ", workspace_query_us=" << workspace_query_us
+        << ", workspace_alloc_us=" << workspace_alloc_us
+        << ", launch_us=" << launch_us << ", sync_us=" << sync_us
+        << ", cleanup_us=" << cleanup_us
+        << ", total_host_us=" << host_end_us - host_start_us;
+  }
   if (run_status != 0) {
     return std::nullopt;
   }

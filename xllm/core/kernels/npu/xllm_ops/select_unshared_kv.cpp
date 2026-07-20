@@ -19,7 +19,12 @@ limitations under the License.
 #include <torch_npu/csrc/libs/init_npu.h>
 #include <torch_npu/torch_npu.h>
 
+#include <cstdlib>
+#include <cstring>
+#include <map>
 #include <nlohmann/json.hpp>
+#include <utility>
+#include <vector>
 #ifdef TORCH_HIGHER_THAN_PTA6
 #include <torch_npu/csrc/framework/OpCommand.h>
 #else
@@ -34,6 +39,65 @@ limitations under the License.
 #include "xllm_ops_api.h"
 
 namespace xllm::kernel::npu {
+
+namespace {
+
+constexpr const char* kAsyncCacheSelectEnv =
+    "XLLM_ONEREC_XATTN_ASYNC_CACHE_SELECT";
+
+struct SelectUnsharedKvWorkspace {
+  void* addr = nullptr;
+  uint64_t size = 0;
+  std::vector<void*> retired_addrs;
+};
+
+using SelectUnsharedKvWorkspaceKey = std::pair<int32_t, uint64_t>;
+
+thread_local std::map<SelectUnsharedKvWorkspaceKey, SelectUnsharedKvWorkspace>
+    g_select_unshared_kv_workspaces;
+
+bool enable_async_cache_select() {
+  static const bool enabled = []() {
+    const char* env = std::getenv(kAsyncCacheSelectEnv);
+    return env != nullptr && std::strcmp(env, "1") == 0;
+  }();
+  return enabled;
+}
+
+SelectUnsharedKvWorkspaceKey make_workspace_key(int32_t device_id,
+                                                aclrtStream stream) {
+  return std::make_pair(
+      device_id, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(stream)));
+}
+
+void* get_persistent_select_workspace(uint64_t workspace_size,
+                                      int32_t device_id,
+                                      aclrtStream stream) {
+  if (workspace_size == 0) {
+    return nullptr;
+  }
+
+  auto& workspace =
+      g_select_unshared_kv_workspaces[make_workspace_key(device_id, stream)];
+  if (workspace.addr != nullptr && workspace.size >= workspace_size) {
+    return workspace.addr;
+  }
+
+  void* workspace_addr = nullptr;
+  CHECK_ACL_SUCCESS(
+      aclrtMalloc(&workspace_addr, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST),
+      "select_unshared_kv: failed to allocate persistent workspace");
+  if (workspace.addr != nullptr) {
+    // Async mode removes the post-kernel host sync, so the old workspace may
+    // still be used by earlier same-stream work until the worker's later sync.
+    workspace.retired_addrs.push_back(workspace.addr);
+  }
+  workspace.addr = workspace_addr;
+  workspace.size = workspace_size;
+  return workspace.addr;
+}
+
+}  // namespace
 
 // Reorder per-layer unshared KV caches after beam selection in REC
 // multi-round decoding.
@@ -93,6 +157,7 @@ void select_unshared_kv(const torch::Tensor& beam_index,
   aclrtStream stream = c10_npu::getCurrentNPUStream(device_id).stream();
   uint64_t workspace_size = 0;
   aclOpExecutor* executor = nullptr;
+  const bool async_cache_select = enable_async_cache_select();
 
   CHECK_ACL_SUCCESS(
       aclnnSelectUnsharedKVGetWorkspaceSize(beam_index_ids,
@@ -110,21 +175,29 @@ void select_unshared_kv(const torch::Tensor& beam_index,
       "select_unshared_kv: failed to get workspace size");
   void* workspace_addr = nullptr;
   if (workspace_size > 0) {
-    CHECK_ACL_SUCCESS(
-        aclrtMalloc(&workspace_addr, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST),
-        "select_unshared_kv: failed to allocate workspace");
+    if (async_cache_select) {
+      workspace_addr =
+          get_persistent_select_workspace(workspace_size, device_id, stream);
+    } else {
+      CHECK_ACL_SUCCESS(
+          aclrtMalloc(
+              &workspace_addr, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST),
+          "select_unshared_kv: failed to allocate workspace");
+    }
   }
   CHECK_ACL_SUCCESS(
       aclnnSelectUnsharedKV(workspace_addr, workspace_size, executor, stream),
       "select_unshared_kv: failed to reorder caches");
-  CHECK_ACL_SUCCESS(aclrtSynchronizeStream(stream),
-                    "select_unshared_kv: failed to synchronize stream");
+  if (!async_cache_select) {
+    CHECK_ACL_SUCCESS(aclrtSynchronizeStream(stream),
+                      "select_unshared_kv: failed to synchronize stream");
+  }
   aclDestroyTensor(beam_index_ids);
   aclDestroyTensor(group_offset_ids);
   aclDestroyTensor(block_table_ids);
   aclDestroyTensorList(x_key_block_list_ids);
   aclDestroyTensorList(x_value_block_list_ids);
-  if (workspace_size > 0) {
+  if (!async_cache_select && workspace_size > 0) {
     CHECK_ACL_SUCCESS(aclrtFree(workspace_addr),
                       "select_unshared_kv: failed to free workspace");
   }
