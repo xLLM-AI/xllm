@@ -1045,8 +1045,6 @@ bool RecWorkerImpl::OneRecXAttentionWorkPipeline::can_use_device_constraints(
          sampling_params.selected_token_idxes.numel() ==
              sampling_params.sample_idxes.numel() &&
          sampling_params.do_sample.defined() &&
-         sampling_params.all_greedy_sample &&
-         !sampling_params.all_random_sample &&
          sampling_params.use_beam_search && sampling_params.logprobs &&
          sampling_params.max_top_logprobs > 0 &&
          sampling_params.max_top_logprobs == beam_width &&
