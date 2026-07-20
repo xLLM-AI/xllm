@@ -14,6 +14,7 @@ cc_library(
     active.cpp
     attention.cpp
     fused_layernorm.cpp
+    npu_adalayernorm.cpp
     matmul.cpp
     matmul_reduce_scatter.cpp
     npu_causal_conv1d.cpp

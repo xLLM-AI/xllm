@@ -389,6 +389,20 @@ void fused_layernorm(FusedLayerNormParams& params) {
 #endif
 }
 
+torch::Tensor fused_adalayer_norm(AdaLayerNormParams& params) {
+#if defined(USE_NPU)
+  params.output = npu::fused_adalayer_norm(params.input,
+                                           params.scale,
+                                           params.shift,
+                                           params.weight,
+                                           params.bias,
+                                           params.eps);
+#else
+  NOT_IMPLEMENTED();
+#endif
+  return params.output;
+}
+
 std::tuple<torch::Tensor, torch::Tensor> rms_norm_dynamic_quant(
     RmsNormDynamicQuantParams& params) {
 #if defined(USE_NPU)

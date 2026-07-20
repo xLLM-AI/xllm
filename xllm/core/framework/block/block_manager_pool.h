@@ -30,10 +30,6 @@ class BlockManagerPool : public KVCacheManager {
     PROPERTY(uint32_t, num_blocks) = 0;
     PROPERTY(uint32_t, host_num_blocks) = 0;
     PROPERTY(int32_t, block_size) = 0;
-    // Sizes the SINGLE-resource pool (max concurrent live sequences); consumed
-    // by the num_single_blocks derivation. The engine/worker wiring PR migrates
-    // this to the max_seqs_per_batch-based sizing (and adapts the tests).
-    PROPERTY(uint32_t, max_concurrent_requests) = 0;
     PROPERTY(bool, enable_linear_state) = false;
     // Total physical linear-state slots [0, N) for the unified slot pool
     // (= num_linear_state_blocks). Only used when enable_linear_state is true.

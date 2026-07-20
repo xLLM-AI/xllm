@@ -27,12 +27,14 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/framework/config/dit_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/state_dict/utils.h"
+#include "core/layers/common/ada_layer_norm.h"
 #include "core/layers/common/add_matmul.h"
 #include "core/layers/common/rms_norm.h"
 #include "models/dit/utils/dit_parallel_linear.h"
@@ -1268,10 +1270,13 @@ class WanTransformerBlockImpl : public torch::nn::Module {
     cross_attn_norm_ = model_args.cross_attn_norm();
     qk_norm_ = model_args.qk_norm();
 
-    norm1_ =
-        register_module("norm1", FP32LayerNorm(context, dim_, eps_, false));
+    ada_norm1_ = register_module(
+        "ada_norm1",
+        layer::AdaLayerNorm(
+            dim_, eps_, /*elementwise_affine=*/false, options_));
     attn1_ = register_module(
         "attn1", WanAttention(context, parallel_args, -1, rainfusion_config));
+
     attn2_ = register_module(
         "attn2",
         WanAttention(
@@ -1291,8 +1296,10 @@ class WanTransformerBlockImpl : public torch::nn::Module {
                                          false,
                                          ffn_dim_,
                                          true));
-    norm3_ =
-        register_module("norm3", FP32LayerNorm(context, dim_, eps_, false));
+    ada_norm3_ = register_module(
+        "ada_norm3",
+        layer::AdaLayerNorm(
+            dim_, eps_, /*elementwise_affine=*/false, options_));
     scale_shift_table_ =
         register_parameter("scale_shift_table",
                            torch::randn({1, 6, dim_}, options_) /
@@ -1332,11 +1339,15 @@ class WanTransformerBlockImpl : public torch::nn::Module {
       c_gate_msa = splits[5];
     }
 
-    torch::Tensor norm1_result = norm1_->forward(hidden_states);
+    auto scale_msa_2d =
+        scale_msa.dim() == 3 ? scale_msa.select(1, 0) : scale_msa;
+    auto shift_msa_2d =
+        shift_msa.dim() == 3 ? shift_msa.select(1, 0) : shift_msa;
     torch::Tensor norm_hidden_states =
-        (norm1_result.to(hidden_states.dtype()) * (1 + scale_msa) + shift_msa);
+        ada_norm1_->forward(hidden_states, scale_msa_2d, shift_msa_2d);
     torch::Tensor attn_output = attn1_->forward(
         norm_hidden_states, norm_hidden_states, rotary_emb, rf_state);
+
     hidden_states = hidden_states + attn_output * gate_msa;
 
     if (cross_attn_norm_) {
@@ -1348,8 +1359,12 @@ class WanTransformerBlockImpl : public torch::nn::Module {
     attn_output = attn2_->forward(
         norm_hidden_states, encoder_hidden_states, std::nullopt, rf_state);
     hidden_states = hidden_states + attn_output;
-    torch::Tensor norm2_result = norm3_->forward(hidden_states);
-    norm_hidden_states = (norm2_result * (1 + c_scale_msa) + c_shift_msa);
+    auto c_scale_msa_2d =
+        c_scale_msa.dim() == 3 ? c_scale_msa.select(1, 0) : c_scale_msa;
+    auto c_shift_msa_2d =
+        c_shift_msa.dim() == 3 ? c_shift_msa.select(1, 0) : c_shift_msa;
+    norm_hidden_states =
+        ada_norm3_->forward(hidden_states, c_scale_msa_2d, c_shift_msa_2d);
     torch::Tensor ff_output = ff_->forward(norm_hidden_states);
     hidden_states = hidden_states + ff_output * c_gate_msa;
 
@@ -1359,7 +1374,7 @@ class WanTransformerBlockImpl : public torch::nn::Module {
   void load_state_dict(const StateDict& state_dict) {
     attn1_->load_state_dict(state_dict.get_dict_with_prefix("attn1."));
     attn2_->load_state_dict(state_dict.get_dict_with_prefix("attn2."));
-    if (cross_attn_norm_ && norm2_) {
+    if (cross_attn_norm_) {
       norm2_->load_state_dict(state_dict.get_dict_with_prefix("norm2."));
     }
     ff_->load_state_dict(state_dict.get_dict_with_prefix("ffn."));
@@ -1401,12 +1416,12 @@ class WanTransformerBlockImpl : public torch::nn::Module {
   int64_t block_idx_ = 0;
   std::string qk_norm_;
 
-  FP32LayerNorm norm1_{nullptr};
   WanAttention attn1_{nullptr};
   WanAttention attn2_{nullptr};
-  FP32LayerNorm norm2_{nullptr};
   WanFeedForward ff_{nullptr};
-  FP32LayerNorm norm3_{nullptr};
+  layer::AdaLayerNorm ada_norm1_{nullptr};  // self-attn pre-norm (fused)
+  FP32LayerNorm norm2_{nullptr};  // cross-attn pre-norm (bf16 LayerNorm)
+  layer::AdaLayerNorm ada_norm3_{nullptr};  // FFN pre-norm (fused)
   torch::Tensor scale_shift_table_;
   bool scale_shift_table_loaded_{false};
 
@@ -1470,8 +1485,10 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
       transformer_layers_.push_back(block);
     }
 
-    norm_out_ = register_module(
-        "norm_out", FP32LayerNorm(context, inner_dim_, 1e-6, false));
+    ada_norm_out_ = register_module(
+        "ada_norm_out",
+        layer::AdaLayerNorm(
+            inner_dim_, 1e-6, /*elementwise_affine=*/false, options_));
     int64_t patch_prod = patch_size_[0] * patch_size_[1] * patch_size_[2];
     proj_out_ = register_module(
         "proj_out",
@@ -1605,12 +1622,15 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     shift = shift.to(hidden_states.device());
     scale = scale.to(hidden_states.device());
 
-    auto norm_result = norm_out_->forward(hidden_states, /*keep_fp32*/ true);
-    auto one_plus_scale =
-        (1 + scale.to(hidden_states.dtype())).to(torch::kFloat32);
-    auto shift_fp32 = shift.to(torch::kFloat32);
-    auto norm_out = norm_result * one_plus_scale + shift_fp32;
-    hidden_states = norm_out.to(hidden_states.dtype());
+    auto hidden_states_dtype = hidden_states.dtype();
+
+    // Drop the redundant sequence dim so the fused kernel uses the fast 2D
+    // [B,H] path instead of the token-wise fold.
+    auto scale_2d = scale.dim() == 3 ? scale.select(1, 0) : scale;
+    auto shift_2d = shift.dim() == 3 ? shift.select(1, 0) : shift;
+    hidden_states = ada_norm_out_->forward(hidden_states,
+                                           scale_2d.to(hidden_states_dtype),
+                                           shift_2d.to(hidden_states_dtype));
 
     if (::xllm::ParallelConfig::get_instance().sp_size() > 1 &&
         seq_len != pad_seq_len) {
@@ -1699,7 +1719,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
       rope_->set_freqs_cos(freqs_cos_fp32.to(device));
       rope_->set_freqs_sin(freqs_sin_fp32.to(device));
       condition_embedder_->to(device);
-      norm_out_->to(device);
+      ada_norm_out_->to(device);
       proj_out_->to(device);
       scale_shift_table_.set_data(scale_shift_table_.to(device));
 
@@ -1743,7 +1763,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
   WanRotaryPosEmbed rope_{nullptr};
   torch::nn::ModuleList blocks_;
   std::vector<WanTransformerBlock> transformer_layers_;
-  FP32LayerNorm norm_out_{nullptr};
+  layer::AdaLayerNorm ada_norm_out_{nullptr};  // final norm (fused)
   layer::AddMatmul proj_out_{nullptr};
   torch::Tensor scale_shift_table_;
   bool scale_shift_table_loaded_{false};

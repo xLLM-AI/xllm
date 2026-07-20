@@ -23,7 +23,6 @@ limitations under the License.
 #include "composite_block_manager.h"
 #include "concurrent_block_manager_impl.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "core/framework/config/service_config.h"
 #include "framework/model/model_input_params.h"
 #include "framework/xtensor/page_allocator.h"
 #include "framework/xtensor/phy_page_pool.h"
@@ -37,11 +36,7 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
   CHECK(dp_size > 0) << "dp_size must be greater than 0";
   block_managers_.reserve(dp_size);
   const uint32_t default_max_single_block_sequences =
-      options_.max_concurrent_requests() > 0
-          ? options_.max_concurrent_requests()
-          : static_cast<uint32_t>(std::max(
-                ::xllm::ServiceConfig::get_instance().max_concurrent_requests(),
-                0));
+      options_.max_seqs_per_batch();
 
   BlockManager::Options block_options;
   block_options.num_blocks(options_.num_blocks())
