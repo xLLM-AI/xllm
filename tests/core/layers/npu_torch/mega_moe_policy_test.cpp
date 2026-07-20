@@ -37,7 +37,7 @@ MegaMoeCapability supported_capability() {
   capability.topk = 8;
   capability.ep_size = 16;
   capability.tp_size = 1;
-  capability.dp_size = 1;
+  capability.dp_size = 16;
   capability.workspace_symbol_ready = true;
   capability.execute_symbol_ready = true;
   capability.comm_context_ready = true;
@@ -72,6 +72,33 @@ TEST(MegaMoePolicyTest, OnAndAutoSelectExactWhitelist) {
   for (MegaMoeMode mode : {MegaMoeMode::ON, MegaMoeMode::AUTO}) {
     const MegaMoeDecision decision =
         decide_mega_moe(mode, supported_capability());
+    EXPECT_TRUE(decision.use_mega_moe);
+    EXPECT_FALSE(decision.fatal);
+    EXPECT_EQ(decision.reason, MegaMoeRejectionReason::NONE);
+  }
+}
+
+TEST(MegaMoePolicyTest, OnSupportsEp16MoeTp1WithAttentionDp16) {
+  MegaMoeCapability capability = supported_capability();
+  capability.ep_size = 16;
+  capability.tp_size = 1;
+  capability.dp_size = 16;
+
+  const MegaMoeDecision decision =
+      decide_mega_moe(MegaMoeMode::ON, capability);
+  EXPECT_TRUE(decision.use_mega_moe);
+  EXPECT_FALSE(decision.fatal);
+  EXPECT_EQ(decision.reason, MegaMoeRejectionReason::NONE);
+}
+
+TEST(MegaMoePolicyTest, AttentionDpDoesNotAffectOperatorEligibility) {
+  for (int64_t dp_size : {1, 2, 8, 16, 32}) {
+    SCOPED_TRACE(dp_size);
+    MegaMoeCapability capability = supported_capability();
+    capability.dp_size = dp_size;
+
+    const MegaMoeDecision decision =
+        decide_mega_moe(MegaMoeMode::ON, capability);
     EXPECT_TRUE(decision.use_mega_moe);
     EXPECT_FALSE(decision.fatal);
     EXPECT_EQ(decision.reason, MegaMoeRejectionReason::NONE);
@@ -182,9 +209,6 @@ TEST(MegaMoePolicyTest, RejectsUnsupportedParallelAndRuntimeModes) {
   capability = supported_capability();
   capability.tp_size = 2;
   expect_rejected(capability, MegaMoeRejectionReason::UNSUPPORTED_TP);
-  capability = supported_capability();
-  capability.dp_size = 2;
-  expect_rejected(capability, MegaMoeRejectionReason::UNSUPPORTED_DP);
   capability = supported_capability();
   capability.graph_enabled = true;
   expect_rejected(capability, MegaMoeRejectionReason::GRAPH_ENABLED);

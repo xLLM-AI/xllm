@@ -60,9 +60,6 @@ MegaMoeRejectionReason find_rejection_reason(
   if (capability.tp_size != 1) {
     return MegaMoeRejectionReason::UNSUPPORTED_TP;
   }
-  if (capability.dp_size != 1) {
-    return MegaMoeRejectionReason::UNSUPPORTED_DP;
-  }
   if (capability.graph_enabled) {
     return MegaMoeRejectionReason::GRAPH_ENABLED;
   }
