@@ -231,7 +231,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
           image.options());
       video_condition = torch::cat({image, zeros, last_img}, 2);
     }
-    video_condition = video_condition.to(options_.device()).to(torch::kFloat32);
+    video_condition = video_condition.to(options_.device(), options_.dtype());
 
     torch::Tensor latents_mean =
         torch::tensor(latents_mean_, torch::dtype(torch::kFloat32))
@@ -624,7 +624,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
     torch::Tensor latents_std = 1.0 / latents_std_raw;
     prepared_latents = prepared_latents / latents_std;
     prepared_latents = prepared_latents + latents_mean;
-    video = vae_->decode(prepared_latents.to(torch::kFloat32)).sample;
+    video = vae_->decode(prepared_latents.to(options_.dtype())).sample;
     video = video_processor_->postprocess_video(video);
     return video;
   }
