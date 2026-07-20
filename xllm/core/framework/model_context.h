@@ -42,9 +42,8 @@ struct OptimizationConfig {
   bool enable_fused_indexer_qk = false;
 
   // Broadcast speculative-decoding sampling results across the TP consensus
-  // group so every rank adopts rank 0's accepted/draft tokens. Guards against
-  // per-rank RNG divergence crashing the draft decoder's TP all-reduce under
-  // enable_schedule_overlap.
+  // group so every rank adopts rank 0's accepted/draft tokens and avoids
+  // per-rank RNG divergence in the draft decoder's TP all-reduce.
   bool enable_spec_token_broadcast = false;
 
   // we can detailize this part later. for example:

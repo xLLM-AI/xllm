@@ -34,9 +34,10 @@ limitations under the License.
 #include "core/distributed_runtime/master.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "core/framework/config/service_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "framework/kv_cache/kv_cache_estimation.h"
 #include "framework/kv_cache/kv_cache_shape.h"
+#include "framework/kv_cache/kv_cache_utils.h"
 #include "framework/model/model_args.h"
 #include "framework/model_loader.h"
 #include "framework/parallel_state/parallel_state.h"
@@ -266,8 +267,8 @@ KVCacheCapacity VLMEngine::estimate_kv_cache_capacity() {
   estimate_options.n_local_linear_v_heads = n_local_linear_v_heads_;
   estimate_options.max_seqs_per_batch =
       static_cast<int64_t>(options_.max_seqs_per_batch());
-  estimate_options.max_linear_state_cache_slots = static_cast<int64_t>(
-      ::xllm::ServiceConfig::get_instance().max_concurrent_requests());
+  estimate_options.max_linear_state_cache_slots =
+      options_.max_linear_state_cache_slots();
   estimate_options.is_draft_engine = options_.is_draft_engine();
   estimate_options.enable_prefix_cache =
       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
@@ -297,12 +298,33 @@ bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
             << ", scale_slot_size: " << kv_cache_cap.scale_slot_size()
             << ", linear_slot_size: " << kv_cache_cap.linear_slot_size()
             << ", linear_blocks: " << kv_cache_cap.num_linear_state_blocks()
+            << ", linear_state_slots: "
+            << (has_linear_attention_layers(args_)
+                    ? kv_cache_cap.num_linear_state_blocks()
+                    : 0)
+            << ", max_linear_state_cache_slots: "
+            << options_.max_linear_state_cache_slots()
             << ", reserved_linear_bytes: "
             << readable_size(kv_cache_cap.linear_cache_size_in_bytes())
             << ", n_layers: " << kv_cache_cap.n_layers()
             << ", kv_cache_dtype: " << options_.kv_cache_dtype();
 
   const int32_t block_size = static_cast<int32_t>(kv_cache_cap.block_size());
+  const bool enable_linear_attention = has_linear_attention_layers(args_);
+
+  if (options_.enable_prefix_cache() && enable_linear_attention) {
+    const auto& scheduler_config = ::xllm::SchedulerConfig::get_instance();
+    CHECK(scheduler_config.enable_chunked_prefill())
+        << "Linear-attention prefix cache requires block-aligned chunked "
+           "prefill to save matching linear states. Please set "
+           "--enable_chunked_prefill=true in your config.";
+    CHECK(scheduler_config.max_tokens_per_chunk_for_prefill() % block_size == 0)
+        << "linear-attention prefix cache saves linear-state checkpoints at "
+           "chunk-end boundaries, so max_tokens_per_chunk_for_prefill ("
+        << scheduler_config.max_tokens_per_chunk_for_prefill()
+        << ") must be a multiple of block_size (" << block_size << ").";
+  }
+
   const KVCacheShape kv_cache_shape(kv_cache_cap, args_, dp_local_tp_size_);
 
   kv_cache_shape.print_shapes();
@@ -312,14 +334,23 @@ bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
   options.num_blocks(kv_cache_cap.n_blocks())
       .host_num_blocks(0)  // no host cache for vlm engine currently.
       .block_size(block_size)
-      .enable_linear_state(has_linear_attention_layers(args_))
-      .linear_state_num_slots(
-          static_cast<int32_t>(kv_cache_cap.num_linear_state_blocks()))
+      .enable_linear_state(enable_linear_attention)
       .enable_prefix_cache(options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
-      .hasher_type(BlockHasherType::MM)
-      .max_concurrent_requests(
-          ::xllm::ServiceConfig::get_instance().max_concurrent_requests());
+      .hasher_type(BlockHasherType::MM);
+  if (enable_linear_attention) {
+    // The unified linear-state slot pool spans all physical slots [0, N);
+    // id 0 is reserved as padding and ids [1, N) serve live and checkpoint
+    // rows interchangeably under reference counting.
+    options.linear_state_num_slots(
+        static_cast<int32_t>(kv_cache_cap.num_linear_state_blocks()));
+    // Checkpoint stride (one prefill chunk in tokens), captured once so the
+    // LINEAR leaf's prefix cache probes its own hash domain without reading the
+    // scheduler-config singleton per match. The CHECK above enforces it is a
+    // positive multiple of block_size when prefix cache is on.
+    options.linear_chunk_stride(::xllm::SchedulerConfig::get_instance()
+                                    .max_tokens_per_chunk_for_prefill());
+  }
   kv_cache_manager_ = std::make_unique<BlockManagerPool>(options, dp_size_);
 
   // init kv cache for each worker in parallel
@@ -490,6 +521,12 @@ std::vector<ForwardInput> VLMEngine::prepare_inputs(std::vector<Batch>& batch) {
     } else {
       batched_inputs.emplace_back(std::move(
           batch[dp_rank].prepare_forward_input(args_, threadpool_.get())));
+      if (!batched_inputs[dp_rank]
+               .input_params.linear_state_cache_ops.empty()) {
+        LOG(WARNING) << "VLM linear-state prefix cache is not supported yet; "
+                     << "dropping unresolved linear-state checkpoint ops.";
+        batched_inputs[dp_rank].input_params.linear_state_cache_ops.clear();
+      }
     }
     dp_global_token_nums[dp_rank] =
         static_cast<int32_t>(batched_inputs[dp_rank].host_token_ids().numel());
