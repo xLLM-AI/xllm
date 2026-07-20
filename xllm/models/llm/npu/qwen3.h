@@ -264,15 +264,27 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
         }
       }
     }
+    // Capture the pre-norm output of the last decoder layer before the final
+    // RMSNorm. Diffusers' JoyImage-Edit-Plus text encoding consumes these
+    // pre-norm hidden states; the embedding service enables this flag so they
+    // are surfaced in ModelOutput.residual. `h` here already includes the
+    // residual stream (the last layer folds it in via intra-layer addnorm), so
+    // it equals the pre-norm hidden states regardless of interlayer addnorm.
+    torch::Tensor prenorm_hidden_states;
+    if (::xllm::KernelConfig::get_instance()
+            .enable_return_prenorm_hidden_states()) {
+      prenorm_hidden_states = h.clone();
+    }
     auto hidden_states = norm_(h, 0);
     if (capture_aux_hidden_states_) {
       CHECK_EQ(capture_idx, static_cast<int64_t>(layers_to_capture_set_.size()))
           << "Captured aux hidden layer count mismatch.";
       torch::Tensor aux_hidden_states =
           aux_output_buffer_.slice(0, 0, num_tokens);
-      return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);
+      return ModelOutput(
+          hidden_states, prenorm_hidden_states, aux_hidden_states);
     }
-    return ModelOutput(hidden_states);
+    return ModelOutput(hidden_states, prenorm_hidden_states);
   }
 
  protected:

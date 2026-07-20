@@ -46,6 +46,12 @@ DEFINE_bool(enable_split_rmsnorm_rope,
             false,
             "enable fused split rmsnorm rope ops.");
 
+DEFINE_bool(enable_return_prenorm_hidden_states,
+            false,
+            "return the pre-norm output of the last decoder layer in "
+            "ModelOutput.residual (used by the Qwen3-VL embedding service for "
+            "JoyImage-Edit-Plus, which consumes pre-norm hidden states).");
+
 DEFINE_bool(enable_aclnn_matmul,
             false,
             "enable ACLNN matmul backend for supported NPU ATB layers.");
@@ -85,6 +91,7 @@ void KernelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_split_rmsnorm_rope);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_aclnn_matmul);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_aclnn_swiglu);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_return_prenorm_hidden_states);
 #endif
 }
 
@@ -98,6 +105,7 @@ void KernelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_split_rmsnorm_rope);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_aclnn_matmul);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_aclnn_swiglu);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_return_prenorm_hidden_states);
 #endif
 }
 
@@ -121,6 +129,8 @@ void KernelConfig::append_config_json(
       config_json, default_config, enable_aclnn_matmul);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_aclnn_swiglu);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_return_prenorm_hidden_states);
 #endif
 }
 

@@ -396,6 +396,8 @@ DECLARE_bool(enable_split_rmsnorm_rope);
 DECLARE_bool(enable_aclnn_matmul);
 
 DECLARE_bool(enable_aclnn_swiglu);
+
+DECLARE_bool(enable_return_prenorm_hidden_states);
 #endif
 
 // --- chat template config ---

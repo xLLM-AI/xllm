@@ -789,6 +789,10 @@ class Qwen3_VLForConditionalGenerationImpl : public torch::nn::Module {
 
   torch::Tensor pooler(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) {
+    if (::xllm::ModelConfig::get_instance()
+            .enable_return_mm_full_embeddings()) {
+      return hidden_states;
+    }
     return language_model_->pooler(hidden_states, seleted_idxes);
   }
 
