@@ -521,12 +521,6 @@ std::vector<ForwardInput> VLMEngine::prepare_inputs(std::vector<Batch>& batch) {
     } else {
       batched_inputs.emplace_back(std::move(
           batch[dp_rank].prepare_forward_input(args_, threadpool_.get())));
-      if (!batched_inputs[dp_rank]
-               .input_params.linear_state_cache_ops.empty()) {
-        LOG(WARNING) << "VLM linear-state prefix cache is not supported yet; "
-                     << "dropping unresolved linear-state checkpoint ops.";
-        batched_inputs[dp_rank].input_params.linear_state_cache_ops.clear();
-      }
     }
     dp_global_token_nums[dp_rank] =
         static_cast<int32_t>(batched_inputs[dp_rank].host_token_ids().numel());
