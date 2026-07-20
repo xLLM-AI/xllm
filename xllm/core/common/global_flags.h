@@ -376,6 +376,7 @@ DECLARE_string(dit_sparse_attention_version);
 DECLARE_int64(dit_sparse_attention_mask_refresh_steps);
 
 DECLARE_bool(dit_laser_attention_enabled);
+DECLARE_bool(dit_distill_enable);
 
 DECLARE_bool(use_audio_in_video);
 

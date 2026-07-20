@@ -28,13 +28,16 @@ limitations under the License.
 
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/state_dict/state_dict.h"
+#include "models/dit/schedulers/scheduler.h"
 #include "models/model_registry.h"
 
 namespace xllm {
-class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
+class FlowMatchEulerDiscreteSchedulerImpl : public xllm::dit::Scheduler {
  public:
-  explicit FlowMatchEulerDiscreteSchedulerImpl(const ModelContext& context)
-      : args_(context.get_model_args()) {
+  explicit FlowMatchEulerDiscreteSchedulerImpl(const ModelContext& context,
+                                               bool distill_raw_sigmas = false)
+      : args_(context.get_model_args()),
+        distill_raw_sigmas_(distill_raw_sigmas) {
     num_train_timesteps_ = args_.num_train_timesteps();
     shift_ = args_.shift();
     use_dynamic_shifting_ = args_.use_dynamic_shifting();
@@ -127,11 +130,12 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
   }
 
   void set_timesteps(
-      int num_inference_steps,
+      int64_t num_inference_steps,
       const torch::Device& device = torch::kCPU,
       const std::optional<std::vector<float>>& sigmas = std::nullopt,
       const std::optional<float>& mu = std::nullopt,
-      const std::optional<std::vector<float>>& timesteps = std::nullopt) {
+      const std::optional<std::vector<float>>& timesteps =
+          std::nullopt) override {
     if (use_dynamic_shifting_ && !mu.has_value()) {
       LOG(FATAL) << "mu must be provided when use_dynamic_shifting is true";
     }
@@ -140,9 +144,23 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
       LOG(FATAL) << "sigmas and timesteps must have the same length";
     }
 
-    int num_steps = num_inference_steps;
+    // Distill path (Wan): build explicit raw sigmas (N-i)/N when none supplied.
+    std::optional<std::vector<float>> distill_sigmas;
+    if (distill_raw_sigmas_ && !sigmas.has_value() && !timesteps.has_value()) {
+      int64_t n = num_inference_steps;
+      std::vector<float> raw(n);
+      for (int64_t i = 0; i < n; ++i) {
+        raw[i] = static_cast<float>(n - i) / static_cast<float>(n);
+      }
+      distill_sigmas = std::move(raw);
+    }
+    const std::optional<std::vector<float>>& eff_sigmas =
+        distill_sigmas.has_value() ? distill_sigmas : sigmas;
+
+    int num_steps = static_cast<int>(num_inference_steps);
     if (num_steps <= 0) {
-      num_steps = sigmas.has_value() ? sigmas->size() : timesteps->size();
+      num_steps =
+          eff_sigmas.has_value() ? eff_sigmas->size() : timesteps->size();
     }
 
     bool is_timesteps_provided = timesteps.has_value();
@@ -155,7 +173,7 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
                       .clone();
     }
 
-    if (!sigmas.has_value()) {
+    if (!eff_sigmas.has_value()) {
       if (!timesteps.has_value()) {
         std::vector<float> ts_vec(num_steps);
         float start = sigma_max_ * num_train_timesteps_;
@@ -169,7 +187,7 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
       }
       sigmas_tensor = ts_tensor / num_train_timesteps_;
     } else {
-      auto* sigmas_data = const_cast<float*>(sigmas->data());
+      auto* sigmas_data = const_cast<float*>(eff_sigmas->data());
       sigmas_tensor =
           torch::from_blob(sigmas_data, {num_steps}, torch::kFloat32).clone();
     }
@@ -214,17 +232,11 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
     begin_index_ = std::nullopt;
   }
 
-  torch::Tensor step(
-      const torch::Tensor& model_output,
-      const torch::Tensor& timestep,
-      const torch::Tensor& sample,
-      float s_churn = 0.0f,
-      float s_tmin = 0.0f,
-      float s_tmax = std::numeric_limits<float>::infinity(),
-      float s_noise = 1.0f,
-      const std::optional<torch::Generator>& generator = std::nullopt,
-      const std::optional<torch::Tensor>& per_token_timesteps = std::nullopt,
-      bool return_dict = true) {
+  torch::Tensor step(const torch::Tensor& model_output,
+                     const torch::Tensor& timestep,
+                     const torch::Tensor& sample,
+                     const std::optional<torch::Tensor>& per_token_timesteps =
+                         std::nullopt) override {
     if (!step_index_.has_value()) {
       init_step_index(timestep);
     }
@@ -277,7 +289,7 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
 
   std::optional<int> step_index() const { return step_index_; }
   std::optional<int> begin_index() const { return begin_index_; }
-  const torch::Tensor& timesteps() const { return timesteps_; }
+  const torch::Tensor& timesteps() const override { return timesteps_; }
   const torch::Tensor& sigmas() const { return sigmas_; }
   int size() const { return num_train_timesteps_; }
 
@@ -372,6 +384,8 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
   bool use_karras_sigmas_ = false;
   bool use_exponential_sigmas_ = false;
   bool stochastic_sampling_ = false;
+  // Wan distill path only: set_timesteps builds raw (N-i)/N sigmas.
+  bool distill_raw_sigmas_ = false;
   std::string time_shift_type_;
 
   // State variables
