@@ -472,40 +472,6 @@ void Batch::refresh_onerec_prefill_output_targets() {
 
 void Batch::process_sample_output(const RawForwardOutput& raw_output,
                                   bool replace_fake_token) {
-<<<<<<< HEAD
-=======
-  if (raw_output.mm_embeddings.size() > 0) {
-    // mm embed task
-    const bool return_full_mm_embeddings =
-        ::xllm::ModelConfig::get_instance().enable_return_mm_full_embeddings();
-    int64_t mm_embedding_idx = 0;
-    const auto sequences = get_sequences();
-    for (auto* seq : sequences) {
-      int64_t mm_item_count = seq->mm_data().size();
-      if (!return_full_mm_embeddings && mm_item_count <= 0) {
-        continue;
-      }
-      std::vector<torch::Tensor> seq_mm_embeddings;
-      // if we want to return the full embeding of images and prompts,
-      // the output is a single embedding tensor, else it would be a vector of
-      // image embeddings
-      int64_t output_tensor_size =
-          return_full_mm_embeddings ? 1 : mm_item_count;
-      seq_mm_embeddings.reserve(output_tensor_size);
-      for (int64_t i = mm_embedding_idx;
-           i < mm_embedding_idx + output_tensor_size;
-           ++i) {
-        CHECK_LT(i, raw_output.mm_embeddings.size());
-        seq_mm_embeddings.push_back(raw_output.mm_embeddings[i]);
-      }
-      seq->update_mm_embeddings(seq_mm_embeddings);
-      // we only support complete mm embedding in one iteration now
-      CHECK(seq->finished());
-      mm_embedding_idx += output_tensor_size;
-    }
-  }
-
->>>>>>> 5bee3602 (feat:update flux2 module text encoder modify 0717)
   for (size_t output_idx = 0; output_idx < output_targets_.size();
        ++output_idx) {
     const auto& target = output_targets_[output_idx];

@@ -170,6 +170,12 @@ void forward_output_to_proto(
         }
         *pb_seq_out.mutable_tokens()->Add() = pb_token;
       }
+      if (output_idx < static_cast<int32_t>(mm_embeddings.size())) {
+        for (const auto& tensor : mm_embeddings[output_idx]) {
+          torch_tensor_to_proto_tensor(
+              tensor, pb_seq_out.mutable_mm_embeddings()->add_tensors());
+        }
+      }
       *pb_forward_output->mutable_outputs()->Add() = pb_seq_out;
     } else {
       proto::SquenceOutput pb_seq_out;
