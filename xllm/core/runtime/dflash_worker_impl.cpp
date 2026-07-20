@@ -45,8 +45,7 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-// Under schedule-overlap the scheduler feeds placeholder (-1) tokens, so
-// per-rank sampling RNG can diverge across the tensor-parallel group.
+// Per-rank sampling RNG can diverge across the tensor-parallel group.
 // Broadcasting the sampled draft/accepted tokens to the group's rank 0 keeps
 // every rank's cached draft probs and accepted prefixes identical. No-op for a
 // single rank (world_size <= 1).
@@ -844,8 +843,7 @@ void DFlashWorkerImpl::process_draft_sample_output(
 }
 
 void DFlashWorkerImpl::maybe_broadcast_spec_tokens(torch::Tensor& tokens) {
-  if (get_optimization_config().enable_spec_token_broadcast &&
-      enable_schedule_overlap()) {
+  if (get_optimization_config().enable_spec_token_broadcast) {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     broadcast_spec_tokens(tokens, spec_broadcast_group(parallel_args_));
   }
