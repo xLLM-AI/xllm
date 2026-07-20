@@ -27,6 +27,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/framework/config/dit_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/dit_model_loader.h"
@@ -57,6 +58,11 @@ using xllm::dit::TpOptions;
 #endif
 
 namespace xllm {
+
+inline bool wan_use_sp_overlap() {
+  return DiTConfig::get_instance().dit_sp_communication_overlap() &&
+         ParallelConfig::get_instance().sp_size() > 1;
+}
 
 inline torch::Tensor wan_apply_rotary_emb(const torch::Tensor& hidden_states,
                                           const torch::Tensor& freqs_cos,
@@ -525,6 +531,8 @@ TORCH_MODULE(WanPixArtAlphaTextProjection);
 
 class WanAttentionImpl : public torch::nn::Module {
  public:
+  friend class WanAttnProcessorCMOImpl;
+
   explicit WanAttentionImpl(
       const ModelContext& context,
       const ParallelArgs& parallel_args,
@@ -586,22 +594,22 @@ class WanAttentionImpl : public torch::nn::Module {
                                               /*sp=*/std::nullopt,
                                               tp_qk));
 
-    // V: TP+SP for self-attention, TP only for cross-attention
+    // V: TP+SP for self-attention (non-CMO), TP only for cross-attention or CMO
     bool is_self_attn = cross_attention_dim_head <= 0;
+    bool use_cmo = wan_use_sp_overlap();
+    auto v_sp = (is_self_attn && !use_cmo) ? std::optional<SpOptions>(sp_before)
+                                           : std::nullopt;
     to_v_ = register_module(
         "to_v",
-        DiTParallelLinear(dim_,
-                          kv_inner_dim_,
-                          true,
-                          options_,
-                          is_self_attn ? sp_before : std::optional<SpOptions>{},
-                          tp_v));
+        DiTParallelLinear(dim_, kv_inner_dim_, true, options_, v_sp, tp_v));
 
-    // to_out: TP+SP row parallel
+    // to_out: TP+SP row parallel (non-CMO), TP only for CMO
+    auto out_sp = use_cmo ? std::optional<SpOptions>{}
+                          : std::optional<SpOptions>(sp_after);
     to_out_ = register_module(
         "to_out",
         DiTParallelLinear(
-            heads_ * dim_head_, dim_, true, options_, sp_after, tp_out));
+            heads_ * dim_head_, dim_, true, options_, out_sp, tp_out));
     norm_q_ = register_module(
         "norm_q", layer::RMSNorm(dim_head_ * heads_, eps_, options_));
     norm_k_ = register_module(
@@ -920,6 +928,245 @@ class WanAttentionImpl : public torch::nn::Module {
   xllm::dit::RainFusionConfig rainfusion_config_;
 };
 TORCH_MODULE(WanAttention);
+
+// CMO (Communication-computation Overlap) attention processor.
+// Uses async all2all to overlap Q/K/V all2all with matmul and norm/rope.
+class WanAttnProcessorCMOImpl : public torch::nn::Module {
+ public:
+  WanAttnProcessorCMOImpl(WanAttention&& attn_module,
+                          const ParallelArgs& parallel_args)
+      : parallel_args_(parallel_args) {
+    attn_ = register_module("attn", std::move(attn_module));
+  }
+
+  // Self-attn: Q/K/V all2all overlapped with matmul (wan.md 2.2 + 2.5).
+  // Returns a handler that completes the output projection (async all2all + TP
+  // matmul).
+  std::function<torch::Tensor()> forward_async(
+      const torch::Tensor& hidden_states_in,
+      const torch::Tensor& encoder_hidden_states,
+      std::optional<std::pair<torch::Tensor, torch::Tensor>> rotary_emb,
+      xllm::dit::RainFusionState& rf_state) {
+    torch::Tensor hidden_states = hidden_states_in;
+    int64_t batch_size = hidden_states.size(0);
+    int64_t tp_size = ::xllm::ParallelConfig::get_instance().tp_size();
+    int64_t sp_size = ::xllm::ParallelConfig::get_instance().sp_size();
+    int64_t n_heads = attn_->heads_;
+    int64_t dim_head = attn_->dim_head_;
+    int64_t local_heads = n_heads / tp_size;
+
+    // QKV all2all overlap (same as forward, self-attn only)
+    torch::Tensor query = attn_->to_q_->forward(hidden_states);
+    if (tp_size > 1) {
+      query =
+          dit::tp_rms_norm(query, attn_->norm_q_, parallel_args_.dit_tp_group_);
+    } else {
+      query = std::get<0>(attn_->norm_q_->forward(query));
+    }
+    auto q_handler = parallel_state::all_to_all_4D(
+        query.view({batch_size, -1, local_heads, dim_head}),
+        /*scatter_idx=*/2,
+        /*gather_idx=*/1,
+        /*async_ops=*/true,
+        parallel_args_.dit_sp_group_);
+
+    torch::Tensor key = attn_->to_k_->forward(hidden_states);
+    if (tp_size > 1) {
+      key = dit::tp_rms_norm(key, attn_->norm_k_, parallel_args_.dit_tp_group_);
+    } else {
+      key = std::get<0>(attn_->norm_k_->forward(key));
+    }
+    auto k_handler = parallel_state::all_to_all_4D(
+        key.view({batch_size, -1, local_heads, dim_head}),
+        /*scatter_idx=*/2,
+        /*gather_idx=*/1,
+        /*async_ops=*/true,
+        parallel_args_.dit_sp_group_);
+
+    // V projection → async V all2all (overlaps with Q/K norm+RoPE)
+    torch::Tensor value = attn_->to_v_->forward(hidden_states);
+    auto v_handler = parallel_state::all_to_all_4D(
+        value.view({batch_size, -1, local_heads, dim_head}),
+        /*scatter_idx=*/2,
+        /*gather_idx=*/1,
+        /*async_ops=*/true,
+        parallel_args_.dit_sp_group_);
+
+    // Wait Q/K → reshape → RoPE (V all2all in flight)
+    query = q_handler();
+    key = k_handler();
+
+    n_heads = local_heads / sp_size;
+    query = query.view({batch_size, -1, n_heads, dim_head});
+    key = key.view({batch_size, -1, n_heads, dim_head});
+
+    if (rotary_emb.has_value()) {
+      auto [freqs_cos, freqs_sin] = rotary_emb.value();
+      query = wan_apply_rotary_emb(query, freqs_cos, freqs_sin);
+      key = wan_apply_rotary_emb(key, freqs_cos, freqs_sin);
+    }
+
+    // Wait V (overlapped with Q/K norm+RoPE above)
+    value = v_handler();
+    value = value.view({batch_size, -1, n_heads, dim_head});
+
+    // Attention
+    hidden_states = attn_->at_npu_attention(query, key, value, rf_state);
+    // hidden_states: {batch, seq_local, n_heads * dim_head}
+
+    // Async output all2all (scatter seq, gather heads)
+    // This is the SP all2all normally done inside to_out_->forward()
+    if (sp_size > 1) {
+      auto out_handler = parallel_state::all_to_all_4D(
+          hidden_states.view({batch_size, -1, n_heads, dim_head}),
+          /*scatter_idx=*/1,
+          /*gather_idx=*/2,
+          /*async_ops=*/true,
+          parallel_args_.dit_sp_group_);
+      int64_t out_heads = local_heads;  // gathered heads = n_heads * sp_size
+      return [this, out_handler, batch_size, out_heads, dim_head]() mutable
+                 -> torch::Tensor {
+        auto gathered = out_handler();
+        gathered = gathered.view({batch_size, -1, out_heads * dim_head});
+        return attn_->to_out_->forward(gathered);
+      };
+    } else {
+      hidden_states = hidden_states.view({batch_size, -1, n_heads * dim_head});
+      auto result = attn_->to_out_->forward(hidden_states);
+      return [result]() -> torch::Tensor { return result; };
+    }
+  }
+
+  // Cross-attn forward: Q all2all overlapped with K/V matmul.
+  torch::Tensor forward_cross(const torch::Tensor& hidden_states_in,
+                              const torch::Tensor& encoder_hidden_states,
+                              xllm::dit::RainFusionState& rf_state) {
+    torch::Tensor hidden_states = hidden_states_in;
+    int64_t batch_size = hidden_states.size(0);
+    int64_t tp_size = ::xllm::ParallelConfig::get_instance().tp_size();
+    int64_t sp_size = ::xllm::ParallelConfig::get_instance().sp_size();
+    int64_t n_heads = attn_->heads_;
+    int64_t dim_head = attn_->dim_head_;
+    int64_t local_heads = n_heads / tp_size;
+
+    // Split encoder hidden states into text and img
+    torch::Tensor enc_text = encoder_hidden_states;
+    torch::Tensor enc_img;
+    if (attn_->add_k_proj_ && enc_text.defined() && enc_text.size(1) > 512) {
+      int64_t img_len = enc_text.size(1) - 512;
+      enc_img = enc_text.slice(1, 0, img_len);
+      enc_text = enc_text.slice(1, img_len);
+    }
+
+    // Q projection → norm Q → async Q all2all
+    torch::Tensor query = attn_->to_q_->forward(hidden_states);
+    if (tp_size > 1) {
+      query =
+          dit::tp_rms_norm(query, attn_->norm_q_, parallel_args_.dit_tp_group_);
+    } else {
+      query = std::get<0>(attn_->norm_q_->forward(query));
+    }
+
+    std::function<torch::Tensor()> q_handler;
+    if (sp_size > 1) {
+      q_handler = parallel_state::all_to_all_4D(
+          query.view({batch_size, -1, local_heads, dim_head}),
+          /*scatter_idx=*/2,
+          /*gather_idx=*/1,
+          /*async_ops=*/true,
+          parallel_args_.dit_sp_group_);
+    }
+
+    // K projection → norm K → sp_slice_heads (overlaps with Q all2all)
+    torch::Tensor key = attn_->to_k_->forward(enc_text);
+    if (tp_size > 1) {
+      key = dit::tp_rms_norm(key, attn_->norm_k_, parallel_args_.dit_tp_group_);
+    } else {
+      key = std::get<0>(attn_->norm_k_->forward(key));
+    }
+    key = sp_slice_heads(
+        key, n_heads, dim_head, tp_size, parallel_args_.dit_sp_group_);
+
+    // V projection → sp_slice_heads (overlaps with Q all2all)
+    torch::Tensor value = attn_->to_v_->forward(enc_text);
+    value = sp_slice_heads(
+        value, n_heads, dim_head, tp_size, parallel_args_.dit_sp_group_);
+
+    // Img K/V (also overlaps with Q all2all)
+    torch::Tensor key_img, value_img;
+    if (enc_img.defined()) {
+      key_img = attn_->add_k_proj_->forward(enc_img);
+      if (tp_size > 1) {
+        key_img = dit::tp_rms_norm(
+            key_img, attn_->norm_added_k_, parallel_args_.dit_tp_group_);
+      } else {
+        key_img = std::get<0>(attn_->norm_added_k_->forward(key_img));
+      }
+      key_img = sp_slice_heads(
+          key_img, n_heads, dim_head, tp_size, parallel_args_.dit_sp_group_);
+
+      value_img = attn_->add_v_proj_->forward(enc_img);
+      value_img = sp_slice_heads(
+          value_img, n_heads, dim_head, tp_size, parallel_args_.dit_sp_group_);
+    }
+
+    // Wait Q all2all → reshape
+    if (sp_size > 1) {
+      query = q_handler();
+      n_heads = local_heads / sp_size;
+    } else {
+      n_heads = n_heads / tp_size;
+    }
+    query = query.view({batch_size, -1, n_heads, dim_head});
+
+    // K/V already 4D from sp_slice_heads + reshape
+    key = key.view({batch_size, -1, n_heads, dim_head});
+    value = value.view({batch_size, -1, n_heads, dim_head});
+
+    // Attention
+    torch::Tensor hidden_states_img;
+    if (enc_img.defined()) {
+      key_img = key_img.view({batch_size, -1, n_heads, dim_head});
+      value_img = value_img.view({batch_size, -1, n_heads, dim_head});
+      hidden_states_img =
+          attn_->at_npu_attention(query, key_img, value_img, rf_state);
+    }
+
+    hidden_states = attn_->at_npu_attention(query, key, value, rf_state);
+    if (hidden_states_img.defined()) {
+      hidden_states = hidden_states + hidden_states_img;
+    }
+
+    // Output projection: sync all2all (scatter seq, gather heads) + TP matmul
+    if (sp_size > 1) {
+      auto out_handler = parallel_state::all_to_all_4D(
+          hidden_states.view({batch_size, -1, n_heads, dim_head}),
+          /*scatter_idx=*/1,
+          /*gather_idx=*/2,
+          /*async_ops=*/true,
+          parallel_args_.dit_sp_group_);
+      hidden_states = out_handler();
+      hidden_states =
+          hidden_states.view({batch_size, -1, local_heads * dim_head});
+    } else {
+      hidden_states = hidden_states.view({batch_size, -1, n_heads * dim_head});
+    }
+    return attn_->to_out_->forward(hidden_states);
+  }
+
+  void load_state_dict(const StateDict& state_dict) {
+    attn_->load_state_dict(state_dict);
+  }
+
+  void verify_loaded_weights(const std::string& prefix) const {
+    attn_->verify_loaded_weights(prefix);
+  }
+
+ private:
+  WanAttention attn_{nullptr};
+  const ParallelArgs parallel_args_;
+};
+TORCH_MODULE(WanAttnProcessorCMO);
 
 // for wan2.2 I2V, actually not used
 class WanImageEmbeddingImpl : public torch::nn::Module {
@@ -1270,12 +1517,26 @@ class WanTransformerBlockImpl : public torch::nn::Module {
 
     norm1_ =
         register_module("norm1", FP32LayerNorm(context, dim_, eps_, false));
-    attn1_ = register_module(
-        "attn1", WanAttention(context, parallel_args, -1, rainfusion_config));
-    attn2_ = register_module(
-        "attn2",
-        WanAttention(
-            context, parallel_args, dim_ / num_heads_, rainfusion_config));
+    if (wan_use_sp_overlap()) {
+      attn1_cmo_ = register_module(
+          "attn1",
+          WanAttnProcessorCMO(
+              WanAttention(context, parallel_args, -1, rainfusion_config),
+              parallel_args));
+      attn2_cmo_ = register_module(
+          "attn2",
+          WanAttnProcessorCMO(
+              WanAttention(
+                  context, parallel_args, dim_ / num_heads_, rainfusion_config),
+              parallel_args));
+    } else {
+      attn1_ = register_module(
+          "attn1", WanAttention(context, parallel_args, -1, rainfusion_config));
+      attn2_ = register_module(
+          "attn2",
+          WanAttention(
+              context, parallel_args, dim_ / num_heads_, rainfusion_config));
+    }
     if (cross_attn_norm_) {
       norm2_ =
           register_module("norm2", FP32LayerNorm(context, dim_, eps_, true));
@@ -1335,8 +1596,18 @@ class WanTransformerBlockImpl : public torch::nn::Module {
     torch::Tensor norm1_result = norm1_->forward(hidden_states);
     torch::Tensor norm_hidden_states =
         (norm1_result.to(hidden_states.dtype()) * (1 + scale_msa) + shift_msa);
-    torch::Tensor attn_output = attn1_->forward(
-        norm_hidden_states, norm_hidden_states, rotary_emb, rf_state);
+    torch::Tensor attn_output;
+    if (attn1_cmo_) {
+      // Self-attn: Q/K/V async all2all overlapped with matmul+norm+RoPE,
+      // returns handler for async output all2all + to_out matmul.
+      auto attn_handler = attn1_cmo_->forward_async(
+          norm_hidden_states, norm_hidden_states, rotary_emb, rf_state);
+      // Wait for self-attn output all2all + to_out matmul.
+      attn_output = attn_handler();
+    } else {
+      attn_output = attn1_->forward(
+          norm_hidden_states, norm_hidden_states, rotary_emb, rf_state);
+    }
     hidden_states = hidden_states + attn_output * gate_msa;
 
     if (cross_attn_norm_) {
@@ -1345,8 +1616,14 @@ class WanTransformerBlockImpl : public torch::nn::Module {
       norm_hidden_states = hidden_states;
     }
 
-    attn_output = attn2_->forward(
-        norm_hidden_states, encoder_hidden_states, std::nullopt, rf_state);
+    if (attn2_cmo_) {
+      // Cross-attn: Q all2all overlapped with K/V matmul.
+      attn_output = attn2_cmo_->forward_cross(
+          norm_hidden_states, encoder_hidden_states, rf_state);
+    } else {
+      attn_output = attn2_->forward(
+          norm_hidden_states, encoder_hidden_states, std::nullopt, rf_state);
+    }
     hidden_states = hidden_states + attn_output;
     torch::Tensor norm2_result = norm3_->forward(hidden_states);
     norm_hidden_states = (norm2_result * (1 + c_scale_msa) + c_shift_msa);
@@ -1357,8 +1634,13 @@ class WanTransformerBlockImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    attn1_->load_state_dict(state_dict.get_dict_with_prefix("attn1."));
-    attn2_->load_state_dict(state_dict.get_dict_with_prefix("attn2."));
+    if (attn1_cmo_) {
+      attn1_cmo_->load_state_dict(state_dict.get_dict_with_prefix("attn1."));
+      attn2_cmo_->load_state_dict(state_dict.get_dict_with_prefix("attn2."));
+    } else {
+      attn1_->load_state_dict(state_dict.get_dict_with_prefix("attn1."));
+      attn2_->load_state_dict(state_dict.get_dict_with_prefix("attn2."));
+    }
     if (cross_attn_norm_ && norm2_) {
       norm2_->load_state_dict(state_dict.get_dict_with_prefix("norm2."));
     }
@@ -1370,11 +1652,19 @@ class WanTransformerBlockImpl : public torch::nn::Module {
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    attn1_->verify_loaded_weights(prefix + "attn1.");
+    if (attn1_cmo_) {
+      attn1_cmo_->verify_loaded_weights(prefix + "attn1.");
+    } else {
+      attn1_->verify_loaded_weights(prefix + "attn1.");
+    }
     if (cross_attn_norm_) {
       norm2_->verify_loaded_weights(prefix + "norm2.");
     }
-    attn2_->verify_loaded_weights(prefix + "attn2.");
+    if (attn2_cmo_) {
+      attn2_cmo_->verify_loaded_weights(prefix + "attn2.");
+    } else {
+      attn2_->verify_loaded_weights(prefix + "attn2.");
+    }
     ff_->verify_loaded_weights(prefix + "ffn.");
     CHECK(scale_shift_table_loaded_) << "scale_shift_table is not loaded for "
                                      << prefix + "scale_shift_table";
@@ -1404,6 +1694,8 @@ class WanTransformerBlockImpl : public torch::nn::Module {
   FP32LayerNorm norm1_{nullptr};
   WanAttention attn1_{nullptr};
   WanAttention attn2_{nullptr};
+  WanAttnProcessorCMO attn1_cmo_{nullptr};
+  WanAttnProcessorCMO attn2_cmo_{nullptr};
   FP32LayerNorm norm2_{nullptr};
   WanFeedForward ff_{nullptr};
   FP32LayerNorm norm3_{nullptr};
