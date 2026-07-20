@@ -112,13 +112,24 @@ def set_npu_envs() -> None:
     if not NPU_TOOLKIT_HOME:
         os.environ["NPU_TOOLKIT_HOME"] = "/usr/local/Ascend/ascend-toolkit/latest"
         NPU_TOOLKIT_HOME = "/usr/local/Ascend/ascend-toolkit/latest"
+    custom_op_api_path = os.path.join(
+        NPU_TOOLKIT_HOME, "opp", "vendors", "custom_xllm_math", "op_api", "lib"
+    )
+    xllm_op_api_path = os.path.join(
+        NPU_TOOLKIT_HOME, "opp", "vendors", "xllm", "op_api", "lib"
+    )
+    op_api_path = (
+        custom_op_api_path
+        if os.path.isdir(custom_op_api_path)
+        else xllm_op_api_path
+    )
     LD_LIBRARY_PATH = os.getenv("LD_LIBRARY_PATH", "")
     arch = platform.machine()
     LD_LIBRARY_PATH = NPU_TOOLKIT_HOME+"/lib64" + ":" + \
         NPU_TOOLKIT_HOME+"/lib64/plugin/opskernel" + ":" + \
         NPU_TOOLKIT_HOME+"/lib64/plugin/nnengine" + ":" + \
         NPU_TOOLKIT_HOME+"/opp/built-in/op_impl/ai_core/tbe/op_tiling/lib/linux/"+arch + ":" + \
-        NPU_TOOLKIT_HOME+"/opp/vendors/xllm/op_api/lib" + ":" + \
+        op_api_path + ":" + \
         NPU_TOOLKIT_HOME+"/tools/aml/lib64" + ":" + \
         NPU_TOOLKIT_HOME+"/tools/aml/lib64/plugin" + ":" + \
         LD_LIBRARY_PATH

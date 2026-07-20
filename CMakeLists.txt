@@ -377,11 +377,6 @@ if(USE_NPU)
       $ENV{ATB_HOME_PATH}/lib
       $ENV{NPU_TOOLKIT_HOME}/lib64
   )
-  if(EXISTS "${XLLM_ASCEND_OPP_PATH}/vendors/xllm/op_api/lib")
-    link_directories(
-      ${XLLM_ASCEND_OPP_PATH}/vendors/xllm/op_api/lib/
-    )
-  endif()
   if(EXISTS "${XLLM_ASCEND_OPP_PATH}/vendors/custom_xllm_math/op_api/lib")
     link_directories(
       ${XLLM_ASCEND_OPP_PATH}/vendors/custom_xllm_math/op_api/lib/

@@ -15,7 +15,7 @@
 	url = https://gitcode.com/xLLM-AI/smhasher.git
 [submodule "third_party/xllm_ops"]
 	path = third_party/xllm_ops
-	url = https://gitcode.com/xLLM-AI/xllm_ops.git
+	url = git@github.com:DragonFive/xllm-ops.git
 [submodule "third_party/etcd_cpp_apiv3"]
 	path = third_party/etcd_cpp_apiv3
 	url = https://gitcode.com/xLLM-AI/etcd-cpp-apiv3.git
@@ -33,7 +33,7 @@
 	url = https://gitcode.com/xLLM-AI/cutlass.git
 [submodule "third_party/xllm_atb_layers"]
 	path = third_party/xllm_atb_layers
-	url = https://gitcode.com/drag/xllm_atb_layers.git
+	url = git@github.com:DragonFive/xllm-atb-layers.git
 [submodule "third_party/xxHash"]
 	path = third_party/xxHash
 	url = https://gitcode.com/xLLM-AI/xxHash.git
