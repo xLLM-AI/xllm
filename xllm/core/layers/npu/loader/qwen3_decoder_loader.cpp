@@ -125,8 +125,8 @@ void Qwen3DecoderLoader::merge_host_at_weights() {
     if (t[IN_MLP_CPROJ_BIAS].numel() > 1) {
       t[IN_MLP_CPROJ_BIAS] = t[IN_MLP_CPROJ_BIAS].to(torch::kInt32);
       t[IN_MLP_CPROJ_DEQSCALE] = t[IN_MLP_CPROJ_DEQSCALE].to(torch::kFloat32);
-      t[IN_MLP_CPROJ_OFFSET] = t[IN_MLP_CPROJ_OFFSET].to(torch::kInt8);
-      t[IN_MLP_CPROJ_SCALE] = t[IN_MLP_CPROJ_SCALE].to(dtype_);
+      t[IN_MLP_CPROJ_OFFSET] = t[IN_MLP_CPROJ_OFFSET].to(torch::kFloat32);
+      t[IN_MLP_CPROJ_SCALE] = t[IN_MLP_CPROJ_SCALE].to(torch::kFloat32);
       down_proj_quantized_ = true;
     }
 
