@@ -38,15 +38,12 @@ torch::Tensor layer_norm_fwd_aclnn(const torch::Tensor& x,
                                    bool norm_before_gate,
                                    bool is_rms_norm) {
   TORCH_CHECK(x.defined(), "layer_norm_fwd_aclnn: x must be defined");
-  TORCH_CHECK(weight.defined(),
-              "layer_norm_fwd_aclnn: weight must be defined");
-  TORCH_CHECK(x.dim() >= 1,
-              "layer_norm_fwd_aclnn: x must have at least 1 dim");
+  TORCH_CHECK(weight.defined(), "layer_norm_fwd_aclnn: weight must be defined");
+  TORCH_CHECK(x.dim() >= 1, "layer_norm_fwd_aclnn: x must have at least 1 dim");
   TORCH_CHECK(is_supported_layer_norm_dtype(x.scalar_type()),
               "layer_norm_fwd_aclnn: x dtype must be fp16, bf16 or fp32, got ",
               x.scalar_type());
-  TORCH_CHECK(weight.dim() == 1,
-              "layer_norm_fwd_aclnn: weight must be 1D");
+  TORCH_CHECK(weight.dim() == 1, "layer_norm_fwd_aclnn: weight must be 1D");
 
   const int64_t full_n = x.size(-1);
   if (group_size < 0) {
@@ -63,8 +60,7 @@ torch::Tensor layer_norm_fwd_aclnn(const torch::Tensor& x,
               "layer_norm_fwd_aclnn: weight numel must equal x last dim");
 
   if (bias.defined()) {
-    TORCH_CHECK(bias.dim() == 1,
-                "layer_norm_fwd_aclnn: bias must be 1D");
+    TORCH_CHECK(bias.dim() == 1, "layer_norm_fwd_aclnn: bias must be 1D");
     TORCH_CHECK(bias.numel() == full_n,
                 "layer_norm_fwd_aclnn: bias numel must equal x last dim");
   }
