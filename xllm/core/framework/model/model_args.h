@@ -460,12 +460,18 @@ struct ModelArgs {
   PROPERTY(int64_t, vae_scale_factor_spatial) = 0;
   PROPERTY(bool, vae_is_residual) = false;
 
+  PROPERTY(float, batch_norm_eps) = 1e-04f;
+  PROPERTY(float, batch_norm_momentum) = 0.1f;
+  PROPERTY(std::vector<int64_t>, ae_patch_size) = {};
+
   // dit related args
   PROPERTY(int64_t, joint_attention_dim) = 0;
   PROPERTY(int64_t, pooled_projection_dim) = 0;
   PROPERTY(bool, guidance_embeds) = true;
   PROPERTY(std::vector<int64_t>, axes_dims_rope) = {};
   PROPERTY(int64_t, num_single_layers) = 0;
+
+  PROPERTY(float, mlp_ratio) = 3.0f;
   PROPERTY(int, timestep_guidance_channels) = 256;
   PROPERTY(int64_t, patch_size) = 1;
   PROPERTY(std::vector<int64_t>, wan_patch_size) = { 1, 2, 2 };

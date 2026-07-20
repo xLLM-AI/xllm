@@ -129,10 +129,9 @@ void AddMatmulWeightTransposedImpl::load_state_dict(
   if (state_dict.has("weight")) {
     xllm::weight::load_weight(state_dict, "weight", weight_, weight_is_loaded_);
     // weight need to be transposed when using addmm
-    if (with_bias_) {
-      torch::Tensor transposed = weight_.data().transpose(0, 1).contiguous();
-      weight_.set_data(transposed);
-    }
+
+    torch::Tensor transposed = weight_.data().transpose(0, 1).contiguous();
+    weight_.set_data(transposed);
   }
   if (with_bias_) {
     weight::load_weight(state_dict, "bias", bias_, bias_is_loaded_);
