@@ -106,6 +106,18 @@ struct Message {
     return count;
   }
 
+  bool has_mm_content() const {
+    if (std::holds_alternative<std::string>(content)) {
+      return false;
+    }
+    for (const auto& item : std::get<MMContentVec>(content)) {
+      if (item.type != "text") {
+        return true;
+      }
+    }
+    return false;
+  }
+
   std::string role;
   Content content;
 

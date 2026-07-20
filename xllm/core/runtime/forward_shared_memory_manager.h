@@ -105,19 +105,20 @@ class ForwardSharedMemoryManager : public SharedMemoryManager {
 
   bool input_write(const ForwardInput& input);
   void input_read(ForwardInput& input, const torch::Device& device);
-  bool raw_output_write(const torch::Tensor& next_tokens,
-                        const torch::Tensor& logprobs,
-                        const torch::Tensor& top_tokens,
-                        const torch::Tensor& top_logprobs,
-                        const torch::Tensor& embeddings,
-                        const std::vector<torch::Tensor>& mm_embeddings,
-                        const std::vector<torch::Tensor>& dit_images,
-                        const std::vector<std::string>& dit_text_output,
-                        const torch::Tensor& expert_load_data,
-                        int32_t prepared_layer_id,
-                        const torch::Tensor& src_seq_idxes,
-                        const torch::Tensor& out_tokens,
-                        const torch::Tensor& out_logprobs);
+  bool raw_output_write(
+      const torch::Tensor& next_tokens,
+      const torch::Tensor& logprobs,
+      const torch::Tensor& top_tokens,
+      const torch::Tensor& top_logprobs,
+      const torch::Tensor& embeddings,
+      const std::vector<std::vector<torch::Tensor>>& mm_embeddings,
+      const std::vector<torch::Tensor>& dit_images,
+      const std::vector<std::string>& dit_text_output,
+      const torch::Tensor& expert_load_data,
+      int32_t prepared_layer_id,
+      const torch::Tensor& src_seq_idxes,
+      const torch::Tensor& out_tokens,
+      const torch::Tensor& out_logprobs);
   void raw_output_read(RawForwardOutput& outputs);
 
   void clear();

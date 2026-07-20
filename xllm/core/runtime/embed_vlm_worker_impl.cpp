@@ -93,17 +93,15 @@ std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
       sample_output.mm_embeddings.reserve(q_seq_len_vec.size());
       int32_t token_start_idx = 0;
       for (auto seq_len : q_seq_len_vec) {
-        auto image_embed =
+        auto seq_embed =
             embeddings.slice(0, token_start_idx, token_start_idx + seq_len);
-        sample_output.mm_embeddings.emplace_back(image_embed);
+        sample_output.mm_embeddings.push_back({seq_embed});
         token_start_idx += seq_len;
       }
-      output.sample_output = sample_output;
     } else {
       sample_output.embeddings = embeddings;
-      output.sample_output = sample_output;
-      output.embedding = embeddings;
     }
+    output.sample_output = sample_output;
   }
   ret = device_.synchronize_default_stream();
   return output;

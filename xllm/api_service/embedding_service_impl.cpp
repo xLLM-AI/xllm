@@ -17,11 +17,13 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <string>
 
 #include "common/instance_name.h"
 #include "distributed_runtime/llm_master.h"
 #include "embedding_output_builder.h"
+#include "framework/config/model_config.h"
 #include "framework/request/request_params.h"
 #include "mm_service_utils.h"
 #include "util/utils.h"
@@ -159,6 +161,21 @@ void MMEmbeddingServiceImpl::process_async_impl(
           req_messages, messages, call, master_->get_image_limit())) {
     return;
   }
+
+  // mm_embed encodes multimodal inputs, so a text-only request is invalid.
+  if (::xllm::ModelConfig::get_instance().task() == "mm_embed") {
+    const bool has_multimodal_content =
+        std::any_of(messages.begin(), messages.end(), [](Message& msg) {
+          return msg.has_mm_content();
+        });
+    if (!has_multimodal_content) {
+      call->finish_with_error(
+          StatusCode::INVALID_ARGUMENT,
+          "mm_embed request must contain multimodal content.");
+      return;
+    }
+  }
+
   auto request_id = request_params.request_id;
 
   auto payload = call->take_request_payload();

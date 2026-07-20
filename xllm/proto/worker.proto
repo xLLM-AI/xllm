@@ -367,6 +367,7 @@ message Token {
 
 message SquenceOutput {
   repeated Token tokens = 1;
+  TensorList mm_embeddings = 2;
 }
 
 message ForwardOutput {

@@ -89,7 +89,24 @@ std::optional<ForwardOutput> MMEmbedVLMWorkerImpl::step(
 
   ForwardOutput output;
   SampleOutput sample_output;
-  sample_output.mm_embeddings = mm_embeddings;
+  // Group the flattened per-image embeddings by sequence, using each sequence's
+  // image count from the host-side mm_data. Outer = sequence, inner = images.
+  const auto& mm_data_vec = input.input_params.multimodal.mm_data.mm_data_vec();
+  sample_output.mm_embeddings.reserve(mm_data_vec.size());
+  size_t image_idx = 0;
+  for (const auto& seq_mm_data : mm_data_vec) {
+    const size_t seq_image_count = seq_mm_data.size();
+    std::vector<torch::Tensor> seq_mm_embeddings;
+    seq_mm_embeddings.reserve(seq_image_count);
+    for (size_t i = 0; i < seq_image_count; ++i) {
+      CHECK_LT(image_idx, mm_embeddings.size());
+      seq_mm_embeddings.push_back(mm_embeddings[image_idx++]);
+    }
+    sample_output.mm_embeddings.push_back(std::move(seq_mm_embeddings));
+  }
+  CHECK_EQ(image_idx, mm_embeddings.size())
+      << "mm_embedding count mismatch: grouped " << image_idx << " but got "
+      << mm_embeddings.size();
   output.sample_output = sample_output;
 
   return output;
