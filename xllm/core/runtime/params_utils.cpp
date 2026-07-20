@@ -70,6 +70,13 @@ void proto_to_forward_output(const proto::ForwardOutput& pb_output,
                           pb_seq_out.tokens()[j].embeddings().vals().end());
       s.tokens.emplace_back(t);
     }
+    s.mm_embeddings.reserve(pb_seq_out.mm_embeddings_size());
+    for (const auto& pb_mm_embedding : pb_seq_out.mm_embeddings()) {
+      torch::Tensor mm_embedding = util::proto_to_torch(pb_mm_embedding);
+      if (mm_embedding.defined()) {
+        s.mm_embeddings.emplace_back(std::move(mm_embedding));
+      }
+    }
     raw_forward_output.outputs.emplace_back(s);
   }
   proto_to_dit_forward_output(pb_output.dit_forward_output(),
@@ -87,17 +94,42 @@ void forward_output_to_proto(const torch::Tensor& next_tokens,
                              const torch::Tensor& src_seq_idxes,
                              const torch::Tensor& out_tokens,
                              const torch::Tensor& out_logprobs,
+                             const std::vector<torch::Tensor>& mm_embeddings,
+                             const std::vector<int32_t>& mm_embedding_counts,
                              const std::vector<torch::Tensor>& dit_images,
                              proto::ForwardOutput* pb_forward_output) {
   Timer timer;
-  int32_t num_seqs = next_tokens.size(0);
+  int32_t num_seqs =
+      next_tokens.defined() ? static_cast<int32_t>(next_tokens.size(0)) : 0;
   if (embeddings.defined() && embeddings.numel() > 0) {
     num_seqs = std::max(num_seqs, static_cast<int32_t>(embeddings.size(0)));
   }
-  int32_t output_idx = 0;
+  if (!mm_embedding_counts.empty()) {
+    num_seqs =
+        std::max(num_seqs, static_cast<int32_t>(mm_embedding_counts.size()));
+  }
+  int64_t mm_embedding_idx = 0;
   pb_forward_output->mutable_outputs()->Reserve(num_seqs);
+  auto append_mm_embeddings = [&](int32_t output_idx,
+                                  proto::SquenceOutput* pb_seq_out) {
+    if (output_idx >= static_cast<int32_t>(mm_embedding_counts.size())) {
+      return;
+    }
+    const int32_t mm_embedding_count = mm_embedding_counts[output_idx];
+    CHECK_GE(mm_embedding_count, 0);
+    pb_seq_out->mutable_mm_embeddings()->Reserve(mm_embedding_count);
+    for (int32_t i = 0; i < mm_embedding_count; ++i) {
+      CHECK_LT(mm_embedding_idx, static_cast<int64_t>(mm_embeddings.size()));
+      proto::Tensor* pb_mm_embedding = pb_seq_out->add_mm_embeddings();
+      CHECK(util::torch_to_proto(
+          mm_embeddings[static_cast<size_t>(mm_embedding_idx)],
+          pb_mm_embedding));
+      ++mm_embedding_idx;
+    }
+  };
+
   for (int32_t output_idx = 0; output_idx < num_seqs; ++output_idx) {
-    if (next_tokens.dim() == 2) {
+    if (next_tokens.defined() && next_tokens.dim() == 2) {
       const auto curr_idx = output_idx;
       const auto curr_next_tokens = next_tokens[curr_idx];
       const auto curr_logprobs =
@@ -157,6 +189,7 @@ void forward_output_to_proto(const torch::Tensor& next_tokens,
         }
         *pb_seq_out.mutable_tokens()->Add() = pb_token;
       }
+      append_mm_embeddings(output_idx, &pb_seq_out);
       *pb_forward_output->mutable_outputs()->Add() = pb_seq_out;
     } else {
       proto::SquenceOutput pb_seq_out;
@@ -200,8 +233,12 @@ void forward_output_to_proto(const torch::Tensor& next_tokens,
                             embedding_slice);
       }
       *pb_seq_out.mutable_tokens()->Add() = pb_token;
+      append_mm_embeddings(output_idx, &pb_seq_out);
       *pb_forward_output->mutable_outputs()->Add() = pb_seq_out;
     }
+  }
+  if (!mm_embedding_counts.empty()) {
+    CHECK_EQ(mm_embedding_idx, static_cast<int64_t>(mm_embeddings.size()));
   }
 
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {

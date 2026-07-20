@@ -31,7 +31,8 @@ class Tokenizer {
 
   virtual bool encode(const std::string_view& text,
                       std::vector<int32_t>* ids,
-                      bool add_special_tokens = true) const {
+                      bool add_special_tokens = true,
+                      int32_t max_sequence_length = 0) const {
     return false;
   }
 

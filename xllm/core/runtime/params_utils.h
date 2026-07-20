@@ -49,6 +49,8 @@ void forward_output_to_proto(const torch::Tensor& next_tokens,
                              const torch::Tensor& src_seq_idxes,
                              const torch::Tensor& out_tokens,
                              const torch::Tensor& out_logprobs,
+                             const std::vector<torch::Tensor>& mm_embeddings,
+                             const std::vector<int32_t>& mm_embedding_counts,
                              const std::vector<torch::Tensor>& dit_images,
                              proto::ForwardOutput* pb_forward_output);
 
