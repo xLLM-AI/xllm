@@ -20,6 +20,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <optional>
 #include <source_location>
@@ -44,13 +45,19 @@ inline torch::Tensor create_2d_tensor(const std::vector<std::vector<T> >& vec,
                        .dtype(dtype)
                        .device(torch::kCPU)
                        .pinned_memory(true));
-  for (int64_t i = 0; i < n_rows; ++i) {
+  // Fill the contiguous pinned buffer row-by-row with a plain memcpy. The
+  // element type T must match `dtype`'s storage; every current caller pairs
+  // int32_t with kInt and int64_t with kInt64. Copying directly avoids a
+  // per-row pinned allocation plus an autograd-aware `tensor[i] = ...`
+  // indexed assignment, which dominated large-batch input building.
+  CHECK_EQ(
+      torch::empty({0}, torch::TensorOptions().dtype(dtype)).element_size(),
+      sizeof(T))
+      << "create_2d_tensor element type does not match dtype storage size";
+  auto* dst = static_cast<T*>(tensor.data_ptr());
+  for (size_t i = 0; i < n_rows; ++i) {
     CHECK_EQ(vec[i].size(), n_cols);
-    tensor[i] = torch::tensor(vec[i],
-                              torch::TensorOptions()
-                                  .dtype(dtype)
-                                  .device(torch::kCPU)
-                                  .pinned_memory(true));
+    std::memcpy(dst + i * n_cols, vec[i].data(), n_cols * sizeof(T));
   }
   return tensor;
 };

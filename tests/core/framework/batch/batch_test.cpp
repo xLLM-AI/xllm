@@ -19,8 +19,12 @@ limitations under the License.
 #include <absl/time/clock.h>
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <deque>
+#include <iostream>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -78,6 +82,23 @@ class BatchInputBuilderTestPeer final {
         seq_len,
         block_size,
         advanced_transfer_block_idx);
+  }
+
+  // Run the two build phases separately so a benchmark can attribute time to
+  // the parallelized sequence processing vs. the serial tensor assembly.
+  static ForwardInput run_phases_timed(BatchInputBuilder& builder,
+                                       double* process_ms,
+                                       double* finalize_ms) {
+    const auto t0 = std::chrono::steady_clock::now();
+    builder.process_sequences();
+    const auto t1 = std::chrono::steady_clock::now();
+    builder.padding_decode_batch_size(/*num_decoding_tokens=*/1,
+                                      /*min_decoding_batch_size=*/0);
+    ForwardInput out = builder.state_to_forward_input();
+    const auto t2 = std::chrono::steady_clock::now();
+    *process_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    *finalize_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+    return out;
   }
 };
 
@@ -222,6 +243,221 @@ Sequence make_overlap_sequence(const std::vector<int32_t>& prompt_token_ids,
                   /*mm_data=*/MMData(),
                   decoder,
                   seq_params);
+}
+
+// Build `batch_size` single-token decode sequences backed by `manager`, stored
+// in `storage` (a std::deque keeps element addresses stable so the returned
+// pointers stay valid). Each sequence caches 3 prompt tokens and appends one
+// decode token, so every batch row contributes exactly one query token.
+std::vector<Sequence*> build_decode_smoke_sequences(
+    int32_t batch_size,
+    BlockManagerImpl& manager,
+    std::deque<Sequence>& storage) {
+  std::vector<Sequence*> sequences;
+  sequences.reserve(batch_size);
+  for (int32_t i = 0; i < batch_size; ++i) {
+    storage.push_back(make_basic_sequence({1, 2, 3}));
+    Sequence& seq = storage.back();
+    seq.add_blocks(BlockType::KV, manager.allocate(1));
+    seq.kv_state().incr_kv_cache_tokens_num(/*size=*/3);
+    seq.append_token(4);
+    sequences.push_back(&seq);
+  }
+  return sequences;
+}
+
+// Build `batch_size` prefill sequences of `prompt_len` tokens each. This makes
+// per-sequence work in process_sequences() non-trivial (each row flattens
+// prompt_len tokens/positions and fills prompt_len cache slots), which is the
+// regime where multithreaded processing is expected to pay off -- in contrast
+// to the 1-token decode builder above.
+std::vector<Sequence*> build_prefill_smoke_sequences(
+    int32_t batch_size,
+    int32_t prompt_len,
+    BlockManagerImpl& manager,
+    std::deque<Sequence>& storage) {
+  const int32_t block_size = 4;
+  const int32_t blocks_per_seq = (prompt_len + block_size - 1) / block_size;
+  std::vector<int32_t> prompt(prompt_len);
+  for (int32_t i = 0; i < prompt_len; ++i) {
+    prompt[i] = (i % 97) + 1;
+  }
+  std::vector<Sequence*> sequences;
+  sequences.reserve(batch_size);
+  for (int32_t i = 0; i < batch_size; ++i) {
+    storage.push_back(make_basic_sequence(prompt));
+    Sequence& seq = storage.back();
+    seq.add_blocks(BlockType::KV, manager.allocate(blocks_per_seq));
+    sequences.push_back(&seq);
+  }
+  return sequences;
+}
+
+// Run `iters` builds of a fresh decode batch of `batch_size` sequences and
+// return the average wall-clock cost of build_forward_input in milliseconds.
+// Sequences are rebuilt every iteration because build_forward_input mutates
+// per-sequence KV-cache state. One untimed warmup build runs first to absorb
+// one-time lazy initialization (torch allocators/kernels) that would otherwise
+// be charged entirely to whichever batch runs first. When `thread_pool` is
+// non-null and the batch is at least as large as the pool, the builder takes
+// its multithreaded path.
+double average_build_ms(int32_t batch_size,
+                        int32_t iters,
+                        ThreadPool* thread_pool) {
+  const uint32_t block_size = 4;
+  double total_ms = 0.0;
+  for (int32_t iter = -1; iter < iters; ++iter) {
+    const bool is_warmup = iter < 0;
+    BlockManager::Options options;
+    options.num_blocks(batch_size + 16).block_size(block_size);
+    BlockManagerImpl manager(options);
+
+    std::deque<Sequence> storage;
+    std::vector<Sequence*> sequences =
+        build_decode_smoke_sequences(batch_size, manager, storage);
+
+    std::vector<uint32_t> allowed_max_tokens(batch_size, 1u);
+    std::vector<torch::Tensor> input_embeddings_vec;
+    std::vector<MMData> mm_data_vec;
+    ModelArgs args;
+    BatchInputBuilder builder(sequences,
+                              allowed_max_tokens,
+                              input_embeddings_vec,
+                              mm_data_vec,
+                              /*swap_block_transfer_infos=*/nullptr,
+                              /*batch_id=*/1,
+                              &args,
+                              BatchForwardType::DECODE,
+                              /*cp_size=*/1,
+                              thread_pool);
+
+    const auto start = std::chrono::steady_clock::now();
+    ForwardInput forward_input =
+        builder.build_forward_input(/*num_decoding_tokens=*/1,
+                                    /*min_decoding_batch_size=*/0);
+    const double elapsed_ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - start)
+                                  .count();
+    if (!is_warmup) {
+      total_ms += elapsed_ms;
+    }
+
+    EXPECT_EQ(forward_input.input_params.meta.num_sequences, batch_size);
+    EXPECT_EQ(forward_input.token_ids.numel(), batch_size);
+  }
+  return total_ms / iters;
+}
+
+struct PhaseTiming {
+  double total_ms = 0.0;
+  double process_ms = 0.0;
+  double finalize_ms = 0.0;
+};
+
+// Like average_build_ms, but splits each build into the parallelized
+// process_sequences() phase and the serial state_to_forward_input() phase so
+// the benchmark can show which phase dominates. One untimed warmup runs first.
+PhaseTiming average_phase_ms(int32_t batch_size,
+                             int32_t iters,
+                             ThreadPool* thread_pool) {
+  const uint32_t block_size = 4;
+  PhaseTiming acc;
+  for (int32_t iter = -1; iter < iters; ++iter) {
+    const bool is_warmup = iter < 0;
+    BlockManager::Options options;
+    options.num_blocks(batch_size + 16).block_size(block_size);
+    BlockManagerImpl manager(options);
+
+    std::deque<Sequence> storage;
+    std::vector<Sequence*> sequences =
+        build_decode_smoke_sequences(batch_size, manager, storage);
+
+    std::vector<uint32_t> allowed_max_tokens(batch_size, 1u);
+    std::vector<torch::Tensor> input_embeddings_vec;
+    std::vector<MMData> mm_data_vec;
+    ModelArgs args;
+    BatchInputBuilder builder(sequences,
+                              allowed_max_tokens,
+                              input_embeddings_vec,
+                              mm_data_vec,
+                              /*swap_block_transfer_infos=*/nullptr,
+                              /*batch_id=*/1,
+                              &args,
+                              BatchForwardType::DECODE,
+                              /*cp_size=*/1,
+                              thread_pool);
+
+    double process_ms = 0.0;
+    double finalize_ms = 0.0;
+    ForwardInput forward_input = BatchInputBuilderTestPeer::run_phases_timed(
+        builder, &process_ms, &finalize_ms);
+    if (!is_warmup) {
+      acc.process_ms += process_ms;
+      acc.finalize_ms += finalize_ms;
+      acc.total_ms += process_ms + finalize_ms;
+    }
+
+    EXPECT_EQ(forward_input.input_params.meta.num_sequences, batch_size);
+    EXPECT_EQ(forward_input.token_ids.numel(), batch_size);
+  }
+  acc.total_ms /= iters;
+  acc.process_ms /= iters;
+  acc.finalize_ms /= iters;
+  return acc;
+}
+
+// Average build_forward_input cost for a PREFILL batch of `batch_size`
+// sequences, each with `prompt_len` prompt tokens. Unlike the decode helper,
+// per-sequence work here scales with prompt_len, so the parallelized
+// process_sequences() phase has real work to distribute. One untimed warmup.
+double average_prefill_build_ms(int32_t batch_size,
+                                int32_t prompt_len,
+                                int32_t iters,
+                                ThreadPool* thread_pool) {
+  const uint32_t block_size = 4;
+  const int32_t blocks_per_seq = (prompt_len + block_size - 1) / block_size;
+  double total_ms = 0.0;
+  for (int32_t iter = -1; iter < iters; ++iter) {
+    const bool is_warmup = iter < 0;
+    BlockManager::Options options;
+    options.num_blocks(batch_size * blocks_per_seq + 16).block_size(block_size);
+    BlockManagerImpl manager(options);
+
+    std::deque<Sequence> storage;
+    std::vector<Sequence*> sequences =
+        build_prefill_smoke_sequences(batch_size, prompt_len, manager, storage);
+
+    std::vector<uint32_t> allowed_max_tokens(batch_size,
+                                             static_cast<uint32_t>(prompt_len));
+    std::vector<torch::Tensor> input_embeddings_vec;
+    std::vector<MMData> mm_data_vec;
+    ModelArgs args;
+    BatchInputBuilder builder(sequences,
+                              allowed_max_tokens,
+                              input_embeddings_vec,
+                              mm_data_vec,
+                              /*swap_block_transfer_infos=*/nullptr,
+                              /*batch_id=*/1,
+                              &args,
+                              BatchForwardType::PREFILL,
+                              /*cp_size=*/1,
+                              thread_pool);
+
+    const auto start = std::chrono::steady_clock::now();
+    ForwardInput forward_input =
+        builder.build_forward_input(/*num_decoding_tokens=*/1,
+                                    /*min_decoding_batch_size=*/0);
+    const double elapsed_ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - start)
+                                  .count();
+    if (!is_warmup) {
+      total_ms += elapsed_ms;
+    }
+
+    EXPECT_EQ(forward_input.input_params.meta.num_sequences, batch_size);
+    EXPECT_EQ(forward_input.token_ids.numel(), batch_size * prompt_len);
+  }
+  return total_ms / iters;
 }
 
 }  // namespace
@@ -2117,6 +2353,86 @@ TEST(BatchTest, DPBalanceShuffle) {
   EXPECT_EQ(shifted_indices[1], 24);
   EXPECT_EQ(shifted_indices[47], 1);
   EXPECT_EQ(shifted_indices[2], 25);
+}
+
+// Smoke test: sweep batch sizes and, for each, report single-threaded vs
+// multithreaded (8-worker pool) build_forward_input latency plus the split
+// between the parallelized process_sequences() phase and the serial
+// state_to_forward_input() phase. This diagnoses where time goes and at which
+// batch size the multithreaded path starts to pay off. Not a strict latency
+// gate; assertions only check the produced shape (inside the helpers).
+TEST(BatchInputBuilderSmokeTest, BatchSizeSweepThreadingBreakdown) {
+  const std::vector<int32_t> batch_sizes = {32, 128, 512, 2048, 5120};
+  constexpr int32_t kIters = 10;
+  ThreadPool thread_pool(/*num_threads=*/8);
+
+  std::cout << "[ SMOKE    ] build_forward_input latency sweep (avg of "
+            << kIters << " iters, " << thread_pool.size() << "-thread pool)\n"
+            << "[ SMOKE    ] batch |  1-thread |  N-thread | speedup | "
+               "process(1t) | process(Nt) | finalize\n";
+  for (int32_t batch_size : batch_sizes) {
+    const double st_ms =
+        average_build_ms(batch_size, kIters, /*thread_pool=*/nullptr);
+    const double mt_ms = average_build_ms(batch_size, kIters, &thread_pool);
+    const PhaseTiming st_phases =
+        average_phase_ms(batch_size, kIters, /*thread_pool=*/nullptr);
+    const PhaseTiming mt_phases =
+        average_phase_ms(batch_size, kIters, &thread_pool);
+
+    char line[256];
+    std::snprintf(line,
+                  sizeof(line),
+                  "[ SMOKE    ] %5d | %8.3f | %8.3f | %6.2fx | %10.3f | "
+                  "%10.3f | %8.3f",
+                  batch_size,
+                  st_ms,
+                  mt_ms,
+                  mt_ms > 0.0 ? st_ms / mt_ms : 0.0,
+                  st_phases.process_ms,
+                  mt_phases.process_ms,
+                  st_phases.finalize_ms);
+    std::cout << line << std::endl;
+
+    EXPECT_GT(st_ms, 0.0);
+    EXPECT_GT(mt_ms, 0.0);
+  }
+}
+
+// Smoke test: same sweep but with PREFILL sequences that carry a real
+// per-sequence token workload. This is the regime the multithreaded builder
+// targets: with meaningful work per sequence, process_sequences() distributes
+// across workers and the N-thread path should beat single-threaded at larger
+// batches. Contrast with the decode sweep above, where per-sequence work is a
+// single token and threading cannot amortize its fixed dispatch+merge cost.
+TEST(BatchInputBuilderSmokeTest, PrefillBatchSizeSweepThreadingSpeedup) {
+  const std::vector<int32_t> batch_sizes = {32, 128, 512, 1024};
+  constexpr int32_t kPromptLen = 512;
+  constexpr int32_t kIters = 10;
+  ThreadPool thread_pool(/*num_threads=*/8);
+
+  std::cout << "[ SMOKE    ] prefill build_forward_input sweep (prompt_len="
+            << kPromptLen << ", avg of " << kIters << " iters, "
+            << thread_pool.size() << "-thread pool)\n"
+            << "[ SMOKE    ] batch |  1-thread |  N-thread | speedup\n";
+  for (int32_t batch_size : batch_sizes) {
+    const double st_ms = average_prefill_build_ms(
+        batch_size, kPromptLen, kIters, /*thread_pool=*/nullptr);
+    const double mt_ms =
+        average_prefill_build_ms(batch_size, kPromptLen, kIters, &thread_pool);
+
+    char line[256];
+    std::snprintf(line,
+                  sizeof(line),
+                  "[ SMOKE    ] %5d | %8.3f | %8.3f | %6.2fx",
+                  batch_size,
+                  st_ms,
+                  mt_ms,
+                  mt_ms > 0.0 ? st_ms / mt_ms : 0.0);
+    std::cout << line << std::endl;
+
+    EXPECT_GT(st_ms, 0.0);
+    EXPECT_GT(mt_ms, 0.0);
+  }
 }
 
 }  // namespace xllm

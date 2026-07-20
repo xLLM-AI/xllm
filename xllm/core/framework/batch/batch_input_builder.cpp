@@ -381,6 +381,19 @@ void BatchInputBuilder::process_sequences_multithreaded() {
 
   for (auto& thread_state : thread_builder_states) {
     thread_state.batch_forward_type = state_.batch_forward_type;
+    // Reserve per-thread scratch so parallel processing does not repeatedly
+    // reallocate (which serializes on the allocator and erodes the speedup).
+    thread_state.block_tables_vec.reserve(sequences_per_thread);
+    thread_state.new_token_slot_ids.reserve(sequences_per_thread);
+    thread_state.kv_cache_tokens_nums.reserve(sequences_per_thread);
+#if defined(USE_NPU) || defined(USE_MUSA)
+    thread_state.seq_lens.reserve(sequences_per_thread);
+    thread_state.q_seq_lens.reserve(sequences_per_thread);
+#endif
+    thread_state.embedding_ids.reserve(sequences_per_thread);
+    thread_state.linear_state_ids.reserve(sequences_per_thread);
+    thread_state.request_ids.reserve(sequences_per_thread);
+    thread_state.extra_token_ids.reserve(sequences_per_thread);
   }
 
   // parallel processing function
@@ -419,6 +432,42 @@ void BatchInputBuilder::process_sequences_multithreaded() {
 
   // Wait for all tasks to complete
   counter.wait();
+
+  // Pre-reserve the destination vectors to their exact final sizes so the
+  // serial merge does a single allocation per field instead of growing
+  // geometrically across thread states. The merge is O(total work) and runs
+  // single-threaded, so realloc churn here directly caps the achievable
+  // multithreaded speedup.
+  size_t total_tokens = 0;
+  size_t total_seqs = 0;
+  size_t total_slots = 0;
+  size_t total_paged_indices = 0;
+  for (const auto& state : thread_builder_states) {
+    total_tokens += state.flatten_tokens_vec.size();
+    total_seqs += state.block_tables_vec.size();
+    total_slots += state.new_token_slot_ids.size();
+    total_paged_indices += state.paged_kv_indices.size();
+  }
+  state_.flatten_tokens_vec.reserve(total_tokens);
+  if (!use_mrope_) {
+    state_.flatten_positions_vec.reserve(total_tokens);
+  } else {
+    state_.mrope_positions_vec.reserve(total_seqs);
+  }
+  state_.block_tables_vec.reserve(total_seqs);
+  state_.new_token_slot_ids.reserve(total_slots);
+  state_.kv_cache_tokens_nums.reserve(total_seqs);
+#if defined(USE_NPU) || defined(USE_MUSA)
+  state_.seq_lens.reserve(total_seqs);
+  state_.q_seq_lens.reserve(total_seqs);
+#endif
+  state_.embedding_ids.reserve(total_seqs);
+  state_.linear_state_ids.reserve(total_seqs);
+  state_.request_ids.reserve(total_seqs);
+  state_.extra_token_ids.reserve(total_seqs);
+  state_.paged_kv_indices.reserve(total_paged_indices);
+  state_.paged_kv_indptr.reserve(total_seqs + 1);
+  state_.paged_kv_last_page_len.reserve(total_seqs);
 
   // Merge results from all threads
   for (const auto& state : thread_builder_states) {
