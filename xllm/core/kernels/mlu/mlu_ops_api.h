@@ -433,7 +433,9 @@ torch::Tensor gated_layer_norm(torch::Tensor& x,
 torch::Tensor gemma_rms_norm(const torch::Tensor& x,
                              const torch::Tensor& gamma,
                              double eps,
-                             torch::Tensor& norm_out);
+                             torch::Tensor& norm_out,
+                             const std::optional<torch::Tensor>& residual,
+                             std::optional<torch::Tensor>& residual_out);
 
 std::tuple<torch::Tensor, torch::Tensor> moe_softplus_topk(
     const torch::Tensor& input,
@@ -515,12 +517,48 @@ fused_recurrent_gated_delta_rule_packed_decode(
     const torch::Tensor& ssm_state_indices,
     bool use_qk_l2norm_in_kernel = true);
 
+std::tuple<torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor,
+           torch::Tensor>
+fused_post_conv_prep(const torch::Tensor& conv_output,
+                     const torch::Tensor& a,
+                     const torch::Tensor& b,
+                     const torch::Tensor& A_log,
+                     const torch::Tensor& dt_bias,
+                     int64_t num_k_heads,
+                     int64_t head_k_dim,
+                     int64_t head_v_dim,
+                     bool apply_l2norm = true,
+                     bool output_g_exp = false);
+
+std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
+    const torch::Tensor& A_log,
+    torch::Tensor& a,
+    torch::Tensor& b,
+    const torch::Tensor& dt_bias,
+    torch::Tensor& q,
+    torch::Tensor& k,
+    torch::Tensor& v,
+    torch::Tensor& initial_state,
+    torch::Tensor& ssm_state_indices,
+    torch::Tensor& cu_seqlens,
+    double scale,
+    bool use_qk_l2norm_in_kernel = true,
+    float softplus_beta = 1.0f,
+    float softplus_threshold = 20.0f,
+    const std::optional<torch::Tensor>& num_accepted_tokens_opt = std::nullopt,
+    bool inplace_final_state = true,
+    bool is_kda = false);
+
 torch::Tensor causal_conv1d_update_decode(
     const torch::Tensor& x,
     torch::Tensor& conv_state,
     const torch::Tensor& weight,
     const std::optional<torch::Tensor>& bias_opt,
-    const torch::Tensor& conv_state_indices,
+    const std::optional<torch::Tensor>& conv_state_indices_opt,
+    bool activation = true,
     int32_t pad_slot_id = -1,
     const std::optional<torch::Tensor>& query_start_loc_opt = std::nullopt,
     int32_t max_query_len = -1,

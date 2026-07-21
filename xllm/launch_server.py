@@ -101,14 +101,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Launch only this rank. If omitted, local ranks 0..nnodes-1 are launched.",
     )
     parser.add_argument(
-        "--start-device-id",
-        "--start_device_id",
-        dest="start_device_id",
-        type=int,
-        default=0,
-        help="Base logical device id. Local multi-rank launch uses id + rank.",
-    )
-    parser.add_argument(
         "--log-dir",
         "--log_dir",
         dest="log_dir",
@@ -195,8 +187,6 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--nnodes must be greater than 0")
     if args.start_port < 1 or args.start_port > 65535:
         parser.error("--port/--start-port must be in range [1, 65535]")
-    if args.start_device_id < 0:
-        parser.error("--start-device-id must be greater than or equal to 0")
     if args.node_rank is not None and (
         args.node_rank < 0 or args.node_rank >= args.nnodes
     ):
@@ -224,15 +214,6 @@ def _resolve_port(
     return args.start_port
 
 
-def _resolve_device_id(
-    args: argparse.Namespace,
-    rank: int,
-    launches_all_local_ranks: bool,
-) -> int:
-    rank_offset = rank if launches_all_local_ranks else 0
-    return args.start_device_id + rank_offset
-
-
 def _build_command(
     binary_path: str,
     args: argparse.Namespace,
@@ -241,7 +222,6 @@ def _build_command(
     launches_all_local_ranks: bool,
 ) -> list[str]:
     port = _resolve_port(args, rank, launches_all_local_ranks)
-    device_id = _resolve_device_id(args, rank, launches_all_local_ranks)
 
     command = [binary_path]
     if args.config_json_file is not None:
@@ -249,7 +229,6 @@ def _build_command(
     command.append(f"--port={port}")
     command.append(f"--nnodes={args.nnodes}")
     command.append(f"--node_rank={rank}")
-    command.append(f"--device_id={device_id}")
     command.extend(extra_args)
     return command
 

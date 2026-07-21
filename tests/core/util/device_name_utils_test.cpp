@@ -26,15 +26,9 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-TEST(DeviceNameUtilsTest, ToDeviceStringUsesCompiledDeviceType) {
-  const std::string device_string = DeviceNameUtils::to_device_string(3);
-
-  EXPECT_EQ(device_string, Platform::type_str() + ":3");
-}
-
 TEST(DeviceNameUtilsTest, ParseGeneratedDeviceString) {
   const std::vector<torch::Device> devices =
-      DeviceNameUtils::parse_devices(DeviceNameUtils::to_device_string(2));
+      DeviceNameUtils::parse_devices(Platform::type_str() + ":2");
 
   ASSERT_EQ(devices.size(), 1);
   EXPECT_EQ(devices[0].type(), Platform::type_torch());

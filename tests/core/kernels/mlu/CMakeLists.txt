@@ -14,6 +14,7 @@ cc_test(
     fused_recurrent_gated_delta_rule_test.cpp
     chunk_gated_delta_rule_regression_test.cpp
     fused_recurrent_gated_delta_rule_beta_regression_test.cpp
+    fused_sigmoid_update_regression_test.cpp
   DEPS
     :triton_jit
     :mlu_kernels

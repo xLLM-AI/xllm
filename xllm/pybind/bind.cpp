@@ -40,9 +40,7 @@ PYBIND11_MODULE(xllm_export, m) {
   py::class_<Options>(m, "Options")
       .def(py::init())
       .def_readwrite("model_path", &Options::model_path_)
-      .def_readwrite("devices", &Options::devices_)
       .def_readwrite("draft_model_path", &Options::draft_model_path_)
-      .def_readwrite("draft_devices", &Options::draft_devices_)
       .def_readwrite("backend", &Options::backend_)
       .def_readwrite("limit_image_per_prompt",
                      &Options::limit_image_per_prompt_)

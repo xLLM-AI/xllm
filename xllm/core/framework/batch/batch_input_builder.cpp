@@ -46,6 +46,15 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+// Minimum estimated total query tokens in a batch before process_sequences
+// takes the multithreaded path. Below this, the fixed thread-dispatch plus
+// O(total-tokens) serial-merge overhead outweighs the parallel savings, so the
+// single-threaded path is faster (measured: decode batches of thousands of
+// 1-token sequences and small prefill batches all regress under threading;
+// only large prefill workloads above this range benefit). Chosen conservatively
+// so decode always stays single-threaded while large prefill still fans out.
+constexpr size_t kMultithreadTokenThreshold = 65536;
+
 uint32_t get_sample_source_position(const SampleSlot& sample_slot) {
   if (sample_slot.token_position == 0) {
     return 0;
@@ -357,7 +366,26 @@ ForwardInput BatchInputBuilder::build_forward_input(
 }
 
 void BatchInputBuilder::process_sequences() {
-  if (thread_pool_ && num_sequences_ >= thread_pool_->size()) {
+  // Multithreading only helps when the parallelized per-sequence work is large
+  // enough to amortize the fixed thread-dispatch cost plus the serial merge of
+  // per-thread states (which is O(total tokens)). Decode batches carry ~1 query
+  // token per sequence, so even thousands of sequences stay far below that
+  // break-even and run faster single-threaded. Gate on the estimated total
+  // query-token workload, not just the sequence count. The estimate mirrors the
+  // q_seq_len computed in process_single_sequence and uses only O(1) accessors.
+  bool use_multithread = thread_pool_ && num_sequences_ >= thread_pool_->size();
+  if (use_multithread) {
+    size_t total_query_tokens = 0;
+    for (int32_t i = 0; i < num_sequences_; ++i) {
+      const Sequence* sequence = sequences_[i];
+      const size_t need_compute = sequence->num_need_compute_tokens();
+      total_query_tokens +=
+          std::min(need_compute, static_cast<size_t>(allowed_max_tokens_[i]));
+    }
+    use_multithread = total_query_tokens >= kMultithreadTokenThreshold;
+  }
+
+  if (use_multithread) {
     process_sequences_multithreaded();
   } else {
     for (int32_t i = 0; i < num_sequences_; ++i) {

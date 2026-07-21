@@ -297,7 +297,8 @@ message DiTForwardInput {
 }
 
 message DiTForwardOutput {
-  TensorList tensors = 1; 
+  TensorList tensors = 1;
+  repeated string text_output = 2;
 }
 
 message DiTGenerationParams {
@@ -307,7 +308,9 @@ message DiTGenerationParams {
   float true_cfg_scale = 4;
   float guidance_scale = 5;
   uint32 num_images_per_prompt = 6;
-  int64 seed = 7;
+  // Use optional so has_seed() can distinguish "not set" (stochastic for Cola-DLM)
+  // from "seed=0" (deterministic with base_seed=0).
+  optional int64 seed = 7;
   int32 max_sequence_length = 8;
   float strength = 9;
   bool enable_cfg_renorm = 10;
@@ -320,6 +323,15 @@ message DiTGenerationParams {
   float boundary_ratio = 17;
   float flow_shift = 18;
   uint32 num_videos_per_prompt = 19;
+  // Text diffusion parameters (Cola-DLM)
+  optional int32 max_new_tokens = 20;
+  optional int32 diffusion_steps = 21;
+  optional float temperature = 22;
+  optional int32 top_k = 23;
+  optional float top_p = 24;
+  optional float repetition_penalty = 25;
+  // Explicit flag: true when the client set seed (including seed=0).
+  bool seed_is_set = 26;
 }
 
 message PackedForwardInput {
