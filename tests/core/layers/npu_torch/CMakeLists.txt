@@ -57,3 +57,33 @@ target_link_options(npu_linear_w8a8_dynamic_test PRIVATE
   "-Wl,--whole-archive"
   "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
   "-Wl,--no-whole-archive")
+
+# Pure-CPU metadata unit test for DSA-CP (M0). No device ops; validates the
+# host-side token-partition math in DSAMetadataBuilder::build_cp_local_metadata.
+cc_test(
+  NAME
+    npu_dsa_cp_metadata_test
+  SRCS
+    dsa_cp_metadata_tests.cpp
+  DEPS
+    :common_layers
+    :parallel_state
+    :model
+    :state_dict
+    glog::glog
+    torch
+    GTest::gtest_main
+)
+
+target_link_libraries(npu_dsa_cp_metadata_test
+                      PRIVATE
+                      ascendcl
+                      hccl
+                      c_sec
+                      nnopbase
+                      atb)
+
+target_link_options(npu_dsa_cp_metadata_test PRIVATE
+  "-Wl,--whole-archive"
+  "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+  "-Wl,--no-whole-archive")

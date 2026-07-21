@@ -111,6 +111,10 @@ DECLARE_int32(ep_size);
 
 DECLARE_int32(cp_size);
 
+DECLARE_bool(enable_dsa_cp);
+
+DECLARE_int32(dsa_cp_kv_interleave_size);
+
 DECLARE_int64(tp_size);
 
 DECLARE_int64(sp_size);

@@ -822,8 +822,18 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
   // already-partitioned device tensors; see ForwardInput::cp_partitioned.
   // Prefill-side CP (partition + ATB cp tensors) applies to PREFILL,
   // CHUNKED_PREFILL, and MIXED. `no_decode()` wrongly excludes MIXED.
+  // DSA-CP (DeepSeek-V4) uses MODEL-side token partitioning: the worker keeps
+  // the FULL token stream and the DSAttention layer slices its local query
+  // token range internally (vllm-ascend dsa_cp.py style), so the worker-side
+  // head-tail CP partition + ATB cp-tensor prep must be skipped here. Gated by
+  // FLAGS_enable_dsa_cp so the legacy worker-side CP path is unchanged when the
+  // feature is off. NPU-only (Platform::supports_dsa_cp_model_partition()).
+  const bool dsa_cp_model_side = FLAGS_enable_dsa_cp &&
+                                 parallel_args_.cp_size() > 1 &&
+                                 Platform::supports_dsa_cp_model_partition();
   const bool needs_cp_prefill_side =
       parallel_args_.cp_size() > 1 && !Platform::uses_model_cp_partition() &&
+      !dsa_cp_model_side &&
       !input.input_params.meta.batch_forward_type.is_decode();
   const bool needs_cp_partition =
       needs_cp_prefill_side && !input.cp_partitioned;

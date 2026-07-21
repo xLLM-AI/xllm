@@ -32,6 +32,7 @@ limitations under the License.
 #include <unordered_set>
 #include <utility>
 
+#include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/state_dict/utils.h"
@@ -431,6 +432,20 @@ class DeepseekV4ModelImpl
         << ", world_size=" << parallel_args.world_size()
         << ", dp_size=" << parallel_args.dp_size();
     tp_num_heads_ = num_heads_ / dp_local_tp_size_;
+    // DSA-CP Model 1 (CP == TP): a single switch (FLAGS_enable_dsa_cp) enables
+    // context parallelism and the CP geometry is DERIVED from TP - the TP group
+    // is the CP token-split group. The launcher keeps config cp_size == 1, so
+    // the CP width equals the DP-local TP width and the CP rank is the TP rank.
+    // This must match DSAttentionImpl's constructor so the precomputed sparse
+    // metadata (local cu_seqlens) is built for the same local token slice the
+    // attention runs on. When the flag is off, fall back to config cp_size.
+    if (FLAGS_enable_dsa_cp && dp_local_tp_size_ > 1) {
+      cp_size_ = dp_local_tp_size_;
+      cp_rank_ = parallel_args.rank() % dp_local_tp_size_;
+    } else {
+      cp_size_ = std::max<int64_t>(parallel_args.cp_size(), 1);
+      cp_rank_ = std::max<int64_t>(parallel_args.cp_rank(), 0);
+    }
     window_size_ = model_args.window_size();
     index_n_heads_ = model_args.index_n_heads();
     index_head_dim_ = model_args.index_head_dim();
@@ -820,8 +835,17 @@ class DeepseekV4ModelImpl
       }
 #endif
     }
+    torch::Tensor pre_hc_head_hidden_states;
+    if (model_args_.num_speculative_tokens() > 0) {
+      pre_hc_head_hidden_states = h;
+    }
     h = hc_head(h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
+    if (pre_hc_head_hidden_states.defined()) {
+      ModelOutput out(hidden_states, residual_out);
+      out.aux_hidden_states = pre_hc_head_hidden_states.flatten(1);
+      return out;
+    }
     return ModelOutput(hidden_states, residual_out);
   }
 
@@ -1367,17 +1391,57 @@ class DeepseekV4ModelImpl
         is_prefill ? as_optional_tensor(dsa.actual_seq_lengths_query)
                    : empty_int32_opt;
 
+    // DSA-CP: every sparse-attn / indexer-topk call downstream runs on
+    // this rank's LOCAL query slice, so the precomputed tiling metadata
+    // must be built from LOCAL cu-seqlens too. Using the full geometry
+    // makes the kernel index q past the local row count -> MTE DDR
+    // out-of-range. Compressor / indexer-cache keep the full geometry
+    // (they are not driven by this precomputed metadata).
+    torch::Tensor md_cu_q = dsa.actual_seq_lengths_query;
+    torch::Tensor md_seqused_kv = dsa.actual_seq_lengths_kv;
+    // ori_kv cu-seqlens default to the query cu-seqlens: in full (non-CP)
+    // prefill q and ori_kv span the same token range, so they coincide. Under
+    // CP they diverge (local q, full right-aligned kv) and md_cu_ori_kv must
+    // follow the KV extent, not the local query count.
+    torch::Tensor md_cu_ori_kv = dsa.actual_seq_lengths_query;
+    int64_t md_batch = batch_size;
+    int64_t md_max_q = max_seqlen_q;
+    const bool dsa_cp_md = FLAGS_enable_dsa_cp && cp_size_ > 1 && is_prefill;
+    if (dsa_cp_md) {
+      auto cpm = layer::DSAMetadataBuilder::build_cp_local_metadata(
+          dsa.actual_seq_lengths_query,
+          dsa.actual_seq_lengths_kv,
+          static_cast<int32_t>(cp_size_),
+          static_cast<int32_t>(cp_rank_));
+      if (cpm.local_query_start_loc.defined() && cpm.local_seq_lens.defined()) {
+        md_cu_q = cpm.local_query_start_loc.to(metadata_device);
+        md_seqused_kv = cpm.local_seq_lens.to(metadata_device);
+        md_batch = std::max<int64_t>(cpm.local_seq_lens.size(0), 1);
+        md_max_q = std::max<int64_t>(cpm.tokens_per_rank, 1);
+        // Right-aligned ori_kv cu-seqlens (cumsum of local_seq_lens). The last
+        // rank's local queries see the full KV stream, so this must not reuse
+        // the local query cu-seqlens (that reads the wrong, earlier KV slice).
+        if (cpm.local_kv_start_loc.defined()) {
+          md_cu_ori_kv = cpm.local_kv_start_loc.to(metadata_device);
+        }
+      }
+    }
+    auto md_cu_q_opt = as_optional_tensor(md_cu_q);
+    auto md_seqused_kv_opt = as_optional_tensor(md_seqused_kv);
+    auto md_cu_ori_kv_opt =
+        is_prefill ? as_optional_tensor(md_cu_ori_kv) : empty_int32_opt;
+
     xllm::kernel::SparseAttnSharedkvMetadataParams c1_params;
     c1_params.num_heads_q = tp_num_heads_;
     c1_params.num_heads_kv = 1;
     c1_params.head_dim = head_dim_;
-    c1_params.cu_seqlens_q = as_optional_tensor(dsa.actual_seq_lengths_query);
-    c1_params.cu_seqlens_ori_kv = cu_seqlens_ori_kv_opt;
+    c1_params.cu_seqlens_q = md_cu_q_opt;
+    c1_params.cu_seqlens_ori_kv = md_cu_ori_kv_opt;
     c1_params.cu_seqlens_cmp_kv = empty_int32_opt;
     c1_params.seqused_q = empty_int32_opt;
-    c1_params.seqused_kv = as_optional_tensor(dsa.actual_seq_lengths_kv);
-    c1_params.batch_size = batch_size;
-    c1_params.max_seqlen_q = max_seqlen_q;
+    c1_params.seqused_kv = md_seqused_kv_opt;
+    c1_params.batch_size = md_batch;
+    c1_params.max_seqlen_q = md_max_q;
     c1_params.max_seqlen_kv = max_seqlen_kv;
     c1_params.ori_topk = 0;
     c1_params.cmp_topk = 0;
@@ -1396,13 +1460,13 @@ class DeepseekV4ModelImpl
     c4_params.num_heads_q = tp_num_heads_;
     c4_params.num_heads_kv = 1;
     c4_params.head_dim = head_dim_;
-    c4_params.cu_seqlens_q = as_optional_tensor(dsa.actual_seq_lengths_query);
-    c4_params.cu_seqlens_ori_kv = cu_seqlens_ori_kv_opt;
+    c4_params.cu_seqlens_q = md_cu_q_opt;
+    c4_params.cu_seqlens_ori_kv = md_cu_ori_kv_opt;
     c4_params.cu_seqlens_cmp_kv = empty_int32_opt;
     c4_params.seqused_q = empty_int32_opt;
-    c4_params.seqused_kv = as_optional_tensor(dsa.actual_seq_lengths_kv);
-    c4_params.batch_size = batch_size;
-    c4_params.max_seqlen_q = max_seqlen_q;
+    c4_params.seqused_kv = md_seqused_kv_opt;
+    c4_params.batch_size = md_batch;
+    c4_params.max_seqlen_q = md_max_q;
     c4_params.max_seqlen_kv = max_seqlen_kv;
     c4_params.ori_topk = 0;
     c4_params.cmp_topk = sparse_topk;
@@ -1421,13 +1485,13 @@ class DeepseekV4ModelImpl
     c128_params.num_heads_q = tp_num_heads_;
     c128_params.num_heads_kv = 1;
     c128_params.head_dim = head_dim_;
-    c128_params.cu_seqlens_q = as_optional_tensor(dsa.actual_seq_lengths_query);
-    c128_params.cu_seqlens_ori_kv = cu_seqlens_ori_kv_opt;
+    c128_params.cu_seqlens_q = md_cu_q_opt;
+    c128_params.cu_seqlens_ori_kv = md_cu_ori_kv_opt;
     c128_params.cu_seqlens_cmp_kv = empty_int32_opt;
     c128_params.seqused_q = empty_int32_opt;
-    c128_params.seqused_kv = as_optional_tensor(dsa.actual_seq_lengths_kv);
-    c128_params.batch_size = batch_size;
-    c128_params.max_seqlen_q = max_seqlen_q;
+    c128_params.seqused_kv = md_seqused_kv_opt;
+    c128_params.batch_size = md_batch;
+    c128_params.max_seqlen_q = md_max_q;
     c128_params.max_seqlen_kv = max_seqlen_kv;
     c128_params.ori_topk = 0;
     c128_params.cmp_topk = 0;
@@ -1469,6 +1533,35 @@ class DeepseekV4ModelImpl
       return;
     }
 
+    // DSA-CP: the indexer runs top-k selection on this rank's LOCAL query
+    // slice (see deepseek_sparse_attention.cpp: idx_q_cu/idx_kv are the
+    // local cu-seqlens). The precomputed qli_metadata must describe the same
+    // LOCAL query geometry, otherwise the indexer collapses its selection to
+    // position 0 (topk_max==0) and attention degenerates. KV stays FULL
+    // (CP splits Q only), so max_seqlen_k keeps the full value. This mirrors
+    // the c1/c4/c128 md_* localization above.
+    int64_t qli_local_max_q = 0;
+    if (dsa_cp_md) {
+      auto qli_cpm = layer::DSAMetadataBuilder::build_cp_local_metadata(
+          dsa.actual_seq_lengths_query,
+          dsa.actual_seq_lengths_kv,
+          static_cast<int32_t>(cp_size_),
+          static_cast<int32_t>(cp_rank_));
+      if (qli_cpm.local_query_start_loc.defined() &&
+          qli_cpm.local_query_start_loc.size(0) > 1 &&
+          qli_cpm.local_seq_lens.defined()) {
+        // Drop the leading 0 to match the query_lens convention above.
+        query_lens = qli_cpm.local_query_start_loc
+                         .slice(/*dim=*/0,
+                                /*start=*/1,
+                                /*end=*/qli_cpm.local_query_start_loc.size(0))
+                         .clone()
+                         .to(metadata_device);
+        key_lens = qli_cpm.local_seq_lens.to(metadata_device);
+        qli_local_max_q = std::max<int64_t>(qli_cpm.tokens_per_rank, 1);
+      }
+    }
+
     const int64_t global_index_num_heads =
         std::max<int64_t>(index_n_heads_ > 0 ? index_n_heads_ : num_heads_, 1);
     CHECK_EQ(global_index_num_heads % dp_local_tp_size_, 0)
@@ -1479,8 +1572,11 @@ class DeepseekV4ModelImpl
     const int64_t index_head_dim =
         std::max<int64_t>(index_head_dim_ > 0 ? index_head_dim_ : head_dim_, 1);
     const int64_t qli_max_seqlen_q =
-        std::max<int64_t>(params.meta.q_max_seq_len,
-                          vector_max_or_zero(params.attention.host.q_seq_lens));
+        qli_local_max_q > 0
+            ? qli_local_max_q
+            : std::max<int64_t>(
+                  params.meta.q_max_seq_len,
+                  vector_max_or_zero(params.attention.host.q_seq_lens));
     const int64_t qli_max_seqlen_k = std::max<int64_t>(
         params.meta.kv_max_seq_len,
         vector_max_or_zero(params.attention.host.kv_seq_lens));
@@ -1529,6 +1625,8 @@ class DeepseekV4ModelImpl
 
   int64_t num_heads_ = 0;
   int64_t tp_num_heads_ = 0;
+  int64_t cp_size_ = 1;
+  int64_t cp_rank_ = 0;
   int64_t dp_local_tp_size_ = 1;
   int64_t head_dim_ = 0;
   int64_t window_size_ = 128;
