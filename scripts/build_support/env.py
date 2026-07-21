@@ -1,5 +1,6 @@
 import os
 import platform
+import subprocess
 
 from typing import Optional
 
@@ -292,10 +293,22 @@ def set_musa_envs() -> None:
     torch_musa_root = os.path.abspath(os.path.join(cmake_prefix, "../.."))
     library_paths: list[str] = [
         os.path.join(musa_home, "lib"),
-        "/usr/local/lib/python3.10/dist-packages/tvm_ffi/lib",
         os.path.join(torch_musa_root, "lib"),
         os.path.join(get_torch_root_path() or "", "lib"),
     ]
+    tvm_ffi_lib_dir = os.getenv("TVM_FFI_LIB_DIR")
+    if not tvm_ffi_lib_dir:
+        try:
+            tvm_ffi_lib_dir = subprocess.check_output(
+                ["tvm-ffi-config", "--libdir"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            tvm_ffi_lib_dir = None
+    if tvm_ffi_lib_dir:
+        library_paths.append(tvm_ffi_lib_dir)
+
     mkl_root = os.getenv("MKLROOT")
     if mkl_root:
         os.environ.setdefault(
