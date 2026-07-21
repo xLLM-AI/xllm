@@ -59,7 +59,8 @@ class DeepseekV4MultiTokenPredictorLayerImpl
                         layer::AttentionMetadata& attn_metadata,
                         KVCache& kv_cache,
                         const ModelInputParams& input_params,
-                        torch::Tensor tokens) {
+                        torch::Tensor tokens,
+                        torch::Tensor* aux_hidden_states) {
     ModelInputParams modified_input_params = input_params;
     modified_input_params.embedding.input_embedding = previous_hidden_states;
     std::optional<torch::Tensor> residual;
@@ -70,7 +71,8 @@ class DeepseekV4MultiTokenPredictorLayerImpl
         attn_metadata,
         kv_cache,
         modified_input_params,
-        tokens);
+        tokens,
+        aux_hidden_states);
   }
 };
 TORCH_MODULE(DeepseekV4MultiTokenPredictorLayer);
@@ -292,6 +294,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
              static_cast<int32_t>(mtp_layers_.size()))
         << "deepseek_v4_mtp requires kv_caches size >= mtp layer count";
 
+    torch::Tensor aux_hidden_states;
     for (size_t i = 0; i < mtp_layers_.size(); ++i) {
       const int32_t layer_id = static_cast<int32_t>(i);
       prepare_for_layer(*modified_input_params.attn_metadata, layer_id);
@@ -301,7 +304,8 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
                                      *modified_input_params.attn_metadata,
                                      kv_caches[i],
                                      modified_input_params,
-                                     tokens);
+                                     tokens,
+                                     &aux_hidden_states);
 #if defined(USE_NPU)
       if (modified_input_params.parallel.layer_synchronizer != nullptr &&
           !modified_input_params.parallel.layer_synchronizer->record_event(
@@ -312,7 +316,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     }
 
     auto [output, _] = final_norm_(hidden_states, std::nullopt);
-    return ModelOutput(output, std::nullopt);
+    return ModelOutput(output, torch::Tensor(), aux_hidden_states.flatten(1));
   }
 
   bool requires_graph_forward_metadata() { return true; }

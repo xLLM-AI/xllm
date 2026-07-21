@@ -820,8 +820,17 @@ class DeepseekV4ModelImpl
       }
 #endif
     }
+    torch::Tensor pre_hc_head_hidden_states;
+    if (model_args_.num_speculative_tokens() > 0) {
+      pre_hc_head_hidden_states = h;
+    }
     h = hc_head(h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
+    if (pre_hc_head_hidden_states.defined()) {
+      ModelOutput out(hidden_states, residual_out);
+      out.aux_hidden_states = pre_hc_head_hidden_states.flatten(1);
+      return out;
+    }
     return ModelOutput(hidden_states, residual_out);
   }
 

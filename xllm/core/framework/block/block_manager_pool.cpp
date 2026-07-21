@@ -44,6 +44,7 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
       .enable_prefix_cache(options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_kvcache_store(options_.enable_kvcache_store())
+      .enable_host_offload(options_.enable_host_offload())
       .sliding_window_size(options_.sliding_window_size())
       .swa_blocks_per_seq(options_.swa_blocks_per_seq())
       .max_tokens_per_batch(options_.max_tokens_per_batch())
@@ -73,13 +74,15 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
     auto leaves = build_composite_leaves(block_options, /*dp_rank=*/i);
     // SINGLE leaf needs the same concurrency wrapper as the other leaves when
     // sequence-level entry points run off the scheduler thread (disagg PD /
-    // kvcache store prefill threadpools call try_allocate concurrently).
+    // kvcache store prefill threadpools call try_allocate concurrently, and the
+    // host-offload D2H callback frees blocks off-thread).
     std::unique_ptr<BlockManager> single_leaf =
         std::make_unique<SingleBlockManager>(
             /*num_blocks=*/num_single_blocks,
             /*resource_name=*/"single block",
             /*exhaustion_message=*/"No more single-block ids available");
-    if (options_.enable_disagg_pd() || options_.enable_kvcache_store()) {
+    if (options_.enable_disagg_pd() || options_.enable_kvcache_store() ||
+        options_.enable_host_offload()) {
       single_leaf =
           std::make_unique<ConcurrentBlockManagerImpl>(std::move(single_leaf));
     }

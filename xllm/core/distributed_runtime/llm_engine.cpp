@@ -41,8 +41,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/platform/platform.h"
 #include "framework/block/block_utils.h"
-// hierarchy temporarily disabled during the block-manager refactor
-// #include "framework/block/hierarchy_block_manager_pool.h"
+#include "framework/block/hierarchy_block_manager_pool.h"
 #include "framework/kv_cache/kv_cache_estimation.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/kv_cache/kv_cache_utils.h"
@@ -617,19 +616,23 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
             kv_cache_cap.swa_count(), std::numeric_limits<uint32_t>::max())));
   }
 
-  if (options_.host_blocks_factor() > 1.0 || options_.enable_kvcache_store()) {
-    // hierarchy temporarily disabled during the block-manager refactor.
-    // host-offload / kvcache-store routes the device + host dual
-    // KVCacheState through HierarchyBlockManagerPool, which is parked while
-    // the composite block-manager refactor lands in smaller pieces. Until
-    // then this path fails loudly rather than silently degrading to a
-    // device-only pool.
-    LOG(FATAL) << "host-offload / kvcache-store is temporarily disabled during "
-                  "the block-manager refactor (hierarchy rebuild in progress). "
-                  "Please disable --host_blocks_factor and "
-                  "--enable_kvcache_store for now.";
+  if (options_.host_blocks_factor() > 1.0) {
+    // Host prefix-cache offload routes device/host blocks through a single flat
+    // BlockType::KV host pool. DeepSeek-V4 has no KV block group (its device
+    // caches are SWA/C4/C128), so collect_offload_pairs would find no KV blocks
+    // and silently offload nothing while still allocating the pinned host
+    // cache. Fail loud until per-block-type host offload is implemented.
+    CHECK(!util::is_deepseek_v4_model_type(args_.model_type()))
+        << "host_blocks_factor > 1 (host prefix-cache offload) does not "
+           "support "
+           "DeepSeek-V4 yet: its SWA/C4/C128 block groups have no KV pool to "
+           "offload. Disable --host_blocks_factor for DeepSeek-V4 models.";
+    options.enable_host_offload(true);
+    kv_cache_manager_ =
+        std::make_unique<HierarchyBlockManagerPool>(options, this, dp_size_);
+  } else {
+    kv_cache_manager_ = std::make_unique<BlockManagerPool>(options, dp_size_);
   }
-  kv_cache_manager_ = std::make_unique<BlockManagerPool>(options, dp_size_);
 
   // init kv cache for each worker in parallel
   std::vector<folly::SemiFuture<bool>> futures;
