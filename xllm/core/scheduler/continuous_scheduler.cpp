@@ -63,21 +63,23 @@ std::vector<std::shared_ptr<Request>> CancelRequestQueue::take_all() {
 BatchMode resolve_batch_mode(const ContinuousScheduler::Options& options) {
   BatchMode mode;
   mode.priority_strategy = options.priority_strategy();
+  mode.enable_chunked_prefill = options.enable_chunked_prefill();
+  mode.enable_mix_batch =
+      ::xllm::SchedulerConfig::get_instance().enable_mix_batch();
 
-  if (options.enable_chunked_prefill()) {
+  // multi_slo_and_prio requires chunked prefill.
+  if (mode.priority_strategy == "multi_slo_and_prio") {
     mode.enable_chunked_prefill = true;
-    if (options.cp_size() > 1 || options.num_speculative_tokens() > 0) {
-      // CP or MTP: prefill cannot mix with decode
-      mode.enable_mix_batch = false;
-    } else {
-      mode.enable_mix_batch = true;
-    }
   }
 
-  // multi_slo_and_prio requires mixed batch + chunked prefill
-  if (mode.priority_strategy == "multi_slo_and_prio") {
-    mode.enable_mix_batch = true;
-    mode.enable_chunked_prefill = true;
+  // CP/MTP: prefill cannot mix with decode in the same batch.
+  if (options.cp_size() > 1 || options.num_speculative_tokens() > 0) {
+    mode.enable_mix_batch = false;
+  }
+
+  // No chunked prefill: prefill occupies the full batch exclusively.
+  if (!mode.enable_chunked_prefill) {
+    mode.enable_mix_batch = false;
   }
 
   return mode;

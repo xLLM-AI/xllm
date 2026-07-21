@@ -393,8 +393,6 @@ TEST(ContinuousSchedulerFactoryTest,
 }
 
 TEST(SchedulerFactoryTest, DisaggPDChunkedPrefillKind) {
-  ScopedConfigValue<bool> use_mix_scheduler(
-      SchedulerConfig::get_instance().use_mix_scheduler(), false);
   ContinuousScheduler::Options opt =
       create_scheduler_options(10000, 256, 2, 1024, 1);
   opt.enable_disagg_pd() = true;
@@ -406,8 +404,6 @@ TEST(SchedulerFactoryTest, DisaggPDChunkedPrefillKind) {
 }
 
 TEST(SchedulerFactoryTest, DisaggPDOOCKeepsPDOOCKind) {
-  ScopedConfigValue<bool> use_mix_scheduler(
-      SchedulerConfig::get_instance().use_mix_scheduler(), false);
   ContinuousScheduler::Options opt =
       create_scheduler_options(10000, 256, 0, 1024, 1);
   opt.enable_disagg_pd() = true;
