@@ -27,8 +27,10 @@ limitations under the License.
 namespace xllm {
 
 MultimodalProcessorBase::MultimodalProcessorBase(
-    std::shared_ptr<Tokenizer> tokenizer)
-    : tokenizer_(std::move(tokenizer)) {}
+    std::shared_ptr<Tokenizer> tokenizer,
+    int32_t max_sequence_length)
+    : tokenizer_(std::move(tokenizer)),
+      max_sequence_length_(max_sequence_length) {}
 
 MultimodalProcessorBase::~MultimodalProcessorBase() = default;
 
@@ -37,8 +39,8 @@ bool MultimodalProcessorBase::tokenize(const std::string& prompt,
   Timer timer;
   if (!tokenizer_->encode(prompt,
                           &token_ids,
-                          /*add_special_tokens=*/false,
-                          /*max_sequence_length=*/512)) {
+                          /*add_special_tokens=*/true,
+                          /*max_sequence_length=*/max_sequence_length_)) {
     LOG(ERROR) << "Failed to encode prompt: " + prompt;
     return false;
   }
@@ -66,7 +68,8 @@ void MultimodalProcessorBase::hash_mm_items(const MMInput& mm_input,
 
 std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
     const ModelArgs& model_args,
-    std::shared_ptr<Tokenizer> tokenizer) {
+    std::shared_ptr<Tokenizer> tokenizer,
+    int32_t max_sequence_length) {
   const std::string& model_type = model_args.model_type();
   std::string resolved_name;
   std::string error_message;
@@ -78,7 +81,8 @@ std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
       ModelRegistry::get_multimodal_processor_factory(resolved_name);
   CHECK(multimodal_processor_factory != nullptr)
       << "Missing multimodal processor for model type: " << model_type;
-  return multimodal_processor_factory(model_args, std::move(tokenizer));
+  return multimodal_processor_factory(
+      model_args, std::move(tokenizer), max_sequence_length);
 }
 
 }  // namespace xllm

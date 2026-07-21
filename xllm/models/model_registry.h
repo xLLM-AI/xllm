@@ -48,7 +48,8 @@ using DiTModelFactory =
 using MultimodalProcessorFactory =
     std::function<std::unique_ptr<MultimodalProcessorBase>(
         const ModelArgs& model_args,
-        std::shared_ptr<Tokenizer> tokenizer)>;
+        std::shared_ptr<Tokenizer> tokenizer,
+        int32_t max_sequence_length)>;
 
 using ModelArgsLoader =
     std::function<bool(const JsonReader& json, ModelArgs* args)>;
@@ -207,17 +208,18 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
 #define REGISTER_DIT_MODEL(ModelType, ModelClass) \
   REGISTER_DIT_MODEL_WITH_VARNAME(ModelType, ModelType, ModelClass)
 
-#define REGISTER_MULTIMODAL_PROCESSOR_WITH_VARNAME(                      \
-    VarName, ModelType, ProcessorClass)                                  \
-  const bool VarName##_multimodal_processor_registered = []() {          \
-    ModelRegistry::register_multimodal_processor_factory(                \
-        #ModelType,                                                      \
-        [](const ModelArgs& model_args,                                  \
-           std::shared_ptr<Tokenizer> tokenizer) {                       \
-          return std::make_unique<ProcessorClass>(model_args,            \
-                                                  std::move(tokenizer)); \
-        });                                                              \
-    return true;                                                         \
+#define REGISTER_MULTIMODAL_PROCESSOR_WITH_VARNAME(                   \
+    VarName, ModelType, ProcessorClass)                               \
+  const bool VarName##_multimodal_processor_registered = []() {       \
+    ModelRegistry::register_multimodal_processor_factory(             \
+        #ModelType,                                                   \
+        [](const ModelArgs& model_args,                               \
+           std::shared_ptr<Tokenizer> tokenizer,                      \
+           int32_t max_sequence_length) {                             \
+          return std::make_unique<ProcessorClass>(                    \
+              model_args, std::move(tokenizer), max_sequence_length); \
+        });                                                           \
+    return true;                                                      \
   }()
 
 #define REGISTER_MULTIMODAL_PROCESSOR(ModelType, ProcessorClass) \

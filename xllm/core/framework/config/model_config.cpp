@@ -91,6 +91,10 @@ DEFINE_bool(
     false,
     "Whether to decode both audio and video when the input is a video.");
 
+DEFINE_int32(flux2_tokenizer_max_sequence_length,
+             0,
+             "Max sequence length for Flux2 tokenizer. 0 means disabled.");
+
 // NOTE: This is an experimental flag,
 //       it needs to be removed after the function is stable.
 DEFINE_bool(use_cpp_chat_template,
@@ -121,6 +125,7 @@ void ModelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(tool_call_parser);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_qwen3_reranker);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_return_mm_full_embeddings);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(flux2_tokenizer_max_sequence_length);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(mm_download_headers);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(flashinfer_workspace_buffer_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(use_audio_in_video);
@@ -161,6 +166,7 @@ void ModelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(tool_call_parser);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_qwen3_reranker);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_return_mm_full_embeddings);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(flux2_tokenizer_max_sequence_length);
   XLLM_CONFIG_ASSIGN_FROM_JSON(mm_download_headers);
   XLLM_CONFIG_ASSIGN_FROM_JSON(flashinfer_workspace_buffer_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(use_audio_in_video);
@@ -191,6 +197,8 @@ void ModelConfig::append_config_json(
       config_json, default_config, enable_qwen3_reranker);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_return_mm_full_embeddings);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, flux2_tokenizer_max_sequence_length);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, mm_download_headers);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
