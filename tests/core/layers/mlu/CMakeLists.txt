@@ -202,16 +202,9 @@ cc_test(
     glog::glog
 )
 
-# Each case forks two ranks. Keep CTest from scheduling cases from this target
-# onto the same MLU devices concurrently, and retain an outer timeout in case
-# the process-group runtime does not respond to the in-test cleanup deadline.
 cc_test(
   NAME
     deepseek_v2_attention_multi_device_test
-  TIMEOUT
-    150
-  RESOURCE_LOCK
-    mlu_multi_device
   SRCS
     deepseek_v2_attention_multi_device_test.cpp
     tests_utils.cpp

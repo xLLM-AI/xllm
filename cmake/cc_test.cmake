@@ -11,8 +11,6 @@ include(CMakeParseArguments)
 # COPTS: List of private compile options
 # LINKOPTS: List of link options
 # ARGS: Command line arguments to test case
-# TIMEOUT: Per-CTest timeout in seconds
-# RESOURCE_LOCK: CTest resource lock name
 #
 # Usage:
 # cc_library(
@@ -42,7 +40,7 @@ function(cc_test)
   cmake_parse_arguments(
     CC_TEST # prefix
     "" # options
-    "NAME;ENVIRONMENT;TIMEOUT;RESOURCE_LOCK" # one value args
+    "NAME;ENVIRONMENT" # one value args
     "SRCS;COPTS;LINKOPTS;DEPS;INCLUDES;ARGS;DATA" # multi value args
     ${ARGN}
   )
@@ -130,14 +128,6 @@ function(cc_test)
   if(CC_TEST_ENVIRONMENT)
     set_tests_properties(${_cc_test_${CC_TEST_NAME}_tests}
       PROPERTIES ENVIRONMENT "${CC_TEST_ENVIRONMENT}")
-  endif()
-  if(CC_TEST_TIMEOUT)
-    set_tests_properties(${_cc_test_${CC_TEST_NAME}_tests}
-      PROPERTIES TIMEOUT "${CC_TEST_TIMEOUT}")
-  endif()
-  if(CC_TEST_RESOURCE_LOCK)
-    set_tests_properties(${_cc_test_${CC_TEST_NAME}_tests}
-      PROPERTIES RESOURCE_LOCK "${CC_TEST_RESOURCE_LOCK}")
   endif()
   #add_test(NAME ${CC_TEST_NAME} COMMAND ${CC_TEST_NAME} ${CC_TEST_ARGS})
 endfunction()
