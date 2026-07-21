@@ -11,6 +11,7 @@ if(USE_NPU)
     DEPS
       torch
       torch_npu
+      ascendcl
       hccl
       hcomm
       glog::glog

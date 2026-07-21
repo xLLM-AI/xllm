@@ -91,6 +91,20 @@ TEST(MegaMoePolicyTest, OnSupportsEp16MoeTp1WithAttentionDp16) {
   EXPECT_EQ(decision.reason, MegaMoeRejectionReason::NONE);
 }
 
+TEST(MegaMoePolicyTest, OnSupportsEp8MoeTp1WithAttentionDp8) {
+  MegaMoeCapability capability = supported_capability();
+  capability.ep_size = 8;
+  capability.tp_size = 1;
+  capability.dp_size = 8;
+
+  const MegaMoeDecision decision =
+      decide_mega_moe(MegaMoeMode::ON, capability);
+
+  EXPECT_TRUE(decision.use_mega_moe);
+  EXPECT_FALSE(decision.fatal);
+  EXPECT_EQ(decision.reason, MegaMoeRejectionReason::NONE);
+}
+
 TEST(MegaMoePolicyTest, AttentionDpDoesNotAffectOperatorEligibility) {
   for (int64_t dp_size : {1, 2, 8, 16, 32}) {
     SCOPED_TRACE(dp_size);
@@ -107,7 +121,7 @@ TEST(MegaMoePolicyTest, AttentionDpDoesNotAffectOperatorEligibility) {
 
 TEST(MegaMoePolicyTest, AutoFallsBackOnlyBeforeCollectivesStart) {
   MegaMoeCapability capability = supported_capability();
-  capability.ep_size = 8;
+  capability.ep_size = 3;
   const MegaMoeDecision before_collectives =
       decide_mega_moe(MegaMoeMode::AUTO, capability);
   EXPECT_FALSE(before_collectives.use_mega_moe);
@@ -204,7 +218,7 @@ TEST(MegaMoePolicyTest, RejectsUnsupportedDtypeActivationAndShape) {
 
 TEST(MegaMoePolicyTest, RejectsUnsupportedParallelAndRuntimeModes) {
   MegaMoeCapability capability = supported_capability();
-  capability.ep_size = 8;
+  capability.ep_size = 3;
   expect_rejected(capability, MegaMoeRejectionReason::UNSUPPORTED_EP);
   capability = supported_capability();
   capability.tp_size = 2;

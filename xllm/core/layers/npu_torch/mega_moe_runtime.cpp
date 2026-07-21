@@ -151,6 +151,15 @@ MegaMoeWeightCacheAction plan_mega_moe_weight_cache(
   return MegaMoeWeightCacheAction::BUILD;
 }
 
+torch::Tensor prepare_mega_moe_topk_weights(
+    const torch::Tensor& topk_weights) {
+  TORCH_CHECK(topk_weights.defined(),
+              "MegaMoe top-k weights must be defined.");
+  TORCH_CHECK(topk_weights.dim() == 2,
+              "MegaMoe top-k weights must be 2D.");
+  return topk_weights.to(torch::kFloat32).contiguous();
+}
+
 int64_t estimate_mega_moe_weight_cache_bytes(
     const torch::Tensor& canonical_w13,
     const torch::Tensor& canonical_w2) {

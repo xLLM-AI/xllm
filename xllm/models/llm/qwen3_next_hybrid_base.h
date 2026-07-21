@@ -96,7 +96,8 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
         layer::AttentionMetadataBuilder::build(
             input_params,
             model_args_.enable_mla(),
-            build_attention_mask(input_params));
+            build_attention_mask(input_params),
+            device_);
     torch::Tensor h;
     if (input_params.embedding.input_embedding.defined()) {
       h = input_params.embedding.input_embedding;

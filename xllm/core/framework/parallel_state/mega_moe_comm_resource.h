@@ -70,6 +70,61 @@ struct MegaMoeBufferSpanValidation {
   uint64_t accessible_span = 0;
 };
 
+// Type-erased RAII holder for a device completion primitive. Production code
+// stores an aclrtEvent; the fence only owns its lifetime and invokes the
+// supplied wait operation, which keeps ACL details out of this header.
+using MegaMoeCompletionToken = std::shared_ptr<void>;
+
+// Protects a ProcessGroup-owned KFC context from overlapping host launches.
+//
+// aclnnMegaMoe is asynchronous: returning from the host API only means that
+// device work has been enqueued. The next host launch must therefore wait for
+// the previous device launch before it reuses the same KFC context and HCCL
+// windows. Otherwise, EP ranks can consume context mutated by a later layer,
+// which was observed as nondeterministic EP8 output rather than a shape error.
+// The fence is scoped to one communication resource, so unrelated NPU work
+// remains asynchronous.
+class MegaMoeLaunchFence final {
+ public:
+  using WaitForCompletion =
+      std::function<bool(const MegaMoeCompletionToken& completion)>;
+  using SynchronizeAbandonedLaunch = std::function<bool()>;
+
+  class Lease final {
+   public:
+    Lease(Lease&& other) noexcept;
+    Lease& operator=(Lease&&) noexcept = delete;
+    ~Lease();
+
+    Lease(const Lease&) = delete;
+    Lease& operator=(const Lease&) = delete;
+
+    // Transfers ownership of the recorded device completion to the fence.
+    // If this is not called (for example, because the host launch throws),
+    // the destructor synchronizes the abandoned launch before unlocking.
+    void record_completion(MegaMoeCompletionToken completion);
+
+   private:
+    friend class MegaMoeLaunchFence;
+
+    Lease(MegaMoeLaunchFence* fence,
+          std::unique_lock<std::mutex>&& lock,
+          SynchronizeAbandonedLaunch synchronize_abandoned_launch);
+
+    MegaMoeLaunchFence* fence_ = nullptr;
+    std::unique_lock<std::mutex> lock_;
+    SynchronizeAbandonedLaunch synchronize_abandoned_launch_;
+  };
+
+  Lease acquire(const WaitForCompletion& wait_for_completion,
+                SynchronizeAbandonedLaunch synchronize_abandoned_launch);
+  void drain(const WaitForCompletion& wait_for_completion);
+
+ private:
+  std::mutex mutex_;
+  MegaMoeCompletionToken completion_;
+};
+
 // HcclGetHcclBuffer returns the local communication payload while
 // HcclGetRemoteIpcHcclBuf may return a larger accessible span that includes
 // auxiliary MC2 memory. Validate that every returned span covers the complete
@@ -93,6 +148,8 @@ class MegaMoeCommResource final {
   const at::Tensor& context_tensor() const;
   int64_t ccl_buffer_size() const;
   int64_t max_num_tokens_per_rank() const;
+  MegaMoeLaunchFence::Lease acquire_launch_lease();
+  void record_launch_completion(MegaMoeLaunchFence::Lease& lease);
 
  private:
   class Impl;

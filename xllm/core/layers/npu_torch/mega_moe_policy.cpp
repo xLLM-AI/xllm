@@ -54,7 +54,8 @@ MegaMoeRejectionReason find_rejection_reason(
       capability.num_experts != 256 || capability.topk != 8) {
     return MegaMoeRejectionReason::UNSUPPORTED_SHAPE;
   }
-  if (capability.ep_size != 16) {
+  if (capability.ep_size <= 0 ||
+      capability.num_experts % capability.ep_size != 0) {
     return MegaMoeRejectionReason::UNSUPPORTED_EP;
   }
   if (capability.tp_size != 1) {

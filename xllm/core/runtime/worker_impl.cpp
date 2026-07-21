@@ -203,9 +203,22 @@ void prepare_input_params_for_linear_attention(ModelInputParams& input_params) {
     input_params.parallel.query_start_loc[i + 1] =
         input_params.parallel.query_start_loc[i] + seq_len;
   }
+  const auto& kv_cache_tokens_nums =
+      input_params.attention.device.kv_cache_tokens_nums;
+  if (!kv_cache_tokens_nums.defined() ||
+      kv_cache_tokens_nums.numel() == 0) {
+    CHECK_EQ(input_params.meta.num_sequences, 0)
+        << "kv_cache_tokens_nums may only be absent on an empty DP/EP shard";
+    // Empty DP/EP shards still execute one synthetic token so every rank
+    // participates in collectives. Keep the linear-attention metadata
+    // coherent with that token without turning it into a scheduled sequence.
+    input_params.parallel.query_start_loc = {0, 1};
+    input_params.parallel.has_initial_state = {0};
+    return;
+  }
 
   torch::Tensor has_initial_state_tensor =
-      input_params.attention.device.kv_cache_tokens_nums > 0;
+      kv_cache_tokens_nums > 0;
   torch::Tensor has_initial_state_int64 = has_initial_state_tensor.contiguous()
                                               .view({-1})
                                               .to(torch::kCPU)
@@ -942,13 +955,26 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
     bool empty_shard = input_params.meta.num_sequences == 0 &&
                        (!processed_input.token_ids.defined() ||
                         processed_input.token_ids.numel() == 0);
-    const bool need_fake_input_for_empty_shard =
-        empty_shard && !input_params.meta.batch_forward_type.is_empty() &&
+    const bool uses_fake_inputs_for_empty_shards =
+        !input_params.meta.batch_forward_type.is_empty() &&
         ((context_.get_parallel_args().cp_size() > 1 &&
           !Platform::uses_model_cp_partition()) ||
          (context_.get_parallel_args().dp_size() > 1 ||
           context_.get_parallel_args().ep_size() > 1 ||
           !context_.get_parallel_args().mapping_data().empty()));
+    const bool need_fake_input_for_empty_shard =
+        empty_shard && uses_fake_inputs_for_empty_shards;
+    if (uses_fake_inputs_for_empty_shards) {
+      // The runtime materializes one synthetic token for every empty shard.
+      // All ranks must therefore use the same collective tensor lengths,
+      // including active ranks that do not enter the fake-input branch below.
+      for (int32_t& token_num :
+           input_params.parallel.dp_global_token_nums) {
+        if (token_num == 0) {
+          token_num = 1;
+        }
+      }
+    }
     if (need_fake_input_for_empty_shard) {
       auto token_options = processed_input.token_ids.defined()
                                ? processed_input.token_ids.options()
@@ -960,6 +986,10 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
           torch::ones({1}, token_options.device(device_));
       processed_input.positions =
           torch::zeros({1}, position_options.device(device_));
+      input_params.embedding.linear_state_ids = {0};
+      input_params.attention.host.q_seq_lens = {1};
+      input_params.attention.host.q_cu_seq_lens = {0, 1};
+      input_params.attention.host.kv_seq_lens = {1};
       empty_shard = false;
     }
     if (empty_shard) {
@@ -1008,7 +1038,8 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
       // Defer the slot-restore copy to step_for_schedule_overlap (worker
       // thread, on compute_stream_) so stream ordering between chunk N-1
       // writes and chunk N restore is automatic.
-      if (!enable_schedule_overlap()) {
+      if (!enable_schedule_overlap() &&
+          !need_fake_input_for_empty_shard) {
         restore_linear_state_slots(
             kv_caches_,
             processed_input.input_params.linear_state_cache_ops,

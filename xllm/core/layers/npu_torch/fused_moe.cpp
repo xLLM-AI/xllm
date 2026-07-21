@@ -1044,6 +1044,7 @@ torch::Tensor FusedMoEImpl::forward_mega_moe(
       router_logits.reshape({-1, router_logits.size(-1)});
   auto [topk_weights, topk_ids] =
       select_global_experts(input_2d, router_logits_2d);
+  topk_weights = prepare_mega_moe_topk_weights(topk_weights);
 
   xllm::kernel::MegaMoeParams params;
   params.context = comm_resource->context_tensor();
@@ -1061,7 +1062,16 @@ torch::Tensor FusedMoEImpl::forward_mega_moe(
 
   torch::Tensor routed_output;
   torch::Tensor expert_token_nums;
+  // All FusedMoE layers on this EP rank reuse one ProcessGroup-owned KFC
+  // context and the same HCCL windows. aclnnMegaMoe returns after enqueueing
+  // device work, while its next host invocation can mutate that shared
+  // context. Without this resource-local fence, EP8 decoding produced
+  // nondeterministic cross-rank tokens even though the operator's standalone
+  // numeric comparison passed. This waits only for the preceding MegaMoe
+  // launch on the same resource; it is not a global stream synchronization.
+  auto launch_lease = comm_resource->acquire_launch_lease();
   std::tie(routed_output, expert_token_nums) = xllm::kernel::mega_moe(params);
+  comm_resource->record_launch_completion(launch_lease);
   (void)expert_token_nums;
   auto output = routed_output.reshape(hidden_states_shape);
   if (shared_output.has_value()) {

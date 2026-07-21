@@ -18,6 +18,7 @@ limitations under the License.
 #include <ATen/ATen.h>
 #include <dlfcn.h>
 #include <glog/logging.h>
+#include <torch_npu/csrc/core/npu/NPUStream.h>
 
 #include <array>
 #include <cstring>
@@ -30,7 +31,6 @@ namespace {
 constexpr uint32_t kHcclMaxRankSize = 1024;
 constexpr uint8_t kCommEngineAiv = 4;
 constexpr uint8_t kAllToAllOpType = 8;
-constexpr int32_t kSupportedEpWorldSize = 16;
 constexpr char kHcclLibrary[] = "libhccl.so";
 constexpr char kHcclFrameworkLibrary[] = "libhccl_fwk.so";
 constexpr char kAllToAllAlgorithm[] =
@@ -293,7 +293,133 @@ MegaMoeCommContext build_context(const MegaMoeCommSpec& spec,
   return context;
 }
 
+aclrtStream get_current_mega_moe_stream(int32_t device_index) {
+  return c10_npu::getCurrentNPUStream(device_index).stream(false);
+}
+
+bool wait_for_mega_moe_completion(
+    const MegaMoeCompletionToken& completion) {
+  const aclrtEvent event = static_cast<aclrtEvent>(completion.get());
+  const aclError result = aclrtSynchronizeEvent(event);
+  if (result != ACL_SUCCESS) {
+    LOG(ERROR) << "Failed to wait for previous MegaMoe completion event: "
+               << result;
+    return false;
+  }
+  return true;
+}
+
+bool synchronize_mega_moe_stream(aclrtStream stream) {
+  const aclError result = aclrtSynchronizeStream(stream);
+  if (result != ACL_SUCCESS) {
+    LOG(ERROR) << "Failed to synchronize MegaMoe stream: " << result;
+    return false;
+  }
+  return true;
+}
+
+void destroy_mega_moe_completion(void* raw_event) {
+  if (raw_event == nullptr) {
+    return;
+  }
+  const aclError result =
+      aclrtDestroyEvent(static_cast<aclrtEvent>(raw_event));
+  if (result != ACL_SUCCESS) {
+    LOG(ERROR) << "Failed to destroy MegaMoe completion event: " << result;
+  }
+}
+
+MegaMoeCompletionToken record_mega_moe_completion(int32_t device_index) {
+  const aclrtStream stream = get_current_mega_moe_stream(device_index);
+  aclrtEvent event = nullptr;
+  aclError result = aclrtCreateEventWithFlag(&event, ACL_EVENT_SYNC);
+  if (result != ACL_SUCCESS) {
+    if (event != nullptr) {
+      destroy_mega_moe_completion(event);
+      event = nullptr;
+    }
+    result = aclrtCreateEvent(&event);
+  }
+  if (result == ACL_SUCCESS) {
+    result = aclrtRecordEvent(event, stream);
+  }
+  if (result == ACL_SUCCESS) {
+    return MegaMoeCompletionToken(event, destroy_mega_moe_completion);
+  }
+
+  if (event != nullptr) {
+    destroy_mega_moe_completion(event);
+  }
+  LOG(ERROR) << "Failed to record MegaMoe completion event: " << result;
+  return nullptr;
+}
+
 }  // namespace
+
+MegaMoeLaunchFence::Lease::Lease(MegaMoeLaunchFence* fence,
+                                 std::unique_lock<std::mutex>&& lock,
+                                 SynchronizeAbandonedLaunch
+                                     synchronize_abandoned_launch)
+    : fence_(fence),
+      lock_(std::move(lock)),
+      synchronize_abandoned_launch_(
+          std::move(synchronize_abandoned_launch)) {}
+
+MegaMoeLaunchFence::Lease::Lease(Lease&& other) noexcept
+    : fence_(std::exchange(other.fence_, nullptr)),
+      lock_(std::move(other.lock_)),
+      synchronize_abandoned_launch_(
+          std::move(other.synchronize_abandoned_launch_)) {}
+
+MegaMoeLaunchFence::Lease::~Lease() {
+  if (!lock_.owns_lock()) {
+    return;
+  }
+
+  // If the host launch throws after enqueueing any device work, a completion
+  // event cannot be recorded reliably. Synchronize that launch before
+  // releasing the shared KFC context to the next layer.
+  CHECK(static_cast<bool>(synchronize_abandoned_launch_));
+  CHECK(synchronize_abandoned_launch_())
+      << "failed to synchronize an abandoned MegaMoe launch";
+  fence_ = nullptr;
+  synchronize_abandoned_launch_ = nullptr;
+  lock_.unlock();
+}
+
+void MegaMoeLaunchFence::Lease::record_completion(
+    MegaMoeCompletionToken completion) {
+  CHECK(fence_ != nullptr);
+  CHECK(lock_.owns_lock());
+  fence_->completion_ = std::move(completion);
+  fence_ = nullptr;
+  synchronize_abandoned_launch_ = nullptr;
+  lock_.unlock();
+}
+
+MegaMoeLaunchFence::Lease MegaMoeLaunchFence::acquire(
+    const WaitForCompletion& wait_for_completion,
+    SynchronizeAbandonedLaunch synchronize_abandoned_launch) {
+  std::unique_lock<std::mutex> lock(mutex_);
+  if (completion_ != nullptr) {
+    CHECK(wait_for_completion(completion_))
+        << "failed to wait for the previous MegaMoe launch completion";
+    completion_.reset();
+  }
+  return Lease(
+      this, std::move(lock), std::move(synchronize_abandoned_launch));
+}
+
+void MegaMoeLaunchFence::drain(
+    const WaitForCompletion& wait_for_completion) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (completion_ == nullptr) {
+    return;
+  }
+  CHECK(wait_for_completion(completion_))
+      << "failed to drain the final MegaMoe launch completion";
+  completion_.reset();
+}
 
 MegaMoeCommValidation validate_mega_moe_comm_spec(
     const MegaMoeCommSpec& spec) {
@@ -303,7 +429,8 @@ MegaMoeCommValidation validate_mega_moe_comm_spec(
   if (spec.hccl_comm == nullptr) {
     return {false, MegaMoeCommRejectReason::NULL_COMM};
   }
-  if (spec.ep_world_size != kSupportedEpWorldSize) {
+  if (spec.ep_world_size <= 0 ||
+      static_cast<uint32_t>(spec.ep_world_size) > kHcclMaxRankSize) {
     return {false, MegaMoeCommRejectReason::UNSUPPORTED_EP_WORLD_SIZE};
   }
   if (spec.device_index < 0) {
@@ -345,7 +472,8 @@ MegaMoeBufferSpanValidation validate_mega_moe_buffer_accessible_spans(
 class MegaMoeCommResource::Impl final {
  public:
   explicit Impl(const MegaMoeCommSpec& spec)
-      : max_num_tokens_per_rank_(spec.max_num_tokens_per_rank) {
+      : device_index_(spec.device_index),
+        max_num_tokens_per_rank_(spec.max_num_tokens_per_rank) {
     const MegaMoeCommContext context = build_context(spec, ccl_buffer_size_);
     const int64_t context_elements =
         static_cast<int64_t>(sizeof(context) / sizeof(int32_t));
@@ -361,10 +489,39 @@ class MegaMoeCommResource::Impl final {
         true);
   }
 
+  ~Impl() {
+    // The slot is destroyed before its HCCL communicator. Drain the final
+    // asynchronous launch while the KFC context and HCCL windows are still
+    // valid, then let the tensor members and communicator owner tear down.
+    launch_fence_.drain(wait_for_mega_moe_completion);
+  }
+
   const at::Tensor& context_tensor() const { return context_tensor_; }
   int64_t ccl_buffer_size() const { return ccl_buffer_size_; }
   int64_t max_num_tokens_per_rank() const {
     return max_num_tokens_per_rank_;
+  }
+
+  MegaMoeLaunchFence::Lease acquire_launch_lease() {
+    const aclrtStream launch_stream =
+        get_current_mega_moe_stream(device_index_);
+    return launch_fence_.acquire(
+        wait_for_mega_moe_completion,
+        [launch_stream]() {
+          return synchronize_mega_moe_stream(launch_stream);
+        });
+  }
+
+  void record_launch_completion(MegaMoeLaunchFence::Lease& lease) {
+    MegaMoeCompletionToken completion =
+        record_mega_moe_completion(device_index_);
+    if (completion == nullptr) {
+      LOG(ERROR) << "Falling back to MegaMoe stream synchronization.";
+      CHECK(synchronize_mega_moe_stream(
+          get_current_mega_moe_stream(device_index_)))
+          << "failed to synchronize MegaMoe stream after event failure";
+    }
+    lease.record_completion(std::move(completion));
   }
 
  private:
@@ -372,8 +529,10 @@ class MegaMoeCommResource::Impl final {
   // only tensor data and destroy it before ParallelArgs tears that comm down.
   at::Tensor host_context_tensor_;
   at::Tensor context_tensor_;
+  int32_t device_index_ = -1;
   int64_t ccl_buffer_size_ = 0;
   int64_t max_num_tokens_per_rank_ = 0;
+  MegaMoeLaunchFence launch_fence_;
 };
 
 MegaMoeCommResource::MegaMoeCommResource(std::unique_ptr<Impl> impl)
@@ -403,6 +562,15 @@ int64_t MegaMoeCommResource::ccl_buffer_size() const {
 
 int64_t MegaMoeCommResource::max_num_tokens_per_rank() const {
   return impl_->max_num_tokens_per_rank();
+}
+
+MegaMoeLaunchFence::Lease MegaMoeCommResource::acquire_launch_lease() {
+  return impl_->acquire_launch_lease();
+}
+
+void MegaMoeCommResource::record_launch_completion(
+    MegaMoeLaunchFence::Lease& lease) {
+  impl_->record_launch_completion(lease);
 }
 
 bool MegaMoeCommResourceSlot::same_key(const MegaMoeCommSpec& lhs,

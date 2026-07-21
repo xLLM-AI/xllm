@@ -45,6 +45,17 @@ TEST(MegaMoeCommResourceTest, AcceptsCompleteEp16Spec) {
   EXPECT_EQ(validation.reason, MegaMoeCommRejectReason::NONE);
 }
 
+TEST(MegaMoeCommResourceTest, AcceptsCompleteEp8Spec) {
+  MegaMoeCommSpec spec = valid_spec();
+  spec.ep_world_size = 8;
+
+  const MegaMoeCommValidation validation =
+      validate_mega_moe_comm_spec(spec);
+
+  EXPECT_TRUE(validation.valid);
+  EXPECT_EQ(validation.reason, MegaMoeCommRejectReason::NONE);
+}
+
 TEST(MegaMoeCommResourceTest, RejectsInvalidConstructionParameters) {
   MegaMoeCommSpec spec = valid_spec();
   spec.group_name.clear();
@@ -57,7 +68,7 @@ TEST(MegaMoeCommResourceTest, RejectsInvalidConstructionParameters) {
             MegaMoeCommRejectReason::NULL_COMM);
 
   spec = valid_spec();
-  spec.ep_world_size = 8;
+  spec.ep_world_size = 0;
   EXPECT_EQ(validate_mega_moe_comm_spec(spec).reason,
             MegaMoeCommRejectReason::UNSUPPORTED_EP_WORLD_SIZE);
 
@@ -292,6 +303,75 @@ TEST(MegaMoeCommResourceTest, EnforcesSingleOwnerLifecycle) {
   EXPECT_FALSE(std::is_copy_assignable_v<MegaMoeCommResource>);
   EXPECT_FALSE(std::is_move_constructible_v<MegaMoeCommResource>);
   EXPECT_FALSE(std::is_move_assignable_v<MegaMoeCommResource>);
+}
+
+TEST(MegaMoeLaunchFenceTest,
+     WaitsForPreviousCompletionBeforeReusingSharedContext) {
+  MegaMoeLaunchFence fence;
+  std::vector<std::string> events;
+
+  auto first = fence.acquire(
+      [&](const MegaMoeCompletionToken&) {
+        events.push_back("unexpected_wait");
+        return true;
+      },
+      []() { return true; });
+  EXPECT_TRUE(events.empty());
+
+  MegaMoeCompletionToken first_completion = std::make_shared<int>(1);
+  first.record_completion(first_completion);
+
+  auto second = fence.acquire(
+      [&](const MegaMoeCompletionToken& completion) {
+        EXPECT_EQ(completion, first_completion);
+        events.push_back("wait_previous");
+        return true;
+      },
+      []() { return true; });
+
+  ASSERT_EQ(events.size(), 1);
+  EXPECT_EQ(events.front(), "wait_previous");
+  second.record_completion(std::make_shared<int>(2));
+}
+
+TEST(MegaMoeLaunchFenceTest,
+     SynchronizesAbandonedLaunchBeforeReleasingSharedContext) {
+  MegaMoeLaunchFence fence;
+  bool synchronized = false;
+
+  {
+    auto abandoned = fence.acquire(
+        [](const MegaMoeCompletionToken&) { return true; },
+        [&]() {
+          synchronized = true;
+          return true;
+        });
+    (void)abandoned;
+  }
+
+  EXPECT_TRUE(synchronized);
+  auto next = fence.acquire(
+      [](const MegaMoeCompletionToken&) { return true; },
+      []() { return true; });
+  next.record_completion(nullptr);
+}
+
+TEST(MegaMoeLaunchFenceTest, DrainsFinalCompletionBeforeResourceTeardown) {
+  MegaMoeLaunchFence fence;
+  MegaMoeCompletionToken completion = std::make_shared<int>(1);
+  auto launch = fence.acquire(
+      [](const MegaMoeCompletionToken&) { return true; },
+      []() { return true; });
+  launch.record_completion(completion);
+
+  bool waited = false;
+  fence.drain([&](const MegaMoeCompletionToken& observed) {
+    EXPECT_EQ(observed, completion);
+    waited = true;
+    return true;
+  });
+
+  EXPECT_TRUE(waited);
 }
 
 }  // namespace

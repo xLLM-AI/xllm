@@ -46,6 +46,9 @@ MegaMoeWeightCacheAction plan_mega_moe_weight_cache(
     bool w2_loaded,
     bool require_complete_weights);
 
+torch::Tensor prepare_mega_moe_topk_weights(
+    const torch::Tensor& topk_weights);
+
 struct MegaMoeWeightCacheDestructionObserver {
   std::function<void()> on_tensor_fields_released;
   std::function<void()> on_reservation_released;

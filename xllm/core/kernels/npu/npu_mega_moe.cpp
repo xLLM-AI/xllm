@@ -42,10 +42,16 @@ std::string expected_custom_mega_moe_library() {
     return {};
   }
 
-  const std::string root(custom_opp_path);
-  // MegaMoe's ABI differs from the stock CANN 9.1 op. Require exactly one
-  // isolated vendor root so symbol fallback cannot silently mix ABIs.
-  if (root.empty() || root.find(':') != std::string::npos) {
+  std::string root(custom_opp_path);
+  // MegaMoe's ABI differs from the stock CANN 9.1 op. The validated MegaMoe
+  // vendor must be first, while standard companion vendors may follow for
+  // other Qwen3.5 ops. The resolved MegaMoe symbols are still required to
+  // come from this first vendor's single libcust_opapi.so.
+  const size_t separator = root.find(':');
+  if (separator != std::string::npos) {
+    root.resize(separator);
+  }
+  if (root.empty()) {
     return {};
   }
   return aclnn::detail::real_path(
@@ -175,8 +181,9 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
       provenance.workspace_library,
       "' and execute resolved to '",
       provenance.execute_library,
-      "'. Source CANN 9.1 set_env.bash and exactly one validated custom "
-      "vendor set_env.bash, then set ASCEND_CUSTOM_OPP_PATH to that vendor.");
+      "'. Source CANN 9.1 and put the validated MegaMoe vendor first in "
+      "ASCEND_CUSTOM_OPP_PATH; standard companion vendors may follow, but "
+      "both MegaMoe symbols must resolve to the first vendor.");
   TORCH_CHECK(context.defined(), "MegaMoe expects a defined context tensor.");
   TORCH_CHECK(context.dim() == 1, "MegaMoe expects 1D context.");
   TORCH_CHECK(context.scalar_type() == at::kInt,
@@ -192,9 +199,8 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
               c10::toString(topk_ids.scalar_type()));
   TORCH_CHECK(topk_weights.dim() == 2,
               "MegaMoe expects 2D topk_weights.");
-  TORCH_CHECK(topk_weights.scalar_type() == at::kFloat ||
-                  topk_weights.scalar_type() == at::kBFloat16,
-              "MegaMoe expects fp32/bf16 topk_weights, got ",
+  TORCH_CHECK(topk_weights.scalar_type() == at::kFloat,
+              "MegaMoe verified A3 path requires fp32 topk_weights, got ",
               c10::toString(topk_weights.scalar_type()));
   TORCH_CHECK(topk_ids.sizes() == topk_weights.sizes(),
               "MegaMoe topk_ids/topk_weights shape mismatch: ",

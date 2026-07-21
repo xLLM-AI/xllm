@@ -265,5 +265,21 @@ TEST(MegaMoeRuntimeTest, RejectsCanonicalShapeMismatch) {
                c10::Error);
 }
 
+TEST(MegaMoeRuntimeTest, PreparesBfloat16TopkWeightsForA3MegaMoe) {
+  const torch::Tensor topk_weights =
+      torch::tensor({{0.125F, 0.25F, 0.625F}},
+                    torch::TensorOptions().dtype(torch::kBFloat16));
+
+  const torch::Tensor prepared =
+      prepare_mega_moe_topk_weights(topk_weights);
+
+  EXPECT_EQ(prepared.scalar_type(), torch::kFloat32);
+  EXPECT_TRUE(prepared.is_contiguous());
+  EXPECT_EQ(prepared.sizes(), topk_weights.sizes());
+  EXPECT_TRUE(torch::equal(prepared,
+                           topk_weights.to(torch::kFloat32)));
+  EXPECT_NE(prepared.data_ptr(), topk_weights.data_ptr());
+}
+
 }  // namespace
 }  // namespace xllm::layer
