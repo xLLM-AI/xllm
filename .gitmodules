@@ -20,7 +20,7 @@
 	fetchRecurseSubmodules = false
 [submodule "third_party/xllm_ops"]
 	path = third_party/xllm_ops
-	url = https://gitcode.com/xLLM-AI/xllm_ops.git
+	url = https://github.com/xLLM-AI/xllm-ops.git
 	fetchRecurseSubmodules = true
 [submodule "third_party/etcd_cpp_apiv3"]
 	path = third_party/etcd_cpp_apiv3
@@ -36,7 +36,7 @@
 	fetchRecurseSubmodules = false
 [submodule "third_party/torch_npu_ops"]
 	path = third_party/torch_npu_ops
-	url = https://gitcode.com/xLLM-AI/torch_npu_ops.git
+	url = https://github.com/xLLM-AI/torch-npu-ops.git
 	fetchRecurseSubmodules = false
 [submodule "third_party/cutlass"]
 	path = third_party/cutlass
