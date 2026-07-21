@@ -13,19 +13,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "scheduler/scheduler_policy.h"
+#include <glog/logging.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <limits>
-
-#include <glog/logging.h>
 
 #include "async_response_processor.h"
 #include "common/metrics.h"
 #include "core/framework/config/kv_cache_store_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "framework/request/priority_comparator.h"
+#include "scheduler/scheduler_policy.h"
 
 namespace xllm {
 
@@ -50,10 +49,9 @@ void UnifiedPolicy::drain_request_queue(
 // UnifiedPolicy::schedule
 // =============================================================================
 
-void UnifiedPolicy::schedule(
-    SchedulerState& state,
-    ScheduleBudget& budget,
-    std::vector<std::shared_ptr<Request>>& finished) {
+void UnifiedPolicy::schedule(SchedulerState& state,
+                             ScheduleBudget& budget,
+                             std::vector<std::shared_ptr<Request>>& finished) {
   // === Requeue phase ===
   // All running requests go back into unified_queue.
   for (auto it = state.running_requests.rbegin();
@@ -74,7 +72,8 @@ void UnifiedPolicy::schedule(
   }
 
   // === Sort + schedule ===
-  get_latency_budget_and_request_order(state.unified_queue, budget.latency_budget, state);
+  get_latency_budget_and_request_order(
+      state.unified_queue, budget.latency_budget, state);
   schedule_from_unified_queue(state.unified_queue, state, budget, finished);
   // Remaining unscheduled requests stay in unified_queue for next step.
 }
@@ -168,11 +167,13 @@ void UnifiedPolicy::schedule_from_unified_queue(
       // Latency-aware scheduling.
       if (options_.enable_latency_aware_schedule()) {
         if (sequence->is_prefill_stage()) {
-          assume_max_tokens = get_max_chunk(
-              sequence.get(), num_tokens, kv_cache_tokens_num,
-              static_cast<int32_t>(budget.latency_budget -
-                                   budget.estimate_latency),
-              state);
+          assume_max_tokens =
+              get_max_chunk(sequence.get(),
+                            num_tokens,
+                            kv_cache_tokens_num,
+                            static_cast<int32_t>(budget.latency_budget -
+                                                 budget.estimate_latency),
+                            state);
           if (assume_max_tokens == kv_cache_tokens_num) {
             budget_exhausted = true;
             break;
@@ -226,8 +227,8 @@ void UnifiedPolicy::schedule_from_unified_queue(
         alloc_success = state.kv_cache_manager->allocate(
             sequence.get(), max_handle_num_tokens, cur_step_copy_blocks);
       } else {
-        alloc_success = state.kv_cache_manager->allocate(
-            sequence.get(), max_handle_num_tokens);
+        alloc_success = state.kv_cache_manager->allocate(sequence.get(),
+                                                         max_handle_num_tokens);
       }
       if (!alloc_success) {
         blocks_exhausted = true;
@@ -251,7 +252,8 @@ void UnifiedPolicy::schedule_from_unified_queue(
           state.running_sequences_budgets.end(),
           candidate_token_budgets.begin(),
           candidate_token_budgets.end());
-      cache_in_batch_prefix(candidate_sequences, candidate_token_budgets, state);
+      cache_in_batch_prefix(
+          candidate_sequences, candidate_token_budgets, state);
       budget.remaining_token_budget -= allocated_tokens;
       budget.remaining_seq_budget -= allocated_seqs;
       remaining_copy_blocks_budget -= allocated_copy_blocks;
@@ -269,16 +271,16 @@ void UnifiedPolicy::schedule_from_unified_queue(
         clear_mtp_bootstrap(request.get(), state);
         state.kv_cache_manager->deallocate(request.get());
         state.response_processor->process_failed_request(
-            request, {StatusCode::RESOURCE_EXHAUSTED,
-                      "No enough resource to schedule a single sequence"});
+            request,
+            {StatusCode::RESOURCE_EXHAUSTED,
+             "No enough resource to schedule a single sequence"});
       }
       break;
     }
 
     // Memory exhausted -- preempt lowest priority request.
     bool find_preempt = false;
-    while (is_preempt_iterator_valid &&
-           preempt_iterator != unified.begin()) {
+    while (is_preempt_iterator_valid && preempt_iterator != unified.begin()) {
       std::shared_ptr<Request> request_to_preempt = *preempt_iterator;
       if (request_to_preempt.get() != request.get()) {
         if (request_to_preempt->sequences()[0]
@@ -313,8 +315,9 @@ void UnifiedPolicy::schedule_from_unified_queue(
       clear_mtp_bootstrap(request.get(), state);
       state.kv_cache_manager->deallocate(request.get());
       state.response_processor->process_failed_request(
-          request, {StatusCode::RESOURCE_EXHAUSTED,
-                    "No enough resource to schedule a single sequence"});
+          request,
+          {StatusCode::RESOURCE_EXHAUSTED,
+           "No enough resource to schedule a single sequence"});
     }
     break;
   }
@@ -374,10 +377,8 @@ void UnifiedPolicy::get_latency_budget_and_request_order(
 
   const double lambda =
       ::xllm::SchedulerConfig::get_instance().aggressive_coeff();
-  const double denominator =
-      std::max(latency_budget - constant_overhead, 1e-6);
-  double load_judge_func =
-      total_exec_time * latency_budget / denominator;
+  const double denominator = std::max(latency_budget - constant_overhead, 1e-6);
+  double load_judge_func = total_exec_time * latency_budget / denominator;
 
   for (auto& request : queue) {
     auto& sequence = request->sequences()[0];
@@ -450,9 +451,12 @@ size_t UnifiedPolicy::get_max_copy_block_num(
     double max_h2d_transfer_time =
         state.profile_manager->predict_copy_blocks_time(max_h2d_block_num);
     if (max_h2d_transfer_time > min_total_exec_time) {
-      max_copy_block_num = get_needed_copy_block_num(
-          req_vec, req_copy_block_num_vec, max_h2d_transfer_time,
-          min_total_exec_time, max_h2d_block_num, state);
+      max_copy_block_num = get_needed_copy_block_num(req_vec,
+                                                     req_copy_block_num_vec,
+                                                     max_h2d_transfer_time,
+                                                     min_total_exec_time,
+                                                     max_h2d_block_num,
+                                                     state);
     }
   }
   return max_copy_block_num;
@@ -483,7 +487,8 @@ size_t UnifiedPolicy::get_needed_copy_block_num(
     total_exec_time -=
         state.profile_manager->predict_step_time(sequence.get(), false);
     double cur_seq_max_exec_time = state.profile_manager->predict_step_time(
-        sequence->num_tokens(), sequence->kv_state().kv_cache_tokens_num(),
+        sequence->num_tokens(),
+        sequence->kv_state().kv_cache_tokens_num(),
         false);
     total_exec_time += cur_seq_max_exec_time;
     h2d_transfer_time -= state.profile_manager->predict_copy_blocks_time(
@@ -567,9 +572,8 @@ int32_t UnifiedPolicy::get_max_chunk(Sequence* sequence,
   int32_t right = num_tokens + 1;
   while (left < right) {
     int32_t mid = left + (right - left) / 2;
-    auto predict_time =
-        state.profile_manager->predict_step_time(mid, kv_cache_tokens_num,
-                                                 false);
+    auto predict_time = state.profile_manager->predict_step_time(
+        mid, kv_cache_tokens_num, false);
     if (predict_time <= latency_budget) {
       left = mid + 1;
     } else {

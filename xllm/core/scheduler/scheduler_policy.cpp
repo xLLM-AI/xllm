@@ -15,12 +15,12 @@ limitations under the License.
 
 #include "scheduler/scheduler_policy.h"
 
+#include <glog/logging.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <numeric>
-
-#include <glog/logging.h>
 
 #include "async_response_processor.h"
 #include "common/metrics.h"
@@ -244,7 +244,8 @@ void SchedulerPolicy::schedule_prefill_from_queue(
 
       size_t num_tokens = compute_prefill_tokens(
           prefill_sequence.get(),
-          budget.remaining_token_budget - allocated_tokens, state);
+          budget.remaining_token_budget - allocated_tokens,
+          state);
 
       if (budget.remaining_token_budget < allocated_tokens + num_tokens ||
           budget.remaining_seq_budget < allocated_seqs + 1) {
@@ -270,8 +271,8 @@ void SchedulerPolicy::schedule_prefill_from_queue(
       }
 
       size_t actual_tokens = 0;
-      if (!allocate_for_prefill(prefill_sequence.get(), num_tokens,
-                                &actual_tokens, state)) {
+      if (!allocate_for_prefill(
+              prefill_sequence.get(), num_tokens, &actual_tokens, state)) {
         can_schedule = false;
         state.kv_cache_manager->deallocate(prefill_sequence.get());
         blocks_exhausted = true;
@@ -309,8 +310,8 @@ void SchedulerPolicy::schedule_prefill_from_queue(
   }
 
   // Handle unschedulable head request.
-  handle_unschedulable_head(queue, state, finished, budget_exhausted,
-                            blocks_exhausted);
+  handle_unschedulable_head(
+      queue, state, finished, budget_exhausted, blocks_exhausted);
 }
 
 size_t SchedulerPolicy::compute_prefill_tokens(Sequence* seq,
@@ -330,24 +331,26 @@ size_t SchedulerPolicy::compute_prefill_tokens(Sequence* seq,
   }
 
   // Chunked prefill: compute min(remaining, max_chunk, budget).
-  const size_t max_tokens_per_chunk = options_.max_tokens_per_chunk_for_prefill();
+  const size_t max_tokens_per_chunk =
+      options_.max_tokens_per_chunk_for_prefill();
   size_t num_tokens = seq->num_tokens();
   size_t assume_max = std::min(max_tokens_per_chunk, remaining_budget);
   num_tokens = std::min(assume_max, num_tokens);
 
   // CP-aware chunk alignment.
   const size_t kv_cache_tokens_num = seq->kv_state().kv_cache_tokens_num();
-  const size_t remaining_in_seq =
-      seq->num_tokens() > kv_cache_tokens_num
-          ? seq->num_tokens() - kv_cache_tokens_num
-          : 0;
+  const size_t remaining_in_seq = seq->num_tokens() > kv_cache_tokens_num
+                                      ? seq->num_tokens() - kv_cache_tokens_num
+                                      : 0;
   const int32_t kv_split_for_align =
       ::xllm::ParallelConfig::get_instance().kv_split_size_effective();
   const int32_t worker_cp_size =
       Platform::uses_model_cp_partition() ? 1 : options_.cp_size();
-  num_tokens = maybe_align_cp_chunk_tokens(
-      num_tokens, worker_cp_size, kv_split_for_align,
-      state.kv_cache_manager->block_size(), remaining_in_seq);
+  num_tokens = maybe_align_cp_chunk_tokens(num_tokens,
+                                           worker_cp_size,
+                                           kv_split_for_align,
+                                           state.kv_cache_manager->block_size(),
+                                           remaining_in_seq);
 
   return num_tokens;
 }
@@ -367,10 +370,10 @@ bool SchedulerPolicy::allocate_for_prefill(Sequence* seq,
     // CP alignment (skip when model handles CP partition internally).
     const int32_t worker_cp_size =
         Platform::uses_model_cp_partition() ? 1 : state.options.cp_size();
-    if (worker_cp_size > 1 && seq->is_prefill_stage() &&
-        *actual_tokens > 0) {
+    if (worker_cp_size > 1 && seq->is_prefill_stage() && *actual_tokens > 0) {
       const size_t alignment = static_cast<size_t>(worker_cp_size) * 2;
-      *actual_tokens = ((*actual_tokens + alignment - 1) / alignment) * alignment;
+      *actual_tokens =
+          ((*actual_tokens + alignment - 1) / alignment) * alignment;
     }
     const size_t target = seq->kv_cache_tokens_num() + *actual_tokens;
     return state.kv_cache_manager->allocate(seq, target);
@@ -393,26 +396,17 @@ bool SchedulerPolicy::allocate_for_prefill(Sequence* seq,
       seq->is_prefill_stage()) {
     const size_t block_size =
         static_cast<size_t>(state.kv_cache_manager->block_size());
-    if (block_size > 0) {
-      const size_t aligned =
-          (max_handle_num_tokens / block_size) * block_size;
-      if (aligned <= kv_cache_tokens_num) {
-        if (max_handle_num_tokens == seq->num_tokens()) {
-          // Final chunk: allow unaligned to complete the sequence.
-        } else {
-          *actual_tokens = 0;
-          return false;
-        }
+    const size_t aligned = (max_handle_num_tokens / block_size) * block_size;
+    if (aligned <= kv_cache_tokens_num) {
+      if (max_handle_num_tokens == seq->num_tokens()) {
+        // Final chunk: allow unaligned to complete the sequence.
       } else {
-        max_handle_num_tokens = aligned;
+        *actual_tokens = 0;
+        return false;
       }
+    } else {
+      max_handle_num_tokens = aligned;
     }
-  }
-
-  // Speculative decoding: add extra tokens in decode stage.
-  if (options_.num_speculative_tokens() > 0 &&
-      !seq->is_chunked_prefill_stage() && kv_cache_tokens_num > 0) {
-    max_handle_num_tokens += state.min_speculative_tokens_required;
   }
 
   CHECK_GT(max_handle_num_tokens, kv_cache_tokens_num);
@@ -641,10 +635,16 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
 
     // Budget exhausted: partial schedule or fail.
     if (!has_enough_budget) {
-      handle_abnormal_decode_request(
-          queue, state, budget, request, candidate_sequences,
-          candidate_token_budgets, allocated_tokens, allocated_seqs,
-          allocated_estimate_latency, /*budget_exhausted=*/true);
+      handle_abnormal_decode_request(queue,
+                                     state,
+                                     budget,
+                                     request,
+                                     candidate_sequences,
+                                     candidate_token_budgets,
+                                     allocated_tokens,
+                                     allocated_seqs,
+                                     allocated_estimate_latency,
+                                     /*budget_exhausted=*/true);
       break;
     }
 
@@ -672,10 +672,16 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
     }
 
     // Cannot preempt or single request left.
-    handle_abnormal_decode_request(
-        queue, state, budget, request, candidate_sequences,
-        candidate_token_budgets, allocated_tokens, allocated_seqs,
-        allocated_estimate_latency, /*budget_exhausted=*/false);
+    handle_abnormal_decode_request(queue,
+                                   state,
+                                   budget,
+                                   request,
+                                   candidate_sequences,
+                                   candidate_token_budgets,
+                                   allocated_tokens,
+                                   allocated_seqs,
+                                   allocated_estimate_latency,
+                                   /*budget_exhausted=*/false);
     break;
   }
 }
@@ -744,14 +750,16 @@ void SchedulerPolicy::handle_unschedulable_head(
       LOG(ERROR) << "Request prompt is too long, no enough memory to schedule "
                     "a single sequence.";
       state.response_processor->process_failed_request(
-          request, {StatusCode::RESOURCE_EXHAUSTED,
-                    "No enough memory to schedule single sequence"});
+          request,
+          {StatusCode::RESOURCE_EXHAUSTED,
+           "No enough memory to schedule single sequence"});
     } else if (budget_exhausted) {
       LOG(ERROR) << "Request prompt is too long, no enough budget to schedule "
                     "a single sequence. Please set a larger budget.";
       state.response_processor->process_failed_request(
-          request, {StatusCode::RESOURCE_EXHAUSTED,
-                    "No enough budget to schedule single sequence."});
+          request,
+          {StatusCode::RESOURCE_EXHAUSTED,
+           "No enough budget to schedule single sequence."});
     } else {
       LOG(FATAL) << "Unexpected error: blocks and budget are enough but can "
                     "not schedule.";
@@ -784,9 +792,8 @@ void SchedulerPolicy::report_metrics(const SchedulerState& state,
 // Helpers
 // =============================================================================
 
-void SchedulerPolicy::handle_running_requests(
-    std::shared_ptr<Request> request,
-    SchedulerState& state) {
+void SchedulerPolicy::handle_running_requests(std::shared_ptr<Request> request,
+                                              SchedulerState& state) {
   if (request->finished() || request->cancelled()) {
     LOG(FATAL) << "Unknown error, finished/cancelled request should have been "
                   "handled before. request_id is "

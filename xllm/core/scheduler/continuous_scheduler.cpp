@@ -215,8 +215,8 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
   ScheduleBudget budget;
   budget.estimate_latency = profile_manager_->get_constant_overhead();
   budget.remaining_token_budget = options_.enable_profile_token_budget()
-      ? profile_manager_->get_token_budget()
-      : options_.max_tokens_per_batch();
+                                      ? profile_manager_->get_token_budget()
+                                      : options_.max_tokens_per_batch();
   budget.remaining_seq_budget = std::max(options_.max_seqs_per_batch(), 1);
   budget.latency_budget = options_.max_global_tpot_ms();
   budget.num_preempted_requests = 0;
@@ -229,14 +229,15 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
     response_processor_->process_completed_requests(finished);
   }
 
-  auto batches = BatchFactory::get_instance(options_.dp_size())
-      ->create_batches(running_requests_, running_sequences_,
-                       running_sequences_budgets_,
-                       kv_cache_manager_->get_swap_block_transfer_infos());
+  auto batches =
+      BatchFactory::get_instance(options_.dp_size())
+          ->create_batches(running_requests_,
+                           running_sequences_,
+                           running_sequences_budgets_,
+                           kv_cache_manager_->get_swap_block_transfer_infos());
 
-  bool is_batches_empty =
-      std::all_of(batches.begin(), batches.end(),
-                  [](const Batch& b) { return b.empty(); });
+  bool is_batches_empty = std::all_of(
+      batches.begin(), batches.end(), [](const Batch& b) { return b.empty(); });
   if (!is_batches_empty) {
     COUNTER_ADD(scheduling_latency_seconds, timer.elapsed_seconds());
     kv_cache_manager_->transfer_blocks(batches);
@@ -244,8 +245,8 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
     kv_cache_manager_->transfer_blocks();
   }
 
-  policy_->report_metrics(state, timer.elapsed_seconds(),
-                           budget.num_preempted_requests);
+  policy_->report_metrics(
+      state, timer.elapsed_seconds(), budget.num_preempted_requests);
   return batches;
 }
 
@@ -793,9 +794,8 @@ bool ContinuousScheduler::is_paused() const {
 }
 
 void ContinuousScheduler::preempt_all_running_requests() {
-  const size_t total_to_preempt = running_requests_.size() +
-                                  decode_queue_->size() +
-                                  chunk_queue_->size();
+  const size_t total_to_preempt =
+      running_requests_.size() + decode_queue_->size() + chunk_queue_->size();
   if (total_to_preempt == 0) {
     return;
   }
@@ -861,9 +861,8 @@ void ContinuousScheduler::preempt_all_running_requests() {
 }
 
 void ContinuousScheduler::abort_all_running_requests() {
-  const size_t total_to_abort = running_requests_.size() +
-                                decode_queue_->size() +
-                                chunk_queue_->size();
+  const size_t total_to_abort =
+      running_requests_.size() + decode_queue_->size() + chunk_queue_->size();
   if (total_to_abort == 0) {
     return;
   }

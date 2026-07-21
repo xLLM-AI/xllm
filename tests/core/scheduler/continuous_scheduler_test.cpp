@@ -111,7 +111,6 @@ class ScopedConfigValue final {
   T old_;
 };
 
-
 ContinuousScheduler::Options create_scheduler_options(
     int32_t max_tokens_per_batch,
     int32_t max_seqs_per_batch,
@@ -458,7 +457,6 @@ TEST(ContinuousSchedulerTest, BeamStrictNoPartialScheduling) {
   EXPECT_NE(batch[0][0], beam_req->sequences()[0].get());
   EXPECT_NE(batch[0][0], beam_req->sequences()[1].get());
 }
-
 
 TEST(BlockManagerPoolTest, AllocateFailureRollsBackSharedPrefixBlocks) {
   auto engine = std::make_unique<FakeEngine>(3, 4, true);

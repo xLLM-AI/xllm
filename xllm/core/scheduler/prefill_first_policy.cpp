@@ -13,15 +13,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "scheduler/scheduler_policy.h"
+#include <glog/logging.h>
 
 #include <cstdint>
 #include <limits>
 
-#include <glog/logging.h>
-
 #include "core/framework/config/scheduler_config.h"
 #include "framework/request/priority_comparator.h"
+#include "scheduler/scheduler_policy.h"
 
 namespace xllm {
 
@@ -93,11 +92,14 @@ void PrefillFirstPolicy::schedule(
   budget.latency_budget = options_.max_global_ttft_ms();
 
   // Compute urgency + reorder for both prefill queues together.
-  adjust_latency_budget_and_reorder(
-      &state.chunk_queue, &state.prefill_queue, budget.latency_budget,
-      /*for_prefill=*/true, state);
+  adjust_latency_budget_and_reorder(&state.chunk_queue,
+                                    &state.prefill_queue,
+                                    budget.latency_budget,
+                                    /*for_prefill=*/true,
+                                    state);
 
-  // Schedule chunked prefill continuations first (they already have partial KV).
+  // Schedule chunked prefill continuations first (they already have partial
+  // KV).
   schedule_prefill_from_queue(&state.chunk_queue, state, budget, finished);
   // Then new prefill requests.
   schedule_prefill_from_queue(&state.prefill_queue, state, budget, finished);
@@ -109,9 +111,11 @@ void PrefillFirstPolicy::schedule(
   // If no prefill sequences were scheduled, try decode.
   if (state.running_sequences.empty()) {
     budget.latency_budget = options_.max_global_tpot_ms();
-    adjust_latency_budget_and_reorder(
-        &state.decode_queue, /*second_queue=*/nullptr, budget.latency_budget,
-        /*for_prefill=*/false, state);
+    adjust_latency_budget_and_reorder(&state.decode_queue,
+                                      /*second_queue=*/nullptr,
+                                      budget.latency_budget,
+                                      /*for_prefill=*/false,
+                                      state);
     schedule_decode_from_queue(&state.decode_queue, state, budget);
   }
 }
@@ -136,7 +140,8 @@ void PrefillFirstPolicy::adjust_latency_budget_and_reorder(
   }
   CHECK(state.profile_manager != nullptr);
 
-  const double constant_overhead = state.profile_manager->get_constant_overhead();
+  const double constant_overhead =
+      state.profile_manager->get_constant_overhead();
   double total_exec_time = 0.0;
   int32_t min_remaining_time = std::numeric_limits<int32_t>::max();
   int32_t min_tpot = std::numeric_limits<int32_t>::max();

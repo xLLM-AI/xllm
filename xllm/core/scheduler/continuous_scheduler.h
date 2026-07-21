@@ -50,14 +50,17 @@ struct SchedulerState;
 // BatchMode captures the scheduling policy configuration.
 // The concrete SchedulerPolicy subclass is selected based on these fields:
 //   - enable_mix_batch=false → PrefillFirstPolicy (exclusive batch)
-//   - enable_mix_batch=true + priority_strategy!="multi_slo_and_prio" → DecodeFirstPolicy
-//   - enable_mix_batch=true + priority_strategy=="multi_slo_and_prio" → UnifiedPolicy
+//   - enable_mix_batch=true + priority_strategy!="multi_slo_and_prio" →
+//   DecodeFirstPolicy
+//   - enable_mix_batch=true + priority_strategy=="multi_slo_and_prio" →
+//   UnifiedPolicy
 //
 // Mapping from old scheduler classes:
-//   {false, false, "fcfs"}              → PrefillFirstPolicy (original ContinuousScheduler)
-//   {true,  true,  "fcfs"}              → DecodeFirstPolicy  (original ChunkedPrefillScheduler)
-//   {false, true,  "fcfs"}              → PrefillFirstPolicy (original PrefillOnlyScheduler)
-//   {true,  true,  "multi_slo_and_prio"}   → UnifiedPolicy      (original MixScheduler)
+//   {false, false, "fcfs"}              → PrefillFirstPolicy (original
+//   ContinuousScheduler) {true,  true,  "fcfs"}              →
+//   DecodeFirstPolicy  (original ChunkedPrefillScheduler) {false, true, "fcfs"}
+//   → PrefillFirstPolicy (original PrefillOnlyScheduler) {true,  true,
+//   "multi_slo_and_prio"}   → UnifiedPolicy      (original MixScheduler)
 struct BatchMode {
   bool enable_mix_batch = false;
   bool enable_chunked_prefill = false;

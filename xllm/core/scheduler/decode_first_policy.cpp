@@ -13,12 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "scheduler/scheduler_policy.h"
+#include <glog/logging.h>
 
 #include <cstdint>
 #include <limits>
 
-#include <glog/logging.h>
+#include "scheduler/scheduler_policy.h"
 
 namespace xllm {
 
@@ -108,7 +108,8 @@ void DecodeFirstPolicy::redistribute_remaining_budget(
 
       double cur_latency = state.profile_manager->predict_step_time(
           budget.remaining_token_budget,
-          sequence->kv_state().kv_cache_tokens_num(), false);
+          sequence->kv_state().kv_cache_tokens_num(),
+          false);
       if (budget.estimate_latency + cur_latency > budget.latency_budget) {
         break;
       }
@@ -116,8 +117,10 @@ void DecodeFirstPolicy::redistribute_remaining_budget(
     }
 
     size_t actual_tokens = 0;
-    if (!allocate_for_prefill(sequence, budget.remaining_token_budget,
-                              &actual_tokens, state,
+    if (!allocate_for_prefill(sequence,
+                              budget.remaining_token_budget,
+                              &actual_tokens,
+                              state,
                               /*skip_shared=*/true)) {
       break;
     }

@@ -15,12 +15,12 @@ limitations under the License.
 
 #pragma once
 
+#include <folly/MPMCQueue.h>
+
 #include <cstdint>
 #include <list>
 #include <memory>
 #include <vector>
-
-#include <folly/MPMCQueue.h>
 
 #include "framework/batch/batch.h"
 #include "framework/block/kv_cache_manager.h"
@@ -40,9 +40,9 @@ class AsyncResponseProcessor;
 struct SchedulerState {
   // Queues (unified -- no separate online/offline distinction).
   // prefill_queue: holds new prefill requests (kv_cache_tokens_num == 0)
-  // chunk_queue: holds chunked prefill continuations (has partial KV, preemptable)
-  // decode_queue: holds decode requests
-  // unified_queue: used by UnifiedPolicy (all requests in one list)
+  // chunk_queue: holds chunked prefill continuations (has partial KV,
+  // preemptable) decode_queue: holds decode requests unified_queue: used by
+  // UnifiedPolicy (all requests in one list)
   RequestPriorityQueue& prefill_queue;
   RequestPriorityQueue& chunk_queue;
   RequestPriorityQueue& decode_queue;
@@ -88,19 +88,22 @@ inline bool budget_exhausted(const ScheduleBudget& budget) {
 // Determined by BatchMode: enable_mix_batch × priority_strategy.
 enum class SchedulerPolicyKind {
   PREFILL_FIRST,  // !enable_mix_batch: prefill and decode never share a batch
-  DECODE_FIRST,   // enable_mix_batch + fcfs/priority/deadline: decode fills first
-  UNIFIED,        // enable_mix_batch + multi_slo_and_prio: unified queue scheduling
+  DECODE_FIRST,   // enable_mix_batch + fcfs/priority/deadline: decode fills
+                  // first
+  UNIFIED,  // enable_mix_batch + multi_slo_and_prio: unified queue scheduling
 };
 
 // SchedulerPolicy is the abstract base for batch-assembly strategies.
 //
-// ContinuousScheduler owns a SchedulerPolicy and calls prepare_batch() each step.
-// The policy handles: requeue previous running requests → schedule new batch.
-// Which concrete policy is instantiated depends on BatchMode (see continuous_scheduler.h).
+// ContinuousScheduler owns a SchedulerPolicy and calls prepare_batch() each
+// step. The policy handles: requeue previous running requests → schedule new
+// batch. Which concrete policy is instantiated depends on BatchMode (see
+// continuous_scheduler.h).
 //
-// Common scheduling primitives (schedule_prefill_from_queue, schedule_decode_from_queue,
-// token computation, block allocation, preemption) live in the base class. Each subclass
-// only implements the top-level scheduling order and queue management strategy.
+// Common scheduling primitives (schedule_prefill_from_queue,
+// schedule_decode_from_queue, token computation, block allocation, preemption)
+// live in the base class. Each subclass only implements the top-level
+// scheduling order and queue management strategy.
 class SchedulerPolicy {
  public:
   SchedulerPolicy(const BatchMode& mode,
@@ -117,9 +120,9 @@ class SchedulerPolicy {
   virtual void drain_request_queue(
       SchedulerState& state,
       folly::MPMCQueue<std::shared_ptr<Request>>& request_queue);
-  std::vector<std::shared_ptr<Request>> collect_finished(
-      SchedulerState& state);
-  void report_metrics(const SchedulerState& state, double elapsed_seconds,
+  std::vector<std::shared_ptr<Request>> collect_finished(SchedulerState& state);
+  void report_metrics(const SchedulerState& state,
+                      double elapsed_seconds,
                       size_t num_preempted_requests);
 
  protected:
@@ -206,12 +209,11 @@ class PrefillFirstPolicy : public SchedulerPolicy {
                 ScheduleBudget& budget,
                 std::vector<std::shared_ptr<Request>>& finished) override;
 
-  void adjust_latency_budget_and_reorder(
-      RequestPriorityQueue* first_queue,
-      RequestPriorityQueue* second_queue,
-      double& latency_budget,
-      bool for_prefill,
-      const SchedulerState& state) override;
+  void adjust_latency_budget_and_reorder(RequestPriorityQueue* first_queue,
+                                         RequestPriorityQueue* second_queue,
+                                         double& latency_budget,
+                                         bool for_prefill,
+                                         const SchedulerState& state) override;
 };
 
 // DecodeFirstPolicy: mixed batch mode with fcfs/priority/deadline.
@@ -236,7 +238,8 @@ class DecodeFirstPolicy : public SchedulerPolicy {
 // and sorted/scheduled together, regardless of their stage.
 // Currently used for multi_slo_and_prio (multi-priority multi-SLO scheduling),
 // where high-priority decode and prefill both rank above low-priority requests.
-// Developers can inherit this class to implement custom unified scheduling strategies.
+// Developers can inherit this class to implement custom unified scheduling
+// strategies.
 class UnifiedPolicy : public SchedulerPolicy {
  public:
   using SchedulerPolicy::SchedulerPolicy;

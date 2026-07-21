@@ -94,7 +94,6 @@ inline size_t maybe_align_cp_prefill_tokens(const Sequence* sequence,
 
 }  // namespace
 
-
 void PDOOCScheduler::cache_in_batch_prefix(
     const std::vector<Sequence*>& sequences,
     const std::vector<size_t>& current_step_token_budgets) {
@@ -190,8 +189,7 @@ void PDOOCScheduler::handle_abnormal_request(
   }
 }
 
-void PDOOCScheduler::handle_running_requests(
-    std::shared_ptr<Request> request) {
+void PDOOCScheduler::handle_running_requests(std::shared_ptr<Request> request) {
   if (request->finished() || request->cancelled()) {
     LOG(FATAL) << "Unknow error, finished/cancelled request have be handled "
                   "before. request_id is "
@@ -491,28 +489,26 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
   bool previous_idle = (step_status_ == StepStatus::IDLE);
   // PD-OOC has its own budgeting and never goes through the chunked-prefill
   // helper; use own handle_prefill_requests_impl directly.
-  handle_prefill_requests_impl(
-      latency_budget,
-      estimate_latency,
-      remaining_token_budget,
-      remaining_seq_budget,
-      prefill_queue_.get(),
-      num_online_prefill_preempt_offline_requests,
-      finished_requests);
+  handle_prefill_requests_impl(latency_budget,
+                               estimate_latency,
+                               remaining_token_budget,
+                               remaining_seq_budget,
+                               prefill_queue_.get(),
+                               num_online_prefill_preempt_offline_requests,
+                               finished_requests);
   if (!running_sequences_.empty()) {
     step_status_ = StepStatus::ONLINE_PREFILL;
     VLOG(1) << "Set step status to ONLINE PREFILL";
   } else {
     // In PD OOC mode, a batch can only consist entirely of online requests or
     // entirely of offline requests
-    handle_prefill_requests_impl(
-        latency_budget,
-        estimate_latency,
-        remaining_token_budget,
-        remaining_seq_budget,
-        prefill_queue_offline_.get(),
-        num_online_prefill_preempt_offline_requests,
-        finished_requests);
+    handle_prefill_requests_impl(latency_budget,
+                                 estimate_latency,
+                                 remaining_token_budget,
+                                 remaining_seq_budget,
+                                 prefill_queue_offline_.get(),
+                                 num_online_prefill_preempt_offline_requests,
+                                 finished_requests);
     if (!running_sequences_.empty()) {
       step_status_ = StepStatus::OFFLINE_PREFILL;
       VLOG(1) << "Set step status to OFFLINE PREFILL";
@@ -1058,8 +1054,7 @@ void PDOOCScheduler::handle_decode_requests_impl(
     // preempted
     if (options_.enable_online_preempt_offline() && !request->offline() &&
         !decode_queue_->empty()) {
-      std::shared_ptr<Request> request_to_preempt =
-          decode_queue_->back();
+      std::shared_ptr<Request> request_to_preempt = decode_queue_->back();
       ++num_online_decode_preempt_offline_requests;
       clear_mtp_bootstrap(request_to_preempt.get());
       kv_cache_manager_->deallocate(request_to_preempt.get());
@@ -1281,8 +1276,7 @@ void PDOOCScheduler::handle_decode_requests(
     // preempted
     if (options_.enable_online_preempt_offline() && !request->offline() &&
         !decode_queue_->empty()) {
-      std::shared_ptr<Request> request_to_preempt =
-          decode_queue_->back();
+      std::shared_ptr<Request> request_to_preempt = decode_queue_->back();
       ++num_online_decode_preempt_offline_requests;
       kv_cache_manager_->deallocate(request_to_preempt.get());
       decode_queue_->pop_back();

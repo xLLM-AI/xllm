@@ -253,8 +253,7 @@ std::vector<Batch> FixedStepsScheduler::prepare_batch() {
   // Initialize from prefill_queue_ since running_requests_ was just
   // cleared.
   if (!scheduler_pipeline_ && !prefill_queue_->empty()) {
-    const std::shared_ptr<Request>& sample_request =
-        prefill_queue_->top();
+    const std::shared_ptr<Request>& sample_request = prefill_queue_->top();
     auto rec_type = sample_request->state().rec_type;
     bool is_rec_multi_round =
         (rec_type == RecType::kLlmRec) && is_rec_multi_round_mode();

@@ -203,9 +203,9 @@ void DisaggPDChunkedPrefillScheduler::schedule_waiting_prefill(
     // The sole fresh request in the whole system is admitted so that an
     // oversized prompt (footprint > total) reaches the exceeds_block_capacity
     // failure path below instead of being deferred forever.
-    const bool is_sole_fresh_request =
-        running_sequences_.empty() && deferred.empty() &&
-        prefill_queue_->size() == 1;
+    const bool is_sole_fresh_request = running_sequences_.empty() &&
+                                       deferred.empty() &&
+                                       prefill_queue_->size() == 1;
     // Complete footprint of the whole prompt, independent of how much is held.
     const size_t full_blocks = pd_prefill_remaining_blocks(
         sequence->num_prompt_tokens(), /*held_blocks=*/0, block_size);

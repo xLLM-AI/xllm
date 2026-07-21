@@ -13,8 +13,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "continuous_scheduler.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -25,6 +23,7 @@ limitations under the License.
 #include <string_view>
 #include <vector>
 
+#include "continuous_scheduler.h"
 #include "core/framework/config/scheduler_config.h"
 #include "distributed_runtime/engine.h"
 #include "framework/model/model_args.h"
@@ -214,8 +213,7 @@ TEST(SchedulerPolicyTest, AddNewRequestBase) {
         create_scheduler_options(10000, 256, 0, 1024, 1);
     auto engine =
         std::make_unique<FakeEngine>(num_blocks[idx], block_size[idx]);
-    auto scheduler =
-        std::make_unique<ContinuousScheduler>(engine.get(), opt);
+    auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
     EXPECT_TRUE(scheduler != nullptr);
 
     // create requests
@@ -245,8 +243,7 @@ TEST(SchedulerPolicyTest, ResourceNotEnough) {
     ContinuousScheduler::Options opt =
         create_scheduler_options(1, 256, 0, 1024, 1);
     auto engine = std::make_unique<FakeEngine>(16, 16);
-    auto scheduler =
-        std::make_unique<ContinuousScheduler>(engine.get(), opt);
+    auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
     EXPECT_TRUE(scheduler != nullptr);
 
     // request prompt len: 100
@@ -266,8 +263,7 @@ TEST(SchedulerPolicyTest, ResourceNotEnough) {
         create_scheduler_options(1000, 256, 0, 1024, 1);
     // free block slot: 1
     auto engine = std::make_unique<FakeEngine>(2, 8);
-    auto scheduler =
-        std::make_unique<ContinuousScheduler>(engine.get(), opt);
+    auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
     EXPECT_TRUE(scheduler != nullptr);
 
     // request prompt len: 1000
