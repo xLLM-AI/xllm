@@ -72,6 +72,16 @@ ReduceAsyncCtx launch_reduce(torch::Tensor input, ProcessGroup* process_group);
 
 torch::Tensor finish_reduce(ReduceAsyncCtx ctx);
 
+AllGatherAsyncCtx launch_all_gather(const torch::Tensor& input,
+                                    ProcessGroup* process_group);
+
+torch::Tensor finish_all_gather(AllGatherAsyncCtx ctx);
+
+AllToAllAsyncCtx launch_all_to_all(const torch::Tensor& input,
+                                   ProcessGroup* process_group);
+
+torch::Tensor finish_all_to_all(AllToAllAsyncCtx ctx);
+
 torch::Tensor all_gather_interleaved(const torch::Tensor& input,
                                      ProcessGroup* process_group);
 

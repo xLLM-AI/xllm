@@ -86,6 +86,26 @@ struct BroadcastTestParams {
   int64_t numel;
   int32_t root_rank;
 };
+
+struct AllGatherAsyncTestParams {
+  int32_t rank;
+  int32_t world_size;
+  int32_t port;
+  std::string host;
+  int32_t device_index;
+  int64_t rows;
+  int64_t cols;
+};
+
+struct AllToAllAsyncTestParams {
+  int32_t rank;
+  int32_t world_size;
+  int32_t port;
+  std::string host;
+  int32_t device_index;
+  int64_t chunk;
+  int64_t cols;
+};
 // Child process test function
 int run_reduce_scatter_test_child(const TestParams& params) {
   try {
@@ -350,6 +370,167 @@ int run_allgather_base_test_child(const AllGatherBaseTestParams& params) {
     return 1;
   }
 }
+
+// Child: launch_all_gather + finish_all_gather over a real group.
+//
+// Each rank `r` builds an input `arange(rows*cols) + r*1000` (distinct per
+// rank so every gather slot is identifiable). `launch_all_gather` must hand
+// back a `[world_size, rows, cols]` stack whose slot `s` equals rank `s`'s
+// input; `finish_all_gather` returns exactly that stacked tensor. We also check
+// the work handle is defined (a real comm was enqueued).
+int run_all_gather_async_child(const AllGatherAsyncTestParams& params) {
+  try {
+    xllm::Device xllm_device(params.device_index);
+    xllm_device.set_device();
+    torch::Device device = xllm_device.unwrap();
+
+    auto process_group = create_test_process_group(
+        params.rank, params.world_size, params.port, params.host, device);
+    if (!process_group) {
+      LOG(ERROR) << "all_gather rank " << params.rank << ": PG creation failed";
+      return 1;
+    }
+
+    auto options = torch::TensorOptions()
+                       .dtype(torch::kFloat32)
+                       .device(device)
+                       .requires_grad(false);
+    auto cpu_options = torch::TensorOptions().dtype(torch::kFloat32);
+    torch::Tensor input = torch::arange(params.rows * params.cols, options)
+                              .reshape({params.rows, params.cols}) +
+                          static_cast<float>(params.rank * 1000);
+
+    AllGatherAsyncCtx ctx = launch_all_gather(input, process_group.get());
+    if (!ctx.work.defined()) {
+      LOG(ERROR) << "all_gather rank " << params.rank
+                 << ": multi-rank launch did not enqueue a work handle";
+      return 1;
+    }
+    torch::Tensor stacked = finish_all_gather(ctx);
+    xllm_device.synchronize_default_stream();
+
+    if (stacked.dim() != 3 || stacked.size(0) != params.world_size ||
+        stacked.size(1) != params.rows || stacked.size(2) != params.cols) {
+      LOG(ERROR) << "all_gather rank " << params.rank << ": output shape mismatch";
+      return 1;
+    }
+
+    torch::Tensor stacked_cpu = stacked.to(torch::kCPU);
+    for (int32_t s = 0; s < params.world_size; ++s) {
+      torch::Tensor expected =
+          torch::arange(params.rows * params.cols, cpu_options)
+              .reshape({params.rows, params.cols}) +
+          static_cast<float>(s * 1000);
+      if (!torch::equal(stacked_cpu[s], expected)) {
+        LOG(ERROR) << "all_gather rank " << params.rank
+                   << ": slot " << s << " mismatch";
+        return 1;
+      }
+    }
+
+    LOG(INFO) << "all_gather rank " << params.rank << ": passed";
+    return 0;
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "all_gather rank " << params.rank << ": exception: " << e.what();
+    return 1;
+  }
+}
+
+// Child: launch_all_to_all + finish_all_to_all over a real group.
+//
+// `launch_all_to_all` does an equal-split all-to-all along dim 0 (input rows
+// must be divisible by `world_size`). Standard convention: rank `r` splits its
+// `[world_size * chunk, cols]` input into `world_size` blocks of `chunk` rows;
+// block `i` is sent to rank `i`. Rank `r`'s output block `i` (rows
+// `i*chunk:(i+1)*chunk`) is the block every source rank `s` placed in slot `r`
+// of ITS input for destination `r`.
+//
+// To make the result checkable we encode each input value uniquely as
+// `f(dest_rank, src_rank, j)` so every (dest, src, j) triple is distinguishable.
+int run_all_to_all_async_child(const AllToAllAsyncTestParams& params) {
+  try {
+    xllm::Device xllm_device(params.device_index);
+    xllm_device.set_device();
+    torch::Device device = xllm_device.unwrap();
+
+    auto process_group = create_test_process_group(
+        params.rank, params.world_size, params.port, params.host, device);
+    if (!process_group) {
+      LOG(ERROR) << "all_to_all rank " << params.rank << ": PG creation failed";
+      return 1;
+    }
+
+    auto cpu_options = torch::TensorOptions().dtype(torch::kFloat32);
+
+    // Build the full per-rank input: block `dest` (rows dest*chunk:(dest+1)*chunk)
+    // is the payload this rank sends to destination `dest`. Encode each
+    // value as a unique key: dest*(world_size*cols) + rank*cols + j.
+    const int64_t total_rows = params.world_size * params.chunk;
+    torch::Tensor input_cpu =
+        torch::empty({total_rows, params.cols}, cpu_options);
+    auto in = input_cpu.accessor<float, 2>();
+    for (int32_t dest = 0; dest < params.world_size; ++dest) {
+      for (int64_t j = 0; j < params.chunk; ++j) {
+        const int64_t row = static_cast<int64_t>(dest) * params.chunk + j;
+        for (int64_t c = 0; c < params.cols; ++c) {
+          in[row][c] = static_cast<float>(
+              static_cast<int64_t>(dest) * (params.world_size * params.cols) +
+              static_cast<int64_t>(params.rank) * params.cols + c);
+        }
+      }
+    }
+    torch::Tensor input = input_cpu.to(device).contiguous();
+
+    AllToAllAsyncCtx ctx = launch_all_to_all(input, process_group.get());
+    if (!ctx.work.defined()) {
+      LOG(ERROR) << "all_to_all rank " << params.rank
+                 << ": multi-rank launch did not enqueue a work handle";
+      return 1;
+    }
+    torch::Tensor output = finish_all_to_all(ctx);
+    xllm_device.synchronize_default_stream();
+
+    if (output.sizes() != input.sizes()) {
+      LOG(ERROR) << "all_to_all rank " << params.rank << ": output shape mismatch";
+      return 1;
+    }
+
+    // Expected output on receiver rank: chunk i (rows i*chunk:(i+1)*chunk) of the
+    // output is the chunk that source rank i sent to destination `rank`:
+    //   output[i*chunk + k][c] = encode(dest=rank, src=i, c)
+    //                           = rank*(world_size*cols) + i*cols + c
+    torch::Tensor output_cpu = output.to(torch::kCPU);
+    auto out = output_cpu.accessor<float, 2>();
+    bool ok = true;
+    for (int32_t i = 0; i < params.world_size; ++i) {
+      for (int64_t k = 0; k < params.chunk; ++k) {
+        const int64_t row = static_cast<int64_t>(i) * params.chunk + k;
+        for (int64_t c = 0; c < params.cols; ++c) {
+          float expected = static_cast<float>(
+              static_cast<int64_t>(params.rank) *
+                  (params.world_size * params.cols) +
+              static_cast<int64_t>(i) * params.cols + c);
+          if (std::abs(out[row][c] - expected) > 1e-4f) {
+            ok = false;
+            LOG(ERROR) << "all_to_all rank " << params.rank << " row " << row
+                       << " col " << c << ": expected " << expected << " got "
+                       << out[row][c];
+          }
+        }
+      }
+    }
+    if (!ok) {
+      LOG(ERROR) << "all_to_all rank " << params.rank << ": value mismatch";
+      return 1;
+    }
+
+    LOG(INFO) << "all_to_all rank " << params.rank << ": passed";
+    return 0;
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "all_to_all rank " << params.rank << ": exception: " << e.what();
+    return 1;
+  }
+}
 // Multi-process test fixture
 class ReduceScatterMultiDeviceTest : public ::testing::Test {
  protected:
@@ -560,6 +741,149 @@ class BroadcastMultiDeviceTest : public ::testing::Test {
   int64_t numel_ = 0;
 };
 
+// ---------------------------------------------------------------------------
+// launch_all_gather / finish_all_gather over a real MLU group
+// ---------------------------------------------------------------------------
+
+class AllGatherAsyncMultiDeviceTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    world_size_ = 2;
+    port_ = 29571;
+    host_ = "127.0.0.1";
+    rows_ = 4;
+    cols_ = 6;
+  }
+
+  void RunMultiProcessTest() {
+    std::vector<pid_t> child_pids;
+    std::vector<int> child_statuses(world_size_);
+
+    for (int32_t rank = 0; rank < world_size_; ++rank) {
+      pid_t pid = fork();
+      if (pid == 0) {
+        AllGatherAsyncTestParams params;
+        params.rank = rank;
+        params.world_size = world_size_;
+        params.port = port_;
+        params.host = host_;
+        params.device_index = rank % Platform::device_count();
+        params.rows = rows_;
+        params.cols = cols_;
+        _exit(run_all_gather_async_child(params));
+      } else if (pid > 0) {
+        child_pids.push_back(pid);
+      } else {
+        LOG(FATAL) << "Failed to fork child process for rank " << rank;
+      }
+    }
+
+    bool all_passed = true;
+    for (size_t i = 0; i < child_pids.size(); ++i) {
+      int status;
+      pid_t waited_pid = waitpid(child_pids[i], &status, 0);
+      if (waited_pid == child_pids[i]) {
+        if (WIFEXITED(status)) {
+          child_statuses[i] = WEXITSTATUS(status);
+          if (child_statuses[i] != 0) {
+            all_passed = false;
+            LOG(ERROR) << "Child process for rank " << i << " exited with code "
+                       << child_statuses[i];
+          }
+        } else {
+          all_passed = false;
+          LOG(ERROR) << "Child process for rank " << i
+                     << " did not exit normally";
+        }
+      } else {
+        all_passed = false;
+        LOG(ERROR) << "Failed to wait for child process for rank " << i;
+      }
+    }
+
+    CHECK(all_passed) << "One or more child processes failed";
+  }
+
+  int32_t world_size_ = 0;
+  int32_t port_ = 0;
+  std::string host_;
+  int64_t rows_ = 0;
+  int64_t cols_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// launch_all_to_all / finish_all_to_all over a real MLU group
+// ---------------------------------------------------------------------------
+
+class AllToAllAsyncMultiDeviceTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    world_size_ = 2;
+    port_ = 29581;
+    host_ = "127.0.0.1";
+    // Equal-split block size (rows sent to / received from each rank). Picked
+    // == world_size so the per-rank input has world_size*chunk rows and the
+    // transpose is a clean [world_size, chunk, cols] dim-(0,1) swap.
+    chunk_ = world_size_;
+    cols_ = 3;
+  }
+
+  void RunMultiProcessTest() {
+    std::vector<pid_t> child_pids;
+    std::vector<int> child_statuses(world_size_);
+
+    for (int32_t rank = 0; rank < world_size_; ++rank) {
+      pid_t pid = fork();
+      if (pid == 0) {
+        AllToAllAsyncTestParams params;
+        params.rank = rank;
+        params.world_size = world_size_;
+        params.port = port_;
+        params.host = host_;
+        params.device_index = rank % Platform::device_count();
+        params.chunk = chunk_;
+        params.cols = cols_;
+        _exit(run_all_to_all_async_child(params));
+      } else if (pid > 0) {
+        child_pids.push_back(pid);
+      } else {
+        LOG(FATAL) << "Failed to fork child process for rank " << rank;
+      }
+    }
+
+    bool all_passed = true;
+    for (size_t i = 0; i < child_pids.size(); ++i) {
+      int status;
+      pid_t waited_pid = waitpid(child_pids[i], &status, 0);
+      if (waited_pid == child_pids[i]) {
+        if (WIFEXITED(status)) {
+          child_statuses[i] = WEXITSTATUS(status);
+          if (child_statuses[i] != 0) {
+            all_passed = false;
+            LOG(ERROR) << "Child process for rank " << i << " exited with code "
+                       << child_statuses[i];
+          }
+        } else {
+          all_passed = false;
+          LOG(ERROR) << "Child process for rank " << i
+                     << " did not exit normally";
+        }
+      } else {
+        all_passed = false;
+        LOG(ERROR) << "Failed to wait for child process for rank " << i;
+      }
+    }
+
+    CHECK(all_passed) << "One or more child processes failed";
+  }
+
+  int32_t world_size_ = 0;
+  int32_t port_ = 0;
+  std::string host_;
+  int64_t chunk_ = 0;
+  int64_t cols_ = 0;
+};
+
 TEST_F(BroadcastMultiDeviceTest, BroadcastFromRoot0) {
   RunMultiProcessTest(/*root_rank=*/0);
 }
@@ -585,6 +909,14 @@ TEST_F(ReduceScatterMultiDeviceTest, LargeInputTest) {
 
 TEST_F(AllGatherBaseMultiDeviceTest, BasicTest) {
   RunMultiProcessTest(input_size_, hidden_dim_);
+}
+
+TEST_F(AllGatherAsyncMultiDeviceTest, StacksPerRankInputs) {
+  RunMultiProcessTest();
+}
+
+TEST_F(AllToAllAsyncMultiDeviceTest, EqualSplitBlockSwap) {
+  RunMultiProcessTest();
 }
 }  // namespace test
 }  // namespace parallel_state
