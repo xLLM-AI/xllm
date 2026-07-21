@@ -180,6 +180,13 @@ std::tuple<at::Tensor, at::Tensor> quant_lightning_indexer(
     bool return_value);
 at::Tensor hc_pre_inv_rms(const at::Tensor& x, double epsilon);
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> gamma_add_rms_norm(
+    const torch::Tensor& x1,
+    const torch::Tensor& x2,
+    const torch::Tensor& gamma,
+    double epsilon,
+    bool add_gamma_offset);
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> hc_pre_sinkhorn(
     const at::Tensor& mixes,
     const at::Tensor& rsqrt,

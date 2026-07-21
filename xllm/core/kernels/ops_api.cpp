@@ -354,9 +354,18 @@ void fused_layernorm(FusedLayerNormParams& params) {
                         params.dynamic_quant);
 #elif defined(USE_NPU)
   if (params.residual.has_value()) {
-    std::tie(params.output, std::ignore, params.residual_out) =
-        npu::add_rms_norm(
-            params.input, params.residual.value(), params.weight, params.eps);
+    if (params.add_gamma_offset) {
+      std::tie(params.output, std::ignore, params.residual_out) =
+          npu::gamma_add_rms_norm(params.input,
+                                  params.residual.value(),
+                                  params.weight,
+                                  params.eps,
+                                  params.add_gamma_offset);
+    } else {
+      std::tie(params.output, std::ignore, params.residual_out) =
+          npu::add_rms_norm(
+              params.input, params.residual.value(), params.weight, params.eps);
+    }
   } else {
     params.output =
         npu::rms_norm(params.input, params.weight, params.eps, params.mode);

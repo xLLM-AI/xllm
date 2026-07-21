@@ -36,6 +36,7 @@ cc_library(
     beam_search_rec_final.cpp
     npu_mega_chunk_gdn.cpp
     layer_norm_fwd.cpp
+    gamma_add_rms_norm.cpp
   INCLUDES
     ${PROJECT_SOURCE_DIR}/third_party/xllm_ops/build/autogen
   DEPS

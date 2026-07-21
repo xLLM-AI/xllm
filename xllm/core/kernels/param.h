@@ -265,6 +265,8 @@ struct FusedLayerNormParams {
   std::string mode;
   // Epsilon value for numerical stability in normalization computation.
   double eps;
+  // Apply the Gemma/Qwen3.5 gamma offset inside NPU residual RMSNorm.
+  bool add_gamma_offset = false;
   // Whether to store output before normalization to residual_out.
   // Not supported when both bias and residual are not provided.
   bool store_output_before_norm = false;
