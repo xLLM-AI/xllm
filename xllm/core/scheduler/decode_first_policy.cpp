@@ -57,7 +57,7 @@ void DecodeFirstPolicy::schedule(
 
   // Step 2: schedule prefill requests (continuations from chunk_queue first,
   // then new prefill from waiting_queue).
-  if (!budget.exhausted()) {
+  if (!budget_exhausted(budget)) {
     if (state.running_sequences.empty()) {
       budget.latency_budget = std::numeric_limits<int32_t>::max();
     }

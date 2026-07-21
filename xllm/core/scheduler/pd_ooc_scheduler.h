@@ -188,6 +188,10 @@ class PDOOCScheduler : public DisaggPDScheduler {
   double decode_last_step_latency_ = 0;
   vector<int> last_decode_step_global_batch_req_lens_;
 
+  // Offline queues for PD-OOC online/offline batch exclusivity.
+  std::unique_ptr<RequestPriorityQueue> prefill_queue_offline_;
+  std::unique_ptr<RequestPriorityQueue> decode_queue_offline_;
+
   // for prefill save all remote requests
   std::unordered_map<std::string, std::shared_ptr<Request>>
       remote_requests_map_;

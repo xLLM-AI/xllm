@@ -75,12 +75,13 @@ struct ScheduleBudget {
   double latency_budget;
   double estimate_latency;
   size_t num_preempted_requests;
-
-  bool exhausted() const {
-    return remaining_token_budget == 0 || remaining_seq_budget == 0 ||
-           latency_budget <= estimate_latency;
-  }
 };
+
+inline bool budget_exhausted(const ScheduleBudget& budget) {
+  return budget.remaining_token_budget == 0 ||
+         budget.remaining_seq_budget == 0 ||
+         budget.latency_budget <= budget.estimate_latency;
+}
 
 // Selects which concrete policy to instantiate.
 // Determined by BatchMode: enable_mix_batch × priority_strategy.

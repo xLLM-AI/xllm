@@ -143,7 +143,9 @@ void PrefillFirstPolicy::adjust_latency_budget_and_reorder(
 
   // Lambda to process one queue's requests for metrics.
   auto process_queue = [&](RequestPriorityQueue* queue) {
-    if (queue == nullptr || queue->empty()) return;
+    if (queue == nullptr || queue->empty()) {
+      return;
+    }
     for (auto it = queue->begin(); it != queue->end(); ++it) {
       auto request = *it;
       auto& sequence = request->sequences()[0];
@@ -187,7 +189,9 @@ void PrefillFirstPolicy::adjust_latency_budget_and_reorder(
 
   // Lambda to set urgency on one queue's requests.
   auto set_urgency = [&](RequestPriorityQueue* queue) {
-    if (queue == nullptr || queue->empty()) return;
+    if (queue == nullptr || queue->empty()) {
+      return;
+    }
     for (auto it = queue->begin(); it != queue->end(); ++it) {
       auto request = *it;
       auto& sequence = request->sequences()[0];
