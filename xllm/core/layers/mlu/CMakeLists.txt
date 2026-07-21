@@ -26,6 +26,7 @@ cc_library(
     qwen3_5/qwen3_5_attention.h
     qwen3_5/qwen3_5_decoder_layer.h
     qwen3_5/qwen3_5_gated_delta_net.h
+    qwen3_5/qwen3_next_rms_norm.h
     moe_softplus_topk.h
   SRCS
     attention.cpp
@@ -50,6 +51,7 @@ cc_library(
     qwen3_5/qwen3_5_attention.cpp
     qwen3_5/qwen3_5_decoder_layer.cpp
     qwen3_5/qwen3_5_gated_delta_net.cpp
+    qwen3_5/qwen3_next_rms_norm.cpp
     moe_softplus_topk.cpp
   DEPS
     :common_layers
