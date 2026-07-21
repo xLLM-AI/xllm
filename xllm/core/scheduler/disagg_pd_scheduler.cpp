@@ -43,6 +43,7 @@ limitations under the License.
 #include "scheduler/chunked_prefill_scheduler.h"
 #include "scheduler/continuous_scheduler.h"
 #include "util/env_var.h"
+#include "util/timer.h"
 #include "util/utils.h"
 
 namespace xllm {
@@ -441,6 +442,7 @@ void DisaggPDScheduler::dispatch_requests() {
 
     // TODO: send the request to the selected D instance
     // Send 'DisaggRequests' and recv 'DisaggResponses'
+    Timer decode_allocation_timer;
     xllm::proto::DisaggRequests reqs;
     xllm::proto::DisaggResponses resps;
     // prefill name (ID)
@@ -509,10 +511,15 @@ void DisaggPDScheduler::dispatch_requests() {
     reqs.mutable_cluster_infos()->mutable_ports()->Add(
         instance_info_.ports.begin(), instance_info_.ports.end());
     reqs.mutable_cluster_infos()->set_dp_size(options_.dp_size());
+    const double allocation_prepare_seconds =
+        decode_allocation_timer.elapsed_seconds();
 
     // TODO: sync rpc here currently
     brpc::Controller cntl;
+    Timer allocation_rpc_timer;
     stub->AddNewRequests(&cntl, &reqs, &resps, nullptr);
+    const double allocation_rpc_seconds =
+        allocation_rpc_timer.elapsed_seconds();
     if (cntl.Failed()) {
       LOG(ERROR) << "Failed to add new requests to decode instance : "
                  << selected_instance << ", error text : " << cntl.ErrorText();
@@ -609,6 +616,12 @@ void DisaggPDScheduler::dispatch_requests() {
         request_queue_.write(requests[i]);
       }
     }
+    LOG(INFO) << "[PD-PERF] Prefill Decode allocation request_id="
+              << requests.front()->request_id()
+              << ", request_count=" << requests.size()
+              << ", prepare_ms=" << allocation_prepare_seconds * 1000.0
+              << ", rpc_ms=" << allocation_rpc_seconds * 1000.0 << ", total_ms="
+              << decode_allocation_timer.elapsed_seconds() * 1000.0;
   }
 }
 
@@ -660,6 +673,7 @@ void DisaggPDScheduler::prefill_send_first_generation() {
       kv_cache_manager_->deallocate(request.get());
     };
     for (auto& request : requests) {
+      Timer first_generation_timer;
       // TODO: support batch request later
       proto::DisaggGenerationsRequests gens;
       auto gen = gens.mutable_multi_gens()->Add();
@@ -692,24 +706,23 @@ void DisaggPDScheduler::prefill_send_first_generation() {
             request->sequences()[0]->first_token().value().token_top_logprobs);
       }
       gen->set_kv_cache_transfer_mode(options_.kv_cache_transfer_mode());
-      if (options_.kv_cache_transfer_mode() == "PULL") {
-        ADD_VECTOR_TO_PROTO(gen->mutable_cluster_ids(),
-                            instance_info_.cluster_ids);
-        ADD_VECTOR_TO_PROTO(gen->mutable_addrs(), instance_info_.addrs);
-
-        const auto blocks =
-            request->sequences()[0]->kv_state().blocks(BlockType::KV);
-        std::vector<uint64_t> block_ids;
-        block_ids.reserve(blocks.size());
-        for (const auto& block : blocks) {
-          block_ids.push_back(block.id());
-        }
-        ADD_VECTOR_TO_PROTO(gen->mutable_block_ids(), block_ids);
-        gen->set_linear_state_id(
-            request->sequences()[0]->get_single_block_id());
-        gen->set_dp_size(instance_info_.dp_size);
-        gen->set_dp_rank(request->sequences()[0]->dp_rank());
+      // Heterogeneous TP uses decode-side PULL+merge even when the configured
+      // transport mode is PUSH, so source topology and cache ids are always
+      // included in the first-generation metadata.
+      ADD_VECTOR_TO_PROTO(gen->mutable_cluster_ids(),
+                          instance_info_.cluster_ids);
+      ADD_VECTOR_TO_PROTO(gen->mutable_addrs(), instance_info_.addrs);
+      gen->set_dp_size(instance_info_.dp_size);
+      gen->set_dp_rank(request->sequences()[0]->dp_rank());
+      const auto blocks =
+          request->sequences()[0]->kv_state().blocks(BlockType::KV);
+      std::vector<uint64_t> block_ids;
+      block_ids.reserve(blocks.size());
+      for (const auto& block : blocks) {
+        block_ids.push_back(block.id());
       }
+      ADD_VECTOR_TO_PROTO(gen->mutable_block_ids(), block_ids);
+      gen->set_linear_state_id(request->sequences()[0]->get_single_block_id());
       if (options_.num_speculative_tokens() > 0) {
         torch::Tensor embedding =
             request->sequences()[0]->get_mtp_bootstrap_embedding();
@@ -733,6 +746,7 @@ void DisaggPDScheduler::prefill_send_first_generation() {
         }
         request->sequences()[0]->clear_mtp_bootstrap_embedding();
       }
+      const double prepare_seconds = first_generation_timer.elapsed_seconds();
 
       // send first gens to remote instance
       proto::DisaggPDService_Stub* stub = nullptr;
@@ -745,7 +759,14 @@ void DisaggPDScheduler::prefill_send_first_generation() {
       // TODO: Async call later
       proto::Status resp;
       brpc::Controller cntl;
+      Timer rpc_timer;
       stub->FirstGeneration(&cntl, &gens, &resp, nullptr);
+      const double rpc_seconds = rpc_timer.elapsed_seconds();
+      LOG(INFO) << "[PD-PERF] Prefill first-generation request_id="
+                << request->request_id()
+                << ", prepare_ms=" << prepare_seconds * 1000.0
+                << ", rpc_ms=" << rpc_seconds * 1000.0 << ", total_ms="
+                << first_generation_timer.elapsed_seconds() * 1000.0;
 
       const bool sent_first_generation = !cntl.Failed() && resp.ok();
       if (!sent_first_generation) {
@@ -809,6 +830,7 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     int32_t src_dp_size,
     int32_t src_dp_rank,
     torch::Tensor mtp_bootstrap_embedding) {
+  Timer receive_timer;
   // push to request_queue_, and will be executed by engine.
   std::shared_ptr<Request> request = nullptr;
   {
@@ -838,6 +860,19 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     return false;
   }
   Sequence* sequence = request->sequences()[0].get();
+  bool hetero_kv_pull = false;
+  if (kv_cache_transfer_mode == "PUSH" && !engine_->model_args().enable_mla() &&
+      src_dp_size > 0 && instance_info_.dp_size > 0 &&
+      src_cluster_ids.size() % static_cast<size_t>(src_dp_size) == 0 &&
+      instance_info_.cluster_ids.size() %
+              static_cast<size_t>(instance_info_.dp_size) ==
+          0) {
+    const size_t src_tp_size =
+        src_cluster_ids.size() / static_cast<size_t>(src_dp_size);
+    const size_t dst_tp_size = instance_info_.cluster_ids.size() /
+                               static_cast<size_t>(instance_info_.dp_size);
+    hetero_kv_pull = src_tp_size != dst_tp_size;
+  }
   const bool need_mtp_bootstrap = options_.num_speculative_tokens() > 0;
   if (need_mtp_bootstrap) {
     const int32_t slot_id = sequence->get_single_block_id();
@@ -887,6 +922,10 @@ bool DisaggPDScheduler::decode_recv_first_generation(
   sequence->tbt(absl::Now());
 
   // TODO: we only support one sequence for currently.
+  // Heterogeneous TP now restores the Prefill KV/linear state before Decode,
+  // so its first token follows the same overlap protocol as every other PD
+  // transfer path.  Appending the real token here bypasses last_step_token and
+  // makes the first Decode step consume misaligned sequence state.
   if (enable_schedule_overlap()) {
     Token fake_token(-1);
     sequence->append_token(fake_token);
@@ -894,9 +933,13 @@ bool DisaggPDScheduler::decode_recv_first_generation(
   } else {
     sequence->append_token(first_token);
   }
+  const double prepare_seconds = receive_timer.elapsed_seconds();
 
-  // pull kv cache
-  if (kv_cache_transfer_mode == "PULL") {
+  // Pull KV cache in native PULL mode. For a non-MLA heterogeneous TP PUSH
+  // deployment, pull every P-side shard into temporary D-side caches and
+  // concatenate the sharded tensor dimensions before decode starts.
+  if (kv_cache_transfer_mode == "PULL" || hetero_kv_pull) {
+    Timer pull_timer;
     const auto blocks = sequence->kv_state().blocks(BlockType::KV);
     std::vector<uint64_t> dst_block_ids;
     dst_block_ids.reserve(blocks.size());
@@ -911,27 +954,47 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     }
 
     int32_t dst_dp_rank = sequence->dp_rank();
-    const bool pulled = engine_->pull_kv_blocks(src_dp_size,
-                                                src_dp_rank,
-                                                src_cluster_ids,
-                                                src_addrs,
-                                                src_block_ids,
-                                                dst_dp_rank,
-                                                dst_block_ids,
-                                                src_linear_state_ids,
-                                                dst_linear_state_ids);
+    const bool pulled =
+        hetero_kv_pull ? engine_->pull_hetero_kv_blocks(src_dp_size,
+                                                        src_dp_rank,
+                                                        src_cluster_ids,
+                                                        src_addrs,
+                                                        src_block_ids,
+                                                        dst_dp_rank,
+                                                        dst_block_ids,
+                                                        src_linear_state_ids,
+                                                        dst_linear_state_ids)
+                       : engine_->pull_kv_blocks(src_dp_size,
+                                                 src_dp_rank,
+                                                 src_cluster_ids,
+                                                 src_addrs,
+                                                 src_block_ids,
+                                                 dst_dp_rank,
+                                                 dst_block_ids,
+                                                 src_linear_state_ids,
+                                                 dst_linear_state_ids);
     if (!pulled) {
-      LOG(ERROR) << "Failed to pull KV blocks, request_id: " << req_id;
+      LOG(ERROR) << "Failed to pull"
+                 << (hetero_kv_pull ? " and merge heterogeneous" : "")
+                 << " KV blocks, request_id: " << req_id;
       kv_cache_manager_->deallocate(request.get());
       return false;
     }
+    LOG(INFO) << "[PD-PERF] Decode KV restore request_id=" << req_id
+              << ", hetero=" << hetero_kv_pull
+              << ", pull_ms=" << pull_timer.elapsed_seconds() * 1000.0;
   }
 
+  Timer enqueue_timer;
   if (!request_queue_.write(request)) {
     LOG(ERROR) << "Failed to enqueue decode request, request_id: " << req_id;
     kv_cache_manager_->deallocate(request.get());
     return false;
   }
+  LOG(INFO) << "[PD-PERF] Decode first-generation request_id=" << req_id
+            << ", prepare_ms=" << prepare_seconds * 1000.0
+            << ", enqueue_ms=" << enqueue_timer.elapsed_seconds() * 1000.0
+            << ", total_ms=" << receive_timer.elapsed_seconds() * 1000.0;
   return true;
 }
 
