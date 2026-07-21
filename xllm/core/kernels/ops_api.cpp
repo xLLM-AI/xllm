@@ -1650,14 +1650,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> moe_gating_top_k_hash(
 
 torch::Tensor gated_layer_norm(GatedLayerNormParams& params) {
 #if defined(USE_NPU)
-  return npu::layer_norm_fwd(params.x,
-                             params.weight,
-                             params.bias,
-                             params.eps,
-                             params.z,
-                             params.group_size,
-                             params.norm_before_gate,
-                             params.is_rms_norm);
+  return npu::layer_norm_fwd_aclnn(params.x,
+                                   params.weight,
+                                   params.bias,
+                                   params.eps,
+                                   params.z,
+                                   params.group_size,
+                                   params.norm_before_gate,
+                                   params.is_rms_norm);
 #elif defined(USE_MLU)
   return mlu::gated_layer_norm(params.x,
                                params.weight,
