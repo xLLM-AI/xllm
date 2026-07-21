@@ -98,6 +98,11 @@ DEFINE_bool(enable_prefill_piecewise_graph,
             "When enabled, attention operations use eager mode while other "
             "operations are captured in CUDA graphs.");
 
+DEFINE_bool(enable_onerec_prefill_acl_graph,
+            false,
+            "Whether to enable OneRec decoder prefill ACL graph on NPU. "
+            "This is a narrow opt-in path for OneRec prefill graph capture.");
+
 DEFINE_bool(enable_graph_vmm_pool,
             true,
             "Whether to enable VMM-backed CUDA graph memory pool for "
@@ -727,6 +732,10 @@ DEFINE_bool(enable_multistream_perf_mode,
             "Enable experimental OneRec xattention multistream performance "
             "mode. When enabled, it disables OneRec xattention prepare/model "
             "forward serialization and enables thread-local ACLNN cache.");
+DEFINE_bool(enable_onerec_multistream_core_split,
+            false,
+            "Limit each of two OneRec NPU worker streams to half of the device "
+            "Cube and Vector cores.");
 
 namespace {
 

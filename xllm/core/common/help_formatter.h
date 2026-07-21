@@ -46,6 +46,7 @@ const OptionCategory kCommonOptions = {"COMMON OPTIONS",
                                         "enable_graph",
                                         "enable_graph_mode_decode_no_padding",
                                         "enable_prefill_piecewise_graph",
+                                        "enable_onerec_prefill_acl_graph",
                                         "max_tokens_for_graph_mode",
                                         "acl_graph_decode_batch_size_limit",
                                         "communication_backend",
@@ -114,6 +115,7 @@ const OptionCategory kRecOptions = {"REC OPTIONS",
                                      "constrained_decoding_filter_path",
                                      "rec_worker_max_concurrency",
                                      "enable_multistream_perf_mode",
+                                     "enable_onerec_multistream_core_split",
                                      "output_rec_logprobs"}};
 
 const OptionCategory kPrefixCacheOptions = {

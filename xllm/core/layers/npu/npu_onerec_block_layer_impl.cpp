@@ -740,6 +740,7 @@ void NpuOneRecBlockLayerImpl::param_from_args(
   param.isDecoder = is_decoder_;
   param.isOneRecEncoder = !is_decoder_;
   param.use_xattn = is_decoder_ && is_onerec_xattention_mode();
+  param.enableCrossAttentionKernel = true;
   param.enableOneRecPrefillOnly = use_legacy_onerec_prefill_only_contract();
   param.backend = FLAGS_communication_backend;
   param.matmulBackend = kEnableOneRecAclnnAttentionLinear
@@ -749,6 +750,7 @@ void NpuOneRecBlockLayerImpl::param_from_args(
   param.worldSize = parallel_args.world_size();
   param.quantType = 0;
   param.quantGroupSize = 64;
+  param.blockSize = FLAGS_block_size;
 
   const int64_t args_n_heads =
       is_decoder_ ? args.decoder_n_heads() : args.n_heads();
@@ -1297,6 +1299,13 @@ int64_t NpuOneRecBlockLayerImpl::init_node(
   return atb::NO_ERROR;
 }
 
+void NpuOneRecBlockLayerImpl::set_cross_kv_cache_for_graph(
+    const torch::Tensor& k_cache,
+    const torch::Tensor& v_cache) {
+  cross_k_cache_ = k_cache;
+  cross_v_cache_ = v_cache;
+}
+
 torch::Tensor NpuOneRecBlockLayerImpl::forward(
     torch::Tensor& x,
     torch::Tensor& attn_mask,
@@ -1323,8 +1332,7 @@ torch::Tensor NpuOneRecBlockLayerImpl::forward(
   if (is_prefill) {
     if (is_decoder_) {
       if (is_first_prefill && encoder_output != nullptr &&
-          (use_legacy_onerec_prefill_only_contract() ||
-           is_onerec_xattention_mode())) {
+          use_legacy_onerec_prefill_only_contract()) {
         const int64_t bs = encoder_output->size(0);
         const int64_t seq_len = encoder_output->size(1);
         const int64_t kv_hidden_size =
@@ -1333,8 +1341,20 @@ torch::Tensor NpuOneRecBlockLayerImpl::forward(
         auto options = torch::TensorOptions()
                            .dtype(encoder_output->dtype())
                            .device(encoder_output->device());
-        cross_k_cache_ = torch::empty({bs, seq_len, kv_hidden_size}, options);
-        cross_v_cache_ = torch::empty({bs, seq_len, kv_hidden_size}, options);
+        const std::vector<int64_t> expected_shape = {
+            bs, seq_len, kv_hidden_size};
+        if (!cross_k_cache_.defined() ||
+            cross_k_cache_.sizes().vec() != expected_shape ||
+            cross_k_cache_.dtype() != encoder_output->dtype() ||
+            cross_k_cache_.device() != encoder_output->device()) {
+          cross_k_cache_ = torch::empty(expected_shape, options);
+        }
+        if (!cross_v_cache_.defined() ||
+            cross_v_cache_.sizes().vec() != expected_shape ||
+            cross_v_cache_.dtype() != encoder_output->dtype() ||
+            cross_v_cache_.device() != encoder_output->device()) {
+          cross_v_cache_ = torch::empty(expected_shape, options);
+        }
       }
 
       if (use_legacy_onerec_prefill_only_contract()) {
@@ -1698,13 +1718,32 @@ int32_t NpuOneRecBlockLayerImpl::setup_common_decoder_tensors(
           : input_params.onerec_params();
   const bool minimize_cross_attn_inputs =
       param.enableOneRecPrefillOnly && !param.enableSplitFuse && !param.isFA;
+  const bool use_cross_attention_kernel =
+      param.enableCrossAttentionKernel && param.use_xattn;
   if (!minimize_cross_attn_inputs) {
+    if (use_cross_attention_kernel) {
+      CHECK(onerec_params != nullptr)
+          << "CrossAttention requires OneRec xattention parameters.";
+      CHECK(onerec_params->cross_attn_kv_cu_seq_lens.defined())
+          << "CrossAttention requires device actual_kv_lens.";
+      CHECK(onerec_params->cross_attn_block_tables.defined())
+          << "CrossAttention requires a device block_table.";
+    }
     if (onerec_params != nullptr &&
         onerec_params->cross_attn_kv_cu_seq_lens.defined()) {
+      if (use_cross_attention_kernel) {
+        CHECK_EQ(onerec_params->cross_attn_kv_cu_seq_lens.device(), device_)
+            << "CrossAttention actual_kv_lens must be on the NPU device.";
+        CHECK_EQ(onerec_params->cross_attn_kv_cu_seq_lens.scalar_type(),
+                 torch::kInt64)
+            << "CrossAttention actual_kv_lens must be int64.";
+      }
       node.variantPack.inTensors.at(idx) = atb_speed::Utils::AtTensor2Tensor(
           onerec_params->cross_attn_kv_cu_seq_lens);
-      node.variantPack.inTensors.at(idx).hostData = const_cast<int32_t*>(
-          onerec_params->cross_attn_kv_cu_seq_lens_vec.data());
+      if (!use_cross_attention_kernel) {
+        node.variantPack.inTensors.at(idx).hostData = const_cast<int32_t*>(
+            onerec_params->cross_attn_kv_cu_seq_lens_vec.data());
+      }
     } else {
       node.variantPack.inTensors.at(idx) = placeholder_;
       node.variantPack.inTensors.at(idx).hostData = placeholder_vec_.data();
@@ -1713,6 +1752,13 @@ int32_t NpuOneRecBlockLayerImpl::setup_common_decoder_tensors(
 
     if (onerec_params != nullptr &&
         onerec_params->cross_attn_block_tables.defined()) {
+      if (use_cross_attention_kernel) {
+        CHECK_EQ(onerec_params->cross_attn_block_tables.device(), device_)
+            << "CrossAttention block_table must be on the NPU device.";
+        CHECK_EQ(onerec_params->cross_attn_block_tables.scalar_type(),
+                 torch::kInt32)
+            << "CrossAttention block_table must be int32.";
+      }
       node.variantPack.inTensors.at(idx) = atb_speed::Utils::AtTensor2Tensor(
           onerec_params->cross_attn_block_tables);
     } else {
@@ -1769,8 +1815,21 @@ int32_t NpuOneRecBlockLayerImpl::setup_common_decoder_tensors(
         onerec_xattn_params->current_round_tensor);
   }
 
-  if ((param.enableOneRecPrefillOnly || param.use_xattn) &&
-      cross_k_cache_.defined() && cross_v_cache_.defined()) {
+  if (param.use_xattn) {
+    auto cross_k_cache = kv_cache.get_k_cache();
+    auto cross_v_cache = kv_cache.get_v_cache();
+    CHECK(cross_k_cache.defined() && cross_v_cache.defined())
+        << "OneRec xattention Cross KV block cache is not initialized.";
+    CHECK_EQ(cross_k_cache.device(), device_)
+        << "CrossAttention key cache must be on the NPU device.";
+    CHECK_EQ(cross_v_cache.device(), device_)
+        << "CrossAttention value cache must be on the NPU device.";
+    node.variantPack.inTensors.at(idx++) =
+        atb_speed::Utils::AtTensor2Tensor(cross_k_cache);
+    node.variantPack.inTensors.at(idx++) =
+        atb_speed::Utils::AtTensor2Tensor(cross_v_cache);
+  } else if (param.enableOneRecPrefillOnly && cross_k_cache_.defined() &&
+             cross_v_cache_.defined()) {
     if (is_first_prefill && node.variantPack.outTensors.size() >= 3) {
       node.variantPack.outTensors.at(1) =
           atb_speed::Utils::AtTensor2Tensor(cross_k_cache_);

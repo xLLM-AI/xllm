@@ -26,9 +26,9 @@ limitations under the License.
 namespace xllm {
 namespace npu {
 
-// Device-level mutex manager for protecting ACL Graph capture operations
-// Prevents prepare_work_before_execute and capture from executing
-// simultaneously to avoid synchronization conflicts during capture
+// Device-level mutex manager for ACL Graph capture and replay bookkeeping.
+// Besides keeping synchronous preparation out of capture, this protects the
+// device-wide torch_npu generator state shared by NPUGraph instances.
 class DeviceCaptureLock {
  public:
   // Get singleton instance

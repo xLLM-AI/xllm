@@ -144,6 +144,21 @@ class CausalLM : public torch::nn::Module {
   virtual void reload_model_weights() { NOT_IMPLEMENTED(); }
 
   virtual void reload_model_weights_from_device() { NOT_IMPLEMENTED(); }
+
+  virtual bool supports_onerec_prefill_graph() const { return false; }
+
+  virtual torch::Tensor get_onerec_graph_encoder_output() const {
+    return torch::Tensor();
+  }
+
+  virtual void bind_onerec_prefill_graph_buffers(
+      const torch::Tensor& encoder_output,
+      const std::vector<torch::Tensor>& cross_k_caches,
+      const std::vector<torch::Tensor>& cross_v_caches) {
+    (void)encoder_output;
+    (void)cross_k_caches;
+    (void)cross_v_caches;
+  }
 };
 
 template <typename Model>
@@ -313,6 +328,33 @@ class CausalLMImpl : public CausalLM {
   torch::Device device() const override { return options_.device(); }
 
   const torch::TensorOptions& options() const override { return options_; }
+
+  bool supports_onerec_prefill_graph() const override {
+    if constexpr (detail::has_onerec_prefill_graph_support<Model>::value) {
+      return model_->supports_onerec_prefill_graph();
+    }
+    return CausalLM::supports_onerec_prefill_graph();
+  }
+
+  torch::Tensor get_onerec_graph_encoder_output() const override {
+    if constexpr (detail::has_get_onerec_graph_encoder_output<Model>::value) {
+      return model_->get_onerec_graph_encoder_output();
+    }
+    return CausalLM::get_onerec_graph_encoder_output();
+  }
+
+  void bind_onerec_prefill_graph_buffers(
+      const torch::Tensor& encoder_output,
+      const std::vector<torch::Tensor>& cross_k_caches,
+      const std::vector<torch::Tensor>& cross_v_caches) override {
+    if constexpr (detail::has_bind_onerec_prefill_graph_buffers<Model>::value) {
+      model_->bind_onerec_prefill_graph_buffers(
+          encoder_output, cross_k_caches, cross_v_caches);
+    } else {
+      CausalLM::bind_onerec_prefill_graph_buffers(
+          encoder_output, cross_k_caches, cross_v_caches);
+    }
+  }
 
  private:
   Model model_;

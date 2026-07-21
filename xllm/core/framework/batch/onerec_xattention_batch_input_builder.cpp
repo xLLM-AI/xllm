@@ -52,8 +52,9 @@ ForwardInput OneRecXAttentionBatchInputBuilder::build_rec_forward_input(
     return input;
   }
 
-  std::vector<std::vector<int32_t>> block_tables_vec;
-  std::vector<int32_t> new_cache_slots_vec;
+  std::vector<std::vector<int32_t>> cross_block_tables_vec;
+  std::vector<int32_t> cross_cache_slots_vec;
+  std::vector<int32_t> cross_kv_lens_vec;
   std::vector<const RequestSamplingParam*> decode_sampling_params;
   std::vector<int32_t> decode_selected_token_idxes;
   std::vector<int32_t> decode_sample_idxes;
@@ -77,21 +78,22 @@ ForwardInput OneRecXAttentionBatchInputBuilder::build_rec_forward_input(
       ++batch_size;
       const int32_t total_seq_len = static_cast<int32_t>(
           sequence_ptr->num_tokens() + sequence_ptr->num_decoder_embeddings());
-      const int32_t n_kv_cache_tokens =
-          static_cast<int32_t>(sequence_ptr->kv_state().kv_cache_tokens_num());
+      const int32_t encoder_seq_len =
+          static_cast<int32_t>(sequence_ptr->encoder_seq_len());
+      CHECK_GT(encoder_seq_len, 0)
+          << "OneRec xattention requires non-empty encoder input.";
       const auto blocks = sequence_ptr->kv_state().kv_blocks();
       std::vector<int32_t> block_ids;
       block_ids.reserve(blocks.size());
       for (const auto& block : blocks) {
         block_ids.emplace_back(block.id());
       }
-      block_tables_vec.emplace_back(std::move(block_ids));
-      if (total_seq_len > n_kv_cache_tokens) {
-        auto slot_ids = sequence_ptr->kv_state().kv_cache_slots(
-            n_kv_cache_tokens, total_seq_len);
-        new_cache_slots_vec.insert(
-            new_cache_slots_vec.end(), slot_ids.begin(), slot_ids.end());
-      }
+      cross_block_tables_vec.emplace_back(std::move(block_ids));
+      cross_kv_lens_vec.emplace_back(encoder_seq_len);
+      auto slot_ids =
+          sequence_ptr->kv_state().kv_cache_slots(0, encoder_seq_len);
+      cross_cache_slots_vec.insert(
+          cross_cache_slots_vec.end(), slot_ids.begin(), slot_ids.end());
 
       const auto* sampling_param = sequence_ptr->sampling_param();
       if (sampling_param == nullptr) {
@@ -147,14 +149,18 @@ ForwardInput OneRecXAttentionBatchInputBuilder::build_rec_forward_input(
     };
   }
 
-  if (!block_tables_vec.empty()) {
-    util::pad_2d_vector(block_tables_vec, /*pad_value=*/0);
-    input.input_params.block_tables =
-        create_2d_tensor(block_tables_vec, torch::kInt);
+  auto& xattn_params = input.input_params.mutable_onerec_xattention_params();
+  xattn_params.cross_attn_kv_cu_seq_lens =
+      torch::tensor(cross_kv_lens_vec, torch::kInt64);
+  xattn_params.cross_attn_kv_cu_seq_lens_vec = cross_kv_lens_vec;
+  if (!cross_block_tables_vec.empty()) {
+    util::pad_2d_vector(cross_block_tables_vec, /*pad_value=*/0);
+    xattn_params.cross_attn_block_tables =
+        create_2d_tensor(cross_block_tables_vec, torch::kInt);
   }
-  if (!new_cache_slots_vec.empty()) {
-    input.input_params.new_cache_slots =
-        torch::tensor(new_cache_slots_vec, torch::kInt);
+  if (xattn_params.is_first_prefill && !cross_cache_slots_vec.empty()) {
+    xattn_params.cross_attn_new_cache_slots =
+        torch::tensor(cross_cache_slots_vec, torch::kInt);
   }
 
   input.step_decode = std::move(step_meta);

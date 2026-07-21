@@ -217,6 +217,31 @@ TEST(FixedStepsSchedulerTest, PrepareBatchRespectsTokenBudget) {
   EXPECT_LE(base->get_running_requests().size(), 1u);
 }
 
+TEST(FixedStepsSchedulerTest,
+     OneRecXAttentionAllocatesCrossCacheForEncoderLength) {
+  const bool old_enable_rec_prefill_only = FLAGS_enable_rec_prefill_only;
+  const int32_t old_max_decode_rounds = FLAGS_max_decode_rounds;
+  FLAGS_enable_rec_prefill_only = false;
+  FLAGS_max_decode_rounds = 3;
+  FLAGS_enable_prefix_cache = false;
+  FLAGS_prefill_scheduling_memory_usage_threshold = 1.0;
+
+  auto engine = std::make_unique<FakeEngine>(32, 32);
+  auto opt = CreateOptions(10000, 256);
+  FixedStepsScheduler scheduler(engine.get(), opt);
+  auto requests = GenRequests({65}, {1}, RecType::kOneRec);
+  scheduler.add_request(requests[0]);
+
+  ContinuousScheduler* base = &scheduler;
+  base->prepare_batch_test();
+  const size_t allocated_blocks =
+      requests[0]->sequences()[0]->kv_state().num_kv_blocks();
+
+  FLAGS_enable_rec_prefill_only = old_enable_rec_prefill_only;
+  FLAGS_max_decode_rounds = old_max_decode_rounds;
+  EXPECT_EQ(allocated_blocks, 3u);
+}
+
 TEST(FixedStepsSchedulerTest, StepCompletesWithRequest) {
   FLAGS_enable_prefix_cache = false;
   FLAGS_prefill_scheduling_memory_usage_threshold = 1.0;

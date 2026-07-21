@@ -106,6 +106,8 @@ DECLARE_bool(enable_graph_mode_decode_no_padding);
 
 DECLARE_bool(enable_prefill_piecewise_graph);
 
+DECLARE_bool(enable_onerec_prefill_acl_graph);
+
 DECLARE_bool(enable_graph_vmm_pool);
 
 DECLARE_int32(max_tokens_for_graph_mode);
@@ -337,6 +339,7 @@ DECLARE_bool(use_audio_in_video);
 // --- concurrent rec worker config ---
 DECLARE_uint32(rec_worker_max_concurrency);
 DECLARE_bool(enable_multistream_perf_mode);
+DECLARE_bool(enable_onerec_multistream_core_split);
 
 void apply_multistream_perf_mode_env_overrides();
 
