@@ -27,10 +27,10 @@ limitations under the License.
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "layers/common/dense_mlp.h"
-#include "layers/common/qwen3_next_rms_norm.h"
 #include "layers/mlu/qwen3_5/qwen3_5_attention.h"
 #include "layers/mlu/qwen3_5/qwen3_5_fused_moe.h"
 #include "layers/mlu/qwen3_5/qwen3_5_gated_delta_net.h"
+#include "layers/mlu/qwen3_5/qwen3_next_rms_norm.h"
 
 namespace xllm {
 namespace layer {
@@ -50,7 +50,7 @@ class Qwen3_5DecoderLayerImpl final : public torch::nn::Module {
 
  private:
   std::tuple<torch::Tensor, std::optional<torch::Tensor>> apply_norm(
-      Qwen3NextRMSNorm& norm,
+      Qwen3NextRMSNormMlu& norm,
       torch::Tensor& input,
       std::optional<torch::Tensor>& residual);
 
@@ -61,8 +61,8 @@ class Qwen3_5DecoderLayerImpl final : public torch::nn::Module {
   Qwen3_5GatedDeltaNet linear_attention_{nullptr};
   DenseMLP mlp_{nullptr};
   Qwen3_5FusedMoE moe_mlp_{nullptr};
-  Qwen3NextRMSNorm input_norm_{nullptr};
-  Qwen3NextRMSNorm post_norm_{nullptr};
+  Qwen3NextRMSNormMlu input_norm_{nullptr};
+  Qwen3NextRMSNormMlu post_norm_{nullptr};
   ParallelArgs parallel_args_;
   bool enable_deep_ep_ = false;
 };

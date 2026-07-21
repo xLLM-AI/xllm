@@ -1,4 +1,4 @@
-/* Copyright 2025-2026 The xLLM Authors.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,27 +13,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/platform/device_name_utils.h"
+#pragma once
 
-#include <gtest/gtest.h>
-
-#include <string>
-#include <vector>
-
-#include "core/platform/device.h"
-#include "core/platform/platform.h"
+#include "layers/common/qwen3_next_rms_norm.h"
 
 namespace xllm {
-namespace {
+namespace layer {
 
-TEST(DeviceNameUtilsTest, ParseGeneratedDeviceString) {
-  const std::vector<torch::Device> devices =
-      DeviceNameUtils::parse_devices(Platform::type_str() + ":2");
+class Qwen3NextRMSNormMluImpl final : public Qwen3NextRMSNormImpl {
+ public:
+  using Qwen3NextRMSNormImpl::Qwen3NextRMSNormImpl;
 
-  ASSERT_EQ(devices.size(), 1);
-  EXPECT_EQ(devices[0].type(), Platform::type_torch());
-  EXPECT_EQ(devices[0].index(), 2);
-}
+  std::tuple<torch::Tensor, std::optional<torch::Tensor>> forward(
+      torch::Tensor& input,
+      std::optional<torch::Tensor> residual = std::nullopt) override;
+};
 
-}  // namespace
+TORCH_MODULE(Qwen3NextRMSNormMlu);
+
+}  // namespace layer
 }  // namespace xllm

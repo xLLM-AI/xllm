@@ -19,15 +19,34 @@ namespace xllm::kernel::mlu {
 torch::Tensor gemma_rms_norm(const torch::Tensor& x,
                              const torch::Tensor& gamma,
                              double eps,
-                             torch::Tensor& norm_out) {
-  auto input_dtype = x.dtype();
-  auto x_fp32 = x.to(torch::kFloat32);
-  auto gamma_fp32 = gamma.to(torch::kFloat32);
-
-  auto variance = torch::mean(torch::pow(x_fp32, 2), -1, true);
-  auto normalized = x_fp32 * torch::rsqrt(variance + eps);
-  auto output = normalized * (1.0f + gamma_fp32);
-  norm_out = output.to(input_dtype);
+                             torch::Tensor& norm_out,
+                             const std::optional<torch::Tensor>& residual,
+                             std::optional<torch::Tensor>& residual_out) {
+  norm_out = torch::empty_like(x);
+  if (residual.has_value() && !residual_out.has_value()) {
+    residual_out = residual.value();
+  }
+  const bool store_output_before_norm = residual.has_value();
+  tmo::torch_api::fused_layernorm(x,
+                                  norm_out,
+                                  residual,
+                                  gamma,
+                                  std::nullopt,
+                                  std::nullopt,
+                                  std::nullopt,
+                                  residual_out,
+                                  std::nullopt,
+                                  std::nullopt,
+                                  "rmsnorm",
+                                  eps,
+                                  store_output_before_norm,
+                                  /*store_output_after_norm=*/false,
+                                  /*dynamic_quant=*/false,
+                                  /*mx_quant=*/false,
+                                  /*transpose_4d_1_2=*/false,
+                                  /*gamma_add_coef=*/1.0,
+                                  /*z_gated=*/std::nullopt,
+                                  /*gated_after_norm=*/false);
   return norm_out;
 }
 }  // namespace xllm::kernel::mlu

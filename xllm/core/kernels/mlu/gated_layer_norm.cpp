@@ -13,6 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <glog/logging.h>
+
 #include "mlu_ops_api.h"
 
 namespace xllm::kernel::mlu {
@@ -23,37 +25,31 @@ torch::Tensor gated_layer_norm(torch::Tensor& x,
                                const std::optional<torch::Tensor>& gate,
                                int64_t group_size,
                                bool norm_before_gate) {
-  auto origin_dtype = x.dtype();
-  auto x_fp32 = x.to(torch::kFloat32);
-  auto weight_fp32 = weight.to(torch::kFloat32);
-  torch::Tensor gate_value;
-  if (gate.has_value()) {
-    gate_value = gate.value().to(torch::kFloat32);
-  }
+  (void)bias;
+  CHECK_EQ(group_size, x.size(-1))
+      << "MLU fused gated_layer_norm only supports whole-last-dim groups";
 
-  if (gate.has_value() && !norm_before_gate) {
-    x_fp32 = x_fp32 * torch::silu(gate_value);
-  }
-
-  int64_t hidden_size = x_fp32.size(-1);
-  torch::Tensor normalized;
-  if (group_size == hidden_size) {
-    auto variance = x_fp32.pow(2).mean(/*dim=*/-1, /*keepdim=*/true);
-    normalized = x_fp32 * torch::rsqrt(variance + eps);
-    normalized = normalized * weight_fp32;
-  } else {
-    int64_t num_groups = hidden_size / group_size;
-    auto x_grouped = x_fp32.reshape({-1, num_groups, group_size});
-    auto variance = x_grouped.pow(2).mean(/*dim=*/-1, /*keepdim=*/true);
-    auto normalized_grouped = x_grouped * torch::rsqrt(variance + eps);
-    normalized = normalized_grouped.reshape({-1, num_groups * group_size});
-    normalized = normalized * weight_fp32;
-  }
-
-  if (gate.has_value() && norm_before_gate) {
-    normalized = normalized * torch::silu(gate_value);
-  }
-
-  return normalized.to(origin_dtype);
+  torch::Tensor output = torch::empty_like(x);
+  tmo::torch_api::fused_layernorm(x,
+                                  output,
+                                  std::nullopt,
+                                  weight,
+                                  std::nullopt,
+                                  std::nullopt,
+                                  std::nullopt,
+                                  std::nullopt,
+                                  std::nullopt,
+                                  std::nullopt,
+                                  "rmsnorm",
+                                  eps,
+                                  /*store_output_before_norm=*/false,
+                                  /*store_output_after_norm=*/false,
+                                  /*dynamic_quant=*/false,
+                                  /*mx_quant=*/false,
+                                  /*transpose_4d_1_2=*/false,
+                                  /*gamma_add_coef=*/0.0,
+                                  gate,
+                                  /*gated_after_norm=*/norm_before_gate);
+  return output;
 }
 }  // namespace xllm::kernel::mlu

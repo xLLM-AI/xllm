@@ -55,7 +55,6 @@ class SpeculativeConfig final {
     static const OptionCategory kOptionCategory = {
         "SPECULATIVE OPTIONS",
         {"draft_model",
-         "draft_devices",
          "num_speculative_tokens",
          "speculative_algorithm",
          "speculative_suffix_cache_max_depth",
@@ -71,8 +70,6 @@ class SpeculativeConfig final {
   }
 
   PROPERTY(std::string, draft_model);
-
-  PROPERTY(std::string, draft_devices) = "";
 
   PROPERTY(int32_t, num_speculative_tokens) = 0;
 

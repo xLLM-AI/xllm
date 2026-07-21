@@ -29,7 +29,7 @@ class Qwen3NextRMSNormImpl : public torch::nn::Module {
                        double eps,
                        const torch::TensorOptions& options);
 
-  std::tuple<torch::Tensor, std::optional<torch::Tensor>> forward(
+  virtual std::tuple<torch::Tensor, std::optional<torch::Tensor>> forward(
       torch::Tensor& input,
       std::optional<torch::Tensor> residual = std::nullopt);
   torch::Tensor weight() const { return weight_; }

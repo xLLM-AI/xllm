@@ -81,6 +81,9 @@ class Platform final {
   }
 
   static int32_t device_count();
+  // Returns the logical index of the device bound to the current thread.
+  // Valid only after the device has been set (e.g. via Device::set_device).
+  static int32_t current_device();
   static int32_t sm_count();
   static bool is_enable_pdl();
   static bool is_support_sm90a();
