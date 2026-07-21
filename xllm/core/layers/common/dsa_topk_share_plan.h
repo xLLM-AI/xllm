@@ -153,8 +153,6 @@ inline std::vector<bool> get_dsa_indexer_layer_mask(const ModelArgs& args,
     return layer_mask;
   }
 
-  CHECK_EQ(num_cache_layers, args.n_layers())
-      << "Main-model DSA cache layers must match num_hidden_layers.";
   const DsaTopkSharePlan topk_share_plan(args);
   for (int32_t layer_id = 0; layer_id < num_cache_layers; ++layer_id) {
     layer_mask[static_cast<size_t>(layer_id)] =

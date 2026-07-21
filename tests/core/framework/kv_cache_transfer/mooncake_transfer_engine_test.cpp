@@ -251,6 +251,20 @@ TEST(MooncakeKVCacheTransferDefaultTest, SpecDraftBufIdsUseSpecOffset) {
 }
 
 TEST(MooncakeKVCacheTransferDefaultTest,
+     VariableLayerBufIdsUseRegistrationOffsets) {
+  MooncakeKVCacheTransferDefault transfer(
+      0, 0, torch::Device(torch::kCPU), "test");
+  transfer.main_layout_.num_layers = 4;
+  transfer.main_layout_.offset = 10;
+  transfer.main_layout_.layer_offsets = {0, 4, 6, 8, 12};
+  transfer.main_layout_.total_buf_cnt = 12;
+  transfer.main_layout_.registered = true;
+
+  EXPECT_EQ(transfer.get_buf_ids({1, 3}, false),
+            (std::vector<int64_t>{14, 15, 18, 19, 20, 21}));
+}
+
+TEST(MooncakeKVCacheTransferDefaultTest,
      AddBufUsesRdmaRegisterableLengthWithoutChangingBlockBytes) {
   if (Platform::device_count() < 1) {
     GTEST_SKIP() << "MLU device is required for Mooncake registration tests.";

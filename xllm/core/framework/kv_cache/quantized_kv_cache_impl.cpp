@@ -47,22 +47,22 @@ std::optional<torch::Tensor> QuantizedKVCacheImpl::get_v_cache_scale() const {
 
 void QuantizedKVCacheImpl::swap_blocks(torch::Tensor& src_tensor,
                                        torch::Tensor& dst_tensor) {
-  // batch select keys and values
-  auto selected_keys = torch::index_select(key_cache_, 0, src_tensor);
-  auto selected_values = torch::index_select(value_cache_, 0, src_tensor);
-
-  // batch copy keys and values to dst indices
+  torch::Tensor selected_keys = torch::index_select(key_cache_, 0, src_tensor);
   key_cache_.index_copy_(0, dst_tensor, selected_keys);
-  value_cache_.index_copy_(0, dst_tensor, selected_values);
+  if (value_cache_.defined() && value_cache_.numel() > 0) {
+    torch::Tensor selected_values =
+        torch::index_select(value_cache_, 0, src_tensor);
+    value_cache_.index_copy_(0, dst_tensor, selected_values);
+  }
 
   // batch copy scale tensors
   if (key_cache_scale_.defined() && key_cache_scale_.numel() > 0) {
-    auto selected_k_scales =
+    torch::Tensor selected_k_scales =
         torch::index_select(key_cache_scale_, 0, src_tensor);
     key_cache_scale_.index_copy_(0, dst_tensor, selected_k_scales);
   }
   if (value_cache_scale_.defined() && value_cache_scale_.numel() > 0) {
-    auto selected_v_scales =
+    torch::Tensor selected_v_scales =
         torch::index_select(value_cache_scale_, 0, src_tensor);
     value_cache_scale_.index_copy_(0, dst_tensor, selected_v_scales);
   }

@@ -190,7 +190,8 @@ class KVCacheTransferFactory {
       AllocateKVCacheFunc allocate_kv_cache_func,
       bool enable_lighting_indexer,
       const std::string& model_type = "",
-      const std::string& model_id = "");
+      const std::string& model_id = "",
+      const std::vector<bool>& indexer_cache_enabled_layers = {});
 };
 
 }  // namespace xllm

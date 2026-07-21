@@ -370,7 +370,8 @@ std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
     AllocateKVCacheFunc allocate_kv_cache_func,
     bool enable_lighting_indexer,
     const std::string& model_type,
-    const std::string& model_id) {
+    const std::string& model_id,
+    const std::vector<bool>& indexer_cache_enabled_layers) {
   std::shared_ptr<KVCacheTransfer> transfer;
 
   int32_t device_id = device.index();
@@ -410,7 +411,11 @@ std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
     }
 #else
     mooncake_transfer = std::make_shared<MooncakeKVCacheTransferDefault>(
-        device_id, transfer_listen_port, device, model_type);
+        device_id,
+        transfer_listen_port,
+        device,
+        model_type,
+        indexer_cache_enabled_layers);
 #endif
 
     mooncake_transfer->initialize(device_id);

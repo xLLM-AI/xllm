@@ -577,6 +577,56 @@ TEST(KVCacheTest, MluIndexerAutoUsesDefaultCacheShapeWithoutScale) {
   EXPECT_EQ(caches[0].get_index_cache().scalar_type(), torch::kBFloat16);
   EXPECT_FALSE(caches[0].get_indexer_cache_scale().has_value());
 }
+
+TEST(KVCacheTest, MluSharedDsaLayersAllocateOnlyMlaCache) {
+  constexpr int64_t kBlockCount = 8;
+  constexpr int64_t kBlockSize = 16;
+
+  KVCacheCapacity capacity;
+  capacity.n_blocks(kBlockCount).block_size(kBlockSize);
+
+  ModelArgs model_args;
+  model_args.model_type("glm_moe_dsa")
+      .enable_mla(true)
+      .n_heads(8)
+      .n_kv_heads(2)
+      .head_dim(64)
+      .kv_lora_rank(64)
+      .qk_rope_head_dim(16)
+      .index_n_heads(1)
+      .index_head_dim(32);
+  const KVCacheShape shape(capacity, model_args, /*world_size=*/1);
+
+  KVCacheCreateOptions options;
+  options.device(torch::Device(torch::kCPU))
+      .dtype(torch::kBFloat16)
+      .num_layers(4)
+      .model_type("glm_moe_dsa")
+      .enable_lighting_indexer(true)
+      .indexer_cache_enabled_layers(
+          std::vector<bool>{true, false, false, true});
+
+  std::vector<KVCache> caches;
+  allocate_kv_caches(caches, shape, options);
+
+  ASSERT_EQ(caches.size(), 4U);
+  EXPECT_TRUE(caches[0].get_index_cache().defined());
+  EXPECT_FALSE(caches[1].get_index_cache().defined());
+  EXPECT_FALSE(caches[2].get_index_cache().defined());
+  EXPECT_TRUE(caches[3].get_index_cache().defined());
+  for (const KVCache& cache : caches) {
+    EXPECT_TRUE(cache.get_k_cache().defined());
+    EXPECT_FALSE(cache.get_v_cache().defined());
+    EXPECT_FALSE(cache.empty());
+  }
+
+  caches[1].get_k_cache()[0].fill_(1);
+  torch::Tensor source_block = torch::tensor({0}, torch::kLong);
+  torch::Tensor destination_block = torch::tensor({1}, torch::kLong);
+  caches[1].swap_blocks(source_block, destination_block);
+  EXPECT_TRUE(
+      torch::equal(caches[1].get_k_cache()[0], caches[1].get_k_cache()[1]));
+}
 #endif
 
 TEST_F(HostKVCacheTest, HostKVCacheNormalLayoutAddsLayerDim) {

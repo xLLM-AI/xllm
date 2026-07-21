@@ -66,6 +66,9 @@ struct KVCacheCreateOptions {
   PROPERTY(bool, enable_sleep_mode) = false;
   PROPERTY(bool, enable_linear_attention) = false;
   PROPERTY(bool, enable_lighting_indexer) = false;
+  // Empty keeps the legacy all-layer behavior. Otherwise each entry controls
+  // whether that layer owns indexer cache tensors.
+  PROPERTY(std::vector<bool>, indexer_cache_enabled_layers);
   PROPERTY(bool, enable_kv_cache_quant) = false;
   PROPERTY(bool, enable_raw_device_allocator) = false;
 #if defined(USE_NPU)

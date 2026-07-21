@@ -186,13 +186,15 @@ MooncakeKVCacheTransferDefault::MooncakeKVCacheTransferDefault(
     const int32_t device_id,
     const uint16_t listen_port,
     const torch::Device& device,
-    const std::string& model_type)
+    const std::string& model_type,
+    const std::vector<bool>& indexer_cache_enabled_layers)
     : MooncakeKVCacheTransferBase(
           device_id,
           listen_port,
           device,
           std::make_unique<MooncakeTransferEngine>(listen_port, device)),
-      model_type_(model_type) {}
+      model_type_(model_type),
+      indexer_cache_enabled_layers_(indexer_cache_enabled_layers) {}
 
 void MooncakeKVCacheTransferDefault::allocate_kv_cache(
     std::vector<xllm::KVCache>& kv_caches,
@@ -223,22 +225,10 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
   const std::vector<int64_t>& key_cache_shape =
       kv_cache_shape.key_cache_shape();
   bool has_v_cache = true;
-  bool has_index_cache = false;
-  bool has_index_cache_scale = false;
   if (!kv_caches.empty()) {
     torch::Tensor value_cache = kv_caches[0].get_v_cache();
-    torch::Tensor index_cache = kv_caches[0].get_index_cache();
-    std::optional<torch::Tensor> index_cache_scale =
-        kv_caches[0].get_indexer_cache_scale();
     has_v_cache = value_cache.defined() && value_cache.numel() > 0;
-    has_index_cache = index_cache.defined() && index_cache.numel() > 0;
-    has_index_cache_scale = index_cache_scale.has_value() &&
-                            index_cache_scale->defined() &&
-                            index_cache_scale->numel() > 0;
   }
-  const int64_t buf_cnt_per_layer = 1 + static_cast<int64_t>(has_v_cache) +
-                                    static_cast<int64_t>(has_index_cache) +
-                                    static_cast<int64_t>(has_index_cache_scale);
 
   int64_t data_size = torch::scalarTypeToTypeMeta(dtype).itemsize();
   int64_t count_per_block = 1;
@@ -255,10 +245,31 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
 
   BufLayout layout;
   layout.num_layers = num_layers;
-  layout.buf_cnt = buf_cnt_per_layer;
+  layout.layer_offsets.reserve(static_cast<size_t>(num_layers) + 1);
+  layout.layer_offsets.emplace_back(0);
+  for (const KVCache& cache : kv_caches) {
+    int64_t buffer_count = 1;
+    const torch::Tensor value_cache = cache.get_v_cache();
+    const torch::Tensor index_cache = cache.get_index_cache();
+    const std::optional<torch::Tensor> index_cache_scale =
+        cache.get_indexer_cache_scale();
+    buffer_count +=
+        static_cast<int64_t>(value_cache.defined() && value_cache.numel() > 0);
+    buffer_count +=
+        static_cast<int64_t>(index_cache.defined() && index_cache.numel() > 0);
+    buffer_count += static_cast<int64_t>(index_cache_scale.has_value() &&
+                                         index_cache_scale->defined() &&
+                                         index_cache_scale->numel() > 0);
+    if (layout.layer_offsets.size() == 1) {
+      layout.buf_cnt = buffer_count;
+    } else if (layout.buf_cnt != buffer_count) {
+      layout.buf_cnt = 0;
+    }
+    layout.total_buf_cnt += buffer_count;
+    layout.layer_offsets.emplace_back(layout.total_buf_cnt);
+  }
   if (is_spec_draft) {
-    layout.offset =
-        main_layout_.offset + main_layout_.num_layers * main_layout_.buf_cnt;
+    layout.offset = main_layout_.offset + main_layout_.total_buf_cnt;
   }
   layout.registered = true;
 
@@ -283,6 +294,9 @@ void MooncakeKVCacheTransferDefault::allocate_kv_cache_impl(
   const std::vector<int64_t>& value_cache_shape =
       kv_cache_shape.value_cache_shape();
 #if defined(USE_MLU)
+  CHECK(indexer_cache_enabled_layers_.empty() ||
+        indexer_cache_enabled_layers_.size() == static_cast<size_t>(num_layers))
+      << "Indexer cache layer mask must match Mooncake num_layers.";
   for (int64_t i = 0; i < num_layers; ++i) {
     torch::Tensor key_cache =
         mlu::alloc_zero_tensor(key_cache_shape, dtype, device_);
@@ -292,13 +306,17 @@ void MooncakeKVCacheTransferDefault::allocate_kv_cache_impl(
     if (kv_cache_shape.has_value_cache_shape()) {
       value_cache = mlu::alloc_zero_tensor(value_cache_shape, dtype, device_);
     }
-    if (kv_cache_shape.has_index_cache_shape()) {
+    const bool enable_indexer_cache =
+        kv_cache_shape.has_index_cache_shape() &&
+        (indexer_cache_enabled_layers_.empty() ||
+         indexer_cache_enabled_layers_[static_cast<size_t>(i)]);
+    if (enable_indexer_cache) {
       const torch::ScalarType index_dtype =
           kv_cache_shape.has_index_cache_scale_shape() ? torch::kChar : dtype;
       index_cache = mlu::alloc_zero_tensor(
           kv_cache_shape.index_cache_shape(), index_dtype, device_);
     }
-    if (kv_cache_shape.has_index_cache_scale_shape()) {
+    if (enable_indexer_cache && kv_cache_shape.has_index_cache_scale_shape()) {
       index_cache_scale = mlu::alloc_rdma_registerable_zero_tensor(
           kv_cache_shape.index_cache_scale_shape(), torch::kFloat32, device_);
     }
@@ -467,15 +485,44 @@ std::vector<int64_t> MooncakeKVCacheTransferDefault::get_buf_ids(
   }
 
   std::vector<int64_t> buf_ids;
-  buf_ids.reserve(active_layer_ids.size() *
-                  static_cast<size_t>(layout.buf_cnt));
+  const bool has_variable_layout = !layout.layer_offsets.empty();
+  if (has_variable_layout) {
+    CHECK_EQ(layout.layer_offsets.size(),
+             static_cast<size_t>(layout.num_layers) + 1)
+        << "KV cache buffer layout offsets are invalid.";
+  } else {
+    CHECK_GT(layout.buf_cnt, 0) << "KV cache uniform buffer layout is invalid.";
+  }
   for (int64_t layer_id : active_layer_ids) {
     CHECK_GE(layer_id, 0) << "layer_id must be non-negative";
     CHECK_LT(layer_id, layout.num_layers) << "layer_id out of range";
+  }
 
-    int64_t buf_id = layout.offset + layer_id * layout.buf_cnt;
-    for (int64_t buf_idx = 0; buf_idx < layout.buf_cnt; ++buf_idx) {
-      buf_ids.emplace_back(buf_id++);
+  size_t buffer_count = 0;
+  for (int64_t layer_id : active_layer_ids) {
+    const int64_t begin =
+        has_variable_layout
+            ? layout.layer_offsets[static_cast<size_t>(layer_id)]
+            : layer_id * layout.buf_cnt;
+    const int64_t end =
+        has_variable_layout
+            ? layout.layer_offsets[static_cast<size_t>(layer_id) + 1]
+            : begin + layout.buf_cnt;
+    buffer_count += static_cast<size_t>(end - begin);
+  }
+  buf_ids.reserve(buffer_count);
+
+  for (int64_t layer_id : active_layer_ids) {
+    const int64_t begin =
+        has_variable_layout
+            ? layout.layer_offsets[static_cast<size_t>(layer_id)]
+            : layer_id * layout.buf_cnt;
+    const int64_t end =
+        has_variable_layout
+            ? layout.layer_offsets[static_cast<size_t>(layer_id) + 1]
+            : begin + layout.buf_cnt;
+    for (int64_t relative_id = begin; relative_id < end; ++relative_id) {
+      buf_ids.emplace_back(layout.offset + relative_id);
     }
   }
   return buf_ids;
