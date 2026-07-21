@@ -110,9 +110,8 @@ torch::Tensor causal_conv1d_update_decode(
   int32_t stride_x_seq =
       is_varlen ? 0 : static_cast<int32_t>(x_input.stride(0));
   int32_t stride_x_dim = static_cast<int32_t>(x_input.stride(1));
-  int32_t stride_x_token =
-      is_varlen ? static_cast<int32_t>(x_input.stride(0))
-                : static_cast<int32_t>(x_input.stride(2));
+  int32_t stride_x_token = is_varlen ? static_cast<int32_t>(x_input.stride(0))
+                                     : static_cast<int32_t>(x_input.stride(2));
   int32_t stride_w_dim = static_cast<int32_t>(weight.stride(0));
   int32_t stride_w_width = static_cast<int32_t>(weight.stride(1));
   int32_t stride_istate_seq = static_cast<int32_t>(conv_state.stride(0));

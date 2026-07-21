@@ -87,7 +87,6 @@ fused_recurrent_gated_delta_rule_packed_decode(
   int32_t num_v_blocks = (V + kBlockV - 1) / kBlockV;
   int32_t total_blocks = B * num_v_blocks;
 
-
   cnrtQueue_t queue = torch_mlu::getCurMLUStream();
 
   JITKernel& f = JITKernel::get(

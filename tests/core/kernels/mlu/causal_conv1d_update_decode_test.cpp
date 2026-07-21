@@ -194,10 +194,10 @@ TEST_F(CausalConv1dUpdateDecodeJitTest,
       torch::tensor(std::vector<int32_t>{1, 2}, int_options);
 
   torch::Tensor expected_state = original_state.clone();
-  torch::Tensor expected_first_prefix = torch::cat(
-      {original_state[0].slice(/*dim=*/1, /*start=*/1, /*end=*/3),
-       x[0].unsqueeze(/*dim=*/1)},
-      /*dim=*/1);
+  torch::Tensor expected_first_prefix =
+      torch::cat({original_state[0].slice(/*dim=*/1, /*start=*/1, /*end=*/3),
+                  x[0].unsqueeze(/*dim=*/1)},
+                 /*dim=*/1);
   expected_state[0]
       .slice(/*dim=*/1, /*start=*/0, /*end=*/3)
       .copy_(expected_first_prefix);
