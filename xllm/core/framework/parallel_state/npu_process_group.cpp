@@ -16,10 +16,8 @@ limitations under the License.
 
 #include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
 
-#include <algorithm>
 #include <c10d/ProcessGroup.hpp>
 #include <c10d/TCPStore.hpp>
-#include <cctype>
 #include <torch_npu/csrc/distributed/ProcessGroupHCCL.hpp>
 
 #include "core/framework/config/dit_config.h"
@@ -82,43 +80,25 @@ std::string resolve_tcp_store_host(const std::string& host, int32_t rank_size) {
   return rank_size == 1 ? "127.0.0.1" : host;
 }
 
-constexpr char kHcclTpAivEnv[] = "XLLM_HCCL_TP_AIV";
-constexpr char kTensorParallelGroupName[] = "tp_group";
 constexpr uint32_t kHcclAivExpansionMode = 3;
-
-bool should_enable_hccl_aiv_expansion(const std::string& group_name,
-                                      int32_t rank_size) {
-  const auto env_value = xllm::util::get_optional_string_env(kHcclTpAivEnv);
-  if (!env_value.has_value() || group_name != kTensorParallelGroupName ||
-      rank_size <= 1) {
-    return false;
-  }
-
-  // Keep the switch opt-in while accepting the values used by launch scripts.
-  std::string normalized_value = *env_value;
-  std::transform(normalized_value.begin(),
-                 normalized_value.end(),
-                 normalized_value.begin(),
-                 [](unsigned char character) {
-                   return static_cast<char>(std::tolower(character));
-                 });
-  return normalized_value == "1" || normalized_value == "true" ||
-         normalized_value == "aiv";
-}
 
 void configure_hccl_aiv_expansion(
     const std::string& group_name,
     int32_t rank_size,
     const c10::intrusive_ptr<c10d_npu::ProcessGroupHCCL::Options>& options) {
-  if (!should_enable_hccl_aiv_expansion(group_name, rank_size)) {
+  if (group_name != "tp_group" || rank_size <= 1) {
+    return;
+  }
+  const auto aiv_mode = xllm::util::get_optional_string_env("XLLM_HCCL_TP_AIV");
+  if (!aiv_mode ||
+      (*aiv_mode != "1" && *aiv_mode != "true" && *aiv_mode != "aiv")) {
     return;
   }
 
   // CANN restricts AIV expansion across multiple communicators, so scope it
   // to the multi-rank tensor-parallel communicator used by this optimization.
   options->hccl_config["hccl_op_expansion_mode"] = kHcclAivExpansionMode;
-  LOG(INFO) << "Enabling communicator-scoped HCCL AIV expansion for "
-            << group_name << ".";
+  LOG(INFO) << "Enabling HCCL AIV expansion for " << group_name << ".";
 }
 }  // namespace
 
