@@ -127,6 +127,7 @@ const XLLM_InitOptions XLLM_INIT_REC_OPTIONS_DEFAULT = {
     .enable_graph = false,
     .enable_rec_fast_sampler = true,
     .enable_prefill_piecewise_graph = false,
+    .enable_onerec_prefill_acl_graph = false,
     .enable_xattention_one_stage = false,
     .enable_graph_mode_decode_no_padding = false,
     .enable_block_copy_kernel = false,
@@ -140,6 +141,7 @@ const XLLM_InitOptions XLLM_INIT_REC_OPTIONS_DEFAULT = {
     .total_conversion_threshold = 256,
     .rec_worker_max_concurrency = 1,
     .enable_multistream_perf_mode = false,
+    .enable_onerec_multistream_core_split = false,
     .constrained_decoding_filter_path = "",
     .cpu_affinity = ""};
 

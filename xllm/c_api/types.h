@@ -166,6 +166,9 @@ typedef struct XLLM_CAPI_EXPORT XLLM_InitOptions {
   /** Whether to enable prefill piecewise graph for REC */
   bool enable_prefill_piecewise_graph;
 
+  /** Whether to enable OneRec decoder prefill ACL graph on NPU */
+  bool enable_onerec_prefill_acl_graph;
+
   /** Whether to enable xattention one-stage execution for REC */
   bool enable_xattention_one_stage;
 
@@ -204,6 +207,9 @@ typedef struct XLLM_CAPI_EXPORT XLLM_InitOptions {
 
   /** Whether to enable OneRec xattention multistream performance mode */
   bool enable_multistream_perf_mode;
+
+  /** Whether to split NPU cores between two OneRec worker streams */
+  bool enable_onerec_multistream_core_split;
 
   /**
    * Relative filename of the constrained decoding filter file (e.g.

@@ -29,8 +29,8 @@ limitations under the License.
 #include <limits>
 #include <stdexcept>
 
-#include "core/common/global_flags.h"
 #include "c_api/internal/infer_timing.h"
+#include "core/common/global_flags.h"
 #include "core/framework/model_loader.h"
 #include "core/util/cpu_affinity.h"
 #include "core/util/rec_model_utils.h"
@@ -184,6 +184,8 @@ XLLM_CAPI_EXPORT bool xllm_rec_initialize(
     FLAGS_enable_rec_fast_sampler = xllm_init_options.enable_rec_fast_sampler;
     FLAGS_enable_prefill_piecewise_graph =
         xllm_init_options.enable_prefill_piecewise_graph;
+    FLAGS_enable_onerec_prefill_acl_graph =
+        xllm_init_options.enable_onerec_prefill_acl_graph;
     FLAGS_enable_xattention_one_stage =
         xllm_init_options.enable_xattention_one_stage;
     FLAGS_enable_graph_mode_decode_no_padding =
@@ -207,6 +209,8 @@ XLLM_CAPI_EXPORT bool xllm_rec_initialize(
         xllm_init_options.total_conversion_threshold;
     FLAGS_enable_multistream_perf_mode =
         xllm_init_options.enable_multistream_perf_mode;
+    FLAGS_enable_onerec_multistream_core_split =
+        xllm_init_options.enable_onerec_multistream_core_split;
     apply_multistream_perf_mode_env_overrides();
 
     if (xllm_init_options.request_queue_size > 0) {
@@ -244,8 +248,12 @@ XLLM_CAPI_EXPORT bool xllm_rec_initialize(
               << ", enable_prefix_cache=" << FLAGS_enable_prefix_cache
               << ", enable_schedule_overlap=" << FLAGS_enable_schedule_overlap
               << ", enable_chunked_prefill=" << FLAGS_enable_chunked_prefill
+              << ", enable_onerec_prefill_acl_graph="
+              << FLAGS_enable_onerec_prefill_acl_graph
               << ", enable_multistream_perf_mode="
               << FLAGS_enable_multistream_perf_mode
+              << ", enable_onerec_multistream_core_split="
+              << FLAGS_enable_onerec_multistream_core_split
               << ", enable_rec_fast_sampler=" << FLAGS_enable_rec_fast_sampler
               << ", max_decode_rounds=" << FLAGS_max_decode_rounds;
 
