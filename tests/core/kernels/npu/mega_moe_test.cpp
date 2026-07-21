@@ -28,7 +28,7 @@ namespace {
 
 TEST(MegaMoeTest, AcceptsOnlyExactCustomVendorAbiProvenance) {
   const std::string expected =
-      "/isolated/vendor/op_api/lib/libcust_opapi.so";
+      "vendor/op_api/lib/libcust_opapi.so";
   auto compatible = validate_mega_moe_op_api_paths(
       expected, expected, expected);
   EXPECT_TRUE(compatible.compatible);
@@ -36,13 +36,13 @@ TEST(MegaMoeTest, AcceptsOnlyExactCustomVendorAbiProvenance) {
 
   auto stock = validate_mega_moe_op_api_paths(
       expected,
-      "/usr/local/Ascend/cann/lib64/libopapi.so",
-      "/usr/local/Ascend/cann/lib64/libopapi.so");
+      "stock/op_api/lib/libopapi.so",
+      "stock/op_api/lib/libopapi.so");
   EXPECT_FALSE(stock.compatible);
   EXPECT_TRUE(stock.same_library);
 
   auto split = validate_mega_moe_op_api_paths(
-      expected, expected, "/other/vendor/libcust_opapi.so");
+      expected, expected, "other/vendor/libcust_opapi.so");
   EXPECT_FALSE(split.compatible);
   EXPECT_FALSE(split.same_library);
 }
