@@ -115,6 +115,7 @@ const OptionCategory kRecOptions = {"REC OPTIONS",
                                      "constrained_decoding_filter_path",
                                      "rec_worker_max_concurrency",
                                      "enable_multistream_perf_mode",
+                                     "enable_onerec_multistream_core_split",
                                      "output_rec_logprobs"}};
 
 const OptionCategory kPrefixCacheOptions = {

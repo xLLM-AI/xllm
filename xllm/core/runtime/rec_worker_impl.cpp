@@ -41,6 +41,7 @@ limitations under the License.
 #include "platform/cuda/device_capture_lock.h"
 #endif
 #if defined(USE_NPU)
+#include <acl/acl.h>
 #include <torch_npu/torch_npu.h>
 
 #include "kernels/npu/npu_ops_api.h"
@@ -234,6 +235,39 @@ bool should_serialize_onerec_xattention_prepare(int64_t max_concurrency) {
 
 bool should_serialize_onerec_xattention_model_forward(int64_t max_concurrency) {
   return max_concurrency > 1 && serialize_onerec_xattention_model_forward();
+}
+
+uint32_t get_half_device_core_count(int32_t device_id, aclrtDevAttr attr) {
+  int64_t core_count = 0;
+  const aclError status =
+      aclrtGetDeviceInfo(static_cast<uint32_t>(device_id), attr, &core_count);
+  CHECK_EQ(status, ACL_SUCCESS)
+      << "Failed to query NPU core count, attr=" << static_cast<int>(attr);
+  CHECK_GE(core_count, 2) << "NPU core count must be at least 2, attr="
+                          << static_cast<int>(attr);
+  return static_cast<uint32_t>(core_count / 2);
+}
+
+void configure_onerec_stream_resource_limit(int32_t device_id,
+                                            aclrtStream stream) {
+  const uint32_t cube_core_limit =
+      get_half_device_core_count(device_id, ACL_DEV_ATTR_CUBE_CORE_NUM);
+  const uint32_t vector_core_limit =
+      get_half_device_core_count(device_id, ACL_DEV_ATTR_VECTOR_CORE_NUM);
+
+  CHECK_EQ(
+      aclrtSetStreamResLimit(stream, ACL_RT_DEV_RES_CUBE_CORE, cube_core_limit),
+      ACL_SUCCESS)
+      << "Failed to set OneRec stream Cube Core limit";
+  CHECK_EQ(aclrtSetStreamResLimit(
+               stream, ACL_RT_DEV_RES_VECTOR_CORE, vector_core_limit),
+           ACL_SUCCESS)
+      << "Failed to set OneRec stream Vector Core limit";
+}
+
+void use_onerec_stream_resource_limit(aclrtStream stream) {
+  CHECK_EQ(aclrtUseStreamResInCurrentThread(stream), ACL_SUCCESS)
+      << "Failed to use OneRec stream resource limit in current thread";
 }
 #else
 bool should_serialize_onerec_xattention_prepare(int64_t max_concurrency) {
@@ -3378,6 +3412,14 @@ bool RecWorkerImpl::init_model(ModelContext& context) {
     auto stream = device_.get_stream_from_pool();
     runtime.stream = std::move(stream);
     auto stream_guard = runtime.stream->set_stream_guard();
+#if defined(USE_NPU)
+    if (FLAGS_enable_onerec_multistream_core_split &&
+        rec_model_kind_ == RecModelKind::kOneRec &&
+        options_.rec_worker_max_concurrency() == 2) {
+      configure_onerec_stream_resource_limit(
+          device_.index(), runtime.stream->get_stream()->stream());
+    }
+#endif
 
     runtime.context =
         std::make_unique<ModelContext>(context.get_parallel_args(),
@@ -3565,6 +3607,11 @@ folly::SemiFuture<std::optional<ForwardOutput>> RecWorkerImpl::step_async(
 #if defined(USE_NPU)
           aclrtStream current_stream =
               c10_npu::getCurrentNPUStream(device_.index()).stream();
+          if (FLAGS_enable_onerec_multistream_core_split &&
+              rec_model_kind_ == RecModelKind::kOneRec &&
+              work_pipelines_.size() == 2) {
+            use_onerec_stream_resource_limit(current_stream);
+          }
           if (enable_rec_pipeline_concurrency_debug()) {
             const auto current_npu_stream =
                 c10_npu::getCurrentNPUStream(device_.index());

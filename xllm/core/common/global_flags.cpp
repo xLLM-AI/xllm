@@ -732,6 +732,10 @@ DEFINE_bool(enable_multistream_perf_mode,
             "Enable experimental OneRec xattention multistream performance "
             "mode. When enabled, it disables OneRec xattention prepare/model "
             "forward serialization and enables thread-local ACLNN cache.");
+DEFINE_bool(enable_onerec_multistream_core_split,
+            false,
+            "Limit each of two OneRec NPU worker streams to half of the device "
+            "Cube and Vector cores.");
 
 namespace {
 
