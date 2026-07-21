@@ -160,15 +160,25 @@ TEST(Dsv4StateCacheTest, MissingPackedFallsBackWithoutSwappingSplit) {
   EXPECT_TRUE(torch::equal(state.score(), score));
 }
 
-// Host prefix-cache allocation registers page-aligned host memory with the NPU
-// via aclrtHostRegister, which requires a live device context. Set one up once.
+// Platform page-locked host allocation requires a live device context.
 class HostKVCacheTest : public ::testing::Test {
  protected:
   void SetUp() override {
+#if defined(USE_MLU)
+    if (Platform::device_count() < 1) {
+      GTEST_SKIP() << "MLU device is required for host KV cache tests.";
+    }
+#endif
     Device device(/*device_index=*/0);
     device.set_device();
     device.init_device_context();
+#if defined(USE_MLU)
+    context_tensor_ =
+        torch::zeros({1}, torch::TensorOptions().device(device.unwrap()));
+#endif
   }
+
+  torch::Tensor context_tensor_;
 };
 
 TEST(KVCacheTest, DeepSeekV4FourDimCachesUseDeviceLayout) {

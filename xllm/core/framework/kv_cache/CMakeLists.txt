@@ -62,6 +62,7 @@ cc_library(
     :xtensor
     glog::glog
     torch
+    $<$<BOOL:${USE_MLU}>:cndrv>
     $<$<BOOL:${USE_NPU}>:ascendcl>
     $<$<BOOL:${USE_NPU}>:torch_npu>
 )

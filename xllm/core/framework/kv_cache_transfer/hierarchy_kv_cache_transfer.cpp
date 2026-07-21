@@ -144,6 +144,17 @@ HierarchyKVCacheTransfer::HierarchyKVCacheTransfer(
 
   device_.set_device();
   device_.init_device_context();
+  build_device_block_type_map();
+  layer_batch_ranges_ = build_layer_batch_ranges(
+      options_.layers(), options_.layers_wise_copy_batchs());
+
+  if (options_.host_blocks_factor() > 1.0) {
+    validate_host_cache();
+    batch_memcpy_ = create_batch_memcpy(device_);
+    CHECK(batch_memcpy_ != nullptr)
+        << "Host prefix cache requires a batch memcpy implementation.";
+  }
+
   load_threadpool_ = std::make_unique<ThreadPool>(
       /*num_threads=*/2,
       /*init_func=*/[this]() mutable { device_.set_device(); },
@@ -158,12 +169,7 @@ HierarchyKVCacheTransfer::HierarchyKVCacheTransfer(
     copy_stream_.enqueue(device_.get_stream_from_pool(TIMEOUT_MS));
   }
 
-  build_device_block_type_map();
-  layer_batch_ranges_ = build_layer_batch_ranges(
-      options_.layers(), options_.layers_wise_copy_batchs());
-
   if (options_.host_blocks_factor() > 1.0) {
-    batch_memcpy_ = create_batch_memcpy(device_);
     create_host_cache();
   }
 }
@@ -191,6 +197,40 @@ void HierarchyKVCacheTransfer::build_device_block_type_map() {
       }
     }
   }
+}
+
+void HierarchyKVCacheTransfer::validate_host_cache() const {
+#if defined(USE_MLU)
+  CHECK(!create_options_.enable_kv_cache_quant())
+      << "MLU host prefix cache phase 1 requires kv_cache_dtype=auto; disable "
+         "KV cache quantization or host cache.";
+  CHECK(!options_.enable_graph())
+      << "MLU host prefix cache phase 1 does not support MLU Graph; disable "
+         "graph or host cache.";
+  CHECK_EQ(device_kv_caches_.size(), static_cast<size_t>(1))
+      << "MLU host prefix cache phase 1 only supports BlockType::KV; disable "
+         "linear attention, lighting indexer, DeepSeek-V4, or host cache.";
+  auto kv_group = device_kv_caches_.find(BlockType::KV);
+  CHECK(kv_group != device_kv_caches_.end())
+      << "MLU host prefix cache phase 1 only supports BlockType::KV; disable "
+         "linear attention, lighting indexer, DeepSeek-V4, or host cache.";
+  for (const KVCache* cache : kv_group->second) {
+    CHECK(cache != nullptr) << "Device KV cache must not be null.";
+    const BlockTypeTensorMap tensors =
+        cache->get_block_type_tensors(BlockType::KV);
+    const bool has_key = tensors.count(KVCacheTensorRole::KEY) == 1;
+    const bool has_value = tensors.count(KVCacheTensorRole::VALUE) == 1;
+    const size_t expected_roles = has_value ? 2 : 1;
+    CHECK(has_key && tensors.size() == expected_roles)
+        << "MLU host prefix cache phase 1 only supports tensor roles {KEY} "
+           "or {KEY, VALUE}; disable lighting indexer or host cache.";
+    CHECK(!cache->get_k_cache_scale().has_value() &&
+          !cache->get_v_cache_scale().has_value())
+        << "MLU host prefix cache phase 1 requires kv_cache_dtype=auto; "
+           "disable "
+           "KV cache quantization or host cache.";
+  }
+#endif
 }
 
 void HierarchyKVCacheTransfer::create_host_cache() {
@@ -380,7 +420,8 @@ uint32_t HierarchyKVCacheTransfer::offload(
   }
 
   if (batch_memcpy_ == nullptr) {
-    return block_transfer_info.size();
+    LOG(ERROR) << "Offload to host failed: batch memcpy is not initialized.";
+    return 0;
   }
 
   Slice<BlockTransferInfo> slice(block_transfer_info);

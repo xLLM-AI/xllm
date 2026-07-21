@@ -50,8 +50,8 @@ class HierarchyKVCacheTransfer {
 
   using GroupedCaches = std::map<BlockType, std::vector<KVCache*>>;
 
-  // Host prefix caches: one real KVCache per block type, allocated over
-  // page-aligned + mlock'd + NPU-registered host memory. Shape per tensor is
+  // Host prefix caches: one real KVCache per block type, allocated over the
+  // platform's page-locked host memory. Shape per tensor is
   // [host_blocks, layer_count, ...per_block_dims].
   using HostGroupedCaches = std::map<BlockType, std::unique_ptr<KVCache>>;
 
@@ -61,6 +61,7 @@ class HierarchyKVCacheTransfer {
     PROPERTY(uint32_t, layers);
     PROPERTY(double, host_blocks_factor) = 0.0;
     PROPERTY(uint32_t, layers_wise_copy_batchs) = 1;
+    PROPERTY(bool, enable_graph) = false;
     PROPERTY(bool, enable_mla) = false;
     PROPERTY(bool, enable_kvcache_store) = false;
     PROPERTY(std::string, store_protocol) = "rdma";
@@ -87,6 +88,7 @@ class HierarchyKVCacheTransfer {
 
  private:
   void build_device_block_type_map();
+  void validate_host_cache() const;
   void create_host_cache();
   CopyPlan build_copy_plan(
       const std::vector<BlockTransferInfo>& block_transfer_info,

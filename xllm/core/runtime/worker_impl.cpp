@@ -1834,6 +1834,7 @@ void WorkerImpl::init_hierarchy_kv_cache_transfer(
         .layers(context_.get_model_args().n_layers())
         .host_blocks_factor(options_.host_blocks_factor())
         .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())
+        .enable_graph(options_.enable_graph())
         .enable_mla(options_.enable_mla())
         .enable_kvcache_store(false);
     hierarchy_kv_cache_transfer_ =

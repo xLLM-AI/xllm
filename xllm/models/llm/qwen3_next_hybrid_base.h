@@ -112,6 +112,9 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
 
     std::optional<torch::Tensor> residual = std::nullopt;
     for (size_t i = 0; i < layers_.size(); i++) {
+      if (!input_params.synchronize_layer(static_cast<uint32_t>(i))) {
+        return ModelOutput();
+      }
       auto& layer = layers_[i];
       h = layer->forward(h,
                          residual,

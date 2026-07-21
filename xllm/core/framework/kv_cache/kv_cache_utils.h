@@ -44,6 +44,10 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache_tensor_allocator.h"
 #include "framework/kv_cache/kv_cache_tensor_role.h"
 
+#if defined(USE_MLU)
+#include <cn_api.h>
+#endif
+
 namespace xllm {
 
 class KVCacheShape;
@@ -121,6 +125,9 @@ using BlockTypeTensorMap = std::map<KVCacheTensorRole::Value, torch::Tensor>;
 struct HostPageAlignedRegion {
   void* base_ptr = nullptr;
   size_t total_bytes = 0;
+#if defined(USE_MLU)
+  CNcontext owner_context = nullptr;
+#endif
 
   HostPageAlignedRegion() = default;
   explicit HostPageAlignedRegion(size_t bytes);
