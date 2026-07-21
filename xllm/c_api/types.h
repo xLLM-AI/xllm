@@ -178,12 +178,6 @@ typedef struct XLLM_CAPI_EXPORT XLLM_InitOptions {
   /** Draft hf model path (empty string = no draft model) */
   char draft_model[XLLM_META_STRING_FIELD_MAX_LEN];
 
-  /**
-   * Devices to run the draft model on (e.g. npu:0, npu:0,npu:1).
-   * Empty string = use the same devices as main model
-   */
-  char draft_devices[XLLM_META_STRING_FIELD_MAX_LEN];
-
   // CPU affinity settings, format be like:
   // 1,2,3
   // meaing ith thread attach to logical processor 1,2,3

@@ -29,7 +29,8 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options,
-    const OptimizationConfig& optimization_config)
+    const OptimizationConfig& optimization_config,
+    bool enable_indexer)
     : q_lora_rank_(args.q_lora_rank()),
       kv_lora_rank_(args.kv_lora_rank()),
       qk_nope_head_dim_(args.qk_nope_head_dim()),
@@ -39,6 +40,7 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
       v_head_dim_(args.v_head_dim()),
       eps_(args.rms_norm_eps()),
       interleaved_(true) {
+  has_indexer_ = enable_lighting_indexer_ && enable_indexer;
   use_full_replicated_attention_weights_ =
       parallel_args.cp_size() > 1 && Platform::uses_model_cp_partition();
   const int64_t tp_size = parallel_args.tp_group_->world_size();
@@ -125,22 +127,20 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
                                                   interleaved_,
                                                   options));
 
-  // indexer rotary embedding for lighting indexer
-  indexer_rotary_emb_ = register_module(
-      "indexer_rotary_emb",
-      create_mla_rotary_embedding(args,
-                                  qk_rope_head_dim_,
-                                  max_position_embeddings,
-                                  args.indexer_rope_interleave(),
-                                  options));
-
   if (args.rope_scaling_rope_type() == "deepseek_yarn") {
     float mscale = layer::rotary::yarn_get_mscale(
         args.rope_scaling_factor(), args.rope_scaling_mscale_all_dim());
     scaling *= mscale * mscale;
   }
 
-  if (enable_lighting_indexer_) {
+  if (has_indexer_) {
+    indexer_rotary_emb_ = register_module(
+        "indexer_rotary_emb",
+        create_mla_rotary_embedding(args,
+                                    qk_rope_head_dim_,
+                                    max_position_embeddings,
+                                    args.indexer_rope_interleave(),
+                                    options));
     indexer_ =
         register_module("indexer",
                         Indexer(hidden_size,
@@ -157,9 +157,8 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
   }
 
   use_fused_mla_qkv_ = optimization_config.enable_fused_mla_kernel;
-  if (::xllm::KVCacheConfig::get_instance().indexer_cache_dtype() == "int8") {
-    CHECK(enable_lighting_indexer_)
-        << "Indexer cache INT8 requires lighting indexer.";
+  if (has_indexer_ &&
+      ::xllm::KVCacheConfig::get_instance().indexer_cache_dtype() == "int8") {
     CHECK(optimization_config.enable_fused_indexer_qk)
         << "Indexer cache INT8 requires fused indexer Q/K.";
   }
@@ -393,7 +392,7 @@ AttentionMetadata DeepseekV2AttentionImpl::build_mla_attention_metadata(
       attn_indexer_metadata.block_table = new_block_tables.value();
       attn_indexer_metadata.kv_seq_lens = new_context_lens.value();
       attn_indexer_metadata.max_seq_len = index_topk_;
-    } else if (enable_lighting_indexer_) {
+    } else if (has_indexer_) {
       auto index_cache = kv_cache.get_index_cache();
       auto index_cache_scale = kv_cache.get_indexer_cache_scale();
       auto [new_block_tables, new_context_lens] = indexer_(hidden_states,
@@ -407,6 +406,9 @@ AttentionMetadata DeepseekV2AttentionImpl::build_mla_attention_metadata(
       attn_indexer_metadata.block_table = new_block_tables;
       attn_indexer_metadata.kv_seq_lens = new_context_lens;
       attn_indexer_metadata.max_seq_len = index_topk_;
+    } else {
+      CHECK(!enable_lighting_indexer_)
+          << "Shared DSA layer requires externally supplied top-k metadata.";
     }
   }
   return attn_indexer_metadata;
@@ -432,10 +434,13 @@ torch::Tensor DeepseekV2AttentionImpl::forward(
     const torch::Tensor& hidden_states,
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
-    const v32_cp::DeepseekV32CPContext* sp_ctx) {
+    const v32_cp::DeepseekV32CPContext* sp_ctx,
+    DsaTopkTransfer* topk_transfer) {
   bool is_prefill_or_chunked_prefill =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
   if (sp_ctx != nullptr && can_use_sp()) {
+    // DSA cross-layer top-k sharing under sequence parallel is out of scope
+    // for the eager path; the sequence parallel branch always recomputes.
     return forward_sp(positions,
                       hidden_states,
                       attn_metadata,
@@ -447,7 +452,8 @@ torch::Tensor DeepseekV2AttentionImpl::forward(
                            hidden_states,
                            attn_metadata,
                            kv_cache,
-                           is_prefill_or_chunked_prefill);
+                           is_prefill_or_chunked_prefill,
+                           topk_transfer);
 }
 
 torch::Tensor DeepseekV2AttentionImpl::forward_normal_tp(
@@ -455,7 +461,8 @@ torch::Tensor DeepseekV2AttentionImpl::forward_normal_tp(
     const torch::Tensor& hidden_states,
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
-    bool is_prefill_or_chunked_prefill) {
+    bool is_prefill_or_chunked_prefill,
+    DsaTopkTransfer* topk_transfer) {
   const auto& heads = active_heads();
   torch::Tensor q, q_norm;
   torch::Tensor q_input = torch::empty(
@@ -487,6 +494,15 @@ torch::Tensor DeepseekV2AttentionImpl::forward_normal_tp(
   k_input = k_input.view({k_input.size(0), -1});
   v_input = v_input.view({v_input.size(0), -1});
 
+  // A Shared layer feeds the previous Full layer's sparse block table so the
+  // metadata builder takes its external branch and skips indexer recompute.
+  std::optional<torch::Tensor> shared_block_tables;
+  std::optional<torch::Tensor> shared_context_lens;
+  if (topk_transfer != nullptr && topk_transfer->input() != nullptr) {
+    shared_block_tables = topk_transfer->input()->block_tables();
+    shared_context_lens = topk_transfer->input()->context_lens();
+  }
+
   AttentionMetadata attn_indexer_metadata =
       build_mla_attention_metadata(positions,
                                    hidden_states,
@@ -495,7 +511,18 @@ torch::Tensor DeepseekV2AttentionImpl::forward_normal_tp(
                                    attn_metadata,
                                    kv_cache,
                                    k_cache_scale,
-                                   is_prefill_or_chunked_prefill);
+                                   is_prefill_or_chunked_prefill,
+                                   /*slot_mapping=*/std::nullopt,
+                                   shared_block_tables,
+                                   shared_context_lens);
+
+  // An Output layer exports the freshly computed sparse block table (held in
+  // the resolved metadata) so the caller can cache it for the next Shared
+  // layer.
+  if (topk_transfer != nullptr && topk_transfer->captures_output()) {
+    topk_transfer->publish_output(DsaTopkState(
+        attn_indexer_metadata.block_table, attn_indexer_metadata.kv_seq_lens));
+  }
 
   // mla forward
   auto [attn_output, output_lse] =
@@ -523,7 +550,7 @@ void DeepseekV2AttentionImpl::load_state_dict(const StateDict& state_dict) {
   kv_b_proj_->load_state_dict(state_dict.get_dict_with_prefix("kv_b_proj."));
 
   // load indexer weights
-  if (enable_lighting_indexer_) {
+  if (has_indexer_) {
     indexer_->load_state_dict(state_dict.get_dict_with_prefix("indexer."));
   }
 

@@ -22,7 +22,6 @@ MODEL_PATH="/path/to/your/DeepSeek-R1"             # 模型路径
 MASTER_NODE_ADDR="123.123.123.123:9748"            # Master 节点地址（需全局一致）
 LOCAL_HOST=123.123.123.123                         # 本机服务启动IP
 START_PORT=18000                                   # 服务起始端口
-START_DEVICE=0                                     # 起始 NPU 逻辑设备号
 LOG_DIR="log"                                      # 日志目录
 LOCAL_NODES=16                                     # 单机节点数（当前脚本启动 16 个进程）
 NNODES=32                                          # 总卡数（该示例为2机32卡）
@@ -32,13 +31,11 @@ mkdir -p $LOG_DIR
 for (( i=0; i<$LOCAL_NODES; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
   /path/to/xllm \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --max_memory_utilization=0.86 \
@@ -74,7 +71,6 @@ MODEL_PATH="/path/to/your/DeepSeek-R1"             # 模型路径
 MASTER_NODE_ADDR="123.123.123.123:9748"            # Master 节点地址（需全局一致）
 LOCAL_HOST=456.456.456.456                         # 本机服务启动IP
 START_PORT=18000                                   # 服务起始端口
-START_DEVICE=0                                     # 起始 NPU 逻辑设备号
 LOG_DIR="log"                                      # 日志目录
 LOCAL_NODES=16                                     # 单机节点数（当前脚本启动 16 个进程）
 NNODES=32                                          # 总卡数（该示例为2机32卡）
@@ -84,13 +80,11 @@ mkdir -p $LOG_DIR
 for (( i=0; i<$LOCAL_NODES; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
   /path/to/xllm \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --max_memory_utilization=0.86 \

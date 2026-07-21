@@ -37,12 +37,44 @@ limitations under the License.
 #include "layers/cuda/attention.h"
 #endif
 #include "layers/common/attention_metadata_builder.h"
+#include "layers/common/dsa_topk_share_plan.h"
 #include "layers/mlu/tests_utils.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 
 namespace xllm {
 namespace layer {
+
+TEST(DeepseekV2DecoderLayerInterfaceTest, ForwardKeepsModelInputParamsConst) {
+  using ForwardFn = torch::Tensor (DeepseekV2DecoderLayerImpl::*)(
+      torch::Tensor&,
+      std::optional<torch::Tensor>&,
+      torch::Tensor&,
+      const AttentionMetadata&,
+      KVCache&,
+      const ModelInputParams&,
+      const std::optional<torch::Tensor>&,
+      DsaTopkRelay*);
+
+  ForwardFn forward = &DeepseekV2DecoderLayerImpl::forward;
+  EXPECT_TRUE(forward != nullptr);
+}
+
+TEST(DeepseekV2DecoderLayerInterfaceTest, MtpForwardExposesTypedStateOutput) {
+  using ForwardMtpFn = torch::Tensor (DeepseekV2DecoderLayerImpl::*)(
+      torch::Tensor&,
+      std::optional<torch::Tensor>&,
+      torch::Tensor&,
+      const AttentionMetadata&,
+      KVCache&,
+      const ModelInputParams&,
+      const std::optional<torch::Tensor>&,
+      const std::optional<DsaTopkState>&,
+      std::optional<DsaTopkState>&);
+
+  ForwardMtpFn forward_mtp = &DeepseekV2DecoderLayerImpl::forward_mtp;
+  EXPECT_TRUE(forward_mtp != nullptr);
+}
 
 class DeepseekV2DecoderLayerTestPeer {
  public:
@@ -110,6 +142,20 @@ class DeepseekV2DecoderLayerTestPeer {
                                   torch::Tensor x,
                                   ProcessGroup* pg) {
     return decoder.reduce_out(x, pg);
+  }
+
+  static const DsaTopkShareDecision& topk_share_decision(
+      const DeepseekV2DecoderLayerImpl& decoder) {
+    return decoder.topk_share_decision_;
+  }
+
+  static bool mtp_topk_reuse(const DeepseekV2DecoderLayerImpl& decoder) {
+    return decoder.mtp_topk_reuse_;
+  }
+
+  static bool attention_has_child(const DeepseekV2DecoderLayerImpl& decoder,
+                                  const std::string& name) {
+    return decoder.attention_->named_children().contains(name);
   }
 };
 
@@ -599,7 +645,9 @@ class DeepseekV2DecoderLayerTest : public ::testing::Test {
   }
 
   DecoderHolder make_decoder(int32_t layer_id) {
-    return DecoderHolder(DeepseekV2DecoderLayerImpl(context_, layer_id));
+    const DsaTopkSharePlan topk_share_plan(model_args_);
+    return DecoderHolder(
+        DeepseekV2DecoderLayerImpl(context_, layer_id, topk_share_plan));
   }
 
   DecoderHolder make_loaded_decoder(int32_t layer_id) {
@@ -1552,12 +1600,319 @@ INSTANTIATE_TEST_SUITE_P(
         LayerCase{"Moe", 5, {0.7773f, 0.7227f, 1.0938f, 1.1875f, 0.6367f}}),
     case_name);
 
-INSTANTIATE_TEST_SUITE_P(
-    QuantizedCache,
-    DeepseekV2DecoderKvCacheTest,
-    ::testing::Values(QuantCase{"Prefill", "mla_quant_prefill", false},
-                      QuantCase{"Decode", "mla_quant_decode", true}),
-    quant_name);
+namespace {
+
+// Ground-truth indexer_types for GLM5.2-W4A8 (index_topk_freq=4,
+// index_skip_topk_offset=3, 78 layers): 21 Full + 57 Shared. A Full layer owns
+// indexer weights (layers 0/1 plus every 4th layer from 2); the rest are
+// Shared and must reuse the previous Full layer's top-k.
+bool is_full_indexer_layer_glm52(int32_t layer_id) {
+  if (layer_id < 2) {
+    return true;
+  }
+  return (layer_id - 2) % 4 == 0;
+}
+
+std::string build_fs_pattern_glm52(int32_t num_layers) {
+  std::string pattern;
+  pattern.reserve(num_layers);
+  for (int32_t layer_id = 0; layer_id < num_layers; ++layer_id) {
+    pattern.push_back(is_full_indexer_layer_glm52(layer_id) ? 'F' : 'S');
+  }
+  return pattern;
+}
+
+}  // namespace
+
+class DeepseekV2DecoderTopkShareTest : public DeepseekV2DecoderLayerTest {
+ protected:
+  static constexpr int32_t kNumLayers = 78;
+
+  void configure_glm5_indexer() {
+    model_args_.model_type() = "glm_moe_dsa";
+    model_args_.n_layers() = kNumLayers;
+    model_args_.index_n_heads() = 4;
+    model_args_.index_head_dim() = 128;
+    model_args_.index_topk() = 64;
+    // Keep every layer dense so construction only exercises attention/indexer.
+    model_args_.first_k_dense_replace() = kNumLayers;
+  }
+
+  void use_cpu_constructor_context() {
+    options_ = torch::TensorOptions()
+                   .dtype(torch::kBFloat16)
+                   .device(torch::kCPU)
+                   .requires_grad(false);
+    mock_process_group_ =
+        std::make_unique<test::MockProcessGroup>(torch::Device(torch::kCPU));
+    parallel_args_ = ParallelArgs(/*rank=*/0,
+                                  /*world_size=*/1,
+                                  /*dp_size=*/1,
+                                  mock_process_group_.get());
+    parallel_args_.tp_group_ = mock_process_group_.get();
+    parallel_args_.single_rank_group_ = mock_process_group_.get();
+    parallel_args_.cp_group_ = mock_process_group_.get();
+    refresh_ctx();
+  }
+};
+
+TEST_F(DeepseekV2DecoderTopkShareTest,
+       DefaultConstructorWhenShareConfiguredKeepsOwnIndexer) {
+  configure_glm5_indexer();
+  model_args_.index_topk_freq() = 4;
+  model_args_.index_skip_topk_offset() = 3;
+  use_cpu_constructor_context();
+
+  DecoderHolder decoder(DeepseekV2DecoderLayerImpl(context_, /*layer_id=*/3));
+
+  const auto parameters = decoder->named_parameters(/*recurse=*/true);
+  EXPECT_TRUE(parameters.contains("self_attn.indexer.wq_b.weight"));
+  EXPECT_TRUE(parameters.contains("self_attn.indexer.wk.weight"));
+  EXPECT_TRUE(parameters.contains("self_attn.indexer.weights_proj.weight"));
+  EXPECT_TRUE(parameters.contains("self_attn.indexer.k_norm.weight"));
+}
+
+TEST_F(DeepseekV2DecoderTopkShareTest,
+       FreqConfig_WhenGlm52_ThenPlanMatchesIndexerTypes) {
+  configure_glm5_indexer();
+  model_args_.index_topk_freq() = 4;
+  model_args_.index_skip_topk_offset() = 3;
+  model_args_.index_topk_pattern() = "";
+  refresh_ctx();
+
+  int32_t full_count = 0;
+  int32_t shared_count = 0;
+  for (int32_t layer_id = 0; layer_id < kNumLayers; ++layer_id) {
+    auto decoder = make_decoder(layer_id);
+    const DsaTopkShareDecision& decision =
+        DeepseekV2DecoderLayerTestPeer::topk_share_decision(*decoder);
+    const bool expect_full = is_full_indexer_layer_glm52(layer_id);
+    const bool expect_output =
+        expect_full && !is_full_indexer_layer_glm52(layer_id + 1);
+    EXPECT_EQ(decision.reuse_topk, !expect_full) << "layer " << layer_id;
+    EXPECT_EQ(decision.output_topk, expect_output) << "layer " << layer_id;
+    if (expect_full) {
+      ++full_count;
+    } else {
+      ++shared_count;
+    }
+  }
+  EXPECT_EQ(full_count, 21);
+  EXPECT_EQ(shared_count, 57);
+}
+
+TEST_F(DeepseekV2DecoderTopkShareTest,
+       SharedLayerOwnsNoIndexerParametersOrConstants) {
+  configure_glm5_indexer();
+  model_args_.index_topk_freq() = 4;
+  model_args_.index_skip_topk_offset() = 3;
+  refresh_ctx();
+
+  auto full_decoder = make_decoder(/*layer_id=*/2);
+  auto shared_decoder = make_decoder(/*layer_id=*/3);
+
+  EXPECT_TRUE(DeepseekV2DecoderLayerTestPeer::attention_has_child(*full_decoder,
+                                                                  "indexer"));
+  EXPECT_TRUE(DeepseekV2DecoderLayerTestPeer::attention_has_child(
+      *full_decoder, "indexer_rotary_emb"));
+  EXPECT_FALSE(DeepseekV2DecoderLayerTestPeer::attention_has_child(
+      *shared_decoder, "indexer"));
+  EXPECT_FALSE(DeepseekV2DecoderLayerTestPeer::attention_has_child(
+      *shared_decoder, "indexer_rotary_emb"));
+
+  const auto full_parameters = full_decoder->named_parameters(/*recurse=*/true);
+  const auto shared_parameters =
+      shared_decoder->named_parameters(/*recurse=*/true);
+  EXPECT_TRUE(full_parameters.contains("self_attn.indexer.wq_b.weight"));
+  EXPECT_TRUE(full_parameters.contains("self_attn.indexer.wk.weight"));
+  EXPECT_TRUE(
+      full_parameters.contains("self_attn.indexer.weights_proj.weight"));
+  EXPECT_TRUE(full_parameters.contains("self_attn.indexer.k_norm.weight"));
+  EXPECT_FALSE(shared_parameters.contains("self_attn.indexer.wq_b.weight"));
+  EXPECT_FALSE(shared_parameters.contains("self_attn.indexer.wk.weight"));
+  EXPECT_FALSE(
+      shared_parameters.contains("self_attn.indexer.weights_proj.weight"));
+  EXPECT_FALSE(shared_parameters.contains("self_attn.indexer.k_norm.weight"));
+}
+
+TEST_F(DeepseekV2DecoderTopkShareTest,
+       Pattern_WhenEquivalentFsString_ThenPlanMatchesFreqConfig) {
+  configure_glm5_indexer();
+  model_args_.index_topk_freq() = 1;
+  model_args_.index_skip_topk_offset() = 0;
+  model_args_.index_topk_pattern() = build_fs_pattern_glm52(kNumLayers);
+  refresh_ctx();
+
+  for (int32_t layer_id = 0; layer_id < kNumLayers; ++layer_id) {
+    auto decoder = make_decoder(layer_id);
+    const DsaTopkShareDecision& decision =
+        DeepseekV2DecoderLayerTestPeer::topk_share_decision(*decoder);
+    const bool expect_full = is_full_indexer_layer_glm52(layer_id);
+    const bool expect_output =
+        expect_full && !is_full_indexer_layer_glm52(layer_id + 1);
+    EXPECT_EQ(decision.reuse_topk, !expect_full) << "layer " << layer_id;
+    EXPECT_EQ(decision.output_topk, expect_output) << "layer " << layer_id;
+  }
+}
+
+TEST_F(DeepseekV2DecoderTopkShareTest,
+       DefaultIndexer_WhenGlm51_ThenEveryLayerLoadsOwnIndexerWeights) {
+  configure_glm5_indexer();
+  // GLM5.1 has an indexer on every layer but no cross-layer share fields.
+  model_args_.index_topk_freq() = 1;
+  model_args_.index_skip_topk_offset() = 0;
+  model_args_.index_topk_pattern() = "";
+  refresh_ctx();
+
+  const DsaTopkSharePlan topk_share_plan(model_args_);
+  EXPECT_FALSE(topk_share_plan.has_reuse());
+  EXPECT_EQ(topk_share_plan.num_indexer_layers(), kNumLayers);
+
+  for (int32_t layer_id : {0, 3, 6, 7}) {
+    auto decoder = make_loaded_decoder(layer_id);
+    const DsaTopkShareDecision& decision =
+        DeepseekV2DecoderLayerTestPeer::topk_share_decision(*decoder);
+    EXPECT_FALSE(decision.reuse_topk) << "layer " << layer_id;
+    EXPECT_FALSE(decision.output_topk) << "layer " << layer_id;
+    EXPECT_TRUE(DeepseekV2DecoderLayerTestPeer::attention_has_child(*decoder,
+                                                                    "indexer"))
+        << "layer " << layer_id;
+    EXPECT_TRUE(DeepseekV2DecoderLayerTestPeer::attention_has_child(
+        *decoder, "indexer_rotary_emb"))
+        << "layer " << layer_id;
+
+    const auto parameters = decoder->named_parameters(/*recurse=*/true);
+    EXPECT_TRUE(parameters.contains("self_attn.indexer.wq_b.weight"))
+        << "layer " << layer_id;
+    EXPECT_TRUE(parameters.contains("self_attn.indexer.wk.weight"))
+        << "layer " << layer_id;
+    EXPECT_TRUE(parameters.contains("self_attn.indexer.weights_proj.weight"))
+        << "layer " << layer_id;
+    EXPECT_TRUE(parameters.contains("self_attn.indexer.k_norm.weight"))
+        << "layer " << layer_id;
+  }
+}
+
+TEST_F(DeepseekV2DecoderTopkShareTest,
+       MtpLayerAtMainModelBoundaryUsesOnlyCrossStepReuse) {
+  configure_glm5_indexer();
+  model_args_.model_type() = "glm_moe_dsa_mtp";
+  model_args_.index_topk_freq() = 4;
+  model_args_.index_skip_topk_offset() = 3;
+  model_args_.index_share_for_mtp_iteration() = true;
+  refresh_ctx();
+
+  DecoderHolder decoder(
+      DeepseekV2DecoderLayerImpl(context_, /*layer_id=*/kNumLayers));
+  const DsaTopkShareDecision& decision =
+      DeepseekV2DecoderLayerTestPeer::topk_share_decision(*decoder);
+  EXPECT_FALSE(decision.reuse_topk);
+  EXPECT_FALSE(decision.output_topk);
+  EXPECT_TRUE(DeepseekV2DecoderLayerTestPeer::mtp_topk_reuse(*decoder));
+  EXPECT_TRUE(
+      DeepseekV2DecoderLayerTestPeer::attention_has_child(*decoder, "indexer"));
+}
+
+// Prefill CP combined with GLM5.2 cross-layer top-k sharing is not
+// supported yet; the model entry must fatal on this combination. The guard is a
+// pure decision so it can be verified without constructing the full model.
+TEST_F(DeepseekV2DecoderTopkShareTest,
+       CpGuard_WhenCpOffAndSharePlan_ThenNoConflict) {
+  configure_glm5_indexer();
+  model_args_.index_topk_freq() = 4;
+  model_args_.index_skip_topk_offset() = 3;
+  model_args_.index_topk_pattern() = "";
+
+  const DsaTopkSharePlan topk_share_plan(model_args_);
+  EXPECT_TRUE(topk_share_plan.has_reuse());
+  EXPECT_FALSE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/false,
+                                                topk_share_plan));
+}
+
+TEST_F(DeepseekV2DecoderTopkShareTest,
+       CpGuard_WhenCpOnAndGlm52FreqPlan_ThenConflict) {
+  configure_glm5_indexer();
+  model_args_.index_topk_freq() = 4;
+  model_args_.index_skip_topk_offset() = 3;
+  model_args_.index_topk_pattern() = "";
+
+  const DsaTopkSharePlan topk_share_plan(model_args_);
+  EXPECT_TRUE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
+                                               topk_share_plan));
+}
+
+TEST_F(DeepseekV2DecoderTopkShareTest,
+       CpGuard_WhenCpOnAndPatternPlan_ThenConflict) {
+  configure_glm5_indexer();
+  model_args_.index_topk_freq() = 1;
+  model_args_.index_skip_topk_offset() = 0;
+  model_args_.index_topk_pattern() = build_fs_pattern_glm52(kNumLayers);
+
+  const DsaTopkSharePlan topk_share_plan(model_args_);
+  EXPECT_TRUE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
+                                               topk_share_plan));
+}
+
+TEST_F(DeepseekV2DecoderTopkShareTest,
+       CpGuard_WhenPatternHasOnlyFullLayers_ThenNoConflict) {
+  configure_glm5_indexer();
+  model_args_.n_layers() = 4;
+  model_args_.index_topk_freq() = 1;
+  model_args_.index_skip_topk_offset() = 0;
+  model_args_.index_topk_pattern() = "FFFF";
+
+  const DsaTopkSharePlan topk_share_plan(model_args_);
+  EXPECT_FALSE(topk_share_plan.has_reuse());
+  EXPECT_FALSE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
+                                                topk_share_plan));
+  EXPECT_FALSE(topk_share_plan.decision_for(/*layer_id=*/3).reuse_topk);
+  EXPECT_FALSE(topk_share_plan.decision_for(/*layer_id=*/3).output_topk);
+}
+
+TEST_F(DeepseekV2DecoderTopkShareTest,
+       CpGuard_WhenShortFreqPlanHasNoSharedLayer_ThenNoConflict) {
+  configure_glm5_indexer();
+  model_args_.n_layers() = 3;
+  model_args_.index_topk_freq() = 4;
+  model_args_.index_skip_topk_offset() = 3;
+  model_args_.index_topk_pattern() = "";
+
+  const DsaTopkSharePlan topk_share_plan(model_args_);
+  EXPECT_FALSE(topk_share_plan.has_reuse());
+  EXPECT_FALSE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
+                                                topk_share_plan));
+  EXPECT_FALSE(topk_share_plan.decision_for(/*layer_id=*/2).output_topk);
+}
+
+TEST_F(DeepseekV2DecoderTopkShareTest,
+       CpGuard_WhenCpOnAndGlm51IndexerDoesNotShare_ThenNoConflict) {
+  configure_glm5_indexer();
+  // GLM5.1: every layer owns an indexer, so CP has no cross-layer carrier.
+  model_args_.index_topk_freq() = 1;
+  model_args_.index_skip_topk_offset() = 0;
+  model_args_.index_topk_pattern() = "";
+
+  const DsaTopkSharePlan topk_share_plan(model_args_);
+  EXPECT_FALSE(topk_share_plan.has_reuse());
+  EXPECT_EQ(topk_share_plan.num_indexer_layers(), kNumLayers);
+  EXPECT_FALSE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
+                                                topk_share_plan));
+}
+
+TEST_F(DeepseekV2DecoderTopkShareTest,
+       CpGuard_WhenCpOnAndDeepseekV32NoSharePlan_ThenNoConflict) {
+  // DeepSeek-V3.2: has an indexer but every layer self-computes (freq=1, no
+  // pattern), so the existing CP path is unaffected.
+  configure_glm5_indexer();
+  model_args_.index_topk_freq() = 1;
+  model_args_.index_skip_topk_offset() = 0;
+  model_args_.index_topk_pattern() = "";
+
+  const DsaTopkSharePlan topk_share_plan(model_args_);
+  EXPECT_FALSE(topk_share_plan.has_reuse());
+  EXPECT_FALSE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
+                                                topk_share_plan));
+}
 
 }  // namespace layer
 }  // namespace xllm

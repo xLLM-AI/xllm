@@ -91,7 +91,6 @@ export LD_LIBRARY_PATH=/usr/local/libtorch_npu/lib:$LD_LIBRARY_PATH
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
 
-export ASCEND_RT_VISIBLE_DEVICES=14,15
 export ASDOPS_LOG_TO_STDOUT=1
 export ASDOPS_LOG_LEVEL=0
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -120,19 +119,17 @@ DRAFT_MODEL_PATH="/path/to/Qwen3.5-27B-mtp"
 
 MASTER_NODE_ADDR="<master-host>:32764"
 START_PORT=18076
-START_DEVICE=0
 NNODES=2
 
+export ASCEND_RT_VISIBLE_DEVICES=14,15
 export HCCL_IF_BASE_PORT=53433
 
 for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
   ./xllm/build/xllm/core/server/xllm \
     --model $MODEL_PATH \
-    --devices="npu:$DEVICE" \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
@@ -151,7 +148,6 @@ do
     --max_concurrent_requests=8 \
     --backend llm \
     --draft_model $DRAFT_MODEL_PATH \
-    --draft_devices="npu:$DEVICE" \
     --num_speculative_tokens 3 \
     >> $LOG_FILE 2>&1 &
 done

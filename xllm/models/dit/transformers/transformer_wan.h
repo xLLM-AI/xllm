@@ -50,13 +50,12 @@ using xllm::dit::TpOptions;
 #include "framework/model_context.h"
 #include "models/dit/transformers/transformer_flux.h"
 #if defined(USE_NPU)
-#include "models/dit/utils/dit_block_weight_manager.h"
-#endif
-#include "models/model_registry.h"
-#if defined(USE_NPU)
 #include "core/kernels/npu/xllm_ops/xllm_ops_api.h"
+#include "models/dit/utils/dit_block_weight_manager.h"
 #include "torch_npu/csrc/aten/CustomFunctions.h"
 #endif
+#include "core/framework/quant_args.h"
+#include "models/model_registry.h"
 
 namespace xllm {
 
@@ -208,11 +207,13 @@ TORCH_MODULE(FP32LayerNorm);
 
 class WanTimestepEmbeddingImpl : public torch::nn::Module {
  public:
-  WanTimestepEmbeddingImpl(int64_t in_channels,
+  WanTimestepEmbeddingImpl(const ModelContext& context,
+                           int64_t in_channels,
                            int64_t time_embed_dim,
                            int64_t out_dim = -1,
                            bool sample_proj_bias = true)
       : options_(torch::dtype(torch::kFloat32)) {
+    quant_args_ = context.get_quant_args();
     linear_1_ = register_module(
         "linear_1",
         layer::AddMatmul(
@@ -241,16 +242,20 @@ class WanTimestepEmbeddingImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    linear_1_->load_state_dict(state_dict.get_dict_with_prefix("linear_1."));
-    linear_2_->load_state_dict(state_dict.get_dict_with_prefix("linear_2."));
+    linear_1_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("0.", "linear_1.")));
+    linear_2_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("2.", "linear_2.")));
   }
-
   void verify_loaded_weights(const std::string& prefix) const {
-    linear_1_->verify_loaded_weights(prefix + "linear_1.");
-    linear_2_->verify_loaded_weights(prefix + "linear_2.");
+    linear_1_->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("0.", "linear_1."));
+    linear_2_->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("2.", "linear_2."));
   }
 
  private:
+  QuantArgs quant_args_;
   torch::TensorOptions options_;
   layer::AddMatmul linear_1_{nullptr};
   torch::nn::SiLU act_{nullptr};
@@ -330,6 +335,7 @@ class WanGELUImpl : public torch::nn::Module {
       : approximate_(approximate),
         options_(context.get_tensor_options()),
         parallel_args_(parallel_args) {
+    quant_args_ = context.get_quant_args();
     std::optional<TpOptions> tp = std::nullopt;
     if (::xllm::ParallelConfig::get_instance().tp_size() > 1) {
       tp = TpOptions::col(parallel_args_.dit_tp_group_,
@@ -340,7 +346,8 @@ class WanGELUImpl : public torch::nn::Module {
                                   with_bias,
                                   options_,
                                   /*sp=*/std::nullopt,
-                                  tp);
+                                  tp,
+                                  quant_args_);
     proj_ = register_module("proj", proj);
   }
 
@@ -355,15 +362,23 @@ class WanGELUImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    proj_->as<DiTParallelLinear>()->load_state_dict(
-        state_dict.get_dict_with_prefix("proj."));
+    if (quant_args_.is_quantized()) {
+      // Quantized checkpoint stores weights directly under the module's
+      // own prefix — no additional sub-prefix wrapping.
+      proj_->as<DiTParallelLinear>()->load_state_dict(state_dict);
+    } else {
+      proj_->as<DiTParallelLinear>()->load_state_dict(
+          state_dict.get_dict_with_prefix("proj."));
+    }
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    proj_->as<DiTParallelLinear>()->verify_loaded_weights(prefix + "proj.");
+    proj_->as<DiTParallelLinear>()->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("", "proj."));
   }
 
  private:
+  QuantArgs quant_args_;
   bool approximate_;
   torch::TensorOptions options_;
   ParallelArgs parallel_args_;
@@ -387,6 +402,7 @@ class WanFeedForwardImpl : public torch::nn::Module {
     int64_t actual_inner_dim =
         (inner_dim > 0) ? inner_dim : static_cast<int64_t>(dim * mult);
     int64_t actual_dim_out = (dim_out > 0) ? dim_out : dim;
+    quant_args_ = context.get_quant_args();
 
     if (activation_fn == "gelu") {
       act_fn_ = register_module("act_fn",
@@ -423,7 +439,8 @@ class WanFeedForwardImpl : public torch::nn::Module {
                                       with_bias,
                                       options_,
                                       /*sp=*/std::nullopt,
-                                      tp_out);
+                                      tp_out,
+                                      quant_args_);
     proj_out_ = register_module("proj_out", proj_out);
 
     if (final_dropout) {
@@ -443,16 +460,21 @@ class WanFeedForwardImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    act_fn_->load_state_dict(state_dict.get_dict_with_prefix("net.0."));
-    proj_out_->load_state_dict(state_dict.get_dict_with_prefix("net.2."));
+    act_fn_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("0.", "net.0.")));
+    proj_out_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("2.", "net.2.")));
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    act_fn_->verify_loaded_weights(prefix + "net.0.");
-    proj_out_->verify_loaded_weights(prefix + "net.2.");
+    act_fn_->verify_loaded_weights(prefix +
+                                   quant_args_.resolve_prefix("0.", "net.0."));
+    proj_out_->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("2.", "net.2."));
   }
 
  private:
+  QuantArgs quant_args_;
   torch::TensorOptions options_;
   ParallelArgs parallel_args_;
   WanGELU act_fn_{nullptr};
@@ -464,11 +486,13 @@ TORCH_MODULE(WanFeedForward);
 
 class WanPixArtAlphaTextProjectionImpl : public torch::nn::Module {
  public:
-  WanPixArtAlphaTextProjectionImpl(int64_t in_features,
+  WanPixArtAlphaTextProjectionImpl(const ModelContext& context,
+                                   int64_t in_features,
                                    int64_t hidden_size,
                                    int64_t out_features = -1,
                                    const std::string& act_fn = "gelu_tanh")
       : options_(torch::dtype(torch::kFloat32)) {
+    quant_args_ = context.get_quant_args();
     int64_t actual_out_features =
         (out_features > 0) ? out_features : hidden_size;
 
@@ -508,16 +532,21 @@ class WanPixArtAlphaTextProjectionImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    linear_1_->load_state_dict(state_dict.get_dict_with_prefix("linear_1."));
-    linear_2_->load_state_dict(state_dict.get_dict_with_prefix("linear_2."));
+    linear_1_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("0.", "linear_1.")));
+    linear_2_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("2.", "linear_2.")));
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    linear_1_->verify_loaded_weights(prefix + "linear_1.");
-    linear_2_->verify_loaded_weights(prefix + "linear_2.");
+    linear_1_->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("0.", "linear_1."));
+    linear_2_->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("2.", "linear_2."));
   }
 
  private:
+  QuantArgs quant_args_;
   torch::TensorOptions options_;
   layer::AddMatmul linear_1_{nullptr};
   torch::nn::AnyModule act_1_;
@@ -531,11 +560,12 @@ class WanAttentionImpl : public torch::nn::Module {
       const ModelContext& context,
       const ParallelArgs& parallel_args,
       int64_t cross_attention_dim_head = -1,
-      const xllm::dit::RainFusionConfig& rainfusion_config = {})
+      const xllm::dit::SparseAttnConfig& sparse_attn_config = {})
       : options_(context.get_tensor_options()),
         parallel_args_(parallel_args),
-        rainfusion_config_(rainfusion_config) {
+        sparse_attn_config_(sparse_attn_config) {
     auto model_args = context.get_model_args();
+    quant_args_ = context.get_quant_args();
     dim_ = model_args.head_dim() * model_args.n_heads();
     heads_ = model_args.n_heads();
     dim_head_ = model_args.head_dim();
@@ -579,14 +609,16 @@ class WanAttentionImpl : public torch::nn::Module {
                                               true,
                                               options_,
                                               /*sp=*/std::nullopt,
-                                              tp_qk));
+                                              tp_qk,
+                                              quant_args_));
     to_k_ = register_module("to_k",
                             DiTParallelLinear(dim_,
                                               kv_inner_dim_,
                                               true,
                                               options_,
                                               /*sp=*/std::nullopt,
-                                              tp_qk));
+                                              tp_qk,
+                                              quant_args_));
 
     // V: TP+SP for self-attention, TP only for cross-attention
     bool is_self_attn = cross_attention_dim_head <= 0;
@@ -597,13 +629,18 @@ class WanAttentionImpl : public torch::nn::Module {
                           true,
                           options_,
                           is_self_attn ? sp_before : std::optional<SpOptions>{},
-                          tp_v));
+                          tp_v,
+                          quant_args_));
 
     // to_out: TP+SP row parallel
-    to_out_ = register_module(
-        "to_out",
-        DiTParallelLinear(
-            heads_ * dim_head_, dim_, true, options_, sp_after, tp_out));
+    to_out_ = register_module("to_out",
+                              DiTParallelLinear(heads_ * dim_head_,
+                                                dim_,
+                                                true,
+                                                options_,
+                                                sp_after,
+                                                tp_out,
+                                                quant_args_));
     norm_q_ = register_module(
         "norm_q", layer::RMSNorm(dim_head_ * heads_, eps_, options_));
     norm_k_ = register_module(
@@ -632,17 +669,19 @@ class WanAttentionImpl : public torch::nn::Module {
     }
   }
 
-  torch::Tensor at_npu_attention(const torch::Tensor& q,
-                                 const torch::Tensor& k,
-                                 const torch::Tensor& v,
-                                 xllm::dit::RainFusionState& rf_state) {
+  torch::Tensor at_npu_attention(
+      const torch::Tensor& q,
+      const torch::Tensor& k,
+      const torch::Tensor& v,
+      xllm::dit::SparseAttnState& sparse_attn_state) {
     const auto q_t = q.transpose(1, 2);
     const auto k_t = k.transpose(1, 2);
     const auto v_t = v.transpose(1, 2);
 
 #if defined(USE_NPU)
-    if (rainfusion_config_.enabled &&
-        rf_state.current_step >= rainfusion_config_.sparse_start_step &&
+    if (sparse_attn_config_.enabled &&
+        sparse_attn_state.current_step >=
+            sparse_attn_config_.sparse_start_step &&
         q_t.size(2) == k_t.size(2)) {
       // Strip SP padding: latent_shape uses the unpadded seq_len,
       // but SP may have padded the sequence to be divisible by sp_size.
@@ -650,21 +689,22 @@ class WanAttentionImpl : public torch::nn::Module {
       auto k_use = k_t;
       auto v_use = v_t;
       int64_t pad_len = 0;
-      if (rf_state.seq_len > 0 && q_t.size(2) > rf_state.seq_len) {
-        pad_len = q_t.size(2) - rf_state.seq_len;
-        q_use = q_t.slice(2, 0, rf_state.seq_len);
-        k_use = k_t.slice(2, 0, rf_state.seq_len);
-        v_use = v_t.slice(2, 0, rf_state.seq_len);
+      if (sparse_attn_state.seq_len > 0 &&
+          q_t.size(2) > sparse_attn_state.seq_len) {
+        pad_len = q_t.size(2) - sparse_attn_state.seq_len;
+        q_use = q_t.slice(2, 0, sparse_attn_state.seq_len);
+        k_use = k_t.slice(2, 0, sparse_attn_state.seq_len);
+        v_use = v_t.slice(2, 0, sparse_attn_state.seq_len);
       }
       auto [out_bnsd, unused] = [&]() {
-        if (rainfusion_config_.version == "sparse_attention") {
+        if (sparse_attn_config_.version == "sparse_attention") {
           return xllm::dit::sparse_attention::attention(
-              q_use, k_use, v_use, rainfusion_config_, rf_state);
+              q_use, k_use, v_use, sparse_attn_config_, sparse_attn_state);
         }
         return xllm::dit::rain_fusion::attention(
-            q_use, k_use, v_use, rainfusion_config_, rf_state);
+            q_use, k_use, v_use, sparse_attn_config_, sparse_attn_state);
       }();
-      // RainFusionState cache (cached_select_idx/_num_idx) managed internally
+      // SparseAttnState cache (cached_select_idx/_num_idx) managed internally
       if (pad_len > 0) {
         out_bnsd = torch::nn::functional::pad(
             out_bnsd,
@@ -743,7 +783,7 @@ class WanAttentionImpl : public torch::nn::Module {
       const torch::Tensor& hidden_states_in,
       const torch::Tensor& encoder_hidden_states,
       std::optional<std::pair<torch::Tensor, torch::Tensor>> rotary_emb,
-      xllm::dit::RainFusionState& rf_state) {
+      xllm::dit::SparseAttnState& sparse_attn_state) {
     torch::Tensor hidden_states = hidden_states_in;
     bool is_self_attention =
         !encoder_hidden_states.defined() ||
@@ -850,9 +890,10 @@ class WanAttentionImpl : public torch::nn::Module {
 
       key_img = key_img.view({batch_size, -1, n_heads, dim_head_});
       value_img = value_img.view({batch_size, -1, n_heads, dim_head_});
-      hidden_states_img = at_npu_attention(query, key_img, value_img, rf_state);
+      hidden_states_img =
+          at_npu_attention(query, key_img, value_img, sparse_attn_state);
     }
-    hidden_states = at_npu_attention(query, key, value, rf_state);
+    hidden_states = at_npu_attention(query, key, value, sparse_attn_state);
     if (hidden_states_img.defined()) {
       hidden_states = hidden_states + hidden_states_img;
     }
@@ -862,11 +903,14 @@ class WanAttentionImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    to_q_->load_state_dict(state_dict.get_dict_with_prefix("to_q."));
-    to_k_->load_state_dict(state_dict.get_dict_with_prefix("to_k."));
-    to_v_->load_state_dict(state_dict.get_dict_with_prefix("to_v."));
-
-    to_out_->load_state_dict(state_dict.get_dict_with_prefix("to_out.0."));
+    to_q_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("q.", "to_q.")));
+    to_k_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("k.", "to_k.")));
+    to_v_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("v.", "to_v.")));
+    to_out_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("o.", "to_out.0.")));
 
     norm_q_->load_state_dict(state_dict.get_dict_with_prefix("norm_q."));
     norm_k_->load_state_dict(state_dict.get_dict_with_prefix("norm_k."));
@@ -882,12 +926,14 @@ class WanAttentionImpl : public torch::nn::Module {
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    to_q_->verify_loaded_weights(prefix + "to_q.");
-    to_k_->verify_loaded_weights(prefix + "to_k.");
-    to_v_->verify_loaded_weights(prefix + "to_v.");
-
-    to_out_->verify_loaded_weights(prefix + "to_out.0.");
-
+    to_q_->verify_loaded_weights(prefix +
+                                 quant_args_.resolve_prefix("q.", "to_q."));
+    to_k_->verify_loaded_weights(prefix +
+                                 quant_args_.resolve_prefix("k.", "to_k."));
+    to_v_->verify_loaded_weights(prefix +
+                                 quant_args_.resolve_prefix("v.", "to_v."));
+    to_out_->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("o.", "to_out.0."));
     if (add_k_proj_) {
       add_k_proj_->verify_loaded_weights(prefix + "add_k_proj.");
       add_v_proj_->verify_loaded_weights(prefix + "add_v_proj.");
@@ -895,6 +941,7 @@ class WanAttentionImpl : public torch::nn::Module {
   }
 
  private:
+  QuantArgs quant_args_;
   int64_t dim_;
   int64_t heads_;
   int64_t dim_head_;
@@ -919,7 +966,7 @@ class WanAttentionImpl : public torch::nn::Module {
   torch::TensorOptions options_;
 
   // RainFusionV3 configuration (static, same for all requests)
-  xllm::dit::RainFusionConfig rainfusion_config_;
+  xllm::dit::SparseAttnConfig sparse_attn_config_;
 };
 TORCH_MODULE(WanAttention);
 
@@ -1017,17 +1064,20 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
     image_embed_dim_ = model_args.image_embed_dim();
     pos_embed_seq_len_ = model_args.pos_embed_seq_len();
 
+    quant_args_ = context.get_quant_args();
     timesteps_proj_ = register_module(
         "timesteps_proj", WanTimesteps(time_freq_dim_, true, 0.0f, 1));
     time_embedder_ = register_module(
-        "time_embedder", WanTimestepEmbedding(time_freq_dim_, dim_, -1, true));
+        "time_embedder",
+        WanTimestepEmbedding(context, time_freq_dim_, dim_, -1, true));
     act_fn_ = register_module("act_fn", torch::nn::SiLU());
     time_proj_ = register_module(
         "time_proj", layer::AddMatmul(dim_, time_proj_dim_, true, options_));
 
-    text_embedder_ = register_module(
-        "text_embedder",
-        WanPixArtAlphaTextProjection(text_embed_dim_, dim_, dim_, "gelu_tanh"));
+    text_embedder_ =
+        register_module("text_embedder",
+                        WanPixArtAlphaTextProjection(
+                            context, text_embed_dim_, dim_, dim_, "gelu_tanh"));
 
     if (image_embed_dim_ > 0) {
       image_embedder_ =
@@ -1069,11 +1119,12 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    time_embedder_->load_state_dict(
-        state_dict.get_dict_with_prefix("time_embedder."));
-    time_proj_->load_state_dict(state_dict.get_dict_with_prefix("time_proj."));
-    text_embedder_->load_state_dict(
-        state_dict.get_dict_with_prefix("text_embedder."));
+    time_embedder_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("time_embedding.", "time_embedder.")));
+    time_proj_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("time_projection.1.", "time_proj.")));
+    text_embedder_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("text_embedding.", "text_embedder.")));
     if (image_embedder_) {
       image_embedder_->load_state_dict(
           state_dict.get_dict_with_prefix("image_embedder."));
@@ -1081,9 +1132,15 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    time_embedder_->verify_loaded_weights(prefix + "time_embedder.");
-    time_proj_->verify_loaded_weights(prefix + "time_proj.");
-    text_embedder_->verify_loaded_weights(prefix + "text_embedder.");
+    time_embedder_->verify_loaded_weights(
+        prefix +
+        quant_args_.resolve_prefix("time_embedding.", "time_embedder."));
+    time_proj_->verify_loaded_weights(
+        prefix +
+        quant_args_.resolve_prefix("time_projection.1.", "time_proj."));
+    text_embedder_->verify_loaded_weights(
+        prefix +
+        quant_args_.resolve_prefix("text_embedding.", "text_embedder."));
     if (image_embedder_) {
       image_embedder_->verify_loaded_weights(prefix + "image_embedder.");
     }
@@ -1097,6 +1154,7 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
   int64_t image_embed_dim_;
   int64_t pos_embed_seq_len_;
 
+  QuantArgs quant_args_;
   WanTimesteps timesteps_proj_{nullptr};
   WanTimestepEmbedding time_embedder_{nullptr};
   torch::nn::SiLU act_fn_{nullptr};
@@ -1257,11 +1315,12 @@ class WanTransformerBlockImpl : public torch::nn::Module {
       const ModelContext& context,
       const ParallelArgs& parallel_args,
       int64_t block_idx = 0,
-      const xllm::dit::RainFusionConfig& rainfusion_config = {})
+      const xllm::dit::SparseAttnConfig& sparse_attn_config = {})
       : options_(context.get_tensor_options()),
         parallel_args_(parallel_args),
         block_idx_(block_idx) {
     auto model_args = context.get_model_args();
+    quant_args_ = context.get_quant_args();
     dim_ = model_args.head_dim() * model_args.n_heads();
     ffn_dim_ = model_args.ffn_dim();
     num_heads_ = model_args.n_heads();
@@ -1275,12 +1334,11 @@ class WanTransformerBlockImpl : public torch::nn::Module {
         layer::AdaLayerNorm(
             dim_, eps_, /*elementwise_affine=*/false, options_));
     attn1_ = register_module(
-        "attn1", WanAttention(context, parallel_args, -1, rainfusion_config));
-
+        "attn1", WanAttention(context, parallel_args, -1, sparse_attn_config));
     attn2_ = register_module(
         "attn2",
         WanAttention(
-            context, parallel_args, dim_ / num_heads_, rainfusion_config));
+            context, parallel_args, dim_ / num_heads_, sparse_attn_config));
     if (cross_attn_norm_) {
       norm2_ =
           register_module("norm2", FP32LayerNorm(context, dim_, eps_, true));
@@ -1311,7 +1369,7 @@ class WanTransformerBlockImpl : public torch::nn::Module {
       const torch::Tensor& encoder_hidden_states,
       const torch::Tensor& timestep_proj,
       std::optional<std::pair<torch::Tensor, torch::Tensor>> rotary_emb,
-      xllm::dit::RainFusionState& rf_state) {
+      xllm::dit::SparseAttnState& sparse_attn_state) {
     torch::Tensor hidden_states = hidden_states_in;
     torch::Tensor shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa,
         c_gate_msa;
@@ -1346,8 +1404,7 @@ class WanTransformerBlockImpl : public torch::nn::Module {
     torch::Tensor norm_hidden_states =
         ada_norm1_->forward(hidden_states, scale_msa_2d, shift_msa_2d);
     torch::Tensor attn_output = attn1_->forward(
-        norm_hidden_states, norm_hidden_states, rotary_emb, rf_state);
-
+        norm_hidden_states, norm_hidden_states, rotary_emb, sparse_attn_state);
     hidden_states = hidden_states + attn_output * gate_msa;
 
     if (cross_attn_norm_) {
@@ -1356,8 +1413,10 @@ class WanTransformerBlockImpl : public torch::nn::Module {
       norm_hidden_states = hidden_states;
     }
 
-    attn_output = attn2_->forward(
-        norm_hidden_states, encoder_hidden_states, std::nullopt, rf_state);
+    attn_output = attn2_->forward(norm_hidden_states,
+                                  encoder_hidden_states,
+                                  std::nullopt,
+                                  sparse_attn_state);
     hidden_states = hidden_states + attn_output;
     auto c_scale_msa_2d =
         c_scale_msa.dim() == 3 ? c_scale_msa.select(1, 0) : c_scale_msa;
@@ -1372,27 +1431,38 @@ class WanTransformerBlockImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    attn1_->load_state_dict(state_dict.get_dict_with_prefix("attn1."));
-    attn2_->load_state_dict(state_dict.get_dict_with_prefix("attn2."));
-    if (cross_attn_norm_) {
-      norm2_->load_state_dict(state_dict.get_dict_with_prefix("norm2."));
+    attn1_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("self_attn.", "attn1.")));
+    attn2_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("cross_attn.", "attn2.")));
+    if (cross_attn_norm_ && norm2_) {
+      norm2_->load_state_dict(state_dict.get_dict_with_prefix(
+          quant_args_.resolve_prefix("norm3.", "norm2.")));
     }
-    ff_->load_state_dict(state_dict.get_dict_with_prefix("ffn."));
-    weight::load_weight(state_dict,
-                        "scale_shift_table",
-                        scale_shift_table_,
-                        scale_shift_table_loaded_);
+    ff_->load_state_dict(state_dict.get_dict_with_prefix(
+        quant_args_.resolve_prefix("ffn.", "ffn.")));
+    weight::load_weight(
+        state_dict,
+        quant_args_.resolve_prefix("modulation", "scale_shift_table"),
+        scale_shift_table_,
+        scale_shift_table_loaded_);
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    attn1_->verify_loaded_weights(prefix + "attn1.");
+    attn1_->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("self_attn.", "attn1."));
     if (cross_attn_norm_) {
-      norm2_->verify_loaded_weights(prefix + "norm2.");
+      norm2_->verify_loaded_weights(
+          prefix + quant_args_.resolve_prefix("norm3.", "norm2."));
     }
-    attn2_->verify_loaded_weights(prefix + "attn2.");
-    ff_->verify_loaded_weights(prefix + "ffn.");
-    CHECK(scale_shift_table_loaded_) << "scale_shift_table is not loaded for "
-                                     << prefix + "scale_shift_table";
+    attn2_->verify_loaded_weights(
+        prefix + quant_args_.resolve_prefix("cross_attn.", "attn2."));
+    ff_->verify_loaded_weights(prefix +
+                               quant_args_.resolve_prefix("ffn.", "ffn."));
+    auto scale_key =
+        quant_args_.resolve_prefix("modulation", "scale_shift_table");
+    CHECK(scale_shift_table_loaded_)
+        << scale_key << " is not loaded for " << prefix + scale_key;
   }
 
 #if defined(USE_NPU)
@@ -1425,6 +1495,7 @@ class WanTransformerBlockImpl : public torch::nn::Module {
   torch::Tensor scale_shift_table_;
   bool scale_shift_table_loaded_{false};
 
+  QuantArgs quant_args_;
   torch::TensorOptions options_;
   ParallelArgs parallel_args_;
 #if defined(USE_NPU)
@@ -1437,7 +1508,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
  public:
   explicit WanTransformer3DModelImpl(
       const ModelContext& context,
-      const xllm::dit::RainFusionConfig& rainfusion_config = {})
+      const xllm::dit::SparseAttnConfig& sparse_attn_config = {})
       : options_(context.get_tensor_options()) {
     auto model_args = context.get_model_args();
     auto parallel_args = context.get_parallel_args();
@@ -1462,6 +1533,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     if (out_channels_ <= 0) {
       out_channels_ = in_channels_;
     }
+    quant_args_ = context.get_quant_args();
     rope_ = register_module("rope", WanRotaryPosEmbed(context));
     patch_embedding_ = register_module(
         "patch_embedding",
@@ -1480,7 +1552,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     transformer_layers_.reserve(num_layers_);
     for (int64_t i = 0; i < num_layers_; ++i) {
       auto block = WanTransformerBlock(
-          context, parallel_args, static_cast<int64_t>(i), rainfusion_config);
+          context, parallel_args, static_cast<int64_t>(i), sparse_attn_config);
       blocks_->push_back(block);
       transformer_layers_.push_back(block);
     }
@@ -1510,7 +1582,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                         const torch::Tensor& timestep,
                         const torch::Tensor& encoder_hidden_states,
                         const torch::Tensor& encoder_hidden_states_image,
-                        xllm::dit::RainFusionState& rf_state,
+                        xllm::dit::SparseAttnState& sparse_attn_state,
                         std::function<void(int32_t)> before_layer_cb = nullptr,
                         std::function<void(int32_t)> after_layer_cb = nullptr) {
     int64_t batch_size = hidden_states_in.size(0);
@@ -1542,8 +1614,8 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     int64_t pad_seq_len = sp_pad_sequence(
         hidden_states, freqs_cos, freqs_sin, rotary_emb, sp_group_);
 
-    rf_state.latent_shape = latent_shape;
-    rf_state.seq_len = seq_len;
+    sparse_attn_state.latent_shape = latent_shape;
+    sparse_attn_state.seq_len = seq_len;
 
     torch::Tensor timestep_input = timestep;
     int64_t ts_seq_len_val = hidden_states.size(1);
@@ -1594,7 +1666,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                                           encoder_hidden_states_embedded,
                                           timestep_proj,
                                           rotary_emb,
-                                          rf_state);
+                                          sparse_attn_state);
       if (after_layer_cb) {
         after_layer_cb(static_cast<int32_t>(i));
       }
@@ -1660,17 +1732,25 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                         patch_embedding_->bias,
                         pad_embedding_bias_loaded_);
 
-    condition_embedder_->load_state_dict(
-        state_dict.get_dict_with_prefix("condition_embedder."));
+    if (quant_args_.is_quantized()) {
+      // Quantized checkpoint stores condition_embedder weights directly
+      // under the top-level prefix — no "condition_embedder." wrapper.
+      condition_embedder_->load_state_dict(state_dict);
+      proj_out_->load_state_dict(state_dict.get_dict_with_prefix("head.head."));
+    } else {
+      condition_embedder_->load_state_dict(
+          state_dict.get_dict_with_prefix("condition_embedder."));
+      proj_out_->load_state_dict(state_dict.get_dict_with_prefix("proj_out."));
+    }
     for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
       transformer_layers_[i]->load_state_dict(
           state_dict.get_dict_with_prefix("blocks." + std::to_string(i) + "."));
     }
-    proj_out_->load_state_dict(state_dict.get_dict_with_prefix("proj_out."));
-    weight::load_weight(state_dict,
-                        "scale_shift_table",
-                        scale_shift_table_,
-                        scale_shift_table_loaded_);
+    weight::load_weight(
+        state_dict,
+        quant_args_.resolve_prefix("head.modulation", "scale_shift_table"),
+        scale_shift_table_,
+        scale_shift_table_loaded_);
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
@@ -1679,14 +1759,22 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     CHECK(pad_embedding_bias_loaded_) << "patch_embedding is not loaded for"
                                       << prefix << "pad_embedding.bias";
 
-    condition_embedder_->verify_loaded_weights(prefix + "condition_embedder.");
+    if (quant_args_.is_quantized()) {
+      condition_embedder_->verify_loaded_weights(prefix);
+      proj_out_->verify_loaded_weights(prefix + "head.head.");
+    } else {
+      condition_embedder_->verify_loaded_weights(prefix +
+                                                 "condition_embedder.");
+      proj_out_->verify_loaded_weights(prefix + "proj_out.");
+    }
     for (size_t i = 0; i < transformer_layers_.size(); ++i) {
       transformer_layers_[i]->verify_loaded_weights(prefix + "blocks." +
                                                     std::to_string(i) + ".");
     }
-    proj_out_->verify_loaded_weights(prefix + "proj_out.");
-    CHECK(scale_shift_table_loaded_) << "scale_shift_table is not loaded for "
-                                     << prefix + "scale_shift_table";
+    auto scale_key =
+        quant_args_.resolve_prefix("head.modulation", "scale_shift_table");
+    CHECK(scale_shift_table_loaded_)
+        << scale_key << " is not loaded for " << prefix + scale_key;
   }
 
   int64_t in_channels() const { return in_channels_; }
@@ -1695,15 +1783,15 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
 
   void load_model(std::unique_ptr<DiTFolderLoader> loader,
                   bool rolling = false) {
+    auto freqs_cos_fp32 = rope_->get_freqs_cos().clone();
+    auto freqs_sin_fp32 = rope_->get_freqs_sin().clone();
+    this->to(rolling ? torch::kCPU : options_.device(), torch::kBFloat16);
     for (const auto& state_dict : loader->get_state_dicts()) {
       load_state_dict(*state_dict);
     }
     verify_loaded_weights("");
 
-    auto freqs_cos_fp32 = rope_->get_freqs_cos().clone();
-    auto freqs_sin_fp32 = rope_->get_freqs_sin().clone();
-
-    this->to(rolling ? torch::kCPU : options_.device(), torch::kBFloat16);
+    // Restore fp32 RoPE frequencies that were cloned before dtype conversion.
     rope_->set_freqs_cos(freqs_cos_fp32);
     rope_->set_freqs_sin(freqs_sin_fp32);
 
@@ -1757,6 +1845,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
   int64_t inner_dim_;
   bool cross_attn_norm_;
   std::string qk_norm_;
+  QuantArgs quant_args_;
   ProcessGroup* sp_group_ = nullptr;
   torch::nn::Conv3d patch_embedding_{nullptr};
   WanTimeTextImageEmbedding condition_embedder_{nullptr};

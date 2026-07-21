@@ -44,16 +44,14 @@ class XLLM_CAPI_EXPORT LLM {
    * @brief Initialize the model: Load model files and configure runtime
    * environment
    * @param model_path Path to model files
-   * @param devices Device configuration (format: "npu:1" for specific NPU,
-   * "auto" for auto-selection)
    * @param init_options Advanced initialization options, Provided default
    * configuration
    * @return bool true if initialization succeeds; false if fails
    * @note Must be called before Completions/ChatCompletions, and only needs to
-   * be called once
+   * be called once. The devices to run on are auto-detected from the visible
+   * device mask (e.g. ASCEND_RT_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES).
    */
   bool Initialize(const std::string& model_path,
-                  const std::string& devices,
                   const XLLM_InitLLMOptions& init_options);
 
   /**

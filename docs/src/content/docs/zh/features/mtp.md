@@ -92,23 +92,19 @@ MODEL_PATH="/models/DeepSeek-V3"
 DRAFT_MODEL_PATH="/models/DeepSeek-V3-mtp"
 MASTER_NODE_ADDR="127.0.0.1:42123"
 START_PORT=13222
-START_DEVICE=0
 LOG_DIR="log"
 NNODES=16
 
 for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
   nohup ./xllm \
     --model $MODEL_PATH \
-    --devices="npu:$DEVICE" \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --draft_model $DRAFT_MODEL_PATH \
-    --draft_devices="npu:$DEVICE" \
     --num_speculative_tokens 1 \
     --max_memory_utilization=0.90 \
     --max_tokens_per_batch=10000 \

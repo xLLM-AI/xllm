@@ -1189,8 +1189,9 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
 
     LOG(INFO) << "QwenImageEditPlusPipeline loading transformer weights";
     transformer_->load_model(std::move(transformer_loader));
+
     LOG(INFO) << "QwenImageEditPlusPipeline moving transformer to device";
-    transformer_->to(options_.device(), dtype_);
+    transformer_->to(options_.device());
     LOG(INFO) << "QwenImageEditPlusPipeline transformer loaded";
 
 #if defined(USE_DCU)

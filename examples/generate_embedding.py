@@ -1,5 +1,5 @@
-# python examples/generate_embedding.py --model='/path/models/Qwen3-8B' --devices='npu:0' --runner pooling
-# python generate_embedding.py --model='/path/models/Qwen3-8B' --devices='npu:0,npu:1'
+# ASCEND_RT_VISIBLE_DEVICES=0 python examples/generate_embedding.py --model='/path/models/Qwen3-8B' --runner pooling
+# ASCEND_RT_VISIBLE_DEVICES=0,1 python generate_embedding.py --model='/path/models/Qwen3-8B'
 
 from xllm import ArgumentParser, LLM, PoolingParams
 

@@ -66,9 +66,8 @@ XLLM_CAPI_EXPORT void xllm_rec_init_options_default(
 XLLM_CAPI_EXPORT bool xllm_rec_initialize(
     XLLM_REC_Handler* handler,
     const char* model_path,
-    const char* devices,
     const XLLM_InitOptions* init_options) {
-  if (!handler || !model_path || !devices) return false;
+  if (!handler || !model_path) return false;
 
   try {
     xllm::CpuAffinity::get_instance().set_cpu_affinity(
@@ -91,9 +90,7 @@ XLLM_CAPI_EXPORT bool xllm_rec_initialize(
     xllm::Options options;
     options.model_path(model_path)
         .task_type(xllm_init_options.task)
-        .devices(devices)
         .draft_model_path(xllm_init_options.draft_model)
-        .draft_devices(xllm_init_options.draft_devices)
         .backend("rec")
         .block_size(xllm_init_options.block_size)
         .max_cache_size(xllm_init_options.max_cache_size)
