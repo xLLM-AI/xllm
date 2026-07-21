@@ -189,7 +189,7 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
                                                      response,
                                                      use_arena) {}
 
-  ~AnthropicCall() {}
+  ~AnthropicCall() override = default;
 
   // Anthropic uses its own error envelope: a JSON object
   // {"type":"error","error":{"type":...,"message":...}} for non-stream and an

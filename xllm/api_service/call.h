@@ -26,8 +26,10 @@ class Call {
   Call(brpc::Controller* controller);
   virtual ~Call() = default;
 
-  std::string raw_header_x_request_id() { return raw_header_x_request_id_; }
-  std::string get_x_request_time() { return x_request_time_; }
+  const std::string& raw_header_x_request_id() const {
+    return raw_header_x_request_id_;
+  }
+  const std::string& x_request_time() const { return x_request_time_; }
 
   // The request-scoped x-request-id: the client-supplied value when present,
   // otherwise a server-generated id. Always non-empty after construction and

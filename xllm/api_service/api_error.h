@@ -18,6 +18,7 @@ limitations under the License.
 #include <brpc/controller.h>
 
 #include <string>
+#include <string_view>
 
 #include "core/common/types.h"
 
@@ -40,12 +41,12 @@ const char* status_code_to_string(StatusCode code);
 
 // Build an OpenAI-compatible error body:
 //   {"error":{"message":...,"type":...,"code":...,"param":null}}
-std::string make_openai_error_json(StatusCode code, const std::string& message);
+std::string make_openai_error_json(StatusCode code, std::string_view message);
 
 // Build an Anthropic-compatible error body:
 //   {"type":"error","error":{"type":...,"message":...}}
 std::string make_anthropic_error_json(StatusCode code,
-                                      const std::string& message);
+                                      std::string_view message);
 
 // Extract the client-supplied x-request-id from an HTTP controller, looking up
 // "x-request-id" then "x-ms-client-request-id". Returns an empty string when
@@ -66,8 +67,8 @@ std::string ensure_x_request_id(const brpc::Controller* controller);
 // response. Used by streaming paths that have already committed a 200 header
 // and can no longer change the status code or body envelope.
 void log_request_error(StatusCode code,
-                       const std::string& message,
-                       const std::string& x_request_id);
+                       std::string_view message,
+                       std::string_view x_request_id);
 
 // Finish a non-stream HTTP request with a structured OpenAI-style error: sets
 // the HTTP status code, writes the JSON error body, and logs the failure with
@@ -75,14 +76,14 @@ void log_request_error(StatusCode code,
 // body and force a generic 500 status.
 void write_openai_error(brpc::Controller* controller,
                         StatusCode code,
-                        const std::string& message,
-                        const std::string& x_request_id);
+                        std::string_view message,
+                        std::string_view x_request_id);
 
 // Same as write_openai_error but emits the Anthropic error envelope.
 void write_anthropic_error(brpc::Controller* controller,
                            StatusCode code,
-                           const std::string& message,
-                           const std::string& x_request_id);
+                           std::string_view message,
+                           std::string_view x_request_id);
 
 }  // namespace api_service
 }  // namespace xllm

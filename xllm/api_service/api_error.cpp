@@ -18,6 +18,8 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <nlohmann/json.hpp>
+#include <string>
+#include <string_view>
 
 #include "core/common/instance_name.h"
 #include "core/util/uuid.h"
@@ -117,8 +119,7 @@ const char* status_code_to_string(StatusCode code) {
   }
 }
 
-std::string make_openai_error_json(StatusCode code,
-                                   const std::string& message) {
+std::string make_openai_error_json(StatusCode code, std::string_view message) {
   nlohmann::json body;
   auto& error = body["error"];
   error["message"] = message;
@@ -129,7 +130,7 @@ std::string make_openai_error_json(StatusCode code,
 }
 
 std::string make_anthropic_error_json(StatusCode code,
-                                      const std::string& message) {
+                                      std::string_view message) {
   nlohmann::json body;
   body["type"] = "error";
   auto& error = body["error"];
@@ -170,9 +171,9 @@ std::string ensure_x_request_id(const brpc::Controller* controller) {
 }
 
 void log_request_error(StatusCode code,
-                       const std::string& message,
-                       const std::string& x_request_id) {
-  const std::string& id = x_request_id.empty() ? "-" : x_request_id;
+                       std::string_view message,
+                       std::string_view x_request_id) {
+  std::string_view id = x_request_id.empty() ? "-" : x_request_id;
   LOG(ERROR) << "[x-request-id=" << id
              << "] request failed (http=" << status_code_to_http_status(code)
              << ", status=" << status_code_to_string(code) << "): " << message;
@@ -189,14 +190,18 @@ namespace {
 
 void write_error_body(brpc::Controller* controller,
                       StatusCode code,
-                      const std::string& message,
-                      const std::string& x_request_id,
+                      std::string_view message,
+                      std::string_view x_request_id,
                       const std::string& body) {
   const int32_t http_status = status_code_to_http_status(code);
   log_request_error(code, message, x_request_id);
 
   controller->http_response().set_content_type("application/json");
   controller->http_response().set_status_code(http_status);
+  if (!x_request_id.empty()) {
+    controller->http_response().SetHeader("x-request-id",
+                                          std::string(x_request_id));
+  }
   // Drop any partially serialized payload before emitting the error body.
   controller->response_attachment().clear();
   controller->response_attachment().append(body);
@@ -206,8 +211,8 @@ void write_error_body(brpc::Controller* controller,
 
 void write_openai_error(brpc::Controller* controller,
                         StatusCode code,
-                        const std::string& message,
-                        const std::string& x_request_id) {
+                        std::string_view message,
+                        std::string_view x_request_id) {
   if (controller == nullptr) {
     return;
   }
@@ -220,8 +225,8 @@ void write_openai_error(brpc::Controller* controller,
 
 void write_anthropic_error(brpc::Controller* controller,
                            StatusCode code,
-                           const std::string& message,
-                           const std::string& x_request_id) {
+                           std::string_view message,
+                           std::string_view x_request_id) {
   if (controller == nullptr) {
     return;
   }

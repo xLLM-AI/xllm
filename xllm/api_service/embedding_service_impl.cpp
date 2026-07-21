@@ -101,7 +101,7 @@ void EmbeddingServiceImpl::process_async_impl(
   // create RequestParams for embeddings request
   // set is_embeddings and max_tokens = 1 to control engine step once.
   RequestParams request_params(
-      rpc_request, call->x_request_id(), call->get_x_request_time());
+      rpc_request, call->x_request_id(), call->x_request_time());
 
   // TODO only support input_str for now
   auto& input = rpc_request.input();
@@ -150,7 +150,7 @@ void MMEmbeddingServiceImpl::process_async_impl(
   // create RequestParams for embeddings request
   // set is_embeddings and max_tokens = 1 to control engine step once.
   RequestParams request_params(
-      rpc_request, call->x_request_id(), call->get_x_request_time());
+      rpc_request, call->x_request_id(), call->x_request_time());
 
   auto& req_messages = rpc_request.messages();
 

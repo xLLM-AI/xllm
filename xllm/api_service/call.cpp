@@ -39,6 +39,7 @@ void Call::init() {
   x_request_id_ = raw_header_x_request_id_.empty()
                       ? api_service::generate_x_request_id()
                       : raw_header_x_request_id_;
+  controller_->http_response().SetHeader("x-request-id", x_request_id_);
   XLLM_VERBOSE_TRACE() << "event=request_received x-request-id="
                        << x_request_id_
                        << " path=" << controller_->http_request().uri().path();
