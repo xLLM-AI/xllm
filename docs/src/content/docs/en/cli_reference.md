@@ -6,6 +6,8 @@ sidebar:
 
 xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the only required flag. When `--config_json_file` is used, values in the JSON file override command-line flag values. The tables below are grouped by the Config classes in `/xllm/core/framework/config`, with one Config per section. The `ConfigJsonUtils` section contains the common JSON config-file flags.
 
+> **Device selection**: xLLM no longer provides `--devices` / `--device_id` / `--draft_devices`. The devices to run on are determined by the visible-device mask environment variables (`ASCEND_RT_VISIBLE_DEVICES` for NPU, `CUDA_VISIBLE_DEVICES` for NVIDIA, `MLU_VISIBLE_DEVICES` for Cambricon, `HIP_VISIBLE_DEVICES` for DCU, `MUSA_VISIBLE_DEVICES` for Moore Threads). Each process uses all of its visible devices: a single-card process exposes one card, while single-process multi-card exposes several. The draft model always uses the same devices as the target model.
+
 ## ConfigJsonUtils
 
 | Parameter | Type | Default | Description |
@@ -37,8 +39,6 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `model` | `string` | `""` | Hugging Face model name or model path. |
 | `backend` | `string` | `""` | Backend model type: `llm` for text-only models, `vlm` for multimodal models, or `dit` for diffusion models. |
 | `task` | `string` | `"generate"` | Model task, for example `generate`, `embed`, or `mm_embed`. |
-| `devices` | `string` | `""` | Deprecated; use `device_id` instead. Devices used by the current process, for example `npu:0` or `npu:0,npu:1`. |
-| `device_id` | `int32` | `-1` | Device id to run the model on, for example `0`. |
 | `limit_image_per_prompt` | `int32` | `8` | Maximum number of images per prompt. Only applies to multimodal models. |
 | `max_encoder_cache_size` | `int64` | `0` | Maximum GPU/NPU memory size in MB for the encoder cache per worker. `0` disables the encoder cache. |
 | `reasoning_parser` | `string` | `""` | Reasoning parser, for example `auto`, `glm45`, `glm47`, `glm5`, `qwen3`, `qwen35`, or `deepseek-r1`. |
@@ -181,7 +181,6 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
 | `draft_model` | `string` | `""` | Draft model path. See [MTP](/en/features/mtp/) for MTP usage. |
-| `draft_devices` | `string` | `""` | Devices used by the draft model, for example `npu:0` or `npu:0,npu:1`. If omitted, uses the target model devices when speculative decoding is enabled. |
 | `num_speculative_tokens` | `int32` | `0` | Number of speculative tokens generated per speculative decoding step. |
 | `speculative_algorithm` | `string` | `"MTP"` | Speculative decoding algorithm. Supported values: `MTP`, `Eagle3`, `Suffix`, `DFlash`. |
 | `speculative_suffix_cache_max_depth` | `int32` | `64` | Maximum suffix-tree depth for suffix speculative decoding. |

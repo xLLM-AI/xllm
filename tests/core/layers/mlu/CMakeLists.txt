@@ -9,8 +9,10 @@ cc_test(
   NAME
     qwen3_5_layer_test
   SRCS
+    qwen3_5_gated_delta_net_ops_test.cpp
     qwen3_5_gated_delta_net_test.cpp
     qwen3_5_attention_test.cpp
+    qwen3_next_rms_norm_test.cpp
     tests_utils.cpp
   DEPS
     :config

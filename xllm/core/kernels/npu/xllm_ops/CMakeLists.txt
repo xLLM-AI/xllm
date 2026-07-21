@@ -35,6 +35,7 @@ cc_library(
     rec_constrained_topk_fused.cpp
     beam_search_rec_final.cpp
     npu_mega_chunk_gdn.cpp
+    layer_norm_fwd.cpp
   INCLUDES
     ${PROJECT_SOURCE_DIR}/third_party/xllm_ops/build/autogen
   DEPS

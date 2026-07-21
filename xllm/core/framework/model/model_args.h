@@ -482,6 +482,33 @@ struct ModelArgs {
   PROPERTY(int64_t, added_kv_proj_dim) = -1;
   PROPERTY(int64_t, pos_embed_seq_len) = -1;
 
+  // cola-dlm dit related args
+  PROPERTY(int64_t, txt_dim) = 0;
+  PROPERTY(int64_t, txt_in_channels) = 0;
+  PROPERTY(int64_t, txt_out_channels) = 0;
+  PROPERTY(int64_t, emb_dim) = 0;
+  PROPERTY(int64_t, heads) = 0;
+  PROPERTY(int64_t, rope_dim) = 0;
+  PROPERTY(int64_t, expand_ratio) = 0;
+  PROPERTY(int64_t, block_size) = 0;
+  PROPERTY(int64_t, latent_dim) = 0;
+  PROPERTY(bool, qk_bias) = false;
+  PROPERTY(float, norm_eps) = 1e-5f;
+
+  // cola-dlm vae related args
+  PROPERTY(int64_t, vae_dim) = 0;
+  PROPERTY(int64_t, vae_num_heads) = 0;
+  PROPERTY(int64_t, encoder_num_blocks) = 0;
+  PROPERTY(int64_t, decoder_num_blocks) = 0;
+  PROPERTY(int64_t, shared_heads_kv) = 0;
+  PROPERTY(int64_t, vae_rope_theta) = 0;
+  PROPERTY(int64_t, vae_block_size) = 0;
+  PROPERTY(int64_t, vae_patch_size) = 0;
+  PROPERTY(bool, encoder_last_ln) = true;
+  PROPERTY(float, shifting_factor) = 0.0f;
+  PROPERTY(float, scaling_factor) = 0.0f;
+  PROPERTY(bool, use_variation) = true;
+
   // t5 related args
   PROPERTY(int64_t, d_model) = 0;
   PROPERTY(int64_t, num_layers) = 0;

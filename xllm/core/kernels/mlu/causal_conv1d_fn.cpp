@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include <framework/core/MLUStream.h>
+#include <framework/core/device.h>
 #include <glog/logging.h>
 #include <torch/torch.h>
 
@@ -39,12 +40,15 @@ torch::Tensor causal_conv1d_fn(
     const std::optional<torch::Tensor>& bias_opt,
     const std::optional<torch::Tensor>& cache_indices_opt,
     const std::optional<torch::Tensor>& has_initial_state_opt,
-    const std::optional<torch::Tensor>& /*initial_state_idx_opt*/,
-    const std::optional<torch::Tensor>& /*num_accepted_tokens_opt*/,
+    const std::optional<torch::Tensor>& initial_state_idx_opt,
+    const std::optional<torch::Tensor>& num_accepted_tokens_opt,
     bool /*inplace_final_state*/) {
   torch::Tensor out = torch::zeros_like(x);
+  CHECK_GT(nt, 0);
   int32_t dim = static_cast<int32_t>(x.size(0));
   int32_t cu_seqlen = static_cast<int32_t>(x.size(1));
+  int32_t width = static_cast<int32_t>(weight.size(1));
+  int32_t state_len = width - 1;
   int32_t num_cache_lines = static_cast<int32_t>(conv_states.size(0));
   int32_t stride_x_dim = static_cast<int32_t>(x.stride(0));
   int32_t stride_x_token = static_cast<int32_t>(x.stride(1));
@@ -67,8 +71,19 @@ torch::Tensor causal_conv1d_fn(
     stride_o_token = static_cast<int32_t>(out.stride(2));
   }
 
-  int32_t num_programs = std::min(nt, static_cast<int32_t>(8));
+  constexpr int32_t kBlockM = 64;
+  constexpr int32_t kBlockN = 2048;
+  int32_t np2_statelen = 1;
+  while (np2_statelen < state_len) {
+    np2_statelen <<= 1;
+  }
+
   cnrtQueue_t queue = torch_mlu::getCurMLUStream();
+  torch_mlu::DeviceProp* prop =
+      torch_mlu::getDeviceProperties(torch_mlu::current_device());
+  CHECK(prop != nullptr);
+  int32_t core_count = prop->cluster_count * prop->core_num_per_cluster;
+  int32_t num_programs = std::min(nt, core_count);
 
   JITKernel& f = JITKernel::get(
       /*py_path=*/"torch_mlu_ops.triton.conv.kernels",
@@ -76,7 +91,7 @@ torch::Tensor causal_conv1d_fn(
 
   f.launch(static_cast<void*>(queue),
            /*grid=*/{static_cast<uint32_t>(num_programs), 1, 1},
-           /*cfg=*/{/*num_warps=*/1, /*num_stages=*/1},
+           /*cfg=*/{/*num_warps=*/1, /*num_stages=*/3},
            x,
            weight,
            bias_opt,
@@ -88,8 +103,8 @@ torch::Tensor causal_conv1d_fn(
            token_block_offset,
            nullptr,
            nullptr,
-           nullptr,
-           nullptr,
+           initial_state_idx_opt,
+           num_accepted_tokens_opt,
            out,
            dim,
            nt,
@@ -107,15 +122,15 @@ torch::Tensor causal_conv1d_fn(
            stride_o_token,
            /*stride_block_m=*/0,
            /*pad_slot_id=*/-1,
-           /*null_block_id=*/-1,
-           /*HAS_BIAS=*/0,
-           /*KERNEL_WIDTH=*/4,
+           /*null_block_id=*/0,
+           /*HAS_BIAS=*/bias_opt.has_value() ? 1 : 0,
+           /*KERNEL_WIDTH=*/width,
            /*SILU_ACTIVATION=*/1,
            /*IS_APC_ENABLED=*/0,
            /*HAS_NULL_BLOCK=*/1,
-           /*NP2_STATELEN=*/4,
-           /*BLOCK_M=*/8,
-           /*BLOCK_N=*/256);
+           /*NP2_STATELEN=*/np2_statelen,
+           /*BLOCK_M=*/kBlockM,
+           /*BLOCK_N=*/kBlockN);
 
   return out;
 }

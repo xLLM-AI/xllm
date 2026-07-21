@@ -20,9 +20,7 @@ std::string Options::to_string() const {
   std::stringstream ss;
   ss << "Options: [";
   ss << "model_path: " << model_path()
-     << ", devices: " << devices().value_or("null")
      << ", draft_model_path: " << draft_model_path().value_or("null")
-     << ", draft_devices: " << draft_devices().value_or("null")
      << ", backend: " << backend()
      << ", limit_image_per_prompt: " << limit_image_per_prompt()
      << ", block_size: " << block_size()

@@ -39,11 +39,7 @@ class Options {
 
   PROPERTY(std::string, model_id);
 
-  PROPERTY(std::optional<std::string>, devices);
-
   PROPERTY(std::optional<std::string>, draft_model_path);
-
-  PROPERTY(std::optional<std::string>, draft_devices);
 
   // model backend
   PROPERTY(std::string, backend);

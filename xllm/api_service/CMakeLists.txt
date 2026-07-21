@@ -18,6 +18,7 @@ cc_library(
     embedding_service_impl.h
     audio_generation_service_impl.h
     image_generation_service_impl.h
+    text_generation_service_impl.h
     video_generation_service_impl.h
     rerank_service_impl.h
     qwen3_rerank_service_impl.h
@@ -45,6 +46,7 @@ cc_library(
     embedding_service_impl.cpp
     audio_generation_service_impl.cpp
     image_generation_service_impl.cpp
+    text_generation_service_impl.cpp
     video_generation_service_impl.cpp
     models_service_impl.cpp
     rerank_service_impl.cpp

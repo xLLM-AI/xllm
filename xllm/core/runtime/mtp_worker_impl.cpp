@@ -1689,11 +1689,16 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
     if (use_chunked_prefill) {
       int32_t prev_token_id = state.prev_token_id;
       torch::Tensor prev_embedding = state.prev_embedding;
-      if (prev_token_id < 0) {
+      const bool prev_is_placeholder = prev_token_id < 0;
+      if (prev_is_placeholder) {
         prev_token_id = current_token_id >= 0 ? current_token_id : 0;
         prev_embedding = torch::Tensor();
       }
       add_row(prev_token_id, /*position_offset=*/-1, prev_embedding);
+      if (prev_is_placeholder) {
+        // Redirect to padding block 0 to avoid overwriting correct KV cache.
+        buf.out_new_cache_slots.back() = 0;
+      }
       add_row(state.token_id, /*position_offset=*/0, state.embedding);
       specBuilder::append_seq_len_by_layout(buf.out_q_seq_lens, 2);
       const int32_t kv_len = specBuilder::calc_kv_len(
@@ -1710,11 +1715,16 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
       int32_t prev_token_id = state.prev_token_id;
       int32_t prev_position_offset = -1;
       torch::Tensor prev_embedding = state.prev_embedding;
-      if (prev_token_id < 0) {
+      const bool prev_is_placeholder = prev_token_id < 0;
+      if (prev_is_placeholder) {
         prev_token_id = state.token_id;
         prev_embedding = torch::Tensor();
       }
       add_row(prev_token_id, prev_position_offset, prev_embedding);
+      if (prev_is_placeholder) {
+        // Redirect to padding block 0 to avoid overwriting correct KV cache.
+        buf.out_new_cache_slots.back() = 0;
+      }
     }
 
     selected_row_idx.emplace_back(

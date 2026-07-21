@@ -26,7 +26,6 @@ limitations under the License.
 #include "xllm_test.pb.h"
 
 DECLARE_string(model_path);
-DECLARE_string(devices);
 DECLARE_int32(port);
 DECLARE_string(listen_addr);
 DECLARE_int32(idle_timeout_s);

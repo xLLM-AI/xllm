@@ -253,22 +253,27 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
                                             initial_state_idx,
                                             num_accepted_tokens,
                                             /*inplace_final_state=*/true);
-    auto [g, beta] = xllm::kernel::mlu::fused_gdn_gating(
-        A_log_, a, b, dt_bias_, /*beta=*/1.0f, /*threshold=*/20.0f);
     mixed_qkv = mixed_qkv.transpose(0, 1);
-    int64_t split_size = k_size_ / tp_size_;
-    auto q_conv = mixed_qkv.slice(-1, 0, split_size);
-    auto k_conv = mixed_qkv.slice(-1, split_size, split_size * 2);
-    auto v_conv = mixed_qkv.slice(-1, split_size * 2);
-    q_conv = q_conv.reshape({1, q_conv.size(0), -1, head_k_dim_}).contiguous();
-    k_conv = k_conv.reshape({1, k_conv.size(0), -1, head_k_dim_}).contiguous();
-    v_conv = v_conv.reshape({1, v_conv.size(0), -1, head_v_dim_}).contiguous();
+    auto [q_conv, k_conv, v_conv, g, beta] =
+        xllm::kernel::mlu::fused_post_conv_prep(mixed_qkv,
+                                                a,
+                                                b,
+                                                A_log_,
+                                                dt_bias_,
+                                                num_k_heads_ / tp_size_,
+                                                head_k_dim_,
+                                                head_v_dim_,
+                                                /*apply_l2norm=*/true,
+                                                /*output_g_exp=*/false);
+    q_conv = q_conv.unsqueeze(0);
+    k_conv = k_conv.unsqueeze(0);
+    v_conv = v_conv.unsqueeze(0);
+    g = g.unsqueeze(0);
+    beta = beta.unsqueeze(0);
 
     auto cu_seqlens = attn_metadata.q_cu_seq_lens.contiguous();
     auto chunk_indices = attn_metadata.chunk_indices.contiguous();
-    // [N, H, K, V] -> [N, H, V, K]
-    auto initial_state =
-        ssm_cache.index({state_indices}).transpose(2, 3).contiguous();
+    auto initial_state = ssm_cache.index({state_indices});
     initial_state.index_put_(
         {~attn_metadata.has_initial_states, torch::indexing::Ellipsis}, 0.0f);
     std::tie(core_attn_out, last_recurrent_state) =
@@ -281,10 +286,9 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
                                          cu_seqlens,
                                          chunk_indices,
                                          /*output_final_state=*/true,
-                                         /*use_qk_l2norm_in_kernel=*/true);
-    ssm_cache.index_put_(
-        {state_indices},
-        last_recurrent_state.to(ssm_cache.dtype()).transpose(2, 3));
+                                         /*use_qk_l2norm_in_kernel=*/false);
+    ssm_cache.index_put_({state_indices},
+                         last_recurrent_state.to(ssm_cache.dtype()));
   } else {
     mixed_qkv =
         xllm::kernel::mlu::causal_conv1d_update_decode(mixed_qkv,
@@ -292,6 +296,7 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
                                                        conv_weight,
                                                        std::nullopt,
                                                        state_indices,
+                                                       /*activation=*/true,
                                                        /*pad_slot_id=*/-1);
 
     double scale = 1.0 / std::sqrt(static_cast<double>(head_k_dim_));

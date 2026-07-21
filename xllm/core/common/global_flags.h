@@ -43,10 +43,6 @@ DECLARE_string(python_model_path);
 
 DECLARE_string(task);
 
-DECLARE_string(devices);
-
-DECLARE_int32(device_id);
-
 DECLARE_int32(limit_image_per_prompt);
 
 DECLARE_string(mm_download_headers);
@@ -75,8 +71,6 @@ DECLARE_int32(max_tokens_per_chunk_for_prefill);
 
 // --- speculative inference config ---
 DECLARE_string(draft_model);
-
-DECLARE_string(draft_devices);
 
 DECLARE_int32(num_speculative_tokens);
 

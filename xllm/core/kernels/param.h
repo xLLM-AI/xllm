@@ -1577,8 +1577,10 @@ struct FusedSigmoidGatingDeltaRuleUpdateParams {
   torch::Tensor initial_state_source;
   torch::Tensor initial_state_indices;
   torch::Tensor cu_seqlens;
+  std::optional<torch::Tensor> num_accepted_tokens = std::nullopt;
   std::optional<float> scale = std::nullopt;
   bool use_qk_l2norm_in_kernel = false;
+  bool is_kda = false;
   float softplus_beta = 1.0f;
   float softplus_threshold = 20.0f;
 };
@@ -1635,6 +1637,8 @@ struct GemmaRMSNormParams {
   torch::Tensor x;
   torch::Tensor gamma;
   double epsilon;
+  std::optional<torch::Tensor> residual;
+  std::optional<torch::Tensor> residual_out;
   torch::Tensor rstd_out;
   torch::Tensor norm_out;
 };

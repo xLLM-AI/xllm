@@ -133,7 +133,7 @@ class Qwen3_5GatedDeltaNetTest : public ::testing::Test {
   };
 
   ConvBatchMeta MakeConvBatchMeta(const torch::Tensor& q_cu_seq_lens) {
-    constexpr int32_t block_size = 8;
+    constexpr int32_t block_size = 64;
     constexpr int32_t pad_slot_id = -1;
     constexpr int64_t default_max_num_programs = 1024;
 
@@ -264,7 +264,7 @@ TEST_F(Qwen3_5GatedDeltaNetTest, PrefillForward) {
   auto metadata = MakePrefillMetadata(batch_size, seq_len);
 
   ModelInputParams input_params;
-  input_params.embedding.linear_state_ids = {0};
+  input_params.embedding.linear_state_ids = {1};
 
   auto output = layer->forward(hidden, metadata, kv_cache_, input_params);
   Device xllm_device(device_);
@@ -288,7 +288,7 @@ TEST_F(Qwen3_5GatedDeltaNetTest, DecodeForward) {
   auto metadata = MakeDecodeMetadata(batch_size);
 
   ModelInputParams input_params;
-  input_params.embedding.linear_state_ids = {0, 1};
+  input_params.embedding.linear_state_ids = {1, 2};
 
   auto output = layer->forward(hidden, metadata, kv_cache_, input_params);
   Device xllm_device(device_);

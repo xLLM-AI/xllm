@@ -29,6 +29,7 @@ limitations under the License.
 
 #include "core/framework/tokenizer/tokenizer_args.h"
 #include "core/framework/tokenizer/tokenizer_factory.h"
+#include "core/util/dit_model_discovery.h"
 #include "core/util/json_reader.h"
 #include "models/model_registry.h"
 
@@ -439,8 +440,23 @@ DiTModelLoader::DiTModelLoader(const std::string& model_root_path)
     // Read model_type from config.json and register the root as "model".
     std::filesystem::path config_json_path = root_path / "config.json";
     if (!std::filesystem::exists(config_json_path)) {
+      if (auto layout = util::discover_dit_model_layout(root_path)) {
+        for (const auto& component : layout->components) {
+          name_to_loader_[component.name] =
+              std::make_unique<DiTFolderLoader>(component.path.string(),
+                                                component.name,
+                                                component.component_type);
+          LOG(INFO) << "DiTModelLoader: auto-discovered component '"
+                    << component.name << "' with model_type='"
+                    << component.component_type << "'";
+        }
+        set_model_type(layout->pipeline_type);
+        LOG(INFO) << "DiTModelLoader: matched registered model type '"
+                  << layout->pipeline_type << "' from component layout";
+        return;
+      }
       LOG(FATAL) << "DiTModelLoader: neither model_index.json nor config.json "
-                    "found in: "
+                    "found, and no component subdirectories discovered in: "
                  << model_root_path_;
     }
     JsonReader cfg_reader;

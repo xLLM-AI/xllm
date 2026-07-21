@@ -383,4 +383,14 @@ std::pair<torch::Tensor, torch::Tensor> npu_mega_chunk_gdn(
     const std::optional<torch::Tensor>& cu_seqlens = std::nullopt,
     c10::ArrayRef<int32_t> q_seq_lens = {},
     bool use_qk_l2norm_in_kernel = false);
+
+torch::Tensor layer_norm_fwd_aclnn(
+    const torch::Tensor& x,
+    const torch::Tensor& weight,
+    const torch::Tensor& bias,
+    double eps,
+    const std::optional<torch::Tensor>& z = std::nullopt,
+    int64_t group_size = -1,
+    bool norm_before_gate = true,
+    bool is_rms_norm = false);
 }  // namespace xllm::kernel::npu
