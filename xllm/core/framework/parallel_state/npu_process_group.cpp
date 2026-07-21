@@ -20,11 +20,11 @@ limitations under the License.
 #include <c10d/ProcessGroup.hpp>
 #include <c10d/TCPStore.hpp>
 #include <cctype>
-#include <cstdlib>
 #include <torch_npu/csrc/distributed/ProcessGroupHCCL.hpp>
 
 #include "core/framework/config/dit_config.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/util/env_var.h"
 #include "npu_rank_table_env.h"
 #include "platform/device.h"
 
@@ -88,14 +88,14 @@ constexpr uint32_t kHcclAivExpansionMode = 3;
 
 bool should_enable_hccl_aiv_expansion(const std::string& group_name,
                                       int32_t rank_size) {
-  const char* env_value = std::getenv(kHcclTpAivEnv);
-  if (env_value == nullptr || group_name != kTensorParallelGroupName ||
+  const auto env_value = xllm::util::get_optional_string_env(kHcclTpAivEnv);
+  if (!env_value.has_value() || group_name != kTensorParallelGroupName ||
       rank_size <= 1) {
     return false;
   }
 
   // Keep the switch opt-in while accepting the values used by launch scripts.
-  std::string normalized_value(env_value);
+  std::string normalized_value = *env_value;
   std::transform(normalized_value.begin(),
                  normalized_value.end(),
                  normalized_value.begin(),
