@@ -321,11 +321,7 @@ std::vector<Batch> DisaggPDChunkedPrefillScheduler::prepare_batch() {
             /*held_blocks=*/0,
             reserve_block_size);
       }
-      if (running->offline()) {
-        prefill_queue_->push(running);
-      } else {
-        prefill_queue_->push(running);
-      }
+      prefill_queue_->push(running);
       *it = nullptr;
     }
   }
