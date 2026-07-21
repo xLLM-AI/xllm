@@ -319,11 +319,11 @@ size_t SchedulerPolicy::compute_prefill_tokens(Sequence* seq,
   if (!batch_mode_.enable_chunked_prefill) {
     // Full prefill: compute all remaining tokens.
     size_t num_tokens = seq->num_need_compute_tokens();
-    // CP alignment for full prefill.
-    if (state.options.cp_size() > 1 && seq->is_prefill_stage() &&
-        num_tokens > 0) {
-      const size_t alignment =
-          static_cast<size_t>(state.options.cp_size()) * 2;
+    // CP alignment for full prefill (skip when model handles CP partition).
+    const int32_t worker_cp_size =
+        Platform::uses_model_cp_partition() ? 1 : state.options.cp_size();
+    if (worker_cp_size > 1 && seq->is_prefill_stage() && num_tokens > 0) {
+      const size_t alignment = static_cast<size_t>(worker_cp_size) * 2;
       num_tokens = ((num_tokens + alignment - 1) / alignment) * alignment;
     }
     return num_tokens;
@@ -358,13 +358,18 @@ bool SchedulerPolicy::allocate_for_prefill(Sequence* seq,
                                            SchedulerState& state,
                                            bool skip_shared) {
   if (!batch_mode_.enable_chunked_prefill) {
+    // Full prefill: match prefix cache first.
+    if (!skip_shared) {
+      allocate_shared_blocks_for(seq, state);
+    }
     // Full prefill: allocate for full prompt.
     *actual_tokens = seq->num_need_compute_tokens();
-    // CP alignment.
-    if (state.options.cp_size() > 1 && seq->is_prefill_stage() &&
+    // CP alignment (skip when model handles CP partition internally).
+    const int32_t worker_cp_size =
+        Platform::uses_model_cp_partition() ? 1 : state.options.cp_size();
+    if (worker_cp_size > 1 && seq->is_prefill_stage() &&
         *actual_tokens > 0) {
-      const size_t alignment =
-          static_cast<size_t>(state.options.cp_size()) * 2;
+      const size_t alignment = static_cast<size_t>(worker_cp_size) * 2;
       *actual_tokens = ((*actual_tokens + alignment - 1) / alignment) * alignment;
     }
     const size_t target = seq->kv_cache_tokens_num() + *actual_tokens;
