@@ -65,6 +65,64 @@ IndexedKVCacheImpl::IndexedKVCacheImpl(
   }
 }
 
+IndexedKVCacheImpl::IndexedKVCacheImpl(
+    const KVCacheShape& kv_cache_shape,
+    const KVCacheCreateOptions& create_options,
+    BlockType type,
+    int64_t layer_count)
+    : KVCacheImpl() {
+  CHECK(type == BlockType::KV)
+      << "IndexedKVCacheImpl host cache only supports BlockType::KV.";
+  host_page_aligned_regions_.reserve(4);
+  if (kv_cache_shape.has_key_cache_shape()) {
+    create_host_tensor(
+        build_host_group_tensor_shape(kv_cache_shape.key_cache_shape(),
+                                      create_options.host_blocks_factor(),
+                                      layer_count),
+        create_options.dtype(),
+        &key_cache_,
+        &key_cache_shape_);
+  }
+  if (kv_cache_shape.has_value_cache_shape()) {
+    create_host_tensor(
+        build_host_group_tensor_shape(kv_cache_shape.value_cache_shape(),
+                                      create_options.host_blocks_factor(),
+                                      layer_count),
+        create_options.dtype(),
+        &value_cache_,
+        &value_cache_shape_);
+  }
+  if (kv_cache_shape.has_index_cache_shape()) {
+    // Mirror the device index dtype: INT8 when indexer cache is quantized (see
+    // create_indexed_kv_cache_tensors), otherwise the model dtype.
+    const torch::ScalarType index_dtype =
+        create_options.enable_indexer_cache_quant() ? torch::kChar
+                                                    : create_options.dtype();
+    create_host_tensor(
+        build_host_group_tensor_shape(kv_cache_shape.index_cache_shape(),
+                                      create_options.host_blocks_factor(),
+                                      layer_count),
+        index_dtype,
+        &index_cache_,
+        &index_cache_shape_);
+  }
+  // The INT8 indexer cache keeps a per-token fp32 scale that must move with the
+  // int8 values during offload/reload, otherwise dequantization reads
+  // mismatched coefficients. Allocate it on host alongside the index cache.
+  if (create_options.enable_indexer_cache_quant() &&
+      kv_cache_shape.has_index_cache_scale_shape()) {
+    torch::Tensor index_scale;
+    create_host_tensor(
+        build_host_group_tensor_shape(kv_cache_shape.index_cache_scale_shape(),
+                                      create_options.host_blocks_factor(),
+                                      layer_count),
+        torch::kFloat32,
+        &index_scale,
+        &index_cache_scale_shape_);
+    index_cache_scale_ = index_scale;
+  }
+}
+
 torch::Tensor IndexedKVCacheImpl::get_index_cache() const {
   return index_cache_;
 }
@@ -92,6 +150,22 @@ std::optional<torch::Tensor> IndexedKVCacheImpl::get_indexer_cache_scale()
     return index_cache_scale_;
   }
   return std::nullopt;
+}
+
+BlockTypeTensorMap IndexedKVCacheImpl::get_block_type_tensors(
+    BlockType type) const {
+  BlockTypeTensorMap tensor_map = KVCacheImpl::get_block_type_tensors(type);
+  if (type != BlockType::KV) {
+    return tensor_map;
+  }
+  if (index_cache_.defined() && index_cache_.numel() > 0) {
+    tensor_map.emplace(KVCacheTensorRole::INDEX, index_cache_);
+  }
+  if (index_cache_scale_.has_value() && index_cache_scale_->defined() &&
+      index_cache_scale_->numel() > 0) {
+    tensor_map.emplace(KVCacheTensorRole::INDEX_SCALE, *index_cache_scale_);
+  }
+  return tensor_map;
 }
 
 bool IndexedKVCacheImpl::empty() const {

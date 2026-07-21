@@ -48,7 +48,14 @@ std::atomic<bool>* NPULayerSynchronizerImpl::get_event_flag(
 }
 
 bool NPULayerSynchronizerImpl::synchronize_layer(const int64_t layer_index) {
-  while (!event_record_flags_[layer_index].load(std::memory_order_acquire));
+  while (!event_record_flags_[layer_index].load(std::memory_order_acquire)) {
+    if (aborted_.load(std::memory_order_acquire)) {
+      return false;
+    }
+  }
+  if (aborted_.load(std::memory_order_acquire)) {
+    return false;
+  }
   auto ret = aclrtSynchronizeEventWithTimeout(events_[layer_index], timeout_);
   if (ret != ACL_SUCCESS) {
     LOG(ERROR) << "Synchronize event failed: " << ret;
@@ -67,6 +74,15 @@ bool NPULayerSynchronizerImpl::record_event(const int64_t layer_index,
   }
   event_record_flags_[layer_index].store(true, std::memory_order_release);
   return true;
+}
+
+void NPULayerSynchronizerImpl::abort() {
+  // Set aborted_ before raising the flags so any thread released from the spin
+  // observes the abort and reports failure rather than syncing a stale event.
+  aborted_.store(true, std::memory_order_release);
+  for (size_t i = 0; i < event_record_flags_.size(); ++i) {
+    event_record_flags_[i].store(true, std::memory_order_release);
+  }
 }
 
 }  // namespace xllm

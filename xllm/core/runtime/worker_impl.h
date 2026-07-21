@@ -26,8 +26,7 @@ limitations under the License.
 #include "forward_params.h"
 #include "framework/eplb/eplb_executor.h"
 #include "framework/kv_cache/kv_cache_shape.h"
-// hierarchy temporarily disabled during the block-manager refactor
-// #include "framework/kv_cache_transfer/hierarchy_kv_cache_transfer.h"
+#include "framework/kv_cache_transfer/hierarchy_kv_cache_transfer.h"
 #include "framework/kv_cache_transfer/kv_cache_store.h"
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #include "framework/model/causal_lm.h"
@@ -214,8 +213,9 @@ class WorkerImpl {
   // Only used for deepseek chunked prefill ops on npu device
   void prepare_mla_prefixcache_inputs(ModelInputParams& input_params);
 
-  // hierarchy temporarily disabled during the block-manager refactor
-  // void init_hierarchy_kv_cache_transfer();
+  void init_hierarchy_kv_cache_transfer(
+      const KVCacheShape& kv_cache_shape,
+      const KVCacheCreateOptions& kv_cache_create_options);
 
   bool can_prepare_npu_graph_decode_input(
       const ModelInputParams& input_params) const;
@@ -335,8 +335,7 @@ class WorkerImpl {
   InstanceRole instance_role_ = InstanceRole::DEFAULT;
 
   std::shared_ptr<KVCacheTransfer> kv_cache_transfer_;
-  // hierarchy temporarily disabled during the block-manager refactor
-  // std::unique_ptr<HierarchyKVCacheTransfer> hierarchy_kv_cache_transfer_;
+  std::unique_ptr<HierarchyKVCacheTransfer> hierarchy_kv_cache_transfer_;
   std::unique_ptr<WorkerRendezvous> worker_rendezvous_;
 
 #if defined(USE_CUDA) || defined(USE_DCU)

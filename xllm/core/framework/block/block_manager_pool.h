@@ -30,10 +30,6 @@ class BlockManagerPool : public KVCacheManager {
     PROPERTY(uint32_t, num_blocks) = 0;
     PROPERTY(uint32_t, host_num_blocks) = 0;
     PROPERTY(int32_t, block_size) = 0;
-    // Sizes the SINGLE-resource pool (max concurrent live sequences); consumed
-    // by the num_single_blocks derivation. The engine/worker wiring PR migrates
-    // this to the max_seqs_per_batch-based sizing (and adapts the tests).
-    PROPERTY(uint32_t, max_concurrent_requests) = 0;
     PROPERTY(bool, enable_linear_state) = false;
     // Total physical linear-state slots [0, N) for the unified slot pool
     // (= num_linear_state_blocks). Only used when enable_linear_state is true.
@@ -46,6 +42,10 @@ class BlockManagerPool : public KVCacheManager {
     PROPERTY(bool, enable_prefix_cache) = true;
     PROPERTY(bool, enable_disagg_pd) = false;
     PROPERTY(bool, enable_kvcache_store) = false;
+    // Host prefix-cache offload (host_blocks_factor > 1). Wraps composite
+    // leaves in ConcurrentBlockManagerImpl so the async D2H offload callback
+    // can free blocks off-thread safely.
+    PROPERTY(bool, enable_host_offload) = false;
     PROPERTY(bool, enable_xtensor) = false;
     PROPERTY(int64_t, num_layers) = 0;  // Required when enable_xtensor is true
     PROPERTY(int64_t, slot_size) = 0;   // Memory size per slot (for xtensor)

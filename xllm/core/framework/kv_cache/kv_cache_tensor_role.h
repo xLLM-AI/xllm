@@ -37,6 +37,7 @@ class KVCacheTensorRole {
     SCORE_STATE = 11,
     INDEX_KV_STATE = 12,
     INDEX_SCORE_STATE = 13,
+    SWA = 14,
     INVALID = -1,
   };
 
@@ -70,6 +71,8 @@ class KVCacheTensorRole {
       value_ = INDEX_KV_STATE;
     } else if (str == "INDEX_SCORE_STATE" || str == "index_score_state") {
       value_ = INDEX_SCORE_STATE;
+    } else if (str == "SWA" || str == "swa") {
+      value_ = SWA;
     } else {
       value_ = INVALID;
     }
@@ -114,6 +117,8 @@ class KVCacheTensorRole {
       return "index_kv_state";
     } else if (this->value_ == INDEX_SCORE_STATE) {
       return "index_score_state";
+    } else if (this->value_ == SWA) {
+      return "swa";
     } else {
       return "invalid";
     }

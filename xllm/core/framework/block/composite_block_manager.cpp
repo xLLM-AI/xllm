@@ -40,11 +40,13 @@ uint32_t ceil_div(uint32_t numerator, uint32_t denominator) {
 }
 
 // Wrap a leaf in a concurrency adapter when sequence-level entry points may run
-// off the scheduler thread (disagg PD / kvcache store prefill threadpools).
+// off the scheduler thread (disagg PD / kvcache store prefill threadpools, or
+// the host-offload D2H completion callback).
 std::unique_ptr<BlockManager> maybe_concurrent(
     std::unique_ptr<BlockManager> leaf,
     const BlockManager::Options& options) {
-  if (options.enable_disagg_pd() || options.enable_kvcache_store()) {
+  if (options.enable_disagg_pd() || options.enable_kvcache_store() ||
+      options.enable_host_offload()) {
     return std::make_unique<ConcurrentBlockManagerImpl>(std::move(leaf));
   }
   return leaf;
@@ -218,6 +220,42 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
     }
     if (!blocks->empty()) {
       staged.emplace_back(type, std::move(*blocks));
+    }
+  }
+
+  // Post-condition (grow-or-fail): every cache-bearing leaf must now hold
+  // enough blocks to cover num_tokens. A leaf that returns an empty vector
+  // means "no growth needed", so we must verify that was true. SINGLE / LINEAR
+  // leaves are per-sequence resource slots (one block per sequence), not
+  // token-cache, and are exempt. Without this check, a leaf that mistakenly
+  // returned an empty vector under pool pressure (instead of nullopt) would
+  // let the pool report admission success while the device is under-provisioned
+  // for num_tokens -- batch_input_builder.cpp:589 CHECK then fires downstream
+  // with `current_max_tokens_capacity() >= seq_len`. Rolling back here lets the
+  // scheduler defer the sequence to the next tick, at which point pool state
+  // may have recovered.
+  for (const auto& [type, entry] : leaves_) {
+    if (type == BlockType::SINGLE || type == BlockType::LINEAR) {
+      continue;
+    }
+    const size_t leaf_block_size = entry.leaf->block_size();
+    if (leaf_block_size == 0) {
+      continue;
+    }
+    const size_t needed = (num_tokens + leaf_block_size - 1) / leaf_block_size;
+    size_t staged_for_type = 0;
+    for (const auto& [staged_type, staged_blocks] : staged) {
+      if (staged_type == type) {
+        staged_for_type = staged_blocks.size();
+        break;
+      }
+    }
+    const size_t total = seq->kv_state().num_blocks(type) + staged_for_type;
+    if (total < needed) {
+      for (auto& [staged_type, staged_blocks] : staged) {
+        leaf_of(staged_type)->deallocate(staged_blocks);
+      }
+      return false;
     }
   }
 

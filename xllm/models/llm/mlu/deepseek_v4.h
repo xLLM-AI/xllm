@@ -225,7 +225,9 @@ class DeepseekV4ModelImpl final
     h = hc_head_(h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
     ModelOutput out(hidden_states, residual_out);
-    out.aux_hidden_states = pre_hc_head_h.flatten(1);
+    if (model_args_.num_speculative_tokens() > 0) {
+      out.aux_hidden_states = pre_hc_head_h.flatten(1);
+    }
     return out;
   }
 
