@@ -113,7 +113,8 @@ class WorkerImpl {
                                            ForwardInput& processed_inputs);
   void prepare_work_before_execute_on_stream(const ForwardInput& input,
                                              ForwardInput& processed_input,
-                                             Stream& prepare_stream);
+                                             Stream& prepare_stream,
+                                             bool record_ready_event = true);
 
   // Internal helper shared by worker pipelines before model execution.
   virtual void apply_kv_block_swaps(const ModelInputParams& input_params);

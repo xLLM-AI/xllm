@@ -9,6 +9,7 @@ cc_library(
   SRCS
     replace_token.cpp
     laser_attention.cpp
+    mtp_prepare_next_draft.cpp
     top_k_top_p.cpp
     quant_matmul.cpp
     quantize.cpp

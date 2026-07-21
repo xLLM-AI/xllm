@@ -204,13 +204,30 @@ void prepare_input_params_for_linear_attention(ModelInputParams& input_params) {
         input_params.parallel.query_start_loc[i] + seq_len;
   }
 
-  torch::Tensor has_initial_state_tensor =
-      input_params.attention.device.kv_cache_tokens_nums > 0;
-  torch::Tensor has_initial_state_int64 = has_initial_state_tensor.contiguous()
-                                              .view({-1})
-                                              .to(torch::kCPU)
-                                              .to(torch::kInt64);
-  const int64_t has_initial_state_size = has_initial_state_int64.size(0);
+  const std::vector<int32_t>& host_kv_cache_tokens_nums =
+      input_params.attention.host.kv_cache_tokens_nums;
+  std::vector<int64_t> has_initial_state;
+  if (!host_kv_cache_tokens_nums.empty()) {
+    has_initial_state.reserve(host_kv_cache_tokens_nums.size());
+    for (int32_t num_tokens : host_kv_cache_tokens_nums) {
+      has_initial_state.emplace_back(num_tokens > 0 ? 1 : 0);
+    }
+  } else {
+    // Compatibility fallback for inputs that only carry the device view.
+    torch::Tensor has_initial_state_tensor =
+        input_params.attention.device.kv_cache_tokens_nums > 0;
+    torch::Tensor has_initial_state_cpu =
+        has_initial_state_tensor.contiguous()
+            .view({-1})
+            .to(torch::kCPU)
+            .to(torch::kInt64);
+    has_initial_state.assign(
+        has_initial_state_cpu.data_ptr<int64_t>(),
+        has_initial_state_cpu.data_ptr<int64_t>() +
+            has_initial_state_cpu.numel());
+  }
+  const int64_t has_initial_state_size =
+      static_cast<int64_t>(has_initial_state.size());
   CHECK_GT(has_initial_state_size, 0)
       << "kv_cache_tokens_nums must not be empty for linear attention";
   CHECK(batch_size == has_initial_state_size ||
@@ -219,21 +236,16 @@ void prepare_input_params_for_linear_attention(ModelInputParams& input_params) {
       << "size, kv_cache_tokens_nums_size=" << has_initial_state_size
       << ", batch_size=" << batch_size;
   if (batch_size == has_initial_state_size) {
-    input_params.parallel.has_initial_state = std::vector<int64_t>(
-        has_initial_state_int64.data_ptr<int64_t>(),
-        has_initial_state_int64.data_ptr<int64_t>() + batch_size);
+    input_params.parallel.has_initial_state = std::move(has_initial_state);
     return;
   }
 
   const int64_t repeat_count = batch_size / has_initial_state_size;
   input_params.parallel.has_initial_state.clear();
   input_params.parallel.has_initial_state.reserve(batch_size);
-  const int64_t* has_initial_state_ptr =
-      has_initial_state_int64.data_ptr<int64_t>();
   for (int64_t i = 0; i < has_initial_state_size; ++i) {
     for (int64_t repeat_idx = 0; repeat_idx < repeat_count; ++repeat_idx) {
-      input_params.parallel.has_initial_state.push_back(
-          has_initial_state_ptr[i]);
+      input_params.parallel.has_initial_state.push_back(has_initial_state[i]);
     }
   }
 }
@@ -774,7 +786,8 @@ void WorkerImpl::prepare_work_before_execute(const ForwardInput& input,
 void WorkerImpl::prepare_work_before_execute_on_stream(
     const ForwardInput& input,
     ForwardInput& processed_input,
-    Stream& prepare_stream) {
+    Stream& prepare_stream,
+    bool record_ready_event) {
 #if defined(USE_NPU)
   // Without device_capture_lock, ACL graph capture will be interrupted by the
   // synchronization H2D of data update streams asynchronously scheduled by
@@ -1022,11 +1035,15 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
 
   prepare_device_on_stream();
 
-  StreamEventPtr event = prepare_stream.record_event();
-  if (event == nullptr) {
-    prepare_stream.synchronize();
+  if (record_ready_event) {
+    StreamEventPtr event = prepare_stream.record_event();
+    if (event == nullptr) {
+      prepare_stream.synchronize();
+    }
+    processed_input.metadata_ready_event = event;
+  } else {
+    processed_input.metadata_ready_event.reset();
   }
-  processed_input.metadata_ready_event = event;
 }
 
 void WorkerImpl::apply_kv_block_swaps(const ModelInputParams& input_params) {
