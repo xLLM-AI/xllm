@@ -202,9 +202,16 @@ cc_test(
     glog::glog
 )
 
+# Each case forks two ranks. Keep CTest from scheduling cases from this target
+# onto the same MLU devices concurrently, and retain an outer timeout in case
+# the process-group runtime does not respond to the in-test cleanup deadline.
 cc_test(
   NAME
     deepseek_v2_attention_multi_device_test
+  TIMEOUT
+    150
+  RESOURCE_LOCK
+    mlu_multi_device
   SRCS
     deepseek_v2_attention_multi_device_test.cpp
     tests_utils.cpp
@@ -214,6 +221,20 @@ cc_test(
     :mlu_layers
     :parallel_state
     :state_dict
+    GTest::gtest_main
+    torch
+    glog::glog
+)
+
+# Cross-layer DSA top-k relay state is pure CPU logic, but the protocol belongs
+# to the MLU decoder/attention boundary.
+cc_test(
+  NAME
+    dsa_topk_relay_test
+  SRCS
+    dsa_topk_relay_test.cpp
+  DEPS
+    :mlu_layers
     GTest::gtest_main
     torch
     glog::glog

@@ -5,6 +5,8 @@ cc_library(
     mlu_layers
   HDRS
     attention.h
+    dsa_topk_relay.h
+    dsa_topk_state.h
     deepseek_v2_attention.h
     deepseek_v2_decoder_layer_impl.h
     deepseek_v2_sparse_moe_block.h
