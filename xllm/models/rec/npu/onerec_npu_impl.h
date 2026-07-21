@@ -540,9 +540,8 @@ class OneRecStackImpl : public torch::nn::Module {
              use_absolute_position_embedding ==
                  other.use_absolute_position_embedding &&
              query_length == other.query_length &&
-             key_length == other.key_length &&
-             num_heads == other.num_heads && dtype == other.dtype &&
-             device == other.device &&
+             key_length == other.key_length && num_heads == other.num_heads &&
+             dtype == other.dtype && device == other.device &&
              relative_attention_num_buckets ==
                  other.relative_attention_num_buckets &&
              relative_attention_max_distance ==
@@ -591,12 +590,12 @@ class OneRecStackImpl : public torch::nn::Module {
       effective_attn_mask = create_moe_attention_mask(
           query_length, h, /*is_decoder=*/false, /*batch_size=*/1);
     } else {
-      effective_attn_mask = compute_position_bias_mask(
-          query_length,
-          key_length,
-          h,
-          /*is_decode_stage=*/false,
-          input_params);
+      effective_attn_mask =
+          compute_position_bias_mask(query_length,
+                                     key_length,
+                                     h,
+                                     /*is_decode_stage=*/false,
+                                     input_params);
     }
     auto preprocessed_attn_mask =
         preprocess_attention_mask(effective_attn_mask, h);
@@ -665,8 +664,7 @@ class OneRecStackImpl : public torch::nn::Module {
   std::vector<layer::NpuOneRecBlockLayer> layers_;
   std::mutex attention_mask_cache_mutex_;
   uint64_t attention_mask_cache_clock_ = 0;
-  std::array<EncoderAttentionMaskCacheEntry,
-             kEncoderAttentionMaskCacheCapacity>
+  std::array<EncoderAttentionMaskCacheEntry, kEncoderAttentionMaskCacheCapacity>
       attention_mask_cache_;
 };
 TORCH_MODULE(OneRecStack);

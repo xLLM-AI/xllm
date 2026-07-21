@@ -184,8 +184,7 @@ struct has_onerec_prefill_graph_support : std::false_type {};
 template <typename T>
 struct has_onerec_prefill_graph_support<
     T,
-    std::void_t<decltype(std::declval<T>()
-                             ->supports_onerec_prefill_graph())>>
+    std::void_t<decltype(std::declval<T>()->supports_onerec_prefill_graph())>>
     : std::true_type {};
 
 template <typename T, typename = void>
@@ -194,8 +193,7 @@ struct has_get_onerec_graph_encoder_output : std::false_type {};
 template <typename T>
 struct has_get_onerec_graph_encoder_output<
     T,
-    std::void_t<decltype(std::declval<T>()
-                             ->get_onerec_graph_encoder_output())>>
+    std::void_t<decltype(std::declval<T>()->get_onerec_graph_encoder_output())>>
     : std::true_type {};
 
 template <typename T, typename = void>
@@ -204,13 +202,10 @@ struct has_bind_onerec_prefill_graph_buffers : std::false_type {};
 template <typename T>
 struct has_bind_onerec_prefill_graph_buffers<
     T,
-    std::void_t<decltype(std::declval<T>()
-                             ->bind_onerec_prefill_graph_buffers(
-                                 std::declval<const torch::Tensor&>(),
-                                 std::declval<
-                                     const std::vector<torch::Tensor>&>(),
-                                 std::declval<
-                                     const std::vector<torch::Tensor>&>()))>>
-    : std::true_type {};
+    std::void_t<decltype(std::declval<T>()->bind_onerec_prefill_graph_buffers(
+        std::declval<const torch::Tensor&>(),
+        std::declval<const std::vector<torch::Tensor>&>(),
+        std::declval<const std::vector<torch::Tensor>&>()))>> : std::true_type {
+};
 }  // namespace detail
 }  // namespace xllm

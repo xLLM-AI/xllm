@@ -1206,9 +1206,8 @@ void RecWorkerImpl::OneRecXAttentionWorkPipeline::allocate_shared_kv_caches() {
 }
 
 void RecWorkerImpl::OneRecXAttentionWorkPipeline::
-    prepare_shared_kv_caches_for_input(
-        int64_t shared_kv_tokens,
-        OneRecXAttentionParams& onerec_params) {
+    prepare_shared_kv_caches_for_input(int64_t shared_kv_tokens,
+                                       OneRecXAttentionParams& onerec_params) {
   if (cached_shared_k_caches_.empty() || cached_shared_v_caches_.empty()) {
     allocate_shared_kv_caches();
   }
