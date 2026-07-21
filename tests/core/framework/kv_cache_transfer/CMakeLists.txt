@@ -46,16 +46,3 @@ cc_test(
 target_link_libraries(mooncake_transfer_engine_test PRIVATE
   "$<LINK_GROUP:RESCAN,xtensor,xllm_server>")
 endif()
-
-if(USE_MLU)
-cc_test(
-  NAME
-    mlu_host_cache_capability_test
-  SRCS
-    mlu_host_cache_capability_test.cpp
-  DEPS
-    :kv_cache_transfer
-    GTest::gtest_main
-    torch
-)
-endif()

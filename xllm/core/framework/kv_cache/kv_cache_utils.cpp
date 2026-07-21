@@ -575,6 +575,30 @@ int64_t scale_host_block_count(int64_t block_count, double host_blocks_factor) {
                            static_cast<int64_t>(block_count * factor));
 }
 
+void check_host_cache_options(double host_blocks_factor,
+                              bool enable_graph,
+                              const std::string& kv_cache_dtype,
+                              const std::string& indexer_cache_dtype) {
+  if (host_blocks_factor <= 1.0) {
+    return;
+  }
+
+  // Host-cache copies use streams and synchronization outside graph capture;
+  // no backend currently guarantees that lifecycle during graph execution.
+  CHECK(!enable_graph)
+      << "Host prefix cache requires enable_graph=false; disable graph or "
+         "host cache.";
+
+  // Quantized KV and indexer caches add scale tensors whose host offload and
+  // restore lifecycle is not supported consistently by the common path yet.
+  CHECK_EQ(kv_cache_dtype, "auto")
+      << "Host prefix cache requires kv_cache_dtype=auto; disable KV cache "
+         "quantization or host cache.";
+  CHECK_EQ(indexer_cache_dtype, "auto")
+      << "Host prefix cache requires indexer_cache_dtype=auto; disable "
+         "indexer cache quantization or host cache.";
+}
+
 std::vector<int64_t> build_host_tensor_shape(
     const std::vector<int64_t>& base_shape,
     double host_blocks_factor) {

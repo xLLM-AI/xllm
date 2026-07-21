@@ -61,7 +61,6 @@ class HierarchyKVCacheTransfer {
     PROPERTY(uint32_t, layers);
     PROPERTY(double, host_blocks_factor) = 0.0;
     PROPERTY(uint32_t, layers_wise_copy_batchs) = 1;
-    PROPERTY(bool, enable_graph) = false;
     PROPERTY(bool, enable_mla) = false;
     PROPERTY(bool, enable_kvcache_store) = false;
     PROPERTY(std::string, store_protocol) = "rdma";
@@ -88,7 +87,6 @@ class HierarchyKVCacheTransfer {
 
  private:
   void build_device_block_type_map();
-  void validate_host_cache() const;
   void create_host_cache();
   CopyPlan build_copy_plan(
       const std::vector<BlockTransferInfo>& block_transfer_info,

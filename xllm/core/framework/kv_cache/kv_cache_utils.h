@@ -181,6 +181,12 @@ LinearAttentionKVCacheTensors create_linear_attention_kv_cache_tensors(
 // (clamped to >= 1.0 so the host pool is never smaller than the device pool).
 int64_t scale_host_block_count(int64_t block_count, double host_blocks_factor);
 
+// Validate backend-independent host prefix-cache configuration constraints.
+void check_host_cache_options(double host_blocks_factor,
+                              bool enable_graph,
+                              const std::string& kv_cache_dtype,
+                              const std::string& indexer_cache_dtype);
+
 // Build a host tensor shape from a per-layer device shape by scaling dim 0
 // (block count) by host_blocks_factor.
 std::vector<int64_t> build_host_tensor_shape(

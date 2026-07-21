@@ -181,6 +181,11 @@ class HostKVCacheTest : public ::testing::Test {
   torch::Tensor context_tensor_;
 };
 
+class HostKVCacheConfigTest : public ::testing::Test {
+ protected:
+  void SetUp() override { GTEST_FLAG_SET(death_test_style, "threadsafe"); }
+};
+
 TEST(KVCacheTest, DeepSeekV4FourDimCachesUseDeviceLayout) {
   constexpr int64_t kSwaCount = 10;
   constexpr int64_t kC4Count = 32;
@@ -871,6 +876,46 @@ TEST_F(HostKVCacheTest, HostKVCacheDeepSeekV4PerBlockType) {
   EXPECT_TRUE(c128_tensors.count(KVCacheTensorRole::INDEX) == 0);
   EXPECT_EQ(c128_tensors.at(KVCacheTensorRole::KEY).size(0),
             scale_host_block_count(kC128Count, kHostFactor));
+}
+
+TEST_F(HostKVCacheConfigTest, AllowsSupportedHostCacheOptions) {
+  EXPECT_NO_FATAL_FAILURE(check_host_cache_options(
+      /*host_blocks_factor=*/2.0,
+      /*enable_graph=*/false,
+      /*kv_cache_dtype=*/"auto",
+      /*indexer_cache_dtype=*/"auto"));
+}
+
+TEST_F(HostKVCacheConfigTest, IgnoresOptionsWhenHostCacheIsDisabled) {
+  EXPECT_NO_FATAL_FAILURE(check_host_cache_options(
+      /*host_blocks_factor=*/1.0,
+      /*enable_graph=*/true,
+      /*kv_cache_dtype=*/"int8",
+      /*indexer_cache_dtype=*/"int8"));
+}
+
+TEST_F(HostKVCacheConfigTest, RejectsGraphExecution) {
+  EXPECT_DEATH(check_host_cache_options(/*host_blocks_factor=*/2.0,
+                                        /*enable_graph=*/true,
+                                        /*kv_cache_dtype=*/"auto",
+                                        /*indexer_cache_dtype=*/"auto"),
+               "enable_graph=false");
+}
+
+TEST_F(HostKVCacheConfigTest, RejectsQuantizedKVCache) {
+  EXPECT_DEATH(check_host_cache_options(/*host_blocks_factor=*/2.0,
+                                        /*enable_graph=*/false,
+                                        /*kv_cache_dtype=*/"int8",
+                                        /*indexer_cache_dtype=*/"auto"),
+               "kv_cache_dtype=auto");
+}
+
+TEST_F(HostKVCacheConfigTest, RejectsQuantizedIndexerCache) {
+  EXPECT_DEATH(check_host_cache_options(/*host_blocks_factor=*/2.0,
+                                        /*enable_graph=*/false,
+                                        /*kv_cache_dtype=*/"auto",
+                                        /*indexer_cache_dtype=*/"int8"),
+               "indexer_cache_dtype=auto");
 }
 
 }  // namespace xllm

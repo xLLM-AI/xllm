@@ -496,6 +496,12 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
 }
 
 bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
+  const KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
+  check_host_cache_options(options_.host_blocks_factor(),
+                           options_.enable_graph(),
+                           options_.kv_cache_dtype(),
+                           kv_cache_config.indexer_cache_dtype());
+
   LOG(INFO) << "kv cache capacity: "
             << readable_size(kv_cache_cap.cache_size_in_bytes())
             << ", blocks: " << kv_cache_cap.n_blocks()
@@ -618,6 +624,16 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
   }
 
   if (options_.host_blocks_factor() > 1.0) {
+    // Host prefix-cache offload routes device/host blocks through a single flat
+    // BlockType::KV host pool. DeepSeek-V4 has no KV block group (its device
+    // caches are SWA/C4/C128), so collect_offload_pairs would find no KV blocks
+    // and silently offload nothing while still allocating the pinned host
+    // cache. Fail loud until per-block-type host offload is implemented.
+    CHECK(!util::is_deepseek_v4_model_type(args_.model_type()))
+        << "host_blocks_factor > 1 (host prefix-cache offload) does not "
+           "support "
+           "DeepSeek-V4 yet: its SWA/C4/C128 block groups have no KV pool to "
+           "offload. Disable --host_blocks_factor for DeepSeek-V4 models.";
     options.enable_host_offload(true);
     kv_cache_manager_ =
         std::make_unique<HierarchyBlockManagerPool>(options, this, dp_size_);
