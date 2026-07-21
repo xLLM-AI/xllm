@@ -44,6 +44,9 @@ limitations under the License.
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/model_context.h"
 #include "core/framework/request/dit_request_state.h"
+#if defined(USE_DCU)
+#include "core/layers/dcu/flash_attention.h"
+#endif
 #include "models/dit/autoencoders/autoencoder_kl.h"  // randn_tensor
 #include "models/dit/encoders/umt5_encoder.h"
 
@@ -725,6 +728,124 @@ inline torch::Tensor apply_rotary_emb(const torch::Tensor& x,
       .to(x.dtype());
 }
 
+#if defined(USE_DCU)
+inline torch::Tensor audio_dense_varlen_flash_attention(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    std::optional<torch::Tensor> key_mask = std::nullopt) {
+  CHECK_EQ(query.dim(), 4) << "AudioDiT query must be [B,H,S,D]";
+  CHECK_EQ(key.dim(), 4) << "AudioDiT key must be [B,H,S,D]";
+  CHECK_EQ(value.dim(), 4) << "AudioDiT value must be [B,H,S,D]";
+  CHECK_EQ(query.size(0), key.size(0)) << "AudioDiT q/k batch mismatch";
+  CHECK_EQ(query.size(0), value.size(0)) << "AudioDiT q/v batch mismatch";
+  CHECK_EQ(query.size(1), key.size(1)) << "AudioDiT q/k head mismatch";
+  CHECK_EQ(key.size(1), value.size(1)) << "AudioDiT k/v head mismatch";
+  CHECK_EQ(query.size(3), key.size(3)) << "AudioDiT q/k head dim mismatch";
+  CHECK_EQ(query.size(3), value.size(3)) << "AudioDiT q/v head dim mismatch";
+  CHECK_EQ(key.size(2), value.size(2)) << "AudioDiT k/v seq mismatch";
+
+  const int64_t batch_size = query.size(0);
+  const int64_t num_heads = query.size(1);
+  const int64_t q_seq_len = query.size(2);
+  const int64_t kv_seq_len = key.size(2);
+  const int64_t head_dim = query.size(3);
+
+  if (key_mask.has_value() && key_mask->all().item<bool>()) {
+    key_mask = std::nullopt;
+  }
+
+  const auto output_dtype = query.scalar_type();
+  torch::Tensor attn_query = query;
+  torch::Tensor attn_key = key;
+  torch::Tensor attn_value = value;
+  if (output_dtype == at::kFloat) {
+    attn_query = query.to(torch::kBFloat16);
+    attn_key = key.to(torch::kBFloat16);
+    attn_value = value.to(torch::kBFloat16);
+  }
+
+  auto dense_query = attn_query.transpose(1, 2).contiguous().view(
+      {batch_size * q_seq_len, num_heads, head_dim});
+  std::vector<int32_t> cu_seqlens_q_vec;
+  cu_seqlens_q_vec.reserve(batch_size + 1);
+  for (int64_t i = 0; i <= batch_size; ++i) {
+    cu_seqlens_q_vec.push_back(static_cast<int32_t>(i * q_seq_len));
+  }
+
+  torch::Tensor dense_key;
+  torch::Tensor dense_value;
+  std::vector<int32_t> cu_seqlens_k_vec;
+  cu_seqlens_k_vec.reserve(batch_size + 1);
+  cu_seqlens_k_vec.push_back(0);
+
+  if (key_mask.has_value()) {
+    CHECK_EQ(key_mask->dim(), 2) << "AudioDiT key mask must be [B,S]";
+    CHECK_EQ(key_mask->size(0), batch_size)
+        << "AudioDiT key mask batch mismatch";
+    CHECK_EQ(key_mask->size(1), kv_seq_len) << "AudioDiT key mask seq mismatch";
+
+    std::vector<torch::Tensor> key_chunks;
+    std::vector<torch::Tensor> value_chunks;
+    key_chunks.reserve(batch_size);
+    value_chunks.reserve(batch_size);
+    int32_t total_kv_len = 0;
+    for (int64_t i = 0; i < batch_size; ++i) {
+      auto valid_indices =
+          torch::nonzero(key_mask->select(0, i).to(torch::kBool)).flatten();
+      const int64_t valid_len = valid_indices.numel();
+      CHECK_GT(valid_len, 0)
+          << "AudioDiT dense flash attention requires at least one valid key";
+      CHECK_LE(valid_len,
+               static_cast<int64_t>(std::numeric_limits<int32_t>::max()) -
+                   total_kv_len)
+          << "AudioDiT key sequence length exceeds int32 range";
+      total_kv_len += static_cast<int32_t>(valid_len);
+      cu_seqlens_k_vec.push_back(total_kv_len);
+
+      key_chunks.push_back(
+          attn_key.select(0, i).transpose(0, 1).contiguous().index_select(
+              0, valid_indices));
+      value_chunks.push_back(
+          attn_value.select(0, i).transpose(0, 1).contiguous().index_select(
+              0, valid_indices));
+    }
+    dense_key = torch::cat(key_chunks, /*dim=*/0);
+    dense_value = torch::cat(value_chunks, /*dim=*/0);
+  } else {
+    dense_key = attn_key.transpose(1, 2).contiguous().view(
+        {batch_size * kv_seq_len, attn_key.size(1), head_dim});
+    dense_value = attn_value.transpose(1, 2).contiguous().view(
+        {batch_size * kv_seq_len, attn_value.size(1), head_dim});
+    for (int64_t i = 1; i <= batch_size; ++i) {
+      cu_seqlens_k_vec.push_back(static_cast<int32_t>(i * kv_seq_len));
+    }
+  }
+
+  auto cu_seqlens_q =
+      torch::tensor(cu_seqlens_q_vec, torch::dtype(torch::kInt32))
+          .to(query.device())
+          .contiguous();
+  auto cu_seqlens_k =
+      torch::tensor(cu_seqlens_k_vec, torch::dtype(torch::kInt32))
+          .to(query.device())
+          .contiguous();
+
+  auto output = layer::dense_varlen_flash_attention(
+      dense_query,
+      dense_key,
+      dense_value,
+      cu_seqlens_q,
+      cu_seqlens_k,
+      std::pow(static_cast<double>(head_dim), -0.5),
+      /*is_causal=*/false);
+  return output.view({batch_size, q_seq_len, num_heads, head_dim})
+      .transpose(1, 2)
+      .contiguous()
+      .to(output_dtype);
+}
+#endif
+
 // Global Response Normalization (GRN) for ConvNeXtV2
 class AudioGRNImpl : public torch::nn::Module {
  public:
@@ -936,6 +1057,9 @@ class AudioSelfAttentionImpl : public torch::nn::Module {
       k = apply_rotary_emb(k, rope->first, rope->second);
     }
 
+#if defined(USE_DCU)
+    torch::Tensor out = audio_dense_varlen_flash_attention(q, k, v, mask);
+#else
     // Attention mask: convert bool (True=attend) to additive float mask.
     // cuDNN/Flash backends require a float additive mask, not a bool mask.
     std::optional<torch::Tensor> attn_mask;
@@ -961,6 +1085,7 @@ class AudioSelfAttentionImpl : public torch::nn::Module {
     torch::Tensor weights =
         torch::softmax(scores.to(torch::kFloat32), -1).to(q.dtype());
     torch::Tensor out = torch::matmul(weights, v);  // (B,H,S,head_dim)
+#endif
 
     out =
         out.transpose(1, 2).contiguous().view({B, S, inner_dim_}).to(q.dtype());
@@ -1033,6 +1158,9 @@ class AudioCrossAttentionImpl : public torch::nn::Module {
       k = apply_rotary_emb(k, cond_rope->first, cond_rope->second);
     }
 
+#if defined(USE_DCU)
+    torch::Tensor out = audio_dense_varlen_flash_attention(q, k, v, cond_mask);
+#else
     // Build cross-attn mask from cond_mask: (B, H, S, Sc)
     // cond_mask is True for valid (attend) tokens.
     // Convert bool to additive float mask for cuDNN/Flash backend
@@ -1064,6 +1192,7 @@ class AudioCrossAttentionImpl : public torch::nn::Module {
         torch::nan_to_num(torch::softmax(scores.to(torch::kFloat32), -1), 0.0)
             .to(q.dtype());
     torch::Tensor out = torch::matmul(weights, v);  // (B,H,S,head_dim)
+#endif
 
     out =
         out.transpose(1, 2).contiguous().view({B, S, inner_dim_}).to(q.dtype());

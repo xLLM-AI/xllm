@@ -32,7 +32,9 @@
 #include "core/framework/request/dit_request_state.h"
 #include "core/framework/tokenizer/tokenizer.h"
 #include "core/layers/common/attention_metadata_builder.h"
+#if defined(USE_CUDA)
 #include "core/layers/cuda/flashinfer_workspace.h"
+#endif
 #include "models/dit/autoencoders/autoencoder_kl.h"
 #include "models/dit/pipelines/pipeline_longcat_image.h"
 #include "models/dit/schedulers/flowmatch_euler_discrete_scheduler.h"
@@ -80,7 +82,7 @@ inline std::pair<int64_t, int64_t> calculate_dimensions_edit(
   return {w, h};
 }
 
-// LongCat-Image-Edit pipeline for CUDA backend.
+// LongCat-Image-Edit pipeline.
 class LongCatImageEditPipelineImpl : public torch::nn::Module {
  public:
   explicit LongCatImageEditPipelineImpl(const DiTModelContext& context)
@@ -89,9 +91,11 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
     const auto& model_args = context.get_model_args("vae");
     options_ = context.get_tensor_options();
 
-    // Initialize FlashinferWorkspace for attention operations
+#if defined(USE_CUDA)
+    // Initialize FlashinferWorkspace for CUDA attention operations.
     layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
         options_.device());
+#endif
 
     vae_scale_factor_ = 1 << (model_args.block_out_channels().size() - 1);
     vae_shift_factor_ = model_args.shift_factor();
@@ -129,16 +133,21 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
     const auto& original_parallel_args = context.get_parallel_args();
     ParallelArgs vlm_parallel_args = original_parallel_args;
     if (original_parallel_args.tp_group_ == nullptr) {
+      constexpr int32_t kLongCatImageEditVlmTpBasePort = 29564;
+      const int32_t vlm_tp_port = get_longcat_vlm_tp_port(
+          kLongCatImageEditVlmTpBasePort, original_parallel_args.rank());
       LOG(INFO)
-          << "Creating real ProcessGroup for single-device VLM initialization.";
-      vlm_tp_group_ = create_process_group(0,
-                                           1,
-                                           1,
-                                           29501,  // Different port from T2I
-                                           false,
-                                           "127.0.0.1",
-                                           "vlm_tp_group_longcat_edit",
-                                           options_.device());
+          << "Creating real ProcessGroup for single-device VLM initialization "
+          << "on 127.0.0.1:" << vlm_tp_port;
+      vlm_tp_group_ =
+          create_process_group(/*rank=*/0,
+                               /*world_size=*/1,
+                               /*rank_size=*/1,
+                               vlm_tp_port,
+                               /*trans=*/false,
+                               /*host=*/"127.0.0.1",
+                               /*group_name=*/"vlm_tp_group_longcat_edit",
+                               options_.device());
       vlm_parallel_args.tp_group_ = vlm_tp_group_.get();
     }
 
@@ -200,10 +209,22 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
             ? std::make_optional(input.negative_pooled_prompt_embeds)
             : std::nullopt;
 
-    auto image = input.images.defined() ? std::make_optional(input.images)
-                                        : std::nullopt;
+    std::optional<torch::Tensor> image = std::nullopt;
+    if (!input.images_list.empty()) {
+      CHECK_EQ(input.images_list.size(), 1)
+          << "LongCat-Image-Edit expects exactly one input image tensor, got "
+          << input.images_list.size();
+      image = input.images_list[0];
+    } else if (input.images.defined()) {
+      image = input.images;
+    }
 
-    CHECK(image.has_value()) << "LongCat-Image-Edit requires an input image.";
+    CHECK(image.has_value())
+        << "LongCat-Image-Edit requires an input image in images or "
+           "images_list. batch_size="
+        << input.batch_size << ", prompts=" << input.prompts.size()
+        << ", images_defined=" << input.images.defined()
+        << ", images_list_size=" << input.images_list.size();
 
     std::vector<torch::Tensor> output = forward_(
         image,                             // input image
@@ -586,8 +607,8 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
     return {prompt_embeds.value(), text_ids};
   }
 
-  torch::Tensor encode_vae_image(const torch::Tensor& image, int64_t seed) {
-    torch::Tensor latents = vae_->encode(image, seed);
+  torch::Tensor encode_vae_image(const torch::Tensor& image) {
+    torch::Tensor latents = vae_->encode_mode(image);
     latents = (latents - vae_shift_factor_) * vae_scaling_factor_;
     return latents;
   }
@@ -611,7 +632,7 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
 
     torch::Tensor image_latents;
     if (image.size(1) != num_channels_latents) {
-      image_latents = encode_vae_image(image, seed);
+      image_latents = encode_vae_image(image);
     } else {
       image_latents = image;
     }
@@ -799,6 +820,9 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
       const torch::Tensor& attention_mask,
       std::optional<MMBatchData> mm_data_opt = std::nullopt) {
     ModelInputParams params;
+#if defined(USE_DCU)
+    params.graph.use_dense_flash_attention = true;
+#endif
 
     int64_t actual_seq_len;
     if (positions.dim() == 2) {
@@ -1123,13 +1147,15 @@ TORCH_MODULE(LongCatImageEditPipeline);
 // Register LongCat-Image-Edit as DiT model.
 namespace {
 const bool longcat_image_edit_dit_registered = []() {
-  ModelRegistry::register_dit_model_factory(
-      "LongCat-Image-Edit", [](const DiTModelContext& context) {
-        LongCatImageEditPipeline model(context);
-        model->eval();
-        return std::make_unique<DiTModelImpl<LongCatImageEditPipeline>>(
-            std::move(model), context.get_tensor_options());
-      });
+  auto factory = [](const DiTModelContext& context) {
+    LongCatImageEditPipeline model(context);
+    model->eval();
+    return std::make_unique<DiTModelImpl<LongCatImageEditPipeline>>(
+        std::move(model), context.get_tensor_options());
+  };
+  ModelRegistry::register_dit_model_factory("LongCat-Image-Edit", factory);
+  ModelRegistry::register_dit_model_factory("LongCatImageEditPipeline",
+                                            factory);
   return true;
 }();
 }  // namespace

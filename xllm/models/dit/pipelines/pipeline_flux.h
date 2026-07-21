@@ -336,4 +336,5 @@ class FluxPipelineImpl : public FluxPipelineBaseImpl {
 TORCH_MODULE(FluxPipeline);
 
 REGISTER_DIT_MODEL(flux, FluxPipeline);
+REGISTER_DIT_MODEL_WITH_VARNAME(flux_pipeline, FluxPipeline, FluxPipeline);
 }  // namespace xllm
