@@ -20,6 +20,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <cstdint>
 #include <vector>
 
 #include "core/framework/config/dit_config.h"
@@ -54,6 +55,10 @@ DiTForwardInput DiTBatch::prepare_forward_input() {
   CHECK(!request_vec_.empty());
   if (::xllm::DiTConfig::get_instance().dit_debug_print()) {
     LOG(INFO) << "DiT batch_size=" << request_vec_.size();
+  }
+  if (request_vec_[0]->state().request_kind() == DiTRequestKind::kText) {
+    CHECK_EQ(request_vec_.size(), 1U)
+        << "Cola-DLM text generation supports batch_size=1 only.";
   }
 
   DiTForwardInput input;
@@ -233,8 +238,19 @@ DiTForwardInput DiTBatch::prepare_forward_input() {
 }
 
 void DiTBatch::process_forward_output(const DiTForwardOutput& output) {
+  // Text diffusion models produce text output directly.
+  if (!output.text_output.empty()) {
+    CHECK(request_vec_.size() == output.text_output.size());
+    for (int32_t idx = 0; idx < static_cast<int32_t>(request_vec_.size());
+         ++idx) {
+      auto& request = request_vec_[idx];
+      request->handle_forward_text_output(output.text_output[idx]);
+    }
+    return;
+  }
   CHECK(request_vec_.size() == output.tensors.size());
-  for (int idx = 0; idx < request_vec_.size(); ++idx) {
+  for (int32_t idx = 0; idx < static_cast<int32_t>(request_vec_.size());
+       ++idx) {
     auto& request = request_vec_[idx];
     request->handle_forward_output(output.tensors[idx]);
   }

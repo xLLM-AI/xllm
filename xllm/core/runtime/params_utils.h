@@ -50,6 +50,7 @@ void forward_output_to_proto(const torch::Tensor& next_tokens,
                              const torch::Tensor& out_tokens,
                              const torch::Tensor& out_logprobs,
                              const std::vector<torch::Tensor>& dit_images,
+                             const std::vector<std::string>& dit_text_output,
                              proto::ForwardOutput* pb_forward_output);
 
 Token build_token(int64_t index,

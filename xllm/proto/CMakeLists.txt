@@ -20,6 +20,7 @@ proto_library(
     xservice.proto
     image_generation.proto
     audio_generation.proto
+    text_generation.proto
     video_generation.proto
     mooncake_transfer_engine.proto
     embedding_data.proto
