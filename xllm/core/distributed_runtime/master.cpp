@@ -74,8 +74,13 @@ std::optional<std::string> validate_model_cp(const Options& options,
   if (options.cp_size() < 1) {
     return "cp_size must be greater than or equal to 1";
   }
+  if (options.dcp_size() < 1) {
+    return "dcp_size must be greater than or equal to 1";
+  }
   const bool use_model_partition =
       options.cp_size() > 1 && Platform::uses_model_cp_partition();
+  const bool use_dcp =
+      options.dcp_size() > 1 && Platform::uses_decode_dcp();
   if (!use_model_partition) {
     return std::nullopt;
   }
@@ -95,8 +100,9 @@ std::optional<std::string> validate_model_cp(const Options& options,
     return "MLU CP does not support model_type=" + model_type;
   }
   if (options.instance_role() != InstanceRole::DEFAULT &&
-      options.instance_role() != InstanceRole::PREFILL) {
-    return "MLU CP supports only DEFAULT or PREFILL roles";
+      options.instance_role() != InstanceRole::PREFILL &&
+      options.instance_role() != InstanceRole::DECODE) {
+    return "MLU CP supports only DEFAULT, PREFILL, or DECODE roles";
   }
   if (options.dp_size() != 1) {
     return "MLU CP requires dp_size == 1";
@@ -213,7 +219,10 @@ Master::Master(const Options& options, EngineType type)
   // World size is the node count (one worker per process).
   const int32_t global_world_size = options_.nnodes();
   std::string cp_model_type;
-  if (options_.cp_size() > 1 && Platform::uses_model_cp_partition()) {
+  const bool needs_cp_model_type =
+      (options_.cp_size() > 1 && Platform::uses_model_cp_partition()) ||
+      (options_.dcp_size() > 1 && Platform::uses_decode_dcp());
+  if (needs_cp_model_type) {
     cp_model_type = util::get_model_type(model_path, options_.backend());
   }
   const std::optional<std::string> cp_error =
@@ -234,11 +243,20 @@ Master::Master(const Options& options, EngineType type)
   print_startup_banner(model_path, options_.backend(), options_.node_rank());
   LOG(INFO) << "Master init options: " << options_.to_string();
   ParallelConfig::get_instance().cp_size(options_.cp_size());
+  ParallelConfig::get_instance().dcp_size(options_.dcp_size());
+  const bool use_dcp =
+      options_.dcp_size() > 1 && Platform::uses_decode_dcp();
+  if (use_dcp) {
+    ParallelConfig::get_instance().kv_split_size(options_.dcp_size());
+  }
   const char* cp_partition_stage =
       options_.cp_size() <= 1
           ? "disabled"
           : (Platform::uses_model_cp_partition() ? "model" : "worker");
   LOG(INFO) << "Resolved CP config: cp_size=" << options_.cp_size()
+            << ", dcp_size=" << options_.dcp_size()
+            << ", kv_split_size="
+            << ParallelConfig::get_instance().kv_split_size_effective()
             << ", world_size=" << global_world_size
             << ", dp_size=" << options_.dp_size()
             << ", ep_size=" << options_.ep_size()
@@ -315,6 +333,7 @@ Master::Master(const Options& options, EngineType type)
         .task_type(options.task_type())
         .enable_mla(options_.enable_mla())
         .cp_size(options_.cp_size())
+        .dcp_size(options_.dcp_size())
         .npu_kernel_backend(options_.npu_kernel_backend())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .enable_offline_inference(options_.enable_offline_inference())
@@ -389,6 +408,7 @@ Master::Master(const Options& options, EngineType type)
         .dp_size(options.dp_size())
         .ep_size(options.ep_size())
         .cp_size(options_.cp_size())
+        .dcp_size(options_.dcp_size())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .max_tokens_per_batch(options_.max_tokens_per_batch())
         .max_seqs_per_batch(options_.max_seqs_per_batch())
@@ -443,6 +463,7 @@ Master::Master(const Options& options, EngineType type)
         .dp_size(options_.dp_size())
         .ep_size(options_.ep_size())
         .cp_size(options_.cp_size())
+        .dcp_size(options_.dcp_size())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .max_tokens_per_batch(options_.max_tokens_per_batch())
         .max_seqs_per_batch(options_.max_seqs_per_batch())
@@ -509,6 +530,7 @@ Master::Master(const Options& options, EngineType type)
         .dp_size(options_.dp_size())
         .ep_size(options_.ep_size())
         .cp_size(options_.cp_size())
+        .dcp_size(options_.dcp_size())
         .max_seqs_per_batch(options_.max_seqs_per_batch())
         .beam_width(options_.beam_width())
         .max_tokens_per_batch(options_.max_tokens_per_batch())

@@ -661,7 +661,6 @@ ForwardInput WorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
   return update_input_by_last_step_output(input);
 }
 
-#if defined(USE_NPU)
 torch::Tensor WorkerImpl::recompute_new_cache_slots(const ForwardInput& input) {
   auto old_cache_slots = input.input_params.attention.device.new_cache_slots;
   int64_t numel = old_cache_slots.numel();
@@ -700,6 +699,7 @@ torch::Tensor WorkerImpl::recompute_new_cache_slots(const ForwardInput& input) {
   return new_cache_slots;
 }
 
+#if defined(USE_NPU)
 torch::Tensor WorkerImpl::compute_in_prefix_slots(const ForwardInput& input) {
   // Derive prefix block count from `kv_cache_tokens_nums` (already-cached
   // tokens at the start of this forward), which covers prefix-cache hits and
@@ -938,6 +938,16 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
           in_prefix_slots.to(device_);
     }
 #endif
+    const bool needs_dcp_decode_prep =
+        parallel_args_.dcp_size_effective() > 1 &&
+        parallel_args_.kv_split_size_effective() > 1 &&
+        input.input_params.meta.batch_forward_type.is_decode() &&
+        !input.cp_partitioned;
+    if (needs_dcp_decode_prep) {
+      torch::Tensor new_cache_slots = recompute_new_cache_slots(input);
+      processed_input.input_params.attention.device.new_cache_slots =
+          new_cache_slots.to(device_);
+    }
 
     auto& input_params = processed_input.input_params;
 

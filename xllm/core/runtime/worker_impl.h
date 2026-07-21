@@ -275,9 +275,9 @@ class WorkerImpl {
   // decoder ATB binding refresh.
   bool init_rolling_runtime_state();
 
-  torch::Tensor recompute_new_cache_slots(const ForwardInput& input);
   torch::Tensor compute_in_prefix_slots(const ForwardInput& input);
 #endif
+  torch::Tensor recompute_new_cache_slots(const ForwardInput& input);
 
  protected:
   // runtime options

@@ -26,6 +26,14 @@ DEFINE_int32(ep_size, 1, "Expert parallel size for MoE model.");
 
 DEFINE_int32(cp_size, 1, "Context parallel size for DSA attention.");
 
+DEFINE_int32(dcp_size,
+             1,
+             "Decode context parallel size. DCP shards decode KV cache across "
+             "dcp_size ranks by reusing the kv_split_size mechanism (the engine "
+             "auto-sets kv_split_size = dcp_size so each rank owns a 1/dcp "
+             "row-band within every logical block, an interleaved subsampling "
+             "of the tokens). Phase 1 requires tp_size % dcp_size == 0.");
+
 DEFINE_int32(kv_split_size,
              1,
              "KV-cache split width. 0 falls back to cp_size (legacy); 1 means "
@@ -75,6 +83,7 @@ void ParallelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(ep_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(cp_size);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dcp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_split_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(tp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(sp_size);
@@ -91,6 +100,7 @@ void ParallelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(dp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(ep_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(cp_size);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dcp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(tp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(sp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(cfg_size);
@@ -108,6 +118,8 @@ void ParallelConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, dp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, ep_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, cp_size);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dcp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, tp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, sp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

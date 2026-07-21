@@ -62,6 +62,7 @@ class Platform final {
   static constexpr bool supports_dsa_indexer_cache_elision() {
     return is_mlu();
   }
+  static constexpr bool uses_decode_dcp() { return is_mlu(); }
 
   static constexpr bool is_ilu() {
 #if defined(USE_ILU)
