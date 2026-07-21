@@ -37,6 +37,10 @@ class KVCache final {
   KVCache(const KVCacheShape& kv_cache_shape,
           const KVCacheCreateOptions& create_options,
           int64_t layer_id);
+  KVCache(const KVCacheShape& kv_cache_shape,
+          const KVCacheCreateOptions& create_options,
+          BlockType type,
+          int64_t layer_count);
   KVCache(const KVCache&) = delete;
   KVCache& operator=(const KVCache&) = delete;
   KVCache(KVCache&&) noexcept = default;
@@ -61,6 +65,7 @@ class KVCache final {
   torch::Tensor get_compress_index_score_state() const;
   torch::Tensor get_compress_state() const;
   torch::Tensor get_compress_index_state() const;
+  BlockTypeTensorMap get_block_type_tensors(BlockType type) const;
   std::vector<std::vector<int64_t>> get_shapes();
 
   bool empty() const;

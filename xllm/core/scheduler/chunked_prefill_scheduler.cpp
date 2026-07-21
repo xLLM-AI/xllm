@@ -813,6 +813,14 @@ std::vector<Batch> ChunkedPrefillScheduler::prepare_batch() {
   if (!is_batches_empty) {
     // only update the scheduling latency when there are requests to process
     COUNTER_ADD(scheduling_latency_seconds, timer.elapsed_seconds());
+    // Dispatch the per-step KV transfers collected during allocate/deallocate:
+    // H2D loads recorded for host prefix-cache hits, and D2H offloads queued
+    // when sequences were deallocated. HierarchyBlockManagerPool overrides
+    // these; the default BlockManagerPool no-ops. Without this call the offload
+    // queue is never drained and its device/host blocks leak.
+    kv_cache_manager_->transfer_blocks(batches);
+  } else {
+    kv_cache_manager_->transfer_blocks();
   }
 
   GAUGE_SET(num_pending_requests,

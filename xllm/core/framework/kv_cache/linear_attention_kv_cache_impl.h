@@ -25,9 +25,15 @@ class LinearAttentionKVCacheImpl final : public KVCacheImpl {
       const LinearAttentionKVCacheTensors& tensors);
   LinearAttentionKVCacheImpl(const KVCacheShape& kv_cache_shape,
                              const KVCacheCreateOptions& create_options);
+  LinearAttentionKVCacheImpl(const KVCacheShape& kv_cache_shape,
+                             const KVCacheCreateOptions& create_options,
+                             BlockType type,
+                             int64_t layer_count);
 
   torch::Tensor get_conv_cache() const override;
   torch::Tensor get_ssm_cache() const override;
+
+  BlockTypeTensorMap get_block_type_tensors(BlockType type) const override;
 
   bool empty() const override;
 

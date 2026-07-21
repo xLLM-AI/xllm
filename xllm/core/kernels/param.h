@@ -277,6 +277,27 @@ struct FusedLayerNormParams {
   bool dynamic_quant = false;
 };
 
+// Fused adaptive LayerNorm parameters.
+// Computes: LayerNorm(x) * (1 + scale) + shift in a single fused kernel.
+struct AdaLayerNormParams {
+  // Input tensor [B, S, H]. Last dimension is hidden_size.
+  torch::Tensor input;
+  // Scale modulation. Shape [B, H] or [B, 1, H] (broadcast over sequence)
+  // or [B, S, H] (token-wise). The (1 + scale) is applied inside the kernel,
+  // so pass the raw scale.
+  torch::Tensor scale;
+  // Shift modulation. Same shape constraints as scale.
+  torch::Tensor shift;
+  // Optional affine weight (gamma) [H]. Only used when elementwise_affine.
+  std::optional<torch::Tensor> weight;
+  // Optional affine bias (beta) [H]. Only used when elementwise_affine.
+  std::optional<torch::Tensor> bias;
+  // Output tensor. Same shape as input. Written back by the kernel.
+  torch::Tensor output;
+  // Epsilon for numerical stability.
+  double eps = 1e-6;
+};
+
 struct RmsNormDynamicQuantParams {
   torch::Tensor input;
   torch::Tensor weight;

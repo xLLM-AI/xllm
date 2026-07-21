@@ -27,6 +27,8 @@ limitations under the License.
 #include <variant>
 
 #include "common/types.h"
+#include "framework/block/block.h"
+#include "platform/layer_synchronizer.h"
 #if defined(USE_NPU)
 #include "platform/npu/npu_layer_synchronizer.h"
 #endif
@@ -629,16 +631,19 @@ struct AttentionInput {
 };
 
 enum class TransferType : uint8_t {
-  G2H = 0,  // global memory(KVCache store) to host memory(DRAM)
-  H2D = 1,  // host memory(DRAM) to device memory(HBM)
-  D2G = 2,  // host memory(DRAM) to global memory(KVCache store)
-  G2D = 3   // global memory(KVCache store) to device memory(HBM)
+  G2H = 0,    // global memory(KVCache store) to host memory(DRAM)
+  H2D = 1,    // host memory(DRAM) to device memory(HBM)
+  D2G = 2,    // device memory(HBM) to global memory(KVCache store)
+  G2D = 3,    // global memory(KVCache store) to device memory(HBM)
+  D2H2G = 4,  // device memory(HBM) to host memory(DRAM) to global
+              // memory(KVCache store)
 };
 
 struct BlockTransferInfo {
   int32_t src_block_id = -1;
   int32_t dst_block_id = -1;
   uint8_t hash_key[XXH3_128BITS_HASH_VALUE_LEN];
+  BlockType block_type = BlockType::KV;
   TransferType transfer_type;
 
   BlockTransferInfo(int32_t src_block_id, int32_t dst_block_id) {
@@ -649,14 +654,19 @@ struct BlockTransferInfo {
   BlockTransferInfo(int32_t src_id,
                     int32_t dst_id,
                     const uint8_t* key,
-                    TransferType type)
-      : src_block_id(src_id), dst_block_id(dst_id), transfer_type(type) {
+                    TransferType type,
+                    BlockType btype = BlockType::KV)
+      : src_block_id(src_id),
+        dst_block_id(dst_id),
+        block_type(btype),
+        transfer_type(type) {
     memcpy(hash_key, key, XXH3_128BITS_HASH_VALUE_LEN);
   }
 
   BlockTransferInfo(const BlockTransferInfo& other)
       : src_block_id(other.src_block_id),
         dst_block_id(other.dst_block_id),
+        block_type(other.block_type),
         transfer_type(other.transfer_type) {
     memcpy(hash_key, other.hash_key, XXH3_128BITS_HASH_VALUE_LEN);
   }
@@ -664,6 +674,7 @@ struct BlockTransferInfo {
   BlockTransferInfo(BlockTransferInfo&& other)
       : src_block_id(other.src_block_id),
         dst_block_id(other.dst_block_id),
+        block_type(other.block_type),
         transfer_type(other.transfer_type) {
     memcpy(hash_key, other.hash_key, XXH3_128BITS_HASH_VALUE_LEN);
 
@@ -674,6 +685,7 @@ struct BlockTransferInfo {
   BlockTransferInfo& operator=(const BlockTransferInfo& other) {
     src_block_id = other.src_block_id;
     dst_block_id = other.dst_block_id;
+    block_type = other.block_type;
     transfer_type = other.transfer_type;
     memcpy(hash_key, other.hash_key, XXH3_128BITS_HASH_VALUE_LEN);
     return *this;
@@ -682,6 +694,7 @@ struct BlockTransferInfo {
   BlockTransferInfo& operator=(BlockTransferInfo&& other) {
     src_block_id = other.src_block_id;
     dst_block_id = other.dst_block_id;
+    block_type = other.block_type;
     transfer_type = other.transfer_type;
     memcpy(hash_key, other.hash_key, XXH3_128BITS_HASH_VALUE_LEN);
 
@@ -801,9 +814,10 @@ struct ParallelInput {
   std::shared_ptr<DCULayerSynchronizerImpl> layer_synchronizer = nullptr;
 #elif defined(USE_NPU)
   std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer = nullptr;
+#endif
   uint32_t layers_per_bacth_copy = std::numeric_limits<uint32_t>::max();
-  std::shared_ptr<NPULayerSynchronizerImpl> layer_wise_load_synchronizer =
-      nullptr;
+  std::shared_ptr<LayerSynchronizer> layer_wise_load_synchronizer = nullptr;
+#if defined(USE_NPU)
   std::vector<int64_t> query_start_loc;
   std::vector<int64_t> has_initial_state;
 #endif
@@ -839,9 +853,9 @@ struct ParallelInput {
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
     out.layer_synchronizer = layer_synchronizer;
 #endif
-#if defined(USE_NPU)
     out.layers_per_bacth_copy = layers_per_bacth_copy;
     out.layer_wise_load_synchronizer = layer_wise_load_synchronizer;
+#if defined(USE_NPU)
     out.query_start_loc = query_start_loc;
     out.has_initial_state = has_initial_state;
 #endif
@@ -1016,7 +1030,6 @@ struct ModelInputParams {
   }
 
   bool synchronize_layer(uint32_t layer_idx) const {
-#if defined(USE_NPU)
     if (parallel.layer_wise_load_synchronizer != nullptr &&
         layer_idx % parallel.layers_per_bacth_copy == 0) {
       if (!parallel.layer_wise_load_synchronizer->synchronize_layer(
@@ -1024,9 +1037,6 @@ struct ModelInputParams {
         return false;
       }
     }
-#else
-    (void)layer_idx;
-#endif
     return true;
   }
 

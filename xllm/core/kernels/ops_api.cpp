@@ -389,6 +389,20 @@ void fused_layernorm(FusedLayerNormParams& params) {
 #endif
 }
 
+torch::Tensor fused_adalayer_norm(AdaLayerNormParams& params) {
+#if defined(USE_NPU)
+  params.output = npu::fused_adalayer_norm(params.input,
+                                           params.scale,
+                                           params.shift,
+                                           params.weight,
+                                           params.bias,
+                                           params.eps);
+#else
+  NOT_IMPLEMENTED();
+#endif
+  return params.output;
+}
+
 std::tuple<torch::Tensor, torch::Tensor> rms_norm_dynamic_quant(
     RmsNormDynamicQuantParams& params) {
 #if defined(USE_NPU)
@@ -1616,14 +1630,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> moe_gating_top_k_hash(
 
 torch::Tensor gated_layer_norm(GatedLayerNormParams& params) {
 #if defined(USE_NPU)
-  return npu::layer_norm_fwd(params.x,
-                             params.weight,
-                             params.bias,
-                             params.eps,
-                             params.z,
-                             params.group_size,
-                             params.norm_before_gate,
-                             params.is_rms_norm);
+  return npu::layer_norm_fwd_aclnn(params.x,
+                                   params.weight,
+                                   params.bias,
+                                   params.eps,
+                                   params.z,
+                                   params.group_size,
+                                   params.norm_before_gate,
+                                   params.is_rms_norm);
 #elif defined(USE_MLU)
   return mlu::gated_layer_norm(params.x,
                                params.weight,

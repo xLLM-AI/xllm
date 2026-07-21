@@ -68,6 +68,9 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
 
  private:
   void allocate_host_shared(Sequence* sequence);
+  // Move offload-eligible device/host KV block pairs out of the sequence into
+  // offload_block_pair_queues_[dp_rank] for the next D2H transfer.
+  void collect_offload_pairs(Sequence* sequence, int32_t dp_rank);
 
  private:
   Engine* engine_;

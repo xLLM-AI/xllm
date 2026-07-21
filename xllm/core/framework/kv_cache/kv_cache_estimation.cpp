@@ -253,6 +253,9 @@ int64_t calculate_linear_state_blocks(int64_t cache_size_in_bytes,
                               linear_slot_size,
                               num_full_attention_layers,
                               full_attention_block_size);
+  if (linear_slot_size <= 0 || num_linear_attention_layers <= 0) {
+    return kPaddingLinearStateBlocks;
+  }
   if (max_linear_state_cache_slots > 0) {
     const int64_t requested_blocks =
         max_linear_state_cache_slots + kPaddingLinearStateBlocks;
