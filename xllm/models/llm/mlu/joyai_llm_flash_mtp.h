@@ -14,9 +14,9 @@ limitations under the License.
 ==============================================================================*/
 #pragma once
 
-#include "deepseek_mtp.h"
+#include "models/llm/mlu/deepseek_mtp.h"
 
-namespace xllm {
+namespace xllm::mlu::model {
 
 class JoyAILLMFlashMtpForCausalLMImpl
     : public LlmForCausalLMImplBase<DeepseekMtpModel> {
@@ -83,4 +83,4 @@ REGISTER_MODEL_ARGS(joyai_llm_flash_mtp, [&] {
   SET_ARG(rope_scaling_rope_type, "default");
   SET_ARG(stop_token_ids, std::unordered_set<int32_t>({1}));
 });
-}  // namespace xllm
+}  // namespace xllm::mlu::model

@@ -10,6 +10,7 @@ cc_library(
     dit_model.h
     model_args.h
     model_input_params.h
+    mtp_topk_state.h
   SRCS
   DEPS
     :common

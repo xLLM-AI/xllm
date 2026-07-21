@@ -20,6 +20,8 @@ limitations under the License.
 
 #include <optional>
 
+#include "core/framework/model/mtp_topk_state.h"
+
 namespace xllm {
 struct ModelOutput {
   // [num_tokens, hidden_size]
@@ -28,8 +30,8 @@ struct ModelOutput {
   torch::Tensor residual;
   // [num_tokens, ...]
   torch::Tensor aux_hidden_states;
-  // DSA top-k indices reused across MTP draft forwards.
-  torch::Tensor dsa_topk_indices;
+  // Backend-neutral state emitted for the next MTP draft step.
+  MtpTopkStatePtr mtp_topk_state;
 
   ModelOutput() = default;
 

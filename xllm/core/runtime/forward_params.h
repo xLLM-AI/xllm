@@ -916,7 +916,8 @@ struct ForwardOutput {
   StreamEventPtr ready_event;
   torch::Tensor logits;
   torch::Tensor embedding;
-  torch::Tensor dsa_topk_indices;
+  // Backend-neutral state for the next MTP draft step.
+  MtpTopkStatePtr mtp_topk_state;
 
   // for eplb, collect the tokens load of experts on each worker.
   torch::Tensor expert_load_data;

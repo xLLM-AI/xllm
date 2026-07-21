@@ -87,6 +87,7 @@ cc_library(
     :dit_cache
     :model
     :parallel_state
+    :indexer_cache_policy
     :kv_cache
     :kv_cache_estimation
     :kv_cache_transfer
