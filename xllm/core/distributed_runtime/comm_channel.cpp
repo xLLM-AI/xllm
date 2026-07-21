@@ -266,6 +266,30 @@ bool CommChannel::pull_kv_blocks(
   return !cntl.Failed() && s.ok();
 }
 
+bool CommChannel::pull_hetero_kv_blocks(
+    const std::vector<uint64_t>& src_cluster_ids,
+    const std::vector<std::string>& src_addrs,
+    const std::vector<uint64_t>& src_blocks,
+    const std::vector<uint64_t>& dst_blocks,
+    const std::vector<uint64_t>& src_linear_state_ids,
+    const std::vector<uint64_t>& dst_linear_state_ids) {
+  proto::PullKVCacheRequest request;
+  request.set_hetero_merge(true);
+  ADD_VECTOR_TO_PROTO(request.mutable_src_cluster_ids(), src_cluster_ids);
+  ADD_VECTOR_TO_PROTO(request.mutable_src_addrs(), src_addrs);
+  ADD_VECTOR_TO_PROTO(request.mutable_src_blocks(), src_blocks);
+  ADD_VECTOR_TO_PROTO(request.mutable_dst_blocks(), dst_blocks);
+  ADD_VECTOR_TO_PROTO(request.mutable_src_linear_state_ids(),
+                      src_linear_state_ids);
+  ADD_VECTOR_TO_PROTO(request.mutable_dst_linear_state_ids(),
+                      dst_linear_state_ids);
+
+  proto::Status s;
+  brpc::Controller cntl;
+  stub_->PullKVCache(&cntl, &request, &s, nullptr);
+  return !cntl.Failed() && s.ok();
+}
+
 void CommChannel::execute_model_async(
     const ForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise) {

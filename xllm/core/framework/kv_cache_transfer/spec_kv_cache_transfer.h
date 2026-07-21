@@ -26,7 +26,9 @@ class SpecKVCacheTransfer : public LlmDataDistTransfer {
  public:
   SpecKVCacheTransfer(const uint16_t listen_port,
                       const InstanceRole& instance_role,
-                      bool enable_lighting_indexer = false);
+                      bool enable_lighting_indexer = false,
+                      bool enable_mla = false,
+                      bool draft_body_uses_tp1 = false);
 
   virtual ~SpecKVCacheTransfer() = default;
 
@@ -47,6 +49,14 @@ class SpecKVCacheTransfer : public LlmDataDistTransfer {
   bool pull_kv_blocks(
       const uint64_t src_cluster_id,
       const std::string& src_addr,
+      const std::vector<uint64_t>& src_blocks,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids,
+      const std::vector<uint64_t>& dst_linear_state_ids) override;
+
+  bool pull_hetero_kv_blocks(
+      const std::vector<uint64_t>& src_cluster_ids,
+      const std::vector<std::string>& src_addrs,
       const std::vector<uint64_t>& src_blocks,
       const std::vector<uint64_t>& dst_blocks,
       const std::vector<uint64_t>& src_linear_state_ids,
@@ -78,7 +88,21 @@ class SpecKVCacheTransfer : public LlmDataDistTransfer {
       int32_t kv_split_rank = 0,
       int32_t kv_split_size = 1);
 
+  bool push_kv_blocks_to_hetero_staging(
+      std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
+      std::shared_ptr<NPULayerSynchronizerImpl>& layer_synchronizer,
+      bool is_spec_draft,
+      int64_t source_shard_rank,
+      int64_t source_shard_count);
+
  private:
+  bool pull_replicated_spec_kv_blocks(uint64_t src_cluster_id,
+                                      const std::vector<uint64_t>& src_blocks,
+                                      const std::vector<uint64_t>& dst_blocks);
+
+  bool draft_body_uses_tp1_ = false;
+  LayerRegisteredCaches hetero_staging_registered_caches_;
+  LayerRegisteredCaches spec_hetero_staging_registered_caches_;
   LayerRegisteredCaches spec_layer_registered_caches_;
 };
 

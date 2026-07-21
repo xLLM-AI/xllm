@@ -289,6 +289,7 @@ void AsyncResponseProcessor::batch_process_stream_requests(
                      num_tokens = std::move(num_tokens),
                      req_output = &request_outputs[i]]() mutable {
       AUTO_COUNTER(responsing_latency_seconds_stream);
+      const absl::Time response_start_time = absl::Now();
 
       // RequestOutput req_output;
       req_output->request_id = request->request_id();
@@ -310,6 +311,13 @@ void AsyncResponseProcessor::batch_process_stream_requests(
           req_output->finished_on_prefill_instance = true;
         }
       }
+      if (req_output->finished_on_prefill_instance) {
+        LOG(INFO) << "[PD-PERF] Prefill response generation request_id="
+                  << request->request_id() << ", response_thread_id="
+                  << request->state().response_thread_id << ", total_ms="
+                  << absl::ToDoubleMilliseconds(absl::Now() -
+                                                response_start_time);
+      }
       counter->decrement_count();
     };
     if (request->state().response_thread_id < 0) {
@@ -327,8 +335,19 @@ void AsyncResponseProcessor::batch_process_stream_requests(
        requests = std::move(requests),
        request_outputs = std::move(request_outputs)]() mutable {
         auto& resp_callback = requests[0]->state().outputs_func;
+        const absl::Time wait_start_time = absl::Now();
         counter->wait();
+        const double wait_ms =
+            absl::ToDoubleMilliseconds(absl::Now() - wait_start_time);
+        const absl::Time rpc_start_time = absl::Now();
         std::vector<bool> status_set = resp_callback(request_outputs);
+        if (!request_outputs.empty() &&
+            request_outputs[0].finished_on_prefill_instance) {
+          LOG(INFO) << "[PD-PERF] Prefill response RPC request_id="
+                    << requests[0]->request_id()
+                    << ", response_wait_ms=" << wait_ms << ", rpc_ms="
+                    << absl::ToDoubleMilliseconds(absl::Now() - rpc_start_time);
+        }
         for (size_t i = 0; i < requests.size(); ++i) {
           if (!status_set[i]) {
             cancel_request(requests[i]);

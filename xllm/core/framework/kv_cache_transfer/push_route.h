@@ -27,4 +27,8 @@ std::vector<int32_t> get_dst_ranks(int32_t src_tp_rank,
                                    int32_t dst_tp_size,
                                    int32_t dst_dp_rank);
 
+std::vector<int32_t> get_src_tp_ranks(int32_t dst_tp_rank,
+                                      int32_t src_tp_size,
+                                      int32_t dst_tp_size);
+
 }  // namespace xllm

@@ -99,6 +99,9 @@ message PullKVCacheRequest {
   repeated uint64 dst_blocks = 5;
   repeated uint64 src_linear_state_ids = 7;
   repeated uint64 dst_linear_state_ids = 8;
+  repeated uint64 src_cluster_ids = 9;
+  repeated string src_addrs = 10;
+  bool hetero_merge = 11;
 }
 
 enum TransferType {
