@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/request/priority_comparator.h"
+#include "platform/platform.h"
 #include "util/timer.h"
 #include "util/utils.h"
 
@@ -342,8 +343,10 @@ size_t SchedulerPolicy::compute_prefill_tokens(Sequence* seq,
           : 0;
   const int32_t kv_split_for_align =
       ::xllm::ParallelConfig::get_instance().kv_split_size_effective();
+  const int32_t worker_cp_size =
+      Platform::uses_model_cp_partition() ? 1 : options_.cp_size();
   num_tokens = maybe_align_cp_chunk_tokens(
-      num_tokens, options_.cp_size(), kv_split_for_align,
+      num_tokens, worker_cp_size, kv_split_for_align,
       state.kv_cache_manager->block_size(), remaining_in_seq);
 
   return num_tokens;
