@@ -281,7 +281,15 @@ class ExtBuild(build_ext):
             exit(1)
 
     def build_extension(self, ext: CMakeExtension) -> None:
-        ninja_dir = shutil.which("ninja")
+        guard_ninja = os.path.join(
+            self.base_dir, "scripts", "ninja_guard", "ninja"
+        )
+        if os.environ.get("XLLM_NINJA_GUARD"):
+            ninja_dir = os.environ["XLLM_NINJA_GUARD"]
+        elif os.path.isfile(guard_ninja):
+            ninja_dir = guard_ninja
+        else:
+            ninja_dir = shutil.which("ninja")
         # the output dir for the extension
         extdir: str = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.path)))
 
@@ -335,12 +343,32 @@ class ExtBuild(build_ext):
         elif self.device == "mlu":
             cmake_args += ["-DUSE_MLU=ON"]
             set_mlu_envs()
+        elif self.device == "musa":
+            torch_cuda_architectures = os.getenv("TORCH_CUDA_ARCH_LIST")
+            if not torch_cuda_architectures:
+                torch_cuda_architectures = "9.0"
+            cmake_args += [
+                "-DUSE_MUSA=ON",
+                "-DUSE_CUDA=ON",
+                f"-DTORCH_CUDA_ARCH_LIST={torch_cuda_architectures}",
+                "-DCMAKE_CUDA_ARCHITECTURES=90",
+                "-DBUILD_TESTING=OFF",
+            ]
+            set_musa_envs()
+            global BUILD_TEST_FILE
+            BUILD_TEST_FILE = False
         elif self.device == "cuda":
             torch_cuda_architectures = os.getenv("TORCH_CUDA_ARCH_LIST")
             if not torch_cuda_architectures:
-                raise ValueError("Please set TORCH_CUDA_ARCH_LIST environment variable, e.g. export TORCH_CUDA_ARCH_LIST=\"8.0 8.9 9.0 10.0 12.0\"")
-            cmake_args += ["-DUSE_CUDA=ON",
-                           f"-DTORCH_CUDA_ARCH_LIST={torch_cuda_architectures}"]
+                raise ValueError(
+                    "Please set TORCH_CUDA_ARCH_LIST environment variable, "
+                    'e.g. export TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 '
+                    '10.0 12.0"'
+                )
+            cmake_args += [
+                "-DUSE_CUDA=ON",
+                f"-DTORCH_CUDA_ARCH_LIST={torch_cuda_architectures}",
+            ]
             set_cuda_envs()
 
         elif self.device == "dcu":
@@ -400,11 +428,6 @@ class ExtBuild(build_ext):
         elif self.device == "ilu":
             cmake_args += ["-DUSE_ILU=ON"]
             set_ilu_envs()
-        elif self.device == "musa":
-            cmake_args += ["-DUSE_MUSA=ON"]
-            set_musa_envs()
-            global BUILD_TEST_FILE
-            BUILD_TEST_FILE = False
         else:
             raise ValueError("Please set --device to npu, mlu, cuda, dcu, ilu, musa or maca.")
 
