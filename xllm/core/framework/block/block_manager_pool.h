@@ -70,42 +70,41 @@ class BlockManagerPool : public KVCacheManager {
 
   ~BlockManagerPool() = default;
 
-  virtual bool allocate(Sequence* sequence) override;
-  virtual bool allocate(std::vector<Sequence*>& sequences) override;
-  virtual bool allocate(Sequence* sequence, size_t num_tokens) override;
-  virtual bool allocate(Sequence* sequence,
-                        size_t num_tokens,
-                        size_t needed_copy_in_blocks_num) override;
+  bool allocate(Sequence* sequence) override;
+  bool allocate(std::vector<Sequence*>& sequences) override;
+  bool allocate(Sequence* sequence, size_t num_tokens) override;
+  bool allocate(Sequence* sequence,
+                size_t num_tokens,
+                size_t needed_copy_in_blocks_num) override;
 
   // Try to allocate blocks with num_tokens,
   // return {} if not enough blocks
-  virtual std::vector<Block> allocate(size_t num_tokens,
-                                      int32_t& dp_rank) override;
+  std::vector<Block> allocate(size_t num_tokens, int32_t& dp_rank) override;
 
-  virtual bool try_allocate(Sequence* sequence) override;
+  bool try_allocate(Sequence* sequence) override;
 
-  virtual void deallocate(Request* request) override;
-  virtual void deallocate(std::vector<Sequence*>& sequences) override;
-  virtual void deallocate(Sequence* sequence) override;
+  void deallocate(Request* request) override;
+  void deallocate(std::vector<Sequence*>& sequences) override;
+  void deallocate(Sequence* sequence) override;
 
   void deallocate_without_cache(Sequence* sequence);
 
-  virtual void allocate_shared(Sequence* sequence) override;
-  virtual void cache(Sequence* sequence) override;
-  virtual void cache(Sequence* sequence, size_t num_tokens) override;
+  void allocate_shared(Sequence* sequence) override;
+  void cache(Sequence* sequence) override;
+  void cache(Sequence* sequence, size_t num_tokens) override;
 
-  virtual std::vector<std::vector<BlockTransferInfo>>*
-  get_swap_block_transfer_infos() override;
+  std::vector<std::vector<BlockTransferInfo>>* get_swap_block_transfer_infos()
+      override;
 
   virtual float get_gpu_cache_usage_perc() const;
 
-  virtual uint32_t num_blocks() const override;
-  virtual int32_t block_size() const override;
+  uint32_t num_blocks() const override;
+  int32_t block_size() const override;
   void reset_prefix_cache() override;
-  virtual std::vector<size_t> num_blocks_in_prefix_cache() const override;
-  virtual std::vector<size_t> num_free_blocks() const override;
-  virtual std::vector<size_t> num_used_blocks() const override;
-  virtual double kv_cache_utilization() const override;
+  std::vector<size_t> num_blocks_in_prefix_cache() const override;
+  std::vector<size_t> num_free_blocks() const override;
+  std::vector<size_t> num_used_blocks() const override;
+  double kv_cache_utilization() const override;
 
   // get the options for the block manager
   const Options& options() const { return options_; }

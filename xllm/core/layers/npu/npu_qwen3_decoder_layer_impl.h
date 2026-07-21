@@ -49,7 +49,7 @@ class NpuQwen3DecoderLayerImpl : public BaseLayer {
 
   ~NpuQwen3DecoderLayerImpl() override = default;
 
-  virtual int64_t init_layer() override;
+  int64_t init_layer() override;
 
   torch::Tensor forward(torch::Tensor& x,
                         torch::Tensor& cos_pos,

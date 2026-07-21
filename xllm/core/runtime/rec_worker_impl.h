@@ -42,7 +42,7 @@ class RecWorkerImpl : public LLMWorkerImpl {
                 const torch::Device& device,
                 const runtime::Options& options);
 
-  virtual ~RecWorkerImpl();
+  ~RecWorkerImpl() override;
 
   bool init_model(const std::string& model_weights_path,
                   int32_t random_seed,
@@ -62,7 +62,7 @@ class RecWorkerImpl : public LLMWorkerImpl {
   std::optional<ForwardOutput> step(const ForwardInput& input) override;
 
   folly::SemiFuture<std::optional<ForwardOutput>> step_async(
-      const ForwardInput& input);
+      const ForwardInput& input) override;
 
  protected:
   std::shared_ptr<MPMCThreadPool> input_builder_thread_pool_;

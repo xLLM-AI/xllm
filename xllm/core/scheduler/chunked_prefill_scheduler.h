@@ -34,7 +34,7 @@ namespace xllm {
 class ChunkedPrefillScheduler : public ContinuousScheduler {
  public:
   ChunkedPrefillScheduler(Engine* engine, const Options& options);
-  virtual ~ChunkedPrefillScheduler();
+  ~ChunkedPrefillScheduler() override;
 
  protected:
   // Returns 0 when no safe boundary can make forward progress.
@@ -47,7 +47,7 @@ class ChunkedPrefillScheduler : public ContinuousScheduler {
                                    size_t kv_cache_tokens_num) const;
 
   // build a batch of requests from the priority queue
-  virtual std::vector<Batch> prepare_batch() override;
+  std::vector<Batch> prepare_batch() override;
   // 1. for prefill sequence: the allocated_tokens will be within
   // [1, num_prompt_tokens - num_tokens_in_kv_cache].
   // 2. for decode sequence: the allocated_tokens usually would

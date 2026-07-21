@@ -40,25 +40,25 @@ class DisaggPDService : public proto::DisaggPDService {
                        ::google::protobuf::Closure* done) override;
 
   // for decode recv multiple tokens from prefill
-  virtual void MultiGenerations(::google::protobuf::RpcController* controller,
-                                const proto::DisaggGenerationsRequests* request,
-                                proto::Status* response,
-                                ::google::protobuf::Closure* done) override;
+  void MultiGenerations(::google::protobuf::RpcController* controller,
+                        const proto::DisaggGenerationsRequests* request,
+                        proto::Status* response,
+                        ::google::protobuf::Closure* done) override;
 
-  virtual void SendPullSignal(::google::protobuf::RpcController* controller,
-                              const proto::PullSignal* request,
-                              proto::Status* response,
-                              ::google::protobuf::Closure* done) override;
+  void SendPullSignal(::google::protobuf::RpcController* controller,
+                      const proto::PullSignal* request,
+                      proto::Status* response,
+                      ::google::protobuf::Closure* done) override;
 
-  virtual void LinkInstance(::google::protobuf::RpcController* controller,
-                            const proto::InstanceClusterInfo* request,
-                            proto::Status* response,
-                            ::google::protobuf::Closure* done) override;
+  void LinkInstance(::google::protobuf::RpcController* controller,
+                    const proto::InstanceClusterInfo* request,
+                    proto::Status* response,
+                    ::google::protobuf::Closure* done) override;
 
-  virtual void UnlinkInstance(::google::protobuf::RpcController* controller,
-                              const proto::InstanceClusterInfo* request,
-                              proto::Status* response,
-                              ::google::protobuf::Closure* done) override;
+  void UnlinkInstance(::google::protobuf::RpcController* controller,
+                      const proto::InstanceClusterInfo* request,
+                      proto::Status* response,
+                      ::google::protobuf::Closure* done) override;
 
  protected:
   std::unique_ptr<DisaggPDServiceImpl> disagg_pd_service_impl_;

@@ -22,11 +22,11 @@ namespace xllm {
 class PrefillOnlyScheduler final : public ContinuousScheduler {
  public:
   PrefillOnlyScheduler(Engine* engine, const Options& options);
-  virtual ~PrefillOnlyScheduler();
+  ~PrefillOnlyScheduler() override;
 
  private:
   // build a batch of requests from the priority queue
-  virtual std::vector<Batch> prepare_batch() override;
+  std::vector<Batch> prepare_batch() override;
   void handle_prefill_requests(
       double& latency_budget,
       double& estimate_latency,

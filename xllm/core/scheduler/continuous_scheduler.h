@@ -144,7 +144,7 @@ class ContinuousScheduler : public Scheduler {
   };
 
   ContinuousScheduler(Engine* engine, const Options& options);
-  virtual ~ContinuousScheduler();
+  ~ContinuousScheduler() override;
 
   bool add_request(std::shared_ptr<Request>& request) override;
 
@@ -162,7 +162,7 @@ class ContinuousScheduler : public Scheduler {
     CHECK_GT(old_value, 0) << "pending requests underflow";
   }
 
-  size_t num_pending_requests() {
+  size_t num_pending_requests() override {
     return pending_requests_.load(std::memory_order_relaxed);
   }
 
@@ -197,10 +197,10 @@ class ContinuousScheduler : public Scheduler {
 
   ProfileManager* get_profile_manager() { return profile_manager_.get(); }
 
-  virtual void get_latency_metrics(std::vector<int64_t>& ttft,
-                                   std::vector<int64_t>& tbt) {}
+  void get_latency_metrics(std::vector<int64_t>& ttft,
+                           std::vector<int64_t>& tbt) override {}
 
-  const InstanceInfo& get_instance_info() { return instance_info_; }
+  const InstanceInfo& get_instance_info() override { return instance_info_; }
 
   std::vector<int> last_batch_lengths_;
 

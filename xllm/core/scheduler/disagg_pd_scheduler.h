@@ -38,9 +38,9 @@ class DisaggPDScheduler : public ChunkedPrefillScheduler {
  public:
   DisaggPDScheduler(Engine* engine, const Options& options);
 
-  virtual ~DisaggPDScheduler();
+  ~DisaggPDScheduler() override;
 
-  virtual uint32_t get_waiting_requests_num() const override {
+  uint32_t get_waiting_requests_num() const override {
     return waiting_priority_queue_->size();
   };
 
@@ -82,7 +82,7 @@ class DisaggPDScheduler : public ChunkedPrefillScheduler {
   bool enable_schedule_overlap() { return options_.enable_schedule_overlap(); };
 
   void get_latency_metrics(std::vector<int64_t>& ttft,
-                           std::vector<int64_t>& tbt);
+                           std::vector<int64_t>& tbt) override;
 
   bool link_instance(const std::string& instance_name,
                      const std::vector<uint64_t>& cluster_ids,

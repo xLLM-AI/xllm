@@ -461,13 +461,13 @@ class ClientStreamReceiver : public brpc::StreamInputHandler {
     return 0;
   }
 
-  virtual void on_idle_timeout(brpc::StreamId id) override {
+  void on_idle_timeout(brpc::StreamId id) override {
     if (!promise_set_.exchange(true)) {
       close_promise_.set_value();
     }
   }
 
-  virtual void on_closed(brpc::StreamId id) override {
+  void on_closed(brpc::StreamId id) override {
     if (!promise_set_.exchange(true)) {
       close_promise_.set_value();
     }
