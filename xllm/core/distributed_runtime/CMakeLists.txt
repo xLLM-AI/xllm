@@ -27,6 +27,7 @@ cc_library(
     disagg_pd_service_impl.h
     pd_ooc_service.h
     pd_ooc_service_impl.h
+    mode_switch_service.h
     dist_manager.h
     remote_worker.h
     worker_server.h

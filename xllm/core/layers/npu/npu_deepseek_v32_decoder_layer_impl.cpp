@@ -401,6 +401,33 @@ NpuDeepseekV32DecoderLayerImpl::NpuDeepseekV32DecoderLayerImpl(
     mtp_decode_fallback_param_.outputTopk = true;
   }
 
+  // Dual-mode setup. When the engine has registered a DualParallelArgs on
+  // the ModelContext, also build prefill+decode params for the OTHER
+  // mode. The active() side has just been baked into prefill_param_ /
+  // decode_param_ above; here we fill the inactive side into
+  // dp_prefill_param_ / dp_decode_param_ (or, if the active side is DP,
+  // we fill the CP variants there). The naming convention for the dp_*
+  // members is "the OTHER half of the dual" -- not literally always DP.
+  // The forward path consults dual_parallel_args_->mode() each call to
+  // pick the right node.
+  dual_parallel_args_ = context.get_dual_parallel_args();
+  if (dual_parallel_args_ != nullptr) {
+    dual_ctor_mode_ = dual_parallel_args_->mode();
+    const ParallelArgs& other_args =
+        (dual_ctor_mode_ == DualParallelArgs::Mode::CP_PREFILL)
+            ? dual_parallel_args_->dp_args()
+            : dual_parallel_args_->cp_args();
+    param_from_args(
+        dp_prefill_param_, model_args, other_args, /*is_prefill=*/true);
+    param_from_args(
+        dp_decode_param_, model_args, other_args, /*is_prefill=*/false);
+    LOG_FIRST_N(INFO, 1) << "DeepSeek V32 layer " << layer_id_
+                         << " entered dual-mode init (ctor_active="
+                         << static_cast<int>(dual_ctor_mode_)
+                         << ", other side cp_size=" << other_args.cp_size()
+                         << " dp_size=" << other_args.dp_size() << ")";
+  }
+
   loader_ = std::make_unique<DeekseekV32DecoderLoader>(
       WEIGHT_COUNT_PER_LAYER,
       context,
@@ -958,6 +985,13 @@ void NpuDeepseekV32DecoderLayerImpl::update_expert_weight() {
       mtp_decode_fallback_node_.inTensors.at(index) =
           &atb_weight_tensors_[index];
     }
+    // Dual-mode mirror: same weight pointer flows into the OTHER side's
+    // nodes too. atb_weight_tensors_ is the single source of truth for
+    // weights regardless of how many ATB graphs reference them.
+    if (dual_parallel_args_ != nullptr) {
+      dp_prefill_node_.inTensors.at(index) = &atb_weight_tensors_[index];
+      dp_decode_node_.inTensors.at(index) = &atb_weight_tensors_[index];
+    }
   }
   expert_routing_map_[layer_id_ - first_k_dense_replace_] =
       expert_routing_map_buffer_;
@@ -974,6 +1008,21 @@ int64_t NpuDeepseekV32DecoderLayerImpl::init_layer() {
         init_node(mtp_prefill_fallback_node_, mtp_prefill_fallback_param_));
     CHECK_OPERATION_STATUS_RETURN(
         init_node(mtp_decode_fallback_node_, mtp_decode_fallback_param_));
+  }
+  // Dual-mode: also init the OTHER side's nodes if a DualParallelArgs is
+  // attached. atb_speed::deepseekV2::DecoderLayer creates a fresh
+  // atb::Operation graph per call so distinct mappings produce distinct
+  // node objects; weights are still shared via atb_weight_tensors_ which
+  // is set up in merge_loaded_weights() and identical across all four
+  // nodes.
+  if (dual_parallel_args_ != nullptr) {
+    CHECK_OPERATION_STATUS_RETURN(
+        init_node(dp_prefill_node_, dp_prefill_param_));
+    CHECK_OPERATION_STATUS_RETURN(init_node(dp_decode_node_, dp_decode_param_));
+    LOG_FIRST_N(INFO, 1)
+        << "DeepSeek V32 layer " << layer_id_
+        << " init_layer: 4 ATB nodes ready (cp_prefill, cp_decode, "
+           "dp_prefill, dp_decode)";
   }
   return atb::NO_ERROR;
 }
@@ -1061,39 +1110,41 @@ torch::Tensor NpuDeepseekV32DecoderLayerImpl::forward_with_topk(
   atb::Status st;
   ModelInputParams& input_params_new =
       const_cast<ModelInputParams&>(input_params);
-  if (input_params_new.meta.batch_forward_type.is_decode()) {
-    build_node_variant_pack(decode_node_,
-                            x,
-                            cos_pos,
-                            sin_pos,
-                            attn_mask,
-                            kv_cache,
-                            input_params_new,
-                            false,
-                            shared_topk_indices,
-                            output_topk_indices,
-                            skip_topk_,
-                            output_topk_);
-    st = execute_node(decode_node_, node_id, event, event_flag);
-    LOG_IF(FATAL, st != 0) << model_name_
-                           << "execute prefill layer fail, error code: " << st;
+  const bool is_decode = input_params_new.meta.batch_forward_type.is_decode();
+
+  // Pick the right ATB node based on (active mode, decode vs prefill).
+  // In legacy single-mode dual_parallel_args_ is null and we keep the
+  // original prefill_node_/decode_node_ behaviour. In dual mode the
+  // construction-time active landed in prefill_node_/decode_node_ and
+  // the OTHER mode landed in dp_prefill_node_/dp_decode_node_; we
+  // compare the live mode against dual_ctor_mode_ to decide.
+  atb_speed::Model::Node* node = nullptr;
+  if (dual_parallel_args_ == nullptr) {
+    node = is_decode ? &decode_node_ : &prefill_node_;
   } else {
-    build_node_variant_pack(prefill_node_,
-                            x,
-                            cos_pos,
-                            sin_pos,
-                            attn_mask,
-                            kv_cache,
-                            input_params_new,
-                            true,
-                            shared_topk_indices,
-                            output_topk_indices,
-                            skip_topk_,
-                            output_topk_);
-    st = execute_node(prefill_node_, node_id, event, event_flag);
-    LOG_IF(FATAL, st != 0) << model_name_
-                           << "execute prefill layer fail, error code: " << st;
+    const bool use_original = (dual_parallel_args_->mode() == dual_ctor_mode_);
+    if (use_original) {
+      node = is_decode ? &decode_node_ : &prefill_node_;
+    } else {
+      node = is_decode ? &dp_decode_node_ : &dp_prefill_node_;
+    }
   }
+
+  build_node_variant_pack(*node,
+                          x,
+                          cos_pos,
+                          sin_pos,
+                          attn_mask,
+                          kv_cache,
+                          input_params_new,
+                          /*is_prefill=*/!is_decode,
+                          shared_topk_indices,
+                          output_topk_indices,
+                          skip_topk_,
+                          output_topk_);
+  st = execute_node(*node, node_id, event, event_flag);
+  LOG_IF(FATAL, st != 0) << model_name_
+                         << " execute layer fail, error code: " << st;
   return tensor_placeholder_;
 }
 
@@ -1170,9 +1221,20 @@ void NpuDeepseekV32DecoderLayerImpl::build_node_variant_pack(
   auto& dp_ep_padding = input_params.parallel.dp_ep_padding_data;
   auto& cp_ep_padding = input_params.parallel.cp_ep_padding_data;
   auto& cp_inputs = input_params.parallel.cp_prefill_inputs;
-  const bool use_cp_ep_padding = (cp_size_ > 1 && is_prefill);
+  // cp_size_/dp_size_ are baked in at ctor from the construction-time mode. A
+  // runtime CP<->DP flip changes the live layout but does NOT rewrite these
+  // members, so read the current layout from dual_parallel_args_ when present
+  // (the forward path already picks the ATB node the same way). Falls back to
+  // the ctor members on the legacy single-mode path.
+  const int32_t active_cp_size = dual_parallel_args_ != nullptr
+                                     ? dual_parallel_args_->active().cp_size()
+                                     : cp_size_;
+  const int32_t active_dp_size = dual_parallel_args_ != nullptr
+                                     ? dual_parallel_args_->active().dp_size()
+                                     : dp_size_;
+  const bool use_cp_ep_padding = (active_cp_size > 1 && is_prefill);
 
-  if (dp_size_ <= 1 && ep_size_ <= 1 || cp_size_ > 1) {
+  if (active_dp_size <= 1 && ep_size_ <= 1 || active_cp_size > 1) {
     dp_ep_padding.set_placeholder(tensor_placeholder_);
   }
   if (!use_cp_ep_padding) {
@@ -1346,14 +1408,22 @@ void NpuDeepseekV32DecoderLayerImpl::build_node_variant_pack(
   }
 
   int32_t cp_input_index = WEIGHT_COUNT_PER_LAYER + 32;
-  if (skip_topk) {
-    CHECK(shared_topk_indices.defined())
-        << "DSA top-k sharing requires previous top-k indices.";
-    node.variantPack.inTensors.at(cp_input_index++) =
-        atb_speed::Utils::AtTensor2Tensor(shared_topk_indices);
+  if (skip_topk || output_topk) {
+    // TODO: support DSA top-k sharing for CP prefill.
+    CHECK(!(active_cp_size > 1 && is_prefill))
+        << "DSA top-k sharing does not support CP prefill yet.";
+    if (skip_topk) {
+      CHECK(shared_topk_indices.defined())
+          << "DSA top-k sharing requires previous top-k indices.";
+      node.variantPack.inTensors.at(cp_input_index++) =
+          atb_speed::Utils::AtTensor2Tensor(shared_topk_indices);
+    }
   }
 
-  if (cp_size_ > 1 && is_prefill) {
+  // active_cp_size (from dual_parallel_args_) instead of cp_size_ so a
+  // runtime CP<->DP flip is respected: after flip to DP the live cp_size
+  // is 1 and the CP-only tensors below must be skipped.
+  if (active_cp_size > 1 && is_prefill) {
     node.variantPack.inTensors.at(cp_input_index++) =
         atb_speed::Utils::AtTensor2Tensor(cp_inputs.cp_o_recover_idx);
     node.variantPack.inTensors.at(cp_input_index++) =

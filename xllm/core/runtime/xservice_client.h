@@ -49,10 +49,25 @@ class XServiceClient {
             const std::string& etcd_namespace = "");
   void set_scheduler(Scheduler* scheduler);
   void set_engine(Engine* engine);
+  // Atomically replace the pool pointer that heartbeat/reconcile threads read.
+  // Called from LLMEngine::rebuild_block_manager_pool after a runtime CP<->DP
+  // flip. Without this, the heartbeat thread keeps the pointer captured at
+  // init() time and dereferences the destroyed pool the moment
+  // unique_ptr::reset swaps it in the engine (silent SIGSEGV, rank0 disappears
+  // ~5s post-flip).
+  void set_block_manager_pool(const BlockManagerPool* block_manager_pool);
   bool initialize_done() { return initialize_done_; }
 
   std::string get_instance_name();
   void register_instance(const InstanceInfo& instance_info);
+  // Re-publish this instance's InstanceInfo to etcd after a runtime CP<->DP
+  // flip changed dp_size. The peer scheduler pulls InstanceInfo lazily on
+  // demand (DisaggPDScheduler::check_remote_instance_info) and its cache is
+  // sticky; without this write, the peer keeps the pre-flip dp_size in
+  // remote_instances_info_ and its own relink_after_flip will link to the
+  // wrong topology. Rewrites the JSON we handed to etcd at register_instance
+  // time with the new dp_size, keeping every other field intact.
+  bool re_register_dp_size(int32_t new_dp_size);
   void heartbeat();
   InstanceInfo get_instance_info(const std::string& instance_name);
   std::vector<std::string> get_static_decode_list();
@@ -114,8 +129,11 @@ class XServiceClient {
   std::mutex registration_mutex_;
   brpc::ChannelOptions chan_options_;
   std::unique_ptr<EtcdClient> etcd_client_;
-  const BlockManagerPool* block_manager_pool_ = nullptr;  // not own
-  Scheduler* scheduler_ = nullptr;                        // not own
+  // Atomic so heartbeat_thread_/reconcile_thread_ can safely re-read after a
+  // runtime CP<->DP flip's rebuild_block_manager_pool. Load with
+  // memory_order_acquire on the reader side; store with release on the writer.
+  std::atomic<const BlockManagerPool*> block_manager_pool_{nullptr};  // not own
+  Scheduler* scheduler_ = nullptr;                                    // not own
   Engine* engine_ = nullptr;  // not own, for xtensor info
 };
 

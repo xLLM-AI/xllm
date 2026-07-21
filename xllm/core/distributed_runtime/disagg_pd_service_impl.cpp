@@ -145,6 +145,12 @@ std::shared_ptr<Request> DisaggPDServiceImpl::generate_request(
 void DisaggPDServiceImpl::decode_recv_new_requests(
     const proto::DisaggRequests* request,
     proto::DisaggResponses* response) {
+  if (FLAGS_enable_flip_verbose_log) {
+    LOG(INFO) << "FLIPDIAG D_recv_new_requests_pre: n_reqs="
+              << request->reqs_size()
+              << " prefill_name=" << request->prefill_name()
+              << " sender_dp_size=" << request->cluster_infos().dp_size();
+  }
   for (auto& req : request->reqs()) {
     auto resp = response->add_resps();
     resp->set_req_id(req.req_id());
@@ -152,6 +158,8 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
     auto new_request = generate_request(req);
     if (new_request == nullptr) {
       resp->set_status_code(500);
+      LOG(WARNING) << "FLIPDIAG D_recv generate_request null: req_id="
+                   << req.req_id();
       continue;
     }
 
@@ -161,6 +169,8 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
     if (!scheduler_->try_allocate(sequence)) {
       // FIXME: set status code
       resp->set_status_code(404);
+      LOG(WARNING) << "FLIPDIAG D_recv try_allocate FAIL: req_id="
+                   << req.req_id();
     } else {
       // push the request to scheduler request buffer
       bool success =
@@ -176,6 +186,14 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
       auto dp_rank = sequence->dp_rank();
       resp->set_dp_rank(dp_rank);
       resp->set_linear_state_id(sequence->get_single_block_id());
+
+      if (FLAGS_enable_flip_verbose_log) {
+        LOG(INFO) << "FLIPDIAG D_recv scheduled: req_id=" << req.req_id()
+                  << " dp_rank=" << dp_rank
+                  << " linear_state_id=" << sequence->get_single_block_id()
+                  << " blocks_reserved="
+                  << sequence->kv_state().blocks(BlockType::KV).size();
+      }
 
       std::vector<int32_t> block_ids;
       if (sequence->kv_state().has_multi_block_export()) {

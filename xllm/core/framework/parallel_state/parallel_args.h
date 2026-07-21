@@ -23,6 +23,7 @@ limitations under the License.
 #include "xllm_atb_layers/models/base/param/mapping.h"
 #endif
 
+#include <atomic>
 #include <nlohmann/json.hpp>
 #include <string>
 
@@ -237,6 +238,73 @@ struct ParallelArgs {
   ProcessGroup* dit_cfg_group_ = nullptr;
   ProcessGroup* dit_dp_group_ = nullptr;
   ProcessGroup* dit_vae_group_ = nullptr;
+};
+
+// Two-mode parallel configuration container used by the runtime CP<->DP
+// switch feature. Holds two independent ParallelArgs (one for CP-prefill
+// mode, one for DP-decode mode) and an atomic flag selecting which one
+// is currently active. Reads go through `active()` so the singular ParallelArgs
+// API stays intact for callers who do not care about the switch.
+//
+// Lifetime: this object outlives both the CollectiveCommunicator instances
+// it borrows from (worker_server keeps both comms resident) and the Worker
+// that holds a const reference / pointer to it. Mode switching only flips
+// the active_ flag; no objects are reconstructed.
+//
+// Threading: active_ is an atomic; the discriminator lives in a single
+// cacheline-bounded read on the forward path. Mode flips are gated by the
+// scheduler's drain protocol -- forward-path readers never observe a switch
+// mid-collective.
+class DualParallelArgs final {
+ public:
+  enum class Mode : int8_t {
+    CP_PREFILL = 0,  // cp_size = N, dp_size = 1; long-prefill friendly
+    DP_DECODE = 1,   // cp_size = 1, dp_size = N; concurrency friendly
+  };
+
+  DualParallelArgs(ParallelArgs cp_args,
+                   ParallelArgs dp_args,
+                   Mode initial_mode)
+      : cp_args_(std::move(cp_args)),
+        dp_args_(std::move(dp_args)),
+        active_(initial_mode) {}
+
+  // Non-copyable, non-movable: holds an atomic and is referenced by ptr
+  // from the Worker that owns it.
+  DualParallelArgs(const DualParallelArgs&) = delete;
+  DualParallelArgs& operator=(const DualParallelArgs&) = delete;
+  DualParallelArgs(DualParallelArgs&&) = delete;
+  DualParallelArgs& operator=(DualParallelArgs&&) = delete;
+
+  [[nodiscard]] const ParallelArgs& active() const noexcept {
+    return active_.load(std::memory_order_acquire) == Mode::CP_PREFILL
+               ? cp_args_
+               : dp_args_;
+  }
+
+  [[nodiscard]] const ParallelArgs& cp_args() const noexcept {
+    return cp_args_;
+  }
+
+  [[nodiscard]] const ParallelArgs& dp_args() const noexcept {
+    return dp_args_;
+  }
+
+  [[nodiscard]] Mode mode() const noexcept {
+    return active_.load(std::memory_order_acquire);
+  }
+
+  // Flip the active mode. Caller is responsible for draining inflight
+  // requests before issuing the flip; see worker switch_mode RPC for the
+  // full protocol. Idempotent if mode is already target.
+  void set_mode(Mode target) noexcept {
+    active_.store(target, std::memory_order_release);
+  }
+
+ private:
+  ParallelArgs cp_args_;
+  ParallelArgs dp_args_;
+  std::atomic<Mode> active_;
 };
 
 }  // namespace xllm

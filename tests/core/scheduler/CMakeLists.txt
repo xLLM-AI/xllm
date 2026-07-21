@@ -2,6 +2,20 @@ include(cc_test)
 
 add_subdirectory(profile)
 
+# Standalone test for the DP lopsided-batch defer state machine
+# (algorithm mirrored from ContinuousScheduler::step()). Depends only on
+# absl::time; runs on any platform and without a real Engine so we can
+# hit the state transitions in isolation.
+cc_test(
+  NAME
+    lopsided_defer_gate_test
+  SRCS
+    lopsided_defer_gate_test.cpp
+  DEPS
+    absl::time
+    GTest::gtest_main
+)
+
 cc_test(
   NAME
     chunked_prefill_scheduler_test

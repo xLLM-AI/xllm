@@ -28,6 +28,7 @@ limitations under the License.
 #include "distributed_runtime/worker_service.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
+#include "framework/parallel_state/collective_communicator.h"
 #include "runtime/executor.h"
 #include "runtime/forward_params.h"
 #include "runtime/forward_shared_memory_manager.h"
@@ -100,6 +101,16 @@ class WorkerServer {
   pid_t spawned_worker_pid_ = -1;
   std::atomic<bool> stopped_{false};
   std::string server_name_;
+
+  // Dual-mode comm holdings. When options.enable_runtime_cp_dp_switch is
+  // true, create_server() builds two CollectiveCommunicators (one CP, one
+  // DP) and stores them here so they outlive the local create_server stack
+  // frame. The DualParallelArgs aggregates both comms' parallel_args() and
+  // is the source of truth the Worker / WorkerImpl reads from after
+  // switch_mode flips. In legacy single-mode these are all null.
+  std::unique_ptr<CollectiveCommunicatorBase> comm_cp_;
+  std::unique_ptr<CollectiveCommunicatorBase> comm_dp_;
+  std::unique_ptr<DualParallelArgs> dual_parallel_args_;
 };
 
 }  // namespace xllm

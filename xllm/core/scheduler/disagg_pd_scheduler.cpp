@@ -32,7 +32,10 @@ limitations under the License.
 #include "core/framework/config/service_config.h"
 #include "disagg_pd.pb.h"
 #include "disagg_pd_scheduler.h"
+#include "distributed_runtime/disagg_pd_service.h"
 #include "distributed_runtime/engine.h"
+#include "distributed_runtime/llm_engine.h"
+#include "distributed_runtime/mode_switch_service.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/kv_cache_transfer/pd_topology_guard.h"
 #include "framework/request/request.h"
@@ -277,7 +280,21 @@ void DisaggPDScheduler::start_rpc_server() {
       std::make_unique<DisaggPDService>(this, engine_);
   auto rpc_server =
       ServerRegistry::get_instance().register_server(server_name_);
-  if (!rpc_server->start(std::move(service))) {
+  if (options_.enable_runtime_cp_dp_switch()) {
+    // Co-host ModeSwitchService on the same brpc server so xllm_service
+    // can reach SwitchMode through instance.rpc_address. The mode_switch
+    // service is independent of disagg_pd.proto / worker.proto so adding
+    // it does not blast the proto-include graph.
+    auto mode_switch =
+        std::make_unique<ModeSwitchService>(static_cast<LLMEngine*>(engine_),
+                                            /*scheduler=*/this);
+    if (!rpc_server->start(std::move(service), std::move(mode_switch))) {
+      LOG(ERROR) << "Failed to start brpc disagg pd + mode switch server "
+                    "on port "
+                 << ::xllm::DisaggPDConfig::get_instance().disagg_pd_port();
+      return;
+    }
+  } else if (!rpc_server->start(std::move(service))) {
     LOG(ERROR) << "Failed to start brpc disagg pd server on port "
                << ::xllm::DisaggPDConfig::get_instance().disagg_pd_port();
     return;
@@ -334,6 +351,19 @@ bool DisaggPDScheduler::add_request(std::shared_ptr<Request>& request) {
   CHECK(request != nullptr);
   CHECK(!request->sequences().empty());
 
+  // FLIPDIAG: trace P-side entry so we can pin down where DP-mode requests
+  // die on the flip path. add_request is called from XllmAPIService's brpc
+  // handler thread (chat_service_impl) after xllm_service picks this
+  // instance via routing.prefill_name.
+  // Gated: fires per-request.
+  if (FLAGS_enable_flip_verbose_log) {
+    LOG(INFO) << "FLIPDIAG add_request: request_id=" << request->request_id()
+              << " offline=" << request->offline() << " prompt_tokens="
+              << (request->sequences().empty()
+                      ? 0
+                      : request->sequences()[0]->num_prompt_tokens());
+  }
+
   kv_cache_manager_->prefetch_from_storage(request);
 
   if (request->offline()) {
@@ -367,6 +397,33 @@ void DisaggPDScheduler::dispatch_requests() {
       break;
     }
 
+    // FLIPDIAG: pin the exact moment dispatch_thread grabs a request off
+    // the queue. If we see add_request lines but no dispatch_dequeued lines,
+    // the thread is blocked before the loop body (e.g. gate held + relink
+    // in progress). If we see dequeued but no push, the flip_guard below or
+    // the kv_cache_manager_ / stub call is stalling.
+    // Gated: fires per-request.
+    if (FLAGS_enable_flip_verbose_log) {
+      LOG(INFO) << "FLIPDIAG dispatch_dequeued: request_id="
+                << request->request_id() << " decode_address='"
+                << request->state().decode_address
+                << "' active_dp_size=" << active_dp_size_;
+    }
+
+    // Coordinate with runtime CP<->DP flip. Take the reader side of
+    // switch_gate_ around the body of one dispatch. The gate is unowned in
+    // steady state; a flip in progress owns it unique via begin_switch and
+    // will make us block here until the rebuild is done. Held for the whole
+    // iteration because the body reaches into engine_/kv_cache_manager_
+    // (implicitly through cache_prefill_blocks and the send_first_generation
+    // task pushed to prefill_threadpool_).
+    std::shared_lock<std::shared_mutex> flip_guard(switch_gate_);
+
+    if (FLAGS_enable_flip_verbose_log) {
+      LOG(INFO) << "FLIPDIAG dispatch_gate_acquired: request_id="
+                << request->request_id();
+    }
+
     if (request->state().decode_address.empty()) {
       // No decode address provided to the prefill instance, just finish the
       // request.
@@ -391,6 +448,16 @@ void DisaggPDScheduler::dispatch_requests() {
     }
     remote_instances_info_[selected_instance] = remote_info;
 
+    if (FLAGS_enable_flip_verbose_log) {
+      LOG(INFO) << "FLIPDIAG dispatch_topo_check: request_id="
+                << request->request_id()
+                << " selected_instance=" << selected_instance
+                << " local_dp=" << instance_info_.dp_size
+                << " local_kv_split=" << instance_info_.kv_split_size
+                << " remote_dp=" << remote_info.dp_size
+                << " remote_kv_split=" << remote_info.kv_split_size;
+    }
+
     const bool enable_mla = engine_->model_args().enable_mla();
     const PdTopoResult topo_result =
         check_pd_topo(instance_info_,
@@ -400,6 +467,8 @@ void DisaggPDScheduler::dispatch_requests() {
     const bool allow_pd_topo = topo_result.status == PdTopoStatus::ALLOW_HOMO ||
                                topo_result.status == PdTopoStatus::ALLOW_HETERO;
     if (!allow_pd_topo) {
+      LOG(WARNING) << "FLIPDIAG dispatch_topo_reject: request_id="
+                   << request->request_id() << " reason=" << topo_result.reason;
       if (topo_result.status == PdTopoStatus::INVALID_REMOTE) {
         remote_instances_info_.erase(selected_instance);
       }
@@ -510,9 +579,35 @@ void DisaggPDScheduler::dispatch_requests() {
         instance_info_.ports.begin(), instance_info_.ports.end());
     reqs.mutable_cluster_infos()->set_dp_size(options_.dp_size());
 
+    // FLIPDIAG: log AddNewRequests fan-out. options_.dp_size() is the
+    // startup value; active_dp_size_ is the post-flip value. If they
+    // diverge (they do after a CP->DP flip on P side) the D side sees
+    // a stale P dp_size and routes KV transfer accordingly.
+    if (FLAGS_enable_flip_verbose_log) {
+      LOG(INFO) << "FLIPDIAG dispatch_add_new_requests_pre: request_id="
+                << requests[0]->request_id() << " reqs=" << reqs.reqs_size()
+                << " options_dp_size=" << options_.dp_size()
+                << " active_dp_size=" << active_dp_size_
+                << " sending_dp_size=" << reqs.cluster_infos().dp_size();
+    }
+
     // TODO: sync rpc here currently
     brpc::Controller cntl;
     stub->AddNewRequests(&cntl, &reqs, &resps, nullptr);
+    if (FLAGS_enable_flip_verbose_log) {
+      LOG(INFO) << "FLIPDIAG dispatch_add_new_requests_post: request_id="
+                << requests[0]->request_id() << " cntl_failed=" << cntl.Failed()
+                << " resps_size=" << resps.resps().size()
+                << (resps.resps().empty()
+                        ? std::string(" [empty]")
+                        : " first_status=" +
+                              std::to_string(resps.resps()[0].status_code()) +
+                              " first_dp_rank=" +
+                              std::to_string(resps.resps()[0].dp_rank()) +
+                              " first_blocks=" +
+                              std::to_string(
+                                  resps.resps()[0].blocks_ids_size()));
+    }
     if (cntl.Failed()) {
       LOG(ERROR) << "Failed to add new requests to decode instance : "
                  << selected_instance << ", error text : " << cntl.ErrorText();
@@ -775,6 +870,13 @@ bool DisaggPDScheduler::decode_schedule(
   CHECK(request != nullptr);
   CHECK(!request->sequences().empty());
 
+  // Reader-side of switch_gate_: called on the brpc worker thread that
+  // handles the follow-up dispatch after decode_recv_new_requests. Held for
+  // the whole method because this path deallocates on failure and enqueues
+  // for the scheduler loop to pick up on success -- either way it must not
+  // race with a rebuild.
+  std::shared_lock<std::shared_mutex> flip_guard(switch_gate_);
+
   {
     std::lock_guard<std::mutex> lock(received_request_map_mutex_);
     if (received_request_map_.find(request->request_id()) !=
@@ -809,6 +911,11 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     int32_t src_dp_size,
     int32_t src_dp_rank,
     torch::Tensor mtp_bootstrap_embedding) {
+  // Reader-side of switch_gate_: called on the brpc worker thread from the
+  // decode side of DisaggPDService::FirstGeneration. Held for the whole
+  // method because it drives kv_cache_manager_->deallocate on failure paths
+  // and pushes into the scheduler's request_queue_ on success.
+  std::shared_lock<std::shared_mutex> flip_guard(switch_gate_);
   // push to request_queue_, and will be executed by engine.
   std::shared_ptr<Request> request = nullptr;
   {
@@ -936,6 +1043,11 @@ bool DisaggPDScheduler::decode_recv_first_generation(
 }
 
 bool DisaggPDScheduler::try_allocate(Sequence* sequence) {
+  // Reader-side of switch_gate_: called from brpc worker threads via
+  // decode_recv_new_requests. Blocks a running flip's rebuild step until we
+  // finish, and blocks us while a flip is in progress -- prevents
+  // use-after-free on kv_cache_manager_ mid-rebuild.
+  std::shared_lock<std::shared_mutex> flip_guard(switch_gate_);
   // When the KV Cache usage reaches the threshold, prefill requests will no
   // longer be scheduled to avoid frequent preemption.
   if (kv_cache_manager_->kv_cache_utilization() <
@@ -1001,6 +1113,11 @@ bool DisaggPDScheduler::link_instance(const std::string& instance_name,
                                       const std::vector<uint16_t>& ports,
                                       const int32_t dp_size,
                                       const int32_t src_kv_split_size) {
+  // Reader-side of switch_gate_: LinkInstance from a peer P/D pair drives
+  // engine_->link_cluster which writes into the KV transfer plane; that
+  // plane's dp_size/kv_split_size views must not observe a rebuild
+  // half-through.
+  std::shared_lock<std::shared_mutex> flip_guard(switch_gate_);
   std::lock_guard<std::mutex> lock(linked_instances_mutex_);
   if (!engine_->link_cluster(
           cluster_ids, addrs, ports, dp_size, src_kv_split_size)) {
@@ -1020,6 +1137,9 @@ bool DisaggPDScheduler::unlink_instance(
     const std::vector<uint16_t>& ports,
     const int32_t dp_size,
     const int32_t src_kv_split_size) {
+  // Reader-side of switch_gate_: mirrors link_instance. Held around both
+  // the received_request_map_ cleanup and the engine_->unlink_cluster call.
+  std::shared_lock<std::shared_mutex> flip_guard(switch_gate_);
   // Clear received requests from this instance
   {
     std::lock_guard<std::mutex> lock(received_request_map_mutex_);
@@ -1043,6 +1163,128 @@ bool DisaggPDScheduler::unlink_instance(
             << instance_name;
   linked_instance_.erase(instance_name);
   return true;
+}
+
+std::unique_lock<std::shared_mutex> DisaggPDScheduler::begin_switch() {
+  // Take the writer side of switch_gate_. This blocks until every reader
+  // (dispatch_thread iteration, in-flight brpc handler on this scheduler)
+  // has released. Callers are expected to have already paused the main
+  // scheduler loop via pause(WAIT) + wait_until_paused; this call closes
+  // the remaining async surfaces before rebuild_after_flip runs.
+  return std::unique_lock<std::shared_mutex>(switch_gate_);
+}
+
+void DisaggPDScheduler::rebuild_after_flip(int32_t new_dp_size) {
+  // Must be called with switch_gate_ held unique (via begin_switch()) AND
+  // with the main scheduler loop paused (WAIT). Rebuilds the scheduler-side
+  // pipeline that was constructed for the pre-flip dp_size.
+  //
+  // The step() loop used to detect this itself and rebuild inline. That path
+  // races with dispatch_thread and brpc handlers -- workers whose Sequences
+  // still hold Block references into the old pool see the pool destroyed
+  // under them, causing a silent SIGSEGV on the next allocate/deallocate
+  // (observed rank0-only zombie on 82 CP=2 flip test). Driving the rebuild
+  // from ModeSwitchService with the gate closed avoids the race.
+  if (new_dp_size == active_dp_size_) {
+    LOG(INFO) << "rebuild_after_flip: dp_size unchanged (" << new_dp_size
+              << "), skipping rebuild";
+    return;
+  }
+  LOG(INFO) << "rebuild_after_flip: rebuilding pool for dp_size "
+            << active_dp_size_ << " -> " << new_dp_size;
+  engine_->rebuild_block_manager_pool(new_dp_size);
+  kv_cache_manager_ = engine_->block_manager_pool();
+  BatchFactory::get_instance(active_dp_size_)->set_dp_size(new_dp_size);
+  active_dp_size_ = new_dp_size;
+  last_batch_.assign(active_dp_size_, {});
+  // Invalidate the peer InstanceInfo cache. Peers re-register to etcd on
+  // their own flip and dispatch reads remote_instances_info_ lazily
+  // (check_remote_instance_info: "if already cached, keep it"). Without
+  // clearing here dispatch will keep pushing to the pre-flip dp_size
+  // topology and D-side won't receive the requests. Safe under the gate:
+  // dispatch_thread and brpc handlers all take shared_lock on switch_gate_
+  // at their entry points and we're here holding unique.
+  remote_instances_info_.clear();
+}
+
+bool DisaggPDScheduler::relink_after_flip() {
+  // Called by ModeSwitchService AFTER gate.unlock + resume, because the
+  // datadist fan-out (link_threadpool_ + folly futures + worker RPC
+  // round-trips) deadlocks inside the gate (v4: D-rank0 crashed with
+  // `std::system_error: Resource deadlock avoided` right after relink).
+  //
+  // Invariants:
+  //   * caller has already run rebuild_after_flip (which cleared
+  //     remote_instances_info_ under the gate) and re_register_dp_size
+  //     (which pushed our new dp_size to etcd), so peers can now pull our
+  //     fresh info and we'll pull theirs;
+  //   * only DECODE instances have datadist links to rebuild -- P-side
+  //     handles LinkInstance RPCs but never issues link_cluster on its
+  //     own (v4 P-side relink triggered LLM_LINK_FAILED and clobbered
+  //     the just-established D-side links).
+
+  if (!options_.instance_role().has_value() ||
+      options_.instance_role().value() != InstanceRole::DECODE) {
+    LOG(INFO) << "relink_after_flip: not a DECODE instance, skipping "
+                 "(P-side has no outbound datadist links to rebuild)";
+    return true;
+  }
+
+  std::vector<std::string> peers;
+  {
+    std::lock_guard<std::mutex> lock(linked_instances_mutex_);
+    peers.assign(linked_instance_.begin(), linked_instance_.end());
+  }
+  if (peers.empty()) {
+    LOG(INFO) << "relink_after_flip: no linked peers, skip";
+    return true;
+  }
+
+  bool all_ok = true;
+  for (const auto& peer : peers) {
+    // Snapshot the pre-flip peer info so we can unlink the exact link that
+    // was created at startup. If this instance was P-side and the peer is
+    // a D-side, the datadist link is one-directional from D's side; unlink
+    // is still safe as it's idempotent for a not-linked cluster.
+    auto old_it = remote_instances_info_.find(peer);
+    if (old_it == remote_instances_info_.end()) {
+      LOG(WARNING) << "relink_after_flip: no cached remote_instance_info for "
+                   << peer << ", skip unlink; will link with fresh info";
+    } else {
+      const auto& old = old_it->second;
+      if (!engine_->unlink_cluster(old.cluster_ids,
+                                   old.addrs,
+                                   old.ports,
+                                   old.dp_size,
+                                   old.kv_split_size)) {
+        LOG(WARNING) << "relink_after_flip: unlink stale link to " << peer
+                     << " failed (may already be gone)";
+      }
+    }
+
+    InstanceInfo fresh = xservice_client_->get_instance_info(peer);
+    if (fresh.name.empty()) {
+      LOG(ERROR) << "relink_after_flip: get_instance_info failed for peer "
+                 << peer;
+      all_ok = false;
+      continue;
+    }
+    if (!engine_->link_cluster(fresh.cluster_ids,
+                               fresh.addrs,
+                               fresh.ports,
+                               fresh.dp_size,
+                               fresh.kv_split_size)) {
+      LOG(ERROR) << "relink_after_flip: link with fresh dp_size="
+                 << fresh.dp_size << " to peer " << peer << " failed";
+      all_ok = false;
+      continue;
+    }
+    remote_instances_info_[peer] = fresh;
+    LOG(INFO) << "relink_after_flip: relinked peer " << peer
+              << " with dp_size=" << fresh.dp_size
+              << " kv_split_size=" << fresh.kv_split_size;
+  }
+  return all_ok;
 }
 
 }  // namespace xllm

@@ -148,6 +148,15 @@ class Options {
 
   PROPERTY(bool, enable_pd_ooc) = false;
 
+  // Runtime CP<->DP switch (dual-graph mode). See
+  // runtime/options.h::enable_runtime_cp_dp_switch for the design notes;
+  // this twin sits on the master-side common::Options so xllm.cpp /
+  // launch flags can flip it and master.cpp forwards it to
+  // runtime::Options on engine boot.
+  PROPERTY(bool, enable_runtime_cp_dp_switch) = false;
+
+  PROPERTY(int32_t, dual_mode_port_stride) = 256;
+
   PROPERTY(bool, enable_schedule_overlap) = true;
 
   PROPERTY(InstanceRole, instance_role) = InstanceRole::DEFAULT;

@@ -127,6 +127,14 @@ DECLARE_int32(micro_batch_num);
 
 DECLARE_bool(enable_dp_balance);
 
+// --- CP<->DP runtime switching debug flags ---
+// enable_runtime_cp_dp_switch is queried via ParallelConfig; this one is
+// a raw gflag consulted by the FLIP_VLOG macro in switch-related files
+// (scheduler, engine, worker) to gate high-cardinality per-request /
+// per-step diagnostic logs. Off by default so production runs stay quiet;
+// verify_switch.sh flips it on when investigating regressions.
+DECLARE_bool(enable_flip_verbose_log);
+
 // --- ep load balance config ---
 DECLARE_bool(enable_eplb);
 
