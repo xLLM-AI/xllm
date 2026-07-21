@@ -245,12 +245,10 @@ torch::Tensor build_mrope_gather_pattern_merged(
     }
   }
 
-  constexpr uint32_t kElementBytes = 2;
   for (int64_t i = 0; i < half_rope_dim; ++i) {
-    pattern_ptr[i] =
-        static_cast<int32_t>((axis_id[i] * rope_dim + i) * kElementBytes);
-    pattern_ptr[half_rope_dim + i] = static_cast<int32_t>(
-        (axis_id[i] * rope_dim + half_rope_dim + i) * kElementBytes);
+    pattern_ptr[i] = static_cast<int32_t>(axis_id[i] * rope_dim + i);
+    pattern_ptr[half_rope_dim + i] =
+        static_cast<int32_t>(axis_id[i] * rope_dim + half_rope_dim + i);
   }
 
   torch::Tensor device_pattern =

@@ -7,23 +7,31 @@ from pathlib import Path
 from scripts.logger import logger
 
 from ...common.toolchain import require_env
-from .kernels.utils import DEFAULT_ASCEND_BISHENG_ARCH
-
 TILELANG_BISHENG_COMMON_FLAGS = [
     "-O2",
-    "-std=c++17",
-    "-xasc",
+    "-std=gnu++17",
+    "-xcce",
+    "-mllvm",
+    "-cce-aicore-stack-size=0x8000",
+    "-mllvm",
+    "-cce-aicore-function-stack-size=0x8000",
+    "-mllvm",
+    "-cce-aicore-record-overflow=true",
+    "-mllvm",
+    "-cce-aicore-addr-transform",
+    "-mllvm",
+    "-cce-aicore-dcci-insert-for-scalar=false",
+    "-DL2_CACHE_HINT",
     "-fPIC",
     "-Wno-macro-redefined",
     "-Wno-ignored-attributes",
-    "-Wno-non-c-typedef-for-linkage",
-    "-DBACKEND_HYBM",
 ]
 
+DEFAULT_ASCEND_BISHENG_ARCH = "dav-c220"
 ASCEND_DEVICE_TO_BISHENG_ARCH = {
     "a2": DEFAULT_ASCEND_BISHENG_ARCH,
     "a3": DEFAULT_ASCEND_BISHENG_ARCH,
-    "a5": DEFAULT_ASCEND_BISHENG_ARCH,
+    "a5": "dav-c310",
 }
 
 
@@ -103,6 +111,7 @@ def bisheng_include_dirs() -> list[str]:
         f"{npu_home_path}/compiler/tikcpp/tikcfw/impl",
         f"{npu_home_path}/compiler/tikcpp/tikcfw/interface",
         f"{tl_root}/3rdparty/catlass/include",
+        f"{tl_root}/3rdparty/pto-isa/include",
         f"{tl_root}/3rdparty/shmem/include",
         f"{tl_root}/3rdparty/shmem/src/device",
         f"{tl_root}/src",
