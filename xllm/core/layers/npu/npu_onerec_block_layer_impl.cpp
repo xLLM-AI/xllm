@@ -735,7 +735,7 @@ void NpuOneRecBlockLayerImpl::param_from_args(
   param.loraEnableGMM = false;
   param.enableLogN = false;
   param.kvQuant = false;
-  param.enableIntraLayerAddNorm = is_decoder_;
+  param.enableIntraLayerAddNorm = false;
   param.enableInterLayerAddNorm = false;
   param.isDecoder = is_decoder_;
   param.isOneRecEncoder = !is_decoder_;
