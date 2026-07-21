@@ -65,6 +65,7 @@ struct SchedulerState {
   const ContinuousScheduler::Options& options;
   int32_t min_speculative_tokens_required;
   bool enable_prefix_cache;
+  bool has_linear_attention_layers;
 };
 
 // ScheduleBudget tracks the remaining resources for the current scheduling

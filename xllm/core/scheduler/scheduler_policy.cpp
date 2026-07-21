@@ -378,6 +378,29 @@ bool SchedulerPolicy::allocate_for_prefill(Sequence* seq,
   size_t max_handle_num_tokens =
       std::min(kv_cache_tokens_num + token_budget, seq->num_tokens());
 
+  // Linear-state block alignment: for models with linear attention layers +
+  // prefix cache, chunk boundaries must align to block_size so linear-state
+  // checkpoints land at recoverable positions.
+  if (state.has_linear_attention_layers && state.enable_prefix_cache &&
+      seq->is_prefill_stage()) {
+    const size_t block_size =
+        static_cast<size_t>(state.kv_cache_manager->block_size());
+    if (block_size > 0) {
+      const size_t aligned =
+          (max_handle_num_tokens / block_size) * block_size;
+      if (aligned <= kv_cache_tokens_num) {
+        if (max_handle_num_tokens == seq->num_tokens()) {
+          // Final chunk: allow unaligned to complete the sequence.
+        } else {
+          *actual_tokens = 0;
+          return false;
+        }
+      } else {
+        max_handle_num_tokens = aligned;
+      }
+    }
+  }
+
   // Speculative decoding: add extra tokens in decode stage.
   if (options_.num_speculative_tokens() > 0 &&
       !seq->is_chunked_prefill_stage() && kv_cache_tokens_num > 0) {
@@ -396,6 +419,12 @@ void SchedulerPolicy::allocate_shared_blocks_for(Sequence* seq,
     return;
   }
   if (seq->is_chunked_prefill_stage()) {
+    if (state.has_linear_attention_layers && state.enable_prefix_cache) {
+      // Linear-state prefix cache can only resume at saved state checkpoints.
+      // Re-match at every chunk boundary.
+      state.kv_cache_manager->allocate_shared(seq);
+      return;
+    }
     const size_t max_tokens_per_chunk =
         std::max(options_.max_tokens_per_chunk_for_prefill(), 64);
     size_t total_chunked_size =

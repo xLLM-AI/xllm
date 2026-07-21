@@ -27,6 +27,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_pool.h"
+#include "framework/model/model_args.h"
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"
 #include "framework/tokenizer/tokenizer.h"
@@ -87,7 +88,7 @@ class FakeEngine final : public Engine {
     return block_manager_.get();
   }
 
-  const ModelArgs& model_args() const override { NOT_IMPLEMENTED(); }
+  const ModelArgs& model_args() const override { return model_args_; }
 
   const TokenizerArgs& tokenizer_args() const override { NOT_IMPLEMENTED(); }
 
@@ -100,6 +101,7 @@ class FakeEngine final : public Engine {
  private:
   std::unique_ptr<Tokenizer> tokenizer_;
   std::unique_ptr<BlockManagerPool> block_manager_;
+  ModelArgs model_args_;
 };
 
 class TestDisaggPDScheduler final : public DisaggPDScheduler {

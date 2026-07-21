@@ -27,6 +27,7 @@ limitations under the License.
 
 #include "core/framework/config/scheduler_config.h"
 #include "distributed_runtime/engine.h"
+#include "framework/model/model_args.h"
 #include "util/utils.h"
 
 namespace xllm {
@@ -71,7 +72,7 @@ class FakeEngine : public Engine {
   BlockManagerPool* block_manager_pool() const {
     return fake_block_manager_.get();
   }
-  const ModelArgs& model_args() const { NOT_IMPLEMENTED(); }
+  const ModelArgs& model_args() const override { return model_args_; }
   const TokenizerArgs& tokenizer_args() const { NOT_IMPLEMENTED(); }
   std::vector<int64_t> get_active_activation_memory() const { return {0}; }
   bool init() override { return true; }
@@ -79,6 +80,7 @@ class FakeEngine : public Engine {
  private:
   std::unique_ptr<Tokenizer> fake_tokenizer_;
   std::unique_ptr<BlockManagerPool> fake_block_manager_;
+  ModelArgs model_args_;
 };
 
 template <typename T>
