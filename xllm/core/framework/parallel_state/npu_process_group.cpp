@@ -16,8 +16,11 @@ limitations under the License.
 
 #include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
 
+#include <algorithm>
 #include <c10d/ProcessGroup.hpp>
 #include <c10d/TCPStore.hpp>
+#include <cctype>
+#include <cstdlib>
 #include <torch_npu/csrc/distributed/ProcessGroupHCCL.hpp>
 
 #include "core/framework/config/dit_config.h"
@@ -78,6 +81,45 @@ std::string resolve_tcp_store_host(const std::string& host, int32_t rank_size) {
   // node for their private group and can deadlock startup.
   return rank_size == 1 ? "127.0.0.1" : host;
 }
+
+constexpr char kHcclTpAivEnv[] = "XLLM_HCCL_TP_AIV";
+constexpr char kTensorParallelGroupName[] = "tp_group";
+constexpr uint32_t kHcclAivExpansionMode = 3;
+
+bool should_enable_hccl_aiv_expansion(const std::string& group_name,
+                                      int32_t rank_size) {
+  const char* env_value = std::getenv(kHcclTpAivEnv);
+  if (env_value == nullptr || group_name != kTensorParallelGroupName ||
+      rank_size <= 1) {
+    return false;
+  }
+
+  // Keep the switch opt-in while accepting the values used by launch scripts.
+  std::string normalized_value(env_value);
+  std::transform(normalized_value.begin(),
+                 normalized_value.end(),
+                 normalized_value.begin(),
+                 [](unsigned char character) {
+                   return static_cast<char>(std::tolower(character));
+                 });
+  return normalized_value == "1" || normalized_value == "true" ||
+         normalized_value == "aiv";
+}
+
+void configure_hccl_aiv_expansion(
+    const std::string& group_name,
+    int32_t rank_size,
+    const c10::intrusive_ptr<c10d_npu::ProcessGroupHCCL::Options>& options) {
+  if (!should_enable_hccl_aiv_expansion(group_name, rank_size)) {
+    return;
+  }
+
+  // CANN restricts AIV expansion across multiple communicators, so scope it
+  // to the multi-rank tensor-parallel communicator used by this optimization.
+  options->hccl_config["hccl_op_expansion_mode"] = kHcclAivExpansionMode;
+  LOG(INFO) << "Enabling communicator-scoped HCCL AIV expansion for "
+            << group_name << ".";
+}
 }  // namespace
 
 namespace xllm {
@@ -115,6 +157,7 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
   const int32_t store_port = rank_size == 1 ? 0 : port;
   auto store = create_tcp_store(
       resolve_tcp_store_host(host, rank_size), store_port, rank);
+  configure_hccl_aiv_expansion(group_name, rank_size, hccl_pg_options);
   pg_ = std::make_unique<c10d_npu::ProcessGroupHCCL>(
       store, rank, rank_size, hccl_pg_options);
 }
@@ -163,6 +206,7 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
   const int32_t store_port = rank_size == 1 ? 0 : port;
   auto store = create_tcp_store(
       resolve_tcp_store_host(host, rank_size), store_port, local_rank);
+  configure_hccl_aiv_expansion(group_name, rank_size, hccl_pg_options);
   pg_ = std::make_unique<c10d_npu::ProcessGroupHCCL>(
       store, local_rank, rank_size, hccl_pg_options);
 }
