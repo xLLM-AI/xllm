@@ -122,7 +122,6 @@ class Options {
 
   PROPERTY(bool, enable_chunked_prefill) = true;
 
-
   // Flash Communication 1 (FC1) sequence-parallel optimization.
   PROPERTY(bool, enable_flashcomm1) = false;
 

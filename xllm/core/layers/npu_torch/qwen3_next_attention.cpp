@@ -180,8 +180,7 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
     out = out * torch::sigmoid(gate.view({T, q_size_}));
 
     if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
-      return o_proj_->forward(
-          out, row_parallel_reduce_mode_for_fc1(*fc1_ctx));
+      return o_proj_->forward(out, row_parallel_reduce_mode_for_fc1(*fc1_ctx));
     }
     return o_proj_->forward(out);
   }
@@ -214,8 +213,7 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
   }
 
   if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
-    return o_proj_->forward(
-        out, row_parallel_reduce_mode_for_fc1(*fc1_ctx));
+    return o_proj_->forward(out, row_parallel_reduce_mode_for_fc1(*fc1_ctx));
   }
   return o_proj_->forward(out);
 }

@@ -105,8 +105,8 @@ torch::Tensor DenseMLPImpl::forward(torch::Tensor hidden_states) {
 
   if (is_smoothquant_) {
     if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
-      return down_proj_->forward(
-          gate_up, row_parallel_reduce_mode_for_fc1(*fc1_ctx));
+      return down_proj_->forward(gate_up,
+                                 row_parallel_reduce_mode_for_fc1(*fc1_ctx));
     }
     return down_proj_->forward(gate_up);
   }
@@ -124,8 +124,8 @@ torch::Tensor DenseMLPImpl::forward(torch::Tensor hidden_states) {
   act_->forward(gate_up, output);
 
   if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
-    return down_proj_->forward(
-        output, row_parallel_reduce_mode_for_fc1(*fc1_ctx));
+    return down_proj_->forward(output,
+                               row_parallel_reduce_mode_for_fc1(*fc1_ctx));
   }
   return down_proj_->forward(output);
 }

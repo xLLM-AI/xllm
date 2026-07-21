@@ -18,8 +18,8 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
-#include "core/framework/model_context.h"
 #include "common/flash_comm1_context.h"
+#include "core/framework/model_context.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
@@ -260,8 +260,7 @@ class RowParallelLinearImpl : public torch::nn::Module {
 
   torch::Tensor forward(torch::Tensor input);
 
-  torch::Tensor forward(torch::Tensor input,
-                        RowParallelReduceMode reduce_mode);
+  torch::Tensor forward(torch::Tensor input, RowParallelReduceMode reduce_mode);
 
   // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict);

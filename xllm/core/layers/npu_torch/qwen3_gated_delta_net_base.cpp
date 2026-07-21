@@ -954,8 +954,8 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
         rearranged_norm.slice(0, 0, original_num_tokens).contiguous();
   }
   if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
-    return o_proj_->forward(
-        rearranged_norm, row_parallel_reduce_mode_for_fc1(*fc1_ctx));
+    return o_proj_->forward(rearranged_norm,
+                            row_parallel_reduce_mode_for_fc1(*fc1_ctx));
   }
   return o_proj_->forward(rearranged_norm);
 }

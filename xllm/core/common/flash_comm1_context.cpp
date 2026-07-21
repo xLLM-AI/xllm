@@ -72,8 +72,7 @@ int64_t shard_start_for_rank_impl(int32_t num_tokens,
 
 }  // namespace
 
-FlashComm1ContextScope::FlashComm1ContextScope(
-    const FlashComm1Context* ctx)
+FlashComm1ContextScope::FlashComm1ContextScope(const FlashComm1Context* ctx)
     : previous_(current_flash_comm1_context) {
   current_flash_comm1_context = ctx;
 }
@@ -129,11 +128,10 @@ torch::Tensor pad_rows_by_copy(const torch::Tensor& input,
   return output;
 }
 
-FlashComm1Context build_flash_comm1_context(
-    int32_t num_tokens,
-    bool is_prefill,
-    const ParallelArgs& parallel_args,
-    const FlashComm1Options& options) {
+FlashComm1Context build_flash_comm1_context(int32_t num_tokens,
+                                            bool is_prefill,
+                                            const ParallelArgs& parallel_args,
+                                            const FlashComm1Options& options) {
   int32_t actual_tp_size = parallel_args.world_size() /
                            (parallel_args.dp_size() * parallel_args.cp_size());
 
@@ -179,8 +177,7 @@ FlashComm1Context build_flash_comm1_context(
   ctx.mmrs_comm_mode = options.mmrs_comm_mode;
   ctx.tp_group = tp_group;
 
-  const int32_t token_alignment =
-      ctx.tp_world_size * kFc1LocalTokenAlignment;
+  const int32_t token_alignment = ctx.tp_world_size * kFc1LocalTokenAlignment;
   ctx.padded_num_tokens = round_up_to_multiple(num_tokens, token_alignment);
   ctx.pad_size = ctx.padded_num_tokens - num_tokens;
   ctx.local_num_tokens = local_num_tokens_for_rank(ctx, ctx.tp_rank);

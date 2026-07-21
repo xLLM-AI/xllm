@@ -264,8 +264,8 @@ void log_mmrs_quant_skip(RowParallelReduceMode reduce_mode,
   LOG_FIRST_N(WARNING, 16)
       << "FC1 MMRS skipped in row-parallel " << quant_path
       << " path: fused matmul_reduce_scatter is currently wired only for "
-         "non-quant linear. input=" << input.sizes()
-      << ", sequence_sharded="
+         "non-quant linear. input="
+      << input.sizes() << ", sequence_sharded="
       << (fc1_ctx != nullptr && is_sequence_sharded(*fc1_ctx))
       << ", enable_mmrs_fusion="
       << (fc1_ctx != nullptr && fc1_ctx->enable_mmrs_fusion);
@@ -1578,19 +1578,20 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
 
 torch::Tensor RowParallelLinearImpl::mmrs_weight_transposed() const {
   CHECK(weight_.defined()) << "weight is required for MMRS.";
-  const bool valid =
-      mmrs_weight_t_.defined() && mmrs_weight_t_.device() == weight_.device() &&
-      mmrs_weight_t_.scalar_type() == weight_.scalar_type() &&
-      mmrs_weight_t_.size(0) == weight_.size(1) &&
-      mmrs_weight_t_.size(1) == weight_.size(0);
+  const bool valid = mmrs_weight_t_.defined() &&
+                     mmrs_weight_t_.device() == weight_.device() &&
+                     mmrs_weight_t_.scalar_type() == weight_.scalar_type() &&
+                     mmrs_weight_t_.size(0) == weight_.size(1) &&
+                     mmrs_weight_t_.size(1) == weight_.size(0);
   if (!valid) {
     mmrs_weight_t_ = weight_.transpose(0, 1).contiguous();
   }
   return mmrs_weight_t_;
 }
 
-torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input,
-                                             RowParallelReduceMode reduce_mode) {
+torch::Tensor RowParallelLinearImpl::forward(
+    torch::Tensor input,
+    RowParallelReduceMode reduce_mode) {
   const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
   auto bias = bias_.defined() && rank_ == 0
                   ? std::optional<torch::Tensor>(bias_)
@@ -1704,8 +1705,7 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input,
     if (!input_is_parallelized_ && !skip_scatter) {
       input = xllm::parallel_state::scatter(input, process_group_);
     }
-    if (wants_mmrs(reduce_mode) && fc1_ctx &&
-        is_sequence_sharded(*fc1_ctx) &&
+    if (wants_mmrs(reduce_mode) && fc1_ctx && is_sequence_sharded(*fc1_ctx) &&
         fc1_ctx->enable_mmrs_fusion) {
       bool can_try_mmrs = input.defined() && weight_.defined() &&
                           input.dim() == 2 &&
@@ -1753,8 +1753,8 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input,
       } else {
         LOG_FIRST_N(WARNING, 8)
             << "FC1 MMRS skipped for unsupported row-parallel shape; fallback "
-               "to matmul + reduce_scatter. input=" << input.sizes()
-            << ", weight=" << weight_.sizes()
+               "to matmul + reduce_scatter. input="
+            << input.sizes() << ", weight=" << weight_.sizes()
             << ", original_num_tokens=" << fc1_ctx->original_num_tokens
             << ", pad_size=" << fc1_ctx->pad_size
             << ", has_bias=" << bias.has_value()
@@ -1772,8 +1772,7 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input,
       if (wants_mmrs(reduce_mode)) {
         LOG_FIRST_N(WARNING, 16)
             << "FC1 MMRS skipped before row-parallel matmul: fc1_ctx="
-            << (fc1_ctx != nullptr)
-            << ", sequence_sharded="
+            << (fc1_ctx != nullptr) << ", sequence_sharded="
             << (fc1_ctx != nullptr && is_sequence_sharded(*fc1_ctx))
             << ", enable_mmrs_fusion="
             << (fc1_ctx != nullptr && fc1_ctx->enable_mmrs_fusion)

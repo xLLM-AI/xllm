@@ -137,8 +137,7 @@ torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
     x = attention_->forward(
         positions, x, attn_metadata, kv_cache, mrope_cos_sin);
   } else {
-    x = linear_attention_->forward(
-        x, attn_metadata, kv_cache, input_params);
+    x = linear_attention_->forward(x, attn_metadata, kv_cache, input_params);
   }
 
   // Before post_norm, ensure residual shape matches x shape

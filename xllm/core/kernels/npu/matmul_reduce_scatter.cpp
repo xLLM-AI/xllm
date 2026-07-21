@@ -13,22 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "npu_ops_api.h"
-
 #include <glog/logging.h>
 #include <torch_npu/csrc/aten/CustomFunctions.h>
 
 #include "core/framework/parallel_state/process_group.h"
+#include "npu_ops_api.h"
 
 namespace xllm::kernel::npu {
 namespace {
 
-bool can_call_torch_npu_mmrs(
-    const torch::Tensor& a,
-    const torch::Tensor& b,
-    const std::optional<torch::Tensor>& bias,
-    const std::optional<torch::Tensor>& output,
-    ProcessGroup* process_group) {
+bool can_call_torch_npu_mmrs(const torch::Tensor& a,
+                             const torch::Tensor& b,
+                             const std::optional<torch::Tensor>& bias,
+                             const std::optional<torch::Tensor>& output,
+                             ProcessGroup* process_group) {
   if (process_group == nullptr) {
     LOG_FIRST_N(WARNING, 8)
         << "FC1 MMRS torch_npu skipped: process_group is null.";
@@ -48,8 +46,7 @@ bool can_call_torch_npu_mmrs(
   if (a.dim() != 2 || b.dim() != 2 || output->dim() != 2) {
     LOG_FIRST_N(WARNING, 8)
         << "FC1 MMRS torch_npu skipped: expected 2D tensors, got a_dim="
-        << a.dim() << ", b_dim=" << b.dim()
-        << ", output_dim=" << output->dim();
+        << a.dim() << ", b_dim=" << b.dim() << ", output_dim=" << output->dim();
     return false;
   }
   if (a.scalar_type() != at::kHalf && a.scalar_type() != at::kBFloat16) {
@@ -61,9 +58,8 @@ bool can_call_torch_npu_mmrs(
   if (a.scalar_type() != b.scalar_type() ||
       a.scalar_type() != output->scalar_type()) {
     LOG_FIRST_N(WARNING, 8)
-        << "FC1 MMRS torch_npu skipped: dtype mismatch. a="
-        << a.scalar_type() << ", b=" << b.scalar_type()
-        << ", output=" << output->scalar_type();
+        << "FC1 MMRS torch_npu skipped: dtype mismatch. a=" << a.scalar_type()
+        << ", b=" << b.scalar_type() << ", output=" << output->scalar_type();
     return false;
   }
   if (bias.has_value() && bias->defined() &&
@@ -82,8 +78,7 @@ bool can_call_torch_npu_mmrs(
   if (output->size(1) != b.size(1)) {
     LOG_FIRST_N(WARNING, 8)
         << "FC1 MMRS torch_npu skipped: output N mismatch. output="
-        << output->sizes()
-        << ", b=" << b.sizes();
+        << output->sizes() << ", b=" << b.sizes();
     return false;
   }
   return true;
@@ -93,8 +88,7 @@ bool should_use_ai_cpu_for_aiv_risky_shape(const torch::Tensor& a,
                                            const torch::Tensor& b,
                                            ProcessGroup* process_group) {
   if (process_group == nullptr || a.scalar_type() != at::kBFloat16 ||
-      a.dim() != 2 || b.dim() != 2 || a.size(0) != 2048 ||
-      b.size(1) != 5120) {
+      a.dim() != 2 || b.dim() != 2 || a.size(0) != 2048 || b.size(1) != 5120) {
     return false;
   }
   const int64_t world_size = process_group->world_size();
@@ -113,16 +107,15 @@ bool should_use_ai_cpu_for_aiv_risky_shape(const torch::Tensor& a,
 
 }  // namespace
 
-torch::Tensor matmul_reduce_scatter(
-    const torch::Tensor& a,
-    const torch::Tensor& b,
-    const std::optional<torch::Tensor>& bias,
-    const std::optional<torch::Tensor>& output,
-    ProcessGroup* process_group,
-    const std::string& reduce_op,
-    int64_t comm_turn,
-    int64_t stream_mode,
-    const std::string& comm_mode) {
+torch::Tensor matmul_reduce_scatter(const torch::Tensor& a,
+                                    const torch::Tensor& b,
+                                    const std::optional<torch::Tensor>& bias,
+                                    const std::optional<torch::Tensor>& output,
+                                    ProcessGroup* process_group,
+                                    const std::string& reduce_op,
+                                    int64_t comm_turn,
+                                    int64_t stream_mode,
+                                    const std::string& comm_mode) {
   if (!can_call_torch_npu_mmrs(a, b, bias, output, process_group)) {
     return torch::Tensor();
   }
