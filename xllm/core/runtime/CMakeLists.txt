@@ -87,6 +87,7 @@ cc_library(
     :platform
     :model_context
     :request
+    :speculative
     :encoder_cache
     :state_dict
     :dit_cache

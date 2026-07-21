@@ -81,6 +81,9 @@ DECLARE_string(speculative_algorithm);
 DECLARE_bool(enable_opt_validate_probs);
 
 DECLARE_bool(enable_mtp_draft_body_tp1);
+DECLARE_bool(enable_adaptive_speculative_decode);
+
+DECLARE_double(adaptive_speculative_min_gain);
 
 DECLARE_int32(speculative_suffix_cache_max_depth);
 

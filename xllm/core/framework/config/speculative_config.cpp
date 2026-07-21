@@ -70,6 +70,16 @@ DEFINE_bool(enable_atb_spec_kernel,
             false,
             "Whether to use ATB speculative kernel.");
 
+DEFINE_bool(enable_adaptive_speculative_decode,
+            false,
+            "Whether to enable adaptive speculative length for MTP decode.");
+
+DEFINE_double(
+    adaptive_speculative_min_gain,
+    0.0,
+    "Minimum relative throughput gain required to include a draft token in "
+    "adaptive speculative validation.");
+
 namespace xllm {
 
 void SpeculativeConfig::from_flags() {
@@ -85,6 +95,8 @@ void SpeculativeConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_opt_validate_probs);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mtp_draft_body_tp1);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_atb_spec_kernel);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_adaptive_speculative_decode);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(adaptive_speculative_min_gain);
 }
 
 void SpeculativeConfig::from_json(const JsonReader& json) {
@@ -100,6 +112,8 @@ void SpeculativeConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_opt_validate_probs);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mtp_draft_body_tp1);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_atb_spec_kernel);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_adaptive_speculative_decode);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(adaptive_speculative_min_gain);
 }
 
 void SpeculativeConfig::append_config_json(
@@ -129,6 +143,10 @@ void SpeculativeConfig::append_config_json(
       config_json, default_config, enable_mtp_draft_body_tp1);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_atb_spec_kernel);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_adaptive_speculative_decode);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, adaptive_speculative_min_gain);
 }
 
 SpeculativeConfig& SpeculativeConfig::get_instance() {

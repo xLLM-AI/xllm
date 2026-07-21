@@ -20,6 +20,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include "common/types.h"
+#include "core/framework/speculative/speculative_profile_registry.h"
 #include "forward_params.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/model/causal_lm.h"
@@ -69,6 +70,9 @@ class Worker {
 
   // allocate kv cache. blocking call
   bool allocate_kv_cache(const KVCacheShape& kv_cache_shape);
+
+  bool set_speculative_validate_time_predictor(
+      const SpeculativeProfileRegistry::ValidateTimePredictor& predictor);
 
   void get_cache_info(uint64_t& cluster_id, std::string& addr, uint16_t& port);
 
