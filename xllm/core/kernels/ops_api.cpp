@@ -435,7 +435,6 @@ torch::Tensor matmul_reduce_scatter(MatmulReduceScatterParams& params) {
   return npu::matmul_reduce_scatter(params.a,
                                     params.b,
                                     params.bias,
-                                    params.output,
                                     params.process_group,
                                     params.reduce_op,
                                     params.comm_turn,

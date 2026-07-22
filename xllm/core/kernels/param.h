@@ -343,7 +343,6 @@ struct MatmulReduceScatterParams {
   std::optional<torch::Tensor> bias;
   ProcessGroup* process_group = nullptr;
 
-  std::optional<torch::Tensor> output;
   std::string reduce_op = "sum";
   int64_t comm_turn = 0;
   int64_t stream_mode = 1;

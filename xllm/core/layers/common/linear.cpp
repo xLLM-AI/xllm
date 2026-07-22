@@ -1643,14 +1643,12 @@ torch::Tensor RowParallelLinearImpl::forward(
         auto output_shape = mmrs_input.sizes().vec();
         output_shape[0] = fc1_ctx->padded_local_num_tokens;
         output_shape[1] = weight_.size(0);
-        torch::Tensor mmrs_output = torch::empty(output_shape, input.options());
 
         xllm::kernel::MatmulReduceScatterParams mmrs_params;
         mmrs_params.a = mmrs_input;
         mmrs_params.b = mmrs_weight_transposed();
         mmrs_params.bias = bias;
         mmrs_params.process_group = process_group_;
-        mmrs_params.output = mmrs_output;
         mmrs_params.comm_mode = fc1_ctx->mmrs_comm_mode;
         try {
           output = xllm::kernel::matmul_reduce_scatter(mmrs_params);

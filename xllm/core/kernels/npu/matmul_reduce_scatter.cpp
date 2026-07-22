@@ -25,16 +25,10 @@ namespace {
 bool can_call_torch_npu_mmrs(const torch::Tensor& a,
                              const torch::Tensor& b,
                              const std::optional<torch::Tensor>& bias,
-                             const std::optional<torch::Tensor>& output,
                              ProcessGroup* process_group) {
   if (process_group == nullptr) {
     LOG_FIRST_N(WARNING, 8)
         << "FC1 MMRS torch_npu skipped: process_group is null.";
-    return false;
-  }
-  if (!output.has_value() || !output->defined()) {
-    LOG_FIRST_N(WARNING, 8)
-        << "FC1 MMRS torch_npu skipped: output tensor is missing.";
     return false;
   }
   if (!a.defined() || !b.defined()) {
@@ -110,13 +104,12 @@ bool should_use_ai_cpu_for_aiv_risky_shape(const torch::Tensor& a,
 torch::Tensor matmul_reduce_scatter(const torch::Tensor& a,
                                     const torch::Tensor& b,
                                     const std::optional<torch::Tensor>& bias,
-                                    const std::optional<torch::Tensor>& output,
                                     ProcessGroup* process_group,
                                     const std::string& reduce_op,
                                     int64_t comm_turn,
                                     int64_t stream_mode,
                                     const std::string& comm_mode) {
-  if (!can_call_torch_npu_mmrs(a, b, bias, output, process_group)) {
+  if (!can_call_torch_npu_mmrs(a, b, bias, process_group)) {
     return torch::Tensor();
   }
 

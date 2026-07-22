@@ -224,19 +224,6 @@ torch::Tensor gather_and_unpad_sequence(const torch::Tensor& input,
   return gathered;
 }
 
-torch::Tensor maybe_pad_for_reduce(const torch::Tensor& input,
-                                   const FlashComm1Context& ctx) {
-  int32_t current_size = input.size(0);
-  int32_t remainder = current_size % ctx.tp_world_size;
-
-  if (remainder == 0) {
-    return input;
-  }
-
-  int32_t dynamic_pad_size = ctx.tp_world_size - remainder;
-  return pad_rows_by_copy(input, current_size + dynamic_pad_size);
-}
-
 namespace {
 
 torch::Tensor reduce_scatter_padded_local(const torch::Tensor& input,
