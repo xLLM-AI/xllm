@@ -58,12 +58,16 @@ class MooncakeKVCacheTransferBase : public KVCacheTransfer {
 class MooncakeKVCacheTransferDefault final
     : public MooncakeKVCacheTransferBase {
  public:
+  MooncakeKVCacheTransferDefault(int32_t device_id,
+                                 uint16_t listen_port,
+                                 const torch::Device& device,
+                                 const std::string& model_type);
   MooncakeKVCacheTransferDefault(
-      const int32_t device_id,
-      const uint16_t listen_port,
+      int32_t device_id,
+      uint16_t listen_port,
       const torch::Device& device,
       const std::string& model_type,
-      const std::vector<bool>& indexer_cache_enabled_layers = {});
+      std::unique_ptr<MooncakeTransferEngine> engine);
 
   void allocate_kv_cache(std::vector<xllm::KVCache>& kv_caches,
                          const int64_t num_layers,
@@ -78,6 +82,10 @@ class MooncakeKVCacheTransferDefault final
   void register_kv_cache(std::vector<xllm::KVCache>& kv_caches,
                          const KVCacheShape& kv_cache_shape,
                          const torch::ScalarType dtype) override;
+
+  void register_kv_cache_spec(std::vector<xllm::KVCache>& kv_caches,
+                              const KVCacheShape& kv_cache_shape,
+                              torch::ScalarType dtype) override;
 
   bool pull_kv_blocks(
       const uint64_t src_cluster_id,
@@ -147,7 +155,6 @@ class MooncakeKVCacheTransferDefault final
   BufLayout main_layout_;
   BufLayout spec_layout_;
   std::string model_type_;
-  std::vector<bool> indexer_cache_enabled_layers_;
 };
 
 class MooncakeKVCacheTransferXTensor final

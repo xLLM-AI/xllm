@@ -41,6 +41,7 @@ limitations under the License.
 
 #include "framework/block/block.h"
 #include "framework/kv_cache/kv_cache_capacity.h"
+#include "framework/kv_cache/kv_cache_tensor_allocator.h"
 #include "framework/kv_cache/kv_cache_tensor_role.h"
 
 namespace xllm {
@@ -70,7 +71,7 @@ struct KVCacheCreateOptions {
   // whether that layer owns indexer cache tensors.
   PROPERTY(std::vector<bool>, indexer_cache_enabled_layers);
   PROPERTY(bool, enable_kv_cache_quant) = false;
-  PROPERTY(bool, enable_raw_device_allocator) = false;
+  PROPERTY(std::shared_ptr<KVCacheTensorAllocator>, tensor_allocator);
 #if defined(USE_NPU)
   PROPERTY(bool, enable_kv_cache_huge_page_allocator) = false;
 #endif
