@@ -281,15 +281,9 @@ class ExtBuild(build_ext):
             exit(1)
 
     def build_extension(self, ext: CMakeExtension) -> None:
-        guard_ninja = os.path.join(
-            self.base_dir, "scripts", "ninja_guard", "ninja"
-        )
-        if os.environ.get("XLLM_NINJA_GUARD"):
-            ninja_dir = os.environ["XLLM_NINJA_GUARD"]
-        elif os.path.isfile(guard_ninja):
-            ninja_dir = guard_ninja
-        else:
-            ninja_dir = shutil.which("ninja")
+        ninja_path = shutil.which("ninja")
+        if ninja_path is None:
+            raise RuntimeError("Ninja is required to build xLLM.")
         # the output dir for the extension
         extdir: str = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.path)))
 
@@ -321,7 +315,7 @@ class ExtBuild(build_ext):
         cmake_args: list[str] = [
             "-G",
             "Ninja",
-            f"-DCMAKE_MAKE_PROGRAM={ninja_dir}",
+            f"-DCMAKE_MAKE_PROGRAM={ninja_path}",
             f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}",
             f"-DCMAKE_RUNTIME_OUTPUT_DIRECTORY={extdir}",
             "-DUSE_CCACHE=ON",
@@ -360,15 +354,9 @@ class ExtBuild(build_ext):
         elif self.device == "cuda":
             torch_cuda_architectures = os.getenv("TORCH_CUDA_ARCH_LIST")
             if not torch_cuda_architectures:
-                raise ValueError(
-                    "Please set TORCH_CUDA_ARCH_LIST environment variable, "
-                    'e.g. export TORCH_CUDA_ARCH_LIST="8.0 8.9 9.0 '
-                    '10.0 12.0"'
-                )
-            cmake_args += [
-                "-DUSE_CUDA=ON",
-                f"-DTORCH_CUDA_ARCH_LIST={torch_cuda_architectures}",
-            ]
+                raise ValueError("Please set TORCH_CUDA_ARCH_LIST environment variable, e.g. export TORCH_CUDA_ARCH_LIST=\"8.0 8.9 9.0 10.0 12.0\"")
+            cmake_args += ["-DUSE_CUDA=ON",
+                           f"-DTORCH_CUDA_ARCH_LIST={torch_cuda_architectures}"]
             set_cuda_envs()
 
         elif self.device == "dcu":
