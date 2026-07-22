@@ -256,14 +256,25 @@ set(CPPREST_EXCLUDE_WEBSOCKETS ON CACHE BOOL "Exclude websockets functionality."
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-format-truncation")
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/cmake)
+set(_XLLM_MUSIFY_COPTS "")
 if(USE_MUSA)
-  if(DEFINED ENV{MUSAMAPPING_PATH} AND NOT "$ENV{MUSAMAPPING_PATH}" STREQUAL "")
-    set(_XLLM_MCC_WRAPPER "$ENV{MUSAMAPPING_PATH}/mcc_wrapper")
-  elseif(DEFINED ENV{MUSA_HOME} AND NOT "$ENV{MUSA_HOME}" STREQUAL "")
-    set(_XLLM_MCC_WRAPPER "$ENV{MUSA_HOME}/tools/musamapping/mcc_wrapper")
-  else()
-    set(_XLLM_MCC_WRAPPER "/usr/local/musa/tools/musamapping/mcc_wrapper")
+  if(NOT USE_CUDA)
+    message(FATAL_ERROR "USE_MUSA requires USE_CUDA=ON")
   endif()
+
+  if(DEFINED ENV{MUSAMAPPING_PATH} AND NOT "$ENV{MUSAMAPPING_PATH}" STREQUAL "")
+    set(_XLLM_MUSAMAPPING_PATH "$ENV{MUSAMAPPING_PATH}")
+  elseif(DEFINED ENV{MUSA_HOME} AND NOT "$ENV{MUSA_HOME}" STREQUAL "")
+    set(_XLLM_MUSAMAPPING_PATH "$ENV{MUSA_HOME}/tools/musamapping")
+  else()
+    set(_XLLM_MUSAMAPPING_PATH "/usr/local/musa/tools/musamapping")
+  endif()
+  set(_XLLM_MCC_WRAPPER "${_XLLM_MUSAMAPPING_PATH}/mcc_wrapper")
+  set(_XLLM_MUSIFY_COPTS
+    "-fplugin=${_XLLM_MUSAMAPPING_PATH}/libMusaMapping.so"
+    "-x" "musa"
+    "-I."
+  )
   set(CMAKE_CXX_COMPILER "${_XLLM_MCC_WRAPPER}" CACHE FILEPATH
       "C++ compiler for the MUSA compatibility path" FORCE)
   project("xllm" LANGUAGES C CXX CUDA)

@@ -3,24 +3,6 @@ include(cc_shared_library)
 
 include_directories(.)
 
-# Restrict musamapping to xLLM targets that compile CUDA-compatible sources.
-if(USE_MUSA)
-  if(DEFINED ENV{MUSAMAPPING_PATH} AND NOT "$ENV{MUSAMAPPING_PATH}" STREQUAL "")
-    set(_XLLM_MUSAMAPPING_PATH "$ENV{MUSAMAPPING_PATH}")
-  elseif(DEFINED ENV{MUSA_HOME} AND NOT "$ENV{MUSA_HOME}" STREQUAL "")
-    set(_XLLM_MUSAMAPPING_PATH "$ENV{MUSA_HOME}/tools/musamapping")
-  else()
-    set(_XLLM_MUSAMAPPING_PATH "/usr/local/musa/tools/musamapping")
-  endif()
-  set(_XLLM_MUSIFY_COPTS
-    "-fplugin=${_XLLM_MUSAMAPPING_PATH}/libMusaMapping.so"
-    "-x" "musa"
-    "-I."
-  )
-else()
-  set(_XLLM_MUSIFY_COPTS "")
-endif()
-
 # Generate build-time version header from version.txt.
 file(READ "${CMAKE_SOURCE_DIR}/version.txt" XLLM_BUILD_VERSION_RAW)
 string(STRIP "${XLLM_BUILD_VERSION_RAW}" XLLM_BUILD_VERSION)

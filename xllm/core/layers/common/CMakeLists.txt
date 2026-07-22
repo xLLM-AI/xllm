@@ -67,7 +67,7 @@ cc_library(
     torch
     :platform
     $<$<BOOL:${USE_MLU}>:mlu_layers>
-    $<$<BOOL:${USE_CUDA}>:cuda_layers>
+    $<$<AND:$<BOOL:${USE_CUDA}>,$<NOT:$<BOOL:${USE_MUSA}>>>:cuda_layers>
     $<$<BOOL:${USE_ILU}>:ilu_layers>
     $<$<BOOL:${USE_NPU}>:npu_torch_layers>
     $<$<BOOL:${USE_MUSA}>:musa_layers>

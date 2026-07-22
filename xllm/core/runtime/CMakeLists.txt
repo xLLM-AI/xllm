@@ -1,6 +1,34 @@
 include(cc_library)
 include(cc_binary)
 
+if(USE_MUSA)
+  cc_library(
+    NAME
+      cuda_graph_executor
+    HDRS
+      cuda_graph_executor_impl.h
+    SRCS
+      cuda_graph_executor_impl.cpp
+    COPTS
+      ${_XLLM_MUSIFY_COPTS}
+    DEPS
+      torch
+      glog::glog
+      absl::flat_hash_map
+      :common
+      :platform
+      :util
+      :cuda_kernels
+      :kv_cache
+      :model
+      :layers
+      :request
+      :parallel_state
+      :model_context
+      :sampler
+  )
+endif()
+
 
 cc_library(
   NAME
@@ -51,7 +79,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:acl_graph_executor_impl.cpp>
     $<$<BOOL:${USE_NPU}>:acl_graph_persistent_param.cpp>
     $<$<BOOL:${USE_MLU}>:mlu_graph_executor_impl.cpp>
-    $<$<BOOL:${USE_CUDA}>:cuda_graph_executor_impl.cpp>
+    $<$<AND:$<BOOL:${USE_CUDA}>,$<NOT:$<BOOL:${USE_MUSA}>>>:cuda_graph_executor_impl.cpp>
     py_executor_impl.cpp
     $<$<BOOL:${USE_DCU}>:dcu_graph_executor_impl.cpp>
     worker.cpp
@@ -98,6 +126,7 @@ cc_library(
     :util
     :worker_service
     :xllm_server
+    $<$<BOOL:${USE_MUSA}>:cuda_graph_executor>
     $<$<BOOL:${USE_NPU}>:xllm_ops>
     $<$<BOOL:${USE_NPU}>:atb_customize>
     $<$<BOOL:${USE_NPU}>:platform_npu>
