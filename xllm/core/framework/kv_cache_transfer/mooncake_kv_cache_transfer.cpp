@@ -203,8 +203,8 @@ bool MooncakeKVCacheTransferBase::unlink_cluster(const uint64_t& cluster_id,
 // ============================================================================
 
 MooncakeKVCacheTransferDefault::MooncakeKVCacheTransferDefault(
-    int32_t device_id,
-    uint16_t listen_port,
+    const int32_t device_id,
+    const uint16_t listen_port,
     const torch::Device& device,
     const std::string& model_type)
     : MooncakeKVCacheTransferBase(
@@ -215,8 +215,8 @@ MooncakeKVCacheTransferDefault::MooncakeKVCacheTransferDefault(
       model_type_(model_type) {}
 
 MooncakeKVCacheTransferDefault::MooncakeKVCacheTransferDefault(
-    int32_t device_id,
-    uint16_t listen_port,
+    const int32_t device_id,
+    const uint16_t listen_port,
     const torch::Device& device,
     const std::string& model_type,
     std::unique_ptr<MooncakeTransferEngine> engine)

@@ -58,13 +58,13 @@ class MooncakeKVCacheTransferBase : public KVCacheTransfer {
 class MooncakeKVCacheTransferDefault final
     : public MooncakeKVCacheTransferBase {
  public:
-  MooncakeKVCacheTransferDefault(int32_t device_id,
-                                 uint16_t listen_port,
+  MooncakeKVCacheTransferDefault(const int32_t device_id,
+                                 const uint16_t listen_port,
                                  const torch::Device& device,
                                  const std::string& model_type);
   MooncakeKVCacheTransferDefault(
-      int32_t device_id,
-      uint16_t listen_port,
+      const int32_t device_id,
+      const uint16_t listen_port,
       const torch::Device& device,
       const std::string& model_type,
       std::unique_ptr<MooncakeTransferEngine> engine);
