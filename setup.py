@@ -48,6 +48,12 @@ BUILD_TEST_FILE: bool = True
 BUILD_EXPORT: bool = True
 
 
+def _ensure_torch_npu_ready() -> None:
+    from scripts.deps.torch_npu_install import ensure_torch_npu_ready
+
+    ensure_torch_npu_ready()
+
+
 def _ensure_tilelang_ascend_ready(target_platform: str, arch: str) -> None:
     compiler_parent = os.path.join(get_base_dir(), "xllm")
     if compiler_parent not in sys.path:
@@ -913,6 +919,7 @@ if __name__ == "__main__":
     logger.info(f"🚀 Build xllm with CPU arch: {arch} and target device: {device}")
 
     if device == "npu":
+        _ensure_torch_npu_ready()
         _ensure_tilelang_ascend_ready(target_platform, arch)
     pre_build(device)
 
