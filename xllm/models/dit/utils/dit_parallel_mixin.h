@@ -19,6 +19,8 @@ limitations under the License.
 
 #include <utility>
 
+#include "core/framework/config/parallel_config.h"
+#include "core/framework/model_context.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "framework/parallel_state/parallel_state.h"
 
@@ -32,26 +34,32 @@ namespace dit {
 //                      public dit::CFGParallelMixin { ... };
 class CFGParallelMixin {
  public:
+  explicit CFGParallelMixin(const DiTModelContext& context)
+      : cfg_size_(ParallelConfig::get_instance().cfg_size()),
+        cfg_group_(context.get_parallel_args().dit_cfg_group_) {}
+
+  // forward_fn(is_positive) -> Tensor  —  caller captures embeddings in lambda.
   // Returns {positive_noise_pred, negative_noise_pred}.
   template <typename ForwardFn>
-  std::pair<torch::Tensor, torch::Tensor> forward_cfg(ForwardFn&& forward_fn,
-                                                      ProcessGroup* pg,
-                                                      bool do_cfg) const {
-    if (!do_cfg) {
-      return {forward_fn(true), torch::Tensor()};
+  std::pair<torch::Tensor, torch::Tensor> exec_with_cfg(
+      const ForwardFn& forward_fn) const {
+    // Not doing CFG parallel: execute both conditionals serially.
+    if (cfg_group_ == nullptr || cfg_group_->world_size() != 2) {
+      return {forward_fn(true), forward_fn(false)};
     }
 
-    if (pg != nullptr && pg->world_size() > 1) {
-      int32_t rank = pg->rank();
-      torch::Tensor noise_pred = forward_fn(rank == 0);
-      torch::Tensor gathered =
-          parallel_state::gather(noise_pred, pg, /*dim=*/0);
-      auto chunks = torch::chunk(gathered, 2, 0);
-      return {chunks[0], chunks[1]};
-    }
-
-    return {forward_fn(true), forward_fn(false)};
+    // CFG parallel: rank 0 → positive, rank 1 → negative, gather + chunk.
+    int32_t rank = cfg_group_->rank();
+    torch::Tensor noise_pred = forward_fn(rank == 0);
+    torch::Tensor gathered =
+        parallel_state::gather(noise_pred, cfg_group_, /*dim=*/0);
+    auto chunks = torch::chunk(gathered, 2, 0);
+    return {chunks[0], chunks[1]};
   }
+
+ private:
+  int32_t cfg_size_ = 1;
+  ProcessGroup* cfg_group_ = nullptr;
 };
 
 // Mixin for VAE parallelism (to be implemented).

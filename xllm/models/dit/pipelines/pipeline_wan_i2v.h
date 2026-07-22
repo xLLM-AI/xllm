@@ -48,7 +48,8 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
                                     public dit::CFGParallelMixin {
  public:
   WanImageToVideoPipelineImpl(const DiTModelContext& context)
-      : parallel_args_(context.get_parallel_args()) {
+      : parallel_args_(context.get_parallel_args()),
+        dit::CFGParallelMixin(context) {
     options_ = context.get_tensor_options();
     const auto& vae_args = context.get_model_args("vae");
     zdim_ = vae_args.z_dim();
@@ -567,20 +568,16 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
 #endif
 
       if (do_classifier_free_guidance) {
-        auto [pos_noise, neg_noise] = forward_cfg(
-            [&](bool is_positive) {
-              auto& embeds =
-                  is_positive ? encoded_prompt_embeds : encoded_negative_embeds;
-              return use_rolling_load_
-                         ? rolling_forward(embeds)
-                         : current_model->forward(latent_model_input,
-                                                  timestep_input,
-                                                  embeds,
-                                                  torch::Tensor(),
-                                                  sparse_attn_state);
-            },
-            parallel_args_.dit_cfg_group_,
-            /*do_cfg=*/true);
+        auto [pos_noise, neg_noise] = exec_with_cfg([&](bool is_positive) {
+          auto& embeds =
+              is_positive ? encoded_prompt_embeds : encoded_negative_embeds;
+          return use_rolling_load_ ? rolling_forward(embeds)
+                                   : current_model->forward(latent_model_input,
+                                                            timestep_input,
+                                                            embeds,
+                                                            torch::Tensor(),
+                                                            sparse_attn_state);
+        });
 
         noise_pred =
             neg_noise.to(torch::kFloat32) +
