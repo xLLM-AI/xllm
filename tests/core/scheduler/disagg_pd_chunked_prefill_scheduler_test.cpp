@@ -529,6 +529,7 @@ TEST(DisaggPDChunkedPrefillSchedulerTest,
   EXPECT_EQ(sequence->kv_state().kv_cache_tokens_num(), 8u);
   EXPECT_EQ(sequence->kv_state().shared_blocks_num(BlockType::KV), 4u);
   EXPECT_EQ(sequence->kv_state().num_blocks(BlockType::KV), 5u);
+  EXPECT_EQ(request->num_prefix_cache_tokens(), 8u);
 
   block_manager->deallocate(request.get());
   release_prefix_cache(block_manager);

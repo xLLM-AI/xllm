@@ -206,7 +206,8 @@ void release_prefix_cache(BlockManagerPool* block_manager) {
 }
 
 bool recv_first_generation(DisaggPDScheduler* scheduler,
-                           const torch::Tensor& mtp_embedding) {
+                           const torch::Tensor& mtp_embedding,
+                           int32_t num_cached_tokens = 0) {
   return scheduler->decode_recv_first_generation(
       "req",
       /*token_id=*/42,
@@ -222,7 +223,8 @@ bool recv_first_generation(DisaggPDScheduler* scheduler,
       /*src_linear_state_id=*/-1,
       /*src_dp_size=*/1,
       /*src_dp_rank=*/0,
-      mtp_embedding);
+      mtp_embedding,
+      num_cached_tokens);
 }
 
 }  // namespace
@@ -333,6 +335,42 @@ TEST(DisaggPDSchedulerTest, FirstDecodeTokenLatencyIsNonNegative) {
   // pre-fix it was created_time + ttft (~now+100ms), yielding a negative ITL.
   int64_t first_itl = queued->sequences()[0]->tbt(absl::Now());
   EXPECT_GE(first_itl, 0);
+}
+
+TEST(DisaggPDSchedulerTest, PreservesPrefillCachedTokensOnDecodeRequest) {
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  TestDisaggPDScheduler scheduler(&engine, make_options());
+  std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
+  Sequence* sequence = request->sequences()[0].get();
+  ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
+  sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
+  ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
+
+  ASSERT_TRUE(recv_first_generation(
+      &scheduler, torch::Tensor(), /*num_cached_tokens=*/2));
+
+  std::shared_ptr<Request> queued;
+  ASSERT_TRUE(scheduler.pop_decode_request_for_test(&queued));
+  EXPECT_EQ(queued->num_prefix_cache_tokens(), 2u);
+}
+
+TEST(DisaggPDSchedulerTest, InvalidPrefillCachedTokensFallBackToZero) {
+  for (int32_t num_cached_tokens : {-1, 5}) {
+    FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+    TestDisaggPDScheduler scheduler(&engine, make_options());
+    std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
+    Sequence* sequence = request->sequences()[0].get();
+    ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
+    sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
+    ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
+
+    ASSERT_TRUE(
+        recv_first_generation(&scheduler, torch::Tensor(), num_cached_tokens));
+
+    std::shared_ptr<Request> queued;
+    ASSERT_TRUE(scheduler.pop_decode_request_for_test(&queued));
+    EXPECT_EQ(queued->num_prefix_cache_tokens(), 0u);
+  }
 }
 
 TEST(DisaggPDSchedulerTest, AmortizedTokenLatencyRoundsHalfUp) {

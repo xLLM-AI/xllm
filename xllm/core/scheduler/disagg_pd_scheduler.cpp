@@ -660,6 +660,17 @@ void DisaggPDScheduler::prefill_send_first_generation() {
       gen->set_req_id(request->request_id());
       gen->set_x_request_id(request->x_request_id());
       gen->set_x_request_time(request->x_request_time());
+      const size_t num_cached_tokens = request->num_prefix_cache_tokens();
+      if (num_cached_tokens >
+          static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        LOG(WARNING) << "Invalid num_cached_tokens on prefill, request_id: "
+                     << request->request_id()
+                     << ", num_cached_tokens: " << num_cached_tokens
+                     << ". Falling back to 0.";
+        gen->set_num_cached_tokens(0);
+      } else {
+        gen->set_num_cached_tokens(static_cast<int32_t>(num_cached_tokens));
+      }
       if (request->sequences()[0]->first_token().has_value()) {
         auto token = gen->mutable_tokens()->Add();
         token->set_token_id(
@@ -802,7 +813,8 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     int32_t src_linear_state_id,
     int32_t src_dp_size,
     int32_t src_dp_rank,
-    torch::Tensor mtp_bootstrap_embedding) {
+    torch::Tensor mtp_bootstrap_embedding,
+    int32_t num_cached_tokens) {
   // push to request_queue_, and will be executed by engine.
   std::shared_ptr<Request> request = nullptr;
   {
@@ -832,6 +844,16 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     return false;
   }
   Sequence* sequence = request->sequences()[0].get();
+  if (num_cached_tokens < 0 ||
+      static_cast<size_t>(num_cached_tokens) > sequence->num_prompt_tokens()) {
+    LOG(WARNING) << "Invalid num_cached_tokens from prefill, request_id: "
+                 << req_id << ", num_cached_tokens: " << num_cached_tokens
+                 << ", num_prompt_tokens: " << sequence->num_prompt_tokens()
+                 << ". Falling back to 0.";
+    num_cached_tokens = 0;
+  }
+  request->record_num_prefix_cache_tokens(
+      static_cast<size_t>(num_cached_tokens));
   const bool need_mtp_bootstrap = options_.num_speculative_tokens() > 0;
   if (need_mtp_bootstrap) {
     const int32_t slot_id = sequence->get_single_block_id();
