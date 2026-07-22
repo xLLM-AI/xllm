@@ -151,8 +151,8 @@ TEST(DsaCpMetadataTest, PaddingAndBoundaryCross) {
 // full length on every rank -- and must DIFFER from local_query_start_loc on
 // the later ranks, which is exactly the bug the ori_kv path had.
 TEST(DsaCpMetadataTest, SingleLongRequestOriKvSeesFullStream) {
-  auto qsl = i32({0, 332});     // 1 request, 332 tokens
-  auto seq_lens = i32({332});   // pure prefill
+  auto qsl = i32({0, 332});    // 1 request, 332 tokens
+  auto seq_lens = i32({332});  // pure prefill
 
   auto r0 = DSAMetadataBuilder::build_cp_local_metadata(
       qsl, seq_lens, /*cp_size=*/2, /*cp_rank=*/0);
