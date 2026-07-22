@@ -19,45 +19,31 @@ limitations under the License.
 
 namespace xllm {
 
-// Sliding-window leaf of CompositeBlockManager.
-//
-// The low-level physical block pool (free list, allocate / deallocate / free,
-// num_* accounting, id-0 padding) is identical to BlockManagerImpl, so this
-// derives from it and reuses that machinery unchanged. Growth is the base flat
-// append (allocate_for_sequence inherited). The sliding-window specifics are:
-//   - release_out_of_window() drops leading blocks that have slid out of the
-//     window; the composite calls it AFTER committing a successful round, so a
-//     failed allocate_sequence never releases the sequence's existing blocks;
-//   - the SWA block list grows by logical position and never shrinks in size;
-//     released leading positions become invalid placeholders;
-//   - the pool is sized with slack (see build_composite_leaves) so the peak
-//     "old blocks not yet released + new tail" fits without borrowing capacity;
-//   - no prefix cache.
+// Sliding-window leaf of CompositeBlockManager. Reuses BlockManagerImpl's
+// physical pool and flat-append growth. SWA-specific behavior:
+//   - release_out_of_window() drops leading slid-out blocks; released
+//     positions stay as invalid placeholders so DSA modulo indexing
+//     (`(pos/block_size) % semantic_cols`) remains stable.
+//   - Prefix cache is gap-tolerant (LinearStatePrefixCache backend); the
+//     tail-continuity check lives on the composite. TEXT hasher only.
 class SlidingWindowBlockManager : public BlockManagerImpl {
  public:
   explicit SlidingWindowBlockManager(const Options& options);
   ~SlidingWindowBlockManager() override = default;
 
-  // Release the leading SWA blocks of the sequence that have fully slid out of
-  // the window: move them out (leaving invalid placeholders so logical-position
-  // indexing stays stable) and return their ids to the pool. Called by the
-  // composite after a successful allocate commit. Growth reuses the inherited
-  // BlockManagerImpl::allocate_for_sequence (flat append).
+  // Deallocate leading blocks that have slid out of the window; leaves
+  // invalid placeholders in their slots. Called by the composite after a
+  // successful allocate commit.
   void release_out_of_window(Sequence* seq) override;
 
-  // SWA never serves prefix cache; these must not be reached.
+  // Gap-tolerant SWA probe. Delegates to LinearStatePrefixCache::match; see
+  // that class for the shape returned. Composite owns the tail-continuity
+  // check and the min-across-leaves clamp.
   std::vector<Block> allocate_shared(
       const Slice<int32_t>& token_ids,
       const Slice<Block>& existed_shared_blocks = {},
       const MMData& mm_data = MMData(),
-      const Slice<XXH3Key>& block_hashes = {},
-      size_t* matched_tokens = nullptr) override;
-  void cache(const Slice<int32_t>& token_ids,
-             std::vector<Block>& blocks,
-             size_t existed_shared_blocks_num = 0,
-             const MMData& mm_data = MMData(),
-             const Slice<XXH3Key>& block_hashes = {}) override;
-  void cache(const std::vector<Block>& blocks) override;
+      const Slice<XXH3Key>& block_hashes = {}) override;
 
   uint32_t swa_blocks_per_seq() const { return options_.swa_blocks_per_seq(); }
 };

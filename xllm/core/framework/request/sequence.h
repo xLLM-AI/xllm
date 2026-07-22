@@ -21,6 +21,7 @@ limitations under the License.
 #include <folly/futures/Future.h>
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -245,19 +246,24 @@ class Sequence final {
 
   // Precomputed chained block hashes used by the prefix cache. Covers all full
   // blocks of the current tokens; reused by match()/insert() so the hash is
-  // computed once per sequence instead of recomputed on every call.
-  Slice<XXH3Key> block_hashes() const { return block_hashes_; }
+  // computed once per sequence instead of recomputed on every call. Returns the
+  // chain for the stride set by the most recent update_block_hashes() call.
+  Slice<XXH3Key> block_hashes() const;
 
-  // Extend `block_hashes_` to cover any newly completed full blocks. Cheap
-  // (no-op) when no new full block is available, so it is safe to call before
-  // every match()/cache().
+  // Extend the per-stride chain for `block_size` to cover any newly completed
+  // full blocks, and select it as the one block_hashes() returns. Cheap (no-op)
+  // when no new full block is available, so it is safe to call before every
+  // match()/cache(). DSV4 admission probes SWA / C4 / C128 back-to-back with
+  // different strides (base / 4*base / 128*base); each stride keeps its own
+  // chain so switching strides no longer discards and rebuilds the whole chain.
   void update_block_hashes(uint32_t block_size, BlockHasherType hasher_type);
 
   // Precomputed chained per-chunk hashes for the linear-state checkpoint index.
-  // Separate hash domain from `block_hashes_`: the stride is one prefill chunk
-  // (a multiple of the KV block size), not a KV block, so a linear checkpoint
-  // is a sparse overlay on the per-block KV cache. Consumed by the batch
-  // builder (save/restore boundaries) and the LINEAR leaf's match probe.
+  // Separate hash domain from the KV block-hash chains: the stride is one
+  // prefill chunk (a multiple of the KV block size), not a KV block, so a
+  // linear checkpoint is a sparse overlay on the per-block KV cache. Consumed
+  // by the batch builder (save/restore boundaries) and the LINEAR leaf's match
+  // probe.
   Slice<XXH3Key> linear_state_hashes() const { return linear_state_hashes_; }
 
   // Extend `linear_state_hashes_` to cover any newly completed full chunks at
@@ -561,11 +567,17 @@ class Sequence final {
   // the length of the prompt tokens
   size_t num_prompt_tokens_ = 0;
 
-  // Precomputed chained block hashes covering all full blocks of `tokens_`.
-  // Extended incrementally; consumed by the prefix cache.
-  std::vector<XXH3Key> block_hashes_;
+  // Precomputed chained block hashes covering all full blocks of `tokens_`,
+  // keyed by block-size stride. DSV4 admission probes multiple strides (base /
+  // 4*base / 128*base) per tick; each keeps its own chain so a stride switch
+  // extends incrementally instead of discarding and rebuilding. Extended
+  // incrementally; consumed by the prefix cache. std::map node storage is
+  // pointer-stable, so a Slice handed out by block_hashes() survives inserts of
+  // other strides.
+  std::map<uint32_t, std::vector<XXH3Key>> block_hashes_by_stride_;
 
-  // Block size used to compute `block_hashes_` (0 until first computed).
+  // Stride selected by the most recent update_block_hashes() call; keys
+  // block_hashes() into `block_hashes_by_stride_` (0 until first computed).
   uint32_t hash_block_size_ = 0;
 
   // Precomputed chained per-chunk hashes for the linear-state checkpoint index

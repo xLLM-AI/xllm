@@ -577,8 +577,7 @@ TEST(BlockManagerPoolTest, LinearStateBlockManagerMatchesOnlyCheckpointHashes) {
       true);
   options.num_single_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
-      .linear_state_num_slots(64)
-      .linear_chunk_stride(4);
+      .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
@@ -634,8 +633,7 @@ TEST(BlockManagerPoolTest, ExactPromptCannotReuseUncheckpointedTailBoundary) {
       true);
   options.num_single_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
-      .linear_state_num_slots(64)
-      .linear_chunk_stride(4);
+      .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
@@ -674,8 +672,7 @@ TEST(BlockManagerPoolTest, PromptPastCheckpointReusesCheckpointBoundary) {
       true);
   options.num_single_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
-      .linear_state_num_slots(64)
-      .linear_chunk_stride(4);
+      .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
@@ -972,8 +969,7 @@ TEST(BlockManagerPoolTest, SparseLinearStateCheckpointTrimsSharedKVBlocks) {
         true);
     options.num_single_blocks(FLAGS_max_seqs_per_batch + 2)
         .enable_linear_state(true)
-        .linear_state_num_slots(64)
-        .linear_chunk_stride(4);
+        .linear_state_num_slots(64);
     ScopedValue<int32_t> chunk_guard(
         &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
     BlockManagerPool pool(options, /*dp_size=*/1);
@@ -1029,8 +1025,7 @@ TEST(BlockManagerPoolTest, SparseLinearStateCheckpointCannotExceedKVMatch) {
       true);
   options.num_single_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
-      .linear_state_num_slots(64)
-      .linear_chunk_stride(4);
+      .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
@@ -1080,8 +1075,7 @@ TEST(BlockManagerPoolTest, ExactPromptStopsAtEarlierCheckpoint) {
       true);
   options.num_single_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
-      .linear_state_num_slots(64)
-      .linear_chunk_stride(4);
+      .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);

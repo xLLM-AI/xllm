@@ -47,8 +47,7 @@ class BlockManagerImpl : public BlockManager {
       const Slice<int32_t>& token_ids,
       const Slice<Block>& existed_shared_blocks = {},
       const MMData& mm_data = MMData(),
-      const Slice<XXH3Key>& block_hashes = {},
-      size_t* matched_tokens = nullptr) override;
+      const Slice<XXH3Key>& block_hashes = {}) override;
 
   // cache blocks when enable prefix cache
   void cache(const Slice<int32_t>& token_ids,
@@ -94,6 +93,14 @@ class BlockManagerImpl : public BlockManager {
 
   // total blocks num
   size_t num_total_blocks() const override { return free_blocks_.size() - 1; }
+
+ protected:
+  // Flip a block's entry in `usage_ids` from 0 to 1. Returns true if the flip
+  // happened; false if the entry was already 1 (i.e. block was already marked
+  // used). Shared with subclasses (e.g. SlidingWindowBlockManager) that need
+  // to reproduce the base allocate_shared refcount bookkeeping over their own
+  // custom probe path. Static-friendly signature keeps callers free of `this`.
+  static bool mark_used(std::vector<uint8_t>* usage_ids, int32_t block_id);
 
  private:
   // check if has enough slots, if not, try to evict some blocks

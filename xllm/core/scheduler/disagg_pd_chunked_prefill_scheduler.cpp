@@ -102,8 +102,15 @@ void DisaggPDChunkedPrefillScheduler::match_prefix_blocks(Sequence* sequence) {
     return;
   }
 
-  if (sequence->kv_state().num_blocks(BlockType::KV) == 0) {
+  if (!sequence->kv_state().has_any_blocks()) {
     kv_cache_manager_->allocate_shared(sequence);
+    return;
+  }
+  // DSV4 (SWA_COMPRESSED) holds SWA/C4/C128 but never a KV leaf, so a
+  // num_blocks(KV)==0 guard alone would treat an already-mounted DSV4 sequence
+  // as fresh and re-run allocate_shared -> mount_composite_shared CHECK. Skip
+  // re-match for the KV-less composite; only flat-KV shapes re-match below.
+  if (sequence->kv_state().num_blocks(BlockType::KV) == 0) {
     return;
   }
   if (!sequence->is_chunked_prefill_stage()) {
