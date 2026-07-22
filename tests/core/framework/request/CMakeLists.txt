@@ -38,6 +38,8 @@ cc_test(
   SRCS
     stopping_checker_test.cpp
   DEPS
+    :block
+    :prefix_cache
     :request
     GTest::gtest_main
 )
