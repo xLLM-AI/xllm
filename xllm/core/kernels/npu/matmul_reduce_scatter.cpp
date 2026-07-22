@@ -37,10 +37,10 @@ bool can_call_torch_npu_mmrs(const torch::Tensor& a,
         << a.defined() << ", b_defined=" << b.defined();
     return false;
   }
-  if (a.dim() != 2 || b.dim() != 2 || output->dim() != 2) {
+  if (a.dim() != 2 || b.dim() != 2) {
     LOG_FIRST_N(WARNING, 8)
         << "FC1 MMRS torch_npu skipped: expected 2D tensors, got a_dim="
-        << a.dim() << ", b_dim=" << b.dim() << ", output_dim=" << output->dim();
+        << a.dim() << ", b_dim=" << b.dim();
     return false;
   }
   if (a.scalar_type() != at::kHalf && a.scalar_type() != at::kBFloat16) {
@@ -49,11 +49,10 @@ bool can_call_torch_npu_mmrs(const torch::Tensor& a,
         << a.scalar_type();
     return false;
   }
-  if (a.scalar_type() != b.scalar_type() ||
-      a.scalar_type() != output->scalar_type()) {
+  if (a.scalar_type() != b.scalar_type()) {
     LOG_FIRST_N(WARNING, 8)
         << "FC1 MMRS torch_npu skipped: dtype mismatch. a=" << a.scalar_type()
-        << ", b=" << b.scalar_type() << ", output=" << output->scalar_type();
+        << ", b=" << b.scalar_type();
     return false;
   }
   if (bias.has_value() && bias->defined() &&
@@ -67,12 +66,6 @@ bool can_call_torch_npu_mmrs(const torch::Tensor& a,
     LOG_FIRST_N(WARNING, 8)
         << "FC1 MMRS torch_npu skipped: matmul K mismatch. a=" << a.sizes()
         << ", b=" << b.sizes();
-    return false;
-  }
-  if (output->size(1) != b.size(1)) {
-    LOG_FIRST_N(WARNING, 8)
-        << "FC1 MMRS torch_npu skipped: output N mismatch. output="
-        << output->sizes() << ", b=" << b.sizes();
     return false;
   }
   return true;
