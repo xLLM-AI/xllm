@@ -14,6 +14,8 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
+#include <cstdint>
+#include <string>
 
 namespace xllm {
 
@@ -22,7 +24,8 @@ enum class PolicyType {
   FBCache,
   TaylorSeer,
   FBCacheTaylorSeer,
-  ResidualCache
+  ResidualCache,
+  RACFGCache
 };
 
 struct DiTBaseCacheOptions {
@@ -68,6 +71,36 @@ struct ResidualCacheOptions {
   int64_t skip_interval_steps = 3;
 };
 
+struct RACFGCacheOptions : public DiTBaseCacheOptions {
+  // Number of blocks to run before making the joint decision.
+  int64_t probe_depth = 2;
+
+  // Joint accumulated-risk threshold.
+  float tau = 0.0f;
+
+  // True CFG scale used in the guided combination.
+  float true_cfg_scale = 3.0f;
+
+  // Whether to use propagation-aware reweighting.
+  bool use_prop_weight = true;
+
+  // Propagation-aware fitted parameters.
+  float prop_a = 0.4806166f;
+  float prop_alpha = 0.4782565f;
+  float prop_b = 0.0641170f;
+
+  // Branch-local proxy error choice:
+  //   0 -> delta_y
+  //   1 -> delta_minus
+  int64_t proxy_error_type = 0;
+
+  // Offline rho table path.
+  std::string rho_table_path = "";
+  std::string model_name = "";
+  // Optional matched CFG scale recorded with the rho table.
+  float matched_cfg_scale = -1.0f;
+};
+
 struct DiTCacheConfig {
   DiTCacheConfig() = default;
 
@@ -85,6 +118,9 @@ struct DiTCacheConfig {
 
   // the configuration for ResidualCache policy.
   ResidualCacheOptions residual_cache;
+
+  // the configuration for RACFGCache policy.
+  RACFGCacheOptions racfgcache;
 };
 
 }  // namespace xllm

@@ -13,6 +13,8 @@ cc_library(
   fbcache_taylorseer.h
   taylorseer.h
   residual_cache.h
+  racfgcache.h
+  calibration/racfgcache_calibration_tables.h
  SRCS
   dit_cache_impl.cpp
   dit_cache.cpp
@@ -21,6 +23,8 @@ cc_library(
   fbcache_taylorseer.cpp
   taylorseer.cpp
   residual_cache.cpp
+  racfgcache.cpp
+  calibration/racfgcache_calibration_tables.cpp
  DEPS
   torch
   glog::glog

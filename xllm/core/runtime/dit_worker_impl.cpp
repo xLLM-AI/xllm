@@ -80,7 +80,33 @@ DiTCacheConfig parse_dit_cache_from_flags() {
     cache_config.residual_cache.dit_cache_end_blocks =
         ::xllm::DiTConfig::get_instance().dit_cache_end_blocks();
     cache_config.residual_cache.skip_interval_steps =
+    cache_config.residual_cache.skip_interval_steps =
         ::xllm::DiTConfig::get_instance().dit_cache_skip_interval_steps();
+  } else if (::xllm::DiTConfig::get_instance().dit_cache_policy() ==
+             "RACFGCache") {
+    cache_config.selected_policy = PolicyType::RACFGCache;
+    cache_config.racfgcache.warmup_steps =
+        ::xllm::DiTConfig::get_instance().dit_cache_warmup_steps();
+    cache_config.racfgcache.probe_depth =
+        ::xllm::DiTConfig::get_instance().dit_cache_probe_depth();
+    cache_config.racfgcache.tau =
+        ::xllm::DiTConfig::get_instance().dit_cache_tau();
+    cache_config.racfgcache.true_cfg_scale =
+        ::xllm::DiTConfig::get_instance().true_cfg_scale();
+    cache_config.racfgcache.use_prop_weight =
+        ::xllm::DiTConfig::get_instance().dit_cache_use_prop_weight();
+    cache_config.racfgcache.prop_a =
+        ::xllm::DiTConfig::get_instance().dit_cache_prop_a();
+    cache_config.racfgcache.prop_alpha =
+        ::xllm::DiTConfig::get_instance().dit_cache_prop_alpha();
+    cache_config.racfgcache.prop_b =
+        ::xllm::DiTConfig::get_instance().dit_cache_prop_b();
+    cache_config.racfgcache.proxy_error_type =
+        ::xllm::DiTConfig::get_instance().dit_cache_proxy_error_type();
+    cache_config.racfgcache.rho_table_path =
+        ::xllm::DiTConfig::get_instance().dit_cache_rho_table_path();
+    cache_config.racfgcache.model_name =
+        ::xllm::DiTConfig::get_instance().dit_cache_model_name();
   } else if (::xllm::DiTConfig::get_instance().dit_cache_policy() == "None") {
     cache_config.selected_policy = PolicyType::None;
   }

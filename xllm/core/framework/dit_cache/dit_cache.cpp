@@ -64,4 +64,9 @@ CacheStepOut DiTCache::on_after_step(const CacheStepIn& stepin, bool use_cfg) {
   return active_cache_->on_after_step(stepin);
 }
 
+void DiTCache::set_runtime_context(const DiTCacheRuntimeContext& ctx) {
+  if (active_cache_) active_cache_->set_runtime_context(ctx);
+  if (active_cond_cache_) active_cond_cache_->set_runtime_context(ctx);
+}
+
 }  // namespace xllm
