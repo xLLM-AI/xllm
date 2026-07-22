@@ -98,6 +98,10 @@ std::tuple<torch::Tensor, torch::Tensor> moe_grouped_topk(
         << "dcu::moe_grouped_topk: correction bias is supported only for "
            "sigmoid scoring";
     torch::Tensor bias = correction_bias.value();
+    // AITER grouped topk requires correction_bias to match gating_output dtype.
+    if (bias.scalar_type() != gating_output.scalar_type()) {
+      bias = bias.to(gating_output.scalar_type());
+    }
     aiter::native::biased_grouped_topk(gating_output,
                                        bias,
                                        topk_weights,

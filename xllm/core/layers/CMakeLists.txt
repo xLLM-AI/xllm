@@ -47,6 +47,9 @@ cc_library(
     qwen3_vision_layer.h
     qwen3_decoder_layer.h
     qwen3_moe_decoder_layer.h
+    $<$<BOOL:${USE_DCU}>:minimax_m2_attention.h>
+    $<$<BOOL:${USE_DCU}>:minimax_m2_decoder_layer.h>
+    $<$<BOOL:${USE_DCU}>:minimax_m2_tensor_parallel_rms_norm.h>
   SRCS
     oxygen_vision_layer.cpp
     $<$<BOOL:${USE_NPU}>:deepseek_v4_decoder_layer.cpp>
@@ -55,12 +58,16 @@ cc_library(
     qwen2_5_vision_layer.cpp
     qwen3_vision_layer.cpp
     qwen3_moe_decoder_layer.cpp
+    $<$<BOOL:${USE_DCU}>:minimax_m2_attention.cpp>
+    $<$<BOOL:${USE_DCU}>:minimax_m2_decoder_layer.cpp>
+    $<$<BOOL:${USE_DCU}>:minimax_m2_tensor_parallel_rms_norm.cpp>
   DEPS
     $<$<BOOL:${USE_NPU}>:npu_layers>
     $<$<BOOL:${USE_NPU}>:npu_torch_layers>
     $<$<BOOL:${USE_MLU}>:mlu_layers>
     $<$<BOOL:${USE_ILU}>:ilu_layers>
     $<$<BOOL:${USE_CUDA}>:cuda_layers>
+    $<$<BOOL:${USE_DCU}>:dcu_layers>
     :common_layers
     :parallel_state
     :state_dict

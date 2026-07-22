@@ -144,10 +144,10 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
   start_expert_id_ = ep_rank * num_experts_per_rank_;
 
   if (topk_method == "noaux_tc") {
-    e_score_correction_bias_ =
-        register_parameter("e_score_correction_bias",
-                           torch::empty({num_experts}, options),
-                           /*requires_grad*/ false);
+    e_score_correction_bias_ = register_parameter(
+        "e_score_correction_bias",
+        torch::empty({num_experts}, options.dtype(torch::kFloat32)),
+        /*requires_grad*/ false);
   }
 
   gate_ = register_module(
@@ -245,7 +245,10 @@ std::pair<torch::Tensor, torch::Tensor> FusedMoEImpl::route_experts(
     const torch::Tensor& router_logits_2d) {
   std::optional<torch::Tensor> e_score_correction_bias = std::nullopt;
   if (e_score_correction_bias_.defined()) {
-    e_score_correction_bias = e_score_correction_bias_;
+    e_score_correction_bias =
+        e_score_correction_bias_.scalar_type() == torch::kFloat32
+            ? e_score_correction_bias_
+            : e_score_correction_bias_.to(torch::kFloat32);
   }
 
   torch::Tensor reduce_weight;
@@ -501,22 +504,17 @@ torch::Tensor FusedMoEImpl::forward_experts(
     auto final_hidden_states = forward_fp8_channelwise_experts(
         hidden_states, hidden_states_2d, router_logits_2d);
 
-    auto current_stream = device_.current_stream();
-    routed_stream_->wait_stream(*current_stream);
-    {
-      torch::StreamGuard stream_guard = routed_stream_->set_stream_guard();
-      if (parallel_args_.ep_size() > 1) {
-        final_hidden_states = parallel_state::reduce(
-            final_hidden_states, parallel_args_.moe_ep_group_);
-      }
-      if (tp_pg_->world_size() > 1) {
-        final_hidden_states =
-            parallel_state::reduce(final_hidden_states, tp_pg_);
-      }
+    if (parallel_args_.ep_size() > 1) {
+      final_hidden_states = parallel_state::reduce(
+          final_hidden_states, parallel_args_.moe_ep_group_);
+    }
+    if (tp_pg_->world_size() > 1) {
+      final_hidden_states = parallel_state::reduce(final_hidden_states, tp_pg_);
     }
 
     torch::Tensor shared_expert_output;
     if (n_shared_experts_ > 0) {
+      auto current_stream = device_.current_stream();
       shared_stream_->wait_stream(*current_stream);
       {
         torch::StreamGuard stream_guard = shared_stream_->set_stream_guard();
@@ -524,10 +522,7 @@ torch::Tensor FusedMoEImpl::forward_experts(
         shared_expert_output =
             shared_expert_output.reshape({-1, shared_expert_output.size(-1)});
       }
-    }
 
-    current_stream->wait_stream(*routed_stream_);
-    if (n_shared_experts_ > 0) {
       current_stream->wait_stream(*shared_stream_);
       final_hidden_states += shared_expert_output.reshape(hidden_states_shape);
     }
