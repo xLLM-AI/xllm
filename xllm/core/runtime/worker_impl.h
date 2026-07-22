@@ -115,6 +115,19 @@ class WorkerImpl {
                                              ForwardInput& processed_input,
                                              Stream& prepare_stream);
 
+  // True when this worker instance owns the NPU model-side CP slot prepare
+  // (build_npu_cp_prefill_plan + localize_slots_recovered +
+  // recompute_new_cache_slots). Composite speculative workers (MTP) override
+  // this to return false so their outer prepare only materializes the input on
+  // device; each target/draft leaf then runs the CP prepare once against its
+  // own ParallelArgs inside run_llm_no_sync_impl. This prevents the composite
+  // worker from converting slots a second time when it re-enters the leaf.
+  virtual bool handles_model_cp_prepare() const { return true; }
+
+  // Lazily resolve the worker's model_type and return whether it advertises the
+  // NPU model-side CP closure. Cached after the first call.
+  bool model_supports_model_cp() const;
+
   // Internal helper shared by worker pipelines before model execution.
   virtual void apply_kv_block_swaps(const ModelInputParams& input_params);
 
@@ -312,6 +325,12 @@ class WorkerImpl {
 
   // parallel args of current instance
   ParallelArgs parallel_args_;
+
+  // Lazily computed: whether the resolved model_type advertises the NPU
+  // model-side CP closure (is_npu_model_cp_capable). Cached so the per-forward
+  // worker predicate does not resolve the model name on every step.
+  mutable bool model_cp_capable_computed_ = false;
+  mutable bool model_cp_capable_ = false;
 
   // kv caches
   std::vector<xllm::KVCache> kv_caches_;

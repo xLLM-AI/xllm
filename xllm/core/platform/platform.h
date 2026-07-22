@@ -52,9 +52,15 @@ class Platform final {
 #endif
   }
 
-  // Temporary compatibility boundary for MLU CP. Remove this capability
-  // after MLU moves CP input preparation into WorkerImpl.
-  static constexpr bool uses_model_cp_partition() { return is_mlu(); }
+  // Model-side CP closure: input localize after embedding and output
+  // gather+restore after the last decoder layer, so the scheduler/worker/MTP
+  // no longer special-case CP. MLU has always done this; NPU now does too via
+  // the Phase C closure (NpuCpPrefillPlan + npu_cp helpers). When this is true
+  // the legacy worker cp_partition_inplace / scheduler 2xCP alignment paths are
+  // compile-time disabled.
+  static constexpr bool uses_model_cp_partition() {
+    return is_mlu() || is_npu();
+  }
 
   // MLU can reuse DSA top-k results across layers without keeping an indexer
   // cache for every layer. Other backends retain the legacy all-layer cache

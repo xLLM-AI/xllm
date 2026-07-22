@@ -19,6 +19,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <iostream>
+#include <mutex>
 #include <unordered_set>
 
 #include "core/framework/config/kernel_config.h"
@@ -166,6 +167,24 @@ bool resolve_model_registration_name(const std::string& model_type,
 #endif
 }
 
+bool is_npu_model_cp_capable(const std::string& resolved_name) {
+  static const std::unordered_set<std::string> kCpCapableModels = {
+      "deepseek_v32",
+      "deepseek_v32_mtp",
+      "glm_moe_dsa",
+      "glm_moe_dsa_mtp",
+  };
+  static std::once_flag once;
+  std::call_once(once, []() {
+    for (const std::string& name : kCpCapableModels) {
+      ModelRegistry::register_cp_partition_mode(name,
+                                                CpPartitionMode::NPU_MODEL);
+    }
+  });
+  return ModelRegistry::get_cp_partition_mode(resolved_name) ==
+         CpPartitionMode::NPU_MODEL;
+}
+
 ModelRegistry* ModelRegistry::get_instance() {
   static ModelRegistry registry;
 
@@ -272,6 +291,21 @@ void ModelRegistry::register_tokenizer_args_loader(const std::string& name,
   } else {
     instance->model_registry_[name].tokenizer_args_loader = loader;
   }
+}
+
+void ModelRegistry::register_cp_partition_mode(const std::string& name,
+                                               CpPartitionMode mode) {
+  ModelRegistry* instance = get_instance();
+  instance->model_registry_[name].cp_partition_mode = mode;
+}
+
+CpPartitionMode ModelRegistry::get_cp_partition_mode(const std::string& name) {
+  ModelRegistry* instance = get_instance();
+  const auto it = instance->model_registry_.find(name);
+  if (it == instance->model_registry_.end()) {
+    return CpPartitionMode::NONE;
+  }
+  return it->second.cp_partition_mode;
 }
 
 CausalLMFactory ModelRegistry::get_causallm_factory(const std::string& name) {

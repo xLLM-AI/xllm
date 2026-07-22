@@ -27,7 +27,11 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
                                     const ModelArgs& args,
                                     const ParallelArgs& parallel_args,
                                     bool isPrefill) {
-  param.outputHidden = cp_size_ > 1;
+  // Model-side CP (NPU/MLU): the model already all-gathers + restores global-
+  // real hidden after the last decoder layer, so the LM head never needs to
+  // re-gather a CP shard. outputHidden (legacy worker-CP gather path) is
+  // permanently false now that legacy worker-side CP has been removed.
+  param.outputHidden = false;
   param.unpadInputs = true;
   param.gatherAhead = isPrefill;
   param.hiddenSizePerAttentionHead = args.hidden_size() / args.n_heads();

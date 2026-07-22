@@ -70,6 +70,11 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                                    ForwardInput& processed_inputs) override;
 
  protected:
+  // Composite worker opts out of the NPU model-side CP slot prepare; each
+  // target/draft leaf runs it once against its own ParallelArgs.
+  bool handles_model_cp_prepare() const override;
+
+ protected:
   std::optional<ForwardOutput> step_prefill(const ForwardInput& input) override;
   std::optional<ForwardOutput> step_decode(const ForwardInput& inputs) override;
   std::optional<ForwardOutput> step_empty(const ForwardInput& inputs) override;

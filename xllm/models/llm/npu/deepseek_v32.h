@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include "core/framework/model/model_output.h"
+#include "core/framework/parallel_state/npu_cp_closure.h"
 #include "core/layers/npu/npu_deepseek_v32_decoder_layer_impl.h"
 #include "llm_model_base.h"
 
@@ -251,12 +252,20 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
     // dp_size_=4;
     dp_size_ = parallel_args.dp_size();
     std::vector<int64_t> indices;
-    dp_local_tp_size_ = parallel_args.world_size() / dp_size_;
-    dp_rank_ = parallel_args.rank() / dp_local_tp_size_;
+    // NPU model-side CP uses orthogonal CP x TP: world_size = dp_size * cp_size
+    // * attn_tp_size. dp_local_tp_size_ is the effective TP width
+    // (attn_tp_size); the DP stride is dp_local_tp_size_ * cp_size. This
+    // matches the layout in npu_base_layer.cpp and compute_cp_group_ranks.
+    dp_local_tp_size_ =
+        parallel_args.world_size() / (dp_size_ * parallel_args.cp_size());
+    dp_rank_ =
+        parallel_args.rank() / (dp_local_tp_size_ * parallel_args.cp_size());
     rank_ = parallel_args.rank();
+    cp_group_ = parallel_args.cp_group_;
     mapping_data_ = parallel_args.mapping_data();
     num_experts_per_tok_ = model_args.num_experts_per_tok();
-    for (int i = 0; i < parallel_args.world_size(); i += dp_local_tp_size_) {
+    const int32_t dp_stride = dp_local_tp_size_ * parallel_args.cp_size();
+    for (int i = 0; i < parallel_args.world_size(); i += dp_stride) {
       indices.push_back(i);
     }
   }
@@ -273,7 +282,18 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
     }
 
     auto h = npu_embed_tokens_(tokens, 0);
-    auto cos_sin = atb_pos_emb_(cos_sin_, positions, 0);
+    // Model-side CP closure: localize the global-real hidden into the
+    // rank-local padded layout consumed by the decoder, and rewrite the
+    // attention metadata to the per-rank local view. No-ops when the plan is
+    // disabled (cp_size == 1 / decode), so the forward is unconditional.
+    const NpuCpPrefillPlan& cp_plan = input_params.parallel.npu_cp_prefill_plan;
+    h = ::xllm::npu_cp::localize(h, cp_plan);
+    torch::Tensor local_positions =
+        ::xllm::npu_cp::localize_positions(cp_plan, positions);
+    ModelInputParams modified_input_params = input_params;
+    ::xllm::apply_cp_local_metadata_from_plan(
+        modified_input_params, cp_plan, device_);
+    auto cos_sin = atb_pos_emb_(cos_sin_, local_positions, 0);
     auto cos_sin_chunks = cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
     auto cos_pos = cos_sin_chunks[0].contiguous();
     auto sin_pos = cos_sin_chunks[1].contiguous();
@@ -336,7 +356,7 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
                                  sin_pos,
                                  attn_mask,
                                  kv_caches[i],
-                                 input_params,
+                                 modified_input_params,
                                  shared_topk_indices,
                                  output_topk_indices,
                                  event,
@@ -347,7 +367,7 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
               sin_pos,
               attn_mask,
               kv_caches[i],
-              input_params,
+              modified_input_params,
               event,
               event_flag);
       }
@@ -356,6 +376,10 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
       }
       rolling_guard.after_layer(layer_index);
     }
+    // Restore global-real order from the rank-major gathered buffer so the LM
+    // head / scheduler / MTP see logical unpadded hidden. No-op when the plan
+    // is disabled or the CP group is single-rank.
+    h = ::xllm::npu_cp::gather_restore(h, cp_plan, cp_group_);
     auto hidden_states = norm_(h, 0);
     return ModelOutput(hidden_states);
   }
@@ -478,6 +502,7 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
   layer::AttentionMask attn_mask_;
   layer::NpuRMSNorm norm_{nullptr};
   RollingLoadManager* rolling_mgr_ = nullptr;
+  ProcessGroup* cp_group_ = nullptr;
 };
 TORCH_MODULE(DeepseekV32Model);
 

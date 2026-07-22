@@ -48,9 +48,16 @@ struct CpEpPaddingData {
   PROPERTY(torch::Tensor, expert_array);
 };
 
+// Builds the CP×EP padding/unpadding index tensors consumed by the decoder
+// ATB graph. The constructor is intentionally length-driven: it only needs the
+// local-padded token count (rows owned by this CP rank after model-side
+// localize, including virtual pad) and never inspects token values. In the
+// legacy worker path the caller passes the per-rank real token count, which is
+// identical to `local_padded_token_num` for aligned cases; in the model-side CP
+// path the caller passes `NpuCpPrefillPlan::local_padded_token_num`.
 class CpEpPadding {
  public:
-  CpEpPadding(const torch::Tensor& input_ids,
+  CpEpPadding(int64_t local_padded_token_num,
               int32_t num_experts_per_tok,
               const nlohmann::json& mapping_npu,
               at::Device device,

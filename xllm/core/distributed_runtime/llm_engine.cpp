@@ -98,12 +98,12 @@ LLMEngine::LLMEngine(const runtime::Options& options,
   dp_local_size_ = worker_clients_num_ / dp_size_;
   const bool use_model_partition =
       cp_size_ > 1 && Platform::uses_model_cp_partition();
-  // MLU model-side CP temporarily overlaps the CP and TP rank sets, so all
-  // DP-local ranks still form the effective TP execution width. Once MLU
-  // adopts orthogonal worker-side CP x TP, remove this special case and use
-  // dp_local_size_ / cp_size_ for every backend.
-  dp_local_tp_size_ =
-      use_model_partition ? dp_local_size_ : dp_local_size_ / cp_size_;
+  // MLU model-side CP overlaps the CP and TP rank sets (cp_size == world_size,
+  // tp_size == 1), so all DP-local ranks form the effective TP execution width.
+  // NPU model-side CP uses orthogonal CP x TP (world_size = dp_size * cp_size *
+  // attn_tp_size), so the effective TP width is dp_local_size_ / cp_size_.
+  const bool mlu_overlap = use_model_partition && Platform::is_mlu();
+  dp_local_tp_size_ = mlu_overlap ? dp_local_size_ : dp_local_size_ / cp_size_;
 
   // create ThreadPool for link cluster
   link_threadpool_ = std::make_unique<ThreadPool>(
@@ -989,8 +989,9 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
   std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;
   futures.reserve(worker_clients_num_);
 
-  // CP partitioning is performed worker-side in
-  // WorkerImpl::prepare_work_before_execute (see runtime/cp_input_partition).
+  // Model-side CP (NPU/MLU) localizes hidden after embedding and restores
+  // global-real order after the last decoder layer, so the engine hands the
+  // full global token stream to each worker unchanged.
   for (auto worker_rank = 0; worker_rank < worker_clients_num_; ++worker_rank) {
     const int32_t dp_rank = worker_rank / dp_local_size_;
     futures.emplace_back(worker_clients_[worker_rank]->step_remote_async(

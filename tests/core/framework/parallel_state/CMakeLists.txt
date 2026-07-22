@@ -37,6 +37,78 @@ if(USE_NPU)
                                hccl
                                c_sec
                                nnopbase)
+
+  cc_test(
+    NAME
+      npu_cp_prefill_plan_test
+    SRCS
+      npu_cp_prefill_plan_test.cpp
+    DEPS
+      parallel_state
+      torch
+      absl::synchronization
+      absl::time
+      GTest::gtest_main
+  )
+
+  cc_test(
+    NAME
+      npu_cp_closure_test
+    SRCS
+      npu_cp_closure_test.cpp
+    DEPS
+      parallel_state
+      torch
+      absl::synchronization
+      absl::time
+      GTest::gtest_main
+  )
+
+  cc_test(
+    NAME
+      cp_group_ranks_test
+    SRCS
+      cp_group_ranks_test.cpp
+    DEPS
+      parallel_state
+      GTest::gtest_main
+  )
+
+  cc_test(
+    NAME
+      npu_cp_ep_padding_plan_test
+    SRCS
+      npu_cp_ep_padding_plan_test.cpp
+    DEPS
+      parallel_state
+      torch
+      absl::synchronization
+      absl::time
+      GTest::gtest_main
+  )
+  target_link_libraries(npu_cp_ep_padding_plan_test
+                        PUBLIC Python::Python
+                               ascendcl
+                               hccl
+                               c_sec
+                               nnopbase)
+
+  cc_test(
+    NAME
+      npu_cp_capability_test
+    SRCS
+      npu_cp_capability_test.cpp
+    DEPS
+      models
+      parallel_state
+      GTest::gtest_main
+  )
+  target_link_libraries(npu_cp_capability_test
+                        PUBLIC Python::Python
+                               ascendcl
+                               hccl
+                               c_sec
+                               nnopbase)
 endif()
 
 if(USE_MLU)

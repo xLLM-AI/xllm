@@ -42,7 +42,7 @@ void CpEpPaddingData::set_placeholder(const torch::Tensor& placeholder) {
   expert_array_ = placeholder;
 }
 
-CpEpPadding::CpEpPadding(const torch::Tensor& input_ids,
+CpEpPadding::CpEpPadding(int64_t local_padded_token_num,
                          int32_t num_experts_per_tok,
                          const nlohmann::json& mapping_npu,
                          at::Device device,
@@ -55,7 +55,7 @@ CpEpPadding::CpEpPadding(const torch::Tensor& input_ids,
   attn_tp_size_ = mapping_npu["attnTpSize"].get<int64_t>();
   attn_tp_rank_ = mapping_npu["attnTp"]["rank"].get<int64_t>();
   attn_cp_size_ = mapping_npu["attnCp"]["rankIds"].size();
-  input_length_ = std::max<int64_t>(input_ids.numel(), 1);
+  input_length_ = std::max<int64_t>(local_padded_token_num, 1);
 
   const bool has_moe_ep = mapping_npu_.contains("moeEpSize") &&
                           mapping_npu_["moeEpSize"].get<int64_t>() > 1;

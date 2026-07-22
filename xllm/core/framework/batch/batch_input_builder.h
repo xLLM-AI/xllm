@@ -157,7 +157,6 @@ class BatchInputBuilder {
   void extract_tokens_and_positions(Sequence* sequence,
                                     uint32_t n_kv_cache_tokens,
                                     uint32_t seq_len,
-                                    uint32_t padded_seq_len,
                                     BuilderState* state_ptr = nullptr);
   // Append this batch row's linear-state transport fields: the live slot id
   // (always, so rows stay aligned) plus a LinearStateCacheOp carrying the

@@ -809,6 +809,11 @@ struct ParallelInput {
   CpEpPaddingData cp_ep_padding_data;
   CpPrefillInputs cp_prefill_inputs;
 
+  // Worker-built, model-consumed CP prefill plan for the NPU model-side CP
+  // closure. Stays dormant (enabled=false) unless the registered model opts
+  // into model-side CP. Worker-local only; never crosses RPC/proto.
+  NpuCpPrefillPlan npu_cp_prefill_plan;
+
 #if defined(USE_MLU)
   std::shared_ptr<MLULayerSynchronizerImpl> layer_synchronizer = nullptr;
 #elif defined(USE_DCU)
@@ -851,6 +856,7 @@ struct ParallelInput {
         .moe_idx(safe_to(cp_ep_padding_data.moe_idx(), device, true))
         .expert_array(safe_to(cp_ep_padding_data.expert_array(), device, true));
     out.cp_prefill_inputs = cp_prefill_inputs.to(device);
+    out.npu_cp_prefill_plan = npu_cp_prefill_plan.to(device);
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
     out.layer_synchronizer = layer_synchronizer;
 #endif

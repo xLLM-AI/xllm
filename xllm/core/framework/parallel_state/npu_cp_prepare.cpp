@@ -15,10 +15,14 @@ limitations under the License.
 
 #include "framework/parallel_state/npu_cp_prepare.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <limits>
 #include <numeric>
 #include <utility>
 #include <vector>
+
+#include "core/framework/model/model_input_params.h"
 
 namespace xllm {
 
@@ -410,9 +414,9 @@ merge_context_and_current_k_gather_index(
                         torch::dtype(torch::kInt32).device(torch::kCPU))};
 }
 
-CpPrefillInputs prepare_cp_prefill_inputs(
+CpPrefillInputs prepare_cp_prefill_inputs_impl(
     int cp_size,
-    const torch::Tensor& input_ids,
+    int64_t local_token_num,
     const torch::Tensor& position_ids,
     const torch::Tensor& input_lengths,
     bool have_prefix_slots,
@@ -446,7 +450,7 @@ CpPrefillInputs prepare_cp_prefill_inputs(
   inputs.cp_o_recover_idx = generate_cp_o_recover_idx(chunk_lengths);
 
   inputs.cp_kv_recover_idx =
-      generate_cp_kv_recover_idx(cp_size, input_ids.numel(), chunk_lengths);
+      generate_cp_kv_recover_idx(cp_size, local_token_num, chunk_lengths);
 
   auto input_lengths_cumsum = torch::cumsum(input_lengths, 0, torch::kInt32);
   auto [input_lengths_cumsum_cp_prev, input_lengths_cumsum_cp_next] =
@@ -454,6 +458,14 @@ CpPrefillInputs prepare_cp_prefill_inputs(
 
   auto gather_index_prev = (input_lengths_cumsum_cp_prev - 1).to(torch::kLong);
   auto gather_index_next = (input_lengths_cumsum_cp_next - 1).to(torch::kLong);
+  // Guard zero-length seqs: input_lengths[i] == 0 -> cumsum_cp_prev/next == 0
+  // -> gather_index == -1, out of range for index_select. Clamp to 0; the seq
+  // contributes no prev/next KV and downstream actual_seq_lengths == 0 masks
+  // the bogus position_ids[0] lookup away. (For local_padded-based inputs a
+  // zero length only occurs when the seq has no real token, which the batch
+  // builder rejects before reaching here; this is purely defensive.)
+  gather_index_prev = torch::clamp(gather_index_prev, /*min=*/0);
+  gather_index_next = torch::clamp(gather_index_next, /*min=*/0);
   auto position_ids_prev = position_ids.index_select(0, gather_index_prev) + 1;
   auto position_ids_next = position_ids.index_select(0, gather_index_next) + 1;
   auto actual_seq_lengths_kv_cp_prev = position_ids_prev.to(torch::kInt32);
@@ -537,6 +549,288 @@ CpPrefillInputs prepare_cp_prefill_inputs(
   inputs.actual_seq_lengths_query_prev = input_lengths_cumsum_half;
   inputs.actual_seq_lengths_query_next = input_lengths_cumsum_half;
   return inputs;
+}
+
+CpPrefillInputs prepare_cp_prefill_inputs_from_plan(
+    const NpuCpPrefillPlan& plan,
+    bool have_prefix_slots,
+    const std::vector<int32_t>& kv_cache_tokens_per_seq,
+    int block_size,
+    int kv_split_size) {
+  TORCH_CHECK(plan.enabled, "NpuCpPrefillPlan must be enabled");
+  TORCH_CHECK(plan.cp_size > 1, "plan.cp_size must be > 1");
+  // SFA prev/next split must be based on the local-PADDED per-seq length
+  // (plan.local_padded_seq_lens = 2*chunk_i, always even and >= 2 when the seq
+  // has any real token), NOT the local REAL length (plan.local_q_seq_lens,
+  // which can be odd/1 for short non-aligned prompts). Using local_real made
+  // compute_input_lengths_cumsum_cp produce a zero-length prev half
+  // (cumsum_cp_prev == 0 -> gather_index_prev == -1) and
+  // position_ids.index_select threw "index out of range in self". local_padded
+  // keeps the prev half = chunk_i >= 1. This mirrors the cp_kv_recover_idx /
+  // cp_load_balance_idx overwrites below, which are also built from
+  // local_padded_seq_lens, so the whole SFA input set now consistently uses the
+  // local-padded layout.
+  auto local_padded_seq_lens_tensor =
+      torch::tensor(plan.local_padded_seq_lens,
+                    torch::dtype(torch::kInt32).device(torch::kCPU));
+  auto inputs = prepare_cp_prefill_inputs_impl(plan.cp_size,
+                                               plan.local_padded_token_num,
+                                               plan.local_virtual_positions,
+                                               local_padded_seq_lens_tensor,
+                                               have_prefix_slots,
+                                               kv_cache_tokens_per_seq,
+                                               block_size,
+                                               kv_split_size);
+  // Overwrite cp_kv_recover_idx: the impl derives chunk_lengths from
+  // local_q_seq_lens (local REAL, = local_padded only when aligned), which
+  // under-cuts cp_kv_recover_idx to local_real-based length for non-aligned
+  // cases. The ATB decoder AllGathers cp_size*local_padded KV rows and
+  // reorders by cp_kv_recover_idx BEFORE ReshapeAndCache, so cp_kv_recover_idx
+  // must be cp_size*local_padded long. Rebuild it from local_padded_seq_lens
+  // (= 2*chunk_i per seq) so chunk_lengths = chunk_i and the result length =
+  // cp_size*local_padded, matching the AllGathered KV. Other impl outputs
+  // (cumsum, k_gather, load_balance, o_recover) are unchanged.
+  std::vector<int> chunk_lengths_padded;
+  chunk_lengths_padded.reserve(plan.local_padded_seq_lens.size());
+  for (int32_t v : plan.local_padded_seq_lens) {
+    chunk_lengths_padded.push_back(v / 2);
+  }
+  inputs.cp_kv_recover_idx =
+      generate_cp_kv_recover_idx(plan.cp_size,
+                                 static_cast<int>(plan.local_padded_token_num),
+                                 chunk_lengths_padded);
+  // Overwrite cp_load_balance_idx: the impl builds it from local_q_seq_lens
+  // (local REAL), so for non-aligned prompts the gathered "balanced" query has
+  // dim0 = local_real (e.g. 5), which is NOT divisible by cp_size and makes
+  // AddSfaSplitCpNode's Split(dim0, splitNum=cp_size) fail with error code 8
+  // ("dims[splitDim] mod splitNum is not zero"). The SFA gather input
+  // (rope_q_o) is local-PADDED, so the balance index must be local_padded long
+  // (divisible by cp_size); virtual rows are masked downstream via
+  // actual_seq_lengths. Reuse local_padded_seq_lens_tensor declared above for
+  // the SFA input_lengths (it is the same plan.local_padded_seq_lens tensor).
+  inputs.cp_load_balance_idx =
+      generate_cp_load_balance_idx(local_padded_seq_lens_tensor);
+  return inputs;
+}
+
+NpuCpPrefillPlan build_npu_cp_prefill_plan(
+    int cp_size,
+    int cp_rank,
+    const std::vector<int32_t>& global_q_seq_lens,
+    const torch::Tensor& global_positions,
+    bool have_prefix_slots,
+    const std::vector<int32_t>& kv_cache_tokens_per_seq,
+    int block_size,
+    int kv_split_size) {
+  TORCH_CHECK(cp_size > 1, "build_npu_cp_prefill_plan requires cp_size > 1");
+  TORCH_CHECK(cp_rank >= 0 && cp_rank < cp_size, "cp_rank out of range");
+  (void)have_prefix_slots;
+  (void)kv_cache_tokens_per_seq;
+  (void)block_size;
+  (void)kv_split_size;
+
+  NpuCpPrefillPlan plan;
+  plan.enabled = true;
+  plan.cp_size = cp_size;
+  plan.cp_rank = cp_rank;
+
+  const int32_t num_chunks = cp_size * 2;
+  const int32_t num_sequences = static_cast<int32_t>(global_q_seq_lens.size());
+
+  int64_t global_real_token_num = 0;
+  int64_t global_padded_token_num = 0;
+  int64_t local_padded_token_num = 0;
+  int64_t local_real_token_num = 0;
+  int32_t local_q_max_seq_len = 0;
+
+  std::vector<int64_t> source_vec;
+  std::vector<int64_t> dest_vec;
+  std::vector<int32_t> virtual_pos_vec;
+  std::vector<int32_t> local_q_seq_lens;
+  std::vector<int32_t> local_kv_seq_lens;
+  std::vector<int32_t> local_padded_seq_lens;
+  std::vector<int32_t> local_q_cu_seq_lens;
+  local_q_seq_lens.reserve(num_sequences);
+  local_kv_seq_lens.reserve(num_sequences);
+  local_q_cu_seq_lens.reserve(num_sequences);
+
+  const int32_t* positions_data = global_positions.defined()
+                                      ? global_positions.data_ptr<int32_t>()
+                                      : nullptr;
+
+  int64_t seq_token_offset = 0;  // global-real token offset of current seq
+  int64_t local_offset = 0;  // offset within this rank's local-padded hidden
+  for (int32_t i = 0; i < num_sequences; ++i) {
+    const int32_t q_i = std::max(0, global_q_seq_lens[i]);
+    const int32_t p_i =
+        ((q_i + num_chunks - 1) / num_chunks) * num_chunks;  // align_up to 2*cp
+    const int32_t chunk_i = p_i / num_chunks;
+    const int32_t local_len_i = 2 * chunk_i;  // constant across ranks
+    int32_t local_real_len_i = 0;  // real tokens owned by this rank for seq i
+
+    const int32_t pos_start = (positions_data != nullptr &&
+                               seq_token_offset < global_positions.numel())
+                                  ? positions_data[seq_token_offset]
+                                  : static_cast<int32_t>(seq_token_offset);
+
+    // First half: chunk `cp_rank`.
+    const int32_t c_first = cp_rank;
+    for (int32_t j = 0; j < chunk_i; ++j) {
+      const int32_t intra = c_first * chunk_i + j;
+      const int32_t vpos = pos_start + c_first * chunk_i + j;
+      virtual_pos_vec.push_back(vpos);
+      if (intra < q_i) {
+        source_vec.push_back(seq_token_offset + intra);
+        dest_vec.push_back(local_offset + j);
+        ++local_real_token_num;
+        ++local_real_len_i;
+      }
+    }
+    // Second half: chunk `num_chunks - 1 - cp_rank`.
+    const int32_t c_second = num_chunks - 1 - cp_rank;
+    for (int32_t j = 0; j < chunk_i; ++j) {
+      const int32_t intra = c_second * chunk_i + j;
+      const int32_t vpos = pos_start + c_second * chunk_i + j;
+      virtual_pos_vec.push_back(vpos);
+      if (intra < q_i) {
+        source_vec.push_back(seq_token_offset + intra);
+        dest_vec.push_back(local_offset + chunk_i + j);
+        ++local_real_token_num;
+        ++local_real_len_i;
+      }
+    }
+
+    // q_seq_lens / kv_seq_lens carry the REAL per-seq token count (matching
+    // legacy cp_partition_inplace); the padded layout is conveyed separately
+    // via attn_padding_idx / local_padded_token_num so the ATB graph can unpad.
+    local_q_seq_lens.push_back(local_real_len_i);
+    local_kv_seq_lens.push_back(local_real_len_i);
+    local_padded_seq_lens.push_back(local_len_i);
+    local_q_max_seq_len = std::max(local_q_max_seq_len, local_real_len_i);
+
+    global_real_token_num += q_i;
+    global_padded_token_num += p_i;
+    local_padded_token_num += local_len_i;
+    seq_token_offset += q_i;
+    local_offset += local_len_i;
+  }
+
+  // Cumulative sum of local q_seq_lens (host side), matching the legacy
+  // attention.host.q_cu_seq_lens convention used by the decoder.
+  int32_t cu = 0;
+  for (int32_t i = 0; i < num_sequences; ++i) {
+    cu += local_q_seq_lens[i];
+    local_q_cu_seq_lens.push_back(cu);
+  }
+
+  plan.global_real_token_num = global_real_token_num;
+  plan.global_padded_token_num = global_padded_token_num;
+  plan.local_padded_token_num = local_padded_token_num;
+  plan.local_real_token_num = local_real_token_num;
+  plan.local_q_seq_lens = std::move(local_q_seq_lens);
+  plan.local_kv_seq_lens = std::move(local_kv_seq_lens);
+  plan.local_padded_seq_lens = std::move(local_padded_seq_lens);
+  plan.local_q_cu_seq_lens = std::move(local_q_cu_seq_lens);
+  plan.local_q_max_seq_len = local_q_max_seq_len;
+  plan.local_kv_max_seq_len = local_q_max_seq_len;
+
+  plan.local_source_indices = torch::tensor(
+      source_vec, torch::dtype(torch::kInt64).device(torch::kCPU));
+  plan.local_destination_indices =
+      torch::tensor(dest_vec, torch::dtype(torch::kInt64).device(torch::kCPU));
+  plan.local_virtual_positions = torch::tensor(
+      virtual_pos_vec, torch::dtype(torch::kInt32).device(torch::kCPU));
+
+  // restore_indices[g] = offset into the CP rank-major all-gathered hidden
+  // (size global_padded_token_num) where global-real token g lives.
+  std::vector<int64_t> restore_vec;
+  restore_vec.reserve(global_real_token_num);
+  int64_t gather_seq_offset =
+      0;  // per-rank offset of seq i (same on all ranks)
+  for (int32_t i = 0; i < num_sequences; ++i) {
+    const int32_t q_i = std::max(0, global_q_seq_lens[i]);
+    const int32_t p_i = ((q_i + num_chunks - 1) / num_chunks) * num_chunks;
+    const int32_t chunk_i = p_i / num_chunks;
+    for (int32_t t = 0; t < q_i; ++t) {
+      const int32_t c = t / chunk_i;
+      const int32_t k = t % chunk_i;
+      int32_t r_owner;
+      int32_t row_in_seq;
+      if (c < cp_size) {
+        r_owner = c;  // first half on rank c
+        row_in_seq = k;
+      } else {
+        r_owner = num_chunks - 1 - c;  // second half on rank (num_chunks-1-c)
+        row_in_seq = chunk_i + k;
+      }
+      const int64_t gathered_idx =
+          static_cast<int64_t>(r_owner) * local_padded_token_num +
+          gather_seq_offset + row_in_seq;
+      restore_vec.push_back(gathered_idx);
+    }
+    gather_seq_offset += 2 * chunk_i;
+  }
+  plan.restore_indices = torch::tensor(
+      restore_vec, torch::dtype(torch::kInt64).device(torch::kCPU));
+
+  return plan;
+}
+
+void apply_cp_local_metadata_from_plan(ModelInputParams& params,
+                                       const NpuCpPrefillPlan& plan,
+                                       const torch::Device& device) {
+  if (!plan.enabled) {
+    return;
+  }
+  const int32_t num_sequences = params.meta.num_sequences;
+  auto& attention = params.attention;
+
+  // Preserve the cumsum / non-cumsum layout of the existing host vectors, the
+  // same way worker `cp_partition_inplace` does. `plan.local_*_seq_lens` are
+  // plain per-seq lengths; rebuild cumsum when the host is in cumsum form.
+  const auto is_cumsum = [&](const std::vector<int32_t>& v) {
+    return static_cast<int32_t>(v.size()) == num_sequences + 1 && !v.empty() &&
+           v.front() == 0;
+  };
+  const auto build_lens = [&](const std::vector<int32_t>& original,
+                              const std::vector<int32_t>& lens) {
+    if (is_cumsum(original)) {
+      std::vector<int32_t> cu = {0};
+      cu.reserve(lens.size() + 1);
+      for (int32_t len : lens) {
+        cu.push_back(cu.back() + len);
+      }
+      return cu;
+    }
+    return lens;
+  };
+
+  const std::vector<int32_t> new_q_lens =
+      build_lens(attention.host.q_seq_lens, plan.local_q_seq_lens);
+  const std::vector<int32_t> new_kv_lens =
+      build_lens(attention.host.kv_seq_lens, plan.local_kv_seq_lens);
+
+  attention.host.q_seq_lens = new_q_lens;
+  attention.host.kv_seq_lens = new_kv_lens;
+  // Materialize device tensors on `device` via an explicit H2D copy (the robust
+  // pattern across CPU/CUDA/NPU backends; `torch::tensor` from a host vector
+  // with a non-CPU device option is not uniformly dispatched).
+  const torch::TensorOptions cpu_int32 =
+      torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+  attention.device.q_seq_lens = torch::tensor(new_q_lens, cpu_int32).to(device);
+  attention.device.kv_seq_lens =
+      torch::tensor(new_kv_lens, cpu_int32).to(device);
+
+  std::vector<int32_t> cu;
+  cu.reserve(plan.local_q_seq_lens.size());
+  std::partial_sum(plan.local_q_seq_lens.begin(),
+                   plan.local_q_seq_lens.end(),
+                   std::back_inserter(cu));
+  attention.host.q_cu_seq_lens = cu;
+  attention.device.q_cu_seq_lens = torch::tensor(cu, cpu_int32).to(device);
+
+  params.meta.q_max_seq_len = plan.local_q_max_seq_len;
+  params.meta.kv_max_seq_len = plan.local_kv_max_seq_len;
 }
 
 }  // namespace xllm

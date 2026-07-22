@@ -29,6 +29,7 @@ limitations under the License.
 #include <optional>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 
 #include "common/metrics.h"
@@ -38,6 +39,7 @@ limitations under the License.
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "dit_master.h"
 #if defined(USE_NPU)
 #include "framework/parallel_state/npu_rank_table_env.h"
@@ -74,41 +76,120 @@ std::optional<std::string> validate_model_cp(const Options& options,
   if (options.cp_size() < 1) {
     return "cp_size must be greater than or equal to 1";
   }
+  // Legacy worker-side CP has been removed. Only model-side CP (MLU/NPU) is
+  // supported; any other platform with cp_size > 1 is rejected at startup.
+  if (options.cp_size() > 1 && !Platform::uses_model_cp_partition()) {
+    return "cp_size > 1 is only supported on platforms with model-side CP "
+           "(MLU/NPU). Legacy worker-side CP has been removed; either disable "
+           "CP (cp_size=1) or use a model-side CP platform.";
+  }
   const bool use_model_partition =
       options.cp_size() > 1 && Platform::uses_model_cp_partition();
   if (!use_model_partition) {
     return std::nullopt;
   }
   if (engine_type != EngineType::LLM && engine_type != EngineType::SSM) {
-    return "MLU CP supports only LLM text generation";
+    return "Model-side CP supports only LLM text generation";
   }
   if (options.task_type() != "generate") {
-    return "MLU CP supports only the generate task";
+    return "Model-side CP supports only the generate task";
   }
   if (engine_type == EngineType::SSM &&
-      options.speculative_algorithm() != "Suffix") {
-    return "Current MLU model-side CP does not support MTPWorkerImpl-based "
-           "speculative algorithms such as MTP or Eagle3; disable CP, disable "
-           "the speculative algorithm, or wait for MLU worker-side CP";
+      SpeculativeConfig::requires_aux_hidden_capture(
+          options.speculative_algorithm())) {
+    return "Current model-side CP does not support aux-hidden-capture "
+           "speculative algorithms (Eagle3/DFlash); disable CP or disable "
+           "the speculative algorithm. MTP and Suffix are supported.";
   }
-  if (model_type != "deepseek_v32" && model_type != "glm_moe_dsa") {
-    return "MLU CP does not support model_type=" + model_type;
+  // CP runs prefill only: the ATB CP prefill graph and the model-side closure
+  // are not built for decode, and mixed prefill+decode batches are not
+  // supported. The scheduler selects PREFILL_ONLY for NPU CP; reject graph
+  // capture and non-prefill roles here so misconfiguration fails fast instead
+  // of silently handing local-padded hidden to final norm / LmHead.
+  if (options.enable_graph()) {
+    return "Model-side CP does not support graph capture (enable_graph=true); "
+           "disable graph or disable CP (cp_size=1).";
   }
   if (options.instance_role() != InstanceRole::DEFAULT &&
       options.instance_role() != InstanceRole::PREFILL) {
-    return "MLU CP supports only DEFAULT or PREFILL roles";
+    return "Model-side CP supports only DEFAULT or PREFILL roles";
   }
   if (options.dp_size() != 1) {
-    return "MLU CP requires dp_size == 1";
+    return "Model-side CP requires dp_size == 1";
   }
-  if (options.cp_size() != global_world_size) {
-    return "MLU CP requires cp_size == global world size";
+  if (Platform::is_mlu()) {
+    // MLU model-side CP overlaps the CP and TP rank sets (cp_size ==
+    // world_size, tp_size == 1), so each rank holds a full KV replica and
+    // EP is restricted to 1 or the full world. Keep MLU's existing matrix;
+    // do not loosen it for NPU MTP changes.
+    static const std::unordered_set<std::string> kMluCpSupportedModelTypes = {
+        "deepseek_v32",
+        "deepseek_v32_mtp",
+        "glm_moe_dsa",
+        "glm_moe_dsa_mtp",
+    };
+    if (!kMluCpSupportedModelTypes.contains(model_type)) {
+      return "MLU model-side CP does not support model_type=" + model_type;
+    }
+    if (options.cp_size() != global_world_size) {
+      return "MLU CP requires cp_size == global world size";
+    }
+    if (ParallelConfig::get_instance().kv_split_size() != 1) {
+      return "MLU CP requires kv_split_size == 1";
+    }
+    if (options.ep_size() != 1 && options.ep_size() != global_world_size) {
+      return "MLU CP requires ep_size == 1 or global world size";
+    }
+    return std::nullopt;
   }
-  if (ParallelConfig::get_instance().kv_split_size() != 1) {
-    return "MLU CP requires kv_split_size == 1";
+  // NPU: resolve the effective kernel backend and the registered model name,
+  // then require the model to advertise the NPU model-side CP closure
+  // (is_npu_model_cp_capable). This rejects TORCH-only models, unregistered
+  // models, and deepseek_v3_mtp (which uses the DeepSeekV2 decoder without the
+  // V3.2 ATB CP metadata/TP contract) without hardcoding the list here.
+  std::string effective_backend;
+  std::string resolved_name;
+  std::string resolve_error;
+  const std::string requested_backend =
+      ::xllm::KernelConfig::get_instance().npu_kernel_backend();
+  if (!resolve_model_registration(model_type,
+                                  requested_backend,
+                                  &effective_backend,
+                                  &resolved_name,
+                                  &resolve_error)) {
+    return "Model-side CP rejected model_type=" + model_type + ": " +
+           resolve_error;
   }
-  if (options.ep_size() != 1 && options.ep_size() != global_world_size) {
-    return "MLU CP requires ep_size == 1 or global world size";
+  if (effective_backend != "ATB") {
+    return "NPU model-side CP requires --npu_kernel_backend=ATB for "
+           "model_type=" +
+           model_type + " (resolved backend=" + effective_backend + ")";
+  }
+  if (!is_npu_model_cp_capable(resolved_name)) {
+    return "NPU model-side CP does not support model_type=" + model_type +
+           " (resolved=" + resolved_name +
+           "); only deepseek_v32, deepseek_v32_mtp, glm_moe_dsa, "
+           "glm_moe_dsa_mtp are registered as CP-capable.";
+  }
+  // NPU model-side CP uses orthogonal CP x TP x EP (see
+  // compute_cp_group_ranks): world_size = dp_size * cp_size * attn_tp_size.
+  if (global_world_size % (options.dp_size() * options.cp_size()) != 0) {
+    return "NPU CP requires world_size divisible by dp_size * cp_size "
+           "(orthogonal CP x TP layout)";
+  }
+  const int32_t attn_tp_size =
+      global_world_size / (options.dp_size() * options.cp_size());
+  if (attn_tp_size < 1) {
+    return "NPU CP requires attn_tp_size >= 1";
+  }
+  // kv_split_size defaults to cp_size (KV sharded across CP ranks with
+  // prefix AllGather); any divisor of cp_size is allowed. kv_split_size
+  // == 1 (full KV replica per rank, skip AllGather) is also valid.
+  const int32_t kv_split =
+      ParallelConfig::get_instance().kv_split_size_effective();
+  if (kv_split < 1 || options.cp_size() % kv_split != 0) {
+    return "NPU CP requires kv_split_size effective value to be a positive "
+           "divisor of cp_size";
   }
   return std::nullopt;
 }
@@ -231,10 +312,9 @@ Master::Master(const Options& options, EngineType type)
   print_startup_banner(model_path, options_.backend(), options_.node_rank());
   LOG(INFO) << "Master init options: " << options_.to_string();
   ParallelConfig::get_instance().cp_size(options_.cp_size());
+  // Legacy worker-side CP has been removed; only "disabled" or "model" remain.
   const char* cp_partition_stage =
-      options_.cp_size() <= 1
-          ? "disabled"
-          : (Platform::uses_model_cp_partition() ? "model" : "worker");
+      options_.cp_size() <= 1 ? "disabled" : "model";
   LOG(INFO) << "Resolved CP config: cp_size=" << options_.cp_size()
             << ", world_size=" << global_world_size
             << ", dp_size=" << options_.dp_size()

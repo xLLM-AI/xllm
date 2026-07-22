@@ -219,9 +219,11 @@ struct ParallelArgs {
   ProcessGroup* encoder_dp_group_ = nullptr;
   ProcessGroup* single_rank_group_ = nullptr;
   // Context-parallel communication group used by prefill attention.
-  // The current MLU model-side CP path requires CP to span the full DP-local
-  // rank set, so this temporarily aliases the TP group. Keep a distinct handle
-  // for a future orthogonal CP x TP topology with a standalone CP group.
+  // For NPU ATB this is a standalone c10d_npu::ProcessGroupHCCL orthogonal to
+  // the TP group (created in CollectiveCommunicator::create_process_groups),
+  // so the model-side CP closure can allgather hidden states across CP ranks.
+  // For the MLU model-side CP path, CP still spans the full DP-local rank set,
+  // so this aliases the TP group there.
   ProcessGroup* cp_group_ = nullptr;
   ProcessGroup* moe_ep_group_ = nullptr;
   ProcessGroup* moe_tp_group_ = nullptr;

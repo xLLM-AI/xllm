@@ -32,6 +32,7 @@ limitations under the License.
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model_context.h"
+#include "core/framework/parallel_state/npu_cp_closure.h"
 #include "core/framework/parallel_state/npu_dp_ep_padding.h"
 #include "core/layers/common/attention_mask.h"
 #include "core/layers/npu/npu_block_copy_impl.h"
@@ -60,9 +61,19 @@ class MtpModelImplBase : public torch::nn::Module {
     auto parallel_args = context.get_parallel_args();
 
     dp_size_ = parallel_args.dp_size();
-    dp_local_tp_size_ = parallel_args.world_size() / dp_size_;
-    dp_rank_ = parallel_args.rank() / dp_local_tp_size_;
+    // NPU model-side CP uses orthogonal CP x TP: world_size = dp_size * cp_size
+    // * attn_tp_size. dp_local_tp_size_ is the effective TP width
+    // (attn_tp_size); the DP stride is dp_local_tp_size_ * cp_size. This
+    // matches the layout in npu_base_layer.cpp and compute_cp_group_ranks, and
+    // the main models (glm5_moe.h / deepseek_v32.h). When
+    // enable_mtp_draft_body_tp1 rewrites the draft ParallelArgs to
+    // world_size=cp_size=1 this collapses to 1.
+    dp_local_tp_size_ =
+        parallel_args.world_size() / (dp_size_ * parallel_args.cp_size());
+    dp_rank_ =
+        parallel_args.rank() / (dp_local_tp_size_ * parallel_args.cp_size());
     rank_ = parallel_args.rank();
+    cp_group_ = parallel_args.cp_group_;
     num_experts_per_tok_ = model_args.num_experts_per_tok();
     index_topk_ = model_args.index_topk();
 
@@ -120,7 +131,22 @@ class MtpModelImplBase : public torch::nn::Module {
     h = torch::cat({enorm, hnorm}, /*dim=*/-1);
     h = eh_proj_(h, 0);
 
-    auto target_cos_sin = atb_pos_emb_(cos_sin_, positions, 0);
+    // Model-side CP closure: localize the global-real hidden into the
+    // rank-local padded layout consumed by the decoder, and rewrite the
+    // attention metadata to the per-rank local view. For MTP the embedding
+    // fusion is word_emb -> enorm -> hnorm -> eh_proj, so localization happens
+    // here (after eh_proj) to keep the fused embedding consistent across CP
+    // ranks. No-ops when the plan is disabled (cp_size == 1 / decode).
+    const NpuCpPrefillPlan& cp_plan = input_params.parallel.npu_cp_prefill_plan;
+    h = ::xllm::npu_cp::localize(h, cp_plan);
+    torch::Tensor local_positions =
+        ::xllm::npu_cp::localize_positions(cp_plan, positions);
+    ModelInputParams& input_params_new =
+        const_cast<ModelInputParams&>(input_params);
+    ::xllm::apply_cp_local_metadata_from_plan(
+        input_params_new, cp_plan, device_);
+
+    auto target_cos_sin = atb_pos_emb_(cos_sin_, local_positions, 0);
     auto target_cos_sin_chunks = target_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
     auto cos_pos = target_cos_sin_chunks[0].contiguous();
     auto sin_pos = target_cos_sin_chunks[1].contiguous();
@@ -162,7 +188,7 @@ class MtpModelImplBase : public torch::nn::Module {
           attn_mask_.get_attn_mask(128, h.dtype().toScalarType(), h.device());
     }
 
-    int64_t input_length = tokens.size(0);
+    int64_t input_length = h.size(0);
     torch::Tensor expert_array = torch::arange(
         0,
         input_length * num_experts_per_tok_,
@@ -173,8 +199,6 @@ class MtpModelImplBase : public torch::nn::Module {
       LOG(FATAL) << "MTP not support layer wise copy!";
     }
 
-    ModelInputParams& input_params_new =
-        const_cast<ModelInputParams&>(input_params);
     input_params_new.expert.expert_array = expert_array;
 
     torch::Tensor prev_topk_indices;
@@ -217,6 +241,10 @@ class MtpModelImplBase : public torch::nn::Module {
                     event,
                     event_flag);
     }
+    // Restore global-real order from the rank-major gathered buffer so the LM
+    // head / scheduler see logical unpadded hidden. No-op when the plan is
+    // disabled or the CP group is single-rank.
+    h = ::xllm::npu_cp::gather_restore(h, cp_plan, cp_group_);
 
     auto hidden_states = final_norm_(h, 0);
     ModelOutput output(hidden_states);
@@ -332,6 +360,7 @@ class MtpModelImplBase : public torch::nn::Module {
   bool enable_rot_ = false;
   torch::Device device_;
   int32_t index_topk_ = 0;
+  ProcessGroup* cp_group_ = nullptr;
 
  private:
   std::string model_type_;
