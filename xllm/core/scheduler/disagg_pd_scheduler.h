@@ -46,8 +46,6 @@ class DisaggPDScheduler : public ContinuousScheduler {
 
   void step(const absl::Duration& timeout) override;
 
-  std::vector<Batch> prepare_batch() override;
-
   bool add_request(std::shared_ptr<Request>& request) override;
 
   // prefill-1: for prefill send new request to decode

@@ -29,7 +29,6 @@ enum class SchedulerKind : int8_t {
   CONTINUOUS = 0,
   ZERO_EVICTION = 4,
   DISAGG_PD = 5,
-  DISAGG_PD_CHUNKED_PREFILL = 6,
   PD_OOC = 7
 };
 

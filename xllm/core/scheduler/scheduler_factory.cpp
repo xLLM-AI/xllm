@@ -19,7 +19,6 @@ limitations under the License.
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "scheduler/continuous_scheduler.h"
-#include "scheduler/disagg_pd_chunked_prefill_scheduler.h"
 #include "scheduler/disagg_pd_scheduler.h"
 #include "scheduler/dit_scheduler.h"
 #include "scheduler/fixed_steps_scheduler.h"
@@ -34,9 +33,6 @@ SchedulerKind select_scheduler_kind(
     if (options.enable_pd_ooc()) {
       return SchedulerKind::PD_OOC;
     }
-    if (options.enable_chunked_prefill()) {
-      return SchedulerKind::DISAGG_PD_CHUNKED_PREFILL;
-    }
     return SchedulerKind::DISAGG_PD;
   }
 
@@ -44,9 +40,6 @@ SchedulerKind select_scheduler_kind(
     return SchedulerKind::ZERO_EVICTION;
   }
 
-  // For all non-PD, non-zero-evict cases, use ContinuousScheduler.
-  // The BatchMode resolved from options handles the old scheduler hierarchy
-  // (chunked prefill, mix, prefill-only) internally.
   return SchedulerKind::CONTINUOUS;
 }
 
@@ -56,8 +49,6 @@ std::unique_ptr<ContinuousScheduler> create_continuous_scheduler(
   switch (select_scheduler_kind(options)) {
     case SchedulerKind::PD_OOC:
       return std::make_unique<PDOOCScheduler>(engine, options);
-    case SchedulerKind::DISAGG_PD_CHUNKED_PREFILL:
-      return std::make_unique<DisaggPDChunkedPrefillScheduler>(engine, options);
     case SchedulerKind::DISAGG_PD:
       return std::make_unique<DisaggPDScheduler>(engine, options);
     case SchedulerKind::ZERO_EVICTION:

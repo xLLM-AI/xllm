@@ -82,6 +82,14 @@ BatchMode resolve_batch_mode(const ContinuousScheduler::Options& options) {
     mode.enable_mix_batch = false;
   }
 
+  // PD PREFILL instance: always use exclusive batch (PrefillFirstPolicy).
+  // Prefill instances never have local decode requests, so mix batch is
+  // meaningless and PrefillFirstPolicy gives cleaner chunk_queue priority.
+  if (options.enable_disagg_pd() && options.instance_role().has_value() &&
+      options.instance_role().value() == InstanceRole::PREFILL) {
+    mode.enable_mix_batch = false;
+  }
+
   return mode;
 }
 
