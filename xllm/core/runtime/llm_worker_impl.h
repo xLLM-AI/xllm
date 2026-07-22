@@ -70,6 +70,14 @@ class LLMWorkerImpl : public WorkerImpl {
 
  public:
 #if defined(USE_NPU)
+  bool prepare_static_graph_tasks(const ForwardInput& input,
+                                  const Stream& signal_stream);
+  bool prepare_static_mtp_graph_tasks(int64_t linear_state_id,
+                                      int64_t num_accepted_tokens,
+                                      int64_t spec_width,
+                                      int64_t block_table_width,
+                                      const Stream& signal_stream);
+
   layer::NpuLmHead get_npu_lm_head() { return model_->get_npu_lm_head(); };
 
   void set_npu_lm_head(layer::NpuLmHead& head) {
@@ -96,6 +104,10 @@ class LLMWorkerImpl : public WorkerImpl {
   void set_word_embedding(layer::WordEmbedding& embedding) {
     model_->set_word_embedding(embedding);
   };
+
+  SpeculativeVerifyCapabilities speculative_verify_capabilities() const {
+    return model_->speculative_verify_capabilities();
+  }
 
   // DFlash-specific delegate: eagerly project target hidden into the draft's
   // per-layer KV cache. Runs outside the executor because the pass has no

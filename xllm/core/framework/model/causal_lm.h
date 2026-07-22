@@ -42,6 +42,7 @@ limitations under the License.
 #include "model_input_params.h"
 #include "model_output.h"
 #include "model_traits.h"
+#include "speculative_verify_capabilities.h"
 
 namespace xllm {
 
@@ -68,6 +69,11 @@ class CausalLM : public torch::nn::Module {
   virtual bool requires_graph_forward_metadata() { return false; }
 
   virtual bool is_hybrid_linear_attention() { return false; }
+
+  virtual SpeculativeVerifyCapabilities speculative_verify_capabilities()
+      const {
+    return {};
+  }
 
   virtual std::unique_ptr<ModelGraphMetadataState>
   create_graph_forward_metadata_state() {
@@ -207,6 +213,15 @@ class CausalLMImpl : public CausalLM {
       return model_->is_hybrid_linear_attention();
     } else {
       return CausalLM::is_hybrid_linear_attention();
+    }
+  }
+
+  SpeculativeVerifyCapabilities speculative_verify_capabilities()
+      const override {
+    if constexpr (detail::has_speculative_verify_capabilities<Model>::value) {
+      return model_->speculative_verify_capabilities();
+    } else {
+      return CausalLM::speculative_verify_capabilities();
     }
   }
 

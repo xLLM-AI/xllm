@@ -51,6 +51,16 @@ class Executor final {
                            std::vector<KVCache>& kv_caches,
                            const ModelInputParams& params);
 
+  bool prepare_static_graph_tasks(const torch::Tensor& tokens,
+                                  const ModelInputParams& params,
+                                  const Stream& signal_stream);
+
+  bool prepare_static_mtp_graph_tasks(int64_t linear_state_id,
+                                      int64_t num_accepted_tokens,
+                                      int64_t spec_width,
+                                      int64_t block_table_width,
+                                      const Stream& signal_stream);
+
  private:
   std::unique_ptr<ExecutorImpl> impl_;
 };

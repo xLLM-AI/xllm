@@ -929,6 +929,74 @@ TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
   speculative_config.enable_atb_spec_kernel(original_enable_atb_spec_kernel);
 }
 
+TEST(AclGraphPersistentParamTest, SpecVerifyGraphUpdateSupportsRuntimeWidth) {
+  constexpr int32_t kSpecWidth = 4;
+  ModelArgs args;
+  args.model_type("deepseek_v4");
+  args.dtype("float32");
+  args.hidden_size(8);
+  args.max_position_embeddings(32);
+
+  runtime::Options options;
+  options.block_size(4);
+  options.max_seqs_per_batch(4);
+  options.max_tokens_per_batch(16);
+  options.num_decoding_tokens(kSpecWidth);
+  options.enable_speculative_decode(true);
+  options.is_draft_engine(false);
+
+  const torch::Device device("npu:0");
+  const torch::TensorOptions int_options =
+      torch::dtype(torch::kInt).device(device);
+  ::xllm::npu::GraphPersistentParam persistent_param(
+      args,
+      device,
+      options,
+      /*need_update_attn_mask=*/false,
+      /*is_hybrid_linear_attention=*/true);
+
+  ModelInputParams params;
+  params.is_spec_verify = true;
+  params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  params.meta.num_sequences = 1;
+  params.meta.q_max_seq_len = kSpecWidth;
+  params.graph.spec_verify_source_addresses_stable = true;
+  params.graph.input_tokens_override =
+      torch::tensor({11, 12, 13, 14}, int_options);
+  params.graph.expanded_kv_seq_lens =
+      torch::tensor({17, 18, 19, 20}, int_options);
+  params.graph.expanded_block_tables =
+      torch::arange(8, int_options).view({kSpecWidth, 2});
+  params.attention.device.q_seq_lens = torch::tensor({kSpecWidth}, int_options);
+  params.attention.device.kv_seq_lens = torch::tensor({20}, int_options);
+  params.attention.device.new_cache_slots =
+      torch::tensor({21, 22, 23, 24}, int_options);
+  params.attention.device.block_tables = torch::tensor({{31, 32}}, int_options);
+  params.attention.device.q_cu_seq_lens =
+      torch::tensor({0, kSpecWidth}, int_options);
+  params.embedding.linear_state_indices = torch::tensor({3}, int_options);
+  params.num_accepted_tokens = torch::tensor({2}, int_options);
+  const torch::Tensor positions =
+      torch::tensor({101, 102, 103, 104}, int_options);
+
+  const std::vector<torch::Tensor> sources =
+      persistent_param.capture_spec_verify_input_update(
+          params.graph.input_tokens_override,
+          positions,
+          params,
+          /*padded_num_tokens=*/kSpecWidth);
+
+  EXPECT_EQ(sources.size(), 11);
+  EXPECT_TRUE(torch::equal(persistent_param.persistent_tokens(kSpecWidth).cpu(),
+                           params.graph.input_tokens_override.cpu()));
+  EXPECT_TRUE(
+      torch::equal(persistent_param.persistent_positions(kSpecWidth).cpu(),
+                   positions.cpu()));
+  EXPECT_TRUE(torch::equal(
+      persistent_param.persistent_new_cache_slots(kSpecWidth).cpu(),
+      params.attention.device.new_cache_slots.cpu()));
+}
+
 TEST(AclGraphExecutorHybridTest, KvCacheSupportsLinearOnlyLayers) {
   auto conv_cache = torch::zeros({4, 32, 3}, torch::dtype(torch::kFloat32));
   auto ssm_cache = torch::zeros({4, 8, 64, 64}, torch::dtype(torch::kFloat32));

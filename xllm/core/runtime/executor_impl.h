@@ -27,6 +27,8 @@ limitations under the License.
 #include "framework/model/model_input_params.h"
 #include "framework/model/model_output.h"
 #include "options.h"
+#include "platform/stream.h"
+#include "platform/stream_event.h"
 
 namespace xllm {
 
@@ -48,6 +50,20 @@ class ExecutorImpl {
                                    const torch::Tensor& /*positions*/,
                                    std::vector<KVCache>& /*kv_caches*/,
                                    const ModelInputParams& /*params*/) {}
+
+  virtual bool prepare_static_graph_tasks(const torch::Tensor& /*tokens*/,
+                                          const ModelInputParams& /*params*/,
+                                          const Stream& /*signal_stream*/) {
+    return false;
+  }
+
+  virtual bool prepare_static_mtp_graph_tasks(int64_t /*linear_state_id*/,
+                                              int64_t /*num_accepted_tokens*/,
+                                              int64_t /*spec_width*/,
+                                              int64_t /*block_table_width*/,
+                                              const Stream& /*signal_stream*/) {
+    return false;
+  }
 };
 
 }  // namespace xllm

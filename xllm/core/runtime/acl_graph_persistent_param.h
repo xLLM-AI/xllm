@@ -69,6 +69,22 @@ class GraphPersistentParam final {
                      uint32_t actual_num_tokens,
                      uint32_t padded_num_tokens);
 
+  // Record device-side updates from speculative-verify sources into persistent
+  // graph inputs while ACL graph capture is active. The returned tensors define
+  // the stable-address replay signature. TileLang fusion is an optional
+  // specialization hidden behind this interface.
+  std::vector<torch::Tensor> capture_spec_verify_input_update(
+      const torch::Tensor& tokens,
+      const torch::Tensor& positions,
+      const ModelInputParams& params,
+      uint32_t padded_num_tokens);
+
+  bool supports_fused_spec_verify_metadata_update(
+      const ModelInputParams& params) const;
+  bool supports_fused_spec_verify_token_update(
+      const ModelInputParams& params) const;
+  void run_fused_spec_verify_token_update(const ModelInputParams& params);
+
   // Getter methods for persistent tensors
   torch::Tensor persistent_tokens(uint32_t actual_tokens = 0) const {
     if (actual_tokens > 0) {
@@ -250,6 +266,7 @@ class GraphPersistentParam final {
 
   // Persistent paged attention tiling tensor on device
   torch::Tensor tiling_data_;
+  std::vector<uint32_t> paged_attention_tiling_template_;
 
   // Cached attention parameters
   int32_t num_head_;
