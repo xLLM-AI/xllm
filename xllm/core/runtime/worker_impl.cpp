@@ -941,10 +941,12 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
     const bool needs_dcp_decode_prep =
         parallel_args_.dcp_size_effective() > 1 &&
         parallel_args_.kv_split_size_effective() > 1 &&
-        input.input_params.meta.batch_forward_type.is_decode() &&
-        !input.cp_partitioned;
+        processed_input.input_params.meta.batch_forward_type.is_decode() &&
+        !processed_input.cp_partitioned &&
+        processed_input.input_params.attention.device.new_cache_slots.defined();
     if (needs_dcp_decode_prep) {
-      torch::Tensor new_cache_slots = recompute_new_cache_slots(input);
+      torch::Tensor new_cache_slots =
+          recompute_new_cache_slots(processed_input);
       processed_input.input_params.attention.device.new_cache_slots =
           new_cache_slots.to(device_);
     }

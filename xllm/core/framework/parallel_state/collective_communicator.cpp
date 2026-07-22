@@ -226,6 +226,8 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
         global_rank, world_size, dp_size, cp_size, nullptr, ep_size);
     parallel_args_->kv_split_size(
         ::xllm::ParallelConfig::get_instance().kv_split_size());
+    parallel_args_->dcp_size(
+        ::xllm::ParallelConfig::get_instance().dcp_size());
     return;
   }
 
@@ -283,11 +285,15 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
                                                   dispatchAndCombineHcclComm);
   parallel_args_->kv_split_size(
       ::xllm::ParallelConfig::get_instance().kv_split_size());
+  parallel_args_->dcp_size(
+      ::xllm::ParallelConfig::get_instance().dcp_size());
 #else
   parallel_args_ = std::make_unique<ParallelArgs>(
       global_rank, world_size, dp_size, cp_size, nullptr, ep_size);
   parallel_args_->kv_split_size(
       ::xllm::ParallelConfig::get_instance().kv_split_size());
+  parallel_args_->dcp_size(
+      ::xllm::ParallelConfig::get_instance().dcp_size());
 #endif
 }
 
@@ -396,13 +402,15 @@ void CollectiveCommunicator::create_process_groups(
     CHECK_EQ(tp_size % dcp_size, 0)
         << "DCP requires tp_size % dcp_size == 0 (tp_size=" << tp_size
         << ", dcp_size=" << dcp_size << ")";
-    const int32_t dcp_group_size = tp_size / dcp_size;
+    const int32_t dcp_group_size = dcp_size;
     const int32_t tp_rank = global_rank % tp_size;
-    const int32_t dcp_rank = tp_rank / dcp_group_size;
+    const int32_t dcp_rank = tp_rank % dcp_size;
+    const int32_t dcp_group_base =
+        (tp_rank / dcp_size) * dcp_size;
     std::vector<int32_t> dcp_group_ranks;
     dcp_group_ranks.reserve(dcp_group_size);
     for (int32_t member = 0; member < dcp_group_size; ++member) {
-      const int32_t member_tp_rank = dcp_rank * dcp_group_size + member;
+      const int32_t member_tp_rank = dcp_group_base + member;
       const int32_t dp_base = global_rank - tp_rank;
       dcp_group_ranks.push_back(dp_base + member_tp_rank);
     }
