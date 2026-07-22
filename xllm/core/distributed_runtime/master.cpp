@@ -37,6 +37,7 @@ limitations under the License.
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "dit_master.h"
 #if defined(USE_NPU)
@@ -171,6 +172,15 @@ void resolve_npu_kernel_backend_for_options(Options* options) {
     return;
   }
 
+  // Python model executor bypasses ATB entirely — force TORCH backend.
+  if (ModelConfig::is_python_model_impl(
+          ModelConfig::get_instance().model_impl())) {
+    options->npu_kernel_backend("TORCH");
+    KernelConfig::get_instance().npu_kernel_backend("TORCH");
+    LOG(INFO) << "Forced npu_kernel_backend=TORCH for python model_impl";
+    return;
+  }
+
   const std::string model_type =
       util::get_model_type(options->model_path(), options->backend());
   std::string effective_backend;
@@ -203,15 +213,28 @@ Master::Master(const Options& options, EngineType type)
   // cards (honoring *_VISIBLE_DEVICES) and select the single card this process
   // owns by its node_rank, so `devices` holds exactly the card this process
   // uses -- mirroring the historical single-element devices semantics.
+  //
+  // Exception: Python model_impl runs TP in-process (threads, not spawned
+  // processes) so all visible devices must be passed when nnodes == 1.
   const auto visible_devices = DeviceNameUtils::parse_devices("auto");
-  CHECK_LT(options_.node_rank(), static_cast<int32_t>(visible_devices.size()))
-      << "node_rank " << options_.node_rank()
-      << " exceeds the number of visible devices " << visible_devices.size()
-      << ". Ensure *_VISIBLE_DEVICES exposes all cards used across processes.";
-  const std::vector<torch::Device> devices = {
-      visible_devices[options_.node_rank()]};
-  // World size is the node count (one worker per process).
-  const int32_t global_world_size = options_.nnodes();
+  const bool python_inproc_tp = options_.nnodes() == 1 &&
+                                ModelConfig::is_python_model_impl(
+                                    ModelConfig::get_instance().model_impl()) &&
+                                visible_devices.size() > 1;
+  std::vector<torch::Device> devices;
+  int32_t global_world_size;
+  if (python_inproc_tp) {
+    devices = visible_devices;
+    global_world_size = static_cast<int32_t>(devices.size());
+  } else {
+    CHECK_LT(options_.node_rank(), static_cast<int32_t>(visible_devices.size()))
+        << "node_rank " << options_.node_rank()
+        << " exceeds the number of visible devices " << visible_devices.size()
+        << ". Ensure *_VISIBLE_DEVICES exposes all cards used across "
+           "processes.";
+    devices = {visible_devices[options_.node_rank()]};
+    global_world_size = options_.nnodes();
+  }
   std::string cp_model_type;
   if (options_.cp_size() > 1 && Platform::uses_model_cp_partition()) {
     cp_model_type = util::get_model_type(model_path, options_.backend());

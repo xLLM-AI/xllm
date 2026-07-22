@@ -33,8 +33,8 @@ from xllm.python.ops.attention import (
     update_decode_graph_metadata,
 )
 from xllm.python.ops.collectives import (
-    all_gather,
     all_reduce_,
+    all_gather,
     init_tp_group,
 )
 
