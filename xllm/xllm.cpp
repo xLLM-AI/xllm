@@ -116,6 +116,11 @@ Options create_options(const std::string& instance_name, bool is_local) {
   Options options;
 #if defined(USE_NPU)
   options.npu_kernel_backend(kernel_config.npu_kernel_backend());
+  options.enable_flashcomm1(kernel_config.enable_flashcomm1())
+      .flashcomm1_min_prefill_tokens(
+          kernel_config.flashcomm1_min_prefill_tokens())
+      .enable_mmrs_fusion(kernel_config.enable_mmrs_fusion())
+      .mmrs_comm_mode(kernel_config.mmrs_comm_mode());
 #endif
   options.model_path(model_config.model())
       .model_id(model_config.model_id())
@@ -159,10 +164,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .rank_tablefile(eplb_config.rank_tablefile())
       .expert_parallel_degree(eplb_config.expert_parallel_degree())
       .enable_chunked_prefill(scheduler_config.enable_chunked_prefill())
-      .enable_flashcomm1(FLAGS_enable_flashcomm1)
-      .flashcomm1_min_prefill_tokens(FLAGS_flashcomm1_min_prefill_tokens)
-      .enable_mmrs_fusion(FLAGS_enable_mmrs_fusion)
-      .mmrs_comm_mode(FLAGS_mmrs_comm_mode)
       .master_node_addr(distributed_config.master_node_addr())
       .instance_role(InstanceRole(disagg_pd_config.instance_role()))
       .transfer_listen_port(

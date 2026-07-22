@@ -47,7 +47,11 @@ class KernelConfig final {
          "enable_interlayer_addnorm",
          "enable_split_rmsnorm_rope",
          "enable_aclnn_matmul",
-         "enable_aclnn_swiglu"}};
+         "enable_aclnn_swiglu",
+         "enable_flashcomm1",
+         "flashcomm1_min_prefill_tokens",
+         "enable_mmrs_fusion",
+         "mmrs_comm_mode"}};
     return kOptionCategory;
   }
 
@@ -67,6 +71,14 @@ class KernelConfig final {
   PROPERTY(bool, enable_aclnn_matmul) = false;
 
   PROPERTY(bool, enable_aclnn_swiglu) = false;
+
+  PROPERTY(bool, enable_flashcomm1) = false;
+
+  PROPERTY(int32_t, flashcomm1_min_prefill_tokens) = 8192;
+
+  PROPERTY(bool, enable_mmrs_fusion) = false;
+
+  PROPERTY(std::string, mmrs_comm_mode) = "aiv";
 #endif
 };
 

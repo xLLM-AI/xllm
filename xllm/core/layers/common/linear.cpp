@@ -1517,6 +1517,9 @@ torch::Tensor RowParallelLinearImpl::mmrs_weight_transposed() const {
 torch::Tensor RowParallelLinearImpl::forward(
     torch::Tensor input,
     RowParallelReduceMode reduce_mode) {
+#if !defined(USE_NPU)
+  return forward(input);
+#else
   const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
   auto bias = bias_.defined() && rank_ == 0
                   ? std::optional<torch::Tensor>(bias_)
@@ -1619,13 +1622,8 @@ torch::Tensor RowParallelLinearImpl::forward(
                             : std::nullopt;
     CHECK(weight_scale.has_value() && weight_scale.value().defined())
         << "weight_scale is required for w8a8_dynamic quant matmul.";
-#if defined(USE_DCU)
-    output = dcu_w8a8_dynamic_linear_forward(
-        input, weight_, weight_scale.value(), bias, output_dtype_);
-#elif defined(USE_NPU)
     output = npu_w8a8_dynamic_linear_forward(
         input, weight_, weight_scale.value(), bias, output_dtype_);
-#endif
   } else {
     if (!input_is_parallelized_ && !skip_scatter) {
       input = xllm::parallel_state::scatter(input, process_group_);
@@ -1728,6 +1726,7 @@ torch::Tensor RowParallelLinearImpl::forward(
     output = xllm::parallel_state::reduce(output, process_group_);
   }
   return output;
+#endif
 }
 
 // load the weight from the checkpoint

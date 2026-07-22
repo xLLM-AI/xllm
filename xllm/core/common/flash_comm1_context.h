@@ -84,10 +84,6 @@ torch::Tensor pad_rows_by_copy(const torch::Tensor& input, int64_t padded_rows);
 
 FlashComm1Context build_flash_comm1_context(int32_t num_tokens,
                                             bool is_prefill,
-                                            const ParallelArgs& parallel_args);
-
-FlashComm1Context build_flash_comm1_context(int32_t num_tokens,
-                                            bool is_prefill,
                                             const ParallelArgs& parallel_args,
                                             const FlashComm1Options& options);
 

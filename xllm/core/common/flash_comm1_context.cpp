@@ -19,26 +19,7 @@ limitations under the License.
 
 #include <algorithm>
 
-#include "common/global_flags.h"
 #include "framework/parallel_state/parallel_state.h"
-
-DEFINE_bool(enable_flashcomm1,
-            false,
-            "Enable Flash Communication 1 (FC1) sequence-parallel optimization "
-            "for tensor parallel inference on NPU.");
-
-DEFINE_int32(flashcomm1_min_prefill_tokens,
-             8192,
-             "Minimum prefill token count to activate FC1.");
-
-DEFINE_bool(enable_mmrs_fusion,
-            false,
-            "Enable Matmul+ReduceScatter fusion kernel for FC1.");
-
-DEFINE_string(mmrs_comm_mode,
-              "aiv",
-              "Communication mode for torch_npu npu_mm_reduce_scatter_base. "
-              "Supported values: ai_cpu, aiv, none.");
 
 namespace xllm {
 
@@ -184,18 +165,6 @@ FlashComm1Context build_flash_comm1_context(int32_t num_tokens,
   ctx.padded_local_num_tokens = ctx.padded_num_tokens / ctx.tp_world_size;
 
   return ctx;
-}
-
-FlashComm1Context build_flash_comm1_context(int32_t num_tokens,
-                                            bool is_prefill,
-                                            const ParallelArgs& parallel_args) {
-  FlashComm1Options options;
-  options.enable_flashcomm1 = FLAGS_enable_flashcomm1;
-  options.min_prefill_tokens = FLAGS_flashcomm1_min_prefill_tokens;
-  options.enable_mmrs_fusion = FLAGS_enable_mmrs_fusion;
-  options.mmrs_comm_mode = FLAGS_mmrs_comm_mode;
-  return build_flash_comm1_context(
-      num_tokens, is_prefill, parallel_args, options);
 }
 
 torch::Tensor shard_sequence(const torch::Tensor& input,
