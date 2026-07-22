@@ -17,6 +17,7 @@ limitations under the License.
 
 #if defined(USE_NPU)
 #include "dit/pipelines/pipeline_flux.h"                 // IWYU pragma: keep
+#include "dit/pipelines/pipeline_flux2.h"                // IWYU pragma: keep
 #include "dit/pipelines/pipeline_flux_control.h"         // IWYU pragma: keep
 #include "dit/pipelines/pipeline_flux_fill.h"            // IWYU pragma: keep
 #include "dit/pipelines/pipeline_qwenimage_edit_plus.h"  // IWYU pragma: keep
