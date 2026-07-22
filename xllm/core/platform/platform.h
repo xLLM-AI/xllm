@@ -56,6 +56,13 @@ class Platform final {
   // after MLU moves CP input preparation into WorkerImpl.
   static constexpr bool uses_model_cp_partition() { return is_mlu(); }
 
+  // MLU can reuse DSA top-k results across layers without keeping an indexer
+  // cache for every layer. Other backends retain the legacy all-layer cache
+  // allocation until they implement the same cache-elision contract.
+  static constexpr bool supports_dsa_indexer_cache_elision() {
+    return is_mlu();
+  }
+
   static constexpr bool is_ilu() {
 #if defined(USE_ILU)
     return true;

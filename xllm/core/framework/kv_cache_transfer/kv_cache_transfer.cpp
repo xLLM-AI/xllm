@@ -385,7 +385,8 @@ std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
 
     transfer->initialize(device_id);
     CHECK(allocate_kv_cache_func(kv_cache_shape,
-                                 /*use_huge_page_allocator=*/true))
+                                 /*use_huge_page_allocator=*/true,
+                                 /*tensor_allocator=*/nullptr))
         << "Allocate KV cache failed.";
     transfer->register_kv_cache(kv_caches, kv_cache_shape, dtype);
 #else
@@ -414,8 +415,20 @@ std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
 #endif
 
     mooncake_transfer->initialize(device_id);
+#if defined(USE_MLU)
+    CHECK(allocate_kv_cache_func(kv_cache_shape,
+                                 /*use_huge_page_allocator=*/false,
+                                 mlu_mooncake_tensor_allocator()))
+        << "Allocate KV cache failed.";
+#else
+    // TODO(xllm-kv-allocator): NPU/DCU/XTensor remains on its existing
+    // physical allocation path in the MLU Mooncake migration. A follow-up
+    // must route this backend through
+    // KVCacheCreateOptions::tensor_allocator without moving cache structure
+    // decisions into Transfer. Do not add indexer layer-mask handling here.
     mooncake_transfer->allocate_kv_cache(
         kv_caches, num_layers, kv_cache_shape, dtype);
+#endif
     mooncake_transfer->register_kv_cache(kv_caches, kv_cache_shape, dtype);
 
     transfer = mooncake_transfer;
