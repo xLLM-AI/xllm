@@ -1051,7 +1051,7 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
       cp_active ? as_optional(cp_local_kv)
                 : as_optional(attn_metadata.actual_seq_lengths_kv),
       /*sinks=*/
-        attn_sink_loaded_ ? as_optional(attn_sink_for_attn) : std::nullopt,
+      attn_sink_loaded_ ? as_optional(attn_sink_for_attn) : std::nullopt,
       /*metadata=*/sparse_metadata,
       /*softmax_scale=*/softmax_scale_,
       /*cmp_ratio=*/compress_ratio_i,
