@@ -224,9 +224,10 @@ class WorkerImpl {
   bool can_skip_npu_graph_decode_sync(
       const ModelInputParams& input_params) const;
 
-  bool allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
-                                 bool use_huge_page_allocator = false,
-                                 bool enable_raw_device_allocator = false);
+  bool allocate_kv_cache_storage(
+      const KVCacheShape& kv_cache_shape,
+      bool use_huge_page_allocator = false,
+      std::shared_ptr<KVCacheTensorAllocator> tensor_allocator = nullptr);
 
   // Get the effective number of layers based on whether this is a spec draft
   // model

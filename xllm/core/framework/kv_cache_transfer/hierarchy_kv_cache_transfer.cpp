@@ -207,7 +207,7 @@ void HierarchyKVCacheTransfer::create_host_cache() {
     KVCacheCreateOptions host_opts = create_options_;
     host_opts.device(torch::Device(torch::kCPU))
         .enable_xtensor(false)
-        .enable_raw_device_allocator(false)
+        .tensor_allocator(nullptr)
         .host_blocks_factor(options_.host_blocks_factor());
 #if defined(USE_NPU)
     host_opts.enable_kv_cache_huge_page_allocator(false);

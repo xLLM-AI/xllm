@@ -143,7 +143,7 @@ uint32_t BlockCapacityGuard::get_needed_block_num_for_prefill() {
 
 std::vector<SequenceStatus> BlockCapacityGuard::get_all_sequence_status() {
   std::vector<Sequence*> running_sequences_for_test =
-      merge_vec(running_sequences_, candidate_sequences_, running_queue_);
+      merge_vec(running_sequences_, candidate_sequences_, decode_queue_);
 
   std::vector<SequenceStatus> result;
   result.reserve(running_sequences_for_test.size());
@@ -237,7 +237,7 @@ bool BlockCapacityGuard::if_accept_candidate_sequences(
   num_reserved_block_for_prefill_ = 0;
 
   candidate_sequences_ = candidate_sequences;
-  running_queue_ = get_running_sequences(running_queue);
+  decode_queue_ = get_running_sequences(running_queue);
   running_sequences_ = running_sequences;
 
   compute_reserved_block_num();
@@ -254,13 +254,13 @@ ZeroEvictionScheduler::ZeroEvictionScheduler(Engine* engine,
 
 ZeroEvictionScheduler::~ZeroEvictionScheduler() {
   // release all requests in the priority queue
-  while (!waiting_priority_queue_->empty()) {
-    waiting_priority_queue_->pop_top();
+  while (!prefill_queue_->empty()) {
+    prefill_queue_->pop_top();
   }
 
   // release all requests in the running priority queue
-  while (!running_queue_->empty()) {
-    running_queue_->pop_top();
+  while (!decode_queue_->empty()) {
+    decode_queue_->pop_top();
   }
 }
 
@@ -317,7 +317,7 @@ bool ZeroEvictionScheduler::try_allocate_block_for(
   CHECK(!prefill_sequences->empty());
 
   if (!block_capacity_guard_->if_accept_candidate_sequences(
-          *prefill_sequences, running_queue_, running_sequences_)) {
+          *prefill_sequences, decode_queue_, running_sequences_)) {
     return false;
   }
 
@@ -353,18 +353,18 @@ void ZeroEvictionScheduler::handle_prefill_requests(
   // NOTE: preempted requests will be pushed in waiting_priority_queue,
   // they may contian many sequences, so we should check here.
 
-  while (!waiting_priority_queue_->empty() && remaining_seq_budget > 0 &&
+  while (!prefill_queue_->empty() && remaining_seq_budget > 0 &&
          remaining_token_budget > 0 &&
          kv_cache_manager_->kv_cache_utilization() <
              ::xllm::SchedulerConfig::get_instance()
                  .prefill_scheduling_memory_usage_threshold()) {
-    std::shared_ptr<Request> request(waiting_priority_queue_->top());
+    std::shared_ptr<Request> request(prefill_queue_->top());
     if (request->finished() || request->cancelled()) {
       kv_cache_manager_->deallocate(request.get());
       // release the ownership of the request
       finished_requests.emplace_back(request);
       // remove the request from the priority queue
-      waiting_priority_queue_->pop_top();
+      prefill_queue_->pop_top();
       continue;
     }
 
@@ -401,7 +401,7 @@ void ZeroEvictionScheduler::handle_prefill_requests(
 
     remaining_token_budget -= allocated_tokens;
     remaining_seq_budget -= allocated_seqs;
-    waiting_priority_queue_->pop_top();
+    prefill_queue_->pop_top();
     running_requests_.emplace_back(request);
     running_sequences_.insert(running_sequences_.end(),
                               prefill_sequences.begin(),
@@ -411,14 +411,14 @@ void ZeroEvictionScheduler::handle_prefill_requests(
                                       prefill_sequences_budget.end());
   }
 
-  if (running_sequences_.empty() && !waiting_priority_queue_->empty() &&
-      running_queue_->empty() &&
+  if (running_sequences_.empty() && !prefill_queue_->empty() &&
+      decode_queue_->empty() &&
       kv_cache_manager_->kv_cache_utilization() == 0) {
     LOG(ERROR) << "Request prompt is too long, no enough memory to schedule "
                   "a single sequence.";
     // no enough memory to schedule single sequence, just finish the request
-    std::shared_ptr<Request> request(waiting_priority_queue_->top());
-    waiting_priority_queue_->pop_top();
+    std::shared_ptr<Request> request(prefill_queue_->top());
+    prefill_queue_->pop_top();
     kv_cache_manager_->deallocate(request.get());
     response_processor_->process_failed_request(
         request,

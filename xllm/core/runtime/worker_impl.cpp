@@ -51,6 +51,7 @@ limitations under the License.
 #include "core/framework/config/profile_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/kv_cache/kv_cache_estimation.h"
 #include "core/platform/platform.h"
 #include "core/platform/sleepable_allocator.h"
 #if defined(USE_NPU)
@@ -298,9 +299,10 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
 
 WorkerImpl::~WorkerImpl() = default;
 
-bool WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
-                                           bool use_huge_page_allocator,
-                                           bool enable_raw_device_allocator) {
+bool WorkerImpl::allocate_kv_cache_storage(
+    const KVCacheShape& kv_cache_shape,
+    bool use_huge_page_allocator,
+    std::shared_ptr<KVCacheTensorAllocator> tensor_allocator) {
   CHECK(model_ != nullptr) << "Model is not initialized.";
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
 
@@ -331,6 +333,8 @@ bool WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
       << "simultaneously.";
 
   const int64_t num_layers = get_num_layers();
+  std::vector<bool> indexer_cache_enabled_layers =
+      resolve_indexer_cache_enabled_layers(args, num_layers);
 
   // Check if KV cache quantization is enabled
   // "auto" (default): cache dtype aligns with model dtype (no quantization)
@@ -379,9 +383,10 @@ bool WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
       .enable_sleep_mode(options_.enable_sleep_mode())
       .enable_linear_attention(enable_linear_attention)
       .enable_lighting_indexer(enable_lighting_indexer)
+      .indexer_cache_enabled_layers(std::move(indexer_cache_enabled_layers))
       .enable_kv_cache_quant(enable_kv_cache_quant)
       .enable_indexer_cache_quant(enable_indexer_cache_quant)
-      .enable_raw_device_allocator(enable_raw_device_allocator)
+      .tensor_allocator(std::move(tensor_allocator))
       .block_size(options_.block_size())
       .head_dim(args.head_dim())
       .index_head_dim(std::max(args.index_head_dim(), 1))
@@ -419,9 +424,9 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
 
   // create a KVCache for each layer
-  const int64_t num_layers = context_.get_model_args().n_layers();
-  const bool enable_lighting_indexer =
-      context_.get_model_args().index_n_heads() > 0;
+  const ModelArgs& model_args = context_.get_model_args();
+  const int64_t num_layers = model_args.n_layers();
+  const bool enable_lighting_indexer = model_args.index_n_heads() > 0;
   kv_cache_transfer_ = KVCacheTransferFactory::create(
       ::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type(),
       options_.transfer_listen_port(),
@@ -431,11 +436,14 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
       dtype_,
       kv_caches_,
       num_layers,
-      [this](const KVCacheShape& shape, bool use_huge_page_allocator) {
-        return this->allocate_kv_cache_storage(shape, use_huge_page_allocator);
+      [this](const KVCacheShape& shape,
+             bool use_huge_page_allocator,
+             std::shared_ptr<KVCacheTensorAllocator> tensor_allocator) {
+        return this->allocate_kv_cache_storage(
+            shape, use_huge_page_allocator, std::move(tensor_allocator));
       },
       enable_lighting_indexer,
-      context_.get_model_args().model_type(),
+      model_args.model_type(),
       options_.model_id());
 
   status_ = Status::READY;
@@ -451,22 +459,22 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
 
   kv_cache_transfer_ = kv_cache_transfer;
 
+  std::shared_ptr<KVCacheTensorAllocator> tensor_allocator;
+#if defined(USE_MLU)
+  tensor_allocator = mlu_mooncake_tensor_allocator();
+#endif
   if (!allocate_kv_cache_storage(kv_cache_shape,
                                  /*use_huge_page_allocator=*/true,
-                                 /*enable_raw_device_allocator=*/true)) {
+                                 std::move(tensor_allocator))) {
     return false;
   }
 
-#if defined(USE_NPU)
   if (is_spec_draft_) {
     kv_cache_transfer_->register_kv_cache_spec(
         kv_caches_, kv_cache_shape, dtype_);
   } else {
     kv_cache_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
   }
-#else
-  kv_cache_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
-#endif
 
   status_ = Status::READY;
   return true;

@@ -169,8 +169,7 @@ BlockTypeTensorMap IndexedKVCacheImpl::get_block_type_tensors(
 }
 
 bool IndexedKVCacheImpl::empty() const {
-  return !key_cache_.defined() || !value_cache_.defined() ||
-         !index_cache_.defined();
+  return KVCacheImpl::empty() || !index_cache_.defined();
 }
 
 std::vector<std::vector<int64_t>> IndexedKVCacheImpl::get_shapes() const {

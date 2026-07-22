@@ -73,8 +73,25 @@ std::unique_ptr<KVCacheImpl> create_kv_cache_impl(
                                                   create_options);
   }
 
-  if (create_options.enable_lighting_indexer()) {
+  bool enable_indexer_cache = create_options.enable_lighting_indexer();
+  const std::vector<bool>& indexer_cache_enabled_layers =
+      create_options.indexer_cache_enabled_layers();
+  if (!indexer_cache_enabled_layers.empty()) {
+    CHECK_EQ(indexer_cache_enabled_layers.size(),
+             static_cast<size_t>(create_options.num_layers()))
+        << "Indexer cache layer mask must match num_layers.";
+    enable_indexer_cache =
+        enable_indexer_cache &&
+        indexer_cache_enabled_layers[static_cast<size_t>(layer_id)];
+  }
+
+  if (enable_indexer_cache) {
     return std::make_unique<IndexedKVCacheImpl>(kv_cache_shape, create_options);
+  }
+
+  if (create_options.enable_kv_cache_quant()) {
+    return std::make_unique<QuantizedKVCacheImpl>(kv_cache_shape,
+                                                  create_options);
   }
 
   return std::make_unique<KVCacheImpl>(kv_cache_shape, create_options);
