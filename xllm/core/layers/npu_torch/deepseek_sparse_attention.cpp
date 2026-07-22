@@ -375,7 +375,8 @@ Dsv4PreprocessOutputs run_dsv4_preprocess_fallback(
     outputs.kv = std::get<0>(kv_layernorm->forward(kv_down));
     outputs.kv = outputs.kv.view({-1, 1, qk_head_dim});
     apply_partial_rope(outputs.kv, nope_head_dim, rope_head_dim, cos, sin);
-    outputs.q = torch::zeros({0, n_local_heads, head_dim}, hidden_states.options());
+    outputs.q =
+        torch::zeros({0, n_local_heads, head_dim}, hidden_states.options());
     outputs.qr = torch::Tensor();  // undefined, unused downstream
     return outputs;
   }
@@ -946,8 +947,9 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   // has nothing to do and select_qli would launch a 0-block kernel.
   // DSA-CP empty rank: skip indexer when this rank has no local query tokens
   // (idx_hidden=empty would crash). M1 only (kv_split_size=1): index-cache
-  // writes are identical across ranks since hidden_states is full on every rank,
-  // so skipping rank N's write is safe when rank 0 already wrote the same data.
+  // writes are identical across ranks since hidden_states is full on every
+  // rank, so skipping rank N's write is safe when rank 0 already wrote the same
+  // data.
   if (compress_ratio_i == 4 && cmp_kv.defined() && has_compress_positions &&
       !cp_local_empty) {
     auto index_cache = kv_cache.get_index_cache();
@@ -1033,67 +1035,69 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   std::optional<torch::Tensor> output_lse = std::nullopt;
   if (cp_local_empty) {
     const int64_t attn_heads = cp_active ? num_heads_ : n_local_heads_;
-    attn_output = torch::zeros({0, attn_heads, head_dim_}, hidden_states.options());
+    attn_output =
+        torch::zeros({0, attn_heads, head_dim_}, hidden_states.options());
   } else {
-  // Normal path: run sparse attention
-  std::optional<torch::Tensor> cu_seqlens_ori_kv_for_attn = std::nullopt;
-  if (use_prefill_attn) {
-    // Prefill-style sparse metadata uses query cu-seqlens for ori_kv in the
-    // non-CP case (q and ori_kv share the full token range). Under CP the
-    // ori_kv is the full, replicated stream while q is the local slice, so
-    // this must be the right-aligned KV cu-seqlens (cumsum of local_seq_lens),
-    // matching seqused_kv below. Using the local query cu-seqlens here offsets
-    // the last rank's causal window and reads the wrong KV slice.
-    cu_seqlens_ori_kv_for_attn =
-        cp_active ? as_optional(cp_local_ori_kv_cu)
-                  : as_optional(attn_metadata.actual_seq_lengths_query);
-  }
+    // Normal path: run sparse attention
+    std::optional<torch::Tensor> cu_seqlens_ori_kv_for_attn = std::nullopt;
+    if (use_prefill_attn) {
+      // Prefill-style sparse metadata uses query cu-seqlens for ori_kv in the
+      // non-CP case (q and ori_kv share the full token range). Under CP the
+      // ori_kv is the full, replicated stream while q is the local slice, so
+      // this must be the right-aligned KV cu-seqlens (cumsum of
+      // local_seq_lens), matching seqused_kv below. Using the local query
+      // cu-seqlens here offsets the last rank's causal window and reads the
+      // wrong KV slice.
+      cu_seqlens_ori_kv_for_attn =
+          cp_active ? as_optional(cp_local_ori_kv_cu)
+                    : as_optional(attn_metadata.actual_seq_lengths_query);
+    }
 
-  const bool pass_cmp_sparse = (compress_ratio_i == 4);
-  // Sink is per attention head. It is full-head when CP prefill runs attention
-  // over all heads; otherwise (decode / non-CP under a full-head build) slice
-  // it to this rank's TP head shard to match the sliced q above.
-  torch::Tensor attn_sink_for_attn = attn_sink_;
-  if (attn_sink_loaded_ && cp_full_head_ && !cp_active) {
-    const int64_t shard_start = tp_rank_ * n_local_heads_;
-    attn_sink_for_attn = attn_sink_
-                             .slice(/*dim=*/0,
-                                    /*start=*/shard_start,
-                                    /*end=*/shard_start + n_local_heads_)
-                             .contiguous();
-  }
-  std::tie(attn_output, output_lse) = xllm::kernel::npu::sparse_attn_sharedkv(
-      /*q=*/q,
-      /*ori_kv=*/as_optional(ori_kv_for_attn),
-      /*cmp_kv=*/compress_ratio_i > 1 ? as_optional(cmp_kv_for_attn)
-                                      : std::nullopt,
-      /*ori_sparse_indices=*/std::nullopt,
-      /*cmp_sparse_indices=*/
-      pass_cmp_sparse ? as_optional(compress_topk_idxs) : std::nullopt,
-      /*ori_block_table=*/as_optional(ori_block_table_for_attn),
-      /*cmp_block_table=*/
-      compress_ratio_i > 1 ? as_optional(cmp_block_table) : std::nullopt,
-      /*cu_seqlens_q=*/
-      cp_active ? as_optional(cp_local_q_cu)
-                : as_optional(attn_metadata.actual_seq_lengths_query),
-      /*cu_seqlens_ori_kv=*/cu_seqlens_ori_kv_for_attn,
-      /*cu_seqlens_cmp_kv=*/std::nullopt,
-      /*seqused_q=*/std::nullopt,
-      /*seqused_kv=*/
-      cp_active ? as_optional(cp_local_kv)
-                : as_optional(attn_metadata.actual_seq_lengths_kv),
-      /*sinks=*/
-      attn_sink_loaded_ ? as_optional(attn_sink_for_attn) : std::nullopt,
-      /*metadata=*/sparse_metadata,
-      /*softmax_scale=*/softmax_scale_,
-      /*cmp_ratio=*/compress_ratio_i,
-      /*ori_mask_mode=*/4,
-      /*cmp_mask_mode=*/3,
-      /*ori_win_left=*/std::max<int64_t>(window_size_ - 1, 0),
-      /*ori_win_right=*/0,
-      /*layout_q=*/"TND",
-      /*layout_kv=*/ori_kv_layout,
-      /*return_softmax_lse=*/false);
+    const bool pass_cmp_sparse = (compress_ratio_i == 4);
+    // Sink is per attention head. It is full-head when CP prefill runs
+    // attention over all heads; otherwise (decode / non-CP under a full-head
+    // build) slice it to this rank's TP head shard to match the sliced q above.
+    torch::Tensor attn_sink_for_attn = attn_sink_;
+    if (attn_sink_loaded_ && cp_full_head_ && !cp_active) {
+      const int64_t shard_start = tp_rank_ * n_local_heads_;
+      attn_sink_for_attn = attn_sink_
+                               .slice(/*dim=*/0,
+                                      /*start=*/shard_start,
+                                      /*end=*/shard_start + n_local_heads_)
+                               .contiguous();
+    }
+    std::tie(attn_output, output_lse) = xllm::kernel::npu::sparse_attn_sharedkv(
+        /*q=*/q,
+        /*ori_kv=*/as_optional(ori_kv_for_attn),
+        /*cmp_kv=*/compress_ratio_i > 1 ? as_optional(cmp_kv_for_attn)
+                                        : std::nullopt,
+        /*ori_sparse_indices=*/std::nullopt,
+        /*cmp_sparse_indices=*/
+        pass_cmp_sparse ? as_optional(compress_topk_idxs) : std::nullopt,
+        /*ori_block_table=*/as_optional(ori_block_table_for_attn),
+        /*cmp_block_table=*/
+        compress_ratio_i > 1 ? as_optional(cmp_block_table) : std::nullopt,
+        /*cu_seqlens_q=*/
+        cp_active ? as_optional(cp_local_q_cu)
+                  : as_optional(attn_metadata.actual_seq_lengths_query),
+        /*cu_seqlens_ori_kv=*/cu_seqlens_ori_kv_for_attn,
+        /*cu_seqlens_cmp_kv=*/std::nullopt,
+        /*seqused_q=*/std::nullopt,
+        /*seqused_kv=*/
+        cp_active ? as_optional(cp_local_kv)
+                  : as_optional(attn_metadata.actual_seq_lengths_kv),
+        /*sinks=*/
+        attn_sink_loaded_ ? as_optional(attn_sink_for_attn) : std::nullopt,
+        /*metadata=*/sparse_metadata,
+        /*softmax_scale=*/softmax_scale_,
+        /*cmp_ratio=*/compress_ratio_i,
+        /*ori_mask_mode=*/4,
+        /*cmp_mask_mode=*/3,
+        /*ori_win_left=*/std::max<int64_t>(window_size_ - 1, 0),
+        /*ori_win_right=*/0,
+        /*layout_q=*/"TND",
+        /*layout_kv=*/ori_kv_layout,
+        /*return_softmax_lse=*/false);
   }  // end if !cp_local_empty
 
   // 8) Deferred cache write for full prefill.
