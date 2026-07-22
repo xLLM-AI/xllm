@@ -100,9 +100,12 @@ void PrefillFirstPolicy::schedule(
 
   // Schedule chunked prefill continuations first (they already have partial
   // KV).
-  schedule_prefill_from_queue(&state.chunk_queue, state, budget, finished);
+  size_t reserved_full_footprint = 0;
+  schedule_prefill_from_queue(
+      &state.chunk_queue, state, budget, finished, reserved_full_footprint);
   // Then new prefill requests.
-  schedule_prefill_from_queue(&state.prefill_queue, state, budget, finished);
+  schedule_prefill_from_queue(
+      &state.prefill_queue, state, budget, finished, reserved_full_footprint);
 
   if (!state.running_sequences.empty()) {
     state.last_step_prefill = true;

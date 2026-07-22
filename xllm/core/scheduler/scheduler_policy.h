@@ -148,7 +148,8 @@ class SchedulerPolicy {
       RequestPriorityQueue* queue,
       SchedulerState& state,
       ScheduleBudget& budget,
-      std::vector<std::shared_ptr<Request>>& finished);
+      std::vector<std::shared_ptr<Request>>& finished,
+      size_t& reserved_full_footprint);
   size_t compute_prefill_tokens(Sequence* seq,
                                 size_t remaining_budget,
                                 const SchedulerState& state);
