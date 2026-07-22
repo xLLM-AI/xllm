@@ -19,7 +19,7 @@ configure_file(
   @ONLY)
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
-#Set warning-as-error for xllm code (third-party headers are marked as SYSTEM)
+# Set warning-as-error for xllm code (third-party headers are marked as SYSTEM)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   if(USE_MUSA)
     add_compile_options(
