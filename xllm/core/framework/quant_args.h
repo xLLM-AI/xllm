@@ -32,7 +32,31 @@ limitations under the License.
 
 namespace xllm {
 
-// Quantization method identifiers
+// ── Shared Utilities ───────────────────────────────────────────────────────
+
+inline std::string to_lower_copy(std::string value) {
+  std::transform(
+      value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+      });
+  return value;
+}
+
+// ── Quant Method Checks ─────────────────────────────────────────────────────
+
+inline bool is_w8a8_dynamic_quant(
+    const std::optional<std::string>& resolved_weight_quant_method) {
+  return resolved_weight_quant_method.has_value() &&
+         resolved_weight_quant_method.value() == "w8a8_dynamic";
+}
+
+inline bool is_w8a8_quant(
+    const std::optional<std::string>& resolved_weight_quant_method) {
+  return resolved_weight_quant_method.has_value() &&
+         resolved_weight_quant_method.value() == "w8a8";
+}
+
+// ── Quantization method identifiers ─────────────────────────────────────────
 static const std::string kQuantMethodFp8 = "fp8";
 static const std::string kQuantMethodSmoothquant = "smoothquant";
 static const std::string kQuantMethodAscendInt4 = "ascend_int4";
@@ -85,6 +109,20 @@ struct QuantArgs {
   // key: full tensor name, e.g. "layers.0.attn.wq_a.weight"
   // value: quant type, e.g. "W8A8_DYNAMIC"
   PROPERTY(QuantDescs, quant_descs) = {};
+
+  // ── Convenience helpers for weight-loading prefix resolution ──────────
+
+  bool is_quantized() const { return !quant_descs_.empty(); }
+
+  // Returns `quant_key` when the model is quantized (quant_descs is
+  // non-empty), otherwise returns `fallback`.  Use this to pick between
+  // checkpoint key names / prefixes at load time without repeated if/else.
+  std::string resolve_prefix(const std::string& quant_key,
+                             const std::string& fallback) const {
+    return quant_descs_.empty() ? fallback : quant_key;
+  }
+
+  // ── Module-level helpers ────────────────────────────────────────────────
 
   bool should_ignore_module(const std::string& module_name) const {
     for (const auto& pattern : ignored_modules()) {

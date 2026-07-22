@@ -418,13 +418,13 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
   // Python model executor: build the graph via the embedded interpreter instead
   // of resolving a C++ model class from the registry.
   const auto& model_impl = context.get_model_impl();
-#if defined(USE_CUDA)
+#if defined(USE_CUDA) || defined(USE_NPU)
   if (ModelConfig::is_python_model_impl(model_impl)) {
     return std::make_unique<PyCausalLM>(context);
   }
 #else
   if (ModelConfig::is_python_model_impl(model_impl)) {
-    LOG(ERROR) << "--model_impl=python is only supported on CUDA builds.";
+    LOG(ERROR) << "--model_impl=python is only supported on CUDA/NPU builds.";
     return nullptr;
   }
 #endif

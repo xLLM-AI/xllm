@@ -1,5 +1,21 @@
 include(cc_test)
 
+cc_test(
+  NAME
+    npu_xllm_ops_test
+  SRCS
+    npu_xllm_ops_test.cpp
+  DEPS
+    ascendcl
+    torch
+    torch_npu
+    kernels
+    npu_kernels
+    GTest::gtest_main
+    glog::glog
+    pybind11::embed
+)
+
 # Temporarily disabled: Dsv4ScatterCache tests are unstable in the current
 # NPU test environment.
 # cc_test(

@@ -35,6 +35,7 @@ cc_library(
     utils.cpp
     w4a8_dynamic_moe_preprocess.cpp
     rec_constrained_topk.cpp
+    npu_ops_library.cpp
   DEPS
     :torch_npu_kernels
     :tilelang_kernels

@@ -21,6 +21,7 @@ limitations under the License.
 #include <optional>
 
 #include "attention.h"
+#include "core/layers/mlu/dsa_topk_relay.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
@@ -50,20 +51,22 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
                           const QuantArgs& quant_args,
                           const ParallelArgs& parallel_args,
                           const torch::TensorOptions& options,
-                          const OptimizationConfig& optimization_config);
+                          const OptimizationConfig& optimization_config,
+                          bool enable_indexer = true);
 
   torch::Tensor forward(const torch::Tensor& positions,
                         const torch::Tensor& hidden_states,
                         const AttentionMetadata& attn_metadata,
                         KVCache& kv_cache,
-                        const v32_cp::DeepseekV32CPContext* sp_ctx = nullptr);
+                        const v32_cp::DeepseekV32CPContext* sp_ctx = nullptr,
+                        DsaTopkTransfer* topk_transfer = nullptr);
 
   bool use_replicated_attn_weights() const {
     return use_full_replicated_attention_weights_;
   }
 
   bool can_use_sp() const {
-    return enable_lighting_indexer_ && use_replicated_attn_weights();
+    return has_indexer_ && use_replicated_attn_weights();
   }
 
   PostAttnLayout post_attn_layout(bool use_sp_output) const {
@@ -100,7 +103,8 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
                                   const torch::Tensor& hidden_states,
                                   const AttentionMetadata& attn_metadata,
                                   KVCache& kv_cache,
-                                  bool is_prefill_or_chunked_prefill);
+                                  bool is_prefill_or_chunked_prefill,
+                                  DsaTopkTransfer* topk_transfer);
 
   // ===== sequence parallel related =====
   torch::Tensor forward_sp(const torch::Tensor& positions,
@@ -178,6 +182,7 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   bool use_full_replicated_attention_weights_ = false;
   bool use_fused_mla_qkv_ = false;
   bool enable_lighting_indexer_ = false;
+  bool has_indexer_ = false;
   bool has_trans_ = false;
   bool interleaved_ = false;
   double eps_;

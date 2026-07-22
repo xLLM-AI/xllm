@@ -23,9 +23,12 @@ from xllm.python.attention.backend import AttentionBackend, AttentionMetadata
 
 
 class BaseRunner(ABC):
-    def __init__(self, model: nn.Module, attention_backend: AttentionBackend) -> None:
+    def __init__(
+        self, model: nn.Module, attention_backend: AttentionBackend, device: torch.device,
+    ) -> None:
         self.model = model
         self.attention_backend = attention_backend
+        self.device = device
 
     @abstractmethod
     def execute(

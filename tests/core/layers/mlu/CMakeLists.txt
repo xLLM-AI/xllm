@@ -218,3 +218,17 @@ cc_test(
     torch
     glog::glog
 )
+
+# Cross-layer DSA top-k relay state is pure CPU logic, but the protocol belongs
+# to the MLU decoder/attention boundary.
+cc_test(
+  NAME
+    dsa_topk_relay_test
+  SRCS
+    dsa_topk_relay_test.cpp
+  DEPS
+    :mlu_layers
+    GTest::gtest_main
+    torch
+    glog::glog
+)

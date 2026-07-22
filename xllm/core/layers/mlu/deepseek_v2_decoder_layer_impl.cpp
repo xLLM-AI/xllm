@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <utility>
 
+#include "layers/common/dsa_topk_share_plan.h"
+
 namespace xllm {
 namespace layer {
 
@@ -36,22 +38,46 @@ bool is_mtp_layer(const ModelArgs& model_args) {
   return model_args.model_type().ends_with("_mtp");
 }
 
-bool use_moe_layer(const ModelArgs& model_args, int32_t layer_id) {
-  if (is_mtp_layer(model_args)) {
-    return model_args.mtp_mlp_type() != "dense";
+DsaTopkShareDecision resolve_topk_share_decision(
+    const ModelContext& context,
+    int32_t layer_id,
+    const DsaTopkSharePlan& topk_share_plan) {
+  if (is_mtp_layer(context.get_model_args())) {
+    return DsaTopkShareDecision();
   }
-  return layer_id >= model_args.first_k_dense_replace();
+  return topk_share_plan.decision_for(layer_id);
 }
 }  // namespace
 
 DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
     const ModelContext& context,
     int32_t layer_id)
-    : parallel_args_(context.get_parallel_args()) {
+    : DeepseekV2DecoderLayerImpl(context, layer_id, DsaTopkShareDecision()) {}
+
+DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
+    const ModelContext& context,
+    int32_t layer_id,
+    const DsaTopkSharePlan& topk_share_plan)
+    : DeepseekV2DecoderLayerImpl(
+          context,
+          layer_id,
+          resolve_topk_share_decision(context, layer_id, topk_share_plan)) {}
+
+DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
+    const ModelContext& context,
+    int32_t layer_id,
+    const DsaTopkShareDecision& topk_share_decision)
+    : parallel_args_(context.get_parallel_args()),
+      layer_id_(layer_id),
+      topk_share_decision_(topk_share_decision) {
   const auto& model_args = context.get_model_args();
   const auto& quant_args = context.get_quant_args();
   const auto& options = context.get_tensor_options();
-  is_moe_layer_ = use_moe_layer(model_args, layer_id);
+  const bool mtp_layer = is_mtp_layer(model_args);
+  is_moe_layer_ = mtp_layer ? model_args.mtp_mlp_type() != "dense"
+                            : layer_id >= model_args.first_k_dense_replace();
+
+  mtp_topk_reuse_ = is_mtp_dsa_topk_reuse_enabled(model_args);
 
   // DeepSeek MoE only support ep == world_size when expert parallel is on
   if (parallel_args_.ep_size() > 1) {
@@ -61,12 +87,15 @@ DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
 
   // Initialize attention layers
   OptimizationConfig optimization_config = context.get_optimization_config();
-  attention_ = register_module("self_attn",
-                               DeepseekV2Attention(model_args,
-                                                   quant_args,
-                                                   parallel_args_,
-                                                   options,
-                                                   optimization_config));
+  attention_ = register_module(
+      "self_attn",
+      DeepseekV2Attention(model_args,
+                          quant_args,
+                          parallel_args_,
+                          options,
+                          optimization_config,
+                          /*enable_indexer=*/
+                          mtp_layer || !topk_share_decision_.reuse_topk));
 
   // Initialize norm layers
   input_norm_ = register_module(
@@ -275,14 +304,94 @@ torch::Tensor DeepseekV2DecoderLayerImpl::forward(
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
     const ModelInputParams& input_params,
-    const std::optional<torch::Tensor>&) {
+    const std::optional<torch::Tensor>& input_ids,
+    DsaTopkRelay* topk_relay) {
+  return forward_impl(x,
+                      residual,
+                      positions,
+                      attn_metadata,
+                      kv_cache,
+                      input_params,
+                      input_ids,
+                      topk_relay,
+                      /*mtp_topk_input=*/nullptr,
+                      /*mtp_topk_output=*/nullptr);
+}
+
+torch::Tensor DeepseekV2DecoderLayerImpl::forward_mtp(
+    torch::Tensor& x,
+    std::optional<torch::Tensor>& residual,
+    torch::Tensor& positions,
+    const AttentionMetadata& attn_metadata,
+    KVCache& kv_cache,
+    const ModelInputParams& input_params,
+    const std::optional<torch::Tensor>& input_ids,
+    const std::optional<DsaTopkState>& topk_input,
+    std::optional<DsaTopkState>& topk_output) {
+  return forward_impl(x,
+                      residual,
+                      positions,
+                      attn_metadata,
+                      kv_cache,
+                      input_params,
+                      input_ids,
+                      /*topk_relay=*/nullptr,
+                      &topk_input,
+                      &topk_output);
+}
+
+torch::Tensor DeepseekV2DecoderLayerImpl::forward_impl(
+    torch::Tensor& x,
+    std::optional<torch::Tensor>& residual,
+    torch::Tensor& positions,
+    const AttentionMetadata& attn_metadata,
+    KVCache& kv_cache,
+    const ModelInputParams& input_params,
+    const std::optional<torch::Tensor>&,
+    DsaTopkRelay* topk_relay,
+    const std::optional<DsaTopkState>* mtp_topk_input,
+    std::optional<DsaTopkState>* mtp_topk_output) {
   // Pre-attention norm
   residual = x;
   x = std::get<0>(input_norm_->forward(x));
 
+  std::optional<DsaTopkTransfer> cross_layer_transfer;
+  if (topk_relay != nullptr && !attn_metadata.is_dummy) {
+    cross_layer_transfer = topk_relay->prepare_layer(topk_share_decision_);
+  }
+
+  // MTP cross-step top-k reuse bridges typed per-layer state into the same
+  // atomic transfer used by attention. It only engages through forward_mtp,
+  // when no cross-layer transfer is active and this is a real forward.
+  std::optional<DsaTopkTransfer> mtp_transfer;
+  DsaTopkTransfer* effective_transfer = cross_layer_transfer.has_value()
+                                            ? &cross_layer_transfer.value()
+                                            : nullptr;
+  const bool use_mtp_topk_bridge =
+      mtp_topk_reuse_ && effective_transfer == nullptr &&
+      mtp_topk_input != nullptr && mtp_topk_output != nullptr &&
+      !attn_metadata.is_dummy;
+  if (use_mtp_topk_bridge) {
+    mtp_transfer =
+        DsaTopkTransfer::prepare_mtp_step(*mtp_topk_input, x.device());
+    effective_transfer = &mtp_transfer.value();
+  }
+
   // Attention
-  x = attention_->forward(
-      positions, x, attn_metadata, kv_cache, context_parallel_context_);
+  x = attention_->forward(positions,
+                          x,
+                          attn_metadata,
+                          kv_cache,
+                          context_parallel_context_,
+                          effective_transfer);
+
+  if (cross_layer_transfer.has_value()) {
+    topk_relay->finish_layer(topk_share_decision_,
+                             cross_layer_transfer.value());
+  }
+  if (use_mtp_topk_bridge) {
+    *mtp_topk_output = mtp_transfer->mtp_output_state();
+  }
   const bool use_sp_output =
       context_parallel_context_ != nullptr && attention_->can_use_sp();
   const auto attn_layout = attention_->post_attn_layout(use_sp_output);

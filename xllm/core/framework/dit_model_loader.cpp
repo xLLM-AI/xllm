@@ -93,6 +93,11 @@ bool DiTFolderLoader::load_args(const std::string& model_weights_path) {
     return false;
   }
 
+  if (!load_quant_args(model_weights_path)) {
+    LOG(WARNING) << "Failed to load quant args from " << model_weights_path;
+    // Non-fatal: not all models have quantization configs.
+  }
+
   return true;
 }
 
@@ -422,6 +427,103 @@ bool DiTFolderLoader::load_tokenizer_args(
     tokenizer_args_.pad_token() = v.value();
   }
 
+  return true;
+}
+
+bool DiTFolderLoader::load_quant_args(const std::string& model_weights_path) {
+  // Search for a quant description JSON file by fuzzy name match
+  // (e.g. "quant_model_description.json", "quant_desc.json", etc.).
+  std::string quant_desc_file_path;
+  for (const auto& entry :
+       std::filesystem::directory_iterator(model_weights_path)) {
+    if (!entry.is_regular_file()) {
+      continue;
+    }
+    const auto& path = entry.path();
+    if (path.extension() == ".json") {
+      std::string stem = path.stem().string();
+      boost::algorithm::to_lower(stem);
+      if (stem.find("quant") != std::string::npos) {
+        quant_desc_file_path = path.string();
+        break;
+      }
+    }
+  }
+  if (quant_desc_file_path.empty()) {
+    return true;  // No quant config — not an error.
+  }
+
+  JsonReader quant_desc_reader;
+  if (!quant_desc_reader.parse(quant_desc_file_path)) {
+    LOG(WARNING) << "Failed to parse quant description file: "
+                 << quant_desc_file_path;
+    return true;
+  }
+
+  const auto quant_desc_data = quant_desc_reader.data();
+  if (!quant_desc_data.is_object()) {
+    LOG(WARNING) << "Quant description file is not a JSON object: "
+                 << quant_desc_file_path;
+    return true;
+  }
+
+  std::unordered_map<std::string, std::string> quant_descs;
+  bool desc_has_w8a8 = false;
+  bool desc_has_w4a8 = false;
+
+  for (auto it = quant_desc_data.begin(); it != quant_desc_data.end(); ++it) {
+    if (!it.value().is_string()) {
+      continue;
+    }
+    // Keep only tensor-like keys (contain '.') — skip metadata fields.
+    if (it.key().find('.') == std::string::npos) {
+      continue;
+    }
+    const std::string quant_type = it.value().get<std::string>();
+    std::string quant_type_lower = quant_type;
+    boost::algorithm::to_lower(quant_type_lower);
+    if (boost::algorithm::starts_with(quant_type_lower, "w4a8")) {
+      desc_has_w4a8 = true;
+    } else if (boost::algorithm::starts_with(quant_type_lower, "w8a8")) {
+      desc_has_w8a8 = true;
+    }
+    quant_descs.emplace(it.key(), quant_type);
+    // Map "weight_packed" keys to "weight" for compatibility.
+    const std::string packed_weight = "weight_packed";
+    std::string mapped_key = it.key();
+    if (const auto pos = mapped_key.find(packed_weight);
+        pos != std::string::npos) {
+      mapped_key.replace(pos, packed_weight.size(), "weight");
+      quant_descs.emplace(std::move(mapped_key), quant_type);
+    }
+  }
+
+  quant_args_.quant_descs() = std::move(quant_descs);
+  if (desc_has_w4a8) {
+    quant_args_.quant_method() = kQuantMethodAscendInt4;
+  } else if (desc_has_w8a8) {
+    quant_args_.quant_method() = kQuantMethodAscendInt8;
+  }
+
+  // Read model-level quant metadata.
+  if (auto v = quant_desc_reader.value<std::string>("model_quant_type")) {
+    auto quantize_type = v.value();
+    boost::algorithm::to_lower(quantize_type);
+    quant_args_.quantize_type() = quantize_type;
+  }
+  if (auto v = quant_desc_reader.value<int64_t>("group_size")) {
+    quant_args_.group_size() = v.value();
+  }
+  if (auto v = quant_desc_reader.value<std::string>("version")) {
+    quant_args_.quant_version() = v.value();
+  }
+
+  LOG(INFO) << "Loaded quant_model_description from " << quant_desc_file_path
+            << ", quant_desc_count=" << quant_args_.quant_descs().size()
+            << ", quant_method="
+            << (quant_args_.quant_method().empty()
+                    ? "<empty>"
+                    : quant_args_.quant_method());
   return true;
 }
 

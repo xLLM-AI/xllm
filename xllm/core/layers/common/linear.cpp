@@ -21,7 +21,7 @@ limitations under the License.
 #include <algorithm>
 #include <cctype>
 
-#include "common/flash_comm1_context.h"
+#include "core/layers/common/quant_utils.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "kernels/ops_api.h"
@@ -192,50 +192,6 @@ std::string to_lower_copy(std::string value) {
         return static_cast<char>(std::tolower(c));
       });
   return value;
-}
-
-void resolve_weight_quant_method_for_linear_load(
-    const QuantArgs& quant_args,
-    const StateDict& state_dict,
-    const std::vector<std::string>* local_prefixes,
-    std::optional<std::string>& resolved_weight_quant_method) {
-  const auto prefixes =
-      local_prefixes == nullptr ? std::vector<std::string>{} : *local_prefixes;
-  auto resolved =
-      quant_args.get_quant_method_from_prefixes(state_dict, prefixes);
-  if (resolved.has_value()) {
-    resolved_weight_quant_method = to_lower_copy(resolved.value());
-    return;
-  }
-  if (quant_args.is_compressed_tensors_w8a8_dynamic()) {
-    bool is_w8a8_dynamic = false;
-    if (prefixes.empty()) {
-      torch::Tensor weight = state_dict.get_tensor("weight");
-      is_w8a8_dynamic = state_dict.has("weight_scale") && weight.defined() &&
-                        weight.scalar_type() == torch::kInt8;
-    } else {
-      is_w8a8_dynamic = true;
-      for (const std::string& prefix : prefixes) {
-        torch::Tensor weight = state_dict.get_tensor(prefix + "weight");
-        if (!state_dict.has(prefix + "weight_scale") || !weight.defined() ||
-            weight.scalar_type() != torch::kInt8) {
-          is_w8a8_dynamic = false;
-          break;
-        }
-      }
-    }
-    if (is_w8a8_dynamic) {
-      resolved_weight_quant_method = "w8a8_dynamic";
-      return;
-    }
-  }
-  if (!quant_args.quant_descs().empty()) {
-    LOG(WARNING) << "[LinearLoad][QuantMethod] quant_descs is not empty but "
-                    "quant method was not resolved from state_dict prefixes. "
-                    "state_dict.prefix="
-                 << state_dict.prefix();
-  }
-  resolved_weight_quant_method = std::nullopt;
 }
 
 bool is_w8a8_dynamic_quant(
@@ -491,37 +447,6 @@ torch::Tensor npu_w8a8_linear_forward(
   quant_matmul_params.output_dtype = output_dtype;
 
   return xllm::kernel::quant_matmul(quant_matmul_params);
-}
-
-torch::Tensor npu_w8a8_dynamic_linear_forward(
-    const torch::Tensor& input,
-    const torch::Tensor& weight,
-    const torch::Tensor& weight_scale,
-    const std::optional<torch::Tensor>& bias,
-    at::ScalarType output_dtype) {
-  xllm::kernel::NpuQuantizeParams quant_params;
-  quant_params.input = input;
-  // quant_params.dst_type = at::kChar;
-
-  torch::Tensor quantized_input;
-  std::optional<torch::Tensor> pertoken_scale;
-  std::tie(quantized_input, pertoken_scale) =
-      xllm::kernel::dynamic_quant(quant_params);
-  CHECK(pertoken_scale.has_value() && pertoken_scale->defined())
-      << "dynamic_quant must return per-token scale for w8a8_dynamic.";
-
-  xllm::kernel::QuantMatmulParams quant_matmul_params;
-  quant_matmul_params.x1 = quantized_input;
-  quant_matmul_params.x2 = weight;
-  quant_matmul_params.transpose2 = true;
-  quant_matmul_params.scale = weight_scale;
-  quant_matmul_params.pertoken_scale = pertoken_scale;
-  quant_matmul_params.output_dtype = output_dtype;
-  if (bias.has_value() && bias->defined()) {
-    quant_matmul_params.bias = bias;
-  }
-  auto output = xllm::kernel::quant_matmul(quant_matmul_params);
-  return output;
 }
 
 #if defined(USE_DCU)
@@ -1810,7 +1735,6 @@ void RowParallelLinearImpl::load_state_dict(const StateDict& state_dict) {
   if (state_dict.size() == 0) {
     return;
   }
-  mmrs_weight_t_ = torch::Tensor();
   const int64_t rank = world_size_ == 1 ? 0 : rank_;
   const int64_t world_size = world_size_;
   resolve_weight_quant_method_for_linear_load(
@@ -1874,7 +1798,6 @@ void RowParallelLinearImpl::load_state_dict(const StateDict& state_dict) {
   if (bias_.defined()) {
     LOAD_WEIGHT(bias);
   }
-  mmrs_weight_t_ = torch::Tensor();
 }
 
 // Linear layer with row parallelism.
