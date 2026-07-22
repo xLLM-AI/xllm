@@ -949,9 +949,8 @@ struct ModelInputParams {
     params.is_spec_verify = is_spec_verify;
     params.num_accepted_tokens = safe_to(num_accepted_tokens, device, true);
     params.num_accepted_tokens_host = num_accepted_tokens_host;
-    // MTP top-k state is backend-owned. The consuming adapter performs device
-    // conversion so this generic transport keeps the original state handle.
-    params.mtp_topk_state = mtp_topk_state;
+    params.mtp_topk_state =
+        mtp_topk_state == nullptr ? nullptr : mtp_topk_state->to(device);
     for (const auto& table : multi_block_tables) {
       params.multi_block_tables.push_back(
           safe_to(table, table.options().device(torch::kCPU), true));

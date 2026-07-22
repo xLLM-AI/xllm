@@ -771,19 +771,51 @@ TEST(SpecMtpTopkInputBuilderTest, KeepsMluStateWhenRowsAlreadyMatchDraftBatch) {
   EXPECT_EQ(selected.get(), state.get());
 }
 
-TEST(SpecMtpTopkInputBuilderTest,
-     DefersTypedStateDeviceConversionToBackendAdapter) {
+TEST(SpecMtpTopkInputBuilderTest, MovesNpuStateWithModelInputParams) {
+  ModelInputParams params;
+  const torch::Tensor topk_indices =
+      torch::tensor({{0, 1}, {2, 3}}, torch::kInt32);
+  params.mtp_topk_state =
+      std::make_shared<npu::model::NpuMtpTopkState>(topk_indices);
+
+  const torch::Device target_device("meta");
+  const ModelInputParams converted = params.to(target_device);
+
+  const auto converted_state =
+      std::dynamic_pointer_cast<const npu::model::NpuMtpTopkState>(
+          converted.mtp_topk_state);
+  ASSERT_NE(converted_state, nullptr);
+  EXPECT_EQ(converted_state->device(), target_device);
+  EXPECT_EQ(converted_state->topk_indices().sizes(), topk_indices.sizes());
+  EXPECT_EQ(converted_state->topk_indices().scalar_type(),
+            topk_indices.scalar_type());
+  EXPECT_TRUE(topk_indices.device().is_cpu());
+}
+
+TEST(SpecMtpTopkInputBuilderTest, MovesMluStateWithModelInputParams) {
   ModelInputParams params;
   mlu::model::MluMtpTopkState::LayerStates states;
   states.emplace_back(
       layer::DsaTopkState(torch::tensor({{0, 1}}, torch::kInt32),
                           torch::tensor({10}, torch::kInt32)));
+  states.emplace_back(std::nullopt);
   params.mtp_topk_state =
       std::make_shared<mlu::model::MluMtpTopkState>(std::move(states));
 
-  const ModelInputParams converted = params.to(torch::Device(torch::kCPU));
+  const torch::Device target_device("meta");
+  const ModelInputParams converted = params.to(target_device);
 
-  EXPECT_EQ(converted.mtp_topk_state.get(), params.mtp_topk_state.get());
+  const auto converted_state =
+      std::dynamic_pointer_cast<const mlu::model::MluMtpTopkState>(
+          converted.mtp_topk_state);
+  ASSERT_NE(converted_state, nullptr);
+  EXPECT_EQ(converted_state->device(), target_device);
+  const auto& converted_layers = converted_state->layer_states();
+  ASSERT_EQ(converted_layers.size(), 2);
+  ASSERT_TRUE(converted_layers[0].has_value());
+  EXPECT_EQ(converted_layers[0]->block_tables().device(), target_device);
+  EXPECT_EQ(converted_layers[0]->context_lens().device(), target_device);
+  EXPECT_FALSE(converted_layers[1].has_value());
 }
 
 }  // namespace

@@ -34,6 +34,7 @@ class MtpTopkState {
 
   virtual int64_t num_rows() const = 0;
   virtual torch::Device device() const = 0;
+  virtual MtpTopkStatePtr to(const torch::Device& device) const = 0;
   virtual MtpTopkStatePtr index_select_rows(
       const torch::Tensor& index) const = 0;
 };

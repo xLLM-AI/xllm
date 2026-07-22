@@ -42,6 +42,11 @@ class NpuMtpTopkState final : public ::xllm::MtpTopkState {
 
   torch::Device device() const override { return topk_indices_.device(); }
 
+  MtpTopkStatePtr to(const torch::Device& device) const override {
+    return std::make_shared<NpuMtpTopkState>(topk_indices_.to(
+        topk_indices_.options().device(device), /*non_blocking=*/true));
+  }
+
   MtpTopkStatePtr index_select_rows(const torch::Tensor& index) const override {
     return std::make_shared<NpuMtpTopkState>(
         topk_indices_.index_select(/*dim=*/0, index));

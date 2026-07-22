@@ -65,6 +65,19 @@ class MluMtpTopkState final : public ::xllm::MtpTopkState {
 
   torch::Device device() const override { return device_; }
 
+  MtpTopkStatePtr to(const torch::Device& device) const override {
+    LayerStates moved_states;
+    moved_states.reserve(layer_states_.size());
+    for (const std::optional<layer::DsaTopkState>& state : layer_states_) {
+      if (!state.has_value()) {
+        moved_states.emplace_back(std::nullopt);
+        continue;
+      }
+      moved_states.emplace_back(state->to(device));
+    }
+    return std::make_shared<MluMtpTopkState>(std::move(moved_states));
+  }
+
   MtpTopkStatePtr index_select_rows(const torch::Tensor& index) const override {
     LayerStates selected_states;
     selected_states.reserve(layer_states_.size());
