@@ -26,6 +26,11 @@ limitations under the License.
 
 #include "shared_vmm_allocator.h"
 
+#if defined(USE_MUSA)
+#pragma push_macro("cuda")
+#undef cuda
+#endif
+
 namespace xllm {
 
 /**
@@ -303,5 +308,9 @@ class VMMTorchAllocator
 };
 
 }  // namespace xllm
+
+#if defined(USE_MUSA)
+#pragma pop_macro("cuda")
+#endif
 
 #endif  // USE_CUDA || USE_ILU
