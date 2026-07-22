@@ -523,8 +523,8 @@ DSAttentionImpl::DSAttentionImpl(const ModelArgs& args,
   // defaults; we override them here with the TP geometry when the flag is set.
   // This avoids the old cp_size(2) vs cp_group world_size(4) mismatch, where
   // the token split used cp_size but the gather ran over every TP member.
-  cp_enabled_ = FLAGS_enable_dsa_cp && tp_size > 1 &&
-                parallel_args.tp_group_ != nullptr;
+  cp_enabled_ =
+      FLAGS_enable_dsa_cp && tp_size > 1 && parallel_args.tp_group_ != nullptr;
   if (cp_enabled_) {
     cp_size_ = tp_size;
     cp_rank_ = tp_rank_;
@@ -1024,9 +1024,10 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   torch::Tensor attn_sink_for_attn = attn_sink_;
   if (attn_sink_loaded_ && cp_full_head_ && !cp_active) {
     const int64_t shard_start = tp_rank_ * n_local_heads_;
-    attn_sink_for_attn = attn_sink_.slice(/*dim=*/0,
-                                          /*start=*/shard_start,
-                                          /*end=*/shard_start + n_local_heads_)
+    attn_sink_for_attn = attn_sink_
+                             .slice(/*dim=*/0,
+                                    /*start=*/shard_start,
+                                    /*end=*/shard_start + n_local_heads_)
                              .contiguous();
   }
   auto [attn_output, output_lse] = xllm::kernel::npu::sparse_attn_sharedkv(
@@ -1049,8 +1050,8 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
       /*seqused_kv=*/
       cp_active ? as_optional(cp_local_kv)
                 : as_optional(attn_metadata.actual_seq_lengths_kv),
-      /*sinks=*/attn_sink_loaded_ ? as_optional(attn_sink_for_attn)
-                                   : std::nullopt,
+      /*sinks=*/
+        attn_sink_loaded_ ? as_optional(attn_sink_for_attn) : std::nullopt,
       /*metadata=*/sparse_metadata,
       /*softmax_scale=*/softmax_scale_,
       /*cmp_ratio=*/compress_ratio_i,
