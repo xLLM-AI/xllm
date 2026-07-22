@@ -1,6 +1,5 @@
 import os
 import platform
-import subprocess
 
 from typing import Optional
 
@@ -272,6 +271,8 @@ def set_ilu_envs() -> None:
 
 def set_musa_envs() -> None:
     """Configure MUSA through mcc_wrapper and the CUDA compatibility path."""
+    from sysconfig import get_paths
+
     set_common_envs()
     import torch_musa
 
@@ -296,18 +297,8 @@ def set_musa_envs() -> None:
         os.path.join(torch_musa_root, "lib"),
         os.path.join(get_torch_root_path() or "", "lib"),
     ]
-    tvm_ffi_lib_dir = os.getenv("TVM_FFI_LIB_DIR")
-    if not tvm_ffi_lib_dir:
-        try:
-            tvm_ffi_lib_dir = subprocess.check_output(
-                ["tvm-ffi-config", "--libdir"],
-                text=True,
-                stderr=subprocess.DEVNULL,
-            ).strip()
-        except (OSError, subprocess.CalledProcessError):
-            tvm_ffi_lib_dir = None
-    if tvm_ffi_lib_dir:
-        library_paths.append(tvm_ffi_lib_dir)
+    python_platlib = get_paths()["platlib"]
+    library_paths.append(os.path.join(python_platlib, "tvm_ffi", "lib"))
 
     mkl_root = os.getenv("MKLROOT")
     if mkl_root:

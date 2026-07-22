@@ -3,6 +3,24 @@ include(cc_shared_library)
 
 include_directories(.)
 
+# Restrict musamapping to xLLM targets that compile CUDA-compatible sources.
+if(USE_MUSA)
+  if(DEFINED ENV{MUSAMAPPING_PATH} AND NOT "$ENV{MUSAMAPPING_PATH}" STREQUAL "")
+    set(_XLLM_MUSAMAPPING_PATH "$ENV{MUSAMAPPING_PATH}")
+  elseif(DEFINED ENV{MUSA_HOME} AND NOT "$ENV{MUSA_HOME}" STREQUAL "")
+    set(_XLLM_MUSAMAPPING_PATH "$ENV{MUSA_HOME}/tools/musamapping")
+  else()
+    set(_XLLM_MUSAMAPPING_PATH "/usr/local/musa/tools/musamapping")
+  endif()
+  set(_XLLM_MUSIFY_COPTS
+    "-fplugin=${_XLLM_MUSAMAPPING_PATH}/libMusaMapping.so"
+    "-x" "musa"
+    "-I."
+  )
+else()
+  set(_XLLM_MUSIFY_COPTS "")
+endif()
+
 # Generate build-time version header from version.txt.
 file(READ "${CMAKE_SOURCE_DIR}/version.txt" XLLM_BUILD_VERSION_RAW)
 string(STRIP "${XLLM_BUILD_VERSION_RAW}" XLLM_BUILD_VERSION)
@@ -19,12 +37,21 @@ configure_file(
   @ONLY)
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
-# Set warning-as-error for xllm code (third-party headers are marked as SYSTEM)
+# mcc_wrapper emits warnings that are not actionable in translated sources.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  add_compile_options(
-    $<$<COMPILE_LANGUAGE:CXX>:-Werror>
-    $<$<COMPILE_LANGUAGE:C>:-Werror>
-  )
+  if(USE_MUSA)
+    add_compile_options(
+      $<$<COMPILE_LANGUAGE:CXX>:-Wno-defaulted-function-deleted>
+      $<$<COMPILE_LANGUAGE:CXX>:-Wno-sign-conversion>
+      $<$<COMPILE_LANGUAGE:CXX>:-Wno-inconsistent-missing-override>
+      $<$<COMPILE_LANGUAGE:CXX>:-Wno-conversion>
+    )
+  else()
+    add_compile_options(
+      $<$<COMPILE_LANGUAGE:CXX>:-Werror>
+      $<$<COMPILE_LANGUAGE:C>:-Werror>
+    )
+  endif()
 
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_compile_options(
@@ -107,8 +134,15 @@ if(USE_MSPTI)
   list(APPEND COMMON_LIBS mspti)
 endif()
 target_link_libraries(xllm PUBLIC ${COMMON_LIBS})
-if (USE_MUSA)
+if(USE_MUSA)
   target_link_libraries(xllm PUBLIC atomic musa_python torch_cpu c10)
+endif()
+
+if(USE_MUSA)
+  target_link_options(xllm PRIVATE
+    "LINKER:--whole-archive,$<TARGET_FILE:cuda_graph_executor>,--no-whole-archive"
+    "LINKER:--whole-archive,$<TARGET_FILE:runtime>,--no-whole-archive"
+  )
 endif()
 
 # install xllm

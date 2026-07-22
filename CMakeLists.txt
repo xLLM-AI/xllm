@@ -569,17 +569,23 @@ if(USE_MUSA)
   endif()
   list(REMOVE_DUPLICATES _MUSA_MKL_LIBRARY_DIRS)
   execute_process(
-    COMMAND tvm-ffi-config --includedir
-    OUTPUT_VARIABLE tvm_ffi_INCLUDE_DIR
+    COMMAND "${Python_EXECUTABLE}" -c
+            "from sysconfig import get_paths; print(get_paths()['platlib'])"
+    OUTPUT_VARIABLE _PYTHON_PLATLIB
     OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _PYTHON_PLATLIB_RESULT
   )
-  execute_process(
-    COMMAND tvm-ffi-config --libdir
-    OUTPUT_VARIABLE tvm_ffi_LIB_DIR
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-  )
-  string(REGEX MATCH "[^\n]*/include[^\n]*" tvm_ffi_INCLUDE_DIR "${tvm_ffi_INCLUDE_DIR}")
-  string(REGEX MATCH "[^\n]*/lib[^\n]*" tvm_ffi_LIB_DIR "${tvm_ffi_LIB_DIR}")
+  if(NOT _PYTHON_PLATLIB_RESULT EQUAL 0 OR "${_PYTHON_PLATLIB}" STREQUAL "")
+    message(FATAL_ERROR "Failed to obtain Python platlib from sysconfig.get_paths()")
+  endif()
+  set(_TVM_FFI_ROOT "${_PYTHON_PLATLIB}/tvm_ffi")
+  set(tvm_ffi_INCLUDE_DIR "${_TVM_FFI_ROOT}/include")
+  set(tvm_ffi_LIB_DIR "${_TVM_FFI_ROOT}/lib")
+  if(NOT IS_DIRECTORY "${tvm_ffi_INCLUDE_DIR}" OR
+     NOT IS_DIRECTORY "${tvm_ffi_LIB_DIR}")
+    message(FATAL_ERROR
+            "tvm_ffi is not installed under Python platlib: ${_PYTHON_PLATLIB}")
+  endif()
   
 
   include_directories(
