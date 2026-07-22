@@ -23,7 +23,6 @@ limitations under the License.
 
 // --- Server + XLLM_InitOptions gflags (defaults aligned with REC defaults) ---
 DEFINE_string(model_path, "", "Path to REC model weights");
-DEFINE_string(devices, "auto", "Devices string, e.g. npu:0 or auto");
 DEFINE_int32(port, 8000, "brpc TCP port");
 DEFINE_string(listen_addr,
               "",
@@ -74,7 +73,6 @@ DEFINE_string(kv_cache_transfer_mode, "PUSH", "");
 // Not named "log_dir": glog already registers FLAGS_log_dir.
 DEFINE_string(xllm_init_log_dir, "", "");
 DEFINE_string(draft_model, "", "");
-DEFINE_string(draft_devices, "", "");
 
 namespace xllm_capi_test {
 
@@ -192,8 +190,6 @@ void ApplyGflagsToXllmInitOptions(XLLM_InitOptions* o) {
       o->log_dir, FLAGS_xllm_init_log_dir, XLLM_META_STRING_FIELD_MAX_LEN);
   CopyToFixed(
       o->draft_model, FLAGS_draft_model, XLLM_META_STRING_FIELD_MAX_LEN);
-  CopyToFixed(
-      o->draft_devices, FLAGS_draft_devices, XLLM_META_STRING_FIELD_MAX_LEN);
 }
 
 void PbToXllmDims(const c_api_test::XLLM_Dims& pb, XLLM_Dims* out) {

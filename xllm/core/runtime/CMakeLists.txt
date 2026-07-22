@@ -88,6 +88,7 @@ cc_library(
     :model
     :parallel_state
     :kv_cache
+    :kv_cache_estimation
     :kv_cache_transfer
     :linear_state_restore
     :kv_transfer_completion

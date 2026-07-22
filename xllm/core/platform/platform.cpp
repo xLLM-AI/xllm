@@ -84,6 +84,20 @@ int32_t Platform::device_count() {
 #endif
 }
 
+int32_t Platform::current_device() {
+#if defined(USE_NPU)
+  return static_cast<int32_t>(c10_npu::current_device());
+#elif defined(USE_MLU)
+  return static_cast<int32_t>(torch_mlu::current_device());
+#elif defined(USE_CUDA) || defined(USE_ILU)
+  return static_cast<int32_t>(c10::cuda::current_device());
+#elif defined(USE_MUSA)
+  return static_cast<int32_t>(c10::musa::current_device());
+#elif defined(USE_DCU)
+  return static_cast<int32_t>(c10::hip::current_device());
+#endif
+}
+
 bool Platform::is_enable_pdl() { return enable_pdl_; }
 
 int32_t Platform::sm_count() { return sm_count_; }

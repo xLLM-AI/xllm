@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <filesystem>
 
+#include "core/util/dit_model_discovery.h"
 #include "core/util/json_reader.h"
 
 namespace xllm::util {
@@ -62,10 +63,21 @@ std::string get_model_type(const JsonReader& reader,
 std::string get_model_type(const std::filesystem::path& model_path,
                            std::optional<std::string> backend) {
   JsonReader reader;
-  // for llm, vlm and rec models, the config.json file is in the model path
-  const std::filesystem::path config_json_path = model_path / "config.json";
+  const std::filesystem::path model_index_path =
+      model_path / "model_index.json";
+  if (std::filesystem::exists(model_index_path)) {
+    if (reader.parse(model_index_path.string())) {
+      if (auto value = reader.value<std::string>("_class_name")) {
+        return value.value();
+      }
+    }
+  }
 
+  const std::filesystem::path config_json_path = model_path / "config.json";
   if (!std::filesystem::exists(config_json_path)) {
+    if (auto layout = discover_dit_model_layout(model_path)) {
+      return layout->pipeline_type;
+    }
     LOG(FATAL) << "Please check config.json or model_index.json file, one of "
                   "them should exist in the model path: "
                << model_path;

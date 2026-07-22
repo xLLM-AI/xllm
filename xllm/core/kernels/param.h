@@ -265,6 +265,8 @@ struct FusedLayerNormParams {
   std::string mode;
   // Epsilon value for numerical stability in normalization computation.
   double eps;
+  // Apply the Gemma/Qwen3.5 gamma offset inside NPU residual RMSNorm.
+  bool add_gamma_offset = false;
   // Whether to store output before normalization to residual_out.
   // Not supported when both bias and residual are not provided.
   bool store_output_before_norm = false;
@@ -275,6 +277,27 @@ struct FusedLayerNormParams {
   // When true, uses per-token quantization scheme; otherwise uses per-channel
   // if quant_scale provided.
   bool dynamic_quant = false;
+};
+
+// Fused adaptive LayerNorm parameters.
+// Computes: LayerNorm(x) * (1 + scale) + shift in a single fused kernel.
+struct AdaLayerNormParams {
+  // Input tensor [B, S, H]. Last dimension is hidden_size.
+  torch::Tensor input;
+  // Scale modulation. Shape [B, H] or [B, 1, H] (broadcast over sequence)
+  // or [B, S, H] (token-wise). The (1 + scale) is applied inside the kernel,
+  // so pass the raw scale.
+  torch::Tensor scale;
+  // Shift modulation. Same shape constraints as scale.
+  torch::Tensor shift;
+  // Optional affine weight (gamma) [H]. Only used when elementwise_affine.
+  std::optional<torch::Tensor> weight;
+  // Optional affine bias (beta) [H]. Only used when elementwise_affine.
+  std::optional<torch::Tensor> bias;
+  // Output tensor. Same shape as input. Written back by the kernel.
+  torch::Tensor output;
+  // Epsilon for numerical stability.
+  double eps = 1e-6;
 };
 
 struct RmsNormDynamicQuantParams {
@@ -1556,8 +1579,10 @@ struct FusedSigmoidGatingDeltaRuleUpdateParams {
   torch::Tensor initial_state_source;
   torch::Tensor initial_state_indices;
   torch::Tensor cu_seqlens;
+  std::optional<torch::Tensor> num_accepted_tokens = std::nullopt;
   std::optional<float> scale = std::nullopt;
   bool use_qk_l2norm_in_kernel = false;
+  bool is_kda = false;
   float softplus_beta = 1.0f;
   float softplus_threshold = 20.0f;
 };
@@ -1614,6 +1639,8 @@ struct GemmaRMSNormParams {
   torch::Tensor x;
   torch::Tensor gamma;
   double epsilon;
+  std::optional<torch::Tensor> residual;
+  std::optional<torch::Tensor> residual_out;
   torch::Tensor rstd_out;
   torch::Tensor norm_out;
 };

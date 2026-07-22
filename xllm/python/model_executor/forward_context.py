@@ -18,12 +18,15 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
+import torch
+
 from xllm.python.attention.backend import AttentionBackend
 
 
 @dataclass(frozen=True, slots=True)
 class ForwardContext:
     attention_backend: AttentionBackend
+    device: torch.device
 
 
 _current_context: ContextVar[ForwardContext | None] = ContextVar(

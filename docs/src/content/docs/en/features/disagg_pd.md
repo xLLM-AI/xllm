@@ -43,9 +43,8 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ./xllm_master_serving --etcd_addr="127.0.
 - Taking Qwen2-7B as an example  
     - Start Prefill Instance
         ```bash
-        /path/to/xllm --model=Qwen2-7B-Instruct \
+        ASCEND_RT_VISIBLE_DEVICES=0 /path/to/xllm --model=Qwen2-7B-Instruct \
                --port=8010 \
-               --devices="npu:0" \
                --master_node_addr="127.0.0.1:18888" \
                --enable_prefix_cache=false \
                --enable_chunked_prefill=false \
@@ -59,9 +58,8 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ./xllm_master_serving --etcd_addr="127.0.
         ```
     - Start Decode Instance 
         ```bash 
-        /path/to/xllm --model=Qwen2-7B-Instruct \
+        ASCEND_RT_VISIBLE_DEVICES=1 /path/to/xllm --model=Qwen2-7B-Instruct \
                --port=8020 \
-               --devices="npu:1" \
                --master_node_addr="127.0.0.1:18898" \
                --enable_prefix_cache=false \
                --enable_chunked_prefill=false \

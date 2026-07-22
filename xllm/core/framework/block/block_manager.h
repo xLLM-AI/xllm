@@ -67,6 +67,11 @@ class BlockManager {
     // leaves are wrapped in ConcurrentBlockManagerImpl when this (or
     // enable_disagg_pd) is set.
     PROPERTY(bool, enable_kvcache_store) = false;
+    // Whether host prefix-cache offload (host_blocks_factor > 1) is enabled.
+    // The D2H offload-completion callback frees device/host blocks from a folly
+    // executor thread, so leaves are wrapped in ConcurrentBlockManagerImpl when
+    // this is set to make those mutations thread-safe against the scheduler.
+    PROPERTY(bool, enable_host_offload) = false;
     // xtensor (VMM) KV leaf parameters. When enable_xtensor is set, the KV leaf
     // is an XTensorBlockManagerImpl instead of a flat BlockManagerImpl; these
     // carry the construction args the spec builder needs.

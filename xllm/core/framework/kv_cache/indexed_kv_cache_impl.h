@@ -24,11 +24,17 @@ class IndexedKVCacheImpl final : public KVCacheImpl {
   explicit IndexedKVCacheImpl(const IndexedKVCacheTensors& tensors);
   IndexedKVCacheImpl(const KVCacheShape& kv_cache_shape,
                      const KVCacheCreateOptions& create_options);
+  IndexedKVCacheImpl(const KVCacheShape& kv_cache_shape,
+                     const KVCacheCreateOptions& create_options,
+                     BlockType type,
+                     int64_t layer_count);
 
   torch::Tensor get_index_cache() const override;
   std::optional<torch::Tensor> get_k_cache_scale() const override;
   std::optional<torch::Tensor> get_v_cache_scale() const override;
   std::optional<torch::Tensor> get_indexer_cache_scale() const override;
+
+  BlockTypeTensorMap get_block_type_tensors(BlockType type) const override;
 
   bool empty() const override;
 

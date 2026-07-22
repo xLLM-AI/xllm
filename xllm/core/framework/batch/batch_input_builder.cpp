@@ -46,6 +46,15 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+// Minimum estimated total query tokens in a batch before process_sequences
+// takes the multithreaded path. Below this, the fixed thread-dispatch plus
+// O(total-tokens) serial-merge overhead outweighs the parallel savings, so the
+// single-threaded path is faster (measured: decode batches of thousands of
+// 1-token sequences and small prefill batches all regress under threading;
+// only large prefill workloads above this range benefit). Chosen conservatively
+// so decode always stays single-threaded while large prefill still fans out.
+constexpr size_t kMultithreadTokenThreshold = 65536;
+
 uint32_t get_sample_source_position(const SampleSlot& sample_slot) {
   if (sample_slot.token_position == 0) {
     return 0;
@@ -357,7 +366,26 @@ ForwardInput BatchInputBuilder::build_forward_input(
 }
 
 void BatchInputBuilder::process_sequences() {
-  if (thread_pool_ && num_sequences_ >= thread_pool_->size()) {
+  // Multithreading only helps when the parallelized per-sequence work is large
+  // enough to amortize the fixed thread-dispatch cost plus the serial merge of
+  // per-thread states (which is O(total tokens)). Decode batches carry ~1 query
+  // token per sequence, so even thousands of sequences stay far below that
+  // break-even and run faster single-threaded. Gate on the estimated total
+  // query-token workload, not just the sequence count. The estimate mirrors the
+  // q_seq_len computed in process_single_sequence and uses only O(1) accessors.
+  bool use_multithread = thread_pool_ && num_sequences_ >= thread_pool_->size();
+  if (use_multithread) {
+    size_t total_query_tokens = 0;
+    for (int32_t i = 0; i < num_sequences_; ++i) {
+      const Sequence* sequence = sequences_[i];
+      const size_t need_compute = sequence->num_need_compute_tokens();
+      total_query_tokens +=
+          std::min(need_compute, static_cast<size_t>(allowed_max_tokens_[i]));
+    }
+    use_multithread = total_query_tokens >= kMultithreadTokenThreshold;
+  }
+
+  if (use_multithread) {
     process_sequences_multithreaded();
   } else {
     for (int32_t i = 0; i < num_sequences_; ++i) {
@@ -381,6 +409,19 @@ void BatchInputBuilder::process_sequences_multithreaded() {
 
   for (auto& thread_state : thread_builder_states) {
     thread_state.batch_forward_type = state_.batch_forward_type;
+    // Reserve per-thread scratch so parallel processing does not repeatedly
+    // reallocate (which serializes on the allocator and erodes the speedup).
+    thread_state.block_tables_vec.reserve(sequences_per_thread);
+    thread_state.new_token_slot_ids.reserve(sequences_per_thread);
+    thread_state.kv_cache_tokens_nums.reserve(sequences_per_thread);
+#if defined(USE_NPU) || defined(USE_MUSA)
+    thread_state.seq_lens.reserve(sequences_per_thread);
+    thread_state.q_seq_lens.reserve(sequences_per_thread);
+#endif
+    thread_state.embedding_ids.reserve(sequences_per_thread);
+    thread_state.linear_state_ids.reserve(sequences_per_thread);
+    thread_state.request_ids.reserve(sequences_per_thread);
+    thread_state.extra_token_ids.reserve(sequences_per_thread);
   }
 
   // parallel processing function
@@ -419,6 +460,42 @@ void BatchInputBuilder::process_sequences_multithreaded() {
 
   // Wait for all tasks to complete
   counter.wait();
+
+  // Pre-reserve the destination vectors to their exact final sizes so the
+  // serial merge does a single allocation per field instead of growing
+  // geometrically across thread states. The merge is O(total work) and runs
+  // single-threaded, so realloc churn here directly caps the achievable
+  // multithreaded speedup.
+  size_t total_tokens = 0;
+  size_t total_seqs = 0;
+  size_t total_slots = 0;
+  size_t total_paged_indices = 0;
+  for (const auto& state : thread_builder_states) {
+    total_tokens += state.flatten_tokens_vec.size();
+    total_seqs += state.block_tables_vec.size();
+    total_slots += state.new_token_slot_ids.size();
+    total_paged_indices += state.paged_kv_indices.size();
+  }
+  state_.flatten_tokens_vec.reserve(total_tokens);
+  if (!use_mrope_) {
+    state_.flatten_positions_vec.reserve(total_tokens);
+  } else {
+    state_.mrope_positions_vec.reserve(total_seqs);
+  }
+  state_.block_tables_vec.reserve(total_seqs);
+  state_.new_token_slot_ids.reserve(total_slots);
+  state_.kv_cache_tokens_nums.reserve(total_seqs);
+#if defined(USE_NPU) || defined(USE_MUSA)
+  state_.seq_lens.reserve(total_seqs);
+  state_.q_seq_lens.reserve(total_seqs);
+#endif
+  state_.embedding_ids.reserve(total_seqs);
+  state_.linear_state_ids.reserve(total_seqs);
+  state_.request_ids.reserve(total_seqs);
+  state_.extra_token_ids.reserve(total_seqs);
+  state_.paged_kv_indices.reserve(total_paged_indices);
+  state_.paged_kv_indptr.reserve(total_seqs + 1);
+  state_.paged_kv_last_page_len.reserve(total_seqs);
 
   // Merge results from all threads
   for (const auto& state : thread_builder_states) {

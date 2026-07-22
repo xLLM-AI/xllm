@@ -143,6 +143,23 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> add_rms_norm(
     const torch::Tensor& gamma,
     double epsilon);
 
+/// @brief Fused adaptive LayerNorm: LayerNorm(x, weight, bias) * (1 + scale) +
+///        shift. Calls aclnnAdaLayerNorm under the hood.
+///        The (1 + scale) is applied inside the kernel, so pass the raw scale.
+/// @param input  Input tensor [B, L, C]
+/// @param scale  Raw scale modulation factor [B, C] (kernel applies +1)
+/// @param shift  Shift modulation factor [B, C]
+/// @param weight Optional affine weight [C]
+/// @param bias   Optional affine bias [C]
+/// @param eps    Epsilon for numerical stability
+/// @return Normalized and modulated output [B, L, C]
+torch::Tensor fused_adalayer_norm(const torch::Tensor& input,
+                                  const torch::Tensor& scale,
+                                  const torch::Tensor& shift,
+                                  std::optional<torch::Tensor> weight,
+                                  std::optional<torch::Tensor> bias,
+                                  double eps);
+
 void apply_rotary(torch::Tensor& q,
                   torch::Tensor& k,
                   const torch::Tensor& cos_sin_cache,

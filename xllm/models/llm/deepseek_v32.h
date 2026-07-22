@@ -46,7 +46,12 @@ inline std::optional<std::string> validate_deepseek_v32_cp_config(
 class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
  public:
   explicit DeepseekV32ModelImpl(const ModelContext& context)
-      : DeepseekV2ModelImpl(context),
+      : DeepseekV32ModelImpl(context, default_decoder_layer_factory()) {}
+
+ protected:
+  DeepseekV32ModelImpl(const ModelContext& context,
+                       const DecoderLayerFactory& decoder_layer_factory)
+      : DeepseekV2ModelImpl(context, decoder_layer_factory),
         device_(context.get_tensor_options().device()),
         cp_group_(context.get_parallel_args().cp_group_),
         parallel_world_size_(context.get_parallel_args().world_size()),
@@ -56,6 +61,7 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
     CHECK(!cp_config_error.has_value()) << cp_config_error.value();
   }
 
+ public:
   ModelOutput forward(const torch::Tensor& tokens,
                       const torch::Tensor& positions,
                       std::vector<KVCache>& kv_caches,

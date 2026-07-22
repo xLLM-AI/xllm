@@ -75,13 +75,12 @@ XLLM_CAPI_EXPORT void xllm_rec_init_options_default(
  * @brief Initialize the Generative Recommendation (REC) model and runtime
  * environment Loads generative recommendation model weights from the specified
  * path, configures target devices, initializes compute contexts, and prepares
- * the recommendation inference runtime
+ * the recommendation inference runtime. The target devices are auto-detected
+ * from the visible device mask (e.g. ASCEND_RT_VISIBLE_DEVICES /
+ * CUDA_VISIBLE_DEVICES).
  * @param handler Valid REC inference instance handle (must not be NULL)
  * @param model_path Null-terminated string of the REC model directory/file path
  *                   (supports .bin/.pth/.safetensors formats with ranking head)
- * @param devices Null-terminated string specifying target devices (format:
- *                "npu:0,1" (specific NPUs), "cuda:0" (single GPU), "auto"
- * (automatic selection))
  * @param init_options Advanced initialization options (NULL = use REC defaults)
  * @return true if initialization succeeds; false on failure (see failure causes
  * below)
@@ -89,7 +88,6 @@ XLLM_CAPI_EXPORT void xllm_rec_init_options_default(
  * - Invalid handler (NULL or already destroyed)
  * - Invalid model_path (non-existent, corrupted, or missing ranking head
  * weights)
- * - Invalid devices string (malformed format or unavailable devices)
  * - Model load error (mismatched REC model architecture or embedding table
  * corruption)
  * - Device initialization failure (out of memory, driver error, insufficient
@@ -99,7 +97,6 @@ XLLM_CAPI_EXPORT void xllm_rec_init_options_default(
  */
 XLLM_CAPI_EXPORT bool xllm_rec_initialize(XLLM_REC_Handler* handler,
                                           const char* model_path,
-                                          const char* devices,
                                           const XLLM_InitOptions* init_options);
 
 /**

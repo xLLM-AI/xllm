@@ -181,12 +181,12 @@ class Qwen3_5ModelImpl final
         layer::AttentionMetadataBuilder::build(params, /*enable_mla=*/false);
     // Init batch and token_block_offset for GDN attention
     if (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill) {
-      constexpr int32_t block_size = 8;
+      constexpr int32_t kBlockM = 64;
       constexpr int64_t pad_slot_id = -1;
       constexpr int64_t default_max_num_programs = 1024;
       constexpr int64_t chunk_size = 64;
       auto seqlens = attn_metadata.q_cu_seq_lens.diff();
-      auto nums = (seqlens + block_size - 1) / block_size;
+      auto nums = (seqlens + kBlockM - 1) / kBlockM;
       nums = nums.to(torch::kLong);
       int32_t tot = nums.sum().item<int32_t>();
       torch::Tensor range_batch = torch::arange(nums.size(0), nums.options());

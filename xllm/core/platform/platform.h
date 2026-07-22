@@ -63,6 +63,12 @@ class Platform final {
   // FLAGS_enable_dsa_cp and cp_size > 1 at the call sites; this hook only
   // reports platform capability. NPU-only for now.
   static constexpr bool supports_dsa_cp_model_partition() { return is_npu(); }
+  // MLU can reuse DSA top-k results across layers without keeping an indexer
+  // cache for every layer. Other backends retain the legacy all-layer cache
+  // allocation until they implement the same cache-elision contract.
+  static constexpr bool supports_dsa_indexer_cache_elision() {
+    return is_mlu();
+  }
 
   static constexpr bool is_ilu() {
 #if defined(USE_ILU)
@@ -89,6 +95,9 @@ class Platform final {
   }
 
   static int32_t device_count();
+  // Returns the logical index of the device bound to the current thread.
+  // Valid only after the device has been set (e.g. via Device::set_device).
+  static int32_t current_device();
   static int32_t sm_count();
   static bool is_enable_pdl();
   static bool is_support_sm90a();

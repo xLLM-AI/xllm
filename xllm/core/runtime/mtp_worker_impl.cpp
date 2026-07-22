@@ -522,7 +522,8 @@ runtime::Options mtp_draft_options(const runtime::Options& options) {
   draft_options.enable_schedule_overlap(false)
       .is_draft_engine(true)
       .num_decoding_tokens(1)
-      .num_speculative_tokens(0);
+      .num_speculative_tokens(0)
+      .enable_graph_aux_hidden_states(true);
   return draft_options;
 }
 
@@ -706,16 +707,14 @@ std::tuple<int64_t, int64_t> MTPWorkerImpl::estimate_kv_cache_capacity() {
 
 int64_t MTPWorkerImpl::get_embedding_placeholder_size() {
   // DeepSeek-V4 MTP stashes the pre-hc_head 3D hidden flattened to
-  // [num_tokens, hc_mult*hidden] (see mlu/deepseekV4ModelImpl::forward), so the
-  // cache placeholder must cover hc_mult*hidden per row.
-#if defined(USE_MLU)
+  // [num_tokens, hc_mult*hidden], so the cache placeholder must cover
+  // hc_mult*hidden per row.
   if (impl_ != nullptr) {
     const ModelArgs& args = impl_->context_.get_model_args();
     if (util::is_deepseek_v4_model_type(args.model_type())) {
       return args.hc_mult() * args.hidden_size();
     }
   }
-#endif
   return static_cast<int64_t>(embedding_size_);
 }
 
@@ -1192,8 +1191,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
       // process_draft_sample_output() compresses the still-full [batch, vocab]
       // probs into the cache: gathering the cached prob with a unified token
       // yields a unified prob, so we only broadcast the [batch] token tensor.
-      if (get_optimization_config().enable_spec_token_broadcast &&
-          enable_schedule_overlap()) {
+      if (get_optimization_config().enable_spec_token_broadcast) {
         SampleOutput& draft_sample = draft_outputs.back().sample_output;
         broadcast_spec_tokens(draft_sample.next_tokens,
                               spec_broadcast_group(parallel_args_));
@@ -1292,8 +1290,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   // Catch-all for cross-rank RNG divergence: unify the accepted next_tokens to
   // the consensus group's rank 0 so all_draft_accepted and the next
   // draft-extend row layout agree across ranks.
-  if (get_optimization_config().enable_spec_token_broadcast &&
-      enable_schedule_overlap()) {
+  if (get_optimization_config().enable_spec_token_broadcast) {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     broadcast_spec_tokens(val_output.next_tokens,
                           spec_broadcast_group(parallel_args_));
@@ -1692,11 +1689,16 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
     if (use_chunked_prefill) {
       int32_t prev_token_id = state.prev_token_id;
       torch::Tensor prev_embedding = state.prev_embedding;
-      if (prev_token_id < 0) {
+      const bool prev_is_placeholder = prev_token_id < 0;
+      if (prev_is_placeholder) {
         prev_token_id = current_token_id >= 0 ? current_token_id : 0;
         prev_embedding = torch::Tensor();
       }
       add_row(prev_token_id, /*position_offset=*/-1, prev_embedding);
+      if (prev_is_placeholder) {
+        // Redirect to padding block 0 to avoid overwriting correct KV cache.
+        buf.out_new_cache_slots.back() = 0;
+      }
       add_row(state.token_id, /*position_offset=*/0, state.embedding);
       specBuilder::append_seq_len_by_layout(buf.out_q_seq_lens, 2);
       const int32_t kv_len = specBuilder::calc_kv_len(
@@ -1713,11 +1715,16 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
       int32_t prev_token_id = state.prev_token_id;
       int32_t prev_position_offset = -1;
       torch::Tensor prev_embedding = state.prev_embedding;
-      if (prev_token_id < 0) {
+      const bool prev_is_placeholder = prev_token_id < 0;
+      if (prev_is_placeholder) {
         prev_token_id = state.token_id;
         prev_embedding = torch::Tensor();
       }
       add_row(prev_token_id, prev_position_offset, prev_embedding);
+      if (prev_is_placeholder) {
+        // Redirect to padding block 0 to avoid overwriting correct KV cache.
+        buf.out_new_cache_slots.back() = 0;
+      }
     }
 
     selected_row_idx.emplace_back(

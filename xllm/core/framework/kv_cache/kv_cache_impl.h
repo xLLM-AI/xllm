@@ -21,6 +21,7 @@ limitations under the License.
 #include <optional>
 #include <vector>
 
+#include "framework/block/block.h"
 #include "framework/kv_cache/kv_cache_utils.h"
 namespace xllm {
 
@@ -32,6 +33,10 @@ class KVCacheImpl {
   explicit KVCacheImpl(const KVCacheTensors& tensors);
   KVCacheImpl(const KVCacheShape& kv_cache_shape,
               const KVCacheCreateOptions& create_options);
+  KVCacheImpl(const KVCacheShape& kv_cache_shape,
+              const KVCacheCreateOptions& create_options,
+              BlockType type,
+              int64_t layer_count);
 
   virtual ~KVCacheImpl() = default;
 
@@ -52,6 +57,12 @@ class KVCacheImpl {
   virtual torch::Tensor get_compress_index_state() const;
   virtual std::vector<KVCacheTensor> get_cache_tensors() const;
 
+  // Host prefix cache extraction by block type. Unlike the device-side
+  // build_block_type_tensor_map in the transfer layer, this carries no
+  // device-pool discriminator guards: a per-type host cache holds exactly the
+  // tensors for that block type.
+  virtual BlockTypeTensorMap get_block_type_tensors(BlockType type) const;
+
   virtual bool empty() const;
 
   virtual std::vector<std::vector<int64_t>> get_shapes() const;
@@ -60,6 +71,12 @@ class KVCacheImpl {
                            torch::Tensor& dst_tensor);
 
  protected:
+  void create_host_tensor(const std::vector<int64_t>& dims,
+                          torch::ScalarType dtype,
+                          torch::Tensor* tensor,
+                          std::vector<int64_t>* shape);
+
+  std::vector<HostPageAlignedRegion> host_page_aligned_regions_;
   torch::Tensor key_cache_;
   torch::Tensor value_cache_;
   std::vector<int64_t> key_cache_shape_;

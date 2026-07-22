@@ -280,10 +280,14 @@ struct DiTForwardInput {
 // dit related forward output params
 struct DiTForwardOutput {
   void save_with_prefix(std::string prefix) const {
-    torch::save(tensors[0], prefix + "dit_images_cpp.pt");
+    if (!tensors.empty()) {
+      torch::save(tensors[0], prefix + "dit_images_cpp.pt");
+    }
   }
-  // generated tensor
+  // generated tensor (for image/audio models)
   std::vector<torch::Tensor> tensors;
+  // generated text (for text diffusion models like Cola-DLM)
+  std::vector<std::string> text_output;
 };
 
 }  // namespace xllm

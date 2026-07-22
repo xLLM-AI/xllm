@@ -809,8 +809,7 @@ REGISTER_MODEL_ARGS(qwen2_5_vl, [&] {
     return args->mm_hidden_size() / args->mm_num_attention_heads();
   });
 
-  LOAD_ARG_OR(
-      rope_scaling_rope_type, "vision_config.rope_scaling.type", "mrope");
+  LOAD_ARG_OR(rope_scaling_rope_type, "rope_scaling.type", "mrope");
   LOAD_ARG(rope_scaling_mrope_section, "rope_scaling.mrope_section");
   LOAD_ARG_OR(vocab_size, "vocab_size", 152064);
 });

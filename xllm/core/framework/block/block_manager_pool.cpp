@@ -23,7 +23,6 @@ limitations under the License.
 #include "composite_block_manager.h"
 #include "concurrent_block_manager_impl.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "core/framework/config/service_config.h"
 #include "framework/model/model_input_params.h"
 #include "framework/xtensor/page_allocator.h"
 #include "framework/xtensor/phy_page_pool.h"
@@ -37,11 +36,7 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
   CHECK(dp_size > 0) << "dp_size must be greater than 0";
   block_managers_.reserve(dp_size);
   const uint32_t default_max_single_block_sequences =
-      options_.max_concurrent_requests() > 0
-          ? options_.max_concurrent_requests()
-          : static_cast<uint32_t>(std::max(
-                ::xllm::ServiceConfig::get_instance().max_concurrent_requests(),
-                0));
+      options_.max_seqs_per_batch();
 
   BlockManager::Options block_options;
   block_options.num_blocks(options_.num_blocks())
@@ -49,6 +44,7 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
       .enable_prefix_cache(options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_kvcache_store(options_.enable_kvcache_store())
+      .enable_host_offload(options_.enable_host_offload())
       .sliding_window_size(options_.sliding_window_size())
       .swa_blocks_per_seq(options_.swa_blocks_per_seq())
       .max_tokens_per_batch(options_.max_tokens_per_batch())
@@ -78,13 +74,15 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
     auto leaves = build_composite_leaves(block_options, /*dp_rank=*/i);
     // SINGLE leaf needs the same concurrency wrapper as the other leaves when
     // sequence-level entry points run off the scheduler thread (disagg PD /
-    // kvcache store prefill threadpools call try_allocate concurrently).
+    // kvcache store prefill threadpools call try_allocate concurrently, and the
+    // host-offload D2H callback frees blocks off-thread).
     std::unique_ptr<BlockManager> single_leaf =
         std::make_unique<SingleBlockManager>(
             /*num_blocks=*/num_single_blocks,
             /*resource_name=*/"single block",
             /*exhaustion_message=*/"No more single-block ids available");
-    if (options_.enable_disagg_pd() || options_.enable_kvcache_store()) {
+    if (options_.enable_disagg_pd() || options_.enable_kvcache_store() ||
+        options_.enable_host_offload()) {
       single_leaf =
           std::make_unique<ConcurrentBlockManagerImpl>(std::move(single_leaf));
     }

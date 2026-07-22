@@ -9,8 +9,10 @@ cc_test(
   NAME
     qwen3_5_layer_test
   SRCS
+    qwen3_5_gated_delta_net_ops_test.cpp
     qwen3_5_gated_delta_net_test.cpp
     qwen3_5_attention_test.cpp
+    qwen3_next_rms_norm_test.cpp
     tests_utils.cpp
   DEPS
     :config
@@ -212,6 +214,20 @@ cc_test(
     :mlu_layers
     :parallel_state
     :state_dict
+    GTest::gtest_main
+    torch
+    glog::glog
+)
+
+# Cross-layer DSA top-k relay state is pure CPU logic, but the protocol belongs
+# to the MLU decoder/attention boundary.
+cc_test(
+  NAME
+    dsa_topk_relay_test
+  SRCS
+    dsa_topk_relay_test.cpp
+  DEPS
+    :mlu_layers
     GTest::gtest_main
     torch
     glog::glog

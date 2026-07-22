@@ -71,6 +71,7 @@ limitations under the License.
 #include "llm/deepseek_v3.h"                      // IWYU pragma: keep
 #include "llm/deepseek_v32.h"                     // IWYU pragma: keep
 #include "llm/glm5.h"                             // IWYU pragma: keep
+#include "llm/glm52.h"                            // IWYU pragma: keep
 #include "llm/glm5_mtp.h"                         // IWYU pragma: keep
 #include "llm/joyai_llm_flash.h"                  // IWYU pragma: keep
 #include "llm/joyai_llm_flash_mtp.h"              // IWYU pragma: keep
@@ -92,6 +93,7 @@ limitations under the License.
 #include "llm/qwen3.h"      // IWYU pragma: keep
 #include "llm/qwen3_moe.h"  // IWYU pragma: keep
 #elif defined(USE_CUDA)
+#include "dit/pipelines/pipeline_cola_dlm.h"            // IWYU pragma: keep
 #include "dit/pipelines/pipeline_longcat_audiodit.h"    // IWYU pragma: keep
 #include "dit/pipelines/pipeline_longcat_image.h"       // IWYU pragma: keep
 #include "dit/pipelines/pipeline_longcat_image_edit.h"  // IWYU pragma: keep

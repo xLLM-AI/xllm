@@ -51,6 +51,7 @@ limitations under the License.
 #include "core/framework/config/profile_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/kv_cache/kv_cache_estimation.h"
 #include "core/platform/platform.h"
 #include "core/platform/sleepable_allocator.h"
 #if defined(USE_NPU)
@@ -298,9 +299,10 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
 
 WorkerImpl::~WorkerImpl() = default;
 
-bool WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
-                                           bool use_huge_page_allocator,
-                                           bool enable_raw_device_allocator) {
+bool WorkerImpl::allocate_kv_cache_storage(
+    const KVCacheShape& kv_cache_shape,
+    bool use_huge_page_allocator,
+    std::shared_ptr<KVCacheTensorAllocator> tensor_allocator) {
   CHECK(model_ != nullptr) << "Model is not initialized.";
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
 
@@ -331,6 +333,8 @@ bool WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
       << "simultaneously.";
 
   const int64_t num_layers = get_num_layers();
+  std::vector<bool> indexer_cache_enabled_layers =
+      resolve_indexer_cache_enabled_layers(args, num_layers);
 
   // Check if KV cache quantization is enabled
   // "auto" (default): cache dtype aligns with model dtype (no quantization)
@@ -379,9 +383,10 @@ bool WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
       .enable_sleep_mode(options_.enable_sleep_mode())
       .enable_linear_attention(enable_linear_attention)
       .enable_lighting_indexer(enable_lighting_indexer)
+      .indexer_cache_enabled_layers(std::move(indexer_cache_enabled_layers))
       .enable_kv_cache_quant(enable_kv_cache_quant)
       .enable_indexer_cache_quant(enable_indexer_cache_quant)
-      .enable_raw_device_allocator(enable_raw_device_allocator)
+      .tensor_allocator(std::move(tensor_allocator))
       .block_size(options_.block_size())
       .head_dim(args.head_dim())
       .index_head_dim(std::max(args.index_head_dim(), 1))
@@ -395,6 +400,7 @@ bool WorkerImpl::allocate_kv_cache_storage(const KVCacheShape& kv_cache_shape,
   // KV cache over a VMM-backed SleepableAllocator region (see kv_cache.cpp), so
   // sleep()/wake_up() can release / re-acquire it.
   allocate_kv_caches(kv_caches_, kv_cache_shape, create_options);
+  init_hierarchy_kv_cache_transfer(kv_cache_shape, create_options);
 
 #if defined(USE_CUDA) || defined(USE_DCU)
   refresh_cuda_block_copy_runtime_state();
@@ -408,8 +414,6 @@ bool WorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
     return false;
   }
 
-  // hierarchy temporarily disabled during the block-manager refactor
-  // init_hierarchy_kv_cache_transfer();
   status_ = Status::READY;
   return true;
 }
@@ -420,9 +424,9 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
 
   // create a KVCache for each layer
-  const int64_t num_layers = context_.get_model_args().n_layers();
-  const bool enable_lighting_indexer =
-      context_.get_model_args().index_n_heads() > 0;
+  const ModelArgs& model_args = context_.get_model_args();
+  const int64_t num_layers = model_args.n_layers();
+  const bool enable_lighting_indexer = model_args.index_n_heads() > 0;
   kv_cache_transfer_ = KVCacheTransferFactory::create(
       ::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type(),
       options_.transfer_listen_port(),
@@ -432,15 +436,15 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
       dtype_,
       kv_caches_,
       num_layers,
-      [this](const KVCacheShape& shape, bool use_huge_page_allocator) {
-        return this->allocate_kv_cache_storage(shape, use_huge_page_allocator);
+      [this](const KVCacheShape& shape,
+             bool use_huge_page_allocator,
+             std::shared_ptr<KVCacheTensorAllocator> tensor_allocator) {
+        return this->allocate_kv_cache_storage(
+            shape, use_huge_page_allocator, std::move(tensor_allocator));
       },
       enable_lighting_indexer,
-      context_.get_model_args().model_type(),
+      model_args.model_type(),
       options_.model_id());
-
-  // hierarchy temporarily disabled during the block-manager refactor
-  // init_hierarchy_kv_cache_transfer();
 
   status_ = Status::READY;
   return true;
@@ -455,25 +459,23 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
 
   kv_cache_transfer_ = kv_cache_transfer;
 
+  std::shared_ptr<KVCacheTensorAllocator> tensor_allocator;
+#if defined(USE_MLU)
+  tensor_allocator = mlu_mooncake_tensor_allocator();
+#endif
   if (!allocate_kv_cache_storage(kv_cache_shape,
                                  /*use_huge_page_allocator=*/true,
-                                 /*enable_raw_device_allocator=*/true)) {
+                                 std::move(tensor_allocator))) {
     return false;
   }
 
-#if defined(USE_NPU)
   if (is_spec_draft_) {
     kv_cache_transfer_->register_kv_cache_spec(
         kv_caches_, kv_cache_shape, dtype_);
   } else {
     kv_cache_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
   }
-#else
-  kv_cache_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
-#endif
 
-  // hierarchy temporarily disabled during the block-manager refactor
-  // init_hierarchy_kv_cache_transfer();
   status_ = Status::READY;
   return true;
 }
@@ -1059,7 +1061,11 @@ void WorkerImpl::apply_kv_block_swaps(const ModelInputParams& input_params) {
       ::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel()) {
     return;
   }
-#elif defined(USE_CUDA) || defined(USE_DCU)
+#elif defined(USE_CUDA) || defined(USE_DCU) || defined(USE_MLU)
+  // MLU has no fused block-copy kernel (enable_block_copy_kernel defaults to
+  // false), so it always falls through to the torch swap path below. Without
+  // this, beam-search copy-on-write blocks are allocated but never populated
+  // with the source KV, leaving each diverging beam reading stale pool memory.
   if (input_params.block_copy.swap_blocks.size() == 0) {
     return;
   }
@@ -1067,7 +1073,8 @@ void WorkerImpl::apply_kv_block_swaps(const ModelInputParams& input_params) {
   return;
 #endif
 
-#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_DCU)
+#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_DCU) || \
+    defined(USE_MLU)
   std::vector<int64_t> src_indices, dst_indices;
   src_indices.reserve(input_params.block_copy.swap_blocks.size());
   dst_indices.reserve(input_params.block_copy.swap_blocks.size());
@@ -1177,10 +1184,9 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
   threadpool_.schedule([this,
                         input = std::move(input_on_device),
                         promise = std::move(promise)]() mutable {
-    // hierarchy temporarily disabled during the block-manager refactor
-    // if (hierarchy_kv_cache_transfer_ != nullptr) {
-    //   hierarchy_kv_cache_transfer_->set_layer_synchronizer(input.input_params);
-    // }
+    if (hierarchy_kv_cache_transfer_ != nullptr) {
+      hierarchy_kv_cache_transfer_->set_layer_synchronizer(input.input_params);
+    }
 
     // run the model on the given input in working thread
     if (!enable_schedule_overlap()) {
@@ -1527,6 +1533,12 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   }
 
 #if defined(USE_NPU)
+  if (options_.enable_speculative_decode() &&
+      util::is_deepseek_v4_model_type(args.model_type()) &&
+      (options_.speculative_algorithm() == "MTP" ||
+       options_.speculative_algorithm() == "mtp")) {
+    args.num_speculative_tokens(options_.num_speculative_tokens());
+  }
   if (options_.speculative_algorithm() == "DFlash") {
     // Both engines capture the same target layers, whose ids live in the draft
     // config: the draft engine reads its own weights path, the target engine
@@ -1770,20 +1782,22 @@ folly::SemiFuture<bool> WorkerImpl::pull_kv_blocks_async(
 }
 
 uint32_t WorkerImpl::transfer_kv_blocks(
-    const uint64_t /*batch_id*/,
-    const std::vector<BlockTransferInfo>& /*block_transfer_info*/) {
-  // hierarchy temporarily disabled during the block-manager refactor.
-  LOG(FATAL) << "hierarchy kv cache transfer is disabled during the "
-                "block-manager refactor.";
+    const uint64_t batch_id,
+    const std::vector<BlockTransferInfo>& block_transfer_info) {
+  if (hierarchy_kv_cache_transfer_ != nullptr) {
+    return hierarchy_kv_cache_transfer_->transfer_kv_blocks(
+        batch_id, block_transfer_info);
+  }
   return 0;
 }
 
 uint32_t WorkerImpl::transfer_kv_blocks(
-    const uint64_t /*batch_id*/,
-    Slice<BlockTransferInfo>& /*block_transfer_info*/) {
-  // hierarchy temporarily disabled during the block-manager refactor.
-  LOG(FATAL) << "hierarchy kv cache transfer is disabled during the "
-                "block-manager refactor.";
+    const uint64_t batch_id,
+    Slice<BlockTransferInfo>& block_transfer_info) {
+  if (hierarchy_kv_cache_transfer_ != nullptr) {
+    return hierarchy_kv_cache_transfer_->transfer_kv_blocks(
+        batch_id, block_transfer_info);
+  }
   return 0;
 }
 
@@ -1814,6 +1828,32 @@ int64_t WorkerImpl::get_active_activation_memory() {
 //         transfer_options, device_, &kv_caches_);
 //   }
 // }
+void WorkerImpl::init_hierarchy_kv_cache_transfer(
+    const KVCacheShape& kv_cache_shape,
+    const KVCacheCreateOptions& kv_cache_create_options) {
+  if (options_.host_blocks_factor() > 1.0) {
+    CHECK(!kv_caches_.empty()) << "kv_caches is not initialized.";
+    CHECK(hierarchy_kv_cache_transfer_ == nullptr)
+        << "Hierarchy KV cache transfer is already initialized.";
+    HierarchyKVCacheTransfer::Options transfer_options;
+    transfer_options
+        .tp_rank(options_.dp_size() > 1
+                     ? options_.node_rank() % options_.dp_size()
+                     : options_.node_rank())
+        .tp_size(options_.world_size() / options_.dp_size())
+        .layers(context_.get_model_args().n_layers())
+        .host_blocks_factor(options_.host_blocks_factor())
+        .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())
+        .enable_mla(options_.enable_mla())
+        .enable_kvcache_store(false);
+    hierarchy_kv_cache_transfer_ =
+        std::make_unique<HierarchyKVCacheTransfer>(transfer_options,
+                                                   device_,
+                                                   &kv_caches_,
+                                                   kv_cache_shape,
+                                                   kv_cache_create_options);
+  }
+}
 void WorkerImpl::prepare_mla_prefixcache_inputs(
     ModelInputParams& input_params) {
   const bool has_prefixcache_metadata =

@@ -107,7 +107,8 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
       const layer::AttentionMetadata& attn_metadata,
       KVCache& kv_cache,
       const ModelInputParams& input_params,
-      const std::optional<torch::Tensor>& input_ids = std::nullopt) {
+      const std::optional<torch::Tensor>& input_ids = std::nullopt,
+      torch::Tensor* aux_hidden_states = nullptr) {
     // Layer norm on token inputs
     auto enorm_out = std::get<0>(enorm_(embed));
 
@@ -115,14 +116,11 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
     // for dummy data parallel run, we set a empty embedding
     if (attn_metadata.is_dummy) {
       int64_t embed_cols = model_args_.hidden_size();
-#if defined(USE_MLU)
-      // MLU's DeepseekV4 target stashes the pre-hc_head 3D hidden flattened
-      // to [num_tokens, hc_mult*hidden] as aux_hidden_states, so the dummy
-      // bootstrap must match that width.
+      // DeepSeek-V4 targets stash the pre-hc_head 3D hidden flattened to
+      // [num_tokens, hc_mult*hidden] as aux_hidden_states.
       if (is_deepseek_v4_mtp_model(model_args_)) {
         embed_cols = model_args_.hc_mult() * model_args_.hidden_size();
       }
-#endif
       embedding_data =
           torch::zeros({embed.size(0), embed_cols}, embed.options());
     }
@@ -133,7 +131,13 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
     if (is_deepseek_v4_mtp_model(model_args_)) {
       const int64_t hidden = model_args_.hidden_size();
       const int64_t hc_mult = model_args_.hc_mult();
-      if (previous_hidden_states.size(-1) == hc_mult * hidden) {
+      const int64_t aux_hidden = hc_mult * hidden;
+      const int64_t input_hidden = previous_hidden_states.size(-1);
+      CHECK(input_hidden == hidden || input_hidden == aux_hidden)
+          << "DeepSeek-V4 MTP input hidden size must be hidden_size (" << hidden
+          << ") or hc_mult * hidden_size (" << aux_hidden << "), but got "
+          << input_hidden;
+      if (input_hidden == aux_hidden) {
         // Target feeds the draft the pre-hc_head 3D hidden flattened to
         // [N, hc_mult*hidden].
         torch::Tensor prev = previous_hidden_states.reshape({-1, hidden});
@@ -185,6 +189,9 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
     }
 
     if (is_deepseek_v4_mtp_model(model_args_)) {
+      if (aux_hidden_states != nullptr) {
+        *aux_hidden_states = hidden_states;
+      }
       auto x_float = hidden_states.to(torch::kFloat32);
       auto x_flatten = x_float.flatten(-2, -1);
       auto rsqrt = torch::rsqrt(x_flatten.pow(2).mean(-1, true) +

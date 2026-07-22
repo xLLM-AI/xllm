@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "core/framework/config/dit_config.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/util/env_var.h"
 #include "npu_rank_table_env.h"
 #include "platform/device.h"
 
@@ -78,6 +79,27 @@ std::string resolve_tcp_store_host(const std::string& host, int32_t rank_size) {
   // node for their private group and can deadlock startup.
   return rank_size == 1 ? "127.0.0.1" : host;
 }
+
+constexpr uint32_t kHcclAivExpansionMode = 3;
+
+void configure_hccl_aiv_expansion(
+    const std::string& group_name,
+    int32_t rank_size,
+    const c10::intrusive_ptr<c10d_npu::ProcessGroupHCCL::Options>& options) {
+  if (group_name != "tp_group" || rank_size <= 1) {
+    return;
+  }
+  const auto aiv_mode = xllm::util::get_optional_string_env("XLLM_HCCL_TP_AIV");
+  if (!aiv_mode ||
+      (*aiv_mode != "1" && *aiv_mode != "true" && *aiv_mode != "aiv")) {
+    return;
+  }
+
+  // CANN restricts AIV expansion across multiple communicators, so scope it
+  // to the multi-rank tensor-parallel communicator used by this optimization.
+  options->hccl_config["hccl_op_expansion_mode"] = kHcclAivExpansionMode;
+  LOG(INFO) << "Enabling HCCL AIV expansion for " << group_name << ".";
+}
 }  // namespace
 
 namespace xllm {
@@ -115,6 +137,7 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
   const int32_t store_port = rank_size == 1 ? 0 : port;
   auto store = create_tcp_store(
       resolve_tcp_store_host(host, rank_size), store_port, rank);
+  configure_hccl_aiv_expansion(group_name, rank_size, hccl_pg_options);
   pg_ = std::make_unique<c10d_npu::ProcessGroupHCCL>(
       store, rank, rank_size, hccl_pg_options);
 }
@@ -163,6 +186,7 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
   const int32_t store_port = rank_size == 1 ? 0 : port;
   auto store = create_tcp_store(
       resolve_tcp_store_host(host, rank_size), store_port, local_rank);
+  configure_hccl_aiv_expansion(group_name, rank_size, hccl_pg_options);
   pg_ = std::make_unique<c10d_npu::ProcessGroupHCCL>(
       store, local_rank, rank_size, hccl_pg_options);
 }

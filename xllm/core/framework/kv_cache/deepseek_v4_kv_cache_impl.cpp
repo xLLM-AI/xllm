@@ -162,6 +162,79 @@ DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
       compressed_block_type_(tensors.compressed_block_type) {
 }
 
+DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
+    const KVCacheShape& kv_cache_shape,
+    const KVCacheCreateOptions& create_options,
+    BlockType type,
+    int64_t layer_count) {
+  CHECK(kv_cache_shape.has_key_cache_shape())
+      << "DeepSeek V4 host kv cache shape must contain pool counts.";
+  const std::vector<int64_t>& pool_counts = kv_cache_shape.key_cache_shape();
+  CHECK_GE(pool_counts.size(), 3) << "DeepSeek V4 host kv cache shape must be "
+                                  << "[swa_count, c4_count, c128_count].";
+  CHECK_GT(create_options.block_size(), 0)
+      << "DeepSeek V4 block_size must be positive.";
+  CHECK_GT(create_options.head_dim(), 0)
+      << "DeepSeek V4 head_dim must be positive.";
+  CHECK_GT(layer_count, 0)
+      << "DeepSeek V4 host prefix cache layer count must be positive.";
+
+  const double factor = create_options.host_blocks_factor();
+  const int64_t host_swa_count = scale_host_block_count(pool_counts[0], factor);
+  const int64_t host_c4_count = scale_host_block_count(pool_counts[1], factor);
+  const int64_t host_c128_count =
+      scale_host_block_count(pool_counts[2], factor);
+  const int64_t block_size = create_options.block_size();
+  const int64_t head_dim = create_options.head_dim();
+  const int64_t index_head_dim =
+      std::max<int64_t>(create_options.index_head_dim(), 1);
+  const int64_t n_heads = 1;
+  const int64_t index_n_heads = 1;
+  const DeepSeekV4CachePolicy cache_policy =
+      get_dsv4_cache_policy(create_options.dtype());
+
+  // Host tensor shape: device per-block dims with a layer dimension inserted at
+  // index 1, i.e. [host_block_count, layer_count, ...per_block_dims].
+  auto host_group_shape = [&](int64_t block_count, int64_t heads, int64_t dim) {
+    std::vector<int64_t> shape =
+        dsv4_block_shape(block_count, block_size, heads, dim);
+    shape.insert(shape.begin() + 1, layer_count);
+    return shape;
+  };
+
+  switch (type) {
+    case BlockType::SWA:
+      host_page_aligned_regions_.reserve(1);
+      create_host_tensor(host_group_shape(host_swa_count, n_heads, head_dim),
+                         create_options.dtype(),
+                         &swa_cache_,
+                         nullptr);
+      break;
+    case BlockType::C4:
+      host_page_aligned_regions_.reserve(2);
+      create_host_tensor(host_group_shape(host_c4_count, n_heads, head_dim),
+                         create_options.dtype(),
+                         &key_cache_,
+                         nullptr);
+      create_host_tensor(
+          host_group_shape(host_c4_count, index_n_heads, index_head_dim),
+          cache_policy.index_dtype,
+          &index_cache_,
+          nullptr);
+      break;
+    case BlockType::C128:
+      host_page_aligned_regions_.reserve(1);
+      create_host_tensor(host_group_shape(host_c128_count, n_heads, head_dim),
+                         create_options.dtype(),
+                         &key_cache_,
+                         nullptr);
+      break;
+    default:
+      LOG(FATAL) << "Unsupported DeepSeek V4 host block type: "
+                 << static_cast<int32_t>(type);
+  }
+}
+
 torch::Tensor DeepSeekV4KVCacheImpl::get_k_cache() const { return key_cache_; }
 
 torch::Tensor DeepSeekV4KVCacheImpl::get_index_cache() const {
@@ -231,6 +304,34 @@ std::vector<KVCacheTensor> DeepSeekV4KVCacheImpl::get_cache_tensors() const {
              index_state_.score(),
              BlockType::SWA);
   return tensors;
+}
+
+BlockTypeTensorMap DeepSeekV4KVCacheImpl::get_block_type_tensors(
+    BlockType type) const {
+  BlockTypeTensorMap tensor_map;
+  switch (type) {
+    case BlockType::SWA:
+      if (swa_cache_.defined() && swa_cache_.numel() > 0) {
+        tensor_map.emplace(KVCacheTensorRole::SWA, swa_cache_);
+      }
+      break;
+    case BlockType::C4:
+      if (key_cache_.defined() && key_cache_.numel() > 0 &&
+          index_cache_.defined() && index_cache_.numel() > 0) {
+        tensor_map.emplace(KVCacheTensorRole::KEY, key_cache_);
+        tensor_map.emplace(KVCacheTensorRole::INDEX, index_cache_);
+      }
+      break;
+    case BlockType::C128:
+      if (key_cache_.defined() && key_cache_.numel() > 0 &&
+          (!index_cache_.defined() || index_cache_.numel() == 0)) {
+        tensor_map.emplace(KVCacheTensorRole::KEY, key_cache_);
+      }
+      break;
+    default:
+      break;
+  }
+  return tensor_map;
 }
 
 bool DeepSeekV4KVCacheImpl::empty() const { return !swa_cache_.defined(); }

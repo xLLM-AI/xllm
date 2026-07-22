@@ -16,6 +16,8 @@ limitations under the License.
 #include "add_matmul.h"
 
 #include "core/framework/state_dict/utils.h"
+#include "core/layers/common/quant_utils.h"
+#include "kernels/ops_api.h"
 
 namespace xllm {
 namespace layer {
@@ -102,10 +104,35 @@ AddMatmulWeightTransposedImpl::AddMatmulWeightTransposedImpl(
     int64_t in,
     int64_t out,
     bool with_bias,
-    const torch::TensorOptions& options)
-    : AddMatmulImpl(in, out, with_bias, options) {}
+    const torch::TensorOptions& options,
+    const QuantArgs& quant_args)
+    : AddMatmulImpl(in, out, with_bias, options),
+      quant_args_(quant_args),
+      output_dtype_(c10::typeMetaToScalarType(options.dtype())) {
+  if (!quant_args_.quant_descs().empty()) {
+    weight_scale_ =
+        register_parameter("weight_scale",
+                           torch::empty({out}, options.dtype(torch::kFloat32)),
+                           /*requires_grad=*/false);
+    weight_offset_ =
+        register_parameter("weight_offset",
+                           torch::empty({out}, options.dtype(torch::kFloat32)),
+                           /*requires_grad=*/false);
+  }
+}
 
 torch::Tensor AddMatmulWeightTransposedImpl::forward(const torch::Tensor& x) {
+  if (is_w8a8_dynamic_quant(resolved_weight_quant_method_)) {
+    CHECK(weight_scale_is_loaded_ && weight_scale_.defined())
+        << "weight_scale is required for w8a8_dynamic quant matmul.";
+    auto bias = with_bias_ ? std::optional<torch::Tensor>(bias_) : std::nullopt;
+    // Offset only valid when out dtype is INT8 (NPU kernel requirement).
+    auto w_offset = (weight_offset_.defined() && output_dtype_ == torch::kInt8)
+                        ? std::optional<torch::Tensor>(weight_offset_)
+                        : std::nullopt;
+    return npu_w8a8_dynamic_linear_forward(
+        x, weight_, weight_scale_, bias, output_dtype_, w_offset);
+  }
   // use addmm when bias is provided
   if (with_bias_) {
     auto sizes = x.sizes();
@@ -123,15 +150,54 @@ torch::Tensor AddMatmulWeightTransposedImpl::forward(const torch::Tensor& x) {
 
 void AddMatmulWeightTransposedImpl::load_state_dict(
     const StateDict& state_dict) {
-  // only transpoes weights when state_dict has the key
-  // or it would be transposed multiple times when having
-  // multiple state dicts
-  if (state_dict.has("weight")) {
-    xllm::weight::load_weight(state_dict, "weight", weight_, weight_is_loaded_);
-    // weight need to be transposed when using addmm
-    if (with_bias_) {
-      torch::Tensor transposed = weight_.data().transpose(0, 1).contiguous();
-      weight_.set_data(transposed);
+  resolve_weight_quant_method_for_linear_load(
+      quant_args_, state_dict, nullptr, resolved_weight_quant_method_);
+
+  if (is_w8a8_dynamic_quant(resolved_weight_quant_method_)) {
+    std::vector<weight::LazyParameterSpec> specs;
+    specs.push_back(
+        weight::LazyParameterSpec{&weight_,
+                                  &weight_is_loaded_,
+                                  "weight",
+                                  {weight_.size(0), weight_.size(1)},
+                                  options_.dtype(torch::kInt8)});
+    weight::ensure_parameter_storage(this, specs);
+
+    std::vector<weight::LazyParameterSpec> scale_specs;
+    scale_specs.push_back(
+        weight::LazyParameterSpec{&weight_scale_,
+                                  &weight_scale_is_loaded_,
+                                  "weight_scale",
+                                  {weight_.size(0)},
+                                  options_.dtype(torch::kFloat32)});
+    scale_specs.push_back(
+        weight::LazyParameterSpec{&weight_offset_,
+                                  &weight_offset_is_loaded_,
+                                  "weight_offset",
+                                  {weight_.size(0)},
+                                  options_.dtype(torch::kFloat32)});
+    weight::ensure_parameter_storage(this, scale_specs);
+
+    if (state_dict.has("weight")) {
+      weight::load_weight(state_dict, "weight", weight_, weight_is_loaded_);
+    }
+    if (state_dict.has("weight_scale")) {
+      weight::load_weight(
+          state_dict, "weight_scale", weight_scale_, weight_scale_is_loaded_);
+    }
+    if (state_dict.has("weight_offset")) {
+      weight::load_weight(state_dict,
+                          "weight_offset",
+                          weight_offset_,
+                          weight_offset_is_loaded_);
+    }
+  } else {
+    if (state_dict.has("weight")) {
+      weight::load_weight(state_dict, "weight", weight_, weight_is_loaded_);
+      if (with_bias_) {
+        torch::Tensor transposed = weight_.data().transpose(0, 1).contiguous();
+        weight_.set_data(transposed);
+      }
     }
   }
   if (with_bias_) {

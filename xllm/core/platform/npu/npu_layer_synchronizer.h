@@ -32,11 +32,14 @@ class NPULayerSynchronizerImpl {
   std::atomic<bool>* get_event_flag(const int64_t layer_index);
   bool synchronize_layer(const int64_t layer_index);
   bool record_event(const int64_t layer_index, const int32_t device_index);
+  // Unblock all pending synchronize_layer spins and make them report failure.
+  void abort();
   uint32_t get_event_size() { return events_.size(); };
 
  private:
   std::vector<aclrtEvent> events_;
   std::vector<std::atomic<bool>> event_record_flags_;
+  std::atomic<bool> aborted_{false};
   const int32_t timeout_;
 };
 

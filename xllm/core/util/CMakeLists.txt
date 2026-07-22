@@ -14,6 +14,7 @@ cc_library(
     hash_util.h
     http_downloader.h
     json_reader.h
+    dit_model_discovery.h
     model_config_utils.h
     lightweightsemaphore.h
     net.h
@@ -41,6 +42,7 @@ cc_library(
     http_downloader.cpp
     # TODO. add following at next pr.
     json_reader.cpp
+    dit_model_discovery.cpp
     linalg.cpp
     model_config_utils.cpp
     net.cpp

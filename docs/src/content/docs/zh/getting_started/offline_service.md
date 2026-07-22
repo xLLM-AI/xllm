@@ -16,7 +16,9 @@ LLM Beam Search 示例：[:simple-github: https://github.com/xLLM-AI/xllm/blob/m
 ```python
 from xllm import BeamSearchParams, LLM
 
-llm = LLM(model="/path/models/Qwen2-7B-Instruct", devices="npu:0")
+# 运行设备通过 ASCEND_RT_VISIBLE_DEVICES 选择
+# （其他平台使用 CUDA_VISIBLE_DEVICES / MLU_VISIBLE_DEVICES 等）。
+llm = LLM(model="/path/models/Qwen2-7B-Instruct")
 params = BeamSearchParams(
     beam_width=2,
     top_logprobs=4,

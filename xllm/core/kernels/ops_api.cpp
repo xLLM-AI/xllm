@@ -37,6 +37,7 @@ limitations under the License.
 #include "dcu/hipblaslt_fp8_adapter.h"
 #endif
 
+#include <cmath>
 #include <numeric>
 
 #include "common/macros.h"
@@ -353,9 +354,18 @@ void fused_layernorm(FusedLayerNormParams& params) {
                         params.dynamic_quant);
 #elif defined(USE_NPU)
   if (params.residual.has_value()) {
-    std::tie(params.output, std::ignore, params.residual_out) =
-        npu::add_rms_norm(
-            params.input, params.residual.value(), params.weight, params.eps);
+    if (params.add_gamma_offset) {
+      std::tie(params.output, std::ignore, params.residual_out) =
+          npu::gamma_add_rms_norm(params.input,
+                                  params.residual.value(),
+                                  params.weight,
+                                  params.eps,
+                                  params.add_gamma_offset);
+    } else {
+      std::tie(params.output, std::ignore, params.residual_out) =
+          npu::add_rms_norm(
+              params.input, params.residual.value(), params.weight, params.eps);
+    }
   } else {
     params.output =
         npu::rms_norm(params.input, params.weight, params.eps, params.mode);
@@ -387,6 +397,20 @@ void fused_layernorm(FusedLayerNormParams& params) {
 #else
   NOT_IMPLEMENTED();
 #endif
+}
+
+torch::Tensor fused_adalayer_norm(AdaLayerNormParams& params) {
+#if defined(USE_NPU)
+  params.output = npu::fused_adalayer_norm(params.input,
+                                           params.scale,
+                                           params.shift,
+                                           params.weight,
+                                           params.bias,
+                                           params.eps);
+#else
+  NOT_IMPLEMENTED();
+#endif
+  return params.output;
 }
 
 std::tuple<torch::Tensor, torch::Tensor> rms_norm_dynamic_quant(
@@ -1285,7 +1309,30 @@ torch::Tensor hc_pre_inv_rms(HcPreInvRmsParams& params) {
 
 torch::Tensor fused_sigmoid_gating_delta_rule_update(
     FusedSigmoidGatingDeltaRuleUpdateParams& params) {
-#if defined(USE_NPU)
+#if defined(USE_MLU)
+  float scale = params.scale.has_value()
+                    ? params.scale.value()
+                    : 1.0f / std::sqrt(static_cast<float>(params.k.size(-1)));
+  auto outputs = mlu::fused_sigmoid_gating_delta_rule_update(
+      params.A_log,
+      params.a,
+      params.b,
+      params.dt_bias,
+      params.q,
+      params.k,
+      params.v,
+      params.initial_state_source,
+      params.initial_state_indices,
+      params.cu_seqlens,
+      scale,
+      params.use_qk_l2norm_in_kernel,
+      params.softplus_beta,
+      params.softplus_threshold,
+      params.num_accepted_tokens,
+      /*inplace_final_state=*/true,
+      params.is_kda);
+  return outputs.first;
+#elif defined(USE_NPU)
   return npu::npu_fused_sigmoid_gating_delta_rule_update(
       params.A_log,
       params.a,
@@ -1409,7 +1456,20 @@ std::tuple<torch::Tensor, torch::Tensor> fused_add_rms_norm_static_fp8_quant(
 }
 
 torch::Tensor causal_conv1d_update(CausalConv1dUpdateParams& params) {
-#if defined(USE_NPU)
+#if defined(USE_MLU)
+  return mlu::causal_conv1d_update_decode(params.x,
+                                          params.conv_state,
+                                          params.weight,
+                                          params.bias,
+                                          params.conv_state_indices,
+                                          params.activation,
+                                          params.pad_slot_id,
+                                          params.query_start_loc,
+                                          params.max_query_len,
+                                          params.num_accepted_tokens,
+                                          params.block_idx_last_scheduled_token,
+                                          params.initial_state_idx);
+#elif defined(USE_NPU)
   const bool has_silu = params.activation;
 
   auto x_work = params.x;
@@ -1616,14 +1676,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> moe_gating_top_k_hash(
 
 torch::Tensor gated_layer_norm(GatedLayerNormParams& params) {
 #if defined(USE_NPU)
-  return npu::layer_norm_fwd(params.x,
-                             params.weight,
-                             params.bias,
-                             params.eps,
-                             params.z,
-                             params.group_size,
-                             params.norm_before_gate,
-                             params.is_rms_norm);
+  return npu::layer_norm_fwd_aclnn(params.x,
+                                   params.weight,
+                                   params.bias,
+                                   params.eps,
+                                   params.z,
+                                   params.group_size,
+                                   params.norm_before_gate,
+                                   params.is_rms_norm);
 #elif defined(USE_MLU)
   return mlu::gated_layer_norm(params.x,
                                params.weight,
@@ -1731,7 +1791,12 @@ void gemma_rms_norm(GemmaRMSNormParams& params) {
   npu::npu_gemma_rms_norm(
       params.x, params.gamma, params.epsilon, params.rstd_out, params.norm_out);
 #elif defined(USE_MLU)
-  mlu::gemma_rms_norm(params.x, params.gamma, params.epsilon, params.norm_out);
+  mlu::gemma_rms_norm(params.x,
+                      params.gamma,
+                      params.epsilon,
+                      params.norm_out,
+                      params.residual,
+                      params.residual_out);
 #elif defined(USE_DCU)
   dcu::gemma_rms_norm(params.x, params.gamma, params.epsilon, params.norm_out);
 #else
