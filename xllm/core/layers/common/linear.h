@@ -286,6 +286,9 @@ class RowParallelLinearImpl : public torch::nn::Module {
   ProcessGroup* process_group() const { return process_group_; }
 
  private:
+  torch::Tensor forward_impl(torch::Tensor input,
+                             RowParallelReduceMode reduce_mode);
+
   torch::Tensor mmrs_weight_transposed() const;
 
   // parameter members, must be registered

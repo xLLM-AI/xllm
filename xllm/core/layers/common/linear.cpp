@@ -1386,119 +1386,10 @@ RowParallelLinearImpl::RowParallelLinearImpl(
 }
 
 torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
-  auto bias = bias_.defined() && rank_ == 0
-                  ? std::optional<torch::Tensor>(bias_)
-                  : std::nullopt;
-  torch::Tensor output;
-  if (quant_args_.quant_method() == kQuantMethodSmoothquant) {
-    CHECK(smooth_.defined()) << "smooth is required for smoothquant.";
-    CHECK(qweight_.defined()) << "qweight is required for smoothquant.";
-    CHECK(per_channel_scale_.defined())
-        << "per_channel_scale is required for smoothquant.";
-
-    torch::Tensor quantized_input;
-    torch::Tensor input_scale;
-
-    if (!input_is_parallelized_) {
-      input = xllm::parallel_state::scatter(input, process_group_);
-    }
-
-    xllm::kernel::ScaledQuantizeParams quantize_params;
-    quantize_params.x = input;
-    quantize_params.smooth = smooth_;
-    quantize_params.zero = std::nullopt;
-    quantize_params.token_count = std::nullopt;
-    quantize_params.gather_index = std::nullopt;
-    quantize_params.gather_index_start_position = std::nullopt;
-    quantize_params.output = std::nullopt;
-    quantize_params.output_scale = std::nullopt;
-    quantize_params.act_mode = linear_extra_args_.act_mode;
-    quantize_params.active_coef = 1.0;
-    quantize_params.is_gated = linear_extra_args_.is_gated;
-
-    std::tie(quantized_input, input_scale) =
-        xllm::kernel::scaled_quantize(quantize_params);
-
-    xllm::kernel::ScaledMatmulParams matmul_params;
-    matmul_params.a = quantized_input;
-    matmul_params.b = qweight_;
-    matmul_params.a_scale = input_scale;
-    matmul_params.b_scale = per_channel_scale_;
-    matmul_params.output_dtype = output_dtype_;
-    matmul_params.bias = bias;
-    matmul_params.c = std::nullopt;
-    matmul_params.act_mode = "none";
-    matmul_params.quant_bit_size = 8;
-    matmul_params.alpha = 1.0;
-    matmul_params.beta = 0.0;
-    matmul_params.use_hp_active = false;
-    matmul_params.a_quant_bit_size = 8;
-    matmul_params.a_calib = std::nullopt;
-    matmul_params.b_calib = std::nullopt;
-    matmul_params.output = std::nullopt;
-
-    output = xllm::kernel::scaled_matmul(matmul_params);
-  } else if (quant_args_.quant_method() == kQuantMethodFp8) {
-    check_fp8_activation_dynamic_supported(quant_args_);
-    if (!input_is_parallelized_) {
-      input = xllm::parallel_state::scatter(input, process_group_);
-    }
-
-    auto scale = input_scale_.defined()
-                     ? std::optional<torch::Tensor>(input_scale_)
-                     : std::nullopt;
-    output = fp8_linear_forward(
-        input, weight_, weight_scale_, scale, bias, output_dtype_);
-  } else if (is_w8a8_quant(resolved_weight_quant_method_)) {
-    CHECK(input_scale_is_loaded_ && input_scale_.defined())
-        << "input_scale is required for w8a8 quant matmul.";
-    CHECK(input_offset_is_loaded_ && input_offset_.defined())
-        << "input_offset is required for w8a8 quant matmul.";
-    CHECK(deq_scale_is_loaded_ && deq_scale_.defined())
-        << "deq_scale is required for w8a8 quant matmul.";
-    if (!input_is_parallelized_) {
-      input = xllm::parallel_state::scatter(input, process_group_);
-    }
-    auto quant_bias = quant_bias_is_loaded_ && quant_bias_.defined()
-                          ? std::optional<torch::Tensor>(quant_bias_)
-                          : std::nullopt;
-    output = npu_w8a8_linear_forward(input,
-                                     weight_,
-                                     input_scale_,
-                                     input_offset_,
-                                     deq_scale_,
-                                     quant_bias,
-                                     output_dtype_);
-  } else if (is_w8a8_dynamic_quant(resolved_weight_quant_method_)) {
-    if (!input_is_parallelized_) {
-      input = xllm::parallel_state::scatter(input, process_group_);
-    }
-    auto weight_scale = weight_scale_is_loaded_
-                            ? std::optional<torch::Tensor>(weight_scale_)
-                            : std::nullopt;
-    CHECK(weight_scale.has_value() && weight_scale.value().defined())
-        << "weight_scale is required for w8a8_dynamic quant matmul.";
-#if defined(USE_DCU)
-    output = dcu_w8a8_dynamic_linear_forward(
-        input, weight_, weight_scale.value(), bias, output_dtype_);
-#elif defined(USE_NPU)
-    output = npu_w8a8_dynamic_linear_forward(
-        input, weight_, weight_scale.value(), bias, output_dtype_);
-#endif
-  } else {
-    if (!input_is_parallelized_) {
-      input = xllm::parallel_state::scatter(input, process_group_);
-    }
-    xllm::kernel::MatmulParams matmul_params;
-    matmul_params.a = input;
-    matmul_params.b = weight_;
-    matmul_params.bias = bias;
-    output = xllm::kernel::matmul(matmul_params);
-  }
-  if (enable_result_reduction_ && world_size_ > 1) {
-    output = xllm::parallel_state::reduce(output, process_group_);
-  }
-  return output;
+  const RowParallelReduceMode reduce_mode =
+      enable_result_reduction_ ? RowParallelReduceMode::ALL_REDUCE
+                               : RowParallelReduceMode::NONE;
+  return forward_impl(input, reduce_mode);
 }
 
 torch::Tensor RowParallelLinearImpl::mmrs_weight_transposed() const {
@@ -1518,14 +1409,30 @@ torch::Tensor RowParallelLinearImpl::forward(
     torch::Tensor input,
     RowParallelReduceMode reduce_mode) {
 #if !defined(USE_NPU)
-  return forward(input);
-#else
+  reduce_mode = enable_result_reduction_ ? RowParallelReduceMode::ALL_REDUCE
+                                         : RowParallelReduceMode::NONE;
+#endif
+  return forward_impl(input, reduce_mode);
+}
+
+torch::Tensor RowParallelLinearImpl::forward_impl(
+    torch::Tensor input,
+    RowParallelReduceMode reduce_mode) {
+#if defined(USE_NPU)
+  const bool use_fc1_reduce =
+      reduce_mode == RowParallelReduceMode::REDUCE_SCATTER ||
+      reduce_mode == RowParallelReduceMode::MATMUL_REDUCE_SCATTER;
   const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
+#else
+  const bool use_fc1_reduce = false;
+  const FlashComm1Context* fc1_ctx = nullptr;
+#endif
   auto bias = bias_.defined() && rank_ == 0
                   ? std::optional<torch::Tensor>(bias_)
                   : std::nullopt;
 
-  const bool skip_scatter = fc1_ctx && is_sequence_sharded(*fc1_ctx);
+  const bool skip_scatter =
+      use_fc1_reduce && fc1_ctx && is_sequence_sharded(*fc1_ctx);
 
   torch::Tensor output;
   if (quant_args_.quant_method() == kQuantMethodSmoothquant) {
@@ -1579,8 +1486,7 @@ torch::Tensor RowParallelLinearImpl::forward(
     output = xllm::kernel::scaled_matmul(matmul_params);
   } else if (quant_args_.quant_method() == kQuantMethodFp8) {
     log_mmrs_quant_skip(reduce_mode, fc1_ctx, "fp8", input);
-    CHECK(!quant_args_.activation_dynamic())
-        << "FP8 quantization does not support activation_dynamic yet";
+    check_fp8_activation_dynamic_supported(quant_args_);
 
     if (!input_is_parallelized_ && !skip_scatter) {
       input = xllm::parallel_state::scatter(input, process_group_);
@@ -1622,12 +1528,18 @@ torch::Tensor RowParallelLinearImpl::forward(
                             : std::nullopt;
     CHECK(weight_scale.has_value() && weight_scale.value().defined())
         << "weight_scale is required for w8a8_dynamic quant matmul.";
+#if defined(USE_DCU)
+    output = dcu_w8a8_dynamic_linear_forward(
+        input, weight_, weight_scale.value(), bias, output_dtype_);
+#elif defined(USE_NPU)
     output = npu_w8a8_dynamic_linear_forward(
         input, weight_, weight_scale.value(), bias, output_dtype_);
+#endif
   } else {
     if (!input_is_parallelized_ && !skip_scatter) {
       input = xllm::parallel_state::scatter(input, process_group_);
     }
+#if defined(USE_NPU)
     if (wants_mmrs(reduce_mode) && fc1_ctx && is_sequence_sharded(*fc1_ctx) &&
         fc1_ctx->enable_mmrs_fusion) {
       bool can_try_mmrs = input.defined() && weight_.defined() &&
@@ -1706,6 +1618,13 @@ torch::Tensor RowParallelLinearImpl::forward(
       matmul_params.bias = bias;
       output = xllm::kernel::matmul(matmul_params);
     }
+#else
+    xllm::kernel::MatmulParams matmul_params;
+    matmul_params.a = input;
+    matmul_params.b = weight_;
+    matmul_params.bias = bias;
+    output = xllm::kernel::matmul(matmul_params);
+#endif
   }
 
   if (reduce_mode == RowParallelReduceMode::NONE) {
@@ -1724,7 +1643,6 @@ torch::Tensor RowParallelLinearImpl::forward(
     output = xllm::parallel_state::reduce(output, process_group_);
   }
   return output;
-#endif
 }
 
 // load the weight from the checkpoint
