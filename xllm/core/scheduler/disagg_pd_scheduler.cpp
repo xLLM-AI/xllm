@@ -295,35 +295,6 @@ void DisaggPDScheduler::step(const absl::Duration& timeout) {
   }
 }
 
-std::vector<Batch> DisaggPDScheduler::prepare_batch() {
-  // For PREFILL / MIX in disagg PD, drain newly arrived requests here and
-  // skip the eager expand_sequences(false) that the base prepare_batch would
-  // otherwise call when enable_prefix_cache is off. For best_of_n requests,
-  // expansion to best_of sequences is deferred to the DECODE instance (where
-  // prefix cache lets seq[1..best_of-1] reuse seq[0]'s prompt KV). Without
-  // this guard, the PREFILL instance would waste N x prefill compute on
-  // candidates that are never used.
-  const bool is_decode =
-      options_.instance_role().has_value() &&
-      options_.instance_role().value() == InstanceRole::DECODE;
-  if (!is_decode) {
-    std::shared_ptr<Request> request;
-    while (request_queue_.read(request)) {
-      CHECK(request);
-      if (request->sequences()[0]->kv_state().kv_cache_tokens_num() == 0) {
-        prefill_queue_->push(request);
-      } else {
-        // request from prefill instance in disagge pd mode.
-        running_requests_.emplace_back(request);
-      }
-    }
-  }
-
-  // The BatchMode config (resolved from options) routes scheduling correctly
-  // for both chunked-prefill and exclusive modes.
-  return ContinuousScheduler::prepare_batch();
-}
-
 bool DisaggPDScheduler::add_request(std::shared_ptr<Request>& request) {
   CHECK(request != nullptr);
   CHECK(!request->sequences().empty());

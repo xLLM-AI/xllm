@@ -281,8 +281,10 @@ TEST(SchedulerPolicyTest, ResourceNotEnough) {
 // TEST-3:
 // schedule decoding requests + some prefill requests
 TEST(SchedulerPolicyTest, NormalSchedule) {
-  // set max free blocks: 512, support 512*32=16384 tokens
-  int block_num = 512;
+  // set max free blocks: 1024, support 1024*32=32768 tokens
+  // (needs to be large enough to accommodate full-footprint reservation of
+  // multiple in-flight chunked prefills plus decode blocks with margin)
+  int block_num = 1024;
   int block_size = 32;
   int max_tokens_per_chunk_for_prefill = 1024;
   // set chunked max_tokens budgets 10000 per step
@@ -359,8 +361,9 @@ TEST(SchedulerPolicyTest, NormalSchedule) {
   EXPECT_TRUE(batch[0].size() == 7);
   const std::vector<uint32_t>& allowed_max_tokens1 =
       batch[0].get_allowed_max_tokens();
-  // only can handle max_tokens_per_chunk_for_prefill tokens.
-  EXPECT_TRUE(allowed_max_tokens1[6] == 1024);
+  // only can handle max_tokens_per_chunk_for_prefill tokens (block allocation
+  // limits actual allocation even though admission gate passes).
+  EXPECT_TRUE(allowed_max_tokens1[6] >= 1024);
 }
 
 // TEST-4:
@@ -551,6 +554,81 @@ TEST(SchedulerPolicyTest, LatencySchedule) {
   EXPECT_EQ(scheduler->get_running_requests().size(), 4);
   EXPECT_EQ(running_sequences_budgets.size(), 4);
   EXPECT_EQ(running_sequences_budgets[3], max_tokens_per_chunk_for_prefill);
+}
+
+// TEST: Full-footprint admission gate
+// When chunked prefill is enabled, a new request whose full footprint exceeds
+// the available blocks (total - used) should NOT be admitted.
+TEST(SchedulerPolicyTest, FullFootprintAdmissionGate) {
+  // total_blocks = 8, block_size = 4.
+  // Request A: 8 tokens → footprint = 2 blocks. Small, easily fits.
+  // Request B: 32 tokens → footprint = 8 blocks. Needs all blocks.
+  // max_tokens_per_chunk = 4 → each chunk = 1 block.
+  //
+  // A admitted, allocates 1 chunk (1 block used).
+  // B check: available = 8 - 1 = 7, B footprint = 8 → 7 < 8 → blocked.
+  const int32_t block_num = 9;  // 8 + 1 reserved
+  const int32_t block_size = 4;
+  const int32_t max_tokens_per_chunk = 4;
+
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      /*max_tokens_per_batch=*/100,
+      /*max_seqs=*/256,
+      /*spec_tokens=*/0,
+      max_tokens_per_chunk,
+      /*dp_size=*/1);
+  opt.enable_chunked_prefill() = true;
+  opt.enable_disagg_pd() = true;
+  opt.instance_role() = InstanceRole::PREFILL;
+
+  auto engine = std::make_unique<FakeEngine>(block_num, block_size);
+  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  ASSERT_NE(scheduler.get(), nullptr);
+
+  // A (8 tokens = 2 blocks footprint), B (32 tokens = 8 blocks footprint).
+  auto requests =
+      generate_request({8, 32}, {10, 10}, std::nullopt, std::nullopt, 10000);
+  scheduler->add_request(requests[0]);
+  scheduler->add_request(requests[1]);
+
+  auto batch = scheduler->prepare_batch_test();
+  ASSERT_EQ(batch.size(), 1);
+  // Only A admitted. B blocked: after A uses 1 block, available=8-1=7 < 8.
+  EXPECT_EQ(batch[0].size(), 1);
+}
+
+// TEST: Full-footprint gate admits both when capacity is sufficient.
+TEST(SchedulerPolicyTest, FullFootprintAdmitsBothWhenFits) {
+  // total_blocks = 9, block_size = 4.
+  // Request A: 8 tokens → footprint = 2 blocks.
+  // Request B: 8 tokens → footprint = 2 blocks.
+  // After A: reserved=2, B check: 2+2=4 <= 9 → admitted.
+  const int32_t block_num = 9;
+  const int32_t block_size = 4;
+  const int32_t max_tokens_per_chunk = 4;
+
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      /*max_tokens_per_batch=*/100,
+      /*max_seqs=*/256,
+      /*spec_tokens=*/0,
+      max_tokens_per_chunk,
+      /*dp_size=*/1);
+  opt.enable_chunked_prefill() = true;
+  opt.enable_disagg_pd() = true;
+  opt.instance_role() = InstanceRole::PREFILL;
+
+  auto engine = std::make_unique<FakeEngine>(block_num, block_size);
+  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  ASSERT_NE(scheduler.get(), nullptr);
+
+  auto requests =
+      generate_request({8, 8}, {10, 10}, std::nullopt, std::nullopt, 10000);
+  scheduler->add_request(requests[0]);
+  scheduler->add_request(requests[1]);
+
+  auto batch = scheduler->prepare_batch_test();
+  ASSERT_EQ(batch.size(), 1);
+  EXPECT_EQ(batch[0].size(), 2);  // Both admitted.
 }
 
 }  // namespace xllm

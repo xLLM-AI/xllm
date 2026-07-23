@@ -19,6 +19,7 @@ limitations under the License.
 #include <limits>
 
 #include "scheduler/scheduler_policy.h"
+#include "util/utils.h"
 
 namespace xllm {
 
@@ -54,15 +55,31 @@ void DecodeFirstPolicy::schedule(
 
   // Step 1: schedule decode requests first (decode-maximal batching).
   schedule_decode_from_queue(&state.decode_queue, state, budget);
+  const bool has_decode = !state.running_sequences.empty();
 
   // Step 2: schedule prefill requests (continuations from chunk_queue first,
   // then new prefill from waiting_queue).
   if (!budget_exhausted(budget)) {
-    if (state.running_sequences.empty()) {
+    if (!has_decode) {
       budget.latency_budget = std::numeric_limits<int32_t>::max();
     }
-    schedule_prefill_from_queue(&state.chunk_queue, state, budget, finished);
-    schedule_prefill_from_queue(&state.prefill_queue, state, budget, finished);
+    // reserved_full_footprint is the full-footprint admission budget shared
+    // across schedule_prefill_from_queue calls. It gates fresh prefill
+    // requests only (in-flight chunked prefills always continue). Starts with
+    // currently used blocks × 1.1 margin to reduce decode preemption, then
+    // accumulates full footprints of newly admitted prefill requests.
+    constexpr double kDecodeReserveMargin = 1.1;
+    size_t reserved_full_footprint = 0;
+    if (has_decode) {
+      const size_t max_used =
+          util::max(state.kv_cache_manager->num_used_blocks());
+      reserved_full_footprint =
+          static_cast<size_t>(max_used * kDecodeReserveMargin);
+    }
+    schedule_prefill_from_queue(
+        &state.chunk_queue, state, budget, finished, reserved_full_footprint);
+    schedule_prefill_from_queue(
+        &state.prefill_queue, state, budget, finished, reserved_full_footprint);
   }
 
   // Step 3: redistribute remaining budget to prefill sequences.
