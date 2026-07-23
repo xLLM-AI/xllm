@@ -157,6 +157,28 @@ ModelOutput forward(torch::Tensor tokens, ...) override;
 virtual ModelOutput forward(torch::Tensor tokens, ...);
 ```
 
+- **Declare functions `noexcept` if they won't emit exceptions.** This is part of the function's interface contract, like `const`. Pay special attention to move constructors, move assignment operators, and `swap`: `std::vector` reallocation moves elements only when move is `noexcept`. Do not use C++98 exception specifications (`throw()`). Do not mark `noexcept` on functions that may throw or call APIs that can throw.
+
+```cpp
+// Good – move is noexcept; vector reallocation can move instead of copy
+MyResource(MyResource&& other) noexcept;
+MyResource& operator=(MyResource&& other) noexcept;
+
+void swap(MyResource& lhs, MyResource& rhs) noexcept;
+```
+
+```cpp
+// Bad – move not noexcept; std::vector may fall back to copy
+MyResource(MyResource&& other);
+MyResource& operator=(MyResource&& other);
+
+// Bad – deprecated C++98 exception specification
+void reset() throw();
+
+// Bad – noexcept on a function that may throw
+void parse_file(const std::string& path) noexcept;
+```
+
 - **Structs must not have member functions**. If you need methods, use a `class`. Structs are for plain data aggregation only.
 
 ---
