@@ -25,6 +25,8 @@ limitations under the License.
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "linear.h"
+#include "lora/lora_column_parallel_linear.h"
+#include "lora/lora_row_parallel_linear.h"
 
 namespace xllm {
 namespace layer {
@@ -58,8 +60,8 @@ class DenseMLPImpl : public torch::nn::Module {
   bool is_gated_;
   int64_t intermediate_size_;
   ProcessGroup* process_group_;
-  ColumnParallelLinear gate_up_proj_{nullptr};
-  RowParallelLinear down_proj_{nullptr};
+  LoRAColumnParallelLinear gate_up_proj_{nullptr};  // LoRA-wrapped drop-in
+  LoRARowParallelLinear down_proj_{nullptr};        // LoRA-wrapped drop-in
   Activation act_{nullptr};
   bool is_smoothquant_;
   std::string hidden_act_;
