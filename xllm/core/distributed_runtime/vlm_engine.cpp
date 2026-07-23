@@ -338,7 +338,8 @@ bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .enable_linear_state(enable_linear_attention)
       .enable_prefix_cache(options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
-      .hasher_type(BlockHasherType::MM);
+      .hasher_type(BlockHasherType::MM)
+      .max_seqs_per_batch(options_.max_seqs_per_batch());
   if (enable_linear_attention) {
     // The unified linear-state slot pool spans all physical slots [0, N);
     // id 0 is reserved as padding and ids [1, N) serve live and checkpoint

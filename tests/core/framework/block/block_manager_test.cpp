@@ -24,7 +24,6 @@ limitations under the License.
 #include "block_manager_pool.h"
 #include "common/global_flags.h"
 #include "core/framework/config/scheduler_config.h"
-#include "core/framework/config/service_config.h"
 #include "framework/block/block_manager_pool_test_peer.h"
 #include "framework/block/linear_state_block_manager.h"
 #include "framework/model/model_input_params.h"
@@ -164,8 +163,12 @@ BlockManagerPool::Options make_linear_state_pool_options(
   BlockManagerPool::Options options;
   options.num_blocks(8).host_num_blocks(0).block_size(4).enable_prefix_cache(
       true);
-  options.num_single_blocks(4).enable_linear_state(true).linear_state_num_slots(
-      linear_state_num_slots);
+  // Zero out max_seqs_per_batch so the SINGLE pool is sized purely by
+  // num_single_blocks (otherwise the pool takes the max of the two).
+  options.max_seqs_per_batch(0)
+      .num_single_blocks(4)
+      .enable_linear_state(true)
+      .linear_state_num_slots(linear_state_num_slots);
   return options;
 }
 
@@ -342,17 +345,16 @@ TEST(BlockManagerPoolTest, SingleBlockCapacityUsesOptionsMaxSeqs) {
 }
 
 TEST(BlockManagerPoolTest, TryAllocateKvFailureRollsBackSingleBlock) {
-  // unified scheduler-side single-block pool has 2 ids.
-  ScopedValue<int32_t> max_seqs_guard(
-      &SchedulerConfig::get_instance().max_seqs_per_batch(), 0);
-
   BlockManagerPool::Options options;
   options.num_blocks(3).host_num_blocks(0).block_size(1).enable_prefix_cache(
       false);
   // id 0 is reserved for padding, so capacity 3 exposes 2 usable single-block
-  // ids, enough for the two sequences allocated after the rollback.
-  options.num_single_blocks(3).enable_linear_state(true).linear_state_num_slots(
-      64);
+  // ids, enough for the two sequences allocated after the rollback. Zero out
+  // max_seqs_per_batch so num_single_blocks alone drives the SINGLE pool size.
+  options.max_seqs_per_batch(0)
+      .num_single_blocks(3)
+      .enable_linear_state(true)
+      .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
@@ -375,17 +377,17 @@ TEST(BlockManagerPoolTest, TryAllocateKvFailureRollsBackSingleBlock) {
 }
 
 TEST(BlockManagerPoolTest, SingleBlockCapacityCanBeLowerThanMaxSeqs) {
-  ScopedValue<int32_t> max_seqs_guard(&FLAGS_max_seqs_per_batch, 8);
-  // Pin the service-level concurrency so the SINGLE pool is sized purely by the
-  // options.num_single_blocks set below (the pool takes the max of the two).
-  ScopedValue<int32_t> max_conc_guard(
-      &ServiceConfig::get_instance().max_concurrent_requests(), 0);
-
   BlockManagerPool::Options options;
   // id 0 is reserved for padding, so capacity 4 exposes 3 usable single blocks.
+  // max_seqs_per_batch is 8 in the scheduler view, but num_single_blocks caps
+  // the SINGLE pool at 4 (pool takes the max, so num_single_blocks wins only
+  // when it is >= max_seqs_per_batch + 2 -- here it is 4 vs 8+2=10, so the
+  // 8+2 path would win; force num_single_blocks to be the winner by lowering
+  // the scheduler side).
   options.num_blocks(16)
       .host_num_blocks(0)
       .block_size(1)
+      .max_seqs_per_batch(0)
       .num_single_blocks(4)
       .enable_prefix_cache(false);
   options.enable_linear_state(true).linear_state_num_slots(64);
@@ -410,14 +412,14 @@ TEST(BlockManagerPoolTest, SingleBlockCapacityCanBeLowerThanMaxSeqs) {
 }
 
 TEST(BlockManagerPoolTest, DpRankSelectionSkipsExhaustedSingleBlockPool) {
-  ScopedValue<int32_t> max_seqs_guard(&FLAGS_max_seqs_per_batch, 8);
-
   BlockManagerPool::Options options;
   // id 0 is reserved for padding, so capacity 2 exposes 1 usable block per
-  // rank.
+  // rank. Zero out max_seqs_per_batch so num_single_blocks alone drives the
+  // SINGLE pool size.
   options.num_blocks(16)
       .host_num_blocks(0)
       .block_size(1)
+      .max_seqs_per_batch(0)
       .num_single_blocks(2)
       .enable_prefix_cache(false);
   options.enable_linear_state(true).linear_state_num_slots(64);
@@ -435,18 +437,14 @@ TEST(BlockManagerPoolTest, DpRankSelectionSkipsExhaustedSingleBlockPool) {
 }
 
 TEST(BlockManagerPoolTest, SingleBlockExhaustionBehavesLikeKvBlockExhaustion) {
-  ScopedValue<int32_t> max_seqs_guard(&FLAGS_max_seqs_per_batch, 8);
-  // Pin the service-level concurrency so the SINGLE pool is sized purely by the
-  // options.num_single_blocks set below (the pool takes the max of the two).
-  ScopedValue<int32_t> max_conc_guard(
-      &ServiceConfig::get_instance().max_concurrent_requests(), 0);
-
   BlockManagerPool::Options options;
   // id 0 is reserved for padding, so capacity 2 exposes 1 usable block per
-  // rank.
+  // rank. Zero out max_seqs_per_batch so num_single_blocks alone drives the
+  // SINGLE pool size.
   options.num_blocks(16)
       .host_num_blocks(0)
       .block_size(1)
+      .max_seqs_per_batch(0)
       .num_single_blocks(2)
       .enable_prefix_cache(false);
   options.enable_linear_state(true).linear_state_num_slots(64);

@@ -19,6 +19,7 @@ limitations under the License.
 #include <pybind11/embed.h>
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <csignal>
 #include <filesystem>
 #include <memory>
@@ -84,6 +85,33 @@ void initialize_configs() {
   SchedulerConfig::get_instance().initialize();
   ServiceConfig::get_instance().initialize();
   SpeculativeConfig::get_instance().initialize();
+
+  // Reconcile the two per-batch admission caps into a single scheduler view
+  // consumed by every downstream user (Master -> Engine -> BlockManagerPool
+  // etc.). max_seqs_per_batch bounds the scheduler batch;
+  // max_concurrent_requests bounds the service-level admission; the effective
+  // batch cap is the tighter of the two. 0 means "unset" on either side; if
+  // both are 0 the caller has no way to size batch-bound resources (e.g. the
+  // SINGLE block pool) and we fail early.
+  {
+    SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+    ServiceConfig& service_config = ServiceConfig::get_instance();
+    const int32_t scheduler_cap = scheduler_config.max_seqs_per_batch();
+    const int32_t service_cap = service_config.max_concurrent_requests();
+    int32_t effective_cap = 0;
+    if (scheduler_cap > 0 && service_cap > 0) {
+      effective_cap = std::min(scheduler_cap, service_cap);
+    } else if (scheduler_cap > 0) {
+      effective_cap = scheduler_cap;
+    } else if (service_cap > 0) {
+      effective_cap = service_cap;
+    } else {
+      LOG(FATAL) << "Both max_seqs_per_batch and max_concurrent_requests are "
+                    "0; set at least one to a positive value.";
+    }
+    scheduler_config.max_seqs_per_batch(effective_cap);
+    service_config.max_concurrent_requests(effective_cap);
+  }
 }
 
 Options create_options(const std::string& instance_name, bool is_local) {

@@ -61,7 +61,7 @@ class SchedulerConfig final {
 
   PROPERTY(int32_t, max_tokens_per_batch) = 10240;
 
-  PROPERTY(int32_t, max_seqs_per_batch) = 1024;
+  PROPERTY(int32_t, max_seqs_per_batch) = 200;
 
   PROPERTY(bool, enable_schedule_overlap) = false;
 

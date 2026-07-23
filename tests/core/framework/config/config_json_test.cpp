@@ -412,7 +412,7 @@ TEST(ConfigJsonTest, MissingJsonFileKeepsFlagDefaults) {
   EXPECT_EQ(kv_cache_config.block_size(), 128);
   EXPECT_DOUBLE_EQ(kv_cache_config.max_memory_utilization(), 0.8);
   EXPECT_EQ(scheduler_config.max_tokens_per_batch(), 10240);
-  EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 1024);
+  EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 200);
 }
 
 TEST(ConfigJsonTest, DumpStartupConfigSkipsWhenDisabled) {
