@@ -172,11 +172,15 @@ std::string ensure_x_request_id(const brpc::Controller* controller) {
 
 void log_request_error(StatusCode code,
                        std::string_view message,
-                       std::string_view x_request_id) {
+                       std::string_view x_request_id,
+                       bool write_verbose_trace) {
   std::string_view id = x_request_id.empty() ? "-" : x_request_id;
   LOG(ERROR) << "[x-request-id=" << id
              << "] request failed (http=" << status_code_to_http_status(code)
              << ", status=" << status_code_to_string(code) << "): " << message;
+  if (!write_verbose_trace) {
+    return;
+  }
   // Mirror the failure to the asynchronous verbose trace log (no-op when the
   // feature is disabled). This keeps the detailed off-hot-path record in sync
   // with every error response we emit, regardless of the entry point.
@@ -192,9 +196,10 @@ void write_error_body(brpc::Controller* controller,
                       StatusCode code,
                       std::string_view message,
                       std::string_view x_request_id,
+                      bool write_verbose_trace,
                       const std::string& body) {
   const int32_t http_status = status_code_to_http_status(code);
-  log_request_error(code, message, x_request_id);
+  log_request_error(code, message, x_request_id, write_verbose_trace);
 
   controller->http_response().set_content_type("application/json");
   controller->http_response().set_status_code(http_status);
@@ -212,7 +217,8 @@ void write_error_body(brpc::Controller* controller,
 void write_openai_error(brpc::Controller* controller,
                         StatusCode code,
                         std::string_view message,
-                        std::string_view x_request_id) {
+                        std::string_view x_request_id,
+                        bool write_verbose_trace) {
   if (controller == nullptr) {
     return;
   }
@@ -220,13 +226,15 @@ void write_openai_error(brpc::Controller* controller,
                    code,
                    message,
                    x_request_id,
+                   write_verbose_trace,
                    make_openai_error_json(code, message));
 }
 
 void write_anthropic_error(brpc::Controller* controller,
                            StatusCode code,
                            std::string_view message,
-                           std::string_view x_request_id) {
+                           std::string_view x_request_id,
+                           bool write_verbose_trace) {
   if (controller == nullptr) {
     return;
   }
@@ -234,6 +242,7 @@ void write_anthropic_error(brpc::Controller* controller,
                    code,
                    message,
                    x_request_id,
+                   write_verbose_trace,
                    make_anthropic_error_json(code, message));
 }
 

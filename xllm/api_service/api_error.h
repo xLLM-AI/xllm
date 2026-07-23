@@ -68,7 +68,8 @@ std::string ensure_x_request_id(const brpc::Controller* controller);
 // and can no longer change the status code or body envelope.
 void log_request_error(StatusCode code,
                        std::string_view message,
-                       std::string_view x_request_id);
+                       std::string_view x_request_id,
+                       bool write_verbose_trace = true);
 
 // Finish a non-stream HTTP request with a structured OpenAI-style error: sets
 // the HTTP status code, writes the JSON error body, and logs the failure with
@@ -77,13 +78,15 @@ void log_request_error(StatusCode code,
 void write_openai_error(brpc::Controller* controller,
                         StatusCode code,
                         std::string_view message,
-                        std::string_view x_request_id);
+                        std::string_view x_request_id,
+                        bool write_verbose_trace = true);
 
 // Same as write_openai_error but emits the Anthropic error envelope.
 void write_anthropic_error(brpc::Controller* controller,
                            StatusCode code,
                            std::string_view message,
-                           std::string_view x_request_id);
+                           std::string_view x_request_id,
+                           bool write_verbose_trace = true);
 
 }  // namespace api_service
 }  // namespace xllm

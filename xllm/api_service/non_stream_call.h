@@ -28,6 +28,7 @@ limitations under the License.
 #include "api_service/api_error.h"
 #include "call.h"
 #include "core/common/types.h"
+#include "core/util/closure_guard.h"
 #include "core/util/verbose_trace_logger.h"
 
 namespace xllm {
@@ -41,8 +42,52 @@ class NonStreamCall : public Call {
                 ::google::protobuf::Closure* done,
                 Request* request,
                 Response* response,
-                bool use_arena = false)
-      : Call(controller, request_body_x_request_id(request)),
+                bool use_arena = false,
+                bool is_http_request = false)
+      : NonStreamCall(controller,
+                      done,
+                      request,
+                      response,
+                      use_arena,
+                      is_http_request,
+                      {}) {}
+
+  NonStreamCall(brpc::Controller* controller,
+                ClosureGuard::AsyncClosure async_closure,
+                Request* request,
+                Response* response,
+                bool use_arena = false,
+                bool is_http_request = false)
+      : NonStreamCall(controller,
+                      async_closure.done,
+                      request,
+                      response,
+                      use_arena,
+                      is_http_request,
+                      std::move(async_closure.after_done)) {}
+
+  ~NonStreamCall() override {
+    complete_request();
+    done_->Run();
+
+    if (!use_arena_) {
+      delete request_;
+      delete response_;
+    }
+  }
+
+ private:
+  NonStreamCall(brpc::Controller* controller,
+                ::google::protobuf::Closure* done,
+                Request* request,
+                Response* response,
+                bool use_arena,
+                bool is_http_request,
+                CompletionCallback completion_callback)
+      : Call(controller,
+             request_body_x_request_id(request),
+             is_http_request,
+             std::move(completion_callback)),
         done_(done),
         request_(request),
         response_(response),
@@ -54,15 +99,7 @@ class NonStreamCall : public Call {
     json_options_.always_print_primitive_fields = true;
   }
 
-  ~NonStreamCall() override {
-    done_->Run();
-
-    if (!use_arena_) {
-      delete request_;
-      delete response_;
-    }
-  }
-
+ public:
   void set_bytes_to_base64(bool bytes_to_base64) {
     json_options_.bytes_to_base64 = bytes_to_base64;
   }
@@ -107,8 +144,12 @@ class NonStreamCall : public Call {
   // For non stream response
   bool finish_with_error(const StatusCode& code,
                          const std::string& error_message) {
-    api_service::write_openai_error(
-        controller_, code, error_message, x_request_id());
+    if (is_http_request()) {
+      api_service::write_openai_error(
+          controller_, code, error_message, x_request_id());
+    } else {
+      controller_->SetFailed(error_message);
+    }
     return true;
   }
 

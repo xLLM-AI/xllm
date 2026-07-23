@@ -74,8 +74,9 @@ DEFINE_int32(verbose_trace_log_max_size_mb,
 
 DEFINE_int32(verbose_trace_log_max_files,
              1000,
-             "Max number of rotated verbose request-trace log files to keep. "
-             "The oldest is removed once this many exist. Defaults to 1000.");
+             "Max number of verbose request-trace log files to keep, including "
+             "the active file. The oldest is removed once this many exist. "
+             "Defaults to 1000.");
 
 namespace xllm {
 

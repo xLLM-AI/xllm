@@ -77,13 +77,16 @@ void VerboseTraceLogger::initialize(bool enabled,
   // Guard against non-positive configuration that spdlog would reject.
   const size_t max_size_bytes =
       static_cast<size_t>(std::max(1, max_size_mb)) * kBytesPerMiB;
-  const size_t rotate_files = static_cast<size_t>(std::max(1, max_files));
+  const size_t total_files = static_cast<size_t>(std::max(1, max_files));
+  // spdlog's max_files parameter counts rotated backups and excludes the
+  // active file. The service option is the total on-disk file limit.
+  const size_t backup_files = total_files - 1;
 
   try {
     thread_pool_ = std::make_shared<spdlog::details::thread_pool>(
         kQueueSize, kWriterThreads);
     auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-        file_path, max_size_bytes, rotate_files);
+        file_path, max_size_bytes, backup_files);
     logger_ = std::make_shared<spdlog::async_logger>(
         "verbose_trace",
         std::move(sink),
@@ -109,7 +112,7 @@ void VerboseTraceLogger::initialize(bool enabled,
   enabled_.store(true, std::memory_order_release);
   LOG(INFO) << "Verbose trace logging enabled, writing to " << file_path
             << " (rotating at " << max_size_mb << " MiB, keeping up to "
-            << rotate_files << " files).";
+            << total_files << " files).";
 }
 
 void VerboseTraceLogger::log(const std::string& entry) {

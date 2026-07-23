@@ -20,19 +20,27 @@ limitations under the License.
 
 #include <nlohmann/json.hpp>
 #include <string>
+#include <utility>
 
 #include "anthropic.pb.h"
 #include "api_service/non_stream_call.h"
+#include "api_service/stream_call.h"
 #include "api_service/xllm_metrics.h"
 #include "chat.pb.h"
 #include "completion.pb.h"
+#include "core/util/closure_guard.h"
 
 namespace xllm {
 namespace {
 
 class NoopClosure final : public google::protobuf::Closure {
  public:
-  void Run() override {}
+  void Run() override { ++run_count_; }
+
+  int run_count() const { return run_count_; }
+
+ private:
+  int run_count_ = 0;
 };
 
 TEST(ApiErrorTest, OpenAIErrorReplacesInvalidUtf8) {
@@ -132,6 +140,93 @@ TEST(CallTest, ExtractsRequestIdFromAllSupportedBodyTypes) {
   proto::AnthropicMessagesRequest anthropic;
   anthropic.set_x_request_id("anthropic-id");
   EXPECT_EQ(request_body_x_request_id(&anthropic), "anthropic-id");
+}
+
+TEST(CallTest, TypedNonStreamErrorUsesBrpcFailure) {
+  brpc::Controller controller;
+  proto::CompletionRequest request;
+  proto::CompletionResponse response;
+  NoopClosure done;
+
+  {
+    NonStreamCall<proto::CompletionRequest, proto::CompletionResponse> call(
+        &controller, &done, &request, &response, true);
+    EXPECT_TRUE(call.finish_with_error(StatusCode::INVALID_ARGUMENT,
+                                       "typed request failed"));
+    EXPECT_TRUE(controller.Failed());
+    EXPECT_EQ(controller.ErrorText(), "typed request failed");
+  }
+
+  EXPECT_EQ(done.run_count(), 1);
+}
+
+TEST(CallTest, TypedStreamCallErrorUsesBrpcFailure) {
+  brpc::Controller controller;
+  proto::CompletionRequest request;
+  request.set_stream(false);
+  proto::CompletionResponse response;
+  NoopClosure done;
+
+  {
+    StreamCall<proto::CompletionRequest, proto::CompletionResponse> call(
+        &controller, &done, &request, &response, true);
+    EXPECT_TRUE(call.finish_with_error(StatusCode::UNAVAILABLE,
+                                       "typed stream call failed"));
+    EXPECT_TRUE(controller.Failed());
+    EXPECT_EQ(controller.ErrorText(), "typed stream call failed");
+  }
+
+  EXPECT_EQ(done.run_count(), 1);
+}
+
+TEST(CallTest, HttpErrorKeepsStructuredOpenAIResponse) {
+  brpc::Controller controller;
+  proto::CompletionRequest request;
+  proto::CompletionResponse response;
+  NoopClosure done;
+
+  {
+    NonStreamCall<proto::CompletionRequest, proto::CompletionResponse> call(
+        &controller, &done, &request, &response, true, true);
+    EXPECT_TRUE(call.finish_with_error(StatusCode::INVALID_ARGUMENT,
+                                       "invalid request"));
+    EXPECT_FALSE(controller.Failed());
+    EXPECT_EQ(controller.http_response().status_code(), 400);
+    EXPECT_EQ(controller.response_attachment().to_string(),
+              api_service::make_openai_error_json(StatusCode::INVALID_ARGUMENT,
+                                                  "invalid request"));
+  }
+
+  EXPECT_EQ(done.run_count(), 1);
+}
+
+TEST(CallTest, AsyncCompletionRunsAfterFinalErrorState) {
+  brpc::Controller controller;
+  proto::CompletionRequest request;
+  proto::CompletionResponse response;
+  NoopClosure done;
+  int completion_count = 0;
+  bool observed_failure = false;
+  ClosureGuard done_guard(
+      &done,
+      [](void* /*unused*/) {},
+      [&](void* /*unused*/) {
+        ++completion_count;
+        observed_failure = is_failed_request(&controller);
+      });
+
+  auto async_closure = done_guard.release_for_async();
+  EXPECT_EQ(completion_count, 0);
+  {
+    NonStreamCall<proto::CompletionRequest, proto::CompletionResponse> call(
+        &controller, std::move(async_closure), &request, &response, true, true);
+    call.finish_with_error(StatusCode::UNKNOWN, "async request failed");
+    EXPECT_EQ(completion_count, 0);
+  }
+
+  EXPECT_EQ(completion_count, 1);
+  EXPECT_TRUE(observed_failure);
+  EXPECT_EQ(done.run_count(), 1);
 }
 
 }  // namespace

@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <brpc/controller.h>
 
+#include <functional>
 #include <string>
 #include <utility>
 
@@ -37,7 +38,12 @@ std::string request_body_x_request_id(const Request* request) {
 
 class Call {
  public:
-  Call(brpc::Controller* controller, std::string body_x_request_id = "");
+  using CompletionCallback = std::function<void(void*)>;
+
+  Call(brpc::Controller* controller,
+       std::string body_x_request_id = "",
+       bool is_http_request = false,
+       CompletionCallback completion_callback = {});
   virtual ~Call() = default;
 
   const std::string& x_request_time() const { return x_request_time_; }
@@ -54,9 +60,13 @@ class Call {
 
  protected:
   void init(std::string body_x_request_id);
+  void complete_request();
+  bool is_http_request() const { return is_http_request_; }
 
  protected:
   brpc::Controller* controller_;
+  bool is_http_request_ = false;
+  CompletionCallback completion_callback_;
 
   std::string x_request_time_;
   std::string x_request_id_;

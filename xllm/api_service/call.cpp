@@ -21,9 +21,21 @@ limitations under the License.
 
 namespace xllm {
 
-Call::Call(brpc::Controller* controller, std::string body_x_request_id)
-    : controller_(controller) {
+Call::Call(brpc::Controller* controller,
+           std::string body_x_request_id,
+           bool is_http_request,
+           CompletionCallback completion_callback)
+    : controller_(controller),
+      is_http_request_(is_http_request),
+      completion_callback_(std::move(completion_callback)) {
   init(std::move(body_x_request_id));
+}
+
+void Call::complete_request() {
+  if (completion_callback_) {
+    auto callback = std::move(completion_callback_);
+    callback(nullptr);
+  }
 }
 
 void Call::init(std::string body_x_request_id) {

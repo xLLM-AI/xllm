@@ -108,7 +108,8 @@ void fail_http_request(brpc::Controller* ctrl,
                        const std::string& message) {
   const std::string x_request_id = api_service::ensure_x_request_id(ctrl);
   verbose_log_request_failure(ctrl, code, message, x_request_id);
-  api_service::write_openai_error(ctrl, code, message, x_request_id);
+  api_service::write_openai_error(
+      ctrl, code, message, x_request_id, false /*write_verbose_trace*/);
 }
 
 // Anthropic HTTP entrypoints surface failures using the Anthropic error
@@ -118,7 +119,8 @@ void fail_anthropic_request(brpc::Controller* ctrl,
                             const std::string& message) {
   const std::string x_request_id = api_service::ensure_x_request_id(ctrl);
   verbose_log_request_failure(ctrl, code, message, x_request_id);
-  api_service::write_anthropic_error(ctrl, code, message, x_request_id);
+  api_service::write_anthropic_error(
+      ctrl, code, message, x_request_id, false /*write_verbose_trace*/);
 }
 
 // Shared dispatch for brpc-typed (non-Http) APIs that follow the standard
@@ -161,7 +163,7 @@ void process_typed_brpc_request(std::unique_ptr<Service>& service_impl,
   // from it.  We cast away constness so the Call can hold a non-const pointer.
   auto req_pb = const_cast<typename CallT::ReqType*>(request);
   std::shared_ptr<Call> call = std::make_shared<CallT>(
-      ctrl, done_guard.release(), req_pb, response, arena != nullptr);
+      ctrl, done_guard.release_for_async(), req_pb, response, arena != nullptr);
   service_impl->process_async(call);
 }
 
@@ -226,7 +228,7 @@ void APIService::Completions(::google::protobuf::RpcController* controller,
     auto arena = GetArenaWithCheck<CompletionCall>(response);
     std::shared_ptr<Call> call = std::make_shared<CompletionCall>(
         ctrl,
-        done_guard.release(),
+        done_guard.release_for_async(),
         const_cast<proto::CompletionRequest*>(request),
         response,
         arena != nullptr);
@@ -274,8 +276,13 @@ void APIService::CompletionsHttp(::google::protobuf::RpcController* controller,
     return;
   }
 
-  std::shared_ptr<Call> call = std::make_shared<CompletionCall>(
-      ctrl, done_guard.release(), req_pb, resp_pb, arena != nullptr);
+  std::shared_ptr<Call> call =
+      std::make_shared<CompletionCall>(ctrl,
+                                       done_guard.release_for_async(),
+                                       req_pb,
+                                       resp_pb,
+                                       arena != nullptr,
+                                       true);
   if (completion_service_impl_) {
     completion_service_impl_->process_async(call);
   } else if (rec_completion_service_impl_) {
@@ -349,8 +356,13 @@ void APIService::SampleHttp(::google::protobuf::RpcController* controller,
     return;
   }
 
-  std::shared_ptr<Call> call = std::make_shared<SampleCall>(
-      ctrl, done_guard.release(), req_pb, resp_pb, arena != nullptr);
+  std::shared_ptr<Call> call =
+      std::make_shared<SampleCall>(ctrl,
+                                   done_guard.release_for_async(),
+                                   req_pb,
+                                   resp_pb,
+                                   arena != nullptr,
+                                   true);
   sample_service_impl_->process_async(call);
 }
 
@@ -417,8 +429,12 @@ void chat_completions_http_impl(std::unique_ptr<Service>& service,
     return;
   }
 
-  auto call = std::make_shared<ChatCall>(
-      ctrl, guard.release(), req_pb, resp_pb, arena != nullptr /*use_arena*/);
+  auto call = std::make_shared<ChatCall>(ctrl,
+                                         guard.release_for_async(),
+                                         req_pb,
+                                         resp_pb,
+                                         arena != nullptr /*use_arena*/,
+                                         true /*is_http_request*/);
   service->process_async(call);
 }
 
@@ -535,7 +551,7 @@ void APIService::Embeddings(::google::protobuf::RpcController* controller,
   }
 
   std::shared_ptr<Call> call = std::make_shared<EmbeddingCall>(
-      ctrl, done_guard.release(), req_pb, response, arena != nullptr);
+      ctrl, done_guard.release_for_async(), req_pb, response, arena != nullptr);
   embedding_service_impl_->process_async(call);
 }
 
@@ -580,8 +596,13 @@ void handle_embedding_request(std::unique_ptr<Service>& embedding_service_impl_,
     req_pb->set_encoding_format("float");
   }
 
-  std::shared_ptr<Call> call = std::make_shared<EmbeddingCall>(
-      ctrl, done_guard.release(), req_pb, resp_pb, arena != nullptr);
+  std::shared_ptr<Call> call =
+      std::make_shared<EmbeddingCall>(ctrl,
+                                      done_guard.release_for_async(),
+                                      req_pb,
+                                      resp_pb,
+                                      arena != nullptr,
+                                      true);
   embedding_service_impl_->process_async(call);
 }
 }  // namespace
@@ -647,8 +668,12 @@ void APIService::ImageGenerationHttp(
     return;
   }
   std::shared_ptr<ImageGenerationCall> call =
-      std::make_shared<ImageGenerationCall>(
-          ctrl, done_guard.release(), req_pb, resp_pb, arena != nullptr);
+      std::make_shared<ImageGenerationCall>(ctrl,
+                                            done_guard.release_for_async(),
+                                            req_pb,
+                                            resp_pb,
+                                            arena != nullptr,
+                                            true);
   image_generation_service_impl_->process_async(call);
 }
 
@@ -700,8 +725,12 @@ void APIService::AudioGenerationHttp(
     return;
   }
   std::shared_ptr<AudioGenerationCall> call =
-      std::make_shared<AudioGenerationCall>(
-          ctrl, done_guard.release(), req_pb, resp_pb, arena != nullptr);
+      std::make_shared<AudioGenerationCall>(ctrl,
+                                            done_guard.release_for_async(),
+                                            req_pb,
+                                            resp_pb,
+                                            arena != nullptr,
+                                            true);
   audio_generation_service_impl_->process_async(call);
 }
 
@@ -753,8 +782,12 @@ void APIService::TextGenerationHttp(
     return;
   }
   std::shared_ptr<TextGenerationCall> call =
-      std::make_shared<TextGenerationCall>(
-          ctrl, done_guard.release(), req_pb, resp_pb, arena != nullptr);
+      std::make_shared<TextGenerationCall>(ctrl,
+                                           done_guard.release_for_async(),
+                                           req_pb,
+                                           resp_pb,
+                                           arena != nullptr,
+                                           true);
   text_generation_service_impl_->process_async(call);
 }
 
@@ -806,8 +839,12 @@ void APIService::VideoGenerationHttp(
     return;
   }
   std::shared_ptr<VideoGenerationCall> call =
-      std::make_shared<VideoGenerationCall>(
-          ctrl, done_guard.release(), req_pb, resp_pb, arena != nullptr);
+      std::make_shared<VideoGenerationCall>(ctrl,
+                                            done_guard.release_for_async(),
+                                            req_pb,
+                                            resp_pb,
+                                            arena != nullptr,
+                                            true);
   video_generation_service_impl_->process_async(call);
 }
 
@@ -851,8 +888,13 @@ void APIService::RerankHttp(::google::protobuf::RpcController* controller,
     return;
   }
 
-  std::shared_ptr<Call> call = std::make_shared<RerankCall>(
-      ctrl, done_guard.release(), req_pb, resp_pb, arena != nullptr);
+  std::shared_ptr<Call> call =
+      std::make_shared<RerankCall>(ctrl,
+                                   done_guard.release_for_async(),
+                                   req_pb,
+                                   resp_pb,
+                                   arena != nullptr,
+                                   true);
   rerank_service_impl_->process_async(call);
 }
 
@@ -970,8 +1012,12 @@ void handle_anthropic_messages(std::unique_ptr<AnthropicServiceImpl>& service,
     return;
   }
 
-  auto call = std::make_shared<AnthropicCall>(
-      ctrl, guard.release(), req_pb, resp_pb, arena != nullptr /*use_arena*/);
+  auto call = std::make_shared<AnthropicCall>(ctrl,
+                                              guard.release_for_async(),
+                                              req_pb,
+                                              resp_pb,
+                                              arena != nullptr /*use_arena*/,
+                                              true /*is_http_request*/);
 
   service->process_async(call);
 }

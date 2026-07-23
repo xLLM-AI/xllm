@@ -30,6 +30,7 @@ limitations under the License.
 #include "api_service/api_error.h"
 #include "api_service/call.h"
 #include "core/common/types.h"
+#include "core/util/closure_guard.h"
 #include "core/util/verbose_trace_logger.h"
 
 namespace xllm {
@@ -44,8 +45,54 @@ class StreamCall : public Call {
              ::google::protobuf::Closure* done,
              Request* request,
              Response* response,
-             bool use_arena = false)
-      : Call(controller, request_body_x_request_id(request)),
+             bool use_arena = false,
+             bool is_http_request = false)
+      : StreamCall(controller,
+                   done,
+                   request,
+                   response,
+                   use_arena,
+                   is_http_request,
+                   {}) {}
+
+  StreamCall(brpc::Controller* controller,
+             ClosureGuard::AsyncClosure async_closure,
+             Request* request,
+             Response* response,
+             bool use_arena = false,
+             bool is_http_request = false)
+      : StreamCall(controller,
+                   async_closure.done,
+                   request,
+                   response,
+                   use_arena,
+                   is_http_request,
+                   std::move(async_closure.after_done)) {}
+
+  ~StreamCall() override {
+    complete_request();
+    // For non stream response, call brpc done Run
+    if (!stream_) {
+      done_->Run();
+    }
+    if (!use_arena_) {
+      delete request_;
+      delete response_;
+    }
+  }
+
+ private:
+  StreamCall(brpc::Controller* controller,
+             ::google::protobuf::Closure* done,
+             Request* request,
+             Response* response,
+             bool use_arena,
+             bool is_http_request,
+             CompletionCallback completion_callback)
+      : Call(controller,
+             request_body_x_request_id(request),
+             is_http_request,
+             std::move(completion_callback)),
         done_(done),
         request_(request),
         response_(response),
@@ -71,17 +118,7 @@ class StreamCall : public Call {
     json_options_.jsonify_empty_array = true;
   }
 
-  ~StreamCall() override {
-    // For non stream response, call brpc done Run
-    if (!stream_) {
-      done_->Run();
-    }
-    if (!use_arena_) {
-      delete request_;
-      delete response_;
-    }
-  }
-
+ public:
   bool write_and_finish(Response& response) {
     butil::IOBufAsZeroCopyOutputStream json_output(
         &controller_->response_attachment());
@@ -97,7 +134,9 @@ class StreamCall : public Call {
 
   virtual bool finish_with_error(const StatusCode& code,
                                  const std::string& error_message) {
-    if (!stream_) {
+    if (!is_http_request()) {
+      controller_->SetFailed(error_message);
+    } else if (!stream_) {
       api_service::write_openai_error(
           controller_, code, error_message, x_request_id());
     } else {
@@ -181,13 +220,29 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
                 ::google::protobuf::Closure* done,
                 proto::AnthropicMessagesRequest* request,
                 proto::AnthropicMessagesResponse* response,
-                bool use_arena = false)
+                bool use_arena = false,
+                bool is_http_request = false)
       : StreamCall<proto::AnthropicMessagesRequest,
                    proto::AnthropicMessagesResponse>(controller,
                                                      done,
                                                      request,
                                                      response,
-                                                     use_arena) {}
+                                                     use_arena,
+                                                     is_http_request) {}
+
+  AnthropicCall(brpc::Controller* controller,
+                ClosureGuard::AsyncClosure async_closure,
+                proto::AnthropicMessagesRequest* request,
+                proto::AnthropicMessagesResponse* response,
+                bool use_arena = false,
+                bool is_http_request = false)
+      : StreamCall<proto::AnthropicMessagesRequest,
+                   proto::AnthropicMessagesResponse>(controller,
+                                                     std::move(async_closure),
+                                                     request,
+                                                     response,
+                                                     use_arena,
+                                                     is_http_request) {}
 
   ~AnthropicCall() override = default;
 
