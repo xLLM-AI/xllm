@@ -79,27 +79,29 @@ Qwen2AttentionImpl::Qwen2AttentionImpl(const ModelContext& context) {
 
   // 1. QKV parallel linear
   qkv_proj_ = register_module("qkv_proj",
-                              QKVParallelLinear(args.hidden_size(),
-                                                num_heads_,
-                                                num_kv_heads_,
-                                                args.head_dim(),
-                                                num_kv_head_replicas_,
-                                                qkv_bias,
-                                                /*gather_output=*/false,
-                                                parallel_args,
-                                                options,
-                                                quant_args));
+                              LoRAQKVParallelLinear(args.hidden_size(),
+                                                    num_heads_,
+                                                    num_kv_heads_,
+                                                    args.head_dim(),
+                                                    num_kv_head_replicas_,
+                                                    qkv_bias,
+                                                    /*gather_output=*/false,
+                                                    parallel_args,
+                                                    options,
+                                                    quant_args));
 
   // 2. Output projection
-  o_proj_ = register_module("o_proj",
-                            RowParallelLinear(total_num_heads * args.head_dim(),
-                                              args.hidden_size(),
-                                              /*bias=*/false,
-                                              /*input_is_parallelized=*/true,
-                                              /*enable_result_reduction=*/true,
-                                              quant_args,
-                                              parallel_args.tp_group_,
-                                              options));
+  o_proj_ =
+      register_module("o_proj",
+                      LoRARowParallelLinear(total_num_heads * args.head_dim(),
+                                            args.hidden_size(),
+                                            /*bias=*/false,
+                                            /*input_is_parallelized=*/true,
+                                            /*enable_result_reduction=*/true,
+                                            quant_args,
+                                            parallel_args.tp_group_,
+                                            options,
+                                            /*proj_name=*/"o_proj"));
 
   // 3. RMSNorm
   if (is_qwen3_style_) {

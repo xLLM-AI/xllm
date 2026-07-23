@@ -65,14 +65,15 @@ DenseMLPImpl::DenseMLPImpl(int64_t hidden_size,
   int64_t out_feature = is_gated_ ? intermediate_size_ * 2 : intermediate_size_;
   gate_up_proj_ =
       register_module("gate_up_proj",
-                      ColumnParallelLinear(hidden_size,
-                                           out_feature,
-                                           /*bias=*/has_bias,
-                                           /*gather_output=*/false,
-                                           quant_args,
-                                           process_group_,
-                                           options,
-                                           gate_up_proj_extra_args));
+                      LoRAColumnParallelLinear(hidden_size,
+                                               out_feature,
+                                               /*bias=*/has_bias,
+                                               /*gather_output=*/false,
+                                               quant_args,
+                                               process_group_,
+                                               options,
+                                               /*proj_name=*/"gate_up_proj",
+                                               gate_up_proj_extra_args));
 
   act_ =
       register_module("act", Activation(hidden_act_, is_gated_, swiglu_limit_));
@@ -82,16 +83,18 @@ DenseMLPImpl::DenseMLPImpl(int64_t hidden_size,
       module_prefix.empty()
           ? quant_args
           : quant_args.for_module(module_prefix + ".down_proj");
-  down_proj_ = register_module("down_proj",
-                               RowParallelLinear(intermediate_size_,
-                                                 hidden_size,
-                                                 /*bias=*/has_bias,
-                                                 /*input_is_parallelized=*/true,
-                                                 enable_result_reduction,
-                                                 down_proj_quant_args,
-                                                 process_group_,
-                                                 options,
-                                                 down_proj_extra_args));
+  down_proj_ =
+      register_module("down_proj",
+                      LoRARowParallelLinear(intermediate_size_,
+                                            hidden_size,
+                                            /*bias=*/has_bias,
+                                            /*input_is_parallelized=*/true,
+                                            enable_result_reduction,
+                                            down_proj_quant_args,
+                                            process_group_,
+                                            options,
+                                            /*proj_name=*/"down_proj",
+                                            down_proj_extra_args));
 }
 
 torch::Tensor DenseMLPImpl::forward(const torch::Tensor& hidden_states) {
