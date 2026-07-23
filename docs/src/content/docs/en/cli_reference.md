@@ -6,7 +6,7 @@ sidebar:
 
 xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the only required flag. When `--config_json_file` is used, values in the JSON file override command-line flag values. The tables below are grouped by the Config classes in `/xllm/core/framework/config`, with one Config per section. The `ConfigJsonUtils` section contains the common JSON config-file flags.
 
-> **Device selection**: xLLM no longer provides `--devices` / `--device_id` / `--draft_devices`. The devices to run on are determined by the visible-device mask environment variables (`ASCEND_RT_VISIBLE_DEVICES` for NPU, `CUDA_VISIBLE_DEVICES` for NVIDIA, `MLU_VISIBLE_DEVICES` for Cambricon, `HIP_VISIBLE_DEVICES` for DCU, `MUSA_VISIBLE_DEVICES` for Moore Threads). Each process uses all of its visible devices: a single-card process exposes one card, while single-process multi-card exposes several. The draft model always uses the same devices as the target model.
+> **Device selection**: xLLM no longer provides `--devices` / `--device_id` / `--draft_devices`. The available devices are determined by the visible-device mask environment variables (`ASCEND_RT_VISIBLE_DEVICES` for NPU, `CUDA_VISIBLE_DEVICES` for NVIDIA, `MLU_VISIBLE_DEVICES` for Cambricon, `HIP_VISIBLE_DEVICES` for DCU, `MUSA_VISIBLE_DEVICES` for Moore Threads). Each service process selects one runtime logical device from its visible devices according to its global `node_rank`; visible-device subsetting and reordering are resolved by the hardware runtime. The draft model always shares the selected device with the target model.
 
 ## ConfigJsonUtils
 
