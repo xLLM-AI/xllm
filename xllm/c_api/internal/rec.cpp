@@ -211,6 +211,8 @@ XLLM_CAPI_EXPORT bool xllm_rec_initialize(
         xllm_init_options.enable_multistream_perf_mode;
     FLAGS_enable_onerec_multistream_core_split =
         xllm_init_options.enable_onerec_multistream_core_split;
+    FLAGS_onerec_multistream_core_ratio =
+        xllm_init_options.onerec_multistream_core_ratio;
     apply_multistream_perf_mode_env_overrides();
 
     if (xllm_init_options.request_queue_size > 0) {
@@ -254,6 +256,8 @@ XLLM_CAPI_EXPORT bool xllm_rec_initialize(
               << FLAGS_enable_multistream_perf_mode
               << ", enable_onerec_multistream_core_split="
               << FLAGS_enable_onerec_multistream_core_split
+              << ", onerec_multistream_core_ratio="
+              << FLAGS_onerec_multistream_core_ratio
               << ", enable_rec_fast_sampler=" << FLAGS_enable_rec_fast_sampler
               << ", max_decode_rounds=" << FLAGS_max_decode_rounds;
 

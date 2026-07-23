@@ -340,6 +340,7 @@ DECLARE_bool(use_audio_in_video);
 DECLARE_uint32(rec_worker_max_concurrency);
 DECLARE_bool(enable_multistream_perf_mode);
 DECLARE_bool(enable_onerec_multistream_core_split);
+DECLARE_double(onerec_multistream_core_ratio);
 
 void apply_multistream_perf_mode_env_overrides();
 

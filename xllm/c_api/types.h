@@ -211,6 +211,9 @@ typedef struct XLLM_CAPI_EXPORT XLLM_InitOptions {
   /** Whether to split NPU cores between two OneRec worker streams */
   bool enable_onerec_multistream_core_split;
 
+  /** Ratio of NPU cores available to each OneRec worker stream */
+  double onerec_multistream_core_ratio;
+
   /**
    * Relative filename of the constrained decoding filter file (e.g.
    * `beam_search_filter.bin`), resolved against the model weights directory

@@ -142,6 +142,7 @@ const XLLM_InitOptions XLLM_INIT_REC_OPTIONS_DEFAULT = {
     .rec_worker_max_concurrency = 1,
     .enable_multistream_perf_mode = false,
     .enable_onerec_multistream_core_split = false,
+    .onerec_multistream_core_ratio = 0.5,
     .constrained_decoding_filter_path = "",
     .cpu_affinity = ""};
 
