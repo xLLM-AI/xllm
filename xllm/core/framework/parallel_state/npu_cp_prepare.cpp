@@ -805,10 +805,20 @@ void apply_cp_local_metadata_from_plan(ModelInputParams& params,
     return lens;
   };
 
+  // ATB-facing attention metadata (q_seq_lens / kv_seq_lens / q_cu_seq_lens /
+  // q_max_seq_len / kv_max_seq_len) MUST use local_padded_seq_lens so that the
+  // lengths are consistent with the hidden row count (local_padded_token_num),
+  // CpEpPadding, and SFA actual_seq_lengths — all of which are built from
+  // local_padded. Using local_real here (as the legacy comment claimed) created
+  // a mismatch for non-aligned prompts where local_real < local_padded: the
+  // ATB graph could size AllGather / attention buffers by kv_seq_lens (real)
+  // while the actual KV data has local_padded rows, causing SDMA DDR
+  // out-of-range crashes. local_real is retained in the plan for restore /
+  // sampling / logging but must NOT be written into the decoder variant pack.
   const std::vector<int32_t> new_q_lens =
-      build_lens(attention.host.q_seq_lens, plan.local_q_seq_lens);
+      build_lens(attention.host.q_seq_lens, plan.local_padded_seq_lens);
   const std::vector<int32_t> new_kv_lens =
-      build_lens(attention.host.kv_seq_lens, plan.local_kv_seq_lens);
+      build_lens(attention.host.kv_seq_lens, plan.local_padded_seq_lens);
 
   attention.host.q_seq_lens = new_q_lens;
   attention.host.kv_seq_lens = new_kv_lens;
@@ -822,15 +832,20 @@ void apply_cp_local_metadata_from_plan(ModelInputParams& params,
       torch::tensor(new_kv_lens, cpu_int32).to(device);
 
   std::vector<int32_t> cu;
-  cu.reserve(plan.local_q_seq_lens.size());
-  std::partial_sum(plan.local_q_seq_lens.begin(),
-                   plan.local_q_seq_lens.end(),
+  cu.reserve(plan.local_padded_seq_lens.size());
+  std::partial_sum(plan.local_padded_seq_lens.begin(),
+                   plan.local_padded_seq_lens.end(),
                    std::back_inserter(cu));
   attention.host.q_cu_seq_lens = cu;
   attention.device.q_cu_seq_lens = torch::tensor(cu, cpu_int32).to(device);
 
-  params.meta.q_max_seq_len = plan.local_q_max_seq_len;
-  params.meta.kv_max_seq_len = plan.local_kv_max_seq_len;
+  // max of local_padded_seq_lens (consistent with hidden row count and SFA)
+  int32_t local_padded_max = 0;
+  for (int32_t v : plan.local_padded_seq_lens) {
+    local_padded_max = std::max(local_padded_max, v);
+  }
+  params.meta.q_max_seq_len = local_padded_max;
+  params.meta.kv_max_seq_len = local_padded_max;
 }
 
 }  // namespace xllm

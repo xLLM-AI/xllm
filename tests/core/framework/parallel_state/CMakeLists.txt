@@ -53,6 +53,45 @@ if(USE_NPU)
 
   cc_test(
     NAME
+      npu_cp_prefill_plan_cmp_test
+    SRCS
+      npu_cp_prefill_plan_cmp_test.cpp
+    DEPS
+      parallel_state
+      torch
+      absl::synchronization
+      absl::time
+      GTest::gtest_main
+  )
+
+  cc_test(
+    NAME
+      npu_cp_ep_padding_cmp_test
+    SRCS
+      npu_cp_ep_padding_cmp_test.cpp
+    DEPS
+      parallel_state
+      torch
+      absl::synchronization
+      absl::time
+      GTest::gtest_main
+  )
+
+  cc_test(
+    NAME
+      npu_cp_slots_cmp_test
+    SRCS
+      npu_cp_slots_cmp_test.cpp
+    DEPS
+      parallel_state
+      torch
+      absl::synchronization
+      absl::time
+      GTest::gtest_main
+  )
+
+  cc_test(
+    NAME
       npu_cp_closure_test
     SRCS
       npu_cp_closure_test.cpp
