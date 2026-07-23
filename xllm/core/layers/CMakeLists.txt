@@ -47,6 +47,7 @@ cc_library(
     qwen3_vision_layer.h
     qwen3_decoder_layer.h
     qwen3_moe_decoder_layer.h
+    $<$<BOOL:${USE_CUDA}>:rwkv7_decoder_layer.h>
   SRCS
     oxygen_vision_layer.cpp
     $<$<BOOL:${USE_NPU}>:deepseek_v4_decoder_layer.cpp>
@@ -55,6 +56,7 @@ cc_library(
     qwen2_5_vision_layer.cpp
     qwen3_vision_layer.cpp
     qwen3_moe_decoder_layer.cpp
+    $<$<BOOL:${USE_CUDA}>:rwkv7_decoder_layer.cpp>
   DEPS
     $<$<BOOL:${USE_NPU}>:npu_layers>
     $<$<BOOL:${USE_NPU}>:npu_torch_layers>
