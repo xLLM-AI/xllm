@@ -70,6 +70,23 @@ torch::Tensor laser_attention(const torch::Tensor& q_bnsd,
                               double scale_value,
                               int64_t head_num);
 
+struct MtpPrepareNextDraftOutput {
+  torch::Tensor token_ids;
+  torch::Tensor embeddings;
+  torch::Tensor positions;
+  torch::Tensor kv_seq_lens;
+  torch::Tensor cache_slots;
+};
+
+std::optional<MtpPrepareNextDraftOutput> try_mtp_prepare_next_draft(
+    const torch::Tensor& accepted_tokens,
+    const torch::Tensor& accepted_embeddings,
+    const torch::Tensor& embedding_placeholder,
+    const torch::Tensor& base_positions,
+    const torch::Tensor& base_kv_seq_lens,
+    const torch::Tensor& block_tables,
+    int64_t block_size);
+
 void beam_search_rec(const torch::Tensor& logprobs,
                      const torch::Tensor& top_tokens,
                      const torch::Tensor& top_logprobs,

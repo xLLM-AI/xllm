@@ -73,6 +73,7 @@ void batch_decode(const torch::Tensor& query,
                   float scale,
                   const torch::Tensor& block_table,
                   const torch::Tensor& seq_lens,
+                  const std::optional<torch::Tensor>& seq_lens_host,
                   torch::Tensor& output) {
   int64_t head_size = query.size(-1);
   int64_t num_heads = query.size(-2);
@@ -87,6 +88,7 @@ void batch_decode(const torch::Tensor& query,
                            scale,
                            block_table,
                            seq_lens,
+                           seq_lens_host,
                            o);
 }
 

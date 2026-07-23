@@ -412,6 +412,10 @@ struct AttentionDeviceInput {
 struct AttentionInput {
   AttentionHostInput host;
   AttentionDeviceInput device;
+  // Some asynchronous decode paths produce exact sequence lengths on device
+  // after host metadata preparation has finished. Keep the host lengths for
+  // shape planning, but make PagedAttention consume the device values.
+  bool use_device_kv_seq_lens = false;
   torch::Tensor attention_host_buffer;
   torch::Tensor attention_device_buffer;
   uint64_t attention_buffer_bytes = 0;
@@ -422,6 +426,7 @@ struct AttentionInput {
     AttentionInput out;
     out.host = host;
     out.device = device.to(target_device);
+    out.use_device_kv_seq_lens = use_device_kv_seq_lens;
     out.attention_host_buffer = attention_host_buffer;
     out.attention_device_buffer = attention_device_buffer;
     out.attention_buffer_bytes = attention_buffer_bytes;

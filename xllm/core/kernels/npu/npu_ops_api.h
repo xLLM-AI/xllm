@@ -45,6 +45,7 @@ void batch_decode(const torch::Tensor& query,
                   float scale,
                   const torch::Tensor& block_table,
                   const torch::Tensor& seq_lens,
+                  const std::optional<torch::Tensor>& seq_lens_host,
                   torch::Tensor& output);
 
 std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(

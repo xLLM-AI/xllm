@@ -1215,8 +1215,13 @@ void NpuDeepseekV32DecoderLayerImpl::build_node_variant_pack(
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11) =
         atb_speed::Utils::AtTensor2Tensor(
             input_params.attention.device.kv_seq_lens);
-    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11).hostData =
-        const_cast<int32_t*>(input_params.attention.host.kv_seq_lens.data());
+    if (!input_params.attention.use_device_kv_seq_lens) {
+      node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11).hostData =
+          const_cast<int32_t*>(input_params.attention.host.kv_seq_lens.data());
+    } else {
+      node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11).hostData =
+          nullptr;
+    }
   }
 
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 12) =

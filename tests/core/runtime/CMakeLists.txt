@@ -79,6 +79,22 @@ cc_test(
 
 cc_test(
   NAME
+    mtp_async_state_test
+  SRCS
+    mtp_async_state_test.cpp
+    "${PROJECT_SOURCE_DIR}/xllm/core/runtime/mtp_async_state.cpp"
+  DEPS
+    torch
+    glog::glog
+    GTest::gtest_main
+)
+if(EXISTS "$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
+  target_link_options(mtp_async_state_test PRIVATE
+    "-Wl,-rpath-link,$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
+endif()
+
+cc_test(
+  NAME
     cp_input_partition_test
   SRCS
     cp_input_partition_test.cpp

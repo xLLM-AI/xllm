@@ -174,6 +174,7 @@ struct AttentionMetadata {
 #if defined(USE_NPU)
   // for npu
   bool is_spec_verify = false;
+  bool use_device_kv_seq_lens = false;
   torch::Tensor q_seq_lens_host;
   torch::Tensor kv_seq_lens_host;
   // For ACL graph execution - fixed-address device tiling data for

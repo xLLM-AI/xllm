@@ -153,7 +153,8 @@ void AttentionImpl::decoder_forward(torch::Tensor& query,
     } else {
       kv_seq_lens = attn_metadata.expanded_kv_seq_lens;
     }
-  } else if (attn_metadata.kv_seq_lens_host.defined()) {
+  } else if (!attn_metadata.use_device_kv_seq_lens &&
+             attn_metadata.kv_seq_lens_host.defined()) {
     kv_seq_lens = attn_metadata.kv_seq_lens_host;
   } else {
     // Fallback if host tensor isn't prepared.
@@ -173,13 +174,17 @@ void AttentionImpl::decoder_forward(torch::Tensor& query,
                                               output);
   } else {
     // Standard PagedAttention path
-    xllm::kernel::npu::batch_decode(query,
-                                    k_cache,
-                                    v_cache.value_or(torch::Tensor()),
-                                    scale_,
-                                    block_table,
-                                    kv_seq_lens,
-                                    output);
+    xllm::kernel::npu::batch_decode(
+        query,
+        k_cache,
+        v_cache.value_or(torch::Tensor()),
+        scale_,
+        block_table,
+        kv_seq_lens,
+        attn_metadata.use_device_kv_seq_lens
+            ? std::make_optional(attn_metadata.kv_seq_lens_host)
+            : std::nullopt,
+        output);
   }
 }
 
