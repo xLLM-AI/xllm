@@ -862,6 +862,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
          new_input.input_params.parallel.dp_global_token_nums) {
       token_num *= 2;
     }
+    for (int32_t& token_num :
+         new_input.input_params.parallel.raw_dp_global_token_nums) {
+      token_num *= 2;
+    }
     draft_outputs.emplace_back(run_llm_no_sync_impl(*draft_impl_,
                                                     new_input,
                                                     *prepare_stream_,
@@ -881,6 +885,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
     new_input = input;
     for (int32_t& token_num :
          new_input.input_params.parallel.dp_global_token_nums) {
+      token_num *= options_.num_speculative_tokens() + 1;
+    }
+    for (int32_t& token_num :
+         new_input.input_params.parallel.raw_dp_global_token_nums) {
       token_num *= options_.num_speculative_tokens() + 1;
     }
     ForwardOutput output = run_llm_no_sync_impl(*impl_,
@@ -1538,6 +1546,9 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
   for (int32_t& token_num : input_params.parallel.dp_global_token_nums) {
     token_num *= num_val_tokens;
   }
+  for (int32_t& token_num : input_params.parallel.raw_dp_global_token_nums) {
+    token_num *= num_val_tokens;
+  }
 
   if (use_chunked_prefill_spec_verify_path()) {
     input_params.embedding.input_embedding = torch::Tensor();
@@ -1767,9 +1778,17 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
       for (int32_t& token_num : input_params.parallel.dp_global_token_nums) {
         token_num *= 2;
       }
+      for (int32_t& token_num :
+           input_params.parallel.raw_dp_global_token_nums) {
+        token_num *= 2;
+      }
     } else if (dp_enabled) {
       constexpr int32_t num_extend_tokens = 2;
       for (int32_t& token_num : input_params.parallel.dp_global_token_nums) {
+        token_num *= num_extend_tokens;
+      }
+      for (int32_t& token_num :
+           input_params.parallel.raw_dp_global_token_nums) {
         token_num *= num_extend_tokens;
       }
     } else if (input_params.parallel.dp_global_token_nums.size() == 1) {

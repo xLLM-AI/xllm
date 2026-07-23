@@ -986,9 +986,19 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
               .device(torch::kCPU)
               .dtype(torch::kInt32)
               .pinned_memory(true));
+      const auto& raw_dp_token_nums =
+          processed_input.input_params.parallel.raw_dp_global_token_nums;
+      torch::Tensor raw_token_size_per_dp_group =
+          raw_dp_token_nums.empty() ? torch::Tensor()
+                                    : torch::tensor(raw_dp_token_nums,
+                                                    torch::TensorOptions()
+                                                        .device(torch::kCPU)
+                                                        .dtype(torch::kInt32)
+                                                        .pinned_memory(true));
       const bool is_prefill =
           processed_input.input_params.meta.batch_forward_type.no_decode();
       DpEpPadding dp_ep_padding(token_size_per_dp_group,
+                                raw_token_size_per_dp_group,
                                 context_.get_model_args().num_experts_per_tok(),
                                 context_.get_parallel_args().mapping_data(),
                                 device_,

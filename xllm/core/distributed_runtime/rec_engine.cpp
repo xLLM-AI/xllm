@@ -389,6 +389,8 @@ std::vector<ForwardInput> RecEngine::LlmRecEnginePipeline::prepare_inputs(
   for (int32_t dp_rank = 0; dp_rank < engine_.dp_size_; ++dp_rank) {
     batched_inputs[dp_rank].input_params.parallel.dp_global_token_nums =
         dp_global_token_nums;
+    batched_inputs[dp_rank].input_params.parallel.raw_dp_global_token_nums =
+        dp_global_token_nums;
     batched_inputs[dp_rank].input_params.parallel.dp_is_decode = dp_is_decode;
     if (batched_inputs[dp_rank]
             .input_params.meta.batch_forward_type.is_empty()) {
