@@ -466,8 +466,8 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
                    << "Using blank white image as fallback.";
       input_image = torch::ones({3, height, width}, torch::kFloat32);
     }
-    torch::Tensor preprocessed_image = video_processor_->preprocess(
-        input_image, height, width, "bicubic_no_aa");
+    torch::Tensor preprocessed_image =
+        video_processor_->preprocess(input_image, height, width);
     preprocessed_image =
         preprocessed_image.to(options_.device(), torch::kFloat32);
 
