@@ -134,6 +134,11 @@ DECLARE_int32(expert_parallel_degree);
 
 DECLARE_string(rank_tablefile);
 
+// --- FlashComm1 (sequence parallel) ---
+DECLARE_bool(enable_flashcomm1);
+
+DECLARE_int32(flashcomm1_sp_min_token_num);
+
 constexpr int32_t kGraphExecutorLogVerboseLevel = 50;
 
 DECLARE_bool(enable_graph);

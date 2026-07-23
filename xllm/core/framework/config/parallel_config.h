@@ -52,7 +52,9 @@ class ParallelConfig final {
          "enable_mm_encoder_dp",
          "enable_multi_stream_parallel",
          "micro_batch_num",
-         "enable_dp_balance"}};
+         "enable_dp_balance",
+         "enable_flashcomm1",
+         "flashcomm1_sp_min_token_num"}};
     return kOptionCategory;
   }
 
@@ -82,6 +84,17 @@ class ParallelConfig final {
   PROPERTY(int32_t, micro_batch_num) = 1;
 
   PROPERTY(bool, enable_dp_balance) = false;
+
+  // FlashComm1 (sequence parallel) master switch. Defaults to false; when true
+  // and tp>1, the model forward token-shards the residual stream and eligible
+  // RowParallel tails reduce-scatter instead of all-reduce.
+  PROPERTY(bool, enable_flashcomm1) = false;
+
+  // FlashComm1 token gate: SP engages only when dim0 tokens >= this value,
+  // keeping it on for prefill and off for decode where the collective fixed
+  // overhead dominates. 0 disables the gate. Only meaningful with
+  // enable_flashcomm1.
+  PROPERTY(int32_t, flashcomm1_sp_min_token_num) = 1000;
 
   [[nodiscard]] int32_t kv_split_size_effective() const noexcept {
     return kv_split_size_ > 0 ? kv_split_size_ : cp_size_;
