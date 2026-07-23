@@ -17,7 +17,12 @@ limitations under the License.
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <pybind11/embed.h>
+namespace py = pybind11;
 #include <torch/torch.h>
+
+#if defined(USE_NPU)
+#include <acl/acl.h>
+#endif
 
 #include <csignal>
 #include <filesystem>
@@ -508,6 +513,55 @@ int main(int argc, char** argv) {
     HelpFormatter::print_error("--model flag is required");
     return 1;
   }
+
+#if defined(USE_NPU)
+  // Early Python + torch_npu init for embedded-python model executor.
+  // post4 libtorch_npu.so calls PyGILState_Ensure inside empty_with_format();
+  // Python must be ready before any NPU tensor allocation happens.
+  if (ModelConfig::is_python_model_impl(
+          ModelConfig::get_instance().model_impl())) {
+    auto acl_ret = aclInit(nullptr);
+    CHECK(acl_ret == ACL_SUCCESS || acl_ret == 500000)
+        << "aclInit failed with error " << acl_ret;
+
+    bool we_initialized_python = false;
+    if (!Py_IsInitialized()) {
+      py::initialize_interpreter(/*init_signal_handlers=*/false);
+      we_initialized_python = true;
+    }
+
+    const auto first_device = DeviceNameUtils::parse_devices("auto").front();
+    const int device_index = first_device.index();
+
+    {
+      py::gil_scoped_acquire gil;
+      py::exec(
+          "import os, sys\n"
+          "os.environ['TORCH_DEVICE_BACKEND_AUTOLOAD'] = '0'\n"
+          "import torch\n"
+          "orig = torch._C._get_accelerator\n"
+          "try:\n"
+          "    torch._C._get_accelerator = lambda: torch.device('cpu')\n"
+          "    import torch_npu\n"
+          "finally:\n"
+          "    torch._C._get_accelerator = orig\n"
+          "import torch_npu.npu as _npu_mod\n"
+          "try:\n"
+          "    torch_npu._C._npu_init()\n"
+          "except RuntimeError as e:\n"
+          "    if 'already initialized' not in str(e).lower():\n"
+          "        raise\n"
+          "_npu_mod._initialized = True\n"
+          "_npu_mod._original_pid = os.getpid()\n"
+          "torch_npu._C._npu_setDevice(" +
+          std::to_string(device_index) + ")\n");
+    }
+
+    if (we_initialized_python) {
+      PyEval_SaveThread();
+    }
+  }
+#endif
 
   return run();
 }

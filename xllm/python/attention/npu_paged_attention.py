@@ -53,12 +53,8 @@ class NpuPagedAttentionBackend(AttentionBackend):
 
         self._kv_caches: list[KVCache] = []
         self._metadata: AttentionMetadata | None = None
-        self._causal_mask = (
-            torch.triu(torch.ones(2048, 2048, dtype=torch.float32), 1)
-            .to(torch.int8)
-            .contiguous()
-            .to(device)
-        )
+        self._causal_mask_size = 2048
+        self._causal_mask = self._make_causal_mask(self._causal_mask_size, device)
 
     @property
     def num_kv_blocks(self) -> int:
@@ -117,12 +113,14 @@ class NpuPagedAttentionBackend(AttentionBackend):
         k_cache, v_cache = self._kv_caches[layer_id]
         num_tokens = q.shape[0]
 
-        # Write KV to paged cache (kernel expects [T, kv_heads, head_dim]).
+        # Write KV to paged cache: k_cache is [num_blocks, block_size, heads, dim],
+        # flatten first two dims so slot_mapping indexes flat slots.
         k_3d = k.view(num_tokens, self.num_kv_heads, self.head_dim).contiguous()
         v_3d = v.view(num_tokens, self.num_kv_heads, self.head_dim).contiguous()
-        torch.ops.xllm_ops.reshape_paged_cache(
-            metadata.slot_mapping, k_3d, v_3d, k_cache, v_cache
-        )
+        flat_k_cache = k_cache.view(-1, self.num_kv_heads, self.head_dim)
+        flat_v_cache = v_cache.view(-1, self.num_kv_heads, self.head_dim)
+        flat_k_cache[metadata.slot_mapping] = k_3d
+        flat_v_cache[metadata.slot_mapping] = v_3d
 
         q_3d = q.view(num_tokens, self.num_heads, self.head_dim).contiguous()
 
@@ -139,11 +137,12 @@ class NpuPagedAttentionBackend(AttentionBackend):
         metadata: AttentionMetadata, num_tokens: int,
     ) -> torch.Tensor:
         actual_seq = self._cumulative_seq_lens(metadata, num_tokens)
+        causal_mask = self._get_causal_mask(num_tokens)
 
         output, _ = torch.ops.npu.npu_fused_infer_attention_score(
             q_3d, k_3d, v_3d,
             pse_shift=None,
-            atten_mask=self._causal_mask,
+            atten_mask=causal_mask,
             actual_seq_lengths=actual_seq,
             actual_seq_lengths_kv=actual_seq,
             num_heads=self.num_heads,
@@ -187,6 +186,22 @@ class NpuPagedAttentionBackend(AttentionBackend):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_causal_mask(size: int, device: torch.device) -> torch.Tensor:
+        return (
+            torch.triu(torch.ones(size, size, dtype=torch.float32), 1)
+            .to(torch.int8)
+            .contiguous()
+            .to(device)
+        )
+
+    def _get_causal_mask(self, seq_len: int) -> torch.Tensor:
+        if seq_len > self._causal_mask_size:
+            new_size = max(seq_len, self._causal_mask_size * 2)
+            self._causal_mask = self._make_causal_mask(new_size, self.device)
+            self._causal_mask_size = new_size
+        return self._causal_mask
 
     def _cumulative_seq_lens(
         self, metadata: AttentionMetadata, num_tokens: int,

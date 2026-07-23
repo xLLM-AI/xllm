@@ -98,7 +98,7 @@ class ModelExecutor:
         self.inductor_runner = None
 
         graph_backend = str(config.get("python_graph_backend", "off")).lower()
-        if graph_backend in ("", "off", "none", "0"):
+        if graph_backend in ("", "off", "none", "0", "eager"):
             pass
         elif graph_backend == "cudagraphs":
             from xllm.python.model_executor.runners.decode_cuda_graph import (
