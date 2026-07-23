@@ -402,3 +402,9 @@ DECLARE_bool(enable_aclnn_swiglu);
 DECLARE_bool(use_cpp_chat_template);
 
 DECLARE_int32(health_check_interval_ms);
+
+DECLARE_bool(enable_request_trace);
+
+DECLARE_string(request_trace_path);
+
+DECLARE_bool(request_trace_per_file);
