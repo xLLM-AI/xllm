@@ -7,8 +7,7 @@ cc_library(
   NAME
     scheduler
   HDRS
-    mix_scheduler.h
-    chunked_prefill_scheduler.h
+    scheduler_policy.h
     zero_eviction_scheduler.h
     continuous_scheduler.h
     disagg_pd_chunked_prefill_scheduler.h
@@ -17,14 +16,15 @@ cc_library(
     async_response_processor.h
     scheduler.h
     dit_scheduler.h
-    prefill_only_scheduler.h
     scheduler_factory.h
     request_priority_queue.h
     perf_model.h
     fixed_steps_scheduler.h
   SRCS
-    mix_scheduler.cpp
-    chunked_prefill_scheduler.cpp
+    scheduler_policy.cpp
+    prefill_first_policy.cpp
+    decode_first_policy.cpp
+    unified_policy.cpp
     zero_eviction_scheduler.cpp
     continuous_scheduler.cpp
     disagg_pd_chunked_prefill_scheduler.cpp
@@ -32,7 +32,6 @@ cc_library(
     pd_ooc_scheduler.cpp
     async_response_processor.cpp
     dit_scheduler.cpp
-    prefill_only_scheduler.cpp
     scheduler_factory.cpp
     perf_model.cpp
     fixed_steps_scheduler.cpp

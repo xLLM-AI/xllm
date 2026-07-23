@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "base_executor_impl.h"
@@ -30,6 +31,7 @@ limitations under the License.
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
 #include "mlu_graph_executor_impl.h"
+#include "models/llm/mlu/mtp_topk_state.h"
 #include "platform/device.h"
 #include "runtime/options.h"
 
@@ -71,11 +73,12 @@ class MockCausalLM : public CausalLM {
     last_tokens_size_ = tokens.size(0);
     last_dp_token_nums_ = params.parallel.dp_global_token_nums;
     auto hidden_states = params.embedding.input_embedding.matmul(weight_);
+    ModelOutput output(hidden_states);
     if (return_aux_hidden_states_) {
-      auto aux_hidden_states = hidden_states + 1;
-      return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);
+      output.aux_hidden_states = hidden_states + 1;
     }
-    return ModelOutput(hidden_states);
+    output.mtp_topk_state = mtp_topk_state_;
+    return output;
   }
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) override {
@@ -90,6 +93,9 @@ class MockCausalLM : public CausalLM {
   void return_aux_hidden_states(bool value) {
     return_aux_hidden_states_ = value;
   }
+  void set_mtp_topk_state(MtpTopkStatePtr state) {
+    mtp_topk_state_ = std::move(state);
+  }
   void load_model(std::unique_ptr<ModelLoader> loader) override {}
   torch::Device device() const override { return options_.device(); }
   void prepare_expert_weight(int32_t layer_id,
@@ -100,6 +106,7 @@ class MockCausalLM : public CausalLM {
  private:
   torch::Tensor input_;
   torch::Tensor weight_;
+  MtpTopkStatePtr mtp_topk_state_;
   torch::TensorOptions options_;
   bool return_aux_hidden_states_ = false;
   int32_t forward_cnt_ = 0;
@@ -332,6 +339,33 @@ TEST_F(MluGraphExecutorTest, DraftEagerDoesNotExposeAuxWhenDisabled) {
                                   kv_caches_,
                                   {forward_input.input_params});
 
+  EXPECT_FALSE(output.aux_hidden_states.defined());
+  EXPECT_EQ(model_->forward_cnt(), 1);
+}
+
+TEST_F(MluGraphExecutorTest, DraftEagerPreservesTypedTopkWhenAuxIsDisabled) {
+  mlu::model::MluMtpTopkState::LayerStates expected_layers;
+  expected_layers.emplace_back(layer::DsaTopkState(
+      torch::tensor({{1, 2}, {3, 4}}, tensor_options_.dtype(torch::kInt32)),
+      torch::tensor({5, 6}, tensor_options_.dtype(torch::kInt32))));
+  const MtpTopkStatePtr expected_state =
+      std::make_shared<mlu::model::MluMtpTopkState>(std::move(expected_layers));
+  model_->return_aux_hidden_states(true);
+  model_->set_mtp_topk_state(expected_state);
+  options_.is_draft_engine(true);
+  options_.enable_graph_aux_hidden_states(false);
+  rebuild_impl();
+
+  const int32_t batch_size = 2;
+  const uint64_t seed = 23;
+  auto forward_input = prepare_inputs(batch_size, seed);
+
+  ModelOutput output = impl_->run({forward_input.token_ids},
+                                  {forward_input.positions},
+                                  kv_caches_,
+                                  {forward_input.input_params});
+
+  EXPECT_EQ(output.mtp_topk_state.get(), expected_state.get());
   EXPECT_FALSE(output.aux_hidden_states.defined());
   EXPECT_EQ(model_->forward_cnt(), 1);
 }

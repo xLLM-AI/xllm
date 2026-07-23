@@ -20,30 +20,31 @@ limitations under the License.
 #include <vector>
 
 #include "core/layers/mlu/deepseek_v2_decoder_layer_impl.h"
-#include "llm_model_base.h"
-#include "mtp_model_base.h"
+#include "models/llm/llm_model_base.h"
+#include "models/llm/mlu/mtp_model_base.h"
 
 // DeepSeek v2 compatible with huggingface weights
 // ref to:
 // https://github.com/vllm-project/vllm/blob/v0.6.6/vllm/model_executor/models/deepseek_v2.py
 
-namespace xllm {
+namespace xllm::mlu::model {
 
 class DeepseekMultiTokenPredictorLayerImpl
-    : public MtpDecoderLayerImplBase<layer::DeepseekV2DecoderLayer> {
+    : public MluMtpDecoderLayerImplBase<layer::DeepseekV2DecoderLayer> {
  public:
   DeepseekMultiTokenPredictorLayerImpl(const ModelContext& context,
                                        const int32_t layer_index)
-      : MtpDecoderLayerImplBase<layer::DeepseekV2DecoderLayer>(context,
-                                                               layer_index) {}
+      : MluMtpDecoderLayerImplBase<layer::DeepseekV2DecoderLayer>(context,
+                                                                  layer_index) {
+  }
 };
 TORCH_MODULE(DeepseekMultiTokenPredictorLayer);
 
 class DeepseekMtpModelImpl
-    : public MtpModelImplBase<DeepseekMultiTokenPredictorLayer> {
+    : public MluMtpModelImplBase<DeepseekMultiTokenPredictorLayer> {
  public:
   DeepseekMtpModelImpl(const ModelContext& context)
-      : MtpModelImplBase<DeepseekMultiTokenPredictorLayer>(context) {}
+      : MluMtpModelImplBase<DeepseekMultiTokenPredictorLayer>(context) {}
 };
 TORCH_MODULE(DeepseekMtpModel);
 
@@ -134,4 +135,4 @@ REGISTER_MODEL_ARGS(deepseek_v3_mtp, [&] {
   LOAD_ARG_OR(index_n_heads, "index_n_heads", 64);
   LOAD_ARG_OR(index_topk, "index_topk", 2048);
 });
-}  // namespace xllm
+}  // namespace xllm::mlu::model

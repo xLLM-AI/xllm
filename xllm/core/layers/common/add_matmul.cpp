@@ -194,10 +194,9 @@ void AddMatmulWeightTransposedImpl::load_state_dict(
   } else {
     if (state_dict.has("weight")) {
       weight::load_weight(state_dict, "weight", weight_, weight_is_loaded_);
-      if (with_bias_) {
-        torch::Tensor transposed = weight_.data().transpose(0, 1).contiguous();
-        weight_.set_data(transposed);
-      }
+
+      torch::Tensor transposed = weight_.data().transpose(0, 1).contiguous();
+      weight_.set_data(transposed);
     }
   }
   if (with_bias_) {

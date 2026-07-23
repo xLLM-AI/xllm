@@ -19,7 +19,7 @@ limitations under the License.
 #include <c10/core/Device.h>
 #include <glog/logging.h>
 #include <tvm/ffi/extra/c_env_api.h>
-#if !defined(XLLM_TORCH_MUSA)
+#if !defined(USE_MUSA)
 #include <c10/cuda/CUDAGuard.h>
 #endif
 #include <dlfcn.h>
@@ -37,7 +37,7 @@ limitations under the License.
 #include "core/util/env_var.h"
 #include "core/util/utils.h"
 
-#if defined(XLLM_TORCH_MUSA)
+#if defined(USE_MUSA)
 
 #include <array>
 #include <optional>
@@ -608,7 +608,7 @@ void bind_tvmffi_stream_to_current_torch_stream(const torch::Device& device) {
     return;
   }
 
-#if !defined(XLLM_TORCH_MUSA)
+#if !defined(USE_MUSA)
   const c10::cuda::CUDAStream cur =
       c10::cuda::getCurrentCUDAStream(device.index());
   void* const stream = reinterpret_cast<void*>(cur.stream());

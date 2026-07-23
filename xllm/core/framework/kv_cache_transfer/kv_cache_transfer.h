@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "common/types.h"
 #include "framework/kv_cache/kv_cache.h"
+#include "framework/kv_cache/kv_cache_tensor_allocator.h"
 #if defined(USE_NPU)
 #include "platform/npu/npu_layer_synchronizer.h"
 #endif
@@ -175,8 +176,10 @@ class KVCacheTransfer {
 
 class KVCacheTransferFactory {
  public:
-  using AllocateKVCacheFunc =
-      std::function<bool(const KVCacheShape&, bool use_huge_page_allocator)>;
+  using AllocateKVCacheFunc = std::function<bool(
+      const KVCacheShape&,
+      bool use_huge_page_allocator,
+      std::shared_ptr<KVCacheTensorAllocator> tensor_allocator)>;
 
   static std::shared_ptr<KVCacheTransfer> create(
       const std::string& transfer_type,

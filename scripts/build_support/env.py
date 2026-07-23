@@ -74,15 +74,6 @@ def get_dcu_root_path() -> Optional[str]:
         return None
 
 
-def get_torch_musa_root_path() -> Optional[str]:
-    try:
-        import torch_musa
-        import os
-        return os.path.dirname(os.path.abspath(torch_musa.__file__))
-    except ImportError:
-        return None
-
-
 def _find_dcu_so(package: str, pattern: str) -> Optional[str]:
     try:
         import glob
@@ -279,13 +270,45 @@ def set_ilu_envs() -> None:
 
 
 def set_musa_envs() -> None:
+    """Configure MUSA through mcc_wrapper and the CUDA compatibility path."""
+    from sysconfig import get_paths
     set_common_envs()
-    os.environ["PYTORCH_MUSA_INSTALL_PATH"] = get_torch_musa_root_path() or ""
     import torch_musa
-    from torch_musa.utils.musa_extension import MUSA_HOME
-    os.environ["TORCH_MUSA_PYTHONPATH"] = torch_musa.core.cmake_prefix_path
-    os.environ["MUSA_TOOLKIT_ROOT_DIR"] = MUSA_HOME
-    os.environ["MKL_DIR"] = "/opt/intel/oneapi/mkl/lib/cmake/mkl"
-    os.environ["MKLROOT"] = "/opt/intel/oneapi/mkl"
-    os.environ["TorchMusa_DIR"] = torch_musa.core.cmake_prefix_path + "/TorchMusa"
-    os.environ["MUSAMAPPING_PATH"] = MUSA_HOME + "/tools/musamapping"
+    from torch_musa.utils.musa_extension import MUSA_HOME as _MUSA_HOME
+    musa_home = os.getenv("MUSA_HOME") or _MUSA_HOME or "/usr/local/musa"
+    os.environ["MUSA_HOME"] = musa_home
+    os.environ["CUDA_HOME"] = musa_home
+    os.environ["CUDAToolkit_ROOT"] = musa_home
+    os.environ["CUDA_TOOLKIT_ROOT_DIR"] = musa_home
+    os.environ["MUSAMAPPING_PATH"] = os.path.join(
+        musa_home, "tools", "musamapping"
+    )
+
+    cmake_prefix = torch_musa.core.cmake_prefix_path
+    os.environ["TORCH_MUSA_PYTHONPATH"] = cmake_prefix
+    os.environ["TorchMusa_DIR"] = os.path.join(cmake_prefix, "TorchMusa")
+
+    torch_musa_root = os.path.abspath(os.path.join(cmake_prefix, "../.."))
+    library_paths: list[str] = [
+        os.path.join(musa_home, "lib"),
+        os.path.join(torch_musa_root, "lib"),
+        os.path.join(get_torch_root_path() or "", "lib"),
+    ]
+    python_platlib = get_paths()["platlib"]
+    library_paths.append(os.path.join(python_platlib, "tvm_ffi", "lib"))
+
+    mkl_root = os.getenv("MKLROOT")
+    if mkl_root:
+        os.environ.setdefault(
+            "MKL_DIR", os.path.join(mkl_root, "lib", "cmake", "mkl")
+        )
+        library_paths.extend(
+            [
+                os.path.join(mkl_root, "lib", "intel64"),
+                os.path.join(mkl_root, "lib"),
+            ]
+        )
+
+    for path in library_paths:
+        if path and os.path.isdir(path):
+            prepend_path_env("LD_LIBRARY_PATH", path)

@@ -22,14 +22,13 @@ limitations under the License.
 #include "npu/npu_ops_api.h"
 #include "npu/xllm_ops/xllm_ops_api.h"
 #include "triton_npu/torch_api/triton_ops_api.h"
+#elif defined(USE_MUSA)
+#include "musa/musa_ops_api.h"
 #elif defined(USE_CUDA)
 #include "cuda/attention_runner.h"
 #include "cuda/cuda_ops_api.h"
 #elif defined(USE_ILU)
 #include "ilu/ilu_ops_api.h"
-#elif defined(USE_MUSA)
-#include "cuda/cuda_ops_api.h"
-#include "musa/musa_ops_api.h"
 #elif defined(USE_DCU)
 #include "cuda/cuda_ops_api.h"
 #include "dcu/aiter_quant_adapter.h"

@@ -14,11 +14,11 @@ limitations under the License.
 ==============================================================================*/
 #pragma once
 
-#include "deepseek_v2.h"
-#include "llm_model_base.h"
-#include "mtp_model_base.h"
+#include "models/llm/deepseek_v2.h"
+#include "models/llm/llm_model_base.h"
+#include "models/llm/mlu/deepseek_mtp.h"
 
-namespace xllm {
+namespace xllm::mlu::model {
 
 class Glm5MtpForCausalLMImpl : public LlmForCausalLMImplBase<DeepseekMtpModel> {
  public:
@@ -90,6 +90,9 @@ REGISTER_MODEL_ARGS(
       LOAD_ARG_OR(index_head_dim, "index_head_dim", 128);
       LOAD_ARG_OR(index_n_heads, "index_n_heads", 32);
       LOAD_ARG_OR(index_topk, "index_topk", 2048);
+      LOAD_ARG_OR(index_share_for_mtp_iteration,
+                  "index_share_for_mtp_iteration",
+                  false);
 
       // Computed parameters
       // the original head_dim in glm5 config seem useless
@@ -108,4 +111,4 @@ REGISTER_MODEL_ARGS(
                                           args->eos_token_id_vec().end()));
     }));
 
-}  // namespace xllm
+}  // namespace xllm::mlu::model

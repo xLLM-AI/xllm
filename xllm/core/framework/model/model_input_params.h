@@ -39,6 +39,7 @@ limitations under the License.
 #include "platform/dcu/dcu_layer_synchronizer.h"
 #endif
 
+#include "core/framework/model/mtp_topk_state.h"
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "framework/batch/batch_forward_type.h"
 #include "framework/parallel_state/npu_cp_ep_padding.h"
@@ -948,7 +949,8 @@ struct ModelInputParams {
     params.is_spec_verify = is_spec_verify;
     params.num_accepted_tokens = safe_to(num_accepted_tokens, device, true);
     params.num_accepted_tokens_host = num_accepted_tokens_host;
-    params.dsa_topk_indices = safe_to(dsa_topk_indices, device, true);
+    params.mtp_topk_state =
+        mtp_topk_state == nullptr ? nullptr : mtp_topk_state->to(device);
     for (const auto& table : multi_block_tables) {
       params.multi_block_tables.push_back(
           safe_to(table, table.options().device(torch::kCPU), true));
@@ -1074,7 +1076,8 @@ struct ModelInputParams {
 
   bool is_spec_verify = false;
   torch::Tensor num_accepted_tokens;
-  torch::Tensor dsa_topk_indices;
+  // Backend-neutral state reused by the next MTP draft step.
+  MtpTopkStatePtr mtp_topk_state;
   std::vector<int64_t> num_accepted_tokens_host;
 
   RecModelInputParams rec_params;
