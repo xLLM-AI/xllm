@@ -16,7 +16,6 @@ limitations under the License.
 #pragma once
 
 #include "core/framework/model/model_output.h"
-#include "core/framework/parallel_state/npu_cp_closure.h"
 #include "core/layers/npu/npu_deepseek_v32_decoder_layer_impl.h"
 #include "llm_model_base.h"
 
@@ -286,13 +285,10 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
     // rank-local padded layout consumed by the decoder, and rewrite the
     // attention metadata to the per-rank local view. No-ops when the plan is
     // disabled (cp_size == 1 / decode), so the forward is unconditional.
-    const NpuCpPrefillPlan& cp_plan = input_params.parallel.npu_cp_prefill_plan;
-    h = ::xllm::npu_cp::localize(h, cp_plan);
-    torch::Tensor local_positions =
-        ::xllm::npu_cp::localize_positions(cp_plan, positions);
+    const npu::cp::Plan& cp_plan = input_params.parallel.cp_plan;
+    torch::Tensor local_positions = positions;
     ModelInputParams modified_input_params = input_params;
-    ::xllm::apply_cp_local_metadata_from_plan(
-        modified_input_params, cp_plan, device_);
+    cp_plan.preprocess(h, local_positions, modified_input_params);
     auto cos_sin = atb_pos_emb_(cos_sin_, local_positions, 0);
     auto cos_sin_chunks = cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
     auto cos_pos = cos_sin_chunks[0].contiguous();
@@ -379,7 +375,7 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
     // Restore global-real order from the rank-major gathered buffer so the LM
     // head / scheduler / MTP see logical unpadded hidden. No-op when the plan
     // is disabled or the CP group is single-rank.
-    h = ::xllm::npu_cp::gather_restore(h, cp_plan, cp_group_);
+    h = cp_plan.postprocess(h, cp_group_);
     auto hidden_states = norm_(h, 0);
     return ModelOutput(hidden_states);
   }

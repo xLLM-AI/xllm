@@ -32,7 +32,6 @@ limitations under the License.
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model_context.h"
-#include "core/framework/parallel_state/npu_cp_closure.h"
 #include "core/framework/parallel_state/npu_dp_ep_padding.h"
 #include "core/layers/common/attention_mask.h"
 #include "core/layers/npu/npu_block_copy_impl.h"
@@ -137,14 +136,10 @@ class MtpModelImplBase : public torch::nn::Module {
     // fusion is word_emb -> enorm -> hnorm -> eh_proj, so localization happens
     // here (after eh_proj) to keep the fused embedding consistent across CP
     // ranks. No-ops when the plan is disabled (cp_size == 1 / decode).
-    const NpuCpPrefillPlan& cp_plan = input_params.parallel.npu_cp_prefill_plan;
-    h = ::xllm::npu_cp::localize(h, cp_plan);
-    torch::Tensor local_positions =
-        ::xllm::npu_cp::localize_positions(cp_plan, positions);
-    ModelInputParams& input_params_new =
-        const_cast<ModelInputParams&>(input_params);
-    ::xllm::apply_cp_local_metadata_from_plan(
-        input_params_new, cp_plan, device_);
+    const npu::cp::Plan& cp_plan = input_params.parallel.cp_plan;
+    torch::Tensor local_positions = positions;
+    ModelInputParams input_params_new = input_params;
+    cp_plan.preprocess(h, local_positions, input_params_new);
 
     auto target_cos_sin = atb_pos_emb_(cos_sin_, local_positions, 0);
     auto target_cos_sin_chunks = target_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
@@ -158,16 +153,16 @@ class MtpModelImplBase : public torch::nn::Module {
     torch::Tensor attn_mask;
     // TODO(liangzhiwei20): support prefix cache for deepseek .
     if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
-      int num_sequences = input_params.meta.num_sequences;
+      int num_sequences = input_params_new.meta.num_sequences;
       if (num_sequences > 0) {
         std::vector<torch::Tensor> req_mask_vec;
         req_mask_vec.reserve(num_sequences);
 
         for (int j = 0; j < num_sequences; j++) {
           auto mask = attn_mask_.gen_append_mask(
-              input_params.attention.host.q_seq_lens[j],
-              input_params.attention.host.kv_seq_lens[j],
-              input_params.meta.kv_max_seq_len,
+              input_params_new.attention.host.q_seq_lens[j],
+              input_params_new.attention.host.kv_seq_lens[j],
+              input_params_new.meta.kv_max_seq_len,
               h.dtype().toScalarType(),
               h.device());
           req_mask_vec.emplace_back(mask);
@@ -244,7 +239,7 @@ class MtpModelImplBase : public torch::nn::Module {
     // Restore global-real order from the rank-major gathered buffer so the LM
     // head / scheduler see logical unpadded hidden. No-op when the plan is
     // disabled or the CP group is single-rank.
-    h = ::xllm::npu_cp::gather_restore(h, cp_plan, cp_group_);
+    h = cp_plan.postprocess(h, cp_group_);
 
     auto hidden_states = final_norm_(h, 0);
     ModelOutput output(hidden_states);

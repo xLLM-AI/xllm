@@ -114,10 +114,14 @@ class WorkerImpl {
   void prepare_work_before_execute_on_stream(const ForwardInput& input,
                                              ForwardInput& processed_input,
                                              Stream& prepare_stream);
+#if defined(USE_NPU)
+  void prepare_cp_input(const ForwardInput& input,
+                        ForwardInput& processed_input);
+#endif
 
   // True when this worker instance owns the NPU model-side CP slot prepare
-  // (build_npu_cp_prefill_plan + localize_slots_recovered +
-  // recompute_new_cache_slots). Composite speculative workers (MTP) override
+  // (Plan::build + Plan::localize_slots_recovered + recompute_new_cache_slots).
+  // Composite speculative workers (MTP) override
   // this to return false so their outer prepare only materializes the input on
   // device; each target/draft leaf then runs the CP prepare once against its
   // own ParallelArgs inside run_llm_no_sync_impl. This prevents the composite

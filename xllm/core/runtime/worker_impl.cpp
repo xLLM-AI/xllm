@@ -67,9 +67,7 @@ limitations under the License.
 #include "framework/kv_cache/linear_state_restore.h"
 #include "framework/model/model_input_params.h"
 #include "framework/model_loader.h"
-#include "framework/parallel_state/npu_cp_closure.h"
-#include "framework/parallel_state/npu_cp_ep_padding.h"
-#include "framework/parallel_state/npu_cp_prepare.h"
+#include "framework/parallel_state/npu/cp/plan.h"
 #include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
 #include "framework/xtensor/global_xtensor.h"
@@ -791,6 +789,114 @@ torch::Tensor WorkerImpl::compute_in_prefix_slots(const ForwardInput& input) {
   }
   return torch::tensor(in_prefix_slots_vec, torch::kInt);
 }
+
+void WorkerImpl::prepare_cp_input(const ForwardInput& input,
+                                  ForwardInput& processed_input) {
+  const bool enabled =
+      parallel_args_.cp_size() > 1 && Platform::uses_model_cp_partition() &&
+      !input.input_params.meta.batch_forward_type.is_decode() &&
+      handles_model_cp_prepare() && model_supports_model_cp() &&
+      !input.cp_partitioned;
+  if (!enabled) {
+    return;
+  }
+
+  auto tensor_to_int32_vec = [](const torch::Tensor& tensor) {
+    std::vector<int32_t> values;
+    if (!tensor.defined() || tensor.numel() == 0) {
+      return values;
+    }
+    torch::Tensor cpu =
+        tensor.device().is_cpu() ? tensor : tensor.to(torch::kCPU);
+    cpu = cpu.contiguous().to(torch::kInt32);
+    values.assign(cpu.data_ptr<int32_t>(),
+                  cpu.data_ptr<int32_t>() + cpu.numel());
+    return values;
+  };
+
+  const int32_t num_sequences = processed_input.input_params.meta.num_sequences;
+  const std::vector<int32_t>& host_q_seq_lens =
+      processed_input.input_params.attention.host.q_seq_lens;
+  std::vector<int32_t> global_q_seq_lens;
+  if (!host_q_seq_lens.empty()) {
+    const bool is_cumsum =
+        static_cast<int32_t>(host_q_seq_lens.size()) == num_sequences + 1 &&
+        host_q_seq_lens.front() == 0;
+    if (is_cumsum) {
+      global_q_seq_lens.reserve(num_sequences);
+      for (int32_t i = 0; i < num_sequences; ++i) {
+        global_q_seq_lens.push_back(
+            std::max(0, host_q_seq_lens[i + 1] - host_q_seq_lens[i]));
+      }
+    } else {
+      global_q_seq_lens = host_q_seq_lens;
+    }
+  } else {
+    global_q_seq_lens = tensor_to_int32_vec(
+        processed_input.input_params.attention.device.q_seq_lens);
+  }
+
+  torch::Tensor global_positions = processed_input.host_positions();
+  if (!global_positions.defined() || global_positions.numel() == 0) {
+    global_positions = processed_input.positions;
+    if (global_positions.defined() && !global_positions.device().is_cpu()) {
+      global_positions =
+          global_positions.to(torch::kCPU).contiguous().to(torch::kInt32);
+    }
+  }
+
+  std::vector<int32_t> kv_cache_tokens_per_seq =
+      processed_input.input_params.attention.host.kv_cache_tokens_nums;
+  if (kv_cache_tokens_per_seq.empty()) {
+    kv_cache_tokens_per_seq = tensor_to_int32_vec(
+        processed_input.input_params.attention.device.kv_cache_tokens_nums);
+  }
+
+  const bool have_prefix_slots =
+      KVCacheConfig::get_instance().enable_prefix_cache() ||
+      SchedulerConfig::get_instance().enable_chunked_prefill();
+  npu::cp::SourceLayout source;
+  source.q_seq_lens = std::move(global_q_seq_lens);
+  source.positions = global_positions;
+  source.have_prefix_slots = have_prefix_slots;
+  source.kv_cache_tokens_per_seq = std::move(kv_cache_tokens_per_seq);
+
+  npu::cp::ParallelConfig config;
+  config.size = parallel_args_.cp_size();
+  config.rank = parallel_args_.cp_rank();
+  config.block_size = options_.block_size();
+  config.kv_split_size = parallel_args_.kv_split_size_effective();
+  config.num_experts_per_tok = context_.get_model_args().num_experts_per_tok();
+  config.mapping_data = context_.get_parallel_args().mapping_data();
+  config.device = device_;
+  config.dtype = dtype_;
+  config.is_prefill = true;
+  processed_input.input_params.parallel.cp_plan =
+      npu::cp::Plan::build(source, config);
+
+  if (input.kv_slot_layout == KvSlotLayout::LOGICAL_REAL) {
+    const npu::cp::Plan& plan = processed_input.input_params.parallel.cp_plan;
+    auto& new_cache_slots =
+        processed_input.input_params.attention.device.new_cache_slots;
+    new_cache_slots = plan.localize_slots_recovered(new_cache_slots);
+    new_cache_slots = recompute_new_cache_slots(processed_input).to(device_);
+    CHECK(new_cache_slots.defined() &&
+          new_cache_slots.numel() == plan.recovered_token_num())
+        << "CP recovered new_cache_slots numel (" << new_cache_slots.numel()
+        << ") must equal recovered token count (" << plan.recovered_token_num()
+        << ")";
+
+    if (have_prefix_slots) {
+      const torch::Tensor& block_tables =
+          processed_input.input_params.attention.device.block_tables;
+      if (block_tables.defined() && block_tables.dim() == 2) {
+        processed_input.input_params.attention.device.in_prefix_slots =
+            compute_in_prefix_slots(processed_input).to(device_);
+      }
+    }
+    processed_input.kv_slot_layout = KvSlotLayout::NPU_CP_RECOVERED_PHYSICAL;
+  }
+}
 #endif
 
 void WorkerImpl::prepare_work_before_execute(const ForwardInput& input,
@@ -832,248 +938,12 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
   CHECK(prepare_stream.wait_event(input.metadata_ready_event))
       << "failed to wait input metadata ready event on worker prepare stream";
 
-  // Model-side CP: the worker keeps the global token stream intact (the model
-  // localizes hidden states after embedding and restores global-real order
-  // after the last decoder layer). The worker only builds the CP plan +
-  // decoder-facing cp_prefill_inputs / cp_ep_padding from the global layout.
-  // Composite speculative workers (MTP) opt out via handles_model_cp_prepare()
-  // so their outer prepare does not convert slots; each leaf runs this once
-  // against its own ParallelArgs inside run_llm_no_sync_impl.
-  // The resolved-capability check (model_supports_model_cp) avoids treating
-  // every NPU model as CP-capable: only deepseek_v32 / deepseek_v32_mtp /
-  // glm_moe_dsa / glm_moe_dsa_mtp opt into the model-side CP closure.
-  const bool needs_model_cp_side =
-      parallel_args_.cp_size() > 1 && Platform::uses_model_cp_partition() &&
-      !input.input_params.meta.batch_forward_type.is_decode() &&
-      handles_model_cp_prepare() && model_supports_model_cp();
-#if defined(USE_NPU)
-  // Model-side CP plan built from the GLOBAL (un-sliced) layout. The model
-  // localizes hidden states after embedding and restores global-real order
-  // after the last decoder layer; the worker only supplies the plan and the
-  // decoder-facing cp_prefill_inputs / cp_ep_padding derived from it. Tokens
-  // and positions stay global here.
-  NpuCpPrefillPlan npu_cp_plan;
-  std::vector<int32_t> kv_cache_tokens_per_seq;
-  const bool model_cp_prefix_or_chunked =
-      ::xllm::KVCacheConfig::get_instance().enable_prefix_cache() ||
-      ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill();
-  // Plan building moved into prepare_device_on_stream (after input.to(device))
-  // because RPC transport packs metadata into a host buffer that is only
-  // unpacked by ForwardInput::to(). Building from the raw `input` here would
-  // see empty num_sequences / q_seq_lens / positions on the worker side.
-#endif
-
   auto prepare_device_on_stream = [&]() {
     processed_input = input.to(device_, dtype_);
     ensure_forward_input_device_tensors(processed_input, device_);
 
 #if defined(USE_NPU)
-    if (needs_model_cp_side && !input.cp_partitioned) {
-      // Build the model-side CP plan from `processed_input` (post-`to()`),
-      // which has host metadata unpacked from the RPC packed proto. On
-      // single-node (non-RPC) paths the host vectors are already populated; on
-      // multi-node paths we fall back to the device tensors (copied to CPU) if
-      // the host vectors are still empty.
-      const int32_t meta_num_sequences =
-          processed_input.input_params.meta.num_sequences;
-      const std::vector<int32_t>& host_q =
-          processed_input.input_params.attention.host.q_seq_lens;
-      const torch::Tensor& host_positions_tensor =
-          processed_input.host_positions();
-      const torch::Tensor& device_q_seq_lens =
-          processed_input.input_params.attention.device.q_seq_lens;
-      const torch::Tensor& device_kv_cache_tokens_nums =
-          processed_input.input_params.attention.device.kv_cache_tokens_nums;
-      const torch::Tensor& device_positions = processed_input.positions;
-
-      auto tensor_to_int32_vec = [](const torch::Tensor& t) {
-        std::vector<int32_t> v;
-        if (!t.defined() || t.numel() == 0) return v;
-        torch::Tensor cpu = t.device().is_cpu() ? t : t.to(torch::kCPU);
-        cpu = cpu.contiguous().to(torch::kInt32);
-        v.assign(cpu.data_ptr<int32_t>(),
-                 cpu.data_ptr<int32_t>() + cpu.numel());
-        return v;
-      };
-
-      std::vector<int32_t> global_q_seq_lens;
-      if (!host_q.empty()) {
-        const bool q_is_cumsum =
-            static_cast<int32_t>(host_q.size()) == meta_num_sequences + 1 &&
-            host_q.front() == 0;
-        if (q_is_cumsum) {
-          global_q_seq_lens.reserve(meta_num_sequences);
-          for (int32_t i = 0; i < meta_num_sequences; ++i) {
-            global_q_seq_lens.push_back(std::max(0, host_q[i + 1] - host_q[i]));
-          }
-        } else {
-          global_q_seq_lens.assign(host_q.begin(), host_q.end());
-        }
-      } else if (device_q_seq_lens.defined() && device_q_seq_lens.numel() > 0) {
-        global_q_seq_lens = tensor_to_int32_vec(device_q_seq_lens);
-      }
-
-      torch::Tensor global_positions;
-      if (host_positions_tensor.defined() &&
-          host_positions_tensor.numel() > 0) {
-        global_positions = host_positions_tensor;
-      } else if (device_positions.defined() && device_positions.numel() > 0) {
-        global_positions = device_positions.device().is_cpu()
-                               ? device_positions
-                               : device_positions.to(torch::kCPU)
-                                     .contiguous()
-                                     .to(torch::kInt32);
-      }
-
-      if (!processed_input.input_params.attention.host.kv_cache_tokens_nums
-               .empty()) {
-        kv_cache_tokens_per_seq =
-            processed_input.input_params.attention.host.kv_cache_tokens_nums;
-      } else if (device_kv_cache_tokens_nums.defined() &&
-                 device_kv_cache_tokens_nums.numel() > 0) {
-        kv_cache_tokens_per_seq =
-            tensor_to_int32_vec(device_kv_cache_tokens_nums);
-      }
-
-      npu_cp_plan = build_npu_cp_prefill_plan(
-          parallel_args_.cp_size(),
-          parallel_args_.cp_rank(),
-          global_q_seq_lens,
-          global_positions,
-          /*have_prefix_slots=*/model_cp_prefix_or_chunked,
-          kv_cache_tokens_per_seq,
-          options_.block_size(),
-          parallel_args_.kv_split_size_effective());
-    }
-#endif
-
-#if defined(USE_NPU)
-    if (needs_model_cp_side && !input.cp_partitioned) {
-      // Model-side CP: hand the plan + decoder-facing CP tensors (built from
-      // the global layout above) to the model. The model localizes hidden
-      // states after embedding and restores global-real order after the last
-      // decoder layer; cp_ep_padding is built from plan.local_padded_token_num
-      // so the decoder ATB graph sees the local-padded layout.
-      processed_input.input_params.parallel.npu_cp_prefill_plan =
-          npu_cp_plan.to(device_);
-      processed_input.input_params.parallel.cp_prefill_inputs =
-          prepare_cp_prefill_inputs_from_plan(
-              npu_cp_plan,
-              /*have_prefix_slots=*/model_cp_prefix_or_chunked,
-              kv_cache_tokens_per_seq,
-              options_.block_size(),
-              parallel_args_.kv_split_size_effective())
-              .to(device_);
-      CpEpPadding cp_ep_padding(npu_cp_plan.local_padded_token_num,
-                                context_.get_model_args().num_experts_per_tok(),
-                                context_.get_parallel_args().mapping_data(),
-                                /*device=*/device_,
-                                dtype_,
-                                /*is_prefill=*/true);
-      processed_input.input_params.parallel.cp_ep_padding_data =
-          cp_ep_padding.build();
-    }
-
-    // Model-side CP slot prep (Phase D). The worker hands the full global token
-    // stream to the model; the model localizes hidden after embedding, so the
-    // decoder sees `[local_padded_token_num]` hidden rows. However the ATB CP
-    // prefill graph AllGathers+reorders the KV (cp_kv_recover_idx) BEFORE
-    // ReshapeAndCache, so the cached KV has cp_size * local_padded rows in
-    // recovered (global-real + per-seq virtual-pad) order. new_cache_slots
-    // (from BatchInputBuilder, numel == global_real_token_num) must be expanded
-    // to that same cp_size * local_padded length and recovered order: real
-    // tokens carry their global slot id, virtual-pad rows carry -1.
-    // localize_slots_recovered builds that tensor via plan.restore_indices +
-    // plan.cp_kv_recover_idx (no collective: global_slots and the plan are
-    // replicated across CP ranks). recompute_new_cache_slots then remaps to the
-    // KV-split layout (no-op when kv_split_size == 1).
-    // `compute_in_prefix_slots` reads only per-sequence block_tables /
-    // kv_cache_tokens_nums. Use `processed_input` (post-`to(device)`) so device
-    // tensors are unpacked from the RPC host buffer; the raw `input` may have
-    // undefined device tensors on the multi-node path, which would skip
-    // in_prefix_slots and cause the decoder to bind a CPU placeholder
-    // ("Expected NPU tensor").
-    //
-    // The slot expand/remap is one-shot: it is only valid on LOGICAL_REAL slots
-    // (one entry per real token, global-real order). The MTP composite worker
-    // prepares its `input_on_device` once (converting LOGICAL_REAL ->
-    // NPU_CP_RECOVERED_PHYSICAL), then hands that already-prepared input to the
-    // target/draft leaves via run_llm_no_sync_impl, which re-enters this worker
-    // prepare path. Re-running localize_slots_recovered +
-    // recompute_new_cache_slots on already-recovered slots would double-remap
-    // the KV-split block ids and corrupt the cache, so we gate on
-    // kv_slot_layout and flip the marker after the conversion. The CP plan /
-    // cp_prefill_inputs / cp_ep_padding blocks above are idempotent and still
-    // run on re-entry (the leaf needs them).
-    if (needs_model_cp_side && !input.cp_partitioned &&
-        input.kv_slot_layout == KvSlotLayout::LOGICAL_REAL) {
-      // new_cache_slots must match the AllGathered+recovered KV that the ATB
-      // ReshapeAndCache node caches. The CP prefill graph AllGathers each
-      // rank's local KV (rank-major, cp_size*local_padded rows) and reorders it
-      // by cp_kv_recover_idx BEFORE ReshapeAndCache, so numTokens there =
-      // cp_size * local_padded (>= global_real for non-aligned cases). The
-      // recovered KV is in global-real order with virtual-pad rows inserted
-      // per-seq; slots must match that length and order (real slots carry their
-      // global id, virtual rows carry -1). localize_slots_recovered builds that
-      // tensor from global_slots + plan.restore_indices +
-      // plan.cp_kv_recover_idx (no collective: global_slots and the plan are
-      // replicated across CP ranks). recompute_new_cache_slots then remaps to
-      // the KV-split layout (no-op when kv_split_size == 1). Use
-      // processed_input (post-to(device)) so device tensors are unpacked from
-      // the RPC host buffer.
-      const NpuCpPrefillPlan& device_plan =
-          processed_input.input_params.parallel.npu_cp_prefill_plan;
-      // GLM5 and DeepSeek v32 share the same ATB decoder layer: both
-      // AllGather+reorder (cp_kv_recover_idx) the KV BEFORE ReshapeAndCache,
-      // so the cached KV has cp_size*local_padded rows in recovered order.
-      // Slots must match that length/order (real slots carry their global id,
-      // virtual rows carry -1). localize_slots_recovered builds that tensor
-      // from global_slots + plan.restore_indices + cp_kv_recover_idx (no
-      // collective: global_slots and the plan are replicated across CP ranks).
-      processed_input.input_params.attention.device.new_cache_slots =
-          npu_cp::localize_slots_recovered(
-              processed_input.input_params.attention.device.new_cache_slots,
-              device_plan,
-              processed_input.input_params.parallel.cp_prefill_inputs
-                  .cp_kv_recover_idx);
-      processed_input.input_params.attention.device.new_cache_slots =
-          recompute_new_cache_slots(processed_input).to(device_);
-      // Invariant: the recovered slot tensor must have exactly cp_size *
-      // local_padded rows (one per AllGathered+recovered KV row). A shorter
-      // tensor would make ReshapeAndCache write past its slot mapping; a longer
-      // one would imply a double expand. Virtual-pad rows carry -1 (preserved
-      // by recompute_new_cache_slots) and must not be re-remapped into logical
-      // slot ids on a later re-entry (the kv_slot_layout gate above prevents
-      // that).
-      if (device_plan.enabled) {
-        const torch::Tensor& slots =
-            processed_input.input_params.attention.device.new_cache_slots;
-        const int64_t expected_rows =
-            static_cast<int64_t>(device_plan.cp_size) *
-            device_plan.local_padded_token_num;
-        CHECK(slots.defined() && slots.numel() == expected_rows)
-            << "CP recovered new_cache_slots numel (" << slots.numel()
-            << ") must equal cp_size*local_padded (" << expected_rows << ")";
-      }
-      if (model_cp_prefix_or_chunked) {
-        const auto& bt =
-            processed_input.input_params.attention.device.block_tables;
-        if (bt.defined() && bt.dim() == 2) {
-          processed_input.input_params.attention.device.in_prefix_slots =
-              compute_in_prefix_slots(processed_input).to(device_);
-        }
-      }
-      processed_input.kv_slot_layout = KvSlotLayout::NPU_CP_RECOVERED_PHYSICAL;
-    } else if (needs_model_cp_side && !input.cp_partitioned &&
-               input.kv_slot_layout ==
-                   KvSlotLayout::NPU_CP_RECOVERED_PHYSICAL) {
-      // Re-entry on already-recovered slots (e.g. MTP leaf run_llm_no_sync_impl
-      // on the composite worker's prepared input): keep the converted slots
-      // verbatim. The leaf still needs the CP plan / cp_prefill_inputs /
-      // cp_ep_padding built above (they are idempotent), but the slot tensor
-      // must not be expanded/remapped a second time.
-      processed_input.kv_slot_layout = KvSlotLayout::NPU_CP_RECOVERED_PHYSICAL;
-    }
+    prepare_cp_input(input, processed_input);
 #endif
 
     auto& input_params = processed_input.input_params;

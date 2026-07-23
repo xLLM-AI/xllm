@@ -1168,8 +1168,8 @@ void NpuDeepseekV32DecoderLayerImpl::build_node_variant_pack(
   // final_hidden_states_ = torch::zeros_like(x);
   int32_t input_idx = 0;
   auto& dp_ep_padding = input_params.parallel.dp_ep_padding_data;
-  auto& cp_ep_padding = input_params.parallel.cp_ep_padding_data;
-  auto& cp_inputs = input_params.parallel.cp_prefill_inputs;
+  auto& cp_ep_padding = input_params.parallel.cp_plan.mutable_ep_padding_data();
+  auto& cp_inputs = input_params.parallel.cp_plan.mutable_prefill_inputs();
   const bool use_cp_ep_padding = (cp_size_ > 1 && is_prefill);
 
   if (dp_size_ <= 1 && ep_size_ <= 1 || cp_size_ > 1) {

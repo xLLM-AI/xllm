@@ -148,6 +148,19 @@ if(USE_NPU)
                                hccl
                                c_sec
                                nnopbase)
+
+  cc_test(
+    NAME
+      cp_plan_test
+    SRCS
+      cp_plan_test.cpp
+    DEPS
+      parallel_state
+      torch
+      absl::synchronization
+      absl::time
+      GTest::gtest_main
+  )
 endif()
 
 if(USE_MLU)

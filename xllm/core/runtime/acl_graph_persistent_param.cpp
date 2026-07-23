@@ -983,7 +983,7 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
   // refreshes the data at those same addresses before graph_.replay().
   update_persistent_dp_ep_padding(params.parallel.dp_ep_padding_data,
                                   padded_num_tokens);
-  update_persistent_cp_ep_padding(params.parallel.cp_ep_padding_data,
+  update_persistent_cp_ep_padding(params.parallel.cp_plan.ep_padding_data(),
                                   padded_num_tokens);
 
   // Return ModelInputParams with persistent buffer references if requested
@@ -1077,8 +1077,8 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
         params.parallel.dp_ep_padding_data,
         params_for_capture->parallel.dp_ep_padding_data);
     replace_capture_cp_ep_padding(
-        params.parallel.cp_ep_padding_data,
-        params_for_capture->parallel.cp_ep_padding_data);
+        params.parallel.cp_plan.ep_padding_data(),
+        params_for_capture->parallel.cp_plan.mutable_ep_padding_data());
 
     auto& qsl = params_for_capture->parallel.query_start_loc;
     qsl.clear();

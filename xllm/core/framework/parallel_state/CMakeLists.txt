@@ -5,6 +5,7 @@ cc_library(
     parallel_state
   HDRS
     mapping_npu.h
+    npu/cp/plan.h
     npu_cp_ep_padding.h
     npu_cp_prepare.h
     npu_dp_ep_padding.h
@@ -24,6 +25,7 @@ cc_library(
     dit_collective_communicator.h
   SRCS
     mapping_npu.cpp
+    npu/cp/plan.cpp
     npu_cp_ep_padding.cpp
     npu_cp_prepare.cpp
     npu_dp_ep_padding.cpp

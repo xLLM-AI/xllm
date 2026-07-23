@@ -625,7 +625,7 @@ struct ForwardInput {
 
   // True once the worker has produced the per-CP-rank slice (legacy path) or
   // handed the global stream to the model for model-side CP localization. The
-  // model-side path keeps this false and uses `npu_cp_prefill_plan` instead.
+  // model-side path keeps this false and uses `parallel.cp_plan` instead.
   bool cp_partitioned = false;
 
   // Layout of `attention.device.new_cache_slots` for the NPU model-side CP
