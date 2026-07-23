@@ -39,14 +39,17 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "models/dit/utils/dit_block_weight_manager.h"
 #endif
+#include "models/dit/utils/dit_parallel_mixin.h"
 #include "models/model_registry.h"
 
 namespace xllm {
 
-class WanImageToVideoPipelineImpl : public torch::nn::Module {
+class WanImageToVideoPipelineImpl : public torch::nn::Module,
+                                    public dit::CFGParallelMixin {
  public:
   WanImageToVideoPipelineImpl(const DiTModelContext& context)
-      : parallel_args_(context.get_parallel_args()) {
+      : parallel_args_(context.get_parallel_args()),
+        dit::CFGParallelMixin(context) {
     options_ = context.get_tensor_options();
     const auto& vae_args = context.get_model_args("vae");
     zdim_ = vae_args.z_dim();
@@ -543,7 +546,6 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
         }
       }
       torch::Tensor noise_pred;
-      torch::Tensor noise_uncond;
 #if defined(USE_NPU)
       auto& rolling = (current_model.get() == transformer_.get())
                           ? rolling_transformer_
@@ -566,46 +568,21 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
 #endif
 
       if (do_classifier_free_guidance) {
-        if (ParallelConfig::get_instance().cfg_size() == 2) {
-          int32_t rank = parallel_args_.dit_cfg_group_->rank();
-          noise_pred =
-              use_rolling_load_
-                  ? rolling_forward(rank == 0 ? encoded_prompt_embeds
-                                              : encoded_negative_embeds)
-                  : current_model->forward(latent_model_input,
-                                           timestep_input,
-                                           rank == 0 ? encoded_prompt_embeds
-                                                     : encoded_negative_embeds,
-                                           torch::Tensor(),
-                                           sparse_attn_state);
-          auto gathered = xllm::parallel_state::gather(
-              noise_pred, parallel_args_.dit_cfg_group_, /*dim=*/0);
-          auto chunks = torch::chunk(gathered, 2, 0);
-          noise_pred = chunks[0];
-          noise_uncond = chunks[1];
-        } else {
-          if (use_rolling_load_) {
-            noise_pred = rolling_forward(encoded_prompt_embeds);
-            noise_uncond = rolling_forward(encoded_negative_embeds);
-          } else {
-            noise_pred = current_model->forward(latent_model_input,
-                                                timestep_input,
-                                                encoded_prompt_embeds,
-                                                torch::Tensor(),
-                                                sparse_attn_state);
-            noise_uncond = current_model->forward(latent_model_input,
-                                                  timestep_input,
-                                                  encoded_negative_embeds,
-                                                  torch::Tensor(),
-                                                  sparse_attn_state);
-          }
-        }
+        auto [pos_noise, neg_noise] = exec_with_cfg([&](bool is_positive) {
+          auto& embeds =
+              is_positive ? encoded_prompt_embeds : encoded_negative_embeds;
+          return use_rolling_load_ ? rolling_forward(embeds)
+                                   : current_model->forward(latent_model_input,
+                                                            timestep_input,
+                                                            embeds,
+                                                            torch::Tensor(),
+                                                            sparse_attn_state);
+        });
 
-        noise_pred = noise_uncond.to(torch::kFloat32) +
-                     static_cast<float>(current_guidance) *
-                         (noise_pred.to(torch::kFloat32) -
-                          noise_uncond.to(torch::kFloat32));
-        noise_uncond.reset();
+        noise_pred =
+            neg_noise.to(torch::kFloat32) +
+            static_cast<float>(current_guidance) *
+                (pos_noise.to(torch::kFloat32) - neg_noise.to(torch::kFloat32));
       } else {
         noise_pred = use_rolling_load_
                          ? rolling_forward(encoded_prompt_embeds)
