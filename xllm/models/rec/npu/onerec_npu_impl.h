@@ -247,12 +247,19 @@ class OneRecStackImpl : public torch::nn::Module {
 
     const bool is_prefill =
         onerec_params->rec_stage == OneRecModelInputParams::RecStage::PREFILL;
-    auto [query_length, key_length] = compute_sequence_lengths(
-        input_params.q_max_seq_len, is_prefill, input_params);
-
     ModelInputParams input_params_local = input_params;
     auto& mutable_onerec_params = input_params_local.mutable_onerec_params();
     const auto* onerec_xattn_params = input_params.onerec_xattention_params();
+    const bool is_xattn_decode =
+        is_decoder_ && !is_prefill && onerec_xattn_params != nullptr;
+    int64_t query_length = 0;
+    int64_t key_length = 0;
+    if (!is_xattn_decode) {
+      const auto sequence_lengths = compute_sequence_lengths(
+          input_params.q_max_seq_len, is_prefill, input_params);
+      query_length = sequence_lengths.first;
+      key_length = sequence_lengths.second;
+    }
 
     auto validate_selected_token_idxes_stage = [&](const char* stage_name) {
       if (!is_decoder_ || onerec_xattn_params == nullptr ||
@@ -280,10 +287,13 @@ class OneRecStackImpl : public torch::nn::Module {
 
     const bool is_decode_stage = is_decoder_ && !is_prefill;
     torch::Tensor preprocessed_attn_mask;
-    if (!is_decoder_) {
+    // XAttention decode uses PA caches and device-side sequence metadata, so
+    // the block layer can use its fixed placeholder instead of a length-sized
+    // position-bias/mask tensor.
+    if (!is_xattn_decode && !is_decoder_) {
       preprocessed_attn_mask = get_or_create_encoder_attention_mask(
           query_length, key_length, h, input_params);
-    } else {
+    } else if (!is_xattn_decode) {
       torch::Tensor effective_attn_mask;
       if (use_absolute_position_embedding_) {
         const int64_t batch_size =

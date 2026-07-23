@@ -115,6 +115,8 @@ std::string build_graph_key(const torch::Tensor& tokens,
   CHECK(onerec_params != nullptr);
   const bool is_decode =
       onerec_params->rec_stage == OneRecModelInputParams::RecStage::DECODE;
+  const bool use_xattn = params.onerec_xattention_params() != nullptr;
+  const bool is_xattn_decode = is_decode && use_xattn;
   std::ostringstream os;
   os << (is_decode ? "onerec_decode" : "onerec_prefill")
      << "|out_tokens:" << get_decoder_output_tokens(tokens, params, args)
@@ -124,11 +126,12 @@ std::string build_graph_key(const torch::Tensor& tokens,
      << "|group_width:" << onerec_params->group_width
      << "|seq_len:" << onerec_params->seq_len
      << "|encoder_max_seq_len:" << onerec_params->encoder_max_seq_len
-     << "|num_sequences:" << params.num_sequences
-     << "|q_max_seq_len:" << params.q_max_seq_len
-     << "|kv_max_seq_len:" << params.kv_max_seq_len
-     << "|use_xattn:" << (params.onerec_xattention_params() != nullptr)
+     << "|num_sequences:" << params.num_sequences << "|use_xattn:" << use_xattn
      << "|use_moe:" << args.use_moe();
+  if (!is_xattn_decode) {
+    os << "|q_max_seq_len:" << params.q_max_seq_len
+       << "|kv_max_seq_len:" << params.kv_max_seq_len;
+  }
   append_tensor_key(os, "tokens", tokens);
   append_tensor_key(os, "positions", positions);
   append_tensor_key(
@@ -147,7 +150,9 @@ std::string build_graph_key(const torch::Tensor& tokens,
   append_int_vec_key(os, "encoder_seq_lens", onerec_params->encoder_seq_lens);
   append_int_vec_key(
       os, "cross_kv_cu_vec", onerec_params->cross_attn_kv_cu_seq_lens_vec);
-  append_int_vec_key(os, "kv_seq_lens_vec", params.kv_seq_lens_vec);
+  if (!is_xattn_decode) {
+    append_int_vec_key(os, "kv_seq_lens_vec", params.kv_seq_lens_vec);
+  }
 
   if (const auto* xattn_params = params.onerec_xattention_params()) {
     auto append_workspace_key = [&](const char* name,
@@ -216,6 +221,15 @@ class OneRecGraphParam {
                 onerec_params.cross_attn_new_cache_slots);
     bind_tensor(persistent_cross_attn_block_tables_,
                 onerec_params.cross_attn_block_tables);
+
+    if (const auto* source_xattn_params = params.onerec_xattention_params()) {
+      auto& xattn_params =
+          params_for_capture_.mutable_onerec_xattention_params();
+      copy_tensor(source_xattn_params->current_round_tensor,
+                  persistent_current_round_tensor_);
+      bind_tensor(persistent_current_round_tensor_,
+                  xattn_params.current_round_tensor);
+    }
 
     ensure_hidden_states(tokens, params);
     const bool use_cross_block_cache =
@@ -337,6 +351,7 @@ class OneRecGraphParam {
   torch::Tensor persistent_cross_attn_kv_cu_seq_lens_;
   torch::Tensor persistent_cross_attn_new_cache_slots_;
   torch::Tensor persistent_cross_attn_block_tables_;
+  torch::Tensor persistent_current_round_tensor_;
   std::vector<torch::Tensor> cross_k_caches_;
   std::vector<torch::Tensor> cross_v_caches_;
   std::vector<torch::Tensor> empty_tensor_vec_;
@@ -513,6 +528,9 @@ class OneRecAclGraphExecutor::Impl {
           model_, tokens, positions, params, encoder_output);
     }
 
+    LOG(INFO) << "Lazy capturing OneRec " << stage_name
+              << " ACL graph triggered, cached_graphs: " << graphs_.size()
+              << ", output_tokens: " << output_tokens;
     auto graph = std::make_unique<OneRecAclGraph>(args_, device_, options_);
     VLOG(kGraphExecutorLogVerboseLevel)
         << "OneRecAclGraphExecutor::run() in " << stage_name << " capture mode";

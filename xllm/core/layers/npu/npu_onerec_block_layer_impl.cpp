@@ -1215,6 +1215,9 @@ int64_t NpuOneRecBlockLayerImpl::init_layer() {
   name_ =
       is_decoder_ ? "onerec_decoder_block_layer" : "onerec_encoder_block_layer";
   model_name_ = "onerec";
+  if (decode_param_.use_xattn) {
+    CHECK_OPERATION_STATUS_RETURN(init_attn_mask());
+  }
   CHECK_OPERATION_STATUS_RETURN(init_node(prefill_node_, prefill_param_));
   if (kEnableOneRecAclnnAttentionLinear &&
       kOneRecAclnnAttentionLinearMinTokens > 0) {
