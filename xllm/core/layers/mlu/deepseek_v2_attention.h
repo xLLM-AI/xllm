@@ -181,7 +181,8 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   torch::Tensor forward_dcp(const torch::Tensor& positions,
                             const torch::Tensor& hidden_states,
                             const AttentionMetadata& attn_metadata,
-                            KVCache& kv_cache);
+                            KVCache& kv_cache,
+                            DsaTopkTransfer* topk_transfer = nullptr);
 
  private:
   bool use_full_replicated_attention_weights_ = false;

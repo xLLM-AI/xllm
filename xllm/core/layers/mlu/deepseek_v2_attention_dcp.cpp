@@ -41,7 +41,8 @@ torch::Tensor DeepseekV2AttentionImpl::forward_dcp(
     const torch::Tensor& positions,
     const torch::Tensor& hidden_states,
     const AttentionMetadata& attn_metadata,
-    KVCache& kv_cache) {
+    KVCache& kv_cache,
+    DsaTopkTransfer* topk_transfer) {
   CHECK_GT(dcp_size_, 1) << "forward_dcp requires dcp_size_ > 1.";
 
   check_phase1_dcp_geometry(dcp_size_, tp_heads_.attn, full_heads_.attn);
@@ -61,6 +62,21 @@ torch::Tensor DeepseekV2AttentionImpl::forward_dcp(
                /*use_prompt_rope=*/false);
   decode_kv_pre_base(latent_cache, positions, attn_metadata, /*use_prompt_rope=*/false);
 
+  // DSA cross-layer top-k sharing. A Shared layer reuses the previous Full
+  // layer's sparse block table (skipping indexer recompute); an Output layer
+  // exports its freshly computed block table so the next Shared layer can
+  // reuse it. Under DCP the indexer (with the slot recovery below) produces a
+  // rank-consistent global top-k, so the published state is safe to share
+  // across ranks just like the eager path.
+  std::optional<torch::Tensor> shared_block_tables;
+  std::optional<torch::Tensor> shared_context_lens;
+  const bool has_shared_topk =
+      topk_transfer != nullptr && topk_transfer->input() != nullptr;
+  if (has_shared_topk) {
+    shared_block_tables = topk_transfer->input()->block_tables();
+    shared_context_lens = topk_transfer->input()->context_lens();
+  }
+
   // DCP indexer index-cache slot recovery.
   // The worker masks `new_cache_slots` (== attn_metadata.slot_mapping) by
   // `pos % dcp_size == dcp_rank` so the sharded MAIN MLA KV cache only receives
@@ -72,10 +88,15 @@ torch::Tensor DeepseekV2AttentionImpl::forward_dcp(
   // original slot id for its owned tokens and -1 elsewhere, so an AllGather +
   // max over the dcp group recovers the full (unmasked) slot map. The indexer
   // then writes the full-replica index cache with this map, while the main KV
-  // write below keeps the masked (sharded) map.
+  // write below keeps the masked (sharded) map. A Shared layer skips the
+  // indexer (it reuses the prior top-k), so the recovery AllGather is skipped
+  // too -- only Full/plain layers that actually recompute the indexer pay for
+  // it.
   torch::Tensor masked_slot_mapping = attn_metadata.slot_mapping;
   AttentionMetadata index_attn_metadata = attn_metadata;
-  if (enable_lighting_indexer_ && masked_slot_mapping.defined() &&
+  const bool indexer_will_run =
+      enable_lighting_indexer_ && !has_shared_topk;
+  if (indexer_will_run && masked_slot_mapping.defined() &&
       dcp_group_ != nullptr) {
     auto slot_gather_ctx = parallel_state::launch_all_gather(
         masked_slot_mapping, dcp_group_);
@@ -96,8 +117,17 @@ torch::Tensor DeepseekV2AttentionImpl::forward_dcp(
       k_cache_scale,
       /*is_prefill_phase=*/false,
       /*slot_mapping=*/std::nullopt,
-      /*new_block_tables=*/std::nullopt,
-      /*new_context_lens=*/std::nullopt);
+      shared_block_tables,
+      shared_context_lens);
+
+  // An Output layer exports the freshly computed sparse block table (held in
+  // the resolved metadata) so the caller can cache it for the next Shared
+  // layer. finish_layer CHECKs that a producer publishes, so this must run
+  // before the main KV write below.
+  if (topk_transfer != nullptr && topk_transfer->captures_output()) {
+    topk_transfer->publish_output(DsaTopkState(
+        local_meta.block_table, local_meta.kv_seq_lens));
+  }
 
   {
     torch::Tensor key = latent_cache.unsqueeze(1);

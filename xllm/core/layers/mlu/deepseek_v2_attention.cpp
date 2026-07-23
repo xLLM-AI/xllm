@@ -446,7 +446,8 @@ torch::Tensor DeepseekV2AttentionImpl::forward(
   bool is_prefill_or_chunked_prefill =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
   if (dcp_enabled_ && !is_prefill_or_chunked_prefill) {
-    return forward_dcp(positions, hidden_states, attn_metadata, kv_cache);
+    return forward_dcp(positions, hidden_states, attn_metadata, kv_cache,
+                      topk_transfer);
   }
 
   if (sp_ctx != nullptr && can_use_sp()) {
