@@ -30,6 +30,8 @@ NPULayerSynchronizerImpl::NPULayerSynchronizerImpl(const int64_t num_layers,
     auto ret = aclrtCreateEventWithFlag(&events_[i], flags);
     CHECK(ret == ACL_SUCCESS) << "Create event failed:" << ret;
   }
+  aclError ctx_ret = aclrtGetCurrentContext(&context_);
+  CHECK(ctx_ret == ACL_SUCCESS) << "Get current context failed:" << ctx_ret;
 }
 
 NPULayerSynchronizerImpl::~NPULayerSynchronizerImpl() {
@@ -47,6 +49,17 @@ std::atomic<bool>* NPULayerSynchronizerImpl::get_event_flag(
   return &event_record_flags_[layer_index];
 }
 
+namespace {
+aclrtStream get_push_wait_stream() {
+  static thread_local aclrtStream wait_stream = nullptr;
+  if (wait_stream == nullptr) {
+    auto ret = aclrtCreateStream(&wait_stream);
+    CHECK(ret == ACL_SUCCESS) << "Create wait stream failed:" << ret;
+  }
+  return wait_stream;
+}
+}  // namespace
+
 bool NPULayerSynchronizerImpl::synchronize_layer(const int64_t layer_index) {
   while (!event_record_flags_[layer_index].load(std::memory_order_acquire)) {
     if (aborted_.load(std::memory_order_acquire)) {
@@ -56,9 +69,22 @@ bool NPULayerSynchronizerImpl::synchronize_layer(const int64_t layer_index) {
   if (aborted_.load(std::memory_order_acquire)) {
     return false;
   }
-  auto ret = aclrtSynchronizeEventWithTimeout(events_[layer_index], timeout_);
+  if (context_ != nullptr) {
+    auto ctx_ret = aclrtSetCurrentContext(context_);
+    if (ctx_ret != ACL_SUCCESS) {
+      LOG(ERROR) << "Set current context failed: " << ctx_ret;
+      return false;
+    }
+  }
+  aclrtStream wait_stream = get_push_wait_stream();
+  auto ret = aclrtStreamWaitEvent(wait_stream, events_[layer_index]);
   if (ret != ACL_SUCCESS) {
-    LOG(ERROR) << "Synchronize event failed: " << ret;
+    LOG(ERROR) << "Stream wait event failed: " << ret;
+    return false;
+  }
+  ret = aclrtSynchronizeStreamWithTimeout(wait_stream, timeout_);
+  if (ret != ACL_SUCCESS) {
+    LOG(ERROR) << "Synchronize wait stream failed: " << ret;
     return false;
   }
   return true;
