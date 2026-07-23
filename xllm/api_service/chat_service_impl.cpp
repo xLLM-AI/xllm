@@ -36,6 +36,7 @@ limitations under the License.
 #include "core/distributed_runtime/llm_master.h"
 #include "core/distributed_runtime/rec_master.h"
 #include "core/distributed_runtime/vlm_master.h"
+#include "core/framework/lora/lora_runtime.h"
 #include "core/framework/request/rec_type.h"
 #include "core/framework/request/request_params.h"
 #include "core/util/utils.h"
@@ -524,8 +525,23 @@ void ChatServiceImpl::process_rec_chat_request(std::shared_ptr<ChatCall> call) {
     return;
   }
 
+  // LoRA lookup: `model` field may name a registered LoRA adapter
+  // instead of a base model. If so, pin it (drain-safe) and set the
+  // request's adapter_id / adapter_name. Base-model requests keep
+  // adapter_id unset.
+  std::optional<LoRARegistry::PinnedAdapter> lora_pinned;
+  if (LoRARuntime::instance().enabled()) {
+    lora_pinned = LoRARuntime::instance().registry().lookup_and_pin(model);
+  }
+  const uint64_t pinned_adapter_id_local =
+      lora_pinned.has_value() ? lora_pinned->int_id : 0;
+
   RequestParams request_params(
       rpc_request, call->get_x_request_id(), call->get_x_request_time());
+  if (lora_pinned.has_value()) {
+    request_params.adapter_id = lora_pinned->int_id;
+    request_params.adapter_name = lora_pinned->req.lora_name;
+  }
 
   // Build messages from rpc request (inline code, not extracted to helper)
   std::vector<Message> messages;

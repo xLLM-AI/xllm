@@ -118,6 +118,12 @@ class BatchInputBuilder {
     std::vector<int32_t> q_seq_lens = {0};  // q_cu_seq_len
 #endif
 
+    // LoRA adapter int_id per sequence, index-aligned with q_seq_lens.
+    // Consumed by ModelInputParams::to(device) to build adapter_ids_per_token.
+    // Platform-independent — kept outside the seq_lens ifdef branches so
+    // ILU/MLU/CUDA/DCU builds see it too.
+    std::vector<uint64_t> adapter_ids;
+
     // Cache and block data
     std::vector<int32_t> new_token_slot_ids;
     std::vector<std::vector<int32_t>> block_tables_vec;
