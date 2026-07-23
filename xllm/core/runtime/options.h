@@ -122,6 +122,8 @@ struct Options {
   // Decode context parallelism size.
   PROPERTY(int32_t, dcp_size) = 1;
 
+  PROPERTY(int32_t, cp_kv_cache_interleave_size) = 0;
+
   // tensor parallelism size
   // Default set as 1
   PROPERTY(int32_t, tp_size) = 1;

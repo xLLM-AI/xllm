@@ -151,6 +151,8 @@ struct ParallelArgs {
   // dcp size
   PROPERTY(int32_t, dcp_size) = 1;
 
+  PROPERTY(int32_t, cp_kv_cache_interleave_size) = 0;
+
   // Derived: CP rank of the current process within its DP group.
   // rank layout: dp_rank * (cp_size * tp_size) + cp_rank * tp_size + tp_rank
   [[nodiscard]] int32_t cp_rank() const noexcept {
@@ -163,6 +165,12 @@ struct ParallelArgs {
 
   [[nodiscard]] int32_t dcp_size_effective() const noexcept {
     return dcp_size_ > 0 ? dcp_size_ : 1;
+  }
+
+  [[nodiscard]] int32_t cp_kv_cache_interleave_size_effective(
+      int32_t block_size) const noexcept {
+    return cp_kv_cache_interleave_size_ > 0 ? cp_kv_cache_interleave_size_
+                                            : block_size;
   }
 
   [[nodiscard]] int32_t dcp_rank() const noexcept {

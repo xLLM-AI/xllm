@@ -79,8 +79,7 @@ std::optional<std::string> validate_model_cp(const Options& options,
   }
   const bool use_model_partition =
       options.cp_size() > 1 && Platform::uses_model_cp_partition();
-  const bool use_dcp =
-      options.dcp_size() > 1 && Platform::uses_decode_dcp();
+  const bool use_dcp = options.dcp_size() > 1 && Platform::uses_decode_dcp();
   if (!use_model_partition) {
     return std::nullopt;
   }
@@ -244,8 +243,9 @@ Master::Master(const Options& options, EngineType type)
   LOG(INFO) << "Master init options: " << options_.to_string();
   ParallelConfig::get_instance().cp_size(options_.cp_size());
   ParallelConfig::get_instance().dcp_size(options_.dcp_size());
-  const bool use_dcp =
-      options_.dcp_size() > 1 && Platform::uses_decode_dcp();
+  ParallelConfig::get_instance().cp_kv_cache_interleave_size(
+      options_.cp_kv_cache_interleave_size());
+  const bool use_dcp = options_.dcp_size() > 1 && Platform::uses_decode_dcp();
   if (use_dcp) {
     ParallelConfig::get_instance().kv_split_size(options_.dcp_size());
   }
@@ -254,8 +254,7 @@ Master::Master(const Options& options, EngineType type)
           ? "disabled"
           : (Platform::uses_model_cp_partition() ? "model" : "worker");
   LOG(INFO) << "Resolved CP config: cp_size=" << options_.cp_size()
-            << ", dcp_size=" << options_.dcp_size()
-            << ", kv_split_size="
+            << ", dcp_size=" << options_.dcp_size() << ", kv_split_size="
             << ParallelConfig::get_instance().kv_split_size_effective()
             << ", world_size=" << global_world_size
             << ", dp_size=" << options_.dp_size()
@@ -334,6 +333,7 @@ Master::Master(const Options& options, EngineType type)
         .enable_mla(options_.enable_mla())
         .cp_size(options_.cp_size())
         .dcp_size(options_.dcp_size())
+        .cp_kv_cache_interleave_size(options_.cp_kv_cache_interleave_size())
         .npu_kernel_backend(options_.npu_kernel_backend())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .enable_offline_inference(options_.enable_offline_inference())
@@ -409,6 +409,7 @@ Master::Master(const Options& options, EngineType type)
         .ep_size(options.ep_size())
         .cp_size(options_.cp_size())
         .dcp_size(options_.dcp_size())
+        .cp_kv_cache_interleave_size(options_.cp_kv_cache_interleave_size())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .max_tokens_per_batch(options_.max_tokens_per_batch())
         .max_seqs_per_batch(options_.max_seqs_per_batch())
@@ -464,6 +465,7 @@ Master::Master(const Options& options, EngineType type)
         .ep_size(options_.ep_size())
         .cp_size(options_.cp_size())
         .dcp_size(options_.dcp_size())
+        .cp_kv_cache_interleave_size(options_.cp_kv_cache_interleave_size())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .max_tokens_per_batch(options_.max_tokens_per_batch())
         .max_seqs_per_batch(options_.max_seqs_per_batch())
@@ -531,6 +533,7 @@ Master::Master(const Options& options, EngineType type)
         .ep_size(options_.ep_size())
         .cp_size(options_.cp_size())
         .dcp_size(options_.dcp_size())
+        .cp_kv_cache_interleave_size(options_.cp_kv_cache_interleave_size())
         .max_seqs_per_batch(options_.max_seqs_per_batch())
         .beam_width(options_.beam_width())
         .max_tokens_per_batch(options_.max_tokens_per_batch())

@@ -34,6 +34,13 @@ DEFINE_int32(dcp_size,
              "row-band within every logical block, an interleaved subsampling "
              "of the tokens). Phase 1 requires tp_size % dcp_size == 0.");
 
+DEFINE_int32(cp_kv_cache_interleave_size,
+             0,
+             "Interleave size of KV cache storage while using CP. "
+             "0=auto (uses block_size, block-banded ownership, backward "
+             "compatible); 1=token-level interleaving; N>0=interleave at N "
+             "tokens. Must divide block_size.");
+
 DEFINE_int32(kv_split_size,
              1,
              "KV-cache split width. 0 falls back to cp_size (legacy); 1 means "
@@ -84,6 +91,7 @@ void ParallelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(ep_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(cp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dcp_size);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(cp_kv_cache_interleave_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_split_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(tp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(sp_size);
@@ -101,6 +109,7 @@ void ParallelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(ep_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(cp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dcp_size);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(cp_kv_cache_interleave_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(tp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(sp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(cfg_size);
@@ -120,6 +129,8 @@ void ParallelConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, cp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dcp_size);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, cp_kv_cache_interleave_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, tp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, sp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

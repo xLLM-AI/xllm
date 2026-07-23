@@ -46,8 +46,6 @@ torch::Tensor DeepseekV2AttentionImpl::forward_dcp(
 
   check_phase1_dcp_geometry(dcp_size_, tp_heads_.attn, full_heads_.attn);
 
-  (void)attn_metadata;
-
   const int64_t tokens = hidden_states.size(0);
   auto k_cache = kv_cache.get_k_cache();
   auto k_cache_scale = kv_cache.get_k_cache_scale();
@@ -62,12 +60,38 @@ torch::Tensor DeepseekV2AttentionImpl::forward_dcp(
                attn_metadata,
                /*use_prompt_rope=*/false);
   decode_kv_pre_base(latent_cache, positions, attn_metadata, /*use_prompt_rope=*/false);
+
+  // DCP indexer index-cache slot recovery.
+  // The worker masks `new_cache_slots` (== attn_metadata.slot_mapping) by
+  // `pos % dcp_size == dcp_rank` so the sharded MAIN MLA KV cache only receives
+  // this rank's 1/dcp tokens. The INDEX cache, however, is a full replica on
+  // every rank (KVCacheShape::init_index_cache_shape does not shard by
+  // world_size, and the indexer weights are replicated), so it must receive ALL
+  // new tokens -- otherwise the indexer's top-k selection runs against a
+  // 1/dcp-populated cache and produces wrong block tables. Each rank keeps the
+  // original slot id for its owned tokens and -1 elsewhere, so an AllGather +
+  // max over the dcp group recovers the full (unmasked) slot map. The indexer
+  // then writes the full-replica index cache with this map, while the main KV
+  // write below keeps the masked (sharded) map.
+  torch::Tensor masked_slot_mapping = attn_metadata.slot_mapping;
+  AttentionMetadata index_attn_metadata = attn_metadata;
+  if (enable_lighting_indexer_ && masked_slot_mapping.defined() &&
+      dcp_group_ != nullptr) {
+    auto slot_gather_ctx = parallel_state::launch_all_gather(
+        masked_slot_mapping, dcp_group_);
+    torch::Tensor stacked_slots =
+        parallel_state::finish_all_gather(std::move(slot_gather_ctx));
+    stacked_slots = stacked_slots.view({dcp_size_, -1});
+    index_attn_metadata.slot_mapping =
+        std::get<0>(torch::max(stacked_slots, /*dim=*/0, /*keepdim=*/false));
+  }
+
   AttentionMetadata local_meta = build_mla_attention_metadata(
       positions,
       hidden_states,
       query_prep.q_norm,
       latent_cache,
-      attn_metadata,
+      index_attn_metadata,
       kv_cache,
       k_cache_scale,
       /*is_prefill_phase=*/false,
@@ -80,7 +104,10 @@ torch::Tensor DeepseekV2AttentionImpl::forward_dcp(
     xllm::kernel::ReshapePagedCacheParams params;
     params.key = key;
     params.k_cache = k_cache;
-    params.slot_mapping = local_meta.slot_mapping;
+    // Main MLA KV is DCP-sharded: write only this rank's owned tokens. Slots
+    // == -1 (non-owned) are skipped by reshape_paged_cache /
+    // quant_to_paged_cache.
+    params.slot_mapping = masked_slot_mapping;
     if (k_cache_scale.has_value()) {
       params.k_cache_scale = k_cache_scale;
       xllm::kernel::quant_to_paged_cache(params);

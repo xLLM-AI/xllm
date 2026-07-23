@@ -228,6 +228,8 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
         ::xllm::ParallelConfig::get_instance().kv_split_size());
     parallel_args_->dcp_size(
         ::xllm::ParallelConfig::get_instance().dcp_size());
+    parallel_args_->cp_kv_cache_interleave_size(
+        ::xllm::ParallelConfig::get_instance().cp_kv_cache_interleave_size());
     return;
   }
 
@@ -287,6 +289,8 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
       ::xllm::ParallelConfig::get_instance().kv_split_size());
   parallel_args_->dcp_size(
       ::xllm::ParallelConfig::get_instance().dcp_size());
+  parallel_args_->cp_kv_cache_interleave_size(
+      ::xllm::ParallelConfig::get_instance().cp_kv_cache_interleave_size());
 #else
   parallel_args_ = std::make_unique<ParallelArgs>(
       global_rank, world_size, dp_size, cp_size, nullptr, ep_size);
@@ -294,6 +298,8 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
       ::xllm::ParallelConfig::get_instance().kv_split_size());
   parallel_args_->dcp_size(
       ::xllm::ParallelConfig::get_instance().dcp_size());
+  parallel_args_->cp_kv_cache_interleave_size(
+      ::xllm::ParallelConfig::get_instance().cp_kv_cache_interleave_size());
 #endif
 }
 

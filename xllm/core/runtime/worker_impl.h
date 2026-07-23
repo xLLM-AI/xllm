@@ -278,6 +278,7 @@ class WorkerImpl {
   torch::Tensor compute_in_prefix_slots(const ForwardInput& input);
 #endif
   torch::Tensor recompute_new_cache_slots(const ForwardInput& input);
+  torch::Tensor recompute_dcp_cache_slots(const ForwardInput& input);
 
  protected:
   // runtime options
