@@ -86,6 +86,14 @@ class WorkerClient {
       const std::vector<uint64_t>& src_linear_state_ids = {},
       const std::vector<uint64_t>& dst_linear_state_ids = {});
 
+  virtual bool pull_hetero_kv_blocks(
+      const std::vector<uint64_t>& src_cluster_ids,
+      const std::vector<std::string>& src_addrs,
+      const std::vector<uint64_t>& src_blocks,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids = {},
+      const std::vector<uint64_t>& dst_linear_state_ids = {});
+
   // prepare input for execution
   virtual ForwardInput prepare_inputs(Batch& batch);
 

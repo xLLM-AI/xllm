@@ -82,14 +82,14 @@ TEST(PdTopologyGuardTest, TryGetPdTopoReturnTopo) {
   EXPECT_TRUE(reason.empty());
 }
 
-TEST(PdTopologyGuardTest, HeteroTopoNeedMla) {
-  const InstanceInfo local_info = make_info(2, {0, 1, 2, 3});
-  const InstanceInfo remote_info = make_info(1, {0, 1, 2, 3});
+TEST(PdTopologyGuardTest, HeteroPrefillTpTwoDecodeTpOneAllowsNonMlaPush) {
+  const InstanceInfo local_info = make_info(1, {0, 1});
+  const InstanceInfo remote_info = make_info(1, {2});
 
   const PdTopoResult result =
       check_pd_topo(local_info, remote_info, "PUSH", false);
-  EXPECT_EQ(result.status, PdTopoStatus::DENY_HETERO);
-  EXPECT_EQ(result.reason, "hetero pd requires enable_mla=true");
+  EXPECT_EQ(result.status, PdTopoStatus::ALLOW_HETERO);
+  EXPECT_TRUE(result.reason.empty());
 }
 
 TEST(PdTopologyGuardTest, HeteroTopoNeedPushKv) {
@@ -110,6 +110,28 @@ TEST(PdTopologyGuardTest, HeteroTopoAllowOnPushMla) {
       check_pd_topo(local_info, remote_info, "PUSH", true);
   EXPECT_EQ(result.status, PdTopoStatus::ALLOW_HETERO);
   EXPECT_TRUE(result.reason.empty());
+}
+
+TEST(PdTopologyGuardTest, NonMlaHeteroTopoRequiresEqualDpSize) {
+  const InstanceInfo local_info = make_info(2, {0, 1, 2, 3});
+  const InstanceInfo remote_info = make_info(1, {4});
+
+  const PdTopoResult result =
+      check_pd_topo(local_info, remote_info, "PUSH", false);
+  EXPECT_EQ(result.status, PdTopoStatus::DENY_HETERO);
+  EXPECT_EQ(result.reason, "non-mla hetero pd requires equal dp_size");
+}
+
+TEST(PdTopologyGuardTest, NonMlaHeteroTopoRequiresPrefillTpMultiple) {
+  const InstanceInfo local_info = make_info(1, {0, 1, 2});
+  const InstanceInfo remote_info = make_info(1, {3, 4});
+
+  const PdTopoResult result =
+      check_pd_topo(local_info, remote_info, "PUSH", false);
+  EXPECT_EQ(result.status, PdTopoStatus::DENY_HETERO);
+  EXPECT_EQ(result.reason,
+            "non-mla hetero pd requires prefill tp_size divisible by decode "
+            "tp_size");
 }
 
 TEST(PdTopologyGuardTest, CheckPdTopoRejectInvalidLocalTopo) {

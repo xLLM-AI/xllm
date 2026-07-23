@@ -144,6 +144,13 @@ class Qwen3_5MtpModelImpl : public Qwen3HybridModelImplBase {
                                        kv_caches[i],
                                        input_params,
                                        mrope_cos_sin);
+#if defined(USE_NPU)
+      if (input_params.parallel.layer_synchronizer != nullptr &&
+          !input_params.parallel.layer_synchronizer->record_event(
+              static_cast<int64_t>(i), device_.index())) {
+        return ModelOutput();
+      }
+#endif
     }
     auto [new_mtp_hidden, new_res] = norm_->forward(mtp_hidden, residual);
     mtp_hidden = new_mtp_hidden;

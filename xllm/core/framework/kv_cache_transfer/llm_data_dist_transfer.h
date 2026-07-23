@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <llm_datadist/llm_datadist.h>
 
+#include <mutex>
+
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 
 namespace xllm {
@@ -28,6 +30,9 @@ struct RegisteredCache {
   int32_t group_id;
   bool sequence_scoped;
   Cache cache;
+  // Keep the tensor owner and layout available for heterogeneous-TP staging
+  // and decode-side merge. Cache only stores the raw address.
+  torch::Tensor tensor;
 };
 
 using LayerRegisteredCaches = std::vector<std::vector<RegisteredCache>>;
@@ -94,6 +99,36 @@ class LlmDataDistTransfer : public KVCacheTransfer {
       int32_t kv_split_rank = 0,
       int32_t kv_split_size = 1);
 
+  bool pull_and_merge_sharded_caches(
+      const LayerRegisteredCaches& layer_registered_caches,
+      const LayerRegisteredCaches& staging_registered_caches,
+      const std::vector<uint64_t>& src_cluster_ids,
+      const std::vector<uint64_t>& src_blocks,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids,
+      const std::vector<uint64_t>& dst_linear_state_ids);
+
+  bool merge_pre_pushed_sharded_caches(
+      const LayerRegisteredCaches& layer_registered_caches,
+      const LayerRegisteredCaches& staging_registered_caches,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& dst_linear_state_ids,
+      int64_t source_shard_count);
+
+  bool push_layer_registered_caches_to_staging(
+      const LayerRegisteredCaches& layer_registered_caches,
+      const LayerRegisteredCaches& staging_registered_caches,
+      std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
+      std::shared_ptr<NPULayerSynchronizerImpl>& layer_synchronizer,
+      int64_t source_shard_rank,
+      int64_t source_shard_count);
+
+  void register_hetero_staging_caches(
+      const LayerRegisteredCaches& source_registered_caches,
+      LayerRegisteredCaches& staging_registered_caches,
+      int64_t source_shard_count = 2,
+      bool source_is_sharded = false);
+
  protected:
   uint64_t cluster_id_;
   std::string host_ip_;
@@ -106,6 +141,13 @@ class LlmDataDistTransfer : public KVCacheTransfer {
 
   std::shared_ptr<LlmDataDist> llm_data_dist_;
   LayerRegisteredCaches layer_registered_caches_;
+  // Heterogeneous requests share staging caches, so only one request may
+  // restore and merge them at a time. The two source shards within that
+  // request are still pulled concurrently.
+  std::mutex hetero_pull_mutex_;
+  ThreadPool shard_pull_threadpool_{/*num_threads=*/1,
+                                    /*cpu_binding=*/false,
+                                    /*pool_name=*/"KVCacheTransfer.shard_pull"};
 };
 
 }  // namespace xllm

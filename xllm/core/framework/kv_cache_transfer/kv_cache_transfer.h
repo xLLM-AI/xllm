@@ -137,6 +137,18 @@ class KVCacheTransfer {
       const std::vector<uint64_t>& src_linear_state_ids,
       const std::vector<uint64_t>& dst_linear_state_ids);
 
+  // Heterogeneous TP fallback transport: pull every source TP shard into
+  // temporary local buffers and merge them into the decode-side cache.
+  virtual bool pull_hetero_kv_blocks(
+      const std::vector<uint64_t>& src_cluster_ids,
+      const std::vector<std::string>& src_addrs,
+      const std::vector<uint64_t>& src_blocks,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids,
+      const std::vector<uint64_t>& dst_linear_state_ids) {
+    return false;
+  }
+
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
   virtual folly::SemiFuture<bool> push_kv_blocks_async(
       const std::vector<TransferKVInfo>& transfer_kv_infos,

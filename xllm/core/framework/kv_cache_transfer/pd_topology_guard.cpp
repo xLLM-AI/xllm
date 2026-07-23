@@ -31,18 +31,31 @@ bool fail_topo(const std::string& msg, std::string* reason) {
   return false;
 }
 
-PdTopoResult check_hetero_pd_req(const std::string& kv_mode, bool enable_mla) {
+PdTopoResult check_hetero_pd_req(const PdTopo& prefill_topo,
+                                 const PdTopo& decode_topo,
+                                 const std::string& kv_mode,
+                                 bool enable_mla) {
   if (kv_mode != "PUSH") {
     return PdTopoResult{PdTopoStatus::DENY_HETERO,
                         "hetero pd requires kv_mode=PUSH"};
   }
-  // Non-MLA KV cache still shards KV heads by TP. Hetero TP needs separate
-  // head-dimension split/merge support, so this path is limited to MLA.
-  if (!enable_mla) {
-    return PdTopoResult{PdTopoStatus::DENY_HETERO,
-                        "hetero pd requires enable_mla=true"};
+
+  if (enable_mla) {
+    return PdTopoResult{PdTopoStatus::ALLOW_HETERO, ""};
   }
 
+  if (prefill_topo.dp_size != decode_topo.dp_size) {
+    return PdTopoResult{PdTopoStatus::DENY_HETERO,
+                        "non-mla hetero pd requires equal dp_size"};
+  }
+
+  if (prefill_topo.tp_size < decode_topo.tp_size ||
+      prefill_topo.tp_size % decode_topo.tp_size != 0) {
+    return PdTopoResult{
+        PdTopoStatus::DENY_HETERO,
+        "non-mla hetero pd requires prefill tp_size divisible by decode "
+        "tp_size"};
+  }
   return PdTopoResult{PdTopoStatus::ALLOW_HETERO, ""};
 }
 
@@ -109,7 +122,7 @@ PdTopoResult check_pd_topo(const InstanceInfo& local,
     return PdTopoResult{PdTopoStatus::ALLOW_HOMO, ""};
   }
 
-  return check_hetero_pd_req(kv_mode, enable_mla);
+  return check_hetero_pd_req(local_topo, remote_topo, kv_mode, enable_mla);
 }
 
 }  // namespace xllm

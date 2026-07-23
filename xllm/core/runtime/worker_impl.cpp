@@ -1771,6 +1771,55 @@ folly::SemiFuture<bool> WorkerImpl::pull_kv_blocks_async(
   return false;
 }
 
+folly::SemiFuture<bool> WorkerImpl::pull_hetero_kv_blocks_async(
+    const std::vector<uint64_t>& src_cluster_ids,
+    const std::vector<std::string>& src_addrs,
+    const std::vector<uint64_t>& src_blocks,
+    const std::vector<uint64_t>& dst_blocks,
+    const std::vector<uint64_t>& src_linear_state_ids,
+    const std::vector<uint64_t>& dst_linear_state_ids) {
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+#if defined(USE_NPU)
+  threadpool_.schedule([this,
+                        src_cluster_ids,
+                        src_addrs,
+                        src_blocks,
+                        dst_blocks,
+                        src_linear_state_ids,
+                        dst_linear_state_ids,
+                        promise = std::move(promise)]() mutable {
+    const bool success =
+        kv_cache_transfer_->pull_hetero_kv_blocks(src_cluster_ids,
+                                                  src_addrs,
+                                                  src_blocks,
+                                                  dst_blocks,
+                                                  src_linear_state_ids,
+                                                  dst_linear_state_ids);
+    if (success) {
+      const int ret = device_.synchronize_default_stream();
+      if (ret != 0) {
+        LOG(ERROR) << "synchronize_default_stream after heterogeneous KV "
+                      "merge failed, ret="
+                   << ret;
+        promise.setValue(false);
+        return;
+      }
+    }
+    promise.setValue(success);
+  });
+#else
+  (void)src_cluster_ids;
+  (void)src_addrs;
+  (void)src_blocks;
+  (void)dst_blocks;
+  (void)src_linear_state_ids;
+  (void)dst_linear_state_ids;
+  promise.setValue(false);
+#endif
+  return future;
+}
+
 uint32_t WorkerImpl::transfer_kv_blocks(
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {

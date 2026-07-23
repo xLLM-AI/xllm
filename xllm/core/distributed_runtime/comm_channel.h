@@ -79,6 +79,14 @@ class CommChannel {
       const std::vector<uint64_t>& src_linear_state_ids = {},
       const std::vector<uint64_t>& dst_linear_state_ids = {});
 
+  virtual bool pull_hetero_kv_blocks(
+      const std::vector<uint64_t>& src_cluster_ids,
+      const std::vector<std::string>& src_addrs,
+      const std::vector<uint64_t>& src_blocks,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids = {},
+      const std::vector<uint64_t>& dst_linear_state_ids = {});
+
   virtual void execute_model_async(
       const ForwardInput& input,
       folly::Promise<std::optional<RawForwardOutput>>& promise);
