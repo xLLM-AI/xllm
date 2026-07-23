@@ -216,13 +216,28 @@ void MappingNPU::parse_parallel_info() {
   attn_kv_split_.group_size(kv_split_group_size);
   attn_kv_split_.backend("hccl");
 
+  // word embed / lm_head: CP-unaware, DP-aware. The model-side CP closure
+  // localizes hidden AFTER embedding and restores global-real hidden BEFORE
+  // the LM head, so both layers always see the full sequence and must NOT be
+  // sharded by the CP-local TP (attn_tp_, size tp). Instead they shard across
+  // the dp-local-TP group = world / dp_size = cp_size * tp_size, i.e. the full
+  // TP width within one DP (spanning all CP ranks in that DP). This avoids
+  // replicating the embedding / lm_head weights across CP ranks. get_tp_group
+  // (called in the constructor after parse_parallel_info) then builds one
+  // contiguous (cp*tp)-rank chunk per DP. When cp_size == 1 this collapses to
+  // tp_size (== attn_tp_) so behavior is unchanged for non-CP runs.
+  const int32_t dp_local_tp_group_size =
+      attn_dp_.group_size() > 0 ? world_size_ / attn_dp_.group_size()
+                                : world_size_;
   // word embed
   word_embed_tp_ = ParallelInfo(attn_tp_);
+  word_embed_tp_.group_size(dp_local_tp_group_size);
   word_embed_dp_ = ParallelInfo(attn_dp_);
   // lm_head
   if (ENV_enable_dp_partition_up) {
     if (!ENV_lm_head_local_tp) {
       lm_head_tp_ = ParallelInfo(attn_tp_);
+      lm_head_tp_.group_size(dp_local_tp_group_size);
       lm_head_dp_ = ParallelInfo(attn_dp_);
     }
   } else {
@@ -422,7 +437,10 @@ nlohmann::json MappingNPU::to_json() {
   // when enable lmhead, the data is output in
   // the form of a data parallel (DP) strategy.
   if (ENV_enable_dp_partition_up) {
-    lmhead_tp = attn_tp_.to_json(buffer_offset_);
+    // Emit the dp-local-TP group (lm_head_tp_, size cp*tp) — not attn_tp_ (size
+    // tp) — so the LM head shards across the full TP within a DP and does not
+    // replicate weights across CP ranks. See parse_parallel_info().
+    lmhead_tp = lm_head_tp_.to_json(buffer_offset_);
     lmhead_dp = attn_dp_.to_json(buffer_offset_);
   } else {
     lmhead_tp = mlp_tp_.to_json(buffer_offset_);

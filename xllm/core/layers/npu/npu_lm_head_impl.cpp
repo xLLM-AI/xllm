@@ -50,14 +50,25 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
 
   if (parallel_args.world_size() > 1) {
     if (parallel_args.mapping_data().empty()) {
-      const bool use_local_tp = (dp_size_ > 1) || (cp_size_ > 1);
-      if (use_local_tp) {
-        CHECK_GT(dp_local_tp_size_, 0);
-        CHECK_GE(dp_local_tp_rank_, 0);
-        CHECK_LT(dp_local_tp_rank_, dp_local_tp_size_);
-        param.linearParallelParam.tensorParallelInfo.rank = dp_local_tp_rank_;
+      // Model-side CP: the LM head runs AFTER npu_cp::gather_restore, so it
+      // sees the full global-real sequence and must be CP-unaware but
+      // DP-aware. Shard across the dp-local-TP group (world / dp_size =
+      // cp_size * tp_size) — the full TP width within one DP, spanning all CP
+      // ranks in that DP — instead of the CP-local TP (dp_local_tp_size_,
+      // size tp). This avoids replicating the lm_head weight across CP
+      // ranks. When cp_size == 1 this collapses to tp_size, so non-CP runs
+      // are unchanged.
+      const bool use_cp_unaware_tp = (dp_size_ > 1) || (cp_size_ > 1);
+      const int32_t cp_unaware_tp_size = parallel_args.world_size() / dp_size_;
+      if (use_cp_unaware_tp) {
+        CHECK_GT(cp_unaware_tp_size, 0);
+        const int32_t cp_unaware_tp_rank =
+            parallel_args.rank() % cp_unaware_tp_size;
+        CHECK_GE(cp_unaware_tp_rank, 0);
+        CHECK_LT(cp_unaware_tp_rank, cp_unaware_tp_size);
+        param.linearParallelParam.tensorParallelInfo.rank = cp_unaware_tp_rank;
         param.linearParallelParam.tensorParallelInfo.worldSize =
-            dp_local_tp_size_;
+            cp_unaware_tp_size;
       } else {
         param.linearParallelParam.tensorParallelInfo.rank =
             parallel_args.rank();
@@ -67,7 +78,7 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
       param.linearParallelParam.parallelType =
           atb_speed::common::COLUMN_PARALLEL;
       const int32_t tp_group_id =
-          use_local_tp ? (parallel_args.rank() / dp_local_tp_size_) : 0;
+          use_cp_unaware_tp ? (parallel_args.rank() / cp_unaware_tp_size) : 0;
       param.linearParallelParam.tensorParallelInfo.commDomain =
           std::to_string(tp_group_id);
       param.linearParallelParam.tensorParallelInfo.backend =
@@ -75,8 +86,12 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
     } else {
       param.linearParallelParam.parallelType =
           atb_speed::common::COLUMN_PARALLEL;
+      // Mapping (ATB) path: use the dedicated LM_HEAD_TP group, which
+      // MappingNPU builds as the dp-local-TP group (size cp*tp). Do NOT use
+      // ATTN_TP (size tp, CP-local) — that would replicate the lm_head
+      // weight across CP ranks. See mapping_npu.cpp parse_parallel_info().
       atb_speed::common::ParallelInfo parallelInfo =
-          parallel_args.mapping().Get(atb_speed::base::ATTN_TP);
+          parallel_args.mapping().Get(atb_speed::base::LM_HEAD_TP);
       param.linearParallelParam.tensorParallelInfo.rank = parallelInfo.rank;
       param.linearParallelParam.tensorParallelInfo.worldSize =
           parallelInfo.rankIds.size();
@@ -101,11 +116,17 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
 
 NpuLmHeadImpl::NpuLmHeadImpl(const ModelContext& context) : BaseLayer(context) {
   vocab_size_ = context.get_model_args().vocab_size();
-  if (vocab_size_ > 0 && dp_local_tp_size_ > 1 &&
-      vocab_size_ % dp_local_tp_size_ != 0) {
+  // The LM head is sharded across the dp-local-TP group (world / dp_size =
+  // cp_size * tp_size, CP-unaware but DP-aware), so pad the vocab to a multiple
+  // of that width — not the CP-local TP (dp_local_tp_size_, size tp). This must
+  // match get_padded_vocab_size() in base_loader.cpp. When cp_size == 1 this
+  // collapses to tp_size, so non-CP runs are unchanged.
+  const int32_t cp_unaware_tp_size = parallel_args_.world_size() / dp_size_;
+  if (vocab_size_ > 0 && cp_unaware_tp_size > 1 &&
+      vocab_size_ % cp_unaware_tp_size != 0) {
     padded_vocab_size_ =
-        ((vocab_size_ + dp_local_tp_size_ - 1) / dp_local_tp_size_) *
-        dp_local_tp_size_;
+        ((vocab_size_ + cp_unaware_tp_size - 1) / cp_unaware_tp_size) *
+        cp_unaware_tp_size;
   } else {
     padded_vocab_size_ = vocab_size_;
   }

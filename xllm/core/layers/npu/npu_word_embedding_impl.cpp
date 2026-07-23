@@ -30,22 +30,35 @@ void NpuWordEmbeddingImpl::param_from_args(
 
   if (parallel_args.world_size() > 1) {
     if (parallel_args.mapping_data().empty()) {
-      const bool use_local_tp = (dp_size_ > 1) || (cp_size_ > 1);
-      if (use_local_tp) {
-        param.tensorParallelInfo.rank = dp_local_tp_rank_;
-        param.tensorParallelInfo.worldSize = dp_local_tp_size_;
+      // Model-side CP: embedding runs BEFORE localize, so it sees the full
+      // sequence and must be CP-unaware but DP-aware. Shard across the
+      // dp-local-TP group (world / dp_size = cp_size * tp_size) — the full TP
+      // width within one DP, spanning all CP ranks in that DP — instead of the
+      // CP-local TP (dp_local_tp_size_, size tp). This avoids replicating the
+      // embedding weight across CP ranks. When cp_size == 1 this collapses to
+      // tp_size, so non-CP runs are unchanged.
+      const bool use_cp_unaware_tp = (dp_size_ > 1) || (cp_size_ > 1);
+      const int32_t cp_unaware_tp_size = parallel_args.world_size() / dp_size_;
+      if (use_cp_unaware_tp) {
+        param.tensorParallelInfo.rank =
+            parallel_args.rank() % cp_unaware_tp_size;
+        param.tensorParallelInfo.worldSize = cp_unaware_tp_size;
       } else {
         param.tensorParallelInfo.rank = parallel_args.rank();
         param.tensorParallelInfo.worldSize = parallel_args.world_size();
       }
       const int32_t tp_group_id =
-          use_local_tp ? (parallel_args.rank() / dp_local_tp_size_) : 0;
+          use_cp_unaware_tp ? (parallel_args.rank() / cp_unaware_tp_size) : 0;
       param.tensorParallelInfo.commDomain = std::to_string(tp_group_id);
       param.tensorParallelInfo.backend =
           ::xllm::ParallelConfig::get_instance().communication_backend();
     } else {
+      // Mapping (ATB) path: use the dedicated WORD_EMBED_TP group, which
+      // MappingNPU builds as the dp-local-TP group (size cp*tp). Do NOT use
+      // ATTN_TP (size tp, CP-local) — that would replicate the embedding
+      // weight across CP ranks. See mapping_npu.cpp parse_parallel_info().
       atb_speed::common::ParallelInfo parallelInfo =
-          parallel_args.mapping().Get(atb_speed::base::ATTN_TP);
+          parallel_args.mapping().Get(atb_speed::base::WORD_EMBED_TP);
       param.tensorParallelInfo.rank = parallelInfo.rank;
       param.tensorParallelInfo.worldSize = parallelInfo.rankIds.size();
       param.tensorParallelInfo.backend =
