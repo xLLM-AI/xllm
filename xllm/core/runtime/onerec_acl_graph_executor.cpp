@@ -358,6 +358,13 @@ class OneRecAclGraph {
                std::vector<KVCache>& kv_caches,
                const ModelInputParams& params,
                const torch::Tensor& encoder_output) {
+    // Device synchronization is not allowed while any stream on the device is
+    // being captured. Serialize the complete quiesce-and-capture sequence so a
+    // second pipeline cannot synchronize the device during another capture.
+    auto& capture_lock =
+        DeviceCaptureLock::get_instance().get_lock(device_index_);
+    std::lock_guard<std::mutex> lock_guard(capture_lock);
+
     torch::npu::synchronize();
     auto params_for_capture =
         param_.update(model, tokens, positions, params, encoder_output);
@@ -365,35 +372,28 @@ class OneRecAclGraph {
     aclrtSynchronizeStream(stream);
 
     bool need_restore_stream = false;
-    {
-      // NPUGraph capture and replay share the device's default generator.
-      auto& capture_lock =
-          DeviceCaptureLock::get_instance().get_lock(device_index_);
-      std::lock_guard<std::mutex> lock_guard(capture_lock);
-      if (c10_npu::getCurrentNPUStream(device_index_) ==
-          c10_npu::getDefaultNPUStream(device_index_)) {
-        c10_npu::setCurrentNPUStream(capture_stream_.value());
-        aclrtSynchronizeStream(capture_stream_.value().stream());
-        need_restore_stream = true;
-      }
-
-      graph_.capture_begin(
-          {0, 0}, aclmdlRICaptureMode::ACL_MODEL_RI_CAPTURE_MODE_THREAD_LOCAL);
-      auto forward_result = model->forward(
-          param_.tokens(), param_.positions(), kv_caches, params_for_capture);
-      param_.set_hidden_states(forward_result.hidden_states);
-      graph_.capture_end();
-
-      if (need_restore_stream) {
-        c10_npu::setCurrentNPUStream(
-            c10_npu::getDefaultNPUStream(device_index_));
-      }
-
-      // Keep validation replay in the same device-wide critical section so a
-      // second pipeline cannot update generator state during capture.
-      aclrtSynchronizeStream(stream);
-      graph_.replay();
+    if (c10_npu::getCurrentNPUStream(device_index_) ==
+        c10_npu::getDefaultNPUStream(device_index_)) {
+      c10_npu::setCurrentNPUStream(capture_stream_.value());
+      aclrtSynchronizeStream(capture_stream_.value().stream());
+      need_restore_stream = true;
     }
+
+    graph_.capture_begin(
+        {0, 0}, aclmdlRICaptureMode::ACL_MODEL_RI_CAPTURE_MODE_THREAD_LOCAL);
+    auto forward_result = model->forward(
+        param_.tokens(), param_.positions(), kv_caches, params_for_capture);
+    param_.set_hidden_states(forward_result.hidden_states);
+    graph_.capture_end();
+
+    if (need_restore_stream) {
+      c10_npu::setCurrentNPUStream(c10_npu::getDefaultNPUStream(device_index_));
+    }
+
+    // NPUGraph capture and replay share the device's default generator. Keep
+    // validation replay in the same device-wide critical section.
+    aclrtSynchronizeStream(stream);
+    graph_.replay();
     captured_ = true;
     return true;
   }
