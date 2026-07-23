@@ -13,12 +13,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#pragma once
+
 #include <brpc/server.h>
 #include <google/protobuf/service.h>
 
 #include "core/common/metrics.h"
 
 namespace xllm {
+
+static bool is_failed_request(const brpc::Controller* ctrl) {
+  return ctrl->Failed() || ctrl->http_response().status_code() >= 400;
+}
 
 static void request_in_metric(void* context) {
   COUNTER_INC(server_request_in_total);
@@ -31,7 +37,7 @@ static void request_out_metric(void* context) {
     return;
   }
 
-  if (!ctrl->Failed()) {
+  if (!is_failed_request(ctrl)) {
     COUNTER_INC(server_request_total_ok);
   } else {
     COUNTER_INC(server_request_total_fail);

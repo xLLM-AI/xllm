@@ -42,7 +42,7 @@ class NonStreamCall : public Call {
                 Request* request,
                 Response* response,
                 bool use_arena = false)
-      : Call(controller),
+      : Call(controller, request_body_x_request_id(request)),
         done_(done),
         request_(request),
         response_(response),
@@ -74,7 +74,8 @@ class NonStreamCall : public Call {
     std::string err_msg;
     if (!json2pb::ProtoMessageToJson(
             response, &json_output, json_options_, &err_msg)) {
-      return finish_with_error(StatusCode::UNKNOWN, err_msg);
+      finish_with_error(StatusCode::UNKNOWN, err_msg);
+      return false;
     }
 
     XLLM_VERBOSE_TRACE() << "event=request_completed http=200 x-request-id="

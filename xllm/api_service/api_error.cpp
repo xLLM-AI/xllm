@@ -126,7 +126,7 @@ std::string make_openai_error_json(StatusCode code, std::string_view message) {
   error["type"] = status_code_to_openai_error_type(code);
   error["code"] = status_code_to_string(code);
   error["param"] = nullptr;
-  return body.dump();
+  return body.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 }
 
 std::string make_anthropic_error_json(StatusCode code,
@@ -136,7 +136,7 @@ std::string make_anthropic_error_json(StatusCode code,
   auto& error = body["error"];
   error["type"] = status_code_to_anthropic_error_type(code);
   error["message"] = message;
-  return body.dump();
+  return body.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 }
 
 std::string get_header_x_request_id(const brpc::Controller* controller) {

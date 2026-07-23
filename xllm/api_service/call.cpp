@@ -21,11 +21,12 @@ limitations under the License.
 
 namespace xllm {
 
-Call::Call(brpc::Controller* controller) : controller_(controller) { init(); }
+Call::Call(brpc::Controller* controller, std::string body_x_request_id)
+    : controller_(controller) {
+  init(std::move(body_x_request_id));
+}
 
-void Call::init() {
-  raw_header_x_request_id_ = api_service::get_header_x_request_id(controller_);
-
+void Call::init(std::string body_x_request_id) {
   if (controller_->http_request().GetHeader("x-request-time")) {
     x_request_time_ = *controller_->http_request().GetHeader("x-request-time");
   } else if (controller_->http_request().GetHeader("x-request-timems")) {
@@ -33,12 +34,15 @@ void Call::init() {
         *controller_->http_request().GetHeader("x-request-timems");
   }
 
-  // Resolve the request-scoped x-request-id once, here: the client-supplied
-  // value when present, otherwise a server-generated id. Shared across logs,
-  // the verbose trace and the engine so a request can be correlated end to end.
-  x_request_id_ = raw_header_x_request_id_.empty()
-                      ? api_service::generate_x_request_id()
-                      : raw_header_x_request_id_;
+  // Resolve the request-scoped x-request-id once, here, so logs, the response
+  // header and the engine use the same value.
+  x_request_id_ = api_service::get_header_x_request_id(controller_);
+  if (x_request_id_.empty()) {
+    x_request_id_ = std::move(body_x_request_id);
+  }
+  if (x_request_id_.empty()) {
+    x_request_id_ = api_service::generate_x_request_id();
+  }
   controller_->http_response().SetHeader("x-request-id", x_request_id_);
   XLLM_VERBOSE_TRACE() << "event=request_received x-request-id="
                        << x_request_id_

@@ -45,7 +45,7 @@ class StreamCall : public Call {
              Request* request,
              Response* response,
              bool use_arena = false)
-      : Call(controller),
+      : Call(controller, request_body_x_request_id(request)),
         done_(done),
         request_(request),
         response_(response),

@@ -50,6 +50,17 @@ cc_test(
 
 cc_test(
   NAME
+    api_error_test
+  SRCS
+    api_error_test.cpp
+  DEPS
+    api_service
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
+)
+
+cc_test(
+  NAME
     completion_json_parser_test
   SRCS
     completion_json_parser_test.cpp

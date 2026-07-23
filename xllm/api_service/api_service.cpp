@@ -260,9 +260,8 @@ void APIService::CompletionsHttp(::google::protobuf::RpcController* controller,
   auto [preprocess_status, processed_json] =
       preprocess_completion_prompt(ctrl->request_attachment().to_string());
   if (!preprocess_status.ok()) {
-    ctrl->SetFailed(preprocess_status.message());
-    LOG(ERROR) << "completion prompt preprocessing failed: "
-               << preprocess_status.message();
+    fail_http_request(
+        ctrl, preprocess_status.code(), preprocess_status.message());
     return;
   }
 
@@ -750,8 +749,7 @@ void APIService::TextGenerationHttp(
   butil::IOBufAsZeroCopyInputStream iobuf_stream(buf);
   bool st = json2pb::JsonToProtoMessage(&iobuf_stream, req_pb, options, &error);
   if (!st) {
-    ctrl->SetFailed(error);
-    LOG(ERROR) << "parse json to proto failed: " << error;
+    fail_http_request(ctrl, StatusCode::INVALID_ARGUMENT, error);
     return;
   }
   std::shared_ptr<TextGenerationCall> call =

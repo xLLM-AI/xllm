@@ -84,7 +84,7 @@ class ServiceConfig final {
 
   PROPERTY(int32_t, verbose_trace_log_max_size_mb) = 1024;
 
-  PROPERTY(int32_t, verbose_trace_log_max_files) = 100000;
+  PROPERTY(int32_t, verbose_trace_log_max_files) = 1000;
 };
 
 }  // namespace xllm

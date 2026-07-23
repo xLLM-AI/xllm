@@ -18,22 +18,33 @@ limitations under the License.
 #include <brpc/controller.h>
 
 #include <string>
+#include <utility>
 
 namespace xllm {
 
+template <typename Request>
+std::string request_body_x_request_id(const Request* request) {
+  if constexpr (requires(const Request& value) {
+                  value.has_x_request_id();
+                  value.x_request_id();
+                }) {
+    if (request != nullptr && request->has_x_request_id()) {
+      return request->x_request_id();
+    }
+  }
+  return "";
+}
+
 class Call {
  public:
-  Call(brpc::Controller* controller);
+  Call(brpc::Controller* controller, std::string body_x_request_id = "");
   virtual ~Call() = default;
 
-  const std::string& raw_header_x_request_id() const {
-    return raw_header_x_request_id_;
-  }
   const std::string& x_request_time() const { return x_request_time_; }
 
-  // The request-scoped x-request-id: the client-supplied value when present,
-  // otherwise a server-generated id. Always non-empty after construction and
-  // shared across logs, the verbose trace and the engine.
+  // The request-scoped x-request-id: the client header when present, then the
+  // request body value, otherwise a server-generated id. Always non-empty
+  // after construction and shared across logs, the response and the engine.
   const std::string& x_request_id() const { return x_request_id_; }
 
   std::string take_request_payload() { return std::move(request_payload_); }
@@ -42,12 +53,11 @@ class Call {
   virtual bool is_disconnected() const = 0;
 
  protected:
-  void init();
+  void init(std::string body_x_request_id);
 
  protected:
   brpc::Controller* controller_;
 
-  std::string raw_header_x_request_id_;
   std::string x_request_time_;
   std::string x_request_id_;
 
