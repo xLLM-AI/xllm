@@ -268,6 +268,100 @@ torch::Tensor scatter(torch::Tensor input,
   return tensor_list[rank];
 }
 
+torch::Tensor shard_dim0_padded(const torch::Tensor& input,
+                                int32_t rank,
+                                int32_t world_size) {
+  if (world_size <= 1) {
+    return input;
+  }
+  CHECK_GE(rank, 0);
+  CHECK_LT(rank, world_size);
+
+  const int64_t original_dim_size = input.size(0);
+  const int64_t remainder = original_dim_size % world_size;
+  const int64_t num_padding = (remainder == 0) ? 0 : (world_size - remainder);
+
+  torch::Tensor padded_input = input;
+  if (num_padding > 0) {
+    // Pad only dim0 (rows); leave every other dim untouched. The pad vector is
+    // ordered from the last dim to the first, two entries (low, high) per dim.
+    std::vector<int64_t> pad(static_cast<size_t>(2 * input.dim()), 0);
+    pad[static_cast<size_t>(2 * (input.dim() - 1) + 1)] = num_padding;
+    padded_input = torch::nn::functional::pad(
+        input, torch::nn::functional::PadFuncOptions(pad));
+  }
+
+  const int64_t chunk_size = padded_input.size(0) / world_size;
+  return padded_input
+      .slice(0,
+             static_cast<int64_t>(rank) * chunk_size,
+             static_cast<int64_t>(rank + 1) * chunk_size)
+      .contiguous();
+}
+
+torch::Tensor all_gather_dim0_unpad(const torch::Tensor& input,
+                                    ProcessGroup* process_group,
+                                    int64_t original_num_tokens) {
+  if (!process_group) {
+    return input;
+  }
+  const int32_t world_size = process_group->world_size();
+  if (world_size == 1) {
+    return input;
+  }
+  // Every rank holds an equal-sized shard, so a plain all-gather along dim0
+  // reconstructs the padded full tensor.
+  const int32_t local_num_tokens = static_cast<int32_t>(input.size(0));
+  const std::vector<int32_t> token_num_list(
+      static_cast<size_t>(world_size), local_num_tokens);
+  torch::Tensor full = gather(input, process_group, token_num_list);
+  if (original_num_tokens >= 0 && full.size(0) > original_num_tokens) {
+    full = full.slice(0, 0, original_num_tokens).contiguous();
+  }
+  return full;
+}
+
+torch::Tensor reduce_scatter_padded_dim0(const torch::Tensor& input,
+                                         ProcessGroup* process_group) {
+  if (!process_group) {
+    return input;
+  }
+  const int32_t world_size = process_group->world_size();
+  if (world_size == 1) {
+    return input;
+  }
+
+  const int64_t original_dim_size = input.size(0);
+  const int64_t remainder = original_dim_size % world_size;
+  const int64_t num_padding = (remainder == 0) ? 0 : (world_size - remainder);
+
+  torch::Tensor padded_input = input;
+  if (num_padding > 0) {
+    // Pad the tail of dim0 (token dim) with zeros for a tensor of arbitrary
+    // rank. torch pad pairs are ordered from the last dim to the first, so the
+    // last pair targets dim0. reduce-scatter of a zero-padded tail is a no-op
+    // for the sum, so correctness is preserved.
+    std::vector<int64_t> pad(static_cast<size_t>(2 * input.dim()), 0);
+    pad[static_cast<size_t>(2 * (input.dim() - 1) + 1)] = num_padding;
+    padded_input = torch::nn::functional::pad(
+        input, torch::nn::functional::PadFuncOptions(pad));
+  }
+
+  const int64_t padded_dim_size = padded_input.size(0);
+  const int64_t chunk_size = padded_dim_size / world_size;
+
+  auto output_shape = padded_input.sizes().vec();
+  output_shape[0] = chunk_size;
+  torch::Tensor output = torch::empty(output_shape, padded_input.options());
+
+  process_group->reduce_scatter(padded_input, output);
+
+  // NOTE: unlike reduce_scatter(), the trailing padding is intentionally kept so
+  // that every rank holds an identically-shaped [chunk_size, ...] token shard
+  // matching shard_dim0_padded. The final all_gather_dim0_unpad strips it.
+  return output;
+}
+
 std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input,
                                              int32_t scatter_idx,
                                              int32_t gather_idx,

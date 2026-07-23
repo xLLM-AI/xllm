@@ -282,6 +282,15 @@ class RowParallelLinearImpl : public torch::nn::Module {
   }
   ProcessGroup* process_group() const { return process_group_; }
 
+  // Mark this RowParallel layer as eligible for FlashComm1 (sequence parallel).
+  // When a FlashComm1 context is active, an eligible layer replaces its tail
+  // all-reduce with a padded reduce-scatter(dim0) so its output returns to a
+  // token shard. Only layers that feed a token-sharded residual boundary (e.g.
+  // attention o_b_proj) should be marked. Default false = unchanged behavior.
+  void set_flash_comm1_eligible(bool eligible) {
+    flash_comm1_eligible_ = eligible;
+  }
+
  private:
   // parameter members, must be registered
   // we allocate the transpose since linear performs XA^T.
@@ -312,6 +321,11 @@ class RowParallelLinearImpl : public torch::nn::Module {
 
   // whether to reduce the results
   bool enable_result_reduction_;
+
+  // whether this layer participates in FlashComm1 (sequence parallel). When
+  // true and a FlashComm1 context is active, the tail all-reduce is replaced by
+  // a padded reduce-scatter(dim0).
+  bool flash_comm1_eligible_ = false;
 
   // parallel process group
   ProcessGroup* process_group_;

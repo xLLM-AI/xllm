@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include "flash_comm1_context.h"
 #include "parallel_args.h"
 #include "process_group.h"
 
@@ -71,6 +72,35 @@ torch::Tensor reduce_scatter(const torch::Tensor& input,
 torch::Tensor scatter(torch::Tensor input,
                       ProcessGroup* process_group,
                       int dim = -1);
+
+// FlashComm1 sequence-parallel primitives.
+//
+// shard_dim0_padded: pad `input` along dim0 up to a multiple of world_size,
+// then return this rank's contiguous 1/world_size shard. The padding rows live
+// only on the last shard(s); callers restore the original token count with
+// all_gather_dim0_unpad. A no-op when process_group is null or world_size == 1.
+torch::Tensor shard_dim0_padded(const torch::Tensor& input,
+                                int32_t rank,
+                                int32_t world_size);
+
+// all_gather_dim0_unpad: all-gather the per-rank shards back into the full
+// (padded) token dimension along dim0, then slice off padding so the result
+// has exactly `original_num_tokens` rows. When original_num_tokens < 0 the
+// gathered (still padded) tensor is returned unsliced. A no-op when
+// process_group is null or world_size == 1.
+torch::Tensor all_gather_dim0_unpad(const torch::Tensor& input,
+                                    ProcessGroup* process_group,
+                                    int64_t original_num_tokens);
+
+// reduce_scatter_padded_dim0: reduce-scatter along dim0, padding dim0 up to a
+// multiple of world_size first. Unlike reduce_scatter(), the trailing padding
+// is INTENTIONALLY kept so every rank returns an identically-shaped
+// [chunk_size, ...] shard that matches shard_dim0_padded (chunk_size =
+// ceil(num_tokens / world_size)). This keeps the FlashComm1 sharded residual
+// stream uniform across ranks; padding rows are stripped by the final
+// all_gather_dim0_unpad. A no-op when process_group is null or world_size == 1.
+torch::Tensor reduce_scatter_padded_dim0(const torch::Tensor& input,
+                                         ProcessGroup* process_group);
 
 std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input_,
                                              int32_t scatter_idx,
