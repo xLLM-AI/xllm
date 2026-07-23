@@ -550,6 +550,9 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     state_.q_seq_lens.insert(state_.q_seq_lens.end(),
                              state.q_seq_lens.begin(),
                              state.q_seq_lens.end());
+    state_.adapter_ids.insert(state_.adapter_ids.end(),
+                              state.adapter_ids.begin(),
+                              state.adapter_ids.end());
     state_.kv_cache_tokens_nums.insert(state_.kv_cache_tokens_nums.end(),
                                        state.kv_cache_tokens_nums.begin(),
                                        state.kv_cache_tokens_nums.end());
@@ -679,6 +682,7 @@ void BatchInputBuilder::process_single_sequence(
 #if defined(USE_NPU)
   state.seq_lens.push_back(seq_len);
   state.q_seq_lens.push_back(padded_q_seq_len);
+  state.adapter_ids.push_back(sequence->adapter_id());
 #elif defined(USE_MLU) || defined(USE_CUDA) || defined(USE_ILU) || \
     defined(USE_DCU)
   state.seq_lens.push_back(state.seq_lens.back() + seq_len);
@@ -1209,6 +1213,7 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
   input_params.attention.host.kv_seq_lens = std::move(state_.seq_lens);
   input_params.attention.host.q_cu_seq_lens = std::move(q_cu_seq_lens);
   input_params.attention.host.q_seq_lens = std::move(state_.q_seq_lens);
+  input_params.adapter_ids = std::move(state_.adapter_ids);
   input_params.attention.device.new_cache_slots =
       torch::tensor(state_.new_token_slot_ids, torch::kInt);
 

@@ -170,6 +170,16 @@ struct RequestParams {
   bool is_sample_request = false;
 
   std::vector<SampleSlot> sample_slots;
+
+  // ---- Multi-tenant LoRA (M7) ----
+  // Engine-assigned int_id of the adapter this request should route to.
+  // Kept as std::optional so the scheduler can partition base vs adapter
+  // requests. Set by ChatServiceImpl after resolving the model / lora_name
+  // fields against LoRARegistry.
+  std::optional<uint64_t> adapter_id;
+
+  // Human-readable adapter name kept for logging / metrics only.
+  std::string adapter_name;
 };
 
 }  // namespace xllm

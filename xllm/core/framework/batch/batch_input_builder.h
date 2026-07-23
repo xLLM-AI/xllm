@@ -112,6 +112,10 @@ class BatchInputBuilder {
 #if defined(USE_NPU) || defined(USE_MUSA)
     std::vector<int32_t> seq_lens;
     std::vector<int32_t> q_seq_lens;
+
+    // LoRA adapter int_id per sequence, index-aligned with q_seq_lens.
+    // Consumed by ModelInputParams::to(device) to build adapter_ids_per_token.
+    std::vector<uint64_t> adapter_ids;
 #elif defined(USE_MLU) || defined(USE_CUDA) || defined(USE_ILU) || \
     defined(USE_DCU)
     std::vector<int32_t> seq_lens = {0};    // cu_seq_lens

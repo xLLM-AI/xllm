@@ -175,6 +175,9 @@ struct RequestState final {
   std::optional<Call*> call_;
 
   std::vector<SampleSlot> sample_slots;
+  // LoRA adapter int_id for this request. 0 = no adapter (base model).
+  // Set by LLMMaster::generate_request from RequestParams::adapter_id.
+  uint64_t adapter_id = 0;
 };
 
 }  // namespace xllm
