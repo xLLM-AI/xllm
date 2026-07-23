@@ -937,8 +937,7 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
         vae_image_sizes.push_back({vae_width, vae_height});
         auto img = image_list[i];
         auto condition_img =
-            vae_image_processor_
-                ->lanczos_resize(img, condition_height, condition_width)
+            vae_image_processor_->resize(img, condition_height, condition_width)
                 .to(options_);
         auto vae_img = vae_image_processor_
                            ->preprocess(img,
