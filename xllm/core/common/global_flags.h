@@ -209,7 +209,7 @@ DECLARE_int32(max_decode_token_per_sequence);
 
 DECLARE_string(priority_strategy);
 
-DECLARE_bool(use_mix_scheduler);
+DECLARE_bool(enable_mix_batch);
 
 DECLARE_bool(enable_online_preempt_offline);
 

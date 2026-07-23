@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "framework/kv_cache/kv_cache_capacity.h"
 
@@ -55,6 +56,10 @@ struct Dsv4KVCacheEstimateCost {
   int64_t token_unit_bytes = 0;
   int64_t manager_blocks_per_unit = 1;
 };
+
+std::vector<bool> resolve_indexer_cache_enabled_layers(
+    const ModelArgs& model_args,
+    int64_t num_cache_layers);
 
 KVCacheCapacity estimate_kv_cache_capacity(
     const ModelArgs& model_args,

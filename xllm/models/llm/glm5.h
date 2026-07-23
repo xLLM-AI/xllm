@@ -22,6 +22,11 @@ class Glm5ModelImpl : public DeepseekV32ModelImpl {
  public:
   explicit Glm5ModelImpl(const ModelContext& context)
       : DeepseekV32ModelImpl(context) {}
+
+ protected:
+  Glm5ModelImpl(const ModelContext& context,
+                const DecoderLayerFactory& decoder_layer_factory)
+      : DeepseekV32ModelImpl(context, decoder_layer_factory) {}
 };
 TORCH_MODULE(Glm5Model);
 
@@ -39,8 +44,9 @@ class Glm5ForCausalLMImpl : public LlmForCausalLMImplBase<Glm5Model> {
 };
 TORCH_MODULE(Glm5ForCausalLM);
 
-// register the causal model
-REGISTER_CAUSAL_MODEL(glm_moe_dsa, Glm5ForCausalLM);
+// GLM5.0/5.1 and GLM5.2 share model_type "glm_moe_dsa". Register it once in
+// glm52.h; Glm52ForCausalLM falls back to the legacy GLM5 behavior when the
+// resolved DSA top-k share plan contains no shared layers.
 
 // register the model args
 // example config:
@@ -95,6 +101,9 @@ REGISTER_MODEL_ARGS(
       LOAD_ARG_OR(index_topk_freq, "index_topk_freq", 1);
       LOAD_ARG_OR(index_topk_pattern, "index_topk_pattern", "");
       LOAD_ARG_OR(index_skip_topk_offset, "index_skip_topk_offset", 0);
+      LOAD_ARG_OR(index_share_for_mtp_iteration,
+                  "index_share_for_mtp_iteration",
+                  false);
 
       // Computed parameters
       // the original head_dim in glm5 config seem useless

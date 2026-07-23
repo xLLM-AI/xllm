@@ -20,6 +20,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <memory>
 #include <string>
 #include <typeinfo>
 #include <vector>
@@ -39,6 +40,7 @@ limitations under the License.
 #include "core/layers/npu/npu_pos_embedding_impl.h"
 #include "core/layers/npu/npu_rms_norm_impl.h"
 #include "core/layers/npu/npu_word_embedding_impl.h"
+#include "models/llm/npu/mtp_topk_state.h"
 #include "models/model_registry.h"
 #include "xllm_atb_layers/core/include/atb_speed/log.h"
 
@@ -175,7 +177,14 @@ class MtpModelImplBase : public torch::nn::Module {
         const_cast<ModelInputParams&>(input_params);
     input_params_new.expert.expert_array = expert_array;
 
-    torch::Tensor prev_topk_indices = input_params_new.dsa_topk_indices;
+    torch::Tensor prev_topk_indices;
+    if (input_params.mtp_topk_state != nullptr) {
+      const auto state = std::dynamic_pointer_cast<const NpuMtpTopkState>(
+          input_params.mtp_topk_state);
+      CHECK(state != nullptr)
+          << "NPU MTP model received an incompatible top-k state.";
+      prev_topk_indices = state->topk_indices();
+    }
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event = nullptr;
       std::atomic<bool>* event_flag = nullptr;
@@ -211,7 +220,10 @@ class MtpModelImplBase : public torch::nn::Module {
 
     auto hidden_states = final_norm_(h, 0);
     ModelOutput output(hidden_states);
-    output.dsa_topk_indices = prev_topk_indices;
+    if (prev_topk_indices.defined()) {
+      output.mtp_topk_state =
+          std::make_shared<NpuMtpTopkState>(prev_topk_indices);
+    }
     return output;
   }
 

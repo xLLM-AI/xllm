@@ -25,10 +25,15 @@ limitations under the License.
 #include "framework/block/block.h"
 #include "framework/kv_cache/deepseek_v4_cache_policy.h"
 #include "framework/kv_cache/deepseek_v4_kv_cache_impl.h"
+#include "framework/kv_cache/kv_cache_tensor_allocator.h"
 #include "framework/kv_cache/kv_cache_utils.h"
 #include "kv_cache_estimation.h"
 #include "kv_cache_shape.h"
 #include "platform/device.h"
+#if defined(USE_MLU)
+#include "platform/mlu/mlu_tensor_alloc.h"
+#endif
+#include "platform/platform.h"
 #include "worker.pb.h"
 
 namespace xllm {
@@ -65,6 +70,28 @@ class IndexerCacheDtypeConfigGuard final {
  private:
   std::string old_indexer_cache_dtype_;
 };
+
+#if defined(USE_MLU)
+class RecordingKVCacheTensorAllocator final : public KVCacheTensorAllocator {
+ public:
+  struct Request {
+    KVCacheTensorRole role;
+    std::vector<int64_t> shape;
+    torch::ScalarType dtype;
+    torch::Device device;
+  };
+
+  torch::Tensor allocate(KVCacheTensorRole role,
+                         const std::vector<int64_t>& shape,
+                         torch::ScalarType dtype,
+                         const torch::Device& device) override {
+    requests.emplace_back(Request{role, shape, dtype, device});
+    return torch::zeros(shape, torch::dtype(dtype).device(device));
+  }
+
+  std::vector<Request> requests;
+};
+#endif
 
 }  // namespace
 
@@ -576,6 +603,156 @@ TEST(KVCacheTest, MluIndexerAutoUsesDefaultCacheShapeWithoutScale) {
   ASSERT_EQ(caches.size(), 1U);
   EXPECT_EQ(caches[0].get_index_cache().scalar_type(), torch::kBFloat16);
   EXPECT_FALSE(caches[0].get_indexer_cache_scale().has_value());
+}
+
+TEST(KVCacheTest, MluSharedDsaLayersAllocateOnlyMlaCache) {
+  constexpr int64_t kBlockCount = 8;
+  constexpr int64_t kBlockSize = 16;
+
+  KVCacheCapacity capacity;
+  capacity.n_blocks(kBlockCount).block_size(kBlockSize);
+
+  ModelArgs model_args;
+  model_args.model_type("glm_moe_dsa")
+      .enable_mla(true)
+      .n_heads(8)
+      .n_kv_heads(2)
+      .head_dim(64)
+      .kv_lora_rank(64)
+      .qk_rope_head_dim(16)
+      .index_n_heads(1)
+      .index_head_dim(32);
+  const KVCacheShape shape(capacity, model_args, /*world_size=*/1);
+
+  KVCacheCreateOptions options;
+  options.device(torch::Device(torch::kCPU))
+      .dtype(torch::kBFloat16)
+      .num_layers(4)
+      .model_type("glm_moe_dsa")
+      .enable_lighting_indexer(true)
+      .indexer_cache_enabled_layers(
+          std::vector<bool>{true, false, false, true});
+
+  std::vector<KVCache> caches;
+  allocate_kv_caches(caches, shape, options);
+
+  ASSERT_EQ(caches.size(), 4U);
+  EXPECT_TRUE(caches[0].get_index_cache().defined());
+  EXPECT_FALSE(caches[1].get_index_cache().defined());
+  EXPECT_FALSE(caches[2].get_index_cache().defined());
+  EXPECT_TRUE(caches[3].get_index_cache().defined());
+  for (const KVCache& cache : caches) {
+    EXPECT_TRUE(cache.get_k_cache().defined());
+    EXPECT_FALSE(cache.get_v_cache().defined());
+    EXPECT_FALSE(cache.empty());
+  }
+
+  caches[1].get_k_cache()[0].fill_(1);
+  torch::Tensor source_block = torch::tensor({0}, torch::kLong);
+  torch::Tensor destination_block = torch::tensor({1}, torch::kLong);
+  caches[1].swap_blocks(source_block, destination_block);
+  EXPECT_TRUE(
+      torch::equal(caches[1].get_k_cache()[0], caches[1].get_k_cache()[1]));
+}
+
+TEST(KVCacheTest, MluMixedDsaLayersUseInjectedAllocatorForActualRoles) {
+  constexpr int64_t kBlockCount = 2;
+  constexpr int64_t kBlockSize = 4;
+
+  KVCacheCapacity capacity;
+  capacity.n_blocks(kBlockCount)
+      .block_size(kBlockSize)
+      .enable_indexer_cache_quant(true);
+
+  ModelArgs model_args;
+  model_args.model_type("glm_moe_dsa")
+      .enable_mla(true)
+      .n_heads(8)
+      .n_kv_heads(2)
+      .head_dim(8)
+      .kv_lora_rank(8)
+      .qk_rope_head_dim(4)
+      .index_n_heads(1)
+      .index_head_dim(4);
+  const KVCacheShape shape(capacity, model_args, /*world_size=*/1);
+
+  auto allocator = std::make_shared<RecordingKVCacheTensorAllocator>();
+  KVCacheCreateOptions options;
+  options.device(torch::Device(torch::kCPU))
+      .dtype(torch::kBFloat16)
+      .num_layers(4)
+      .model_type("glm_moe_dsa")
+      .enable_lighting_indexer(true)
+      .enable_indexer_cache_quant(true)
+      .indexer_cache_enabled_layers({true, false, true, false})
+      .tensor_allocator(allocator);
+
+  std::vector<KVCache> caches;
+  allocate_kv_caches(caches, shape, options);
+
+  const std::vector<KVCacheTensorRole> expected_roles = {
+      KVCacheTensorRole::KEY,
+      KVCacheTensorRole::INDEX,
+      KVCacheTensorRole::INDEX_SCALE,
+      KVCacheTensorRole::KEY,
+      KVCacheTensorRole::KEY,
+      KVCacheTensorRole::INDEX,
+      KVCacheTensorRole::INDEX_SCALE,
+      KVCacheTensorRole::KEY};
+  ASSERT_EQ(allocator->requests.size(), expected_roles.size());
+  for (size_t i = 0; i < expected_roles.size(); ++i) {
+    EXPECT_EQ(allocator->requests[i].role, expected_roles[i]);
+    EXPECT_EQ(allocator->requests[i].device, torch::Device(torch::kCPU));
+  }
+  EXPECT_EQ(allocator->requests[1].dtype, torch::kChar);
+  EXPECT_EQ(allocator->requests[2].dtype, torch::kFloat32);
+  EXPECT_EQ(allocator->requests[2].shape, shape.index_cache_scale_shape());
+
+  ASSERT_EQ(caches.size(), 4U);
+  EXPECT_EQ(caches[0].get_cache_tensors().size(), 3U);
+  EXPECT_EQ(caches[1].get_cache_tensors().size(), 1U);
+  EXPECT_EQ(caches[2].get_cache_tensors().size(), 3U);
+  EXPECT_EQ(caches[3].get_cache_tensors().size(), 1U);
+  EXPECT_FALSE(caches[1].get_index_cache().defined());
+  EXPECT_FALSE(caches[3].get_indexer_cache_scale().has_value());
+}
+
+TEST(KVCacheTensorAllocatorTest,
+     MluMooncakePadsOnlyIndexScaleAndDoesNotOwnTensorLifetime) {
+  if (Platform::device_count() < 1) {
+    GTEST_SKIP() << "MLU device is required for allocator storage checks.";
+  }
+
+  Device device(/*device_index=*/0);
+  device.set_device();
+  const torch::Device torch_device = device.unwrap();
+  std::shared_ptr<KVCacheTensorAllocator> allocator =
+      mlu_mooncake_tensor_allocator();
+  std::weak_ptr<KVCacheTensorAllocator> allocator_lifetime = allocator;
+
+  torch::Tensor key = allocator->allocate(
+      KVCacheTensorRole::KEY, {2, 4}, torch::kBFloat16, torch_device);
+  torch::Tensor index_scale =
+      allocator->allocate(KVCacheTensorRole::INDEX_SCALE,
+                          {2, 96, 1},
+                          torch::kFloat32,
+                          torch_device);
+
+  EXPECT_EQ(key.storage().nbytes(), key.nbytes());
+  EXPECT_EQ(index_scale.sizes().vec(), (std::vector<int64_t>{2, 96, 1}));
+  EXPECT_EQ(index_scale.scalar_type(), torch::kFloat32);
+  EXPECT_EQ(index_scale.nbytes(), 2 * 96 * sizeof(float));
+  EXPECT_GE(index_scale.storage().nbytes(), index_scale.nbytes());
+  EXPECT_EQ(mlu::get_rdma_registerable_nbytes(index_scale),
+            index_scale.storage().nbytes());
+
+  allocator.reset();
+  EXPECT_TRUE(allocator_lifetime.expired());
+  key.fill_(1);
+  index_scale.fill_(2);
+  device.synchronize_default_stream();
+  EXPECT_TRUE(key.defined());
+  EXPECT_TRUE(index_scale.defined());
 }
 #endif
 
