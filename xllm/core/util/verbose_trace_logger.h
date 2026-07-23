@@ -31,6 +31,11 @@ class thread_pool;
 
 namespace xllm {
 
+[[nodiscard]] std::string resolve_verbose_trace_log_path(
+    const std::string& configured_path,
+    int32_t nnodes,
+    int32_t node_rank);
+
 // Asynchronous request-trace logger.
 //
 // When enabled, serving threads format an entry into a thread-local buffer and

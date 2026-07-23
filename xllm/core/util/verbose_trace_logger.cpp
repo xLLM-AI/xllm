@@ -37,6 +37,22 @@ constexpr int64_t kBytesPerMiB = 1024 * 1024;
 
 }  // namespace
 
+std::string resolve_verbose_trace_log_path(const std::string& configured_path,
+                                           int32_t nnodes,
+                                           int32_t node_rank) {
+  if (configured_path.empty() || nnodes <= 1) {
+    return configured_path;
+  }
+
+  const std::filesystem::path path(configured_path);
+  const std::string extension = path.extension().string();
+  const size_t extension_position = configured_path.size() - extension.size();
+  std::string resolved_path = configured_path;
+  resolved_path.insert(extension_position,
+                       "_rank_" + std::to_string(node_rank));
+  return resolved_path;
+}
+
 VerboseTraceLogger& VerboseTraceLogger::get_instance() {
   static VerboseTraceLogger instance;
   return instance;

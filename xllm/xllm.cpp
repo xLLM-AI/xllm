@@ -504,11 +504,18 @@ int main(int argc, char** argv) {
   google::InitGoogleLogging("xllm");
   initialize_configs();
 
+  const ServiceConfig& service_config = ServiceConfig::get_instance();
+  const DistributedConfig& distributed_config =
+      DistributedConfig::get_instance();
+  const std::string verbose_trace_log_path =
+      resolve_verbose_trace_log_path(service_config.verbose_trace_log_path(),
+                                     distributed_config.nnodes(),
+                                     distributed_config.node_rank());
   VerboseTraceLogger::get_instance().initialize(
-      ServiceConfig::get_instance().enable_verbose_trace_log(),
-      ServiceConfig::get_instance().verbose_trace_log_path(),
-      ServiceConfig::get_instance().verbose_trace_log_max_size_mb(),
-      ServiceConfig::get_instance().verbose_trace_log_max_files());
+      service_config.enable_verbose_trace_log(),
+      verbose_trace_log_path,
+      service_config.verbose_trace_log_max_size_mb(),
+      service_config.verbose_trace_log_max_files());
 
   // Check if model path is provided
   if (::xllm::ModelConfig::get_instance().model().empty()) {

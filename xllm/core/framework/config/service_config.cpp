@@ -61,22 +61,28 @@ DEFINE_bool(enable_verbose_trace_log,
             "enabled, failed-request context and request lifecycle events are "
             "written off the serving hot path by a background thread.");
 
-DEFINE_string(verbose_trace_log_path,
-              "log/verbose_trace.log",
-              "File path for the verbose request-trace log. Used only when "
-              "verbose trace logging is enabled. Defaults to "
-              "log/verbose_trace.log, so it sits alongside node_<rank>.log.");
+DEFINE_string(
+    verbose_trace_log_path,
+    "log/verbose_trace.log",
+    "Base file path for the verbose request-trace log. When nnodes is greater "
+    "than 1, _rank_<node_rank> is inserted before the final extension (for "
+    "example, log/verbose_trace_rank_2.log). Single-rank serving uses this "
+    "path "
+    "unchanged. Used only when verbose trace logging is enabled. Defaults to "
+    "log/verbose_trace.log, so it sits alongside node_<rank>.log.");
 
 DEFINE_int32(verbose_trace_log_max_size_mb,
              1024,
              "Max size in MiB of a single verbose request-trace log file "
              "before it is rotated. Defaults to 1024 (1 GiB).");
 
-DEFINE_int32(verbose_trace_log_max_files,
-             1000,
-             "Max number of verbose request-trace log files to keep, including "
-             "the active file. The oldest is removed once this many exist. "
-             "Defaults to 1000.");
+DEFINE_int32(
+    verbose_trace_log_max_files,
+    1000,
+    "Max number of verbose request-trace log files to keep per rank, including "
+    "the active file. Each rank rotates independently and removes its oldest "
+    "file once this many exist; this is not a deployment-wide limit. Defaults "
+    "to 1000.");
 
 namespace xllm {
 
