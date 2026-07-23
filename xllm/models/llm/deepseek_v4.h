@@ -34,6 +34,8 @@ limitations under the License.
 
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/parallel_config.h"
+#include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/state_dict/utils.h"
 #include "core/kernels/ops_api.h"
 #include "core/layers/common/dsa_metadata.h"
@@ -431,6 +433,7 @@ class DeepseekV4ModelImpl
         << ", world_size=" << parallel_args.world_size()
         << ", dp_size=" << parallel_args.dp_size();
     tp_num_heads_ = num_heads_ / dp_local_tp_size_;
+    tp_group_ = parallel_args.tp_group_;
     window_size_ = model_args.window_size();
     index_n_heads_ = model_args.index_n_heads();
     index_head_dim_ = model_args.index_head_dim();
@@ -742,6 +745,50 @@ class DeepseekV4ModelImpl
       }
     }
 
+    // FlashComm1 (sequence parallel): token-shard the replicated hidden stream
+    // across the TP group for the whole decoder stack. Each layer all-gathers
+    // to full tokens before attention / MoE and reduce-scatters back, so
+    // norm / hc / gate run on 1/tp_world_size tokens. The full token dimension
+    // is restored right before hc_head. A no-op when --enable_flashcomm1 is
+    // false.
+    //
+    // tp_group_ is the per-DP-replica TP group, so sharding / all-gathering
+    // stays within one DP replica: the layer all-gathers back to the replica's
+    // full tokens before the MoE, making MoE input identical to the baseline.
+    // is_empty_dp_rank agrees across a replica's TP ranks, and replicas own
+    // disjoint groups, so an empty replica opting out cannot desync others.
+    //
+    // Gating: engage only in prefill (q_max_seq_len > 1, which also covers
+    // chunked-prefill) with num_tokens >= flashcomm1_sp_min_token_num; the
+    // collectives only amortize with enough tokens. Decode, empty DP ranks and
+    // ACL-graph forwards are excluded.
+    const int64_t fc1_num_tokens = h.defined() ? h.size(0) : 0;
+    const auto& fc1_parallel_cfg = ParallelConfig::get_instance();
+    // num_tokens must be >= tp_world_size for a non-degenerate shard;
+    // sp_min_token_num == 0 keeps only the prefill gate.
+    const int64_t fc1_sp_min_tokens = std::max<int64_t>(
+        fc1_parallel_cfg.flashcomm1_sp_min_token_num(),
+        tp_group_ != nullptr ? tp_group_->world_size() : 1);
+    const bool fc1_tp_ok =
+        fc1_parallel_cfg.enable_flashcomm1() && tp_group_ != nullptr &&
+        tp_group_->world_size() > 1 && fc1_num_tokens >= fc1_sp_min_tokens;
+    const bool fc1_is_prefill = input_params.meta.q_max_seq_len > 1;
+    const bool fc1_enabled = fc1_tp_ok && fc1_is_prefill &&
+                             !acl_graph_forward && !is_empty_dp_rank;
+    parallel_state::FlashComm1Guard fc1_guard(
+        fc1_enabled,
+        fc1_num_tokens,
+        fc1_enabled ? tp_group_->rank() : 0,
+        fc1_enabled ? tp_group_->world_size() : 1,
+        tp_group_);
+    if (parallel_state::flash_comm1_active()) {
+      LOG_FIRST_N(INFO, 1)
+          << "[FlashComm1] active: tp_world_size=" << tp_group_->world_size()
+          << ", num_tokens=" << fc1_num_tokens;
+      h = parallel_state::shard_dim0_padded(
+          h, tp_group_->rank(), tp_group_->world_size());
+    }
+
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_.size(); i++) {
       if (attn_metadata.dsa_metadata) {
@@ -819,6 +866,13 @@ class DeepseekV4ModelImpl
         return ModelOutput();
       }
 #endif
+    }
+    // FlashComm1: restore the full token dimension (stripping shard padding)
+    // before hc_head / norm / logits so downstream consumers see all tokens.
+    // pre_hc_head_hidden_states (exported to MTP as aux_hidden_states) must be
+    // captured from the full stream, so all-gather first, then capture.
+    if (parallel_state::flash_comm1_active()) {
+      h = parallel_state::all_gather_dim0_unpad(h, tp_group_, fc1_num_tokens);
     }
     torch::Tensor pre_hc_head_hidden_states;
     if (model_args_.num_speculative_tokens() > 0) {
@@ -1545,6 +1599,10 @@ class DeepseekV4ModelImpl
   int64_t index_head_dim_ = 0;
   int64_t index_topk_ = 512;
   torch::Device device_{torch::kCPU};
+
+  // FlashComm1 (sequence parallel): the per-DP-replica TP group used for the
+  // token-shard / all-gather boundaries. Captured at construction.
+  ProcessGroup* tp_group_ = nullptr;
 
   // DSA cache group info: built once at model init from compress_ratios
   // caches_info_[layer_id] = vector of DSACacheInfo for each cache in that
