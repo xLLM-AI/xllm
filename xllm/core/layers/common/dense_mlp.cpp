@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "common/flash_comm1_context.h"
 #include "kernels/ops_api.h"
+#include "platform/platform.h"
 
 namespace xllm {
 namespace layer {
@@ -112,14 +113,12 @@ torch::Tensor DenseMLPImpl::forward(torch::Tensor hidden_states) {
   }
 
   torch::Tensor output;
-#if !defined(USE_NPU)
-  {
-    int64_t batch_size = gate_up.sizes()[0];
+  if (!Platform::is_npu()) {
+    const int64_t batch_size = gate_up.sizes()[0];
     output = torch::empty(
         {batch_size, intermediate_size_ / process_group_->world_size()},
         gate_up.options());
   }
-#endif
 
   act_->forward(gate_up, output);
 

@@ -174,15 +174,24 @@ torch::Tensor shard_sequence(const torch::Tensor& input,
   }
 
   CHECK_EQ(input.size(0), ctx.original_num_tokens);
-  torch::Tensor padded_input = input;
-  if (ctx.pad_size > 0) {
-    padded_input = pad_rows_by_copy(input, ctx.padded_num_tokens);
-  }
-
   const int64_t shard_start =
       static_cast<int64_t>(ctx.tp_rank) * ctx.padded_local_num_tokens;
   const int64_t shard_end = shard_start + ctx.padded_local_num_tokens;
-  return padded_input.slice(0, shard_start, shard_end).contiguous();
+  const int64_t valid_end =
+      std::min(shard_end, static_cast<int64_t>(ctx.original_num_tokens));
+
+  if (valid_end == shard_end) {
+    return input.slice(0, shard_start, shard_end).contiguous();
+  }
+
+  auto output_shape = input.sizes().vec();
+  output_shape[0] = ctx.padded_local_num_tokens;
+  torch::Tensor output = torch::zeros(output_shape, input.options());
+  if (valid_end > shard_start) {
+    output.slice(0, 0, valid_end - shard_start)
+        .copy_(input.slice(0, shard_start, valid_end));
+  }
+  return output;
 }
 
 torch::Tensor gather_sequence(const torch::Tensor& input,
@@ -210,15 +219,6 @@ torch::Tensor gather_sequence(const torch::Tensor& input,
   auto gathered = parallel_state::gather(input, ctx.tp_group, token_nums);
 
   if (ctx.pad_size > 0 && gathered.size(0) > ctx.original_num_tokens) {
-    return gathered.slice(0, 0, ctx.original_num_tokens);
-  }
-  return gathered;
-}
-
-torch::Tensor gather_and_unpad_sequence(const torch::Tensor& input,
-                                        const FlashComm1Context& ctx) {
-  auto gathered = gather_sequence(input, ctx);
-  if (ctx.pad_size > 0) {
     return gathered.slice(0, 0, ctx.original_num_tokens);
   }
   return gathered;
@@ -298,15 +298,14 @@ torch::Tensor maybe_shard_residual(const torch::Tensor& residual,
   if (!is_sequence_sharded(ctx)) {
     return residual;
   }
-  if (residual.size(0) == ctx.padded_local_num_tokens) {
-    return residual;
-  }
-  if (residual.size(0) == ctx.original_num_tokens) {
-    return shard_sequence(residual, ctx);
-  }
-  CHECK_EQ(residual.size(0), ctx.padded_local_num_tokens)
+  const int64_t num_tokens = residual.size(0);
+  CHECK(num_tokens == ctx.original_num_tokens ||
+        num_tokens == ctx.padded_local_num_tokens)
       << "FC1 residual layout must be either full real-token or padded local "
       << "sequence shard.";
+  if (num_tokens == ctx.original_num_tokens) {
+    return shard_sequence(residual, ctx);
+  }
   return residual;
 }
 

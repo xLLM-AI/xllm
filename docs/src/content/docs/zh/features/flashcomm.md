@@ -45,6 +45,7 @@ FlashComm 不适合或收益有限的场景：
 - 高 decode 占比场景，例如长输出请求。整体 latency 可能主要由 decode 决定。
 - `TP < 8`、`dp > 1` 或 `cp > 1` 的场景，当前默认不会启用。
 - 量化 row-parallel 路径。当前 MMRS 只接入普通 BF16/FP16 matmul 路径。
+- MoE 模型。当前 FC1 仅支持 Dense 模型；检测到 routed experts 时会自动关闭 FC1。
 
 ## 使用方式
 
@@ -89,6 +90,8 @@ FlashComm 和 MMRS 融合算子都默认关闭。推荐在长 prefill、TP=8 或
 ```bash
 --mmrs_comm_mode=ai_cpu
 ```
+
+使用 `mmrs_comm_mode=aiv` 时，需要加载包含 MMRS AIV 修复的 ops-transformers 9.1.0 或更高版本算子库。
 
 ## 最优配置建议
 

@@ -59,6 +59,11 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
         model_args_(context.get_model_args()),
         parallel_args_(context.get_parallel_args()),
         flash_comm1_options_(context.get_flash_comm1_options()) {
+    if (model_args_.n_routed_experts() > 0) {
+      flash_comm1_options_.enable_flashcomm1 = false;
+      flash_comm1_options_.enable_mmrs_fusion = false;
+    }
+
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
 
@@ -147,7 +152,7 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
     auto [hidden_states, residual_out] = norm_->forward(h, residual);
     h = hidden_states;
     if (is_sequence_sharded(fc1_ctx)) {
-      h = gather_and_unpad_sequence(h, fc1_ctx);
+      h = gather_sequence(h, fc1_ctx);
     }
     return ModelOutput(h);
   }

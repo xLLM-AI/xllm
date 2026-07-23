@@ -71,27 +71,6 @@ bool can_call_torch_npu_mmrs(const torch::Tensor& a,
   return true;
 }
 
-bool should_use_ai_cpu_for_aiv_risky_shape(const torch::Tensor& a,
-                                           const torch::Tensor& b,
-                                           ProcessGroup* process_group) {
-  if (process_group == nullptr || a.scalar_type() != at::kBFloat16 ||
-      a.dim() != 2 || b.dim() != 2 || a.size(0) != 2048 || b.size(1) != 5120) {
-    return false;
-  }
-  const int64_t world_size = process_group->world_size();
-  const int64_t k = a.size(1);
-  if (world_size == 2) {
-    return k == 3072 || k == 8704;
-  }
-  if (world_size == 4) {
-    return k == 4352;
-  }
-  if (world_size == 8) {
-    return k == 2176;
-  }
-  return false;
-}
-
 }  // namespace
 
 torch::Tensor matmul_reduce_scatter(const torch::Tensor& a,
@@ -114,24 +93,12 @@ torch::Tensor matmul_reduce_scatter(const torch::Tensor& a,
     return torch::Tensor();
   }
 
-  std::string effective_comm_mode = comm_mode;
-  if ((comm_mode.empty() || comm_mode == "aiv") &&
-      should_use_ai_cpu_for_aiv_risky_shape(a, b, process_group)) {
-    effective_comm_mode = "ai_cpu";
-    LOG_FIRST_N(WARNING, 16)
-        << "FC1 MMRS comm_mode switched from aiv to ai_cpu for known risky "
-           "torch_npu shape: a="
-        << a.sizes() << ", b=" << b.sizes()
-        << ", world_size=" << process_group->world_size()
-        << ", dtype=" << a.scalar_type();
-  }
-
   std::optional<c10::string_view> torch_comm_mode = std::nullopt;
-  if (effective_comm_mode == "ai_cpu" || effective_comm_mode == "aiv") {
-    torch_comm_mode = c10::string_view(effective_comm_mode);
-  } else if (!effective_comm_mode.empty() && effective_comm_mode != "none") {
+  if (comm_mode == "ai_cpu" || comm_mode == "aiv") {
+    torch_comm_mode = c10::string_view(comm_mode);
+  } else if (!comm_mode.empty() && comm_mode != "none") {
     LOG_FIRST_N(WARNING, 8)
-        << "FC1 MMRS torch_npu unsupported comm_mode=" << effective_comm_mode
+        << "FC1 MMRS torch_npu unsupported comm_mode=" << comm_mode
         << "; using torch_npu default comm_mode.";
   }
   return at_npu::native::custom_ops::npu_mm_reduce_scatter_base(

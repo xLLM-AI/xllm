@@ -154,7 +154,7 @@ torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
   if (moe_mlp_) {
     x = moe_mlp_(x, input_params);
   } else {
-    x = mlp_->forward(x);
+    x = mlp_(x);
   }
 
   return x;

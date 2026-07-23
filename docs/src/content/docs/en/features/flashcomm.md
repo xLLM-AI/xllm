@@ -45,6 +45,7 @@ FlashComm is usually not suitable, or has limited benefit, for:
 - Long-output workloads where decode dominates total latency.
 - `TP < 8`, `dp > 1`, or `cp > 1`, which are not enabled by the default activation rule.
 - Quantized row-parallel paths. MMRS is currently wired only for the normal BF16/FP16 matmul path.
+- MoE models. FC1 currently supports Dense models only and is automatically disabled when routed experts are present.
 
 ## Usage
 
@@ -89,6 +90,8 @@ In most cases, keep `mmrs_comm_mode=aiv`. If some shapes hit AICore errors on th
 ```bash
 --mmrs_comm_mode=ai_cpu
 ```
+
+When using `mmrs_comm_mode=aiv`, load an ops-transformers 9.1.0 or newer operator library that includes the MMRS AIV fix.
 
 ## Recommended Configuration
 
