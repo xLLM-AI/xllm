@@ -370,6 +370,18 @@ torch::Tensor causal_conv1d(const torch::Tensor& x,
                             int64_t pad_slot_id,
                             int64_t run_mode);
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> causal_conv1d_qkv(
+    const torch::Tensor& x,
+    const torch::Tensor& weight,
+    const torch::Tensor& conv_state,
+    const torch::IntArrayRef query_start_loc_opt,
+    const torch::IntArrayRef cache_indices_opt,
+    const torch::IntArrayRef initial_state_mode_opt,
+    int64_t num_qk_heads,
+    int64_t num_v_heads,
+    int64_t head_k_dim,
+    int64_t head_v_dim);
+
 void causal_conv1d_out(const torch::Tensor& output,
                        const torch::Tensor& x,
                        const torch::Tensor& weight,
