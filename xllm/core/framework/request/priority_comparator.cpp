@@ -261,7 +261,7 @@ create_comparator(const std::string& priority_strategy, bool is_reversed) {
       return is_reversed ? DensityComparator()(b, a)
                          : DensityComparator()(a, b);
     };
-  } else if (priority_strategy == "urgency_density") {
+  } else if (priority_strategy == "multi_slo_and_prio") {
     return [is_reversed](const std::shared_ptr<Request>& a,
                          const std::shared_ptr<Request>& b) {
       return is_reversed ? UrgencyDensityComparator()(b, a)

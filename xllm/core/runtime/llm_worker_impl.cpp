@@ -317,7 +317,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   }
 
   ForwardOutput output;
-  output.dsa_topk_indices = model_output.dsa_topk_indices;
+  output.mtp_topk_state = std::move(model_output.mtp_topk_state);
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     output.expert_load_data = expert_load_data_;
     output.prepared_layer_id = eplb_executor_->get_ready_layer_id();

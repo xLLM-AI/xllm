@@ -593,9 +593,12 @@ ModelOutput MluGraphExecutorImpl::run_eager(const torch::Tensor& tokens,
   }
   COUNTER_INC(num_model_execution_total_eager);
   ModelOutput result = model_->forward(tokens, positions, kv_caches, params);
-  return make_graph_output(result.hidden_states,
-                           result.aux_hidden_states,
-                           options_.enable_graph_aux_hidden_states());
+  ModelOutput output =
+      make_graph_output(result.hidden_states,
+                        result.aux_hidden_states,
+                        options_.enable_graph_aux_hidden_states());
+  output.mtp_topk_state = std::move(result.mtp_topk_state);
+  return output;
 }
 
 void MluGraphExecutorImpl::init_param_once() {

@@ -28,6 +28,7 @@ limitations under the License.
 #include "common/macros.h"
 #include "core/distributed_runtime/pd_ooc_service.h"
 #include "core/framework/config/disagg_pd_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "disagg_pd.pb.h"
 #include "distributed_runtime/engine.h"
 #include "framework/batch/batch_factory.h"
@@ -36,12 +37,178 @@ limitations under the License.
 #include "framework/request/sequence.h"
 #include "pd_ooc_scheduler.h"
 #include "runtime/xservice_client.h"
-#include "scheduler/chunked_prefill_scheduler.h"
 #include "scheduler/continuous_scheduler.h"
 #include "util/env_var.h"
 #include "util/utils.h"
 
 namespace xllm {
+
+namespace {
+
+size_t estimate_decode_extra_blocks(Sequence* sequence,
+                                    size_t updated_num_tokens,
+                                    size_t block_size) {
+  const size_t num_blocks = sequence->kv_state().num_blocks(BlockType::KV);
+  const size_t num_blocks_needed =
+      (updated_num_tokens + block_size - 1) / block_size;
+  if (num_blocks_needed > num_blocks) {
+    return num_blocks_needed - num_blocks;
+  }
+
+  // Beam swap may still require one extra block when reusing source blocks.
+  if (sequence->check_beam_search() &&
+      !sequence->kv_state().src_blocks().empty() &&
+      sequence->kv_state().need_swap()) {
+    return 1;
+  }
+  return 0;
+}
+
+size_t get_sequence_free_blocks_for_rank(KVCacheManager* kv_cache_manager,
+                                         int32_t dp_rank) {
+  const auto free_blocks = kv_cache_manager->num_free_blocks();
+  if (free_blocks.empty()) {
+    return 0;
+  }
+  if (dp_rank >= 0 && static_cast<size_t>(dp_rank) < free_blocks.size()) {
+    return free_blocks[dp_rank];
+  }
+  return util::max(free_blocks);
+}
+
+inline size_t maybe_align_cp_prefill_tokens(const Sequence* sequence,
+                                            size_t num_tokens,
+                                            int32_t cp_size) {
+  if (sequence == nullptr || cp_size <= 1 || num_tokens == 0) {
+    return num_tokens;
+  }
+  if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
+    return num_tokens;
+  }
+  if (!sequence->is_prefill_stage()) {
+    return num_tokens;
+  }
+  const size_t alignment = static_cast<size_t>(cp_size) * 2;
+  return xllm::util::align_up(num_tokens, alignment);
+}
+
+}  // namespace
+
+void PDOOCScheduler::cache_in_batch_prefix(
+    const std::vector<Sequence*>& sequences,
+    const std::vector<size_t>& current_step_token_budgets) {
+  if (!enable_prefix_cache_ || !enable_in_batch_prefix_cache_ ||
+      sequences.empty()) {
+    return;
+  }
+  CHECK_EQ(sequences.size(), current_step_token_budgets.size());
+  for (size_t i = 0; i < sequences.size(); ++i) {
+    Sequence* sequence = sequences[i];
+    if (sequence == nullptr || !sequence->is_prefill_stage()) {
+      continue;
+    }
+    const size_t max_handle_num_tokens =
+        sequence->kv_state().kv_cache_tokens_num() +
+        current_step_token_budgets[i];
+    kv_cache_manager_->cache(sequence, max_handle_num_tokens);
+  }
+}
+
+void PDOOCScheduler::handle_abnormal_request(
+    RequestPriorityQueue* running_queue,
+    const std::vector<Sequence*>& candidate_sequences,
+    const std::vector<size_t>& candidate_token_budgets,
+    const size_t& allocated_tokens,
+    const size_t& allocated_seqs,
+    double& allocated_estimate_latency,
+    size_t& remaining_token_budget,
+    size_t& remaining_seq_budget,
+    double& estimate_latency,
+    bool budget_exhausted,
+    bool blocks_exhausted) {
+  std::shared_ptr<Request> request = running_queue->top();
+  if (candidate_sequences.empty()) {
+    if (!running_sequences_.empty()) {
+      return;
+    }
+
+    // unknown case, maybe a schedule bug.
+    if (!budget_exhausted && !blocks_exhausted) {
+      LOG(FATAL) << "Unknown case, budget and blocks are not exhausted, but "
+                    "there are no running sequences."
+                 << " budget_exhausted = " << budget_exhausted
+                 << " blocks_exhausted = " << blocks_exhausted
+                 << " candidate_sequences.size = " << candidate_sequences.size()
+                 << ", running_sequences.size = " << running_sequences_.size();
+    }
+
+    // budget exhausted
+    if (budget_exhausted) {
+      LOG(ERROR) << "Request prompt is too long, please set a larger "
+                    "max_tokens value via --max_tokens_per_batch.";
+    } else {
+      CHECK(running_queue->size() == 1)
+          << "Running queue size is not 1, there maybe a bug of request "
+             "preemption logic. decode_queue_.size ="
+          << running_queue->size();
+      if (util::sum(kv_cache_manager_->num_used_blocks()) !=
+          request->total_num_blocks()) {
+        // blocks_exhausted is true.
+        // NOTE: consider dp > 1, here we need get all num blocks in use.
+        // Total num blocks in use not equal request->total_num_blocks() means
+        // some sequences are not scheduled but hold blocks in disagg PD mode.
+        return;
+      }
+      LOG(ERROR) << "Request prompt is too long, no enough memory to schedule "
+                 << "a single sequence.";
+    }
+
+    // request is too long, budget or memory no enough.
+    running_queue->pop_top();
+    clear_mtp_bootstrap(request.get());
+    kv_cache_manager_->deallocate(request.get());
+    response_processor_->process_failed_request(
+        request,
+        {StatusCode::RESOURCE_EXHAUSTED,
+         "No enough resource to schedule a single sequence"});
+  } else {
+    // partially schedule the sequences in request
+    if (!request->check_beam_search()) {
+      running_queue->pop_top();
+      running_requests_.emplace_back(request);
+      running_sequences_.insert(running_sequences_.end(),
+                                candidate_sequences.begin(),
+                                candidate_sequences.end());
+      running_sequences_budgets_.insert(running_sequences_budgets_.end(),
+                                        candidate_token_budgets.begin(),
+                                        candidate_token_budgets.end());
+      remaining_token_budget -= allocated_tokens;
+      remaining_seq_budget -= allocated_seqs;
+      estimate_latency += allocated_estimate_latency;
+    }
+  }
+}
+
+void PDOOCScheduler::handle_running_requests(std::shared_ptr<Request> request) {
+  if (request->finished() || request->cancelled()) {
+    LOG(FATAL) << "Unknow error, finished/cancelled request have be handled "
+                  "before. request_id is "
+               << request->request_id();
+  }
+
+  // check if the request can be expanded
+  if (request->expand_sequences()) {
+    // cache the blocks to share among the sequences
+    kv_cache_manager_->cache(request->sequences()[0].get());
+  }
+
+  // release blocks for finished sequences here
+  for (auto& sequence : request->sequences()) {
+    if (sequence->finished()) {
+      kv_cache_manager_->deallocate(sequence.get());
+    }
+  }
+}
 
 PDOOCScheduler::PDOOCScheduler(Engine* engine, const Options& options)
     : DisaggPDScheduler(engine, options),
@@ -82,6 +249,10 @@ PDOOCScheduler::PDOOCScheduler(Engine* engine, const Options& options)
   linear_saturation_bs_ = llm_flops_.linear_saturation_bs();
 
   LOG(INFO) << "LLM linear saturation batch size: " << linear_saturation_bs_;
+
+  // Create offline queues for online/offline batch exclusivity.
+  prefill_queue_offline_ = std::make_unique<DequeQueue>();
+  decode_queue_offline_ = std::make_unique<DequeQueue>();
 
   // OOC-specific threads based on instance role
   if (options_.instance_role().value() == InstanceRole::PREFILL) {
@@ -155,10 +326,10 @@ void PDOOCScheduler::prefill_step(const absl::Duration& timeout) {
     prepare_offline_dispatch_queue();
     /*
     WIP Determine the status of current step
-    If request_queue_ has online requests or waiting_priority_queue_ is not
-    empty, set current status to ONLINE_PREFILL If running_queue_offline_ is not
+    If request_queue_ has online requests or prefill_queue_ is not
+    empty, set current status to ONLINE_PREFILL If decode_queue_ is not
     empty, set current status to OFFLINE_PREFILL If request_queue_ has offline
-    requests or waiting_priority_queue_offline_ is not empty, set current status
+    requests or prefill_queue_ is not empty, set current status
     to OFFLINE_PREFILL
     */
     InterruptionBus::get_instance().publish(false);
@@ -175,7 +346,7 @@ void PDOOCScheduler::prefill_step(const absl::Duration& timeout) {
 
 std::vector<Batch> PDOOCScheduler::prepare_batch() {
   Timer timer;
-  // propogate new requests to waiting_priority_queue_
+  // propogate new requests to prefill_queue_
   // Include those requests that are preempted by others.
   std::shared_ptr<Request> request;
   // read from request queue then push to waiting priority queue
@@ -192,17 +363,17 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
     if (request->sequences()[0]->kv_state().kv_cache_tokens_num() == 0) {
       if (request->offline()) {
         int current_offline_decode_bs =
-            running_requests_.size() + waiting_priority_queue_offline_->size();
+            running_requests_.size() + prefill_queue_offline_->size();
         VLOG(1) << "Current offline decode batch size: "
                 << current_offline_decode_bs
                 << ", linear_saturation_bs_: " << linear_saturation_bs_;
         if (current_offline_decode_bs < linear_saturation_bs_) {
-          waiting_priority_queue_offline_->push(request);
+          prefill_queue_offline_->push(request);
         } else {
           deferred_reqs.emplace_back(request);
         }
       } else {
-        waiting_priority_queue_->push(request);
+        prefill_queue_->push(request);
       }
     } else {
       // request from prefill instance in disagge pd mode.
@@ -235,11 +406,11 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
 
   if (options_.priority_strategy() == "fcfs") {
     if (last_step_prefill_) {
-      // insert all requests to the back of running_queue_
+      // insert all requests to the back of decode_queue_
       // 1. last step is prefill step:
       // new prefill has high priority, but these requests has lower priority
-      // then existed requests in running_queue_ in decoding stage.
-      // so we need to push them to the back of running_queue_.
+      // then existed requests in decode_queue_ in decoding stage.
+      // so we need to push them to the back of decode_queue_.
       for (auto it = running_requests_.cbegin(); it != running_requests_.cend();
            ++it) {
         // finished request is set to nullptr
@@ -248,17 +419,17 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
         }
         handle_running_requests(*it);
         if ((*it)->offline()) {
-          running_queue_offline_->push(*it, last_step_prefill_);
+          decode_queue_offline_->push(*it, last_step_prefill_);
         } else {
-          running_queue_->push(*it, last_step_prefill_);
+          decode_queue_->push(*it, last_step_prefill_);
         }
       }
     } else {
-      // insert all requests to the front of running_queue_
+      // insert all requests to the front of decode_queue_
       // 2. last step is decode step:
       // We need to traverse running_requests_ array in reverse order.
       // Because there may be some unexecuted requests with
-      // lower priorities remaining in the running_queue_.
+      // lower priorities remaining in the decode_queue_.
       // For the requests in running_requests_,
       // their priorities are all higher than those of the
       // remaining requests. Therefore, the `push_front`
@@ -273,9 +444,9 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
         }
         handle_running_requests(*it);
         if ((*it)->offline()) {
-          running_queue_offline_->push(*it, last_step_prefill_);
+          decode_queue_offline_->push(*it, last_step_prefill_);
         } else {
-          running_queue_->push(*it, last_step_prefill_);
+          decode_queue_->push(*it, last_step_prefill_);
         }
       }
     }
@@ -287,9 +458,9 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
       }
       handle_running_requests(*it);
       if ((*it)->offline()) {
-        running_queue_offline_->push(*it);
+        decode_queue_offline_->push(*it);
       } else {
-        running_queue_->push(*it);
+        decode_queue_->push(*it);
       }
     }
   }
@@ -316,34 +487,28 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
   size_t num_online_decode_preempt_offline_requests = 0;
   // TO IMPROVE?: handle online decode request before prefill offline request
   bool previous_idle = (step_status_ == StepStatus::IDLE);
-  // The CP PR makes DisaggPDScheduler inherit ChunkedPrefillScheduler so the
-  // chunked-prefill code path is shared across all PD-disagg subclasses. That
-  // private 11-arg ChunkedPrefillScheduler::handle_prefill_requests in turn
-  // name-hides the 7-arg virtual one defined on ContinuousScheduler. We need
-  // the latter here (PD-OOC has its own budgeting and never goes through the
-  // chunked-prefill helper), so call it through the base class explicitly.
-  ContinuousScheduler::handle_prefill_requests(
-      latency_budget,
-      estimate_latency,
-      remaining_token_budget,
-      remaining_seq_budget,
-      waiting_priority_queue_.get(),
-      num_online_prefill_preempt_offline_requests,
-      finished_requests);
+  // PD-OOC has its own budgeting and never goes through the chunked-prefill
+  // helper; use own handle_prefill_requests_impl directly.
+  handle_prefill_requests_impl(latency_budget,
+                               estimate_latency,
+                               remaining_token_budget,
+                               remaining_seq_budget,
+                               prefill_queue_.get(),
+                               num_online_prefill_preempt_offline_requests,
+                               finished_requests);
   if (!running_sequences_.empty()) {
     step_status_ = StepStatus::ONLINE_PREFILL;
     VLOG(1) << "Set step status to ONLINE PREFILL";
   } else {
     // In PD OOC mode, a batch can only consist entirely of online requests or
     // entirely of offline requests
-    ContinuousScheduler::handle_prefill_requests(
-        latency_budget,
-        estimate_latency,
-        remaining_token_budget,
-        remaining_seq_budget,
-        waiting_priority_queue_offline_.get(),
-        num_online_prefill_preempt_offline_requests,
-        finished_requests);
+    handle_prefill_requests_impl(latency_budget,
+                                 estimate_latency,
+                                 remaining_token_budget,
+                                 remaining_seq_budget,
+                                 prefill_queue_offline_.get(),
+                                 num_online_prefill_preempt_offline_requests,
+                                 finished_requests);
     if (!running_sequences_.empty()) {
       step_status_ = StepStatus::OFFLINE_PREFILL;
       VLOG(1) << "Set step status to OFFLINE PREFILL";
@@ -359,7 +524,7 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
                              num_offline_decode_preempt_offline_requests,
                              num_online_decode_preempt_online_requests,
                              num_online_decode_preempt_offline_requests,
-                             running_queue_.get());
+                             decode_queue_.get());
       handle_decode_requests(latency_budget,
                              estimate_latency,
                              remaining_token_budget,
@@ -367,7 +532,7 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
                              num_offline_decode_preempt_offline_requests,
                              num_online_decode_preempt_online_requests,
                              num_online_decode_preempt_offline_requests,
-                             running_queue_offline_.get());
+                             decode_queue_offline_.get());
       if (!running_sequences_.empty()) {
         step_status_ = StepStatus::DECODE;
         VLOG(1) << "Set step status to DECODE";
@@ -409,7 +574,7 @@ std::vector<Batch> PDOOCScheduler::prepare_batch() {
             pending_requests_.load(std::memory_order_relaxed));
   GAUGE_SET(num_running_requests, running_requests_.size());
   GAUGE_SET(num_waiting_requests,
-            waiting_priority_queue_->size() + running_queue_->size());
+            prefill_queue_->size() + decode_queue_->size());
 
   GAUGE_ADD(num_preempted_requests, num_preempted_requests);
   GAUGE_ADD(num_offline_decode_preempt_offline_requests,
@@ -455,9 +620,9 @@ void PDOOCScheduler::handle_prefill_interruption() {
     // Add back to offline waiting queue for rescheduling
     VLOG(1) << "Preempting offline request due to interruption: "
             << request->request_id();
-    VLOG(1) << "waiting_priority_queue_offline_->size() before push: "
-            << waiting_priority_queue_offline_->size();
-    waiting_priority_queue_offline_->push(request);
+    VLOG(1) << "prefill_queue_offline_->size() before push: "
+            << prefill_queue_offline_->size();
+    prefill_queue_offline_->push(request);
 
     VLOG(1) << "Preempted offline request due to interruption: "
             << request->request_id();
@@ -486,6 +651,458 @@ void PDOOCScheduler::decode_step(const absl::Duration& timeout) {
   last_decode_step_global_batch_req_lens_ = decode_step_global_batch_req_lens_;
 }
 
+void PDOOCScheduler::handle_prefill_requests_impl(
+    double& latency_budget,
+    double& estimate_latency,
+    size_t& remaining_token_budget,
+    size_t& remaining_seq_budget,
+    RequestPriorityQueue* waiting_priority_queue,
+    size_t& num_online_prefill_preempt_offline_requests,
+    std::vector<std::shared_ptr<Request>>& finished_requests) {
+  // Handle new request prompt first.
+  // Include those requests that are preempted by others.
+  //
+  // schedule the prefill requests in the waiting priority queue until budgets
+  // are exhausted.
+  // When the KV Cache usage reaches the threshold, prefill requests will no
+  // longer be scheduled to avoid frequent preemption.
+  //
+  // NOTE: preempted requests will be pushed in waiting_priority_queue,
+  // they may contian many sequences, so we should check here.
+
+  bool budget_exhausted = false;
+  bool blocks_exhausted = false;
+  while (!waiting_priority_queue->empty() && remaining_seq_budget > 0 &&
+         remaining_token_budget > 0 && latency_budget > estimate_latency) {
+    if (!options_.enable_disagg_pd() &&
+        kv_cache_manager_->kv_cache_utilization() >=
+            ::xllm::SchedulerConfig::get_instance()
+                .prefill_scheduling_memory_usage_threshold()) {
+      blocks_exhausted = true;
+      break;
+    }
+
+    std::shared_ptr<Request> request(waiting_priority_queue->top());
+    if (request->finished() || request->cancelled()) {
+      clear_mtp_bootstrap(request.get());
+      kv_cache_manager_->deallocate(request.get());
+      // release the ownership of the request
+      finished_requests.emplace_back(request);
+      // remove the request from the request priority queue
+      waiting_priority_queue->pop_top();
+      continue;
+    }
+
+    const size_t num_sequences = request->sequences().size();
+    if (!request->preempted()) {
+      CHECK(num_sequences == 1 || num_sequences == request->best_of())
+          << "Waiting request should have either 1 or best_of("
+          << request->best_of() << ") sequences, got " << num_sequences;
+    }
+
+    if (!kv_cache_manager_->update_prefetch_result(
+            request, options_.prefetch_timeout())) {
+      waiting_priority_queue->pop_top();
+      waiting_priority_queue->push(request);
+      continue;
+    }
+
+    // TODO: FIXME later
+    // Optimization of the scheduling algorithm under multiple sequences
+    // TODO: can refactor like handle_decode otherwise request with multiple
+    // long sequences may stuck when n>1
+    size_t allocated_tokens = 0;
+    size_t allocated_seqs = 0;
+    double allocated_estimate_latency = 0;
+    bool can_schedule = true;
+    std::vector<Sequence*> prefill_sequences;
+    std::vector<size_t> prefill_sequences_budget;
+    prefill_sequences.reserve(request->sequences().size());
+    prefill_sequences_budget.reserve(request->sequences().size());
+    for (auto& prefill_sequence : request->sequences()) {
+      if (prefill_sequence->finished()) {
+        continue;
+      }
+
+      // FIXME: use actual num_tokens to handle
+      // Currently overestimating the number of tokens actually processed when
+      // enable prefix cache
+      size_t num_tokens = prefill_sequence->num_need_compute_tokens();
+      num_tokens = maybe_align_cp_prefill_tokens(
+          prefill_sequence.get(), num_tokens, options_.cp_size());
+      const size_t target_num_tokens =
+          prefill_sequence->kv_cache_tokens_num() + num_tokens;
+      if (remaining_token_budget < allocated_tokens + num_tokens ||
+          remaining_seq_budget < allocated_seqs + 1) {
+        can_schedule = false;
+        budget_exhausted = true;
+        break;
+      }
+
+      // preempt offline decode
+      if (!kv_cache_manager_->allocate(prefill_sequence.get(),
+                                       target_num_tokens)) {
+        can_schedule = false;
+        kv_cache_manager_->deallocate(prefill_sequence.get());
+        blocks_exhausted = true;
+        break;
+      }
+
+      // OPTIMIZE for multi-slo requests
+      // for prefill requests, check latency after prefix cache match
+      double seq_estimate_latency = 0;
+      if (options_.enable_latency_aware_schedule()) {
+        seq_estimate_latency =
+            profile_manager_->predict_step_time(prefill_sequence.get(), false);
+        if ((estimate_latency + allocated_estimate_latency +
+                 seq_estimate_latency >
+             latency_budget) &&
+            (!running_sequences_.empty())) {
+          // release shared prefix blocks
+          kv_cache_manager_->deallocate(prefill_sequence.get());
+          can_schedule = false;
+          budget_exhausted = true;
+          break;
+        }
+      }
+
+      prefill_sequences_budget.emplace_back(num_tokens);
+      prefill_sequences.emplace_back(prefill_sequence.get());
+      allocated_tokens += num_tokens;
+      allocated_seqs += 1;
+      allocated_estimate_latency += seq_estimate_latency;
+    }
+
+    if (!can_schedule) {
+      for (auto& seq : prefill_sequences) {
+        // release shared blocks
+        kv_cache_manager_->deallocate(seq);
+      }
+      break;
+    }
+
+    remaining_token_budget -= allocated_tokens;
+    remaining_seq_budget -= allocated_seqs;
+    estimate_latency += allocated_estimate_latency;
+    waiting_priority_queue->pop_top();
+    running_requests_.emplace_back(request);
+    request->record_num_prefix_cache_tokens();
+    running_sequences_.insert(running_sequences_.end(),
+                              prefill_sequences.begin(),
+                              prefill_sequences.end());
+    running_sequences_budgets_.insert(running_sequences_budgets_.end(),
+                                      prefill_sequences_budget.begin(),
+                                      prefill_sequences_budget.end());
+    cache_in_batch_prefix(prefill_sequences, prefill_sequences_budget);
+  }
+  // maybe can pre-compute if prompt beyond length
+  if (running_sequences_.empty() && !waiting_priority_queue->empty() &&
+      decode_queue_->empty()) {
+    std::shared_ptr<Request> request(waiting_priority_queue->top());
+    waiting_priority_queue->pop_top();
+    clear_mtp_bootstrap(request.get());
+    kv_cache_manager_->deallocate(request.get());
+    if (blocks_exhausted) {
+      LOG(ERROR) << "Request prompt is too long, no enough memory to schedule "
+                    "a single sequence.";
+      // no enough memory to schedule single sequence, just finish the request
+      response_processor_->process_failed_request(
+          request,
+          {StatusCode::RESOURCE_EXHAUSTED,
+           "No enough memory to schedule single sequence"});
+    } else if (budget_exhausted) {
+      LOG(ERROR) << "Request prompt is too long, no enough budget to schedule "
+                    "a single sequence. Please set a larger budegt.";
+      // no enough memory to schedule single sequence, just finish the request
+      response_processor_->process_failed_request(
+          request,
+          {StatusCode::RESOURCE_EXHAUSTED,
+           "No enough budget to schedule single sequence."});
+    } else {
+      LOG(INFO) << "latency budegt: " << latency_budget
+                << ", estimate latency: " << estimate_latency;
+      LOG(FATAL) << "Unexpected error: blocks and budget are enough but can "
+                    "not schedule.";
+    }
+  }
+
+  if (!running_sequences_.empty()) {
+    last_step_prefill_ = true;
+  }
+}
+
+void PDOOCScheduler::handle_decode_requests_impl(
+    double& latency_budget,
+    double& estimate_latency,
+    size_t& remaining_token_budget,
+    size_t& remaining_seq_budget,
+    size_t& num_offline_decode_preempt_offline_requests,
+    size_t& num_online_decode_preempt_online_requests,
+    size_t& num_online_decode_preempt_offline_requests,
+    RequestPriorityQueue* running_queue) {
+  std::vector<Sequence*> candidate_sequences;
+  std::vector<size_t> candidate_token_budgets;
+
+  while (!running_queue->empty() &&
+         remaining_token_budget > min_speculative_tokens_required_ &&
+         latency_budget > estimate_latency && remaining_seq_budget > 0) {
+    std::shared_ptr<Request> request = running_queue->top();
+    // TODO: check if request is timeout
+
+    const size_t num_sequences = request->sequences().size();
+    candidate_sequences.clear();
+    candidate_token_budgets.clear();
+    candidate_sequences.reserve(num_sequences);
+    candidate_token_budgets.reserve(num_sequences);
+
+    bool has_enough_budget = true;
+    bool has_enough_blocks = true;
+    size_t allocated_tokens = 0;
+    size_t allocated_seqs = 0;
+    double allocated_estimate_latency = 0;
+
+    if (request->check_beam_search()) {
+      std::vector<Sequence*> active_sequences;
+      active_sequences.reserve(num_sequences);
+      for (auto& seq : request->sequences()) {
+        if (!seq->finished()) {
+          active_sequences.emplace_back(seq.get());
+        }
+      }
+      if (active_sequences.empty()) {
+        running_queue->pop_top();
+        continue;
+      }
+
+      const size_t decode_step_tokens = min_speculative_tokens_required_ + 1;
+      if (decode_step_tokens * active_sequences.size() >
+              remaining_token_budget ||
+          active_sequences.size() > remaining_seq_budget) {
+        has_enough_budget = false;
+      }
+
+      if (has_enough_budget && options_.enable_latency_aware_schedule() &&
+          !(options_.instance_role().has_value() &&
+            options_.instance_role().value() == InstanceRole::PREFILL)) {
+        for (auto* sequence : active_sequences) {
+          const double seq_estimate_latency =
+              profile_manager_->predict_step_time(sequence, false);
+          if (estimate_latency + allocated_estimate_latency +
+                  seq_estimate_latency >
+              latency_budget) {
+            has_enough_budget = false;
+            break;
+          }
+          allocated_estimate_latency += seq_estimate_latency;
+        }
+      }
+
+      // Reset estimation value. It will be recomputed on successful allocation.
+      allocated_estimate_latency = 0.0;
+
+      if (has_enough_budget) {
+        const size_t block_size = kv_cache_manager_->block_size();
+        size_t needed_blocks = 0;
+        for (auto* sequence : active_sequences) {
+          const size_t updated_num_tokens =
+              sequence->num_tokens() + min_speculative_tokens_required_;
+          needed_blocks += estimate_decode_extra_blocks(
+              sequence, updated_num_tokens, block_size);
+        }
+
+        const int32_t dp_rank = active_sequences.front()->dp_rank();
+        const size_t free_blocks =
+            get_sequence_free_blocks_for_rank(kv_cache_manager_, dp_rank);
+        if (needed_blocks > free_blocks) {
+          has_enough_blocks = false;
+        }
+      }
+
+      if (has_enough_budget && has_enough_blocks) {
+        bool allocate_failed = false;
+        for (auto* sequence : active_sequences) {
+          const size_t updated_num_tokens =
+              sequence->num_tokens() + min_speculative_tokens_required_;
+          if (!kv_cache_manager_->allocate(sequence, updated_num_tokens)) {
+            allocate_failed = true;
+            break;
+          }
+          if (sequence->if_cache_block_for_prefill()) {
+            kv_cache_manager_->cache(sequence);
+          }
+          candidate_sequences.emplace_back(sequence);
+          candidate_token_budgets.emplace_back(decode_step_tokens);
+          allocated_tokens += decode_step_tokens;
+          allocated_seqs += 1;
+        }
+
+        if (allocate_failed) {
+          LOG(ERROR) << "Beam strict scheduling allocation failed. "
+                     << "request_id=" << request->request_id()
+                     << ", beam=" << request->check_beam_search();
+          // Fallback to full request deallocation to avoid inconsistent
+          // per-sequence states.
+          clear_mtp_bootstrap(request.get());
+          kv_cache_manager_->deallocate(request.get());
+          running_queue->pop_top();
+          request->set_preempted();
+          if (request->offline()) {
+            prefill_queue_offline_->push(request);
+          } else {
+            prefill_queue_->push(request);
+          }
+          continue;
+        }
+
+        if (options_.enable_latency_aware_schedule() &&
+            !(options_.instance_role().has_value() &&
+              options_.instance_role().value() == InstanceRole::PREFILL)) {
+          for (auto* sequence : candidate_sequences) {
+            allocated_estimate_latency +=
+                profile_manager_->predict_step_time(sequence, false);
+          }
+        }
+      }
+    } else {
+      for (auto& sequence : request->sequences()) {
+        if (sequence->finished()) {
+          continue;
+        }
+        // no budget left
+        double seq_estimate_latency = 0;
+        if (options_.enable_latency_aware_schedule()
+            // force not enabled on prefill node (only offline req decode here)
+            && !(options_.instance_role().has_value() &&
+                 options_.instance_role().value() == InstanceRole::PREFILL)) {
+          seq_estimate_latency =
+              profile_manager_->predict_step_time(sequence.get(), false);
+          if (estimate_latency + allocated_estimate_latency +
+                  seq_estimate_latency >
+              latency_budget) {
+            has_enough_budget = false;
+            break;
+          }
+        }
+        if (allocated_tokens + min_speculative_tokens_required_ >=
+                remaining_token_budget ||
+            allocated_seqs >= remaining_seq_budget) {
+          has_enough_budget = false;
+          break;
+        }
+        // sequence token already appended
+        size_t updated_num_tokens =
+            sequence->num_tokens() + min_speculative_tokens_required_;
+        // no blocks left
+        if (!kv_cache_manager_->allocate(sequence.get(), updated_num_tokens)) {
+          has_enough_blocks = false;
+          break;
+        }
+
+        if (sequence->if_cache_block_for_prefill()) {
+          kv_cache_manager_->cache(sequence.get());
+        }
+
+        // update the allocated tokens for the sequence
+        allocated_tokens += min_speculative_tokens_required_ + 1;
+        allocated_seqs += 1;
+        allocated_estimate_latency += seq_estimate_latency;
+        candidate_sequences.emplace_back(sequence.get());
+        candidate_token_budgets.emplace_back(min_speculative_tokens_required_ +
+                                             1);
+      }
+    }
+    CHECK(allocated_tokens <= remaining_token_budget);
+    CHECK(allocated_seqs <= remaining_seq_budget);
+
+    // schedule candidates in the request if there are enough blocks
+    if (has_enough_budget && has_enough_blocks) {
+      // remove the request from the priority queue
+      running_queue->pop_top();
+      // add the request to the batch
+      running_requests_.emplace_back(request);
+      running_sequences_.insert(running_sequences_.end(),
+                                candidate_sequences.begin(),
+                                candidate_sequences.end());
+      running_sequences_budgets_.insert(running_sequences_budgets_.end(),
+                                        candidate_token_budgets.begin(),
+                                        candidate_token_budgets.end());
+      remaining_token_budget -= allocated_tokens;
+      remaining_seq_budget -= allocated_seqs;
+      estimate_latency += allocated_estimate_latency;
+
+      continue;
+    }
+
+    // budget exhausted, do partially schedule the request
+    if (!has_enough_budget) {
+      handle_abnormal_request(running_queue,
+                              candidate_sequences,
+                              candidate_token_budgets,
+                              allocated_tokens,
+                              allocated_seqs,
+                              allocated_estimate_latency,
+                              remaining_token_budget,
+                              remaining_seq_budget,
+                              estimate_latency,
+                              true, /*budget_exhausted*/
+                              false /*blocks_exhausted*/);
+      break;
+    }
+
+    // memory exhausted, try to preempt lowest priority request
+    // continue to evict blocks until enough or no other requests that can be
+    // preempted
+    if (options_.enable_online_preempt_offline() && !request->offline() &&
+        !decode_queue_->empty()) {
+      std::shared_ptr<Request> request_to_preempt = decode_queue_->back();
+      ++num_online_decode_preempt_offline_requests;
+      clear_mtp_bootstrap(request_to_preempt.get());
+      kv_cache_manager_->deallocate(request_to_preempt.get());
+      decode_queue_->pop_back();
+      // add preemptable request to waiting priority queue
+      request_to_preempt->set_preempted();
+      prefill_queue_offline_->push(request_to_preempt);
+      continue;
+    } else if (running_queue->size() > 1) {
+      std::shared_ptr<Request> request_to_preempt = running_queue->back();
+      if (request_to_preempt.get() != request.get()) {
+        // TO IMPROVE: kv cache offload to cpu
+        clear_mtp_bootstrap(request_to_preempt.get());
+        kv_cache_manager_->deallocate(request_to_preempt.get());
+        running_queue->pop_back();
+        // add preemptable request to waiting priority queue
+        request_to_preempt->set_preempted();
+        if (request_to_preempt->offline()) {
+          ++num_offline_decode_preempt_offline_requests;
+          prefill_queue_offline_->push(request_to_preempt);
+        } else {
+          ++num_online_decode_preempt_online_requests;
+          prefill_queue_->push(request_to_preempt);
+        }
+
+      } else {
+        LOG(FATAL) << "Unexpected error: preempting the candidate itself.";
+      }
+
+      continue;
+    }
+
+    // no requests left to preempt
+    handle_abnormal_request(running_queue,
+                            candidate_sequences,
+                            candidate_token_budgets,
+                            allocated_tokens,
+                            allocated_seqs,
+                            allocated_estimate_latency,
+                            remaining_token_budget,
+                            remaining_seq_budget,
+                            estimate_latency,
+                            false, /*budget_exhausted*/
+                            true /*blocks_exhausted*/);
+    break;
+  }
+}
+
 // copy+modify from ContinuousScheduler::handle_decode_requests
 // Due to limitations in superclass' implementation, manual maintenance of
 // decode_step_global_batch_req_lens_ is required
@@ -500,7 +1117,7 @@ void PDOOCScheduler::handle_decode_requests(
     RequestPriorityQueue* running_queue) {
   // only used in decode step
   if (options_.instance_role().value() != InstanceRole::DECODE) {
-    return ContinuousScheduler::handle_decode_requests(
+    return handle_decode_requests_impl(
         latency_budget,
         estimate_latency,
         remaining_token_budget,
@@ -658,15 +1275,14 @@ void PDOOCScheduler::handle_decode_requests(
     // continue to evict blocks until enough or no other requests that can be
     // preempted
     if (options_.enable_online_preempt_offline() && !request->offline() &&
-        !running_queue_offline_->empty()) {
-      std::shared_ptr<Request> request_to_preempt =
-          running_queue_offline_->back();
+        !decode_queue_->empty()) {
+      std::shared_ptr<Request> request_to_preempt = decode_queue_->back();
       ++num_online_decode_preempt_offline_requests;
       kv_cache_manager_->deallocate(request_to_preempt.get());
-      running_queue_offline_->pop_back();
+      decode_queue_->pop_back();
       // add preemptable request to waiting priority queue
       request_to_preempt->set_preempted();
-      waiting_priority_queue_offline_->push(request_to_preempt);
+      prefill_queue_offline_->push(request_to_preempt);
       continue;
     } else if (running_queue->size() > 1) {
       std::shared_ptr<Request> request_to_preempt = running_queue->back();
@@ -678,10 +1294,10 @@ void PDOOCScheduler::handle_decode_requests(
         request_to_preempt->set_preempted();
         if (request_to_preempt->offline()) {
           ++num_offline_decode_preempt_offline_requests;
-          waiting_priority_queue_offline_->push(request_to_preempt);
+          prefill_queue_offline_->push(request_to_preempt);
         } else {
           ++num_online_decode_preempt_online_requests;
-          waiting_priority_queue_->push(request_to_preempt);
+          prefill_queue_->push(request_to_preempt);
         }
 
       } else {

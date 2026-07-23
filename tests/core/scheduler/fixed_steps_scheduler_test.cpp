@@ -68,7 +68,6 @@ class FakeEngine : public Engine {
     opt.num_blocks_ = num_blocks;
     opt.block_size_ = block_size;
     opt.enable_prefix_cache_ = false;
-    opt.max_seqs_per_batch_ = 1024;
     fake_tokenizer_ = std::make_unique<FakeTokenizer>();
     fake_block_manager_ = std::make_unique<BlockManagerPool>(opt, 1);
   }

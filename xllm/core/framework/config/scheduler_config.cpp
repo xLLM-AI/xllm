@@ -40,6 +40,11 @@ DEFINE_int32(chunked_match_frequency,
              2,
              "Number of sequence prefix cache match frequency.");
 
+DEFINE_bool(enable_mix_batch,
+            true,
+            "Enable mixed batch (prefill + decode in same batch). "
+            "Forced to false when CP or MTP is active.");
+
 DEFINE_bool(use_zero_evict,
             false,
             "Use ZeroEvictionScheduler but ContinuousScheduler.");
@@ -52,10 +57,6 @@ DEFINE_int32(
 DEFINE_string(priority_strategy,
               "fcfs",
               "Priority strategy for requests(e.g. fcfs, priority, deadline).");
-
-DEFINE_bool(use_mix_scheduler,
-            false,
-            "Use MixScheduler for handling prefill and decode uniformly.");
 
 DEFINE_bool(enable_online_preempt_offline,
             true,
@@ -86,7 +87,7 @@ void SchedulerConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(use_zero_evict);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_decode_token_per_sequence);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(priority_strategy);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(use_mix_scheduler);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mix_batch);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_online_preempt_offline);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(aggressive_coeff);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(starve_threshold);
@@ -104,7 +105,7 @@ void SchedulerConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(use_zero_evict);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_decode_token_per_sequence);
   XLLM_CONFIG_ASSIGN_FROM_JSON(priority_strategy);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(use_mix_scheduler);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mix_batch);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_online_preempt_offline);
   XLLM_CONFIG_ASSIGN_FROM_JSON(aggressive_coeff);
   XLLM_CONFIG_ASSIGN_FROM_JSON(starve_threshold);
@@ -135,7 +136,7 @@ void SchedulerConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, priority_strategy);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, use_mix_scheduler);
+      config_json, default_config, enable_mix_batch);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_online_preempt_offline);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

@@ -23,6 +23,7 @@ limitations under the License.
 #include <type_traits>
 #include <vector>
 
+#include "core/framework/model/mtp_topk_state.h"
 #include "core/framework/state_dict/utils.h"
 #include "core/util/utils.h"
 #include "llm_model_base.h"
@@ -106,8 +107,63 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
       torch::Tensor positions,
       const layer::AttentionMetadata& attn_metadata,
       KVCache& kv_cache,
-      const ModelInputParams& input_params,
+      ModelInputParams& input_params,
       const std::optional<torch::Tensor>& input_ids = std::nullopt,
+      torch::Tensor* aux_hidden_states = nullptr) {
+    auto decoder_forward = [](DecoderLayerType& decoder,
+                              torch::Tensor& hidden_states,
+                              std::optional<torch::Tensor>& layer_residual,
+                              torch::Tensor& layer_positions,
+                              const layer::AttentionMetadata& metadata,
+                              KVCache& layer_kv_cache,
+                              ModelInputParams& params,
+                              const std::optional<torch::Tensor>& ids) {
+      if constexpr (std::is_invocable_v<DecoderLayerType,
+                                        torch::Tensor&,
+                                        std::optional<torch::Tensor>&,
+                                        torch::Tensor&,
+                                        const layer::AttentionMetadata&,
+                                        KVCache&,
+                                        ModelInputParams&,
+                                        const std::optional<torch::Tensor>&>) {
+        return decoder(hidden_states,
+                       layer_residual,
+                       layer_positions,
+                       metadata,
+                       layer_kv_cache,
+                       params,
+                       ids);
+      } else {
+        return decoder(hidden_states,
+                       layer_residual,
+                       layer_positions,
+                       metadata,
+                       layer_kv_cache,
+                       params);
+      }
+    };
+    return forward_with_decoder(std::move(embed),
+                                residual,
+                                std::move(positions),
+                                attn_metadata,
+                                kv_cache,
+                                input_params,
+                                input_ids,
+                                decoder_forward,
+                                aux_hidden_states);
+  }
+
+ protected:
+  template <typename DecoderForward>
+  torch::Tensor forward_with_decoder(
+      torch::Tensor embed,
+      std::optional<torch::Tensor>& residual,
+      torch::Tensor positions,
+      const layer::AttentionMetadata& attn_metadata,
+      KVCache& kv_cache,
+      ModelInputParams& input_params,
+      const std::optional<torch::Tensor>& input_ids,
+      DecoderForward&& decoder_forward,
       torch::Tensor* aux_hidden_states = nullptr) {
     // Layer norm on token inputs
     auto enorm_out = std::get<0>(enorm_(embed));
@@ -163,30 +219,15 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
       }
     }
 
-    // Pass through mtp block
-    if constexpr (std::is_invocable_v<DecoderLayerType,
-                                      torch::Tensor&,
-                                      std::optional<torch::Tensor>&,
-                                      torch::Tensor&,
-                                      const layer::AttentionMetadata&,
-                                      KVCache&,
-                                      const ModelInputParams&,
-                                      const std::optional<torch::Tensor>&>) {
-      hidden_states = mtp_block_(hidden_states,
-                                 residual,
-                                 positions,
-                                 attn_metadata,
-                                 kv_cache,
-                                 input_params,
-                                 input_ids);
-    } else {
-      hidden_states = mtp_block_(hidden_states,
-                                 residual,
-                                 positions,
-                                 attn_metadata,
-                                 kv_cache,
-                                 input_params);
-    }
+    // Pass through the backend-selected decoder invocation.
+    hidden_states = decoder_forward(mtp_block_,
+                                    hidden_states,
+                                    residual,
+                                    positions,
+                                    attn_metadata,
+                                    kv_cache,
+                                    input_params,
+                                    input_ids);
 
     if (is_deepseek_v4_mtp_model(model_args_)) {
       if (aux_hidden_states != nullptr) {
@@ -207,6 +248,7 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
     return hidden_states;
   }
 
+ public:
   void load_state_dict(const StateDict& state_dict) {
     enorm_->load_state_dict(state_dict.get_dict_with_prefix("enorm."));
     hnorm_->load_state_dict(state_dict.get_dict_with_prefix("hnorm."));
@@ -266,6 +308,39 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
 };
 
 template <typename DecoderLayerType>
+class DefaultMtpLayerForwardAdapter final {
+ public:
+  DefaultMtpLayerForwardAdapter(const MtpTopkStatePtr& input_state,
+                                size_t /*num_layers*/,
+                                const torch::Device& /*device*/) {
+    CHECK(input_state == nullptr)
+        << "MTP model received top-k state without a backend adapter.";
+  }
+
+  torch::Tensor forward_layer(DecoderLayerType& decoder_layer,
+                              size_t /*layer_id*/,
+                              torch::Tensor& hidden_states,
+                              std::optional<torch::Tensor>& residual,
+                              torch::Tensor& positions,
+                              const layer::AttentionMetadata& attn_metadata,
+                              KVCache& kv_cache,
+                              ModelInputParams& input_params,
+                              const std::optional<torch::Tensor>& input_ids) {
+    return decoder_layer(hidden_states,
+                         residual,
+                         positions,
+                         attn_metadata,
+                         kv_cache,
+                         input_params,
+                         input_ids);
+  }
+
+  MtpTopkStatePtr take_output() { return nullptr; }
+};
+
+template <typename DecoderLayerType,
+          typename LayerForwardAdapter =
+              DefaultMtpLayerForwardAdapter<DecoderLayerType>>
 class MtpModelImplBase : public torch::nn::Module {
  public:
   MtpModelImplBase(const ModelContext& context)
@@ -346,25 +421,31 @@ class MtpModelImplBase : public torch::nn::Module {
     }
 
     std::optional<torch::Tensor> residual;
+    LayerForwardAdapter forward_adapter(
+        input_params.mtp_topk_state, mtp_layers_.size(), device_);
     for (size_t i = 0; i < mtp_layers_.size(); i++) {
 #if defined(USE_CUDA) || defined(USE_MUSA)
       attn_metadata.plan_info->layer_id = i;
 #endif
       auto& layer = mtp_layers_[i];
-      hidden_states = layer(hidden_states,
-                            residual,
-                            positions,
-                            attn_metadata,
-                            kv_caches[i],
-                            modified_input_params,
-                            tokens);
+      hidden_states = forward_adapter.forward_layer(layer,
+                                                    i,
+                                                    hidden_states,
+                                                    residual,
+                                                    positions,
+                                                    attn_metadata,
+                                                    kv_caches[i],
+                                                    modified_input_params,
+                                                    tokens);
       if (!modified_input_params.record_layer(static_cast<uint32_t>(i),
                                               hidden_states.device())) {
         return ModelOutput();
       }
     }
     auto [h_out, r_out] = norm_(hidden_states, residual);
-    return ModelOutput(h_out, r_out);
+    ModelOutput output(h_out, r_out);
+    output.mtp_topk_state = forward_adapter.take_output();
+    return output;
   }
 
   // load the weight from the checkpoint

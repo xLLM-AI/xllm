@@ -27,21 +27,21 @@ limitations under the License.
 #include "framework/request/request.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "runtime/xservice_client.h"
-#include "scheduler/chunked_prefill_scheduler.h"
+#include "scheduler/continuous_scheduler.h"
 #include "server/xllm_server_registry.h"
 #include "util/blockingconcurrentqueue.h"
 #include "util/threadpool.h"
 
 namespace xllm {
 
-class DisaggPDScheduler : public ChunkedPrefillScheduler {
+class DisaggPDScheduler : public ContinuousScheduler {
  public:
   DisaggPDScheduler(Engine* engine, const Options& options);
 
   virtual ~DisaggPDScheduler();
 
   virtual uint32_t get_waiting_requests_num() const override {
-    return waiting_priority_queue_->size();
+    return prefill_queue_->size();
   };
 
   void step(const absl::Duration& timeout) override;
