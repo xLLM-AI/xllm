@@ -210,9 +210,12 @@ TEST(CallTest, AsyncCompletionRunsAfterFinalErrorState) {
   ClosureGuard done_guard(
       &done,
       [](void* /*unused*/) {},
-      [&](void* /*unused*/) {
+      [&](void* completion_context) {
         ++completion_count;
-        observed_failure = is_failed_request(&controller);
+        ASSERT_NE(completion_context, nullptr);
+        observed_failure =
+            static_cast<const Call::CompletionStatus*>(completion_context)
+                ->failed;
       });
 
   auto async_closure = done_guard.release_for_async();

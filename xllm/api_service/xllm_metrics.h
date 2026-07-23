@@ -47,6 +47,14 @@ static void request_out_metric(void* context) {
   }
 }
 
+static void request_out_metric(bool failed) {
+  if (failed) {
+    COUNTER_INC(server_request_total_fail);
+  } else {
+    COUNTER_INC(server_request_total_ok);
+  }
+}
+
 static void device_info_metric() {
   // TODO: get cpu device info
   GAUGE_SET(xllm_cpu_num, 0);

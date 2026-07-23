@@ -38,6 +38,10 @@ std::string request_body_x_request_id(const Request* request) {
 
 class Call {
  public:
+  struct CompletionStatus {
+    bool failed = false;
+  };
+
   using CompletionCallback = std::function<void(void*)>;
 
   Call(brpc::Controller* controller,
@@ -61,12 +65,14 @@ class Call {
  protected:
   void init(std::string body_x_request_id);
   void complete_request();
+  void mark_request_failed() { completion_status_.failed = true; }
   bool is_http_request() const { return is_http_request_; }
 
  protected:
   brpc::Controller* controller_;
   bool is_http_request_ = false;
   CompletionCallback completion_callback_;
+  CompletionStatus completion_status_;
 
   std::string x_request_time_;
   std::string x_request_id_;

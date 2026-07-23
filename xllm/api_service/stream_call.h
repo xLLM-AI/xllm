@@ -134,6 +134,7 @@ class StreamCall : public Call {
 
   virtual bool finish_with_error(const StatusCode& code,
                                  const std::string& error_message) {
+    mark_request_failed();
     if (!is_http_request()) {
       controller_->SetFailed(error_message);
     } else if (!stream_) {
@@ -251,6 +252,7 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
   // `error` SSE event for streaming responses.
   bool finish_with_error(const StatusCode& code,
                          const std::string& error_message) override {
+    this->mark_request_failed();
     if (!this->stream_) {
       api_service::write_anthropic_error(
           this->controller_, code, error_message, this->x_request_id());

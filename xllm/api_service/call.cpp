@@ -34,7 +34,7 @@ Call::Call(brpc::Controller* controller,
 void Call::complete_request() {
   if (completion_callback_) {
     auto callback = std::move(completion_callback_);
-    callback(nullptr);
+    callback(&completion_status_);
   }
 }
 

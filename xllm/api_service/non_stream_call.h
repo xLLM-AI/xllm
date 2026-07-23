@@ -144,6 +144,7 @@ class NonStreamCall : public Call {
   // For non stream response
   bool finish_with_error(const StatusCode& code,
                          const std::string& error_message) {
+    mark_request_failed();
     if (is_http_request()) {
       api_service::write_openai_error(
           controller_, code, error_message, x_request_id());
