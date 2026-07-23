@@ -46,9 +46,7 @@ class CFGParallelMixin {
       cfg_size = cfg_group_->world_size();
     }
 
-    TORCH_CHECK(cfg_size == 1 || cfg_size == 2,
-                "CFGParallelMixin only supports cfg_size 1 or 2, got ",
-                cfg_size);
+    CHECK(cfg_size == 1 || cfg_size == 2);
 
     // Serial execution: evaluate positive and negative conditionals one by one.
     if (cfg_size == 1) {
