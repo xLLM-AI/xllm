@@ -168,6 +168,23 @@ virtual ModelOutput forward(torch::Tensor tokens, ...);
   - Use `std::shared_ptr` only when shared ownership is genuinely needed.
   - Raw pointers are acceptable only for non-owning references where the lifetime is clearly managed elsewhere.
 
+- **Prefer `std::make_unique` and `std::make_shared` to direct use of `new`** when creating heap objects managed by smart pointers.
+  - Avoid repeating the type and avoid exception-unsafe patterns such as passing `std::shared_ptr<T>(new T(...))` in the same statement as other expressions.
+  - Direct `new` is acceptable when make functions cannot be used (e.g. custom deleters, braced initialization of the pointee, or APIs that require a raw pointer and take ownership explicitly).
+  - If `new` is required, assign the result to a smart pointer in a standalone statement before any other expression that may throw.
+
+```cpp
+// Good
+auto widget = std::make_unique<Widget>(arg);
+auto widget = std::make_shared<Widget>(arg);
+stub_ = std::make_unique<ServiceStub>(&channel_);
+
+// Bad
+std::unique_ptr<Widget> widget(new Widget(arg));
+stub_.reset(new ServiceStub(&channel_));
+process(std::shared_ptr<Widget>(new Widget), compute_priority());  // may leak
+```
+
 ---
 
 ## 6. Scoping & Visibility
