@@ -27,8 +27,8 @@ limitations under the License. -->
 ### 📢 News
 <!-- only keep the latest 3 news, others should be folded -->
 - 2026-07-06: 🎉 xLLM is officially donated to the OpenAtom Foundation!
-- 2026-06-13: 🎉 We day-0 support the [MiniMax-M3](https://huggingface.co/MiniMaxAI/MiniMax-M3) model, please refer to the [Deployment Document](https://github.com/jd-opensource/xllm/blob/preview/minimax-m3/testspace/run_minimax_m3.sh) for deployment.
-- 2026-04-24: 🎉 We day-0 support the [DeepSeek-V4](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) model, please refer to the [Deployment Document](https://github.com/jd-opensource/xllm/blob/preview/deepseek-v4-mlu/testspace/run_deepseek_v4.sh) for deployment.
+- 2026-06-13: 🎉 We day-0 support the [MiniMax-M3](https://huggingface.co/MiniMaxAI/MiniMax-M3) model. Please refer to the [Deployment Document](https://github.com/jd-opensource/xllm/blob/preview/minimax-m3/testspace/run_minimax_m3.sh) for deployment.
+- 2026-04-24: 🎉 We day-0 support the [DeepSeek-V4](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) model. Please refer to the [Deployment Document](https://github.com/jd-opensource/xllm/blob/preview/deepseek-v4-mlu/testspace/run_deepseek_v4.sh) for deployment.
 
 <details>
 <summary>More News</summary>
