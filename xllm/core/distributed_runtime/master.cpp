@@ -199,17 +199,14 @@ Master::Master(const Options& options, EngineType type)
       master_status_(options.master_status()) {
   const auto model_path =
       std::filesystem::path(options_.model_path()).lexically_normal();
-  // Multi-process serving runs one worker per process. Enumerate the visible
-  // cards (honoring *_VISIBLE_DEVICES) and select the single card this process
-  // owns by its node_rank, so `devices` holds exactly the card this process
-  // uses -- mirroring the historical single-element devices semantics.
+  // Multi-process serving runs one worker per process. Select one runtime
+  // logical device from the process-visible devices while keeping node_rank as
+  // the global distributed identity.
+  const int32_t visible_device_count = Platform::device_count();
+  const int32_t device_idx = DeviceNameUtils::get_device_idx(
+      options_.node_rank(), options_.nnodes(), visible_device_count);
   const auto visible_devices = DeviceNameUtils::parse_devices("auto");
-  CHECK_LT(options_.node_rank(), static_cast<int32_t>(visible_devices.size()))
-      << "node_rank " << options_.node_rank()
-      << " exceeds the number of visible devices " << visible_devices.size()
-      << ". Ensure *_VISIBLE_DEVICES exposes all cards used across processes.";
-  const std::vector<torch::Device> devices = {
-      visible_devices[options_.node_rank()]};
+  const std::vector<torch::Device> devices = {visible_devices[device_idx]};
   // World size is the node count (one worker per process).
   const int32_t global_world_size = options_.nnodes();
   std::string cp_model_type;

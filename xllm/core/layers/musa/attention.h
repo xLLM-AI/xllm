@@ -17,13 +17,9 @@ limitations under the License.
 
 #include <torch/torch.h>
 
-// The musa layer directory hosts two mutually exclusive attention backends
-// selected at build time:
-//   * XLLM_TORCH_MUSA: the CUDA-graph FlashInfer path (torch_musa runtime).
-//   * USE_MUSA:        the native MTTOplib path.
-// Both expose the same `AttentionImpl` / `Attention` module so downstream
-// layers can include this single header regardless of the active backend.
-#if defined(XLLM_TORCH_MUSA)
+// MUSA layer directory: FlashInfer/Mate backend for CUDA-graph path.
+// Uses torch_musa runtime with mcc_wrapper + musamapping plugin.
+#if defined(USE_MUSA)
 
 #include <memory>
 #include <optional>
@@ -37,7 +33,7 @@ namespace layer {
 
 class BaseAttentionImpl;
 
-// CUDA-graph attention entry for XLLM_TORCH_MUSA (FlashInfer-only backend).
+// CUDA-graph attention entry for USE_MUSA (FlashInfer-only backend).
 class AttentionImpl final : public torch::nn::Module {
  public:
   AttentionImpl() = default;
@@ -71,60 +67,4 @@ TORCH_MODULE(Attention);
 }  // namespace layer
 }  // namespace xllm
 
-#else  // native USE_MUSA (MTTOplib backend)
-
-#include <cassert>
-#include <cstdint>
-#include <optional>
-
-#include "framework/state_dict/state_dict.h"
-#include "framework/state_dict/utils.h"
-#include "layers/musa/layer_base.h"
-
-namespace xllm {
-namespace layer {
-
-class AttentionImpl : public MUSALayerBaseImpl {
- public:
-  explicit AttentionImpl(ModelArgs const& args,
-                         QuantArgs const& quant_args,
-                         ParallelArgs const& parallel_args,
-                         torch::TensorOptions const& options);
-
-  AttentionImpl(int64_t num_heads,
-                int64_t head_size,
-                float scale,
-                int64_t num_kv_heads,
-                int64_t sliding_window);
-
-  ~AttentionImpl() {};
-
-  torch::Tensor forward(torch::Tensor& input,
-                        ForwardParams& fwd_params) override;
-
-  std::tuple<torch::Tensor, std::optional<torch::Tensor>> forward(
-      const AttentionMetadata& attn_metadata,
-      torch::Tensor& query,
-      torch::Tensor& key,
-      torch::Tensor& value,
-      KVCache& kv_cache);
-
-  void load_state_dict(StateDict const& state_dict) override;
-
- private:
-  int32_t num_heads_;
-  int32_t num_kv_heads_;
-  int32_t head_dim_;
-  int32_t q_size_;
-  int32_t kv_size_;
-  int32_t hidden_size_;
-  float rms_eps;
-  float scaling_;
-  constexpr static int32_t weight_num_ = 7;
-};
-TORCH_MODULE(Attention);
-
-}  // namespace layer
-}  // namespace xllm
-
-#endif  // XLLM_TORCH_MUSA
+#endif  // USE_MUSA

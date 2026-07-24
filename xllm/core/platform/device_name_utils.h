@@ -27,6 +27,10 @@ namespace xllm {
 
 class DeviceNameUtils {
  public:
+  static int32_t get_device_idx(int32_t node_rank,
+                                int32_t nnodes,
+                                int32_t visible_device_count);
+
   static std::vector<torch::Device> parse_devices(
       const std::string& device_str);
 

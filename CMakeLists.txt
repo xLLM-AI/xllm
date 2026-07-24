@@ -256,7 +256,30 @@ set(CPPREST_EXCLUDE_WEBSOCKETS ON CACHE BOOL "Exclude websockets functionality."
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-format-truncation")
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/cmake)
-if(USE_CUDA)
+set(_XLLM_MUSIFY_COPTS "")
+if(USE_MUSA)
+  if(NOT USE_CUDA)
+    message(FATAL_ERROR "USE_MUSA requires USE_CUDA=ON")
+  endif()
+
+  if(DEFINED ENV{MUSAMAPPING_PATH} AND NOT "$ENV{MUSAMAPPING_PATH}" STREQUAL "")
+    set(_XLLM_MUSAMAPPING_PATH "$ENV{MUSAMAPPING_PATH}")
+  elseif(DEFINED ENV{MUSA_HOME} AND NOT "$ENV{MUSA_HOME}" STREQUAL "")
+    set(_XLLM_MUSAMAPPING_PATH "$ENV{MUSA_HOME}/tools/musamapping")
+  else()
+    set(_XLLM_MUSAMAPPING_PATH "/usr/local/musa/tools/musamapping")
+  endif()
+  set(_XLLM_MCC_WRAPPER "${_XLLM_MUSAMAPPING_PATH}/mcc_wrapper")
+  set(_XLLM_MUSIFY_COPTS
+    "-fplugin=${_XLLM_MUSAMAPPING_PATH}/libMusaMapping.so"
+    "-x" "musa"
+    "-I."
+  )
+  set(CMAKE_CXX_COMPILER "${_XLLM_MCC_WRAPPER}" CACHE FILEPATH
+      "C++ compiler for the MUSA compatibility path" FORCE)
+  project("xllm" LANGUAGES C CXX CUDA)
+  add_compile_options(-Wno-c++11-narrowing)
+elseif(USE_CUDA)
   project("xllm" LANGUAGES C CXX CUDA)
   find_package(CUDAToolkit REQUIRED)
 elseif(USE_DCU)
@@ -268,11 +291,6 @@ elseif(USE_DCU)
     list(APPEND CMAKE_PREFIX_PATH "/opt/dtk")
     set(DCU_ROOT "/opt/dtk")
   endif()
-elseif(USE_MUSA)
-  project("xllm" LANGUAGES C CXX MUSA)
-  add_compile_options(
-        -Wno-c++11-narrowing
-      )
 else()
   project("xllm" LANGUAGES C CXX)
 endif()
@@ -515,67 +533,99 @@ endif()
 
 if(USE_MUSA)
   add_definitions(-DUSE_MUSA)
+  add_definitions(-DUSE_CUDA)
   add_compile_definitions(TORCH_CUDA=1)
-
   if(NOT DEFINED MUSA_PATH)
-    set(MUSA_PATH /usr/local/musa)
+    if(DEFINED ENV{MUSA_HOME} AND NOT "$ENV{MUSA_HOME}" STREQUAL "")
+      set(MUSA_PATH "$ENV{MUSA_HOME}")
+    else()
+      set(MUSA_PATH /usr/local/musa)
+    endif()
   endif()
   list(APPEND CMAKE_MODULE_PATH "${MUSA_PATH}/cmake")
   find_package(MUSA REQUIRED)
-
-  if(NOT DEFINED ENV{MTT_OPLIB_PATH})
-    set(ENV{MTT_OPLIB_PATH} $ENV{MUSA_HOME}/tools/MTTOplib)
+  # MUSA builds use the FlashInfer/Mate TVM-FFI path; MTTOplib is not needed.
+  if(NOT DEFINED ENV{TORCH_MUSA_PYTHONPATH} OR
+     "$ENV{TORCH_MUSA_PYTHONPATH}" STREQUAL "")
+    message(FATAL_ERROR
+            "TORCH_MUSA_PYTHONPATH is required for USE_MUSA builds")
   endif()
 
-  message(STATUS  "using MTT Oplib at: $ENV{MTT_OPLIB_PATH}")
-  set(MTTOplib_DIR $ENV{MTT_OPLIB_PATH}/cmake)
-  find_package(MTTOplib REQUIRED)
-
   find_package(Python COMPONENTS Interpreter REQUIRED)
-  list(APPEND CMAKE_PREFIX_PATH $ENV{TORCH_MUSA_PYTHONPATH})
+  list(APPEND CMAKE_PREFIX_PATH "$ENV{TORCH_MUSA_PYTHONPATH}")
   find_package(TorchMusa REQUIRED CONFIG)
   list(POP_BACK CMAKE_PREFIX_PATH)
+  get_filename_component(
+    _TORCH_MUSA_ROOT
+    "$ENV{TORCH_MUSA_PYTHONPATH}/../.."
+    ABSOLUTE)
 
+  if(DEFINED ENV{MKLROOT} AND NOT "$ENV{MKLROOT}" STREQUAL "" AND
+     NOT DEFINED MKL_DIR)
+    set(MKL_DIR "$ENV{MKLROOT}/lib/cmake/mkl")
+  endif()
   find_package(MKL REQUIRED)
+
+  set(_MUSA_MKL_LIBRARY_DIRS ${MKL_LIB_PATH})
+  if(DEFINED ENV{MKLROOT} AND NOT "$ENV{MKLROOT}" STREQUAL "")
+    foreach(_mkl_library_dir
+            "$ENV{MKLROOT}/lib/intel64"
+            "$ENV{MKLROOT}/lib")
+      if(IS_DIRECTORY "${_mkl_library_dir}")
+        list(APPEND _MUSA_MKL_LIBRARY_DIRS "${_mkl_library_dir}")
+      endif()
+    endforeach()
+  endif()
+  list(REMOVE_DUPLICATES _MUSA_MKL_LIBRARY_DIRS)
   execute_process(
-    COMMAND tvm-ffi-config --includedir
-    OUTPUT_VARIABLE tvm_ffi_INCLUDE_DIR
+    COMMAND "${Python_EXECUTABLE}" -c
+            "from sysconfig import get_paths; print(get_paths()['platlib'])"
+    OUTPUT_VARIABLE _PYTHON_PLATLIB
     OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _PYTHON_PLATLIB_RESULT
   )
-  execute_process(
-    COMMAND tvm-ffi-config --libdir
-    OUTPUT_VARIABLE tvm_ffi_LIB_DIR
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-  )
-  string(REGEX MATCH "[^\n]*/include[^\n]*" tvm_ffi_INCLUDE_DIR "${tvm_ffi_INCLUDE_DIR}")
-  string(REGEX MATCH "[^\n]*/lib[^\n]*" tvm_ffi_LIB_DIR "${tvm_ffi_LIB_DIR}")
+  if(NOT _PYTHON_PLATLIB_RESULT EQUAL 0 OR "${_PYTHON_PLATLIB}" STREQUAL "")
+    message(FATAL_ERROR "Failed to obtain Python platlib from sysconfig.get_paths()")
+  endif()
+  set(_TVM_FFI_ROOT "${_PYTHON_PLATLIB}/tvm_ffi")
+  set(tvm_ffi_INCLUDE_DIR "${_TVM_FFI_ROOT}/include")
+  set(tvm_ffi_LIB_DIR "${_TVM_FFI_ROOT}/lib")
+  if(NOT IS_DIRECTORY "${tvm_ffi_INCLUDE_DIR}" OR
+     NOT IS_DIRECTORY "${tvm_ffi_LIB_DIR}")
+    message(FATAL_ERROR
+            "tvm_ffi is not installed under Python platlib: ${_PYTHON_PLATLIB}")
+  endif()
   
 
   include_directories(
       ${MUSA_INCLUDE_DIRS}
       ${TorchMusa_INCLUDE_DIRS}
       ${Python_SITELIB}/torch_musa_compiled/share/torch_musa_codegen
-
+      ${tvm_ffi_INCLUDE_DIR}
+      ${MUSA_PATH}/include
+      ${_TORCH_MUSA_ROOT}/share/torch_musa_codegen
+      ${_TORCH_MUSA_ROOT}/share/generated_cuda_compatible/include
+      ${_TORCH_MUSA_ROOT}/share/generated_cuda_compatible/include/torch/csrc/api/include
+      ${_TORCH_MUSA_ROOT}/share/generated_cuda_compatible/include/torch/csrc/musa
       $ENV{PYTHON_INCLUDE_PATH}
       $ENV{PYTORCH_INSTALL_PATH}/include
       $ENV{PYTORCH_INSTALL_PATH}/include/torch/csrc/api/include
-      ${MTTOplib_INCLUDE_DIRS}
-      ${tvm_ffi_INCLUDE_DIR}
   )
 
   link_directories(
     ${MUSA_LIB_PATH}
+    ${MUSA_PATH}/lib
+    ${_TORCH_MUSA_ROOT}/lib
+    ${_MUSA_MKL_LIBRARY_DIRS}
     $ENV{PYTHON_LIB_PATH}
     $ENV{PYTORCH_INSTALL_PATH}/lib
     ${TorchMusa_LIB_PATH}
-    ${MKL_LIB_PATH}
     ${tvm_ffi_LIB_DIR}
     ${TorchMusa_INSTALL_PREFIX}/lib
-    )
-  set(MUSA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -O3)
-endif()
-
-if(USE_CUDA)
+  )
+  set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -O3)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=parentheses")
+elseif(USE_CUDA)
   message(STATUS "TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST}")
   add_definitions(-DUSE_CUDA)
   add_compile_definitions(TORCH_CUDA=1)

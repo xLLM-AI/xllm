@@ -243,6 +243,7 @@ void DisaggPDChunkedPrefillScheduler::schedule_waiting_prefill(
 
     queue.pop_top();
     running_requests_.emplace_back(request);
+    request->record_num_prefix_cache_tokens();
     running_sequences_.emplace_back(sequence);
     running_sequences_budgets_.emplace_back(actual_tokens);
     remaining_token_budget -= actual_tokens;

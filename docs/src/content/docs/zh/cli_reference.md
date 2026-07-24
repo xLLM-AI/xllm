@@ -6,7 +6,7 @@ sidebar:
 
 xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填参数。使用 `--config_json_file` 时，JSON 文件中的值会覆盖命令行 flag 值。下表按 `/xllm/core/framework/config` 下的 Config 类分组，一个 Config 对应一节；`ConfigJsonUtils` 一节包含配置文件相关的通用参数。
 
-> **设备选择**：xLLM 不再提供 `--devices` / `--device_id` / `--draft_devices` 参数。运行设备由可见设备掩码环境变量决定（NPU 用 `ASCEND_RT_VISIBLE_DEVICES`，NVIDIA 用 `CUDA_VISIBLE_DEVICES`，寒武纪用 `MLU_VISIBLE_DEVICES`，DCU 用 `HIP_VISIBLE_DEVICES`，摩尔线程用 `MUSA_VISIBLE_DEVICES`）。每个进程会使用其可见的全部设备：单卡进程只暴露一张卡，单进程多卡则暴露多张卡。draft 模型始终与 target 模型使用相同设备。
+> **设备选择**：xLLM 不再提供 `--devices` / `--device_id` / `--draft_devices` 参数。可用设备由可见设备掩码环境变量决定（NPU 用 `ASCEND_RT_VISIBLE_DEVICES`，NVIDIA 用 `CUDA_VISIBLE_DEVICES`，寒武纪用 `MLU_VISIBLE_DEVICES`，DCU 用 `HIP_VISIBLE_DEVICES`，摩尔线程用 `MUSA_VISIBLE_DEVICES`）。每个服务进程根据全局 `node_rank` 从其可见设备中选择一个运行时逻辑设备；可见设备的子集化与重排由硬件运行时解析。draft 模型始终与 target 模型共享所选设备。
 
 ## ConfigJsonUtils
 

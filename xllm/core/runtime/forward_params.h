@@ -934,6 +934,8 @@ struct ForwardOutput {
 
 struct RawSampleOutput {
   std::vector<RawToken> tokens;  // num tokens
+  // multimodal embedding output for this sequence
+  std::vector<torch::Tensor> mm_embeddings;
 };
 
 struct RawForwardOutput {
@@ -947,8 +949,6 @@ struct RawForwardOutput {
 
   // batch-level beam output for Rec multi-round mode
   std::vector<int32_t> beam_sequence_group;  // flattened 2D
-  // multimodal embedding output
-  std::vector<torch::Tensor> mm_embeddings;
   // dit output data
   DiTForwardOutput dit_forward_output;
 };

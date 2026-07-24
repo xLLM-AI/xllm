@@ -255,6 +255,8 @@ message DisaggGenerationsRequest {
   int32 linear_state_id = 13;
   // MTP bootstrap state for the first decode draft extend.
   Tensor mtp_bootstrap_embedding = 14;
+  // Number of prompt tokens served from the prefill prefix cache.
+  int32 num_cached_tokens = 15;
 }
 
 message DisaggGenerationsRequests {

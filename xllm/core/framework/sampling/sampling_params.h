@@ -190,8 +190,7 @@ struct SampleOutput {
   // directly without re-selecting. Only set on the CP target prefill path.
   torch::Tensor selected_embeddings;
 
-  // each element is a FloatTensor
-  std::vector<torch::Tensor> mm_embeddings;
+  std::vector<std::vector<torch::Tensor>> mm_embeddings;
 };
 
 }  // namespace xllm
