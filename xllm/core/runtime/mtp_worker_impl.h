@@ -70,8 +70,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                                    ForwardInput& processed_inputs) override;
 
  protected:
-  // Composite worker opts out of the NPU model-side CP slot prepare; each
-  // target/draft leaf runs it once against its own ParallelArgs.
+  // MTP composite: leaves own NpuCpPlan::prepare.
   bool owns_npu_cp_plan_build() const override;
 
  protected:

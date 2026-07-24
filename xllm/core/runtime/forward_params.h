@@ -402,23 +402,10 @@ class WorkerType {
   Value value_;
 };
 
-// KV slot layout for the NPU model-side CP pipeline. Worker-local only: it is
-// never transported across RPC/proto/shared-memory boundaries.
-//   LOGICAL_REAL              - new_cache_slots carries one entry per real
-//                               token in global-real order (BlockManager
-//                               logical slot space). This is the layout the
-//                               BatchInputBuilder produces and the only layout
-//                               that may be fed into prepare_cache_slots().
-//   NPU_CP_RECOVERED_PHYSICAL  - new_cache_slots has already been expanded to
-//                               cp_size * local_padded rows in
-//                               kv_reorder_indices order (real rows carry their
-//                               global slot id, virtual-pad rows carry -1) and
-//                               remapped to the KV-split layout. Re-entering
-//                               worker prepare must skip the expand/remap to
-//                               avoid double remap.
+// Worker-local KV slot layout for NPU CP (not transported).
 enum class KvSlotLayout : int8_t {
-  LOGICAL_REAL = 0,
-  NPU_CP_RECOVERED_PHYSICAL = 1,
+  LOGICAL_REAL = 0,  // Builder slots; input to prepare_cache_slots.
+  NPU_CP_RECOVERED_PHYSICAL = 1,  // Already CP-expanded; skip re-prepare.
 };
 
 // Step-level decode metadata for Rec multi-round (device loop).
@@ -619,11 +606,7 @@ struct ForwardInput {
   // then skip rebuilding/H2D in ForwardInput::to().
   bool device_tensors_ready = false;
 
-  // Layout of `attention.device.new_cache_slots` for the NPU model-side CP
-  // pipeline. See `KvSlotLayout`. Defaults to LOGICAL_REAL; the worker flips it
-  // to NPU_CP_RECOVERED_PHYSICAL after the one-shot expand/remap so a re-entry
-  // into worker prepare (e.g. MTP leaf run_llm_no_sync_impl on an already
-  // prepared input) does not convert twice.
+  // new_cache_slots layout; flip after one-shot CP remap.
   KvSlotLayout kv_slot_layout = KvSlotLayout::LOGICAL_REAL;
 
   // Device-side readiness dependencies for inputs prepared on a different

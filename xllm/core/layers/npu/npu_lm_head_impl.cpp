@@ -27,15 +27,8 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
                                     const ModelArgs& args,
                                     const ParallelArgs& parallel_args,
                                     bool isPrefill) {
-  // Model-side CP (NPU/MLU): the model already all-gathers + restores global-
-  // real hidden after the last decoder layer (merge_model_output), so the
-  // LM head never needs to re-gather a CP shard. Two knobs must stay off
-  // here, otherwise the ATB LmHead graph nests a second CP AllGather on the
-  // already-global hidden (peak O(cp_size * T * H), OOM on long prefill):
-  //   * outputHidden stays false.
-  //   * contextParallelInfo is left default-constructed (rankIds empty ->
-  //     IsEnabled()==false), so the ATB `gatherAhead && IsEnabled()` gate skips
-  //     the CP AllGather node.
+  // Keep outputHidden=false and contextParallelInfo empty to avoid nested CP
+  // AllGather after merge_model_output.
   param.outputHidden = false;
   param.unpadInputs = true;
   param.gatherAhead = isPrefill;
@@ -47,14 +40,7 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
 
   if (parallel_args.world_size() > 1) {
     if (parallel_args.mapping_data().empty()) {
-      // Model-side CP: the LM head runs after merge_model_output, so it
-      // sees the full global-real sequence and must be CP-unaware but
-      // DP-aware. Shard across the dp-local-TP group (world / dp_size =
-      // cp_size * tp_size) — the full TP width within one DP, spanning all CP
-      // ranks in that DP — instead of the CP-local TP (dp_local_tp_size_,
-      // size tp). This avoids replicating the lm_head weight across CP
-      // ranks. When cp_size == 1 this collapses to tp_size, so non-CP runs
-      // are unchanged.
+      // Shard LM head on dp-local TP (cp*tp), not CP-local attn TP.
       const bool use_cp_unaware_tp = (dp_size_ > 1) || (cp_size_ > 1);
       const int32_t cp_unaware_tp_size = parallel_args.world_size() / dp_size_;
       if (use_cp_unaware_tp) {
@@ -83,10 +69,8 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
     } else {
       param.linearParallelParam.parallelType =
           atb_speed::common::COLUMN_PARALLEL;
-      // Mapping (ATB) path: use the dedicated LM_HEAD_TP group, which
-      // MappingNPU builds as the dp-local-TP group (size cp*tp). Do NOT use
-      // ATTN_TP (size tp, CP-local) — that would replicate the lm_head
-      // weight across CP ranks. See mapping_npu.cpp parse_parallel_info().
+      // Use LM_HEAD_TP (dp-local), not ATTN_TP; leave contextParallelInfo
+      // empty to avoid nested CP AllGather.
       atb_speed::common::ParallelInfo parallelInfo =
           parallel_args.mapping().Get(atb_speed::base::LM_HEAD_TP);
       param.linearParallelParam.tensorParallelInfo.rank = parallelInfo.rank;
@@ -97,26 +81,13 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
       parallelInfo.InitCommDomain(
           param.linearParallelParam.tensorParallelInfo.hcommInfo,
           param.linearParallelParam.tensorParallelInfo.commDomain);
-      // Do NOT assign ATTN_CP to param.contextParallelInfo. Model-side CP
-      // already restored global-real hidden via merge_model_output before
-      // the LM head, so every rank already holds the full sequence. Registering
-      // ATTN_CP here would make IsEnabled()==true (rankIds.size()>1) and, with
-      // gatherAhead=true on prefill, build a nested CP AllGather that treats
-      // the full sequence as a shard and scales hidden by cp_size again ->
-      // O(cp_size * T * H) peak memory and OOM on long prefill. Leave
-      // contextParallelInfo default-constructed so the ATB LmHead graph skips
-      // the CP AllGather node.
     }
   }
 }
 
 NpuLmHeadImpl::NpuLmHeadImpl(const ModelContext& context) : BaseLayer(context) {
   vocab_size_ = context.get_model_args().vocab_size();
-  // The LM head is sharded across the dp-local-TP group (world / dp_size =
-  // cp_size * tp_size, CP-unaware but DP-aware), so pad the vocab to a multiple
-  // of that width — not the CP-local TP (dp_local_tp_size_, size tp). This must
-  // match get_padded_vocab_size() in base_loader.cpp. When cp_size == 1 this
-  // collapses to tp_size, so non-CP runs are unchanged.
+  // Pad vocab to dp-local TP width (world/dp_size).
   const int32_t cp_unaware_tp_size = parallel_args_.world_size() / dp_size_;
   if (vocab_size_ > 0 && cp_unaware_tp_size > 1 &&
       vocab_size_ % cp_unaware_tp_size != 0) {

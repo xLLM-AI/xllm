@@ -251,10 +251,7 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
     // dp_size_=4;
     dp_size_ = parallel_args.dp_size();
     std::vector<int64_t> indices;
-    // NPU model-side CP uses orthogonal CP x TP: world_size = dp_size * cp_size
-    // * attn_tp_size. dp_local_tp_size_ is the effective TP width
-    // (attn_tp_size); the DP stride is dp_local_tp_size_ * cp_size. This
-    // matches the layout in npu_base_layer.cpp and compute_cp_group_ranks.
+    // Orthogonal CP×TP: dp_local_tp = attn_tp; DP stride = tp*cp.
     dp_local_tp_size_ =
         parallel_args.world_size() / (dp_size_ * parallel_args.cp_size());
     dp_rank_ =
@@ -280,10 +277,6 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
     }
 
     auto h = npu_embed_tokens_(tokens, 0);
-    // Model-side CP pipeline: shard the global-real hidden into the rank-local
-    // padded layout. The worker has already localized input_params.attention
-    // via cp_plan.prepare(). Guarded so the non-CP forward is untouched;
-    // shard_model_input rewrites h/positions in place.
     const NpuCpPlan& cp_plan = input_params.parallel.cp_plan;
     if (cp_plan.enabled()) {
       cp_plan.shard_model_input(h, positions);
@@ -371,9 +364,6 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
       }
       rolling_guard.after_layer(layer_index);
     }
-    // Restore global-real order from the rank-major gathered buffer so the LM
-    // head / scheduler / MTP see logical unpadded hidden. The CP process group
-    // is bound inside the plan; guarded so the non-CP forward is untouched.
     if (cp_plan.enabled()) {
       h = cp_plan.merge_model_output(h);
     }

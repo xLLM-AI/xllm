@@ -120,17 +120,10 @@ class WorkerImpl {
   const CpPlanRuntimeConfig& npu_cp_plan_runtime_config() const;
 #endif
 
-  // True when this worker instance owns the NPU model-side CP slot prepare
-  // (NpuCpPlan::build + prepare_cache_slots).
-  // Composite speculative workers (MTP) override
-  // this to return false so their outer prepare only materializes the input on
-  // device; each target/draft leaf then runs the CP prepare once against its
-  // own ParallelArgs inside run_llm_no_sync_impl. This prevents the composite
-  // worker from converting slots a second time when it re-enters the leaf.
+  // False on MTP composite: only leaf workers run NpuCpPlan::prepare.
   virtual bool owns_npu_cp_plan_build() const { return true; }
 
-  // Lazily resolve the worker's model_type and return whether it advertises the
-  // NPU model-side CP pipeline. Cached after the first call.
+  // Cached: whether the loaded model advertises NPU model-side CP.
   bool model_supports_model_cp() const;
 
   // Internal helper shared by worker pipelines before model execution.

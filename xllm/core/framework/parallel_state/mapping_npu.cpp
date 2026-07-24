@@ -216,16 +216,7 @@ void MappingNPU::parse_parallel_info() {
   attn_kv_split_.group_size(kv_split_group_size);
   attn_kv_split_.backend("hccl");
 
-  // word embed / lm_head: CP-unaware, DP-aware. The model-side CP pipeline
-  // localizes hidden AFTER embedding and restores global-real hidden BEFORE
-  // the LM head, so both layers always see the full sequence and must NOT be
-  // sharded by the CP-local TP (attn_tp_, size tp). Instead they shard across
-  // the dp-local-TP group = world / dp_size = cp_size * tp_size, i.e. the full
-  // TP width within one DP (spanning all CP ranks in that DP). This avoids
-  // replicating the embedding / lm_head weights across CP ranks. get_tp_group
-  // (called in the constructor after parse_parallel_info) then builds one
-  // contiguous (cp*tp)-rank chunk per DP. When cp_size == 1 this collapses to
-  // tp_size (== attn_tp_) so behavior is unchanged for non-CP runs.
+  // Embed/LMHead use dp-local TP (cp*tp), not attn_tp (CP-local).
   const int32_t dp_local_tp_group_size =
       attn_dp_.group_size() > 0 ? world_size_ / attn_dp_.group_size()
                                 : world_size_;
@@ -263,11 +254,7 @@ void MappingNPU::validate() {
     CHECK(attn_dp_.group_size() == 1) << "DP size should be 1 if CP size > 1";
   }
 
-  // KV split must either match cp_size or be a divisor of it. The
-  // > cp_size case is rejected on purpose - it would force a mapping across
-  // attnCp boundaries (intersecting TP/EP) which is out of scope for this
-  // refactor. kv_split_size == 1 is allowed and means each CP rank owns a
-  // full KV replica.
+  // kv_split_size must be 1 or a divisor of cp_size (<= cp_size).
   const int32_t kv_split = attn_kv_split_.group_size();
   const int32_t cp_sz = std::max(1, attn_cp_.group_size());
   CHECK(kv_split >= 1) << "kv_split size must be >= 1, got " << kv_split;

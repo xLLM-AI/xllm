@@ -36,13 +36,8 @@ namespace xllm {
 
 namespace {
 
-// Round a chunked-prefill chunk size DOWN to a multiple of
-// `kv_split_size * block_size` so the KV-shard prefix geometry stays aligned
-// at block boundaries across chunks. When KV split is off (kv_split_size == 1)
-// this term collapses to block_size.
-//
-// TODO: the kv split block-mapping logic should be refactored to remove this
-// chunk-alignment limitation.
+// Align chunk down to kv_split_size*block_size.
+// TODO: refactor kv-split block mapping to remove this limitation.
 inline size_t maybe_align_cp_chunk_tokens(size_t num_tokens,
                                           int32_t kv_split_size,
                                           int32_t block_size,

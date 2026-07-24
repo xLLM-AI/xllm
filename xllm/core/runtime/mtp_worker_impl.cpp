@@ -752,10 +752,7 @@ ForwardInput MTPWorkerImpl::update_input_by_last_step_output(
 
 void MTPWorkerImpl::prepare_work_before_execute(const ForwardInput& input,
                                                 ForwardInput& processed_input) {
-  // The composite worker only materializes the input on device; the target and
-  // draft leaves each run the NPU model-side CP slot prepare once against their
-  // own ParallelArgs inside run_llm_no_sync_impl. See
-  // owns_npu_cp_plan_build().
+  // Composite skips CP prepare; leaves run it in run_llm_no_sync_impl.
   SpeculativeWorkerImpl::prepare_work_before_execute(input, processed_input);
 }
 
@@ -857,11 +854,6 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
       prefill_input.input_params.embedding.input_embedding = embeddings.clone();
     }
     if (output.sample_output.next_tokens.defined()) {
-      // Legacy CP-specific target-token injection (apply_cp_mtp_prefill_target_
-      // tokens) has been removed: model-side CP restores global-real order
-      // after the last decoder layer, so the target's next_tokens are already
-      // in global-real layout and the draft consumes them directly. Always
-      // use the plain placeholder replacement.
       replace_host_token_placeholders(prefill_input,
                                       -1,
                                       output.sample_output.next_tokens,
@@ -888,10 +880,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
 
   if (input.sampling_params.selected_token_idxes.defined()) {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-    // Model-side CP restores global-real order after the last decoder layer,
-    // so `embeddings` is the full global-real hidden and can be indexed
-    // directly by selected_token_idxes. `selected_embeddings` is now always
-    // undefined but kept as a defensive fallback.
+    // Prefer embeddings (global-real after CP merge); selected_embeddings is
+    // a fallback.
     const torch::Tensor& target_hidden =
         output.sample_output.selected_embeddings.defined()
             ? output.sample_output.selected_embeddings
@@ -935,12 +925,6 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
   prefill_input.sampling_params.return_probs = true;
   clear_ready_events(prefill_input);
   auto& input_params = prefill_input.input_params;
-  // Legacy CP-specific mtp_shifted_token_ids handling has been removed:
-  // model-side CP localizes hidden after embedding and restores global-real
-  // order after the last decoder layer, so the draft consumes the target's
-  // global-real hidden directly. The draft's own CP plan (if cp_size > 1) is
-  // rebuilt by its leaf WorkerImpl prepare stage from this prefill_input.
-
   auto& extra_token_ids = input_params.embedding.extra_token_ids;
 
   const torch::Tensor& token_ids = input.token_ids_host;

@@ -650,9 +650,6 @@ void BatchInputBuilder::process_single_sequence(
   CHECK(allowed_max_tokens_[seq_index] > 0);
   const uint32_t q_seq_len =
       std::min(n_tokens - n_kv_cache_tokens, allowed_max_tokens_[seq_index]);
-  // Model-side CP localizes hidden after embedding and pads with virtual rows
-  // inside the model, so the batch builder no longer right-pads q_seq_len to
-  // 2*cp_size. cp_size_ is always 1 here.
   const uint32_t padded_q_seq_len = q_seq_len;
   const uint32_t logical_seq_len = q_seq_len + n_kv_cache_tokens;
   const uint32_t seq_len = padded_q_seq_len + n_kv_cache_tokens;
@@ -750,10 +747,6 @@ void BatchInputBuilder::extract_tokens_and_positions(Sequence* sequence,
     }
   }
 
-  // Model-side CP localizes hidden after embedding and pads with virtual rows
-  // inside the model, so the batch builder never appends physical pad tokens
-  // for CP and padded_seq_len always equals seq_len.
-
   append_linear_state_row(sequence, n_kv_cache_tokens, seq_len, state);
 
   // Add extra token id
@@ -793,9 +786,6 @@ void BatchInputBuilder::extract_tokens_and_positions(Sequence* sequence,
     extra_token_id = token_ids[seq_len];
     state.extra_token_ids.emplace_back(extra_token_id);
   }
-
-  // Model-side CP MTP does not consume `mtp_shifted_token_ids` (cp_size_ is
-  // always 1 here).
 }
 
 void BatchInputBuilder::append_linear_state_row(Sequence* sequence,

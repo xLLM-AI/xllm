@@ -76,12 +76,9 @@ std::optional<std::string> validate_model_cp(const Options& options,
   if (options.cp_size() < 1) {
     return "cp_size must be greater than or equal to 1";
   }
-  // Only model-side CP (MLU/NPU) is supported; any other platform with
-  // cp_size > 1 is rejected at startup.
   if (options.cp_size() > 1 && !Platform::uses_model_cp_sharding()) {
     return "cp_size > 1 is only supported on platforms with model-side CP "
-           "(MLU/NPU). Legacy worker-side CP has been removed; either disable "
-           "CP (cp_size=1) or use a model-side CP platform.";
+           "(MLU/NPU); disable CP (cp_size=1) or use MLU/NPU.";
   }
   const bool use_model_sharding =
       options.cp_size() > 1 && Platform::uses_model_cp_sharding();
@@ -101,11 +98,7 @@ std::optional<std::string> validate_model_cp(const Options& options,
            "speculative algorithms (Eagle3/DFlash); disable CP or disable "
            "the speculative algorithm. MTP and Suffix are supported.";
   }
-  // CP runs prefill only: the ATB CP prefill graph and the model-side pipeline
-  // are not built for decode, and mixed prefill+decode batches are not
-  // supported. The scheduler selects PREFILL_ONLY for NPU CP; reject graph
-  // capture and non-prefill roles here so misconfiguration fails fast instead
-  // of silently handing local-padded hidden to final norm / LmHead.
+  // CP is prefill-only; reject graph/non-prefill roles.
   if (options.enable_graph()) {
     return "Model-side CP does not support graph capture (enable_graph=true); "
            "disable graph or disable CP (cp_size=1).";
@@ -118,10 +111,7 @@ std::optional<std::string> validate_model_cp(const Options& options,
     return "Model-side CP requires dp_size == 1";
   }
   if (Platform::is_mlu()) {
-    // MLU model-side CP overlaps the CP and TP rank sets (cp_size ==
-    // world_size, tp_size == 1), so each rank holds a full KV replica and
-    // EP is restricted to 1 or the full world. Keep MLU's existing matrix;
-    // do not loosen it for NPU MTP changes.
+    // MLU: cp_size==world, kv_split==1, ep in {1, world}.
     static const std::unordered_set<std::string> kMluCpSupportedModelTypes = {
         "deepseek_v32",
         "deepseek_v32_mtp",
@@ -142,11 +132,7 @@ std::optional<std::string> validate_model_cp(const Options& options,
     }
     return std::nullopt;
   }
-  // NPU: resolve the effective kernel backend and the registered model name,
-  // then require the model to advertise the NPU model-side CP pipeline
-  // (is_npu_model_cp_capable). This rejects TORCH-only models, unregistered
-  // models, and deepseek_v3_mtp (which uses the DeepSeekV2 decoder without the
-  // V3.2 ATB CP metadata/TP contract) without hardcoding the list here.
+  // Require registered NPU model-side CP capability + ATB backend.
   std::string effective_backend;
   std::string resolved_name;
   std::string resolve_error;
@@ -171,8 +157,6 @@ std::optional<std::string> validate_model_cp(const Options& options,
            "); only deepseek_v32, deepseek_v32_mtp, glm_moe_dsa, "
            "glm_moe_dsa_mtp are registered as CP-capable.";
   }
-  // NPU model-side CP uses orthogonal CP x TP x EP (see
-  // compute_cp_group_ranks): world_size = dp_size * cp_size * attn_tp_size.
   if (global_world_size % (options.dp_size() * options.cp_size()) != 0) {
     return "NPU CP requires world_size divisible by dp_size * cp_size "
            "(orthogonal CP x TP layout)";
@@ -182,9 +166,6 @@ std::optional<std::string> validate_model_cp(const Options& options,
   if (attn_tp_size < 1) {
     return "NPU CP requires attn_tp_size >= 1";
   }
-  // kv_split_size defaults to cp_size (KV sharded across CP ranks with
-  // prefix AllGather); any divisor of cp_size is allowed. kv_split_size
-  // == 1 (full KV replica per rank, skip AllGather) is also valid.
   const int32_t kv_split =
       ParallelConfig::get_instance().kv_split_size_effective();
   if (kv_split < 1 || options.cp_size() % kv_split != 0) {

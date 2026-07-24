@@ -540,12 +540,7 @@ void NpuDeepseekV32DecoderLayerImpl::initialize_basic_parameters(
        ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) &&
       ::xllm::ParallelConfig::get_instance().cp_size() > 1 && is_prefill) {
     param.enablePrefixCacheCP = true;
-    // When kv_split_size collapses to 1 (each CP rank owns a full KV replica)
-    // the ATB prefix AllGather is replaced by an identity reshape so the
-    // downstream SparseFlashAttention input contract stays unchanged.
-    // See `sparse_latent_attention.cpp::AddPrefixConcatCpNode` and S6 in the
-    // KV-split / CP decoupling plan. The default (kv_split_size == cp_size)
-    // keeps this false, preserving behavior byte-for-byte.
+    // kv_split_size==1: skip prefix AllGather (identity reshape).
     param.enablePrefixCacheLocal =
         (parallel_args.kv_split_size_effective() == 1);
   }

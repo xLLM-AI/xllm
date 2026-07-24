@@ -366,10 +366,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     }
     if (!input.input_params.meta.batch_forward_type.is_decode() &&
         !is_spec_draft_) {
-      // Target prefill keeps the full hidden in `embeddings` for the draft
-      // input_embedding. Model-side CP has already restored global-real order
-      // after the last decoder layer, so `embeddings` is the full global-real
-      // hidden and can be indexed directly by selected_token_idxes.
+      // Target prefill: keep full embeddings (global-real under model-side CP).
       output.sample_output.embeddings = embeddings;
     } else if (sampling_params.selected_token_idxes.defined()) {
       output.sample_output.embeddings = embeddings.index_select(

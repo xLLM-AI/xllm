@@ -52,10 +52,7 @@ class Platform final {
 #endif
   }
 
-  // Model-side CP pipeline: input shard after embedding and output
-  // gather+restore after the last decoder layer, so the scheduler/worker/MTP
-  // no longer special-case CP. MLU has always done this; NPU now does too via
-  // NpuCpPlan.
+  // Model-side CP: shard after embed, gather+restore before LM head.
   static constexpr bool uses_model_cp_sharding() {
     return is_mlu() || is_npu();
   }

@@ -158,22 +158,13 @@ struct ParallelArgs {
     return (rank_ % (cp_size_ * tp_sz)) / tp_sz;
   }
 
-  // KV-cache split width. 0 == "follow cp_size" (legacy). Use
-  // `kv_split_size_effective()` instead of reading the raw value when computing
-  // strides / block sizes; the raw setter is kept so the engine can override
-  // the per-instance value (e.g. PD link negotiation) without touching gflags.
+  // 0 means follow cp_size; prefer kv_split_size_effective().
   PROPERTY(int32_t, kv_split_size) = 0;
 
-  // Effective KV split width: kv_split_size_ if explicitly set, otherwise
-  // cp_size_. When this equals 1 with cp_size_ > 1, each CP rank holds a
-  // complete KV replica and the ATB prefix AllGather can be skipped.
   [[nodiscard]] int32_t kv_split_size_effective() const noexcept {
     return kv_split_size_ > 0 ? kv_split_size_ : cp_size_;
   }
 
-  // KV-split rank: global rank block index over world_size / kv_split_size.
-  // Aligns with MappingNPU::get_kv_split_group (get_dp_group stride) and ATB
-  // kvSplitInfo.rankIds ordering used by the prefix AllGather.
   [[nodiscard]] int32_t kv_split_rank() const noexcept {
     const int32_t kv = kv_split_size_effective();
     if (kv <= 1) {
@@ -218,12 +209,7 @@ struct ParallelArgs {
   ProcessGroup* lm_head_group_ = nullptr;
   ProcessGroup* encoder_dp_group_ = nullptr;
   ProcessGroup* single_rank_group_ = nullptr;
-  // Context-parallel communication group used by prefill attention.
-  // For NPU ATB this is a standalone c10d_npu::ProcessGroupHCCL orthogonal to
-  // the TP group (created in CollectiveCommunicator::create_process_groups),
-  // so the model-side CP pipeline can allgather hidden states across CP ranks.
-  // For the MLU model-side CP path, CP still spans the full DP-local rank set,
-  // so this aliases the TP group there.
+  // CP ProcessGroup for prefill AllGather (NPU standalone; MLU aliases TP).
   ProcessGroup* cp_group_ = nullptr;
   ProcessGroup* moe_ep_group_ = nullptr;
   ProcessGroup* moe_tp_group_ = nullptr;

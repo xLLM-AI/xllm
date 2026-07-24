@@ -843,9 +843,7 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
       }
     }
 
-    // Build the NPU model-side CP plan after every consumer of the global
-    // attention metadata (MLA prefix cache, linear attention) has run, so they
-    // still see the global view. No-op when CP is disabled.
+    // CP prepare after global attention-meta consumers.
     processed_input.input_params.parallel.cp_plan.prepare(
         processed_input, npu_cp_plan_runtime_config());
 

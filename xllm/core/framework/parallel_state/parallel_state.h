@@ -68,13 +68,7 @@ torch::Tensor reduce(torch::Tensor& input, ProcessGroup* process_group);
 torch::Tensor reduce_scatter(const torch::Tensor& input,
                              ProcessGroup* process_group);
 
-// Compute the global ranks that share the current rank's CP group.
-// Rank layout: dp_rank * (cp_size * attn_tp_size) + cp_rank * attn_tp_size +
-// tp_rank, where attn_tp_size = world_size / (dp_size * cp_size). The returned
-// ranks are ordered by CP rank (0..cp_size-1), so the position of `global_rank`
-// in the vector is its CP rank. Used to build a standalone CP process group
-// that is orthogonal to the TP group and coexists with ATB-managed
-// communicators.
+// Global ranks in this rank's CP group, ordered by CP rank.
 std::vector<int32_t> compute_cp_group_ranks(int32_t global_rank,
                                             int32_t world_size,
                                             int32_t dp_size,

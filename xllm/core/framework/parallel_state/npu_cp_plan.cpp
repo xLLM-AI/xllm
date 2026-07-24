@@ -204,16 +204,8 @@ std::pair<torch::Tensor, torch::Tensor> generate_k_gather_index(
   return {prev_tensor, next_tensor};
 }
 
-// Build the per-rank prefix geometry shared by prefix slot preparation and
-// attention gather-index construction:
-//   - real_len[i] = (kv_cache_tokens_per_seq[i] / cp_size / block_size) *
-//   block_size
-//   - cache_len[i] = real_len[i] if real_len[i] > 0 else 1   (1-slot padding)
-//   - offset_in_rank[i] = sum_{k<i} cache_len[k]
-//   - rank_block_size  = sum_i cache_len[i]
-// Real vs cache len is the source of truth for whether a seq's ctx tokens
-// actually exist in `prefix_kv_allgather` (real_len == 0 means only the
-// padding slot is present and must not appear in the gather result).
+// Prefix geometry: real_len / cache_len(+1 pad) / offset_in_rank /
+// rank_block_size.
 struct PrefixRankGeometry {
   std::vector<int32_t> real_len_in_rank;
   std::vector<int32_t> cache_len_in_rank;
@@ -287,16 +279,7 @@ torch::Tensor build_prefix_cache_slots(
   return torch::tensor(prefix_cache_slots, torch::kInt32);
 }
 
-// Gather index over `intermediate_kv` (current segment of `merged_kv`, which
-// is per-seq grouped after `kv_reorder_indices` reorder; each seq occupies
-// `cp_size * input_lengths[i]` slots). Offsets are local to the current
-// segment (start at 0). `merge_context_and_current_k_gather_index` rebases
-// them onto `merged_kv` by adding the prefix segment total length.
-//
-// current_lengths_kv_cp_prev[i] = max(0, actual_seq_lengths_kv_cp_prev[i]
-//                                       - per_rank_prefix_tokens[i] * cp_size)
-// current_lengths_kv_cp_next[i] = max(0, actual_seq_lengths_kv_cp_next[i]
-//                                       - per_rank_prefix_tokens[i] * cp_size)
+// Current-segment K gather indices (local offsets; rebased in merge).
 std::pair<torch::Tensor, torch::Tensor> generate_current_k_gather_index(
     const torch::Tensor& current_lengths_kv_cp_prev,
     const torch::Tensor& current_lengths_kv_cp_next,
@@ -338,21 +321,8 @@ std::pair<torch::Tensor, torch::Tensor> generate_current_k_gather_index(
       torch::tensor(next_idx, torch::dtype(torch::kInt32).device(torch::kCPU))};
 }
 
-// Gather index over `prefix_kv_allgather` (prefix segment of `merged_kv`,
-// which is rank-grouped after AllGather: kv_split_size rank segments back-
-// to-back, each segment = concat of per-rank prefix slices over all seqs,
-// including 1-token padding slots for prefix-less seqs).
-//
-// For each seq with a real prefix, this emits its full prefix by stitching
-// the same `cache_len_in_rank` slice from each of the kv_split_size rank
-// segments. Prefix-less seqs are skipped entirely so their padding slots
-// never appear in the gather output.
-//
-// prev and next halves both attend to the full prefix, so this function
-// returns the same tensor (cloned) for the two output slots.
-//
-// Prefix geometry is shard-aligned, so this takes `kv_split_size` rather than
-// `cp_size`.
+// Prefix-segment gather: stitch per-rank slices across kv_split_size; skip
+// pad-only seqs.
 std::pair<torch::Tensor, torch::Tensor> generate_context_k_gather_index(
     const std::vector<int32_t>& kv_cache_tokens_per_seq,
     int32_t kv_split_size,
@@ -364,9 +334,7 @@ std::pair<torch::Tensor, torch::Tensor> generate_context_k_gather_index(
   std::vector<int32_t> ctx_idx;
   for (int64_t i = 0; i < n; ++i) {
     if (geom.real_len_in_rank[i] == 0) {
-      // Prefix-less seq: only the padding slot lives in merged_kv's prefix
-      // segment and it must not be gathered.
-      continue;
+      continue;  // pad-only prefix slot; do not gather.
     }
     for (int64_t j = 0; j < kv_split_size; ++j) {
       std::vector<int32_t> prefix_range(geom.cache_len_in_rank[i]);
@@ -382,16 +350,8 @@ std::pair<torch::Tensor, torch::Tensor> generate_context_k_gather_index(
   return {tensor, tensor.clone()};
 }
 
-// Stitch the per-seq context (prefix) and current slices into the final
-// gather indices over `merged_kv`. The final layout is per-seq interleaved:
-//   prev: |ctx_0|cur_0_prev|ctx_1|cur_1_prev|...|
-//   next: |ctx_0|cur_0_next|ctx_1|cur_1_next|...|
-// where ctx_i is empty for prefix-less seqs.
-//
-// Context indices are taken verbatim from history_* (already absolute
-// offsets into merged_kv's prefix segment). Current indices are local to
-// the current segment so we rebase them by adding the prefix total length
-// (= rank_block_size * cp_size).
+// Interleave ctx+current gather indices; rebase current by prefix_total_len.
+// Prefix uses kv_split_size; current uses token-CP cp_size.
 std::pair<torch::Tensor, torch::Tensor>
 merge_context_and_current_k_gather_index(
     const torch::Tensor& current_prev_kv_gather_indices,
@@ -404,10 +364,6 @@ merge_context_and_current_k_gather_index(
     const std::vector<int32_t>& kv_cache_tokens_per_seq,
     int32_t kv_split_size,
     int32_t block_size) {
-  // NOTE: `kv_split_size` (was `cp_size`) only governs the PREFIX-segment
-  // geometry: rank stride for AllGather slices and `prefix_total_len`. The
-  // CURRENT-segment indices passed in via current_k_gather_index_* are
-  // generated upstream with token-CP cp_size, so the two widths can differ.
   CHECK_EQ(input_lengths.dim(), 1) << "input_lengths must be 1D";
   CHECK_EQ(current_lengths_kv_cp_prev.dim(), 1)
       << "current_lengths_kv_cp_prev must be 1D";
@@ -508,12 +464,7 @@ CpAttentionMeta build_attention_tensor_meta(
 
   auto gather_index_prev = (input_lengths_cumsum_cp_prev - 1).to(torch::kLong);
   auto gather_index_next = (input_lengths_cumsum_cp_next - 1).to(torch::kLong);
-  // Guard zero-length seqs: input_lengths[i] == 0 -> cumsum_cp_prev/next == 0
-  // -> gather_index == -1, out of range for index_select. Clamp to 0; the seq
-  // contributes no prev/next KV and downstream actual_seq_lengths == 0 masks
-  // the bogus position_ids[0] lookup away. (For local_padded-based inputs a
-  // zero length only occurs when the seq has no real token, which the batch
-  // builder rejects before reaching here; this is purely defensive.)
+  // Clamp empty-seq gather_index to 0 (defensive).
   gather_index_prev = torch::clamp(gather_index_prev, /*min=*/0);
   gather_index_next = torch::clamp(gather_index_next, /*min=*/0);
   auto position_ids_prev = position_ids.index_select(0, gather_index_prev) + 1;
@@ -522,17 +473,10 @@ CpAttentionMeta build_attention_tensor_meta(
   auto actual_seq_lengths_kv_cp_next = position_ids_next.to(torch::kInt32);
 
   if (have_prefix_slots) {
-    // Strip the per-seq full-prefix length from the SFA-logical KV lengths to
-    // obtain how much each seq's prev/next half needs from merged_kv's current
-    // segment. Prefix-less seqs get prefix_kv_len_total == 0 and fall through
-    // unchanged. Prefix slots and these gather indices share
-    // `compute_prefix_rank_geometry` as their source of truth.
+    // Subtract prefix KV length to get current-segment prev/next lengths.
     const int64_t n = input_lengths.numel();
     CHECK_EQ(static_cast<size_t>(n), kv_cache_tokens_per_seq.size())
         << "input_lengths must equal kv_cache_tokens_per_seq size";
-    // Prefix geometry is shard-aligned to `kv_split_size`, not cp_size:
-    //   per_rank_prefix_tokens = total_prefix / kv_split_size
-    //   prefix_kv_len_total    = per_rank_prefix * kv_split_size
     const auto geom = compute_prefix_rank_geometry(
         kv_cache_tokens_per_seq, kv_split_size, block_size);
     auto prev_total_data = actual_seq_lengths_kv_cp_prev.data_ptr<int32_t>();

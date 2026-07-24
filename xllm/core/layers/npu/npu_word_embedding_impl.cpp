@@ -30,13 +30,7 @@ void NpuWordEmbeddingImpl::param_from_args(
 
   if (parallel_args.world_size() > 1) {
     if (parallel_args.mapping_data().empty()) {
-      // Model-side CP: embedding runs BEFORE localize, so it sees the full
-      // sequence and must be CP-unaware but DP-aware. Shard across the
-      // dp-local-TP group (world / dp_size = cp_size * tp_size) — the full TP
-      // width within one DP, spanning all CP ranks in that DP — instead of the
-      // CP-local TP (dp_local_tp_size_, size tp). This avoids replicating the
-      // embedding weight across CP ranks. When cp_size == 1 this collapses to
-      // tp_size, so non-CP runs are unchanged.
+      // Shard embed on dp-local TP (cp*tp); runs before CP localize.
       const bool use_cp_unaware_tp = (dp_size_ > 1) || (cp_size_ > 1);
       const int32_t cp_unaware_tp_size = parallel_args.world_size() / dp_size_;
       if (use_cp_unaware_tp) {
@@ -53,10 +47,7 @@ void NpuWordEmbeddingImpl::param_from_args(
       param.tensorParallelInfo.backend =
           ::xllm::ParallelConfig::get_instance().communication_backend();
     } else {
-      // Mapping (ATB) path: use the dedicated WORD_EMBED_TP group, which
-      // MappingNPU builds as the dp-local-TP group (size cp*tp). Do NOT use
-      // ATTN_TP (size tp, CP-local) — that would replicate the embedding
-      // weight across CP ranks. See mapping_npu.cpp parse_parallel_info().
+      // Use WORD_EMBED_TP (dp-local), not ATTN_TP.
       atb_speed::common::ParallelInfo parallelInfo =
           parallel_args.mapping().Get(atb_speed::base::WORD_EMBED_TP);
       param.tensorParallelInfo.rank = parallelInfo.rank;

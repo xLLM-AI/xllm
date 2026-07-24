@@ -98,10 +98,7 @@ LLMEngine::LLMEngine(const runtime::Options& options,
   dp_local_size_ = worker_clients_num_ / dp_size_;
   const bool use_model_sharding =
       cp_size_ > 1 && Platform::uses_model_cp_sharding();
-  // MLU model-side CP overlaps the CP and TP rank sets (cp_size == world_size,
-  // tp_size == 1), so all DP-local ranks form the effective TP execution width.
-  // NPU model-side CP uses orthogonal CP x TP (world_size = dp_size * cp_size *
-  // attn_tp_size), so the effective TP width is dp_local_size_ / cp_size_.
+  // Effective TP: MLU=dp_local; NPU=dp_local/cp_size.
   const bool mlu_overlap = use_model_sharding && Platform::is_mlu();
   dp_local_tp_size_ = mlu_overlap ? dp_local_size_ : dp_local_size_ / cp_size_;
 
@@ -538,10 +535,7 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
   kv_cache_shape.print_shapes();
 
   // initialize block manager
-  // Logical block size = physical block_size * kv_split_size. When kv_split is
-  // off (kv_split_size == 1) this collapses back to plain block_size so each
-  // CP rank reserves slots for the full KV - that is the price we pay for
-  // skipping the prefix AllGather.
+  // Logical block_size *= kv_split_size.
   const int32_t kv_split_size_eff =
       ::xllm::ParallelConfig::get_instance().kv_split_size_effective();
   BlockManagerPool::Options options;
@@ -989,9 +983,7 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
   std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;
   futures.reserve(worker_clients_num_);
 
-  // Model-side CP (NPU/MLU) localizes hidden after embedding and restores
-  // global-real order after the last decoder layer, so the engine hands the
-  // full global token stream to each worker unchanged.
+  // Engine sends full global tokens; model-side CP shards inside the worker.
   for (auto worker_rank = 0; worker_rank < worker_clients_num_; ++worker_rank) {
     const int32_t dp_rank = worker_rank / dp_local_size_;
     futures.emplace_back(worker_clients_[worker_rank]->step_remote_async(

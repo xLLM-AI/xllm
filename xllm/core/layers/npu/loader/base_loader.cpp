@@ -319,11 +319,7 @@ void BaseLoader::set_weight_with_padding(const StateDict& state_dict,
 
 int64_t BaseLoader::get_padded_vocab_size(const ModelContext& context) const {
   int64_t vocab_size = context.get_model_args().vocab_size();
-  // The LM head is sharded across the dp-local-TP group (world / dp_size =
-  // cp_size * tp_size, CP-unaware but DP-aware), so the vocab must be padded to
-  // a multiple of that width — not the CP-local TP (dp_local_tp_size_, size
-  // tp). This helper is only used by the LM head loader. When cp_size == 1 this
-  // collapses to tp_size, so non-CP runs are unchanged.
+  // Pad LM-head vocab to dp-local TP (world/dp_size).
   int32_t local_tp_size = parallel_args_.world_size() / dp_size_;
   if (vocab_size > 0 && local_tp_size > 1 && vocab_size % local_tp_size != 0) {
     return ((vocab_size + local_tp_size - 1) / local_tp_size) * local_tp_size;

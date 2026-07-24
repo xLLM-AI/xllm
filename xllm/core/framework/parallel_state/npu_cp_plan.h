@@ -63,10 +63,7 @@ struct CpPlanConfig {
   torch::ScalarType dtype = torch::kFloat;
 };
 
-// Worker-resolved, per-instance configuration handed to NpuCpPlan::prepare().
-// Static for the lifetime of a worker instance: the enabled decision, the typed
-// plan config, the CP process group for the output AllGather, and the
-// prefix-slot flag.
+// Per-worker static inputs for NpuCpPlan::prepare().
 struct CpPlanRuntimeConfig {
   bool enabled = false;
   CpPlanConfig plan_config;
@@ -157,26 +154,17 @@ class NpuCpPlan final {
     return output_merge_meta_;
   }
 
-  // Request-level CP preparation, called once per forward after every consumer
-  // of the global attention metadata (MLA prefix cache, linear attention) has
-  // run. No-op when disabled (non-CP model, cp_size == 1, decode, or a
-  // composite worker that does not own the build); otherwise builds the plan in
-  // place, converts LOGICAL_REAL cache slots to recovered-physical, and
-  // rewrites the attention metadata to the per-rank local-padded view.
+  // Build CP plan and localize attention meta after global-meta consumers.
   void prepare(ForwardInput& processed_input,
                const CpPlanRuntimeConfig& runtime_config);
 
-  // In-place input localization: rewrites hidden_states to the rank-local
-  // padded layout and position_ids to the per-rank local position ids. No-op
-  // when the plan is disabled, so callers guard with `if (cp_plan.enabled())`.
+  // Rewrite hidden/positions to the rank-local padded layout in place.
   void shard_model_input(torch::Tensor& hidden_states,
                          torch::Tensor& position_ids) const;
-  // Produces the final recovered physical slot tensor consumed by the graph.
+  // Expand LOGICAL_REAL cache slots to recovered-physical layout.
   torch::Tensor prepare_cache_slots(
       const torch::Tensor& global_logical_slots) const;
-  // Restores global-real order from the rank-major gathered buffer, using the
-  // process group bound at prepare()/set_process_group() time. No-op when the
-  // plan is disabled.
+  // AllGather then restore global-real order via the prepare()-bound cp_group.
   torch::Tensor merge_model_output(
       const torch::Tensor& local_hidden_states) const;
 

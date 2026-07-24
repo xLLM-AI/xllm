@@ -59,12 +59,8 @@ using QuantArgsLoader =
 using TokenizerArgsLoader =
     std::function<bool(const JsonReader& json, TokenizerArgs* args)>;
 
-// Model-side context-parallel sharding mode advertised by a registered model.
-//   NONE      - model does not implement the NPU model-side CP pipeline; the
-//               worker must not hand it an enabled NpuCpPlan.
-//   NPU_MODEL - model localizes hidden after embedding and restores
-//               global-real order after the last decoder layer (NPU ATB
-//               model-side CP). Only valid on NPU + ATB + dp_size == 1.
+// Model-advertised CP mode: NONE or NPU_MODEL (shard after embed / merge
+// before LM head).
 enum class CpShardingMode : int8_t {
   NONE = 0,
   NPU_MODEL = 1,
