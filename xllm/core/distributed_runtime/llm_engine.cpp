@@ -1221,6 +1221,8 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
   for (auto dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
     batched_inputs[dp_rank].input_params.parallel.dp_global_token_nums =
         dp_global_token_nums;
+    batched_inputs[dp_rank].input_params.parallel.raw_dp_global_token_nums =
+        dp_global_token_nums;
     batched_inputs[dp_rank].input_params.parallel.dp_is_decode = dp_is_decode;
     if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
       batched_inputs[dp_rank].input_params.expert.eplb_info = eplb_info;

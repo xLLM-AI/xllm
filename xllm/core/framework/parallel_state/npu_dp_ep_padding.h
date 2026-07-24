@@ -55,6 +55,7 @@ struct DpEpPaddingData {
 class DpEpPadding {
  public:
   DpEpPadding(torch::Tensor token_size_per_dp_group,
+              torch::Tensor raw_token_size_per_dp_group,
               int32_t num_experts_per_tok,
               const nlohmann::json& mapping_npu,
               at::Device device,
@@ -88,6 +89,7 @@ class DpEpPadding {
   int64_t input_ids_len_;
   int64_t max_dp_batch_size_;
   int64_t max_token_size_per_dp_group_;
+  torch::Tensor raw_token_size_per_dp_group_;
   torch::Tensor token_size_per_dp_group_startid_;
 
   torch::Tensor ffn_padding_idx_;
