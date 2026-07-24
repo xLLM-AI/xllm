@@ -92,6 +92,7 @@ else()
       :config
       :xllm_server
       :master
+      :util
       absl::strings
       Boost::serialization
       gflags::gflags

@@ -62,6 +62,16 @@ struct RequestParams {
                 const std::string& x_rid,
                 const std::string& x_rtime);
 
+  // When neither the x-request-id header nor the request body supplied a client
+  // request id, fall back to `fallback` (the Call's generated trace id) so the
+  // logs, the verbose trace and the echoed response header all share one id.
+  // No-op when an id is already present.
+  void set_x_request_id_if_absent(const std::string& fallback) {
+    if (x_request_id.empty()) {
+      x_request_id = fallback;
+    }
+  }
+
   bool verify_params(OutputCallback callback) const;
 
   // request id

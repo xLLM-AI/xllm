@@ -18,6 +18,7 @@ limitations under the License.
 #include <google/protobuf/service.h>
 
 #include <functional>
+#include <utility>
 
 #include "butil/macros.h"
 
@@ -26,6 +27,13 @@ namespace xllm {
 // RAII: Call Run() of the closure on destruction.
 class ClosureGuard {
  public:
+  using DoneCallback = std::function<void(void*)>;
+
+  struct AsyncClosure {
+    google::protobuf::Closure* done = nullptr;
+    DoneCallback after_done;
+  };
+
   ClosureGuard()
       : _done(nullptr), _before_done([](void*) {}), _after_done([](void*) {}) {}
 
@@ -60,6 +68,16 @@ class ClosureGuard {
     google::protobuf::Closure* const prev_done = _done;
     _done = nullptr;
     return prev_done;
+  }
+
+  // Transfer both the closure and its completion callback to an asynchronous
+  // owner. The callback must be run by that owner when the operation actually
+  // completes, before running done.
+  AsyncClosure release_for_async() {
+    AsyncClosure released{_done, std::move(_after_done)};
+    _done = nullptr;
+    _after_done = [](void*) {};
+    return released;
   }
 
   // True if no closure inside.

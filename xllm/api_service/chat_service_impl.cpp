@@ -525,7 +525,7 @@ void ChatServiceImpl::process_rec_chat_request(std::shared_ptr<ChatCall> call) {
   }
 
   RequestParams request_params(
-      rpc_request, call->get_x_request_id(), call->get_x_request_time());
+      rpc_request, call->x_request_id(), call->x_request_time());
 
   // Build messages from rpc request (inline code, not extracted to helper)
   std::vector<Message> messages;
@@ -755,7 +755,7 @@ void ChatServiceImpl::process_async_impl(std::shared_ptr<ChatCall> call) {
   }
 
   RequestParams request_params(
-      rpc_request, call->get_x_request_id(), call->get_x_request_time());
+      rpc_request, call->x_request_id(), call->x_request_time());
   std::vector<Message> messages;
   messages.reserve(rpc_request.messages_size());
   for (const auto& message : rpc_request.messages()) {
@@ -911,7 +911,7 @@ void MMChatServiceImpl::process_async_impl(std::shared_ptr<MMChatCall> call) {
   }
 
   RequestParams request_params(
-      rpc_request, call->get_x_request_id(), call->get_x_request_time());
+      rpc_request, call->x_request_id(), call->x_request_time());
 
   std::vector<Message> messages;
   if (!mm_service_utils::build_messages<MMChatCall>(

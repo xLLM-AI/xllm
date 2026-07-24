@@ -658,7 +658,7 @@ void AnthropicServiceImpl::process_async_impl(
 
   // Build request parameters
   RequestParams request_params(
-      rpc_request, call->get_x_request_id(), call->get_x_request_time());
+      rpc_request, call->x_request_id(), call->x_request_time());
 
   // Build messages
   std::vector<Message> messages = build_messages(rpc_request);

@@ -27,8 +27,11 @@ limitations under the License.
 
 #include "anthropic.pb.h"
 #include "api_service/anthropic_json.h"
+#include "api_service/api_error.h"
 #include "api_service/call.h"
 #include "core/common/types.h"
+#include "core/util/closure_guard.h"
+#include "core/util/verbose_trace_logger.h"
 
 namespace xllm {
 
@@ -42,8 +45,54 @@ class StreamCall : public Call {
              ::google::protobuf::Closure* done,
              Request* request,
              Response* response,
-             bool use_arena = false)
-      : Call(controller),
+             bool use_arena = false,
+             bool is_http_request = false)
+      : StreamCall(controller,
+                   done,
+                   request,
+                   response,
+                   use_arena,
+                   is_http_request,
+                   {}) {}
+
+  StreamCall(brpc::Controller* controller,
+             ClosureGuard::AsyncClosure async_closure,
+             Request* request,
+             Response* response,
+             bool use_arena = false,
+             bool is_http_request = false)
+      : StreamCall(controller,
+                   async_closure.done,
+                   request,
+                   response,
+                   use_arena,
+                   is_http_request,
+                   std::move(async_closure.after_done)) {}
+
+  ~StreamCall() override {
+    complete_request();
+    // For non stream response, call brpc done Run
+    if (!stream_) {
+      done_->Run();
+    }
+    if (!use_arena_) {
+      delete request_;
+      delete response_;
+    }
+  }
+
+ private:
+  StreamCall(brpc::Controller* controller,
+             ::google::protobuf::Closure* done,
+             Request* request,
+             Response* response,
+             bool use_arena,
+             bool is_http_request,
+             CompletionCallback completion_callback)
+      : Call(controller,
+             request_body_x_request_id(request),
+             is_http_request,
+             std::move(completion_callback)),
         done_(done),
         request_(request),
         response_(response),
@@ -69,17 +118,7 @@ class StreamCall : public Call {
     json_options_.jsonify_empty_array = true;
   }
 
-  ~StreamCall() override {
-    // For non stream response, call brpc done Run
-    if (!stream_) {
-      done_->Run();
-    }
-    if (!use_arena_) {
-      delete request_;
-      delete response_;
-    }
-  }
-
+ public:
   bool write_and_finish(Response& response) {
     butil::IOBufAsZeroCopyOutputStream json_output(
         &controller_->response_attachment());
@@ -88,18 +127,28 @@ class StreamCall : public Call {
             response, &json_output, json_options_, &err_msg)) {
       return finish_with_error(StatusCode::UNKNOWN, err_msg);
     }
+    XLLM_VERBOSE_TRACE() << "event=request_completed http=200 x-request-id="
+                         << x_request_id();
     return true;
   }
 
-  bool finish_with_error(const StatusCode& code,
-                         const std::string& error_message) {
-    if (!stream_) {
+  virtual bool finish_with_error(const StatusCode& code,
+                                 const std::string& error_message) {
+    mark_request_failed();
+    if (!is_http_request()) {
       controller_->SetFailed(error_message);
-
+    } else if (!stream_) {
+      api_service::write_openai_error(
+          controller_, code, error_message, x_request_id());
     } else {
+      // The stream has already committed a 200 header, so the error can only be
+      // surfaced as a terminal SSE event carrying the OpenAI error envelope.
       io_buf_.clear();
-      io_buf_.append(error_message);
+      io_buf_.append("data: ");
+      io_buf_.append(api_service::make_openai_error_json(code, error_message));
+      io_buf_.append("\n\n");
       pa_->Write(io_buf_);
+      api_service::log_request_error(code, error_message, x_request_id());
     }
 
     return true;
@@ -128,6 +177,8 @@ class StreamCall : public Call {
     io_buf_.append("data: [DONE]\n\n");
 
     pa_->Write(io_buf_);
+    XLLM_VERBOSE_TRACE() << "event=request_completed http=200 x-request-id="
+                         << x_request_id();
     return true;
   }
 
@@ -170,15 +221,52 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
                 ::google::protobuf::Closure* done,
                 proto::AnthropicMessagesRequest* request,
                 proto::AnthropicMessagesResponse* response,
-                bool use_arena = false)
+                bool use_arena = false,
+                bool is_http_request = false)
       : StreamCall<proto::AnthropicMessagesRequest,
                    proto::AnthropicMessagesResponse>(controller,
                                                      done,
                                                      request,
                                                      response,
-                                                     use_arena) {}
+                                                     use_arena,
+                                                     is_http_request) {}
 
-  ~AnthropicCall() {}
+  AnthropicCall(brpc::Controller* controller,
+                ClosureGuard::AsyncClosure async_closure,
+                proto::AnthropicMessagesRequest* request,
+                proto::AnthropicMessagesResponse* response,
+                bool use_arena = false,
+                bool is_http_request = false)
+      : StreamCall<proto::AnthropicMessagesRequest,
+                   proto::AnthropicMessagesResponse>(controller,
+                                                     std::move(async_closure),
+                                                     request,
+                                                     response,
+                                                     use_arena,
+                                                     is_http_request) {}
+
+  ~AnthropicCall() override = default;
+
+  // Anthropic uses its own error envelope: a JSON object
+  // {"type":"error","error":{"type":...,"message":...}} for non-stream and an
+  // `error` SSE event for streaming responses.
+  bool finish_with_error(const StatusCode& code,
+                         const std::string& error_message) override {
+    this->mark_request_failed();
+    if (!this->stream_) {
+      api_service::write_anthropic_error(
+          this->controller_, code, error_message, this->x_request_id());
+    } else {
+      this->io_buf_.clear();
+      this->io_buf_.append("event: error\ndata: ");
+      this->io_buf_.append(
+          api_service::make_anthropic_error_json(code, error_message));
+      this->io_buf_.append("\n\n");
+      this->pa_->Write(this->io_buf_);
+      api_service::log_request_error(code, error_message, this->x_request_id());
+    }
+    return true;
+  }
 
   bool write_and_finish(proto::AnthropicMessagesResponse& response) {
     std::string json;
@@ -188,6 +276,8 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
       return this->finish_with_error(StatusCode::UNKNOWN, err_msg);
     }
     this->controller_->response_attachment().append(json);
+    XLLM_VERBOSE_TRACE() << "event=request_completed http=200 x-request-id="
+                         << this->x_request_id();
     return true;
   }
 

@@ -89,7 +89,7 @@ void ImageGenerationServiceImpl::process_async_impl(
 
   // create DiTRequestParams for image generation request
   DiTRequestParams request_params(
-      rpc_request, call->get_x_request_id(), call->get_x_request_time());
+      rpc_request, call->x_request_id(), call->x_request_time());
 
   auto saved_request_id = request_params.request_id;
   // schedule the request

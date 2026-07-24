@@ -55,6 +55,35 @@ DEFINE_int32(health_check_interval_ms,
              3000,
              "Worker health check interval in milliseconds.");
 
+DEFINE_bool(enable_verbose_trace_log,
+            false,
+            "Enable asynchronous verbose request-trace logging to a file. When "
+            "enabled, failed-request context and request lifecycle events are "
+            "written off the serving hot path by a background thread.");
+
+DEFINE_string(
+    verbose_trace_log_path,
+    "log/verbose_trace.log",
+    "Base file path for the verbose request-trace log. When nnodes is greater "
+    "than 1, _rank_<node_rank> is inserted before the final extension (for "
+    "example, log/verbose_trace_rank_2.log). Single-rank serving uses this "
+    "path "
+    "unchanged. Used only when verbose trace logging is enabled. Defaults to "
+    "log/verbose_trace.log, so it sits alongside node_<rank>.log.");
+
+DEFINE_int32(verbose_trace_log_max_size_mb,
+             1024,
+             "Max size in MiB of a single verbose request-trace log file "
+             "before it is rotated. Defaults to 1024 (1 GiB).");
+
+DEFINE_int32(
+    verbose_trace_log_max_files,
+    1000,
+    "Max number of verbose request-trace log files to keep per rank, including "
+    "the active file. Each rank rotates independently and removes its oldest "
+    "file once this many exist; this is not a deployment-wide limit. Defaults "
+    "to 1000.");
+
 namespace xllm {
 
 void ServiceConfig::from_flags() {
@@ -68,6 +97,10 @@ void ServiceConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(num_request_handling_threads);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(num_response_handling_threads);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(health_check_interval_ms);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_verbose_trace_log);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(verbose_trace_log_path);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(verbose_trace_log_max_size_mb);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(verbose_trace_log_max_files);
 }
 
 void ServiceConfig::from_json(const JsonReader& json) {
@@ -82,6 +115,10 @@ void ServiceConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(num_request_handling_threads);
   XLLM_CONFIG_ASSIGN_FROM_JSON(num_response_handling_threads);
   XLLM_CONFIG_ASSIGN_FROM_JSON(health_check_interval_ms);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_verbose_trace_log);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(verbose_trace_log_path);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(verbose_trace_log_max_size_mb);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(verbose_trace_log_max_files);
 }
 
 void ServiceConfig::append_config_json(
@@ -106,6 +143,14 @@ void ServiceConfig::append_config_json(
       config_json, default_config, num_response_handling_threads);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, health_check_interval_ms);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_verbose_trace_log);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, verbose_trace_log_path);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, verbose_trace_log_max_size_mb);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, verbose_trace_log_max_files);
 }
 
 ServiceConfig& ServiceConfig::get_instance() {
