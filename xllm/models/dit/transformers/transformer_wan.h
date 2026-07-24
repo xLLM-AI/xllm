@@ -813,6 +813,7 @@ class WanAttentionImpl : public torch::nn::Module {
       query = dit::tp_rms_norm(query, norm_q_, parallel_args_.dit_tp_group_);
       key = dit::tp_rms_norm(key, norm_k_, parallel_args_.dit_tp_group_);
     } else {
+      // Fused kernel for performance; per-op fp32 RMSNorm is more precise.
       query = std::get<0>(norm_q_->forward(query));
       key = std::get<0>(norm_k_->forward(key));
     }
@@ -1097,9 +1098,16 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
       timestep_proj =
           timesteps_proj_->forward(ts).view({-1, seq_len, time_freq_dim_});
     }
-    timestep_proj = timestep_proj.to(torch::kFloat32);
-    auto embed_dtype = encoder_hidden_states.dtype();
-    torch::Tensor temb = time_embedder_->forward(timestep_proj.to(embed_dtype));
+    torch::Tensor temb;
+    if (!DiTConfig::get_instance().dit_distill_enable()) {
+      // Non-distill: original fp32 round-trip before the time embedder.
+      timestep_proj = timestep_proj.to(torch::kFloat32);
+      auto embed_dtype = encoder_hidden_states.dtype();
+      temb = time_embedder_->forward(timestep_proj.to(embed_dtype));
+    } else {
+      // Distill: bf16-direct temb (fp32 round-trip gives no benefit).
+      temb = time_embedder_->forward(timestep_proj);
+    }
     torch::Tensor timestep_proj_out =
         time_proj_->forward(act_fn_->forward(temb));
     if (seq_len > 1) {
@@ -1640,7 +1648,6 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     } else {
       timestep_proj = timestep_proj.view({batch_size, 6, -1});
     }
-
     if (encoder_hidden_states_image_embedded.defined()) {
       encoder_hidden_states_embedded =
           torch::cat({encoder_hidden_states_image_embedded,
