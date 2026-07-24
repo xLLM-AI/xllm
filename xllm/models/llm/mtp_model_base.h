@@ -424,6 +424,9 @@ class MtpModelImplBase : public torch::nn::Module {
     LayerForwardAdapter forward_adapter(
         input_params.mtp_topk_state, mtp_layers_.size(), device_);
     for (size_t i = 0; i < mtp_layers_.size(); i++) {
+      if (!modified_input_params.synchronize_layer(static_cast<uint32_t>(i))) {
+        return ModelOutput();
+      }
 #if defined(USE_CUDA) || defined(USE_MUSA)
       attn_metadata.plan_info->layer_id = i;
 #endif

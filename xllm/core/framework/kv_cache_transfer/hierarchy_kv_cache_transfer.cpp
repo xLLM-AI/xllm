@@ -144,6 +144,16 @@ HierarchyKVCacheTransfer::HierarchyKVCacheTransfer(
 
   device_.set_device();
   device_.init_device_context();
+  build_device_block_type_map();
+  layer_batch_ranges_ = build_layer_batch_ranges(
+      options_.layers(), options_.layers_wise_copy_batchs());
+
+  if (options_.host_blocks_factor() > 1.0) {
+    batch_memcpy_ = create_batch_memcpy(device_);
+    CHECK(batch_memcpy_ != nullptr)
+        << "Host prefix cache requires a batch memcpy implementation.";
+  }
+
   load_threadpool_ = std::make_unique<ThreadPool>(
       /*num_threads=*/2,
       /*init_func=*/[this]() mutable { device_.set_device(); },
@@ -158,12 +168,7 @@ HierarchyKVCacheTransfer::HierarchyKVCacheTransfer(
     copy_stream_.enqueue(device_.get_stream_from_pool(TIMEOUT_MS));
   }
 
-  build_device_block_type_map();
-  layer_batch_ranges_ = build_layer_batch_ranges(
-      options_.layers(), options_.layers_wise_copy_batchs());
-
   if (options_.host_blocks_factor() > 1.0) {
-    batch_memcpy_ = create_batch_memcpy(device_);
     create_host_cache();
   }
 }
@@ -380,7 +385,8 @@ uint32_t HierarchyKVCacheTransfer::offload(
   }
 
   if (batch_memcpy_ == nullptr) {
-    return block_transfer_info.size();
+    LOG(ERROR) << "Offload to host failed: batch memcpy is not initialized.";
+    return 0;
   }
 
   Slice<BlockTransferInfo> slice(block_transfer_info);

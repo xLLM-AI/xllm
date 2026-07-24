@@ -496,6 +496,12 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
 }
 
 bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
+  const KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
+  check_host_cache_options(options_.host_blocks_factor(),
+                           options_.enable_graph(),
+                           options_.kv_cache_dtype(),
+                           kv_cache_config.indexer_cache_dtype());
+
   LOG(INFO) << "kv cache capacity: "
             << readable_size(kv_cache_cap.cache_size_in_bytes())
             << ", blocks: " << kv_cache_cap.n_blocks()

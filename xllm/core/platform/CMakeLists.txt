@@ -29,6 +29,7 @@ cc_library(
     sleepable_allocator.h
     batch_memcpy.h
     layer_synchronizer.h
+    $<$<BOOL:${USE_MLU}>:mlu/mlu_batch_memcpy.h>
     $<$<BOOL:${USE_MLU}>:mlu/mlu_layer_synchronizer.h>
     $<$<BOOL:${USE_MLU}>:mlu/mlu_tensor_alloc.h>
     $<$<BOOL:${USE_DCU}>:dcu/dcu_layer_synchronizer.h>
@@ -47,6 +48,7 @@ cc_library(
     sleepable_allocator.cpp
     batch_memcpy.cpp
     layer_synchronizer.cpp
+    $<$<BOOL:${USE_MLU}>:mlu/mlu_batch_memcpy.cpp>
     $<$<BOOL:${USE_MLU}>:mlu/mlu_layer_synchronizer.cpp>
     $<$<BOOL:${USE_MLU}>:mlu/mlu_tensor_alloc.cpp>
     $<$<BOOL:${USE_CUDA}>:cuda_profiler.cpp>
