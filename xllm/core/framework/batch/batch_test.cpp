@@ -431,6 +431,8 @@ TEST(BatchTest, OneRecXAttentionBuildsCrossBlockCacheMetadata) {
   group.sequences()[0]->add_kv_blocks(blocks);
   const std::vector<int32_t> expected_slots =
       group.sequences()[0]->kv_state().kv_cache_slots(0, encoder_tokens.size());
+  std::vector<int32_t> expected_padded_slots = expected_slots;
+  expected_padded_slots.resize(blocks.size() * block_size, -1);
 
   std::vector<SequencesGroup*> groups = {&group};
   std::vector<uint32_t> allowed_max_tokens = {
@@ -451,14 +453,17 @@ TEST(BatchTest, OneRecXAttentionBuildsCrossBlockCacheMetadata) {
                                             &thread_pool,
                                             &perf_cache);
 
+  const int32_t original_block_size = FLAGS_block_size;
+  FLAGS_block_size = block_size;
   ForwardInput input = builder.build_rec_forward_input(1, 0);
+  FLAGS_block_size = original_block_size;
   const auto* params = input.input_params.onerec_xattention_params();
   ASSERT_NE(params, nullptr);
   EXPECT_TRUE(equal<int64_t>(params->cross_attn_kv_cu_seq_lens, {5}));
   EXPECT_TRUE(
       equal<int32_t>(params->cross_attn_block_tables, expected_block_ids));
-  EXPECT_TRUE(
-      equal<int32_t>(params->cross_attn_new_cache_slots, expected_slots));
+  EXPECT_TRUE(equal<int32_t>(params->cross_attn_new_cache_slots,
+                             expected_padded_slots));
 }
 
 TEST(BatchTest, SampleRequestProcessesAllMatchedRawOutputs) {

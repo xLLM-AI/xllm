@@ -36,7 +36,15 @@ inline torch::Tensor pad_encoder_output(const torch::Tensor& encoder_output,
   const int64_t bs = onerec_params->bs;
   const int64_t hidden_size = encoder_output.size(1);
   const auto& seq_lens = onerec_params->encoder_seq_lens;
-  const int64_t max_seq_len = onerec_params->encoder_max_seq_len;
+  int64_t max_seq_len = onerec_params->encoder_max_seq_len;
+  if (input_params.onerec_xattention_params() != nullptr &&
+      onerec_params->cross_attn_block_tables.defined() &&
+      onerec_params->cross_attn_block_tables.dim() >= 2) {
+    CHECK_GT(FLAGS_block_size, 0);
+    max_seq_len = std::max<int64_t>(
+        max_seq_len,
+        onerec_params->cross_attn_block_tables.size(1) * FLAGS_block_size);
+  }
 
   CHECK_EQ(static_cast<int64_t>(seq_lens.size()), bs)
       << "encoder_seq_lens size mismatch.";
@@ -247,12 +255,19 @@ class OneRecStackImpl : public torch::nn::Module {
 
     const bool is_prefill =
         onerec_params->rec_stage == OneRecModelInputParams::RecStage::PREFILL;
-    auto [query_length, key_length] = compute_sequence_lengths(
-        input_params.q_max_seq_len, is_prefill, input_params);
-
     ModelInputParams input_params_local = input_params;
     auto& mutable_onerec_params = input_params_local.mutable_onerec_params();
     const auto* onerec_xattn_params = input_params.onerec_xattention_params();
+    const bool is_xattn_decode =
+        is_decoder_ && !is_prefill && onerec_xattn_params != nullptr;
+    int64_t query_length = 0;
+    int64_t key_length = 0;
+    if (!is_xattn_decode) {
+      const auto sequence_lengths = compute_sequence_lengths(
+          input_params.q_max_seq_len, is_prefill, input_params);
+      query_length = sequence_lengths.first;
+      key_length = sequence_lengths.second;
+    }
 
     auto validate_selected_token_idxes_stage = [&](const char* stage_name) {
       if (!is_decoder_ || onerec_xattn_params == nullptr ||
@@ -280,10 +295,13 @@ class OneRecStackImpl : public torch::nn::Module {
 
     const bool is_decode_stage = is_decoder_ && !is_prefill;
     torch::Tensor preprocessed_attn_mask;
-    if (!is_decoder_) {
+    // XAttention decode uses PA caches and device-side sequence metadata, so
+    // the block layer can use its fixed placeholder instead of a length-sized
+    // position-bias/mask tensor.
+    if (!is_xattn_decode && !is_decoder_) {
       preprocessed_attn_mask = get_or_create_encoder_attention_mask(
           query_length, key_length, h, input_params);
-    } else {
+    } else if (!is_xattn_decode) {
       torch::Tensor effective_attn_mask;
       if (use_absolute_position_embedding_) {
         const int64_t batch_size =

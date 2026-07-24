@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <cmath>
 #include <exception>
 #include <filesystem>
 #include <memory>
@@ -237,23 +238,29 @@ bool should_serialize_onerec_xattention_model_forward(int64_t max_concurrency) {
   return max_concurrency > 1 && serialize_onerec_xattention_model_forward();
 }
 
-uint32_t get_half_device_core_count(int32_t device_id, aclrtDevAttr attr) {
+uint32_t get_device_core_limit(int32_t device_id,
+                               aclrtDevAttr attr,
+                               double ratio) {
   int64_t core_count = 0;
   const aclError status =
       aclrtGetDeviceInfo(static_cast<uint32_t>(device_id), attr, &core_count);
   CHECK_EQ(status, ACL_SUCCESS)
       << "Failed to query NPU core count, attr=" << static_cast<int>(attr);
-  CHECK_GE(core_count, 2) << "NPU core count must be at least 2, attr="
+  CHECK_GT(core_count, 0) << "NPU core count must be positive, attr="
                           << static_cast<int>(attr);
-  return static_cast<uint32_t>(core_count / 2);
+  return std::max<uint32_t>(
+      1, static_cast<uint32_t>(std::floor(core_count * ratio)));
 }
 
 void configure_onerec_stream_resource_limit(int32_t device_id,
                                             aclrtStream stream) {
+  const double ratio = FLAGS_onerec_multistream_core_ratio;
+  CHECK(std::isfinite(ratio) && ratio > 0.0 && ratio <= 1.0)
+      << "--onerec_multistream_core_ratio must be in (0, 1], got " << ratio;
   const uint32_t cube_core_limit =
-      get_half_device_core_count(device_id, ACL_DEV_ATTR_CUBE_CORE_NUM);
+      get_device_core_limit(device_id, ACL_DEV_ATTR_CUBE_CORE_NUM, ratio);
   const uint32_t vector_core_limit =
-      get_half_device_core_count(device_id, ACL_DEV_ATTR_VECTOR_CORE_NUM);
+      get_device_core_limit(device_id, ACL_DEV_ATTR_VECTOR_CORE_NUM, ratio);
 
   CHECK_EQ(
       aclrtSetStreamResLimit(stream, ACL_RT_DEV_RES_CUBE_CORE, cube_core_limit),
@@ -263,6 +270,9 @@ void configure_onerec_stream_resource_limit(int32_t device_id,
                stream, ACL_RT_DEV_RES_VECTOR_CORE, vector_core_limit),
            ACL_SUCCESS)
       << "Failed to set OneRec stream Vector Core limit";
+  LOG(INFO) << "Configured OneRec stream core limits, ratio=" << ratio
+            << ", cube_cores=" << cube_core_limit
+            << ", vector_cores=" << vector_core_limit;
 }
 
 void use_onerec_stream_resource_limit(aclrtStream stream) {
@@ -1897,6 +1907,41 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
     round_params.rec_stage = OneRecModelInputParams::RecStage::DECODE;
     round_params.is_first_prefill = false;
     round_params.is_encoder_forward = false;
+#if defined(USE_NPU)
+    if (round == 1 && FLAGS_enable_graph) {
+      round_params.cross_attn_new_cache_slots = torch::Tensor();
+      CHECK_GT(FLAGS_block_size, 0);
+      const int64_t max_encoder_kv_len =
+          runtime_.context->get_model_args().max_position_embeddings();
+      CHECK_GT(max_encoder_kv_len, 0);
+      CHECK_LE(round_params.encoder_max_seq_len, max_encoder_kv_len);
+      const int64_t decode_block_table_len =
+          (max_encoder_kv_len + FLAGS_block_size - 1) / FLAGS_block_size;
+      const int64_t required_blocks =
+          (static_cast<int64_t>(round_params.encoder_max_seq_len) +
+           FLAGS_block_size - 1) /
+          FLAGS_block_size;
+
+      auto& cross_block_tables = round_params.cross_attn_block_tables;
+      CHECK(cross_block_tables.defined());
+      CHECK_EQ(cross_block_tables.dim(), 2);
+      CHECK_EQ(cross_block_tables.size(0), batch_size);
+      CHECK_GE(cross_block_tables.size(1), required_blocks);
+      if (cross_block_tables.size(1) < decode_block_table_len) {
+        auto padding =
+            torch::zeros({cross_block_tables.size(0),
+                          decode_block_table_len - cross_block_tables.size(1)},
+                         cross_block_tables.options());
+        cross_block_tables =
+            torch::cat({cross_block_tables, padding}, /*dim=*/1);
+      } else if (cross_block_tables.size(1) > decode_block_table_len) {
+        cross_block_tables =
+            cross_block_tables
+                .slice(/*dim=*/1, /*start=*/0, /*end=*/decode_block_table_len)
+                .contiguous();
+      }
+    }
+#endif
     if (round_params.current_round_tensor.defined()) {
       round_params.current_round_tensor.fill_(round);
     }

@@ -179,12 +179,12 @@ struct has_init_or_refresh_rolling_runtime<
 #endif
 
 template <typename T, typename = void>
-struct has_onerec_prefill_graph_support : std::false_type {};
+struct has_onerec_graph_support : std::false_type {};
 
 template <typename T>
-struct has_onerec_prefill_graph_support<
+struct has_onerec_graph_support<
     T,
-    std::void_t<decltype(std::declval<T>()->supports_onerec_prefill_graph())>>
+    std::void_t<decltype(std::declval<T>()->supports_onerec_graph())>>
     : std::true_type {};
 
 template <typename T, typename = void>

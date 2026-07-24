@@ -159,7 +159,7 @@ class OneRecModelImpl final : public torch::nn::Module {
     decoder_->merge_loaded_weights();
   }
 
-  bool supports_onerec_prefill_graph() const { return true; }
+  bool supports_onerec_graph() const { return true; }
 
   torch::Tensor get_onerec_graph_encoder_output() const {
     std::lock_guard<std::mutex> lock(encoder_output_mutex_);
@@ -286,8 +286,8 @@ class OneRecForConditionalGenerationImpl final
   explicit OneRecForConditionalGenerationImpl(const ModelContext& context)
       : RecForCausalLMImplBase<OneRecModel>(context) {}
 
-  bool supports_onerec_prefill_graph() const {
-    return this->model_->supports_onerec_prefill_graph();
+  bool supports_onerec_graph() const {
+    return this->model_->supports_onerec_graph();
   }
 
   torch::Tensor get_onerec_graph_encoder_output() const {

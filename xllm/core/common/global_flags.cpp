@@ -734,8 +734,12 @@ DEFINE_bool(enable_multistream_perf_mode,
             "forward serialization and enables thread-local ACLNN cache.");
 DEFINE_bool(enable_onerec_multistream_core_split,
             false,
-            "Limit each of two OneRec NPU worker streams to half of the device "
-            "Cube and Vector cores.");
+            "Limit each of two OneRec NPU worker streams to a configurable "
+            "ratio of device Cube and Vector cores.");
+DEFINE_double(onerec_multistream_core_ratio,
+              0.5,
+              "Ratio of device Cube and Vector cores available to each OneRec "
+              "NPU worker stream. Valid range: (0, 1].");
 
 namespace {
 

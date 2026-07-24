@@ -145,7 +145,7 @@ class CausalLM : public torch::nn::Module {
 
   virtual void reload_model_weights_from_device() { NOT_IMPLEMENTED(); }
 
-  virtual bool supports_onerec_prefill_graph() const { return false; }
+  virtual bool supports_onerec_graph() const { return false; }
 
   virtual torch::Tensor get_onerec_graph_encoder_output() const {
     return torch::Tensor();
@@ -329,11 +329,11 @@ class CausalLMImpl : public CausalLM {
 
   const torch::TensorOptions& options() const override { return options_; }
 
-  bool supports_onerec_prefill_graph() const override {
-    if constexpr (detail::has_onerec_prefill_graph_support<Model>::value) {
-      return model_->supports_onerec_prefill_graph();
+  bool supports_onerec_graph() const override {
+    if constexpr (detail::has_onerec_graph_support<Model>::value) {
+      return model_->supports_onerec_graph();
     }
-    return CausalLM::supports_onerec_prefill_graph();
+    return CausalLM::supports_onerec_graph();
   }
 
   torch::Tensor get_onerec_graph_encoder_output() const override {
