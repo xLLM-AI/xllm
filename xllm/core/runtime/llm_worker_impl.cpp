@@ -232,7 +232,24 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_for_schedule_overlap(
                                mutable_params.parallel.has_initial_state);
   }
 #endif
-  return execute_no_sync_on_stream(input, *compute_stream_);
+  std::optional<ForwardOutput> output =
+      execute_no_sync_on_stream(input, *compute_stream_);
+#if defined(USE_NPU)
+  // Single-process schedule overlap publishes this step's sample outputs to
+  // last_step_output_ for consumption by other threads (the engine-facing
+  // device->host copy in forward_output_to_raw runs on a folly executor thread
+  // with no NPU stream binding, and cannot be ordered against compute_stream_).
+  // The forward ran NO_SYNC, so without a barrier here those consumers race the
+  // still-running compute-stream kernels and read reused device memory, which
+  // aborts with an NPU MTE out-of-range error. Multi-process serializes through
+  // the RPC/shm response so it never hit this and keeps its overlap unchanged.
+  // Sync compute_stream_ before the output leaves this device-bound worker
+  // thread; the next step's prepare still overlaps on prepare_stream_.
+  if (options_.enable_single_process() && compute_stream_ != nullptr) {
+    compute_stream_->synchronize();
+  }
+#endif
+  return output;
 }
 
 ForwardInput

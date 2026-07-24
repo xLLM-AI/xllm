@@ -52,13 +52,20 @@ class DistributedConfig final {
     return kOptionCategory;
   }
 
-  PROPERTY(std::string, master_node_addr) = "127.0.0.1:19888";
+  PROPERTY(std::string, master_node_addr) = "";
 
   PROPERTY(std::string, xtensor_master_node_addr) = "127.0.0.1:19889";
 
   PROPERTY(int32_t, nnodes) = 1;
 
   PROPERTY(int32_t, node_rank) = 0;
+
+  // Run all local devices inside a single OS process (one worker thread per
+  // device, sharing one HcclCommInitAll world) instead of one process per
+  // device. Independent of master_node_addr: single-node single-process needs
+  // no master_node_addr, while a future multi-node single-process deployment
+  // would still use master_node_addr for inter-node rendezvous.
+  PROPERTY(bool, enable_single_process) = false;
 
   PROPERTY(std::string, etcd_addr);
 

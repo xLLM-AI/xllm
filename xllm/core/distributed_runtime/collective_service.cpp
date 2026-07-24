@@ -20,6 +20,8 @@ limitations under the License.
 
 #include <vector>
 
+#include "util/net.h"
+
 namespace xllm {
 
 CollectiveService::CollectiveService(int dp_group_num,
@@ -38,6 +40,27 @@ CollectiveService::CollectiveService(int dp_group_num,
     root_infos_.push_back(root_info);
   }
 #endif
+
+  // Pre-allocate free TCPStore ports for the worst-case communication group
+  // count. The communicator computes a slot index per group from
+  // (group_kind, group_index) — see ProcessGroupSlots in
+  // collective_communicator.cpp — which is bounded by total_num_ slots
+  // across the world/tp/single_rank/dp_local/moe_tp/moe_ep/encoder_dp
+  // sections. We over-allocate by a small constant to absorb future group
+  // additions; the unused ports are released right after binding.
+  //
+  // OS-allocated free ports avoid collisions with random outgoing TCP source
+  // ports inside the local ephemeral range (1024-65535 on common Linux
+  // hosts), which the previous "master_port + offset" scheme could not.
+  const int port_slot_count = std::max(1, 4 * total_num_ + 8);
+  group_ports_.reserve(port_slot_count);
+  for (int i = 0; i < port_slot_count; ++i) {
+    const int port = net::get_local_free_port();
+    CHECK_GT(port, 0) << "Failed to allocate free TCP port for process-group "
+                         "rendezvous; slot="
+                      << i;
+    group_ports_.push_back(port);
+  }
 }
 
 void CollectiveService::Sync(::google::protobuf::RpcController* controller,
@@ -55,6 +78,12 @@ void CollectiveService::Sync(::google::protobuf::RpcController* controller,
 #if defined(USE_NPU)
   to_proto_list(root_infos_, response);
 #endif
+  // Send the master-allocated ports to every worker. All ranks see the same
+  // ordered list, so each worker resolves its process-group slots to the
+  // same TCPStore endpoints the master will bind on.
+  for (const int port : group_ports_) {
+    response->add_group_ports(port);
+  }
 }
 
 std::unordered_map<int32_t, std::string> CollectiveService::wait() {

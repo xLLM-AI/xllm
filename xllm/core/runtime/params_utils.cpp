@@ -77,6 +77,154 @@ void proto_to_forward_output(const proto::ForwardOutput& pb_output,
   COUNTER_ADD(proto_latency_seconds_proto2o, timer.elapsed_seconds());
 }
 
+namespace {
+// Decode one already-CPU-resident Token plus its optional embedding vector into
+// a RawToken. Mirrors the field-by-field mapping the brpc path performs across
+// forward_output_to_proto -> proto_to_forward_output (logprob optionality,
+// top-k slices, per-token hidden-state embeddings), but without the proto.
+RawToken decode_raw_token(const Token& token,
+                          const torch::Tensor& token_embeddings) {
+  RawToken raw_token;
+  raw_token.id = token.id;
+  raw_token.logprob = token.logprob;
+  raw_token.top_tokens.assign(token.top_tokens.begin(), token.top_tokens.end());
+  raw_token.top_logprobs.assign(token.top_logprobs.begin(),
+                                token.top_logprobs.end());
+  if (token_embeddings.defined()) {
+    const float* ptr = token_embeddings.data_ptr<float>();
+    raw_token.embeddings.assign(
+        ptr, ptr + static_cast<size_t>(token_embeddings.size(0)));
+  }
+  return raw_token;
+}
+}  // namespace
+
+void forward_output_to_raw(const ForwardOutput& forward_output,
+                           RawForwardOutput& raw_forward_output) {
+  // Convert an in-process ForwardOutput directly into a RawForwardOutput.
+  // Single-node single-process mode has no transport between worker and engine,
+  // so instead of the wasteful forward_output_to_proto ->
+  // proto_to_forward_output serialize/deserialize round-trip, we decode the
+  // host-side tensors straight into the raw vectors. The decode reuses
+  // build_token (the same primitive the brpc path calls internally), so the
+  // result is byte-identical to what a RemoteWorker would have produced over
+  // brpc.
+  const auto& sample_output = forward_output.sample_output;
+  const auto& beam_search_output = forward_output.beam_search_output;
+
+  auto to_cpu = [](const torch::Tensor& t) -> torch::Tensor {
+    if (!t.defined() || t.device().is_cpu()) {
+      return t;
+    }
+    return t.to(torch::kCPU);
+  };
+
+  torch::Tensor next_tokens = to_cpu(sample_output.next_tokens);
+  torch::Tensor logprobs = to_cpu(sample_output.logprobs);
+  torch::Tensor top_tokens = to_cpu(sample_output.top_tokens);
+  torch::Tensor top_logprobs = to_cpu(sample_output.top_logprobs);
+  torch::Tensor embeddings = to_cpu(sample_output.embeddings);
+  torch::Tensor expert_load_data = to_cpu(forward_output.expert_load_data);
+  torch::Tensor src_seq_idxes = to_cpu(beam_search_output.src_seq_idxes);
+  torch::Tensor out_tokens = to_cpu(beam_search_output.out_tokens);
+  torch::Tensor out_logprobs = to_cpu(beam_search_output.out_logprobs);
+
+  // Per-sequence token outputs. num_seqs and the 1D/2D branch selection mirror
+  // forward_output_to_proto exactly.
+  int32_t num_seqs = next_tokens.size(0);
+  if (embeddings.defined() && embeddings.numel() > 0) {
+    num_seqs = std::max(num_seqs, static_cast<int32_t>(embeddings.size(0)));
+  }
+  raw_forward_output.outputs.reserve(num_seqs);
+  for (int32_t output_idx = 0; output_idx < num_seqs; ++output_idx) {
+    RawSampleOutput raw_seq_out;
+    if (next_tokens.dim() == 2) {
+      // Speculative decoding: one row per sequence, multiple tokens per row.
+      const auto curr_next_tokens = next_tokens[output_idx];
+      const auto curr_logprobs =
+          logprobs.defined() ? logprobs[output_idx] : logprobs;
+      const auto curr_top_tokens =
+          top_tokens.defined() ? top_tokens[output_idx] : top_tokens;
+      const auto curr_top_logprobs =
+          top_logprobs.defined() ? top_logprobs[output_idx] : top_logprobs;
+      const auto curr_embeddings =
+          embeddings.defined() ? embeddings[output_idx] : embeddings;
+
+      const int32_t num_tokens = curr_next_tokens.size(0);
+      raw_seq_out.tokens.reserve(num_tokens);
+      for (int32_t i = 0; i < num_tokens; ++i) {
+        const auto token = build_token(i,
+                                       curr_next_tokens,
+                                       curr_logprobs,
+                                       curr_top_tokens,
+                                       curr_top_logprobs);
+        if (token.id == -1) {
+          break;
+        }
+        const auto token_embeddings =
+            curr_embeddings.defined() ? curr_embeddings[i] : curr_embeddings;
+        raw_seq_out.tokens.emplace_back(
+            decode_raw_token(token, token_embeddings));
+      }
+    } else {
+      // Single token per sequence; embedding-only requests emit a -1
+      // placeholder token that still carries its embedding (no early break,
+      // matching proto).
+      Token token(-1);
+      if (next_tokens.defined() && next_tokens.numel() > 0) {
+        token = build_token(
+            output_idx, next_tokens, logprobs, top_tokens, top_logprobs);
+      }
+      const auto token_embeddings =
+          embeddings.defined() ? embeddings[output_idx] : embeddings;
+      raw_seq_out.tokens.emplace_back(
+          decode_raw_token(token, token_embeddings));
+    }
+    raw_forward_output.outputs.emplace_back(std::move(raw_seq_out));
+  }
+
+  // EPLB expert load + prepared_layer_id. The proto path only serializes these
+  // under enable_eplb(), so prepared_layer_id decodes to the proto3 default (0)
+  // when EPLB is off — preserve that exactly.
+  if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
+    raw_forward_output.prepared_layer_id = forward_output.prepared_layer_id;
+    if (expert_load_data.defined()) {
+      const auto flattened = expert_load_data.view({-1}).contiguous();
+      const int64_t* ptr = flattened.data_ptr<int64_t>();
+      raw_forward_output.expert_load_data.assign(
+          ptr, ptr + static_cast<size_t>(flattened.size(0)));
+    }
+  } else {
+    raw_forward_output.prepared_layer_id = 0;
+  }
+
+  // Beam search kernel output (flattened 1D tensors, assumed contiguous as in
+  // the proto path).
+  if (src_seq_idxes.defined() && src_seq_idxes.numel() > 0) {
+    const int32_t* ptr = src_seq_idxes.data_ptr<int32_t>();
+    raw_forward_output.src_seq_idxes.assign(
+        ptr, ptr + static_cast<size_t>(src_seq_idxes.numel()));
+  }
+  if (out_tokens.defined() && out_tokens.numel() > 0) {
+    const int32_t* ptr = out_tokens.data_ptr<int32_t>();
+    raw_forward_output.out_tokens.assign(
+        ptr, ptr + static_cast<size_t>(out_tokens.numel()));
+  }
+  if (out_logprobs.defined() && out_logprobs.numel() > 0) {
+    const float* ptr = out_logprobs.data_ptr<float>();
+    raw_forward_output.out_logprobs.assign(
+        ptr, ptr + static_cast<size_t>(out_logprobs.numel()));
+  }
+
+  // DiT images are already torch tensors on both sides, so the proto round-trip
+  // was pure overhead: just move them to host.
+  raw_forward_output.dit_forward_output.tensors.reserve(
+      forward_output.dit_forward_output.tensors.size());
+  for (const auto& t : forward_output.dit_forward_output.tensors) {
+    raw_forward_output.dit_forward_output.tensors.emplace_back(to_cpu(t));
+  }
+}
+
 void forward_output_to_proto(const torch::Tensor& next_tokens,
                              const torch::Tensor& logprobs,
                              const torch::Tensor& top_tokens,

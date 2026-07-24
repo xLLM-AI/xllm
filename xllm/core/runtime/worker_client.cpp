@@ -16,6 +16,7 @@ limitations under the License.
 #include "worker_client.h"
 
 #include <folly/Unit.h>
+#include <folly/executors/GlobalExecutor.h>
 #include <folly/futures/Future.h>
 #include <glog/logging.h>
 #include <torch/torch.h>
@@ -28,9 +29,30 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
+#include "runtime/params_utils.h"
 #include "util/timer.h"
 
+#if defined(USE_CUDA) || defined(USE_DCU)
+#include <c10/cuda/CUDAFunctions.h>
+#endif
+
 namespace xllm {
+
+WorkerClient::WorkerClient(Worker* w, const runtime::Options& options)
+    : worker_(w),
+      options_(options),
+      dispatch_threadpool_(
+          std::make_unique<ThreadPool>(/*num_threads=*/1,
+                                       /*cpu_binding=*/false,
+                                       /*pool_name=*/"WorkerClient.dispatch")) {
+  // Pin the dispatch thread to the worker's device so any CUDA driver calls
+  // issued during prepare (cudaHostAlloc, stream guards, etc.) operate on
+  // the right context without competing with the engine thread.
+  if (worker_ != nullptr) {
+    const Device dev = Device(worker_->device());
+    dev.set_device();
+  }
+}
 
 bool WorkerClient::init_model(const std::string& model_weights_path,
                               int32_t random_seed,
@@ -106,11 +128,107 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerClient::step_async(
   return worker_->step_async(input);
 }
 
+void WorkerClient::build_fake_overlap_output(
+    const ForwardInput& input,
+    RawForwardOutput& raw_output) const {
+  // Mirror WorkerService::step's overlap branch fake-token construction.
+  // The number of placeholder tokens equals the number of sampled sequences
+  // for this step (decode + any prefill-sampled seqs), read from
+  // sampling_params.sample_idxes. Packed engine inputs carry the layout in
+  // the host buffer, so unpack first when sample_idxes is not materialized.
+  int32_t num_samples = 0;
+  if (input.sampling_params.sample_idxes.defined()) {
+    num_samples =
+        static_cast<int32_t>(input.sampling_params.sample_idxes.size(0));
+  } else if (input.input_host_buffer_has_layout) {
+    ForwardInput unpacked_input;
+    const bool unpacked = detail::unpack_from_input_host_buffer(
+        input, torch::Device(torch::kCPU), unpacked_input);
+    if (unpacked && unpacked_input.sampling_params.sample_idxes.defined()) {
+      num_samples = static_cast<int32_t>(
+          unpacked_input.sampling_params.sample_idxes.size(0));
+    }
+  }
+
+  raw_output.outputs.clear();
+  raw_output.outputs.reserve(num_samples);
+  for (int32_t i = 0; i < num_samples; ++i) {
+    RawSampleOutput sample_output;
+    RawToken token;
+    // Negative 1-based index placeholder: -(i+1). On the next step,
+    // update_input_by_last_step_output replaces it with next_tokens[i].
+    token.id = -(static_cast<int64_t>(i) + 1);
+    sample_output.tokens.emplace_back(std::move(token));
+    raw_output.outputs.emplace_back(std::move(sample_output));
+  }
+  raw_output.prepared_layer_id = -1;
+}
+
 folly::SemiFuture<std::optional<RawForwardOutput>>
 WorkerClient::step_remote_async(const ForwardInput& input) {
-  LOG(FATAL) << "WorkerClient Method step_remote_async with ForwardInput "
-                "param is UnImplemented.";
-  return folly::makeSemiFuture(std::optional<RawForwardOutput>(std::nullopt));
+  // Single-node single-process path: dispatch the step on the worker and
+  // convert the resulting ForwardOutput into a RawForwardOutput so callers
+  // (e.g. LLMEngine::step) get the same shape they would receive from a
+  // RemoteWorker over brpc.
+  if (worker_ == nullptr) {
+    LOG(FATAL) << "WorkerClient Method step_remote_async with ForwardInput "
+                  "param is UnImplemented.";
+    return folly::makeSemiFuture(std::optional<RawForwardOutput>(std::nullopt));
+  }
+
+  // Schedule-overlap path: the engine pipelines step N+1 while step N's GPU
+  // work is still in flight, and fetches step N's real result on the next
+  // iteration via get_last_step_result_async. We MUST NOT block the returned
+  // future on the worker's forward completion here: LLMEngine::step does
+  // collectAll(futures).get(), and the consumer that unblocks the worker's
+  // producer-consumer cv (update_last_step_result -> get_last_step_result) is
+  // only dispatched by the scheduler AFTER engine_->step() returns. Waiting on
+  // the forward here would deadlock the worker's cv against the engine thread.
+  //
+  // Instead, mirror multi-process WorkerService::step: kick the forward off
+  // fire-and-forget on the dispatch thread (it runs, records its result, and
+  // satisfies the cv handshake against the separate get_last_step path), and
+  // immediately resolve with a fake-token RawForwardOutput. The real tokens
+  // are picked up next iteration.
+  if (options_.enable_schedule_overlap()) {
+    RawForwardOutput fake_output;
+    build_fake_overlap_output(input, fake_output);
+    dispatch_threadpool_->schedule([this, input]() mutable {
+      worker_->step_async(input)
+          .via(folly::getGlobalCPUExecutor())
+          .thenValue([](std::optional<ForwardOutput>&& /*unused*/) {});
+    });
+    return folly::makeSemiFuture(
+        std::optional<RawForwardOutput>(std::move(fake_output)));
+  }
+
+  folly::Promise<std::optional<RawForwardOutput>> promise;
+  auto future = promise.getSemiFuture();
+  // Non-overlap path: run the entire prepare+step kickoff on the per-worker
+  // dispatch thread. WorkerImpl::step_async runs prepare_work_before_execute
+  // synchronously on the calling thread, which can issue blocking CUDA driver
+  // calls. If we ran it on the engine thread, worker N+1's prepare would not
+  // start until worker N's prepare finished — meanwhile worker N's step kernel
+  // is already busy-waiting on NCCL collectives that need worker N+1, which
+  // deadlocks both GPUs. Dispatching here lets every worker's prepare run in
+  // parallel on its own thread.
+  dispatch_threadpool_->schedule([this,
+                                  input,
+                                  promise = std::move(promise)]() mutable {
+    worker_->step_async(input)
+        .via(folly::getGlobalCPUExecutor())
+        .thenValue([promise = std::move(promise)](
+                       std::optional<ForwardOutput>&& forward_output) mutable {
+          if (!forward_output.has_value()) {
+            promise.setValue(std::nullopt);
+            return;
+          }
+          RawForwardOutput raw;
+          forward_output_to_raw(forward_output.value(), raw);
+          promise.setValue(std::optional<RawForwardOutput>(std::move(raw)));
+        });
+  });
+  return future;
 }
 
 folly::SemiFuture<folly::Unit> WorkerClient::process_group_test_async() {
@@ -198,7 +316,29 @@ const torch::Device& WorkerClient::device() const { return worker_->device(); }
 
 folly::SemiFuture<std::optional<RawForwardOutput>>
 WorkerClient::get_last_step_result_async() {
-  return folly::makeSemiFuture(std::optional<RawForwardOutput>(std::nullopt));
+  // Same single-node single-process pattern as step_remote_async: bridge the
+  // worker's ForwardOutput into the engine-facing RawForwardOutput shape.
+  if (worker_ == nullptr) {
+    return folly::makeSemiFuture(std::optional<RawForwardOutput>(std::nullopt));
+  }
+  folly::Promise<std::optional<RawForwardOutput>> promise;
+  auto future = promise.getSemiFuture();
+  dispatch_threadpool_->schedule([this,
+                                  promise = std::move(promise)]() mutable {
+    worker_->get_last_step_result_async()
+        .via(folly::getGlobalCPUExecutor())
+        .thenValue([promise = std::move(promise)](
+                       std::optional<ForwardOutput>&& forward_output) mutable {
+          if (!forward_output.has_value()) {
+            promise.setValue(std::nullopt);
+            return;
+          }
+          RawForwardOutput raw;
+          forward_output_to_raw(forward_output.value(), raw);
+          promise.setValue(std::optional<RawForwardOutput>(std::move(raw)));
+        });
+  });
+  return future;
 }
 
 folly::SemiFuture<std::optional<ForwardOutput>>

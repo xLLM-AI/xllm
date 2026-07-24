@@ -15,6 +15,7 @@ cc_library(
     process_group.h
     $<$<BOOL:${USE_NPU}>:npu_rank_table_env.h>
     $<$<BOOL:${USE_NPU}>:npu_process_group.h>
+    $<$<BOOL:${USE_NPU}>:single_process/hccl_process_group.h>
     $<$<BOOL:${USE_MLU}>:mlu_process_group.h>
     $<$<BOOL:${USE_MUSA}>:musa_process_group.h>
     $<$<OR:$<BOOL:${USE_CUDA}>,$<BOOL:${USE_DCU}>>:cuda_process_group.h>
@@ -33,6 +34,7 @@ cc_library(
     process_group.cpp
     $<$<BOOL:${USE_NPU}>:npu_rank_table_env.cpp>
     $<$<BOOL:${USE_NPU}>:npu_process_group.cpp>
+    $<$<BOOL:${USE_NPU}>:single_process/hccl_process_group.cpp>
     collective_communicator.cpp
     dit_collective_communicator.cpp
   DEPS

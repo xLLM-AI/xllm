@@ -119,6 +119,14 @@ message CommUniqueId {
 
 message CommUniqueIdList {
   repeated CommUniqueId comm_unique_ids = 1;
+
+  // Master-allocated TCPStore ports for each communication group, in a
+  // canonical order shared between the master and every worker. Workers
+  // consume this list when bootstrapping their process groups instead of
+  // deriving ports from master_addr, so the bind targets sit on OS-chosen
+  // free ports rather than fixed offsets that may collide with random
+  // outgoing TCP source ports on a busy host.
+  repeated int32 group_ports = 2;
 }
 
 enum MasterStatus {

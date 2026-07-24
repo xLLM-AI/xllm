@@ -39,6 +39,14 @@ void packed_proto_to_forward_input(
 void proto_to_forward_output(const proto::ForwardOutput& pb_output,
                              RawForwardOutput& raw_forward_output);
 
+// Convert an in-process ForwardOutput into a RawForwardOutput by reading
+// the host-side tensors of the SampleOutput. Mirrors the logic that
+// WorkerService::ExecuteModel would have produced for a remote worker, but
+// avoids the proto round-trip when the engine and worker live in the same
+// process (single-node single-process mode).
+void forward_output_to_raw(const ForwardOutput& forward_output,
+                           RawForwardOutput& raw_forward_output);
+
 void forward_output_to_proto(const torch::Tensor& next_tokens,
                              const torch::Tensor& logprobs,
                              const torch::Tensor& top_tokens,

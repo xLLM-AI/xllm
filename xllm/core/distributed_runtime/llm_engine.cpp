@@ -70,9 +70,6 @@ LLMEngine::LLMEngine(const runtime::Options& options,
   InterruptionBus::get_instance().subscribe([this](bool interrupted) {
     this->layer_forward_interrupted_ = interrupted;
   });
-  auto master_node_addr = options.master_node_addr().value_or("");
-  CHECK(!master_node_addr.empty())
-      << " LLM need to set master node addr, Please set --master_node_addr.";
   const auto& devices = options_.devices();
   // initialize device monitor
   DeviceMonitor::get_instance().initialize(devices);

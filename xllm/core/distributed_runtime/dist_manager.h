@@ -34,6 +34,7 @@ class DistManager {
 
  private:
   DISALLOW_COPY_AND_ASSIGN(DistManager);
+  void setup_single_node_workers(const runtime::Options& options);
   void setup_multi_node_workers(const runtime::Options& options,
                                 const std::string& master_node_addr);
 

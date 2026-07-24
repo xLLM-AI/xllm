@@ -108,6 +108,10 @@ struct Options {
   // the node_rank of current worker process at.
   PROPERTY(int32_t, node_rank) = 0;
 
+  // run all local devices inside a single OS process (one worker thread per
+  // device) instead of one process per device.
+  PROPERTY(bool, enable_single_process) = false;
+
   // data parallelism size, currently mainly used for MoE model
   // default set as 1 for non-MoE model
   PROPERTY(int32_t, dp_size) = 1;

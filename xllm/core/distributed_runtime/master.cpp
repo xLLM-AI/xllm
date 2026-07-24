@@ -199,16 +199,25 @@ Master::Master(const Options& options, EngineType type)
       master_status_(options.master_status()) {
   const auto model_path =
       std::filesystem::path(options_.model_path()).lexically_normal();
+  const auto visible_devices = DeviceNameUtils::parse_devices("auto");
+  std::vector<torch::Device> devices;
+  if (options_.enable_single_process()) {
+  // Single-process serving instead drives every visible card from one process
+  // (one worker thread per device), so it takes all visible devices and its
+  // world size is the device count rather than the node count.
+    devices = visible_devices;
+  } else {
   // Multi-process serving runs one worker per process. Select one runtime
   // logical device from the process-visible devices while keeping node_rank as
   // the global distributed identity.
   const int32_t visible_device_count = Platform::device_count();
   const int32_t device_idx = DeviceNameUtils::get_device_idx(
       options_.node_rank(), options_.nnodes(), visible_device_count);
-  const auto visible_devices = DeviceNameUtils::parse_devices("auto");
-  const std::vector<torch::Device> devices = {visible_devices[device_idx]};
-  // World size is the node count (one worker per process).
-  const int32_t global_world_size = options_.nnodes();
+  devices = {visible_devices[device_idx]};
+  }
+
+  int32_t global_world_size = static_cast<int32_t>(devices.size()) * options_.nnodes();
+
   std::string cp_model_type;
   if (options_.cp_size() > 1 && Platform::uses_model_cp_partition()) {
     cp_model_type = util::get_model_type(model_path, options_.backend());
@@ -325,6 +334,7 @@ Master::Master(const Options& options, EngineType type)
         .master_node_addr(options.master_node_addr())
         .nnodes(options.nnodes())
         .node_rank(options.node_rank())
+        .enable_single_process(options.enable_single_process())
         .dp_size(options.dp_size())
         .ep_size(options.ep_size())
         .max_tokens_per_batch(options_.max_tokens_per_batch())
@@ -383,6 +393,7 @@ Master::Master(const Options& options, EngineType type)
         .master_node_addr(options.master_node_addr())
         .nnodes(options.nnodes())
         .node_rank(options.node_rank())
+        .enable_single_process(options.enable_single_process())
         .dp_size(options.dp_size())
         .ep_size(options.ep_size())
         .cp_size(options_.cp_size())
@@ -437,6 +448,7 @@ Master::Master(const Options& options, EngineType type)
         .master_node_addr(options_.master_node_addr())
         .nnodes(options_.nnodes())
         .node_rank(options_.node_rank())
+        .enable_single_process(options_.enable_single_process())
         .dp_size(options_.dp_size())
         .ep_size(options_.ep_size())
         .cp_size(options_.cp_size())
@@ -503,6 +515,7 @@ Master::Master(const Options& options, EngineType type)
         .master_node_addr(options_.master_node_addr())
         .nnodes(options_.nnodes())
         .node_rank(options_.node_rank())
+        .enable_single_process(options_.enable_single_process())
         .dp_size(options_.dp_size())
         .ep_size(options_.ep_size())
         .cp_size(options_.cp_size())
@@ -540,6 +553,7 @@ Master::Master(const Options& options, EngineType type)
         .output_shm_size(options_.output_shm_size() * 1024 * 1024)
         .is_local(options_.is_local())
         .node_rank(options_.node_rank())
+        .enable_single_process(options_.enable_single_process())
         .enable_schedule_overlap(options_.enable_schedule_overlap())
         .dp_size(options_.dp_size())
         .ep_size(options_.ep_size())

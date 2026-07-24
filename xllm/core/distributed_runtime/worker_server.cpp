@@ -176,6 +176,16 @@ void WorkerServer::create_server(const runtime::Options& options,
     comm = std::move(common_comm);
   }
 
+  // Forward master-allocated TCPStore ports (if any) so the communicator
+  // binds on OS-chosen free ports instead of fixed master_port + offset
+  // values that can collide with random outgoing TCP source ports inside
+  // the local ephemeral range.
+  std::vector<int32_t> group_ports(uids.group_ports().begin(),
+                                   uids.group_ports().end());
+  if (!group_ports.empty()) {
+    comm->set_group_ports(std::move(group_ports));
+  }
+
   comm->create_process_groups(master_node_addr, device);
   parallel_args = comm->parallel_args();
 

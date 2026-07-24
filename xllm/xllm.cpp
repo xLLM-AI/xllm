@@ -164,6 +164,7 @@ Options create_options(const std::string& instance_name, bool is_local) {
           static_cast<uint16_t>(disagg_pd_config.transfer_listen_port()))
       .nnodes(distributed_config.nnodes())
       .node_rank(distributed_config.node_rank())
+      .enable_single_process(distributed_config.enable_single_process())
       .dp_size(parallel_config.dp_size())
       .cp_size(parallel_config.cp_size())
       .ep_size(parallel_config.ep_size())
@@ -369,10 +370,12 @@ int run() {
     service_config.host(net::get_local_ip_addr());
   }
 
+  const bool single_process_mode = distributed_config.enable_single_process();
   const bool is_local =
-      !service_config.host().empty() &&
-      net::extract_ip(distributed_config.master_node_addr()) ==
-          service_config.host();
+      single_process_mode ||
+      (!service_config.host().empty() &&
+       net::extract_ip(distributed_config.master_node_addr()) ==
+           service_config.host());
 
   LOG(INFO) << "set worker role to "
             << (is_local ? "local worker" : "remote worker");
@@ -451,6 +454,9 @@ int run() {
 
   std::unique_ptr<Master> master;
   // working node
+  // Assistant masters serve non-zero node ranks in a multi-process multi-node
+  // deployment. Single-process serving always runs at node_rank 0, so it takes
+  // the master path below.
   if (options.node_rank() != 0) {
     if (model_config.backend() == "dit") {
       master = std::make_unique<DiTAssistantMaster>(options);

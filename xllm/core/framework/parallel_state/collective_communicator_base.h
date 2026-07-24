@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "parallel_args.h"
 #include "process_group.h"
@@ -37,12 +38,23 @@ class CollectiveCommunicatorBase {
 
   virtual const ParallelArgs* parallel_args() = 0;
 
+  // Master-broadcast TCPStore ports for process-group rendezvous. When set,
+  // create_process_groups consumes these instead of computing ports from
+  // master_addr (which lives inside the OS ephemeral range and can collide
+  // with random outgoing TCP source ports on a busy host). Empty list is
+  // legal — implementations fall back to the legacy offset scheme so
+  // single-node-single-process and DiT remain unchanged.
+  void set_group_ports(std::vector<int32_t> ports) {
+    group_ports_ = std::move(ports);
+  }
+
   int get_global_rank() const { return global_rank_; }
   int get_world_size() const { return world_size_; }
 
  protected:
   int global_rank_;
   int world_size_;
+  std::vector<int32_t> group_ports_;
 };
 
 }  // namespace xllm

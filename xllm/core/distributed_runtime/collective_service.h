@@ -40,6 +40,12 @@ class CollectiveService : public proto::Collective {
   // wait all worker connected
   std::unordered_map<int32_t, std::string> wait();
 
+  // Master-allocated free TCPStore ports, in the canonical group order shared
+  // with workers (see CollectiveCommunicator::create_process_groups). The
+  // master node consumes this list locally; workers receive the same list
+  // through CommUniqueIdList.group_ports during Sync.
+  const std::vector<int32_t>& group_ports() const { return group_ports_; }
+
  private:
   DISALLOW_COPY_AND_ASSIGN(CollectiveService);
 
@@ -57,6 +63,10 @@ class CollectiveService : public proto::Collective {
 #endif
   std::mutex mutex_;
   std::unordered_map<int32_t, std::string> addrs_map_;
+  // Free TCPStore ports the master allocated up-front. Returned verbatim to
+  // every worker through Sync so each rank uses the same set of ports for
+  // process-group bootstrap.
+  std::vector<int32_t> group_ports_;
 };
 
 }  // namespace xllm

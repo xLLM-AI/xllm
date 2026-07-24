@@ -1165,31 +1165,39 @@ void WorkerImpl::execute_cuda_block_copy_kernel(
 
 folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
     const ForwardInput& input) {
-  ForwardInput input_on_device;
-
-  prepare_work_before_execute(input, input_on_device);
-
   folly::Promise<std::optional<ForwardOutput>> promise;
   auto future = promise.getSemiFuture();
-  threadpool_.schedule([this,
-                        input = std::move(input_on_device),
-                        promise = std::move(promise)]() mutable {
+  // Prepare runs on the worker's own threadpool (the same thread that
+  // executes step). Doing prepare on the calling thread instead serialises
+  // every worker's input H2D copy through that caller, and in single-node
+  // single-process mode each prepare can issue blocking device driver calls
+  // through the caching host allocator. While one worker's step is busy-waiting
+  // on a collective for its partner, those driver calls share the driver's
+  // internal locks with the running collective and the caller never returns to
+  // schedule the second worker's step — both devices deadlock. Pinning prepare
+  // to the worker's device thread keeps all device work on a single thread.
+  threadpool_.schedule([this, input, promise = std::move(promise)]() mutable {
+    ForwardInput input_on_device;
+    prepare_work_before_execute(input, input_on_device);
+
     if (hierarchy_kv_cache_transfer_ != nullptr) {
-      hierarchy_kv_cache_transfer_->set_layer_synchronizer(input.input_params);
+      hierarchy_kv_cache_transfer_->set_layer_synchronizer(
+          input_on_device.input_params);
     }
 
     // run the model on the given input in working thread
     if (!enable_schedule_overlap()) {
-      const auto output = this->step(input);
+      const auto output = this->step(input_on_device);
       promise.setValue(output);
     } else {
-      if (last_step_output_valid_ && input.token_ids.numel() > 0 &&
-          input.input_params.meta.batch_forward_type.has_decode()) {
+      if (last_step_output_valid_ && input_on_device.token_ids.numel() > 0 &&
+          input_on_device.input_params.meta.batch_forward_type.has_decode()) {
         // replace step i model input with true output of step i-1
-        input = update_input_by_last_step_output_for_schedule_overlap(input);
+        input_on_device = update_input_by_last_step_output_for_schedule_overlap(
+            input_on_device);
       }
 
-      const auto output = this->step_for_schedule_overlap(input);
+      const auto output = this->step_for_schedule_overlap(input_on_device);
       if (output.has_value()) {
         if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
           std::unique_lock<std::mutex> lock(mtx_);

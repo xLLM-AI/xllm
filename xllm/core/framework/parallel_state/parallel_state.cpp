@@ -20,6 +20,9 @@ limitations under the License.
 #include "util/net.h"
 
 #if defined(USE_NPU)
+#include <torch_npu/csrc/core/npu/NPUFunctions.h>
+
+#include "framework/parallel_state/single_process/hccl_process_group.h"
 #include "hccl/hccl.h"
 #include "npu_process_group.h"
 #endif
@@ -456,9 +459,36 @@ std::vector<std::unique_ptr<ProcessGroup>> create_local_process_groups(
   process_groups.reserve(devices.size());
 
 #if defined(USE_NPU)
+  // Single-process multi-device path: use HcclCommInitAll so every device
+  // shares one HCCL world. Two c10d_npu::ProcessGroupHCCL instances coexisting
+  // inside the same process can dispatch collectives in mismatched orders and
+  // deadlock the local_tp_group under load; HcclCommInitAll-backed groups
+  // sidestep that by sharing a single HCCL bootstrap.
+  std::vector<int> device_idxs;
+  device_idxs.reserve(devices.size());
+  for (const auto& device : devices) {
+    device_idxs.push_back(device.index());
+  }
   std::vector<HcclComm> comms(devices.size());
+  // HcclCommInitAll requires a device bound on the calling thread to refresh
+  // the runtime device logic id; the engine thread that runs this has not
+  // bound one yet (workers bind their own device on their own threads later).
+  // Bind through c10_npu::SetDevice rather than raw aclrtSetDevice so
+  // torch_npu's thread-local device cache stays in sync; a raw aclrtSetDevice
+  // would desync that cache and make later c10_npu::SetDevice calls skip the
+  // real device switch, leaving worker streams in the wrong context.
+  int32_t prev_device = c10_npu::current_device();
+  CHECK_EQ(c10_npu::SetDevice(static_cast<int32_t>(device_idxs[0])),
+           ACL_SUCCESS)
+      << "c10_npu::SetDevice failed for device " << device_idxs[0]
+      << " before HcclCommInitAll";
+  HCCLCHECK(HcclCommInitAll(world_size, device_idxs.data(), comms.data()));
+  if (prev_device >= 0) {
+    CHECK_EQ(c10_npu::SetDevice(prev_device), ACL_SUCCESS)
+        << "c10_npu::SetDevice failed to restore device " << prev_device;
+  }
   for (int32_t i = 0; i < world_size; ++i) {
-    process_groups.emplace_back(std::make_unique<ProcessGroupImpl>(
+    process_groups.emplace_back(std::make_unique<HcclProcessGroup>(
         /*rank=*/i, world_size, devices[i], comms[i]));
   }
 #elif defined(USE_CUDA) || defined(USE_MLU) || defined(USE_ILU) || \

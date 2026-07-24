@@ -304,22 +304,63 @@ void CollectiveCommunicator::create_process_groups(
   int32_t port;
   net::parse_host_port_from_addr(master_addr, host, port);
 
+  // Compute section bases for the master-allocated port list. Every rank
+  // computes the same offsets given (world_size, dp_size, ep_size,
+  // enable_mm_encoder_dp), so the (section, group_index) -> slot mapping is
+  // identical on master and workers. group_ports_[slot] is then used as the
+  // TCPStore port for the corresponding process group, which sidesteps the
+  // EADDRINUSE race that the old "master_port + offset" scheme hits inside
+  // the OS ephemeral range.
+  //
+  // When group_ports_ is empty (legacy callers / DiT) we fall back to the
+  // master_port + offset formula via use_master_ports below, preserving
+  // byte-for-byte behaviour for those paths.
+  const bool use_master_ports = !group_ports_.empty();
+  const bool encoder_dp_enabled =
+      ::xllm::ParallelConfig::get_instance().enable_mm_encoder_dp();
+  const int32_t tp_size_pre = world_size / dp_size;
+  const int32_t moe_tp_size_pre = world_size / ep_size;
+
+  const int32_t kEncoderDpBase = 0;
+  const int32_t kWorldBase = encoder_dp_enabled ? dp_size : 0;
+  const int32_t kTpBase = kWorldBase + 1;
+  const int32_t kSingleRankBase = kTpBase + dp_size;
+  const int32_t kDpLocalBase =
+      kSingleRankBase + (tp_size_pre > 1 ? world_size : 0);
+  const int32_t kMoeTpBase = kDpLocalBase + (dp_size > 1 ? tp_size_pre : 0);
+  const int32_t kMoeEpBase = kMoeTpBase + (ep_size > 1 ? ep_size : 0);
+
+  auto resolve_port =
+      [&](int32_t section_base, int32_t group_index, int32_t legacy_port) {
+        if (!use_master_ports) {
+          return legacy_port;
+        }
+        const int32_t slot = section_base + group_index;
+        CHECK_LT(slot, static_cast<int32_t>(group_ports_.size()))
+            << "Master-allocated TCPStore port slot " << slot
+            << " out of range (size " << group_ports_.size() << ").";
+        return group_ports_[slot];
+      };
+
   int32_t port_offset = 0;
 
   // Encoder DP is used by multi-modal models to parallelize vision encoder
   // work inside each language-model TP group. The rank set matches the TP
   // group, but each rank runs a full encoder on different multi-modal items.
-  if (::xllm::ParallelConfig::get_instance().enable_mm_encoder_dp()) {
+  if (encoder_dp_enabled) {
     const int32_t encoder_dp_size = world_size / dp_size;
-    port_offset = global_rank / encoder_dp_size + 1;
-    encoder_dp_group_ = create_process_group(global_rank,
-                                             world_size,
-                                             encoder_dp_size,
-                                             port + port_offset,
-                                             false,
-                                             host,
-                                             "encoder_dp_group",
-                                             device);
+    const int32_t encoder_dp_group_index = global_rank / encoder_dp_size;
+    port_offset = encoder_dp_group_index + 1;
+    encoder_dp_group_ = create_process_group(
+        global_rank,
+        world_size,
+        encoder_dp_size,
+        resolve_port(
+            kEncoderDpBase, encoder_dp_group_index, port + port_offset),
+        /*trans=*/false,
+        host,
+        "encoder_dp_group",
+        device);
     parallel_args_->encoder_dp_group_ = encoder_dp_group_.get();
     port += dp_size;
   }
@@ -333,8 +374,8 @@ void CollectiveCommunicator::create_process_groups(
   process_group_ = create_process_group(global_rank,
                                         world_size,
                                         world_size,
-                                        ++port,
-                                        false,
+                                        resolve_port(kWorldBase, 0, ++port),
+                                        /*trans=*/false,
                                         host,
                                         "world_group",
                                         device);
@@ -342,7 +383,8 @@ void CollectiveCommunicator::create_process_groups(
 
   int32_t tp_size = world_size / dp_size;
   CHECK_EQ(tp_size * dp_size, world_size);
-  port_offset = global_rank / tp_size + 1;
+  const int32_t tp_group_index = global_rank / tp_size;
+  port_offset = tp_group_index + 1;
   std::string tp_host = host;
 #if defined(USE_NPU)
   if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&
@@ -351,14 +393,15 @@ void CollectiveCommunicator::create_process_groups(
     tp_host = get_rank_table_server_host(tp_group_start, host);
   }
 #endif
-  tp_group_ = create_process_group(global_rank,
-                                   world_size,
-                                   tp_size,
-                                   port + port_offset,
-                                   false,
-                                   tp_host,
-                                   "tp_group",
-                                   device);
+  tp_group_ = create_process_group(
+      global_rank,
+      world_size,
+      tp_size,
+      resolve_port(kTpBase, tp_group_index, port + port_offset),
+      /*trans=*/false,
+      tp_host,
+      "tp_group",
+      device);
   parallel_args_->tp_group_ = tp_group_.get();
   // Single-rank group is used for modules that don't need tensor parallel (TP)
   // communication. This avoids unnecessary communication. When tp_size > 1,
@@ -375,8 +418,11 @@ void CollectiveCommunicator::create_process_groups(
         global_rank,
         world_size,
         1,
-        port + dp_size + single_rank_group_port_gap + global_rank + 1,
-        false,
+        resolve_port(
+            kSingleRankBase,
+            global_rank,
+            port + dp_size + single_rank_group_port_gap + global_rank + 1),
+        /*trans=*/false,
         host,
         "single_rank_group",
         device);
@@ -392,15 +438,17 @@ void CollectiveCommunicator::create_process_groups(
   port += dp_size + single_rank_group_port_gap + single_rank_group_count;
 
   if (dp_size > 1) {
-    port_offset = global_rank % tp_size + 1;
-    dp_local_process_group_ = create_process_group(global_rank,
-                                                   world_size,
-                                                   dp_size,
-                                                   port + port_offset,
-                                                   true,
-                                                   host,
-                                                   "dp_group",
-                                                   device);
+    const int32_t dp_local_group_index = global_rank % tp_size;
+    port_offset = dp_local_group_index + 1;
+    dp_local_process_group_ = create_process_group(
+        global_rank,
+        world_size,
+        dp_size,
+        resolve_port(kDpLocalBase, dp_local_group_index, port + port_offset),
+        /*trans=*/true,
+        host,
+        "dp_group",
+        device);
     parallel_args_->dp_local_process_group_ = dp_local_process_group_.get();
     port += tp_size;
   }
@@ -410,7 +458,8 @@ void CollectiveCommunicator::create_process_groups(
   if (ep_size == 1) {
     parallel_args_->moe_tp_group_ = process_group_.get();
   } else {
-    port_offset = global_rank / moe_tp_size + 1;
+    const int32_t moe_tp_group_index = global_rank / moe_tp_size;
+    port_offset = moe_tp_group_index + 1;
     std::string moe_tp_host = host;
 #if defined(USE_NPU)
     if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH") {
@@ -419,30 +468,32 @@ void CollectiveCommunicator::create_process_groups(
       moe_tp_host = get_rank_table_server_host(moe_tp_group_start, host);
     }
 #endif
-    moe_tp_group_ = create_process_group(global_rank,
-                                         world_size,
-                                         moe_tp_size,
-                                         port + port_offset,
-                                         false,
-                                         moe_tp_host,
-                                         "moe_tp_group",
-                                         device);
+    moe_tp_group_ = create_process_group(
+        global_rank,
+        world_size,
+        moe_tp_size,
+        resolve_port(kMoeTpBase, moe_tp_group_index, port + port_offset),
+        /*trans=*/false,
+        moe_tp_host,
+        "moe_tp_group",
+        device);
     parallel_args_->moe_tp_group_ = moe_tp_group_.get();
     port += ep_size;
-    port_offset = global_rank % moe_tp_size + 1;
-    moe_ep_group_ = create_process_group(global_rank,
-                                         world_size,
-                                         ep_size,
-                                         port + port_offset,
-                                         true,
-                                         host,
-                                         "moe_ep_group",
-                                         device);
+    const int32_t moe_ep_group_index = global_rank % moe_tp_size;
+    port_offset = moe_ep_group_index + 1;
+    moe_ep_group_ = create_process_group(
+        global_rank,
+        world_size,
+        ep_size,
+        resolve_port(kMoeEpBase, moe_ep_group_index, port + port_offset),
+        /*trans=*/true,
+        host,
+        "moe_ep_group",
+        device);
     parallel_args_->moe_ep_group_ = moe_ep_group_.get();
     port += moe_tp_size;
   }
 
-  const int32_t tp_group_index = global_rank / tp_size;
   parallel_args_->python_tp_rendezvous_host_ = host;
   parallel_args_->python_tp_rendezvous_port_ = port + tp_group_index + 1;
   CHECK_LE(parallel_args_->python_tp_rendezvous_port_, 65535)
