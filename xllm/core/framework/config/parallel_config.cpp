@@ -33,6 +33,13 @@ DEFINE_int32(kv_split_size,
              "AllGather); other K (K divides cp_size) means KV is sharded "
              "across K ranks while token-CP still uses cp_size.");
 
+DEFINE_bool(enable_dsa_cp,
+            false,
+            "Enable DeepSeek-V4 DSA context parallel (prefill-only, M1). "
+            "Only takes effect when cp_size > 1 and the model is DeepSeek-V4 "
+            "(DSA). When false, DSA attention runs its original non-CP path "
+            "even if cp_size > 1.");
+
 DEFINE_int64(tp_size, 1, "Tensor parallelism size, only used for DiT model.");
 
 DEFINE_int64(sp_size, 1, "Sequence parallelism size, only used for DiT model.");
@@ -76,6 +83,7 @@ void ParallelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(ep_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(cp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_split_size);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_dsa_cp);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(tp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(sp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(cfg_size);
@@ -91,6 +99,7 @@ void ParallelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(dp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(ep_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(cp_size);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_dsa_cp);
   XLLM_CONFIG_ASSIGN_FROM_JSON(tp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(sp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(cfg_size);
@@ -108,6 +117,8 @@ void ParallelConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, dp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, ep_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, cp_size);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_dsa_cp);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, tp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, sp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

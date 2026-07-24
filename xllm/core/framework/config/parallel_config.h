@@ -44,6 +44,7 @@ class ParallelConfig final {
         {"dp_size",
          "ep_size",
          "cp_size",
+         "enable_dsa_cp",
          "tp_size",
          "sp_size",
          "cfg_size",
@@ -64,6 +65,9 @@ class ParallelConfig final {
 
   // 0 means follow cp_size (legacy KV-split width).
   PROPERTY(int32_t, kv_split_size) = 1;
+
+  // Enable DeepSeek-V4 DSA context parallel (prefill-only, M1).
+  PROPERTY(bool, enable_dsa_cp) = false;
 
   PROPERTY(int64_t, tp_size) = 1;
 
