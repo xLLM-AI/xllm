@@ -28,6 +28,7 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/common/message.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/multimodal/mm_input.h"
 #include "core/platform/device_name_utils.h"
@@ -107,7 +108,10 @@ VLMMaster::VLMMaster(const Options& options)
   chat_template_ =
       std::make_unique<JinjaChatTemplate>(engine_->tokenizer_args());
   tokenizer_ = engine_->tokenizer()->clone();
-  processor_ = create_multimodal_processor(model_args_, tokenizer_);
+  const int32_t max_sequence_length =
+      ::xllm::ModelConfig::get_instance().flux2_tokenizer_max_sequence_length();
+  processor_ =
+      create_multimodal_processor(model_args_, tokenizer_, max_sequence_length);
 
   threadpool_ = std::make_unique<ThreadPool>(
       /*num_threads=*/options_.num_request_handling_threads(),

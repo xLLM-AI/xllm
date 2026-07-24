@@ -2895,7 +2895,7 @@ void convert_tensor_to_raw_output(
   if (!mm_embeddings.empty()) {
     num_seqs = std::max(num_seqs, static_cast<int32_t>(mm_embeddings.size()));
   }
-
+  
   raw_output.outputs.reserve(num_seqs);
   raw_output.dit_forward_output.tensors = dit_images;
   raw_output.dit_forward_output.text_output = dit_text_output;

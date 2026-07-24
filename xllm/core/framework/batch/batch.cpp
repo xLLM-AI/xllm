@@ -23,7 +23,6 @@ limitations under the License.
 #include <vector>
 
 #include "batch_input_builder.h"
-#include "common/global_flags.h"
 #include "common/metrics.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"

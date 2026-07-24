@@ -71,7 +71,8 @@ bool add_special_token_id(const std::string& token,
 
 bool FastTokenizer::encode(const std::string_view& text,
                            std::vector<int32_t>* ids,
-                           bool add_special_tokens) const {
+                           bool add_special_tokens,
+                           int32_t max_sequence_length) const {
   TokenizerEncodeResult result;
   tokenizers_encode(
       handle_, text.data(), text.size(), add_special_tokens, &result);
@@ -102,6 +103,16 @@ bool FastTokenizer::encode(const std::string_view& text,
                          eos_id,
                          ids,
                          /*prepend=*/false);
+  }
+  // Add pad to max_sequence_length if configured
+  if (max_sequence_length > 0 && !tokenizer_args_.pad_token().empty()) {
+    const auto pad_id = token_to_id(tokenizer_args_.pad_token());
+    if (pad_id.has_value() &&
+        static_cast<int32_t>(ids->size()) < max_sequence_length) {
+      int32_t pad_count =
+          max_sequence_length - static_cast<int32_t>(ids->size());
+      ids->insert(ids->begin(), pad_count, pad_id.value());
+    }
   }
 
   return true;

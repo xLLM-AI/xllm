@@ -66,7 +66,9 @@ class FakeTokenizer final : public Tokenizer {
  public:
   bool encode(const std::string_view& /*text*/,
               std::vector<int32_t>* /*ids*/,
-              bool /*add_special_tokens*/) const override {
+              bool /*add_special_tokens*/,
+              int32_t /*max_sequence_length*/) const override {
+    // max_sequence_length is not implemented by this fake tokenizer.
     NOT_IMPLEMENTED();
   }
 
