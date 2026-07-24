@@ -450,11 +450,7 @@ torch::Tensor matmul_reduce_scatter(MatmulReduceScatterParams& params) {
                                     params.stream_mode,
                                     params.comm_mode);
 #else
-  MatmulParams matmul_params;
-  matmul_params.a = params.a;
-  matmul_params.b = params.b;
-  matmul_params.bias = params.bias;
-  return matmul(matmul_params);
+  NOT_IMPLEMENTED();
 #endif
 }
 
