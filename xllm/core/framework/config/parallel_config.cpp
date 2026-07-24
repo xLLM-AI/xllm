@@ -69,6 +69,26 @@ DEFINE_bool(
     "Whether to enable dp load balance, if true, sequences within a single "
     "dp batch will be shuffled.");
 
+DEFINE_bool(
+    enable_flashcomm1,
+    false,
+    "Whether to enable FlashComm1 (sequence parallel): keep the residual "
+    "stream token-sharded across the TP group, all-gather to full tokens at "
+    "sequence-parallel boundaries (e.g. attention input), and replace the tail "
+    "all-reduce of eligible TP RowParallel layers with a padded "
+    "reduce-scatter(dim0). Requires tp>1 and benefits high-token "
+    "(prefill / chunked-prefill) batches. Defaults to false.");
+
+DEFINE_int32(
+    flashcomm1_sp_min_token_num,
+    1000,
+    "Minimum token count (dim0) for FlashComm1 sequence parallelism to engage. "
+    "Below this, the fixed overhead of the shard / all-gather / reduce-scatter "
+    "collectives dominates and SP is a net loss, so FlashComm1 is disabled for "
+    "the forward. This keeps SP on for prefill (many tokens) and off for decode "
+    "(few tokens). Set to 0 to disable the token gate entirely. Only meaningful "
+    "with enable_flashcomm1.");
+
 namespace xllm {
 
 void ParallelConfig::from_flags() {
@@ -85,6 +105,8 @@ void ParallelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_multi_stream_parallel);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(micro_batch_num);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_dp_balance);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_flashcomm1);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(flashcomm1_sp_min_token_num);
 }
 
 void ParallelConfig::from_json(const JsonReader& json) {
@@ -100,6 +122,8 @@ void ParallelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_multi_stream_parallel);
   XLLM_CONFIG_ASSIGN_FROM_JSON(micro_batch_num);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_dp_balance);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_flashcomm1);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(flashcomm1_sp_min_token_num);
 }
 
 void ParallelConfig::append_config_json(
@@ -124,6 +148,10 @@ void ParallelConfig::append_config_json(
       config_json, default_config, micro_batch_num);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_dp_balance);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_flashcomm1);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, flashcomm1_sp_min_token_num);
 }
 
 ParallelConfig& ParallelConfig::get_instance() {

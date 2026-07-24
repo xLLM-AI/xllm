@@ -605,6 +605,11 @@ DSAttentionImpl::DSAttentionImpl(const ModelArgs& args,
                                                 quant_args,
                                                 parallel_args.tp_group_,
                                                 options));
+  // FlashComm1: the attention output projection feeds the token-sharded
+  // residual stream. When a FlashComm1 context is active its tail all-reduce
+  // becomes a reduce-scatter(dim0), returning the full-token attention output
+  // to this rank's token shard.
+  o_b_proj_->set_flash_comm1_eligible(true);
 }
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>>

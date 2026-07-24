@@ -12,6 +12,7 @@ cc_library(
     rank_generator.h
     parallel_args.h
     parallel_state.h
+    flash_comm1_context.h
     process_group.h
     $<$<BOOL:${USE_NPU}>:npu_rank_table_env.h>
     $<$<BOOL:${USE_NPU}>:npu_process_group.h>
@@ -30,6 +31,7 @@ cc_library(
     dit_mapping.cpp
     parallel_state.cpp
     parallel_state_async.cpp
+    flash_comm1_context.cpp
     process_group.cpp
     $<$<BOOL:${USE_NPU}>:npu_rank_table_env.cpp>
     $<$<BOOL:${USE_NPU}>:npu_process_group.cpp>

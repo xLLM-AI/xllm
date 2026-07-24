@@ -1,5 +1,19 @@
 include(cc_test)
 
+# Host-buildable: exercises the FlashComm1 thread_local context RAII and the
+# device-free shard_dim0_padded sharding math. No device / process group.
+cc_test(
+  NAME
+    flash_comm1_context_test
+  SRCS
+    flash_comm1_context_test.cpp
+  DEPS
+    parallel_state
+    GTest::gtest_main
+    torch
+    glog::glog
+)
+
 if(USE_NPU)
   cc_test(
     NAME

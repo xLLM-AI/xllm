@@ -1475,7 +1475,22 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
     output = xllm::kernel::matmul(matmul_params);
   }
   if (enable_result_reduction_ && world_size_ > 1) {
-    output = xllm::parallel_state::reduce(output, process_group_);
+    // FlashComm1: when a sequence-parallel context is active and this layer is
+    // eligible (e.g. attention o_b_proj), replace the tail all-reduce with a
+    // padded reduce-scatter(dim0) so the output returns to a token shard that
+    // matches the sharded residual stream. The collective runs over this
+    // layer's own TP group, which is the model TP group that produced the
+    // shard. Otherwise, unchanged all-reduce.
+    const auto& fc1 = xllm::parallel_state::current_flash_comm1_context();
+    if (fc1.enabled && flash_comm1_eligible_) {
+      // Padded reduce-scatter keeps a uniform [chunk_size, ...] shard on every
+      // rank (matching shard_dim0_padded), so the sharded residual stream stays
+      // shape-consistent across ranks. Padding is stripped at the final gather.
+      output =
+          xllm::parallel_state::reduce_scatter_padded_dim0(output, process_group_);
+    } else {
+      output = xllm::parallel_state::reduce(output, process_group_);
+    }
   }
   return output;
 }
