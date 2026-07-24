@@ -47,7 +47,8 @@ class KernelConfig final {
          "enable_interlayer_addnorm",
          "enable_split_rmsnorm_rope",
          "enable_aclnn_matmul",
-         "enable_aclnn_swiglu"}};
+         "enable_aclnn_swiglu",
+         "enable_return_prenorm_hidden_states"}};
     return kOptionCategory;
   }
 
@@ -67,6 +68,8 @@ class KernelConfig final {
   PROPERTY(bool, enable_aclnn_matmul) = false;
 
   PROPERTY(bool, enable_aclnn_swiglu) = false;
+
+  PROPERTY(bool, enable_return_prenorm_hidden_states) = false;
 #endif
 };
 

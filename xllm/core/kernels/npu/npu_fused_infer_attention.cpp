@@ -107,7 +107,8 @@ std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
     int64_t block_size,
     int64_t sparse_mode,
     const std::string& input_layout,
-    bool softmax_lse_flag) {
+    bool softmax_lse_flag,
+    bool is_causal) {
   check_tensor(query, "query", "npu_fused_infer_attention");
   check_tensor(key, "key", "npu_fused_infer_attention");
   check_tensor(value, "value", "npu_fused_infer_attention");
@@ -143,7 +144,7 @@ std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
   std::string layout = input_layout;
   char* input_layout_ptr = const_cast<char*>(layout.c_str());
   int64_t pre_tokens = kSwaIntMax;
-  int64_t next_tokens = 0;
+  int64_t next_tokens = is_causal ? 0 : kSwaIntMax;
   int64_t inner_precise = 0;
   int64_t antiquant_mode = 0;
   int64_t key_antiquant_mode = 0;

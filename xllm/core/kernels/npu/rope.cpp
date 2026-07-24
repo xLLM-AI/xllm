@@ -20,6 +20,58 @@ limitations under the License.
 
 namespace xllm::kernel::npu {
 
+void apply_rotary_pos_emb(torch::Tensor& query,
+                          torch::Tensor& key,
+                          const torch::Tensor& cos,
+                          const torch::Tensor& sin) {
+  CHECK(cos.defined() && sin.defined());
+  CHECK(cos.sizes() == sin.sizes());
+  CHECK_GT(cos.dim(), 0);
+  const int64_t rotary_dim = cos.size(-1);
+  CHECK_GT(rotary_dim, 0);
+  const int64_t num_tokens = cos.numel() / rotary_dim;
+  CHECK_GT(num_tokens, 0);
+  CHECK_EQ(query.numel() % (num_tokens * rotary_dim), 0);
+  CHECK_EQ(key.numel() % (num_tokens * rotary_dim), 0);
+
+  const std::vector<int64_t> query_shape = query.sizes().vec();
+  const std::vector<int64_t> key_shape = key.sizes().vec();
+  const int64_t num_query_heads = query.numel() / (num_tokens * rotary_dim);
+  const int64_t num_key_heads = key.numel() / (num_tokens * rotary_dim);
+
+  torch::Tensor query_view =
+      query.contiguous().view({1, num_tokens, num_query_heads, rotary_dim});
+  torch::Tensor key_view =
+      key.contiguous().view({1, num_tokens, num_key_heads, rotary_dim});
+  torch::Tensor cos_view =
+      cos.contiguous().view({1, num_tokens, 1, rotary_dim});
+  torch::Tensor sin_view =
+      sin.contiguous().view({1, num_tokens, 1, rotary_dim});
+
+  auto rotary_result = at_npu::native::custom_ops::npu_apply_rotary_pos_emb(
+      query_view, key_view, cos_view, sin_view, "BSND");
+  query = std::get<0>(rotary_result).view(query_shape);
+  key = std::get<1>(rotary_result).view(key_shape);
+}
+
+void apply_rotary_pos_emb_atb(torch::Tensor& query,
+                              torch::Tensor& key,
+                              const torch::Tensor& cos,
+                              const torch::Tensor& sin) {
+  const int64_t rotary_dim = query.size(-1) / 2;
+  auto cos_input = cos.size(-1) == query.size(-1)
+                       ? cos.slice(/*dim=*/-1, /*start=*/0, /*end=*/rotary_dim)
+                       : cos;
+  auto sin_input = sin.size(-1) == query.size(-1)
+                       ? sin.slice(/*dim=*/-1, /*start=*/0, /*end=*/rotary_dim)
+                       : sin;
+  atb::npu_rotary_embedding_with_cos_sin(cos_input.contiguous(),
+                                         sin_input.contiguous(),
+                                         query,
+                                         key,
+                                         /*is_neox_style=*/true);
+}
+
 void apply_rotary(torch::Tensor& q,
                   torch::Tensor& k,
                   const torch::Tensor& cos_sin_cache,
@@ -40,7 +92,7 @@ void apply_rotary(torch::Tensor& q,
   q = q.view({1, q.size(0), -1, rotary_dim});
   k = k.view({1, k.size(0), -1, rotary_dim});
 
-  at_npu::native::custom_ops::npu_apply_rotary_pos_emb(q, k, cos, sin);
+  apply_rotary_pos_emb(q, k, cos, sin);
 }
 
 std::pair<torch::Tensor, torch::Tensor> apply_npu_partial_rotary_embedding(

@@ -115,7 +115,8 @@ bool resolve_model_registration(const std::string& model_type,
   if (backend == kAutoBackend) {
     effective_backend =
         is_torch_only_model_type(model_type) ? kTorchBackend : kAtbBackend;
-  } else if (model_type == "qwen3" || model_type == "qwen3_moe") {
+  } else if (model_type == "qwen3" || model_type == "qwen3_moe" ||
+             model_type == "qwen3_vl") {
     // qwen3/qwen3_moe support both backends.
   } else if (is_torch_only_model_type(model_type)) {
     if (backend != kTorchBackend) {
@@ -140,6 +141,8 @@ bool resolve_model_registration(const std::string& model_type,
     *resolved_name = "qwen3_atb";
   } else if (model_type == "qwen3_moe" && effective_backend == kAtbBackend) {
     *resolved_name = "qwen3_moe_atb";
+  } else if (model_type == "qwen3_vl" && effective_backend == kTorchBackend) {
+    *resolved_name = "qwen3_vl_torch";
   } else {
     *resolved_name = model_type;
   }

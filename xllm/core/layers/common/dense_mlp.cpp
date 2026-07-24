@@ -109,7 +109,6 @@ torch::Tensor DenseMLPImpl::forward(const torch::Tensor& hidden_states) {
           {batch_size, intermediate_size_ / process_group_->world_size()},
           gate_up.options());
     }
-
     act_->forward(gate_up, output);
     return down_proj_->forward(output);
   }

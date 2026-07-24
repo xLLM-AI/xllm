@@ -19,6 +19,9 @@ limitations under the License.
 
 #include <tuple>
 
+#if defined(USE_NPU)
+#include "kernels/npu/npu_ops_api.h"
+#endif
 #if defined(USE_CUDA) || defined(USE_DCU)
 #include "kernels/cuda/cuda_ops_api.h"
 #endif
@@ -180,7 +183,17 @@ torch::Tensor Qwen2AttentionImpl::forward(
 
   // 4. rope
   if (!fused_qk_norm_rope_applied) {
+#if defined(USE_NPU)
+    if (attn_metadata.mrope_cos.defined() &&
+        attn_metadata.mrope_sin.defined()) {
+      xllm::kernel::npu::apply_rotary_pos_emb(
+          q, k, attn_metadata.mrope_cos, attn_metadata.mrope_sin);
+    } else {
+      rotary_emb_->forward(q, k, positions, attn_metadata);
+    }
+#else
     rotary_emb_->forward(q, k, positions, attn_metadata);
+#endif
   }
   q = q.view({T, q_size_});
   k = k.view({T, kv_size_});

@@ -291,6 +291,7 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
 
     deepstack_mergers_ =
         register_module("deepstack_mergers", torch::nn::ModuleList());
+    blocks_ = register_module("blocks", torch::nn::ModuleList());
 
     emb_ = register_module(
         "embedding",
@@ -299,8 +300,10 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
 
     merger_ = register_module("merger", Qwen3_VisionPatchMerger(context));
 
+    layers_.reserve(model_args.mm_num_hidden_layers());
     for (int32_t idx = 0; idx < model_args.mm_num_hidden_layers(); idx++) {
       auto layer = layer::Qwen3_VisionLayer(context);
+      blocks_->push_back(layer);
       layers_.push_back(layer);
     }
     for (int32_t idx = 0; idx < deepstack_visual_indexes_.size(); idx++) {
@@ -461,12 +464,12 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
     m_sin = m_sin.repeat({1, 2});
 
     torch::Tensor cu_seqlens_cpu = cu_seqlens.cpu();
-    std::vector<int> cu_seqlens_vec(
+    std::vector<int32_t> cu_seqlens_vec(
         cu_seqlens_cpu.data_ptr<int>(),  // full seqlen vec
         cu_seqlens_cpu.data_ptr<int>() + cu_seqlens_cpu.numel());
     std::vector<torch::Tensor> deepstack_feature_lists;
     deepstack_feature_lists.reserve(deepstack_visual_indexes_.size());
-    for (int idx = 0; idx < layers_.size(); ++idx) {
+    for (int32_t idx = 0; idx < layers_.size(); ++idx) {
       hidden_states = layers_[idx](
           hidden_states, m_cos, m_sin, cu_seqlens, cu_seqlens_vec, idx);
       auto it = std::find(deepstack_visual_indexes_.begin(),
@@ -516,6 +519,23 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
     }
   }
 
+  void verify_loaded_weights(const std::string& prefix) const {
+    patch_embed_->verify_loaded_weights(prefix + "patch_embed.");
+    for (size_t idx = 0; idx < layers_.size(); ++idx) {
+      layers_[idx]->verify_loaded_weights(prefix + "blocks." +
+                                          std::to_string(idx) + ".");
+    }
+    merger_->verify_loaded_weights(prefix + "merger.");
+    for (size_t idx = 0; idx < deepstack_merger_layers_.size(); ++idx) {
+      deepstack_merger_layers_[idx]->verify_loaded_weights(
+          prefix + "deepstack_merger_list." + std::to_string(idx) + ".");
+    }
+    CHECK(is_emb_weight_loaded)
+        << "weight is not loaded for " << prefix + "pos_embed.weight";
+  }
+
+  void merge_loaded_weights() {}
+
  private:
   int hidden_size_ = 0;
   int num_heads_ = 0;
@@ -534,6 +554,7 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
   std::vector<layer::Qwen3_VisionLayer> layers_;
 
   torch::nn::ModuleList deepstack_mergers_{nullptr};
+  torch::nn::ModuleList blocks_{nullptr};
   std::vector<Qwen3_VisionPatchMerger> deepstack_merger_layers_;
   Qwen3_VisionPatchMerger merger_{nullptr};
 
@@ -557,11 +578,24 @@ TORCH_MODULE(Qwen3_VLForConditionalGeneration);
 using Qwen3VLMultimodalProcessor = MultimodalProcessor<Qwen3VLPromptProcessor,
                                                        Qwen2VLImageProcessor,
                                                        Qwen3VLVideoProcessor>;
+#if defined(USE_NPU)
+REGISTER_MULTIMODAL_PROCESSOR_WITH_VARNAME(qwen3_vl_torch,
+                                           qwen3_vl_torch,
+                                           Qwen3VLMultimodalProcessor);
+REGISTER_CAUSAL_VLM_MODEL_WITH_VARNAME(qwen3_vl_torch,
+                                       qwen3_vl_torch,
+                                       Qwen3_VLForConditionalGeneration);
+#define REGISTER_QWEN3_VL_MODEL_ARGS(...) \
+  REGISTER_MODEL_ARGS_WITH_VARNAME(qwen3_vl_torch, qwen3_vl_torch, __VA_ARGS__)
+#else
 REGISTER_MULTIMODAL_PROCESSOR(qwen3_vl, Qwen3VLMultimodalProcessor);
 REGISTER_CAUSAL_VLM_MODEL(qwen3_vl, Qwen3_VLForConditionalGeneration);
 REGISTER_MPOSITION_GENERATOR(qwen3_vl, Qwen3VLMPositionGenerator);
+#define REGISTER_QWEN3_VL_MODEL_ARGS(...) \
+  REGISTER_MODEL_ARGS(qwen3_vl, __VA_ARGS__)
+#endif
 
-REGISTER_MODEL_ARGS(qwen3_vl, [&] {
+REGISTER_QWEN3_VL_MODEL_ARGS([&] {
   // text config
   // LOAD_ARG_OR(attention_dropout, "attention_dropout", 0.0);
   LOAD_ARG_OR(model_type, "model_type", "qwen3_vl");
@@ -620,4 +654,5 @@ REGISTER_MODEL_ARGS(qwen3_vl, [&] {
 
   LOAD_ARG_OR(vocab_size, "text_config.vocab_size", 151936);
 });
+#undef REGISTER_QWEN3_VL_MODEL_ARGS
 }  // namespace xllm

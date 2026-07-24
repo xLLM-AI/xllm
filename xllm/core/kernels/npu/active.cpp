@@ -22,9 +22,13 @@ limitations under the License.
 namespace xllm::kernel::npu {
 
 torch::Tensor active(const torch::Tensor& input, const std::string& act_mode) {
-  if (act_mode != "silu" && act_mode != "swiglu") {
-    LOG(FATAL) << "Only swiglu activation is supported in NPU active";
+  if (act_mode == "gelu" || act_mode == "gelu_pytorch_tanh") {
+    const auto approximate = act_mode == "gelu_pytorch_tanh" ? "tanh" : "none";
+    return at_npu::native::custom_ops::npu_gelu(input, approximate);
   }
-  return at_npu::native::custom_ops::npu_swiglu(input);
+  if (act_mode == "silu" || act_mode == "swiglu") {
+    return at_npu::native::custom_ops::npu_swiglu(input);
+  }
+  LOG(FATAL) << "Unsupported NPU activation: " << act_mode;
 }
 }  // namespace xllm::kernel::npu

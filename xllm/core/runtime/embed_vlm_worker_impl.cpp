@@ -26,6 +26,7 @@ limitations under the License.
 #include <utility>
 
 #include "common/metrics.h"
+#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
@@ -71,6 +72,11 @@ std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
   auto model_output = model_executor_->forward(
       flatten_tokens, flatten_positions, kv_caches_, params);
   auto hidden_states = model_output.hidden_states;
+  if (::xllm::KernelConfig::get_instance()
+          .enable_return_prenorm_hidden_states() &&
+      model_output.residual.defined()) {
+    hidden_states = model_output.residual;
+  }
   ret = device_.synchronize_default_stream();
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
 

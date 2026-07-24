@@ -7,6 +7,7 @@ cc_library(
     oxygen_vision_attention.h
     qwen2_attention.h
     qwen2_vision_attention.h
+    ../npu/npu_rope_layer_impl.h
     qwen3_next_rms_norm.h
     deepseek_v4_rotary_embedding.h
     partial_rotary_embedding.h
@@ -33,6 +34,7 @@ cc_library(
     oxygen_vision_attention.cpp
     qwen2_attention.cpp
     qwen2_vision_attention.cpp
+    ../npu/npu_rope_layer_impl.cpp
     qwen3_next_rms_norm.cpp
     deepseek_v4_rotary_embedding.cpp
     partial_rotary_embedding.cpp

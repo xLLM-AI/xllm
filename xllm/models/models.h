@@ -20,6 +20,7 @@ limitations under the License.
 #include "dit/pipelines/pipeline_flux2.h"                // IWYU pragma: keep
 #include "dit/pipelines/pipeline_flux_control.h"         // IWYU pragma: keep
 #include "dit/pipelines/pipeline_flux_fill.h"            // IWYU pragma: keep
+#include "dit/pipelines/pipeline_joyimage_edit_plus.h"   // IWYU pragma: keep
 #include "dit/pipelines/pipeline_qwenimage_edit_plus.h"  // IWYU pragma: keep
 #include "dit/pipelines/pipeline_wan_i2v.h"              // IWYU pragma: keep
 #include "llm/deepseek_v4.h"                             // IWYU pragma: keep
@@ -62,6 +63,7 @@ limitations under the License.
 #include "vlm/npu/qwen3_vl.h"                            // IWYU pragma: keep
 #include "vlm/npu/qwen3_vl_moe.h"                        // IWYU pragma: keep
 #include "vlm/qwen3_5.h"                                 // IWYU pragma: keep
+#include "vlm/qwen3_vl.h"                                // IWYU pragma: keep
 
 #elif defined(USE_MLU)
 #include "dit/pipelines/pipeline_flux.h"          // IWYU pragma: keep
