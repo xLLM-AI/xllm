@@ -60,7 +60,7 @@ patch_yalantinglibs_config() {
         run_or_die \
             "Failed to patch yalantinglibs config.cmake" \
             sed -i \
-            '54s/target_link_libraries(${ylt_target_name} -libverbs)/target_link_libraries(${ylt_target_name} INTERFACE -libverbs)/' \
+            's|target_link_libraries(${ylt_target_name} -libverbs)|target_link_libraries(${ylt_target_name} INTERFACE -libverbs)|' \
             "${config_file}"
     fi
 }
@@ -121,10 +121,49 @@ install_yalantinglibs() {
     print_success "yalantinglibs installed successfully to ${INSTALL_PREFIX}"
 }
 
+# Install system development headers required by Mooncake v0.3.12
+# (mooncake-store links -lzstd, includes xxhash.h). The runtime libs
+# already ship with the base image; only the -devel symlinks/headers
+# are missing.
+install_mooncake_system_devel() {
+    print_section "Installing system devel packages required by Mooncake"
+    run_or_die "Failed to install system devel packages" \
+        yum install -y zstd-devel xxhash-devel
+    print_success "System devel packages installed: zstd-devel xxhash-devel"
+}
+
+# Install the header-only msgpack-cxx headers that Mooncake v0.3.12's
+# serializer.h expects. No matching yum package exists on the base
+# image, so drop the headers into /usr/local/include/. Header-only,
+# no build step needed.
+install_msgpack_cxx_headers() {
+    print_section "Installing msgpack-cxx headers"
+
+    local version="cpp-6.1.0"
+    local repo_url="https://gitcode.com/gh_mirrors/ms/msgpack-c.git"
+    local work_dir
+    work_dir="$(mktemp -d -t msgpack-cxx-XXXXXX)"
+
+    echo "Cloning msgpack-c ${version} from ${repo_url}"
+    run_or_die "Failed to clone msgpack-c" \
+        git clone --depth 1 --branch "${version}" "${repo_url}" "${work_dir}/msgpack-c"
+
+    echo "Installing msgpack.hpp and msgpack/ into /usr/local/include"
+    run_or_die "Failed to install msgpack.hpp" \
+        cp "${work_dir}/msgpack-c/include/msgpack.hpp" /usr/local/include/
+    run_or_die "Failed to install msgpack/ headers" \
+        cp -r "${work_dir}/msgpack-c/include/msgpack" /usr/local/include/
+
+    rm -rf "${work_dir}"
+    print_success "msgpack-cxx headers installed to /usr/local/include"
+}
+
 main() {
     ensure_dir "${INSTALL_PREFIX}" "Failed to create install directory: ${INSTALL_PREFIX}"
     echo -e "${YELLOW}Installing to: ${INSTALL_PREFIX}${NC}"
 
+    install_mooncake_system_devel
+    install_msgpack_cxx_headers
     install_yalantinglibs
 }
 

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Mooncake/mooncake-store/include/client.h>
+#include <Mooncake/mooncake-store/include/client_service.h>
 #include <glog/logging.h>
 
 #include <string>

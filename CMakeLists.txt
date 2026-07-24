@@ -353,6 +353,11 @@ find_package(nlohmann_json CONFIG REQUIRED)
 find_package(OpenCV CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED)
 find_package(Python COMPONENTS Development REQUIRED)
+
+if(Python_EXECUTABLE AND NOT Python3_EXECUTABLE)
+    set(Python3_EXECUTABLE "${Python_EXECUTABLE}")
+endif()
+find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
 
 if (USE_CXX11_ABI)

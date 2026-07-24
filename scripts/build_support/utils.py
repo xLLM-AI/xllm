@@ -289,6 +289,13 @@ def _get_required_dependency_files() -> dict[str, list[str]]:
                 "config.cmake",
             ),
         ],
+        # Mooncake v0.3.12 mooncake-store links -lzstd (needs the -devel
+        # symlink, not just libzstd.so.1) and includes xxhash.h.
+        "zstd-devel": ["/usr/lib64/libzstd.so"],
+        "xxhash-devel": ["/usr/include/xxhash.h"],
+        # msgpack-cxx headers used by Mooncake v0.3.12's serialize/serializer.h.
+        # Header-only, dropped into /usr/local/include by dependencies.sh.
+        "msgpack-cxx": ["/usr/local/include/msgpack.hpp"],
     }
 
 
