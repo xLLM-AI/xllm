@@ -48,6 +48,7 @@ limitations under the License.
 #include "core/runtime/acl_graph_persistent_param.h"
 #include "core/runtime/base_executor_impl.h"
 #include "core/runtime/options.h"
+#include "core/runtime/speculative_worker_impl.h"
 #include "models/model_registry.h"
 
 // Global test environment for ACL graph executor tests
@@ -1104,6 +1105,41 @@ TEST(SpeculativeConfigTest, MtpAlgorithmClassificationIsCaseInsensitive) {
   EXPECT_FALSE(SpeculativeConfig::is_mtp_algorithm("DFlash"));
   EXPECT_FALSE(SpeculativeConfig::is_mtp_algorithm("Suffix"));
   EXPECT_FALSE(SpeculativeConfig::is_mtp_algorithm("unknown"));
+}
+
+TEST(SpeculativeWorkerDispatchTest, DecodeRequiresEveryDpRankToDecode) {
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  params.parallel.dp_global_token_nums = {1, 1};
+  params.parallel.dp_is_decode = {1, 1};
+  EXPECT_TRUE(should_run_speculative_decode(params));
+
+  params.parallel.dp_global_token_nums = {1, 8095};
+  params.parallel.dp_is_decode = {1, 0};
+  EXPECT_FALSE(should_run_speculative_decode(params));
+}
+
+TEST(SpeculativeWorkerDispatchTest, PreservesSingleDpRankBehavior) {
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  EXPECT_TRUE(should_run_speculative_decode(params));
+
+  params.parallel.dp_global_token_nums = {1};
+  EXPECT_TRUE(should_run_speculative_decode(params));
+
+  params.parallel.dp_is_decode = {1};
+  EXPECT_TRUE(should_run_speculative_decode(params));
+
+  params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  EXPECT_FALSE(should_run_speculative_decode(params));
+}
+
+TEST(SpeculativeWorkerDispatchTest, DecodeRejectsIncompleteDpMetadata) {
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  params.parallel.dp_global_token_nums = {1, 8095};
+  params.parallel.dp_is_decode = {1};
+  EXPECT_FALSE(should_run_speculative_decode(params));
 }
 
 TEST(AclGraphExecutorHybridTest, KvCacheSupportsLinearOnlyLayers) {
