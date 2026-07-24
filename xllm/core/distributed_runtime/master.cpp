@@ -216,17 +216,6 @@ Master::Master(const Options& options, EngineType type)
   const std::optional<std::string> cp_error =
       validate_model_cp(options_, type, cp_model_type, global_world_size);
   CHECK(!cp_error.has_value()) << cp_error.value();
-  if (options_.enable_prefix_cache() && options_.backend() == "llm") {
-    const std::string model_type = util::get_model_type(model_path);
-    if (util::is_deepseek_v4_model_type(model_type)) {
-      LOG(WARNING) << model_type
-                   << " does not support prefix cache with "
-                      "CompositeBlockManager yet, fallback to "
-                      "enable_prefix_cache=false";
-      options_.enable_prefix_cache(false);
-      KVCacheConfig::get_instance().enable_prefix_cache(false);
-    }
-  }
   options_.enable_mla(util::should_enable_mla(model_path, options_.backend()));
   print_startup_banner(model_path, options_.backend(), options_.node_rank());
   LOG(INFO) << "Master init options: " << options_.to_string();

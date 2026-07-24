@@ -121,7 +121,13 @@ void BlockCapacityGuard::compute_reserved_block_num() {
 void BlockCapacityGuard::prefix_cache_for_candidate_sequences() {
   if (::xllm::KVCacheConfig::get_instance().enable_prefix_cache()) {
     for (auto* sequence : candidate_sequences_) {
-      kv_cache_manager_->allocate_shared(sequence);
+      // A candidate may be re-evaluated across capacity-guard passes after it
+      // already mounted its shared prefix. Re-running allocate_shared on a
+      // sequence that holds cache-bearing blocks re-mounts and trips
+      // mount_composite_shared's CHECK (DSV4), so match only fresh sequences.
+      if (!sequence->kv_state().has_any_blocks()) {
+        kv_cache_manager_->allocate_shared(sequence);
+      }
     }
   }
 }

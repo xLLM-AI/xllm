@@ -42,12 +42,10 @@ class Sequence;
 class LinearStateBlockManager final : public BlockManagerImpl {
  public:
   // |chunk_stride| is the linear-state checkpoint stride in tokens (one prefill
-  // chunk), forwarded to the checkpoint index as its hash-domain step. It
-  // defaults to -1 (probe disabled) for the block-level unit tests that drive
-  // the slot pool directly and never exercise the token-based match() override.
-  LinearStateBlockManager(uint32_t num_slots,
-                          int32_t kv_block_size,
-                          int32_t chunk_stride = -1);
+  // chunk), used as block_size for both the slot pool and the prefix-cache hash
+  // domain. Defaults to -1 (probe disabled) for block-level unit tests that
+  // drive the slot pool directly and never exercise the token-based match().
+  LinearStateBlockManager(uint32_t num_slots, int32_t chunk_stride = -1);
   ~LinearStateBlockManager() override = default;
 
   // ---- BlockManagerImpl overrides ----
@@ -79,24 +77,26 @@ class LinearStateBlockManager final : public BlockManagerImpl {
   // admission. |token_ids| is the sequence's full token span; |block_hashes|
   // carries the sequence's precomputed chained per-chunk linear-state hashes
   // (own hash domain, chunk-strided -- not the KV by-block chain), forwarded to
-  // the probe; |existed_shared_blocks|/|mm_data| are unused. The recoverable
-  // length in TOKENS (a multiple of the prefill chunk stride) is written
-  // through |matched_tokens|. The leaf is KV-blind: the composite owns the
-  // cross-leaf min + chunk alignment + KV-block clamp.
+  // the probe; |existed_shared_blocks|/|mm_data| are unused. Reach in tokens
+  // is derived from `returned.size() * block_size()` (block_size() is the
+  // chunk stride), symmetric with KV/SWA. The leaf is KV-blind: the composite
+  // owns the cross-leaf min + chunk alignment + KV-block clamp.
   //
   // The recurrent state is cumulatively compressed, so at most ONE checkpoint
-  // is mounted -- the single deepest hit, whose state subsumes every earlier
-  // one. On a hit the return vector holds that one checkpoint block, fetched
-  // via find() (refcount+1, LRU-promoted) so it stays pinned until restored;
-  // the caller stashes it as the class-A restore source WITHOUT adding it to
-  // the sequence's LINEAR block vector (that slot is the live, in-place-updated
-  // one). Returns an empty vector when nothing hits.
+  // survives -- the single deepest hit, whose state subsumes every earlier
+  // one. The returned vector has the shape `[inv, inv, ..., deepest_valid]`
+  // at chunk-stride granularity (deepest slot fetched via find(), so refcount
+  // is +1 and it is LRU-promoted, pinned until restored). The caller
+  // (composite) picks the deepest slot out as the class-A restore source and
+  // never mounts LINEAR blocks into the sequence's live LINEAR vector (that
+  // slot is the live, in-place-updated one). Reach in tokens is
+  // `returned.size() * block_size()` where block_size() is the chunk stride;
+  // an empty vector means nothing hit.
   std::vector<Block> allocate_shared(
       const Slice<int32_t>& token_ids,
       const Slice<Block>& existed_shared_blocks = {},
       const MMData& mm_data = MMData(),
-      const Slice<XXH3Key>& block_hashes = {},
-      size_t* matched_tokens = nullptr) override;
+      const Slice<XXH3Key>& block_hashes = {}) override;
   void cache(const Slice<int32_t>& token_ids,
              std::vector<Block>& blocks,
              size_t existed_shared_blocks_num = 0,

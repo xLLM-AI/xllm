@@ -76,8 +76,7 @@ class XTensorBlockManagerImpl : public BlockManager {
       const Slice<int32_t>& token_ids,
       const Slice<Block>& existed_shared_blocks = {},
       const MMData& mm_data = MMData(),
-      const Slice<XXH3Key>& block_hashes = {},
-      size_t* matched_tokens = nullptr) override;
+      const Slice<XXH3Key>& block_hashes = {}) override;
 
   // Cache blocks (prefix cache not supported)
   void cache(const Slice<int32_t>& token_ids,

@@ -136,6 +136,7 @@ void KVCacheState::incr_shared_blocks_num(BlockType type, size_t num) {
 void KVCacheState::erase_blocks(BlockType type) {
   composite_blocks_.erase(type);
   num_owned_shared_blocks_.erase(type);
+  num_cached_blocks_.erase(type);
   if (type == BlockType::LINEAR) {
     pending_linear_save_hash_.reset();
     linear_restore_src_block_.reset();
@@ -158,16 +159,23 @@ size_t KVCacheState::shared_blocks_num(BlockType type) const {
 }
 
 size_t KVCacheState::shared_tokens_num() const {
-  // Shared token count is a sequence-level value: shared_blocks * block_size is
-  // the same across block types. Read it off whichever type carries shared
-  // blocks (KV is the canonical source).
+  // Shared token count is a sequence-level value: shared_blocks * block_size
+  // is the same across cache-bearing block types by construction (composite
+  // trim keeps every leaf aligned to a common safe_hit). Read it off any type
+  // that carries shared blocks. Use the first VALID block in the vector for
+  // block_size -- vec[0] may be an invalid placeholder in the gap-tolerant
+  // SWA case (last_hit at position K, vec_len = K+1, positions [0..K-1] may
+  // include invalid placeholders), and reading .size() off an invalid Block
+  // returns 0.
   for (const auto& [type, shared] : num_owned_shared_blocks_) {
     if (shared == 0) {
       continue;
     }
     const Slice<Block> bs = blocks(type);
-    if (!bs.empty()) {
-      return shared * bs[0].size();
+    for (const auto& b : bs) {
+      if (b.is_valid()) {
+        return shared * b.size();
+      }
     }
   }
   return 0;
@@ -215,6 +223,34 @@ void KVCacheState::add_shared_blocks(BlockType type,
   CHECK_LT(num_shared_tokens, current_total_num_tokens);
   // update the kv cache position
   kv_cache_tokens_num_ = num_shared_tokens;
+}
+
+void KVCacheState::mount_composite_shared(BlockType type,
+                                          std::vector<Block>&& shared_blocks) {
+  if (shared_blocks.empty()) {
+    return;
+  }
+  std::vector<Block>& bs = composite_blocks_[type];
+  CHECK(bs.empty()) << "mount_composite_shared: existing blocks under type "
+                    << static_cast<int32_t>(type);
+  const size_t count = shared_blocks.size();
+  bs = std::move(shared_blocks);
+  num_owned_shared_blocks_[type] = static_cast<uint32_t>(count);
+  // Mounted blocks are already resident in the prefix cache (they came from
+  // find()); the pre-grow hook consults num_cached_blocks to skip them. Chain
+  // hashes are recomputed from tokens inside PrefixCache::insert (compute
+  // path), so we don't have to worry about trailing invalid placeholders
+  // here.
+  num_cached_blocks_[type] = count;
+}
+
+size_t KVCacheState::num_cached_blocks(BlockType type) const {
+  const auto it = num_cached_blocks_.find(type);
+  return it == num_cached_blocks_.end() ? 0 : it->second;
+}
+
+void KVCacheState::set_num_cached_blocks(BlockType type, size_t n) {
+  num_cached_blocks_[type] = n;
 }
 
 void KVCacheState::set_slice_window_size(uint32_t size) {
@@ -335,6 +371,7 @@ void KVCacheState::advance_group_transfer_block_idx(BlockType type,
 void KVCacheState::reset() {
   kv_cache_tokens_num_ = 0;
   num_owned_shared_blocks_.clear();
+  num_cached_blocks_.clear();
   pushed_local_block_count_ = 0;
   composite_blocks_.clear();
   src_blocks_.clear();

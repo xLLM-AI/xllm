@@ -292,7 +292,7 @@ Sequence::Sequence(const Sequence& other)
       num_tokens_(other.num_tokens_),
       token_to_count_map_(other.token_to_count_map_),
       num_prompt_tokens_(other.num_prompt_tokens_),
-      block_hashes_(other.block_hashes_),
+      block_hashes_by_stride_(other.block_hashes_by_stride_),
       hash_block_size_(other.hash_block_size_),
       linear_state_hashes_(other.linear_state_hashes_),
       linear_hash_stride_(other.linear_hash_stride_),
@@ -754,27 +754,44 @@ void Sequence::add_shared_host_blocks(BlockType type,
   host_kv_state_.add_shared_blocks(type, std::move(blocks), num_tokens_);
 }
 
+Slice<XXH3Key> Sequence::block_hashes() const {
+  const auto it = block_hashes_by_stride_.find(hash_block_size_);
+  if (it == block_hashes_by_stride_.end()) {
+    return {};
+  }
+  return it->second;
+}
+
 void Sequence::update_block_hashes(uint32_t block_size,
                                    BlockHasherType hasher_type) {
   if (block_size == 0) {
     return;
   }
+  // DSV4 admission probes SWA / C4 / C128 back-to-back with different strides
+  // (base / 4*base / 128*base). Each stride keeps its own chain in
+  // `block_hashes_by_stride_`, so switching strides extends that stride's chain
+  // incrementally instead of discarding and rebuilding the whole prompt chain
+  // every probe. Select this stride as the one block_hashes() returns.
   hash_block_size_ = block_size;
   extend_prefix_hashes(hasher_type,
                        mm_data_,
                        this->tokens(),
                        block_size,
                        /*boundary_blocks=*/num_tokens_ / block_size,
-                       block_hashes_);
+                       block_hashes_by_stride_[block_size]);
 }
 
 void Sequence::invalidate_block_hashes_from(size_t token_index) {
-  if (block_hashes_.empty() || hash_block_size_ == 0) {
-    return;
-  }
-  const size_t first_stale_block = token_index / hash_block_size_;
-  if (first_stale_block < block_hashes_.size()) {
-    block_hashes_.resize(first_stale_block);
+  // Truncate every stride's chain at the first block the rewrite touched; each
+  // stride recomputes lazily on its next update_block_hashes().
+  for (auto& [block_size, hashes] : block_hashes_by_stride_) {
+    if (hashes.empty() || block_size == 0) {
+      continue;
+    }
+    const size_t first_stale_block = token_index / block_size;
+    if (first_stale_block < hashes.size()) {
+      hashes.resize(first_stale_block);
+    }
   }
 }
 

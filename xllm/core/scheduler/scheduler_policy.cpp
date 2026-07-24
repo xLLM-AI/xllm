@@ -416,8 +416,15 @@ bool SchedulerPolicy::allocate_for_prefill(Sequence* seq,
 
 void SchedulerPolicy::allocate_shared_blocks_for(Sequence* seq,
                                                  SchedulerState& state) {
-  if (seq->kv_state().num_blocks(BlockType::KV) == 0) {
+  if (!seq->kv_state().has_any_blocks()) {
     state.kv_cache_manager->allocate_shared(seq);
+    return;
+  }
+  // DSV4 (SWA_COMPRESSED) holds SWA/C4/C128 but never a KV leaf, so a
+  // num_blocks(KV)==0 guard alone would treat an already-mounted DSV4 sequence
+  // as fresh and re-run allocate_shared -> mount_composite_shared CHECK. Skip
+  // re-match for the KV-less composite; only flat-KV shapes re-match below.
+  if (seq->kv_state().num_blocks(BlockType::KV) == 0) {
     return;
   }
   if (seq->is_chunked_prefill_stage()) {

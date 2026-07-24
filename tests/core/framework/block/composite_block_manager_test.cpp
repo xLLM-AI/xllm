@@ -84,7 +84,10 @@ Sequence MakeTestSequence(size_t index,
   StoppingChecker stopping_checker;
   stopping_checker.set_max_generated_tokens(256);
   SequenceParams seq_params;
-  seq_params.seq_capacity = 5000;
+  // Large enough to hold DSV4-scale prompts (>= a full C128 block = 16384
+  // tokens). Individual tests can still use short prompts; sequence capacity
+  // just has to bound `num_tokens + max_generated_tokens`.
+  seq_params.seq_capacity = 65536;
   seq_params.stopping_checker = &stopping_checker;
   seq_params.sampling_param = &sampling_param;
   seq_params.skip_special_tokens = true;
@@ -526,6 +529,205 @@ TEST(CompositeBlockManagerTest, CapacityStatsUseFinestAdmissionLeaf) {
   EXPECT_EQ(manager.num_free_blocks(), total - c4_used);
 
   manager.deallocate_for_sequence(&seq);
+}
+
+// DSV4 prefix cache: a fresh sequence with the same prompt as a previously
+// released sequence should mount shared blocks from all three prefix-cache
+// leaves (SWA / C4 / C128). The composite takes the cross-leaf min hit length
+// clamped to a C128 block, so the prompt has to span at least one C128 block
+// (128 * base = 16384 tokens) for the hit to be non-trivial. Uses a 2*C128
+// prompt so we get a meaningful hit even after the exact-repeat pop.
+TEST(CompositeBlockManagerTest, Dsv4PrefixCacheHitOnRepeatedPrefix) {
+  const uint32_t base_num_blocks = 4096;
+  // Sliding window covers a couple C128 blocks worth of tokens so the SWA
+  // tail-continuity check has room to succeed even after the exact-repeat pop.
+  const uint32_t window_size = 4 * kBaseBlockSize;
+  const uint32_t max_seqs_per_batch = 4;
+  BlockManager::Options opts = MakeCompositeOptions(
+      base_num_blocks, kBaseBlockSize, window_size, max_seqs_per_batch);
+  // max_tokens_per_batch has to accommodate the prompt so allocate_sequence
+  // does not exceed the SWA burst budget.
+  opts.max_tokens_per_batch(3 * kBlockSizeRatio128);
+  ASSERT_TRUE(opts.enable_prefix_cache());
+  CompositeBlockManager manager(build_composite_leaves(opts));
+
+  // First sequence: a 2*C128 prompt (32768 tokens) so both C4 and C128 have
+  // multiple full blocks worth of cacheable prefix. Mark all tokens as
+  // forwarded so the pre-grow hook (fired during the NEXT allocate) has data
+  // to insert -- and we drive one extra allocate to trigger it explicitly.
+  const size_t num_tokens = 2 * kBlockSizeRatio128;
+  const std::vector<int32_t> prompt(num_tokens, 7);
+  Sequence seq_first = MakeTestSequence(0, prompt);
+  ASSERT_TRUE(manager.allocate_sequence(&seq_first, num_tokens));
+  seq_first.kv_state().incr_kv_cache_tokens_num(num_tokens);
+  // deallocate_for_sequence runs the pre-grow hook once more (via
+  // cache_for_sequence's fan-out), flushing the residual full blocks.
+  manager.deallocate_for_sequence(&seq_first);
+  seq_first.reset();
+
+  // The prefix cache under SWA / C4 / C128 should now hold the prompt's full
+  // blocks. On a second sequence with the same prompt, admission mounts from
+  // all three leaves and pins kv_cache_tokens_num to the safe min hit.
+  Sequence seq_hit = MakeTestSequence(1, prompt);
+  manager.allocate_shared_for_sequence(&seq_hit);
+  EXPECT_GT(seq_hit.kv_state().shared_blocks_num(BlockType::SWA), 0u);
+  EXPECT_GT(seq_hit.kv_state().shared_blocks_num(BlockType::C4), 0u);
+  EXPECT_GT(seq_hit.kv_state().shared_blocks_num(BlockType::C128), 0u);
+  const size_t kv_tokens = seq_hit.kv_state().kv_cache_tokens_num();
+  EXPECT_GT(kv_tokens, 0u);
+  EXPECT_LT(kv_tokens, num_tokens);  // exact-repeat pop kept at least one c128
+  EXPECT_EQ(kv_tokens % kBlockSizeRatio128, 0u)
+      << "safe_hit_tokens must be a multiple of the C128 block stride";
+  // SWA vector length matches safe_hit / base and the tail carries valid
+  // blocks.
+  const std::vector<Block> hit_swa = SwaBlocks(seq_hit);
+  EXPECT_EQ(hit_swa.size(), kv_tokens / kBaseBlockSize);
+  EXPECT_TRUE(hit_swa.back().is_valid());
+
+  manager.deallocate_for_sequence(&seq_hit);
+}
+
+// DSV4 prefix cache: a fresh sequence with a completely different prompt should
+// miss cleanly (no shared mount, kv_cache_tokens_num unchanged).
+TEST(CompositeBlockManagerTest, Dsv4PrefixCacheMissCleanly) {
+  const uint32_t base_num_blocks = 4096;
+  const uint32_t window_size = 4 * kBaseBlockSize;
+  const uint32_t max_seqs_per_batch = 4;
+  BlockManager::Options opts = MakeCompositeOptions(
+      base_num_blocks, kBaseBlockSize, window_size, max_seqs_per_batch);
+  opts.max_tokens_per_batch(3 * kBlockSizeRatio128);
+  CompositeBlockManager manager(build_composite_leaves(opts));
+
+  const size_t num_tokens = 2 * kBlockSizeRatio128;
+  const std::vector<int32_t> prompt_a(num_tokens, 7);
+  Sequence seq_a = MakeTestSequence(0, prompt_a);
+  ASSERT_TRUE(manager.allocate_sequence(&seq_a, num_tokens));
+  seq_a.kv_state().incr_kv_cache_tokens_num(num_tokens);
+  manager.deallocate_for_sequence(&seq_a);
+  seq_a.reset();
+
+  // A sequence with a totally different prompt should not share any block.
+  std::vector<int32_t> prompt_b(num_tokens, 0);
+  for (size_t i = 0; i < prompt_b.size(); ++i) {
+    prompt_b[i] = static_cast<int32_t>(i + 100);
+  }
+  Sequence seq_b = MakeTestSequence(1, prompt_b);
+  manager.allocate_shared_for_sequence(&seq_b);
+  EXPECT_EQ(seq_b.kv_state().shared_blocks_num(BlockType::SWA), 0u);
+  EXPECT_EQ(seq_b.kv_state().shared_blocks_num(BlockType::C4), 0u);
+  EXPECT_EQ(seq_b.kv_state().shared_blocks_num(BlockType::C128), 0u);
+  EXPECT_EQ(seq_b.kv_state().kv_cache_tokens_num(), 0u);
+
+  manager.deallocate_for_sequence(&seq_b);
+}
+
+// SWA slid-out blocks should enter the prefix cache via the pre-grow hook (v2b:
+// hook fires at every allocate_sequence, insertion is incremental and cached
+// blocks survive slid-out release through the ref<=2u path). A follow-up
+// sequence with the same prompt should hit those cached blocks.
+TEST(CompositeBlockManagerTest, SlidingWindowSlidOutBlocksEnterPrefixCache) {
+  const uint32_t base_num_blocks = 4096;
+  // Window covers a small number of base blocks so slide-out happens quickly.
+  const uint32_t sliding_window_blocks_per_sequence = 3;
+  const uint32_t window_size =
+      sliding_window_blocks_per_sequence * kBaseBlockSize;
+  const uint32_t max_seqs_per_batch = 4;
+  BlockManager::Options opts = MakeCompositeOptions(
+      base_num_blocks, kBaseBlockSize, window_size, max_seqs_per_batch);
+  opts.max_tokens_per_batch(3 * kBlockSizeRatio128);
+  ASSERT_TRUE(opts.enable_prefix_cache());
+  CompositeBlockManager manager(build_composite_leaves(opts));
+
+  // Prompt spans two full C128 blocks so the min-across-leaves gate can
+  // survive AND the exact-repeat pop (one c128 stride) still leaves shared
+  // blocks behind. A single-c128 prompt would end up entirely popped.
+  const size_t num_tokens = 2 * kBlockSizeRatio128;
+  const std::vector<int32_t> prompt(num_tokens, 7);
+  Sequence seq_first = MakeTestSequence(0, prompt);
+  ASSERT_TRUE(manager.allocate_sequence(&seq_first, num_tokens));
+  seq_first.kv_state().incr_kv_cache_tokens_num(num_tokens);
+  // The SWA leaf should have released everything but the last window-sized
+  // slab back to the pool (as invalid placeholders), and those blocks landed
+  // in the prefix cache via the pre-grow hook before release.
+  manager.deallocate_for_sequence(&seq_first);
+  seq_first.reset();
+
+  // A second sequence with the same prompt should hit the cached SWA tail.
+  Sequence seq_hit = MakeTestSequence(1, prompt);
+  manager.allocate_shared_for_sequence(&seq_hit);
+  EXPECT_GT(seq_hit.kv_state().shared_blocks_num(BlockType::SWA), 0u);
+  EXPECT_GT(seq_hit.kv_state().shared_blocks_num(BlockType::C4), 0u);
+  EXPECT_GT(seq_hit.kv_state().shared_blocks_num(BlockType::C128), 0u);
+
+  manager.deallocate_for_sequence(&seq_hit);
+}
+
+// v2b: pre-grow hook advances KVCacheState::num_cached_blocks incrementally
+// across chunked-prefill steps. First chunk: cursor at 0. Second chunk (after
+// forwarding chunk 1's tokens): cursor at chunk-1's full-block count.
+TEST(CompositeBlockManagerTest, Dsv4PrefixCachePreHookCursorAdvances) {
+  const uint32_t base_num_blocks = 4096;
+  const uint32_t window_size = 4 * kBaseBlockSize;
+  const uint32_t max_seqs_per_batch = 4;
+  BlockManager::Options opts = MakeCompositeOptions(
+      base_num_blocks, kBaseBlockSize, window_size, max_seqs_per_batch);
+  opts.max_tokens_per_batch(4 * kBlockSizeRatio128);
+  CompositeBlockManager manager(build_composite_leaves(opts));
+
+  // Two-chunk prompt (2*C128). Chunk 1 is a single C128 block wide.
+  const size_t chunk = kBlockSizeRatio128;
+  const size_t total = 2 * chunk;
+  Sequence seq = MakeTestSequence(0, std::vector<int32_t>(total, 7));
+
+  // Chunk 1: allocate + forward.
+  ASSERT_TRUE(manager.allocate_sequence(&seq, chunk));
+  EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::SWA), 0u)
+      << "pre-grow hook has nothing to cache on the very first allocate: kv=0";
+  EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::C4), 0u);
+  EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::C128), 0u);
+  seq.kv_state().incr_kv_cache_tokens_num(chunk);
+
+  // Chunk 2 allocation triggers the pre-grow hook, which now sees kv=chunk
+  // worth of forwarded tokens and inserts them.
+  ASSERT_TRUE(manager.allocate_sequence(&seq, total));
+  EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::SWA),
+            chunk / kBaseBlockSize);
+  EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::C4),
+            chunk / kBlockSizeRatio4);
+  EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::C128),
+            chunk / kBlockSizeRatio128);
+
+  manager.deallocate_for_sequence(&seq);
+}
+
+// v2b: exact-repeat safe-hit hits the pop path -- when a fresh sequence has a
+// prompt whose entire length is cached, safe_hit_tokens is popped by one
+// c128 block worth of tokens so the forward has data to process. The test
+// verifies kv_cache_tokens_num after mount is strictly less than the prompt.
+TEST(CompositeBlockManagerTest, Dsv4PrefixCacheExactRepeatPopsOneC128) {
+  const uint32_t base_num_blocks = 4096;
+  const uint32_t window_size = 4 * kBaseBlockSize;
+  const uint32_t max_seqs_per_batch = 4;
+  BlockManager::Options opts = MakeCompositeOptions(
+      base_num_blocks, kBaseBlockSize, window_size, max_seqs_per_batch);
+  opts.max_tokens_per_batch(4 * kBlockSizeRatio128);
+  CompositeBlockManager manager(build_composite_leaves(opts));
+
+  const size_t num_tokens = 3 * kBlockSizeRatio128;
+  const std::vector<int32_t> prompt(num_tokens, 42);
+  Sequence seq_first = MakeTestSequence(0, prompt);
+  ASSERT_TRUE(manager.allocate_sequence(&seq_first, num_tokens));
+  seq_first.kv_state().incr_kv_cache_tokens_num(num_tokens);
+  manager.deallocate_for_sequence(&seq_first);
+  seq_first.reset();
+
+  Sequence seq_hit = MakeTestSequence(1, prompt);
+  manager.allocate_shared_for_sequence(&seq_hit);
+  // Full-length hit → pop one c128 block. Expect kv = num_tokens - c128.
+  EXPECT_EQ(seq_hit.kv_state().kv_cache_tokens_num(),
+            num_tokens - kBlockSizeRatio128);
+
+  manager.deallocate_for_sequence(&seq_hit);
 }
 
 }  // namespace xllm
