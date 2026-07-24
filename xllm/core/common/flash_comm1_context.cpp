@@ -43,14 +43,6 @@ int32_t local_num_tokens_for_rank_impl(int32_t num_tokens,
   return base + (rank < remainder ? 1 : 0);
 }
 
-int64_t shard_start_for_rank_impl(int32_t num_tokens,
-                                  int32_t world_size,
-                                  int32_t rank) {
-  const int32_t base = num_tokens / world_size;
-  const int32_t remainder = num_tokens % world_size;
-  return static_cast<int64_t>(rank) * base + std::min(rank, remainder);
-}
-
 }  // namespace
 
 FlashComm1ContextScope::FlashComm1ContextScope(const FlashComm1Context* ctx)
@@ -83,15 +75,6 @@ std::vector<int32_t> token_num_list(const FlashComm1Context& ctx) {
     token_nums[rank] = local_num_tokens_for_rank(ctx, rank);
   }
   return token_nums;
-}
-
-int64_t get_shard_start(const FlashComm1Context& ctx) {
-  return shard_start_for_rank_impl(
-      ctx.original_num_tokens, ctx.tp_world_size, ctx.tp_rank);
-}
-
-int64_t get_shard_end(const FlashComm1Context& ctx) {
-  return get_shard_start(ctx) + ctx.local_num_tokens;
 }
 
 torch::Tensor pad_rows_by_copy(const torch::Tensor& input,
@@ -274,23 +257,6 @@ RowParallelReduceMode row_parallel_reduce_mode_for_fc1(
     const FlashComm1Context& ctx) {
   return ctx.enable_mmrs_fusion ? RowParallelReduceMode::MATMUL_REDUCE_SCATTER
                                 : RowParallelReduceMode::REDUCE_SCATTER;
-}
-
-torch::Tensor maybe_chunk_residual(const torch::Tensor& residual,
-                                   int32_t tp_rank,
-                                   int32_t tp_world_size) {
-  if (tp_world_size <= 1) {
-    return residual;
-  }
-
-  CHECK_GE(tp_rank, 0);
-  CHECK_LT(tp_rank, tp_world_size);
-  const int32_t num_tokens = static_cast<int32_t>(residual.size(0));
-  const int64_t start =
-      shard_start_for_rank_impl(num_tokens, tp_world_size, tp_rank);
-  const int64_t end = start + local_num_tokens_for_rank_impl(
-                                  num_tokens, tp_world_size, tp_rank);
-  return residual.slice(0, start, end).contiguous();
 }
 
 torch::Tensor maybe_shard_residual(const torch::Tensor& residual,

@@ -348,7 +348,7 @@ struct MatmulReduceScatterParams {
   std::string reduce_op = "sum";
   int64_t comm_turn = 0;
   int64_t stream_mode = 1;
-  std::string comm_mode = "ai_cpu";
+  std::string comm_mode = "aiv";
 };
 
 // Quantized matmul parameters (NPU aclnnQuantMatmulV4 path).

@@ -76,10 +76,6 @@ int32_t local_num_tokens_for_rank(const FlashComm1Context& ctx, int32_t rank);
 
 std::vector<int32_t> token_num_list(const FlashComm1Context& ctx);
 
-int64_t get_shard_start(const FlashComm1Context& ctx);
-
-int64_t get_shard_end(const FlashComm1Context& ctx);
-
 torch::Tensor pad_rows_by_copy(const torch::Tensor& input, int64_t padded_rows);
 
 FlashComm1Context build_flash_comm1_context(int32_t num_tokens,
@@ -99,10 +95,6 @@ torch::Tensor maybe_pad_and_reduce(torch::Tensor input,
 
 RowParallelReduceMode row_parallel_reduce_mode_for_fc1(
     const FlashComm1Context& ctx);
-
-torch::Tensor maybe_chunk_residual(const torch::Tensor& residual,
-                                   int32_t tp_rank,
-                                   int32_t tp_world_size);
 
 torch::Tensor maybe_shard_residual(const torch::Tensor& residual,
                                    const FlashComm1Context& ctx);
