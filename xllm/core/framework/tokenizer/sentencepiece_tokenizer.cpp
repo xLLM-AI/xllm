@@ -150,6 +150,9 @@ bool SentencePieceTokenizer::encode(const std::string_view& text,
                                     std::vector<int32_t>* ids,
                                     bool add_special_tokens,
                                     int32_t max_sequence_length) const {
+  // max_sequence_length is not implemented for SentencePieceTokenizer.
+  (void)max_sequence_length;
+
   // prepend prefix tokens if exists
   if (!prefix_token_ids_.empty()) {
     ids->insert(

@@ -28,6 +28,8 @@ limitations under the License.
 namespace xllm {
 
 // a tokenizer that uses google/SentencePiece
+// max_sequence_length is accepted for interface compatibility, but padding to
+// that length is not implemented by this tokenizer.
 class SentencePieceTokenizer : public Tokenizer {
  public:
   SentencePieceTokenizer(const std::string_view& dir_path,

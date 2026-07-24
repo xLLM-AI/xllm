@@ -29,6 +29,8 @@ class Tokenizer {
  public:
   virtual ~Tokenizer() = default;
 
+  // max_sequence_length is currently honored by FastTokenizer only.
+  // Other text tokenizer implementations may accept but ignore it.
   virtual bool encode(const std::string_view& text,
                       std::vector<int32_t>* ids,
                       bool add_special_tokens = true,

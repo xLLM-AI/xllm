@@ -164,7 +164,9 @@ class MistralModelImpl : public torch::nn::Module {
                                      model_args.rope_theta(),
                                      options);
 
-    int32_t mask_value = FLAGS_enable_chunked_prefill ? -9984 : 1;
+    int32_t mask_value =
+        ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill() ? -9984
+                                                                         : 1;
     attn_mask_ = layer::AttentionMask(options.device(),
                                       options.dtype().toScalarType(),
                                       /*mask_value=*/mask_value);
@@ -209,37 +211,67 @@ class MistralModelImpl : public torch::nn::Module {
         const_cast<ModelInputParams&>(input_params);
     torch::Tensor max_of_seq =
         torch::max(input_params.attention.device.kv_seq_lens);
-    max_seq_len_ = FLAGS_enable_chunked_prefill
-                       ? std::max(max_of_seq.item<int>(), max_seq_len_)
-                       : 128;
+    max_seq_len_ =
+        ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()
+            ? std::max(max_of_seq.item<int>(), max_seq_len_)
+            : 128;
 
     torch::Tensor attn_mask;
 
-    if (FLAGS_enable_chunked_prefill) {
-      LOG(FATAL)
-          << "Flux2 text encoder (Mistral) does not support chunked_prefill. "
-          << "Please set --enable_chunked_prefill=false and restart.";
+    if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
+      // LOG(FATAL)
+      //     << "Flux2 text encoder (Mistral) does not support chunked_prefill.
+      //     "
+      //     << "Please set --enable_chunked_prefill=false and restart.";
       // Use the original logic
-      int max_kv_seq = input_params.meta.kv_max_seq_len;
-      int num_sequences = input_params.meta.num_sequences;
+      int32_t max_kv_seq = input_params.meta.kv_max_seq_len;
+      int32_t num_sequences = input_params.meta.num_sequences;
       if (num_sequences > 0) {
         std::vector<torch::Tensor> req_mask_vec;
         req_mask_vec.reserve(num_sequences);
-        for (int j = 0; j < num_sequences; j++) {
-          auto mask = attn_mask_.gen_append_mask(
-              input_params.attention.host.q_seq_lens[j],
-              input_params.attention.host.kv_seq_lens[j],
-              max_kv_seq,
-              cos_pos.dtype().toScalarType(),
-              cos_pos.device());
+        int64_t row_offset = 0;
+        int64_t token_offset = 0;
+        for (int32_t j = 0; j < num_sequences; j++) {
+          int32_t q_len = input_params.attention.host.q_seq_lens[j];
+          int32_t kv_len = input_params.attention.host.kv_seq_lens[j];
+          int64_t pad_count = 0;
+          int64_t token_end =
+              std::min<int64_t>(tokens.size(0), token_offset + q_len);
+          if (token_offset < token_end) {
+            auto token_slice = tokens.slice(0, token_offset, token_end);
+            auto is_pad_cpu = (token_slice == 11).cpu();
+            for (int64_t i = 0; i < is_pad_cpu.size(0); ++i) {
+              if (is_pad_cpu[i].item<bool>()) {
+                pad_count++;
+              } else {
+                break;
+              }
+            }
+          }
+
+          auto mask = attn_mask_.gen_append_mask(q_len,
+                                                 kv_len,
+                                                 max_kv_seq,
+                                                 cos_pos.dtype().toScalarType(),
+                                                 cos_pos.device());
+          if (pad_count > 0) {
+            int64_t pad_cols = std::min<int64_t>(pad_count, mask.size(1));
+            int64_t pad_rows = std::min<int64_t>(pad_count, mask.size(0));
+            mask.slice(0, 0, pad_rows).fill_(-9984);
+            mask.slice(1, 0, pad_cols).fill_(-9984);
+          }
           req_mask_vec.emplace_back(mask);
+          row_offset += q_len;
+          token_offset += q_len;
         }
         attn_mask = torch::cat(req_mask_vec, 0);
+        LOG(INFO) << "chunk prefill attn_mask dtype: " << attn_mask.dtype()
+                  << ", cos_pos dtype: " << cos_pos.dtype()
+                  << ", h dtype: " << h.dtype()
+                  << ", attn_mask sizes: " << attn_mask.sizes();
       }
     } else if (input_params.meta.batch_forward_type.is_prefill()) {
       int64_t seq_len = h.size(0);
-      bool is_bf16 = (cos_pos.scalar_type() == torch::kBFloat16);
-      // float min_dtype = is_bf16 ? -3.389538e+38f : -65504.0f;
       float min_dtype = 1.0f;
       auto opts = torch::TensorOptions()
                       .dtype(cos_pos.dtype().toScalarType())

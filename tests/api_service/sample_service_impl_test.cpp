@@ -34,6 +34,9 @@ class CharTokenizer final : public Tokenizer {
               std::vector<int32_t>* ids,
               bool add_special_tokens = true,
               int32_t max_sequence_length = 0) const override {
+    // max_sequence_length is not implemented by this test tokenizer.
+    (void)max_sequence_length;
+
     if (ids == nullptr) {
       return false;
     }
@@ -86,6 +89,9 @@ class UnstableLiteralTokenizer final : public Tokenizer {
               std::vector<int32_t>* ids,
               bool add_special_tokens = true,
               int32_t max_sequence_length = 0) const override {
+    // max_sequence_length is not implemented by this test tokenizer.
+    (void)max_sequence_length;
+
     if (ids == nullptr) {
       return false;
     }

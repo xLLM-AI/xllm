@@ -20,7 +20,7 @@ limitations under the License.
 
 #include <map>
 
-#include "common/global_flags.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/layers/common/attention_mask.h"
 #include "loader/mistral_decoder_loader.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
@@ -70,11 +70,15 @@ void NpuMistralDecoderLayerImpl::param_from_args(
   param.enableSwiGLU = true;
   param.enableLcoc = is_prefill;
   param.enableSpeculate = false;
-  param.enableSplitFuse = FLAGS_enable_chunked_prefill && is_prefill;
+  param.enableSplitFuse =
+      ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill() &&
+      is_prefill;
   param.enableLora = false;
   param.loraEnableGMM = false;
+
   // flux2 module text encoder disable isTriuMask
   param.disableisTriuMask = true;
+
   // Quantization settings (adjust as needed)
   param.packQuantType = {1, 1};
   param.linearQuantType = {0, -1, -1, 0, 0, -1, 0};
@@ -251,7 +255,8 @@ void NpuMistralDecoderLayerImpl::build_node_variant_pack(
   node.variantPack.inTensors.at(kWeightCountPerLayer + 10) =
       atb_speed::Utils::AtTensor2Tensor(
           input_params.attention.device.new_cache_slots);
-  if (is_prefill && FLAGS_enable_chunked_prefill) {
+  if (is_prefill &&
+      ::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
     node.variantPack.inTensors.at(kWeightCountPerLayer + 11) =
         atb_speed::Utils::AtTensor2Tensor(
             input_params.attention.device.q_seq_lens);

@@ -39,6 +39,7 @@ class FakeTokenizer : public Tokenizer {
     (void)text;
     (void)ids;
     (void)add_special_tokens;
+    // max_sequence_length is not implemented by this fake tokenizer.
     (void)max_sequence_length;
     return false;
   }

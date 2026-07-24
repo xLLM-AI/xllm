@@ -448,11 +448,6 @@ class Mistral3_VisionTransformerImpl : public torch::nn::Module {
 
     // PatchMerger: RMSNorm + unfold + Linear + MLP
     hidden_states = merger_(hidden_states, image_grid_thw);
-    torch::save(hidden_states,
-                "/export/home/weinan5/wangshuibin/mistral3_vision_tensor/"
-                "01_cpp_mistral_vision_tensor/"
-                "03_mistral3_generate_vision_transformer/"
-                "03_02_0715_after_merger_mistral3_vision_output.pt");
     return hidden_states;
   }
 
@@ -617,6 +612,8 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
   }
 
   // ==================== Forward ====================
+  // Remove bos token (line 4 in Flux2 chat_template.jinja) to adapt xLLM
+  // default add_special_tokens behavior
   ModelOutput forward(const torch::Tensor& tokens,
                       const torch::Tensor& positions,
                       std::vector<KVCache>& kv_caches,
@@ -639,10 +636,7 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
                          .to(model_output.aux_hidden_states.device());
       auto selected =
           model_output.aux_hidden_states.index_select(/*dim=*/0, indices);
-      torch::save(selected,
-                  "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/"
-                  "dump_flux2_tensor/01_cpp_mistral3_relatives_tensor/"
-                  "02_modify_mistral3_out.pt");
+
       return ModelOutput(selected);
     }
     return model_output;
@@ -733,7 +727,6 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
       language_model_->verify_loaded_weights("language_model.model.");
       lm_head_->verify_loaded_weights("language_model.lm_head.");
     }
-    LOG(INFO) << "Mistral3ForConditionalGeneration loaded successfully.";
   }
 
   // ==================== Lifecycle ====================

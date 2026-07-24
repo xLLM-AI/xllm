@@ -44,6 +44,11 @@ bool MultimodalProcessorBase::tokenize(const std::string& prompt,
     LOG(ERROR) << "Failed to encode prompt: " + prompt;
     return false;
   }
+  std::string token_ids_str;
+  for (size_t i = 0; i < token_ids.size(); ++i) {
+    token_ids_str += std::to_string(token_ids[i]);
+    if (i + 1 < token_ids.size()) token_ids_str += ", ";
+  }
   COUNTER_ADD(tokenization_latency_seconds, timer.elapsed_seconds());
   return true;
 }

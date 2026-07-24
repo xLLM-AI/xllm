@@ -29,6 +29,8 @@ namespace xllm {
 
 // a simple c++ implementation of the openai/tiktoken
 // https://github.com/openai/tiktoken
+// max_sequence_length is accepted for interface compatibility, but padding to
+// that length is not implemented by this tokenizer.
 class TiktokenTokenizer : public Tokenizer {
  public:
   TiktokenTokenizer(const std::string_view& dir_path,

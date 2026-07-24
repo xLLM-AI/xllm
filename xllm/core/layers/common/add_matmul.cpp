@@ -150,7 +150,6 @@ torch::Tensor AddMatmulWeightTransposedImpl::forward(const torch::Tensor& x) {
 
 void AddMatmulWeightTransposedImpl::load_state_dict(
     const StateDict& state_dict) {
-<<<<<<< HEAD
   resolve_weight_quant_method_for_linear_load(
       quant_args_, state_dict, nullptr, resolved_weight_quant_method_);
 
