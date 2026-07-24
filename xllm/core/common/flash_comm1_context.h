@@ -23,10 +23,6 @@ limitations under the License.
 
 namespace xllm {
 
-namespace layer {
-struct AttentionMetadata;
-}
-
 enum class RowParallelReduceMode : int8_t {
   NONE = 0,
   ALL_REDUCE = 1,

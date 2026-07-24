@@ -117,6 +117,7 @@ torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
     const ModelInputParams& input_params,
     const torch::Tensor& mrope_cos_sin) {
   const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
+  // Pre-attention norm
   if (!residual.has_value()) {
     residual = x;
     x = std::get<0>(input_norm_->forward(x));
@@ -133,6 +134,7 @@ torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
     std::tie(x, residual) = input_norm_->forward(x, residual);
   }
 
+  // Attention
   if (attention_) {
     x = attention_->forward(
         positions, x, attn_metadata, kv_cache, mrope_cos_sin);
@@ -140,7 +142,8 @@ torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
     x = linear_attention_->forward(x, attn_metadata, kv_cache, input_params);
   }
 
-  // Before post_norm, ensure residual shape matches x shape
+  // Post-attention norm
+  // Ensure the residual layout matches the attention output before post_norm.
   if (fc1_ctx && is_sequence_sharded(*fc1_ctx) && residual.has_value() &&
       residual.value().size(0) != x.size(0)) {
     residual = maybe_shard_residual(residual.value(), *fc1_ctx);
@@ -151,6 +154,7 @@ torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
 
   std::tie(x, residual) = post_norm_->forward(x, residual);
 
+  // MLP forward
   if (moe_mlp_) {
     x = moe_mlp_(x, input_params);
   } else {

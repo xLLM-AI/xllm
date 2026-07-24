@@ -109,9 +109,8 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
     const int32_t num_tokens = static_cast<int32_t>(tokens.size(0));
     const auto& batch_forward_type = input_params.meta.batch_forward_type;
     const bool is_prefill_side = batch_forward_type.no_decode();
-    FlashComm1Options fc1_options = flash_comm1_options_;
     FlashComm1Context fc1_ctx = build_flash_comm1_context(
-        num_tokens, is_prefill_side, parallel_args_, fc1_options);
+        num_tokens, is_prefill_side, parallel_args_, flash_comm1_options_);
     FlashComm1ContextScope fc1_scope(&fc1_ctx);
 
     torch::Tensor h;

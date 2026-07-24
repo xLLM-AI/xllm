@@ -94,7 +94,7 @@ DenseMLPImpl::DenseMLPImpl(int64_t hidden_size,
                                                  down_proj_extra_args));
 }
 
-torch::Tensor DenseMLPImpl::forward(torch::Tensor hidden_states) {
+torch::Tensor DenseMLPImpl::forward(const torch::Tensor& hidden_states) {
   const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
   torch::Tensor h = hidden_states;
 

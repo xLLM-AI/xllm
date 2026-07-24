@@ -185,6 +185,7 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
     return o_proj_->forward(out);
   }
 
+  // Fallback path: weight-reordered layout [Q | G | K | V]
   torch::Tensor q, k, v;
   torch::Tensor gate;
 
