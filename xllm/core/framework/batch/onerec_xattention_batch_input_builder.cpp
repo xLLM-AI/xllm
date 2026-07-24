@@ -53,7 +53,7 @@ ForwardInput OneRecXAttentionBatchInputBuilder::build_rec_forward_input(
   }
 
   std::vector<std::vector<int32_t>> cross_block_tables_vec;
-  std::vector<int32_t> cross_cache_slots_vec;
+  std::vector<std::vector<int32_t>> cross_cache_slots_vec;
   std::vector<int32_t> cross_kv_lens_vec;
   std::vector<const RequestSamplingParam*> decode_sampling_params;
   std::vector<int32_t> decode_selected_token_idxes;
@@ -92,8 +92,7 @@ ForwardInput OneRecXAttentionBatchInputBuilder::build_rec_forward_input(
       cross_kv_lens_vec.emplace_back(encoder_seq_len);
       auto slot_ids =
           sequence_ptr->kv_state().kv_cache_slots(0, encoder_seq_len);
-      cross_cache_slots_vec.insert(
-          cross_cache_slots_vec.end(), slot_ids.begin(), slot_ids.end());
+      cross_cache_slots_vec.emplace_back(std::move(slot_ids));
 
       const auto* sampling_param = sequence_ptr->sampling_param();
       if (sampling_param == nullptr) {
@@ -153,14 +152,33 @@ ForwardInput OneRecXAttentionBatchInputBuilder::build_rec_forward_input(
   xattn_params.cross_attn_kv_cu_seq_lens =
       torch::tensor(cross_kv_lens_vec, torch::kInt64);
   xattn_params.cross_attn_kv_cu_seq_lens_vec = cross_kv_lens_vec;
+  size_t max_cross_blocks = 0;
   if (!cross_block_tables_vec.empty()) {
     util::pad_2d_vector(cross_block_tables_vec, /*pad_value=*/0);
+    max_cross_blocks = cross_block_tables_vec.front().size();
     xattn_params.cross_attn_block_tables =
         create_2d_tensor(cross_block_tables_vec, torch::kInt);
   }
   if (xattn_params.is_first_prefill && !cross_cache_slots_vec.empty()) {
+    CHECK_GT(FLAGS_block_size, 0);
+    CHECK_GT(max_cross_blocks, 0);
+    CHECK_EQ(cross_cache_slots_vec.size(), static_cast<size_t>(batch_size));
+    const size_t padded_encoder_seq_len =
+        max_cross_blocks * static_cast<size_t>(FLAGS_block_size);
+    std::vector<int32_t> padded_cross_cache_slots;
+    padded_cross_cache_slots.reserve(cross_cache_slots_vec.size() *
+                                     padded_encoder_seq_len);
+    for (const auto& slots : cross_cache_slots_vec) {
+      CHECK_LE(slots.size(), padded_encoder_seq_len);
+      padded_cross_cache_slots.insert(
+          padded_cross_cache_slots.end(), slots.begin(), slots.end());
+      // ReshapeAndCache skips -1 slots, so padded K/V cannot overwrite cache.
+      padded_cross_cache_slots.insert(padded_cross_cache_slots.end(),
+                                      padded_encoder_seq_len - slots.size(),
+                                      -1);
+    }
     xattn_params.cross_attn_new_cache_slots =
-        torch::tensor(cross_cache_slots_vec, torch::kInt);
+        torch::tensor(padded_cross_cache_slots, torch::kInt);
   }
 
   input.step_decode = std::move(step_meta);

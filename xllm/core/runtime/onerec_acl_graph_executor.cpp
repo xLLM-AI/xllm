@@ -125,9 +125,11 @@ std::string build_graph_key(const torch::Tensor& tokens,
      << "|bs:" << onerec_params->bs
      << "|group_width:" << onerec_params->group_width
      << "|seq_len:" << onerec_params->seq_len
-     << "|encoder_max_seq_len:" << onerec_params->encoder_max_seq_len
      << "|num_sequences:" << params.num_sequences << "|use_xattn:" << use_xattn
      << "|use_moe:" << args.use_moe();
+  if (!use_xattn) {
+    os << "|encoder_max_seq_len:" << onerec_params->encoder_max_seq_len;
+  }
   if (!is_xattn_decode) {
     os << "|q_max_seq_len:" << params.q_max_seq_len
        << "|kv_max_seq_len:" << params.kv_max_seq_len;
@@ -147,9 +149,11 @@ std::string build_graph_key(const torch::Tensor& tokens,
   append_tensor_key(os, "kv_seq_lens", params.kv_seq_lens);
   append_tensor_key(os, "new_cache_slots", params.new_cache_slots);
   append_tensor_key(os, "block_tables", params.block_tables);
-  append_int_vec_key(os, "encoder_seq_lens", onerec_params->encoder_seq_lens);
-  append_int_vec_key(
-      os, "cross_kv_cu_vec", onerec_params->cross_attn_kv_cu_seq_lens_vec);
+  if (!use_xattn) {
+    append_int_vec_key(os, "encoder_seq_lens", onerec_params->encoder_seq_lens);
+    append_int_vec_key(
+        os, "cross_kv_cu_vec", onerec_params->cross_attn_kv_cu_seq_lens_vec);
+  }
   if (!is_xattn_decode) {
     append_int_vec_key(os, "kv_seq_lens_vec", params.kv_seq_lens_vec);
   }
@@ -185,6 +189,17 @@ class OneRecGraphParam {
                           const torch::Tensor& positions,
                           const ModelInputParams& params,
                           const torch::Tensor& encoder_output) {
+    const auto* source_xattn_params = params.onerec_xattention_params();
+    if (source_xattn_params != nullptr &&
+        source_xattn_params->rec_stage ==
+            OneRecModelInputParams::RecStage::PREFILL &&
+        source_xattn_params->is_first_prefill && encoder_output.defined()) {
+      CHECK_EQ(encoder_output.dim(), 3);
+      CHECK(source_xattn_params->cross_attn_new_cache_slots.defined());
+      CHECK_EQ(encoder_output.size(0) * encoder_output.size(1),
+               source_xattn_params->cross_attn_new_cache_slots.numel());
+    }
+
     copy_tensor(tokens, persistent_tokens_);
     copy_tensor(positions, persistent_positions_);
     copy_tensor(encoder_output, persistent_encoder_output_);
@@ -222,7 +237,7 @@ class OneRecGraphParam {
     bind_tensor(persistent_cross_attn_block_tables_,
                 onerec_params.cross_attn_block_tables);
 
-    if (const auto* source_xattn_params = params.onerec_xattention_params()) {
+    if (source_xattn_params != nullptr) {
       auto& xattn_params =
           params_for_capture_.mutable_onerec_xattention_params();
       copy_tensor(source_xattn_params->current_round_tensor,

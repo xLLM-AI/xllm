@@ -36,7 +36,15 @@ inline torch::Tensor pad_encoder_output(const torch::Tensor& encoder_output,
   const int64_t bs = onerec_params->bs;
   const int64_t hidden_size = encoder_output.size(1);
   const auto& seq_lens = onerec_params->encoder_seq_lens;
-  const int64_t max_seq_len = onerec_params->encoder_max_seq_len;
+  int64_t max_seq_len = onerec_params->encoder_max_seq_len;
+  if (input_params.onerec_xattention_params() != nullptr &&
+      onerec_params->cross_attn_block_tables.defined() &&
+      onerec_params->cross_attn_block_tables.dim() >= 2) {
+    CHECK_GT(FLAGS_block_size, 0);
+    max_seq_len = std::max<int64_t>(
+        max_seq_len,
+        onerec_params->cross_attn_block_tables.size(1) * FLAGS_block_size);
+  }
 
   CHECK_EQ(static_cast<int64_t>(seq_lens.size()), bs)
       << "encoder_seq_lens size mismatch.";

@@ -1907,6 +1907,41 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
     round_params.rec_stage = OneRecModelInputParams::RecStage::DECODE;
     round_params.is_first_prefill = false;
     round_params.is_encoder_forward = false;
+#if defined(USE_NPU)
+    if (round == 1 && FLAGS_enable_graph) {
+      round_params.cross_attn_new_cache_slots = torch::Tensor();
+      CHECK_GT(FLAGS_block_size, 0);
+      const int64_t max_encoder_kv_len =
+          runtime_.context->get_model_args().max_position_embeddings();
+      CHECK_GT(max_encoder_kv_len, 0);
+      CHECK_LE(round_params.encoder_max_seq_len, max_encoder_kv_len);
+      const int64_t decode_block_table_len =
+          (max_encoder_kv_len + FLAGS_block_size - 1) / FLAGS_block_size;
+      const int64_t required_blocks =
+          (static_cast<int64_t>(round_params.encoder_max_seq_len) +
+           FLAGS_block_size - 1) /
+          FLAGS_block_size;
+
+      auto& cross_block_tables = round_params.cross_attn_block_tables;
+      CHECK(cross_block_tables.defined());
+      CHECK_EQ(cross_block_tables.dim(), 2);
+      CHECK_EQ(cross_block_tables.size(0), batch_size);
+      CHECK_GE(cross_block_tables.size(1), required_blocks);
+      if (cross_block_tables.size(1) < decode_block_table_len) {
+        auto padding =
+            torch::zeros({cross_block_tables.size(0),
+                          decode_block_table_len - cross_block_tables.size(1)},
+                         cross_block_tables.options());
+        cross_block_tables =
+            torch::cat({cross_block_tables, padding}, /*dim=*/1);
+      } else if (cross_block_tables.size(1) > decode_block_table_len) {
+        cross_block_tables =
+            cross_block_tables
+                .slice(/*dim=*/1, /*start=*/0, /*end=*/decode_block_table_len)
+                .contiguous();
+      }
+    }
+#endif
     if (round_params.current_round_tensor.defined()) {
       round_params.current_round_tensor.fill_(round);
     }
