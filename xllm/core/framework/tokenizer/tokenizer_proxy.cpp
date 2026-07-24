@@ -32,8 +32,10 @@ std::unique_ptr<Tokenizer> TokenizerProxy::clone() const {
 
 bool TokenizerProxy::encode(const std::string_view& text,
                             std::vector<int32_t>* ids,
-                            bool add_special_tokens) const {
-  return get_tls_tokenizer()->encode(text, ids, add_special_tokens);
+                            bool add_special_tokens,
+                            int32_t max_sequence_length) const {
+  return get_tls_tokenizer()->encode(
+      text, ids, add_special_tokens, max_sequence_length);
 }
 
 bool TokenizerProxy::encode(int64_t item_id,

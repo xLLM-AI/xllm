@@ -57,6 +57,7 @@ class ModelConfig final {
          "tool_call_parser",
          "enable_qwen3_reranker",
          "enable_return_mm_full_embeddings",
+         "flux2_tokenizer_max_sequence_length",
          "mm_download_headers",
          "flashinfer_workspace_buffer_size",
          "use_audio_in_video",
@@ -87,6 +88,8 @@ class ModelConfig final {
   PROPERTY(bool, enable_qwen3_reranker) = false;
 
   PROPERTY(bool, enable_return_mm_full_embeddings) = false;
+
+  PROPERTY(int32_t, flux2_tokenizer_max_sequence_length) = 0;
 
   PROPERTY(std::string, mm_download_headers) = "";
 

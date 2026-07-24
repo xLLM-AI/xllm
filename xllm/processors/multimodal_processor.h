@@ -51,7 +51,8 @@ class MultimodalProcessorBase {
                                   MMData& data) const = 0;
 
  protected:
-  explicit MultimodalProcessorBase(std::shared_ptr<Tokenizer> tokenizer);
+  explicit MultimodalProcessorBase(std::shared_ptr<Tokenizer> tokenizer,
+                                   int32_t max_sequence_length);
 
   bool tokenize(const std::string& prompt,
                 std::vector<int32_t>& token_ids) const;
@@ -60,11 +61,13 @@ class MultimodalProcessorBase {
 
  private:
   std::shared_ptr<Tokenizer> tokenizer_;
+  int32_t max_sequence_length_;
 };
 
 std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
     const ModelArgs& model_args,
-    std::shared_ptr<Tokenizer> tokenizer);
+    std::shared_ptr<Tokenizer> tokenizer,
+    int32_t max_sequence_length);
 
 template <typename PromptProcessor,
           typename ImageProcessor = ImageNoneProcessor,
@@ -73,8 +76,9 @@ template <typename PromptProcessor,
 class MultimodalProcessor final : public MultimodalProcessorBase {
  public:
   MultimodalProcessor(const ModelArgs& model_args,
-                      std::shared_ptr<Tokenizer> tokenizer)
-      : MultimodalProcessorBase(std::move(tokenizer)),
+                      std::shared_ptr<Tokenizer> tokenizer,
+                      int32_t max_sequence_length)
+      : MultimodalProcessorBase(std::move(tokenizer), max_sequence_length),
         image_processor_(std::make_unique<ImageProcessor>(model_args)),
         video_processor_(std::make_unique<VideoProcessor>(model_args)),
         audio_processor_(std::make_unique<AudioProcessor>(model_args)),

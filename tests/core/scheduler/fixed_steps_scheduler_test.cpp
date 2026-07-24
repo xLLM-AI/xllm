@@ -34,10 +34,13 @@ class FakeTokenizer : public Tokenizer {
  public:
   bool encode(const std::string_view& text,
               std::vector<int32_t>* ids,
-              bool add_special_tokens = true) const override {
+              bool add_special_tokens = true,
+              int32_t max_sequence_length = 0) const override {
     (void)text;
     (void)ids;
     (void)add_special_tokens;
+    // max_sequence_length is not implemented by this fake tokenizer.
+    (void)max_sequence_length;
     return false;
   }
   std::string decode(const Slice<int32_t>& ids,
