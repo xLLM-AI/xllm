@@ -205,23 +205,23 @@ struct DiTForwardInput {
     }
 
     if (images.defined()) {
-      input.images = images.to(device);  // torch::kUInt8
+      input.images = images.to(device, /*dtype=*/torch::kUInt8);
     }
 
     if (mask_images.defined()) {
-      input.mask_images = mask_images.to(device);  // torch::kUInt8
+      input.mask_images = mask_images.to(device, /*dtype=*/torch::kUInt8);
     }
 
     for (auto& img : input.images_list) {
-      img = img.to(device);  // torch::kUInt8
+      img = img.to(device, /*dtype=*/torch::kUInt8);
     }
 
     if (control_image.defined()) {
-      input.control_image = control_image.to(device);  // torch::kUInt8
+      input.control_image = control_image.to(device, /*dtype=*/torch::kUInt8);
     }
 
     if (last_images.defined()) {
-      input.last_images = last_images.to(device);  // torch::kUInt8
+      input.last_images = last_images.to(device, /*dtype=*/torch::kUInt8);
     }
 
     if (prompt_audio.defined()) {
