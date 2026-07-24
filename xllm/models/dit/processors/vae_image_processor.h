@@ -191,18 +191,15 @@ class VAEImageProcessorImpl : public torch::nn::Module {
         resized_images.emplace_back(out.permute({2, 0, 1}));
       }
       resized = torch::stack(resized_images);
-    } else if (resize_mode == "default" || resize_mode == "bicubic_no_aa") {
-      bool antialias = resize_mode == "default";
-      auto options =
-          torch::nn::functional::InterpolateFuncOptions()
-              .size(std::vector<int64_t>{height, width})
-              .align_corners(/*align_corners=*/false)
-              .antialias(antialias)
-              .mode(torch::kBicubic);  // torch::kNearest, torch::kBilinear
+    } else if (resize_mode == "bicubic") {
+      auto options = torch::nn::functional::InterpolateFuncOptions()
+                         .size(std::vector<int64_t>{height, width})
+                         .align_corners(false)
+                         .antialias(true)
+                         .mode(torch::kBicubic);
       resized = torch::nn::functional::interpolate(image, options);
     } else {
-      LOG(FATAL) << "Currently only support 'lanczos', 'default', and "
-                    "'bicubic_no_aa'"
+      LOG(FATAL) << "Currently only support 'lanczos' and 'bicubic'"
                  << ", but got: " << resize_mode;
     }
 
