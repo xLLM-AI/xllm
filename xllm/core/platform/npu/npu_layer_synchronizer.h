@@ -41,6 +41,9 @@ class NPULayerSynchronizerImpl {
   std::vector<std::atomic<bool>> event_record_flags_;
   std::atomic<bool> aborted_{false};
   const int32_t timeout_;
+  // ACL context captured at construction so waiters can restore it before
+  // synchronizing events recorded on another thread/context.
+  aclrtContext context_ = nullptr;
 };
 
 }  // namespace xllm
