@@ -34,7 +34,7 @@ class Glm52ModelImpl : public Glm5ModelImpl {
       : Glm5ModelImpl(context, create_decoder_layer_factory(context)),
         dsa_topk_share_plan_(context.get_model_args()) {
     const bool enable_prefill_cp = context.get_parallel_args().cp_size() > 1 &&
-                                   Platform::uses_model_cp_partition();
+                                   Platform::uses_model_cp_sharding();
     if (layer::cp_conflicts_with_dsa_topk_share(enable_prefill_cp,
                                                 dsa_topk_share_plan_)) {
       LOG(FATAL) << "Prefill CP is not supported together with GLM5.2 "

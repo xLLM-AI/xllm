@@ -184,13 +184,13 @@ void WorkerServer::create_server(const runtime::Options& options,
       worker_parallel_args.cp_group_ == nullptr
           ? 1
           : worker_parallel_args.cp_group_->world_size();
-  const char* cp_partition_stage =
+  const char* cp_sharding_stage =
       options.cp_size() <= 1
           ? "disabled"
-          : (Platform::uses_model_cp_partition() ? "model" : "worker");
+          : (Platform::uses_model_cp_sharding() ? "model" : "worker");
   LOG(INFO) << "Worker CP config: cp_size=" << options.cp_size()
             << ", cp_group_size=" << cp_group_size
-            << ", cp_partition_stage=" << cp_partition_stage
+            << ", cp_sharding_stage=" << cp_sharding_stage
             << ", instance_role=" << options.instance_role().to_string();
 
   std::unique_ptr<Worker> worker = std::make_unique<Worker>(
@@ -321,15 +321,15 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
   std::string spawn_worker_bin_path =
       options.spawn_worker_path() + "/spawn_worker";
   LOG(INFO) << "Spawn worker path: " << spawn_worker_bin_path;
-  const char* cp_partition_stage =
+  const char* cp_sharding_stage =
       options.cp_size() <= 1
           ? "disabled"
-          : (Platform::uses_model_cp_partition() ? "model" : "worker");
+          : (Platform::uses_model_cp_sharding() ? "model" : "worker");
   LOG(INFO) << "Spawn worker CP config: cp_size=" << options.cp_size()
             << ", global_world_size=" << parallel_args.world_size()
             << ", global_rank=" << parallel_args.rank()
             << ", ep_size=" << parallel_args.ep_size()
-            << ", cp_partition_stage=" << cp_partition_stage
+            << ", cp_sharding_stage=" << cp_sharding_stage
             << ", instance_role=" << options.instance_role().to_string();
   const char* argv[] = {spawn_worker_bin_path.c_str(),
                         master_node_addr.c_str(),

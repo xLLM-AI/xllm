@@ -42,7 +42,7 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
       interleaved_(true) {
   has_indexer_ = enable_lighting_indexer_ && enable_indexer;
   use_full_replicated_attention_weights_ =
-      parallel_args.cp_size() > 1 && Platform::uses_model_cp_partition();
+      parallel_args.cp_size() > 1 && Platform::uses_model_cp_sharding();
   const int64_t tp_size = parallel_args.tp_group_->world_size();
   int64_t hidden_size = args.hidden_size();
   int64_t num_heads = args.n_heads();

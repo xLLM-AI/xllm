@@ -287,8 +287,7 @@ inline torch::Tensor gather_tensor_by_indices(
   if (cpu_tensor.dim() <= 1) {
     return cpu_tensor.index_select(0, gather_indices);
   }
-  CHECK_EQ(cpu_tensor.dim(), 2)
-      << "Expected 1-D or 2-D tensor for CP partition";
+  CHECK_EQ(cpu_tensor.dim(), 2) << "Expected 1-D or 2-D tensor for CP shard";
   return cpu_tensor.index_select(1, gather_indices);
 }
 
@@ -403,17 +402,16 @@ class WorkerType {
   Value value_;
 };
 
-// KV slot layout for the NPU model-side CP closure. Worker-local only: it is
+// KV slot layout for the NPU model-side CP pipeline. Worker-local only: it is
 // never transported across RPC/proto/shared-memory boundaries.
 //   LOGICAL_REAL              - new_cache_slots carries one entry per real
 //                               token in global-real order (BlockManager
 //                               logical slot space). This is the layout the
 //                               BatchInputBuilder produces and the only layout
-//                               that may be fed into localize_slots_recovered()
-//                               + recompute_new_cache_slots().
+//                               that may be fed into prepare_cache_slots().
 //   NPU_CP_RECOVERED_PHYSICAL  - new_cache_slots has already been expanded to
 //                               cp_size * local_padded rows in
-//                               cp_kv_recover_idx order (real rows carry their
+//                               kv_reorder_indices order (real rows carry their
 //                               global slot id, virtual-pad rows carry -1) and
 //                               remapped to the KV-split layout. Re-entering
 //                               worker prepare must skip the expand/remap to
@@ -483,7 +481,6 @@ struct ForwardInput {
     inputs.device_input_buffer = device_input_buffer;
     inputs.input_host_buffer_has_layout = input_host_buffer_has_layout;
     inputs.device_tensors_ready = true;
-    inputs.cp_partitioned = cp_partitioned;
     inputs.kv_slot_layout = kv_slot_layout;
     return inputs;
   }
@@ -547,7 +544,6 @@ struct ForwardInput {
     inputs.transfer_kv_infos = transfer_kv_infos;
     inputs.step_decode = step_decode;
     inputs.skip_sampling_for_logits_only = skip_sampling_for_logits_only;
-    inputs.cp_partitioned = cp_partitioned;
     inputs.kv_slot_layout = kv_slot_layout;
   }
 
@@ -623,13 +619,8 @@ struct ForwardInput {
   // then skip rebuilding/H2D in ForwardInput::to().
   bool device_tensors_ready = false;
 
-  // True once the worker has produced the per-CP-rank slice (legacy path) or
-  // handed the global stream to the model for model-side CP localization. The
-  // model-side path keeps this false and uses `parallel.cp_plan` instead.
-  bool cp_partitioned = false;
-
   // Layout of `attention.device.new_cache_slots` for the NPU model-side CP
-  // closure. See `KvSlotLayout`. Defaults to LOGICAL_REAL; the worker flips it
+  // pipeline. See `KvSlotLayout`. Defaults to LOGICAL_REAL; the worker flips it
   // to NPU_CP_RECOVERED_PHYSICAL after the one-shot expand/remap so a re-entry
   // into worker prepare (e.g. MTP leaf run_llm_no_sync_impl on an already
   // prepared input) does not convert twice.

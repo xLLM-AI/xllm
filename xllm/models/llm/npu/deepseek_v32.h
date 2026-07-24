@@ -281,14 +281,16 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
     }
 
     auto h = npu_embed_tokens_(tokens, 0);
-    // Model-side CP closure: localize the global-real hidden into the
+    // Model-side CP pipeline: shard the global-real hidden into the
     // rank-local padded layout consumed by the decoder, and rewrite the
     // attention metadata to the per-rank local view. No-ops when the plan is
     // disabled (cp_size == 1 / decode), so the forward is unconditional.
-    const npu::cp::Plan& cp_plan = input_params.parallel.cp_plan;
-    torch::Tensor local_positions = positions;
+    const NpuCpPlan& cp_plan = input_params.parallel.cp_plan;
+    CpInputShard sharded_input = cp_plan.shard_model_input(h, positions);
+    h = std::move(sharded_input.hidden_states);
+    torch::Tensor local_positions = std::move(sharded_input.position_ids);
     ModelInputParams modified_input_params = input_params;
-    cp_plan.preprocess(h, local_positions, modified_input_params);
+    cp_plan.apply_attention_meta(modified_input_params);
     auto cos_sin = atb_pos_emb_(cos_sin_, local_positions, 0);
     auto cos_sin_chunks = cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
     auto cos_pos = cos_sin_chunks[0].contiguous();
@@ -375,7 +377,7 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
     // Restore global-real order from the rank-major gathered buffer so the LM
     // head / scheduler / MTP see logical unpadded hidden. No-op when the plan
     // is disabled or the CP group is single-rank.
-    h = cp_plan.postprocess(h, cp_group_);
+    h = cp_plan.merge_model_output(h, cp_group_);
     auto hidden_states = norm_(h, 0);
     return ModelOutput(hidden_states);
   }

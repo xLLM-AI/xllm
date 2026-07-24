@@ -43,7 +43,7 @@ class CollectiveCommunicator : public CollectiveCommunicatorBase {
   std::unique_ptr<ProcessGroup> single_rank_group_;
   // Standalone CP group owner. For NPU ATB this holds a real
   // c10d_npu::ProcessGroupHCCL orthogonal to the TP group, created in
-  // create_process_groups so the model-side CP closure can allgather across CP
+  // create_process_groups so the model-side CP pipeline can allgather across CP
   // ranks. For the MLU model-side CP path, ParallelArgs::cp_group_ still
   // aliases tp_group_ instead, so this owner stays empty there.
   std::unique_ptr<ProcessGroup> cp_group_;

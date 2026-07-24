@@ -177,12 +177,11 @@ bool is_npu_model_cp_capable(const std::string& resolved_name) {
   static std::once_flag once;
   std::call_once(once, []() {
     for (const std::string& name : kCpCapableModels) {
-      ModelRegistry::register_cp_partition_mode(name,
-                                                CpPartitionMode::NPU_MODEL);
+      ModelRegistry::register_cp_sharding_mode(name, CpShardingMode::NPU_MODEL);
     }
   });
-  return ModelRegistry::get_cp_partition_mode(resolved_name) ==
-         CpPartitionMode::NPU_MODEL;
+  return ModelRegistry::get_cp_sharding_mode(resolved_name) ==
+         CpShardingMode::NPU_MODEL;
 }
 
 ModelRegistry* ModelRegistry::get_instance() {
@@ -293,19 +292,19 @@ void ModelRegistry::register_tokenizer_args_loader(const std::string& name,
   }
 }
 
-void ModelRegistry::register_cp_partition_mode(const std::string& name,
-                                               CpPartitionMode mode) {
+void ModelRegistry::register_cp_sharding_mode(const std::string& name,
+                                              CpShardingMode mode) {
   ModelRegistry* instance = get_instance();
-  instance->model_registry_[name].cp_partition_mode = mode;
+  instance->model_registry_[name].cp_sharding_mode = mode;
 }
 
-CpPartitionMode ModelRegistry::get_cp_partition_mode(const std::string& name) {
+CpShardingMode ModelRegistry::get_cp_sharding_mode(const std::string& name) {
   ModelRegistry* instance = get_instance();
   const auto it = instance->model_registry_.find(name);
   if (it == instance->model_registry_.end()) {
-    return CpPartitionMode::NONE;
+    return CpShardingMode::NONE;
   }
-  return it->second.cp_partition_mode;
+  return it->second.cp_sharding_mode;
 }
 
 CausalLMFactory ModelRegistry::get_causallm_factory(const std::string& name) {

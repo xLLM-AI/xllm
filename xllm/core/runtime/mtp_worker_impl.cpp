@@ -755,11 +755,11 @@ void MTPWorkerImpl::prepare_work_before_execute(const ForwardInput& input,
   // The composite worker only materializes the input on device; the target and
   // draft leaves each run the NPU model-side CP slot prepare once against their
   // own ParallelArgs inside run_llm_no_sync_impl. See
-  // handles_model_cp_prepare().
+  // owns_npu_cp_plan_build().
   SpeculativeWorkerImpl::prepare_work_before_execute(input, processed_input);
 }
 
-bool MTPWorkerImpl::handles_model_cp_prepare() const { return false; }
+bool MTPWorkerImpl::owns_npu_cp_plan_build() const { return false; }
 
 std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
     const ForwardInput& input) {
@@ -890,9 +890,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     // Model-side CP restores global-real order after the last decoder layer,
     // so `embeddings` is the full global-real hidden and can be indexed
-    // directly by selected_token_idxes. The `selected_embeddings` fallback was
-    // for legacy worker-side CP (where the model returned a local shard); it is
-    // now always undefined but kept as a defensive fallback.
+    // directly by selected_token_idxes. `selected_embeddings` is now always
+    // undefined but kept as a defensive fallback.
     const torch::Tensor& target_hidden =
         output.sample_output.selected_embeddings.defined()
             ? output.sample_output.selected_embeddings
@@ -940,7 +939,7 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
   // model-side CP localizes hidden after embedding and restores global-real
   // order after the last decoder layer, so the draft consumes the target's
   // global-real hidden directly. The draft's own CP plan (if cp_size > 1) is
-  // rebuilt by its WorkerImpl::forward from this prefill_input.
+  // rebuilt by its leaf WorkerImpl prepare stage from this prefill_input.
 
   auto& extra_token_ids = input_params.embedding.extra_token_ids;
 

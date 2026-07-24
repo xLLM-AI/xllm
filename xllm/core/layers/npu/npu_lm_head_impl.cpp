@@ -28,17 +28,14 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
                                     const ParallelArgs& parallel_args,
                                     bool isPrefill) {
   // Model-side CP (NPU/MLU): the model already all-gathers + restores global-
-  // real hidden after the last decoder layer (npu_cp::gather_restore), so the
-  // LM head never needs to re-gather a CP shard. Two legacy worker-CP knobs
-  // must stay off here, otherwise the ATB LmHead graph nests a second CP
-  // AllGather on the already-global hidden (peak O(cp_size * T * H), OOM on
-  // long prefill):
-  //   * outputHidden (legacy gathered-hidden output) is permanently false now
-  //     that legacy worker-side CP has been removed.
+  // real hidden after the last decoder layer (merge_model_output), so the
+  // LM head never needs to re-gather a CP shard. Two knobs must stay off
+  // here, otherwise the ATB LmHead graph nests a second CP AllGather on the
+  // already-global hidden (peak O(cp_size * T * H), OOM on long prefill):
+  //   * outputHidden stays false.
   //   * contextParallelInfo is left default-constructed (rankIds empty ->
   //     IsEnabled()==false), so the ATB `gatherAhead && IsEnabled()` gate skips
-  //     the CP AllGather node. See
-  //     docs/pr2003_lmhead_nested_cp_allgather_bug.md.
+  //     the CP AllGather node.
   param.outputHidden = false;
   param.unpadInputs = true;
   param.gatherAhead = isPrefill;
@@ -50,7 +47,7 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
 
   if (parallel_args.world_size() > 1) {
     if (parallel_args.mapping_data().empty()) {
-      // Model-side CP: the LM head runs AFTER npu_cp::gather_restore, so it
+      // Model-side CP: the LM head runs after merge_model_output, so it
       // sees the full global-real sequence and must be CP-unaware but
       // DP-aware. Shard across the dp-local-TP group (world / dp_size =
       // cp_size * tp_size) — the full TP width within one DP, spanning all CP
@@ -101,15 +98,14 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
           param.linearParallelParam.tensorParallelInfo.hcommInfo,
           param.linearParallelParam.tensorParallelInfo.commDomain);
       // Do NOT assign ATTN_CP to param.contextParallelInfo. Model-side CP
-      // already restored global-real hidden via npu_cp::gather_restore before
+      // already restored global-real hidden via merge_model_output before
       // the LM head, so every rank already holds the full sequence. Registering
       // ATTN_CP here would make IsEnabled()==true (rankIds.size()>1) and, with
       // gatherAhead=true on prefill, build a nested CP AllGather that treats
       // the full sequence as a shard and scales hidden by cp_size again ->
       // O(cp_size * T * H) peak memory and OOM on long prefill. Leave
       // contextParallelInfo default-constructed so the ATB LmHead graph skips
-      // the CP AllGather node. See
-      // docs/pr2003_lmhead_nested_cp_allgather_bug.md.
+      // the CP AllGather node.
     }
   }
 }

@@ -52,13 +52,11 @@ class Platform final {
 #endif
   }
 
-  // Model-side CP closure: input localize after embedding and output
+  // Model-side CP pipeline: input shard after embedding and output
   // gather+restore after the last decoder layer, so the scheduler/worker/MTP
   // no longer special-case CP. MLU has always done this; NPU now does too via
-  // the Phase C closure (NpuCpPrefillPlan + npu_cp helpers). When this is true
-  // the legacy worker cp_partition_inplace / scheduler 2xCP alignment paths are
-  // compile-time disabled.
-  static constexpr bool uses_model_cp_partition() {
+  // NpuCpPlan.
+  static constexpr bool uses_model_cp_sharding() {
     return is_mlu() || is_npu();
   }
 

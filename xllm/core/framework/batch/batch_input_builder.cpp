@@ -750,11 +750,9 @@ void BatchInputBuilder::extract_tokens_and_positions(Sequence* sequence,
     }
   }
 
-  // The legacy CP prefill right-padding (physical pad tokens appended to match
-  // 2*cp_size alignment) has been removed: model-side CP localizes hidden
-  // after embedding and pads with virtual rows inside the model, so the batch
-  // builder never appends physical pad tokens for CP. padded_seq_len now
-  // always equals seq_len.
+  // Model-side CP localizes hidden after embedding and pads with virtual rows
+  // inside the model, so the batch builder never appends physical pad tokens
+  // for CP and padded_seq_len always equals seq_len.
 
   append_linear_state_row(sequence, n_kv_cache_tokens, seq_len, state);
 
@@ -796,9 +794,8 @@ void BatchInputBuilder::extract_tokens_and_positions(Sequence* sequence,
     state.extra_token_ids.emplace_back(extra_token_id);
   }
 
-  // The legacy CP-specific `mtp_shifted_token_ids` padding (shift-by-1 layout
-  // for CP-aware MTP) has been removed: cp_size_ is always 1 now that legacy
-  // worker-side CP is gone, and model-side CP MTP does not consume this field.
+  // Model-side CP MTP does not consume `mtp_shifted_token_ids` (cp_size_ is
+  // always 1 here).
 }
 
 void BatchInputBuilder::append_linear_state_row(Sequence* sequence,

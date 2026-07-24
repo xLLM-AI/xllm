@@ -76,16 +76,16 @@ std::optional<std::string> validate_model_cp(const Options& options,
   if (options.cp_size() < 1) {
     return "cp_size must be greater than or equal to 1";
   }
-  // Legacy worker-side CP has been removed. Only model-side CP (MLU/NPU) is
-  // supported; any other platform with cp_size > 1 is rejected at startup.
-  if (options.cp_size() > 1 && !Platform::uses_model_cp_partition()) {
+  // Only model-side CP (MLU/NPU) is supported; any other platform with
+  // cp_size > 1 is rejected at startup.
+  if (options.cp_size() > 1 && !Platform::uses_model_cp_sharding()) {
     return "cp_size > 1 is only supported on platforms with model-side CP "
            "(MLU/NPU). Legacy worker-side CP has been removed; either disable "
            "CP (cp_size=1) or use a model-side CP platform.";
   }
-  const bool use_model_partition =
-      options.cp_size() > 1 && Platform::uses_model_cp_partition();
-  if (!use_model_partition) {
+  const bool use_model_sharding =
+      options.cp_size() > 1 && Platform::uses_model_cp_sharding();
+  if (!use_model_sharding) {
     return std::nullopt;
   }
   if (engine_type != EngineType::LLM && engine_type != EngineType::SSM) {
@@ -101,7 +101,7 @@ std::optional<std::string> validate_model_cp(const Options& options,
            "speculative algorithms (Eagle3/DFlash); disable CP or disable "
            "the speculative algorithm. MTP and Suffix are supported.";
   }
-  // CP runs prefill only: the ATB CP prefill graph and the model-side closure
+  // CP runs prefill only: the ATB CP prefill graph and the model-side pipeline
   // are not built for decode, and mixed prefill+decode batches are not
   // supported. The scheduler selects PREFILL_ONLY for NPU CP; reject graph
   // capture and non-prefill roles here so misconfiguration fails fast instead
@@ -143,7 +143,7 @@ std::optional<std::string> validate_model_cp(const Options& options,
     return std::nullopt;
   }
   // NPU: resolve the effective kernel backend and the registered model name,
-  // then require the model to advertise the NPU model-side CP closure
+  // then require the model to advertise the NPU model-side CP pipeline
   // (is_npu_model_cp_capable). This rejects TORCH-only models, unregistered
   // models, and deepseek_v3_mtp (which uses the DeepSeekV2 decoder without the
   // V3.2 ATB CP metadata/TP contract) without hardcoding the list here.
@@ -291,7 +291,7 @@ Master::Master(const Options& options, EngineType type)
   // World size is the node count (one worker per process).
   const int32_t global_world_size = options_.nnodes();
   std::string cp_model_type;
-  if (options_.cp_size() > 1 && Platform::uses_model_cp_partition()) {
+  if (options_.cp_size() > 1 && Platform::uses_model_cp_sharding()) {
     cp_model_type = util::get_model_type(model_path, options_.backend());
   }
   const std::optional<std::string> cp_error =
@@ -312,14 +312,14 @@ Master::Master(const Options& options, EngineType type)
   print_startup_banner(model_path, options_.backend(), options_.node_rank());
   LOG(INFO) << "Master init options: " << options_.to_string();
   ParallelConfig::get_instance().cp_size(options_.cp_size());
-  // Legacy worker-side CP has been removed; only "disabled" or "model" remain.
-  const char* cp_partition_stage =
+  // cp_size <= 1 -> "disabled", otherwise "model" (model-side CP).
+  const char* cp_sharding_stage =
       options_.cp_size() <= 1 ? "disabled" : "model";
   LOG(INFO) << "Resolved CP config: cp_size=" << options_.cp_size()
             << ", world_size=" << global_world_size
             << ", dp_size=" << options_.dp_size()
             << ", ep_size=" << options_.ep_size()
-            << ", cp_partition_stage=" << cp_partition_stage
+            << ", cp_sharding_stage=" << cp_sharding_stage
             << ", instance_role=" << options_.instance_role().to_string();
 
   // Allow brpc receive SIGTREM and SIGINT signal.

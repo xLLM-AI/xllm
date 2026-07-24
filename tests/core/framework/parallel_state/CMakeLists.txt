@@ -40,71 +40,6 @@ if(USE_NPU)
 
   cc_test(
     NAME
-      npu_cp_prefill_plan_test
-    SRCS
-      npu_cp_prefill_plan_test.cpp
-    DEPS
-      parallel_state
-      torch
-      absl::synchronization
-      absl::time
-      GTest::gtest_main
-  )
-
-  cc_test(
-    NAME
-      npu_cp_prefill_plan_cmp_test
-    SRCS
-      npu_cp_prefill_plan_cmp_test.cpp
-    DEPS
-      parallel_state
-      torch
-      absl::synchronization
-      absl::time
-      GTest::gtest_main
-  )
-
-  cc_test(
-    NAME
-      npu_cp_ep_padding_cmp_test
-    SRCS
-      npu_cp_ep_padding_cmp_test.cpp
-    DEPS
-      parallel_state
-      torch
-      absl::synchronization
-      absl::time
-      GTest::gtest_main
-  )
-
-  cc_test(
-    NAME
-      npu_cp_slots_cmp_test
-    SRCS
-      npu_cp_slots_cmp_test.cpp
-    DEPS
-      parallel_state
-      torch
-      absl::synchronization
-      absl::time
-      GTest::gtest_main
-  )
-
-  cc_test(
-    NAME
-      npu_cp_closure_test
-    SRCS
-      npu_cp_closure_test.cpp
-    DEPS
-      parallel_state
-      torch
-      absl::synchronization
-      absl::time
-      GTest::gtest_main
-  )
-
-  cc_test(
-    NAME
       cp_group_ranks_test
     SRCS
       cp_group_ranks_test.cpp
@@ -112,25 +47,6 @@ if(USE_NPU)
       parallel_state
       GTest::gtest_main
   )
-
-  cc_test(
-    NAME
-      npu_cp_ep_padding_plan_test
-    SRCS
-      npu_cp_ep_padding_plan_test.cpp
-    DEPS
-      parallel_state
-      torch
-      absl::synchronization
-      absl::time
-      GTest::gtest_main
-  )
-  target_link_libraries(npu_cp_ep_padding_plan_test
-                        PUBLIC Python::Python
-                               ascendcl
-                               hccl
-                               c_sec
-                               nnopbase)
 
   cc_test(
     NAME
@@ -151,9 +67,9 @@ if(USE_NPU)
 
   cc_test(
     NAME
-      cp_plan_test
+      npu_cp_plan_test
     SRCS
-      cp_plan_test.cpp
+      npu_cp_plan_test.cpp
     DEPS
       parallel_state
       torch

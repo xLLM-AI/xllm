@@ -42,7 +42,7 @@ limitations under the License.
 #include "core/framework/model/mtp_topk_state.h"
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "framework/batch/batch_forward_type.h"
-#include "framework/parallel_state/npu/cp/plan.h"
+#include "framework/parallel_state/npu_cp_plan.h"
 #include "framework/parallel_state/npu_dp_ep_padding.h"
 #include "runtime/dit_forward_params.h"
 #include "util/hash_util.h"
@@ -380,9 +380,8 @@ struct AttentionDeviceInput {
   torch::Tensor ring_cur_seqlen;
   torch::Tensor ring_cache_seqlen;
 
-  // Per-rank prefix slot index for KV-split prefix AllGather (see
-  // WorkerImpl::compute_in_prefix_slots). Must propagate in to(device) because
-  // nested worker paths skip recomputation when cp_partitioned is true.
+  // Per-rank prefix slot indices for KV-split prefix AllGather. NpuCpPlan
+  // supplies this graph input with the rest of the CP attention metadata.
   torch::Tensor in_prefix_slots;
 
   AttentionDeviceInput to(const torch::Device& device) const {
@@ -805,7 +804,7 @@ struct ParallelInput {
   std::vector<int32_t> dp_is_decode;
 
   DpEpPaddingData dp_ep_padding_data;
-  npu::cp::Plan cp_plan;
+  NpuCpPlan cp_plan;
 
 #if defined(USE_MLU)
   std::shared_ptr<MLULayerSynchronizerImpl> layer_synchronizer = nullptr;

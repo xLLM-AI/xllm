@@ -221,7 +221,7 @@ struct ParallelArgs {
   // Context-parallel communication group used by prefill attention.
   // For NPU ATB this is a standalone c10d_npu::ProcessGroupHCCL orthogonal to
   // the TP group (created in CollectiveCommunicator::create_process_groups),
-  // so the model-side CP closure can allgather hidden states across CP ranks.
+  // so the model-side CP pipeline can allgather hidden states across CP ranks.
   // For the MLU model-side CP path, CP still spans the full DP-local rank set,
   // so this aliases the TP group there.
   ProcessGroup* cp_group_ = nullptr;

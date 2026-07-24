@@ -96,13 +96,13 @@ LLMEngine::LLMEngine(const runtime::Options& options,
   cp_size_ = options_.cp_size();
   worker_clients_num_ = worker_clients_.size();
   dp_local_size_ = worker_clients_num_ / dp_size_;
-  const bool use_model_partition =
-      cp_size_ > 1 && Platform::uses_model_cp_partition();
+  const bool use_model_sharding =
+      cp_size_ > 1 && Platform::uses_model_cp_sharding();
   // MLU model-side CP overlaps the CP and TP rank sets (cp_size == world_size,
   // tp_size == 1), so all DP-local ranks form the effective TP execution width.
   // NPU model-side CP uses orthogonal CP x TP (world_size = dp_size * cp_size *
   // attn_tp_size), so the effective TP width is dp_local_size_ / cp_size_.
-  const bool mlu_overlap = use_model_partition && Platform::is_mlu();
+  const bool mlu_overlap = use_model_sharding && Platform::is_mlu();
   dp_local_tp_size_ = mlu_overlap ? dp_local_size_ : dp_local_size_ / cp_size_;
 
   // create ThreadPool for link cluster

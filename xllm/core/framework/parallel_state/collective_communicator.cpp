@@ -237,7 +237,7 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
   const int32_t normalized_cp_size = cp_size > 0 ? cp_size : 1;
   const int32_t attn_tp_size = world_size / (dp_size * normalized_cp_size);
   // FLAGS_kv_split_size: 0 -> leave Options::kv_split_size = -1 so that
-  // MappingNPU falls back to cp_size (legacy byte-equivalent). >0 -> propagate
+  // MappingNPU falls back to cp_size (byte-equivalent). >0 -> propagate
   // verbatim; MappingNPU::validate() enforces divisibility against cp_size.
   const int32_t kv_split_size =
       ::xllm::ParallelConfig::get_instance().kv_split_size();
@@ -329,13 +329,13 @@ void CollectiveCommunicator::create_process_groups(
   if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "ATB") {
     // ATB manages TP/DP/EP communicators internally via MappingNPU and
     // ExternalCommManager, so the xllm ProcessGroups created below are not
-    // needed. The model-side CP closure, however, allgathers hidden states
+    // needed. The model-side CP pipeline, however, allgathers hidden states
     // through xllm::parallel_state::gather, which requires a real
     // xllm::ProcessGroup backed by a c10d_npu::ProcessGroupHCCL. Build a
     // standalone CP group here (orthogonal to the TP group, sharing only the
     // CP dimension) so the model can gather across CP ranks without touching
     // ATB graph code. The group is created but stays idle until later phases
-    // flip NPU to the model-side CP partition.
+    // enable NPU model-side CP sharding.
     if (cp_size > 1) {
       const std::vector<int32_t> cp_ranks =
           parallel_state::compute_cp_group_ranks(

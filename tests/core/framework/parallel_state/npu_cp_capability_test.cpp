@@ -23,16 +23,16 @@ namespace xllm {
 namespace {
 
 TEST(NpuCpCapabilityTest, RegisteredCpCapableModels) {
-  // The four models that opt into the NPU ATB model-side CP closure.
+  // The four models that opt into the NPU ATB model-side CP pipeline.
   EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v32"));
   EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v32_mtp"));
   EXPECT_TRUE(is_npu_model_cp_capable("glm_moe_dsa"));
   EXPECT_TRUE(is_npu_model_cp_capable("glm_moe_dsa_mtp"));
   // The registry must advertise NPU_MODEL for these and NONE for the rest.
-  EXPECT_EQ(ModelRegistry::get_cp_partition_mode("deepseek_v32"),
-            CpPartitionMode::NPU_MODEL);
-  EXPECT_EQ(ModelRegistry::get_cp_partition_mode("glm_moe_dsa_mtp"),
-            CpPartitionMode::NPU_MODEL);
+  EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("deepseek_v32"),
+            CpShardingMode::NPU_MODEL);
+  EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("glm_moe_dsa_mtp"),
+            CpShardingMode::NPU_MODEL);
 }
 
 TEST(NpuCpCapabilityTest, UnregisteredModelsAreNotCapable) {
@@ -47,10 +47,10 @@ TEST(NpuCpCapabilityTest, UnregisteredModelsAreNotCapable) {
   EXPECT_FALSE(is_npu_model_cp_capable("deepseek_v4"));
   // Unknown model names default to NONE.
   EXPECT_FALSE(is_npu_model_cp_capable("definitely_not_a_model"));
-  EXPECT_EQ(ModelRegistry::get_cp_partition_mode("deepseek_v3_mtp"),
-            CpPartitionMode::NONE);
-  EXPECT_EQ(ModelRegistry::get_cp_partition_mode("definitely_not_a_model"),
-            CpPartitionMode::NONE);
+  EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("deepseek_v3_mtp"),
+            CpShardingMode::NONE);
+  EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("definitely_not_a_model"),
+            CpShardingMode::NONE);
 }
 
 TEST(NpuCpCapabilityTest, RegistrationIsIdempotent) {

@@ -130,16 +130,18 @@ class MtpModelImplBase : public torch::nn::Module {
     h = torch::cat({enorm, hnorm}, /*dim=*/-1);
     h = eh_proj_(h, 0);
 
-    // Model-side CP closure: localize the global-real hidden into the
+    // Model-side CP pipeline: shard the global-real hidden into the
     // rank-local padded layout consumed by the decoder, and rewrite the
     // attention metadata to the per-rank local view. For MTP the embedding
     // fusion is word_emb -> enorm -> hnorm -> eh_proj, so localization happens
     // here (after eh_proj) to keep the fused embedding consistent across CP
     // ranks. No-ops when the plan is disabled (cp_size == 1 / decode).
-    const npu::cp::Plan& cp_plan = input_params.parallel.cp_plan;
-    torch::Tensor local_positions = positions;
+    const NpuCpPlan& cp_plan = input_params.parallel.cp_plan;
+    CpInputShard sharded_input = cp_plan.shard_model_input(h, positions);
+    h = std::move(sharded_input.hidden_states);
+    torch::Tensor local_positions = std::move(sharded_input.position_ids);
     ModelInputParams input_params_new = input_params;
-    cp_plan.preprocess(h, local_positions, input_params_new);
+    cp_plan.apply_attention_meta(input_params_new);
 
     auto target_cos_sin = atb_pos_emb_(cos_sin_, local_positions, 0);
     auto target_cos_sin_chunks = target_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
@@ -239,7 +241,7 @@ class MtpModelImplBase : public torch::nn::Module {
     // Restore global-real order from the rank-major gathered buffer so the LM
     // head / scheduler see logical unpadded hidden. No-op when the plan is
     // disabled or the CP group is single-rank.
-    h = cp_plan.postprocess(h, cp_group_);
+    h = cp_plan.merge_model_output(h, cp_group_);
 
     auto hidden_states = final_norm_(h, 0);
     ModelOutput output(hidden_states);

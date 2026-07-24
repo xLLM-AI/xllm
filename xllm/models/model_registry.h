@@ -59,13 +59,13 @@ using QuantArgsLoader =
 using TokenizerArgsLoader =
     std::function<bool(const JsonReader& json, TokenizerArgs* args)>;
 
-// Model-side context-parallel partition mode advertised by a registered model.
-//   NONE      - model does not implement the NPU model-side CP closure; the
-//               worker must not hand it an enabled NpuCpPrefillPlan.
+// Model-side context-parallel sharding mode advertised by a registered model.
+//   NONE      - model does not implement the NPU model-side CP pipeline; the
+//               worker must not hand it an enabled NpuCpPlan.
 //   NPU_MODEL - model localizes hidden after embedding and restores
 //               global-real order after the last decoder layer (NPU ATB
 //               model-side CP). Only valid on NPU + ATB + dp_size == 1.
-enum class CpPartitionMode : int8_t {
+enum class CpShardingMode : int8_t {
   NONE = 0,
   NPU_MODEL = 1,
 };
@@ -80,7 +80,7 @@ struct ModelMeta {
   ModelArgsLoader model_args_loader;
   QuantArgsLoader quant_args_loader;
   TokenizerArgsLoader tokenizer_args_loader;
-  CpPartitionMode cp_partition_mode = CpPartitionMode::NONE;
+  CpShardingMode cp_sharding_mode = CpShardingMode::NONE;
 };
 
 // Model registry is a singleton class that registers all models with the
@@ -114,14 +114,14 @@ class ModelRegistry {
       const std::string& name,
       MultimodalProcessorFactory factory);
 
-  // Register the model-side CP partition mode advertised by `name`. Defaults to
+  // Register the model-side CP sharding mode advertised by `name`. Defaults to
   // NONE for any unregistered model.
-  static void register_cp_partition_mode(const std::string& name,
-                                         CpPartitionMode mode);
+  static void register_cp_sharding_mode(const std::string& name,
+                                        CpShardingMode mode);
 
-  // Read-only query of the registered CP partition mode. Returns NONE when
+  // Read-only query of the registered CP sharding mode. Returns NONE when
   // `name` is unknown or the model did not opt into model-side CP.
-  static CpPartitionMode get_cp_partition_mode(const std::string& name);
+  static CpShardingMode get_cp_sharding_mode(const std::string& name);
 
   static CausalLMFactory get_causallm_factory(const std::string& name);
 
@@ -153,7 +153,7 @@ bool resolve_model_registration_name(const std::string& model_type,
                                      std::string* resolved_name,
                                      std::string* error_message = nullptr);
 
-// Lazily register the NPU ATB model-side CP closure capability for the four
+// Lazily register the NPU ATB model-side CP pipeline capability for the four
 // supported models (deepseek_v32, deepseek_v32_mtp, glm_moe_dsa,
 // glm_moe_dsa_mtp) and return whether `resolved_name` is CP-capable.
 // Idempotent. `resolved_name` must already be backend-resolved (see

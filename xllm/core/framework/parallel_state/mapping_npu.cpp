@@ -216,7 +216,7 @@ void MappingNPU::parse_parallel_info() {
   attn_kv_split_.group_size(kv_split_group_size);
   attn_kv_split_.backend("hccl");
 
-  // word embed / lm_head: CP-unaware, DP-aware. The model-side CP closure
+  // word embed / lm_head: CP-unaware, DP-aware. The model-side CP pipeline
   // localizes hidden AFTER embedding and restores global-real hidden BEFORE
   // the LM head, so both layers always see the full sequence and must NOT be
   // sharded by the CP-local TP (attn_tp_, size tp). Instead they shard across
@@ -263,7 +263,7 @@ void MappingNPU::validate() {
     CHECK(attn_dp_.group_size() == 1) << "DP size should be 1 if CP size > 1";
   }
 
-  // KV split must either match cp_size (legacy) or be a divisor of it. The
+  // KV split must either match cp_size or be a divisor of it. The
   // > cp_size case is rejected on purpose - it would force a mapping across
   // attnCp boundaries (intersecting TP/EP) which is out of scope for this
   // refactor. kv_split_size == 1 is allowed and means each CP rank owns a
