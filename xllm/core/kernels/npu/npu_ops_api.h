@@ -99,7 +99,6 @@ torch::Tensor matmul_reduce_scatter(const torch::Tensor& a,
                                     ProcessGroup* process_group,
                                     const std::string& reduce_op,
                                     int64_t comm_turn,
-                                    int64_t stream_mode,
                                     const std::string& comm_mode);
 
 torch::Tensor active(const torch::Tensor& input, const std::string& act_mode);

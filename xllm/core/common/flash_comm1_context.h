@@ -17,7 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
-#include <vector>
+#include <string>
 
 #include "framework/parallel_state/parallel_args.h"
 
@@ -40,10 +40,8 @@ struct FlashComm1Context {
   int32_t tp_world_size = 1;
   int32_t original_num_tokens = 0;
   int32_t padded_num_tokens = 0;
-  int32_t local_num_tokens = 0;
   int32_t padded_local_num_tokens = 0;
   int32_t pad_size = 0;
-  bool is_prefill = true;
   bool enable_mmrs_fusion = false;
   std::string mmrs_comm_mode = "aiv";
   ProcessGroup* tp_group = nullptr;
@@ -71,10 +69,6 @@ class FlashComm1ContextScope {
 const FlashComm1Context* get_current_flash_comm1_context();
 
 bool is_sequence_sharded(const FlashComm1Context& ctx);
-
-int32_t local_num_tokens_for_rank(const FlashComm1Context& ctx, int32_t rank);
-
-std::vector<int32_t> token_num_list(const FlashComm1Context& ctx);
 
 torch::Tensor pad_rows_by_copy(const torch::Tensor& input, int64_t padded_rows);
 

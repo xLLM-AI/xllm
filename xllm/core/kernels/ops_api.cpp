@@ -447,7 +447,6 @@ torch::Tensor matmul_reduce_scatter(MatmulReduceScatterParams& params) {
                                     params.process_group,
                                     params.reduce_op,
                                     params.comm_turn,
-                                    params.stream_mode,
                                     params.comm_mode);
 #else
   NOT_IMPLEMENTED();

@@ -35,14 +35,6 @@ int32_t round_up_to_multiple(int32_t value, int32_t multiple) {
   return remainder == 0 ? value : value + multiple - remainder;
 }
 
-int32_t local_num_tokens_for_rank_impl(int32_t num_tokens,
-                                       int32_t world_size,
-                                       int32_t rank) {
-  const int32_t base = num_tokens / world_size;
-  const int32_t remainder = num_tokens % world_size;
-  return base + (rank < remainder ? 1 : 0);
-}
-
 }  // namespace
 
 FlashComm1ContextScope::FlashComm1ContextScope(const FlashComm1Context* ctx)
@@ -60,21 +52,6 @@ const FlashComm1Context* get_current_flash_comm1_context() {
 
 bool is_sequence_sharded(const FlashComm1Context& ctx) {
   return ctx.enabled && ctx.tp_world_size > 1;
-}
-
-int32_t local_num_tokens_for_rank(const FlashComm1Context& ctx, int32_t rank) {
-  CHECK_GE(rank, 0);
-  CHECK_LT(rank, ctx.tp_world_size);
-  return local_num_tokens_for_rank_impl(
-      ctx.original_num_tokens, ctx.tp_world_size, rank);
-}
-
-std::vector<int32_t> token_num_list(const FlashComm1Context& ctx) {
-  std::vector<int32_t> token_nums(ctx.tp_world_size);
-  for (int32_t rank = 0; rank < ctx.tp_world_size; ++rank) {
-    token_nums[rank] = local_num_tokens_for_rank(ctx, rank);
-  }
-  return token_nums;
 }
 
 torch::Tensor pad_rows_by_copy(const torch::Tensor& input,
@@ -136,7 +113,6 @@ FlashComm1Context build_flash_comm1_context(int32_t num_tokens,
   ctx.tp_rank = tp_group->rank();
   ctx.tp_world_size = tp_group->world_size();
   ctx.original_num_tokens = num_tokens;
-  ctx.is_prefill = is_prefill;
   ctx.enable_mmrs_fusion = options.enable_mmrs_fusion;
   ctx.mmrs_comm_mode = options.mmrs_comm_mode;
   ctx.tp_group = tp_group;
@@ -144,7 +120,6 @@ FlashComm1Context build_flash_comm1_context(int32_t num_tokens,
   const int32_t token_alignment = ctx.tp_world_size * kFc1LocalTokenAlignment;
   ctx.padded_num_tokens = round_up_to_multiple(num_tokens, token_alignment);
   ctx.pad_size = ctx.padded_num_tokens - num_tokens;
-  ctx.local_num_tokens = local_num_tokens_for_rank(ctx, ctx.tp_rank);
   ctx.padded_local_num_tokens = ctx.padded_num_tokens / ctx.tp_world_size;
 
   return ctx;
@@ -183,21 +158,13 @@ torch::Tensor gather_sequence(const torch::Tensor& input,
     return input;
   }
 
-  const int32_t current_local_size = input.size(0);
-  const int32_t expected_even_size = ctx.padded_num_tokens / ctx.tp_world_size;
-  const int32_t expected_local_size = ctx.local_num_tokens;
+  const int32_t expected_local_size = ctx.padded_local_num_tokens;
+  CHECK_EQ(input.size(0), expected_local_size)
+      << "FC1 gather expects a padded local shard of " << expected_local_size
+      << " rows, got " << input.size(0) << ", rank=" << ctx.tp_rank
+      << ", world=" << ctx.tp_world_size;
 
-  std::vector<int32_t> token_nums = token_num_list(ctx);
-  if (ctx.pad_size > 0 && current_local_size == expected_even_size) {
-    for (int32_t i = 0; i < ctx.tp_world_size; ++i) {
-      token_nums[i] = expected_even_size;
-    }
-  } else {
-    CHECK_EQ(current_local_size, expected_local_size)
-        << "FC1 gather expected local real-token shard size "
-        << expected_local_size << ", got " << current_local_size
-        << ", rank=" << ctx.tp_rank << ", world=" << ctx.tp_world_size;
-  }
+  const std::vector<int32_t> token_nums(ctx.tp_world_size, expected_local_size);
 
   auto gathered = parallel_state::gather(input, ctx.tp_group, token_nums);
 
