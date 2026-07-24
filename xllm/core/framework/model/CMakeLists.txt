@@ -11,6 +11,7 @@ cc_library(
     model_args.h
     model_input_params.h
     mtp_topk_state.h
+    mtp_utils.h
   SRCS
   DEPS
     :common
@@ -19,6 +20,7 @@ cc_library(
     :parallel_state
     :processors
     :chat_template
+    :util
     glog::glog
     torch
     torch_python

@@ -17,6 +17,7 @@ cc_library(
     types.h
     device_monitor.h
     version_singleton.h
+    flash_comm1_context.h
   SRCS
     etcd_client.cpp
     metrics.cpp
@@ -24,9 +25,11 @@ cc_library(
     options.cpp
     rate_limiter.cpp
     device_monitor.cpp
+    flash_comm1_context.cpp
   DEPS
     :config
     util
+    parallel_state
     absl::random_random
     absl::strings
     torch

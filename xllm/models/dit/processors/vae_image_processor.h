@@ -65,13 +65,7 @@ class VAEImageProcessorImpl : public torch::nn::Module {
       const std::string& resize_mode = "lanczos",
       std::optional<std::tuple<int64_t, int64_t, int64_t, int64_t>>
           crop_coords = std::nullopt) {
-    torch::Tensor processed = image.clone();
-    if (processed.dtype() != torch::kFloat32) {
-      processed = processed.to(torch::kFloat32);
-    }
-    if (processed.max().item<float>() > 1.1f) {
-      processed = processed / 255.0f;
-    }
+    torch::Tensor processed = image;
     if (crop_coords.has_value()) {
       auto [x1, y1, x2, y2] = crop_coords.value();
       x1 = std::max(int64_t(0), x1);
@@ -97,25 +91,11 @@ class VAEImageProcessorImpl : public torch::nn::Module {
     auto [target_h, target_w] =
         get_default_height_width(processed, height, width);
     if (do_resize_) {
-      if (resize_mode == "lanczos") {
-        processed = lanczos_resize(processed, target_h, target_w);
-      } else if (resize_mode == "default") {
-        processed = resize(processed,
-                           {target_h, target_w},
-                           /*resample=*/3,  // BICUBIC
-                           /*antialias=*/true);
-      } else if (resize_mode == "bicubic_no_aa") {
-        processed = resize(processed,
-                           {target_h, target_w},
-                           /*resample=*/3,  // BICUBIC
-                           /*antialias=*/false);
-      } else {
-        LOG(FATAL) << "Currently only support three resize methods, 'lanczos', "
-                      "'default', and 'bicubic_no_aa'"
-                   << ", but got: " << resize_mode;
-      }
+      processed = resize(processed, target_h, target_w, resize_mode);
     }
-
+    if (processed.max().item<float>() > 1.1f) {
+      processed = processed / 255.0f;
+    }
     if (do_normalize_) {
       processed = normalize(processed);
     }
@@ -174,68 +154,59 @@ class VAEImageProcessorImpl : public torch::nn::Module {
   }
 
  public:
-  torch::Tensor resize(const torch::Tensor& image,
-                       const std::vector<int64_t>& size,
-                       size_t resample,
-                       bool antialias) {
-    if (image.dim() != 4) {
-      LOG(FATAL) << "Input image must be a 4D tensor (B x C x H x W).";
-    }
-    auto options = torch::nn::functional::InterpolateFuncOptions()
-                       .size(size)
-                       .align_corners(/*align_corners=*/false)
-                       .antialias(antialias);
-    switch (resample) {
-      case 1:
-        options.mode(torch::kNearest);
-        break;
-      case 2:
-        options.mode(torch::kBilinear);
-        break;
-      case 3:
-        options.mode(torch::kBicubic);
-        break;
-      default:
-        LOG(FATAL) << "Invalid resample value. Must be one of 1, 2, or 3.";
-    }
-    return torch::nn::functional::interpolate(image, options);
-  }
-
-  torch::Tensor lanczos_resize(torch::Tensor image,
-                               int64_t height,
-                               int64_t width) {
+  torch::Tensor resize(torch::Tensor image,
+                       int64_t height,
+                       int64_t width,
+                       const std::string& resize_mode = "lanczos") {
     auto options = image.options();
+    image = image.cpu();
 
-    // BCHW || CHW
-    if (image.dim() == 4) {
+    bool squeeze_batch = false;
+    if (image.dim() == 3) {
+      image = image.unsqueeze(0);
+      squeeze_batch = true;
+    }
+    CHECK_EQ(image.dim(), 4) << "resize expects CHW or BCHW image";
+
+    torch::Tensor resized;
+    if (resize_mode == "lanczos") {
       std::vector<torch::Tensor> resized_images;
       resized_images.reserve(image.size(0));
       for (int64_t i = 0; i < image.size(0); ++i) {
-        resized_images.emplace_back(lanczos_resize(image[i], height, width));
+        auto chw_image = image[i];
+        auto hwc_image = chw_image.permute({1, 2, 0}).contiguous();
+
+        int64_t h = hwc_image.size(0);
+        int64_t w = hwc_image.size(1);
+        int64_t c = hwc_image.size(2);
+
+        torch::Tensor out = torch::empty({height, width, c}, torch::kUInt8);
+        lanczos::resize_8bpc(hwc_image.data_ptr<uint8_t>(),
+                             static_cast<int32_t>(w),
+                             static_cast<int32_t>(h),
+                             static_cast<int32_t>(c),
+                             static_cast<int32_t>(width),
+                             static_cast<int32_t>(height),
+                             out.data_ptr<uint8_t>());
+        resized_images.emplace_back(out.permute({2, 0, 1}));
       }
-      return torch::stack(resized_images).to(options);
+      resized = torch::stack(resized_images);
+    } else if (resize_mode == "bicubic") {
+      auto options = torch::nn::functional::InterpolateFuncOptions()
+                         .size(std::vector<int64_t>{height, width})
+                         .align_corners(false)
+                         .antialias(true)
+                         .mode(torch::kBicubic);
+      resized = torch::nn::functional::interpolate(image, options);
+    } else {
+      LOG(FATAL) << "Currently only support 'lanczos' and 'bicubic'"
+                 << ", but got: " << resize_mode;
     }
-    CHECK_EQ(image.dim(), 3) << "lanczos_resize expects CHW or BCHW image";
 
-    image = image.cpu().to(torch::kFloat32);
-
-    image = image.permute({1, 2, 0}).contiguous();  // [H, W, C]
-
-    int64_t h = image.size(0), w = image.size(1), c = image.size(2);
-
-    torch::Tensor out = torch::empty({height, width, c}, torch::kFloat32);
-    lanczos::resize_f32(image.data_ptr<float>(),
-                        static_cast<int32_t>(w),
-                        static_cast<int32_t>(h),
-                        static_cast<int32_t>(c),
-                        static_cast<int32_t>(width),
-                        static_cast<int32_t>(height),
-                        out.data_ptr<float>());
-
-    out = out.permute({2, 0, 1});  // [C, dstH, dstW]
-    out = out.to(options);
-
-    return out;
+    if (squeeze_batch) {
+      resized = resized.squeeze(0);
+    }
+    return resized.to(options);
   }
 
  private:

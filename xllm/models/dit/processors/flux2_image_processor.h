@@ -70,13 +70,7 @@ class Flux2ImageProcessorImpl final : public VAEImageProcessorImpl {
                             static_cast<float>(image_width * image_height));
     int64_t width = static_cast<int64_t>(image_width * scale);
     int64_t height = static_cast<int64_t>(image_height * scale);
-    return torch::nn::functional::interpolate(
-               image.unsqueeze(0),  // [1, 3, H, W]
-               torch::nn::functional::InterpolateFuncOptions()
-                   .mode(torch::kBilinear)
-                   .align_corners(false)
-                   .size(std::vector<int64_t>{height, width}))
-        .squeeze(0);
+    return VAEImageProcessorImpl::resize(image, height, width);
   }
 
   torch::Tensor resize_if_exceeds_area(const torch::Tensor& image,

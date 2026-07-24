@@ -206,6 +206,27 @@ bool is_w8a8_quant(
          resolved_weight_quant_method.value() == "w8a8";
 }
 
+bool wants_mmrs(RowParallelReduceMode reduce_mode) {
+  return reduce_mode == RowParallelReduceMode::MATMUL_REDUCE_SCATTER;
+}
+
+void log_mmrs_quant_skip(RowParallelReduceMode reduce_mode,
+                         const FlashComm1Context* fc1_ctx,
+                         const char* quant_path,
+                         const torch::Tensor& input) {
+  if (!wants_mmrs(reduce_mode)) {
+    return;
+  }
+  LOG_FIRST_N(WARNING, 16)
+      << "FC1 MMRS skipped in row-parallel " << quant_path
+      << " path: fused matmul_reduce_scatter is currently wired only for "
+         "non-quant linear. input="
+      << input.sizes() << ", sequence_sharded="
+      << (fc1_ctx != nullptr && is_sequence_sharded(*fc1_ctx))
+      << ", enable_mmrs_fusion="
+      << (fc1_ctx != nullptr && fc1_ctx->enable_mmrs_fusion);
+}
+
 bool is_fp8_channelwise_w8a8(const QuantArgs& quant_args) {
 #if defined(USE_DCU)
   // Compressed-tensors FP8 W8A8 currently pairs dynamic activations with
@@ -1365,11 +1386,57 @@ RowParallelLinearImpl::RowParallelLinearImpl(
 }
 
 torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
+  const RowParallelReduceMode reduce_mode =
+      enable_result_reduction_ ? RowParallelReduceMode::ALL_REDUCE
+                               : RowParallelReduceMode::NONE;
+  return forward_impl(input, reduce_mode);
+}
+
+torch::Tensor RowParallelLinearImpl::mmrs_weight_transposed() const {
+  CHECK(weight_.defined()) << "weight is required for MMRS.";
+  const bool valid = mmrs_weight_t_.defined() &&
+                     mmrs_weight_t_.device() == weight_.device() &&
+                     mmrs_weight_t_.scalar_type() == weight_.scalar_type() &&
+                     mmrs_weight_t_.size(0) == weight_.size(1) &&
+                     mmrs_weight_t_.size(1) == weight_.size(0);
+  if (!valid) {
+    mmrs_weight_t_ = weight_.transpose(0, 1).contiguous();
+  }
+  return mmrs_weight_t_;
+}
+
+torch::Tensor RowParallelLinearImpl::forward(
+    torch::Tensor input,
+    RowParallelReduceMode reduce_mode) {
+#if !defined(USE_NPU)
+  reduce_mode = enable_result_reduction_ ? RowParallelReduceMode::ALL_REDUCE
+                                         : RowParallelReduceMode::NONE;
+#endif
+  return forward_impl(input, reduce_mode);
+}
+
+torch::Tensor RowParallelLinearImpl::forward_impl(
+    torch::Tensor input,
+    RowParallelReduceMode reduce_mode) {
+#if defined(USE_NPU)
+  const bool use_fc1_reduce =
+      reduce_mode == RowParallelReduceMode::REDUCE_SCATTER ||
+      reduce_mode == RowParallelReduceMode::MATMUL_REDUCE_SCATTER;
+  const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
+#else
+  const bool use_fc1_reduce = false;
+  const FlashComm1Context* fc1_ctx = nullptr;
+#endif
   auto bias = bias_.defined() && rank_ == 0
                   ? std::optional<torch::Tensor>(bias_)
                   : std::nullopt;
+
+  const bool skip_scatter =
+      use_fc1_reduce && fc1_ctx && is_sequence_sharded(*fc1_ctx);
+
   torch::Tensor output;
   if (quant_args_.quant_method() == kQuantMethodSmoothquant) {
+    log_mmrs_quant_skip(reduce_mode, fc1_ctx, "smoothquant", input);
     CHECK(smooth_.defined()) << "smooth is required for smoothquant.";
     CHECK(qweight_.defined()) << "qweight is required for smoothquant.";
     CHECK(per_channel_scale_.defined())
@@ -1378,7 +1445,7 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
     torch::Tensor quantized_input;
     torch::Tensor input_scale;
 
-    if (!input_is_parallelized_) {
+    if (!input_is_parallelized_ && !skip_scatter) {
       input = xllm::parallel_state::scatter(input, process_group_);
     }
 
@@ -1418,8 +1485,10 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
 
     output = xllm::kernel::scaled_matmul(matmul_params);
   } else if (quant_args_.quant_method() == kQuantMethodFp8) {
+    log_mmrs_quant_skip(reduce_mode, fc1_ctx, "fp8", input);
     check_fp8_activation_dynamic_supported(quant_args_);
-    if (!input_is_parallelized_) {
+
+    if (!input_is_parallelized_ && !skip_scatter) {
       input = xllm::parallel_state::scatter(input, process_group_);
     }
 
@@ -1429,13 +1498,14 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
     output = fp8_linear_forward(
         input, weight_, weight_scale_, scale, bias, output_dtype_);
   } else if (is_w8a8_quant(resolved_weight_quant_method_)) {
+    log_mmrs_quant_skip(reduce_mode, fc1_ctx, "w8a8", input);
     CHECK(input_scale_is_loaded_ && input_scale_.defined())
         << "input_scale is required for w8a8 quant matmul.";
     CHECK(input_offset_is_loaded_ && input_offset_.defined())
         << "input_offset is required for w8a8 quant matmul.";
     CHECK(deq_scale_is_loaded_ && deq_scale_.defined())
         << "deq_scale is required for w8a8 quant matmul.";
-    if (!input_is_parallelized_) {
+    if (!input_is_parallelized_ && !skip_scatter) {
       input = xllm::parallel_state::scatter(input, process_group_);
     }
     auto quant_bias = quant_bias_is_loaded_ && quant_bias_.defined()
@@ -1449,7 +1519,8 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
                                      quant_bias,
                                      output_dtype_);
   } else if (is_w8a8_dynamic_quant(resolved_weight_quant_method_)) {
-    if (!input_is_parallelized_) {
+    log_mmrs_quant_skip(reduce_mode, fc1_ctx, "w8a8_dynamic", input);
+    if (!input_is_parallelized_ && !skip_scatter) {
       input = xllm::parallel_state::scatter(input, process_group_);
     }
     auto weight_scale = weight_scale_is_loaded_
@@ -1465,15 +1536,109 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
         input, weight_, weight_scale.value(), bias, output_dtype_);
 #endif
   } else {
-    if (!input_is_parallelized_) {
+    if (!input_is_parallelized_ && !skip_scatter) {
       input = xllm::parallel_state::scatter(input, process_group_);
     }
+#if defined(USE_NPU)
+    if (wants_mmrs(reduce_mode) && fc1_ctx && is_sequence_sharded(*fc1_ctx) &&
+        fc1_ctx->enable_mmrs_fusion) {
+      bool can_try_mmrs = input.defined() && weight_.defined() &&
+                          input.dim() == 2 &&
+                          input.size(0) == fc1_ctx->original_num_tokens &&
+                          (!bias.has_value() || fc1_ctx->pad_size == 0);
+      if (can_try_mmrs) {
+        torch::Tensor mmrs_input = input;
+        if (fc1_ctx->pad_size > 0) {
+          mmrs_input = pad_rows_by_copy(input, fc1_ctx->padded_num_tokens);
+        }
+
+        auto output_shape = mmrs_input.sizes().vec();
+        output_shape[0] = fc1_ctx->padded_local_num_tokens;
+        output_shape[1] = weight_.size(0);
+
+        xllm::kernel::MatmulReduceScatterParams mmrs_params;
+        mmrs_params.a = mmrs_input;
+        mmrs_params.b = mmrs_weight_transposed();
+        mmrs_params.bias = bias;
+        mmrs_params.process_group = process_group_;
+        mmrs_params.comm_mode = fc1_ctx->mmrs_comm_mode;
+        try {
+          output = xllm::kernel::matmul_reduce_scatter(mmrs_params);
+        } catch (const c10::Error& error) {
+          LOG_FIRST_N(WARNING, 8)
+              << "FC1 MMRS call failed; fallback reduction will run: "
+              << error.what_without_backtrace();
+          output = torch::Tensor();
+        }
+        if (output.defined() &&
+            output.sizes() == torch::IntArrayRef(output_shape)) {
+          return output;
+        }
+        if (output.defined()) {
+          LOG_FIRST_N(WARNING, 8)
+              << "FC1 MMRS returned non-local shape; fallback reduction will "
+                 "run. input="
+              << input.sizes() << ", weight=" << weight_.sizes()
+              << ", returned_output=" << output.sizes()
+              << ", expected_local_output=" << output_shape;
+          output = torch::Tensor();
+        }
+      } else {
+        LOG_FIRST_N(WARNING, 8)
+            << "FC1 MMRS skipped for unsupported row-parallel shape; fallback "
+               "to matmul + reduce_scatter. input="
+            << input.sizes() << ", weight=" << weight_.sizes()
+            << ", original_num_tokens=" << fc1_ctx->original_num_tokens
+            << ", pad_size=" << fc1_ctx->pad_size
+            << ", has_bias=" << bias.has_value()
+            << ", input_dim=" << input.dim();
+      }
+
+      if (!output.defined()) {
+        xllm::kernel::MatmulParams matmul_params;
+        matmul_params.a = input;
+        matmul_params.b = weight_;
+        matmul_params.bias = bias;
+        output = xllm::kernel::matmul(matmul_params);
+      }
+    } else {
+      if (wants_mmrs(reduce_mode)) {
+        LOG_FIRST_N(WARNING, 16)
+            << "FC1 MMRS skipped before row-parallel matmul: fc1_ctx="
+            << (fc1_ctx != nullptr) << ", sequence_sharded="
+            << (fc1_ctx != nullptr && is_sequence_sharded(*fc1_ctx))
+            << ", enable_mmrs_fusion="
+            << (fc1_ctx != nullptr && fc1_ctx->enable_mmrs_fusion)
+            << ", reduce_mode=" << static_cast<int>(reduce_mode)
+            << ", input=" << input.sizes();
+      }
+      xllm::kernel::MatmulParams matmul_params;
+      matmul_params.a = input;
+      matmul_params.b = weight_;
+      matmul_params.bias = bias;
+      output = xllm::kernel::matmul(matmul_params);
+    }
+#else
     xllm::kernel::MatmulParams matmul_params;
     matmul_params.a = input;
     matmul_params.b = weight_;
     matmul_params.bias = bias;
     output = xllm::kernel::matmul(matmul_params);
+#endif
   }
+
+  if (reduce_mode == RowParallelReduceMode::NONE) {
+    return output;
+  }
+
+  if ((reduce_mode == RowParallelReduceMode::REDUCE_SCATTER ||
+       reduce_mode == RowParallelReduceMode::MATMUL_REDUCE_SCATTER) &&
+      fc1_ctx) {
+    FlashComm1Context ctx_copy = *fc1_ctx;
+    ctx_copy.tp_group = process_group_;
+    return maybe_pad_and_reduce(output, ctx_copy, reduce_mode);
+  }
+
   if (enable_result_reduction_ && world_size_ > 1) {
     output = xllm::parallel_state::reduce(output, process_group_);
   }
@@ -1485,6 +1650,8 @@ void RowParallelLinearImpl::load_state_dict(const StateDict& state_dict) {
   if (state_dict.size() == 0) {
     return;
   }
+  // The transposed weight is derived state and must be rebuilt after reload.
+  mmrs_weight_t_ = torch::Tensor();
   const int64_t rank = world_size_ == 1 ? 0 : rank_;
   const int64_t world_size = world_size_;
   resolve_weight_quant_method_for_linear_load(

@@ -118,6 +118,15 @@ class Options {
 
   PROPERTY(bool, enable_chunked_prefill) = true;
 
+  // Flash Communication 1 (FC1) sequence-parallel optimization.
+  PROPERTY(bool, enable_flashcomm1) = false;
+
+  PROPERTY(int32_t, flashcomm1_min_prefill_tokens) = 8192;
+
+  PROPERTY(bool, enable_mmrs_fusion) = false;
+
+  PROPERTY(std::string, mmrs_comm_mode) = "aiv";
+
   PROPERTY(std::optional<std::string>, master_node_addr);
 
   PROPERTY(int32_t, nnodes) = 1;

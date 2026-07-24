@@ -870,8 +870,7 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
     std::vector<torch::Tensor> image_list;
     image_list.reserve(raw_image_inputs.size());
 
-    for (const auto& images : raw_image_inputs) {
-      auto img = images.to(options_.device(), dtype_);
+    for (const auto& img : raw_image_inputs) {
       if (img.dim() != 4) {
         LOG(ERROR)
             << "image inputs are expected to be a 4 dim tensor, but got: "
@@ -937,17 +936,12 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
         CHECK_GT(vae_height, 0) << "QwenImageEditPlus vae_height must be > 0";
         vae_image_sizes.push_back({vae_width, vae_height});
         auto img = image_list[i];
-        auto condition_img = vae_image_processor_->resize(
-            img,
-            {condition_height, condition_width},
-            /*resample=*/3,  // BICUBIC (approximate LANCZOS)
-            /*antialias=*/true);
-        auto vae_img = vae_image_processor_
-                           ->preprocess(img,
-                                        vae_height,
-                                        vae_width,
-                                        /*resize_mode=*/"default")
-                           .unsqueeze(2);
+        auto condition_img =
+            vae_image_processor_->resize(img, condition_height, condition_width)
+                .to(options_);
+        auto vae_img =
+            vae_image_processor_->preprocess(img, vae_height, vae_width)
+                .unsqueeze(2);
 
         condition_images.push_back(condition_img);
         vae_images.push_back(vae_img);

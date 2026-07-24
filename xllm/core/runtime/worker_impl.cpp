@@ -42,6 +42,7 @@ limitations under the License.
 #include "common/device_monitor.h"
 #include "common/global_flags.h"
 #include "common/metrics.h"
+#include "core/common/flash_comm1_context.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/eplb_config.h"
@@ -1523,10 +1524,10 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   }
 
 #if defined(USE_NPU)
+  const std::string& speculative_algorithm = options_.speculative_algorithm();
   if (options_.enable_speculative_decode() &&
-      util::is_deepseek_v4_model_type(args.model_type()) &&
-      (options_.speculative_algorithm() == "MTP" ||
-       options_.speculative_algorithm() == "mtp")) {
+      SpeculativeConfig::is_mtp_algorithm(speculative_algorithm) &&
+      util::is_deepseek_v4_model_type(args.model_type())) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
   }
   if (options_.speculative_algorithm() == "DFlash") {
@@ -1620,6 +1621,13 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   auto tensor_options = torch::dtype(dtype_).device(device_);
   context_ = ModelContext(parallel_args_, args, quant_args, tensor_options);
   context_.set_model_id(options_.model_id());
+  FlashComm1Options flash_comm1_options;
+  flash_comm1_options.enable_flashcomm1 = options_.enable_flashcomm1();
+  flash_comm1_options.min_prefill_tokens =
+      options_.flashcomm1_min_prefill_tokens();
+  flash_comm1_options.enable_mmrs_fusion = options_.enable_mmrs_fusion();
+  flash_comm1_options.mmrs_comm_mode = options_.mmrs_comm_mode();
+  context_.set_flash_comm1_options(flash_comm1_options);
 
   // init model, create model executor
   bool status = this->init_model(context_);

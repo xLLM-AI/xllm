@@ -21,6 +21,10 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+namespace xllm {
+class ProcessGroup;
+}  // namespace xllm
+
 namespace xllm::layer {
 struct AttentionMetadata;
 }  // namespace xllm::layer
@@ -333,6 +337,17 @@ struct MatmulParams {
   // Scaling factor for tensor c (if provided). Default: 0.0
   // Result: alpha * (a @ b) + beta * c (if c provided)
   double beta = 0.0;
+};
+
+struct MatmulReduceScatterParams {
+  torch::Tensor a;
+  torch::Tensor b;
+  std::optional<torch::Tensor> bias;
+  ProcessGroup* process_group = nullptr;
+
+  std::string reduce_op = "sum";
+  int64_t comm_turn = 0;
+  std::string comm_mode = "aiv";
 };
 
 // Quantized matmul parameters (NPU aclnnQuantMatmulV4 path).

@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/kv_cache/kv_cache_estimation.h"
+#include "core/framework/model/mtp_utils.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/layers/common/dsa_topk_share_plan.h"
 #include "spec_input_builder.h"
@@ -679,9 +680,7 @@ int64_t MTPWorkerImpl::get_embedding_placeholder_size() {
   // hc_mult*hidden per row.
   if (impl_ != nullptr) {
     const ModelArgs& args = impl_->context_.get_model_args();
-    if (util::is_deepseek_v4_model_type(args.model_type())) {
-      return args.hc_mult() * args.hidden_size();
-    }
+    return mtp_hidden_state_width(args);
   }
   return static_cast<int64_t>(embedding_size_);
 }

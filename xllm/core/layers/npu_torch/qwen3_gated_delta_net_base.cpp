@@ -535,8 +535,14 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
     const ModelInputParams& input_params) {
-  // Save original hidden_states size for potential padding later
-  const int64_t original_num_tokens = hidden_states.size(0);
+  const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
+  torch::Tensor h = hidden_states;
+  if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
+    h = gather_sequence(hidden_states, *fc1_ctx);
+  }
+
+  // Save the gathered hidden-state size for potential padding later.
+  const int64_t original_num_tokens = h.size(0);
   const bool use_spec_verify = input_params.is_spec_verify;
   const bool is_any_prefill =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
@@ -548,14 +554,13 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
   // Qwen3.5 stores qkv, z, b, and a as separate projection weights, so it can
   // use their outputs directly in every forward mode. Qwen3Next stores qkvz
   // and ba as packed weights and uses the fused-split fallback below.
-  auto split_inputs = project_split_inputs(hidden_states, attn_metadata);
+  auto split_inputs = project_split_inputs(h, attn_metadata);
   if (split_inputs.has_value()) {
     std::tie(mixed_qkv, z, b, a) = split_inputs.value();
     batch_size = mixed_qkv.size(0);
     seq_len = mixed_qkv.size(1);
   } else {
-    auto [qkvz_padded, ba_padded] =
-        project_padded_inputs(hidden_states, attn_metadata);
+    auto [qkvz_padded, ba_padded] = project_padded_inputs(h, attn_metadata);
     batch_size = qkvz_padded.size(0);
     seq_len = qkvz_padded.size(1);
 
@@ -1025,6 +1030,10 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     // Slice excess padding tokens
     rearranged_norm =
         rearranged_norm.slice(0, 0, original_num_tokens).contiguous();
+  }
+  if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
+    return o_proj_->forward(rearranged_norm,
+                            row_parallel_reduce_mode_for_fc1(*fc1_ctx));
   }
   return o_proj_->forward(rearranged_norm);
 }

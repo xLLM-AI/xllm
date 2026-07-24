@@ -438,6 +438,20 @@ torch::Tensor matmul(MatmulParams& params) {
 #endif
 }
 
+torch::Tensor matmul_reduce_scatter(MatmulReduceScatterParams& params) {
+#if defined(USE_NPU)
+  return npu::matmul_reduce_scatter(params.a,
+                                    params.b,
+                                    params.bias,
+                                    params.process_group,
+                                    params.reduce_op,
+                                    params.comm_turn,
+                                    params.comm_mode);
+#else
+  NOT_IMPLEMENTED();
+#endif
+}
+
 torch::Tensor quant_matmul(QuantMatmulParams& params) {
 #if defined(USE_NPU)
   return npu::quant_matmul(params.x1,

@@ -23,6 +23,10 @@ limitations under the License.
 
 #include "custom_functions_npu/atb_common.h"
 
+namespace xllm {
+class ProcessGroup;
+}  // namespace xllm
+
 namespace xllm::kernel::npu {
 
 void reshape_paged_cache(torch::Tensor& key,
@@ -88,6 +92,14 @@ void batch_decode_acl_graph(const torch::Tensor& query,
 torch::Tensor matmul(const torch::Tensor& a,
                      const torch::Tensor& b,
                      const std::optional<torch::Tensor>& bias);
+
+torch::Tensor matmul_reduce_scatter(const torch::Tensor& a,
+                                    const torch::Tensor& b,
+                                    const std::optional<torch::Tensor>& bias,
+                                    ProcessGroup* process_group,
+                                    const std::string& reduce_op,
+                                    int64_t comm_turn,
+                                    const std::string& comm_mode);
 
 torch::Tensor active(const torch::Tensor& input, const std::string& act_mode);
 

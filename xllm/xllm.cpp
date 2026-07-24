@@ -26,6 +26,7 @@ limitations under the License.
 #include <random>
 
 #include "api_service/api_service.h"
+#include "core/common/global_flags.h"
 #include "core/common/instance_name.h"
 #include "core/common/metrics.h"
 #include "core/common/options.h"
@@ -143,6 +144,11 @@ Options create_options(const std::string& instance_name, bool is_local) {
   Options options;
 #if defined(USE_NPU)
   options.npu_kernel_backend(kernel_config.npu_kernel_backend());
+  options.enable_flashcomm1(kernel_config.enable_flashcomm1())
+      .flashcomm1_min_prefill_tokens(
+          kernel_config.flashcomm1_min_prefill_tokens())
+      .enable_mmrs_fusion(kernel_config.enable_mmrs_fusion())
+      .mmrs_comm_mode(kernel_config.mmrs_comm_mode());
 #endif
   options.model_path(model_config.model())
       .model_id(model_config.model_id())
