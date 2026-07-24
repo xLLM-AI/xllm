@@ -30,24 +30,36 @@ void NpuColumnParallelLinearImpl::param_from_args(
 
   if (parallel_args.world_size() > 1) {
     if (parallel_args.mapping_data().empty()) {
-      const bool use_local_tp = (dp_size_ > 1) || (cp_size_ > 1);
-      if (use_local_tp) {
-        param.tensorParallelInfo.rank = dp_local_tp_rank_;
-        param.tensorParallelInfo.worldSize = dp_local_tp_size_;
+      // NpuColumnParallelLinear is only used by embedding-flow projections
+      // (MTP eh_proj / rot, eagle3/dflash fc), which run BEFORE localize and
+      // see the full sequence. So it must be CP-unaware but DP-aware: shard
+      // across the dp-local-TP group (world / dp_size = cp_size * tp_size)
+      // instead of the CP-local TP (dp_local_tp_size_, size tp). When
+      // cp_size == 1 this collapses to tp_size, so non-CP runs are unchanged.
+      const bool use_cp_unaware_tp = (dp_size_ > 1) || (cp_size_ > 1);
+      const int32_t cp_unaware_tp_size = parallel_args.world_size() / dp_size_;
+      if (use_cp_unaware_tp) {
+        param.tensorParallelInfo.rank =
+            parallel_args.rank() % cp_unaware_tp_size;
+        param.tensorParallelInfo.worldSize = cp_unaware_tp_size;
       } else {
         param.tensorParallelInfo.rank = parallel_args.rank();
         param.tensorParallelInfo.worldSize = parallel_args.world_size();
       }
       param.parallelType = atb_speed::common::COLUMN_PARALLEL;
       const int32_t tp_group_id =
-          use_local_tp ? (parallel_args.rank() / dp_local_tp_size_) : 0;
+          use_cp_unaware_tp ? (parallel_args.rank() / cp_unaware_tp_size) : 0;
       param.tensorParallelInfo.commDomain = std::to_string(tp_group_id);
       param.tensorParallelInfo.backend =
           ParallelConfig::get_instance().communication_backend();
     } else {
+      // Mapping (ATB) path: use the dedicated WORD_EMBED_TP group (dp-local-TP,
+      // size cp*tp). Do NOT use ATTN_TP (size tp, CP-local) — that would
+      // replicate the projection weight across CP ranks. See mapping_npu.cpp
+      // parse_parallel_info().
       param.parallelType = atb_speed::common::COLUMN_PARALLEL;
       atb_speed::common::ParallelInfo parallelInfo =
-          parallel_args.mapping().Get(atb_speed::base::ATTN_TP);
+          parallel_args.mapping().Get(atb_speed::base::WORD_EMBED_TP);
       param.tensorParallelInfo.rank = parallelInfo.rank;
       param.tensorParallelInfo.worldSize = parallelInfo.rankIds.size();
       param.tensorParallelInfo.backend =

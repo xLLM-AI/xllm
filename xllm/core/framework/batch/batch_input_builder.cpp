@@ -31,7 +31,6 @@ limitations under the License.
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/multimodal/mm_visitor.h"
-#include "core/platform/platform.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
 #include "framework/request/sequence.h"
@@ -218,7 +217,7 @@ BatchInputBuilder::BatchInputBuilder(
       num_sequences_(sequences.size()),
       swap_block_transfer_infos_(swap_block_transfer_infos),
       batch_id_(batch_id),
-      cp_size_(Platform::uses_model_cp_partition() ? 1 : std::max(1, cp_size)) {
+      cp_size_(1) {
   // Reserve space for better performance
   const size_t reserve_size = 1024;
   state_.flatten_tokens_vec.reserve(reserve_size);
@@ -651,14 +650,7 @@ void BatchInputBuilder::process_single_sequence(
   CHECK(allowed_max_tokens_[seq_index] > 0);
   const uint32_t q_seq_len =
       std::min(n_tokens - n_kv_cache_tokens, allowed_max_tokens_[seq_index]);
-  uint32_t padded_q_seq_len = q_seq_len;
-  // Continuous scheduler can enlarge token budget for CP prefill padding.
-  // Keep physical q_len aligned to 2 * cp_size to match later cp_partition.
-  if (cp_size_ > 1 && state.batch_forward_type.no_decode()) {
-    const uint32_t aligned_q_seq_len =
-        xllm::util::align_up(q_seq_len, cp_size_ * 2);
-    padded_q_seq_len = aligned_q_seq_len;
-  }
+  const uint32_t padded_q_seq_len = q_seq_len;
   const uint32_t logical_seq_len = q_seq_len + n_kv_cache_tokens;
   const uint32_t seq_len = padded_q_seq_len + n_kv_cache_tokens;
 
@@ -688,7 +680,7 @@ void BatchInputBuilder::process_single_sequence(
   process_multi_modal_inputs(sequence, n_kv_cache_tokens, q_seq_len, seq_index);
   // Process tokens and positions
   extract_tokens_and_positions(
-      sequence, n_kv_cache_tokens, logical_seq_len, seq_len, state_ptr);
+      sequence, n_kv_cache_tokens, logical_seq_len, state_ptr);
 
   // Setup KV cache
   setup_kv_cache_info(sequence,
@@ -708,7 +700,6 @@ void BatchInputBuilder::process_single_sequence(
 void BatchInputBuilder::extract_tokens_and_positions(Sequence* sequence,
                                                      uint32_t n_kv_cache_tokens,
                                                      uint32_t seq_len,
-                                                     uint32_t padded_seq_len,
                                                      BuilderState* state_ptr) {
   BuilderState& state = state_ptr ? *state_ptr : state_;
   const size_t seq_token_begin = state.flatten_tokens_vec.size();
@@ -756,17 +747,6 @@ void BatchInputBuilder::extract_tokens_and_positions(Sequence* sequence,
     }
   }
 
-  // Right padding for CP prefill: append physical tokens only for cache/layout.
-  if (padded_seq_len > seq_len) {
-    const int32_t pad_token_id = args_ ? args_->pad_token_id() : 0;
-    for (uint32_t j = seq_len; j < padded_seq_len; ++j) {
-      state.flatten_tokens_vec.emplace_back(pad_token_id);
-      if (!use_mrope_) {
-        state.flatten_positions_vec.push_back(static_cast<int32_t>(j));
-      }
-    }
-  }
-
   append_linear_state_row(sequence, n_kv_cache_tokens, seq_len, state);
 
   // Add extra token id
@@ -805,28 +785,6 @@ void BatchInputBuilder::extract_tokens_and_positions(Sequence* sequence,
   } else {
     extra_token_id = token_ids[seq_len];
     state.extra_token_ids.emplace_back(extra_token_id);
-  }
-
-  // Build MTP shifted token ids for both pure prefill and chunked-prefill
-  // (no_decode) when CP is enabled. The shift-by-1 layout is required by the
-  // CP-aware MTP loss computation across both layouts; using is_prefill()
-  // here (upstream default) would miss chunked-prefill chunks and produce
-  // mis-aligned logits when CP > 1.
-  if (cp_size_ > 1 && state.batch_forward_type.no_decode()) {
-    const uint32_t q_len = seq_len - n_kv_cache_tokens;
-    if (q_len > 1) {
-      state.mtp_shifted_token_ids.insert(
-          state.mtp_shifted_token_ids.end(),
-          state.flatten_tokens_vec.begin() + seq_token_begin + 1,
-          state.flatten_tokens_vec.begin() + seq_token_begin + q_len);
-    }
-    state.mtp_shifted_token_ids.emplace_back(extra_token_id);
-    if (padded_seq_len > seq_len) {
-      const int32_t pad_token_id = args_ ? args_->pad_token_id() : 0;
-      state.mtp_shifted_token_ids.insert(state.mtp_shifted_token_ids.end(),
-                                         padded_seq_len - seq_len,
-                                         pad_token_id);
-    }
   }
 }
 
@@ -1254,8 +1212,8 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
   if (!state_.mtp_shifted_token_ids.empty()) {
     // Write both the upstream "root" path (consumed by non-CP MTP code paths
     // and by the existing shm serializer) and the CP-specific embedding path
-    // (consumed by cp_input_partition + mtp_worker_impl). Both tensors share
-    // storage via from_blob; the cost is one extra tensor handle, not a copy.
+    // (consumed by mtp_worker_impl). Both tensors share storage via from_blob;
+    // the cost is one extra tensor handle, not a copy.
     auto mtp_tensor = torch::tensor(state_.mtp_shifted_token_ids, torch::kInt);
     input_params.embedding.mtp_shifted_token_ids = mtp_tensor;
     input_params.mtp_shifted_token_ids = mtp_tensor;

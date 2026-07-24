@@ -43,15 +43,7 @@ using KVPushSynchronizerImpl = MLULayerSynchronizerImpl;
 using KVPushSynchronizerImpl = DCULayerSynchronizerImpl;
 #endif
 
-// In KV-split mode, filters and remaps remote_blocks_ids so that each KV-split
-// rank only sees the remote blocks assigned to it. When `kv_split_size == 1`
-// the caller should skip this entirely (every rank holds the full KV replica
-// and `remote_blocks_ids` is 1:1 with `local_blocks_ids`).
-//
-// Note: prior to the KV-split / CP decoupling refactor this was named
-// filter_cp_kv_infos and gated on cp_size>1. The behavior is identical when
-// kv_split_size == cp_size (the legacy default), so callers that pass cp_rank
-// / cp_size keep working byte-for-byte.
+// Filter/remap remote_blocks_ids for one kv-split rank (skip when size==1).
 std::vector<TransferKVInfo> filter_kv_split_infos(
     int32_t kv_split_rank,
     int32_t kv_split_size,

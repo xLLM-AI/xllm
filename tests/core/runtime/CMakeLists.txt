@@ -72,19 +72,10 @@ cc_test(
     "${PROJECT_SOURCE_DIR}/xllm/core/runtime/spec_input_builder.cpp"
   DEPS
     :multimodal
+    :parallel_state
     torch
     glog::glog
     proto::xllm_proto
-    GTest::gtest_main
-)
-
-cc_test(
-  NAME
-    cp_input_partition_test
-  SRCS
-    cp_input_partition_test.cpp
-  DEPS
-    :runtime
     GTest::gtest_main
 )
 

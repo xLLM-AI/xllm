@@ -312,14 +312,6 @@ torch::Tensor to_cpu_int_tensor_for_read(const torch::Tensor& values) {
       .contiguous();
 }
 
-bool has_mtp_prefill_placeholder_extra_token(
-    const std::vector<int32_t>& extra_token_ids,
-    int32_t placeholder) {
-  return std::find(extra_token_ids.begin(),
-                   extra_token_ids.end(),
-                   placeholder) != extra_token_ids.end();
-}
-
 void check_mtp_decode_states(
     const std::vector<EmbeddingCache::DecodeState>& states,
     const std::vector<std::string>& request_ids,
@@ -357,73 +349,6 @@ void check_mtp_decode_states(
         << "MTP decode target state token mismatch, request_id="
         << request_ids[i];
   }
-}
-
-// CP partition keeps the final -1 placeholder on exactly one rank's shard.
-// The owning rank injects the target next_token at that local placeholder; non-
-// owning ranks have no placeholder and skip injection. selected_token_idxes is
-// left in the CP all-gather global space for the draft LmHead.
-void apply_cp_mtp_prefill_target_tokens(
-    ForwardInput& input,
-    const torch::Tensor& next_tokens,
-    int32_t placeholder,
-    const torch::TensorOptions& token_options) {
-  auto& embedding = input.input_params.embedding;
-  CHECK(embedding.mtp_shifted_token_ids.defined());
-  CHECK(input.sampling_params.selected_token_idxes.defined())
-      << "selected_token_idxes required for CP MTP final-chunk draft input";
-
-  torch::Tensor shifted_cpu =
-      embedding.mtp_shifted_token_ids.device().is_cpu()
-          ? embedding.mtp_shifted_token_ids
-          : embedding.mtp_shifted_token_ids.to(torch::kCPU);
-  if (shifted_cpu.scalar_type() != torch::kInt32) {
-    shifted_cpu = shifted_cpu.to(torch::kInt32);
-  }
-  shifted_cpu = shifted_cpu.contiguous();
-
-  const auto& extra_token_ids = embedding.extra_token_ids;
-  const int32_t num_sequences = input.input_params.meta.num_sequences;
-  torch::Tensor next_cpu = to_cpu_int_tensor_for_read(next_tokens);
-
-  input.device_tensors_ready = false;
-  input.token_ids_host = shifted_cpu.clone();
-  int32_t* host_tokens = input.token_ids_host.data_ptr<int32_t>();
-  const int64_t num_tokens = input.token_ids_host.numel();
-
-  // Inject each sequence's target next_token into its -1 placeholder slot. The
-  // global prediction position is token-level gathered into exactly one CP
-  // rank's mtp_shifted shard (see cp_partition gather_token_level_tensor), so a
-  // local scan for the placeholder is the authoritative owner check: the owning
-  // rank replaces it, non-owning ranks legitimately have no placeholder and
-  // skip injection. selected_token_idxes is intentionally left unchanged: the
-  // draft LmHead CP all-gathers hidden before gathering selected rows (same as
-  // the target path, which yields a valid selected_hidden_from_lm_head), so the
-  // indices must stay in the CP all-gather global space, not local rows.
-  int32_t next_seq_idx = 0;
-  for (int32_t seq = 0; seq < num_sequences; ++seq) {
-    if (seq >= static_cast<int32_t>(extra_token_ids.size()) ||
-        extra_token_ids[seq] != placeholder) {
-      continue;
-    }
-    CHECK_LT(next_seq_idx, next_cpu.numel());
-    const int32_t next_token = next_cpu.data_ptr<int32_t>()[next_seq_idx];
-    for (int64_t i = 0; i < num_tokens; ++i) {
-      if (host_tokens[i] != placeholder) {
-        continue;
-      }
-      host_tokens[i] = next_token;
-      break;
-    }
-    ++next_seq_idx;
-  }
-  CHECK_EQ(next_seq_idx, next_cpu.numel())
-      << "unused target next_tokens for CP MTP prefill";
-
-  input.token_ids =
-      safe_to(input.token_ids_host, token_options, /*non_blocking=*/true);
-  embedding.mtp_shifted_token_ids = input.token_ids;
-  input.device_tensors_ready = true;
 }
 
 void replace_host_token_placeholders(ForwardInput& input,
@@ -826,8 +751,11 @@ ForwardInput MTPWorkerImpl::update_input_by_last_step_output(
 
 void MTPWorkerImpl::prepare_work_before_execute(const ForwardInput& input,
                                                 ForwardInput& processed_input) {
+  // Composite skips CP prepare; leaves run it in run_llm_no_sync_impl.
   SpeculativeWorkerImpl::prepare_work_before_execute(input, processed_input);
 }
+
+bool MTPWorkerImpl::owns_npu_cp_plan_build() const { return false; }
 
 std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
     const ForwardInput& input) {
@@ -925,20 +853,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
       prefill_input.input_params.embedding.input_embedding = embeddings.clone();
     }
     if (output.sample_output.next_tokens.defined()) {
-      const auto& extra_token_ids =
-          prefill_input.input_params.embedding.extra_token_ids;
-      if (options_.cp_size() > 1 &&
-          has_mtp_prefill_placeholder_extra_token(extra_token_ids, -1)) {
-        apply_cp_mtp_prefill_target_tokens(prefill_input,
-                                           output.sample_output.next_tokens,
-                                           -1,
-                                           prefill_input.token_ids.options());
-      } else {
-        replace_host_token_placeholders(prefill_input,
-                                        -1,
-                                        output.sample_output.next_tokens,
-                                        prefill_input.token_ids.options());
-      }
+      replace_host_token_placeholders(prefill_input,
+                                      -1,
+                                      output.sample_output.next_tokens,
+                                      prefill_input.token_ids.options());
     }
     if (embeddings.defined() || output.sample_output.next_tokens.defined()) {
       record_current_metadata_ready_event(prefill_input, *compute_stream_);
@@ -961,11 +879,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
 
   if (input.sampling_params.selected_token_idxes.defined()) {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-    // Under CP the target prefill `embeddings` is the full local token shard,
-    // which cannot be indexed by the CP all-gather-space selected indices.
-    // Prefer the LmHead-gathered per-sequence hidden when present so the cache
-    // stores it directly; fall back to the full hidden for the non-CP path,
-    // where index_select on the complete local sequence is valid.
+    // Prefer embeddings (global-real after CP merge); selected_embeddings is
+    // a fallback.
     const torch::Tensor& target_hidden =
         output.sample_output.selected_embeddings.defined()
             ? output.sample_output.selected_embeddings
@@ -1009,22 +924,6 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
   prefill_input.sampling_params.return_probs = true;
   clear_ready_events(prefill_input);
   auto& input_params = prefill_input.input_params;
-  if (options_.cp_size() > 1) {
-    CHECK(input_params.embedding.mtp_shifted_token_ids.defined());
-    CHECK_EQ(input_params.embedding.mtp_shifted_token_ids.numel(),
-             prefill_input.token_ids.numel());
-    prefill_input.token_ids = input_params.embedding.mtp_shifted_token_ids;
-    torch::Tensor shifted_cpu = prefill_input.token_ids.device().is_cpu()
-                                    ? prefill_input.token_ids
-                                    : prefill_input.token_ids.to(torch::kCPU);
-    if (shifted_cpu.scalar_type() != torch::kInt32) {
-      shifted_cpu = shifted_cpu.to(torch::kInt32);
-    }
-    prefill_input.token_ids_host = shifted_cpu.contiguous();
-    finish_metadata_prepare(*prepare_stream_, prefill_input);
-    return;
-  }
-
   auto& extra_token_ids = input_params.embedding.extra_token_ids;
 
   const torch::Tensor& token_ids = input.token_ids_host;

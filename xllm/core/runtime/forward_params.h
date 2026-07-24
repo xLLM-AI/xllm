@@ -287,8 +287,7 @@ inline torch::Tensor gather_tensor_by_indices(
   if (cpu_tensor.dim() <= 1) {
     return cpu_tensor.index_select(0, gather_indices);
   }
-  CHECK_EQ(cpu_tensor.dim(), 2)
-      << "Expected 1-D or 2-D tensor for CP partition";
+  CHECK_EQ(cpu_tensor.dim(), 2) << "Expected 1-D or 2-D tensor for CP shard";
   return cpu_tensor.index_select(1, gather_indices);
 }
 
@@ -403,6 +402,12 @@ class WorkerType {
   Value value_;
 };
 
+// Worker-local KV slot layout for NPU CP (not transported).
+enum class KvSlotLayout : int8_t {
+  LOGICAL_REAL = 0,  // Builder slots; input to prepare_cache_slots.
+  NPU_CP_RECOVERED_PHYSICAL = 1,  // Already CP-expanded; skip re-prepare.
+};
+
 // Step-level decode metadata for Rec multi-round (device loop).
 struct StepDecodeMeta {
   int32_t batch_size = 0;
@@ -463,7 +468,7 @@ struct ForwardInput {
     inputs.device_input_buffer = device_input_buffer;
     inputs.input_host_buffer_has_layout = input_host_buffer_has_layout;
     inputs.device_tensors_ready = true;
-    inputs.cp_partitioned = cp_partitioned;
+    inputs.kv_slot_layout = kv_slot_layout;
     return inputs;
   }
 
@@ -526,7 +531,7 @@ struct ForwardInput {
     inputs.transfer_kv_infos = transfer_kv_infos;
     inputs.step_decode = step_decode;
     inputs.skip_sampling_for_logits_only = skip_sampling_for_logits_only;
-    inputs.cp_partitioned = cp_partitioned;
+    inputs.kv_slot_layout = kv_slot_layout;
   }
 
   void set_host_views(ForwardInput& inputs) const {
@@ -601,300 +606,14 @@ struct ForwardInput {
   // then skip rebuilding/H2D in ForwardInput::to().
   bool device_tensors_ready = false;
 
-  // True once cp::cp_partition_inplace has produced the per-CP-rank slice.
-  bool cp_partitioned = false;
+  // new_cache_slots layout; flip after one-shot CP remap.
+  KvSlotLayout kv_slot_layout = KvSlotLayout::LOGICAL_REAL;
 
   // Device-side readiness dependencies for inputs prepared on a different
   // stream. These are local runtime handles and are intentionally not included
   // in proto or shared-memory transport.
   StreamEventPtr metadata_ready_event;
 };
-
-#if 0  // Legacy engine-side CP partition; superseded by
-       // cp::cp_partition_inplace.
-inline ForwardInput cp_partition_forward_input(const ForwardInput& input,
-                                               int32_t cp_rank,
-                                               int32_t cp_size) {
-  if (cp_size <= 1 || !input.host_token_ids().defined() ||
-      !input.input_params.meta.batch_forward_type.is_prefill()) {
-    return input;
-  }
-
-  CHECK_GT(cp_size, 0);
-  CHECK_GE(cp_rank, 0);
-  CHECK_LT(cp_rank, cp_size);
-  CHECK_GT(input.input_params.meta.num_sequences, 0);
-
-  ForwardInput output = input;
-  output.set_host_views(output);
-
-  auto host_vector_or_tensor = [](const std::vector<int32_t>& host_values,
-                                  const torch::Tensor& tensor) {
-    if (!host_values.empty()) {
-      return host_values;
-    }
-    return detail::tensor_to_vector<int32_t>(tensor);
-  };
-
-  const std::vector<int32_t> seq_lens =
-      host_vector_or_tensor(input.input_params.attention.host.kv_seq_lens,
-                            input.input_params.attention.device.kv_seq_lens);
-  const std::vector<int32_t> q_seq_lens =
-      host_vector_or_tensor(input.input_params.attention.host.q_seq_lens,
-                            input.input_params.attention.device.q_seq_lens);
-  const int32_t num_sequences = input.input_params.meta.num_sequences;
-
-  auto to_seq_lens =
-      [&](const std::vector<int32_t>& lens) -> std::vector<int32_t> {
-    if (lens.empty()) {
-      return std::vector<int32_t>(num_sequences, 0);
-    }
-    const bool is_cumsum =
-        lens.size() == static_cast<size_t>(num_sequences + 1) &&
-        lens.front() == 0;
-    std::vector<int32_t> result;
-    result.reserve(num_sequences);
-    if (is_cumsum) {
-      for (int32_t i = 0; i < num_sequences; ++i) {
-        result.push_back(std::max(0, lens[i + 1] - lens[i]));
-      }
-    } else {
-      CHECK_GE(lens.size(), static_cast<size_t>(num_sequences));
-      for (int32_t i = 0; i < num_sequences; ++i) {
-        result.push_back(std::max(0, lens[i]));
-      }
-    }
-    return result;
-  };
-
-  const std::vector<int32_t> input_lens =
-      !q_seq_lens.empty() ? to_seq_lens(q_seq_lens) : to_seq_lens(seq_lens);
-
-  const int32_t num_chunks = cp_size * 2;
-  const int64_t token_num = input.host_token_ids().numel();
-  std::vector<int32_t> cp_q_lens;
-  cp_q_lens.reserve(num_sequences);
-  std::vector<int64_t> gather_indices;
-  gather_indices.reserve(static_cast<size_t>(token_num));
-  int32_t cp_global_max_seq_len = 0;
-
-  std::vector<int64_t> old_seq_offsets;
-  old_seq_offsets.reserve(num_sequences + 1);
-  old_seq_offsets.push_back(0);
-
-  for (int32_t seq_idx = 0; seq_idx < num_sequences; ++seq_idx) {
-    const int32_t input_len = std::max(0, input_lens[seq_idx]);
-    const int64_t seq_start = old_seq_offsets.back();
-    const int64_t chunk_len =
-        (input_len + num_chunks - 1) / static_cast<int64_t>(num_chunks);
-
-    auto range_len = [&](int64_t local_start, int64_t local_end) -> int64_t {
-      local_start = std::max<int64_t>(0, local_start);
-      local_end = std::max<int64_t>(0, local_end);
-      local_start = std::min<int64_t>(local_start, input_len);
-      local_end = std::min<int64_t>(local_end, input_len);
-      return std::max<int64_t>(0, local_end - local_start);
-    };
-
-    int64_t local_len = 0;
-    auto append_range = [&](int64_t local_start, int64_t local_end) {
-      const int64_t valid_len = range_len(local_start, local_end);
-      if (valid_len <= 0) {
-        return;
-      }
-      const int64_t start =
-          std::max<int64_t>(0, std::min<int64_t>(local_start, input_len));
-      for (int64_t i = 0; i < valid_len; ++i) {
-        gather_indices.push_back(seq_start + start + i);
-      }
-      local_len += valid_len;
-    };
-
-    append_range(chunk_len * cp_rank, chunk_len * (cp_rank + 1));
-    append_range(chunk_len * (num_chunks - 1 - cp_rank),
-                 chunk_len * (num_chunks - cp_rank));
-
-    cp_q_lens.push_back(static_cast<int32_t>(local_len));
-    old_seq_offsets.push_back(seq_start + input_len);
-
-    int64_t seq_cp_max = 0;
-    for (int32_t rank = 0; rank < cp_size; ++rank) {
-      const int64_t former_len =
-          range_len(chunk_len * rank, chunk_len * (rank + 1));
-      const int64_t latter_len = range_len(chunk_len * (num_chunks - 1 - rank),
-                                           chunk_len * (num_chunks - rank));
-      seq_cp_max = std::max(seq_cp_max, former_len + latter_len);
-    }
-    cp_global_max_seq_len =
-        std::max(cp_global_max_seq_len, static_cast<int32_t>(seq_cp_max));
-  }
-  CHECK_EQ(old_seq_offsets.back(), token_num);
-
-  output.token_ids_host =
-      detail::gather_tensor_by_indices(input.host_token_ids(), gather_indices);
-  output.token_ids = output.token_ids_host;
-  output.positions_host =
-      detail::gather_tensor_by_indices(input.host_positions(), gather_indices);
-  output.positions = output.positions_host;
-  output.input_params.attention.host.new_cache_slots = host_vector_or_tensor(
-      input.input_params.attention.host.new_cache_slots,
-      input.input_params.attention.device.new_cache_slots);
-  if (!output.input_params.attention.host.new_cache_slots.empty() &&
-      output.input_params.attention.host.new_cache_slots.size() ==
-          static_cast<size_t>(token_num)) {
-    std::vector<int32_t> cp_new_cache_slots;
-    cp_new_cache_slots.reserve(gather_indices.size());
-    for (int64_t idx : gather_indices) {
-      cp_new_cache_slots.push_back(
-          output.input_params.attention.host
-              .new_cache_slots[static_cast<size_t>(idx)]);
-    }
-    output.input_params.attention.host.new_cache_slots =
-        std::move(cp_new_cache_slots);
-    output.input_params.attention.device.new_cache_slots =
-        detail::int_vector_to_cpu_tensor(
-            output.input_params.attention.host.new_cache_slots);
-  }
-  if (input.input_params.embedding.input_embedding.defined() &&
-      input.input_params.embedding.input_embedding.size(0) == token_num) {
-    output.input_params.embedding.input_embedding =
-        detail::gather_tensor_by_indices_on_dim(
-            input.input_params.embedding.input_embedding,
-            gather_indices,
-            /*dim=*/0);
-  }
-  if (input.input_params.attention.device.new_cache_slot_offsets.defined() &&
-      input.input_params.attention.device.new_cache_slot_offsets.size(0) ==
-          token_num) {
-    output.input_params.attention.device.new_cache_slot_offsets =
-        detail::gather_tensor_by_indices_on_dim(
-            input.input_params.attention.device.new_cache_slot_offsets,
-            gather_indices,
-            /*dim=*/0);
-  }
-
-  auto build_seq_lens = [&](const std::vector<int32_t>& original,
-                            const std::vector<int32_t>& lengths) {
-    const bool is_cumsum =
-        original.size() == static_cast<size_t>(num_sequences + 1) &&
-        !original.empty() && original.front() == 0;
-    std::vector<int32_t> result;
-    if (is_cumsum) {
-      result.reserve(num_sequences + 1);
-      result.push_back(0);
-      for (const int32_t len : lengths) {
-        result.push_back(result.back() + len);
-      }
-    } else {
-      result.assign(lengths.begin(), lengths.end());
-    }
-    return result;
-  };
-
-  std::vector<int32_t> cp_q_seq_lens = build_seq_lens(q_seq_lens, cp_q_lens);
-  std::vector<int32_t> cp_seq_lens = build_seq_lens(seq_lens, cp_q_lens);
-  std::vector<int32_t> cp_q_cu_seq_lens(cp_q_lens.size());
-  std::partial_sum(
-      cp_q_lens.begin(), cp_q_lens.end(), cp_q_cu_seq_lens.begin());
-
-  output.input_params.attention.host.q_seq_lens = cp_q_seq_lens;
-  output.input_params.attention.host.kv_seq_lens = cp_seq_lens;
-  output.input_params.attention.host.q_cu_seq_lens = cp_q_cu_seq_lens;
-  output.input_params.attention.device.q_seq_lens =
-      detail::int_vector_to_cpu_tensor(cp_q_seq_lens);
-  output.input_params.attention.device.kv_seq_lens =
-      detail::int_vector_to_cpu_tensor(cp_seq_lens);
-  output.input_params.attention.device.q_cu_seq_lens =
-      detail::int_vector_to_cpu_tensor(cp_q_cu_seq_lens);
-  output.input_params.meta.q_max_seq_len = cp_global_max_seq_len;
-  output.input_params.meta.kv_max_seq_len = cp_global_max_seq_len;
-
-  if (input.sampling_params.selected_token_idxes.defined() &&
-      input.sampling_params.selected_token_idxes.numel() > 0) {
-    std::vector<int32_t> selected_token_idxes =
-        detail::tensor_to_vector<int32_t>(
-            input.sampling_params.selected_token_idxes);
-    const int64_t selected_num =
-        static_cast<int64_t>(selected_token_idxes.size());
-    std::vector<int64_t> remapped_idxes;
-    remapped_idxes.reserve(static_cast<size_t>(selected_num));
-
-    const int64_t num_chunks_i64 = static_cast<int64_t>(cp_size) * 2;
-    std::vector<int64_t> seq_context_lens(num_sequences, 0);
-    std::vector<int64_t> selected_seq_idx(static_cast<size_t>(selected_num), 0);
-
-    for (int64_t i = 0; i < selected_num; ++i) {
-      const int64_t old_idx = selected_token_idxes[static_cast<size_t>(i)];
-      auto upper = std::upper_bound(
-          old_seq_offsets.begin(), old_seq_offsets.end(), old_idx);
-      int64_t seq_idx =
-          static_cast<int64_t>(upper - old_seq_offsets.begin()) - 1;
-      seq_idx = std::max<int64_t>(
-          0,
-          std::min<int64_t>(seq_idx, static_cast<int64_t>(num_sequences) - 1));
-      selected_seq_idx[static_cast<size_t>(i)] = seq_idx;
-
-      const int64_t seq_start = old_seq_offsets[static_cast<size_t>(seq_idx)];
-      const int64_t seq_end = old_seq_offsets[static_cast<size_t>(seq_idx + 1)];
-      const int64_t seq_len = std::max<int64_t>(0, seq_end - seq_start);
-      const int64_t context_len = std::max<int64_t>(
-          1, std::min<int64_t>(old_idx - seq_start + 1, seq_len));
-      seq_context_lens[static_cast<size_t>(seq_idx)] =
-          std::max(seq_context_lens[static_cast<size_t>(seq_idx)], context_len);
-    }
-
-    std::vector<int64_t> chunk_lens(num_sequences, 1);
-    std::vector<int64_t> seq_prefix_per_rank(num_sequences, 0);
-    int64_t token_num_per_rank = 0;
-    for (int32_t seq_idx = 0; seq_idx < num_sequences; ++seq_idx) {
-      int64_t chunk_len = (seq_context_lens[static_cast<size_t>(seq_idx)] +
-                           num_chunks_i64 - 1) /
-                          num_chunks_i64;
-      chunk_len = std::max<int64_t>(1, chunk_len);
-      chunk_lens[static_cast<size_t>(seq_idx)] = chunk_len;
-      seq_prefix_per_rank[static_cast<size_t>(seq_idx)] = token_num_per_rank;
-      token_num_per_rank += (chunk_len * num_chunks_i64) / cp_size;
-    }
-
-    for (int64_t i = 0; i < selected_num; ++i) {
-      const int64_t old_idx = selected_token_idxes[static_cast<size_t>(i)];
-      const int64_t seq_idx = selected_seq_idx[static_cast<size_t>(i)];
-      const int64_t seq_start = old_seq_offsets[static_cast<size_t>(seq_idx)];
-      const int64_t seq_context_len =
-          seq_context_lens[static_cast<size_t>(seq_idx)];
-      const int64_t chunk_len = chunk_lens[static_cast<size_t>(seq_idx)];
-
-      int64_t token_pos = old_idx - seq_start;
-      token_pos = std::max<int64_t>(
-          0, std::min<int64_t>(token_pos, seq_context_len - 1));
-      const int64_t chunk_id = token_pos / chunk_len;
-      const int64_t offset = token_pos % chunk_len;
-      const int64_t rank_id =
-          chunk_id >= cp_size ? static_cast<int64_t>(2 * cp_size) - chunk_id - 1
-                              : chunk_id;
-      const int64_t remap_idx =
-          token_num_per_rank * rank_id +
-          seq_prefix_per_rank[static_cast<size_t>(seq_idx)] +
-          (chunk_id / cp_size) * chunk_len + offset;
-      remapped_idxes.push_back(remap_idx);
-    }
-
-    std::vector<int32_t> remapped_selected_token_idxes;
-    remapped_selected_token_idxes.reserve(remapped_idxes.size());
-    for (int64_t idx : remapped_idxes) {
-      remapped_selected_token_idxes.push_back(static_cast<int32_t>(idx));
-    }
-    output.sampling_params.selected_token_idxes =
-        detail::int_vector_to_cpu_tensor(remapped_selected_token_idxes);
-  }
-
-  output.input_host_buffer = torch::Tensor();
-  output.device_input_buffer = torch::Tensor();
-  output.input_host_buffer_has_layout = false;
-  output.device_tensors_ready = false;
-  return output;
-}
-#endif
 
 // output after forward execution
 struct ForwardOutput {

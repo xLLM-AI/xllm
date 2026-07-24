@@ -40,7 +40,6 @@ limitations under the License.
 #include "framework/sampling/sampling_params.h"
 #include "platform/device.h"
 #include "platform/platform.h"
-#include "runtime/cp_input_partition.h"
 #include "runtime/forward_shared_memory_manager.h"
 #include "util/tensor_helper.h"
 
@@ -1118,73 +1117,6 @@ TEST(BatchTest, ForwardInputBlockCopyKernelFieldsMatchExpectedLayout) {
 
   ::xllm::BeamSearchConfig::get_instance().enable_block_copy_kernel(
       old_enable_block_copy_kernel);
-}
-
-TEST(BatchTest, ForwardInputCpPartitionMatchesExpectedLayout) {
-  RequestSamplingParam sampling_param;
-  sampling_param.logprobs = true;
-  StoppingChecker stopping_checker;
-  stopping_checker.set_max_generated_tokens(4);
-  SequenceParams seq_params;
-  seq_params.seq_capacity = 32;
-  seq_params.stopping_checker = &stopping_checker;
-  seq_params.sampling_param = &sampling_param;
-  seq_params.skip_special_tokens = true;
-  seq_params.echo = false;
-  seq_params.logprobs = true;
-  seq_params.enable_schedule_overlap = false;
-  seq_params.request_id = "req-cp";
-
-  BlockManager::Options options;
-  options.num_blocks(8).block_size(4);
-  BlockManagerImpl manager(options);
-
-  torch::Tensor input_embedding;
-  MMData mm_data;
-  IncrementalDecoder decoder("", 1, false, false);
-  Sequence seq(/*index=*/0,
-               /*token_ids=*/{1, 2, 3, 4, 5, 6, 7, 8},
-               input_embedding,
-               mm_data,
-               std::move(decoder),
-               seq_params);
-  seq.add_blocks(BlockType::KV, manager.allocate(2));
-
-  std::vector<Sequence*> sequences = {&seq};
-  std::vector<uint32_t> budgets = {8};
-  ModelArgs args;
-  BatchInputBuilder forward_builder(sequences,
-                                    budgets,
-                                    {},
-                                    {},
-                                    nullptr,
-                                    /*batch_id=*/1,
-                                    &args,
-                                    BatchForwardType::PREFILL);
-  ForwardInput forward_input =
-      forward_builder.build_forward_input(/*num_decoding_tokens=*/1,
-                                          /*min_decoding_batch_size=*/0);
-
-  ForwardInput cp_forward_input = forward_input;
-  cp::cp_partition_inplace(cp_forward_input, /*cp_rank=*/0, /*cp_size=*/2);
-
-  EXPECT_TRUE(
-      equal(cp_forward_input.token_ids, std::vector<int32_t>({1, 2, 7, 8})));
-  EXPECT_TRUE(
-      equal(cp_forward_input.positions, std::vector<int32_t>({0, 1, 6, 7})));
-  EXPECT_TRUE(equal(cp_forward_input.sampling_params.selected_token_idxes,
-                    std::vector<int32_t>({3})));
-  EXPECT_EQ(cp_forward_input.input_params.meta.q_max_seq_len, 4);
-  EXPECT_EQ(cp_forward_input.input_params.meta.kv_max_seq_len, 4);
-
-  const std::vector<int32_t>& q_seq_lens =
-      cp_forward_input.input_params.attention.host.q_seq_lens;
-  const std::vector<int32_t>& kv_seq_lens =
-      cp_forward_input.input_params.attention.host.kv_seq_lens;
-  EXPECT_TRUE((q_seq_lens == std::vector<int32_t>({4}) ||
-               q_seq_lens == std::vector<int32_t>({0, 4})));
-  EXPECT_TRUE((kv_seq_lens == std::vector<int32_t>({4}) ||
-               kv_seq_lens == std::vector<int32_t>({0, 4})));
 }
 
 TEST(BatchTest, KVCacheEmptySupportsLinearOnlyAndFullOnlyLayouts) {

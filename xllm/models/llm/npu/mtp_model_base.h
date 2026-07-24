@@ -60,8 +60,11 @@ class MtpModelImplBase : public torch::nn::Module {
     auto parallel_args = context.get_parallel_args();
 
     dp_size_ = parallel_args.dp_size();
-    dp_local_tp_size_ = parallel_args.world_size() / dp_size_;
-    dp_rank_ = parallel_args.rank() / dp_local_tp_size_;
+    // Orthogonal CP×TP: dp_local_tp = attn_tp; DP stride = tp*cp.
+    dp_local_tp_size_ =
+        parallel_args.world_size() / (dp_size_ * parallel_args.cp_size());
+    dp_rank_ =
+        parallel_args.rank() / (dp_local_tp_size_ * parallel_args.cp_size());
     rank_ = parallel_args.rank();
     num_experts_per_tok_ = model_args.num_experts_per_tok();
     index_topk_ = model_args.index_topk();
@@ -120,6 +123,15 @@ class MtpModelImplBase : public torch::nn::Module {
     h = torch::cat({enorm, hnorm}, /*dim=*/-1);
     h = eh_proj_(h, 0);
 
+    // Localize after eh_proj (fused MTP embed).
+    const NpuCpPlan& cp_plan = input_params.parallel.cp_plan;
+    if (cp_plan.enabled()) {
+      cp_plan.shard_model_input(h, positions);
+    }
+    // input_params is const; the model needs a mutable copy to install the
+    // per-forward expert_array (sized to the post-shard hidden length).
+    ModelInputParams input_params_new = input_params;
+
     auto target_cos_sin = atb_pos_emb_(cos_sin_, positions, 0);
     auto target_cos_sin_chunks = target_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
     auto cos_pos = target_cos_sin_chunks[0].contiguous();
@@ -132,16 +144,16 @@ class MtpModelImplBase : public torch::nn::Module {
     torch::Tensor attn_mask;
     // TODO(liangzhiwei20): support prefix cache for deepseek .
     if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
-      int num_sequences = input_params.meta.num_sequences;
+      int num_sequences = input_params_new.meta.num_sequences;
       if (num_sequences > 0) {
         std::vector<torch::Tensor> req_mask_vec;
         req_mask_vec.reserve(num_sequences);
 
         for (int j = 0; j < num_sequences; j++) {
           auto mask = attn_mask_.gen_append_mask(
-              input_params.attention.host.q_seq_lens[j],
-              input_params.attention.host.kv_seq_lens[j],
-              input_params.meta.kv_max_seq_len,
+              input_params_new.attention.host.q_seq_lens[j],
+              input_params_new.attention.host.kv_seq_lens[j],
+              input_params_new.meta.kv_max_seq_len,
               h.dtype().toScalarType(),
               h.device());
           req_mask_vec.emplace_back(mask);
@@ -162,7 +174,7 @@ class MtpModelImplBase : public torch::nn::Module {
           attn_mask_.get_attn_mask(128, h.dtype().toScalarType(), h.device());
     }
 
-    int64_t input_length = tokens.size(0);
+    int64_t input_length = h.size(0);
     torch::Tensor expert_array = torch::arange(
         0,
         input_length * num_experts_per_tok_,
@@ -173,8 +185,6 @@ class MtpModelImplBase : public torch::nn::Module {
       LOG(FATAL) << "MTP not support layer wise copy!";
     }
 
-    ModelInputParams& input_params_new =
-        const_cast<ModelInputParams&>(input_params);
     input_params_new.expert.expert_array = expert_array;
 
     torch::Tensor prev_topk_indices;
@@ -216,6 +226,9 @@ class MtpModelImplBase : public torch::nn::Module {
                     layer_index,
                     event,
                     event_flag);
+    }
+    if (cp_plan.enabled()) {
+      h = cp_plan.merge_model_output(h);
     }
 
     auto hidden_states = final_norm_(h, 0);

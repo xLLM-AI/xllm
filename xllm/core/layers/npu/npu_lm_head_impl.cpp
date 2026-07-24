@@ -27,7 +27,9 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
                                     const ModelArgs& args,
                                     const ParallelArgs& parallel_args,
                                     bool isPrefill) {
-  param.outputHidden = cp_size_ > 1;
+  // Keep outputHidden=false and contextParallelInfo empty to avoid nested CP
+  // AllGather after merge_model_output.
+  param.outputHidden = false;
   param.unpadInputs = true;
   param.gatherAhead = isPrefill;
   param.hiddenSizePerAttentionHead = args.hidden_size() / args.n_heads();
@@ -38,14 +40,18 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
 
   if (parallel_args.world_size() > 1) {
     if (parallel_args.mapping_data().empty()) {
-      const bool use_local_tp = (dp_size_ > 1) || (cp_size_ > 1);
-      if (use_local_tp) {
-        CHECK_GT(dp_local_tp_size_, 0);
-        CHECK_GE(dp_local_tp_rank_, 0);
-        CHECK_LT(dp_local_tp_rank_, dp_local_tp_size_);
-        param.linearParallelParam.tensorParallelInfo.rank = dp_local_tp_rank_;
+      // Shard LM head on dp-local TP (cp*tp), not CP-local attn TP.
+      const bool use_cp_unaware_tp = (dp_size_ > 1) || (cp_size_ > 1);
+      const int32_t cp_unaware_tp_size = parallel_args.world_size() / dp_size_;
+      if (use_cp_unaware_tp) {
+        CHECK_GT(cp_unaware_tp_size, 0);
+        const int32_t cp_unaware_tp_rank =
+            parallel_args.rank() % cp_unaware_tp_size;
+        CHECK_GE(cp_unaware_tp_rank, 0);
+        CHECK_LT(cp_unaware_tp_rank, cp_unaware_tp_size);
+        param.linearParallelParam.tensorParallelInfo.rank = cp_unaware_tp_rank;
         param.linearParallelParam.tensorParallelInfo.worldSize =
-            dp_local_tp_size_;
+            cp_unaware_tp_size;
       } else {
         param.linearParallelParam.tensorParallelInfo.rank =
             parallel_args.rank();
@@ -55,7 +61,7 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
       param.linearParallelParam.parallelType =
           atb_speed::common::COLUMN_PARALLEL;
       const int32_t tp_group_id =
-          use_local_tp ? (parallel_args.rank() / dp_local_tp_size_) : 0;
+          use_cp_unaware_tp ? (parallel_args.rank() / cp_unaware_tp_size) : 0;
       param.linearParallelParam.tensorParallelInfo.commDomain =
           std::to_string(tp_group_id);
       param.linearParallelParam.tensorParallelInfo.backend =
@@ -63,8 +69,10 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
     } else {
       param.linearParallelParam.parallelType =
           atb_speed::common::COLUMN_PARALLEL;
+      // Use LM_HEAD_TP (dp-local), not ATTN_TP; leave contextParallelInfo
+      // empty to avoid nested CP AllGather.
       atb_speed::common::ParallelInfo parallelInfo =
-          parallel_args.mapping().Get(atb_speed::base::ATTN_TP);
+          parallel_args.mapping().Get(atb_speed::base::LM_HEAD_TP);
       param.linearParallelParam.tensorParallelInfo.rank = parallelInfo.rank;
       param.linearParallelParam.tensorParallelInfo.worldSize =
           parallelInfo.rankIds.size();
@@ -73,19 +81,19 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
       parallelInfo.InitCommDomain(
           param.linearParallelParam.tensorParallelInfo.hcommInfo,
           param.linearParallelParam.tensorParallelInfo.commDomain);
-      param.contextParallelInfo =
-          parallel_args.mapping().Get(atb_speed::base::ATTN_CP);
     }
   }
 }
 
 NpuLmHeadImpl::NpuLmHeadImpl(const ModelContext& context) : BaseLayer(context) {
   vocab_size_ = context.get_model_args().vocab_size();
-  if (vocab_size_ > 0 && dp_local_tp_size_ > 1 &&
-      vocab_size_ % dp_local_tp_size_ != 0) {
+  // Pad vocab to dp-local TP width (world/dp_size).
+  const int32_t cp_unaware_tp_size = parallel_args_.world_size() / dp_size_;
+  if (vocab_size_ > 0 && cp_unaware_tp_size > 1 &&
+      vocab_size_ % cp_unaware_tp_size != 0) {
     padded_vocab_size_ =
-        ((vocab_size_ + dp_local_tp_size_ - 1) / dp_local_tp_size_) *
-        dp_local_tp_size_;
+        ((vocab_size_ + cp_unaware_tp_size - 1) / cp_unaware_tp_size) *
+        cp_unaware_tp_size;
   } else {
     padded_vocab_size_ = vocab_size_;
   }

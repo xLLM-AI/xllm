@@ -40,7 +40,6 @@ cc_library(
     spec_input_builder.h
     forward_shared_memory_manager.h
     worker_rendezvous.h
-    cp_input_partition.h
   SRCS
     executor.cpp
     executor_impl_factory.cpp
@@ -73,7 +72,6 @@ cc_library(
     dflash_worker_impl.cpp
     spec_input_builder.cpp
     forward_shared_memory_manager.cpp
-    cp_input_partition.cpp
   DEPS
     torch
     $<$<BOOL:${USE_NPU}>:torch_npu>

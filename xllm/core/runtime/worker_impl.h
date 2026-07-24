@@ -114,6 +114,17 @@ class WorkerImpl {
   void prepare_work_before_execute_on_stream(const ForwardInput& input,
                                              ForwardInput& processed_input,
                                              Stream& prepare_stream);
+#if defined(USE_NPU)
+  // Per-worker-static configuration handed to NpuCpPlan::prepare(); built once
+  // and cached.
+  const CpPlanRuntimeConfig& npu_cp_plan_runtime_config() const;
+#endif
+
+  // False on MTP composite: only leaf workers run NpuCpPlan::prepare.
+  virtual bool owns_npu_cp_plan_build() const { return true; }
+
+  // Cached: whether the loaded model advertises NPU model-side CP.
+  bool model_supports_model_cp() const;
 
   // Internal helper shared by worker pipelines before model execution.
   virtual void apply_kv_block_swaps(const ModelInputParams& input_params);
@@ -275,8 +286,6 @@ class WorkerImpl {
   // decoder ATB binding refresh.
   bool init_rolling_runtime_state();
 
-  torch::Tensor recompute_new_cache_slots(const ForwardInput& input);
-  torch::Tensor compute_in_prefix_slots(const ForwardInput& input);
 #endif
 
  protected:
@@ -313,6 +322,12 @@ class WorkerImpl {
   // parallel args of current instance
   ParallelArgs parallel_args_;
 
+  // Lazily computed: whether the resolved model_type advertises the NPU
+  // model-side CP pipeline (is_npu_model_cp_capable). Cached so the per-forward
+  // worker predicate does not resolve the model name on every step.
+  mutable bool model_cp_capable_computed_ = false;
+  mutable bool model_cp_capable_ = false;
+
   // kv caches
   std::vector<xllm::KVCache> kv_caches_;
 
@@ -346,6 +361,10 @@ class WorkerImpl {
 #if defined(USE_NPU)
   std::unique_ptr<MooncakeWeightTransfer> weight_transfer_;
   std::unique_ptr<Stream> load_stream_;
+
+  // Lazily-built cache backing npu_cp_plan_runtime_config().
+  mutable bool npu_cp_runtime_config_computed_ = false;
+  mutable CpPlanRuntimeConfig npu_cp_runtime_config_;
 #endif
 
   bool is_spec_draft_ = false;

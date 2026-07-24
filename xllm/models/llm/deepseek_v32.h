@@ -27,9 +27,9 @@ namespace xllm {
 
 inline std::optional<std::string> validate_deepseek_v32_cp_config(
     const ParallelArgs& parallel_args) {
-  const bool use_model_partition =
-      parallel_args.cp_size() > 1 && Platform::uses_model_cp_partition();
-  if (!use_model_partition) {
+  const bool use_model_sharding =
+      parallel_args.cp_size() > 1 && Platform::uses_model_cp_sharding();
+  if (!use_model_sharding) {
     return std::nullopt;
   }
   if (parallel_args.dp_size() != 1) {
@@ -78,9 +78,9 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
     }
     auto& attn_metadata = *modified_input_params.attn_metadata;
     std::optional<layer::v32_cp::DeepseekV32CPContext> cp_ctx;
-    const bool use_model_partition =
-        cp_size_ > 1 && Platform::uses_model_cp_partition();
-    if (use_model_partition) {
+    const bool use_model_sharding =
+        cp_size_ > 1 && Platform::uses_model_cp_sharding();
+    if (use_model_sharding) {
       if (cp_group_ == nullptr) {
         CHECK_EQ(parallel_world_size_, 1)
             << "deepseek_v32 Prefill CP requires cp_group_.";

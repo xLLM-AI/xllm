@@ -216,13 +216,19 @@ void MappingNPU::parse_parallel_info() {
   attn_kv_split_.group_size(kv_split_group_size);
   attn_kv_split_.backend("hccl");
 
+  // Embed/LMHead use dp-local TP (cp*tp), not attn_tp (CP-local).
+  const int32_t dp_local_tp_group_size =
+      attn_dp_.group_size() > 0 ? world_size_ / attn_dp_.group_size()
+                                : world_size_;
   // word embed
   word_embed_tp_ = ParallelInfo(attn_tp_);
+  word_embed_tp_.group_size(dp_local_tp_group_size);
   word_embed_dp_ = ParallelInfo(attn_dp_);
   // lm_head
   if (ENV_enable_dp_partition_up) {
     if (!ENV_lm_head_local_tp) {
       lm_head_tp_ = ParallelInfo(attn_tp_);
+      lm_head_tp_.group_size(dp_local_tp_group_size);
       lm_head_dp_ = ParallelInfo(attn_dp_);
     }
   } else {
@@ -248,11 +254,7 @@ void MappingNPU::validate() {
     CHECK(attn_dp_.group_size() == 1) << "DP size should be 1 if CP size > 1";
   }
 
-  // KV split must either match cp_size (legacy) or be a divisor of it. The
-  // > cp_size case is rejected on purpose - it would force a mapping across
-  // attnCp boundaries (intersecting TP/EP) which is out of scope for this
-  // refactor. kv_split_size == 1 is allowed and means each CP rank owns a
-  // full KV replica.
+  // kv_split_size must be 1 or a divisor of cp_size (<= cp_size).
   const int32_t kv_split = attn_kv_split_.group_size();
   const int32_t cp_sz = std::max(1, attn_cp_.group_size());
   CHECK(kv_split >= 1) << "kv_split size must be >= 1, got " << kv_split;
@@ -422,7 +424,10 @@ nlohmann::json MappingNPU::to_json() {
   // when enable lmhead, the data is output in
   // the form of a data parallel (DP) strategy.
   if (ENV_enable_dp_partition_up) {
-    lmhead_tp = attn_tp_.to_json(buffer_offset_);
+    // Emit the dp-local-TP group (lm_head_tp_, size cp*tp) — not attn_tp_ (size
+    // tp) — so the LM head shards across the full TP within a DP and does not
+    // replicate weights across CP ranks. See parse_parallel_info().
+    lmhead_tp = lm_head_tp_.to_json(buffer_offset_);
     lmhead_dp = attn_dp_.to_json(buffer_offset_);
   } else {
     lmhead_tp = mlp_tp_.to_json(buffer_offset_);

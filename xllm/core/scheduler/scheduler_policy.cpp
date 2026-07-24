@@ -20,7 +20,6 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <limits>
-#include <numeric>
 
 #include "async_response_processor.h"
 #include "common/metrics.h"
@@ -30,7 +29,6 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/request/priority_comparator.h"
-#include "platform/platform.h"
 #include "util/timer.h"
 #include "util/utils.h"
 
@@ -38,22 +36,13 @@ namespace xllm {
 
 namespace {
 
-// LCM helper for size_t values. Returns 0 when either argument is 0.
-inline size_t lcm_size_t(size_t a, size_t b) {
-  if (a == 0 || b == 0) {
-    return 0;
-  }
-  return (a / std::gcd(a, b)) * b;
-}
-
-// Round a chunked-prefill chunk size DOWN to a multiple of
-// lcm(2 * cp_size, kv_split_size * block_size).
+// Align chunk down to kv_split_size*block_size.
+// TODO: refactor kv-split block mapping to remove this limitation.
 inline size_t maybe_align_cp_chunk_tokens(size_t num_tokens,
-                                          int32_t cp_size,
                                           int32_t kv_split_size,
                                           int32_t block_size,
                                           size_t remaining_in_seq) {
-  if (cp_size <= 1 && kv_split_size <= 1) {
+  if (kv_split_size <= 1) {
     return num_tokens;
   }
   if (block_size <= 0 || num_tokens == 0) {
@@ -62,17 +51,12 @@ inline size_t maybe_align_cp_chunk_tokens(size_t num_tokens,
   if (num_tokens >= remaining_in_seq) {
     return num_tokens;
   }
-  const size_t cp_term =
-      cp_size > 1 ? static_cast<size_t>(2) * static_cast<size_t>(cp_size) : 1;
   const size_t kv_term =
-      kv_split_size > 1
-          ? static_cast<size_t>(kv_split_size) * static_cast<size_t>(block_size)
-          : 1;
-  const size_t alignment = lcm_size_t(cp_term, kv_term);
-  if (alignment == 0 || num_tokens < alignment) {
+      static_cast<size_t>(kv_split_size) * static_cast<size_t>(block_size);
+  if (num_tokens < kv_term) {
     return num_tokens;
   }
-  return (num_tokens / alignment) * alignment;
+  return (num_tokens / kv_term) * kv_term;
 }
 
 // Estimate extra blocks needed for a decode step with speculative tokens.
@@ -319,15 +303,7 @@ size_t SchedulerPolicy::compute_prefill_tokens(Sequence* seq,
                                                const SchedulerState& state) {
   if (!batch_mode_.enable_chunked_prefill) {
     // Full prefill: compute all remaining tokens.
-    size_t num_tokens = seq->num_need_compute_tokens();
-    // CP alignment for full prefill (skip when model handles CP partition).
-    const int32_t worker_cp_size =
-        Platform::uses_model_cp_partition() ? 1 : state.options.cp_size();
-    if (worker_cp_size > 1 && seq->is_prefill_stage() && num_tokens > 0) {
-      const size_t alignment = static_cast<size_t>(worker_cp_size) * 2;
-      num_tokens = ((num_tokens + alignment - 1) / alignment) * alignment;
-    }
-    return num_tokens;
+    return seq->num_need_compute_tokens();
   }
 
   // Chunked prefill: compute min(remaining, max_chunk, budget).
@@ -344,10 +320,7 @@ size_t SchedulerPolicy::compute_prefill_tokens(Sequence* seq,
                                       : 0;
   const int32_t kv_split_for_align =
       ::xllm::ParallelConfig::get_instance().kv_split_size_effective();
-  const int32_t worker_cp_size =
-      Platform::uses_model_cp_partition() ? 1 : options_.cp_size();
   num_tokens = maybe_align_cp_chunk_tokens(num_tokens,
-                                           worker_cp_size,
                                            kv_split_for_align,
                                            state.kv_cache_manager->block_size(),
                                            remaining_in_seq);
@@ -367,14 +340,6 @@ bool SchedulerPolicy::allocate_for_prefill(Sequence* seq,
     }
     // Full prefill: allocate for full prompt.
     *actual_tokens = seq->num_need_compute_tokens();
-    // CP alignment (skip when model handles CP partition internally).
-    const int32_t worker_cp_size =
-        Platform::uses_model_cp_partition() ? 1 : state.options.cp_size();
-    if (worker_cp_size > 1 && seq->is_prefill_stage() && *actual_tokens > 0) {
-      const size_t alignment = static_cast<size_t>(worker_cp_size) * 2;
-      *actual_tokens =
-          ((*actual_tokens + alignment - 1) / alignment) * alignment;
-    }
     const size_t target = seq->kv_cache_tokens_num() + *actual_tokens;
     return state.kv_cache_manager->allocate(seq, target);
   }

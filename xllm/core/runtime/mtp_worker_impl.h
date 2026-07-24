@@ -70,6 +70,10 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                                    ForwardInput& processed_inputs) override;
 
  protected:
+  // MTP composite: leaves own NpuCpPlan::prepare.
+  bool owns_npu_cp_plan_build() const override;
+
+ protected:
   std::optional<ForwardOutput> step_prefill(const ForwardInput& input) override;
   std::optional<ForwardOutput> step_decode(const ForwardInput& inputs) override;
   std::optional<ForwardOutput> step_empty(const ForwardInput& inputs) override;

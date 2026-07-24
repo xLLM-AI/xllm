@@ -271,19 +271,28 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
       .post_lmhead_gather_indices(
           torch::zeros({padding_buf_capacity}, int_opts));
 
-  persistent_cp_ep_padding_
-      .attn_padding_idx(torch::zeros({padding_buf_capacity}, int_opts))
-      .attn_unpadding_idx(torch::zeros({padding_buf_capacity}, int_opts))
-      .ffn_padding_idx(torch::zeros({padding_buf_capacity}, int_opts))
-      .ffn_unpadding_idx(torch::zeros({padding_buf_capacity}, int_opts))
-      .lm_head_skip_padding_token_indices(
-          torch::zeros({padding_buf_capacity}, int_opts))
-      .gather_prenorm_idx(torch::zeros({padding_buf_capacity}, int_opts))
-      .padding_idx(torch::zeros({padding_buf_capacity}, int_opts))
-      .un_padding_idx(torch::zeros({padding_buf_capacity}, int_opts))
-      .dynamic_ep_idx(torch::zeros({padding_buf_capacity}, int_opts))
-      .moe_idx(torch::zeros({padding_buf_capacity}, int_opts))
-      .expert_array(torch::zeros({padding_buf_capacity, 1}, int_opts));
+  persistent_cp_ep_meta_.attention_tp_padding_indices =
+      torch::zeros({padding_buf_capacity}, int_opts);
+  persistent_cp_ep_meta_.attention_tp_unpadding_indices =
+      torch::zeros({padding_buf_capacity}, int_opts);
+  persistent_cp_ep_meta_.ffn_padding_indices =
+      torch::zeros({padding_buf_capacity}, int_opts);
+  persistent_cp_ep_meta_.ffn_unpadding_indices =
+      torch::zeros({padding_buf_capacity}, int_opts);
+  persistent_cp_ep_meta_.lm_head_skip_padding_indices =
+      torch::zeros({padding_buf_capacity}, int_opts);
+  persistent_cp_ep_meta_.prenorm_gather_indices =
+      torch::zeros({padding_buf_capacity}, int_opts);
+  persistent_cp_ep_meta_.attention_padding_indices =
+      torch::zeros({padding_buf_capacity}, int_opts);
+  persistent_cp_ep_meta_.attention_unpadding_indices =
+      torch::zeros({padding_buf_capacity}, int_opts);
+  persistent_cp_ep_meta_.dynamic_ep_indices =
+      torch::zeros({padding_buf_capacity}, int_opts);
+  persistent_cp_ep_meta_.moe_indices =
+      torch::zeros({padding_buf_capacity}, int_opts);
+  persistent_cp_ep_meta_.expert_array =
+      torch::zeros({padding_buf_capacity, 1}, int_opts);
 
   // Do not need to create ATB context and custom paged attention operation
   if (args_.head_dim() == 0) {
@@ -355,37 +364,33 @@ void GraphPersistentParam::update_persistent_dp_ep_padding(
                        src.post_lmhead_gather_indices());
 }
 
-void GraphPersistentParam::update_persistent_cp_ep_padding(
-    const CpEpPaddingData& src,
+void GraphPersistentParam::update_persistent_cp_ep_meta(
+    const CpEpMeta& src,
     uint32_t /*padded_tokens*/) {
-  // Skip when cp ep padding is not enabled. When enabled, build() always
-  // populates attn_padding_idx first, so it is a reliable signal.
-  if (!src.attn_padding_idx().defined() ||
-      src.attn_padding_idx().numel() == 0) {
+  if (!src.attention_tp_padding_indices.defined() ||
+      src.attention_tp_padding_indices.numel() == 0) {
     return;
   }
-  copy_into_persistent(persistent_cp_ep_padding_.attn_padding_idx(),
-                       src.attn_padding_idx());
-  copy_into_persistent(persistent_cp_ep_padding_.attn_unpadding_idx(),
-                       src.attn_unpadding_idx());
-  copy_into_persistent(persistent_cp_ep_padding_.ffn_padding_idx(),
-                       src.ffn_padding_idx());
-  copy_into_persistent(persistent_cp_ep_padding_.ffn_unpadding_idx(),
-                       src.ffn_unpadding_idx());
-  copy_into_persistent(
-      persistent_cp_ep_padding_.lm_head_skip_padding_token_indices(),
-      src.lm_head_skip_padding_token_indices());
-  copy_into_persistent(persistent_cp_ep_padding_.gather_prenorm_idx(),
-                       src.gather_prenorm_idx());
-  copy_into_persistent(persistent_cp_ep_padding_.padding_idx(),
-                       src.padding_idx());
-  copy_into_persistent(persistent_cp_ep_padding_.un_padding_idx(),
-                       src.un_padding_idx());
-  copy_into_persistent(persistent_cp_ep_padding_.dynamic_ep_idx(),
-                       src.dynamic_ep_idx());
-  copy_into_persistent(persistent_cp_ep_padding_.moe_idx(), src.moe_idx());
-  copy_into_persistent(persistent_cp_ep_padding_.expert_array(),
-                       src.expert_array());
+  copy_into_persistent(persistent_cp_ep_meta_.attention_tp_padding_indices,
+                       src.attention_tp_padding_indices);
+  copy_into_persistent(persistent_cp_ep_meta_.attention_tp_unpadding_indices,
+                       src.attention_tp_unpadding_indices);
+  copy_into_persistent(persistent_cp_ep_meta_.ffn_padding_indices,
+                       src.ffn_padding_indices);
+  copy_into_persistent(persistent_cp_ep_meta_.ffn_unpadding_indices,
+                       src.ffn_unpadding_indices);
+  copy_into_persistent(persistent_cp_ep_meta_.lm_head_skip_padding_indices,
+                       src.lm_head_skip_padding_indices);
+  copy_into_persistent(persistent_cp_ep_meta_.prenorm_gather_indices,
+                       src.prenorm_gather_indices);
+  copy_into_persistent(persistent_cp_ep_meta_.attention_padding_indices,
+                       src.attention_padding_indices);
+  copy_into_persistent(persistent_cp_ep_meta_.attention_unpadding_indices,
+                       src.attention_unpadding_indices);
+  copy_into_persistent(persistent_cp_ep_meta_.dynamic_ep_indices,
+                       src.dynamic_ep_indices);
+  copy_into_persistent(persistent_cp_ep_meta_.moe_indices, src.moe_indices);
+  copy_into_persistent(persistent_cp_ep_meta_.expert_array, src.expert_array);
 }
 
 void GraphPersistentParam::replace_capture_dp_ep_padding(
@@ -425,38 +430,40 @@ void GraphPersistentParam::replace_capture_dp_ep_padding(
                         src.post_lmhead_gather_indices()));
 }
 
-void GraphPersistentParam::replace_capture_cp_ep_padding(
-    const CpEpPaddingData& src,
-    CpEpPaddingData& dst) const {
-  if (!src.attn_padding_idx().defined() ||
-      src.attn_padding_idx().numel() == 0) {
+void GraphPersistentParam::replace_capture_cp_ep_meta(const CpEpMeta& src,
+                                                      CpEpMeta& dst) const {
+  if (!src.attention_tp_padding_indices.defined() ||
+      src.attention_tp_padding_indices.numel() == 0) {
     return;
   }
-  dst.attn_padding_idx(slice_like_source(
-      persistent_cp_ep_padding_.attn_padding_idx(), src.attn_padding_idx()));
-  dst.attn_unpadding_idx(
-      slice_like_source(persistent_cp_ep_padding_.attn_unpadding_idx(),
-                        src.attn_unpadding_idx()));
-  dst.ffn_padding_idx(slice_like_source(
-      persistent_cp_ep_padding_.ffn_padding_idx(), src.ffn_padding_idx()));
-  dst.ffn_unpadding_idx(slice_like_source(
-      persistent_cp_ep_padding_.ffn_unpadding_idx(), src.ffn_unpadding_idx()));
-  dst.lm_head_skip_padding_token_indices(slice_like_source(
-      persistent_cp_ep_padding_.lm_head_skip_padding_token_indices(),
-      src.lm_head_skip_padding_token_indices()));
-  dst.gather_prenorm_idx(
-      slice_like_source(persistent_cp_ep_padding_.gather_prenorm_idx(),
-                        src.gather_prenorm_idx()));
-  dst.padding_idx(slice_like_source(persistent_cp_ep_padding_.padding_idx(),
-                                    src.padding_idx()));
-  dst.un_padding_idx(slice_like_source(
-      persistent_cp_ep_padding_.un_padding_idx(), src.un_padding_idx()));
-  dst.dynamic_ep_idx(slice_like_source(
-      persistent_cp_ep_padding_.dynamic_ep_idx(), src.dynamic_ep_idx()));
-  dst.moe_idx(
-      slice_like_source(persistent_cp_ep_padding_.moe_idx(), src.moe_idx()));
-  dst.expert_array(slice_like_source(persistent_cp_ep_padding_.expert_array(),
-                                     src.expert_array()));
+  dst.attention_tp_padding_indices =
+      slice_like_source(persistent_cp_ep_meta_.attention_tp_padding_indices,
+                        src.attention_tp_padding_indices);
+  dst.attention_tp_unpadding_indices =
+      slice_like_source(persistent_cp_ep_meta_.attention_tp_unpadding_indices,
+                        src.attention_tp_unpadding_indices);
+  dst.ffn_padding_indices = slice_like_source(
+      persistent_cp_ep_meta_.ffn_padding_indices, src.ffn_padding_indices);
+  dst.ffn_unpadding_indices = slice_like_source(
+      persistent_cp_ep_meta_.ffn_unpadding_indices, src.ffn_unpadding_indices);
+  dst.lm_head_skip_padding_indices =
+      slice_like_source(persistent_cp_ep_meta_.lm_head_skip_padding_indices,
+                        src.lm_head_skip_padding_indices);
+  dst.prenorm_gather_indices =
+      slice_like_source(persistent_cp_ep_meta_.prenorm_gather_indices,
+                        src.prenorm_gather_indices);
+  dst.attention_padding_indices =
+      slice_like_source(persistent_cp_ep_meta_.attention_padding_indices,
+                        src.attention_padding_indices);
+  dst.attention_unpadding_indices =
+      slice_like_source(persistent_cp_ep_meta_.attention_unpadding_indices,
+                        src.attention_unpadding_indices);
+  dst.dynamic_ep_indices = slice_like_source(
+      persistent_cp_ep_meta_.dynamic_ep_indices, src.dynamic_ep_indices);
+  dst.moe_indices =
+      slice_like_source(persistent_cp_ep_meta_.moe_indices, src.moe_indices);
+  dst.expert_array =
+      slice_like_source(persistent_cp_ep_meta_.expert_array, src.expert_array);
 }
 
 GraphPersistentParam::~GraphPersistentParam() {
@@ -986,8 +993,8 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
   // refreshes the data at those same addresses before graph_.replay().
   update_persistent_dp_ep_padding(params.parallel.dp_ep_padding_data,
                                   padded_num_tokens);
-  update_persistent_cp_ep_padding(params.parallel.cp_ep_padding_data,
-                                  padded_num_tokens);
+  update_persistent_cp_ep_meta(params.parallel.cp_plan.cp_ep_meta(),
+                               padded_num_tokens);
 
   // Return ModelInputParams with persistent buffer references if requested
   if (return_capture_params) {
@@ -1079,9 +1086,11 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     replace_capture_dp_ep_padding(
         params.parallel.dp_ep_padding_data,
         params_for_capture->parallel.dp_ep_padding_data);
-    replace_capture_cp_ep_padding(
-        params.parallel.cp_ep_padding_data,
-        params_for_capture->parallel.cp_ep_padding_data);
+    CpEpMeta capture_cp_ep_meta = params.parallel.cp_plan.cp_ep_meta();
+    replace_capture_cp_ep_meta(params.parallel.cp_plan.cp_ep_meta(),
+                               capture_cp_ep_meta);
+    params_for_capture->parallel.cp_plan.replace_cp_ep_meta_storage(
+        std::move(capture_cp_ep_meta));
 
     auto& qsl = params_for_capture->parallel.query_start_loc;
     qsl.clear();
