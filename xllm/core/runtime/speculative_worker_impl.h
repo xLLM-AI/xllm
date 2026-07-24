@@ -24,6 +24,10 @@ limitations under the License.
 
 namespace xllm {
 
+// Returns whether this rank may execute the multi-step speculative decode
+// plan for the current global DP batch.
+bool should_run_speculative_decode(const ModelInputParams& params);
+
 // Base class for all speculative decoding workers.
 // Provides common logic: target model management, step dispatch, and
 // sampling parameter updates. Subclasses implement algorithm-specific
