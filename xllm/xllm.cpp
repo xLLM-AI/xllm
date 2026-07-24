@@ -17,9 +17,14 @@ limitations under the License.
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <pybind11/embed.h>
+namespace py = pybind11;
 #include <torch/torch.h>
 
 #include <algorithm>
+#if defined(USE_NPU)
+#include <acl/acl.h>
+#endif
+
 #include <csignal>
 #include <filesystem>
 #include <memory>
@@ -263,6 +268,58 @@ Options create_options(const std::string& instance_name, bool is_local) {
 }
 
 }  // namespace
+
+#if defined(USE_NPU)
+namespace {
+// Initialize Python interpreter and torch_npu runtime early, before any NPU
+// tensor allocation. torch_npu (post4+) calls PyGILState_Ensure inside
+// empty_with_format(), so Python must be alive before the first NPU op.
+// All NPU processes go through this path for consistency — the build system
+// links against the pip-installed torch_npu .so directly.
+void init_npu_python_runtime() {
+  auto acl_ret = aclInit(nullptr);
+  CHECK(acl_ret == ACL_SUCCESS || acl_ret == 500000)
+      << "aclInit failed with error " << acl_ret;
+
+  bool we_initialized_python = false;
+  if (!Py_IsInitialized()) {
+    py::initialize_interpreter(/*init_signal_handlers=*/false);
+    we_initialized_python = true;
+  }
+
+  const auto first_device = DeviceNameUtils::parse_devices("auto").front();
+  const int device_index = first_device.index();
+
+  {
+    py::gil_scoped_acquire gil;
+    py::exec(
+        "import os, sys\n"
+        "os.environ['TORCH_DEVICE_BACKEND_AUTOLOAD'] = '0'\n"
+        "import torch\n"
+        "orig = torch._C._get_accelerator\n"
+        "try:\n"
+        "    torch._C._get_accelerator = lambda: torch.device('cpu')\n"
+        "    import torch_npu\n"
+        "finally:\n"
+        "    torch._C._get_accelerator = orig\n"
+        "import torch_npu.npu as _npu_mod\n"
+        "try:\n"
+        "    torch_npu._C._npu_init()\n"
+        "except RuntimeError as e:\n"
+        "    if 'already initialized' not in str(e).lower():\n"
+        "        raise\n"
+        "_npu_mod._initialized = True\n"
+        "_npu_mod._original_pid = os.getpid()\n"
+        "torch_npu._C._npu_setDevice(" +
+        std::to_string(device_index) + ")\n");
+  }
+
+  if (we_initialized_python) {
+    PyEval_SaveThread();
+  }
+}
+}  // namespace
+#endif
 
 void shutdown_handler(int signal) {
   // TODO: gracefully shutdown the server
@@ -542,6 +599,10 @@ int main(int argc, char** argv) {
     HelpFormatter::print_error("--model flag is required");
     return 1;
   }
+
+#if defined(USE_NPU)
+  init_npu_python_runtime();
+#endif
 
   return run();
 }

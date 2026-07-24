@@ -123,7 +123,34 @@ def set_common_envs() -> None:
 def set_npu_envs() -> None:
     PYTORCH_NPU_INSTALL_PATH = os.getenv("PYTORCH_NPU_INSTALL_PATH")
     if not PYTORCH_NPU_INSTALL_PATH:
-        os.environ["PYTORCH_NPU_INSTALL_PATH"] = "/usr/local/libtorch_npu"
+        # Use importlib.metadata instead of `import torch_npu` to avoid loading
+        # torch_npu .so into the build process. Loading torch_npu pollutes the
+        # ProcessPoolExecutor(spawn) child processes used by tilelang codegen,
+        # causing TVM to produce incorrect kernel source for small num_heads
+        # variants (nh4/nh6/nh8).
+        try:
+            import importlib.metadata
+            dist = importlib.metadata.distribution("torch_npu")
+            dist_loc = dist._path.parent
+            candidate = os.path.join(str(dist_loc), "torch_npu")
+            if os.path.isdir(candidate):
+                PYTORCH_NPU_INSTALL_PATH = candidate
+            else:
+                PYTORCH_NPU_INSTALL_PATH = "/usr/local/libtorch_npu"
+        except Exception:
+            PYTORCH_NPU_INSTALL_PATH = "/usr/local/libtorch_npu"
+        os.environ["PYTORCH_NPU_INSTALL_PATH"] = PYTORCH_NPU_INSTALL_PATH
+
+    # pip torch_npu wheel ships torch_npu.h under csrc/libs/ but not at the
+    # top-level include/torch_npu/. Create a symlink so #include
+    # <torch_npu/torch_npu.h> resolves correctly from the pip package.
+    top_header = os.path.join(
+        PYTORCH_NPU_INSTALL_PATH, "include", "torch_npu", "torch_npu.h")
+    csrc_header = os.path.join(
+        PYTORCH_NPU_INSTALL_PATH, "include", "torch_npu", "csrc", "libs",
+        "torch_npu.h")
+    if not os.path.exists(top_header) and os.path.exists(csrc_header):
+        os.symlink(csrc_header, top_header)
 
     set_common_envs()
     set_npu_torch_ld_library_path()
