@@ -72,7 +72,6 @@ class MtpModelImplBase : public torch::nn::Module {
     dp_rank_ =
         parallel_args.rank() / (dp_local_tp_size_ * parallel_args.cp_size());
     rank_ = parallel_args.rank();
-    cp_group_ = parallel_args.cp_group_;
     num_experts_per_tok_ = model_args.num_experts_per_tok();
     index_topk_ = model_args.index_topk();
 
@@ -130,20 +129,22 @@ class MtpModelImplBase : public torch::nn::Module {
     h = torch::cat({enorm, hnorm}, /*dim=*/-1);
     h = eh_proj_(h, 0);
 
-    // Model-side CP pipeline: shard the global-real hidden into the
-    // rank-local padded layout consumed by the decoder, and rewrite the
-    // attention metadata to the per-rank local view. For MTP the embedding
-    // fusion is word_emb -> enorm -> hnorm -> eh_proj, so localization happens
-    // here (after eh_proj) to keep the fused embedding consistent across CP
-    // ranks. No-ops when the plan is disabled (cp_size == 1 / decode).
+    // Model-side CP pipeline: shard the global-real hidden into the rank-local
+    // padded layout. For MTP the embedding fusion is word_emb -> enorm -> hnorm
+    // -> eh_proj, so localization happens here (after eh_proj) to keep the
+    // fused embedding consistent across CP ranks. The worker has already
+    // localized input_params.attention via cp_plan.prepare(); guarded so the
+    // non-CP forward is untouched and shard_model_input rewrites h/positions
+    // in place.
     const NpuCpPlan& cp_plan = input_params.parallel.cp_plan;
-    CpInputShard sharded_input = cp_plan.shard_model_input(h, positions);
-    h = std::move(sharded_input.hidden_states);
-    torch::Tensor local_positions = std::move(sharded_input.position_ids);
+    if (cp_plan.enabled()) {
+      cp_plan.shard_model_input(h, positions);
+    }
+    // input_params is const; the model needs a mutable copy to install the
+    // per-forward expert_array (sized to the post-shard hidden length).
     ModelInputParams input_params_new = input_params;
-    cp_plan.apply_attention_meta(input_params_new);
 
-    auto target_cos_sin = atb_pos_emb_(cos_sin_, local_positions, 0);
+    auto target_cos_sin = atb_pos_emb_(cos_sin_, positions, 0);
     auto target_cos_sin_chunks = target_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
     auto cos_pos = target_cos_sin_chunks[0].contiguous();
     auto sin_pos = target_cos_sin_chunks[1].contiguous();
@@ -239,9 +240,11 @@ class MtpModelImplBase : public torch::nn::Module {
                     event_flag);
     }
     // Restore global-real order from the rank-major gathered buffer so the LM
-    // head / scheduler see logical unpadded hidden. No-op when the plan is
-    // disabled or the CP group is single-rank.
-    h = cp_plan.merge_model_output(h, cp_group_);
+    // head / scheduler see logical unpadded hidden. The CP process group is
+    // bound inside the plan; guarded so the non-CP forward is untouched.
+    if (cp_plan.enabled()) {
+      h = cp_plan.merge_model_output(h);
+    }
 
     auto hidden_states = final_norm_(h, 0);
     ModelOutput output(hidden_states);
@@ -357,7 +360,6 @@ class MtpModelImplBase : public torch::nn::Module {
   bool enable_rot_ = false;
   torch::Device device_;
   int32_t index_topk_ = 0;
-  ProcessGroup* cp_group_ = nullptr;
 
  private:
   std::string model_type_;

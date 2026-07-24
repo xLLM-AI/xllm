@@ -25,6 +25,8 @@ namespace xllm {
 class ProcessGroup;
 struct ModelInputParams;
 struct ParallelInput;
+struct ForwardInput;
+enum class KvSlotLayout : int8_t;
 namespace npu {
 class GraphPersistentParam;
 }
@@ -55,10 +57,21 @@ struct CpPlanConfig {
   int32_t moe_ep_size = 1;
   int32_t expert_parallel_degree = 1;
   int32_t num_experts_per_token = 1;
-  // Dynamic EP degree 3 is enabled only for prefill in the legacy builder.
+  // Dynamic EP degree 3 only applies to prefill.
   bool is_prefill = true;
   torch::Device device = torch::kCPU;
   torch::ScalarType dtype = torch::kFloat;
+};
+
+// Worker-resolved, per-instance configuration handed to NpuCpPlan::prepare().
+// Static for the lifetime of a worker instance: the enabled decision, the typed
+// plan config, the CP process group for the output AllGather, and the
+// prefix-slot flag.
+struct CpPlanRuntimeConfig {
+  bool enabled = false;
+  CpPlanConfig plan_config;
+  ProcessGroup* cp_group = nullptr;
+  bool has_prefix_slots = false;
 };
 
 // Pre-model mapping from global-real rows to this rank's local-padded rows.
@@ -117,11 +130,6 @@ struct CpOutputMergeMeta {
   torch::Tensor output_restore_indices;
 };
 
-struct CpInputShard {
-  torch::Tensor hidden_states;
-  torch::Tensor position_ids;
-};
-
 // Complete execution plan for one model-side NPU CP forward.
 class NpuCpPlan final {
  public:
@@ -149,15 +157,36 @@ class NpuCpPlan final {
     return output_merge_meta_;
   }
 
-  CpInputShard shard_model_input(
-      const torch::Tensor& global_hidden_states,
-      const torch::Tensor& global_position_ids) const;
-  void apply_attention_meta(ModelInputParams& params) const;
+  // Request-level CP preparation, called once per forward after every consumer
+  // of the global attention metadata (MLA prefix cache, linear attention) has
+  // run. No-op when disabled (non-CP model, cp_size == 1, decode, or a
+  // composite worker that does not own the build); otherwise builds the plan in
+  // place, converts LOGICAL_REAL cache slots to recovered-physical, and
+  // rewrites the attention metadata to the per-rank local-padded view.
+  void prepare(ForwardInput& processed_input,
+               const CpPlanRuntimeConfig& runtime_config);
+
+  // In-place input localization: rewrites hidden_states to the rank-local
+  // padded layout and position_ids to the per-rank local position ids. No-op
+  // when the plan is disabled, so callers guard with `if (cp_plan.enabled())`.
+  void shard_model_input(torch::Tensor& hidden_states,
+                         torch::Tensor& position_ids) const;
   // Produces the final recovered physical slot tensor consumed by the graph.
   torch::Tensor prepare_cache_slots(
       const torch::Tensor& global_logical_slots) const;
-  torch::Tensor merge_model_output(const torch::Tensor& local_hidden_states,
-                                   ProcessGroup* process_group) const;
+  // Restores global-real order from the rank-major gathered buffer, using the
+  // process group bound at prepare()/set_process_group() time. No-op when the
+  // plan is disabled.
+  torch::Tensor merge_model_output(
+      const torch::Tensor& local_hidden_states) const;
+
+  // Binds the CP process group used by merge_model_output(). Workers set this
+  // through prepare(); tests and direct builders use this instead.
+  void set_process_group(ProcessGroup* process_group);
+
+  // Rewrites the model attention metadata to the per-rank local-padded view.
+  // Called from prepare(); public for unit tests that build a plan directly.
+  void apply_attention_meta(ModelInputParams& params) const;
 
  private:
   friend class npu::GraphPersistentParam;
@@ -174,6 +203,9 @@ class NpuCpPlan final {
   int32_t kv_split_size_ = 1;
   int32_t kv_split_rank_ = 0;
   int32_t block_size_ = 0;
+  // Non-owning CP process group bound at prepare()/set_process_group() time
+  // and consumed by merge_model_output().
+  ProcessGroup* cp_group_ = nullptr;
   CpInputShardMeta input_shard_meta_;
   CpAttentionMeta attention_meta_;
   CpEpMeta cp_ep_meta_;

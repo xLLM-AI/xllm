@@ -338,14 +338,17 @@ TEST(NpuCpPlanTest, GraphMetadataMatchesLegacyBytes) {
 TEST(NpuCpPlanTest, ShardsModelInputAndAppliesAttentionMeta) {
   const NpuCpPlan plan = NpuCpPlan::build(aligned_input(), cp2_rank0_config());
   torch::Tensor hidden = torch::arange(80, torch::kFloat).view({20, 4});
-  CpInputShard sharded =
-      plan.shard_model_input(hidden, aligned_input().position_ids);
+  const torch::Tensor global_hidden = hidden.clone();
+  torch::Tensor positions = aligned_input().position_ids;
+  // shard_model_input is now in-place: it rewrites hidden/positions to the
+  // rank-local padded layout.
+  plan.shard_model_input(hidden, positions);
 
   expect_tensor_bytes_equal(
-      sharded.hidden_states,
-      hidden.index_select(
+      hidden,
+      global_hidden.index_select(
           /*dim=*/0, int64_tensor({0, 1, 6, 7, 8, 9, 10, 17, 18, 19})));
-  expect_tensor_bytes_equal(sharded.position_ids,
+  expect_tensor_bytes_equal(positions,
                             int32_tensor({0, 1, 6, 7, 0, 1, 2, 9, 10, 11}));
 
   ModelInputParams params;
@@ -383,9 +386,10 @@ TEST(NpuCpPlanTest, NonAlignedInputUsesVirtualPadding) {
             std::vector<int32_t>({4, 4}));
 
   torch::Tensor hidden = torch::arange(12, torch::kFloat).view({12, 1});
-  CpInputShard sharded = plan.shard_model_input(hidden, input.position_ids);
+  torch::Tensor positions = input.position_ids;
+  plan.shard_model_input(hidden, positions);
   expect_tensor_bytes_equal(
-      sharded.hidden_states.flatten(),
+      hidden.flatten(),
       torch::tensor({0.0f, 1.0f, 0.0f, 0.0f, 5.0f, 6.0f, 11.0f, 0.0f}));
 
   const CpAttentionMeta& attention = plan.attention_meta();
@@ -447,9 +451,12 @@ TEST(NpuCpPlanTest, InputShardAndOutputMergeRoundTripAcrossRanks) {
       if (cp_rank == 0) {
         rank0_plan = plan;
       }
-      rank_shards.push_back(
-          plan.shard_model_input(global_hidden, input.position_ids)
-              .hidden_states);
+      // shard_model_input is in-place, so clone the global hidden per rank to
+      // avoid rewriting the shared source tensor.
+      torch::Tensor local_hidden = global_hidden.clone();
+      torch::Tensor local_positions = input.position_ids;
+      plan.shard_model_input(local_hidden, local_positions);
+      rank_shards.push_back(local_hidden);
     }
 
     torch::Tensor rank_major_gathered = torch::cat(rank_shards, /*dim=*/0);
@@ -461,19 +468,20 @@ TEST(NpuCpPlanTest, InputShardAndOutputMergeRoundTripAcrossRanks) {
 
 TEST(NpuCpPlanTest, OutputMergeRejectsInvalidProcessGroup) {
 #if GTEST_HAS_DEATH_TEST
-  const NpuCpPlan plan = NpuCpPlan::build(aligned_input(), cp2_rank0_config());
+  NpuCpPlan plan = NpuCpPlan::build(aligned_input(), cp2_rank0_config());
   const torch::Tensor local_hidden = torch::zeros({10, 1}, torch::kFloat);
-  EXPECT_DEATH(plan.merge_model_output(local_hidden, nullptr), "process_group");
+  // No process group bound -> merge must reject.
+  EXPECT_DEATH(plan.merge_model_output(local_hidden), "process_group");
 
   ProcessGroup wrong_size_group(
       /*rank=*/0, /*world_size=*/1, torch::Device(torch::kCPU));
-  EXPECT_DEATH(plan.merge_model_output(local_hidden, &wrong_size_group),
-               "size mismatch");
+  plan.set_process_group(&wrong_size_group);
+  EXPECT_DEATH(plan.merge_model_output(local_hidden), "size mismatch");
 
   ProcessGroup wrong_rank_group(
       /*rank=*/1, /*world_size=*/2, torch::Device(torch::kCPU));
-  EXPECT_DEATH(plan.merge_model_output(local_hidden, &wrong_rank_group),
-               "rank mismatch");
+  plan.set_process_group(&wrong_rank_group);
+  EXPECT_DEATH(plan.merge_model_output(local_hidden), "rank mismatch");
 #endif
 }
 
@@ -693,25 +701,21 @@ TEST(NpuCpPlanTest, MtpTargetAndDraftShardGlobalInputsExactlyOnce) {
 
   torch::Tensor target_hidden = torch::arange(96, torch::kFloat).view({12, 8});
   torch::Tensor draft_hidden = target_hidden + 1000;
-  CpInputShard target_shard =
-      target_plan.shard_model_input(target_hidden, mtp_input.position_ids);
-  CpInputShard draft_shard =
-      draft_plan.shard_model_input(draft_hidden, mtp_input.position_ids);
-  EXPECT_EQ(target_shard.hidden_states.size(0),
-            target_plan.local_padded_token_count());
-  EXPECT_EQ(draft_shard.hidden_states.size(0),
-            draft_plan.local_padded_token_count());
+  torch::Tensor target_positions = mtp_input.position_ids;
+  torch::Tensor draft_positions = mtp_input.position_ids;
+  target_plan.shard_model_input(target_hidden, target_positions);
+  draft_plan.shard_model_input(draft_hidden, draft_positions);
+  EXPECT_EQ(target_hidden.size(0), target_plan.local_padded_token_count());
+  EXPECT_EQ(draft_hidden.size(0), draft_plan.local_padded_token_count());
   const torch::Tensor& destination_indices =
       target_plan.input_shard_meta().input_destination_indices;
   expect_tensor_bytes_equal(
-      draft_shard.hidden_states.index_select(/*dim=*/0, destination_indices),
-      target_shard.hidden_states.index_select(/*dim=*/0, destination_indices) +
-          1000);
+      draft_hidden.index_select(/*dim=*/0, destination_indices),
+      target_hidden.index_select(/*dim=*/0, destination_indices) + 1000);
 #if GTEST_HAS_DEATH_TEST
   EXPECT_DEATH(draft_plan.prepare_cache_slots(draft_slots),
                "global-real logical layout");
-  EXPECT_DEATH(draft_plan.shard_model_input(draft_shard.hidden_states,
-                                            draft_shard.position_ids),
+  EXPECT_DEATH(draft_plan.shard_model_input(draft_hidden, draft_positions),
                "exactly once");
 #endif
 }
@@ -736,13 +740,12 @@ TEST(NpuCpPlanTest, CumulativeHostLayoutIsPreserved) {
 TEST(NpuCpPlanTest, EmptyPlanDropsWorkerFakeModelRow) {
   const NpuCpPlan plan =
       NpuCpPlan::build(make_plan_input({}, {}), cp2_rank0_config());
-  const torch::Tensor fake_hidden = torch::ones({1, 8}, torch::kFloat);
-  const torch::Tensor fake_position = int32_tensor({0});
-  const CpInputShard sharded =
-      plan.shard_model_input(fake_hidden, fake_position);
+  torch::Tensor fake_hidden = torch::ones({1, 8}, torch::kFloat);
+  torch::Tensor fake_position = int32_tensor({0});
+  plan.shard_model_input(fake_hidden, fake_position);
 
-  EXPECT_EQ(sharded.hidden_states.sizes(), torch::IntArrayRef({0, 8}));
-  EXPECT_EQ(sharded.position_ids.numel(), 0);
+  EXPECT_EQ(fake_hidden.sizes(), torch::IntArrayRef({0, 8}));
+  EXPECT_EQ(fake_position.numel(), 0);
 }
 
 TEST(NpuCpPlanTest, DisabledPlanIsNoOp) {
@@ -750,11 +753,16 @@ TEST(NpuCpPlanTest, DisabledPlanIsNoOp) {
   torch::Tensor hidden = torch::randn({4, 8});
   torch::Tensor positions = torch::arange(4, torch::kInt32);
   torch::Tensor slots = torch::arange(4, torch::kInt32);
-  CpInputShard sharded = plan.shard_model_input(hidden, positions);
-  EXPECT_TRUE(sharded.hidden_states.is_same(hidden));
-  EXPECT_TRUE(sharded.position_ids.is_same(positions));
+  const torch::Tensor hidden_before = hidden.clone();
+  const torch::Tensor positions_before = positions.clone();
+  // shard_model_input is a no-op (leaves both tensors unchanged) when the
+  // plan is disabled; merge_model_output / prepare_cache_slots return their
+  // input tensor unchanged.
+  plan.shard_model_input(hidden, positions);
+  expect_tensor_bytes_equal(hidden, hidden_before);
+  expect_tensor_bytes_equal(positions, positions_before);
   EXPECT_TRUE(plan.prepare_cache_slots(slots).is_same(slots));
-  EXPECT_TRUE(plan.merge_model_output(hidden, nullptr).is_same(hidden));
+  EXPECT_TRUE(plan.merge_model_output(hidden).is_same(hidden));
 }
 
 }  // namespace

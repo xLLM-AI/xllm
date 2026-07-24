@@ -76,7 +76,6 @@ class GlmMoeDsaModelImpl : public torch::nn::Module {
     dp_rank_ =
         parallel_args.rank() / (dp_local_tp_size_ * parallel_args.cp_size());
     rank_ = parallel_args.rank();
-    cp_group_ = parallel_args.cp_group_;
     mapping_data_ = parallel_args.mapping_data();
     num_experts_per_tok_ = model_args.num_experts_per_tok();
     const int32_t dp_stride = dp_local_tp_size_ * parallel_args.cp_size();
@@ -97,17 +96,15 @@ class GlmMoeDsaModelImpl : public torch::nn::Module {
     }
 
     auto h = npu_embed_tokens_(tokens, 0);
-    // Model-side CP pipeline: shard the global-real hidden into the
-    // rank-local padded layout consumed by the decoder, and rewrite the
-    // attention metadata to the per-rank local view. No-ops when the plan is
-    // disabled (cp_size == 1 / decode), so the forward is unconditional.
+    // Model-side CP pipeline: shard the global-real hidden into the rank-local
+    // padded layout. The worker has already localized input_params.attention
+    // via cp_plan.prepare(). Guarded so the non-CP forward is untouched;
+    // shard_model_input rewrites h/positions in place.
     const NpuCpPlan& cp_plan = input_params.parallel.cp_plan;
-    CpInputShard sharded_input = cp_plan.shard_model_input(h, positions);
-    h = std::move(sharded_input.hidden_states);
-    torch::Tensor local_positions = std::move(sharded_input.position_ids);
-    ModelInputParams modified_input_params = input_params;
-    cp_plan.apply_attention_meta(modified_input_params);
-    auto cos_sin = atb_pos_emb_(cos_sin_, local_positions, 0);
+    if (cp_plan.enabled()) {
+      cp_plan.shard_model_input(h, positions);
+    }
+    auto cos_sin = atb_pos_emb_(cos_sin_, positions, 0);
     auto cos_sin_chunks = cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
     auto cos_pos = cos_sin_chunks[0].contiguous();
     auto sin_pos = cos_sin_chunks[1].contiguous();
@@ -170,7 +167,7 @@ class GlmMoeDsaModelImpl : public torch::nn::Module {
                                  sin_pos,
                                  attn_mask,
                                  kv_caches[i],
-                                 modified_input_params,
+                                 input_params,
                                  shared_topk_indices,
                                  output_topk_indices,
                                  event,
@@ -181,7 +178,7 @@ class GlmMoeDsaModelImpl : public torch::nn::Module {
               sin_pos,
               attn_mask,
               kv_caches[i],
-              modified_input_params,
+              input_params,
               event,
               event_flag);
       }
@@ -191,9 +188,11 @@ class GlmMoeDsaModelImpl : public torch::nn::Module {
       rolling_guard.after_layer(layer_index);
     }
     // Restore global-real order from the rank-major gathered buffer so the LM
-    // head / scheduler / MTP see logical unpadded hidden. No-op when the plan
-    // is disabled or the CP group is single-rank.
-    h = cp_plan.merge_model_output(h, cp_group_);
+    // head / scheduler / MTP see logical unpadded hidden. The CP process group
+    // is bound inside the plan; guarded so the non-CP forward is untouched.
+    if (cp_plan.enabled()) {
+      h = cp_plan.merge_model_output(h);
+    }
     return ModelOutput(norm_(h, 0));
   }
 
@@ -315,7 +314,6 @@ class GlmMoeDsaModelImpl : public torch::nn::Module {
   layer::AttentionMask attn_mask_;
   layer::NpuRMSNorm norm_{nullptr};
   RollingLoadManager* rolling_mgr_ = nullptr;
-  ProcessGroup* cp_group_ = nullptr;
 };
 TORCH_MODULE(GlmMoeDsaModel);
 

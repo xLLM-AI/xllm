@@ -115,8 +115,9 @@ class WorkerImpl {
                                              ForwardInput& processed_input,
                                              Stream& prepare_stream);
 #if defined(USE_NPU)
-  void prepare_npu_cp_plan(const ForwardInput& input,
-                           ForwardInput& processed_input);
+  // Per-worker-static configuration handed to NpuCpPlan::prepare(); built once
+  // and cached.
+  const CpPlanRuntimeConfig& npu_cp_plan_runtime_config() const;
 #endif
 
   // True when this worker instance owns the NPU model-side CP slot prepare
@@ -367,6 +368,10 @@ class WorkerImpl {
 #if defined(USE_NPU)
   std::unique_ptr<MooncakeWeightTransfer> weight_transfer_;
   std::unique_ptr<Stream> load_stream_;
+
+  // Lazily-built cache backing npu_cp_plan_runtime_config().
+  mutable bool npu_cp_runtime_config_computed_ = false;
+  mutable CpPlanRuntimeConfig npu_cp_runtime_config_;
 #endif
 
   bool is_spec_draft_ = false;

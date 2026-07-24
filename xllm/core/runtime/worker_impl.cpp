@@ -680,128 +680,46 @@ bool WorkerImpl::model_supports_model_cp() const {
 }
 
 #if defined(USE_NPU)
-void WorkerImpl::prepare_npu_cp_plan(const ForwardInput& input,
-                                     ForwardInput& processed_input) {
-  const bool enabled =
-      parallel_args_.cp_size() > 1 && Platform::uses_model_cp_sharding() &&
-      !input.input_params.meta.batch_forward_type.is_decode() &&
-      owns_npu_cp_plan_build() && model_supports_model_cp();
-  if (!enabled) {
-    return;
+const CpPlanRuntimeConfig& WorkerImpl::npu_cp_plan_runtime_config() const {
+  if (npu_cp_runtime_config_computed_) {
+    return npu_cp_runtime_config_;
   }
-
-  auto tensor_to_int32_vec = [](const torch::Tensor& tensor) {
-    std::vector<int32_t> values;
-    if (!tensor.defined() || tensor.numel() == 0) {
-      return values;
-    }
-    torch::Tensor cpu =
-        tensor.device().is_cpu() ? tensor : tensor.to(torch::kCPU);
-    cpu = cpu.contiguous().to(torch::kInt32);
-    values.assign(cpu.data_ptr<int32_t>(),
-                  cpu.data_ptr<int32_t>() + cpu.numel());
-    return values;
-  };
-
-  const int32_t num_sequences = processed_input.input_params.meta.num_sequences;
-  const std::vector<int32_t>& host_q_seq_lens =
-      processed_input.input_params.attention.host.q_seq_lens;
-  const std::vector<int32_t>& host_kv_seq_lens =
-      processed_input.input_params.attention.host.kv_seq_lens;
-  const bool q_seq_lens_are_cumulative =
-      static_cast<int32_t>(host_q_seq_lens.size()) == num_sequences + 1 &&
-      !host_q_seq_lens.empty() && host_q_seq_lens.front() == 0;
-  const bool kv_seq_lens_are_cumulative =
-      static_cast<int32_t>(host_kv_seq_lens.size()) == num_sequences + 1 &&
-      !host_kv_seq_lens.empty() && host_kv_seq_lens.front() == 0;
-  std::vector<int32_t> global_q_seq_lens;
-  if (!host_q_seq_lens.empty()) {
-    if (q_seq_lens_are_cumulative) {
-      global_q_seq_lens.reserve(num_sequences);
-      for (int32_t i = 0; i < num_sequences; ++i) {
-        global_q_seq_lens.push_back(
-            std::max(0, host_q_seq_lens[i + 1] - host_q_seq_lens[i]));
-      }
-    } else {
-      global_q_seq_lens = host_q_seq_lens;
-    }
-  } else {
-    global_q_seq_lens = tensor_to_int32_vec(
-        processed_input.input_params.attention.device.q_seq_lens);
-  }
-
-  torch::Tensor global_positions = processed_input.host_positions();
-  if (!global_positions.defined() || global_positions.numel() == 0) {
-    global_positions = processed_input.positions;
-    if (global_positions.defined() && !global_positions.device().is_cpu()) {
-      global_positions =
-          global_positions.to(torch::kCPU).contiguous().to(torch::kInt32);
-    }
-  }
-
-  std::vector<int32_t> kv_cache_tokens_per_seq =
-      processed_input.input_params.attention.host.kv_cache_tokens_nums;
-  if (kv_cache_tokens_per_seq.empty()) {
-    kv_cache_tokens_per_seq = tensor_to_int32_vec(
-        processed_input.input_params.attention.device.kv_cache_tokens_nums);
-  }
-
-  const bool have_prefix_slots =
+  CpPlanRuntimeConfig cfg;
+  cfg.enabled = parallel_args_.cp_size() > 1 &&
+                Platform::uses_model_cp_sharding() &&
+                owns_npu_cp_plan_build() && model_supports_model_cp();
+  cfg.has_prefix_slots =
       KVCacheConfig::get_instance().enable_prefix_cache() ||
       SchedulerConfig::get_instance().enable_chunked_prefill();
-  CpPlanInput plan_input;
-  plan_input.q_seq_lens = std::move(global_q_seq_lens);
-  plan_input.position_ids = global_positions;
-  plan_input.prefix_token_counts = std::move(kv_cache_tokens_per_seq);
-  plan_input.has_prefix_slots = have_prefix_slots;
-  torch::Tensor block_tables =
-      processed_input.input_params.attention.device.block_tables;
-  if (have_prefix_slots && block_tables.defined() && block_tables.dim() == 2) {
-    plan_input.block_tables = block_tables.device().is_cpu()
-                                  ? block_tables
-                                  : block_tables.to(torch::kCPU);
+  if (cfg.enabled) {
+    const nlohmann::json& mapping = context_.get_parallel_args().mapping_data();
+    CHECK(!mapping.empty()) << "NPU CP plan requires parallel mapping data";
+    cfg.cp_group = parallel_args_.cp_group_;
+    CpPlanConfig& plan_config = cfg.plan_config;
+    plan_config.cp_size = parallel_args_.cp_size();
+    plan_config.cp_rank = parallel_args_.cp_rank();
+    plan_config.block_size = options_.block_size();
+    plan_config.kv_split_size = parallel_args_.kv_split_size_effective();
+    plan_config.kv_split_rank = parallel_args_.kv_split_rank();
+    plan_config.attention_tp_size = mapping["attnTpSize"].get<int32_t>();
+    plan_config.attention_tp_rank = mapping["attnTp"]["rank"].get<int32_t>();
+    plan_config.attention_cp_size = mapping["attnCpSize"].get<int32_t>();
+    plan_config.attention_cp_group_size =
+        static_cast<int32_t>(mapping["attnCp"]["rankIds"].size());
+    plan_config.moe_ep_size =
+        mapping.contains("moeEpSize") ? mapping["moeEpSize"].get<int32_t>() : 1;
+    plan_config.expert_parallel_degree =
+        EPLBConfig::get_instance().expert_parallel_degree();
+    plan_config.num_experts_per_token =
+        context_.get_model_args().num_experts_per_tok();
+    // CP only runs on prefill (decode is filtered in prepare()).
+    plan_config.is_prefill = true;
+    plan_config.device = device_;
+    plan_config.dtype = dtype_;
   }
-  plan_input.q_seq_lens_are_cumulative = q_seq_lens_are_cumulative;
-  plan_input.kv_seq_lens_are_cumulative = kv_seq_lens_are_cumulative;
-
-  const nlohmann::json& mapping = context_.get_parallel_args().mapping_data();
-  CHECK(!mapping.empty()) << "NPU CP plan requires parallel mapping data";
-  CpPlanConfig config;
-  config.cp_size = parallel_args_.cp_size();
-  config.cp_rank = parallel_args_.cp_rank();
-  config.block_size = options_.block_size();
-  config.kv_split_size = parallel_args_.kv_split_size_effective();
-  config.kv_split_rank = parallel_args_.kv_split_rank();
-  config.attention_tp_size = mapping["attnTpSize"].get<int32_t>();
-  config.attention_tp_rank = mapping["attnTp"]["rank"].get<int32_t>();
-  config.attention_cp_size = mapping["attnCpSize"].get<int32_t>();
-  config.attention_cp_group_size =
-      static_cast<int32_t>(mapping["attnCp"]["rankIds"].size());
-  config.moe_ep_size =
-      mapping.contains("moeEpSize") ? mapping["moeEpSize"].get<int32_t>() : 1;
-  config.expert_parallel_degree =
-      EPLBConfig::get_instance().expert_parallel_degree();
-  config.num_experts_per_token =
-      context_.get_model_args().num_experts_per_tok();
-  config.is_prefill = true;
-  config.device = device_;
-  config.dtype = dtype_;
-  processed_input.input_params.parallel.cp_plan =
-      NpuCpPlan::build(plan_input, config);
-
-  if (input.kv_slot_layout == KvSlotLayout::LOGICAL_REAL) {
-    const NpuCpPlan& plan = processed_input.input_params.parallel.cp_plan;
-    auto& new_cache_slots =
-        processed_input.input_params.attention.device.new_cache_slots;
-    new_cache_slots = plan.prepare_cache_slots(new_cache_slots);
-    CHECK(new_cache_slots.defined() &&
-          new_cache_slots.numel() == plan.recovered_token_count())
-        << "CP recovered new_cache_slots numel (" << new_cache_slots.numel()
-        << ") must equal recovered token count ("
-        << plan.recovered_token_count() << ")";
-
-    processed_input.kv_slot_layout = KvSlotLayout::NPU_CP_RECOVERED_PHYSICAL;
-  }
+  npu_cp_runtime_config_ = std::move(cfg);
+  npu_cp_runtime_config_computed_ = true;
+  return npu_cp_runtime_config_;
 }
 #endif
 
@@ -847,10 +765,6 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
   auto prepare_device_on_stream = [&]() {
     processed_input = input.to(device_, dtype_);
     ensure_forward_input_device_tensors(processed_input, device_);
-
-#if defined(USE_NPU)
-    prepare_npu_cp_plan(input, processed_input);
-#endif
 
     auto& input_params = processed_input.input_params;
 
@@ -928,6 +842,12 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
             processed_input.input_params.parallel.has_initial_state);
       }
     }
+
+    // Build the NPU model-side CP plan after every consumer of the global
+    // attention metadata (MLA prefix cache, linear attention) has run, so they
+    // still see the global view. No-op when CP is disabled.
+    processed_input.input_params.parallel.cp_plan.prepare(
+        processed_input, npu_cp_plan_runtime_config());
 
     if (can_prepare_npu_graph_decode_input(input_params)) {
       model_executor_->prepare_graph_input(processed_input.token_ids,
