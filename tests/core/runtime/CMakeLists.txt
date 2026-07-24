@@ -72,6 +72,7 @@ cc_test(
     "${PROJECT_SOURCE_DIR}/xllm/core/runtime/spec_input_builder.cpp"
   DEPS
     :multimodal
+    :parallel_state
     torch
     glog::glog
     proto::xllm_proto
