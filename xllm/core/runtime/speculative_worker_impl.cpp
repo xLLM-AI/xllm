@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "speculative_worker_impl.h"
 
+#include <algorithm>
+
 #include "common/global_flags.h"
 #include "common/metrics.h"
 #include "core/framework/config/speculative_config.h"
@@ -38,6 +40,25 @@ Slice<int32_t> tensor_slice(const torch::Tensor& tensor) {
 }
 
 }  // namespace
+
+bool should_run_speculative_decode(const ModelInputParams& params) {
+  if (!params.meta.batch_forward_type.is_decode()) {
+    return false;
+  }
+
+  const auto& dp_token_nums = params.parallel.dp_global_token_nums;
+  const auto& dp_is_decode = params.parallel.dp_is_decode;
+  if (dp_is_decode.empty()) {
+    return dp_token_nums.size() <= 1;
+  }
+  if (dp_is_decode.size() != dp_token_nums.size()) {
+    return false;
+  }
+
+  return std::all_of(dp_is_decode.begin(),
+                     dp_is_decode.end(),
+                     [](int32_t is_decode) { return is_decode == 1; });
+}
 
 SpeculativeWorkerImpl::SpeculativeWorkerImpl(
     const ParallelArgs& parallel_args,
@@ -81,12 +102,21 @@ bool SpeculativeWorkerImpl::allocate_kv_cache_with_transfer(
 
 std::optional<ForwardOutput> SpeculativeWorkerImpl::step(
     const ForwardInput& input) {
+  const bool run_speculative_decode =
+      should_run_speculative_decode(input.input_params);
   if (input.input_params.meta.num_sequences == 0 ||
       input.token_ids.numel() == 0) {
+    if (input.input_params.meta.batch_forward_type.is_decode() &&
+        !run_speculative_decode) {
+      ForwardInput aligned_input = input;
+      aligned_input.input_params.meta.batch_forward_type =
+          BatchForwardType::EMPTY;
+      return step_empty(aligned_input);
+    }
     return step_empty(input);
   }
 
-  if (input.input_params.meta.batch_forward_type.is_decode()) {
+  if (run_speculative_decode) {
     return step_decode(input);
   }
   return step_prefill(input);
