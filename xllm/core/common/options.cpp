@@ -56,6 +56,7 @@ std::string Options::to_string() const {
      << ", enable_chunked_prefill: " << enable_chunked_prefill()
      << ", cp_size: " << cp_size()
      << ", master_node_addr: " << master_node_addr().value_or("null")
+     << ", dcp_size: " << dcp_size()
      << ", instance_role: " << instance_role().to_string()
      << ", transfer_listen_port: " << transfer_listen_port()
      << ", nnodes: " << nnodes() << ", node_rank: " << node_rank()

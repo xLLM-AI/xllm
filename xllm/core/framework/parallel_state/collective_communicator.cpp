@@ -226,6 +226,10 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
         global_rank, world_size, dp_size, cp_size, nullptr, ep_size);
     parallel_args_->kv_split_size(
         ::xllm::ParallelConfig::get_instance().kv_split_size());
+    parallel_args_->dcp_size(
+        ::xllm::ParallelConfig::get_instance().dcp_size());
+    parallel_args_->cp_kv_cache_interleave_size(
+        ::xllm::ParallelConfig::get_instance().cp_kv_cache_interleave_size());
     return;
   }
 
@@ -283,11 +287,19 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
                                                   dispatchAndCombineHcclComm);
   parallel_args_->kv_split_size(
       ::xllm::ParallelConfig::get_instance().kv_split_size());
+  parallel_args_->dcp_size(
+      ::xllm::ParallelConfig::get_instance().dcp_size());
+  parallel_args_->cp_kv_cache_interleave_size(
+      ::xllm::ParallelConfig::get_instance().cp_kv_cache_interleave_size());
 #else
   parallel_args_ = std::make_unique<ParallelArgs>(
       global_rank, world_size, dp_size, cp_size, nullptr, ep_size);
   parallel_args_->kv_split_size(
       ::xllm::ParallelConfig::get_instance().kv_split_size());
+  parallel_args_->dcp_size(
+      ::xllm::ParallelConfig::get_instance().dcp_size());
+  parallel_args_->cp_kv_cache_interleave_size(
+      ::xllm::ParallelConfig::get_instance().cp_kv_cache_interleave_size());
 #endif
 }
 
@@ -390,6 +402,37 @@ void CollectiveCommunicator::create_process_groups(
   // future orthogonal CP x TP topology can provide its own process group.
   parallel_args_->cp_group_ = tp_group_.get();
   port += dp_size + single_rank_group_port_gap + single_rank_group_count;
+
+  const int32_t dcp_size = parallel_args_->dcp_size_effective();
+  if (dcp_size > 1) {
+    CHECK_EQ(tp_size % dcp_size, 0)
+        << "DCP requires tp_size % dcp_size == 0 (tp_size=" << tp_size
+        << ", dcp_size=" << dcp_size << ")";
+    const int32_t dcp_group_size = dcp_size;
+    const int32_t tp_rank = global_rank % tp_size;
+    const int32_t dcp_rank = tp_rank % dcp_size;
+    const int32_t dcp_group_base =
+        (tp_rank / dcp_size) * dcp_size;
+    std::vector<int32_t> dcp_group_ranks;
+    dcp_group_ranks.reserve(dcp_group_size);
+    for (int32_t member = 0; member < dcp_group_size; ++member) {
+      const int32_t member_tp_rank = dcp_group_base + member;
+      const int32_t dp_base = global_rank - tp_rank;
+      dcp_group_ranks.push_back(dp_base + member_tp_rank);
+    }
+    port += 1;
+    dcp_group_ = create_process_group(global_rank,
+                                      dcp_rank,
+                                      dcp_group_ranks,
+                                      world_size,
+                                      dcp_group_size,
+                                      port + global_rank / tp_size + 1,
+                                      host,
+                                      "dcp_group",
+                                      device);
+    parallel_args_->dcp_group_ = dcp_group_.get();
+    port += tp_size;
+  }
 
   if (dp_size > 1) {
     port_offset = global_rank % tp_size + 1;

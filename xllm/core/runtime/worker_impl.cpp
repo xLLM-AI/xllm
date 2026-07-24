@@ -661,7 +661,6 @@ ForwardInput WorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
   return update_input_by_last_step_output(input);
 }
 
-#if defined(USE_NPU)
 torch::Tensor WorkerImpl::recompute_new_cache_slots(const ForwardInput& input) {
   auto old_cache_slots = input.input_params.attention.device.new_cache_slots;
   int64_t numel = old_cache_slots.numel();
@@ -700,6 +699,7 @@ torch::Tensor WorkerImpl::recompute_new_cache_slots(const ForwardInput& input) {
   return new_cache_slots;
 }
 
+#if defined(USE_NPU)
 torch::Tensor WorkerImpl::compute_in_prefix_slots(const ForwardInput& input) {
   // Derive prefix block count from `kv_cache_tokens_nums` (already-cached
   // tokens at the start of this forward), which covers prefix-cache hits and
@@ -777,6 +777,45 @@ void WorkerImpl::prepare_work_before_execute(const ForwardInput& input,
                                              ForwardInput& processed_input) {
   prepare_work_before_execute_on_stream(
       input, processed_input, *prepare_stream_);
+}
+
+torch::Tensor WorkerImpl::recompute_dcp_cache_slots(const ForwardInput& input) {
+  const int32_t dcp_size = parallel_args_.dcp_size_effective();
+  CHECK_GT(dcp_size, 1) << "recompute_dcp_cache_slots requires dcp_size > 1";
+  const int32_t dcp_rank = parallel_args_.dcp_rank();
+
+  torch::Tensor old_cache_slots =
+      input.input_params.attention.device.new_cache_slots;
+  if (!old_cache_slots.defined() || old_cache_slots.numel() == 0) {
+    return old_cache_slots;
+  }
+
+  const int32_t block_size = options_.block_size();
+  torch::Tensor positions =
+      input.host_positions().to(torch::kCPU).to(torch::kLong);
+  const int32_t interleave_size =
+      parallel_args_.cp_kv_cache_interleave_size_effective(block_size);
+
+  const int64_t virtual_block_size = block_size * dcp_size;
+  torch::Tensor pos = positions.to(torch::kCPU).to(torch::kLong);
+  torch::Tensor slots = old_cache_slots.to(torch::kCPU).to(torch::kLong);
+
+  torch::Tensor virtual_block_offsets = pos % virtual_block_size;
+  torch::Tensor owner = (virtual_block_offsets / interleave_size) % dcp_size;
+  torch::Tensor mask = (owner == dcp_rank);
+
+  torch::Tensor local_offsets =
+      (virtual_block_offsets / (dcp_size * interleave_size)) * interleave_size +
+      (virtual_block_offsets % interleave_size);
+
+  // Physical slot: logical_block_id = old_slot / virtual_block_size.
+  torch::Tensor logical_block_id = slots / virtual_block_size;
+  torch::Tensor physical_slot = logical_block_id * block_size + local_offsets;
+
+  // Non-owned tokens → -1.
+  torch::Tensor remapped = torch::where(
+      mask, physical_slot, torch::full_like(slots, -1, slots.options()));
+  return remapped.to(old_cache_slots.scalar_type()).to(old_cache_slots.device());
 }
 
 void WorkerImpl::prepare_work_before_execute_on_stream(
@@ -938,6 +977,16 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
           in_prefix_slots.to(device_);
     }
 #endif
+    const bool needs_dcp_decode_prep =
+        parallel_args_.dcp_size_effective() > 1 &&
+        processed_input.input_params.meta.batch_forward_type.is_decode() &&
+        !processed_input.cp_partitioned;
+    if (needs_dcp_decode_prep) {
+      torch::Tensor new_cache_slots =
+          recompute_dcp_cache_slots(processed_input);
+      processed_input.input_params.attention.device.new_cache_slots =
+          new_cache_slots.to(device_);
+    }
 
     auto& input_params = processed_input.input_params;
 

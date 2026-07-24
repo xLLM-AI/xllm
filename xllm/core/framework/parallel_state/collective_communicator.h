@@ -45,6 +45,7 @@ class CollectiveCommunicator : public CollectiveCommunicatorBase {
   // model-side CP path aliases ParallelArgs::cp_group_ to tp_group_ instead of
   // constructing a separate communicator, so this stays empty for now.
   std::unique_ptr<ProcessGroup> cp_group_;
+  std::unique_ptr<ProcessGroup> dcp_group_;
   std::unique_ptr<ProcessGroup> moe_tp_group_;
   std::unique_ptr<ProcessGroup> moe_ep_group_;
 };

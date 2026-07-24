@@ -128,6 +128,10 @@ class Options {
 
   PROPERTY(int32_t, cp_size) = 1;
 
+  PROPERTY(int32_t, dcp_size) = 1;
+
+  PROPERTY(int32_t, cp_kv_cache_interleave_size) = 0;
+
   PROPERTY(int32_t, ep_size) = 1;
 
   PROPERTY(int32_t, tp_size) = 1;

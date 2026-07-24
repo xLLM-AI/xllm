@@ -39,6 +39,18 @@ struct ReduceAsyncCtx {
   c10::intrusive_ptr<c10d::Work> work;
 };
 
+struct AllGatherAsyncCtx {
+  torch::Tensor input;
+  torch::Tensor stacked;
+  c10::intrusive_ptr<c10d::Work> work;
+};
+
+struct AllToAllAsyncCtx {
+  torch::Tensor input;
+  torch::Tensor output;
+  c10::intrusive_ptr<c10d::Work> work;
+};
+
 std::optional<ParallelArgs> get_dp_attn_parallel_args(
     const ParallelArgs& parallel_args);
 
@@ -59,6 +71,16 @@ torch::Tensor finish_gather(GatherAsyncCtx ctx);
 ReduceAsyncCtx launch_reduce(torch::Tensor input, ProcessGroup* process_group);
 
 torch::Tensor finish_reduce(ReduceAsyncCtx ctx);
+
+AllGatherAsyncCtx launch_all_gather(const torch::Tensor& input,
+                                    ProcessGroup* process_group);
+
+torch::Tensor finish_all_gather(AllGatherAsyncCtx ctx);
+
+AllToAllAsyncCtx launch_all_to_all(const torch::Tensor& input,
+                                   ProcessGroup* process_group);
+
+torch::Tensor finish_all_to_all(AllToAllAsyncCtx ctx);
 
 torch::Tensor all_gather_interleaved(const torch::Tensor& input,
                                      ProcessGroup* process_group);

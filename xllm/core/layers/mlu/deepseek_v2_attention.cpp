@@ -43,6 +43,11 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
   has_indexer_ = enable_lighting_indexer_ && enable_indexer;
   use_full_replicated_attention_weights_ =
       parallel_args.cp_size() > 1 && Platform::uses_model_cp_partition();
+  dcp_enabled_ = parallel_args.dcp_size() > 1 &&
+                 parallel_args.dcp_group_ != nullptr;
+  dcp_group_ = parallel_args.dcp_group_;
+  dcp_size_ = parallel_args.dcp_size_effective();
+  kv_split_rank_ = parallel_args.kv_split_rank();
   const int64_t tp_size = parallel_args.tp_group_->world_size();
   int64_t hidden_size = args.hidden_size();
   int64_t num_heads = args.n_heads();
@@ -54,6 +59,8 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
   tp_heads_ = {num_heads / tp_size, num_heads / tp_size};
   full_heads_ = {num_heads, num_heads};
   float scaling = std::pow(qk_head_dim_, -0.5f);
+  sliding_window_ = args.sliding_window();
+  attn_scale_ = scaling;
 
   ProcessGroup* weight_group =
       use_replicated_attn_weights() &&
@@ -438,6 +445,11 @@ torch::Tensor DeepseekV2AttentionImpl::forward(
     DsaTopkTransfer* topk_transfer) {
   bool is_prefill_or_chunked_prefill =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
+  if (dcp_enabled_ && !is_prefill_or_chunked_prefill) {
+    return forward_dcp(positions, hidden_states, attn_metadata, kv_cache,
+                      topk_transfer);
+  }
+
   if (sp_ctx != nullptr && can_use_sp()) {
     // DSA cross-layer top-k sharing under sequence parallel is out of scope
     // for the eager path; the sequence parallel branch always recomputes.

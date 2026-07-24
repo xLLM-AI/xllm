@@ -1,0 +1,234 @@
+/* Copyright 2025-2026 The xLLM Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include "deepseek_v2_attention.h"
+
+#include <cstdint>
+#include <optional>
+
+#include "framework/parallel_state/parallel_state.h"
+#include "kernels/mlu/mlu_ops_api.h"
+#include "kernels/ops_api.h"
+#include "platform/platform.h"
+
+namespace xllm {
+namespace layer {
+
+namespace {
+void check_phase1_dcp_geometry(int32_t dcp_size,
+                               int64_t tp_heads_attn,
+                               int64_t full_heads_attn) {
+  CHECK_EQ(dcp_size * tp_heads_attn, full_heads_attn)
+      << "Phase 1 DCP requires dcp_size * tp_heads == full_heads (i.e. "
+         "tp_size == dcp_size); tp_size > dcp_size is a Phase 2 task.";
+}
+
+}  // namespace
+
+torch::Tensor DeepseekV2AttentionImpl::forward_dcp(
+    const torch::Tensor& positions,
+    const torch::Tensor& hidden_states,
+    const AttentionMetadata& attn_metadata,
+    KVCache& kv_cache,
+    DsaTopkTransfer* topk_transfer) {
+  CHECK_GT(dcp_size_, 1) << "forward_dcp requires dcp_size_ > 1.";
+
+  check_phase1_dcp_geometry(dcp_size_, tp_heads_.attn, full_heads_.attn);
+
+  const int64_t tokens = hidden_states.size(0);
+  auto k_cache = kv_cache.get_k_cache();
+  auto k_cache_scale = kv_cache.get_k_cache_scale();
+  auto query_prep = prep_query(hidden_states, tp_heads_);
+  torch::Tensor q_input = torch::empty(
+      {tokens, tp_heads_.attn, kv_lora_rank_ + qk_rope_head_dim_},
+      hidden_states.options());
+  torch::Tensor latent_cache = kv_a_proj_with_mqa_(hidden_states);
+  fill_q_input(q_input,
+               query_prep.q,
+               positions,
+               attn_metadata,
+               /*use_prompt_rope=*/false);
+  decode_kv_pre_base(latent_cache, positions, attn_metadata, /*use_prompt_rope=*/false);
+
+  // DSA cross-layer top-k sharing. A Shared layer reuses the previous Full
+  // layer's sparse block table (skipping indexer recompute); an Output layer
+  // exports its freshly computed block table so the next Shared layer can
+  // reuse it. Under DCP the indexer (with the slot recovery below) produces a
+  // rank-consistent global top-k, so the published state is safe to share
+  // across ranks just like the eager path.
+  std::optional<torch::Tensor> shared_block_tables;
+  std::optional<torch::Tensor> shared_context_lens;
+  const bool has_shared_topk =
+      topk_transfer != nullptr && topk_transfer->input() != nullptr;
+  if (has_shared_topk) {
+    shared_block_tables = topk_transfer->input()->block_tables();
+    shared_context_lens = topk_transfer->input()->context_lens();
+  }
+
+  // DCP indexer index-cache slot recovery.
+  // The worker masks `new_cache_slots` (== attn_metadata.slot_mapping) by
+  // `pos % dcp_size == dcp_rank` so the sharded MAIN MLA KV cache only receives
+  // this rank's 1/dcp tokens. The INDEX cache, however, is a full replica on
+  // every rank (KVCacheShape::init_index_cache_shape does not shard by
+  // world_size, and the indexer weights are replicated), so it must receive ALL
+  // new tokens -- otherwise the indexer's top-k selection runs against a
+  // 1/dcp-populated cache and produces wrong block tables. Each rank keeps the
+  // original slot id for its owned tokens and -1 elsewhere, so an AllGather +
+  // max over the dcp group recovers the full (unmasked) slot map. The indexer
+  // then writes the full-replica index cache with this map, while the main KV
+  // write below keeps the masked (sharded) map. A Shared layer skips the
+  // indexer (it reuses the prior top-k), so the recovery AllGather is skipped
+  // too -- only Full/plain layers that actually recompute the indexer pay for
+  // it.
+  torch::Tensor masked_slot_mapping = attn_metadata.slot_mapping;
+  AttentionMetadata index_attn_metadata = attn_metadata;
+  const bool indexer_will_run =
+      enable_lighting_indexer_ && !has_shared_topk;
+  if (indexer_will_run && masked_slot_mapping.defined() &&
+      dcp_group_ != nullptr) {
+    auto slot_gather_ctx = parallel_state::launch_all_gather(
+        masked_slot_mapping, dcp_group_);
+    torch::Tensor stacked_slots =
+        parallel_state::finish_all_gather(std::move(slot_gather_ctx));
+    stacked_slots = stacked_slots.view({dcp_size_, -1});
+    index_attn_metadata.slot_mapping =
+        std::get<0>(torch::max(stacked_slots, /*dim=*/0, /*keepdim=*/false));
+  }
+
+  AttentionMetadata local_meta = build_mla_attention_metadata(
+      positions,
+      hidden_states,
+      query_prep.q_norm,
+      latent_cache,
+      index_attn_metadata,
+      kv_cache,
+      k_cache_scale,
+      /*is_prefill_phase=*/false,
+      /*slot_mapping=*/std::nullopt,
+      shared_block_tables,
+      shared_context_lens);
+
+  // An Output layer exports the freshly computed sparse block table (held in
+  // the resolved metadata) so the caller can cache it for the next Shared
+  // layer. finish_layer CHECKs that a producer publishes, so this must run
+  // before the main KV write below.
+  if (topk_transfer != nullptr && topk_transfer->captures_output()) {
+    topk_transfer->publish_output(DsaTopkState(
+        local_meta.block_table, local_meta.kv_seq_lens));
+  }
+
+  {
+    torch::Tensor key = latent_cache.unsqueeze(1);
+    xllm::kernel::ReshapePagedCacheParams params;
+    params.key = key;
+    params.k_cache = k_cache;
+    // Main MLA KV is DCP-sharded: write only this rank's owned tokens. Slots
+    // == -1 (non-owned) are skipped by reshape_paged_cache /
+    // quant_to_paged_cache.
+    params.slot_mapping = masked_slot_mapping;
+    if (k_cache_scale.has_value()) {
+      params.k_cache_scale = k_cache_scale;
+      xllm::kernel::quant_to_paged_cache(params);
+    } else {
+      xllm::kernel::reshape_paged_cache(params);
+    }
+  }
+
+  q_input = q_input.view({tokens, tp_heads_.attn, -1});
+  auto q_gather_ctx = parallel_state::launch_all_gather(
+      q_input.contiguous(), dcp_group_);
+  torch::Tensor q_full = parallel_state::finish_all_gather(std::move(q_gather_ctx));
+  const int64_t head_dim = q_input.size(-1);
+  q_full = q_full.permute({1, 0, 2, 3}).contiguous()
+               .view({tokens, dcp_size_ * tp_heads_.attn, head_dim});
+
+  const int64_t local_heads = full_heads_.attn;
+  torch::Tensor q_decode = q_full.view({tokens, local_heads, head_dim})
+                               .unsqueeze(1)
+                               .contiguous();  // [tokens, 1, heads, D]
+  torch::Tensor partial_out =
+      torch::empty({tokens, 1, local_heads, kv_lora_rank_}, hidden_states.options());
+  std::optional<torch::Tensor> partial_lse =
+      torch::empty({tokens, local_heads, 1},
+                   hidden_states.options().dtype(torch::kFloat32));
+  int64_t kv_cache_quant_bit_size = -1;
+  std::optional<torch::Tensor> k_cache_quant_scale;
+  if (k_cache_scale.has_value()) {
+    k_cache_quant_scale = k_cache_scale;
+    kv_cache_quant_bit_size = 8;
+  }
+
+  auto max_seq_len = (local_meta.max_seq_len + dcp_size_ - 1) / dcp_size_;  // ceil div
+  auto kv_seq_lens = (local_meta.kv_seq_lens + dcp_size_ - 1) / dcp_size_;  // ceil div
+  kv_seq_lens = kv_seq_lens.to(torch::kInt32);
+  xllm::kernel::mlu::batch_decode(
+      q_decode,
+      k_cache,
+      partial_out,
+      local_meta.block_table,
+      kv_seq_lens,
+      /*v_cache=*/std::nullopt,
+      partial_lse,
+      /*q_quant_scale=*/std::nullopt,
+      k_cache_quant_scale,
+      /*v_cache_quant_scale=*/std::nullopt,
+      /*out_quant_scale=*/std::nullopt,
+      /*alibi_slope=*/std::nullopt,
+      /*mask=*/std::nullopt,
+      local_meta.compute_dtype,
+      max_seq_len,
+      std::max<int64_t>(sliding_window_ - 1, -1),
+      /*window_size_right=*/-1,
+      attn_scale_,
+      /*return_lse=*/true,
+      kv_cache_quant_bit_size,
+      /*cu_seq_q=*/std::nullopt,
+      /*max_seq_q=*/-1,
+      /*sink=*/std::nullopt);
+
+  torch::Tensor partial_out_flat =
+      partial_out.permute({2, 0, 1, 3}).contiguous()
+          .view({local_heads, tokens * kv_lora_rank_});
+  auto o_a2a_ctx = parallel_state::launch_all_to_all(partial_out_flat, dcp_group_);
+  torch::Tensor partial_out_redistributed =
+      parallel_state::finish_all_to_all(std::move(o_a2a_ctx));
+
+  torch::Tensor partial_lse_flat =
+      partial_lse.value().permute({1, 0, 2}).contiguous()
+          .view({local_heads, tokens});
+  auto lse_a2a_ctx = parallel_state::launch_all_to_all(partial_lse_flat, dcp_group_);
+  torch::Tensor partial_lse_redistributed =
+      parallel_state::finish_all_to_all(std::move(lse_a2a_ctx));
+
+  partial_out_redistributed =
+      partial_out_redistributed.view({dcp_size_, 1, tp_heads_.attn, tokens, kv_lora_rank_})
+          .permute({0, 3, 1, 2, 4}).contiguous();
+  partial_lse_redistributed =
+      partial_lse_redistributed.view({dcp_size_, tp_heads_.attn, tokens, 1})
+          .permute({0, 2, 1, 3}).contiguous();
+
+  torch::Tensor merged_out = partial_out_redistributed[0].clone();
+  torch::Tensor merged_lse = partial_lse_redistributed[0].clone();
+  for (int32_t i = 1; i < dcp_size_; ++i) {
+    xllm::kernel::mlu::update_out_and_lse(
+        merged_out, merged_lse,
+        partial_out_redistributed[i], partial_lse_redistributed[i]);
+  }
+
+  return project_output(merged_out, tp_heads_);
+}
+
+}  // namespace layer
+}  // namespace xllm

@@ -79,7 +79,8 @@ GraphPoolMemoryUsage get_graph_pool_usage(
   const auto snapshot = torch_mlu::MLUCachingAllocator::snapshot();
   for (const auto& segment : snapshot.segments) {
     if (segment.device != device_index ||
-        segment.owner_private_pool_id != pool_id) {
+        segment.owner_private_pool_id.first != static_cast<uint64_t>(pool_id.first) ||
+        segment.owner_private_pool_id.second != static_cast<uint64_t>(pool_id.second)) {
       continue;
     }
     usage.reserved_bytes += segment.total_size;
