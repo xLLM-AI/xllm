@@ -28,6 +28,7 @@ limitations under the License.
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "platform/stream.h"
 #if defined(USE_CUDA)
 #include <cuda_runtime_api.h>
@@ -2369,7 +2370,15 @@ inline void deserialize_forward_input_payload(
   read_linear_state_cache_ops(context, input_params.linear_state_cache_ops);
   normalize_linear_state_ids(input_params.embedding.linear_state_ids,
                              input_params.meta.num_sequences);
-  if (!input_params.embedding.linear_state_ids.empty()) {
+  bool defer_linear_state_indices_h2d = false;
+#if defined(USE_NPU)
+  defer_linear_state_indices_h2d =
+      stream != nullptr &&
+      ::xllm::ExecutionConfig::get_instance().enable_graph() &&
+      ::xllm::SchedulerConfig::get_instance().enable_schedule_overlap();
+#endif
+  if (!defer_linear_state_indices_h2d &&
+      !input_params.embedding.linear_state_ids.empty()) {
     input_params.embedding.linear_state_indices =
         torch::tensor(input_params.embedding.linear_state_ids, torch::kInt)
             .to(device, /*non_blocking=*/true);
