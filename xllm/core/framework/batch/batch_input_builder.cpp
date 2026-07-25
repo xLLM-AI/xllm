@@ -422,6 +422,7 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     thread_state.linear_state_ids.reserve(sequences_per_thread);
     thread_state.request_ids.reserve(sequences_per_thread);
     thread_state.extra_token_ids.reserve(sequences_per_thread);
+    thread_state.scheduled_mm_data_vec.reserve(sequences_per_thread);
   }
 
   // parallel processing function
@@ -598,6 +599,9 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     state_.transfer_kv_infos.insert(state_.transfer_kv_infos.end(),
                                     state.transfer_kv_infos.begin(),
                                     state.transfer_kv_infos.end());
+    state_.scheduled_mm_data_vec.insert(state_.scheduled_mm_data_vec.end(),
+                                        state.scheduled_mm_data_vec.begin(),
+                                        state.scheduled_mm_data_vec.end());
 
     // for flashinfer
     // we skip the first '0' element
@@ -685,7 +689,8 @@ void BatchInputBuilder::process_single_sequence(
   state.q_seq_lens.push_back(state.q_seq_lens.back() + padded_q_seq_len);
 #endif
   // Process multi-modal input
-  process_multi_modal_inputs(sequence, n_kv_cache_tokens, q_seq_len, seq_index);
+  process_multi_modal_inputs(
+      sequence, n_kv_cache_tokens, q_seq_len, seq_index, state_ptr);
   // Process tokens and positions
   extract_tokens_and_positions(
       sequence, n_kv_cache_tokens, logical_seq_len, seq_len, state_ptr);
@@ -1221,7 +1226,11 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
       torch::tensor(state_.paged_kv_last_page_len, torch::kInt);
 
   // Setup multimodal data
-  input_params.multimodal.mm_data.batch(mm_data_vec_);
+  std::vector<MMData> batch_mm_data_vec = mm_data_vec_;
+  batch_mm_data_vec.insert(batch_mm_data_vec.end(),
+                           state_.scheduled_mm_data_vec.begin(),
+                           state_.scheduled_mm_data_vec.end());
+  input_params.multimodal.mm_data.batch(batch_mm_data_vec);
 
   // Setup block tables
   util::pad_2d_vector(state_.block_tables_vec, /*pad_value=*/0);
@@ -1345,7 +1354,9 @@ void BatchInputBuilder::process_swap_block_infos(ForwardInput& forward_input) {
 void BatchInputBuilder::process_multi_modal_inputs(Sequence* sequence,
                                                    uint32_t n_kv_cache_tokens,
                                                    uint32_t q_seq_len,
-                                                   int32_t seq_index) {
+                                                   int32_t seq_index,
+                                                   BuilderState* state_ptr) {
+  BuilderState& state = state_ptr ? *state_ptr : state_;
   MMData& mm_data = sequence->mutable_mm_data();
   if ((sequence->stage() != SequenceStage::DECODE) && mm_data.valid()) {
     UpdateMMItemScheduleStateVisitor visitor(
@@ -1356,7 +1367,7 @@ void BatchInputBuilder::process_multi_modal_inputs(Sequence* sequence,
     }
     MMData scheduled_mm_data(visitor.scheduled_type_,
                              std::move(visitor.mm_data_items_));
-    mm_data_vec_.emplace_back(std::move(scheduled_mm_data));
+    state.scheduled_mm_data_vec.emplace_back(std::move(scheduled_mm_data));
   }
 }
 }  // namespace xllm
