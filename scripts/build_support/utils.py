@@ -269,16 +269,24 @@ def _collect_submodule_init_issues(repo_root: str) -> dict[str, str]:
 
     return issues
 
-def _is_dependency_installed(required_files: list[str]) -> bool:
-    normalized_files = [
+def _is_dependency_installed(candidate_files: list[str]) -> bool:
+    """Return whether any distribution-specific dependency marker exists."""
+    normalized_candidates = [
         os.path.abspath(os.path.expanduser(file_path))
-        for file_path in required_files
+        for file_path in candidate_files
     ]
-    return all(os.path.isfile(file_path) for file_path in normalized_files)
+    return any(os.path.isfile(file_path) for file_path in normalized_candidates)
 
 
 def _get_required_dependency_files() -> dict[str, list[str]]:
     install_prefix = "/usr/local/yalantinglibs"
+    zstd_library_candidates = ["/usr/lib64/libzstd.so"]
+    multiarch = sysconfig.get_config_var("MULTIARCH")
+    if multiarch:
+        zstd_library_candidates.append(
+            os.path.join("/usr/lib", multiarch, "libzstd.so")
+        )
+
     return {
         "yalantinglibs": [
             os.path.join(
@@ -291,7 +299,7 @@ def _get_required_dependency_files() -> dict[str, list[str]]:
         ],
         # Mooncake v0.3.12 mooncake-store links -lzstd (needs the -devel
         # symlink, not just libzstd.so.1) and includes xxhash.h.
-        "zstd-devel": ["/usr/lib64/libzstd.so"],
+        "zstd-devel": zstd_library_candidates,
         "xxhash-devel": ["/usr/include/xxhash.h"],
         # msgpack-cxx headers used by Mooncake v0.3.12's serialize/serializer.h.
         # Header-only, dropped into /usr/local/include by dependencies.sh.
@@ -303,13 +311,13 @@ def _collect_missing_dependencies(
     dependency_files: dict[str, list[str]],
 ) -> dict[str, list[str]]:
     missing: dict[str, list[str]] = {}
-    for name, required_files in dependency_files.items():
-        normalized_files = [
+    for name, candidate_files in dependency_files.items():
+        normalized_candidates = [
             os.path.abspath(os.path.expanduser(file_path))
-            for file_path in required_files
+            for file_path in candidate_files
         ]
-        if not _is_dependency_installed(normalized_files):
-            missing[name] = normalized_files
+        if not _is_dependency_installed(normalized_candidates):
+            missing[name] = normalized_candidates
     return missing
 
 
@@ -340,14 +348,14 @@ def _export_cmake_prefix_paths(prefix_paths: list[str]) -> None:
 
 def _run_dependencies_script_or_exit(script_path: str) -> None:
     if not _run_shell_command(
-        "sh third_party/dependencies.sh",
+        "bash third_party/dependencies.sh",
         cwd=script_path,
         passthrough_output=True,
     ):
-        logger.error("❌ Run shell command 'sh third_party/dependencies.sh' failed!")
+        logger.error("❌ Run shell command 'bash third_party/dependencies.sh' failed!")
         _print_manual_check_commands([
             f"cd {script_path}",
-            "sh third_party/dependencies.sh",
+            "bash third_party/dependencies.sh",
         ])
         exit(1)
 
@@ -375,7 +383,7 @@ def _ensure_prebuild_dependencies_installed(script_path: str) -> None:
         missing_dependencies = _collect_missing_dependencies(dependency_files)
         if missing_dependencies:
             logger.error("❌ Some third-party dependencies are still missing after running dependencies.sh:")
-            manual_commands = [f"cd {script_path}", "sh third_party/dependencies.sh"]
+            manual_commands = [f"cd {script_path}", "bash third_party/dependencies.sh"]
             for name in sorted(missing_dependencies):
                 logger.error(f"   - {name}")
                 for file_path in missing_dependencies[name]:
