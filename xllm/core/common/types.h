@@ -298,6 +298,10 @@ struct KVBlockTransferGroup {
   int32_t group_id = 0;
   std::vector<uint64_t> local_blocks_ids;
   std::vector<uint64_t> remote_blocks_ids;
+  // Number of leading blocks D already has from its own device-side prefix
+  // cache under this group. P uses this to compress its per-group transfer
+  // cursor to the first block D actually needs (no shared -> zero, no-op).
+  uint32_t remote_shared_num = 0;
 };
 
 struct TransferKVInfo {
@@ -310,6 +314,12 @@ struct TransferKVInfo {
   std::vector<uint64_t> remote_linear_state_ids;
   int32_t dp_rank;
   InstanceInfo remote_instance_info;
+  // Number of leading blocks D already holds from its own device-side prefix
+  // cache under BlockType::KV (flat KV path). remote_blocks_ids is shipped
+  // starting from that offset; build_step_transfer_info uses this to
+  // translate a local block index to the correct remote_blocks_ids slot.
+  // Zero when D had no hit, which preserves the pre-existing indexing.
+  uint32_t remote_shared_num = 0;
 
   // XTensor mode: destination offsets from D-node (per-layer)
   // Only populated when KVCacheConfig::enable_xtensor is true.

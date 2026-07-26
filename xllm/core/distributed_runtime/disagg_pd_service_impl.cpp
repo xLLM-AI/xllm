@@ -175,7 +175,10 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
 
       auto dp_rank = sequence->dp_rank();
       resp->set_dp_rank(dp_rank);
-      resp->set_linear_state_id(sequence->get_single_block_id());
+      // Advertise the recurrent-state slot: LINEAR for Qwen3.5 GDN, SINGLE
+      // for legacy models. Sender-side batch_input_builder resolves the slot
+      // via the same helper so both sides agree.
+      resp->set_linear_state_id(sequence->get_recurrent_state_slot_id());
 
       std::vector<int32_t> block_ids;
       if (sequence->kv_state().has_multi_block_export()) {
@@ -183,18 +186,44 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
         for (const auto& [block_type, blocks_ptr] : export_view) {
           auto* group = resp->mutable_kv_block_groups()->Add();
           group->set_group_id(cache_group_id(block_type));
+          // D-side shared count for this group. P advances its per-group
+          // transfer cursor to this value so it starts pushing at the first
+          // block D actually needs. SWA / LINEAR under DECODE role return
+          // 0 (prefix cache off), which is a no-op advance and reproduces
+          // the pre-existing "push everything" behavior. C4 / C128 may
+          // return >0 and let P skip the leading shared blocks.
+          group->set_remote_shared_num(static_cast<uint32_t>(
+              sequence->kv_state().shared_blocks_num(block_type)));
           group->mutable_block_ids()->Reserve(blocks_ptr->size());
           for (const auto& block : *blocks_ptr) {
-            CHECK(block.is_valid())
-                << "Decode allocated an invalid grouped KV block, group_id="
-                << cache_group_id(block_type);
-            group->mutable_block_ids()->Add(block.id());
+            // Invalid placeholders are legitimate for SWA: the sliding
+            // window release loop leaves moved-from Blocks in place so
+            // positional indexing stays stable, and both P and D produce
+            // the same invalid pattern for the slid-out window. Ship them
+            // as -1 sentinels; P's build_group_step_transfer skips
+            // positions where the local block id is negative, so the
+            // remote id at those positions is never dereferenced. The
+            // CHECK below only refuses invalid blocks under types where
+            // slide-out cannot produce them (C4 / C128), preserving the
+            // guard for genuine allocation bugs.
+            const int32_t block_id = block.is_valid() ? block.id() : -1;
+            if (!block.is_valid()) {
+              CHECK(block_type == BlockType::SWA)
+                  << "Decode allocated an invalid grouped KV block under a "
+                  << "non-SWA leaf, group_id=" << cache_group_id(block_type);
+            }
+            group->mutable_block_ids()->Add(block_id);
           }
         }
       } else {
         const size_t shared_num =
             sequence->kv_state().shared_blocks_num(BlockType::KV);
         const auto blocks = sequence->kv_state().blocks(BlockType::KV);
+
+        // Tell P where the D-side prefix cache hit ends so its transfer
+        // cursor lines up with the block ids we return below. Zero if there
+        // was no D-side hit -- matches pre-shared_num behavior.
+        resp->set_remote_shared_num(static_cast<uint32_t>(shared_num));
 
         // Collect block IDs
         block_ids.reserve(blocks.size() - shared_num);

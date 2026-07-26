@@ -252,6 +252,7 @@ TransferKVInfo BatchInputBuilder::build_step_transfer_info(
   info.remote_instance_info = full_info.remote_instance_info;
   info.local_linear_state_ids = full_info.local_linear_state_ids;
   info.remote_linear_state_ids = full_info.remote_linear_state_ids;
+  info.remote_shared_num = full_info.remote_shared_num;
 
   if (block_size == 0 || local_block_ids.empty()) {
     return info;
@@ -265,19 +266,35 @@ TransferKVInfo BatchInputBuilder::build_step_transfer_info(
   const size_t map_end = std::min(win_end, local_size);
   const size_t remote_stride =
       static_cast<size_t>(util::kv_split_size_effective());
-  const size_t remote_end = map_end * remote_stride;
-  CHECK_GE(util::align_up(remote_size, remote_stride), remote_end)
-      << "remote block coverage shortage, request_id=" << full_info.request_id
-      << ", remote_size=" << remote_size << ", remote_end=" << remote_end
-      << ", remote_stride=" << remote_stride;
+  // D shipped remote_blocks_ids starting at its shared_num, so P's local
+  // index `local_idx` maps to remote slot `local_idx - remote_shared_num`.
+  // The P scheduler has already advanced next_transfer_block_idx to at least
+  // remote_shared_num, so win_begin >= remote_shared_num is invariant here.
+  const size_t remote_shared_num =
+      static_cast<size_t>(full_info.remote_shared_num);
+  CHECK_GE(win_begin, remote_shared_num)
+      << "P transfer cursor slid below D-side shared prefix, request_id="
+      << full_info.request_id << ", win_begin=" << win_begin
+      << ", remote_shared_num=" << remote_shared_num;
 
   const size_t stable_end = static_cast<size_t>(seq_len / block_size);
   *advanced_transfer_block_idx =
       std::max(next_transfer_block_idx, std::min(stable_end, map_end));
 
-  if (win_begin >= map_end) {
+  // Early-return before computing remote_end: when the current chunk stops
+  // inside the D-side shared prefix, map_end can be less than remote_shared_num
+  // and the (map_end - remote_shared_num) subtraction below would underflow
+  // size_t. There is nothing to transfer in that case anyway.
+  if (win_begin >= map_end || map_end <= remote_shared_num) {
     return info;
   }
+
+  const size_t remote_end = (map_end - remote_shared_num) * remote_stride;
+  CHECK_GE(util::align_up(remote_size, remote_stride), remote_end)
+      << "remote block coverage shortage, request_id=" << full_info.request_id
+      << ", remote_size=" << remote_size << ", remote_end=" << remote_end
+      << ", remote_stride=" << remote_stride
+      << ", remote_shared_num=" << remote_shared_num;
 
   std::vector<size_t> remote_idxs;
   const size_t block_cnt = map_end - win_begin;
@@ -287,7 +304,8 @@ TransferKVInfo BatchInputBuilder::build_step_transfer_info(
   for (size_t local_idx = win_begin; local_idx < map_end; ++local_idx) {
     info.local_blocks_ids.emplace_back(local_block_ids[local_idx]);
     for (size_t offset = 0; offset < remote_stride; ++offset) {
-      const size_t remote_idx = local_idx * remote_stride + offset;
+      const size_t remote_idx =
+          (local_idx - remote_shared_num) * remote_stride + offset;
       if (remote_idx >= full_info.remote_blocks_ids.size()) {
         if (remote_stride > 1) {
           break;
@@ -348,10 +366,21 @@ KVBlockTransferGroup BatchInputBuilder::build_group_step_transfer(
     if (local_block_id < 0) {
       continue;
     }
+    // Skip positions where the remote side sent a -1 sentinel: those
+    // correspond to slid-out SWA slots on D, whose ids are meaningless.
+    // P still holds a valid local block there but the transfer would land
+    // in undefined memory. Both sides slide the window identically, so
+    // this branch normally coincides with the local-invalid branch above.
+    // Remote comes in as int32 via proto and is stored zero-extended in the
+    // uint64 struct field, so a negative sentinel round-trips to the low
+    // 32 bits being all-ones.
+    const uint64_t remote_block_id = full_group.remote_blocks_ids[local_idx];
+    if (static_cast<int32_t>(remote_block_id) < 0) {
+      continue;
+    }
     step_group.local_blocks_ids.emplace_back(
         static_cast<uint64_t>(local_block_id));
-    step_group.remote_blocks_ids.emplace_back(
-        full_group.remote_blocks_ids[local_idx]);
+    step_group.remote_blocks_ids.emplace_back(remote_block_id);
   }
   return step_group;
 }
@@ -1009,8 +1038,18 @@ void BatchInputBuilder::setup_kv_cache_info(
       step_info.request_id = transfer_kv_info->request_id;
       step_info.dp_rank = transfer_kv_info->dp_rank;
       step_info.remote_instance_info = transfer_kv_info->remote_instance_info;
-      step_info.local_linear_state_ids =
-          transfer_kv_info->local_linear_state_ids;
+      // Populate the sender-side linear-state slot id on demand from the
+      // sequence. Transfer builders never carry this forward from the
+      // scheduler (the field on TransferKVInfo is initialized empty), so
+      // deriving it here at build time keeps the P->D transport aligned
+      // with the D response, which advertises the same slot via
+      // Sequence::get_recurrent_state_slot_id() in disagg_pd_service_impl.
+      const int32_t local_recurrent_slot =
+          sequence->get_recurrent_state_slot_id();
+      if (local_recurrent_slot >= 0) {
+        step_info.local_linear_state_ids.emplace_back(
+            static_cast<uint64_t>(local_recurrent_slot));
+      }
       step_info.remote_linear_state_ids =
           transfer_kv_info->remote_linear_state_ids;
       for (const auto& full_group : transfer_kv_info->block_transfer_groups) {
@@ -1113,6 +1152,17 @@ void BatchInputBuilder::setup_kv_cache_info(
         seq_len,
         static_cast<uint32_t>(block_size),
         &advanced_transfer_block_idx);
+    // Populate the sender-side linear-state slot id on demand from the
+    // sequence (see the grouped path above for the rationale). Uses the
+    // same helper as the D-side response so both sides agree on slot id.
+    if (step_info.local_linear_state_ids.empty()) {
+      const int32_t local_recurrent_slot =
+          sequence->get_recurrent_state_slot_id();
+      if (local_recurrent_slot >= 0) {
+        step_info.local_linear_state_ids.emplace_back(
+            static_cast<uint64_t>(local_recurrent_slot));
+      }
+    }
     sequence->kv_state().advance_transfer_block_idx(
         advanced_transfer_block_idx);
     if (!step_info.local_blocks_ids.empty()) {

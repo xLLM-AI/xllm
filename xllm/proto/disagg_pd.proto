@@ -113,6 +113,14 @@ message DisaggResponse {
   // Group-aware block allocation. group_id is defined by the cache layout and
   // is opaque to the PD protocol.
   repeated KVBlockGroup kv_block_groups = 20;
+
+  // Flat KV counterpart of KVBlockGroup.remote_shared_num: the number of
+  // leading blocks the D side already holds from its own prefix cache under
+  // BlockType::KV. P advances its per-sequence transfer cursor to this value
+  // so it starts pushing at the first block D actually needs. Zero when the
+  // request did not hit the D-side cache; also zero on responses from
+  // engines that do not populate it (backward-compatible default).
+  uint32 remote_shared_num = 21;
 }
 
 // XTensor mode: offsets for one layer
@@ -127,6 +135,11 @@ message KVBlockGroup {
   int32 group_id = 1;
   reserved 2;
   repeated int32 block_ids = 3;
+  // Number of leading blocks the D side already holds from its own prefix
+  // cache. P advances its per-group transfer cursor to this value so it
+  // starts pushing at the first block that D actually needs. Zero when D
+  // has no shared prefix (e.g. DECODE-side SWA prefix cache is off by role).
+  uint32 remote_shared_num = 4;
 }
 
 // Deprecated: Use DisaggGenerationsRequest instead

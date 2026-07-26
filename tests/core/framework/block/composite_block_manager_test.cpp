@@ -20,6 +20,7 @@ limitations under the License.
 #include <set>
 
 #include "framework/block/block_utils.h"
+#include "framework/config/scheduler_config.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
 #include "framework/request/stopping_checker.h"
@@ -728,6 +729,106 @@ TEST(CompositeBlockManagerTest, Dsv4PrefixCacheExactRepeatPopsOneC128) {
             num_tokens - kBlockSizeRatio128);
 
   manager.deallocate_for_sequence(&seq_hit);
+}
+
+// DSV4 D-side (instance_is_decode=true) should skip the SWA leaf's prefix
+// cache entirely: no shared blocks on SWA even when the same prompt was
+// previously seeded. C4 / C128 continue to hit because the role predicate
+// only masks SWA / LINEAR / SINGLE on the DECODE side. This is the mirror of
+// Dsv4PrefixCacheHitOnRepeatedPrefix under the DECODE role.
+TEST(CompositeBlockManagerTest, DecodeRoleSkipsSwaPrefixCache) {
+  const uint32_t base_num_blocks = 4096;
+  const uint32_t window_size = 4 * kBaseBlockSize;
+  const uint32_t max_seqs_per_batch = 4;
+  BlockManager::Options opts = MakeCompositeOptions(
+      base_num_blocks, kBaseBlockSize, window_size, max_seqs_per_batch);
+  opts.max_tokens_per_batch(3 * kBlockSizeRatio128);
+  // First seed the cache under a PREFILL role so all three leaves publish
+  // their blocks -- then swap in a DECODE-role composite that shares the
+  // hash space via the same leaf construction path.
+  ASSERT_TRUE(opts.enable_prefix_cache());
+  {
+    CompositeBlockManager prefill_manager(build_composite_leaves(opts));
+    const size_t num_tokens = 2 * kBlockSizeRatio128;
+    const std::vector<int32_t> prompt(num_tokens, 7);
+    Sequence seq_seed = MakeTestSequence(0, prompt);
+    ASSERT_TRUE(prefill_manager.allocate_sequence(&seq_seed, num_tokens));
+    seq_seed.kv_state().incr_kv_cache_tokens_num(num_tokens);
+    prefill_manager.deallocate_for_sequence(&seq_seed);
+    seq_seed.reset();
+
+    // Under the PREFILL role, SWA/C4/C128 all hit.
+    Sequence seq_p_hit = MakeTestSequence(1, prompt);
+    prefill_manager.allocate_shared_for_sequence(&seq_p_hit);
+    EXPECT_GT(seq_p_hit.kv_state().shared_blocks_num(BlockType::SWA), 0u);
+    EXPECT_GT(seq_p_hit.kv_state().shared_blocks_num(BlockType::C4), 0u);
+    EXPECT_GT(seq_p_hit.kv_state().shared_blocks_num(BlockType::C128), 0u);
+    prefill_manager.deallocate_for_sequence(&seq_p_hit);
+  }
+
+  // Under DECODE role: separate manager (its own SWA leaf ⇒ own cache), so a
+  // fresh prompt lookup must return zero SWA / zero C4 / zero C128. The
+  // point of this test is that CONSTRUCTION does not FATAL and the SWA leaf
+  // is skipped at classify + probe time; the composite still classifies as
+  // SWA_COMPRESSED (C4+C128 remain prefix-cache-on).
+  BlockManager::Options decode_opts = opts;
+  decode_opts.instance_is_decode(true);
+  CompositeBlockManager decode_manager(build_composite_leaves(decode_opts));
+  const size_t num_tokens = 2 * kBlockSizeRatio128;
+  const std::vector<int32_t> prompt(num_tokens, 7);
+  Sequence seq_d = MakeTestSequence(2, prompt);
+  decode_manager.allocate_shared_for_sequence(&seq_d);
+  // SWA prefix cache is off on DECODE ⇒ never hits.
+  EXPECT_EQ(seq_d.kv_state().shared_blocks_num(BlockType::SWA), 0u);
+  // C4/C128 caches are fresh (per-manager) so also zero here, but the intent
+  // is: the participate predicate keeps them enabled so future hits work.
+  EXPECT_EQ(seq_d.kv_state().shared_blocks_num(BlockType::C4), 0u);
+  EXPECT_EQ(seq_d.kv_state().shared_blocks_num(BlockType::C128), 0u);
+  // No safe_hit_tokens change either (nothing mounted).
+  EXPECT_EQ(seq_d.kv_state().kv_cache_tokens_num(), 0u);
+
+  decode_manager.deallocate_for_sequence(&seq_d);
+}
+
+// Qwen3.5 GDN D-side (instance_is_decode=true, LINEAR present): the LINEAR
+// leaf should stop advertising prefix cache, so build_composite_leaves
+// classifies FLAT_KV_LINEAR down to FLAT_KV and no restore-source mount
+// happens. Guards against a null-deref regression inside
+// LinearStateBlockManager::allocate_for_sequence when the checkpoint index
+// is disabled by role.
+TEST(CompositeBlockManagerTest, DecodeRoleSkipsLinearPrefixCache) {
+  // LinearStateBlockManager pulls its chunk stride from the global scheduler
+  // config, so pin a valid stride for this test and restore it after.
+  const int32_t original_chunk_stride =
+      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
+  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 128;
+
+  const uint32_t block_size = 128;
+  const uint32_t num_blocks = 128;
+  BlockManager::Options opts;
+  opts.num_blocks(num_blocks)
+      .block_size(block_size)
+      .enable_linear_state(true)
+      .linear_state_num_slots(64)
+      .enable_prefix_cache(true)
+      .instance_is_decode(true);
+  // No manager_types → flat KV shape. LINEAR is added on top by
+  // build_composite_leaves.
+  CompositeBlockManager manager(build_composite_leaves(opts));
+
+  const std::vector<int32_t> prompt(4 * block_size, 5);
+  Sequence seq = MakeTestSequence(0, prompt);
+  ASSERT_TRUE(manager.allocate_sequence(&seq, prompt.size()));
+  seq.kv_state().incr_kv_cache_tokens_num(prompt.size());
+
+  // Under DECODE role LINEAR prefix cache is off, so no pending_save can turn
+  // into a restore source and allocate_for_sequence stays on the fresh-slot
+  // path.
+  EXPECT_FALSE(seq.has_linear_restore_src_block());
+  manager.deallocate_for_sequence(&seq);
+
+  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
+      original_chunk_stride;
 }
 
 }  // namespace xllm

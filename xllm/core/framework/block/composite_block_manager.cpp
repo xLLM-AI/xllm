@@ -41,6 +41,40 @@ uint32_t ceil_div(uint32_t numerator, uint32_t denominator) {
   return (numerator + denominator - 1) / denominator;
 }
 
+// Whether a leaf of the given BlockType participates in prefix cache under
+// the current role. On the PREFILL side (instance_is_decode == false) every
+// cache-bearing leaf participates. On the DECODE side we skip SWA and
+// LINEAR because the D forward never reads their shared prefix before P
+// overwrites it -- SWA hits carry gap-invalid placeholders that would break
+// the grouped-response CHECK, and LINEAR restore is a net waste (D does no
+// prefill). SINGLE has never had a prefix cache and stays out on both sides.
+//
+// The same predicate governs the set of leaves that will participate in
+// future host offload (see xllm_docs/pd_d_side_skip_swa_linear_prefix_cache.md
+// §11) -- keep the two decisions aligned by reusing this function when host
+// offload grows past BlockType::KV.
+bool leaf_participates_in_prefix_cache(BlockType type,
+                                       bool instance_is_decode) {
+  if (!instance_is_decode) {
+    return true;
+  }
+  switch (type) {
+    case BlockType::KV:
+    case BlockType::C4:
+    case BlockType::C128:
+      return true;
+    case BlockType::SWA:
+    case BlockType::LINEAR:
+    case BlockType::SINGLE:
+      return false;
+  }
+  // Fail loudly on unhandled BlockType. Falling back to false would silently
+  // disable prefix cache for the new leaf across both P and D, and every
+  // request would end up re-prefilling its prompt with no visible error.
+  LOG(FATAL) << "leaf_participates_in_prefix_cache: unhandled BlockType="
+             << static_cast<int32_t>(type);
+}
+
 // Wrap the leaf in a concurrency adapter when sequence-level calls may run
 // off the scheduler thread (disagg PD / kvcache store / host-offload).
 std::unique_ptr<BlockManager> maybe_concurrent(
@@ -84,12 +118,25 @@ std::map<BlockType, CompositeBlockManager::LeafEntry> build_composite_leaves(
     int32_t dp_rank) {
   std::map<BlockType, CompositeBlockManager::LeafEntry> leaves;
 
+  const bool prefix_cache_on = options.enable_prefix_cache();
+  const bool is_decode = options.instance_is_decode();
+  const bool linear_participates =
+      leaf_participates_in_prefix_cache(BlockType::LINEAR, is_decode);
+  const bool swa_participates =
+      leaf_participates_in_prefix_cache(BlockType::SWA, is_decode);
+  const bool c4_participates =
+      leaf_participates_in_prefix_cache(BlockType::C4, is_decode);
+  const bool c128_participates =
+      leaf_participates_in_prefix_cache(BlockType::C128, is_decode);
+  const bool kv_participates =
+      leaf_participates_in_prefix_cache(BlockType::KV, is_decode);
+
   // LINEAR resource leaf (Qwen3.5-Next GDN). Additive on top of the KV
   // family: a GDN model holds both KV and LINEAR. Not an admission leaf
   // (block_size==1 would misreport pool capacity). Scheduler-thread only, so
-  // no ConcurrentBlockManagerImpl wrap. supports_prefix_cache=true so
-  // probe_prefix_leaves picks it up; the FLAT_KV_LINEAR trimmer pulls out
-  // the deepest checkpoint as a restore source.
+  // no ConcurrentBlockManagerImpl wrap. supports_prefix_cache follows the
+  // role predicate; on DECODE it is off so probe_prefix_leaves skips the
+  // leaf and the composite classifies FLAT_KV_LINEAR down to FLAT_KV.
   if (options.enable_linear_state()) {
     CHECK_GT(options.linear_state_num_slots(), 0)
         << "linear_state_num_slots must be set when linear state is enabled";
@@ -97,14 +144,16 @@ std::map<BlockType, CompositeBlockManager::LeafEntry> build_composite_leaves(
         SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
     CHECK_GT(chunk_stride, 0)
         << "max_tokens_per_chunk_for_prefill must be positive for linear state";
+    const bool linear_prefix_cache = prefix_cache_on && linear_participates;
     leaves.emplace(
         BlockType::LINEAR,
         CompositeBlockManager::LeafEntry{
             std::make_unique<LinearStateBlockManager>(
                 static_cast<uint32_t>(options.linear_state_num_slots()),
-                chunk_stride),
+                chunk_stride,
+                linear_prefix_cache),
             /*participates_in_admission=*/false,
-            /*supports_prefix_cache=*/options.enable_prefix_cache()});
+            /*supports_prefix_cache=*/linear_prefix_cache});
   }
 
   if (options.manager_types().empty()) {
@@ -112,13 +161,15 @@ std::map<BlockType, CompositeBlockManager::LeafEntry> build_composite_leaves(
     // the flat (non-xtensor) KV leaf.
     BlockManager::Options kv_opts = options;
     kv_opts.block_type(BlockType::KV);
+    const bool kv_prefix_cache =
+        prefix_cache_on && !options.enable_xtensor() && kv_participates;
+    kv_opts.enable_prefix_cache(kv_prefix_cache);
     leaves.emplace(
         BlockType::KV,
         CompositeBlockManager::LeafEntry{
             maybe_concurrent(make_kv_leaf(kv_opts, dp_rank), options),
             /*participates_in_admission=*/true,
-            /*supports_prefix_cache=*/
-            options.enable_prefix_cache() && !options.enable_xtensor()});
+            /*supports_prefix_cache=*/kv_prefix_cache});
     return leaves;
   }
 
@@ -143,19 +194,22 @@ std::map<BlockType, CompositeBlockManager::LeafEntry> build_composite_leaves(
           << " for composite BlockManagerImpl sub-manager";
       const BlockType key =
           compress_ratio == 4 ? BlockType::C4 : BlockType::C128;
+      const bool compressed_participates =
+          key == BlockType::C4 ? c4_participates : c128_participates;
+      const bool compressed_prefix_cache =
+          prefix_cache_on && compressed_participates;
       opts.block_type(key)
-          .enable_prefix_cache(options.enable_prefix_cache())
+          .enable_prefix_cache(compressed_prefix_cache)
           .hasher_type(options.hasher_type());
       // C4/C128: full-history attention (no window), so hits must form a
       // solid left-to-right prefix. The default BlockManagerImpl probe is
       // exactly right. Cross-leaf min happens in the composite.
-      leaves.emplace(
-          key,
-          CompositeBlockManager::LeafEntry{
-              maybe_concurrent(std::make_unique<BlockManagerImpl>(opts),
-                               options),
-              /*participates_in_admission=*/true,
-              /*supports_prefix_cache=*/options.enable_prefix_cache()});
+      leaves.emplace(key,
+                     CompositeBlockManager::LeafEntry{
+                         maybe_concurrent(
+                             std::make_unique<BlockManagerImpl>(opts), options),
+                         /*participates_in_admission=*/true,
+                         /*supports_prefix_cache=*/compressed_prefix_cache});
     } else if (type == kManagerTypeSlidingWindowBlockManager) {
       const uint32_t swa_blocks_per_seq = options.swa_blocks_per_seq();
       CHECK_GT(swa_blocks_per_seq, 0u) << "swa_blocks_per_seq must be positive";
@@ -169,11 +223,12 @@ std::map<BlockType, CompositeBlockManager::LeafEntry> build_composite_leaves(
       // Slack fits the peak "old blocks not yet released + new tail".
       const uint32_t swa_total_blocks =
           swa_blocks_per_seq * max_seqs + burst_blocks + max_seqs + 2;
+      const bool swa_prefix_cache = prefix_cache_on && swa_participates;
       opts.num_blocks(swa_total_blocks)
           .swa_blocks_per_seq(swa_blocks_per_seq)
           .sliding_window_size(sliding_window_size)
           .block_type(BlockType::SWA)
-          .enable_prefix_cache(options.enable_prefix_cache())
+          .enable_prefix_cache(swa_prefix_cache)
           .hasher_type(options.hasher_type());
       // SWA is not an admission leaf (pool sized by ring, not token budget)
       // but serves gap-tolerant prefix cache.
@@ -183,7 +238,7 @@ std::map<BlockType, CompositeBlockManager::LeafEntry> build_composite_leaves(
               maybe_concurrent(
                   std::make_unique<SlidingWindowBlockManager>(opts), options),
               /*participates_in_admission=*/false,
-              /*supports_prefix_cache=*/options.enable_prefix_cache()});
+              /*supports_prefix_cache=*/swa_prefix_cache});
     } else {
       LOG(FATAL) << "Unknown manager_type " << type;
     }
@@ -212,13 +267,25 @@ CompositeBlockManager::classify_leaf_combination(
   const bool has_c128 = has_prefix(BlockType::C128);
   const bool has_linear = has_prefix(BlockType::LINEAR);
 
-  if (has_swa || has_c4 || has_c128) {
-    CHECK(has_swa && has_c4 && has_c128)
-        << "SWA_COMPRESSED requires all of {SWA, C4, C128}; got SWA=" << has_swa
-        << " C4=" << has_c4 << " C128=" << has_c128;
+  // SWA_COMPRESSED requires C4 + C128 to make sense (a compressed shape with
+  // only one granularity is not a shape we ship). SWA is optional here on
+  // purpose: the DECODE role turns off SWA prefix cache via the role
+  // predicate, so has_swa is false while C4/C128 stay on -- trim /
+  // classify still route through this branch, but probes will be missing
+  // the SWA entry and trim_swa_compressed guards accordingly.
+  if (has_c4 || has_c128) {
+    CHECK(has_c4 && has_c128)
+        << "SWA_COMPRESSED requires both C4 and C128 with prefix cache on; "
+        << "got C4=" << has_c4 << " C128=" << has_c128;
     CHECK(!has_kv) << "SWA_COMPRESSED must not carry a KV leaf";
     CHECK(!has_linear) << "SWA_COMPRESSED must not carry a LINEAR leaf";
     return LeafCombination::SWA_COMPRESSED;
+  }
+  if (has_swa) {
+    // A prefix-cache-on SWA leaf paired with no compressed leaves is not a
+    // shape we build; the classifier surfaces the misconfiguration loudly
+    // instead of silently mounting garbage.
+    LOG(FATAL) << "SWA prefix cache is on but neither C4 nor C128 is present";
   }
   if (has_kv) {
     return has_linear ? LeafCombination::FLAT_KV_LINEAR

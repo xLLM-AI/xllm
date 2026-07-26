@@ -216,6 +216,18 @@ class Sequence final {
     return kv_state_.get_linear_block_id();
   }
 
+  // Recurrent state slot for models with sequence-scoped CONV/SSM caches.
+  // Prefer the dedicated LINEAR slot (Qwen3.5 GDN, drawn from
+  // LinearStateBlockManager); fall back to the SINGLE resource block id for
+  // legacy models where recurrent state still lives in the SINGLE slot. All
+  // P/D endpoints that advertise or consume the recurrent-state slot id must
+  // use this helper so the sender and receiver agree on which slot is holding
+  // the state.
+  int32_t get_recurrent_state_slot_id() const {
+    const int32_t linear_slot = get_linear_state_slot_id();
+    return linear_slot >= 0 ? linear_slot : get_single_block_id();
+  }
+
   void set_pending_linear_save(const XXH3Key& hash) {
     kv_state_.set_pending_linear_save(hash);
   }
@@ -352,6 +364,11 @@ class Sequence final {
 
   KVCacheState& kv_state() { return kv_state_; }
 
+  // Host-side block state, per BlockType (mirrors kv_state_). Today only
+  // BlockType::KV is populated by HierarchyBlockManagerPool; when host
+  // offload is extended past the flat-KV shape (SWA / C4 / C128), the
+  // additional per-type slots land under the same KVCacheState here without
+  // touching this signature.
   KVCacheState& host_kv_state() { return host_kv_state_; }
 
   // for generated tokens

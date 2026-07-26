@@ -89,6 +89,12 @@ class BlockManager {
     // runtime::Options). Used by CompositeBlockManager to adjust SWA block
     // release accounting.
     PROPERTY(uint32_t, num_speculative_tokens) = 0;
+    // Role flag: true on the DECODE side of disaggregated PD. In that role
+    // the composite skips prefix cache on leaves whose data forward never
+    // reads before P overwrites it (SWA, LINEAR). Same predicate governs
+    // future host offload participation -- see
+    // leaf_participates_in_prefix_cache in composite_block_manager.cpp.
+    PROPERTY(bool, instance_is_decode) = false;
   };
 
   explicit BlockManager(Options options) : options_(options) {}

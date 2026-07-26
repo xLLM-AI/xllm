@@ -45,8 +45,13 @@ class LinearStateBlockManager final : public BlockManagerImpl {
   // chunk), used as block_size for both the slot pool and the prefix-cache hash
   // domain. Defaults to -1 (probe disabled) for block-level unit tests that
   // drive the slot pool directly and never exercise the token-based match().
+  // |enable_prefix_cache| toggles the checkpoint index; when false the leaf
+  // still serves live-slot allocation but skips save-rotation and returns an
+  // empty allocate_shared. Composite drives this via the role-gated predicate
+  // in composite_block_manager.cpp.
   explicit LinearStateBlockManager(uint32_t num_slots,
-                                   int32_t chunk_stride = -1);
+                                   int32_t chunk_stride = -1,
+                                   bool enable_prefix_cache = true);
   ~LinearStateBlockManager() override = default;
 
   // ---- BlockManagerImpl overrides ----

@@ -28,11 +28,12 @@ namespace xllm {
 namespace {
 
 BlockManager::Options make_linear_state_options(uint32_t num_slots,
-                                                int32_t chunk_stride) {
+                                                int32_t chunk_stride,
+                                                bool enable_prefix_cache) {
   BlockManager::Options options;
   options.num_blocks(num_slots);
   options.block_size(chunk_stride);
-  options.enable_prefix_cache(true);
+  options.enable_prefix_cache(enable_prefix_cache);
   options.enable_disagg_pd(false);
   options.block_type(BlockType::LINEAR);
   return options;
@@ -41,8 +42,11 @@ BlockManager::Options make_linear_state_options(uint32_t num_slots,
 }  // namespace
 
 LinearStateBlockManager::LinearStateBlockManager(uint32_t num_slots,
-                                                 int32_t chunk_stride)
-    : BlockManagerImpl(make_linear_state_options(num_slots, chunk_stride)) {
+                                                 int32_t chunk_stride,
+                                                 bool enable_prefix_cache)
+    : BlockManagerImpl(make_linear_state_options(num_slots,
+                                                 chunk_stride,
+                                                 enable_prefix_cache)) {
   CHECK_GT(num_slots, 1u)
       << "linear-state leaf needs at least one usable slot (plus padding)";
   CHECK_GT(chunk_stride, 0)
@@ -69,9 +73,13 @@ LinearStateBlockManager::allocate_for_sequence(Sequence* seq,
   // never surface as an allocation failure, or the composite would roll back
   // the whole sequence.
   const std::optional<XXH3Key> pending_hash = seq->take_pending_linear_save();
-  const bool should_apply_save = pending_hash.has_value() &&
-                                 seq->has_linear_state_slot() &&
-                                 !prefix_cache_->contains(*pending_hash);
+  // When prefix cache is off (DECODE role for LINEAR) the checkpoint index
+  // is not constructed; skip save-rotation entirely. batch_input_builder
+  // still may set a pending hash from an earlier PREFILL role transition,
+  // so guard here instead of assuming pending_hash stays nullopt.
+  const bool should_apply_save =
+      prefix_cache_ != nullptr && pending_hash.has_value() &&
+      seq->has_linear_state_slot() && !prefix_cache_->contains(*pending_hash);
   Block new_live_slot = should_apply_save ? allocate() : Block();
   if (new_live_slot.is_valid()) {
     // Pin the warm slot into the checkpoint index (refcount+1) and mount a
@@ -150,7 +158,7 @@ std::vector<Block> LinearStateBlockManager::allocate_shared(
   // restore would look for a checkpoint that need not be there; on a miss the
   // sequence cold-starts on a non-empty KV prefix and its recurrent state is
   // corrupt.
-  if (token_ids.size() == 0) {
+  if (token_ids.size() == 0 || prefix_cache_ == nullptr) {
     return {};
   }
   return prefix_cache_->match(token_ids.slice(0, token_ids.size() - 1),

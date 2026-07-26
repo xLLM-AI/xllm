@@ -520,7 +520,13 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
   const int32_t block_size = static_cast<int32_t>(kv_cache_cap.block_size());
   const bool enable_gdn_attention = has_linear_attention_layers(args_);
 
-  if (options_.enable_prefix_cache() && enable_gdn_attention) {
+  // DECODE-side skips LINEAR prefix cache by role (see
+  // composite_block_manager.cpp::leaf_participates_in_prefix_cache), so the
+  // chunked-prefill + chunk-stride guards below are only meaningful for
+  // PREFILL / MIX. On DECODE the linear-state cache is disabled anyway and
+  // pd_launch.sh legitimately sets --enable_chunked_prefill=false.
+  const bool is_decode = options_.instance_role() == InstanceRole::DECODE;
+  if (options_.enable_prefix_cache() && enable_gdn_attention && !is_decode) {
     const auto& scheduler_config = ::xllm::SchedulerConfig::get_instance();
     CHECK(scheduler_config.enable_chunked_prefill())
         << "Linear-attention prefix cache requires block-aligned chunked "
@@ -561,7 +567,11 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .slot_size(kv_cache_cap.slot_size())
       .model_id(options_.model_id())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
-      .num_speculative_tokens(options_.num_speculative_tokens());
+      .num_speculative_tokens(options_.num_speculative_tokens())
+      // DECODE-side prefix cache participation is per-leaf and gated by the
+      // predicate in composite_block_manager.cpp. P and MIX are treated
+      // identically (both admit prefix cache on every leaf).
+      .instance_is_decode(options_.instance_role() == InstanceRole::DECODE);
   if (enable_gdn_attention) {
     // The unified linear-state slot pool spans all physical slots [0, N);
     // id 0 is reserved as padding and ids [1, N) serve live and checkpoint
