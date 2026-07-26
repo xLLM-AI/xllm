@@ -15,6 +15,7 @@ limitations under the License.
 
 #include <c10/core/DeviceType.h>
 #include <glog/logging.h>
+#include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/torch_npu.h>
 
@@ -38,6 +39,12 @@ namespace {
 
 constexpr int32_t kTokenSpecializationMin = 2;
 constexpr int32_t kTokenSpecializationStep = 2;
+
+void record_tensor_stream(const torch::Tensor& tensor,
+                          const c10_npu::NPUStream& stream) {
+  c10_npu::NPUCachingAllocator::recordStream(tensor.storage().data_ptr(),
+                                             stream);
+}
 
 #include XLLM_TL_SPLIT_QKV_RMSNORM_MROPE_REGISTRY_INC
 
@@ -350,7 +357,8 @@ split_qkv_rmsnorm_mrope(const torch::Tensor& qkvg,
       << "TileLang split_qkv_rmsnorm_mrope: num_tokens exceeds int32";
 
   const int32_t device_id = qkvg.device().index();
-  aclrtStream stream = c10_npu::getCurrentNPUStream(device_id).stream();
+  const auto npu_stream = c10_npu::getCurrentNPUStream(device_id);
+  aclrtStream stream = npu_stream.stream();
   entry->fn(static_cast<uint8_t*>(qkvg.data_ptr()),
             static_cast<uint8_t*>(q_weight.data_ptr()),
             static_cast<uint8_t*>(k_weight.data_ptr()),
@@ -363,6 +371,20 @@ split_qkv_rmsnorm_mrope(const torch::Tensor& qkvg,
             static_cast<int32_t>(num_tokens),
             eps,
             stream);
+
+  // The TileLang AOT entry launches directly, outside OpCommand.  Tell the
+  // caching allocator that every launch operand remains in use on this stream;
+  // otherwise a temporary may be recycled before the asynchronous kernel has
+  // finished reading or writing it.
+  record_tensor_stream(qkvg, npu_stream);
+  record_tensor_stream(q_weight, npu_stream);
+  record_tensor_stream(k_weight, npu_stream);
+  record_tensor_stream(cos_sin, npu_stream);
+  record_tensor_stream(gather_pattern, npu_stream);
+  record_tensor_stream(q_out_flat, npu_stream);
+  record_tensor_stream(k_out_flat, npu_stream);
+  record_tensor_stream(v_out_flat, npu_stream);
+  record_tensor_stream(gate_out_flat, npu_stream);
 
   return {q_out_flat.view({num_tokens, num_q_heads, head_size}),
           k_out_flat.view({num_tokens, num_kv_heads, head_size}),
