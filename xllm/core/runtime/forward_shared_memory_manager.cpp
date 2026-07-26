@@ -28,7 +28,6 @@ limitations under the License.
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/model_config.h"
-#include "core/framework/config/scheduler_config.h"
 #include "platform/stream.h"
 #if defined(USE_CUDA)
 #include <cuda_runtime_api.h>
@@ -2227,13 +2226,18 @@ inline void initialize_device_buffer_session(ReadContext& context,
 #endif
 
   auto& session = *context.device_session;
-  torch::Tensor host_input_buffer =
-      torch::from_blob(const_cast<char*>(payload_base),
-                       {static_cast<int64_t>(payload_size)},
-                       torch::TensorOptions()
-                           .dtype(torch::kUInt8)
-                           .device(torch::kCPU)
-                           .pinned_memory(/*pinned_memory=*/true));
+  // POSIX shared-memory pages are not pinned merely because TensorOptions says
+  // so. Own a genuinely pinned staging copy and keep it alive with ForwardInput
+  // until the asynchronous H2D has completed.
+  forward_input.input_host_buffer =
+      torch::empty({static_cast<int64_t>(payload_size)},
+                   torch::TensorOptions()
+                       .dtype(torch::kUInt8)
+                       .device(torch::kCPU)
+                       .pinned_memory(/*pinned_memory=*/true));
+  std::memcpy(
+      forward_input.input_host_buffer.data_ptr(), payload_base, payload_size);
+  const torch::Tensor& host_input_buffer = forward_input.input_host_buffer;
 
   auto device_options =
       torch::TensorOptions().dtype(torch::kUInt8).device(device);
@@ -2370,14 +2374,7 @@ inline void deserialize_forward_input_payload(
   read_linear_state_cache_ops(context, input_params.linear_state_cache_ops);
   normalize_linear_state_ids(input_params.embedding.linear_state_ids,
                              input_params.meta.num_sequences);
-  bool defer_linear_state_indices_h2d = false;
-#if defined(USE_NPU)
-  defer_linear_state_indices_h2d =
-      stream != nullptr &&
-      ::xllm::ExecutionConfig::get_instance().enable_graph() &&
-      ::xllm::SchedulerConfig::get_instance().enable_schedule_overlap();
-#endif
-  if (!defer_linear_state_indices_h2d &&
+  if (materialize_device_buffer &&
       !input_params.embedding.linear_state_ids.empty()) {
     input_params.embedding.linear_state_indices =
         torch::tensor(input_params.embedding.linear_state_ids, torch::kInt)
@@ -3152,8 +3149,10 @@ bool ForwardSharedMemoryManager::input_write(const ForwardInput& input) {
   return true;
 }
 
-void ForwardSharedMemoryManager::input_read(ForwardInput& input,
-                                            const torch::Device& device) {
+void ForwardSharedMemoryManager::input_read(
+    ForwardInput& input,
+    const torch::Device& device,
+    bool materialize_device_buffer_on_read) {
   while (true) {
     if (control_ptr_->version != last_version_) {
       last_version_ = control_ptr_->version;
@@ -3168,13 +3167,25 @@ void ForwardSharedMemoryManager::input_read(ForwardInput& input,
   uint64_t total_size;
   read_data(data_ptr, total_size);
   bool materialize_device_buffer = false;
+  bool own_pinned_host_payload = false;
 #if defined(USE_NPU)
-  materialize_device_buffer = true;
+  materialize_device_buffer = materialize_device_buffer_on_read;
+  own_pinned_host_payload = !materialize_device_buffer;
 #elif defined(USE_CUDA)
   materialize_device_buffer = device.type() == torch::kCUDA;
 #elif defined(USE_MLU)
   materialize_device_buffer = device.type() == torch::kPrivateUse1;
 #endif
+  if (own_pinned_host_payload) {
+    input.input_host_buffer =
+        torch::empty({static_cast<int64_t>(total_size)},
+                     torch::TensorOptions()
+                         .dtype(torch::kUInt8)
+                         .device(torch::kCPU)
+                         .pinned_memory(/*pinned_memory=*/true));
+    std::memcpy(input.input_host_buffer.data_ptr(), data_ptr, total_size);
+    data_ptr = static_cast<const char*>(input.input_host_buffer.data_ptr());
+  }
   deserialize_forward_input_payload(data_ptr,
                                     total_size,
                                     input,

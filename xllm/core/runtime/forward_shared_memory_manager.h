@@ -104,7 +104,9 @@ class ForwardSharedMemoryManager : public SharedMemoryManager {
   };
 
   bool input_write(const ForwardInput& input);
-  void input_read(ForwardInput& input, const torch::Device& device);
+  void input_read(ForwardInput& input,
+                  const torch::Device& device,
+                  bool materialize_device_buffer_on_read = true);
   bool raw_output_write(
       const torch::Tensor& next_tokens,
       const torch::Tensor& logprobs,

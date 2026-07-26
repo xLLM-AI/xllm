@@ -315,7 +315,13 @@ void WorkerService::create_polling_shm_thread(
         Timer timer;
         while (true) {
           ForwardInput fwd_input;
-          input_shm_manager->input_read(fwd_input, device_);
+          // NPU graph task updates cannot safely overlap an H2D enqueue from
+          // the SHM polling thread. Keep scheduler overlap, but defer device
+          // materialization to WorkerImpl's ordered prepare stream.
+          const bool defer_graph_overlap_h2d =
+              options_.enable_schedule_overlap() && options_.enable_graph();
+          input_shm_manager->input_read(
+              fwd_input, device_, !defer_graph_overlap_h2d);
           timer.reset();
           // model output variables
           torch::Tensor next_tokens;
