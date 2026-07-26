@@ -100,5 +100,8 @@ MegaMoeExecutionContract make_mega_moe_execution_contract(
     int64_t ep_size,
     bool has_shared_expert);
 
+bool requires_external_dp_gather_for_moe(bool use_mega_moe,
+                                         int64_t dp_size);
+
 }  // namespace layer
 }  // namespace xllm

@@ -1383,7 +1383,8 @@ torch::Tensor FusedMoEImpl::forward(const torch::Tensor& hidden_states,
 }
 
 bool FusedMoEImpl::should_gather_dp_inputs_for_moe() const {
-  return parallel_args_.dp_size() > 1;
+  return requires_external_dp_gather_for_moe(
+      mega_moe_enabled_, parallel_args_.dp_size());
 }
 
 bool FusedMoEImpl::can_use_ep2_dispatch_combine(

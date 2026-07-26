@@ -244,6 +244,18 @@ TEST(MegaMoePolicyTest, MegaMoePreservesGlobalRoutingAndAddsSharedOnce) {
   EXPECT_EQ(contract.shared_output_additions, 1);
 }
 
+TEST(MegaMoePolicyTest, MegaMoeOwnsDistributedTokenExchange) {
+  EXPECT_FALSE(requires_external_dp_gather_for_moe(
+      /*use_mega_moe=*/true, /*dp_size=*/4));
+}
+
+TEST(MegaMoePolicyTest, LegacyKeepsExternalGatherOnlyForDistributedDp) {
+  EXPECT_TRUE(requires_external_dp_gather_for_moe(
+      /*use_mega_moe=*/false, /*dp_size=*/4));
+  EXPECT_FALSE(requires_external_dp_gather_for_moe(
+      /*use_mega_moe=*/false, /*dp_size=*/1));
+}
+
 TEST(MegaMoePolicyTest, LegacyMasksLocalRoutingAndReducesAcrossEp) {
   const MegaMoeDecision decision =
       decide_mega_moe(MegaMoeMode::OFF, supported_capability());

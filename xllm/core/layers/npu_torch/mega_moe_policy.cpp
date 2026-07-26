@@ -151,5 +151,14 @@ MegaMoeExecutionContract make_mega_moe_execution_contract(
       .shared_output_additions = has_shared_expert ? 1 : 0};
 }
 
+bool requires_external_dp_gather_for_moe(bool use_mega_moe,
+                                         int64_t dp_size) {
+  // The legacy expert path needs replicated tokens before local expert
+  // execution. MegaMoe accepts rank-local tokens and owns its EP
+  // dispatch/combine, so gathering first would duplicate communication and
+  // compute the global token set on every rank.
+  return dp_size > 1 && !use_mega_moe;
+}
+
 }  // namespace layer
 }  // namespace xllm
