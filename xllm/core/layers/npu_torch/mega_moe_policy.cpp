@@ -160,5 +160,13 @@ bool requires_external_dp_gather_for_moe(bool use_mega_moe,
   return dp_size > 1 && !use_mega_moe;
 }
 
+bool should_use_mega_moe_for_batch(bool mega_moe_enabled,
+                                   bool is_decode_batch) {
+  // MegaMoe's EP-wide collective improves steady decode. Prefill and mixed
+  // batches retain the legacy collective contract so their first-token tail
+  // is not coupled to cross-DP arrival skew.
+  return mega_moe_enabled && is_decode_batch;
+}
+
 }  // namespace layer
 }  // namespace xllm

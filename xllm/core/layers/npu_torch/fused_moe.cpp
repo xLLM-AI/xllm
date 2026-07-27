@@ -1075,9 +1075,6 @@ torch::Tensor FusedMoEImpl::forward_expert(
     const torch::Tensor& hidden_states,
     const torch::Tensor& router_logits,
     const std::optional<torch::Tensor>& shared_output) {
-  if (mega_moe_enabled_) {
-    return forward_mega_moe(hidden_states, router_logits, shared_output);
-  }
   // prepare the parameters for MoE computation
   torch::IntArrayRef hidden_states_shape = hidden_states.sizes();
   torch::ScalarType hidden_states_dtype = hidden_states.dtype().toScalarType();
@@ -1346,9 +1343,17 @@ torch::Tensor FusedMoEImpl::forward_expert(
 
 torch::Tensor FusedMoEImpl::forward(const torch::Tensor& hidden_states,
                                     const ModelInputParams& input_params) {
+  // MegaMoe's EP-wide collective is valuable in steady decode, but using it
+  // for prefill also couples the first-token tail to cross-DP arrival skew.
+  // Mixed/prefill batches therefore retain the complete legacy communication
+  // contract; only a pure decode batch switches gather/reduce ownership to
+  // MegaMoe. BatchForwardType is authoritative here--tensor shape is not.
+  const bool use_mega_moe = should_use_mega_moe_for_batch(
+      mega_moe_enabled_, input_params.meta.batch_forward_type.is_decode());
   auto input = hidden_states;
   bool need_slice = false;
-  if (should_gather_dp_inputs_for_moe()) {
+  if (requires_external_dp_gather_for_moe(
+          use_mega_moe, parallel_args_.dp_size())) {
     input = parallel_state::gather(input,
                                    parallel_args_.dp_local_process_group_,
                                    input_params.parallel.dp_global_token_nums);
@@ -1369,7 +1374,9 @@ torch::Tensor FusedMoEImpl::forward(const torch::Tensor& hidden_states,
     }
   }
   auto router_logits = gate_(input);
-  auto output = forward_expert(input, router_logits, shared_output);
+  auto output = use_mega_moe
+                    ? forward_mega_moe(input, router_logits, shared_output)
+                    : forward_expert(input, router_logits, shared_output);
 
   if (need_slice) {
     const auto& dp_tokens = input_params.parallel.dp_global_token_nums;

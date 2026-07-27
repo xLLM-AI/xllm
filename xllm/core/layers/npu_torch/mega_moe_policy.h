@@ -103,5 +103,8 @@ MegaMoeExecutionContract make_mega_moe_execution_contract(
 bool requires_external_dp_gather_for_moe(bool use_mega_moe,
                                          int64_t dp_size);
 
+bool should_use_mega_moe_for_batch(bool mega_moe_enabled,
+                                   bool is_decode_batch);
+
 }  // namespace layer
 }  // namespace xllm

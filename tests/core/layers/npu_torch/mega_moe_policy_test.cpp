@@ -256,6 +256,15 @@ TEST(MegaMoePolicyTest, LegacyKeepsExternalGatherOnlyForDistributedDp) {
       /*use_mega_moe=*/false, /*dp_size=*/1));
 }
 
+TEST(MegaMoePolicyTest, UsesMegaMoeOnlyForEnabledPureDecodeBatch) {
+  EXPECT_TRUE(should_use_mega_moe_for_batch(
+      /*mega_moe_enabled=*/true, /*is_decode_batch=*/true));
+  EXPECT_FALSE(should_use_mega_moe_for_batch(
+      /*mega_moe_enabled=*/true, /*is_decode_batch=*/false));
+  EXPECT_FALSE(should_use_mega_moe_for_batch(
+      /*mega_moe_enabled=*/false, /*is_decode_batch=*/true));
+}
+
 TEST(MegaMoePolicyTest, LegacyMasksLocalRoutingAndReducesAcrossEp) {
   const MegaMoeDecision decision =
       decide_mega_moe(MegaMoeMode::OFF, supported_capability());

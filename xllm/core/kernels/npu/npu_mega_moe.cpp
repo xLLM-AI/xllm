@@ -140,10 +140,21 @@ MegaMoeOpApiProvenance inspect_mega_moe_op_api_provenance() {
                                         symbol_library_path(execute));
 }
 
-bool has_mega_moe() {
+namespace {
+
+// Custom OPP paths and loaded symbols are immutable after worker startup.
+// Keep inspect_mega_moe_op_api_provenance() uncached for tests and explicit
+// diagnostics, while avoiding dlsym/dladdr/realpath in every MoE layer.
+const MegaMoeOpApiProvenance& cached_mega_moe_op_api_provenance() {
   static const MegaMoeOpApiProvenance provenance =
       inspect_mega_moe_op_api_provenance();
-  return provenance.compatible;
+  return provenance;
+}
+
+}  // namespace
+
+bool has_mega_moe() {
+  return cached_mega_moe_op_api_provenance().compatible;
 }
 
 std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
@@ -171,7 +182,7 @@ std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
     int64_t dispatch_quant_out_dtype,
     int64_t topo_type,
     int64_t rank_num_per_server) {
-  const auto provenance = inspect_mega_moe_op_api_provenance();
+  const auto& provenance = cached_mega_moe_op_api_provenance();
   TORCH_CHECK(
       provenance.compatible,
       "aclnnMegaMoe custom ABI provenance check failed. Expected both "
