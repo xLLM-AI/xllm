@@ -2204,7 +2204,8 @@ void NpuOneRecBlockLayerImpl::merge_experts_weights() {
                                            /*transpose=*/false);
   CHECK(merged_down.defined()) << "OneRec MoE down experts merge failed.";
   at_weight_tensors_[kInMoeExpertW2Weight] =
-      at_npu::native::npu_format_cast(merged_down, /*format=*/2).contiguous();
+      at_npu::native::npu_format_cast(merged_down, ACL_FORMAT_FRACTAL_NZ)
+          .contiguous();
 
   if (quantize_type_ == "w8a8_dynamic") {
     if (experts_weights_.count("down_proj.weight_offset") > 0) {
