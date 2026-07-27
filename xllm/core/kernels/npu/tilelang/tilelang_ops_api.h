@@ -24,6 +24,9 @@ limitations under the License.
 
 namespace xllm::kernel::npu::tilelang {
 
+torch::Tensor embedding(const torch::Tensor& weight,
+                        const torch::Tensor& token_ids);
+
 // Public TileLang kernel APIs exported to the xLLM NPU runtime.
 //
 // Apply TileLang RoPE kernel in-place on a single input tensor.

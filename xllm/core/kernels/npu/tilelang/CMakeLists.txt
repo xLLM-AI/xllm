@@ -128,6 +128,11 @@ tilelang_register_runtime_kernel(
 )
 
 tilelang_register_runtime_kernel(
+  NAME embedding
+  WRAPPER_SRCS embedding_wrapper.cpp
+)
+
+tilelang_register_runtime_kernel(
   NAME fused_gdn_gating
   WRAPPER_SRCS fused_gdn_gating_wrapper.cpp
 )

@@ -15,6 +15,10 @@ limitations under the License.
 
 #include "word_embedding_impl.h"
 
+#if defined(USE_NPU)
+#include "core/kernels/npu/tilelang/tilelang_ops_api.h"
+#endif
+
 namespace xllm {
 namespace layer {
 
@@ -47,8 +51,16 @@ WordEmbeddingImpl::WordEmbeddingImpl(int64_t num_embeddings,
 // The input to the module is a list of indices, and the output is the
 // corresponding word embeddings.
 torch::Tensor WordEmbeddingImpl::forward(torch::Tensor input) {
-  namespace F = torch::nn::functional;
-  auto output = F::embedding(input, weight_);
+#if defined(USE_NPU)
+  const bool use_tilelang =
+      input.numel() <= 192 && weight_.size(0) == 248320 &&
+      (weight_.size(1) == 2560 || weight_.size(1) == 5120);
+  auto output = use_tilelang
+                    ? xllm::kernel::npu::tilelang::embedding(weight_, input)
+                    : torch::nn::functional::embedding(input, weight_);
+#else
+  auto output = torch::nn::functional::embedding(input, weight_);
+#endif
   if (world_size_ > 1) {
     output = xllm::parallel_state::gather(output, parallel_args_.tp_group_);
   }
