@@ -148,6 +148,11 @@ struct ParallelArgs {
   // cp size
   PROPERTY(int32_t, cp_size) = 1;
 
+  // dcp size
+  PROPERTY(int32_t, dcp_size) = 1;
+
+  PROPERTY(int32_t, cp_kv_cache_interleave_size) = 0;
+
   // Derived: CP rank of the current process within its DP group.
   // rank layout: dp_rank * (cp_size * tp_size) + cp_rank * tp_size + tp_rank
   [[nodiscard]] int32_t cp_rank() const noexcept {
@@ -156,6 +161,28 @@ struct ParallelArgs {
     }
     int32_t tp_sz = world_size_ / dp_size_ / cp_size_;
     return (rank_ % (cp_size_ * tp_sz)) / tp_sz;
+  }
+
+  [[nodiscard]] int32_t dcp_size_effective() const noexcept {
+    return dcp_size_ > 0 ? dcp_size_ : 1;
+  }
+
+  [[nodiscard]] int32_t cp_kv_cache_interleave_size_effective(
+      int32_t block_size) const noexcept {
+    return cp_kv_cache_interleave_size_ > 0 ? cp_kv_cache_interleave_size_
+                                            : block_size;
+  }
+
+  [[nodiscard]] int32_t dcp_rank() const noexcept {
+    if (dcp_size_ <= 1) {
+      return 0;
+    }
+    int32_t tp_sz = world_size_ / dp_size_ / cp_size_;
+    if (tp_sz <= 0 || tp_sz < dcp_size_) {
+      return 0;
+    }
+    int32_t tp_rank = (rank_ % tp_sz);
+    return tp_rank / (tp_sz / dcp_size_);
   }
 
   // KV-cache split width. 0 == "follow cp_size" (legacy). Use
@@ -223,6 +250,7 @@ struct ParallelArgs {
   // rank set, so this temporarily aliases the TP group. Keep a distinct handle
   // for a future orthogonal CP x TP topology with a standalone CP group.
   ProcessGroup* cp_group_ = nullptr;
+  ProcessGroup* dcp_group_ = nullptr;
   ProcessGroup* moe_ep_group_ = nullptr;
   ProcessGroup* moe_tp_group_ = nullptr;
 

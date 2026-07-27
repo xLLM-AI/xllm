@@ -81,5 +81,59 @@ ReduceAsyncCtx launch_reduce(torch::Tensor input, ProcessGroup* process_group) {
   return ctx;
 }
 
+AllGatherAsyncCtx launch_all_gather(const torch::Tensor& input,
+                                    ProcessGroup* process_group) {
+  AllGatherAsyncCtx ctx;
+  if (!process_group || process_group->world_size() <= 1) {
+    ctx.input = input.contiguous();
+    ctx.stacked = ctx.input.unsqueeze(0);
+    return ctx;
+  }
+
+  ctx.input = input.contiguous();
+  auto stacked_shape = ctx.input.sizes().vec();
+  stacked_shape.insert(stacked_shape.begin(), process_group->world_size());
+  ctx.stacked = torch::empty(stacked_shape, ctx.input.options());
+  ctx.work = process_group->allgather_base_async(ctx.input, ctx.stacked);
+  return ctx;
+}
+
+torch::Tensor finish_all_gather(AllGatherAsyncCtx ctx) {
+  if (ctx.work.defined()) {
+    ctx.work->wait();
+  }
+  return ctx.stacked;
+}
+
+AllToAllAsyncCtx launch_all_to_all(const torch::Tensor& input,
+                                   ProcessGroup* process_group) {
+  AllToAllAsyncCtx ctx;
+  if (!process_group || process_group->world_size() <= 1) {
+    ctx.input = input.contiguous();
+    ctx.output = ctx.input;
+    return ctx;
+  }
+
+  const int32_t world_size = process_group->world_size();
+  ctx.input = input.contiguous();
+  CHECK_EQ(ctx.input.size(0) % world_size, 0)
+      << "launch_all_to_all: input dim 0 (" << ctx.input.size(0)
+      << ") must be divisible by world_size (" << world_size << ")";
+  ctx.output = torch::empty_like(ctx.input);
+  process_group->all_to_all_single(ctx.output,
+                                   ctx.input,
+                                   /*output_split_sizes=*/{},
+                                   /*input_split_sizes=*/{},
+                                   /*async_op=*/true,
+                                   &ctx.work);
+  return ctx;
+}
+
+torch::Tensor finish_all_to_all(AllToAllAsyncCtx ctx) {
+  if (ctx.work.defined()) {
+    ctx.work->wait();
+  }
+  return ctx.output;
+}
 }  // namespace parallel_state
 }  // namespace xllm

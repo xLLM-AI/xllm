@@ -37,6 +37,13 @@ def get_torch_mlu_root_path() -> Optional[str]:
     except ImportError:
         return None
 
+def get_torch_mlu_ops_root_path() -> Optional[str]:
+    try:
+        import torch_mlu_ops
+        import os
+        return os.path.dirname(os.path.abspath(torch_mlu_ops.__file__))
+    except ImportError:
+        return None
 
 def get_ixformer_root_path() -> Optional[str]:
     try:
@@ -210,6 +217,7 @@ def set_npu_envs() -> None:
 def set_mlu_envs() -> None:
     set_common_envs()
     os.environ["PYTORCH_MLU_INSTALL_PATH"] = get_torch_mlu_root_path() or ""
+    os.environ["PYTORCH_MLU_OPS_INSTALL_PATH"] = get_torch_mlu_ops_root_path() or ""
 
 
 def set_cuda_envs() -> None:

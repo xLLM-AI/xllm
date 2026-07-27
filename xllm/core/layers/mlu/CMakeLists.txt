@@ -33,6 +33,7 @@ cc_library(
   SRCS
     attention.cpp
     deepseek_v2_attention.cpp
+    deepseek_v2_attention_dcp.cpp
     deepseek_v2_attention_sp.cpp
     deepseek_v2_decoder_layer_impl.cpp
     deepseek_v2_sparse_moe_block.cpp

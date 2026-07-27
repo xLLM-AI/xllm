@@ -44,6 +44,8 @@ class ParallelConfig final {
         {"dp_size",
          "ep_size",
          "cp_size",
+         "dcp_size",
+         "cp_kv_cache_interleave_size",
          "tp_size",
          "sp_size",
          "cfg_size",
@@ -61,6 +63,10 @@ class ParallelConfig final {
   PROPERTY(int32_t, ep_size) = 1;
 
   PROPERTY(int32_t, cp_size) = 1;
+
+  PROPERTY(int32_t, dcp_size) = 1;
+
+  PROPERTY(int32_t, cp_kv_cache_interleave_size) = 0;
 
   // 0 means follow cp_size (legacy KV-split width).
   PROPERTY(int32_t, kv_split_size) = 1;
@@ -85,6 +91,12 @@ class ParallelConfig final {
 
   [[nodiscard]] int32_t kv_split_size_effective() const noexcept {
     return kv_split_size_ > 0 ? kv_split_size_ : cp_size_;
+  }
+
+  [[nodiscard]] int32_t cp_kv_cache_interleave_size_effective(
+      int32_t block_size) const noexcept {
+    return cp_kv_cache_interleave_size_ > 0 ? cp_kv_cache_interleave_size_
+                                            : block_size;
   }
 };
 

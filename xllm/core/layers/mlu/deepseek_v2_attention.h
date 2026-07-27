@@ -178,6 +178,12 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
     return use_replicated_attn_weights() ? full_heads_ : tp_heads_;
   }
 
+  torch::Tensor forward_dcp(const torch::Tensor& positions,
+                            const torch::Tensor& hidden_states,
+                            const AttentionMetadata& attn_metadata,
+                            KVCache& kv_cache,
+                            DsaTopkTransfer* topk_transfer = nullptr);
+
  private:
   bool use_full_replicated_attention_weights_ = false;
   bool use_fused_mla_qkv_ = false;
@@ -185,6 +191,10 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   bool has_indexer_ = false;
   bool has_trans_ = false;
   bool interleaved_ = false;
+  bool dcp_enabled_ = false;
+  int64_t sliding_window_ = -1;
+  int32_t kv_split_rank_ = 0;
+  float attn_scale_ = 1.0f;
   double eps_;
   int64_t qk_head_dim_;
   int64_t v_head_dim_;
@@ -215,6 +225,8 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   std::shared_ptr<RotaryEmbeddingBase> indexer_rotary_emb_;
   Indexer indexer_{nullptr};
   std::unique_ptr<Stream> sp_comm_stream_;
+  ProcessGroup* dcp_group_ = nullptr;
+  int32_t dcp_size_ = 1;
 };
 TORCH_MODULE(DeepseekV2Attention);
 
