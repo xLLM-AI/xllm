@@ -656,4 +656,90 @@ KVCacheCapacity estimate_kv_cache_capacity(
   return kv_cache_cap;
 }
 
+int64_t estimate_speculative_kv_cache_blocks(
+    const KVCacheCapacity& target_kv_cache_cap,
+    const KVCacheCapacity& draft_kv_cache_cap,
+    bool share_device,
+    bool draft_body_uses_tp1) {
+  CHECK_GT(target_kv_cache_cap.cache_size_in_bytes(), 0)
+      << "no memory for target kv cache";
+  CHECK_GT(draft_kv_cache_cap.cache_size_in_bytes(), 0)
+      << "no memory for draft kv cache";
+  CHECK_EQ(target_kv_cache_cap.block_size(), draft_kv_cache_cap.block_size())
+      << "target and draft kv cache block size must be the same";
+
+  if (target_kv_cache_cap.swa_count() > 0) {
+    CHECK_GT(target_kv_cache_cap.n_blocks(), 0)
+        << "no memory for DeepSeek V4 kv cache pools";
+    return target_kv_cache_cap.n_blocks();
+  }
+
+  if (!share_device) {
+    return std::min(target_kv_cache_cap.n_blocks(),
+                    draft_kv_cache_cap.n_blocks());
+  }
+
+  const int64_t block_size = target_kv_cache_cap.block_size();
+  CHECK_GT(block_size, 0) << "kv cache block size must be greater than 0";
+
+  const int64_t cache_size_in_bytes =
+      std::min(target_kv_cache_cap.cache_size_in_bytes(),
+               draft_kv_cache_cap.cache_size_in_bytes());
+  const int64_t linear_cache_size_in_bytes =
+      target_kv_cache_cap.linear_cache_size_in_bytes();
+  CHECK_GT(cache_size_in_bytes, linear_cache_size_in_bytes)
+      << "no memory left for speculative full-attention kv cache after "
+         "reserving target linear state cache, cache_size: "
+      << cache_size_in_bytes
+      << ", linear_cache_size: " << linear_cache_size_in_bytes;
+
+  const int64_t target_full_attention_slot_size =
+      target_kv_cache_cap.slot_size() + target_kv_cache_cap.index_slot_size() +
+      target_kv_cache_cap.scale_slot_size();
+  const int64_t draft_full_attention_slot_size =
+      draft_kv_cache_cap.slot_size() + draft_kv_cache_cap.index_slot_size() +
+      draft_kv_cache_cap.scale_slot_size();
+  if (!draft_body_uses_tp1) {
+    CHECK_LE(draft_full_attention_slot_size, target_full_attention_slot_size)
+        << "draft full-attention kv cache slot size must not exceed target "
+           "slot size because the current speculative worker allocates draft "
+           "KV tensors with the target KVCacheShape";
+  }
+  const int64_t draft_allocated_full_attention_slot_size =
+      draft_body_uses_tp1 ? draft_full_attention_slot_size
+                          : target_full_attention_slot_size;
+  CHECK_GT(target_full_attention_slot_size, 0)
+      << "target full-attention kv cache slot size must be greater than 0";
+  CHECK_GT(draft_allocated_full_attention_slot_size, 0)
+      << "draft full-attention kv cache slot size must be greater than 0";
+
+  const int64_t target_full_attention_layers =
+      std::max<int64_t>(target_kv_cache_cap.num_full_attention_layers(), 1);
+  // Draft model has no linear-attention layers in the current MTP/Eagle path.
+  const int64_t draft_full_attention_layers = draft_kv_cache_cap.n_layers();
+  const int64_t target_full_attention_block_size_in_bytes =
+      block_size *
+      (target_full_attention_layers * (target_kv_cache_cap.slot_size() +
+                                       target_kv_cache_cap.scale_slot_size()) +
+       target_kv_cache_cap.num_indexer_layers() *
+           target_kv_cache_cap.index_slot_size());
+  const int64_t draft_full_attention_block_size_in_bytes =
+      draft_body_uses_tp1
+          ? block_size * (draft_full_attention_layers *
+                              (draft_kv_cache_cap.slot_size() +
+                               draft_kv_cache_cap.scale_slot_size()) +
+                          draft_kv_cache_cap.num_indexer_layers() *
+                              draft_kv_cache_cap.index_slot_size())
+          : block_size * draft_full_attention_layers *
+                draft_allocated_full_attention_slot_size;
+  const int64_t full_attention_block_size_in_bytes =
+      target_full_attention_block_size_in_bytes +
+      draft_full_attention_block_size_in_bytes;
+  CHECK_GT(full_attention_block_size_in_bytes, 0)
+      << "speculative kv cache block size in bytes must be greater than 0";
+
+  return (cache_size_in_bytes - linear_cache_size_in_bytes) /
+         full_attention_block_size_in_bytes;
+}
+
 }  // namespace xllm

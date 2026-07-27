@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <mutex>
 #include <string>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/TCPStore.hpp>
@@ -115,6 +116,24 @@ class ProcessGroup {
 
   virtual std::string hccl_comm_name(bool init_comm = true);
 
+#if defined(USE_NPU)
+  // Initialize the HCCL point-to-point communicators for every peer while
+  // device memory is still available. Runs at most once per process group.
+  virtual void warmup_p2p();
+
+  // batch_isend_irecv: batched point-to-point send/recv over the underlying
+  // ProcessGroupHCCL. The EPLB group carries these operations on the
+  // all-connected HCCS super-node fabric. `op_types` entries must be "send" or
+  // "recv"; each entry pairs with the same-index tensor and remote rank.
+  // Orders each rank pair so one side sends while the other receives, then
+  // returns a work handle that owns any staging buffers. The caller controls
+  // when communication completion and receive copy-back are awaited. NPU-only.
+  virtual c10::intrusive_ptr<c10d::Work> batch_isend_irecv(
+      std::vector<std::string>& op_types,
+      std::vector<torch::Tensor>& tensors,
+      std::vector<int64_t> remote_ranks);
+#endif
+
  private:
   // rank of current process.
   int32_t rank_ = 0;
@@ -125,8 +144,21 @@ class ProcessGroup {
   // device of current process.
   torch::Device device_;
 
+#if defined(USE_NPU)
+  std::once_flag p2p_warmup_flag_;
+#endif
+
  protected:
   void shutdown_backend();
+
+#if defined(USE_NPU)
+  virtual int64_t max_p2p_wave_payload_bytes() const;
+  virtual int32_t synchronize_p2p_staging();
+  virtual c10::intrusive_ptr<c10d::Work>
+  send_p2p(std::vector<torch::Tensor>& tensors, int64_t peer_rank, int32_t tag);
+  virtual c10::intrusive_ptr<c10d::Work>
+  recv_p2p(std::vector<torch::Tensor>& tensors, int64_t peer_rank, int32_t tag);
+#endif
 
 #if defined(USE_NPU) &&         \
     (TORCH_VERSION_MAJOR < 2 || \
