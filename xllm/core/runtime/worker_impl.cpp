@@ -59,8 +59,10 @@ limitations under the License.
 #include "platform/npu/device_capture_lock.h"
 #elif defined(USE_CUDA) || defined(USE_DCU)
 #include "kernels/cuda/cuda_ops_api.h"
-#include "platform/cuda_profiler.h"
 #include "platform/torch_profiler.h"
+#endif
+#if defined(USE_CUDA)
+#include "platform/cuda_profiler.h"
 #endif
 #include "core/distributed_runtime/master.h"
 #include "core/runtime/worker_rendezvous.h"
@@ -1334,12 +1336,14 @@ bool WorkerImpl::update_weights(const std::string& weights_path) {
 }
 
 bool WorkerImpl::start_profile() {
-#if defined(USE_CUDA)
   const auto& cfg = ProfileConfig::get_instance();
+  LOG(INFO) << "Starting profiling with backend: " << cfg.profile_backend();
+#if defined(USE_CUDA)
   if (cfg.profile_backend() == "cuda") {
     // Capture-range only; requires the server to run under nsys.
     return CudaProfiler::get_instance().start();
   }
+#elif defined(USE_DCU)
   // Default "torch" backend records in-process via Kineto. CPU-op capture uses
   // thread-local callbacks, so enable it on the compute thread that runs the
   // forward pass rather than on the RPC handler thread.
@@ -1350,17 +1354,19 @@ bool WorkerImpl::start_profile() {
   });
   return std::move(future).get();
 #else
-  LOG(ERROR) << "Online timeline profiling is only supported on CUDA.";
+  LOG(ERROR) << "Profiling is not supported on this platform.";
   return false;
 #endif
 }
 
 bool WorkerImpl::stop_profile() {
-#if defined(USE_CUDA)
   const auto& cfg = ProfileConfig::get_instance();
+  LOG(INFO) << "Stopping profiling with backend: " << cfg.profile_backend();
+#if defined(USE_CUDA)
   if (cfg.profile_backend() == "cuda") {
     return CudaProfiler::get_instance().stop();
   }
+#elif defined(USE_DCU)
   const std::string profile_dir = cfg.profile_dir();
   const int32_t rank = parallel_args_.rank();
   folly::Promise<bool> promise;
@@ -1371,7 +1377,7 @@ bool WorkerImpl::stop_profile() {
       });
   return std::move(future).get();
 #else
-  LOG(ERROR) << "Online timeline profiling is only supported on CUDA.";
+  LOG(ERROR) << "Profiling is not supported on this platform.";
   return false;
 #endif
 }
