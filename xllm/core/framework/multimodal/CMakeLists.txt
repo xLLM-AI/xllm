@@ -15,6 +15,7 @@ cc_library(
     mm_input.h
     mm_item_state.h
     mm_type.h
+    processor_cache.h
   SRCS
     mm_batch_data.cpp
     mm_codec.cpp
@@ -25,6 +26,7 @@ cc_library(
     mm_handler.cpp
     mm_input.cpp
     mm_type.cpp
+    processor_cache.cpp
   DEPS
     common
     util

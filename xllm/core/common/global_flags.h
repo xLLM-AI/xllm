@@ -61,6 +61,8 @@ DECLARE_bool(enable_in_batch_prefix_cache);
 
 DECLARE_int64(max_encoder_cache_size);
 
+DECLARE_int64(max_processor_cache_items);
+
 DECLARE_uint32(xxh3_128bits_seed);
 
 DECLARE_int32(max_tokens_per_batch);

@@ -34,6 +34,7 @@ limitations under the License.
 #include "framework/chat_template/jinja_chat_template.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
+#include "processors/caching_multimodal_processor.h"
 #include "runtime/xservice_client.h"
 #include "scheduler/scheduler_factory.h"
 #include "server/xllm_server_registry.h"
@@ -108,6 +109,10 @@ VLMMaster::VLMMaster(const Options& options)
       std::make_unique<JinjaChatTemplate>(engine_->tokenizer_args());
   tokenizer_ = engine_->tokenizer()->clone();
   processor_ = create_multimodal_processor(model_args_, tokenizer_);
+  if (options_.max_processor_cache_items() > 0) {
+    processor_ = std::make_unique<CachingMultimodalProcessor>(
+        std::move(processor_), options_.max_processor_cache_items());
+  }
 
   threadpool_ = std::make_unique<ThreadPool>(
       /*num_threads=*/options_.num_request_handling_threads(),

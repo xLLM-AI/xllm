@@ -20,6 +20,7 @@ cc_library(
     processors
   HDRS
     transforms.h
+    caching_multimodal_processor.h
     multimodal_processor.h
     audio_processor.h
     image_processor.h
@@ -41,6 +42,7 @@ cc_library(
     video_processor.h
   SRCS
     transforms.cpp
+    caching_multimodal_processor.cpp
     multimodal_processor.cpp
     clip_image_processor.cpp
     clip_prompt_processor.cpp
