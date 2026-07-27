@@ -418,4 +418,14 @@ folly::SemiFuture<bool> RemoteWorker::stop_profile_async() {
   return future;
 }
 
+folly::SemiFuture<bool> RemoteWorker::switch_mode_async(int32_t target_mode) {
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule(
+      [this, target_mode, promise = std::move(promise)]() mutable {
+        promise.setValue(channel_->switch_mode(target_mode));
+      });
+  return future;
+}
+
 }  // namespace xllm

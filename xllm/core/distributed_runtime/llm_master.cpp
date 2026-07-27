@@ -29,6 +29,9 @@ limitations under the License.
 
 #include "api_service/call.h"
 #include "common/metrics.h"
+#include "core/distributed_runtime/mode_switch_service.h"
+#include "core/framework/config/disagg_pd_config.h"
+#include "core/framework/config/service_config.h"
 #include "core/platform/device_name_utils.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
@@ -102,6 +105,7 @@ LLMMaster::LLMMaster(const Options& options)
       .enable_profile_kv_blocks(options_.enable_profile_kv_blocks())
       .disable_ttft_profiling(options_.disable_ttft_profiling())
       .enable_forward_interruption(options_.enable_forward_interruption())
+      .enable_runtime_cp_dp_switch(options_.enable_runtime_cp_dp_switch())
       .max_global_ttft_ms(options_.max_global_ttft_ms())
       .max_global_tpot_ms(options_.max_global_tpot_ms())
       .server_idx(options_.server_idx())
@@ -112,6 +116,38 @@ LLMMaster::LLMMaster(const Options& options)
   if (options_.enable_service_routing()) {
     auto& instance_info = scheduler_->get_instance_info();
     XServiceClient::get_instance()->register_instance(instance_info);
+  }
+
+  // Single-instance (non-disagg) debug trigger for runtime CP<->DP switch.
+  // In disagg_pd deployments ModeSwitchService is co-hosted on the disagg
+  // brpc server by DisaggPDScheduler::start_rpc_server(). That path never
+  // runs for a plain ContinuousScheduler, so a dual-mode single instance has
+  // no way to receive a SwitchMode RPC. Mount a standalone ModeSwitchService
+  // here so the flip can be driven directly. engine_ is already init'd and
+  // its worker_clients_ are ready (populated in the LLMEngine ctor).
+  if (options_.enable_runtime_cp_dp_switch() && !options_.enable_disagg_pd()) {
+    const int32_t port =
+        ::xllm::DisaggPDConfig::get_instance().disagg_pd_port();
+    std::string host = ::xllm::ServiceConfig::get_instance().host();
+    if (host.empty()) {
+      host = "127.0.0.1";
+    }
+    const std::string addr = host + ":" + std::to_string(port);
+    auto* rpc_server =
+        ServerRegistry::get_instance().register_server("ModeSwitchStandalone");
+    // Pass the ContinuousScheduler so ModeSwitchService can pause the loop
+    // and gate async surfaces around switch_mode + rebuild. Non-disagg
+    // deployments have no dispatch_thread / brpc handler surface, so the
+    // gate is a no-op and only the pause/resume path activates. If the
+    // dynamic_cast returns null (a scheduler_ type that isn't
+    // ContinuousScheduler-derived), fall back to the un-drained path
+    // that was there before.
+    auto* cs = dynamic_cast<ContinuousScheduler*>(scheduler_.get());
+    auto mode_switch = std::make_unique<ModeSwitchService>(
+        static_cast<LLMEngine*>(engine_.get()), cs);
+    if (!rpc_server->start(std::move(mode_switch), addr)) {
+      LOG(ERROR) << "Failed to start standalone ModeSwitchService on " << addr;
+    }
   }
 
   // construct chat template

@@ -164,7 +164,7 @@ bool XServiceClient::init(const std::string& etcd_addr,
   };
   etcd_client_->add_watch(ETCD_XSERVICES_KEY_PREFIX, xservices_func);
 
-  block_manager_pool_ = block_manager_pool;
+  block_manager_pool_.store(block_manager_pool, std::memory_order_release);
 
   initialize_done_ = true;
   return true;
@@ -175,6 +175,14 @@ void XServiceClient::set_scheduler(Scheduler* scheduler) {
 }
 
 void XServiceClient::set_engine(Engine* engine) { engine_ = engine; }
+
+void XServiceClient::set_block_manager_pool(
+    const BlockManagerPool* block_manager_pool) {
+  // Release-store: pairs with the acquire-load in heartbeat(). Callers hold
+  // no lock; heartbeat/reconcile threads are unaffected because they snapshot
+  // the pointer at loop-iteration granularity.
+  block_manager_pool_.store(block_manager_pool, std::memory_order_release);
+}
 
 XServiceClient::~XServiceClient() {
   exited_.store(true);
@@ -286,6 +294,47 @@ void XServiceClient::register_instance(const InstanceInfo& instance_info) {
   LOG(INFO) << "Success register instance to etcd.";
 }
 
+bool XServiceClient::re_register_dp_size(int32_t new_dp_size) {
+  // A runtime CP<->DP flip changes this instance's dp_size. Peers cache
+  // InstanceInfo the first time they query it (DisaggPDScheduler.
+  // check_remote_instance_info: "if already cached, keep it") and never
+  // refresh, so their post-flip relink would build the wrong topology
+  // unless we push the new dp_size back to etcd here. We re-serialize the
+  // JSON we handed etcd at register time (kept in registration_value_)
+  // with the new dp_size, leaving every other field intact.
+  std::string key;
+  std::string value;
+  {
+    std::lock_guard<std::mutex> lock(registration_mutex_);
+    if (registration_key_.empty() || registration_value_.empty()) {
+      LOG(ERROR) << "re_register_dp_size called before register_instance";
+      return false;
+    }
+    nlohmann::json json_val;
+    try {
+      json_val = nlohmann::json::parse(registration_value_);
+    } catch (const std::exception& e) {
+      LOG(ERROR) << "re_register_dp_size: failed to parse cached registration "
+                    "value: "
+                 << e.what();
+      return false;
+    }
+    json_val["dp_size"] = new_dp_size;
+    registration_value_ = json_val.dump();
+    key = registration_key_;
+    value = registration_value_;
+  }
+
+  if (!register_instance_with_retry(key, value)) {
+    LOG(ERROR) << "re_register_dp_size: failed to write updated dp_size="
+               << new_dp_size << " to etcd";
+    return false;
+  }
+  LOG(INFO) << "re_register_dp_size: published dp_size=" << new_dp_size
+            << " to etcd for instance " << instance_name_;
+  return true;
+}
+
 InstanceInfo XServiceClient::get_instance_info(
     const std::string& instance_name) {
   InstanceInfo result;
@@ -346,7 +395,15 @@ void XServiceClient::heartbeat() {
         1000)));
     if (!register_done_.load()) continue;
 
-    if (block_manager_pool_ == nullptr || scheduler_ == nullptr) continue;
+    // Snapshot the pool pointer once per iteration; the writer
+    // (set_block_manager_pool, called from
+    // LLMEngine::rebuild_block_manager_pool during a runtime CP<->DP flip) may
+    // swap it under us at any point. Reading the atomic once and using the
+    // local for the whole iteration keeps this section race-free without
+    // needing a mutex.
+    const BlockManagerPool* pool =
+        block_manager_pool_.load(std::memory_order_acquire);
+    if (pool == nullptr || scheduler_ == nullptr) continue;
 
     brpc::Controller cntl;
     xllm_service::proto::HeartbeatRequest req;
@@ -354,7 +411,7 @@ void XServiceClient::heartbeat() {
     req.set_incarnation_id(incarnation_id_);
 
     req.mutable_load_metrics()->set_gpu_cache_usage_perc(
-        block_manager_pool_->get_gpu_cache_usage_perc());
+        pool->get_gpu_cache_usage_perc());
 
     req.mutable_load_metrics()->set_waiting_requests_num(
         scheduler_->get_waiting_requests_num());

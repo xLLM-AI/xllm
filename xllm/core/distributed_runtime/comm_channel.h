@@ -122,6 +122,12 @@ class CommChannel {
 
   virtual bool stop_profile();
 
+  // Issues SwitchMode RPC against the remote worker. target_mode value
+  // mirrors xllm::DualParallelArgs::Mode (0 = CP_PREFILL, 1 = DP_DECODE).
+  // Returns false on RPC failure, invalid target_mode, or when the
+  // remote worker rejects the flip (e.g. it is in legacy single-mode).
+  virtual bool switch_mode(int32_t target_mode);
+
  protected:
   bool execute_model_with_brpc(
       const ForwardInput& input,

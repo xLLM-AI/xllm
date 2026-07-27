@@ -160,6 +160,15 @@ void WorkerServer::create_server(const runtime::Options& options,
 
   const ParallelArgs* parallel_args = nullptr;
   std::unique_ptr<CollectiveCommunicatorBase> comm;
+  // Holdings for dual-mode (enable_runtime_cp_dp_switch). These stay
+  // empty in legacy single-mode.
+  std::unique_ptr<CollectiveCommunicatorBase> comm_cp_local;
+  std::unique_ptr<CollectiveCommunicatorBase> comm_dp_local;
+  std::unique_ptr<DualParallelArgs> dual_args_local;
+
+  const bool enable_dual_mode =
+      options.enable_runtime_cp_dp_switch() && worker_type != WorkerType::DIT;
+
   if (worker_type == WorkerType::DIT) {
     auto dit_comm =
         std::make_unique<DiTCollectiveCommunicator>(worker_global_rank,
@@ -170,32 +179,133 @@ void WorkerServer::create_server(const runtime::Options& options,
                                                     options.cfg_size(),
                                                     options.vae_size());
     comm = std::move(dit_comm);
-  } else {
+    comm->create_process_groups(master_node_addr, device);
+    parallel_args = comm->parallel_args();
+  } else if (!enable_dual_mode) {
     auto common_comm = std::make_unique<CollectiveCommunicator>(
         worker_global_rank, world_size, dp_size, ep_size, cp_size);
     comm = std::move(common_comm);
+    comm->create_process_groups(master_node_addr, device);
+    parallel_args = comm->parallel_args();
+  } else {
+    // Dual-mode: build two CollectiveCommunicators on different
+    // master_addr port windows, snapshot both ParallelArgs into a
+    // DualParallelArgs, and let WorkerImpl pick active() at runtime.
+    //
+    // Mode mapping. The user-supplied (cp_size, dp_size, tp_size) is
+    // taken as ONE side of the dual; the OTHER side is its swap with
+    // cp_size <-> dp_size and tp_size held constant. This keeps
+    // world_size = cp * dp * tp invariant so the two ParallelArgs
+    // share the same world geometry, which is what HCCL ECM caches and
+    // what the dual_graph_probe_atb run-with-barrier relied on.
+    //
+    // Initial active is whichever side matches the user's input cp/dp.
+    // If the user passed cp_size > 1 we boot into CP_PREFILL mode; if
+    // they passed dp_size > 1 we boot into DP_DECODE mode. (Both > 1
+    // is rejected by MappingNPU::validate already.)
+    //
+    // CRITICAL invariants captured by the v3 probe (see
+    // tests/probes/dual_graph_probe_atb.cpp + DESIGN_DOC_v0.2.md):
+    //   * port stride MUST exceed inner fanout in
+    //     CollectiveCommunicator::create_process_groups (default 256)
+    //   * after each create_process_groups we MUST issue a barrier
+    //     allreduce before continuing -- atb::Comm::CreateHcclComm
+    //     returns asynchronously on this CANN, so a fast rank racing
+    //     ahead can land in the slow-rank fallback path that emits
+    //     commDomain="0" / hccl=null. The probe enforces this with a
+    //     1-element HcclAllReduce; here we rely on the fact that the
+    //     master_node sync_master_node call later gates the dp_args
+    //     consumer the same way for production startup.
+    std::string master_host;
+    int32_t master_port = 0;
+    net::parse_host_port_from_addr(master_node_addr, master_host, master_port);
+    const int32_t cp_port = master_port;
+    const int32_t dp_port = master_port + options.dual_mode_port_stride();
+    const std::string cp_addr = master_host + ":" + std::to_string(cp_port);
+    const std::string dp_addr = master_host + ":" + std::to_string(dp_port);
+
+    LOG(INFO) << "Worker rank=" << worker_global_rank
+              << " dual-mode comm setup: cp_master=" << cp_addr
+              << " dp_master=" << dp_addr << " (user cp=" << cp_size
+              << " dp=" << dp_size
+              << " => CP-side cp=" << std::max(cp_size, dp_size)
+              << " dp=1, DP-side cp=1 dp=" << std::max(cp_size, dp_size) << ")";
+
+    // The "CP" side: cp_size = max(cp, dp), dp_size = 1.
+    // The "DP" side: cp_size = 1,           dp_size = max(cp, dp).
+    // tp_size and ep_size carry over implicitly through world_size.
+    const int32_t paired = std::max(cp_size, dp_size);
+    auto cp_comm = std::make_unique<CollectiveCommunicator>(worker_global_rank,
+                                                            world_size,
+                                                            /*dp_size=*/1,
+                                                            ep_size,
+                                                            /*cp_size=*/paired);
+    cp_comm->create_process_groups(cp_addr, device);
+
+    auto dp_comm = std::make_unique<CollectiveCommunicator>(worker_global_rank,
+                                                            world_size,
+                                                            /*dp_size=*/paired,
+                                                            ep_size,
+                                                            /*cp_size=*/1);
+    dp_comm->create_process_groups(dp_addr, device);
+
+    dual_args_local = std::make_unique<DualParallelArgs>(
+        *cp_comm->parallel_args(),
+        *dp_comm->parallel_args(),
+        cp_size > 1 ? DualParallelArgs::Mode::CP_PREFILL
+                    : DualParallelArgs::Mode::DP_DECODE);
+
+    comm_cp_local = std::move(cp_comm);
+    comm_dp_local = std::move(dp_comm);
+    parallel_args = &dual_args_local->active();
   }
 
-  comm->create_process_groups(master_node_addr, device);
-  parallel_args = comm->parallel_args();
+  // Legacy (single-mode) path: build one process group and use the
+  // single ParallelArgs. Dual-mode already built both cp_comm and
+  // dp_comm above with their own create_process_groups(); skip the
+  // extra call here to avoid duplicate rendezvous.
+  if (!enable_dual_mode) {
+    comm->create_process_groups(master_node_addr, device);
+    parallel_args = comm->parallel_args();
+  }
 
-  ParallelArgs worker_parallel_args = *parallel_args;
-  const int32_t cp_group_size =
-      worker_parallel_args.cp_group_ == nullptr
-          ? 1
-          : worker_parallel_args.cp_group_->world_size();
-  const char* cp_partition_stage =
-      options.cp_size() <= 1
-          ? "disabled"
-          : (Platform::uses_model_cp_partition() ? "model" : "worker");
-  LOG(INFO) << "Worker CP config: cp_size=" << options.cp_size()
-            << ", cp_group_size=" << cp_group_size
-            << ", cp_partition_stage=" << cp_partition_stage
-            << ", instance_role=" << options.instance_role().to_string();
+  // Diagnostic log (from upstream): print CP topology + partition stage.
+  {
+    const ParallelArgs& active_pa =
+        enable_dual_mode ? dual_args_local->active() : *parallel_args;
+    const int32_t cp_group_size =
+        active_pa.cp_group_ == nullptr ? 1 : active_pa.cp_group_->world_size();
+    const char* cp_partition_stage =
+        options.cp_size() <= 1
+            ? "disabled"
+            : (Platform::uses_model_cp_partition() ? "model" : "worker");
+    LOG(INFO) << "Worker CP config: cp_size=" << options.cp_size()
+              << ", cp_group_size=" << cp_group_size
+              << ", cp_partition_stage=" << cp_partition_stage
+              << ", instance_role=" << options.instance_role().to_string()
+              << ", dual_mode=" << enable_dual_mode;
+  }
 
-  std::unique_ptr<Worker> worker = std::make_unique<Worker>(
-      worker_parallel_args, device, options, worker_type);
+  std::unique_ptr<Worker> worker;
+  if (enable_dual_mode) {
+    worker = std::make_unique<Worker>(
+        dual_args_local.get(), device, options, worker_type);
+  } else {
+    worker =
+        std::make_unique<Worker>(*parallel_args, device, options, worker_type);
+  }
   worker_service->set_worker(std::move(worker));
+
+  // Move the dual-mode comm holdings onto WorkerServer so they outlive
+  // this scope. WorkerService holds Worker which holds a non-owning
+  // pointer into dual_parallel_args_; if we let it die here that pointer
+  // would dangle. In legacy single-mode these stay null and `comm` falls
+  // through to the existing local-scope cleanup behavior.
+  if (enable_dual_mode) {
+    comm_cp_ = std::move(comm_cp_local);
+    comm_dp_ = std::move(comm_dp_local);
+    dual_parallel_args_ = std::move(dual_args_local);
+  }
   bool create_shm =
       options.enable_shm() && input_shm_manager && output_shm_manager;
   if (create_shm) {

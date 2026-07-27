@@ -121,7 +121,27 @@ int32_t BlockManagerPool::get_dp_rank(Sequence* sequence) const {
   if (sequence->dp_rank() >= 0) {
     dp_rank = sequence->dp_rank();
   } else {
-    dp_rank = get_manager_with_max_free_blocks();
+    // Round-robin across dp_ranks for the initial assignment. The former
+    // "max free blocks" heuristic packed the first N sequences of a burst
+    // all onto dp_rank=0 (they all saw dp_rank=0 free>=dp_rank=1 free
+    // until dp_rank=0's free drops below), which after a runtime CP<->DP
+    // flip left dp_rank=1 empty. Empty shard forwards run on the fake
+    // token (see worker_impl need_fake_input_for_empty_shard) but the
+    // ATB / DP collective ops in some layers still hang when one shard
+    // is a real N-token batch and the peer only has a synthesized
+    // 1-token filler; balancing at assignment time avoids that path.
+    // Note: RR ignores current free-block imbalance, which is fine as
+    // long as dp_size stays small (world/dp_size); once one manager
+    // fully fills, its allocate() will fail-fast, propagating an
+    // OOM-style rejection back to the scheduler for the caller to
+    // retry rather than silently oversubscribing the busier rank.
+    if (block_managers_.empty()) {
+      dp_rank = 0;
+    } else {
+      const uint64_t idx =
+          next_rr_dp_rank_.fetch_add(1, std::memory_order_relaxed);
+      dp_rank = static_cast<int32_t>(idx % block_managers_.size());
+    }
     sequence->set_dp_rank(dp_rank);
   }
   return dp_rank;

@@ -57,6 +57,11 @@ class WorkerClient {
 
   virtual folly::SemiFuture<bool> stop_profile_async();
 
+  // Runtime CP<->DP switch. target_mode mirrors DualParallelArgs::Mode.
+  // Future resolves to false on RPC failure or if the remote worker
+  // is in legacy single-mode (no DualParallelArgs attached).
+  virtual folly::SemiFuture<bool> switch_mode_async(int32_t target_mode);
+
   virtual std::tuple<int64_t, int64_t> estimate_kv_cache_capacity();
 
   // allocate kv cache. blocking call
