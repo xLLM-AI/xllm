@@ -1,5 +1,14 @@
 include(cc_test)
 
+# dual_parallel_args_test verifies the atomic Mode discriminator on
+# DualParallelArgs. Kept as a source file for reference / hand-run under a
+# CPU environment; not wired into CMake because parallel_args.h under
+# USE_NPU transitively includes xllm_atb_layers/atb which needs the full
+# ATB toolchain, and stubbing all of that just for a header-only test
+# yields more surface area than value. The lopsided_defer_gate_test
+# (tests/core/scheduler/) and atomic_pool_handle_test (tests/core/runtime/)
+# cover the runtime CP<->DP switch's higher-value invariants.
+
 if(USE_NPU)
   cc_test(
     NAME

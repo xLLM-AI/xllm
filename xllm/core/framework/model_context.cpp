@@ -97,6 +97,10 @@ ModelContext ModelContext::with_parallel_args(
   derived.model_id_ = model_id_;
   derived.optimization_config_ = optimization_config_;
   derived.flash_comm1_options_ = flash_comm1_options_;
+  // Forward the optional dual-mode source so derived contexts (used by
+  // some sub-models when they construct nested ModelContexts) keep the
+  // same dual-mode visibility as the parent.
+  derived.dual_parallel_args_ = dual_parallel_args_;
   return derived;
 }
 

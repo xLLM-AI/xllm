@@ -320,11 +320,14 @@ size_t SchedulerPolicy::compute_prefill_tokens(Sequence* seq,
   if (!batch_mode_.enable_chunked_prefill) {
     // Full prefill: compute all remaining tokens.
     size_t num_tokens = seq->num_need_compute_tokens();
-    // CP alignment for full prefill (skip when model handles CP partition).
-    const int32_t worker_cp_size =
-        Platform::uses_model_cp_partition() ? 1 : state.options.cp_size();
-    if (worker_cp_size > 1 && seq->is_prefill_stage() && num_tokens > 0) {
-      const size_t alignment = static_cast<size_t>(worker_cp_size) * 2;
+    // CP alignment for full prefill (skip when model handles CP partition,
+    // and skip after a runtime CP->DP flip which drops live_cp_size to 1).
+    const int32_t live_cp_size =
+        (state.active_dp_size > 1 || Platform::uses_model_cp_partition())
+            ? 1
+            : state.options.cp_size();
+    if (live_cp_size > 1 && seq->is_prefill_stage() && num_tokens > 0) {
+      const size_t alignment = static_cast<size_t>(live_cp_size) * 2;
       num_tokens = ((num_tokens + alignment - 1) / alignment) * alignment;
     }
     return num_tokens;
@@ -337,17 +340,21 @@ size_t SchedulerPolicy::compute_prefill_tokens(Sequence* seq,
   size_t assume_max = std::min(max_tokens_per_chunk, remaining_budget);
   num_tokens = std::min(assume_max, num_tokens);
 
-  // CP-aware chunk alignment.
+  // CP-aware chunk alignment. Same live_cp_size gate as the full-prefill
+  // branch: a runtime CP->DP flip drops the alignment to 1 so the DP path
+  // does not attempt CP-shaped chunking.
   const size_t kv_cache_tokens_num = seq->kv_state().kv_cache_tokens_num();
   const size_t remaining_in_seq = seq->num_tokens() > kv_cache_tokens_num
                                       ? seq->num_tokens() - kv_cache_tokens_num
                                       : 0;
   const int32_t kv_split_for_align =
       ::xllm::ParallelConfig::get_instance().kv_split_size_effective();
-  const int32_t worker_cp_size =
-      Platform::uses_model_cp_partition() ? 1 : options_.cp_size();
+  const int32_t chunk_live_cp_size =
+      (state.active_dp_size > 1 || Platform::uses_model_cp_partition())
+          ? 1
+          : options_.cp_size();
   num_tokens = maybe_align_cp_chunk_tokens(num_tokens,
-                                           worker_cp_size,
+                                           chunk_live_cp_size,
                                            kv_split_for_align,
                                            state.kv_cache_manager->block_size(),
                                            remaining_in_seq);
@@ -367,11 +374,14 @@ bool SchedulerPolicy::allocate_for_prefill(Sequence* seq,
     }
     // Full prefill: allocate for full prompt.
     *actual_tokens = seq->num_need_compute_tokens();
-    // CP alignment (skip when model handles CP partition internally).
-    const int32_t worker_cp_size =
-        Platform::uses_model_cp_partition() ? 1 : state.options.cp_size();
-    if (worker_cp_size > 1 && seq->is_prefill_stage() && *actual_tokens > 0) {
-      const size_t alignment = static_cast<size_t>(worker_cp_size) * 2;
+    // CP alignment (skip when model handles CP partition internally, and
+    // skip after a runtime CP->DP flip which drops live_cp_size to 1).
+    const int32_t live_cp_size =
+        (state.active_dp_size > 1 || Platform::uses_model_cp_partition())
+            ? 1
+            : state.options.cp_size();
+    if (live_cp_size > 1 && seq->is_prefill_stage() && *actual_tokens > 0) {
+      const size_t alignment = static_cast<size_t>(live_cp_size) * 2;
       *actual_tokens =
           ((*actual_tokens + alignment - 1) / alignment) * alignment;
     }

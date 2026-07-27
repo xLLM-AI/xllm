@@ -42,6 +42,15 @@ class BatchFactory {
       std::vector<std::vector<BlockTransferInfo>>* swap_block_transfer_infos =
           nullptr);
 
+  // Update the dp/cp size after a runtime CP<->DP flip. This is a Meyers
+  // singleton, so the size is otherwise fixed at first get_instance() call;
+  // create_batches reads these members on every call, so updating them here is
+  // enough. Must be called from the scheduler loop thread while drained.
+  void set_dp_size(int32_t dp_size, int32_t cp_size = 1) {
+    dp_size_ = dp_size;
+    cp_size_ = cp_size;
+  }
+
  private:
   BatchFactory(int32_t dp_size, int32_t cp_size)
       : dp_size_(dp_size), cp_size_(cp_size) {}

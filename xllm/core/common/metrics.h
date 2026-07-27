@@ -230,3 +230,13 @@ DECLARE_GAUGE(total_activation_size_in_kilobytes);
 DECLARE_MULTI_HISTOGRAM(active_kv_cache_size_in_kilobytes);
 DECLARE_MULTI_HISTOGRAM(prefill_active_activation_size_in_kilobytes);
 DECLARE_MULTI_HISTOGRAM(decode_active_activation_size_in_kilobytes);
+
+// Runtime CP<->DP mode-switch metrics.
+DECLARE_COUNTER(mode_switch_total_to_cp);
+DECLARE_COUNTER(mode_switch_total_to_dp);
+DECLARE_COUNTER(mode_switch_failed_total);
+DECLARE_HISTOGRAM(mode_switch_latency_ms);
+DECLARE_HISTOGRAM(mode_switch_drain_ms);
+DECLARE_GAUGE(active_dp_size);
+DECLARE_GAUGE(active_cp_size);
+DECLARE_GAUGE(auto_flip_long_ratio);

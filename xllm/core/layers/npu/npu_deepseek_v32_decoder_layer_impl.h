@@ -211,6 +211,36 @@ class NpuDeepseekV32DecoderLayerImpl : public BaseLayer {
   atb_speed::Model::Node mtp_prefill_fallback_node_;
   atb_speed::Model::Node mtp_decode_fallback_node_;
 
+  // Dual-mode mirrors. Populated only when the layer was constructed
+  // through a ModelContext that carried a DualParallelArgs; in that case
+  // the four (param, node) pairs above hold the CP-mode configuration
+  // (cp_size = world, dp_size = 1) and the four below hold the DP-mode
+  // configuration (cp_size = 1, dp_size = world). forward() inspects
+  // dual_parallel_args_ at call time and dispatches accordingly.
+  //
+  // Memory note: each ATB DecoderLayer node carries its own workspace
+  // (kernel cache, intermediate buffers, etc.); two extra nodes per
+  // layer × 60 layers is the bulk of the ~1-2 GB / NPU dual-graph
+  // overhead documented in DESIGN_DOC_v0.2.md. The weights themselves
+  // are referenced by both pairs through atb_weight_tensors_, no copies.
+  atb_speed::deepseekV2::DecoderLayerParam dp_prefill_param_;
+  atb_speed::deepseekV2::DecoderLayerParam dp_decode_param_;
+
+  atb_speed::Model::Node dp_prefill_node_;
+  atb_speed::Model::Node dp_decode_node_;
+
+  // Non-owning pointer back to the per-worker DualParallelArgs (lives on
+  // WorkerServer). Null in legacy single-mode -- forward() then routes
+  // straight to prefill_node_ / decode_node_ as before.
+  const DualParallelArgs* dual_parallel_args_ = nullptr;
+
+  // Records which mode was active at construction time. The construction-
+  // time active mode landed in prefill_node_/decode_node_ (the original
+  // pair) and the other mode landed in dp_prefill_node_/dp_decode_node_.
+  // forward() compares dual_parallel_args_->mode() against this field to
+  // decide which pair to use.
+  DualParallelArgs::Mode dual_ctor_mode_ = DualParallelArgs::Mode::CP_PREFILL;
+
   atb::Tensor internal_tensor_;
 
   torch::Tensor at_cumsum_;

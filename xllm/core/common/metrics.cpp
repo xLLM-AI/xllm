@@ -233,3 +233,38 @@ DEFINE_MULTI_HISTOGRAM(
     decode_active_activation_size_in_kilobytes,
     "dp_rank",
     "Active activation size in kilobytes per dp rank during decode phase");
+
+// Runtime CP<->DP mode-switch metrics.
+// mode_switch_total: incremented once per successful flip. Split by
+// direction to observe balance between CP<->DP transitions.
+// mode_switch_failed_total: any flip that failed (drain timeout,
+// engine.switch_mode returned false, etc.). Should be 0 in steady state.
+// mode_switch_latency_ms: full ModeSwitchService.SwitchMode wall time,
+// covering pause + drain + engine flip + rebuild + resume + relink
+// (relink after resume is included in the histogram observation).
+// mode_switch_drain_ms: time spent in scheduler.wait_until_paused only,
+// isolates the "wait for in-flight requests to finish" cost from the
+// rebuild cost. Long tail here means running_requests were still
+// active on flip trigger and drain took real time.
+// active_dp_size / active_cp_size: Gauge tracking current runtime
+// topology (post-flip). Useful to correlate performance metrics with
+// what mode we are in.
+// auto_flip_long_ratio: Gauge published by AutoFlipController each tick,
+// exposes the signal that drove the flip decision.
+DEFINE_COUNTER(mode_switch_total_to_cp,
+               "Total number of successful flips into CP_PREFILL mode "
+               "(target=0 per parallel_args.h; proto comment is misleading)");
+DEFINE_COUNTER(mode_switch_total_to_dp,
+               "Total number of successful flips into DP_DECODE mode "
+               "(target=1 per parallel_args.h; proto comment is misleading)");
+DEFINE_COUNTER(mode_switch_failed_total,
+               "Total number of failed mode-switch attempts (drain "
+               "timeout, engine failure, or rollback)");
+DEFINE_HISTOGRAM(mode_switch_latency_ms,
+                 "Wall-clock latency of a full mode-switch RPC in ms");
+DEFINE_HISTOGRAM(mode_switch_drain_ms,
+                 "Time spent in scheduler drain (wait_until_paused) in ms");
+DEFINE_GAUGE(active_dp_size, "Current active dp_size after latest flip");
+DEFINE_GAUGE(active_cp_size, "Current active cp_size after latest flip");
+DEFINE_GAUGE(auto_flip_long_ratio,
+             "Latest long_ratio signal computed by AutoFlipController");

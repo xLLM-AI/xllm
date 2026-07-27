@@ -10,6 +10,7 @@ cc_library(
     scheduler_policy.h
     zero_eviction_scheduler.h
     continuous_scheduler.h
+    auto_flip_stats.h
     disagg_pd_chunked_prefill_scheduler.h
     disagg_pd_scheduler.h
     pd_ooc_scheduler.h
@@ -35,6 +36,7 @@ cc_library(
     scheduler_factory.cpp
     perf_model.cpp
     fixed_steps_scheduler.cpp
+    mode_switch_service.cpp
   DEPS
     :batch
     :distributed_runtime

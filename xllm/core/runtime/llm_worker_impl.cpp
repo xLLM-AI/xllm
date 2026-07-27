@@ -54,6 +54,14 @@ bool uses_worker_cp_partition(const runtime::Options& options) {
   return options.cp_size() > 1 && !Platform::uses_model_cp_partition();
 }
 
+// Runtime-aware variant: reads the live parallel_args_.cp_size() instead
+// of the immutable options_.cp_size(), so a CP<->DP flip that changes
+// the effective cp_size is respected. Callers that only run in single-
+// mode (no runtime flip) may still use the options-based overload.
+bool uses_worker_cp_partition(const ParallelArgs& parallel_args) {
+  return parallel_args.cp_size() > 1 && !Platform::uses_model_cp_partition();
+}
+
 void wait_input_ready_events(const ForwardInput& input, const Stream& stream) {
   CHECK(stream.wait_event(input.metadata_ready_event))
       << "failed to wait ForwardInput metadata ready event";
@@ -307,7 +315,11 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
                                      /*non_blocking=*/false)
                                  .contiguous();
     }
-    if (uses_worker_cp_partition(options_)) {
+    // Use the live parallel_args_ (not options_) so a runtime CP<->DP
+    // flip is respected: after flipping to DP_DECODE the live cp_size is
+    // 1 and we must take the non-CP logits path. Options holds the
+    // STARTUP value and never follows a runtime flip.
+    if (uses_worker_cp_partition(parallel_args_)) {
       logits = model_->logits(model_output.hidden_states,
                               selected_token_idxes,
                               selected_hidden_from_lm_head);
@@ -385,12 +397,12 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       // separately so the embedding cache stores it without re-selecting on
       // the local shard.
       output.sample_output.embeddings = embeddings;
-      if (uses_worker_cp_partition(options_) &&
+      if (uses_worker_cp_partition(parallel_args_) &&
           selected_hidden_from_lm_head.defined()) {
         output.sample_output.selected_embeddings = selected_hidden_from_lm_head;
       }
     } else if (sampling_params.selected_token_idxes.defined()) {
-      if (uses_worker_cp_partition(options_)) {
+      if (uses_worker_cp_partition(parallel_args_)) {
         CHECK(selected_hidden_from_lm_head.defined())
             << "selected_hidden_from_lm_head must be defined when "
                "selected_token_idxes is defined.";

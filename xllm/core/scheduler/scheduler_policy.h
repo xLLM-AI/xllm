@@ -66,6 +66,14 @@ struct SchedulerState {
   int32_t min_speculative_tokens_required;
   bool enable_prefix_cache;
   bool has_linear_attention_layers;
+
+  // Live (mode-aware) view of dp_size. Reflects a runtime CP<->DP flip:
+  // the frozen options_.dp_size() stays 1 in CP mode, but active_dp_size
+  // becomes > 1 after a flip to DP_DECODE. Policy code that used to read
+  // options_.cp_size() must gate on active_dp_size (see the live_cp_size
+  // derivation at the CP-alignment sites in scheduler_policy.cpp) so
+  // worker-side CP token alignment is skipped in DP mode.
+  int32_t active_dp_size = 1;
 };
 
 // ScheduleBudget tracks the remaining resources for the current scheduling

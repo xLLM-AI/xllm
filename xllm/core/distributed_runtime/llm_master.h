@@ -120,6 +120,14 @@ class LLMMaster : public Master {
 
   std::unique_ptr<Scheduler> scheduler_;
 
+  // Autonomous CP<->DP flip driver. Constructed only when
+  // enable_runtime_cp_dp_switch is on and the standalone ModeSwitchService
+  // was started; ticks a background thread that reads request stats from
+  // the scheduler and, when policy conditions are met, invokes SwitchMode
+  // in-process. Feature-gated separately via FLAGS_enable_auto_flip so the
+  // controller can be started disabled and toggled at runtime via /flags.
+  std::unique_ptr<class AutoFlipController> auto_flip_controller_;
+
   // model args
   ModelArgs model_args_;
 

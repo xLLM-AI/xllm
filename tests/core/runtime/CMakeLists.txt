@@ -1,5 +1,18 @@
 include(cc_test)
 
+# Standalone test for the atomic-pointer discipline that XServiceClient
+# uses to survive a runtime CP<->DP flip. Uses a FakePool + a stripped
+# AtomicPoolHandle so it can run without the singleton / etcd / brpc
+# dependencies of the real client. Runs on any platform.
+cc_test(
+  NAME
+    atomic_pool_handle_test
+  SRCS
+    atomic_pool_handle_test.cpp
+  DEPS
+    GTest::gtest_main
+)
+
 if(USE_NPU)
   cc_test(
     NAME

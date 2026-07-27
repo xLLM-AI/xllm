@@ -52,7 +52,9 @@ class ParallelConfig final {
          "enable_mm_encoder_dp",
          "enable_multi_stream_parallel",
          "micro_batch_num",
-         "enable_dp_balance"}};
+         "enable_dp_balance",
+         "enable_runtime_cp_dp_switch",
+         "dual_mode_port_stride"}};
     return kOptionCategory;
   }
 
@@ -82,6 +84,15 @@ class ParallelConfig final {
   PROPERTY(int32_t, micro_batch_num) = 1;
 
   PROPERTY(bool, enable_dp_balance) = false;
+
+  // Mirrors gflags::FLAGS_enable_runtime_cp_dp_switch /
+  // FLAGS_dual_mode_port_stride. xllm.cpp copies these onto common::Options
+  // so master.cpp can forward them to runtime::Options at engine boot;
+  // worker_server then uses them to decide whether to bring up two
+  // CollectiveCommunicators.
+  PROPERTY(bool, enable_runtime_cp_dp_switch) = false;
+
+  PROPERTY(int32_t, dual_mode_port_stride) = 256;
 
   [[nodiscard]] int32_t kv_split_size_effective() const noexcept {
     return kv_split_size_ > 0 ? kv_split_size_ : cp_size_;
