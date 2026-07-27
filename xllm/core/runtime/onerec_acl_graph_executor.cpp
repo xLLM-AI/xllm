@@ -135,7 +135,9 @@ std::string build_graph_key(const torch::Tensor& tokens,
        << "|kv_max_seq_len:" << params.kv_max_seq_len;
   }
   append_tensor_key(os, "tokens", tokens);
-  append_tensor_key(os, "positions", positions);
+  if (!is_xattn_decode) {
+    append_tensor_key(os, "positions", positions);
+  }
   append_tensor_key(
       os, "decoder_context", onerec_params->decoder_context_embedding);
   append_tensor_key(
@@ -190,6 +192,9 @@ class OneRecGraphParam {
                           const ModelInputParams& params,
                           const torch::Tensor& encoder_output) {
     const auto* source_xattn_params = params.onerec_xattention_params();
+    const bool is_xattn_decode = source_xattn_params != nullptr &&
+                                 source_xattn_params->rec_stage ==
+                                     OneRecModelInputParams::RecStage::DECODE;
     if (source_xattn_params != nullptr &&
         source_xattn_params->rec_stage ==
             OneRecModelInputParams::RecStage::PREFILL &&
@@ -200,8 +205,20 @@ class OneRecGraphParam {
                source_xattn_params->cross_attn_new_cache_slots.numel());
     }
 
-    copy_tensor(tokens, persistent_tokens_);
-    copy_tensor(positions, persistent_positions_);
+    if (is_xattn_decode) {
+      // Beam search writes this pipeline-owned buffer before graph replay on
+      // the same stream, so decode can consume the captured address directly.
+      capture_stable_tensor(tokens, captured_decode_tokens_, "decode tokens");
+      tokens_for_capture_ = captured_decode_tokens_;
+    } else {
+      copy_tensor(tokens, persistent_tokens_);
+      tokens_for_capture_ = persistent_tokens_;
+    }
+    if (!is_xattn_decode) {
+      copy_tensor(positions, persistent_positions_);
+    } else {
+      persistent_positions_ = torch::Tensor();
+    }
     copy_tensor(encoder_output, persistent_encoder_output_);
 
     params_for_capture_ = params;
@@ -240,10 +257,19 @@ class OneRecGraphParam {
     if (source_xattn_params != nullptr) {
       auto& xattn_params =
           params_for_capture_.mutable_onerec_xattention_params();
-      copy_tensor(source_xattn_params->current_round_tensor,
-                  persistent_current_round_tensor_);
-      bind_tensor(persistent_current_round_tensor_,
-                  xattn_params.current_round_tensor);
+      if (is_xattn_decode) {
+        // The pipeline owns this scalar for its full lifetime. Capture that
+        // address directly so each round only updates its contents.
+        capture_stable_tensor(source_xattn_params->current_round_tensor,
+                              captured_current_round_tensor_,
+                              "current round");
+        xattn_params.current_round_tensor = captured_current_round_tensor_;
+      } else {
+        copy_tensor(source_xattn_params->current_round_tensor,
+                    persistent_current_round_tensor_);
+        bind_tensor(persistent_current_round_tensor_,
+                    xattn_params.current_round_tensor);
+      }
     }
 
     ensure_hidden_states(tokens, params);
@@ -256,7 +282,7 @@ class OneRecGraphParam {
     return params_for_capture_;
   }
 
-  torch::Tensor tokens() const { return persistent_tokens_; }
+  torch::Tensor tokens() const { return tokens_for_capture_; }
   torch::Tensor positions() const { return persistent_positions_; }
   torch::Tensor hidden_states() const { return hidden_states_; }
 
@@ -287,6 +313,29 @@ class OneRecGraphParam {
                           torch::Tensor& target) {
     if (persistent.defined()) {
       target = persistent;
+    }
+  }
+
+  static void capture_stable_tensor(const torch::Tensor& src,
+                                    torch::Tensor& captured,
+                                    const char* name) {
+    // ACL Graph embeds device addresses. Reject accidental rebinding instead
+    // of replaying a graph against stale pipeline storage.
+    CHECK(src.defined()) << "OneRec graph requires " << name;
+    if (!captured.defined()) {
+      captured = src;
+      return;
+    }
+    CHECK_EQ(captured.sizes(), src.sizes())
+        << "OneRec graph " << name << " shape changed";
+    CHECK_EQ(captured.scalar_type(), src.scalar_type())
+        << "OneRec graph " << name << " dtype changed";
+    CHECK_EQ(captured.device(), src.device())
+        << "OneRec graph " << name << " device changed";
+    if (src.numel() > 0) {
+      CHECK_EQ(reinterpret_cast<uintptr_t>(captured.data_ptr()),
+               reinterpret_cast<uintptr_t>(src.data_ptr()))
+          << "OneRec graph " << name << " address changed";
     }
   }
 
@@ -356,6 +405,8 @@ class OneRecGraphParam {
   runtime::Options options_;
   ModelInputParams params_for_capture_;
   torch::Tensor persistent_tokens_;
+  torch::Tensor tokens_for_capture_;
+  torch::Tensor captured_decode_tokens_;
   torch::Tensor persistent_positions_;
   torch::Tensor persistent_encoder_output_;
   torch::Tensor persistent_kv_seq_lens_;
@@ -367,6 +418,7 @@ class OneRecGraphParam {
   torch::Tensor persistent_cross_attn_new_cache_slots_;
   torch::Tensor persistent_cross_attn_block_tables_;
   torch::Tensor persistent_current_round_tensor_;
+  torch::Tensor captured_current_round_tensor_;
   std::vector<torch::Tensor> cross_k_caches_;
   std::vector<torch::Tensor> cross_v_caches_;
   std::vector<torch::Tensor> empty_tensor_vec_;

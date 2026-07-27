@@ -334,7 +334,8 @@ OneRecBeamSearchTensors prepare_onerec_beam_search_tensors(
     int32_t batch_size,
     int32_t beam_width,
     int32_t total_rounds,
-    const torch::Device& device) {
+    const torch::Device& device,
+    const torch::Tensor& out_token_ids) {
   const torch::TensorOptions int_options =
       torch::TensorOptions().dtype(torch::kInt32).device(device);
   const torch::TensorOptions fp32_options =
@@ -346,7 +347,13 @@ OneRecBeamSearchTensors prepare_onerec_beam_search_tensors(
       torch::zeros({batch_size, beam_width, total_rounds}, int_options);
   tensors.acc_logprob = torch::zeros({num_seq, 1}, fp32_options);
   tensors.out_log_probs = torch::zeros({num_seq, 1}, fp32_options);
-  tensors.out_token_ids = torch::zeros({num_seq, 1}, int_options);
+  CHECK(out_token_ids.defined());
+  CHECK_EQ(out_token_ids.dim(), 2);
+  CHECK_EQ(out_token_ids.size(0), num_seq);
+  CHECK_EQ(out_token_ids.size(1), 1);
+  CHECK_EQ(out_token_ids.scalar_type(), torch::kInt32);
+  CHECK_EQ(out_token_ids.device(), device);
+  tensors.out_token_ids = out_token_ids;
   tensors.out_token_index = torch::zeros({num_seq, 1}, int_options);
   tensors.out_beam_count_prefix_sums = torch::zeros({num_seq, 1}, int_options);
   tensors.out_seqgroup = torch::zeros_like(tensors.sequence_group);
@@ -1462,6 +1469,8 @@ void RecWorkerImpl::OneRecXAttentionWorkPipeline::prepare_work_before_execute(
   if (!current_round_tensor_.defined()) {
     current_round_tensor_ = torch::empty({1}, int_options);
   }
+  // Beam width is request-static. Current round reuses its scalar address and
+  // only updates the value inside the device loop.
   beam_width_tensor_.fill_(beam_width);
   current_round_tensor_.fill_(get_onerec_decode_round(onerec_params));
   onerec_params.beam_width_tensor = beam_width_tensor_;
@@ -1896,13 +1905,9 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
   auto prepare_decode_round_input = [&](int32_t round,
                                         int32_t batch_size,
                                         int32_t beam_width,
-                                        int32_t total_rounds,
-                                        const std::vector<int32_t>&
-                                            decode_positions_vec,
-                                        const torch::Tensor& sequence_group) {
+                                        const torch::Tensor& next_token_ids) {
     auto& round_params =
         mutable_input.input_params.mutable_onerec_xattention_params();
-    const int32_t decode_step = std::max(round - 1, 0);
 
     round_params.rec_stage = OneRecModelInputParams::RecStage::DECODE;
     round_params.is_first_prefill = false;
@@ -1945,15 +1950,12 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
     if (round_params.current_round_tensor.defined()) {
       round_params.current_round_tensor.fill_(round);
     }
-    if (round_params.beam_width_tensor.defined()) {
-      round_params.beam_width_tensor.fill_(beam_width);
-    }
 
-    if (sequence_group.defined()) {
-      mutable_input.token_ids =
-          sequence_group.select(/*dim=*/2, /*index=*/decode_step)
-              .contiguous()
-              .reshape({-1});
+    if (next_token_ids.defined()) {
+      CHECK_EQ(next_token_ids.numel(),
+               static_cast<int64_t>(batch_size) * beam_width);
+      // Beam search already materializes selected tokens contiguously.
+      mutable_input.token_ids = next_token_ids.reshape({-1});
     }
 
     round_params.decoder_context_embedding = torch::Tensor();
@@ -1964,6 +1966,9 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
     auto int_options = torch::TensorOptions()
                            .dtype(torch::kInt32)
                            .device(runtime_.worker.device());
+    // OneRec uses internal relative position bias and ignores this argument.
+    mutable_input.positions = torch::Tensor();
+
     if (enable_onerec_xattention_cache_decode_input_tensors()) {
       const int64_t total_beam = static_cast<int64_t>(batch_size) * beam_width;
       if (!cached_decode_selected_token_idxes_.defined() ||
@@ -1974,59 +1979,17 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
             torch::arange(total_beam, int_options);
         cached_decode_selected_token_count_ = total_beam;
       }
-
-      const int32_t decode_rounds = std::max(total_rounds - 1, 0);
-      const bool positions_cache_hit =
-          cached_decode_positions_batch_size_ == batch_size &&
-          cached_decode_positions_beam_width_ == beam_width &&
-          cached_decode_positions_total_rounds_ == total_rounds &&
-          cached_decode_positions_key_ == decode_positions_vec &&
-          static_cast<int32_t>(cached_decode_position_tensors_.size()) ==
-              decode_rounds;
-      if (!positions_cache_hit) {
-        cached_decode_positions_key_ = decode_positions_vec;
-        cached_decode_positions_batch_size_ = batch_size;
-        cached_decode_positions_beam_width_ = beam_width;
-        cached_decode_positions_total_rounds_ = total_rounds;
-        cached_decode_position_tensors_.clear();
-        cached_decode_position_tensors_.reserve(decode_rounds);
-
-        std::vector<int32_t> position_buffer;
-        position_buffer.reserve(static_cast<size_t>(total_beam));
-        for (int32_t round_idx = 0; round_idx < decode_rounds; ++round_idx) {
-          position_buffer.clear();
-          for (int32_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
-            const int32_t base_position =
-                decode_positions_vec.at(static_cast<size_t>(seq_idx)) +
-                round_idx;
-            for (int32_t beam_idx = 0; beam_idx < beam_width; ++beam_idx) {
-              position_buffer.emplace_back(base_position);
-            }
-          }
-          cached_decode_position_tensors_.emplace_back(
-              torch::tensor(position_buffer, int_options));
-        }
-      }
-
-      mutable_input.positions =
-          cached_decode_position_tensors_.at(static_cast<size_t>(decode_step));
       mutable_input.decoder_sampling_params.selected_token_idxes =
           cached_decode_selected_token_idxes_;
     } else {
-      std::vector<int32_t> positions_host;
-      positions_host.reserve(static_cast<size_t>(batch_size * beam_width));
       std::vector<int32_t> selected_token_idxes;
       selected_token_idxes.reserve(
           static_cast<size_t>(batch_size * beam_width));
       for (int32_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
         for (int32_t beam_idx = 0; beam_idx < beam_width; ++beam_idx) {
-          positions_host.emplace_back(
-              decode_positions_vec.at(static_cast<size_t>(seq_idx)) +
-              decode_step);
           selected_token_idxes.emplace_back(seq_idx * beam_width + beam_idx);
         }
       }
-      mutable_input.positions = torch::tensor(positions_host, int_options);
       mutable_input.decoder_sampling_params.selected_token_idxes =
           torch::tensor(selected_token_idxes, int_options);
     }
@@ -2087,8 +2050,24 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
   const int32_t batch_size = step_meta->batch_size;
   const int32_t beam_width = step_meta->beam_width;
   const int32_t total_rounds = step_meta->total_round;
-  OneRecBeamSearchTensors beam_tensors = prepare_onerec_beam_search_tensors(
-      batch_size, beam_width, total_rounds, runtime_.worker.device());
+  const int64_t num_seq = static_cast<int64_t>(batch_size) * beam_width;
+  CHECK_GT(num_seq, 0);
+  // A buffer for each token count keeps graph input addresses stable when
+  // requests with different batch/beam shapes alternate on this pipeline.
+  auto& cached_decode_token_ids = cached_decode_token_ids_[num_seq];
+  if (!cached_decode_token_ids.defined()) {
+    cached_decode_token_ids =
+        torch::empty({num_seq, 1},
+                     torch::TensorOptions()
+                         .dtype(torch::kInt32)
+                         .device(runtime_.worker.device()));
+  }
+  OneRecBeamSearchTensors beam_tensors =
+      prepare_onerec_beam_search_tensors(batch_size,
+                                         beam_width,
+                                         total_rounds,
+                                         runtime_.worker.device(),
+                                         cached_decode_token_ids);
 
   ForwardOutput output;
   torch::Tensor top_tokens;
@@ -2098,12 +2077,8 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
     if (round > 0) {
       Timer prepare_round_timer;
       Timer prepare_round_host_timer;
-      prepare_decode_round_input(round,
-                                 batch_size,
-                                 beam_width,
-                                 total_rounds,
-                                 step_meta->decode_positions_vec,
-                                 beam_tensors.sequence_group);
+      prepare_decode_round_input(
+          round, batch_size, beam_width, beam_tensors.out_token_ids);
       log_onerec_xattention_host_stage_timing(
           "prepare_decode_round_input", round, prepare_round_host_timer);
       log_stage_timing(
@@ -2153,6 +2128,16 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
       output.max_top_logprobs = result->sampling_params.max_top_logprobs;
       continue;
     }
+
+    torch::Tensor final_round_token_ids;
+    if (final_round && requested_result_width == beam_width) {
+      // Returned tensors must not alias pipeline storage that the next request
+      // can reuse while asynchronous output handling is still in flight.
+      final_round_token_ids = torch::empty_like(beam_tensors.out_token_ids);
+    }
+    torch::Tensor& round_out_token_ids = final_round_token_ids.defined()
+                                             ? final_round_token_ids
+                                             : beam_tensors.out_token_ids;
 
 #if defined(USE_NPU)
     Timer beam_timer;
@@ -2218,7 +2203,7 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
           /*top_logprobs=*/top_logprobs,
           /*sequence_group=*/beam_tensors.sequence_group,
           /*current_step=*/static_cast<int64_t>(round),
-          /*out_token_ids=*/beam_tensors.out_token_ids,
+          /*out_token_ids=*/round_out_token_ids,
           /*out_token_index=*/beam_tensors.out_token_index,
           /*out_log_probs=*/beam_tensors.out_log_probs,
           /*out_beam_count_prefix_sums=*/
@@ -2268,7 +2253,7 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
                                       top_tokens,
                                       top_logprobs,
                                       beam_tensors.out_log_probs,
-                                      beam_tensors.out_token_ids,
+                                      round_out_token_ids,
                                       beam_tensors.out_token_index,
                                       beam_tensors.out_beam_count_prefix_sums,
                                       beam_tensors.out_seqgroup,
@@ -2280,6 +2265,9 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
 #else
     LOG(FATAL) << "OneRec xattention beam search requires NPU or CUDA.";
 #endif
+    if (final_round_token_ids.defined()) {
+      beam_tensors.out_token_ids = std::move(final_round_token_ids);
+    }
     if (FLAGS_enable_output_sku_logprobs || output_logprobs) {
       runtime::detail::write_beam_round_step_logprobs(
           beam_tensors.out_log_probs,

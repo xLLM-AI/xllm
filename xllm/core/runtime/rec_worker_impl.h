@@ -22,6 +22,7 @@ limitations under the License.
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include "runtime/llm_worker_impl.h"
@@ -206,13 +207,9 @@ class RecWorkerImpl : public LLMWorkerImpl {
     std::vector<torch::Tensor> cached_shared_v_caches_;
     std::vector<torch::Tensor> cached_unshared_k_caches_;
     std::vector<torch::Tensor> cached_unshared_v_caches_;
-    std::vector<torch::Tensor> cached_decode_position_tensors_;
-    std::vector<int32_t> cached_decode_positions_key_;
+    std::unordered_map<int64_t, torch::Tensor> cached_decode_token_ids_;
     torch::Tensor cached_decode_selected_token_idxes_;
     int64_t cached_decode_selected_token_count_ = 0;
-    int32_t cached_decode_positions_batch_size_ = 0;
-    int32_t cached_decode_positions_beam_width_ = 0;
-    int32_t cached_decode_positions_total_rounds_ = 0;
     int32_t max_seqs_per_batch_ = 0;
     int32_t max_tokens_per_batch_ = 0;
     int32_t beam_width_ = 1;
