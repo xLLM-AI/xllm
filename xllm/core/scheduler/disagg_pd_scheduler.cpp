@@ -560,6 +560,9 @@ void DisaggPDScheduler::dispatch_requests() {
               info.block_transfer_groups.emplace_back(std::move(group));
             }
           } else {
+            const size_t prefix_blocks =
+                static_cast<size_t>(resp.num_prefix_blocks());
+            info.remote_blocks_ids.resize(prefix_blocks, 0);
             for (const int32_t block_id : resp.blocks_ids()) {
               info.remote_blocks_ids.emplace_back(
                   static_cast<uint64_t>(block_id));
@@ -596,6 +599,11 @@ void DisaggPDScheduler::dispatch_requests() {
                     << ", num_layers=" << info.dst_xtensor_layer_offsets.size();
           }
 
+          const int32_t num_prefix_blocks = resp.num_prefix_blocks();
+          if (num_prefix_blocks > 0) {
+            sequence->kv_state().set_next_transfer_block_idx(
+                static_cast<size_t>(num_prefix_blocks));
+          }
           sequence->kv_state().set_transfer_kv_info(std::move(info));
         }
 

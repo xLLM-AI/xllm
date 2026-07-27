@@ -196,13 +196,14 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
             sequence->kv_state().shared_blocks_num(BlockType::KV);
         const auto blocks = sequence->kv_state().blocks(BlockType::KV);
 
-        // Collect block IDs
+        // Collect block IDs (skip prefix-cache-hit blocks)
         block_ids.reserve(blocks.size() - shared_num);
         for (size_t i = shared_num; i < blocks.size(); i++) {
           int32_t block_id = blocks[i].id();
           *(resp->mutable_blocks_ids()->Add()) = block_id;
           block_ids.push_back(block_id);
         }
+        resp->set_num_prefix_blocks(static_cast<int32_t>(shared_num));
       }
       // XTensor mode: calculate and return GlobalXTensor offsets
       if (::xllm::KVCacheConfig::get_instance().enable_xtensor() &&

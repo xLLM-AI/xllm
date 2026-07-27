@@ -113,6 +113,10 @@ message DisaggResponse {
   // Group-aware block allocation. group_id is defined by the cache layout and
   // is opaque to the PD protocol.
   repeated KVBlockGroup kv_block_groups = 20;
+
+  // Number of leading blocks served from decode-side prefix cache.
+  // Prefill uses this to skip cached blocks during KV transfer.
+  int32 num_prefix_blocks = 21;
 }
 
 // XTensor mode: offsets for one layer
