@@ -112,7 +112,7 @@ jobs:
       timeout-minutes: 5
       uses: actions/checkout@v4
       with:
-        submodules: true
+        submodules: recursive
 
     - name: Clean submodules
       run: git submodule foreach --recursive git clean -ffdx

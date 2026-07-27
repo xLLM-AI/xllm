@@ -568,12 +568,6 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
     // rows interchangeably under reference counting.
     options.linear_state_num_slots(
         static_cast<int32_t>(kv_cache_cap.num_linear_state_blocks()));
-    // Capture the checkpoint stride (one prefill chunk in tokens) once here so
-    // the LINEAR leaf's prefix cache probes its own hash domain without reading
-    // the scheduler-config singleton per match. The CHECK above already
-    // enforces it is a positive multiple of block_size when prefix cache is on.
-    options.linear_chunk_stride(::xllm::SchedulerConfig::get_instance()
-                                    .max_tokens_per_chunk_for_prefill());
   }
   if (util::is_deepseek_v4_model_type(args_.model_type())) {
     constexpr uint32_t kManagerTypeBlockManagerImpl = 0;

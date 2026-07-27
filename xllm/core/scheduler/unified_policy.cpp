@@ -198,10 +198,16 @@ void UnifiedPolicy::schedule_from_unified_queue(
         }
       } else {
         // Token-budget based scheduling.
-        size_t num_tokens_to_handle =
-            sequence->is_prefill_stage()
-                ? std::min(assume_max_tokens, num_tokens - kv_cache_tokens_num)
-                : 1 + state.min_speculative_tokens_required;
+        size_t num_tokens_to_handle;
+        if (sequence->is_prefill_stage()) {
+          size_t remaining = num_tokens - kv_cache_tokens_num;
+          size_t max_chunk =
+              static_cast<size_t>(options_.max_tokens_per_chunk_for_prefill());
+          num_tokens_to_handle =
+              std::min({assume_max_tokens, max_chunk, remaining});
+        } else {
+          num_tokens_to_handle = 1 + state.min_speculative_tokens_required;
+        }
         if (allocated_seqs + 1 > budget.remaining_seq_budget ||
             allocated_tokens + num_tokens_to_handle >
                 budget.remaining_token_budget) {
@@ -213,6 +219,12 @@ void UnifiedPolicy::schedule_from_unified_queue(
       // Allocate blocks (MixScheduler version with copy blocks support).
       size_t max_handle_num_tokens =
           std::min(kv_cache_tokens_num + assume_max_tokens, num_tokens);
+      if (sequence->is_prefill_stage()) {
+        size_t max_chunk =
+            static_cast<size_t>(options_.max_tokens_per_chunk_for_prefill());
+        max_handle_num_tokens =
+            std::min(max_handle_num_tokens, kv_cache_tokens_num + max_chunk);
+      }
       if (options_.num_speculative_tokens() > 0 &&
           !sequence->is_chunked_prefill_stage() && kv_cache_tokens_num > 0) {
         max_handle_num_tokens += state.min_speculative_tokens_required;
@@ -244,6 +256,7 @@ void UnifiedPolicy::schedule_from_unified_queue(
 
     if (!blocks_exhausted && !budget_exhausted) {
       unified.pop_front();
+      request->record_num_prefix_cache_tokens();
       state.running_requests.emplace_back(request);
       state.running_sequences.insert(state.running_sequences.end(),
                                      candidate_sequences.begin(),

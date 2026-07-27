@@ -42,8 +42,7 @@ class FakeEngine : public Engine {
   FakeEngine(int32_t num_blocks,
              int32_t block_size,
              bool enable_prefix_cache = false,
-             bool enable_linear_attention = false,
-             int32_t linear_chunk_stride = -1) {
+             bool enable_linear_attention = false) {
     BlockManagerPool::Options opt;
     opt.num_blocks_ = num_blocks;
     opt.block_size_ = block_size;
@@ -55,10 +54,6 @@ class FakeEngine : public Engine {
       // The unified linear-state slot pool needs a positive physical capacity;
       // size it generously so tests never hit slot pressure.
       opt.linear_state_num_slots_ = num_blocks + 2;
-      // Chunk stride the LINEAR checkpoint index probes with. Mirrors the
-      // engine, which captures it from the scheduler config at construction so
-      // the override never reads a global singleton.
-      opt.linear_chunk_stride_ = linear_chunk_stride;
     }
     fake_tokenizer_ = std::make_unique<FakeTokenizer>();
     fake_block_manager_ = std::make_unique<BlockManagerPool>(opt, 1);

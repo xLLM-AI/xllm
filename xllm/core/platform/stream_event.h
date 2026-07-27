@@ -45,6 +45,11 @@ class StreamEvent final {
   c10::Event& c10_event() { return c10_event_; }
 #endif
 
+  // Block the calling host thread until the recorded device work completes.
+  // This is intentionally different from Stream::wait_event(), which only
+  // installs a device-stream dependency and returns immediately on the host.
+  bool synchronize();
+
   DISALLOW_COPY_AND_ASSIGN(StreamEvent);
 
  private:

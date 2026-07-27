@@ -390,13 +390,15 @@ bool SchedulerPolicy::allocate_for_prefill(Sequence* seq,
       std::min(kv_cache_tokens_num + token_budget, seq->num_tokens());
 
   // Linear-state block alignment: for models with linear attention layers +
-  // prefix cache, chunk boundaries must align to block_size so linear-state
+  // prefix cache, chunk boundaries must align to chunk_stride so linear-state
   // checkpoints land at recoverable positions.
   if (state.has_linear_attention_layers && state.enable_prefix_cache &&
       seq->is_prefill_stage()) {
-    const size_t block_size =
-        static_cast<size_t>(state.kv_cache_manager->block_size());
-    const size_t aligned = (max_handle_num_tokens / block_size) * block_size;
+    const size_t chunk_stride =
+        static_cast<size_t>(::xllm::SchedulerConfig::get_instance()
+                                .max_tokens_per_chunk_for_prefill());
+    const size_t aligned =
+        (max_handle_num_tokens / chunk_stride) * chunk_stride;
     if (aligned <= kv_cache_tokens_num) {
       if (max_handle_num_tokens == seq->num_tokens()) {
         // Final chunk: allow unaligned to complete the sequence.
@@ -416,8 +418,15 @@ bool SchedulerPolicy::allocate_for_prefill(Sequence* seq,
 
 void SchedulerPolicy::allocate_shared_blocks_for(Sequence* seq,
                                                  SchedulerState& state) {
-  if (seq->kv_state().num_blocks(BlockType::KV) == 0) {
+  if (!seq->kv_state().has_any_blocks()) {
     state.kv_cache_manager->allocate_shared(seq);
+    return;
+  }
+  // DSV4 (SWA_COMPRESSED) holds SWA/C4/C128 but never a KV leaf, so a
+  // num_blocks(KV)==0 guard alone would treat an already-mounted DSV4 sequence
+  // as fresh and re-run allocate_shared -> mount_composite_shared CHECK. Skip
+  // re-match for the KV-less composite; only flat-KV shapes re-match below.
+  if (seq->kv_state().num_blocks(BlockType::KV) == 0) {
     return;
   }
   if (seq->is_chunked_prefill_stage()) {

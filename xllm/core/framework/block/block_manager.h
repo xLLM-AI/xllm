@@ -85,10 +85,6 @@ class BlockManager {
     // for the unified slot pool. Both are ignored unless linear state is on.
     PROPERTY(bool, enable_linear_state) = false;
     PROPERTY(int32_t, linear_state_num_slots) = 0;
-    // Linear-state checkpoint stride in tokens (one prefill chunk), forwarded
-    // to the LINEAR leaf's prefix cache as its hash-domain step. Ignored unless
-    // linear state is on; -1 makes the linear probe bail out.
-    PROPERTY(int32_t, linear_chunk_stride) = -1;
     // Number of speculative tokens for MTP decode (passed from
     // runtime::Options). Used by CompositeBlockManager to adjust SWA block
     // release accounting.
@@ -102,17 +98,27 @@ class BlockManager {
 
   virtual std::vector<Block> allocate(size_t num_blocks) = 0;
 
-  // `matched_tokens`, when non-null, receives the matched prefix length in
-  // TOKENS (forwarded straight to PrefixCache::match: the flat-KV leaf writes
-  // blocks.size() * block_size; the LINEAR leaf writes the recoverable
-  // checkpoint prefix in its own chunk-strided hash domain). Callers that only
-  // want the blocks leave it null.
+  // Returns the shared-prefix vector for the caller's Sequence. The vector's
+  // shape is leaf-defined:
+  //   - KV / C4 / C128 return a solid prefix `[valid, valid, ..., valid]`;
+  //     length in blocks × block_size() is the matched-token count.
+  //   - SWA returns a gap-tolerant `[opt_valid, ..., valid_last]` where the
+  //     length equals last-hit-index + 1 in base blocks (attention only reads
+  //     the last swa_blocks_per_seq base blocks; the composite enforces the
+  //     tail-continuity check).
+  //   - LINEAR (constraint leaf) returns `[inv, inv, ..., deepest_valid]` at
+  //     chunk-stride granularity; the deepest slot is the class-A checkpoint
+  //     restore source, and length in chunks × block_size() is the recoverable
+  //     prefix length. The composite pulls that block out and never mounts
+  //     LINEAR blocks into the sequence's live LINEAR vector.
+  //
+  // Matched-token count is `returned.size() * block_size()`; callers derive
+  // it directly, so no separate out-param is needed.
   virtual std::vector<Block> allocate_shared(
       const Slice<int32_t>& token_ids,
       const Slice<Block>& existed_shared_blocks = {},
       const MMData& mm_data = MMData(),
-      const Slice<XXH3Key>& block_hashes = {},
-      size_t* matched_tokens = nullptr) = 0;
+      const Slice<XXH3Key>& block_hashes = {}) = 0;
 
   virtual void cache(const Slice<int32_t>& token_ids,
                      std::vector<Block>& blocks,
