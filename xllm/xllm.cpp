@@ -157,6 +157,7 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .backend(model_config.backend())
       .limit_image_per_prompt(model_config.limit_image_per_prompt())
       .max_encoder_cache_size(model_config.max_encoder_cache_size())
+      .max_processor_cache_items(model_config.max_processor_cache_items())
       .block_size(kv_cache_config.block_size())
       .max_cache_size(kv_cache_config.max_cache_size())
       .max_memory_utilization(kv_cache_config.max_memory_utilization())
@@ -286,6 +287,9 @@ void validate_config(const std::string& model_type) {
   }
   if (model_config.max_encoder_cache_size() < 0) {
     LOG(FATAL) << "max_encoder_cache_size must be >= 0.";
+  }
+  if (model_config.max_processor_cache_items() < 0) {
+    LOG(FATAL) << "max_processor_cache_items must be >= 0.";
   }
 #if defined(USE_MLU)
   // Disable enable_schedule_overlap for VLM models on MLU backend

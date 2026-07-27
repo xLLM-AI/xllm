@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <cstddef>
+#include <optional>
 #include <unordered_set>
 #include <vector>
 
@@ -164,6 +166,28 @@ class UpdateMMItemScheduleStateVisitor : public MMDataItem::IVisitor {
 };
 
 class EncoderCache;
+class ProcessorCache;
+
+class ProcessorCacheLookupVisitor final : public MMInputItem::IVisitor {
+ public:
+  ProcessorCacheLookupVisitor(ProcessorCache& cache, size_t item_count);
+  bool visit(const MMInputItem& input) override;
+
+  std::vector<std::optional<MMDataItem>> cache_hits_;
+  std::vector<MMInputItem> miss_inputs_;
+
+ private:
+  ProcessorCache& cache_;
+};
+
+class ProcessorCacheInsertVisitor final : public MMDataItem::IVisitor {
+ public:
+  explicit ProcessorCacheInsertVisitor(ProcessorCache& cache);
+  bool visit(MMDataItem& item) override;
+
+ private:
+  ProcessorCache& cache_;
+};
 
 class EncoderCacheLookupVisitor : public MMDataItem::IVisitor {
  public:

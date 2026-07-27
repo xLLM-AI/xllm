@@ -107,7 +107,8 @@ VLMMaster::VLMMaster(const Options& options)
   chat_template_ =
       std::make_unique<JinjaChatTemplate>(engine_->tokenizer_args());
   tokenizer_ = engine_->tokenizer()->clone();
-  processor_ = create_multimodal_processor(model_args_, tokenizer_);
+  processor_ = create_multimodal_processor(
+      model_args_, tokenizer_, options_.max_processor_cache_items());
 
   threadpool_ = std::make_unique<ThreadPool>(
       /*num_threads=*/options_.num_request_handling_threads(),
