@@ -111,6 +111,10 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
         layer::v32_cp::reorder_to_local_shard(positions, cp_ctx.value());
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_ref().size(); ++i) {
+      if (!modified_input_params.synchronize_layer(static_cast<uint32_t>(i))) {
+        active_cp_context_ = nullptr;
+        return ModelOutput();
+      }
 #if defined(USE_CUDA) || defined(USE_MUSA)
       attn_metadata.plan_info->layer_id = i;
 #endif

@@ -15,11 +15,12 @@ limitations under the License.
 
 #pragma once
 
-#include <c10/core/Event.h>
-
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <vector>
+
+#include "platform/stream.h"
 
 namespace xllm {
 
@@ -29,12 +30,19 @@ class MLULayerSynchronizerImpl final {
   ~MLULayerSynchronizerImpl() = default;
 
   bool synchronize_layer(int64_t layer_index);
+  bool record_stream(int64_t layer_index, Stream* stream);
   bool record_current(int64_t layer_index, int32_t device_index);
-  uint32_t get_event_size() const { return events_.size(); }
+  void abort();
+  uint32_t get_event_size() const {
+    return static_cast<uint32_t>(events_.size());
+  }
 
  private:
-  std::vector<c10::Event> events_;
+  bool valid_index(int64_t layer_index) const;
+
+  std::vector<StreamEventPtr> events_;
   std::vector<std::atomic<bool>> event_record_flags_;
+  std::atomic<bool> aborted_{false};
 };
 
 }  // namespace xllm

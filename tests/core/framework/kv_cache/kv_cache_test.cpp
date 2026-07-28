@@ -160,15 +160,30 @@ TEST(Dsv4StateCacheTest, MissingPackedFallsBackWithoutSwappingSplit) {
   EXPECT_TRUE(torch::equal(state.score(), score));
 }
 
-// Host prefix-cache allocation registers page-aligned host memory with the NPU
-// via aclrtHostRegister, which requires a live device context. Set one up once.
+// Platform page-locked host allocation requires a live device context.
 class HostKVCacheTest : public ::testing::Test {
  protected:
   void SetUp() override {
+#if defined(USE_MLU)
+    if (Platform::device_count() < 1) {
+      GTEST_SKIP() << "MLU device is required for host KV cache tests.";
+    }
+#endif
     Device device(/*device_index=*/0);
     device.set_device();
     device.init_device_context();
+#if defined(USE_MLU)
+    context_tensor_ =
+        torch::zeros({1}, torch::TensorOptions().device(device.unwrap()));
+#endif
   }
+
+  torch::Tensor context_tensor_;
+};
+
+class HostKVCacheConfigTest : public ::testing::Test {
+ protected:
+  void SetUp() override { GTEST_FLAG_SET(death_test_style, "threadsafe"); }
 };
 
 TEST(KVCacheTest, DeepSeekV4FourDimCachesUseDeviceLayout) {
@@ -861,6 +876,46 @@ TEST_F(HostKVCacheTest, HostKVCacheDeepSeekV4PerBlockType) {
   EXPECT_TRUE(c128_tensors.count(KVCacheTensorRole::INDEX) == 0);
   EXPECT_EQ(c128_tensors.at(KVCacheTensorRole::KEY).size(0),
             scale_host_block_count(kC128Count, kHostFactor));
+}
+
+TEST_F(HostKVCacheConfigTest, AllowsSupportedHostCacheOptions) {
+  EXPECT_NO_FATAL_FAILURE(check_host_cache_options(
+      /*host_blocks_factor=*/2.0,
+      /*enable_graph=*/false,
+      /*kv_cache_dtype=*/"auto",
+      /*indexer_cache_dtype=*/"auto"));
+}
+
+TEST_F(HostKVCacheConfigTest, IgnoresOptionsWhenHostCacheIsDisabled) {
+  EXPECT_NO_FATAL_FAILURE(check_host_cache_options(
+      /*host_blocks_factor=*/1.0,
+      /*enable_graph=*/true,
+      /*kv_cache_dtype=*/"int8",
+      /*indexer_cache_dtype=*/"int8"));
+}
+
+TEST_F(HostKVCacheConfigTest, RejectsGraphExecution) {
+  EXPECT_DEATH(check_host_cache_options(/*host_blocks_factor=*/2.0,
+                                        /*enable_graph=*/true,
+                                        /*kv_cache_dtype=*/"auto",
+                                        /*indexer_cache_dtype=*/"auto"),
+               "enable_graph=false");
+}
+
+TEST_F(HostKVCacheConfigTest, RejectsQuantizedKVCache) {
+  EXPECT_DEATH(check_host_cache_options(/*host_blocks_factor=*/2.0,
+                                        /*enable_graph=*/false,
+                                        /*kv_cache_dtype=*/"int8",
+                                        /*indexer_cache_dtype=*/"auto"),
+               "kv_cache_dtype=auto");
+}
+
+TEST_F(HostKVCacheConfigTest, RejectsQuantizedIndexerCache) {
+  EXPECT_DEATH(check_host_cache_options(/*host_blocks_factor=*/2.0,
+                                        /*enable_graph=*/false,
+                                        /*kv_cache_dtype=*/"auto",
+                                        /*indexer_cache_dtype=*/"int8"),
+               "indexer_cache_dtype=auto");
 }
 
 }  // namespace xllm

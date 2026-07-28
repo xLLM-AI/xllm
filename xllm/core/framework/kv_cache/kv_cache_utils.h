@@ -44,6 +44,10 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache_tensor_allocator.h"
 #include "framework/kv_cache/kv_cache_tensor_role.h"
 
+#if defined(USE_MLU)
+#include <cn_api.h>
+#endif
+
 namespace xllm {
 
 class KVCacheShape;
@@ -121,6 +125,9 @@ using BlockTypeTensorMap = std::map<KVCacheTensorRole::Value, torch::Tensor>;
 struct HostPageAlignedRegion {
   void* base_ptr = nullptr;
   size_t total_bytes = 0;
+#if defined(USE_MLU)
+  CNcontext owner_context = nullptr;
+#endif
 
   HostPageAlignedRegion() = default;
   explicit HostPageAlignedRegion(size_t bytes);
@@ -173,6 +180,12 @@ LinearAttentionKVCacheTensors create_linear_attention_kv_cache_tensors(
 // Scale a device block count to the host block count using host_blocks_factor
 // (clamped to >= 1.0 so the host pool is never smaller than the device pool).
 int64_t scale_host_block_count(int64_t block_count, double host_blocks_factor);
+
+// Validate backend-independent host prefix-cache configuration constraints.
+void check_host_cache_options(double host_blocks_factor,
+                              bool enable_graph,
+                              const std::string& kv_cache_dtype,
+                              const std::string& indexer_cache_dtype);
 
 // Build a host tensor shape from a per-layer device shape by scaling dim 0
 // (block count) by host_blocks_factor.

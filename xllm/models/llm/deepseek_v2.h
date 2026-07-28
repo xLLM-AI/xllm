@@ -115,6 +115,9 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     torch::Tensor hidden_states = embed_tokens_(tokens);
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_.size(); i++) {
+      if (!modified_input_params.synchronize_layer(static_cast<uint32_t>(i))) {
+        return ModelOutput();
+      }
       // NOTE: we will remove this until refactor flashinfer API
 #if defined(USE_CUDA) || defined(USE_MUSA)
       attn_metadata.plan_info->layer_id = i;

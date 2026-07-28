@@ -206,6 +206,10 @@ class DeepseekV4ModelImpl final
 
     std::optional<torch::Tensor> residual;
     for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx) {
+      if (!modified_input_params.synchronize_layer(
+              static_cast<uint32_t>(layer_idx))) {
+        return ModelOutput();
+      }
       prepare_layer_metadata(attn_metadata, static_cast<int32_t>(layer_idx));
       h = layers_[layer_idx](h,
                              residual,
