@@ -22,6 +22,7 @@ from dataclasses import dataclass
 import shlex
 import signal
 import subprocess
+import sys
 import time
 from typing import Sequence, TextIO
 
@@ -48,7 +49,7 @@ def _resolve_binary_path(binary_path: str | None) -> str:
     if not os.path.isfile(path):
         raise FileNotFoundError(
             f"xllm server binary was not found: {path}. "
-            "Build and install the wheel before using `python -m xllm.launch_server`."
+            "Build and install the wheel before using `xllm serve`."
         )
     if not os.access(path, os.X_OK):
         raise PermissionError(f"xllm server binary is not executable: {path}")
@@ -61,6 +62,7 @@ def _format_command(command: Sequence[str]) -> str:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
+        prog=f"{os.path.basename(sys.argv[0]) or 'xllm'} serve",
         description=(
             "Launch the packaged xLLM server binary. Unknown arguments are "
             "forwarded to the xllm binary unchanged."
@@ -364,8 +366,36 @@ def launch_server(argv: Sequence[str] | None = None) -> int:
         _close_logs(processes)
 
 
-def main() -> None:
-    raise SystemExit(launch_server())
+def _print_top_level_help(prog: str) -> None:
+    logger.info(
+        "usage: %s <command> [options]\n\n"
+        "commands:\n"
+        "  serve    Launch the xLLM server. Options are forwarded to the "
+        "server binary.\n\n"
+        "Run `%s serve --help` for server options.",
+        prog,
+        prog,
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    args = list(sys.argv[1:] if argv is None else argv)
+    prog = os.path.basename(sys.argv[0]) or "xllm"
+
+    if not args or args[0] in ("-h", "--help"):
+        _print_top_level_help(prog)
+        raise SystemExit(0 if args else 1)
+
+    command, command_args = args[0], args[1:]
+    if command == "serve":
+        raise SystemExit(launch_server(command_args))
+
+    logger.error(
+        "unknown command: %s. Run `%s --help` for available commands.",
+        command,
+        prog,
+    )
+    raise SystemExit(2)
 
 
 if __name__ == "__main__":
