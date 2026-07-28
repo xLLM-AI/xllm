@@ -54,6 +54,10 @@ DEFINE_bool(enable_aclnn_swiglu,
             false,
             "enable ACLNN SwiGLU backend for supported NPU ATB layers.");
 
+DEFINE_bool(enable_mega_moe,
+            false,
+            "enable mega_moe fused operator for MoE expert parallel.");
+
 DEFINE_bool(enable_flashcomm1,
             false,
             "Enable Flash Communication 1 sequence-parallel optimization.");
@@ -103,6 +107,7 @@ void KernelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_split_rmsnorm_rope);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_aclnn_matmul);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_aclnn_swiglu);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mega_moe);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_flashcomm1);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(flashcomm1_min_prefill_tokens);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mmrs_fusion);
@@ -120,6 +125,7 @@ void KernelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_split_rmsnorm_rope);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_aclnn_matmul);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_aclnn_swiglu);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mega_moe);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_flashcomm1);
   XLLM_CONFIG_ASSIGN_FROM_JSON(flashcomm1_min_prefill_tokens);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mmrs_fusion);
@@ -147,6 +153,8 @@ void KernelConfig::append_config_json(
       config_json, default_config, enable_aclnn_matmul);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_aclnn_swiglu);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_mega_moe);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_flashcomm1);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

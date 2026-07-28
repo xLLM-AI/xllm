@@ -21,6 +21,7 @@ limitations under the License.
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -34,6 +35,8 @@ limitations under the License.
 
 #include "framework/config/eplb_config.h"
 #include "framework/config/kernel_config.h"
+#include "framework/config/scheduler_config.h"
+#include "framework/parallel_state/mega_moe_comm_resource.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "kernels/ops_api.h"
 #include "layers/common/dp_utils.h"
@@ -63,6 +66,8 @@ std::vector<int32_t> make_moe_dp_token_nums(
   }
   return normalized;
 }
+
+constexpr int64_t kMegaMoeMaxTokens = 4096;
 
 // Generic local tensor helpers.
 torch::Tensor get_tensor_with_weight_suffix(const StateDict& state_dict,
@@ -544,6 +549,7 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
             options_),
         false);
   }
+  initialize_mega_moe();
 }
 
 void FusedMoEImpl::validate_resolved_quant_method() const {
@@ -762,10 +768,9 @@ void FusedMoEImpl::ensure_group_gemm_weight_layout(torch::Tensor& weight,
       << weight.sizes() << ", expected dim2=" << output_dim;
 }
 
-torch::Tensor FusedMoEImpl::select_experts(
+std::pair<torch::Tensor, torch::Tensor> FusedMoEImpl::select_global_experts(
     const torch::Tensor& hidden_states_2d,
-    const torch::Tensor& router_logits_2d,
-    SelectedExpertInfo& selected_expert_info) {
+    const torch::Tensor& router_logits_2d) {
   torch::Tensor topk_weights;
   torch::Tensor topk_ids;
   std::optional<torch::Tensor> e_score_correction_bias = std::nullopt;
@@ -825,6 +830,16 @@ torch::Tensor FusedMoEImpl::select_experts(
     }
   }
 
+  return std::make_pair(topk_weights.contiguous(), topk_ids.contiguous());
+}
+
+torch::Tensor FusedMoEImpl::select_experts(
+    const torch::Tensor& hidden_states_2d,
+    const torch::Tensor& router_logits_2d,
+    SelectedExpertInfo& selected_expert_info) {
+  auto [topk_weights, topk_ids] =
+      select_global_experts(hidden_states_2d, router_logits_2d);
+
   const int64_t local_expert_start = start_expert_id_;
   const int64_t local_expert_end = start_expert_id_ + num_experts_per_rank_;
   if (parallel_args_.ep_size() > 1) {
@@ -869,10 +884,106 @@ torch::Tensor FusedMoEImpl::select_experts(
   return expand_hidden_states;
 }
 
-torch::Tensor FusedMoEImpl::forward_expert(
+void FusedMoEImpl::initialize_mega_moe() {
+  if (!::xllm::KernelConfig::get_instance().enable_mega_moe()) {
+    return;
+  }
+  CHECK_GT(parallel_args_.ep_size(), 1) << "mega_moe requires ep_size > 1";
+  CHECK(parallel_args_.moe_ep_group_ != nullptr)
+      << "mega_moe requires moe_ep_group";
+  CHECK(xllm::kernel::has_mega_moe()) << "aclnnMegaMoe symbol not available";
+  CHECK(quant_args_.quant_method().empty() && quant_args_.quant_descs().empty())
+      << "mega_moe only supports unquantized weights";
+  CHECK_EQ(options_.dtype(), torch::kBFloat16) << "mega_moe requires bf16";
+
+  ProcessGroup* ep_group = parallel_args_.moe_ep_group_;
+  MegaMoeCommSpec comm_spec;
+  comm_spec.group_name = ep_group->hccl_comm_name(/*init_comm=*/true);
+  comm_spec.hccl_comm = ep_group->hccl_comm();
+  comm_spec.ep_world_size = ep_group->world_size();
+  comm_spec.device_index = options_.device().index();
+  comm_spec.max_num_tokens_per_rank =
+      ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch();
+  mega_moe_comm_resource_ = ep_group->acquire_mega_moe_comm_resource(comm_spec);
+  mega_moe_enabled_ = true;
+}
+
+void FusedMoEImpl::ensure_mega_moe_weights() {
+  if (mega_moe_w1_storage_.defined() && mega_moe_w2_storage_.defined()) {
+    return;
+  }
+  CHECK(w13_is_loaded_ && w2_is_loaded_)
+      << "MegaMoe weights must be loaded before first execution.";
+  mega_moe_w1_storage_ = (w13_.size(1) == hidden_size_)
+                             ? w13_.contiguous()
+                             : w13_.transpose(1, 2).contiguous();
+  mega_moe_w2_storage_ = (w2_.size(2) == hidden_size_)
+                             ? w2_.contiguous()
+                             : w2_.transpose(1, 2).contiguous();
+  mega_moe_w1_list_.reserve(static_cast<size_t>(num_experts_per_rank_));
+  mega_moe_w2_list_.reserve(static_cast<size_t>(num_experts_per_rank_));
+  for (int64_t i = 0; i < num_experts_per_rank_; ++i) {
+    mega_moe_w1_list_.push_back(mega_moe_w1_storage_.select(0, i));
+    mega_moe_w2_list_.push_back(mega_moe_w2_storage_.select(0, i));
+  }
+}
+
+torch::Tensor FusedMoEImpl::forward_mega_moe(
     const torch::Tensor& hidden_states,
     const torch::Tensor& router_logits,
     const std::optional<torch::Tensor>& shared_output) {
+  CHECK(mega_moe_enabled_);
+  auto comm = mega_moe_comm_resource_.lock();
+  CHECK(comm != nullptr)
+      << "MegaMoe communication resource expired before collective launch.";
+
+  ensure_mega_moe_weights();
+  const auto hidden_states_shape = hidden_states.sizes();
+  auto input_2d =
+      hidden_states.reshape({-1, hidden_states.size(-1)}).contiguous();
+  auto router_logits_2d = router_logits.reshape({-1, router_logits.size(-1)});
+
+  auto [topk_weights, topk_ids] =
+      select_global_experts(input_2d, router_logits_2d);
+  topk_weights = topk_weights.to(torch::kFloat32).contiguous();
+  topk_ids = topk_ids.to(torch::kInt32).contiguous();
+
+  const int64_t ep_world_size = parallel_args_.ep_size();
+
+  xllm::kernel::MegaMoeParams params;
+  params.context = comm->context_tensor();
+  params.x = input_2d;
+  params.topk_ids = topk_ids;
+  params.topk_weights = topk_weights;
+  params.weight1 = torch::TensorList(mega_moe_w1_list_);
+  params.weight2 = torch::TensorList(mega_moe_w2_list_);
+  params.moe_expert_num = num_total_experts_;
+  params.ep_world_size = ep_world_size;
+  params.ccl_buffer_size = comm->ccl_buffer_size();
+  params.num_max_tokens_per_rank = comm->max_num_tokens_per_rank();
+
+  auto [y, expert_token_nums] = xllm::kernel::mega_moe(params);
+
+  (void)expert_token_nums;
+  auto output = y.reshape(hidden_states_shape);
+  if (shared_output.has_value()) {
+    auto shared = shared_output.value();
+    if (tp_pg_->world_size() > 1) {
+      shared = parallel_state::reduce(shared, tp_pg_);
+    }
+    output = output + shared;
+  }
+  return output;
+}
+
+torch::Tensor FusedMoEImpl::forward_expert(
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& router_logits,
+    const std::optional<torch::Tensor>& shared_output,
+    bool use_mega_moe) {
+  if (use_mega_moe) {
+    return forward_mega_moe(hidden_states, router_logits, shared_output);
+  }
   // prepare the parameters for MoE computation
   torch::IntArrayRef hidden_states_shape = hidden_states.sizes();
   torch::ScalarType hidden_states_dtype = hidden_states.dtype().toScalarType();
@@ -1166,7 +1277,10 @@ torch::Tensor FusedMoEImpl::forward(const torch::Tensor& hidden_states,
     }
   }
   auto router_logits = gate_(input);
-  auto output = forward_expert(input, router_logits, shared_output);
+  const bool use_mega_moe =
+      mega_moe_enabled_ && input.size(0) <= kMegaMoeMaxTokens;
+  auto output =
+      forward_expert(input, router_logits, shared_output, use_mega_moe);
 
   if (need_slice) {
     const int64_t dp_rank = parallel_args_.dp_local_process_group_->rank();
@@ -1685,7 +1799,10 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts(
   std::vector<int64_t> router_shape = input.sizes().vec();
   router_shape.back() = num_total_experts_;
   torch::Tensor router_logits = torch::empty(router_shape, input.options());
-  torch::Tensor output = forward_expert(input, router_logits, shared_output);
+  const bool use_mega_moe =
+      mega_moe_enabled_ && input.size(0) <= kMegaMoeMaxTokens;
+  torch::Tensor output =
+      forward_expert(input, router_logits, shared_output, use_mega_moe);
   preselected_experts_ = std::nullopt;
 
   if (need_slice) {
