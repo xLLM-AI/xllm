@@ -88,10 +88,13 @@ std::pair<torch::Tensor, torch::Tensor> npu_mega_chunk_gdn(
     k_normalized = npu_l2norm_last_dim(k);
   }
 
-  const bool use_bf16_compute =
-      q_normalized.scalar_type() == torch::kBFloat16 &&
-      k_normalized.scalar_type() == torch::kBFloat16 &&
-      v.scalar_type() == torch::kBFloat16;
+  // Force the fp16 compute path for GDN prefill. The recurrent state S
+  // accumulates K^T V over the whole prefix across chunks; bf16's 8-bit
+  // mantissa loses precision as the sequence grows, and past ~1700 prefill
+  // tokens the output degenerates into repeated "!". This is a regression from
+  // #1999, which switched this kernel from hardcoded fp16 to bf16. fp16
+  // restores the numerically stable pre-#1999 behavior.
+  const bool use_bf16_compute = false;
   const auto compute_dtype =
       use_bf16_compute ? torch::kBFloat16 : torch::kFloat16;
   auto q_compute = q_normalized.to(compute_dtype);
