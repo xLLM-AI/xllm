@@ -24,6 +24,8 @@ limitations under the License.
 #include <memory>
 #include <string>
 #include <tuple>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "core/framework/dit_cache/dit_cache.h"
@@ -32,6 +34,7 @@ limitations under the License.
 #include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/state_dict/utils.h"
+#include "core/layers/common/ada_layer_norm.h"
 #include "core/layers/common/add_matmul.h"
 #include "core/layers/common/rms_norm.h"
 #include "models/dit/attn_processor/attn_processor.h"
@@ -94,9 +97,9 @@ inline torch::Tensor apply_rotary_emb_batched(const torch::Tensor& x,
 #endif
 }
 
-// Joint attention over [B, S, H, D] with an optional bool mask
-// (True == attend). NPU uses npu_fusion_attention (BSND layout); the fallback
-// uses scaled_dot_product_attention.
+// Joint attention over [B, S, H, D] with an optional bool mask. NPU uses a
+// materialized block mask (True == masked out); the fallback uses a broadcast
+// keep mask (True == attend).
 inline torch::Tensor joyimage_joint_attention(
     const torch::Tensor& query,  // [B, S, H, D]
     const torch::Tensor& key,    // [B, S, H, D]
@@ -104,11 +107,6 @@ inline torch::Tensor joyimage_joint_attention(
     int64_t num_heads,
     const torch::Tensor& attn_mask = torch::Tensor()) {
 #if defined(USE_NPU)
-  // JoyImage uses full bidirectional attention. Do not pass the pipeline-side
-  // padding mask to npu_fusion_attention: that mask is [B,1,1,Skv], while the
-  // NPU kernel requires an explicit Sq dimension ([B,1,Sq,Skv], [Sq,Skv], ...).
-  // This mirrors the QwenImageEditPlus/Wan DiT NPU paths, which run full
-  // attention with atten_mask=nullopt.
   auto results = at_npu::native::custom_ops::npu_fusion_attention(
       query,
       key,
@@ -117,7 +115,7 @@ inline torch::Tensor joyimage_joint_attention(
       /*input_layout=*/"BSND",
       /*pse=*/torch::nullopt,
       /*padding_mask=*/torch::nullopt,
-      /*atten_mask=*/torch::nullopt,
+      /*atten_mask=*/attn_mask,
       /*scale=*/std::pow(static_cast<double>(query.size(3)), -0.5),
       /*keep_prob=*/1.0,
       /*pre_tockens=*/65535,
@@ -297,12 +295,20 @@ class JoyAttentionImpl final : public torch::nn::Module {
                    int64_t num_heads,
                    int64_t head_dim,
                    double eps = 1e-6)
-      : options_(context.get_tensor_options()), heads_(num_heads) {
-    int64_t inner = num_heads * head_dim;
+      : heads_(num_heads),
+        head_dim_(head_dim),
+        options_(context.get_tensor_options()) {
+    const int64_t inner = num_heads * head_dim;
 
-    img_attn_qkv_ = register_module(
-        "img_attn_qkv",
-        layer::AddMatmulWeightTransposed(dim, inner * 3, true, options_));
+    img_attn_q_ = register_module(
+        "img_attn_q",
+        layer::AddMatmulWeightTransposed(dim, inner, true, options_));
+    img_attn_k_ = register_module(
+        "img_attn_k",
+        layer::AddMatmulWeightTransposed(dim, inner, true, options_));
+    img_attn_v_ = register_module(
+        "img_attn_v",
+        layer::AddMatmulWeightTransposed(dim, inner, true, options_));
     img_attn_q_norm_ = register_module("img_attn_q_norm",
                                        layer::RMSNorm(head_dim, eps, options_));
     img_attn_k_norm_ = register_module("img_attn_k_norm",
@@ -311,9 +317,15 @@ class JoyAttentionImpl final : public torch::nn::Module {
         "img_attn_proj",
         layer::AddMatmulWeightTransposed(inner, dim, true, options_));
 
-    txt_attn_qkv_ = register_module(
-        "txt_attn_qkv",
-        layer::AddMatmulWeightTransposed(dim, inner * 3, true, options_));
+    txt_attn_q_ = register_module(
+        "txt_attn_q",
+        layer::AddMatmulWeightTransposed(dim, inner, true, options_));
+    txt_attn_k_ = register_module(
+        "txt_attn_k",
+        layer::AddMatmulWeightTransposed(dim, inner, true, options_));
+    txt_attn_v_ = register_module(
+        "txt_attn_v",
+        layer::AddMatmulWeightTransposed(dim, inner, true, options_));
     txt_attn_q_norm_ = register_module("txt_attn_q_norm",
                                        layer::RMSNorm(head_dim, eps, options_));
     txt_attn_k_norm_ = register_module("txt_attn_k_norm",
@@ -324,16 +336,22 @@ class JoyAttentionImpl final : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    img_attn_qkv_->load_state_dict(
-        state_dict.get_dict_with_prefix("img_attn_qkv."));
+    load_qkv_projections(state_dict,
+                         /*prefix=*/"img_attn_qkv",
+                         img_attn_q_,
+                         img_attn_k_,
+                         img_attn_v_);
     img_attn_q_norm_->load_state_dict(
         state_dict.get_dict_with_prefix("img_attn_q_norm."));
     img_attn_k_norm_->load_state_dict(
         state_dict.get_dict_with_prefix("img_attn_k_norm."));
     img_attn_proj_->load_state_dict(
         state_dict.get_dict_with_prefix("img_attn_proj."));
-    txt_attn_qkv_->load_state_dict(
-        state_dict.get_dict_with_prefix("txt_attn_qkv."));
+    load_qkv_projections(state_dict,
+                         /*prefix=*/"txt_attn_qkv",
+                         txt_attn_q_,
+                         txt_attn_k_,
+                         txt_attn_v_);
     txt_attn_q_norm_->load_state_dict(
         state_dict.get_dict_with_prefix("txt_attn_q_norm."));
     txt_attn_k_norm_->load_state_dict(
@@ -342,11 +360,15 @@ class JoyAttentionImpl final : public torch::nn::Module {
         state_dict.get_dict_with_prefix("txt_attn_proj."));
   }
   void verify_loaded_weights(const std::string& prefix) {
-    img_attn_qkv_->verify_loaded_weights(prefix + "img_attn_qkv.");
+    img_attn_q_->verify_loaded_weights(prefix + "img_attn_qkv.q.");
+    img_attn_k_->verify_loaded_weights(prefix + "img_attn_qkv.k.");
+    img_attn_v_->verify_loaded_weights(prefix + "img_attn_qkv.v.");
     img_attn_q_norm_->verify_loaded_weights(prefix + "img_attn_q_norm.");
     img_attn_k_norm_->verify_loaded_weights(prefix + "img_attn_k_norm.");
     img_attn_proj_->verify_loaded_weights(prefix + "img_attn_proj.");
-    txt_attn_qkv_->verify_loaded_weights(prefix + "txt_attn_qkv.");
+    txt_attn_q_->verify_loaded_weights(prefix + "txt_attn_qkv.q.");
+    txt_attn_k_->verify_loaded_weights(prefix + "txt_attn_qkv.k.");
+    txt_attn_v_->verify_loaded_weights(prefix + "txt_attn_qkv.v.");
     txt_attn_q_norm_->verify_loaded_weights(prefix + "txt_attn_q_norm.");
     txt_attn_k_norm_->verify_loaded_weights(prefix + "txt_attn_k_norm.");
     txt_attn_proj_->verify_loaded_weights(prefix + "txt_attn_proj.");
@@ -354,16 +376,60 @@ class JoyAttentionImpl final : public torch::nn::Module {
 
  public:
   int64_t heads_;
-  layer::AddMatmulWeightTransposed img_attn_qkv_{nullptr};
+  int64_t head_dim_;
+  layer::AddMatmulWeightTransposed img_attn_q_{nullptr};
+  layer::AddMatmulWeightTransposed img_attn_k_{nullptr};
+  layer::AddMatmulWeightTransposed img_attn_v_{nullptr};
   layer::RMSNorm img_attn_q_norm_{nullptr};
   layer::RMSNorm img_attn_k_norm_{nullptr};
   layer::AddMatmulWeightTransposed img_attn_proj_{nullptr};
-  layer::AddMatmulWeightTransposed txt_attn_qkv_{nullptr};
+  layer::AddMatmulWeightTransposed txt_attn_q_{nullptr};
+  layer::AddMatmulWeightTransposed txt_attn_k_{nullptr};
+  layer::AddMatmulWeightTransposed txt_attn_v_{nullptr};
   layer::RMSNorm txt_attn_q_norm_{nullptr};
   layer::RMSNorm txt_attn_k_norm_{nullptr};
   layer::AddMatmulWeightTransposed txt_attn_proj_{nullptr};
 
  private:
+  void load_qkv_projections(const StateDict& state_dict,
+                            const std::string& prefix,
+                            layer::AddMatmulWeightTransposed& q_projection,
+                            layer::AddMatmulWeightTransposed& k_projection,
+                            layer::AddMatmulWeightTransposed& v_projection) {
+    torch::Tensor fused_weight = state_dict.get_tensor(prefix + ".weight");
+    torch::Tensor fused_bias = state_dict.get_tensor(prefix + ".bias");
+    if (!fused_weight.defined() && !fused_bias.defined()) {
+      return;
+    }
+
+    const int64_t inner = heads_ * head_dim_;
+    CHECK(fused_weight.defined()) << prefix << ".weight is missing";
+    CHECK(fused_bias.defined()) << prefix << ".bias is missing";
+    CHECK_EQ(fused_weight.dim(), 2) << prefix << ".weight must be 2D";
+    CHECK_EQ(fused_weight.size(0), inner * 3)
+        << prefix << ".weight output size mismatch";
+    CHECK_EQ(fused_bias.dim(), 1) << prefix << ".bias must be 1D";
+    CHECK_EQ(fused_bias.size(0), inner * 3)
+        << prefix << ".bias output size mismatch";
+
+    auto load_projection = [&](layer::AddMatmulWeightTransposed& projection,
+                               int64_t projection_index) {
+      const int64_t start = projection_index * inner;
+      std::unordered_map<std::string, torch::Tensor> projection_tensors;
+      projection_tensors.reserve(2);
+      projection_tensors.emplace(
+          "weight", fused_weight.slice(/*dim=*/0, start, start + inner));
+      projection_tensors.emplace(
+          "bias", fused_bias.slice(/*dim=*/0, start, start + inner));
+      StateDict projection_state_dict(std::move(projection_tensors));
+      projection->load_state_dict(projection_state_dict);
+    };
+
+    load_projection(q_projection, /*projection_index=*/0);
+    load_projection(k_projection, /*projection_index=*/1);
+    load_projection(v_projection, /*projection_index=*/2);
+  }
+
   torch::TensorOptions options_;
 };
 TORCH_MODULE(JoyAttention);
@@ -396,18 +462,19 @@ class JoyAttnProcessor final : public JoyAttnProcessorBase {
                                  const torch::Tensor& rope_sin,
                                  const torch::Tensor& attn_mask) override {
     JoyAttention& attn = attention();
-    auto img_qkv = attn->img_attn_qkv_->forward(hidden_states);
-    auto img_chunks = img_qkv.chunk(3, -1);
-    auto txt_qkv = attn->txt_attn_qkv_->forward(encoder_hidden_states);
-    auto txt_chunks = txt_qkv.chunk(3, -1);
-
     std::vector<int64_t> reshape = {attn->heads_, -1};
-    auto img_q = img_chunks[0].unflatten(-1, reshape);
-    auto img_k = img_chunks[1].unflatten(-1, reshape);
-    auto img_v = img_chunks[2].unflatten(-1, reshape);
-    auto txt_q = txt_chunks[0].unflatten(-1, reshape);
-    auto txt_k = txt_chunks[1].unflatten(-1, reshape);
-    auto txt_v = txt_chunks[2].unflatten(-1, reshape);
+    auto img_q =
+        attn->img_attn_q_->forward(hidden_states).unflatten(-1, reshape);
+    auto img_k =
+        attn->img_attn_k_->forward(hidden_states).unflatten(-1, reshape);
+    auto img_v =
+        attn->img_attn_v_->forward(hidden_states).unflatten(-1, reshape);
+    auto txt_q = attn->txt_attn_q_->forward(encoder_hidden_states)
+                     .unflatten(-1, reshape);
+    auto txt_k = attn->txt_attn_k_->forward(encoder_hidden_states)
+                     .unflatten(-1, reshape);
+    auto txt_v = attn->txt_attn_v_->forward(encoder_hidden_states)
+                     .unflatten(-1, reshape);
 
     img_q = std::get<0>(attn->img_attn_q_norm_->forward(img_q));
     img_k = std::get<0>(attn->img_attn_k_norm_->forward(img_k));
@@ -456,13 +523,9 @@ class JoySequenceParallelAttnProcessor final
                                  const torch::Tensor& rope_sin,
                                  const torch::Tensor& attn_mask) override {
     JoyAttention& attn = attention();
-    auto img_qkv = attn->img_attn_qkv_->forward(hidden_states);
-    auto img_chunks = img_qkv.chunk(3, -1);
-
     std::vector<int64_t> reshape = {attn->heads_, -1};
-    auto img_q = img_chunks[0].unflatten(-1, reshape);
-    auto img_k = img_chunks[1].unflatten(-1, reshape);
-    auto img_v = img_chunks[2].unflatten(-1, reshape);
+    auto img_q =
+        attn->img_attn_q_->forward(hidden_states).unflatten(-1, reshape);
 
     auto img_q_handler =
         xllm::parallel_state::all_to_all_4D(img_q,
@@ -472,6 +535,8 @@ class JoySequenceParallelAttnProcessor final
                                             process_group(),
                                             /*enable_sp_pad=*/true,
                                             /*tensor_name=*/"hidden_states");
+    auto img_k =
+        attn->img_attn_k_->forward(hidden_states).unflatten(-1, reshape);
     auto img_k_handler =
         xllm::parallel_state::all_to_all_4D(img_k,
                                             /*scatter_idx=*/2,
@@ -480,6 +545,8 @@ class JoySequenceParallelAttnProcessor final
                                             process_group(),
                                             /*enable_sp_pad=*/true,
                                             /*tensor_name=*/"hidden_states");
+    auto img_v =
+        attn->img_attn_v_->forward(hidden_states).unflatten(-1, reshape);
     auto img_v_handler =
         xllm::parallel_state::all_to_all_4D(img_v,
                                             /*scatter_idx=*/2,
@@ -489,11 +556,8 @@ class JoySequenceParallelAttnProcessor final
                                             /*enable_sp_pad=*/true,
                                             /*tensor_name=*/"hidden_states");
 
-    auto txt_qkv = attn->txt_attn_qkv_->forward(encoder_hidden_states);
-    auto txt_chunks = txt_qkv.chunk(3, -1);
-    auto txt_q = txt_chunks[0].unflatten(-1, reshape);
-    auto txt_k = txt_chunks[1].unflatten(-1, reshape);
-    auto txt_v = txt_chunks[2].unflatten(-1, reshape);
+    auto txt_q = attn->txt_attn_q_->forward(encoder_hidden_states)
+                     .unflatten(-1, reshape);
 
     auto txt_q_handler = xllm::parallel_state::all_to_all_4D(
         txt_q,
@@ -503,6 +567,8 @@ class JoySequenceParallelAttnProcessor final
         process_group(),
         /*enable_sp_pad=*/true,
         /*tensor_name=*/"encoder_hidden_states");
+    auto txt_k = attn->txt_attn_k_->forward(encoder_hidden_states)
+                     .unflatten(-1, reshape);
     auto txt_k_handler = xllm::parallel_state::all_to_all_4D(
         txt_k,
         /*scatter_idx=*/2,
@@ -511,6 +577,8 @@ class JoySequenceParallelAttnProcessor final
         process_group(),
         /*enable_sp_pad=*/true,
         /*tensor_name=*/"encoder_hidden_states");
+    auto txt_v = attn->txt_attn_v_->forward(encoder_hidden_states)
+                     .unflatten(-1, reshape);
     auto txt_v_handler = xllm::parallel_state::all_to_all_4D(
         txt_v,
         /*scatter_idx=*/2,
@@ -620,9 +688,26 @@ class TransformerBlockImpl final : public torch::nn::Module {
     int64_t mlp_hidden = static_cast<int64_t>(dim * mlp_width_ratio);
 
     img_mod_ = register_module("img_mod", Modulate(dim, 6));
+#if defined(USE_NPU)
+    const torch::TensorOptions options = context.get_tensor_options();
+    img_norm1_ = register_module(
+        "img_norm1",
+        layer::AdaLayerNorm(dim, eps, /*elementwise_affine=*/false, options));
+    img_norm2_ = register_module(
+        "img_norm2",
+        layer::AdaLayerNorm(dim, eps, /*elementwise_affine=*/false, options));
+#endif
     img_mlp_ = register_module(
         "img_mlp", qwenimage::FeedForward(context, dim, dim, /*mult=*/4));
     txt_mod_ = register_module("txt_mod", Modulate(dim, 6));
+#if defined(USE_NPU)
+    txt_norm1_ = register_module(
+        "txt_norm1",
+        layer::AdaLayerNorm(dim, eps, /*elementwise_affine=*/false, options));
+    txt_norm2_ = register_module(
+        "txt_norm2",
+        layer::AdaLayerNorm(dim, eps, /*elementwise_affine=*/false, options));
+#endif
     txt_mlp_ = register_module(
         "txt_mlp", qwenimage::FeedForward(context, dim, dim, /*mult=*/4));
     attn_ = register_module(
@@ -668,32 +753,50 @@ class TransformerBlockImpl final : public torch::nn::Module {
     auto ehs = encoder_hidden_states;
 
     // --- attention ---
+#if defined(USE_NPU)
+    auto img_modulated = img_norm1_->forward(hs, img_c1, img_s1);
+    auto txt_modulated = txt_norm1_->forward(ehs, txt_c1, txt_s1);
+#else
     auto img_normed = fp32_norm(hs, eps_);
     auto txt_normed = fp32_norm(ehs, eps_);
     auto img_modulated =
         img_normed * (1 + img_c1.unsqueeze(1)) + img_s1.unsqueeze(1);
     auto txt_modulated =
         txt_normed * (1 + txt_c1.unsqueeze(1)) + txt_s1.unsqueeze(1);
+#endif
 
     auto attn_out = attn_processor_->forward(
         img_modulated, txt_modulated, rope_cos, rope_sin, attn_mask);
     auto img_attn = std::get<0>(attn_out);
     auto txt_attn = std::get<1>(attn_out);
 
-    hs = hs + img_attn * img_g1.unsqueeze(1);
-    ehs = ehs + txt_attn * txt_g1.unsqueeze(1);
+    img_attn.mul_(img_g1.unsqueeze(1));
+    img_attn.add_(hs);
+    hs = img_attn;
+    txt_attn.mul_(txt_g1.unsqueeze(1));
+    txt_attn.add_(ehs);
+    ehs = txt_attn;
 
     // --- FFN ---
+#if defined(USE_NPU)
+    auto img_ffn_in = img_norm2_->forward(hs, img_c2, img_s2);
+    auto txt_ffn_in = txt_norm2_->forward(ehs, txt_c2, txt_s2);
+#else
     auto img_ffn_normed = fp32_norm(hs, eps_);
     auto txt_ffn_normed = fp32_norm(ehs, eps_);
     auto img_ffn_in =
         img_ffn_normed * (1 + img_c2.unsqueeze(1)) + img_s2.unsqueeze(1);
     auto txt_ffn_in =
         txt_ffn_normed * (1 + txt_c2.unsqueeze(1)) + txt_s2.unsqueeze(1);
+#endif
     auto img_ffn = img_mlp_->forward(img_ffn_in);
     auto txt_ffn = txt_mlp_->forward(txt_ffn_in);
-    hs = hs + img_ffn * img_g2.unsqueeze(1);
-    ehs = ehs + txt_ffn * txt_g2.unsqueeze(1);
+    img_ffn.mul_(img_g2.unsqueeze(1));
+    img_ffn.add_(hs);
+    hs = img_ffn;
+    txt_ffn.mul_(txt_g2.unsqueeze(1));
+    txt_ffn.add_(ehs);
+    ehs = txt_ffn;
 
     return std::make_tuple(hs, ehs);
   }
@@ -717,6 +820,12 @@ class TransformerBlockImpl final : public torch::nn::Module {
   double eps_;
   Modulate img_mod_{nullptr};
   Modulate txt_mod_{nullptr};
+#if defined(USE_NPU)
+  layer::AdaLayerNorm img_norm1_{nullptr};
+  layer::AdaLayerNorm img_norm2_{nullptr};
+  layer::AdaLayerNorm txt_norm1_{nullptr};
+  layer::AdaLayerNorm txt_norm2_{nullptr};
+#endif
   qwenimage::FeedForward img_mlp_{nullptr};
   qwenimage::FeedForward txt_mlp_{nullptr};
   JoyAttention attn_{nullptr};

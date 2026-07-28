@@ -27,7 +27,6 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/kernel_config.h"
-#include "core/framework/config/parallel_config.h"
 #include "core/framework/dit_cache/dit_cache.h"
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/kv_cache/kv_cache.h"
@@ -35,7 +34,6 @@ limitations under the License.
 #include "core/framework/model_context.h"
 #include "core/framework/multimodal/mm_input.h"
 #include "core/framework/multimodal/mm_visitor.h"
-#include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/tokenizer/tokenizer.h"
@@ -44,6 +42,7 @@ limitations under the License.
 #include "models/dit/processors/vae_image_processor.h"
 #include "models/dit/schedulers/flowmatch_euler_discrete_scheduler.h"
 #include "models/dit/transformers/transformer_joyimage_edit_plus.h"
+#include "models/dit/utils/dit_parallel_mixin.h"
 #include "models/dit/utils/util.h"
 #include "models/model_registry.h"
 #include "models/vlm/mposition/mposition.h"
@@ -55,7 +54,8 @@ namespace xllm {
 
 using JoyImageEditTextEncoder = Qwen3_VLForConditionalGeneration;
 
-class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
+class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
+                                     public dit::CFGParallelMixin {
  public:
   using JoyImageShapeList = std::vector<std::vector<std::array<int64_t, 3>>>;
 
@@ -66,7 +66,8 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
   };
 
   JoyImageEditPlusPipelineImpl(const DiTModelContext& context)
-      : context_(context),
+      : dit::CFGParallelMixin(context),
+        context_(context),
         parallel_args_(context.get_parallel_args()),
         vae_model_args_(context.get_model_args("vae")) {
     options_ = context.get_tensor_options();
@@ -314,7 +315,7 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
         auto hw = joyimage_bucket(ih, iw);
         auto img4 = img.unsqueeze(0).to(device_);
         vae_refs[b].push_back(vae_image_processor_->preprocess(
-            img4, hw.first, hw.second, /*resize_mode=*/"default"));
+            img4, hw.first, hw.second, /*resize_mode=*/"lanczos"));
       }
     }
     bool do_cfg = guidance_scale > 1.0;
@@ -373,6 +374,9 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
     auto target_mask = std::get<1>(lp);
     auto shape_list = std::get<2>(lp);
     auto clean_backup = latents.clone();
+    const std::array<int64_t, 3>& target_shape = shape_list.front().front();
+    const int64_t target_patch_count =
+        target_shape[0] * target_shape[1] * target_shape[2];
 
     // Timesteps (static shift; no dynamic shifting for Joy).
     scheduler_->set_timesteps(num_inference_steps, device_);
@@ -381,83 +385,41 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
     DiTCache::get_instance().set_infer_steps(num_inference_steps);
     DiTCache::get_instance().set_num_blocks(num_layers_);
 
-    const int32_t cfg_size = ::xllm::ParallelConfig::get_instance().cfg_size();
-    torch::Tensor transformer_encoder_hidden_states;
-    torch::Tensor transformer_encoder_hidden_states_mask;
-    JoyImageShapeList transformer_shape_list = shape_list;
-    bool transformer_use_cfg = false;
-    int64_t transformer_batch_size = batch_size;
-    if (!do_cfg) {
-      transformer_encoder_hidden_states = prompt_embeds;
-      transformer_encoder_hidden_states_mask = prompt_embeds_mask;
-    } else if (cfg_size == 2) {
-      CHECK(parallel_args_.dit_cfg_group_ != nullptr)
-          << "JoyImageEditPlus CFG parallel requires dit_cfg_group_";
-      const int32_t rank = parallel_args_.dit_cfg_group_->rank();
-      if (rank == 0) {
-        transformer_encoder_hidden_states = prompt_embeds;
-        transformer_encoder_hidden_states_mask = prompt_embeds_mask;
-      } else {
-        transformer_encoder_hidden_states = neg_embeds;
-        transformer_encoder_hidden_states_mask = neg_embeds_mask;
-        transformer_use_cfg = true;
-      }
-    } else {
-      transformer_encoder_hidden_states =
-          torch::cat({neg_embeds, prompt_embeds}, /*dim=*/0);
-      transformer_encoder_hidden_states_mask =
-          torch::cat({neg_embeds_mask, prompt_embeds_mask}, /*dim=*/0);
-      transformer_shape_list.insert(
-          transformer_shape_list.end(), shape_list.begin(), shape_list.end());
-      transformer_batch_size *= 2;
-    }
-
-    TransformerForwardContext transformer_context =
-        prepare_transformer_context(transformer_batch_size,
+    TransformerForwardContext prompt_transformer_context =
+        prepare_transformer_context(batch_size,
                                     latents.size(1),
                                     latents.device(),
-                                    transformer_encoder_hidden_states_mask,
-                                    transformer_shape_list);
+                                    prompt_embeds_mask,
+                                    shape_list);
+    TransformerForwardContext negative_transformer_context;
+    if (do_cfg) {
+      negative_transformer_context =
+          prepare_transformer_context(batch_size,
+                                      latents.size(1),
+                                      latents.device(),
+                                      neg_embeds_mask,
+                                      shape_list);
+    }
 
     for (int64_t i = 0; i < timesteps.size(0); ++i) {
       auto t = timesteps[i];
-      // Restore reference patches.
-      latents.index_put_({~target_mask}, clean_backup.index({~target_mask}));
 
       torch::Tensor noise_pred;
       if (do_cfg) {
-        torch::Tensor cond;
-        torch::Tensor uncond;
-        if (cfg_size == 2) {
-          auto t_expand = t.repeat({batch_size});
-          torch::Tensor local_pred =
-              sequence_parallel_forward(latents,
-                                        t_expand,
-                                        transformer_encoder_hidden_states,
-                                        transformer_context,
-                                        transformer_use_cfg,
-                                        /*step_index=*/i + 1);
-          torch::Tensor gathered_pred =
-              xllm::parallel_state::gather(local_pred,
-                                           parallel_args_.dit_cfg_group_,
-                                           /*dim=*/0);
-          auto chunks = gathered_pred.chunk(2, 0);
-          cond = chunks[0];
-          uncond = chunks[1];
-        } else {
-          auto model_in = torch::cat({latents, latents}, 0);
-          auto t_expand = t.repeat({model_in.size(0)});
-          auto pred =
-              sequence_parallel_forward(model_in,
-                                        t_expand,
-                                        transformer_encoder_hidden_states,
-                                        transformer_context,
-                                        /*use_cfg=*/false,
-                                        /*step_index=*/i + 1);
-          auto chunks = pred.chunk(2, 0);
-          uncond = chunks[0];
-          cond = chunks[1];
-        }
+        torch::Tensor t_expand = t.repeat({batch_size});
+        auto [cond, uncond] = exec_with_cfg([&](bool is_positive) {
+          const torch::Tensor& encoder_hidden_states =
+              is_positive ? prompt_embeds : neg_embeds;
+          const TransformerForwardContext& transformer_context =
+              is_positive ? prompt_transformer_context
+                          : negative_transformer_context;
+          return sequence_parallel_forward(latents,
+                                           t_expand,
+                                           encoder_hidden_states,
+                                           transformer_context,
+                                           /*use_cfg=*/!is_positive,
+                                           /*step_index=*/i + 1);
+        });
         auto comb = uncond + guidance_scale * (cond - uncond);
         // Norm-rescale (diffusers): comb * (||cond|| / ||comb||) over channel
         // dim (2) of the 6D [B, N, C, pt, ph, pw] prediction.
@@ -467,21 +429,22 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
             torch::norm(comb, 2, std::vector<int64_t>{2}, /*keepdim=*/true);
         noise_pred = comb * (cond_norm / noise_norm.clamp_min(1e-6));
       } else {
-        auto t_expand = t.repeat({batch_size});
-        noise_pred =
-            sequence_parallel_forward(latents,
-                                      t_expand,
-                                      transformer_encoder_hidden_states,
-                                      transformer_context,
-                                      /*use_cfg=*/false,
-                                      /*step_index=*/i + 1);
+        torch::Tensor t_expand = t.repeat({batch_size});
+        noise_pred = sequence_parallel_forward(latents,
+                                               t_expand,
+                                               prompt_embeds,
+                                               prompt_transformer_context,
+                                               /*use_cfg=*/false,
+                                               /*step_index=*/i + 1);
       }
 
       latents = scheduler_->step(noise_pred, t, latents).to(latents.dtype());
+      latents.slice(/*dim=*/1, target_patch_count, latents.size(1))
+          .copy_(clean_backup.slice(
+              /*dim=*/1, target_patch_count, clean_backup.size(1)));
     }
 
-    // Restore refs and decode target patches per sample.
-    latents.index_put_({~target_mask}, clean_backup.index({~target_mask}));
+    // Decode target patches per sample.
     std::vector<torch::Tensor> images;
     for (int64_t b = 0; b < batch_size; ++b) {
       auto thw = shape_list[b][0];
@@ -818,7 +781,6 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
     torch::Tensor rope_sin = torch::stack(sin_list, /*dim=*/0);
     torch::Tensor attention_mask;
 
-#if !defined(USE_NPU)
     if (encoder_hidden_states_mask.defined()) {
       torch::Tensor image_mask = torch::zeros(
           {batch_size, image_sequence_length},
@@ -835,9 +797,20 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
       torch::Tensor full_mask =
           torch::cat({image_mask, encoder_hidden_states_mask.to(torch::kBool)},
                      /*dim=*/1);
+#if defined(USE_NPU)
+      const int64_t sequence_length = full_mask.size(1);
+      attention_mask = full_mask.logical_not()
+                           .unsqueeze(1)
+                           .unsqueeze(1)
+                           .expand({batch_size,
+                                    /*num_heads=*/1,
+                                    sequence_length,
+                                    sequence_length})
+                           .contiguous();
+#else
       attention_mask = full_mask.unsqueeze(1).unsqueeze(1);
-    }
 #endif
+    }
 
     return {rope_cos, rope_sin, attention_mask};
   }
