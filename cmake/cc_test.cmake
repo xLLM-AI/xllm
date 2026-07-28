@@ -113,6 +113,9 @@ function(cc_test)
   )
 
   if(USE_NPU)
+    target_sources(${CC_TEST_NAME} PRIVATE
+      "${PROJECT_SOURCE_DIR}/tests/npu_test_environment.cpp"
+    )
     set(COMMON_LIBS Python::Python torch_npu torch_python)
     target_link_libraries(${CC_TEST_NAME} PRIVATE ${COMMON_LIBS})
   endif()
