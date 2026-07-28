@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,7 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/multimodal/embedding_output.h"
 #include "mm_type.h"
+#include "util/hash_util.h"
 
 namespace xllm {
 
@@ -39,6 +41,7 @@ struct MMInputItem {
   void clear() {
     type = MMType::NONE;
     raw_data.clear();
+    uuid.clear();
   }
 
   std::optional<torch::Tensor> get_decode_data(MMType type_) const {
@@ -60,6 +63,7 @@ struct MMInputItem {
   uint32_t type = MMType::NONE;
 
   std::string raw_data;  // binary
+  std::string uuid;
 
   torch::Tensor decode_image;  // image: rgb, [c,h,w], uint8
   torch::Tensor decode_video;  // video: rgb, [t,c,h,w], uint8
@@ -69,6 +73,10 @@ struct MMInputItem {
   AudioMetadata audio_meta;
   EmbeddingInput embedding;
 };
+
+std::optional<XXH3Key> hash_mm_item(const MMInputItem& item);
+
+bool is_url_type(const std::string& type);
 
 struct MMPayload {
   MMPayload() = default;
@@ -146,6 +154,7 @@ enum class MMErrCode : uint8_t {
   PARSE_EMB_ERR = 5,
   DECODE_ERR = 6,
   HANDLER_ERR = 7,
+  PROCESS_ERR = 8,
 };
 
 inline const char* MMErrToString(MMErrCode code) {
@@ -165,6 +174,8 @@ inline const char* MMErrToString(MMErrCode code) {
              "http(s) URL / local file URL.";
     case MMErrCode::HANDLER_ERR:
       return "Unsupported multimodal input type.";
+    case MMErrCode::PROCESS_ERR:
+      return "Failed to process multimodal input.";
     default:
       return "Unknown error occurred when loading/decoding multimodal input.";
   }
@@ -178,9 +189,14 @@ class MMInputTransfer {
   ~MMInputTransfer();
 
   MMErrCode trans(const std::vector<Message>& messages, MMInput& inputs);
+  MMErrCode trans(const std::vector<Message>& messages,
+                  const std::vector<bool>& selected_items,
+                  MMInput& inputs);
 
  private:
   MMErrCode trans_parallel(const MMContentVec& mmc,
+                           const std::vector<bool>& selected_items,
+                           size_t& selected_index,
                            std::vector<MMInputItem>& inputs,
                            MMPayload& payload);
   MMErrCode trans(const MMContentVec& mmc,

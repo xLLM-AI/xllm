@@ -27,15 +27,14 @@ limitations under the License.
 
 #include "common/options.h"
 #include "common/types.h"
-#include "core/framework/multimodal/mm_input.h"
 #include "engine.h"
 #include "framework/chat_template/jinja_chat_template.h"
 #include "framework/request/request_output.h"
 #include "framework/request/request_params.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "master.h"
+#include "processors/caching_multimodal_processor.h"
 #include "scheduler/continuous_scheduler.h"
-#include "xllm/processors/multimodal_processor.h"
 
 namespace xllm {
 
@@ -111,7 +110,7 @@ class VLMMaster : public Master {
   std::unique_ptr<ThreadPool> threadpool_;
 
   std::unique_ptr<JinjaChatTemplate> chat_template_;
-  std::unique_ptr<MultimodalProcessorBase> processor_;
+  std::unique_ptr<CachingMultimodalProcessor> processor_;
   std::shared_ptr<Tokenizer> tokenizer_;
 
   // thread for moving forward the scheduler

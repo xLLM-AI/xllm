@@ -26,6 +26,11 @@ limitations under the License.
 #include "mm_handler.h"
 
 namespace xllm {
+
+bool is_url_type(const std::string& type) {
+  return type == "image_url" || type == "video_url" || type == "audio_url";
+}
+
 namespace {
 
 struct ProcessTask {
@@ -33,10 +38,6 @@ struct ProcessTask {
   size_t input_index = 0;
   MMPayload payload;
 };
-
-bool is_url_type(const std::string& type) {
-  return type == "image_url" || type == "video_url" || type == "audio_url";
-}
 
 bool is_binary_data_url(std::string_view url) {
   constexpr std::string_view kPrefix = "data:";
@@ -105,6 +106,19 @@ bool MMInput::foreach (MMInputItem::IVisitor& v) const {
   return true;
 }
 
+std::optional<XXH3Key> hash_mm_item(const MMInputItem& item) {
+  if (item.is_embedding()) {
+    return std::nullopt;
+  }
+  if (!item.uuid.empty()) {
+    return hash_string(item.uuid);
+  }
+  if (!item.raw_data.empty()) {
+    return hash_string(item.raw_data);
+  }
+  return std::nullopt;
+}
+
 MMInputTransfer::MMInputTransfer() {
   mm_handlers_ = std::make_unique<MMHandlerSet>();
   threadpool_ = std::make_unique<ThreadPool>(/*num_threads=*/16,
@@ -116,55 +130,83 @@ MMInputTransfer::~MMInputTransfer() {}
 
 MMErrCode MMInputTransfer::trans(const std::vector<Message>& messages,
                                  MMInput& inputs) {
+  size_t item_count = 0;
+  for (const Message& message : messages) {
+    const MMContentVec& contents = std::get<MMContentVec>(message.content);
+    item_count += std::count_if(
+        contents.begin(), contents.end(), [](const MMContent& item) {
+          return item.type != "text";
+        });
+  }
+  return trans(messages, std::vector<bool>(item_count, true), inputs);
+}
+
+MMErrCode MMInputTransfer::trans(const std::vector<Message>& messages,
+                                 const std::vector<bool>& selected_items,
+                                 MMInput& inputs) {
   inputs.clear();
   std::vector<MMInputItem> ins;
+  size_t selected_index = 0;
 
-  for (size_t idx = 0; idx < messages.size(); ++idx) {
-    const auto& message = messages[idx];
-    const auto& mmc = std::get<MMContentVec>(message.content);
+  for (const Message& message : messages) {
+    const MMContentVec& mmc = std::get<MMContentVec>(message.content);
 
-    MMErrCode code = this->trans_parallel(mmc, ins, inputs.payload());
+    MMErrCode code = this->trans_parallel(
+        mmc, selected_items, selected_index, ins, inputs.payload());
     if (code != MMErrCode::SUCCESS) {
       return code;
     }
 
     inputs.insert(ins);
   }
+  CHECK_EQ(selected_index, selected_items.size());
   return MMErrCode::SUCCESS;
 }
 
-MMErrCode MMInputTransfer::trans_parallel(const MMContentVec& mmc,
-                                          std::vector<MMInputItem>& inputs,
-                                          MMPayload& payload) {
-  size_t mm_count =
-      std::count_if(mmc.begin(), mmc.end(), [](const MMContent& item) {
-        return item.type != "text";
-      });
-  inputs.resize(mm_count);
+MMErrCode MMInputTransfer::trans_parallel(
+    const MMContentVec& mmc,
+    const std::vector<bool>& selected_items,
+    size_t& selected_index,
+    std::vector<MMInputItem>& inputs,
+    MMPayload& payload) {
+  inputs.clear();
   std::vector<ProcessTask> tasks;
-  tasks.reserve(mm_count);
+  tasks.reserve(mmc.size());
 
-  size_t out_idx = 0;
   for (size_t idx = 0; idx < mmc.size(); ++idx) {
     const std::string& type = mmc[idx].type;
     if (type == "text") {
       continue;
     }
 
+    CHECK_LT(selected_index, selected_items.size());
+    const bool selected = selected_items[selected_index++];
+    MMPayload item_payload;
+    if (is_url_type(type)) {
+      item_payload = slice_payload(mmc[idx], payload);
+    }
+    if (!selected) {
+      CHECK(is_url_type(type))
+          << "Only URL items can be skipped during multimodal transfer.";
+      continue;
+    }
+
+    inputs.emplace_back();
+    const size_t input_index = inputs.size() - 1;
     if (is_url_type(type)) {
       tasks.emplace_back(ProcessTask{
           .content_index = idx,
-          .input_index = out_idx,
-          .payload = slice_payload(mmc[idx], payload),
+          .input_index = input_index,
+          .payload = std::move(item_payload),
       });
     } else {
       MMErrCode code =
-          mm_handlers_->process(type, mmc[idx], inputs[out_idx], payload);
+          mm_handlers_->process(type, mmc[idx], inputs[input_index], payload);
       if (code != MMErrCode::SUCCESS) {
         return code;
       }
+      inputs[input_index].uuid = mmc[idx].uuid;
     }
-    ++out_idx;
   }
 
   if (tasks.empty()) {
@@ -185,6 +227,8 @@ MMErrCode MMInputTransfer::trans_parallel(const MMContentVec& mmc,
                      << ", type=" << type;
           MMErrCode expected = MMErrCode::SUCCESS;
           error.compare_exchange_strong(expected, code);
+        } else {
+          inputs[t.input_index].uuid = mmc[t.content_index].uuid;
         }
       }
       counter.decrement_count();
@@ -208,6 +252,7 @@ MMErrCode MMInputTransfer::trans(const MMContentVec& mmc,
       if (code != MMErrCode::SUCCESS) {
         return code;
       }
+      input.uuid = item.uuid;
 
       inputs.emplace_back(std::move(input));
     }

@@ -20,6 +20,8 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/common/message.h"
+#include "core/framework/multimodal/mm_visitor.h"
 #include "core/framework/multimodal/processor_cache.h"
 #include "processors/multimodal_processor.h"
 
@@ -31,14 +33,28 @@ class CachingMultimodalProcessor final : public MultimodalProcessorBase {
                              int64_t max_cache_items);
   ~CachingMultimodalProcessor() override = default;
 
+  MMErrCode process_multimodal_request(const std::vector<Message>& messages,
+                                       std::string payload,
+                                       MMData& data);
   bool process_prompt(std::string& prompt,
                       MMData& mm_data,
                       std::vector<int32_t>& token_ids) override;
   bool process_multimodal(const MMInput& inputs, MMData& data) const override;
 
  private:
+  // Cache hits are keyed by client uuid and resolved before any URL is loaded,
+  // so cached items skip downloading and processing entirely.
+  MMErrCode process_by_uuid(const std::vector<Message>& messages,
+                            std::string payload,
+                            MMData& data);
+  // Full load followed by content-keyed caching inside process_multimodal.
+  MMErrCode process_by_content(const std::vector<Message>& messages,
+                               std::string payload,
+                               MMData& data);
+
   std::unique_ptr<MultimodalProcessorBase> inner_;
-  mutable ProcessorCache cache_;
+  std::unique_ptr<ProcessorCache> cache_;
+  MMInputTransfer input_transfer_;
 };
 
 }  // namespace xllm

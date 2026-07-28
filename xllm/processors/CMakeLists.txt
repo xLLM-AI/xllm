@@ -5,8 +5,8 @@ set(BASE_DEPS
   :multimodal
   :common
   :kv_cache
-  :prefix_cache
   :block
+  :prefix_cache
   :chat_template
   glog::glog
   torch

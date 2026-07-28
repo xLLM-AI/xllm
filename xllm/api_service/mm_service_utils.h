@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -25,6 +26,111 @@ limitations under the License.
 
 namespace xllm {
 namespace mm_service_utils {
+namespace detail {
+
+// The proto arrives as const& but is a mutable RPC request object that is no
+// longer read after this call, so we const_cast once and move its large fields
+// (urls, header values, embeddings) into MMContent instead of copying them.
+inline bool append_mm_content(const ::xllm::proto::MMInputData& item,
+                              MMContentVec& contents,
+                              std::string& error_message) {
+  auto& mutable_item = const_cast<::xllm::proto::MMInputData&>(item);
+  const std::string& type = mutable_item.type();
+  if (type == "text") {
+    if (!mutable_item.has_text()) {
+      error_message = "text content requires text.";
+      return false;
+    }
+    contents.emplace_back(type, *mutable_item.release_text());
+    return true;
+  }
+
+  if (type == "image_url") {
+    if (!mutable_item.has_image_url()) {
+      error_message = "image_url content requires image_url.";
+      return false;
+    }
+    ImageURL image_url;
+    auto* proto_url = mutable_item.mutable_image_url();
+    image_url.url = std::move(*proto_url->release_url());
+    for (auto& [key, value] : *proto_url->mutable_headers()) {
+      image_url.headers[key] = std::move(value);
+    }
+    contents.emplace_back(type, std::move(image_url));
+    contents.back().uuid = std::move(*mutable_item.mutable_uuid());
+    return true;
+  }
+
+  if (type == "video_url") {
+    if (!mutable_item.has_video_url()) {
+      error_message = "video_url content requires video_url.";
+      return false;
+    }
+    VideoURL video_url;
+    auto* proto_url = mutable_item.mutable_video_url();
+    video_url.url = std::move(*proto_url->release_url());
+    for (auto& [key, value] : *proto_url->mutable_headers()) {
+      video_url.headers[key] = std::move(value);
+    }
+    contents.emplace_back(type, std::move(video_url));
+    contents.back().uuid = std::move(*mutable_item.mutable_uuid());
+    return true;
+  }
+
+  if (type == "audio_url") {
+    if (!mutable_item.has_audio_url()) {
+      error_message = "audio_url content requires audio_url.";
+      return false;
+    }
+    AudioURL audio_url;
+    auto* proto_url = mutable_item.mutable_audio_url();
+    audio_url.url = std::move(*proto_url->release_url());
+    for (auto& [key, value] : *proto_url->mutable_headers()) {
+      audio_url.headers[key] = std::move(value);
+    }
+    contents.emplace_back(type, std::move(audio_url));
+    contents.back().uuid = std::move(*mutable_item.mutable_uuid());
+    return true;
+  }
+
+  if (type == "image_embedding") {
+    if (!mutable_item.has_image_embedding()) {
+      error_message = "image_embedding content requires image_embedding data.";
+      return false;
+    }
+    contents.emplace_back(type,
+                          std::move(*mutable_item.mutable_image_embedding()));
+    contents.back().uuid = std::move(*mutable_item.mutable_uuid());
+    return true;
+  }
+
+  if (type == "video_embedding") {
+    if (!mutable_item.has_video_embedding()) {
+      error_message = "video_embedding content requires video_embedding data.";
+      return false;
+    }
+    contents.emplace_back(type,
+                          std::move(*mutable_item.mutable_video_embedding()));
+    contents.back().uuid = std::move(*mutable_item.mutable_uuid());
+    return true;
+  }
+
+  if (type == "audio_embedding") {
+    if (!mutable_item.has_audio_embedding()) {
+      error_message = "audio_embedding content requires audio_embedding data.";
+      return false;
+    }
+    contents.emplace_back(type,
+                          std::move(*mutable_item.mutable_audio_embedding()));
+    contents.back().uuid = std::move(*mutable_item.mutable_uuid());
+    return true;
+  }
+
+  error_message = "message content type is invalid.";
+  return false;
+}
+
+}  // namespace detail
 
 template <typename Call>
 bool build_messages(const google::protobuf::RepeatedPtrField<
@@ -37,45 +143,12 @@ bool build_messages(const google::protobuf::RepeatedPtrField<
 
   for (const auto& req_message : req_messages) {
     MMContentVec contents;
+    contents.reserve(req_message.content_size());
+    std::string error_message;
 
     for (const auto& input : req_message.content()) {
-      auto& item = const_cast<::xllm::proto::MMInputData&>(input);
-
-      if (item.type() == "text") {
-        contents.emplace_back(item.type(), *item.release_text());
-
-      } else if (item.type() == "image_url") {
-        ImageURL image_url;
-        image_url.url = std::move(*item.mutable_image_url()->release_url());
-        for (const auto& [k, v] : item.image_url().headers()) {
-          image_url.headers[k] = v;
-        }
-        contents.emplace_back(item.type(), image_url);
-
-      } else if (item.type() == "video_url") {
-        VideoURL video_url;
-        video_url.url = std::move(*item.mutable_video_url()->release_url());
-        for (const auto& [k, v] : item.video_url().headers()) {
-          video_url.headers[k] = v;
-        }
-        contents.emplace_back(item.type(), video_url);
-
-      } else if (item.type() == "audio_url") {
-        AudioURL audio_url;
-        audio_url.url = std::move(*item.mutable_audio_url()->release_url());
-        for (const auto& [k, v] : item.audio_url().headers()) {
-          audio_url.headers[k] = v;
-        }
-        contents.emplace_back(item.type(), audio_url);
-      } else if (item.type() == "image_embedding") {
-        contents.emplace_back("image_embedding", item.image_embedding());
-      } else if (item.type() == "video_embedding") {
-        contents.emplace_back("video_embedding", item.video_embedding());
-      } else if (item.type() == "audio_embedding") {
-        contents.emplace_back("audio_embedding", item.audio_embedding());
-      } else {
-        call->finish_with_error(StatusCode::INVALID_ARGUMENT,
-                                "message content type is invalid.");
+      if (!detail::append_mm_content(input, contents, error_message)) {
+        call->finish_with_error(StatusCode::INVALID_ARGUMENT, error_message);
         return false;
       }
     }

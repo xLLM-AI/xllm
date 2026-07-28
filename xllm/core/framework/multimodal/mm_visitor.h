@@ -17,12 +17,14 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <optional>
 #include <unordered_set>
 #include <vector>
 
 #include "mm_batch_data.h"
 #include "mm_data.h"
 #include "mm_input.h"
+#include "processor_cache.h"
 
 namespace xllm {
 
@@ -43,6 +45,24 @@ class MMInputGatherVisitor final : public MMInputItem::IVisitor {
   std::vector<VideoMetadata> video_metadata_;
   std::vector<AudioMetadata> audio_metadata_;
   std::vector<MMDataItem> image_embedding_items_;
+};
+
+// Probes a ProcessorCache for each visited input item, splitting the stream
+// into cache hits (kept in original order, nullopt marks a miss slot) and
+// misses forwarded to the inner processor. Miss keys are recorded so freshly
+// produced items can be backfilled into the cache.
+class CacheProbeVisitor final : public MMInputItem::IVisitor {
+ public:
+  explicit CacheProbeVisitor(ProcessorCache& cache) : cache_(cache) {}
+
+  bool visit(const MMInputItem& item) override;
+
+  std::vector<std::optional<MMDataItem>> cached_items_;
+  std::vector<MMInputItem> miss_input_items_;
+  std::vector<std::optional<XXH3Key>> miss_keys_;
+
+ private:
+  ProcessorCache& cache_;
 };
 
 class CollectItemTensorVisitor : public MMData::IItemVisitor {

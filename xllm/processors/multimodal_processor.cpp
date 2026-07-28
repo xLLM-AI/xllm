@@ -45,18 +45,13 @@ bool MultimodalProcessorBase::tokenize(const std::string& prompt,
 
 void MultimodalProcessorBase::hash_mm_items(const MMInput& mm_input,
                                             MMData& mm_data) const {
-  const auto& mm_input_items = mm_input.items();
-  auto& mm_items = mm_data.items<MMItemVec>();
-  size_t size = mm_input_items.size();
-  for (size_t idx = 0; idx < size; ++idx) {
-    const std::string& data = mm_input_items[idx].raw_data;
-    if (!data.empty()) {
-      XXH3Key mm_hash = hash_string(data);
-      auto& schedule_data =
-          mm_items[idx].mutable_state().mutable_schedule_data();
-      schedule_data.key = mm_hash;
-    } else {
-      LOG(WARNING) << "Empty data for multimodal item";
+  const std::vector<MMInputItem>& mm_input_items = mm_input.items();
+  MMItemVec& mm_items = mm_data.items<MMItemVec>();
+  CHECK_EQ(mm_input_items.size(), mm_items.size());
+  for (size_t index = 0; index < mm_input_items.size(); ++index) {
+    std::optional<XXH3Key> key = hash_mm_item(mm_input_items[index]);
+    if (key.has_value()) {
+      mm_items[index].mutable_state().mutable_schedule_data().key = key.value();
     }
   }
 }

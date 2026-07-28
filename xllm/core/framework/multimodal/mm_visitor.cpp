@@ -69,6 +69,23 @@ std::vector<int32_t> normalize_to_per_seq_lens(
 }
 }  // namespace
 
+bool CacheProbeVisitor::visit(const MMInputItem& item) {
+  std::optional<XXH3Key> key = hash_mm_item(item);
+  if (key.has_value()) {
+    std::optional<MMDataItem> cached = cache_.lookup(key.value());
+    if (cached.has_value()) {
+      cached->mutable_state().mutable_schedule_data().key = key.value();
+      cached_items_.emplace_back(std::move(cached));
+      return true;
+    }
+  }
+  miss_keys_.emplace_back(key);
+
+  cached_items_.emplace_back(std::nullopt);
+  miss_input_items_.emplace_back(item);
+  return true;
+}
+
 bool MMInputGatherVisitor::visit(const MMInputItem& item) {
   if (item.has_type(MMType::IMAGE)) {
     data_type_ |= MMType::IMAGE;
