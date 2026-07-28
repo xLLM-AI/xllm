@@ -73,7 +73,8 @@ constexpr const char* kOnerecXAttentionSerializeModelForwardEnv =
     "XLLM_ONEREC_XATTN_SERIALIZE_MODEL_FORWARD";
 constexpr const char* kOnerecXAttentionAsyncOutputReadyEnv =
     "XLLM_ONEREC_XATTN_ASYNC_OUTPUT_READY";
-constexpr const char* kOnerecXAttentionCacheDecodeInputTensorsEnv =
+// Keep the legacy environment variable name for launch-config compatibility.
+constexpr const char* kOnerecXAttentionCacheSelectedTokenIdxesEnv =
     "XLLM_ONEREC_XATTN_CACHE_DECODE_INPUT_TENSORS";
 
 RecVocabDict* get_onerec_vocab_dict(const std::string& model_weights_path) {
@@ -153,10 +154,10 @@ bool enable_onerec_xattention_async_output_ready() {
   return async_output_ready;
 }
 
-bool enable_onerec_xattention_cache_decode_input_tensors() {
-  static const bool cache_decode_input_tensors =
-      util::get_bool_env(kOnerecXAttentionCacheDecodeInputTensorsEnv, false);
-  return cache_decode_input_tensors;
+bool enable_onerec_xattention_cache_selected_token_idxes() {
+  static const bool cache_selected_token_idxes =
+      util::get_bool_env(kOnerecXAttentionCacheSelectedTokenIdxesEnv, true);
+  return cache_selected_token_idxes;
 }
 
 int synchronize_onerec_xattention_stream(Stream& stream,
@@ -1969,7 +1970,7 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
     // OneRec uses internal relative position bias and ignores this argument.
     mutable_input.positions = torch::Tensor();
 
-    if (enable_onerec_xattention_cache_decode_input_tensors()) {
+    if (enable_onerec_xattention_cache_selected_token_idxes()) {
       const int64_t total_beam = static_cast<int64_t>(batch_size) * beam_width;
       if (!cached_decode_selected_token_idxes_.defined() ||
           cached_decode_selected_token_count_ != total_beam ||
