@@ -166,14 +166,15 @@ void WorkerServer::create_server(const runtime::Options& options,
   const ParallelArgs* parallel_args = nullptr;
   std::unique_ptr<CollectiveCommunicatorBase> comm;
   if (worker_type == WorkerType::DIT) {
-    auto dit_comm =
-        std::make_unique<DiTCollectiveCommunicator>(worker_global_rank,
-                                                    world_size,
-                                                    options.dp_size(),
-                                                    options.tp_size(),
-                                                    options.sp_size(),
-                                                    options.cfg_size(),
-                                                    options.vae_size());
+    auto dit_comm = std::make_unique<DiTCollectiveCommunicator>(
+        worker_global_rank,
+        world_size,
+        options.dp_size(),
+        options.tp_size(),
+        options.sp_size(),
+        options.cfg_size(),
+        options.vae_size(),
+        options.text_encoder_tp_size());
     comm = std::move(dit_comm);
   } else {
     auto common_comm = std::make_unique<CollectiveCommunicator>(
@@ -315,6 +316,9 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
   const char* sp_size_ptr = sp_size_str.c_str();
   std::string cfg_size_str = std::to_string(options.cfg_size());
   const char* cfg_size_ptr = cfg_size_str.c_str();
+  std::string text_encoder_tp_size_str =
+      std::to_string(options.text_encoder_tp_size());
+  const char* text_encoder_tp_size_ptr = text_encoder_tp_size_str.c_str();
   const std::string& indexer_cache_dtype =
       KVCacheConfig::get_instance().indexer_cache_dtype();
   const char* indexer_cache_dtype_ptr = indexer_cache_dtype.c_str();
@@ -372,6 +376,7 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
                         instance_role_ptr,
                         indexer_cache_dtype_ptr,
                         enable_mtp_draft_body_tp1_ptr,
+                        text_encoder_tp_size_ptr,
                         nullptr};
   static_assert(std::size(argv) == spawn_worker_protocol::kArgumentCount + 1);
   pid_t pid;

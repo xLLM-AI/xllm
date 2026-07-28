@@ -117,8 +117,9 @@ bool resolve_model_registration(const std::string& model_type,
     effective_backend =
         is_torch_only_model_type(model_type) ? kTorchBackend : kAtbBackend;
   } else if (model_type == "qwen3" || model_type == "qwen3_moe" ||
-             model_type == "deepseek_v32" || model_type == "glm_moe_dsa") {
-    // qwen3/qwen3_moe/deepseek_v32/glm_moe_dsa support both backends.
+             model_type == "deepseek_v32" || model_type == "glm_moe_dsa"
+             || model_type == "qwen3_vl") {
+    // qwen3/qwen3_moe/deepseek_v32/glm_moe_dsa/qwen3_vl support both backends.
   } else if (is_torch_only_model_type(model_type)) {
     if (backend != kTorchBackend) {
       if (error_message != nullptr) {
@@ -142,6 +143,8 @@ bool resolve_model_registration(const std::string& model_type,
     *resolved_name = "qwen3_atb";
   } else if (model_type == "qwen3_moe" && effective_backend == kAtbBackend) {
     *resolved_name = "qwen3_moe_atb";
+  } else if (model_type == "qwen3_vl" && effective_backend == kAtbBackend) {
+    *resolved_name = "qwen3_vl_atb";
   } else {
     *resolved_name = model_type;
   }

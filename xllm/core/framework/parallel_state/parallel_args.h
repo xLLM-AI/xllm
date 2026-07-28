@@ -101,6 +101,7 @@ struct ParallelArgs {
                int32_t sp_size,
                int32_t cfg_size,
                int32_t vae_size,
+               int32_t text_encoder_tp_size,
                ProcessGroup* process_group)
       : rank_(rank),
         world_size_(world_size),
@@ -109,6 +110,7 @@ struct ParallelArgs {
         sp_size_(sp_size),
         cfg_size_(cfg_size),
         vae_size_(vae_size),
+        text_encoder_tp_size_(text_encoder_tp_size),
         process_group_(process_group) {}
 
   int32_t get_group_size_by_type(const std::string& group_type) const {
@@ -124,6 +126,8 @@ struct ParallelArgs {
       return ep_size();
     } else if (group_type == "vae") {
       return vae_size();
+    } else if (group_type == "text_encoder_tp") {
+      return text_encoder_tp_size();
     } else if (group_type == "cp") {
       return cp_size();
     } else {
@@ -185,6 +189,9 @@ struct ParallelArgs {
   // cfg size
   PROPERTY(int32_t, vae_size) = 1;
 
+  // text encoder tensor parallel size
+  PROPERTY(int32_t, text_encoder_tp_size) = 1;
+
   // atb hccl mapping json data
   PROPERTY(nlohmann::json, mapping_data);
 
@@ -231,6 +238,7 @@ struct ParallelArgs {
   ProcessGroup* dit_cfg_group_ = nullptr;
   ProcessGroup* dit_dp_group_ = nullptr;
   ProcessGroup* dit_vae_group_ = nullptr;
+  ProcessGroup* dit_text_encoder_tp_group_ = nullptr;
 };
 
 }  // namespace xllm

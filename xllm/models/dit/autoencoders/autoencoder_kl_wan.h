@@ -270,9 +270,17 @@ class WanRMSNormImpl : public torch::nn::Module {
 
   torch::Tensor forward(const torch::Tensor& x) {
     int64_t norm_dim = channel_first_ ? 1 : -1;
-    auto normed = torch::nn::functional::normalize(
-        x,
-        torch::nn::functional::NormalizeFuncOptions().dim(norm_dim).eps(1e-12));
+    // Match diffusers: normalize fp16/bf16 inputs in fp32 for numerical
+    // stability, then cast the normalized activations back to the input dtype.
+    const bool needs_fp32_normalize =
+        x.dtype() == torch::kFloat16 || x.dtype() == torch::kBFloat16;
+    auto norm_input = needs_fp32_normalize ? x.to(torch::kFloat32) : x;
+    auto normed =
+        torch::nn::functional::normalize(
+            norm_input,
+            torch::nn::functional::NormalizeFuncOptions().dim(norm_dim).eps(
+                1e-12))
+            .to(x.dtype());
     auto out = normed * scale_ * gamma_;
     if (bias_enabled_) {
       out = out + bias_;
@@ -315,9 +323,11 @@ class WanUpsampleImpl : public torch::nn::Module {
       : options_(options) {}
 
   torch::Tensor forward(const torch::Tensor& x) {
+    // Match diffusers WanUpsample: interpolation is performed in fp32, then
+    // cast back to the input dtype.
     auto result =
         torch::nn::functional::interpolate(x.to(torch::kFloat32), options_);
-    return result;
+    return result.to(x.dtype());
   }
 
  private:
@@ -1647,9 +1657,12 @@ class AutoencoderKLWanImpl : public torch::nn::Module,
   }
 
   torch::Tensor encode_(const torch::Tensor& videos) {
-    auto orig_dtype = videos.dtype();
-    auto x = videos.to(torch::kFloat32);
+    // The Wan VAE follows the dtype selected by the owning pipeline's
+    // TensorOptions. Individual modules (RMSNorm, upsample) still upcast their
+    // numerically-sensitive intermediate math to fp32 as diffusers does.
+    auto x = videos.to(device_, dtype_);
     x = vae_parallel_split(x);
+
     int64_t num_frame = x.size(2);
     int64_t height = x.size(3);
     int64_t width = x.size(4);
@@ -1685,7 +1698,7 @@ class AutoencoderKLWanImpl : public torch::nn::Module,
     // Merge latent back to global W before passing to DiT transformer
     out = vae_parallel_merge(out);
     clear_cache();
-    return out.to(orig_dtype);
+    return out;
   }
 
   AutoencoderKLOutput encode(const torch::Tensor& videos) {
@@ -1695,9 +1708,10 @@ class AutoencoderKLWanImpl : public torch::nn::Module,
   }
 
   DecoderOutput decode_(const torch::Tensor& latents) {
-    auto orig_dtype = latents.dtype();
-    torch::Tensor processed_latents = latents.to(torch::kFloat32);
+
+    torch::Tensor processed_latents = latents.to(device_, dtype_);
     processed_latents = vae_parallel_split(processed_latents);
+    
     int64_t num_frame = processed_latents.size(2);
     int64_t height = processed_latents.size(3);
     int64_t width = processed_latents.size(4);
@@ -1718,7 +1732,7 @@ class AutoencoderKLWanImpl : public torch::nn::Module,
     auto dec = torch::clamp(out, -1.0f, 1.0f);
 
     clear_cache();
-    return DecoderOutput(dec.to(orig_dtype));
+    return DecoderOutput(dec);
   }
 
   DecoderOutput decode(
@@ -1742,10 +1756,10 @@ class AutoencoderKLWanImpl : public torch::nn::Module,
   }
 
   void load_model(std::unique_ptr<DiTFolderLoader> loader) {
-    encoder_->to(torch::kFloat32);
-    decoder_->to(torch::kFloat32);
-    quant_conv_->to(torch::kFloat32);
-    post_quant_conv_->to(torch::kFloat32);
+    encoder_->to(device_, dtype_);
+    decoder_->to(device_, dtype_);
+    quant_conv_->to(device_, dtype_);
+    post_quant_conv_->to(device_, dtype_);
 
     for (const auto& state_dict : loader->get_state_dicts()) {
       encoder_->load_state_dict(state_dict->get_dict_with_prefix("encoder."));

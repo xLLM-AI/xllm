@@ -36,6 +36,8 @@ class DiTMapping final {
     PROPERTY(int32_t, dit_dp_size) = -1;
     // vae size
     PROPERTY(int32_t, dit_vae_size) = -1;
+    // text encoder tensor parallel size
+    PROPERTY(int32_t, dit_text_encoder_tp_size) = -1;
   };
 
   DiTMapping(const int32_t world_size,
@@ -72,5 +74,6 @@ class DiTMapping final {
   ParallelInfo cfg_ = ParallelInfo();
   ParallelInfo dp_ = ParallelInfo();
   ParallelInfo vae_ = ParallelInfo();
+  ParallelInfo text_encoder_tp_ = ParallelInfo();
 };
 }  // namespace xllm

@@ -35,13 +35,15 @@ limitations under the License.
 #include "util/net.h"
 namespace xllm {
 
-DiTCollectiveCommunicator::DiTCollectiveCommunicator(int32_t global_rank,
-                                                     int32_t world_size,
-                                                     int32_t dit_dp_size,
-                                                     int32_t dit_tp_size,
-                                                     int32_t dit_sp_size,
-                                                     int32_t dit_cfg_size,
-                                                     int32_t dit_vae_size)
+DiTCollectiveCommunicator::DiTCollectiveCommunicator(
+    int32_t global_rank,
+    int32_t world_size,
+    int32_t dit_dp_size,
+    int32_t dit_tp_size,
+    int32_t dit_sp_size,
+    int32_t dit_cfg_size,
+    int32_t dit_vae_size,
+    int32_t dit_text_encoder_tp_size)
     : CollectiveCommunicatorBase(global_rank, world_size) {
   parallel_args_ = std::make_unique<ParallelArgs>(global_rank,
                                                   world_size,
@@ -50,13 +52,15 @@ DiTCollectiveCommunicator::DiTCollectiveCommunicator(int32_t global_rank,
                                                   dit_sp_size,
                                                   dit_cfg_size,
                                                   dit_vae_size,
+                                                  dit_text_encoder_tp_size,
                                                   /*process_group=*/nullptr);
   DiTMapping::Options dit_mapping_options;
   dit_mapping_options.dit_tp_size(dit_tp_size)
       .dit_sp_size(dit_sp_size)
       .dit_cfg_size(dit_cfg_size)
       .dit_dp_size(dit_dp_size)
-      .dit_vae_size(dit_vae_size);
+      .dit_vae_size(dit_vae_size)
+      .dit_text_encoder_tp_size(dit_text_encoder_tp_size);
   dit_mapping_ = std::make_unique<DiTMapping>(
       world_size, global_rank, dit_mapping_options);
 }
@@ -88,6 +92,8 @@ void DiTCollectiveCommunicator::create_process_groups(
       create_process_group_by_type("dp", dit_dp_group_, device);
   parallel_args_->dit_vae_group_ =
       create_process_group_by_type("vae", dit_vae_group_, device);
+  parallel_args_->dit_text_encoder_tp_group_ = create_process_group_by_type(
+      "text_encoder_tp", dit_text_encoder_tp_group_, device);
 }
 
 ProcessGroup* DiTCollectiveCommunicator::create_process_group_by_type(
@@ -95,6 +101,7 @@ ProcessGroup* DiTCollectiveCommunicator::create_process_group_by_type(
     std::unique_ptr<ProcessGroup>& member_group,
     const torch::Device& device) {
   int32_t group_size = parallel_args_->get_group_size_by_type(group_type);
+  
   if (dit_mapping_) {
     auto parallel_info = dit_mapping_->get_parallel_info(group_type);
     auto group_id = parallel_info.current_group_id();

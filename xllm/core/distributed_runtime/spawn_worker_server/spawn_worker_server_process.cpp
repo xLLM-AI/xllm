@@ -60,6 +60,7 @@ limitations under the License.
 // @instance_role
 // @indexer_cache_dtype
 // @enable_mtp_draft_body_tp1
+// @text_encoder_tp_size
 int main(int argc, char* argv[]) {
   const std::optional<std::string> parsed_indexer_cache_dtype =
       xllm::spawn_worker_protocol::parse_indexer_cache_dtype(argc, argv);
@@ -117,8 +118,14 @@ int main(int argc, char* argv[]) {
       static_cast<int32_t>(
           atoi(argv[xllm::spawn_worker_protocol::
                         kEnableMtpDraftBodyTp1ArgumentIndex])) > 0;
+  const int32_t text_encoder_tp_size =
+      argc > xllm::spawn_worker_protocol::kTextEncoderTpSizeArgumentIndex
+          ? static_cast<int32_t>(
+                atoi(argv[xllm::spawn_worker_protocol::
+                              kTextEncoderTpSizeArgumentIndex]))
+          : 1;
   if (world_size < 1 || global_rank < 0 || global_rank >= world_size ||
-      cp_size < 1 || ep_size < 1 ||
+      cp_size < 1 || ep_size < 1 || text_encoder_tp_size < 1 ||
       (instance_role_str != "DEFAULT" && instance_role_str != "PREFILL" &&
        instance_role_str != "DECODE")) {
     LOG(ERROR) << "Invalid spawn worker topology: global_rank=" << global_rank
@@ -159,6 +166,7 @@ int main(int argc, char* argv[]) {
       << ", max_encoder_cache_size = " << max_encoder_cache_size
       << ", dp_size = " << dp_size << ", tp_size = " << tp_size
       << ", sp_size = " << sp_size << ", cfg_size = " << cfg_size
+      << ", text_encoder_tp_size = " << text_encoder_tp_size
       << ", indexer_cache_dtype = " << indexer_cache_dtype
       << ", enable_mtp_draft_body_tp1 = " << enable_mtp_draft_body_tp1 << "\n";
 
@@ -193,6 +201,7 @@ int main(int argc, char* argv[]) {
                                  tp_size,
                                  sp_size,
                                  cfg_size,
+                                 text_encoder_tp_size,
                                  cp_size,
                                  ep_size,
                                  instance_role,

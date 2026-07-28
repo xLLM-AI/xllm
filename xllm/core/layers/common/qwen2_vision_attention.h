@@ -25,6 +25,9 @@ limitations under the License.
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "linear.h"
+#if defined(USE_NPU)
+#include "layers/npu/npu_rope_layer_impl.h"
+#endif
 
 namespace xllm {
 namespace layer {
@@ -55,6 +58,9 @@ class Qwen2VisionAttentionImpl : public torch::nn::Module {
 
   QKVParallelLinear qkv_proj_{nullptr};
   RowParallelLinear proj_{nullptr};
+#if defined(USE_NPU)
+  NpuRopeLayer rope_layer_{nullptr};
+#endif
 };
 TORCH_MODULE(Qwen2VisionAttention);
 

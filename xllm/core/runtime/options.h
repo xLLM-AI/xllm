@@ -138,6 +138,10 @@ struct Options {
   // Default set as 1
   PROPERTY(int32_t, vae_size) = 1;
 
+  // text encoder tensor parallelism size
+  // Default set as 1
+  PROPERTY(int32_t, text_encoder_tp_size) = 1;
+
   // enable enable_schedule_overlap to improve runtime execution efficiency.
   PROPERTY(bool, enable_schedule_overlap) = true;
 

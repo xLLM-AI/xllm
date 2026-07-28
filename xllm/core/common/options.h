@@ -150,6 +150,8 @@ class Options {
 
   PROPERTY(int32_t, vae_size) = 1;
 
+  PROPERTY(int32_t, text_encoder_tp_size) = 1;
+
   PROPERTY(std::optional<std::string>, instance_name);
 
   PROPERTY(bool, enable_disagg_pd) = false;
