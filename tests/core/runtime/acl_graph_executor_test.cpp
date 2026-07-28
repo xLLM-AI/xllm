@@ -50,11 +50,14 @@ limitations under the License.
 #include "core/runtime/options.h"
 #include "core/runtime/speculative_worker_impl.h"
 #include "models/model_registry.h"
+#include "tests/npu_test_environment.h"
 
 // Global test environment for ACL graph executor tests
 class AclGraphExecutorTestEnvironment : public ::testing::Environment {
  public:
   void SetUp() override {
+    xllm::testing::init_npu_test_runtime();
+
     // Initialize glog
     google::InitGoogleLogging("acl_graph_executor_test");
     google::SetStderrLogging(google::INFO);
@@ -75,6 +78,8 @@ class AclGraphExecutorTestEnvironment : public ::testing::Environment {
     aclrtResetDevice(0);
     aclFinalize();
     LOG(INFO) << "AclGraphExecutorTestEnvironment TearDown completed.";
+
+    xllm::testing::finalize_npu_test_runtime();
   }
 };
 

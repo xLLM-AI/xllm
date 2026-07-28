@@ -24,6 +24,8 @@ limitations under the License.
 #if defined(USE_NPU)
 #include <acl/acl.h>
 #include <torch_npu/torch_npu.h>
+
+#include "tests/npu_test_environment.h"
 #endif
 
 namespace {
@@ -31,6 +33,9 @@ namespace {
 class SharedVMMAllocatorTestEnvironment : public ::testing::Environment {
  public:
   void SetUp() override {
+#if defined(USE_NPU)
+    xllm::testing::init_npu_test_runtime();
+#endif
     google::InitGoogleLogging("platform_vmm_test");
     google::SetStderrLogging(google::INFO);
 
@@ -50,6 +55,9 @@ class SharedVMMAllocatorTestEnvironment : public ::testing::Environment {
     aclFinalize();
 #endif
     google::ShutdownGoogleLogging();
+#if defined(USE_NPU)
+    xllm::testing::finalize_npu_test_runtime();
+#endif
   }
 };
 

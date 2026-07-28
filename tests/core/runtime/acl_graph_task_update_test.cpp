@@ -40,6 +40,7 @@ limitations under the License.
 #include "core/runtime/acl_graph_executor_impl.h"
 #include "core/runtime/base_executor_impl.h"
 #include "core/runtime/options.h"
+#include "tests/npu_test_environment.h"
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
@@ -56,6 +57,8 @@ limitations under the License.
 class AclGraphTaskUpdateTestEnvironment : public ::testing::Environment {
  public:
   void SetUp() override {
+    xllm::testing::init_npu_test_runtime();
+
     google::InitGoogleLogging("acl_graph_task_update_test");
     google::SetStderrLogging(google::INFO);
     int ret = aclrtSetDevice(0);
@@ -70,6 +73,8 @@ class AclGraphTaskUpdateTestEnvironment : public ::testing::Environment {
     torch_npu::finalize_npu();
     aclrtResetDevice(0);
     aclFinalize();
+
+    xllm::testing::finalize_npu_test_runtime();
   }
 };
 
