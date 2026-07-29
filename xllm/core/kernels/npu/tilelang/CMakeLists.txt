@@ -62,6 +62,17 @@ function(tilelang_import_kernel_manifest)
       message(FATAL_ERROR "TileLang compiled binary does not exist: ${_compiled_binary}")
     endif()
 
+    # PTO requires this device entry name during compilation. Keep it local in
+    # the final ELF so variants can coexist in one static library.
+    execute_process(
+      COMMAND "${CMAKE_OBJCOPY}" --localize-symbol=launch_kernel "${_compiled_binary}"
+      RESULT_VARIABLE _localize_result
+    )
+    if(NOT _localize_result EQUAL 0)
+      message(FATAL_ERROR
+        "Failed to localize TileLang launch_kernel in: ${_compiled_binary}")
+    endif()
+
     set_source_files_properties("${_compiled_binary}" PROPERTIES
       GENERATED TRUE
       EXTERNAL_OBJECT TRUE

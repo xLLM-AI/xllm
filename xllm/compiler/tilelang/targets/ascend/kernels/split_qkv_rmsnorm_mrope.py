@@ -154,7 +154,7 @@ class SyncEvent(enum.IntEnum):
 
 
 KERNEL_PASS_CONFIGS = {
-    "tl.ascend_auto_sync": False,
+    "tl.ascend_auto_sync": True,
     "tl.ascend_memory_planning": True,
     "tl.ascend_auto_cross_core_sync": True,
     "tl.ascend_auto_cv_combine": True,
@@ -243,7 +243,7 @@ def build_split_qkv_rmsnorm_mrope_kernel(
     @T.macro
     def assemble_cos_sin_v(
         axes_ub,
-        gather_offset_ub,
+        gather_index_ub,
         gathered_ub,
         assembled_cos_sin_ub,
         cos_full_ub,
@@ -252,7 +252,7 @@ def build_split_qkv_rmsnorm_mrope_kernel(
     ):
         """V-pipe: gather from axes_ub then construct cos/sin."""
         v_wait_mte2(E.COS_SIN_AXES)
-        T.tile.gather(gathered_ub, axes_ub, gather_offset_ub, 0)
+        T.tile.gather_mask(gathered_ub, axes_ub, gather_index_ub)
         T.tile.cast(
             assembled_cos_sin_ub, gathered_ub, "CAST_NONE", rope_dim
         )
@@ -364,7 +364,7 @@ def build_split_qkv_rmsnorm_mrope_kernel(
                 axes_ub = T.alloc_shared((1, gather_pad_dim), input_dtype)
                 gathered_ub = T.alloc_shared((1, gather_pad_dim), input_dtype)
                 assembled_cos_sin_ub = T.alloc_shared((1, rope_dim), acc_dtype)
-                gather_offset_ub = T.alloc_shared((gather_pad_dim,), "uint32")
+                gather_index_ub = T.alloc_shared((1, gather_pad_dim), "uint32")
                 cos_full_ub = T.alloc_shared((1, rope_dim), acc_dtype)
                 sin_signed_ub = T.alloc_shared((1, rope_dim), acc_dtype)
                 sin_neg_tmp_ub = T.alloc_shared((1, half_rope_dim), acc_dtype)
@@ -379,7 +379,7 @@ def build_split_qkv_rmsnorm_mrope_kernel(
                 k_rope_sin_2d_ub = T.alloc_shared((num_kv_heads, rope_dim), acc_dtype)
 
                 # Init: load gather pattern, weights.
-                T.copy(gather_pattern, gather_offset_ub)
+                T.copy(gather_pattern, gather_index_ub[0, :])
                 T.tile.fill(axes_ub, 0.0)
                 T.copy(q_weight[0, 0], q_weight_half_ub[0, :])
                 T.copy(k_weight[0, 0], k_weight_half_ub[0, :])
@@ -456,7 +456,7 @@ def build_split_qkv_rmsnorm_mrope_kernel(
                     # load while V is still computing rope.
                     assemble_cos_sin_v(
                         axes_ub,
-                        gather_offset_ub,
+                        gather_index_ub,
                         gathered_ub,
                         assembled_cos_sin_ub,
                         cos_full_ub,
@@ -548,7 +548,7 @@ def build_split_qkv_rmsnorm_mrope_kernel(
     return split_qkv_rmsnorm_mrope_kernel
 
 
-@tilelang.jit(pass_configs=KERNEL_PASS_CONFIGS)
+@tilelang.jit(pass_configs=KERNEL_PASS_CONFIGS, target="pto")
 def split_qkv_rmsnorm_mrope_kernel_jit(
     head_size: int,
     rope_dim: int,
@@ -632,7 +632,7 @@ class SplitQkvRmsnormMropeKernel(TilelangKernel):
         with tilelang.tvm.transform.PassContext(
             opt_level=3, config=KERNEL_PASS_CONFIGS
         ):
-            kernel = tilelang.engine.lower(tilelang_kernel)
+            kernel = tilelang.engine.lower(tilelang_kernel, target="pto")
         return kernel.kernel_source
 
 
@@ -843,7 +843,6 @@ def _parse_head_config(text: str) -> tuple[int, int]:
 
 
 def build_mrope_gather_pattern_merged(
-    *,
     half_rope_dim: int,
     rope_dim: int,
     mrope_section: tuple[int, int, int],
@@ -851,15 +850,7 @@ def build_mrope_gather_pattern_merged(
     gather_pad_dim: int,
     device: str = "cpu",
 ) -> "torch.Tensor":
-    """Build uint32 gather byte-offset pattern for merged cos+sin gather.
-
-    Source buffer layout (bf16):
-        [t_cos(hrd) | t_sin(hrd) | h_cos(hrd) | h_sin(hrd) | w_cos(hrd) | w_sin(hrd)]
-        = 3 * rope_dim elements total.
-
-    Output layout after gather:
-        [assembled_cos(hrd) | assembled_sin(hrd)] = rope_dim elements.
-    """
+    """Build uint32 element-index pattern for merged cos+sin gather."""
     import torch
 
     t_len, h_len, w_len = mrope_section
@@ -879,15 +870,13 @@ def build_mrope_gather_pattern_merged(
             elif i >= t_end:
                 axis_id[i] = 1
 
-    elem_bytes = 2  # bfloat16
     pattern = torch.zeros(gather_pad_dim, dtype=torch.int32, device="cpu")
     for i in range(half_rope_dim):
-        # cos part: output[i] reads from axis_id[i]'s cos segment position i
-        pattern[i] = (axis_id[i] * rope_dim + i) * elem_bytes
-        # sin part: output[half_rope_dim + i] reads from axis_id[i]'s sin segment
+        pattern[i] = axis_id[i] * rope_dim + i
         pattern[half_rope_dim + i] = (
             axis_id[i] * rope_dim + half_rope_dim + i
-        ) * elem_bytes
+        )
+
     return pattern.to(device).view(torch.uint32)
 
 

@@ -105,8 +105,8 @@ def build_rope_kernel(
             with T.Scope("V"):
                 mask_ub = T.alloc_ub([1, rope_dim], mask_dtype)
                 for j in T.serial(rope_dim // 2):
-                    mask_ub[0, 2 * j] = 4 * (2 * j + 1)
-                    mask_ub[0, 2 * j + 1] = 4 * (2 * j)
+                    mask_ub[0, 2 * j] = 2 * j + 1
+                    mask_ub[0, 2 * j + 1] = 2 * j
 
                 sin_mask_ub = T.alloc_ub((rope_dim,), acc_dtype)
                 T.tile.fill(sin_mask_ub, 1.0)
@@ -134,7 +134,7 @@ def build_rope_kernel(
                     T.tile.cast(cos_ub, cos_half_ub, "CAST_NONE", rope_dim)
                     T.tile.mul(sin_ub[0, :], sin_ub[0, :], sin_mask_ub)
 
-                    T.tile.gather(x_rotate_ub, x_ub, mask_ub, 0)
+                    T.tile.gather_mask(x_rotate_ub, x_ub, mask_ub)
                     T.tile.mul(x_ub, x_ub, cos_ub)
                     T.tile.mul(x_rotate_ub, x_rotate_ub, sin_ub)
                     T.tile.add(out_ub, x_ub, x_rotate_ub)
@@ -144,7 +144,7 @@ def build_rope_kernel(
     return rope_in_place_kernel
 
 
-@tilelang.jit(pass_configs=DEFAULT_ASCEND_PASS_CONFIGS)
+@tilelang.jit(pass_configs=DEFAULT_ASCEND_PASS_CONFIGS, target="pto")
 def rope_in_place_kernel_jit(
     head_dim: int,
     rope_dim: int,
@@ -199,7 +199,7 @@ class RopeKernel(TilelangKernel):
         with tilelang.tvm.transform.PassContext(
             opt_level=3, config=DEFAULT_ASCEND_PASS_CONFIGS
         ):
-            kernel = tilelang.engine.lower(tilelang_kernel)
+            kernel = tilelang.engine.lower(tilelang_kernel, target="pto")
         return kernel.kernel_source
 
 

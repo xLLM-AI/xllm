@@ -109,7 +109,8 @@ def _run_variant_worker(args: _VariantWorkerArgs) -> _VariantBuildResult:
 
     compile_cmd = [
         args.bisheng_executable,
-        f"--npu-arch={args.bisheng_arch}",
+        f"--cce-aicore-arch={args.bisheng_arch}",
+        "-DREGISTER_BASE" if args.bisheng_arch == "dav-c310" else "-DMEMORY_BASE",
         *TILELANG_BISHENG_COMMON_FLAGS,
         f"-Dg_tilingKey=g_tilingKey__{compile_spec.variant_key}",
         *[f"-I{d}" for d in args.include_dirs],
