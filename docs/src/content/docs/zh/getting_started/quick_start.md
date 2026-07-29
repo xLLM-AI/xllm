@@ -12,11 +12,11 @@ sidebar:
 下面是我们构建好的开发镜像。
 ```bash
 # A2 x86
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-20260306
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260605
 # A2 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-20260306
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260605
 # A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-20260306
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605
 ```
 
 容器启动命令如下：
