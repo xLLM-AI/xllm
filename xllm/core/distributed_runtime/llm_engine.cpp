@@ -38,13 +38,13 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
-#include "core/framework/config/service_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/platform/platform.h"
 #include "framework/block/block_utils.h"
-// hierarchy temporarily disabled during the block-manager refactor
-// #include "framework/block/hierarchy_block_manager_pool.h"
+#include "framework/block/hierarchy_block_manager_pool.h"
 #include "framework/kv_cache/kv_cache_estimation.h"
 #include "framework/kv_cache/kv_cache_shape.h"
+#include "framework/kv_cache/kv_cache_utils.h"
 #include "framework/model/model_args.h"
 #include "framework/model_loader.h"
 #include "framework/xtensor/page_allocator.h"
@@ -96,14 +96,11 @@ LLMEngine::LLMEngine(const runtime::Options& options,
   cp_size_ = options_.cp_size();
   worker_clients_num_ = worker_clients_.size();
   dp_local_size_ = worker_clients_num_ / dp_size_;
-  const bool use_model_partition =
-      cp_size_ > 1 && Platform::uses_model_cp_partition();
-  // MLU model-side CP temporarily overlaps the CP and TP rank sets, so all
-  // DP-local ranks still form the effective TP execution width. Once MLU
-  // adopts orthogonal worker-side CP x TP, remove this special case and use
-  // dp_local_size_ / cp_size_ for every backend.
-  dp_local_tp_size_ =
-      use_model_partition ? dp_local_size_ : dp_local_size_ / cp_size_;
+  const bool use_model_sharding =
+      cp_size_ > 1 && Platform::uses_model_cp_sharding();
+  // Effective TP: MLU=dp_local; NPU=dp_local/cp_size.
+  const bool mlu_overlap = use_model_sharding && Platform::is_mlu();
+  dp_local_tp_size_ = mlu_overlap ? dp_local_size_ : dp_local_size_ / cp_size_;
 
   // create ThreadPool for link cluster
   link_threadpool_ = std::make_unique<ThreadPool>(
@@ -466,8 +463,8 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
       static_cast<int64_t>(options_.num_speculative_tokens());
   estimate_options.max_tokens_per_batch =
       static_cast<int64_t>(options_.max_tokens_per_batch());
-  estimate_options.max_linear_state_cache_slots = static_cast<int64_t>(
-      ::xllm::ServiceConfig::get_instance().max_concurrent_requests());
+  estimate_options.max_linear_state_cache_slots =
+      options_.max_linear_state_cache_slots();
   estimate_options.is_draft_engine = options_.is_draft_engine();
   estimate_options.enable_prefix_cache =
       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
@@ -501,9 +498,16 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
             << ", blocks: " << kv_cache_cap.n_blocks()
             << ", slot_size: " << kv_cache_cap.slot_size()
             << ", index_slot_size: " << kv_cache_cap.index_slot_size()
+            << ", indexer_layers: " << kv_cache_cap.num_indexer_layers()
             << ", scale_slot_size: " << kv_cache_cap.scale_slot_size()
             << ", linear_slot_size: " << kv_cache_cap.linear_slot_size()
             << ", linear_blocks: " << kv_cache_cap.num_linear_state_blocks()
+            << ", linear_state_slots: "
+            << (has_linear_attention_layers(args_)
+                    ? kv_cache_cap.num_linear_state_blocks()
+                    : 0)
+            << ", max_linear_state_cache_slots: "
+            << options_.max_linear_state_cache_slots()
             << ", reserved_linear_bytes: "
             << readable_size(kv_cache_cap.linear_cache_size_in_bytes())
             << ", n_layers: " << kv_cache_cap.n_layers()
@@ -513,15 +517,31 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
   const int32_t block_size = static_cast<int32_t>(kv_cache_cap.block_size());
   const bool enable_gdn_attention = has_linear_attention_layers(args_);
 
+  // DECODE-side skips LINEAR prefix cache by role (see
+  // composite_block_manager.cpp::leaf_participates_in_prefix_cache), so the
+  // chunked-prefill + chunk-stride guards below are only meaningful for
+  // PREFILL / MIX. On DECODE the linear-state cache is disabled anyway and
+  // pd_launch.sh legitimately sets --enable_chunked_prefill=false.
+  const bool is_decode = options_.instance_role() == InstanceRole::DECODE;
+  if (options_.enable_prefix_cache() && enable_gdn_attention && !is_decode) {
+    const auto& scheduler_config = ::xllm::SchedulerConfig::get_instance();
+    CHECK(scheduler_config.enable_chunked_prefill())
+        << "Linear-attention prefix cache requires block-aligned chunked "
+           "prefill to save matching linear states. Please set "
+           "--enable_chunked_prefill=true in your config.";
+    CHECK(scheduler_config.max_tokens_per_chunk_for_prefill() % block_size == 0)
+        << "linear-attention prefix cache saves linear-state checkpoints at "
+           "chunk-end boundaries, so max_tokens_per_chunk_for_prefill ("
+        << scheduler_config.max_tokens_per_chunk_for_prefill()
+        << ") must be a multiple of block_size (" << block_size << ").";
+  }
+
   // init kv cache for each worker
   const KVCacheShape kv_cache_shape(kv_cache_cap, args_, dp_local_tp_size_);
   kv_cache_shape.print_shapes();
 
   // initialize block manager
-  // Logical block size = physical block_size * kv_split_size. When kv_split is
-  // off (kv_split_size == 1) this collapses back to plain block_size so each
-  // CP rank reserves slots for the full KV - that is the price we pay for
-  // skipping the prefix AllGather.
+  // Logical block_size *= kv_split_size.
   const int32_t kv_split_size_eff =
       ::xllm::ParallelConfig::get_instance().kv_split_size_effective();
   BlockManagerPool::Options options;
@@ -538,14 +558,21 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .enable_kvcache_store(options_.enable_kvcache_store())
       .enable_xtensor(::xllm::KVCacheConfig::get_instance().enable_xtensor())
       .num_layers(args_.n_layers())
-      .linear_state_num_slots(
-          static_cast<int32_t>(kv_cache_cap.num_linear_state_blocks()))
       .slot_size(kv_cache_cap.slot_size())
       .model_id(options_.model_id())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
-      .max_concurrent_requests(
-          ::xllm::ServiceConfig::get_instance().max_concurrent_requests())
-      .num_speculative_tokens(options_.num_speculative_tokens());
+      .num_speculative_tokens(options_.num_speculative_tokens())
+      // DECODE-side prefix cache participation is per-leaf and gated by the
+      // predicate in composite_block_manager.cpp. P and MIX are treated
+      // identically (both admit prefix cache on every leaf).
+      .instance_is_decode(options_.instance_role() == InstanceRole::DECODE);
+  if (enable_gdn_attention) {
+    // The unified linear-state slot pool spans all physical slots [0, N);
+    // id 0 is reserved as padding and ids [1, N) serve live and checkpoint
+    // rows interchangeably under reference counting.
+    options.linear_state_num_slots(
+        static_cast<int32_t>(kv_cache_cap.num_linear_state_blocks()));
+  }
   if (util::is_deepseek_v4_model_type(args_.model_type())) {
     constexpr uint32_t kManagerTypeBlockManagerImpl = 0;
     constexpr uint32_t kManagerTypeSlidingWindowBlockManager = 1;
@@ -588,19 +615,23 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
             kv_cache_cap.swa_count(), std::numeric_limits<uint32_t>::max())));
   }
 
-  if (options_.host_blocks_factor() > 1.0 || options_.enable_kvcache_store()) {
-    // hierarchy temporarily disabled during the block-manager refactor.
-    // host-offload / kvcache-store routes the device + host dual
-    // KVCacheState through HierarchyBlockManagerPool, which is parked while
-    // the composite block-manager refactor lands in smaller pieces. Until
-    // then this path fails loudly rather than silently degrading to a
-    // device-only pool.
-    LOG(FATAL) << "host-offload / kvcache-store is temporarily disabled during "
-                  "the block-manager refactor (hierarchy rebuild in progress). "
-                  "Please disable --host_blocks_factor and "
-                  "--enable_kvcache_store for now.";
+  if (options_.host_blocks_factor() > 1.0) {
+    // Host prefix-cache offload routes device/host blocks through a single flat
+    // BlockType::KV host pool. DeepSeek-V4 has no KV block group (its device
+    // caches are SWA/C4/C128), so collect_offload_pairs would find no KV blocks
+    // and silently offload nothing while still allocating the pinned host
+    // cache. Fail loud until per-block-type host offload is implemented.
+    CHECK(!util::is_deepseek_v4_model_type(args_.model_type()))
+        << "host_blocks_factor > 1 (host prefix-cache offload) does not "
+           "support "
+           "DeepSeek-V4 yet: its SWA/C4/C128 block groups have no KV pool to "
+           "offload. Disable --host_blocks_factor for DeepSeek-V4 models.";
+    options.enable_host_offload(true);
+    kv_cache_manager_ =
+        std::make_unique<HierarchyBlockManagerPool>(options, this, dp_size_);
+  } else {
+    kv_cache_manager_ = std::make_unique<BlockManagerPool>(options, dp_size_);
   }
-  kv_cache_manager_ = std::make_unique<BlockManagerPool>(options, dp_size_);
 
   // init kv cache for each worker in parallel
   std::vector<folly::SemiFuture<bool>> futures;
@@ -956,8 +987,7 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
   std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;
   futures.reserve(worker_clients_num_);
 
-  // CP partitioning is performed worker-side in
-  // WorkerImpl::prepare_work_before_execute (see runtime/cp_input_partition).
+  // Engine sends full global tokens; model-side CP shards inside the worker.
   for (auto worker_rank = 0; worker_rank < worker_clients_num_; ++worker_rank) {
     const int32_t dp_rank = worker_rank / dp_local_size_;
     futures.emplace_back(worker_clients_[worker_rank]->step_remote_async(
@@ -967,36 +997,47 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
   // wait for the all future to complete
   auto results = folly::collectAll(futures).get();
 
+  DCHECK_EQ(dp_size_, worker_clients_num_ / dp_local_size_);
+  // Every worker must have produced a value before EPLB consumes all results
+  // and before promotions are committed to the shared prefix cache below; an
+  // interrupted or failed worker must not reach those non-reversible steps.
+  for (uint32_t worker_rank = 0; worker_rank < worker_clients_num_;
+       ++worker_rank) {
+    if (!results[worker_rank].hasValue() || !results[worker_rank].value()) {
+      LOG(FATAL) << "Failed to execute model, result has no value";
+    }
+  }
+  // Interruption is reported per dp group via its driver worker's output.
+  for (uint32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
+    const uint32_t worker_begin = dp_rank * dp_local_size_;
+    const auto& result = results[worker_begin].value();
+    if (result.value().outputs.empty() && layer_forward_interrupted_) {
+      throw ForwardInterruptedException();
+    }
+  }
+
   if (::xllm::EPLBConfig::get_instance().enable_eplb() &&
       !options_.enable_schedule_overlap()) {
     process_eplb_data(results);
   }
 
-  assert(dp_size_ == worker_clients_num_ / dp_local_size_);
   size_t dp_rank = 0;
   for (auto worker_rank = 0; worker_rank < worker_clients_num_;
        worker_rank += dp_local_size_) {
     auto result = results[worker_rank].value();
-    if (result.has_value()) {
-      if (result.value().outputs.empty() && layer_forward_interrupted_) {
-        throw ForwardInterruptedException();
-      }
-      // if src_seq_idxes is not empty, skip sample output processing and
-      // process beam search output instead
-      if (result.value().src_seq_idxes.size() == 0) {
-        // set second input param enable_schedule_overlap to false,
-        // if it's not enabled, process_sample_output will append the real
-        // token, if it's enabled, this false here will append the fake token in
-        // process_sample_output
-        batch[dp_rank].process_sample_output(result.value(), false);
-      } else {
-        batch[dp_rank].process_beam_search_output(result.value(), false);
-      }
-      // Keep Batch::sequences_ aligned with SequencesGroup after beam updates.
-      batch[dp_rank].refresh_sequences_from_groups();
+    // if src_seq_idxes is not empty, skip sample output processing and
+    // process beam search output instead
+    if (result.value().src_seq_idxes.size() == 0) {
+      // set second input param enable_schedule_overlap to false,
+      // if it's not enabled, process_sample_output will append the real
+      // token, if it's enabled, this false here will append the fake token in
+      // process_sample_output
+      batch[dp_rank].process_sample_output(result.value(), false);
     } else {
-      LOG(FATAL) << "Failed to execute model, result has no value";
+      batch[dp_rank].process_beam_search_output(result.value(), false);
     }
+    // Keep Batch::sequences_ aligned with SequencesGroup after beam updates.
+    batch[dp_rank].refresh_sequences_from_groups();
     ++dp_rank;
   }
 
@@ -1117,6 +1158,9 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
 
   // build model input for every single micro batch
   for (auto dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
+    // Linear-state saves deferred from the previous step are executed by the
+    // LINEAR leaf inside allocate_for_sequence (scheduler-side), so the builder
+    // below already sees the rotated live slot -- no apply step is needed here.
     batched_inputs.emplace_back(std::move(batch[dp_rank].prepare_forward_input(
         args_, threadpool_.get(), cp_size_)));
     const BatchForwardType& current_batch_forward_type =
@@ -1173,6 +1217,8 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
   // update dp_global_token_nums and batch_forward_type
   for (auto dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
     batched_inputs[dp_rank].input_params.parallel.dp_global_token_nums =
+        dp_global_token_nums;
+    batched_inputs[dp_rank].input_params.parallel.raw_dp_global_token_nums =
         dp_global_token_nums;
     batched_inputs[dp_rank].input_params.parallel.dp_is_decode = dp_is_decode;
     if (::xllm::EPLBConfig::get_instance().enable_eplb()) {

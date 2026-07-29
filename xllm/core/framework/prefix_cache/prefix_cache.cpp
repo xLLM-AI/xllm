@@ -29,14 +29,10 @@ namespace xllm {
 std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
                                       const Slice<Block>& existed_shared_blocks,
                                       const MMData& mm_data,
-                                      const Slice<XXH3Key>& block_hashes,
-                                      size_t* matched_tokens) {
+                                      const Slice<XXH3Key>& block_hashes) {
   // allign tokens to block boundary
   const size_t n_tokens = round_down(token_ids.size(), block_size_);
   if (n_tokens == 0) {
-    if (matched_tokens != nullptr) {
-      *matched_tokens = 0;
-    }
     return std::vector<Block>();
   }
 
@@ -99,10 +95,6 @@ std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
 
   matched_blocks_.fetch_add(blocks.size());
 
-  if (matched_tokens != nullptr) {
-    *matched_tokens = blocks.size() * block_size_;
-  }
-
   int64_t int_rate_percent = static_cast<int64_t>(
       static_cast<double>(blocks.size()) * 100.0 / n_blocks);
   HISTOGRAM_OBSERVE(prefix_cache_block_matched_rate, int_rate_percent);
@@ -131,6 +123,10 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
 
   // Fill `token_hash_key` with the chained hash of block `block_idx`, reusing
   // the precomputed hash when it covers all blocks, otherwise computing it.
+  // The KV / C4 / C128 prefix is solid (no placeholders), so the compute path
+  // seeds the chain in O(1) from the previous block's stamped hash. SWA's
+  // slid-out placeholders are handled by LinearStatePrefixCache::insert, which
+  // overrides this.
   const bool use_precomputed = block_hashes.size() >= n_blocks;
   XXH3Key token_hash_key = existed_shared_blocks_num == 0
                                ? XXH3Key{}

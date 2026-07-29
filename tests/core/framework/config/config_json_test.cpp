@@ -326,7 +326,6 @@ TEST(ConfigJsonTest, LoadJsonFileReadsConfigFixture) {
   EXPECT_TRUE(scheduler_config.use_zero_evict());
   EXPECT_EQ(scheduler_config.max_decode_token_per_sequence(), 128);
   EXPECT_EQ(scheduler_config.priority_strategy(), "priority");
-  EXPECT_TRUE(scheduler_config.use_mix_scheduler());
   EXPECT_FALSE(scheduler_config.enable_online_preempt_offline());
   EXPECT_DOUBLE_EQ(scheduler_config.aggressive_coeff(), 1.5);
   EXPECT_DOUBLE_EQ(scheduler_config.starve_threshold(), 2.0);
@@ -413,7 +412,7 @@ TEST(ConfigJsonTest, MissingJsonFileKeepsFlagDefaults) {
   EXPECT_EQ(kv_cache_config.block_size(), 128);
   EXPECT_DOUBLE_EQ(kv_cache_config.max_memory_utilization(), 0.8);
   EXPECT_EQ(scheduler_config.max_tokens_per_batch(), 10240);
-  EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 1024);
+  EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 200);
 }
 
 TEST(ConfigJsonTest, DumpStartupConfigSkipsWhenDisabled) {

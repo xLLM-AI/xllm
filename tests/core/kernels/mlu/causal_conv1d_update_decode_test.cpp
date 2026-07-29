@@ -21,6 +21,7 @@ limitations under the License.
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 #include "kernels/mlu/mlu_ops_api.h"
 
@@ -68,12 +69,22 @@ TEST_F(CausalConv1dUpdateDecodeJitTest, SecondCallHitsCache) {
   torch::Tensor cs2 = conv_state_orig.clone();
 
   auto t0 = std::chrono::steady_clock::now();
-  torch::Tensor out1 = causal_conv1d_update_decode(
-      x, cs1, weight, std::nullopt, conv_state_indices, /*pad_slot_id=*/-1);
+  torch::Tensor out1 = causal_conv1d_update_decode(x,
+                                                   cs1,
+                                                   weight,
+                                                   std::nullopt,
+                                                   conv_state_indices,
+                                                   /*activation=*/true,
+                                                   /*pad_slot_id=*/-1);
   torch_mlu::synchronize();
   auto t1 = std::chrono::steady_clock::now();
-  torch::Tensor out2 = causal_conv1d_update_decode(
-      x, cs2, weight, std::nullopt, conv_state_indices, -1);
+  torch::Tensor out2 = causal_conv1d_update_decode(x,
+                                                   cs2,
+                                                   weight,
+                                                   std::nullopt,
+                                                   conv_state_indices,
+                                                   /*activation=*/true,
+                                                   /*pad_slot_id=*/-1);
   torch_mlu::synchronize();
   auto t2 = std::chrono::steady_clock::now();
 
@@ -100,10 +111,120 @@ TEST_F(CausalConv1dUpdateDecodeJitTest, AcceptsUncompiledDim) {
   torch::Tensor conv_state_indices = torch::arange(
       0, batch, torch::TensorOptions().dtype(torch::kInt32).device(device()));
 
-  torch::Tensor out = causal_conv1d_update_decode(
-      x, conv_state, weight, std::nullopt, conv_state_indices, -1);
+  torch::Tensor out = causal_conv1d_update_decode(x,
+                                                  conv_state,
+                                                  weight,
+                                                  std::nullopt,
+                                                  conv_state_indices,
+                                                  /*activation=*/true,
+                                                  /*pad_slot_id=*/-1);
   torch_mlu::synchronize();
   EXPECT_TRUE(torch::isfinite(out.to(torch::kFloat32)).all().item<bool>());
+}
+
+TEST_F(CausalConv1dUpdateDecodeJitTest,
+       PreservesAdjacentSlotAcrossConsecutiveDecode) {
+  torch::DeviceGuard guard(device());
+  const int32_t dim = 2048;
+  const int32_t width = 4;
+  const int32_t num_slots = 3;
+  const float canary = 7.0f;
+  torch::TensorOptions bf16_opts =
+      torch::TensorOptions().dtype(torch::kBFloat16).device(device());
+  torch::TensorOptions int_opts =
+      torch::TensorOptions().dtype(torch::kInt32).device(device());
+  torch::Tensor x = torch::zeros({1, dim, 1}, bf16_opts);
+  torch::Tensor weight = torch::ones({dim, width}, bf16_opts);
+  torch::Tensor conv_state =
+      torch::zeros({num_slots, dim, width - 1}, bf16_opts);
+  conv_state[1].fill_(canary);
+  torch::Tensor adjacent_slot = conv_state[1].clone();
+  torch::Tensor first_slot = torch::zeros({1}, int_opts);
+
+  causal_conv1d_update_decode(x,
+                              conv_state,
+                              weight,
+                              std::nullopt,
+                              first_slot,
+                              /*activation=*/false,
+                              /*pad_slot_id=*/-1);
+  torch_mlu::synchronize();
+
+  EXPECT_TRUE(torch::equal(conv_state[1], adjacent_slot))
+      << "decoding slot 0 must not overwrite adjacent slot 1";
+
+  torch::Tensor second_slot = torch::ones({1}, int_opts);
+  torch::Tensor out = causal_conv1d_update_decode(x,
+                                                  conv_state,
+                                                  weight,
+                                                  std::nullopt,
+                                                  second_slot,
+                                                  /*activation=*/false,
+                                                  /*pad_slot_id=*/-1);
+  torch_mlu::synchronize();
+  torch::Tensor expected = torch::full_like(out, canary * (width - 1));
+
+  EXPECT_TRUE(torch::equal(out, expected))
+      << "the next decode must observe the original state of slot 1";
+}
+
+TEST_F(CausalConv1dUpdateDecodeJitTest,
+       SpecVarlenKeepsAcceptedStateWindowLayout) {
+  torch::DeviceGuard guard(device());
+  constexpr int32_t kDim = 4;
+  constexpr int32_t kWidth = 4;
+  constexpr int32_t kBatch = 2;
+  constexpr int32_t kMaxQueryLen = 3;
+  constexpr int32_t kStateLen = kWidth - 1 + kMaxQueryLen - 1;
+  torch::TensorOptions bf16_options =
+      torch::TensorOptions().dtype(torch::kBFloat16).device(device());
+  torch::TensorOptions int_options =
+      torch::TensorOptions().dtype(torch::kInt32).device(device());
+  torch::Tensor x =
+      torch::arange(1, 1 + 4 * kDim, bf16_options).view({4, kDim});
+  torch::Tensor conv_state =
+      torch::arange(101, 101 + kBatch * kDim * kStateLen, bf16_options)
+          .view({kBatch, kDim, kStateLen});
+  torch::Tensor original_state = conv_state.clone();
+  torch::Tensor weight = torch::zeros({kDim, kWidth}, bf16_options);
+  torch::Tensor conv_state_indices = torch::arange(0, kBatch, int_options);
+  torch::Tensor query_start_loc =
+      torch::tensor(std::vector<int32_t>{0, 1, 4}, int_options);
+  torch::Tensor num_accepted_tokens =
+      torch::tensor(std::vector<int32_t>{1, 2}, int_options);
+
+  torch::Tensor expected_state = original_state.clone();
+  torch::Tensor expected_first_prefix =
+      torch::cat({original_state[0].slice(/*dim=*/1, /*start=*/1, /*end=*/3),
+                  x[0].unsqueeze(/*dim=*/1)},
+                 /*dim=*/1);
+  expected_state[0]
+      .slice(/*dim=*/1, /*start=*/0, /*end=*/3)
+      .copy_(expected_first_prefix);
+  torch::Tensor expected_second = torch::cat(
+      {original_state[1].slice(/*dim=*/1, /*start=*/2, /*end=*/4),
+       x.slice(/*dim=*/0, /*start=*/1).transpose(/*dim0=*/0, /*dim1=*/1)},
+      /*dim=*/1);
+  expected_state[1].copy_(expected_second);
+
+  causal_conv1d_update_decode(x,
+                              conv_state,
+                              weight,
+                              /*bias_opt=*/std::nullopt,
+                              conv_state_indices,
+                              /*activation=*/false,
+                              /*pad_slot_id=*/-1,
+                              query_start_loc,
+                              /*max_query_len=*/kMaxQueryLen,
+                              num_accepted_tokens);
+  torch_mlu::synchronize();
+
+  EXPECT_TRUE(tensors_allclose(conv_state,
+                               expected_state,
+                               /*rtol=*/0.0,
+                               /*atol=*/0.0))
+      << "spec varlen must preserve accepted state window layout while "
+         "writing only the actual query tokens";
 }
 
 }  // namespace

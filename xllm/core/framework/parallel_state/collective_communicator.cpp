@@ -34,6 +34,7 @@ limitations under the License.
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "parallel_args.h"
+#include "parallel_state.h"
 #include "process_group.h"
 #include "util/json_reader.h"
 #include "util/net.h"
@@ -236,7 +237,7 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
   const int32_t normalized_cp_size = cp_size > 0 ? cp_size : 1;
   const int32_t attn_tp_size = world_size / (dp_size * normalized_cp_size);
   // FLAGS_kv_split_size: 0 -> leave Options::kv_split_size = -1 so that
-  // MappingNPU falls back to cp_size (legacy byte-equivalent). >0 -> propagate
+  // MappingNPU falls back to cp_size (byte-equivalent). >0 -> propagate
   // verbatim; MappingNPU::validate() enforces divisibility against cp_size.
   const int32_t kv_split_size =
       ::xllm::ParallelConfig::get_instance().kv_split_size();
@@ -326,6 +327,31 @@ void CollectiveCommunicator::create_process_groups(
 
 #if defined(USE_NPU)
   if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "ATB") {
+    // ATB owns TP/DP/EP; build a standalone HCCL CP ProcessGroup for
+    // model-side AllGather.
+    if (cp_size > 1) {
+      const std::vector<int32_t> cp_ranks =
+          parallel_state::compute_cp_group_ranks(
+              global_rank, world_size, dp_size, cp_size);
+      const int32_t cp_local_rank = parallel_args_->cp_rank();
+      CHECK_EQ(cp_ranks.size(), cp_size);
+      CHECK_GE(cp_local_rank, 0);
+      CHECK_LT(cp_local_rank, cp_size);
+      CHECK_EQ(cp_ranks[cp_local_rank], global_rank);
+      // Unique TCPStore port per CP group (keyed by attn TP rank).
+      const int32_t attn_tp_size = world_size / (dp_size * cp_size);
+      const int32_t tp_rank = global_rank % attn_tp_size;
+      cp_group_ = create_process_group(global_rank,
+                                       cp_local_rank,
+                                       cp_ranks,
+                                       world_size,
+                                       cp_size,
+                                       port + 1 + tp_rank,
+                                       host,
+                                       "cp_group",
+                                       device);
+      parallel_args_->cp_group_ = cp_group_.get();
+    }
     return;
   }
 #endif

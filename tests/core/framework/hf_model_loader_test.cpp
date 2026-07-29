@@ -234,10 +234,10 @@ TEST(HFModelLoaderTest, RecFactoryCreatesRecCausalLmInstance) {
   EXPECT_EQ(rec_model->device(), torch::Device(torch::kCPU));
 }
 
-#if defined(USE_NPU)
+#if defined(USE_NPU) || defined(USE_MLU)
 TEST(HFModelLoaderTest, Qwen35MtpModelArgsFromDenseConfig) {
   auto loader = ModelRegistry::get_model_args_loader("qwen3_5_mtp");
-  ASSERT_TRUE(loader != nullptr);
+  ASSERT_NE(loader, nullptr);
 
   JsonReader reader;
   ASSERT_TRUE(reader.parse_text(R"json(
@@ -261,7 +261,7 @@ TEST(HFModelLoaderTest, Qwen35MtpModelArgsFromDenseConfig) {
 
 TEST(HFModelLoaderTest, Qwen35MtpModelArgsFromMoeConfig) {
   auto loader = ModelRegistry::get_model_args_loader("qwen3_5_moe_mtp");
-  ASSERT_TRUE(loader != nullptr);
+  ASSERT_NE(loader, nullptr);
 
   JsonReader reader;
   ASSERT_TRUE(reader.parse_text(R"json(

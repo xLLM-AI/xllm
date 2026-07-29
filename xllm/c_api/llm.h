@@ -82,6 +82,8 @@ XLLM_CAPI_EXPORT void xllm_llm_init_options_default(
  * Loads model weights from the specified path, configures target devices,
  * initializes compute contexts, and prepares the inference runtime.
  * Must be called exactly once per handler before using completion/chat APIs.
+ * The target devices are auto-detected from the visible device mask
+ * (e.g. ASCEND_RT_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES).
  *
  * If init_options is NULL, this function automatically uses the default values
  * from XLLM_INIT_LLM_OPTIONS_DEFAULT (via xllm_llm_init_options_default()).
@@ -89,9 +91,6 @@ XLLM_CAPI_EXPORT void xllm_llm_init_options_default(
  * @param handler Valid LLM instance handle (must not be NULL)
  * @param model_path Null-terminated string of the model directory/file path
  *                   (supports .bin/.pth/.safetensors formats)
- * @param devices Null-terminated string specifying target devices (format:
- *                "npu:0,1" (specific NPUs), "cuda:0" (single GPU), "auto"
- * (automatic selection))
  * @param init_options Advanced initialization options (NULL = use defaults)
  *
  * @return true if initialization succeeds; false on failure (see failure causes
@@ -100,7 +99,6 @@ XLLM_CAPI_EXPORT void xllm_llm_init_options_default(
  * @failure_causes
  * - Invalid handler (NULL or already destroyed)
  * - Invalid model_path (non-existent, corrupted, or unsupported format)
- * - Invalid devices string (malformed format or unavailable devices)
  * - Model load error (mismatched model architecture or weight corruption)
  * - Device initialization failure (out of memory, driver error)
  *
@@ -109,7 +107,6 @@ XLLM_CAPI_EXPORT void xllm_llm_init_options_default(
  */
 XLLM_CAPI_EXPORT bool xllm_llm_initialize(XLLM_LLM_Handler* handler,
                                           const char* model_path,
-                                          const char* devices,
                                           const XLLM_InitOptions* init_options);
 
 /**

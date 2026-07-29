@@ -27,7 +27,6 @@ limitations under the License.
 
 #include "rec.h"
 
-std::string devices = "cuda:0";
 std::string model_name = "homepage_qwen_06b_6_raw";
 std::string model_path = "/export/home/models/homepage_qwen_06b_6_raw";
 
@@ -185,8 +184,8 @@ XLLM_REC_Handler* service_startup_hook() {
            sizeof(init_options.log_dir),
            "/export/home/huheng7/log");
 
-  bool ret = xllm_rec_initialize(
-      rec_handler, model_path.c_str(), devices.c_str(), &init_options);
+  bool ret =
+      xllm_rec_initialize(rec_handler, model_path.c_str(), &init_options);
   if (!ret) {
     std::cout << "REC init failed" << std::endl;
     xllm_rec_destroy(rec_handler);

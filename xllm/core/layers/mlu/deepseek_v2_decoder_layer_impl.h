@@ -20,6 +20,7 @@ limitations under the License.
 #include <optional>
 
 #include "attention.h"
+#include "core/layers/mlu/dsa_topk_relay.h"
 #include "deepseek_v2_attention.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
@@ -45,6 +46,10 @@ class DeepseekV2DecoderLayerImpl : public torch::nn::Module {
   explicit DeepseekV2DecoderLayerImpl(const ModelContext& context,
                                       int32_t layer_id);
 
+  DeepseekV2DecoderLayerImpl(const ModelContext& context,
+                             int32_t layer_id,
+                             const DsaTopkSharePlan& topk_share_plan);
+
   ~DeepseekV2DecoderLayerImpl() override = default;
 
   void load_state_dict(const StateDict& state_dict);
@@ -62,9 +67,24 @@ class DeepseekV2DecoderLayerImpl : public torch::nn::Module {
       const AttentionMetadata& attn_metadata,
       KVCache& kv_cache,
       const ModelInputParams& input_params,
-      const std::optional<torch::Tensor>& input_ids = std::nullopt);
+      const std::optional<torch::Tensor>& input_ids = std::nullopt,
+      DsaTopkRelay* topk_relay = nullptr);
+
+  torch::Tensor forward_mtp(torch::Tensor& x,
+                            std::optional<torch::Tensor>& residual,
+                            torch::Tensor& positions,
+                            const AttentionMetadata& attn_metadata,
+                            KVCache& kv_cache,
+                            const ModelInputParams& input_params,
+                            const std::optional<torch::Tensor>& input_ids,
+                            const std::optional<DsaTopkState>& topk_input,
+                            std::optional<DsaTopkState>& topk_output);
 
  private:
+  DeepseekV2DecoderLayerImpl(const ModelContext& context,
+                             int32_t layer_id,
+                             const DsaTopkShareDecision& topk_share_decision);
+
   enum class PostAttnMode {
     kReplicated,
     kPackedLocal,
@@ -105,12 +125,28 @@ class DeepseekV2DecoderLayerImpl : public torch::nn::Module {
   torch::Tensor restore_ffn_output(torch::Tensor x,
                                    const PostAttnCarrier& carrier);
   torch::Tensor reduce_out(torch::Tensor x, ProcessGroup* pg) const;
+  torch::Tensor forward_impl(torch::Tensor& x,
+                             std::optional<torch::Tensor>& residual,
+                             torch::Tensor& positions,
+                             const AttentionMetadata& attn_metadata,
+                             KVCache& kv_cache,
+                             const ModelInputParams& input_params,
+                             const std::optional<torch::Tensor>& input_ids,
+                             DsaTopkRelay* topk_relay,
+                             const std::optional<DsaTopkState>* mtp_topk_input,
+                             std::optional<DsaTopkState>* mtp_topk_output);
 
   friend class DeepseekV2DecoderLayerTestPeer;
 
   // parallel args
   ParallelArgs parallel_args_;
+  int32_t layer_id_;
   bool is_moe_layer_;
+  DsaTopkShareDecision topk_share_decision_;
+  // MTP draft layer reuses the first draft step's top-k across the remaining
+  // steps (cross-step sharing), isolated from the cross-layer DsaTopkRelay
+  // relay used by the main model.
+  bool mtp_topk_reuse_ = false;
 
   DeepseekV2Attention attention_{nullptr};
   DenseMLP mlp_{nullptr};

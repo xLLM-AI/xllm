@@ -39,6 +39,7 @@ void DpEpPaddingData::set_placeholder(const torch::Tensor& placeholder) {
 }
 
 DpEpPadding::DpEpPadding(torch::Tensor token_size_per_dp_group,
+                         torch::Tensor raw_token_size_per_dp_group,
                          int32_t num_experts_per_tok,
                          const nlohmann::json& mapping_npu,
                          at::Device device,
@@ -57,6 +58,16 @@ DpEpPadding::DpEpPadding(torch::Tensor token_size_per_dp_group,
         << "token_size_per_dp_group must be 1-dimensional, current dim is "
         << token_size_per_dp_group_.dim();
   }
+  raw_token_size_per_dp_group_ =
+      raw_token_size_per_dp_group.defined()
+          ? raw_token_size_per_dp_group.contiguous().to(torch::kInt32)
+          : token_size_per_dp_group_.to(torch::kInt32);
+  CHECK_EQ(raw_token_size_per_dp_group_.dim(), 1)
+      << "raw_token_size_per_dp_group must be 1-dimensional, current dim is "
+      << raw_token_size_per_dp_group_.dim();
+  CHECK_EQ(raw_token_size_per_dp_group_.size(0),
+           token_size_per_dp_group_.size(0))
+      << "raw token size count must match padded token size count";
   token_size_per_dp_group_ = torch::where(token_size_per_dp_group_ == 0,
                                           torch::tensor(1).to(torch::kInt32),
                                           token_size_per_dp_group)
@@ -239,9 +250,10 @@ torch::Tensor DpEpPadding::build_reduce_scatter_unpadding() {
          ++j) {
       offset += new_dp_size_[j];
     }
-    auto partial = torch::arange(token_size_per_dp_group_[i].item<int64_t>(),
-                                 torch::kInt32) +
-                   offset;
+    auto partial =
+        torch::arange(raw_token_size_per_dp_group_[i].item<int64_t>(),
+                      torch::kInt32) +
+        offset;
     components.push_back(partial);
   }
   return torch::cat(components);
@@ -262,7 +274,8 @@ torch::Tensor DpEpPadding::build_ffn_unpadding_idx() {
 }
 
 void DpEpPadding::prepare_cumulative_sum() {
-  token_size_per_dp_group_startid_ = torch::cumsum(token_size_per_dp_group_, 0);
+  token_size_per_dp_group_startid_ =
+      torch::cumsum(raw_token_size_per_dp_group_, 0);
   if (token_size_per_dp_group_startid_.size(0) > 0) {
     token_size_per_dp_group_startid_[-1] = 0;
   }
@@ -274,7 +287,9 @@ torch::Tensor DpEpPadding::build_ffn_padding_idx() {
   std::vector<torch::Tensor> components;
   components.reserve(dp_group_count);
   for (int64_t dp_group_id = 0; dp_group_id < dp_group_count; ++dp_group_id) {
-    const int64_t token_size =
+    const int64_t raw_token_size =
+        raw_token_size_per_dp_group_[dp_group_id].item<int64_t>();
+    const int64_t padded_token_size =
         token_size_per_dp_group_[dp_group_id].item<int64_t>();
 
     int64_t start = 0;
@@ -287,16 +302,17 @@ torch::Tensor DpEpPadding::build_ffn_padding_idx() {
     }
 
     torch::Tensor valid;
-    if (token_size > 0) {
-      valid = torch::arange(token_size, torch::kInt32) + start;
+    if (raw_token_size > 0) {
+      valid = torch::arange(raw_token_size, torch::kInt32) + start;
     } else {
       valid = torch::tensor({}, torch::kInt32);
     }
 
-    const int64_t padding_size = max_token_size_per_dp_group_ - token_size;
+    const int64_t padding_size = max_token_size_per_dp_group_ - raw_token_size;
     torch::Tensor padding = torch::zeros(padding_size, torch::kInt32);
-    if (padding_size > 0 && token_size == 0) {
-      padding[0] = start;
+    if (padding_size > 0 && raw_token_size == 0 &&
+        padded_token_size > raw_token_size) {
+      padding[0] = 0;
     }
 
     components.push_back(torch::cat({valid, padding}));
@@ -307,10 +323,10 @@ torch::Tensor DpEpPadding::build_ffn_padding_idx() {
 
 torch::Tensor DpEpPadding::build_lm_head_indices() {
   std::vector<torch::Tensor> components;
-  components.reserve(token_size_per_dp_group_.size(0));
-  for (int64_t rank_id = 0; rank_id < token_size_per_dp_group_.size(0);
+  components.reserve(raw_token_size_per_dp_group_.size(0));
+  for (int64_t rank_id = 0; rank_id < raw_token_size_per_dp_group_.size(0);
        ++rank_id) {
-    const auto j = token_size_per_dp_group_[rank_id].item<int64_t>();
+    const int64_t j = raw_token_size_per_dp_group_[rank_id].item<int64_t>();
     const int64_t offset = rank_id * max_token_size_per_dp_group_;
     components.push_back(torch::arange(j, torch::kInt32) + offset);
   }

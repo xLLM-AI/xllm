@@ -59,6 +59,13 @@ using QuantArgsLoader =
 using TokenizerArgsLoader =
     std::function<bool(const JsonReader& json, TokenizerArgs* args)>;
 
+// Model-advertised CP mode: NONE or NPU_MODEL (shard after embed / merge
+// before LM head).
+enum class CpShardingMode : int8_t {
+  NONE = 0,
+  NPU_MODEL = 1,
+};
+
 // TODO: add default args loader.
 struct ModelMeta {
   CausalLMFactory causal_lm_factory;
@@ -69,6 +76,7 @@ struct ModelMeta {
   ModelArgsLoader model_args_loader;
   QuantArgsLoader quant_args_loader;
   TokenizerArgsLoader tokenizer_args_loader;
+  CpShardingMode cp_sharding_mode = CpShardingMode::NONE;
 };
 
 // Model registry is a singleton class that registers all models with the
@@ -102,6 +110,15 @@ class ModelRegistry {
       const std::string& name,
       MultimodalProcessorFactory factory);
 
+  // Register the model-side CP sharding mode advertised by `name`. Defaults to
+  // NONE for any unregistered model.
+  static void register_cp_sharding_mode(const std::string& name,
+                                        CpShardingMode mode);
+
+  // Read-only query of the registered CP sharding mode. Returns NONE when
+  // `name` is unknown or the model did not opt into model-side CP.
+  static CpShardingMode get_cp_sharding_mode(const std::string& name);
+
   static CausalLMFactory get_causallm_factory(const std::string& name);
 
   static RecModelFactory get_rec_model_factory(const std::string& name);
@@ -131,6 +148,13 @@ class ModelRegistry {
 bool resolve_model_registration_name(const std::string& model_type,
                                      std::string* resolved_name,
                                      std::string* error_message = nullptr);
+
+// Lazily register the NPU ATB model-side CP pipeline capability for the four
+// supported models (deepseek_v32, deepseek_v32_mtp, glm_moe_dsa,
+// glm_moe_dsa_mtp) and return whether `resolved_name` is CP-capable.
+// Idempotent. `resolved_name` must already be backend-resolved (see
+// resolve_model_registration) so qwen3_atb etc. are not misclassified.
+bool is_npu_model_cp_capable(const std::string& resolved_name);
 
 bool resolve_model_registration(const std::string& model_type,
                                 const std::string& requested_npu_kernel_backend,

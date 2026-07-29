@@ -27,9 +27,9 @@ namespace xllm {
 
 inline std::optional<std::string> validate_deepseek_v32_cp_config(
     const ParallelArgs& parallel_args) {
-  const bool use_model_partition =
-      parallel_args.cp_size() > 1 && Platform::uses_model_cp_partition();
-  if (!use_model_partition) {
+  const bool use_model_sharding =
+      parallel_args.cp_size() > 1 && Platform::uses_model_cp_sharding();
+  if (!use_model_sharding) {
     return std::nullopt;
   }
   if (parallel_args.dp_size() != 1) {
@@ -46,7 +46,12 @@ inline std::optional<std::string> validate_deepseek_v32_cp_config(
 class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
  public:
   explicit DeepseekV32ModelImpl(const ModelContext& context)
-      : DeepseekV2ModelImpl(context),
+      : DeepseekV32ModelImpl(context, default_decoder_layer_factory()) {}
+
+ protected:
+  DeepseekV32ModelImpl(const ModelContext& context,
+                       const DecoderLayerFactory& decoder_layer_factory)
+      : DeepseekV2ModelImpl(context, decoder_layer_factory),
         device_(context.get_tensor_options().device()),
         cp_group_(context.get_parallel_args().cp_group_),
         parallel_world_size_(context.get_parallel_args().world_size()),
@@ -56,6 +61,7 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
     CHECK(!cp_config_error.has_value()) << cp_config_error.value();
   }
 
+ public:
   ModelOutput forward(const torch::Tensor& tokens,
                       const torch::Tensor& positions,
                       std::vector<KVCache>& kv_caches,
@@ -72,9 +78,10 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
     }
     auto& attn_metadata = *modified_input_params.attn_metadata;
     std::optional<layer::v32_cp::DeepseekV32CPContext> cp_ctx;
-    const bool use_model_partition =
-        cp_size_ > 1 && Platform::uses_model_cp_partition();
-    if (use_model_partition) {
+    const bool use_model_sharding =
+        cp_size_ > 1 && Platform::uses_model_cp_sharding() &&
+        input_params.meta.batch_forward_type.no_decode();
+    if (use_model_sharding) {
       if (cp_group_ == nullptr) {
         CHECK_EQ(parallel_world_size_, 1)
             << "deepseek_v32 Prefill CP requires cp_group_.";
@@ -104,23 +111,14 @@ class DeepseekV32ModelImpl : public DeepseekV2ModelImpl {
     torch::Tensor positions_local =
         layer::v32_cp::reorder_to_local_shard(positions, cp_ctx.value());
     std::optional<torch::Tensor> residual;
-    for (size_t i = 0; i < layers_ref().size(); ++i) {
-#if defined(USE_CUDA) || defined(USE_MUSA)
-      attn_metadata.plan_info->layer_id = i;
-#endif
-      auto& layer = layers_ref()[i];
-      prepare_decoder_layer_for_forward(i, layer, attn_metadata);
-      hidden_states = layer(hidden_states,
+    if (!run_decoder_layers(hidden_states,
                             residual,
                             positions_local,
                             attn_metadata,
-                            kv_caches[i],
-                            modified_input_params);
-      if (!modified_input_params.record_layer(static_cast<uint32_t>(i),
-                                              hidden_states.device())) {
-        active_cp_context_ = nullptr;
-        return ModelOutput();
-      }
+                            kv_caches,
+                            modified_input_params)) {
+      active_cp_context_ = nullptr;
+      return ModelOutput();
     }
     hidden_states =
         layer::v32_cp::gather_and_restore_global(hidden_states, cp_ctx.value());

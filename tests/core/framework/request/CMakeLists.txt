@@ -24,6 +24,16 @@ cc_test(
 
 cc_test(
   NAME
+    dit_request_params_test
+  SRCS
+    dit_request_params_test.cpp
+  DEPS
+    :request
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     stopping_checker_test
   SRCS
     stopping_checker_test.cpp

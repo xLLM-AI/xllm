@@ -130,6 +130,14 @@ bool SpeculativeEngine::allocate_kv_cache() {
 
   KVCacheCapacity draft_kv_cache_cap =
       draft_engine_->estimate_kv_cache_capacity();
+
+  if (target_kv_cache_cap.c4_count() > 0 ||
+      target_kv_cache_cap.c128_count() > 0) {
+    draft_kv_cache_cap.n_blocks() = target_kv_cache_cap.n_blocks();
+    return engine_->allocate_kv_cache(target_kv_cache_cap) &&
+           draft_engine_->allocate_kv_cache(draft_kv_cache_cap);
+  }
+
   const int64_t kv_cache_size =
       std::min(target_kv_cache_cap.cache_size_in_bytes(),
                draft_kv_cache_cap.cache_size_in_bytes());
@@ -210,11 +218,20 @@ int64_t SpeculativeEngine::calculate_kv_cache(
   // Draft model has no linear-attention layers in the current MTP/Eagle path.
   const int64_t draft_full_attention_layers = draft_kv_cache_cap.n_layers();
   const int64_t target_full_attention_block_size_in_bytes =
-      block_size * target_full_attention_layers *
-      target_full_attention_slot_size;
+      block_size *
+      (target_full_attention_layers * (target_kv_cache_cap.slot_size() +
+                                       target_kv_cache_cap.scale_slot_size()) +
+       target_kv_cache_cap.num_indexer_layers() *
+           target_kv_cache_cap.index_slot_size());
   const int64_t draft_full_attention_block_size_in_bytes =
-      block_size * draft_full_attention_layers *
-      draft_allocated_full_attention_slot_size;
+      draft_body_uses_tp1
+          ? block_size * (draft_full_attention_layers *
+                              (draft_kv_cache_cap.slot_size() +
+                               draft_kv_cache_cap.scale_slot_size()) +
+                          draft_kv_cache_cap.num_indexer_layers() *
+                              draft_kv_cache_cap.index_slot_size())
+          : block_size * draft_full_attention_layers *
+                draft_allocated_full_attention_slot_size;
   const int64_t full_attention_block_size_in_bytes =
       target_full_attention_block_size_in_bytes +
       draft_full_attention_block_size_in_bytes;

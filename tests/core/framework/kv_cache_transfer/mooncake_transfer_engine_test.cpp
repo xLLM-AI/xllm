@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -88,6 +89,35 @@ void expect_same_merge(
 }
 
 #if defined(USE_MLU)
+class RecordingMooncakeTransferEngine final : public MooncakeTransferEngine {
+ public:
+  RecordingMooncakeTransferEngine(uint16_t listen_port,
+                                  const torch::Device& device)
+      : MooncakeTransferEngine(listen_port, device) {}
+
+  bool register_memory(std::vector<void*> addrs,
+                       std::vector<size_t> lens,
+                       std::vector<uint64_t> buf_bytes) override {
+    registered_addrs.emplace_back(std::move(addrs));
+    registered_lens.emplace_back(std::move(lens));
+    registered_block_bytes.emplace_back(std::move(buf_bytes));
+    return true;
+  }
+
+  bool pull_memory_blocks(const std::string& /*remote_addr*/,
+                          const std::vector<uint64_t>& /*src_blocks*/,
+                          const std::vector<uint64_t>& /*dst_blocks*/,
+                          const std::vector<int64_t>& buf_ids) override {
+    pulled_buf_ids = buf_ids;
+    return true;
+  }
+
+  std::vector<std::vector<void*>> registered_addrs;
+  std::vector<std::vector<size_t>> registered_lens;
+  std::vector<std::vector<uint64_t>> registered_block_bytes;
+  std::vector<int64_t> pulled_buf_ids;
+};
+
 KVCacheShape make_indexer_int8_transfer_shape() {
   proto::KVCacheShape proto_shape;
   for (int64_t dim : std::vector<int64_t>{2, 1, 1, 16}) {
@@ -101,6 +131,37 @@ KVCacheShape make_indexer_int8_transfer_shape() {
     proto_shape.add_index_cache_scale_shape(dim);
   }
   return KVCacheShape::from_proto(proto_shape);
+}
+
+std::vector<KVCache> make_mixed_transfer_caches(const torch::Device& device) {
+  std::shared_ptr<KVCacheTensorAllocator> allocator =
+      mlu_mooncake_tensor_allocator();
+  auto make_full_cache = [&allocator, &device]() {
+    torch::Tensor key = allocator->allocate(
+        KVCacheTensorRole::KEY, {2, 1, 1, 16}, torch::kBFloat16, device);
+    torch::Tensor index = allocator->allocate(
+        KVCacheTensorRole::INDEX, {2, 96, 1, 8}, torch::kChar, device);
+    torch::Tensor index_scale = allocator->allocate(
+        KVCacheTensorRole::INDEX_SCALE, {2, 96, 1}, torch::kFloat32, device);
+    return KVCache(IndexedKVCacheTensors{
+        KVCacheTensors{key, torch::Tensor()}, index, index_scale});
+  };
+  auto make_shared_cache = [&allocator, &device]() {
+    torch::Tensor key = allocator->allocate(
+        KVCacheTensorRole::KEY, {2, 1, 1, 16}, torch::kChar, device);
+    torch::Tensor key_scale = allocator->allocate(
+        KVCacheTensorRole::KEY_SCALE, {2, 1, 1}, torch::kFloat32, device);
+    return KVCache(QuantizedKVCacheTensors{
+        KVCacheTensors{key, torch::Tensor()}, key_scale, torch::Tensor()});
+  };
+
+  std::vector<KVCache> caches;
+  caches.reserve(4);
+  caches.emplace_back(make_full_cache());
+  caches.emplace_back(make_shared_cache());
+  caches.emplace_back(make_full_cache());
+  caches.emplace_back(make_shared_cache());
+  return caches;
 }
 #endif
 
@@ -251,6 +312,20 @@ TEST(MooncakeKVCacheTransferDefaultTest, SpecDraftBufIdsUseSpecOffset) {
 }
 
 TEST(MooncakeKVCacheTransferDefaultTest,
+     VariableLayerBufIdsUseRegistrationOffsets) {
+  MooncakeKVCacheTransferDefault transfer(
+      0, 0, torch::Device(torch::kCPU), "test");
+  transfer.main_layout_.num_layers = 4;
+  transfer.main_layout_.offset = 10;
+  transfer.main_layout_.layer_offsets = {0, 4, 6, 8, 12};
+  transfer.main_layout_.total_buf_cnt = 12;
+  transfer.main_layout_.registered = true;
+
+  EXPECT_EQ(transfer.get_buf_ids({1, 3}, false),
+            (std::vector<int64_t>{14, 15, 18, 19, 20, 21}));
+}
+
+TEST(MooncakeKVCacheTransferDefaultTest,
      AddBufUsesRdmaRegisterableLengthWithoutChangingBlockBytes) {
   if (Platform::device_count() < 1) {
     GTEST_SKIP() << "MLU device is required for Mooncake registration tests.";
@@ -282,6 +357,88 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   EXPECT_EQ(block_bytes[0], kScaleBlockBytes);
 }
 
+TEST(MooncakeKVCacheTransferDefaultTest,
+     RegistersMixedLayersFromProtocolRolesInStableOrder) {
+  if (Platform::device_count() < 1) {
+    GTEST_SKIP() << "MLU device is required for Mooncake registration tests.";
+  }
+  Device device(/*device_id=*/0);
+  device.set_device();
+  const torch::Device torch_device = device.unwrap();
+  auto engine = std::make_unique<RecordingMooncakeTransferEngine>(
+      /*listen_port=*/0, torch_device);
+  RecordingMooncakeTransferEngine* engine_observer = engine.get();
+  MooncakeKVCacheTransferDefault transfer(/*device_id=*/0,
+                                          /*listen_port=*/0,
+                                          torch_device,
+                                          /*model_type=*/"glm_moe_dsa",
+                                          std::move(engine));
+  std::vector<KVCache> caches = make_mixed_transfer_caches(torch_device);
+  const KVCacheShape shape = make_indexer_int8_transfer_shape();
+
+  transfer.register_kv_cache(caches, shape, torch::kBFloat16);
+
+  ASSERT_EQ(engine_observer->registered_addrs.size(), 1U);
+  ASSERT_EQ(engine_observer->registered_addrs[0].size(), 8U);
+  const std::vector<void*> expected_addrs = {
+      caches[0].get_k_cache().data_ptr(),
+      caches[0].get_index_cache().data_ptr(),
+      caches[0].get_indexer_cache_scale()->data_ptr(),
+      caches[1].get_k_cache().data_ptr(),
+      caches[2].get_k_cache().data_ptr(),
+      caches[2].get_index_cache().data_ptr(),
+      caches[2].get_indexer_cache_scale()->data_ptr(),
+      caches[3].get_k_cache().data_ptr()};
+  EXPECT_EQ(engine_observer->registered_addrs[0], expected_addrs);
+  EXPECT_EQ(engine_observer->registered_lens[0][2],
+            caches[0].get_indexer_cache_scale()->storage().nbytes());
+  EXPECT_EQ(engine_observer->registered_block_bytes[0][2],
+            caches[0].get_indexer_cache_scale()->nbytes() / 2);
+
+  EXPECT_TRUE(transfer.pull_kv_blocks(/*src_cluster_id=*/1,
+                                      /*src_addr=*/"remote",
+                                      /*src_blocks=*/{0},
+                                      /*dst_blocks=*/{1},
+                                      /*src_linear_state_ids=*/{},
+                                      /*dst_linear_state_ids=*/{}));
+  EXPECT_EQ(engine_observer->pulled_buf_ids,
+            (std::vector<int64_t>{0, 1, 2, 3, 4, 5, 6, 7}));
+}
+
+TEST(MooncakeKVCacheTransferDefaultTest,
+     SpecRegistrationStartsAfterActualMainBufferCount) {
+  if (Platform::device_count() < 1) {
+    GTEST_SKIP() << "MLU device is required for Mooncake registration tests.";
+  }
+  Device device(/*device_id=*/0);
+  device.set_device();
+  const torch::Device torch_device = device.unwrap();
+  auto engine = std::make_unique<RecordingMooncakeTransferEngine>(
+      /*listen_port=*/0, torch_device);
+  RecordingMooncakeTransferEngine* engine_observer = engine.get();
+  MooncakeKVCacheTransferDefault transfer(/*device_id=*/0,
+                                          /*listen_port=*/0,
+                                          torch_device,
+                                          /*model_type=*/"glm_moe_dsa",
+                                          std::move(engine));
+  std::vector<KVCache> main_caches = make_mixed_transfer_caches(torch_device);
+  std::vector<KVCache> draft_source = make_mixed_transfer_caches(torch_device);
+  std::vector<KVCache> draft_caches;
+  draft_caches.reserve(2);
+  draft_caches.emplace_back(std::move(draft_source[1]));
+  draft_caches.emplace_back(std::move(draft_source[0]));
+  const KVCacheShape shape = make_indexer_int8_transfer_shape();
+
+  transfer.register_kv_cache(main_caches, shape, torch::kBFloat16);
+  transfer.register_kv_cache_spec(draft_caches, shape, torch::kBFloat16);
+
+  ASSERT_EQ(engine_observer->registered_addrs.size(), 2U);
+  EXPECT_EQ(engine_observer->registered_addrs[0].size(), 8U);
+  EXPECT_EQ(engine_observer->registered_addrs[1].size(), 4U);
+  EXPECT_EQ(transfer.get_buf_ids({0, 1}, /*is_spec_draft=*/true),
+            (std::vector<int64_t>{8, 9, 10, 11}));
+}
+
 TEST(MooncakeKVCacheTransferDefaultTest, AddBufRejectsNonContiguousTensor) {
   GTEST_FLAG_SET(death_test_style, "threadsafe");
   MooncakeKVCacheTransferDefault transfer(
@@ -297,6 +454,35 @@ TEST(MooncakeKVCacheTransferDefaultTest, AddBufRejectsNonContiguousTensor) {
 
   EXPECT_DEATH(transfer.add_buf(tensor, addrs, lens, block_bytes),
                "contiguous");
+}
+
+TEST(MooncakeKVCacheTransferDefaultTest, AddBufRejectsRdmaLengthBeyondStorage) {
+  if (Platform::device_count() < 1) {
+    GTEST_SKIP() << "MLU device is required for Mooncake registration tests.";
+  }
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  Device device(/*device_id=*/0);
+  device.set_device();
+  const torch::Device torch_device = device.unwrap();
+  MooncakeKVCacheTransferDefault transfer(
+      /*device_id=*/0,
+      /*listen_port=*/0,
+      torch_device,
+      /*model_type=*/"test");
+  const torch::Tensor tensor =
+      mlu::alloc_zero_tensor({2, 96, 1}, torch::kFloat32, torch_device);
+  std::vector<void*> addrs;
+  std::vector<size_t> lens;
+  std::vector<uint64_t> block_bytes;
+
+  EXPECT_DEATH(
+      transfer.add_buf(tensor,
+                       addrs,
+                       lens,
+                       block_bytes,
+                       MooncakeKVCacheTransferDefault::RegisterLengthPolicy::
+                           RDMA_REGISTERABLE_BYTES),
+      "exceeds tensor storage capacity");
 }
 
 TEST(MooncakeKVCacheTransferDefaultTest,
@@ -319,8 +505,16 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   transfer.initialize(/*device_id=*/0);
 
   const KVCacheShape shape = make_indexer_int8_transfer_shape();
+  KVCacheCreateOptions options;
+  options.device(torch_device)
+      .dtype(torch::kBFloat16)
+      .num_layers(1)
+      .model_type("deepseek_v32")
+      .enable_lighting_indexer(true)
+      .enable_indexer_cache_quant(true)
+      .tensor_allocator(mlu_mooncake_tensor_allocator());
   std::vector<KVCache> caches;
-  transfer.allocate_kv_cache(caches, /*num_layers=*/1, shape, torch::kBFloat16);
+  allocate_kv_caches(caches, shape, options);
   ASSERT_EQ(caches.size(), 1U);
 
   KVCache& cache = caches[0];

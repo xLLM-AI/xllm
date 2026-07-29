@@ -44,6 +44,8 @@ class DiTRequest : public RequestBase {
 
   void handle_forward_output(torch::Tensor output);
 
+  void handle_forward_text_output(const std::string& text);
+
   const DiTRequestOutput generate_output();
 
   void log_statistic(double total_latency);

@@ -27,6 +27,8 @@ limitations under the License.
 #include <variant>
 
 #include "common/types.h"
+#include "framework/block/block.h"
+#include "platform/layer_synchronizer.h"
 #if defined(USE_NPU)
 #include "platform/npu/npu_layer_synchronizer.h"
 #endif
@@ -37,10 +39,10 @@ limitations under the License.
 #include "platform/dcu/dcu_layer_synchronizer.h"
 #endif
 
+#include "core/framework/model/mtp_topk_state.h"
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "framework/batch/batch_forward_type.h"
-#include "framework/parallel_state/npu_cp_ep_padding.h"
-#include "framework/parallel_state/npu_cp_prepare.h"
+#include "framework/parallel_state/npu_cp_plan.h"
 #include "framework/parallel_state/npu_dp_ep_padding.h"
 #include "runtime/dit_forward_params.h"
 #include "util/hash_util.h"
@@ -378,9 +380,8 @@ struct AttentionDeviceInput {
   torch::Tensor ring_cur_seqlen;
   torch::Tensor ring_cache_seqlen;
 
-  // Per-rank prefix slot index for KV-split prefix AllGather (see
-  // WorkerImpl::compute_in_prefix_slots). Must propagate in to(device) because
-  // nested worker paths skip recomputation when cp_partitioned is true.
+  // Per-rank prefix slot indices for KV-split prefix AllGather. NpuCpPlan
+  // supplies this graph input with the rest of the CP attention metadata.
   torch::Tensor in_prefix_slots;
 
   AttentionDeviceInput to(const torch::Device& device) const {
@@ -629,16 +630,19 @@ struct AttentionInput {
 };
 
 enum class TransferType : uint8_t {
-  G2H = 0,  // global memory(KVCache store) to host memory(DRAM)
-  H2D = 1,  // host memory(DRAM) to device memory(HBM)
-  D2G = 2,  // host memory(DRAM) to global memory(KVCache store)
-  G2D = 3   // global memory(KVCache store) to device memory(HBM)
+  G2H = 0,    // global memory(KVCache store) to host memory(DRAM)
+  H2D = 1,    // host memory(DRAM) to device memory(HBM)
+  D2G = 2,    // device memory(HBM) to global memory(KVCache store)
+  G2D = 3,    // global memory(KVCache store) to device memory(HBM)
+  D2H2G = 4,  // device memory(HBM) to host memory(DRAM) to global
+              // memory(KVCache store)
 };
 
 struct BlockTransferInfo {
   int32_t src_block_id = -1;
   int32_t dst_block_id = -1;
   uint8_t hash_key[XXH3_128BITS_HASH_VALUE_LEN];
+  BlockType block_type = BlockType::KV;
   TransferType transfer_type;
 
   BlockTransferInfo(int32_t src_block_id, int32_t dst_block_id) {
@@ -649,14 +653,19 @@ struct BlockTransferInfo {
   BlockTransferInfo(int32_t src_id,
                     int32_t dst_id,
                     const uint8_t* key,
-                    TransferType type)
-      : src_block_id(src_id), dst_block_id(dst_id), transfer_type(type) {
+                    TransferType type,
+                    BlockType btype = BlockType::KV)
+      : src_block_id(src_id),
+        dst_block_id(dst_id),
+        block_type(btype),
+        transfer_type(type) {
     memcpy(hash_key, key, XXH3_128BITS_HASH_VALUE_LEN);
   }
 
   BlockTransferInfo(const BlockTransferInfo& other)
       : src_block_id(other.src_block_id),
         dst_block_id(other.dst_block_id),
+        block_type(other.block_type),
         transfer_type(other.transfer_type) {
     memcpy(hash_key, other.hash_key, XXH3_128BITS_HASH_VALUE_LEN);
   }
@@ -664,6 +673,7 @@ struct BlockTransferInfo {
   BlockTransferInfo(BlockTransferInfo&& other)
       : src_block_id(other.src_block_id),
         dst_block_id(other.dst_block_id),
+        block_type(other.block_type),
         transfer_type(other.transfer_type) {
     memcpy(hash_key, other.hash_key, XXH3_128BITS_HASH_VALUE_LEN);
 
@@ -674,6 +684,7 @@ struct BlockTransferInfo {
   BlockTransferInfo& operator=(const BlockTransferInfo& other) {
     src_block_id = other.src_block_id;
     dst_block_id = other.dst_block_id;
+    block_type = other.block_type;
     transfer_type = other.transfer_type;
     memcpy(hash_key, other.hash_key, XXH3_128BITS_HASH_VALUE_LEN);
     return *this;
@@ -682,6 +693,7 @@ struct BlockTransferInfo {
   BlockTransferInfo& operator=(BlockTransferInfo&& other) {
     src_block_id = other.src_block_id;
     dst_block_id = other.dst_block_id;
+    block_type = other.block_type;
     transfer_type = other.transfer_type;
     memcpy(hash_key, other.hash_key, XXH3_128BITS_HASH_VALUE_LEN);
 
@@ -789,11 +801,14 @@ struct MultiModalInput {
 struct ParallelInput {
   // num tokens of all workers, mainly used for dp case
   std::vector<int32_t> dp_global_token_nums;
+  // Original DP token counts before empty ranks are padded to one fake token.
+  // Attention/FFN paths may need the padded counts, while lm_head output
+  // compaction must skip true empty DP ranks.
+  std::vector<int32_t> raw_dp_global_token_nums;
   std::vector<int32_t> dp_is_decode;
 
   DpEpPaddingData dp_ep_padding_data;
-  CpEpPaddingData cp_ep_padding_data;
-  CpPrefillInputs cp_prefill_inputs;
+  NpuCpPlan cp_plan;
 
 #if defined(USE_MLU)
   std::shared_ptr<MLULayerSynchronizerImpl> layer_synchronizer = nullptr;
@@ -801,9 +816,10 @@ struct ParallelInput {
   std::shared_ptr<DCULayerSynchronizerImpl> layer_synchronizer = nullptr;
 #elif defined(USE_NPU)
   std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer = nullptr;
+#endif
   uint32_t layers_per_bacth_copy = std::numeric_limits<uint32_t>::max();
-  std::shared_ptr<NPULayerSynchronizerImpl> layer_wise_load_synchronizer =
-      nullptr;
+  std::shared_ptr<LayerSynchronizer> layer_wise_load_synchronizer = nullptr;
+#if defined(USE_NPU)
   std::vector<int64_t> query_start_loc;
   std::vector<int64_t> has_initial_state;
 #endif
@@ -811,37 +827,16 @@ struct ParallelInput {
   ParallelInput to(const torch::Device& device) const {
     ParallelInput out;
     out.dp_global_token_nums = dp_global_token_nums;
+    out.raw_dp_global_token_nums = raw_dp_global_token_nums;
     out.dp_is_decode = dp_is_decode;
     out.dp_ep_padding_data = dp_ep_padding_data;
-    out.cp_ep_padding_data
-        .attn_padding_idx(
-            safe_to(cp_ep_padding_data.attn_padding_idx(), device, true))
-        .attn_unpadding_idx(
-            safe_to(cp_ep_padding_data.attn_unpadding_idx(), device, true))
-        .ffn_padding_idx(
-            safe_to(cp_ep_padding_data.ffn_padding_idx(), device, true))
-        .ffn_unpadding_idx(
-            safe_to(cp_ep_padding_data.ffn_unpadding_idx(), device, true))
-        .lm_head_skip_padding_token_indices(
-            safe_to(cp_ep_padding_data.lm_head_skip_padding_token_indices(),
-                    device,
-                    true))
-        .gather_prenorm_idx(
-            safe_to(cp_ep_padding_data.gather_prenorm_idx(), device, true))
-        .padding_idx(safe_to(cp_ep_padding_data.padding_idx(), device, true))
-        .un_padding_idx(
-            safe_to(cp_ep_padding_data.un_padding_idx(), device, true))
-        .dynamic_ep_idx(
-            safe_to(cp_ep_padding_data.dynamic_ep_idx(), device, true))
-        .moe_idx(safe_to(cp_ep_padding_data.moe_idx(), device, true))
-        .expert_array(safe_to(cp_ep_padding_data.expert_array(), device, true));
-    out.cp_prefill_inputs = cp_prefill_inputs.to(device);
+    out.cp_plan = cp_plan.to(device);
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
     out.layer_synchronizer = layer_synchronizer;
 #endif
-#if defined(USE_NPU)
     out.layers_per_bacth_copy = layers_per_bacth_copy;
     out.layer_wise_load_synchronizer = layer_wise_load_synchronizer;
+#if defined(USE_NPU)
     out.query_start_loc = query_start_loc;
     out.has_initial_state = has_initial_state;
 #endif
@@ -934,7 +929,8 @@ struct ModelInputParams {
     params.is_spec_verify = is_spec_verify;
     params.num_accepted_tokens = safe_to(num_accepted_tokens, device, true);
     params.num_accepted_tokens_host = num_accepted_tokens_host;
-    params.dsa_topk_indices = safe_to(dsa_topk_indices, device, true);
+    params.mtp_topk_state =
+        mtp_topk_state == nullptr ? nullptr : mtp_topk_state->to(device);
     for (const auto& table : multi_block_tables) {
       params.multi_block_tables.push_back(
           safe_to(table, table.options().device(torch::kCPU), true));
@@ -1016,7 +1012,6 @@ struct ModelInputParams {
   }
 
   bool synchronize_layer(uint32_t layer_idx) const {
-#if defined(USE_NPU)
     if (parallel.layer_wise_load_synchronizer != nullptr &&
         layer_idx % parallel.layers_per_bacth_copy == 0) {
       if (!parallel.layer_wise_load_synchronizer->synchronize_layer(
@@ -1024,9 +1019,6 @@ struct ModelInputParams {
         return false;
       }
     }
-#else
-    (void)layer_idx;
-#endif
     return true;
   }
 
@@ -1064,7 +1056,8 @@ struct ModelInputParams {
 
   bool is_spec_verify = false;
   torch::Tensor num_accepted_tokens;
-  torch::Tensor dsa_topk_indices;
+  // Backend-neutral state reused by the next MTP draft step.
+  MtpTopkStatePtr mtp_topk_state;
   std::vector<int64_t> num_accepted_tokens_host;
 
   RecModelInputParams rec_params;

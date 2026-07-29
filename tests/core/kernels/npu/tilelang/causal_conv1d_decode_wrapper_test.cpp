@@ -30,7 +30,6 @@ namespace xllm::kernel::npu::tilelang {
 namespace {
 
 constexpr int32_t kWidth = 4;
-constexpr int32_t kDim = 2048;
 constexpr int32_t kStateLen = kWidth - 1;
 
 class TileLangCausalConv1dDecodeWrapperTest : public ::testing::Test {
@@ -112,6 +111,7 @@ torch::Tensor conv_state_t_to_pytorch(const torch::Tensor& conv_state_t) {
 
 struct CausalConv1dDecodeTestCase {
   std::string name;
+  int64_t dim;
   int64_t batch_size;
   bool has_silu;
   int64_t num_cache_lines;
@@ -121,6 +121,7 @@ struct CausalConv1dDecodeTestCase {
 void run_causal_conv1d_decode_case(
     const CausalConv1dDecodeTestCase& test_case) {
   ASSERT_GT(test_case.batch_size, 0);
+  ASSERT_GT(test_case.dim, 0);
   ASSERT_GT(test_case.num_cache_lines, 0);
 
   const auto npu_device = torch::Device("npu:0");
@@ -131,11 +132,11 @@ void run_causal_conv1d_decode_case(
 
   torch::manual_seed(test_case.seed);
 
-  auto x_raw = torch::randn({test_case.batch_size, kDim}, bf16_opts);
-  auto conv_state_raw =
-      torch::randn({test_case.num_cache_lines, kDim, kStateLen}, bf16_opts);
-  auto weight_raw = torch::randn({kDim, kWidth}, bf16_opts);
-  auto bias_raw = torch::randn({kDim}, bf16_opts);
+  auto x_raw = torch::randn({test_case.batch_size, test_case.dim}, bf16_opts);
+  auto conv_state_raw = torch::randn(
+      {test_case.num_cache_lines, test_case.dim, kStateLen}, bf16_opts);
+  auto weight_raw = torch::randn({test_case.dim, kWidth}, bf16_opts);
+  auto bias_raw = torch::randn({test_case.dim}, bf16_opts);
 
   auto init_indices = torch::arange(0, test_case.batch_size, i32_opts);
   auto current_indices = torch::arange(0, test_case.batch_size, i32_opts);
@@ -193,10 +194,17 @@ void run_causal_conv1d_decode_case(
 TEST_F(TileLangCausalConv1dDecodeWrapperTest, DecodeBatch1Silu) {
   const std::vector<CausalConv1dDecodeTestCase> cases = {
       {.name = "decode_bs1_sl1",
+       .dim = 2048,
        .batch_size = 1,
        .has_silu = true,
        .num_cache_lines = 4,
        .seed = 42},
+      {.name = "qwen35_2b_tp2_decode_bs1_sl1",
+       .dim = 3072,
+       .batch_size = 1,
+       .has_silu = true,
+       .num_cache_lines = 4,
+       .seed = 43},
   };
   for (const auto& tc : cases) {
     SCOPED_TRACE(::testing::Message() << "case=" << tc.name);

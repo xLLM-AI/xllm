@@ -52,10 +52,43 @@ class RotaryEmbedding(nn.Module):
         )
         t = torch.arange(max_position, dtype=torch.float32, device=device)
         freqs = torch.outer(t, inv_freq)  # [max_position, head_dim/2]
-        # [cos(freqs) | sin(freqs)] -> [max_position, head_dim].
-        cos_sin_cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1)
+        cos_half = freqs.cos()  # [max_position, head_dim/2]
+        sin_half = freqs.sin()
         if dtype is not None:
-            cos_sin_cache = cos_sin_cache.to(dtype)
-        self.register_buffer(
-            "cos_sin_cache", cos_sin_cache.contiguous(), persistent=False
-        )
+            cos_half = cos_half.to(dtype)
+            sin_half = sin_half.to(dtype)
+
+        device_type = torch.device(device).type if device else "cpu"
+        if device_type in ("npu", "privateuseone"):
+            # NPU path: pre-expand [cos_half, cos_half] so forward() is
+            # index+view only. Skip cos_sin_cache (CUDA-only) to save HBM.
+            self.cos_sin_cache = torch.empty(0)
+            self.register_buffer(
+                "_cos_expanded",
+                torch.cat([cos_half, cos_half], dim=-1).contiguous(),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_sin_expanded",
+                torch.cat([sin_half, sin_half], dim=-1).contiguous(),
+                persistent=False,
+            )
+        else:
+            # CUDA path: [cos(freqs) | sin(freqs)] -> [max_position, head_dim].
+            cos_sin_cache = torch.cat([cos_half, sin_half], dim=-1)
+            self.register_buffer(
+                "cos_sin_cache", cos_sin_cache.contiguous(), persistent=False
+            )
+
+    def forward(
+        self, positions: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Index into the cache and return per-token (cos, sin).
+
+        Returns cos/sin as ``[1, num_tokens, 1, head_dim]`` via index + view
+        (zero allocation on the hot path).
+        """
+        num_tokens = positions.size(0)
+        cos = self._cos_expanded[positions].view(1, num_tokens, 1, self.head_dim)
+        sin = self._sin_expanded[positions].view(1, num_tokens, 1, self.head_dim)
+        return cos, sin

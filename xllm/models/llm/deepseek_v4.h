@@ -812,9 +812,25 @@ class DeepseekV4ModelImpl
                      kv_caches[i],
                      modified_input_params,
                      tokens);
+#if defined(USE_NPU)
+      if (modified_input_params.parallel.layer_synchronizer != nullptr &&
+          !modified_input_params.parallel.layer_synchronizer->record_event(
+              static_cast<int64_t>(i), runtime_device.index())) {
+        return ModelOutput();
+      }
+#endif
+    }
+    torch::Tensor pre_hc_head_hidden_states;
+    if (model_args_.num_speculative_tokens() > 0) {
+      pre_hc_head_hidden_states = h;
     }
     h = hc_head(h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
+    if (pre_hc_head_hidden_states.defined()) {
+      ModelOutput out(hidden_states, residual_out);
+      out.aux_hidden_states = pre_hc_head_hidden_states.flatten(1);
+      return out;
+    }
     return ModelOutput(hidden_states, residual_out);
   }
 

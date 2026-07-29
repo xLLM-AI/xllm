@@ -268,17 +268,16 @@ class GraphPersistentParam final {
   // max decode capacity so that graph capture and replay always reference
   // stable device addresses, regardless of actual vs bucket token counts.
   DpEpPaddingData persistent_dp_ep_padding_;
-  CpEpPaddingData persistent_cp_ep_padding_;
+  CpEpMeta persistent_cp_ep_meta_;
 
   // Copy src padding data into pre-allocated persistent buffers.
   void update_persistent_dp_ep_padding(const DpEpPaddingData& src,
                                        uint32_t padded_tokens);
-  void update_persistent_cp_ep_padding(const CpEpPaddingData& src,
-                                       uint32_t padded_tokens);
+  void update_persistent_cp_ep_meta(const CpEpMeta& src,
+                                    uint32_t padded_tokens);
   void replace_capture_dp_ep_padding(const DpEpPaddingData& src,
                                      DpEpPaddingData& dst) const;
-  void replace_capture_cp_ep_padding(const CpEpPaddingData& src,
-                                     CpEpPaddingData& dst) const;
+  void replace_capture_cp_ep_meta(const CpEpMeta& src, CpEpMeta& dst) const;
 };
 
 }  // namespace xllm::npu

@@ -38,7 +38,6 @@ export MLU_VISIBLE_DEVICES=0
 MODEL_PATH="/path/to/model/Qwen3-8B"
 MASTER_NODE_ADDR="127.0.0.1:9748"
 START_PORT=18000
-START_DEVICE=0
 LOG_DIR="log"
 NNODES=1
 
@@ -47,11 +46,9 @@ mkdir -p $LOG_DIR
 for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
   xllm \
     --model $MODEL_PATH \
-    --devices="mlu:$DEVICE" \
     --port $PORT \
     --nnodes=$NNODES \
     --master_node_addr=$MASTER_NODE_ADDR \
@@ -70,7 +67,8 @@ For MLU, the configured `cp_size` must equal the global world size, calculated
 as `nnodes` multiplied by the number of devices used by each process. Current
 MLU model-side CP has the following constraints:
 
-- Supported model types are `deepseek_v32` and `glm_moe_dsa` (GLM-5).
+- Supported model types are `deepseek_v32` and `glm_moe_dsa` (the GLM-5
+  family, including GLM-5.2 cross-layer DSA top-k sharing).
 - Only the `generate` task of text-generation models is supported.
 - `dp_size` must be `1`, and `kv_split_size` must be `1`.
 - `ep_size` must be either `1` or the global world size.
@@ -81,6 +79,11 @@ MLU model-side CP has the following constraints:
 In a disaggregated Prefill/Decode deployment, configure `cp_size=N` on the
 Prefill instance and `cp_size=1` on the Decode instance. The Decode instance
 does not participate in MLU model-side CP.
+
+Prefill CP uses head-tail token partitioning. Each attention layer temporarily
+all-gathers only that layer's MLA K; Indexer-bearing Full layers also gather
+that layer's Indexer K, while GLM-5.2 Shared layers reuse the sparse block table
+produced by the Full layer on the same CP rank.
 
 ## Notes
 

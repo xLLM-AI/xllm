@@ -53,6 +53,22 @@ DEFINE_bool(enable_aclnn_matmul,
 DEFINE_bool(enable_aclnn_swiglu,
             false,
             "enable ACLNN SwiGLU backend for supported NPU ATB layers.");
+
+DEFINE_bool(enable_flashcomm1,
+            false,
+            "Enable Flash Communication 1 sequence-parallel optimization.");
+
+DEFINE_int32(flashcomm1_min_prefill_tokens,
+             8192,
+             "Minimum prefill token count to activate FC1.");
+
+DEFINE_bool(enable_mmrs_fusion,
+            false,
+            "Enable Matmul+ReduceScatter fusion kernel for FC1.");
+
+DEFINE_string(mmrs_comm_mode,
+              "aiv",
+              "Communication mode for torch_npu MMRS: ai_cpu, aiv, or none.");
 #endif
 
 namespace xllm {
@@ -85,6 +101,10 @@ void KernelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_split_rmsnorm_rope);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_aclnn_matmul);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_aclnn_swiglu);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_flashcomm1);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(flashcomm1_min_prefill_tokens);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mmrs_fusion);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(mmrs_comm_mode);
 #endif
 }
 
@@ -98,6 +118,10 @@ void KernelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_split_rmsnorm_rope);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_aclnn_matmul);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_aclnn_swiglu);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_flashcomm1);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(flashcomm1_min_prefill_tokens);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mmrs_fusion);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(mmrs_comm_mode);
 #endif
 }
 
@@ -121,6 +145,14 @@ void KernelConfig::append_config_json(
       config_json, default_config, enable_aclnn_matmul);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_aclnn_swiglu);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_flashcomm1);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, flashcomm1_min_prefill_tokens);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_mmrs_fusion);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, mmrs_comm_mode);
 #endif
 }
 

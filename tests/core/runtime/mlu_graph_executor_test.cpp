@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "base_executor_impl.h"
@@ -30,6 +31,7 @@ limitations under the License.
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
 #include "mlu_graph_executor_impl.h"
+#include "models/llm/mlu/mtp_topk_state.h"
 #include "platform/device.h"
 #include "runtime/options.h"
 
@@ -71,11 +73,12 @@ class MockCausalLM : public CausalLM {
     last_tokens_size_ = tokens.size(0);
     last_dp_token_nums_ = params.parallel.dp_global_token_nums;
     auto hidden_states = params.embedding.input_embedding.matmul(weight_);
+    ModelOutput output(hidden_states);
     if (return_aux_hidden_states_) {
-      auto aux_hidden_states = hidden_states + 1;
-      return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);
+      output.aux_hidden_states = hidden_states + 1;
     }
-    return ModelOutput(hidden_states);
+    output.mtp_topk_state = mtp_topk_state_;
+    return output;
   }
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) override {
@@ -90,6 +93,9 @@ class MockCausalLM : public CausalLM {
   void return_aux_hidden_states(bool value) {
     return_aux_hidden_states_ = value;
   }
+  void set_mtp_topk_state(MtpTopkStatePtr state) {
+    mtp_topk_state_ = std::move(state);
+  }
   void load_model(std::unique_ptr<ModelLoader> loader) override {}
   torch::Device device() const override { return options_.device(); }
   void prepare_expert_weight(int32_t layer_id,
@@ -100,6 +106,7 @@ class MockCausalLM : public CausalLM {
  private:
   torch::Tensor input_;
   torch::Tensor weight_;
+  MtpTopkStatePtr mtp_topk_state_;
   torch::TensorOptions options_;
   bool return_aux_hidden_states_ = false;
   int32_t forward_cnt_ = 0;
@@ -336,6 +343,33 @@ TEST_F(MluGraphExecutorTest, DraftEagerDoesNotExposeAuxWhenDisabled) {
   EXPECT_EQ(model_->forward_cnt(), 1);
 }
 
+TEST_F(MluGraphExecutorTest, DraftEagerPreservesTypedTopkWhenAuxIsDisabled) {
+  mlu::model::MluMtpTopkState::LayerStates expected_layers;
+  expected_layers.emplace_back(layer::DsaTopkState(
+      torch::tensor({{1, 2}, {3, 4}}, tensor_options_.dtype(torch::kInt32)),
+      torch::tensor({5, 6}, tensor_options_.dtype(torch::kInt32))));
+  const MtpTopkStatePtr expected_state =
+      std::make_shared<mlu::model::MluMtpTopkState>(std::move(expected_layers));
+  model_->return_aux_hidden_states(true);
+  model_->set_mtp_topk_state(expected_state);
+  options_.is_draft_engine(true);
+  options_.enable_graph_aux_hidden_states(false);
+  rebuild_impl();
+
+  const int32_t batch_size = 2;
+  const uint64_t seed = 23;
+  auto forward_input = prepare_inputs(batch_size, seed);
+
+  ModelOutput output = impl_->run({forward_input.token_ids},
+                                  {forward_input.positions},
+                                  kv_caches_,
+                                  {forward_input.input_params});
+
+  EXPECT_EQ(output.mtp_topk_state.get(), expected_state.get());
+  EXPECT_FALSE(output.aux_hidden_states.defined());
+  EXPECT_EQ(model_->forward_cnt(), 1);
+}
+
 TEST_F(MluGraphExecutorTest, TargetDecodeCapturesThenReplays) {
   options_.is_draft_engine(false);
   rebuild_impl();
@@ -361,6 +395,53 @@ TEST_F(MluGraphExecutorTest, TargetDecodeCapturesThenReplays) {
   EXPECT_TRUE(
       torch::allclose(first_impl_output, second_impl_output, 1e-5, 1e-6));
   EXPECT_EQ(model_->forward_cnt(), 1);
+}
+
+TEST_F(MluGraphExecutorTest, SpecVerifyFallsBackAndNonSpecStillCaptures) {
+  options_.is_draft_engine(false);
+  rebuild_impl();
+
+  const int32_t batch_size = 5;
+  auto spec_input = prepare_inputs(batch_size, /*seed=*/13);
+  spec_input.input_params.is_spec_verify = true;
+
+  const int32_t start_cnt = model_->forward_cnt();
+  auto first_spec_output = impl_
+                               ->run({spec_input.token_ids},
+                                     {spec_input.positions},
+                                     kv_caches_,
+                                     {spec_input.input_params})
+                               .hidden_states;
+  auto second_spec_output = impl_
+                                ->run({spec_input.token_ids},
+                                      {spec_input.positions},
+                                      kv_caches_,
+                                      {spec_input.input_params})
+                                .hidden_states;
+
+  torch_mlu::synchronize();
+  EXPECT_TRUE(
+      torch::allclose(first_spec_output, second_spec_output, 1e-5, 1e-6));
+  EXPECT_EQ(model_->forward_cnt(), start_cnt + 2);
+
+  auto decode_input = prepare_inputs(batch_size, /*seed=*/14);
+  auto first_decode_output = impl_
+                                 ->run({decode_input.token_ids},
+                                       {decode_input.positions},
+                                       kv_caches_,
+                                       {decode_input.input_params})
+                                 .hidden_states;
+  auto second_decode_output = impl_
+                                  ->run({decode_input.token_ids},
+                                        {decode_input.positions},
+                                        kv_caches_,
+                                        {decode_input.input_params})
+                                  .hidden_states;
+
+  torch_mlu::synchronize();
+  EXPECT_TRUE(
+      torch::allclose(first_decode_output, second_decode_output, 1e-5, 1e-6));
+  EXPECT_EQ(model_->forward_cnt(), start_cnt + 3);
 }
 
 TEST_F(MluGraphExecutorTest, LargeDecodeBucketCapturesThenReplays) {
@@ -600,6 +681,35 @@ TEST_F(MluGraphExecutorTest, MtpSeqLensCapacityUsesSpecFactor) {
 
   torch_mlu::synchronize();
   EXPECT_TRUE(torch::allclose(first_output, second_output, 1e-5, 1e-6));
+}
+
+TEST_F(MluGraphExecutorTest, MtpSeqLensCapacityIncludesGraphPadding) {
+  options_.is_draft_engine(false);
+  options_.num_speculative_tokens(2);
+  options_.num_decoding_tokens(options_.num_speculative_tokens() + 1);
+  options_.enable_speculative_decode(true);
+  options_.max_seqs_per_batch(8);
+  rebuild_impl();
+
+  // Eight MTP validation requests produce 24 token rows. The MLU graph
+  // executor pads that input to the 32-token bucket, so cumulative sequence
+  // lengths need 33 entries.
+  auto forward_input = prepare_inputs(/*batch_size=*/24, /*seed=*/73);
+
+  EXPECT_NO_THROW({
+    ModelOutput first_output = impl_->run({forward_input.token_ids},
+                                          {forward_input.positions},
+                                          kv_caches_,
+                                          {forward_input.input_params});
+    ModelOutput second_output = impl_->run({forward_input.token_ids},
+                                           {forward_input.positions},
+                                           kv_caches_,
+                                           {forward_input.input_params});
+
+    torch_mlu::synchronize();
+    EXPECT_TRUE(torch::allclose(
+        first_output.hidden_states, second_output.hidden_states, 1e-5, 1e-6));
+  });
 }
 
 TEST_F(MluGraphExecutorTest, DpDummyFallsBackToEager) {

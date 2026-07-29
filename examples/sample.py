@@ -1,5 +1,5 @@
-# python examples/sample.py --model='/path/models/Qwen3-8B' --devices='npu:0'
-# python examples/sample.py --model='/path/models/Qwen3-8B' --devices='npu:0,npu:1'
+# ASCEND_RT_VISIBLE_DEVICES=0 python examples/sample.py --model='/path/models/Qwen3-8B'
+# ASCEND_RT_VISIBLE_DEVICES=0,1 python examples/sample.py --model='/path/models/Qwen3-8B'
 
 from xllm import ArgumentParser, LLM, RequestParams
 

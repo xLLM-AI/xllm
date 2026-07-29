@@ -22,8 +22,9 @@ from dataclasses import dataclass
 import shlex
 import signal
 import subprocess
+import sys
 import time
-from typing import Sequence, TextIO
+from typing import NoReturn, Sequence, TextIO
 
 from scripts.logger import logger
 
@@ -48,7 +49,7 @@ def _resolve_binary_path(binary_path: str | None) -> str:
     if not os.path.isfile(path):
         raise FileNotFoundError(
             f"xllm server binary was not found: {path}. "
-            "Build and install the wheel before using `python -m xllm.launch_server`."
+            "Build and install the wheel before using `xllm serve`."
         )
     if not os.access(path, os.X_OK):
         raise PermissionError(f"xllm server binary is not executable: {path}")
@@ -59,13 +60,38 @@ def _format_command(command: Sequence[str]) -> str:
     return " ".join(shlex.quote(part) for part in command)
 
 
+def _ensure_python_model_path() -> None:
+    # The Python model executor (--model_impl=python) imports the 'xllm.python'
+    # subpackage. --python_model_path (or XLLM_PYTHON_MODEL_PATH when the flag
+    # is empty) must point at the directory containing the 'xllm' package. For
+    # a wheel install that is site-packages — the parent of this launcher's
+    # directory. The embedded interpreter does not reliably pick up venv
+    # site-packages on its own, so default the env var explicitly; an explicit
+    # --python_model_path or a pre-set env var still takes precedence.
+    os.environ.setdefault(
+        "XLLM_PYTHON_MODEL_PATH",
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
+        prog=f"{os.path.basename(sys.argv[0]) or 'xllm'} serve",
         description=(
             "Launch the packaged xLLM server binary. Unknown arguments are "
             "forwarded to the xllm binary unchanged."
         ),
         allow_abbrev=False,
+        # Handle -h/--help ourselves so we can also print the server binary's
+        # own help (xllm --help) instead of stopping at the launcher options.
+        add_help=False,
+    )
+    parser.add_argument(
+        "-h",
+        "--help",
+        dest="show_help",
+        action="store_true",
+        help="Show this launcher help and the xllm server options, then exit.",
     )
     parser.add_argument(
         "--config_json_file",
@@ -99,14 +125,6 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Launch only this rank. If omitted, local ranks 0..nnodes-1 are launched.",
-    )
-    parser.add_argument(
-        "--start-device-id",
-        "--start_device_id",
-        dest="start_device_id",
-        type=int,
-        default=0,
-        help="Base logical device id. Local multi-rank launch uses id + rank.",
     )
     parser.add_argument(
         "--log-dir",
@@ -195,8 +213,6 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--nnodes must be greater than 0")
     if args.start_port < 1 or args.start_port > 65535:
         parser.error("--port/--start-port must be in range [1, 65535]")
-    if args.start_device_id < 0:
-        parser.error("--start-device-id must be greater than or equal to 0")
     if args.node_rank is not None and (
         args.node_rank < 0 or args.node_rank >= args.nnodes
     ):
@@ -224,15 +240,6 @@ def _resolve_port(
     return args.start_port
 
 
-def _resolve_device_id(
-    args: argparse.Namespace,
-    rank: int,
-    launches_all_local_ranks: bool,
-) -> int:
-    rank_offset = rank if launches_all_local_ranks else 0
-    return args.start_device_id + rank_offset
-
-
 def _build_command(
     binary_path: str,
     args: argparse.Namespace,
@@ -241,7 +248,6 @@ def _build_command(
     launches_all_local_ranks: bool,
 ) -> list[str]:
     port = _resolve_port(args, rank, launches_all_local_ranks)
-    device_id = _resolve_device_id(args, rank, launches_all_local_ranks)
 
     command = [binary_path]
     if args.config_json_file is not None:
@@ -249,7 +255,6 @@ def _build_command(
     command.append(f"--port={port}")
     command.append(f"--nnodes={args.nnodes}")
     command.append(f"--node_rank={rank}")
-    command.append(f"--device_id={device_id}")
     command.extend(extra_args)
     return command
 
@@ -332,26 +337,39 @@ def _install_signal_handlers() -> None:
     signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
 
 
+def _print_binary_help(parser: argparse.ArgumentParser, binary_path: str) -> None:
+    # Flush our buffered stdout first: when piped, Python stdout is block
+    # buffered while the child writes straight to the fd, which would otherwise
+    # print the binary help before the launcher help.
+    sys.stdout.flush()
+    try:
+        subprocess.run([binary_path, "--help"], check=False)
+    except OSError as error:
+        parser.error(f"failed to run xllm binary help {binary_path}: {error}")
+
+
 def launch_server(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args, extra_args = parser.parse_known_args(argv)
+
+    if args.show_help:
+        parser.print_help()
+        # Also surface the server binary's own options (HelpFormatter output).
+        try:
+            binary_path = _resolve_binary_path(args.binary_path)
+        except (FileNotFoundError, PermissionError) as error:
+            parser.exit(status=0, message=f"\n{error}\n")
+        print("\nxllm server options:\n")
+        _print_binary_help(parser, binary_path)
+        return 0
+
     config_json = _load_config_json(parser, args)
     _apply_config_json_overrides(parser, args, config_json)
     _validate_args(parser, args)
 
     binary_path = _resolve_binary_path(args.binary_path)
 
-    # The Python model executor (--model_impl=python) imports the 'xllm.python'
-    # subpackage. --python_model_path (or XLLM_PYTHON_MODEL_PATH when the flag
-    # is empty) must point at the directory containing the 'xllm' package. For
-    # a wheel install that is site-packages — the parent of this launcher's
-    # directory. The embedded interpreter does not reliably pick up venv
-    # site-packages on its own, so default the env var explicitly; an explicit
-    # --python_model_path or a pre-set env var still takes precedence.
-    os.environ.setdefault(
-        "XLLM_PYTHON_MODEL_PATH",
-        os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-    )
+    _ensure_python_model_path()
 
     launches_all_local_ranks = args.node_rank is None
     ranks = _resolve_ranks(args)
@@ -385,8 +403,31 @@ def launch_server(argv: Sequence[str] | None = None) -> int:
         _close_logs(processes)
 
 
-def main() -> None:
-    raise SystemExit(launch_server())
+def _exec_binary(argv: Sequence[str]) -> NoReturn:
+    # Replace this process with the packaged xllm binary so `xllm <args>`
+    # behaves exactly like invoking the binary directly (same pid, signals,
+    # stdio, and exit code). Any argument other than the `serve` subcommand is
+    # forwarded verbatim, which keeps `xllm --model ...` working for users who
+    # start the server through the binary directly.
+    try:
+        binary_path = _resolve_binary_path(None)
+    except (FileNotFoundError, PermissionError) as error:
+        logger.error("%s", error)
+        raise SystemExit(1)
+
+    _ensure_python_model_path()
+    os.execv(binary_path, [binary_path, *argv])
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    args = list(sys.argv[1:] if argv is None else argv)
+
+    if args and args[0] == "serve":
+        raise SystemExit(launch_server(args[1:]))
+
+    # Everything else is handed straight to the xllm binary, including no args
+    # and -h/--help, so `xllm` is a transparent alias for the server binary.
+    _exec_binary(args)
 
 
 if __name__ == "__main__":

@@ -14,7 +14,9 @@ cc_library(
     active.cpp
     attention.cpp
     fused_layernorm.cpp
+    npu_adalayernorm.cpp
     matmul.cpp
+    matmul_reduce_scatter.cpp
     npu_causal_conv1d.cpp
     npu_fused_infer_attention.cpp
     npu_gemma_rms_norm.cpp
@@ -33,6 +35,7 @@ cc_library(
     utils.cpp
     w4a8_dynamic_moe_preprocess.cpp
     rec_constrained_topk.cpp
+    npu_ops_library.cpp
   DEPS
     :torch_npu_kernels
     :tilelang_kernels

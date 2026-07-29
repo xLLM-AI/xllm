@@ -17,6 +17,10 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <optional>
+#include <string>
+
+#include "core/framework/quant_args.h"
 #include "core/framework/state_dict/state_dict.h"
 
 namespace xllm {
@@ -64,13 +68,24 @@ class AddMatmulWeightTransposedImpl : public AddMatmulImpl {
   AddMatmulWeightTransposedImpl(int64_t in,
                                 int64_t out,
                                 bool with_bias,
-                                const torch::TensorOptions& options);
+                                const torch::TensorOptions& options,
+                                const QuantArgs& quant_args = QuantArgs());
 
   torch::Tensor forward(const torch::Tensor& x) override;
 
   void load_state_dict(const xllm::StateDict& state_dict) override;
+
+ protected:
+  QuantArgs quant_args_;
+  std::optional<std::string> resolved_weight_quant_method_;
+  torch::Tensor weight_scale_;
+  torch::Tensor weight_offset_;
+  bool weight_scale_is_loaded_ = false;
+  bool weight_offset_is_loaded_ = false;
+  at::ScalarType output_dtype_;
 };
 
 TORCH_MODULE(AddMatmulWeightTransposed);
+
 }  // namespace layer
 }  // namespace xllm

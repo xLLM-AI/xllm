@@ -26,7 +26,6 @@ limitations under the License.
  * multiple models needs to be supported, then you can follow this example.
  */
 
-std::string devices = "npu:0";
 std::string model_path = "/export/home/models/Qwen3-4B";
 
 int main(int argc, char** argv) {
@@ -35,7 +34,7 @@ int main(int argc, char** argv) {
   std::shared_ptr<xllm::LLM> llm_instance_01 = std::make_shared<xllm::LLM>();
   xllm::XLLM_InitLLMOptions options_01;
   options_01.max_memory_utilization = 0.45;
-  bool ret = llm_instance_01->Initialize(model_path, devices, options_01);
+  bool ret = llm_instance_01->Initialize(model_path, options_01);
   if (!ret) {
     std::cout << "LLM instance init failed." << std::endl;
     return -1;
@@ -60,7 +59,7 @@ int main(int argc, char** argv) {
   options_02.server_idx = 1;
   options_02.max_memory_utilization = 0.9;
 
-  ret = llm_instance_02->Initialize(model_path, devices, options_02);
+  ret = llm_instance_02->Initialize(model_path, options_02);
   if (!ret) {
     std::cout << "LLM instance init failed." << std::endl;
     return -1;

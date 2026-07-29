@@ -23,6 +23,10 @@ limitations under the License.
 
 #include "custom_functions_npu/atb_common.h"
 
+namespace xllm {
+class ProcessGroup;
+}  // namespace xllm
+
 namespace xllm::kernel::npu {
 
 void reshape_paged_cache(torch::Tensor& key,
@@ -89,6 +93,14 @@ torch::Tensor matmul(const torch::Tensor& a,
                      const torch::Tensor& b,
                      const std::optional<torch::Tensor>& bias);
 
+torch::Tensor matmul_reduce_scatter(const torch::Tensor& a,
+                                    const torch::Tensor& b,
+                                    const std::optional<torch::Tensor>& bias,
+                                    ProcessGroup* process_group,
+                                    const std::string& reduce_op,
+                                    int64_t comm_turn,
+                                    const std::string& comm_mode);
+
 torch::Tensor active(const torch::Tensor& input, const std::string& act_mode);
 
 torch::Tensor rms_norm(const torch::Tensor& input,
@@ -142,6 +154,23 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> add_rms_norm(
     const torch::Tensor& x2,
     const torch::Tensor& gamma,
     double epsilon);
+
+/// @brief Fused adaptive LayerNorm: LayerNorm(x, weight, bias) * (1 + scale) +
+///        shift. Calls aclnnAdaLayerNorm under the hood.
+///        The (1 + scale) is applied inside the kernel, so pass the raw scale.
+/// @param input  Input tensor [B, L, C]
+/// @param scale  Raw scale modulation factor [B, C] (kernel applies +1)
+/// @param shift  Shift modulation factor [B, C]
+/// @param weight Optional affine weight [C]
+/// @param bias   Optional affine bias [C]
+/// @param eps    Epsilon for numerical stability
+/// @return Normalized and modulated output [B, L, C]
+torch::Tensor fused_adalayer_norm(const torch::Tensor& input,
+                                  const torch::Tensor& scale,
+                                  const torch::Tensor& shift,
+                                  std::optional<torch::Tensor> weight,
+                                  std::optional<torch::Tensor> bias,
+                                  double eps);
 
 void apply_rotary(torch::Tensor& q,
                   torch::Tensor& k,
@@ -352,6 +381,18 @@ torch::Tensor causal_conv1d(const torch::Tensor& x,
                             int64_t activation_mode,
                             int64_t pad_slot_id,
                             int64_t run_mode);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> causal_conv1d_qkv(
+    const torch::Tensor& x,
+    const torch::Tensor& weight,
+    const torch::Tensor& conv_state,
+    const torch::IntArrayRef query_start_loc_opt,
+    const torch::IntArrayRef cache_indices_opt,
+    const torch::IntArrayRef initial_state_mode_opt,
+    int64_t num_qk_heads,
+    int64_t num_v_heads,
+    int64_t head_k_dim,
+    int64_t head_v_dim);
 
 void causal_conv1d_out(const torch::Tensor& output,
                        const torch::Tensor& x,

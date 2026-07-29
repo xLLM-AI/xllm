@@ -27,9 +27,6 @@ namespace xllm {
 
 enum class SchedulerKind : int8_t {
   CONTINUOUS = 0,
-  CHUNKED_PREFILL = 1,
-  PREFILL_ONLY = 2,
-  MIX = 3,
   ZERO_EVICTION = 4,
   DISAGG_PD = 5,
   DISAGG_PD_CHUNKED_PREFILL = 6,

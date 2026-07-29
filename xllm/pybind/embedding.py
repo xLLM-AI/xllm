@@ -28,7 +28,6 @@ class Embedding:
     def __init__(
         self,
         model: str,
-        devices: str = 'npu:0',
         limit_image_per_prompt: int = 8,
         block_size: int = 128,
         max_cache_size: int = 0,
@@ -76,9 +75,7 @@ class Embedding:
         options = Options()
         options.model_path = model
         options.task_type = "embed"
-        options.devices = devices
         options.draft_model_path = None
-        options.draft_devices = None
         options.backend = "llm"
         options.limit_image_per_prompt = limit_image_per_prompt
         options.block_size = block_size

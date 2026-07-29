@@ -66,6 +66,12 @@ class AttentionMetadataView final {
   py::object kv_seq_lens_host() const {
     return optional_tensor(kv_seq_lens_host_);
   }
+  py::object block_table() const {
+    return optional_tensor(metadata_->block_table);
+  }
+  py::object kv_seq_lens() const {
+    return optional_tensor(metadata_->kv_seq_lens);
+  }
   bool is_prefill() const { return metadata_->is_prefill; }
   bool is_chunked_prefill() const { return metadata_->is_chunked_prefill; }
 
@@ -111,6 +117,8 @@ PYBIND11_EMBEDDED_MODULE(xllm_runtime, m) {
                              &AttentionMetadataView::kv_cu_seq_lens)
       .def_property_readonly("kv_seq_lens_host",
                              &AttentionMetadataView::kv_seq_lens_host)
+      .def_property_readonly("block_table", &AttentionMetadataView::block_table)
+      .def_property_readonly("kv_seq_lens", &AttentionMetadataView::kv_seq_lens)
       .def_property_readonly("is_prefill", &AttentionMetadataView::is_prefill)
       .def_property_readonly("is_chunked_prefill",
                              &AttentionMetadataView::is_chunked_prefill);

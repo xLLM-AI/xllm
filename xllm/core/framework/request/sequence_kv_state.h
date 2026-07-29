@@ -34,6 +34,13 @@ class KVCacheState {
   size_t kv_cache_tokens_num() const;
   void set_kv_cache_tokens_num(size_t num);
   void incr_kv_cache_tokens_num(size_t num);
+  // Advance kv_cache_tokens_num_ to `new_target` if it grows the counter. No-op
+  // when `new_target <= kv_cache_tokens_num_`. CHECK-fails when `new_target`
+  // exceeds current_max_tokens_capacity() -- callers must clamp before calling.
+  // CHECK-fails when the counter is already past capacity (drift detection).
+  // Used by the host-cache H2D restore path in HierarchyBlockManagerPool where
+  // the "up to" semantics naturally arise from mismatched host/device counters.
+  void incr_kv_cache_tokens_num_up_to(size_t new_target);
 
   // Blocks held under `type`; empty slice when the type is absent.
   Slice<Block> blocks(BlockType type) const;
@@ -56,6 +63,15 @@ class KVCacheState {
   void add_shared_blocks(BlockType type,
                          std::vector<Block>&& blocks,
                          size_t current_total_num_tokens);
+  // Composite mount for DSV4 admission: install the (possibly gap-containing)
+  // shared block vector for `type` at logical positions [0, blocks.size()),
+  // set shared_blocks_num[type] and num_cached_blocks[type] to blocks.size()
+  // (the mounted blocks are already in the prefix cache -- no need to re-insert
+  // on the next pre-grow hook). Does NOT touch kv_cache_tokens_num_; the
+  // composite advances that once after all leaves have mounted, so all leaves
+  // observe a consistent shared-token count.
+  void mount_composite_shared(BlockType type,
+                              std::vector<Block>&& shared_blocks);
   void incr_shared_blocks_num(BlockType type, size_t num);
   // Drop all blocks held under `type` (releases their Block refs and removes
   // the map entry).
@@ -66,6 +82,18 @@ class KVCacheState {
   // Number of shared tokens for this sequence. Sequence-level: the value is the
   // same across block types, so it takes no BlockType.
   size_t shared_tokens_num() const;
+
+  // Pre-grow cache cursor: how many blocks under `type` have already been
+  // inserted into the prefix cache. The composite's pre-grow hook consults
+  // this to skip blocks already in the cache and only stamp+insert the delta
+  // that has been forwarded since the last hook run. Grows monotonically:
+  //   - Admission mount: set to shared_blocks.size() (mounted blocks are
+  //     already cache-resident, so no re-insert on the next pre-grow).
+  //   - Pre-grow hook: after inserting a run [cursor, end), advance cursor to
+  //     `end`.
+  //   - reset(): cleared alongside the rest of the sequence's cache state.
+  size_t num_cached_blocks(BlockType type) const;
+  void set_num_cached_blocks(BlockType type, size_t n);
 
   void set_slice_window_size(uint32_t size);
   void update_slice_window_pos();
@@ -155,6 +183,9 @@ class KVCacheState {
   void set_next_transfer_block_idx(size_t idx);
   void advance_transfer_block_idx(size_t idx);
 
+  size_t next_group_transfer_block_idx(BlockType type) const;
+  void advance_group_transfer_block_idx(BlockType type, size_t idx);
+
   void reset();
 
   void process_beam_search(std::optional<Block> new_block = std::nullopt);
@@ -182,8 +213,15 @@ class KVCacheState {
   // next logical prompt block index that needs PD PUSH transfer.
   size_t next_transfer_block_idx_ = 0;
 
+  // Cache groups can have different block sizes, so each group advances its
+  // transfer cursor independently.
+  std::map<BlockType, size_t> next_group_transfer_block_idxes_;
+
   // shared blocks number per block type.
   std::map<BlockType, uint32_t> num_owned_shared_blocks_;
+
+  // Pre-grow cache insert cursor per block type. See num_cached_blocks() above.
+  std::map<BlockType, size_t> num_cached_blocks_;
 
   // Sliding-window cursor for legacy callers. CompositeBlockManager keeps DSA
   // SWA block vectors in absolute logical block order and leaves expired

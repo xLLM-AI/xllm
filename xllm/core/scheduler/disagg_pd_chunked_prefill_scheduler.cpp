@@ -34,14 +34,7 @@ bool exceeds_block_capacity(Sequence* sequence, KVCacheManager* manager) {
   }
   const size_t needed_blocks = util::ceil_div(
       static_cast<size_t>(sequence->num_prompt_tokens()), block_size);
-  const std::vector<size_t> free_blocks = manager->num_free_blocks();
-  const std::vector<size_t> used_blocks = manager->num_used_blocks();
-  size_t max_blocks = 0;
-  const size_t num_ranks = std::min(free_blocks.size(), used_blocks.size());
-  for (size_t i = 0; i < num_ranks; ++i) {
-    max_blocks = std::max(max_blocks, free_blocks[i] + used_blocks[i]);
-  }
-  return needed_blocks > max_blocks;
+  return needed_blocks > static_cast<size_t>(manager->num_blocks());
 }
 
 void update_block_metrics(KVCacheManager* manager) {
@@ -109,8 +102,15 @@ void DisaggPDChunkedPrefillScheduler::match_prefix_blocks(Sequence* sequence) {
     return;
   }
 
-  if (sequence->kv_state().num_blocks(BlockType::KV) == 0) {
+  if (!sequence->kv_state().has_any_blocks()) {
     kv_cache_manager_->allocate_shared(sequence);
+    return;
+  }
+  // DSV4 (SWA_COMPRESSED) holds SWA/C4/C128 but never a KV leaf, so a
+  // num_blocks(KV)==0 guard alone would treat an already-mounted DSV4 sequence
+  // as fresh and re-run allocate_shared -> mount_composite_shared CHECK. Skip
+  // re-match for the KV-less composite; only flat-KV shapes re-match below.
+  if (sequence->kv_state().num_blocks(BlockType::KV) == 0) {
     return;
   }
   if (!sequence->is_chunked_prefill_stage()) {
@@ -203,18 +203,16 @@ void DisaggPDChunkedPrefillScheduler::schedule_waiting_prefill(
     }
 
     Sequence* sequence = request->sequences()[0].get();
-    const size_t held_blocks = sequence->kv_state().num_blocks(BlockType::KV);
+    const bool is_in_flight = sequence->kv_state().has_any_blocks();
     // An already in-flight request (held>0) must continue: its footprint is
     // already counted in reserved_blocks, and evicting its partial KV is a
     // preemption decision made elsewhere.
-    const bool is_in_flight = held_blocks > 0;
     // The sole fresh request in the whole system is admitted so that an
     // oversized prompt (footprint > total) reaches the exceeds_block_capacity
     // failure path below instead of being deferred forever.
-    const bool is_sole_fresh_request =
-        running_sequences_.empty() && deferred.empty() &&
-        (waiting_priority_queue_->size() +
-         waiting_priority_queue_offline_->size()) == 1;
+    const bool is_sole_fresh_request = running_sequences_.empty() &&
+                                       deferred.empty() &&
+                                       prefill_queue_->size() == 1;
     // Complete footprint of the whole prompt, independent of how much is held.
     const size_t full_blocks = pd_prefill_remaining_blocks(
         sequence->num_prompt_tokens(), /*held_blocks=*/0, block_size);
@@ -252,6 +250,7 @@ void DisaggPDChunkedPrefillScheduler::schedule_waiting_prefill(
 
     queue.pop_top();
     running_requests_.emplace_back(request);
+    request->record_num_prefix_cache_tokens();
     running_sequences_.emplace_back(sequence);
     running_sequences_budgets_.emplace_back(actual_tokens);
     remaining_token_budget -= actual_tokens;
@@ -278,9 +277,7 @@ void DisaggPDChunkedPrefillScheduler::update_metrics() {
   GAUGE_SET(num_pending_requests,
             pending_requests_.load(std::memory_order_relaxed));
   GAUGE_SET(num_running_requests, running_requests_.size());
-  GAUGE_SET(num_waiting_requests,
-            waiting_priority_queue_->size() +
-                waiting_priority_queue_offline_->size());
+  GAUGE_SET(num_waiting_requests, prefill_queue_->size());
   GAUGE_SET(num_running_sequences, running_sequences_.size());
   update_block_metrics(kv_cache_manager_);
 }
@@ -298,11 +295,7 @@ std::vector<Batch> DisaggPDChunkedPrefillScheduler::prepare_batch() {
     // For best_of_n, expansion to best_of sequences is deferred to the
     // DECODE instance (where prefix cache lets seq[1..best_of-1] reuse
     // seq[0]'s prompt KV). Expanding here would waste N x prefill compute.
-    if (request->offline()) {
-      waiting_priority_queue_offline_->push(request);
-    } else {
-      waiting_priority_queue_->push(request);
-    }
+    prefill_queue_->push(request);
   }
 
   // Reserve the complete footprint of every request that is still in flight
@@ -336,11 +329,7 @@ std::vector<Batch> DisaggPDChunkedPrefillScheduler::prepare_batch() {
             /*held_blocks=*/0,
             reserve_block_size);
       }
-      if (running->offline()) {
-        waiting_priority_queue_offline_->push(running);
-      } else {
-        waiting_priority_queue_->push(running);
-      }
+      prefill_queue_->push(running);
       *it = nullptr;
     }
   }
@@ -365,13 +354,7 @@ std::vector<Batch> DisaggPDChunkedPrefillScheduler::prepare_batch() {
   // starts cannot each reserve the full capacity independently.
   const size_t total_blocks =
       static_cast<size_t>(kv_cache_manager_->num_blocks());
-  schedule_waiting_prefill(*waiting_priority_queue_,
-                           remaining_token_budget,
-                           remaining_seq_budget,
-                           total_blocks,
-                           reserved_blocks,
-                           done);
-  schedule_waiting_prefill(*waiting_priority_queue_offline_,
+  schedule_waiting_prefill(*prefill_queue_,
                            remaining_token_budget,
                            remaining_seq_budget,
                            total_blocks,

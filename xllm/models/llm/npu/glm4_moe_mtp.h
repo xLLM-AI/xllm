@@ -44,6 +44,19 @@ class Glm4MoeMtpModelImpl
         model_args.rope_theta(),
         options);
   }
+
+ protected:
+  void prepare_legacy_expert_array(
+      const torch::Tensor& hidden_states,
+      const ModelInputParams& input_params) override {
+    auto& expert_input = const_cast<ExpertInput&>(input_params.expert);
+    expert_input.expert_array =
+        torch::arange(0,
+                      hidden_states.size(0) * num_experts_per_tok_,
+                      torch::TensorOptions()
+                          .dtype(torch::kInt32)
+                          .device(hidden_states.device()));
+  }
 };
 TORCH_MODULE(Glm4MoeMtpModel);
 

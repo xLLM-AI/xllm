@@ -46,6 +46,13 @@ class SpeculativeConfig final {
     return algorithm == "Eagle3" || algorithm == "DFlash";
   }
 
+  static bool is_mtp_algorithm(std::string_view algorithm) {
+    return algorithm.size() == 3 &&
+           (algorithm[0] == 'M' || algorithm[0] == 'm') &&
+           (algorithm[1] == 'T' || algorithm[1] == 't') &&
+           (algorithm[2] == 'P' || algorithm[2] == 'p');
+  }
+
   void from_flags();
   void from_json(const JsonReader& json);
   void append_config_json(nlohmann::ordered_json& config_json) const;
@@ -55,7 +62,6 @@ class SpeculativeConfig final {
     static const OptionCategory kOptionCategory = {
         "SPECULATIVE OPTIONS",
         {"draft_model",
-         "draft_devices",
          "num_speculative_tokens",
          "speculative_algorithm",
          "speculative_suffix_cache_max_depth",
@@ -71,8 +77,6 @@ class SpeculativeConfig final {
   }
 
   PROPERTY(std::string, draft_model);
-
-  PROPERTY(std::string, draft_devices) = "";
 
   PROPERTY(int32_t, num_speculative_tokens) = 0;
 

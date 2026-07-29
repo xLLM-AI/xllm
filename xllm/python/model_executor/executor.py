@@ -17,14 +17,47 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from xllm.python.attention.backend import AttentionMetadata, KVCache
-from xllm.python.attention.flashinfer import FlashInferBackend
+from xllm.python.attention.backend import AttentionBackend, AttentionMetadata, KVCache
 from xllm.python.layers.attention import Attention
-from xllm.python.model_executor.runners.decode_cuda_graph import (
-    DecodeCudaGraphRunner,
-)
 from xllm.python.model_executor.runners.eager import EagerRunner
-from xllm.python.model_executor.runners.inductor import InductorRunner
+
+
+def _is_npu_device(device: torch.device) -> bool:
+    return device.type in ("npu", "privateuseone")
+
+
+def _create_attention_backend(
+    first_attention: Attention,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> AttentionBackend:
+    if _is_npu_device(device):
+        from xllm.python.attention.npu_paged_attention import (
+            NpuPagedAttentionBackend,
+        )
+        return NpuPagedAttentionBackend(
+            num_heads=first_attention.num_heads,
+            num_kv_heads=first_attention.num_kv_heads,
+            head_dim=first_attention.head_dim,
+            scale=first_attention.scale,
+            sliding_window=first_attention.sliding_window,
+            device=device,
+            dtype=dtype,
+        )
+    if device.type == "cuda":
+        from xllm.python.attention.flashinfer import FlashInferBackend
+        return FlashInferBackend(
+            num_heads=first_attention.num_heads,
+            num_kv_heads=first_attention.num_kv_heads,
+            head_dim=first_attention.head_dim,
+            scale=first_attention.scale,
+            sliding_window=first_attention.sliding_window,
+            device=device,
+            dtype=dtype,
+        )
+    raise NotImplementedError(
+        f"No attention backend available for device type '{device.type}'"
+    )
 
 
 class ModelExecutor:
@@ -48,24 +81,19 @@ class ModelExecutor:
         for layer in attention_layers[1:]:
             if self._attention_config(layer) != expected_config:
                 raise ValueError(
-                    "FlashInferBackend requires identical attention configuration "
+                    "Attention backend requires identical attention configuration "
                     "across all layers"
                 )
 
         first_parameter = next(model.parameters())
+        device = first_parameter.device
         self._num_attention_layers = len(attention_layers)
-        self.attention_backend = FlashInferBackend(
-            num_heads=first_attention.num_heads,
-            num_kv_heads=first_attention.num_kv_heads,
-            head_dim=first_attention.head_dim,
-            scale=first_attention.scale,
-            sliding_window=first_attention.sliding_window,
-            device=first_parameter.device,
-            dtype=first_parameter.dtype,
+        self.attention_backend = _create_attention_backend(
+            first_attention, device, first_parameter.dtype
         )
 
         execution_model = model.model
-        self.eager_runner = EagerRunner(execution_model, self.attention_backend)
+        self.eager_runner = EagerRunner(execution_model, self.attention_backend, device)
         self.decode_cuda_graph_runner = None
         self.inductor_runner = None
 
@@ -73,15 +101,20 @@ class ModelExecutor:
         if graph_backend in ("", "off", "none", "0"):
             pass
         elif graph_backend == "cudagraphs":
+            from xllm.python.model_executor.runners.decode_cuda_graph import (
+                DecodeCudaGraphRunner,
+            )
             self.decode_cuda_graph_runner = DecodeCudaGraphRunner(
                 execution_model,
                 self.attention_backend,
+                device,
                 max_seqs_per_batch,
                 int(config["max_position_embeddings"]),
             )
         else:
+            from xllm.python.model_executor.runners.inductor import InductorRunner
             self.inductor_runner = InductorRunner(
-                execution_model, self.attention_backend, graph_backend
+                execution_model, self.attention_backend, device, graph_backend
             )
 
     @staticmethod

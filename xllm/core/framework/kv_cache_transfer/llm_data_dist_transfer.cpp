@@ -45,17 +45,11 @@ ge::DataType dtype_to_ge_dtype(torch::ScalarType dtype) {
   return it->second;
 }
 
-bool is_linear_state_cache(KVCacheTensorRole role) {
-  return role == KVCacheTensorRole::CONV || role == KVCacheTensorRole::SSM;
-}
-
 LlmDataDistTransfer::LlmDataDistTransfer(const uint16_t listen_port,
                                          const InstanceRole& instance_role,
-                                         const std::string& model_type,
                                          bool enable_lighting_indexer)
     : listen_port_(listen_port),
       enable_lighting_indexer_(enable_lighting_indexer),
-      model_type_(model_type),
       KVCacheTransfer() {
   if (instance_role == InstanceRole::PREFILL) {
     LOG(INFO) << "Create LlmDataDistTransfer for prefill instance.";
@@ -100,7 +94,10 @@ void LlmDataDistTransfer::register_kv_cache(
   register_layer_registered_caches(kv_caches, layer_registered_caches_);
 }
 
-void LlmDataDistTransfer::free_kv_cache() { layer_registered_caches_.clear(); }
+void LlmDataDistTransfer::free_kv_cache() {
+  layer_registered_caches_.clear();
+  has_grouped_cache_layout_ = false;
+}
 
 void LlmDataDistTransfer::get_cache_info(uint64_t& cluster_id,
                                          std::string& addr) {
@@ -164,14 +161,17 @@ bool LlmDataDistTransfer::pull_kv_blocks(
     const std::vector<uint64_t>& dst_blocks,
     const std::vector<uint64_t>& src_linear_state_ids,
     const std::vector<uint64_t>& dst_linear_state_ids) {
+  if (has_grouped_cache_layout_) {
+    LOG(ERROR) << "Grouped KV cache layout only supports PUSH transfer mode.";
+    return false;
+  }
   bool result = true;
   for (int64_t layer_id = 0;
        layer_id < static_cast<int64_t>(layer_registered_caches_.size());
        ++layer_id) {
     const auto& registered_caches = layer_registered_caches_[layer_id];
     for (const RegisteredCache& registered_cache : registered_caches) {
-      const bool linear_state_cache =
-          is_linear_state_cache(registered_cache.role);
+      const bool linear_state_cache = registered_cache.sequence_scoped;
       const std::vector<uint64_t>& src_ids =
           linear_state_cache ? src_linear_state_ids : src_blocks;
       const std::vector<uint64_t>& dst_ids =
@@ -226,7 +226,10 @@ RegisteredCache LlmDataDistTransfer::register_cache_tensor(
   auto tensor_addr = reinterpret_cast<uintptr_t>(tensor.data_ptr());
   std::vector<uint64_t> addrs = {static_cast<uint64_t>(tensor_addr)};
 
-  RegisteredCache registered_cache{cache_tensor.role, Cache{}};
+  RegisteredCache registered_cache{cache_tensor.role,
+                                   cache_tensor.group_id,
+                                   cache_tensor.sequence_scoped,
+                                   Cache{}};
   registered_cache.cache.tensor_addrs = {tensor_addr};
 
   CacheDesc& desc = registered_cache.cache.cache_desc;
@@ -255,6 +258,10 @@ void LlmDataDistTransfer::register_layer_registered_caches(
   for (int64_t layer_id = 0; layer_id < num_layers; ++layer_id) {
     for (const KVCacheTensor& cache_tensor :
          kv_caches[layer_id].get_cache_tensors()) {
+      if (!cache_tensor.sequence_scoped &&
+          cache_tensor.group_id != cache_group_id(BlockType::KV)) {
+        has_grouped_cache_layout_ = true;
+      }
       layer_registered_caches[layer_id].emplace_back(
           register_cache_tensor(layer_id, cache_tensor));
     }
@@ -283,28 +290,64 @@ bool LlmDataDistTransfer::push_layer_registered_caches(
        layer_index < static_cast<int64_t>(layer_registered_caches.size());
        ++layer_index) {
     // Wait for the KV cache computation of this layer to complete.
-    layer_synchronizer->synchronize_layer(layer_index);
+    if (!layer_synchronizer->synchronize_layer(layer_index)) {
+      result = false;
+      continue;
+    }
     for (const std::string& key : keys) {
       const KVCacheInfo& kv_info = merged_kv_infos.at(key);
-      if (kv_info.src_blocks.empty() && kv_info.src_linear_state_ids.empty()) {
+      if (kv_info.src_blocks.empty() && kv_info.src_linear_state_ids.empty() &&
+          kv_info.block_transfer_groups.empty()) {
         continue;
       }
 
       for (const RegisteredCache& registered_cache :
            layer_registered_caches[layer_index]) {
-        const bool linear_state_cache =
-            is_linear_state_cache(registered_cache.role);
-        const std::vector<uint64_t>& src_ids =
-            linear_state_cache ? kv_info.src_linear_state_ids
-                               : kv_info.src_blocks;
-        const std::vector<uint64_t>& dst_ids =
-            linear_state_cache ? kv_info.dst_linear_state_ids
-                               : kv_info.dst_blocks;
-        if (src_ids.empty() || dst_ids.empty()) {
+        const std::vector<uint64_t>* src_ids = nullptr;
+        const std::vector<uint64_t>* dst_ids = nullptr;
+        if (registered_cache.sequence_scoped) {
+          src_ids = &kv_info.src_linear_state_ids;
+          dst_ids = &kv_info.dst_linear_state_ids;
+        } else {
+          const int32_t group_id = registered_cache.group_id;
+          const auto group_it =
+              std::find_if(kv_info.block_transfer_groups.begin(),
+                           kv_info.block_transfer_groups.end(),
+                           [group_id](const KVBlockTransferGroup& group) {
+                             return group.group_id == group_id;
+                           });
+          if (group_it != kv_info.block_transfer_groups.end()) {
+            src_ids = &group_it->local_blocks_ids;
+            dst_ids = &group_it->remote_blocks_ids;
+          } else if (registered_cache.group_id ==
+                     cache_group_id(BlockType::KV)) {
+            src_ids = &kv_info.src_blocks;
+            dst_ids = &kv_info.dst_blocks;
+          } else {
+            LOG(ERROR) << "Missing KV cache transfer group, layer="
+                       << layer_index
+                       << ", role=" << registered_cache.role.to_string()
+                       << ", group_id=" << group_id;
+            result = false;
+            continue;
+          }
+        }
+        CHECK(src_ids != nullptr && dst_ids != nullptr);
+        if (src_ids->empty() || dst_ids->empty()) {
           VLOG(5) << "Skip PushKvBlocks, layer = " << layer_index
                   << ", role = " << registered_cache.role.to_string()
-                  << ", src_ids = " << src_ids.size()
-                  << ", dst_ids = " << dst_ids.size();
+                  << ", src_ids = " << src_ids->size()
+                  << ", dst_ids = " << dst_ids->size();
+          continue;
+        }
+        if (src_ids->size() != dst_ids->size()) {
+          LOG(ERROR) << "KV cache block mapping size mismatch, layer="
+                     << layer_index
+                     << ", role=" << registered_cache.role.to_string()
+                     << ", group_id=" << registered_cache.group_id
+                     << ", local=" << src_ids->size()
+                     << ", remote=" << dst_ids->size();
+          result = false;
           continue;
         }
         CacheIndex cache_index{kv_info.dst_cluster_id,
@@ -315,7 +358,7 @@ bool LlmDataDistTransfer::push_layer_registered_caches(
         ext_param.tensor_num_per_layer = 1;
 
         auto ret = llm_data_dist_->PushKvBlocks(
-            registered_cache.cache, cache_index, src_ids, dst_ids, ext_param);
+            registered_cache.cache, cache_index, *src_ids, *dst_ids, ext_param);
         if (ret != LLM_SUCCESS) {
           LOG(ERROR) << "PushKvBlocks failed, layer = " << layer_index
                      << ", role = " << registered_cache.role.to_string()

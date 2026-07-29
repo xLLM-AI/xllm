@@ -1,5 +1,3 @@
-include(cc_library)
-
 if(USE_NPU OR USE_CUDA OR USE_MLU OR USE_DCU)
   include_directories(
     ${CMAKE_SOURCE_DIR}/third_party/spdlog/include

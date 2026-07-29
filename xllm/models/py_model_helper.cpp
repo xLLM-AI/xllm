@@ -86,6 +86,9 @@ void ensure_python_interpreter() {
 
     const bool we_initialized = !Py_IsInitialized();
     if (we_initialized) {
+#if defined(USE_NPU)
+      setenv("TORCH_DEVICE_BACKEND_AUTOLOAD", "0", 0);
+#endif
       py::initialize_interpreter(/*init_signal_handlers=*/false);
     }
 
@@ -99,6 +102,11 @@ void ensure_python_interpreter() {
         }
       }
       prepend_sys_path(model_path);
+#if defined(USE_NPU)
+      if (we_initialized) {
+        py::module_::import("xllm.python._npu_bootstrap");
+      }
+#endif
       try {
         py::module_::import("xllm.python");
       } catch (const py::error_already_set& e) {

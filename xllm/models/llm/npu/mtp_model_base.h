@@ -20,6 +20,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <memory>
 #include <string>
 #include <typeinfo>
 #include <vector>
@@ -39,6 +40,7 @@ limitations under the License.
 #include "core/layers/npu/npu_pos_embedding_impl.h"
 #include "core/layers/npu/npu_rms_norm_impl.h"
 #include "core/layers/npu/npu_word_embedding_impl.h"
+#include "models/llm/npu/mtp_topk_state.h"
 #include "models/model_registry.h"
 #include "xllm_atb_layers/core/include/atb_speed/log.h"
 
@@ -58,8 +60,11 @@ class MtpModelImplBase : public torch::nn::Module {
     auto parallel_args = context.get_parallel_args();
 
     dp_size_ = parallel_args.dp_size();
-    dp_local_tp_size_ = parallel_args.world_size() / dp_size_;
-    dp_rank_ = parallel_args.rank() / dp_local_tp_size_;
+    // Orthogonal CP×TP: dp_local_tp = attn_tp; DP stride = tp*cp.
+    dp_local_tp_size_ =
+        parallel_args.world_size() / (dp_size_ * parallel_args.cp_size());
+    dp_rank_ =
+        parallel_args.rank() / (dp_local_tp_size_ * parallel_args.cp_size());
     rank_ = parallel_args.rank();
     num_experts_per_tok_ = model_args.num_experts_per_tok();
     index_topk_ = model_args.index_topk();
@@ -118,6 +123,12 @@ class MtpModelImplBase : public torch::nn::Module {
     h = torch::cat({enorm, hnorm}, /*dim=*/-1);
     h = eh_proj_(h, 0);
 
+    // Localize after eh_proj (fused MTP embed).
+    const NpuCpPlan& cp_plan = input_params.parallel.cp_plan;
+    if (cp_plan.enabled()) {
+      cp_plan.shard_model_input(h, positions);
+    }
+
     auto target_cos_sin = atb_pos_emb_(cos_sin_, positions, 0);
     auto target_cos_sin_chunks = target_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
     auto cos_pos = target_cos_sin_chunks[0].contiguous();
@@ -160,22 +171,21 @@ class MtpModelImplBase : public torch::nn::Module {
           attn_mask_.get_attn_mask(128, h.dtype().toScalarType(), h.device());
     }
 
-    int64_t input_length = tokens.size(0);
-    torch::Tensor expert_array = torch::arange(
-        0,
-        input_length * num_experts_per_tok_,
-        torch::TensorOptions().dtype(torch::kInt32).device(tokens.device()));
+    prepare_legacy_expert_array(h, input_params);
 
     // TODO(liangzhiwei20): MTP need more support for layer wise copy.
     if (input_params.parallel.layer_wise_load_synchronizer != nullptr) {
       LOG(FATAL) << "MTP not support layer wise copy!";
     }
 
-    ModelInputParams& input_params_new =
-        const_cast<ModelInputParams&>(input_params);
-    input_params_new.expert.expert_array = expert_array;
-
-    torch::Tensor prev_topk_indices = input_params_new.dsa_topk_indices;
+    torch::Tensor prev_topk_indices;
+    if (input_params.mtp_topk_state != nullptr) {
+      const auto state = std::dynamic_pointer_cast<const NpuMtpTopkState>(
+          input_params.mtp_topk_state);
+      CHECK(state != nullptr)
+          << "NPU MTP model received an incompatible top-k state.";
+      prev_topk_indices = state->topk_indices();
+    }
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event = nullptr;
       std::atomic<bool>* event_flag = nullptr;
@@ -202,16 +212,22 @@ class MtpModelImplBase : public torch::nn::Module {
                     sin_pos,
                     attn_mask,
                     kv_caches[i],
-                    input_params_new,
+                    input_params,
                     prev_topk_indices,
                     layer_index,
                     event,
                     event_flag);
     }
+    if (cp_plan.enabled()) {
+      h = cp_plan.merge_model_output(h);
+    }
 
     auto hidden_states = final_norm_(h, 0);
     ModelOutput output(hidden_states);
-    output.dsa_topk_indices = prev_topk_indices;
+    if (prev_topk_indices.defined()) {
+      output.mtp_topk_state =
+          std::make_shared<NpuMtpTopkState>(prev_topk_indices);
+    }
     return output;
   }
 
@@ -274,6 +290,12 @@ class MtpModelImplBase : public torch::nn::Module {
   }
 
  protected:
+  // Among NPU MTP models, only GLM4 currently consumes the legacy
+  // ExpertInput::expert_array path.
+  virtual void prepare_legacy_expert_array(
+      const torch::Tensor& /*hidden_states*/,
+      const ModelInputParams& /*input_params*/) {}
+
   virtual void forward_layer(DecoderLayerType& layer,
                              torch::Tensor& h,
                              torch::Tensor& cos_pos,

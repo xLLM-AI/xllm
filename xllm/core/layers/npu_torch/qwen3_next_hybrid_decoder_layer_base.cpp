@@ -19,6 +19,8 @@ limitations under the License.
 #include <optional>
 #include <tuple>
 
+#include "common/flash_comm1_context.h"
+
 namespace xllm {
 namespace layer {
 
@@ -114,11 +116,21 @@ torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
     KVCache& kv_cache,
     const ModelInputParams& input_params,
     const torch::Tensor& mrope_cos_sin) {
+  const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
   // Pre-attention norm
   if (!residual.has_value()) {
     residual = x;
     x = std::get<0>(input_norm_->forward(x));
   } else {
+    if (fc1_ctx && is_sequence_sharded(*fc1_ctx) &&
+        residual.value().size(0) != x.size(0)) {
+      residual = maybe_shard_residual(residual.value(), *fc1_ctx);
+    }
+    if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
+      CHECK_EQ(residual.value().size(0), x.size(0))
+          << "FC1 input residual and hidden states must share the same "
+          << "padded local sequence layout.";
+    }
     std::tie(x, residual) = input_norm_->forward(x, residual);
   }
 
@@ -131,6 +143,15 @@ torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
   }
 
   // Post-attention norm
+  // Ensure the residual layout matches the attention output before post_norm.
+  if (fc1_ctx && is_sequence_sharded(*fc1_ctx) && residual.has_value() &&
+      residual.value().size(0) != x.size(0)) {
+    residual = maybe_shard_residual(residual.value(), *fc1_ctx);
+    CHECK_EQ(residual.value().size(0), x.size(0))
+        << "FC1 post-attention residual and hidden states must share the same "
+        << "padded local sequence layout.";
+  }
+
   std::tie(x, residual) = post_norm_->forward(x, residual);
 
   // MLP forward

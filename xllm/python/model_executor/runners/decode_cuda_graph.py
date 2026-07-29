@@ -77,10 +77,11 @@ class DecodeCudaGraphRunner(BaseRunner):
         self,
         model: nn.Module,
         attention_backend: AttentionBackend,
+        device: torch.device,
         max_batch: int,
         max_model_len: int,
     ) -> None:
-        super().__init__(model, attention_backend)
+        super().__init__(model, attention_backend, device)
         self.max_batch = max_batch
         self.max_model_len = max_model_len
         self._graphs: dict[int, _DecodeGraphEntry] = {}
@@ -157,7 +158,7 @@ class DecodeCudaGraphRunner(BaseRunner):
         with torch.cuda.stream(self._stream):
             self._fill_entry(entry, input_ids, positions, metadata, batch_size)
             self.attention_backend.prepare(entry.static_metadata, graph_mode=True)
-            with forward_context(ForwardContext(self.attention_backend)):
+            with forward_context(ForwardContext(self.attention_backend, self.device)):
                 if first_capture:
                     self._capture(entry)
                 entry.graph.replay()

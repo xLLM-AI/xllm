@@ -37,14 +37,21 @@ struct DiTGenerationOutput {
   // the generated audio as raw WAV bytes (audio models only).
   std::string audio;
 
+  // the generated text (text diffusion models like Cola-DLM).
+  std::string text;
+
   // the height of the generated image/video.
   int32_t height;
 
   // the width of the generated image/video.
   int32_t width;
 
-  // seed used for generation.
-  int64_t seed;
+  // seed used for generation (only valid when seed_is_set is true).
+  int64_t seed = 0;
+
+  // True when the client explicitly requested a seed (omit in API response when
+  // false so stochastic runs are not reported as seed=0).
+  bool seed_is_set = false;
 
   // number of video frames
   int32_t num_frames = 0;

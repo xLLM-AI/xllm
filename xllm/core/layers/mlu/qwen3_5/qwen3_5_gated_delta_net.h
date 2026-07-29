@@ -35,6 +35,22 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
+torch::Tensor build_linear_state_base_indices(
+    const torch::Tensor& logical_state_indices,
+    int64_t checkpoint_stride);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> split_mixed_qkv(
+    const torch::Tensor& mixed_qkv,
+    int64_t num_k_heads,
+    int64_t num_v_heads,
+    int64_t head_k_dim,
+    int64_t head_v_dim);
+
+torch::Tensor build_rebased_ssm_state_indices(
+    const torch::Tensor& logical_state_indices,
+    int64_t checkpoint_stride,
+    int64_t q_max_seq_len);
+
 class Qwen3_5GatedDeltaNetImpl : public torch::nn::Module {
  public:
   Qwen3_5GatedDeltaNetImpl() = default;
@@ -54,6 +70,9 @@ class Qwen3_5GatedDeltaNetImpl : public torch::nn::Module {
  private:
   torch::Tensor get_linear_state_indices(const ModelInputParams& input_params,
                                          const torch::Device& device) const;
+  std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> split_mixed_qkv(
+      const torch::Tensor& mixed_qkv) const;
+  int64_t get_checkpoint_stride(const KVCache& kv_cache) const;
 
   int64_t num_k_heads_ = 0;
   int64_t num_v_heads_ = 0;

@@ -187,7 +187,12 @@ void Request::record_num_prefix_cache_tokens() {
   for (const auto& seq : sequences()) {
     current_max = std::max(current_max, seq->num_prefix_cache_tokens());
   }
-  num_prefix_cache_tokens_ = std::max(num_prefix_cache_tokens_, current_max);
+  record_num_prefix_cache_tokens(current_max);
+}
+
+void Request::record_num_prefix_cache_tokens(size_t num_prefix_cache_tokens) {
+  num_prefix_cache_tokens_ =
+      std::max(num_prefix_cache_tokens_, num_prefix_cache_tokens);
 }
 
 void Request::update_connection_status() {

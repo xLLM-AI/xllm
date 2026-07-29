@@ -56,7 +56,6 @@ constexpr int32_t kMaxClientParallelism = 128;
 
 struct CliOptions {
   std::string model_path;
-  std::string devices = "cuda:0";
   std::string master_node_addr = "127.0.0.1:18899";
   int32_t prompt_size = 128;
   int32_t token_min_size = 1024;
@@ -737,7 +736,6 @@ void PrintSummary(const CliOptions& options,
   std::cout << "=== stress_rec_multimodal_completions summary ===\n";
   std::cout << "model_id=" << ResolveModelId(options.model_path) << "\n";
   std::cout << "model_type=" << config.model_type << "\n";
-  std::cout << "devices=" << options.devices << "\n";
   std::cout << "master_node_addr=" << options.master_node_addr << "\n";
   std::cout << "hidden_size=" << config.hidden_size
             << ", vocab_size=" << config.vocab_size
@@ -802,10 +800,8 @@ int main(int argc, char** argv) {
                   sizeof(init_options.master_node_addr),
                   "%s",
                   options.master_node_addr.c_str());
-    const bool init_ok = xllm_rec_initialize(rec_handler,
-                                             options.model_path.c_str(),
-                                             options.devices.c_str(),
-                                             &init_options);
+    const bool init_ok = xllm_rec_initialize(
+        rec_handler, options.model_path.c_str(), &init_options);
     if (!init_ok) {
       xllm_rec_destroy(rec_handler);
       throw std::runtime_error("xllm_rec_initialize failed");

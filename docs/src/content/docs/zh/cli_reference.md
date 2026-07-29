@@ -6,6 +6,8 @@ sidebar:
 
 xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填参数。使用 `--config_json_file` 时，JSON 文件中的值会覆盖命令行 flag 值。下表按 `/xllm/core/framework/config` 下的 Config 类分组，一个 Config 对应一节；`ConfigJsonUtils` 一节包含配置文件相关的通用参数。
 
+> **设备选择**：xLLM 不再提供 `--devices` / `--device_id` / `--draft_devices` 参数。可用设备由可见设备掩码环境变量决定（NPU 用 `ASCEND_RT_VISIBLE_DEVICES`，NVIDIA 用 `CUDA_VISIBLE_DEVICES`，寒武纪用 `MLU_VISIBLE_DEVICES`，DCU 用 `HIP_VISIBLE_DEVICES`，摩尔线程用 `MUSA_VISIBLE_DEVICES`）。每个服务进程根据全局 `node_rank` 从其可见设备中选择一个运行时逻辑设备；可见设备的子集化与重排由硬件运行时解析。draft 模型始终与 target 模型共享所选设备。
+
 ## ConfigJsonUtils
 
 | 参数名称 | 类型 | 默认值 | 参数含义 |
@@ -37,8 +39,6 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `model` | `string` | `""` | Hugging Face 模型名称或模型路径。 |
 | `backend` | `string` | `""` | 后端模型类型；`llm` 表示纯文本模型，`vlm` 表示多模态模型，`dit` 表示扩散模型。 |
 | `task` | `string` | `"generate"` | 模型任务类型，例如 `generate`、`embed`、`mm_embed`。 |
-| `devices` | `string` | `""` | 已废弃，请改用 `device_id`。当前进程使用的设备，例如 `npu:0`、`npu:0,npu:1`。 |
-| `device_id` | `int32` | `-1` | 运行模型的 device id，例如 `0`。 |
 | `limit_image_per_prompt` | `int32` | `8` | 每个 prompt 允许的最大图片数量，仅用于多模态模型。 |
 | `max_encoder_cache_size` | `int64` | `0` | 每个 worker 的 encoder cache 最大显存大小，单位 MB；`0` 表示禁用 encoder cache。 |
 | `reasoning_parser` | `string` | `""` | reasoning 交互解析器，例如 `auto`、`glm45`、`glm47`、`glm5`、`qwen3`、`qwen35`、`deepseek-r1`。 |
@@ -181,7 +181,6 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
 | `draft_model` | `string` | `""` | draft 模型路径；MTP 使用方式详见 [MTP](/zh/features/mtp/)。 |
-| `draft_devices` | `string` | `""` | draft 模型使用的设备，例如 `npu:0`、`npu:0,npu:1`；未指定时，启用 speculative decoding 会使用 target 模型的设备。 |
 | `num_speculative_tokens` | `int32` | `0` | 每轮 speculative decoding 生成的 speculative token 数。 |
 | `speculative_algorithm` | `string` | `"MTP"` | Speculative decoding 算法，支持 `MTP`、`Eagle3`、`Suffix`、`DFlash`。 |
 | `speculative_suffix_cache_max_depth` | `int32` | `64` | Suffix speculative decoding 的后缀树最大深度。 |

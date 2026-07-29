@@ -25,14 +25,13 @@ limitations under the License.
  * inference engine.
  */
 
-std::string devices = "npu:0";
 std::string model_path = "/export/home/models/Qwen3-4B";
 
 int main(int argc, char** argv) {
   xllm::LLM llm_instance;
   xllm::XLLM_InitLLMOptions options;
   options.cp_size = 1;
-  bool ret = llm_instance.Initialize(model_path, devices, options);
+  bool ret = llm_instance.Initialize(model_path, options);
   if (!ret) {
     std::cout << "LLM init failed." << std::endl;
     return -1;

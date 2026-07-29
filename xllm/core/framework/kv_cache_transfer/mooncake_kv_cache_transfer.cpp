@@ -83,6 +83,26 @@ void merge_xtensor_offsets(
   }
 }
 
+std::vector<KVCacheTensor> get_mooncake_tensors(const KVCache& cache) {
+  std::vector<KVCacheTensor> transfer_tensors;
+  for (const KVCacheTensor& cache_tensor : cache.get_cache_tensors()) {
+    switch (cache_tensor.role) {
+      case KVCacheTensorRole::KEY:
+      case KVCacheTensorRole::VALUE:
+      case KVCacheTensorRole::INDEX:
+      case KVCacheTensorRole::INDEX_SCALE:
+        transfer_tensors.emplace_back(cache_tensor);
+        break;
+      default:
+        // Mooncake roles form an explicit protocol whitelist. A new cache role
+        // must not become transferable without a corresponding protocol
+        // decision and registration-order test.
+        break;
+    }
+  }
+  return transfer_tensors;
+}
+
 void merge_kv_info(
     std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo>&
         merged_kv_infos,
@@ -194,6 +214,18 @@ MooncakeKVCacheTransferDefault::MooncakeKVCacheTransferDefault(
           std::make_unique<MooncakeTransferEngine>(listen_port, device)),
       model_type_(model_type) {}
 
+MooncakeKVCacheTransferDefault::MooncakeKVCacheTransferDefault(
+    const int32_t device_id,
+    const uint16_t listen_port,
+    const torch::Device& device,
+    const std::string& model_type,
+    std::unique_ptr<MooncakeTransferEngine> engine)
+    : MooncakeKVCacheTransferBase(device_id,
+                                  listen_port,
+                                  device,
+                                  std::move(engine)),
+      model_type_(model_type) {}
+
 void MooncakeKVCacheTransferDefault::allocate_kv_cache(
     std::vector<xllm::KVCache>& kv_caches,
     const int64_t num_layers,
@@ -223,22 +255,10 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
   const std::vector<int64_t>& key_cache_shape =
       kv_cache_shape.key_cache_shape();
   bool has_v_cache = true;
-  bool has_index_cache = false;
-  bool has_index_cache_scale = false;
   if (!kv_caches.empty()) {
     torch::Tensor value_cache = kv_caches[0].get_v_cache();
-    torch::Tensor index_cache = kv_caches[0].get_index_cache();
-    std::optional<torch::Tensor> index_cache_scale =
-        kv_caches[0].get_indexer_cache_scale();
     has_v_cache = value_cache.defined() && value_cache.numel() > 0;
-    has_index_cache = index_cache.defined() && index_cache.numel() > 0;
-    has_index_cache_scale = index_cache_scale.has_value() &&
-                            index_cache_scale->defined() &&
-                            index_cache_scale->numel() > 0;
   }
-  const int64_t buf_cnt_per_layer = 1 + static_cast<int64_t>(has_v_cache) +
-                                    static_cast<int64_t>(has_index_cache) +
-                                    static_cast<int64_t>(has_index_cache_scale);
 
   int64_t data_size = torch::scalarTypeToTypeMeta(dtype).itemsize();
   int64_t count_per_block = 1;
@@ -255,10 +275,22 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
 
   BufLayout layout;
   layout.num_layers = num_layers;
-  layout.buf_cnt = buf_cnt_per_layer;
+  layout.layer_offsets.reserve(static_cast<size_t>(num_layers) + 1);
+  layout.layer_offsets.emplace_back(0);
+  for (const KVCache& cache : kv_caches) {
+    const std::vector<KVCacheTensor> transfer_tensors =
+        get_mooncake_tensors(cache);
+    const int64_t buffer_count = static_cast<int64_t>(transfer_tensors.size());
+    if (layout.layer_offsets.size() == 1) {
+      layout.buf_cnt = buffer_count;
+    } else if (layout.buf_cnt != buffer_count) {
+      layout.buf_cnt = 0;
+    }
+    layout.total_buf_cnt += buffer_count;
+    layout.layer_offsets.emplace_back(layout.total_buf_cnt);
+  }
   if (is_spec_draft) {
-    layout.offset =
-        main_layout_.offset + main_layout_.num_layers * main_layout_.buf_cnt;
+    layout.offset = main_layout_.offset + main_layout_.total_buf_cnt;
   }
   layout.registered = true;
 
@@ -273,49 +305,39 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
   register_kv_cache_impl(kv_caches);
 }
 
+void MooncakeKVCacheTransferDefault::register_kv_cache_spec(
+    std::vector<xllm::KVCache>& kv_caches,
+    const KVCacheShape& kv_cache_shape,
+    torch::ScalarType dtype) {
+  CHECK(main_layout_.registered)
+      << "Main KV cache must be registered before spec draft KV cache.";
+  register_kv_cache(kv_caches, kv_cache_shape, dtype);
+}
+
 void MooncakeKVCacheTransferDefault::allocate_kv_cache_impl(
     std::vector<xllm::KVCache>& kv_caches,
     int64_t num_layers,
     const KVCacheShape& kv_cache_shape,
     torch::ScalarType dtype) {
-  const std::vector<int64_t>& key_cache_shape =
-      kv_cache_shape.key_cache_shape();
-  const std::vector<int64_t>& value_cache_shape =
-      kv_cache_shape.value_cache_shape();
 #if defined(USE_MLU)
-  for (int64_t i = 0; i < num_layers; ++i) {
-    torch::Tensor key_cache =
-        mlu::alloc_zero_tensor(key_cache_shape, dtype, device_);
-    torch::Tensor value_cache;
-    torch::Tensor index_cache;
-    std::optional<torch::Tensor> index_cache_scale;
-    if (kv_cache_shape.has_value_cache_shape()) {
-      value_cache = mlu::alloc_zero_tensor(value_cache_shape, dtype, device_);
-    }
-    if (kv_cache_shape.has_index_cache_shape()) {
-      const torch::ScalarType index_dtype =
-          kv_cache_shape.has_index_cache_scale_shape() ? torch::kChar : dtype;
-      index_cache = mlu::alloc_zero_tensor(
-          kv_cache_shape.index_cache_shape(), index_dtype, device_);
-    }
-    if (kv_cache_shape.has_index_cache_scale_shape()) {
-      index_cache_scale = mlu::alloc_rdma_registerable_zero_tensor(
-          kv_cache_shape.index_cache_scale_shape(), torch::kFloat32, device_);
-    }
-    if (index_cache.defined()) {
-      kv_caches.emplace_back(
-          IndexedKVCacheTensors{KVCacheTensors{key_cache, value_cache},
-                                index_cache,
-                                index_cache_scale});
-    } else {
-      kv_caches.emplace_back(KVCacheTensors{key_cache, value_cache});
-    }
-  }
+  (void)kv_caches;
+  (void)num_layers;
+  (void)kv_cache_shape;
+  (void)dtype;
+  LOG(FATAL) << "MLU Mooncake cache allocation must use the KV cache factory.";
 #elif defined(USE_DCU)
+  // TODO(xllm-kv-allocator): DCU remains on its existing physical allocation
+  // path in the MLU Mooncake migration. A follow-up must route it through
+  // KVCacheCreateOptions::tensor_allocator without moving cache structure
+  // decisions into Transfer. Do not add indexer layer-mask handling here.
   CHECK(kv_cache_shape.has_value_cache_shape())
       << "DCU Mooncake KV transfer requires a value cache shape.";
   CHECK(!kv_cache_shape.has_index_cache_shape())
       << "DCU Mooncake KV transfer does not support index cache yet.";
+  const std::vector<int64_t>& key_cache_shape =
+      kv_cache_shape.key_cache_shape();
+  const std::vector<int64_t>& value_cache_shape =
+      kv_cache_shape.value_cache_shape();
 
   for (int64_t i = 0; i < num_layers; ++i) {
     torch::Tensor key_cache =
@@ -325,6 +347,14 @@ void MooncakeKVCacheTransferDefault::allocate_kv_cache_impl(
     kv_caches.emplace_back(KVCacheTensors{key_cache, value_cache});
   }
 #else
+  // TODO(xllm-kv-allocator): NPU remains on its existing physical allocation
+  // path in the MLU Mooncake migration. A follow-up must route it through
+  // KVCacheCreateOptions::tensor_allocator without moving cache structure
+  // decisions into Transfer. Do not add indexer layer-mask handling here.
+  const std::vector<int64_t>& key_cache_shape =
+      kv_cache_shape.key_cache_shape();
+  const std::vector<int64_t>& value_cache_shape =
+      kv_cache_shape.value_cache_shape();
   // Original mode: allocate device memory using aclrtMalloc
   // calculate the size of kv cache for each layer
   auto data_size = torch::elementSize(dtype);
@@ -467,15 +497,44 @@ std::vector<int64_t> MooncakeKVCacheTransferDefault::get_buf_ids(
   }
 
   std::vector<int64_t> buf_ids;
-  buf_ids.reserve(active_layer_ids.size() *
-                  static_cast<size_t>(layout.buf_cnt));
+  const bool has_variable_layout = !layout.layer_offsets.empty();
+  if (has_variable_layout) {
+    CHECK_EQ(layout.layer_offsets.size(),
+             static_cast<size_t>(layout.num_layers) + 1)
+        << "KV cache buffer layout offsets are invalid.";
+  } else {
+    CHECK_GT(layout.buf_cnt, 0) << "KV cache uniform buffer layout is invalid.";
+  }
   for (int64_t layer_id : active_layer_ids) {
     CHECK_GE(layer_id, 0) << "layer_id must be non-negative";
     CHECK_LT(layer_id, layout.num_layers) << "layer_id out of range";
+  }
 
-    int64_t buf_id = layout.offset + layer_id * layout.buf_cnt;
-    for (int64_t buf_idx = 0; buf_idx < layout.buf_cnt; ++buf_idx) {
-      buf_ids.emplace_back(buf_id++);
+  size_t buffer_count = 0;
+  for (int64_t layer_id : active_layer_ids) {
+    const int64_t begin =
+        has_variable_layout
+            ? layout.layer_offsets[static_cast<size_t>(layer_id)]
+            : layer_id * layout.buf_cnt;
+    const int64_t end =
+        has_variable_layout
+            ? layout.layer_offsets[static_cast<size_t>(layer_id) + 1]
+            : begin + layout.buf_cnt;
+    buffer_count += static_cast<size_t>(end - begin);
+  }
+  buf_ids.reserve(buffer_count);
+
+  for (int64_t layer_id : active_layer_ids) {
+    const int64_t begin =
+        has_variable_layout
+            ? layout.layer_offsets[static_cast<size_t>(layer_id)]
+            : layer_id * layout.buf_cnt;
+    const int64_t end =
+        has_variable_layout
+            ? layout.layer_offsets[static_cast<size_t>(layer_id) + 1]
+            : begin + layout.buf_cnt;
+    for (int64_t relative_id = begin; relative_id < end; ++relative_id) {
+      buf_ids.emplace_back(layout.offset + relative_id);
     }
   }
   return buf_ids;
@@ -490,22 +549,23 @@ void MooncakeKVCacheTransferDefault::register_kv_cache_impl(
   lens.reserve(kv_caches.size() * 4);
   buf_bytes.reserve(kv_caches.size() * 4);
 
-  for (int64_t i = 0; i < static_cast<int64_t>(kv_caches.size()); ++i) {
-    add_buf(kv_caches[i].get_k_cache(), addrs, lens, buf_bytes);
-    add_buf(kv_caches[i].get_v_cache(), addrs, lens, buf_bytes);
-    add_buf(kv_caches[i].get_index_cache(), addrs, lens, buf_bytes);
-    std::optional<torch::Tensor> index_cache_scale =
-        kv_caches[i].get_indexer_cache_scale();
-    if (index_cache_scale.has_value()) {
+  for (const KVCache& cache : kv_caches) {
+    const std::vector<KVCacheTensor> transfer_tensors =
+        get_mooncake_tensors(cache);
+    for (const KVCacheTensor& cache_tensor : transfer_tensors) {
+      if (cache_tensor.role == KVCacheTensorRole::INDEX_SCALE) {
 #if defined(USE_MLU)
-      add_buf(index_cache_scale.value(),
-              addrs,
-              lens,
-              buf_bytes,
-              RegisterLengthPolicy::RDMA_REGISTERABLE_BYTES);
+        add_buf(cache_tensor.tensor,
+                addrs,
+                lens,
+                buf_bytes,
+                RegisterLengthPolicy::RDMA_REGISTERABLE_BYTES);
 #else
-      add_buf(index_cache_scale.value(), addrs, lens, buf_bytes);
+        add_buf(cache_tensor.tensor, addrs, lens, buf_bytes);
 #endif
+        continue;
+      }
+      add_buf(cache_tensor.tensor, addrs, lens, buf_bytes);
     }
   }
 

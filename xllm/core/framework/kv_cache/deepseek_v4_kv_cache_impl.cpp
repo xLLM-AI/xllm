@@ -33,6 +33,7 @@ limitations under the License.
 
 #include "framework/kv_cache/deepseek_v4_cache_policy.h"
 #include "framework/kv_cache/kv_cache_shape.h"
+#include "framework/kv_cache/kv_cache_utils.h"
 
 namespace xllm {
 namespace {
@@ -141,9 +142,8 @@ DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
     : key_cache_(tensors.key_cache),
       index_cache_(tensors.index_cache),
       indexer_cache_scale_(tensors.indexer_cache_scale),
-      swa_cache_(tensors.swa_cache)
+      swa_cache_(tensors.swa_cache),
 #if defined(USE_MLU)
-      ,
       compress_state_(
           Dsv4StateCache::from_packed(tensors.compress_state,
                                       tensors.compress_kv_state,
@@ -151,16 +151,88 @@ DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
       index_state_(
           Dsv4StateCache::from_packed(tensors.compress_index_state,
                                       tensors.compress_index_kv_state,
-                                      tensors.compress_index_score_state))
+                                      tensors.compress_index_score_state)),
 #else
-      ,
       compress_state_(Dsv4StateCache::from_split(tensors.compress_kv_state,
                                                  tensors.compress_score_state)),
       index_state_(
           Dsv4StateCache::from_split(tensors.compress_index_kv_state,
-                                     tensors.compress_index_score_state))
+                                     tensors.compress_index_score_state)),
 #endif
-{
+      compressed_block_type_(tensors.compressed_block_type) {
+}
+
+DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
+    const KVCacheShape& kv_cache_shape,
+    const KVCacheCreateOptions& create_options,
+    BlockType type,
+    int64_t layer_count) {
+  CHECK(kv_cache_shape.has_key_cache_shape())
+      << "DeepSeek V4 host kv cache shape must contain pool counts.";
+  const std::vector<int64_t>& pool_counts = kv_cache_shape.key_cache_shape();
+  CHECK_GE(pool_counts.size(), 3) << "DeepSeek V4 host kv cache shape must be "
+                                  << "[swa_count, c4_count, c128_count].";
+  CHECK_GT(create_options.block_size(), 0)
+      << "DeepSeek V4 block_size must be positive.";
+  CHECK_GT(create_options.head_dim(), 0)
+      << "DeepSeek V4 head_dim must be positive.";
+  CHECK_GT(layer_count, 0)
+      << "DeepSeek V4 host prefix cache layer count must be positive.";
+
+  const double factor = create_options.host_blocks_factor();
+  const int64_t host_swa_count = scale_host_block_count(pool_counts[0], factor);
+  const int64_t host_c4_count = scale_host_block_count(pool_counts[1], factor);
+  const int64_t host_c128_count =
+      scale_host_block_count(pool_counts[2], factor);
+  const int64_t block_size = create_options.block_size();
+  const int64_t head_dim = create_options.head_dim();
+  const int64_t index_head_dim =
+      std::max<int64_t>(create_options.index_head_dim(), 1);
+  const int64_t n_heads = 1;
+  const int64_t index_n_heads = 1;
+  const DeepSeekV4CachePolicy cache_policy =
+      get_dsv4_cache_policy(create_options.dtype());
+
+  // Host tensor shape: device per-block dims with a layer dimension inserted at
+  // index 1, i.e. [host_block_count, layer_count, ...per_block_dims].
+  auto host_group_shape = [&](int64_t block_count, int64_t heads, int64_t dim) {
+    std::vector<int64_t> shape =
+        dsv4_block_shape(block_count, block_size, heads, dim);
+    shape.insert(shape.begin() + 1, layer_count);
+    return shape;
+  };
+
+  switch (type) {
+    case BlockType::SWA:
+      host_page_aligned_regions_.reserve(1);
+      create_host_tensor(host_group_shape(host_swa_count, n_heads, head_dim),
+                         create_options.dtype(),
+                         &swa_cache_,
+                         nullptr);
+      break;
+    case BlockType::C4:
+      host_page_aligned_regions_.reserve(2);
+      create_host_tensor(host_group_shape(host_c4_count, n_heads, head_dim),
+                         create_options.dtype(),
+                         &key_cache_,
+                         nullptr);
+      create_host_tensor(
+          host_group_shape(host_c4_count, index_n_heads, index_head_dim),
+          cache_policy.index_dtype,
+          &index_cache_,
+          nullptr);
+      break;
+    case BlockType::C128:
+      host_page_aligned_regions_.reserve(1);
+      create_host_tensor(host_group_shape(host_c128_count, n_heads, head_dim),
+                         create_options.dtype(),
+                         &key_cache_,
+                         nullptr);
+      break;
+    default:
+      LOG(FATAL) << "Unsupported DeepSeek V4 host block type: "
+                 << static_cast<int32_t>(type);
+  }
 }
 
 torch::Tensor DeepSeekV4KVCacheImpl::get_k_cache() const { return key_cache_; }
@@ -203,6 +275,63 @@ torch::Tensor DeepSeekV4KVCacheImpl::get_compress_state() const {
 
 torch::Tensor DeepSeekV4KVCacheImpl::get_compress_index_state() const {
   return index_state_.packed();
+}
+
+std::vector<KVCacheTensor> DeepSeekV4KVCacheImpl::get_cache_tensors() const {
+  std::vector<KVCacheTensor> tensors;
+  tensors.reserve(8);
+  auto add_tensor = [&tensors](KVCacheTensorRole role,
+                               const torch::Tensor& tensor,
+                               BlockType block_type) {
+    if (tensor.defined() && tensor.numel() > 0) {
+      tensors.emplace_back(KVCacheTensor{
+          role, tensor, cache_group_id(block_type), /*sequence_scoped=*/false});
+    }
+  };
+
+  add_tensor(KVCacheTensorRole::WINDOW, swa_cache_, BlockType::SWA);
+  add_tensor(KVCacheTensorRole::KEY, key_cache_, compressed_block_type_);
+  add_tensor(KVCacheTensorRole::INDEX, index_cache_, compressed_block_type_);
+  add_tensor(KVCacheTensorRole::INDEX_SCALE,
+             indexer_cache_scale_,
+             compressed_block_type_);
+  add_tensor(KVCacheTensorRole::KV_STATE, compress_state_.kv(), BlockType::SWA);
+  add_tensor(
+      KVCacheTensorRole::SCORE_STATE, compress_state_.score(), BlockType::SWA);
+  add_tensor(
+      KVCacheTensorRole::INDEX_KV_STATE, index_state_.kv(), BlockType::SWA);
+  add_tensor(KVCacheTensorRole::INDEX_SCORE_STATE,
+             index_state_.score(),
+             BlockType::SWA);
+  return tensors;
+}
+
+BlockTypeTensorMap DeepSeekV4KVCacheImpl::get_block_type_tensors(
+    BlockType type) const {
+  BlockTypeTensorMap tensor_map;
+  switch (type) {
+    case BlockType::SWA:
+      if (swa_cache_.defined() && swa_cache_.numel() > 0) {
+        tensor_map.emplace(KVCacheTensorRole::SWA, swa_cache_);
+      }
+      break;
+    case BlockType::C4:
+      if (key_cache_.defined() && key_cache_.numel() > 0 &&
+          index_cache_.defined() && index_cache_.numel() > 0) {
+        tensor_map.emplace(KVCacheTensorRole::KEY, key_cache_);
+        tensor_map.emplace(KVCacheTensorRole::INDEX, index_cache_);
+      }
+      break;
+    case BlockType::C128:
+      if (key_cache_.defined() && key_cache_.numel() > 0 &&
+          (!index_cache_.defined() || index_cache_.numel() == 0)) {
+        tensor_map.emplace(KVCacheTensorRole::KEY, key_cache_);
+      }
+      break;
+    default:
+      break;
+  }
+  return tensor_map;
 }
 
 bool DeepSeekV4KVCacheImpl::empty() const { return !swa_cache_.defined(); }
@@ -265,113 +394,102 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
           ? compress_ratios[static_cast<size_t>(layer_idx)]
           : 1;
 
-  const torch::TensorOptions cache_options =
-      torch::dtype(create_options.dtype()).device(create_options.device());
   const DeepSeekV4CachePolicy cache_policy =
       get_dsv4_cache_policy(create_options.dtype());
-  const torch::TensorOptions index_options =
-      torch::dtype(cache_policy.index_dtype).device(create_options.device());
-  const torch::TensorOptions state_options =
-      torch::dtype(torch::kFloat32).device(create_options.device());
-  const torch::TensorOptions scale_options =
-      torch::dtype(cache_policy.scale_dtype).device(create_options.device());
+
+#if defined(USE_NPU)
+  const bool use_huge_page_allocator =
+      create_options.enable_kv_cache_huge_page_allocator();
+#endif
+  auto allocate_tensor = [&](const std::vector<int64_t>& dims,
+                             torch::ScalarType dtype) {
+#if defined(USE_NPU)
+    if (use_huge_page_allocator) {
+      return alloc_npu_huge_page_tensor(dims, dtype, ACL_FORMAT_ND);
+    }
+#endif
+    return cast_to_nd_format(torch::empty(
+        dims, torch::dtype(dtype).device(create_options.device())));
+  };
 
   DeepSeekV4KVCacheTensors tensors;
   if (compress_ratio == 1) {
-    tensors.swa_cache =
-        torch::empty(dsv4_block_shape(swa_count, block_size, n_heads, head_dim),
-                     cache_options);
+    tensors.swa_cache = allocate_tensor(
+        dsv4_block_shape(swa_count, block_size, n_heads, head_dim),
+        create_options.dtype());
   } else if (compress_ratio == 4) {
-    tensors.key_cache =
-        torch::empty(dsv4_block_shape(c4_count, block_size, n_heads, head_dim),
-                     cache_options);
-    tensors.index_cache = torch::empty(
+    tensors.compressed_block_type = BlockType::C4;
+    tensors.key_cache = allocate_tensor(
+        dsv4_block_shape(c4_count, block_size, n_heads, head_dim),
+        create_options.dtype());
+    tensors.index_cache = allocate_tensor(
         dsv4_block_shape(c4_count, block_size, index_n_heads, index_head_dim),
-        index_options);
+        cache_policy.index_dtype);
     if (cache_policy.has_indexer_cache_scale) {
       tensors.indexer_cache_scale =
-          torch::empty({c4_count, block_size, 1}, scale_options);
+          allocate_tensor({c4_count, block_size, 1}, cache_policy.scale_dtype);
     }
-    tensors.swa_cache =
-        torch::empty(dsv4_block_shape(swa_count, block_size, n_heads, head_dim),
-                     cache_options);
+    tensors.swa_cache = allocate_tensor(
+        dsv4_block_shape(swa_count, block_size, n_heads, head_dim),
+        create_options.dtype());
 #if defined(USE_MLU)
     // coff_dim = 2 * head_dim for ratio==4; merged dim = 2 * coff_dim. The
     // owning compress_state backs the narrow-view getters and is passed
     // directly to fused_compress_*_kv (which requires a contiguous
     // state_cache).
     const int64_t cmp_coff_dim = 2 * head_dim;
-    tensors.compress_state =
-        torch::empty({swa_count, block_size, 2 * cmp_coff_dim}, state_options);
+    tensors.compress_state = allocate_tensor(
+        {swa_count, block_size, 2 * cmp_coff_dim}, torch::kFloat32);
     tensors.compress_kv_state = tensors.compress_state.narrow(
         /*dim=*/2, /*start=*/0, /*length=*/cmp_coff_dim);
     tensors.compress_score_state = tensors.compress_state.narrow(
         /*dim=*/2, /*start=*/cmp_coff_dim, /*length=*/cmp_coff_dim);
     const int64_t idx_coff_dim = 2 * index_head_dim;
-    tensors.compress_index_state =
-        torch::empty({swa_count, block_size, 2 * idx_coff_dim}, state_options);
+    tensors.compress_index_state = allocate_tensor(
+        {swa_count, block_size, 2 * idx_coff_dim}, torch::kFloat32);
     tensors.compress_index_kv_state = tensors.compress_index_state.narrow(
         /*dim=*/2, /*start=*/0, /*length=*/idx_coff_dim);
     tensors.compress_index_score_state = tensors.compress_index_state.narrow(
         /*dim=*/2, /*start=*/idx_coff_dim, /*length=*/idx_coff_dim);
 #else
     tensors.compress_kv_state =
-        torch::empty({swa_count, block_size, 2 * head_dim}, state_options);
+        allocate_tensor({swa_count, block_size, 2 * head_dim}, torch::kFloat32);
     tensors.compress_score_state =
-        torch::empty({swa_count, block_size, 2 * head_dim}, state_options);
-    tensors.compress_index_kv_state = torch::empty(
-        {swa_count, block_size, 2 * index_head_dim}, state_options);
-    tensors.compress_index_score_state = torch::empty(
-        {swa_count, block_size, 2 * index_head_dim}, state_options);
+        allocate_tensor({swa_count, block_size, 2 * head_dim}, torch::kFloat32);
+    tensors.compress_index_kv_state = allocate_tensor(
+        {swa_count, block_size, 2 * index_head_dim}, torch::kFloat32);
+    tensors.compress_index_score_state = allocate_tensor(
+        {swa_count, block_size, 2 * index_head_dim}, torch::kFloat32);
 #endif
   } else if (compress_ratio == 128) {
-    tensors.key_cache = torch::empty(
+    tensors.compressed_block_type = BlockType::C128;
+    tensors.key_cache = allocate_tensor(
         dsv4_block_shape(c128_count, block_size, n_heads, head_dim),
-        cache_options);
-    tensors.swa_cache =
-        torch::empty(dsv4_block_shape(swa_count, block_size, n_heads, head_dim),
-                     cache_options);
+        create_options.dtype());
+    tensors.swa_cache = allocate_tensor(
+        dsv4_block_shape(swa_count, block_size, n_heads, head_dim),
+        create_options.dtype());
 #if defined(USE_MLU)
     // coff_dim = head_dim for ratio==128; merged dim = 2 * coff_dim.
     const int64_t cmp_coff_dim = head_dim;
-    tensors.compress_state =
-        torch::empty({swa_count, block_size, 2 * cmp_coff_dim}, state_options);
+    tensors.compress_state = allocate_tensor(
+        {swa_count, block_size, 2 * cmp_coff_dim}, torch::kFloat32);
     tensors.compress_kv_state = tensors.compress_state.narrow(
         /*dim=*/2, /*start=*/0, /*length=*/cmp_coff_dim);
     tensors.compress_score_state = tensors.compress_state.narrow(
         /*dim=*/2, /*start=*/cmp_coff_dim, /*length=*/cmp_coff_dim);
 #else
     tensors.compress_kv_state =
-        torch::empty({swa_count, block_size, head_dim}, state_options);
+        allocate_tensor({swa_count, block_size, head_dim}, torch::kFloat32);
     tensors.compress_score_state =
-        torch::empty({swa_count, block_size, head_dim}, state_options);
+        allocate_tensor({swa_count, block_size, head_dim}, torch::kFloat32);
 #endif
   } else {
-    tensors.swa_cache =
-        torch::empty(dsv4_block_shape(swa_count, block_size, n_heads, head_dim),
-                     cache_options);
+    tensors.swa_cache = allocate_tensor(
+        dsv4_block_shape(swa_count, block_size, n_heads, head_dim),
+        create_options.dtype());
   }
 
-  tensors.key_cache = cast_to_nd_format(tensors.key_cache);
-  tensors.index_cache = cast_to_nd_format(tensors.index_cache);
-  tensors.indexer_cache_scale = cast_to_nd_format(tensors.indexer_cache_scale);
-  tensors.swa_cache = cast_to_nd_format(tensors.swa_cache);
-#if defined(USE_MLU)
-  // Cast the owning merged tensors only; the split getters are narrow views
-  // into them. (cast_to_nd_format is a no-op on MLU but kept for parity, and
-  // never applied to non-contiguous narrow views.)
-  tensors.compress_state = cast_to_nd_format(tensors.compress_state);
-  tensors.compress_index_state =
-      cast_to_nd_format(tensors.compress_index_state);
-#else
-  tensors.compress_kv_state = cast_to_nd_format(tensors.compress_kv_state);
-  tensors.compress_score_state =
-      cast_to_nd_format(tensors.compress_score_state);
-  tensors.compress_index_kv_state =
-      cast_to_nd_format(tensors.compress_index_kv_state);
-  tensors.compress_index_score_state =
-      cast_to_nd_format(tensors.compress_index_score_state);
-#endif
   return tensors;
 }
 

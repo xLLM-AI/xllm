@@ -42,10 +42,14 @@ void dequant_from_paged_cache(ReshapeFromCacheParams& params);
 
 void fused_layernorm(FusedLayerNormParams& params);
 
+torch::Tensor fused_adalayer_norm(AdaLayerNormParams& params);
+
 std::tuple<torch::Tensor, torch::Tensor> rms_norm_dynamic_quant(
     RmsNormDynamicQuantParams& params);
 
 torch::Tensor matmul(MatmulParams& params);
+
+torch::Tensor matmul_reduce_scatter(MatmulReduceScatterParams& params);
 
 torch::Tensor quant_matmul(QuantMatmulParams& params);
 

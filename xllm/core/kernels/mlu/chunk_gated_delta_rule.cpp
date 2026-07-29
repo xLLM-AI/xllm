@@ -217,6 +217,7 @@ torch::Tensor ChunkGatedDeltaRuleImpl::chunk_scaled_dot_kkt_fwd(
     const torch::Tensor& chunk_indices) {
   int64_t B = k.size(0);
   int64_t T = k.size(1);
+  int64_t K = k.size(3);
   int64_t H = beta.size(-1);
   int64_t NT;
   if (cu_seqlens.numel() == 0) {
@@ -224,7 +225,7 @@ torch::Tensor ChunkGatedDeltaRuleImpl::chunk_scaled_dot_kkt_fwd(
   } else {
     NT = chunk_indices.size(0);
   }
-  int64_t chunk_num = B * H * NT;
+  int64_t chunk_num = B * NT;
 
   auto A = torch::empty({B, T, H, chunk_size},
                         torch::dtype(torch::kFloat32).device(k.device()));
@@ -236,7 +237,7 @@ torch::Tensor ChunkGatedDeltaRuleImpl::chunk_scaled_dot_kkt_fwd(
       /*fn_name=*/"tmo_chunk_scaled_dot_kkt_fwd_kernel")
       .launch(static_cast<void*>(queue),
               /*grid=*/{dim.x, dim.y, dim.z},
-              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/1},
+              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/4},
               k,
               beta,
               g,
@@ -247,13 +248,13 @@ torch::Tensor ChunkGatedDeltaRuleImpl::chunk_scaled_dot_kkt_fwd(
               static_cast<int32_t>(B),
               static_cast<int32_t>(num_v_heads_),
               static_cast<int32_t>(num_k_heads_),
-              /*BK=*/128,
+              static_cast<int32_t>(K),
               /*BT=*/64,
-              /*BV=*/128,
+              /*BK=*/128,
               static_cast<int32_t>(NT),
               static_cast<int32_t>(chunk_num),
               /*ALLOW_TF32=*/1,
-              /*IS_VARLEN=*/1,
+              /*IS_VARLEN=*/cu_seqlens.numel() > 0 ? 1 : 0,
               /*USE_G=*/1);
   return A;
 }
@@ -293,8 +294,11 @@ ChunkGatedDeltaRuleImpl::recompute_w_fwd(const torch::Tensor& k,
   int64_t B = k.size(0);
   int64_t T = k.size(1);
   int64_t K = k.size(3);
+  int64_t V = v.size(-1);
   int64_t H = v.size(-2);
   int64_t BT = A.size(-1);
+  int64_t BK = ceil_div(K, 64) * 64;
+  int64_t BV = ceil_div(V, 64) * 64;
   int64_t NT;
   if (cu_seqlens.numel() == 0) {
     NT = ceil_div(T, BT);
@@ -315,7 +319,7 @@ ChunkGatedDeltaRuleImpl::recompute_w_fwd(const torch::Tensor& k,
       /*fn_name=*/"tmo_recompute_w_u_fwd_kernel")
       .launch(static_cast<void*>(queue),
               /*grid=*/{dim.x, dim.y, dim.z},
-              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/1},
+              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/4},
               k,
               v,
               trans_beta,
@@ -329,15 +333,15 @@ ChunkGatedDeltaRuleImpl::recompute_w_fwd(const torch::Tensor& k,
               static_cast<int32_t>(B),
               static_cast<int32_t>(num_v_heads_),
               static_cast<int32_t>(num_k_heads_),
-              /*BK=*/128,
-              /*BV=*/128,
-              /*BT=*/64,
-              /*BT_v=*/128,
-              /*BC=*/128,
+              static_cast<int32_t>(K),
+              static_cast<int32_t>(V),
+              static_cast<int32_t>(BT),
+              static_cast<int32_t>(BK),
+              static_cast<int32_t>(BV),
               static_cast<int32_t>(NT),
               static_cast<int32_t>(chunk_num),
               /*ALLOW_TF32=*/1,
-              /*IS_VARLEN=*/1);
+              /*IS_VARLEN=*/cu_seqlens.numel() > 0 ? 1 : 0);
   return std::make_pair(w, u);
 }
 
@@ -359,6 +363,8 @@ ChunkGatedDeltaRuleImpl::chunk_gated_delta_rule_fwd_h(
   int64_t K = k.size(3);
   int64_t V = u.size(-1);
   int64_t H = u.size(-2);
+  int64_t BK = ceil_div(K, 64) * 64;
+  int64_t BV = kBv;
 
   int64_t N, NT;
   torch::Tensor cu_seqlens_tensor, chunk_offsets;
@@ -373,10 +379,10 @@ ChunkGatedDeltaRuleImpl::chunk_gated_delta_rule_fwd_h(
     chunk_offsets = prepare_chunk_offsets(cu_seqlens_tensor, chunk_size);
   }
 
-  auto h = k.new_empty({B, NT, H, K, V}, k.device());
+  auto h = k.new_empty({B, NT, H, V, K}, k.device());
   torch::Tensor final_state, v_new;
   if (output_final_state) {
-    final_state = k.new_empty({N, H, K, V}, torch::kFloat32);
+    final_state = k.new_empty({N, H, V, K}, torch::kFloat32);
   }
   if (save_new_value) {
     v_new = torch::empty_like(u);
@@ -398,7 +404,7 @@ ChunkGatedDeltaRuleImpl::chunk_gated_delta_rule_fwd_h(
       /*fn_name=*/"tmo_chunk_gated_delta_rule_fwd_kernel_h_blockdim64")
       .launch(static_cast<void*>(queue),
               /*grid=*/{dim_block.x, dim_block.y, dim_block.z},
-              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/1},
+              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/4},
               k,
               u,
               w,
@@ -414,11 +420,11 @@ ChunkGatedDeltaRuleImpl::chunk_gated_delta_rule_fwd_h(
               static_cast<int32_t>(B),
               static_cast<int32_t>(num_v_heads_),
               static_cast<int32_t>(num_k_heads_),
-              /*BK=*/128,
-              /*BV=*/128,
+              static_cast<int32_t>(K),
+              static_cast<int32_t>(V),
               /*BT=*/64,
-              /*BT_v=*/128,
-              /*BC=*/64,
+              static_cast<int32_t>(BK),
+              static_cast<int32_t>(BV),
               /*USE_G=*/use_g,
               /*USE_GK=*/use_gk,
               /*USE_INITIAL_STATE=*/use_initial_state,
@@ -426,7 +432,7 @@ ChunkGatedDeltaRuleImpl::chunk_gated_delta_rule_fwd_h(
               /*SAVE_NEW_VALUE=*/save_new_value_flag,
               /*IS_VARLEN=*/is_varlen,
               /*ALLOW_TF32=*/1,
-              /*STATE_V_FIRST=*/0);
+              /*STATE_V_FIRST=*/1);
   return std::make_tuple(h, v_new, final_state);
 }
 
@@ -442,8 +448,12 @@ torch::Tensor ChunkGatedDeltaRuleImpl::chunk_fwd_o(
     const torch::Tensor& chunk_indices) {
   int64_t B = q.size(0);
   int64_t T = q.size(1);
+  int64_t K = q.size(3);
+  int64_t V = v.size(-1);
   int64_t H = v.size(-2);
   int64_t BT = kDefaultChunkSize;
+  int64_t BK = ceil_div(K, 64) * 64;
+  int64_t BV = ceil_div(V, 64) * 64;
   int64_t NT;
   if (!cu_seqlens.has_value()) {
     NT = ceil_div(T, BT);
@@ -469,7 +479,7 @@ torch::Tensor ChunkGatedDeltaRuleImpl::chunk_fwd_o(
       /*fn_name=*/"tmo_chunk_fwd_kernel_o")
       .launch(static_cast<void*>(queue),
               /*grid=*/{dim.x, dim.y, dim.z},
-              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/1},
+              /*cfg=*/{/*num_warps=*/1, /*num_stages=*/4},
               q,
               k,
               v,
@@ -483,17 +493,17 @@ torch::Tensor ChunkGatedDeltaRuleImpl::chunk_fwd_o(
               static_cast<int32_t>(B),
               static_cast<int32_t>(num_v_heads_),
               static_cast<int32_t>(num_k_heads_),
-              /*BK=*/128,
-              /*BV=*/128,
-              /*BT=*/64,
-              /*BT_v=*/128,
-              /*BC=*/128,
+              static_cast<int32_t>(K),
+              static_cast<int32_t>(V),
+              static_cast<int32_t>(BT),
+              static_cast<int32_t>(BK),
+              static_cast<int32_t>(BV),
               static_cast<int32_t>(NT),
               static_cast<int32_t>(chunk_num),
-              /*USE_G=*/1,
-              /*IS_VARLEN=*/1,
+              /*USE_G=*/g.has_value() ? 1 : 0,
+              /*IS_VARLEN=*/cu_seqlens.has_value() ? 1 : 0,
               /*ALLOW_TF32=*/1,
-              /*STATE_V_FIRST=*/0);
+              /*STATE_V_FIRST=*/1);
   return o;
 }
 }  // namespace mlu

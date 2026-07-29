@@ -5,10 +5,12 @@ cc_library(
     platform_npu
   HDRS
     npu_layer_synchronizer.h
+    npu_batch_memcpy.h
     device_capture_lock.h
     acl_graph_task_update_context.h
   SRCS
     npu_layer_synchronizer.cpp
+    npu_batch_memcpy.cpp
   DEPS
     torch_npu
     glog::glog

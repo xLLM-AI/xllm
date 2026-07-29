@@ -223,7 +223,8 @@ bool RecEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .host_num_blocks(0)
       .block_size(block_size)
       .enable_prefix_cache(options_.enable_prefix_cache())
-      .enable_disagg_pd(options_.enable_disagg_pd());
+      .enable_disagg_pd(options_.enable_disagg_pd())
+      .max_seqs_per_batch(options_.max_seqs_per_batch());
   kv_cache_manager_ = std::make_unique<BlockManagerPool>(options, dp_size_);
 
   return pipeline_->allocate_kv_cache(kv_cache_shape);
@@ -388,6 +389,8 @@ std::vector<ForwardInput> RecEngine::LlmRecEnginePipeline::prepare_inputs(
 
   for (int32_t dp_rank = 0; dp_rank < engine_.dp_size_; ++dp_rank) {
     batched_inputs[dp_rank].input_params.parallel.dp_global_token_nums =
+        dp_global_token_nums;
+    batched_inputs[dp_rank].input_params.parallel.raw_dp_global_token_nums =
         dp_global_token_nums;
     batched_inputs[dp_rank].input_params.parallel.dp_is_decode = dp_is_decode;
     if (batched_inputs[dp_rank]

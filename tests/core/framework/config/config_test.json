@@ -18,7 +18,6 @@
   "use_zero_evict": true,
   "max_decode_token_per_sequence": 128,
   "priority_strategy": "priority",
-  "use_mix_scheduler": true,
   "enable_online_preempt_offline": false,
   "aggressive_coeff": 1.5,
   "starve_threshold": 2.0,

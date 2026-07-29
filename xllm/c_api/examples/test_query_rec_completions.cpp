@@ -21,13 +21,6 @@ limitations under the License.
 
 #include "rec.h"
 
-#if defined(USE_NPU)
-std::string devices = "npu:14";
-#elif defined(USE_CUDA)
-std::string devices = "cuda:0";
-#else
-std::string devices = "npu:14";
-#endif
 std::string model_name = "Qwen3-0.6B";
 std::string model_path = "/export/home/models/Qwen3-0.6B";
 
@@ -54,8 +47,8 @@ XLLM_REC_Handler* service_startup_hook() {
   init_options.rec_worker_max_concurrency = 1;
 #endif
 
-  bool ret = xllm_rec_initialize(
-      rec_handler, model_path.c_str(), devices.c_str(), &init_options);
+  bool ret =
+      xllm_rec_initialize(rec_handler, model_path.c_str(), &init_options);
   if (!ret) {
     std::cout << "REC init failed" << std::endl;
     xllm_rec_destroy(rec_handler);
@@ -74,11 +67,10 @@ void service_stop_hook(XLLM_REC_Handler* rec_handler) {
 
 int main(int argc, char** argv) {
   if (argc > 1) {
-    devices = argv[1];
+    model_path = argv[1];
   }
 
   std::cout << "Using model path: " << model_path << std::endl;
-  std::cout << "Using devices: " << devices << std::endl;
 
   XLLM_REC_Handler* rec_handler = service_startup_hook();
   if (nullptr == rec_handler) {

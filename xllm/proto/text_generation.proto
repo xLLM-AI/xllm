@@ -1,0 +1,90 @@
+/* Copyright 2025-2026 The xLLM Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+syntax = "proto3";
+
+option go_package = "jd.com/jd-infer/xllm;xllm";
+package xllm.proto;
+
+// Input for text diffusion models (e.g. Cola-DLM).
+message TextInput {
+  // Prompt text to continue / complete.
+  string prompt = 1;
+}
+
+// Generation parameters for text diffusion.
+message TextParameters {
+  // Random seed. When omitted, generation uses stochastic global noise.
+  optional int64 seed = 1;
+
+  // Maximum number of new tokens to generate.
+  optional int32 max_new_tokens = 2;
+
+  // Number of diffusion / Euler steps.
+  optional int32 diffusion_steps = 3;
+
+  // Classifier-free guidance scale.
+  optional float guidance_scale = 4;
+
+  // Sampling temperature (0.0 = greedy).
+  optional float temperature = 5;
+
+  // Top-k sampling (0 = disabled).
+  optional int32 top_k = 6;
+
+  // Top-p (nucleus) sampling (1.0 = disabled).
+  optional float top_p = 7;
+
+  // Repetition penalty applied before temperature/top_k/top_p decoding.
+  // Official Cola-DLM default is 1.1; 1.0 disables the penalty.
+  optional float repetition_penalty = 8;
+}
+
+// Request for text diffusion generation (Cola-DLM).
+message TextGenerationRequest {
+  // Model id (e.g. "Cola-DLM").
+  string model = 1;
+
+  TextInput input = 2;
+
+  TextParameters parameters = 3;
+
+  optional string user = 4;
+
+  optional string request_id = 5;
+}
+
+message TextGenData {
+  string text = 1;
+
+  // Present only when the client explicitly set seed in the request.
+  optional int64 seed = 2;
+}
+
+message TextGenerationOutput {
+  repeated TextGenData results = 1;
+}
+
+message TextGenerationResponse {
+  string id = 1;
+
+  string object = 2;
+
+  int64 created = 3;
+
+  string model = 4;
+
+  TextGenerationOutput output = 5;
+}

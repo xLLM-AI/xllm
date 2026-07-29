@@ -25,8 +25,8 @@ from xllm.python.model_executor.runners.base import BaseRunner
 
 
 class InductorRunner(BaseRunner):
-    def __init__(self, model, attention_backend, backend: str) -> None:
-        super().__init__(model, attention_backend)
+    def __init__(self, model, attention_backend, device, backend: str) -> None:
+        super().__init__(model, attention_backend, device)
         self.compiled_model = torch.compile(model, backend=backend)
 
     def execute(
@@ -36,5 +36,5 @@ class InductorRunner(BaseRunner):
         metadata: AttentionMetadata,
     ) -> torch.Tensor:
         self.attention_backend.prepare(metadata)
-        with forward_context(ForwardContext(self.attention_backend)):
+        with forward_context(ForwardContext(self.attention_backend, self.device)):
             return self.compiled_model(input_ids, positions)

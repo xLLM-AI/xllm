@@ -19,10 +19,12 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <iostream>
+#include <mutex>
 #include <unordered_set>
 
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"
+#include "core/util/dit_model_discovery.h"
 #include "llm/py_causal_lm.h"
 #include "models.h"
 
@@ -165,6 +167,23 @@ bool resolve_model_registration_name(const std::string& model_type,
 #endif
 }
 
+bool is_npu_model_cp_capable(const std::string& resolved_name) {
+  static const std::unordered_set<std::string> kCpCapableModels = {
+      "deepseek_v32",
+      "deepseek_v32_mtp",
+      "glm_moe_dsa",
+      "glm_moe_dsa_mtp",
+  };
+  static std::once_flag once;
+  std::call_once(once, []() {
+    for (const std::string& name : kCpCapableModels) {
+      ModelRegistry::register_cp_sharding_mode(name, CpShardingMode::NPU_MODEL);
+    }
+  });
+  return ModelRegistry::get_cp_sharding_mode(resolved_name) ==
+         CpShardingMode::NPU_MODEL;
+}
+
 ModelRegistry* ModelRegistry::get_instance() {
   static ModelRegistry registry;
 
@@ -273,6 +292,21 @@ void ModelRegistry::register_tokenizer_args_loader(const std::string& name,
   }
 }
 
+void ModelRegistry::register_cp_sharding_mode(const std::string& name,
+                                              CpShardingMode mode) {
+  ModelRegistry* instance = get_instance();
+  instance->model_registry_[name].cp_sharding_mode = mode;
+}
+
+CpShardingMode ModelRegistry::get_cp_sharding_mode(const std::string& name) {
+  ModelRegistry* instance = get_instance();
+  const auto it = instance->model_registry_.find(name);
+  if (it == instance->model_registry_.end()) {
+    return CpShardingMode::NONE;
+  }
+  return it->second.cp_sharding_mode;
+}
+
 CausalLMFactory ModelRegistry::get_causallm_factory(const std::string& name) {
   ModelRegistry* instance = get_instance();
 
@@ -323,9 +357,90 @@ TokenizerArgsLoader ModelRegistry::get_tokenizer_args_loader(
 
 bool ModelRegistry::has_dit_model_factory(const std::string& name) {
   ModelRegistry* instance = get_instance();
-  return (instance->model_registry_.find(name) !=
-          instance->model_registry_.end());
+  const auto it = instance->model_registry_.find(name);
+  if (it == instance->model_registry_.end()) {
+    return false;
+  }
+  return it->second.dit_model_factory != nullptr;
 }
+
+namespace util {
+
+namespace {
+
+std::string try_resolve_from_component_key(const std::string& key) {
+  if (key.empty()) {
+    return {};
+  }
+  if (ModelRegistry::has_dit_model_factory(key)) {
+    return key;
+  }
+
+  auto try_prefix = [](const std::string& prefix) -> std::string {
+    if (ModelRegistry::has_dit_model_factory(prefix)) {
+      return prefix;
+    }
+    for (const char* suffix : {"_dlm", "_dit", "_diffusion", "_model"}) {
+      const std::string candidate = prefix + suffix;
+      if (ModelRegistry::has_dit_model_factory(candidate)) {
+        return candidate;
+      }
+    }
+    return {};
+  };
+
+  if (key.size() > 4 && key.substr(key.size() - 4) == "_dit") {
+    if (std::string resolved = try_prefix(key.substr(0, key.size() - 4));
+        !resolved.empty()) {
+      return resolved;
+    }
+  }
+  if (key.size() > 4 && key.substr(key.size() - 4) == "_vae") {
+    if (std::string resolved = try_prefix(key.substr(0, key.size() - 4));
+        !resolved.empty()) {
+      return resolved;
+    }
+  }
+  return {};
+}
+
+}  // namespace
+
+std::string resolve_dit_pipeline_type(
+    const std::vector<DitDiscoveredComponent>& components) {
+  if (components.empty()) {
+    return {};
+  }
+
+  for (const auto& component : components) {
+    if (std::string resolved =
+            try_resolve_from_component_key(component.component_type);
+        !resolved.empty()) {
+      return resolved;
+    }
+    if (component.name != component.component_type) {
+      if (std::string resolved = try_resolve_from_component_key(component.name);
+          !resolved.empty()) {
+        return resolved;
+      }
+    }
+  }
+
+  std::string component_summary;
+  for (const auto& component : components) {
+    if (!component_summary.empty()) {
+      component_summary += "; ";
+    }
+    component_summary +=
+        component.name + " (model_type=" + component.component_type + ")";
+  }
+  LOG(FATAL) << "Unable to resolve a registered DiT pipeline type from "
+                "discovered components: "
+             << component_summary;
+  return {};
+}
+
+}  // namespace util
 
 std::string ModelRegistry::get_model_backend(const std::string& name) {
   ModelRegistry* instance = get_instance();
@@ -336,13 +451,13 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
   // Python model executor: build the graph via the embedded interpreter instead
   // of resolving a C++ model class from the registry.
   const auto& model_impl = context.get_model_impl();
-#if defined(USE_CUDA)
+#if defined(USE_CUDA) || defined(USE_NPU)
   if (ModelConfig::is_python_model_impl(model_impl)) {
     return std::make_unique<PyCausalLM>(context);
   }
 #else
   if (ModelConfig::is_python_model_impl(model_impl)) {
-    LOG(ERROR) << "--model_impl=python is only supported on CUDA builds.";
+    LOG(ERROR) << "--model_impl=python is only supported on CUDA/NPU builds.";
     return nullptr;
   }
 #endif

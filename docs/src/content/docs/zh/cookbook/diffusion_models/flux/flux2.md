@@ -115,7 +115,6 @@ export HCCL_IF_BASE_PORT=43432  # HCCL 通信基础端口
 MODEL_PATH="/path/to/flux2/text_encoder/"          # text_encoder路径
 MASTER_NODE_ADDR="127.0.0.1:9748"                  # Master 节点地址（需全局一致）
 START_PORT=18001                                   # 服务起始端口
-START_DEVICE=2                                     # 起始逻辑设备号
 LOG_DIR="log"                                      # 日志目录
 NNODES=2                                           # 节点数（当前脚本启动 1 个进程）
 
@@ -124,11 +123,9 @@ mkdir -p $LOG_DIR
 for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/mistral_node_$i.log"
   ./build/xllm/core/server/xllm \
     --model $MODEL_PATH \
-    --devices="npu:$DEVICE" \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
@@ -186,21 +183,18 @@ export HCCL_IF_BASE_PORT=43432  # HCCL 通信基础端口
 ```bash
 MASTER_NODE_ADDR="127.0.0.1:8999"                  # Master 节点地址（需全局一致）
 START_PORT=18018                                   # 服务起始端口
-START_DEVICE=4                                     # 起始 NPU 逻辑设备号
 LOG_DIR="log"                                      # 日志目录
 NNODES=2                                           # 节点数（当前脚本启动 2 个进程）
 
 for (( i=0; i<2; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/dit_node_$i.log"
   ./build/xllm/core/server/xllm \
     --model="/path/to/flux2/" \
     --max_memory_utilization=0.6 \
     --backend="dit" \
     --tp_size=2 \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --port $PORT \

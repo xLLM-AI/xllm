@@ -9,6 +9,7 @@ cc_library(
   SRCS
     replace_token.cpp
     laser_attention.cpp
+    mtp_prepare_next_draft.cpp
     top_k_top_p.cpp
     quant_matmul.cpp
     quantize.cpp
@@ -35,6 +36,8 @@ cc_library(
     rec_constrained_topk_fused.cpp
     beam_search_rec_final.cpp
     npu_mega_chunk_gdn.cpp
+    layer_norm_fwd.cpp
+    gamma_add_rms_norm.cpp
   INCLUDES
     ${PROJECT_SOURCE_DIR}/third_party/xllm_ops/build/autogen
   DEPS

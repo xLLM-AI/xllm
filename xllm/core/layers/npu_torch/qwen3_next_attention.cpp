@@ -20,6 +20,8 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
+#include "common/flash_comm1_context.h"
+
 namespace xllm {
 namespace layer {
 
@@ -145,7 +147,14 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
     const torch::Tensor& mrope_cos_sin) {
-  auto qkv = qkv_proj_->forward(hidden_states);
+  const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
+  torch::Tensor h = hidden_states;
+
+  if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
+    h = gather_sequence(hidden_states, *fc1_ctx);
+  }
+
+  auto qkv = qkv_proj_->forward(h);
 
   if (use_fused_qkv_) {
     const int64_t T = qkv.size(0);
@@ -169,6 +178,10 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
     auto out = std::get<0>(
         attn_->forward(attn_metadata, q_flat, k_flat, v_flat, kv_cache));
     out = out * torch::sigmoid(gate.view({T, q_size_}));
+
+    if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
+      return o_proj_->forward(out, row_parallel_reduce_mode_for_fc1(*fc1_ctx));
+    }
     return o_proj_->forward(out);
   }
 
@@ -198,6 +211,10 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
 
   if (attn_output_gate_) {
     out = out * torch::sigmoid(gate);
+  }
+
+  if (fc1_ctx && is_sequence_sharded(*fc1_ctx)) {
+    return o_proj_->forward(out, row_parallel_reduce_mode_for_fc1(*fc1_ctx));
   }
   return o_proj_->forward(out);
 }

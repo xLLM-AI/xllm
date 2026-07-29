@@ -22,12 +22,9 @@ limitations under the License.
 namespace xllm {
 SpecKVCacheTransfer::SpecKVCacheTransfer(const uint16_t listen_port,
                                          const InstanceRole& instance_role,
-                                         const std::string& model_type,
                                          bool enable_lighting_indexer)
-    : LlmDataDistTransfer(listen_port,
-                          instance_role,
-                          model_type,
-                          enable_lighting_indexer) {}
+    : LlmDataDistTransfer(listen_port, instance_role, enable_lighting_indexer) {
+}
 
 void SpecKVCacheTransfer::register_kv_cache(
     std::vector<xllm::KVCache>& kv_caches,
@@ -56,6 +53,7 @@ void SpecKVCacheTransfer::register_kv_cache_internal(
 void SpecKVCacheTransfer::free_kv_cache() {
   layer_registered_caches_.clear();
   spec_layer_registered_caches_.clear();
+  has_grouped_cache_layout_ = false;
 }
 
 bool SpecKVCacheTransfer::pull_kv_blocks(
@@ -65,6 +63,14 @@ bool SpecKVCacheTransfer::pull_kv_blocks(
     const std::vector<uint64_t>& dst_blocks,
     const std::vector<uint64_t>& src_linear_state_ids,
     const std::vector<uint64_t>& dst_linear_state_ids) {
+  if (has_grouped_cache_layout_) {
+    return LlmDataDistTransfer::pull_kv_blocks(src_cluster_id,
+                                               src_addr,
+                                               src_blocks,
+                                               dst_blocks,
+                                               src_linear_state_ids,
+                                               dst_linear_state_ids);
+  }
   const bool base_success =
       LlmDataDistTransfer::pull_kv_blocks(src_cluster_id,
                                           src_addr,
@@ -78,16 +84,21 @@ bool SpecKVCacheTransfer::pull_kv_blocks(
        ++layer_id) {
     const auto& registered_caches = spec_layer_registered_caches_[layer_id];
     for (const RegisteredCache& registered_cache : registered_caches) {
+      const bool sequence_scoped = registered_cache.sequence_scoped;
+      const std::vector<uint64_t>& src_ids =
+          sequence_scoped ? src_linear_state_ids : src_blocks;
+      const std::vector<uint64_t>& dst_ids =
+          sequence_scoped ? dst_linear_state_ids : dst_blocks;
+      if (src_ids.empty() || dst_ids.empty()) {
+        continue;
+      }
       CacheIndex cache_index{src_cluster_id, registered_cache.cache.cache_id};
       KvCacheExtParam ext_param{};
       ext_param.src_layer_range = {0, 0};
       ext_param.dst_layer_range = {0, 0};
       ext_param.tensor_num_per_layer = 1;
-      auto ret = llm_data_dist_->PullKvBlocks(cache_index,
-                                              registered_cache.cache,
-                                              src_blocks,
-                                              dst_blocks,
-                                              ext_param);
+      auto ret = llm_data_dist_->PullKvBlocks(
+          cache_index, registered_cache.cache, src_ids, dst_ids, ext_param);
       if (ret != LLM_SUCCESS) {
         LOG(ERROR) << "Pull spec KvBlocks failed, layer = " << layer_id
                    << ", ret = " << std::hex << ret;

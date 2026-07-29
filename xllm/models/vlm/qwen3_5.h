@@ -17,6 +17,7 @@ limitations under the License.
 
 #include "core/framework/model/model_output.h"
 #include "core/layers/common/lm_head.h"
+#include "core/layers/common/rotary_embedding_util.h"
 #include "models/model_registry.h"
 #include "models/vlm/mposition/mposition.h"
 #include "models/vlm/qwen3_vl_base.h"
@@ -89,34 +90,7 @@ class Qwen3_5ModelImpl final
 
   std::pair<torch::Tensor, torch::Tensor> apply_mrope(
       const torch::Tensor positions) override {
-    auto target_cos_sin = cos_sin_.index({positions});
-    auto target_cos_sin_chunks = target_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
-    auto cos_pos = target_cos_sin_chunks[0].contiguous();
-    auto sin_pos = target_cos_sin_chunks[1].contiguous();
-    auto options = positions.options().dtype(torch::kLong);
-    auto apply = [this, options](torch::Tensor x) {
-      auto freqs_t = x[0].clone();
-      int64_t mrop_length = static_cast<int64_t>(freqs_t.size(-1) / 2);
-
-      for (int32_t dim_idx = 1; dim_idx <= 2; ++dim_idx) {
-        int64_t offset = dim_idx;
-        int64_t section_len = mrope_section_[dim_idx];
-        int64_t length = section_len * 3;
-
-        auto idx_first_half = torch::arange(offset, length, 3, options);
-        auto idx_second_half = torch::arange(
-            offset + mrop_length, length + mrop_length, 3, options);
-
-        auto idx_tensor =
-            torch::cat({idx_first_half, idx_second_half}, 0).to(x.device());
-        auto src = x[dim_idx].index_select(-1, idx_tensor);
-        freqs_t.index_copy_(-1, idx_tensor, src);
-      }
-      return freqs_t;
-    };
-    cos_pos = apply(cos_pos.reshape({positions.size(0), -1, cos_pos.size(-1)}));
-    sin_pos = apply(sin_pos.reshape({positions.size(0), -1, sin_pos.size(-1)}));
-    return std::make_pair(cos_pos, sin_pos);
+    return layer::rotary::apply_mrope(cos_sin_, positions, mrope_section_);
   }
 
   virtual ModelOutput forward(torch::Tensor tokens,
@@ -181,12 +155,12 @@ class Qwen3_5ModelImpl final
         layer::AttentionMetadataBuilder::build(params, /*enable_mla=*/false);
     // Init batch and token_block_offset for GDN attention
     if (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill) {
-      constexpr int32_t block_size = 8;
+      constexpr int32_t kBlockM = 64;
       constexpr int64_t pad_slot_id = -1;
       constexpr int64_t default_max_num_programs = 1024;
       constexpr int64_t chunk_size = 64;
       auto seqlens = attn_metadata.q_cu_seq_lens.diff();
-      auto nums = (seqlens + block_size - 1) / block_size;
+      auto nums = (seqlens + kBlockM - 1) / kBlockM;
       nums = nums.to(torch::kLong);
       int32_t tot = nums.sum().item<int32_t>();
       torch::Tensor range_batch = torch::arange(nums.size(0), nums.options());

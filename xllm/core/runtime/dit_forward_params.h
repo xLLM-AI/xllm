@@ -205,24 +205,25 @@ struct DiTForwardInput {
     }
 
     if (images.defined()) {
-      input.images = images.to(device, dtype);
+      input.images = images.to(device, /*dtype=*/torch::kUInt8);
     }
 
     if (mask_images.defined()) {
-      input.mask_images = mask_images.to(device, dtype);
+      input.mask_images = mask_images.to(device, /*dtype=*/torch::kUInt8);
     }
 
     for (auto& img : input.images_list) {
-      img = img.to(device, dtype);
+      img = img.to(device, /*dtype=*/torch::kUInt8);
     }
 
     if (control_image.defined()) {
-      input.control_image = control_image.to(device, dtype);
+      input.control_image = control_image.to(device, /*dtype=*/torch::kUInt8);
     }
 
     if (last_images.defined()) {
-      input.last_images = last_images.to(device, dtype);
+      input.last_images = last_images.to(device, /*dtype=*/torch::kUInt8);
     }
+
     if (prompt_audio.defined()) {
       input.prompt_audio = prompt_audio.to(device, torch::kFloat32);
     }
@@ -280,10 +281,14 @@ struct DiTForwardInput {
 // dit related forward output params
 struct DiTForwardOutput {
   void save_with_prefix(std::string prefix) const {
-    torch::save(tensors[0], prefix + "dit_images_cpp.pt");
+    if (!tensors.empty()) {
+      torch::save(tensors[0], prefix + "dit_images_cpp.pt");
+    }
   }
-  // generated tensor
+  // generated tensor (for image/audio models)
   std::vector<torch::Tensor> tensors;
+  // generated text (for text diffusion models like Cola-DLM)
+  std::vector<std::string> text_output;
 };
 
 }  // namespace xllm

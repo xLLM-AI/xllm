@@ -21,6 +21,7 @@ limitations under the License.
 #include <limits>
 
 #include "framework/model/model_input_params.h"
+#include "framework/sampling/sampling_params.h"
 #include "runtime/forward_params.h"
 #include "util/tensor_helper.h"
 
@@ -140,6 +141,27 @@ void fill_multi_block_table_slices(DecodeRowContext& ctx) {
 }
 
 }  // namespace
+
+MtpTopkStatePtr select_mtp_topk_state_for_next_step(
+    const MtpTopkStatePtr& state,
+    const SamplingParameters& sampling_params) {
+  if (state == nullptr || !sampling_params.selected_token_idxes.defined()) {
+    return state;
+  }
+  const torch::Tensor& selected_idxes = sampling_params.selected_token_idxes;
+  if (selected_idxes.numel() == 0 ||
+      state->num_rows() == selected_idxes.numel()) {
+    return state;
+  }
+  if (selected_idxes.device().is_cpu()) {
+    CHECK_GT(state->num_rows(), selected_idxes.max().item<int64_t>())
+        << "MTP selected top-k index exceeds top-k rows.";
+  }
+  torch::Tensor index =
+      selected_idxes.to(torch::dtype(torch::kLong).device(state->device()))
+          .contiguous();
+  return state->index_select_rows(index);
+}
 
 int32_t calc_slot_id(int32_t position,
                      const Slice<int32_t>& block_table_slice,

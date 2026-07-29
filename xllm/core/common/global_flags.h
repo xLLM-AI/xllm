@@ -43,10 +43,6 @@ DECLARE_string(python_model_path);
 
 DECLARE_string(task);
 
-DECLARE_string(devices);
-
-DECLARE_int32(device_id);
-
 DECLARE_int32(limit_image_per_prompt);
 
 DECLARE_string(mm_download_headers);
@@ -75,8 +71,6 @@ DECLARE_int32(max_tokens_per_chunk_for_prefill);
 
 // --- speculative inference config ---
 DECLARE_string(draft_model);
-
-DECLARE_string(draft_devices);
 
 DECLARE_int32(num_speculative_tokens);
 
@@ -215,7 +209,7 @@ DECLARE_int32(max_decode_token_per_sequence);
 
 DECLARE_string(priority_strategy);
 
-DECLARE_bool(use_mix_scheduler);
+DECLARE_bool(enable_mix_batch);
 
 DECLARE_bool(enable_online_preempt_offline);
 
@@ -402,6 +396,14 @@ DECLARE_bool(enable_split_rmsnorm_rope);
 DECLARE_bool(enable_aclnn_matmul);
 
 DECLARE_bool(enable_aclnn_swiglu);
+
+DECLARE_bool(enable_flashcomm1);
+
+DECLARE_int32(flashcomm1_min_prefill_tokens);
+
+DECLARE_bool(enable_mmrs_fusion);
+
+DECLARE_string(mmrs_comm_mode);
 #endif
 
 // --- chat template config ---

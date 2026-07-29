@@ -10,6 +10,7 @@ cc_library(
     qwen3_next_rms_norm.h
     deepseek_v4_rotary_embedding.h
     partial_rotary_embedding.h
+    ada_layer_norm.h
     rms_norm_gated.h
     rms_norm.h
     rotary_embedding.h
@@ -35,6 +36,7 @@ cc_library(
     qwen3_next_rms_norm.cpp
     deepseek_v4_rotary_embedding.cpp
     partial_rotary_embedding.cpp
+    ada_layer_norm.cpp
     rms_norm_gated.cpp
     rms_norm.cpp
     rotary_embedding.cpp
@@ -65,7 +67,7 @@ cc_library(
     torch
     :platform
     $<$<BOOL:${USE_MLU}>:mlu_layers>
-    $<$<BOOL:${USE_CUDA}>:cuda_layers>
+    $<$<AND:$<BOOL:${USE_CUDA}>,$<NOT:$<BOOL:${USE_MUSA}>>>:cuda_layers>
     $<$<BOOL:${USE_ILU}>:ilu_layers>
     $<$<BOOL:${USE_NPU}>:npu_torch_layers>
     $<$<BOOL:${USE_MUSA}>:musa_layers>

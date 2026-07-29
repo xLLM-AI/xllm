@@ -52,9 +52,21 @@ class Platform final {
 #endif
   }
 
-  // Temporary compatibility boundary for MLU CP. Remove this capability
-  // after MLU moves CP input preparation into WorkerImpl.
-  static constexpr bool uses_model_cp_partition() { return is_mlu(); }
+  // Performance preference between equivalent mRoPE implementations, not a
+  // statement of functional support.
+  static constexpr bool prefers_sliced_mrope() { return is_mlu(); }
+
+  // Model-side CP: shard after embed, gather+restore before LM head.
+  static constexpr bool uses_model_cp_sharding() {
+    return is_mlu() || is_npu();
+  }
+
+  // MLU can reuse DSA top-k results across layers without keeping an indexer
+  // cache for every layer. Other backends retain the legacy all-layer cache
+  // allocation until they implement the same cache-elision contract.
+  static constexpr bool supports_dsa_indexer_cache_elision() {
+    return is_mlu();
+  }
 
   static constexpr bool is_ilu() {
 #if defined(USE_ILU)
@@ -81,6 +93,9 @@ class Platform final {
   }
 
   static int32_t device_count();
+  // Returns the logical index of the device bound to the current thread.
+  // Valid only after the device has been set (e.g. via Device::set_device).
+  static int32_t current_device();
   static int32_t sm_count();
   static bool is_enable_pdl();
   static bool is_support_sm90a();

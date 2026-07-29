@@ -28,32 +28,29 @@ namespace xllm {
 namespace {
 
 BlockManager::Options make_linear_state_options(uint32_t num_slots,
-                                                int32_t kv_block_size,
-                                                int32_t chunk_stride) {
+                                                int32_t chunk_stride,
+                                                bool enable_prefix_cache) {
   BlockManager::Options options;
   options.num_blocks(num_slots);
-  // The slot pool is one id per slot; block_size carries the real KV block
-  // size so the checkpoint index can convert its KV-block budget into whole
-  // prefill chunks without the leaf holding a private copy.
-  options.block_size(kv_block_size);
-  options.enable_prefix_cache(true);
+  options.block_size(chunk_stride);
+  options.enable_prefix_cache(enable_prefix_cache);
   options.enable_disagg_pd(false);
   options.block_type(BlockType::LINEAR);
-  options.linear_chunk_stride(chunk_stride);
   return options;
 }
 
 }  // namespace
 
 LinearStateBlockManager::LinearStateBlockManager(uint32_t num_slots,
-                                                 int32_t kv_block_size,
-                                                 int32_t chunk_stride)
-    : BlockManagerImpl(
-          make_linear_state_options(num_slots, kv_block_size, chunk_stride)) {
+                                                 int32_t chunk_stride,
+                                                 bool enable_prefix_cache)
+    : BlockManagerImpl(make_linear_state_options(num_slots,
+                                                 chunk_stride,
+                                                 enable_prefix_cache)) {
   CHECK_GT(num_slots, 1u)
       << "linear-state leaf needs at least one usable slot (plus padding)";
-  CHECK_GT(kv_block_size, 0)
-      << "linear-state leaf needs the KV block size for safe-prefix clamping";
+  CHECK_GT(chunk_stride, 0)
+      << "linear-state leaf needs a positive chunk stride";
 }
 
 std::optional<std::vector<Block>>
@@ -76,9 +73,13 @@ LinearStateBlockManager::allocate_for_sequence(Sequence* seq,
   // never surface as an allocation failure, or the composite would roll back
   // the whole sequence.
   const std::optional<XXH3Key> pending_hash = seq->take_pending_linear_save();
-  const bool should_apply_save = pending_hash.has_value() &&
-                                 seq->has_linear_state_slot() &&
-                                 !prefix_cache_->contains(*pending_hash);
+  // When prefix cache is off (DECODE role for LINEAR) the checkpoint index
+  // is not constructed; skip save-rotation entirely. batch_input_builder
+  // still may set a pending hash from an earlier PREFILL role transition,
+  // so guard here instead of assuming pending_hash stays nullopt.
+  const bool should_apply_save =
+      prefix_cache_ != nullptr && pending_hash.has_value() &&
+      seq->has_linear_state_slot() && !prefix_cache_->contains(*pending_hash);
   Block new_live_slot = should_apply_save ? allocate() : Block();
   if (new_live_slot.is_valid()) {
     // Pin the warm slot into the checkpoint index (refcount+1) and mount a
@@ -132,33 +133,38 @@ std::vector<Block> LinearStateBlockManager::allocate_shared(
     const Slice<int32_t>& token_ids,
     const Slice<Block>& /*existed_shared_blocks*/,
     const MMData& /*mm_data*/,
-    const Slice<XXH3Key>& block_hashes,
-    size_t* matched_tokens) {
-  if (matched_tokens != nullptr) {
-    *matched_tokens = 0;
-  }
+    const Slice<XXH3Key>& block_hashes) {
   // Probe + mount through the base match virtual: prefix_cache_ is the
-  // LinearStatePrefixCache, whose override runs the chunk-strided probe over
-  // its own hash domain (chunk stride captured at construction from the
-  // scheduler config). |block_hashes| carries the sequence's precomputed
-  // chained per-chunk linear-state hashes
-  // (Sequence::update_linear_state_hashes), forwarded here so the probe
-  // consumes them instead of recomputing; the override writes the recoverable
-  // token length back through |matched_tokens| and returns the single deepest
-  // checkpoint (already pinned + LRU-promoted via find()). Linear thus travels
-  // the same allocate_shared verb as KV, and beneath it the same match verb --
-  // no downcast, plain virtual dispatch. The index is KV-blind; the composite
-  // owns the cross-leaf min + chunk alignment.
+  // LinearStatePrefixCache, whose gap-tolerant walk over the chunk-strided
+  // hash domain (chunk stride captured at construction from the scheduler
+  // config; block_size_ of this cache) returns a vector of shape
+  // `[hit_or_inv, ..., last_hit]` per chunk. |block_hashes| carries the
+  // sequence's precomputed chained per-chunk linear-state hashes
+  // (Sequence::update_linear_state_hashes) so the probe consumes them
+  // instead of recomputing; the composite picks the deepest valid slot out
+  // as the class-A restore source. Linear thus travels the same
+  // allocate_shared verb as KV, and beneath it the same match verb -- no
+  // downcast, plain virtual dispatch. The index is KV-blind; the composite
+  // owns the cross-leaf min + chunk alignment + deepest-pick.
   //
-  // One-block insight: the deepest checkpoint's cumulatively-compressed state
-  // subsumes every earlier hit, so match() returns at most one block. That
-  // block, when present, is the class-A restore source; the caller stashes it
-  // WITHOUT adding it to the sequence's live LINEAR slot vector.
-  return prefix_cache_->match(token_ids,
+  // Reserve one fresh token by slicing off the last input token before the
+  // probe. The forward must compute at least one token, so a checkpoint that
+  // sits exactly at token_ids.size() would leave zero tokens to run; slicing
+  // to size-1 makes match() naturally stop at the deepest chunk STRICTLY
+  // below the final token. This is LINEAR-specific -- it cannot be delegated
+  // to KV's own size-1 (the add_shared_blocks last-block pop): that pop lands
+  // on an arbitrary KV block boundary, whereas linear checkpoints exist only
+  // on sparse chunk boundaries. If reuse were clamped by KV's boundary the
+  // restore would look for a checkpoint that need not be there; on a miss the
+  // sequence cold-starts on a non-empty KV prefix and its recurrent state is
+  // corrupt.
+  if (token_ids.size() == 0 || prefix_cache_ == nullptr) {
+    return {};
+  }
+  return prefix_cache_->match(token_ids.slice(0, token_ids.size() - 1),
                               /*existed_shared_blocks=*/{},
                               MMData(),
-                              block_hashes,
-                              matched_tokens);
+                              block_hashes);
 }
 
 void LinearStateBlockManager::cache(const Slice<int32_t>& /*token_ids*/,

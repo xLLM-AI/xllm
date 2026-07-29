@@ -5,7 +5,7 @@ sidebar:
   order: 7
 ---
 
-在摩尔线程（Mthreads）MUSA GPU 上部署 xLLM 时使用 MUSA 设备后端（`--devices=musa:<id>`）。
+在摩尔线程（Mthreads）MUSA GPU 上部署 xLLM 时使用 MUSA 设备后端；通过 `MUSA_VISIBLE_DEVICES` 选择可见的设备卡。
 
 ## 镜像和容器启动命令
 
@@ -49,7 +49,6 @@ export MUSA_VISIBLE_DEVICES=0
 MODEL_PATH="/path/to/model/Qwen3.5-27B"
 MASTER_NODE_ADDR="127.0.0.1:9748"
 START_PORT=18000
-START_DEVICE=0
 LOG_DIR="log"
 NNODES=1
 
@@ -58,11 +57,9 @@ mkdir -p $LOG_DIR
 for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
   xllm \
     --model $MODEL_PATH \
-    --devices="musa:$DEVICE" \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \

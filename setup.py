@@ -48,6 +48,12 @@ BUILD_TEST_FILE: bool = True
 BUILD_EXPORT: bool = True
 
 
+def _ensure_torch_npu_ready() -> None:
+    from scripts.deps.torch_npu_install import ensure_torch_npu_ready
+
+    ensure_torch_npu_ready()
+
+
 def _ensure_tilelang_ascend_ready(target_platform: str, arch: str) -> None:
     compiler_parent = os.path.join(get_base_dir(), "xllm")
     if compiler_parent not in sys.path:
@@ -335,6 +341,20 @@ class ExtBuild(build_ext):
         elif self.device == "mlu":
             cmake_args += ["-DUSE_MLU=ON"]
             set_mlu_envs()
+        elif self.device == "musa":
+            torch_cuda_architectures = os.getenv("TORCH_CUDA_ARCH_LIST")
+            if not torch_cuda_architectures:
+                torch_cuda_architectures = "9.0"
+            cmake_args += [
+                "-DUSE_MUSA=ON",
+                "-DUSE_CUDA=ON",
+                f"-DTORCH_CUDA_ARCH_LIST={torch_cuda_architectures}",
+                "-DCMAKE_CUDA_ARCHITECTURES=90",
+                "-DBUILD_TESTING=OFF",
+            ]
+            set_musa_envs()
+            global BUILD_TEST_FILE
+            BUILD_TEST_FILE = False
         elif self.device == "cuda":
             torch_cuda_architectures = os.getenv("TORCH_CUDA_ARCH_LIST")
             if not torch_cuda_architectures:
@@ -400,11 +420,6 @@ class ExtBuild(build_ext):
         elif self.device == "ilu":
             cmake_args += ["-DUSE_ILU=ON"]
             set_ilu_envs()
-        elif self.device == "musa":
-            cmake_args += ["-DUSE_MUSA=ON"]
-            set_musa_envs()
-            global BUILD_TEST_FILE
-            BUILD_TEST_FILE = False
         else:
             raise ValueError("Please set --device to npu, mlu, cuda, dcu, ilu, musa or maca.")
 
@@ -913,6 +928,7 @@ if __name__ == "__main__":
     logger.info(f"🚀 Build xllm with CPU arch: {arch} and target device: {device}")
 
     if device == "npu":
+        _ensure_torch_npu_ready()
         _ensure_tilelang_ascend_ready(target_platform, arch)
     pre_build(device)
 

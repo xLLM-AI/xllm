@@ -178,7 +178,7 @@ from xllm.python.model_executor.runners.decode_cuda_graph import (
 device = torch.device("cuda")
 backend = SimpleNamespace(page_size=4, num_kv_blocks=6)
 runner = DecodeCudaGraphRunner(
-    torch.nn.Identity(), backend, max_batch=4, max_model_len=24
+    torch.nn.Identity(), backend, device, max_batch=4, max_model_len=24
 )
 metadata = SimpleNamespace(
     slot_mapping=torch.zeros(2, dtype=torch.int32, device=device),
@@ -220,6 +220,7 @@ TEST_F(XllmOpsTest, ModelExecutorUsesExplicitRuntimeBatchLimit) {
 
   py::exec(R"PY(
 import torch
+from unittest.mock import patch
 
 from xllm.python.layers.attention import Attention
 from xllm.python.model_executor import executor as executor_module
@@ -228,6 +229,23 @@ from xllm.python.model_executor import executor as executor_module
 class FakeBackend:
     def __init__(self, **kwargs):
         pass
+
+    def bind_kv_caches(self, kv_caches):
+        pass
+
+    def prepare(self, metadata, *, graph_mode=False):
+        pass
+
+    def execute(self, q, k, v, layer):
+        return q
+
+    @property
+    def num_kv_blocks(self):
+        return 0
+
+    @property
+    def page_size(self):
+        return 1
 
 
 class FakeModel(torch.nn.Module):
@@ -238,9 +256,7 @@ class FakeModel(torch.nn.Module):
         self.model = torch.nn.Identity()
 
 
-original_backend = executor_module.FlashInferBackend
-executor_module.FlashInferBackend = FakeBackend
-try:
+with patch.object(executor_module, "_create_attention_backend", return_value=FakeBackend()):
     model_executor = executor_module.ModelExecutor(
         FakeModel(),
         {
@@ -251,8 +267,6 @@ try:
         max_seqs_per_batch=3,
     )
     assert model_executor.decode_cuda_graph_runner.max_batch == 3
-finally:
-    executor_module.FlashInferBackend = original_backend
 )PY");
 }
 

@@ -39,11 +39,7 @@ class Options {
 
   PROPERTY(std::string, model_id);
 
-  PROPERTY(std::optional<std::string>, devices);
-
   PROPERTY(std::optional<std::string>, draft_model_path);
-
-  PROPERTY(std::optional<std::string>, draft_devices);
 
   // model backend
   PROPERTY(std::string, backend);
@@ -121,6 +117,15 @@ class Options {
   PROPERTY(std::string, npu_kernel_backend) = "AUTO";
 
   PROPERTY(bool, enable_chunked_prefill) = true;
+
+  // Flash Communication 1 (FC1) sequence-parallel optimization.
+  PROPERTY(bool, enable_flashcomm1) = false;
+
+  PROPERTY(int32_t, flashcomm1_min_prefill_tokens) = 8192;
+
+  PROPERTY(bool, enable_mmrs_fusion) = false;
+
+  PROPERTY(std::string, mmrs_comm_mode) = "aiv";
 
   PROPERTY(std::optional<std::string>, master_node_addr);
 

@@ -35,12 +35,21 @@ LmHeadLoader::LmHeadLoader(uint64_t weight_count,
 void LmHeadLoader::load_state_dict(const StateDict& state_dict) {
   const bool to_host = load_to_host();
   if (cp_size_ > 1 || dp_size_ > 1) {
+    // CP-unaware, DP-aware: shard the lm_head weight across the dp-local-TP
+    // group (world / dp_size = cp_size * tp_size), matching the LM_HEAD_TP
+    // comm group built by MappingNPU. Using the CP-local TP
+    // (dp_local_tp_size_, size tp) here would load the SAME shard on every CP
+    // rank and replicate the weight across CP. When cp_size == 1 this collapses
+    // to tp_size, so non-CP runs are unchanged.
+    const int32_t cp_unaware_tp_size = parallel_args_.world_size() / dp_size_;
+    const int32_t cp_unaware_tp_rank =
+        parallel_args_.rank() % cp_unaware_tp_size;
     set_weight_with_padding(state_dict,
                             "weight",
                             0,
                             0,
-                            dp_local_tp_rank_,
-                            dp_local_tp_size_,
+                            cp_unaware_tp_rank,
+                            cp_unaware_tp_size,
                             padded_vocab_size_,
                             to_host);
   } else if (parallel_args_.world_size() > 1) {

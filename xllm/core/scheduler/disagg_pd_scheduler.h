@@ -27,21 +27,21 @@ limitations under the License.
 #include "framework/request/request.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "runtime/xservice_client.h"
-#include "scheduler/chunked_prefill_scheduler.h"
+#include "scheduler/continuous_scheduler.h"
 #include "server/xllm_server_registry.h"
 #include "util/blockingconcurrentqueue.h"
 #include "util/threadpool.h"
 
 namespace xllm {
 
-class DisaggPDScheduler : public ChunkedPrefillScheduler {
+class DisaggPDScheduler : public ContinuousScheduler {
  public:
   DisaggPDScheduler(Engine* engine, const Options& options);
 
   virtual ~DisaggPDScheduler();
 
   virtual uint32_t get_waiting_requests_num() const override {
-    return waiting_priority_queue_->size();
+    return prefill_queue_->size();
   };
 
   void step(const absl::Duration& timeout) override;
@@ -74,7 +74,8 @@ class DisaggPDScheduler : public ChunkedPrefillScheduler {
       int32_t src_linear_state_id,
       int32_t src_dp_size,
       int32_t src_dp_rank,
-      torch::Tensor mtp_bootstrap_embedding = torch::Tensor());
+      torch::Tensor mtp_bootstrap_embedding = torch::Tensor(),
+      int32_t num_cached_tokens = 0);
 
   // decode allocate blocks with prefix cache.
   bool try_allocate(Sequence* sequence);

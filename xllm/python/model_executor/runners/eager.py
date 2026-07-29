@@ -32,5 +32,5 @@ class EagerRunner(BaseRunner):
         metadata: AttentionMetadata,
     ) -> torch.Tensor:
         self.attention_backend.prepare(metadata)
-        with forward_context(ForwardContext(self.attention_backend)):
+        with forward_context(ForwardContext(self.attention_backend, self.device)):
             return self.model(input_ids, positions)

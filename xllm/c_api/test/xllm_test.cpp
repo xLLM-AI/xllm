@@ -259,12 +259,10 @@ int main(int argc, char* argv[]) {
     XLLM_InitOptions init{};
     xllm_rec_init_options_default(&init);
     xllm_capi_test::ApplyGflagsToXllmInitOptions(&init);
-    if (!xllm_rec_initialize(rec_holder.get(),
-                             FLAGS_model_path.c_str(),
-                             FLAGS_devices.c_str(),
-                             &init)) {
-      LOG(ERROR) << "xllm_rec_initialize failed model_path=" << FLAGS_model_path
-                 << " devices=" << FLAGS_devices;
+    if (!xllm_rec_initialize(
+            rec_holder.get(), FLAGS_model_path.c_str(), &init)) {
+      LOG(ERROR) << "xllm_rec_initialize failed model_path="
+                 << FLAGS_model_path;
       return -4;
     }
     rec_ptr = rec_holder.get();
@@ -277,12 +275,10 @@ int main(int argc, char* argv[]) {
     XLLM_InitOptions init{};
     xllm_llm_init_options_default(&init);
     xllm_capi_test::ApplyGflagsToXllmInitOptions(&init);
-    if (!xllm_llm_initialize(llm_holder.get(),
-                             FLAGS_model_path.c_str(),
-                             FLAGS_devices.c_str(),
-                             &init)) {
-      LOG(ERROR) << "xllm_llm_initialize failed model_path=" << FLAGS_model_path
-                 << " devices=" << FLAGS_devices;
+    if (!xllm_llm_initialize(
+            llm_holder.get(), FLAGS_model_path.c_str(), &init)) {
+      LOG(ERROR) << "xllm_llm_initialize failed model_path="
+                 << FLAGS_model_path;
       return -6;
     }
     llm_ptr = llm_holder.get();

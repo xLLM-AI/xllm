@@ -24,6 +24,7 @@ limitations under the License.
 #include <memory>
 #include <string>
 
+#include "core/common/flash_comm1_context.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/framework/quant_args.h"
@@ -42,9 +43,8 @@ struct OptimizationConfig {
   bool enable_fused_indexer_qk = false;
 
   // Broadcast speculative-decoding sampling results across the TP consensus
-  // group so every rank adopts rank 0's accepted/draft tokens. Guards against
-  // per-rank RNG divergence crashing the draft decoder's TP all-reduce under
-  // enable_schedule_overlap.
+  // group so every rank adopts rank 0's accepted/draft tokens and avoids
+  // per-rank RNG divergence in the draft decoder's TP all-reduce.
   bool enable_spec_token_broadcast = false;
 
   // we can detailize this part later. for example:
@@ -82,6 +82,14 @@ class ModelContext {
     return optimization_config_;
   }
 
+  const FlashComm1Options& get_flash_comm1_options() const {
+    return flash_comm1_options_;
+  }
+
+  void set_flash_comm1_options(const FlashComm1Options& options) {
+    flash_comm1_options_ = options;
+  }
+
   ModelContext with_parallel_args(const ParallelArgs& parallel_args) const;
 
 #if defined(USE_NPU)
@@ -115,6 +123,7 @@ class ModelContext {
   ParallelArgs parallel_args_;
   torch::TensorOptions tensor_options_;
   OptimizationConfig optimization_config_;
+  FlashComm1Options flash_comm1_options_;
 
 #if defined(USE_NPU)
   // used for npu atb

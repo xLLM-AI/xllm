@@ -30,22 +30,17 @@ class BlockManagerPool : public KVCacheManager {
     PROPERTY(uint32_t, num_blocks) = 0;
     PROPERTY(uint32_t, host_num_blocks) = 0;
     PROPERTY(int32_t, block_size) = 0;
-    // Sizes the SINGLE-resource pool (max concurrent live sequences); consumed
-    // by the num_single_blocks derivation. The engine/worker wiring PR migrates
-    // this to the max_seqs_per_batch-based sizing (and adapts the tests).
-    PROPERTY(uint32_t, max_concurrent_requests) = 0;
     PROPERTY(bool, enable_linear_state) = false;
     // Total physical linear-state slots [0, N) for the unified slot pool
     // (= num_linear_state_blocks). Only used when enable_linear_state is true.
     PROPERTY(int32_t, linear_state_num_slots) = 0;
-    // Linear-state checkpoint stride in tokens (one prefill chunk), forwarded
-    // to the LINEAR leaf so its checkpoint index probes the correct hash
-    // domain. Only used when enable_linear_state is true; -1 disables the
-    // probe.
-    PROPERTY(int32_t, linear_chunk_stride) = -1;
     PROPERTY(bool, enable_prefix_cache) = true;
     PROPERTY(bool, enable_disagg_pd) = false;
     PROPERTY(bool, enable_kvcache_store) = false;
+    // Host prefix-cache offload (host_blocks_factor > 1). Wraps composite
+    // leaves in ConcurrentBlockManagerImpl so the async D2H offload callback
+    // can free blocks off-thread safely.
+    PROPERTY(bool, enable_host_offload) = false;
     PROPERTY(bool, enable_xtensor) = false;
     PROPERTY(int64_t, num_layers) = 0;  // Required when enable_xtensor is true
     PROPERTY(int64_t, slot_size) = 0;   // Memory size per slot (for xtensor)
@@ -64,6 +59,11 @@ class BlockManagerPool : public KVCacheManager {
     PROPERTY(BlockHasherType, hasher_type) = BlockHasherType::TEXT;
     PROPERTY(uint32_t, num_single_blocks) = 0;
     PROPERTY(uint32_t, num_speculative_tokens) = 0;
+    // Role flag: true on the DECODE side of disaggregated PD. Forwarded to
+    // BlockManager::Options for every composite leaf; the leaf's prefix
+    // cache participation goes through the shared predicate (see
+    // composite_block_manager.cpp::leaf_participates_in_prefix_cache).
+    PROPERTY(bool, instance_is_decode) = false;
   };
 
   explicit BlockManagerPool(const Options& options, int32_t dp_size = 1);

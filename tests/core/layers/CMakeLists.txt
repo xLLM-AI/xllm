@@ -1,3 +1,29 @@
+include(cc_test)
+
+# Backend-independent DSA sharing policy. Keep this target outside platform
+# subdirectories so CUDA, MLU, NPU, and DCU test builds all register it.
+cc_test(
+  NAME
+    dsa_topk_share_plan_test
+  SRCS
+    dsa_topk_share_plan_test.cpp
+  DEPS
+    GTest::gtest_main
+    glog::glog
+)
+
+cc_test(
+  NAME
+    rotary_embedding_util_test
+  SRCS
+    rotary_embedding_util_test.cpp
+  DEPS
+    :common_layers
+    glog::glog
+    torch
+    GTest::gtest_main
+)
+
 if(USE_CUDA)
   add_subdirectory(cuda)
 endif()

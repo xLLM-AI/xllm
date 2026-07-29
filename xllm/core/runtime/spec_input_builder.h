@@ -21,12 +21,14 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/framework/model/mtp_topk_state.h"
 #include "util/slice.h"
 
 namespace xllm {
 
 struct ModelInputParams;
 struct ForwardInput;
+struct SamplingParameters;
 
 namespace specBuilder {
 
@@ -164,6 +166,12 @@ void set_token_position_tensors(ForwardInput& input,
                                 const std::vector<int32_t>& positions,
                                 const torch::TensorOptions& token_options,
                                 const torch::TensorOptions& position_options);
+
+// Reuses the NPU MTP draft-step row-selection flow for every backend. Backend
+// state implementations only interpret index_select_rows() for their payload.
+MtpTopkStatePtr select_mtp_topk_state_for_next_step(
+    const MtpTopkStatePtr& state,
+    const SamplingParameters& sampling_params);
 
 namespace draftProbs {
 

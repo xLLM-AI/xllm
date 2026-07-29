@@ -38,6 +38,7 @@ from xllm.python.layers import (
     RotaryEmbedding,
     RowParallelLinear,
 )
+from xllm.python.model_executor.forward_context import get_forward_context
 from xllm.python.models.base import PyModelBase
 
 
@@ -176,13 +177,6 @@ class Qwen3Attention(nn.Module):
         self.k_norm = RMSNorm(
             self.head_dim, cfg.rms_norm_eps, dtype=dtype, device=device
         )
-        self.rotary = RotaryEmbedding(
-            self.head_dim,
-            cfg.max_position_embeddings,
-            cfg.rope_theta,
-            dtype=dtype,
-            device=device,
-        )
         self.attn = Attention(
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
@@ -196,10 +190,13 @@ class Qwen3Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        cos: torch.Tensor | None,
+        sin: torch.Tensor | None,
     ) -> torch.Tensor:
         qkv = self.qkv_proj(hidden)
 
-        qkv = ops.fused_qk_norm_rope(
+        q, k, v = ops.fused_qk_norm_rope(
             qkv,
             num_heads_q=self.num_heads,
             num_heads_k=self.num_kv_heads,
@@ -208,12 +205,11 @@ class Qwen3Attention(nn.Module):
             eps=self.q_norm.eps,
             q_weight=self.q_norm.weight,
             k_weight=self.k_norm.weight,
-            cos_sin_cache=self.rotary.cos_sin_cache,
+            cos_sin_cache=cos_sin_cache,
             position_ids=positions,
+            cos=cos,
+            sin=sin,
         )
-        q = qkv[:, : self.q_size]
-        k = qkv[:, self.q_size : self.q_size + self.kv_size]
-        v = qkv[:, self.q_size + self.kv_size :]
 
         attn_out = self.attn(q, k, v)
         return self.o_proj(attn_out)
@@ -243,6 +239,9 @@ class Qwen3DecoderLayer(nn.Module):
         hidden: torch.Tensor,
         residual: Optional[torch.Tensor],
         positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        cos: torch.Tensor | None,
+        sin: torch.Tensor | None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden
@@ -251,7 +250,7 @@ class Qwen3DecoderLayer(nn.Module):
             hidden, residual = self.input_layernorm(hidden, residual)
 
         hidden = self.self_attn(
-            positions, hidden
+            positions, hidden, cos_sin_cache, cos, sin
         )
 
         hidden, residual = self.post_attention_layernorm(hidden, residual)
@@ -268,6 +267,13 @@ class Qwen3Model(nn.Module):
         assert cfg.hidden_size % tp == 0
         self.embed_tokens = HiddenParallelEmbedding(
             cfg.vocab_size, cfg.hidden_size // tp, tp, dtype=dtype, device=device
+        )
+        self.rotary = RotaryEmbedding(
+            cfg.head_dim,
+            cfg.max_position_embeddings,
+            cfg.rope_theta,
+            dtype=dtype,
+            device=device,
         )
         self.layers = nn.ModuleList(
             [
@@ -291,9 +297,14 @@ class Qwen3Model(nn.Module):
         # (its output lives in the graph memory pool), so replay re-casts the
         # updated static_positions correctly.
         positions = positions.to(torch.int64).contiguous()
+        cos, sin = None, None
+        if get_forward_context().device.type in ("npu", "privateuseone"):
+            cos, sin = self.rotary(positions)
         residual: Optional[torch.Tensor] = None
         for layer in self.layers:
-            hidden, residual = layer(hidden, residual, positions)
+            hidden, residual = layer(
+                hidden, residual, positions, self.rotary.cos_sin_cache, cos, sin
+            )
         hidden, _ = self.norm(hidden, residual)
         return hidden
 

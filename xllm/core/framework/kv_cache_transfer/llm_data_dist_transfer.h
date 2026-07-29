@@ -25,6 +25,8 @@ using namespace llm_datadist;
 
 struct RegisteredCache {
   KVCacheTensorRole role;
+  int32_t group_id;
+  bool sequence_scoped;
   Cache cache;
 };
 
@@ -34,7 +36,6 @@ class LlmDataDistTransfer : public KVCacheTransfer {
  public:
   LlmDataDistTransfer(const uint16_t listen_port,
                       const InstanceRole& instance_role,
-                      const std::string& model_type = "",
                       bool enable_lighting_indexer = false);
   virtual ~LlmDataDistTransfer() = default;
 
@@ -99,7 +100,7 @@ class LlmDataDistTransfer : public KVCacheTransfer {
   uint16_t listen_port_;
   bool enable_mla_ = false;
   bool enable_lighting_indexer_ = false;
-  std::string model_type_;
+  bool has_grouped_cache_layout_ = false;
   LlmRole role_ = LlmRole::kMix;
   std::unordered_set<uint64_t> linked_cluster_ids;
 

@@ -86,12 +86,12 @@ Qwen3_5DecoderLayerImpl::Qwen3_5DecoderLayerImpl(const ModelContext& context,
 
   input_norm_ = register_module(
       "input_layernorm",
-      Qwen3NextRMSNorm(
+      Qwen3NextRMSNormMlu(
           model_args.hidden_size(), model_args.rms_norm_eps(), options));
 
   post_norm_ = register_module(
       "post_attention_layernorm",
-      Qwen3NextRMSNorm(
+      Qwen3NextRMSNormMlu(
           model_args.hidden_size(), model_args.rms_norm_eps(), options));
 
   if (use_moe) {
@@ -134,6 +134,13 @@ void Qwen3_5DecoderLayerImpl::load_state_dict(const StateDict& state_dict) {
   }
 }
 
+void Qwen3_5DecoderLayerImpl::verify_loaded_weights(
+    const std::string& prefix) const {
+  if (linear_attention_) {
+    linear_attention_->verify_loaded_weights(prefix + "linear_attn.");
+  }
+}
+
 torch::Tensor Qwen3_5DecoderLayerImpl::run_moe(
     torch::Tensor x,
     const ModelInputParams& input_params) {
@@ -148,7 +155,7 @@ torch::Tensor Qwen3_5DecoderLayerImpl::run_moe(
 }
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>>
-Qwen3_5DecoderLayerImpl::apply_norm(Qwen3NextRMSNorm& norm,
+Qwen3_5DecoderLayerImpl::apply_norm(Qwen3NextRMSNormMlu& norm,
                                     torch::Tensor& input,
                                     std::optional<torch::Tensor>& residual) {
   if (!residual.has_value()) {
@@ -156,12 +163,7 @@ Qwen3_5DecoderLayerImpl::apply_norm(Qwen3NextRMSNorm& norm,
     auto output = std::get<0>(norm->forward(input));
     return {output, new_residual};
   }
-  auto orig_dtype = input.dtype();
-  input = input + residual.value();
-  auto new_residual = input;
-  input = input.to(orig_dtype);
-  auto output = std::get<0>(norm->forward(input));
-  return {output, new_residual};
+  return norm->forward(input, residual);
 }
 
 torch::Tensor Qwen3_5DecoderLayerImpl::forward(
@@ -170,7 +172,11 @@ torch::Tensor Qwen3_5DecoderLayerImpl::forward(
     torch::Tensor& positions,
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
-    const ModelInputParams& input_params) {
+    const ModelInputParams& input_params,
+    const torch::Tensor& mrope_cos_sin) {
+  // MLU attention/GDN does not use the mrope split; accept the argument to
+  // satisfy the hybrid interface and discard it.
+  (void)mrope_cos_sin;
   // Pre-attention norm
   std::tie(x, residual) = apply_norm(input_norm_, x, residual);
 

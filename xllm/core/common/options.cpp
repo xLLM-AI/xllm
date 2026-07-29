@@ -20,9 +20,7 @@ std::string Options::to_string() const {
   std::stringstream ss;
   ss << "Options: [";
   ss << "model_path: " << model_path()
-     << ", devices: " << devices().value_or("null")
      << ", draft_model_path: " << draft_model_path().value_or("null")
-     << ", draft_devices: " << draft_devices().value_or("null")
      << ", backend: " << backend()
      << ", limit_image_per_prompt: " << limit_image_per_prompt()
      << ", block_size: " << block_size()
@@ -56,7 +54,10 @@ std::string Options::to_string() const {
      << ", expert_parallel_degree: " << expert_parallel_degree().value_or(0)
      << ", task_type: " << task_type() << ", enable_mla: " << enable_mla()
      << ", enable_chunked_prefill: " << enable_chunked_prefill()
-     << ", cp_size: " << cp_size()
+     << ", enable_flashcomm1: " << enable_flashcomm1()
+     << ", flashcomm1_min_prefill_tokens: " << flashcomm1_min_prefill_tokens()
+     << ", enable_mmrs_fusion: " << enable_mmrs_fusion()
+     << ", mmrs_comm_mode: " << mmrs_comm_mode() << ", cp_size: " << cp_size()
      << ", master_node_addr: " << master_node_addr().value_or("null")
      << ", instance_role: " << instance_role().to_string()
      << ", transfer_listen_port: " << transfer_listen_port()

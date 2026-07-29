@@ -292,7 +292,7 @@ Sequence::Sequence(const Sequence& other)
       num_tokens_(other.num_tokens_),
       token_to_count_map_(other.token_to_count_map_),
       num_prompt_tokens_(other.num_prompt_tokens_),
-      block_hashes_(other.block_hashes_),
+      block_hashes_by_stride_(other.block_hashes_by_stride_),
       hash_block_size_(other.hash_block_size_),
       linear_state_hashes_(other.linear_state_hashes_),
       linear_hash_stride_(other.linear_hash_stride_),
@@ -398,7 +398,8 @@ void Sequence::update_last_step_token(const Token& token, size_t token_offset) {
     // This happens when the sequence was preempted during schedule_request(),
     // causing its KV cache to be deallocated (reset), but it's still in
     // last_batch_ being processed by update_last_step_result().
-    if (kv_state_.num_blocks(BlockType::KV) == 0) {
+    // Composite KV managers can have capacity without exposing local blocks.
+    if (kv_state_.current_max_tokens_capacity() == 0) {
       return;
     }
     kv_state_.incr_kv_cache_tokens_num(1);
@@ -753,27 +754,44 @@ void Sequence::add_shared_host_blocks(BlockType type,
   host_kv_state_.add_shared_blocks(type, std::move(blocks), num_tokens_);
 }
 
+Slice<XXH3Key> Sequence::block_hashes() const {
+  const auto it = block_hashes_by_stride_.find(hash_block_size_);
+  if (it == block_hashes_by_stride_.end()) {
+    return {};
+  }
+  return it->second;
+}
+
 void Sequence::update_block_hashes(uint32_t block_size,
                                    BlockHasherType hasher_type) {
   if (block_size == 0) {
     return;
   }
+  // DSV4 admission probes SWA / C4 / C128 back-to-back with different strides
+  // (base / 4*base / 128*base). Each stride keeps its own chain in
+  // `block_hashes_by_stride_`, so switching strides extends that stride's chain
+  // incrementally instead of discarding and rebuilding the whole prompt chain
+  // every probe. Select this stride as the one block_hashes() returns.
   hash_block_size_ = block_size;
   extend_prefix_hashes(hasher_type,
                        mm_data_,
                        this->tokens(),
                        block_size,
                        /*boundary_blocks=*/num_tokens_ / block_size,
-                       block_hashes_);
+                       block_hashes_by_stride_[block_size]);
 }
 
 void Sequence::invalidate_block_hashes_from(size_t token_index) {
-  if (block_hashes_.empty() || hash_block_size_ == 0) {
-    return;
-  }
-  const size_t first_stale_block = token_index / hash_block_size_;
-  if (first_stale_block < block_hashes_.size()) {
-    block_hashes_.resize(first_stale_block);
+  // Truncate every stride's chain at the first block the rewrite touched; each
+  // stride recomputes lazily on its next update_block_hashes().
+  for (auto& [block_size, hashes] : block_hashes_by_stride_) {
+    if (hashes.empty() || block_size == 0) {
+      continue;
+    }
+    const size_t first_stale_block = token_index / block_size;
+    if (first_stale_block < hashes.size()) {
+      hashes.resize(first_stale_block);
+    }
   }
 }
 
@@ -783,10 +801,17 @@ void Sequence::update_linear_state_hashes(uint32_t chunk_stride) {
   }
   linear_hash_stride_ = chunk_stride;
   // Cover only whole chunks; the trailing partial chunk carries no checkpoint.
-  // Linear-state checkpoints are text-only today: even under a VLM the mounted
-  // ops are dropped before forward (vlm_engine drops unresolved linear ops), so
-  // TEXT keeps this hash domain aligned with what can actually be restored.
-  extend_prefix_hashes(BlockHasherType::TEXT,
+  // Fold multimodal content into the chunk digest whenever this sequence
+  // carries it, so a linear-state checkpoint keyed on a chunk that spans image
+  // tokens cannot collide with a text-only chunk (or a different image) at the
+  // same token boundary. The digest is chosen from mm_data_ rather than an
+  // engine-bound type because the linear hash is only ever computed here, in
+  // the sequence's own context, where mm_data_ is in hand -- and with an empty
+  // mm_data_ the MM hasher is byte-identical to TEXT, so text-only sequences
+  // are unaffected.
+  const BlockHasherType hasher_type =
+      mm_data_.valid() ? BlockHasherType::MM : BlockHasherType::TEXT;
+  extend_prefix_hashes(hasher_type,
                        mm_data_,
                        this->tokens(),
                        chunk_stride,

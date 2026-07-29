@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/platform/device.h"
+#include "core/platform/platform.h"
 #include "core/util/slice.h"
 
 namespace xllm {
@@ -365,6 +366,104 @@ torch::Tensor get_concat_rotary_embedding(int64_t dim,
                                           double rope_theta,
                                           const torch::TensorOptions& options) {
   return compute_rotary_embedding(dim, seq_len, rope_theta, options, true);
+}
+
+namespace {
+
+// Preserve Qwen3.5's interleaved THWTHW... layout with step-3 slice
+// assignment. This avoids temporary index tensors and some contiguous copies,
+// which can be faster on backends with efficient slice assignment.
+std::pair<torch::Tensor, torch::Tensor> apply_sliced_mrope(
+    const torch::Tensor& cos_sin_cache,
+    const torch::Tensor& positions,
+    const std::vector<int64_t>& mrope_section) {
+  torch::Tensor target_cos_sin = cos_sin_cache.index({positions});
+  std::vector<torch::Tensor> target_cos_sin_chunks =
+      target_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
+  auto apply = [&](const torch::Tensor& values) {
+    torch::Tensor freqs = values[0].clone();
+    int64_t half_rotary_dim = freqs.size(-1) / 2;
+
+    for (int32_t axis = 1; axis <= 2; ++axis) {
+      int64_t section_len = mrope_section[axis];
+      if (section_len == 0) {
+        continue;
+      }
+      int64_t slice_end = section_len * 3;
+      freqs.index_put_({torch::indexing::Ellipsis,
+                        torch::indexing::Slice(axis, slice_end, /*step=*/3)},
+                       values[axis].index({torch::indexing::Ellipsis,
+                                           torch::indexing::Slice(
+                                               axis, slice_end, /*step=*/3)}));
+      freqs.index_put_({torch::indexing::Ellipsis,
+                        torch::indexing::Slice(axis + half_rotary_dim,
+                                               slice_end + half_rotary_dim,
+                                               /*step=*/3)},
+                       values[axis].index(
+                           {torch::indexing::Ellipsis,
+                            torch::indexing::Slice(axis + half_rotary_dim,
+                                                   slice_end + half_rotary_dim,
+                                                   /*step=*/3)}));
+    }
+    return freqs;
+  };
+  return std::make_pair(apply(target_cos_sin_chunks[0]),
+                        apply(target_cos_sin_chunks[1]));
+}
+
+std::pair<torch::Tensor, torch::Tensor> apply_indexed_mrope(
+    const torch::Tensor& cos_sin_cache,
+    const torch::Tensor& positions,
+    const std::vector<int64_t>& mrope_section) {
+  torch::Tensor target_cos_sin = cos_sin_cache.index({positions});
+  std::vector<torch::Tensor> target_cos_sin_chunks =
+      target_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
+  torch::Tensor cos_pos = target_cos_sin_chunks[0].contiguous();
+  torch::Tensor sin_pos = target_cos_sin_chunks[1].contiguous();
+  torch::TensorOptions index_options = positions.options().dtype(torch::kLong);
+  auto apply = [&](const torch::Tensor& values) {
+    torch::Tensor freqs = values[0].clone();
+    int64_t half_rotary_dim = freqs.size(-1) / 2;
+
+    for (int32_t axis = 1; axis <= 2; ++axis) {
+      int64_t section_len = mrope_section[axis];
+      if (section_len == 0) {
+        continue;
+      }
+      int64_t slice_end = section_len * 3;
+
+      torch::Tensor idx_first_half =
+          torch::arange(axis, slice_end, 3, index_options);
+      torch::Tensor idx_second_half = torch::arange(axis + half_rotary_dim,
+                                                    slice_end + half_rotary_dim,
+                                                    3,
+                                                    index_options);
+      torch::Tensor idx_tensor =
+          torch::cat({idx_first_half, idx_second_half}, 0).to(values.device());
+      torch::Tensor src = values[axis].index_select(-1, idx_tensor);
+      freqs.index_copy_(-1, idx_tensor, src);
+    }
+    return freqs;
+  };
+  cos_pos = apply(cos_pos);
+  sin_pos = apply(sin_pos);
+  return std::make_pair(cos_pos, sin_pos);
+}
+
+}  // namespace
+
+std::pair<torch::Tensor, torch::Tensor> apply_mrope(
+    const torch::Tensor& cos_sin_cache,
+    const torch::Tensor& positions,
+    const std::vector<int64_t>& mrope_section) {
+  torch::Tensor mrope_positions = positions;
+  if (positions.dim() == 1) {
+    mrope_positions = positions.expand({3, -1});
+  }
+  if (Platform::prefers_sliced_mrope()) {
+    return apply_sliced_mrope(cos_sin_cache, mrope_positions, mrope_section);
+  }
+  return apply_indexed_mrope(cos_sin_cache, mrope_positions, mrope_section);
 }
 
 #if defined(USE_MUSA)

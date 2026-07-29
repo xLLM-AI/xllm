@@ -26,6 +26,7 @@ limitations under the License.
 #include <utility>
 
 #include "common/metrics.h"
+#include "core/framework/config/speculative_config.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
@@ -48,17 +49,18 @@ Worker::Worker(const ParallelArgs& parallel_args,
                const runtime::Options& options,
                WorkerType worker_type) {
   if (options.enable_speculative_decode()) {
-    auto algo = options.speculative_algorithm();
-    LOG(INFO) << "Speculative decode is enabled, algorithm: " << algo;
-    if (algo == "Eagle3") {
+    const std::string& algorithm = options.speculative_algorithm();
+    LOG(INFO) << "Speculative decode is enabled, algorithm: " << algorithm;
+    if (algorithm == "Eagle3") {
       impl_ = new Eagle3WorkerImpl(parallel_args, device, options);
-    } else if (algo == "DFlash") {
+    } else if (algorithm == "DFlash") {
       impl_ = new DFlashWorkerImpl(parallel_args, device, options);
-    } else if (algo == "Suffix") {
+    } else if (algorithm == "Suffix") {
       impl_ = new SuffixWorkerImpl(parallel_args, device, options);
-    } else {
-      // Default: MTP
+    } else if (SpeculativeConfig::is_mtp_algorithm(algorithm)) {
       impl_ = new MTPWorkerImpl(parallel_args, device, options);
+    } else {
+      LOG(FATAL) << "Unsupported speculative decoding algorithm: " << algorithm;
     }
   } else if (worker_type == WorkerType::LLM) {
     impl_ = new LLMWorkerImpl(parallel_args, device, options);

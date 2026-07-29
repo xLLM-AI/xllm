@@ -49,6 +49,9 @@ class KVCacheShape final {
   bool has_index_cache_scale_shape() const;
   bool has_conv_cache_shape() const;
   bool has_ssm_cache_shape() const;
+  bool has_grouped_cache_layout() const {
+    return shape_kind_ == ShapeKind::GROUPED_POOL;
+  }
 
   void print_shapes() const;
 
@@ -58,7 +61,7 @@ class KVCacheShape final {
  private:
   enum class ShapeKind : int8_t {
     NORMAL = 0,
-    DSV4_POOL = 1,
+    GROUPED_POOL = 1,
   };
 
   void init_dsv4_pool_shape(const KVCacheCapacity& kv_cache_cap);

@@ -19,6 +19,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -38,7 +39,9 @@ limitations under the License.
 #endif
 #endif
 
+#include "framework/block/block.h"
 #include "framework/kv_cache/kv_cache_capacity.h"
+#include "framework/kv_cache/kv_cache_tensor_allocator.h"
 #include "framework/kv_cache/kv_cache_tensor_role.h"
 
 namespace xllm {
@@ -51,6 +54,7 @@ struct KVCacheCreateOptions {
   PROPERTY(torch::ScalarType, dtype) = torch::kBFloat16;
   // ssm dtype for linear attention layers
   PROPERTY(torch::ScalarType, ssm_dtype) = torch::kBFloat16;
+  PROPERTY(double, host_blocks_factor) = 0.0;
   PROPERTY(int64_t, num_layers) = 0;
   // full attention interval for linear attention layers
   PROPERTY(int64_t, full_attention_interval) = 1;
@@ -63,8 +67,11 @@ struct KVCacheCreateOptions {
   PROPERTY(bool, enable_sleep_mode) = false;
   PROPERTY(bool, enable_linear_attention) = false;
   PROPERTY(bool, enable_lighting_indexer) = false;
+  // Empty keeps the legacy all-layer behavior. Otherwise each entry controls
+  // whether that layer owns indexer cache tensors.
+  PROPERTY(std::vector<bool>, indexer_cache_enabled_layers);
   PROPERTY(bool, enable_kv_cache_quant) = false;
-  PROPERTY(bool, enable_raw_device_allocator) = false;
+  PROPERTY(std::shared_ptr<KVCacheTensorAllocator>, tensor_allocator);
 #if defined(USE_NPU)
   PROPERTY(bool, enable_kv_cache_huge_page_allocator) = false;
 #endif
@@ -105,6 +112,23 @@ struct LinearAttentionKVCacheTensors {
 struct KVCacheTensor {
   KVCacheTensorRole role;
   torch::Tensor tensor;
+  int32_t group_id = cache_group_id(BlockType::KV);
+  bool sequence_scoped = false;
+};
+
+using BlockTypeTensorMap = std::map<KVCacheTensorRole::Value, torch::Tensor>;
+
+struct HostPageAlignedRegion {
+  void* base_ptr = nullptr;
+  size_t total_bytes = 0;
+
+  HostPageAlignedRegion() = default;
+  explicit HostPageAlignedRegion(size_t bytes);
+  HostPageAlignedRegion(const HostPageAlignedRegion&) = delete;
+  HostPageAlignedRegion& operator=(const HostPageAlignedRegion&) = delete;
+  HostPageAlignedRegion(HostPageAlignedRegion&& other) noexcept;
+  HostPageAlignedRegion& operator=(HostPageAlignedRegion&& other) noexcept;
+  ~HostPageAlignedRegion();
 };
 
 struct DeepSeekV4KVCacheTensors {
@@ -120,6 +144,7 @@ struct DeepSeekV4KVCacheTensors {
   torch::Tensor compress_state;
   torch::Tensor compress_index_state;
 #endif
+  BlockType compressed_block_type = BlockType::KV;
 };
 
 // for qwen3.5
@@ -145,8 +170,38 @@ LinearAttentionKVCacheTensors create_linear_attention_kv_cache_tensors(
     const KVCacheShape& kv_cache_shape,
     const KVCacheCreateOptions& create_options);
 
+// Scale a device block count to the host block count using host_blocks_factor
+// (clamped to >= 1.0 so the host pool is never smaller than the device pool).
+int64_t scale_host_block_count(int64_t block_count, double host_blocks_factor);
+
+// Build a host tensor shape from a per-layer device shape by scaling dim 0
+// (block count) by host_blocks_factor.
+std::vector<int64_t> build_host_tensor_shape(
+    const std::vector<int64_t>& base_shape,
+    double host_blocks_factor);
+
+// Build a grouped host tensor shape: scales dim 0 then inserts a layer
+// dimension at index 1, yielding [host_blocks, layer_count, ...per_block_dims].
+std::vector<int64_t> build_host_group_tensor_shape(
+    const std::vector<int64_t>& base_shape,
+    double host_blocks_factor,
+    int64_t layer_count);
+
+// Allocate a page-aligned, mlock'd (and NPU-registered) host tensor over a
+// HostPageAlignedRegion. The region owns the memory; the tensor is a view.
+void create_host_page_aligned_tensor(const std::vector<int64_t>& dims,
+                                     torch::ScalarType dtype,
+                                     torch::Tensor* tensor,
+                                     HostPageAlignedRegion* region);
+
 #if defined(USE_NPU)
 aclFormat get_npu_kv_cache_format(const std::string& model_type);
+
+// Allocate an NPU tensor from the huge-page device allocator. The returned
+// tensor owns the ACL allocation and carries the requested NPU format.
+torch::Tensor alloc_npu_huge_page_tensor(const std::vector<int64_t>& dims,
+                                         torch::ScalarType dtype,
+                                         aclFormat format);
 #endif
 
 }  // namespace xllm

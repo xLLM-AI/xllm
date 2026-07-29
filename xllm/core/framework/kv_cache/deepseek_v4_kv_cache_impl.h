@@ -50,6 +50,10 @@ class Dsv4StateCache final {
 class DeepSeekV4KVCacheImpl final : public KVCacheImpl {
  public:
   explicit DeepSeekV4KVCacheImpl(const DeepSeekV4KVCacheTensors& tensors);
+  DeepSeekV4KVCacheImpl(const KVCacheShape& kv_cache_shape,
+                        const KVCacheCreateOptions& create_options,
+                        BlockType type,
+                        int64_t layer_count);
 
   torch::Tensor get_k_cache() const override;
   torch::Tensor get_index_cache() const override;
@@ -61,6 +65,9 @@ class DeepSeekV4KVCacheImpl final : public KVCacheImpl {
   torch::Tensor get_compress_index_score_state() const override;
   torch::Tensor get_compress_state() const override;
   torch::Tensor get_compress_index_state() const override;
+  std::vector<KVCacheTensor> get_cache_tensors() const override;
+
+  BlockTypeTensorMap get_block_type_tensors(BlockType type) const override;
 
   bool empty() const override;
 
@@ -76,6 +83,7 @@ class DeepSeekV4KVCacheImpl final : public KVCacheImpl {
   torch::Tensor swa_cache_;
   Dsv4StateCache compress_state_;
   Dsv4StateCache index_state_;
+  BlockType compressed_block_type_ = BlockType::KV;
 };
 
 DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(

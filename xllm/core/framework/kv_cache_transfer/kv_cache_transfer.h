@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "common/types.h"
 #include "framework/kv_cache/kv_cache.h"
+#include "framework/kv_cache/kv_cache_tensor_allocator.h"
 #if defined(USE_NPU)
 #include "platform/npu/npu_layer_synchronizer.h"
 #endif
@@ -42,15 +43,7 @@ using KVPushSynchronizerImpl = MLULayerSynchronizerImpl;
 using KVPushSynchronizerImpl = DCULayerSynchronizerImpl;
 #endif
 
-// In KV-split mode, filters and remaps remote_blocks_ids so that each KV-split
-// rank only sees the remote blocks assigned to it. When `kv_split_size == 1`
-// the caller should skip this entirely (every rank holds the full KV replica
-// and `remote_blocks_ids` is 1:1 with `local_blocks_ids`).
-//
-// Note: prior to the KV-split / CP decoupling refactor this was named
-// filter_cp_kv_infos and gated on cp_size>1. The behavior is identical when
-// kv_split_size == cp_size (the legacy default), so callers that pass cp_rank
-// / cp_size keep working byte-for-byte.
+// Filter/remap remote_blocks_ids for one kv-split rank (skip when size==1).
 std::vector<TransferKVInfo> filter_kv_split_infos(
     int32_t kv_split_rank,
     int32_t kv_split_size,
@@ -69,6 +62,9 @@ class KVCacheTransfer {
     // XTensor mode: destination offsets from D-node (per-layer)
     // dst_xtensor_layer_offsets[layer_id] = {k_offsets, v_offsets}
     std::vector<XTensorLayerOffsets> dst_xtensor_layer_offsets;
+
+    // Group-aware block mappings keyed by cache-layout group id.
+    std::vector<KVBlockTransferGroup> block_transfer_groups;
   };
 
   static std::vector<std::string> rotate_dst_rank(
@@ -172,8 +168,10 @@ class KVCacheTransfer {
 
 class KVCacheTransferFactory {
  public:
-  using AllocateKVCacheFunc =
-      std::function<bool(const KVCacheShape&, bool use_huge_page_allocator)>;
+  using AllocateKVCacheFunc = std::function<bool(
+      const KVCacheShape&,
+      bool use_huge_page_allocator,
+      std::shared_ptr<KVCacheTensorAllocator> tensor_allocator)>;
 
   static std::shared_ptr<KVCacheTransfer> create(
       const std::string& transfer_type,

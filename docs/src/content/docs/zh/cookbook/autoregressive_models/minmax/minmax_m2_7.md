@@ -167,20 +167,17 @@ MASTER_NODE_ADDR="10.143.3.204:10015"
 LOCAL_HOST="10.143.3.204"
 # Service Port
 START_PORT=18994
-START_DEVICE=0
 LOG_DIR="logs"
 NNODES=16
 
 for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
   nohup numactl -C $((i*40))-$((i*40+39)) $XLLM_PATH \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
-    --devices="npu:$DEVICE" \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --node_rank=$i \

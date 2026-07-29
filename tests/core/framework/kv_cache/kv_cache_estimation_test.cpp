@@ -60,6 +60,18 @@ TEST(KVCacheEstimationTest, EstimatesStandardAttentionBlocks) {
   EXPECT_EQ(capacity.n_blocks(), 128);
 }
 
+TEST(KVCacheEstimationTest, IgnoresLinearStateSlotsWithoutLinearAttention) {
+  ModelArgs model_args = make_standard_args();
+  KVCacheEstimateOptions options = make_estimate_options();
+  options.max_linear_state_cache_slots = 32;
+
+  KVCacheCapacity capacity = estimate_kv_cache_capacity(model_args, options);
+
+  EXPECT_EQ(capacity.num_linear_attention_layers(), 0);
+  EXPECT_EQ(capacity.num_linear_state_blocks(), 2);
+  EXPECT_EQ(capacity.linear_cache_size_in_bytes(), 0);
+}
+
 TEST(KVCacheEstimationTest, UserIndexerCacheDtypeDirectlyControlsQuantization) {
   ModelArgs model_args = make_standard_args();
   model_args.model_type("unsupported_model")
@@ -81,6 +93,23 @@ TEST(KVCacheEstimationTest, UserIndexerCacheDtypeDirectlyControlsQuantization) {
 }
 
 #if defined(USE_MLU)
+TEST(KVCacheEstimationTest, SharedDsaLayersDoNotConsumeIndexerCacheBudget) {
+  ModelArgs model_args = make_standard_args();
+  model_args.model_type("glm_moe_dsa")
+      .index_n_heads(1)
+      .index_head_dim(16)
+      .index_topk(8)
+      .index_topk_pattern("FSFS");
+  KVCacheEstimateOptions options = make_estimate_options();
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  EXPECT_EQ(capacity.num_full_attention_layers(), 4);
+  EXPECT_EQ(capacity.num_indexer_layers(), 2);
+  EXPECT_EQ(capacity.n_blocks(), 113);
+}
+
 TEST(KVCacheEstimationTest,
      RdmaScalePaddingReducesCapacityToLargestAllocatableBlockCount) {
   ModelArgs model_args = make_standard_args();

@@ -59,7 +59,6 @@ LLM::~LLM() {
 }
 
 bool LLM::Initialize(const std::string& model_path,
-                     const std::string& devices,
                      const XLLM_InitLLMOptions& init_options) {
   if (!init_options.log_dir.empty()) {
     InitGlog(init_options.log_dir);
@@ -74,9 +73,7 @@ bool LLM::Initialize(const std::string& model_path,
     Options options;
     options.model_path(model_path)
         .task_type(init_options.task)
-        .devices(devices)
         .draft_model_path(init_options.draft_model)
-        .draft_devices(init_options.draft_devices)
         .backend("llm")
         .block_size(init_options.block_size)
         .max_cache_size(init_options.max_cache_size)

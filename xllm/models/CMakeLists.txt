@@ -32,6 +32,7 @@ cc_library(
     :dit_cache
     :model_loader
     :layers
+    util
     $<$<BOOL:${USE_NPU}>:npu_layers>
     $<$<BOOL:${USE_CUDA}>:cuda_kernels>
     torch_python

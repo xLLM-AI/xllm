@@ -19,6 +19,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/framework/model/mtp_utils.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/request/incremental_decoder.h"
@@ -126,7 +127,7 @@ TEST(GraphWarmupTest, InjectsBootstrapEmbeddingWhenSpeculativeEnabled) {
   Sequence sequence = make_sequence(/*index=*/0, /*tokens=*/{1, 2, 3});
 
   prepare_warmup_decode_sequence(&sequence,
-                                 /*hidden_size=*/128,
+                                 /*embedding_width=*/128,
                                  /*num_speculative_tokens=*/3);
 
   const torch::Tensor embedding = sequence.get_mtp_bootstrap_embedding();
@@ -136,11 +137,29 @@ TEST(GraphWarmupTest, InjectsBootstrapEmbeddingWhenSpeculativeEnabled) {
   EXPECT_EQ(embedding.size(1), 128);
 }
 
+TEST(GraphWarmupTest, DeepseekV4MtpUsesFlattenedHyperConnectionWidth) {
+  ModelArgs model_args;
+  model_args.model_type() = "deepseek_v4_mtp";
+  model_args.hidden_size() = 128;
+  model_args.hc_mult() = 4;
+
+  EXPECT_EQ(mtp_hidden_state_width(model_args), 512);
+}
+
+TEST(GraphWarmupTest, OtherMtpModelsUseDenseHiddenWidth) {
+  ModelArgs model_args;
+  model_args.model_type() = "deepseek_v32_mtp";
+  model_args.hidden_size() = 128;
+  model_args.hc_mult() = 4;
+
+  EXPECT_EQ(mtp_hidden_state_width(model_args), 128);
+}
+
 TEST(GraphWarmupTest, SkipsBootstrapEmbeddingWhenSpeculativeDisabled) {
   Sequence sequence = make_sequence(/*index=*/0, /*tokens=*/{1, 2, 3});
 
   prepare_warmup_decode_sequence(&sequence,
-                                 /*hidden_size=*/128,
+                                 /*embedding_width=*/128,
                                  /*num_speculative_tokens=*/0);
 
   EXPECT_FALSE(sequence.get_mtp_bootstrap_embedding().defined());

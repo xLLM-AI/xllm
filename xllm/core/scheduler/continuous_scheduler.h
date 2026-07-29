@@ -22,6 +22,7 @@ limitations under the License.
 #include <atomic>
 #include <condition_variable>
 #include <limits>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -43,6 +44,32 @@ limitations under the License.
 namespace xllm {
 class Engine;
 class RequestPriorityQueue;
+class SchedulerPolicy;
+struct SchedulerState;
+
+// BatchMode captures the scheduling policy configuration.
+// The concrete SchedulerPolicy subclass is selected based on these fields:
+//   - enable_mix_batch=false → PrefillFirstPolicy (exclusive batch)
+//   - enable_mix_batch=true + priority_strategy!="multi_slo_and_prio" →
+//   DecodeFirstPolicy
+//   - enable_mix_batch=true + priority_strategy=="multi_slo_and_prio" →
+//   UnifiedPolicy
+//
+// Mapping from old scheduler classes:
+//   {false, false, "fcfs"}              → PrefillFirstPolicy (original
+//   ContinuousScheduler) {true,  true,  "fcfs"}              →
+//   DecodeFirstPolicy  (original ChunkedPrefillScheduler) {false, true, "fcfs"}
+//   → PrefillFirstPolicy (original PrefillOnlyScheduler) {true,  true,
+//   "multi_slo_and_prio"}   → UnifiedPolicy      (original MixScheduler)
+struct BatchMode {
+  bool enable_mix_batch = false;
+  bool enable_chunked_prefill = false;
+  // "fcfs": first-come-first-served
+  // "multi_slo_and_prio": multi-priority multi-SLO aware scheduling (ProSched)
+  // "priority": static priority weight
+  // "deadline": earliest-deadline-first
+  std::string priority_strategy = "fcfs";
+};
 
 class CancelRequestQueue final {
  public:
@@ -167,8 +194,7 @@ class ContinuousScheduler : public Scheduler {
   }
 
   uint32_t get_waiting_requests_num() const override {
-    return waiting_priority_queue_->size() +
-           waiting_priority_queue_offline_->size();
+    return prefill_queue_->size() + chunk_queue_->size();
   }
 
   // for test only
@@ -181,11 +207,11 @@ class ContinuousScheduler : public Scheduler {
   }
   std::vector<std::shared_ptr<Request>> get_waiting_requests() {
     std::vector<std::shared_ptr<Request>> result;
-    if (waiting_priority_queue_ == nullptr) {
+    if (prefill_queue_ == nullptr) {
       return result;
     }
 
-    auto copied_waiting_queue = waiting_priority_queue_->clone();
+    auto copied_waiting_queue = prefill_queue_->clone();
     result.reserve(copied_waiting_queue->size());
     while (!copied_waiting_queue->empty()) {
       result.emplace_back(copied_waiting_queue->top());
@@ -252,14 +278,20 @@ class ContinuousScheduler : public Scheduler {
   // ABORT mode: cancel all running requests; they are not rescheduled.
   void abort_all_running_requests();
 
+ protected:
   void clear_mtp_bootstrap(Request* request);
 
- protected:
-  // Rounds a per-step wall-clock latency to an amortized per-token latency,
   // i.e. round(tbt_ms / num_tokens). num_tokens must be > 0.
   static int64_t amortized_token_latency_ms(int64_t tbt_ms, size_t num_tokens);
 
   const Options options_;
+
+  // BatchMode resolved from options/global config (subsumes old scheduler
+  // hierarchy selection).
+  BatchMode batch_mode_;
+
+  // Policy object that encapsulates all batch-assembly logic.
+  std::unique_ptr<SchedulerPolicy> policy_;
 
   // the engine to run the batch
   Engine* engine_;
@@ -293,95 +325,38 @@ class ContinuousScheduler : public Scheduler {
   std::unique_ptr<ProfileManager> profile_manager_;
 
   bool enable_prefix_cache_ = false;
-
-  // Cached once at construction (mirrors enable_prefix_cache_): the model's
-  // layer set is immutable, so the hot scheduling path must not re-scan
-  // layer_types() with std::any_of on every allocate.
   bool has_linear_attention_layers_ = false;
-
   bool enable_in_batch_prefix_cache_ = false;
 
   // the number of requests that are waiting to be scheduled
   std::atomic<size_t> pending_requests_{0};
 
-  // keep all new requests, generally speaking, they do not have any kv cache.
-  std::unique_ptr<RequestPriorityQueue> waiting_priority_queue_;
-  std::unique_ptr<RequestPriorityQueue> waiting_priority_queue_offline_;
+  // Prefill queue: holds new prefill requests (kv_cache_tokens_num == 0).
+  std::unique_ptr<RequestPriorityQueue> prefill_queue_;
 
-  // keep all running request from high priority to low.
-  // NOTE: Maybe not all requests are scheduled in one step,
-  // this is decided by the kv blocks usage.
-  // This contain all decoding requests and requests that have been
-  // popped from waiting_priority_queue_ but remain in prefill stage,
-  // these requests have already allocated some kv caches,
-  // so they can be preemeted in scheduler.
+  // Chunk queue: chunked prefill continuations (has partial KV cache,
+  // can be preempted to free blocks when decode needs memory).
+  std::unique_ptr<RequestPriorityQueue> chunk_queue_;
 
   // is last step handle prefill requests
   bool last_step_prefill_ = false;
 
-  // std::deque<std::shared_ptr<Request>> running_queue_;
-  // std::deque<std::shared_ptr<Request>> running_queue_offline_;
-  std::unique_ptr<RequestPriorityQueue> running_queue_;
-  std::unique_ptr<RequestPriorityQueue> running_queue_offline_;
+  // Decode queue: holds all decode-stage requests.
+  std::unique_ptr<RequestPriorityQueue> decode_queue_;
+
+  // Unified queue: used by UnifiedPolicy only (all requests in one queue).
+  std::list<std::shared_ptr<Request>> unified_queue_;
 
   InstanceInfo instance_info_;
 
   int32_t min_speculative_tokens_required_ = 0;
 
-  virtual void handle_prefill_requests(
-      double& latency_budget,
-      double& estimate_latency,
-      size_t& remaining_token_budget,
-      size_t& remaining_seq_budget,
-      RequestPriorityQueue* waiting_priority_queue,
-      size_t& num_online_prefill_preempt_offline_requests,
-      std::vector<std::shared_ptr<Request>>& finished_requests);
-  virtual void handle_decode_requests(
-      double& latency_budget,
-      double& estimate_latency,
-      size_t& remaining_token_budget,
-      size_t& remaining_seq_budget,
-      size_t& num_offline_decode_preempt_offline_requests,
-      size_t& num_online_decode_preempt_online_requests,
-      size_t& num_online_decode_preempt_offline_requests,
-      RequestPriorityQueue* running_queue);
-  void get_latency_budget_and_request_order(
-      RequestPriorityQueue* request_priority_queue,
-      double& latency_budget,
-      bool for_prefill);
-
-  void handle_abnormal_request(
-      RequestPriorityQueue* running_queue,
-      const std::vector<Sequence*>& candidate_sequences,
-      const std::vector<size_t>& candidate_token_budgets,
-      const size_t& allocated_tokens,
-      const size_t& allocated_seqs,
-      double& allocated_estimate_latency,
-      size_t& remaining_token_budget,
-      size_t& remaining_seq_budget,
-      double& estimate_latency,
-      bool budget_exhausted,
-      bool block_exhausted);
-  void handle_running_requests(std::shared_ptr<Request> request);
-
-  bool check_if_enough_to_evict(RequestPriorityQueue* running_queue_to_evict,
-                                Sequence* prefill_sequence,
-                                size_t max_handle_num_tokens,
-                                size_t& num_request_to_evict);
-
-  // Publish the full prefill blocks admitted in this scheduling step into the
-  // prefix cache, so later requests in the same batch can share them.
-  void cache_in_batch_prefix(
-      const std::vector<Sequence*>& sequences,
-      const std::vector<size_t>& current_step_token_budgets);
-
   // build a batch of requests from the priority queue
   virtual std::vector<Batch> prepare_batch();
 
   virtual bool if_queue_not_empty() {
-    return !waiting_priority_queue_->empty() || !running_queue_->empty() ||
-           !waiting_priority_queue_offline_->empty() ||
-           !running_queue_offline_->empty();
+    return !prefill_queue_->empty() || !chunk_queue_->empty() ||
+           !decode_queue_->empty() || !unified_queue_.empty();
   }
 
   // tokenizer
@@ -406,6 +381,9 @@ class ContinuousScheduler : public Scheduler {
   std::condition_variable pause_cv_;
 
  private:
+  // Construct a SchedulerState snapshot for the policy.
+  SchedulerState make_state();
+
   void apply_cancel_requests();
 
   std::vector<Batch> schedule_request(const absl::Duration& timeout);
@@ -428,8 +406,11 @@ class ContinuousScheduler : public Scheduler {
   std::vector<int64_t> get_active_activation_in_bytes();
   void update_memory_metrics(std::vector<Sequence*>& sequences);
 
-  void create_waiting_queue(const Options& options);
-  void create_running_queue(const Options& options);
+  void create_queues(const Options& options);
 };
+
+// Resolves the BatchMode from the scheduler options and global configs.
+// Maps the old scheduler-selection logic (factory) to a BatchMode value.
+BatchMode resolve_batch_mode(const ContinuousScheduler::Options& options);
 
 }  // namespace xllm

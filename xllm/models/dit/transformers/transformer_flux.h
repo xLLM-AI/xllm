@@ -902,7 +902,8 @@ TORCH_MODULE(AdaLayerNormZeroSingle);
 
 class AdaLayerNormContinuousImpl : public torch::nn::Module {
  public:
-  explicit AdaLayerNormContinuousImpl(ModelContext context)
+  explicit AdaLayerNormContinuousImpl(ModelContext context,
+                                      bool with_bias = true)
       : options_(context.get_tensor_options()) {
     ModelArgs model_args = context.get_model_args();
     auto num_attention_heads = model_args.n_heads();
@@ -913,7 +914,7 @@ class AdaLayerNormContinuousImpl : public torch::nn::Module {
     linear_ = register_module("linear",
                               layer::AddMatmul(conditioning_embedding_dim,
                                                2 * embedding_dim,
-                                               /*with_bias=*/true,
+                                               /*with_bias=*/with_bias,
                                                options_));
     norm_ = register_module(
         "norm",

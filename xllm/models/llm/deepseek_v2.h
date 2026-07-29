@@ -17,6 +17,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -32,8 +33,24 @@ limitations under the License.
 namespace xllm {
 
 class DeepseekV2ModelImpl : public torch::nn::Module {
+ protected:
+  using DecoderLayerFactory =
+      std::function<layer::DeepseekV2DecoderLayer(const ModelContext&,
+                                                  int32_t)>;
+
+  static DecoderLayerFactory default_decoder_layer_factory() {
+    return [](const ModelContext& context, int32_t layer_id) {
+      return layer::DeepseekV2DecoderLayer(context, layer_id);
+    };
+  }
+
  public:
-  DeepseekV2ModelImpl(const ModelContext& context)
+  explicit DeepseekV2ModelImpl(const ModelContext& context)
+      : DeepseekV2ModelImpl(context, default_decoder_layer_factory()) {}
+
+ protected:
+  DeepseekV2ModelImpl(const ModelContext& context,
+                      const DecoderLayerFactory& decoder_layer_factory)
       : model_args_(context.get_model_args()),
         device_(context.get_tensor_options().device()) {
     auto options = context.get_tensor_options();
@@ -55,7 +72,7 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
 
     // create decoder layers
     for (int32_t i = 0; i < model_args_.n_layers(); ++i) {
-      auto block = layer::DeepseekV2DecoderLayer(context, i);
+      auto block = decoder_layer_factory(context, i);
       layers_.push_back(block);
       blocks_->push_back(block);
     }
@@ -70,6 +87,7 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     }
   }
 
+ public:
   ModelOutput forward_native(torch::Tensor tokens,
                              torch::Tensor positions,
                              std::vector<KVCache>& kv_caches,
@@ -96,24 +114,13 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     auto& attn_metadata = *(modified_input_params.attn_metadata);
     torch::Tensor hidden_states = embed_tokens_(tokens);
     std::optional<torch::Tensor> residual;
-    for (size_t i = 0; i < layers_.size(); i++) {
-      // NOTE: we will remove this until refactor flashinfer API
-#if defined(USE_CUDA) || defined(USE_MUSA)
-      attn_metadata.plan_info->layer_id = i;
-#endif
-      auto& layer = layers_[i];
-      prepare_decoder_layer_for_forward(i, layer, attn_metadata);
-
-      hidden_states = layer(hidden_states,
+    if (!run_decoder_layers(hidden_states,
                             residual,
                             positions,
                             attn_metadata,
-                            kv_caches[i],
-                            modified_input_params);
-      if (!modified_input_params.record_layer(static_cast<uint32_t>(i),
-                                              hidden_states.device())) {
-        return ModelOutput();
-      }
+                            kv_caches,
+                            modified_input_params)) {
+      return ModelOutput();
     }
     auto [h, res] = norm_(hidden_states, residual);
     return ModelOutput(h, res);
@@ -157,9 +164,56 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
       layer::DeepseekV2DecoderLayer& /*layer*/,
       const layer::AttentionMetadata& /*attn_metadata*/) {}
 
-  layer::WordEmbedding& embed_mod() { return embed_tokens_; }
+  // Single extension point for the per-layer invocation so subclasses can
+  // attach model-specific per-layer plumbing (e.g. GLM5.2 DSA cross-layer
+  // top-k sharing in glm52.h) without forking the whole forward loop.
+  virtual torch::Tensor forward_decoder_layer(
+      size_t layer_id,
+      layer::DeepseekV2DecoderLayer& layer,
+      torch::Tensor& hidden_states,
+      std::optional<torch::Tensor>& residual,
+      torch::Tensor& positions,
+      layer::AttentionMetadata& attn_metadata,
+      KVCache& kv_cache,
+      const ModelInputParams& input_params) {
+    return layer(hidden_states,
+                 residual,
+                 positions,
+                 attn_metadata,
+                 kv_cache,
+                 input_params);
+  }
 
-  std::vector<layer::DeepseekV2DecoderLayer>& layers_ref() { return layers_; }
+  bool run_decoder_layers(torch::Tensor& hidden_states,
+                          std::optional<torch::Tensor>& residual,
+                          torch::Tensor& positions,
+                          layer::AttentionMetadata& attn_metadata,
+                          std::vector<KVCache>& kv_caches,
+                          const ModelInputParams& input_params) {
+    for (size_t i = 0; i < layers_.size(); ++i) {
+      // NOTE: we will remove this until refactor flashinfer API
+#if defined(USE_CUDA) || defined(USE_MUSA)
+      attn_metadata.plan_info->layer_id = i;
+#endif
+      layer::DeepseekV2DecoderLayer& decoder_layer = layers_[i];
+      prepare_decoder_layer_for_forward(i, decoder_layer, attn_metadata);
+      hidden_states = forward_decoder_layer(i,
+                                            decoder_layer,
+                                            hidden_states,
+                                            residual,
+                                            positions,
+                                            attn_metadata,
+                                            kv_caches[i],
+                                            input_params);
+      if (!input_params.record_layer(static_cast<uint32_t>(i),
+                                     hidden_states.device())) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  layer::WordEmbedding& embed_mod() { return embed_tokens_; }
 
   layer::RMSNorm& norm_mod() { return norm_; }
 
