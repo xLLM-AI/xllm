@@ -52,7 +52,8 @@ class DisaggPDConfig final {
          "instance_role",
          "kv_cache_transfer_type",
          "kv_cache_transfer_mode",
-         "transfer_listen_port"}};
+         "transfer_listen_port",
+         "enable_pd_parallel_shard_pull"}};
     return kOptionCategory;
   }
 
@@ -71,6 +72,8 @@ class DisaggPDConfig final {
   PROPERTY(int32_t, transfer_listen_port) = 26000;
 
   PROPERTY(bool, kv_push_dst_rotate) = false;
+
+  PROPERTY(bool, enable_pd_parallel_shard_pull) = true;
 };
 
 }  // namespace xllm

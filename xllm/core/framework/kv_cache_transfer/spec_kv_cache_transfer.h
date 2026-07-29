@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <mutex>
+
 #include "framework/kv_cache_transfer/llm_data_dist_transfer.h"
 #include "framework/parallel_state/parallel_args.h"
 
@@ -96,6 +98,36 @@ class SpecKVCacheTransfer : public LlmDataDistTransfer {
       int64_t source_shard_count);
 
  private:
+  bool pull_and_merge_sharded_caches(
+      const LayerRegisteredCaches& layer_registered_caches,
+      const LayerRegisteredCaches& staging_registered_caches,
+      const std::vector<uint64_t>& src_cluster_ids,
+      const std::vector<uint64_t>& src_blocks,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids,
+      const std::vector<uint64_t>& dst_linear_state_ids);
+
+  bool merge_pre_pushed_sharded_caches(
+      const LayerRegisteredCaches& layer_registered_caches,
+      const LayerRegisteredCaches& staging_registered_caches,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& dst_linear_state_ids,
+      int64_t source_shard_count);
+
+  bool push_layer_registered_caches_to_staging(
+      const LayerRegisteredCaches& layer_registered_caches,
+      const LayerRegisteredCaches& staging_registered_caches,
+      std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
+      std::shared_ptr<NPULayerSynchronizerImpl>& layer_synchronizer,
+      int64_t source_shard_rank,
+      int64_t source_shard_count);
+
+  void register_hetero_staging_caches(
+      const LayerRegisteredCaches& source_registered_caches,
+      LayerRegisteredCaches& staging_registered_caches,
+      int64_t source_shard_count,
+      bool source_is_sharded);
+
   bool pull_replicated_spec_kv_blocks(uint64_t src_cluster_id,
                                       const std::vector<uint64_t>& src_blocks,
                                       const std::vector<uint64_t>& dst_blocks);
@@ -104,6 +136,14 @@ class SpecKVCacheTransfer : public LlmDataDistTransfer {
   LayerRegisteredCaches hetero_staging_registered_caches_;
   LayerRegisteredCaches spec_hetero_staging_registered_caches_;
   LayerRegisteredCaches spec_layer_registered_caches_;
+  bool parallel_shard_pull_ = true;
+  // Staging tensors are shared by all heterogeneous requests. Keep the full
+  // restore transaction serialized until request-scoped staging slots exist.
+  std::mutex hetero_restore_mutex_;
+  ThreadPool shard_pull_threadpool_{
+      /*num_threads=*/1,
+      /*cpu_binding=*/false,
+      /*pool_name=*/"SpecKVCacheTransfer.shard_pull"};
 };
 
 }  // namespace xllm

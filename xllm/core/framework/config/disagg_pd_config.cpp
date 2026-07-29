@@ -55,6 +55,10 @@ DEFINE_bool(kv_push_dst_rotate,
             "Rotate the dst-worker traversal order in push_kv_blocks per "
             "KV-split rank to spread incast across D workers.");
 
+DEFINE_bool(enable_pd_parallel_shard_pull,
+            true,
+            "Pull heterogeneous source TP shards in parallel on Decode.");
+
 namespace xllm {
 namespace {
 
@@ -73,6 +77,7 @@ void DisaggPDConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_transfer_mode);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(transfer_listen_port);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_push_dst_rotate);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_pd_parallel_shard_pull);
 }
 
 void DisaggPDConfig::from_json(const JsonReader& json) {
@@ -83,6 +88,7 @@ void DisaggPDConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_transfer_type);
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_transfer_mode);
   XLLM_CONFIG_ASSIGN_FROM_JSON(transfer_listen_port);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_pd_parallel_shard_pull);
 }
 
 void DisaggPDConfig::append_config_json(
@@ -102,6 +108,8 @@ void DisaggPDConfig::append_config_json(
       config_json, default_config, kv_cache_transfer_mode);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, transfer_listen_port);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_pd_parallel_shard_pull);
 }
 
 DisaggPDConfig& DisaggPDConfig::get_instance() {
