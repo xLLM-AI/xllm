@@ -396,6 +396,14 @@ DECLARE_bool(enable_split_rmsnorm_rope);
 DECLARE_bool(enable_aclnn_matmul);
 
 DECLARE_bool(enable_aclnn_swiglu);
+
+DECLARE_bool(enable_flashcomm1);
+
+DECLARE_int32(flashcomm1_min_prefill_tokens);
+
+DECLARE_bool(enable_mmrs_fusion);
+
+DECLARE_string(mmrs_comm_mode);
 #endif
 
 // --- chat template config ---

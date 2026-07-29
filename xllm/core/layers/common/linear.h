@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include "common/flash_comm1_context.h"
 #include "core/framework/model_context.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/quant_args.h"
@@ -259,6 +260,8 @@ class RowParallelLinearImpl : public torch::nn::Module {
 
   torch::Tensor forward(torch::Tensor input);
 
+  torch::Tensor forward(torch::Tensor input, RowParallelReduceMode reduce_mode);
+
   // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict);
 
@@ -283,6 +286,11 @@ class RowParallelLinearImpl : public torch::nn::Module {
   ProcessGroup* process_group() const { return process_group_; }
 
  private:
+  torch::Tensor forward_impl(torch::Tensor input,
+                             RowParallelReduceMode reduce_mode);
+
+  torch::Tensor mmrs_weight_transposed() const;
+
   // parameter members, must be registered
   // we allocate the transpose since linear performs XA^T.
   // A^T: [out_features, in_features_per_partition]
@@ -325,6 +333,7 @@ class RowParallelLinearImpl : public torch::nn::Module {
   at::ScalarType output_dtype_;
   LinearExtraArgs linear_extra_args_;
   std::optional<std::string> resolved_weight_quant_method_;
+  mutable torch::Tensor mmrs_weight_t_;
 };
 TORCH_MODULE(RowParallelLinear);
 

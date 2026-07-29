@@ -27,6 +27,7 @@ limitations under the License.
 #include "common/interruption_bus.h"
 #include "common/macros.h"
 #include "core/distributed_runtime/pd_ooc_service.h"
+#include "core/framework/block/block.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "disagg_pd.pb.h"
@@ -1481,17 +1482,67 @@ void PDOOCScheduler::dispatch_requests() {
         for (auto& sequence : requests[i]->sequences()) {
           TransferKVInfo info;
           info.request_id = requests[i]->request_id();
-          for (auto& bid : resps.resps()[i].blocks_ids()) {
-            info.remote_blocks_ids.emplace_back(bid);
+          const auto& resp = resps.resps()[i];
+          const bool has_grouped_cache = resp.kv_block_groups_size() > 0;
+          if (has_grouped_cache) {
+            for (const auto& resp_group : resp.kv_block_groups()) {
+              KVBlockTransferGroup group;
+              group.group_id = resp_group.group_id();
+              group.remote_shared_num = resp_group.remote_shared_num();
+              group.remote_blocks_ids.reserve(resp_group.block_ids_size());
+              for (const int32_t block_id : resp_group.block_ids()) {
+                group.remote_blocks_ids.emplace_back(
+                    static_cast<uint64_t>(block_id));
+              }
+              info.block_transfer_groups.emplace_back(std::move(group));
+            }
+          } else {
+            for (const int32_t block_id : resp.blocks_ids()) {
+              info.remote_blocks_ids.emplace_back(
+                  static_cast<uint64_t>(block_id));
+            }
+            info.remote_shared_num = resp.remote_shared_num();
           }
-          if (resps.resps()[i].linear_state_id() >= 0) {
-            info.remote_linear_state_ids.emplace_back(
-                resps.resps()[i].linear_state_id());
+          if (resp.linear_state_id() >= 0) {
+            info.remote_linear_state_ids.emplace_back(resp.linear_state_id());
           }
-          info.dp_rank = resps.resps()[i].dp_rank();
+          if (!has_grouped_cache) {
+            const size_t prompt_blocks =
+                (requests[i]->state().prompt_tokens.size() +
+                 kv_cache_manager_->block_size() - 1) /
+                kv_cache_manager_->block_size();
+            info.local_blocks_ids.resize(prompt_blocks);
+          }
+          info.dp_rank = resp.dp_rank();
           // TODO: remote_instances_info_ is not multi-thread safe.
           info.remote_instance_info = remote_instances_info_[selected_instance];
           sequence->kv_state().set_transfer_kv_info(std::move(info));
+
+          // Compress per-group transfer cursors to the D-side shared count.
+          // Monotonic max; no-op when a group's remote_shared_num is 0.
+          const auto& groups =
+              sequence->kv_state().transfer_kv_info()->block_transfer_groups;
+          for (const auto& g : groups) {
+            if (g.remote_shared_num == 0) {
+              continue;
+            }
+            const std::optional<BlockType> block_type =
+                block_type_from_cache_group_id(g.group_id);
+            if (!block_type.has_value()) {
+              LOG(ERROR) << "Unknown KV cache transfer group_id: "
+                         << g.group_id;
+              continue;
+            }
+            sequence->kv_state().advance_group_transfer_block_idx(
+                block_type.value(), static_cast<size_t>(g.remote_shared_num));
+          }
+          // Flat KV counterpart: response ships block_ids starting from D's
+          // shared_num; advance the flat cursor so build_step_transfer_info
+          // indexes remote_blocks_ids from 0 rather than local_idx 0.
+          if (!has_grouped_cache && resp.remote_shared_num() > 0) {
+            sequence->kv_state().advance_transfer_block_idx(
+                static_cast<size_t>(resp.remote_shared_num()));
+          }
         }
 
         // push to request_queue_, and will be executed by engine.
@@ -1597,8 +1648,11 @@ void PDOOCScheduler::prefill_send_first_generation() {
           block_ids.push_back(block.id());
         }
         ADD_VECTOR_TO_PROTO(gen->mutable_block_ids(), block_ids);
+        // Advertise the recurrent-state slot to pull from: LINEAR for
+        // Qwen3.5 GDN, SINGLE fallback. Must match the D-side response
+        // helper (Sequence::get_recurrent_state_slot_id).
         gen->set_linear_state_id(
-            request->sequences()[0]->get_single_block_id());
+            request->sequences()[0]->get_recurrent_state_slot_id());
         gen->set_dp_size(instance_info_.dp_size);
         gen->set_dp_rank(request->sequences()[0]->dp_rank());
       }
@@ -1741,11 +1795,16 @@ bool PDOOCScheduler::decode_recv_multi_generations(
     }
     std::vector<uint64_t> src_linear_state_ids;
     std::vector<uint64_t> dst_linear_state_ids;
-    if (src_linear_state_id >= 0 &&
-        request->sequences()[0]->get_single_block_id() >= 0) {
+    // Resolve the destination recurrent-state slot with the same helper the
+    // sender used to advertise src_linear_state_id (LINEAR for Qwen3.5 GDN,
+    // SINGLE otherwise), so PULL writes the pulled state into the slot the
+    // decode forward actually reads (see
+    // Sequence::get_recurrent_state_slot_id).
+    const int32_t dst_linear_state_id =
+        request->sequences()[0]->get_recurrent_state_slot_id();
+    if (src_linear_state_id >= 0 && dst_linear_state_id >= 0) {
       src_linear_state_ids.emplace_back(src_linear_state_id);
-      dst_linear_state_ids.emplace_back(
-          request->sequences()[0]->get_single_block_id());
+      dst_linear_state_ids.emplace_back(dst_linear_state_id);
     }
 
     int32_t dst_dp_rank = request->sequences()[0]->dp_rank();
@@ -1907,16 +1966,61 @@ void PDOOCScheduler::dispatch_offline_requests() {
       for (auto& sequence : request->sequences()) {
         TransferKVInfo info;
         info.request_id = request->request_id();
-        for (auto& bid : resps.resps()[0].blocks_ids()) {
-          info.remote_blocks_ids.emplace_back(bid);
+        const auto& resp = resps.resps()[0];
+        const bool has_grouped_cache = resp.kv_block_groups_size() > 0;
+        if (has_grouped_cache) {
+          for (const auto& resp_group : resp.kv_block_groups()) {
+            KVBlockTransferGroup group;
+            group.group_id = resp_group.group_id();
+            group.remote_shared_num = resp_group.remote_shared_num();
+            group.remote_blocks_ids.reserve(resp_group.block_ids_size());
+            for (const int32_t block_id : resp_group.block_ids()) {
+              group.remote_blocks_ids.emplace_back(
+                  static_cast<uint64_t>(block_id));
+            }
+            info.block_transfer_groups.emplace_back(std::move(group));
+          }
+        } else {
+          for (const int32_t block_id : resp.blocks_ids()) {
+            info.remote_blocks_ids.emplace_back(
+                static_cast<uint64_t>(block_id));
+          }
+          info.remote_shared_num = resp.remote_shared_num();
         }
-        if (resps.resps()[0].linear_state_id() >= 0) {
-          info.remote_linear_state_ids.emplace_back(
-              resps.resps()[0].linear_state_id());
+        if (resp.linear_state_id() >= 0) {
+          info.remote_linear_state_ids.emplace_back(resp.linear_state_id());
         }
-        info.dp_rank = resps.resps()[0].dp_rank();
+        if (!has_grouped_cache) {
+          const size_t prompt_blocks = (request->state().prompt_tokens.size() +
+                                        kv_cache_manager_->block_size() - 1) /
+                                       kv_cache_manager_->block_size();
+          info.local_blocks_ids.resize(prompt_blocks);
+        }
+        info.dp_rank = resp.dp_rank();
         info.remote_instance_info = remote_instances_info_[target_instance];
         sequence->kv_state().set_transfer_kv_info(std::move(info));
+
+        // Compress per-group / flat transfer cursors to the D-side shared
+        // counts; see the online dispatch path above for the rationale.
+        const auto& groups =
+            sequence->kv_state().transfer_kv_info()->block_transfer_groups;
+        for (const auto& g : groups) {
+          if (g.remote_shared_num == 0) {
+            continue;
+          }
+          const std::optional<BlockType> block_type =
+              block_type_from_cache_group_id(g.group_id);
+          if (!block_type.has_value()) {
+            LOG(ERROR) << "Unknown KV cache transfer group_id: " << g.group_id;
+            continue;
+          }
+          sequence->kv_state().advance_group_transfer_block_idx(
+              block_type.value(), static_cast<size_t>(g.remote_shared_num));
+        }
+        if (!has_grouped_cache && resp.remote_shared_num() > 0) {
+          sequence->kv_state().advance_transfer_block_idx(
+              static_cast<size_t>(resp.remote_shared_num()));
+        }
       }
 
       // Move to transfer queue for KV cache transfer
@@ -2046,7 +2150,7 @@ void PDOOCScheduler::prefill_send_multi_generations() {
         for (const auto& block : blocks) {
           multi_req->mutable_block_ids()->Add(block.id());
         }
-        multi_req->set_linear_state_id(sequence->get_single_block_id());
+        multi_req->set_linear_state_id(sequence->get_recurrent_state_slot_id());
         multi_req->set_dp_size(instance_info_.dp_size);
         multi_req->set_dp_rank(sequence->dp_rank());
       }

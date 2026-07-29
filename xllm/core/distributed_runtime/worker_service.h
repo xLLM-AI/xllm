@@ -157,7 +157,7 @@ class WorkerService : public proto::DistributeWorker {
             torch::Tensor& top_tokens,
             torch::Tensor& top_logprobs,
             torch::Tensor& embeddings,
-            std::vector<torch::Tensor>& mm_embeddings,
+            std::vector<std::vector<torch::Tensor>>& mm_embeddings,
             std::vector<torch::Tensor>& dit_images,
             std::vector<std::string>& dit_text_output,
             torch::Tensor& expert_load_data,

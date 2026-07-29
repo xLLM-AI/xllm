@@ -15,74 +15,189 @@ limitations under the License.
 
 #include "linear_state_prefix_cache.h"
 
+#include <absl/time/clock.h>
+#include <absl/time/time.h>
+
+#include <memory>
+
+#include "common/metrics.h"
+
 namespace xllm {
 
 std::vector<Block> LinearStatePrefixCache::match(
     const Slice<int32_t>& token_ids,
-    const Slice<Block>& /*existed_shared_blocks*/,
-    const MMData& /*mm_data*/,
-    const Slice<XXH3Key>& block_hashes,
-    size_t* matched_tokens) {
-  if (matched_tokens != nullptr) {
-    *matched_tokens = 0;
-  }
-  // The chunk stride (one prefill chunk in tokens) is the linear hash domain's
-  // step. It is this cache's single block-boundary size (the inherited
-  // block_size_), fed in at construction from the scheduler config; the engine
-  // enforces a positive multiple of the KV block size when linear prefix cache
-  // is on. A misconfigured run leaves the stride at its -1 default, which
-  // arrives here as a saturated unsigned value that drives probe_chunk_count to
-  // 0 below (nothing probed); guard the zero case explicitly so the probe
-  // arithmetic never divides by zero.
-  if (block_size_ == 0) {
+    const Slice<Block>& existed_shared_blocks,
+    const MMData& mm_data,
+    const Slice<XXH3Key>& block_hashes) {
+  const size_t n_tokens = round_down(token_ids.size(), block_size_);
+  if (n_tokens == 0) {
     return {};
   }
-  const size_t chunk_stride = block_size_;
-  // The chained per-chunk hashes are precomputed once on the sequence
-  // (update_linear_state_hashes) and passed in via |block_hashes|; they cover
-  // every whole chunk of the prefix, including one that may end exactly at the
-  // final token. Probe only chunks STRICTLY below the final token: the forward
-  // must compute at least one fresh token, so a checkpoint sitting exactly at
-  // token_ids.size() is unusable (restoring it would leave zero tokens to run).
-  // This is pure token-domain arithmetic -- still KV-blind -- but it cannot be
-  // delegated to KV's own size-1 (the add_shared_blocks pop): that pop lands on
-  // an arbitrary KV *block* boundary, which need not be a linear *checkpoint*
-  // boundary. When the two diverge the restore misses and the sequence silently
-  // cold-starts on a non-empty KV prefix -> corrupt recurrent state. Only this
-  // index knows where the checkpoints are, so snapping to the deepest one below
-  // the final token must happen here; the caller (composite) then takes the min
-  // with the KV match.
-  const size_t probe_chunk_count =
-      token_ids.size() == 0 ? 0 : (token_ids.size() - 1) / chunk_stride;
-  const size_t probe_limit = std::min(probe_chunk_count, block_hashes.size());
-  size_t deepest_hit_chunk = probe_limit;  // sentinel: nothing hit
-  for (size_t chunk_idx = 0; chunk_idx < probe_limit; ++chunk_idx) {
-    // Probe with contains() (no LRU touch): a probed-but-unused prefix must not
-    // pollute recency. Recurrent state is cumulatively compressed, so a later
-    // hit's checkpoint subsumes earlier ones -- keep only the deepest. Gaps are
-    // allowed: do NOT break on a miss, a later hit extends past it.
-    if (contains(block_hashes[chunk_idx])) {
-      deepest_hit_chunk = chunk_idx;
+  const size_t n_blocks = n_tokens / block_size_;
+  total_blocks_.fetch_add(n_blocks);
+
+  std::vector<Block> blocks;
+  blocks.reserve(n_blocks);
+  blocks.insert(
+      blocks.end(), existed_shared_blocks.begin(), existed_shared_blocks.end());
+
+  DNodeList node_list;
+  const size_t start_block = existed_shared_blocks.size();
+
+  // Hit: emplace + LRU-touch. Miss: emplace invalid placeholder.
+  auto probe = [&](const XXH3Key& key) -> bool {
+    auto iter = cached_blocks_.find(key);
+    if (iter == cached_blocks_.end()) {
+      blocks.emplace_back();
+      return false;
+    }
+    blocks.emplace_back(iter->second->block);
+    lru_lst_.remove_node(iter->second);
+    node_list.push_front(iter->second);
+    return true;
+  };
+
+  size_t last_hit_idx = 0;
+  bool has_any_hit = false;
+  if (block_hashes.size() >= n_blocks) {
+    for (size_t b = start_block; b < n_blocks; ++b) {
+      if (probe(block_hashes[b])) {
+        last_hit_idx = b;
+        has_any_hit = true;
+      }
+    }
+  } else {
+    // Fallback: compute chain on the fly, keeping it advancing across misses.
+    XXH3Key token_hash_key =
+        existed_shared_blocks.empty()
+            ? XXH3Key{}
+            : XXH3Key{existed_shared_blocks.back().get_immutable_hash_value()};
+    auto hasher =
+        BlockHasher::create(hasher_type_, mm_data, start_block * block_size_);
+    for (size_t b = start_block; b < n_blocks; ++b) {
+      const size_t i = b * block_size_;
+      const uint8_t* pre_hash_value = (b == 0) ? nullptr : token_hash_key.data;
+      hasher->compute(
+          token_ids, i, i + block_size_, pre_hash_value, token_hash_key);
+      if (probe(token_hash_key)) {
+        last_hit_idx = b;
+        has_any_hit = true;
+      }
     }
   }
-  if (deepest_hit_chunk >= probe_limit) {
-    return {};
+
+  // Trim trailing placeholders; end at deepest hit.
+  const size_t keep =
+      has_any_hit ? (last_hit_idx + 1) : existed_shared_blocks.size();
+  blocks.resize(keep);
+
+  while (!node_list.is_empty()) {
+    Node* node = node_list.pop_front();
+    lru_lst_.push_back(node);
   }
-  // One-block insight: mount only the single deepest checkpoint. Its
-  // cumulatively-compressed recurrent state covers the whole recoverable
-  // prefix. find() pins it (refcount+1) and promotes its LRU recency now that
-  // it is about to be restored, so the earlier probe stays side-effect free.
-  Block deepest = find(block_hashes[deepest_hit_chunk]);
-  if (!deepest.is_valid()) {
-    return {};
+
+  size_t valid_hits = 0;
+  for (const auto& b : blocks) {
+    if (b.is_valid()) {
+      ++valid_hits;
+    }
   }
-  if (matched_tokens != nullptr) {
-    *matched_tokens = (deepest_hit_chunk + 1) * chunk_stride;
+  matched_blocks_.fetch_add(valid_hits);
+
+  const int64_t int_rate_percent =
+      static_cast<int64_t>(static_cast<double>(valid_hits) * 100.0 / n_blocks);
+  HISTOGRAM_OBSERVE(prefix_cache_block_matched_rate, int_rate_percent);
+  HISTOGRAM_OBSERVE(prefix_cache_block_matched_num, valid_hits);
+
+  return blocks;
+}
+
+size_t LinearStatePrefixCache::insert(const Slice<int32_t>& token_ids,
+                                      std::vector<Block>& blocks,
+                                      size_t existed_shared_blocks_num,
+                                      const MMData& mm_data,
+                                      const Slice<XXH3Key>& block_hashes) {
+  const int64_t now = absl::ToUnixMicros(absl::Now());
+  // allign tokens to block boundary
+  const size_t n_blocks =
+      std::min(token_ids.size() / block_size_, blocks.size());
+
+  if (n_blocks == 0) {
+    return 0;
   }
-  std::vector<Block> mounted;
-  mounted.reserve(1);
-  mounted.emplace_back(std::move(deepest));
-  return mounted;
+  CHECK_GE(n_blocks, existed_shared_blocks_num);
+
+  DNodeList node_list;
+
+  // Fill `token_hash_key` with the chained hash of block `block_idx`, reusing
+  // the precomputed hash when it covers all blocks, otherwise computing it.
+  // The block vector may contain invalid placeholders (SWA slid-out slots), so
+  // the compute path walks the chain from token 0 rather than seeding from
+  // blocks[existed_shared_blocks_num - 1] whose stamped hash is undefined when
+  // it is a placeholder. The pre-existed walk hashes tokens in order to catch
+  // the parent-hash cursor up.
+  const bool use_precomputed = block_hashes.size() >= n_blocks;
+  XXH3Key token_hash_key{};
+  std::unique_ptr<BlockHasher> hasher;
+  if (!use_precomputed) {
+    hasher = BlockHasher::create(hasher_type_, mm_data, /*start=*/0);
+    const uint8_t* prev_hash = nullptr;
+    for (size_t b = 0; b < existed_shared_blocks_num; ++b) {
+      const size_t i = b * block_size_;
+      hasher->compute(token_ids, i, i + block_size_, prev_hash, token_hash_key);
+      prev_hash = token_hash_key.data;
+    }
+  }
+  auto fill_block_hash = [&](size_t block_idx) {
+    if (use_precomputed) {
+      token_hash_key = block_hashes[block_idx];
+      return;
+    }
+    const size_t i = block_idx * block_size_;
+    const uint8_t* pre_hash_value =
+        (block_idx == 0) ? nullptr : token_hash_key.data;
+    hasher->compute(
+        token_ids, i, i + block_size_, pre_hash_value, token_hash_key);
+  };
+
+  for (size_t block_idx = existed_shared_blocks_num; block_idx < n_blocks;
+       ++block_idx) {
+    fill_block_hash(block_idx);
+    // Skip invalid placeholders (e.g. SWA slid-out slots): the chain-hash
+    // cursor has already advanced above, but there is no physical block to
+    // stamp or emplace here.
+    if (!blocks[block_idx].is_valid()) {
+      continue;
+    }
+    blocks[block_idx].set_hash_value(token_hash_key.data);
+
+    auto iter = cached_blocks_.find(token_hash_key);
+    if (iter != cached_blocks_.end()) {
+      iter->second->last_access_time = now;
+
+      lru_lst_.remove_node(iter->second);
+      node_list.push_front(iter->second);
+    } else {
+      Node* new_node = new Node();
+
+      new_node->block = blocks[block_idx];
+      new_node->last_access_time = now;
+
+      node_list.push_front(new_node);
+
+      cached_blocks_.emplace(std::make_pair(token_hash_key, new_node));
+
+      num_blocks_++;
+    }
+  }
+
+  const size_t n_tokens = n_blocks * block_size_;
+  while (!node_list.is_empty()) {
+    Node* node = node_list.pop_front();
+    lru_lst_.push_back(node);
+  }
+
+  return n_tokens;
 }
 
 }  // namespace xllm

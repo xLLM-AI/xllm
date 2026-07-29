@@ -23,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
@@ -1813,48 +1814,90 @@ TEST_F(DeepseekV2DecoderTopkShareTest,
       DeepseekV2DecoderLayerTestPeer::attention_has_child(*decoder, "indexer"));
 }
 
-// Prefill CP combined with GLM5.2 cross-layer top-k sharing is not
-// supported yet; the model entry must fatal on this combination. The guard is a
-// pure decision so it can be verified without constructing the full model.
 TEST_F(DeepseekV2DecoderTopkShareTest,
-       CpGuard_WhenCpOffAndSharePlan_ThenNoConflict) {
+       MtpForwardComputesThenReusesTopkAcrossSteps) {
   configure_glm5_indexer();
+  model_args_.model_type() = "glm_moe_dsa_mtp";
+  model_args_.mtp_mlp_type() = "dense";
+  model_args_.index_n_heads() = 32;
+  model_args_.kv_lora_rank() = 256;
+  model_args_.v_head_dim() = 128;
+  model_args_.first_k_dense_replace() = kNumLayers + 1;
   model_args_.index_topk_freq() = 4;
   model_args_.index_skip_topk_offset() = 3;
-  model_args_.index_topk_pattern() = "";
+  model_args_.index_share_for_mtp_iteration() = true;
+  refresh_ctx();
 
-  const DsaTopkSharePlan topk_share_plan(model_args_);
-  EXPECT_TRUE(topk_share_plan.has_reuse());
-  EXPECT_FALSE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/false,
-                                                topk_share_plan));
+  DecoderHolder decoder = make_loaded_decoder(/*layer_id=*/kNumLayers);
+  constexpr int64_t kBatchSize = 1;
+  constexpr int64_t kSeqLen = 1;
+  constexpr int64_t kBlockSize = 16;
+  KVCacheConfig::get_instance().block_size(kBlockSize);
+  ModelInputParams input_params = build_prefill_params(kBatchSize, kSeqLen);
+  input_params.meta.batch_forward_type = BatchForwardType::DECODE;
+  AttentionMetadata attn_metadata =
+      AttentionMetadataBuilder::build(input_params, /*enable_mla=*/true);
+  const torch::Tensor initial_hidden =
+      test::seeded_tensor("deepseek_v2_decoder.mtp_topk_hidden",
+                          {kBatchSize, model_args_.hidden_size()},
+                          torch::kBFloat16,
+                          options_.device());
+  torch::Tensor positions = torch::zeros(
+      {kBatchSize},
+      torch::TensorOptions().dtype(torch::kInt32).device(options_.device()));
+
+  KVCache first_cache =
+      build_cache(/*block_num=*/kBatchSize + 1, /*block_size=*/kBlockSize);
+  torch::Tensor first_hidden = initial_hidden.clone();
+  std::optional<torch::Tensor> first_residual = std::nullopt;
+  std::optional<DsaTopkState> first_topk_output = std::nullopt;
+  torch::Tensor first_output = decoder->forward_mtp(first_hidden,
+                                                    first_residual,
+                                                    positions,
+                                                    attn_metadata,
+                                                    first_cache,
+                                                    input_params,
+                                                    /*input_ids=*/std::nullopt,
+                                                    /*topk_input=*/std::nullopt,
+                                                    first_topk_output);
+  sync_dev();
+
+  ASSERT_TRUE(first_topk_output.has_value());
+  const DsaTopkState& first_topk = first_topk_output.value();
+  EXPECT_EQ(first_topk.block_tables().sizes(),
+            torch::IntArrayRef({kBatchSize, model_args_.index_topk()}));
+  EXPECT_EQ(first_topk.context_lens().sizes(),
+            torch::IntArrayRef({kBatchSize}));
+  EXPECT_TRUE(first_topk.block_tables().is_contiguous());
+  EXPECT_TRUE(first_topk.context_lens().is_contiguous());
+
+  KVCache second_cache =
+      build_cache(/*block_num=*/kBatchSize + 1, /*block_size=*/kBlockSize);
+  torch::Tensor second_hidden = initial_hidden.clone();
+  std::optional<torch::Tensor> second_residual = std::nullopt;
+  std::optional<DsaTopkState> second_topk_output = std::nullopt;
+  torch::Tensor second_output = decoder->forward_mtp(second_hidden,
+                                                     second_residual,
+                                                     positions,
+                                                     attn_metadata,
+                                                     second_cache,
+                                                     input_params,
+                                                     /*input_ids=*/std::nullopt,
+                                                     first_topk_output,
+                                                     second_topk_output);
+  sync_dev();
+
+  ASSERT_TRUE(second_topk_output.has_value());
+  const DsaTopkState& second_topk = second_topk_output.value();
+  EXPECT_EQ(second_topk.block_tables().data_ptr(),
+            first_topk.block_tables().data_ptr());
+  EXPECT_EQ(second_topk.context_lens().data_ptr(),
+            first_topk.context_lens().data_ptr());
+  test::verify_tensor_close(
+      second_output, first_output, /*rtol=*/1e-3, /*atol=*/1e-2);
 }
 
-TEST_F(DeepseekV2DecoderTopkShareTest,
-       CpGuard_WhenCpOnAndGlm52FreqPlan_ThenConflict) {
-  configure_glm5_indexer();
-  model_args_.index_topk_freq() = 4;
-  model_args_.index_skip_topk_offset() = 3;
-  model_args_.index_topk_pattern() = "";
-
-  const DsaTopkSharePlan topk_share_plan(model_args_);
-  EXPECT_TRUE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
-                                               topk_share_plan));
-}
-
-TEST_F(DeepseekV2DecoderTopkShareTest,
-       CpGuard_WhenCpOnAndPatternPlan_ThenConflict) {
-  configure_glm5_indexer();
-  model_args_.index_topk_freq() = 1;
-  model_args_.index_skip_topk_offset() = 0;
-  model_args_.index_topk_pattern() = build_fs_pattern_glm52(kNumLayers);
-
-  const DsaTopkSharePlan topk_share_plan(model_args_);
-  EXPECT_TRUE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
-                                               topk_share_plan));
-}
-
-TEST_F(DeepseekV2DecoderTopkShareTest,
-       CpGuard_WhenPatternHasOnlyFullLayers_ThenNoConflict) {
+TEST_F(DeepseekV2DecoderTopkShareTest, PatternWithOnlyFullLayersHasNoReuse) {
   configure_glm5_indexer();
   model_args_.n_layers() = 4;
   model_args_.index_topk_freq() = 1;
@@ -1863,14 +1906,12 @@ TEST_F(DeepseekV2DecoderTopkShareTest,
 
   const DsaTopkSharePlan topk_share_plan(model_args_);
   EXPECT_FALSE(topk_share_plan.has_reuse());
-  EXPECT_FALSE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
-                                                topk_share_plan));
   EXPECT_FALSE(topk_share_plan.decision_for(/*layer_id=*/3).reuse_topk);
   EXPECT_FALSE(topk_share_plan.decision_for(/*layer_id=*/3).output_topk);
 }
 
 TEST_F(DeepseekV2DecoderTopkShareTest,
-       CpGuard_WhenShortFreqPlanHasNoSharedLayer_ThenNoConflict) {
+       ShortFrequencyPlanWithNoSharedLayerHasNoReuse) {
   configure_glm5_indexer();
   model_args_.n_layers() = 3;
   model_args_.index_topk_freq() = 4;
@@ -1879,39 +1920,7 @@ TEST_F(DeepseekV2DecoderTopkShareTest,
 
   const DsaTopkSharePlan topk_share_plan(model_args_);
   EXPECT_FALSE(topk_share_plan.has_reuse());
-  EXPECT_FALSE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
-                                                topk_share_plan));
   EXPECT_FALSE(topk_share_plan.decision_for(/*layer_id=*/2).output_topk);
-}
-
-TEST_F(DeepseekV2DecoderTopkShareTest,
-       CpGuard_WhenCpOnAndGlm51IndexerDoesNotShare_ThenNoConflict) {
-  configure_glm5_indexer();
-  // GLM5.1: every layer owns an indexer, so CP has no cross-layer carrier.
-  model_args_.index_topk_freq() = 1;
-  model_args_.index_skip_topk_offset() = 0;
-  model_args_.index_topk_pattern() = "";
-
-  const DsaTopkSharePlan topk_share_plan(model_args_);
-  EXPECT_FALSE(topk_share_plan.has_reuse());
-  EXPECT_EQ(topk_share_plan.num_indexer_layers(), kNumLayers);
-  EXPECT_FALSE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
-                                                topk_share_plan));
-}
-
-TEST_F(DeepseekV2DecoderTopkShareTest,
-       CpGuard_WhenCpOnAndDeepseekV32NoSharePlan_ThenNoConflict) {
-  // DeepSeek-V3.2: has an indexer but every layer self-computes (freq=1, no
-  // pattern), so the existing CP path is unaffected.
-  configure_glm5_indexer();
-  model_args_.index_topk_freq() = 1;
-  model_args_.index_skip_topk_offset() = 0;
-  model_args_.index_topk_pattern() = "";
-
-  const DsaTopkSharePlan topk_share_plan(model_args_);
-  EXPECT_FALSE(topk_share_plan.has_reuse());
-  EXPECT_FALSE(cp_conflicts_with_dsa_topk_share(/*enable_prefill_cp=*/true,
-                                                topk_share_plan));
 }
 
 }  // namespace layer

@@ -66,7 +66,8 @@ MLU Context Parallel（CP）通过 `--cp_size` 配置。
 在 MLU 上，`cp_size` 必须等于全局 world size，即 `nnodes` 乘以每个进程
 使用的设备数量。当前 MLU model-side CP 还有以下限制：
 
-- 支持的模型类型为 `deepseek_v32` 和 `glm_moe_dsa`（GLM-5）。
+- 支持的模型类型为 `deepseek_v32` 和 `glm_moe_dsa`（GLM-5 系列，包含
+  GLM-5.2 的跨层 DSA top-k 共享）。
 - 仅支持文本生成模型的 `generate` 任务。
 - `dp_size` 必须为 `1`，`kv_split_size` 必须为 `1`。
 - `ep_size` 必须为 `1` 或全局 world size。
@@ -75,6 +76,10 @@ MLU Context Parallel（CP）通过 `--cp_size` 配置。
 
 在 Prefill/Decode 分离部署中，Prefill 实例配置 `cp_size=N`，Decode 实例
 配置 `cp_size=1`。Decode 实例不参与 MLU model-side CP。
+
+Prefill CP 使用首尾式 token 分区。每个注意力层仅临时 all-gather 当前层
+的 MLA K；带 Indexer 的 Full 层还会 all-gather 当前层 Indexer K，GLM-5.2
+的 Shared 层直接复用同一 CP rank 上 Full 层生成的稀疏 block table。
 
 ## 注意事项
 

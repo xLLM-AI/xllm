@@ -12,6 +12,7 @@ cc_test(
     qwen3_5_gated_delta_net_ops_test.cpp
     qwen3_5_gated_delta_net_test.cpp
     qwen3_5_attention_test.cpp
+    qwen3_5_fused_moe_test.cpp
     qwen3_next_rms_norm_test.cpp
     tests_utils.cpp
   DEPS

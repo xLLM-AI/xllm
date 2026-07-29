@@ -30,7 +30,7 @@ namespace layer {
 // MUSA-native FlashInfer attention. Mirrors the CUDA
 // layers/cuda/flashinfer_attention.h declaration but is owned by the MUSA
 // backend so MUSA-only state (the FA3 decode LSE scratch) stays out of the
-// shared CUDA header. Only the XLLM_TORCH_MUSA build links this class
+// shared CUDA header. Only the USE_MUSA build links this class
 // (layers/musa/flashinfer_attention.cpp provides the definitions); a pure
 // CUDA build links its own layers/cuda copy instead, so the two declarations
 // never coexist in one binary.

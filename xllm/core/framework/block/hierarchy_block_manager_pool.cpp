@@ -48,7 +48,11 @@ HierarchyBlockManagerPool::HierarchyBlockManagerPool(
         options_.enable_host_offload()) {
       leaf = std::make_unique<ConcurrentBlockManagerImpl>(std::move(leaf));
     }
-    host_block_managers_.emplace_back(std::move(leaf));
+    // Per-BlockType map, KV-only today; SWA / C4 / C128 slots stay empty
+    // until host offload grows past the flat-KV shape.
+    std::unordered_map<BlockType, std::unique_ptr<BlockManager>> per_type;
+    per_type.emplace(BlockType::KV, std::move(leaf));
+    host_block_managers_.emplace_back(std::move(per_type));
   }
 
   load_block_transfer_infos_.resize(host_block_managers_.size());
@@ -73,7 +77,7 @@ void HierarchyBlockManagerPool::deallocate(Sequence* sequence) {
   // completes and the offload callback caches + frees them.
   auto host_blocks = sequence->host_kv_state().blocks(BlockType::KV);
   if (!host_blocks.empty()) {
-    host_block_managers_[dp_rank]->deallocate(host_blocks);
+    host_block_managers_[dp_rank].at(BlockType::KV)->deallocate(host_blocks);
   }
 
   // Release device blocks via the composite (includes prefix cache flush).
@@ -90,6 +94,13 @@ void HierarchyBlockManagerPool::collect_offload_pairs(Sequence* sequence,
   if (!options_.enable_prefix_cache()) {
     return;
   }
+
+  // Host offload is KV-only today. When extended to SWA / C4 / C128, iterate
+  // this body over BlockType values whose predicate returns true for the
+  // current role (see composite_block_manager.cpp
+  // ::leaf_participates_in_prefix_cache). host_block_managers_ is already a
+  // per-BlockType map; the missing pieces are the SWA / C4 / C128 host leaf
+  // constructions in the ctor and the tail-continuity handling for SWA.
 
   std::vector<Block>* device_blocks =
       sequence->kv_state().mutable_blocks(BlockType::KV);
@@ -119,8 +130,9 @@ void HierarchyBlockManagerPool::collect_offload_pairs(Sequence* sequence,
                                       ? cached_device_block_num - host_block_num
                                       : 0;
   if (needed_block_num != 0) {
-    std::vector<Block> new_host_blocks =
-        host_block_managers_[dp_rank]->allocate(needed_block_num);
+    std::vector<Block> new_host_blocks = host_block_managers_[dp_rank]
+                                             .at(BlockType::KV)
+                                             ->allocate(needed_block_num);
     if (new_host_blocks.size() != needed_block_num) {
       // Host pool exhausted; skip offload this round rather than partially
       // copy.
@@ -322,7 +334,9 @@ void HierarchyBlockManagerPool::allocate_host_shared(Sequence* sequence) {
   if (options_.enable_prefix_cache()) {
     int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
     std::vector<Block> shared_blocks =
-        host_block_managers_[dp_rank]->allocate_shared(sequence->tokens());
+        host_block_managers_[dp_rank]
+            .at(BlockType::KV)
+            ->allocate_shared(sequence->tokens());
     sequence->add_shared_host_blocks(BlockType::KV, std::move(shared_blocks));
   }
 }
@@ -338,8 +352,9 @@ void HierarchyBlockManagerPool::prefetch_from_storage(
 
     int32_t dp_rank = BlockManagerPool::get_dp_rank(prefill_sequence.get());
     std::vector<Block> shared_blocks =
-        host_block_managers_[dp_rank]->allocate_shared(
-            prefill_sequence->tokens());
+        host_block_managers_[dp_rank]
+            .at(BlockType::KV)
+            ->allocate_shared(prefill_sequence->tokens());
     prefill_sequence->add_shared_host_blocks(BlockType::KV,
                                              std::move(shared_blocks));
 
@@ -353,8 +368,9 @@ void HierarchyBlockManagerPool::prefetch_from_storage(
       continue;
     }
 
-    auto host_blocks =
-        host_block_managers_[dp_rank]->allocate(num_additional_blocks);
+    auto host_blocks = host_block_managers_[dp_rank]
+                           .at(BlockType::KV)
+                           ->allocate(num_additional_blocks);
     if (host_blocks.size() != num_additional_blocks) {
       continue;
     }
@@ -405,8 +421,10 @@ bool HierarchyBlockManagerPool::update_prefetch_result(
       auto cached_blocks =
           prefill_sequence->host_kv_state().shared_blocks_num(BlockType::KV);
 
-      host_block_managers_[dp_rank]->cache(
-          host_blocks.slice(cached_blocks - success_cnt, cached_blocks));
+      host_block_managers_[dp_rank]
+          .at(BlockType::KV)
+          ->cache(
+              host_blocks.slice(cached_blocks - success_cnt, cached_blocks));
     }
   }
 
@@ -453,7 +471,8 @@ void HierarchyBlockManagerPool::transfer_blocks() {
           .thenValue([device_blocks = std::move(src_blocks),
                       host_blocks = std::move(dst_blocks),
                       device_block_mgr_ptr = block_managers_[i].get(),
-                      host_block_mgr_ptr = host_block_managers_[i].get()](
+                      host_block_mgr_ptr =
+                          host_block_managers_[i].at(BlockType::KV).get()](
                          std::vector<folly::Try<uint32_t>>&& results) mutable {
             bool copy_ok = true;
             for (auto&& result : results) {

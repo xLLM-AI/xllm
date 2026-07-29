@@ -49,6 +49,8 @@ std::tuple<torch::Tensor, torch::Tensor> rms_norm_dynamic_quant(
 
 torch::Tensor matmul(MatmulParams& params);
 
+torch::Tensor matmul_reduce_scatter(MatmulReduceScatterParams& params);
+
 torch::Tensor quant_matmul(QuantMatmulParams& params);
 
 torch::Tensor quantize(NpuQuantizeParams& params);

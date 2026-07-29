@@ -295,12 +295,12 @@ def _run_git_command(repo_root: str, args: list[str]) -> tuple[bool, str]:
     return True, output
 
 def _collect_submodule_init_issues(repo_root: str) -> dict[str, str]:
-    ok, output = _run_git_command(repo_root, ["submodule", "status"])
+    ok, output = _run_git_command(repo_root, ["submodule", "status", "--recursive"])
     if not ok:
         logger.error("❌ Failed to inspect submodule status.")
         _print_manual_check_commands([
             f"cd {repo_root}",
-            "git submodule status",
+            "git submodule status --recursive",
             "git submodule update --init --recursive",
         ])
         exit(1)
@@ -326,16 +326,40 @@ def _collect_submodule_init_issues(repo_root: str) -> dict[str, str]:
 
     return issues
 
-def _is_dependency_installed(required_files: list[str]) -> bool:
-    normalized_files = [
+def _is_dependency_installed(candidate_files: list[str]) -> bool:
+    """Return whether any distribution-specific dependency marker exists."""
+    normalized_candidates = [
         os.path.abspath(os.path.expanduser(file_path))
-        for file_path in required_files
+        for file_path in candidate_files
     ]
-    return all(os.path.isfile(file_path) for file_path in normalized_files)
+    return any(os.path.isfile(file_path) for file_path in normalized_candidates)
+
+
+def _get_yalantinglibs_prefix() -> str:
+    return os.path.abspath(
+        os.path.expanduser(
+            os.getenv("YALANTINGLIBS_PREFIX", "/usr/local/yalantinglibs")
+        )
+    )
 
 
 def _get_required_dependency_files() -> dict[str, list[str]]:
-    install_prefix = "/usr/local/yalantinglibs"
+    install_prefix = _get_yalantinglibs_prefix()
+    library_dirs = [
+        "/usr/lib",
+        "/usr/lib64",
+        "/usr/local/lib",
+        "/usr/local/lib64",
+    ]
+    multiarch = sysconfig.get_config_var("MULTIARCH")
+    if multiarch:
+        library_dirs.extend(
+            [
+                os.path.join("/usr/lib", multiarch),
+                os.path.join("/usr/local/lib", multiarch),
+            ]
+        )
+
     return {
         "yalantinglibs": [
             os.path.join(
@@ -346,6 +370,24 @@ def _get_required_dependency_files() -> dict[str, list[str]]:
                 "config.cmake",
             ),
         ],
+        "zstd-header": [
+            "/usr/include/zstd.h",
+            "/usr/local/include/zstd.h",
+        ],
+        "zstd-library": [
+            os.path.join(path, "libzstd.so") for path in library_dirs
+        ],
+        "xxhash-header": [
+            "/usr/include/xxhash.h",
+            "/usr/local/include/xxhash.h",
+        ],
+        "xxhash-library": [
+            os.path.join(path, "libxxhash.so") for path in library_dirs
+        ],
+        "msgpack-cxx": [
+            "/usr/include/msgpack.hpp",
+            "/usr/local/include/msgpack.hpp",
+        ],
     }
 
 
@@ -353,13 +395,13 @@ def _collect_missing_dependencies(
     dependency_files: dict[str, list[str]],
 ) -> dict[str, list[str]]:
     missing: dict[str, list[str]] = {}
-    for name, required_files in dependency_files.items():
-        normalized_files = [
+    for name, candidate_files in dependency_files.items():
+        normalized_candidates = [
             os.path.abspath(os.path.expanduser(file_path))
-            for file_path in required_files
+            for file_path in candidate_files
         ]
-        if not _is_dependency_installed(normalized_files):
-            missing[name] = normalized_files
+        if not _is_dependency_installed(normalized_candidates):
+            missing[name] = normalized_candidates
     return missing
 
 
@@ -390,14 +432,14 @@ def _export_cmake_prefix_paths(prefix_paths: list[str]) -> None:
 
 def _run_dependencies_script_or_exit(script_path: str) -> None:
     if not _run_shell_command(
-        "sh third_party/dependencies.sh",
+        "bash third_party/dependencies.sh",
         cwd=script_path,
         passthrough_output=True,
     ):
-        logger.error("❌ Run shell command 'sh third_party/dependencies.sh' failed!")
+        logger.error("❌ Run shell command 'bash third_party/dependencies.sh' failed!")
         _print_manual_check_commands([
             f"cd {script_path}",
-            "sh third_party/dependencies.sh",
+            "bash third_party/dependencies.sh",
         ])
         exit(1)
 
@@ -425,7 +467,7 @@ def _ensure_prebuild_dependencies_installed(script_path: str) -> None:
         missing_dependencies = _collect_missing_dependencies(dependency_files)
         if missing_dependencies:
             logger.error("❌ Some third-party dependencies are still missing after running dependencies.sh:")
-            manual_commands = [f"cd {script_path}", "sh third_party/dependencies.sh"]
+            manual_commands = [f"cd {script_path}", "bash third_party/dependencies.sh"]
             for name in sorted(missing_dependencies):
                 logger.error(f"   - {name}")
                 for file_path in missing_dependencies[name]:
@@ -434,7 +476,7 @@ def _ensure_prebuild_dependencies_installed(script_path: str) -> None:
             _print_manual_check_commands(manual_commands)
             exit(1)
 
-    _export_cmake_prefix_paths(["/usr/local/yalantinglibs"])
+    _export_cmake_prefix_paths([_get_yalantinglibs_prefix()])
 
 
 def _get_cmake_cache_path() -> str:

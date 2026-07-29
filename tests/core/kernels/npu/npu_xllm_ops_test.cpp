@@ -75,11 +75,11 @@ class NpuXllmOpsTest : public ::testing::Test {
     if (!Py_IsInitialized()) {
       setenv("TORCH_DEVICE_BACKEND_AUTOLOAD", "0", 1);
       Py_InitializeEx(0);
-      py::gil_scoped_acquire gil;
-      prepend_python_model_path();
-      py::module_::import("xllm.python._npu_bootstrap");
-      py::module_::import("xllm.python");
     }
+    py::gil_scoped_acquire gil;
+    prepend_python_model_path();
+    py::module_::import("xllm.python._npu_bootstrap");
+    py::module_::import("xllm.python");
   }
 };
 

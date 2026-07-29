@@ -245,6 +245,36 @@ torch::Tensor reduce_scatter(const torch::Tensor& input,
   return output;
 }
 
+std::vector<int32_t> compute_cp_group_ranks(int32_t global_rank,
+                                            int32_t world_size,
+                                            int32_t dp_size,
+                                            int32_t cp_size) {
+  CHECK_GT(cp_size, 1) << "compute_cp_group_ranks requires cp_size > 1.";
+  CHECK_GT(dp_size, 0) << "dp_size must be positive.";
+  CHECK_GT(world_size, 0) << "world_size must be positive.";
+  CHECK_EQ(world_size % (dp_size * cp_size), 0)
+      << "world_size (" << world_size
+      << ") must be divisible by dp_size * cp_size (" << dp_size * cp_size
+      << ") so that attn_tp_size is integral.";
+  const int32_t attn_tp_size = world_size / (dp_size * cp_size);
+  CHECK_GE(global_rank, 0);
+  CHECK_LT(global_rank, world_size);
+
+  // rank layout: dp_rank * (cp_size * attn_tp_size) + cp_rank * attn_tp_size +
+  // tp_rank
+  const int32_t tp_stride = attn_tp_size;
+  const int32_t dp_stride = cp_size * attn_tp_size;
+  const int32_t dp_rank = global_rank / dp_stride;
+  const int32_t tp_rank = global_rank % attn_tp_size;
+
+  std::vector<int32_t> ranks;
+  ranks.reserve(cp_size);
+  for (int32_t cp_rank = 0; cp_rank < cp_size; ++cp_rank) {
+    ranks.push_back(dp_rank * dp_stride + cp_rank * tp_stride + tp_rank);
+  }
+  return ranks;
+}
+
 torch::Tensor scatter(torch::Tensor input,
                       ProcessGroup* process_group,
                       int dim) {

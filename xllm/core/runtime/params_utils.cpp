@@ -70,6 +70,10 @@ void proto_to_forward_output(const proto::ForwardOutput& pb_output,
                           pb_seq_out.tokens()[j].embeddings().vals().end());
       s.tokens.emplace_back(t);
     }
+    s.mm_embeddings.reserve(pb_seq_out.mm_embeddings().tensors_size());
+    for (const auto& pb_tensor : pb_seq_out.mm_embeddings().tensors()) {
+      s.mm_embeddings.emplace_back(util::proto_to_torch(pb_tensor));
+    }
     raw_forward_output.outputs.emplace_back(s);
   }
   proto_to_dit_forward_output(pb_output.dit_forward_output(),
@@ -77,19 +81,21 @@ void proto_to_forward_output(const proto::ForwardOutput& pb_output,
   COUNTER_ADD(proto_latency_seconds_proto2o, timer.elapsed_seconds());
 }
 
-void forward_output_to_proto(const torch::Tensor& next_tokens,
-                             const torch::Tensor& logprobs,
-                             const torch::Tensor& top_tokens,
-                             const torch::Tensor& top_logprobs,
-                             const torch::Tensor& embeddings,
-                             const torch::Tensor& expert_load_data,
-                             int32_t prepared_layer_id,
-                             const torch::Tensor& src_seq_idxes,
-                             const torch::Tensor& out_tokens,
-                             const torch::Tensor& out_logprobs,
-                             const std::vector<torch::Tensor>& dit_images,
-                             const std::vector<std::string>& dit_text_output,
-                             proto::ForwardOutput* pb_forward_output) {
+void forward_output_to_proto(
+    const torch::Tensor& next_tokens,
+    const torch::Tensor& logprobs,
+    const torch::Tensor& top_tokens,
+    const torch::Tensor& top_logprobs,
+    const torch::Tensor& embeddings,
+    const std::vector<std::vector<torch::Tensor>>& mm_embeddings,
+    const torch::Tensor& expert_load_data,
+    int32_t prepared_layer_id,
+    const torch::Tensor& src_seq_idxes,
+    const torch::Tensor& out_tokens,
+    const torch::Tensor& out_logprobs,
+    const std::vector<torch::Tensor>& dit_images,
+    const std::vector<std::string>& dit_text_output,
+    proto::ForwardOutput* pb_forward_output) {
   Timer timer;
   // LLM decode fills next_tokens; DiT text diffusion (e.g. Cola-DLM) may leave
   // it undefined and only populate dit_text_output. Guard before
@@ -98,6 +104,9 @@ void forward_output_to_proto(const torch::Tensor& next_tokens,
       next_tokens.defined() ? static_cast<int32_t>(next_tokens.size(0)) : 0;
   if (embeddings.defined() && embeddings.numel() > 0) {
     num_seqs = std::max(num_seqs, static_cast<int32_t>(embeddings.size(0)));
+  }
+  if (!mm_embeddings.empty()) {
+    num_seqs = std::max(num_seqs, static_cast<int32_t>(mm_embeddings.size()));
   }
   pb_forward_output->mutable_outputs()->Reserve(num_seqs);
   for (int32_t output_idx = 0; output_idx < num_seqs; ++output_idx) {
@@ -204,6 +213,12 @@ void forward_output_to_proto(const torch::Tensor& next_tokens,
                             embedding_slice);
       }
       *pb_seq_out.mutable_tokens()->Add() = pb_token;
+      if (output_idx < static_cast<int32_t>(mm_embeddings.size())) {
+        for (const auto& tensor : mm_embeddings[output_idx]) {
+          torch_tensor_to_proto_tensor(
+              tensor, pb_seq_out.mutable_mm_embeddings()->add_tensors());
+        }
+      }
       *pb_forward_output->mutable_outputs()->Add() = pb_seq_out;
     }
   }

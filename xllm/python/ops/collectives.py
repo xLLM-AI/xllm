@@ -9,6 +9,29 @@ _tp_groups = {}
 _tp_stores = {}
 
 
+def _create_process_group(
+    host: str, port: int, rank: int, world_size: int, device: str
+):
+    """Create HCCL or NCCL ProcessGroup depending on device type."""
+    store = dist.TCPStore(
+        host,
+        port,
+        world_size,
+        rank == 0,
+        timedelta(minutes=5),
+        wait_for_workers=False,
+    )
+    device_obj = torch.device(device)
+    if device_obj.type == "cuda":
+        group = dist.ProcessGroupNCCL(store, rank, world_size, timedelta(minutes=5))
+    else:
+        import torch_npu  # noqa: F401
+        from torch_npu._C._distributed_c10d import ProcessGroupHCCL
+
+        group = ProcessGroupHCCL(store, rank, world_size, timedelta(minutes=5))
+    return store, group
+
+
 def init_tp_group(
     host: str,
     port: int,
@@ -27,20 +50,7 @@ def init_tp_group(
             )
         return group
 
-    store = dist.TCPStore(
-        host,
-        port,
-        world_size,
-        rank == 0,
-        timedelta(minutes=5),
-        wait_for_workers=False,
-    )
-    group = dist.ProcessGroupNCCL(
-        store,
-        rank,
-        world_size,
-        timedelta(minutes=5),
-    )
+    store, group = _create_process_group(host, port, rank, world_size, device)
     _tp_stores[device_key] = store
     _tp_groups[device_key] = group
     return group

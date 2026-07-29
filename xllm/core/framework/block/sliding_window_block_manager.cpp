@@ -17,22 +17,21 @@ limitations under the License.
 
 #include <algorithm>
 
+#include "framework/prefix_cache/prefix_cache.h"
+
 namespace xllm {
 
-namespace {
-
-// SWA never serves prefix cache; force it off so the base does not build one.
-BlockManager::Options without_prefix_cache(BlockManager::Options options) {
-  options.enable_prefix_cache(false);
-  return options;
-}
-
-}  // namespace
-
 SlidingWindowBlockManager::SlidingWindowBlockManager(const Options& options)
-    : BlockManagerImpl(without_prefix_cache(options)) {
+    : BlockManagerImpl(options) {
   CHECK_GT(options_.swa_blocks_per_seq(), 0u)
       << "swa_blocks_per_seq must be positive";
+  if (options_.enable_prefix_cache()) {
+    // SWA prefix cache uses Sequence::block_hashes_ (TEXT chain). VLM MM
+    // hasher is not compatible; fail loud instead of silently corrupting hits.
+    CHECK(options_.hasher_type() == BlockHasherType::TEXT)
+        << "SWA prefix cache does not yet support VLM (MM hasher). "
+           "Disable prefix cache for VLM DSV4 or wait for VLM support.";
+  }
 }
 
 void SlidingWindowBlockManager::release_out_of_window(Sequence* seq) {
@@ -45,10 +44,6 @@ void SlidingWindowBlockManager::release_out_of_window(Sequence* seq) {
   if (block_size == 0 || swa_blocks.empty()) {
     return;
   }
-  // Leading logical blocks that have fully slid out of the window can be freed.
-  // Runs AFTER the composite has committed this round's growth, and only on a
-  // successful allocation, so a failed allocate_sequence never releases the
-  // sequence's existing SWA blocks.
   const size_t cached_tokens = kv_state.kv_cache_tokens_num();
   const size_t num_spec_tokens =
       static_cast<size_t>(options_.num_speculative_tokens());
@@ -64,9 +59,9 @@ void SlidingWindowBlockManager::release_out_of_window(Sequence* seq) {
   if (release_blocks == 0) {
     return;
   }
-  // Move slid-out blocks out (leaving invalid placeholders so logical-position
-  // indexing stays stable) and deallocate them through the base free list. The
-  // is_valid() guard makes re-entry a safe no-op.
+  // Move slid-out blocks out (leaving invalid placeholders so positional
+  // indexing stays stable). Cache alias still pins the physical block, so
+  // deallocate walks the ref<=2u branch and only clears usage bookkeeping.
   std::vector<Block> blocks_to_release;
   blocks_to_release.reserve(release_blocks);
   for (size_t j = 0; j < release_blocks; ++j) {
@@ -80,25 +75,37 @@ void SlidingWindowBlockManager::release_out_of_window(Sequence* seq) {
 }
 
 std::vector<Block> SlidingWindowBlockManager::allocate_shared(
-    const Slice<int32_t>& /*token_ids*/,
+    const Slice<int32_t>& token_ids,
     const Slice<Block>& /*existed_shared_blocks*/,
-    const MMData& /*mm_data*/,
-    const Slice<XXH3Key>& /*block_hashes*/,
-    size_t* /*matched_tokens*/) {
-  NOT_IMPLEMENTED();
-  return {};
-}
+    const MMData& mm_data,
+    const Slice<XXH3Key>& block_hashes) {
+  if (!options_.enable_prefix_cache() || options_.block_size() == 0 ||
+      prefix_cache_ == nullptr) {
+    return {};
+  }
+  AUTO_COUNTER(prefix_cache_latency_seconds_match);
+  std::vector<Block> result = prefix_cache_->match(token_ids,
+                                                   /*existed_shared_blocks=*/{},
+                                                   mm_data,
+                                                   block_hashes);
+  if (result.empty()) {
+    return {};
+  }
 
-void SlidingWindowBlockManager::cache(const Slice<int32_t>& /*token_ids*/,
-                                      std::vector<Block>& /*blocks*/,
-                                      size_t /*existed_shared_blocks_num*/,
-                                      const MMData& /*mm_data*/,
-                                      const Slice<XXH3Key>& /*block_hashes*/) {
-  NOT_IMPLEMENTED();
-}
+  // Bookkeeping: mark_used only for valid positions. mark_used is idempotent
+  // per block id, so blocks shared across sequences are only counted once.
+  size_t added = 0;
+  for (const auto& b : result) {
+    if (b.is_valid() && mark_used(&usage_accounted_ids_, b.id())) {
+      ++added;
+    }
+  }
+  num_used_blocks_.fetch_add(added, std::memory_order_relaxed);
 
-void SlidingWindowBlockManager::cache(const std::vector<Block>& /*blocks*/) {
-  NOT_IMPLEMENTED();
+  const size_t reach_tokens =
+      result.size() * static_cast<size_t>(options_.block_size());
+  COUNTER_ADD(prefix_cache_match_length_total, reach_tokens);
+  return result;
 }
 
 }  // namespace xllm

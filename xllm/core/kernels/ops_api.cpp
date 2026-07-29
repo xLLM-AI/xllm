@@ -22,14 +22,13 @@ limitations under the License.
 #include "npu/npu_ops_api.h"
 #include "npu/xllm_ops/xllm_ops_api.h"
 #include "triton_npu/torch_api/triton_ops_api.h"
+#elif defined(USE_MUSA)
+#include "musa/musa_ops_api.h"
 #elif defined(USE_CUDA)
 #include "cuda/attention_runner.h"
 #include "cuda/cuda_ops_api.h"
 #elif defined(USE_ILU)
 #include "ilu/ilu_ops_api.h"
-#elif defined(USE_MUSA)
-#include "cuda/cuda_ops_api.h"
-#include "musa/musa_ops_api.h"
 #elif defined(USE_DCU)
 #include "cuda/cuda_ops_api.h"
 #include "dcu/aiter_quant_adapter.h"
@@ -434,6 +433,20 @@ torch::Tensor matmul(MatmulParams& params) {
   return ilu::matmul(params.a, params.b, params.bias);
 #elif defined(USE_DCU)
   return dcu::matmul(params.a, params.b, params.bias);
+#else
+  NOT_IMPLEMENTED();
+#endif
+}
+
+torch::Tensor matmul_reduce_scatter(MatmulReduceScatterParams& params) {
+#if defined(USE_NPU)
+  return npu::matmul_reduce_scatter(params.a,
+                                    params.b,
+                                    params.bias,
+                                    params.process_group,
+                                    params.reduce_op,
+                                    params.comm_turn,
+                                    params.comm_mode);
 #else
   NOT_IMPLEMENTED();
 #endif

@@ -37,7 +37,9 @@ limitations under the License.
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "dit_master.h"
 #if defined(USE_NPU)
 #include "framework/parallel_state/npu_rank_table_env.h"
@@ -74,43 +76,118 @@ std::optional<std::string> validate_model_cp(const Options& options,
   if (options.cp_size() < 1) {
     return "cp_size must be greater than or equal to 1";
   }
-  const bool use_model_partition =
-      options.cp_size() > 1 && Platform::uses_model_cp_partition();
-  if (!use_model_partition) {
+  if (options.cp_size() == 1) {
     return std::nullopt;
   }
-  if (engine_type != EngineType::LLM && engine_type != EngineType::SSM) {
-    return "MLU CP supports only LLM text generation";
+
+  if (Platform::is_mlu()) {
+    if (engine_type != EngineType::LLM && engine_type != EngineType::SSM) {
+      return "MLU CP supports only LLM text generation";
+    }
+    if (options.task_type() != "generate") {
+      return "MLU CP supports only the generate task";
+    }
+    if (engine_type == EngineType::SSM &&
+        options.speculative_algorithm() != "Suffix") {
+      return "Current MLU model-side CP does not support MTPWorkerImpl-based "
+             "speculative algorithms such as MTP or Eagle3; disable CP, "
+             "disable the speculative algorithm, or wait for MLU worker-side "
+             "CP";
+    }
+    if (model_type != "deepseek_v32" && model_type != "glm_moe_dsa") {
+      return "MLU CP does not support model_type=" + model_type;
+    }
+    if (options.instance_role() != InstanceRole::DEFAULT &&
+        options.instance_role() != InstanceRole::PREFILL) {
+      return "MLU CP supports only DEFAULT or PREFILL roles";
+    }
+    if (options.dp_size() != 1) {
+      return "MLU CP requires dp_size == 1";
+    }
+    if (options.cp_size() != global_world_size) {
+      return "MLU CP requires cp_size == global world size";
+    }
+    if (ParallelConfig::get_instance().kv_split_size() != 1) {
+      return "MLU CP requires kv_split_size == 1";
+    }
+    if (options.ep_size() != 1 && options.ep_size() != global_world_size) {
+      return "MLU CP requires ep_size == 1 or global world size";
+    }
+    return std::nullopt;
   }
-  if (options.task_type() != "generate") {
-    return "MLU CP supports only the generate task";
+
+  if (Platform::is_npu()) {
+    if (engine_type != EngineType::LLM && engine_type != EngineType::SSM) {
+      return "Model-side CP supports only LLM text generation";
+    }
+    if (options.task_type() != "generate") {
+      return "Model-side CP supports only the generate task";
+    }
+    if (engine_type == EngineType::SSM &&
+        SpeculativeConfig::requires_aux_hidden_capture(
+            options.speculative_algorithm())) {
+      return "Current model-side CP does not support aux-hidden-capture "
+             "speculative algorithms (Eagle3/DFlash); disable CP or disable "
+             "the speculative algorithm. MTP and Suffix are supported.";
+    }
+    // CP is prefill-only; reject graph/non-prefill roles.
+    if (options.enable_graph()) {
+      return "Model-side CP does not support graph capture "
+             "(enable_graph=true); disable graph or disable CP (cp_size=1).";
+    }
+    if (options.instance_role() != InstanceRole::DEFAULT &&
+        options.instance_role() != InstanceRole::PREFILL) {
+      return "Model-side CP supports only DEFAULT or PREFILL roles";
+    }
+    if (options.dp_size() != 1) {
+      return "Model-side CP requires dp_size == 1";
+    }
+
+    // Require registered NPU model-side CP capability + ATB backend.
+    std::string effective_backend;
+    std::string resolved_name;
+    std::string resolve_error;
+    // Runtime platform branches are type-checked in every platform build.
+    const std::string requested_backend = options.npu_kernel_backend();
+    if (!resolve_model_registration(model_type,
+                                    requested_backend,
+                                    &effective_backend,
+                                    &resolved_name,
+                                    &resolve_error)) {
+      return "Model-side CP rejected model_type=" + model_type + ": " +
+             resolve_error;
+    }
+    if (effective_backend != "ATB") {
+      return "NPU model-side CP requires --npu_kernel_backend=ATB for "
+             "model_type=" +
+             model_type + " (resolved backend=" + effective_backend + ")";
+    }
+    if (!is_npu_model_cp_capable(resolved_name)) {
+      return "NPU model-side CP does not support model_type=" + model_type +
+             " (resolved=" + resolved_name +
+             "); only deepseek_v32, deepseek_v32_mtp, glm_moe_dsa, "
+             "glm_moe_dsa_mtp are registered as CP-capable.";
+    }
+    if (global_world_size % (options.dp_size() * options.cp_size()) != 0) {
+      return "NPU CP requires world_size divisible by dp_size * cp_size "
+             "(orthogonal CP x TP layout)";
+    }
+    const int32_t attn_tp_size =
+        global_world_size / (options.dp_size() * options.cp_size());
+    if (attn_tp_size < 1) {
+      return "NPU CP requires attn_tp_size >= 1";
+    }
+    const int32_t kv_split =
+        ParallelConfig::get_instance().kv_split_size_effective();
+    if (kv_split < 1 || options.cp_size() % kv_split != 0) {
+      return "NPU CP requires kv_split_size effective value to be a positive "
+             "divisor of cp_size";
+    }
+    return std::nullopt;
   }
-  if (engine_type == EngineType::SSM &&
-      options.speculative_algorithm() != "Suffix") {
-    return "Current MLU model-side CP does not support MTPWorkerImpl-based "
-           "speculative algorithms such as MTP or Eagle3; disable CP, disable "
-           "the speculative algorithm, or wait for MLU worker-side CP";
-  }
-  if (model_type != "deepseek_v32" && model_type != "glm_moe_dsa") {
-    return "MLU CP does not support model_type=" + model_type;
-  }
-  if (options.instance_role() != InstanceRole::DEFAULT &&
-      options.instance_role() != InstanceRole::PREFILL) {
-    return "MLU CP supports only DEFAULT or PREFILL roles";
-  }
-  if (options.dp_size() != 1) {
-    return "MLU CP requires dp_size == 1";
-  }
-  if (options.cp_size() != global_world_size) {
-    return "MLU CP requires cp_size == global world size";
-  }
-  if (ParallelConfig::get_instance().kv_split_size() != 1) {
-    return "MLU CP requires kv_split_size == 1";
-  }
-  if (options.ep_size() != 1 && options.ep_size() != global_world_size) {
-    return "MLU CP requires ep_size == 1 or global world size";
-  }
-  return std::nullopt;
+
+  return "cp_size > 1 is only supported on platforms with model-side CP "
+         "(MLU/NPU); disable CP (cp_size=1) or use MLU/NPU.";
 }
 
 void print_startup_banner(const std::filesystem::path& model_path,
@@ -171,6 +248,17 @@ void resolve_npu_kernel_backend_for_options(Options* options) {
     return;
   }
 
+  // Python model executor builds the compute graph in Python (torch/torch_npu),
+  // bypassing ATB C++ kernels entirely — force TORCH backend so that kernel
+  // dispatch picks pure-torch implementations for reshape_and_cache etc.
+  if (ModelConfig::is_python_model_impl(
+          ModelConfig::get_instance().model_impl())) {
+    options->npu_kernel_backend("TORCH");
+    KernelConfig::get_instance().npu_kernel_backend("TORCH");
+    LOG(INFO) << "Forced npu_kernel_backend=TORCH for python model_impl";
+    return;
+  }
+
   const std::string model_type =
       util::get_model_type(options->model_path(), options->backend());
   std::string effective_backend;
@@ -199,50 +287,35 @@ Master::Master(const Options& options, EngineType type)
       master_status_(options.master_status()) {
   const auto model_path =
       std::filesystem::path(options_.model_path()).lexically_normal();
-  // Multi-process serving runs one worker per process. Enumerate the visible
-  // cards (honoring *_VISIBLE_DEVICES) and select the single card this process
-  // owns by its node_rank, so `devices` holds exactly the card this process
-  // uses -- mirroring the historical single-element devices semantics.
+  // Multi-process serving runs one worker per process. Select one runtime
+  // logical device from the process-visible devices while keeping node_rank as
+  // the global distributed identity.
+  const int32_t visible_device_count = Platform::device_count();
+  const int32_t device_idx = DeviceNameUtils::get_device_idx(
+      options_.node_rank(), options_.nnodes(), visible_device_count);
   const auto visible_devices = DeviceNameUtils::parse_devices("auto");
-  CHECK_LT(options_.node_rank(), static_cast<int32_t>(visible_devices.size()))
-      << "node_rank " << options_.node_rank()
-      << " exceeds the number of visible devices " << visible_devices.size()
-      << ". Ensure *_VISIBLE_DEVICES exposes all cards used across processes.";
-  const std::vector<torch::Device> devices = {
-      visible_devices[options_.node_rank()]};
+  const std::vector<torch::Device> devices = {visible_devices[device_idx]};
   // World size is the node count (one worker per process).
   const int32_t global_world_size = options_.nnodes();
   std::string cp_model_type;
-  if (options_.cp_size() > 1 && Platform::uses_model_cp_partition()) {
+  if (options_.cp_size() > 1 && Platform::uses_model_cp_sharding()) {
     cp_model_type = util::get_model_type(model_path, options_.backend());
   }
   const std::optional<std::string> cp_error =
       validate_model_cp(options_, type, cp_model_type, global_world_size);
   CHECK(!cp_error.has_value()) << cp_error.value();
-  if (options_.enable_prefix_cache() && options_.backend() == "llm") {
-    const std::string model_type = util::get_model_type(model_path);
-    if (util::is_deepseek_v4_model_type(model_type)) {
-      LOG(WARNING) << model_type
-                   << " does not support prefix cache with "
-                      "CompositeBlockManager yet, fallback to "
-                      "enable_prefix_cache=false";
-      options_.enable_prefix_cache(false);
-      KVCacheConfig::get_instance().enable_prefix_cache(false);
-    }
-  }
   options_.enable_mla(util::should_enable_mla(model_path, options_.backend()));
   print_startup_banner(model_path, options_.backend(), options_.node_rank());
   LOG(INFO) << "Master init options: " << options_.to_string();
   ParallelConfig::get_instance().cp_size(options_.cp_size());
-  const char* cp_partition_stage =
-      options_.cp_size() <= 1
-          ? "disabled"
-          : (Platform::uses_model_cp_partition() ? "model" : "worker");
+  // cp_size <= 1 -> "disabled", otherwise "model" (model-side CP).
+  const char* cp_sharding_stage =
+      options_.cp_size() <= 1 ? "disabled" : "model";
   LOG(INFO) << "Resolved CP config: cp_size=" << options_.cp_size()
             << ", world_size=" << global_world_size
             << ", dp_size=" << options_.dp_size()
             << ", ep_size=" << options_.ep_size()
-            << ", cp_partition_stage=" << cp_partition_stage
+            << ", cp_sharding_stage=" << cp_sharding_stage
             << ", instance_role=" << options_.instance_role().to_string();
 
   // Allow brpc receive SIGTREM and SIGINT signal.
@@ -314,6 +387,10 @@ Master::Master(const Options& options, EngineType type)
         .max_linear_state_cache_slots(options.max_linear_state_cache_slots())
         .task_type(options.task_type())
         .enable_mla(options_.enable_mla())
+        .enable_flashcomm1(options_.enable_flashcomm1())
+        .flashcomm1_min_prefill_tokens(options_.flashcomm1_min_prefill_tokens())
+        .enable_mmrs_fusion(options_.enable_mmrs_fusion())
+        .mmrs_comm_mode(options_.mmrs_comm_mode())
         .cp_size(options_.cp_size())
         .npu_kernel_backend(options_.npu_kernel_backend())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
@@ -388,6 +465,10 @@ Master::Master(const Options& options, EngineType type)
         .node_rank(options.node_rank())
         .dp_size(options.dp_size())
         .ep_size(options.ep_size())
+        .enable_flashcomm1(options_.enable_flashcomm1())
+        .flashcomm1_min_prefill_tokens(options_.flashcomm1_min_prefill_tokens())
+        .enable_mmrs_fusion(options_.enable_mmrs_fusion())
+        .mmrs_comm_mode(options_.mmrs_comm_mode())
         .cp_size(options_.cp_size())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .max_tokens_per_batch(options_.max_tokens_per_batch())
@@ -442,6 +523,10 @@ Master::Master(const Options& options, EngineType type)
         .node_rank(options_.node_rank())
         .dp_size(options_.dp_size())
         .ep_size(options_.ep_size())
+        .enable_flashcomm1(options_.enable_flashcomm1())
+        .flashcomm1_min_prefill_tokens(options_.flashcomm1_min_prefill_tokens())
+        .enable_mmrs_fusion(options_.enable_mmrs_fusion())
+        .mmrs_comm_mode(options_.mmrs_comm_mode())
         .cp_size(options_.cp_size())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .max_tokens_per_batch(options_.max_tokens_per_batch())

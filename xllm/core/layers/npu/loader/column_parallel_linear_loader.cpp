@@ -36,12 +36,20 @@ ColumParallelLinearLoader::ColumParallelLinearLoader(
 void ColumParallelLinearLoader::load_state_dict(const StateDict& state_dict) {
   const bool to_host = load_to_host();
   if (dp_size_ > 1 || cp_size_ > 1) {
+    // CP-unaware, DP-aware: shard across the dp-local-TP group
+    // (world / dp_size = cp_size * tp_size), matching the WORD_EMBED_TP comm
+    // group. Using the CP-local TP (dp_local_tp_size_, size tp) would
+    // replicate the projection weight (eh_proj / rot / fc) across CP ranks.
+    // When cp_size == 1 this collapses to tp_size, so non-CP runs unchanged.
+    const int32_t cp_unaware_tp_size = parallel_args_.world_size() / dp_size_;
+    const int32_t cp_unaware_tp_rank =
+        parallel_args_.rank() % cp_unaware_tp_size;
     set_weight(state_dict,
                "weight",
                0,
                0,
-               dp_local_tp_rank_,
-               dp_local_tp_size_,
+               cp_unaware_tp_rank,
+               cp_unaware_tp_size,
                to_host);
   } else {
     set_weight(state_dict, "weight", 0, 0, to_host);

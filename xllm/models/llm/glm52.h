@@ -17,7 +17,6 @@ limitations under the License.
 #include "core/layers/common/dsa_topk_share_plan.h"
 #include "core/layers/mlu/dsa_topk_relay.h"
 #include "models/llm/glm5.h"
-#include "platform/platform.h"
 
 // GLM5.2 shares model_type "glm_moe_dsa" with GLM5.0/5.1 and is told apart by
 // the resolved indexer top-k share plan. GLM5.0/5.1 configs carry no reuse, so
@@ -31,18 +30,7 @@ namespace xllm {
 class Glm52ModelImpl : public Glm5ModelImpl {
  public:
   explicit Glm52ModelImpl(const ModelContext& context)
-      : Glm5ModelImpl(context, create_decoder_layer_factory(context)),
-        dsa_topk_share_plan_(context.get_model_args()) {
-    const bool enable_prefill_cp = context.get_parallel_args().cp_size() > 1 &&
-                                   Platform::uses_model_cp_partition();
-    if (layer::cp_conflicts_with_dsa_topk_share(enable_prefill_cp,
-                                                dsa_topk_share_plan_)) {
-      LOG(FATAL) << "Prefill CP is not supported together with GLM5.2 "
-                    "DSA cross-layer top-k sharing. Disable one of them: unset "
-                    "cp_size, or run a model whose DSA top-k plan contains "
-                    "no Shared layers.";
-    }
-  }
+      : Glm5ModelImpl(context, create_decoder_layer_factory(context)) {}
 
  protected:
   // The relay is reset at layer 0 so its state remains forward-scoped. Decoder
@@ -80,7 +68,6 @@ class Glm52ModelImpl : public Glm5ModelImpl {
         };
   }
 
-  layer::DsaTopkSharePlan dsa_topk_share_plan_;
   layer::DsaTopkRelay topk_relay_;
 };
 TORCH_MODULE(Glm52Model);

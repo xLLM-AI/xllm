@@ -33,7 +33,6 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
-#include "core/platform/platform.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/kv_cache/linear_state_restore.h"
 #include "framework/kv_cache_transfer/kv_transfer_completion.h"
@@ -49,10 +48,6 @@ limitations under the License.
 namespace xllm {
 
 namespace {
-
-bool uses_worker_cp_partition(const runtime::Options& options) {
-  return options.cp_size() > 1 && !Platform::uses_model_cp_partition();
-}
 
 void wait_input_ready_events(const ForwardInput& input, const Stream& stream) {
   CHECK(stream.wait_event(input.metadata_ready_event))
@@ -297,7 +292,6 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   }
 
   torch::Tensor logits;
-  torch::Tensor selected_hidden_from_lm_head;
   if (sampling_params.selected_token_idxes.defined()) {
     torch::Tensor selected_token_idxes = sampling_params.selected_token_idxes;
     if (model_output.hidden_states.defined() &&
@@ -307,13 +301,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
                                      /*non_blocking=*/false)
                                  .contiguous();
     }
-    if (uses_worker_cp_partition(options_)) {
-      logits = model_->logits(model_output.hidden_states,
-                              selected_token_idxes,
-                              selected_hidden_from_lm_head);
-    } else {
-      logits = model_->logits(model_output.hidden_states, selected_token_idxes);
-    }
+    logits = model_->logits(model_output.hidden_states, selected_token_idxes);
   }
 
   ForwardOutput output;
@@ -378,27 +366,11 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     }
     if (!input.input_params.meta.batch_forward_type.is_decode() &&
         !is_spec_draft_) {
-      // Target prefill keeps the full hidden in `embeddings` for the draft
-      // input_embedding. Under CP this is the LOCAL token shard, whose rows
-      // cannot be indexed by the CP all-gather-space selected_token_idxes.
-      // Expose the LmHead-gathered per-sequence hidden (rows = num_seq)
-      // separately so the embedding cache stores it without re-selecting on
-      // the local shard.
+      // Target prefill: keep full embeddings (global-real under model-side CP).
       output.sample_output.embeddings = embeddings;
-      if (uses_worker_cp_partition(options_) &&
-          selected_hidden_from_lm_head.defined()) {
-        output.sample_output.selected_embeddings = selected_hidden_from_lm_head;
-      }
     } else if (sampling_params.selected_token_idxes.defined()) {
-      if (uses_worker_cp_partition(options_)) {
-        CHECK(selected_hidden_from_lm_head.defined())
-            << "selected_hidden_from_lm_head must be defined when "
-               "selected_token_idxes is defined.";
-        output.sample_output.embeddings = selected_hidden_from_lm_head;
-      } else {
-        output.sample_output.embeddings = embeddings.index_select(
-            /*dim=*/0, sampling_params.selected_token_idxes);
-      }
+      output.sample_output.embeddings = embeddings.index_select(
+          /*dim=*/0, sampling_params.selected_token_idxes);
     }
   }
 

@@ -24,6 +24,12 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 namespace {
+bool has_sq_weights(const StateDict& state_dict, const std::string& prefix) {
+  return state_dict.has(prefix + ".qweight") ||
+         state_dict.has(prefix + ".per_channel_scale") ||
+         state_dict.has(prefix + ".smooth");
+}
+
 torch::Tensor get_tensor_with_weight_suffix(const StateDict& state_dict,
                                             const std::string& tensor_name) {
   torch::Tensor tensor = state_dict.get_tensor(tensor_name);
@@ -102,7 +108,7 @@ void Qwen3_5FusedMoEImpl::load_experts(const StateDict& state_dict) {
   if (is_smoothquant_) {
     const bool gate_up_loaded =
         w13_is_loaded_ && w13_scale_is_loaded_ && input_smooth_is_loaded_;
-    if (!gate_up_loaded) {
+    if (!gate_up_loaded && has_sq_weights(state_dict, "gate_up_proj")) {
       CHECK(moe_weight::try_load_gate_up_sq(state_dict,
                                             tp_pg_->rank(),
                                             tp_pg_->world_size(),
@@ -120,7 +126,7 @@ void Qwen3_5FusedMoEImpl::load_experts(const StateDict& state_dict) {
 
     const bool down_loaded =
         w2_is_loaded_ && w2_scale_is_loaded_ && act_smooth_is_loaded_;
-    if (!down_loaded) {
+    if (!down_loaded && has_sq_weights(state_dict, "down_proj")) {
       CHECK(moe_weight::try_load_down_sq(state_dict,
                                          tp_pg_->rank(),
                                          tp_pg_->world_size(),

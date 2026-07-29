@@ -677,6 +677,8 @@ struct AttentionRunResult {
   torch::Tensor global_output;
   torch::Tensor k_cache;
   torch::Tensor index_cache;
+  DeepseekV2AttentionImpl::PostAttnLayout layout =
+      DeepseekV2AttentionImpl::PostAttnLayout::kTpShard;
   bool used_sp = false;
   int64_t local_token_num = 0;
 };
@@ -686,6 +688,8 @@ void check_repl_output_contract(const AttentionRunResult& result,
                                 int64_t hidden_size,
                                 const std::string& label) {
   CHECK(!result.used_sp) << label << " unexpectedly used sequence parallel";
+  CHECK(result.layout == DeepseekV2AttentionImpl::PostAttnLayout::kReplicated)
+      << label << " must report replicated attention output";
   CHECK_EQ(result.local_token_num, token_num)
       << label << " local token count mismatch";
   CHECK_EQ(result.local_output.sizes(), result.global_output.sizes())
@@ -707,6 +711,8 @@ void check_sp_output_contract(const AttentionRunResult& result,
                               int64_t local_token_num,
                               const std::string& label) {
   CHECK(result.used_sp) << label << " did not use sequence parallel";
+  CHECK(result.layout == DeepseekV2AttentionImpl::PostAttnLayout::kPackedLocal)
+      << label << " must report packed-local attention output";
   CHECK_EQ(result.local_token_num, local_token_num)
       << label << " local token count mismatch";
   CHECK_EQ(result.local_output.size(0), local_token_num)
@@ -760,7 +766,8 @@ torch::Tensor run_attention_decode_once(const ModelArgs& args,
       args, quant_args, effective_parallel_args, options, optimization_config);
   attention->load_state_dict(state_dict);
   AttentionMetadata metadata = create_decode_metadata(options);
-  return attention->forward(positions, hidden_states, metadata, kv_cache);
+  return attention->forward(positions, hidden_states, metadata, kv_cache)
+      .output;
 }
 
 AttentionRunResult run_attention_prefill_once(
@@ -777,15 +784,21 @@ AttentionRunResult run_attention_prefill_once(
     bool enable_fused_mla_kernel,
     BatchForwardType batch_forward_type = BatchForwardType::PREFILL,
     int32_t prefix_len = 0,
-    bool build_cp_context = true) {
+    bool build_cp_context = true,
+    DsaTopkTransfer* topk_transfer = nullptr,
+    bool enable_indexer = true) {
   ParallelArgs effective_parallel_args = parallel_args;
   effective_parallel_args.cp_size() =
       enable_full_weight_path ? parallel_args.world_size() : 1;
   OptimizationConfig optimization_config;
   optimization_config.enable_fused_mla_kernel = enable_fused_mla_kernel;
   optimization_config.enable_fused_indexer_qk = false;
-  DeepseekV2Attention attention(
-      args, quant_args, effective_parallel_args, options, optimization_config);
+  DeepseekV2Attention attention(args,
+                                quant_args,
+                                effective_parallel_args,
+                                options,
+                                optimization_config,
+                                enable_indexer);
   attention->load_state_dict(state_dict);
   const int32_t token_num = static_cast<int32_t>(tokens.numel());
   AttentionMetadata metadata =
@@ -815,11 +828,14 @@ AttentionRunResult run_attention_prefill_once(
     }
   }
   AttentionRunResult result;
-  result.local_output = attention->forward(local_positions,
-                                           local_hidden_states,
-                                           metadata,
-                                           kv_cache,
-                                           sp_ctx ? &sp_ctx.value() : nullptr);
+  auto attention_result = attention->forward(local_positions,
+                                             local_hidden_states,
+                                             metadata,
+                                             kv_cache,
+                                             sp_ctx ? &sp_ctx.value() : nullptr,
+                                             topk_transfer);
+  result.local_output = std::move(attention_result.output);
+  result.layout = attention_result.layout;
   result.global_output = result.local_output;
   result.used_sp = sp_ctx.has_value();
   result.local_token_num =
@@ -1087,6 +1103,137 @@ int32_t run_attention_prefill_sp_test_child(int32_t rank,
                           : "DeepseekV2Attention prefill sp output");
         return 0;
       });
+}
+
+int32_t run_attention_prefill_sp_topk_share_test_child(
+    int32_t rank,
+    int32_t world_size,
+    int32_t port,
+    const std::string& host) {
+  try {
+    const int32_t dev_count = xllm::Platform::device_count();
+    if (dev_count < world_size) {
+      LOG(WARNING) << "Rank " << rank << ": insufficient devices. Skipping.";
+      return EXIT_CODE_SKIP;
+    }
+
+    KVCacheConfig::get_instance().block_size(16);
+    const int32_t device_index = rank % dev_count;
+    xllm::Device xllm_device(device_index);
+    xllm_device.set_device();
+    torch::Device device = xllm_device.unwrap();
+    auto process_group =
+        create_test_process_group(rank, world_size, port, host, device);
+    CHECK(process_group) << "Rank " << rank
+                         << ": failed to create process group";
+    auto self_group = create_test_self_group(rank, world_size, host, device);
+    CHECK(self_group) << "Rank " << rank << ": failed to create self group";
+
+    ParallelArgs parallel_args(rank, world_size, process_group.get());
+    parallel_args.tp_group_ = process_group.get();
+    parallel_args.single_rank_group_ = self_group.get();
+    parallel_args.cp_group_ = process_group.get();
+
+    auto options = torch::TensorOptions()
+                       .dtype(torch::kBFloat16)
+                       .device(device)
+                       .requires_grad(false);
+    ModelArgs model_args = create_glm5_attention_model_args();
+    QuantArgs quant_args = create_default_quant_args();
+    StateDict state_dict = create_attention_state_dict(model_args, options);
+
+    constexpr int32_t kSeqLen = 4;
+    torch::Tensor tokens =
+        torch::arange(kSeqLen, options.dtype(torch::kInt32).device(device));
+    torch::Tensor hidden_states = seeded_tensor(
+        "attention_multi_device/glm52_cp_topk_share_hidden_states",
+        {kSeqLen, model_args.hidden_size()},
+        torch::kBFloat16,
+        device);
+    torch::Tensor positions =
+        torch::arange(kSeqLen, options.dtype(torch::kInt32).device(device));
+
+    KVCache full_layer_cache = create_decode_kv_cache(model_args, options);
+    full_layer_cache.get_k_cache().zero_();
+    DsaTopkTransfer full_transfer = DsaTopkTransfer::capture_output();
+    AttentionRunResult full_result =
+        run_attention_prefill_once(model_args,
+                                   quant_args,
+                                   parallel_args,
+                                   options,
+                                   state_dict,
+                                   tokens,
+                                   positions,
+                                   hidden_states,
+                                   full_layer_cache,
+                                   /*enable_full_weight_path=*/true,
+                                   /*enable_fused_mla_kernel=*/false,
+                                   BatchForwardType::PREFILL,
+                                   /*prefix_len=*/0,
+                                   /*build_cp_context=*/true,
+                                   &full_transfer);
+    xllm_device.synchronize_default_stream();
+
+    const DsaTopkState* full_topk = full_transfer.output();
+    CHECK(full_topk != nullptr)
+        << "GLM5.2 PCP Full layer must publish rank-local DSA top-k state";
+    CHECK_EQ(full_topk->block_tables().size(0), kSeqLen / world_size)
+        << "GLM5.2 PCP top-k rows must match rank-local query rows";
+    CHECK_EQ(full_topk->block_tables().size(1), model_args.index_topk())
+        << "GLM5.2 PCP top-k width mismatch";
+    CHECK(torch::isfinite(full_result.local_output.to(torch::kFloat32))
+              .all()
+              .item<bool>())
+        << "GLM5.2 PCP Full layer output must be finite";
+
+    KVCache shared_layer_cache = create_decode_kv_cache(model_args, options);
+    shared_layer_cache.get_k_cache().zero_();
+    DsaTopkTransfer shared_transfer =
+        DsaTopkTransfer::reuse_and_capture(*full_topk);
+    AttentionRunResult shared_result =
+        run_attention_prefill_once(model_args,
+                                   quant_args,
+                                   parallel_args,
+                                   options,
+                                   state_dict,
+                                   tokens,
+                                   positions,
+                                   hidden_states,
+                                   shared_layer_cache,
+                                   /*enable_full_weight_path=*/true,
+                                   /*enable_fused_mla_kernel=*/false,
+                                   BatchForwardType::PREFILL,
+                                   /*prefix_len=*/0,
+                                   /*build_cp_context=*/true,
+                                   &shared_transfer,
+                                   /*enable_indexer=*/false);
+    xllm_device.synchronize_default_stream();
+
+    const DsaTopkState* reused_topk = shared_transfer.output();
+    CHECK(reused_topk != nullptr)
+        << "GLM5.2 PCP Shared layer must publish the state it consumed";
+    CHECK_EQ(reused_topk->block_tables().data_ptr(),
+             full_topk->block_tables().data_ptr())
+        << "GLM5.2 PCP Shared layer must reuse the Full layer block table "
+           "storage";
+    CHECK_EQ(reused_topk->context_lens().data_ptr(),
+             full_topk->context_lens().data_ptr())
+        << "GLM5.2 PCP Shared layer must reuse the Full layer context lens "
+           "storage";
+    CHECK(torch::isfinite(shared_result.local_output.to(torch::kFloat32))
+              .all()
+              .item<bool>())
+        << "GLM5.2 PCP Shared layer output must be finite";
+    check_tensors_close(shared_result.global_output,
+                        full_result.global_output,
+                        /*rtol=*/0.0,
+                        /*atol=*/0.0,
+                        "GLM5.2 PCP Full/Shared output");
+    return 0;
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "Rank " << rank << ": Exception: " << e.what();
+    return 1;
+  }
 }
 
 int32_t run_attention_prefill_sp_baseline_test_child(int32_t rank,
@@ -1386,12 +1533,14 @@ int32_t run_attention_topk_share_test_child(int32_t rank,
         // the attention output.
         AttentionMetadata full_metadata = create_decode_metadata(options);
         DsaTopkTransfer full_transfer = DsaTopkTransfer::capture_output();
-        torch::Tensor full_out = full_attention->forward(positions,
-                                                         hidden_states,
-                                                         full_metadata,
-                                                         full_kv_cache,
-                                                         /*sp_ctx=*/nullptr,
-                                                         &full_transfer);
+        torch::Tensor full_out = full_attention
+                                     ->forward(positions,
+                                               hidden_states,
+                                               full_metadata,
+                                               full_kv_cache,
+                                               /*sp_ctx=*/nullptr,
+                                               &full_transfer)
+                                     .output;
         xllm_device.synchronize_default_stream();
 
         const DsaTopkState* full_topk = full_transfer.output();
@@ -1425,12 +1574,14 @@ int32_t run_attention_topk_share_test_child(int32_t rank,
         CHECK_EQ(shared_input->context_lens().data_ptr(),
                  full_context_lens.data_ptr())
             << "Shared relay must reuse the Full layer's context lens";
-        torch::Tensor shared_out = shared_attention->forward(positions,
-                                                             hidden_states,
-                                                             shared_metadata,
-                                                             shared_kv_cache,
-                                                             /*sp_ctx=*/nullptr,
-                                                             &shared_transfer);
+        torch::Tensor shared_out = shared_attention
+                                       ->forward(positions,
+                                                 hidden_states,
+                                                 shared_metadata,
+                                                 shared_kv_cache,
+                                                 /*sp_ctx=*/nullptr,
+                                                 &shared_transfer)
+                                       .output;
         xllm_device.synchronize_default_stream();
 
         CHECK(shared_transfer.output() == nullptr)
@@ -1583,12 +1734,14 @@ int32_t run_attention_topk_share_bucket_test_child(int32_t rank,
         AttentionMetadata full_metadata =
             create_batch_decode_metadata(options, kBucketTokens);
         DsaTopkTransfer full_transfer = DsaTopkTransfer::capture_output();
-        torch::Tensor full_out = full_attention->forward(positions,
-                                                         hidden_states,
-                                                         full_metadata,
-                                                         full_kv_cache,
-                                                         /*sp_ctx=*/nullptr,
-                                                         &full_transfer);
+        torch::Tensor full_out = full_attention
+                                     ->forward(positions,
+                                               hidden_states,
+                                               full_metadata,
+                                               full_kv_cache,
+                                               /*sp_ctx=*/nullptr,
+                                               &full_transfer)
+                                     .output;
         xllm_device.synchronize_default_stream();
 
         const DsaTopkState* full_topk = full_transfer.output();
@@ -1614,12 +1767,14 @@ int32_t run_attention_topk_share_bucket_test_child(int32_t rank,
         CHECK_EQ(shared_input->block_tables().data_ptr(),
                  full_block_tables.data_ptr())
             << "Shared relay must reuse the Full layer's sparse block table";
-        torch::Tensor shared_out = shared_attention->forward(positions,
-                                                             hidden_states,
-                                                             shared_metadata,
-                                                             shared_kv_cache,
-                                                             /*sp_ctx=*/nullptr,
-                                                             &shared_transfer);
+        torch::Tensor shared_out = shared_attention
+                                       ->forward(positions,
+                                                 hidden_states,
+                                                 shared_metadata,
+                                                 shared_kv_cache,
+                                                 /*sp_ctx=*/nullptr,
+                                                 &shared_transfer)
+                                       .output;
         xllm_device.synchronize_default_stream();
 
         CHECK(shared_transfer.output() == nullptr)
@@ -1751,6 +1906,18 @@ class AttentionMultiDeviceTest : public ::testing::Test {
         "Attention multi-device SP prefill test failed.");
   }
 
+  void run_prefill_sp_topk_share_test() {
+    run_child_test(
+        [](int32_t rank,
+           int32_t world_size,
+           int32_t port,
+           const std::string& host) {
+          return run_attention_prefill_sp_topk_share_test_child(
+              rank, world_size, port, host);
+        },
+        "GLM5.2 PCP cross-layer top-k share test failed.");
+  }
+
   void run_chunked_test() {
     run_child_test(
         [](int32_t rank,
@@ -1839,6 +2006,10 @@ TEST_F(AttentionMultiDeviceTest, PrefillShortSeqFallsBackToReplicatedPath) {
 
 TEST_F(AttentionMultiDeviceTest, Glm5PrefillSpRestoresToTpBaseline) {
   run_prefill_sp_test(/*use_glm5_args=*/true);
+}
+
+TEST_F(AttentionMultiDeviceTest, Glm52PrefillCpReusesRankLocalTopkState) {
+  run_prefill_sp_topk_share_test();
 }
 
 TEST_F(AttentionMultiDeviceTest,

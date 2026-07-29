@@ -129,7 +129,7 @@ torch::Tensor Qwen3NextAttentionImpl::build_mrope_cos_sin(
 #if defined(USE_CUDA) || defined(USE_MUSA)
   // The fused split_qkv_rmsnorm_mrope kernel is currently NPU-only via
   // TileLang -- `has_split_qkv_rmsnorm_mrope_specialization()` returns false
-  // on USE_CUDA + XLLM_TORCH_MUSA (see ops_api.cpp), so `use_fused_qkv_` is
+  // on USE_CUDA + USE_MUSA (see ops_api.cpp), so `use_fused_qkv_` is
   // always false on this platform and the precomputed mrope_cos_sin tensor
   // produced here is never consulted by forward() -- it falls through to the
   // standalone `rotary_emb_->forward(positions, q, k)` path instead.

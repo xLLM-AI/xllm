@@ -167,13 +167,4 @@ inline DsaTopkShareDecision get_dsa_topk_share_decision(const ModelArgs& args,
   return topk_share_plan.decision_for(layer_id);
 }
 
-// Prefill context parallelism combined with a DSA cross-layer top-k share plan
-// is not supported yet: CP shards the sparse block table per local shard, which
-// is incompatible with cross-layer top-k reuse.
-inline bool cp_conflicts_with_dsa_topk_share(
-    bool enable_prefill_cp,
-    const DsaTopkSharePlan& topk_share_plan) {
-  return enable_prefill_cp && topk_share_plan.has_reuse();
-}
-
 }  // namespace xllm::layer

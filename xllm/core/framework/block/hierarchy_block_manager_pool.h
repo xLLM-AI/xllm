@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <unordered_map>
+
 #include "block_manager_pool.h"
 #include "distributed_runtime/engine.h"
 #include "util/blockingconcurrentqueue.h"
@@ -74,7 +76,15 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
 
  private:
   Engine* engine_;
-  std::vector<std::unique_ptr<BlockManager>> host_block_managers_;
+  // Per-dp host block manager map keyed by BlockType. Today only
+  // BlockType::KV is populated; SWA / C4 / C128 slots are reserved so future
+  // host offload of the DSV4 composite shape can plug in without touching
+  // the container. Participation follows the same role-gated predicate as
+  // device prefix cache -- see composite_block_manager.cpp
+  // ::leaf_participates_in_prefix_cache and
+  // xllm_docs/pd_d_side_skip_swa_linear_prefix_cache.md §11.
+  std::vector<std::unordered_map<BlockType, std::unique_ptr<BlockManager>>>
+      host_block_managers_;
 
   // BlockTransferInfo per step
   std::vector<std::vector<BlockTransferInfo>> load_block_transfer_infos_;

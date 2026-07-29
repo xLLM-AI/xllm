@@ -76,8 +76,6 @@ class HelpFormatter {
   static std::string generate_help() {
     std::ostringstream oss;
 
-    oss << "USAGE: xllm --model <PATH> [OPTIONS]\n\n";
-
     oss << "REQUIRED OPTIONS:\n";
     oss << "  --model <PATH>: Path to the model directory. This is "
            "the only required flag.\n\n";

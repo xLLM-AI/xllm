@@ -175,7 +175,7 @@ void WorkerService::step(ForwardInput& fwd_input,
                          torch::Tensor& top_tokens,
                          torch::Tensor& top_logprobs,
                          torch::Tensor& embeddings,
-                         std::vector<torch::Tensor>& mm_embeddings,
+                         std::vector<std::vector<torch::Tensor>>& mm_embeddings,
                          std::vector<torch::Tensor>& dit_images,
                          std::vector<std::string>& dit_text_output,
                          torch::Tensor& expert_load_data,
@@ -216,9 +216,14 @@ void WorkerService::step(ForwardInput& fwd_input,
 
           mm_embeddings.clear();
           mm_embeddings.reserve(sample_output.mm_embeddings.size());
-          for (auto mm_embedding : sample_output.mm_embeddings) {
-            mm_embeddings.emplace_back(
-                safe_to(mm_embedding, torch::kCPU, /*non_blocking=*/true));
+          for (const auto& seq_mm_embeddings : sample_output.mm_embeddings) {
+            std::vector<torch::Tensor> seq_out;
+            seq_out.reserve(seq_mm_embeddings.size());
+            for (const auto& mm_embedding : seq_mm_embeddings) {
+              seq_out.emplace_back(
+                  safe_to(mm_embedding, torch::kCPU, /*non_blocking=*/true));
+            }
+            mm_embeddings.emplace_back(std::move(seq_out));
           }
 
           dit_images.clear();
@@ -318,7 +323,7 @@ void WorkerService::create_polling_shm_thread(
           torch::Tensor top_tokens;
           torch::Tensor top_logprobs;
           torch::Tensor embeddings;
-          std::vector<torch::Tensor> mm_embeddings;
+          std::vector<std::vector<torch::Tensor>> mm_embeddings;
           std::vector<torch::Tensor> dit_images;
           std::vector<std::string> dit_text_output;
           torch::Tensor expert_load_data;
@@ -747,7 +752,7 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
         torch::Tensor top_tokens;
         torch::Tensor top_logprobs;
         torch::Tensor embeddings;
-        std::vector<torch::Tensor> mm_embeddings;
+        std::vector<std::vector<torch::Tensor>> mm_embeddings;
         std::vector<torch::Tensor> dit_images;
         std::vector<std::string> dit_text_output;
         torch::Tensor expert_load_data;
@@ -777,6 +782,7 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
                                 top_tokens,
                                 top_logprobs,
                                 embeddings,
+                                mm_embeddings,
                                 expert_load_data,
                                 prepared_layer_id,
                                 src_seq_idxes,
@@ -901,11 +907,13 @@ void WorkerService::GetLastStepResult(
           if (next_tokens.defined() || !dit_images.empty() ||
               !dit_text_output.empty() ||
               ::xllm::EPLBConfig::get_instance().enable_eplb()) {
+            const std::vector<std::vector<torch::Tensor>> mm_embeddings;
             forward_output_to_proto(next_tokens,
                                     logprobs,
                                     top_tokens,
                                     top_logprobs,
                                     embeddings,
+                                    mm_embeddings,
                                     expert_load_data,
                                     prepared_layer_id,
                                     src_seq_idxes,

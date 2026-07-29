@@ -159,6 +159,8 @@ class Request : public RequestBase {
 
   void record_num_prefix_cache_tokens();
 
+  void record_num_prefix_cache_tokens(size_t num_prefix_cache_tokens);
+
   size_t num_prefix_cache_tokens() const { return num_prefix_cache_tokens_; }
 
  private:

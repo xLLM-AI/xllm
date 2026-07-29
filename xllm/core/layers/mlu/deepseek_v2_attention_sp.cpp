@@ -27,79 +27,95 @@ torch::Tensor DeepseekV2AttentionImpl::forward_sp(
     const AttentionMetadata& attn_metadata,
     const v32_cp::DeepseekV32CPContext& sp_ctx,
     KVCache& kv_cache,
-    bool is_prefill_or_chunked_prefill) {
-  CHECK(can_use_sp())
+    bool is_prefill_or_chunked_prefill,
+    DsaTopkTransfer* topk_transfer) {
+  CHECK(can_use_sp(topk_transfer))
       << "deepseek_v32 sequence parallel requires replicated attention "
-         "weights and lighting indexer.";
+         "weights plus either a lighting indexer or reused top-k state.";
   CHECK(is_prefill_or_chunked_prefill)
       << "deepseek_v32 sequence parallel only supports prefill batches.";
   auto k_cache_scale = kv_cache.get_k_cache_scale();
-  auto index_cache_scale = kv_cache.get_indexer_cache_scale();
   auto query_prep = prep_query(hidden_states, full_heads());
 
-  std::optional<torch::Tensor> new_block_tables = std::nullopt;
-  std::optional<torch::Tensor> new_context_lens = std::nullopt;
+  std::optional<DsaTopkState> topk_state;
   v32_cp::PaddedGatherHandle mla_handle;
-  torch::Tensor index_cache = kv_cache.get_index_cache();
   IndexerSPPreOut index_pre;
   v32_cp::PaddedGatherHandle index_handle;
+  const DsaTopkState* reused_topk =
+      topk_transfer != nullptr ? topk_transfer->input() : nullptr;
+  const bool compute_topk = !attn_metadata.is_dummy && reused_topk == nullptr;
 
   Device device(hidden_states.device());
   if (sp_comm_stream_ == nullptr) {
     sp_comm_stream_ = device.get_stream_from_pool();
   }
-  index_pre = indexer_->sp_pre(hidden_states,
-                               query_prep.q_norm,
-                               positions,
-                               sp_ctx.local_attn_metadata,
-                               sp_ctx,
-                               /*quantize_output=*/false);
-  auto compute_stream = device.current_stream();
-  sp_comm_stream_->wait_stream(*compute_stream);
-  {
-    torch::StreamGuard stream_guard = sp_comm_stream_->set_stream_guard();
-    index_handle = indexer_->sp_comm(index_pre.k_local, sp_ctx);
+  if (compute_topk) {
+    index_pre = indexer_->sp_pre(hidden_states,
+                                 query_prep.q_norm,
+                                 positions,
+                                 sp_ctx.local_attn_metadata,
+                                 sp_ctx,
+                                 /*quantize_output=*/false);
+    auto compute_stream = device.current_stream();
+    sp_comm_stream_->wait_stream(*compute_stream);
+    {
+      torch::StreamGuard stream_guard = sp_comm_stream_->set_stream_guard();
+      index_handle = indexer_->sp_comm(index_pre.k_local, sp_ctx);
+    }
   }
 
   auto mla_inputs =
       build_sp_mla_inputs(hidden_states, positions, query_prep, sp_ctx);
 
-  torch::Tensor k_gathered =
-      indexer_->sp_wait_k(index_pre.k_local, index_handle, sp_ctx);
-  compute_stream = device.current_stream();
+  torch::Tensor k_gathered;
+  if (compute_topk) {
+    k_gathered = indexer_->sp_wait_k(index_pre.k_local, index_handle, sp_ctx);
+  }
+  auto compute_stream = device.current_stream();
   sp_comm_stream_->wait_stream(*compute_stream);
   {
     torch::StreamGuard stream_guard = sp_comm_stream_->set_stream_guard();
     mla_handle = sp_mla_comm(mla_inputs.k_input, sp_ctx);
   }
-  auto index_out = indexer_->sp_post(index_pre,
-                                     k_gathered,
-                                     index_cache,
-                                     attn_metadata,
-                                     sp_ctx.gathered_slot_mapping,
-                                     sp_ctx,
-                                     index_cache_scale);
-  new_block_tables = std::get<0>(index_out);
-  new_context_lens = std::get<1>(index_out);
+  if (compute_topk) {
+    torch::Tensor index_cache = kv_cache.get_index_cache();
+    auto index_cache_scale = kv_cache.get_indexer_cache_scale();
+    auto index_out = indexer_->sp_post(index_pre,
+                                       k_gathered,
+                                       index_cache,
+                                       attn_metadata,
+                                       sp_ctx.gathered_slot_mapping,
+                                       sp_ctx,
+                                       index_cache_scale);
+    topk_state.emplace(std::get<0>(index_out), std::get<1>(index_out));
+  }
   finish_sp_k_gather(mla_inputs, mla_handle, sp_ctx);
 
-  AttentionMetadata attn_indexer_metadata =
-      build_mla_attention_metadata(positions,
-                                   hidden_states,
-                                   mla_inputs.q_norm,
-                                   mla_inputs.k_input,
-                                   attn_metadata,
-                                   kv_cache,
-                                   k_cache_scale,
-                                   is_prefill_or_chunked_prefill,
-                                   sp_ctx.gathered_slot_mapping,
-                                   new_block_tables,
-                                   new_context_lens);
-  attn_indexer_metadata.q_cu_seq_lens =
-      sp_ctx.local_attn_metadata.q_cu_seq_lens;
-  attn_indexer_metadata.max_query_len =
-      sp_ctx.local_attn_metadata.max_query_len;
-  auto [attn_output_local, output_lse] = attn_(attn_indexer_metadata,
+  if (attn_metadata.is_dummy) {
+    topk_state.reset();
+  } else {
+    if (reused_topk != nullptr) {
+      topk_state = *reused_topk;
+    }
+    CHECK(topk_state.has_value())
+        << "DSA sequence-parallel attention requires top-k state.";
+  }
+
+  update_mla_k_cache(mla_inputs.k_input,
+                     attn_metadata,
+                     kv_cache,
+                     k_cache_scale,
+                     is_prefill_or_chunked_prefill,
+                     sp_ctx.gathered_slot_mapping);
+  if (topk_transfer != nullptr) {
+    topk_transfer->complete(topk_state);
+  }
+
+  AttentionMetadata kernel_metadata =
+      build_mla_attention_metadata(attn_metadata, topk_state);
+  kernel_metadata.q_cu_seq_lens = sp_ctx.local_attn_metadata.q_cu_seq_lens;
+  kernel_metadata.max_query_len = sp_ctx.local_attn_metadata.max_query_len;
+  auto [attn_output_local, output_lse] = attn_(kernel_metadata,
                                                mla_inputs.q_input,
                                                mla_inputs.k_input,
                                                mla_inputs.v_input,

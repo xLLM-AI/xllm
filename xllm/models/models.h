@@ -93,6 +93,10 @@ limitations under the License.
 #include "llm/qwen2.h"      // IWYU pragma: keep
 #include "llm/qwen3.h"      // IWYU pragma: keep
 #include "llm/qwen3_moe.h"  // IWYU pragma: keep
+#elif defined(USE_MUSA)
+#include "llm/qwen3_5.h"      // IWYU pragma: keep
+#include "llm/qwen3_5_mtp.h"  // IWYU pragma: keep
+#include "llm/qwen3_next.h"   // IWYU pragma: keep
 #elif defined(USE_CUDA)
 #include "dit/pipelines/pipeline_cola_dlm.h"            // IWYU pragma: keep
 #include "dit/pipelines/pipeline_longcat_audiodit.h"    // IWYU pragma: keep
@@ -107,25 +111,24 @@ limitations under the License.
 #include "vlm/qwen2_vl.h"                               // IWYU pragma: keep
 #include "vlm/qwen3_vl.h"                               // IWYU pragma: keep
 #include "vlm/qwen3_vl_moe.h"                           // IWYU pragma: keep
-#elif defined(USE_MUSA)
-#include "llm/musa/qwen3.h"  // IWYU pragma: keep
 #elif defined(USE_DCU)
-#include "dit/pipelines/pipeline_flux.h"
-#include "dit/pipelines/pipeline_longcat_image.h"
-#include "dit/pipelines/pipeline_qwenimage_edit_plus.h"
-#include "dit/pipelines/pipeline_wan_i2v.h"
-#include "llm/deepseek_v2.h"  // IWYU pragma: keep
-#include "llm/deepseek_v3.h"  // IWYU pragma: keep
-#include "llm/mimo.h"         // IWYU pragma: keep
-#include "llm/mimo_mtp.h"     // IWYU pragma: keep
-#include "llm/qwen2.h"
-#include "llm/qwen3.h"
-#include "llm/qwen3_moe.h"
-#include "vlm/qwen2_5_vl.h"
-#include "vlm/qwen2_vl.h"
-#include "vlm/qwen3_5.h"
-#include "vlm/qwen3_vl.h"
-#include "vlm/qwen3_vl_moe.h"
+#include "dit/pipelines/pipeline_flux.h"                 // IWYU pragma: keep
+#include "dit/pipelines/pipeline_longcat_image.h"        // IWYU pragma: keep
+#include "dit/pipelines/pipeline_qwenimage_edit_plus.h"  // IWYU pragma: keep
+#include "dit/pipelines/pipeline_wan_i2v.h"              // IWYU pragma: keep
+#include "llm/deepseek_v2.h"                             // IWYU pragma: keep
+#include "llm/deepseek_v3.h"                             // IWYU pragma: keep
+#include "llm/mimo.h"                                    // IWYU pragma: keep
+#include "llm/mimo_mtp.h"                                // IWYU pragma: keep
+#include "llm/minimax_m2.h"                              // IWYU pragma: keep
+#include "llm/qwen2.h"                                   // IWYU pragma: keep
+#include "llm/qwen3.h"                                   // IWYU pragma: keep
+#include "llm/qwen3_moe.h"                               // IWYU pragma: keep
+#include "vlm/qwen2_5_vl.h"                              // IWYU pragma: keep
+#include "vlm/qwen2_vl.h"                                // IWYU pragma: keep
+#include "vlm/qwen3_5.h"                                 // IWYU pragma: keep
+#include "vlm/qwen3_vl.h"                                // IWYU pragma: keep
+#include "vlm/qwen3_vl_moe.h"                            // IWYU pragma: keep
 #else
 #error "Unsupported device type, only support NPU, CUDA, MLU, ILU and MUSA now."
 #endif

@@ -42,8 +42,7 @@ limitations under the License.
 #include "core/framework/model/mtp_topk_state.h"
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "framework/batch/batch_forward_type.h"
-#include "framework/parallel_state/npu_cp_ep_padding.h"
-#include "framework/parallel_state/npu_cp_prepare.h"
+#include "framework/parallel_state/npu_cp_plan.h"
 #include "framework/parallel_state/npu_dp_ep_padding.h"
 #include "runtime/dit_forward_params.h"
 #include "util/hash_util.h"
@@ -381,9 +380,8 @@ struct AttentionDeviceInput {
   torch::Tensor ring_cur_seqlen;
   torch::Tensor ring_cache_seqlen;
 
-  // Per-rank prefix slot index for KV-split prefix AllGather (see
-  // WorkerImpl::compute_in_prefix_slots). Must propagate in to(device) because
-  // nested worker paths skip recomputation when cp_partitioned is true.
+  // Per-rank prefix slot indices for KV-split prefix AllGather. NpuCpPlan
+  // supplies this graph input with the rest of the CP attention metadata.
   torch::Tensor in_prefix_slots;
 
   AttentionDeviceInput to(const torch::Device& device) const {
@@ -806,8 +804,7 @@ struct ParallelInput {
   std::vector<int32_t> dp_is_decode;
 
   DpEpPaddingData dp_ep_padding_data;
-  CpEpPaddingData cp_ep_padding_data;
-  CpPrefillInputs cp_prefill_inputs;
+  NpuCpPlan cp_plan;
 
 #if defined(USE_MLU)
   std::shared_ptr<MLULayerSynchronizerImpl> layer_synchronizer = nullptr;
@@ -828,29 +825,7 @@ struct ParallelInput {
     out.dp_global_token_nums = dp_global_token_nums;
     out.dp_is_decode = dp_is_decode;
     out.dp_ep_padding_data = dp_ep_padding_data;
-    out.cp_ep_padding_data
-        .attn_padding_idx(
-            safe_to(cp_ep_padding_data.attn_padding_idx(), device, true))
-        .attn_unpadding_idx(
-            safe_to(cp_ep_padding_data.attn_unpadding_idx(), device, true))
-        .ffn_padding_idx(
-            safe_to(cp_ep_padding_data.ffn_padding_idx(), device, true))
-        .ffn_unpadding_idx(
-            safe_to(cp_ep_padding_data.ffn_unpadding_idx(), device, true))
-        .lm_head_skip_padding_token_indices(
-            safe_to(cp_ep_padding_data.lm_head_skip_padding_token_indices(),
-                    device,
-                    true))
-        .gather_prenorm_idx(
-            safe_to(cp_ep_padding_data.gather_prenorm_idx(), device, true))
-        .padding_idx(safe_to(cp_ep_padding_data.padding_idx(), device, true))
-        .un_padding_idx(
-            safe_to(cp_ep_padding_data.un_padding_idx(), device, true))
-        .dynamic_ep_idx(
-            safe_to(cp_ep_padding_data.dynamic_ep_idx(), device, true))
-        .moe_idx(safe_to(cp_ep_padding_data.moe_idx(), device, true))
-        .expert_array(safe_to(cp_ep_padding_data.expert_array(), device, true));
-    out.cp_prefill_inputs = cp_prefill_inputs.to(device);
+    out.cp_plan = cp_plan.to(device);
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
     out.layer_synchronizer = layer_synchronizer;
 #endif

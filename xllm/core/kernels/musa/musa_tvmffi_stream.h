@@ -42,7 +42,7 @@ namespace ffi = tvm::ffi;
 namespace xllm::kernel::cuda {
 
 inline bool is_torch_musa_device(const torch::Device& device) {
-#if defined(XLLM_TORCH_MUSA)
+#if defined(USE_MUSA)
   return device.is_privateuseone() || device.is_cuda();
 #else
   return device.is_privateuseone();

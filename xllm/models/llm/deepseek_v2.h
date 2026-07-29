@@ -114,26 +114,13 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     auto& attn_metadata = *(modified_input_params.attn_metadata);
     torch::Tensor hidden_states = embed_tokens_(tokens);
     std::optional<torch::Tensor> residual;
-    for (size_t i = 0; i < layers_.size(); i++) {
-      // NOTE: we will remove this until refactor flashinfer API
-#if defined(USE_CUDA) || defined(USE_MUSA)
-      attn_metadata.plan_info->layer_id = i;
-#endif
-      auto& layer = layers_[i];
-      prepare_decoder_layer_for_forward(i, layer, attn_metadata);
-
-      hidden_states = forward_decoder_layer(i,
-                                            layer,
-                                            hidden_states,
-                                            residual,
-                                            positions,
-                                            attn_metadata,
-                                            kv_caches[i],
-                                            modified_input_params);
-      if (!modified_input_params.record_layer(static_cast<uint32_t>(i),
-                                              hidden_states.device())) {
-        return ModelOutput();
-      }
+    if (!run_decoder_layers(hidden_states,
+                            residual,
+                            positions,
+                            attn_metadata,
+                            kv_caches,
+                            modified_input_params)) {
+      return ModelOutput();
     }
     auto [h, res] = norm_(hidden_states, residual);
     return ModelOutput(h, res);
@@ -197,9 +184,36 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
                  input_params);
   }
 
-  layer::WordEmbedding& embed_mod() { return embed_tokens_; }
+  bool run_decoder_layers(torch::Tensor& hidden_states,
+                          std::optional<torch::Tensor>& residual,
+                          torch::Tensor& positions,
+                          layer::AttentionMetadata& attn_metadata,
+                          std::vector<KVCache>& kv_caches,
+                          const ModelInputParams& input_params) {
+    for (size_t i = 0; i < layers_.size(); ++i) {
+      // NOTE: we will remove this until refactor flashinfer API
+#if defined(USE_CUDA) || defined(USE_MUSA)
+      attn_metadata.plan_info->layer_id = i;
+#endif
+      layer::DeepseekV2DecoderLayer& decoder_layer = layers_[i];
+      prepare_decoder_layer_for_forward(i, decoder_layer, attn_metadata);
+      hidden_states = forward_decoder_layer(i,
+                                            decoder_layer,
+                                            hidden_states,
+                                            residual,
+                                            positions,
+                                            attn_metadata,
+                                            kv_caches[i],
+                                            input_params);
+      if (!input_params.record_layer(static_cast<uint32_t>(i),
+                                     hidden_states.device())) {
+        return false;
+      }
+    }
+    return true;
+  }
 
-  std::vector<layer::DeepseekV2DecoderLayer>& layers_ref() { return layers_; }
+  layer::WordEmbedding& embed_mod() { return embed_tokens_; }
 
   layer::RMSNorm& norm_mod() { return norm_; }
 

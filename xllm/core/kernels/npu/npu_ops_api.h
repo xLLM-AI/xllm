@@ -23,6 +23,10 @@ limitations under the License.
 
 #include "custom_functions_npu/atb_common.h"
 
+namespace xllm {
+class ProcessGroup;
+}  // namespace xllm
+
 namespace xllm::kernel::npu {
 
 void reshape_paged_cache(torch::Tensor& key,
@@ -88,6 +92,14 @@ void batch_decode_acl_graph(const torch::Tensor& query,
 torch::Tensor matmul(const torch::Tensor& a,
                      const torch::Tensor& b,
                      const std::optional<torch::Tensor>& bias);
+
+torch::Tensor matmul_reduce_scatter(const torch::Tensor& a,
+                                    const torch::Tensor& b,
+                                    const std::optional<torch::Tensor>& bias,
+                                    ProcessGroup* process_group,
+                                    const std::string& reduce_op,
+                                    int64_t comm_turn,
+                                    const std::string& comm_mode);
 
 torch::Tensor active(const torch::Tensor& input, const std::string& act_mode);
 
@@ -369,6 +381,18 @@ torch::Tensor causal_conv1d(const torch::Tensor& x,
                             int64_t activation_mode,
                             int64_t pad_slot_id,
                             int64_t run_mode);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> causal_conv1d_qkv(
+    const torch::Tensor& x,
+    const torch::Tensor& weight,
+    const torch::Tensor& conv_state,
+    const torch::IntArrayRef query_start_loc_opt,
+    const torch::IntArrayRef cache_indices_opt,
+    const torch::IntArrayRef initial_state_mode_opt,
+    int64_t num_qk_heads,
+    int64_t num_v_heads,
+    int64_t head_k_dim,
+    int64_t head_v_dim);
 
 void causal_conv1d_out(const torch::Tensor& output,
                        const torch::Tensor& x,

@@ -68,6 +68,12 @@ torch::Tensor reduce(torch::Tensor& input, ProcessGroup* process_group);
 torch::Tensor reduce_scatter(const torch::Tensor& input,
                              ProcessGroup* process_group);
 
+// Global ranks in this rank's CP group, ordered by CP rank.
+std::vector<int32_t> compute_cp_group_ranks(int32_t global_rank,
+                                            int32_t world_size,
+                                            int32_t dp_size,
+                                            int32_t cp_size);
+
 torch::Tensor scatter(torch::Tensor input,
                       ProcessGroup* process_group,
                       int dim = -1);

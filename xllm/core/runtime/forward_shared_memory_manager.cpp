@@ -2521,6 +2521,7 @@ size_t calculate_raw_sample_output_size(const RawSampleOutput& sample) {
   for (const auto& token : sample.tokens) {
     size += calculate_raw_token_size(token);
   }
+  size += get_vector_tensor_size(sample.mm_embeddings);
   return size;
 }
 
@@ -2537,8 +2538,6 @@ size_t calculate_raw_forward_output_size(const RawForwardOutput& output) {
   size += get_vector_size(output.out_tokens);
   size += get_vector_size(output.out_logprobs);
   size += type_size<int32_t>;  // prepared_layer_id
-  // mm_embedding_data
-  size += get_vector_tensor_size(output.mm_embeddings);
   const bool has_dit_forward_output =
       !output.dit_forward_output.tensors.empty();
   size += type_size<bool>;
@@ -2567,6 +2566,7 @@ void write_raw_sample_output(char*& buffer, const RawSampleOutput& sample) {
   for (const auto& token : sample.tokens) {
     write_raw_token(buffer, token);
   }
+  write_vector_tensor(buffer, sample.mm_embeddings);
 }
 
 void read_raw_token(const char*& buffer, RawToken& token) {
@@ -2594,6 +2594,7 @@ void read_raw_sample_output(const char*& buffer, RawSampleOutput& sample) {
   for (auto& token : sample.tokens) {
     read_raw_token(buffer, token);
   }
+  read_vector_tensor(buffer, sample.mm_embeddings);
 }
 
 void deserialize_raw_forward_output(const char* buffer,
@@ -2611,8 +2612,6 @@ void deserialize_raw_forward_output(const char* buffer,
   read_vector(buffer, output.out_logprobs);
 
   read_data(buffer, output.prepared_layer_id);
-
-  read_vector_tensor(buffer, output.mm_embeddings);
 
   bool has_dit_forward_output = false;
   read_data(buffer, has_dit_forward_output);
@@ -2635,7 +2634,6 @@ void serialize_raw_forward_output(const RawForwardOutput& output,
 
   write_data(buffer, output.prepared_layer_id);
 
-  write_vector_tensor(buffer, output.mm_embeddings);
   const bool has_dit_forward_output =
       !output.dit_forward_output.tensors.empty();
   write_data(buffer, has_dit_forward_output);
@@ -2850,7 +2848,7 @@ void convert_tensor_to_raw_output(
     const torch::Tensor& top_tokens,
     const torch::Tensor& top_logprobs,
     const torch::Tensor& embeddings,
-    const std::vector<torch::Tensor>& mm_embeddings,
+    const std::vector<std::vector<torch::Tensor>>& mm_embeddings,
     const std::vector<torch::Tensor>& dit_images,
     const std::vector<std::string>& dit_text_output,
     const torch::Tensor& expert_load_data,
@@ -2894,9 +2892,11 @@ void convert_tensor_to_raw_output(
   if (embeddings.defined() && embeddings.numel() > 0) {
     num_seqs = std::max(num_seqs, static_cast<int32_t>(embeddings.size(0)));
   }
+  if (!mm_embeddings.empty()) {
+    num_seqs = std::max(num_seqs, static_cast<int32_t>(mm_embeddings.size()));
+  }
 
   raw_output.outputs.reserve(num_seqs);
-  raw_output.mm_embeddings = mm_embeddings;
   raw_output.dit_forward_output.tensors = dit_images;
   raw_output.dit_forward_output.text_output = dit_text_output;
   for (int32_t output_idx = 0; output_idx < num_seqs; ++output_idx) {
@@ -2969,6 +2969,9 @@ void convert_tensor_to_raw_output(
       }
 
       raw_sample_output.tokens.push_back(std::move(raw_token));
+    }
+    if (output_idx < static_cast<int32_t>(mm_embeddings.size())) {
+      raw_sample_output.mm_embeddings = mm_embeddings[output_idx];
     }
     raw_output.outputs.push_back(std::move(raw_sample_output));
   }
@@ -3180,7 +3183,7 @@ bool ForwardSharedMemoryManager::raw_output_write(
     const torch::Tensor& top_tokens,
     const torch::Tensor& top_logprobs,
     const torch::Tensor& embeddings,
-    const std::vector<torch::Tensor>& mm_embeddings,
+    const std::vector<std::vector<torch::Tensor>>& mm_embeddings,
     const std::vector<torch::Tensor>& dit_images,
     const std::vector<std::string>& dit_text_output,
     const torch::Tensor& expert_load_data,

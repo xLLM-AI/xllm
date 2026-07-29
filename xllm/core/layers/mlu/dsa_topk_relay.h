@@ -65,6 +65,14 @@ class DsaTopkTransfer final {
     output_ = std::move(output);
   }
 
+  void complete(const std::optional<DsaTopkState>& resolved_state) {
+    // A data-parallel dummy invocation resolves no state and publishes nothing.
+    if (!captures_output_ || !resolved_state.has_value()) {
+      return;
+    }
+    publish_output(resolved_state.value());
+  }
+
   const DsaTopkState* output() const {
     return output_.has_value() ? &output_.value() : nullptr;
   }

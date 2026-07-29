@@ -338,19 +338,18 @@ bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .enable_linear_state(enable_linear_attention)
       .enable_prefix_cache(options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
-      .hasher_type(BlockHasherType::MM);
+      .hasher_type(BlockHasherType::MM)
+      .max_seqs_per_batch(options_.max_seqs_per_batch())
+      // DECODE-side prefix cache participation is per-leaf and gated by the
+      // predicate in composite_block_manager.cpp; mirror llm_engine so a
+      // linear-attention VLM decode instance disables the LINEAR prefix cache.
+      .instance_is_decode(options_.instance_role() == InstanceRole::DECODE);
   if (enable_linear_attention) {
     // The unified linear-state slot pool spans all physical slots [0, N);
     // id 0 is reserved as padding and ids [1, N) serve live and checkpoint
     // rows interchangeably under reference counting.
     options.linear_state_num_slots(
         static_cast<int32_t>(kv_cache_cap.num_linear_state_blocks()));
-    // Checkpoint stride (one prefill chunk in tokens), captured once so the
-    // LINEAR leaf's prefix cache probes its own hash domain without reading the
-    // scheduler-config singleton per match. The CHECK above enforces it is a
-    // positive multiple of block_size when prefix cache is on.
-    options.linear_chunk_stride(::xllm::SchedulerConfig::get_instance()
-                                    .max_tokens_per_chunk_for_prefill());
   }
   kv_cache_manager_ = std::make_unique<BlockManagerPool>(options, dp_size_);
 

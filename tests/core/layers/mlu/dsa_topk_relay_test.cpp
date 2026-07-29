@@ -21,6 +21,14 @@ limitations under the License.
 namespace xllm::layer {
 namespace {
 
+DsaTopkState make_topk_state() {
+  const torch::Tensor block_tables =
+      torch::tensor({{1, 2}, {3, 4}}, torch::dtype(torch::kInt32));
+  const torch::Tensor context_lens =
+      torch::tensor({2, 1}, torch::dtype(torch::kInt32));
+  return DsaTopkState(block_tables, context_lens);
+}
+
 TEST(DsaTopkRelayTest, PublishedStateIsReusedAsOneValue) {
   DsaTopkRelay relay;
   const DsaTopkShareDecision publish_decision{
@@ -119,6 +127,51 @@ TEST(DsaTopkTransferTest, ExistingMtpStateIsReusedAndRecaptured) {
             block_tables.data_ptr());
   EXPECT_EQ(transfer.input()->context_lens().data_ptr(),
             context_lens.data_ptr());
+}
+
+TEST(DsaTopkTransferTest, CompleteSkipsResolvedStateForReuseOnly) {
+  const DsaTopkState input = make_topk_state();
+  const DsaTopkState resolved_state = make_topk_state();
+  DsaTopkTransfer transfer = DsaTopkTransfer::reuse(input);
+
+  transfer.complete(resolved_state);
+
+  EXPECT_EQ(transfer.output(), nullptr);
+}
+
+TEST(DsaTopkTransferTest, CompletePublishesResolvedStateWhenCapturing) {
+  const DsaTopkState resolved_state = make_topk_state();
+  DsaTopkTransfer transfer = DsaTopkTransfer::capture_output();
+
+  transfer.complete(resolved_state);
+
+  ASSERT_NE(transfer.output(), nullptr);
+  EXPECT_EQ(transfer.output()->block_tables().data_ptr(),
+            resolved_state.block_tables().data_ptr());
+  EXPECT_EQ(transfer.output()->context_lens().data_ptr(),
+            resolved_state.context_lens().data_ptr());
+}
+
+TEST(DsaTopkTransferTest, CompleteSkipsMissingStateWhenCapturing) {
+  DsaTopkTransfer transfer = DsaTopkTransfer::capture_output();
+
+  transfer.complete(std::nullopt);
+
+  EXPECT_EQ(transfer.output(), nullptr);
+}
+
+TEST(DsaTopkTransferTest, CompletePublishesStateWhenReusingAndCapturing) {
+  const DsaTopkState input = make_topk_state();
+  const DsaTopkState resolved_state = make_topk_state();
+  DsaTopkTransfer transfer = DsaTopkTransfer::reuse_and_capture(input);
+
+  transfer.complete(resolved_state);
+
+  ASSERT_NE(transfer.output(), nullptr);
+  EXPECT_EQ(transfer.output()->block_tables().data_ptr(),
+            resolved_state.block_tables().data_ptr());
+  EXPECT_EQ(transfer.output()->context_lens().data_ptr(),
+            resolved_state.context_lens().data_ptr());
 }
 
 TEST(DsaTopkStateTest, RejectsStateWithNonInt32Dtype) {

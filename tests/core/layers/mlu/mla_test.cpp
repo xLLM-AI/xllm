@@ -262,7 +262,8 @@ class DeepseekMLATest : public ::testing::Test {
                                 is_prefill,
                                 num_tokens);
 
-    auto output = deepseek_mla(positions, hidden_states, metadata, kv_cache);
+    auto output =
+        deepseek_mla(positions, hidden_states, metadata, kv_cache).output;
     xllm::Device device(options_.device());
     device.synchronize_default_stream();
 

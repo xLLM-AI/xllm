@@ -29,6 +29,17 @@ limitations under the License.
 
 namespace xllm {
 
+int32_t DeviceNameUtils::get_device_idx(int32_t node_rank,
+                                        int32_t nnodes,
+                                        int32_t visible_device_count) {
+  CHECK_GT(visible_device_count, 0)
+      << "At least one accelerator device must be visible.";
+  CHECK_GE(node_rank, 0) << "node_rank must be non-negative.";
+  CHECK_LT(node_rank, nnodes) << "node_rank " << node_rank
+                              << " must be less than nnodes " << nnodes << ".";
+  return node_rank % visible_device_count;
+}
+
 std::vector<torch::Device> DeviceNameUtils::parse_devices(
     const std::string& device_str) {
   std::vector<torch::Device> devices;

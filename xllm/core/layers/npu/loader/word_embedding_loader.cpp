@@ -24,12 +24,20 @@ WordEmbeddingLoader::WordEmbeddingLoader(uint64_t weight_count,
 
 void WordEmbeddingLoader::load_state_dict(const StateDict& state_dict) {
   if (dp_size_ > 1 || cp_size_ > 1) {
+    // CP-unaware, DP-aware: shard the embedding weight across the dp-local-TP
+    // group (world / dp_size = cp_size * tp_size), matching the WORD_EMBED_TP
+    // comm group built by MappingNPU. Using the CP-local TP
+    // (dp_local_tp_size_, size tp) would replicate the weight across CP.
+    // When cp_size == 1 this collapses to tp_size, so non-CP runs unchanged.
+    const int32_t cp_unaware_tp_size = parallel_args_.world_size() / dp_size_;
+    const int32_t cp_unaware_tp_rank =
+        parallel_args_.rank() % cp_unaware_tp_size;
     set_weight(state_dict,
                "weight",
                0,
                1,
-               dp_local_tp_rank_,
-               dp_local_tp_size_,
+               cp_unaware_tp_rank,
+               cp_unaware_tp_size,
                load_to_host());
   } else {
     set_weight(state_dict, "weight", 0, 1, load_to_host());

@@ -34,11 +34,6 @@ class BlockManagerPool : public KVCacheManager {
     // Total physical linear-state slots [0, N) for the unified slot pool
     // (= num_linear_state_blocks). Only used when enable_linear_state is true.
     PROPERTY(int32_t, linear_state_num_slots) = 0;
-    // Linear-state checkpoint stride in tokens (one prefill chunk), forwarded
-    // to the LINEAR leaf so its checkpoint index probes the correct hash
-    // domain. Only used when enable_linear_state is true; -1 disables the
-    // probe.
-    PROPERTY(int32_t, linear_chunk_stride) = -1;
     PROPERTY(bool, enable_prefix_cache) = true;
     PROPERTY(bool, enable_disagg_pd) = false;
     PROPERTY(bool, enable_kvcache_store) = false;
@@ -64,6 +59,11 @@ class BlockManagerPool : public KVCacheManager {
     PROPERTY(BlockHasherType, hasher_type) = BlockHasherType::TEXT;
     PROPERTY(uint32_t, num_single_blocks) = 0;
     PROPERTY(uint32_t, num_speculative_tokens) = 0;
+    // Role flag: true on the DECODE side of disaggregated PD. Forwarded to
+    // BlockManager::Options for every composite leaf; the leaf's prefix
+    // cache participation goes through the shared predicate (see
+    // composite_block_manager.cpp::leaf_participates_in_prefix_cache).
+    PROPERTY(bool, instance_is_decode) = false;
   };
 
   explicit BlockManagerPool(const Options& options, int32_t dp_size = 1);

@@ -21,10 +21,19 @@ include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
 # Set warning-as-error for xllm code (third-party headers are marked as SYSTEM)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  add_compile_options(
-    $<$<COMPILE_LANGUAGE:CXX>:-Werror>
-    $<$<COMPILE_LANGUAGE:C>:-Werror>
-  )
+  if(USE_MUSA)
+    add_compile_options(
+      $<$<COMPILE_LANGUAGE:CXX>:-Wno-defaulted-function-deleted>
+      $<$<COMPILE_LANGUAGE:CXX>:-Wno-sign-conversion>
+      $<$<COMPILE_LANGUAGE:CXX>:-Wno-inconsistent-missing-override>
+      $<$<COMPILE_LANGUAGE:CXX>:-Wno-conversion>
+    )
+  else()
+    add_compile_options(
+      $<$<COMPILE_LANGUAGE:CXX>:-Werror>
+      $<$<COMPILE_LANGUAGE:C>:-Werror>
+    )
+  endif()
 
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_compile_options(
@@ -107,8 +116,14 @@ if(USE_MSPTI)
   list(APPEND COMMON_LIBS mspti)
 endif()
 target_link_libraries(xllm PUBLIC ${COMMON_LIBS})
-if (USE_MUSA)
+if(USE_MUSA)
   target_link_libraries(xllm PUBLIC atomic musa_python torch_cpu c10)
+endif()
+
+if(USE_MUSA)
+  target_link_options(xllm PRIVATE
+    "LINKER:--whole-archive,$<TARGET_FILE:runtime>,--no-whole-archive"
+  )
 endif()
 
 # install xllm

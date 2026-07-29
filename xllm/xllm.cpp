@@ -17,7 +17,13 @@ limitations under the License.
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <pybind11/embed.h>
+namespace py = pybind11;
 #include <torch/torch.h>
+
+#include <algorithm>
+#if defined(USE_NPU)
+#include <acl/acl.h>
+#endif
 
 #include <csignal>
 #include <filesystem>
@@ -25,6 +31,7 @@ limitations under the License.
 #include <random>
 
 #include "api_service/api_service.h"
+#include "core/common/global_flags.h"
 #include "core/common/instance_name.h"
 #include "core/common/metrics.h"
 #include "core/common/options.h"
@@ -84,6 +91,33 @@ void initialize_configs() {
   SchedulerConfig::get_instance().initialize();
   ServiceConfig::get_instance().initialize();
   SpeculativeConfig::get_instance().initialize();
+
+  // Reconcile the two per-batch admission caps into a single scheduler view
+  // consumed by every downstream user (Master -> Engine -> BlockManagerPool
+  // etc.). max_seqs_per_batch bounds the scheduler batch;
+  // max_concurrent_requests bounds the service-level admission; the effective
+  // batch cap is the tighter of the two. 0 means "unset" on either side; if
+  // both are 0 the caller has no way to size batch-bound resources (e.g. the
+  // SINGLE block pool) and we fail early.
+  {
+    SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+    ServiceConfig& service_config = ServiceConfig::get_instance();
+    const int32_t scheduler_cap = scheduler_config.max_seqs_per_batch();
+    const int32_t service_cap = service_config.max_concurrent_requests();
+    int32_t effective_cap = 0;
+    if (scheduler_cap > 0 && service_cap > 0) {
+      effective_cap = std::min(scheduler_cap, service_cap);
+    } else if (scheduler_cap > 0) {
+      effective_cap = scheduler_cap;
+    } else if (service_cap > 0) {
+      effective_cap = service_cap;
+    } else {
+      LOG(FATAL) << "Both max_seqs_per_batch and max_concurrent_requests are "
+                    "0; set at least one to a positive value.";
+    }
+    scheduler_config.max_seqs_per_batch(effective_cap);
+    service_config.max_concurrent_requests(effective_cap);
+  }
 }
 
 Options create_options(const std::string& instance_name, bool is_local) {
@@ -115,6 +149,11 @@ Options create_options(const std::string& instance_name, bool is_local) {
   Options options;
 #if defined(USE_NPU)
   options.npu_kernel_backend(kernel_config.npu_kernel_backend());
+  options.enable_flashcomm1(kernel_config.enable_flashcomm1())
+      .flashcomm1_min_prefill_tokens(
+          kernel_config.flashcomm1_min_prefill_tokens())
+      .enable_mmrs_fusion(kernel_config.enable_mmrs_fusion())
+      .mmrs_comm_mode(kernel_config.mmrs_comm_mode());
 #endif
   options.model_path(model_config.model())
       .model_id(model_config.model_id())
@@ -229,6 +268,58 @@ Options create_options(const std::string& instance_name, bool is_local) {
 }
 
 }  // namespace
+
+#if defined(USE_NPU)
+namespace {
+// Initialize Python interpreter and torch_npu runtime early, before any NPU
+// tensor allocation. torch_npu (post4+) calls PyGILState_Ensure inside
+// empty_with_format(), so Python must be alive before the first NPU op.
+// All NPU processes go through this path for consistency — the build system
+// links against the pip-installed torch_npu .so directly.
+void init_npu_python_runtime() {
+  auto acl_ret = aclInit(nullptr);
+  CHECK(acl_ret == ACL_SUCCESS || acl_ret == 500000)
+      << "aclInit failed with error " << acl_ret;
+
+  bool we_initialized_python = false;
+  if (!Py_IsInitialized()) {
+    py::initialize_interpreter(/*init_signal_handlers=*/false);
+    we_initialized_python = true;
+  }
+
+  const auto first_device = DeviceNameUtils::parse_devices("auto").front();
+  const int device_index = first_device.index();
+
+  {
+    py::gil_scoped_acquire gil;
+    py::exec(
+        "import os, sys\n"
+        "os.environ['TORCH_DEVICE_BACKEND_AUTOLOAD'] = '0'\n"
+        "import torch\n"
+        "orig = torch._C._get_accelerator\n"
+        "try:\n"
+        "    torch._C._get_accelerator = lambda: torch.device('cpu')\n"
+        "    import torch_npu\n"
+        "finally:\n"
+        "    torch._C._get_accelerator = orig\n"
+        "import torch_npu.npu as _npu_mod\n"
+        "try:\n"
+        "    torch_npu._C._npu_init()\n"
+        "except RuntimeError as e:\n"
+        "    if 'already initialized' not in str(e).lower():\n"
+        "        raise\n"
+        "_npu_mod._initialized = True\n"
+        "_npu_mod._original_pid = os.getpid()\n"
+        "torch_npu._C._npu_setDevice(" +
+        std::to_string(device_index) + ")\n");
+  }
+
+  if (we_initialized_python) {
+    PyEval_SaveThread();
+  }
+}
+}  // namespace
+#endif
 
 void shutdown_handler(int signal) {
   // TODO: gracefully shutdown the server
@@ -508,6 +599,10 @@ int main(int argc, char** argv) {
     HelpFormatter::print_error("--model flag is required");
     return 1;
   }
+
+#if defined(USE_NPU)
+  init_npu_python_runtime();
+#endif
 
   return run();
 }
