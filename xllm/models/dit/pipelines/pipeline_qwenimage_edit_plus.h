@@ -68,15 +68,16 @@ inline int32_t get_qwen_image_edit_vlm_tp_port(int32_t rank) {
 inline int64_t get_qwen_image_edit_vae_target_area(int64_t height,
                                                    int64_t width) {
   constexpr int64_t kDefaultVaeTargetArea = 1024 * 1024;
-  int64_t request_area =
-      height > 0 && width > 0 ? height * width : kDefaultVaeTargetArea;
+  (void)height;
+  (void)width;
 
   const int64_t config_area =
       ::xllm::DiTConfig::get_instance().dit_vae_image_size();
-  if (config_area > 0 && config_area != kDefaultVaeTargetArea) {
+  if (config_area > 0) {
     return config_area;
   }
-  return request_area;
+
+  return kDefaultVaeTargetArea;
 }
 
 class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
