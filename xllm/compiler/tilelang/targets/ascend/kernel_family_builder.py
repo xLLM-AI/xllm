@@ -7,7 +7,7 @@ import multiprocessing
 import os
 from pathlib import Path
 
-from ...common.cache import compute_cache_key, is_cache_hit
+from ...common.cache import compute_cache_key
 from ...common.manifest import KernelAbi, KernelFamilyManifest, KernelVariantManifest
 from ...common.spec import DispatchField, KernelCompileSpec, KernelSpec, TilelangKernel
 from ...common.toolchain import repo_root, run_checked
@@ -272,7 +272,7 @@ def build_kernel_family(
             and cached_variant is not None
             and Path(cached_variant.generated_source).is_file()
             and Path(cached_variant.compiled_binary).is_file()
-            and is_cache_hit(manifest_path, compile_spec.variant_key, cache_key)
+            and cached_variant.cache_key == cache_key
         ):
             cached_source = Path(cached_variant.generated_source).read_text(
                 encoding="utf-8"

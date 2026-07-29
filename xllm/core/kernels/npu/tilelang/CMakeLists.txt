@@ -74,7 +74,14 @@ function(tilelang_import_kernel_manifest)
   set(${TL_PREFIX}_REGISTRY_INC "${_registry_inc}" PARENT_SCOPE)
 endfunction()
 
-set(TILELANG_GENERATED_ROOT "${CMAKE_BINARY_DIR}/xllm/compiler/tilelang")
+if(DEFINED ENV{XLLM_TILELANG_CACHE_ROOT} AND
+   NOT "$ENV{XLLM_TILELANG_CACHE_ROOT}" STREQUAL "")
+  get_filename_component(
+    TILELANG_GENERATED_ROOT "$ENV{XLLM_TILELANG_CACHE_ROOT}" ABSOLUTE
+  )
+else()
+  set(TILELANG_GENERATED_ROOT "${CMAKE_BINARY_DIR}/xllm/compiler/tilelang")
+endif()
 
 function(tilelang_register_runtime_kernel)
   set(options "")

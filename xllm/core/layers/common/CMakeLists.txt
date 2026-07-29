@@ -2,19 +2,45 @@ include(cc_library)
 
 cc_library(
   NAME
+    rotary_embedding_util
+  HDRS
+    rotary_embedding_util.h
+  SRCS
+    rotary_embedding_util.cpp
+  DEPS
+    :platform
+    glog::glog
+    gflags::gflags
+    torch
+)
+
+cc_library(
+  NAME
+    deepseek_v4_rotary_embedding_lib
+  HDRS
+    deepseek_v4_rotary_embedding.h
+  SRCS
+    deepseek_v4_rotary_embedding.cpp
+  DEPS
+    :rotary_embedding_util
+    :platform
+    glog::glog
+    torch
+)
+
+cc_library(
+  NAME
     common_layers
   HDRS
     oxygen_vision_attention.h
     qwen2_attention.h
     qwen2_vision_attention.h
     qwen3_next_rms_norm.h
-    deepseek_v4_rotary_embedding.h
     partial_rotary_embedding.h
     ada_layer_norm.h
     rms_norm_gated.h
     rms_norm.h
     rotary_embedding.h
-    rotary_embedding_util.h
     $<$<NOT:$<OR:$<BOOL:${USE_ILU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_NPU}>,$<BOOL:${USE_CUDA}>,$<BOOL:${USE_DCU}>>>:fused_moe.h>
     dense_mlp.h
     linear.h
@@ -34,13 +60,11 @@ cc_library(
     qwen2_attention.cpp
     qwen2_vision_attention.cpp
     qwen3_next_rms_norm.cpp
-    deepseek_v4_rotary_embedding.cpp
     partial_rotary_embedding.cpp
     ada_layer_norm.cpp
     rms_norm_gated.cpp
     rms_norm.cpp
     rotary_embedding.cpp
-    rotary_embedding_util.cpp
     $<$<NOT:$<OR:$<BOOL:${USE_ILU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_NPU}>,$<BOOL:${USE_CUDA}>,$<BOOL:${USE_DCU}>>>:fused_moe.cpp>
     dense_mlp.cpp
     linear.cpp
@@ -62,6 +86,8 @@ cc_library(
     :state_dict
     :model
     :kernels
+    :deepseek_v4_rotary_embedding_lib
+    :rotary_embedding_util
     glog::glog
     gflags::gflags
     torch

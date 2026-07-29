@@ -41,7 +41,6 @@ cc_library(
     npu_rope_layer_impl.h
     npu_siglip_encoder_layer_impl.h
     rotary_embedding.h
-    ../common/rotary_embedding_util.h
     loader/qwen3_decoder_loader.h
     loader/qwen2_decoder_loader.h
     loader/qwen3_moe_decoder_loader.h
@@ -100,7 +99,6 @@ cc_library(
     npu_rope_layer_impl.cpp
     npu_siglip_encoder_layer_impl.cpp
     rotary_embedding.cpp
-    ../common/rotary_embedding_util.cpp
     loader/qwen3_decoder_loader.cpp
     loader/qwen2_decoder_loader.cpp
     loader/qwen3_moe_decoder_loader.cpp
@@ -137,6 +135,7 @@ cc_library(
     :parallel_state
     :state_dict
     :model
+    :rotary_embedding_util
     glog::glog
     gflags::gflags
     spdlog::spdlog
@@ -145,21 +144,6 @@ cc_library(
     xllm_atb_layers
     ${NPU_RUNTIME_SO}
     nnopbase
-)
-
-cc_library(
-  NAME
-    deepseek_v4_rotary_embedding_lib
-  HDRS
-    ../common/deepseek_v4_rotary_embedding.h
-    ../common/rotary_embedding_util.h
-  SRCS
-    ../common/deepseek_v4_rotary_embedding.cpp
-    ../common/rotary_embedding_util.cpp
-  DEPS
-    :platform
-    glog::glog
-    torch
 )
 
 cc_test(

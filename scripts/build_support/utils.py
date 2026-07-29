@@ -12,6 +12,63 @@ from typing import Optional
 from scripts.build_support.env import set_npu_envs
 from scripts.logger import logger
 
+
+def _get_available_cpu_ids() -> set[int]:
+    """Returns the CPU IDs available to the current build process."""
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            return set(os.sched_getaffinity(0))
+        except OSError:
+            pass
+    return set(range(os.cpu_count() or 1))
+
+
+def _read_cpu_topology_id(cpu_id: int, topology_field: str) -> Optional[int]:
+    """Reads one CPU topology field from Linux sysfs."""
+    topology_path = Path(
+        f"/sys/devices/system/cpu/cpu{cpu_id}/topology/{topology_field}"
+    )
+    try:
+        topology_id = int(topology_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return topology_id if topology_id >= 0 else None
+
+
+def get_default_build_jobs() -> int:
+    """Returns a topology-aware default for native build parallelism.
+
+    Native C++ compilation is memory- and NUMA-sensitive. Use the number of
+    physical cores in one available CPU package, which avoids counting SMT
+    threads and avoids crossing sockets by default. ``MAX_JOBS`` remains the
+    explicit override for workloads that benefit from a different setting.
+    """
+    cpu_ids = _get_available_cpu_ids()
+    if not cpu_ids:
+        return 1
+
+    physical_cores_by_package: dict[int, set[int]] = {}
+    for cpu_id in cpu_ids:
+        package_id = _read_cpu_topology_id(cpu_id, "physical_package_id")
+        core_id = _read_cpu_topology_id(cpu_id, "core_id")
+        if package_id is None or core_id is None:
+            return len(cpu_ids)
+        physical_cores_by_package.setdefault(package_id, set()).add(core_id)
+
+    return max(
+        (len(physical_cores) for physical_cores in physical_cores_by_package.values()),
+        default=1,
+    )
+
+
+def get_tilelang_cache_root(default_root: str) -> str:
+    """Returns the absolute root used for generated TileLang artifacts."""
+    configured_root = os.getenv("XLLM_TILELANG_CACHE_ROOT")
+    if configured_root:
+        return os.path.abspath(os.path.expanduser(configured_root))
+    return os.path.abspath(default_root)
+
+
 def _b64(s: str) -> str:
     return base64.b64decode(s).decode()
 
