@@ -34,13 +34,9 @@ cc_library(
     comm_channel.h
     shm_channel.h
   SRCS
-    master.cpp
     dit_engine.cpp
-    dit_master.cpp
     llm_engine.cpp
-    llm_master.cpp
     vlm_engine.cpp
-    vlm_master.cpp
     speculative_engine.cpp
     rec_engine.cpp
     rec_master.cpp
@@ -51,7 +47,6 @@ cc_library(
     dist_manager.cpp
     remote_worker.cpp
     worker_server.cpp
-    worker_service.cpp
     comm_channel.cpp
     shm_channel.cpp
   DEPS
@@ -65,6 +60,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:xllm_atb_layers>
     $<$<BOOL:${USE_NPU}>:unified_dlog>
     :collective_service
+    :worker_service
     :xtensor
 )
 

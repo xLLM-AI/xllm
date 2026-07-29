@@ -17,6 +17,11 @@ try:
 except ModuleNotFoundError:
     from wheel.bdist_wheel import bdist_wheel
 
+from scripts.build_support.cmake_configure import (
+    cmake_configure_required,
+    get_cmake_configure_fingerprint,
+    record_cmake_configure_fingerprint,
+)
 from scripts.build_support.env import (
     get_cxx_abi,
     get_torch_root_path,
@@ -34,8 +39,10 @@ from scripts.build_support.utils import (
     get_base_dir,
     get_cmake_dir,
     get_cpu_arch,
+    get_default_build_jobs,
     get_device_type,
     get_python_version,
+    get_tilelang_cache_root,
     get_torch_cmake_prefix_path,
     get_torch_version,
     get_version,
@@ -62,8 +69,11 @@ def _maybe_compile_tilelang_kernels(device: str, jobs: int | str | None = None) 
         return
     target_platform = get_ascend_platform()
 
-    output_root = os.path.join(get_cmake_dir(), "xllm", "compiler", "tilelang")
+    output_root = get_tilelang_cache_root(
+        os.path.join(get_cmake_dir(), "xllm", "compiler", "tilelang")
+    )
     os.makedirs(output_root, exist_ok=True)
+    os.environ["XLLM_TILELANG_CACHE_ROOT"] = output_root
 
     env = os.environ.copy()
     base_dir = get_base_dir()
@@ -81,7 +91,9 @@ def _maybe_compile_tilelang_kernels(device: str, jobs: int | str | None = None) 
     ]
     if jobs is not None:
         cmd.extend(["--jobs", str(jobs)])
-    logger.info("compiling TileLang kernels via source-tree launcher")
+    logger.info(
+        f"compiling TileLang kernels via source-tree launcher at {output_root}"
+    )
     subprocess.check_call(cmd, cwd=base_dir, env=env)
 
 
@@ -294,16 +306,32 @@ class ExtBuild(build_ext):
         debug: int = int(os.environ.get("DEBUG", 0)) if self.debug is None else int(self.debug)
         build_type: str = "Debug" if debug else "Release"
 
-        default_jobs = os.cpu_count() or 1
-        max_jobs: str = os.getenv("MAX_JOBS", str(default_jobs))
-        max_jobs_int: int = int(max_jobs)
+        max_jobs_env = os.getenv("MAX_JOBS")
+        if max_jobs_env is None:
+            max_jobs_int = get_default_build_jobs()
+            max_jobs = str(max_jobs_int)
+            logger.info(f"Auto-selected MAX_JOBS={max_jobs} from CPU topology")
+        else:
+            try:
+                max_jobs_int = int(max_jobs_env)
+            except ValueError as exc:
+                raise ValueError("MAX_JOBS must be a positive integer") from exc
+            if max_jobs_int <= 0:
+                raise ValueError("MAX_JOBS must be a positive integer")
+            max_jobs = str(max_jobs_int)
 
         # Limit archive (ar/ranlib) concurrency to avoid file locking conflicts.
         # The ar tool requires exclusive access to archive files (.a files) when
         # creating or updating static libraries. When multiple ar processes attempt
         # to modify the same archive file simultaneously, they compete for file locks,
         # which can cause deadlocks and hang the build process.
-        archive_jobs: int = min(8, max(1, max_jobs_int // 4))
+        min_archive_jobs = 1
+        max_archive_jobs = 8
+        build_jobs_per_archive_job = 4
+        archive_jobs: int = min(
+            max_archive_jobs,
+            max(min_archive_jobs, max_jobs_int // build_jobs_per_archive_job),
+        )
 
         if self.device is None:
             raise ValueError("Please set --device to npu, mlu, cuda, dcu, ilu or musa.")
@@ -448,12 +476,16 @@ class ExtBuild(build_ext):
         """Build CMake targets"""
         cmake_dir = get_cmake_dir()
         cmake_cmd = "cmake_maca" if self.device == "maca" else "cmake"
-        subprocess.check_call([cmake_cmd, self.base_dir] + cmake_args, cwd=cmake_dir, env=env)
+        self.configure_cmake(cmake_cmd, cmake_args, env, cmake_dir)
 
         base_build_args = build_args
         # add build target to speed up the build process
         build_args += ["--target", ext.name, "xllm"]
-        subprocess.check_call([cmake_cmd, "--build", ".", "--verbose"] + build_args, cwd=cmake_dir)
+        subprocess.check_call(
+            [cmake_cmd, "--build", ".", "--verbose"] + build_args,
+            cwd=cmake_dir,
+            env=env,
+        )
 
         os.makedirs(os.path.join(os.path.dirname(cmake_dir), "xllm/core/server/"), exist_ok=True)
         shutil.copy(
@@ -487,12 +519,40 @@ class ExtBuild(build_ext):
         if BUILD_EXPORT:
             # build export module
             build_args = base_build_args + ["--target export_module"]
-            subprocess.check_call([cmake_cmd, "--build", ".", "--verbose"] + build_args, cwd=cmake_dir)
+            subprocess.check_call(
+                [cmake_cmd, "--build", ".", "--verbose"] + build_args,
+                cwd=cmake_dir,
+                env=env,
+            )
 
         if BUILD_TEST_FILE:
             # build tests target
             build_args = base_build_args + ["--target all_tests"]
-            subprocess.check_call([cmake_cmd, "--build", ".", "--verbose"] + build_args, cwd=cmake_dir)
+            subprocess.check_call(
+                [cmake_cmd, "--build", ".", "--verbose"] + build_args,
+                cwd=cmake_dir,
+                env=env,
+            )
+
+    def configure_cmake(
+        self,
+        cmake_cmd: str,
+        cmake_args: list[str],
+        env: dict[str, str],
+        cmake_dir: str,
+    ) -> None:
+        """Configures CMake when command-line or toolchain inputs changed."""
+        configure_command = [cmake_cmd, self.base_dir] + cmake_args
+        fingerprint = get_cmake_configure_fingerprint(configure_command, env)
+        if not cmake_configure_required(cmake_dir, fingerprint):
+            logger.info(
+                "CMake configure inputs are unchanged; reusing the Ninja build tree."
+            )
+            return
+
+        subprocess.check_call(configure_command, cwd=cmake_dir, env=env)
+        record_cmake_configure_fingerprint(cmake_dir, fingerprint)
+
 
 class ExtBuildSingleTest(ExtBuild):
     """Inherit ExtBuild, used to build and run a single test"""
@@ -520,12 +580,16 @@ class ExtBuildSingleTest(ExtBuild):
     ) -> None:
         """Override method: only build the specified test target and run"""
         cmake_dir = get_cmake_dir()
-        subprocess.check_call(["cmake", self.base_dir] + cmake_args, cwd=cmake_dir, env=env)
+        self.configure_cmake("cmake", cmake_args, env, cmake_dir)
 
         base_build_args = build_args
         # Only build the specified test target
         build_args += ["--target", self.test_name]
-        subprocess.check_call(["cmake", "--build", ".", "--verbose"] + build_args, cwd=cmake_dir)
+        subprocess.check_call(
+            ["cmake", "--build", ".", "--verbose"] + build_args,
+            cwd=cmake_dir,
+            env=env,
+        )
 
         # Find test executable
         # CMake usually places executables in CMAKE_RUNTIME_OUTPUT_DIRECTORY or build directory
