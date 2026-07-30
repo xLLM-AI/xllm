@@ -15,26 +15,31 @@ limitations under the License.
 
 #include "call.h"
 
+#include "api_service/request_id.h"
 #include "core/common/constants.h"
 #include "core/util/verbose_trace_logger.h"
 
 namespace xllm {
 
-Call::Call(brpc::Controller* controller) : controller_(controller) { init(); }
+Call::Call(brpc::Controller* controller,
+           std::string body_x_request_id,
+           bool is_http_request)
+    : controller_(controller) {
+  init(std::move(body_x_request_id), is_http_request);
+}
 
-void Call::init() {
-  if (controller_->http_request().GetHeader("x-request-id")) {
-    x_request_id_ = *controller_->http_request().GetHeader("x-request-id");
-  } else if (controller_->http_request().GetHeader("x-ms-client-request-id")) {
-    x_request_id_ =
-        *controller_->http_request().GetHeader("x-ms-client-request-id");
-  }
-
+void Call::init(std::string body_x_request_id, bool is_http_request) {
   if (controller_->http_request().GetHeader("x-request-time")) {
     x_request_time_ = *controller_->http_request().GetHeader("x-request-time");
   } else if (controller_->http_request().GetHeader("x-request-timems")) {
     x_request_time_ =
         *controller_->http_request().GetHeader("x-request-timems");
+  }
+
+  x_request_id_ =
+      api_service::resolve_x_request_id(controller_, body_x_request_id);
+  if (is_http_request) {
+    controller_->http_response().SetHeader("x-request-id", x_request_id_);
   }
 
   XLLM_VERBOSE_TRACE() << "event=request_received x-request-id="

@@ -62,6 +62,12 @@ struct RequestParams {
                 const std::string& x_rid,
                 const std::string& x_rtime);
 
+  void set_x_request_id_if_absent(const std::string& fallback) {
+    if (x_request_id.empty()) {
+      x_request_id = fallback;
+    }
+  }
+
   bool verify_params(OutputCallback callback) const;
 
   // request id

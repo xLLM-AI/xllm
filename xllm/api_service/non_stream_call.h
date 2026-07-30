@@ -40,8 +40,9 @@ class NonStreamCall : public Call {
                 ::google::protobuf::Closure* done,
                 Request* request,
                 Response* response,
-                bool use_arena = false)
-      : Call(controller),
+                bool use_arena = false,
+                bool is_http_request = false)
+      : Call(controller, request_body_x_request_id(request), is_http_request),
         done_(done),
         request_(request),
         response_(response),
