@@ -23,7 +23,7 @@ DEFINE_int32(max_requests_per_batch, 1, "Max number of request per batch.");
 DEFINE_string(dit_cache_policy,
               "TaylorSeer",
               "The policy of dit cache(e.g. None, FBCache, TaylorSeer, "
-              "FBCacheTaylorSeer, ResidualCache).");
+              "FBCacheTaylorSeer, ResidualCache, RegionE).");
 
 DEFINE_int64(dit_cache_warmup_steps, 0, "The number of warmup steps.");
 
@@ -52,6 +52,14 @@ DEFINE_int64(dit_cache_start_blocks,
 DEFINE_int64(dit_cache_end_blocks,
              5,
              "The number of blocks to skip at the end.");
+
+DEFINE_string(dit_regione_refresh_steps,
+              "16",
+              "RegionE: comma-separated full-image refresh steps in RAGS.");
+
+DEFINE_double(dit_regione_region_threshold,
+              0.80,
+              "RegionE: cosine threshold for adaptive region partition.");
 
 DEFINE_bool(dit_sp_communication_overlap,
             true,
@@ -131,6 +139,8 @@ void DiTConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cache_end_steps);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cache_start_blocks);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cache_end_blocks);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_regione_refresh_steps);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_regione_region_threshold);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sp_communication_overlap);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_debug_print);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_laser_attention_enabled);
@@ -157,6 +167,8 @@ void DiTConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cache_end_steps);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cache_start_blocks);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cache_end_blocks);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_regione_refresh_steps);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_regione_region_threshold);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sp_communication_overlap);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_debug_print);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_laser_attention_enabled);
@@ -194,6 +206,10 @@ void DiTConfig::append_config_json(nlohmann::ordered_json& config_json) const {
       config_json, default_config, dit_cache_start_blocks);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_cache_end_blocks);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_regione_refresh_steps);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_regione_region_threshold);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_sp_communication_overlap);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

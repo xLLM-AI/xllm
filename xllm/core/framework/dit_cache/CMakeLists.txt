@@ -13,6 +13,7 @@ cc_library(
   fbcache_taylorseer.h
   taylorseer.h
   residual_cache.h
+  regione.h
  SRCS
   dit_cache_impl.cpp
   dit_cache.cpp
@@ -21,8 +22,10 @@ cc_library(
   fbcache_taylorseer.cpp
   taylorseer.cpp
   residual_cache.cpp
+  regione.cpp
  DEPS
   torch
+  $<$<BOOL:${USE_NPU}>:torch_npu>
   glog::glog
   Folly::folly
   parallel_state

@@ -51,6 +51,8 @@ class DiTConfig final {
          "dit_cache_end_steps",
          "dit_cache_start_blocks",
          "dit_cache_end_blocks",
+         "dit_regione_refresh_steps",
+         "dit_regione_region_threshold",
          "dit_sp_communication_overlap",
          "dit_debug_print",
          "dit_laser_attention_enabled",
@@ -86,6 +88,10 @@ class DiTConfig final {
   PROPERTY(int64_t, dit_cache_start_blocks) = 5;
 
   PROPERTY(int64_t, dit_cache_end_blocks) = 5;
+
+  PROPERTY(std::string, dit_regione_refresh_steps) = "16";
+
+  PROPERTY(double, dit_regione_region_threshold) = 0.80;
 
   PROPERTY(bool, dit_sp_communication_overlap) = true;
 

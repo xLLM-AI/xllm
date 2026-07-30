@@ -64,6 +64,7 @@ namespace xllm {
 
 inline bool use_dit_sp_communication_overlap() {
   return DiTConfig::get_instance().dit_sp_communication_overlap() &&
+         DiTConfig::get_instance().dit_cache_policy() != "RegionE" &&
          ParallelConfig::get_instance().sp_size() > 1;
 }
 
@@ -1583,6 +1584,11 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto img_query = attn_->to_q_->forward(hidden_states);
     auto img_key = attn_->to_k_->forward(hidden_states);
     auto img_value = attn_->to_v_->forward(hidden_states);
+    auto* regione = DiTCache::get_instance().regione();
+    if (regione) {
+      std::tie(img_key, img_value) =
+          regione->process_image_kv(img_key, img_value);
+    }
 
     // Compute QKV for text stream (context projections)
     auto txt_query = attn_->add_q_proj_->forward(encoder_hidden_states);
@@ -1632,8 +1638,14 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     xllm::dit::SequenceParallelPadManager::get_instance().unpad_tensor(
         img_value, /*tensor_name=*/"hidden_states", /*dim=*/1);
 
-    img_query = apply_rotary_emb_qwen(img_query, img_freqs, false);
-    img_key = apply_rotary_emb_qwen(img_key, img_freqs, false);
+    auto img_query_freqs = img_freqs;
+    auto img_key_freqs = img_freqs;
+    if (regione) {
+      std::tie(img_query_freqs, img_key_freqs) =
+          regione->adjust_image_rope(img_freqs, img_key.size(1));
+    }
+    img_query = apply_rotary_emb_qwen(img_query, img_query_freqs, false);
+    img_key = apply_rotary_emb_qwen(img_key, img_key_freqs, false);
     txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs, false);
     txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, false);
 
@@ -2352,15 +2364,21 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
       block_attention_kwargs["attention_mask"] = joint_attention_mask;
     }
 
+    auto* regione = DiTCache::get_instance().regione();
+    const bool regione_partial_sp_mode =
+        regione && regione->regione_is_partial_sp_mode();
     if (::xllm::ParallelConfig::get_instance().sp_size() > 1) {
-      new_hidden_states = dit::sp_split_sequence(new_hidden_states,
-                                                 /*dim=*/1,
-                                                 parallel_args_.dit_sp_group_);
+      if (!regione_partial_sp_mode) {
+        new_hidden_states =
+            dit::sp_split_sequence(new_hidden_states,
+                                   /*dim=*/1,
+                                   parallel_args_.dit_sp_group_);
+      }
       new_encoder_hidden_states =
           dit::sp_split_sequence(new_encoder_hidden_states,
                                  /*dim=*/1,
                                  parallel_args_.dit_sp_group_);
-      if (modulate_index.defined()) {
+      if (modulate_index.defined() && !regione_partial_sp_mode) {
         modulate_index = dit::sp_split_sequence(modulate_index,
                                                 /*dim=*/1,
                                                 parallel_args_.dit_sp_group_);
@@ -2372,6 +2390,10 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
 
     bool use_step_cache = false;
     bool use_block_cache = false;
+
+    if (regione) {
+      regione->regione_prefetch_img_kv(0, use_cfg, new_hidden_states);
+    }
 
     torch::Tensor original_hidden_states = new_hidden_states;
     torch::Tensor original_encoder_hidden_states = new_encoder_hidden_states;
@@ -2390,6 +2412,10 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
         CacheBlockIn blockin_before(index_block, block_in_before_map);
         use_block_cache =
             DiTCache::get_instance().on_before_block(blockin_before, use_cfg);
+        if (regione) {
+          regione->regione_set_current_block(
+              index_block, use_cfg, new_hidden_states);
+        }
 
         if (!use_block_cache) {
           std::tie(new_hidden_states, new_encoder_hidden_states) =
@@ -2434,7 +2460,8 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
 
     new_hidden_states = norm_out_->forward(new_hidden_states, temb);
     new_hidden_states = proj_out_->forward(new_hidden_states);
-    if (::xllm::ParallelConfig::get_instance().sp_size() > 1) {
+    if (::xllm::ParallelConfig::get_instance().sp_size() > 1 &&
+        !regione_partial_sp_mode) {
       new_hidden_states = dit::sp_gather_sequence(
           new_hidden_states, /*dim=*/1, parallel_args_.dit_sp_group_);
     }
