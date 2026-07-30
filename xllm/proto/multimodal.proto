@@ -184,4 +184,8 @@ message MMChatRequest {
 
   // xllm_service rpc addr(ip:rpc_port) that forwards this request.
   optional string source_xservice_addr = 41;
+
+  // whether to include stop strings or stop tokens in the output text.
+  // default = false
+  optional bool include_stop_str_in_output = 43;
 }

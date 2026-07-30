@@ -129,3 +129,25 @@ target_link_libraries(sequence_generated_tokens_test
 target_link_options(sequence_generated_tokens_test
                     PRIVATE
                     $<$<BOOL:${USE_MLU}>:-Wl,--no-as-needed>)
+
+cc_test(
+  NAME
+    sequence_stop_output_test
+  SRCS
+    sequence_stop_output_test.cpp
+  DEPS
+    :request
+    $<$<BOOL:${USE_MLU}>:torch_mlu>
+    $<$<BOOL:${USE_NPU}>:torch_npu>
+    GTest::gtest_main
+)
+target_link_libraries(sequence_stop_output_test
+                      PUBLIC
+                      Python::Python
+                      $<$<BOOL:${USE_NPU}>:ascendcl>
+                      $<$<BOOL:${USE_NPU}>:hccl>
+                      $<$<BOOL:${USE_NPU}>:c_sec>
+                      $<$<BOOL:${USE_NPU}>:nnopbase>)
+target_link_options(sequence_stop_output_test
+                    PRIVATE
+                    $<$<BOOL:${USE_MLU}>:-Wl,--no-as-needed>)

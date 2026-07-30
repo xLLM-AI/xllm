@@ -62,6 +62,8 @@ RequestParams transfer_request_params(
   xllm_request_params.top_p = request_params.top_p;
   xllm_request_params.ignore_eos = request_params.ignore_eos;
   xllm_request_params.skip_special_tokens = request_params.skip_special_tokens;
+  xllm_request_params.include_stop_str_in_output =
+      request_params.include_stop_str_in_output;
   xllm_request_params.n = request_params.n;
   xllm_request_params.max_tokens = request_params.max_tokens;
   xllm_request_params.frequency_penalty = request_params.frequency_penalty;

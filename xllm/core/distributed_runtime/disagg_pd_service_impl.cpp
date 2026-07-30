@@ -130,6 +130,7 @@ std::shared_ptr<Request> DisaggPDServiceImpl::generate_request(
                          scheduler_->enable_schedule_overlap(),
                          output_callback,
                          batch_output_callback);
+  req_state.include_stop_str_in_output = req.include_stop_str_in_output();
 
   auto new_request = std::make_shared<Request>(req.req_id(),
                                                req.x_request_id(),

@@ -494,6 +494,8 @@ void DisaggPDScheduler::dispatch_requests() {
       req->set_is_embeddings(requests[i]->state().sampling_param.is_embeddings);
       req->set_echo(requests[i]->state().echo);
       req->set_skip_special_tokens(requests[i]->state().skip_special_tokens);
+      req->set_include_stop_str_in_output(
+          requests[i]->state().include_stop_str_in_output);
       //*reqs.mutable_reqs()->Add() = req;
     }
     reqs.mutable_cluster_infos()->mutable_cluster_ids()->Add(

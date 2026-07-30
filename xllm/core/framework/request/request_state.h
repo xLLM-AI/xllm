@@ -139,6 +139,8 @@ struct RequestState final {
 
   bool skip_special_tokens = true;
 
+  bool include_stop_str_in_output = false;
+
   OutputFunc output_func;
 
   // function to call when batch outputs is generated in disagg pd mode,

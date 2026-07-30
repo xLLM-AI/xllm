@@ -856,6 +856,7 @@ std::shared_ptr<Request> RecMaster::build_request_common(
                          callback,
                          nullptr,
                          sp.decode_address);
+  req_state.include_stop_str_in_output = sp.include_stop_str_in_output;
   req_state.rec_type = rec_type_;
   req_state.bos_token_id = model_args_.bos_token_id();
   auto request = std::make_shared<Request>(sp.request_id,

@@ -68,6 +68,10 @@ struct SequenceParams {
   // whether to skip special tokens in the output text. default = true.
   bool skip_special_tokens = true;
 
+  // whether to include stop strings or stop tokens in the output text.
+  // default = false.
+  bool include_stop_str_in_output = false;
+
   // whether to echo the prompt in the output text. default = false.
   bool echo = false;
 
@@ -187,7 +191,7 @@ class Sequence final {
   void update_token(size_t index, const Token& token);
   void update_last_step_token(const Token& token, size_t token_offset = 0);
   bool has_new_tokens_generated() const {
-    return num_tokens_ > decoder_.output_offset();
+    return num_tokens_ > stream_output_token_offset_;
   }
 
   // update mm embeddings to the sequence
@@ -504,6 +508,11 @@ class Sequence final {
   // from the chunk containing `token_index` onward.
   void invalidate_linear_state_hashes_from(size_t token_index);
 
+  // Number of tokens available to the decoder after applying stop-output
+  // suppression and streaming buffering. The underlying sequence retains all
+  // generated tokens for usage and scheduling accounting.
+  size_t get_decodable_token_count(size_t size) const;
+
   SequenceOutputType output_type();
   void generate_embeddings_output(SequenceOutput& output);
   void generate_mm_embeddings_output(SequenceOutput& output);
@@ -556,6 +565,11 @@ class Sequence final {
 
   // incremental decoder to decode the tokens
   IncrementalDecoder decoder_;
+
+  // All tokens before this offset have been returned in streaming output.
+  // This is independent from the decoder offset because hidden stop tokens
+  // remain present in token_ids and logprobs.
+  size_t stream_output_token_offset_ = 0;
 
   // token ids generated for the sequence
   std::vector<int32_t> tokens_;
@@ -624,6 +638,11 @@ class Sequence final {
 
   // the reason why the sequence is finished
   mutable FinishReason finish_reason_ = FinishReason::NONE;
+
+  // Number of trailing tokens that matched the stopping criterion. These
+  // tokens remain in `tokens_` and are omitted from decoded output when
+  // `include_stop_str_in_output` is false.
+  mutable size_t matched_stop_token_count_ = 0;
 
   // is the sequence closed.
   bool closed_ = false;

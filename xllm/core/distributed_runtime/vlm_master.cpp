@@ -419,6 +419,7 @@ std::shared_ptr<Request> VLMMaster::build_request(
                          options_.enable_schedule_overlap(),
                          callback,
                          nullptr);
+  req_state.include_stop_str_in_output = sp.include_stop_str_in_output;
   auto request = std::make_shared<Request>(sp.request_id,
                                            sp.x_request_id,
                                            sp.x_request_time,

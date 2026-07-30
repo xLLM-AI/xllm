@@ -51,6 +51,8 @@ void Request::create_sequences_group() {
   SequenceParams sequence_params;
   sequence_params.seq_capacity = state_.seq_capacity;
   sequence_params.skip_special_tokens = state_.skip_special_tokens;
+  sequence_params.include_stop_str_in_output =
+      state_.include_stop_str_in_output;
   sequence_params.echo = state_.echo;
   sequence_params.logprobs = state_.logprobs;
   sequence_params.n = state_.n;

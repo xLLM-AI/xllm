@@ -208,6 +208,9 @@ RequestParams::RequestParams(const proto::CompletionRequest& request,
   if (request.has_skip_special_tokens()) {
     skip_special_tokens = request.skip_special_tokens();
   }
+  if (request.has_include_stop_str_in_output()) {
+    include_stop_str_in_output = request.include_stop_str_in_output();
+  }
   if (request.has_ignore_eos()) {
     ignore_eos = request.ignore_eos();
   }
@@ -391,6 +394,9 @@ void init_from_chat_request(RequestParams& params, const ChatRequest& request) {
   }
   if (request.has_skip_special_tokens()) {
     params.skip_special_tokens = request.skip_special_tokens();
+  }
+  if (request.has_include_stop_str_in_output()) {
+    params.include_stop_str_in_output = request.include_stop_str_in_output();
   }
   if (request.has_ignore_eos()) {
     params.ignore_eos = request.ignore_eos();

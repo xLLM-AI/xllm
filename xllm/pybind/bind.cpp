@@ -236,6 +236,8 @@ PYBIND11_MODULE(xllm_export, m) {
       .def_readwrite("logprobs", &RequestParams::logprobs)
       .def_readwrite("top_logprobs", &RequestParams::top_logprobs)
       .def_readwrite("skip_special_tokens", &RequestParams::skip_special_tokens)
+      .def_readwrite("include_stop_str_in_output",
+                     &RequestParams::include_stop_str_in_output)
       .def_readwrite("ignore_eos", &RequestParams::ignore_eos)
       .def_readwrite("is_embeddings", &RequestParams::is_embeddings)
       .def_readwrite("stop", &RequestParams::stop)

@@ -169,6 +169,10 @@ message ChatRequest {
   // request trace headers from client.
   optional string x_request_id = 43;
   optional string x_request_time = 44;
+
+  // whether to include stop strings or stop tokens in the output text.
+  // default = false
+  optional bool include_stop_str_in_output = 46;
 }
 
 message ChatLogProbData {
