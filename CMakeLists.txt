@@ -8,6 +8,19 @@ option(USE_CUDA "Enable CUDA support" OFF)
 option(USE_MUSA "Enable MUSA support" OFF)
 option(USE_DCU "Enable DCU support" OFF)
 option(USE_MACA "Enable MACA support" OFF)
+
+set(XLLM_ARCHIVE_JOBS "" CACHE STRING
+    "Maximum concurrent archive and link jobs for Ninja builds")
+if(CMAKE_GENERATOR MATCHES "Ninja" AND NOT XLLM_ARCHIVE_JOBS STREQUAL "")
+  if(NOT XLLM_ARCHIVE_JOBS MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR "XLLM_ARCHIVE_JOBS must be a positive integer")
+  endif()
+  set_property(GLOBAL APPEND PROPERTY JOB_POOLS
+    archive=${XLLM_ARCHIVE_JOBS}
+  )
+  set(CMAKE_JOB_POOL_LINK archive)
+endif()
+
 add_compile_definitions(YLT_ENABLE_IBV)
 add_definitions(-DYLT_ENABLE_IBV)
 set(YLT_ENABLE_IBV ON)

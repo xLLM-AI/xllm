@@ -63,7 +63,11 @@ function(cargo_shared_library)
     list(APPEND CARGO_ARGS "--release")
   endif()
 
-  file(GLOB_RECURSE LIB_SOURCES "*.rs")
+  file(GLOB_RECURSE LIB_SOURCES CONFIGURE_DEPENDS "*.rs")
+  set(CARGO_INPUTS ${LIB_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml")
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.lock")
+    list(APPEND CARGO_INPUTS "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.lock")
+  endif()
 
   if(DEFINED ENV{XLLM_CARGO_TARGET_ROOT} AND
      NOT "$ENV{XLLM_CARGO_TARGET_ROOT}" STREQUAL "")
@@ -80,17 +84,25 @@ function(cargo_shared_library)
   # build the library target with cargo
   set(SHARED_LIB_NAME
     "${CMAKE_SHARED_LIBRARY_PREFIX}${LIB_NAME}${CMAKE_SHARED_LIBRARY_SUFFIX}")
-  set(LIB_FILE 
+  set(CARGO_LIB_FILE
     "${CARGO_TARGET_DIR}/${LIB_TARGET}/${LIB_BUILD_TYPE}/${SHARED_LIB_NAME}")
+  set(CARGO_LOCAL_ARTIFACT_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo-artifacts")
+  set(LIB_FILE "${CARGO_LOCAL_ARTIFACT_DIR}/${SHARED_LIB_NAME}")
 
-  add_custom_command(
-      OUTPUT ${LIB_FILE}
-      COMMAND ${CARGO_ENV_COMMAND} ${CARGO_EXECUTABLE} ARGS ${CARGO_ARGS}
+  # Always enter Cargo so its content- and toolchain-aware fingerprint can
+  # validate a persistent target directory. Copy the result into this CMake
+  # build tree so Ninja clean never removes the shared Cargo cache artifact.
+  add_custom_target(${CARGO_NAME}_target ALL
+      COMMAND ${CARGO_ENV_COMMAND} ${CARGO_EXECUTABLE} ${CARGO_ARGS}
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${CARGO_LOCAL_ARTIFACT_DIR}"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${CARGO_LIB_FILE}" "${LIB_FILE}"
       WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-      DEPENDS ${LIB_SOURCES}
+      BYPRODUCTS "${LIB_FILE}"
+      DEPENDS ${CARGO_INPUTS}
       COMMENT "Building cargo library ${LIB_FILE}"
+      VERBATIM
   )
-  add_custom_target(${CARGO_NAME}_target ALL DEPENDS ${LIB_FILE})
 
   # add the library target
   add_library(${CARGO_NAME} SHARED IMPORTED GLOBAL)

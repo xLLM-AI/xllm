@@ -36,6 +36,7 @@ from scripts.build_support.env import (
 from scripts.build_support.utils import (
     check_and_install_pre_commit,
     get_ascend_platform,
+    get_archive_build_jobs,
     get_base_dir,
     get_cmake_dir,
     get_cpu_arch,
@@ -43,6 +44,7 @@ from scripts.build_support.utils import (
     get_device_type,
     get_python_version,
     get_tilelang_cache_root,
+    get_tilelang_cache_namespace,
     get_torch_cmake_prefix_path,
     get_torch_version,
     get_version,
@@ -74,15 +76,31 @@ def _maybe_compile_tilelang_kernels(device: str, jobs: int | str | None = None) 
     if device != "npu":
         return
     target_platform = get_ascend_platform()
+    base_dir = get_base_dir()
 
-    output_root = get_tilelang_cache_root(
+    cache_root = get_tilelang_cache_root(
         os.path.join(get_cmake_dir(), "xllm", "compiler", "tilelang")
     )
+    tilelang_source_root = os.path.join(base_dir, "xllm", "compiler", "tilelang")
+    toolchain_paths = {
+        name: path
+        for name, path in {
+            "tilelang": os.getenv("TL_ROOT"),
+            "npu": os.getenv("NPU_HOME_PATH") or os.getenv("NPU_TOOLKIT_HOME"),
+            "bisheng": shutil.which("bisheng"),
+        }.items()
+        if path
+    }
+    cache_namespace = get_tilelang_cache_namespace(
+        tilelang_source_root,
+        target_platform,
+        toolchain_paths,
+    )
+    output_root = os.path.join(cache_root, cache_namespace)
     os.makedirs(output_root, exist_ok=True)
     os.environ["XLLM_TILELANG_CACHE_ROOT"] = output_root
 
     env = os.environ.copy()
-    base_dir = get_base_dir()
 
     cmd = [
         sys.executable,
@@ -326,18 +344,9 @@ class ExtBuild(build_ext):
                 raise ValueError("MAX_JOBS must be a positive integer")
             max_jobs = str(max_jobs_int)
 
-        # Limit archive (ar/ranlib) concurrency to avoid file locking conflicts.
-        # The ar tool requires exclusive access to archive files (.a files) when
-        # creating or updating static libraries. When multiple ar processes attempt
-        # to modify the same archive file simultaneously, they compete for file locks,
-        # which can cause deadlocks and hang the build process.
-        min_archive_jobs = 1
-        max_archive_jobs = 8
-        build_jobs_per_archive_job = 4
-        archive_jobs: int = min(
-            max_archive_jobs,
-            max(min_archive_jobs, max_jobs_int // build_jobs_per_archive_job),
-        )
+        # Archive and link operations are I/O- and memory-intensive, so limit
+        # their concurrency independently from compilation.
+        archive_jobs = get_archive_build_jobs(max_jobs_int)
 
         if self.device is None:
             raise ValueError("Please set --device to npu, mlu, cuda, dcu, ilu or musa.")
@@ -357,7 +366,7 @@ class ExtBuild(build_ext):
             f"-DDEVICE_TYPE=USE_{self.device.upper()}",
             f"-DDEVICE_ARCH={self.arch.upper()}",
             f"-DXLLM_ATB_LAYERS_SOURCE_DIR={os.path.join(self.base_dir, 'third_party', 'xllm_atb_layers')}",
-            f"-DCMAKE_JOB_POOLS=archive={archive_jobs}",
+            f"-DXLLM_ARCHIVE_JOBS={archive_jobs}",
         ]
         if self.device != 'maca':
             cmake_args += ["-DUSE_CCACHE=ON"]
