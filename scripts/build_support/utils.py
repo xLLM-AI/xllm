@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import json
 import os
 import sys
 import platform
@@ -11,6 +13,43 @@ from typing import Optional
 
 from scripts.build_support.env import set_npu_envs
 from scripts.logger import logger
+
+
+_MIN_BUILD_JOBS = 1
+_MAX_ARCHIVE_JOBS = 8
+_BUILD_JOBS_PER_ARCHIVE_JOB = 4
+_TILELANG_CACHE_NAMESPACE_HASH_LENGTH = 16
+_FILE_HASH_CHUNK_SIZE = 1024 * 1024
+_TOOLCHAIN_SOURCE_SUFFIXES = frozenset(
+    {
+        ".c",
+        ".cc",
+        ".cmake",
+        ".cpp",
+        ".cu",
+        ".cuh",
+        ".h",
+        ".hpp",
+        ".inc",
+        ".json",
+        ".py",
+        ".pyi",
+        ".so",
+        ".toml",
+        ".txt",
+        ".yaml",
+        ".yml",
+    }
+)
+_TOOLCHAIN_FINGERPRINT_EXCLUDED_DIRS = frozenset(
+    {".cache", ".git", "__pycache__", "build", "dist"}
+)
+_NPU_VERSION_MARKERS = (
+    "version.cfg",
+    "version.info",
+    "version.txt",
+    "compiler/version.info",
+)
 
 
 def _get_available_cpu_ids() -> set[int]:
@@ -45,7 +84,7 @@ def get_default_build_jobs() -> int:
     """
     cpu_ids = _get_available_cpu_ids()
     if not cpu_ids:
-        return 1
+        return _MIN_BUILD_JOBS
 
     physical_cores_by_package: dict[int, set[int]] = {}
     for cpu_id in cpu_ids:
@@ -57,7 +96,17 @@ def get_default_build_jobs() -> int:
 
     return max(
         (len(physical_cores) for physical_cores in physical_cores_by_package.values()),
-        default=1,
+        default=_MIN_BUILD_JOBS,
+    )
+
+
+def get_archive_build_jobs(max_jobs: int) -> int:
+    """Returns the bounded parallelism for archive and link operations."""
+    if max_jobs < _MIN_BUILD_JOBS:
+        raise ValueError("max_jobs must be a positive integer")
+    return min(
+        _MAX_ARCHIVE_JOBS,
+        max(_MIN_BUILD_JOBS, max_jobs // _BUILD_JOBS_PER_ARCHIVE_JOB),
     )
 
 
@@ -67,6 +116,144 @@ def get_tilelang_cache_root(default_root: str) -> str:
     if configured_root:
         return os.path.abspath(os.path.expanduser(configured_root))
     return os.path.abspath(default_root)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as input_file:
+        while chunk := input_file.read(_FILE_HASH_CHUNK_SIZE):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _run_git_fingerprint_command(root: Path, args: list[str]) -> bytes | None:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-c",
+                f"safe.directory={root}",
+                "-C",
+                str(root),
+                *args,
+            ],
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _git_source_tree_fingerprint(root: Path) -> str | None:
+    head = _run_git_fingerprint_command(root, ["rev-parse", "HEAD"])
+    tracked_diff = _run_git_fingerprint_command(
+        root,
+        ["diff", "--binary", "HEAD", "--", "."],
+    )
+    untracked = _run_git_fingerprint_command(
+        root,
+        ["ls-files", "--others", "--exclude-standard", "-z", "--", "."],
+    )
+    if head is None or tracked_diff is None or untracked is None:
+        return None
+
+    digest = hashlib.sha256()
+    digest.update(head)
+    digest.update(tracked_diff)
+    for encoded_path in sorted(filter(None, untracked.split(b"\0"))):
+        source_path = root / os.fsdecode(encoded_path)
+        if not source_path.is_file():
+            continue
+        digest.update(encoded_path)
+        digest.update(_sha256_file(source_path).encode("ascii"))
+    return digest.hexdigest()
+
+
+def _fallback_source_tree_fingerprint(root: Path) -> str:
+    digest = hashlib.sha256()
+    for source_path in sorted(root.rglob("*")):
+        if not source_path.is_file():
+            continue
+        relative_path = source_path.relative_to(root)
+        if any(
+            part in _TOOLCHAIN_FINGERPRINT_EXCLUDED_DIRS
+            for part in relative_path.parts
+        ):
+            continue
+        if source_path.suffix.lower() not in _TOOLCHAIN_SOURCE_SUFFIXES:
+            continue
+        digest.update(relative_path.as_posix().encode("utf-8"))
+        digest.update(_sha256_file(source_path).encode("ascii"))
+    return digest.hexdigest()
+
+
+def _toolchain_path_fingerprint(name: str, path: str) -> dict[str, object]:
+    resolved_path = Path(path).expanduser().resolve()
+    fingerprint: dict[str, object] = {"name": name}
+    if resolved_path.is_file():
+        fingerprint.update(
+            {
+                "kind": "file",
+                "sha256": _sha256_file(resolved_path),
+            }
+        )
+        return fingerprint
+
+    if not resolved_path.is_dir():
+        fingerprint["kind"] = "missing"
+        return fingerprint
+
+    fingerprint["kind"] = "directory"
+    if name == "tilelang":
+        source_fingerprint = _git_source_tree_fingerprint(resolved_path)
+        if source_fingerprint is None:
+            source_fingerprint = _fallback_source_tree_fingerprint(resolved_path)
+        fingerprint["source"] = source_fingerprint
+        return fingerprint
+
+    fingerprint["version"] = resolved_path.name
+    version_markers: dict[str, str] = {}
+    for marker in _NPU_VERSION_MARKERS:
+        marker_path = resolved_path / marker
+        if marker_path.is_file():
+            version_markers[marker] = _sha256_file(marker_path)
+    fingerprint["version_markers"] = version_markers
+    return fingerprint
+
+
+def get_tilelang_cache_namespace(
+    source_root: str,
+    target_platform: str,
+    toolchain_paths: dict[str, str],
+) -> str:
+    """Returns a stable namespace for compatible TileLang build artifacts."""
+    root = Path(source_root).resolve()
+    source_files: list[dict[str, str]] = []
+    for source_path in sorted(root.rglob("*.py")):
+        relative_path = source_path.relative_to(root).as_posix()
+        source_files.append(
+            {
+                "path": relative_path,
+                "sha256": _sha256_file(source_path),
+            }
+        )
+
+    payload = {
+        "target_platform": target_platform,
+        "source_files": source_files,
+        "toolchains": [
+            _toolchain_path_fingerprint(name, path)
+            for name, path in sorted(toolchain_paths.items())
+        ],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    digest = hashlib.sha256(encoded)
+
+    namespace_hash = digest.hexdigest()[:_TILELANG_CACHE_NAMESPACE_HASH_LENGTH]
+    return f"{target_platform}-{namespace_hash}"
 
 
 def _b64(s: str) -> str:

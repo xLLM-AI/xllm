@@ -7,7 +7,7 @@ import multiprocessing
 import os
 from pathlib import Path
 
-from ...common.cache import compute_cache_key
+from ...common.cache import cache_file_lock, compute_cache_key
 from ...common.manifest import KernelAbi, KernelFamilyManifest, KernelVariantManifest
 from ...common.spec import DispatchField, KernelCompileSpec, KernelSpec, TilelangKernel
 from ...common.toolchain import repo_root, run_checked
@@ -231,6 +231,24 @@ def build_kernel_family(
 ) -> KernelFamilyManifest:
     family_output_dir = Path(output_root) / "targets" / "ascend" / family.kernel_name
     family_output_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = family_output_dir / ".build.lock"
+    with cache_file_lock(lock_path):
+        return _build_kernel_family_locked(
+            family,
+            family_output_dir,
+            context,
+            force,
+            jobs,
+        )
+
+
+def _build_kernel_family_locked(
+    family: RegisteredKernelFamily,
+    family_output_dir: Path,
+    context: AscendBuildContext,
+    force: bool,
+    jobs: int | str | None,
+) -> KernelFamilyManifest:
     manifest_path = family_output_dir / "manifest.json"
     existing_manifest = _read_family_manifest(manifest_path)
     dependency_files = _build_dependency_files(family)
@@ -260,6 +278,7 @@ def build_kernel_family(
             compile_spec,
             context.fingerprint,
             dependency_files,
+            repo_root(),
         )
 
         cached_variant = (
