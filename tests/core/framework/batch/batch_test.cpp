@@ -482,11 +482,13 @@ TEST(BatchTest, DecodeForwardInputConsumesMtpBootstrap) {
   BlockManagerPool::Options options;
   options.num_blocks(8).block_size(4).enable_disagg_pd(true);
   options.max_seqs_per_batch(1024);
+  options.num_speculative_tokens(1);
+  options.num_embedding_blocks(8);
   BlockManagerPool manager(options, /*dp_size=*/1);
 
   Sequence sequence = make_basic_sequence({1, 2, 3});
   ASSERT_TRUE(manager.allocate(&sequence));
-  ASSERT_GE(sequence.get_single_block_id(), 0);
+  ASSERT_GE(sequence.get_embedding_block_id(), 0);
   sequence.kv_state().set_kv_cache_tokens_num(sequence.num_prompt_tokens());
   sequence.append_token(Token(42));
 
@@ -509,6 +511,8 @@ TEST(BatchTest, DecodeForwardInputMapsSparseMtpBootstrapRows) {
   BlockManagerPool::Options options;
   options.num_blocks(8).block_size(4).enable_disagg_pd(true);
   options.max_seqs_per_batch(1024);
+  options.num_speculative_tokens(1);
+  options.num_embedding_blocks(8);
   BlockManagerPool manager(options, /*dp_size=*/1);
 
   Sequence first = make_basic_sequence({1, 2, 3});
@@ -1300,7 +1304,7 @@ TEST(BatchTest, DecodeMinBatchSizeDoesNotPadTransportState) {
             std::vector<int32_t>({-1}));
 }
 
-TEST(BatchTest, DecodeSingleBlockIdsStaySplitInTransportButShareSlotValue) {
+TEST(BatchTest, DecodeEmbeddingAndLinearStateIdsAreIndependentSlots) {
   const uint32_t n_blocks = 8;
   const uint32_t block_size = 4;
   BlockManager::Options options;
@@ -1328,10 +1332,19 @@ TEST(BatchTest, DecodeSingleBlockIdsStaySplitInTransportButShareSlotValue) {
   seq.kv_state().incr_kv_cache_tokens_num(/*size=*/3);
   seq.append_token(4);
 
-  auto slot_block = manager.allocate(1);
-  ASSERT_EQ(slot_block.size(), 1u);
-  const int32_t expected_slot_id = slot_block[0].id();
-  seq.add_blocks(BlockType::SINGLE, slot_block);
+  // EMBEDDING and LINEAR are now fully decoupled slots: the embedding-row id
+  // (embedding_ids) and the recurrent-state id (linear_state_ids) come from
+  // separate blocks and no longer share a value.
+  auto embedding_block = manager.allocate(1);
+  ASSERT_EQ(embedding_block.size(), 1u);
+  const int32_t expected_embedding_id = embedding_block[0].id();
+  seq.add_blocks(BlockType::EMBEDDING, embedding_block);
+
+  auto linear_block = manager.allocate(1);
+  ASSERT_EQ(linear_block.size(), 1u);
+  const int32_t expected_linear_id = linear_block[0].id();
+  seq.add_blocks(BlockType::LINEAR, linear_block);
+  ASSERT_NE(expected_embedding_id, expected_linear_id);
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> allowed_max_tokens = {1};
@@ -1355,9 +1368,9 @@ TEST(BatchTest, DecodeSingleBlockIdsStaySplitInTransportButShareSlotValue) {
   ASSERT_EQ(forward_input.input_params.embedding.embedding_ids.size(), 1u);
   ASSERT_EQ(forward_input.input_params.embedding.linear_state_ids.size(), 1u);
   EXPECT_EQ(forward_input.input_params.embedding.embedding_ids[0],
-            expected_slot_id);
+            expected_embedding_id);
   EXPECT_EQ(forward_input.input_params.embedding.linear_state_ids[0],
-            expected_slot_id);
+            expected_linear_id);
 }
 
 TEST(BatchTest, LinearStateCheckpointSavesOnlyAtPrefillStepBoundary) {

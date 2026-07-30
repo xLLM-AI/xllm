@@ -746,10 +746,9 @@ void DisaggPDScheduler::prefill_send_first_generation() {
           block_ids.push_back(block.id());
         }
         ADD_VECTOR_TO_PROTO(gen->mutable_block_ids(), block_ids);
-        // Advertise the recurrent-state slot the D side should pull from.
-        // Prefer the dedicated LINEAR slot (Qwen3.5 GDN); fall back to
-        // SINGLE for legacy models where the CONV/SSM caches still live in
-        // the SINGLE slot. Must match the D-side response helper.
+        // Advertise the recurrent-state slot the D side should pull from: the
+        // dedicated LINEAR slot (Qwen3.5 GDN), or -1 for models without
+        // linear-attention layers. Must match the D-side response helper.
         gen->set_linear_state_id(
             request->sequences()[0]->get_recurrent_state_slot_id());
         gen->set_dp_size(instance_info_.dp_size);
@@ -896,7 +895,7 @@ bool DisaggPDScheduler::decode_recv_first_generation(
       static_cast<size_t>(num_cached_tokens));
   const bool need_mtp_bootstrap = options_.num_speculative_tokens() > 0;
   if (need_mtp_bootstrap) {
-    const int32_t slot_id = sequence->get_single_block_id();
+    const int32_t slot_id = sequence->get_embedding_block_id();
     if (slot_id < 0) {
       LOG(ERROR) << "Invalid MTP bootstrap slot, request_id: " << req_id;
       kv_cache_manager_->deallocate(request.get());
@@ -962,8 +961,8 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     std::vector<uint64_t> src_linear_state_ids;
     std::vector<uint64_t> dst_linear_state_ids;
     // Resolve the destination recurrent-state slot with the same helper the
-    // sender used to advertise src_linear_state_id (LINEAR for Qwen3.5 GDN,
-    // SINGLE otherwise), so PULL writes the pulled state into the slot the
+    // sender used to advertise src_linear_state_id (the LINEAR slot for Qwen3.5
+    // GDN, -1 otherwise), so PULL writes the pulled state into the slot the
     // decode forward actually reads (see
     // Sequence::get_recurrent_state_slot_id).
     const int32_t dst_linear_state_id = sequence->get_recurrent_state_slot_id();

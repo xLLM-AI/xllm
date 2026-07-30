@@ -562,6 +562,8 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .model_id(options_.model_id())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .num_speculative_tokens(options_.num_speculative_tokens())
+      .num_embedding_blocks(
+          static_cast<uint32_t>(kv_cache_shape.key_cache_shape()[0]))
       // DECODE-side prefix cache participation is per-leaf and gated by the
       // predicate in composite_block_manager.cpp. P and MIX are treated
       // identically (both admit prefix cache on every leaf).
@@ -609,10 +611,7 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
         .swa_blocks_per_seq(swa_blocks_per_seq)
         .max_tokens_per_batch(options_.max_tokens_per_batch())
         .manager_types(std::move(manager_types))
-        .compress_ratios(std::move(manager_compress_ratios))
-        .max_seqs_per_batch(options_.max_seqs_per_batch())
-        .num_single_blocks(static_cast<uint32_t>(std::min<int64_t>(
-            kv_cache_cap.swa_count(), std::numeric_limits<uint32_t>::max())));
+        .compress_ratios(std::move(manager_compress_ratios));
   }
 
   if (options_.host_blocks_factor() > 1.0) {

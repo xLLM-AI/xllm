@@ -734,7 +734,7 @@ TEST(CompositeBlockManagerTest, Dsv4PrefixCacheExactRepeatPopsOneC128) {
 // DSV4 D-side (instance_is_decode=true) should skip the SWA leaf's prefix
 // cache entirely: no shared blocks on SWA even when the same prompt was
 // previously seeded. C4 / C128 continue to hit because the role predicate
-// only masks SWA / LINEAR / SINGLE on the DECODE side. This is the mirror of
+// only masks SWA / LINEAR / EMBEDDING on the DECODE side. This is the mirror of
 // Dsv4PrefixCacheHitOnRepeatedPrefix under the DECODE role.
 TEST(CompositeBlockManagerTest, DecodeRoleSkipsSwaPrefixCache) {
   const uint32_t base_num_blocks = 4096;

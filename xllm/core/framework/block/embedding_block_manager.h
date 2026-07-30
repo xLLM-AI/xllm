@@ -21,24 +21,24 @@ limitations under the License.
 
 namespace xllm {
 
-// Per-sequence single-resource leaf (BlockType::SINGLE): linear-state /
-// embedding row id, exactly one block per sequence, reused for its lifetime.
+// Per-sequence single-resource leaf (BlockType::EMBEDDING): the spec-decode
+// embedding-row id, exactly one block per sequence, reused for its lifetime.
 //
 // The physical id pool (free list, allocate / deallocate / free, num_*
 // accounting, id-0 padding) is identical to BlockManagerImpl, so this derives
 // from it and reuses that machinery. block_size is 1 (each id is one block) and
 // there is no prefix cache. What differs is the sequence-level policy: grow
 // allocates one block only when the sequence does not already hold one.
-class SingleBlockManager final : public BlockManagerImpl {
+class EmbeddingBlockManager final : public BlockManagerImpl {
  public:
-  SingleBlockManager(uint32_t num_blocks,
-                     std::string resource_name,
-                     std::string exhaustion_message = "");
-  ~SingleBlockManager() override = default;
+  EmbeddingBlockManager(uint32_t num_blocks,
+                        std::string resource_name,
+                        std::string exhaustion_message = "");
+  ~EmbeddingBlockManager() override = default;
 
   // One block per sequence: empty when already held, else a single block (or
   // std::nullopt when the pool is exhausted). Does not insert into the sequence
-  // -- the composite commits the returned block under BlockType::SINGLE.
+  // -- the composite commits the returned block under BlockType::EMBEDDING.
   std::optional<std::vector<Block>> allocate_for_sequence(
       Sequence* seq,
       size_t num_tokens) override;
@@ -52,7 +52,7 @@ class SingleBlockManager final : public BlockManagerImpl {
   using BlockManagerImpl::allocate;
   Block allocate() override;
 
-  // SINGLE never serves prefix cache; these must not be reached.
+  // EMBEDDING never serves prefix cache; these must not be reached.
   std::vector<Block> allocate_shared(
       const Slice<int32_t>& token_ids,
       const Slice<Block>& existed_shared_blocks = {},

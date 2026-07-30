@@ -149,7 +149,8 @@ class BlockManager {
   // get number of slots per block
   size_t block_size() const { return options_.block_size(); }
 
-  // The block category this leaf serves (KV / SWA / C4 / C128 / SINGLE). A leaf
+  // The block category this leaf serves (KV / SWA / C4 / C128 / EMBEDDING /
+  // LINEAR). A leaf
   // reads its own held-block count from the sequence under this type, and the
   // CompositeBlockManager inserts the returned blocks into the sequence under
   // this type. Carried via Options by the spec builder.

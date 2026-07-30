@@ -870,14 +870,14 @@ TEST_F(AclGraphExecutorTest, BatchInputCarriesLinearStateIds) {
   ASSERT_FALSE(batch->empty());
   ASSERT_FALSE(sequences_.empty());
 
-  // embedding_ids come from the single_block slot, while linear_state_ids come
-  // from the dedicated linear_state_slot slot; the two are decoupled and carry
+  // embedding_ids come from the EMBEDDING slot, while linear_state_ids come
+  // from the dedicated LINEAR slot; the two are decoupled and carry
   // independent ids through transport.
   auto& seq = sequences_.back();
   auto embedding_block = block_manager_->allocate(1);
   ASSERT_EQ(embedding_block.size(), 1);
   const int32_t expected_embedding_id = embedding_block[0].id();
-  seq.add_blocks(BlockType::SINGLE, embedding_block);
+  seq.add_blocks(BlockType::EMBEDDING, embedding_block);
 
   auto linear_state_slot = block_manager_->allocate(1);
   ASSERT_EQ(linear_state_slot.size(), 1);

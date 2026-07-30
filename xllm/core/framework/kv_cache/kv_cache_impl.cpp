@@ -136,7 +136,7 @@ std::vector<KVCacheTensor> KVCacheImpl::get_cache_tensors() const {
       tensors.emplace_back(KVCacheTensor{role,
                                          tensor,
                                          cache_group_id(block_type),
-                                         block_type == BlockType::SINGLE});
+                                         block_type == BlockType::LINEAR});
     }
   };
 
@@ -148,8 +148,8 @@ std::vector<KVCacheTensor> KVCacheImpl::get_cache_tensors() const {
     add_tensor(
         KVCacheTensorRole::INDEX_SCALE, index_scale.value(), BlockType::KV);
   }
-  add_tensor(KVCacheTensorRole::CONV, get_conv_cache(), BlockType::SINGLE);
-  add_tensor(KVCacheTensorRole::SSM, get_ssm_cache(), BlockType::SINGLE);
+  add_tensor(KVCacheTensorRole::CONV, get_conv_cache(), BlockType::LINEAR);
+  add_tensor(KVCacheTensorRole::SSM, get_ssm_cache(), BlockType::LINEAR);
   const auto key_scale = get_k_cache_scale();
   if (key_scale.has_value()) {
     add_tensor(KVCacheTensorRole::KEY_SCALE, key_scale.value(), BlockType::KV);

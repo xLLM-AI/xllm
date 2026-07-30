@@ -13,16 +13,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "single_block_manager.h"
+#include "embedding_block_manager.h"
 
 #include <gtest/gtest.h>
 
 namespace xllm {
 
-TEST(SingleBlockManagerTest, AllocateAndFreeRoundTrip) {
+TEST(EmbeddingBlockManagerTest, AllocateAndFreeRoundTrip) {
   // id 0 is reserved for padding (matching BlockManagerImpl), so a pool sized
   // for 4 physical slots exposes 3 usable blocks.
-  SingleBlockManager manager(4, "single");
+  EmbeddingBlockManager manager(4, "single");
 
   EXPECT_EQ(manager.num_total_blocks(), 3);
   EXPECT_EQ(manager.num_blocks_in_prefix_cache(), 0);
@@ -49,30 +49,30 @@ TEST(SingleBlockManagerTest, AllocateAndFreeRoundTrip) {
   EXPECT_DOUBLE_EQ(manager.kv_cache_utilization(), 0.0);
 }
 
-TEST(SingleBlockManagerTest, AllocateReturnsEmptyWhenExhausted) {
+TEST(EmbeddingBlockManagerTest, AllocateReturnsEmptyWhenExhausted) {
   // id 0 is reserved internally, so 3 physical slots expose 2 usable blocks.
-  SingleBlockManager manager(3, "single");
+  EmbeddingBlockManager manager(3, "single");
   auto blocks = manager.allocate(2);
   ASSERT_EQ(blocks.size(), 2);
   EXPECT_TRUE(manager.allocate(1).empty());
 }
 
-TEST(SingleBlockManagerTest, AllocateSingleDiesWhenExhausted) {
+TEST(EmbeddingBlockManagerTest, AllocateSingleDiesWhenExhausted) {
   // id 0 is reserved internally, so 2 physical slots expose a single usable
   // block, whose id is 1.
-  SingleBlockManager manager(2, "single");
+  EmbeddingBlockManager manager(2, "single");
   Block block = manager.allocate();
   EXPECT_EQ(block.id(), 1);
   EXPECT_DEATH(manager.allocate(), "No more single blocks available");
 }
 
-TEST(SingleBlockManagerTest, PrefixCacheApisAreNotImplemented) {
-  SingleBlockManager manager(2, "single");
+TEST(EmbeddingBlockManagerTest, PrefixCacheApisAreNotImplemented) {
+  EmbeddingBlockManager manager(2, "single");
 
   const int32_t token_ids_arr[] = {1, 2, 3};
   const Slice<int32_t> token_ids(token_ids_arr, 3);
 
-  // SINGLE never serves the prefix cache. These APIs are explicitly
+  // EMBEDDING never serves the prefix cache. These APIs are explicitly
   // NOT_IMPLEMENTED so a stray caller fails loudly instead of silently
   // mis-routing (the composite only calls them on prefix-capable leaves).
   EXPECT_DEATH(manager.allocate_shared(token_ids), "not implemented");
@@ -83,14 +83,14 @@ TEST(SingleBlockManagerTest, PrefixCacheApisAreNotImplemented) {
   EXPECT_DEATH(manager.cache(blocks), "not implemented");
 }
 
-TEST(SingleBlockManagerTest, UsedBlocksAccountingRoundTrips) {
-  // SingleBlockManager now reuses BlockManagerImpl's free list. With prefix
+TEST(EmbeddingBlockManagerTest, UsedBlocksAccountingRoundTrips) {
+  // EmbeddingBlockManager now reuses BlockManagerImpl's free list. With prefix
   // cache disabled there is no aliasing scenario (single blocks live only in
   // the owning sequence, never in a prefix cache), so deallocate drops
   // effective usage immediately and the physical id returns when the Block is
   // destroyed. id 0 is reserved internally, so 2 physical slots expose a single
   // usable block.
-  SingleBlockManager manager(2, "single");
+  EmbeddingBlockManager manager(2, "single");
   EXPECT_EQ(manager.num_used_blocks(), 0u);
   EXPECT_EQ(manager.num_free_blocks(), 1u);
 
@@ -113,11 +113,11 @@ TEST(SingleBlockManagerTest, UsedBlocksAccountingRoundTrips) {
   EXPECT_EQ(manager.num_free_blocks(), 1u);
 }
 
-TEST(SingleBlockManagerTest, ReservesPaddingSlotZero) {
+TEST(EmbeddingBlockManagerTest, ReservesPaddingSlotZero) {
   // Draining the whole pool must never yield the reserved padding id 0, which
   // padded batch rows use as kPaddingLinearStateId. 4 physical slots expose 3
   // usable blocks.
-  SingleBlockManager manager(4, "single");
+  EmbeddingBlockManager manager(4, "single");
   EXPECT_EQ(manager.num_total_blocks(), 3);
 
   std::vector<Block> blocks = manager.allocate(3);
@@ -132,8 +132,8 @@ TEST(SingleBlockManagerTest, ReservesPaddingSlotZero) {
   EXPECT_EQ(manager.num_free_blocks(), 3u);
 }
 
-TEST(SingleBlockManagerTest, ConstructorRejectsZeroBlocks) {
-  EXPECT_DEATH({ SingleBlockManager manager(0, "single"); }, "No blocks");
+TEST(EmbeddingBlockManagerTest, ConstructorRejectsZeroBlocks) {
+  EXPECT_DEATH({ EmbeddingBlockManager manager(0, "single"); }, "No blocks");
 }
 
 }  // namespace xllm

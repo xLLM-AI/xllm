@@ -43,9 +43,9 @@ LinearAttentionKVCacheImpl::LinearAttentionKVCacheImpl(
     BlockType type,
     int64_t layer_count)
     : KVCacheImpl() {
-  CHECK(type == BlockType::SINGLE)
+  CHECK(type == BlockType::LINEAR)
       << "LinearAttentionKVCacheImpl host cache only supports "
-         "BlockType::SINGLE.";
+         "BlockType::LINEAR.";
   host_page_aligned_regions_.reserve(2);
   if (kv_cache_shape.has_conv_cache_shape()) {
     create_host_tensor(
@@ -78,7 +78,7 @@ torch::Tensor LinearAttentionKVCacheImpl::get_ssm_cache() const {
 BlockTypeTensorMap LinearAttentionKVCacheImpl::get_block_type_tensors(
     BlockType type) const {
   BlockTypeTensorMap tensor_map;
-  if (type != BlockType::SINGLE) {
+  if (type != BlockType::LINEAR) {
     return tensor_map;
   }
   if (conv_cache_.defined() && conv_cache_.numel() > 0) {

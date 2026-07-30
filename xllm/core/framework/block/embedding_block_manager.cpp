@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "single_block_manager.h"
+#include "embedding_block_manager.h"
 
 #include <glog/logging.h>
 
@@ -22,29 +22,30 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-// One physical id == one block; no prefix cache; blocks live under the SINGLE
-// slot of the sequence's KVCacheState. id 0 stays the reserved padding slot
-// (BlockManagerImpl reserves it in its ctor), so usable ids are [1, n-1].
-BlockManager::Options make_single_block_options(uint32_t num_blocks) {
+// One physical id == one block; no prefix cache; blocks live under the
+// EMBEDDING slot of the sequence's KVCacheState. id 0 stays the reserved
+// padding slot (BlockManagerImpl reserves it in its ctor), so usable ids are
+// [1, n-1].
+BlockManager::Options make_embedding_block_options(uint32_t num_blocks) {
   BlockManager::Options options;
   options.num_blocks(num_blocks);
   options.block_size(/*unused, one id == one block=*/1);
   options.enable_prefix_cache(false);
   options.enable_disagg_pd(false);
-  options.block_type(BlockType::SINGLE);
+  options.block_type(BlockType::EMBEDDING);
   return options;
 }
 
 }  // namespace
 
-SingleBlockManager::SingleBlockManager(uint32_t num_blocks,
-                                       std::string resource_name,
-                                       std::string exhaustion_message)
-    : BlockManagerImpl(make_single_block_options(num_blocks)),
+EmbeddingBlockManager::EmbeddingBlockManager(uint32_t num_blocks,
+                                             std::string resource_name,
+                                             std::string exhaustion_message)
+    : BlockManagerImpl(make_embedding_block_options(num_blocks)),
       resource_name_(std::move(resource_name)),
       exhaustion_message_(std::move(exhaustion_message)) {}
 
-std::optional<std::vector<Block>> SingleBlockManager::allocate_for_sequence(
+std::optional<std::vector<Block>> EmbeddingBlockManager::allocate_for_sequence(
     Sequence* seq,
     size_t /*num_tokens*/) {
   if (seq == nullptr) {
@@ -67,7 +68,7 @@ std::optional<std::vector<Block>> SingleBlockManager::allocate_for_sequence(
   return blocks;
 }
 
-Block SingleBlockManager::allocate() {
+Block EmbeddingBlockManager::allocate() {
   // Surface exhaustion with this resource's identity instead of the generic
   // base message, then delegate to the counting allocate(1) path (the base
   // zero-arg allocate() skips num_used accounting -- it exists for padding).
@@ -82,7 +83,7 @@ Block SingleBlockManager::allocate() {
   return std::move(blocks[0]);
 }
 
-std::vector<Block> SingleBlockManager::allocate_shared(
+std::vector<Block> EmbeddingBlockManager::allocate_shared(
     const Slice<int32_t>& /*token_ids*/,
     const Slice<Block>& /*existed_shared_blocks*/,
     const MMData& /*mm_data*/,
@@ -91,15 +92,15 @@ std::vector<Block> SingleBlockManager::allocate_shared(
   return {};
 }
 
-void SingleBlockManager::cache(const Slice<int32_t>& /*token_ids*/,
-                               std::vector<Block>& /*blocks*/,
-                               size_t /*existed_shared_blocks_num*/,
-                               const MMData& /*mm_data*/,
-                               const Slice<XXH3Key>& /*block_hashes*/) {
+void EmbeddingBlockManager::cache(const Slice<int32_t>& /*token_ids*/,
+                                  std::vector<Block>& /*blocks*/,
+                                  size_t /*existed_shared_blocks_num*/,
+                                  const MMData& /*mm_data*/,
+                                  const Slice<XXH3Key>& /*block_hashes*/) {
   NOT_IMPLEMENTED();
 }
 
-void SingleBlockManager::cache(const std::vector<Block>& /*blocks*/) {
+void EmbeddingBlockManager::cache(const std::vector<Block>& /*blocks*/) {
   NOT_IMPLEMENTED();
 }
 

@@ -89,7 +89,7 @@ size_t KVCacheState::num_blocks(BlockType type) const {
 }
 
 bool KVCacheState::has_any_blocks() const {
-  // Cache-bearing types only; SINGLE is a per-sequence resource block, not
+  // Cache-bearing types only; EMBEDDING is a per-sequence resource block, not
   // token cache, and must not count toward "the sequence already holds cache".
   for (const BlockType type :
        {BlockType::KV, BlockType::SWA, BlockType::C4, BlockType::C128}) {
@@ -144,7 +144,7 @@ void KVCacheState::erase_blocks(BlockType type) {
 }
 
 Block KVCacheState::copy_block(BlockType type) const {
-  DCHECK(type == BlockType::SINGLE || type == BlockType::LINEAR)
+  DCHECK(type == BlockType::EMBEDDING || type == BlockType::LINEAR)
       << "copy_block is for singleton block types only";
   auto it = composite_blocks_.find(type);
   if (it == composite_blocks_.end() || it->second.empty()) {
@@ -319,8 +319,8 @@ bool KVCacheState::has_multi_block_export() const {
   return false;
 }
 
-int32_t KVCacheState::get_single_block_id() const {
-  const auto it = composite_blocks_.find(BlockType::SINGLE);
+int32_t KVCacheState::get_embedding_block_id() const {
+  const auto it = composite_blocks_.find(BlockType::EMBEDDING);
   if (it == composite_blocks_.end() || it->second.empty() ||
       !it->second[0].is_valid()) {
     return -1;

@@ -90,7 +90,7 @@ BlockTypeTensorMap build_block_type_tensor_map(const KVCache& kv_cache,
         map.emplace(KVCacheTensorRole::INDEX_SCALE, index_cache_scale.value());
       }
       return map;
-    case BlockType::SINGLE:
+    case BlockType::LINEAR:
       if (has_tensor(conv_cache)) {
         map.emplace(KVCacheTensorRole::CONV, conv_cache);
       }
@@ -173,7 +173,7 @@ void HierarchyKVCacheTransfer::build_device_block_type_map() {
   device_block_type_layer_ids_.clear();
 
   const std::vector<BlockType> kBlockTypes = {BlockType::KV,
-                                              BlockType::SINGLE,
+                                              BlockType::LINEAR,
                                               BlockType::SWA,
                                               BlockType::C4,
                                               BlockType::C128};

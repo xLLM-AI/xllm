@@ -64,12 +64,16 @@ class FakeTokenizer final : public Tokenizer {
 
 class FakeEngine final : public Engine {
  public:
-  FakeEngine(int32_t num_blocks, int32_t block_size) {
+  FakeEngine(int32_t num_blocks,
+             int32_t block_size,
+             int32_t num_speculative_tokens = 0) {
     BlockManagerPool::Options options;
     options.num_blocks(num_blocks)
         .block_size(block_size)
         .enable_prefix_cache(true)
-        .enable_disagg_pd(true);
+        .enable_disagg_pd(true)
+        .num_speculative_tokens(num_speculative_tokens)
+        .num_embedding_blocks(num_blocks);
     tokenizer_ = std::make_unique<FakeTokenizer>();
     block_manager_ = std::make_unique<BlockManagerPool>(options, /*dp_size=*/1);
   }
@@ -285,7 +289,9 @@ TEST(DisaggPDSchedulerTest, CacheSkipsExistingSharedBlocks) {
 }
 
 TEST(DisaggPDSchedulerTest, MtpFirstGenerationRequiresBootstrapBeforeQueue) {
-  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  FakeEngine engine(/*num_blocks=*/8,
+                    /*block_size=*/2,
+                    /*num_speculative_tokens=*/1);
   TestDisaggPDScheduler scheduler(&engine, make_mtp_decode_options());
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   ASSERT_TRUE(
@@ -298,13 +304,15 @@ TEST(DisaggPDSchedulerTest, MtpFirstGenerationRequiresBootstrapBeforeQueue) {
 }
 
 TEST(DisaggPDSchedulerTest, MtpFirstGenerationStoresBootstrapThenQueues) {
-  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  FakeEngine engine(/*num_blocks=*/8,
+                    /*block_size=*/2,
+                    /*num_speculative_tokens=*/1);
   TestDisaggPDScheduler scheduler(&engine, make_mtp_decode_options());
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
   ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
   sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
-  ASSERT_GE(sequence->get_single_block_id(), 0);
+  ASSERT_GE(sequence->get_embedding_block_id(), 0);
   ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
 
   torch::Tensor embedding = torch::tensor({1.0f, 2.0f});
@@ -388,7 +396,9 @@ TEST(DisaggPDSchedulerTest, AmortizedTokenLatencyRoundsHalfUp) {
 }
 
 TEST(DisaggPDSchedulerTest, SpeculativeGaugeReportsBatchMeanTokensPerStep) {
-  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  FakeEngine engine(/*num_blocks=*/8,
+                    /*block_size=*/2,
+                    /*num_speculative_tokens=*/1);
   TestDisaggPDScheduler scheduler(&engine, make_mtp_decode_options());
 
   std::shared_ptr<Request> first_request = make_request({1, 2, 3, 4});

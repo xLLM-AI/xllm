@@ -784,7 +784,7 @@ void BatchInputBuilder::extract_tokens_and_positions(Sequence* sequence,
     // last chunk of prefill and decode
     // add -1 as extra token id
     state.extra_token_ids.emplace_back(-1);
-    state.embedding_ids.emplace_back(sequence->get_single_block_id());
+    state.embedding_ids.emplace_back(sequence->get_embedding_block_id());
     state.request_ids.emplace_back(sequence->request_id());
     torch::Tensor mtp_bootstrap = sequence->get_mtp_bootstrap_embedding();
     if (state.batch_forward_type.is_decode() && mtp_bootstrap.defined()) {
@@ -823,15 +823,11 @@ void BatchInputBuilder::append_linear_state_row(Sequence* sequence,
                                                 BuilderState& state) {
   // linear_state_ids must stay aligned with logical batch rows even when the
   // model has no linear-attention layers, because downstream consumers index by
-  // batch row. Prefer the dedicated linear-state slot. Linear-attention decode
-  // paths that only carry a scheduler-side single block still share that live
-  // slot value across embedding and linear-state transport fields.
+  // batch row. GDN models always hold a dedicated LINEAR slot, so read it
+  // directly; non-linear models emit -1 and return early below.
   const bool has_linear_attention =
       args_ && has_linear_attention_layers(*args_);
   int32_t linear_state_id = sequence->get_linear_state_slot_id();
-  if (linear_state_id < 0 && has_linear_attention) {
-    linear_state_id = sequence->get_single_block_id();
-  }
   state.linear_state_ids.emplace_back(linear_state_id);
   if (!has_linear_attention) {
     return;

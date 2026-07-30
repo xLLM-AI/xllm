@@ -110,13 +110,15 @@ enum TransferType {
 }
 
 // Mirrors xllm::BlockType (framework/block/block.h). Kept in wire order so
-// numeric values round-trip losslessly across RPC.
+// numeric values round-trip losslessly across RPC (serialized by number, not
+// name). Enumerator 4 was historically named SINGLE; it is now EMBEDDING to
+// match the C++ enum, with the value pinned at 4 for wire compatibility.
 enum BlockType {
   KV = 0;
   SWA = 1;
   C4 = 2;
   C128 = 3;
-  SINGLE = 4;
+  EMBEDDING = 4;
   LINEAR = 5;
 }
 

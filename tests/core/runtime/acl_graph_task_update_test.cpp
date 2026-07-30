@@ -310,9 +310,9 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
       if (!kv_blocks.empty()) {
         block_manager_->deallocate(kv_blocks);
       }
-      auto single_blocks = sequence.kv_state().blocks(BlockType::SINGLE);
-      if (!single_blocks.empty()) {
-        block_manager_->deallocate(single_blocks);
+      auto linear_blocks = sequence.kv_state().blocks(BlockType::LINEAR);
+      if (!linear_blocks.empty()) {
+        block_manager_->deallocate(linear_blocks);
       }
     }
     sequences_.clear();
@@ -368,7 +368,7 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
       auto& sequence = sequences_.back();
 
       auto linear_state_block = block_manager_->allocate(1);
-      sequence.add_blocks(BlockType::SINGLE, linear_state_block);
+      sequence.add_blocks(BlockType::LINEAR, linear_state_block);
       sequence.add_blocks(BlockType::KV, block_manager_->allocate(2));
       sequence.kv_state().incr_kv_cache_tokens_num(4);
       sequence.append_token(token_seed + static_cast<int32_t>(i));
@@ -392,7 +392,7 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
       auto& sequence = sequences_.back();
 
       auto linear_state_block = block_manager_->allocate(1);
-      sequence.add_blocks(BlockType::SINGLE, linear_state_block);
+      sequence.add_blocks(BlockType::LINEAR, linear_state_block);
       sequence.add_blocks(
           BlockType::KV,
           block_manager_->allocate(static_cast<size_t>(num_kv_blocks)));

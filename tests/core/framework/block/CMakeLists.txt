@@ -18,7 +18,7 @@ if(USE_NPU)
       block_test
     SRCS
       block_manager_test.cpp
-      single_block_manager_test.cpp
+      embedding_block_manager_test.cpp
       composite_block_manager_test.cpp
     DEPS
       :xllm_server

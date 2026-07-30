@@ -34,20 +34,24 @@ class BlockManager;
 
 // Identity of a KV block's cache role inside a sequence's KVCacheState. Used as
 // the key of the per-sequence block map: the legacy flat attention KV lives
-// under KV, DSV4's three groups under SWA/C4/C128, and the per-sequence
-// linear/embedding resource block (formerly Sequence::single_block_) under
-// Single. A block carries no type identity itself; the owning BlockManager
-// decides which key to store it under when it fills the sequence state.
+// under KV, DSV4's three groups under SWA/C4/C128. EMBEDDING and LINEAR are
+// per-sequence single-resource slots (one block per sequence): EMBEDDING backs
+// the spec-decode embedding-row id, LINEAR backs the GDN recurrent state (its
+// slot id also indexes the conv/ssm KV tensors, which are tagged as the LINEAR
+// cache group). A block carries no type identity itself; the owning
+// BlockManager decides which key to store it under when it fills the state.
 enum class BlockType : int8_t {
-  KV = 0,      // normal/Qwen flat attention KV, exported to block_tables
-  SWA = 1,     // DSV4 sliding window, exported to multi_block_tables[0]
-  C4 = 2,      // DSV4 compressed, exported to multi_block_tables[1]
-  C128 = 3,    // DSV4 compressed, exported to multi_block_tables[2]
-  SINGLE = 4,  // per-sequence embedding resource block, exported via
-               // get_single_block_id() (embedding_ids)
-  LINEAR = 5,  // per-sequence linear-state (GDN recurrent) live slot, drawn
-               // from LinearStateBlockManager; exported via
-               // get_linear_block_id() (linear_state_ids)
+  KV = 0,         // normal/Qwen flat attention KV, exported to block_tables
+  SWA = 1,        // DSV4 sliding window, exported to multi_block_tables[0]
+  C4 = 2,         // DSV4 compressed, exported to multi_block_tables[1]
+  C128 = 3,       // DSV4 compressed, exported to multi_block_tables[2]
+  EMBEDDING = 4,  // per-sequence spec-decode embedding-row slot, exported via
+                  // get_embedding_block_id() (embedding_ids). Value kept at 4
+                  // for proto BlockType wire compatibility.
+  LINEAR = 5,     // per-sequence linear-state (GDN recurrent) live slot, drawn
+                  // from LinearStateBlockManager; exported via
+  // get_linear_block_id() (linear_state_ids). Also the cache group
+  // for the conv/ssm recurrent-state KV tensors.
 };
 
 // Fixed column order of worker multi_block_tables. The exported tables must
@@ -76,8 +80,6 @@ inline constexpr std::optional<BlockType> block_type_from_cache_group_id(
       return BlockType::C4;
     case cache_group_id(BlockType::C128):
       return BlockType::C128;
-    case cache_group_id(BlockType::SINGLE):
-      return BlockType::SINGLE;
     default:
       return std::nullopt;
   }

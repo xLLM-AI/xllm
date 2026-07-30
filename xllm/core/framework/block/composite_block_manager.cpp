@@ -24,9 +24,9 @@ limitations under the License.
 #include "concurrent_block_manager_impl.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "embedding_block_manager.h"
 #include "framework/xtensor/xtensor_block_manager_impl.h"
 #include "linear_state_block_manager.h"
-#include "single_block_manager.h"
 #include "sliding_window_block_manager.h"
 
 namespace xllm {
@@ -47,7 +47,7 @@ uint32_t ceil_div(uint32_t numerator, uint32_t denominator) {
 // LINEAR because the D forward never reads their shared prefix before P
 // overwrites it -- SWA hits carry gap-invalid placeholders that would break
 // the grouped-response CHECK, and LINEAR restore is a net waste (D does no
-// prefill). SINGLE has never had a prefix cache and stays out on both sides.
+// prefill). EMBEDDING has never had a prefix cache and stays out on both sides.
 //
 // The same predicate governs the set of leaves that will participate in
 // future host offload (see xllm_docs/pd_d_side_skip_swa_linear_prefix_cache.md
@@ -65,7 +65,7 @@ bool leaf_participates_in_prefix_cache(BlockType type,
       return true;
     case BlockType::SWA:
     case BlockType::LINEAR:
-    case BlockType::SINGLE:
+    case BlockType::EMBEDDING:
       return false;
   }
   // Fail loudly on unhandled BlockType. Falling back to false would silently
@@ -318,8 +318,8 @@ void CompositeBlockManager::cache_full_blocks_for_sequence(Sequence* seq) {
   KVCacheState& kv = seq->kv_state();
   for (auto& [type, entry] : leaves_) {
     // KV owns its final flush via cache_for_sequence at deallocate time;
-    // SINGLE / LINEAR hold no token cache.
-    if (type == BlockType::KV || type == BlockType::SINGLE ||
+    // EMBEDDING / LINEAR hold no token cache.
+    if (type == BlockType::KV || type == BlockType::EMBEDDING ||
         type == BlockType::LINEAR) {
       continue;
     }
@@ -400,9 +400,9 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
   // pressure would let the pool report admission success while the device
   // is under-provisioned -- batch_input_builder's CHECK then fires
   // downstream. Rolling back lets the scheduler defer to the next tick.
-  // SINGLE / LINEAR are per-sequence resource slots, not token cache.
+  // EMBEDDING / LINEAR are per-sequence resource slots, not token cache.
   for (const auto& [type, entry] : leaves_) {
-    if (type == BlockType::SINGLE || type == BlockType::LINEAR) {
+    if (type == BlockType::EMBEDDING || type == BlockType::LINEAR) {
       continue;
     }
     const size_t leaf_block_size = entry.leaf->block_size();

@@ -28,8 +28,9 @@ namespace xllm {
 // threadpools).
 //
 // Composition, not inheritance: the inner manager is always a leaf
-// (BlockManagerImpl / SingleBlockManager / ...), never a CompositeBlockManager.
-// The composite constructs this wrapper around the leaves that need it.
+// (BlockManagerImpl / EmbeddingBlockManager / ...), never a
+// CompositeBlockManager. The composite constructs this wrapper around the
+// leaves that need it.
 class ConcurrentBlockManagerImpl : public BlockManager {
  public:
   explicit ConcurrentBlockManagerImpl(std::unique_ptr<BlockManager> inner);

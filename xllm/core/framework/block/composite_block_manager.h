@@ -126,7 +126,7 @@ class CompositeBlockManager : public BlockManager {
   // full blocks into its own prefix cache incrementally (cursor lives in
   // KVCacheState::num_cached_blocks). Only fires for leaves that carry token
   // cache and are not the KV leaf -- KV has its own final-flush semantics
-  // via cache_for_sequence at deallocate time; SINGLE / LINEAR hold no token
+  // via cache_for_sequence at deallocate time; EMBEDDING / LINEAR hold no token
   // cache.
   void cache_full_blocks_for_sequence(Sequence* seq);
 
@@ -134,13 +134,15 @@ class CompositeBlockManager : public BlockManager {
   LeafCombination combination_;
 };
 
-// Build the leaf map for one DP rank. Per model:
-//   normal / Qwen -> {KV, SINGLE}
-//   DSV4          -> {SWA, C4, C128, SINGLE}
-//   xtensor       -> {KV(XTensorBlockManagerImpl), SINGLE}
+// Build the leaf map for one DP rank. Per model (base cache-bearing leaves):
+//   normal / Qwen -> {KV}
+//   DSV4          -> {SWA, C4, C128}
+//   xtensor       -> {KV(XTensorBlockManagerImpl)}
+// A LINEAR leaf is added when enable_linear_state (GDN recurrent models).
 // Leaves are wrapped in ConcurrentBlockManagerImpl for disagg-PD / kvcache
-// store. SINGLE is appended by the pool caller. dp_rank is used by the
-// xtensor KV leaf (per-rank VMM page pool).
+// store. The EMBEDDING leaf is appended by the pool caller only when spec
+// decode needs it. dp_rank is used by the xtensor KV leaf (per-rank VMM page
+// pool).
 std::map<BlockType, CompositeBlockManager::LeafEntry> build_composite_leaves(
     const BlockManager::Options& options,
     int32_t dp_rank = 0);

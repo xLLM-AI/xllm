@@ -49,9 +49,9 @@ class KVCacheState {
   // Number of blocks held under `type`.
   size_t num_blocks(BlockType type) const;
   // True if the sequence holds any cache-bearing blocks (KV / SWA / C4 / C128).
-  // Excludes SINGLE, which is a per-sequence resource, not token cache. Used to
-  // decide whether an allocation that started from an empty sequence should be
-  // fully rolled back on failure (vs. a grow on an already-populated sequence).
+  // Excludes EMBEDDING, which is a per-sequence resource, not token cache. Used
+  // to decide whether an allocation that started from an empty sequence should
+  // be fully rolled back on failure (vs. a grow on an already-populated seq).
   bool has_any_blocks() const;
   // token <-> physical slot mapping for `type` (paged attention). CHECKs the
   // type is present.
@@ -119,10 +119,10 @@ class KVCacheState {
   // (SWA / C4 / C128).
   bool has_multi_block_export() const;
 
-  // Single per-sequence resource block (BlockType::SINGLE): returns the Single
-  // block id, or -1 when absent. Used for embedding_ids export and disagg-PD's
-  // linear_state_id fallback. Other block types read via blocks(type).
-  int32_t get_single_block_id() const;
+  // Per-sequence embedding-row block (BlockType::EMBEDDING): returns the
+  // EMBEDDING block id, or -1 when absent. Used for embedding_ids export
+  // (spec-decode EmbeddingCache). Other block types read via blocks(type).
+  int32_t get_embedding_block_id() const;
 
   // Linear-state live slot id (BlockType::LINEAR), or -1 when absent.
   int32_t get_linear_block_id() const;
@@ -196,7 +196,8 @@ class KVCacheState {
 
   // KV cache blocks keyed by cache role. The flat attention KV lives under
   // BlockType::KV; DSV4 keeps its SWA / C4 / C128 groups here; the per-sequence
-  // linear/embedding resource block lives under BlockType::SINGLE. std::map
+  // embedding-row slot lives under BlockType::EMBEDDING and the GDN recurrent
+  // slot under BlockType::LINEAR. std::map
   // keeps deterministic iteration for reset / dealloc / debugging, but worker
   // export order is governed by kMultiBlockExportOrder, not by map order.
   std::map<BlockType, std::vector<Block>> composite_blocks_;

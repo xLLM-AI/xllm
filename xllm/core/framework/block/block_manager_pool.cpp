@@ -35,8 +35,6 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
     : options_(options) {
   CHECK(dp_size > 0) << "dp_size must be greater than 0";
   block_managers_.reserve(dp_size);
-  const uint32_t default_max_single_block_sequences =
-      options_.max_seqs_per_batch();
 
   BlockManager::Options block_options;
   block_options.num_blocks(options_.num_blocks())
@@ -61,36 +59,35 @@ BlockManagerPool::BlockManagerPool(const Options& options, int32_t dp_size)
       .num_speculative_tokens(options_.num_speculative_tokens())
       .instance_is_decode(options_.instance_is_decode());
 
-  uint32_t num_single_blocks = std::max<uint32_t>(
-      options_.num_single_blocks(), default_max_single_block_sequences + 2);
-  CHECK_GT(num_single_blocks, 0u) << "num_single_blocks must be positive";
-
   for (int32_t i = 0; i < dp_size; ++i) {
     // The pool always holds a CompositeBlockManager. Its KV leaf is a flat
     // BlockManagerImpl, or an XTensorBlockManagerImpl when enable_xtensor (the
-    // builder picks); SWA / C4 / C128 come from manager_types; the per-sequence
-    // SINGLE resource leaf is appended here under the SINGLE key. Every leaf is
-    // routed by its BlockType, so xtensor and Single are ordinary leaves.
+    // builder picks); SWA / C4 / C128 come from manager_types; the LINEAR leaf
+    // is added by the builder when enable_linear_state. The per-sequence
+    // EMBEDDING resource leaf is appended here under the EMBEDDING key when
+    // spec decode needs it. Every leaf is routed by its BlockType.
     auto leaves = build_composite_leaves(block_options, /*dp_rank=*/i);
-    // SINGLE leaf needs the same concurrency wrapper as the other leaves when
-    // sequence-level entry points run off the scheduler thread (disagg PD /
-    // kvcache store prefill threadpools call try_allocate concurrently, and the
-    // host-offload D2H callback frees blocks off-thread).
-    std::unique_ptr<BlockManager> single_leaf =
-        std::make_unique<SingleBlockManager>(
-            /*num_blocks=*/num_single_blocks,
-            /*resource_name=*/"single block",
-            /*exhaustion_message=*/"No more single-block ids available");
-    if (options_.enable_disagg_pd() || options_.enable_kvcache_store() ||
-        options_.enable_host_offload()) {
-      single_leaf =
-          std::make_unique<ConcurrentBlockManagerImpl>(std::move(single_leaf));
+    if (options_.num_speculative_tokens() > 0) {
+      // EMBEDDING leaf needs the same concurrency wrapper as the other leaves
+      // when sequence-level entry points run off the scheduler thread (disagg
+      // PD / kvcache store prefill threadpools call try_allocate concurrently,
+      // and the host-offload D2H callback frees blocks off-thread).
+      std::unique_ptr<BlockManager> embedding_leaf =
+          std::make_unique<EmbeddingBlockManager>(
+              /*num_blocks=*/options_.num_embedding_blocks(),
+              /*resource_name=*/"embedding block",
+              /*exhaustion_message=*/"No more embedding-block ids available");
+      if (options_.enable_disagg_pd() || options_.enable_kvcache_store() ||
+          options_.enable_host_offload()) {
+        embedding_leaf = std::make_unique<ConcurrentBlockManagerImpl>(
+            std::move(embedding_leaf));
+      }
+      leaves.emplace(
+          BlockType::EMBEDDING,
+          CompositeBlockManager::LeafEntry{std::move(embedding_leaf),
+                                           /*participates_in_admission=*/false,
+                                           /*supports_prefix_cache=*/false});
     }
-    leaves.emplace(
-        BlockType::SINGLE,
-        CompositeBlockManager::LeafEntry{std::move(single_leaf),
-                                         /*participates_in_admission=*/false,
-                                         /*supports_prefix_cache=*/false});
     block_managers_.emplace_back(
         std::make_unique<CompositeBlockManager>(std::move(leaves)));
   }
@@ -144,7 +141,7 @@ void BlockManagerPool::deallocate(Sequence* sequence) {
   DCHECK(sequence != nullptr);
   int32_t dp_rank = get_dp_rank(sequence);
   // The composite fans deallocate (with final cache) out across all leaves,
-  // including the SINGLE resource leaf, the LINEAR leaf, and the (flat or
+  // including the EMBEDDING resource leaf, the LINEAR leaf, and the (flat or
   // xtensor) KV leaf.
   auto* composite =
       static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
@@ -183,7 +180,7 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
   // failure, wrongly deallocate + reset the already-held SWA/C4/C128 blocks.
   const bool started_empty = !sequence->kv_state().has_any_blocks();
 
-  // The leaves (KV / SWA / C4 / C128 / SINGLE / LINEAR) each apply their own
+  // The leaves (KV / SWA / C4 / C128 / EMBEDDING / LINEAR) each apply their own
   // strategy; the pool only orchestrates prefix-share-then-beam-then-grow,
   // which beam (KV copy-on-write) must sit between.
   auto* composite =
@@ -201,7 +198,7 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
   }
   // Always run the composite growth pass: even when KV is already satisfied, a
   // sequence (e.g. a fork/clone of a beam parent) may still be missing its
-  // per-sequence SINGLE / LINEAR block. The composite skips no-op leaves
+  // per-sequence EMBEDDING / LINEAR block. The composite skips no-op leaves
   // internally.
   if (!composite->allocate_sequence(sequence, num_tokens)) {
     if (started_empty) {
@@ -390,7 +387,7 @@ void BlockManagerPool::deallocate_without_cache(Sequence* sequence) {
                                BlockType::SWA,
                                BlockType::C4,
                                BlockType::C128,
-                               BlockType::SINGLE,
+                               BlockType::EMBEDDING,
                                BlockType::LINEAR}) {
     const Slice<Block> blocks = sequence->kv_state().blocks(type);
     if (!blocks.empty()) {

@@ -340,6 +340,8 @@ bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .enable_disagg_pd(options_.enable_disagg_pd())
       .hasher_type(BlockHasherType::MM)
       .max_seqs_per_batch(options_.max_seqs_per_batch())
+      .num_embedding_blocks(
+          static_cast<uint32_t>(kv_cache_shape.key_cache_shape()[0]))
       // DECODE-side prefix cache participation is per-leaf and gated by the
       // predicate in composite_block_manager.cpp; mirror llm_engine so a
       // linear-attention VLM decode instance disables the LINEAR prefix cache.
