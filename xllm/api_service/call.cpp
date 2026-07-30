@@ -16,6 +16,7 @@ limitations under the License.
 #include "call.h"
 
 #include "core/common/constants.h"
+#include "core/util/verbose_trace_logger.h"
 
 namespace xllm {
 
@@ -35,6 +36,10 @@ void Call::init() {
     x_request_time_ =
         *controller_->http_request().GetHeader("x-request-timems");
   }
+
+  XLLM_VERBOSE_TRACE() << "event=request_received x-request-id="
+                       << x_request_id_
+                       << " path=" << controller_->http_request().uri().path();
 
   init_request_payload();
 }
