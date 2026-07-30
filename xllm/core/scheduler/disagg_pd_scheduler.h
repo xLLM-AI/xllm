@@ -74,6 +74,7 @@ class DisaggPDScheduler : public ContinuousScheduler {
       int32_t src_linear_state_id,
       int32_t src_dp_size,
       int32_t src_dp_rank,
+      bool heterogeneous_pd = false,
       torch::Tensor mtp_bootstrap_embedding = torch::Tensor(),
       int32_t num_cached_tokens = 0);
 

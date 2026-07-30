@@ -227,6 +227,7 @@ bool recv_first_generation(DisaggPDScheduler* scheduler,
       /*src_linear_state_id=*/-1,
       /*src_dp_size=*/1,
       /*src_dp_rank=*/0,
+      /*heterogeneous_pd=*/false,
       mtp_embedding,
       num_cached_tokens);
 }

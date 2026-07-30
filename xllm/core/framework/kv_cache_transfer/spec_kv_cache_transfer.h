@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <memory>
 #include <mutex>
 
 #include "framework/kv_cache_transfer/llm_data_dist_transfer.h"
@@ -133,6 +134,7 @@ class SpecKVCacheTransfer : public LlmDataDistTransfer {
                                       const std::vector<uint64_t>& dst_blocks);
 
   bool draft_body_uses_tp1_ = false;
+  bool heterogeneous_pd_enabled_ = false;
   LayerRegisteredCaches hetero_staging_registered_caches_;
   LayerRegisteredCaches spec_hetero_staging_registered_caches_;
   LayerRegisteredCaches spec_layer_registered_caches_;
@@ -140,10 +142,9 @@ class SpecKVCacheTransfer : public LlmDataDistTransfer {
   // Staging tensors are shared by all heterogeneous requests. Keep the full
   // restore transaction serialized until request-scoped staging slots exist.
   std::mutex hetero_restore_mutex_;
-  ThreadPool shard_pull_threadpool_{
-      /*num_threads=*/1,
-      /*cpu_binding=*/false,
-      /*pool_name=*/"SpecKVCacheTransfer.shard_pull"};
+  // Created only for the opt-in heterogeneous path. Homogeneous PD should not
+  // reserve a worker thread for a code path it cannot enter.
+  std::unique_ptr<ThreadPool> shard_pull_threadpool_;
 };
 
 }  // namespace xllm

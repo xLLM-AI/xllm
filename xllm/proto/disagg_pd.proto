@@ -271,6 +271,8 @@ message DisaggGenerationsRequest {
   Tensor mtp_bootstrap_embedding = 14;
   // Number of prompt tokens served from the prefill prefix cache.
   int32 num_cached_tokens = 15;
+  // The request uses the opt-in non-MLA heterogeneous TP restore path.
+  bool heterogeneous_pd = 16;
 }
 
 message DisaggGenerationsRequests {

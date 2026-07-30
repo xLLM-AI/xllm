@@ -312,11 +312,11 @@ void AsyncResponseProcessor::batch_process_stream_requests(
         }
       }
       if (req_output->finished_on_prefill_instance) {
-        LOG(INFO) << "[PD-PERF] Prefill response generation request_id="
-                  << request->request_id() << ", response_thread_id="
-                  << request->state().response_thread_id << ", total_ms="
-                  << absl::ToDoubleMilliseconds(absl::Now() -
-                                                response_start_time);
+        VLOG(1) << "Prefill response generation request_id="
+                << request->request_id() << ", response_thread_id="
+                << request->state().response_thread_id << ", total_ms="
+                << absl::ToDoubleMilliseconds(absl::Now() -
+                                              response_start_time);
       }
       counter->decrement_count();
     };
@@ -329,31 +329,30 @@ void AsyncResponseProcessor::batch_process_stream_requests(
     }
   }
 
-  rpc_threadpool_.schedule(
-      [cancel_request = cancel_request_,
-       counter = std::unique_ptr<BlockingCounter>(counter),
-       requests = std::move(requests),
-       request_outputs = std::move(request_outputs)]() mutable {
-        auto& resp_callback = requests[0]->state().outputs_func;
-        const absl::Time wait_start_time = absl::Now();
-        counter->wait();
-        const double wait_ms =
-            absl::ToDoubleMilliseconds(absl::Now() - wait_start_time);
-        const absl::Time rpc_start_time = absl::Now();
-        std::vector<bool> status_set = resp_callback(request_outputs);
-        if (!request_outputs.empty() &&
-            request_outputs[0].finished_on_prefill_instance) {
-          LOG(INFO) << "[PD-PERF] Prefill response RPC request_id="
-                    << requests[0]->request_id()
-                    << ", response_wait_ms=" << wait_ms << ", rpc_ms="
-                    << absl::ToDoubleMilliseconds(absl::Now() - rpc_start_time);
-        }
-        for (size_t i = 0; i < requests.size(); ++i) {
-          if (!status_set[i]) {
-            cancel_request(requests[i]);
-          }
-        }
-      });
+  rpc_threadpool_.schedule([cancel_request = cancel_request_,
+                            counter = std::unique_ptr<BlockingCounter>(counter),
+                            requests = std::move(requests),
+                            request_outputs =
+                                std::move(request_outputs)]() mutable {
+    auto& resp_callback = requests[0]->state().outputs_func;
+    const absl::Time wait_start_time = absl::Now();
+    counter->wait();
+    const double wait_ms =
+        absl::ToDoubleMilliseconds(absl::Now() - wait_start_time);
+    const absl::Time rpc_start_time = absl::Now();
+    std::vector<bool> status_set = resp_callback(request_outputs);
+    if (!request_outputs.empty() &&
+        request_outputs[0].finished_on_prefill_instance) {
+      VLOG(1) << "Prefill response RPC request_id=" << requests[0]->request_id()
+              << ", response_wait_ms=" << wait_ms << ", rpc_ms="
+              << absl::ToDoubleMilliseconds(absl::Now() - rpc_start_time);
+    }
+    for (size_t i = 0; i < requests.size(); ++i) {
+      if (!status_set[i]) {
+        cancel_request(requests[i]);
+      }
+    }
+  });
 }
 
 // process stream requests

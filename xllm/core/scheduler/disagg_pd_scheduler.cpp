@@ -387,11 +387,14 @@ void DisaggPDScheduler::dispatch_requests() {
     remote_instances_info_[selected_instance] = remote_info;
 
     const bool enable_mla = engine_->model_args().enable_mla();
+    const bool enable_heterogeneous_pd =
+        DisaggPDConfig::get_instance().enable_heterogeneous_pd();
     const PdTopoResult topo_result =
         check_pd_topo(instance_info_,
                       remote_info,
                       options_.kv_cache_transfer_mode(),
-                      enable_mla);
+                      enable_mla,
+                      enable_heterogeneous_pd);
     const bool allow_pd_topo = topo_result.status == PdTopoStatus::ALLOW_HOMO ||
                                topo_result.status == PdTopoStatus::ALLOW_HETERO;
     if (!allow_pd_topo) {
@@ -405,6 +408,14 @@ void DisaggPDScheduler::dispatch_requests() {
                " is incompatible: " + topo_result.reason});
       continue;
     }
+    if (!enable_mla && topo_result.status == PdTopoStatus::ALLOW_HETERO &&
+        options_.num_speculative_tokens() <= 0) {
+      response_processor_->process_failed_request(
+          request,
+          {StatusCode::INVALID_ARGUMENT,
+           "non-mla heterogeneous PD requires speculative decoding"});
+      continue;
+    }
     if (topo_result.status == PdTopoStatus::ALLOW_HETERO && VLOG_IS_ON(1)) {
       const PdTopo local_topo = get_pd_topo(instance_info_);
       const PdTopo remote_topo = get_pd_topo(remote_info);
@@ -413,6 +424,8 @@ void DisaggPDScheduler::dispatch_requests() {
               << ", remote dp/tp=" << remote_topo.dp_size << "/"
               << remote_topo.tp_size;
     }
+    request->state().heterogeneous_pd =
+        !enable_mla && topo_result.status == PdTopoStatus::ALLOW_HETERO;
 
     proto::DisaggPDService_Stub* stub = create_rpc_channel(selected_instance);
     if (stub == nullptr) {
@@ -646,12 +659,12 @@ void DisaggPDScheduler::dispatch_requests() {
         request_queue_.write(requests[i]);
       }
     }
-    LOG(INFO) << "[PD-PERF] Prefill Decode allocation request_id="
-              << requests.front()->request_id()
-              << ", request_count=" << requests.size()
-              << ", prepare_ms=" << allocation_prepare_seconds * 1000.0
-              << ", rpc_ms=" << allocation_rpc_seconds * 1000.0 << ", total_ms="
-              << decode_allocation_timer.elapsed_seconds() * 1000.0;
+    VLOG(1) << "Prefill Decode allocation request_id="
+            << requests.front()->request_id()
+            << ", request_count=" << requests.size()
+            << ", prepare_ms=" << allocation_prepare_seconds * 1000.0
+            << ", rpc_ms=" << allocation_rpc_seconds * 1000.0 << ", total_ms="
+            << decode_allocation_timer.elapsed_seconds() * 1000.0;
   }
 }
 
@@ -747,27 +760,30 @@ void DisaggPDScheduler::prefill_send_first_generation() {
             request->sequences()[0]->first_token().value().token_top_logprobs);
       }
       gen->set_kv_cache_transfer_mode(options_.kv_cache_transfer_mode());
-      // Heterogeneous TP uses decode-side PULL+merge even when the configured
-      // transport mode is PUSH, so source topology and cache ids are always
-      // included in the first-generation metadata.
-      ADD_VECTOR_TO_PROTO(gen->mutable_cluster_ids(),
-                          instance_info_.cluster_ids);
-      ADD_VECTOR_TO_PROTO(gen->mutable_addrs(), instance_info_.addrs);
-      gen->set_dp_size(instance_info_.dp_size);
-      gen->set_dp_rank(request->sequences()[0]->dp_rank());
-      const auto blocks =
-          request->sequences()[0]->kv_state().blocks(BlockType::KV);
-      std::vector<uint64_t> block_ids;
-      block_ids.reserve(blocks.size());
-      for (const auto& block : blocks) {
-        block_ids.push_back(block.id());
+      gen->set_heterogeneous_pd(request->state().heterogeneous_pd);
+      // Native PULL and heterogeneous PUSH both need source cache metadata.
+      // Homogeneous PUSH does not consume it, so keep that request compact.
+      if (options_.kv_cache_transfer_mode() == "PULL" ||
+          request->state().heterogeneous_pd) {
+        ADD_VECTOR_TO_PROTO(gen->mutable_cluster_ids(),
+                            instance_info_.cluster_ids);
+        ADD_VECTOR_TO_PROTO(gen->mutable_addrs(), instance_info_.addrs);
+        gen->set_dp_size(instance_info_.dp_size);
+        gen->set_dp_rank(request->sequences()[0]->dp_rank());
+        const auto blocks =
+            request->sequences()[0]->kv_state().blocks(BlockType::KV);
+        std::vector<uint64_t> block_ids;
+        block_ids.reserve(blocks.size());
+        for (const auto& block : blocks) {
+          block_ids.push_back(block.id());
+        }
+        ADD_VECTOR_TO_PROTO(gen->mutable_block_ids(), block_ids);
+        // Advertise the recurrent-state slot the D side should pull from: the
+        // dedicated LINEAR slot (Qwen3.5 GDN), or -1 for models without
+        // linear-attention layers. Must match the D-side response helper.
+        gen->set_linear_state_id(
+            request->sequences()[0]->get_recurrent_state_slot_id());
       }
-      ADD_VECTOR_TO_PROTO(gen->mutable_block_ids(), block_ids);
-      // Advertise the recurrent-state slot the D side should pull from: the
-      // dedicated LINEAR slot (Qwen3.5 GDN), or -1 for models without
-      // linear-attention layers. Must match the D-side response helper.
-      gen->set_linear_state_id(
-          request->sequences()[0]->get_recurrent_state_slot_id());
       if (options_.num_speculative_tokens() > 0) {
         torch::Tensor embedding =
             request->sequences()[0]->get_mtp_bootstrap_embedding();
@@ -807,11 +823,10 @@ void DisaggPDScheduler::prefill_send_first_generation() {
       Timer rpc_timer;
       stub->FirstGeneration(&cntl, &gens, &resp, nullptr);
       const double rpc_seconds = rpc_timer.elapsed_seconds();
-      LOG(INFO) << "[PD-PERF] Prefill first-generation request_id="
-                << request->request_id()
-                << ", prepare_ms=" << prepare_seconds * 1000.0
-                << ", rpc_ms=" << rpc_seconds * 1000.0 << ", total_ms="
-                << first_generation_timer.elapsed_seconds() * 1000.0;
+      VLOG(1) << "Prefill first-generation request_id=" << request->request_id()
+              << ", prepare_ms=" << prepare_seconds * 1000.0
+              << ", rpc_ms=" << rpc_seconds * 1000.0 << ", total_ms="
+              << first_generation_timer.elapsed_seconds() * 1000.0;
 
       const bool sent_first_generation = !cntl.Failed() && resp.ok();
       if (!sent_first_generation) {
@@ -874,6 +889,7 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     int32_t src_linear_state_id,
     int32_t src_dp_size,
     int32_t src_dp_rank,
+    bool heterogeneous_pd,
     torch::Tensor mtp_bootstrap_embedding,
     int32_t num_cached_tokens) {
   Timer receive_timer;
@@ -916,18 +932,15 @@ bool DisaggPDScheduler::decode_recv_first_generation(
   }
   request->record_num_prefix_cache_tokens(
       static_cast<size_t>(num_cached_tokens));
-  bool hetero_kv_pull = false;
-  if (kv_cache_transfer_mode == "PUSH" && !engine_->model_args().enable_mla() &&
-      src_dp_size > 0 && instance_info_.dp_size > 0 &&
-      src_cluster_ids.size() % static_cast<size_t>(src_dp_size) == 0 &&
-      instance_info_.cluster_ids.size() %
-              static_cast<size_t>(instance_info_.dp_size) ==
-          0) {
-    const size_t src_tp_size =
-        src_cluster_ids.size() / static_cast<size_t>(src_dp_size);
-    const size_t dst_tp_size = instance_info_.cluster_ids.size() /
-                               static_cast<size_t>(instance_info_.dp_size);
-    hetero_kv_pull = src_tp_size != dst_tp_size;
+  const bool hetero_kv_pull =
+      heterogeneous_pd &&
+      DisaggPDConfig::get_instance().enable_heterogeneous_pd();
+  if (heterogeneous_pd && !hetero_kv_pull) {
+    LOG(ERROR) << "Prefill requested heterogeneous PD but Decode did not "
+                  "enable it, request_id: "
+               << req_id;
+    kv_cache_manager_->deallocate(request.get());
+    return false;
   }
   const bool need_mtp_bootstrap = options_.num_speculative_tokens() > 0;
   if (need_mtp_bootstrap) {
@@ -1042,9 +1055,9 @@ bool DisaggPDScheduler::decode_recv_first_generation(
       kv_cache_manager_->deallocate(request.get());
       return false;
     }
-    LOG(INFO) << "[PD-PERF] Decode KV restore request_id=" << req_id
-              << ", hetero=" << hetero_kv_pull
-              << ", pull_ms=" << pull_timer.elapsed_seconds() * 1000.0;
+    VLOG(1) << "Decode KV restore request_id=" << req_id
+            << ", hetero=" << hetero_kv_pull
+            << ", pull_ms=" << pull_timer.elapsed_seconds() * 1000.0;
   }
 
   Timer enqueue_timer;
@@ -1053,10 +1066,10 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     kv_cache_manager_->deallocate(request.get());
     return false;
   }
-  LOG(INFO) << "[PD-PERF] Decode first-generation request_id=" << req_id
-            << ", prepare_ms=" << prepare_seconds * 1000.0
-            << ", enqueue_ms=" << enqueue_timer.elapsed_seconds() * 1000.0
-            << ", total_ms=" << receive_timer.elapsed_seconds() * 1000.0;
+  VLOG(1) << "Decode first-generation request_id=" << req_id
+          << ", prepare_ms=" << prepare_seconds * 1000.0
+          << ", enqueue_ms=" << enqueue_timer.elapsed_seconds() * 1000.0
+          << ", total_ms=" << receive_timer.elapsed_seconds() * 1000.0;
   return true;
 }
 

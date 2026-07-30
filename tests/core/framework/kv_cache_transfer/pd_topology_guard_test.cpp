@@ -87,9 +87,21 @@ TEST(PdTopologyGuardTest, HeteroPrefillTpTwoDecodeTpOneAllowsNonMlaPush) {
   const InstanceInfo remote_info = make_info(1, {2});
 
   const PdTopoResult result =
-      check_pd_topo(local_info, remote_info, "PUSH", false);
+      check_pd_topo(local_info, remote_info, "PUSH", false, true);
   EXPECT_EQ(result.status, PdTopoStatus::ALLOW_HETERO);
   EXPECT_TRUE(result.reason.empty());
+}
+
+TEST(PdTopologyGuardTest, HeterogeneousNonMlaIsOptIn) {
+  const InstanceInfo local_info = make_info(1, {0, 1});
+  const InstanceInfo remote_info = make_info(1, {2});
+
+  const PdTopoResult result =
+      check_pd_topo(local_info, remote_info, "PUSH", false);
+  EXPECT_EQ(result.status, PdTopoStatus::DENY_HETERO);
+  EXPECT_EQ(result.reason,
+            "non-mla hetero pd is disabled; set "
+            "enable_heterogeneous_pd=true on both instances");
 }
 
 TEST(PdTopologyGuardTest, HeteroTopoNeedPushKv) {
@@ -117,21 +129,33 @@ TEST(PdTopologyGuardTest, NonMlaHeteroTopoRequiresEqualDpSize) {
   const InstanceInfo remote_info = make_info(1, {4});
 
   const PdTopoResult result =
-      check_pd_topo(local_info, remote_info, "PUSH", false);
+      check_pd_topo(local_info, remote_info, "PUSH", false, true);
   EXPECT_EQ(result.status, PdTopoStatus::DENY_HETERO);
   EXPECT_EQ(result.reason, "non-mla hetero pd requires equal dp_size");
 }
 
-TEST(PdTopologyGuardTest, NonMlaHeteroTopoRequiresPrefillTpMultiple) {
+TEST(PdTopologyGuardTest, NonMlaHeteroTopoSupportsOnlyPrefillTp2DecodeTp1) {
   const InstanceInfo local_info = make_info(1, {0, 1, 2});
   const InstanceInfo remote_info = make_info(1, {3, 4});
 
   const PdTopoResult result =
-      check_pd_topo(local_info, remote_info, "PUSH", false);
+      check_pd_topo(local_info, remote_info, "PUSH", false, true);
   EXPECT_EQ(result.status, PdTopoStatus::DENY_HETERO);
   EXPECT_EQ(result.reason,
-            "non-mla hetero pd requires prefill tp_size divisible by decode "
-            "tp_size");
+            "non-mla hetero pd currently supports only Prefill TP2 to Decode "
+            "TP1");
+}
+
+TEST(PdTopologyGuardTest, NonMlaHeteroTopoRejectsPrefillTp4DecodeTp1) {
+  const InstanceInfo local_info = make_info(1, {0, 1, 2, 3});
+  const InstanceInfo remote_info = make_info(1, {4});
+
+  const PdTopoResult result =
+      check_pd_topo(local_info, remote_info, "PUSH", false, true);
+  EXPECT_EQ(result.status, PdTopoStatus::DENY_HETERO);
+  EXPECT_EQ(result.reason,
+            "non-mla hetero pd currently supports only Prefill TP2 to Decode "
+            "TP1");
 }
 
 TEST(PdTopologyGuardTest, CheckPdTopoRejectInvalidLocalTopo) {

@@ -150,6 +150,11 @@ struct RequestState final {
   // decode address.
   std::string decode_address;
 
+  // Set after the Prefill/Decode topology guard accepts the opt-in non-MLA
+  // heterogeneous TP path. It scopes first-generation transfer metadata to
+  // requests that actually consume it.
+  bool heterogeneous_pd = false;
+
   torch::Tensor input_embedding;
 
   // multimodal

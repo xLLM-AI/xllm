@@ -269,8 +269,16 @@ SpecKVCacheTransfer::SpecKVCacheTransfer(const uint16_t listen_port,
     : LlmDataDistTransfer(listen_port, instance_role, enable_lighting_indexer) {
   enable_mla_ = enable_mla;
   draft_body_uses_tp1_ = draft_body_uses_tp1;
+  heterogeneous_pd_enabled_ =
+      DisaggPDConfig::get_instance().enable_heterogeneous_pd();
   parallel_shard_pull_ =
       DisaggPDConfig::get_instance().enable_pd_parallel_shard_pull();
+  if (heterogeneous_pd_enabled_ && parallel_shard_pull_) {
+    shard_pull_threadpool_ = std::make_unique<ThreadPool>(
+        /*num_threads=*/1,
+        /*cpu_binding=*/false,
+        /*pool_name=*/"SpecKVCacheTransfer.shard_pull");
+  }
 }
 
 void SpecKVCacheTransfer::register_kv_cache(
@@ -289,6 +297,9 @@ void SpecKVCacheTransfer::register_kv_cache_spec(
   UNUSED_PARAMETER(kv_cache_shape);
   UNUSED_PARAMETER(dtype);
   register_kv_cache_internal(kv_caches, spec_layer_registered_caches_);
+  if (!heterogeneous_pd_enabled_) {
+    return;
+  }
   // Register matching staging cache IDs on both Prefill and Decode before the
   // first DataDist link. Prefill pushes each local TP shard into a disjoint row
   // range; Decode merges those already-local rows into its TP1 cache.
@@ -297,10 +308,12 @@ void SpecKVCacheTransfer::register_kv_cache_spec(
                                  hetero_staging_registered_caches_,
                                  kSupportedHeterogeneousSourceShardCount,
                                  source_is_sharded);
-  register_hetero_staging_caches(spec_layer_registered_caches_,
-                                 spec_hetero_staging_registered_caches_,
-                                 kSupportedHeterogeneousSourceShardCount,
-                                 source_is_sharded && !draft_body_uses_tp1_);
+  if (!draft_body_uses_tp1_) {
+    register_hetero_staging_caches(spec_layer_registered_caches_,
+                                   spec_hetero_staging_registered_caches_,
+                                   kSupportedHeterogeneousSourceShardCount,
+                                   source_is_sharded);
+  }
 }
 
 bool SpecKVCacheTransfer::pull_and_merge_sharded_caches(
@@ -422,8 +435,9 @@ bool SpecKVCacheTransfer::pull_and_merge_sharded_caches(
 
       Timer pull_group_timer;
       if (parallel_shard_pull_) {
+        CHECK(shard_pull_threadpool_ != nullptr);
         TaskGroup shard_pull_group(1);
-        shard_pull_threadpool_.schedule(
+        shard_pull_threadpool_->schedule(
             shard_pull_group.wrap([&]() { pull_one_shard(1); }));
         std::exception_ptr request_thread_exception;
         try {
@@ -492,23 +506,23 @@ bool SpecKVCacheTransfer::pull_and_merge_sharded_caches(
       }
     }
   }
-  LOG(INFO) << "[PD-PERF] Heterogeneous pull-merge breakdown"
-            << " linear_request=" << !src_linear_state_ids.empty()
-            << " parallel_shard_pull=" << parallel_shard_pull_
-            << " pull_calls=" << pull_calls << " merge_calls=" << merge_calls
-            << " shard0_pull_ms=" << shard_pull_seconds[0] * 1000.0
-            << " shard1_pull_ms=" << shard_pull_seconds[1] * 1000.0
-            << " conv_pull_ms=" << conv_pull_seconds * 1000.0
-            << " ssm_pull_ms=" << ssm_pull_seconds * 1000.0
-            << " pull_work_ms=" << pull_seconds * 1000.0
-            << " pull_ms=" << pull_wall_seconds * 1000.0
-            << " conv_merge_ms=" << conv_merge_seconds * 1000.0
-            << " ssm_merge_ms=" << ssm_merge_seconds * 1000.0
-            << " merge_ms=" << merge_seconds * 1000.0 << " other_ms="
-            << (breakdown_total_timer.elapsed_seconds() - pull_wall_seconds -
-                merge_seconds) *
-                   1000.0
-            << " total_ms=" << breakdown_total_timer.elapsed_seconds() * 1000.0;
+  VLOG(1) << "Heterogeneous pull-merge breakdown"
+          << " linear_request=" << !src_linear_state_ids.empty()
+          << " parallel_shard_pull=" << parallel_shard_pull_
+          << " pull_calls=" << pull_calls << " merge_calls=" << merge_calls
+          << " shard0_pull_ms=" << shard_pull_seconds[0] * 1000.0
+          << " shard1_pull_ms=" << shard_pull_seconds[1] * 1000.0
+          << " conv_pull_ms=" << conv_pull_seconds * 1000.0
+          << " ssm_pull_ms=" << ssm_pull_seconds * 1000.0
+          << " pull_work_ms=" << pull_seconds * 1000.0
+          << " pull_ms=" << pull_wall_seconds * 1000.0
+          << " conv_merge_ms=" << conv_merge_seconds * 1000.0
+          << " ssm_merge_ms=" << ssm_merge_seconds * 1000.0
+          << " merge_ms=" << merge_seconds * 1000.0 << " other_ms="
+          << (breakdown_total_timer.elapsed_seconds() - pull_wall_seconds -
+              merge_seconds) *
+                 1000.0
+          << " total_ms=" << breakdown_total_timer.elapsed_seconds() * 1000.0;
   return true;
 }
 
@@ -664,11 +678,11 @@ bool SpecKVCacheTransfer::push_layer_registered_caches_to_staging(
       }
     }
   }
-  LOG(INFO) << "[PD-PERF] Heterogeneous staging push source_shard="
-            << source_shard_rank << ", request_count=" << keys.size()
-            << ", layer_wait_ms=" << layer_wait_seconds * 1000.0
-            << ", push_ms=" << push_seconds * 1000.0
-            << ", total_ms=" << total_timer.elapsed_seconds() * 1000.0;
+  VLOG(1) << "Heterogeneous staging push source_shard=" << source_shard_rank
+          << ", request_count=" << keys.size()
+          << ", layer_wait_ms=" << layer_wait_seconds * 1000.0
+          << ", push_ms=" << push_seconds * 1000.0
+          << ", total_ms=" << total_timer.elapsed_seconds() * 1000.0;
   return success;
 }
 
@@ -837,6 +851,11 @@ bool SpecKVCacheTransfer::pull_hetero_kv_blocks(
     const std::vector<uint64_t>& dst_blocks,
     const std::vector<uint64_t>& src_linear_state_ids,
     const std::vector<uint64_t>& dst_linear_state_ids) {
+  if (!heterogeneous_pd_enabled_) {
+    LOG(ERROR) << "Heterogeneous KV restore requested while "
+                  "enable_heterogeneous_pd is false.";
+    return false;
+  }
   (void)src_addrs;
   // All heterogeneous cache roles share staging tensors. Serialize the full
   // Linear State -> Target KV -> Draft KV restore transaction so another
@@ -888,16 +907,15 @@ bool SpecKVCacheTransfer::pull_hetero_kv_blocks(
                 /*dst_linear_state_ids=*/{});
   if (draft_success) {
     const double draft_seconds = phase_timer.elapsed_seconds();
-    LOG(INFO) << "Merged heterogeneous TP KV cache (target KV pre-pushed, "
-                 "linear state and draft pulled): source_shards="
-              << kSupportedHeterogeneousSourceShardCount
-              << ", blocks=" << dst_blocks.size()
-              << ", linear_states=" << dst_linear_state_ids.size()
-              << ", linear_ms=" << linear_seconds * 1000.0
-              << ", target_merge_ms=" << target_merge_seconds * 1000.0
-              << ", draft_ms=" << draft_seconds * 1000.0 << ", total_ms="
-              << (linear_seconds + target_merge_seconds + draft_seconds) *
-                     1000.0;
+    VLOG(1) << "Merged heterogeneous TP KV cache (target KV pre-pushed, "
+               "linear state and draft pulled): source_shards="
+            << kSupportedHeterogeneousSourceShardCount
+            << ", blocks=" << dst_blocks.size()
+            << ", linear_states=" << dst_linear_state_ids.size()
+            << ", linear_ms=" << linear_seconds * 1000.0
+            << ", target_merge_ms=" << target_merge_seconds * 1000.0
+            << ", draft_ms=" << draft_seconds * 1000.0 << ", total_ms="
+            << (linear_seconds + target_merge_seconds + draft_seconds) * 1000.0;
   }
   return draft_success;
 }
@@ -975,16 +993,16 @@ folly::SemiFuture<bool> SpecKVCacheTransfer::push_kv_blocks_async(
       get_remote_tp_size(transfer_kv_infos);
   bool heterogeneous_non_mla = false;
   int32_t local_tp_size = 1;
-  if (!enable_mla_ && local_dp_size > 0 && kv_split_size > 0 &&
-      remote_tp_size.has_value()) {
+  if (heterogeneous_pd_enabled_ && !enable_mla_ && local_dp_size > 0 &&
+      kv_split_size > 0 && remote_tp_size.has_value()) {
     local_tp_size = parallel_args.world_size() / local_dp_size / kv_split_size;
     if (local_tp_size != remote_tp_size.value()) {
       heterogeneous_non_mla = true;
-      LOG(INFO) << "Push non-MLA heterogeneous KV shards to decode staging: "
-                << "prefill_tp_size=" << local_tp_size
-                << ", decode_tp_size=" << remote_tp_size.value()
-                << ", is_spec_draft=" << is_spec_draft
-                << "; decode will only perform a local merge.";
+      VLOG(1) << "Push non-MLA heterogeneous KV shards to decode staging: "
+              << "prefill_tp_size=" << local_tp_size
+              << ", decode_tp_size=" << remote_tp_size.value()
+              << ", is_spec_draft=" << is_spec_draft
+              << "; decode will only perform a local merge.";
     }
   }
   const int64_t source_shard_rank =

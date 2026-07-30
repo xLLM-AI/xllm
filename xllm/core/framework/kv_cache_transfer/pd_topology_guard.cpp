@@ -34,7 +34,8 @@ bool fail_topo(const std::string& msg, std::string* reason) {
 PdTopoResult check_hetero_pd_req(const PdTopo& prefill_topo,
                                  const PdTopo& decode_topo,
                                  const std::string& kv_mode,
-                                 bool enable_mla) {
+                                 bool enable_mla,
+                                 bool enable_heterogeneous_pd) {
   if (kv_mode != "PUSH") {
     return PdTopoResult{PdTopoStatus::DENY_HETERO,
                         "hetero pd requires kv_mode=PUSH"};
@@ -44,17 +45,21 @@ PdTopoResult check_hetero_pd_req(const PdTopo& prefill_topo,
     return PdTopoResult{PdTopoStatus::ALLOW_HETERO, ""};
   }
 
+  if (!enable_heterogeneous_pd) {
+    return PdTopoResult{PdTopoStatus::DENY_HETERO,
+                        "non-mla hetero pd is disabled; set "
+                        "enable_heterogeneous_pd=true on both instances"};
+  }
+
   if (prefill_topo.dp_size != decode_topo.dp_size) {
     return PdTopoResult{PdTopoStatus::DENY_HETERO,
                         "non-mla hetero pd requires equal dp_size"};
   }
 
-  if (prefill_topo.tp_size < decode_topo.tp_size ||
-      prefill_topo.tp_size % decode_topo.tp_size != 0) {
-    return PdTopoResult{
-        PdTopoStatus::DENY_HETERO,
-        "non-mla hetero pd requires prefill tp_size divisible by decode "
-        "tp_size"};
+  if (prefill_topo.tp_size != 2 || decode_topo.tp_size != 1) {
+    return PdTopoResult{PdTopoStatus::DENY_HETERO,
+                        "non-mla hetero pd currently supports only Prefill "
+                        "TP2 to Decode TP1"};
   }
   return PdTopoResult{PdTopoStatus::ALLOW_HETERO, ""};
 }
@@ -102,7 +107,8 @@ PdTopo get_pd_topo(const InstanceInfo& info) {
 PdTopoResult check_pd_topo(const InstanceInfo& local,
                            const InstanceInfo& remote,
                            const std::string& kv_mode,
-                           bool enable_mla) {
+                           bool enable_mla,
+                           bool enable_heterogeneous_pd) {
   PdTopo local_topo;
   std::string reason;
   if (!try_get_pd_topo(local, &local_topo, &reason)) {
@@ -122,7 +128,8 @@ PdTopoResult check_pd_topo(const InstanceInfo& local,
     return PdTopoResult{PdTopoStatus::ALLOW_HOMO, ""};
   }
 
-  return check_hetero_pd_req(local_topo, remote_topo, kv_mode, enable_mla);
+  return check_hetero_pd_req(
+      local_topo, remote_topo, kv_mode, enable_mla, enable_heterogeneous_pd);
 }
 
 }  // namespace xllm
