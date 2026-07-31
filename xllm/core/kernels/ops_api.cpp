@@ -115,8 +115,17 @@ void apply_rotary(RotaryParams& params) {
                     params.dynamic_ntk,
                     params.max_query_len);
 #elif defined(USE_NPU)
-  npu::apply_rotary(
-      params.q, params.k, params.cos_sin, params.position_ids.value());
+  if (!params.position_ids.has_value() && params.cos.defined() &&
+      params.sin.defined()) {
+    npu::apply_rotary(params.q, params.k, params.cos, params.sin, "BSND");
+  } else {
+    CHECK(params.position_ids.has_value())
+        << "NPU rotary embedding requires position_ids when precomputed "
+           "cos/sin "
+           "are unavailable";
+    npu::apply_rotary(
+        params.q, params.k, params.cos_sin, params.position_ids.value());
+  }
 #elif defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)
   bool is_neox = !params.interleaved;
   torch::Tensor pos_ids;
@@ -352,7 +361,19 @@ void fused_layernorm(FusedLayerNormParams& params) {
                         params.store_output_after_norm,
                         params.dynamic_quant);
 #elif defined(USE_NPU)
-  if (params.residual.has_value()) {
+  if (params.mode == "layernorm") {
+    CHECK(params.beta.has_value()) << "LayerNorm requires beta on NPU";
+    torch::Tensor norm_input = params.input;
+    if (params.residual.has_value()) {
+      norm_input = params.input + params.residual.value();
+      params.residual_out = norm_input;
+    }
+    params.output = torch::layer_norm(norm_input,
+                                      {params.input.size(-1)},
+                                      params.weight,
+                                      params.beta.value(),
+                                      params.eps);
+  } else if (params.residual.has_value()) {
     if (params.add_gamma_offset) {
       std::tie(params.output, std::ignore, params.residual_out) =
           npu::gamma_add_rms_norm(params.input,
@@ -369,7 +390,7 @@ void fused_layernorm(FusedLayerNormParams& params) {
     params.output =
         npu::rms_norm(params.input, params.weight, params.eps, params.mode);
   }
-  if (params.beta.has_value()) {
+  if (params.beta.has_value() && params.mode != "layernorm") {
     params.output += params.beta.value();
   }
 #elif defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_DCU)

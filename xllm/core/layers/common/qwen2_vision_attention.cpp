@@ -67,6 +67,8 @@ Qwen2VisionAttentionImpl::Qwen2VisionAttentionImpl(const ModelContext& context,
                                             parallel_args.tp_group_,
                                             options));
 #if defined(USE_NPU)
+  // currently only atb rope operation supports the head_dim=72,
+  // aclnn rope operation only supports head_dim=64 or 128
   rope_layer_ = register_module("rope", NpuRopeLayer(context));
 #endif
 }

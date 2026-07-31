@@ -20,10 +20,11 @@ limitations under the License.
 
 namespace xllm::kernel::npu {
 
-void apply_rotary_pos_emb(torch::Tensor& query,
-                          torch::Tensor& key,
-                          const torch::Tensor& cos,
-                          const torch::Tensor& sin) {
+void apply_rotary(torch::Tensor& query,
+                  torch::Tensor& key,
+                  const torch::Tensor& cos,
+                  const torch::Tensor& sin,
+                  const std::string& input_layout) {
   CHECK(cos.defined() && sin.defined());
   CHECK(cos.sizes() == sin.sizes());
   CHECK_GT(cos.dim(), 0);
@@ -49,7 +50,7 @@ void apply_rotary_pos_emb(torch::Tensor& query,
       sin.contiguous().view({1, num_tokens, 1, rotary_dim});
 
   auto rotary_result = at_npu::native::custom_ops::npu_apply_rotary_pos_emb(
-      query_view, key_view, cos_view, sin_view, "BSND");
+      query_view, key_view, cos_view, sin_view, input_layout);
   query = std::get<0>(rotary_result).view(query_shape);
   key = std::get<1>(rotary_result).view(key_shape);
 }

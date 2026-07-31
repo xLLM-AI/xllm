@@ -52,17 +52,10 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
   const bool only_prefill =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
 
-  torch::Tensor k_cache;
-  std::optional<torch::Tensor> v_cache;
-  if (kv_cache.empty()) {
-    CHECK(attn_metadata.is_prefill)
-        << "KV-cache-free NPU attention only supports full prefill.";
-    CHECK(!attn_metadata.use_expanded_decode_for_spec_verify_attention)
-        << "KV-cache-free NPU attention does not support expanded decode.";
-  } else {
-    k_cache = kv_cache.get_k_cache();
-    v_cache = kv_cache.get_v_cache();
+  torch::Tensor k_cache = kv_cache.get_k_cache();
+  std::optional<torch::Tensor> v_cache = kv_cache.get_v_cache();
 
+  if (!attn_metadata.prefill_without_cache) {
     xllm::kernel::ReshapePagedCacheParams reshape_paged_cache_params;
     reshape_paged_cache_params.key = key.view({-1, num_kv_heads_, head_size_});
     reshape_paged_cache_params.value =

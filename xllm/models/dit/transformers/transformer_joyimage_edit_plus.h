@@ -37,9 +37,8 @@ limitations under the License.
 #include "core/layers/common/ada_layer_norm.h"
 #include "core/layers/common/add_matmul.h"
 #include "core/layers/common/rms_norm.h"
-#include "models/dit/sequence_parallel/sequence_parallel_context.h"
-#include "models/dit/sequence_parallel/sequence_parallel_mixin.h"
 #include "models/dit/transformers/transformer_qwen_image.h"
+#include "models/dit/utils/sequence_parallel_mixin.h"
 #include "models/model_registry.h"
 
 namespace xllm {
@@ -294,9 +293,11 @@ class JoyAttentionImpl final : public torch::nn::Module {
                    int64_t dim,
                    int64_t num_heads,
                    int64_t head_dim,
+                   ProcessGroup* sp_group,
                    double eps = 1e-6)
       : heads_(num_heads),
         head_dim_(head_dim),
+        sp_group_(sp_group),
         options_(context.get_tensor_options()) {
     const int64_t inner = num_heads * head_dim;
 
@@ -335,44 +336,64 @@ class JoyAttentionImpl final : public torch::nn::Module {
         layer::AddMatmulWeightTransposed(inner, dim, true, options_));
   }
 
-  JoyAttentionOutput forward(
-      const torch::Tensor& hidden_states,
-      const torch::Tensor& encoder_hidden_states,
-      const torch::Tensor& rope_cos,
-      const torch::Tensor& rope_sin,
-      const torch::Tensor& attn_mask,
-      xllm::dit::SequenceParallelContext& sequence_parallel_context) {
+  JoyAttentionOutput forward(const torch::Tensor& hidden_states,
+                             const torch::Tensor& encoder_hidden_states,
+                             const torch::Tensor& rope_cos,
+                             const torch::Tensor& rope_sin,
+                             const torch::Tensor& attn_mask) {
     std::vector<int64_t> reshape = {heads_, -1};
     torch::Tensor img_q =
         img_attn_q_->forward(hidden_states).unflatten(-1, reshape);
-    auto img_q_work = sequence_parallel_context.launch_sequence_to_head(
-        img_q, /*tensor_name=*/"hidden_states");
+    auto img_q_work = parallel_state::all_to_all_4D(img_q,
+                                                    /*scatter_idx=*/2,
+                                                    /*gather_idx=*/1,
+                                                    /*async_ops=*/true,
+                                                    sp_group_);
     torch::Tensor img_k =
         img_attn_k_->forward(hidden_states).unflatten(-1, reshape);
-    auto img_k_work = sequence_parallel_context.launch_sequence_to_head(
-        img_k, /*tensor_name=*/"hidden_states");
+    auto img_k_work = parallel_state::all_to_all_4D(img_k,
+                                                    /*scatter_idx=*/2,
+                                                    /*gather_idx=*/1,
+                                                    /*async_ops=*/true,
+                                                    sp_group_);
     torch::Tensor img_v =
         img_attn_v_->forward(hidden_states).unflatten(-1, reshape);
-    auto img_v_work = sequence_parallel_context.launch_sequence_to_head(
-        img_v, /*tensor_name=*/"hidden_states");
+    auto img_v_work = parallel_state::all_to_all_4D(img_v,
+                                                    /*scatter_idx=*/2,
+                                                    /*gather_idx=*/1,
+                                                    /*async_ops=*/true,
+                                                    sp_group_);
 
     torch::Tensor txt_q =
         txt_attn_q_->forward(encoder_hidden_states).unflatten(-1, reshape);
-    auto txt_q_work = sequence_parallel_context.launch_sequence_to_head(
-        txt_q, /*tensor_name=*/"encoder_hidden_states");
+    auto txt_q_work = parallel_state::all_to_all_4D(txt_q,
+                                                    /*scatter_idx=*/2,
+                                                    /*gather_idx=*/1,
+                                                    /*async_ops=*/true,
+                                                    sp_group_);
     torch::Tensor txt_k =
         txt_attn_k_->forward(encoder_hidden_states).unflatten(-1, reshape);
-    auto txt_k_work = sequence_parallel_context.launch_sequence_to_head(
-        txt_k, /*tensor_name=*/"encoder_hidden_states");
+    auto txt_k_work = parallel_state::all_to_all_4D(txt_k,
+                                                    /*scatter_idx=*/2,
+                                                    /*gather_idx=*/1,
+                                                    /*async_ops=*/true,
+                                                    sp_group_);
     torch::Tensor txt_v =
         txt_attn_v_->forward(encoder_hidden_states).unflatten(-1, reshape);
-    auto txt_v_work = sequence_parallel_context.launch_sequence_to_head(
-        txt_v, /*tensor_name=*/"encoder_hidden_states");
+    auto txt_v_work = parallel_state::all_to_all_4D(txt_v,
+                                                    /*scatter_idx=*/2,
+                                                    /*gather_idx=*/1,
+                                                    /*async_ops=*/true,
+                                                    sp_group_);
 
-    img_q = img_q_work();
-    img_k = img_k_work();
-    txt_q = txt_q_work();
-    txt_k = txt_k_work();
+    img_q = xllm::dit::SequenceParallelMixin::unpad_tensor(
+        img_q_work(), /*tensor_name=*/"hidden_states", /*dim=*/1);
+    img_k = xllm::dit::SequenceParallelMixin::unpad_tensor(
+        img_k_work(), /*tensor_name=*/"hidden_states", /*dim=*/1);
+    txt_q = xllm::dit::SequenceParallelMixin::unpad_tensor(
+        txt_q_work(), /*tensor_name=*/"encoder_hidden_states", /*dim=*/1);
+    txt_k = xllm::dit::SequenceParallelMixin::unpad_tensor(
+        txt_k_work(), /*tensor_name=*/"encoder_hidden_states", /*dim=*/1);
 
     img_q = std::get<0>(img_attn_q_norm_->forward(img_q));
     img_k = std::get<0>(img_attn_k_norm_->forward(img_k));
@@ -384,13 +405,16 @@ class JoyAttentionImpl final : public torch::nn::Module {
       img_k = apply_rotary_emb_batched(img_k, rope_cos, rope_sin);
     }
 
-    img_v = img_v_work();
-    txt_v = txt_v_work();
+    img_v = xllm::dit::SequenceParallelMixin::unpad_tensor(
+        img_v_work(), /*tensor_name=*/"hidden_states", /*dim=*/1);
+    txt_v = xllm::dit::SequenceParallelMixin::unpad_tensor(
+        txt_v_work(), /*tensor_name=*/"encoder_hidden_states", /*dim=*/1);
 
     torch::Tensor joint_q = torch::cat({img_q, txt_q}, /*dim=*/1);
     torch::Tensor joint_k = torch::cat({img_k, txt_k}, /*dim=*/1);
     torch::Tensor joint_v = torch::cat({img_v, txt_v}, /*dim=*/1);
-    const int64_t local_heads = heads_ / sequence_parallel_context.world_size();
+    const int32_t sp_size = sp_group_ == nullptr ? 1 : sp_group_->world_size();
+    const int64_t local_heads = heads_ / sp_size;
     torch::Tensor joint = joyimage_joint_attention(
         joint_q, joint_k, joint_v, local_heads, attn_mask);
     joint = joint.to(joint_q.dtype());
@@ -402,10 +426,20 @@ class JoyAttentionImpl final : public torch::nn::Module {
                                         /*start=*/image_sequence_length,
                                         /*end=*/joint.size(1));
 
-    auto img_out_work = sequence_parallel_context.launch_head_to_sequence(
-        img_out, /*tensor_name=*/"hidden_states");
-    auto txt_out_work = sequence_parallel_context.launch_head_to_sequence(
-        txt_out, /*tensor_name=*/"encoder_hidden_states");
+    img_out = xllm::dit::SequenceParallelMixin::pad_tensor(
+        img_out, /*tensor_name=*/"hidden_states", /*dim=*/1);
+    auto img_out_work = parallel_state::all_to_all_4D(img_out,
+                                                      /*scatter_idx=*/1,
+                                                      /*gather_idx=*/2,
+                                                      /*async_ops=*/true,
+                                                      sp_group_);
+    txt_out = xllm::dit::SequenceParallelMixin::pad_tensor(
+        txt_out, /*tensor_name=*/"encoder_hidden_states", /*dim=*/1);
+    auto txt_out_work = parallel_state::all_to_all_4D(txt_out,
+                                                      /*scatter_idx=*/1,
+                                                      /*gather_idx=*/2,
+                                                      /*async_ops=*/true,
+                                                      sp_group_);
 
     img_out = img_out_work().flatten(/*start_dim=*/2, /*end_dim=*/3);
     img_out = img_attn_proj_->forward(img_out);
@@ -456,6 +490,7 @@ class JoyAttentionImpl final : public torch::nn::Module {
  private:
   int64_t heads_;
   int64_t head_dim_;
+  ProcessGroup* sp_group_{nullptr};
   layer::AddMatmulWeightTransposed img_attn_q_{nullptr};
   layer::AddMatmulWeightTransposed img_attn_k_{nullptr};
   layer::AddMatmulWeightTransposed img_attn_v_{nullptr};
@@ -521,6 +556,7 @@ class TransformerBlockImpl final : public torch::nn::Module {
                        int64_t num_heads,
                        int64_t head_dim,
                        double mlp_width_ratio,
+                       ProcessGroup* sp_group,
                        double eps = 1e-6)
       : eps_(eps) {
     int64_t mlp_hidden = static_cast<int64_t>(dim * mlp_width_ratio);
@@ -549,7 +585,7 @@ class TransformerBlockImpl final : public torch::nn::Module {
     txt_mlp_ = register_module(
         "txt_mlp", qwenimage::FeedForward(context, dim, dim, /*mult=*/4));
     attn_ = register_module(
-        "attn", JoyAttention(context, dim, num_heads, head_dim, eps));
+        "attn", JoyAttention(context, dim, num_heads, head_dim, sp_group, eps));
     (void)mlp_hidden;  // FeedForward uses dim*4 internally (== dim*ratio)
   }
 
@@ -567,8 +603,7 @@ class TransformerBlockImpl final : public torch::nn::Module {
       const torch::Tensor& temb,  // [B, hidden]
       const torch::Tensor& rope_cos,
       const torch::Tensor& rope_sin,
-      const torch::Tensor& attn_mask,
-      xllm::dit::SequenceParallelContext& sequence_parallel_context) {
+      const torch::Tensor& attn_mask) {
     auto img_mod = img_mod_->forward(temb);  // 6 x [B, hidden]
     auto txt_mod = txt_mod_->forward(temb);
 
@@ -601,12 +636,8 @@ class TransformerBlockImpl final : public torch::nn::Module {
         txt_normed * (1 + txt_c1.unsqueeze(1)) + txt_s1.unsqueeze(1);
 #endif
 
-    JoyAttentionOutput attn_out = attn_->forward(img_modulated,
-                                                 txt_modulated,
-                                                 rope_cos,
-                                                 rope_sin,
-                                                 attn_mask,
-                                                 sequence_parallel_context);
+    JoyAttentionOutput attn_out = attn_->forward(
+        img_modulated, txt_modulated, rope_cos, rope_sin, attn_mask);
     auto img_attn = std::get<0>(attn_out);
     auto txt_attn = std::get<1>(attn_out);
 
@@ -725,8 +756,12 @@ class JoyImageEditPlusTransformer3DModelImpl final
 
     double_blocks_ = register_module("double_blocks", torch::nn::ModuleList());
     for (int64_t i = 0; i < num_layers; ++i) {
-      auto block = TransformerBlock(
-          context, hidden_size_, num_heads_, head_dim_, mlp_width_ratio);
+      auto block = TransformerBlock(context,
+                                    hidden_size_,
+                                    num_heads_,
+                                    head_dim_,
+                                    mlp_width_ratio,
+                                    parallel_args.dit_sp_group_);
       double_blocks_->push_back(block);
       block_layers_.push_back(block);
     }
@@ -760,8 +795,7 @@ class JoyImageEditPlusTransformer3DModelImpl final
              &attention_mask,
              use_cfg,
              step_index](
-                const xllm::dit::SequenceParallelTensorMap& model_inputs,
-                xllm::dit::SequenceParallelContext& sequence_parallel_context) {
+                const xllm::dit::SequenceParallelTensorMap& model_inputs) {
               torch::Tensor output =
                   forward_impl(model_inputs.at("hidden_states"),
                                timestep,
@@ -770,8 +804,7 @@ class JoyImageEditPlusTransformer3DModelImpl final
                                rope_sin,
                                attention_mask,
                                use_cfg,
-                               step_index,
-                               sequence_parallel_context);
+                               step_index);
               return xllm::dit::SequenceParallelTensorMap{
                   {"hidden_states", output}};
             });
@@ -779,16 +812,14 @@ class JoyImageEditPlusTransformer3DModelImpl final
   }
 
  private:
-  torch::Tensor forward_impl(
-      const torch::Tensor& local_hidden_states,
-      const torch::Tensor& timestep,
-      const torch::Tensor& local_encoder_hidden_states,
-      const torch::Tensor& rope_cos,
-      const torch::Tensor& rope_sin,
-      const torch::Tensor& attention_mask,
-      bool use_cfg,
-      int64_t step_index,
-      xllm::dit::SequenceParallelContext& sequence_parallel_context) {
+  torch::Tensor forward_impl(const torch::Tensor& local_hidden_states,
+                             const torch::Tensor& timestep,
+                             const torch::Tensor& local_encoder_hidden_states,
+                             const torch::Tensor& rope_cos,
+                             const torch::Tensor& rope_sin,
+                             const torch::Tensor& attention_mask,
+                             bool use_cfg,
+                             int64_t step_index) {
     int64_t batch_size = local_hidden_states.size(0);
     int64_t sequence_length = local_hidden_states.size(1);
     int64_t channels = local_hidden_states.size(2);
@@ -835,14 +866,8 @@ class JoyImageEditPlusTransformer3DModelImpl final
         const bool use_block_cache =
             DiTCache::get_instance().on_before_block(block_before, use_cfg);
         if (!use_block_cache) {
-          std::tie(img, txt) =
-              block_layers_[block_index]->forward(img,
-                                                  txt,
-                                                  temb6,
-                                                  rope_cos,
-                                                  rope_sin,
-                                                  attention_mask,
-                                                  sequence_parallel_context);
+          std::tie(img, txt) = block_layers_[block_index]->forward(
+              img, txt, temb6, rope_cos, rope_sin, attention_mask);
         }
 
         TensorMap block_after_map = {

@@ -51,10 +51,11 @@ void batch_decode(const torch::Tensor& query,
                   const torch::Tensor& seq_lens,
                   torch::Tensor& output);
 
-void apply_rotary_pos_emb(torch::Tensor& query,
-                          torch::Tensor& key,
-                          const torch::Tensor& cos,
-                          const torch::Tensor& sin);
+void apply_rotary(torch::Tensor& query,
+                  torch::Tensor& key,
+                  const torch::Tensor& cos,
+                  const torch::Tensor& sin,
+                  const std::string& input_layout);
 
 std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
     const torch::Tensor& query,

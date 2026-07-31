@@ -480,8 +480,8 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
       CHECK(tokenizer != nullptr)
           << "Failed to load JoyImageEditPlus Qwen3-VL tokenizer";
       tokenizer_ = std::shared_ptr<Tokenizer>(std::move(tokenizer));
-      multimodal_processor_ =
-          create_multimodal_processor(text_encoder_model_args_, tokenizer_);
+      multimodal_processor_ = create_multimodal_processor(
+          text_encoder_model_args_, tokenizer_, /*max_cache_items=*/0);
     }
 
     vae_->load_model(std::move(vae_loader));
@@ -557,6 +557,7 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
     params.meta.q_max_seq_len = sequence_length;
     params.meta.kv_max_seq_len = sequence_length;
     params.meta.batch_forward_type = BatchForwardType::PREFILL;
+    params.prefill_without_cache = true;
     params.attention.host.q_seq_lens = {sequence_length};
     params.attention.host.kv_seq_lens = {sequence_length};
 #if defined(USE_NPU)

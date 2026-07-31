@@ -47,18 +47,6 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> RMSNormImpl::forward(
     std::optional<torch::Tensor> inplace_output) {
   auto org_shape = input.sizes().vec();
 
-  if (Platform::is_npu() && mode_ == kLayerNormMode) {
-    torch::Tensor norm_input = input;
-    std::optional<torch::Tensor> residual_out;
-    if (residual.has_value()) {
-      norm_input = input + residual.value();
-      residual_out = norm_input;
-    }
-    torch::Tensor output =
-        torch::layer_norm(norm_input, {norm_dim_}, weight_, bias_, eps_);
-    return std::make_tuple(output, residual_out);
-  }
-
   input = input.reshape({-1, norm_dim_});
 
   torch::Tensor output;

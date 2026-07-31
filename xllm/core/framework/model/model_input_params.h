@@ -1130,6 +1130,8 @@ struct ModelInputParams {
   std::vector<LinearStateCacheOp> linear_state_cache_ops;
 
   bool is_spec_verify = false;
+  // Propagated to AttentionMetadata for caller-managed cacheless prefill.
+  bool prefill_without_cache = false;
   torch::Tensor num_accepted_tokens;
   // Backend-neutral state reused by the next MTP draft step.
   MtpTopkStatePtr mtp_topk_state;

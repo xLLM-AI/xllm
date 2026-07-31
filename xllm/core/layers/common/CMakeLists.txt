@@ -7,7 +7,6 @@ cc_library(
     oxygen_vision_attention.h
     qwen2_attention.h
     qwen2_vision_attention.h
-    ../npu/npu_rope_layer_impl.h
     qwen3_next_rms_norm.h
     deepseek_v4_rotary_embedding.h
     partial_rotary_embedding.h
@@ -34,7 +33,6 @@ cc_library(
     oxygen_vision_attention.cpp
     qwen2_attention.cpp
     qwen2_vision_attention.cpp
-    ../npu/npu_rope_layer_impl.cpp
     qwen3_next_rms_norm.cpp
     deepseek_v4_rotary_embedding.cpp
     partial_rotary_embedding.cpp
@@ -68,6 +66,7 @@ cc_library(
     gflags::gflags
     torch
     :platform
+    $<$<BOOL:${USE_NPU}>:npu_layers>
     $<$<BOOL:${USE_MLU}>:mlu_layers>
     $<$<AND:$<BOOL:${USE_CUDA}>,$<NOT:$<BOOL:${USE_MUSA}>>>:cuda_layers>
     $<$<BOOL:${USE_ILU}>:ilu_layers>
@@ -75,3 +74,8 @@ cc_library(
     $<$<BOOL:${USE_MUSA}>:musa_layers>
     $<$<BOOL:${USE_DCU}>:dcu_layers>
 )
+
+if(USE_NPU)
+  # Repeat the static-library cycle so NPU RoPE symbols are resolved.
+  set_property(TARGET common_layers PROPERTY LINK_INTERFACE_MULTIPLICITY 3)
+endif()
