@@ -37,6 +37,7 @@ limitations under the License.
 #include "framework/sampling/beam_searcher.h"
 #include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
+#include "framework/tokenizer/tokenizer.h"
 #include "framework/xtensor/xtensor.h"
 #include "options.h"
 #include "platform/device.h"
@@ -111,6 +112,7 @@ class WorkerImpl {
   // prepare work before model execution
   virtual void prepare_work_before_execute(const ForwardInput& inputs,
                                            ForwardInput& processed_inputs);
+  virtual void restore_json_object_states(ForwardInput& input);
   void prepare_work_before_execute_on_stream(const ForwardInput& input,
                                              ForwardInput& processed_input,
                                              Stream& prepare_stream,
@@ -135,6 +137,7 @@ class WorkerImpl {
   virtual void process_group_test();
 
   virtual ForwardInput update_input_by_last_step_output(ForwardInput& inputs);
+  void update_json_object_states_by_last_step_output(ForwardInput& inputs);
 
   // initialize model, cache manager. async call
   virtual folly::SemiFuture<bool> init_model_async(
@@ -219,7 +222,10 @@ class WorkerImpl {
   }
 
  protected:
-  void update_last_step_output(const std::optional<ForwardOutput>& output);
+  void update_last_step_output(const std::optional<ForwardOutput>& output,
+                               const std::vector<std::string>& request_ids);
+  bool can_use_last_step_output_for_schedule_overlap(
+      const ForwardInput& input) const;
   virtual std::optional<ForwardOutput> step_for_schedule_overlap(
       const ForwardInput& input);
   virtual ForwardInput update_input_by_last_step_output_for_schedule_overlap(
@@ -289,6 +295,8 @@ class WorkerImpl {
   // decoder ATB binding refresh.
   bool init_rolling_runtime_state();
 
+  torch::Tensor recompute_new_cache_slots(const ForwardInput& input);
+
 #endif
 
  protected:
@@ -336,6 +344,10 @@ class WorkerImpl {
 
   // causal LM model
   std::unique_ptr<CausalLM> model_;
+
+  std::unique_ptr<Tokenizer> tokenizer_;
+  std::shared_ptr<const JsonObjectGrammar> json_object_grammar_;
+  std::shared_ptr<const JsonObjectGrammar> json_reasoning_grammar_;
 
   std::unique_ptr<Executor> model_executor_;
 

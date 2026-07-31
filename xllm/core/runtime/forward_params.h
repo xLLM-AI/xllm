@@ -34,6 +34,7 @@ limitations under the License.
 #include "framework/config/execution_config.h"
 #include "framework/model/model_input_params.h"
 #include "framework/sampling/beam_searcher.h"
+#include "framework/sampling/json_object_grammar.h"
 #include "framework/sampling/sampling_params.h"
 #include "platform/device.h"
 #include "platform/platform.h"
@@ -194,6 +195,7 @@ inline bool add_sampling_to_plan(const SamplingParameters& source,
                   &target.unique_token_ids_lens) &&
          plan.add(source.sample_idxes, &target.sample_idxes) &&
          plan.add(source.do_sample, &target.do_sample) &&
+         plan.add(source.filter_mask, &target.filter_mask) &&
          plan.add(source.acc_logprob, &target.acc_logprob);
 }
 
@@ -533,6 +535,9 @@ struct ForwardInput {
     inputs.skip_sampling_for_logits_only = skip_sampling_for_logits_only;
     inputs.kv_slot_layout = kv_slot_layout;
     inputs.metadata_ready_event = metadata_ready_event;
+    inputs.cp_partitioned = cp_partitioned;
+    inputs.json_object_states = json_object_states;
+    inputs.json_object_state_snapshots = json_object_state_snapshots;
   }
 
   void set_host_views(ForwardInput& inputs) const {
@@ -587,6 +592,11 @@ struct ForwardInput {
   ModelInputParams input_params;
   SamplingParameters sampling_params;
   SamplingParameters decoder_sampling_params;
+  std::vector<JsonObjectGrammarState> json_object_states;
+  std::vector<JsonObjectGrammarSnapshot> json_object_state_snapshots;
+  // Flattened [sequence][draft position] flags produced during MTP
+  // validation. This is execution-local metadata and is not transported.
+  std::vector<uint8_t> json_object_invalid_draft;
 
   // step-level decode metadata
   std::optional<StepDecodeMeta> step_decode;

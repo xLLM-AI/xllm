@@ -573,6 +573,12 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     state_.sampling_params.insert(state_.sampling_params.end(),
                                   state.sampling_params.begin(),
                                   state.sampling_params.end());
+    state_.filter_mask_rows.insert(state_.filter_mask_rows.end(),
+                                   state.filter_mask_rows.begin(),
+                                   state.filter_mask_rows.end());
+    state_.json_object_states.insert(state_.json_object_states.end(),
+                                     state.json_object_states.begin(),
+                                     state.json_object_states.end());
     int32_t sample_idxes_offset =
         static_cast<int32_t>(state_.sample_idxes.size());
     for (const auto& idx : state.sample_idxes) {
@@ -936,6 +942,10 @@ void BatchInputBuilder::handle_sampling_parameters(Sequence* sequence,
   state.selected_token_idxes.push_back(
       static_cast<int32_t>(state.flatten_tokens_vec.size() - 1));
   state.sampling_params.push_back(sequence->sampling_param());
+  state.filter_mask_rows.push_back(sequence->json_object_filter_mask());
+  const JsonObjectGrammarState* json_state = sequence->json_object_state();
+  state.json_object_states.push_back(
+      json_state == nullptr ? JsonObjectGrammarState() : *json_state);
   state.sample_idxes.push_back(
       static_cast<int32_t>(state.selected_token_idxes.size() - 1));
 
@@ -1255,7 +1265,36 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
                                        state_.sample_idxes,
                                        state_.unique_token_ids_vec,
                                        state_.unique_token_counts_vec,
-                                       state_.unique_token_lens_vec);
+                                       state_.unique_token_lens_vec,
+                                       state_.filter_mask_rows);
+    forward_input.json_object_states = std::move(state_.json_object_states);
+    if (state_.sample_idxes.size() != forward_input.json_object_states.size()) {
+      std::vector<JsonObjectGrammarState> sampled_states;
+      sampled_states.reserve(state_.sample_idxes.size());
+      for (const int32_t sample_idx : state_.sample_idxes) {
+        CHECK_GE(sample_idx, 0);
+        CHECK_LT(static_cast<size_t>(sample_idx),
+                 forward_input.json_object_states.size());
+        sampled_states.push_back(forward_input.json_object_states[sample_idx]);
+      }
+      forward_input.json_object_states = std::move(sampled_states);
+    }
+    const bool has_json_object_state =
+        std::any_of(forward_input.json_object_states.begin(),
+                    forward_input.json_object_states.end(),
+                    [](const JsonObjectGrammarState& state) {
+                      return state.initialized();
+                    });
+    if (has_json_object_state) {
+      forward_input.json_object_state_snapshots.reserve(
+          forward_input.json_object_states.size());
+      for (const auto& json_state : forward_input.json_object_states) {
+        forward_input.json_object_state_snapshots.push_back(
+            json_state.snapshot());
+      }
+    } else {
+      forward_input.json_object_states.clear();
+    }
   }
 
   return forward_input;

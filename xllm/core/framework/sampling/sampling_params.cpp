@@ -32,7 +32,8 @@ void SamplingParameters::init(
     const std::vector<int32_t>& sample_idxes,
     const std::vector<std::vector<int64_t>>& unique_token_ids_vec,
     const std::vector<std::vector<int32_t>>& unique_token_counts_vec,
-    const std::vector<int32_t>& unique_token_lens_vec) {
+    const std::vector<int32_t>& unique_token_lens_vec,
+    const std::vector<torch::Tensor>& filter_mask_rows) {
   CHECK_EQ(req_sampling_params.size(), selected_token_idxes.size());
   CHECK_GE(req_sampling_params.size(), sample_idxes.size());
 
@@ -123,6 +124,42 @@ void SamplingParameters::init(
 
   this->selected_token_idxes =
       torch::tensor(selected_token_idxes, int_tensor_options);
+  const bool has_filter_mask =
+      std::any_of(filter_mask_rows.begin(),
+                  filter_mask_rows.end(),
+                  [](const torch::Tensor& row) { return row.defined(); });
+  if (has_filter_mask) {
+    CHECK_EQ(filter_mask_rows.size(), req_sampling_params.size());
+    int64_t vocab_size = 0;
+    for (const auto& row : filter_mask_rows) {
+      if (row.defined()) {
+        CHECK_EQ(row.dim(), 1) << "filter mask rows must be 1-D";
+        vocab_size = row.size(0);
+        break;
+      }
+    }
+    CHECK_GT(vocab_size, 0)
+        << "a filter mask batch must contain a constrained row";
+    std::vector<torch::Tensor> rows;
+    rows.reserve(filter_mask_rows.size());
+    for (const auto& row : filter_mask_rows) {
+      if (row.defined()) {
+        CHECK_EQ(row.size(0), vocab_size)
+            << "filter mask vocabulary sizes must match";
+        rows.push_back(row);
+      } else {
+        rows.push_back(torch::zeros(
+            {vocab_size}, torch::TensorOptions().dtype(torch::kFloat32)));
+      }
+    }
+    this->filter_mask =
+        torch::cat(rows, /*dim=*/0)
+            .view({static_cast<int64_t>(rows.size()), vocab_size});
+    if (sample_idxes.size() != filter_mask_rows.size()) {
+      this->filter_mask = this->filter_mask.index_select(
+          0, torch::tensor(sample_idxes, torch::kLong));
+    }
+  }
   if (need_token_stats) {
     CHECK_EQ(req_sampling_params.size(), unique_token_ids_vec.size());
     CHECK_EQ(req_sampling_params.size(), unique_token_counts_vec.size());
@@ -189,6 +226,26 @@ void SamplingParameters::concat(const SamplingParameters& param) {
       safe_concat(this->unique_token_ids_lens, param.unique_token_ids_lens, 0);
   this->do_sample = safe_concat(this->do_sample, param.do_sample, 0);
   this->acc_logprob = safe_concat(this->acc_logprob, param.acc_logprob, 0);
+  if (this->filter_mask.defined() && param.filter_mask.defined()) {
+    this->filter_mask = torch::cat({this->filter_mask, param.filter_mask}, 0);
+  } else if (this->filter_mask.defined() || param.filter_mask.defined()) {
+    const auto row_count = [](const SamplingParameters& value) {
+      if (value.filter_mask.defined()) {
+        return value.filter_mask.size(0);
+      }
+      return value.sample_idxes.defined() ? value.sample_idxes.numel() : 0;
+    };
+    const torch::Tensor& defined_mask =
+        this->filter_mask.defined() ? this->filter_mask : param.filter_mask;
+    const int64_t missing_rows =
+        this->filter_mask.defined() ? row_count(param) : row_count(*this);
+    torch::Tensor unconstrained_rows = torch::zeros(
+        {missing_rows, defined_mask.size(1)}, defined_mask.options());
+    this->filter_mask =
+        this->filter_mask.defined()
+            ? torch::cat({this->filter_mask, unconstrained_rows}, 0)
+            : torch::cat({unconstrained_rows, param.filter_mask}, 0);
+  }
   this->logprobs = this->logprobs || param.logprobs;
   this->return_probs = this->return_probs || param.return_probs;
   this->is_embeddings = this->is_embeddings || param.is_embeddings;

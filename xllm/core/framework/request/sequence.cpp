@@ -238,6 +238,10 @@ Sequence::Sequence(size_t index,
       stream_output_token_offset_(decoder_.output_offset()),
       termination_flag_(std::make_shared<std::atomic<int32_t>>(INT32_MAX)),
       request_id_(seq_params.request_id) {
+  if (sequence_params_.json_object_grammar != nullptr) {
+    json_object_state_ = sequence_params_.json_object_grammar->initial_state(
+        sequence_params_.json_reasoning_enabled);
+  }
   if (is_onerec_model()) {
     init_onerec_sequence(prompt_token_ids, std::move(input_embedding));
     return;
@@ -301,6 +305,7 @@ Sequence::Sequence(const Sequence& other)
       linear_state_hashes_(other.linear_state_hashes_),
       linear_hash_stride_(other.linear_hash_stride_),
       onerec_state_(other.onerec_state_),
+      json_object_state_(other.json_object_state_),
       volatile_num_prompt_tokens_(other.volatile_num_prompt_tokens_),
       request_id_(other.request_id_),
       finished_(other.finished_),
@@ -324,6 +329,15 @@ Sequence::Sequence(const Sequence& other)
   kv_state_.erase_blocks(BlockType::LINEAR);
   host_kv_state_.erase_blocks(BlockType::EMBEDDING);
   host_kv_state_.erase_blocks(BlockType::LINEAR);
+}
+
+torch::Tensor Sequence::json_object_filter_mask() const {
+  if (!json_object_state_.has_value() ||
+      sequence_params_.json_object_grammar == nullptr) {
+    return torch::Tensor();
+  }
+  return sequence_params_.json_object_grammar->build_filter_mask(
+      json_object_state_.value());
 }
 
 // The first token will be only used in disagg pd mode.
@@ -374,6 +388,11 @@ void Sequence::append_token(const Token& token) {
 
   // A real token was committed (overlap-fake placeholders returned above).
   ++generated_tokens_since_latency_;
+  if (json_object_state_.has_value() && token_id >= 0) {
+    CHECK(json_object_state_->accept_token(token_id))
+        << "generated token violates json_object grammar, token_id="
+        << token_id;
+  }
 
   if (need_unique_tokens_) {
     token_to_count_map_[token_id]++;
@@ -425,6 +444,23 @@ void Sequence::update_last_step_token(const Token& token, size_t token_offset) {
   // hash from this position onward so it is recomputed when next needed.
   invalidate_block_hashes_from(cur_generated_token_idx_);
   invalidate_linear_state_hashes_from(cur_generated_token_idx_);
+  if (json_object_state_.has_value() && token_id >= 0) {
+    if (!json_object_state_->can_accept_token(token_id)) {
+      const JsonObjectGrammarSnapshot snapshot = json_object_state_->snapshot();
+      const JsonObjectGrammar* grammar = json_object_state_->grammar();
+      LOG(ERROR)
+          << "MTP JSON grammar mismatch: token_offset=" << token_offset
+          << ", token_id=" << token_id
+          << ", committed_tokens=" << snapshot.token_ids.size()
+          << ", allowed_tokens="
+          << (grammar == nullptr
+                  ? 0
+                  : grammar->allowed_token_ids(*json_object_state_).size());
+    }
+    CHECK(json_object_state_->accept_token(token_id))
+        << "accepted MTP token violates json_object grammar, token_id="
+        << token_id;
+  }
   if (need_unique_tokens_) {
     token_to_count_map_[token_id]++;
   }

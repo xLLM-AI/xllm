@@ -86,6 +86,8 @@ message DisaggRequest {
   optional int32 priority_weight = 37;
   string source_xservice_addr = 38;
   bool include_stop_str_in_output = 39;
+  bool json_object = 40;
+  bool json_reasoning_enabled = 41;
 
 }
 

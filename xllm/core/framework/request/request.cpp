@@ -65,6 +65,8 @@ void Request::create_sequences_group() {
   sequence_params.sample_slots = &(state_.sample_slots);
   sequence_params.sampling_param = &(state_.sampling_param);
   sequence_params.stopping_checker = &(state_.stopping_checker);
+  sequence_params.json_object_grammar = state_.json_object_grammar;
+  sequence_params.json_reasoning_enabled = state_.json_reasoning_enabled;
   sequences_group_ = std::make_unique<SequencesGroup>(state_.prompt,
                                                       state_.prompt_tokens,
                                                       state_.input_embedding,

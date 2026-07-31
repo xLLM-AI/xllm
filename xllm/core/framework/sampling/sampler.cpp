@@ -29,6 +29,8 @@ namespace xllm {
 SampleOutput Sampler::forward(torch::Tensor& logits,
                               const SamplingParameters& params,
                               const torch::Tensor& filter_mask) const {
+  const torch::Tensor& effective_filter_mask =
+      filter_mask.defined() ? filter_mask : params.filter_mask;
   SampleOutput output;
   // apply frequency and presence penalties
   if (params.frequency_penalties.defined()) {
@@ -65,18 +67,18 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
     }
   }
 
-  if (filter_mask.defined()) {
-    CHECK_EQ(filter_mask.dim(), 2)
-        << "filter_mask must be 2-D, dim=" << filter_mask.dim();
-    CHECK_EQ(filter_mask.size(0), sample_logits.size(0))
+  if (effective_filter_mask.defined()) {
+    CHECK_EQ(effective_filter_mask.dim(), 2)
+        << "filter_mask must be 2-D, dim=" << effective_filter_mask.dim();
+    CHECK_EQ(effective_filter_mask.size(0), sample_logits.size(0))
         << "filter_mask batch mismatch, filter_mask.size(0)="
-        << filter_mask.size(0)
+        << effective_filter_mask.size(0)
         << ", sample_logits.size(0)=" << sample_logits.size(0);
-    CHECK_EQ(filter_mask.size(1), sample_logits.size(1))
+    CHECK_EQ(effective_filter_mask.size(1), sample_logits.size(1))
         << "filter_mask vocab mismatch, filter_mask.size(1)="
-        << filter_mask.size(1)
+        << effective_filter_mask.size(1)
         << ", sample_logits.size(1)=" << sample_logits.size(1);
-    sample_logits = sample_logits + filter_mask;
+    sample_logits = sample_logits + effective_filter_mask;
   }
 
   if (params.all_greedy_sample && !params.logprobs && !params.return_probs &&

@@ -670,13 +670,18 @@ WorkerImpl::estimate_kv_cache_capacity_async() {
 }
 
 void WorkerImpl::update_last_step_output(
-    const std::optional<ForwardOutput>& output) {
+    const std::optional<ForwardOutput>& output,
+    const std::vector<std::string>& request_ids) {
   if (output.value().sample_output.next_tokens.defined()) {
     last_step_output_ = std::move(output.value());
+    last_step_request_ids_ = request_ids;
     last_step_output_valid_ = true;
   } else {
     if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
       last_step_output_ = std::move(output.value());
+      last_step_request_ids_ = request_ids;
+    } else {
+      last_step_request_ids_.clear();
     }
     last_step_output_valid_ = false;
   }
@@ -726,8 +731,123 @@ std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap(
 
 ForwardInput WorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
     ForwardInput& input) {
+  update_json_object_states_by_last_step_output(input);
   return update_input_by_last_step_output(input);
 }
+
+void WorkerImpl::update_json_object_states_by_last_step_output(
+    ForwardInput& input) {
+  if (input.json_object_states.empty() ||
+      !last_step_output_.sample_output.next_tokens.defined()) {
+    return;
+  }
+
+  CHECK(compute_stream_ != nullptr)
+      << "JSON grammar overlap update requires a compute stream";
+  c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+  if (last_step_output_.ready_event != nullptr) {
+    CHECK(compute_stream_->wait_event(last_step_output_.ready_event))
+        << "failed to wait for last-step output before JSON grammar update";
+  }
+
+  torch::Tensor next_tokens =
+      safe_to(last_step_output_.sample_output.next_tokens,
+              torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU),
+              /*non_blocking=*/false);
+  CHECK(next_tokens.dim() == 1 || next_tokens.dim() == 2)
+      << "overlap JSON token output must be 1-D or 2-D, got "
+      << next_tokens.sizes();
+
+  const auto& current_request_ids = input.input_params.embedding.request_ids;
+  const bool has_request_ids =
+      !current_request_ids.empty() && !last_step_request_ids_.empty();
+  for (size_t state_idx = 0; state_idx < input.json_object_states.size();
+       ++state_idx) {
+    int32_t output_idx = static_cast<int32_t>(state_idx);
+    if (has_request_ids && state_idx < current_request_ids.size()) {
+      const auto iter = std::find(last_step_request_ids_.begin(),
+                                  last_step_request_ids_.end(),
+                                  current_request_ids[state_idx]);
+      if (iter == last_step_request_ids_.end()) {
+        continue;
+      }
+      output_idx = static_cast<int32_t>(iter - last_step_request_ids_.begin());
+    }
+    if (output_idx < 0 || output_idx >= next_tokens.size(0)) {
+      continue;
+    }
+
+    JsonObjectGrammarState& state = input.json_object_states[state_idx];
+    if (!state.initialized()) {
+      continue;
+    }
+    if (next_tokens.dim() == 1) {
+      const int32_t token_id =
+          static_cast<int32_t>(next_tokens[output_idx].item<int64_t>());
+      if (token_id >= 0) {
+        CHECK(state.accept_token(token_id))
+            << "last-step token violates json_object grammar, token_id="
+            << token_id;
+      }
+      continue;
+    }
+
+    const torch::Tensor output_row = next_tokens[output_idx];
+    for (int64_t token_idx = 0; token_idx < output_row.numel(); ++token_idx) {
+      const int32_t token_id =
+          static_cast<int32_t>(output_row[token_idx].item<int64_t>());
+      if (token_id < 0) {
+        break;
+      }
+      CHECK(state.accept_token(token_id))
+          << "last-step token violates json_object grammar, token_id="
+          << token_id;
+    }
+  }
+  input.sampling_params.filter_mask =
+      build_json_object_filter_mask(input.json_object_states, device_, dtype_);
+}
+
+#if defined(USE_NPU)
+torch::Tensor WorkerImpl::recompute_new_cache_slots(const ForwardInput& input) {
+  auto old_cache_slots = input.input_params.attention.device.new_cache_slots;
+  int64_t numel = old_cache_slots.numel();
+  // The logical block stride that BlockManager hands out is
+  // `block_size * kv_split_size_effective` (see llm_engine init). When KV is
+  // not split (kv_split_size == 1) the stride collapses back to block_size.
+  const int32_t kv_split_size = parallel_args_.kv_split_size_effective();
+  const int32_t block_size_total = options_.block_size() * kv_split_size;
+  // KV-shard ownership predicate: block whose sub-index inside the logical
+  // block matches this rank's KV-split rank (degenerates to "this rank only"
+  // when kv_split_size == 1, since sub_block_idx is always 0 there).
+  const int32_t owner_kv_split_rank = parallel_args_.kv_split_rank();
+
+  torch::Tensor indices = torch::arange(numel, torch::kCPU);
+  torch::Tensor block_offset = indices % block_size_total;
+  torch::Tensor sub_block_idx =
+      torch::floor_divide(block_offset, options_.block_size());
+  torch::Tensor mask = (sub_block_idx == owner_kv_split_rank);
+  torch::Tensor valid_indices = torch::nonzero(mask).squeeze();
+
+  torch::Tensor new_cache_slots = torch::full_like(old_cache_slots, -1);
+  if (valid_indices.numel() > 0) {
+    const torch::Device slots_device = old_cache_slots.device();
+    torch::Tensor valid_indices_on_device =
+        valid_indices.to(slots_device, /*non_blocking=*/false);
+    torch::Tensor old_slotid =
+        old_cache_slots.index_select(0, valid_indices_on_device)
+            .to(torch::kInt);
+    torch::Tensor block_id = torch::floor_divide(old_slotid, block_size_total);
+    torch::Tensor block_offset_mod = old_slotid % options_.block_size();
+    torch::Tensor new_slotid =
+        block_id * options_.block_size() + block_offset_mod;
+    new_cache_slots.index_put_({valid_indices_on_device},
+                               new_slotid.to(new_cache_slots.scalar_type()));
+  }
+  return new_cache_slots;
+}
+
+#endif
 
 bool WorkerImpl::model_supports_model_cp() const {
   if (model_cp_capable_computed_) {
@@ -807,6 +927,13 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
     ForwardInput& processed_input,
     Stream& prepare_stream,
     bool record_ready_event) {
+  if (!input.json_object_state_snapshots.empty()) {
+    ForwardInput restored_input = input;
+    restore_json_object_states(restored_input);
+    prepare_work_before_execute_on_stream(
+        restored_input, processed_input, prepare_stream, record_ready_event);
+    return;
+  }
 #if defined(USE_NPU)
   // Without device_capture_lock, ACL graph capture will be interrupted by the
   // synchronization H2D of data update streams asynchronously scheduled by
@@ -955,6 +1082,46 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
   } else {
     processed_input.metadata_ready_event.reset();
   }
+}
+
+void WorkerImpl::restore_json_object_states(ForwardInput& input) {
+  if (input.json_object_state_snapshots.empty()) {
+    return;
+  }
+  CHECK(tokenizer_ != nullptr)
+      << "JSON object state restoration requires a worker tokenizer";
+
+  std::vector<JsonObjectGrammarState> states;
+  states.reserve(input.json_object_state_snapshots.size());
+  for (const auto& snapshot : input.json_object_state_snapshots) {
+    if (!snapshot.enabled) {
+      states.emplace_back();
+      continue;
+    }
+
+    std::shared_ptr<const JsonObjectGrammar>* grammar =
+        snapshot.reasoning_enabled ? &json_reasoning_grammar_
+                                   : &json_object_grammar_;
+    if (*grammar == nullptr) {
+      std::string error;
+      *grammar = JsonObjectGrammar::create_from_tokenizer(
+          *tokenizer_,
+          context_.get_model_args().eos_token_id(),
+          context_.get_model_args().stop_token_ids(),
+          context_.get_model_args().vocab_size(),
+          snapshot.reasoning_enabled,
+          &error);
+      CHECK(*grammar != nullptr)
+          << "Failed to restore JSON object grammar: " << error;
+    }
+
+    JsonObjectGrammarState state = (*grammar)->restore_state(snapshot);
+    CHECK(state.is_valid())
+        << "Serialized JSON object grammar state is invalid";
+    states.push_back(std::move(state));
+  }
+  input.json_object_states = std::move(states);
+  input.json_object_state_snapshots.clear();
 }
 
 void WorkerImpl::apply_kv_block_swaps(const ModelInputParams& input_params) {
@@ -1114,11 +1281,13 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
         if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
           std::unique_lock<std::mutex> lock(mtx_);
           cv_.wait(lock, [this] { return !is_recorded_; });
-          update_last_step_output(output);
+          update_last_step_output(output,
+                                  input.input_params.embedding.request_ids);
           is_recorded_ = true;
           cv_.notify_one();
         } else {
-          update_last_step_output(output);
+          update_last_step_output(output,
+                                  input.input_params.embedding.request_ids);
         }
       } else {
         if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
@@ -1419,6 +1588,9 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 
   auto model_loader = ModelLoader::create(model_weights_path);
   model_weights_path_ = std::move(model_weights_path);
+  auto tokenizer = model_loader->tokenizer();
+  CHECK(tokenizer != nullptr);
+  tokenizer_ = std::move(tokenizer);
 
   auto args = model_loader->model_args();
   auto quant_args = model_loader->quant_args();
@@ -1430,8 +1602,6 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   // no tokenizer of its own (not universal: Eagle3 keeps its own draft vocab;
   // see speculative_engine.cpp).
   if (!options_.is_draft_engine()) {
-    std::unique_ptr<Tokenizer> tokenizer = model_loader->tokenizer();
-    CHECK(tokenizer != nullptr);
     const int64_t tokenizer_vocab_size = tokenizer->vocab_size();
     int64_t model_vocab_size = args.vocab_size();
     // use tokenizer vocab size if model vocab size is not set

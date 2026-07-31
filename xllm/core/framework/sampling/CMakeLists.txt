@@ -1,6 +1,19 @@
 include(cc_library)
 
 cc_library(
+  NAME
+    json_object_grammar
+  HDRS
+    json_object_grammar.h
+  SRCS
+    json_object_grammar.cpp
+  DEPS
+    :tokenizer
+    glog::glog
+    torch
+)
+
+cc_library(
   NAME 
     sampler
   HDRS
@@ -20,6 +33,7 @@ cc_library(
     beam_searcher.cpp
     rec_constrained_decoding.cpp
   DEPS
+    :json_object_grammar
     :state_dict
     :common
     glog::glog

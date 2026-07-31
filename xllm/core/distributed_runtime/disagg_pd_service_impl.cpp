@@ -20,6 +20,7 @@ limitations under the License.
 #include "common/global_flags.h"
 #include "common/types.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/sampling/json_object_grammar.h"
 #include "distributed_runtime/llm_engine.h"
 #include "framework/request/request_output.h"
 #include "scheduler/disagg_pd_scheduler.h"
@@ -35,6 +36,24 @@ DisaggPDServiceImpl::DisaggPDServiceImpl(DisaggPDScheduler* scheduler,
     LOG(FATAL) << "XServiceClient not init.";
     return;
   }
+}
+
+std::shared_ptr<const JsonObjectGrammar>
+DisaggPDServiceImpl::get_json_object_grammar(bool reasoning_enabled,
+                                             std::string* error) {
+  std::lock_guard<std::mutex> lock(json_object_grammar_mutex_);
+  std::shared_ptr<const JsonObjectGrammar>& grammar =
+      reasoning_enabled ? json_reasoning_grammar_ : json_object_grammar_;
+  if (grammar == nullptr) {
+    grammar = JsonObjectGrammar::create_from_tokenizer(
+        *engine_->tokenizer(),
+        engine_->model_args().eos_token_id(),
+        engine_->model_args().stop_token_ids(),
+        engine_->model_args().vocab_size(),
+        reasoning_enabled,
+        error);
+  }
+  return grammar;
 }
 
 std::shared_ptr<Request> DisaggPDServiceImpl::generate_request(
@@ -66,6 +85,8 @@ std::shared_ptr<Request> DisaggPDServiceImpl::generate_request(
   sampling_param.logprobs = req.logprobs();
   sampling_param.top_logprobs = req.top_logprobs();
   sampling_param.is_embeddings = req.is_embeddings();
+  sampling_param.json_object = req.json_object();
+  const bool json_object = sampling_param.json_object;
 
   SchedulerParam scheduler_param;
   scheduler_param.offline = req.offline();
@@ -131,6 +152,18 @@ std::shared_ptr<Request> DisaggPDServiceImpl::generate_request(
                          output_callback,
                          batch_output_callback);
   req_state.include_stop_str_in_output = req.include_stop_str_in_output();
+
+  if (json_object) {
+    std::string grammar_error;
+    req_state.json_object_grammar =
+        get_json_object_grammar(req.json_reasoning_enabled(), &grammar_error);
+    if (req_state.json_object_grammar == nullptr) {
+      LOG(ERROR) << "Failed to initialize json_object constraint: "
+                 << grammar_error << ", request_id=" << req.req_id();
+      return nullptr;
+    }
+    req_state.json_reasoning_enabled = req.json_reasoning_enabled();
+  }
 
   auto new_request = std::make_shared<Request>(req.req_id(),
                                                req.x_request_id(),

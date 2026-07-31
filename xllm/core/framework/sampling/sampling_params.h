@@ -35,6 +35,7 @@ struct RequestSamplingParam {
   int64_t top_logprobs = 0;
   bool do_sample = false;
   bool is_embeddings = false;
+  bool json_object = false;
   int32_t beam_width = 0;
   int32_t num_return_sequences = 0;
 };
@@ -46,7 +47,8 @@ struct SamplingParameters {
             const std::vector<int32_t>& sample_idxes,
             const std::vector<std::vector<int64_t>>& unique_token_ids_vec,
             const std::vector<std::vector<int32_t>>& unique_token_counts_vec,
-            const std::vector<int32_t>& unique_token_lens_vec);
+            const std::vector<int32_t>& unique_token_lens_vec,
+            const std::vector<torch::Tensor>& filter_mask_rows = {});
 
   SamplingParameters to(const torch::Device& device,
                         torch::ScalarType dtype) const {
@@ -59,8 +61,10 @@ struct SamplingParameters {
         selected_token_idxes.defined()
             ? safe_to(selected_token_idxes, device).contiguous()
             : selected_token_idxes;
-
     auto options = torch::device(device).dtype(dtype);
+    params.filter_mask = filter_mask.defined()
+                             ? safe_to(filter_mask, options, true).contiguous()
+                             : filter_mask;
     params.frequency_penalties = safe_to(frequency_penalties, options, true);
     params.presence_penalties = safe_to(presence_penalties, options, true);
     params.repetition_penalties = safe_to(repetition_penalties, options, true);
@@ -97,6 +101,10 @@ struct SamplingParameters {
   // including the generated tokens and the last prompt token
   // IntTensor
   torch::Tensor selected_token_idxes;
+
+  // Dense additive mask for token-level structured output constraints. Zero
+  // entries are allowed and negative entries are forbidden.
+  torch::Tensor filter_mask;
 
   // [num_tokens] FloatTensor
   torch::Tensor frequency_penalties;

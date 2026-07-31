@@ -277,6 +277,7 @@ size_t get_sampling_params_size(const SamplingParameters& params) {
   size_t total = 0;
 
   total += get_tensor_size(params.selected_token_idxes);
+  total += get_tensor_size(params.filter_mask);
   total += get_tensor_size(params.frequency_penalties);
   total += get_tensor_size(params.presence_penalties);
   total += get_tensor_size(params.repetition_penalties);
@@ -590,6 +591,17 @@ inline void write_vector(RawInputSectionCursor& cursor,
   if (size > 0) {
     const uint64_t bytes = size * type_size<T>;
     write_bytes(cursor, vec.data(), bytes);
+  }
+}
+
+void write_json_object_state_snapshots(
+    RawInputSectionCursor& cursor,
+    const std::vector<JsonObjectGrammarSnapshot>& snapshots) {
+  write_data(cursor, static_cast<uint64_t>(snapshots.size()));
+  for (const auto& snapshot : snapshots) {
+    write_data(cursor, snapshot.enabled);
+    write_data(cursor, snapshot.reasoning_enabled);
+    write_vector(cursor, snapshot.token_ids);
   }
 }
 
@@ -1524,6 +1536,19 @@ inline void read_vector(ReadContext& context, std::vector<T>& vec) {
   }
 }
 
+void read_json_object_state_snapshots(
+    ReadContext& context,
+    std::vector<JsonObjectGrammarSnapshot>& snapshots) {
+  uint64_t size;
+  read_data(context, size);
+  snapshots.resize(size);
+  for (auto& snapshot : snapshots) {
+    read_data(context, snapshot.enabled);
+    read_data(context, snapshot.reasoning_enabled);
+    read_vector(context, snapshot.token_ids);
+  }
+}
+
 template <typename T>
 inline void read_tensor_and_vector(ReadContext& context,
                                    torch::Tensor& tensor,
@@ -2390,6 +2415,7 @@ inline void deserialize_forward_input_payload(
   if (selected_token_idxes_size > 0) {
     auto& sampling_params = forward_input.sampling_params;
     read_tensor(context, sampling_params.selected_token_idxes, stream);
+    read_tensor(context, sampling_params.filter_mask, stream);
     read_tensor(context, sampling_params.frequency_penalties, stream);
     read_tensor(context, sampling_params.presence_penalties, stream);
     read_tensor(context, sampling_params.repetition_penalties, stream);
@@ -2411,6 +2437,8 @@ inline void deserialize_forward_input_payload(
   }
   // acc_logprob
   read_tensor(context, forward_input.sampling_params.acc_logprob, stream);
+  read_json_object_state_snapshots(context,
+                                   forward_input.json_object_state_snapshots);
 
   // Keep transfer/eplb host-materialized, but continue advancing the
   // device cursor when a contiguous device buffer is active.
@@ -2748,6 +2776,7 @@ inline void serialize_forward_input_sections(
   write_data(context.descriptor, selected_token_idxes_size);
   if (selected_token_idxes_size > 0) {
     write_tensor(context, sampling_params.selected_token_idxes);
+    write_tensor(context, sampling_params.filter_mask);
     write_tensor(context, sampling_params.frequency_penalties);
     write_tensor(context, sampling_params.presence_penalties);
     write_tensor(context, sampling_params.repetition_penalties);
@@ -2769,6 +2798,8 @@ inline void serialize_forward_input_sections(
   }
 
   write_tensor(context, sampling_params.acc_logprob);
+  write_json_object_state_snapshots(context.descriptor,
+                                    input.json_object_state_snapshots);
 
   write_data(context.descriptor,
              static_cast<uint64_t>(input.transfer_kv_infos.size()));

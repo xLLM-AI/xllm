@@ -23,6 +23,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -31,6 +32,7 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/prefix_cache/block_hasher.h"
+#include "core/framework/sampling/json_object_grammar.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/tokenizer/tokenizer.h"
 #include "core/util/slice.h"
@@ -108,6 +110,9 @@ struct SequenceParams {
   // stopping checker
   // reference from request
   StoppingChecker* stopping_checker;  // not owned
+
+  std::shared_ptr<const JsonObjectGrammar> json_object_grammar;
+  bool json_reasoning_enabled = false;
 };
 
 class Sequence final {
@@ -309,6 +314,12 @@ class Sequence final {
   // get the sampling parameters
   const RequestSamplingParam* sampling_param() const {
     return sequence_params_.sampling_param;
+  }
+
+  torch::Tensor json_object_filter_mask() const;
+  const JsonObjectGrammarState* json_object_state() const {
+    return json_object_state_.has_value() ? &json_object_state_.value()
+                                          : nullptr;
   }
 
   // get the stopping criteria
@@ -625,6 +636,8 @@ class Sequence final {
   uint32_t linear_hash_stride_ = 0;
 
   std::optional<OneRecState> onerec_state_;
+
+  std::optional<JsonObjectGrammarState> json_object_state_;
 
   // NOTE: MUST FIXME Later
   // record all tokens num in last turn when the request is

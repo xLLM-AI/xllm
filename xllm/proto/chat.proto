@@ -40,6 +40,9 @@ message ChatMessage {
   optional string tool_call_id = 5;
 }
 
+message ResponseFormat {
+  optional string type = 1;
+}
 
 // Next Id: 45
 message ChatRequest {
@@ -173,6 +176,7 @@ message ChatRequest {
   // whether to include stop strings or stop tokens in the output text.
   // default = false
   optional bool include_stop_str_in_output = 46;
+  optional ResponseFormat response_format = 47;
 }
 
 message ChatLogProbData {
