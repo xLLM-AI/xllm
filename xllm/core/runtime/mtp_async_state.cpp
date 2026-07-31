@@ -40,12 +40,54 @@ torch::Tensor gather_sequence_rows(const torch::Tensor& values,
 
 }  // namespace
 
+TargetSpecVerifyMode classify_target_spec_verify_mode(
+    std::string_view model_type) {
+  if (model_type == "qwen3_5" || model_type == "qwen3_5_moe" ||
+      model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text") {
+    return TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY;
+  }
+  if (model_type == "mimo") {
+    return TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL;
+  }
+  return TargetSpecVerifyMode::GENERIC;
+}
+
+int64_t speculative_verify_block_table_capacity(int64_t max_position_embeddings,
+                                                int64_t block_size) {
+  CHECK_GT(max_position_embeddings, 0);
+  CHECK_GT(block_size, 0);
+  return (max_position_embeddings + block_size - 1) / block_size + 1;
+}
+
 CombinedDraftExecutionPath classify_combined_draft_execution_path(
     std::string_view model_type) {
   if (model_type == "qwen3_5_mtp" || model_type == "qwen3_5_moe_mtp") {
     return CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION;
   }
   return CombinedDraftExecutionPath::UNSUPPORTED;
+}
+
+torch::Tensor materialize_speculative_verify_tokens(
+    const torch::Tensor& verify_tokens,
+    const std::vector<torch::Tensor>& draft_token_sources) {
+  if (draft_token_sources.empty()) {
+    return verify_tokens;
+  }
+  CHECK(verify_tokens.defined());
+  CHECK_EQ(verify_tokens.dim(), 1);
+  const int64_t verify_width =
+      static_cast<int64_t>(draft_token_sources.size()) + 1;
+  CHECK_EQ(verify_tokens.numel() % verify_width, 0);
+  const int64_t batch_size = verify_tokens.numel() / verify_width;
+  torch::Tensor verify_rows = verify_tokens.view({batch_size, verify_width});
+  for (size_t step = 0; step < draft_token_sources.size(); ++step) {
+    const torch::Tensor& source = draft_token_sources[step];
+    CHECK(source.defined());
+    CHECK_EQ(source.numel(), batch_size);
+    verify_rows.select(/*dim=*/1, static_cast<int64_t>(step) + 1)
+        .copy_(source.flatten(), /*non_blocking=*/true);
+  }
+  return verify_tokens;
 }
 
 AcceptedState build_accepted_state(const torch::Tensor& accepted_tokens,
