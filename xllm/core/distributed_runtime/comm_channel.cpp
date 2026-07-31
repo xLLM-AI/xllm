@@ -352,15 +352,17 @@ void CommChannel::transfer_kv_blocks(
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
   proto::BlockTransferInfos pb_block_transfer_info;
-  if (!block_transfer_info_to_proto(
-          batch_id, block_transfer_info, &pb_block_transfer_info)) {
-    LOG(ERROR) << "transfer_kv_blocks with batch id " << batch_id
-               << " fail: create proto fail!";
-    return;
-  }
+  CHECK(block_transfer_info_to_proto(
+      batch_id, block_transfer_info, &pb_block_transfer_info))
+      << "Failed to serialize H2D transfer for batch_id=" << batch_id;
   brpc::Controller cntl;
   proto::TransferStatus response;
   stub_->TransferBlocks(&cntl, &pb_block_transfer_info, &response, nullptr);
+  CHECK(!cntl.Failed()) << "H2D transfer registration RPC failed for batch_id="
+                        << batch_id << ": " << cntl.ErrorText();
+  CHECK_EQ(response.success_cnt(), block_transfer_info.size())
+      << "H2D transfer registration was not acknowledged for batch_id="
+      << batch_id;
 }
 
 bool CommChannel::sleep(MasterStatus master_status) {

@@ -26,6 +26,7 @@ limitations under the License.
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 
@@ -529,6 +530,8 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .enable_prefix_cache = options_.enable_prefix_cache(),
       .has_key_cache_shape = kv_cache_shape.has_key_cache_shape(),
       .has_grouped_cache_layout = kv_cache_shape.has_grouped_cache_layout(),
+      .supports_grouped_cache_offload =
+          util::is_deepseek_v4_model_type(args_.model_type()),
       .has_conv_cache_shape = kv_cache_shape.has_conv_cache_shape(),
       .has_ssm_cache_shape = kv_cache_shape.has_ssm_cache_shape(),
       .kv_cache_dtype = options_.kv_cache_dtype(),
@@ -637,6 +640,31 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
   }
 
   if (options_.host_blocks_factor() > 1.0) {
+    // Translate a composite cache capacity into typed Host pools. The
+    // hierarchy layer consumes only this BlockType map and does not need to
+    // identify the model that produced the layout.
+    if (!options.manager_types().empty()) {
+      std::map<BlockType, uint32_t> host_capacities;
+      if (kv_cache_cap.swa_count() > 0) {
+        host_capacities.emplace(
+            BlockType::SWA,
+            static_cast<uint32_t>(scale_host_block_count(
+                kv_cache_cap.swa_count(), options_.host_blocks_factor())));
+      }
+      if (kv_cache_cap.c4_count() > 0) {
+        host_capacities.emplace(
+            BlockType::C4,
+            static_cast<uint32_t>(scale_host_block_count(
+                kv_cache_cap.c4_count(), options_.host_blocks_factor())));
+      }
+      if (kv_cache_cap.c128_count() > 0) {
+        host_capacities.emplace(
+            BlockType::C128,
+            static_cast<uint32_t>(scale_host_block_count(
+                kv_cache_cap.c128_count(), options_.host_blocks_factor())));
+      }
+      options.host_num_blocks_by_type(std::move(host_capacities));
+    }
     options.enable_host_offload(true);
     kv_cache_manager_ =
         std::make_unique<HierarchyBlockManagerPool>(options, this, dp_size_);

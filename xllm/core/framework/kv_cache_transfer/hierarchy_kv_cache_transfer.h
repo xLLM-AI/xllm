@@ -71,6 +71,7 @@ class HierarchyKVCacheTransfer {
 
   HierarchyKVCacheTransfer(const Options& options,
                            const torch::Device& device,
+                           const Stream* compute_stream,
                            std::vector<xllm::KVCache>* kv_caches_ptr,
                            const KVCacheShape& kv_cache_shape,
                            const KVCacheCreateOptions& create_options);
@@ -101,6 +102,7 @@ class HierarchyKVCacheTransfer {
  private:
   Options options_;
   Device device_;
+  const Stream* compute_stream_ = nullptr;
 
   std::unique_ptr<ThreadPool> load_threadpool_;
   moodycamel::BlockingConcurrentQueue<std::unique_ptr<Stream>> copy_stream_;

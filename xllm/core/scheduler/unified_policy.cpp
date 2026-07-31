@@ -91,7 +91,7 @@ void UnifiedPolicy::schedule_from_unified_queue(
     return;
   }
 
-  size_t remaining_copy_blocks_budget =
+  size_t remaining_copy_units_budget =
       (options_.enable_latency_aware_schedule() &&
        ::xllm::KVCacheStoreConfig::get_instance()
            .enable_control_h2d_block_num())
@@ -134,31 +134,30 @@ void UnifiedPolicy::schedule_from_unified_queue(
     size_t allocated_tokens = 0;
     size_t allocated_seqs = 0;
     double allocated_estimate_latency = 0;
-    size_t allocated_copy_blocks = 0;
+    size_t allocated_copy_units = 0;
 
     for (auto& sequence : request->sequences()) {
       if (sequence->finished()) {
         continue;
       }
 
-      // H2D swap support.
-      int32_t block_size = state.kv_cache_manager->block_size();
-      size_t host_blocks_num =
-          sequence->host_kv_state().kv_cache_tokens_num() / block_size;
-      size_t device_blocks_num =
-          sequence->kv_state().kv_cache_tokens_num() / block_size;
-      size_t cur_step_copy_blocks = host_blocks_num > device_blocks_num
-                                        ? host_blocks_num - device_blocks_num
-                                        : 0;
-      cur_step_copy_blocks =
-          std::min(cur_step_copy_blocks,
-                   remaining_copy_blocks_budget - allocated_copy_blocks);
-      size_t kv_cache_tokens_num =
-          cur_step_copy_blocks == 0
-              ? sequence->kv_state().kv_cache_tokens_num()
-              : (sequence->kv_state().kv_cache_tokens_num() / block_size +
-                 cur_step_copy_blocks) *
-                    block_size;
+      const size_t unallocated_copy_units =
+          remaining_copy_units_budget > allocated_copy_units
+              ? remaining_copy_units_budget - allocated_copy_units
+              : 0;
+      const bool host_cache_enabled =
+          state.kv_cache_manager->supports_host_cache_restore();
+      const size_t full_copy_units = sequence->host_cache_copy_units();
+      HostCacheRestorePoint selected_restore{
+          /*restore_target_tokens=*/sequence->kv_cache_tokens_num(),
+          /*copy_units=*/full_copy_units};
+      if (unallocated_copy_units < full_copy_units) {
+        selected_restore = state.kv_cache_manager->select_host_cache_restore(
+            sequence.get(), unallocated_copy_units);
+      }
+
+      const size_t current_step_copy_units = selected_restore.copy_units;
+      const size_t kv_cache_tokens_num = selected_restore.restore_target_tokens;
 
       size_t num_tokens = sequence->num_tokens();
       size_t assume_max_tokens =
@@ -184,12 +183,16 @@ void UnifiedPolicy::schedule_from_unified_queue(
             break;
           }
           allocated_estimate_latency = state.profile_manager->predict_step_time(
-              assume_max_tokens, kv_cache_tokens_num, false);
+              assume_max_tokens,
+              kv_cache_tokens_num,
+              /*if_need_add_constant_term=*/false);
           assume_max_tokens -= kv_cache_tokens_num;
         } else {
           assume_max_tokens = 1;
           allocated_estimate_latency = state.profile_manager->predict_step_time(
-              num_tokens, kv_cache_tokens_num, false);
+              num_tokens,
+              kv_cache_tokens_num,
+              /*if_need_add_constant_term=*/false);
           if (budget.estimate_latency + allocated_estimate_latency >
               budget.latency_budget) {
             budget_exhausted = true;
@@ -216,7 +219,8 @@ void UnifiedPolicy::schedule_from_unified_queue(
         }
       }
 
-      // Allocate blocks (MixScheduler version with copy blocks support).
+      // Allocate blocks after committing the scheduler-selected Host restore
+      // boundary. The allocator only executes the resulting restore plan.
       size_t max_handle_num_tokens =
           std::min(kv_cache_tokens_num + assume_max_tokens, num_tokens);
       if (sequence->is_prefill_stage()) {
@@ -234,10 +238,11 @@ void UnifiedPolicy::schedule_from_unified_queue(
           max_handle_num_tokens - kv_cache_tokens_num;
 
       bool alloc_success = false;
-      if (::xllm::KVCacheStoreConfig::get_instance().host_blocks_factor() >
-          1.0) {
-        alloc_success = state.kv_cache_manager->allocate(
-            sequence.get(), max_handle_num_tokens, cur_step_copy_blocks);
+      if (host_cache_enabled) {
+        state.kv_cache_manager->trim_host_cache(sequence.get(),
+                                                selected_restore);
+        alloc_success = state.kv_cache_manager->allocate(sequence.get(),
+                                                         max_handle_num_tokens);
       } else {
         alloc_success = state.kv_cache_manager->allocate(sequence.get(),
                                                          max_handle_num_tokens);
@@ -249,7 +254,7 @@ void UnifiedPolicy::schedule_from_unified_queue(
 
       allocated_tokens += current_step_handle_tokens;
       allocated_seqs += 1;
-      allocated_copy_blocks += cur_step_copy_blocks;
+      allocated_copy_units += current_step_copy_units;
       candidate_sequences.emplace_back(sequence.get());
       candidate_token_budgets.emplace_back(current_step_handle_tokens);
     }
@@ -269,7 +274,7 @@ void UnifiedPolicy::schedule_from_unified_queue(
           candidate_sequences, candidate_token_budgets, state);
       budget.remaining_token_budget -= allocated_tokens;
       budget.remaining_seq_budget -= allocated_seqs;
-      remaining_copy_blocks_budget -= allocated_copy_blocks;
+      remaining_copy_units_budget -= allocated_copy_units;
       budget.estimate_latency += allocated_estimate_latency;
       continue;
     }
@@ -357,8 +362,19 @@ void UnifiedPolicy::get_latency_budget_and_request_order(
   // Update request metrics.
   for (auto& request : queue) {
     auto& sequence = request->sequences()[0];
-    sequence->set_estimated_latency(
-        state.profile_manager->predict_step_time(sequence.get(), false));
+    const HostCacheRestorePoint full_restore =
+        state.kv_cache_manager->select_host_cache_restore(
+            sequence.get(), std::numeric_limits<size_t>::max());
+    const size_t candidate_prefix = std::max(
+        sequence->kv_cache_tokens_num(), full_restore.restore_target_tokens);
+    const size_t usable_prefix =
+        sequence->num_tokens() == 0
+            ? 0
+            : std::min(candidate_prefix, sequence->num_tokens() - 1);
+    sequence->set_estimated_latency(state.profile_manager->predict_step_time(
+        sequence->num_tokens(),
+        usable_prefix,
+        /*if_need_add_constant_term=*/false));
     request->set_elapsed_time_ms();
     request->set_deadline_ms();
     request->set_starved(false);
@@ -432,47 +448,50 @@ size_t UnifiedPolicy::get_max_copy_block_num(
     ScheduleBudget& budget,
     const SchedulerState& state) {
   double min_total_exec_time = state.profile_manager->get_constant_overhead();
-  size_t max_h2d_block_num = 0;
-  int32_t block_size = state.kv_cache_manager->block_size();
-  std::vector<size_t> req_copy_block_num_vec;
-  std::vector<std::shared_ptr<Request>> req_vec;
+  size_t full_copy_units = 0;
+  std::vector<size_t> per_request_copy_units;
+  std::vector<std::shared_ptr<Request>> requests_with_host_restore;
 
   for (auto& request : queue) {
     auto& sequence = request->sequences()[0];
-    min_total_exec_time +=
-        state.profile_manager->predict_step_time(sequence.get(), false);
+    const HostCacheRestorePoint full_restore =
+        state.kv_cache_manager->select_host_cache_restore(
+            sequence.get(), std::numeric_limits<size_t>::max());
+    const size_t candidate_prefix = std::max(
+        sequence->kv_cache_tokens_num(), full_restore.restore_target_tokens);
+    const size_t usable_prefix =
+        sequence->num_tokens() == 0
+            ? 0
+            : std::min(candidate_prefix, sequence->num_tokens() - 1);
+    min_total_exec_time += state.profile_manager->predict_step_time(
+        sequence->num_tokens(),
+        usable_prefix,
+        /*if_need_add_constant_term=*/false);
 
-    size_t host_blocks_num =
-        sequence->host_kv_state().kv_cache_tokens_num() / block_size;
-    size_t device_blocks_num =
-        sequence->kv_state().kv_cache_tokens_num() / block_size;
-    size_t cur_step_copy_blocks = host_blocks_num > device_blocks_num
-                                      ? host_blocks_num - device_blocks_num
-                                      : 0;
-    max_h2d_block_num += cur_step_copy_blocks;
-    if (cur_step_copy_blocks > 0) {
-      req_copy_block_num_vec.push_back(cur_step_copy_blocks);
-      req_vec.push_back(request);
+    full_copy_units += full_restore.copy_units;
+    if (full_restore.copy_units > 0) {
+      per_request_copy_units.push_back(full_restore.copy_units);
+      requests_with_host_restore.push_back(request);
     }
   }
 
-  size_t max_copy_block_num = std::numeric_limits<int32_t>::max();
+  size_t max_copy_units = std::numeric_limits<int32_t>::max();
   if (min_total_exec_time >= budget.latency_budget) {
-    max_copy_block_num =
+    max_copy_units =
         state.profile_manager->get_max_copy_block_num(budget.latency_budget);
-  } else {
-    double max_h2d_transfer_time =
-        state.profile_manager->predict_copy_blocks_time(max_h2d_block_num);
-    if (max_h2d_transfer_time > min_total_exec_time) {
-      max_copy_block_num = get_needed_copy_block_num(req_vec,
-                                                     req_copy_block_num_vec,
-                                                     max_h2d_transfer_time,
-                                                     min_total_exec_time,
-                                                     max_h2d_block_num,
-                                                     state);
+  } else if (full_copy_units > 0) {
+    const double full_h2d_transfer_time =
+        state.profile_manager->predict_copy_blocks_time(full_copy_units);
+    if (full_h2d_transfer_time > min_total_exec_time) {
+      max_copy_units = get_needed_copy_block_num(requests_with_host_restore,
+                                                 per_request_copy_units,
+                                                 full_h2d_transfer_time,
+                                                 min_total_exec_time,
+                                                 full_copy_units,
+                                                 state);
     }
   }
-  return max_copy_block_num;
+  return max_copy_units;
 }
 
 // =============================================================================
@@ -480,84 +499,97 @@ size_t UnifiedPolicy::get_max_copy_block_num(
 // =============================================================================
 
 size_t UnifiedPolicy::get_needed_copy_block_num(
-    std::vector<std::shared_ptr<Request>>& req_vec,
-    std::vector<size_t>& req_copy_block_num_vec,
-    double max_h2d_transfer_time,
-    double min_total_exec_time,
-    size_t max_h2d_block_num,
+    const std::vector<std::shared_ptr<Request>>& requests,
+    const std::vector<size_t>& per_request_copy_units,
+    double full_h2d_transfer_time,
+    double full_restore_exec_time,
+    size_t full_copy_units,
     const SchedulerState& state) {
-  int32_t block_size = state.kv_cache_manager->block_size();
-  size_t total_needed_copy_blocks = max_h2d_block_num;
-  double total_exec_time = min_total_exec_time;
-  double h2d_transfer_time = max_h2d_transfer_time;
+  if (requests.empty()) {
+    CHECK(per_request_copy_units.empty());
+    return 0;
+  }
+  CHECK_EQ(requests.size(), per_request_copy_units.size());
+
+  size_t needed_copy_units = full_copy_units;
+  double total_exec_time = full_restore_exec_time;
+  double h2d_transfer_time = full_h2d_transfer_time;
   CHECK_GT(h2d_transfer_time, total_exec_time);
 
-  size_t index = req_vec.size() - 1;
-  for (auto it = req_vec.rbegin(); it != req_vec.rend(); ++it, --index) {
-    auto request = *it;
-    auto& sequence = request->sequences()[0];
-    total_needed_copy_blocks -= req_copy_block_num_vec[index];
-    total_exec_time -=
-        state.profile_manager->predict_step_time(sequence.get(), false);
-    double cur_seq_max_exec_time = state.profile_manager->predict_step_time(
+  size_t index = requests.size() - 1;
+  for (auto it = requests.rbegin(); it != requests.rend(); ++it, --index) {
+    Sequence* sequence = (*it)->sequences()[0].get();
+    const HostCacheRestorePoint full_restore =
+        state.kv_cache_manager->select_host_cache_restore(
+            sequence, std::numeric_limits<size_t>::max());
+    CHECK_EQ(full_restore.copy_units, per_request_copy_units[index]);
+
+    const size_t full_prefix =
+        sequence->num_tokens() == 0
+            ? 0
+            : std::min(full_restore.restore_target_tokens,
+                       sequence->num_tokens() - 1);
+    const double full_exec_time = state.profile_manager->predict_step_time(
         sequence->num_tokens(),
-        sequence->kv_state().kv_cache_tokens_num(),
-        false);
-    total_exec_time += cur_seq_max_exec_time;
+        full_prefix,
+        /*if_need_add_constant_term=*/false);
+    needed_copy_units -= full_restore.copy_units;
+    total_exec_time -= full_exec_time;
     h2d_transfer_time -= state.profile_manager->predict_copy_blocks_time(
-        req_copy_block_num_vec[index], false);
+        full_restore.copy_units, /*if_need_add_constant_term=*/false);
 
-    if (h2d_transfer_time < total_exec_time) {
-      double base_total_exec_time = total_exec_time - cur_seq_max_exec_time;
-      size_t left = 0;
-      size_t right = req_copy_block_num_vec[index] + 1;
-      double min_latency = std::numeric_limits<double>::max();
-      while (left < right) {
-        size_t mid = left + (right - left) / 2;
-        double cur_seq_h2d_time =
-            state.profile_manager->predict_copy_blocks_time(mid, false);
-        size_t kv_cache_tokens_num =
-            mid == 0
-                ? sequence->kv_state().kv_cache_tokens_num()
-                : (sequence->kv_state().kv_cache_tokens_num() / block_size +
-                   mid) *
-                      block_size;
-        double cur_seq_exec_time = state.profile_manager->predict_step_time(
-            sequence->num_tokens(), kv_cache_tokens_num, false);
-        if (h2d_transfer_time + cur_seq_h2d_time <
-            base_total_exec_time + cur_seq_exec_time) {
-          left = mid + 1;
-          min_latency = std::max(h2d_transfer_time + cur_seq_h2d_time,
-                                 base_total_exec_time + cur_seq_exec_time);
-        } else {
-          right = mid;
-        }
+    HostCacheRestorePoint selected_restore =
+        state.kv_cache_manager->select_host_cache_restore(sequence,
+                                                          /*max_copy_units=*/0);
+    double selected_exec_time = 0;
+    double selected_total_exec_time = 0;
+    double selected_total_h2d_time = 0;
+    double selected_latency = std::numeric_limits<double>::max();
+    auto evaluate_restore = [&](const HostCacheRestorePoint& restore) {
+      if (restore.copy_units > full_restore.copy_units ||
+          sequence->num_tokens() == 0) {
+        return;
       }
-      size_t needed_copy_blocks = left - 1;
-      if (left <= req_copy_block_num_vec[index]) {
-        double cur_seq_h2d_time =
-            state.profile_manager->predict_copy_blocks_time(left, false);
-        size_t kv_cache_tokens_num =
-            left == 0
-                ? sequence->kv_state().kv_cache_tokens_num()
-                : (sequence->kv_state().kv_cache_tokens_num() / block_size +
-                   left) *
-                      block_size;
-        double cur_seq_exec_time = state.profile_manager->predict_step_time(
-            sequence->num_tokens(), kv_cache_tokens_num, false);
-        double candidate_latency =
-            std::max(h2d_transfer_time + cur_seq_h2d_time,
-                     base_total_exec_time + cur_seq_exec_time);
-        if (min_latency > candidate_latency) {
-          needed_copy_blocks = left;
-        }
+      const size_t prefix =
+          std::min(restore.restore_target_tokens, sequence->num_tokens() - 1);
+      const double exec_time = state.profile_manager->predict_step_time(
+          sequence->num_tokens(),
+          prefix,
+          /*if_need_add_constant_term=*/false);
+      const double candidate_h2d_time =
+          h2d_transfer_time + state.profile_manager->predict_copy_blocks_time(
+                                  restore.copy_units,
+                                  /*if_need_add_constant_term=*/false);
+      const double candidate_exec_time = total_exec_time + exec_time;
+      const double latency = std::max(candidate_h2d_time, candidate_exec_time);
+      if (latency < selected_latency ||
+          (latency == selected_latency &&
+           restore.restore_target_tokens >
+               selected_restore.restore_target_tokens)) {
+        selected_restore = restore;
+        selected_exec_time = exec_time;
+        selected_total_exec_time = candidate_exec_time;
+        selected_total_h2d_time = candidate_h2d_time;
+        selected_latency = latency;
       }
+    };
 
-      total_needed_copy_blocks += needed_copy_blocks;
-      break;
+    evaluate_restore(selected_restore);
+    for (size_t copy_units = 1; copy_units <= full_restore.copy_units;
+         ++copy_units) {
+      evaluate_restore(state.kv_cache_manager->select_host_cache_restore(
+          sequence, copy_units));
     }
+
+    needed_copy_units += selected_restore.copy_units;
+    if (selected_restore.copy_units > 0 ||
+        selected_total_h2d_time <= selected_total_exec_time) {
+      return needed_copy_units;
+    }
+
+    total_exec_time += selected_exec_time;
   }
-  return total_needed_copy_blocks;
+  return needed_copy_units;
 }
 
 // =============================================================================
@@ -573,7 +605,9 @@ int32_t UnifiedPolicy::get_max_chunk(Sequence* sequence,
     return kv_cache_tokens_num;
   }
   if (state.profile_manager->predict_step_time(
-          num_tokens, kv_cache_tokens_num, false) <= latency_budget) {
+          num_tokens,
+          kv_cache_tokens_num,
+          /*if_need_add_constant_term=*/false) <= latency_budget) {
     return num_tokens;
   }
   if (latency_budget <= 0) {
@@ -585,8 +619,10 @@ int32_t UnifiedPolicy::get_max_chunk(Sequence* sequence,
   int32_t right = num_tokens + 1;
   while (left < right) {
     int32_t mid = left + (right - left) / 2;
-    auto predict_time = state.profile_manager->predict_step_time(
-        mid, kv_cache_tokens_num, false);
+    const double predict_time = state.profile_manager->predict_step_time(
+        mid,
+        kv_cache_tokens_num,
+        /*if_need_add_constant_term=*/false);
     if (predict_time <= latency_budget) {
       left = mid + 1;
     } else {

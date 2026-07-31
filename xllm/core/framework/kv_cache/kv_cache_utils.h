@@ -121,6 +121,7 @@ struct HostCacheValidationOptions {
   bool enable_prefix_cache = true;
   bool has_key_cache_shape = true;
   bool has_grouped_cache_layout = false;
+  bool supports_grouped_cache_offload = false;
   bool has_conv_cache_shape = false;
   bool has_ssm_cache_shape = false;
   std::string kv_cache_dtype = "auto";

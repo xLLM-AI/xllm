@@ -622,6 +622,34 @@ TEST(CompositeBlockManagerTest, Dsv4PrefixCacheMissCleanly) {
   manager.deallocate_for_sequence(&seq_b);
 }
 
+TEST(CompositeBlockManagerTest, Dsv4PrefixCacheEvictsAtC128Capacity) {
+  // C128 has four physical blocks and each prompt consumes two. The third
+  // distinct prompt must evict the first prompt from both compressed leaves.
+  const uint32_t base_num_blocks = 4 * kCompressRatio128;
+  const uint32_t window_size = 4 * kBaseBlockSize;
+  BlockManager::Options opts = MakeCompositeOptions(
+      base_num_blocks, kBaseBlockSize, window_size, /*max_seqs_per_batch=*/1);
+  opts.max_tokens_per_batch(2 * kBlockSizeRatio128);
+  CompositeBlockManager manager(build_composite_leaves(opts));
+
+  const size_t num_tokens = 2 * kBlockSizeRatio128;
+  for (int32_t value : {11, 22, 33}) {
+    Sequence seq =
+        MakeTestSequence(value, std::vector<int32_t>(num_tokens, value));
+    ASSERT_TRUE(manager.allocate_sequence(&seq, num_tokens));
+    seq.kv_state().incr_kv_cache_tokens_num(num_tokens);
+    manager.deallocate_for_sequence(&seq);
+    seq.reset();
+  }
+
+  Sequence first = MakeTestSequence(99, std::vector<int32_t>(num_tokens, 11));
+  manager.allocate_shared_for_sequence(&first);
+  EXPECT_EQ(first.kv_state().shared_blocks_num(BlockType::C4), 0u);
+  EXPECT_EQ(first.kv_state().shared_blocks_num(BlockType::C128), 0u);
+  EXPECT_EQ(first.kv_state().kv_cache_tokens_num(), 0u);
+  manager.deallocate_for_sequence(&first);
+}
+
 // SWA slid-out blocks should enter the prefix cache via the pre-grow hook (v2b:
 // hook fires at every allocate_sequence, insertion is incremental and cached
 // blocks survive slid-out release through the ref<=2u path). A follow-up
@@ -663,10 +691,10 @@ TEST(CompositeBlockManagerTest, SlidingWindowSlidOutBlocksEnterPrefixCache) {
   manager.deallocate_for_sequence(&seq_hit);
 }
 
-// v2b: pre-grow hook advances KVCacheState::num_cached_blocks incrementally
-// across chunked-prefill steps. First chunk: cursor at 0. Second chunk (after
-// forwarding chunk 1's tokens): cursor at chunk-1's full-block count.
-TEST(CompositeBlockManagerTest, Dsv4PrefixCachePreHookCursorAdvances) {
+// The post-grow hook advances KVCacheState::num_cached_blocks incrementally.
+// Newly allocated blocks are present by then, but the token cursor limits the
+// published range to blocks completed by the preceding forward.
+TEST(CompositeBlockManagerTest, Dsv4PrefixCachePostGrowCursorAdvances) {
   const uint32_t base_num_blocks = 4096;
   const uint32_t window_size = 4 * kBaseBlockSize;
   const uint32_t max_seqs_per_batch = 4;
@@ -683,12 +711,12 @@ TEST(CompositeBlockManagerTest, Dsv4PrefixCachePreHookCursorAdvances) {
   // Chunk 1: allocate + forward.
   ASSERT_TRUE(manager.allocate_sequence(&seq, chunk));
   EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::SWA), 0u)
-      << "pre-grow hook has nothing to cache on the very first allocate: kv=0";
+      << "post-grow hook has nothing to cache on the first allocate: kv=0";
   EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::C4), 0u);
   EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::C128), 0u);
   seq.kv_state().incr_kv_cache_tokens_num(chunk);
 
-  // Chunk 2 allocation triggers the pre-grow hook, which now sees kv=chunk
+  // Chunk 2 allocation triggers the post-grow hook, which now sees kv=chunk
   // worth of forwarded tokens and inserts them.
   ASSERT_TRUE(manager.allocate_sequence(&seq, total));
   EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::SWA),

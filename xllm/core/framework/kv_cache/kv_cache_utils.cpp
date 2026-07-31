@@ -542,7 +542,8 @@ std::optional<std::string> validate_host_cache_options(
   if (!options.has_key_cache_shape) {
     violations.emplace_back("KV cache has no key-cache tensor to offload");
   }
-  if (options.has_grouped_cache_layout) {
+  if (options.has_grouped_cache_layout &&
+      !options.supports_grouped_cache_offload) {
     std::ostringstream violation;
     violation << "model \"" << options.model_type
               << "\" uses a grouped cache layout (for example DeepSeek-V4 "

@@ -64,14 +64,19 @@ class KVCacheState {
                          std::vector<Block>&& blocks,
                          size_t current_total_num_tokens);
   // Composite mount for DSV4 admission: install the (possibly gap-containing)
-  // shared block vector for `type` at logical positions [0, blocks.size()),
-  // set shared_blocks_num[type] and num_cached_blocks[type] to blocks.size()
-  // (the mounted blocks are already in the prefix cache -- no need to re-insert
-  // on the next pre-grow hook). Does NOT touch kv_cache_tokens_num_; the
-  // composite advances that once after all leaves have mounted, so all leaves
-  // observe a consistent shared-token count.
+  // shared block vector for `type` at logical positions [0, blocks.size()).
+  // The vector came directly from this state's/type's prefix-cache probe, so
+  // its logical length is also the actual per-type cache hit cursor. Does NOT
+  // touch kv_cache_tokens_num_; the composite advances that once after all
+  // leaves have mounted, so all leaves observe a consistent usable-token
+  // count while retaining their independent cache hit cursors.
   void mount_composite_shared(BlockType type,
                               std::vector<Block>&& shared_blocks);
+  // Replace the full block vector and its shared/cache publication metadata.
+  void replace_composite_blocks(BlockType type,
+                                std::vector<Block>&& blocks,
+                                size_t num_shared_blocks,
+                                size_t cache_publish_cursor);
   void incr_shared_blocks_num(BlockType type, size_t num);
   // Drop all blocks held under `type` (releases their Block refs and removes
   // the map entry).
@@ -83,16 +88,18 @@ class KVCacheState {
   // same across block types, so it takes no BlockType.
   size_t shared_tokens_num() const;
 
-  // Pre-grow cache cursor: how many blocks under `type` have already been
-  // inserted into the prefix cache. The composite's pre-grow hook consults
-  // this to skip blocks already in the cache and only stamp+insert the delta
-  // that has been forwarded since the last hook run. Grows monotonically:
-  //   - Admission mount: set to shared_blocks.size() (mounted blocks are
-  //     already cache-resident, so no re-insert on the next pre-grow).
+  // Prefix-cache cursor in units of this BlockType's blocks. It starts at the
+  // actual logical reach returned by this state/type's probe (not the common
+  // sequence restore length), then advances as newly forwarded blocks are
+  // inserted. For sparse SWA this is a logical position and may span invalid
+  // placeholders. Grows monotonically:
+  //   - Admission mount: set to that type's retained probe-vector length.
   //   - Pre-grow hook: after inserting a run [cursor, end), advance cursor to
   //     `end`.
   //   - reset(): cleared alongside the rest of the sequence's cache state.
   size_t num_cached_blocks(BlockType type) const;
+  // Per-type cursor table. Callers that need a stable snapshot must copy it.
+  const std::map<BlockType, size_t>& num_cached_blocks() const;
   void set_num_cached_blocks(BlockType type, size_t n);
 
   void set_slice_window_size(uint32_t size);
@@ -191,6 +198,8 @@ class KVCacheState {
   void process_beam_search(std::optional<Block> new_block = std::nullopt);
 
  private:
+  void remember_block_size(BlockType type, const std::vector<Block>& blocks);
+
   // number of tokens in kv cache
   size_t kv_cache_tokens_num_ = 0;
 
@@ -201,6 +210,12 @@ class KVCacheState {
   // keeps deterministic iteration for reset / dealloc / debugging, but worker
   // export order is governed by kMultiBlockExportOrder, not by map order.
   std::map<BlockType, std::vector<Block>> composite_blocks_;
+
+  // Logical block size is layout metadata, not Block ownership state. Host
+  // offload moves physical Block handles into an asynchronous queue and leaves
+  // invalid placeholders behind, so capacity calculations cannot read size()
+  // from the first current handle.
+  std::map<BlockType, size_t> block_sizes_;
 
   // source kv cache blocks for swap
   std::vector<Block> src_blocks_;
