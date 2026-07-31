@@ -116,7 +116,6 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
     FlashComm1Context fc1_ctx = build_flash_comm1_context(
         num_tokens, is_prefill_side, parallel_args_, flash_comm1_options_);
     FlashComm1ContextScope fc1_scope(&fc1_ctx);
-
     torch::Tensor h;
     if (input_params.embedding.input_embedding.defined()) {
       h = input_params.embedding.input_embedding;

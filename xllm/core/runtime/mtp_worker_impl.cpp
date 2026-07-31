@@ -33,6 +33,9 @@ limitations under the License.
 #include "core/framework/kv_cache/kv_cache_estimation.h"
 #include "core/framework/model/mtp_utils.h"
 #include "core/framework/multimodal/mm_data.h"
+#if defined(USE_NPU)
+#include "core/kernels/npu/tilelang/tilelang_ops_api.h"
+#endif
 #include "core/layers/common/dsa_topk_share_plan.h"
 #include "core/runtime/mtp_async_input_builder.h"
 #include "core/runtime/mtp_async_state.h"
@@ -46,6 +49,8 @@ namespace xllm {
 constexpr uint64_t MBUF_SIZE = 128 * 1024 * 1024;
 
 namespace {
+
+constexpr int64_t kMaxSpecVerifyGraphUpdateBlockTableWidth = (1 << 15) - 1;
 
 ProcessGroup* spec_broadcast_group(const ParallelArgs& parallel_args) {
   return parallel_args.tp_group_ != nullptr ? parallel_args.tp_group_
@@ -187,12 +192,12 @@ void clear_expanded_spec_verify_graph_input(ModelInputParams& input_params) {
   input_params.graph.expanded_kv_seq_lens_vec.clear();
 }
 
-void build_expanded_spec_verify_graph_input(ModelInputParams& input_params,
-                                            const torch::Device& device) {
+bool build_expanded_spec_verify_graph_host_input(
+    ModelInputParams& input_params) {
   clear_expanded_spec_verify_graph_input(input_params);
   if (!input_params.is_spec_verify ||
       !input_params.meta.batch_forward_type.is_chunked_prefill()) {
-    return;
+    return false;
   }
 
   const std::vector<int32_t>& q_seq_lens =
@@ -200,19 +205,13 @@ void build_expanded_spec_verify_graph_input(ModelInputParams& input_params,
   const std::vector<int32_t>& kv_seq_lens =
       input_params.attention.host.kv_seq_lens;
   if (q_seq_lens.empty() || kv_seq_lens.empty()) {
-    return;
+    return false;
   }
   CHECK_EQ(q_seq_lens.size(), kv_seq_lens.size())
       << "spec verify q/kv seq lens must both be sequence-scoped";
-  CHECK(input_params.attention.device.block_tables.defined())
-      << "spec verify block tables must be rebuilt before graph input";
-
   const int64_t batch_size = static_cast<int64_t>(q_seq_lens.size());
-  CHECK_GE(input_params.attention.device.block_tables.size(0), batch_size)
-      << "spec verify block table rows are fewer than sequences";
 
   std::vector<int32_t> expanded_kv_seq_lens;
-  std::vector<torch::Tensor> expanded_block_rows;
   for (int64_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
     const int32_t q_len = q_seq_lens[static_cast<size_t>(seq_idx)];
     const int32_t kv_len = kv_seq_lens[static_cast<size_t>(seq_idx)];
@@ -220,27 +219,62 @@ void build_expanded_spec_verify_graph_input(ModelInputParams& input_params,
     CHECK_GE(kv_len, q_len) << "kv_len must include validate query tokens";
     for (int32_t token_idx = 0; token_idx < q_len; ++token_idx) {
       expanded_kv_seq_lens.emplace_back(kv_len - q_len + token_idx + 1);
+    }
+  }
+  if (expanded_kv_seq_lens.empty()) {
+    return false;
+  }
+
+  input_params.graph.use_expanded_decode_for_spec_verify_attention = true;
+  input_params.graph.expanded_kv_seq_lens_vec = std::move(expanded_kv_seq_lens);
+  return true;
+}
+
+void bind_expanded_spec_verify_graph_input(ModelInputParams& input_params,
+                                           const torch::Device& device,
+                                           bool kv_lens_already_bound) {
+  if (!input_params.graph.use_expanded_decode_for_spec_verify_attention) {
+    return;
+  }
+  CHECK(input_params.attention.device.block_tables.defined())
+      << "spec verify block tables must be rebuilt before graph input";
+  const auto& q_seq_lens = input_params.attention.host.q_seq_lens;
+  CHECK_GE(input_params.attention.device.block_tables.size(0),
+           static_cast<int64_t>(q_seq_lens.size()))
+      << "spec verify block table rows are fewer than sequences";
+  std::vector<torch::Tensor> expanded_block_rows;
+  for (int64_t seq_idx = 0; seq_idx < static_cast<int64_t>(q_seq_lens.size());
+       ++seq_idx) {
+    for (int32_t token_idx = 0;
+         token_idx < q_seq_lens[static_cast<size_t>(seq_idx)];
+         ++token_idx) {
       expanded_block_rows.emplace_back(
           input_params.attention.device.block_tables.select(/*dim=*/0,
                                                             seq_idx));
     }
   }
-  if (expanded_kv_seq_lens.empty()) {
-    return;
+
+  if (!kv_lens_already_bound) {
+    torch::Tensor expanded_kv_seq_lens_host =
+        torch::tensor(input_params.graph.expanded_kv_seq_lens_vec,
+                      torch::TensorOptions()
+                          .dtype(torch::kInt)
+                          .device(torch::kCPU)
+                          .pinned_memory(true));
+    input_params.graph.expanded_kv_seq_lens =
+        expanded_kv_seq_lens_host.to(device, /*non_blocking=*/true);
   }
 
-  torch::Tensor expanded_kv_seq_lens_host =
-      torch::tensor(expanded_kv_seq_lens,
-                    torch::TensorOptions()
-                        .dtype(torch::kInt)
-                        .device(torch::kCPU)
-                        .pinned_memory(true));
-  input_params.graph.use_expanded_decode_for_spec_verify_attention = true;
-  input_params.graph.expanded_kv_seq_lens =
-      expanded_kv_seq_lens_host.to(device, /*non_blocking=*/true);
+  // ATB consumes this tensor as dense row-major storage. Keep the generic
+  // fallback contiguous; a zero-stride expand view is rejected at runtime.
   input_params.graph.expanded_block_tables =
       torch::stack(expanded_block_rows, 0);
-  input_params.graph.expanded_kv_seq_lens_vec = std::move(expanded_kv_seq_lens);
+}
+
+void build_expanded_spec_verify_graph_input(ModelInputParams& input_params,
+                                            const torch::Device& device) {
+  build_expanded_spec_verify_graph_host_input(input_params);
+  bind_expanded_spec_verify_graph_input(input_params, device, false);
 }
 #endif
 
@@ -462,19 +496,9 @@ KVCacheShape MTPDraftKVCacheShape(const KVCacheShape& target_shape,
   return KVCacheShape(draft_capacity, draft_model_args, /*world_size=*/1);
 }
 
-bool is_qwen3_5_target_model_type(const std::string& model_type) {
-  return model_type == "qwen3_5" || model_type == "qwen3_5_moe" ||
-         model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text" ||
-         model_type.rfind("qwen3_5_", 0) == 0;
-}
-
 bool is_qwen3_5_draft_model_type(const std::string& model_type) {
   return mtp_async::classify_combined_draft_execution_path(model_type) ==
          mtp_async::CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION;
-}
-
-bool is_mimo_target_model_type(const std::string& model_type) {
-  return model_type == "mimo";
 }
 
 }  // namespace
@@ -522,6 +546,8 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
 
   if (impl_ != nullptr && impl_->get_status() == WorkerImpl::Status::LOADED) {
     context_ = impl_->context_;
+    target_spec_verify_mode_ = mtp_async::classify_target_spec_verify_mode(
+        context_.get_model_args().model_type());
   }
 
   if (draft_impl_ != nullptr &&
@@ -556,7 +582,7 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
     }
   }
 #if defined(USE_NPU)
-  if (result && use_qwen3_5_spec_verify_path()) {
+  if (result && supports_explicit_spec_verify_replay_update()) {
     CHECK_EQ(::xllm::KernelConfig::get_instance().npu_kernel_backend(), "TORCH")
         << "Qwen3.5 MTP only supports NPU Torch backend";
   }
@@ -617,28 +643,61 @@ int64_t MTPWorkerImpl::get_embedding_placeholder_size() {
   return static_cast<int64_t>(embedding_size_);
 }
 
-bool MTPWorkerImpl::use_qwen3_5_spec_verify_path() const {
-  return impl_ != nullptr &&
-         impl_->get_status() != WorkerImpl::Status::UNINITIALIZED &&
-         is_qwen3_5_target_model_type(
-             impl_->context_.get_model_args().model_type());
+bool MTPWorkerImpl::supports_explicit_spec_verify_replay_update() const {
+  return target_spec_verify_mode_ ==
+         mtp_async::TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY;
 }
 
-// MiMo MTP validation requires chunked-prefill mode (same as Qwen3.5) to
-// avoid the read-before-write race in FlashInfer batch-decode: validation
-// token 1 (at position p+1) must attend to the KV written by token 0 (at
-// position p) within the same batch call, but all-reads-then-all-writes
-// ordering means it reads garbage.  Chunked prefill executes tokens causally
-// so token 1 always sees token 0's committed KV.
-bool MTPWorkerImpl::use_mimo_spec_verify_path() const {
-  return impl_ != nullptr &&
-         impl_->get_status() != WorkerImpl::Status::UNINITIALIZED &&
-         is_mimo_target_model_type(
-             impl_->context_.get_model_args().model_type());
+bool MTPWorkerImpl::should_use_explicit_spec_verify_replay_update(
+    const ForwardInput& input) const {
+#if defined(USE_NPU)
+  const torch::Tensor& block_tables =
+      input.input_params.attention.host.block_tables;
+  if (!::xllm::ExecutionConfig::get_instance().enable_graph() ||
+      !::xllm::ExecutionConfig::get_instance()
+           .enable_graph_mode_decode_no_padding() ||
+      !supports_explicit_spec_verify_replay_update() ||
+      options_.num_speculative_tokens() <= 0 ||
+      input.input_params.meta.num_sequences <= 0 ||
+      options_.block_size() <= 0 || !block_tables.defined() ||
+      block_tables.dim() != 2 ||
+      block_tables.size(0) != input.input_params.meta.num_sequences) {
+    return false;
+  }
+  const int64_t block_table_width = spec_verify_block_table_width(block_tables);
+  if (block_table_width <= 0 ||
+      block_table_width > kMaxSpecVerifyGraphUpdateBlockTableWidth) {
+    return false;
+  }
+  const int64_t spec_width =
+      static_cast<int64_t>(options_.num_speculative_tokens()) + 1;
+  return kernel::npu::tilelang::has_spec_verify_graph_update_specialization(
+      spec_width, options_.block_size());
+#else
+  (void)input;
+  return false;
+#endif
+}
+
+int64_t MTPWorkerImpl::spec_verify_block_table_width(
+    const torch::Tensor& block_tables) const {
+  CHECK(block_tables.defined() && block_tables.dim() == 2);
+  CHECK_GT(options_.block_size(), 0);
+  int64_t required_width = block_tables.size(1);
+  if (impl_ != nullptr) {
+    const int64_t declared_capacity =
+        mtp_async::speculative_verify_block_table_capacity(
+            impl_->context_.get_model_args().max_position_embeddings(),
+            options_.block_size());
+    CHECK_LE(required_width, declared_capacity)
+        << "block table width exceeds the model position capacity";
+    required_width = declared_capacity;
+  }
+  return required_width;
 }
 
 bool MTPWorkerImpl::use_chunked_prefill_spec_verify_path() const {
-  return use_qwen3_5_spec_verify_path() || use_mimo_spec_verify_path();
+  return target_spec_verify_mode_ != mtp_async::TargetSpecVerifyMode::GENERIC;
 }
 
 bool MTPWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
@@ -1016,9 +1075,9 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
     // synchronizes the worker thread with the NPU.
     flush_pending_target_context();
     if (matching_device_target_context) {
-      // The first target handoff for a new batch establishes the scheduler's
-      // corrected position/KV base. Subsequent handoffs can derive that base
-      // fully on device without waiting for the scheduler.
+      // The first target-context publication for a new batch establishes the
+      // scheduler's corrected position/KV base. Subsequent publications can
+      // derive that base fully on device without waiting for the scheduler.
       device_context_ready_embedding_ids_ =
           input.input_params.embedding.embedding_ids;
       device_context_ready_request_ids_ =
@@ -1077,7 +1136,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
   if (use_prelaunched_first_draft) {
     // The first draft was fully prepared and submitted by the preceding
     // run_validate().  Host metadata is corrected below after the accepted
-    // token handoff; it is only needed for draft steps 1..N-1 and target.
+    // accepted-token update; it is only needed for draft steps 1..N-1 and
+    // target.
   } else if (use_device_target_context) {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
 
@@ -1158,6 +1218,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
       draft_impl_->context_.get_model_args());
   MtpTopkStatePtr mtp_topk_state;
   for (int32_t draft_idx = 0; draft_idx < num_speculative_tokens; ++draft_idx) {
+    const bool is_final_draft = draft_idx == num_speculative_tokens - 1;
+    const bool static_graph_tasks_prepared =
+        is_final_draft &&
+        prepare_static_mtp_graph_tasks_before_final_draft(input);
     if (reuse_mtp_topk_state) {
       current_draft_input.input_params.mtp_topk_state = mtp_topk_state;
     }
@@ -1201,8 +1265,9 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
     }
 
     // Overlap next-step input preparation with async draft forward.
-    if (draft_idx == num_speculative_tokens - 1) {
-      prepare_validate_inputs(metadata_template, validate_input);
+    if (is_final_draft) {
+      prepare_validate_inputs(
+          metadata_template, validate_input, static_graph_tasks_prepared);
     } else {
       prepare_draft_inputs(metadata_template, next_step_input, draft_idx + 1);
     }
@@ -1276,18 +1341,49 @@ void MTPWorkerImpl::fill_validate_input_from_draft_outputs(
       validate_input.token_ids.view({num_sequences, num_val_tokens});
 
   validate_input.device_tensors_ready = false;
+  auto& fused_draft_tokens =
+      validate_input.input_params.graph.spec_verify_draft_token_sources;
+  fused_draft_tokens.clear();
+#if defined(USE_NPU)
+  const bool use_fused_verify_token_update =
+      validate_input.input_params.graph.spec_verify_source_addresses_stable &&
+      validate_input.input_params.graph.input_tokens_override.defined() &&
+      supports_explicit_spec_verify_replay_update() &&
+      kernel::npu::tilelang::has_spec_verify_graph_update_specialization(
+          num_val_tokens, options_.block_size());
+  if (use_fused_verify_token_update) {
+    fused_draft_tokens.reserve(draft_outputs.size());
+    for (const ForwardOutput& draft_output : draft_outputs) {
+      const torch::Tensor& next_tokens = draft_output.sample_output.next_tokens;
+      CHECK(next_tokens.defined() && next_tokens.numel() == num_sequences &&
+            next_tokens.scalar_type() == torch::kInt64 &&
+            next_tokens.device() == validate_input.token_ids.device() &&
+            next_tokens.is_contiguous())
+          << "fused speculative verify input update requires one contiguous "
+             "int64 token per sequence and draft step";
+      fused_draft_tokens.emplace_back(next_tokens.flatten());
+    }
+    validate_input.device_tensors_ready = true;
+    return;
+  }
+#endif
+  std::vector<torch::Tensor> draft_token_columns;
+  draft_token_columns.reserve(num_speculative_tokens);
   for (int32_t i = 0; i < num_speculative_tokens; ++i) {
-    const auto& draft_output = draft_outputs[i];
-    const torch::Tensor& next_tokens = draft_output.sample_output.next_tokens;
+    const torch::Tensor& next_tokens =
+        draft_outputs[i].sample_output.next_tokens;
     CHECK(next_tokens.defined())
         << "draft next_tokens must be defined for validate token fill";
     torch::Tensor draft_tokens =
         safe_to(next_tokens.flatten(), token_options, /*non_blocking=*/true);
     CHECK_EQ(draft_tokens.numel(), num_sequences)
         << "draft token count must match validate sequence count";
-    validate_token_rows.select(/*dim=*/1, /*index=*/i + 1)
-        .copy_(draft_tokens, /*non_blocking=*/true);
+    draft_token_columns.emplace_back(std::move(draft_tokens));
   }
+  torch::Tensor packed_draft_tokens =
+      torch::stack(draft_token_columns, /*dim=*/1);
+  validate_token_rows.slice(/*dim=*/1, /*start=*/1, /*end=*/num_val_tokens)
+      .copy_(packed_draft_tokens, /*non_blocking=*/true);
   validate_input.device_tensors_ready = true;
   record_metadata_ready_event(compute_stream, validate_input);
 }
@@ -1345,7 +1441,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   torch::Tensor accepted_tokens_cpu_result = accepted_tokens_host;
   torch::Tensor base_positions;
   torch::Tensor base_kv_seq_lens;
-  StreamEventPtr handoff_ready_event;
+  StreamEventPtr target_context_ready_event;
   {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
 
@@ -1365,18 +1461,18 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
 
     accepted_tokens_host.copy_(val_output.next_tokens,
                                /*non_blocking=*/true);
-    // The event covers consensus, base-state derivation, and the D2H handoff.
-    handoff_ready_event = compute_stream_->record_event();
+    // The event covers consensus, base-state derivation, and the D2H copy.
+    target_context_ready_event = compute_stream_->record_event();
   }
-  if (handoff_ready_event == nullptr) {
+  if (target_context_ready_event == nullptr) {
     const int32_t ret = compute_stream_->synchronize();
-    CHECK_EQ(ret, 0) << "failed to synchronize MTP handoff, ret=" << ret;
+    CHECK_EQ(ret, 0) << "failed to synchronize MTP target context, ret=" << ret;
   }
   stage_target_context_write(input,
                              val_output,
                              base_positions,
                              base_kv_seq_lens,
-                             handoff_ready_event,
+                             target_context_ready_event,
                              std::move(accepted_tokens_host));
   if (prelaunch_next_first_draft) {
     // Submit the next iteration's first draft before returning to the
@@ -1389,10 +1485,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
                              base_kv_seq_lens,
                              std::move(next_first_draft_input));
   }
-  target_output.ready_event = handoff_ready_event;
+  target_output.ready_event = target_context_ready_event;
 
   // Target validation consumes all draft outputs on the same compute stream.
-  // Keep their prepared inputs alive until the target handoff event completes.
+  // Keep their prepared inputs alive until the target-context event completes.
   for (const ForwardOutput& draft_output : draft_outputs) {
     if (draft_output.retained_input != nullptr) {
       target_output.retained_input_dependencies.emplace_back(
@@ -1514,7 +1610,7 @@ bool MTPWorkerImpl::supports_combined_first_draft_execution() const {
 
   // The prelaunch builds an eager two-row DECODE input. The ATB speculative
   // path expects CHUNKED_PREFILL metadata instead, and the current device
-  // handoff is rank-local rather than DP-aware.
+  // target-context prelaunch is rank-local rather than DP-aware.
   if (::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel() ||
       parallel_args_.dp_size() > 1) {
     return false;
@@ -1769,7 +1865,8 @@ void MTPWorkerImpl::update_decode_step_input(
 }
 
 void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
-                                            ForwardInput& validate_input) {
+                                            ForwardInput& validate_input,
+                                            bool static_graph_tasks_prepared) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   validate_input = input;
   clear_ready_events(validate_input);
@@ -1784,6 +1881,12 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
   const int32_t num_val_tokens = num_speculative_tokens + 1;
   const int32_t total_num_val_tokens = num_sequences * num_val_tokens;
   const int32_t block_size = options_.block_size();
+#if defined(USE_NPU)
+  const bool use_explicit_spec_verify_replay_update =
+      should_use_explicit_spec_verify_replay_update(input);
+#else
+  const bool use_explicit_spec_verify_replay_update = false;
+#endif
   specBuilder::DecodeRowContext row_ctx =
       specBuilder::make_decode_row_context(input);
   Slice<int32_t> token_ids = {
@@ -1845,11 +1948,13 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
   CHECK_EQ(buf.out_positions.size(), buf.out_token_ids.size())
       << "validate positions/tokens mismatch";
 
-  specBuilder::set_token_position_tensors(validate_input,
-                                          buf.out_token_ids,
-                                          buf.out_positions,
-                                          token_options,
-                                          position_options);
+  if (!use_explicit_spec_verify_replay_update) {
+    specBuilder::set_token_position_tensors(validate_input,
+                                            buf.out_token_ids,
+                                            buf.out_positions,
+                                            token_options,
+                                            position_options);
+  }
   if (!use_atb_spec_kernel) {
     input_params.meta.num_sequences = total_num_val_tokens;
     input_params.meta.batch_forward_type = BatchForwardType::DECODE;
@@ -1875,8 +1980,55 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
                                      /*update_block_tables=*/true);
   }
 
+  auto& validate_sampling_params = validate_input.sampling_params;
+#if defined(USE_NPU)
+  // update_sampling_params() uses repeat_interleave on device tensors.  For a
+  // single greedy sequence that work only expands [0] and [false] into fixed
+  // validation controls, yet it lands on the final-draft -> target dependency
+  // chain.  Reuse stable controls after warmup and retain the generic builder
+  // for sampling, penalties, multi-sequence batches and other backends.
+  const bool use_stable_greedy_validate_sampling =
+      use_explicit_spec_verify_replay_update &&
+      validate_sampling_params.all_greedy_sample &&
+      validate_sampling_params.selected_token_idxes.defined() &&
+      validate_sampling_params.selected_token_idxes.numel() == 1 &&
+      validate_sampling_params.sample_idxes.defined() &&
+      validate_sampling_params.sample_idxes.numel() == 1 &&
+      validate_sampling_params.do_sample.defined() &&
+      validate_sampling_params.do_sample.numel() == 1 &&
+      !validate_sampling_params.frequency_penalties.defined() &&
+      !validate_sampling_params.presence_penalties.defined() &&
+      !validate_sampling_params.repetition_penalties.defined() &&
+      !validate_sampling_params.temperatures.defined() &&
+      !validate_sampling_params.top_p.defined() &&
+      !validate_sampling_params.top_k.defined() &&
+      !validate_sampling_params.unique_token_ids.defined() &&
+      !validate_sampling_params.unique_token_counts.defined() &&
+      !validate_sampling_params.unique_token_ids_lens.defined();
+  if (use_stable_greedy_validate_sampling) {
+    if (!mtp_validate_greedy_indices_.defined() ||
+        mtp_validate_greedy_indices_.numel() != total_num_val_tokens) {
+      mtp_validate_greedy_indices_ = torch::arange(
+          total_num_val_tokens,
+          torch::TensorOptions().dtype(torch::kInt).device(device_));
+      mtp_validate_greedy_do_sample_ = torch::zeros(
+          {total_num_val_tokens},
+          torch::TensorOptions().dtype(torch::kBool).device(device_));
+    }
+    validate_sampling_params.selected_token_idxes =
+        mtp_validate_greedy_indices_;
+    validate_sampling_params.sample_idxes = mtp_validate_greedy_indices_;
+    validate_sampling_params.do_sample = mtp_validate_greedy_do_sample_;
+    validate_sampling_params.all_random_sample = false;
+    validate_sampling_params.all_greedy_sample = true;
+  } else {
+    update_sampling_params(
+        validate_sampling_params, num_val_tokens, total_num_val_tokens);
+  }
+#else
   update_sampling_params(
-      validate_input.sampling_params, num_val_tokens, total_num_val_tokens);
+      validate_sampling_params, num_val_tokens, total_num_val_tokens);
+#endif
 
   for (int32_t& token_num : input_params.parallel.dp_global_token_nums) {
     token_num *= num_val_tokens;
@@ -1885,6 +2037,7 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
     token_num *= num_val_tokens;
   }
 
+  std::vector<int32_t> accepted_prefix_lengths;
   if (use_chunked_prefill_spec_verify_path()) {
     input_params.embedding.input_embedding = torch::Tensor();
     input_params.is_spec_verify = true;
@@ -1897,28 +2050,187 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
       }
       input_params.attention.host.q_cu_seq_lens = std::move(q_cu_seq_lens_vec);
     }
-    std::vector<int32_t> accepted_prefix_lengths(num_sequences, 1);
+    accepted_prefix_lengths.assign(num_sequences, 1);
     if (embedding_cache_ != nullptr &&
         !input.input_params.embedding.embedding_ids.empty()) {
       accepted_prefix_lengths = embedding_cache_->read_accepted_prefix_lengths(
           input.input_params.embedding.embedding_ids);
     }
-    input_params.num_accepted_tokens =
-        torch::tensor(accepted_prefix_lengths, token_options);
     input_params.num_accepted_tokens_host.assign(
         accepted_prefix_lengths.begin(), accepted_prefix_lengths.end());
+    if (!use_explicit_spec_verify_replay_update) {
+      input_params.num_accepted_tokens =
+          torch::tensor(accepted_prefix_lengths, token_options);
+    }
   }
 
-  input_params.attention.rebuild_device_buffer(device_);
 #if defined(USE_NPU)
-  if (use_qwen3_5_spec_verify_path()) {
-    build_expanded_spec_verify_graph_input(input_params, device_);
+  if (use_explicit_spec_verify_replay_update) {
+    build_expanded_spec_verify_graph_host_input(input_params);
+
+    auto& attention = input_params.attention;
+    CHECK(attention.host.block_tables.defined());
+    CHECK_EQ(attention.host.block_tables.dim(), 2);
+    CHECK_EQ(attention.host.block_tables.size(0), num_sequences);
+    CHECK_EQ(attention.host.block_tables.scalar_type(), torch::kInt32);
+    const int64_t active_block_table_width =
+        attention.host.block_tables.size(1);
+    const int64_t verify_block_table_width =
+        spec_verify_block_table_width(attention.host.block_tables);
+    if (active_block_table_width != verify_block_table_width) {
+      torch::Tensor padded_block_tables = torch::zeros(
+          {num_sequences, verify_block_table_width},
+          attention.host.block_tables.options().device(torch::kCPU));
+      padded_block_tables.narrow(1, 0, active_block_table_width)
+          .copy_(attention.host.block_tables);
+      attention.host.block_tables = std::move(padded_block_tables);
+    }
+
+    const bool initialize_stable_buffer =
+        !spec_verify_attention_host_buffer_.defined();
+    attention.attention_host_buffer = spec_verify_attention_host_buffer_;
+    attention.attention_device_buffer = spec_verify_attention_device_buffer_;
+    attention.attention_buffer_bytes = 0;
+    attention.attention_buffer_capacity =
+        spec_verify_attention_buffer_capacity_;
+    attention.attention_buffer_owner = spec_verify_attention_buffer_owner_;
+
+    const int64_t expanded_block_rows = static_cast<int64_t>(
+        input_params.graph.expanded_kv_seq_lens_vec.size());
+    CHECK_EQ(expanded_block_rows, total_num_val_tokens);
+    const torch::Tensor dense_block_source =
+        attention.host.block_tables.contiguous();
+    std::vector<int32_t> expanded_block_tables_dense(
+        static_cast<size_t>(expanded_block_rows * verify_block_table_width));
+    const int32_t* block_row = dense_block_source.data_ptr<int32_t>();
+    for (int64_t row = 0; row < expanded_block_rows; ++row) {
+      const int64_t sequence_index = row / num_val_tokens;
+      std::memcpy(
+          expanded_block_tables_dense.data() + row * verify_block_table_width,
+          block_row + sequence_index * verify_block_table_width,
+          static_cast<size_t>(verify_block_table_width) * sizeof(int32_t));
+    }
+    torch::Tensor expanded_block_tables_flat;
+    std::vector<AttentionInput::PackedIntInput> extra_int_inputs;
+    extra_int_inputs.push_back({&buf.out_token_ids,
+                                &validate_input.token_ids_host,
+                                &validate_input.token_ids});
+    extra_int_inputs.push_back({&buf.out_positions,
+                                &validate_input.positions_host,
+                                &validate_input.positions});
+    if (!input_params.embedding.linear_state_ids.empty()) {
+      extra_int_inputs.push_back(
+          {&input_params.embedding.linear_state_ids,
+           nullptr,
+           &input_params.embedding.linear_state_indices});
+    }
+    if (!input_params.num_accepted_tokens_host.empty()) {
+      extra_int_inputs.push_back({&accepted_prefix_lengths,
+                                  nullptr,
+                                  &input_params.num_accepted_tokens});
+    }
+    if (!input_params.graph.expanded_kv_seq_lens_vec.empty()) {
+      extra_int_inputs.push_back({&input_params.graph.expanded_kv_seq_lens_vec,
+                                  nullptr,
+                                  &input_params.graph.expanded_kv_seq_lens});
+    }
+    extra_int_inputs.push_back(
+        {&expanded_block_tables_dense, nullptr, &expanded_block_tables_flat});
+    attention.rebuild_device_buffer(
+        device_,
+        extra_int_inputs,
+        initialize_stable_buffer
+            ? AttentionInput::BufferReusePolicy::GROWABLE
+            : AttentionInput::BufferReusePolicy::FIXED_CAPACITY);
+    if (initialize_stable_buffer && num_sequences > 0) {
+      // Source views are part of the explicit replay contract. Reserve enough
+      // packed storage for any configured decode batch before the first graph
+      // captures their addresses, so a later larger batch cannot relocate the
+      // buffer and invalidate an already captured variant.
+      const uint64_t max_sequences =
+          static_cast<uint64_t>(options_.max_seqs_per_batch());
+      const uint64_t batch_scale =
+          (max_sequences + static_cast<uint64_t>(num_sequences) - 1) /
+          static_cast<uint64_t>(num_sequences);
+      const uint64_t reserve_capacity =
+          attention.attention_buffer_bytes * batch_scale;
+      if (reserve_capacity > attention.attention_buffer_capacity) {
+        attention.reserve_device_buffer_capacity(reserve_capacity, device_);
+        attention.rebuild_device_buffer(
+            device_,
+            extra_int_inputs,
+            AttentionInput::BufferReusePolicy::FIXED_CAPACITY);
+      }
+    }
+    spec_verify_attention_host_buffer_ = attention.attention_host_buffer;
+    spec_verify_attention_device_buffer_ = attention.attention_device_buffer;
+    spec_verify_attention_buffer_capacity_ =
+        attention.attention_buffer_capacity;
+    input_params.graph.expanded_block_tables = expanded_block_tables_flat.view(
+        {expanded_block_rows, verify_block_table_width});
+    input_params.graph.input_tokens_override = validate_input.token_ids;
+    input_params.graph.spec_verify_source_addresses_stable = true;
+  } else {
+    input_params.attention.rebuild_device_buffer(device_);
+    if (supports_explicit_spec_verify_replay_update()) {
+      build_expanded_spec_verify_graph_input(input_params, device_);
+    }
   }
+#else
+  input_params.attention.rebuild_device_buffer(device_);
 #endif
   validate_input.device_tensors_ready = true;
   // This metadata is independent of the in-flight final draft. Keep it on the
   // auxiliary stream and hand it to the compute stream with a device event.
+#if defined(USE_NPU)
+  input_params.graph.spec_verify_static_graph_tasks_prepared =
+      use_explicit_spec_verify_replay_update && static_graph_tasks_prepared;
+#endif
   finish_metadata_prepare(*prepare_stream_, validate_input);
+}
+
+bool MTPWorkerImpl::prepare_static_mtp_graph_tasks_before_final_draft(
+    const ForwardInput& input) {
+#if defined(USE_NPU)
+  if (!should_use_explicit_spec_verify_replay_update(input) ||
+      input.input_params.embedding.linear_state_ids.size() != 1 ||
+      embedding_cache_ == nullptr ||
+      input.input_params.embedding.embedding_ids.empty()) {
+    return false;
+  }
+  const auto& block_tables = input.input_params.attention.host.block_tables;
+  if (!block_tables.defined() || block_tables.dim() != 2 ||
+      block_tables.size(0) != 1) {
+    return false;
+  }
+  const std::vector<int32_t> accepted_prefix_lengths =
+      embedding_cache_->read_accepted_prefix_lengths(
+          input.input_params.embedding.embedding_ids);
+  if (accepted_prefix_lengths.size() != 1) {
+    return false;
+  }
+  const int64_t verify_block_table_width =
+      spec_verify_block_table_width(block_tables);
+  const auto& kv_seq_lens = input.input_params.attention.host.kv_seq_lens;
+  if (kv_seq_lens.empty()) {
+    return false;
+  }
+  const int64_t spec_verify_max_kv_seq_len =
+      static_cast<int64_t>(
+          *std::max_element(kv_seq_lens.begin(), kv_seq_lens.end())) +
+      options_.num_speculative_tokens();
+  const SpecVerifyGraphTaskSignal signal{
+      .linear_state_id = input.input_params.embedding.linear_state_ids.front(),
+      .num_accepted_tokens = accepted_prefix_lengths.front(),
+      .spec_width = options_.num_speculative_tokens() + 1,
+      .block_table_width = verify_block_table_width,
+      .max_kv_seq_len = spec_verify_max_kv_seq_len,
+  };
+  return impl_->prepare_static_mtp_graph_tasks(signal, *compute_stream_);
+#else
+  (void)input;
+  return false;
+#endif
 }
 
 void MTPWorkerImpl::prepare_draft_extend_inputs(
@@ -2097,7 +2409,7 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
                                      std::move(buf.out_kv_seq_lens),
                                      /*update_block_tables=*/true);
   }
-  if (use_qwen3_5_spec_verify_path()) {
+  if (supports_explicit_spec_verify_replay_update()) {
     input_params.attention.host.q_cu_seq_lens.clear();
     input_params.attention.host.q_cu_seq_lens.reserve(
         input_params.meta.num_sequences + 1);
@@ -2209,7 +2521,7 @@ void MTPWorkerImpl::prepare_draft_inputs(const ForwardInput& input,
       std::move(input_params.attention.host.q_cu_seq_lens),
       buf.meta.kv_max_seq_len,
       std::move(buf.out_kv_seq_lens));
-  if (use_qwen3_5_spec_verify_path()) {
+  if (supports_explicit_spec_verify_replay_update()) {
     input_params.attention.host.q_cu_seq_lens.clear();
     input_params.attention.host.q_cu_seq_lens.reserve(
         input_params.meta.num_sequences + 1);
