@@ -34,9 +34,11 @@ limitations under the License.
 #include <torch_npu/csrc/framework/utils/OpPreparation.h>
 #endif
 #include "core/common/metrics.h"
+#include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/kernels/ops_api.h"
 #include "core/platform/device.h"
 #include "core/platform/npu/acl_graph_task_update_context.h"
+#include "core/runtime/mtp_async_state.h"
 #include "core/util/utils.h"
 #include "platform/npu/device_capture_lock.h"
 
@@ -45,6 +47,119 @@ namespace xllm::npu {
 namespace {
 constexpr uint64_t kSpecVerifyGraphKeyMask = 1ull << 63;
 constexpr uint64_t kSpecVerifyQMaxSeqLenShift = 32;
+constexpr uint64_t kSpecVerifyBucketMask = (1ull << 16) - 1;
+constexpr uint64_t kSpecVerifyFieldMask = (1ull << 16) - 1;
+constexpr uint64_t kSpecVerifyExpandedBlockMask = (1ull << 15) - 1;
+constexpr uint64_t kStaticGraphTaskHashSeed = 0x6a09e667f3bcc909ull;
+constexpr size_t kMaxStaticMtpGraphVariantsPerSlot = 16;
+
+bool uses_static_mtp_graph_task_variant(const ModelInputParams& params,
+                                        uint32_t bucket_num_tokens,
+                                        int64_t block_size) {
+  const int64_t batch_size = params.meta.num_sequences;
+  const int64_t spec_width = params.meta.q_max_seq_len;
+  return params.is_spec_verify &&
+         params.meta.batch_forward_type.is_chunked_prefill() &&
+         params.graph.use_expanded_decode_for_spec_verify_attention &&
+         params.graph.spec_verify_source_addresses_stable &&
+         kernel::npu::tilelang::has_spec_verify_graph_update_specialization(
+             spec_width, block_size) &&
+         batch_size == 1 && spec_width > 0 &&
+         bucket_num_tokens == batch_size * spec_width &&
+         params.parallel.query_start_loc.size() ==
+             static_cast<size_t>(batch_size + 1) &&
+         params.embedding.linear_state_ids.size() ==
+             static_cast<size_t>(batch_size) &&
+         params.num_accepted_tokens_host.size() ==
+             static_cast<size_t>(batch_size);
+}
+
+uint64_t mix_graph_key(uint64_t hash, uint64_t value) {
+  value += 0x9e3779b97f4a7c15ull;
+  value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ull;
+  value = (value ^ (value >> 27)) * 0x94d049bb133111ebull;
+  value ^= value >> 31;
+  return hash ^ (value + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2));
+}
+
+constexpr uint64_t paged_attention_plan_bucket_unchecked(int64_t max_kv,
+                                                         int64_t block_size) {
+  const uint64_t block =
+      static_cast<uint64_t>((max_kv + block_size - 1) / block_size);
+  // Keep the exact block endpoint separate. This preserves a conservative
+  // boundary for vendor plans that may switch strategy on aligned lengths,
+  // while reducing cold classifications from every token to at most two per
+  // block.
+  const uint64_t is_block_endpoint = max_kv % block_size == 0 ? 1 : 0;
+  return (block << 1) | is_block_endpoint;
+}
+
+static_assert(paged_attention_plan_bucket_unchecked(127, 128) == 2);
+static_assert(paged_attention_plan_bucket_unchecked(128, 128) == 3);
+static_assert(paged_attention_plan_bucket_unchecked(129, 128) == 4);
+static_assert(paged_attention_plan_bucket_unchecked(255, 128) == 4);
+static_assert(paged_attention_plan_bucket_unchecked(256, 128) == 5);
+static_assert(paged_attention_plan_bucket_unchecked(257, 128) == 6);
+
+uint64_t paged_attention_plan_bucket(int64_t max_kv, int64_t block_size) {
+  CHECK_GT(max_kv, 0);
+  CHECK_GT(block_size, 0);
+  return paged_attention_plan_bucket_unchecked(max_kv, block_size);
+}
+
+uint64_t spec_verify_packed_graph_key(uint32_t bucket_num_tokens,
+                                      uint64_t q_max_seq_len,
+                                      uint64_t block_table_width,
+                                      uint64_t expanded_block_table_width) {
+  CHECK_LE(bucket_num_tokens, kSpecVerifyBucketMask);
+  CHECK_LE(q_max_seq_len, kSpecVerifyFieldMask);
+  CHECK_LE(block_table_width, kSpecVerifyFieldMask);
+  CHECK_LE(expanded_block_table_width, kSpecVerifyExpandedBlockMask);
+  return kSpecVerifyGraphKeyMask | (expanded_block_table_width << 48) |
+         (block_table_width << 32) | (q_max_seq_len << 16) |
+         static_cast<uint64_t>(bucket_num_tokens);
+}
+
+uint64_t spec_verify_attention_plan_lookup_key(
+    uint64_t packed_graph_key,
+    const std::vector<int32_t>& expanded_kv_seq_lens,
+    int64_t block_size) {
+  CHECK(!expanded_kv_seq_lens.empty());
+  const int64_t max_kv = *std::max_element(expanded_kv_seq_lens.begin(),
+                                           expanded_kv_seq_lens.end());
+  return mix_graph_key(packed_graph_key,
+                       paged_attention_plan_bucket(max_kv, block_size));
+}
+
+uint64_t spec_verify_attention_plan_lookup_key(uint32_t bucket_num_tokens,
+                                               const ModelInputParams& params,
+                                               int64_t block_size) {
+  CHECK(params.attention.device.block_tables.defined());
+  CHECK(params.graph.expanded_block_tables.defined());
+  const uint64_t packed_key = spec_verify_packed_graph_key(
+      bucket_num_tokens,
+      static_cast<uint64_t>(std::max<int32_t>(params.meta.q_max_seq_len, 1)),
+      static_cast<uint64_t>(params.attention.device.block_tables.size(1)),
+      static_cast<uint64_t>(params.graph.expanded_block_tables.size(1)));
+  return spec_verify_attention_plan_lookup_key(
+      packed_key, params.graph.expanded_kv_seq_lens_vec, block_size);
+}
+
+uint64_t static_mtp_graph_task_key(uint64_t base_key,
+                                   const StaticGraphTaskSignature& signature) {
+  uint64_t hash = mix_graph_key(kStaticGraphTaskHashSeed, base_key);
+  hash = mix_graph_key(hash, static_cast<uint64_t>(signature.linear_state_id));
+  hash =
+      mix_graph_key(hash, static_cast<uint64_t>(signature.num_accepted_tokens));
+  hash = mix_graph_key(hash,
+                       static_cast<uint64_t>(signature.query_start_loc_begin));
+  hash =
+      mix_graph_key(hash, static_cast<uint64_t>(signature.query_start_loc_end));
+  // Retain the spec-verify namespace bit. A signature comparison on replay
+  // guards correctness even in the astronomically unlikely event of a hash
+  // collision.
+  return hash | kSpecVerifyGraphKeyMask;
+}
 
 std::pair<torch::Tensor, torch::Tensor> find_attention_plan_kv_cache(
     const std::vector<KVCache>& kv_caches) {
@@ -57,6 +172,52 @@ std::pair<torch::Tensor, torch::Tensor> find_attention_plan_kv_cache(
     }
   }
   return {torch::Tensor(), torch::Tensor()};
+}
+
+std::optional<std::array<const void*, 11>> spec_verify_input_addresses(
+    const torch::Tensor& tokens,
+    const torch::Tensor& positions,
+    const ModelInputParams& params) {
+  const torch::Tensor& graph_tokens =
+      params.graph.input_tokens_override.defined()
+          ? params.graph.input_tokens_override
+          : tokens;
+  // Graph key + eligibility fix shapes; packed fixed-capacity fixes strides.
+  const std::array<const torch::Tensor*, 11> sources = {
+      &graph_tokens,
+      &positions,
+      &params.attention.device.q_seq_lens,
+      &params.attention.device.kv_seq_lens,
+      &params.attention.device.new_cache_slots,
+      &params.attention.device.block_tables,
+      &params.embedding.linear_state_indices,
+      &params.num_accepted_tokens,
+      &params.attention.device.q_cu_seq_lens,
+      &params.graph.expanded_kv_seq_lens,
+      &params.graph.expanded_block_tables};
+  std::array<const void*, 11> addresses;
+  for (size_t i = 0; i < sources.size(); ++i) {
+    if (!sources[i]->defined()) {
+      return std::nullopt;
+    }
+    addresses[i] = sources[i]->data_ptr();
+  }
+  return addresses;
+}
+
+ModelOutput forward_eager(CausalLM* model,
+                          const torch::Tensor& tokens,
+                          const torch::Tensor& positions,
+                          std::vector<KVCache>& kv_cache,
+                          const ModelInputParams& params) {
+  const torch::Tensor& verify_tokens =
+      params.graph.input_tokens_override.defined()
+          ? params.graph.input_tokens_override
+          : tokens;
+  torch::Tensor materialized_tokens =
+      mtp_async::materialize_speculative_verify_tokens(
+          verify_tokens, params.graph.spec_verify_draft_token_sources);
+  return model->forward(materialized_tokens, positions, kv_cache, params);
 }
 
 }  // namespace
@@ -93,18 +254,74 @@ bool AclGraph::capture(CausalLM* model,
       static_cast<uint32_t>(tokens.size(/*dim=*/0));
   CHECK_GE(num_tokens_, actual_num_tokens)
       << "num_tokens_ >= actual_num_tokens";
+  const bool update_spec_verify_tokens =
+      params.graph.spec_verify_source_addresses_stable &&
+      params.graph.input_tokens_override.defined() && params.is_spec_verify &&
+      params.meta.batch_forward_type.is_chunked_prefill();
   auto graph_params = persistent_param_.update(tokens,
                                                k_cache,
                                                v_cache,
                                                positions,
                                                params,
                                                num_tokens_,
-                                               /*return_capture_params=*/true);
+                                               /*return_capture_params=*/true,
+                                               /*skip_token_update=*/
+                                               update_spec_verify_tokens);
+  if (update_spec_verify_tokens) {
+    persistent_param_.update_spec_verify_inputs(
+        tokens,
+        positions,
+        params,
+        num_tokens_,
+        SpecVerifyInputUpdateScope::TOKENS_ONLY);
+  }
 
   // Use the returned ModelInputParams for graph capture
   CHECK(graph_params.has_value())
       << "update() should return ModelInputParams when "
          "return_capture_params=true";
+  const auto spec_verify_attention_plan =
+      persistent_param_.paged_attention_plan_descriptor(
+          actual_num_tokens, params.meta.q_max_seq_len);
+  int64_t spec_verify_kv_split_core_count = 0;
+  if (spec_verify_attention_plan.has_value()) {
+    spec_verify_kv_split_core_count = static_cast<int64_t>(
+        spec_verify_attention_plan->normalized_tiling.at(static_cast<size_t>(
+            spec_verify_attention_plan->layout.kv_split_core_count_offset)));
+  }
+  const bool can_use_explicit_spec_verify_replay_update =
+      model->is_hybrid_linear_attention() &&
+      kernel::npu::tilelang::has_spec_verify_graph_update_specialization(
+          params.meta.q_max_seq_len, options.block_size()) &&
+      params.graph.spec_verify_source_addresses_stable &&
+      params.is_spec_verify &&
+      params.meta.batch_forward_type.is_chunked_prefill() &&
+      spec_verify_attention_plan.has_value() &&
+      spec_verify_kv_split_core_count > 0 &&
+      actual_num_tokens == bucket_num_tokens && params.meta.num_sequences > 0 &&
+      params.meta.q_max_seq_len > 0 &&
+      actual_num_tokens == static_cast<uint32_t>(params.meta.num_sequences) *
+                               params.meta.q_max_seq_len;
+  if (can_use_explicit_spec_verify_replay_update) {
+    spec_verify_block_size_ = options.block_size();
+    spec_verify_kv_split_core_count_ = spec_verify_kv_split_core_count;
+    spec_verify_paged_attention_tiling_layout_ =
+        spec_verify_attention_plan->layout;
+    const int64_t paged_attention_tiling_words = static_cast<int64_t>(
+        spec_verify_attention_plan->normalized_tiling.size());
+    CHECK_GT(paged_attention_tiling_words, 0);
+    CHECK_LE(paged_attention_tiling_words,
+             persistent_param_.tiling_data().numel());
+    graph_paged_attention_tiling_data_ =
+        persistent_param_.tiling_data().clone();
+    // The paged-attention launch and the TileLang dynamic update must target
+    // storage owned by this graph. A slot's persistent tiling tensor is shared
+    // by every graph variant and can be overwritten while another variant is
+    // still replaying.
+    graph_params->graph.tiling_data = graph_paged_attention_tiling_data_;
+    graph_params->graph.expanded_tiling_data =
+        graph_paged_attention_tiling_data_;
+  }
   prepare_model_graph_metadata(
       model,
       persistent_param_.persistent_positions(num_tokens_),
@@ -115,7 +332,8 @@ bool AclGraph::capture(CausalLM* model,
     graph_task_context_->begin_capture();
     graph_params->graph.acl_graph_task_update_context = graph_task_context_;
   }
-
+  const bool capture_static_graph_tasks = uses_static_mtp_graph_task_variant(
+      graph_params.value(), num_tokens_, options.block_size());
   // Synchronize stream to ensure all data is copied to graph persistent buffers
   aclrtSynchronizeStream(stream);
 
@@ -148,6 +366,11 @@ bool AclGraph::capture(CausalLM* model,
     // other threads to execute synchronous operations
     graph_.capture_begin(
         {0, 0}, aclmdlRICaptureMode::ACL_MODEL_RI_CAPTURE_MODE_THREAD_LOCAL);
+    if (graph_paged_attention_tiling_data_.defined()) {
+      spec_verify_input_addresses_at_capture_ =
+          spec_verify_input_addresses(tokens, positions, params);
+      update_spec_verify_attention_tiling(graph_params.value());
+    }
     // Execute forward pass - NPUGraph mempool manages temporary tensors
     auto forward_result =
         model->forward({persistent_param_.persistent_tokens(num_tokens_)},
@@ -176,14 +399,17 @@ bool AclGraph::capture(CausalLM* model,
   aclrtSynchronizeStream(stream);
   graph_.replay();
   update_graph_tasks(graph_params.value());
+  if (capture_static_graph_tasks) {
+    capture_static_graph_task_signature(graph_params.value());
+  }
   make_current_stream_wait_for_graph(stream);
   return true;
 }
 
-void AclGraph::update_graph_tasks(const ModelInputParams& params) {
+bool AclGraph::update_graph_tasks(const ModelInputParams& params) {
   if (graph_task_context_ == nullptr ||
       graph_task_context_->causal_conv1d_tasks.empty()) {
-    return;
+    return false;
   }
 
   const std::vector<int64_t> empty_host_args;
@@ -235,6 +461,34 @@ void AclGraph::update_graph_tasks(const ModelInputParams& params) {
       task.event->record(update_stream);
     }
   }
+  return true;
+}
+
+void AclGraph::signal_static_graph_tasks(
+    const c10_npu::NPUStream& signal_stream) {
+  CHECK(graph_task_context_ != nullptr);
+  for (auto& task : graph_task_context_->causal_conv1d_tasks) {
+    CHECK(task.event != nullptr)
+        << "static graph-task replay requires a captured ready event";
+    task.event->record(signal_stream);
+  }
+}
+
+bool AclGraph::static_graph_task_signature_matches(
+    const ModelInputParams& params) const {
+  const auto current_signature = make_static_graph_task_signature(params);
+  return current_signature.has_value() &&
+         static_graph_task_signature_ == current_signature;
+}
+
+void AclGraph::capture_static_graph_task_signature(
+    const ModelInputParams& params) {
+  static_graph_task_signature_ = make_static_graph_task_signature(params);
+  CHECK(static_graph_task_signature_.has_value());
+  LOG(INFO) << "Captured static MTP graph-task signature: linear_state_id="
+            << static_graph_task_signature_->linear_state_id
+            << ", accepted_tokens="
+            << static_graph_task_signature_->num_accepted_tokens;
 }
 
 AclGraph::~AclGraph() {
@@ -247,6 +501,10 @@ AclGraph::~AclGraph() {
     aclrtDestroyEvent(replay_done_event_);
     replay_done_event_ = nullptr;
   }
+  if (replay_input_ready_event_ != nullptr) {
+    aclrtDestroyEvent(replay_input_ready_event_);
+    replay_input_ready_event_ = nullptr;
+  }
 }
 
 void AclGraph::initialize_capture_stream(c10::DeviceIndex device_index) {
@@ -257,12 +515,30 @@ void AclGraph::initialize_capture_stream(c10::DeviceIndex device_index) {
   capture_stream_ = c10_npu::getStreamFromPool(true, device_index);
   update_stream_ = c10_npu::getStreamFromPool(true, device_index);
   device_index_ = device_index;
+  CHECK_EQ(aclrtCreateEventWithFlag(&replay_input_ready_event_, ACL_EVENT_SYNC),
+           ACL_SUCCESS)
+      << "Failed to create ACL graph replay input-ready event";
   CHECK_EQ(aclrtCreateEventWithFlag(&replay_done_event_, ACL_EVENT_SYNC),
            ACL_SUCCESS)
       << "Failed to create ACL graph replay completion event";
   LOG(INFO) << "Initialized capture_stream"
             << ", id: " << capture_stream_.value().id()
             << ", device_index: " << device_index;
+}
+
+void AclGraph::make_graph_wait_for_current_stream(aclrtStream current_stream) {
+  CHECK_NE(graph_stream_, nullptr) << "graph_stream is not initialized";
+  CHECK_NE(replay_input_ready_event_, nullptr)
+      << "replay_input_ready_event is not initialized";
+  if (current_stream == graph_stream_) {
+    return;
+  }
+  CHECK_EQ(aclrtRecordEvent(replay_input_ready_event_, current_stream),
+           ACL_SUCCESS)
+      << "aclrtRecordEvent(replay_input_ready_event) failed";
+  CHECK_EQ(aclrtStreamWaitEvent(graph_stream_, replay_input_ready_event_),
+           ACL_SUCCESS)
+      << "aclrtStreamWaitEvent(graph_stream, replay_input_ready_event) failed";
 }
 
 void AclGraph::make_current_stream_wait_for_graph(aclrtStream current_stream) {
@@ -296,6 +572,20 @@ void AclGraph::prepare_model_graph_metadata(CausalLM* model,
       << "model graph metadata preparation did not populate attn_metadata";
 }
 
+void AclGraph::update_spec_verify_attention_tiling(
+    const ModelInputParams& params) {
+  CHECK(graph_paged_attention_tiling_data_.defined());
+  CHECK(spec_verify_paged_attention_tiling_layout_.has_value());
+  kernel::npu::tilelang::spec_verify_attention_tiling_update(
+      params.graph.expanded_kv_seq_lens,
+      graph_paged_attention_tiling_data_,
+      spec_verify_paged_attention_tiling_layout_.value(),
+      params.meta.q_max_seq_len,
+      spec_verify_block_size_,
+      params.meta.kv_max_seq_len,
+      spec_verify_kv_split_core_count_);
+}
+
 ModelOutput AclGraph::replay(CausalLM* model,
                              const torch::Tensor& tokens,
                              const torch::Tensor& positions,
@@ -320,7 +610,33 @@ ModelOutput AclGraph::replay(CausalLM* model,
       replay_inputs_prepared && params.graph.input_tokens_override.defined() &&
       !needs_graph_metadata;
   std::optional<ModelInputParams> graph_params;
-  if (can_use_prepared_inputs) {
+  if (graph_paged_attention_tiling_data_.defined()) {
+    const auto current_addresses =
+        spec_verify_input_addresses(tokens, positions, params);
+    if (!spec_verify_input_addresses_at_capture_.has_value() ||
+        current_addresses != spec_verify_input_addresses_at_capture_) {
+      LOG_FIRST_N(ERROR, 1)
+          << "Falling back to eager speculative verification because graph "
+             "input source storage moved after capture.";
+      COUNTER_INC(num_model_execution_total_eager);
+      return forward_eager(model, tokens, positions, kv_cache, params);
+    }
+    // Raw TileLang launches are not replayed as part of the captured ACL
+    // graph on this runtime. Refresh the persistent metadata and the
+    // graph-owned paged-attention tiling explicitly on the producer stream,
+    // then let make_graph_wait_for_current_stream() carry the dependency.
+    persistent_param_.update_spec_verify_inputs(
+        tokens,
+        positions,
+        params,
+        num_tokens_,
+        SpecVerifyInputUpdateScope::ALL_INPUTS);
+    update_spec_verify_attention_tiling(params);
+    // Explicit producer-stream updates have populated the persistent graph
+    // inputs. Host-only task parameters remain current and are consumed by
+    // update_graph_tasks() below.
+    graph_params = params;
+  } else if (can_use_prepared_inputs) {
     persistent_param_.update_tokens(
         tokens, params, actual_num_tokens, num_tokens_);
   } else {
@@ -346,11 +662,35 @@ ModelOutput AclGraph::replay(CausalLM* model,
   // Get current NPU stream from libtorch NPU API
   aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
+  if (graph_paged_attention_tiling_data_.defined()) {
+    // The producer stream has refreshed inputs that include the final draft
+    // token. Make graph replay wait for those updates on device; a host
+    // synchronize here would recreate the bubble we remove.
+    make_graph_wait_for_current_stream(stream);
+  }
+  const bool use_static_graph_tasks =
+      graph_params.has_value() &&
+      static_graph_task_signature_matches(graph_params.value());
+  const bool static_graph_tasks_prepared =
+      params.graph.spec_verify_static_graph_tasks_prepared;
+  CHECK(!static_graph_tasks_prepared || use_static_graph_tasks)
+      << "prepared static graph tasks do not match the replay signature";
+  if (use_static_graph_tasks && !static_graph_tasks_prepared) {
+    // Cold/fallback path: the final-draft pre-submit could not find this graph
+    // variant. Ring its ready event immediately before replay; steady MTP3/4
+    // cycles use the compute-stream pre-submit path instead.
+    CHECK(update_stream_.has_value());
+    signal_static_graph_tasks(update_stream_.value());
+  }
   graph_.replay();
   if (model->is_hybrid_linear_attention()) {
     CHECK(graph_params.has_value())
         << "update() should return ModelInputParams for graph task update";
-    update_graph_tasks(graph_params.value());
+    if (use_static_graph_tasks) {
+      // This graph variant's task-ready event was recorded before replay.
+    } else {
+      update_graph_tasks(graph_params.value());
+    }
   }
   make_current_stream_wait_for_graph(stream);
 
@@ -364,6 +704,9 @@ void AclGraph::prepare_replay_inputs(const torch::Tensor& tokens,
                                      const torch::Tensor& positions,
                                      std::vector<KVCache>& kv_cache,
                                      const ModelInputParams& params) {
+  if (graph_paged_attention_tiling_data_.defined()) {
+    return;
+  }
   const uint32_t actual_num_tokens =
       static_cast<uint32_t>(tokens.size(/*dim=*/0));
   CHECK_LE(actual_num_tokens, num_tokens_)
@@ -379,6 +722,17 @@ void AclGraph::prepare_replay_inputs(const torch::Tensor& tokens,
                            /*return_capture_params=*/false,
                            /*skip_token_update=*/true);
   replay_inputs_prepared_.store(true, std::memory_order_release);
+}
+
+bool AclGraph::prepare_static_mtp_graph_tasks(
+    const SpecVerifyGraphTaskSignal& signal,
+    const c10_npu::NPUStream& signal_stream) {
+  if (static_graph_task_signature_ !=
+      make_static_graph_task_signature(signal)) {
+    return false;
+  }
+  signal_static_graph_tasks(signal_stream);
+  return true;
 }
 
 AclGraphExecutorImpl::AclGraphExecutorImpl(CausalLM* model,
@@ -432,7 +786,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
     VLOG(kGraphExecutorLogVerboseLevel)
         << "AclGraphExecutorImpl::run() in eager mode";
     COUNTER_INC(num_model_execution_total_eager);
-    return model_->forward(tokens, positions, kv_caches, params);
+    return forward_eager(model_, tokens, positions, kv_caches, params);
   }
   if (in_spec_verify_phase && !model_->is_hybrid_linear_attention()) {
     LOG_FIRST_N(WARNING, 1)
@@ -440,7 +794,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
            "chunked-prefill validate graph path is currently only adapted for "
            "hybrid linear attention models.";
     COUNTER_INC(num_model_execution_total_eager);
-    return model_->forward(tokens, positions, kv_caches, params);
+    return forward_eager(model_, tokens, positions, kv_caches, params);
   }
 
   if (in_decoding_phase &&
@@ -457,7 +811,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
           << params_single.parallel.dp_global_token_nums
           << ", dp_is_decode=" << params_single.parallel.dp_is_decode;
       COUNTER_INC(num_model_execution_total_eager);
-      return model_->forward(tokens, positions, kv_caches, params);
+      return forward_eager(model_, tokens, positions, kv_caches, params);
     }
 
     if (std::find(params_single.parallel.dp_is_decode.begin(),
@@ -471,7 +825,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
           << params_single.parallel.dp_global_token_nums
           << ", dp_is_decode=" << params_single.parallel.dp_is_decode;
       COUNTER_INC(num_model_execution_total_eager);
-      return model_->forward(tokens, positions, kv_caches, params);
+      return forward_eager(model_, tokens, positions, kv_caches, params);
     }
   }
 
@@ -505,7 +859,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
         << "This message is logged only once. "
         << "Monitor counter 'num_model_execution_total_eager' for frequency.";
     COUNTER_INC(num_model_execution_total_eager);
-    return model_->forward(tokens, positions, kv_caches, params);
+    return forward_eager(model_, tokens, positions, kv_caches, params);
   }
 
   const uint32_t bucket_num_tokens = get_bucket_num_tokens(graph_num_tokens);
@@ -527,14 +881,10 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
         << max_seq_len << "). This message is logged only once. "
         << "Monitor counter 'num_model_execution_total_eager' for frequency.";
     COUNTER_INC(num_model_execution_total_eager);
-    return model_->forward(tokens, positions, kv_caches, params);
+    return forward_eager(model_, tokens, positions, kv_caches, params);
   }
 
-  const uint64_t graph_key = get_graph_key(bucket_num_tokens, params_single);
-
-  // Check if captured graph exists for this bucket num_tokens
   int32_t slot_idx = 0;
-  AclGraph* replay_graph = nullptr;
   {
     std::lock_guard<std::mutex> lock(graph_slots_mutex_);
     slot_idx = next_replay_slot_;
@@ -542,13 +892,71 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
     last_started_replay_slot_ = slot_idx;
     auto& slot = graph_slots_[slot_idx];
     slot.is_prepared = false;
-    auto it = slot.graphs.find(graph_key);
-    if (it != slot.graphs.end()) {
-      replay_graph = it->second.get();
-    }
   }
   auto& active_slot = graph_slots_[slot_idx];
   auto& active_persistent_param = *active_slot.persistent_param;
+
+  uint64_t attention_plan_class = 0;
+  const bool needs_attention_plan_class =
+      params_single.is_spec_verify &&
+      params_single.meta.batch_forward_type.is_chunked_prefill() &&
+      params_single.graph.spec_verify_source_addresses_stable;
+  if (needs_attention_plan_class) {
+    const uint64_t lookup_key = spec_verify_attention_plan_lookup_key(
+        bucket_num_tokens, params_single, options_.block_size());
+    if (auto plan_class = find_spec_verify_attention_plan_class(lookup_key)) {
+      attention_plan_class = plan_class.value();
+    }
+    if (attention_plan_class == 0) {
+      // Cold path for a previously unseen KV block bucket. Run ATB Setup to
+      // classify its immutable tiling plan, then reuse any graph already
+      // captured for that plan class.
+      auto [k_cache, v_cache] = find_attention_plan_kv_cache(kv_caches);
+      auto descriptor =
+          active_persistent_param.classify_spec_verify_paged_attention_plan(
+              tokens_tensor, k_cache, v_cache, params_single);
+      if (!descriptor.has_value()) {
+        LOG_FIRST_N(ERROR, 1)
+            << "Falling back to eager speculative verification because the "
+               "paged-attention tiling layout cannot be classified safely.";
+        COUNTER_INC(num_model_execution_total_eager);
+        return forward_eager(
+            model_, tokens, positions, kv_caches, params_single);
+      }
+      std::lock_guard<std::mutex> lock(graph_slots_mutex_);
+      auto descriptor_it =
+          std::find(spec_verify_attention_plan_descriptors_.begin(),
+                    spec_verify_attention_plan_descriptors_.end(),
+                    descriptor.value());
+      if (descriptor_it == spec_verify_attention_plan_descriptors_.end()) {
+        spec_verify_attention_plan_descriptors_.push_back(
+            std::move(descriptor.value()));
+        attention_plan_class = spec_verify_attention_plan_descriptors_.size();
+      } else {
+        attention_plan_class =
+            static_cast<uint64_t>(
+                std::distance(spec_verify_attention_plan_descriptors_.begin(),
+                              descriptor_it)) +
+            1;
+      }
+      auto [it, inserted] = spec_verify_attention_plan_classes_.emplace(
+          lookup_key, attention_plan_class);
+      CHECK(inserted || it->second == attention_plan_class)
+          << "paged-attention plan class changed for one KV block bucket";
+      attention_plan_class = it->second;
+    }
+  }
+
+  const uint64_t graph_key =
+      get_graph_key(bucket_num_tokens, params_single, attention_plan_class);
+  std::shared_ptr<AclGraph> replay_graph;
+  {
+    std::lock_guard<std::mutex> lock(graph_slots_mutex_);
+    auto it = active_slot.graphs.find(graph_key);
+    if (it != active_slot.graphs.end()) {
+      replay_graph = it->second;
+    }
+  }
 
   if (replay_graph != nullptr) {
     // Replay the existing graph
@@ -570,7 +978,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
 
   // Graph doesn't exist for this bucket num_tokens, try to create it lazily
   auto graph =
-      std::make_unique<AclGraph>(active_persistent_param, device_.index());
+      std::make_shared<AclGraph>(active_persistent_param, device_.index());
   VLOG(kGraphExecutorLogVerboseLevel)
       << "AclGraphExecutorImpl::run() in capture mode";
   bool capture_success = false;
@@ -587,7 +995,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
                << bucket_num_tokens << ": " << e.what()
                << ". Falling back to eager mode.";
     COUNTER_INC(num_model_execution_total_eager);
-    return model_->forward(tokens, positions, kv_caches, params);
+    return forward_eager(model_, tokens, positions, kv_caches, params);
   }
 
   if (capture_success) {
@@ -595,13 +1003,28 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
               << bucket_num_tokens << " (actual num_tokens: " << n_tokens
               << ") done";
 
-    // Save the graph for future reuse
-    active_slot.graphs[graph_key] = std::move(graph);
+    const bool static_mtp_variant = uses_static_mtp_graph_task_variant(
+        params_single, bucket_num_tokens, options_.block_size());
+    {
+      std::lock_guard<std::mutex> lock(graph_slots_mutex_);
+      if (static_mtp_variant) {
+        while (active_slot.static_mtp_graph_keys.size() >=
+               kMaxStaticMtpGraphVariantsPerSlot) {
+          const uint64_t evicted_key =
+              active_slot.static_mtp_graph_keys.front();
+          active_slot.static_mtp_graph_keys.pop_front();
+          active_slot.graphs.erase(evicted_key);
+        }
+        active_slot.static_mtp_graph_keys.push_back(graph_key);
+      }
+      // shared_ptr keeps a replay/prepare that already left the map alive if a
+      // later capture evicts this static variant.
+      active_slot.graphs[graph_key] = graph;
+    }
 
     // Return the output from capture (no need to replay since capture
     // already executed)
-    torch::Tensor hidden_states =
-        active_slot.graphs[graph_key]->get_hidden_states(n_tokens);
+    torch::Tensor hidden_states = graph->get_hidden_states(n_tokens);
     if (options_.enable_graph_aux_hidden_states()) {
       torch::Tensor aux_hidden_states =
           active_persistent_param.aux_hidden_states(n_tokens);
@@ -616,7 +1039,7 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   LOG(ERROR) << "Failed to capture ACL graph for bucket num_tokens: "
              << bucket_num_tokens;
   COUNTER_INC(num_model_execution_total_eager);
-  return model_->forward(tokens, positions, kv_caches, params);
+  return forward_eager(model_, tokens, positions, kv_caches, params);
 }
 
 void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
@@ -662,9 +1085,22 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
     return;
   }
   const uint32_t bucket_num_tokens = get_bucket_num_tokens(graph_num_tokens);
-  const uint64_t graph_key = get_graph_key(bucket_num_tokens, params);
+  uint64_t attention_plan_class = 0;
+  if (params.is_spec_verify &&
+      params.meta.batch_forward_type.is_chunked_prefill() &&
+      params.graph.spec_verify_source_addresses_stable) {
+    const uint64_t lookup_key = spec_verify_attention_plan_lookup_key(
+        bucket_num_tokens, params, options_.block_size());
+    auto plan_class = find_spec_verify_attention_plan_class(lookup_key);
+    if (!plan_class.has_value()) {
+      return;
+    }
+    attention_plan_class = plan_class.value();
+  }
+  const uint64_t graph_key =
+      get_graph_key(bucket_num_tokens, params, attention_plan_class);
 
-  AclGraph* graph = nullptr;
+  std::shared_ptr<AclGraph> graph;
   {
     std::lock_guard<std::mutex> lock(graph_slots_mutex_);
     if (last_started_replay_slot_ < 0) {
@@ -680,10 +1116,52 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
     if (it == slot.graphs.end()) {
       return;
     }
-    graph = it->second.get();
+    graph = it->second;
     slot.is_prepared = true;
   }
   graph->prepare_replay_inputs(tokens, positions, kv_caches, params);
+}
+
+bool AclGraphExecutorImpl::prepare_static_mtp_graph_tasks(
+    const SpecVerifyGraphTaskSignal& signal,
+    const Stream& signal_stream) {
+  if (!model_->is_hybrid_linear_attention() || graph_slot_count_ != 1 ||
+      !kernel::npu::tilelang::has_spec_verify_graph_update_specialization(
+          signal.spec_width, options_.block_size()) ||
+      signal.block_table_width < 1 ||
+      signal.block_table_width > kSpecVerifyExpandedBlockMask ||
+      signal.max_kv_seq_len < 1) {
+    return false;
+  }
+  const uint64_t bucket_num_tokens = static_cast<uint64_t>(signal.spec_width);
+  const uint64_t q_max_seq_len = static_cast<uint64_t>(signal.spec_width);
+  const uint64_t width = static_cast<uint64_t>(signal.block_table_width);
+  const uint64_t packed_key = spec_verify_packed_graph_key(
+      static_cast<uint32_t>(bucket_num_tokens), q_max_seq_len, width, width);
+  const uint64_t lookup_key =
+      mix_graph_key(packed_key,
+                    paged_attention_plan_bucket(signal.max_kv_seq_len,
+                                                options_.block_size()));
+  auto attention_plan_class = find_spec_verify_attention_plan_class(lookup_key);
+  if (!attention_plan_class.has_value()) {
+    return false;
+  }
+  const uint64_t base_key =
+      mix_graph_key(packed_key, attention_plan_class.value());
+  const uint64_t graph_key = static_mtp_graph_task_key(
+      base_key, make_static_graph_task_signature(signal));
+  std::shared_ptr<AclGraph> graph;
+  {
+    std::lock_guard<std::mutex> lock(graph_slots_mutex_);
+    auto& graphs = graph_slots_[0].graphs;
+    auto it = graphs.find(graph_key);
+    if (it == graphs.end()) {
+      return false;
+    }
+    graph = it->second;
+  }
+  return graph->prepare_static_mtp_graph_tasks(signal,
+                                               *signal_stream.get_stream());
 }
 
 void AclGraph::print_graph_tensors() const {
@@ -727,13 +1205,52 @@ uint32_t AclGraphExecutorImpl::get_bucket_num_tokens(
   }
 }
 
+std::optional<uint64_t>
+AclGraphExecutorImpl::find_spec_verify_attention_plan_class(
+    uint64_t lookup_key) {
+  std::lock_guard<std::mutex> lock(graph_slots_mutex_);
+  auto it = spec_verify_attention_plan_classes_.find(lookup_key);
+  if (it == spec_verify_attention_plan_classes_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
 uint64_t AclGraphExecutorImpl::get_graph_key(
     uint32_t bucket_num_tokens,
-    const ModelInputParams& params) const {
+    const ModelInputParams& params,
+    uint64_t attention_plan_class) const {
   if (params.is_spec_verify &&
       params.meta.batch_forward_type.is_chunked_prefill()) {
     const uint64_t q_max_seq_len =
         static_cast<uint64_t>(std::max<int32_t>(params.meta.q_max_seq_len, 1));
+    if (params.graph.spec_verify_source_addresses_stable) {
+      CHECK(params.attention.device.block_tables.defined());
+      CHECK(params.graph.expanded_block_tables.defined());
+      const uint64_t block_table_width =
+          static_cast<uint64_t>(params.attention.device.block_tables.size(1));
+      const uint64_t expanded_block_table_width =
+          static_cast<uint64_t>(params.graph.expanded_block_tables.size(1));
+      // Persistent graph inputs encode tensor view shapes. Specialize the MTP
+      // target graph by both block-table widths so a synthetic warmup graph
+      // cannot be replayed with a real request's wider table view.
+      const uint64_t packed_key =
+          spec_verify_packed_graph_key(bucket_num_tokens,
+                                       q_max_seq_len,
+                                       block_table_width,
+                                       expanded_block_table_width);
+      CHECK_NE(attention_plan_class, 0)
+          << "stable speculative-verify graph requires an attention plan "
+             "class";
+      const uint64_t base_key = mix_graph_key(packed_key, attention_plan_class);
+      if (uses_static_mtp_graph_task_variant(
+              params, bucket_num_tokens, options_.block_size())) {
+        const auto signature = make_static_graph_task_signature(params);
+        CHECK(signature.has_value());
+        return static_mtp_graph_task_key(base_key, signature.value());
+      }
+      return base_key;
+    }
     return static_cast<uint64_t>(bucket_num_tokens) | kSpecVerifyGraphKeyMask |
            (q_max_seq_len << kSpecVerifyQMaxSeqLenShift);
   }

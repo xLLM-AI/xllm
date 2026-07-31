@@ -90,6 +90,28 @@ class AclGraphExecutorTestEnvironment : public ::testing::Environment {
 
 namespace xllm {
 
+TEST(AclGraphStaticGraphTaskSignatureTest,
+     BuildsSameSignatureFromCaptureAndSignal) {
+  ModelInputParams params;
+  params.parallel.query_start_loc = {0, 5};
+  params.embedding.linear_state_ids = {7};
+  params.num_accepted_tokens_host = {4};
+  const SpecVerifyGraphTaskSignal signal{
+      .linear_state_id = 7,
+      .num_accepted_tokens = 4,
+      .spec_width = 5,
+      .block_table_width = 64,
+      .max_kv_seq_len = 256,
+  };
+
+  const auto captured = npu::make_static_graph_task_signature(params);
+  ASSERT_TRUE(captured.has_value());
+  EXPECT_EQ(captured.value(), npu::make_static_graph_task_signature(signal));
+
+  params.parallel.query_start_loc.push_back(6);
+  EXPECT_FALSE(npu::make_static_graph_task_signature(params).has_value());
+}
+
 namespace {
 const KVCache& first_full_attention_cache(
     const std::vector<KVCache>& kv_caches) {

@@ -126,6 +126,17 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
   return true;
 }
 
+#if defined(USE_NPU)
+bool LLMWorkerImpl::prepare_static_mtp_graph_tasks(
+    const SpecVerifyGraphTaskSignal& signal,
+    const Stream& signal_stream) {
+  if (model_executor_ == nullptr) {
+    return false;
+  }
+  return model_executor_->prepare_static_mtp_graph_tasks(signal, signal_stream);
+}
+#endif
+
 std::optional<ForwardOutput> LLMWorkerImpl::step_no_sync(
     const ForwardInput& input) {
   ForwardInput input_on_device;

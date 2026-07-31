@@ -51,6 +51,9 @@ class Executor final {
                            std::vector<KVCache>& kv_caches,
                            const ModelInputParams& params);
 
+  bool prepare_static_mtp_graph_tasks(const SpecVerifyGraphTaskSignal& signal,
+                                      const Stream& signal_stream);
+
  private:
   std::unique_ptr<ExecutorImpl> impl_;
 };

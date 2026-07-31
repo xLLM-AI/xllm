@@ -70,6 +70,9 @@ class LLMWorkerImpl : public WorkerImpl {
 
  public:
 #if defined(USE_NPU)
+  bool prepare_static_mtp_graph_tasks(const SpecVerifyGraphTaskSignal& signal,
+                                      const Stream& signal_stream);
+
   layer::NpuLmHead get_npu_lm_head() { return model_->get_npu_lm_head(); };
 
   void set_npu_lm_head(layer::NpuLmHead& head) {
