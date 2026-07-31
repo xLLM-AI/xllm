@@ -55,6 +55,28 @@ DEFINE_int32(health_check_interval_ms,
              3000,
              "Worker health check interval in milliseconds.");
 
+// --- request input/output trace(dump) config ---
+DEFINE_bool(enable_request_trace,
+            false,
+            "Whether to dump the input and output of each request to a file. "
+            "For streaming requests, the complete output is saved after all "
+            "the streaming outputs are finished.");
+
+DEFINE_string(request_trace_path,
+              "./request_trace.jsonl",
+              "The path to dump the request input/output trace. When "
+              "request_trace_per_file is false, this is a file that JSON "
+              "records are appended to (one record per line). When "
+              "request_trace_per_file is true, this is a directory and each "
+              "request is written to <dir>/<request_id>.json. Only used when "
+              "enable_request_trace is true.");
+
+DEFINE_bool(request_trace_per_file,
+            false,
+            "Whether to dump each request to a separate file named "
+            "<request_trace_path>/<request_id>.json instead of appending all "
+            "requests to a single JSON-lines file.");
+
 namespace xllm {
 
 void ServiceConfig::from_flags() {
@@ -68,6 +90,9 @@ void ServiceConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(num_request_handling_threads);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(num_response_handling_threads);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(health_check_interval_ms);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_request_trace);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(request_trace_path);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(request_trace_per_file);
 }
 
 void ServiceConfig::from_json(const JsonReader& json) {
@@ -82,6 +107,9 @@ void ServiceConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(num_request_handling_threads);
   XLLM_CONFIG_ASSIGN_FROM_JSON(num_response_handling_threads);
   XLLM_CONFIG_ASSIGN_FROM_JSON(health_check_interval_ms);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_request_trace);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(request_trace_path);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(request_trace_per_file);
 }
 
 void ServiceConfig::append_config_json(
@@ -106,6 +134,12 @@ void ServiceConfig::append_config_json(
       config_json, default_config, num_response_handling_threads);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, health_check_interval_ms);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_request_trace);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, request_trace_path);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, request_trace_per_file);
 }
 
 ServiceConfig& ServiceConfig::get_instance() {

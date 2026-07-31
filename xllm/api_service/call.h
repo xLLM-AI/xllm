@@ -32,6 +32,8 @@ class Call {
   std::string take_request_payload() { return std::move(request_payload_); }
   void init_request_payload();
 
+  brpc::Controller* controller() const { return controller_; }
+
   virtual bool is_disconnected() const = 0;
 
  protected:

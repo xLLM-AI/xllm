@@ -50,7 +50,10 @@ class ServiceConfig final {
          "max_concurrent_requests",
          "num_request_handling_threads",
          "num_response_handling_threads",
-         "health_check_interval_ms"}};
+         "health_check_interval_ms",
+         "enable_request_trace",
+         "request_trace_path",
+         "request_trace_per_file"}};
     return kOptionCategory;
   }
 
@@ -73,6 +76,12 @@ class ServiceConfig final {
   PROPERTY(int32_t, num_response_handling_threads) = 4;
 
   PROPERTY(int32_t, health_check_interval_ms) = 3000;
+
+  PROPERTY(bool, enable_request_trace) = false;
+
+  PROPERTY(std::string, request_trace_path) = "./request_trace.jsonl";
+
+  PROPERTY(bool, request_trace_per_file) = false;
 };
 
 }  // namespace xllm
