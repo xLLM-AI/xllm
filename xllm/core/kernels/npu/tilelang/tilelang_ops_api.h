@@ -22,7 +22,31 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/kernels/npu/paged_attention_tiling_layout.h"
+
 namespace xllm::kernel::npu::tilelang {
+
+void spec_verify_token_update(const torch::Tensor& base_tokens,
+                              const std::vector<torch::Tensor>& draft_tokens,
+                              torch::Tensor& persistent_tokens,
+                              int64_t spec_width);
+
+bool has_spec_verify_token_update_specialization(int64_t spec_width);
+
+bool has_spec_verify_attention_tiling_update_specialization(int64_t spec_width,
+                                                            int64_t block_size);
+
+bool has_spec_verify_graph_update_specialization(int64_t spec_width,
+                                                 int64_t block_size);
+
+void spec_verify_attention_tiling_update(
+    const torch::Tensor& src_kv_seq_lens,
+    torch::Tensor& tiling_data,
+    const PagedAttentionTilingLayout& layout,
+    int64_t spec_width,
+    int64_t block_size,
+    int64_t max_kv_seq_len,
+    int64_t kv_split_core_count);
 
 // Public TileLang kernel APIs exported to the xLLM NPU runtime.
 //
