@@ -287,8 +287,18 @@ void init_npu_python_runtime() {
     we_initialized_python = true;
   }
 
-  const auto first_device = DeviceNameUtils::parse_devices("auto").front();
-  const int device_index = first_device.index();
+  // Select the same logical device this process's worker will run on. Multi-
+  // process single-card serving lets every process see all TP cards and picks
+  // its own via node_rank (see Master ctor). Using .front() here would pin an
+  // extra context on logical device 0 for every node_rank != 0 process, piling
+  // small allocations onto die0. Mirror master.cpp's get_device_idx instead.
+  const auto& distributed_config = DistributedConfig::get_instance();
+  const int32_t visible_device_count =
+      DeviceNameUtils::parse_devices("auto").size();
+  const int32_t device_index =
+      DeviceNameUtils::get_device_idx(distributed_config.node_rank(),
+                                      distributed_config.nnodes(),
+                                      visible_device_count);
 
   {
     py::gil_scoped_acquire gil;
