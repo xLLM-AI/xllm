@@ -12,6 +12,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <ATen/ops/mv.h>
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/cuda.h>
@@ -34,6 +35,10 @@ __device__ __forceinline__ scalar_t compute(const scalar_t& x,
 }
 
 __device__ __forceinline__ bool is_16byte_aligned(const void* ptr) {
+  return (reinterpret_cast<uintptr_t>(ptr) & 15) == 0;
+}
+
+inline bool is_16byte_aligned_host(const void* ptr) {
   return (reinterpret_cast<uintptr_t>(ptr) & 15) == 0;
 }
 
@@ -182,6 +187,111 @@ void launch_mul_sigmoid_gate_inplace(torch::Tensor& out,
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
+
+constexpr int32_t kSharedGateWarpSize = 32;
+constexpr int32_t kSharedGateWarpsPerBlock = 8;
+constexpr int32_t kSharedGateValuesPerVector = 8;
+
+template <typename scalar_t>
+union SharedGateVector {
+  int4 packed;
+  scalar_t values[kSharedGateValuesPerVector];
+};
+
+__device__ __forceinline__ float shared_gate_warp_sum(float value) {
+#pragma unroll
+  for (int32_t offset = kSharedGateWarpSize / 2; offset > 0; offset >>= 1) {
+    value += __shfl_xor_sync(0xffffffffu, value, offset);
+  }
+  return value;
+}
+
+__device__ __forceinline__ float stable_sigmoid(float value) {
+  const bool positive = value >= 0.0f;
+  const float exponential = __expf(positive ? -value : value);
+  const float reciprocal = 1.0f / (1.0f + exponential);
+  return positive ? reciprocal : exponential * reciprocal;
+}
+
+template <typename scalar_t>
+__global__ void __launch_bounds__(kSharedGateWarpsPerBlock* kSharedGateWarpSize,
+                                  1)
+    fused_shared_expert_gate_kernel(scalar_t* __restrict__ shared_output,
+                                    const scalar_t* __restrict__ hidden_states,
+                                    const scalar_t* __restrict__ gate_weight,
+                                    int64_t num_tokens,
+                                    int64_t hidden_size) {
+  const int32_t warp = threadIdx.x / kSharedGateWarpSize;
+  const int32_t lane = threadIdx.x % kSharedGateWarpSize;
+  const int64_t token =
+      static_cast<int64_t>(blockIdx.x) * kSharedGateWarpsPerBlock + warp;
+  if (token >= num_tokens) {
+    return;
+  }
+
+  const int64_t vector_count = hidden_size / kSharedGateValuesPerVector;
+  const int64_t token_base = token * hidden_size;
+  float gate_value = 0.0f;
+  for (int64_t vector = lane; vector < vector_count;
+       vector += kSharedGateWarpSize) {
+    const int64_t offset = token_base + vector * kSharedGateValuesPerVector;
+    SharedGateVector<scalar_t> hidden_vector;
+    SharedGateVector<scalar_t> weight_vector;
+    hidden_vector.packed =
+        *reinterpret_cast<const int4*>(hidden_states + offset);
+    weight_vector.packed = *reinterpret_cast<const int4*>(
+        gate_weight + vector * kSharedGateValuesPerVector);
+#pragma unroll
+    for (int32_t index = 0; index < kSharedGateValuesPerVector; ++index) {
+      gate_value += static_cast<float>(hidden_vector.values[index]) *
+                    static_cast<float>(weight_vector.values[index]);
+    }
+  }
+
+  gate_value = shared_gate_warp_sum(gate_value);
+  const float gate = stable_sigmoid(
+      __shfl_sync(0xffffffffu, gate_value, 0, kSharedGateWarpSize));
+  for (int64_t vector = lane; vector < vector_count;
+       vector += kSharedGateWarpSize) {
+    const int64_t offset = token_base + vector * kSharedGateValuesPerVector;
+    SharedGateVector<scalar_t> output_vector;
+    output_vector.packed =
+        *reinterpret_cast<const int4*>(shared_output + offset);
+#pragma unroll
+    for (int32_t index = 0; index < kSharedGateValuesPerVector; ++index) {
+      output_vector.values[index] = static_cast<scalar_t>(
+          static_cast<float>(output_vector.values[index]) * gate);
+    }
+    *reinterpret_cast<int4*>(shared_output + offset) = output_vector.packed;
+  }
+}
+
+void launch_fused_shared_expert_gate_inplace(torch::Tensor& shared_output,
+                                             const torch::Tensor& hidden_states,
+                                             const torch::Tensor& gate_weight) {
+  const int64_t num_tokens = shared_output.size(0);
+  if (num_tokens == 0) {
+    return;
+  }
+  const int64_t hidden_size = shared_output.size(1);
+  const int64_t block_count =
+      (num_tokens + kSharedGateWarpsPerBlock - 1) / kSharedGateWarpsPerBlock;
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(shared_output));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  DISPATCH_HALF_TYPES(
+      shared_output.scalar_type(), "fused_shared_expert_gate", [&] {
+        fused_shared_expert_gate_kernel<scalar_t>
+            <<<dim3(static_cast<unsigned int>(block_count)),
+               dim3(kSharedGateWarpsPerBlock * kSharedGateWarpSize),
+               0,
+               stream>>>(shared_output.data_ptr<scalar_t>(),
+                         hidden_states.data_ptr<scalar_t>(),
+                         gate_weight.data_ptr<scalar_t>(),
+                         num_tokens,
+                         hidden_size);
+      });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 }  // namespace
 
 namespace xllm::kernel::cuda {
@@ -202,6 +312,42 @@ void mul_sigmoid_gate_inplace(torch::Tensor& out, const torch::Tensor& gate) {
         << "gate shape not collapsible to 2D";
   }
   launch_mul_sigmoid_gate_inplace(out, gate);
+}
+
+void fused_shared_expert_gate_inplace(torch::Tensor& shared_output,
+                                      const torch::Tensor& hidden_states,
+                                      const torch::Tensor& gate_weight) {
+  CHECK(shared_output.defined() && hidden_states.defined() &&
+        gate_weight.defined())
+      << "shared_output, hidden_states, and gate_weight must be defined";
+  CHECK(shared_output.dim() == 2 && hidden_states.dim() == 2)
+      << "shared_output and hidden_states must be 2D";
+  CHECK(shared_output.sizes() == hidden_states.sizes())
+      << "shared_output and hidden_states must have the same shape";
+  CHECK(gate_weight.dim() == 2 && gate_weight.size(0) == 1 &&
+        gate_weight.size(1) == hidden_states.size(1))
+      << "gate_weight must have shape [1, hidden_size]";
+  CHECK(shared_output.scalar_type() == hidden_states.scalar_type() &&
+        shared_output.scalar_type() == gate_weight.scalar_type())
+      << "shared expert gate dtype mismatch";
+  CHECK(shared_output.scalar_type() == torch::kFloat16 ||
+        shared_output.scalar_type() == torch::kBFloat16)
+      << "shared expert gate only supports FP16 and BF16";
+  CHECK(shared_output.device() == hidden_states.device() &&
+        shared_output.device() == gate_weight.device())
+      << "shared expert gate device mismatch";
+  CHECK(shared_output.is_contiguous() && hidden_states.is_contiguous() &&
+        gate_weight.is_contiguous())
+      << "shared expert gate tensors must be contiguous";
+  CHECK(hidden_states.size(1) % kSharedGateValuesPerVector == 0)
+      << "shared expert hidden_size must be divisible by "
+      << kSharedGateValuesPerVector;
+  CHECK(is_16byte_aligned_host(shared_output.data_ptr()) &&
+        is_16byte_aligned_host(hidden_states.data_ptr()) &&
+        is_16byte_aligned_host(gate_weight.data_ptr()))
+      << "shared expert gate tensors must be 16-byte aligned";
+  launch_fused_shared_expert_gate_inplace(
+      shared_output, hidden_states, gate_weight);
 }
 
 void act_and_mul(torch::Tensor out,
@@ -229,6 +375,19 @@ torch::Tensor matmul(torch::Tensor a,
   if (output_buf.has_value() && output_buf->defined() && a.dim() == 2 &&
       b.dim() == 2) {
     auto& out = *output_buf;
+    const int64_t output_features = b.size(0);
+    const bool has_bias = bias.has_value() && bias->defined();
+    const bool use_decode_gemv =
+        a.size(0) == 1 && a.scalar_type() == torch::kBFloat16 &&
+        b.scalar_type() == torch::kBFloat16 && a.size(1) == 2048 &&
+        (output_features == 64 || output_features == 256) && !has_bias &&
+        a.is_contiguous() && b.is_contiguous() && out.is_contiguous();
+    if (use_decode_gemv) {
+      auto out_flat = out.view({output_features});
+      auto input_flat = a.view({a.size(1)});
+      at::mv_out(out_flat, b, input_flat);
+      return out;
+    }
     auto bt = b.t();
     if (bias.has_value() && bias->defined()) {
       torch::addmm_out(out, *bias, a, bt);

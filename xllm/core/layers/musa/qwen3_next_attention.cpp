@@ -20,8 +20,20 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
+#include "core/kernels/musa/musa_ops_api.h"
+#include "core/util/env_var.h"
+
 namespace xllm {
 namespace layer {
+namespace {
+
+bool fused_qk_norm_rope_enabled() {
+  static const bool enabled =
+      util::get_bool_env("XLLM_MUSA_FUSED_QK_NORM_ROPE", true);
+  return enabled;
+}
+
+}  // namespace
 
 Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
     const ModelArgs& args,
@@ -63,7 +75,8 @@ Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
                         /*bias=*/args.attention_bias(),
                         /*gather_output=*/false,
                         parallel_args,
-                        options));
+                        options,
+                        quant_args));
 
   // 2. O proj
   o_proj_ = register_module("o_proj",
@@ -98,12 +111,12 @@ Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
                                              options));
 
   // 6. Attention
-  attn_ = register_module("attn",
-                          Attention(num_heads_,
-                                    head_dim_,
-                                    scaling_,
-                                    num_kv_heads_,
-                                    args.sliding_window()));
+  const int64_t sliding_window =
+      args.use_sliding_window() ? args.sliding_window() : -1;
+  attn_ = register_module(
+      "attn",
+      Attention(
+          num_heads_, head_dim_, scaling_, num_kv_heads_, sliding_window));
 
   // 7. Fused split_qkv_rmsnorm_mrope kernel setup
   rotary_dim_ = static_cast<int64_t>(head_dim_ * args.partial_rotary_factor());
@@ -126,11 +139,10 @@ Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
 
 torch::Tensor Qwen3NextAttentionImpl::build_mrope_cos_sin(
     const torch::Tensor& positions) const {
-#if defined(USE_CUDA) || defined(USE_MUSA)
   // The fused split_qkv_rmsnorm_mrope kernel is currently NPU-only via
   // TileLang -- `has_split_qkv_rmsnorm_mrope_specialization()` returns false
-  // on USE_CUDA + USE_MUSA (see ops_api.cpp), so `use_fused_qkv_` is
-  // always false on this platform and the precomputed mrope_cos_sin tensor
+  // in the MUSA build (see ops_api.cpp), so `use_fused_qkv_` is always false
+  // on this platform and the precomputed mrope_cos_sin tensor
   // produced here is never consulted by forward() -- it falls through to the
   // standalone `rotary_emb_->forward(positions, q, k)` path instead.
   //
@@ -150,7 +162,6 @@ torch::Tensor Qwen3NextAttentionImpl::build_mrope_cos_sin(
   if (!use_fused_qkv_) {
     return {};
   }
-#endif
   auto cos_sin_cache = rotary_emb_->get_cos_sin_cache();
   if (positions.dim() == 1) {
     return cos_sin_cache.index_select(0, positions).repeat({1, 3});
@@ -169,86 +180,116 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
     const torch::Tensor& mrope_cos_sin) {
-  auto qkv = qkv_proj_->forward(hidden_states);
-
+  torch::Tensor qkv;
+  {
+    qkv = qkv_proj_->forward(hidden_states);
+  }
   if (use_fused_qkv_) {
+    torch::Tensor q_flat;
+    torch::Tensor k_flat;
+    torch::Tensor v_flat;
+    torch::Tensor gate;
     const int64_t T = qkv.size(0);
-    xllm::kernel::SplitQkvRmsnormMropeParams params;
-    params.qkvg = qkv;
-    params.q_weight = q_norm_->weight();
-    params.k_weight = k_norm_->weight();
-    params.cos_sin = mrope_cos_sin;
-    params.gather_pattern = mrope_gather_pattern_;
-    params.eps = rms_norm_eps_;
-    params.num_q_heads = num_heads_;
-    params.num_kv_heads = num_kv_heads_;
-    params.head_size = head_dim_;
+    {
+      xllm::kernel::SplitQkvRmsnormMropeParams params;
+      params.qkvg = qkv;
+      params.q_weight = q_norm_->weight();
+      params.k_weight = k_norm_->weight();
+      params.cos_sin = mrope_cos_sin;
+      params.gather_pattern = mrope_gather_pattern_;
+      params.eps = rms_norm_eps_;
+      params.num_q_heads = num_heads_;
+      params.num_kv_heads = num_kv_heads_;
+      params.head_size = head_dim_;
 
-    auto [q, k, v, gate] = xllm::kernel::split_qkv_rmsnorm_mrope(params);
+      auto [q, k, v, g] = xllm::kernel::split_qkv_rmsnorm_mrope(params);
+      q_flat = q.view({T, q_size_});
+      k_flat = k.view({T, kv_size_});
+      v_flat = v.view({T, kv_size_});
+      gate = g;
+    }
 
-    auto q_flat = q.view({T, q_size_});
-    auto k_flat = k.view({T, kv_size_});
-    auto v_flat = v.view({T, kv_size_});
-
-    auto out = std::get<0>(
-        attn_->forward(attn_metadata, q_flat, k_flat, v_flat, kv_cache));
-    out = out * torch::sigmoid(gate.view({T, q_size_}));
-    return o_proj_->forward(out);
+    torch::Tensor out;
+    {
+      out = std::get<0>(
+          attn_->forward(attn_metadata, q_flat, k_flat, v_flat, kv_cache));
+    }
+    {
+      out = out * torch::sigmoid(gate.view({T, q_size_}));
+      return o_proj_->forward(out);
+    }
   }
 
   // Fallback path: weight-reordered layout [Q | G | K | V]
   torch::Tensor q, k, v;
   torch::Tensor gate;
+  {
+    if (attn_output_gate_) {
+      q = qkv.slice(/*dim=*/-1, /*start=*/0, /*end=*/q_size_);
+      gate = qkv.slice(/*dim=*/-1, /*start=*/q_size_, /*end=*/q_size_ * 2);
+      k = qkv.slice(/*dim=*/-1,
+                    /*start=*/q_size_ * 2,
+                    /*end=*/q_size_ * 2 + kv_size_);
+      v = qkv.slice(/*dim=*/-1,
+                    /*start=*/q_size_ * 2 + kv_size_,
+                    /*end=*/q_size_ * 2 + kv_size_ * 2);
+    } else {
+      q = qkv.slice(/*dim=*/-1, /*start=*/0, /*end=*/q_size_);
+      k = qkv.slice(/*dim=*/-1, /*start=*/q_size_, /*end=*/q_size_ + kv_size_);
+      v = qkv.slice(/*dim=*/-1,
+                    /*start=*/q_size_ + kv_size_,
+                    /*end=*/q_size_ + 2 * kv_size_);
+    }
 
-  if (attn_output_gate_) {
-    q = qkv.slice(/*dim=*/-1, /*start=*/0, /*end=*/q_size_);
-    gate = qkv.slice(/*dim=*/-1, /*start=*/q_size_, /*end=*/q_size_ * 2);
-    k = qkv.slice(/*dim=*/-1,
-                  /*start=*/q_size_ * 2,
-                  /*end=*/q_size_ * 2 + kv_size_);
-    v = qkv.slice(/*dim=*/-1,
-                  /*start=*/q_size_ * 2 + kv_size_,
-                  /*end=*/q_size_ * 2 + kv_size_ * 2);
-  } else {
-    q = qkv.slice(/*dim=*/-1, /*start=*/0, /*end=*/q_size_);
-    k = qkv.slice(/*dim=*/-1, /*start=*/q_size_, /*end=*/q_size_ + kv_size_);
-    v = qkv.slice(/*dim=*/-1,
-                  /*start=*/q_size_ + kv_size_,
-                  /*end=*/q_size_ + 2 * kv_size_);
+    const int64_t T = q.size(0);
+
+    // Fused QK-norm + RoPE: collapse 3 kernel launches into 1 for decode
+    // (1D positions). Writes norm+rope results back into qkv in-place.
+    if (fused_qk_norm_rope_enabled() && positions.dim() == 1 &&
+        positions.scalar_type() == torch::kInt32 &&
+        (head_dim_ == 64 || head_dim_ == 128 || head_dim_ == 256)) {
+      auto cos_sin_cache = rotary_emb_->get_cos_sin_cache();
+      int64_t k_head_offset = attn_output_gate_ ? num_heads_ * 2 : num_heads_;
+      xllm::kernel::cuda::fused_qk_norm_rope(qkv,
+                                             num_heads_,
+                                             num_kv_heads_,
+                                             num_kv_heads_,
+                                             head_dim_,
+                                             rms_norm_eps_,
+                                             q_norm_->weight(),
+                                             k_norm_->weight(),
+                                             cos_sin_cache,
+                                             /*interleaved=*/false,
+                                             positions,
+                                             k_head_offset);
+      q = qkv.slice(/*dim=*/-1, /*start=*/0, /*end=*/q_size_);
+      k = qkv.slice(
+          /*dim=*/-1,
+          /*start=*/attn_output_gate_ ? q_size_ * 2 : q_size_,
+          /*end=*/
+          attn_output_gate_ ? q_size_ * 2 + kv_size_ : q_size_ + kv_size_);
+    } else {
+      auto q_3d = q.view({T, num_heads_, head_dim_});
+      q = std::get<0>(q_norm_->forward(q_3d)).view({T, q_size_});
+      auto k_3d = k.view({T, num_kv_heads_, head_dim_});
+      k = std::get<0>(k_norm_->forward(k_3d)).view({T, kv_size_});
+
+      rotary_emb_->forward(positions, q, k);
+    }
   }
 
-  const int64_t T = q.size(0);
-  auto q_3d = q.view({T, num_heads_, head_dim_});
-  q = std::get<0>(q_norm_->forward(q_3d)).view({T, q_size_});
-  auto k_3d = k.view({T, num_kv_heads_, head_dim_});
-  k = std::get<0>(k_norm_->forward(k_3d)).view({T, kv_size_});
-
-  rotary_emb_->forward(positions, q, k);
-  auto out = std::get<0>(attn_->forward(attn_metadata, q, k, v, kv_cache));
-
-  if (attn_output_gate_) {
-#if defined(USE_CUDA) || defined(USE_MUSA)
-    // Capture-safe gating: `torch::sigmoid(gate)` allocates via
-    // `empty_like(gate)` -> EmptyMUSA (forbidden mid-stream-capture), and
-    // `out * sigmoid_result` allocates again. Replace with two purely
-    // elementwise in-place kernels:
-    //   * `gate.sigmoid_()`  -- writes back into `gate`, a view of the
-    //     ColumnParallelLinear persistent qkv buffer. Safe because `gate`
-    //     is not consumed again in this function (and the persistent
-    //     qkv buffer is rewritten on every forward by qkv_proj_).
-    //   * `out.mul_(gate)`   -- modifies the AttentionImpl persistent
-    //     output buffer slice in place; the next layer's attn_->forward
-    //     overwrites that slot before any other consumer reads it.
-    // Both ops are pure elementwise kernels with no host-side allocation.
-    // torch_musa does not fuse this path; libtorch's MemPoolContext-aware
-    // allocator is not honoured by torch_musa 2.7.1 for captured pools, so
-    // on this stack we bypass the implicit allocations entirely.
-    out.mul_(gate.sigmoid_());
-#else
-    out = out * torch::sigmoid(gate);
-#endif
+  torch::Tensor out;
+  {
+    out = std::get<0>(attn_->forward(attn_metadata, q, k, v, kv_cache));
   }
-  return o_proj_->forward(out);
+  {
+    if (attn_output_gate_) {
+      // Capture-safe fused gating: compute sigmoid(gate) and multiply `out`
+      // in one launch without a temporary allocation or mutating `gate`.
+      xllm::kernel::cuda::mul_sigmoid_gate_inplace(out, gate);
+    }
+    return o_proj_->forward(out);
+  }
 }
 
 void Qwen3NextAttentionImpl::load_state_dict(const StateDict& state_dict) {

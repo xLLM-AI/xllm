@@ -246,8 +246,26 @@ void batch_chunked_prefill(const std::string& uri,
                            torch::Tensor output,
                            std::optional<torch::Tensor>& output_lse,
                            std::optional<torch::Tensor> qo_indptr,
-                           bool causal) {
+                           bool causal,
+                           const torch::Tensor& paged_kv_indptr_host,
+                           const torch::Tensor& paged_kv_indices_host,
+                           const torch::Tensor& paged_kv_last_page_len_host) {
   VLOG(kGraphExecutorLogVerboseLevel) << "plan_info: " << plan_info;
+
+  // The mate FlashInfer FFI in this build requires CPU (kDLCPU) paged_kv
+  // tensors for the host-side page-table build (PagedKvToPageTable). Prefer the
+  // pre-staged host mirrors; fall back to a lazy D2H copy for callers that do
+  // not populate them.
+  const torch::Tensor paged_kv_indptr_ffi =
+      paged_kv_indptr_host.defined() ? paged_kv_indptr_host
+                                     : paged_kv_indptr.to(torch::kCPU);
+  const torch::Tensor paged_kv_indices_ffi =
+      paged_kv_indices_host.defined() ? paged_kv_indices_host
+                                      : paged_kv_indices.to(torch::kCPU);
+  const torch::Tensor paged_kv_last_page_len_ffi =
+      paged_kv_last_page_len_host.defined()
+          ? paged_kv_last_page_len_host
+          : paged_kv_last_page_len.to(torch::kCPU);
 
   torch::Tensor qo_indptr_to_use;
   if (qo_indptr.has_value()) {
@@ -273,9 +291,9 @@ void batch_chunked_prefill(const std::string& uri,
       to_ffi_tensor(k_cache),
       to_ffi_tensor(v_cache),
       to_ffi_tensor(qo_indptr_to_use),
-      to_ffi_tensor(paged_kv_indptr),
-      to_ffi_tensor(paged_kv_indices),
-      to_ffi_tensor(paged_kv_last_page_len),
+      to_ffi_tensor(paged_kv_indptr_ffi),
+      to_ffi_tensor(paged_kv_indices_ffi),
+      to_ffi_tensor(paged_kv_last_page_len_ffi),
       to_ffi_tensor(output),
       output_lse.has_value() ? to_ffi_tensor(output_lse.value())
                              : ffi::Optional<ffi::Tensor>(),

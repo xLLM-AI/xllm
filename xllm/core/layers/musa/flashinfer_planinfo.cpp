@@ -60,7 +60,8 @@ ffi::Array<int64_t> deep_copy_plan_info(const ffi::Array<int64_t>& src) {
   return ffi::Array<int64_t>(temp_vec.begin(), temp_vec.end());
 }
 
-torch::Tensor get_kv_len_arr_host(const AttentionMetadata& attn_meta) {
+torch::Tensor get_kv_len_arr_host(
+    const xllm::layer::AttentionMetadata& attn_meta) {
   if (attn_meta.kv_seq_lens.defined()) {
     return attn_meta.kv_seq_lens.to(torch::kCPU);
   }
@@ -243,7 +244,8 @@ void update_chunked_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
                             /*use_fp16_qk_reduction=*/false);
   const int64_t batch_size = attn_meta.paged_kv_last_page_len.size(0);
   torch::Tensor qo_indptr_host;
-  if (causal) {
+  if (causal && attn_meta.qo_indptr.has_value() &&
+      attn_meta.qo_indptr->defined()) {
     qo_indptr_host = attn_meta.qo_indptr.value().to(torch::kCPU);
   } else {
     qo_indptr_host = get_cache_buffer(batch_size + 1, torch::kCPU);
@@ -265,7 +267,7 @@ void update_chunked_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
       paged_kv_indptr_host.defined()) {
     auto opts = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
     torch::Tensor synth_indptr_host = torch::empty({batch_size + 1}, opts);
-    int32_t* p = synth_indptr_host.data_ptr<int32_t>();
+    auto* p = synth_indptr_host.data_ptr<int32_t>();
     for (int64_t i = 0; i <= batch_size; ++i) {
       p[i] = static_cast<int32_t>(i * max_kv_blocks_per_seq);
     }
@@ -413,7 +415,7 @@ void update_decode_plan_info(std::shared_ptr<PlanInfo> plan_info,
       torch::Tensor synth_indptr_host = torch::empty({batch_size + 1}, opts);
       // Fill [0, max, 2*max, ..., bs*max]. Use int32 view since plan() and the
       // upstream pinned-host buffers all use int32 for indptr.
-      int32_t* p = synth_indptr_host.data_ptr<int32_t>();
+      auto* p = synth_indptr_host.data_ptr<int32_t>();
       for (int64_t i = 0; i <= batch_size; ++i) {
         p[i] = static_cast<int32_t>(i * max_kv_blocks_per_seq);
       }

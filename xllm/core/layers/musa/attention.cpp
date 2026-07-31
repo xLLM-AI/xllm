@@ -15,8 +15,6 @@ limitations under the License.
 
 #include "layers/musa/attention.h"
 
-#if defined(USE_MUSA)
-
 #include "layers/cuda/base_attention_impl.h"
 #include "layers/musa/flashinfer_attention.h"
 
@@ -117,5 +115,3 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
 
 }  // namespace layer
 }  // namespace xllm
-
-#endif  // USE_MUSA
