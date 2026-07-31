@@ -326,6 +326,14 @@ bool AclGraph::capture(CausalLM* model,
       model,
       persistent_param_.persistent_positions(num_tokens_),
       graph_params.value());
+  if (graph_paged_attention_tiling_data_.defined()) {
+    spec_verify_input_addresses_at_capture_ =
+        spec_verify_input_addresses(tokens, positions, params);
+    // Raw TileLang launches are not replayed by the captured ACL graph. Run
+    // the initial tiling update on the producer stream and let the existing
+    // stream synchronization complete it before capture begins.
+    update_spec_verify_attention_tiling(graph_params.value());
+  }
 
   if (model->is_hybrid_linear_attention()) {
     graph_task_context_ = std::make_shared<AclGraphTaskUpdateContext>();
@@ -366,11 +374,6 @@ bool AclGraph::capture(CausalLM* model,
     // other threads to execute synchronous operations
     graph_.capture_begin(
         {0, 0}, aclmdlRICaptureMode::ACL_MODEL_RI_CAPTURE_MODE_THREAD_LOCAL);
-    if (graph_paged_attention_tiling_data_.defined()) {
-      spec_verify_input_addresses_at_capture_ =
-          spec_verify_input_addresses(tokens, positions, params);
-      update_spec_verify_attention_tiling(graph_params.value());
-    }
     // Execute forward pass - NPUGraph mempool manages temporary tensors
     auto forward_result =
         model->forward({persistent_param_.persistent_tokens(num_tokens_)},
