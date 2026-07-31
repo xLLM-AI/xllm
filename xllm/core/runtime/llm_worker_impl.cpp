@@ -146,6 +146,12 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_no_sync(
 }
 
 std::optional<ForwardOutput> LLMWorkerImpl::execute_no_sync_on_stream(
+    const ForwardInput& input, Stream& compute_stream) {
+  return execute_no_sync_on_stream(
+      input, compute_stream, /*record_ready_event=*/true);
+}
+
+std::optional<ForwardOutput> LLMWorkerImpl::execute_no_sync_on_stream(
     const ForwardInput& input,
     Stream& compute_stream,
     bool record_ready_event) {

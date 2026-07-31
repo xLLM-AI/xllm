@@ -207,12 +207,30 @@ struct has_get_npu_word_embedding<
     : std::true_type {};
 
 template <typename T, typename = void>
+struct has_restored_npu_word_embedding : std::false_type {};
+
+template <typename T>
+struct has_restored_npu_word_embedding<
+    T,
+    std::void_t<decltype(std::declval<T>()->has_restored_npu_word_embedding())>>
+    : std::true_type {};
+
+template <typename T, typename = void>
 struct has_set_npu_word_embedding : std::false_type {};
 
 template <typename T>
 struct has_set_npu_word_embedding<
     T,
     std::void_t<decltype(std::declval<T>()->set_npu_word_embedding(
+        std::declval<layer::NpuWordEmbedding&>()))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_set_restored_npu_word_embedding : std::false_type {};
+
+template <typename T>
+struct has_set_restored_npu_word_embedding<
+    T,
+    std::void_t<decltype(std::declval<T>()->set_restored_npu_word_embedding(
         std::declval<layer::NpuWordEmbedding&>()))>> : std::true_type {};
 
 template <typename T, typename = void>
