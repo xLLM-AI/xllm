@@ -37,8 +37,8 @@ limitations under the License.
 #include "framework/model_context.h"
 #include "models/dit/autoencoders/autoencoder_kl.h"
 #include "models/dit/utils/diagonal_gaussian_distribution.h"
+#include "models/dit/utils/dit_parallel_mixin.h"
 #include "models/dit/utils/util.h"
-#include "models/dit/utils/vae_spatial_parallel.h"
 #include "models/model_registry.h"
 
 #if defined(USE_NPU)
@@ -56,28 +56,27 @@ limitations under the License.
 
 namespace xllm {
 
-using xllm::dit::VaeSpatialParallel;
-
 class QwenImageBaseModule : public torch::nn::Module {
  public:
   virtual torch::Tensor forward(
       const torch::Tensor& x,
       std::shared_ptr<std::vector<torch::Tensor>> feat_cache,
-      std::shared_ptr<std::vector<int64_t>> feat_idx,
-      VaeSpatialParallel& ctx) = 0;
+      std::shared_ptr<std::vector<int64_t>> feat_idx) = 0;
   virtual ~QwenImageBaseModule() = default;
 };
 
 const int64_t CACHE_T = 2;
 
-class QwenImageCausalConv3dImpl : public torch::nn::Module {
+class QwenImageCausalConv3dImpl : public torch::nn::Module,
+                                  public dit::VaeParallelMixin {
  public:
   QwenImageCausalConv3dImpl(const ModelContext& context,
                             int64_t in_channels,
                             int64_t out_channels,
                             torch::IntArrayRef kernel_size,
                             torch::IntArrayRef stride = 1,
-                            torch::IntArrayRef padding = 0) {
+                            torch::IntArrayRef padding = 0)
+      : dit::VaeParallelMixin(context) {
     conv_ = register_module(
         "conv",
         torch::nn::Conv3d(
@@ -95,7 +94,6 @@ class QwenImageCausalConv3dImpl : public torch::nn::Module {
   }
 
   torch::Tensor forward(const torch::Tensor& x,
-                        VaeSpatialParallel& ctx,
                         const torch::Tensor& cache_x = torch::Tensor()) {
     auto padding_vec = padding_;
     auto result_x = x;
@@ -107,7 +105,8 @@ class QwenImageCausalConv3dImpl : public torch::nn::Module {
     //   {W_left, W_right, H_top, H_bottom, T_front, T_back}
     // padding_[1] is W_right padding, padding_[2] is H_top padding.
     // Both == 1 means spatial kernel is 3×3 with padding=1.
-    bool use_halo = (ctx.is_parallel() && padding_[1] == 1 && padding_[2] == 1);
+    bool use_halo =
+        (vae_parallel_enabled() && padding_[1] == 1 && padding_[2] == 1);
 
     // Temporal padding (causal) — must come BEFORE halo exchange so cache
     // and input have matching spatial dims.
@@ -122,7 +121,7 @@ class QwenImageCausalConv3dImpl : public torch::nn::Module {
     // Zero W padding from F::pad (exchange already handles it).
     // H padding stays in F::pad since conv3d has padding=0.
     if (use_halo) {
-      result_x = ctx.exchange(result_x, /*pad=*/true);
+      result_x = vae_parallel_exchange(result_x, /*pad=*/true);
       padding_vec[0] = 0;  // W left  — handled by exchange
       padding_vec[1] = 0;  // W right — handled by exchange
     }
@@ -266,12 +265,13 @@ class QwenImageUpsampleImpl : public torch::nn::Module {
 
 TORCH_MODULE(QwenImageUpsample);
 
-class QwenImageResampleImpl : public QwenImageBaseModule {
+class QwenImageResampleImpl : public QwenImageBaseModule,
+                              public dit::VaeParallelMixin {
  public:
   QwenImageResampleImpl(const ModelContext& context,
                         int64_t dim,
                         const std::string& mode)
-      : dim_(dim), mode_(mode) {
+      : dit::VaeParallelMixin(context), dim_(dim), mode_(mode) {
     if (mode_ == "upsample2d") {
       resample_ = register_module(
           "resample",
@@ -348,10 +348,10 @@ class QwenImageResampleImpl : public QwenImageBaseModule {
     rep_tensor_ = register_parameter("rep_tensor", torch::tensor({-999.0}));
   }
 
-  torch::Tensor forward(const torch::Tensor& x,
-                        std::shared_ptr<std::vector<torch::Tensor>> feat_cache,
-                        std::shared_ptr<std::vector<int64_t>> feat_idx,
-                        VaeSpatialParallel& ctx) override {
+  torch::Tensor forward(
+      const torch::Tensor& x,
+      std::shared_ptr<std::vector<torch::Tensor>> feat_cache,
+      std::shared_ptr<std::vector<int64_t>> feat_idx) override {
     if (feat_idx == nullptr) {
       feat_idx =
           std::make_shared<std::vector<int64_t>>(std::vector<int64_t>{0});
@@ -388,9 +388,9 @@ class QwenImageResampleImpl : public QwenImageBaseModule {
               {torch::zeros_like(cache_x).to(cache_x.device()), cache_x}, 2);
         }
         if (torch::equal(rep_tensor_, feat_cache->at(idx))) {
-          result_x = time_conv_->forward(result_x, ctx);
+          result_x = time_conv_->forward(result_x);
         } else {
-          result_x = time_conv_->forward(result_x, ctx, feat_cache->at(idx));
+          result_x = time_conv_->forward(result_x, feat_cache->at(idx));
         }
         feat_cache->at(idx) = cache_x;
         (*feat_idx)[0]++;
@@ -412,13 +412,13 @@ class QwenImageResampleImpl : public QwenImageBaseModule {
     bool is_downsample = (mode_ == "downsample2d" || mode_ == "downsample3d");
 
     // Upsample: exchange halo columns before spatial upsampling
-    if (ctx.is_parallel() && is_upsample) {
-      result_x = ctx.exchange(result_x, /*pad=*/false);
+    if (is_upsample) {
+      result_x = vae_parallel_exchange(result_x, /*pad=*/false);
       w = result_x.size(-1);
     }
     // Downsample: merge spatial slices before spatial downsampling
-    if (ctx.is_parallel() && is_downsample) {
-      result_x = ctx.merge(result_x);
+    if (is_downsample) {
+      result_x = vae_parallel_merge(result_x);
       w = result_x.size(-1);
       h = result_x.size(-2);
     }
@@ -440,19 +440,12 @@ class QwenImageResampleImpl : public QwenImageBaseModule {
     //   - middle rank (has_left && has_right): trim 2 from each side
     //   - first rank  (!has_left):           trim 2 from right only
     //   - last rank   (!has_right):          trim 2 from left only
-    if (ctx.is_parallel() && is_upsample) {
-      auto cur_w = result_x.size(-1);
-      if (ctx.has_left() && ctx.has_right()) {
-        result_x = result_x.slice(/*dim=*/-1, 2, cur_w - 2);
-      } else if (!ctx.has_left()) {
-        result_x = result_x.slice(/*dim=*/-1, 0, cur_w - 2);
-      } else {
-        result_x = result_x.slice(/*dim=*/-1, 2, cur_w);
-      }
+    if (is_upsample) {
+      result_x = vae_parallel_trim_halo(result_x, /*per_side=*/2);
     }
     // Downsample: split full result back to local slices
-    if (ctx.is_parallel() && is_downsample) {
-      result_x = ctx.split(result_x);
+    if (is_downsample) {
+      result_x = vae_parallel_split(result_x);
     }
 
     if (mode_ == "downsample3d" && feat_cache && feat_idx) {
@@ -474,7 +467,7 @@ class QwenImageResampleImpl : public QwenImageBaseModule {
              result_x},
             2);
 
-        result_x = time_conv_->forward(concat_x, ctx);
+        result_x = time_conv_->forward(concat_x);
         feat_cache->at(idx) = cache_x;
         (*feat_idx)[0]++;
       } else {
@@ -581,17 +574,17 @@ class QwenImageResidualBlockImpl : public QwenImageBaseModule {
     }
   }
 
-  torch::Tensor forward(const torch::Tensor& x,
-                        std::shared_ptr<std::vector<torch::Tensor>> feat_cache,
-                        std::shared_ptr<std::vector<int64_t>> feat_idx,
-                        VaeSpatialParallel& ctx) override {
+  torch::Tensor forward(
+      const torch::Tensor& x,
+      std::shared_ptr<std::vector<torch::Tensor>> feat_cache,
+      std::shared_ptr<std::vector<int64_t>> feat_idx) override {
     if (feat_idx == nullptr) {
       feat_idx =
           std::make_shared<std::vector<int64_t>>(std::vector<int64_t>{0});
     }
     torch::Tensor h = torch::empty({0});
     if (conv_shortcut_) {
-      h = conv_shortcut_->forward(x, ctx);
+      h = conv_shortcut_->forward(x);
     } else {
       h = identity_->forward(x);
     }
@@ -619,11 +612,11 @@ class QwenImageResidualBlockImpl : public QwenImageBaseModule {
         cache_x = torch::cat({last_frame, cache_x}, 2);
       }
 
-      result_x = conv1_->forward(result_x, ctx, feat_cache->at(idx));
+      result_x = conv1_->forward(result_x, feat_cache->at(idx));
       feat_cache->at(idx) = cache_x;
       (*feat_idx)[0]++;
     } else {
-      result_x = conv1_->forward(result_x, ctx);
+      result_x = conv1_->forward(result_x);
     }
     result_x = norm2_->forward(result_x);
     result_x = activation_->forward(result_x);
@@ -648,11 +641,11 @@ class QwenImageResidualBlockImpl : public QwenImageBaseModule {
                 .to(cache_x.device());
         cache_x = torch::cat({last_frame, cache_x}, 2);
       }
-      result_x = conv2_->forward(result_x, ctx, feat_cache->at(idx));
+      result_x = conv2_->forward(result_x, feat_cache->at(idx));
       feat_cache->at(idx) = cache_x;
       (*feat_idx)[0]++;
     } else {
-      result_x = conv2_->forward(result_x, ctx);
+      result_x = conv2_->forward(result_x);
     }
 
     return result_x + h;
@@ -694,10 +687,11 @@ class QwenImageResidualBlockImpl : public QwenImageBaseModule {
 
 TORCH_MODULE(QwenImageResidualBlock);
 
-class QwenImageAttentionBlockImpl : public QwenImageBaseModule {
+class QwenImageAttentionBlockImpl : public QwenImageBaseModule,
+                                    public dit::VaeParallelMixin {
  public:
   QwenImageAttentionBlockImpl(const ModelContext& context, int64_t dim)
-      : dim_(dim) {
+      : dit::VaeParallelMixin(context), dim_(dim) {
     norm_ = register_module("norm",
                             QwenImageRMS_norm(context,
                                               dim,
@@ -717,11 +711,10 @@ class QwenImageAttentionBlockImpl : public QwenImageBaseModule {
                                                    /*kernel_size=*/1)));
   }
 
-  torch::Tensor forward(const torch::Tensor& x,
-                        std::shared_ptr<std::vector<torch::Tensor>> feat_cache,
-                        std::shared_ptr<std::vector<int64_t>> feat_idx,
-                        VaeSpatialParallel& ctx) override {
-    (void)ctx;  // attention block has no conv3d sub-calls
+  torch::Tensor forward(
+      const torch::Tensor& x,
+      std::shared_ptr<std::vector<torch::Tensor>> feat_cache,
+      std::shared_ptr<std::vector<int64_t>> feat_idx) override {
     if (feat_idx == nullptr) {
       feat_idx =
           std::make_shared<std::vector<int64_t>>(std::vector<int64_t>{0});
@@ -736,11 +729,11 @@ class QwenImageAttentionBlockImpl : public QwenImageBaseModule {
     auto qkv = to_qkv_->forward(reshaped_x);
 
     torch::Tensor q, k, v;
-    if (ctx.is_parallel()) {
+    if (vae_parallel_enabled()) {
       // Gather K/V in spatial domain before BNSD reshape
       auto spatial_chunks = qkv.chunk(3, 1);
-      auto k_sp = ctx.merge(spatial_chunks[1].unsqueeze(2)).squeeze(2);
-      auto v_sp = ctx.merge(spatial_chunks[2].unsqueeze(2)).squeeze(2);
+      auto k_sp = vae_parallel_merge(spatial_chunks[1].unsqueeze(2)).squeeze(2);
+      auto v_sp = vae_parallel_merge(spatial_chunks[2].unsqueeze(2)).squeeze(2);
       int64_t W_global = k_sp.size(-1);
       q = spatial_chunks[0]
               .reshape({b * t, 1, c, h * w})
@@ -861,8 +854,7 @@ class QwenImageMidBlockImpl : public torch::nn::Module {
 
   torch::Tensor forward(const torch::Tensor& x,
                         std::shared_ptr<std::vector<torch::Tensor>> feat_cache,
-                        std::shared_ptr<std::vector<int64_t>> feat_idx,
-                        VaeSpatialParallel& ctx) {
+                        std::shared_ptr<std::vector<int64_t>> feat_idx) {
     if (feat_idx == nullptr) {
       feat_idx =
           std::make_shared<std::vector<int64_t>>(std::vector<int64_t>{0});
@@ -870,13 +862,13 @@ class QwenImageMidBlockImpl : public torch::nn::Module {
     auto result_x = x;
 
     result_x = resnets_[0]->as<QwenImageResidualBlock>()->forward(
-        result_x, feat_cache, feat_idx, ctx);
+        result_x, feat_cache, feat_idx);
 
     for (size_t i = 0; i < attentions_->size(); i++) {
       result_x = attentions_[i]->as<QwenImageAttentionBlock>()->forward(
-          result_x, nullptr, nullptr, ctx);
+          result_x, nullptr, nullptr);
       result_x = resnets_[i + 1]->as<QwenImageResidualBlock>()->forward(
-          result_x, feat_cache, feat_idx, ctx);
+          result_x, feat_cache, feat_idx);
     }
 
     return result_x;
@@ -1014,8 +1006,7 @@ class QwenImageEncoder3dImpl : public torch::nn::Module {
 
   torch::Tensor forward(const torch::Tensor& x,
                         std::shared_ptr<std::vector<torch::Tensor>> feat_cache,
-                        std::shared_ptr<std::vector<int64_t>> feat_idx,
-                        VaeSpatialParallel& ctx) {
+                        std::shared_ptr<std::vector<int64_t>> feat_idx) {
     if (feat_idx == nullptr) {
       feat_idx =
           std::make_shared<std::vector<int64_t>>(std::vector<int64_t>{0});
@@ -1040,11 +1031,11 @@ class QwenImageEncoder3dImpl : public torch::nn::Module {
                 .to(cache_x.device());
         cache_x = torch::cat({last_frame, cache_x}, 2);
       }
-      result_x = conv_in_->forward(x, ctx, feat_cache->at(idx));
+      result_x = conv_in_->forward(x, feat_cache->at(idx));
       feat_cache->at(idx) = cache_x;
       (*feat_idx)[0]++;
     } else {
-      result_x = conv_in_->forward(x, ctx);
+      result_x = conv_in_->forward(x);
     }
 
     int64_t counter = 0;
@@ -1053,18 +1044,18 @@ class QwenImageEncoder3dImpl : public torch::nn::Module {
         counter = counter + 1;
         result_x =
             std::dynamic_pointer_cast<QwenImageBaseModule>(layer)->forward(
-                result_x, feat_cache, feat_idx, ctx);
+                result_x, feat_cache, feat_idx);
       } else {
         result_x =
             std::dynamic_pointer_cast<QwenImageBaseModule>(layer)->forward(
                 result_x,
                 nullptr,
-                std::make_shared<std::vector<int64_t>>(std::vector<int64_t>{0}),
-                ctx);
+                std::make_shared<std::vector<int64_t>>(
+                    std::vector<int64_t>{0}));
       }
     }
 
-    result_x = mid_block_->forward(result_x, feat_cache, feat_idx, ctx);
+    result_x = mid_block_->forward(result_x, feat_cache, feat_idx);
 
     result_x = norm_out_->forward(result_x);
     result_x = nonlinearity_->forward(result_x);
@@ -1090,11 +1081,11 @@ class QwenImageEncoder3dImpl : public torch::nn::Module {
         cache_x = torch::cat({last_frame, cache_x}, 2);
       }
 
-      result_x = conv_out_->forward(result_x, ctx, feat_cache->at(idx));
+      result_x = conv_out_->forward(result_x, feat_cache->at(idx));
       feat_cache->at(idx) = cache_x;
       (*feat_idx)[0]++;
     } else {
-      result_x = conv_out_->forward(result_x, ctx);
+      result_x = conv_out_->forward(result_x);
     }
 
     return result_x;
@@ -1200,8 +1191,7 @@ class QwenImageUpBlockImpl : public torch::nn::Module {
 
   torch::Tensor forward(const torch::Tensor& x,
                         std::shared_ptr<std::vector<torch::Tensor>> feat_cache,
-                        std::shared_ptr<std::vector<int64_t>> feat_idx,
-                        VaeSpatialParallel& ctx) {
+                        std::shared_ptr<std::vector<int64_t>> feat_idx) {
     if (feat_idx == nullptr) {
       feat_idx =
           std::make_shared<std::vector<int64_t>>(std::vector<int64_t>{0});
@@ -1213,14 +1203,14 @@ class QwenImageUpBlockImpl : public torch::nn::Module {
       if (feat_cache && feat_idx) {
         result_x =
             std::dynamic_pointer_cast<QwenImageBaseModule>(resnet)->forward(
-                result_x, feat_cache, feat_idx, ctx);
+                result_x, feat_cache, feat_idx);
       } else {
         result_x =
             std::dynamic_pointer_cast<QwenImageBaseModule>(resnet)->forward(
                 result_x,
                 nullptr,
-                std::make_shared<std::vector<int64_t>>(std::vector<int64_t>{0}),
-                ctx);
+                std::make_shared<std::vector<int64_t>>(
+                    std::vector<int64_t>{0}));
       }
     }
 
@@ -1228,15 +1218,14 @@ class QwenImageUpBlockImpl : public torch::nn::Module {
       if (feat_cache && feat_idx) {
         result_x =
             std::dynamic_pointer_cast<QwenImageBaseModule>(upsamplers_[0])
-                ->forward(result_x, feat_cache, feat_idx, ctx);
+                ->forward(result_x, feat_cache, feat_idx);
       } else {
         result_x =
             std::dynamic_pointer_cast<QwenImageBaseModule>(upsamplers_[0])
                 ->forward(result_x,
                           nullptr,
                           std::make_shared<std::vector<int64_t>>(
-                              std::vector<int64_t>{0}),
-                          ctx);
+                              std::vector<int64_t>{0}));
       }
     }
 
@@ -1362,8 +1351,7 @@ class QwenImageDecoder3dImpl : public torch::nn::Module {
 
   torch::Tensor forward(const torch::Tensor& x,
                         std::shared_ptr<std::vector<torch::Tensor>> feat_cache,
-                        std::shared_ptr<std::vector<int64_t>> feat_idx,
-                        VaeSpatialParallel& ctx) {
+                        std::shared_ptr<std::vector<int64_t>> feat_idx) {
     if (feat_idx == nullptr) {
       feat_idx =
           std::make_shared<std::vector<int64_t>>(std::vector<int64_t>{0});
@@ -1390,18 +1378,18 @@ class QwenImageDecoder3dImpl : public torch::nn::Module {
         cache_x = torch::cat({last_frame, cache_x}, 2);
       }
 
-      result_x = conv_in_->forward(result_x, ctx, feat_cache->at(idx));
+      result_x = conv_in_->forward(result_x, feat_cache->at(idx));
       feat_cache->at(idx) = cache_x;
       (*feat_idx)[0]++;
     } else {
-      result_x = conv_in_->forward(result_x, ctx);
+      result_x = conv_in_->forward(result_x);
     }
 
-    result_x = mid_block_->forward(result_x, feat_cache, feat_idx, ctx);
+    result_x = mid_block_->forward(result_x, feat_cache, feat_idx);
 
     for (auto& up_block : *up_blocks_) {
       result_x = up_block->as<QwenImageUpBlock>()->forward(
-          result_x, feat_cache, feat_idx, ctx);
+          result_x, feat_cache, feat_idx);
     }
 
     result_x = norm_out_->forward(result_x);
@@ -1428,11 +1416,11 @@ class QwenImageDecoder3dImpl : public torch::nn::Module {
         cache_x = torch::cat({last_frame, cache_x}, 2);
       }
 
-      result_x = conv_out_->forward(result_x, ctx, feat_cache->at(idx));
+      result_x = conv_out_->forward(result_x, feat_cache->at(idx));
       feat_cache->at(idx) = cache_x;
       (*feat_idx)[0]++;
     } else {
-      result_x = conv_out_->forward(result_x, ctx);
+      result_x = conv_out_->forward(result_x);
     }
     return result_x;
   }
@@ -1486,23 +1474,19 @@ class QwenImageDecoder3dImpl : public torch::nn::Module {
 
 TORCH_MODULE(QwenImageDecoder3d);
 
-class AutoencoderKLQwenImageImpl : public torch::nn::Module {
+class AutoencoderKLQwenImageImpl : public torch::nn::Module,
+                                   public dit::VaeParallelMixin {
  public:
   AutoencoderKLQwenImageImpl(const ModelContext& context)
-      : args_(context.get_model_args()),
+      : dit::VaeParallelMixin(context),
+        args_(context.get_model_args()),
         z_dim_(context.get_model_args().z_dim()),
         temperal_downsample_(context.get_model_args().temperal_downsample()),
         base_dim_(context.get_model_args().base_dim()),
         dim_mult_(context.get_model_args().dim_mult()),
         num_res_blocks_(context.get_model_args().num_res_blocks()),
         attn_scales_(context.get_model_args().attn_scales()),
-        dropout_(context.get_model_args().dropout()),
-        // VAE spatial parallel context (always constructed, even w_split=1).
-        // VaeSpatialParallel's own constructor CHECKs that a process group is
-        // provided whenever vae_size > 1.
-        parallel_ctx_(context.get_parallel_args().vae_size(),
-                      context.get_parallel_args().dit_vae_group_,
-                      context.get_tensor_options().device()) {
+        dropout_(context.get_model_args().dropout()) {
     temperal_upsample_ = std::vector<bool>(temperal_downsample_.rbegin(),
                                            temperal_downsample_.rend());
 
@@ -1559,11 +1543,6 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
 
     cached_conv_counts_ = {{"decoder", count_conv3d_modules(*decoder_)},
                            {"encoder", count_conv3d_modules(*encoder_)}};
-
-    if (parallel_ctx_.is_parallel()) {
-      LOG(INFO) << "VAE spatial parallel enabled: w_split="
-                << parallel_ctx_.w_split();
-    }
   }
 
   void enable_tiling(int64_t tile_sample_min_height = -1,
@@ -1600,10 +1579,8 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
     auto b = sizes[0], c = sizes[1], num_frame = sizes[2], height = sizes[3],
          width = sizes[4];
 
-    if (parallel_ctx_.is_parallel()) {
-      x = parallel_ctx_.split(x);
-      width = x.size(-1);
-    }
+    x = vae_parallel_split(x);
+    width = x.size(-1);
 
     if (use_tiling_ &&
         (width > tile_sample_min_width_ || height > tile_sample_min_height_)) {
@@ -1634,15 +1611,13 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
       }
 
       enc_outputs.push_back(
-          encoder_->forward(tile, enc_feat_map_, enc_conv_idx_, parallel_ctx_));
+          encoder_->forward(tile, enc_feat_map_, enc_conv_idx_));
     }
     torch::Tensor out = torch::cat(enc_outputs, 2);
 
-    auto enc = quant_conv_->forward(out, parallel_ctx_);
+    auto enc = quant_conv_->forward(out);
     // Merge latent back to global W before passing to DiT transformer
-    if (parallel_ctx_.is_parallel()) {
-      enc = parallel_ctx_.merge(enc);
-    }
+    enc = vae_parallel_merge(enc);
     clear_cache();
     return enc;
   }
@@ -1677,10 +1652,8 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
     auto b = sizes[0], c = sizes[1], num_frame = sizes[2], height = sizes[3],
          width = sizes[4];
 
-    if (parallel_ctx_.is_parallel()) {
-      z = parallel_ctx_.split(z);
-      width = z.size(-1);
-    }
+    z = vae_parallel_split(z);
+    width = z.size(-1);
 
     auto tile_latent_min_height =
         tile_sample_min_height_ / spatial_compression_ratio_;
@@ -1693,21 +1666,18 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
     }
 
     clear_cache();
-    auto x = post_quant_conv_->forward(z, parallel_ctx_);
+    auto x = post_quant_conv_->forward(z);
 
     std::vector<torch::Tensor> dec_outputs;
     dec_outputs.reserve(num_frame);
     for (int64_t i = 0; i < num_frame; i++) {
       conv_idx_->at(0) = 0;
       auto frame = x.slice(/*dim=*/2, i, i + 1);
-      dec_outputs.push_back(
-          decoder_->forward(frame, feat_map_, conv_idx_, parallel_ctx_));
+      dec_outputs.push_back(decoder_->forward(frame, feat_map_, conv_idx_));
     }
     torch::Tensor out = torch::cat(dec_outputs, 2);
 
-    if (parallel_ctx_.is_parallel()) {
-      out = parallel_ctx_.merge(out);
-    }
+    out = vae_parallel_merge(out);
 
     out = torch::clamp(out, -1.0, 1.0);
     clear_cache();
@@ -1862,10 +1832,9 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
                  torch::indexing::Slice(j, j + tile_sample_min_width_)});
           }
 
-          auto encoded_tile = encoder_->forward(
-              tile, enc_feat_map_, enc_conv_idx_, parallel_ctx_);
-          auto quantized_tile =
-              quant_conv_->forward(encoded_tile, parallel_ctx_);
+          auto encoded_tile =
+              encoder_->forward(tile, enc_feat_map_, enc_conv_idx_);
+          auto quantized_tile = quant_conv_->forward(encoded_tile);
           time_frames.push_back(quantized_tile);
         }
 
@@ -1949,9 +1918,9 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
                        torch::indexing::Slice(i, i + tile_latent_min_height),
                        torch::indexing::Slice(j, j + tile_latent_min_width)});
 
-          auto post_quant_tile = post_quant_conv_->forward(tile, parallel_ctx_);
-          auto decoded_tile = decoder_->forward(
-              post_quant_tile, feat_map_, conv_idx_, parallel_ctx_);
+          auto post_quant_tile = post_quant_conv_->forward(tile);
+          auto decoded_tile =
+              decoder_->forward(post_quant_tile, feat_map_, conv_idx_);
           time_frames.push_back(decoded_tile);
         }
 
@@ -2084,7 +2053,6 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
   QwenImageDecoder3d decoder_{nullptr};
 
   ModelArgs args_;
-  VaeSpatialParallel parallel_ctx_;
 };
 
 TORCH_MODULE(AutoencoderKLQwenImage);
