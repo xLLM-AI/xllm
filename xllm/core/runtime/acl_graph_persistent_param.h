@@ -19,11 +19,13 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <vector>
 
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_input_params.h"
+#include "core/kernels/npu/paged_attention_tiling_layout.h"
 #include "core/runtime/options.h"
 
 // Forward declarations for ATB
@@ -36,6 +38,23 @@ struct TilingBufferInfo;
 }  // namespace atb
 
 namespace xllm::npu {
+
+struct PagedAttentionPlanDescriptor {
+  std::vector<uint32_t> normalized_tiling;
+  uint64_t workspace_size = 0;
+  kernel::npu::PagedAttentionTilingLayout layout;
+};
+
+inline bool operator==(const PagedAttentionPlanDescriptor& lhs,
+                       const PagedAttentionPlanDescriptor& rhs) {
+  return lhs.workspace_size == rhs.workspace_size && lhs.layout == rhs.layout &&
+         lhs.normalized_tiling == rhs.normalized_tiling;
+}
+
+enum class SpecVerifyInputUpdateScope : uint8_t {
+  TOKENS_ONLY,
+  ALL_INPUTS,
+};
 
 // Helper class to hold persistent parameters for graph execution
 // Multiple AclGraph instances can share the same GraphPersistentParam object
@@ -68,6 +87,15 @@ class GraphPersistentParam final {
                      const ModelInputParams& params,
                      uint32_t actual_num_tokens,
                      uint32_t padded_num_tokens);
+
+  // Update persistent graph inputs from speculative-verify source tensors on
+  // the current producer stream. TileLang fusion is an optional specialization
+  // hidden behind this interface.
+  void update_spec_verify_inputs(const torch::Tensor& tokens,
+                                 const torch::Tensor& positions,
+                                 const ModelInputParams& params,
+                                 uint32_t padded_num_tokens,
+                                 SpecVerifyInputUpdateScope scope);
 
   // Getter methods for persistent tensors
   torch::Tensor persistent_tokens(uint32_t actual_tokens = 0) const {
@@ -109,6 +137,14 @@ class GraphPersistentParam final {
     return persistent_mask_;
   }
   const torch::Tensor& tiling_data() const { return tiling_data_; }
+  std::optional<PagedAttentionPlanDescriptor> paged_attention_plan_descriptor(
+      int64_t num_rows,
+      int64_t spec_width) const;
+  std::optional<PagedAttentionPlanDescriptor>
+  classify_spec_verify_paged_attention_plan(const torch::Tensor& tokens,
+                                            const torch::Tensor& k_cache,
+                                            const torch::Tensor& v_cache,
+                                            const ModelInputParams& params);
   torch::Tensor hidden_states(uint32_t actual_tokens = 0) const {
     if (actual_tokens > 0) {
       return hidden_states_.slice(
@@ -195,7 +231,8 @@ class GraphPersistentParam final {
                                    const torch::Tensor& v_cache,
                                    const torch::Tensor& block_tables,
                                    const ModelInputParams& input_params,
-                                   aclrtStream stream);
+                                   aclrtStream stream,
+                                   bool copy_to_device = true);
 
   std::vector<int32_t> update_expanded_spec_decode_attention(
       const ModelInputParams& input_params,
@@ -250,6 +287,9 @@ class GraphPersistentParam final {
 
   // Persistent paged attention tiling tensor on device
   torch::Tensor tiling_data_;
+  std::vector<uint32_t> paged_attention_tiling_template_;
+  uint64_t paged_attention_plan_workspace_size_ = 0;
+  std::mutex paged_attention_plan_mutex_;
 
   // Cached attention parameters
   int32_t num_head_;
