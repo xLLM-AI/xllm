@@ -99,7 +99,7 @@ class VaeParallelMixin {
   }
 
   // ---- queries ------------------------------------------------------------
-
+  // TODO: move this func to private.
   bool vae_parallel_enabled() const {
     return pg_ != nullptr && pg_->world_size() > 1;
   }
