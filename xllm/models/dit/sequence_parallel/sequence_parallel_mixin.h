@@ -23,8 +23,7 @@ limitations under the License.
 #include <unordered_map>
 #include <utility>
 
-#include "core/framework/parallel_state/parallel_state.h"
-#include "models/dit/utils/sequence_parallel_pad_manager.h"
+#include "models/dit/sequence_parallel/sequence_parallel_context.h"
 
 namespace xllm::dit {
 
@@ -33,7 +32,7 @@ using SequenceParallelTensorMap =
 using SequenceParallelTensorDims = std::unordered_map<std::string, int64_t>;
 
 class SequenceParallelMixin {
- public:
+ protected:
   SequenceParallelMixin(ProcessGroup* process_group,
                         SequenceParallelTensorDims input_sequence_dims,
                         SequenceParallelTensorDims output_sequence_dims)
@@ -45,67 +44,29 @@ class SequenceParallelMixin {
   SequenceParallelTensorMap sequence_parallel_forward(
       const SequenceParallelTensorMap& inputs,
       ForwardFn&& forward_fn) const {
-    SequenceParallelTensorMap split_inputs =
-        split_sequence_parallel_inputs(inputs);
+    SequenceParallelContext context(process_group_);
+    SequenceParallelTensorMap local_inputs = inputs;
+    for (const auto& [tensor_name, sequence_dim] : input_sequence_dims_) {
+      auto tensor_it = local_inputs.find(tensor_name);
+      CHECK(tensor_it != local_inputs.end())
+          << "Missing registered sequence-parallel input: " << tensor_name;
+      tensor_it->second = context.scatter_sequence(
+          tensor_it->second, tensor_name, sequence_dim);
+    }
+
     SequenceParallelTensorMap outputs =
-        std::forward<ForwardFn>(forward_fn)(split_inputs);
-    return gather_sequence_parallel_outputs(outputs);
+        std::forward<ForwardFn>(forward_fn)(local_inputs, context);
+    for (const auto& [tensor_name, sequence_dim] : output_sequence_dims_) {
+      auto tensor_it = outputs.find(tensor_name);
+      CHECK(tensor_it != outputs.end())
+          << "Missing registered sequence-parallel output: " << tensor_name;
+      tensor_it->second =
+          context.gather_sequence(tensor_it->second, tensor_name, sequence_dim);
+    }
+    return outputs;
   }
 
  private:
-  SequenceParallelTensorMap split_sequence_parallel_inputs(
-      const SequenceParallelTensorMap& inputs) const {
-    SequenceParallelTensorMap split_inputs = inputs;
-    if (!sequence_parallel_enabled()) {
-      return split_inputs;
-    }
-
-    for (const auto& [tensor_name, sequence_dim] : input_sequence_dims_) {
-      auto tensor_it = split_inputs.find(tensor_name);
-      CHECK(tensor_it != split_inputs.end())
-          << "Missing registered sequence-parallel input: " << tensor_name;
-      if (!tensor_it->second.defined()) {
-        continue;
-      }
-
-      torch::Tensor padded_tensor =
-          SequenceParallelPadManager::get_instance().pad_tensor(
-              tensor_it->second, tensor_name, sequence_dim);
-      tensor_it->second = parallel_state::scatter(
-          padded_tensor, process_group_, static_cast<int32_t>(sequence_dim));
-    }
-    return split_inputs;
-  }
-
-  SequenceParallelTensorMap gather_sequence_parallel_outputs(
-      const SequenceParallelTensorMap& outputs) const {
-    SequenceParallelTensorMap gathered_outputs = outputs;
-    if (!sequence_parallel_enabled()) {
-      return gathered_outputs;
-    }
-
-    for (const auto& [tensor_name, sequence_dim] : output_sequence_dims_) {
-      auto tensor_it = gathered_outputs.find(tensor_name);
-      CHECK(tensor_it != gathered_outputs.end())
-          << "Missing registered sequence-parallel output: " << tensor_name;
-      if (!tensor_it->second.defined()) {
-        continue;
-      }
-
-      tensor_it->second =
-          parallel_state::gather(tensor_it->second.contiguous(),
-                                 process_group_,
-                                 static_cast<int32_t>(sequence_dim));
-      SequenceParallelPadManager::get_instance().unpad_tensor(
-          tensor_it->second, tensor_name, sequence_dim);
-    }
-    return gathered_outputs;
-  }
-
-  bool sequence_parallel_enabled() const {
-    return process_group_ != nullptr && process_group_->world_size() > 1;
-  }
-
   ProcessGroup* process_group_{nullptr};
   SequenceParallelTensorDims input_sequence_dims_;
   SequenceParallelTensorDims output_sequence_dims_;

@@ -413,12 +413,12 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
           const TransformerForwardContext& transformer_context =
               is_positive ? prompt_transformer_context
                           : negative_transformer_context;
-          return sequence_parallel_forward(latents,
-                                           t_expand,
-                                           encoder_hidden_states,
-                                           transformer_context,
-                                           /*use_cfg=*/!is_positive,
-                                           /*step_index=*/i + 1);
+          return transformer_forward(latents,
+                                     t_expand,
+                                     encoder_hidden_states,
+                                     transformer_context,
+                                     /*use_cfg=*/!is_positive,
+                                     /*step_index=*/i + 1);
         });
         auto comb = uncond + guidance_scale * (cond - uncond);
         // Norm-rescale (diffusers): comb * (||cond|| / ||comb||) over channel
@@ -430,12 +430,12 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
         noise_pred = comb * (cond_norm / noise_norm.clamp_min(1e-6));
       } else {
         torch::Tensor t_expand = t.repeat({batch_size});
-        noise_pred = sequence_parallel_forward(latents,
-                                               t_expand,
-                                               prompt_embeds,
-                                               prompt_transformer_context,
-                                               /*use_cfg=*/false,
-                                               /*step_index=*/i + 1);
+        noise_pred = transformer_forward(latents,
+                                         t_expand,
+                                         prompt_embeds,
+                                         prompt_transformer_context,
+                                         /*use_cfg=*/false,
+                                         /*step_index=*/i + 1);
       }
 
       latents = scheduler_->step(noise_pred, t, latents).to(latents.dtype());
@@ -705,32 +705,21 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
     return {torch::cat(embeddings, /*dim=*/0), torch::cat(masks, /*dim=*/0)};
   }
 
-  torch::Tensor sequence_parallel_forward(
+  torch::Tensor transformer_forward(
       const torch::Tensor& hidden_states,
       const torch::Tensor& timestep,
       const torch::Tensor& encoder_hidden_states,
       const TransformerForwardContext& forward_context,
       bool use_cfg,
       int64_t step_index) {
-    xllm::dit::SequenceParallelTensorMap model_outputs =
-        transformer_->sequence_parallel_forward(
-            {{"hidden_states", hidden_states},
-             {"encoder_hidden_states", encoder_hidden_states}},
-            [this, &timestep, &forward_context, use_cfg, step_index](
-                const xllm::dit::SequenceParallelTensorMap& model_inputs) {
-              torch::Tensor output = transformer_->forward(
-                  model_inputs.at("hidden_states"),
-                  timestep,
-                  model_inputs.at("encoder_hidden_states"),
-                  forward_context.rope_cos,
-                  forward_context.rope_sin,
-                  forward_context.attention_mask,
-                  use_cfg,
-                  step_index);
-              return xllm::dit::SequenceParallelTensorMap{
-                  {"hidden_states", output}};
-            });
-    return model_outputs.at("hidden_states");
+    return transformer_->forward(hidden_states,
+                                 timestep,
+                                 encoder_hidden_states,
+                                 forward_context.rope_cos,
+                                 forward_context.rope_sin,
+                                 forward_context.attention_mask,
+                                 use_cfg,
+                                 step_index);
   }
 
   TransformerForwardContext prepare_transformer_context(

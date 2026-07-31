@@ -281,8 +281,5 @@ class VaeParallelMixin {
   ProcessGroup* pg_ = nullptr;
 };
 
-// Mixin for sequence parallelism (to be implemented).
-class SpParallelMixin {};
-
 }  // namespace dit
 }  // namespace xllm

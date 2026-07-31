@@ -16,7 +16,6 @@ limitations under the License.
 #include "parallel_state.h"
 
 #include "core/util/utils.h"
-#include "models/dit/utils/sequence_parallel_pad_manager.h"
 #include "runtime/options.h"
 #include "util/net.h"
 
@@ -302,9 +301,7 @@ std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input,
                                              int32_t scatter_idx,
                                              int32_t gather_idx,
                                              bool async_ops,
-                                             ProcessGroup* process_group,
-                                             bool enable_sp_pad,
-                                             const std::string& tensor_name) {
+                                             ProcessGroup* process_group) {
   if (!process_group) {
     return [input]() { return input; };
   }
@@ -353,13 +350,7 @@ std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input,
                    .transpose(0, 1)
                    .contiguous()
                    .reshape({bs, seqlen, shard_head_num, head_size});
-      return [output, enable_sp_pad, tensor_name]() mutable {
-        if (enable_sp_pad) {
-          xllm::dit::SequenceParallelPadManager::get_instance().unpad_tensor(
-              output, tensor_name, /*dim=*/1);
-        }
-        return output;
-      };
+      return [output]() { return output; };
     } else {
       c10::intrusive_ptr<c10d::Work> all2all_work;
       process_group->all_to_all_single(output,
@@ -373,32 +364,18 @@ std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input,
               bs,
               seqlen,
               shard_head_num,
-              head_size,
-              enable_sp_pad,
-              tensor_name]() mutable -> torch::Tensor {
+              head_size]() mutable -> torch::Tensor {
         all2all_work->wait();
-        auto comm_output =
-            output.reshape({seqlen, bs, shard_head_num, head_size})
-                .transpose(0, 1)
-                .contiguous()
-                .reshape({bs, seqlen, shard_head_num, head_size});
-        if (enable_sp_pad) {
-          xllm::dit::SequenceParallelPadManager::get_instance().unpad_tensor(
-              comm_output, tensor_name, /*dim=*/1);
-        }
-        return comm_output;
+        return output.reshape({seqlen, bs, shard_head_num, head_size})
+            .transpose(0, 1)
+            .contiguous()
+            .reshape({bs, seqlen, shard_head_num, head_size});
       };
     }
   } else if (scatter_idx == 1 && gather_idx == 2) {
     // branch B : from "head shard" -> "sequence shard"
     // input: (bs, seqlen, head_num / group_size, head_size)
     // output (bs, seqlen / group_size, head_num, haed_size)
-    if (enable_sp_pad) {
-      send_input =
-          xllm::dit::SequenceParallelPadManager::get_instance().pad_tensor(
-              send_input, tensor_name, /*dim=*/1);
-    }
-
     auto sizes = send_input.sizes().vec();
     const int64_t bs = sizes[0];
     const int64_t seqlen = sizes[1];
