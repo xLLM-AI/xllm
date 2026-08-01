@@ -716,9 +716,9 @@ void GraphPersistentParam::update_spec_verify_inputs(
 
   if (use_mrope_) {
     // Hybrid mRoPE models store graph positions as [3, max_tokens]. The MTP
-    // worker
-    // supplies the compact [num_tokens] position vector, matching the normal
-    // persistent update path where copy_ broadcasts it across the mRoPE rows.
+    // worker supplies the compact [num_tokens] position vector, matching the
+    // normal persistent update path where copy_ broadcasts it across the mRoPE
+    // rows.
     persistent_positions_.narrow(1, 0, total_tokens).copy_(positions, true);
   } else {
     persistent_positions_.narrow(0, 0, total_tokens).copy_(positions, true);

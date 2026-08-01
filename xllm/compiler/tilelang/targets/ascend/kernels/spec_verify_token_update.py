@@ -20,6 +20,8 @@ import tilelang.language as T
 from .utils import DEFAULT_ASCEND_PASS_CONFIGS
 from ....common.spec import DispatchField, TilelangKernel, register_kernel
 
+# Verification width includes the base target token. These variants therefore
+# cover MTP depths 3, 4, and 5.
 SUPPORTED_SPEC_WIDTHS = (4, 5, 6)
 SYMBOL_BUFFER_CAPACITY = T.symbolic("buffer_capacity")
 
@@ -43,6 +45,10 @@ def build_spec_verify_token_update_kernel(spec_width: int):
             if batch_size == 1:
                 if vid == 0:
                     with T.Scope("V"):
+                        # Use one 256-bit store for the latency-critical batch-1
+                        # path. The wrapper contract requires eight writable
+                        # int32 elements; clear the unused tail so replay never
+                        # observes stale token values.
                         packed_ub = T.alloc_ub((8,), "int32")
                         packed_ub[0] = base_tokens[0]
                         packed_ub[1] = T.Cast("int32", draft_token_0[0])

@@ -1135,9 +1135,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
   ForwardInput metadata_template = input;
   if (use_prelaunched_first_draft) {
     // The first draft was fully prepared and submitted by the preceding
-    // run_validate().  Host metadata is corrected below after the accepted
-    // accepted-token update; it is only needed for draft steps 1..N-1 and
-    // target.
+    // run_validate(). Host metadata is corrected below after the accepted-token
+    // update; it is only needed for draft steps 1..N-1 and target verification.
   } else if (use_device_target_context) {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
 

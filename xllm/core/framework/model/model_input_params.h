@@ -936,18 +936,17 @@ struct GraphInput {
   std::shared_ptr<npu::AclGraphTaskUpdateContext> acl_graph_task_update_context;
 #endif
   torch::Tensor input_tokens_override;
-  // Device token sources produced by a speculative proposer. The graph input
-  // updater may fuse them into stable target-verify storage when a matching
-  // backend specialization exists. Their addresses are not part of the replay
-  // signature unless spec_verify_source_addresses_stable is true.
+  // Device token sources produced by a speculative proposer. A matching
+  // backend may fuse them into graph-owned target-verify storage.
   std::vector<torch::Tensor> spec_verify_draft_token_sources;
-  // All dynamic target-verify source tensors have stable addresses across
-  // replay generations. This contract is algorithm-independent; individual
-  // backends may still select model- or shape-specific fused implementations.
+  // All dynamic target-verify source tensors retain their backing addresses
+  // across replay generations. When true, the ACL graph records those
+  // addresses separately from its graph key/task signature and validates them
+  // before each replay.
   bool spec_verify_source_addresses_stable = false;
-  // The static causal-conv task-ready event has already been queued on the
-  // compute stream. Replay may consume it without issuing a host-side task
-  // update on the final-draft-to-target critical path.
+  // All ready events for the current static causal-conv task signature have
+  // already been recorded on the signal stream. Replay can skip cold-path
+  // signaling on the final-draft-to-target critical path.
   bool spec_verify_static_graph_tasks_prepared = false;
 
   GraphInput to(const torch::Device& device) const {

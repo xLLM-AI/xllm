@@ -19,6 +19,8 @@ import tilelang.language as T
 from .utils import DEFAULT_ASCEND_PASS_CONFIGS
 from ....common.spec import DispatchField, TilelangKernel, register_kernel
 
+# Verification width includes the base target token. These variants therefore
+# cover MTP depths 3, 4, and 5.
 SUPPORTED_SPEC_WIDTHS = (4, 5, 6)
 SYMBOL_NUM_ROWS = T.symbolic("num_rows")
 SYMBOL_TILING_WORDS = T.symbolic("tiling_words")

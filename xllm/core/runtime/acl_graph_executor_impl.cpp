@@ -182,7 +182,9 @@ std::optional<std::array<const void*, 11>> spec_verify_input_addresses(
       params.graph.input_tokens_override.defined()
           ? params.graph.input_tokens_override
           : tokens;
-  // Graph key + eligibility fix shapes; packed fixed-capacity fixes strides.
+  // The graph key fixes tensor view shapes; this address list protects their
+  // backing storage. Fixed-capacity packed buffers keep the corresponding
+  // strides stable across replay generations.
   const std::array<const torch::Tensor*, 11> sources = {
       &graph_tokens,
       &positions,
@@ -680,8 +682,8 @@ ModelOutput AclGraph::replay(CausalLM* model,
       << "prepared static graph tasks do not match the replay signature";
   if (use_static_graph_tasks && !static_graph_tasks_prepared) {
     // Cold/fallback path: the final-draft pre-submit could not find this graph
-    // variant. Ring its ready event immediately before replay; steady MTP3/4
-    // cycles use the compute-stream pre-submit path instead.
+    // variant. Signal its task-ready events immediately before replay; steady
+    // supported-width cycles use the compute-stream pre-submit path instead.
     CHECK(update_stream_.has_value());
     signal_static_graph_tasks(update_stream_.value());
   }
