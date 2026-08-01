@@ -31,6 +31,7 @@ class EagerRunner(BaseRunner):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         metadata: AttentionMetadata,
+        input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
     ) -> torch.Tensor:
         self.attention_backend.prepare(metadata)
@@ -43,4 +44,6 @@ class EagerRunner(BaseRunner):
                 layer_synchronizer=layer_synchronizer,
             )
         ):
-            return self.model(input_ids, positions)
+            if input_embedding is None:
+                return self.model(input_ids, positions)
+            return self.model(input_ids, positions, input_embedding)

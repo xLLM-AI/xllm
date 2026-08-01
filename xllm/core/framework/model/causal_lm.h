@@ -167,6 +167,8 @@ class CausalLM : public torch::nn::Module {
     NOT_IMPLEMENTED();
   }
 
+  virtual bool share_weights_from(CausalLM& /*source*/) { return false; }
+
   // DFlash-specific interface. Attention-free scatter-only pass that projects
   // target hidden into the draft's per-layer KV cache. Not part of forward()
   // because it has no attention and its shape doesn't match forward's decode

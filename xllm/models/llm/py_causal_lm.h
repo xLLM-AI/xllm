@@ -50,6 +50,8 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalLM {
   void prepare_expert_weight(int32_t, const std::vector<int32_t>&) override {}
   void update_expert_weight(int32_t) override {}
 
+  bool share_weights_from(CausalLM& source) override;
+
   pybind11::object& python_model() { return py_model_; }
   const pybind11::object& config_dict() const { return config_dict_; }
 

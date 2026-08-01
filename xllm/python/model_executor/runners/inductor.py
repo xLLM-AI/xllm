@@ -35,6 +35,7 @@ class InductorRunner(BaseRunner):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         metadata: AttentionMetadata,
+        input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
     ) -> torch.Tensor:
         self.attention_backend.prepare(metadata)
@@ -47,4 +48,6 @@ class InductorRunner(BaseRunner):
                 layer_synchronizer=layer_synchronizer,
             )
         ):
-            return self.compiled_model(input_ids, positions)
+            if input_embedding is None:
+                return self.compiled_model(input_ids, positions)
+            return self.compiled_model(input_ids, positions, input_embedding)
