@@ -3158,7 +3158,7 @@ bool ForwardSharedMemoryManager::input_write(const ForwardInput& input) {
 void ForwardSharedMemoryManager::input_read(
     ForwardInput& input,
     const torch::Device& device,
-    bool materialize_device_buffer_on_read) {
+    InputDeviceMaterializationPolicy policy) {
   while (true) {
     if (control_ptr_->version != last_version_) {
       last_version_ = control_ptr_->version;
@@ -3175,8 +3175,10 @@ void ForwardSharedMemoryManager::input_read(
   bool materialize_device_buffer = false;
   bool own_pinned_host_payload = false;
 #if defined(USE_NPU)
-  materialize_device_buffer = materialize_device_buffer_on_read;
-  own_pinned_host_payload = !materialize_device_buffer;
+  materialize_device_buffer =
+      policy == InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ;
+  own_pinned_host_payload =
+      policy == InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE;
 #elif defined(USE_CUDA)
   materialize_device_buffer = device.type() == torch::kCUDA;
 #elif defined(USE_MLU)

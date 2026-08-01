@@ -43,6 +43,11 @@ enum class ForwardType : int8_t {
   RAW_OUTPUT = 4,
 };
 
+enum class InputDeviceMaterializationPolicy : int8_t {
+  MATERIALIZE_ON_READ = 0,
+  DEFER_TO_WORKER_PREPARE,
+};
+
 class ForwardSharedMemoryManager : public SharedMemoryManager {
  public:
   explicit ForwardSharedMemoryManager(const std::string& name,
@@ -106,7 +111,8 @@ class ForwardSharedMemoryManager : public SharedMemoryManager {
   bool input_write(const ForwardInput& input);
   void input_read(ForwardInput& input,
                   const torch::Device& device,
-                  bool materialize_device_buffer_on_read = true);
+                  InputDeviceMaterializationPolicy policy =
+                      InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ);
   bool raw_output_write(
       const torch::Tensor& next_tokens,
       const torch::Tensor& logprobs,
