@@ -125,4 +125,18 @@ torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
   return out.cast<torch::Tensor>();
 }
 
+bool PyCausalLM::share_weights_from(CausalLM& source) {
+  auto* source_model = dynamic_cast<PyCausalLM*>(&source);
+  if (source_model == nullptr) {
+    return false;
+  }
+
+  py::gil_scoped_acquire gil;
+  py_model_.attr("lm_head") = source_model->py_model_.attr("lm_head");
+  py::object draft_body = py_model_.attr("model");
+  py::object target_body = source_model->py_model_.attr("model");
+  draft_body.attr("embed_tokens") = target_body.attr("embed_tokens");
+  return true;
+}
+
 }  // namespace xllm

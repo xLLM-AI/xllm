@@ -205,6 +205,9 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
   }
 
   py::object py_metadata = py::cast(AttentionMetadataView(attn_metadata));
+  py::object input_embedding = params.embedding.input_embedding.defined()
+                                   ? py::cast(params.embedding.input_embedding)
+                                   : py::none();
 
   py::object py_sync = py::none();
 #if defined(USE_NPU)
@@ -214,9 +217,8 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
 #endif
 
   // Execute: one C++ -> Python call per step.
-  py::object hidden_obj =
-      py_executor_.attr("execute")(tokens, positions, py_metadata, py_sync);
-
+  py::object hidden_obj = py_executor_.attr("execute")(
+      tokens, positions, py_metadata, input_embedding, py_sync);
   return ModelOutput(hidden_obj.cast<torch::Tensor>());
 }
 

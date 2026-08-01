@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 
 from xllm.python.attention.backend import AttentionBackend, AttentionMetadata
+from xllm.python.model_executor.forward_context import LayerSynchronizer
 
 
 class BaseRunner(ABC):
@@ -36,5 +37,7 @@ class BaseRunner(ABC):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         metadata: AttentionMetadata,
+        input_embedding: torch.Tensor | None = None,
+        layer_synchronizer: LayerSynchronizer | None = None,
     ) -> torch.Tensor:
         pass
