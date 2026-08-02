@@ -3173,18 +3173,16 @@ void ForwardSharedMemoryManager::input_read(
   uint64_t total_size;
   read_data(data_ptr, total_size);
   bool materialize_device_buffer = false;
-  bool own_pinned_host_payload = false;
 #if defined(USE_NPU)
   materialize_device_buffer =
       policy == InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ;
-  own_pinned_host_payload =
-      policy == InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE;
 #elif defined(USE_CUDA)
   materialize_device_buffer = device.type() == torch::kCUDA;
 #elif defined(USE_MLU)
   materialize_device_buffer = device.type() == torch::kPrivateUse1;
 #endif
-  if (own_pinned_host_payload) {
+#if defined(USE_NPU)
+  if (policy == InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE) {
     input.input_host_buffer =
         torch::empty({static_cast<int64_t>(total_size)},
                      torch::TensorOptions()
@@ -3194,6 +3192,7 @@ void ForwardSharedMemoryManager::input_read(
     std::memcpy(input.input_host_buffer.data_ptr(), data_ptr, total_size);
     data_ptr = static_cast<const char*>(input.input_host_buffer.data_ptr());
   }
+#endif
   deserialize_forward_input_payload(data_ptr,
                                     total_size,
                                     input,
