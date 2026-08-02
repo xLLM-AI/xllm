@@ -21,8 +21,54 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/framework/tokenizer/tokenizer.h"
+
 namespace xllm {
 namespace {
+
+class LossySingleTokenTokenizer final : public Tokenizer {
+ public:
+  std::string decode(const Slice<int32_t>& ids,
+                     bool skip_special_tokens) const override {
+    (void)skip_special_tokens;
+    std::string decoded;
+    for (const int32_t id : ids) {
+      if (id == 2) {
+        decoded += "\xEF\xBF\xBD";
+      } else {
+        decoded += decode_token(id);
+      }
+    }
+    return decoded;
+  }
+
+  std::string decode_token(int32_t id) const override {
+    switch (id) {
+      case 0:
+        return "{";
+      case 1:
+        return "\"";
+      case 2:
+        return "a\"";
+      case 3:
+        return ":";
+      case 4:
+        return "1";
+      case 5:
+        return "}";
+      case 6:
+        return "<eos>";
+      default:
+        return "";
+    }
+  }
+
+  std::string id_to_token(int32_t id) const override {
+    return decode_token(id);
+  }
+
+  size_t vocab_size() const override { return 7; }
+};
 
 JsonObjectGrammar make_grammar(bool add_model_only_token = false) {
   std::vector<std::string> token_pieces = {
@@ -184,6 +230,27 @@ TEST(JsonObjectGrammarTest, StopsAtObjectCompletionWithMultipleStopTokens) {
   EXPECT_TRUE(state.can_accept_token(/*stop_token_id=*/7));
   EXPECT_TRUE(state.can_accept_token(/*stop_token_id=*/8));
   EXPECT_FALSE(state.can_accept_token(/*trailing_space_token_id=*/6));
+}
+
+TEST(JsonObjectGrammarTest, UsesStableDecodeTokenPiecesForGrammar) {
+  LossySingleTokenTokenizer tokenizer;
+  std::string error;
+  std::shared_ptr<const JsonObjectGrammar> grammar =
+      JsonObjectGrammar::create_from_tokenizer(tokenizer,
+                                               /*eos_token_id=*/6,
+                                               /*stop_token_ids=*/{},
+                                               /*model_vocab_size=*/7,
+                                               /*reasoning_enabled=*/false,
+                                               &error);
+  ASSERT_NE(grammar, nullptr) << error;
+
+  JsonObjectGrammarState state = grammar->initial_state();
+  ASSERT_TRUE(state.accept_token(0));
+  ASSERT_TRUE(state.accept_token(1));
+  ASSERT_TRUE(state.accept_token(2));
+
+  EXPECT_TRUE(state.can_accept_token(3));
+  EXPECT_FALSE(state.can_accept_piece("x"));
 }
 
 }  // namespace

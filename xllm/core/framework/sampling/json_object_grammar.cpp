@@ -496,7 +496,7 @@ JsonObjectGrammar::create_from_tokenizer(
   size_t non_empty_piece_count = 0;
   for (size_t token_id = 0; token_id < tokenizer_vocab_size; ++token_id) {
     const int32_t id = static_cast<int32_t>(token_id);
-    std::string piece = tokenizer.decode(Slice<int32_t>(&id, 1), false);
+    std::string piece = tokenizer.decode_token(id);
     if (piece.empty()) {
       piece = tokenizer.id_to_token(id);
     }
