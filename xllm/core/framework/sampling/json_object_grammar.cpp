@@ -23,6 +23,22 @@ namespace xllm {
 namespace {
 
 constexpr float kDisallowedTokenMask = -1.0e9F;
+constexpr uint64_t kFnvOffsetBasis = 14695981039346656037ULL;
+constexpr uint64_t kFnvPrime = 1099511628211ULL;
+
+uint64_t hash_byte(uint64_t hash, uint8_t value) {
+  return (hash ^ value) * kFnvPrime;
+}
+
+uint64_t hash_uint64(uint64_t hash, uint64_t value) {
+  for (int32_t byte_index = 0; byte_index < 8; ++byte_index) {
+    const int32_t shift = byte_index * 8;
+    hash = hash_byte(
+        hash,
+        static_cast<uint8_t>((value >> shift) & static_cast<uint64_t>(0xFF)));
+  }
+  return hash;
+}
 
 bool is_hex_digit(char character) {
   return (character >= '0' && character <= '9') ||
@@ -65,6 +81,15 @@ bool JsonObjectGrammarState::accept_token(int32_t token_id) {
     return false;
   }
 
+  if (grammar_->stop_token_ids_.find(token_id) !=
+      grammar_->stop_token_ids_.end()) {
+    if (reasoning_phase_ || !root_complete_ || parse_mode_ != ParseMode::NONE) {
+      return false;
+    }
+    committed_token_ids_.push_back(token_id);
+    return true;
+  }
+
   if (reasoning_phase_) {
     if (grammar_->reasoning_end_token_ids_.empty()) {
       committed_token_ids_.push_back(token_id);
@@ -90,12 +115,7 @@ bool JsonObjectGrammarState::accept_token(int32_t token_id) {
 
   if (root_complete_ && parse_mode_ == ParseMode::NONE &&
       !grammar_->stop_token_ids_.empty()) {
-    if (grammar_->stop_token_ids_.find(token_id) ==
-        grammar_->stop_token_ids_.end()) {
-      return false;
-    }
-    committed_token_ids_.push_back(token_id);
-    return true;
+    return false;
   }
 
   const std::string& piece = grammar_->token_piece(token_id);
@@ -115,6 +135,20 @@ JsonObjectGrammarSnapshot JsonObjectGrammarState::snapshot() const {
   snapshot.reasoning_enabled = reasoning_enabled_;
   snapshot.token_ids = committed_token_ids_;
   return snapshot;
+}
+
+uint64_t JsonObjectGrammarState::fingerprint() const {
+  const JsonObjectGrammarSnapshot state_snapshot = snapshot();
+  uint64_t hash = kFnvOffsetBasis;
+  hash = hash_uint64(hash, state_snapshot.enabled ? 1U : 0U);
+  hash = hash_uint64(hash, state_snapshot.reasoning_enabled ? 1U : 0U);
+  hash =
+      hash_uint64(hash, static_cast<uint64_t>(state_snapshot.token_ids.size()));
+  for (const int32_t token_id : state_snapshot.token_ids) {
+    hash = hash_uint64(hash,
+                       static_cast<uint64_t>(static_cast<uint32_t>(token_id)));
+  }
+  return hash;
 }
 
 bool JsonObjectGrammarState::can_accept_piece(std::string_view piece) const {

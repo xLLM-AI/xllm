@@ -22,7 +22,10 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
+#include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -886,6 +889,58 @@ TEST(BatchTest, SampleRequestInjectsAllMatchedSlots) {
   EXPECT_EQ(sampling_params_out.selected_token_idxes.size(0), 2);
 }
 
+TEST(BatchTest, JsonObjectSampleSequenceIdsFollowSamplingRows) {
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(4);
+  BlockManagerImpl manager(options);
+
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(4);
+  std::shared_ptr<const JsonObjectGrammar> grammar =
+      std::make_shared<const JsonObjectGrammar>(
+          std::vector<std::string>{"{", "}", "\"", "a", ":", "1", ""},
+          std::unordered_set<int32_t>{6});
+
+  SequenceParams first_params;
+  first_params.seq_capacity = 16;
+  first_params.stopping_checker = &stopping_checker;
+  first_params.sampling_param = &sampling_param;
+  first_params.request_id = "req-shared";
+  first_params.json_object_grammar = grammar;
+
+  SequenceParams second_params = first_params;
+  second_params.request_id = "req-shared";
+
+  IncrementalDecoder first_decoder("", 2, false, false);
+  Sequence first(/*index=*/0,
+                 /*token_ids=*/{10, 11},
+                 torch::Tensor(),
+                 MMData(),
+                 std::move(first_decoder),
+                 first_params);
+  first.add_kv_blocks(manager.allocate(1));
+
+  IncrementalDecoder second_decoder("", 2, false, false);
+  Sequence second(/*index=*/1,
+                  /*token_ids=*/{20, 21},
+                  torch::Tensor(),
+                  MMData(),
+                  std::move(second_decoder),
+                  second_params);
+  second.add_kv_blocks(manager.allocate(1));
+
+  Batch batch({&second, &first});
+  ForwardInput forward_input = batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
+
+  EXPECT_EQ(forward_input.sample_sequence_ids,
+            std::vector<std::string>({"req-shared#1", "req-shared#0"}));
+  ASSERT_EQ(forward_input.json_object_states.size(), 2u);
+  ASSERT_TRUE(forward_input.sampling_params.filter_mask.defined());
+  EXPECT_EQ(forward_input.sampling_params.filter_mask.size(0), 2);
+}
+
 TEST(BatchTest, ChunkedPDTransferUsesStepWindow) {
   torch::Device device(Platform::type_torch(), 0);
   const uint32_t n_blocks = 8;
@@ -1125,6 +1180,7 @@ TEST(BatchTest, ForwardInputPackedRoundTripPreservesTransportFields) {
   input.input_params.embedding.mtp_bootstrap_row_idxes = {0};
   input.input_params.embedding.mtp_bootstrap_embeddings =
       torch::tensor({{3.0f, 4.0f}});
+  input.sample_sequence_ids = {"req-packed#0"};
   bool is_creator = false;
   auto shm_name =
       ForwardSharedMemoryManager::create_unique_name("batch_test_forward_input",
@@ -1151,6 +1207,8 @@ TEST(BatchTest, ForwardInputPackedRoundTripPreservesTransportFields) {
   EXPECT_EQ(mapping.remote_ids, (std::vector<uint64_t>{100}));
   EXPECT_EQ(round_trip.input_params.embedding.mtp_bootstrap_row_idxes,
             std::vector<int32_t>{0});
+  EXPECT_EQ(round_trip.sample_sequence_ids,
+            std::vector<std::string>{"req-packed#0"});
   ASSERT_TRUE(
       round_trip.input_params.embedding.mtp_bootstrap_embeddings.defined());
   EXPECT_TRUE(torch::equal(

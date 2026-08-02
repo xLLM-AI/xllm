@@ -23,6 +23,8 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
+
+#include "core/runtime/json_object_output_rows.h"
 #if defined(USE_NPU)
 #include "acl/acl.h"
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
@@ -671,17 +673,21 @@ WorkerImpl::estimate_kv_cache_capacity_async() {
 
 void WorkerImpl::update_last_step_output(
     const std::optional<ForwardOutput>& output,
-    const std::vector<std::string>& request_ids) {
+    const std::vector<std::string>& request_ids,
+    const std::vector<std::string>& sample_sequence_ids) {
   if (output.value().sample_output.next_tokens.defined()) {
     last_step_output_ = std::move(output.value());
     last_step_request_ids_ = request_ids;
+    last_step_sample_sequence_ids_ = sample_sequence_ids;
     last_step_output_valid_ = true;
   } else {
     if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
       last_step_output_ = std::move(output.value());
       last_step_request_ids_ = request_ids;
+      last_step_sample_sequence_ids_ = sample_sequence_ids;
     } else {
       last_step_request_ids_.clear();
+      last_step_sample_sequence_ids_.clear();
     }
     last_step_output_valid_ = false;
   }
@@ -758,21 +764,24 @@ void WorkerImpl::update_json_object_states_by_last_step_output(
       << "overlap JSON token output must be 1-D or 2-D, got "
       << next_tokens.sizes();
 
-  const auto& current_request_ids = input.input_params.embedding.request_ids;
-  const bool has_request_ids =
-      !current_request_ids.empty() && !last_step_request_ids_.empty();
+  if (!last_step_sample_sequence_ids_.empty()) {
+    CHECK_EQ(last_step_sample_sequence_ids_.size(),
+             static_cast<size_t>(next_tokens.size(0)))
+        << "last-step sampled request ids must align with output rows";
+  }
+
+  std::vector<int32_t> output_rows;
+  std::string row_error;
+  CHECK(detail::resolve_json_object_output_rows(input.json_object_states,
+                                                input.sample_sequence_ids,
+                                                last_step_sample_sequence_ids_,
+                                                &output_rows,
+                                                &row_error))
+      << row_error;
+
   for (size_t state_idx = 0; state_idx < input.json_object_states.size();
        ++state_idx) {
-    int32_t output_idx = static_cast<int32_t>(state_idx);
-    if (has_request_ids && state_idx < current_request_ids.size()) {
-      const auto iter = std::find(last_step_request_ids_.begin(),
-                                  last_step_request_ids_.end(),
-                                  current_request_ids[state_idx]);
-      if (iter == last_step_request_ids_.end()) {
-        continue;
-      }
-      output_idx = static_cast<int32_t>(iter - last_step_request_ids_.begin());
-    }
+    const int32_t output_idx = output_rows[state_idx];
     if (output_idx < 0 || output_idx >= next_tokens.size(0)) {
       continue;
     }
@@ -1282,22 +1291,28 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
           std::unique_lock<std::mutex> lock(mtx_);
           cv_.wait(lock, [this] { return !is_recorded_; });
           update_last_step_output(output,
-                                  input.input_params.embedding.request_ids);
+                                  input.input_params.embedding.request_ids,
+                                  input.sample_sequence_ids);
           is_recorded_ = true;
           cv_.notify_one();
         } else {
           update_last_step_output(output,
-                                  input.input_params.embedding.request_ids);
+                                  input.input_params.embedding.request_ids,
+                                  input.sample_sequence_ids);
         }
       } else {
         if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
           std::unique_lock<std::mutex> lock(mtx_);
           cv_.wait(lock, [this] { return !is_recorded_; });
           last_step_output_valid_ = false;
+          last_step_request_ids_.clear();
+          last_step_sample_sequence_ids_.clear();
           is_recorded_ = true;
           cv_.notify_one();
         } else {
           last_step_output_valid_ = false;
+          last_step_request_ids_.clear();
+          last_step_sample_sequence_ids_.clear();
         }
       }
       promise.setValue(output);

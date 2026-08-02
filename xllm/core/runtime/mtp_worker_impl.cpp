@@ -875,6 +875,71 @@ void MTPWorkerImpl::prepare_work_before_execute(const ForwardInput& input,
   SpeculativeWorkerImpl::prepare_work_before_execute(input, processed_input);
 }
 
+folly::SemiFuture<std::optional<ForwardOutput>> MTPWorkerImpl::step_async(
+    const ForwardInput& input) {
+  folly::Promise<std::optional<ForwardOutput>> promise;
+  auto future = promise.getSemiFuture();
+  threadpool_.schedule([this, input, promise = std::move(promise)]() mutable {
+    std::lock_guard<std::recursive_mutex> lock(step_mutex_);
+
+    ForwardInput input_on_device;
+    prepare_work_before_execute(input, input_on_device);
+
+    if (hierarchy_kv_cache_transfer_ != nullptr) {
+      hierarchy_kv_cache_transfer_->set_layer_synchronizer(
+          input_on_device.input_params);
+    }
+
+    if (!enable_schedule_overlap()) {
+      const auto output = this->step(input_on_device);
+      promise.setValue(output);
+      return;
+    }
+
+    if (can_use_last_step_output_for_schedule_overlap(input_on_device) &&
+        input_on_device.token_ids.numel() > 0 &&
+        input_on_device.input_params.meta.batch_forward_type.has_decode()) {
+      input_on_device = update_input_by_last_step_output_for_schedule_overlap(
+          input_on_device);
+    }
+
+    const auto output = this->step_for_schedule_overlap(input_on_device);
+    if (output.has_value()) {
+      if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
+        std::unique_lock<std::mutex> output_lock(mtx_);
+        cv_.wait(output_lock, [this] { return !is_recorded_; });
+        update_last_step_output(
+            output,
+            input_on_device.input_params.embedding.request_ids,
+            input_on_device.sample_sequence_ids);
+        is_recorded_ = true;
+        cv_.notify_one();
+      } else {
+        update_last_step_output(
+            output,
+            input_on_device.input_params.embedding.request_ids,
+            input_on_device.sample_sequence_ids);
+      }
+    } else {
+      if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
+        std::unique_lock<std::mutex> output_lock(mtx_);
+        cv_.wait(output_lock, [this] { return !is_recorded_; });
+        last_step_output_valid_ = false;
+        last_step_request_ids_.clear();
+        last_step_sample_sequence_ids_.clear();
+        is_recorded_ = true;
+        cv_.notify_one();
+      } else {
+        last_step_output_valid_ = false;
+        last_step_request_ids_.clear();
+        last_step_sample_sequence_ids_.clear();
+      }
+    }
+    promise.setValue(output);
+  });
+  return future;
+}
+
 bool MTPWorkerImpl::owns_npu_cp_plan_build() const { return false; }
 
 std::optional<ForwardOutput> MTPWorkerImpl::step_empty(

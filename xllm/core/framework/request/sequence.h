@@ -251,6 +251,9 @@ class Sequence final {
   }
   Block copy_block(BlockType type) const { return kv_state_.copy_block(type); }
   const std::string& request_id() const { return request_id_; }
+  std::string sample_sequence_id() const {
+    return request_id_ + "#" + std::to_string(index_);
+  }
   // get input embedding
   torch::Tensor get_input_embedding() const { return input_embedding_; }
 

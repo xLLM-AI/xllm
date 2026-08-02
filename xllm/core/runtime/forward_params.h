@@ -536,6 +536,7 @@ struct ForwardInput {
     inputs.kv_slot_layout = kv_slot_layout;
     inputs.metadata_ready_event = metadata_ready_event;
     inputs.cp_partitioned = cp_partitioned;
+    inputs.sample_sequence_ids = sample_sequence_ids;
     inputs.json_object_states = json_object_states;
     inputs.json_object_state_snapshots = json_object_state_snapshots;
   }
@@ -592,6 +593,7 @@ struct ForwardInput {
   ModelInputParams input_params;
   SamplingParameters sampling_params;
   SamplingParameters decoder_sampling_params;
+  std::vector<std::string> sample_sequence_ids;
   std::vector<JsonObjectGrammarState> json_object_states;
   std::vector<JsonObjectGrammarSnapshot> json_object_state_snapshots;
   // Flattened [sequence][draft position] flags produced during MTP

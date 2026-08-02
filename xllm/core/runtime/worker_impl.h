@@ -222,8 +222,10 @@ class WorkerImpl {
   }
 
  protected:
-  void update_last_step_output(const std::optional<ForwardOutput>& output,
-                               const std::vector<std::string>& request_ids);
+  void update_last_step_output(
+      const std::optional<ForwardOutput>& output,
+      const std::vector<std::string>& request_ids,
+      const std::vector<std::string>& sample_sequence_ids);
   bool can_use_last_step_output_for_schedule_overlap(
       const ForwardInput& input) const;
   virtual std::optional<ForwardOutput> step_for_schedule_overlap(
@@ -358,6 +360,8 @@ class WorkerImpl {
   // params for enable_schedule_overlap case
   // an output to store the result of last step
   ForwardOutput last_step_output_;
+  std::vector<std::string> last_step_request_ids_;
+  std::vector<std::string> last_step_sample_sequence_ids_;
   bool last_step_output_valid_ = false;
   std::mutex mtx_;
   std::condition_variable cv_;

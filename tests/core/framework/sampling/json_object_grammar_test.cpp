@@ -130,6 +130,9 @@ TEST(JsonObjectGrammarTest, TemporaryAdvanceDoesNotCommitState) {
   EXPECT_TRUE(state.can_accept_piece("{"));
   EXPECT_TRUE(state.accept_piece("{"));
   EXPECT_TRUE(state.can_accept_piece("}"));
+  const uint64_t fingerprint = state.fingerprint();
+  EXPECT_FALSE(state.can_accept_piece("]"));
+  EXPECT_EQ(state.fingerprint(), fingerprint);
   EXPECT_FALSE(state.is_complete());
   EXPECT_TRUE(state.accept_piece("\"a\":1}"));
   EXPECT_TRUE(state.is_complete());
@@ -165,9 +168,11 @@ TEST(JsonObjectGrammarTest, SnapshotRestoresCommittedState) {
   ASSERT_TRUE(snapshot.enabled);
   EXPECT_FALSE(snapshot.reasoning_enabled);
   EXPECT_EQ(snapshot.token_ids, std::vector<int32_t>({0, 2, 3, 2}));
+  const uint64_t fingerprint = state.fingerprint();
 
   JsonObjectGrammarState restored = grammar.restore_state(snapshot);
   EXPECT_TRUE(restored.is_valid());
+  EXPECT_EQ(restored.fingerprint(), fingerprint);
   EXPECT_TRUE(restored.can_accept_piece(":1}"));
 }
 
@@ -186,6 +191,52 @@ TEST(JsonObjectGrammarTest, ReasoningIsUnconstrainedUntilEndMarker) {
   EXPECT_FALSE(state.in_reasoning());
   EXPECT_TRUE(state.can_accept_token(0));
   EXPECT_FALSE(state.can_accept_token(1));
+}
+
+TEST(JsonObjectGrammarTest, RejectsNonEmptyStopTokensBeforeRootCompletion) {
+  JsonObjectGrammar grammar({"{",
+                             "\"",
+                             "a",
+                             ":",
+                             "1",
+                             "x",
+                             " ",
+                             "e",
+                             "}",
+                             "tru",
+                             "<think>",
+                             "</think>"},
+                            /*stop_token_ids=*/{5, 6, 7},
+                            /*reasoning_end_token_ids=*/{10, 11});
+
+  JsonObjectGrammarState reasoning_state =
+      grammar.initial_state(/*reasoning_phase=*/true);
+  EXPECT_FALSE(reasoning_state.can_accept_token(/*stop_x=*/5));
+
+  JsonObjectGrammarState key_state = grammar.initial_state();
+  ASSERT_TRUE(key_state.accept_piece("{\"a"));
+  EXPECT_FALSE(key_state.can_accept_token(/*stop_x=*/5));
+
+  JsonObjectGrammarState string_value_state = grammar.initial_state();
+  ASSERT_TRUE(string_value_state.accept_piece("{\"a\":\""));
+  EXPECT_FALSE(string_value_state.can_accept_token(/*stop_x=*/5));
+
+  JsonObjectGrammarState number_state = grammar.initial_state();
+  ASSERT_TRUE(number_state.accept_piece("{\"a\":1"));
+  EXPECT_FALSE(number_state.can_accept_token(/*stop_space=*/6));
+
+  JsonObjectGrammarState literal_state = grammar.initial_state();
+  ASSERT_TRUE(literal_state.accept_piece("{\"a\":tru"));
+  EXPECT_FALSE(literal_state.can_accept_token(/*stop_e=*/7));
+}
+
+TEST(JsonObjectGrammarTest, AcceptsNonEmptyStopTokenAfterRootCompletion) {
+  JsonObjectGrammar grammar({"{", "}", "\"", "a", ":", "1", "stop"},
+                            /*stop_token_ids=*/{6});
+  JsonObjectGrammarState state = grammar.initial_state();
+
+  ASSERT_TRUE(state.accept_piece("{\"a\":1}"));
+  EXPECT_TRUE(state.can_accept_token(/*stop_token_id=*/6));
 }
 
 TEST(JsonObjectGrammarTest, MaskHasNoUnrestrictedFailureFallback) {

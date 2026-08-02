@@ -53,6 +53,7 @@ class JsonObjectGrammarState final {
   bool initialized() const { return grammar_ != nullptr; }
   const JsonObjectGrammar* grammar() const { return grammar_; }
   JsonObjectGrammarSnapshot snapshot() const;
+  uint64_t fingerprint() const;
 
  private:
   friend class JsonObjectGrammar;
