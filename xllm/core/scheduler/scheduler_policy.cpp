@@ -168,14 +168,14 @@ void SchedulerPolicy::reset_batch_state(SchedulerState& state) {
 // Prefill scheduling
 // =============================================================================
 
-bool SchedulerPolicy::schedule_prefill_from_queue(
+void SchedulerPolicy::schedule_prefill_from_queue(
     RequestPriorityQueue* queue,
     SchedulerState& state,
     ScheduleBudget& budget,
     std::vector<std::shared_ptr<Request>>& finished,
     size_t& reserved_full_footprint) {
   if (queue == nullptr || queue->empty()) {
-    return false;
+    return;
   }
 
   bool budget_exhausted = false;
@@ -328,7 +328,6 @@ bool SchedulerPolicy::schedule_prefill_from_queue(
   // Handle unschedulable head request.
   handle_unschedulable_head(
       queue, state, finished, budget_exhausted, blocks_exhausted);
-  return blocks_exhausted;
 }
 
 size_t SchedulerPolicy::compute_prefill_tokens(Sequence* seq,
