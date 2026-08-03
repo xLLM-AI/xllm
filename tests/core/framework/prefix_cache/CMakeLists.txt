@@ -7,6 +7,7 @@ cc_test(
     prefix_cache_test.cpp
   DEPS
     :config
+    :encoder_cache
     :kv_cache
     :prefix_cache
     :block

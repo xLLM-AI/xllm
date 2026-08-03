@@ -107,12 +107,15 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
   }
 #endif
 
-  // Try to create a causal LM model
   context.set_model_impl(model_config.model_impl());
-  model_ = create_llm_model(context);
+  if (options_.backend() == "vlm") {
+    model_ = create_vlm_model(context);
+  } else {
+    model_ = create_llm_model(context);
+  }
 
-  // Dont find model in causal models
-  CHECK(model_ != nullptr) << "Failed to create model.";
+  CHECK(model_ != nullptr) << "Failed to create " << options_.backend()
+                           << " causal model.";
   model_executor_ = std::make_unique<Executor>(
       model_.get(), context.get_model_args(), device_, options_);
 

@@ -106,6 +106,16 @@ cc_test(
     GTest::gtest_main
 )
 
+cc_test(
+  NAME
+    serving_mode_test
+  SRCS
+    serving_mode_test.cpp
+  DEPS
+    common
+    GTest::gtest_main
+)
+
 # Integration smoke tests for OpenAI-compatible endpoints. These require a
 # running server and are disabled by default in code.
 cc_test(

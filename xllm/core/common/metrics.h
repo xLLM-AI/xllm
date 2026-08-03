@@ -196,6 +196,7 @@ DECLARE_COUNTER(speculative_execution_latency_seconds_target);
 DECLARE_COUNTER(speculative_execution_latency_seconds_validation);
 DECLARE_COUNTER(speculative_num_accepted_tokens_total);
 DECLARE_COUNTER(speculative_num_draft_tokens_total);
+DECLARE_COUNTER(vlm_encoder_effective_invocations_total);
 DECLARE_GAUGE(speculative_mean_tokens_per_decode_step);
 
 // latency of proto conversion in seconds

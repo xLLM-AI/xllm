@@ -419,7 +419,10 @@ runtime::Options MTPTargetOptions(const runtime::Options& options) {
 
 runtime::Options mtp_draft_options(const runtime::Options& options) {
   runtime::Options draft_options = options;
-  draft_options.enable_schedule_overlap(false)
+  const std::string draft_backend =
+      options.backend() == "vlm" ? "llm" : options.backend();
+  draft_options.backend(draft_backend)
+      .enable_schedule_overlap(false)
       .is_draft_engine(true)
       .num_decoding_tokens(1)
       .num_speculative_tokens(0)

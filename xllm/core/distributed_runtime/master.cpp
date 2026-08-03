@@ -53,6 +53,7 @@ limitations under the License.
 #include "platform/platform.h"
 #include "rec_engine.h"
 #include "rec_master.h"
+#include "runtime_options_builder.h"
 #include "speculative_engine.h"
 #include "util/model_config_utils.h"
 #include "util/scope_guard.h"
@@ -375,51 +376,13 @@ Master::Master(const Options& options, EngineType type)
   }
 
   if (type == EngineType::VLM) {
-    runtime::Options eng_options;
-    eng_options.model_path(options_.model_path())
-        .devices(devices)
-        .backend(options.backend())
-        .block_size(options.block_size())
-        .max_cache_size(options.max_cache_size())
-        .max_memory_utilization(options.max_memory_utilization())
-        .enable_prefix_cache(options.enable_prefix_cache())
-        .max_encoder_cache_size(options.max_encoder_cache_size())
-        .max_linear_state_cache_slots(options.max_linear_state_cache_slots())
-        .task_type(options.task_type())
-        .enable_mla(options_.enable_mla())
-        .enable_flashcomm1(options_.enable_flashcomm1())
-        .flashcomm1_min_prefill_tokens(options_.flashcomm1_min_prefill_tokens())
-        .enable_mmrs_fusion(options_.enable_mmrs_fusion())
-        .mmrs_comm_mode(options_.mmrs_comm_mode())
-        .cp_size(options_.cp_size())
-        .npu_kernel_backend(options_.npu_kernel_backend())
-        .enable_chunked_prefill(options_.enable_chunked_prefill())
-        .enable_offline_inference(options_.enable_offline_inference())
-        .disable_log_stats(options_.disable_log_stats())
-        .spawn_worker_path(options_.spawn_worker_path())
-        .enable_shm(options_.enable_shm())
-        .input_shm_size(options_.input_shm_size() * 1024 * 1024)
-        .output_shm_size(options_.output_shm_size() * 1024 * 1024)
-        .is_local(options_.is_local())
-        .enable_schedule_overlap(options_.enable_schedule_overlap())
-        .master_node_addr(options.master_node_addr())
-        .nnodes(options.nnodes())
-        .node_rank(options.node_rank())
-        .dp_size(options.dp_size())
-        .ep_size(options.ep_size())
-        .max_tokens_per_batch(options_.max_tokens_per_batch())
-        .max_seqs_per_batch(options_.max_seqs_per_batch())
-        .enable_graph(options_.enable_graph())
-        .enable_graph_mode_decode_no_padding(
-            options_.enable_graph_mode_decode_no_padding())
-        .enable_prefill_piecewise_graph(
-            options_.enable_prefill_piecewise_graph())
-        .max_tokens_for_graph_mode(options_.max_tokens_for_graph_mode())
-        .max_tokens_per_chunk_for_prefill(
-            options_.max_tokens_per_chunk_for_prefill());
-
-    auto engine = std::make_unique<VLMEngine>(eng_options);
-    engine_ = std::move(engine);
+    runtime::Options eng_options = make_runtime_options(options_, devices);
+    engine_ = std::make_unique<VLMEngine>(eng_options);
+  } else if (type == EngineType::VLM_SPECULATIVE) {
+    LOG(INFO) << "Using draft devices: " << DeviceNameUtils::to_string(devices);
+    runtime::Options spec_options =
+        make_speculative_runtime_options(options_, devices, devices);
+    engine_ = std::make_unique<SpeculativeEngine>(spec_options);
   } else if (type == EngineType::SSM) {
     // create a speculative engine if draft model path is provided
     const std::string draft_model_path =
@@ -431,69 +394,8 @@ Master::Master(const Options& options, EngineType type)
     const auto& draft_devices = devices;
     LOG(INFO) << "Using draft devices: "
               << DeviceNameUtils::to_string(draft_devices);
-    runtime::Options spec_options;
-    spec_options.model_path(options_.model_path())
-        .draft_model_path(draft_model_path)
-        .devices(devices)
-        .draft_devices(draft_devices)
-        .backend(options_.backend())
-        .block_size(options_.block_size())
-        .max_cache_size(options_.max_cache_size())
-        .max_memory_utilization(options_.max_memory_utilization())
-        .enable_prefix_cache(options_.enable_prefix_cache())
-        .max_linear_state_cache_slots(options_.max_linear_state_cache_slots())
-        .num_speculative_tokens(options_.num_speculative_tokens())
-        .speculative_algorithm(options_.speculative_algorithm())
-        .enable_mtp_draft_body_tp1(options_.enable_mtp_draft_body_tp1())
-        .speculative_suffix_cache_max_depth(
-            options_.speculative_suffix_cache_max_depth())
-        .speculative_suffix_max_spec_factor(
-            options_.speculative_suffix_max_spec_factor())
-        .speculative_suffix_max_spec_offset(
-            options_.speculative_suffix_max_spec_offset())
-        .speculative_suffix_min_token_prob(
-            options_.speculative_suffix_min_token_prob())
-        .speculative_suffix_max_cached_requests(
-            options_.speculative_suffix_max_cached_requests())
-        .speculative_suffix_use_tree_spec(
-            options_.speculative_suffix_use_tree_spec())
-        .task_type(options_.task_type())
-        .enable_mla(options_.enable_mla())
-        .npu_kernel_backend(options_.npu_kernel_backend())
-        .master_node_addr(options.master_node_addr())
-        .nnodes(options.nnodes())
-        .node_rank(options.node_rank())
-        .dp_size(options.dp_size())
-        .ep_size(options.ep_size())
-        .enable_flashcomm1(options_.enable_flashcomm1())
-        .flashcomm1_min_prefill_tokens(options_.flashcomm1_min_prefill_tokens())
-        .enable_mmrs_fusion(options_.enable_mmrs_fusion())
-        .mmrs_comm_mode(options_.mmrs_comm_mode())
-        .cp_size(options_.cp_size())
-        .enable_chunked_prefill(options_.enable_chunked_prefill())
-        .max_tokens_per_batch(options_.max_tokens_per_batch())
-        .max_seqs_per_batch(options_.max_seqs_per_batch())
-        .max_tokens_per_chunk_for_prefill(
-            options_.max_tokens_per_chunk_for_prefill())
-        .instance_role(options_.instance_role())
-        .kv_cache_transfer_mode(options_.kv_cache_transfer_mode())
-        .transfer_listen_port(options_.transfer_listen_port())
-        .enable_disagg_pd(options_.enable_disagg_pd())
-        .enable_service_routing(options_.enable_service_routing())
-        .enable_schedule_overlap(options_.enable_schedule_overlap())
-        .enable_offline_inference(options_.enable_offline_inference())
-        .disable_log_stats(options_.disable_log_stats())
-        .spawn_worker_path(options_.spawn_worker_path())
-        .enable_shm(options_.enable_shm())
-        .input_shm_size(options_.input_shm_size() * 1024 * 1024)
-        .output_shm_size(options_.output_shm_size() * 1024 * 1024)
-        .is_local(options_.is_local())
-        .enable_graph(options_.enable_graph())
-        .enable_graph_mode_decode_no_padding(
-            options_.enable_graph_mode_decode_no_padding())
-        .enable_prefill_piecewise_graph(
-            options_.enable_prefill_piecewise_graph())
-        .max_tokens_for_graph_mode(options_.max_tokens_for_graph_mode());
+    runtime::Options spec_options =
+        make_speculative_runtime_options(options_, devices, draft_devices);
 
     if (use_suffix_spec) {
       engine_ = std::make_unique<SuffixSpeculativeEngine>(spec_options);
@@ -506,65 +408,7 @@ Master::Master(const Options& options, EngineType type)
       LOG(WARNING) << "Force to disable schedule overlap for embedding model, "
                       "avoiding performance degradation.";
     }
-    runtime::Options eng_options;
-    eng_options.model_path(options_.model_path())
-        .devices(devices)
-        .backend(options_.backend())
-        .block_size(options_.block_size())
-        .max_cache_size(options_.max_cache_size())
-        .max_memory_utilization(options_.max_memory_utilization())
-        .enable_prefix_cache(options_.enable_prefix_cache())
-        .max_linear_state_cache_slots(options_.max_linear_state_cache_slots())
-        .task_type(options_.task_type())
-        .enable_mla(options_.enable_mla())
-        .npu_kernel_backend(options_.npu_kernel_backend())
-        .master_node_addr(options_.master_node_addr())
-        .nnodes(options_.nnodes())
-        .node_rank(options_.node_rank())
-        .dp_size(options_.dp_size())
-        .ep_size(options_.ep_size())
-        .enable_flashcomm1(options_.enable_flashcomm1())
-        .flashcomm1_min_prefill_tokens(options_.flashcomm1_min_prefill_tokens())
-        .enable_mmrs_fusion(options_.enable_mmrs_fusion())
-        .mmrs_comm_mode(options_.mmrs_comm_mode())
-        .cp_size(options_.cp_size())
-        .enable_chunked_prefill(options_.enable_chunked_prefill())
-        .max_tokens_per_batch(options_.max_tokens_per_batch())
-        .max_seqs_per_batch(options_.max_seqs_per_batch())
-        .max_tokens_per_chunk_for_prefill(
-            options_.max_tokens_per_chunk_for_prefill())
-        .instance_role(options_.instance_role())
-        .kv_cache_transfer_mode(options_.kv_cache_transfer_mode())
-        .transfer_listen_port(options_.transfer_listen_port())
-        .enable_disagg_pd(options_.enable_disagg_pd())
-        .enable_service_routing(options_.enable_service_routing())
-        .enable_schedule_overlap(options_.enable_schedule_overlap())
-        .host_blocks_factor(options_.host_blocks_factor())
-        .enable_kvcache_store(options_.enable_kvcache_store())
-        .store_protocol(options_.store_protocol())
-        .store_master_server_address(options_.store_master_server_address())
-        .store_metadata_server(options_.store_metadata_server())
-        .store_local_hostname(options_.store_local_hostname())
-        .prefetch_batch_size(options_.prefetch_batch_size())
-        .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())
-        .enable_offline_inference(options_.enable_offline_inference())
-        .disable_log_stats(options_.disable_log_stats())
-        .spawn_worker_path(options_.spawn_worker_path())
-        .enable_shm(options_.enable_shm())
-        .input_shm_size(options_.input_shm_size() * 1024 * 1024)
-        .output_shm_size(options_.output_shm_size() * 1024 * 1024)
-        .is_local(options_.is_local())
-        .server_idx(options_.server_idx())
-        .enable_graph(options_.enable_graph())
-        .enable_graph_mode_decode_no_padding(
-            options_.enable_graph_mode_decode_no_padding())
-        .enable_prefill_piecewise_graph(
-            options_.enable_prefill_piecewise_graph())
-        .max_tokens_for_graph_mode(options_.max_tokens_for_graph_mode())
-        .kv_cache_dtype(options_.kv_cache_dtype())
-        .enable_sleep_mode(options_.enable_sleep_mode())
-        .model_id(options_.model_id());
-
+    runtime::Options eng_options = make_runtime_options(options_, devices);
     engine_ = std::make_unique<LLMEngine>(eng_options);
   } else if (type == EngineType::REC) {
     options_.enable_schedule_overlap(false);

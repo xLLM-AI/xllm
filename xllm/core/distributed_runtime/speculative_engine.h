@@ -36,6 +36,10 @@ class SpeculativeEngine : public Engine {
 
   bool init(MasterStatus master_status) override;
 
+  // VLMMaster calls the no-arg engine_->init(); forward it to the speculative
+  // init path so target model init is not silently skipped under backend=vlm.
+  bool init() override;
+
   // step the engine forward
   ForwardOutput step(std::vector<Batch>& batch) override;
 
@@ -99,7 +103,7 @@ class SpeculativeEngine : public Engine {
   SpeculativeEngine(const runtime::Options& options, bool use_draft_engine);
 
  private:
-  bool init_model();
+  bool init_model(MasterStatus master_status);
 
   bool allocate_kv_cache();
 
@@ -112,7 +116,8 @@ class SpeculativeEngine : public Engine {
   // options
   const runtime::Options options_;
 
-  // engine
+  // Causal VLM targets share the LLM engine's speculative orchestration. The
+  // worker creates the VLM model and executor from the target backend.
   std::unique_ptr<LLMEngine> engine_;
 
   // draft engine

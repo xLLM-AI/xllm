@@ -173,6 +173,8 @@ DEFINE_COUNTER(speculative_num_accepted_tokens_total,
                "Total number of accepted tokens in validation");
 DEFINE_COUNTER(speculative_num_draft_tokens_total,
                "Total number of draft tokens");
+DEFINE_COUNTER(vlm_encoder_effective_invocations_total,
+               "Total number of VLM encoder invocations with uncached input");
 DEFINE_GAUGE(speculative_mean_tokens_per_decode_step,
              "Batch-mean tokens committed per decode step, i.e. the TPOT "
              "speedup factor (1.0 without speculative decoding)");

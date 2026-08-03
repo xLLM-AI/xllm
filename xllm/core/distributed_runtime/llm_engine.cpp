@@ -39,6 +39,7 @@ limitations under the License.
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/platform/platform.h"
 #include "framework/block/block_utils.h"
 #include "framework/block/hierarchy_block_manager_pool.h"
@@ -47,6 +48,7 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache_utils.h"
 #include "framework/kv_cache_transfer/push_route.h"
 #include "framework/model/model_args.h"
+#include "framework/model/mtp_draft_model_args.h"
 #include "framework/model_loader.h"
 #include "framework/xtensor/page_allocator.h"
 #include "framework/xtensor/phy_page_pool.h"
@@ -190,6 +192,17 @@ bool LLMEngine::init_model(MasterStatus master_status) {
 
   args_ = model_loader->model_args();
   quant_args_ = model_loader->quant_args();
+
+  if (options_.is_draft_engine() &&
+      SpeculativeConfig::is_mtp_algorithm(options_.speculative_algorithm())) {
+    const std::string target_model_type = args_.model_type();
+    const MtpDraftModelArgsStatus status =
+        normalize_mtp_draft_model_args(args_, args_);
+    if (status == MtpDraftModelArgsStatus::NORMALIZED) {
+      LOG(INFO) << "Normalized draft model args from " << target_model_type
+                << " to " << args_.model_type();
+    }
+  }
 
   // A draft engine is fed token ids and detokenized by the target, so it
   // shares the target vocabulary and loads no tokenizer of its own.
@@ -565,6 +578,8 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .num_speculative_tokens(options_.num_speculative_tokens())
       .num_embedding_blocks(
           static_cast<uint32_t>(kv_cache_shape.key_cache_shape()[0]))
+      .hasher_type(options_.backend() == "vlm" ? BlockHasherType::MM
+                                               : BlockHasherType::TEXT)
       // DECODE-side prefix cache participation is per-leaf and gated by the
       // predicate in composite_block_manager.cpp. P and MIX are treated
       // identically (both admit prefix cache on every leaf).

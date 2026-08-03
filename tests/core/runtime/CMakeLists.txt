@@ -1,5 +1,15 @@
 include(cc_test)
 
+cc_test(
+  NAME
+    speculative_worker_impl_test
+  SRCS
+    speculative_worker_impl_test.cpp
+  DEPS
+    :runtime
+    GTest::gtest_main
+)
+
 if(USE_NPU)
   cc_test(
     NAME

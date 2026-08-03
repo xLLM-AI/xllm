@@ -35,7 +35,6 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -53,6 +52,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/kv_cache/kv_cache_estimation.h"
+#include "core/framework/model/mtp_draft_model_args.h"
 #include "core/platform/platform.h"
 #include "core/platform/sleepable_allocator.h"
 #if defined(USE_NPU)
@@ -1416,21 +1416,12 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   } else if (options_.enable_speculative_decode() &&
              options_.num_speculative_tokens() == 0 &&
              args.num_nextn_predict_layers() != 0) {
-    const std::string& current_type = args.model_type();
-    const char* mtp_model_type = nullptr;
-    if (current_type == "qwen3_5_text") {
-      mtp_model_type = "qwen3_5_mtp";
-    } else if (current_type == "qwen3_5_moe_text") {
-      mtp_model_type = "qwen3_5_moe_mtp";
-    }
-    if (mtp_model_type != nullptr) {
-      LOG(INFO) << "Overriding draft model_type from " << current_type << " to "
-                << mtp_model_type << " for speculative decoding";
-      args.model_type(mtp_model_type);
-      const int32_t mtp_layers = args.num_nextn_predict_layers();
-      args.n_layers(mtp_layers);
-      args.layer_types(std::vector<std::string>(mtp_layers, "full_attention"));
-      args.full_attention_interval(1);
+    const std::string target_model_type = args.model_type();
+    const MtpDraftModelArgsStatus status =
+        normalize_mtp_draft_model_args(args, args);
+    if (status == MtpDraftModelArgsStatus::NORMALIZED) {
+      LOG(INFO) << "Normalized draft model args from " << target_model_type
+                << " to " << args.model_type();
     }
   }
   // Eagle3/DFlash targets capture intermediate-layer aux hidden from the layers
@@ -1456,21 +1447,12 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
     // original config.
     if (options_.num_speculative_tokens() == 0 &&
         args.num_nextn_predict_layers() != 0) {
-      static const std::unordered_map<std::string, std::string>
-          kModelTypeToMtpType = {
-              {"deepseek_v3", "deepseek_v3_mtp"},
-              {"deepseek_v32", "deepseek_v32_mtp"},
-              {"deepseek_v4", "deepseek_v4_mtp"},
-              {"glm_moe_dsa", "glm_moe_dsa_mtp"},
-              {"joyai_llm_flash", "joyai_llm_flash_mtp"},
-              {"mimo", "mimo_mtp"},
-          };
-      const std::string& current_type = args.model_type();
-      auto it = kModelTypeToMtpType.find(current_type);
-      if (it != kModelTypeToMtpType.end()) {
-        LOG(INFO) << "Overriding draft model_type from " << current_type
-                  << " to " << it->second << " for speculative decoding";
-        args.model_type(it->second);
+      const std::string target_model_type = args.model_type();
+      const MtpDraftModelArgsStatus status =
+          normalize_mtp_draft_model_args(args, args);
+      if (status == MtpDraftModelArgsStatus::NORMALIZED) {
+        LOG(INFO) << "Normalized draft model args from " << target_model_type
+                  << " to " << args.model_type();
       }
     }
   }

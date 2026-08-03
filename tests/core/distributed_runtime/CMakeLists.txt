@@ -11,3 +11,13 @@ cc_test(
   DEPS
     GTest::gtest_main
 )
+
+cc_test(
+  NAME
+    runtime_options_builder_test
+  SRCS
+    runtime_options_builder_test.cpp
+  DEPS
+    :master
+    GTest::gtest_main
+)

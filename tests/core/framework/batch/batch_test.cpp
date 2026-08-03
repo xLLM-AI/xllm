@@ -721,6 +721,63 @@ TEST(BatchTest, Basic) {
   // clang-format on
 }
 
+TEST(BatchTest, DecodeOmitsImageAfterPrefill) {
+  const uint32_t block_size = 4;
+  BlockManager::Options options;
+  options.num_blocks(3).block_size(block_size);
+  BlockManagerImpl manager(options);
+
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(2);
+  SequenceParams seq_params;
+  seq_params.seq_capacity = 8;
+  seq_params.stopping_checker = &stopping_checker;
+  seq_params.sampling_param = &sampling_param;
+
+  MMData mm_data;
+  MMDataItem& image = mm_data.add(MMType::IMAGE);
+  image.add("pixel_values", torch::ones({1}, torch::kFloat));
+  MMItemState& image_state = image.mutable_state();
+  image_state.mutable_token_pos().offset = 1;
+  image_state.mutable_token_pos().length = 2;
+  image_state.mutable_mm_token_mask() = torch::ones({2}, torch::kBool);
+  image_state.mutable_mm_token_num() = 2;
+
+  IncrementalDecoder decoder("",
+                             /*num_prompt_tokens=*/4,
+                             /*echo=*/false,
+                             /*skip_special_tokens=*/true);
+  Sequence sequence(/*index=*/0,
+                    /*token_ids=*/{1, 2, 3, 4},
+                    /*input_embedding=*/torch::Tensor(),
+                    mm_data,
+                    decoder,
+                    seq_params);
+  std::vector<Block> kv_blocks = manager.allocate(2);
+  ASSERT_EQ(kv_blocks.size(), 2u);
+  sequence.add_blocks(BlockType::KV, kv_blocks);
+
+  Batch prefill_batch(&sequence);
+  const ForwardInput prefill_input = prefill_batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
+  const MMBatchData& prefill_mm = prefill_input.input_params.multimodal.mm_data;
+  ASSERT_TRUE(prefill_mm.valid());
+  EXPECT_TRUE(prefill_mm.has(MMType::IMAGE));
+  ASSERT_EQ(prefill_mm.mm_data_vec().size(), 1u);
+
+  sequence.kv_state().set_kv_cache_tokens_num(sequence.num_prompt_tokens());
+  sequence.append_token(Token(5));
+
+  Batch decode_batch(&sequence);
+  const ForwardInput decode_input = decode_batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
+  const MMBatchData& decode_mm = decode_input.input_params.multimodal.mm_data;
+  EXPECT_TRUE(decode_input.input_params.meta.batch_forward_type.is_decode());
+  EXPECT_FALSE(decode_mm.valid());
+  EXPECT_TRUE(decode_mm.mm_data_vec().empty());
+}
+
 TEST(BatchTest, SampleRequestInjectsAllMatchedSlots) {
   torch::Device device(Platform::type_torch(), 0);
   const uint32_t n_blocks = 8;

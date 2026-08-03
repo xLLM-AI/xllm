@@ -31,6 +31,7 @@ cc_library(
     worker_service.h
     comm_channel.h
     shm_channel.h
+    runtime_options_builder.h
   SRCS
     master.cpp
     dit_engine.cpp
@@ -52,6 +53,7 @@ cc_library(
     worker_service.cpp
     comm_channel.cpp
     shm_channel.cpp
+    runtime_options_builder.cpp
   DEPS
     :api_service
     :runtime
@@ -63,6 +65,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:xllm_atb_layers>
     $<$<BOOL:${USE_NPU}>:unified_dlog>
     :collective_service
+    :model
     :xtensor
 )
 

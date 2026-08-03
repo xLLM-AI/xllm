@@ -21,13 +21,16 @@ limitations under the License.
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <memory>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
 #include "common/metrics.h"
 #include "core/common/message.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/multimodal/mm_input.h"
 #include "core/platform/device_name_utils.h"
@@ -37,7 +40,6 @@ limitations under the License.
 #include "runtime/xservice_client.h"
 #include "scheduler/scheduler_factory.h"
 #include "server/xllm_server_registry.h"
-#include "speculative_engine.h"
 #include "util/scope_guard.h"
 #include "util/timer.h"
 #include "vlm_engine.h"
@@ -61,13 +63,66 @@ std::vector<Message> build_user_messages_from_image_urls(
   return messages;
 }
 
+EngineType resolve_vlm_engine_type(const Options& options) {
+  const std::string draft_model_path = options.draft_model_path().value_or("");
+  const bool has_draft_model = !draft_model_path.empty();
+  const bool has_speculative_tokens = options.num_speculative_tokens() > 0;
+  CHECK(has_draft_model == has_speculative_tokens &&
+        options.num_speculative_tokens() >= 0)
+      << "VLM MTP requires draft_model_path and num_speculative_tokens > 0 "
+         "to be configured together";
+  if (!has_draft_model) {
+    return EngineType::VLM;
+  }
+
+  CHECK_EQ(options.backend(), "vlm")
+      << "VLM MTP currently requires backend=vlm";
+  CHECK(SpeculativeConfig::is_mtp_algorithm(options.speculative_algorithm()))
+      << "VLM MTP currently requires speculative_algorithm=MTP, got "
+      << options.speculative_algorithm();
+  CHECK_EQ(options.cp_size(), 1) << "VLM MTP currently requires cp_size=1";
+  return EngineType::VLM_SPECULATIVE;
+}
+
+size_t vlm_request_capacity(size_t prompt_tokens,
+                            size_t max_generated_tokens,
+                            int32_t speculative_reserve) {
+  return prompt_tokens + max_generated_tokens + 1 +
+         static_cast<size_t>(speculative_reserve);
+}
+
+size_t vlm_stopping_context_limit(size_t model_context_limit,
+                                  int32_t speculative_reserve) {
+  CHECK_GT(model_context_limit, static_cast<size_t>(speculative_reserve))
+      << "model context limit must exceed the speculative reserve";
+  return model_context_limit - static_cast<size_t>(speculative_reserve);
+}
+
 }  // namespace
 
 VLMMaster::VLMMaster(const Options& options)
-    : Master(options, EngineType::VLM) {
+    : Master(options, resolve_vlm_engine_type(options)) {
   CHECK(engine_->init());
 
   model_args_ = engine_->model_args();
+
+  const int32_t speculative_reserve =
+      engine_type_ == EngineType::VLM_SPECULATIVE
+          ? options_.num_speculative_tokens()
+          : 0;
+  const char* draft_backend =
+      engine_type_ == EngineType::VLM_SPECULATIVE ? "llm" : "none";
+  LOG(INFO) << "VLM startup: service_mode=VLM, engine_type="
+            << engine_type_.to_string()
+            << ", target_backend=" << options_.backend()
+            << ", target_model_type=" << model_args_.model_type()
+            << ", draft_backend=" << draft_backend
+            << ", num_speculative_tokens=" << speculative_reserve
+            << ", enable_prefix_cache=" << options_.enable_prefix_cache()
+            << ", enable_graph=" << options_.enable_graph()
+            << ", enable_chunked_prefill=" << options_.enable_chunked_prefill()
+            << ", enable_schedule_overlap="
+            << options_.enable_schedule_overlap();
 
   if (options_.enable_service_routing()) {
     XServiceClient* xservice_client = XServiceClient::get_instance();
@@ -85,6 +140,7 @@ VLMMaster::VLMMaster(const Options& options)
       .max_seqs_per_batch(options.max_seqs_per_batch())
       .max_tokens_per_chunk_for_prefill(
           options.max_tokens_per_chunk_for_prefill())
+      .num_speculative_tokens(speculative_reserve)
       .dp_size(options_.dp_size())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_chunked_prefill(options_.enable_chunked_prefill())
@@ -349,9 +405,15 @@ std::shared_ptr<Request> VLMMaster::build_request(
     max_tokens = kDefaultMaxTokens;
   }
 
-  // allocate enough capacity for prompt tokens, max tokens, and speculative
-  // tokens, TODO: add image token size as well.
-  const size_t capacity = prompt_tokens.size() + max_tokens + 1;
+  // prompt_tokens includes visual placeholder tokens expanded by the processor.
+  // Reserve one bonus token and the speculative validation span.
+  const int32_t speculative_reserve =
+      engine_type_ == EngineType::VLM_SPECULATIVE
+          ? options_.num_speculative_tokens()
+          : 0;
+  const size_t capacity = vlm_request_capacity(prompt_tokens.size(),
+                                               static_cast<size_t>(max_tokens),
+                                               speculative_reserve);
   const size_t best_of = sp.best_of.value_or(sp.n);
 
   RequestSamplingParam sampling_param;
@@ -391,12 +453,14 @@ std::shared_ptr<Request> VLMMaster::build_request(
     }
   }
 
-  StoppingChecker stopping_checker(max_tokens,
-                                   max_context_len,
-                                   model_args_.eos_token_id(),
-                                   sp.ignore_eos,
-                                   std::move(stop_tokens),
-                                   std::move(stop_sequences));
+  StoppingChecker stopping_checker(
+      max_tokens,
+      vlm_stopping_context_limit(static_cast<size_t>(max_context_len),
+                                 speculative_reserve),
+      model_args_.eos_token_id(),
+      sp.ignore_eos,
+      std::move(stop_tokens),
+      std::move(stop_sequences));
 
   // results cannot be streamed when best_of != n
   bool stream = sp.streaming;
@@ -475,7 +539,7 @@ std::shared_ptr<Request> VLMMaster::generate_request(
 volatile bool VLMAssistantMaster::running_ = false;
 
 VLMAssistantMaster::VLMAssistantMaster(const Options& options)
-    : Master(options, EngineType::VLM) {
+    : Master(options, resolve_vlm_engine_type(options)) {
   auto master_node_addr = options_.master_node_addr().value_or("");
   if (master_node_addr.empty()) {
     LOG(FATAL)

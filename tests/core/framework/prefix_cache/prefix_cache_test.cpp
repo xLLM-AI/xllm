@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "framework/block/block_manager_impl.h"
+#include "framework/encoder_cache/encoder_cache.h"
 #include "util/hash_util.h"
 namespace xllm {
 
@@ -44,6 +45,37 @@ std::vector<int32_t> make_random_tokens(size_t count, uint32_t seed) {
 }
 
 }  // namespace
+
+TEST(PrefixCacheTest, EncoderCacheLifecycleIsIndependentFromDecoderCache) {
+  const uint32_t block_size = 4;
+  const std::vector<int32_t> tokens = {1, 2, 3, 4};
+  const Slice<int32_t> token_slice(tokens);
+  const torch::Tensor embedding = torch::ones({2, 2}, torch::kFloat32);
+  const int64_t embedding_size = static_cast<int64_t>(embedding.nbytes());
+  EncoderCache encoder_cache(/*max_size=*/embedding_size);
+  PrefixCache decoder_cache(block_size);
+  BlockManager::Options options;
+  options.num_blocks(2).block_size(block_size);
+  BlockManagerImpl block_manager(options);
+
+  const XXH3Key image_key = hash_string("image-a");
+  EXPECT_FALSE(encoder_cache.lookup(image_key).has_value());
+  EXPECT_TRUE(decoder_cache.match(token_slice).empty());
+
+  encoder_cache.insert(image_key, embedding);
+  EXPECT_TRUE(encoder_cache.lookup(image_key).has_value());
+  EXPECT_TRUE(decoder_cache.match(token_slice).empty());
+
+  std::vector<Block> token_blocks = block_manager.allocate(/*n_blocks=*/1);
+  decoder_cache.insert(token_slice, token_blocks);
+  EXPECT_EQ(decoder_cache.match(token_slice).size(), 1);
+  token_blocks.clear();
+
+  encoder_cache.insert(hash_string("image-b"), embedding);
+  EXPECT_FALSE(encoder_cache.lookup(image_key).has_value());
+  EXPECT_EQ(decoder_cache.match(token_slice).size(), 1);
+  EXPECT_EQ(decoder_cache.evict(/*n_blocks=*/1), 1);
+}
 
 void test_basic_operation(BlockManagerImpl* block_manager,
                           PrefixCache* prefix_cache,

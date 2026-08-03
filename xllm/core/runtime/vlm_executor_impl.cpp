@@ -70,6 +70,10 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
   CHECK(input_gather.finish(mm_data));
   mm_data.to(device_);
 
+  // Only uncached multimodal input requires encoder work.
+  if (!mm_data.data().empty()) {
+    COUNTER_INC(vlm_encoder_effective_invocations_total);
+  }
   MMDict embedding = encode(params);
   EncoderOutputScatterVisitor scatter(embedding);
   mm_data.foreach (scatter);

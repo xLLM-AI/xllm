@@ -9,10 +9,12 @@ cc_library(
     causal_vlm.h
     dit_model.h
     model_args.h
+    mtp_draft_model_args.h
     model_input_params.h
     mtp_topk_state.h
     mtp_utils.h
   SRCS
+    mtp_draft_model_args.cpp
   DEPS
     :common
     :common_layers

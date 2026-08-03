@@ -20,8 +20,11 @@ limitations under the License.
 
 #include <algorithm>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "common/metrics.h"
+#include "core/framework/config/speculative_config.h"
 #include "llm_engine.h"
 #include "runtime/forward_params.h"
 #include "util/timer.h"
@@ -53,6 +56,7 @@ SpeculativeEngine::SpeculativeEngine(const runtime::Options& options,
     runtime::Options draft_engine_options = options_;
     draft_engine_options.model_path(options_.draft_model_path().value_or(""))
         .devices(options.draft_devices())
+        .backend("llm")
         .num_decoding_tokens(1)
         .enable_speculative_decode(/*enable_speculative_decode=*/false)
         .enable_graph(/*enable_graph=*/false)
@@ -74,7 +78,7 @@ SuffixSpeculativeEngine::SuffixSpeculativeEngine(
     : SpeculativeEngine(options, /*use_draft_engine=*/false) {}
 
 bool SpeculativeEngine::init(MasterStatus master_status) {
-  if (!init_model()) {
+  if (!init_model(master_status)) {
     return false;
   }
 
@@ -85,8 +89,16 @@ bool SpeculativeEngine::init(MasterStatus master_status) {
   return true;
 }
 
-bool SpeculativeEngine::init_model() {
-  if (!engine_->init_model()) {
+bool SpeculativeEngine::init() {
+  // VLMMaster calls the no-arg engine_->init(); the Engine base default is
+  // `return true`, which would silently skip target model init under
+  // backend=vlm. Forward to the speculative init path so the target VLM model
+  // is initialized and model_args_ is populated before VLMMaster reads it.
+  return init(MasterStatus::WAKEUP);
+}
+
+bool SpeculativeEngine::init_model(MasterStatus master_status) {
+  if (!engine_->init_model(master_status)) {
     return false;
   }
 
@@ -134,8 +146,8 @@ bool SpeculativeEngine::allocate_kv_cache() {
   if (target_kv_cache_cap.c4_count() > 0 ||
       target_kv_cache_cap.c128_count() > 0) {
     draft_kv_cache_cap.n_blocks() = target_kv_cache_cap.n_blocks();
-    return engine_->allocate_kv_cache(target_kv_cache_cap) &&
-           draft_engine_->allocate_kv_cache(draft_kv_cache_cap);
+    const bool target_ok = engine_->allocate_kv_cache(target_kv_cache_cap);
+    return target_ok && draft_engine_->allocate_kv_cache(draft_kv_cache_cap);
   }
 
   const int64_t kv_cache_size =
@@ -152,6 +164,7 @@ bool SpeculativeEngine::allocate_kv_cache() {
     n_blocks =
         std::min(target_kv_cache_cap.n_blocks(), draft_kv_cache_cap.n_blocks());
   }
+
   CHECK_GT(n_blocks, 0) << "no memory for kv cache";
 
   // allocate kv cache
@@ -159,8 +172,8 @@ bool SpeculativeEngine::allocate_kv_cache() {
   target_kv_cache_cap.cache_size_in_bytes() = kv_cache_size;
   draft_kv_cache_cap.n_blocks() = n_blocks;
   draft_kv_cache_cap.cache_size_in_bytes() = kv_cache_size;
-  return engine_->allocate_kv_cache(target_kv_cache_cap) &&
-         draft_engine_->allocate_kv_cache(draft_kv_cache_cap);
+  const bool target_ok = engine_->allocate_kv_cache(target_kv_cache_cap);
+  return target_ok && draft_engine_->allocate_kv_cache(draft_kv_cache_cap);
 }
 
 // TODO: support dp batches later

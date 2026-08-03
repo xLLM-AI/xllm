@@ -317,6 +317,28 @@ TEST(KVCacheEstimationTest, Qwen35TextMtpUsesSsmCheckpointStride) {
   EXPECT_EQ(capacity.linear_cache_size_in_bytes(), 8960);
 }
 
+TEST(KVCacheEstimationTest, Qwen35MoeVlmMtpUsesSsmCheckpointStride) {
+  ModelArgs model_args = make_standard_args();
+  model_args.model_type("qwen3_5_moe")
+      .full_attention_interval(2)
+      .linear_num_key_heads(2)
+      .linear_num_value_heads(2)
+      .linear_key_head_dim(4)
+      .linear_value_head_dim(8)
+      .linear_conv_kernel_dim(3);
+  KVCacheEstimateOptions options = make_estimate_options();
+  options.n_local_linear_k_heads = 2;
+  options.n_local_linear_v_heads = 2;
+  options.num_speculative_tokens = 1;
+
+  KVCacheCapacity capacity = estimate_kv_cache_capacity(model_args, options);
+
+  EXPECT_EQ(capacity.linear_conv_state_len(), 3);
+  EXPECT_EQ(capacity.linear_ssm_checkpoint_stride(), 2);
+  EXPECT_EQ(capacity.linear_slot_size(), 448);
+  EXPECT_EQ(capacity.linear_cache_size_in_bytes(), 8960);
+}
+
 TEST(KVCacheEstimationTest, EstimatesDeepSeekV4Pools) {
   ModelArgs model_args;
   model_args.model_type("deepseek_v4")
