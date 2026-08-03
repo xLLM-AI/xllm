@@ -377,8 +377,8 @@ void chat_completions_http_impl(std::unique_ptr<Service>& service,
                                          guard.release(),
                                          req_pb,
                                          resp_pb,
-                                         arena != nullptr /*use_arena*/,
-                                         true /*is_http_request*/);
+                                         /*use_arena=*/arena != nullptr,
+                                         /*is_http_request=*/true);
   service->process_async(call);
 }
 
@@ -972,8 +972,8 @@ void handle_anthropic_messages(std::unique_ptr<AnthropicServiceImpl>& service,
                                               guard.release(),
                                               req_pb,
                                               resp_pb,
-                                              arena != nullptr /*use_arena*/,
-                                              true /*is_http_request*/);
+                                              /*use_arena=*/arena != nullptr,
+                                              /*is_http_request=*/true);
 
   service->process_async(call);
 }

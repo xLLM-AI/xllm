@@ -75,6 +75,54 @@ TEST(RequestIdTest, BodyIsUsedWhenHeaderIsMissing) {
   EXPECT_EQ(*controller.http_response().GetHeader("x-request-id"), "body-id");
 }
 
+TEST(RequestIdTest, InvalidPrimaryHeaderFallsBackToSecondaryHeader) {
+  brpc::Controller controller;
+  controller.http_request().SetHeader("x-request-id", "invalid\r\nid");
+  controller.http_request().SetHeader("x-ms-client-request-id", "fallback-id");
+  proto::CompletionRequest request;
+  request.set_x_request_id("body-id");
+  proto::CompletionResponse response;
+  NoopClosure done;
+
+  CompletionCallForTest call(&controller,
+                             &done,
+                             &request,
+                             &response,
+                             /*use_arena=*/true,
+                             /*is_http_request=*/true);
+
+  EXPECT_EQ(call.get_x_request_id(), "fallback-id");
+  ASSERT_NE(controller.http_response().GetHeader("x-request-id"), nullptr);
+  EXPECT_EQ(*controller.http_response().GetHeader("x-request-id"),
+            "fallback-id");
+}
+
+TEST(RequestIdTest, InvalidHeadersAreReplacedBeforeResponseHeader) {
+  brpc::Controller controller;
+  const std::string invalid_primary_id = "invalid\r\nprimary";
+  const std::string invalid_secondary_id = "invalid\nsecondary";
+  controller.http_request().SetHeader("x-request-id", invalid_primary_id);
+  controller.http_request().SetHeader("x-ms-client-request-id",
+                                      invalid_secondary_id);
+  proto::CompletionRequest request;
+  proto::CompletionResponse response;
+  NoopClosure done;
+
+  CompletionCallForTest call(&controller,
+                             &done,
+                             &request,
+                             &response,
+                             /*use_arena=*/true,
+                             /*is_http_request=*/true);
+
+  EXPECT_EQ(call.get_x_request_id().find("req-"), 0);
+  EXPECT_NE(call.get_x_request_id(), invalid_primary_id);
+  EXPECT_NE(call.get_x_request_id(), invalid_secondary_id);
+  ASSERT_NE(controller.http_response().GetHeader("x-request-id"), nullptr);
+  EXPECT_EQ(*controller.http_response().GetHeader("x-request-id"),
+            call.get_x_request_id());
+}
+
 TEST(RequestIdTest, BodyOverridesIdGeneratedBeforeParsing) {
   brpc::Controller controller;
   const std::string early_x_request_id =
