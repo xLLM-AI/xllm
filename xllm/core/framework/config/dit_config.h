@@ -62,7 +62,8 @@ class DiTConfig final {
          "dit_sparse_attention_pool_size",
          "dit_sparse_attention_sparse_start_step",
          "dit_sparse_attention_version",
-         "dit_sparse_attention_mask_refresh_steps"}};
+         "dit_sparse_attention_mask_refresh_steps",
+         "max_sequence_length"}};
     return kOptionCategory;
   }
 
@@ -109,6 +110,8 @@ class DiTConfig final {
   PROPERTY(std::string, dit_sparse_attention_version) = "rain_fusion";
 
   PROPERTY(int64_t, dit_sparse_attention_mask_refresh_steps) = 1;
+
+  PROPERTY(int32_t, max_sequence_length) = 0;
 };
 
 }  // namespace xllm
