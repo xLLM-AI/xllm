@@ -40,5 +40,6 @@ cc_library(
     :torch_npu_kernels
     :tilelang_kernels
     xllm_ops
+    nnopbase
     opapi
 )
