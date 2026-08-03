@@ -19,6 +19,7 @@ import torch
 from xllm.python.attention.backend import AttentionMetadata
 from xllm.python.model_executor.forward_context import (
     ForwardContext,
+    LayerSynchronizer,
     forward_context,
 )
 from xllm.python.model_executor.runners.base import BaseRunner
@@ -34,7 +35,13 @@ class InductorRunner(BaseRunner):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         metadata: AttentionMetadata,
+        layer_synchronizer: LayerSynchronizer | None = None,
     ) -> torch.Tensor:
         self.attention_backend.prepare(metadata)
-        with forward_context(ForwardContext(self.attention_backend, self.device)):
+        with forward_context(
+            ForwardContext(
+                self.attention_backend, self.device,
+                layer_synchronizer=layer_synchronizer,
+            )
+        ):
             return self.compiled_model(input_ids, positions)

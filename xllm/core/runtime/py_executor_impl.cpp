@@ -26,8 +26,13 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
-#include "kernels/npu/py_layer_synchronizer_context.h"
 #include "models/llm/py_causal_lm.h"
+
+#if defined(USE_NPU)
+#include <torch_npu/csrc/core/npu/NPUStream.h>
+
+#include "platform/npu/npu_layer_synchronizer.h"
+#endif
 
 namespace py = pybind11;
 
@@ -123,6 +128,17 @@ PYBIND11_EMBEDDED_MODULE(xllm_runtime, m) {
       .def_property_readonly("is_prefill", &AttentionMetadataView::is_prefill)
       .def_property_readonly("is_chunked_prefill",
                              &AttentionMetadataView::is_chunked_prefill);
+
+#if defined(USE_NPU)
+  py::class_<NPULayerSynchronizerImpl,
+             std::shared_ptr<NPULayerSynchronizerImpl>>(m, "LayerSynchronizer")
+      .def("record_event",
+           [](NPULayerSynchronizerImpl& self, int64_t layer_id) {
+             int32_t device_id = static_cast<int32_t>(
+                 c10_npu::getCurrentNPUStream().device_index());
+             return self.record_event(layer_id, device_id);
+           });
+#endif
 }
 
 PyExecutorImpl::PyExecutorImpl(CausalLM* model,
@@ -190,17 +206,16 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
 
   py::object py_metadata = py::cast(AttentionMetadataView(attn_metadata));
 
+  py::object py_sync = py::none();
 #if defined(USE_NPU)
-  set_current_layer_synchronizer(params.parallel.layer_synchronizer);
+  if (params.parallel.layer_synchronizer) {
+    py_sync = py::cast(params.parallel.layer_synchronizer);
+  }
 #endif
 
   // Execute: one C++ -> Python call per step.
   py::object hidden_obj =
-      py_executor_.attr("execute")(tokens, positions, py_metadata);
-
-#if defined(USE_NPU)
-  set_current_layer_synchronizer(nullptr);
-#endif
+      py_executor_.attr("execute")(tokens, positions, py_metadata, py_sync);
 
   return ModelOutput(hidden_obj.cast<torch::Tensor>());
 }
