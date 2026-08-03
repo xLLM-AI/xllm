@@ -17,16 +17,32 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable
 
 import torch
 
-from xllm.python.attention.backend import AttentionBackend
+if TYPE_CHECKING:
+    from xllm.python.attention.backend import AttentionBackend
+
+
+@dataclass(frozen=True, slots=True)
+class AclGraphTask:
+    event: object
+    handle: object
+    update: Callable[[], None]
+
+
+@dataclass(slots=True)
+class AclGraphCaptureContext:
+    stream: object
+    tasks: list[AclGraphTask]
 
 
 @dataclass(frozen=True, slots=True)
 class ForwardContext:
     attention_backend: AttentionBackend
     device: torch.device
+    acl_graph: AclGraphCaptureContext | None = None
 
 
 _current_context: ContextVar[ForwardContext | None] = ContextVar(

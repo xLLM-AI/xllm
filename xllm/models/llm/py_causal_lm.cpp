@@ -83,6 +83,7 @@ py::dict PyCausalLM::build_config_dict(
   d["device"] = c10::str(device_);
   d["tp_size"] = tp_size_;
   d["tp_rank"] = tp_rank_;
+  d["enable_graph"] = ExecutionConfig::get_instance().enable_graph();
   d["python_graph_backend"] =
       ExecutionConfig::get_instance().python_graph_backend();
   return d;

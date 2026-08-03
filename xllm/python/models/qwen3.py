@@ -38,7 +38,7 @@ from xllm.python.layers import (
     RotaryEmbedding,
     RowParallelLinear,
 )
-from xllm.python.model_executor.forward_context import get_forward_context
+from xllm.python.model_executor.forward_context import ForwardContext, forward_context  # noqa: F401
 from xllm.python.models.base import PyModelBase
 
 
@@ -297,13 +297,10 @@ class Qwen3Model(nn.Module):
         # (its output lives in the graph memory pool), so replay re-casts the
         # updated static_positions correctly.
         positions = positions.to(torch.int64).contiguous()
-        cos, sin = None, None
-        if get_forward_context().device.type in ("npu", "privateuseone"):
-            cos, sin = self.rotary(positions)
         residual: Optional[torch.Tensor] = None
         for layer in self.layers:
             hidden, residual = layer(
-                hidden, residual, positions, self.rotary.cos_sin_cache, cos, sin
+                hidden, residual, positions, self.rotary.cos_sin_cache, None, None
             )
         hidden, _ = self.norm(hidden, residual)
         return hidden
@@ -414,6 +411,11 @@ class Qwen3ForCausalLM(PyModelBase):
 
             copy_in(p + "mlp.down_proj.weight",
                     shard(p + "mlp.down_proj.weight", dim=1))
+
+            if self.device.type in ("npu", "privateuseone"):
+                layer = self.model.layers[i]
+                layer.self_attn.o_proj.format_npu_weight_()
+                layer.mlp.down_proj.format_npu_weight_()
 
         norm_name = "model.norm.weight"
         if not find(norm_name):

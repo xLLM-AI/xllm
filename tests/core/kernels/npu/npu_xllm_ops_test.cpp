@@ -204,7 +204,7 @@ with patch.object(
         max_seqs_per_batch=3,
     )
     assert model_executor._num_attention_layers == 1
-    assert model_executor.decode_cuda_graph_runner is None
+    assert model_executor.decode_graph_runner is None
     assert model_executor.inductor_runner is None
 )PY");
 }

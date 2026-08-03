@@ -2226,13 +2226,21 @@ inline void initialize_device_buffer_session(ReadContext& context,
 #endif
 
   auto& session = *context.device_session;
-  torch::Tensor host_input_buffer =
-      torch::from_blob(const_cast<char*>(payload_base),
-                       {static_cast<int64_t>(payload_size)},
-                       torch::TensorOptions()
-                           .dtype(torch::kUInt8)
-                           .device(torch::kCPU)
-                           .pinned_memory(/*pinned_memory=*/true));
+  // POSIX shared-memory pages are not pinned merely because TensorOptions says
+  // so. Own a genuinely pinned staging copy and keep it alive with ForwardInput
+  // until the asynchronous H2D has completed.
+  forward_input.input_host_buffer =
+      torch::empty({static_cast<int64_t>(payload_size)},
+                   torch::TensorOptions()
+                       .dtype(torch::kUInt8)
+                       .device(torch::kCPU)
+                       .pinned_memory(/*pinned_memory=*/true));
+  std::memcpy(
+      forward_input.input_host_buffer.data_ptr(), payload_base, payload_size);
+  const torch::Tensor& host_input_buffer = forward_input.input_host_buffer;
+  context.tensor_cursor =
+      static_cast<const char*>(host_input_buffer.data_ptr()) +
+      tensor_arena_offset;
 
   auto device_options =
       torch::TensorOptions().dtype(torch::kUInt8).device(device);
@@ -2370,7 +2378,8 @@ inline void deserialize_forward_input_payload(
   read_linear_state_cache_ops(context, input_params.linear_state_cache_ops);
   normalize_linear_state_ids(input_params.embedding.linear_state_ids,
                              input_params.meta.num_sequences);
-  if (!input_params.embedding.linear_state_ids.empty()) {
+  if (materialize_device_buffer &&
+      !input_params.embedding.linear_state_ids.empty()) {
     input_params.embedding.linear_state_indices =
         torch::tensor(input_params.embedding.linear_state_ids, torch::kInt)
             .to(device, /*non_blocking=*/true);
@@ -3146,8 +3155,10 @@ bool ForwardSharedMemoryManager::input_write(const ForwardInput& input) {
   return true;
 }
 
-void ForwardSharedMemoryManager::input_read(ForwardInput& input,
-                                            const torch::Device& device) {
+void ForwardSharedMemoryManager::input_read(
+    ForwardInput& input,
+    const torch::Device& device,
+    InputDeviceMaterializationPolicy policy) {
   while (true) {
     if (control_ptr_->version != last_version_) {
       last_version_ = control_ptr_->version;
@@ -3163,11 +3174,24 @@ void ForwardSharedMemoryManager::input_read(ForwardInput& input,
   read_data(data_ptr, total_size);
   bool materialize_device_buffer = false;
 #if defined(USE_NPU)
-  materialize_device_buffer = true;
+  materialize_device_buffer =
+      policy == InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ;
 #elif defined(USE_CUDA)
   materialize_device_buffer = device.type() == torch::kCUDA;
 #elif defined(USE_MLU)
   materialize_device_buffer = device.type() == torch::kPrivateUse1;
+#endif
+#if defined(USE_NPU)
+  if (policy == InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE) {
+    input.input_host_buffer =
+        torch::empty({static_cast<int64_t>(total_size)},
+                     torch::TensorOptions()
+                         .dtype(torch::kUInt8)
+                         .device(torch::kCPU)
+                         .pinned_memory(/*pinned_memory=*/true));
+    std::memcpy(input.input_host_buffer.data_ptr(), data_ptr, total_size);
+    data_ptr = static_cast<const char*>(input.input_host_buffer.data_ptr());
+  }
 #endif
   deserialize_forward_input_payload(data_ptr,
                                     total_size,

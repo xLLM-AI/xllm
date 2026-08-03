@@ -26,6 +26,15 @@ def _is_npu_device(device: torch.device) -> bool:
     return device.type in ("npu", "privateuseone")
 
 
+def _resolve_graph_backend(config: dict, device: torch.device) -> str:
+    graph_backend = str(config.get("python_graph_backend", "off")).lower()
+    graph_disabled = graph_backend in ("", "off", "none", "0")
+    if graph_disabled and config.get("enable_graph", False):
+        if _is_npu_device(device):
+            return "aclgraph"
+    return graph_backend
+
+
 def _create_attention_backend(
     first_attention: Attention,
     device: torch.device,
@@ -94,17 +103,28 @@ class ModelExecutor:
 
         execution_model = model.model
         self.eager_runner = EagerRunner(execution_model, self.attention_backend, device)
-        self.decode_cuda_graph_runner = None
+        self.decode_graph_runner = None
         self.inductor_runner = None
 
-        graph_backend = str(config.get("python_graph_backend", "off")).lower()
+        graph_backend = _resolve_graph_backend(config, device)
         if graph_backend in ("", "off", "none", "0"):
             pass
         elif graph_backend == "cudagraphs":
             from xllm.python.model_executor.runners.decode_cuda_graph import (
                 DecodeCudaGraphRunner,
             )
-            self.decode_cuda_graph_runner = DecodeCudaGraphRunner(
+            self.decode_graph_runner = DecodeCudaGraphRunner(
+                execution_model,
+                self.attention_backend,
+                device,
+                max_seqs_per_batch,
+                int(config["max_position_embeddings"]),
+            )
+        elif graph_backend == "aclgraph":
+            from xllm.python.model_executor.runners.decode_acl_graph import (
+                DecodeAclGraphRunner,
+            )
+            self.decode_graph_runner = DecodeAclGraphRunner(
                 execution_model,
                 self.attention_backend,
                 device,
@@ -146,7 +166,7 @@ class ModelExecutor:
         if not self._kv_bound:
             raise RuntimeError("KV caches are not bound")
 
-        graph_runner = self.decode_cuda_graph_runner
+        graph_runner = self.decode_graph_runner
         if graph_runner is not None:
             graph_runner.warmup(input_ids.device, input_ids.dtype)
             if graph_runner.can_execute(input_ids, metadata):

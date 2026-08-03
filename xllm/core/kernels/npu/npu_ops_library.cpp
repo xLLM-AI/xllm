@@ -69,11 +69,10 @@ void apply_rotary_embedding_npu(torch::Tensor& q,
   xllm::kernel::npu::apply_rotary(q, k, cos_sin_cache, positions);
 }
 
-// Stub for graph-mode decode metadata update. Currently only used by
-// DecodeCudaGraphRunner (--python_graph_backend=cudagraphs). Registered here so
-// that the Python ops module can be imported unconditionally on NPU without
-// AttributeError. Will gain a real NPU graph implementation once NPU graph
-// capture is enabled, or be removed if NPU graph takes a different approach.
+// Graph-mode decode metadata update. Copies real data into the head of
+// pre-allocated static buffers and fills padding slots with safe defaults
+// (zero tokens, -1 slot mapping, 1 last-page-len) so that the captured
+// graph operates on valid data for every padded position.
 torch::Tensor update_decode_graph_metadata_npu(
     const torch::Tensor& tokens,
     const torch::Tensor& positions,
@@ -91,19 +90,43 @@ torch::Tensor update_decode_graph_metadata_npu(
     torch::Tensor& dst_paged_kv_indices,
     torch::Tensor& dst_paged_kv_last_page_len,
     int64_t padded_num_tokens) {
-  dst_tokens.slice(0, 0, padded_num_tokens).copy_(tokens);
-  dst_positions.slice(0, 0, padded_num_tokens).copy_(positions);
-  dst_slot_mapping.slice(0, 0, padded_num_tokens).copy_(slot_mapping);
+  const int64_t n = tokens.size(0);
+  const int64_t p = padded_num_tokens;
 
-  const int64_t batch_size = kv_seq_lens.size(0);
-  dst_kv_seq_lens.slice(0, 0, batch_size).copy_(kv_seq_lens);
-  dst_kv_seq_lens_delta.slice(0, 0, batch_size).fill_(1);
-  dst_paged_kv_indptr.slice(0, 0, batch_size + 1).copy_(paged_kv_indptr);
+  dst_tokens.slice(0, 0, n).copy_(tokens);
+  dst_positions.slice(0, 0, n).copy_(positions);
+  dst_slot_mapping.slice(0, 0, n).copy_(slot_mapping);
+  if (p > n) {
+    dst_tokens.slice(0, n, p).zero_();
+    dst_positions.slice(0, n, p).zero_();
+    dst_slot_mapping.slice(0, n, p).fill_(-1);
+  }
+
+  const int64_t src_len = std::min<int64_t>(kv_seq_lens.size(0), n + 1);
+  dst_kv_seq_lens.slice(0, 0, src_len).copy_(kv_seq_lens.slice(0, 0, src_len));
+  if (p >= n) {
+    dst_kv_seq_lens.slice(0, src_len, p + 1)
+        .copy_(kv_seq_lens.slice(0, src_len - 1, src_len));
+  }
+  dst_kv_seq_lens_delta.slice(0, 0, p).copy_(
+      dst_kv_seq_lens.slice(0, 1, p + 1) - dst_kv_seq_lens.slice(0, 0, p));
+
+  const int64_t indptr_len = std::min<int64_t>(paged_kv_indptr.size(0), n + 1);
+  dst_paged_kv_indptr.slice(0, 0, indptr_len)
+      .copy_(paged_kv_indptr.slice(0, 0, indptr_len));
+  if (p >= n) {
+    dst_paged_kv_indptr.slice(0, indptr_len, p + 1)
+        .copy_(paged_kv_indptr.slice(0, indptr_len - 1, indptr_len));
+  }
+
+  dst_paged_kv_last_page_len.slice(0, 0, n).copy_(
+      paged_kv_last_page_len.slice(0, 0, n));
+  if (p > n) {
+    dst_paged_kv_last_page_len.slice(0, n, p).fill_(1);
+  }
 
   const int64_t num_pages = paged_kv_indices.size(0);
   dst_paged_kv_indices.slice(0, 0, num_pages).copy_(paged_kv_indices);
-  dst_paged_kv_last_page_len.slice(0, 0, batch_size)
-      .copy_(paged_kv_last_page_len);
 
   return dst_tokens;
 }

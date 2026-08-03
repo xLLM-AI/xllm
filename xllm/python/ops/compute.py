@@ -68,44 +68,17 @@ def fused_qk_norm_rope(
         )
         return qkv[:, :q_size], qkv[:, q_size:q_size + kv_size], qkv[:, q_size + kv_size:]
     if device_type in ("npu", "privateuseone"):
-        return _fused_qk_norm_rope_npu(
-            qkv, num_heads_q, num_heads_k, head_dim, eps,
-            q_weight, k_weight, cos, sin,
+        from xllm.python.ops.triton.split_qkv_rmsnorm_rope import (
+            split_qkv_rmsnorm_rope,
+        )
+        return split_qkv_rmsnorm_rope(
+            qkv, cos_sin_cache, position_ids,
+            q_weight, k_weight,
+            q_size, kv_size, head_dim, eps,
         )
     raise NotImplementedError(
         f"fused_qk_norm_rope is not supported on device type '{device_type}'"
     )
-
-
-def _fused_qk_norm_rope_npu(
-    qkv: torch.Tensor,
-    num_heads_q: int, num_heads_k: int,
-    head_dim: int, eps: float,
-    q_weight: torch.Tensor, k_weight: torch.Tensor,
-    cos: torch.Tensor | None,
-    sin: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    num_tokens = qkv.size(0)
-    q_size = num_heads_q * head_dim
-    k_size = num_heads_k * head_dim
-
-    q = torch.ops.xllm_ops.rms_norm(
-        qkv[:, :q_size].reshape(num_tokens * num_heads_q, head_dim), q_weight, eps,
-    ).view(num_tokens, q_size)
-    k = torch.ops.xllm_ops.rms_norm(
-        qkv[:, q_size:q_size + k_size].reshape(num_tokens * num_heads_k, head_dim),
-        k_weight, eps,
-    ).view(num_tokens, k_size)
-
-    q_out = torch.ops.npu.npu_rotary_mul(
-        q.view(1, num_tokens, num_heads_q, head_dim), cos, sin,
-    ).view(num_tokens, q_size)
-    k_out = torch.ops.npu.npu_rotary_mul(
-        k.view(1, num_tokens, num_heads_k, head_dim), cos, sin,
-    ).view(num_tokens, k_size)
-
-    v = qkv[:, q_size + k_size:]
-    return q_out, k_out, v
 
 
 @torch.library.register_fake("xllm_ops::fused_qk_norm_rope")
