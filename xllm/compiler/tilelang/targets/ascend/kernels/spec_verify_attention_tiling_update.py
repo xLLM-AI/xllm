@@ -16,18 +16,15 @@
 import tilelang
 import tilelang.language as T
 
-from .utils import DEFAULT_ASCEND_PASS_CONFIGS
+from .utils import DEFAULT_ASCEND_PASS_CONFIGS, SUPPORTED_SPEC_VERIFY_WIDTHS
 from ....common.spec import DispatchField, TilelangKernel, register_kernel
 
-# Verification width includes the base target token. These variants therefore
-# cover MTP depths 3, 4, and 5.
-SUPPORTED_SPEC_WIDTHS = (4, 5, 6)
 SYMBOL_NUM_ROWS = T.symbolic("num_rows")
 SYMBOL_TILING_WORDS = T.symbolic("tiling_words")
 
 
 def build_spec_verify_attention_tiling_update_kernel(spec_width: int):
-    if spec_width not in SUPPORTED_SPEC_WIDTHS:
+    if spec_width not in SUPPORTED_SPEC_VERIFY_WIDTHS:
         raise ValueError(f"unsupported MTP tiling width: {spec_width}")
 
     @T.prim_func
@@ -61,7 +58,7 @@ class SpecVerifyAttentionTilingUpdateKernel(TilelangKernel):
             "variant_key": f"w{spec_width}",
             "spec_width": spec_width,
         }
-        for spec_width in SUPPORTED_SPEC_WIDTHS
+        for spec_width in SUPPORTED_SPEC_VERIFY_WIDTHS
     ]
 
     @staticmethod

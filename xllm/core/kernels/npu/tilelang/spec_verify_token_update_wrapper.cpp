@@ -20,6 +20,7 @@ limitations under the License.
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <utility>
 
 #include "core/kernels/npu/tilelang/dispatch_registry.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
@@ -49,8 +50,7 @@ void check_tokens(const torch::Tensor& tokens,
 }  // namespace
 
 bool has_spec_verify_token_update_specialization(int64_t spec_width) {
-  if (spec_width < 1 ||
-      spec_width > static_cast<int64_t>(kDraftTokenSourceSlots) + 1) {
+  if (spec_width <= 0 || !std::in_range<int32_t>(spec_width)) {
     return false;
   }
   const auto specialization = make_spec_verify_token_update_specialization(
