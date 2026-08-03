@@ -18,6 +18,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <string>
 
 #include "core/framework/config/dit_config.h"
 #include "core/framework/config/load_config.h"
@@ -34,6 +35,7 @@ limitations under the License.
 #include "models/dit/autoencoders/autoencoder_kl_wan.h"
 #include "models/dit/encoders/umt5_encoder.h"
 #include "models/dit/processors/vae_video_processor.h"
+#include "models/dit/schedulers/flowmatch_euler_discrete_scheduler.h"
 #include "models/dit/schedulers/uni_pc_multi_step_scheduler.h"
 #include "models/dit/transformers/transformer_wan.h"
 #if defined(USE_NPU)
@@ -55,7 +57,6 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
     zdim_ = vae_args.z_dim();
     latents_mean_ = vae_args.latents_mean();
     latents_std_ = vae_args.latents_std();
-
     const auto& scheduler_args = context.get_model_args("scheduler");
     num_train_timesteps_ = scheduler_args.num_train_timesteps();
 
@@ -80,8 +81,18 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
     transformer_2_ = WanTransformer3DModel(
         context.get_model_context("transformer_2"), sparse_attn_config_);
     umt5_ = UMT5EncoderModel(context.get_model_context("text_encoder"));
-    scheduler_ =
-        UniPCMultistepScheduler(context.get_model_context("scheduler"));
+    // Pick the scheduler from the class name in scheduler_config.json.
+    // Distilled Wan2.2 weights ship FlowMatch; raw_sigmas makes it end the
+    // sigma ramp at 1/N instead of its default sigma_min_, which is the
+    // schedule those weights need. Non-distilled weights ship UniPC, which
+    // computes its own schedule.
+    const auto& scheduler_ctx = context.get_model_context("scheduler");
+    if (scheduler_args.model_type() == "FlowMatchEulerDiscreteScheduler") {
+      scheduler_ = std::make_shared<FlowMatchEulerDiscreteSchedulerImpl>(
+          scheduler_ctx, /*raw_sigmas=*/true);
+    } else {
+      scheduler_ = std::make_shared<UniPCMultistepSchedulerImpl>(scheduler_ctx);
+    }
     video_processor_ = VAEVideoProcessor(context.get_model_context("vae"),
                                          true,
                                          true,
@@ -507,7 +518,6 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
 
     for (int64_t i = 0; i < timesteps.numel(); ++i) {
       torch::Tensor t = timesteps[i];
-      int64_t total_steps = timesteps.numel();
 
       WanTransformer3DModel current_model = nullptr;
       float current_guidance;
@@ -713,7 +723,10 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
   }
 #endif
 
-  UniPCMultistepScheduler scheduler_{nullptr};
+  // Held through the Scheduler base class because Wan2.2 I2V serves both weight
+  // flavours from one pipeline: distilled weights need FlowMatch, non-distilled
+  // ones UniPC. Other pipelines ship a single scheduler and name it directly.
+  std::shared_ptr<xllm::dit::Scheduler> scheduler_{nullptr};
   AutoencoderKLWan vae_{nullptr};
   WanTransformer3DModel transformer_{nullptr};
   WanTransformer3DModel transformer_2_{nullptr};

@@ -25,6 +25,7 @@ limitations under the License.
 #include <torch/library.h>
 #include <torch/torch.h>
 
+#include "kernels/npu/xllm_ops/xllm_ops_api.h"
 #include "npu_ops_api.h"
 
 namespace xllm {
@@ -169,6 +170,31 @@ TORCH_LIBRARY(xllm_ops, m) {
       "dst_kv_seq_lens, Tensor(e!) dst_kv_seq_lens_delta, Tensor(f!) "
       "dst_paged_kv_indptr, Tensor(g!) dst_paged_kv_indices, Tensor(h!) "
       "dst_paged_kv_last_page_len, int padded_num_tokens) -> Tensor");
+  m.def(
+      "quant_matmul(Tensor x1, Tensor x2, bool transpose2, Tensor scale, "
+      "Tensor? offset, Tensor? pertoken_scale, Tensor? bias, ScalarType? "
+      "output_dtype) -> Tensor");
+  m.def(
+      "quantize_per_tensor(Tensor self, Tensor scales, Tensor zero_points, "
+      "ScalarType dtype, int axis) -> Tensor");
+  m.def(
+      "dynamic_quant(Tensor input, Tensor? smooth_scales, Tensor? group_index, "
+      "ScalarType? dst_type) -> (Tensor, Tensor?)");
+  m.def(
+      "lightning_indexer(Tensor query, Tensor key, Tensor weights, "
+      "Tensor? query_seq_lengths, Tensor? key_seq_lengths, Tensor? "
+      "block_table, str layout_query, str layout_key, int selected_count, int "
+      "sparse_mode, int pre_tokens, int next_tokens, bool return_value) -> "
+      "Tensor");
+  m.def(
+      "scatter_nd_update(Tensor(a!) var, Tensor indices, Tensor updates) -> "
+      "()");
+  m.def(
+      "sparse_flash_attention(Tensor query, Tensor key, Tensor value, Tensor "
+      "sparse_indices, Tensor? block_table, Tensor? actual_seq_lengths_query, "
+      "Tensor? actual_seq_lengths_kv, Tensor? query_rope, Tensor? key_rope, "
+      "float scale_value, int sparse_block_size, str layout_query, str "
+      "layout_kv, int sparse_mode) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
@@ -179,4 +205,12 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl("apply_rotary_embedding", TORCH_FN(xllm::apply_rotary_embedding_npu));
   m.impl("update_decode_graph_metadata",
          TORCH_FN(xllm::update_decode_graph_metadata_npu));
+  m.impl("quant_matmul", TORCH_FN(xllm::kernel::npu::quant_matmul));
+  m.impl("quantize_per_tensor",
+         TORCH_FN(xllm::kernel::npu::quantize_per_tensor));
+  m.impl("dynamic_quant", TORCH_FN(xllm::kernel::npu::dynamic_quant));
+  m.impl("lightning_indexer", TORCH_FN(xllm::kernel::npu::lightning_indexer));
+  m.impl("scatter_nd_update", TORCH_FN(xllm::kernel::npu::scatter_nd_update));
+  m.impl("sparse_flash_attention",
+         TORCH_FN(xllm::kernel::npu::sparse_flash_attention));
 }

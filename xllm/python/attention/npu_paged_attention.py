@@ -26,7 +26,12 @@ import torch
 import torch_npu
 
 from xllm.python import ops
-from xllm.python.attention.backend import AttentionBackend, AttentionMetadata, KVCache
+from xllm.python.attention.backend import (
+    AttentionBackend,
+    AttentionMetadata,
+    KVCache,
+    MlaIndexContext,
+)
 from xllm.python.model_executor.forward_context import (
     AclGraphTask,
     get_forward_context,
@@ -64,6 +69,8 @@ class NpuPagedAttentionBackend(AttentionBackend):
         self._graph_lses: dict[int, torch.Tensor] = {}
         self._current_graph_output: torch.Tensor | None = None
         self._current_graph_lse: torch.Tensor | None = None
+        self._mla_actual_seq_q: torch.Tensor | None = None
+        self._mla_actual_seq_kv: torch.Tensor | None = None
         self._causal_mask = (
             torch.triu(torch.ones(2048, 2048, dtype=torch.float32), 1)
             .to(torch.int8)
@@ -166,6 +173,25 @@ class NpuPagedAttentionBackend(AttentionBackend):
             self._current_graph_output = self._graph_outputs[graph_batch_size]
             self._current_graph_lse = self._graph_lses[graph_batch_size]
 
+        # Pre-cache MLA (sparse SFA) seq-lens once per step; shared by
+        # execute_mla / mla_index_context instead of re-derived per layer.
+        if metadata.kv_seq_lens is not None:
+            kv_seq_lens = metadata.kv_seq_lens
+            mla_device = kv_seq_lens.device
+            self._mla_actual_seq_kv = kv_seq_lens.to(torch.int32).to(mla_device)
+            if metadata.q_cu_seq_lens is not None:
+                self._mla_actual_seq_q = metadata.q_cu_seq_lens[1:].to(
+                    torch.int32
+                ).to(mla_device)
+            else:
+                batch = kv_seq_lens.size(0)
+                self._mla_actual_seq_q = torch.arange(
+                    1, batch + 1, dtype=torch.int32, device=mla_device
+                )
+        else:
+            self._mla_actual_seq_q = None
+            self._mla_actual_seq_kv = None
+
     def execute(
         self,
         q: torch.Tensor,
@@ -177,7 +203,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
         assert metadata is not None
 
         layer_id = layer.layer_id
-        k_cache, v_cache = self._kv_caches[layer_id]
+        k_cache, v_cache, _ = self._kv_caches[layer_id]
         num_tokens = q.shape[0]
 
         # Write KV to paged cache (kernel expects [T, kv_heads, head_dim]).
@@ -192,6 +218,64 @@ class NpuPagedAttentionBackend(AttentionBackend):
         if metadata.is_prefill or metadata.is_chunked_prefill:
             return self._prefill(q_3d, k_3d, v_3d, metadata, num_tokens)
         return self._decode(q_3d, k_cache, v_cache, metadata, num_tokens)
+
+    def execute_mla(
+        self,
+        q_latent: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_latent_3d: torch.Tensor,
+        k_pe_3d: torch.Tensor,
+        layer: "Attention",
+        topk: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Absorbed-MLA attention. Returns [T, H, kv_lora]; caller bmm's W_UV."""
+        metadata = self._metadata
+        assert metadata is not None, "execute_mla called before prepare()"
+        if topk is None:
+            raise NotImplementedError(
+                "dense MLA (topk=None) is not yet supported on "
+                "NpuPagedAttentionBackend"
+            )
+        layer_id = layer.layer_id
+        nope_cache, rope_cache, _ = self._kv_caches[layer_id]
+
+        torch.ops.xllm_ops.reshape_paged_cache(
+            metadata.slot_mapping, k_latent_3d, k_pe_3d, nope_cache, rope_cache
+        )
+        return self._mla_sparse(
+            q_latent, q_pe, nope_cache, rope_cache, topk, metadata.block_table
+        )
+
+    def mla_index_context(self, layer: "Attention") -> MlaIndexContext:
+        metadata = self._metadata
+        assert metadata is not None, "mla_index_context called before prepare()"
+        _, _, index_cache = self._kv_caches[layer.layer_id]
+        return MlaIndexContext(
+            index_cache=index_cache,
+            slot_mapping=metadata.slot_mapping,
+            block_table=metadata.block_table,
+            actual_seq_q=self._mla_actual_seq_q,
+            actual_seq_kv=self._mla_actual_seq_kv,
+        )
+
+    def _mla_sparse(
+        self,
+        q_latent: torch.Tensor,
+        q_pe: torch.Tensor,
+        nope_cache: torch.Tensor,
+        rope_cache: torch.Tensor,
+        topk: torch.Tensor,
+        block_table: torch.Tensor,
+    ) -> torch.Tensor:
+        out = torch.ops.xllm_ops.sparse_flash_attention(
+            q_latent, nope_cache, nope_cache, topk,
+            block_table,
+            self._mla_actual_seq_q,
+            self._mla_actual_seq_kv,
+            q_pe, rope_cache, self.scale, 1,
+            "TND", "PA_BSND", 3,
+        )
+        return out  # [T, H, kv_lora]
 
     # ------------------------------------------------------------------
     # Prefill: packed TND with causal mask

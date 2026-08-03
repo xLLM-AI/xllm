@@ -57,6 +57,12 @@ DEFINE_int64(max_encoder_cache_size,
              "Max gpu/npu memory size in MB for encoder cache per worker. "
              "Default is 0, which disables encoder cache.");
 
+DEFINE_int64(max_processor_cache_items,
+             256,
+             "Maximum number of multimodal processor results cached on the "
+             "master. Capacity is counted by item. "
+             "Default is 256; set to 0 to disable processor cache.");
+
 DEFINE_string(reasoning_parser,
               "",
               "Specify the reasoning parser for handling reasoning "
@@ -117,6 +123,7 @@ void ModelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(task);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(limit_image_per_prompt);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_encoder_cache_size);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(max_processor_cache_items);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(reasoning_parser);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(tool_call_parser);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_qwen3_reranker);
@@ -157,6 +164,7 @@ void ModelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(task);
   XLLM_CONFIG_ASSIGN_FROM_JSON(limit_image_per_prompt);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_encoder_cache_size);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(max_processor_cache_items);
   XLLM_CONFIG_ASSIGN_FROM_JSON(reasoning_parser);
   XLLM_CONFIG_ASSIGN_FROM_JSON(tool_call_parser);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_qwen3_reranker);
@@ -183,6 +191,8 @@ void ModelConfig::append_config_json(
       config_json, default_config, limit_image_per_prompt);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, max_encoder_cache_size);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, max_processor_cache_items);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, reasoning_parser);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

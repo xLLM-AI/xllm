@@ -20,8 +20,8 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/tokenizer/tokenizer.h"
-#include "core/util/hash_util.h"
 #include "models/model_registry.h"
+#include "processors/cacheable_multimodal_processor.h"
 #include "util/timer.h"
 
 namespace xllm {
@@ -43,27 +43,24 @@ bool MultimodalProcessorBase::tokenize(const std::string& prompt,
   return true;
 }
 
-void MultimodalProcessorBase::hash_mm_items(const MMInput& mm_input,
-                                            MMData& mm_data) const {
-  const auto& mm_input_items = mm_input.items();
-  auto& mm_items = mm_data.items<MMItemVec>();
-  size_t size = mm_input_items.size();
-  for (size_t idx = 0; idx < size; ++idx) {
-    const std::string& data = mm_input_items[idx].raw_data;
-    if (!data.empty()) {
-      XXH3Key mm_hash = hash_string(data);
-      auto& schedule_data =
-          mm_items[idx].mutable_state().mutable_schedule_data();
-      schedule_data.key = mm_hash;
-    } else {
-      LOG(WARNING) << "Empty data for multimodal item";
+void MultimodalProcessorBase::assign_mm_hash_keys(const MMInput& mm_input,
+                                                  MMData& mm_data) const {
+  const std::vector<MMInputItem>& input_items = mm_input.items();
+  MMItemVec& output_items = mm_data.items<MMItemVec>();
+  CHECK_EQ(input_items.size(), output_items.size());
+  for (size_t index = 0; index < input_items.size(); ++index) {
+    const std::optional<XXH3Key>& hash_key = input_items[index].hash_key;
+    if (hash_key.has_value()) {
+      output_items[index].mutable_state().mutable_schedule_data().key =
+          hash_key.value();
     }
   }
 }
 
 std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
     const ModelArgs& model_args,
-    std::shared_ptr<Tokenizer> tokenizer) {
+    std::shared_ptr<Tokenizer> tokenizer,
+    int64_t max_cache_items) {
   const std::string& model_type = model_args.model_type();
   std::string resolved_name;
   std::string error_message;
@@ -75,7 +72,13 @@ std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
       ModelRegistry::get_multimodal_processor_factory(resolved_name);
   CHECK(multimodal_processor_factory != nullptr)
       << "Missing multimodal processor for model type: " << model_type;
-  return multimodal_processor_factory(model_args, std::move(tokenizer));
+  std::unique_ptr<MultimodalProcessorBase> processor =
+      multimodal_processor_factory(model_args, std::move(tokenizer));
+  if (max_cache_items == 0) {
+    return processor;
+  }
+  return std::make_unique<CacheableMultimodalProcessor>(std::move(processor),
+                                                        max_cache_items);
 }
 
 }  // namespace xllm

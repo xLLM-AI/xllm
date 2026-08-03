@@ -134,14 +134,14 @@ struct ReshapePagedCacheParams {
   // Last two dimensions must be contiguous: stride(-1)==1,
   // stride(-2)==head_dim. Must have same device and dtype as other tensors.
   std::optional<torch::Tensor> value;
-  // Key cache tensor in paged format. Shape: [num_blocks, num_heads,
-  // block_size, head_dim]. Must be contiguous. Must have same device and dtype
+  // Key cache tensor in paged format. Shape: [num_blocks, block_size,
+  // num_heads, head_dim]. Must be contiguous. Must have same device and dtype
   // as key and value.
   torch::Tensor k_cache;
-  // Optional value cache tensor in paged format. Shape: [num_blocks, num_heads,
-  // block_size, head_dim]. If provided, value must also be provided (and vice
-  // versa). Must be contiguous. Must have same device and dtype as other
-  // tensors.
+  // Optional value cache tensor in paged format. Shape: [num_blocks,
+  // block_size, num_heads, head_dim]. If provided, value must also be provided
+  // (and vice versa). Must be contiguous. Must have same device and dtype as
+  // other tensors.
   std::optional<torch::Tensor> v_cache;
   // Slot mapping tensor. Shape: [num_tokens]. Type must be int32.
   // Maps each token to its corresponding slot in the cache. Must be contiguous.

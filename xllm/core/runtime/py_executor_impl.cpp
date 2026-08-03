@@ -176,7 +176,8 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
   if (!kv_bound_) {
     py::list kv_caches_py;
     for (auto& kv : kv_caches) {
-      kv_caches_py.append(py::make_tuple(kv.get_k_cache(), kv.get_v_cache()));
+      kv_caches_py.append(py::make_tuple(
+          kv.get_k_cache(), kv.get_v_cache(), kv.get_index_cache()));
     }
     py_executor_.attr("bind_kv_caches")(kv_caches_py);
     kv_bound_ = true;

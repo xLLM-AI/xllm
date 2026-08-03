@@ -347,4 +347,73 @@ TEST(KVCacheEstimationTest, EstimatesDeepSeekV4Pools) {
 #endif
 }
 
+TEST(KVCacheEstimationTest,
+     SpeculativeDecodePreservesDeepSeekV4PoolBlockCount) {
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v4")
+      .n_layers(3)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(257)
+      .compress_ratios({1, 4, 128});
+
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kFloat32;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes = 2818048;
+  options.block_size = 128;
+  options.max_seqs_per_batch = 4;
+
+  KVCacheCapacity target_capacity =
+      estimate_kv_cache_capacity(model_args, options);
+  KVCacheCapacity draft_capacity = target_capacity;
+  draft_capacity.n_blocks(target_capacity.n_blocks() * 4);
+
+  EXPECT_EQ(estimate_speculative_kv_cache_blocks(
+                target_capacity, draft_capacity, /*share_device=*/true),
+            target_capacity.n_blocks());
+}
+
+TEST(KVCacheEstimationTest, SpeculativeDecodeCombinesStandardCacheCosts) {
+  KVCacheCapacity target_capacity;
+  target_capacity.cache_size_in_bytes(100000)
+      .block_size(10)
+      .slot_size(2)
+      .num_full_attention_layers(1);
+  KVCacheCapacity draft_capacity;
+  draft_capacity.cache_size_in_bytes(100000)
+      .block_size(10)
+      .slot_size(1)
+      .n_layers(2);
+
+  EXPECT_EQ(estimate_speculative_kv_cache_blocks(
+                target_capacity, draft_capacity, /*share_device=*/true),
+            1666);
+}
+
+TEST(KVCacheEstimationTest, SpeculativeDecodeUsesDraftShapeForTp1Body) {
+  KVCacheCapacity target_capacity;
+  target_capacity.cache_size_in_bytes(100000)
+      .block_size(10)
+      .slot_size(2)
+      .scale_slot_size(1)
+      .index_slot_size(3)
+      .num_full_attention_layers(2)
+      .num_indexer_layers(1);
+  KVCacheCapacity draft_capacity;
+  draft_capacity.cache_size_in_bytes(100000)
+      .block_size(10)
+      .slot_size(4)
+      .scale_slot_size(1)
+      .index_slot_size(2)
+      .num_indexer_layers(1)
+      .n_layers(2);
+
+  EXPECT_EQ(estimate_speculative_kv_cache_blocks(target_capacity,
+                                                 draft_capacity,
+                                                 /*share_device=*/true,
+                                                 /*draft_body_uses_tp1=*/true),
+            476);
+}
+
 }  // namespace xllm

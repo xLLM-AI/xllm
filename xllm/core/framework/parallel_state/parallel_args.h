@@ -16,7 +16,7 @@ limitations under the License.
 #pragma once
 
 #include "core/common/macros.h"
-#include "process_group.h"
+#include "core/framework/parallel_state/process_group.h"
 
 #if defined(USE_NPU)
 #include "hccl/hccl.h"
@@ -212,6 +212,12 @@ struct ParallelArgs {
   // CP ProcessGroup for prefill AllGather (NPU standalone; MLU aliases TP).
   ProcessGroup* cp_group_ = nullptr;
   ProcessGroup* moe_ep_group_ = nullptr;
+  // Dedicated group for EPLB weight migration. It has the same rank set as
+  // moe_ep_group_ but isolates migration P2P from forward collectives.
+  ProcessGroup* eplb_group_ = nullptr;
+  // Dedicated group for fused MC2 dispatch/combine. It has the same rank set
+  // as moe_ep_group_ but isolates MC2 collectives from regular MoE EP traffic.
+  ProcessGroup* mc2_group_ = nullptr;
   ProcessGroup* moe_tp_group_ = nullptr;
 
   // PyTorch creates its own TP process group. These fields only reserve the

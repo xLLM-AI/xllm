@@ -23,10 +23,16 @@ Python package directly via ``layers/attention.py``, not through this module.
 """
 
 from xllm.python.ops.compute import (
+    dynamic_quant,
     fused_add_rms_norm,
     fused_qk_norm_rope,
+    lightning_indexer,
+    quant_matmul,
+    quantize_per_tensor,
     rms_norm,
+    scatter_nd_update,
     silu_and_mul,
+    sparse_flash_attention,
 )
 from xllm.python.ops.attention import (
     reshape_paged_cache,
@@ -36,6 +42,7 @@ from xllm.python.ops.collectives import (
     all_gather,
     all_reduce_,
     init_tp_group,
+    tp_rank,
 )
 
 __all__ = [
@@ -43,9 +50,16 @@ __all__ = [
     "fused_add_rms_norm",
     "silu_and_mul",
     "fused_qk_norm_rope",
+    "quant_matmul",
+    "quantize_per_tensor",
+    "dynamic_quant",
+    "lightning_indexer",
+    "scatter_nd_update",
+    "sparse_flash_attention",
     "reshape_paged_cache",
     "update_decode_graph_metadata",
     "all_reduce_",
     "all_gather",
     "init_tp_group",
+    "tp_rank",
 ]

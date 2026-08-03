@@ -13,12 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "collective_communicator.h"
+#include "core/framework/parallel_state/collective_communicator.h"
 
-#include "mapping_npu.h"
+#include "core/framework/parallel_state/mapping_npu.h"
 
 #if defined(USE_NPU)
-#include "npu_process_group.h"
+#include "core/framework/parallel_state/npu_process_group.h"
 #include "xllm_atb_layers/core/include/atb_speed/base/external_comm_manager.h"
 #include "xllm_atb_layers/core/include/atb_speed/utils/singleton.h"
 #elif defined(USE_MLU)
@@ -435,6 +435,7 @@ void CollectiveCommunicator::create_process_groups(
   CHECK_EQ(moe_tp_size * ep_size, world_size);
   if (ep_size == 1) {
     parallel_args_->moe_tp_group_ = process_group_.get();
+    parallel_args_->eplb_group_ = process_group_.get();
   } else {
     port_offset = global_rank / moe_tp_size + 1;
     std::string moe_tp_host = host;
@@ -466,6 +467,45 @@ void CollectiveCommunicator::create_process_groups(
                                          device);
     parallel_args_->moe_ep_group_ = moe_ep_group_.get();
     port += moe_tp_size;
+#if defined(USE_NPU)
+    if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&
+        ::xllm::KernelConfig::get_instance().enable_fused_mc2() > 0) {
+      mc2_group_ = create_process_group(global_rank,
+                                        world_size,
+                                        ep_size,
+                                        port + port_offset,
+                                        true,
+                                        host,
+                                        "mc2_group",
+                                        device);
+      parallel_args_->mc2_group_ = mc2_group_.get();
+      const std::string mc2_comm_name =
+          mc2_group_->hccl_comm_name(/*init_comm=*/true);
+      CHECK(!mc2_comm_name.empty())
+          << "Fused MC2 process group failed to initialize its HCCL "
+             "communicator.";
+      port += moe_tp_size;
+    }
+#endif
+    if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
+      eplb_group_ = create_process_group(global_rank,
+                                         world_size,
+                                         ep_size,
+                                         port + port_offset,
+                                         true,
+                                         host,
+                                         "eplb_group",
+                                         device);
+      parallel_args_->eplb_group_ = eplb_group_.get();
+#if defined(USE_NPU)
+      // Match vLLM Ascend's dynamic EPLB initialization: establish every P2P
+      // communicator before EP2 registers its dispatch/combine comm domain.
+      // Lazy HCCL initialization during a weight transfer can otherwise race
+      // with the next MoE dispatch and temporarily invalidate group lookup.
+      eplb_group_->warmup_p2p();
+#endif
+      port += moe_tp_size;
+    }
   }
 
   const int32_t tp_group_index = global_rank / tp_size;

@@ -56,7 +56,7 @@ class MultimodalProcessorBase {
   bool tokenize(const std::string& prompt,
                 std::vector<int32_t>& token_ids) const;
 
-  void hash_mm_items(const MMInput& mm_input, MMData& mm_data) const;
+  void assign_mm_hash_keys(const MMInput& mm_input, MMData& mm_data) const;
 
  private:
   std::shared_ptr<Tokenizer> tokenizer_;
@@ -64,7 +64,8 @@ class MultimodalProcessorBase {
 
 std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
     const ModelArgs& model_args,
-    std::shared_ptr<Tokenizer> tokenizer);
+    std::shared_ptr<Tokenizer> tokenizer,
+    int64_t max_cache_items);
 
 template <typename PromptProcessor,
           typename ImageProcessor = ImageNoneProcessor,
@@ -122,7 +123,7 @@ class MultimodalProcessor final : public MultimodalProcessorBase {
         gather.finish(image_items, video_items, audio_items);
     data.set(gather.data_type_, std::move(output_items));
 
-    hash_mm_items(inputs, data);
+    assign_mm_hash_keys(inputs, data);
     return true;
   }
 

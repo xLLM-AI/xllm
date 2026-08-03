@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <ATen/ops/scaled_dot_product_attention.h>
 #include <glog/logging.h>
 
 #include "core/kernels/npu/aclnn/pytorch_npu_helper.hpp"
@@ -22,6 +23,63 @@ limitations under the License.
 namespace {
 
 constexpr int64_t kSwaIntMax = 2147483647;
+
+torch::Tensor ascend950_packed_causal_attention(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const std::vector<int64_t>& actual_seq_lengths,
+    const std::vector<int64_t>& actual_seq_lengths_kv,
+    int64_t num_heads,
+    int64_t num_key_value_heads,
+    double scale) {
+  CHECK_EQ(actual_seq_lengths.size(), actual_seq_lengths_kv.size())
+      << "query and key/value sequence counts must match";
+
+  torch::Tensor output = torch::empty_like(query);
+  int64_t query_start = 0;
+  int64_t key_value_start = 0;
+  for (size_t index = 0; index < actual_seq_lengths.size(); ++index) {
+    const int64_t query_end = actual_seq_lengths[index];
+    const int64_t key_value_end = actual_seq_lengths_kv[index];
+    const int64_t query_length = query_end - query_start;
+    const int64_t key_value_length = key_value_end - key_value_start;
+    CHECK_EQ(query_length, key_value_length)
+        << "Ascend950 torch attention fallback only supports non-chunked "
+           "prefill";
+
+    const torch::Tensor query_slice =
+        query.narrow(0, query_start, query_length);
+    torch::Tensor key_slice = key.narrow(0, key_value_start, key_value_length);
+    torch::Tensor value_slice =
+        value.narrow(0, key_value_start, key_value_length);
+    key_slice = xllm::kernel::npu::expand_kv_heads(
+        key_slice, num_heads, num_key_value_heads);
+    value_slice = xllm::kernel::npu::expand_kv_heads(
+        value_slice, num_heads, num_key_value_heads);
+
+    const torch::Tensor query_4d = query_slice.permute({1, 0, 2}).unsqueeze(0);
+    const torch::Tensor key_4d = key_slice.permute({1, 0, 2}).unsqueeze(0);
+    const torch::Tensor value_4d = value_slice.permute({1, 0, 2}).unsqueeze(0);
+    const torch::Tensor sequence_output =
+        torch::scaled_dot_product_attention(query_4d,
+                                            key_4d,
+                                            value_4d,
+                                            /*attn_mask=*/std::nullopt,
+                                            /*dropout_p=*/0.0,
+                                            /*is_causal=*/true,
+                                            /*scale=*/scale)
+            .squeeze(0)
+            .permute({1, 0, 2});
+    output.narrow(0, query_start, query_length).copy_(sequence_output);
+    query_start = query_end;
+    key_value_start = key_value_end;
+  }
+
+  CHECK_EQ(query_start, query.size(0));
+  CHECK_EQ(key_value_start, key.size(0));
+  return output;
+}
 
 torch::Tensor infer_attention_output(
     const torch::Tensor& query,
@@ -120,6 +178,20 @@ std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
       query, value, block_table, num_heads, input_layout);
   torch::Tensor softmax_lse =
       infer_softmax_lse(query, num_heads, input_layout, softmax_lse_flag);
+
+  if (is_ascend950() && input_layout == "TND" && !block_table.has_value()) {
+    CHECK(!softmax_lse_flag)
+        << "Ascend950 torch attention fallback does not return softmax_lse";
+    output = ascend950_packed_causal_attention(query,
+                                               key,
+                                               value,
+                                               actual_seq_lengths,
+                                               actual_seq_lengths_kv,
+                                               num_heads,
+                                               num_key_value_heads,
+                                               scale);
+    return {output, softmax_lse};
+  }
 
   std::vector<torch::Tensor> key_tensors_vec{key};
   std::vector<torch::Tensor> value_tensors_vec{value};

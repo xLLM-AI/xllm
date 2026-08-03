@@ -65,4 +65,10 @@ KVCacheCapacity estimate_kv_cache_capacity(
     const ModelArgs& model_args,
     const KVCacheEstimateOptions& options);
 
+int64_t estimate_speculative_kv_cache_blocks(
+    const KVCacheCapacity& target_kv_cache_cap,
+    const KVCacheCapacity& draft_kv_cache_cap,
+    bool share_device,
+    bool draft_body_uses_tp1 = false);
+
 }  // namespace xllm

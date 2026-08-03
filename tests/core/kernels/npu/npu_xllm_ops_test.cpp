@@ -19,6 +19,7 @@ limitations under the License.
 // linking on NPU (PrivateUse1), ops are callable via the dispatcher, and the
 // embedded Python interpreter sees torch.ops.xllm_ops.*.
 
+#include <acl/acl.h>
 #include <c10/core/impl/DeviceGuardImplInterface.h>
 #include <gtest/gtest.h>
 #include <pybind11/embed.h>
@@ -26,7 +27,11 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <filesystem>
+#include <limits>
+#include <optional>
+#include <string>
 
+#include "core/kernels/npu/npu_ops_api.h"
 #include "core/kernels/xllm_torch_ops.h"
 
 namespace py = pybind11;
@@ -63,6 +68,59 @@ void prepend_python_model_path() {
 bool is_npu_available() {
   return c10::impl::getDeviceGuardImpl(c10::DeviceType::PrivateUse1)
              ->deviceCount() > 0;
+}
+
+bool is_ascend950_device() {
+  const char* soc_name = aclrtGetSocName();
+  return soc_name != nullptr &&
+         std::string(soc_name).find("Ascend950") != std::string::npos;
+}
+
+torch::Tensor expand_kv_heads_reference(const torch::Tensor& tensor,
+                                        int64_t num_heads) {
+  const int64_t num_kv_heads = tensor.size(1);
+  EXPECT_EQ(num_heads % num_kv_heads, 0);
+  const int64_t expansion_factor = num_heads / num_kv_heads;
+  return tensor.unsqueeze(2)
+      .expand({tensor.size(0), num_kv_heads, expansion_factor, tensor.size(2)})
+      .reshape({tensor.size(0), num_heads, tensor.size(2)});
+}
+
+torch::Tensor packed_causal_attention_reference(const torch::Tensor& query,
+                                                const torch::Tensor& key,
+                                                const torch::Tensor& value,
+                                                double scale) {
+  const auto query_float = query.to(torch::kFloat32).permute({1, 0, 2});
+  const auto key_float =
+      expand_kv_heads_reference(key.to(torch::kFloat32), query.size(1));
+  const auto value_float =
+      expand_kv_heads_reference(value.to(torch::kFloat32), query.size(1));
+  auto scores =
+      torch::matmul(query_float, key_float.permute({1, 2, 0})) * scale;
+  const auto causal_mask =
+      torch::ones({query.size(0), key.size(0)}, torch::kBool).triu(1);
+  scores.masked_fill_(causal_mask, -std::numeric_limits<float>::infinity());
+  return torch::matmul(torch::softmax(scores, -1),
+                       value_float.permute({1, 0, 2}))
+      .permute({1, 0, 2});
+}
+
+torch::Tensor decode_attention_reference(const torch::Tensor& query,
+                                         const torch::Tensor& key,
+                                         const torch::Tensor& value,
+                                         double scale) {
+  const auto query_float = query.to(torch::kFloat32).squeeze(0);
+  const auto key_float =
+      expand_kv_heads_reference(key.to(torch::kFloat32), query.size(1));
+  const auto value_float =
+      expand_kv_heads_reference(value.to(torch::kFloat32), query.size(1));
+  const auto scores =
+      torch::matmul(query_float.unsqueeze(1), key_float.permute({1, 2, 0})) *
+      scale;
+  return torch::matmul(torch::softmax(scores, -1),
+                       value_float.permute({1, 0, 2}))
+      .squeeze(1)
+      .unsqueeze(0);
 }
 
 class NpuXllmOpsTest : public ::testing::Test {
@@ -146,6 +204,155 @@ TEST_F(NpuXllmOpsTest, EmbeddedInterpreterSeesOps) {
       torch::allclose(out.cpu(), ref.cpu(), /*rtol=*/1e-2, /*atol=*/1e-2))
       << "max abs diff = "
       << (out.cpu().to(torch::kFloat32) - ref.cpu().to(torch::kFloat32))
+             .abs()
+             .max()
+             .item<float>();
+}
+
+TEST_F(NpuXllmOpsTest, Qwen35_27B_TP4_FullAttentionMatchesReference) {
+  py::gil_scoped_acquire gil;
+  if (!is_ascend950_device()) {
+    GTEST_SKIP() << "Ascend950 is required for the A5 attention path.";
+  }
+
+  constexpr int64_t kSequenceLength = 129;
+  constexpr int64_t kQueryHeads = 6;
+  constexpr int64_t kKvHeads = 1;
+  constexpr int64_t kHeadDim = 256;
+  constexpr double kScale = 1.0 / 16.0;
+  torch::manual_seed(20260729);
+
+  const auto cpu_float = torch::TensorOptions().dtype(torch::kFloat32);
+  const auto query_cpu =
+      (0.25 * torch::randn({kSequenceLength, kQueryHeads, kHeadDim}, cpu_float))
+          .to(torch::kBFloat16);
+  const auto key_cpu =
+      (0.25 * torch::randn({kSequenceLength, kKvHeads, kHeadDim}, cpu_float))
+          .to(torch::kBFloat16);
+  const auto value_cpu =
+      torch::randn({kSequenceLength, kKvHeads, kHeadDim}, cpu_float)
+          .to(torch::kBFloat16);
+  const auto query = query_cpu.to(torch::kPrivateUse1);
+  const auto key = key_cpu.to(torch::kPrivateUse1);
+  const auto value = value_cpu.to(torch::kPrivateUse1);
+
+  const auto [actual, softmax_lse] =
+      xllm::kernel::npu::npu_fused_infer_attention(query,
+                                                   key,
+                                                   value,
+                                                   std::nullopt,
+                                                   std::nullopt,
+                                                   {kSequenceLength},
+                                                   {kSequenceLength},
+                                                   kQueryHeads,
+                                                   kKvHeads,
+                                                   kScale,
+                                                   /*block_size=*/128,
+                                                   /*sparse_mode=*/0,
+                                                   /*input_layout=*/"TND",
+                                                   /*softmax_lse_flag=*/false);
+  const auto expected =
+      packed_causal_attention_reference(query_cpu, key_cpu, value_cpu, kScale);
+
+  EXPECT_EQ(actual.sizes(), query.sizes());
+  EXPECT_EQ(softmax_lse.numel(), 0);
+  EXPECT_TRUE(torch::allclose(actual.cpu().to(torch::kFloat32),
+                              expected,
+                              /*rtol=*/5e-2,
+                              /*atol=*/5e-2))
+      << "max abs diff = "
+      << (actual.cpu().to(torch::kFloat32) - expected)
+             .abs()
+             .max()
+             .item<float>();
+}
+
+TEST_F(NpuXllmOpsTest, Qwen35_27B_TP4_KvCacheCrosses128TokenBoundary) {
+  py::gil_scoped_acquire gil;
+  if (!is_ascend950_device()) {
+    GTEST_SKIP() << "Ascend950 is required for the A5 paged-cache path.";
+  }
+
+  constexpr int64_t kSequenceLength = 130;
+  constexpr int64_t kBlockSize = 128;
+  constexpr int64_t kNumPhysicalBlocks = 3;
+  constexpr int64_t kQueryHeads = 6;
+  constexpr int64_t kKvHeads = 1;
+  constexpr int64_t kHeadDim = 256;
+  constexpr double kScale = 1.0 / 16.0;
+  torch::manual_seed(20260730);
+
+  const auto cpu_float = torch::TensorOptions().dtype(torch::kFloat32);
+  const auto key_cpu =
+      torch::randn({kSequenceLength, kKvHeads, kHeadDim}, cpu_float)
+          .to(torch::kBFloat16);
+  const auto value_cpu =
+      torch::randn({kSequenceLength, kKvHeads, kHeadDim}, cpu_float)
+          .to(torch::kBFloat16);
+  const auto query_cpu =
+      (0.25 * torch::randn({1, kQueryHeads, kHeadDim}, cpu_float))
+          .to(torch::kBFloat16);
+  auto key = key_cpu.to(torch::kPrivateUse1);
+  auto value_tensor = value_cpu.to(torch::kPrivateUse1);
+  std::optional<torch::Tensor> value = value_tensor;
+
+  const auto npu_bfloat = torch::TensorOptions()
+                              .dtype(torch::kBFloat16)
+                              .device(torch::kPrivateUse1);
+  auto key_cache = torch::zeros(
+      {kNumPhysicalBlocks, kBlockSize, kKvHeads, kHeadDim}, npu_bfloat);
+  auto value_cache_tensor = torch::zeros_like(key_cache);
+  std::optional<torch::Tensor> value_cache = value_cache_tensor;
+
+  const auto first_block_slots =
+      torch::arange(2 * kBlockSize,
+                    3 * kBlockSize,
+                    torch::TensorOptions().dtype(torch::kInt32));
+  const auto second_block_slots =
+      torch::arange(0, 2, torch::TensorOptions().dtype(torch::kInt32));
+  const auto slot_mapping = torch::cat({first_block_slots, second_block_slots})
+                                .to(torch::kPrivateUse1);
+  xllm::kernel::npu::reshape_paged_cache(
+      key, value, key_cache, value_cache, slot_mapping);
+
+  auto expected_key_cache =
+      torch::zeros({kNumPhysicalBlocks, kBlockSize, kKvHeads, kHeadDim},
+                   torch::TensorOptions().dtype(torch::kBFloat16));
+  auto expected_value_cache = torch::zeros_like(expected_key_cache);
+  expected_key_cache[2].copy_(key_cpu.narrow(0, 0, kBlockSize));
+  expected_value_cache[2].copy_(value_cpu.narrow(0, 0, kBlockSize));
+  expected_key_cache[0].narrow(0, 0, 2).copy_(key_cpu.narrow(0, kBlockSize, 2));
+  expected_value_cache[0].narrow(0, 0, 2).copy_(
+      value_cpu.narrow(0, kBlockSize, 2));
+
+  EXPECT_TRUE(torch::equal(key_cache.cpu(), expected_key_cache));
+  EXPECT_TRUE(torch::equal(value_cache.value().cpu(), expected_value_cache));
+
+  const auto query = query_cpu.to(torch::kPrivateUse1);
+  const auto block_table =
+      torch::tensor({{2, 0}}, torch::TensorOptions().dtype(torch::kInt32))
+          .to(torch::kPrivateUse1);
+  const auto seq_lens =
+      torch::tensor({kSequenceLength},
+                    torch::TensorOptions().dtype(torch::kInt32))
+          .to(torch::kPrivateUse1);
+  auto actual = torch::empty_like(query);
+  xllm::kernel::npu::batch_decode(query,
+                                  key_cache,
+                                  value_cache.value(),
+                                  kScale,
+                                  block_table,
+                                  seq_lens,
+                                  actual);
+  const auto expected =
+      decode_attention_reference(query_cpu, key_cpu, value_cpu, kScale);
+
+  EXPECT_TRUE(torch::allclose(actual.cpu().to(torch::kFloat32),
+                              expected,
+                              /*rtol=*/5e-2,
+                              /*atol=*/5e-2))
+      << "max abs diff = "
+      << (actual.cpu().to(torch::kFloat32) - expected)
              .abs()
              .max()
              .item<float>();

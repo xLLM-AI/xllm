@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "shared_memory_manager.h"
+#include "core/util/shared_memory_manager.h"
 
 #include <fcntl.h>
 #include <glog/logging.h>
@@ -21,18 +21,40 @@ limitations under the License.
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <algorithm>
+#include <cerrno>
 #include <csignal>
 #include <cstring>
+#include <mutex>
+#include <new>
 
 namespace xllm {
-std::vector<std::string> SharedMemoryManager::pending_cleanups;
-std::mutex SharedMemoryManager::cleanup_mutex;
+namespace {
+
+constexpr char kGenerationLockName[] = "/xllm_shm_generation_lock_v2";
+constexpr uint64_t kSharedMemoryMagic = 0x584C4C4D53484D32ULL;
+constexpr uint32_t kSharedMemoryLayoutVersion = 2;
+
+class alignas(64) SharedMemoryLayoutHeader final {
+ public:
+  uint64_t magic = kSharedMemoryMagic;
+  uint32_t version = kSharedMemoryLayoutVersion;
+  uint32_t header_size = sizeof(SharedMemoryLayoutHeader);
+  uint64_t payload_size = 0;
+  uint64_t generation = 1;
+  uint64_t reserved[4] = {};
+};
+
+static_assert(sizeof(SharedMemoryLayoutHeader) == 64);
+
+}  // namespace
 
 SharedMemoryManager::SharedMemoryManager(const std::string& name,
                                          size_t size,
                                          bool& is_creator)
-    : shm_name_(name), size_(size) {
+    : shm_name_(name),
+      size_(static_cast<int64_t>(size)),
+      mapping_size_(static_cast<int64_t>(sizeof(SharedMemoryLayoutHeader)) +
+                    static_cast<int64_t>(size)) {
   // Register cleanup handlers for signals (once per process)
   static std::once_flag flag;
   std::call_once(flag, [] {
@@ -41,84 +63,148 @@ SharedMemoryManager::SharedMemoryManager(const std::string& name,
     // signal(SIGSEGV, cleanup_handler);
   });
 
-  // First try to create exclusively (O_CREAT | O_EXCL)
+  CHECK_GT(size_, 0) << "Shared memory payload size must be positive.";
+  CHECK_GT(mapping_size_, size_) << "Shared memory mapping size overflow.";
+
+  // A single persistent lock serializes name generation transitions for every
+  // xLLM SHM object. Its namespace is bounded and it prevents
+  // open/unlink/create races without leaking one lock object per service port
+  // or test name.
+  lock_fd_ = shm_open(kGenerationLockName, O_CREAT | O_RDWR, 0666);
+  if (lock_fd_ == -1) {
+    LOG(FATAL) << "shm_open lock failed: " << strerror(errno);
+  }
+  if (flock(lock_fd_, LOCK_EX) == -1) {
+    close(lock_fd_);
+    lock_fd_ = -1;
+    LOG(FATAL) << "flock generation lock failed: " << strerror(errno);
+  }
+
+  bool created_exclusively = false;
   fd_ = shm_open(name.c_str(), O_CREAT | O_RDWR | O_EXCL, 0666);
-  is_creator = (fd_ != -1);
-  // If creation failed, try opening existing
-  if (!is_creator) {
+  if (fd_ != -1) {
+    created_exclusively = true;
+  } else if (errno == EEXIST) {
     fd_ = shm_open(name.c_str(), O_RDWR, 0666);
     if (fd_ == -1) {
       LOG(FATAL) << "shm_open failed: " << strerror(errno);
     }
   } else {
-    // Track created SHM for later cleanup
-    std::lock_guard<std::mutex> lock(cleanup_mutex);
-    pending_cleanups.push_back(name);
+    LOG(FATAL) << "shm_open create failed: " << strerror(errno);
   }
 
-  // Serialize size initialization with a write lock.
-  struct flock lock;
-  std::memset(&lock, 0, sizeof(lock));
-  lock.l_type = F_WRLCK;
-  lock.l_whence = SEEK_SET;
-  lock.l_start = 0;
-  lock.l_len = 0;  // lock the whole file
-  if (fcntl(fd_, F_SETLKW, &lock) == -1) {
-    close(fd_);
-    LOG(FATAL) << "fcntl(F_SETLKW) failed: " << strerror(errno);
-  }
-
-  struct stat st;
-  if (fstat(fd_, &st) == -1) {
-    close(fd_);
-    LOG(FATAL) << "fstat failed: " << strerror(errno);
-  }
-
-  // Ensure size is correct before mapping
-  if (st.st_size != static_cast<off_t>(size)) {
-    if (ftruncate(fd_, size) == -1) {
+  if (created_exclusively) {
+    if (flock(fd_, LOCK_EX) == -1) {
+      close(fd_);
+      LOG(FATAL) << "flock(LOCK_EX) failed: " << strerror(errno);
+    }
+    if (ftruncate(fd_, mapping_size_) == -1) {
       close(fd_);
       LOG(FATAL) << "ftruncate failed: " << strerror(errno);
     }
+    is_creator_ = true;
+  } else {
+    struct stat st;
+    if (fstat(fd_, &st) == -1) {
+      close(fd_);
+      LOG(FATAL) << "fstat failed: " << strerror(errno);
+    }
+    if (st.st_size != static_cast<off_t>(mapping_size_)) {
+      close(fd_);
+      LOG(FATAL) << "incompatible shared memory layout for " << name
+                 << ": expected mapped size " << mapping_size_ << ", got "
+                 << st.st_size
+                 << ". Stop all old xLLM processes and remove the stale SHM "
+                    "object before upgrading.";
+    }
+    is_creator_ = (flock(fd_, LOCK_EX | LOCK_NB) == 0);
+    if (!is_creator_ && errno != EWOULDBLOCK && errno != EAGAIN) {
+      close(fd_);
+      LOG(FATAL) << "flock(LOCK_EX) failed: " << strerror(errno);
+    }
+    if (!is_creator_ && flock(fd_, LOCK_SH) == -1) {
+      close(fd_);
+      LOG(FATAL) << "flock(LOCK_SH) failed: " << strerror(errno);
+    }
   }
+  is_creator = is_creator_;
 
-  lock.l_type = F_UNLCK;
-  if (fcntl(fd_, F_SETLK, &lock) == -1) {
-    close(fd_);
-    LOG(FATAL) << "fcntl(F_SETLK) failed: " << strerror(errno);
-  }
-
-  // Map into process address space
-  addr_ = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
+  addr_ =
+      mmap(nullptr, mapping_size_, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
   if (addr_ == MAP_FAILED) {
     close(fd_);
     LOG(FATAL) << "mmap failed: " << strerror(errno);
   }
+  auto* header = static_cast<SharedMemoryLayoutHeader*>(addr_);
+  payload_addr_ = static_cast<char*>(addr_) + sizeof(SharedMemoryLayoutHeader);
 
-  // Initialize memory to zero only for creator.
-  std::memset(addr_, 0, size_);
+  if (created_exclusively) {
+    new (header) SharedMemoryLayoutHeader();
+    header->payload_size = static_cast<uint64_t>(size_);
+  } else {
+    CHECK_EQ(header->magic, kSharedMemoryMagic)
+        << "incompatible shared memory layout magic for " << name;
+    CHECK_EQ(header->version, kSharedMemoryLayoutVersion)
+        << "incompatible shared memory layout version for " << name;
+    CHECK_EQ(header->header_size, sizeof(SharedMemoryLayoutHeader))
+        << "incompatible shared memory layout header size for " << name;
+    CHECK_EQ(header->payload_size, static_cast<uint64_t>(size_))
+        << "incompatible shared memory payload size for " << name;
+    if (is_creator_) {
+      ++header->generation;
+    }
+  }
+
+  if (is_creator_) {
+    std::memset(payload_addr_, 0, size_);
+    if (flock(fd_, LOCK_SH) == -1) {
+      munmap(addr_, mapping_size_);
+      close(fd_);
+      LOG(FATAL) << "flock(LOCK_SH) failed: " << strerror(errno);
+    }
+  }
+
+  if (flock(lock_fd_, LOCK_UN) == -1) {
+    munmap(addr_, mapping_size_);
+    close(fd_);
+    close(lock_fd_);
+    fd_ = -1;
+    lock_fd_ = -1;
+    LOG(FATAL) << "flock generation unlock failed: " << strerror(errno);
+  }
 }
 
 SharedMemoryManager::~SharedMemoryManager() {
-  // Unmap memory
   LOG(INFO) << "Delete ~SharedMemoryManager";
   if (addr_ != MAP_FAILED) {
-    munmap(addr_, size_);
+    munmap(addr_, mapping_size_);
   }
 
-  // Close descriptor
-  if (fd_ != -1) {
+  if (fd_ == -1 || lock_fd_ == -1) {
+    return;
+  }
+
+  if (flock(lock_fd_, LOCK_EX) == -1) {
+    PLOG(ERROR) << "flock generation lock failed while releasing " << shm_name_;
     close(fd_);
+    close(lock_fd_);
+    return;
   }
 
-  // Cleanup if we're the creator
-  std::lock_guard<std::mutex> lock(cleanup_mutex);
-  auto it =
-      std::find(pending_cleanups.begin(), pending_cleanups.end(), shm_name_);
-  if (it != pending_cleanups.end()) {
+  if (flock(fd_, LOCK_UN) == -1) {
+    PLOG(ERROR) << "flock(LOCK_UN) failed while releasing " << shm_name_;
+  } else if (flock(fd_, LOCK_EX | LOCK_NB) == 0) {
     shm_unlink(shm_name_.c_str());
-    pending_cleanups.erase(it);
+  } else if (errno != EWOULDBLOCK && errno != EAGAIN) {
+    PLOG(ERROR) << "flock(LOCK_EX) failed while releasing " << shm_name_;
   }
+
+  close(fd_);
+  if (flock(lock_fd_, LOCK_UN) == -1) {
+    PLOG(ERROR) << "flock generation unlock failed while releasing "
+                << shm_name_;
+  }
+  close(lock_fd_);
 }
 
 void SharedMemoryManager::cleanup_handler(int sig) {

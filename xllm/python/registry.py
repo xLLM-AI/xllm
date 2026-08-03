@@ -52,5 +52,9 @@ def _register_builtin_models() -> None:
 
     register_model("Qwen3ForCausalLM", "qwen3")(Qwen3ForCausalLM)
 
+    from xllm.python.models.deepseek_v32 import DeepseekV3ForCausalLM
+
+    register_model("deepseek_v32")(DeepseekV3ForCausalLM)
+
 
 _register_builtin_models()

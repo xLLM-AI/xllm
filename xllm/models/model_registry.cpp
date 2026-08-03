@@ -116,8 +116,9 @@ bool resolve_model_registration(const std::string& model_type,
   if (backend == kAutoBackend) {
     effective_backend =
         is_torch_only_model_type(model_type) ? kTorchBackend : kAtbBackend;
-  } else if (model_type == "qwen3" || model_type == "qwen3_moe") {
-    // qwen3/qwen3_moe support both backends.
+  } else if (model_type == "qwen3" || model_type == "qwen3_moe" ||
+             model_type == "deepseek_v32") {
+    // qwen3/qwen3_moe/deepseek_v32 support both backends.
   } else if (is_torch_only_model_type(model_type)) {
     if (backend != kTorchBackend) {
       if (error_message != nullptr) {

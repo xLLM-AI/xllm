@@ -63,6 +63,7 @@ namespace py = pybind11;
 #include "core/platform/device_name_utils.h"
 #include "core/util/net.h"
 #include "core/util/utils.h"
+#include "core/util/verbose_trace_logger.h"
 #include "function_call/function_call_parser.h"
 #include "parser/reasoning_parser.h"
 #include "server/xllm_server_registry.h"
@@ -134,6 +135,7 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .backend(model_config.backend())
       .limit_image_per_prompt(model_config.limit_image_per_prompt())
       .max_encoder_cache_size(model_config.max_encoder_cache_size())
+      .max_processor_cache_items(model_config.max_processor_cache_items())
       .block_size(kv_cache_config.block_size())
       .max_cache_size(kv_cache_config.max_cache_size())
       .max_memory_utilization(kv_cache_config.max_memory_utilization())
@@ -325,6 +327,9 @@ void validate_config(const std::string& model_type) {
   }
   if (model_config.max_encoder_cache_size() < 0) {
     LOG(FATAL) << "max_encoder_cache_size must be >= 0.";
+  }
+  if (model_config.max_processor_cache_items() < 0) {
+    LOG(FATAL) << "max_processor_cache_items must be >= 0.";
   }
 #if defined(USE_MLU)
   // Disable enable_schedule_overlap for VLM models on MLU backend
@@ -576,6 +581,19 @@ int main(int argc, char** argv) {
   google::ParseCommandLineFlags(&argc, &argv, true);
   google::InitGoogleLogging("xllm");
   initialize_configs();
+
+  const ServiceConfig& service_config = ServiceConfig::get_instance();
+  const DistributedConfig& distributed_config =
+      DistributedConfig::get_instance();
+  const std::string verbose_trace_log_path =
+      resolve_verbose_trace_log_path(service_config.verbose_trace_log_path(),
+                                     distributed_config.nnodes(),
+                                     distributed_config.node_rank());
+  VerboseTraceLogger::get_instance().initialize(
+      service_config.enable_verbose_trace_log(),
+      verbose_trace_log_path,
+      service_config.verbose_trace_log_max_size_mb(),
+      service_config.verbose_trace_log_max_files());
 
   // Check if model path is provided
   if (::xllm::ModelConfig::get_instance().model().empty()) {

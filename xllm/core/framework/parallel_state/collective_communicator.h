@@ -15,7 +15,7 @@ limitations under the License.
 
 #pragma once
 
-#include "collective_communicator_base.h"
+#include "core/framework/parallel_state/collective_communicator_base.h"
 
 namespace xllm {
 
@@ -45,6 +45,8 @@ class CollectiveCommunicator : public CollectiveCommunicatorBase {
   std::unique_ptr<ProcessGroup> cp_group_;
   std::unique_ptr<ProcessGroup> moe_tp_group_;
   std::unique_ptr<ProcessGroup> moe_ep_group_;
+  std::unique_ptr<ProcessGroup> mc2_group_;
+  std::unique_ptr<ProcessGroup> eplb_group_;
 };
 
 }  // namespace xllm

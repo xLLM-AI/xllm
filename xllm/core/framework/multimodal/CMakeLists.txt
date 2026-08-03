@@ -29,6 +29,7 @@ cc_library(
     common
     util
     encoder_cache
+    :processor_cache
     glog::glog
     absl::strings
     absl::time
