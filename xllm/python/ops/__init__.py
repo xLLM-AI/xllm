@@ -35,6 +35,7 @@ from xllm.python.ops.compute import (
     sparse_flash_attention,
 )
 from xllm.python.ops.attention import (
+    record_layer_event,
     reshape_paged_cache,
     update_decode_graph_metadata,
 )
@@ -56,6 +57,7 @@ __all__ = [
     "lightning_indexer",
     "scatter_nd_update",
     "sparse_flash_attention",
+    "record_layer_event",
     "reshape_paged_cache",
     "update_decode_graph_metadata",
     "all_reduce_",

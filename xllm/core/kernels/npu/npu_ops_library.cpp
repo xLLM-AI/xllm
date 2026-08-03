@@ -25,6 +25,7 @@ limitations under the License.
 #include <torch/library.h>
 #include <torch/torch.h>
 
+#include "kernels/npu/py_layer_synchronizer_context.h"
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
 #include "npu_ops_api.h"
 
@@ -68,6 +69,10 @@ void apply_rotary_embedding_npu(torch::Tensor& q,
                                 const torch::Tensor& cos_sin_cache,
                                 const torch::Tensor& positions) {
   xllm::kernel::npu::apply_rotary(q, k, cos_sin_cache, positions);
+}
+
+void record_layer_event_npu(int64_t layer_id) {
+  xllm::record_current_layer_event(layer_id);
 }
 
 // Graph-mode decode metadata update. Copies real data into the head of
@@ -195,6 +200,8 @@ TORCH_LIBRARY(xllm_ops, m) {
       "Tensor? actual_seq_lengths_kv, Tensor? query_rope, Tensor? key_rope, "
       "float scale_value, int sparse_block_size, str layout_query, str "
       "layout_kv, int sparse_mode) -> Tensor");
+  m.def("record_layer_event(int layer_id) -> ()",
+        TORCH_FN(xllm::record_layer_event_npu));
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {

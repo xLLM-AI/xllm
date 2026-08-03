@@ -7,6 +7,7 @@ import torch
 # ---------------------------------------------------------------------------
 reshape_paged_cache = torch.ops.xllm_ops.reshape_paged_cache
 update_decode_graph_metadata = torch.ops.xllm_ops.update_decode_graph_metadata
+record_layer_event = torch.ops.xllm_ops.record_layer_event
 
 
 @torch.library.register_fake("xllm_ops::reshape_paged_cache")

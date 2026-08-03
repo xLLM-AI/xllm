@@ -298,10 +298,11 @@ class Qwen3Model(nn.Module):
         # updated static_positions correctly.
         positions = positions.to(torch.int64).contiguous()
         residual: Optional[torch.Tensor] = None
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             hidden, residual = layer(
                 hidden, residual, positions, self.rotary.cos_sin_cache, None, None
             )
+            ops.record_layer_event(i)
         hidden, _ = self.norm(hidden, residual)
         return hidden
 

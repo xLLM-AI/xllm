@@ -26,6 +26,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
+#include "kernels/npu/py_layer_synchronizer_context.h"
 #include "models/llm/py_causal_lm.h"
 
 namespace py = pybind11;
@@ -189,9 +190,18 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
 
   py::object py_metadata = py::cast(AttentionMetadataView(attn_metadata));
 
+#if defined(USE_NPU)
+  set_current_layer_synchronizer(params.parallel.layer_synchronizer);
+#endif
+
   // Execute: one C++ -> Python call per step.
   py::object hidden_obj =
       py_executor_.attr("execute")(tokens, positions, py_metadata);
+
+#if defined(USE_NPU)
+  set_current_layer_synchronizer(nullptr);
+#endif
+
   return ModelOutput(hidden_obj.cast<torch::Tensor>());
 }
 

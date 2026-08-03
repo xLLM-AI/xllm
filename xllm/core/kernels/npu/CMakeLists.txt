@@ -36,10 +36,12 @@ cc_library(
     w4a8_dynamic_moe_preprocess.cpp
     rec_constrained_topk.cpp
     npu_ops_library.cpp
+    py_layer_synchronizer_context.cpp
   DEPS
     :torch_npu_kernels
     :tilelang_kernels
     xllm_ops
     nnopbase
     opapi
+    platform_npu
 )
