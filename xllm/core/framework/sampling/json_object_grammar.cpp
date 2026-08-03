@@ -611,13 +611,6 @@ std::vector<int32_t> JsonObjectGrammar::allowed_token_ids(
   if (!state.is_valid()) {
     return allowed;
   }
-  if (state.in_reasoning()) {
-    allowed.reserve(token_pieces_.size());
-    for (size_t token_id = 0; token_id < token_pieces_.size(); ++token_id) {
-      allowed.push_back(static_cast<int32_t>(token_id));
-    }
-    return allowed;
-  }
   allowed.reserve(token_pieces_.size());
   for (size_t token_id = 0; token_id < token_pieces_.size(); ++token_id) {
     if (state.can_accept_token(static_cast<int32_t>(token_id))) {

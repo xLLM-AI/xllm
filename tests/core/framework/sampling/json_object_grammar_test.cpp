@@ -184,7 +184,14 @@ TEST(JsonObjectGrammarTest, ReasoningIsUnconstrainedUntilEndMarker) {
       grammar.initial_state(/*reasoning_phase=*/true);
 
   EXPECT_TRUE(state.in_reasoning());
-  EXPECT_EQ(grammar.allowed_token_ids(state).size(), grammar.vocab_size());
+  EXPECT_EQ(grammar.allowed_token_ids(state),
+            std::vector<int32_t>({0, 2, 3, 4}));
+  const torch::Tensor mask = grammar.build_filter_mask(state);
+  EXPECT_EQ(mask.index({0}).item<float>(), 0.0F);
+  EXPECT_LT(mask.index({1}).item<float>(), -1.0F);
+  EXPECT_EQ(mask.index({2}).item<float>(), 0.0F);
+  EXPECT_EQ(mask.index({3}).item<float>(), 0.0F);
+  EXPECT_EQ(mask.index({4}).item<float>(), 0.0F);
   EXPECT_TRUE(state.accept_token(2));
   EXPECT_TRUE(state.accept_token(3));
   EXPECT_TRUE(state.accept_token(4));

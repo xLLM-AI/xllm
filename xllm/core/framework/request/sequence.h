@@ -64,6 +64,10 @@ enum class SequenceStage : int8_t {
   DECODE = 2
 };
 
+struct RequestFailureState final {
+  std::optional<Status> status;
+};
+
 struct SequenceParams {
   // max tokens count in the sequence.
   size_t seq_capacity = 0;
@@ -113,6 +117,7 @@ struct SequenceParams {
 
   std::shared_ptr<const JsonObjectGrammar> json_object_grammar;
   bool json_reasoning_enabled = false;
+  std::shared_ptr<RequestFailureState> request_failure_state;
 };
 
 class Sequence final {
@@ -125,6 +130,7 @@ class Sequence final {
            const SequenceParams& seq_params);
 
   Sequence(const Sequence& other);
+  Sequence(const Sequence& other, size_t index);
 
   // get mm data
   const MMData& mm_data() const { return mm_data_; }
@@ -298,10 +304,14 @@ class Sequence final {
   }
 
   FinishReason finish_reason() const { return finish_reason_; }
+  const std::optional<Status>& error_status() const {
+    return sequence_params_.request_failure_state->status;
+  }
   // check finish status, use cached value if not invalidated
   bool finished() const;
   // mark sequence as finished (used by rec model multi-round decoding)
   void finish();
+  void fail(Status status);
 
   // get the output of the sequence until the specified number of tokens,
   // returns nullopt if no delta text and not finished

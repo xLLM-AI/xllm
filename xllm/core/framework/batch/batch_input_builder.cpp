@@ -582,6 +582,10 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     state_.sample_sequence_ids.insert(state_.sample_sequence_ids.end(),
                                       state.sample_sequence_ids.begin(),
                                       state.sample_sequence_ids.end());
+    state_.sample_prior_output_rows.insert(
+        state_.sample_prior_output_rows.end(),
+        state.sample_prior_output_rows.begin(),
+        state.sample_prior_output_rows.end());
     int32_t sample_idxes_offset =
         static_cast<int32_t>(state_.sample_idxes.size());
     for (const auto& idx : state.sample_idxes) {
@@ -950,6 +954,9 @@ void BatchInputBuilder::handle_sampling_parameters(Sequence* sequence,
   state.json_object_states.push_back(
       json_state == nullptr ? JsonObjectGrammarState() : *json_state);
   state.sample_sequence_ids.emplace_back(sequence->sample_sequence_id());
+  const int32_t sampled_input_token = state.flatten_tokens_vec.back();
+  state.sample_prior_output_rows.emplace_back(
+      sampled_input_token < 0 ? -sampled_input_token - 1 : -1);
   state.sample_idxes.push_back(
       static_cast<int32_t>(state.selected_token_idxes.size() - 1));
 
@@ -1274,22 +1281,31 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
     forward_input.json_object_states = std::move(state_.json_object_states);
     std::vector<std::string> sample_sequence_ids =
         std::move(state_.sample_sequence_ids);
+    std::vector<int32_t> sample_prior_output_rows =
+        std::move(state_.sample_prior_output_rows);
     CHECK_EQ(sample_sequence_ids.size(),
+             forward_input.json_object_states.size());
+    CHECK_EQ(sample_prior_output_rows.size(),
              forward_input.json_object_states.size());
     if (state_.sample_idxes.size() != forward_input.json_object_states.size()) {
       std::vector<JsonObjectGrammarState> sampled_states;
       sampled_states.reserve(state_.sample_idxes.size());
       std::vector<std::string> sampled_sequence_ids;
       sampled_sequence_ids.reserve(state_.sample_idxes.size());
+      std::vector<int32_t> sampled_prior_output_rows;
+      sampled_prior_output_rows.reserve(state_.sample_idxes.size());
       for (const int32_t sample_idx : state_.sample_idxes) {
         CHECK_GE(sample_idx, 0);
         CHECK_LT(static_cast<size_t>(sample_idx),
                  forward_input.json_object_states.size());
         sampled_states.push_back(forward_input.json_object_states[sample_idx]);
         sampled_sequence_ids.emplace_back(sample_sequence_ids[sample_idx]);
+        sampled_prior_output_rows.emplace_back(
+            sample_prior_output_rows[sample_idx]);
       }
       forward_input.json_object_states = std::move(sampled_states);
       sample_sequence_ids = std::move(sampled_sequence_ids);
+      sample_prior_output_rows = std::move(sampled_prior_output_rows);
     }
     const bool has_json_object_state =
         std::any_of(forward_input.json_object_states.begin(),
@@ -1299,6 +1315,8 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
                     });
     if (has_json_object_state) {
       forward_input.sample_sequence_ids = std::move(sample_sequence_ids);
+      forward_input.sample_prior_output_rows =
+          std::move(sample_prior_output_rows);
       forward_input.json_object_state_snapshots.reserve(
           forward_input.json_object_states.size());
       for (const auto& json_state : forward_input.json_object_states) {

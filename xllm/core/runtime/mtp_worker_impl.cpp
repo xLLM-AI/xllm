@@ -896,15 +896,20 @@ folly::SemiFuture<std::optional<ForwardOutput>> MTPWorkerImpl::step_async(
       return;
     }
 
-    if (can_use_last_step_output_for_schedule_overlap(input_on_device) &&
-        input_on_device.token_ids.numel() > 0 &&
+    if (input_on_device.token_ids.numel() > 0 &&
         input_on_device.input_params.meta.batch_forward_type.has_decode()) {
-      input_on_device = update_input_by_last_step_output_for_schedule_overlap(
-          input_on_device);
+      if (can_use_last_step_output_for_schedule_overlap(input_on_device)) {
+        input_on_device = update_input_by_last_step_output_for_schedule_overlap(
+            input_on_device);
+      } else {
+        update_json_object_states_by_last_step_output(input_on_device);
+        sanitize_json_object_error_inputs(input_on_device);
+      }
     }
 
-    const auto output = this->step_for_schedule_overlap(input_on_device);
+    auto output = this->step_for_schedule_overlap(input_on_device);
     if (output.has_value()) {
+      output->json_object_errors = input_on_device.json_object_errors;
       if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
         std::unique_lock<std::mutex> output_lock(mtx_);
         cv_.wait(output_lock, [this] { return !is_recorded_; });
@@ -925,12 +930,14 @@ folly::SemiFuture<std::optional<ForwardOutput>> MTPWorkerImpl::step_async(
         std::unique_lock<std::mutex> output_lock(mtx_);
         cv_.wait(output_lock, [this] { return !is_recorded_; });
         last_step_output_valid_ = false;
+        last_step_output_ = ForwardOutput();
         last_step_request_ids_.clear();
         last_step_sample_sequence_ids_.clear();
         is_recorded_ = true;
         cv_.notify_one();
       } else {
         last_step_output_valid_ = false;
+        last_step_output_ = ForwardOutput();
         last_step_request_ids_.clear();
         last_step_sample_sequence_ids_.clear();
       }

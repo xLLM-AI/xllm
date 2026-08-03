@@ -362,11 +362,11 @@ void SequencesGroup::process_beam_search(bool force_requested_result_size) {
     CHECK_LT(candidate.source_index, sequences_.size());
     CHECK(sequences_[candidate.source_index] != nullptr);
     if (i < existing_size) {
-      replacement_sequences[i] =
-          std::make_unique<Sequence>(*sequences_[candidate.source_index]);
+      replacement_sequences[i] = std::make_unique<Sequence>(
+          *sequences_[candidate.source_index], /*index=*/i);
     } else {
-      tail_sequences.emplace_back(
-          std::make_unique<Sequence>(*sequences_[candidate.source_index]));
+      tail_sequences.emplace_back(std::make_unique<Sequence>(
+          *sequences_[candidate.source_index], /*index=*/i));
     }
   }
 

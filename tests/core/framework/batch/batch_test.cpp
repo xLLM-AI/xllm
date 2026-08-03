@@ -42,6 +42,7 @@ limitations under the License.
 #include "framework/prefix_cache/block_hasher.h"
 #include "framework/request/stopping_checker.h"
 #include "framework/sampling/sampling_params.h"
+#include "framework/tokenizer/tokenizer.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "runtime/forward_shared_memory_manager.h"
@@ -209,7 +210,9 @@ Sequence make_basic_sequence(const std::vector<int32_t>& prompt_token_ids) {
 Sequence make_overlap_sequence(const std::vector<int32_t>& prompt_token_ids,
                                size_t seq_capacity,
                                RequestSamplingParam* sampling_param,
-                               StoppingChecker* stopping_checker) {
+                               StoppingChecker* stopping_checker,
+                               const std::string& request_id = "",
+                               size_t sequence_index = 0) {
   SequenceParams seq_params;
   seq_params.seq_capacity = seq_capacity;
   seq_params.stopping_checker = stopping_checker;
@@ -218,12 +221,13 @@ Sequence make_overlap_sequence(const std::vector<int32_t>& prompt_token_ids,
   seq_params.echo = false;
   seq_params.logprobs = false;
   seq_params.enable_schedule_overlap = true;
+  seq_params.request_id = request_id;
 
   IncrementalDecoder decoder(/*prompt=*/"",
                              /*num_prompt_tokens=*/prompt_token_ids.size(),
                              /*echo=*/false,
                              /*skip_special_tokens=*/true);
-  return Sequence(/*index=*/0,
+  return Sequence(/*index=*/sequence_index,
                   prompt_token_ids,
                   /*input_embedding=*/torch::Tensor(),
                   /*mm_data=*/MMData(),
@@ -586,6 +590,189 @@ TEST(BatchTest, ProcessRawOutputStoresMtpBootstrapEmbedding) {
   EXPECT_TRUE(torch::equal(stored, torch::tensor({3.0f, 4.0f})));
 }
 
+TEST(SequenceTest, JsonObjectCommitMismatchFailsBeforeTokenMutation) {
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(4);
+  BlockManagerImpl manager(options);
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(4);
+  std::shared_ptr<const JsonObjectGrammar> grammar =
+      std::make_shared<const JsonObjectGrammar>(
+          std::vector<std::string>{"{", "}", ""},
+          std::unordered_set<int32_t>{2});
+
+  SequenceParams seq_params;
+  seq_params.seq_capacity = 16;
+  seq_params.stopping_checker = &stopping_checker;
+  seq_params.sampling_param = &sampling_param;
+  seq_params.request_id = "req-commit";
+  seq_params.json_object_grammar = grammar;
+  IncrementalDecoder decoder("", 2, false, false);
+  Sequence sequence(/*index=*/0,
+                    /*prompt_token_ids=*/{10, 11},
+                    torch::Tensor(),
+                    MMData(),
+                    std::move(decoder),
+                    seq_params);
+  sequence.add_kv_blocks(manager.allocate(1));
+  sequence.kv_state().set_kv_cache_tokens_num(sequence.num_prompt_tokens());
+  const size_t original_num_tokens = sequence.num_tokens();
+
+  EXPECT_NO_FATAL_FAILURE(sequence.append_token(Token(/*id=*/1)));
+
+  EXPECT_EQ(sequence.num_tokens(), original_num_tokens);
+  ASSERT_TRUE(sequence.error_status().has_value());
+  EXPECT_TRUE(sequence.finished());
+}
+
+TEST(SequenceTest, JsonObjectOverlapMismatchKeepsPlaceholderToken) {
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(4);
+  BlockManagerImpl manager(options);
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(4);
+  std::shared_ptr<const JsonObjectGrammar> grammar =
+      std::make_shared<const JsonObjectGrammar>(
+          std::vector<std::string>{"{", "}", ""},
+          std::unordered_set<int32_t>{2});
+
+  SequenceParams seq_params;
+  seq_params.seq_capacity = 16;
+  seq_params.stopping_checker = &stopping_checker;
+  seq_params.sampling_param = &sampling_param;
+  seq_params.enable_schedule_overlap = true;
+  seq_params.request_id = "req-overlap-commit";
+  seq_params.json_object_grammar = grammar;
+  IncrementalDecoder decoder("", 2, false, false);
+  Sequence sequence(/*index=*/0,
+                    /*prompt_token_ids=*/{10, 11},
+                    torch::Tensor(),
+                    MMData(),
+                    std::move(decoder),
+                    seq_params);
+  sequence.add_kv_blocks(manager.allocate(1));
+  sequence.kv_state().set_kv_cache_tokens_num(sequence.num_prompt_tokens());
+  sequence.append_token(Token(/*id=*/-1));
+  const size_t original_num_tokens = sequence.num_tokens();
+
+  EXPECT_NO_FATAL_FAILURE(
+      sequence.update_last_step_token(Token(/*id=*/1), /*token_offset=*/0));
+
+  EXPECT_EQ(sequence.num_tokens(), original_num_tokens);
+  EXPECT_EQ(sequence.tokens()[sequence.num_prompt_tokens()], -1);
+  ASSERT_TRUE(sequence.error_status().has_value());
+  EXPECT_TRUE(sequence.finished());
+}
+
+TEST(BatchTest, JsonObjectCommitMismatchSkipsRemainingSampleSlotsAndEmbedding) {
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(4);
+  BlockManagerImpl manager(options);
+  RequestSamplingParam sampling_param;
+  sampling_param.logprobs = true;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(4);
+  std::shared_ptr<const JsonObjectGrammar> grammar =
+      std::make_shared<const JsonObjectGrammar>(
+          std::vector<std::string>{"{", "x", ""},
+          std::unordered_set<int32_t>{2});
+  std::vector<SampleSlot> sample_slots;
+  SampleSlot first_slot;
+  first_slot.request_id = "sample-req";
+  first_slot.sample_id = 0;
+  first_slot.token_position = 2;
+  sample_slots.emplace_back(first_slot);
+  SampleSlot second_slot;
+  second_slot.request_id = "sample-req";
+  second_slot.sample_id = 1;
+  second_slot.token_position = 4;
+  sample_slots.emplace_back(second_slot);
+
+  SequenceParams seq_params;
+  seq_params.seq_capacity = 16;
+  seq_params.stopping_checker = &stopping_checker;
+  seq_params.sampling_param = &sampling_param;
+  seq_params.sample_slots = &sample_slots;
+  seq_params.request_id = "req-sample-slots";
+  seq_params.json_object_grammar = grammar;
+  IncrementalDecoder decoder("", 4, false, false);
+  Sequence sequence(/*index=*/0,
+                    /*prompt_token_ids=*/{10, 11, 12, 13},
+                    torch::Tensor(),
+                    MMData(),
+                    std::move(decoder),
+                    seq_params);
+  sequence.add_kv_blocks(manager.allocate(1));
+  Batch batch(&sequence);
+  (void)batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
+  const size_t original_num_tokens = sequence.num_tokens();
+
+  RawForwardOutput raw_output;
+  raw_output.outputs = {
+      make_raw_sample_output(
+          /*token_id=*/1, -0.1f, {}, {}, /*embeddings=*/{3.0f, 4.0f}),
+      make_raw_sample_output(/*token_id=*/0, -0.2f)};
+  EXPECT_NO_FATAL_FAILURE(
+      batch.process_sample_output(raw_output, /*replace_fake_token=*/false));
+
+  EXPECT_EQ(sequence.num_tokens(), original_num_tokens);
+  EXPECT_FALSE(sequence.get_mtp_bootstrap_embedding().defined());
+  ASSERT_TRUE(sequence.error_status().has_value());
+  EXPECT_TRUE(sequence.finished());
+}
+
+TEST(BatchTest, JsonObjectErrorDiscardsFailedMmEmbeddingWithoutRowShift) {
+  RequestSamplingParam sampling_param;
+  sampling_param.is_embeddings = true;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(1);
+
+  SequenceParams failed_params;
+  failed_params.seq_capacity = 8;
+  failed_params.stopping_checker = &stopping_checker;
+  failed_params.sampling_param = &sampling_param;
+  failed_params.request_id = "req-mm-failed";
+  SequenceParams healthy_params = failed_params;
+  healthy_params.request_id = "req-mm-healthy";
+
+  MMItemVec failed_items = {MMDataItem(MMType::IMAGE)};
+  MMItemVec healthy_items = {MMDataItem(MMType::IMAGE)};
+  IncrementalDecoder failed_decoder("", 1, false, false);
+  Sequence failed(/*index=*/0,
+                  /*prompt_token_ids=*/{10},
+                  torch::Tensor(),
+                  MMData(MMType::IMAGE, failed_items),
+                  std::move(failed_decoder),
+                  failed_params);
+  IncrementalDecoder healthy_decoder("", 1, false, false);
+  Sequence healthy(/*index=*/0,
+                   /*prompt_token_ids=*/{20},
+                   torch::Tensor(),
+                   MMData(MMType::IMAGE, healthy_items),
+                   std::move(healthy_decoder),
+                   healthy_params);
+  Batch batch({&failed, &healthy});
+
+  RawForwardOutput raw_output;
+  raw_output.mm_embeddings = {torch::tensor({1.0f, 2.0f}),
+                              torch::tensor({3.0f, 4.0f})};
+  raw_output.json_object_errors = {
+      {failed.sample_sequence_id(), "missing prior sampled output row"}};
+  batch.process_sample_output(raw_output, /*replace_fake_token=*/false);
+
+  ASSERT_TRUE(failed.error_status().has_value());
+  EXPECT_TRUE(healthy.finished());
+  Tokenizer tokenizer;
+  SequenceOutput output = healthy.generate_output(tokenizer);
+  ASSERT_TRUE(output.mm_embeddings.has_value());
+  ASSERT_EQ(output.mm_embeddings->size(), 1u);
+  EXPECT_TRUE(torch::equal(output.mm_embeddings->at(0).embedding,
+                           raw_output.mm_embeddings[1]));
+}
+
 TEST(BatchTest, DecodeForwardInputConsumesMtpBootstrap) {
   BlockManagerPool::Options options;
   options.num_blocks(8).block_size(4).enable_disagg_pd(true);
@@ -908,6 +1095,7 @@ TEST(BatchTest, JsonObjectSampleSequenceIdsFollowSamplingRows) {
   first_params.sampling_param = &sampling_param;
   first_params.request_id = "req-shared";
   first_params.json_object_grammar = grammar;
+  first_params.enable_schedule_overlap = true;
 
   SequenceParams second_params = first_params;
   second_params.request_id = "req-shared";
@@ -936,9 +1124,19 @@ TEST(BatchTest, JsonObjectSampleSequenceIdsFollowSamplingRows) {
 
   EXPECT_EQ(forward_input.sample_sequence_ids,
             std::vector<std::string>({"req-shared#1", "req-shared#0"}));
+  EXPECT_EQ(forward_input.sample_prior_output_rows,
+            std::vector<int32_t>({-1, -1}));
   ASSERT_EQ(forward_input.json_object_states.size(), 2u);
   ASSERT_TRUE(forward_input.sampling_params.filter_mask.defined());
   EXPECT_EQ(forward_input.sampling_params.filter_mask.size(0), 2);
+
+  RawForwardOutput fake_output;
+  fake_output.outputs = {make_raw_sample_output(-1, std::nullopt),
+                         make_raw_sample_output(-2, std::nullopt)};
+  batch.process_sample_output(fake_output, /*replace_fake_token=*/false);
+  ForwardInput next_input = batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
+  EXPECT_EQ(next_input.sample_prior_output_rows, std::vector<int32_t>({0, 1}));
 }
 
 TEST(BatchTest, ChunkedPDTransferUsesStepWindow) {
@@ -1181,6 +1379,7 @@ TEST(BatchTest, ForwardInputPackedRoundTripPreservesTransportFields) {
   input.input_params.embedding.mtp_bootstrap_embeddings =
       torch::tensor({{3.0f, 4.0f}});
   input.sample_sequence_ids = {"req-packed#0"};
+  input.sample_prior_output_rows = {3};
   bool is_creator = false;
   auto shm_name =
       ForwardSharedMemoryManager::create_unique_name("batch_test_forward_input",
@@ -1209,12 +1408,80 @@ TEST(BatchTest, ForwardInputPackedRoundTripPreservesTransportFields) {
             std::vector<int32_t>{0});
   EXPECT_EQ(round_trip.sample_sequence_ids,
             std::vector<std::string>{"req-packed#0"});
+  EXPECT_EQ(round_trip.sample_prior_output_rows, std::vector<int32_t>{3});
   ASSERT_TRUE(
       round_trip.input_params.embedding.mtp_bootstrap_embeddings.defined());
   EXPECT_TRUE(torch::equal(
       round_trip.input_params.embedding.mtp_bootstrap_embeddings.to(
           torch::kCPU),
       torch::tensor({{3.0f, 4.0f}})));
+}
+
+TEST(BatchTest, ForwardOutputProtoRoundTripPreservesJsonObjectErrors) {
+  const torch::Tensor undefined;
+  const std::vector<JsonObjectOutputError> errors = {
+      {"req-error#0", "missing prior sampled output row"}};
+  proto::ForwardOutput proto_output;
+  forward_output_to_proto(undefined,
+                          undefined,
+                          undefined,
+                          undefined,
+                          undefined,
+                          undefined,
+                          /*prepared_layer_id=*/-1,
+                          undefined,
+                          undefined,
+                          undefined,
+                          /*dit_images=*/{},
+                          errors,
+                          &proto_output);
+
+  RawForwardOutput round_trip;
+  proto_to_forward_output(proto_output, round_trip);
+
+  ASSERT_EQ(round_trip.json_object_errors.size(), 1u);
+  EXPECT_EQ(round_trip.json_object_errors[0].sample_sequence_id, "req-error#0");
+  EXPECT_EQ(round_trip.json_object_errors[0].message,
+            "missing prior sampled output row");
+}
+
+TEST(BatchTest, ForwardOutputShmRoundTripPreservesJsonObjectErrors) {
+  bool is_creator = false;
+  const std::string shm_name = ForwardSharedMemoryManager::create_unique_name(
+      "batch_test_forward_output",
+      /*dp_group=*/0,
+      ForwardType::RAW_OUTPUT,
+      /*rank=*/0);
+  ForwardSharedMemoryManager writer_manager(
+      shm_name, 1 << 20, is_creator, ForwardType::RAW_OUTPUT);
+  bool is_reader_creator = false;
+  ForwardSharedMemoryManager reader_manager(
+      shm_name, 1 << 20, is_reader_creator, ForwardType::RAW_OUTPUT);
+  const torch::Tensor undefined;
+  const std::vector<JsonObjectOutputError> errors = {
+      {"req-error#0", "prior token violates json_object grammar"}};
+
+  ASSERT_TRUE(writer_manager.raw_output_write(undefined,
+                                              undefined,
+                                              undefined,
+                                              undefined,
+                                              undefined,
+                                              /*mm_embeddings=*/{},
+                                              /*dit_images=*/{},
+                                              undefined,
+                                              /*prepared_layer_id=*/-1,
+                                              undefined,
+                                              undefined,
+                                              undefined,
+                                              errors));
+
+  RawForwardOutput round_trip;
+  reader_manager.raw_output_read(round_trip);
+
+  ASSERT_EQ(round_trip.json_object_errors.size(), 1u);
+  EXPECT_EQ(round_trip.json_object_errors[0].sample_sequence_id, "req-error#0");
+  EXPECT_EQ(round_trip.json_object_errors[0].message,
+            "prior token violates json_object grammar");
 }
 
 TEST(BatchTest, ForwardInputBlockCopyKernelFieldsMatchExpectedLayout) {
@@ -2184,6 +2451,153 @@ TEST(BatchTest, KeepTargetsForOverlapReplacement) {
 
   SchedulerConfig::get_instance().enable_schedule_overlap(
       old_enable_schedule_overlap);
+}
+
+TEST(BatchTest, JsonObjectErrorFailsOnlyOwningRequestWithoutTokenCommit) {
+  const bool old_enable_schedule_overlap =
+      SchedulerConfig::get_instance().enable_schedule_overlap();
+  SchedulerConfig::get_instance().enable_schedule_overlap(true);
+
+  BlockManager::Options options;
+  options.num_blocks(16).block_size(4);
+  BlockManagerImpl manager(options);
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(4);
+
+  Sequence failed = make_overlap_sequence({1, 10, 11},
+                                          /*seq_capacity=*/32,
+                                          &sampling_param,
+                                          &stopping_checker,
+                                          "req-error",
+                                          /*sequence_index=*/0);
+  Sequence failed_peer = make_overlap_sequence({1, 20, 21},
+                                               /*seq_capacity=*/32,
+                                               &sampling_param,
+                                               &stopping_checker,
+                                               "req-error",
+                                               /*sequence_index=*/1);
+  Sequence healthy = make_overlap_sequence({1, 30, 31},
+                                           /*seq_capacity=*/32,
+                                           &sampling_param,
+                                           &stopping_checker,
+                                           "req-healthy",
+                                           /*sequence_index=*/0);
+  for (Sequence* sequence :
+       std::vector<Sequence*>{&failed, &failed_peer, &healthy}) {
+    sequence->add_kv_blocks(manager.allocate(1));
+    sequence->kv_state().incr_kv_cache_tokens_num(
+        sequence->num_prompt_tokens() - 1);
+  }
+
+  Batch batch({&failed, &failed_peer, &healthy});
+  (void)batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
+
+  RawForwardOutput fake_output;
+  fake_output.outputs = {make_raw_sample_output(-1, std::nullopt),
+                         make_raw_sample_output(-2, std::nullopt),
+                         make_raw_sample_output(-3, std::nullopt)};
+  batch.process_sample_output(fake_output, /*replace_fake_token=*/false);
+
+  RawForwardOutput real_output;
+  real_output.outputs = {make_raw_sample_output(101, std::nullopt),
+                         make_raw_sample_output(102, std::nullopt),
+                         make_raw_sample_output(103, std::nullopt)};
+  real_output.json_object_errors = {
+      {failed.sample_sequence_id(), "missing prior sampled output row"}};
+  batch.process_sample_output(real_output, /*replace_fake_token=*/true);
+
+  EXPECT_EQ(failed.num_generated_tokens(), 1u);
+  EXPECT_EQ(failed.tokens()[failed.num_prompt_tokens()], -1);
+  ASSERT_TRUE(failed.error_status().has_value());
+  EXPECT_FALSE(failed.error_status()->ok());
+  EXPECT_TRUE(failed.finished());
+
+  EXPECT_EQ(failed_peer.num_generated_tokens(), 1u);
+  EXPECT_EQ(failed_peer.tokens()[failed_peer.num_prompt_tokens()], -2);
+  ASSERT_TRUE(failed_peer.error_status().has_value());
+  EXPECT_FALSE(failed_peer.error_status()->ok());
+  EXPECT_TRUE(failed_peer.finished());
+
+  EXPECT_EQ(healthy.num_generated_tokens(), 1u);
+  EXPECT_EQ(healthy.tokens()[healthy.num_prompt_tokens()], 103);
+  EXPECT_FALSE(healthy.error_status().has_value());
+  EXPECT_FALSE(healthy.finished());
+
+  SchedulerConfig::get_instance().enable_schedule_overlap(
+      old_enable_schedule_overlap);
+}
+
+TEST(BatchTest, JsonObjectErrorForUnknownSequenceDies) {
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(4);
+  BlockManagerImpl manager(options);
+  Sequence sequence = make_basic_sequence({1, 2, 3});
+  sequence.add_kv_blocks(manager.allocate(1));
+  Batch batch(&sequence);
+  (void)batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
+
+  RawForwardOutput raw_output;
+  raw_output.json_object_errors = {
+      {"unknown-request#0", "missing prior sampled output row"}};
+  EXPECT_DEATH(
+      batch.process_sample_output(raw_output, /*replace_fake_token=*/false),
+      "unknown sampled sequence id");
+}
+
+TEST(BatchTest, JsonObjectErrorFailsUnscheduledSiblingSequence) {
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(4);
+  BlockManagerImpl manager(options);
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(4);
+  RequestState request_state(
+      "prompt",
+      std::vector<int32_t>{1, 2, 3},
+      sampling_param,
+      SchedulerParam{},
+      stopping_checker,
+      /*seq_capacity=*/32,
+      /*n=*/2,
+      /*best_of=*/2,
+      /*logprobs=*/false,
+      /*stream=*/false,
+      /*echo=*/false,
+      /*skip_special_tokens=*/true,
+      /*enable_schedule_overlap=*/true,
+      [](const RequestOutput&) { return true; },
+      OutputsFunc{});
+  Request request("req-shared", "", "", request_state);
+  ASSERT_TRUE(request.expand_sequences(/*share_prefix=*/false));
+  ASSERT_EQ(request.sequences().size(), 2u);
+  for (const auto& sequence : request.sequences()) {
+    sequence->add_kv_blocks(manager.allocate(1));
+    sequence->kv_state().incr_kv_cache_tokens_num(
+        sequence->num_prompt_tokens() - 1);
+  }
+
+  Sequence* scheduled_sequence = request.sequences()[0].get();
+  Batch batch(scheduled_sequence);
+  (void)batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
+  RawForwardOutput raw_output;
+  raw_output.json_object_errors = {{scheduled_sequence->sample_sequence_id(),
+                                    "missing prior sampled output row"}};
+
+  batch.process_sample_output(raw_output, /*replace_fake_token=*/false);
+
+  EXPECT_TRUE(request.finished());
+  ASSERT_TRUE(request.error_status().has_value());
+  for (const auto& sequence : request.sequences()) {
+    EXPECT_TRUE(sequence->finished());
+    ASSERT_TRUE(sequence->error_status().has_value());
+    EXPECT_EQ(sequence->error_status()->message(),
+              request.error_status()->message());
+    EXPECT_EQ(sequence->num_generated_tokens(), 0u);
+  }
 }
 
 TEST(BatchTest, OverlapMTPReplacementSkipsPreemptedSequenceWithoutKVBlocks) {

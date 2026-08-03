@@ -138,6 +138,7 @@ class WorkerImpl {
 
   virtual ForwardInput update_input_by_last_step_output(ForwardInput& inputs);
   void update_json_object_states_by_last_step_output(ForwardInput& inputs);
+  void sanitize_json_object_error_inputs(ForwardInput& inputs);
 
   // initialize model, cache manager. async call
   virtual folly::SemiFuture<bool> init_model_async(

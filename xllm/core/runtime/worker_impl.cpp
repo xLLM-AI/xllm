@@ -39,6 +39,7 @@ limitations under the License.
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -675,17 +676,15 @@ void WorkerImpl::update_last_step_output(
     const std::optional<ForwardOutput>& output,
     const std::vector<std::string>& request_ids,
     const std::vector<std::string>& sample_sequence_ids) {
-  if (output.value().sample_output.next_tokens.defined()) {
-    last_step_output_ = std::move(output.value());
-    last_step_request_ids_ = request_ids;
-    last_step_sample_sequence_ids_ = sample_sequence_ids;
+  const bool has_tokens = output.value().sample_output.next_tokens.defined();
+  last_step_output_ = std::move(output.value());
+  last_step_request_ids_ = request_ids;
+  last_step_sample_sequence_ids_ = sample_sequence_ids;
+  if (has_tokens) {
     last_step_output_valid_ = true;
   } else {
-    if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
-      last_step_output_ = std::move(output.value());
-      last_step_request_ids_ = request_ids;
-      last_step_sample_sequence_ids_ = sample_sequence_ids;
-    } else {
+    if (!::xllm::EPLBConfig::get_instance().enable_eplb() &&
+        last_step_output_.json_object_errors.empty()) {
       last_step_request_ids_.clear();
       last_step_sample_sequence_ids_.clear();
     }
@@ -743,60 +742,112 @@ ForwardInput WorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
 
 void WorkerImpl::update_json_object_states_by_last_step_output(
     ForwardInput& input) {
-  if (input.json_object_states.empty() ||
-      !last_step_output_.sample_output.next_tokens.defined()) {
+  if (input.json_object_states.empty()) {
     return;
   }
+  CHECK_EQ(input.sample_sequence_ids.size(), input.json_object_states.size())
+      << "JSON grammar states must align with sampled sequence ids";
+  CHECK_EQ(input.sample_prior_output_rows.size(),
+           input.json_object_states.size())
+      << "JSON grammar states must align with prior output rows";
 
-  CHECK(compute_stream_ != nullptr)
-      << "JSON grammar overlap update requires a compute stream";
-  c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-  if (last_step_output_.ready_event != nullptr) {
-    CHECK(compute_stream_->wait_event(last_step_output_.ready_event))
-        << "failed to wait for last-step output before JSON grammar update";
+  const bool has_prior_output =
+      last_step_output_valid_ &&
+      last_step_output_.sample_output.next_tokens.defined();
+  torch::Tensor next_tokens;
+  if (has_prior_output) {
+    CHECK(compute_stream_ != nullptr)
+        << "JSON grammar overlap update requires a compute stream";
+    c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+    if (last_step_output_.ready_event != nullptr) {
+      CHECK(compute_stream_->wait_event(last_step_output_.ready_event))
+          << "failed to wait for last-step output before JSON grammar update";
+    }
+    next_tokens =
+        safe_to(last_step_output_.sample_output.next_tokens,
+                torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU),
+                /*non_blocking=*/false);
+    CHECK(next_tokens.dim() == 1 || next_tokens.dim() == 2)
+        << "overlap JSON token output must be 1-D or 2-D, got "
+        << next_tokens.sizes();
   }
 
-  torch::Tensor next_tokens =
-      safe_to(last_step_output_.sample_output.next_tokens,
-              torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU),
-              /*non_blocking=*/false);
-  CHECK(next_tokens.dim() == 1 || next_tokens.dim() == 2)
-      << "overlap JSON token output must be 1-D or 2-D, got "
-      << next_tokens.sizes();
-
-  if (!last_step_sample_sequence_ids_.empty()) {
+  bool expects_prior_output = false;
+  for (size_t state_idx = 0; state_idx < input.json_object_states.size();
+       ++state_idx) {
+    if (input.json_object_states[state_idx].initialized() &&
+        input.sample_prior_output_rows[state_idx] >= 0) {
+      expects_prior_output = true;
+      break;
+    }
+  }
+  if (has_prior_output &&
+      (!last_step_sample_sequence_ids_.empty() || expects_prior_output)) {
     CHECK_EQ(last_step_sample_sequence_ids_.size(),
              static_cast<size_t>(next_tokens.size(0)))
         << "last-step sampled request ids must align with output rows";
   }
 
   std::vector<int32_t> output_rows;
+  std::vector<JsonObjectOutputError> output_errors;
   std::string row_error;
+  const std::vector<std::string> empty_sample_sequence_ids;
+  const std::vector<std::string>& prior_sample_sequence_ids =
+      has_prior_output ? last_step_sample_sequence_ids_
+                       : empty_sample_sequence_ids;
   CHECK(detail::resolve_json_object_output_rows(input.json_object_states,
                                                 input.sample_sequence_ids,
-                                                last_step_sample_sequence_ids_,
+                                                input.sample_prior_output_rows,
+                                                prior_sample_sequence_ids,
                                                 &output_rows,
+                                                &output_errors,
                                                 &row_error))
       << row_error;
 
+  for (const JsonObjectOutputError& output_error : output_errors) {
+    LOG(ERROR) << "JSON overlap row mismatch: sequence_id="
+               << output_error.sample_sequence_id
+               << ", error=" << output_error.message;
+    input.json_object_errors.emplace_back(output_error);
+  }
+
   for (size_t state_idx = 0; state_idx < input.json_object_states.size();
        ++state_idx) {
-    const int32_t output_idx = output_rows[state_idx];
-    if (output_idx < 0 || output_idx >= next_tokens.size(0)) {
-      continue;
-    }
-
     JsonObjectGrammarState& state = input.json_object_states[state_idx];
     if (!state.initialized()) {
       continue;
     }
+
+    const std::string& sequence_id = input.sample_sequence_ids[state_idx];
+    const int32_t output_idx = output_rows[state_idx];
+    if (output_idx == detail::kInvalidJsonObjectOutputRow) {
+      state = JsonObjectGrammarState();
+      continue;
+    }
+    if (output_idx == detail::kNoPriorJsonObjectOutputRow) {
+      continue;
+    }
+    CHECK(has_prior_output);
+    CHECK_GE(output_idx, 0);
+    CHECK_LT(output_idx, next_tokens.size(0));
     if (next_tokens.dim() == 1) {
       const int32_t token_id =
           static_cast<int32_t>(next_tokens[output_idx].item<int64_t>());
       if (token_id >= 0) {
-        CHECK(state.accept_token(token_id))
-            << "last-step token violates json_object grammar, token_id="
-            << token_id;
+        if (!state.can_accept_token(token_id)) {
+          const JsonObjectGrammarSnapshot snapshot = state.snapshot();
+          LOG(ERROR)
+              << "last-step token violates json_object grammar, sequence_id="
+              << sequence_id << ", output_row=" << output_idx
+              << ", token_offset=0, token_id=" << token_id
+              << ", committed_tokens=" << snapshot.token_ids.size()
+              << ", state_fingerprint=" << state.fingerprint();
+          input.json_object_errors.push_back(
+              {sequence_id, "prior token violates json_object grammar"});
+          state = JsonObjectGrammarState();
+          continue;
+        }
+        CHECK(state.accept_token(token_id));
       }
       continue;
     }
@@ -808,13 +859,52 @@ void WorkerImpl::update_json_object_states_by_last_step_output(
       if (token_id < 0) {
         break;
       }
-      CHECK(state.accept_token(token_id))
-          << "last-step token violates json_object grammar, token_id="
-          << token_id;
+      if (!state.can_accept_token(token_id)) {
+        const JsonObjectGrammarSnapshot snapshot = state.snapshot();
+        LOG(ERROR)
+            << "last-step token violates json_object grammar, sequence_id="
+            << sequence_id << ", output_row=" << output_idx
+            << ", token_offset=" << token_idx << ", token_id=" << token_id
+            << ", committed_tokens=" << snapshot.token_ids.size()
+            << ", state_fingerprint=" << state.fingerprint();
+        input.json_object_errors.push_back(
+            {sequence_id, "prior token violates json_object grammar"});
+        state = JsonObjectGrammarState();
+        break;
+      }
+      CHECK(state.accept_token(token_id));
     }
   }
   input.sampling_params.filter_mask =
       build_json_object_filter_mask(input.json_object_states, device_, dtype_);
+}
+
+void WorkerImpl::sanitize_json_object_error_inputs(ForwardInput& input) {
+  if (input.json_object_errors.empty() || !input.token_ids.defined()) {
+    return;
+  }
+
+  std::unordered_set<std::string> failed_sample_sequence_ids;
+  failed_sample_sequence_ids.reserve(input.json_object_errors.size());
+  for (const JsonObjectOutputError& error : input.json_object_errors) {
+    failed_sample_sequence_ids.emplace(error.sample_sequence_id);
+  }
+
+  for (size_t state_idx = 0; state_idx < input.sample_sequence_ids.size();
+       ++state_idx) {
+    if (!failed_sample_sequence_ids.contains(
+            input.sample_sequence_ids[state_idx])) {
+      continue;
+    }
+    const int32_t prior_output_row = input.sample_prior_output_rows[state_idx];
+    if (prior_output_row < 0) {
+      continue;
+    }
+    const int32_t placeholder_token = -prior_output_row - 1;
+    input.token_ids = torch::where(input.token_ids == placeholder_token,
+                                   torch::zeros_like(input.token_ids),
+                                   input.token_ids);
+  }
 }
 
 #if defined(USE_NPU)
@@ -1279,14 +1369,20 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
       const auto output = this->step(input);
       promise.setValue(output);
     } else {
-      if (last_step_output_valid_ && input.token_ids.numel() > 0 &&
+      if (input.token_ids.numel() > 0 &&
           input.input_params.meta.batch_forward_type.has_decode()) {
-        // replace step i model input with true output of step i-1
-        input = update_input_by_last_step_output_for_schedule_overlap(input);
+        if (can_use_last_step_output_for_schedule_overlap(input)) {
+          // replace step i model input with true output of step i-1
+          input = update_input_by_last_step_output_for_schedule_overlap(input);
+        } else {
+          update_json_object_states_by_last_step_output(input);
+          sanitize_json_object_error_inputs(input);
+        }
       }
 
-      const auto output = this->step_for_schedule_overlap(input);
+      auto output = this->step_for_schedule_overlap(input);
       if (output.has_value()) {
+        output->json_object_errors = input.json_object_errors;
         if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
           std::unique_lock<std::mutex> lock(mtx_);
           cv_.wait(lock, [this] { return !is_recorded_; });
@@ -1305,12 +1401,14 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
           std::unique_lock<std::mutex> lock(mtx_);
           cv_.wait(lock, [this] { return !is_recorded_; });
           last_step_output_valid_ = false;
+          last_step_output_ = ForwardOutput();
           last_step_request_ids_.clear();
           last_step_sample_sequence_ids_.clear();
           is_recorded_ = true;
           cv_.notify_one();
         } else {
           last_step_output_valid_ = false;
+          last_step_output_ = ForwardOutput();
           last_step_request_ids_.clear();
           last_step_sample_sequence_ids_.clear();
         }
@@ -1326,7 +1424,8 @@ ForwardOutput WorkerImpl::get_last_step_result() {
   std::unique_lock<std::mutex> lock(mtx_);
   cv_.wait(lock, [this] { return is_recorded_; });
   if (last_step_output_valid_ ||
-      ::xllm::EPLBConfig::get_instance().enable_eplb()) {
+      ::xllm::EPLBConfig::get_instance().enable_eplb() ||
+      !last_step_output_.json_object_errors.empty()) {
     output = last_step_output_;
   }
   is_recorded_ = false;
