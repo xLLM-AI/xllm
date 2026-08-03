@@ -692,6 +692,28 @@ void WorkerImpl::update_last_step_output(
   }
 }
 
+bool WorkerImpl::can_use_last_step_output_for_schedule_overlap(
+    const ForwardInput& input) const {
+  if (!last_step_output_valid_) {
+    return false;
+  }
+  const auto& request_ids = input.input_params.embedding.request_ids;
+  if (request_ids.empty() || last_step_request_ids_.empty()) {
+    return true;
+  }
+  for (const auto& request_id : request_ids) {
+    if (request_id.empty()) {
+      continue;
+    }
+    if (std::find(last_step_request_ids_.begin(),
+                  last_step_request_ids_.end(),
+                  request_id) != last_step_request_ids_.end()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 ForwardInput WorkerImpl::update_input_by_last_step_output(
     ForwardInput& inputs) {
 #if defined(USE_NPU)

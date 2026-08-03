@@ -74,8 +74,6 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   ForwardInput update_input_by_last_step_output(ForwardInput& inputs) override;
   ForwardInput update_input_by_last_step_output_for_schedule_overlap(
       ForwardInput& inputs) override;
-  folly::SemiFuture<std::optional<ForwardOutput>> step_async(
-      const ForwardInput& inputs) override;
   void prepare_work_before_execute(const ForwardInput& inputs,
                                    ForwardInput& processed_inputs) override;
 

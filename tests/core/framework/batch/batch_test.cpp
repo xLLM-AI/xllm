@@ -615,7 +615,7 @@ TEST(SequenceTest, JsonObjectCommitMismatchFailsBeforeTokenMutation) {
                     MMData(),
                     std::move(decoder),
                     seq_params);
-  sequence.add_kv_blocks(manager.allocate(1));
+  sequence.add_blocks(BlockType::KV, manager.allocate(1));
   sequence.kv_state().set_kv_cache_tokens_num(sequence.num_prompt_tokens());
   const size_t original_num_tokens = sequence.num_tokens();
 
@@ -652,7 +652,7 @@ TEST(SequenceTest, JsonObjectOverlapMismatchKeepsPlaceholderToken) {
                     MMData(),
                     std::move(decoder),
                     seq_params);
-  sequence.add_kv_blocks(manager.allocate(1));
+  sequence.add_blocks(BlockType::KV, manager.allocate(1));
   sequence.kv_state().set_kv_cache_tokens_num(sequence.num_prompt_tokens());
   sequence.append_token(Token(/*id=*/-1));
   const size_t original_num_tokens = sequence.num_tokens();
@@ -704,7 +704,7 @@ TEST(BatchTest, JsonObjectCommitMismatchSkipsRemainingSampleSlotsAndEmbedding) {
                     MMData(),
                     std::move(decoder),
                     seq_params);
-  sequence.add_kv_blocks(manager.allocate(1));
+  sequence.add_blocks(BlockType::KV, manager.allocate(1));
   Batch batch(&sequence);
   (void)batch.prepare_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
@@ -725,6 +725,9 @@ TEST(BatchTest, JsonObjectCommitMismatchSkipsRemainingSampleSlotsAndEmbedding) {
 }
 
 TEST(BatchTest, JsonObjectErrorDiscardsFailedMmEmbeddingWithoutRowShift) {
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(4);
+  BlockManagerImpl manager(options);
   RequestSamplingParam sampling_param;
   sampling_param.is_embeddings = true;
   StoppingChecker stopping_checker;
@@ -754,11 +757,17 @@ TEST(BatchTest, JsonObjectErrorDiscardsFailedMmEmbeddingWithoutRowShift) {
                    MMData(MMType::IMAGE, healthy_items),
                    std::move(healthy_decoder),
                    healthy_params);
+  failed.add_blocks(BlockType::KV, manager.allocate(1));
+  healthy.add_blocks(BlockType::KV, manager.allocate(1));
   Batch batch({&failed, &healthy});
+  (void)batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
 
   RawForwardOutput raw_output;
-  raw_output.mm_embeddings = {torch::tensor({1.0f, 2.0f}),
-                              torch::tensor({3.0f, 4.0f})};
+  raw_output.outputs = {make_raw_sample_output(/*token_id=*/0, std::nullopt),
+                        make_raw_sample_output(/*token_id=*/0, std::nullopt)};
+  raw_output.outputs[0].mm_embeddings = {torch::tensor({1.0f, 2.0f})};
+  raw_output.outputs[1].mm_embeddings = {torch::tensor({3.0f, 4.0f})};
   raw_output.json_object_errors = {
       {failed.sample_sequence_id(), "missing prior sampled output row"}};
   batch.process_sample_output(raw_output, /*replace_fake_token=*/false);
@@ -770,7 +779,7 @@ TEST(BatchTest, JsonObjectErrorDiscardsFailedMmEmbeddingWithoutRowShift) {
   ASSERT_TRUE(output.mm_embeddings.has_value());
   ASSERT_EQ(output.mm_embeddings->size(), 1u);
   EXPECT_TRUE(torch::equal(output.mm_embeddings->at(0).embedding,
-                           raw_output.mm_embeddings[1]));
+                           raw_output.outputs[1].mm_embeddings[0]));
 }
 
 TEST(BatchTest, DecodeForwardInputConsumesMtpBootstrap) {
@@ -1107,7 +1116,7 @@ TEST(BatchTest, JsonObjectSampleSequenceIdsFollowSamplingRows) {
                  MMData(),
                  std::move(first_decoder),
                  first_params);
-  first.add_kv_blocks(manager.allocate(1));
+  first.add_blocks(BlockType::KV, manager.allocate(1));
 
   IncrementalDecoder second_decoder("", 2, false, false);
   Sequence second(/*index=*/1,
@@ -1116,7 +1125,7 @@ TEST(BatchTest, JsonObjectSampleSequenceIdsFollowSamplingRows) {
                   MMData(),
                   std::move(second_decoder),
                   second_params);
-  second.add_kv_blocks(manager.allocate(1));
+  second.add_blocks(BlockType::KV, manager.allocate(1));
 
   Batch batch({&second, &first});
   ForwardInput forward_input = batch.prepare_forward_input(
@@ -1427,12 +1436,14 @@ TEST(BatchTest, ForwardOutputProtoRoundTripPreservesJsonObjectErrors) {
                           undefined,
                           undefined,
                           undefined,
+                          /*mm_embeddings=*/{},
                           undefined,
                           /*prepared_layer_id=*/-1,
                           undefined,
                           undefined,
                           undefined,
                           /*dit_images=*/{},
+                          /*dit_text_output=*/{},
                           errors,
                           &proto_output);
 
@@ -1468,6 +1479,7 @@ TEST(BatchTest, ForwardOutputShmRoundTripPreservesJsonObjectErrors) {
                                               undefined,
                                               /*mm_embeddings=*/{},
                                               /*dit_images=*/{},
+                                              /*dit_text_output=*/{},
                                               undefined,
                                               /*prepared_layer_id=*/-1,
                                               undefined,
@@ -2485,7 +2497,7 @@ TEST(BatchTest, JsonObjectErrorFailsOnlyOwningRequestWithoutTokenCommit) {
                                            /*sequence_index=*/0);
   for (Sequence* sequence :
        std::vector<Sequence*>{&failed, &failed_peer, &healthy}) {
-    sequence->add_kv_blocks(manager.allocate(1));
+    sequence->add_blocks(BlockType::KV, manager.allocate(1));
     sequence->kv_state().incr_kv_cache_tokens_num(
         sequence->num_prompt_tokens() - 1);
   }
@@ -2534,7 +2546,7 @@ TEST(BatchTest, JsonObjectErrorForUnknownSequenceDies) {
   options.num_blocks(8).block_size(4);
   BlockManagerImpl manager(options);
   Sequence sequence = make_basic_sequence({1, 2, 3});
-  sequence.add_kv_blocks(manager.allocate(1));
+  sequence.add_blocks(BlockType::KV, manager.allocate(1));
   Batch batch(&sequence);
   (void)batch.prepare_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
@@ -2574,7 +2586,7 @@ TEST(BatchTest, JsonObjectErrorFailsUnscheduledSiblingSequence) {
   ASSERT_TRUE(request.expand_sequences(/*share_prefix=*/false));
   ASSERT_EQ(request.sequences().size(), 2u);
   for (const auto& sequence : request.sequences()) {
-    sequence->add_kv_blocks(manager.allocate(1));
+    sequence->add_blocks(BlockType::KV, manager.allocate(1));
     sequence->kv_state().incr_kv_cache_tokens_num(
         sequence->num_prompt_tokens() - 1);
   }

@@ -863,8 +863,6 @@ ForwardInput MTPWorkerImpl::update_input_by_last_step_output(
 ForwardInput
 MTPWorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
     ForwardInput& inputs) {
-  c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-  wait_output_ready_event(last_step_output_, *compute_stream_);
   update_json_object_states_by_last_step_output(inputs);
   return update_input_by_last_step_output(inputs);
 }
@@ -873,78 +871,6 @@ void MTPWorkerImpl::prepare_work_before_execute(const ForwardInput& input,
                                                 ForwardInput& processed_input) {
   // Composite skips CP prepare; leaves run it in run_llm_no_sync_impl.
   SpeculativeWorkerImpl::prepare_work_before_execute(input, processed_input);
-}
-
-folly::SemiFuture<std::optional<ForwardOutput>> MTPWorkerImpl::step_async(
-    const ForwardInput& input) {
-  folly::Promise<std::optional<ForwardOutput>> promise;
-  auto future = promise.getSemiFuture();
-  threadpool_.schedule([this, input, promise = std::move(promise)]() mutable {
-    std::lock_guard<std::recursive_mutex> lock(step_mutex_);
-
-    ForwardInput input_on_device;
-    prepare_work_before_execute(input, input_on_device);
-
-    if (hierarchy_kv_cache_transfer_ != nullptr) {
-      hierarchy_kv_cache_transfer_->set_layer_synchronizer(
-          input_on_device.input_params);
-    }
-
-    if (!enable_schedule_overlap()) {
-      const auto output = this->step(input_on_device);
-      promise.setValue(output);
-      return;
-    }
-
-    if (input_on_device.token_ids.numel() > 0 &&
-        input_on_device.input_params.meta.batch_forward_type.has_decode()) {
-      if (can_use_last_step_output_for_schedule_overlap(input_on_device)) {
-        input_on_device = update_input_by_last_step_output_for_schedule_overlap(
-            input_on_device);
-      } else {
-        update_json_object_states_by_last_step_output(input_on_device);
-        sanitize_json_object_error_inputs(input_on_device);
-      }
-    }
-
-    auto output = this->step_for_schedule_overlap(input_on_device);
-    if (output.has_value()) {
-      output->json_object_errors = input_on_device.json_object_errors;
-      if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
-        std::unique_lock<std::mutex> output_lock(mtx_);
-        cv_.wait(output_lock, [this] { return !is_recorded_; });
-        update_last_step_output(
-            output,
-            input_on_device.input_params.embedding.request_ids,
-            input_on_device.sample_sequence_ids);
-        is_recorded_ = true;
-        cv_.notify_one();
-      } else {
-        update_last_step_output(
-            output,
-            input_on_device.input_params.embedding.request_ids,
-            input_on_device.sample_sequence_ids);
-      }
-    } else {
-      if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
-        std::unique_lock<std::mutex> output_lock(mtx_);
-        cv_.wait(output_lock, [this] { return !is_recorded_; });
-        last_step_output_valid_ = false;
-        last_step_output_ = ForwardOutput();
-        last_step_request_ids_.clear();
-        last_step_sample_sequence_ids_.clear();
-        is_recorded_ = true;
-        cv_.notify_one();
-      } else {
-        last_step_output_valid_ = false;
-        last_step_output_ = ForwardOutput();
-        last_step_request_ids_.clear();
-        last_step_sample_sequence_ids_.clear();
-      }
-    }
-    promise.setValue(output);
-  });
-  return future;
 }
 
 bool MTPWorkerImpl::owns_npu_cp_plan_build() const { return false; }

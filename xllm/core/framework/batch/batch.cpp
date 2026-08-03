@@ -531,48 +531,16 @@ void Batch::process_sample_output(const RawForwardOutput& raw_output,
   const std::unordered_set<std::string> failed_request_ids =
       fail_json_object_requests(sequences, raw_output.json_object_errors);
 
-  if (raw_output.mm_embeddings.size() > 0) {
-    // mm embed task
-    int64_t mm_embedding_idx = 0;
-    for (auto* seq : sequences) {
-      int64_t mm_item_count = seq->mm_data().size();
-      if (mm_item_count <= 0) {
-        continue;
-      }
-      std::vector<torch::Tensor> seq_mm_embeddings;
-      // if we want to return the full embeding of images and prompts,
-      // the output is a single embedding tensor, else it would be a vector of
-      // image embeddings
-      int64_t output_tensor_size =
-          ::xllm::ModelConfig::get_instance().enable_return_mm_full_embeddings()
-              ? 1
-              : mm_item_count;
-      CHECK_LE(mm_embedding_idx + output_tensor_size,
-               raw_output.mm_embeddings.size());
-      if (failed_request_ids.contains(seq->request_id()) ||
-          seq->error_status().has_value()) {
-        mm_embedding_idx += output_tensor_size;
-        continue;
-      }
-      seq_mm_embeddings.reserve(output_tensor_size);
-      for (int64_t i = mm_embedding_idx;
-           i < mm_embedding_idx + output_tensor_size;
-           ++i) {
-        CHECK_LT(i, raw_output.mm_embeddings.size());
-        seq_mm_embeddings.push_back(raw_output.mm_embeddings[i]);
-      }
-      seq->update_mm_embeddings(seq_mm_embeddings);
-      // we only support complete mm embedding in one iteration now
-      CHECK(seq->finished());
-      mm_embedding_idx += output_tensor_size;
-    }
-  }
-
   for (size_t output_idx = 0; output_idx < output_targets_.size();
        ++output_idx) {
     const auto& target = output_targets_[output_idx];
     auto* seq = target.sequence;
     CHECK(seq != nullptr);
+
+    if (failed_request_ids.contains(seq->request_id()) ||
+        seq->error_status().has_value()) {
+      continue;
+    }
 
     if (output_idx < raw_output.outputs.size()) {
       const auto& seq_mm_embeddings =
@@ -580,10 +548,6 @@ void Batch::process_sample_output(const RawForwardOutput& raw_output,
       if (!seq_mm_embeddings.empty()) {
         seq->update_mm_embeddings(seq_mm_embeddings);
       }
-    }
-    if (failed_request_ids.contains(seq->request_id()) ||
-        seq->error_status().has_value()) {
-      continue;
     }
 
     if (!target.from_sample_slot) {
