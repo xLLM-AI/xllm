@@ -76,10 +76,19 @@ void DecodeFirstPolicy::schedule(
       reserved_full_footprint =
           static_cast<size_t>(max_used * kDecodeReserveMargin);
     }
-    schedule_prefill_from_queue(
-        &state.chunk_queue, state, budget, finished, reserved_full_footprint);
-    schedule_prefill_from_queue(
-        &state.prefill_queue, state, budget, finished, reserved_full_footprint);
+    const bool chunk_blocks_exhausted = schedule_prefill_from_queue(
+        &state.chunk_queue,
+        state,
+        budget,
+        finished,
+        reserved_full_footprint);
+    if (!chunk_blocks_exhausted) {
+      schedule_prefill_from_queue(&state.prefill_queue,
+                                  state,
+                                  budget,
+                                  finished,
+                                  reserved_full_footprint);
+    }
   }
 
   // Step 3: redistribute remaining budget to prefill sequences.

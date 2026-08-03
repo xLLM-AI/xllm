@@ -144,7 +144,9 @@ class SchedulerPolicy {
       const SchedulerState& state);
 
   // ===== Prefill scheduling =====
-  void schedule_prefill_from_queue(
+  // Returns true when KV block exhaustion prevents the head request from
+  // being scheduled.
+  bool schedule_prefill_from_queue(
       RequestPriorityQueue* queue,
       SchedulerState& state,
       ScheduleBudget& budget,

@@ -387,6 +387,82 @@ TEST(ContinuousSchedulerFactoryTest,
             opt.max_tokens_per_chunk_for_prefill());
 }
 
+TEST(ContinuousSchedulerTest,
+     BlockedChunkKeepsPartialKvAndLetsDecodeReleaseCapacity) {
+  constexpr int32_t kBlockSize = 1;
+  constexpr int32_t kNumBlocks = 106;
+  constexpr int32_t kChunkSize = 32;
+  constexpr int32_t kChunkPromptTokens = 70;
+  constexpr int32_t kDecodePromptTokens = 20;
+  constexpr int32_t kDecodeReservedTokens = 37;
+  constexpr int32_t kFreshPromptTokens = 4;
+
+  ScopedConfigValue<double> memory_threshold(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      /*new_value=*/2.0);
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      /*max_tokens_per_batch=*/2 * kChunkSize,
+      /*max_seqs_per_batch=*/32,
+      /*num_speculative_tokens=*/3,
+      /*max_tokens_per_chunk_for_prefill=*/kChunkSize,
+      /*dp_size=*/1);
+  opt.enable_chunked_prefill() = true;
+  auto engine = std::make_unique<FakeEngine>(kNumBlocks, kBlockSize);
+  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+
+  auto chunk_request = generate_request({kChunkPromptTokens},
+                                        {16},
+                                        /*offlines=*/std::nullopt,
+                                        /*priorities=*/std::nullopt,
+                                        /*ns=*/std::nullopt,
+                                        /*beam_widths=*/std::nullopt,
+                                        /*max_context_len=*/30000)[0];
+  scheduler->add_request(chunk_request);
+
+  auto batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  ASSERT_EQ(batches[0].size(), 1u);
+  set_chunk_kv(chunk_request, kChunkSize);
+
+  auto decode_request = generate_request({kDecodePromptTokens},
+                                         {16},
+                                         /*offlines=*/std::nullopt,
+                                         /*priorities=*/std::nullopt,
+                                         /*ns=*/std::nullopt,
+                                         /*beam_widths=*/std::nullopt,
+                                         /*max_context_len=*/30000)[0];
+  scheduler->add_request(decode_request);
+
+  batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  ASSERT_EQ(batches[0].size(), 2u);
+  set_chunk_kv(chunk_request, 2 * kChunkSize);
+  make_request_decode_ready(decode_request);
+
+  auto* block_manager_pool = engine->block_manager_pool();
+  ASSERT_TRUE(block_manager_pool->allocate(decode_request->sequences()[0].get(),
+                                           kDecodeReservedTokens));
+  ASSERT_EQ(util::max(block_manager_pool->num_free_blocks()), 4u);
+
+  auto new_request = generate_request({kFreshPromptTokens},
+                                      {16},
+                                      /*offlines=*/std::nullopt,
+                                      /*priorities=*/std::nullopt,
+                                      /*ns=*/std::nullopt,
+                                      /*beam_widths=*/std::nullopt,
+                                      /*max_context_len=*/30000)[0];
+  scheduler->add_request(new_request);
+
+  batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  ASSERT_EQ(batches[0].size(), 1u);
+  EXPECT_EQ(scheduler->get_running_requests()[0], decode_request);
+  EXPECT_EQ(chunk_request->sequences()[0]->kv_state().kv_cache_tokens_num(),
+            2 * kChunkSize);
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 2u);
+}
+
 TEST(SchedulerFactoryTest, DisaggPDChunkedPrefillUsesDisaggPD) {
   ContinuousScheduler::Options opt =
       create_scheduler_options(10000, 256, 2, 1024, 1);
