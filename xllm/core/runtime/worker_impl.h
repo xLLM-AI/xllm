@@ -20,6 +20,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <memory>
+#include <mutex>
 
 #include "common/types.h"
 #include "executor.h"
@@ -128,6 +129,9 @@ class WorkerImpl {
 
   // Cached: whether the loaded model advertises NPU model-side CP.
   bool model_supports_model_cp() const;
+  // Lazily create (or return) the worker-local JSON grammar. Thread-safe.
+  std::shared_ptr<const JsonObjectGrammar> ensure_json_object_grammar(
+      bool reasoning_enabled);
 
   // Internal helper shared by worker pipelines before model execution.
   virtual void apply_kv_block_swaps(const ModelInputParams& input_params);
@@ -351,6 +355,7 @@ class WorkerImpl {
   std::unique_ptr<Tokenizer> tokenizer_;
   std::shared_ptr<const JsonObjectGrammar> json_object_grammar_;
   std::shared_ptr<const JsonObjectGrammar> json_reasoning_grammar_;
+  mutable std::mutex json_object_grammar_mutex_;
 
   std::unique_ptr<Executor> model_executor_;
 

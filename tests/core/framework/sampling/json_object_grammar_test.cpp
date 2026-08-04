@@ -246,6 +246,68 @@ TEST(JsonObjectGrammarTest, AcceptsNonEmptyStopTokenAfterRootCompletion) {
   EXPECT_TRUE(state.can_accept_token(/*stop_token_id=*/6));
 }
 
+TEST(JsonObjectGrammarTest, MatcherFingerprintIgnoresCommittedHistory) {
+  JsonObjectGrammar grammar = make_grammar();
+  JsonObjectGrammarState via_tokens = grammar.initial_state();
+  ASSERT_TRUE(via_tokens.accept_token(/*{=*/0));
+  ASSERT_TRUE(via_tokens.accept_token(/*"=*/2));
+  ASSERT_TRUE(via_tokens.accept_token(/*a=*/3));
+  ASSERT_TRUE(via_tokens.accept_token(/*"=*/2));
+
+  JsonObjectGrammarState via_piece = grammar.initial_state();
+  ASSERT_TRUE(via_piece.accept_piece("{\"a\""));
+
+  EXPECT_EQ(via_tokens.fingerprint(), via_piece.fingerprint());
+  EXPECT_EQ(grammar.allowed_token_ids(via_tokens),
+            grammar.allowed_token_ids(via_piece));
+
+  JsonObjectGrammarState restored =
+      grammar.restore_state(via_tokens.snapshot());
+  EXPECT_EQ(restored.fingerprint(), via_piece.fingerprint());
+}
+
+TEST(JsonObjectGrammarTest, BitmaskMatchesFloatMaskAndCaches) {
+  JsonObjectGrammar grammar = make_grammar();
+  JsonObjectGrammarState state = grammar.initial_state();
+  ASSERT_TRUE(state.accept_piece("{\"a\":"));
+
+  const std::vector<uint32_t> bitmask = grammar.allowed_token_bitmask(state);
+  ASSERT_EQ(bitmask.size(), grammar.bitmask_num_words());
+  EXPECT_EQ(grammar.allowed_token_bitmask(state), bitmask);
+
+  const torch::Tensor float_mask = grammar.build_filter_mask(state);
+  const torch::Tensor packed = grammar.build_filter_bitmask(state);
+  ASSERT_EQ(
+      packed.sizes(),
+      torch::IntArrayRef({static_cast<int64_t>(grammar.bitmask_num_words())}));
+
+  torch::Tensor logits =
+      torch::zeros({1, static_cast<int64_t>(grammar.vocab_size())});
+  apply_token_bitmask_inplace(logits, packed.unsqueeze(0));
+  for (int64_t token_id = 0;
+       token_id < static_cast<int64_t>(grammar.vocab_size());
+       ++token_id) {
+    EXPECT_NEAR(logits.index({0, token_id}).item<float>(),
+                float_mask.index({token_id}).item<float>(),
+                1.0e-3F);
+  }
+}
+
+TEST(JsonObjectGrammarTest, BuildsMixedBatchBitmask) {
+  JsonObjectGrammar grammar = make_grammar();
+  std::vector<JsonObjectGrammarState> states = {grammar.initial_state(),
+                                                JsonObjectGrammarState()};
+
+  torch::Tensor bitmask = build_json_object_filter_bitmask(states);
+  ASSERT_EQ(bitmask.sizes(),
+            torch::IntArrayRef(
+                {2, static_cast<int64_t>(grammar.bitmask_num_words())}));
+  // Constrained row allows '{'.
+  EXPECT_NE(bitmask.index({0, 0}).item<int32_t>() & 0x1, 0);
+  // Unconstrained row is all-ones.
+  EXPECT_EQ(bitmask.index({1, 0}).item<int32_t>(), -1);
+}
+
 TEST(JsonObjectGrammarTest, MaskHasNoUnrestrictedFailureFallback) {
   JsonObjectGrammar grammar = make_grammar();
   JsonObjectGrammarState state = grammar.initial_state();
@@ -308,6 +370,22 @@ TEST(JsonObjectGrammarTest, UsesStableDecodeTokenPiecesForGrammar) {
   ASSERT_TRUE(state.accept_token(2));
 
   EXPECT_TRUE(state.can_accept_token(3));
+  EXPECT_FALSE(state.can_accept_piece("x"));
+}
+
+TEST(JsonObjectGrammarTest, TrialAcceptIgnoresCommittedTokenHistorySize) {
+  JsonObjectGrammar grammar = make_grammar();
+  JsonObjectGrammarState state = grammar.initial_state();
+  ASSERT_TRUE(state.accept_piece("{\"a\":"));
+
+  // Grow committed history with digit tokens; can_accept must stay equivalent
+  // without depending on O(generated) vector copies.
+  constexpr int32_t kDigitOneTokenId = 12;
+  for (int32_t i = 0; i < 64; ++i) {
+    ASSERT_TRUE(state.accept_token(kDigitOneTokenId));
+  }
+  EXPECT_TRUE(state.can_accept_token(kDigitOneTokenId));
+  EXPECT_TRUE(state.can_accept_piece("}"));
   EXPECT_FALSE(state.can_accept_piece("x"));
 }
 

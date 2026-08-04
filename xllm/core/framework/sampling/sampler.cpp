@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/sampling/json_object_grammar.h"
 #include "logits_utils.h"
 #include "sampling_params.h"
 
@@ -51,6 +52,7 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
   torch::Tensor sample_temperatures = params.temperatures;
   torch::Tensor sample_top_k = params.top_k;
   torch::Tensor sample_top_p = params.top_p;
+  torch::Tensor sample_filter_bitmask = params.filter_bitmask;
   const bool use_sample_indices =
       params.selected_token_idxes.numel() != params.sample_idxes.numel();
   if (use_sample_indices) {
@@ -65,9 +67,15 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
     if (params.top_p.defined()) {
       sample_top_p = params.top_p.index_select(/*dim=*/0, params.sample_idxes);
     }
+    if (sample_filter_bitmask.defined()) {
+      sample_filter_bitmask =
+          sample_filter_bitmask.index_select(/*dim=*/0, params.sample_idxes);
+    }
   }
 
-  if (effective_filter_mask.defined()) {
+  if (sample_filter_bitmask.defined()) {
+    apply_token_bitmask_inplace(sample_logits, sample_filter_bitmask);
+  } else if (effective_filter_mask.defined()) {
     CHECK_EQ(effective_filter_mask.dim(), 2)
         << "filter_mask must be 2-D, dim=" << effective_filter_mask.dim();
     CHECK_EQ(effective_filter_mask.size(0), sample_logits.size(0))

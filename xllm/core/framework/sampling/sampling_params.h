@@ -65,6 +65,11 @@ struct SamplingParameters {
     params.filter_mask = filter_mask.defined()
                              ? safe_to(filter_mask, options, true).contiguous()
                              : filter_mask;
+    // Bitmask must stay int32; never cast to model floating dtype.
+    params.filter_bitmask =
+        filter_bitmask.defined()
+            ? safe_to(filter_bitmask, device, true).contiguous()
+            : filter_bitmask;
     params.frequency_penalties = safe_to(frequency_penalties, options, true);
     params.presence_penalties = safe_to(presence_penalties, options, true);
     params.repetition_penalties = safe_to(repetition_penalties, options, true);
@@ -105,6 +110,10 @@ struct SamplingParameters {
   // Dense additive mask for token-level structured output constraints. Zero
   // entries are allowed and negative entries are forbidden.
   torch::Tensor filter_mask;
+
+  // Compact allowed-token bitmask [num_tokens, ceil(vocab/32)] int32. When
+  // defined, Sampler prefers this over filter_mask (smaller H2D).
+  torch::Tensor filter_bitmask;
 
   // [num_tokens] FloatTensor
   torch::Tensor frequency_penalties;

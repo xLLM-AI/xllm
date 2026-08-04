@@ -897,8 +897,10 @@ void WorkerImpl::update_json_object_states_by_last_step_output(
       CHECK(state.accept_token(token_id));
     }
   }
-  input.sampling_params.filter_mask =
-      build_json_object_filter_mask(input.json_object_states, device_, dtype_);
+  input.sampling_params.filter_bitmask =
+      build_json_object_filter_bitmask(input.json_object_states, device_);
+  // Prefer compact bitmask; clear dense float mask to avoid duplicate H2D.
+  input.sampling_params.filter_mask = torch::Tensor();
 }
 
 void WorkerImpl::sanitize_json_object_error_inputs(ForwardInput& input) {
@@ -1220,29 +1222,42 @@ void WorkerImpl::restore_json_object_states(ForwardInput& input) {
       continue;
     }
 
-    std::shared_ptr<const JsonObjectGrammar>* grammar =
-        snapshot.reasoning_enabled ? &json_reasoning_grammar_
-                                   : &json_object_grammar_;
-    if (*grammar == nullptr) {
-      std::string error;
-      *grammar = JsonObjectGrammar::create_from_tokenizer(
-          *tokenizer_,
-          context_.get_model_args().eos_token_id(),
-          context_.get_model_args().stop_token_ids(),
-          context_.get_model_args().vocab_size(),
-          snapshot.reasoning_enabled,
-          &error);
-      CHECK(*grammar != nullptr)
-          << "Failed to restore JSON object grammar: " << error;
-    }
+    std::shared_ptr<const JsonObjectGrammar> grammar =
+        ensure_json_object_grammar(snapshot.reasoning_enabled);
+    CHECK(grammar != nullptr) << "Failed to restore JSON object grammar";
 
-    JsonObjectGrammarState state = (*grammar)->restore_state(snapshot);
+    JsonObjectGrammarState state = grammar->restore_state(snapshot);
     CHECK(state.is_valid())
         << "Serialized JSON object grammar state is invalid";
     states.push_back(std::move(state));
   }
   input.json_object_states = std::move(states);
   input.json_object_state_snapshots.clear();
+}
+
+std::shared_ptr<const JsonObjectGrammar> WorkerImpl::ensure_json_object_grammar(
+    bool reasoning_enabled) {
+  CHECK(tokenizer_ != nullptr)
+      << "JSON object grammar requires a worker tokenizer";
+  std::lock_guard<std::mutex> lock(json_object_grammar_mutex_);
+  std::shared_ptr<const JsonObjectGrammar>* grammar =
+      reasoning_enabled ? &json_reasoning_grammar_ : &json_object_grammar_;
+  if (*grammar != nullptr) {
+    return *grammar;
+  }
+  std::string error;
+  *grammar = JsonObjectGrammar::create_from_tokenizer(
+      *tokenizer_,
+      context_.get_model_args().eos_token_id(),
+      context_.get_model_args().stop_token_ids(),
+      context_.get_model_args().vocab_size(),
+      reasoning_enabled,
+      &error);
+  if (*grammar == nullptr) {
+    LOG(ERROR) << "Failed to create JSON object grammar"
+               << (reasoning_enabled ? " (reasoning)" : "") << ": " << error;
+  }
+  return *grammar;
 }
 
 void WorkerImpl::apply_kv_block_swaps(const ModelInputParams& input_params) {
@@ -1871,6 +1886,16 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   if (!status) {
     LOG(ERROR) << "init_model failed";
     return false;
+  }
+
+  // Warm JSON grammars off the forward path so the first constrained request
+  // does not pay tokenizer.decode over the full vocab under the step lock.
+  if (ensure_json_object_grammar(/*reasoning_enabled=*/false) == nullptr) {
+    LOG(WARNING) << "JSON object grammar warmup failed; will retry lazily";
+  }
+  if (ensure_json_object_grammar(/*reasoning_enabled=*/true) == nullptr) {
+    LOG(WARNING)
+        << "JSON reasoning grammar warmup failed; will retry lazily on demand";
   }
 
   int32_t tp_world_size = parallel_args_.world_size();

@@ -246,6 +246,31 @@ void SamplingParameters::concat(const SamplingParameters& param) {
             ? torch::cat({this->filter_mask, unconstrained_rows}, 0)
             : torch::cat({unconstrained_rows, param.filter_mask}, 0);
   }
+  if (this->filter_bitmask.defined() && param.filter_bitmask.defined()) {
+    this->filter_bitmask =
+        torch::cat({this->filter_bitmask, param.filter_bitmask}, 0);
+  } else if (this->filter_bitmask.defined() || param.filter_bitmask.defined()) {
+    const auto row_count = [](const SamplingParameters& value) {
+      if (value.filter_bitmask.defined()) {
+        return value.filter_bitmask.size(0);
+      }
+      return value.sample_idxes.defined() ? value.sample_idxes.numel() : 0;
+    };
+    const torch::Tensor& defined_mask = this->filter_bitmask.defined()
+                                            ? this->filter_bitmask
+                                            : param.filter_bitmask;
+    const int64_t missing_rows =
+        this->filter_bitmask.defined() ? row_count(param) : row_count(*this);
+    // All-ones words => allow all tokens (unconstrained).
+    torch::Tensor unconstrained_rows =
+        torch::full({missing_rows, defined_mask.size(1)},
+                    /*fill_value=*/static_cast<int32_t>(-1),
+                    defined_mask.options());
+    this->filter_bitmask =
+        this->filter_bitmask.defined()
+            ? torch::cat({this->filter_bitmask, unconstrained_rows}, 0)
+            : torch::cat({unconstrained_rows, param.filter_bitmask}, 0);
+  }
   this->logprobs = this->logprobs || param.logprobs;
   this->return_probs = this->return_probs || param.return_probs;
   this->is_embeddings = this->is_embeddings || param.is_embeddings;

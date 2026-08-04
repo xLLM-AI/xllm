@@ -101,6 +101,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       const std::vector<ForwardOutput>& draft_outputs,
       const ForwardOutput& target_output,
       const torch::Tensor& target_filter_mask = torch::Tensor(),
+      const torch::Tensor& target_filter_bitmask = torch::Tensor(),
       const std::vector<uint8_t>& invalid_draft = {});
 
   // Hook for algorithm-specific draft output post-processing during decode.
@@ -113,6 +114,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       const torch::Tensor& draft_probs,
       const ForwardOutput& target_output,
       const torch::Tensor& target_filter_mask = torch::Tensor(),
+      const torch::Tensor& target_filter_bitmask = torch::Tensor(),
       const std::vector<uint8_t>& invalid_draft = {});
 
   // PD separation: placeholder size for empty embedding slot. Default: 1x
