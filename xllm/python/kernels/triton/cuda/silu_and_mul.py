@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Triton implementations of select xLLM ops.
-
-Each kernel is wrapped as a ``torch.library.custom_op`` (opaque to Dynamo, with
-a ``register_fake`` for shape inference) so it stays a single node in the
-compiled graph. Fixed BLOCK size (no autotune) ensures CUDA-graph capturability.
-"""
+"""CUDA Triton implementation of gated SiLU."""
 
 from __future__ import annotations
 
@@ -52,7 +47,6 @@ def _silu_and_mul_kernel(
     tl.store(out_ptr + row * out_row_stride + col, silu * up, mask=mask)
 
 
-@torch.library.custom_op("xllm_triton::silu_and_mul", mutates_args=())
 def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     """Gated SiLU: input ``[..., 2d]`` -> output ``[..., d]`` (SwiGLU)."""
     assert x.shape[-1] % 2 == 0, "silu_and_mul expects an even last dim"
@@ -65,10 +59,3 @@ def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
         x2d, out, d, x2d.stride(0), out.stride(0), BLOCK=_SILU_BLOCK
     )
     return out.reshape(*x.shape[:-1], d)
-
-
-@silu_and_mul.register_fake
-def _silu_and_mul_fake(x: torch.Tensor) -> torch.Tensor:
-    shape = list(x.shape)
-    shape[-1] //= 2
-    return x.new_empty(shape)

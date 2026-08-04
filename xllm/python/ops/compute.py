@@ -68,7 +68,7 @@ def fused_qk_norm_rope(
         )
         return qkv[:, :q_size], qkv[:, q_size:q_size + kv_size], qkv[:, q_size + kv_size:]
     if device_type in ("npu", "privateuseone"):
-        from xllm.python.ops.triton.split_qkv_rmsnorm_rope import (
+        from xllm.python.kernels.triton.npu.split_qkv_rmsnorm_rope import (
             split_qkv_rmsnorm_rope,
         )
         return split_qkv_rmsnorm_rope(
