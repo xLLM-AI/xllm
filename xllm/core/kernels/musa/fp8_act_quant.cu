@@ -13,12 +13,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-// clang-format off
+#include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <musa_bf16.h>
 #include <musa_fp8.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAException.h>
-// clang-format on
 
 #include <cstdint>
 #include <limits>
@@ -26,7 +24,7 @@ limitations under the License.
 
 #include "core/kernels/musa/musa_ops_api.h"
 
-namespace xllm::kernel::cuda {
+namespace xllm::kernel::musa {
 
 namespace {
 
@@ -1348,4 +1346,4 @@ torch::Tensor fused_moe_ragged_combine(const torch::Tensor& down,
   return output;
 }
 
-}  // namespace xllm::kernel::cuda
+}  // namespace xllm::kernel::musa

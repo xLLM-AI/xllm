@@ -89,7 +89,8 @@ void DisaggPDConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_disagg_pd);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_pd_ooc);
   XLLM_CONFIG_ASSIGN_FROM_JSON(disagg_pd_port);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(instance_role);
+  // instance role is different for prefill and decode instances, so we don't
+  // need to assign it from json XLLM_CONFIG_ASSIGN_FROM_JSON(instance_role);
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_transfer_type);
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_transfer_mode);
   XLLM_CONFIG_ASSIGN_FROM_JSON(transfer_listen_port);
@@ -106,8 +107,9 @@ void DisaggPDConfig::append_config_json(
       config_json, default_config, enable_pd_ooc);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, disagg_pd_port);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, instance_role);
+  // we don't need to append it to config json for prefill and decode instances
+  //  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+  //      config_json, default_config, instance_role);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, kv_cache_transfer_type);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

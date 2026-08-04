@@ -30,8 +30,8 @@ namespace xllm {
 using SpecialToken = std::pair<std::string, int32_t>;
 
 struct TokenizerArgs {
-  // Type of tokenizer to use. valid values are "fast", "sentencepiece" and
-  // "tiktoken".
+  // Type of tokenizer to use. valid values are "fast", "sentencepiece",
+  // "tiktoken", and "rwkv".
   PROPERTY(std::string, tokenizer_type) = "sentencepiece";
 
   // Vocab file name.

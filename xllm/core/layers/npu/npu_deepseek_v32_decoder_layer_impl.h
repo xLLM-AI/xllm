@@ -42,7 +42,7 @@ class NpuDeepseekV32DecoderLayerImpl : public BaseLayer {
 
   ~NpuDeepseekV32DecoderLayerImpl() {};
 
-  virtual void merge_loaded_weights() override;
+  void merge_loaded_weights() override;
 
   torch::Tensor build_expert_routing_map(std::vector<int32_t> expert_lists);
 
@@ -50,7 +50,7 @@ class NpuDeepseekV32DecoderLayerImpl : public BaseLayer {
 
   void update_expert_weight();
 
-  virtual int64_t init_layer() override;
+  int64_t init_layer() override;
 
   torch::Tensor forward(torch::Tensor& x,
                         torch::Tensor& cos_pos,

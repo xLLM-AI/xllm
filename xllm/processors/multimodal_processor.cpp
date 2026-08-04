@@ -18,6 +18,7 @@ limitations under the License.
 #include <utility>
 
 #include "common/metrics.h"
+#include "core/framework/config/dit_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/tokenizer/tokenizer.h"
 #include "models/model_registry.h"
@@ -27,8 +28,9 @@ limitations under the License.
 namespace xllm {
 
 MultimodalProcessorBase::MultimodalProcessorBase(
-    std::shared_ptr<Tokenizer> tokenizer)
-    : tokenizer_(std::move(tokenizer)) {}
+    std::shared_ptr<Tokenizer> tokenizer,
+    const TokenizerArgs& tokenizer_args)
+    : tokenizer_(std::move(tokenizer)), tokenizer_args_(tokenizer_args) {}
 
 MultimodalProcessorBase::~MultimodalProcessorBase() = default;
 
@@ -39,6 +41,8 @@ bool MultimodalProcessorBase::tokenize(const std::string& prompt,
     LOG(ERROR) << "Failed to encode prompt: " + prompt;
     return false;
   }
+
+  pad_to_max_length(token_ids);
   COUNTER_ADD(tokenization_latency_seconds, timer.elapsed_seconds());
   return true;
 }
@@ -57,10 +61,30 @@ void MultimodalProcessorBase::assign_mm_hash_keys(const MMInput& mm_input,
   }
 }
 
+void MultimodalProcessorBase::pad_to_max_length(
+    std::vector<int32_t>& token_ids) const {
+  const int32_t max_sequence_length =
+      DiTConfig::get_instance().max_sequence_length();
+  if (max_sequence_length <= 0 || tokenizer_args_.pad_token().empty()) {
+    return;
+  }
+
+  const auto pad_id = tokenizer_->token_to_id(tokenizer_args_.pad_token());
+  if (!pad_id.has_value() ||
+      static_cast<int32_t>(token_ids.size()) >= max_sequence_length) {
+    return;
+  }
+
+  const int32_t pad_count =
+      max_sequence_length - static_cast<int32_t>(token_ids.size());
+  token_ids.insert(token_ids.begin(), pad_count, pad_id.value());
+}
+
 std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
     const ModelArgs& model_args,
     std::shared_ptr<Tokenizer> tokenizer,
-    int64_t max_cache_items) {
+    int64_t max_cache_items,
+    const TokenizerArgs& tokenizer_args) {
   const std::string& model_type = model_args.model_type();
   std::string resolved_name;
   std::string error_message;
@@ -73,7 +97,8 @@ std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
   CHECK(multimodal_processor_factory != nullptr)
       << "Missing multimodal processor for model type: " << model_type;
   std::unique_ptr<MultimodalProcessorBase> processor =
-      multimodal_processor_factory(model_args, std::move(tokenizer));
+      multimodal_processor_factory(
+          model_args, std::move(tokenizer), tokenizer_args);
   if (max_cache_items == 0) {
     return processor;
   }

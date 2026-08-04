@@ -343,6 +343,47 @@ TEST(HFModelLoaderTest, MiMoMtpModelArgsDefaults) {
   EXPECT_EQ(args.eos_token_id(), 151643);
   EXPECT_EQ(args.stop_token_ids(), std::unordered_set<int32_t>({151643}));
 }
+
+TEST(HFModelLoaderTest, Rwkv7ModelArgsFromConvertedConfig) {
+  auto loader = ModelRegistry::get_model_args_loader("rwkv7");
+  ASSERT_NE(loader, nullptr);
+
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(R"json(
+    {
+      "model_type": "rwkv7",
+      "torch_dtype": "float16",
+      "vocab_size": 65536,
+      "hidden_size": 768,
+      "num_hidden_layers": 12,
+      "head_size": 64,
+      "intermediate_size": 3072,
+      "num_attention_heads": 12,
+      "layer_norm_eps": 1e-5,
+      "max_position_embeddings": 4096,
+      "bos_token_id": 0,
+      "eos_token_id": 0
+    }
+  )json"));
+
+  ModelArgs args;
+  ASSERT_TRUE(loader(reader, &args));
+  EXPECT_EQ(args.model_type(), "rwkv7");
+  EXPECT_EQ(args.vocab_size(), 65536);
+  EXPECT_EQ(args.hidden_size(), 768);
+  EXPECT_EQ(args.n_layers(), 12);
+  EXPECT_EQ(args.head_dim(), 64);
+  EXPECT_EQ(args.intermediate_size(), 3072);
+  EXPECT_EQ(args.n_heads(), 12);
+  EXPECT_EQ(args.max_position_embeddings(), 4096);
+  EXPECT_FLOAT_EQ(args.layer_norm_eps(), 1e-5f);
+  EXPECT_EQ(args.linear_conv_kernel_dim(), 2);
+  EXPECT_EQ(args.full_attention_interval(), 13);
+  EXPECT_TRUE(has_linear_attention_layers(args));
+  ASSERT_EQ(args.layer_types().size(), 12U);
+  EXPECT_EQ(args.layer_types().front(), "rwkv7");
+  EXPECT_EQ(args.stop_token_ids(), std::unordered_set<int32_t>({0}));
+}
 #endif  // USE_CUDA
 
 #if defined(USE_DCU)

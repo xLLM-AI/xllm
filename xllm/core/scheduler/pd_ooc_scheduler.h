@@ -47,7 +47,7 @@ class PDOOCScheduler : public DisaggPDScheduler {
  public:
   PDOOCScheduler(Engine* engine, const Options& options);
 
-  virtual ~PDOOCScheduler();
+  ~PDOOCScheduler() override;
 
   void step(const absl::Duration& timeout) override;
 

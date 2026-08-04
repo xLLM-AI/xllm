@@ -32,7 +32,7 @@ limitations under the License.
 #include "torch_musa/csrc/core/MUSAGuard.h"
 #include "torch_musa/csrc/core/MUSAStream.h"
 
-namespace xllm::kernel::cuda {
+namespace xllm::kernel::musa {
 namespace {
 
 constexpr const char* kAlignUri = "sglang_musa_moe_align_block_size";
@@ -622,4 +622,4 @@ torch::Tensor musa_fused_moe_aot_bf16(const torch::Tensor& hidden_states,
   return reduce_assignments(down);
 }
 
-}  // namespace xllm::kernel::cuda
+}  // namespace xllm::kernel::musa

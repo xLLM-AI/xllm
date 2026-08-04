@@ -113,6 +113,11 @@ DEFINE_int64(dit_sparse_attention_mask_refresh_steps,
              "Sparse attention: recompute block sparse mask every N diffusion "
              "steps. 1 = every step (default), higher = reuse mask longer.");
 
+DEFINE_int32(
+    max_sequence_length,
+    0,
+    "Max sequence length for Flux2 text encoder tokenizer. 0 means disabled.");
+
 namespace xllm {
 
 void DiTConfig::from_flags() {
@@ -138,6 +143,7 @@ void DiTConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sparse_attention_sparse_start_step);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sparse_attention_version);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sparse_attention_mask_refresh_steps);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(max_sequence_length);
 }
 
 void DiTConfig::from_json(const JsonReader& json) {
@@ -163,6 +169,7 @@ void DiTConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sparse_attention_sparse_start_step);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sparse_attention_version);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sparse_attention_mask_refresh_steps);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(max_sequence_length);
 }
 
 void DiTConfig::append_config_json(nlohmann::ordered_json& config_json) const {
@@ -211,6 +218,8 @@ void DiTConfig::append_config_json(nlohmann::ordered_json& config_json) const {
       config_json, default_config, dit_sparse_attention_version);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_sparse_attention_mask_refresh_steps);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, max_sequence_length);
 }
 
 DiTConfig& DiTConfig::get_instance() {

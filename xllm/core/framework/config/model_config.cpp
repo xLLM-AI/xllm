@@ -157,9 +157,7 @@ void ModelConfig::normalize_cpp_chat_template(const std::string& model_type) {
 
 void ModelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(model_id);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(model);
   XLLM_CONFIG_ASSIGN_FROM_JSON(model_impl);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(python_model_path);
   XLLM_CONFIG_ASSIGN_FROM_JSON(backend);
   XLLM_CONFIG_ASSIGN_FROM_JSON(task);
   XLLM_CONFIG_ASSIGN_FROM_JSON(limit_image_per_prompt);
@@ -180,11 +178,8 @@ void ModelConfig::append_config_json(
   const ModelConfig default_config;
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, model_id);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, model);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, model_impl);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, python_model_path);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, backend);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, task);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

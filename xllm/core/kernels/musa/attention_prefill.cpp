@@ -22,7 +22,7 @@ limitations under the License.
 #include "core/kernels/musa/musa_ops_api.h"
 #include "core/kernels/musa/musa_tvmffi_stream.h"
 
-namespace xllm::kernel::cuda {
+namespace xllm::kernel::musa {
 namespace {
 
 void batch_prefill_impl(const std::string& uri,
@@ -314,4 +314,4 @@ void batch_chunked_prefill(const std::string& uri,
       /*token_pos_in_items_len=*/0);
 }
 
-}  // namespace xllm::kernel::cuda
+}  // namespace xllm::kernel::musa

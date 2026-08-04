@@ -21,7 +21,7 @@ limitations under the License.
 
 #include "core/kernels/musa/musa_ops_api.h"
 
-namespace xllm::kernel::cuda {
+namespace xllm::kernel::musa {
 namespace {
 
 constexpr int32_t kBlockSize = 256;
@@ -161,4 +161,4 @@ torch::Tensor rejection_sample_target_only_k1(
   return output;
 }
 
-}  // namespace xllm::kernel::cuda
+}  // namespace xllm::kernel::musa

@@ -421,3 +421,6 @@ DECLARE_string(verbose_trace_log_path);
 DECLARE_int32(verbose_trace_log_max_size_mb);
 
 DECLARE_int32(verbose_trace_log_max_files);
+
+// --- flux2 text encoder tokenizer config ---
+DECLARE_int32(max_sequence_length);

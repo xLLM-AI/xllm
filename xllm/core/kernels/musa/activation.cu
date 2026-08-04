@@ -294,7 +294,7 @@ void launch_fused_shared_expert_gate_inplace(torch::Tensor& shared_output,
 }
 }  // namespace
 
-namespace xllm::kernel::cuda {
+namespace xllm::kernel::musa {
 
 void mul_sigmoid_gate_inplace(torch::Tensor& out, const torch::Tensor& gate) {
   CHECK(out.defined() && gate.defined()) << "out and gate must be defined";
@@ -400,4 +400,4 @@ torch::Tensor matmul(torch::Tensor a,
   return F::linear(a, b, bias.value_or(torch::Tensor()));
 }
 
-}  // namespace xllm::kernel::cuda
+}  // namespace xllm::kernel::musa

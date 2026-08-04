@@ -101,7 +101,7 @@ class BlockCapacityGuard {
 class ZeroEvictionScheduler final : public ContinuousScheduler {
  public:
   ZeroEvictionScheduler(Engine* engine, const Options& options);
-  virtual ~ZeroEvictionScheduler();
+  ~ZeroEvictionScheduler() override;
 
  private:
   void handle_prefill_requests(

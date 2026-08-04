@@ -17,7 +17,7 @@ limitations under the License.
 
 #include "core/kernels/musa/musa_ops_api.h"
 
-namespace xllm::kernel::cuda {
+namespace xllm::kernel::musa {
 
 torch::Tensor random_sample(const torch::Tensor& probs) {
   CHECK(probs.dim() == 2 || probs.dim() == 3)
@@ -50,4 +50,4 @@ torch::Tensor random_sample(const torch::Tensor& probs) {
   return samples.flatten();
 }
 
-}  // namespace xllm::kernel::cuda
+}  // namespace xllm::kernel::musa

@@ -92,7 +92,7 @@ class CausalVLMImpl : public CausalVLM {
     return;
   }
 
-  virtual void update_expert_weight(int32_t layer_id) { return; }
+  void update_expert_weight(int32_t layer_id) override { return; }
 
 #if defined(USE_NPU)
   layer::NpuLmHead get_npu_lm_head() override {

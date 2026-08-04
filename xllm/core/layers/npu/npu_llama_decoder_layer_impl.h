@@ -49,9 +49,9 @@ class NpuLlamaDecoderLayerImpl : public BaseLayer {
 
   ~NpuLlamaDecoderLayerImpl() override = default;
 
-  virtual void merge_loaded_weights() override;
+  void merge_loaded_weights() override;
 
-  virtual int64_t init_layer() override;
+  int64_t init_layer() override;
 
   torch::Tensor forward(torch::Tensor& x,
                         torch::Tensor& cos_pos,

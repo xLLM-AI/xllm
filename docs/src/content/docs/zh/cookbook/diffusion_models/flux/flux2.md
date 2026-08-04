@@ -13,6 +13,8 @@ sidebar:
 
 + 权重下载: [modelscope-FLUX.2-dev](https://www.modelscope.cn/models/black-forest-labs/FLUX.2-dev/)
 
+注意：由于而xLLM中默认的add_bos_token为True，Flux2模型权重目录下的tokenizer/chat_template.jinja中第4行默认使用了`{{ bos_token }}`，因此需要将其注释掉或者删除掉。
+
 ## 1.拉取镜像环境
 
 首先下载xLLM提供的镜像：
@@ -89,7 +91,7 @@ python -c "import torch_npu
 for i in range(16):torch_npu.npu.set_device(i)"
 ```
 
-当前xLLM侧的Flux2拉起服务化是两阶段模式，需要分别拉起text-encoder组件和DiT组件服务化，再通过python的embedding脚本触发整个Flux2推理进程。另外，Flux2支持TP、SP和dit_cache特性（TaylorSeer、ResidualCache），暂时不支持chunked prefill特性。
+当前xLLM侧的Flux2拉起服务化是两阶段模式，需要分别拉起text-encoder组件和DiT组件服务化，再通过python的embedding脚本触发整个Flux2推理进程。另外，Flux2支持TP、SP和dit_cache特性（TaylorSeer、ResidualCache）。
 
 ### 1. 拉起text-encoder组件服务化
 #### 环境变量
@@ -120,6 +122,8 @@ NNODES=2                                           # 节点数（当前脚本启
 
 mkdir -p $LOG_DIR
 
+export ASCEND_RT_VISIBLE_DEVICES=4,5               # NPU 逻辑设备号
+
 for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
@@ -130,14 +134,17 @@ do
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --max_memory_utilization=0.86 \
+    --max_tokens_per_batch=40000 \
+    --max_seqs_per_batch=256 \
     --block_size=128 \
     --tp_size=2 \
     --communication_backend="hccl" \
+    --backend="vlm" \
     --enable_prefix_cache=false \
     --enable_chunked_prefill=false \
-    --enable_schedule_overlap=true \
-    --enable_return_mm_full_embeddings=true \
-    --enable_mistral_prompt_to_message=true \
+    --enable_schedule_overlap=false \
+    --enable_return_mm_full_embeddings 1 \
+    --max_sequence_length=512 \
     --task="embed" \
     --enable_shm=true \
     --node_rank=$i \ > $LOG_FILE 2>&1 &
@@ -181,23 +188,26 @@ export HCCL_IF_BASE_PORT=43432  # HCCL 通信基础端口
 #### 启动命令 - Flux2的DiT组件（单机 1卡2die TP=2）
 
 ```bash
-MASTER_NODE_ADDR="127.0.0.1:8999"                  # Master 节点地址（需全局一致）
+MASTER_NODE_ADDR="127.0.0.1:8888"                  # Master 节点地址（需全局一致）
 START_PORT=18018                                   # 服务起始端口
 LOG_DIR="log"                                      # 日志目录
 NNODES=2                                           # 节点数（当前脚本启动 2 个进程）
+
+export ASCEND_RT_VISIBLE_DEVICES=6,7               # NPU 逻辑设备号
 
 for (( i=0; i<2; i++ ))
 do
   PORT=$((START_PORT + i))
   LOG_FILE="$LOG_DIR/dit_node_$i.log"
   ./build/xllm/core/server/xllm \
-    --model="/path/to/flux2/" \
+    --model="/export/home/models/flux2/" \
     --max_memory_utilization=0.6 \
     --backend="dit" \
     --tp_size=2 \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --port $PORT \
+    --dit_cache_policy=None \
     --communication_backend="hccl" \
     --enable_prefix_cache=false \
     --enable_chunked_prefill=false \
@@ -294,7 +304,6 @@ def load_tensor(
     target_dtype = dtype or torch.float32
     tensor = tensor.to(dtype=target_dtype)
 
-    # clone 确保独立内存（可选，但保险）
     return tensor.clone()
 
 def base64_to_image(base64_string, output_path):
@@ -385,6 +394,110 @@ def create_tensor(data, name, datatype="FP32"):
         }
 
 
+def _get_tensor_content(contents, snake_name, camel_name):
+        value = contents.get(snake_name)
+        if value is None:
+                value = contents.get(camel_name)
+        return value
+
+
+def _decode_tensor_bytes(raw_value):
+        if raw_value is None or raw_value == "":
+                return None
+        if isinstance(raw_value, str):
+                return base64.b64decode(raw_value)
+        if isinstance(raw_value, bytes):
+                return raw_value
+        if isinstance(raw_value, list):
+                return bytes(raw_value)
+        raise ValueError(f"不支持的bytes_contents类型: {type(raw_value)}")
+
+
+def _reshape_tensor_from_bytes(raw_bytes, datatype, shape):
+        byte_buffer = bytearray(raw_bytes)
+        normalized_datatype = datatype.upper()
+        if normalized_datatype == "FP32":
+                tensor = torch.frombuffer(byte_buffer, dtype=torch.float32).clone()
+        elif normalized_datatype == "FP16":
+                tensor = torch.frombuffer(byte_buffer, dtype=torch.float16).clone()
+                tensor = tensor.to(torch.float32)
+        elif normalized_datatype == "BF16":
+                tensor = torch.frombuffer(byte_buffer, dtype=torch.bfloat16).clone()
+                tensor = tensor.to(torch.float32)
+        else:
+                raise ValueError(f"暂不支持从bytes_contents解析datatype={datatype}")
+
+        expected_numel = math.prod(shape)
+        if tensor.numel() != expected_numel:
+                raise ValueError(
+                    f"bytes_contents元素数和shape不匹配: numel={tensor.numel()}, "
+                    f"expected={expected_numel}, datatype={datatype}, shape={shape}"
+                )
+        return tensor.reshape(shape)
+
+
+def _extract_tensor_payload(tensor, shape):
+        datatype = tensor.get("datatype", "FP32")
+        contents = tensor.get("contents", {})
+        flat_embedding = _get_tensor_content(
+            contents, "fp32_contents", "fp32Contents"
+        )
+        if flat_embedding:
+                return torch.tensor(flat_embedding, dtype=torch.float32).reshape(shape)
+
+        raw_value = _get_tensor_content(
+            contents, "bytes_contents", "bytesContents"
+        )
+        raw_bytes = _decode_tensor_bytes(raw_value)
+        if raw_bytes is not None:
+                return _reshape_tensor_from_bytes(raw_bytes, datatype, shape)
+
+        raise ValueError(
+            f"tensor有shape但没有可用数据: datatype={datatype}, shape={shape}, "
+            f"contents字段={list(contents.keys())}"
+        )
+
+
+def extract_prompt_embedding(result, hidden_size=5120, num_layers=3):
+        """Extract Flux2 prompt embeddings from text_encoder response."""
+        data_items = result.get("data", [])
+        if not data_items:
+                raise ValueError(f"text_encoder响应缺少data字段或data为空: {result.keys()}")
+
+        data = data_items[0]
+        mm_embeddings = data.get("mm_embeddings", [])
+        if mm_embeddings:
+                tensor = mm_embeddings[0].get("embedding", {})
+                shape = [int(dim) for dim in tensor.get("shape", [])]
+                if not shape:
+                        raise ValueError("mm_embeddings[0].embedding缺少shape字段")
+                if any(dim <= 0 for dim in shape):
+                        raise ValueError(f"mm_embeddings[0].embedding shape非法: {shape}")
+
+                print("response_keys", list(data.keys()))
+                print("mm_embedding_datatype", tensor.get("datatype", "FP32"))
+                print("mm_embedding_shape", shape)
+                return _extract_tensor_payload(tensor, shape)
+
+        flat_embedding = data.get("embedding", [])
+        if not flat_embedding:
+                raise ValueError(
+                    f"text_encoder响应中embedding为空且没有mm_embeddings，data字段: {list(data.keys())}"
+                )
+
+        seq_len = len(flat_embedding) // (num_layers * hidden_size)
+        if seq_len <= 0:
+                raise ValueError(
+                    f"普通embedding长度不足，len={len(flat_embedding)}, "
+                    f"num_layers={num_layers}, hidden_size={hidden_size}"
+                )
+        print("response_keys", list(data.keys()))
+        print("embedding_shape", [num_layers, seq_len, hidden_size])
+        return torch.tensor(flat_embedding, dtype=torch.float32).reshape(
+            num_layers, seq_len, hidden_size
+        )
+
+
 def test_image_generation(pos_embed):
         """测试图像生成接口（使用修复后的Tensor结构）"""
         api_base = "http://127.0.0.1:18018"
@@ -434,9 +547,9 @@ def test_image_generation(pos_embed):
                 data=json.dumps(payload),
                 timeout=60 * 5
                 )
-
                 response.raise_for_status()
                 result = response.json()
+                # print("data",json.dumps(payload))
                 # 4. 解析响应（后续逻辑不变）
                 print(f"接口响应: {json.dumps(result, indent=2, ensure_ascii=False)}")
                 # print(f"请求耗时: {time.time() - :.2f}s")
@@ -458,6 +571,7 @@ def test_image_generation(pos_embed):
         except Exception as e:
                 print(f"处理失败: {str(e)}")
 
+
 def calculate_dimensions(target_area, ratio):
     width = math.sqrt(target_area * ratio)
     height = width / ratio
@@ -468,35 +582,29 @@ def calculate_dimensions(target_area, ratio):
     return width, height
 
 def main(args: argparse.Namespace):
-    start = time.time()
-
-    tokenizer = AutoTokenizer.from_pretrained("/path/to/flux2/text_encoder/")
-    messages = [
-        {"role": "system", "content": "You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object\nattribution and actions without speculation."},
-        {"role": "user", "content": "A cat holding a sign that says hello world"},
-    ]
-    formatted_input = tokenizer.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        tokenize=False,
-    )                                                                                                                                                             
-    # 4. 构造 payload，将格式化后的字符串作为 input
-    payload = {                                                                                                                                                   
-        "model": "text_encoder",                                                                                                                                  
-        "input": formatted_input,
-        "encoding_format": "float"                                                                                                                                
+    start = time.time()            
+    # 1. 构造 payload，将格式化后的字符串作为 input
+    payload = {
+        "model": "text_encoder",
+        "messages": [
+            {"role": "system", "content": [
+                {"type": "text", "text": "You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object\nattribution and actions without speculation."}
+            ]},
+            {"role": "user", "content": [
+                {"type": "text", "text": "A cat holding a sign that says hello world"}
+            ]},
+        ],
     }
 
-    # 发送给mistral的请求
+    # 2.发送给mistral的请求
     raw_response = requests.post("http://127.0.0.1:18001/v1/embeddings", json=payload)
     result = raw_response.json()
 
-    # 解析向量
-    bytes_data = result["data"][0]["mm_embeddings"][0]["embedding"]["contents"]["bytes_contents"]
-    embed_data = base64.b64decode(bytes_data)
-    embed_shape = result["data"][0]["mm_embeddings"][0]["embedding"]["shape"]
-    pos_embed = torch.frombuffer(bytearray(embed_data), dtype=torch.bfloat16).reshape(embed_shape)
+    # 3、Mistral3 Flux2 text encoder 输出 shape: [3, seq_len, hidden_size]
+    pos_embed = extract_prompt_embedding(result)
+    print("embed_shape", list(pos_embed.shape))
 
+    # 4、调用DiT组件生成图像
     test_image_generation(pos_embed)
     end = time.time()
     print(f"耗时: {end - start:.2f} 秒")
