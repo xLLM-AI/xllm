@@ -421,6 +421,83 @@ class AclGraphExecutorTest : public ::testing::Test {
 
     return batch;
   }
+
+  void ExpectDpReplayMismatchFallsBack(
+      bool decode_no_padding,
+      const std::vector<int32_t>& captured_dp_token_nums,
+      const std::vector<int32_t>& replay_dp_token_nums,
+      bool capture_empty_rank = false) {
+    ExecutionConfig& execution_config = ExecutionConfig::get_instance();
+    const bool original_decode_no_padding =
+        execution_config.enable_graph_mode_decode_no_padding();
+    const bool original_double_buffer =
+        execution_config.enable_graph_double_buffer();
+    execution_config.enable_graph_mode_decode_no_padding(decode_no_padding);
+    execution_config.enable_graph_double_buffer(true);
+
+    std::unique_ptr<Batch> batch = CreateTestBatch();
+    EXPECT_FALSE(batch->empty());
+    ForwardInput forward_input =
+        batch->prepare_forward_input(options_.num_decoding_tokens(),
+                                     /*min_decoding_batch_size=*/0,
+                                     model_args_);
+    forward_input = forward_input.to(*device_, torch::kFloat32);
+
+    ModelInputParams capture_params = forward_input.input_params;
+    capture_params.parallel.dp_global_token_nums = captured_dp_token_nums;
+    capture_params.parallel.dp_is_decode.assign(captured_dp_token_nums.size(),
+                                                1);
+    if (capture_empty_rank) {
+      capture_params.meta.num_sequences = 0;
+      capture_params.attention.host.q_seq_lens.clear();
+      capture_params.attention.host.kv_seq_lens.clear();
+    }
+
+    std::unique_ptr<::xllm::npu::AclGraphExecutorImpl> graph_executor =
+        std::make_unique<::xllm::npu::AclGraphExecutorImpl>(
+            model_.get(), model_args_, *device_, options_);
+    const double eager_fallbacks_before =
+        COUNTER_num_model_execution_total_eager.get_value();
+    for (int32_t slot_idx = 0;
+         slot_idx < graph_executor->graph_slot_count_for_test();
+         ++slot_idx) {
+      graph_executor->run({forward_input.token_ids},
+                          {forward_input.positions},
+                          kv_caches_,
+                          {capture_params});
+    }
+    EXPECT_EQ(COUNTER_num_model_execution_total_eager.get_value(),
+              eager_fallbacks_before);
+
+    ModelInputParams replay_params = forward_input.input_params;
+    replay_params.parallel.dp_global_token_nums = replay_dp_token_nums;
+    replay_params.parallel.dp_is_decode.assign(replay_dp_token_nums.size(), 1);
+    graph_executor->prepare_graph_input(forward_input.token_ids,
+                                        forward_input.positions,
+                                        kv_caches_,
+                                        replay_params);
+    const ModelOutput eager_output = model_->forward({forward_input.token_ids},
+                                                     {forward_input.positions},
+                                                     kv_caches_,
+                                                     {replay_params});
+    const ModelOutput fallback_output =
+        graph_executor->run({forward_input.token_ids},
+                            {forward_input.positions},
+                            kv_caches_,
+                            {replay_params});
+
+    EXPECT_EQ(COUNTER_num_model_execution_total_eager.get_value(),
+              eager_fallbacks_before + 1);
+    EXPECT_TRUE(torch::allclose(eager_output.hidden_states,
+                                fallback_output.hidden_states,
+                                /*rtol=*/1e-5,
+                                /*atol=*/1e-6));
+
+    execution_config.enable_graph_mode_decode_no_padding(
+        original_decode_no_padding);
+    execution_config.enable_graph_double_buffer(original_double_buffer);
+  }
+
   bool initialized_ = false;
   ModelArgs model_args_;
   std::unique_ptr<torch::Device> device_;
@@ -529,6 +606,30 @@ TEST_F(AclGraphExecutorTest, GraphReplayConsistency) {
       << "First output:\n"
       << output1.hidden_states << "\nSecond output:\n"
       << output2.hidden_states;
+}
+
+TEST_F(AclGraphExecutorTest,
+       DpReplayFallsBackWhenRoundedBucketDistributionChanges) {
+  ExpectDpReplayMismatchFallsBack(
+      /*decode_no_padding=*/false,
+      /*captured_dp_token_nums=*/{9, 1},
+      /*replay_dp_token_nums=*/{16, 15});
+}
+
+TEST_F(AclGraphExecutorTest,
+       DpReplayFallsBackWhenNoPaddingDistributionChanges) {
+  ExpectDpReplayMismatchFallsBack(
+      /*decode_no_padding=*/true,
+      /*captured_dp_token_nums=*/{8, 1},
+      /*replay_dp_token_nums=*/{8, 7});
+}
+
+TEST_F(AclGraphExecutorTest, DpReplayFallsBackWhenEmptyRankBecomesNonEmpty) {
+  ExpectDpReplayMismatchFallsBack(
+      /*decode_no_padding=*/true,
+      /*captured_dp_token_nums=*/{8, 0},
+      /*replay_dp_token_nums=*/{8, 1},
+      /*capture_empty_rank=*/true);
 }
 
 TEST_F(AclGraphExecutorTest, PreservesAuxHiddenStatesAcrossGraphReplay) {

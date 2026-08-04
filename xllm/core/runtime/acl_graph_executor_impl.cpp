@@ -93,6 +93,7 @@ bool AclGraph::capture(CausalLM* model,
       static_cast<uint32_t>(tokens.size(/*dim=*/0));
   CHECK_GE(num_tokens_, actual_num_tokens)
       << "num_tokens_ >= actual_num_tokens";
+  captured_dp_global_token_nums_ = params.parallel.dp_global_token_nums;
   auto graph_params = persistent_param_.update(tokens,
                                                k_cache,
                                                v_cache,
@@ -360,6 +361,28 @@ ModelOutput AclGraph::replay(CausalLM* model,
   return ModelOutput(get_hidden_states(actual_num_tokens));
 }
 
+bool AclGraph::is_replay_compatible(const ModelInputParams& params) const {
+  const std::vector<int32_t>& replay_dp_global_token_nums =
+      params.parallel.dp_global_token_nums;
+  const bool has_distributed_input =
+      captured_dp_global_token_nums_.size() > 1 ||
+      replay_dp_global_token_nums.size() > 1;
+  if (!has_distributed_input) {
+    return true;
+  }
+  if (captured_dp_global_token_nums_ == replay_dp_global_token_nums) {
+    return true;
+  }
+
+  LOG_FIRST_N(WARNING, 10)
+      << "Falling back to eager mode because the DP token distribution differs "
+         "from the ACL graph capture. Replaying would reuse DP/EP padding "
+         "tensor descriptors captured for another distribution. captured="
+      << captured_dp_global_token_nums_
+      << ", replay=" << replay_dp_global_token_nums;
+  return false;
+}
+
 void AclGraph::prepare_replay_inputs(const torch::Tensor& tokens,
                                      const torch::Tensor& positions,
                                      std::vector<KVCache>& kv_cache,
@@ -551,6 +574,11 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   auto& active_persistent_param = *active_slot.persistent_param;
 
   if (replay_graph != nullptr) {
+    if (!replay_graph->is_replay_compatible(params_single)) {
+      replay_graph->discard_prepared_replay_inputs();
+      COUNTER_INC(num_model_execution_total_eager);
+      return model_->forward(tokens, positions, kv_caches, params);
+    }
     // Replay the existing graph
     VLOG(kGraphExecutorLogVerboseLevel)
         << "AclGraphExecutorImpl::run() in replay mode";
@@ -678,6 +706,10 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
     }
     auto it = slot.graphs.find(graph_key);
     if (it == slot.graphs.end()) {
+      return;
+    }
+    if (!it->second->is_replay_compatible(params)) {
+      it->second->discard_prepared_replay_inputs();
       return;
     }
     graph = it->second.get();

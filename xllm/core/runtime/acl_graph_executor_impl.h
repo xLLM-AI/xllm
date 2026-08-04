@@ -80,6 +80,15 @@ class AclGraph {
                      std::vector<KVCache>& kv_cache,
                      const ModelInputParams& params);
 
+  // DP/EP padding tensors are captured with shapes derived from the complete
+  // per-rank token distribution. Reusing the graph for a different
+  // distribution would keep the old tensor descriptors.
+  [[nodiscard]] bool is_replay_compatible(const ModelInputParams& params) const;
+
+  void discard_prepared_replay_inputs() {
+    replay_inputs_prepared_.store(false, std::memory_order_release);
+  }
+
   void prepare_replay_inputs(const torch::Tensor& tokens,
                              const torch::Tensor& positions,
                              std::vector<KVCache>& kv_cache,
@@ -120,6 +129,7 @@ class AclGraph {
   std::shared_ptr<AclGraphTaskUpdateContext> graph_task_context_;
   std::optional<c10_npu::NPUStream> update_stream_;
   std::atomic<bool> replay_inputs_prepared_{false};
+  std::vector<int32_t> captured_dp_global_token_nums_;
 };
 
 // Executor implementation using ACL graph optimization
