@@ -936,7 +936,7 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
     std::vector<std::pair<int64_t, int64_t>> vae_image_sizes;
     if (!image_list.empty() && image_list[0].size(1) != latent_channels_) {
       for (size_t i = 0; i < image_list.size(); i++) {
-        aspect_ratio =
+        double aspect_ratio =
             static_cast<double>(image_list[i].size(3)) / image_list[i].size(2);
         auto [condition_width, condition_height] =
             xllm::dit::calculate_dimensions(CONDITION_IMAGE_SIZE, aspect_ratio);
