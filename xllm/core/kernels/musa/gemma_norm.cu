@@ -24,7 +24,7 @@ limitations under the License.
 #include "core/kernels/musa/musa_ops_api.h"
 #include "core/kernels/musa/musa_tvmffi_stream.h"
 
-namespace xllm::kernel::cuda {
+namespace xllm::kernel::musa {
 
 namespace {
 
@@ -811,4 +811,4 @@ void fused_add_gemma_rms_norm(torch::Tensor& input,
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-}  // namespace xllm::kernel::cuda
+}  // namespace xllm::kernel::musa

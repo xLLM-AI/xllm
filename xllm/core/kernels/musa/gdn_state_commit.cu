@@ -20,7 +20,7 @@ limitations under the License.
 
 #include "core/kernels/musa/gdn_ops.h"
 
-namespace xllm::kernel::cuda {
+namespace xllm::kernel::musa {
 namespace {
 
 constexpr int32_t kBlockSize = 256;
@@ -168,4 +168,4 @@ void scatter_gdn_mtp_verify_states(torch::Tensor& ssm_cache,
   }
 }
 
-}  // namespace xllm::kernel::cuda
+}  // namespace xllm::kernel::musa

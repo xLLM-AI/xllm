@@ -39,7 +39,7 @@ bool is_accel_device_tensor(const at::Tensor& tensor) {
 
 namespace xllm {
 namespace kernel {
-namespace cuda {
+namespace musa {
 
 namespace {
 
@@ -790,6 +790,6 @@ void causal_conv1d_fwd_token_major(const at::Tensor& x,
       });
 }
 
-}  // namespace cuda
+}  // namespace musa
 }  // namespace kernel
 }  // namespace xllm

@@ -304,7 +304,7 @@ void launch_fused_qknorm_rope(void* qkv,
 
 }  // namespace
 
-namespace xllm::kernel::cuda {
+namespace xllm::kernel::musa {
 
 void fused_qk_norm_rope(torch::Tensor& qkv,
                         int64_t num_heads_q,
@@ -390,4 +390,4 @@ void fused_qk_norm_rope(torch::Tensor& qkv,
   }
 }
 
-}  // namespace xllm::kernel::cuda
+}  // namespace xllm::kernel::musa

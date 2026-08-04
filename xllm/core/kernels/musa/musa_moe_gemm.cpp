@@ -24,7 +24,7 @@ limitations under the License.
 #include "kernels/musa/musa_ops_api.h"
 #include "kernels/musa/musa_tvmffi_stream.h"
 
-namespace xllm::kernel::cuda {
+namespace xllm::kernel::musa {
 namespace {
 
 constexpr const char* kGemmOpsUri = "gemm_ops";
@@ -345,4 +345,4 @@ bool musa_moe_topk_softmax_available() {
   return available;
 }
 
-}  // namespace xllm::kernel::cuda
+}  // namespace xllm::kernel::musa
