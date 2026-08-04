@@ -358,6 +358,14 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
       params.meta.batch_forward_type = BatchForwardType::PREFILL;
     }
 
+    torch::Tensor image_mask =
+        tokens.eq(context_.get_model_args("text_encoder").image_token_id());
+    if (image_mask.sum().item<int64_t>() == 0) {
+      params.embedding.input_embedding =
+          text_encoder_->get_input_embeddings(tokens, params);
+      return params;
+    }
+
     ModelInputParams mm_params;
     mm_params.multimodal.mm_data = MMBatchData::to(mm_batch, tokens.device());
     MMDict multimodal_embeds =
@@ -375,8 +383,6 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
       image_embeddings = torch::cat(image_embedding_list, 0);
     }
 
-    torch::Tensor image_mask =
-        tokens.eq(context_.get_model_args("text_encoder").image_token_id());
     CHECK_EQ(image_mask.sum().item<int64_t>(), image_embeddings.size(0))
         << "image token count does not match image embedding count";
 
@@ -399,7 +405,6 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
 #if defined(USE_DCU)
     CHECK(tokenizer_ != nullptr) << "Tokenizer not loaded";
     CHECK(!text_encoder_.is_empty()) << "Text encoder not loaded";
-    CHECK(!image.empty()) << "QwenImageEditPlus requires input images";
 
     const auto& text_encoder_args = context_.get_model_args("text_encoder");
     const auto& processor_args = context_.get_model_args("processor");
@@ -459,9 +464,12 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
       }
 
       std::vector<MMDataItem> mm_items;
-      CHECK(vl_image_processor_.process(vl_images, mm_items))
-          << "VL image processor failed";
-      CHECK(!mm_items.empty()) << "VL image processor produced no image items";
+      if (!vl_images.empty()) {
+        CHECK(vl_image_processor_.process(vl_images, mm_items))
+            << "VL image processor failed";
+        CHECK(!mm_items.empty())
+            << "VL image processor produced no image items";
+      }
       std::vector<torch::Tensor> sample_grids;
       sample_grids.reserve(mm_items.size());
       for (auto& item : mm_items) {
@@ -485,11 +493,16 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
       for (auto& sample_grid : sample_grids) {
         grid_tensors.push_back(sample_grid);
       }
-      MMData mm_data;
-      mm_data.set(MMType::IMAGE, mm_items);
-      mm_data_list.emplace_back(std::move(mm_data));
+      if (!mm_items.empty()) {
+        MMData mm_data;
+        mm_data.set(MMType::IMAGE, mm_items);
+        mm_data_list.emplace_back(std::move(mm_data));
+      }
     }
-    torch::Tensor image_grid_thw = torch::cat(grid_tensors, 0);
+    torch::Tensor image_grid_thw;
+    if (!grid_tensors.empty()) {
+      image_grid_thw = torch::cat(grid_tensors, 0);
+    }
 
     std::string base_img_prompt;
     for (size_t i = 0; i < first_sample_mm_items.size(); ++i) {
@@ -859,13 +872,6 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
       raw_image_inputs = input.images_list;
     } else if (input.images.defined()) {
       raw_image_inputs.emplace_back(input.images);
-    } else {
-      LOG(FATAL) << "QwenImageEditPlus pipeline expected to have image inputs "
-                    "in images or images_list. batch_size="
-                 << input.batch_size << ", prompts=" << input.prompts.size()
-                 << ", prompt_embeds_defined=" << prompt_embeds.defined()
-                 << ", images_defined=" << input.images.defined()
-                 << ", images_list_size=" << input.images_list.size();
     }
 
     std::vector<torch::Tensor> image_list;
@@ -881,7 +887,7 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
       image_list.emplace_back(img);
     }
 
-    if (image_list.empty()) {
+    if (image_list.empty() && !raw_image_inputs.empty()) {
       LOG(FATAL) << "No valid images found in images or images_list. ";
     }
 
@@ -892,7 +898,7 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
     if (batch_size == 0 && prompt_embeds.defined()) {
       batch_size = prompt_embeds.size(0);
     }
-    if (batch_size == 0) {
+    if (batch_size == 0 && !image_list.empty()) {
       batch_size = image_list[0].size(0);
     }
     CHECK_GT(batch_size, 0) << "QwenImageEditPlus batch_size must be > 0";
@@ -901,18 +907,23 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
           << "all image inputs must have the same batch size";
     }
 
-    double height_size = static_cast<double>(image_list[0].size(2));
-    double width_size = static_cast<double>(image_list[0].size(3));
     int64_t num_images_per_prompt = generation_params.num_images_per_prompt;
     CHECK_GT(num_images_per_prompt, 0)
         << "QwenImageEditPlus num_images_per_prompt must be > 0";
 
-    double aspect_ratio = width_size / height_size;
-    auto [calculated_width, calculated_height] =
-        xllm::dit::calculate_dimensions(1024 * 1024, aspect_ratio);
-
-    height = (height == 0) ? calculated_height : height;
-    width = (width == 0) ? calculated_width : width;
+    if (!image_list.empty()) {
+      double height_size = static_cast<double>(image_list[0].size(2));
+      double width_size = static_cast<double>(image_list[0].size(3));
+      double aspect_ratio = width_size / height_size;
+      auto [calculated_width, calculated_height] =
+          xllm::dit::calculate_dimensions(1024 * 1024, aspect_ratio);
+      height = (height == 0) ? calculated_height : height;
+      width = (width == 0) ? calculated_width : width;
+    } else {
+      height =
+          (height == 0) ? default_sample_size_ * vae_scale_factor_ : height;
+      width = (width == 0) ? default_sample_size_ * vae_scale_factor_ : width;
+    }
 
     int64_t multiple_of = vae_scale_factor_ * 2;
     width = (width / multiple_of) * multiple_of;
@@ -935,7 +946,7 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
             xllm::dit::calculate_dimensions(vae_target_area, aspect_ratio);
         CHECK_GT(vae_width, 0) << "QwenImageEditPlus vae_width must be > 0";
         CHECK_GT(vae_height, 0) << "QwenImageEditPlus vae_height must be > 0";
-        vae_image_sizes.push_back({vae_width, vae_height});
+        vae_image_sizes.emplace_back(vae_width, vae_height);
         auto img = image_list[i];
         auto condition_img =
             vae_image_processor_->resize(img, condition_height, condition_width)
@@ -1148,12 +1159,13 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
             .to(dtype_);
     auto latents_mean =
         torch::tensor(vae_model_args_.latents_mean(), torch::kDouble);
-    latents_mean = latents_mean.view({1, latent_channels_, 1, 1, 1})
-                       .to(device_, image_latents.dtype());
+    latents_mean =
+        latents_mean.view({1, latent_channels_, 1, 1, 1}).to(device_, dtype_);
     auto latents_std =
         torch::tensor(vae_model_args_.latents_std(), torch::kDouble);
-    latents_std = 1.0 / latents_std.view({1, latent_channels_, 1, 1, 1})
-                            .to(device_, image_latents.dtype());
+    latents_std =
+        1.0 /
+        latents_std.view({1, latent_channels_, 1, 1, 1}).to(device_, dtype_);
 
     unpacked_latents = unpacked_latents / latents_std + latents_mean;
     output_image = vae_->decode(unpacked_latents).sample.squeeze(2);
