@@ -10,6 +10,7 @@ cc_library(
     dit_model.h
     model_args.h
     model_input_params.h
+    model_parallel_capabilities.h
     mtp_topk_state.h
     mtp_utils.h
   SRCS
