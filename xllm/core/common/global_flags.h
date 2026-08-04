@@ -339,6 +339,8 @@ DECLARE_int64(dit_cache_skip_interval_steps);
 
 DECLARE_double(dit_cache_residual_diff_threshold);
 
+DECLARE_bool(enable_constrained_decoding);
+
 DECLARE_bool(enable_convert_tokens_to_item);
 DECLARE_bool(enable_output_sku_logprobs);
 DECLARE_bool(enable_extended_item_info);
@@ -356,6 +358,28 @@ DECLARE_int64(dit_cache_start_blocks);
 DECLARE_int64(dit_cache_end_blocks);
 
 DECLARE_bool(dit_sp_communication_overlap);
+
+DECLARE_int64(dit_cache_probe_depth);
+
+DECLARE_double(dit_cache_tau);
+
+DECLARE_bool(dit_cache_use_prop_weight);
+
+DECLARE_double(dit_cache_prop_a);
+
+DECLARE_double(dit_cache_prop_alpha);
+
+DECLARE_double(dit_cache_prop_b);
+
+DECLARE_int64(dit_cache_proxy_error_type);
+
+DECLARE_string(dit_cache_rho_table_path);
+
+DECLARE_string(dit_cache_model_name);
+
+DECLARE_double(true_cfg_scale);
+
+DECLARE_int64(tp_size);
 
 DECLARE_int64(dit_generation_image_area_max);
 

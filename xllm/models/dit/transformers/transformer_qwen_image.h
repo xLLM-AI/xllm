@@ -2378,7 +2378,9 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
     // Step start: prepare inputs (hidden_states, original_hidden_states)
     TensorMap step_in_map = {
         {"hidden_states", new_hidden_states},
-        {"original_hidden_states", original_hidden_states}};
+        {"original_hidden_states", original_hidden_states},
+        {"encoder_hidden_states", new_encoder_hidden_states},
+        {"original_encoder_hidden_states", original_encoder_hidden_states}};
     CacheStepIn stepin_before(step_idx, step_in_map);
     use_step_cache =
         DiTCache::get_instance().on_before_step(stepin_before, use_cfg);
@@ -2422,7 +2424,10 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
     // Step end: update outputs (hidden_states, original_hidden_states)
     TensorMap step_after_map = {
         {"hidden_states", new_hidden_states},
-        {"original_hidden_states", original_hidden_states}};
+        {"original_hidden_states", original_hidden_states},
+        {"encoder_hidden_states", new_encoder_hidden_states},
+        {"original_encoder_hidden_states", original_encoder_hidden_states}};
+
     CacheStepIn stepin_after(step_idx, step_after_map);
     CacheStepOut stepout_after =
         DiTCache::get_instance().on_after_step(stepin_after, use_cfg);
