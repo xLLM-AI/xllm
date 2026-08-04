@@ -39,6 +39,7 @@ from xllm.python import kernels
 from xllm.python.attention.backend import AttentionBackend, AttentionMetadata
 from xllm.python.model_executor.forward_context import (
     AclGraphCaptureContext,
+    AclGraphExecutionState,
     AclGraphTask,
     ForwardContext,
     forward_context,
@@ -77,12 +78,20 @@ class _DecodeGraphEntry:
         "static_output",
         "static_input_ids",
         "static_positions",
+        "static_input_embedding",
         "static_metadata",
         "kv_seq_lens_delta",
-        "host_seq_lens",
-        "host_block_counts",
         "graph_tasks",
+        "execution_state",
     )
+
+
+_GraphKey = tuple[
+    int,
+    torch.dtype | None,
+    torch.device | None,
+    tuple[int, ...] | None,
+]
 
 
 class DecodeAclGraphRunner(BaseRunner):
@@ -99,7 +108,7 @@ class DecodeAclGraphRunner(BaseRunner):
         super().__init__(model, attention_backend, device)
         self.max_batch = max_batch
         self.max_model_len = max_model_len
-        self._graphs: dict[int, _DecodeGraphEntry] = {}
+        self._graphs: dict[_GraphKey, _DecodeGraphEntry] = {}
         self._paged_kv_indices_buffer: torch.Tensor | None = None
         self._max_blocks_per_sequence: int = 0
         self._stream: torch.npu.Stream | None = None
@@ -108,18 +117,35 @@ class DecodeAclGraphRunner(BaseRunner):
         self._warmed_up = False
 
     def can_execute(
-        self, input_ids: torch.Tensor, metadata: AttentionMetadata
+        self,
+        input_ids: torch.Tensor,
+        metadata: AttentionMetadata,
+        input_embedding: torch.Tensor | None = None,
     ) -> bool:
+        batch_size = input_ids.shape[0]
+        bucket_size = _decode_bucket(batch_size)
         return (
             not metadata.is_prefill
             and not metadata.is_chunked_prefill
-            and _decode_bucket(input_ids.shape[0]) <= self.max_batch
+            and bucket_size <= self.max_batch
         )
 
-    def warmup(self, device: torch.device, _dtype: torch.dtype) -> None:
+    def warmup(
+        self,
+        device: torch.device,
+        _dtype: torch.dtype,
+        input_embedding: torch.Tensor | None = None,
+    ) -> None:
         if self._warmed_up:
             return
         self._warmed_up = True
+
+        # MLA/SFA graph inputs include Lightning Indexer state and paged KV
+        # metadata.  Capturing these graphs with dummy warmup data would make
+        # the first real replay consume stale indexer/KV arguments.  Let the
+        # first real request lazily capture its bucket instead.
+        if getattr(self.attention_backend, "is_mla", False):
+            return
 
         buckets = [size for size in (1, 2, 4, 8) if size <= self.max_batch]
         buckets.extend(range(16, self.max_batch + 1, 16))
@@ -140,18 +166,27 @@ class DecodeAclGraphRunner(BaseRunner):
                 paged_kv_last_page_len=torch.ones(
                     batch_size, dtype=torch.int32, device=device
                 ),
-                kv_seq_lens_host=torch.arange(
-                    batch_size + 1, dtype=torch.int32, device="cpu"
-                ).mul_(2),
+                kv_seq_lens_host=torch.full(
+                    (batch_size,), 2, dtype=torch.int32, device="cpu"
+                ),
                 kv_cu_seq_lens=torch.arange(
                     batch_size + 1, dtype=torch.int32, device=device
                 ).mul_(2),
                 block_table=block_ids.unsqueeze(1),
             )
+            warmup_embedding = None
+            if input_embedding is not None:
+                warmup_embedding = torch.zeros(
+                    batch_size,
+                    input_embedding.shape[-1],
+                    dtype=input_embedding.dtype,
+                    device=device,
+                )
             self.execute(
                 torch.zeros(batch_size, dtype=torch.int32, device=device),
                 torch.zeros(batch_size, dtype=torch.int32, device=device),
                 metadata,
+                warmup_embedding,
             )
 
     def execute(
@@ -159,19 +194,21 @@ class DecodeAclGraphRunner(BaseRunner):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         metadata: AttentionMetadata,
+        input_embedding: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = input_ids.shape[0]
         padded_batch_size = _decode_bucket(batch_size)
         if padded_batch_size > self.max_batch:
             raise ValueError("decode batch exceeds ACL graph capacity")
 
-        entry = self._graphs.get(padded_batch_size)
+        graph_key = self._graph_key(padded_batch_size, input_embedding)
+        entry = self._graphs.get(graph_key)
         first_capture = entry is None
         if first_capture:
             entry = self._allocate_entry(
                 padded_batch_size, input_ids, positions, metadata
             )
-            self._graphs[padded_batch_size] = entry
+            self._graphs[graph_key] = entry
 
         if self._stream is None:
             self._stream = torch.npu.Stream(device=input_ids.device)
@@ -183,9 +220,21 @@ class DecodeAclGraphRunner(BaseRunner):
         assert self._update_stream is not None
         assert self._replay_done_event is not None
 
-        self._fill_entry(entry, input_ids, positions, metadata, batch_size)
+        self._fill_entry(
+            entry, input_ids, positions, metadata, batch_size, input_embedding
+        )
 
-        self.attention_backend.prepare(entry.static_metadata, graph_mode=True)
+        prepare_context = ForwardContext(
+            self.attention_backend,
+            self.device,
+            entry.static_metadata,
+            self.layer_caches,
+            execution_state=entry.execution_state,
+        )
+        with forward_context(prepare_context):
+            self.attention_backend.prepare(
+                entry.static_metadata, graph_mode=True
+            )
 
         if first_capture:
             self._capture(entry)
@@ -208,6 +257,21 @@ class DecodeAclGraphRunner(BaseRunner):
 
         torch.npu.current_stream().wait_stream(self._stream)
         return output
+
+    @staticmethod
+    def _graph_key(
+        padded_batch_size: int,
+        input_embedding: torch.Tensor | None,
+    ) -> _GraphKey:
+        """Return the capture shape key, including the MTP input path."""
+        if input_embedding is None:
+            return padded_batch_size, None, None, None
+        return (
+            padded_batch_size,
+            input_embedding.dtype,
+            input_embedding.device,
+            tuple(input_embedding.shape[1:]),
+        )
 
     def _allocate_entry(
         self,
@@ -241,12 +305,14 @@ class DecodeAclGraphRunner(BaseRunner):
         entry.graph = None
         entry.static_output = None
         entry.graph_tasks = []
+        entry.execution_state = AclGraphExecutionState({})
         entry.static_input_ids = torch.zeros(
             padded_batch_size, dtype=input_ids.dtype, device=device
         )
         entry.static_positions = torch.zeros(
             padded_batch_size, dtype=torch.int32, device=device
         )
+        entry.static_input_embedding = None
         entry.static_metadata = _StaticAttentionMetadata(
             slot_mapping=torch.zeros(
                 padded_batch_size,
@@ -276,19 +342,16 @@ class DecodeAclGraphRunner(BaseRunner):
                 padded_batch_size, dtype=torch.int32, device="cpu"
             ),
             kv_seq_lens_host=torch.zeros(
-                padded_batch_size + 1, dtype=torch.int32, device="cpu"
+                padded_batch_size, dtype=torch.int32, device="cpu"
             ),
             block_table=static_block_table,
         )
         entry.kv_seq_lens_delta = torch.empty(
             padded_batch_size, dtype=torch.int32, device=device
         )
-        entry.host_seq_lens = torch.empty(
-            padded_batch_size, dtype=torch.int32, device="cpu"
-        )
-        entry.host_block_counts = torch.empty(
-            padded_batch_size, dtype=torch.int32, device="cpu"
-        )
+        # The graph metadata update writes per-sequence KV lengths into this
+        # buffer.  MLA/SFA consumes the same stable buffer as its key lengths.
+        entry.static_metadata.kv_seq_lens = entry.kv_seq_lens_delta
         return entry
 
     def _fill_entry(
@@ -298,19 +361,26 @@ class DecodeAclGraphRunner(BaseRunner):
         positions: torch.Tensor,
         metadata: AttentionMetadata,
         batch_size: int,
+        input_embedding: torch.Tensor | None,
     ) -> None:
         padded_batch_size = entry.batch_size
         static_metadata = entry.static_metadata
-        if metadata.kv_cu_seq_lens is None:
+        if metadata.kv_seq_lens is None and metadata.kv_cu_seq_lens is None:
             raise RuntimeError(
-                "decode ACL graph requires device cumulative KV lengths"
+                "decode ACL graph requires device KV lengths"
             )
+        cumulative_kv_seq_lens = metadata.kv_cu_seq_lens
+        if cumulative_kv_seq_lens is None:
+            raise RuntimeError(
+                "decode ACL graph requires C++ cumulative KV lengths"
+            )
+        cumulative_kv_seq_lens = cumulative_kv_seq_lens.to(torch.int32)
         graph_positions = positions.to(torch.int32).contiguous()
         kernels.update_decode_graph_metadata(
             input_ids,
             graph_positions,
             metadata.slot_mapping,
-            metadata.kv_cu_seq_lens,
+            cumulative_kv_seq_lens,
             metadata.paged_kv_indptr,
             metadata.paged_kv_indices,
             metadata.paged_kv_last_page_len,
@@ -325,6 +395,31 @@ class DecodeAclGraphRunner(BaseRunner):
             padded_batch_size,
         )
         self._fill_host_metadata(entry, metadata, batch_size)
+
+        if input_embedding is not None:
+            if input_embedding.shape[0] != batch_size:
+                raise ValueError(
+                    "ACL graph input_embedding token count must match input_ids"
+                )
+            if entry.static_input_embedding is None:
+                entry.static_input_embedding = torch.zeros(
+                    entry.batch_size,
+                    input_embedding.shape[-1],
+                    dtype=input_embedding.dtype,
+                    device=input_embedding.device,
+                )
+            elif (
+                entry.static_input_embedding.shape[1:]
+                != input_embedding.shape[1:]
+            ):
+                raise ValueError(
+                    "ACL graph input_embedding shape changed for a graph bucket"
+                )
+            entry.static_input_embedding[:batch_size].copy_(input_embedding)
+            if entry.batch_size > batch_size:
+                entry.static_input_embedding[batch_size:].zero_()
+        elif entry.static_input_embedding is not None:
+            entry.static_input_embedding.zero_()
 
         if (
             metadata.block_table is not None
@@ -341,91 +436,31 @@ class DecodeAclGraphRunner(BaseRunner):
             if padded_batch_size > batch_size:
                 static_metadata.block_table[batch_size:].zero_()
 
+        # Padded lanes must remain valid inputs for sparse MLA tiling.  Their
+        # token and slot mapping are dummy values, so one KV token is safe.
+        if padded_batch_size > batch_size:
+            entry.kv_seq_lens_delta[batch_size:].fill_(1)
+
     def _fill_host_metadata(
         self,
         entry: _DecodeGraphEntry,
         metadata: AttentionMetadata,
         batch_size: int,
     ) -> None:
-        cumulative_seq_lens = metadata.kv_seq_lens_host
-        if cumulative_seq_lens is None:
+        kv_seq_lens = metadata.kv_seq_lens_host
+        if kv_seq_lens is None:
             raise RuntimeError("decode ACL graph requires host KV lengths")
-        cumulative_seq_lens = cumulative_seq_lens.cpu()
-        if cumulative_seq_lens.numel() == batch_size:
-            cum = torch.zeros(
-                batch_size + 1,
-                dtype=cumulative_seq_lens.dtype,
-                device=cumulative_seq_lens.device,
-            )
-            cum[1:] = torch.cumsum(cumulative_seq_lens, dim=0)
-            cumulative_seq_lens = cum
-        if cumulative_seq_lens.numel() != batch_size + 1:
+        kv_seq_lens = kv_seq_lens.cpu()
+        if kv_seq_lens.numel() != batch_size:
             raise RuntimeError(
-                "decode ACL graph requires cumulative host KV lengths"
+                "decode ACL graph requires per-sequence host KV lengths"
             )
 
         padded_batch_size = entry.batch_size
         static_metadata = entry.static_metadata
-        torch.sub(
-            cumulative_seq_lens[1:],
-            cumulative_seq_lens[:-1],
-            out=entry.host_seq_lens[:batch_size],
-        )
+        static_metadata.kv_seq_lens_host[:batch_size].copy_(kv_seq_lens)
         if padded_batch_size > batch_size:
-            entry.host_seq_lens[batch_size:padded_batch_size].fill_(1)
-        torch.cumsum(
-            entry.host_seq_lens,
-            dim=0,
-            out=static_metadata.kv_seq_lens_host[1:],
-        )
-
-        page_size = self.attention_backend.page_size
-        if page_size == 1:
-            static_metadata.paged_kv_indptr_host[: batch_size + 1].copy_(
-                cumulative_seq_lens
-            )
-            static_metadata.paged_kv_last_page_len_host.fill_(1)
-        else:
-            torch.add(
-                entry.host_seq_lens,
-                page_size - 1,
-                out=entry.host_block_counts,
-            )
-            torch.div(
-                entry.host_block_counts,
-                page_size,
-                rounding_mode="floor",
-                out=entry.host_block_counts,
-            )
-            torch.cumsum(
-                entry.host_block_counts,
-                dim=0,
-                out=static_metadata.paged_kv_indptr_host[1:],
-            )
-            torch.sub(
-                entry.host_seq_lens,
-                1,
-                out=static_metadata.paged_kv_last_page_len_host,
-            )
-            torch.remainder(
-                static_metadata.paged_kv_last_page_len_host,
-                page_size,
-                out=static_metadata.paged_kv_last_page_len_host,
-            )
-            torch.add(
-                static_metadata.paged_kv_last_page_len_host,
-                1,
-                out=static_metadata.paged_kv_last_page_len_host,
-            )
-            if padded_batch_size > batch_size:
-                static_metadata.paged_kv_last_page_len_host[
-                    batch_size:padded_batch_size
-                ].fill_(1)
-
-        if page_size == 1 and padded_batch_size > batch_size:
-            static_metadata.paged_kv_indptr_host[
-                batch_size + 1 : padded_batch_size + 1
-            ].fill_(int(cumulative_seq_lens[-1]))
+            static_metadata.kv_seq_lens_host[batch_size:].fill_(1)
 
     def _capture(self, entry: _DecodeGraphEntry) -> None:
         context = ForwardContext(
@@ -433,10 +468,11 @@ class DecodeAclGraphRunner(BaseRunner):
             self.device,
             entry.static_metadata,
             self.layer_caches,
+            execution_state=entry.execution_state,
         )
         with forward_context(context):
             for _ in range(_CAPTURE_WARMUP_STEPS):
-                self.model(entry.static_input_ids, entry.static_positions)
+                self._forward_static(entry)
         torch.npu.synchronize()
         entry.graph = torch.npu.NPUGraph()
         capture_context = AclGraphCaptureContext(self._stream, [])
@@ -446,13 +482,21 @@ class DecodeAclGraphRunner(BaseRunner):
             entry.static_metadata,
             self.layer_caches,
             acl_graph=capture_context,
+            execution_state=entry.execution_state,
         )
         with forward_context(context):
             with torch.npu.graph(entry.graph, stream=self._stream):
-                entry.static_output = self.model(
-                    entry.static_input_ids, entry.static_positions
-                )
+                entry.static_output = self._forward_static(entry)
         entry.graph_tasks = capture_context.tasks
+
+    def _forward_static(self, entry: _DecodeGraphEntry) -> torch.Tensor:
+        if entry.static_input_embedding is None:
+            return self.model(entry.static_input_ids, entry.static_positions)
+        return self.model(
+            entry.static_input_ids,
+            entry.static_positions,
+            entry.static_input_embedding,
+        )
 
     @staticmethod
     def _update_graph_tasks(

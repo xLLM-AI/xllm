@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, Sequence
+from typing import TYPE_CHECKING, Callable, Protocol, Sequence
 
 import torch
 
@@ -100,6 +100,7 @@ class MlaIndexContext:
     block_table: torch.Tensor | None
     actual_seq_q: torch.Tensor
     actual_seq_kv: torch.Tensor
+    update_index_cache: Callable[[torch.Tensor], None]
 
 
 class AttentionBackend(ABC):

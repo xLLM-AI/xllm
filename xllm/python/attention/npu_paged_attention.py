@@ -34,6 +34,7 @@ from xllm.python.attention.backend import (
 )
 from xllm.python.model_executor.forward_context import (
     AclGraphTask,
+    get_execution_buffer,
     get_forward_context,
 )
 
@@ -71,6 +72,10 @@ class NpuPagedAttentionBackend(AttentionBackend):
         self.sliding_window = sliding_window
         self.dtype = dtype
         self.device = device
+        # DeepSeek-V3.2 MLA uses a 512-wide latent cache and the sparse MLA
+        # operators.  Ascend FIA graph tiling does not support that head
+        # dimension, so it must not be initialized for this backend instance.
+        self._is_mla = head_dim > 192 and num_kv_heads == 1
 
         self._kv_caches: list[LayerCache] = []
         self._metadata: AttentionMetadata | None = None
@@ -101,6 +106,10 @@ class NpuPagedAttentionBackend(AttentionBackend):
             return 1
         key_cache = self._kv_caches[0].key
         return key_cache.shape[1] if key_cache is not None else 1
+
+    @property
+    def is_mla(self) -> bool:
+        return self._is_mla
 
     def bind_kv_caches(self, kv_caches: list[LayerCache]) -> None:
         self._kv_caches = kv_caches
@@ -141,7 +150,11 @@ class NpuPagedAttentionBackend(AttentionBackend):
         else:
             self._block_table_i32 = None
 
-        if graph_mode and self._block_table_i32 is not None:
+        if (
+            graph_mode
+            and self._block_table_i32 is not None
+            and not self._is_mla
+        ):
             graph_batch_size = self._block_table_i32.shape[0]
             if self._graph_workspace is None:
                 block_size = self.page_size
@@ -190,16 +203,31 @@ class NpuPagedAttentionBackend(AttentionBackend):
         if metadata.kv_seq_lens is not None:
             kv_seq_lens = metadata.kv_seq_lens
             mla_device = kv_seq_lens.device
-            self._mla_actual_seq_kv = kv_seq_lens.to(torch.int32).to(mla_device)
+            actual_seq_kv = kv_seq_lens.to(torch.int32).to(mla_device)
             if metadata.q_cu_seq_lens is not None:
-                self._mla_actual_seq_q = metadata.q_cu_seq_lens[1:].to(
+                actual_seq_q = metadata.q_cu_seq_lens[1:].to(
                     torch.int32
                 ).to(mla_device)
             else:
                 batch = kv_seq_lens.size(0)
-                self._mla_actual_seq_q = torch.arange(
+                actual_seq_q = torch.arange(
                     1, batch + 1, dtype=torch.int32, device=mla_device
                 )
+            if graph_mode:
+                graph_batch = int(actual_seq_kv.numel())
+                self._mla_actual_seq_q = get_execution_buffer(
+                    ("MLA_ACTUAL_SEQ_Q", graph_batch),
+                    lambda: torch.empty_like(actual_seq_q),
+                )
+                self._mla_actual_seq_kv = get_execution_buffer(
+                    ("MLA_ACTUAL_SEQ_KV", graph_batch),
+                    lambda: torch.empty_like(actual_seq_kv),
+                )
+                self._mla_actual_seq_q.copy_(actual_seq_q)
+                self._mla_actual_seq_kv.copy_(actual_seq_kv)
+            else:
+                self._mla_actual_seq_q = actual_seq_q
+                self._mla_actual_seq_kv = actual_seq_kv
         else:
             self._mla_actual_seq_q = None
             self._mla_actual_seq_kv = None
@@ -264,7 +292,13 @@ class NpuPagedAttentionBackend(AttentionBackend):
             metadata.slot_mapping, k_latent_3d, k_pe_3d, nope_cache, rope_cache
         )
         return self._mla_sparse(
-            q_latent, q_pe, nope_cache, rope_cache, topk, metadata.block_table
+            q_latent,
+            q_pe,
+            nope_cache,
+            rope_cache,
+            topk,
+            metadata.block_table,
+            layer_id,
         )
 
     def mla_index_context(self, layer: "Attention") -> MlaIndexContext:
@@ -281,6 +315,22 @@ class NpuPagedAttentionBackend(AttentionBackend):
             block_table=metadata.block_table,
             actual_seq_q=self._mla_actual_seq_q,
             actual_seq_kv=self._mla_actual_seq_kv,
+            update_index_cache=lambda values: self._update_mla_index_cache(
+                index_cache, metadata.slot_mapping, values
+            ),
+        )
+
+    @staticmethod
+    def _update_mla_index_cache(
+        index_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        values: torch.Tensor,
+    ) -> None:
+        cache_view = index_cache.view(-1, index_cache.size(-1))
+        kernels.scatter_nd_update(
+            cache_view,
+            slot_mapping.reshape(-1, 1).clamp_min(0),
+            values,
         )
 
     def _mla_sparse(
@@ -291,16 +341,20 @@ class NpuPagedAttentionBackend(AttentionBackend):
         rope_cache: torch.Tensor,
         topk: torch.Tensor,
         block_table: torch.Tensor,
+        layer_id: int,
     ) -> torch.Tensor:
-        out = torch.ops.xllm_ops.sparse_flash_attention(
+        out = get_execution_buffer(
+            ("SFA_OUTPUT", layer_id) + tuple(q_latent.shape),
+            lambda: torch.empty_like(q_latent),
+        )
+        return kernels.sparse_flash_attention_out(
             q_latent, nope_cache, nope_cache, topk,
             block_table,
             self._mla_actual_seq_q,
             self._mla_actual_seq_kv,
             q_pe, rope_cache, self.scale, 1,
-            "TND", "PA_BSND", 3,
-        )
-        return out  # [T, H, kv_lora]
+            "TND", "PA_BSND", 3, out,
+        )  # [T, H, kv_lora]
 
     # ------------------------------------------------------------------
     # Prefill: packed TND with causal mask

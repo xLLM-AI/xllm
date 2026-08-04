@@ -123,7 +123,12 @@ class DecodeCudaGraphRunner(BaseRunner):
             and graph_key in self._graphs
         )
 
-    def warmup(self, device: torch.device, _dtype: torch.dtype) -> None:
+    def warmup(
+        self,
+        device: torch.device,
+        _dtype: torch.dtype,
+        _input_embedding: torch.Tensor | None = None,
+    ) -> None:
         if self._warmed_up:
             return
 

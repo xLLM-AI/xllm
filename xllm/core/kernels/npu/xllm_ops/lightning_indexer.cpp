@@ -110,4 +110,53 @@ torch::Tensor lightning_indexer(
   return sparse_indices_out;
 }
 
+torch::Tensor lightning_indexer_out(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& weights,
+    const c10::optional<torch::Tensor>& query_seq_lengths,
+    const c10::optional<torch::Tensor>& key_seq_lengths,
+    const c10::optional<torch::Tensor>& block_table,
+    c10::string_view layout_query,
+    c10::string_view layout_key,
+    int64_t selected_count,
+    int64_t sparse_mode,
+    int64_t pre_tokens,
+    int64_t next_tokens,
+    bool return_value,
+    torch::Tensor& sparse_indices_out,
+    torch::Tensor& sparse_values_out) {
+  CHECK(sparse_indices_out.is_contiguous())
+      << "sparse_indices_out must be contiguous";
+  CHECK(sparse_values_out.is_contiguous())
+      << "sparse_values_out must be contiguous";
+  CHECK(sparse_indices_out.scalar_type() == torch::kInt)
+      << "sparse_indices_out must be int32";
+  CHECK(sparse_values_out.scalar_type() == torch::kBFloat16)
+      << "sparse_values_out must be bfloat16";
+
+  std::string query_layout_str = std::string(layout_query);
+  std::string key_layout_str = std::string(layout_key);
+  char* query_layout_ptr = const_cast<char*>(query_layout_str.c_str());
+  char* key_layout_ptr = const_cast<char*>(key_layout_str.c_str());
+
+  EXEC_NPU_CMD(aclnnLightningIndexer,
+               query,
+               key,
+               weights,
+               query_seq_lengths,
+               key_seq_lengths,
+               block_table,
+               query_layout_ptr,
+               key_layout_ptr,
+               selected_count,
+               sparse_mode,
+               pre_tokens,
+               next_tokens,
+               return_value,
+               sparse_indices_out,
+               sparse_values_out);
+  return sparse_indices_out;
+}
+
 }  // namespace xllm::kernel::npu
