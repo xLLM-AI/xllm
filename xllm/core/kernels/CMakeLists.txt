@@ -39,7 +39,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:npu_kernels>
     $<$<BOOL:${USE_NPU}>:xllm_ops>
     $<$<BOOL:${USE_MLU}>:mlu_kernels>
-    $<$<BOOL:${USE_CUDA}>:cuda_kernels>
+    $<$<OR:$<BOOL:${USE_CUDA}>,$<BOOL:${USE_MUSA}>>:cuda_kernels>
     $<$<BOOL:${USE_ILU}>:ilu_kernels>
     $<$<BOOL:${USE_DCU}>:dcu_kernels>
 )

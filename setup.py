@@ -376,7 +376,6 @@ class ExtBuild(build_ext):
                 torch_cuda_architectures = "9.0"
             cmake_args += [
                 "-DUSE_MUSA=ON",
-                "-DUSE_CUDA=ON",
                 f"-DTORCH_CUDA_ARCH_LIST={torch_cuda_architectures}",
                 "-DCMAKE_CUDA_ARCHITECTURES=90",
                 "-DBUILD_TESTING=OFF",

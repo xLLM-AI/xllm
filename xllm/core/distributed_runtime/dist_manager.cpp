@@ -24,7 +24,8 @@ limitations under the License.
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/parallel_state/process_group.h"
-#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
+#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_MLU) || \
+    defined(USE_DCU)
 #include "platform/numa_utils.h"
 #endif
 #include "remote_worker.h"
@@ -89,7 +90,8 @@ std::unique_ptr<CommChannel> create_channel(const std::string& worker_addrs,
   return channel;
 }
 
-#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
+#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_MLU) || \
+    defined(USE_DCU)
 void setup_numa_affinity_and_isolation(
     const runtime::Options& options,
     std::vector<int32_t>& device_numa_nodes,
@@ -147,7 +149,8 @@ void DistManager::setup_multi_node_workers(
     const std::string& master_node_addr) {
   const auto& devices = options.devices();
 
-#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
+#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_MLU) || \
+    defined(USE_DCU)
   std::vector<int32_t> device_numa_nodes;
   std::vector<bool> force_spawn_for_numa_isolation;
   setup_numa_affinity_and_isolation(
@@ -248,7 +251,8 @@ void DistManager::setup_multi_node_workers(
 
     // we use spawn process worker to launch a xllm instance
     // when start a offline inference task with multi-gpu/npu/mpu/...
-#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
+#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_MLU) || \
+    defined(USE_DCU)
     bool use_spawn_worker = (options.enable_offline_inference() && i > 0) ||
                             force_spawn_for_numa_isolation[i];
     if (force_spawn_for_numa_isolation[i]) {

@@ -268,11 +268,10 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-format-truncation")
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/cmake)
 set(_XLLM_MUSIFY_COPTS "")
-if(USE_MUSA)
-  if(NOT USE_CUDA)
-    message(FATAL_ERROR "USE_MUSA requires USE_CUDA=ON")
-  endif()
 
+if(USE_MUSA)
+  # MUSA uses CUDA language with mcc_wrapper + musamapping plugin.
+  # mcc_wrapper must be set before project().
   if(DEFINED ENV{MUSAMAPPING_PATH} AND NOT "$ENV{MUSAMAPPING_PATH}" STREQUAL "")
     set(_XLLM_MUSAMAPPING_PATH "$ENV{MUSAMAPPING_PATH}")
   elseif(DEFINED ENV{MUSA_HOME} AND NOT "$ENV{MUSA_HOME}" STREQUAL "")
@@ -549,7 +548,6 @@ endif()
 
 if(USE_MUSA)
   add_definitions(-DUSE_MUSA)
-  add_definitions(-DUSE_CUDA)
   add_compile_definitions(TORCH_CUDA=1)
   if(NOT DEFINED MUSA_PATH)
     if(DEFINED ENV{MUSA_HOME} AND NOT "$ENV{MUSA_HOME}" STREQUAL "")

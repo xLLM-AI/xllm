@@ -44,7 +44,8 @@ limitations under the License.
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/platform/platform.h"
-#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
+#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_MLU) || \
+    defined(USE_DCU)
 #include "core/platform/numa_utils.h"
 #endif
 #include "framework/kv_cache/kv_cache.h"
@@ -106,7 +107,8 @@ void WorkerServer::create_server(const runtime::Options& options,
   prepare_shm(
       startup_parallel_args, options, input_shm_manager, output_shm_manager);
 
-#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
+#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_MLU) || \
+    defined(USE_DCU)
   // Bind worker thread to the same NUMA node as the device
   // This prevents the thread from spanning across NUMA nodes, which would
   // significantly degrade memory access and other performance aspects

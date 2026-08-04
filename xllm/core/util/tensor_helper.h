@@ -84,17 +84,14 @@ inline torch::Tensor load_tensor(std::string filename) {
   return my_tensor;
 }
 
-inline void print_tensor(
-    const torch::Tensor& tensor,
-    const std::string& tensor_name = "tensor",
-    int num = 10,
-    bool part = true,
-    bool print_value = true,
-    const std::source_location& loc = std::source_location::current()) {
-  auto& log_stream =
-      google::LogMessage(
-          loc.file_name(), static_cast<int>(loc.line()), google::GLOG_INFO)
-          .stream();
+inline void print_tensor(const torch::Tensor& tensor,
+                         const std::string& tensor_name = "tensor",
+                         int num = 10,
+                         bool part = true,
+                         bool print_value = true,
+                         const char* file = __builtin_FILE(),
+                         int line = __builtin_LINE()) {
+  auto& log_stream = google::LogMessage(file, line, google::GLOG_INFO).stream();
   if (!tensor.defined()) {
     log_stream << tensor_name << ", Undefined tensor." << std::endl;
     return;
@@ -379,7 +376,8 @@ inline torch::Tensor get_tensor_from_blob(const std::vector<int64_t>& dims,
 
   tensor.set_(storage, 0, dims);
   return tensor;
-#elif defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
+#elif defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_MLU) || \
+    defined(USE_DCU)
   auto options = torch::TensorOptions()
                      .dtype(dtype)
 #if defined(USE_CUDA) || defined(USE_DCU)
@@ -391,7 +389,8 @@ inline torch::Tensor get_tensor_from_blob(const std::vector<int64_t>& dims,
                          /*requires_grad=*/false);
   return torch::from_blob(const_cast<void*>(dev_addr), dims, options);
 #else
-  LOG(FATAL) << "get_tensor_from_blob only supports NPU, CUDA and MLU devices";
+  LOG(FATAL)
+      << "get_tensor_from_blob only supports NPU, CUDA, MUSA, MLU and DCU";
 #endif
 }
 
@@ -399,7 +398,8 @@ inline torch::Tensor get_tensor_from_blob(const std::vector<int64_t>& dims,
                                           const torch::ScalarType dtype,
                                           const void* dev_addr,
                                           const torch::Tensor& owner) {
-#if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)
+#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_MLU) || \
+    defined(USE_DCU)
   CHECK(owner.defined())
       << "get_tensor_from_blob requires a valid owner tensor";
 
