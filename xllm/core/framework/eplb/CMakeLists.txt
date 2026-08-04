@@ -12,7 +12,9 @@ cc_library(
   HDRS
     eplb_aggregator.h
     eplb_executor.h
+    eplb_info.h
     eplb_manager.h
+    eplb_options.h
     eplb_policy.h
     eplb_utils.h
     expert_weight_buffer_shm.h
@@ -21,6 +23,7 @@ cc_library(
     eplb_aggregator.cpp
     eplb_executor.cpp
     eplb_manager.cpp
+    eplb_options.cpp
     eplb_policy.cpp
     expert_weight_buffer_shm.cpp
     expert_buffer_manager.cpp

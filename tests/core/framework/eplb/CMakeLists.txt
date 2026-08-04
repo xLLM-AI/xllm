@@ -2,6 +2,17 @@ include(cc_test)
 
 cc_test(
   NAME
+    eplb_options_test
+  SRCS
+    eplb_options_test.cpp
+  DEPS
+    :eplb
+    GTest::gtest_main
+)
+target_link_libraries(eplb_options_test PRIVATE $<$<BOOL:${USE_NPU}>:c_sec>)
+
+cc_test(
+  NAME
     eplb_policy_test
   SRCS
     eplb_policy_test.cpp
