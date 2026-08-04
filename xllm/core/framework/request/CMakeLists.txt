@@ -45,9 +45,9 @@ cc_library(
     priority_comparator.cpp
   DEPS
     :kv_cache
+    :block
     :prefix_cache
     :encoder_cache
-    :block
     :tokenizer
     :chat_template
     :multimodal

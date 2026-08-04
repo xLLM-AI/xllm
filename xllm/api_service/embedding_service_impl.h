@@ -16,6 +16,9 @@ limitations under the License.
 #pragma once
 #include <absl/container/flat_hash_set.h>
 
+#include <atomic>
+#include <vector>
+
 #include "api_service/api_service_impl.h"
 #include "api_service/call.h"
 #include "api_service/non_stream_call.h"
@@ -27,6 +30,34 @@ namespace xllm {
 using EmbeddingCall =
     NonStreamCall<proto::EmbeddingRequest, proto::EmbeddingResponse>;
 
+class BatchEmbeddingContext final {
+ public:
+  BatchEmbeddingContext(std::shared_ptr<EmbeddingCall> call,
+                        std::string model,
+                        std::string request_id,
+                        int64_t created_time,
+                        size_t num_requests)
+      : call_(std::move(call)),
+        model_(std::move(model)),
+        request_id_(std::move(request_id)),
+        created_time_(created_time),
+        pending_count_(num_requests) {
+    req_outputs_.resize(num_requests);
+  }
+
+  void on_complete(size_t index, RequestOutput output);
+
+ private:
+  void finalize();
+
+  std::shared_ptr<EmbeddingCall> call_;
+  std::string model_;
+  std::string request_id_;
+  int64_t created_time_;
+  std::vector<RequestOutput> req_outputs_;
+  std::atomic<size_t> pending_count_;
+};
+
 // a class to handle completion requests
 class EmbeddingServiceImpl final : public APIServiceImpl<EmbeddingCall> {
  public:
@@ -35,6 +66,9 @@ class EmbeddingServiceImpl final : public APIServiceImpl<EmbeddingCall> {
 
   // brpc call_data needs to use shared_ptr
   void process_async_impl(std::shared_ptr<EmbeddingCall> call);
+
+  void process_batch_async(std::shared_ptr<EmbeddingCall> call,
+                           std::vector<std::string> inputs);
 
  private:
   DISALLOW_COPY_AND_ASSIGN(EmbeddingServiceImpl);
