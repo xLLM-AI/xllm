@@ -214,6 +214,42 @@ def _lightning_indexer_fake(
     return query.new_zeros(out_shape, dtype=torch.int32)
 
 
+def _lightning_indexer_out_fake(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    weights: torch.Tensor,
+    query_seq_lengths: torch.Tensor | None,
+    key_seq_lengths: torch.Tensor | None,
+    block_table: torch.Tensor | None,
+    layout_query: str,
+    layout_key: str,
+    selected_count: int,
+    sparse_mode: int,
+    pre_tokens: int,
+    next_tokens: int,
+    return_value: bool,
+    sparse_indices_out: torch.Tensor,
+    sparse_values_out: torch.Tensor,
+) -> torch.Tensor:
+    del (
+        query,
+        key,
+        weights,
+        query_seq_lengths,
+        key_seq_lengths,
+        block_table,
+        layout_query,
+        layout_key,
+        selected_count,
+        sparse_mode,
+        pre_tokens,
+        next_tokens,
+        return_value,
+        sparse_values_out,
+    )
+    return sparse_indices_out
+
+
 def _scatter_nd_update_fake(
     var: torch.Tensor,
     indices: torch.Tensor,
@@ -256,6 +292,42 @@ def _sparse_flash_attention_fake(
     return query.new_empty(query.shape, dtype=query.dtype)
 
 
+def _sparse_flash_attention_out_fake(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    sparse_indices: torch.Tensor,
+    block_table: torch.Tensor | None,
+    actual_seq_lengths_query: torch.Tensor | None,
+    actual_seq_lengths_kv: torch.Tensor | None,
+    query_rope: torch.Tensor | None,
+    key_rope: torch.Tensor | None,
+    scale_value: float,
+    sparse_block_size: int,
+    layout_query: str,
+    layout_kv: str,
+    sparse_mode: int,
+    output: torch.Tensor,
+) -> torch.Tensor:
+    del (
+        query,
+        key,
+        value,
+        sparse_indices,
+        block_table,
+        actual_seq_lengths_query,
+        actual_seq_lengths_kv,
+        query_rope,
+        key_rope,
+        scale_value,
+        sparse_block_size,
+        layout_query,
+        layout_kv,
+        sparse_mode,
+    )
+    return output
+
+
 register_fake("xllm_ops::rms_norm", _rms_norm_fake)
 register_fake("xllm_ops::fused_add_rms_norm", _fused_add_rms_norm_fake)
 register_fake("xllm_ops::silu_and_mul", _silu_and_mul_fake)
@@ -267,5 +339,9 @@ register_fake("xllm_ops::quant_matmul", _quant_matmul_fake)
 register_fake("xllm_ops::quantize_per_tensor", _quantize_per_tensor_fake)
 register_fake("xllm_ops::dynamic_quant", _dynamic_quant_fake)
 register_fake("xllm_ops::lightning_indexer", _lightning_indexer_fake)
+register_fake("xllm_ops::lightning_indexer_out", _lightning_indexer_out_fake)
 register_fake("xllm_ops::scatter_nd_update", _scatter_nd_update_fake)
 register_fake("xllm_ops::sparse_flash_attention", _sparse_flash_attention_fake)
+register_fake(
+    "xllm_ops::sparse_flash_attention_out", _sparse_flash_attention_out_fake
+)

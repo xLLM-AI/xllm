@@ -36,7 +36,10 @@ from xllm.python.layers import (
     RotaryEmbedding,
     RowParallelLinear,
 )
-from xllm.python.model_executor.forward_context import get_forward_context
+from xllm.python.model_executor.forward_context import (
+    get_execution_buffer,
+    get_forward_context,
+)
 from xllm.python.models.base import PyModelBase
 
 
@@ -706,16 +709,29 @@ class DeepseekV3Indexer(nn.Module):
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = torch.cat([k_pe, k_nope], dim=-1)
         if ctx.index_cache is not None and ctx.slot_mapping is not None:
-            k_view = ctx.index_cache.view(-1, ctx.index_cache.size(-1))
-            kernels.scatter_nd_update(
-                k_view, ctx.slot_mapping.reshape(-1, 1).clamp_min(0), k
-            )
-        topk = kernels.lightning_indexer(
+            ctx.update_index_cache(k)
+
+        key_head_num = ctx.index_cache.size(2) if ctx.index_cache.dim() >= 3 else 1
+        output_shape = (q.size(0), key_head_num, self.topk)
+        buffer_key = tuple(output_shape)
+        topk_buffer = get_execution_buffer(
+            ("LIGHTNING_INDEXER_INDICES",) + buffer_key,
+            lambda: torch.empty(
+                output_shape, dtype=torch.int32, device=q.device
+            ),
+        )
+        values_buffer = get_execution_buffer(
+            ("LIGHTNING_INDEXER_VALUES",) + buffer_key,
+            lambda: torch.empty(
+                output_shape, dtype=q.dtype, device=q.device
+            ),
+        )
+        topk = kernels.lightning_indexer_out(
             q, ctx.index_cache, weights,
             ctx.actual_seq_q, ctx.actual_seq_kv, ctx.block_table,
             "TND", "PA_BSND", self.topk, 3,
             9223372036854775807, 9223372036854775807,
-            False,
+            False, topk_buffer, values_buffer,
         )
         return topk
 

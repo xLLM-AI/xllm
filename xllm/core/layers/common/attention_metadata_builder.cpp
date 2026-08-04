@@ -54,6 +54,18 @@ AttentionMetadata build_attention_metadata(
   AttentionMetadata attn_metadata;
   attn_metadata.q_cu_seq_lens = params.attention.device.q_seq_lens;
   attn_metadata.kv_cu_seq_lens = params.attention.device.kv_seq_lens;
+#if defined(USE_NPU)
+  // BatchInputBuilder supplies per-sequence KV lengths on NPU.  Expose the
+  // cumulative form separately so Python graph execution can consume the
+  // scheduler-owned tensor without rebuilding it in the model path.
+  if (attn_metadata.kv_cu_seq_lens.defined() &&
+      attn_metadata.kv_cu_seq_lens.numel() == params.meta.num_sequences) {
+    torch::Tensor kv_seq_lens = attn_metadata.kv_cu_seq_lens.to(torch::kInt32);
+    torch::Tensor kv_cumsum = torch::cumsum(kv_seq_lens, /*dim=*/0);
+    attn_metadata.kv_cu_seq_lens = torch::cat(
+        {torch::zeros({1}, kv_seq_lens.options()), kv_cumsum}, /*dim=*/0);
+  }
+#endif
   attn_metadata.max_query_len = params.meta.q_max_seq_len;
   attn_metadata.max_seq_len = params.meta.kv_max_seq_len;
   if (!params.attention.host.kv_seq_lens.empty()) {
