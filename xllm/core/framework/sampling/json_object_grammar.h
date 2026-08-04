@@ -117,6 +117,7 @@ class JsonObjectGrammarState final {
   bool has_complete_number() const;
   // Copy matcher fields for trial accepts without cloning committed_token_ids_.
   void copy_trial_state_from(const JsonObjectGrammarState& other);
+  std::string transition_cache_key() const;
 
   const JsonObjectGrammar* grammar_ = nullptr;
   std::vector<ContainerFrame> containers_;
@@ -188,18 +189,25 @@ class JsonObjectGrammar final {
 
  private:
   friend class JsonObjectGrammarState;
+  friend torch::Tensor build_json_object_filter_mask(
+      const std::vector<JsonObjectGrammarState>& states,
+      const torch::Device& device,
+      torch::ScalarType dtype);
 
-  struct CachedMask {
+  struct CachedMask final {
     std::vector<uint32_t> bitmask;
     torch::Tensor float_mask_cpu;
   };
 
-  torch::Tensor materialize_reasoning_filter_mask(
-      const torch::Device& device,
-      torch::ScalarType dtype) const;
+  struct FilterMaskCache final {
+    std::mutex mutex;
+    std::unordered_map<std::string, std::shared_ptr<const CachedMask>> entries;
+  };
+
+  torch::Tensor get_cpu_filter_mask(const JsonObjectGrammarState& state) const;
   std::vector<uint32_t> compute_allowed_bitmask(
       const JsonObjectGrammarState& state) const;
-  const CachedMask& cached_mask_for_state(
+  std::shared_ptr<const CachedMask> cached_mask_for_state(
       const JsonObjectGrammarState& state) const;
   static torch::Tensor float_mask_from_bitmask(
       const std::vector<uint32_t>& bitmask,
@@ -211,9 +219,9 @@ class JsonObjectGrammar final {
   // Precomputed additive mask for reasoning: allow all tokens except stops.
   torch::Tensor reasoning_filter_mask_cpu_;
   std::vector<uint32_t> reasoning_bitmask_;
+  std::shared_ptr<const CachedMask> reasoning_cached_mask_;
 
-  mutable std::mutex mask_cache_mutex_;
-  mutable std::unordered_map<uint64_t, CachedMask> mask_cache_;
+  std::shared_ptr<FilterMaskCache> filter_mask_cache_;
 };
 
 torch::Tensor build_json_object_filter_mask(

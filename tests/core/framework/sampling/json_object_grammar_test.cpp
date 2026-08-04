@@ -18,9 +18,11 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
+#include "core/common/metrics.h"
 #include "core/framework/tokenizer/tokenizer.h"
 
 namespace xllm {
@@ -365,6 +367,103 @@ TEST(JsonObjectGrammarTest, BuildsMaskWithMixedReasoningDefinitions) {
   EXPECT_EQ(mask.index({2, 1}).item<float>(), 0.0F);
   EXPECT_EQ(mask.index({3, 2}).item<float>(), 0.0F);
   EXPECT_LT(mask.index({4, 2}).item<float>(), -1.0F);
+
+  const torch::Tensor bitmask = build_json_object_filter_bitmask(states);
+  ASSERT_EQ(bitmask.sizes(), torch::IntArrayRef({5, 1}));
+  torch::Tensor masked_logits = torch::zeros({5, 5});
+  apply_token_bitmask_inplace(masked_logits, bitmask);
+  EXPECT_TRUE(torch::equal(masked_logits, mask));
+}
+
+TEST(JsonObjectGrammarTest, ReusesMaskForTransitionEquivalentStates) {
+  JsonObjectGrammar grammar = make_grammar();
+  JsonObjectGrammarState first = grammar.initial_state();
+  JsonObjectGrammarState second = grammar.initial_state();
+  ASSERT_TRUE(first.accept_token(/*open_object=*/0));
+  ASSERT_TRUE(first.accept_token(/*quote=*/2));
+  ASSERT_TRUE(first.accept_token(/*key_a=*/3));
+  ASSERT_TRUE(second.accept_token(/*open_object=*/0));
+  ASSERT_TRUE(second.accept_token(/*quote=*/2));
+  ASSERT_TRUE(second.accept_token(/*key_b=*/4));
+  ASSERT_NE(first.snapshot().token_ids, second.snapshot().token_ids);
+
+  const double hits_before =
+      COUNTER_json_object_mask_cache_hits_total.get_value();
+  const torch::Tensor first_mask = grammar.build_filter_mask(first);
+  const torch::Tensor second_mask = grammar.build_filter_mask(second);
+
+  EXPECT_TRUE(torch::equal(first_mask, second_mask));
+  EXPECT_GT(COUNTER_json_object_mask_cache_hits_total.get_value(), hits_before);
+}
+
+TEST(JsonObjectGrammarTest, ReusesMaskAfterDifferentCompletedLiterals) {
+  JsonObjectGrammar grammar({"{", "}", "true", "false", "stop"},
+                            /*stop_token_ids=*/{4});
+  JsonObjectGrammarState true_value = grammar.initial_state();
+  JsonObjectGrammarState false_value = grammar.initial_state();
+  ASSERT_TRUE(true_value.accept_piece("{\"a\":true}"));
+  ASSERT_TRUE(false_value.accept_piece("{\"a\":false}"));
+
+  const double hits_before =
+      COUNTER_json_object_mask_cache_hits_total.get_value();
+  const torch::Tensor true_mask = grammar.build_filter_mask(true_value);
+  const torch::Tensor false_mask = grammar.build_filter_mask(false_value);
+
+  EXPECT_TRUE(torch::equal(true_mask, false_mask));
+  EXPECT_GT(COUNTER_json_object_mask_cache_hits_total.get_value(), hits_before);
+}
+
+TEST(JsonObjectGrammarTest, DoesNotAliasDifferentTransitionStates) {
+  JsonObjectGrammar grammar = make_grammar();
+  JsonObjectGrammarState initial = grammar.initial_state();
+  JsonObjectGrammarState in_object = grammar.initial_state();
+  ASSERT_TRUE(in_object.accept_piece("{"));
+
+  const torch::Tensor initial_mask = grammar.build_filter_mask(initial);
+  const torch::Tensor object_mask = grammar.build_filter_mask(in_object);
+  const torch::Tensor cached_initial_mask = grammar.build_filter_mask(initial);
+
+  EXPECT_FALSE(torch::equal(initial_mask, object_mask));
+  EXPECT_TRUE(torch::equal(initial_mask, cached_initial_mask));
+}
+
+TEST(JsonObjectGrammarTest, BuildsCachedMasksConcurrently) {
+  JsonObjectGrammar grammar = make_grammar();
+  const JsonObjectGrammarState state = grammar.initial_state();
+  constexpr size_t kThreadCount = 8;
+  std::vector<torch::Tensor> masks(kThreadCount);
+  std::vector<std::thread> threads;
+  threads.reserve(kThreadCount);
+  for (size_t thread_idx = 0; thread_idx < kThreadCount; ++thread_idx) {
+    threads.emplace_back([&grammar, &masks, &state, thread_idx]() {
+      masks[thread_idx] = grammar.build_filter_mask(state);
+    });
+  }
+  for (std::thread& thread : threads) {
+    thread.join();
+  }
+
+  for (size_t mask_idx = 1; mask_idx < masks.size(); ++mask_idx) {
+    EXPECT_TRUE(torch::equal(masks[0], masks[mask_idx]));
+  }
+}
+
+TEST(JsonObjectGrammarTest, RemainsCorrectAfterMaskCacheEviction) {
+  JsonObjectGrammar grammar({"{", "\"a\"", ":", "[", "]", "}", "0"});
+  JsonObjectGrammarState nested = grammar.initial_state();
+  ASSERT_TRUE(nested.accept_token(/*open_object=*/0));
+  ASSERT_TRUE(nested.accept_token(/*key=*/1));
+  ASSERT_TRUE(nested.accept_token(/*colon=*/2));
+  for (size_t depth = 0; depth < 80; ++depth) {
+    ASSERT_TRUE(nested.accept_token(/*open_array=*/3));
+    const torch::Tensor mask = grammar.build_filter_mask(nested);
+    EXPECT_EQ(mask.size(0), static_cast<int64_t>(grammar.vocab_size()));
+  }
+
+  JsonObjectGrammarState initial = grammar.initial_state();
+  const torch::Tensor initial_mask = grammar.build_filter_mask(initial);
+  EXPECT_EQ(initial_mask.index({0}).item<float>(), 0.0F);
+  EXPECT_LT(initial_mask.index({3}).item<float>(), -1.0F);
 }
 
 TEST(JsonObjectGrammarTest, StopsAtObjectCompletionWithMultipleStopTokens) {

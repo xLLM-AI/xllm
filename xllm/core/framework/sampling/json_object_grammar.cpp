@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <algorithm>
 
+#include "core/common/metrics.h"
 #include "core/util/slice.h"
 
 namespace xllm {
@@ -27,6 +28,7 @@ namespace {
 constexpr float kDisallowedTokenMask = -1.0e9F;
 constexpr uint64_t kFnvOffsetBasis = 14695981039346656037ULL;
 constexpr uint64_t kFnvPrime = 1099511628211ULL;
+constexpr size_t kMaxFilterMaskCacheEntries = 64;
 
 uint64_t hash_byte(uint64_t hash, uint8_t value) {
   return (hash ^ value) * kFnvPrime;
@@ -40,6 +42,19 @@ uint64_t hash_uint64(uint64_t hash, uint64_t value) {
         static_cast<uint8_t>((value >> shift) & static_cast<uint64_t>(0xFF)));
   }
   return hash;
+}
+
+void append_cache_key_byte(std::string* key, uint8_t value) {
+  key->push_back(static_cast<char>(value));
+}
+
+void append_cache_key_uint64(std::string* key, uint64_t value) {
+  for (int32_t byte_index = 0; byte_index < 8; ++byte_index) {
+    const int32_t shift = byte_index * 8;
+    append_cache_key_byte(
+        key,
+        static_cast<uint8_t>((value >> shift) & static_cast<uint64_t>(0xFF)));
+  }
 }
 
 bool is_hex_digit(char character) {
@@ -185,6 +200,47 @@ uint64_t JsonObjectGrammarState::fingerprint() const {
     hash = hash_uint64(hash, static_cast<uint64_t>(frame.state));
   }
   return hash;
+}
+
+std::string JsonObjectGrammarState::transition_cache_key() const {
+  std::string key;
+  key.reserve(40 + literal_target_.size() + containers_.size() * 2);
+  append_cache_key_byte(&key, valid_ ? 1U : 0U);
+  append_cache_key_byte(&key, root_started_ ? 1U : 0U);
+  append_cache_key_byte(&key, root_complete_ ? 1U : 0U);
+  append_cache_key_byte(&key, reasoning_phase_ ? 1U : 0U);
+  append_cache_key_byte(&key, static_cast<uint8_t>(parse_mode_));
+  if (reasoning_phase_) {
+    append_cache_key_uint64(&key,
+                            static_cast<uint64_t>(reasoning_marker_index_));
+  }
+  switch (parse_mode_) {
+    case ParseMode::STRING:
+    case ParseMode::STRING_ESCAPE:
+      append_cache_key_byte(&key, static_cast<uint8_t>(string_role_));
+      break;
+    case ParseMode::STRING_UNICODE:
+      append_cache_key_byte(&key, static_cast<uint8_t>(string_role_));
+      append_cache_key_byte(&key, unicode_digits_);
+      break;
+    case ParseMode::NUMBER:
+      append_cache_key_byte(&key, static_cast<uint8_t>(number_state_));
+      break;
+    case ParseMode::LITERAL:
+      append_cache_key_uint64(&key, static_cast<uint64_t>(literal_index_));
+      append_cache_key_uint64(&key,
+                              static_cast<uint64_t>(literal_target_.size()));
+      key.append(literal_target_);
+      break;
+    case ParseMode::NONE:
+      break;
+  }
+  append_cache_key_uint64(&key, static_cast<uint64_t>(containers_.size()));
+  for (const ContainerFrame& frame : containers_) {
+    append_cache_key_byte(&key, static_cast<uint8_t>(frame.type));
+    append_cache_key_byte(&key, static_cast<uint8_t>(frame.state));
+  }
+  return key;
 }
 
 bool JsonObjectGrammarState::can_accept_piece(std::string_view piece) const {
@@ -530,7 +586,8 @@ JsonObjectGrammar::JsonObjectGrammar(
     std::vector<int32_t> reasoning_end_token_ids)
     : token_pieces_(std::move(token_pieces)),
       stop_token_ids_(std::move(stop_token_ids)),
-      reasoning_end_token_ids_(std::move(reasoning_end_token_ids)) {
+      reasoning_end_token_ids_(std::move(reasoning_end_token_ids)),
+      filter_mask_cache_(std::make_shared<FilterMaskCache>()) {
   reasoning_bitmask_.assign(bitmask_num_words(), 0xFFFFFFFFu);
   for (const int32_t stop_token_id : stop_token_ids_) {
     if (stop_token_id < 0 ||
@@ -549,6 +606,8 @@ JsonObjectGrammar::JsonObjectGrammar(
   }
   reasoning_filter_mask_cpu_ =
       float_mask_from_bitmask(reasoning_bitmask_, token_pieces_.size());
+  reasoning_cached_mask_ = std::make_shared<const CachedMask>(
+      CachedMask{reasoning_bitmask_, reasoning_filter_mask_cpu_});
 }
 
 std::shared_ptr<const JsonObjectGrammar>
@@ -694,37 +753,53 @@ torch::Tensor JsonObjectGrammar::float_mask_from_bitmask(
   return mask;
 }
 
-const JsonObjectGrammar::CachedMask& JsonObjectGrammar::cached_mask_for_state(
+std::shared_ptr<const JsonObjectGrammar::CachedMask>
+JsonObjectGrammar::cached_mask_for_state(
     const JsonObjectGrammarState& state) const {
   CHECK(state.grammar_ == this)
       << "JSON grammar state belongs to a different grammar";
-  const uint64_t key = state.fingerprint();
+  CHECK(state.is_valid()) << "JSON object grammar state is invalid";
+  if (state.in_reasoning()) {
+    return reasoning_cached_mask_;
+  }
+
+  const std::string cache_key = state.transition_cache_key();
   {
-    std::lock_guard<std::mutex> lock(mask_cache_mutex_);
-    const auto it = mask_cache_.find(key);
-    if (it != mask_cache_.end()) {
+    std::lock_guard<std::mutex> lock(filter_mask_cache_->mutex);
+    const auto it = filter_mask_cache_->entries.find(cache_key);
+    if (it != filter_mask_cache_->entries.end()) {
+      COUNTER_INC(json_object_mask_cache_hits_total);
       return it->second;
     }
   }
 
-  CachedMask cached;
-  if (state.in_reasoning()) {
-    cached.bitmask = reasoning_bitmask_;
-    cached.float_mask_cpu = reasoning_filter_mask_cpu_;
-  } else {
-    cached.bitmask = compute_allowed_bitmask(state);
-    CHECK(std::any_of(cached.bitmask.begin(),
-                      cached.bitmask.end(),
-                      [](uint32_t word) { return word != 0U; }))
-        << "JSON object grammar has no allowed token; refusing unrestricted "
-           "mask";
-    cached.float_mask_cpu =
-        float_mask_from_bitmask(cached.bitmask, token_pieces_.size());
-  }
+  COUNTER_INC(json_object_mask_cache_misses_total);
+  Timer scan_timer;
+  std::vector<uint32_t> bitmask = compute_allowed_bitmask(state);
+  HISTOGRAM_OBSERVE(json_object_mask_vocab_scan_latency_microseconds,
+                    static_cast<int64_t>(scan_timer.elapsed_microseconds()));
+  CHECK(std::any_of(bitmask.begin(), bitmask.end(), [](uint32_t word) {
+    return word != 0U;
+  })) << "JSON object grammar has no allowed token; refusing unrestricted mask";
 
-  std::lock_guard<std::mutex> lock(mask_cache_mutex_);
-  const auto [inserted, _] = mask_cache_.emplace(key, std::move(cached));
-  return inserted->second;
+  Timer build_timer;
+  torch::Tensor float_mask =
+      float_mask_from_bitmask(bitmask, token_pieces_.size());
+  HISTOGRAM_OBSERVE(json_object_mask_row_build_latency_microseconds,
+                    static_cast<int64_t>(build_timer.elapsed_microseconds()));
+  auto cached = std::make_shared<const CachedMask>(
+      CachedMask{std::move(bitmask), std::move(float_mask)});
+
+  std::lock_guard<std::mutex> lock(filter_mask_cache_->mutex);
+  const auto existing = filter_mask_cache_->entries.find(cache_key);
+  if (existing != filter_mask_cache_->entries.end()) {
+    return existing->second;
+  }
+  if (filter_mask_cache_->entries.size() >= kMaxFilterMaskCacheEntries) {
+    filter_mask_cache_->entries.erase(filter_mask_cache_->entries.begin());
+  }
+  filter_mask_cache_->entries.emplace(cache_key, cached);
+  return cached;
 }
 
 std::vector<int32_t> JsonObjectGrammar::allowed_token_ids(
@@ -746,35 +821,28 @@ std::vector<uint32_t> JsonObjectGrammar::allowed_token_bitmask(
   if (!state.is_valid()) {
     return std::vector<uint32_t>(bitmask_num_words(), 0U);
   }
-  return cached_mask_for_state(state).bitmask;
+  return cached_mask_for_state(state)->bitmask;
 }
 
-torch::Tensor JsonObjectGrammar::materialize_reasoning_filter_mask(
-    const torch::Device& device,
-    torch::ScalarType dtype) const {
-  torch::Tensor mask = reasoning_filter_mask_cpu_;
-  if (dtype != torch::kFloat32) {
-    mask = mask.to(dtype);
-  }
-  if (!device.is_cpu()) {
-    mask = mask.to(device);
-  }
-  return mask;
+torch::Tensor JsonObjectGrammar::get_cpu_filter_mask(
+    const JsonObjectGrammarState& state) const {
+  return cached_mask_for_state(state)->float_mask_cpu;
 }
 
 torch::Tensor JsonObjectGrammar::build_filter_mask(
     const JsonObjectGrammarState& state,
     const torch::Device& device,
     torch::ScalarType dtype) const {
-  if (state.in_reasoning()) {
-    return materialize_reasoning_filter_mask(device, dtype);
-  }
-  torch::Tensor mask = cached_mask_for_state(state).float_mask_cpu;
+  torch::Tensor mask = get_cpu_filter_mask(state);
   if (dtype != torch::kFloat32) {
     mask = mask.to(dtype);
   }
   if (!device.is_cpu()) {
+    Timer transfer_timer;
     mask = mask.to(device);
+    HISTOGRAM_OBSERVE(
+        json_object_mask_device_copy_latency_microseconds,
+        static_cast<int64_t>(transfer_timer.elapsed_microseconds()));
   }
   return mask;
 }
@@ -783,9 +851,11 @@ torch::Tensor JsonObjectGrammar::build_filter_bitmask(
     const JsonObjectGrammarState& state,
     const torch::Device& device) const {
   std::vector<uint32_t> zero_bitmask;
+  std::shared_ptr<const CachedMask> cached_mask;
   const std::vector<uint32_t>* bitmask = nullptr;
   if (state.is_valid()) {
-    bitmask = &cached_mask_for_state(state).bitmask;
+    cached_mask = cached_mask_for_state(state);
+    bitmask = &cached_mask->bitmask;
   } else {
     zero_bitmask.assign(bitmask_num_words(), 0U);
     bitmask = &zero_bitmask;
@@ -795,7 +865,11 @@ torch::Tensor JsonObjectGrammar::build_filter_bitmask(
   auto tensor = torch::tensor(
       words, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
   if (!device.is_cpu()) {
+    Timer transfer_timer;
     tensor = tensor.to(device);
+    HISTOGRAM_OBSERVE(
+        json_object_mask_device_copy_latency_microseconds,
+        static_cast<int64_t>(transfer_timer.elapsed_microseconds()));
   }
   return tensor;
 }
@@ -820,22 +894,39 @@ torch::Tensor build_json_object_filter_mask(
   }
   const size_t vocab_size = grammar->vocab_size();
 
+  Timer batch_timer;
   std::vector<torch::Tensor> masks;
   masks.reserve(states.size());
+  torch::Tensor unconstrained_mask;
   for (const auto& state : states) {
     if (state.initialized()) {
       const JsonObjectGrammar* state_grammar = state.grammar();
       CHECK_EQ(state_grammar->vocab_size(), vocab_size)
           << "mixed JSON grammar vocabularies in one batch";
-      masks.emplace_back(
-          state_grammar->build_filter_mask(state, device, dtype));
+      masks.emplace_back(state_grammar->get_cpu_filter_mask(state));
     } else {
-      masks.emplace_back(
-          torch::zeros({static_cast<int64_t>(vocab_size)},
-                       torch::TensorOptions().device(device).dtype(dtype)));
+      if (!unconstrained_mask.defined()) {
+        unconstrained_mask =
+            torch::zeros({static_cast<int64_t>(vocab_size)},
+                         torch::TensorOptions().dtype(torch::kFloat32));
+      }
+      masks.emplace_back(unconstrained_mask);
     }
   }
-  return torch::stack(masks, /*dim=*/0);
+  torch::Tensor mask = torch::stack(masks, /*dim=*/0);
+  if (dtype != torch::kFloat32) {
+    mask = mask.to(dtype);
+  }
+  HISTOGRAM_OBSERVE(json_object_mask_batch_build_latency_microseconds,
+                    static_cast<int64_t>(batch_timer.elapsed_microseconds()));
+  if (!device.is_cpu()) {
+    Timer transfer_timer;
+    mask = mask.to(device);
+    HISTOGRAM_OBSERVE(
+        json_object_mask_device_copy_latency_microseconds,
+        static_cast<int64_t>(transfer_timer.elapsed_microseconds()));
+  }
+  return mask;
 }
 
 torch::Tensor build_json_object_filter_bitmask(
@@ -856,23 +947,36 @@ torch::Tensor build_json_object_filter_bitmask(
     return torch::Tensor();
   }
 
+  Timer batch_timer;
   std::vector<torch::Tensor> masks;
   masks.reserve(states.size());
   const int64_t num_words = static_cast<int64_t>(grammar->bitmask_num_words());
   for (const auto& state : states) {
     if (state.initialized()) {
-      CHECK_EQ(state.grammar(), grammar)
-          << "mixed JSON grammar definitions in one batch";
-      masks.push_back(grammar->build_filter_bitmask(state, device));
+      const JsonObjectGrammar* state_grammar = state.grammar();
+      CHECK_EQ(state_grammar->vocab_size(), grammar->vocab_size())
+          << "mixed JSON grammar vocabularies in one batch";
+      masks.emplace_back(
+          state_grammar->build_filter_bitmask(state, torch::kCPU));
     } else {
       // Unconstrained row: all tokens allowed (matches float-mask zeros).
-      masks.push_back(torch::full(
-          {num_words},
-          /*fill_value=*/static_cast<int32_t>(-1),
-          torch::TensorOptions().device(device).dtype(torch::kInt32)));
+      masks.emplace_back(
+          torch::full({num_words},
+                      /*fill_value=*/static_cast<int32_t>(-1),
+                      torch::TensorOptions().dtype(torch::kInt32)));
     }
   }
-  return torch::stack(masks, /*dim=*/0);
+  torch::Tensor mask = torch::stack(masks, /*dim=*/0);
+  HISTOGRAM_OBSERVE(json_object_mask_batch_build_latency_microseconds,
+                    static_cast<int64_t>(batch_timer.elapsed_microseconds()));
+  if (!device.is_cpu()) {
+    Timer transfer_timer;
+    mask = mask.to(device);
+    HISTOGRAM_OBSERVE(
+        json_object_mask_device_copy_latency_microseconds,
+        static_cast<int64_t>(transfer_timer.elapsed_microseconds()));
+  }
+  return mask;
 }
 
 void apply_token_bitmask_inplace(torch::Tensor& logits,

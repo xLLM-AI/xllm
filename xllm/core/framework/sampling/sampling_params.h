@@ -20,8 +20,6 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
-#include "core/util/tensor_helper.h"
-
 namespace xllm {
 
 struct RequestSamplingParam {
@@ -51,53 +49,7 @@ struct SamplingParameters {
             const std::vector<torch::Tensor>& filter_mask_rows = {});
 
   SamplingParameters to(const torch::Device& device,
-                        torch::ScalarType dtype) const {
-    SamplingParameters params;
-
-    // selected/sample indices are tiny control tensors and
-    // correctness-critical. Use blocking H2D copies to avoid consuming
-    // partially transferred index buffers on NPU runtime paths.
-    params.selected_token_idxes =
-        selected_token_idxes.defined()
-            ? safe_to(selected_token_idxes, device).contiguous()
-            : selected_token_idxes;
-    auto options = torch::device(device).dtype(dtype);
-    params.filter_mask = filter_mask.defined()
-                             ? safe_to(filter_mask, options, true).contiguous()
-                             : filter_mask;
-    // Bitmask must stay int32; never cast to model floating dtype.
-    params.filter_bitmask =
-        filter_bitmask.defined()
-            ? safe_to(filter_bitmask, device, true).contiguous()
-            : filter_bitmask;
-    params.frequency_penalties = safe_to(frequency_penalties, options, true);
-    params.presence_penalties = safe_to(presence_penalties, options, true);
-    params.repetition_penalties = safe_to(repetition_penalties, options, true);
-    params.temperatures = safe_to(temperatures, options, true);
-    params.top_p = safe_to(top_p, options, true);
-    params.top_k = safe_to(top_k, device, true);
-
-    params.unique_token_ids = safe_to(unique_token_ids, device, true);
-    params.unique_token_counts = safe_to(unique_token_counts, device, true);
-    params.unique_token_ids_lens = safe_to(unique_token_ids_lens, device, true);
-
-    params.sample_idxes = sample_idxes.defined()
-                              ? safe_to(sample_idxes, device).contiguous()
-                              : sample_idxes;
-    params.do_sample = safe_to(do_sample, device, true);
-    params.acc_logprob = safe_to(acc_logprob, device, true);
-    params.all_random_sample = all_random_sample;
-    params.all_greedy_sample = all_greedy_sample;
-    params.logprobs = logprobs;
-    params.return_probs = return_probs;
-    params.max_top_logprobs = max_top_logprobs;
-    params.is_embeddings = is_embeddings;
-    params.num_return_sequences = num_return_sequences;
-
-    // for beam search
-    params.use_beam_search = use_beam_search;
-    return params;
-  }
+                        torch::ScalarType dtype) const;
 
   // concat two SamplingParameters into one
   void concat(const SamplingParameters& param);

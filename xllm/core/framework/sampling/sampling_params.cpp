@@ -24,6 +24,9 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
+#include "core/common/metrics.h"
+#include "core/util/tensor_helper.h"
+
 namespace xllm {
 
 void SamplingParameters::init(
@@ -129,6 +132,7 @@ void SamplingParameters::init(
                   filter_mask_rows.end(),
                   [](const torch::Tensor& row) { return row.defined(); });
   if (has_filter_mask) {
+    Timer mask_batch_timer;
     CHECK_EQ(filter_mask_rows.size(), req_sampling_params.size());
     int64_t vocab_size = 0;
     for (const auto& row : filter_mask_rows) {
@@ -159,6 +163,9 @@ void SamplingParameters::init(
       this->filter_mask = this->filter_mask.index_select(
           0, torch::tensor(sample_idxes, torch::kLong));
     }
+    HISTOGRAM_OBSERVE(
+        json_object_mask_batch_build_latency_microseconds,
+        static_cast<int64_t>(mask_batch_timer.elapsed_microseconds()));
   }
   if (need_token_stats) {
     CHECK_EQ(req_sampling_params.size(), unique_token_ids_vec.size());
@@ -192,6 +199,70 @@ void SamplingParameters::init(
     this->all_random_sample = this->do_sample.all().item<bool>();
     this->all_greedy_sample = !this->do_sample.any().item<bool>();
   }
+}
+
+SamplingParameters SamplingParameters::to(const torch::Device& device,
+                                          torch::ScalarType dtype) const {
+  SamplingParameters params;
+
+  // selected/sample indices are tiny control tensors and
+  // correctness-critical. Use blocking H2D copies to avoid consuming
+  // partially transferred index buffers on NPU runtime paths.
+  params.selected_token_idxes =
+      selected_token_idxes.defined()
+          ? safe_to(selected_token_idxes, device).contiguous()
+          : selected_token_idxes;
+  const torch::TensorOptions options = torch::device(device).dtype(dtype);
+  if (filter_mask.defined()) {
+    if (device.is_cpu()) {
+      params.filter_mask = safe_to(filter_mask, options, true).contiguous();
+    } else {
+      Timer transfer_timer;
+      params.filter_mask = safe_to(filter_mask, options, true).contiguous();
+      HISTOGRAM_OBSERVE(
+          json_object_mask_transfer_submission_latency_microseconds,
+          static_cast<int64_t>(transfer_timer.elapsed_microseconds()));
+    }
+  }
+  if (filter_bitmask.defined()) {
+    if (device.is_cpu()) {
+      params.filter_bitmask =
+          safe_to(filter_bitmask, device, true).contiguous();
+    } else {
+      Timer transfer_timer;
+      params.filter_bitmask =
+          safe_to(filter_bitmask, device, true).contiguous();
+      HISTOGRAM_OBSERVE(
+          json_object_mask_transfer_submission_latency_microseconds,
+          static_cast<int64_t>(transfer_timer.elapsed_microseconds()));
+    }
+  }
+  params.frequency_penalties = safe_to(frequency_penalties, options, true);
+  params.presence_penalties = safe_to(presence_penalties, options, true);
+  params.repetition_penalties = safe_to(repetition_penalties, options, true);
+  params.temperatures = safe_to(temperatures, options, true);
+  params.top_p = safe_to(top_p, options, true);
+  params.top_k = safe_to(top_k, device, true);
+
+  params.unique_token_ids = safe_to(unique_token_ids, device, true);
+  params.unique_token_counts = safe_to(unique_token_counts, device, true);
+  params.unique_token_ids_lens = safe_to(unique_token_ids_lens, device, true);
+
+  params.sample_idxes = sample_idxes.defined()
+                            ? safe_to(sample_idxes, device).contiguous()
+                            : sample_idxes;
+  params.do_sample = safe_to(do_sample, device, true);
+  params.acc_logprob = safe_to(acc_logprob, device, true);
+  params.all_random_sample = all_random_sample;
+  params.all_greedy_sample = all_greedy_sample;
+  params.logprobs = logprobs;
+  params.return_probs = return_probs;
+  params.max_top_logprobs = max_top_logprobs;
+  params.is_embeddings = is_embeddings;
+  params.num_return_sequences = num_return_sequences;
+
+  params.use_beam_search = use_beam_search;
+  return params;
 }
 
 void SamplingParameters::concat(const SamplingParameters& param) {

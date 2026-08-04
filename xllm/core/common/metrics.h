@@ -154,6 +154,15 @@ DECLARE_COUNTER(execution_latency_seconds_model);
 DECLARE_COUNTER(execution_latency_seconds_logits_processing);
 DECLARE_COUNTER(execution_latency_seconds_sampling);
 
+// JSON object constrained-decoding mask metrics.
+DECLARE_COUNTER(json_object_mask_cache_hits_total);
+DECLARE_COUNTER(json_object_mask_cache_misses_total);
+DECLARE_HISTOGRAM(json_object_mask_vocab_scan_latency_microseconds);
+DECLARE_HISTOGRAM(json_object_mask_row_build_latency_microseconds);
+DECLARE_HISTOGRAM(json_object_mask_batch_build_latency_microseconds);
+DECLARE_HISTOGRAM(json_object_mask_device_copy_latency_microseconds);
+DECLARE_HISTOGRAM(json_object_mask_transfer_submission_latency_microseconds);
+
 DECLARE_GAUGE(num_pending_requests);
 DECLARE_GAUGE(num_running_requests);
 DECLARE_GAUGE(num_waiting_requests);

@@ -97,6 +97,22 @@ DEFINE_COUNTER(execution_latency_seconds_logits_processing,
 DEFINE_COUNTER(execution_latency_seconds_sampling,
                "Latency of sampling in seconds");
 
+DEFINE_COUNTER(json_object_mask_cache_hits_total,
+               "JSON object mask cache hit count");
+DEFINE_COUNTER(json_object_mask_cache_misses_total,
+               "JSON object mask cache miss count");
+DEFINE_HISTOGRAM(json_object_mask_vocab_scan_latency_microseconds,
+                 "JSON object mask vocabulary scan latency in microseconds");
+DEFINE_HISTOGRAM(json_object_mask_row_build_latency_microseconds,
+                 "JSON object CPU mask row build latency in microseconds");
+DEFINE_HISTOGRAM(json_object_mask_batch_build_latency_microseconds,
+                 "JSON object CPU mask batch build latency in microseconds");
+DEFINE_HISTOGRAM(json_object_mask_device_copy_latency_microseconds,
+                 "JSON object blocking device copy latency in microseconds");
+DEFINE_HISTOGRAM(
+    json_object_mask_transfer_submission_latency_microseconds,
+    "JSON object non-blocking device copy submission latency in microseconds");
+
 // scheduler metrics
 DEFINE_GAUGE(num_pending_requests, "Number of pending requests in scheduler");
 DEFINE_GAUGE(num_running_requests, "Number of running requests in scheduler");

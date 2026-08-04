@@ -9,6 +9,7 @@ cc_library(
     json_object_grammar.cpp
   DEPS
     :tokenizer
+    :common
     glog::glog
     torch
 )
