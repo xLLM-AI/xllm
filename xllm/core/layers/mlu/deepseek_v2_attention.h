@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 
@@ -31,6 +32,7 @@ limitations under the License.
 #include "layers/common/linear.h"
 #include "layers/common/rms_norm.h"
 #include "layers/common/rotary_embedding.h"
+#include "layers/mlu/dcp_decode_context.h"
 #include "layers/mlu/deepseek_v32_cp_context.h"
 #include "layers/mlu/indexer.h"
 #include "platform/stream.h"
@@ -98,6 +100,13 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
                                   KVCache& kv_cache,
                                   bool is_prefill_or_chunked_prefill,
                                   DsaTopkTransfer* topk_transfer);
+
+  torch::Tensor forward_dcp(const torch::Tensor& positions,
+                            const torch::Tensor& hidden_states,
+                            const AttentionMetadata& attn_metadata,
+                            KVCache& kv_cache,
+                            bool is_prefill_or_chunked_prefill,
+                            DsaTopkTransfer* topk_transfer);
 
   // ===== sequence parallel related =====
   torch::Tensor forward_sp(const torch::Tensor& positions,
@@ -171,6 +180,18 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
       const AttentionMetadata& attn_metadata,
       const std::optional<DsaTopkState>& topk_state) const;
 
+  DcpAttentionResult run_dcp_paged_attention(
+      const torch::Tensor& q_input,
+      const DsaTopkState& global_topk,
+      KVCache& kv_cache,
+      const AttentionMetadata& base_metadata);
+
+  DcpAttentionResult run_dcp_chunked_prefill_attention(
+      const torch::Tensor& q_input,
+      const DsaTopkState& global_topk,
+      KVCache& kv_cache,
+      const AttentionMetadata& base_metadata);
+
   torch::Tensor project_output(const torch::Tensor& attn_output,
                                const HeadInfo& heads);
 
@@ -190,6 +211,7 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   bool use_full_replicated_attention_weights_ = false;
   bool use_fused_mla_qkv_ = false;
   bool enable_lighting_indexer_ = false;
+  bool dcp_spans_tp_ = false;
   bool has_indexer_ = false;
   bool has_trans_ = false;
   bool interleaved_ = false;
@@ -201,6 +223,13 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   int64_t qk_nope_head_dim_;
   int64_t qk_rope_head_dim_;
   int64_t index_topk_;
+  int32_t kv_split_size_ = 1;
+  int32_t kv_split_rank_ = 0;
+  int32_t tp_rank_ = 0;
+  int32_t block_size_ = 1;
+  bool enable_mla_cache_sharding_ = false;
+  ProcessGroup* tp_group_ = nullptr;
+  std::unique_ptr<DcpDecodeContext> dcp_decode_context_;
   HeadInfo tp_heads_;
   HeadInfo full_heads_;
   torch::Tensor w_kc_;
@@ -223,6 +252,7 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   std::shared_ptr<RotaryEmbeddingBase> indexer_rotary_emb_;
   Indexer indexer_{nullptr};
   std::unique_ptr<Stream> sp_comm_stream_;
+  Attention dcp_full_head_attn_{nullptr};
 };
 TORCH_MODULE(DeepseekV2Attention);
 
