@@ -341,6 +341,32 @@ TEST(JsonObjectGrammarTest, BuildsMixedBatchMask) {
   EXPECT_EQ(mask.index({1, 1}).item<float>(), 0.0F);
 }
 
+TEST(JsonObjectGrammarTest, BuildsMaskWithMixedReasoningDefinitions) {
+  const std::vector<std::string> token_pieces = {
+      "{", "}", "reasoning", "<think>", "</think>"};
+  JsonObjectGrammar json_grammar(token_pieces, /*stop_token_ids=*/{1});
+  JsonObjectGrammar reasoning_grammar(token_pieces,
+                                      /*stop_token_ids=*/{1},
+                                      /*reasoning_end_token_ids=*/{3, 4});
+  std::vector<JsonObjectGrammarState> states = {
+      json_grammar.initial_state(),
+      reasoning_grammar.initial_state(/*reasoning_phase=*/true),
+      JsonObjectGrammarState(),
+      reasoning_grammar.initial_state(/*reasoning_phase=*/true),
+      json_grammar.initial_state()};
+
+  torch::Tensor mask = build_json_object_filter_mask(states);
+
+  ASSERT_EQ(mask.sizes(), torch::IntArrayRef({5, 5}));
+  EXPECT_EQ(mask.index({0, 0}).item<float>(), 0.0F);
+  EXPECT_LT(mask.index({0, 2}).item<float>(), -1.0F);
+  EXPECT_EQ(mask.index({1, 2}).item<float>(), 0.0F);
+  EXPECT_LT(mask.index({1, 1}).item<float>(), -1.0F);
+  EXPECT_EQ(mask.index({2, 1}).item<float>(), 0.0F);
+  EXPECT_EQ(mask.index({3, 2}).item<float>(), 0.0F);
+  EXPECT_LT(mask.index({4, 2}).item<float>(), -1.0F);
+}
+
 TEST(JsonObjectGrammarTest, StopsAtObjectCompletionWithMultipleStopTokens) {
   JsonObjectGrammar grammar({"{", "}", "\"", "a", ":", "1", " ", "", ""},
                             /*stop_token_ids=*/{7, 8});

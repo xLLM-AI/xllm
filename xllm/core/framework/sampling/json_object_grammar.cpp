@@ -818,17 +818,20 @@ torch::Tensor build_json_object_filter_mask(
   if (grammar == nullptr) {
     return torch::Tensor();
   }
+  const size_t vocab_size = grammar->vocab_size();
 
   std::vector<torch::Tensor> masks;
   masks.reserve(states.size());
   for (const auto& state : states) {
     if (state.initialized()) {
-      CHECK_EQ(state.grammar(), grammar)
-          << "mixed JSON grammar definitions in one batch";
-      masks.push_back(grammar->build_filter_mask(state, device, dtype));
+      const JsonObjectGrammar* state_grammar = state.grammar();
+      CHECK_EQ(state_grammar->vocab_size(), vocab_size)
+          << "mixed JSON grammar vocabularies in one batch";
+      masks.emplace_back(
+          state_grammar->build_filter_mask(state, device, dtype));
     } else {
-      masks.push_back(
-          torch::zeros({static_cast<int64_t>(grammar->vocab_size())},
+      masks.emplace_back(
+          torch::zeros({static_cast<int64_t>(vocab_size)},
                        torch::TensorOptions().device(device).dtype(dtype)));
     }
   }
