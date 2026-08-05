@@ -44,24 +44,17 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   tp_group_ = parallel_args.tp_group_;
   cp_size_ = parallel_args.cp_size();
   cp_rank_ = parallel_args.cp_rank();
-  // The physical process group (tp_group_) has size world/dp. CP is carved out
-  // of it: the Python model's tensor-parallel degree is the cp-discounted part
-  // and CP consumes the rest (cp_group_ aliases tp_group_ on the TORCH
-  // backend). v1 supports pure CP (model tp == 1) or pure TP (cp == 1), not an
-  // orthogonal mix on the same physical group.
-  const int64_t phys_group_size =
-      (tp_group_ != nullptr) ? tp_group_->world_size() : 1;
-  const int64_t phys_group_rank =
-      (tp_group_ != nullptr) ? tp_group_->rank() : 0;
-  CHECK_EQ(phys_group_size % cp_size_, 0)
-      << "physical group size " << phys_group_size
-      << " not divisible by cp_size " << cp_size_;
-  tp_size_ = phys_group_size / cp_size_;
+  // tp_group_ and cp_group_ are already the final, orthogonally-split groups:
+  // the collective communicator narrows tp_group_ to world/(dp*cp) and builds a
+  // separate cp_group_ over the cp-strided ranks. Read each dimension from its
+  // own group instead of carving CP back out of tp_group_. v1 supports pure CP
+  // (tp_size == 1) or pure TP (cp_size == 1), not an orthogonal mix.
+  tp_size_ = (tp_group_ != nullptr) ? tp_group_->world_size() : 1;
+  tp_rank_ = (tp_group_ != nullptr) ? tp_group_->rank() : 0;
   CHECK(cp_size_ == 1 || tp_size_ == 1)
-      << "Python CP v1 does not support orthogonal TP x CP on one group "
+      << "Python CP v1 does not support orthogonal TP x CP "
          "(tp_size="
       << tp_size_ << ", cp_size=" << cp_size_ << ")";
-  tp_rank_ = (tp_size_ > 1) ? phys_group_rank : 0;
 
   py::gil_scoped_acquire gil;
   // The physical group's rendezvous endpoint (shared by all ranks in the group)

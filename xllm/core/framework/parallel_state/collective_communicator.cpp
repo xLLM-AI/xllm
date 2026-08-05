@@ -583,9 +583,23 @@ void CollectiveCommunicator::create_process_groups(
     }
   }
 
-  const int32_t tp_group_index = global_rank / tp_size;
+  // The Python model executor drives exactly one parallel dimension (v1
+  // supports pure TP or pure CP, not an orthogonal mix). Every rank that shares
+  // a Python collective must rendezvous on one endpoint, and distinct groups
+  // must get distinct ports. Under orthogonal CP the CP group is strided by
+  // tp_size (its members are not contiguous), so index by the CP group when
+  // cp_size > 1; otherwise index by the contiguous TP group.
+  int32_t rendezvous_group_index;
+  if (cp_size > 1) {
+    const int32_t dp_stride = cp_size * tp_size;
+    rendezvous_group_index =
+        (global_rank / dp_stride) * tp_size + global_rank % tp_size;
+  } else {
+    rendezvous_group_index = global_rank / tp_size;
+  }
   parallel_args_->python_tp_rendezvous_host_ = host;
-  parallel_args_->python_tp_rendezvous_port_ = port + tp_group_index + 1;
+  parallel_args_->python_tp_rendezvous_port_ =
+      port + rendezvous_group_index + 1;
   CHECK_LE(parallel_args_->python_tp_rendezvous_port_, 65535)
       << "No TCP port remains for the Python TP rendezvous.";
 
