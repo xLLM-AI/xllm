@@ -115,14 +115,38 @@ AdaptiveSpeculativeController::select_pruned_prefix_lengths(
               return lhs.seq_id < rhs.seq_id;
             });
 
+  // Incremental greedy: maintain running expected_accepted and validate_time
+  // instead of recomputing the whole batch per candidate (was O(batch^2 * S)).
+  // validate_time = intercept + Σᵢ (query_token_ms·qᵢ +
+  // query_prefix_ms·qᵢ·kvᵢ), qᵢ = prefix_len_i + 1. Fetch the predictor once
+  // outside the loop.
+  std::optional<SpeculativeProfileRegistry::ValidateTimePredictor> predictor =
+      SpeculativeProfileRegistry::get_instance().validate_time_predictor();
+  const bool has_predictor = predictor.has_value();
+  const double query_token_ms = has_predictor ? predictor->query_token_ms : 0.0;
+  const double query_prefix_ms =
+      has_predictor ? predictor->query_prefix_ms : 0.0;
+
   std::vector<int32_t> prefix_lengths(static_cast<size_t>(batch_size), 0);
   double expected_accepted = 0.0;
-  double current_score = score_for_pruned_state(batch_size,
-                                                expected_accepted,
-                                                prefix_lengths,
-                                                per_seq_kv_lens,
-                                                full_draft_time_ms,
-                                                target_step_time_ms);
+  // Running raw validate_time for the current prefix_lengths (qᵢ = 0+1 = 1).
+  double validate_time_raw = 1.0;  // fallback when predictor is unavailable
+  if (has_predictor) {
+    validate_time_raw = predictor->intercept_ms;
+    for (int32_t seq_id = 0; seq_id < batch_size; ++seq_id) {
+      const double kv_i = static_cast<size_t>(seq_id) < per_seq_kv_lens.size()
+                              ? per_seq_kv_lens[static_cast<size_t>(seq_id)]
+                              : 0.0;
+      validate_time_raw += query_token_ms * 1.0 + query_prefix_ms * 1.0 * kv_i;
+    }
+  }
+  auto score_of = [&](double accepted, double vtime_raw) {
+    const double estimated_time =
+        std::max(full_draft_time_ms, 1.0e-6) +
+        std::max(std::max(vtime_raw, 0.0), target_step_time_ms * 0.1);
+    return (static_cast<double>(batch_size) + accepted) / estimated_time;
+  };
+  double current_score = score_of(expected_accepted, validate_time_raw);
   const double min_gain = std::max(min_gain_, 0.0);
   for (const PruneCandidate& candidate : candidates) {
     int32_t& prefix_len = prefix_lengths[static_cast<size_t>(candidate.seq_id)];
@@ -138,65 +162,30 @@ AdaptiveSpeculativeController::select_pruned_prefix_lengths(
       candidate_expected_accepted +=
           seq_path_probs[static_cast<size_t>(token_idx)];
     }
-    const int32_t old_prefix_len = prefix_len;
-    prefix_len = candidate.prefix_len;
+    // Incremental validate_time: only this seq's qᵢ grows by (new - old).
+    const double kv_i =
+        static_cast<size_t>(candidate.seq_id) < per_seq_kv_lens.size()
+            ? per_seq_kv_lens[static_cast<size_t>(candidate.seq_id)]
+            : 0.0;
+    const double delta_q =
+        static_cast<double>(candidate.prefix_len - prefix_len);
+    const double candidate_validate_time_raw =
+        has_predictor ? validate_time_raw + query_token_ms * delta_q +
+                            query_prefix_ms * delta_q * kv_i
+                      : validate_time_raw;
     const double next_score =
-        score_for_pruned_state(batch_size,
-                               candidate_expected_accepted,
-                               prefix_lengths,
-                               per_seq_kv_lens,
-                               full_draft_time_ms,
-                               target_step_time_ms);
+        score_of(candidate_expected_accepted, candidate_validate_time_raw);
     if (next_score <= current_score * (1.0 + min_gain)) {
-      prefix_len = old_prefix_len;
       continue;
     }
 
+    prefix_len = candidate.prefix_len;
     expected_accepted = candidate_expected_accepted;
+    validate_time_raw = candidate_validate_time_raw;
     current_score = next_score;
   }
 
   return prefix_lengths;
-}
-
-// score = expected_emitted / (draft_time + validate_time)
-// validate_time is estimated per-seq: sum of per-token costs from the profile.
-double AdaptiveSpeculativeController::score_for_pruned_state(
-    int32_t batch_size,
-    double expected_accepted,
-    const std::vector<int32_t>& prefix_lengths,
-    const std::vector<double>& per_seq_kv_lens,
-    double full_draft_time_ms,
-    double target_step_time_ms) const {
-  const double estimated_time =
-      std::max(full_draft_time_ms, 1.0e-6) +
-      std::max(estimate_validate_time(prefix_lengths, per_seq_kv_lens),
-               target_step_time_ms * 0.1);
-  const double expected_emitted =
-      static_cast<double>(batch_size) + expected_accepted;
-  return expected_emitted / estimated_time;
-}
-
-// Per-seq validate time: intercept + Σᵢ (query_token_ms * qᵢ +
-// query_prefix_ms * qᵢ * kvᵢ) where qᵢ = prefix_lengths[i] + 1. Coefficients
-// from ProfileManager's linear regression (batch_ms term is not fitted).
-double AdaptiveSpeculativeController::estimate_validate_time(
-    const std::vector<int32_t>& prefix_lengths,
-    const std::vector<double>& per_seq_kv_lens) const {
-  std::optional<SpeculativeProfileRegistry::ValidateTimePredictor> predictor =
-      SpeculativeProfileRegistry::get_instance().validate_time_predictor();
-  if (!predictor.has_value()) {
-    return 1.0;
-  }
-
-  double time = predictor->intercept_ms;
-  for (size_t i = 0; i < prefix_lengths.size(); ++i) {
-    const double q_i = static_cast<double>(prefix_lengths[i] + 1);
-    const double kv_i = i < per_seq_kv_lens.size() ? per_seq_kv_lens[i] : 0.0;
-    time += predictor->query_token_ms * q_i;
-    time += predictor->query_prefix_ms * q_i * kv_i;
-  }
-  return std::max(time, 0.0);
 }
 
 }  // namespace xllm

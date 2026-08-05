@@ -40,16 +40,6 @@ class AdaptiveSpeculativeController final {
       const std::vector<double>& per_seq_kv_lens) const;
 
  private:
-  double score_for_pruned_state(int32_t batch_size,
-                                double expected_accepted,
-                                const std::vector<int32_t>& prefix_lengths,
-                                const std::vector<double>& per_seq_kv_lens,
-                                double full_draft_time_ms,
-                                double target_step_time_ms) const;
-  double estimate_validate_time(
-      const std::vector<int32_t>& prefix_lengths,
-      const std::vector<double>& per_seq_kv_lens) const;
-
   bool enabled_ = false;
   double min_gain_ = 0.0;
 };
