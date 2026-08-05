@@ -173,14 +173,54 @@ void AttentionImpl::decoder_forward(torch::Tensor& query,
                                               tiling_data,
                                               output);
   } else {
-    // Standard PagedAttention path
-    xllm::kernel::npu::batch_decode(query,
-                                    k_cache,
-                                    v_cache.value_or(torch::Tensor()),
-                                    scale_,
-                                    block_table,
-                                    kv_seq_lens,
-                                    output);
+    // Eager decode uses non-causal FIA with one query token per sequence.
+    CHECK(v_cache.has_value() && v_cache->defined())
+        << "FIA decode requires a value cache";
+    torch::Tensor query_tnd = query.view({-1, num_heads_, head_size_});
+    torch::Tensor output_tnd = output.view({-1, num_heads_, head_size_});
+
+    std::vector<int64_t> expanded_kv_seq_lens;
+    const std::vector<int64_t>* kv_seq_lens_vec =
+        &attn_metadata.kv_seq_lens_host_vec;
+    if (attn_metadata.expanded_decode.enabled) {
+      expanded_kv_seq_lens.reserve(
+          attn_metadata.expanded_decode.kv_seq_lens_host_vec.size());
+      for (int32_t kv_seq_len :
+           attn_metadata.expanded_decode.kv_seq_lens_host_vec) {
+        expanded_kv_seq_lens.emplace_back(kv_seq_len);
+      }
+      kv_seq_lens_vec = &expanded_kv_seq_lens;
+    }
+    CHECK_EQ(static_cast<int64_t>(kv_seq_lens_vec->size()),
+             query_tnd.size(0))
+        << "FIA decode KV lengths must match query tokens";
+
+    torch::Tensor key_view =
+        k_cache.view({k_cache.size(0), k_cache.size(1), -1});
+    torch::Tensor value_view =
+        v_cache->view({v_cache->size(0), v_cache->size(1), -1});
+
+    std::vector<int64_t> actual_q_lens;
+    actual_q_lens.reserve(static_cast<size_t>(query_tnd.size(0)));
+    for (int64_t token_idx = 0; token_idx < query_tnd.size(0); ++token_idx) {
+      actual_q_lens.emplace_back(token_idx + 1);
+    }
+
+    auto fia_result = xllm::kernel::npu::npu_fused_infer_attention(
+        query_tnd,
+        key_view,
+        value_view,
+        /*atten_mask=*/std::nullopt,
+        std::make_optional(block_table),
+        actual_q_lens,
+        *kv_seq_lens_vec,
+        num_heads_,
+        num_kv_heads_,
+        scale_,
+        /*block_size=*/k_cache.size(1),
+        /*sparse_mode=*/0,
+        /*input_layout=*/"TND");
+    output_tnd.copy_(std::get<0>(fia_result).view_as(output_tnd));
   }
 }
 
