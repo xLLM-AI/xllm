@@ -38,7 +38,7 @@ limitations under the License.
 #include "core/layers/common/add_matmul.h"
 #include "core/layers/common/rms_norm.h"
 #include "models/dit/transformers/transformer_qwen_image.h"
-#include "models/dit/utils/sequence_parallel_mixin.h"
+#include "models/dit/utils/dit_parallel_mixin.h"
 #include "models/model_registry.h"
 
 namespace xllm {
@@ -287,7 +287,8 @@ TORCH_MODULE(TimeTextEmbedding);
 
 using JoyAttentionOutput = std::tuple<torch::Tensor, torch::Tensor>;
 
-class JoyAttentionImpl final : public torch::nn::Module {
+class JoyAttentionImpl final : public torch::nn::Module,
+                               public xllm::dit::SequenceParallelMixin {
  public:
   JoyAttentionImpl(const ModelContext& context,
                    int64_t dim,
@@ -295,9 +296,9 @@ class JoyAttentionImpl final : public torch::nn::Module {
                    int64_t head_dim,
                    ProcessGroup* sp_group,
                    double eps = 1e-6)
-      : heads_(num_heads),
+      : xllm::dit::SequenceParallelMixin(/*process_group=*/sp_group),
+        heads_(num_heads),
         head_dim_(head_dim),
-        sp_group_(sp_group),
         options_(context.get_tensor_options()) {
     const int64_t inner = num_heads * head_dim;
 
@@ -348,21 +349,21 @@ class JoyAttentionImpl final : public torch::nn::Module {
                                                     /*scatter_idx=*/2,
                                                     /*gather_idx=*/1,
                                                     /*async_ops=*/true,
-                                                    sp_group_);
+                                                    process_group_);
     torch::Tensor img_k =
         img_attn_k_->forward(hidden_states).unflatten(-1, reshape);
     auto img_k_work = parallel_state::all_to_all_4D(img_k,
                                                     /*scatter_idx=*/2,
                                                     /*gather_idx=*/1,
                                                     /*async_ops=*/true,
-                                                    sp_group_);
+                                                    process_group_);
     torch::Tensor img_v =
         img_attn_v_->forward(hidden_states).unflatten(-1, reshape);
     auto img_v_work = parallel_state::all_to_all_4D(img_v,
                                                     /*scatter_idx=*/2,
                                                     /*gather_idx=*/1,
                                                     /*async_ops=*/true,
-                                                    sp_group_);
+                                                    process_group_);
 
     torch::Tensor txt_q =
         txt_attn_q_->forward(encoder_hidden_states).unflatten(-1, reshape);
@@ -370,29 +371,29 @@ class JoyAttentionImpl final : public torch::nn::Module {
                                                     /*scatter_idx=*/2,
                                                     /*gather_idx=*/1,
                                                     /*async_ops=*/true,
-                                                    sp_group_);
+                                                    process_group_);
     torch::Tensor txt_k =
         txt_attn_k_->forward(encoder_hidden_states).unflatten(-1, reshape);
     auto txt_k_work = parallel_state::all_to_all_4D(txt_k,
                                                     /*scatter_idx=*/2,
                                                     /*gather_idx=*/1,
                                                     /*async_ops=*/true,
-                                                    sp_group_);
+                                                    process_group_);
     torch::Tensor txt_v =
         txt_attn_v_->forward(encoder_hidden_states).unflatten(-1, reshape);
     auto txt_v_work = parallel_state::all_to_all_4D(txt_v,
                                                     /*scatter_idx=*/2,
                                                     /*gather_idx=*/1,
                                                     /*async_ops=*/true,
-                                                    sp_group_);
+                                                    process_group_);
 
-    img_q = xllm::dit::SequenceParallelMixin::unpad_tensor(
-        img_q_work(), /*tensor_name=*/"hidden_states", /*dim=*/1);
-    img_k = xllm::dit::SequenceParallelMixin::unpad_tensor(
-        img_k_work(), /*tensor_name=*/"hidden_states", /*dim=*/1);
-    txt_q = xllm::dit::SequenceParallelMixin::unpad_tensor(
+    img_q =
+        unpad_tensor(img_q_work(), /*tensor_name=*/"hidden_states", /*dim=*/1);
+    img_k =
+        unpad_tensor(img_k_work(), /*tensor_name=*/"hidden_states", /*dim=*/1);
+    txt_q = unpad_tensor(
         txt_q_work(), /*tensor_name=*/"encoder_hidden_states", /*dim=*/1);
-    txt_k = xllm::dit::SequenceParallelMixin::unpad_tensor(
+    txt_k = unpad_tensor(
         txt_k_work(), /*tensor_name=*/"encoder_hidden_states", /*dim=*/1);
 
     img_q = std::get<0>(img_attn_q_norm_->forward(img_q));
@@ -405,15 +406,16 @@ class JoyAttentionImpl final : public torch::nn::Module {
       img_k = apply_rotary_emb_batched(img_k, rope_cos, rope_sin);
     }
 
-    img_v = xllm::dit::SequenceParallelMixin::unpad_tensor(
-        img_v_work(), /*tensor_name=*/"hidden_states", /*dim=*/1);
-    txt_v = xllm::dit::SequenceParallelMixin::unpad_tensor(
+    img_v =
+        unpad_tensor(img_v_work(), /*tensor_name=*/"hidden_states", /*dim=*/1);
+    txt_v = unpad_tensor(
         txt_v_work(), /*tensor_name=*/"encoder_hidden_states", /*dim=*/1);
 
     torch::Tensor joint_q = torch::cat({img_q, txt_q}, /*dim=*/1);
     torch::Tensor joint_k = torch::cat({img_k, txt_k}, /*dim=*/1);
     torch::Tensor joint_v = torch::cat({img_v, txt_v}, /*dim=*/1);
-    const int32_t sp_size = sp_group_ == nullptr ? 1 : sp_group_->world_size();
+    const int32_t sp_size =
+        process_group_ == nullptr ? 1 : process_group_->world_size();
     const int64_t local_heads = heads_ / sp_size;
     torch::Tensor joint = joyimage_joint_attention(
         joint_q, joint_k, joint_v, local_heads, attn_mask);
@@ -426,20 +428,19 @@ class JoyAttentionImpl final : public torch::nn::Module {
                                         /*start=*/image_sequence_length,
                                         /*end=*/joint.size(1));
 
-    img_out = xllm::dit::SequenceParallelMixin::pad_tensor(
-        img_out, /*tensor_name=*/"hidden_states", /*dim=*/1);
+    img_out = pad_tensor(img_out, /*tensor_name=*/"hidden_states", /*dim=*/1);
     auto img_out_work = parallel_state::all_to_all_4D(img_out,
                                                       /*scatter_idx=*/1,
                                                       /*gather_idx=*/2,
                                                       /*async_ops=*/true,
-                                                      sp_group_);
-    txt_out = xllm::dit::SequenceParallelMixin::pad_tensor(
-        txt_out, /*tensor_name=*/"encoder_hidden_states", /*dim=*/1);
+                                                      process_group_);
+    txt_out =
+        pad_tensor(txt_out, /*tensor_name=*/"encoder_hidden_states", /*dim=*/1);
     auto txt_out_work = parallel_state::all_to_all_4D(txt_out,
                                                       /*scatter_idx=*/1,
                                                       /*gather_idx=*/2,
                                                       /*async_ops=*/true,
-                                                      sp_group_);
+                                                      process_group_);
 
     img_out = img_out_work().flatten(/*start_dim=*/2, /*end_dim=*/3);
     img_out = img_attn_proj_->forward(img_out);
@@ -490,7 +491,6 @@ class JoyAttentionImpl final : public torch::nn::Module {
  private:
   int64_t heads_;
   int64_t head_dim_;
-  ProcessGroup* sp_group_{nullptr};
   layer::AddMatmulWeightTransposed img_attn_q_{nullptr};
   layer::AddMatmulWeightTransposed img_attn_k_{nullptr};
   layer::AddMatmulWeightTransposed img_attn_v_{nullptr};
@@ -710,10 +710,7 @@ class JoyImageEditPlusTransformer3DModelImpl final
   JoyImageEditPlusTransformer3DModelImpl(const ModelContext& context,
                                          const ParallelArgs& parallel_args)
       : xllm::dit::SequenceParallelMixin(
-            /*process_group=*/parallel_args.dit_sp_group_,
-            /*input_sequence_dims=*/
-            {{"hidden_states", 1}, {"encoder_hidden_states", 1}},
-            /*output_sequence_dims=*/{{"hidden_states", 1}}),
+            /*process_group=*/parallel_args.dit_sp_group_),
         options_(context.get_tensor_options()) {
     auto model_args = context.get_model_args();
     hidden_size_ = model_args.hidden_size();
@@ -786,8 +783,8 @@ class JoyImageEditPlusTransformer3DModelImpl final
                         int64_t step_index = 1) {
     xllm::dit::SequenceParallelTensorMap model_outputs =
         sequence_parallel_forward(
-            {{"hidden_states", hidden_states},
-             {"encoder_hidden_states", encoder_hidden_states}},
+            {{"hidden_states", {hidden_states, 1}},
+             {"encoder_hidden_states", {encoder_hidden_states, 1}}},
             [this,
              &timestep,
              &rope_cos,
@@ -797,18 +794,18 @@ class JoyImageEditPlusTransformer3DModelImpl final
              step_index](
                 const xllm::dit::SequenceParallelTensorMap& model_inputs) {
               torch::Tensor output =
-                  forward_impl(model_inputs.at("hidden_states"),
+                  forward_impl(model_inputs.at("hidden_states").first,
                                timestep,
-                               model_inputs.at("encoder_hidden_states"),
+                               model_inputs.at("encoder_hidden_states").first,
                                rope_cos,
                                rope_sin,
                                attention_mask,
                                use_cfg,
                                step_index);
               return xllm::dit::SequenceParallelTensorMap{
-                  {"hidden_states", output}};
+                  {"hidden_states", {output, 1}}};
             });
-    return model_outputs.at("hidden_states");
+    return model_outputs.at("hidden_states").first;
   }
 
  private:

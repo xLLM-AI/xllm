@@ -516,23 +516,6 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
     }
   }
 
-  void verify_loaded_weights(const std::string& prefix) const {
-    patch_embed_->verify_loaded_weights(prefix + "patch_embed.");
-    for (size_t idx = 0; idx < layers_.size(); ++idx) {
-      layers_[idx]->verify_loaded_weights(prefix + "blocks." +
-                                          std::to_string(idx) + ".");
-    }
-    merger_->verify_loaded_weights(prefix + "merger.");
-    for (size_t idx = 0; idx < deepstack_merger_layers_.size(); ++idx) {
-      deepstack_merger_layers_[idx]->verify_loaded_weights(
-          prefix + "deepstack_merger_list." + std::to_string(idx) + ".");
-    }
-    CHECK(is_emb_weight_loaded)
-        << "weight is not loaded for " << prefix + "pos_embed.weight";
-  }
-
-  void merge_loaded_weights() {}
-
  private:
   int hidden_size_ = 0;
   int num_heads_ = 0;

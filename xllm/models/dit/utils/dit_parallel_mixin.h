@@ -19,6 +19,9 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -68,6 +71,135 @@ class CFGParallelMixin {
 
  private:
   ProcessGroup* cfg_group_ = nullptr;
+};
+
+using SequenceParallelTensor = std::pair<torch::Tensor, int64_t>;
+using SequenceParallelTensorMap =
+    std::unordered_map<std::string, SequenceParallelTensor>;
+
+class SequenceParallelMixin {
+ public:
+  torch::Tensor pad_tensor(const torch::Tensor& input,
+                           const std::string& tensor_name,
+                           int64_t dim) const {
+    if (!input.defined()) {
+      return input;
+    }
+
+    const int64_t padding = padding_length(tensor_name);
+    if (padding == 0) {
+      return input;
+    }
+
+    const int64_t normalized_dim = normalize_dim(input, dim);
+    std::vector<int64_t> padding_config(static_cast<size_t>(input.dim() * 2),
+                                        0);
+    const int64_t padding_index = 2 * (input.dim() - normalized_dim - 1) + 1;
+    padding_config[static_cast<size_t>(padding_index)] = padding;
+    return torch::pad(input, padding_config, "constant", 0);
+  }
+
+  torch::Tensor unpad_tensor(const torch::Tensor& input,
+                             const std::string& tensor_name,
+                             int64_t dim) const {
+    if (!input.defined()) {
+      return input;
+    }
+
+    const int64_t padding = padding_length(tensor_name);
+    if (padding == 0) {
+      return input;
+    }
+
+    const int64_t normalized_dim = normalize_dim(input, dim);
+    CHECK_GE(input.size(normalized_dim), padding)
+        << "Padding length exceeds tensor size";
+    return input.narrow(normalized_dim,
+                        /*start=*/0,
+                        input.size(normalized_dim) - padding);
+  }
+
+ protected:
+  explicit SequenceParallelMixin(ProcessGroup* process_group)
+      : process_group_(process_group) {}
+
+  template <typename ForwardFn>
+  SequenceParallelTensorMap sequence_parallel_forward(
+      const SequenceParallelTensorMap& inputs,
+      ForwardFn&& forward_fn) {
+    padding_lengths_.clear();
+    SequenceParallelTensorMap local_inputs = inputs;
+    for (auto& [tensor_name, tensor_and_dim] : local_inputs) {
+      tensor_and_dim.first = scatter_sequence(
+          tensor_and_dim.first, tensor_name, tensor_and_dim.second);
+    }
+
+    SequenceParallelTensorMap outputs =
+        std::forward<ForwardFn>(forward_fn)(local_inputs);
+    for (auto& [tensor_name, tensor_and_dim] : outputs) {
+      tensor_and_dim.first = gather_sequence(
+          tensor_and_dim.first, tensor_name, tensor_and_dim.second);
+    }
+    return outputs;
+  }
+
+ private:
+  int32_t world_size() const {
+    return process_group_ == nullptr ? 1 : process_group_->world_size();
+  }
+
+  bool sequence_parallel_enabled() const { return world_size() > 1; }
+
+  torch::Tensor scatter_sequence(const torch::Tensor& input,
+                                 const std::string& tensor_name,
+                                 int64_t sequence_dim) {
+    if (!input.defined()) {
+      return input;
+    }
+
+    const int64_t sequence_length = input.size(sequence_dim);
+    const int64_t padding_length =
+        (world_size() - sequence_length % world_size()) % world_size();
+    padding_lengths_[tensor_name] = padding_length;
+    if (!sequence_parallel_enabled()) {
+      return input;
+    }
+
+    torch::Tensor padded_input = pad_tensor(input, tensor_name, sequence_dim);
+    return parallel_state::scatter(
+        padded_input, process_group_, static_cast<int32_t>(sequence_dim));
+  }
+
+  torch::Tensor gather_sequence(const torch::Tensor& input,
+                                const std::string& tensor_name,
+                                int64_t sequence_dim) const {
+    if (!sequence_parallel_enabled() || !input.defined()) {
+      return input;
+    }
+
+    torch::Tensor output = parallel_state::gather(
+        input.contiguous(), process_group_, static_cast<int32_t>(sequence_dim));
+    return unpad_tensor(output, tensor_name, sequence_dim);
+  }
+
+  int64_t normalize_dim(const torch::Tensor& input, int64_t dim) const {
+    const int64_t normalized_dim = dim < 0 ? input.dim() + dim : dim;
+    CHECK_GE(normalized_dim, 0) << "Invalid tensor dimension: " << dim;
+    CHECK_LT(normalized_dim, input.dim())
+        << "Invalid tensor dimension: " << dim;
+    return normalized_dim;
+  }
+
+  int64_t padding_length(const std::string& tensor_name) const {
+    auto padding_it = padding_lengths_.find(tensor_name);
+    CHECK(padding_it != padding_lengths_.end())
+        << "Missing sequence-parallel padding metadata: " << tensor_name;
+    return padding_it->second;
+  }
+
+ protected:
+  ProcessGroup* process_group_{nullptr};
+  inline static std::unordered_map<std::string, int64_t> padding_lengths_;
 };
 
 // Mixin providing 1D spatial-parallel VAE encode/decode.
