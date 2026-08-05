@@ -56,5 +56,9 @@ def _register_builtin_models() -> None:
 
     register_model("deepseek_v32")(DeepseekV3ForCausalLM)
 
+    from xllm.python.models.glm5_2 import Glm52ForCausalLM
+
+    register_model("glm_moe_dsa")(Glm52ForCausalLM)
+
 
 _register_builtin_models()

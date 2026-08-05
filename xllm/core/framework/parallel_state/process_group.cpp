@@ -549,6 +549,16 @@ c10::intrusive_ptr<c10d::Work> ProcessGroup::batch_isend_irecv(
              int32_t tag) { return recv_p2p(wave_tensors, peer_rank, tag); },
       [this]() { return synchronize_p2p_staging(); });
 }
+
+HcclComm ProcessGroup::hccl_comm() {
+  CHECK(false) << "hccl_comm is only supported on NPU HCCL process group.";
+  return nullptr;
+}
+
+std::shared_ptr<MegaMoeCommResource>
+ProcessGroup::acquire_mega_moe_comm_resource(const MegaMoeCommSpec& spec) {
+  return mega_moe_comm_slot_.acquire(spec);
+}
 #endif
 
 std::unique_ptr<ProcessGroup> create_process_group(

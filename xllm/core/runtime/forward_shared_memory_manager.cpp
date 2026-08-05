@@ -2372,6 +2372,7 @@ inline void deserialize_forward_input_payload(
   read_tensor(context, input_params.embedding.input_embedding, stream);
   read_vector(context, input_params.parallel.dp_global_token_nums);
   read_vector(context, input_params.parallel.raw_dp_global_token_nums);
+  read_vector(context, input_params.parallel.dp_global_kv_max_seq_lens);
   read_vector(context, input_params.parallel.dp_is_decode);
   read_vector(context, input_params.embedding.embedding_ids);
   read_vector(context, input_params.embedding.linear_state_ids);
@@ -2735,6 +2736,8 @@ inline void serialize_forward_input_sections(
   write_vector(context.descriptor, input_params.parallel.dp_global_token_nums);
   write_vector(context.descriptor,
                input_params.parallel.raw_dp_global_token_nums);
+  write_vector(context.descriptor,
+               input_params.parallel.dp_global_kv_max_seq_lens);
   write_vector(context.descriptor, input_params.parallel.dp_is_decode);
   write_vector(context.descriptor, input_params.embedding.embedding_ids);
   write_vector(context.descriptor, input_params.embedding.linear_state_ids);

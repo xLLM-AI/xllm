@@ -366,13 +366,40 @@ void CollectiveCommunicator::create_process_groups(
                                         device);
   parallel_args_->process_group_ = process_group_.get();
 
-  int32_t tp_size = world_size / dp_size;
-  CHECK_EQ(tp_size * dp_size, world_size);
+  // Orthogonal CP x TP (NPU TORCH only): the rank layout is
+  //   rank = dp_rank * (cp_size * tp_size) + cp_rank * tp_size + tp_rank
+  // so tensor parallelism spans world_size / (dp_size * cp_size), NOT
+  // world_size / dp_size. Narrowing tp_size here is what makes attention head
+  // sharding and the o_proj all-reduce use the attention-TP width: consumers
+  // read it back through tp_group_->world_size(). Leaving it at world/dp would
+  // make ranks r and r + tp_size hold the same heads and double-accumulate in
+  // the all-reduce, which is a silent numerical error rather than a crash.
+  const int32_t normalized_cp_size = cp_size > 0 ? cp_size : 1;
+  bool use_orthogonal_cp = false;
+#if defined(USE_NPU)
+  use_orthogonal_cp =
+      ::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&
+      normalized_cp_size > 1;
+#endif
+  int32_t tp_size = use_orthogonal_cp
+                        ? world_size / (dp_size * normalized_cp_size)
+                        : world_size / dp_size;
+  CHECK_GT(tp_size, 0) << "attention tp_size must be positive: world_size="
+                       << world_size << ", dp_size=" << dp_size
+                       << ", cp_size=" << normalized_cp_size;
+  CHECK_EQ(tp_size * dp_size * (use_orthogonal_cp ? normalized_cp_size : 1),
+           world_size)
+      << "world_size (" << world_size << ") must equal dp_size * cp_size * "
+      << "tp_size (" << dp_size << " * " << normalized_cp_size << " * "
+      << tp_size << ")";
+  // Group counts stop tracking dp_size once tp_size narrows, so derive every
+  // TCPStore window from the group width instead of assuming world/dp.
+  const int32_t tp_group_count = world_size / tp_size;
   port_offset = global_rank / tp_size + 1;
   std::string tp_host = host;
 #if defined(USE_NPU)
   if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&
-      dp_size > 1) {
+      tp_group_count > 1) {
     const int32_t tp_group_start = (global_rank / tp_size) * tp_size;
     tp_host = get_rank_table_server_host(tp_group_start, host);
   }
@@ -386,6 +413,9 @@ void CollectiveCommunicator::create_process_groups(
                                    "tp_group",
                                    device);
   parallel_args_->tp_group_ = tp_group_.get();
+  // Publish the narrowed width so consumers that read tp_size() (rather than
+  // tp_group_->world_size()) agree with the group actually created above.
+  parallel_args_->tp_size(tp_size);
   // Single-rank group is used for modules that don't need tensor parallel (TP)
   // communication. This avoids unnecessary communication. When tp_size > 1,
   // create a process group of size 1 for each rank. Otherwise, reuse tp_group
@@ -401,7 +431,7 @@ void CollectiveCommunicator::create_process_groups(
         global_rank,
         world_size,
         1,
-        port + dp_size + single_rank_group_port_gap + global_rank + 1,
+        port + tp_group_count + single_rank_group_port_gap + global_rank + 1,
         false,
         host,
         "single_rank_group",
@@ -411,14 +441,59 @@ void CollectiveCommunicator::create_process_groups(
   } else {
     parallel_args_->single_rank_group_ = tp_group_.get();
   }
-  // The current MLU model-side CP path spans the full DP-local rank set, which
-  // is also represented by tp_group_ today. Keep a distinct CP handle so a
-  // future orthogonal CP x TP topology can provide its own process group.
-  parallel_args_->cp_group_ = tp_group_.get();
-  port += dp_size + single_rank_group_port_gap + single_rank_group_count;
+  port += tp_group_count + single_rank_group_port_gap + single_rank_group_count;
+
+#if defined(USE_NPU)
+  if (use_orthogonal_cp) {
+    // A CP group varies cp_rank while holding (dp_rank, tp_rank) fixed, so its
+    // members are strided by tp_size and cannot be expressed by the contiguous
+    // or `trans` groupings of the size-only overload. Enumerate the ranks
+    // explicitly instead.
+    const std::vector<int32_t> cp_ranks =
+        parallel_state::compute_cp_group_ranks(
+            global_rank, world_size, dp_size, normalized_cp_size);
+    const int32_t cp_local_rank = parallel_args_->cp_rank();
+    CHECK_EQ(static_cast<int32_t>(cp_ranks.size()), normalized_cp_size);
+    CHECK_GE(cp_local_rank, 0);
+    CHECK_LT(cp_local_rank, normalized_cp_size);
+    CHECK_EQ(cp_ranks[cp_local_rank], global_rank)
+        << "cp_rank() must index this rank inside its own CP group";
+    // One CP group per (dp_rank, tp_rank) pair. tp_rank alone is not unique:
+    // with dp=2/cp=2/tp=4 the groups {0,4} and {8,12} both have tp_rank 0 and
+    // would race for the same TCPStore port.
+    const int32_t dp_stride = normalized_cp_size * tp_size;
+    const int32_t cp_group_index =
+        (global_rank / dp_stride) * tp_size + global_rank % tp_size;
+    const int32_t cp_group_count = dp_size * tp_size;
+    cp_group_ =
+        create_process_group(global_rank,
+                             cp_local_rank,
+                             cp_ranks,
+                             world_size,
+                             normalized_cp_size,
+                             port + cp_group_index + 1,
+                             get_rank_table_server_host(cp_ranks.front(), host),
+                             "cp_group",
+                             device);
+    parallel_args_->cp_group_ = cp_group_.get();
+    port += cp_group_count;
+  } else
+#endif
+  {
+    // The current MLU model-side CP path spans the full DP-local rank set,
+    // which is also represented by tp_group_ today. Keep a distinct CP handle
+    // so an orthogonal CP x TP topology can provide its own process group.
+    parallel_args_->cp_group_ = tp_group_.get();
+  }
 
   if (dp_size > 1) {
-    port_offset = global_rank % tp_size + 1;
+    // A DP group varies dp_rank while preserving the full local model-shard
+    // index. Under orthogonal CP that index spans cp_rank AND tp_rank, so the
+    // grouping key is global_rank % (world_size / dp_size) -- matching the
+    // `trans` grouping below. Keying on tp_size alone was equivalent only
+    // while tp_size == world/dp; after narrowing it collides.
+    const int32_t dp_group_count = world_size / dp_size;
+    port_offset = global_rank % dp_group_count + 1;
     dp_local_process_group_ = create_process_group(global_rank,
                                                    world_size,
                                                    dp_size,
@@ -428,7 +503,7 @@ void CollectiveCommunicator::create_process_groups(
                                                    "dp_group",
                                                    device);
     parallel_args_->dp_local_process_group_ = dp_local_process_group_.get();
-    port += tp_size;
+    port += dp_group_count;
   }
 
   int32_t moe_tp_size = world_size / ep_size;

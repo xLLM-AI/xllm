@@ -159,6 +159,8 @@ struct ModelArgs {
   PROPERTY(std::string, index_topk_pattern);
   PROPERTY(int32_t, index_skip_topk_offset) = 0;
   PROPERTY(bool, index_share_for_mtp_iteration) = false;
+  PROPERTY(std::vector<std::string>, indexer_types) = {};
+  PROPERTY(std::vector<std::string>, mlp_layer_types) = {};
 
   // deepseek v4
   PROPERTY(int32_t, rope_head_dim) = 0;

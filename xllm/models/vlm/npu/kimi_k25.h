@@ -107,6 +107,33 @@ void load_layernorm_if_defined(const StateDict& state_dict,
                          module_name,
                          layernorm_name + ".bias");
 }
+
+bool is_w8a8_dynamic_quant(const QuantArgs& quant_args,
+                           const std::string& module_prefix) {
+  auto quant = quant_args.get_quant_method(module_prefix, "weight");
+  return quant.has_value() &&
+         (*quant == "W8A8_DYNAMIC" || *quant == "w8a8_dynamic");
+}
+
+ModelContext make_kimi_k25_vision_context(const ModelContext& context) {
+  const auto& quant_args = context.get_quant_args();
+  const bool vision_mlp_is_w8a8_dynamic =
+      is_w8a8_dynamic_quant(quant_args,
+                            "vision_tower.encoder.blocks.0.mlp.fc0") &&
+      is_w8a8_dynamic_quant(quant_args,
+                            "vision_tower.encoder.blocks.0.mlp.fc1");
+  if (!vision_mlp_is_w8a8_dynamic) {
+    return context;
+  }
+
+  auto vision_quant_args = quant_args;
+  vision_quant_args.quant_method() = kQuantMethodAscendInt8;
+  vision_quant_args.quantize_type() = "w8a8_dynamic";
+  vision_quant_args.bits() = 8;
+  vision_quant_args.moe_weight_bits() = 8;
+  vision_quant_args.activation_dynamic() = true;
+  return context.with_quant_args(vision_quant_args);
+}
 }  // namespace
 
 class KimiK2_5_VisionBlockImpl : public torch::nn::Module {
@@ -773,8 +800,9 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
                          << tp_size
                          << " (world_size=" << parallel_args.world_size()
                          << ", dp_size=" << dp_size << ")";
-    visual_ =
-        register_module("vision_tower", KimiK2_5_VisionTransformer(context));
+    auto vision_context = make_kimi_k25_vision_context(context);
+    visual_ = register_module("vision_tower",
+                              KimiK2_5_VisionTransformer(vision_context));
     auto mm_ptype = model_args_.mm_projector_type();
     if (mm_ptype == "patchmerger") {
       mm_projector_ =
@@ -944,18 +972,24 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
   torch::Tensor get_input_embeddings(const torch::Tensor input_ids,
                                      const ModelInputParams& input_params) {
     const auto& mm_data = input_params.multimodal.mm_data;
-    torch::Tensor multimodal_embeds;
-    if (const auto& emb = mm_data.get<torch::Tensor>("embedding")) {
-      multimodal_embeds = emb.value();
-    }
-    auto inputs_embeds =
+    torch::Tensor inputs_embeds =
         language_model_->get_npu_word_embedding()(input_ids, 0);
-    if (!multimodal_embeds.defined()) {
-      return inputs_embeds;
-    }
-    auto is_multimodal = generate_multimodal_mask(input_ids);
-    inputs_embeds = merge_multimodal_embeddings(
-        inputs_embeds, multimodal_embeds, is_multimodal);
+    auto merge_modality = [&](const std::string& embed_key,
+                              const std::string& mask_key) {
+      auto emb = mm_data.get<torch::Tensor>(embed_key);
+      if (!emb.has_value() || !emb.value().defined()) {
+        return;
+      }
+      auto mask = mm_data.get<torch::Tensor>(mask_key);
+      if (!mask.has_value() || !mask.value().defined()) {
+        return;
+      }
+      inputs_embeds =
+          merge_multimodal_embeddings(inputs_embeds, emb.value(), mask.value());
+    };
+
+    merge_modality("image|embedding", "image|mask");
+    merge_modality("video|embedding", "video|mask");
     return inputs_embeds;
   }
 
@@ -965,6 +999,8 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
                       const ModelInputParams& input_params) {
     return language_model_(tokens, positions, kv_caches, input_params);
   }
+
+  bool supports_mla_graph_kv_bucketing() const { return true; }
 
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) {

@@ -1220,6 +1220,7 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
   batched_inputs.reserve(dp_size_ * cp_size_);
   // some dp related variables
   std::vector<int32_t> dp_global_token_nums(dp_size_);
+  std::vector<int32_t> dp_global_kv_max_seq_lens(dp_size_);
   std::vector<int32_t> dp_is_decode(dp_size_, 0);
   // when enable dp, we need to check the forward type of each batch
   // and set the empty forward type of each batch to the same value as the first
@@ -1237,6 +1238,8 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
         batched_inputs[dp_rank].input_params.meta.batch_forward_type;
     dp_global_token_nums[dp_rank] =
         static_cast<int32_t>(batched_inputs[dp_rank].host_token_ids().numel());
+    dp_global_kv_max_seq_lens[dp_rank] =
+        batched_inputs[dp_rank].input_params.meta.kv_max_seq_len;
     if (util::is_deepseek_v4_model_type(args_.model_type())) {
       const int64_t actual_scheduled_tokens = static_cast<int64_t>(
           batched_inputs[dp_rank].host_token_ids().numel());
@@ -1290,6 +1293,8 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
         dp_global_token_nums;
     batched_inputs[dp_rank].input_params.parallel.raw_dp_global_token_nums =
         dp_global_token_nums;
+    batched_inputs[dp_rank].input_params.parallel.dp_global_kv_max_seq_lens =
+        dp_global_kv_max_seq_lens;
     batched_inputs[dp_rank].input_params.parallel.dp_is_decode = dp_is_decode;
     if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
       batched_inputs[dp_rank].input_params.expert.eplb_info = eplb_info;

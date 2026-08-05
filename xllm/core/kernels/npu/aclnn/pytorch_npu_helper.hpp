@@ -529,6 +529,14 @@ inline aclTensor* convert_type(const c10::optional<at::Tensor>& opt_tensor) {
   return nullptr;
 }
 
+inline aclTensorList* convert_type(
+    const c10::optional<at::TensorList>& opt_tensor_list) {
+  if (opt_tensor_list.has_value()) {
+    return convert_type(opt_tensor_list.value());
+  }
+  return nullptr;
+}
+
 inline aclIntArray* convert_type(
     const c10::optional<at::IntArrayRef>& opt_array) {
   if (opt_array.has_value()) {
@@ -571,6 +579,9 @@ auto convert_to_op_api_func(const Tuple& params, void* op_api_addr) {
 }
 
 inline void release(aclTensor* p) {
+  if (p == nullptr) {
+    return;
+  }
   static const auto acl_destroy_tensor =
       get_op_api_func<AclDestroyTensorFn>("aclDestroyTensor");
   if (acl_destroy_tensor == nullptr) {
@@ -609,6 +620,9 @@ inline void release(aclBoolArray* p) {
 }
 
 inline void release(aclTensorList* p) {
+  if (p == nullptr) {
+    return;
+  }
   static const auto acl_destroy_tensor_list =
       get_op_api_func<AclDestroyTensorListFn>("aclDestroyTensorList");
   if (acl_destroy_tensor_list == nullptr) {

@@ -47,6 +47,7 @@ limitations under the License.
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/profile_config.h"
@@ -706,9 +707,15 @@ const CpPlanRuntimeConfig& WorkerImpl::npu_cp_plan_runtime_config() const {
     return npu_cp_runtime_config_;
   }
   CpPlanRuntimeConfig cfg;
-  cfg.enabled = parallel_args_.cp_size() > 1 &&
-                Platform::uses_model_cp_sharding() &&
-                owns_npu_cp_plan_build() && model_supports_model_cp();
+  // NpuCpPlan is the ATB-side CP substrate: it emits cp_ep_meta for ATB graph
+  // nodes and reads attn tp/cp widths out of MappingNPU's json, which only the
+  // ATB branch populates. TORCH models (deepseek_v4) own their CP split inside
+  // the model, so the worker must not shard a second time here -- and must not
+  // reach the mapping CHECK below with an empty mapping.
+  cfg.enabled =
+      parallel_args_.cp_size() > 1 && Platform::uses_model_cp_sharding() &&
+      ::xllm::KernelConfig::get_instance().npu_kernel_backend() == "ATB" &&
+      owns_npu_cp_plan_build() && model_supports_model_cp();
   cfg.has_prefix_slots =
       KVCacheConfig::get_instance().enable_prefix_cache() ||
       SchedulerConfig::get_instance().enable_chunked_prefill();

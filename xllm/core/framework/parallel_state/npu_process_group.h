@@ -56,6 +56,7 @@ class ProcessGroupImpl : public ProcessGroup {
   ~ProcessGroupImpl() override;
 
   std::string hccl_comm_name(bool init_comm = true) override;
+  HcclComm hccl_comm() override;
 
  private:
   HcclComm comm_ = nullptr;

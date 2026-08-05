@@ -69,6 +69,8 @@ class CausalLM : public torch::nn::Module {
 
   virtual bool is_hybrid_linear_attention() { return false; }
 
+  virtual bool supports_mla_graph_kv_bucketing() const { return false; }
+
   virtual std::unique_ptr<ModelGraphMetadataState>
   create_graph_forward_metadata_state() {
     return nullptr;
@@ -208,6 +210,13 @@ class CausalLMImpl : public CausalLM {
     } else {
       return CausalLM::is_hybrid_linear_attention();
     }
+  }
+
+  bool supports_mla_graph_kv_bucketing() const override {
+    if constexpr (detail::has_supports_mla_graph_kv_bucketing<Model>::value) {
+      return model_->supports_mla_graph_kv_bucketing();
+    }
+    return CausalLM::supports_mla_graph_kv_bucketing();
   }
 
   std::unique_ptr<ModelGraphMetadataState> create_graph_forward_metadata_state()

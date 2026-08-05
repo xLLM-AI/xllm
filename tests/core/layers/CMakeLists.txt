@@ -24,6 +24,21 @@ cc_test(
     GTest::gtest_main
 )
 
+# DeepSeek-V4 prefill CP split arithmetic. Kept outside the platform
+# subdirectories: the split math has no accelerator or ProcessGroup dependency,
+# so every platform build can verify it.
+cc_test(
+  NAME
+    deepseek_v4_cp_split_test
+  SRCS
+    deepseek_v4_cp_split_test.cpp
+  DEPS
+    :parallel_state
+    glog::glog
+    torch
+    GTest::gtest_main
+)
+
 if(USE_CUDA)
   add_subdirectory(cuda)
 endif()

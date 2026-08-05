@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
+#include "framework/parallel_state/mega_moe_comm_resource.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/quant_args.h"
 #include "framework/state_dict/state_dict.h"
@@ -47,7 +48,8 @@ class FusedMoEImpl : public torch::nn::Module {
   torch::Tensor forward_expert(
       const torch::Tensor& hidden_states,
       const torch::Tensor& router_logits,
-      const std::optional<torch::Tensor>& shared_output);
+      const std::optional<torch::Tensor>& shared_output,
+      bool use_mega_moe);
   torch::Tensor forward_with_selected_experts(
       const torch::Tensor& hidden_states,
       const torch::Tensor& topk_weights,
@@ -71,6 +73,19 @@ class FusedMoEImpl : public torch::nn::Module {
   torch::Tensor select_experts(const torch::Tensor& hidden_states_2d,
                                const torch::Tensor& router_logits_2d,
                                SelectedExpertInfo& selected_expert_info);
+
+  // Computes router choices in the global expert-id space. MegaMoe consumes
+  // these values before the legacy per-rank expert mask is applied.
+  std::pair<torch::Tensor, torch::Tensor> select_global_experts(
+      const torch::Tensor& hidden_states_2d,
+      const torch::Tensor& router_logits_2d);
+
+  void initialize_mega_moe();
+  void ensure_mega_moe_weights();
+  torch::Tensor forward_mega_moe(
+      const torch::Tensor& hidden_states,
+      const torch::Tensor& router_logits,
+      const std::optional<torch::Tensor>& shared_output);
 
  private:
   int64_t num_total_experts_;
@@ -172,6 +187,13 @@ class FusedMoEImpl : public torch::nn::Module {
   torch::Tensor dispatch_ffn_w13_scale_;
   torch::Tensor dispatch_ffn_w2_scale_;
   std::string moe_ep_group_name_;
+
+  bool mega_moe_enabled_ = false;
+  std::weak_ptr<MegaMoeCommResource> mega_moe_comm_resource_;
+  torch::Tensor mega_moe_w1_storage_;
+  torch::Tensor mega_moe_w2_storage_;
+  std::vector<torch::Tensor> mega_moe_w1_list_;
+  std::vector<torch::Tensor> mega_moe_w2_list_;
 };
 TORCH_MODULE(FusedMoE);
 

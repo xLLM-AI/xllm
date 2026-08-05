@@ -117,8 +117,8 @@ bool resolve_model_registration(const std::string& model_type,
     effective_backend =
         is_torch_only_model_type(model_type) ? kTorchBackend : kAtbBackend;
   } else if (model_type == "qwen3" || model_type == "qwen3_moe" ||
-             model_type == "deepseek_v32") {
-    // qwen3/qwen3_moe/deepseek_v32 support both backends.
+             model_type == "deepseek_v32" || model_type == "glm_moe_dsa") {
+    // qwen3/qwen3_moe/deepseek_v32/glm_moe_dsa support both backends.
   } else if (is_torch_only_model_type(model_type)) {
     if (backend != kTorchBackend) {
       if (error_message != nullptr) {
@@ -169,9 +169,16 @@ bool resolve_model_registration_name(const std::string& model_type,
 }
 
 bool is_npu_model_cp_capable(const std::string& resolved_name) {
+  // Registers model-side CP capability for master-side validation. Note this
+  // is not the same switch as the worker-side NpuCpPlan gate: deepseek_v4 and
+  // deepseek_v4_mtp own their CP split inside the model (TORCH backend) and
+  // deliberately keep model_supports_model_cp() false so the worker does not
+  // shard a second time.
   static const std::unordered_set<std::string> kCpCapableModels = {
       "deepseek_v32",
       "deepseek_v32_mtp",
+      "deepseek_v4",
+      "deepseek_v4_mtp",
       "glm_moe_dsa",
       "glm_moe_dsa_mtp",
   };

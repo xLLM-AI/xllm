@@ -377,7 +377,7 @@ std::shared_ptr<Request> VLMMaster::build_request(
   if (sp.stop_token_ids.has_value()) {
     const auto& stop_token_ids = sp.stop_token_ids.value();
     stop_tokens.insert(stop_token_ids.begin(), stop_token_ids.end());
-  } else {
+  } else if (!sp.ignore_eos) {
     stop_tokens = model_args_.stop_token_ids();
   }
   std::vector<std::vector<int32_t>> stop_sequences;

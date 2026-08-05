@@ -50,21 +50,55 @@ constexpr uint64_t MBUF_SIZE = 128 * 1024 * 1024;
 
 namespace {
 
-constexpr int64_t kMaxSpecVerifyGraphUpdateBlockTableWidth = (1 << 15) - 1;
-
-ProcessGroup* spec_broadcast_group(const ParallelArgs& parallel_args) {
-  return parallel_args.tp_group_ != nullptr ? parallel_args.tp_group_
-                                            : parallel_args.process_group_;
-}
-
-void broadcast_spec_tokens(torch::Tensor& tokens,
-                           ProcessGroup* pg,
-                           int32_t root_rank = 0) {
-  if (pg == nullptr || pg->world_size() <= 1 || !tokens.defined()) {
+void broadcast_tokens_in_group(torch::Tensor& tokens,
+                               ProcessGroup* process_group,
+                               int32_t root_rank = 0) {
+  if (process_group == nullptr || process_group->world_size() <= 1 ||
+      !tokens.defined()) {
     return;
   }
   tokens = tokens.contiguous();
-  pg->broadcast(tokens, root_rank);
+  process_group->broadcast(tokens, root_rank);
+}
+
+bool should_broadcast_spec_tokens(const ParallelArgs& parallel_args,
+                                  bool enable_spec_token_broadcast,
+                                  bool all_greedy_sample) {
+  const bool use_orthogonal_cp_consensus =
+      parallel_args.cp_size() > 1 && parallel_args.tp_group_ != nullptr &&
+      parallel_args.cp_group_ != nullptr &&
+      parallel_args.cp_group_ != parallel_args.tp_group_;
+  return use_orthogonal_cp_consensus ||
+         (enable_spec_token_broadcast && !all_greedy_sample);
+}
+
+constexpr int64_t kMaxSpecVerifyGraphUpdateBlockTableWidth = (1 << 15) - 1;
+
+// Speculative state is replicated across every model rank within one DP
+// replica. With orthogonal CP x TP, tp_group_ covers only one CP shard, while
+// cp_group_ connects the same TP rank across CP shards. Broadcast along both
+// axes so every replica caches and consumes the same sampled token, without
+// crossing into another DP replica through the world group.
+void broadcast_spec_tokens(torch::Tensor& tokens,
+                           const ParallelArgs& parallel_args) {
+  // DeepSeek-V4 TORCH publishes orthogonal TP and CP groups. Other backends
+  // retain their existing single-group speculative broadcast behavior.
+  ProcessGroup* tp_group = parallel_args.tp_group_ != nullptr
+                               ? parallel_args.tp_group_
+                               : parallel_args.process_group_;
+  const bool use_orthogonal_cp_consensus =
+      parallel_args.cp_size() > 1 && parallel_args.tp_group_ != nullptr &&
+      parallel_args.cp_group_ != nullptr &&
+      parallel_args.cp_group_ != parallel_args.tp_group_;
+  if (!use_orthogonal_cp_consensus) {
+    broadcast_tokens_in_group(tokens, tp_group);
+    return;
+  }
+
+  broadcast_tokens_in_group(tokens, parallel_args.tp_group_);
+  if (parallel_args.cp_group_ != parallel_args.tp_group_) {
+    broadcast_tokens_in_group(tokens, parallel_args.cp_group_);
+  }
 }
 
 int64_t get_dp_local_tp_size(const ParallelArgs& parallel_args) {
@@ -937,6 +971,16 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
 
   {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+    // Target prefill seeds the MTP decode cache. Under orthogonal CP x TP each
+    // CP shard samples independently unless this token is synchronized across
+    // both axes; caching divergent tokens makes the first decode input disagree
+    // with the non-driver CP shard's DecodeState.
+    if (should_broadcast_spec_tokens(
+            parallel_args_,
+            get_optimization_config().enable_spec_token_broadcast,
+            input.sampling_params.all_greedy_sample)) {
+      broadcast_spec_tokens(output.sample_output.next_tokens, parallel_args_);
+    }
     if (embeddings.defined()) {
       prefill_input.input_params.embedding.input_embedding = embeddings.clone();
     }
@@ -1284,11 +1328,12 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
       // process_draft_sample_output() compresses the still-full [batch, vocab]
       // probs into the cache: gathering the cached prob with a unified token
       // yields a unified prob, so we only broadcast the [batch] token tensor.
-      if (get_optimization_config().enable_spec_token_broadcast &&
-          !current_draft_input.sampling_params.all_greedy_sample) {
+      if (should_broadcast_spec_tokens(
+              parallel_args_,
+              get_optimization_config().enable_spec_token_broadcast,
+              current_draft_input.sampling_params.all_greedy_sample)) {
         SampleOutput& draft_sample = draft_outputs.back().sample_output;
-        broadcast_spec_tokens(draft_sample.next_tokens,
-                              spec_broadcast_group(parallel_args_));
+        broadcast_spec_tokens(draft_sample.next_tokens, parallel_args_);
       }
       process_draft_sample_output(draft_outputs.back().sample_output);
     }
@@ -1444,10 +1489,11 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
 
     // Catch-all for cross-rank RNG divergence: unify accepted tokens before
     // deriving any device-resident state used by the next draft iteration.
-    if (get_optimization_config().enable_spec_token_broadcast &&
-        !input.sampling_params.all_greedy_sample) {
-      broadcast_spec_tokens(val_output.next_tokens,
-                            spec_broadcast_group(parallel_args_));
+    if (should_broadcast_spec_tokens(
+            parallel_args_,
+            get_optimization_config().enable_spec_token_broadcast,
+            input.sampling_params.all_greedy_sample)) {
+      broadcast_spec_tokens(val_output.next_tokens, parallel_args_);
     }
 
     base_positions = validate_input.positions.view({batch_size, num_val_tokens})
