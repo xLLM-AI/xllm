@@ -12,7 +12,7 @@
 ### 环境设置与编译
 下载镜像：
 ```bash
-docker pull quay.io/ascend/xllm:a3-arm-dev-010-cache-mtp
+docker pull <待定>
 ```
 
 启动容器：
@@ -37,11 +37,19 @@ docker run -it \
 -v /var/log/npu/dump/:/var/log/npu/dump \
 -v $HOME:$HOME \
 -w $HOME \
-quay.io/ascend/xllm:a3-arm-dev-010-cache-mtp \
+<待定> \
 /bin/bash
 ```
 
 编译xLLM：
+
+镜像默认已将 xLLM 源码放在 `/opt/xllm`，直接进入该目录编译即可：
+```bash
+cd /opt/xllm
+python setup.py build --device npu
+```
+
+如果镜像中没有 `/opt/xllm`，再重新拉取并编译：
 ```bash
 git clone -b lingji-competition https://github.com/jd-opensource/xllm
 cd xllm
@@ -53,7 +61,15 @@ pre-commit install
 git submodule update --init --recursive
 
 # Build xllm in docker container
-python setup.py build
+python setup.py build --device npu
+```
+
+Qwen3.5 路径会依赖 TileLang 相关 kernel。不要手动删除或绕过 TileLang 生成产物，否则可能导致编译看似成功，但推理阶段失败。
+
+如果删除了 `build` 目录，直接重新编译即可，只是耗时会回到完整编译级别：
+
+```bash
+python setup.py build --device npu
 ```
 
 ### 下载模型
@@ -67,47 +83,42 @@ modelscope download --model Qwen/Qwen3.5-4B --local_dir /path/to/model/Qwen3.5-4
 ```
 
 
-### xLLM server启动脚本
+### xLLM server 启动
+
+仓库提供了 [`qwen35_start.sh`](qwen35_start.sh) 启动脚本，已内置竞赛基线的推荐配置（非量化、单卡、关闭 prefix cache / chunked prefill / schedule overlap / shm）。完成编译后，通过环境变量指定模型路径等参数即可启动 OpenAI 兼容服务：
+
 ```bash
-#!/bin/bash
-set -e
+MODEL_PATH=/path/to/model/Qwen3.5-4B \
+MODEL_ID=Qwen3.5-4B \
+PORT=18000 \
+VISIBLE_DEVICES=0 \
+bash qwen35_start.sh
+```
 
-rm -rf core.*
+常用参数（可通过环境变量覆盖）：
 
-source /usr/local/Ascend/ascend-toolkit/set_env.sh 
-source /usr/local/Ascend/nnal/atb/set_env.sh
-export ASCEND_RT_VISIBLE_DEVICES=0
-export HCCL_IF_BASE_PORT=43432  # HCCL communication base port
+| 参数 | 默认值 | 说明 |
+|---|---:|---|
+| `MODEL_PATH` | `/path/to/model/Qwen3.5-4B` | 模型目录 |
+| `MODEL_ID` | `Qwen3.5-4B` | 对外暴露的模型名 |
+| `PORT` | `18000` | 服务端口 |
+| `VISIBLE_DEVICES` | `0` | 可见的 NPU 卡号 |
+| `DEVICE` | `0` | 使用的逻辑设备号 |
 
+如果编译产物不在默认路径 `/opt/xllm/build/lib.linux-aarch64-cpython-311/xllm/xllm`，可通过 `XLLM_BIN` 指定实际二进制：
 
-MODEL_PATH="/path/to/model/Qwen3.5-4B"               # Model path
-MASTER_NODE_ADDR="127.0.0.1:9748"                  # Master node address (must be globally consistent)
-START_PORT=18000                                   # Service starting port
-START_DEVICE=0                                     # Starting logical device number
-LOG_DIR="log"                                      # Log directory
-NNODES=1                                           # Number of nodes (current script launches 1 process)
+```bash
+XLLM_BIN=/opt/xllm/build/lib.linux-aarch64-cpython-311/xllm/xllm \
+MODEL_PATH=/path/to/model/Qwen3.5-4B \
+PORT=18000 \
+VISIBLE_DEVICES=0 \
+bash qwen35_start.sh
+```
 
-mkdir -p $LOG_DIR
+可以通过 `EXTRA_ARGS` 追加其它 xLLM 参数：
 
-for (( i=0; i<$NNODES; i++ ))
-do
-  PORT=$((START_PORT + i))
-  DEVICE=$((START_DEVICE + i))
-  LOG_FILE="$LOG_DIR/node_$i.log"
-  /path/to/xllm \
-    --model $MODEL_PATH \
-    --devices="npu:$DEVICE" \
-    --port $PORT \
-    --master_node_addr=$MASTER_NODE_ADDR \
-    --nnodes=$NNODES \
-    --max_memory_utilization=0.6 \
-    --block_size=128 \
-    --enable_prefix_cache=false \
-    --enable_chunked_prefill=false \
-    --enable_schedule_overlap=false \
-    --enable_shm=false \
-    --node_rank=$i \ > $LOG_FILE 2>&1 &
-done
+```bash
+EXTRA_ARGS="--max_concurrent_requests=1" bash qwen35_start.sh
 ```
 
 
