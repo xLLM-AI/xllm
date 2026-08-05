@@ -51,4 +51,24 @@ if(EXISTS "$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
     "-Wl,-rpath-link,$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
 endif()
 
+cc_test(
+  NAME
+    fia_decode_lse_probe_test
+  SRCS
+    fia_decode_lse_probe_test.cpp
+  DEPS
+    ascendcl
+    nnopbase
+    torch
+    torch_npu
+    kernels
+    npu_kernels
+    GTest::gtest_main
+    glog::glog
+)
+if(EXISTS "$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
+  target_link_options(fia_decode_lse_probe_test PRIVATE
+    "-Wl,-rpath-link,$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
+endif()
+
 add_subdirectory(tilelang)

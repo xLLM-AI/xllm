@@ -88,5 +88,9 @@ TEST(SpawnWorkerProtocolTest, PreservesExplicitEmptyDtype) {
   EXPECT_TRUE(indexer_cache_dtype->empty());
 }
 
+TEST(SpawnWorkerProtocolTest, AppendsDecodeContextParallelSizeAtTail) {
+  EXPECT_EQ(kDecodeContextParallelSizeArgumentIndex, kArgumentCount - 1);
+}
+
 }  // namespace
 }  // namespace xllm::spawn_worker_protocol

@@ -59,6 +59,7 @@ std::string Options::to_string() const {
      << ", flashcomm1_min_prefill_tokens: " << flashcomm1_min_prefill_tokens()
      << ", enable_mmrs_fusion: " << enable_mmrs_fusion()
      << ", mmrs_comm_mode: " << mmrs_comm_mode() << ", cp_size: " << cp_size()
+     << ", decode_context_parallel_size: " << decode_context_parallel_size()
      << ", master_node_addr: " << master_node_addr().value_or("null")
      << ", instance_role: " << instance_role().to_string()
      << ", transfer_listen_port: " << transfer_listen_port()

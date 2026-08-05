@@ -275,6 +275,101 @@ std::vector<int32_t> compute_cp_group_ranks(int32_t global_rank,
   return ranks;
 }
 
+std::vector<int32_t> compute_dcp_group_ranks(int32_t global_rank,
+                                             int32_t world_size,
+                                             int32_t dp_size,
+                                             int32_t dcp_size) {
+  CHECK_GT(dcp_size, 1) << "compute_dcp_group_ranks requires dcp_size > 1.";
+  CHECK_GT(dp_size, 0) << "dp_size must be positive.";
+  CHECK_GT(world_size, 0) << "world_size must be positive.";
+  CHECK_EQ(world_size % dp_size, 0)
+      << "world_size (" << world_size << ") must be divisible by dp_size ("
+      << dp_size << ") so that tp_size is integral.";
+  const int32_t tp_size = world_size / dp_size;
+  CHECK_EQ(tp_size % dcp_size, 0)
+      << "tp_size (" << tp_size << ") must be divisible by dcp_size ("
+      << dcp_size << ").";
+  CHECK_GE(global_rank, 0);
+  CHECK_LT(global_rank, world_size);
+
+  const int32_t tp_rank = global_rank % tp_size;
+  const int32_t dp_base = global_rank - tp_rank;
+  const int32_t dcp_group_base = (tp_rank / dcp_size) * dcp_size;
+
+  std::vector<int32_t> ranks;
+  ranks.reserve(dcp_size);
+  for (int32_t member = 0; member < dcp_size; ++member) {
+    ranks.emplace_back(dp_base + dcp_group_base + member);
+  }
+  return ranks;
+}
+
+int64_t compute_dcp_cache_slot(int64_t logical_slot,
+                               int64_t position,
+                               int32_t block_size,
+                               int32_t dcp_size,
+                               int32_t dcp_rank,
+                               int32_t interleave_size) {
+  if (logical_slot < 0) {
+    return -1;
+  }
+  CHECK_GE(position, 0) << "position must be non-negative.";
+  CHECK_GT(block_size, 0) << "block_size must be positive.";
+  CHECK_GT(dcp_size, 1) << "dcp_size must be greater than 1.";
+  CHECK_GE(dcp_rank, 0) << "dcp_rank must be non-negative.";
+  CHECK_LT(dcp_rank, dcp_size) << "dcp_rank must be smaller than dcp_size.";
+  CHECK_GT(interleave_size, 0) << "interleave_size must be positive.";
+  CHECK_EQ(interleave_size, block_size)
+      << "DCP local block-table selection requires block interleave.";
+
+  const int64_t owner = (position / block_size) % dcp_size;
+  if (owner != dcp_rank) {
+    return -1;
+  }
+  return logical_slot;
+}
+
+torch::Tensor select_dcp_local_block_table(const torch::Tensor& block_table,
+                                           int32_t dcp_size,
+                                           int32_t dcp_rank) {
+  CHECK(block_table.defined()) << "block_table must be defined.";
+  CHECK_EQ(block_table.dim(), 2) << "block_table must be two-dimensional.";
+  CHECK_GT(dcp_size, 1) << "dcp_size must be greater than 1.";
+  CHECK_GE(dcp_rank, 0) << "dcp_rank must be non-negative.";
+  CHECK_LT(dcp_rank, dcp_size) << "dcp_rank must be smaller than dcp_size.";
+
+  const int64_t block_table_width = block_table.size(1);
+  if (block_table_width <= dcp_rank) {
+    return block_table.slice(/*dim=*/1, /*start=*/0, /*end=*/0);
+  }
+
+  const torch::TensorOptions index_options =
+      torch::TensorOptions().dtype(torch::kLong).device(block_table.device());
+  const torch::Tensor local_block_indices =
+      torch::arange(dcp_rank, block_table_width, dcp_size, index_options);
+  return block_table.index_select(/*dim=*/1, local_block_indices);
+}
+
+torch::Tensor remap_dcp_cache_slots(const torch::Tensor& positions,
+                                    const torch::Tensor& slots,
+                                    int32_t interleave_size,
+                                    int32_t dcp_size,
+                                    int32_t dcp_rank) {
+  CHECK_GT(interleave_size, 0) << "interleave_size must be positive.";
+  CHECK_GT(dcp_size, 1) << "dcp_size must be greater than 1.";
+  CHECK_GE(dcp_rank, 0) << "dcp_rank must be non-negative.";
+  CHECK_LT(dcp_rank, dcp_size) << "dcp_rank must be smaller than dcp_size.";
+  CHECK_EQ(positions.numel(), slots.numel())
+      << "positions and slots must have the same token count.";
+
+  const torch::Tensor pos = positions.to(torch::kCPU).to(torch::kLong);
+  const torch::Tensor slot = slots.to(torch::kCPU).to(torch::kLong);
+  const torch::Tensor owner =
+      torch::floor_divide(pos, interleave_size) % dcp_size;
+  const torch::Tensor mask = (owner == dcp_rank) & (slot >= 0);
+  return torch::where(mask, slot, torch::full_like(slot, -1, slot.options()));
+}
+
 torch::Tensor scatter(torch::Tensor input,
                       ProcessGroup* process_group,
                       int dim) {

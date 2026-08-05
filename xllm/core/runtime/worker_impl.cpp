@@ -73,6 +73,7 @@ limitations under the License.
 #include "framework/model/model_input_params.h"
 #include "framework/model_loader.h"
 #include "framework/parallel_state/npu_cp_plan.h"
+#include "framework/parallel_state/parallel_state.h"
 #include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
 #include "framework/xtensor/global_xtensor.h"
@@ -750,6 +751,35 @@ void WorkerImpl::prepare_work_before_execute(const ForwardInput& input,
       input, processed_input, *prepare_stream_);
 }
 
+#if defined(USE_NPU)
+torch::Tensor WorkerImpl::recompute_dcp_cache_slots(
+    const ForwardInput& input) const {
+  const int32_t dcp_size = parallel_args_.dcp_size_effective();
+  CHECK_GT(dcp_size, 1) << "recompute_dcp_cache_slots requires dcp_size > 1";
+
+  const torch::Tensor& old_cache_slots =
+      input.input_params.attention.device.new_cache_slots;
+  if (!old_cache_slots.defined() || old_cache_slots.numel() == 0) {
+    return old_cache_slots;
+  }
+
+  const torch::Tensor& host_positions = input.host_positions();
+  CHECK(host_positions.defined())
+      << "DCP cache slot remap requires host positions";
+  CHECK_EQ(host_positions.numel(), old_cache_slots.numel())
+      << "DCP cache slot remap requires positions and cache slots to have the "
+         "same token count";
+
+  const int32_t interleave_size = options_.block_size();
+  const int32_t dcp_rank = parallel_args_.dcp_rank();
+
+  const torch::Tensor remapped = parallel_state::remap_dcp_cache_slots(
+      host_positions, old_cache_slots, interleave_size, dcp_size, dcp_rank);
+  return remapped.to(old_cache_slots.scalar_type())
+      .to(old_cache_slots.device());
+}
+#endif
+
 void WorkerImpl::prepare_work_before_execute_on_stream(
     const ForwardInput& input,
     ForwardInput& processed_input,
@@ -878,6 +908,24 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
     // CP prepare after global attention-meta consumers.
     processed_input.input_params.parallel.cp_plan.prepare(
         processed_input, npu_cp_plan_runtime_config());
+
+    if (parallel_args_.dcp_size_effective() > 1 &&
+        processed_input.kv_slot_layout == KvSlotLayout::LOGICAL_REAL) {
+      const BatchForwardType& batch_forward_type =
+          processed_input.input_params.meta.batch_forward_type;
+      CHECK(batch_forward_type.is_prefill() || batch_forward_type.is_decode() ||
+            batch_forward_type.is_empty())
+          << "DCP-1c supports only normal full prefill and decode cache "
+             "writes; chunked and mixed batches require DCP-2 layout "
+             "support.";
+      CHECK(!processed_input.input_params.is_spec_verify)
+          << "DCP-1c does not support speculative verification cache writes.";
+      CHECK(!processed_input.input_params.enable_graph)
+          << "DCP-1c does not support graph-captured cache writes.";
+      processed_input.input_params.attention.device.new_cache_slots =
+          recompute_dcp_cache_slots(processed_input);
+      processed_input.kv_slot_layout = KvSlotLayout::NPU_DCP_LOCAL_PHYSICAL;
+    }
 
     if (can_prepare_npu_graph_decode_input(input_params)) {
       model_executor_->prepare_graph_input(processed_input.token_ids,

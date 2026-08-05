@@ -179,6 +179,8 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .node_rank(distributed_config.node_rank())
       .dp_size(parallel_config.dp_size())
       .cp_size(parallel_config.cp_size())
+      .decode_context_parallel_size(
+          parallel_config.decode_context_parallel_size())
       .ep_size(parallel_config.ep_size())
       .tp_size(static_cast<int32_t>(parallel_config.tp_size()))
       .sp_size(static_cast<int32_t>(parallel_config.sp_size()))

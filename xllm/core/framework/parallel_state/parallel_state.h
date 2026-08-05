@@ -74,6 +74,36 @@ std::vector<int32_t> compute_cp_group_ranks(int32_t global_rank,
                                             int32_t dp_size,
                                             int32_t cp_size);
 
+// Global ranks in this rank's DCP group, ordered by DCP rank.
+std::vector<int32_t> compute_dcp_group_ranks(int32_t global_rank,
+                                             int32_t world_size,
+                                             int32_t dp_size,
+                                             int32_t dcp_size);
+
+// Remap a logical KV cache slot to this DCP rank's local physical slot. Returns
+// -1 when the token is owned by a different DCP rank.
+int64_t compute_dcp_cache_slot(int64_t logical_slot,
+                               int64_t position,
+                               int32_t block_size,
+                               int32_t dcp_size,
+                               int32_t dcp_rank,
+                               int32_t interleave_size);
+
+torch::Tensor select_dcp_local_block_table(const torch::Tensor& block_table,
+                                           int32_t dcp_size,
+                                           int32_t dcp_rank);
+
+// Batched tensor form of compute_dcp_cache_slot for the production remap path.
+// Keeps a slot only when this DCP rank owns the token; others become -1. Owner
+// uses integer floor division on the position tensor (a plain `/` on an integer
+// tensor is float true-division and mis-owns tokens with
+// 0<position<interleave).
+torch::Tensor remap_dcp_cache_slots(const torch::Tensor& positions,
+                                    const torch::Tensor& slots,
+                                    int32_t interleave_size,
+                                    int32_t dcp_size,
+                                    int32_t dcp_rank);
+
 torch::Tensor scatter(torch::Tensor input,
                       ProcessGroup* process_group,
                       int dim = -1);

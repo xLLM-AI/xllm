@@ -406,6 +406,7 @@ class WorkerType {
 enum class KvSlotLayout : int8_t {
   LOGICAL_REAL = 0,  // Builder slots; input to prepare_cache_slots.
   NPU_CP_RECOVERED_PHYSICAL = 1,  // Already CP-expanded; skip re-prepare.
+  NPU_DCP_LOCAL_PHYSICAL = 2,     // Already DCP-local; non-owned tokens are -1.
 };
 
 // Step-level decode metadata for Rec multi-round (device loop).

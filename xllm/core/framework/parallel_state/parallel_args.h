@@ -148,6 +148,8 @@ struct ParallelArgs {
   // cp size
   PROPERTY(int32_t, cp_size) = 1;
 
+  PROPERTY(int32_t, dcp_size) = 1;
+
   // Derived: CP rank of the current process within its DP group.
   // rank layout: dp_rank * (cp_size * tp_size) + cp_rank * tp_size + tp_rank
   [[nodiscard]] int32_t cp_rank() const noexcept {
@@ -163,6 +165,24 @@ struct ParallelArgs {
 
   [[nodiscard]] int32_t kv_split_size_effective() const noexcept {
     return kv_split_size_ > 0 ? kv_split_size_ : cp_size_;
+  }
+
+  [[nodiscard]] int32_t dcp_size_effective() const noexcept {
+    return dcp_size_ > 0 ? dcp_size_ : 1;
+  }
+
+  [[nodiscard]] int32_t dcp_rank() const noexcept {
+    if (dcp_size_effective() <= 1) {
+      return 0;
+    }
+    if (dp_size_ <= 0) {
+      return 0;
+    }
+    const int32_t tp_sz = world_size_ / dp_size_;
+    if (tp_sz <= 0) {
+      return 0;
+    }
+    return (rank_ % tp_sz) % dcp_size_effective();
   }
 
   [[nodiscard]] int32_t kv_split_rank() const noexcept {
@@ -211,6 +231,7 @@ struct ParallelArgs {
   ProcessGroup* single_rank_group_ = nullptr;
   // CP ProcessGroup for prefill AllGather (NPU standalone; MLU aliases TP).
   ProcessGroup* cp_group_ = nullptr;
+  ProcessGroup* dcp_group_ = nullptr;
   ProcessGroup* moe_ep_group_ = nullptr;
   // Dedicated group for EPLB weight migration. It has the same rank set as
   // moe_ep_group_ but isolates migration P2P from forward collectives.

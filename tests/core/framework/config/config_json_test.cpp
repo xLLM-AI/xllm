@@ -84,11 +84,17 @@ class DumpConfigJsonFlagGuard final {
 
 class CpSizeFlagGuard final {
  public:
-  CpSizeFlagGuard() : old_cp_size_(FLAGS_cp_size) {}
-  ~CpSizeFlagGuard() { FLAGS_cp_size = old_cp_size_; }
+  CpSizeFlagGuard()
+      : old_cp_size_(FLAGS_cp_size),
+        old_decode_context_parallel_size_(FLAGS_decode_context_parallel_size) {}
+  ~CpSizeFlagGuard() {
+    FLAGS_cp_size = old_cp_size_;
+    FLAGS_decode_context_parallel_size = old_decode_context_parallel_size_;
+  }
 
  private:
   int32_t old_cp_size_;
+  int32_t old_decode_context_parallel_size_;
 };
 
 class ConfigFlagGuard final {
@@ -274,17 +280,21 @@ TEST(KVCacheConfigValidationTest, RejectsUnsupportedIndexerCacheDtypes) {
 
 TEST(ConfigJsonTest, ParallelConfigReadsContextParallelSize) {
   CpSizeFlagGuard flag_guard;
-  const JsonReader json =
-      config::parse_json_string(R"json({"cp_size": 4})json");
+  const JsonReader json = config::parse_json_string(
+      R"json({"cp_size": 4, "decode_context_parallel_size": 2})json");
   ParallelConfig parallel_config;
   parallel_config.from_json(json);
 
   EXPECT_EQ(parallel_config.cp_size(), 4);
+  EXPECT_EQ(parallel_config.decode_context_parallel_size(), 2);
 }
 
-TEST(ConfigJsonTest, RegistersOnlyContextParallelCommandLineOption) {
+TEST(ConfigJsonTest, RegistersContextParallelCommandLineOptions) {
   google::CommandLineFlagInfo flag_info;
   EXPECT_TRUE(google::GetCommandLineFlagInfo("cp_size", &flag_info));
+  EXPECT_EQ(flag_info.default_value, "1");
+  EXPECT_TRUE(google::GetCommandLineFlagInfo("decode_context_parallel_size",
+                                             &flag_info));
   EXPECT_EQ(flag_info.default_value, "1");
 
   const std::string removed_flag = std::string("enable_") + "prefill_sp";

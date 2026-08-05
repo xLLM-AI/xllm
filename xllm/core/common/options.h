@@ -140,6 +140,8 @@ class Options {
 
   PROPERTY(int32_t, cp_size) = 1;
 
+  PROPERTY(int32_t, decode_context_parallel_size) = 1;
+
   PROPERTY(int32_t, ep_size) = 1;
 
   PROPERTY(int32_t, tp_size) = 1;

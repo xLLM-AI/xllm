@@ -107,6 +107,8 @@ DECLARE_int32(ep_size);
 
 DECLARE_int32(cp_size);
 
+DECLARE_int32(decode_context_parallel_size);
+
 DECLARE_int64(tp_size);
 
 DECLARE_int64(sp_size);

@@ -227,6 +227,8 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
         global_rank, world_size, dp_size, cp_size, nullptr, ep_size);
     parallel_args_->kv_split_size(
         ::xllm::ParallelConfig::get_instance().kv_split_size());
+    parallel_args_->dcp_size(
+        ::xllm::ParallelConfig::get_instance().decode_context_parallel_size());
     return;
   }
 
@@ -284,11 +286,15 @@ CollectiveCommunicator::CollectiveCommunicator(int global_rank,
                                                   dispatchAndCombineHcclComm);
   parallel_args_->kv_split_size(
       ::xllm::ParallelConfig::get_instance().kv_split_size());
+  parallel_args_->dcp_size(
+      ::xllm::ParallelConfig::get_instance().decode_context_parallel_size());
 #else
   parallel_args_ = std::make_unique<ParallelArgs>(
       global_rank, world_size, dp_size, cp_size, nullptr, ep_size);
   parallel_args_->kv_split_size(
       ::xllm::ParallelConfig::get_instance().kv_split_size());
+  parallel_args_->dcp_size(
+      ::xllm::ParallelConfig::get_instance().decode_context_parallel_size());
 #endif
 }
 
@@ -416,6 +422,47 @@ void CollectiveCommunicator::create_process_groups(
   // future orthogonal CP x TP topology can provide its own process group.
   parallel_args_->cp_group_ = tp_group_.get();
   port += dp_size + single_rank_group_port_gap + single_rank_group_count;
+
+  const int32_t dcp_size = parallel_args_->dcp_size_effective();
+  if (dcp_size > 1) {
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
+    CHECK_EQ(tp_size % dcp_size, 0)
+        << "DCP requires tp_size divisible by dcp_size, tp_size=" << tp_size
+        << ", dcp_size=" << dcp_size;
+
+    const int32_t tp_rank = global_rank % tp_size;
+    const int32_t dcp_rank = tp_rank % dcp_size;
+    const int32_t dcp_group_base = (tp_rank / dcp_size) * dcp_size;
+    const int32_t dp_base = global_rank - tp_rank;
+    const std::vector<int32_t> dcp_group_ranks =
+        parallel_state::compute_dcp_group_ranks(
+            global_rank, world_size, dp_size, dcp_size);
+
+    const int32_t dcp_groups_per_dp = tp_size / dcp_size;
+    const int32_t dp_rank = dp_base / tp_size;
+    const int32_t dcp_group_index =
+        dp_rank * dcp_groups_per_dp + dcp_group_base / dcp_size;
+    std::string dcp_host = host;
+#if defined(USE_NPU)
+    if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH") {
+      dcp_host = get_rank_table_server_host(dcp_group_ranks.front(), host);
+    }
+#endif
+    dcp_group_ = create_process_group(global_rank,
+                                      dcp_rank,
+                                      dcp_group_ranks,
+                                      world_size,
+                                      dcp_size,
+                                      port + dcp_group_index + 1,
+                                      dcp_host,
+                                      "dcp_group",
+                                      device);
+    parallel_args_->dcp_group_ = dcp_group_.get();
+    port += world_size / dcp_size;
+#else
+    CHECK(false) << "DCP process group is not supported on this platform";
+#endif
+  }
 
   if (dp_size > 1) {
     port_offset = global_rank % tp_size + 1;

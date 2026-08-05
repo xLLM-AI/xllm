@@ -34,6 +34,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "common/types.h"
 #include "core/common/xllm_build_info.h"
+#include "core/distributed_runtime/dcp_compat.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -54,6 +55,7 @@ limitations under the License.
 #include "rec_engine.h"
 #include "rec_master.h"
 #include "speculative_engine.h"
+#include "util/json_reader.h"
 #include "util/model_config_utils.h"
 #include "util/scope_guard.h"
 #include "util/timer.h"
@@ -68,6 +70,154 @@ DECLARE_bool(graceful_quit_on_sighup);
 
 namespace xllm {
 namespace {
+
+struct DcpModelConfig {
+  std::string model_type;
+  int64_t num_attention_heads = 0;
+  int64_t num_key_value_heads = 0;
+};
+
+bool is_qwen3_5_text_model_type(const std::string& model_type) {
+  return model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text";
+}
+
+DcpModelConfig load_dcp_model_config(
+    const std::filesystem::path& model_path,
+    const std::optional<std::string>& backend) {
+  const std::filesystem::path config_json_path = model_path / "config.json";
+  CHECK(std::filesystem::exists(config_json_path))
+      << "Please check config.json file in model path: " << model_path;
+
+  JsonReader reader;
+  CHECK(reader.parse(config_json_path.string()))
+      << "Failed to parse config.json file in model path: " << model_path;
+
+  DcpModelConfig config;
+  config.model_type = util::get_model_type(reader, model_path, backend);
+  config.num_attention_heads = reader.value_or<int64_t>(
+      std::vector<std::string>{"text_config.num_attention_heads",
+                               "num_attention_heads"},
+      int64_t{0});
+  config.num_key_value_heads = reader.value_or<int64_t>(
+      std::vector<std::string>{"text_config.num_key_value_heads",
+                               "num_key_value_heads"},
+      int64_t{0});
+  return config;
+}
+
+std::optional<std::string> validate_model_dcp(
+    const Options& options,
+    EngineType engine_type,
+    const std::optional<DcpModelConfig>& model_config,
+    int32_t global_world_size) {
+  const int32_t dcp_size = options.decode_context_parallel_size();
+  if (dcp_size < 1) {
+    return "decode_context_parallel_size must be greater than or equal to 1";
+  }
+
+  if (model_config.has_value() &&
+      is_qwen3_5_text_model_type(model_config->model_type) &&
+      options.cp_size() > 1) {
+    return "Qwen3.5 decode context parallelism uses "
+           "--decode_context_parallel_size, not --cp_size; keep cp_size=1";
+  }
+
+  if (dcp_size == 1) {
+    return std::nullopt;
+  }
+
+  if (std::optional<std::string> dcp_option_error =
+          validate_dcp_first_version_options(options, engine_type)) {
+    return dcp_option_error;
+  }
+
+  if (options.cp_size() != 1) {
+    return "decode_context_parallel_size cannot be combined with cp_size; "
+           "keep cp_size=1";
+  }
+  if (!Platform::is_npu()) {
+    return "decode_context_parallel_size is currently supported only on NPU";
+  }
+  if (options.npu_kernel_backend() != "TORCH") {
+    return "decode_context_parallel_size requires --npu_kernel_backend=TORCH";
+  }
+  if (options.enable_graph()) {
+    return "decode_context_parallel_size does not support graph capture yet; "
+           "disable graph or set decode_context_parallel_size=1";
+  }
+  if (engine_type != EngineType::LLM && engine_type != EngineType::SSM) {
+    return "decode context parallelism supports only LLM text generation";
+  }
+  if (options.task_type() != "generate") {
+    return "decode context parallelism supports only the generate task";
+  }
+  if (!model_config.has_value()) {
+    return "decode_context_parallel_size requires model config to validate "
+           "Qwen3.5 GQA topology";
+  }
+  if (!is_qwen3_5_text_model_type(model_config->model_type)) {
+    return "decode_context_parallel_size currently supports only Qwen3.5 "
+           "text models, got model_type=" +
+           model_config->model_type;
+  }
+  if (std::optional<std::string> dcp_model_error =
+          validate_dcp_first_version_model_type(model_config->model_type)) {
+    return dcp_model_error;
+  }
+  if (options.dp_size() < 1) {
+    return "decode context parallelism requires dp_size >= 1";
+  }
+  if (global_world_size < 1) {
+    return "decode context parallelism requires world_size >= 1";
+  }
+  if (global_world_size % options.dp_size() != 0) {
+    return "decode context parallelism requires world_size divisible by "
+           "dp_size";
+  }
+
+  const int64_t tp_size = global_world_size / options.dp_size();
+  if (tp_size < 1) {
+    return "decode context parallelism requires tensor parallel size >= 1";
+  }
+  const int64_t num_attention_heads = model_config->num_attention_heads;
+  const int64_t num_key_value_heads = model_config->num_key_value_heads;
+  if (num_attention_heads <= 0 || num_key_value_heads <= 0) {
+    return "decode context parallelism requires positive num_attention_heads "
+           "and num_key_value_heads in config.json";
+  }
+  if (num_attention_heads % tp_size != 0) {
+    return "decode context parallelism requires num_attention_heads divisible "
+           "by tensor parallel size";
+  }
+  if (num_attention_heads % num_key_value_heads != 0) {
+    return "decode context parallelism requires num_attention_heads divisible "
+           "by num_key_value_heads";
+  }
+  if (tp_size <= num_key_value_heads) {
+    return "decode context parallelism for Qwen3.5 GQA requires tensor "
+           "parallel size greater than num_key_value_heads";
+  }
+  if (tp_size % num_key_value_heads != 0) {
+    return "decode context parallelism requires tensor parallel size divisible "
+           "by num_key_value_heads";
+  }
+
+  const int64_t num_kv_head_replicas = tp_size / num_key_value_heads;
+  const int64_t num_q_heads_per_kv = num_attention_heads / num_key_value_heads;
+  if (dcp_size > num_kv_head_replicas) {
+    return "decode_context_parallel_size exceeds the number of replicated KV "
+           "head ranks in the TP group";
+  }
+  if (num_q_heads_per_kv % dcp_size != 0) {
+    return "num_attention_heads / num_key_value_heads must be divisible by "
+           "decode_context_parallel_size";
+  }
+  if (num_kv_head_replicas % dcp_size != 0) {
+    return "tensor parallel KV-head replica count must be divisible by "
+           "decode_context_parallel_size";
+  }
+  return std::nullopt;
+}
 
 std::optional<std::string> validate_model_cp(const Options& options,
                                              EngineType engine_type,
@@ -297,10 +447,19 @@ Master::Master(const Options& options, EngineType type)
   const std::vector<torch::Device> devices = {visible_devices[device_idx]};
   // World size is the node count (one worker per process).
   const int32_t global_world_size = options_.nnodes();
-  std::string cp_model_type;
-  if (options_.cp_size() > 1 && Platform::uses_model_cp_sharding()) {
-    cp_model_type = util::get_model_type(model_path, options_.backend());
+#if defined(USE_NPU)
+  resolve_npu_kernel_backend_for_options(&options_);
+#endif
+  std::optional<DcpModelConfig> dcp_model_config;
+  if (options_.decode_context_parallel_size() > 1 ||
+      (options_.cp_size() > 1 && Platform::uses_model_cp_sharding())) {
+    dcp_model_config = load_dcp_model_config(model_path, options_.backend());
   }
+  const std::optional<std::string> dcp_error =
+      validate_model_dcp(options_, type, dcp_model_config, global_world_size);
+  CHECK(!dcp_error.has_value()) << dcp_error.value();
+  const std::string cp_model_type =
+      dcp_model_config.has_value() ? dcp_model_config->model_type : "";
   const std::optional<std::string> cp_error =
       validate_model_cp(options_, type, cp_model_type, global_world_size);
   CHECK(!cp_error.has_value()) << cp_error.value();
@@ -308,10 +467,14 @@ Master::Master(const Options& options, EngineType type)
   print_startup_banner(model_path, options_.backend(), options_.node_rank());
   LOG(INFO) << "Master init options: " << options_.to_string();
   ParallelConfig::get_instance().cp_size(options_.cp_size());
+  ParallelConfig::get_instance().decode_context_parallel_size(
+      options_.decode_context_parallel_size());
   // cp_size <= 1 -> "disabled", otherwise "model" (model-side CP).
   const char* cp_sharding_stage =
       options_.cp_size() <= 1 ? "disabled" : "model";
   LOG(INFO) << "Resolved CP config: cp_size=" << options_.cp_size()
+            << ", decode_context_parallel_size="
+            << options_.decode_context_parallel_size()
             << ", world_size=" << global_world_size
             << ", dp_size=" << options_.dp_size()
             << ", ep_size=" << options_.ep_size()
@@ -351,7 +514,6 @@ Master::Master(const Options& options, EngineType type)
   if (options.eplb_update_threshold().has_value()) {
     eplb_config.eplb_update_threshold(options.eplb_update_threshold().value());
   }
-  resolve_npu_kernel_backend_for_options(&options_);
 #endif
   ParallelConfig::get_instance().enable_multi_stream_parallel(
       options.enable_multi_stream_parallel() && (options.nnodes() > 1));
@@ -393,6 +555,7 @@ Master::Master(const Options& options, EngineType type)
         .enable_mmrs_fusion(options_.enable_mmrs_fusion())
         .mmrs_comm_mode(options_.mmrs_comm_mode())
         .cp_size(options_.cp_size())
+        .decode_context_parallel_size(options_.decode_context_parallel_size())
         .npu_kernel_backend(options_.npu_kernel_backend())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .enable_offline_inference(options_.enable_offline_inference())
@@ -471,6 +634,7 @@ Master::Master(const Options& options, EngineType type)
         .enable_mmrs_fusion(options_.enable_mmrs_fusion())
         .mmrs_comm_mode(options_.mmrs_comm_mode())
         .cp_size(options_.cp_size())
+        .decode_context_parallel_size(options_.decode_context_parallel_size())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .max_tokens_per_batch(options_.max_tokens_per_batch())
         .max_seqs_per_batch(options_.max_seqs_per_batch())
@@ -529,6 +693,7 @@ Master::Master(const Options& options, EngineType type)
         .enable_mmrs_fusion(options_.enable_mmrs_fusion())
         .mmrs_comm_mode(options_.mmrs_comm_mode())
         .cp_size(options_.cp_size())
+        .decode_context_parallel_size(options_.decode_context_parallel_size())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .max_tokens_per_batch(options_.max_tokens_per_batch())
         .max_seqs_per_batch(options_.max_seqs_per_batch())
@@ -595,6 +760,7 @@ Master::Master(const Options& options, EngineType type)
         .dp_size(options_.dp_size())
         .ep_size(options_.ep_size())
         .cp_size(options_.cp_size())
+        .decode_context_parallel_size(options_.decode_context_parallel_size())
         .max_seqs_per_batch(options_.max_seqs_per_batch())
         .beam_width(options_.beam_width())
         .max_tokens_per_batch(options_.max_tokens_per_batch())

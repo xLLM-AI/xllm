@@ -119,6 +119,7 @@ class WorkerImpl {
   // Per-worker-static configuration handed to NpuCpPlan::prepare(); built once
   // and cached.
   const CpPlanRuntimeConfig& npu_cp_plan_runtime_config() const;
+  torch::Tensor recompute_dcp_cache_slots(const ForwardInput& input) const;
 #endif
 
   // False on MTP composite: only leaf workers run NpuCpPlan::prepare.

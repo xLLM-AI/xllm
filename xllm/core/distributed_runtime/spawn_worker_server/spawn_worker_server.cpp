@@ -91,7 +91,8 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
                                      int32_t cp_size,
                                      int32_t ep_size,
                                      const InstanceRole& instance_role,
-                                     bool enable_mtp_draft_body_tp1) {
+                                     bool enable_mtp_draft_body_tp1,
+                                     int32_t decode_context_parallel_size) {
   // TODO: pass whole xllm::runtime::Options here from main process.
   xllm::runtime::Options runner_options;
   const std::string backend = get_backend_from_worker_type(worker_type);
@@ -116,6 +117,7 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
       .dp_size(dp_size)
       .ep_size(ep_size)
       .cp_size(cp_size)
+      .decode_context_parallel_size(decode_context_parallel_size)
       .tp_size(tp_size)
       .sp_size(effective_sp_size)
       .cfg_size(effective_cfg_size)
@@ -139,6 +141,7 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
       .dp_size(dp_size)
       .ep_size(ep_size)
       .cp_size(cp_size)
+      .decode_context_parallel_size(decode_context_parallel_size)
       .tp_size(tp_size)
       .sp_size(effective_sp_size)
       .cfg_size(effective_cfg_size)
@@ -183,6 +186,7 @@ SpawnWorkerServer::SpawnWorkerServer(const std::string& master_node_addr,
                              cp_size,
                              /* process_group = */ nullptr,
                              ep_size);
+  parallel_args.dcp_size(decode_context_parallel_size);
   worker_server_ = std::make_unique<WorkerServer>(local_rank,
                                                   master_node_addr,
                                                   done_,
