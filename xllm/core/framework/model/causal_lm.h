@@ -115,7 +115,16 @@ class CausalLM : public torch::nn::Module {
   virtual void prepare_expert_weight(
       int32_t layer_id,
       const std::vector<int32_t>& expert_ids) = 0;
+  virtual void start_expert_weight_transfer(int32_t /*layer_id*/) {}
   virtual void update_expert_weight(int32_t layer_id) = 0;
+
+  // Returns whether the last prepare_expert_weight() call for the given layer
+  // succeeded. Default is true so models that do not fail-report keep the old
+  // behavior; DSV4 (npu_torch) overrides this to expose real prepare status
+  // so EplbExecutor does not advance ready_layer_id on silent failures.
+  virtual bool last_prepare_expert_weight_ok(int32_t /*layer_id*/) const {
+    return true;
+  }
 
   virtual const torch::TensorOptions& options() const = 0;
 
@@ -335,8 +344,22 @@ class CausalLMImpl : public CausalLM {
     return model_->prepare_expert_weight(layer_id, expert_ids);
   }
 
+  void start_expert_weight_transfer(int32_t layer_id) override {
+    if constexpr (detail::has_start_expert_weight_transfer<Model>::value) {
+      model_->start_expert_weight_transfer(layer_id);
+    }
+  }
+
   void update_expert_weight(int32_t layer_id) override {
     return model_->update_expert_weight(layer_id);
+  }
+
+  bool last_prepare_expert_weight_ok(int32_t layer_id) const override {
+    if constexpr (detail::has_last_prepare_expert_weight_ok<Model>::value) {
+      return model_->last_prepare_expert_weight_ok(layer_id);
+    } else {
+      return CausalLM::last_prepare_expert_weight_ok(layer_id);
+    }
   }
 
 #if defined(USE_NPU)

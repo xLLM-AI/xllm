@@ -641,9 +641,8 @@ struct ForwardOutput {
 
   // for eplb, collect the tokens load of experts on each worker.
   torch::Tensor expert_load_data;
-  // for eplb, indicates that the specified layer on the worker
-  // has completed the asynchronous loading of new weight.
-  int32_t prepared_layer_id;
+  // EPLB prepare-attempt token completed by this worker.
+  int64_t prepared_token = -1;
 
   BeamSearchOutput beam_search_output;
   torch::Tensor beam_sequence_group;
@@ -661,7 +660,7 @@ struct RawSampleOutput {
 struct RawForwardOutput {
   std::vector<RawSampleOutput> outputs;  // num seqs
   std::vector<int64_t> expert_load_data;
-  int32_t prepared_layer_id;
+  int64_t prepared_token = -1;
   // beam search kernel output
   std::vector<int32_t> src_seq_idxes;
   std::vector<int32_t> out_tokens;

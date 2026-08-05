@@ -179,7 +179,7 @@ void WorkerService::step(ForwardInput& fwd_input,
                          std::vector<torch::Tensor>& dit_images,
                          std::vector<std::string>& dit_text_output,
                          torch::Tensor& expert_load_data,
-                         int32_t& prepared_layer_id,
+                         int64_t& prepared_token,
                          torch::Tensor& src_seq_idxes,
                          torch::Tensor& out_tokens,
                          torch::Tensor& out_logprobs) {
@@ -203,7 +203,7 @@ void WorkerService::step(ForwardInput& fwd_input,
       expert_load_data = safe_to(forward_outputs.value().expert_load_data,
                                  torch::kCPU,
                                  /*non_blocking=*/true);
-      prepared_layer_id = forward_outputs.value().prepared_layer_id;
+      prepared_token = forward_outputs.value().prepared_token;
 
       {
         auto copy_output_to_host = [&]() {
@@ -335,7 +335,7 @@ void WorkerService::create_polling_shm_thread(
           std::vector<torch::Tensor> dit_images;
           std::vector<std::string> dit_text_output;
           torch::Tensor expert_load_data;
-          int32_t prepared_layer_id = -1;
+          int64_t prepared_token = -1;
 
           // beam search kernel output
           torch::Tensor src_seq_idxes;
@@ -352,7 +352,7 @@ void WorkerService::create_polling_shm_thread(
                dit_images,
                dit_text_output,
                expert_load_data,
-               prepared_layer_id,
+               prepared_token,
                src_seq_idxes,
                out_tokens,
                out_logprobs);
@@ -367,7 +367,7 @@ void WorkerService::create_polling_shm_thread(
                                                    dit_images,
                                                    dit_text_output,
                                                    expert_load_data,
-                                                   prepared_layer_id,
+                                                   prepared_token,
                                                    src_seq_idxes,
                                                    out_tokens,
                                                    out_logprobs);
@@ -776,7 +776,7 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
         std::vector<torch::Tensor> dit_images;
         std::vector<std::string> dit_text_output;
         torch::Tensor expert_load_data;
-        int32_t prepared_layer_id = -1;
+        int64_t prepared_token = -1;
         // beam search kernel output
         torch::Tensor src_seq_idxes;
         torch::Tensor out_tokens;
@@ -792,7 +792,7 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
              dit_images,
              dit_text_output,
              expert_load_data,
-             prepared_layer_id,
+             prepared_token,
              src_seq_idxes,
              out_tokens,
              out_logprobs);
@@ -804,7 +804,7 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
                                 embeddings,
                                 mm_embeddings,
                                 expert_load_data,
-                                prepared_layer_id,
+                                prepared_token,
                                 src_seq_idxes,
                                 out_tokens,
                                 out_logprobs,
@@ -831,7 +831,7 @@ void WorkerService::GetLastStepResult(
         if (forward_outputs) {
           const ForwardOutput& forward_output = forward_outputs.value();
           const auto& sample_output = forward_output.sample_output;
-          int32_t prepared_layer_id = forward_output.prepared_layer_id;
+          int64_t prepared_token = forward_output.prepared_token;
           const auto& beam_search_output = forward_output.beam_search_output;
           torch::Tensor expert_load_data;
           torch::Tensor embeddings;
@@ -935,7 +935,7 @@ void WorkerService::GetLastStepResult(
                                     embeddings,
                                     mm_embeddings,
                                     expert_load_data,
-                                    prepared_layer_id,
+                                    prepared_token,
                                     src_seq_idxes,
                                     out_tokens,
                                     out_logprobs,

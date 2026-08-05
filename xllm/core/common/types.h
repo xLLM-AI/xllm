@@ -360,21 +360,6 @@ struct JsonTool {
   JsonTool(const std::string& tool_type, const JsonFunction& func)
       : type(tool_type), function(func) {}
 };
-// Experts update the required information
-struct EplbInfo {
-  // Target layer ID for new expert weight pre-loading (-1 = no pending load)
-  // Values >=0 indicate the layer ID that should start loading new expert
-  // weights
-  int32_t prepare_layer_id = -1;
-  // Expert IDs requiring updates, ordered by device shard assignment
-  // Contains per-device expert indices for distributed weight updates
-  std::vector<int32_t> expert_ids;
-  // Layer ID ready for expert weight activation (-1 = no pending update)
-  // Values >=0 indicate the layer ID whose pre-loaded weights are ready for
-  // deployment
-  int32_t update_layer_id = -1;
-};
-
 class MasterStatus {
  public:
   enum Value : int32_t {

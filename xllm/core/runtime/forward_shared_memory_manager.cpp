@@ -231,9 +231,11 @@ inline size_t get_transfer_kv_info_size(const TransferKVInfo& info) {
 }
 
 inline size_t get_eplb_info_size(const EplbInfo& info) {
-  return type_size<int32_t>  // prepare_layer_id
+  return type_size<int32_t>    // prepare_layer_id
+         + type_size<int64_t>  // prepare_token
          + get_vector_size(info.expert_ids) +
-         type_size<int32_t>;  // update_layer_id
+         type_size<int32_t> +  // update_layer_id
+         type_size<int64_t>;   // activation_token
 }
 
 inline size_t get_mm_dict_size(const MMDict& mm_dict) {
@@ -831,15 +833,19 @@ inline void write_transfer_kv_info(RawInputSerializeContext& context,
 
 inline void write_eplb_info(char*& buffer, const EplbInfo& info) {
   write_data(buffer, info.prepare_layer_id);
+  write_data(buffer, info.prepare_token);
   write_vector(buffer, info.expert_ids);
   write_data(buffer, info.update_layer_id);
+  write_data(buffer, info.activation_token);
 }
 
 inline void write_eplb_info(RawInputSerializeContext& context,
                             const EplbInfo& info) {
   write_data(context.descriptor, info.prepare_layer_id);
+  write_data(context.descriptor, info.prepare_token);
   write_vector(context.descriptor, info.expert_ids);
   write_data(context.descriptor, info.update_layer_id);
+  write_data(context.descriptor, info.activation_token);
 }
 
 inline void write_swap_blocks(char*& buffer,
@@ -1741,14 +1747,18 @@ inline void read_transfer_kv_info(ReadContext& context, TransferKVInfo& info) {
 
 inline void read_eplb_info(const char*& buffer, EplbInfo& info) {
   read_data(buffer, info.prepare_layer_id);
+  read_data(buffer, info.prepare_token);
   read_vector(buffer, info.expert_ids);
   read_data(buffer, info.update_layer_id);
+  read_data(buffer, info.activation_token);
 }
 
 inline void read_eplb_info(ReadContext& context, EplbInfo& info) {
   read_data(context, info.prepare_layer_id);
+  read_data(context, info.prepare_token);
   read_vector(context, info.expert_ids);
   read_data(context, info.update_layer_id);
+  read_data(context, info.activation_token);
 }
 
 inline void read_swap_blocks(const char*& buffer,
@@ -2548,7 +2558,7 @@ size_t calculate_raw_forward_output_size(const RawForwardOutput& output) {
   size += get_vector_size(output.src_seq_idxes);
   size += get_vector_size(output.out_tokens);
   size += get_vector_size(output.out_logprobs);
-  size += type_size<int32_t>;  // prepared_layer_id
+  size += type_size<int64_t>;  // prepared_token
   const bool has_dit_forward_output =
       !output.dit_forward_output.tensors.empty();
   size += type_size<bool>;
@@ -2622,7 +2632,7 @@ void deserialize_raw_forward_output(const char* buffer,
   read_vector(buffer, output.out_tokens);
   read_vector(buffer, output.out_logprobs);
 
-  read_data(buffer, output.prepared_layer_id);
+  read_data(buffer, output.prepared_token);
 
   bool has_dit_forward_output = false;
   read_data(buffer, has_dit_forward_output);
@@ -2643,7 +2653,7 @@ void serialize_raw_forward_output(const RawForwardOutput& output,
   write_vector(buffer, output.out_tokens);
   write_vector(buffer, output.out_logprobs);
 
-  write_data(buffer, output.prepared_layer_id);
+  write_data(buffer, output.prepared_token);
 
   const bool has_dit_forward_output =
       !output.dit_forward_output.tensors.empty();
@@ -2867,12 +2877,12 @@ void convert_tensor_to_raw_output(
     const std::vector<torch::Tensor>& dit_images,
     const std::vector<std::string>& dit_text_output,
     const torch::Tensor& expert_load_data,
-    int32_t prepared_layer_id,
+    int64_t prepared_token,
     const torch::Tensor& src_seq_idxes,
     const torch::Tensor& out_tokens,
     const torch::Tensor& out_logprobs,
     RawForwardOutput& raw_output) {
-  raw_output.prepared_layer_id = prepared_layer_id;
+  raw_output.prepared_token = prepared_token;
 
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     torch::Tensor expert_load_data_flattened =
@@ -3217,7 +3227,7 @@ bool ForwardSharedMemoryManager::raw_output_write(
     const std::vector<torch::Tensor>& dit_images,
     const std::vector<std::string>& dit_text_output,
     const torch::Tensor& expert_load_data,
-    int32_t prepared_layer_id,
+    int64_t prepared_token,
     const torch::Tensor& src_seq_idxes,
     const torch::Tensor& out_tokens,
     const torch::Tensor& out_logprobs) {
@@ -3231,7 +3241,7 @@ bool ForwardSharedMemoryManager::raw_output_write(
                                dit_images,
                                dit_text_output,
                                expert_load_data,
-                               prepared_layer_id,
+                               prepared_token,
                                src_seq_idxes,
                                out_tokens,
                                out_logprobs,

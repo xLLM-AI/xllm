@@ -130,6 +130,24 @@ struct has_requires_graph_forward_metadata<
     : std::true_type {};
 
 template <typename T, typename = void>
+struct has_last_prepare_expert_weight_ok : std::false_type {};
+
+template <typename T>
+struct has_last_prepare_expert_weight_ok<
+    T,
+    std::void_t<decltype(std::declval<T>()->last_prepare_expert_weight_ok(
+        std::declval<int32_t>()))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_start_expert_weight_transfer : std::false_type {};
+
+template <typename T>
+struct has_start_expert_weight_transfer<
+    T,
+    std::void_t<decltype(std::declval<T>()->start_expert_weight_transfer(
+        std::declval<int32_t>()))>> : std::true_type {};
+
+template <typename T, typename = void>
 struct has_is_hybrid_linear_attention : std::false_type {};
 
 template <typename T>

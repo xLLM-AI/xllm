@@ -117,6 +117,7 @@ bool SpeculativeEngine::init_model() {
     }
   }
 
+  engine_->init_eplb_manager();
   dtype_ = util::parse_dtype(model_args_.dtype(), options_.devices()[0]);
   return true;
 }

@@ -21,6 +21,7 @@ limitations under the License.
 #include <unistd.h>
 
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <vector>
 
@@ -164,6 +165,7 @@ class LLMEngine : public Engine {
   // setup workers internal
   void setup_workers(const runtime::Options& options);
   bool init_model(MasterStatus master_status = MasterStatus::WAKEUP);
+  void init_eplb_manager();
   int64_t get_effective_xtensor_weight_size(
       const ModelLoader& model_loader) const;
   KVCacheCapacity estimate_kv_cache_capacity();
@@ -212,8 +214,10 @@ class LLMEngine : public Engine {
 
   torch::Tensor expert_load_data_;
   std::unique_ptr<EplbManager> eplb_manager_ = nullptr;
+  std::deque<int64_t> pending_eplb_activation_tokens_;
   void process_eplb_data(
-      const std::vector<folly::Try<std::optional<RawForwardOutput>>>& results);
+      const std::vector<folly::Try<std::optional<RawForwardOutput>>>& results,
+      int64_t completed_activation_token);
 
   // threadpool for handle forward_input in parallel.
   // Since the batch is created in every step,

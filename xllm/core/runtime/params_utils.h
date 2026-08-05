@@ -47,7 +47,7 @@ void forward_output_to_proto(
     const torch::Tensor& embeddings,
     const std::vector<std::vector<torch::Tensor>>& mm_embeddings,
     const torch::Tensor& expert_load_data,
-    int32_t prepared_layer_id,
+    int64_t prepared_token,
     const torch::Tensor& src_seq_idxes,
     const torch::Tensor& out_tokens,
     const torch::Tensor& out_logprobs,

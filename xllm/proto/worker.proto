@@ -190,6 +190,7 @@ message EplbInfo {
   int32 prepare_layer_id = 1;
   repeated int32 expert_ids = 2;
   int32 update_layer_id = 3;
+  int64 prepare_token = 4;
 };
 
 message RequestSamplingParam {
@@ -378,7 +379,7 @@ message SquenceOutput {
 message ForwardOutput {
   repeated SquenceOutput outputs = 2;
   repeated int64 expert_load_data = 3;
-  int32 prepared_layer_id = 4;
+  int64 prepared_token = 4;
   repeated int32 src_seq_idxes = 5;
   repeated int32 out_tokens = 6;
   repeated float out_logprobs = 7;
