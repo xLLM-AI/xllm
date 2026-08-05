@@ -22,7 +22,7 @@ import torch
 @torch.library.custom_op("xllm_triton::l2_norm", mutates_args=())
 def l2_norm(value: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """Run CUDA Triton L2 normalization as one graph node."""
-    from xllm.python.kernels.triton.cuda.l2_norm import l2_norm as triton_l2_norm
+    from xllm.python.kernels.cuda.triton.l2_norm import l2_norm as triton_l2_norm
 
     return triton_l2_norm(value, eps)
 
@@ -41,7 +41,7 @@ def rms_norm_gated(
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """Run CUDA Triton gated RMSNorm as one graph node."""
-    from xllm.python.kernels.triton.cuda.rms_norm import (
+    from xllm.python.kernels.cuda.triton.rms_norm import (
         rms_norm_gated as triton_rms_norm_gated,
     )
 

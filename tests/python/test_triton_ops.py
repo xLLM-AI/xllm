@@ -23,32 +23,48 @@ from pathlib import Path
 import pytest
 import torch
 
+if not torch.cuda.is_available():
+    pytest.skip("CUDA Triton tests require CUDA", allow_module_level=True)
+
 _PYTHON_ROOT = Path(__file__).parents[2] / "xllm" / "python"
 _python_package = types.ModuleType("xllm.python")
 _python_package.__path__ = [str(_PYTHON_ROOT)]
 sys.modules.setdefault("xllm.python", _python_package)
 _ops_package = types.ModuleType("xllm.python.ops")
 _ops_package.__path__ = [str(_PYTHON_ROOT / "ops")]
-sys.modules.setdefault("xllm.python.ops", _ops_package)
+sys.modules["xllm.python.ops"] = _ops_package
+python_package = sys.modules["xllm.python"]
+python_package.ops = _ops_package
 
-from xllm.python.kernels.triton.cuda.causal_conv1d import (
+_native_ops = torch.library.Library("xllm_ops", "DEF")
+_native_ops.define(
+    "moe_fused_topk(Tensor gating_output, int topk, bool renormalize, str "
+    "scoring_func) -> (Tensor, Tensor)"
+)
+_native_ops.define(
+    "cutlass_fused_moe(Tensor input, Tensor token_selected_experts, Tensor "
+    "token_final_scales, Tensor fc1_expert_weights, Tensor fc2_expert_weights, "
+    "int tp_size, int tp_rank, int ep_size, int ep_rank) -> Tensor"
+)
+
+from xllm.python.kernels.cuda.triton.causal_conv1d import (
     causal_conv1d_decode as kernel_causal_conv1d_decode,
 )
-from xllm.python.kernels.triton.cuda.causal_conv1d import (
+from xllm.python.kernels.cuda.triton.causal_conv1d import (
     causal_conv1d_prefill as kernel_causal_conv1d_prefill,
 )
-from xllm.python.kernels.triton.cuda.fused_moe import fused_moe as kernel_fused_moe
-from xllm.python.kernels.triton.cuda.gated_delta_net import (
+from xllm.python.kernels.cuda.triton.fused_moe import fused_moe as kernel_fused_moe
+from xllm.python.kernels.cuda.triton.gated_delta_net import (
     fused_recurrent_gated_delta_rule_packed_decode as kernel_gdn_decode,
 )
-from xllm.python.kernels.triton.cuda.gdn_prefill import (
+from xllm.python.kernels.cuda.triton.gdn_prefill import (
     fused_gdn_prefill_post_conv as kernel_gdn_post_conv,
 )
-from xllm.python.kernels.triton.cuda.l2_norm import l2_norm as kernel_l2_norm
-from xllm.python.kernels.triton.cuda.rms_norm import (
+from xllm.python.kernels.cuda.triton.l2_norm import l2_norm as kernel_l2_norm
+from xllm.python.kernels.cuda.triton.rms_norm import (
     rms_norm_gated as kernel_rms_norm_gated,
 )
-from xllm.python.kernels.triton.cuda.silu_and_mul import (
+from xllm.python.kernels.cuda.triton.silu_and_mul import (
     silu_and_mul as kernel_silu_and_mul,
 )
 from xllm.python.ops.activation import silu_and_mul

@@ -111,17 +111,13 @@ class RowParallelLinear(nn.Module):
         else:
             self.register_parameter("bias", None)
 
-    def format_npu_weight_(self) -> None:
-        """Store the weight as ``[K, N]`` FRACTAL_NZ for non-transposed matmul."""
-        if self.weight.device.type not in ("npu", "privateuseone"):
-            return
+    def process_weights_after_loading(self) -> None:
+        """Prepare the weight layout selected by the active device backend."""
         if self._weight_is_transposed:
             return
-        import torch_npu
-
-        transposed = self.weight.data.transpose(0, 1).contiguous()
-        self.weight.data = torch_npu.npu_format_cast(transposed, 29)
-        self._weight_is_transposed = True
+        prepared, is_transposed = ops.prepare_row_parallel_weight(self.weight.data)
+        self.weight.data = prepared
+        self._weight_is_transposed = is_transposed
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self._weight_is_transposed:

@@ -22,7 +22,7 @@ import torch
 @torch.library.custom_op("xllm_triton::silu_and_mul", mutates_args=())
 def silu_and_mul(value: torch.Tensor) -> torch.Tensor:
     """Run the CUDA Triton gated SiLU kernel as one graph node."""
-    from xllm.python.kernels.triton.cuda.silu_and_mul import (
+    from xllm.python.kernels.cuda.triton.silu_and_mul import (
         silu_and_mul as triton_silu_and_mul,
     )
 

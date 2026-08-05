@@ -417,10 +417,9 @@ class Qwen3ForCausalLM(PyModelBase):
             copy_in(p + "mlp.down_proj.weight",
                     shard(p + "mlp.down_proj.weight", dim=1))
 
-            if self.device.type in ("npu", "privateuseone"):
-                layer = self.model.layers[i]
-                layer.self_attn.o_proj.format_npu_weight_()
-                layer.mlp.down_proj.format_npu_weight_()
+            layer = self.model.layers[i]
+            layer.self_attn.o_proj.process_weights_after_loading()
+            layer.mlp.down_proj.process_weights_after_loading()
 
         norm_name = "model.norm.weight"
         if not find(norm_name):

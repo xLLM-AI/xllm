@@ -32,7 +32,7 @@ def causal_conv1d_prefill(
     query_start_loc: torch.Tensor,
 ) -> torch.Tensor:
     """Run CUDA Triton varlen causal convolution as one graph node."""
-    from xllm.python.kernels.triton.cuda.causal_conv1d import (
+    from xllm.python.kernels.cuda.triton.causal_conv1d import (
         causal_conv1d_prefill as triton_causal_conv1d_prefill,
     )
 
@@ -70,7 +70,7 @@ def causal_conv1d_decode(
     state_indices: torch.Tensor,
 ) -> torch.Tensor:
     """Run CUDA Triton single-token causal convolution as one graph node."""
-    from xllm.python.kernels.triton.cuda.causal_conv1d import (
+    from xllm.python.kernels.cuda.triton.causal_conv1d import (
         causal_conv1d_decode as triton_causal_conv1d_decode,
     )
 

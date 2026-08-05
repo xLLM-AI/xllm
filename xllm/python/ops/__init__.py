@@ -12,28 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Op dispatch layer for the Python model executor.
+"""Hardware-neutral op interfaces for the Python model executor.
 
-Each op is a direct binding to the C++ ``torch.ops.xllm_ops.*`` kernel (routed
-by PyTorch DispatchKey per device).  FakeTensor / disallow_in_graph semantics
-are registered as import-time side effects in the submodules.
-
-Attention kernels (batch_prefill/batch_decode) are provided by the flashinfer
-Python package directly via ``layers/attention.py``, not through this module.
+Public op modules own device-independent contracts and lazily select
+platform-specific implementations when needed. C++ ``torch.ops.xllm_ops``
+bindings remain registered by the modules that own those interfaces.
 """
 
-from xllm.python.ops.compute import (
-    dynamic_quant,
-    fused_add_rms_norm,
-    fused_qk_norm_rope,
-    lightning_indexer,
-    quant_matmul,
-    quantize_per_tensor,
-    rms_norm,
-    scatter_nd_update,
-    silu_and_mul,
-    sparse_flash_attention,
-)
 from xllm.python.ops.attention import (
     reshape_paged_cache,
     update_decode_graph_metadata,
@@ -44,22 +29,56 @@ from xllm.python.ops.collectives import (
     init_tp_group,
     tp_rank,
 )
+from xllm.python.ops.compute import (
+    fused_add_rms_norm,
+    fused_qk_norm_rope,
+    rms_norm,
+    silu_and_mul,
+)
+from xllm.python.ops.linear import prepare_row_parallel_weight
+from xllm.python.ops.moe import (
+    cutlass_fused_moe,
+    fused_moe,
+    grouped_moe,
+    moe_fused_topk,
+    prepare_grouped_moe_weights,
+    supports_cutlass_moe,
+)
+from xllm.python.ops.quantization import (
+    dynamic_quant,
+    quant_matmul,
+    quantize_per_tensor,
+)
+from xllm.python.ops.rotary_embedding import interleaved_rotary_embedding
+from xllm.python.ops.sparse_attention import (
+    lightning_indexer,
+    scatter_nd_update,
+    sparse_flash_attention,
+)
 
 __all__ = [
     "rms_norm",
     "fused_add_rms_norm",
     "silu_and_mul",
     "fused_qk_norm_rope",
-    "quant_matmul",
-    "quantize_per_tensor",
-    "dynamic_quant",
-    "lightning_indexer",
-    "scatter_nd_update",
-    "sparse_flash_attention",
     "reshape_paged_cache",
     "update_decode_graph_metadata",
     "all_reduce_",
     "all_gather",
     "init_tp_group",
     "tp_rank",
+    "prepare_row_parallel_weight",
+    "prepare_grouped_moe_weights",
+    "supports_cutlass_moe",
+    "moe_fused_topk",
+    "cutlass_fused_moe",
+    "fused_moe",
+    "grouped_moe",
+    "quant_matmul",
+    "quantize_per_tensor",
+    "dynamic_quant",
+    "interleaved_rotary_embedding",
+    "lightning_indexer",
+    "scatter_nd_update",
+    "sparse_flash_attention",
 ]

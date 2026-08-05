@@ -53,7 +53,7 @@ def fused_gdn_prefill_post_conv(
     torch.Tensor,
 ]:
     """Prepare normalized Q/K and GDN gates as one graph node."""
-    from xllm.python.kernels.triton.cuda.gdn_prefill import (
+    from xllm.python.kernels.cuda.triton.gdn_prefill import (
         fused_gdn_prefill_post_conv as triton_gdn_post_conv,
     )
 
@@ -112,7 +112,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     scale: float,
 ) -> torch.Tensor:
     """Run a packed recurrent GDN update as one graph node."""
-    from xllm.python.kernels.triton.cuda.gated_delta_net import (
+    from xllm.python.kernels.cuda.triton.gated_delta_net import (
         fused_recurrent_gated_delta_rule_packed_decode as triton_gdn_decode,
     )
 
@@ -165,13 +165,13 @@ def chunk_gated_delta_rule(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run a backend-selected chunked gated delta rule as one graph node."""
     if backend == "flashinfer":
-        from xllm.python.kernels.flashinfer.gated_delta_net import (
+        from xllm.python.kernels.cuda.flashinfer.gated_delta_net import (
             chunk_gated_delta_rule as flashinfer_gdn,
         )
 
         return flashinfer_gdn(q, k, v, g, beta, initial_state, cu_seqlens)
     if backend == "triton":
-        from xllm.python.kernels.triton.cuda.fla import (
+        from xllm.python.kernels.cuda.triton.fla import (
             chunk_gated_delta_rule as triton_gdn,
         )
 

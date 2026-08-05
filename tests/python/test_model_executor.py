@@ -21,7 +21,9 @@ validation, and execution routing — using CPU mocks so no GPU/NPU required.
 from __future__ import annotations
 
 import sys
+import types
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List
 from unittest.mock import MagicMock, patch
 
@@ -32,16 +34,24 @@ import torch.nn as nn
 # The xllm.python package auto-registers models on import, which triggers
 # torch.ops.xllm_ops lookups that require the C++ binary. We bypass this
 # by mocking the ops and registry modules before importing executor.
-_mock_ops = MagicMock()
-sys.modules.setdefault("xllm.python.ops", _mock_ops)
-sys.modules.setdefault("xllm.python.ops.compute", _mock_ops)
+_python_root = Path(__file__).parents[2] / "xllm" / "python"
+_mock_ops = types.ModuleType("xllm.python.ops")
+_mock_ops.__path__ = [str(_python_root / "ops")]
+_mock_ops.all_gather = MagicMock()
+_mock_ops.all_gather_variable = MagicMock()
+_mock_ops.all_reduce_ = MagicMock()
+_mock_ops.cutlass_fused_moe = MagicMock()
+_mock_ops.fused_moe = MagicMock()
+_mock_ops.moe_fused_topk = MagicMock()
+_mock_ops.supports_cutlass_moe = MagicMock(return_value=False)
+sys.modules["xllm.python.ops"] = _mock_ops
+sys.modules["xllm.python.ops.compute"] = MagicMock()
 
 from xllm.python.attention.backend import AttentionBackend, AttentionMetadata, KVCache  # noqa: E402
 from xllm.python.layers.attention import Attention  # noqa: E402
 from xllm.python.model_executor.executor import (  # noqa: E402
     ModelExecutor,
     _create_attention_backend,
-    _is_npu_device,
     _resolve_graph_backend,
 )
 
@@ -126,37 +136,15 @@ class _FakeModelNoAttention(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Tests: _is_npu_device
-# ---------------------------------------------------------------------------
-
-
-class TestIsNpuDevice:
-    def test_npu_type(self):
-        assert _is_npu_device(torch.device("npu")) is True
-
-    def test_privateuseone_type(self):
-        assert _is_npu_device(torch.device("privateuseone")) is True
-
-    def test_cuda_type(self):
-        assert _is_npu_device(torch.device("cuda")) is False
-
-    def test_cpu_type(self):
-        assert _is_npu_device(torch.device("cpu")) is False
-
-
-# ---------------------------------------------------------------------------
 # Tests: graph backend resolution
 # ---------------------------------------------------------------------------
 
 
 class TestNpuGraphBackendResolution:
-    def test_enable_graph_selects_aclgraph_on_npu(self):
+    @patch("xllm.python.model_executor.executor.platform.is_npu", return_value=True)
+    def test_enable_graph_selects_aclgraph_on_npu(self, _mock_is_npu):
         config = {"enable_graph": True, "python_graph_backend": "off"}
-
-        assert (
-            _resolve_graph_backend(config, torch.device("npu"))
-            == "aclgraph"
-        )
+        assert _resolve_graph_backend(config) == "aclgraph"
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +154,7 @@ class TestNpuGraphBackendResolution:
 
 class TestCreateAttentionBackend:
     @patch(
-        "xllm.python.model_executor.executor._is_npu_device", return_value=True
+        "xllm.python.model_executor.executor.platform.is_npu", return_value=True
     )
     @patch(
         "xllm.python.attention.npu_paged_attention.NpuPagedAttentionBackend",
@@ -182,18 +170,19 @@ class TestCreateAttentionBackend:
         assert backend.init_kwargs["num_kv_heads"] == 2
         assert backend.init_kwargs["head_dim"] == 64
 
-    @patch(
-        "xllm.python.model_executor.executor._is_npu_device", return_value=False
-    )
-    @patch(
-        "xllm.python.model_executor.executor._create_attention_backend",
-    )
-    def test_cuda_device_creates_flashinfer_backend(self, mock_create, _mock_is_npu):
-        mock_create.return_value = StubAttentionBackend(num_heads=8)
+    @patch("xllm.python.model_executor.executor.platform.is_npu", return_value=False)
+    @patch("xllm.python.model_executor.executor.platform.is_gpu", return_value=True)
+    def test_cuda_device_creates_flashinfer_backend(
+        self, _mock_is_gpu, _mock_is_npu
+    ):
         attn = _make_attention_layer()
-        # Verify the factory would be called (we can't import flashinfer in NPU env)
-        from xllm.python.model_executor.executor import _is_npu_device
-        assert _is_npu_device(torch.device("cuda")) is False
+        module = types.ModuleType("xllm.python.attention.flashinfer")
+        module.FlashInferBackend = StubAttentionBackend
+        with patch.dict(sys.modules, {module.__name__: module}):
+            backend = _create_attention_backend(
+                attn, torch.device("cuda"), torch.float16
+            )
+        assert isinstance(backend, StubAttentionBackend)
 
 
 # ---------------------------------------------------------------------------
