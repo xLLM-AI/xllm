@@ -70,6 +70,10 @@ class ForwardContext:
     acl_graph: AclGraphCaptureContext | None = None
     layer_synchronizer: LayerSynchronizer | None = None
     execution_state: AclGraphExecutionState | None = None
+    # Context-Parallel sharding plan for this forward, or None when CP is off
+    # (cp_size <= 1) or the step is decode (CP is prefill-only in v1). Typed as
+    # object to avoid a circular import with model_executor.cp_utils.CpContext.
+    cp_context: object | None = None
 
 
 _current_context: ContextVar[ForwardContext | None] = ContextVar(

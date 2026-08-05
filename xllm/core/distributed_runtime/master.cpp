@@ -165,6 +165,26 @@ std::optional<std::string> validate_model_cp(const Options& options,
       return "Model-side CP supports only DEFAULT or PREFILL roles";
     }
 
+    // Python model executor runs a standalone torch CP path (all-gather KV,
+    // eager prefill only) that does not go through the ATB fused-attention op,
+    // so it bypasses the ATB-backend requirement and the ATB CP capability
+    // allowlist below. The safety constraints above (LLM/generate, no graph,
+    // DEFAULT/PREFILL) still apply. Orthogonal TP x CP is supported (both may
+    // be > 1, sharing world = cp * tp); the collective communicator builds the
+    // narrowed TP group and the strided CP group as separate torch subgroups
+    // off the shared world rendezvous endpoint. DP > 1 stays unsupported: the
+    // Python executor does not implement the dp * cp * tp rank layout.
+    if (ModelConfig::is_python_model_impl(
+            ModelConfig::get_instance().model_impl())) {
+      if (options.dp_size() != 1) {
+        return "Python CP requires dp_size == 1";
+      }
+      if (global_world_size % (options.dp_size() * options.cp_size()) != 0) {
+        return "Python CP requires world_size divisible by dp_size * cp_size";
+      }
+      return std::nullopt;
+    }
+
     // Require registered NPU model-side CP capability. The backend is not
     // constrained: ATB models drive CP through NpuCpPlan, while TORCH models
     // (deepseek_v4) own their CP split inside the model. Both rely on the

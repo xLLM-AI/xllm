@@ -106,6 +106,10 @@ class ModelExecutor:
 
         execution_model = model.model
         self.eager_runner = EagerRunner(execution_model, self.attention_backend, device)
+        # Context-Parallel: shard prefill sequences across the CP group. Decode
+        # stays on the non-CP path (CP is prefill-only, eager-only in v1).
+        self.eager_runner.cp_size = int(config.get("cp_size", 1))
+        self.eager_runner.cp_rank = int(config.get("cp_rank", 0))
         self.decode_graph_runner = None
         self.inductor_runner = None
 

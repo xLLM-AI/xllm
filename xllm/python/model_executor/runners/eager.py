@@ -17,6 +17,7 @@ from __future__ import annotations
 import torch
 
 from xllm.python.attention.backend import AttentionMetadata
+from xllm.python.model_executor.cp_utils import build_cp_context
 from xllm.python.model_executor.forward_context import (
     ForwardContext,
     LayerSynchronizer,
@@ -25,7 +26,25 @@ from xllm.python.model_executor.forward_context import (
 from xllm.python.model_executor.runners.base import BaseRunner
 
 
+def _per_seq_lens_from_metadata(metadata: AttentionMetadata) -> list[int] | None:
+    """Per-sequence query lengths for the packed prefill batch, or None.
+
+    Derived from ``q_cu_seq_lens`` (cumulative, leading 0). Returns None when
+    the field is absent so the caller falls back to the non-CP path.
+    """
+    cu = metadata.q_cu_seq_lens
+    if cu is None:
+        return None
+    cu_host = cu.cpu().tolist()
+    return [cu_host[i + 1] - cu_host[i] for i in range(len(cu_host) - 1)]
+
+
 class EagerRunner(BaseRunner):
+    # Context-Parallel config, set by ModelExecutor when cp_size > 1. CP shards
+    # the prefill sequence across these ranks; decode is left on the non-CP path.
+    cp_size: int = 1
+    cp_rank: int = 0
+
     def execute(
         self,
         input_ids: torch.Tensor,
@@ -35,6 +54,15 @@ class EagerRunner(BaseRunner):
         layer_synchronizer: LayerSynchronizer | None = None,
     ) -> torch.Tensor:
         self.attention_backend.prepare(metadata)
+
+        cp_context = None
+        if self.cp_size > 1 and metadata.is_prefill:
+            seq_lens = _per_seq_lens_from_metadata(metadata)
+            if seq_lens is not None:
+                cp_context = build_cp_context(
+                    seq_lens, self.cp_size, self.cp_rank, self.device
+                )
+
         with forward_context(
             ForwardContext(
                 self.attention_backend,
@@ -42,6 +70,7 @@ class EagerRunner(BaseRunner):
                 metadata,
                 self.layer_caches,
                 layer_synchronizer=layer_synchronizer,
+                cp_context=cp_context,
             )
         ):
             if input_embedding is None:

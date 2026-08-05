@@ -73,6 +73,14 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
 
   const ParallelArgs& parallel_args = context.get_parallel_args();
   tp_group_ = parallel_args.tp_group_;
+  cp_size_ = parallel_args.cp_size();
+  cp_rank_ = parallel_args.cp_rank();
+  // tp_group_ and cp_group_ are already the final, orthogonally-split groups:
+  // the collective communicator narrows tp_group_ to world/(dp*cp) and builds a
+  // separate cp_group_ over the cp-strided ranks. Read each dimension from its
+  // own group instead of carving CP back out of tp_group_. TP and CP are
+  // orthogonal: a rank can shard both attention heads (TP) and sequence tokens
+  // (CP) at once, so both dimensions may be > 1 simultaneously.
   tp_size_ = (tp_group_ != nullptr) ? tp_group_->world_size() : 1;
   tp_rank_ = (tp_group_ != nullptr) ? tp_group_->rank() : 0;
   ProcessGroup* dp_group = parallel_args.dp_local_process_group_;
@@ -144,6 +152,25 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
                        global_world_size,
                        global_rank % moe_tp_size_);
   }
+  if (cp_size_ > 1) {
+    // CP shards sequence tokens; its group is strided by tp_size -- ranks with
+    // the same (dp, tp) slot but different cp_rank. The group index selects that
+    // (dp, tp) slot: dp block (global_rank / (cp_size*tp_size)) times tp_size,
+    // plus the tp offset within it. TP and CP are orthogonal, so both groups may
+    // be initialized on the same device off the shared rendezvous endpoint.
+    const int32_t cp_group_index =
+        (global_rank / (cp_size_ * tp_size_)) * tp_size_ +
+        global_rank % tp_size_;
+    init_process_group("cp",
+                       parallel_args.python_rendezvous_host_,
+                       parallel_args.python_rendezvous_port_,
+                       cp_rank_,
+                       cp_size_,
+                       c10::str(device_),
+                       global_rank,
+                       global_world_size,
+                       cp_group_index);
+  }
   const std::string module_name = context.get_model_args().model_type().empty()
                                       ? std::string("Qwen3ForCausalLM")
                                       : context.get_model_args().model_type();
@@ -176,6 +203,9 @@ py::dict PyCausalLM::build_config_dict(
   d["moe_tp_rank"] = moe_tp_rank_;
   d["ep_size"] = ep_size_;
   d["ep_rank"] = ep_rank_;
+  // cp_size is a reflected ParallelArgs PROPERTY (already in d), but cp_rank is
+  // a derived member function, so pass it explicitly for the Python executor.
+  d["cp_rank"] = cp_rank_;
   d["enable_graph"] = ExecutionConfig::get_instance().enable_graph();
   d["python_graph_backend"] =
       ExecutionConfig::get_instance().python_graph_backend();

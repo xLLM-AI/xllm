@@ -35,6 +35,7 @@ from xllm.python.attention.backend import (
 from xllm.python.attention.expanded_decode_metadata import (
     resolve_expanded_decode_metadata,
 )
+from xllm.python.model_executor.cp_utils import cp_gather_kv
 from xllm.python.model_executor.forward_context import (
     AclGraphTask,
     get_execution_buffer,
@@ -308,14 +309,25 @@ class NpuPagedAttentionBackend(AttentionBackend):
             raise RuntimeError(f"KV cache is missing for layer {layer_id}")
         num_tokens = q.shape[0]
 
-        # Write KV to paged cache (kernel expects [T, kv_heads, head_dim]).
         k_3d = k.view(num_tokens, self.num_kv_heads, self.head_dim).contiguous()
         v_3d = v.view(num_tokens, self.num_kv_heads, self.head_dim).contiguous()
+        q_3d = q.view(num_tokens, self.num_heads, self.head_dim).contiguous()
+
+        # Context-Parallel prefill: q/k/v are this rank's sequence shard while the
+        # slot_mapping/metadata still describe the full global sequence (C++ does
+        # not pre-shard the Python qwen3 path). All-gather K/V to the full
+        # sequence, persist this rank's KV shard, and attend over its causal
+        # prefix.
+        cp_context = get_forward_context().cp_context
+        if cp_context is not None:
+            return self._prefill_cp(
+                q_3d, k_3d, v_3d, metadata, cp_context, k_cache, v_cache
+            )
+
+        # Write KV to paged cache (kernel expects [T, kv_heads, head_dim]).
         kernels.reshape_paged_cache(
             metadata.slot_mapping, k_3d, v_3d, k_cache, v_cache
         )
-
-        q_3d = q.view(num_tokens, self.num_heads, self.head_dim).contiguous()
 
         if metadata.is_prefill or metadata.is_chunked_prefill:
             if self._use_expanded_decode:
@@ -474,6 +486,83 @@ class NpuPagedAttentionBackend(AttentionBackend):
             softmax_lse_flag=False,
         )
         return output.reshape(num_tokens, self.num_heads * self.head_dim)
+
+    # ------------------------------------------------------------------
+    # Context-Parallel prefill: all-gather KV, attend over causal prefix
+    # ------------------------------------------------------------------
+
+    def _prefill_cp(
+        self,
+        q_3d: torch.Tensor,
+        k_3d: torch.Tensor,
+        v_3d: torch.Tensor,
+        metadata: AttentionMetadata,
+        cp_context,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+    ) -> torch.Tensor:
+        """Prefill attention for this rank's zigzag sequence shard.
+
+        q/k/v hold this rank's ``total_local`` rows (two owned chunks per
+        sequence, padding rows zeroed). We all-gather K/V back to the full
+        global-order sequence, write the complete KV into the paged cache (so a
+        later non-CP decode sees every position), then run one FIA over this
+        rank's real queries. Each owned (sequence, half) segment is a packed
+        sub-sequence: its ``real_count`` queries attend the causal prefix
+        ``[0, segment_start + real_count)`` selected by ``kv_gather_index``.
+        With ``sparse_mode=3`` (right-aligned causal) query row ``i`` of a
+        segment attends KV ``[0, segment_start + i]`` — its exact global causal
+        range. Segments are independent sub-sequences delimited by
+        ``q_cu_seqlens`` / ``kv_cu_seqlens``, so both owned chunks resolve in a
+        single call.
+        """
+        local_tokens = q_3d.shape[0]
+
+        kv_global_k = cp_gather_kv(k_3d, cp_context)
+        kv_global_v = cp_gather_kv(v_3d, cp_context)
+
+        # Persist the full global-order KV into this rank's paged cache.
+        kernels.reshape_paged_cache(
+            metadata.slot_mapping,
+            kv_global_k.contiguous(),
+            kv_global_v.contiguous(),
+            k_cache,
+            v_cache,
+        )
+
+        # Real queries this rank owns, packed per (sequence, half) segment.
+        q_real = q_3d.index_select(0, cp_context.query_index).contiguous()
+        # Each segment's causal KV prefix, packed in the same segment order.
+        kv_prefix_k = kv_global_k.index_select(
+            0, cp_context.kv_gather_index
+        ).contiguous()
+        kv_prefix_v = kv_global_v.index_select(
+            0, cp_context.kv_gather_index
+        ).contiguous()
+
+        output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+            q_real,
+            kv_prefix_k,
+            kv_prefix_v,
+            pse_shift=None,
+            atten_mask=self._causal_mask,
+            actual_seq_lengths=cp_context.q_cu_seqlens,
+            actual_seq_lengths_kv=cp_context.kv_cu_seqlens,
+            num_heads=self.num_heads,
+            scale=self.scale,
+            input_layout="TND",
+            num_key_value_heads=self.num_kv_heads,
+            sparse_mode=3,
+            softmax_lse_flag=False,
+        )
+        output = output.reshape(-1, self.num_heads * self.head_dim)
+
+        # Scatter real-query outputs back into the padded [total_local] layout;
+        # padding rows stay zero (they are never selected by restore_index in
+        # the subsequent all-gather merge).
+        out_local = q_3d.new_zeros(local_tokens, self.num_heads * self.head_dim)
+        out_local.index_copy_(0, cp_context.query_index, output)
+        return out_local
 
     # ------------------------------------------------------------------
     # Decode: FIA with block_table (paged KV, no gather)
