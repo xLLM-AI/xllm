@@ -24,7 +24,6 @@ limitations under the License.
 #include "framework/block/block_utils.h"
 #include "framework/kv_cache/deepseek_v4_cache_policy.h"
 #include "framework/model/model_args.h"
-#include "framework/model/model_parallel_capabilities.h"
 #include "platform/mlu/mlu_rdma_memory_plan.h"
 #include "util/pretty_print.h"
 #include "util/tensor_helper.h"
@@ -82,12 +81,10 @@ int64_t index_slot_size(const ModelArgs& model_args,
 
   const int64_t index_n_head = 1;
   int64_t split_factor = 1;
-#if defined(USE_MLU)
-  if (uses_dcp_sharded_indexer_cache(model_args.model_type(),
-                                     util::kv_split_size_effective())) {
+  if (Platform::supports_dsa_indexer_cache_sharding() &&
+      util::kv_split_size_effective() > 1) {
     split_factor = util::kv_split_size_effective();
   }
-#endif
   if (enable_indexer_cache_quantization) {
     // int8 index cache: one byte per element, plus an independent per-token
     // fp32 scale (kept separate from the main-KV scale_slot_size path).

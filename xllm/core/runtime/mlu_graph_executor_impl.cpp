@@ -481,10 +481,6 @@ void MluGraph::prepare_model_graph_metadata(CausalLM* model,
     model_graph_metadata_state_ = model->create_graph_forward_metadata_state();
   }
   auto graph_params = make_graph_params(params, padding_num_tokens_);
-  // Model graph metadata must derive from the same stable attention inputs
-  // consumed by the captured forward, rather than per-request tensor storage.
-  graph_params.attention.device = attention_device_;
-  graph_params.attention.host = persistent_param_->params_.attention.host;
   int32_t slice_dim = persistent_param_->use_mrope_ ? 1 : 0;
   model->prepare_graph_forward_metadata(
       model_graph_metadata_state_.get(),
@@ -551,7 +547,6 @@ void MluGraph::update_input_buffer(CausalLM* model,
   uint32_t padding_needed = padding_num_tokens_ - tokens.size(0);
   if (is_init) {
     persistent_param_->init_params(params, padding_num_tokens_, padding_needed);
-    attention_device_ = persistent_param_->params_.attention.device;
   }
   persistent_param_->update_input_buffer(
       tokens, positions, params, padding_needed);

@@ -18,7 +18,6 @@ limitations under the License.
 #include <tuple>
 
 #include "core/framework/config/kv_cache_config.h"
-#include "framework/model/model_parallel_capabilities.h"
 #include "kernels/ops_api.h"
 #include "platform/platform.h"
 
@@ -46,8 +45,7 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
   tp_group_ = parallel_args.tp_group_;
   tp_rank_ = tp_group_->rank();
   block_size_ = ::xllm::KVCacheConfig::get_instance().block_size();
-  enable_mla_cache_sharding_ =
-      uses_dcp_sharded_indexer_cache(args.model_type(), kv_split_size_);
+  enable_mla_cache_sharding_ = kv_split_size_ > 1;
   if (enable_mla_cache_sharding_) {
     CHECK(parallel_args.dcp_group_ != nullptr)
         << "MLA cache sharding requires a DCP process group";

@@ -134,9 +134,6 @@ class MluGraph {
   // Per-graph metadata state for models that require graph-forward
   // metadata preparation (e.g., DeepSeek V4 DSA metadata).
   std::unique_ptr<ModelGraphMetadataState> model_graph_metadata_state_;
-  // Each bucket captures slices into the shared persistent buffers. Keep its
-  // exact attention views so a later bucket cannot change replay metadata.
-  AttentionDeviceInput attention_device_;
 };
 
 // Executor implementation using MLU graph optimization
