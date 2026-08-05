@@ -47,8 +47,10 @@ BlockDraftSampleOutput sample_block(
   const int64_t num_reqs = base_logits.size(0);
   const int64_t num_speculative_tokens = base_logits.size(1);
   SamplingParameters step_sampling_params = sampling_params;
-  step_sampling_params.selected_token_idxes = torch::Tensor();
-  step_sampling_params.sample_idxes = torch::Tensor();
+  const torch::TensorOptions index_options =
+      torch::TensorOptions().dtype(torch::kInt).device(base_logits.device());
+  step_sampling_params.selected_token_idxes = torch::empty({0}, index_options);
+  step_sampling_params.sample_idxes = torch::empty({0}, index_options);
   step_sampling_params.return_probs = !step_sampling_params.all_greedy_sample;
   step_sampling_params.logprobs = false;
   step_sampling_params.max_top_logprobs = 0;
