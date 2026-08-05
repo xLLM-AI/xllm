@@ -14,6 +14,8 @@ limitations under the License. -->
 
 [English](./README.md) | [中文](./README_zh.md)
 
+## 📢 参加竞赛的同学请参考：[竞赛准备](README_tmh.md)。
+
 <div align="center">
 <img src="assets/logo_with_llm.png" alt="xLLM" style="width:50%; height:auto;">
     

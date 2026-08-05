@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License. -->
 
 [English](./README.md) | [中文](./README_zh.md)
+## 📢 For students participating in the competition, please refer to: [Competition Preparation](README_tmh.md).
 
 <div align="center">
 <img src="assets/logo_with_llm.png" alt="xLLM" style="width:50%; height:auto;">
