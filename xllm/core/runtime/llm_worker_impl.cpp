@@ -219,8 +219,10 @@ LLMWorkerImpl::execute_block_draft_no_sync_on_stream(
   BlockDraftSampleOutput sample_output;
   {
     c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
+    SamplingParameters sampling_params_on_device =
+        sampling_params.to(base_logits.device(), base_logits.scalar_type());
     sample_output = block_draft_sampler->sample(
-        base_logits, anchor_token_ids, sampling_params);
+        base_logits, anchor_token_ids, sampling_params_on_device);
   }
 
   BlockDraftExecutionOutput output;
