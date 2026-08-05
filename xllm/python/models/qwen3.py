@@ -29,7 +29,7 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from xllm.python import ops
+from xllm.python import kernels
 from xllm.python.layers import (
     Attention,
     ColumnParallelLinear,
@@ -141,7 +141,7 @@ class Qwen3MLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up = self.gate_up_proj(x)
-        act = ops.silu_and_mul(gate_up)
+        act = kernels.silu_and_mul(gate_up)
         return self.down_proj(act)
 
 
@@ -200,7 +200,7 @@ class Qwen3Attention(nn.Module):
     ) -> torch.Tensor:
         qkv = self.qkv_proj(hidden)
 
-        q, k, v = ops.fused_qk_norm_rope(
+        q, k, v = kernels.fused_qk_norm_rope(
             qkv,
             num_heads_q=self.num_heads,
             num_heads_k=self.num_kv_heads,

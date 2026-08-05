@@ -49,7 +49,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   if (tp_size_ > 1) {
     CHECK(!parallel_args.python_tp_rendezvous_host_.empty());
     CHECK_GT(parallel_args.python_tp_rendezvous_port_, 0);
-    py::module_::import("xllm.python.ops")
+    py::module_::import("xllm.python.distributed")
         .attr("init_tp_group")(parallel_args.python_tp_rendezvous_host_,
                                parallel_args.python_tp_rendezvous_port_,
                                tp_rank_,

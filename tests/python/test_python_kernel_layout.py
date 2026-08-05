@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Architecture tests for Python models, ops, and hardware kernels."""
+"""Architecture boundaries for Python models, layers, and kernel packages."""
 
 from __future__ import annotations
 
@@ -22,36 +22,27 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).parents[2]
 _PYTHON_ROOT = _REPO_ROOT / "xllm" / "python"
 
-_FORBIDDEN_IMPORT_PREFIXES = (
+# Models and layers reach kernels through the bound name ``xllm.python.kernels``
+# only. Naming a platform package, a vendor library, or the platform query would
+# put a hardware branch above the kernel layer.
+_MODEL_IMPORTS = (
     "flashinfer",
     "torch_npu",
     "triton",
-    "xllm.python.kernels",
-    "xllm.python.ops.cuda",
-    "xllm.python.ops.npu",
+    "xllm.python.kernels_cuda",
+    "xllm.python.kernels_npu",
+    "xllm.python.platform",
 )
-_FORBIDDEN_ATTRIBUTE_PREFIXES = (
-    "torch.cuda",
-    "torch.ops.npu",
-    "torch_npu",
-)
+_MODEL_ATTRIBUTES = ("torch.cuda", "torch.ops.npu", "torch_npu")
+
+_KERNEL_PACKAGES = ("kernels_cuda", "kernels_npu")
 
 
 def _python_files(directory: Path) -> list[Path]:
-    return sorted(
-        path
-        for path in directory.rglob("*.py")
-        if "__pycache__" not in path.parts
-    )
+    return sorted(directory.rglob("*.py"))
 
 
-def _decorator_name(decorator: ast.expr) -> str:
-    if isinstance(decorator, ast.Call):
-        decorator = decorator.func
-    return _attribute_name(decorator)
-
-
-def _attribute_name(node: ast.AST) -> str:
+def _qualified_name(node: ast.AST) -> str:
     parts: list[str] = []
     while isinstance(node, ast.Attribute):
         parts.append(node.attr)
@@ -61,7 +52,17 @@ def _attribute_name(node: ast.AST) -> str:
     return ".".join(reversed(parts))
 
 
-def _matches_prefix(name: str, prefixes: tuple[str, ...]) -> bool:
+def _imported_modules(tree: ast.AST) -> list[tuple[int, str]]:
+    modules: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.extend((node.lineno, alias.name) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            modules.append((node.lineno, node.module or ""))
+    return modules
+
+
+def _matches(name: str, prefixes: tuple[str, ...]) -> bool:
     return any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes)
 
 
@@ -70,128 +71,101 @@ def test_models_and_layers_are_hardware_independent() -> None:
     for root in (_PYTHON_ROOT / "models", _PYTHON_ROOT / "layers"):
         for path in _python_files(root):
             tree = ast.parse(path.read_text(), filename=str(path))
-            relative_path = path.relative_to(_REPO_ROOT)
+            relative = path.relative_to(_REPO_ROOT)
+            for line, module in _imported_modules(tree):
+                if _matches(module, _MODEL_IMPORTS):
+                    violations.append(f"{relative}:{line}: {module}")
             for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if _matches_prefix(alias.name, _FORBIDDEN_IMPORT_PREFIXES):
-                            violations.append(
-                                f"{relative_path}:{node.lineno}: import {alias.name}"
-                            )
-                elif isinstance(node, ast.ImportFrom):
-                    module = node.module or ""
-                    if _matches_prefix(module, _FORBIDDEN_IMPORT_PREFIXES):
-                        violations.append(
-                            f"{relative_path}:{node.lineno}: from {module}"
-                        )
-                elif isinstance(node, ast.Attribute):
-                    name = _attribute_name(node)
-                    if _matches_prefix(name, _FORBIDDEN_ATTRIBUTE_PREFIXES):
-                        violations.append(f"{relative_path}:{node.lineno}: {name}")
+                name = _qualified_name(node)
+                if isinstance(node, ast.Attribute) and _matches(
+                    name, _MODEL_ATTRIBUTES
+                ):
+                    violations.append(f"{relative}:{node.lineno}: {name}")
     assert violations == []
 
 
-def test_kernel_modules_do_not_register_torch_ops() -> None:
+def test_kernel_packages_do_not_depend_on_layers_or_peers() -> None:
     violations: list[str] = []
-    for path in _python_files(_PYTHON_ROOT / "kernels"):
-        tree = ast.parse(path.read_text(), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for decorator in node.decorator_list:
-                name = _decorator_name(decorator)
-                if name.endswith("custom_op") or name.endswith("register_fake"):
-                    violations.append(f"{path.relative_to(_REPO_ROOT)}:{node.lineno}")
+    for package in _KERNEL_PACKAGES:
+        peers = tuple(
+            f"xllm.python.{name}" for name in _KERNEL_PACKAGES if name != package
+        )
+        forbidden = ("xllm.python.layers", "xllm.python.models", *peers)
+        for path in _python_files(_PYTHON_ROOT / package):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            relative = path.relative_to(_REPO_ROOT)
+            for line, module in _imported_modules(tree):
+                if _matches(module, forbidden):
+                    violations.append(f"{relative}:{line}: {module}")
     assert violations == []
 
 
-def test_kernels_do_not_reverse_depend_on_graph_layers() -> None:
+def test_kernel_packages_name_themselves_only_through_relative_imports() -> None:
+    """A package that never spells its own name can be copied to seed a peer."""
     violations: list[str] = []
-    forbidden = (
-        "xllm.python.layers",
-        "xllm.python.models",
-        "xllm.python.ops",
-    )
-    for path in _python_files(_PYTHON_ROOT / "kernels"):
-        tree = ast.parse(path.read_text(), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                modules = tuple(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom):
-                modules = (node.module or "",)
-            else:
+    for package in _KERNEL_PACKAGES:
+        own_name = f"xllm.python.{package}"
+        for path in _python_files(_PYTHON_ROOT / package):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            relative = path.relative_to(_REPO_ROOT)
+            for line, module in _imported_modules(tree):
+                if _matches(module, (own_name,)):
+                    violations.append(f"{relative}:{line}: {module}")
+    assert violations == []
+
+
+def test_launchers_stay_under_their_framework_directory() -> None:
+    """``triton.jit`` belongs in ``triton/``, not in the modules that export."""
+    violations: list[str] = []
+    for package in _KERNEL_PACKAGES:
+        root = _PYTHON_ROOT / package
+        for path in _python_files(root):
+            if path.parent != root:
                 continue
-            for module in modules:
-                if _matches_prefix(module, forbidden):
-                    violations.append(
-                        f"{path.relative_to(_REPO_ROOT)}:{node.lineno}: {module}"
+            tree = ast.parse(path.read_text(), filename=str(path))
+            relative = path.relative_to(_REPO_ROOT)
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for decorator in node.decorator_list:
+                    name = _qualified_name(
+                        decorator.func
+                        if isinstance(decorator, ast.Call)
+                        else decorator
                     )
+                    if name.endswith(("triton.jit", "triton.autotune")):
+                        violations.append(f"{relative}:{node.lineno}: {name}")
     assert violations == []
 
 
-def test_op_modules_do_not_define_triton_kernels() -> None:
-    violations: list[str] = []
-    for path in _python_files(_PYTHON_ROOT / "ops"):
+def test_platform_packages_are_peers() -> None:
+    for package in _KERNEL_PACKAGES:
+        root = _PYTHON_ROOT / package
+        assert (root / "__init__.py").is_file()
+        assert (root / "_custom_op.py").is_file()
+        assert (root / "triton").is_dir()
+    assert (_PYTHON_ROOT / "kernels_cuda" / "flashinfer").is_dir()
+    assert not (_PYTHON_ROOT / "kernels").exists()
+    assert not (_PYTHON_ROOT / "ops" / "__init__.py").exists()
+
+
+def test_the_platform_branch_lives_only_in_the_package_init() -> None:
+    """``platform.is_*`` selects the kernel package once, in one place."""
+    branching: list[str] = []
+    for path in _python_files(_PYTHON_ROOT):
         tree = ast.parse(path.read_text(), filename=str(path))
+        relative = path.relative_to(_REPO_ROOT)
         for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not isinstance(node, ast.Call):
                 continue
-            for decorator in node.decorator_list:
-                name = _decorator_name(decorator)
-                if name.endswith("triton.jit") or name.endswith("triton.autotune"):
-                    violations.append(f"{path.relative_to(_REPO_ROOT)}:{node.lineno}")
-    assert violations == []
-
-
-def test_public_ops_init_does_not_import_platform_backends() -> None:
-    path = _PYTHON_ROOT / "ops" / "__init__.py"
-    tree = ast.parse(path.read_text(), filename=str(path))
-    violations: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            modules = tuple(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            modules = (node.module or "",)
-        else:
-            continue
-        for module in modules:
-            if _matches_prefix(
-                module, ("xllm.python.ops.cuda", "xllm.python.ops.npu")
-            ):
-                violations.append(f"{path.relative_to(_REPO_ROOT)}:{node.lineno}")
-    assert violations == []
-
-
-def test_kernels_are_partitioned_by_hardware_then_framework() -> None:
-    kernels_root = _PYTHON_ROOT / "kernels"
-    assert (kernels_root / "cuda" / "triton" / "silu_and_mul.py").is_file()
-    assert (kernels_root / "cuda" / "triton" / "fused_moe.py").is_file()
-    assert (
-        kernels_root / "cuda" / "flashinfer" / "gated_delta_net.py"
-    ).is_file()
-    assert (
-        kernels_root / "npu" / "triton" / "split_qkv_rmsnorm_rope.py"
-    ).is_file()
-    assert not (kernels_root / "triton").exists()
-    assert not (kernels_root / "flashinfer").exists()
-    assert not (_PYTHON_ROOT / "ops" / "triton").exists()
-    assert not (kernels_root / "triton_ops.py").exists()
-
-    compute_source = (_PYTHON_ROOT / "ops" / "compute.py").read_text()
-    assert "xllm.python.kernels.npu.triton.split_qkv_rmsnorm_rope" in compute_source
-    assert "xllm.python.kernels.triton" not in compute_source
-
-
-def test_public_and_platform_ops_are_partitioned_by_ownership() -> None:
-    ops_root = _PYTHON_ROOT / "ops"
-    assert (ops_root / "quantization.py").is_file()
-    assert (ops_root / "sparse_attention.py").is_file()
-    assert (ops_root / "rotary_embedding.py").is_file()
-    assert (ops_root / "linear.py").is_file()
-    assert (ops_root / "npu" / "linear.py").is_file()
-    assert (ops_root / "npu" / "moe.py").is_file()
-    assert (ops_root / "npu" / "rotary_embedding.py").is_file()
-    assert (ops_root / "cuda" / "moe.py").is_file()
-    assert not (ops_root / "npu" / "quantization.py").exists()
-    assert not (ops_root / "npu" / "sparse_attention.py").exists()
-    assert not (ops_root / "npu_compute.py").exists()
+            name = _qualified_name(node.func)
+            if name.endswith(("platform.is_gpu", "platform.is_npu")):
+                branching.append(str(relative))
+    # The kernel binding, plus the attention backend and graph runner selection
+    # in the executor. Attention backends hold per-step state and are wired into
+    # the executor, so they are selected there rather than exported by a kernel
+    # package.
+    assert set(branching) == {
+        "xllm/python/__init__.py",
+        "xllm/python/model_executor/executor.py",
+    }

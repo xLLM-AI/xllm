@@ -19,7 +19,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from xllm.python import ops
+from xllm.python import distributed
 
 
 class HiddenParallelEmbedding(nn.Module):
@@ -52,5 +52,5 @@ class HiddenParallelEmbedding(nn.Module):
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         out = torch.nn.functional.embedding(input_ids, self.weight)
         if self.tp_size > 1:
-            out = ops.all_gather(out, dim=-1, world_size=self.tp_size)
+            out = distributed.all_gather(out, dim=-1, world_size=self.tp_size)
         return out

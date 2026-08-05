@@ -35,7 +35,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from xllm.python import ops
+from xllm.python import kernels
 from xllm.python.attention.backend import AttentionBackend, AttentionMetadata
 from xllm.python.model_executor.forward_context import (
     AclGraphCaptureContext,
@@ -304,7 +304,7 @@ class DecodeAclGraphRunner(BaseRunner):
                 "decode ACL graph requires device cumulative KV lengths"
             )
         graph_positions = positions.to(torch.int32).contiguous()
-        ops.update_decode_graph_metadata(
+        kernels.update_decode_graph_metadata(
             input_ids,
             graph_positions,
             metadata.slot_mapping,

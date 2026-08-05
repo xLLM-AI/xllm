@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from xllm.python import ops
+from xllm.python import distributed, kernels
 
 if TYPE_CHECKING:
     from xllm_weight_loader import StateDict
@@ -108,7 +108,7 @@ def _interleave_rope_with(
     x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
 ) -> torch.Tensor:
     """Apply interleaved RoPE to ``[T, H, D]`` with precomputed cos/sin."""
-    return ops.interleaved_rotary_embedding(x, cos, sin)
+    return kernels.interleaved_rotary_embedding(x, cos, sin)
 
 
 def _apply_half_rope(
@@ -357,9 +357,9 @@ class W8A8StaticLinear(nn.Module):
             ),
             -128, 127,
         ).to(torch.int8)
-        return ops.quant_matmul(
+        return kernels.quant_matmul(
             x_int8, self.weight, False, self.deq_scale, None, None,
-            self.quant_bias if not (self.row_parallel and ops.tp_rank(x.device) != 0) else None,
+            self.quant_bias if not (self.row_parallel and distributed.tp_rank(x.device) != 0) else None,
             torch.bfloat16,
         )
 
@@ -395,8 +395,8 @@ class W8A8DynamicLinear(nn.Module):
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_int8, pertoken = ops.dynamic_quant(x)
-        return ops.quant_matmul(
+        x_int8, pertoken = kernels.dynamic_quant(x)
+        return kernels.quant_matmul(
             x_int8, self.weight, False, self.weight_scale, None,
             pertoken, None, torch.bfloat16,
         )
@@ -513,10 +513,10 @@ class DeepseekV3MLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up = self.gate_up_proj(x)
-        act = ops.silu_and_mul(gate_up)
+        act = kernels.silu_and_mul(gate_up)
         out = self.down_proj(act)
         if self.tp > 1 and not self.skip_tp_reduce:
-            ops.all_reduce_(out)
+            distributed.all_reduce_(out)
         return out
 
 
@@ -658,7 +658,7 @@ class DeepseekV3MLAAttention(Attention):
         )
         o = self.o_proj(v_full)
         if self.cfg.tp_size > 1:
-            ops.all_reduce_(o)
+            distributed.all_reduce_(o)
         return o
 
 
@@ -707,10 +707,10 @@ class DeepseekV3Indexer(nn.Module):
         k = torch.cat([k_pe, k_nope], dim=-1)
         if ctx.index_cache is not None and ctx.slot_mapping is not None:
             k_view = ctx.index_cache.view(-1, ctx.index_cache.size(-1))
-            ops.scatter_nd_update(
+            kernels.scatter_nd_update(
                 k_view, ctx.slot_mapping.reshape(-1, 1).clamp_min(0), k
             )
-        topk = ops.lightning_indexer(
+        topk = kernels.lightning_indexer(
             q, ctx.index_cache, weights,
             ctx.actual_seq_q, ctx.actual_seq_kv, ctx.block_table,
             "TND", "PA_BSND", self.topk, 3,
@@ -808,7 +808,7 @@ class DeepseekV3MoE(nn.Module):
         self.experts_w13.data = self.experts_w13.data.transpose(1, 2).contiguous()
         self.experts_w2.data = self.experts_w2.data.transpose(1, 2).contiguous()
         self.experts_w13.data, self.experts_w2.data = (
-            ops.prepare_grouped_moe_weights(
+            kernels.prepare_grouped_moe_weights(
                 self.experts_w13.data,
                 self.experts_w2.data,
             )
@@ -829,7 +829,7 @@ class DeepseekV3MoE(nn.Module):
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         logits = self.gate(hidden)
-        routed = ops.grouped_moe(
+        routed = kernels.grouped_moe(
             hidden,
             logits,
             self.experts_w13,
@@ -846,7 +846,7 @@ class DeepseekV3MoE(nn.Module):
         shared_out = self.shared_experts(hidden)
         final = routed + shared_out
         if self.cfg.tp_size > 1:
-            ops.all_reduce_(final)
+            distributed.all_reduce_(final)
         return final
 
 

@@ -15,9 +15,9 @@
 """Reusable model layers (RMSNorm, rotary embedding, tensor-parallel linear /
 embedding).
 
-Layers depend only on the op dispatch layer (:mod:`python.ops`); they never
-touch the kernel backends directly. The dependency direction is
-``models -> layers -> ops -> kernels``.
+Layers call :mod:`python.kernels`, which resolves to the package of the active
+hardware platform; they carry no hardware branch of their own. The dependency
+direction is ``models -> layers -> kernels``.
 """
 
 from xllm.python.layers.attention import Attention

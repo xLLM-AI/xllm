@@ -23,7 +23,6 @@ from __future__ import annotations
 import sys
 import types
 from dataclasses import dataclass
-from pathlib import Path
 from typing import List
 from unittest.mock import MagicMock, patch
 
@@ -31,22 +30,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-# The xllm.python package auto-registers models on import, which triggers
-# torch.ops.xllm_ops lookups that require the C++ binary. We bypass this
-# by mocking the ops and registry modules before importing executor.
-_python_root = Path(__file__).parents[2] / "xllm" / "python"
-_mock_ops = types.ModuleType("xllm.python.ops")
-_mock_ops.__path__ = [str(_python_root / "ops")]
-_mock_ops.all_gather = MagicMock()
-_mock_ops.all_gather_variable = MagicMock()
-_mock_ops.all_reduce_ = MagicMock()
-_mock_ops.cutlass_fused_moe = MagicMock()
-_mock_ops.fused_moe = MagicMock()
-_mock_ops.moe_fused_topk = MagicMock()
-_mock_ops.supports_cutlass_moe = MagicMock(return_value=False)
-sys.modules["xllm.python.ops"] = _mock_ops
-sys.modules["xllm.python.ops.compute"] = MagicMock()
-
+# conftest.py stands in for xllm.python, whose import would bind the active
+# platform's kernel package and reach for operators from the C++ binary.
 from xllm.python.attention.backend import AttentionBackend, AttentionMetadata, KVCache  # noqa: E402
 from xllm.python.layers.attention import Attention  # noqa: E402
 from xllm.python.model_executor.executor import (  # noqa: E402

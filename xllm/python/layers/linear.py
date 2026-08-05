@@ -17,8 +17,8 @@
 At ``tp_size==1`` these hold full-size weights and skip all collectives, so they
 are numerically identical to plain ``nn.Linear`` and preserve the single-card
 byte parity. At ``tp_size>1`` each rank holds a per-partition shard and inserts
-the same all-reduce / all-gather the native C++ parallel layers use (via the op
-dispatch layer :mod:`python.ops`).
+the same all-reduce / all-gather the native C++ parallel layers use (via
+:mod:`python.distributed`).
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from xllm.python import ops
+from xllm.python import distributed, kernels
 
 
 class ColumnParallelLinear(nn.Module):
@@ -71,7 +71,7 @@ class ColumnParallelLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.nn.functional.linear(x, self.weight, self.bias)
         if self.gather_output and self.tp_size > 1:
-            out = ops.all_gather(out, dim=-1, world_size=self.tp_size)
+            out = distributed.all_gather(out, dim=-1, world_size=self.tp_size)
         return out
 
 
@@ -115,7 +115,7 @@ class RowParallelLinear(nn.Module):
         """Prepare the weight layout selected by the active device backend."""
         if self._weight_is_transposed:
             return
-        prepared, is_transposed = ops.prepare_row_parallel_weight(self.weight.data)
+        prepared, is_transposed = kernels.prepare_row_parallel_weight(self.weight.data)
         self.weight.data = prepared
         self._weight_is_transposed = is_transposed
 
@@ -125,7 +125,7 @@ class RowParallelLinear(nn.Module):
         else:
             out = torch.nn.functional.linear(x, self.weight)
         if self.tp_size > 1:
-            ops.all_reduce_(out)
+            distributed.all_reduce_(out)
         if self.bias is not None:
             out = out + self.bias
         return out
