@@ -2097,7 +2097,8 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
     if (embedding_cache_ != nullptr &&
         !input.input_params.embedding.embedding_ids.empty()) {
       accepted_prefix_lengths = embedding_cache_->read_accepted_prefix_lengths(
-          input.input_params.embedding.embedding_ids);
+          input.input_params.embedding.embedding_ids,
+          input.input_params.embedding.request_ids);
     }
     input_params.num_accepted_tokens_host.assign(
         accepted_prefix_lengths.begin(), accepted_prefix_lengths.end());
@@ -2248,7 +2249,8 @@ bool MTPWorkerImpl::prepare_static_mtp_graph_tasks_before_final_draft(
   }
   const std::vector<int32_t> accepted_prefix_lengths =
       embedding_cache_->read_accepted_prefix_lengths(
-          input.input_params.embedding.embedding_ids);
+          input.input_params.embedding.embedding_ids,
+          input.input_params.embedding.request_ids);
   if (accepted_prefix_lengths.size() != 1) {
     return false;
   }
