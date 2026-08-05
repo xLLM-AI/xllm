@@ -351,9 +351,13 @@ void ProfileManager::profile_step_time(bool if_dump_to_file) {
   for (int32_t token_length = 2; token_length < profile_max_prompt_length;
        token_length += profile_length_step_) {
     for (int32_t batch_size = 1; batch_size < max_batch_size; batch_size += 2) {
+      // Use run_decode_request to build genuine decode-stage requests (each
+      // seq prefills token_length-1 then decodes 1 token) instead of
+      // approximating via run_request.
+      std::vector<int32_t> total_length_vec(batch_size, token_length);
       double latency_mean = 0;
       for (int32_t k = 0; k < profile_count_per_step_; k++) {
-        latency_mean += run_request(token_length, token_length - 1, batch_size);
+        latency_mean += run_decode_request(total_length_vec);
       }
       latency_mean /= profile_count_per_step_;
       time_profiling_data.emplace_back(token_length, batch_size, latency_mean);
@@ -385,7 +389,11 @@ void ProfileManager::train_speculative_validate_time_predictor(
     return;
   }
 
-  constexpr int32_t kNumCoefficients = 4;
+  // Fit T = intercept + query_token_ms*(batch*query) +
+  // query_prefix_ms*(batch*query*prefix). The standalone batch_ms term is
+  // dropped: it is pruning-invariant (does not depend on prefix) and only
+  // steals variance from the marginal query terms that drive pruning.
+  constexpr int32_t kNumCoefficients = 3;
   Eigen::MatrixXd matrix(time_profiling_data.size(), kNumCoefficients);
   Eigen::VectorXd target(time_profiling_data.size());
   for (int32_t i = 0; i < static_cast<int32_t>(time_profiling_data.size());
@@ -397,9 +405,8 @@ void ProfileManager::train_speculative_validate_time_predictor(
     const double query = static_cast<double>(query_len);
     const double prefix = static_cast<double>(prefix_len);
     matrix(i, 0) = 1.0;
-    matrix(i, 1) = batch;
-    matrix(i, 2) = batch * query;
-    matrix(i, 3) = batch * query * prefix;
+    matrix(i, 1) = batch * query;
+    matrix(i, 2) = batch * query * prefix;
     target(i) = std::get<3>(time_profiling_data[i]);
   }
 
@@ -431,9 +438,9 @@ void ProfileManager::train_speculative_validate_time_predictor(
 
   SpeculativeProfileRegistry::ValidateTimePredictor predictor;
   predictor.intercept_ms = coefficients(0);
-  predictor.batch_ms = coefficients(1);
-  predictor.query_token_ms = coefficients(2);
-  predictor.query_prefix_ms = coefficients(3);
+  predictor.batch_ms = 0.0;
+  predictor.query_token_ms = coefficients(1);
+  predictor.query_prefix_ms = coefficients(2);
   SpeculativeProfileRegistry::get_instance().set_validate_time_predictor(
       predictor);
   if (!engine_->set_speculative_validate_time_predictor(predictor)) {
@@ -444,7 +451,6 @@ void ProfileManager::train_speculative_validate_time_predictor(
   }
 
   LOG(INFO) << "Fitted speculative validate equation: time = "
-            << predictor.batch_ms << " * batch_size + "
             << predictor.query_token_ms << " * batch_size * query_len + "
             << predictor.query_prefix_ms
             << " * batch_size * query_len * prefix_len + "
@@ -542,6 +548,9 @@ void ProfileManager::profile_speculative_validate_time() {
           latency_mean += run_request(token_length, prefix_len, batch_size);
         }
         latency_mean /= static_cast<double>(profile_count_per_step_);
+        LOG(INFO) << "[spec_validate_profile] batch=" << batch_size
+                  << " query_len=" << query_len << " prefix_len=" << prefix_len
+                  << " latency_ms=" << latency_mean;
         time_profiling_data.emplace_back(
             batch_size, query_len, prefix_len, latency_mean);
       }

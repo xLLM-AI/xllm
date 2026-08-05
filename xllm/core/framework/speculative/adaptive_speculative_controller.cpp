@@ -177,9 +177,9 @@ double AdaptiveSpeculativeController::score_for_pruned_state(
   return expected_emitted / estimated_time;
 }
 
-// Per-seq validate time: intercept + Σᵢ (batch_ms + query_token_ms * qᵢ +
+// Per-seq validate time: intercept + Σᵢ (query_token_ms * qᵢ +
 // query_prefix_ms * qᵢ * kvᵢ) where qᵢ = prefix_lengths[i] + 1. Coefficients
-// from ProfileManager's linear regression.
+// from ProfileManager's linear regression (batch_ms term is not fitted).
 double AdaptiveSpeculativeController::estimate_validate_time(
     const std::vector<int32_t>& prefix_lengths,
     const std::vector<double>& per_seq_kv_lens) const {
@@ -193,7 +193,6 @@ double AdaptiveSpeculativeController::estimate_validate_time(
   for (size_t i = 0; i < prefix_lengths.size(); ++i) {
     const double q_i = static_cast<double>(prefix_lengths[i] + 1);
     const double kv_i = i < per_seq_kv_lens.size() ? per_seq_kv_lens[i] : 0.0;
-    time += predictor->batch_ms;
     time += predictor->query_token_ms * q_i;
     time += predictor->query_prefix_ms * q_i * kv_i;
   }
