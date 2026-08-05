@@ -32,6 +32,7 @@ from xllm.python.attention.backend import (
     KVCache,
     MlaIndexContext,
 )
+from xllm.python.model_executor.cp_utils import cp_gather_kv
 from xllm.python.model_executor.forward_context import (
     AclGraphTask,
     get_forward_context,
@@ -206,14 +207,24 @@ class NpuPagedAttentionBackend(AttentionBackend):
         k_cache, v_cache, _ = self._kv_caches[layer_id]
         num_tokens = q.shape[0]
 
-        # Write KV to paged cache (kernel expects [T, kv_heads, head_dim]).
         k_3d = k.view(num_tokens, self.num_kv_heads, self.head_dim).contiguous()
         v_3d = v.view(num_tokens, self.num_kv_heads, self.head_dim).contiguous()
+        q_3d = q.view(num_tokens, self.num_heads, self.head_dim).contiguous()
+
+        # Context-Parallel prefill: q/k/v are this rank's sequence shard while the
+        # slot_mapping/metadata still describe the full global sequence (C++ does
+        # not pre-shard the Python qwen3 path). All-gather K/V to the full
+        # sequence, persist it, and attend over this rank's causal prefix.
+        cp_context = get_forward_context().cp_context
+        if cp_context is not None:
+            return self._prefill_cp(
+                q_3d, k_3d, v_3d, metadata, cp_context, k_cache, v_cache
+            )
+
+        # Write KV to paged cache (kernel expects [T, kv_heads, head_dim]).
         ops.reshape_paged_cache(
             metadata.slot_mapping, k_3d, v_3d, k_cache, v_cache
         )
-
-        q_3d = q.view(num_tokens, self.num_heads, self.head_dim).contiguous()
 
         if metadata.is_prefill or metadata.is_chunked_prefill:
             return self._prefill(q_3d, k_3d, v_3d, metadata, num_tokens)
@@ -301,6 +312,64 @@ class NpuPagedAttentionBackend(AttentionBackend):
             softmax_lse_flag=False,
         )
         return output.reshape(num_tokens, self.num_heads * self.head_dim)
+
+    # ------------------------------------------------------------------
+    # Context-Parallel prefill: all-gather KV, attend over causal prefix
+    # ------------------------------------------------------------------
+
+    def _prefill_cp(
+        self,
+        q_3d: torch.Tensor,
+        k_3d: torch.Tensor,
+        v_3d: torch.Tensor,
+        metadata: AttentionMetadata,
+        cp_context,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+    ) -> torch.Tensor:
+        """Prefill attention for this rank's sequence shard.
+
+        q/k/v hold only this rank's ``total_local`` rows. We all-gather K/V to
+        the full sequence, write the complete KV into the paged cache (so a
+        later non-CP decode sees every position), then run FIA with this rank's
+        local queries against their causal KV prefix. ``sparse_mode=3`` aligns
+        the causal triangle to the bottom-right, so with ``Sq=seg_len`` and
+        ``Skv=(cp_rank+1)*seg_len`` local-q row ``i`` attends KV ``[0, cp_rank *
+        seg_len + i]`` — exactly its global causal range.
+        """
+        local_tokens = q_3d.shape[0]
+
+        kv_global_k, kv_prefix_k = cp_gather_kv(k_3d, cp_context)
+        kv_global_v, kv_prefix_v = cp_gather_kv(v_3d, cp_context)
+
+        # Persist the full global-order KV into this rank's paged cache.
+        ops.reshape_paged_cache(
+            metadata.slot_mapping,
+            kv_global_k.contiguous(),
+            kv_global_v.contiguous(),
+            k_cache,
+            v_cache,
+        )
+
+        kv_prefix_k = kv_prefix_k.contiguous()
+        kv_prefix_v = kv_prefix_v.contiguous()
+
+        output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+            q_3d,
+            kv_prefix_k,
+            kv_prefix_v,
+            pse_shift=None,
+            atten_mask=self._causal_mask,
+            actual_seq_lengths=cp_context.q_cu_seqlens,
+            actual_seq_lengths_kv=cp_context.kv_cu_seqlens,
+            num_heads=self.num_heads,
+            scale=self.scale,
+            input_layout="TND",
+            num_key_value_heads=self.num_kv_heads,
+            sparse_mode=3,
+            softmax_lse_flag=False,
+        )
+        return output.reshape(local_tokens, self.num_heads * self.head_dim)
 
     # ------------------------------------------------------------------
     # Decode: FIA with block_table (paged KV, no gather)

@@ -42,10 +42,31 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
 
   const ParallelArgs& parallel_args = context.get_parallel_args();
   tp_group_ = parallel_args.tp_group_;
-  tp_size_ = (tp_group_ != nullptr) ? tp_group_->world_size() : 1;
-  tp_rank_ = (tp_group_ != nullptr) ? tp_group_->rank() : 0;
+  cp_size_ = parallel_args.cp_size();
+  cp_rank_ = parallel_args.cp_rank();
+  // The physical process group (tp_group_) has size world/dp. CP is carved out
+  // of it: the Python model's tensor-parallel degree is the cp-discounted part
+  // and CP consumes the rest (cp_group_ aliases tp_group_ on the TORCH
+  // backend). v1 supports pure CP (model tp == 1) or pure TP (cp == 1), not an
+  // orthogonal mix on the same physical group.
+  const int64_t phys_group_size =
+      (tp_group_ != nullptr) ? tp_group_->world_size() : 1;
+  const int64_t phys_group_rank =
+      (tp_group_ != nullptr) ? tp_group_->rank() : 0;
+  CHECK_EQ(phys_group_size % cp_size_, 0)
+      << "physical group size " << phys_group_size
+      << " not divisible by cp_size " << cp_size_;
+  tp_size_ = phys_group_size / cp_size_;
+  CHECK(cp_size_ == 1 || tp_size_ == 1)
+      << "Python CP v1 does not support orthogonal TP x CP on one group "
+         "(tp_size="
+      << tp_size_ << ", cp_size=" << cp_size_ << ")";
+  tp_rank_ = (tp_size_ > 1) ? phys_group_rank : 0;
 
   py::gil_scoped_acquire gil;
+  // The physical group's rendezvous endpoint (shared by all ranks in the group)
+  // backs either the TP group or the CP group depending on which dimension owns
+  // it. Init exactly the one that is > 1.
   if (tp_size_ > 1) {
     CHECK(!parallel_args.python_tp_rendezvous_host_.empty());
     CHECK_GT(parallel_args.python_tp_rendezvous_port_, 0);
@@ -54,6 +75,16 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
                                parallel_args.python_tp_rendezvous_port_,
                                tp_rank_,
                                tp_size_,
+                               c10::str(device_));
+  }
+  if (cp_size_ > 1) {
+    CHECK(!parallel_args.python_tp_rendezvous_host_.empty());
+    CHECK_GT(parallel_args.python_tp_rendezvous_port_, 0);
+    py::module_::import("xllm.python.ops")
+        .attr("init_cp_group")(parallel_args.python_tp_rendezvous_host_,
+                               parallel_args.python_tp_rendezvous_port_,
+                               cp_rank_,
+                               cp_size_,
                                c10::str(device_));
   }
   const std::string module_name = context.get_model_args().model_type().empty()
@@ -83,6 +114,9 @@ py::dict PyCausalLM::build_config_dict(
   d["device"] = c10::str(device_);
   d["tp_size"] = tp_size_;
   d["tp_rank"] = tp_rank_;
+  // cp_size is a reflected ParallelArgs PROPERTY (already in d), but cp_rank is
+  // a derived member function, so pass it explicitly for the Python executor.
+  d["cp_rank"] = cp_rank_;
   d["enable_graph"] = ExecutionConfig::get_instance().enable_graph();
   d["python_graph_backend"] =
       ExecutionConfig::get_instance().python_graph_backend();
