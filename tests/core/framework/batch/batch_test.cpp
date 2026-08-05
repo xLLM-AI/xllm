@@ -1108,6 +1108,7 @@ TEST(BatchTest, JsonObjectSampleSequenceIdsFollowSamplingRows) {
 
   SequenceParams second_params = first_params;
   second_params.request_id = "req-shared";
+  second_params.json_object_grammar.reset();
 
   IncrementalDecoder first_decoder("", 2, false, false);
   Sequence first(/*index=*/0,
@@ -1136,8 +1137,16 @@ TEST(BatchTest, JsonObjectSampleSequenceIdsFollowSamplingRows) {
   EXPECT_EQ(forward_input.sample_prior_output_rows,
             std::vector<int32_t>({-1, -1}));
   ASSERT_EQ(forward_input.json_object_states.size(), 2u);
-  ASSERT_TRUE(forward_input.sampling_params.filter_mask.defined());
-  EXPECT_EQ(forward_input.sampling_params.filter_mask.size(0), 2);
+  ASSERT_TRUE(forward_input.sampling_params.filter_bitmask.defined());
+  EXPECT_FALSE(forward_input.sampling_params.filter_mask.defined());
+  EXPECT_EQ(forward_input.sampling_params.filter_bitmask.size(0), 2);
+  EXPECT_EQ(forward_input.sampling_params.filter_bitmask.size(1), 1);
+  EXPECT_EQ(forward_input.sampling_params.filter_bitmask.index({0, 0})
+                .item<int32_t>(),
+            -1);
+  EXPECT_NE(forward_input.sampling_params.filter_bitmask.index({1, 0})
+                .item<int32_t>(),
+            -1);
 
   RawForwardOutput fake_output;
   fake_output.outputs = {make_raw_sample_output(-1, std::nullopt),
@@ -1389,6 +1398,9 @@ TEST(BatchTest, ForwardInputPackedRoundTripPreservesTransportFields) {
       torch::tensor({{3.0f, 4.0f}});
   input.sample_sequence_ids = {"req-packed#0"};
   input.sample_prior_output_rows = {3};
+  input.sampling_params.filter_bitmask =
+      torch::tensor({{static_cast<int32_t>(-1)}},
+                    torch::TensorOptions().dtype(torch::kInt32));
   bool is_creator = false;
   auto shm_name =
       ForwardSharedMemoryManager::create_unique_name("batch_test_forward_input",
@@ -1418,6 +1430,10 @@ TEST(BatchTest, ForwardInputPackedRoundTripPreservesTransportFields) {
   EXPECT_EQ(round_trip.sample_sequence_ids,
             std::vector<std::string>{"req-packed#0"});
   EXPECT_EQ(round_trip.sample_prior_output_rows, std::vector<int32_t>{3});
+  ASSERT_TRUE(round_trip.sampling_params.filter_bitmask.defined());
+  EXPECT_TRUE(
+      torch::equal(round_trip.sampling_params.filter_bitmask.to(torch::kCPU),
+                   input.sampling_params.filter_bitmask));
   ASSERT_TRUE(
       round_trip.input_params.embedding.mtp_bootstrap_embeddings.defined());
   EXPECT_TRUE(torch::equal(

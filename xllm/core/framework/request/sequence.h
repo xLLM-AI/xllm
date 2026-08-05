@@ -329,7 +329,6 @@ class Sequence final {
     return sequence_params_.sampling_param;
   }
 
-  torch::Tensor json_object_filter_mask() const;
   const JsonObjectGrammarState* json_object_state() const {
     return json_object_state_.has_value() ? &json_object_state_.value()
                                           : nullptr;

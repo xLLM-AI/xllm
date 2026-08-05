@@ -12,6 +12,8 @@ cc_library(
     :common
     glog::glog
     torch
+    $<$<BOOL:${USE_NPU}>:tilelang_kernels>
+    $<$<BOOL:${USE_NPU}>:unified_dlog>
 )
 
 cc_library(

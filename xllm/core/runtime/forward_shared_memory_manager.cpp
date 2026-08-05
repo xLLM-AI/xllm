@@ -278,6 +278,7 @@ size_t get_sampling_params_size(const SamplingParameters& params) {
 
   total += get_tensor_size(params.selected_token_idxes);
   total += get_tensor_size(params.filter_mask);
+  total += get_tensor_size(params.filter_bitmask);
   total += get_tensor_size(params.frequency_penalties);
   total += get_tensor_size(params.presence_penalties);
   total += get_tensor_size(params.repetition_penalties);
@@ -2416,6 +2417,7 @@ inline void deserialize_forward_input_payload(
     auto& sampling_params = forward_input.sampling_params;
     read_tensor(context, sampling_params.selected_token_idxes, stream);
     read_tensor(context, sampling_params.filter_mask, stream);
+    read_tensor(context, sampling_params.filter_bitmask, stream);
     read_tensor(context, sampling_params.frequency_penalties, stream);
     read_tensor(context, sampling_params.presence_penalties, stream);
     read_tensor(context, sampling_params.repetition_penalties, stream);
@@ -2816,6 +2818,7 @@ inline void serialize_forward_input_sections(
   if (selected_token_idxes_size > 0) {
     write_tensor(context, sampling_params.selected_token_idxes);
     write_tensor(context, sampling_params.filter_mask);
+    write_tensor(context, sampling_params.filter_bitmask);
     write_tensor(context, sampling_params.frequency_penalties);
     write_tensor(context, sampling_params.presence_penalties);
     write_tensor(context, sampling_params.repetition_penalties);

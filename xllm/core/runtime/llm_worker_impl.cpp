@@ -351,6 +351,8 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     output.max_top_logprobs = sampling_params.max_top_logprobs;
     if (!input.skip_sampling_for_logits_only) {
       auto sample_output = sampler_->forward(logits, sampling_params);
+      output.filter_bitmask_applied_to_logits =
+          sampling_params.filter_bitmask.defined();
 
       // beam search kernel
       BeamSearchOutput beam_search_output;

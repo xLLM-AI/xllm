@@ -32,6 +32,12 @@ namespace xllm {
 
 class JsonObjectGrammar;
 
+enum class JsonObjectMaskBuildPhase : uint8_t {
+  NORMAL = 0,
+  DRAFT = 1,
+  TARGET = 2,
+};
+
 struct JsonObjectGrammarSnapshot final {
   bool enabled = false;
   bool reasoning_enabled = false;
@@ -193,6 +199,10 @@ class JsonObjectGrammar final {
       const std::vector<JsonObjectGrammarState>& states,
       const torch::Device& device,
       torch::ScalarType dtype);
+  friend torch::Tensor build_json_object_filter_bitmask(
+      const std::vector<JsonObjectGrammarState>& states,
+      const torch::Device& device,
+      JsonObjectMaskBuildPhase phase);
 
   struct CachedMask final {
     std::vector<uint32_t> bitmask;
@@ -231,7 +241,8 @@ torch::Tensor build_json_object_filter_mask(
 
 torch::Tensor build_json_object_filter_bitmask(
     const std::vector<JsonObjectGrammarState>& states,
-    const torch::Device& device = torch::kCPU);
+    const torch::Device& device = torch::kCPU,
+    JsonObjectMaskBuildPhase phase = JsonObjectMaskBuildPhase::NORMAL);
 
 // Advances each initialized state with its corresponding accepted token.
 std::vector<JsonObjectGrammarState> advance_json_object_states(

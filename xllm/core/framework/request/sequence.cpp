@@ -337,15 +337,6 @@ Sequence::Sequence(const Sequence& other, size_t index)
   host_kv_state_.erase_blocks(BlockType::LINEAR);
 }
 
-torch::Tensor Sequence::json_object_filter_mask() const {
-  if (!json_object_state_.has_value() ||
-      sequence_params_.json_object_grammar == nullptr) {
-    return torch::Tensor();
-  }
-  return sequence_params_.json_object_grammar->build_filter_mask(
-      json_object_state_.value());
-}
-
 // The first token will be only used in disagg pd mode.
 void Sequence::record_first_token(const Token& token) {
   if (!::xllm::DisaggPDConfig::get_instance().enable_disagg_pd() ||

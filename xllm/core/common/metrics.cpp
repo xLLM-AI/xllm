@@ -112,6 +112,24 @@ DEFINE_HISTOGRAM(json_object_mask_device_copy_latency_microseconds,
 DEFINE_HISTOGRAM(
     json_object_mask_transfer_submission_latency_microseconds,
     "JSON object non-blocking device copy submission latency in microseconds");
+DEFINE_COUNTER(json_object_mask_build_calls_normal_total,
+               "JSON object normal mask build calls");
+DEFINE_COUNTER(json_object_mask_build_calls_draft_total,
+               "JSON object draft mask build calls");
+DEFINE_COUNTER(json_object_mask_build_calls_target_total,
+               "JSON object target mask build calls");
+DEFINE_COUNTER(json_object_mask_build_rows_normal_total,
+               "JSON object normal mask build rows");
+DEFINE_COUNTER(json_object_mask_build_rows_draft_total,
+               "JSON object draft mask build rows");
+DEFINE_COUNTER(json_object_mask_build_rows_target_total,
+               "JSON object target mask build rows");
+DEFINE_COUNTER(json_object_mask_build_constrained_rows_normal_total,
+               "JSON object constrained rows in normal mask builds");
+DEFINE_COUNTER(json_object_mask_build_constrained_rows_draft_total,
+               "JSON object constrained rows in draft mask builds");
+DEFINE_COUNTER(json_object_mask_build_constrained_rows_target_total,
+               "JSON object constrained rows in target mask builds");
 
 // scheduler metrics
 DEFINE_GAUGE(num_pending_requests, "Number of pending requests in scheduler");
@@ -207,6 +225,16 @@ DEFINE_COUNTER(speculative_num_draft_tokens_total,
 DEFINE_GAUGE(speculative_mean_tokens_per_decode_step,
              "Batch-mean tokens committed per decode step, i.e. the TPOT "
              "speedup factor (1.0 without speculative decoding)");
+DEFINE_HISTOGRAM(speculative_draft_token_d2h_latency_microseconds,
+                 "Latency of draft token host copies in microseconds");
+DEFINE_COUNTER(speculative_num_accepted_tokens_constrained_total,
+               "Accepted speculative tokens from constrained rows");
+DEFINE_COUNTER(speculative_num_accepted_tokens_plain_total,
+               "Accepted speculative tokens from plain rows");
+DEFINE_COUNTER(speculative_num_draft_tokens_constrained_total,
+               "Draft speculative tokens from constrained rows");
+DEFINE_COUNTER(speculative_num_draft_tokens_plain_total,
+               "Draft speculative tokens from plain rows");
 
 // proto metrics
 DEFINE_COUNTER(proto_latency_seconds_proto2i,

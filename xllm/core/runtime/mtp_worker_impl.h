@@ -26,6 +26,7 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "framework/kv_cache_transfer/spec_kv_cache_transfer.h"
 #endif
+#include "runtime/mtp_json_object_state.h"
 #include "runtime/speculative_worker_impl.h"
 
 namespace xllm {
@@ -90,11 +91,13 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       const ForwardInput& input,
       const std::vector<ForwardOutput>& draft_outputs,
       ForwardInput& validate_input,
+      const detail::JsonDraftValidationScratch* json_scratch,
       Stream& compute_stream);
   std::optional<ForwardOutput> run_validate(
       const ForwardInput& input,
       const std::vector<ForwardOutput>& draft_outputs,
-      ForwardInput& validate_input);
+      ForwardInput& validate_input,
+      const detail::JsonDraftValidationScratch* json_scratch);
 
   virtual SampleOutput validate(
       const SamplingParameters& sampling_params,
@@ -168,6 +171,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
     torch::Tensor accepted_embeddings;
     torch::Tensor base_positions;
     torch::Tensor base_kv_seq_lens;
+    std::vector<uint8_t> json_constrained_rows;
     StreamEventPtr ready_event;
   };
 

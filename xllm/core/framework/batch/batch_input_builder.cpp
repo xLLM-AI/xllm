@@ -573,9 +573,6 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     state_.sampling_params.insert(state_.sampling_params.end(),
                                   state.sampling_params.begin(),
                                   state.sampling_params.end());
-    state_.filter_mask_rows.insert(state_.filter_mask_rows.end(),
-                                   state.filter_mask_rows.begin(),
-                                   state.filter_mask_rows.end());
     state_.json_object_states.insert(state_.json_object_states.end(),
                                      state.json_object_states.begin(),
                                      state.json_object_states.end());
@@ -949,7 +946,6 @@ void BatchInputBuilder::handle_sampling_parameters(Sequence* sequence,
   state.selected_token_idxes.push_back(
       static_cast<int32_t>(state.flatten_tokens_vec.size() - 1));
   state.sampling_params.push_back(sequence->sampling_param());
-  state.filter_mask_rows.push_back(sequence->json_object_filter_mask());
   const JsonObjectGrammarState* json_state = sequence->json_object_state();
   state.json_object_states.push_back(
       json_state == nullptr ? JsonObjectGrammarState() : *json_state);
@@ -1276,8 +1272,7 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
                                        state_.sample_idxes,
                                        state_.unique_token_ids_vec,
                                        state_.unique_token_counts_vec,
-                                       state_.unique_token_lens_vec,
-                                       state_.filter_mask_rows);
+                                       state_.unique_token_lens_vec);
     forward_input.json_object_states = std::move(state_.json_object_states);
     std::vector<std::string> sample_sequence_ids =
         std::move(state_.sample_sequence_ids);
@@ -1314,6 +1309,11 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
                       return state.initialized();
                     });
     if (has_json_object_state) {
+      forward_input.sampling_params.filter_bitmask =
+          build_json_object_filter_bitmask(forward_input.json_object_states);
+      // JSON rows use the compact packed mask. Keep the generic dense API
+      // available for other callers without constructing a dense JSON mask.
+      forward_input.sampling_params.filter_mask = torch::Tensor();
       forward_input.sample_sequence_ids = std::move(sample_sequence_ids);
       forward_input.sample_prior_output_rows =
           std::move(sample_prior_output_rows);

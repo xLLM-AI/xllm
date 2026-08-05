@@ -18,9 +18,13 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <cstring>
 
 #include "core/common/metrics.h"
 #include "core/util/slice.h"
+#if defined(USE_NPU)
+#include "core/kernels/npu/tilelang/tilelang_ops_api.h"
+#endif
 
 namespace xllm {
 namespace {
@@ -29,6 +33,31 @@ constexpr float kDisallowedTokenMask = -1.0e9F;
 constexpr uint64_t kFnvOffsetBasis = 14695981039346656037ULL;
 constexpr uint64_t kFnvPrime = 1099511628211ULL;
 constexpr size_t kMaxFilterMaskCacheEntries = 64;
+
+void record_mask_build_metrics(JsonObjectMaskBuildPhase phase,
+                               int64_t total_rows,
+                               int64_t constrained_rows) {
+  switch (phase) {
+    case JsonObjectMaskBuildPhase::NORMAL:
+      COUNTER_INC(json_object_mask_build_calls_normal_total);
+      COUNTER_ADD(json_object_mask_build_rows_normal_total, total_rows);
+      COUNTER_ADD(json_object_mask_build_constrained_rows_normal_total,
+                  constrained_rows);
+      return;
+    case JsonObjectMaskBuildPhase::DRAFT:
+      COUNTER_INC(json_object_mask_build_calls_draft_total);
+      COUNTER_ADD(json_object_mask_build_rows_draft_total, total_rows);
+      COUNTER_ADD(json_object_mask_build_constrained_rows_draft_total,
+                  constrained_rows);
+      return;
+    case JsonObjectMaskBuildPhase::TARGET:
+      COUNTER_INC(json_object_mask_build_calls_target_total);
+      COUNTER_ADD(json_object_mask_build_rows_target_total, total_rows);
+      COUNTER_ADD(json_object_mask_build_constrained_rows_target_total,
+                  constrained_rows);
+      return;
+  }
+}
 
 uint64_t hash_byte(uint64_t hash, uint8_t value) {
   return (hash ^ value) * kFnvPrime;
@@ -931,7 +960,8 @@ torch::Tensor build_json_object_filter_mask(
 
 torch::Tensor build_json_object_filter_bitmask(
     const std::vector<JsonObjectGrammarState>& states,
-    const torch::Device& device) {
+    const torch::Device& device,
+    JsonObjectMaskBuildPhase phase) {
   if (states.empty()) {
     return torch::Tensor();
   }
@@ -948,27 +978,36 @@ torch::Tensor build_json_object_filter_bitmask(
   }
 
   Timer batch_timer;
-  std::vector<torch::Tensor> masks;
-  masks.reserve(states.size());
+  int64_t constrained_rows = 0;
   const int64_t num_words = static_cast<int64_t>(grammar->bitmask_num_words());
-  for (const auto& state : states) {
+  torch::Tensor mask = torch::empty(
+      {static_cast<int64_t>(states.size()), num_words},
+      torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
+  int32_t* mask_data = mask.data_ptr<int32_t>();
+  const size_t row_bytes = static_cast<size_t>(num_words) * sizeof(int32_t);
+  for (size_t row = 0; row < states.size(); ++row) {
+    const auto& state = states[row];
+    int32_t* row_data = mask_data + row * static_cast<size_t>(num_words);
     if (state.initialized()) {
+      ++constrained_rows;
       const JsonObjectGrammar* state_grammar = state.grammar();
       CHECK_EQ(state_grammar->vocab_size(), grammar->vocab_size())
           << "mixed JSON grammar vocabularies in one batch";
-      masks.emplace_back(
-          state_grammar->build_filter_bitmask(state, torch::kCPU));
+      if (state.is_valid()) {
+        const auto cached_mask = state_grammar->cached_mask_for_state(state);
+        std::memcpy(row_data, cached_mask->bitmask.data(), row_bytes);
+      } else {
+        std::fill_n(row_data, num_words, 0);
+      }
     } else {
       // Unconstrained row: all tokens allowed (matches float-mask zeros).
-      masks.emplace_back(
-          torch::full({num_words},
-                      /*fill_value=*/static_cast<int32_t>(-1),
-                      torch::TensorOptions().dtype(torch::kInt32)));
+      std::fill_n(row_data, num_words, static_cast<int32_t>(-1));
     }
   }
-  torch::Tensor mask = torch::stack(masks, /*dim=*/0);
   HISTOGRAM_OBSERVE(json_object_mask_batch_build_latency_microseconds,
                     static_cast<int64_t>(batch_timer.elapsed_microseconds()));
+  record_mask_build_metrics(
+      phase, static_cast<int64_t>(states.size()), constrained_rows);
   if (!device.is_cpu()) {
     Timer transfer_timer;
     mask = mask.to(device);
@@ -997,6 +1036,13 @@ void apply_token_bitmask_inplace(torch::Tensor& logits,
   CHECK(bitmask.scalar_type() == torch::kInt32 ||
         bitmask.scalar_type() == torch::kInt64)
       << "bitmask must be int32/int64";
+
+#if defined(USE_NPU)
+  if (kernel::npu::tilelang::can_apply_token_bitmask_inplace(logits, bitmask)) {
+    kernel::npu::tilelang::apply_token_bitmask_inplace(logits, bitmask);
+    return;
+  }
+#endif
 
   const auto options =
       torch::TensorOptions().dtype(torch::kInt64).device(logits.device());

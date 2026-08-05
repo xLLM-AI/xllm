@@ -197,6 +197,7 @@ inline bool add_sampling_to_plan(const SamplingParameters& source,
          plan.add(source.sample_idxes, &target.sample_idxes) &&
          plan.add(source.do_sample, &target.do_sample) &&
          plan.add(source.filter_mask, &target.filter_mask) &&
+         plan.add(source.filter_bitmask, &target.filter_bitmask) &&
          plan.add(source.acc_logprob, &target.acc_logprob);
 }
 
@@ -642,6 +643,10 @@ struct ForwardOutput {
   // max number of top logprobs in the batch
   int64_t max_top_logprobs = 0;
   SampleOutput sample_output;
+  // The target sampler applies packed token masks in-place before returning
+  // sampled tokens. MTP validation uses this local contract to avoid applying
+  // the same mask to target logits a second time.
+  bool filter_bitmask_applied_to_logits = false;
   std::vector<JsonObjectOutputError> json_object_errors;
   // Keep no-sync input tensor handles alive until downstream consumers finish
   // using outputs on the same compute stream.

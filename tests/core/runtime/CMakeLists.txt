@@ -105,6 +105,16 @@ cc_test(
     GTest::gtest_main
 )
 
+cc_test(
+  NAME
+    mtp_json_object_state_test
+  SRCS
+    mtp_json_object_state_test.cpp
+  DEPS
+    :json_object_grammar
+    GTest::gtest_main
+)
+
 if(USE_MLU)
   cc_test(
     NAME

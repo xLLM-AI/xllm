@@ -60,5 +60,22 @@ TEST(SamplerFilterMaskTest, RandomSamplingCannotSelectDisallowedToken) {
   EXPECT_EQ(output.next_tokens.index({0}).item<int64_t>(), 1);
 }
 
+TEST(SamplerFilterMaskTest, PackedMaskFiltersCallerLogitsInPlace) {
+  SamplingParameters params = make_greedy_params(/*batch_size=*/1);
+  params.filter_bitmask =
+      torch::tensor({{static_cast<int32_t>(0b0101)}},
+                    torch::TensorOptions().dtype(torch::kInt32));
+  torch::Tensor logits = torch::tensor({{1.0F, 100.0F, 2.0F, 100.0F}});
+
+  Sampler sampler;
+  SampleOutput output = sampler.forward(logits, params);
+
+  EXPECT_EQ(output.next_tokens.index({0}).item<int64_t>(), 2);
+  EXPECT_EQ(logits.index({0, 0}).item<float>(), 1.0F);
+  EXPECT_LT(logits.index({0, 1}).item<float>(), -1.0F);
+  EXPECT_EQ(logits.index({0, 2}).item<float>(), 2.0F);
+  EXPECT_LT(logits.index({0, 3}).item<float>(), -1.0F);
+}
+
 }  // namespace
 }  // namespace xllm
