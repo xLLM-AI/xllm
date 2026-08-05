@@ -33,7 +33,7 @@ limitations under the License.
 
 namespace xllm::npu::model {
 
-class DFlashQwen3ModelImpl final : public QWen3ModelImpl {
+class DFlashQwen3ModelImpl : public QWen3ModelImpl {
  public:
   explicit DFlashQwen3ModelImpl(const ModelContext& context)
       : QWen3ModelImpl(context) {

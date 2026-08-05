@@ -28,6 +28,7 @@ cc_library(
     :model
     :mposition
     :parallel_state
+    :sampler
     :model_context
     :dit_cache
     :model_loader

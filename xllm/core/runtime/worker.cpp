@@ -32,6 +32,7 @@ limitations under the License.
 #include "framework/state_dict/state_dict.h"
 #include "runtime/dflash_worker_impl.h"
 #include "runtime/dit_worker_impl.h"
+#include "runtime/dspark_worker_impl.h"
 #include "runtime/eagle3_worker_impl.h"
 #include "runtime/embed_vlm_worker_impl.h"
 #include "runtime/embed_worker_impl.h"
@@ -55,6 +56,8 @@ Worker::Worker(const ParallelArgs& parallel_args,
       impl_ = new Eagle3WorkerImpl(parallel_args, device, options);
     } else if (algorithm == "DFlash") {
       impl_ = new DFlashWorkerImpl(parallel_args, device, options);
+    } else if (algorithm == "DSpark") {
+      impl_ = new DSparkWorkerImpl(parallel_args, device, options);
     } else if (algorithm == "Suffix") {
       impl_ = new SuffixWorkerImpl(parallel_args, device, options);
     } else if (SpeculativeConfig::is_mtp_algorithm(algorithm)) {

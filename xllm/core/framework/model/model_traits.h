@@ -234,5 +234,14 @@ struct has_write_context_kv<
         std::declval<std::vector<KVCache>&>(),
         std::declval<const ModelInputParams&>()))>> : std::true_type {};
 
+template <typename T, typename = void>
+struct has_block_draft_sampler : std::false_type {};
+
+template <typename T>
+struct has_block_draft_sampler<
+    T,
+    std::void_t<decltype(std::declval<T>()->block_draft_sampler())>>
+    : std::true_type {};
+
 }  // namespace detail
 }  // namespace xllm

@@ -38,6 +38,7 @@ limitations under the License.
 #include "core/framework/model_loader.h"
 #include "core/framework/quant_args.h"
 #include "core/framework/state_dict/state_dict.h"
+#include "framework/sampling/block_draft_sampler.h"
 #include "model_args.h"
 #include "model_input_params.h"
 #include "model_output.h"
@@ -170,6 +171,11 @@ class CausalLM : public torch::nn::Module {
     return {};
   }
 
+  // Optional block-draft extension point. Concrete draft models own the
+  // algorithm-specific sampler and expose it without adding DSpark-specific
+  // operations to the generic CausalLM interface.
+  virtual BlockDraftSampler* block_draft_sampler() { return nullptr; }
+
   virtual void lazy_load_model(std::unique_ptr<ModelLoader> loader) {
     NOT_IMPLEMENTED();
   }
@@ -270,6 +276,13 @@ class CausalLMImpl : public CausalLM {
                                         kv_caches,
                                         input_params);
     }
+  }
+
+  BlockDraftSampler* block_draft_sampler() override {
+    if constexpr (detail::has_block_draft_sampler<Model>::value) {
+      return model_->block_draft_sampler();
+    }
+    return nullptr;
   }
 
   void lazy_load_model(std::unique_ptr<ModelLoader> loader) override {

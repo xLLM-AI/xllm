@@ -18,6 +18,9 @@ limitations under the License.
 #include <folly/futures/Future.h>
 #include <torch/torch.h>
 
+#include <cstdint>
+#include <memory>
+
 #include "executor.h"
 #include "forward_params.h"
 #include "framework/model/causal_lm.h"
@@ -32,6 +35,12 @@ namespace xllm {
 
 class LLMWorkerImpl : public WorkerImpl {
  public:
+  struct BlockDraftExecutionOutput {
+    torch::Tensor token_ids;
+    torch::Tensor probs;
+    std::shared_ptr<ForwardInput> retained_input;
+  };
+
   enum class ForwardSyncPolicy : int8_t {
     LEGACY = 0,
     NO_SYNC,
@@ -53,6 +62,14 @@ class LLMWorkerImpl : public WorkerImpl {
       const ForwardInput& input,
       Stream& compute_stream,
       bool record_ready_event = true);
+
+  BlockDraftExecutionOutput execute_block_draft_no_sync_on_stream(
+      const ForwardInput& input,
+      const torch::Tensor& anchor_token_ids,
+      const SamplingParameters& sampling_params,
+      int32_t num_speculative_tokens,
+      Stream& prepare_stream,
+      Stream& compute_stream);
 
   folly::SemiFuture<std::optional<ForwardOutput>> step_async_no_sync(
       const ForwardInput& input);

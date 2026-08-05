@@ -5,6 +5,8 @@ cc_library(
     sampler
   HDRS
     sampling_params.h
+    block_draft_sampler.h
+    dspark_sampler.h
     logits_utils.h
     rejection_sampler.h
     sampler.h

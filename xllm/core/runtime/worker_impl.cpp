@@ -154,7 +154,9 @@ std::vector<int32_t> read_dflash_capture_layer_ids(
       << "Failed to parse DFlash config: " << config_path;
   std::vector<int32_t> capture_layer_ids;
   for (int32_t layer_id : reader.value_or<std::vector<int32_t>>(
-           "dflash_config.target_layer_ids", std::vector<int32_t>{})) {
+           std::vector<std::string>{"target_layer_ids",
+                                    "dflash_config.target_layer_ids"},
+           std::vector<int32_t>{})) {
     capture_layer_ids.emplace_back(layer_id + 1);
   }
   return capture_layer_ids;
@@ -1405,20 +1407,27 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       util::is_deepseek_v4_model_type(args.model_type())) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
   }
-  if (options_.speculative_algorithm() == "DFlash") {
-    // Both engines capture the same target layers, whose ids live in the draft
-    // config: the draft engine reads its own weights path, the target engine
-    // reads --draft_model. The draft engine additionally swaps in the
-    // DFlashDraftModel body.
+  if (options_.speculative_algorithm() == "DFlash" ||
+      options_.speculative_algorithm() == "DSpark") {
+    // DSpark is a DFlash variant: same target-layer capture and draft-body
+    // swap, just a different draft model_type ("DSparkDraftModel") carrying the
+    // extra Markov head. Both engines capture the same target layers, whose ids
+    // live in the draft config: the draft engine reads its own weights path,
+    // the target engine reads --draft_model. The draft engine additionally
+    // swaps in the DFlash/DSpark draft body.
+    const bool is_dspark = options_.speculative_algorithm() == "DSpark";
+    const char* draft_model_type =
+        is_dspark ? "DSparkDraftModel" : "DFlashDraftModel";
     std::string draft_config_path;
     if (options_.is_draft_engine()) {
       LOG(INFO) << "Overriding draft model_type from " << args.model_type()
-                << " to DFlashDraftModel for DFlash speculative decoding";
-      args.model_type("DFlashDraftModel");
+                << " to " << draft_model_type
+                << " for block-diffusion speculative decoding";
+      args.model_type(draft_model_type);
       draft_config_path = model_weights_path_;
     } else {
       CHECK(options_.draft_model_path().has_value())
-          << "DFlash requires --draft_model.";
+          << "block-diffusion speculative decoding requires --draft_model.";
       draft_config_path = options_.draft_model_path().value();
     }
     args.layers_to_capture(read_dflash_capture_layer_ids(draft_config_path));
@@ -1449,13 +1458,14 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   // Eagle3/DFlash targets capture intermediate-layer aux hidden from the layers
   // in layers_to_capture, the model's sole capture signal. Fill the default
   // {2, n/2, n-3} for an Eagle3 target whose config omits the list; DFlash
-  // already filled it from the draft config. The DFlash draft body
-  // (DFlashDraftModel) consumes context-KV rather than capturing, so exclude
-  // it.
+  // already filled it from the draft config. The DFlash/DSpark draft body
+  // (DFlashDraftModel/DSparkDraftModel) consumes context-KV rather than
+  // capturing, so exclude it.
   if (options_.enable_speculative_decode() &&
       SpeculativeConfig::requires_aux_hidden_capture(
           options_.speculative_algorithm()) &&
       args.model_type() != "DFlashDraftModel" &&
+      args.model_type() != "DSparkDraftModel" &&
       args.layers_to_capture().empty()) {
     const int32_t num_layers = static_cast<int32_t>(args.n_layers());
     args.layers_to_capture({2, num_layers / 2, num_layers - 3});

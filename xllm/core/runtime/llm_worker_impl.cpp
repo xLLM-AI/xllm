@@ -175,6 +175,61 @@ std::optional<ForwardOutput> LLMWorkerImpl::execute_no_sync_on_stream(
   return step_internal(input, sync_policy, record_ready_event);
 }
 
+LLMWorkerImpl::BlockDraftExecutionOutput
+LLMWorkerImpl::execute_block_draft_no_sync_on_stream(
+    const ForwardInput& input,
+    const torch::Tensor& anchor_token_ids,
+    const SamplingParameters& sampling_params,
+    int32_t num_speculative_tokens,
+    Stream& prepare_stream,
+    Stream& compute_stream) {
+  CHECK_GT(num_speculative_tokens, 0)
+      << "Block draft requires num_speculative_tokens > 0.";
+  ForwardInput logits_input = input;
+  logits_input.skip_sampling_for_logits_only = true;
+
+  ForwardInput processed_input;
+  prepare_work_before_execute_on_stream(
+      logits_input, processed_input, prepare_stream);
+  std::optional<ForwardOutput> draft_output =
+      execute_no_sync_on_stream(processed_input,
+                                compute_stream,
+                                /*record_ready_event=*/false);
+  CHECK(draft_output.has_value())
+      << "Block draft forward must return an output.";
+  CHECK(draft_output->logits.defined())
+      << "Block draft forward must return logits.";
+
+  const int64_t num_rows = draft_output->logits.size(/*dim=*/0);
+  CHECK_EQ(num_rows % num_speculative_tokens, 0)
+      << "Block draft logits rows must be divisible by "
+         "num_speculative_tokens.";
+  const int64_t batch_size = num_rows / num_speculative_tokens;
+  CHECK_EQ(anchor_token_ids.dim(), 1)
+      << "Block draft anchor_token_ids must be one-dimensional.";
+  CHECK_EQ(anchor_token_ids.size(0), batch_size)
+      << "Block draft anchor batch must match the logits batch.";
+
+  torch::Tensor base_logits = draft_output->logits.view(
+      {batch_size, num_speculative_tokens, draft_output->logits.size(-1)});
+  BlockDraftSampler* block_draft_sampler = model_->block_draft_sampler();
+  CHECK(block_draft_sampler != nullptr)
+      << "The draft model does not provide a block draft sampler.";
+
+  BlockDraftSampleOutput sample_output;
+  {
+    c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
+    sample_output = block_draft_sampler->sample(
+        base_logits, anchor_token_ids, sampling_params);
+  }
+
+  BlockDraftExecutionOutput output;
+  output.token_ids = std::move(sample_output.token_ids);
+  output.probs = std::move(sample_output.probs);
+  output.retained_input = std::move(draft_output->retained_input);
+  return output;
+}
+
 std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
 #if defined(USE_NPU)
   if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
