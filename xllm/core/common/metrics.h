@@ -140,6 +140,15 @@ DECLARE_HISTOGRAM(prefix_cache_block_matched_num);
 // total number of model execution operations
 DECLARE_COUNTER(num_model_execution_total_eager);
 
+// MoonCake KV transfer metrics
+DECLARE_COUNTER(mooncake_transfer_completed_total_read);
+DECLARE_COUNTER(mooncake_transfer_completed_total_write);
+DECLARE_COUNTER(mooncake_transfer_bytes_total_read);
+DECLARE_COUNTER(mooncake_transfer_bytes_total_write);
+DECLARE_COUNTER(mooncake_transfer_failed_total);
+DECLARE_HISTOGRAM(mooncake_transfer_latency_microseconds_read);
+DECLARE_HISTOGRAM(mooncake_transfer_latency_microseconds_write);
+
 // latency of worker execution operations in seconds
 DECLARE_COUNTER(execution_latency_seconds_model);
 DECLARE_COUNTER(execution_latency_seconds_logits_processing);

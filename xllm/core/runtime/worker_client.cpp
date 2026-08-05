@@ -75,32 +75,18 @@ std::tuple<int64_t, int64_t> WorkerClient::estimate_kv_cache_capacity() {
 bool WorkerClient::pull_kv_blocks(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
-  auto future = worker_->pull_kv_blocks_async(src_cluster_id,
-                                              src_addr,
-                                              src_blocks,
-                                              dst_blocks,
-                                              src_linear_state_ids,
-                                              dst_linear_state_ids);
+    const std::vector<KVTransferMapping>& mappings) {
+  auto future =
+      worker_->pull_kv_blocks_async(src_cluster_id, src_addr, mappings);
   return std::move(future).get();
 }
 
 bool WorkerClient::pull_hetero_kv_blocks(
     const std::vector<uint64_t>& src_cluster_ids,
     const std::vector<std::string>& src_addrs,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
-  auto future = worker_->pull_hetero_kv_blocks_async(src_cluster_ids,
-                                                     src_addrs,
-                                                     src_blocks,
-                                                     dst_blocks,
-                                                     src_linear_state_ids,
-                                                     dst_linear_state_ids);
+    const std::vector<KVTransferMapping>& mappings) {
+  auto future = worker_->pull_hetero_kv_blocks_async(
+      src_cluster_ids, src_addrs, mappings);
   return std::move(future).get();
 }
 
@@ -155,16 +141,8 @@ folly::SemiFuture<bool> WorkerClient::allocate_kv_cache_with_transfer_async(
 folly::SemiFuture<bool> WorkerClient::pull_kv_blocks_async(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
-  return worker_->pull_kv_blocks_async(src_cluster_id,
-                                       src_addr,
-                                       src_blocks,
-                                       dst_blocks,
-                                       src_linear_state_ids,
-                                       dst_linear_state_ids);
+    const std::vector<KVTransferMapping>& mappings) {
+  return worker_->pull_kv_blocks_async(src_cluster_id, src_addr, mappings);
 }
 
 folly::SemiFuture<uint32_t> WorkerClient::transfer_kv_blocks(

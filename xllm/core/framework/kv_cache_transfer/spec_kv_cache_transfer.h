@@ -49,21 +49,14 @@ class SpecKVCacheTransfer : public LlmDataDistTransfer {
 
   void free_kv_cache() override;
 
-  bool pull_kv_blocks(
-      const uint64_t src_cluster_id,
-      const std::string& src_addr,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids,
-      const std::vector<uint64_t>& dst_linear_state_ids) override;
+  bool pull_kv_blocks(const uint64_t src_cluster_id,
+                      const std::string& src_addr,
+                      const std::vector<KVTransferMapping>& mappings) override;
 
   bool pull_hetero_kv_blocks(
       const std::vector<uint64_t>& src_cluster_ids,
       const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids,
-      const std::vector<uint64_t>& dst_linear_state_ids) override;
+      const std::vector<KVTransferMapping>& mappings) override;
 
   folly::SemiFuture<bool> push_kv_blocks_async(
       const std::vector<TransferKVInfo>& transfer_kv_infos,
@@ -103,17 +96,15 @@ class SpecKVCacheTransfer : public LlmDataDistTransfer {
       const LayerRegisteredCaches& layer_registered_caches,
       const LayerRegisteredCaches& staging_registered_caches,
       const std::vector<uint64_t>& src_cluster_ids,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids,
-      const std::vector<uint64_t>& dst_linear_state_ids);
+      const std::vector<KVTransferMapping>& mappings,
+      bool sequence_scoped);
 
   bool merge_pre_pushed_sharded_caches(
       const LayerRegisteredCaches& layer_registered_caches,
       const LayerRegisteredCaches& staging_registered_caches,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& dst_linear_state_ids,
-      int64_t source_shard_count);
+      const std::vector<KVTransferMapping>& mappings,
+      int64_t source_shard_count,
+      bool sequence_scoped);
 
   bool push_layer_registered_caches_to_staging(
       const LayerRegisteredCaches& layer_registered_caches,
@@ -129,9 +120,9 @@ class SpecKVCacheTransfer : public LlmDataDistTransfer {
       int64_t source_shard_count,
       bool source_is_sharded);
 
-  bool pull_replicated_spec_kv_blocks(uint64_t src_cluster_id,
-                                      const std::vector<uint64_t>& src_blocks,
-                                      const std::vector<uint64_t>& dst_blocks);
+  bool pull_replicated_spec_kv_blocks(
+      uint64_t src_cluster_id,
+      const std::vector<KVTransferMapping>& mappings);
 
   bool draft_body_uses_tp1_ = false;
   bool heterogeneous_pd_enabled_ = false;

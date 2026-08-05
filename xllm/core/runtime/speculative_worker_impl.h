@@ -103,31 +103,16 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   folly::SemiFuture<bool> pull_kv_blocks_async(
       const uint64_t src_cluster_id,
       const std::string& src_addr,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {}) override {
-    return impl_->pull_kv_blocks_async(src_cluster_id,
-                                       src_addr,
-                                       src_blocks,
-                                       dst_blocks,
-                                       src_linear_state_ids,
-                                       dst_linear_state_ids);
+      const std::vector<KVTransferMapping>& mappings) override {
+    return impl_->pull_kv_blocks_async(src_cluster_id, src_addr, mappings);
   };
 
   folly::SemiFuture<bool> pull_hetero_kv_blocks_async(
       const std::vector<uint64_t>& src_cluster_ids,
       const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {}) override {
-    return impl_->pull_hetero_kv_blocks_async(src_cluster_ids,
-                                              src_addrs,
-                                              src_blocks,
-                                              dst_blocks,
-                                              src_linear_state_ids,
-                                              dst_linear_state_ids);
+      const std::vector<KVTransferMapping>& mappings) override {
+    return impl_->pull_hetero_kv_blocks_async(
+        src_cluster_ids, src_addrs, mappings);
   };
 
  protected:

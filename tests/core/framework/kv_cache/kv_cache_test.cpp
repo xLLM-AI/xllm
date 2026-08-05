@@ -279,7 +279,6 @@ TEST(KVCacheTest, DeepSeekV4FourDimCachesUseDeviceLayout) {
     ASSERT_NE(it, tensors.end()) << "missing role=" << role.to_string();
     EXPECT_EQ(it->group_id, cache_group_id(expected_block_type))
         << "role=" << role.to_string();
-    EXPECT_FALSE(it->sequence_scoped);
   };
   expect_tensor_group(caches[0], KVCacheTensorRole::WINDOW, BlockType::SWA);
   expect_tensor_group(caches[1], KVCacheTensorRole::KEY, BlockType::C4);

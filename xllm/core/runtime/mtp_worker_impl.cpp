@@ -22,7 +22,7 @@ limitations under the License.
 #include <memory>
 
 #include "common/metrics.h"
-#if defined(USE_MLU)
+#if defined(USE_NPU) || defined(USE_MLU)
 #include "framework/kv_cache_transfer/mooncake_kv_cache_transfer.h"
 #endif
 #include "core/framework/block/block_utils.h"
@@ -783,16 +783,27 @@ bool MTPWorkerImpl::allocate_kv_cache_with_transfer(
 
   if (kv_cache_transfer_ == nullptr) {
 #if defined(USE_NPU)
-    kv_cache_transfer_ = std::make_shared<SpecKVCacheTransfer>(
-        options_.transfer_listen_port(),
-        options_.instance_role(),
-        context_.get_model_args().index_n_heads() > 0,
-        context_.get_model_args().enable_mla(),
-        options_.enable_mtp_draft_body_tp1());
+    const std::string& transfer_type =
+        ::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type();
+    if (transfer_type == "LlmDataDist") {
+      kv_cache_transfer_ = std::make_shared<SpecKVCacheTransfer>(
+          options_.transfer_listen_port(),
+          options_.instance_role(),
+          context_.get_model_args().index_n_heads() > 0,
+          context_.get_model_args().enable_mla(),
+          options_.enable_mtp_draft_body_tp1());
+    } else {
+      CHECK_EQ(transfer_type, "Mooncake");
+      kv_cache_transfer_ = std::make_shared<MooncakeKVCacheTransferDefault>(
+          device_.index(),
+          options_.transfer_listen_port(),
+          device_,
+          context_.get_model_args().model_type());
+    }
 #elif defined(USE_MLU)
     CHECK_EQ(::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type(),
              "Mooncake")
-        << "MLU MTP push only supports Mooncake KV transfer.";
+        << "MLU MTP only supports Mooncake KV transfer.";
     kv_cache_transfer_ = std::make_shared<MooncakeKVCacheTransferDefault>(
         device_.index(),
         options_.transfer_listen_port(),

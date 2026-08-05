@@ -670,16 +670,12 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
   return true;
 }
 
-bool LLMEngine::pull_kv_blocks(
-    const int32_t src_dp_size,
-    const int32_t src_dp_rank,
-    const std::vector<uint64_t>& src_cluster_ids,
-    const std::vector<std::string>& src_addrs,
-    const std::vector<uint64_t>& src_blocks,
-    const int32_t dst_dp_rank,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
+bool LLMEngine::pull_kv_blocks(const int32_t src_dp_size,
+                               const int32_t src_dp_rank,
+                               const std::vector<uint64_t>& src_cluster_ids,
+                               const std::vector<std::string>& src_addrs,
+                               const int32_t dst_dp_rank,
+                               const std::vector<KVTransferMapping>& mappings) {
   int32_t src_world_size = src_cluster_ids.size();
   int32_t src_tp_size = src_world_size / src_dp_size;
   int32_t dst_world_size = options_.nnodes();
@@ -697,10 +693,7 @@ bool LLMEngine::pull_kv_blocks(
     results.push_back(worker_clients_[dst_worker_rank]->pull_kv_blocks(
         src_cluster_ids[src_worker_rank],
         src_addrs[src_worker_rank],
-        src_blocks,
-        dst_blocks,
-        src_linear_state_ids,
-        dst_linear_state_ids));
+        mappings));
   }
 
   for (bool result : results) {
@@ -716,11 +709,8 @@ bool LLMEngine::pull_hetero_kv_blocks(
     const int32_t src_dp_rank,
     const std::vector<uint64_t>& src_cluster_ids,
     const std::vector<std::string>& src_addrs,
-    const std::vector<uint64_t>& src_blocks,
     const int32_t dst_dp_rank,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
+    const std::vector<KVTransferMapping>& mappings) {
   if (src_dp_size <= 0 || src_dp_rank < 0 || src_dp_rank >= src_dp_size ||
       src_cluster_ids.size() != src_addrs.size() ||
       src_cluster_ids.size() % static_cast<size_t>(src_dp_size) != 0) {
@@ -749,12 +739,7 @@ bool LLMEngine::pull_hetero_kv_blocks(
     }
     const int32_t dst_worker_rank = dst_dp_rank * dst_tp_size + dst_tp_rank;
     results.push_back(worker_clients_[dst_worker_rank]->pull_hetero_kv_blocks(
-        worker_src_cluster_ids,
-        worker_src_addrs,
-        src_blocks,
-        dst_blocks,
-        src_linear_state_ids,
-        dst_linear_state_ids));
+        worker_src_cluster_ids, worker_src_addrs, mappings));
   }
   return std::all_of(
       results.begin(), results.end(), [](bool result) { return result; });

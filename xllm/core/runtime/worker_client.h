@@ -78,21 +78,14 @@ class WorkerClient {
   virtual bool link_p2p(const std::string& remote_addr);
   virtual bool unlink_p2p(const std::string& remote_addr);
 
-  virtual bool pull_kv_blocks(
-      const uint64_t src_cluster_id,
-      const std::string& src_addr,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {});
+  virtual bool pull_kv_blocks(const uint64_t src_cluster_id,
+                              const std::string& src_addr,
+                              const std::vector<KVTransferMapping>& mappings);
 
   virtual bool pull_hetero_kv_blocks(
       const std::vector<uint64_t>& src_cluster_ids,
       const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {});
+      const std::vector<KVTransferMapping>& mappings);
 
   // prepare input for execution
   virtual ForwardInput prepare_inputs(Batch& batch);
@@ -119,10 +112,7 @@ class WorkerClient {
   virtual folly::SemiFuture<bool> pull_kv_blocks_async(
       const uint64_t src_cluster_id,
       const std::string& src_addr,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {});
+      const std::vector<KVTransferMapping>& mappings);
 
   virtual folly::SemiFuture<uint32_t> transfer_kv_blocks(
       const std::vector<BlockTransferInfo>& block_transfer_info);

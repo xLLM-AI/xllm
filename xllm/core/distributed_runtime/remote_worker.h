@@ -71,21 +71,14 @@ class RemoteWorker : public WorkerClient {
   bool link_p2p(const std::string& remote_addr) override;
   bool unlink_p2p(const std::string& remote_addr) override;
 
-  bool pull_kv_blocks(
-      const uint64_t src_cluster_id,
-      const std::string& src_addr,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {}) override;
+  bool pull_kv_blocks(const uint64_t src_cluster_id,
+                      const std::string& src_addr,
+                      const std::vector<KVTransferMapping>& mappings) override;
 
   virtual bool pull_hetero_kv_blocks(
       const std::vector<uint64_t>& src_cluster_ids,
       const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {}) override;
+      const std::vector<KVTransferMapping>& mappings) override;
 
   // prepare input request
   ForwardInput prepare_inputs(Batch& batch) override;
@@ -109,10 +102,7 @@ class RemoteWorker : public WorkerClient {
   folly::SemiFuture<bool> pull_kv_blocks_async(
       const uint64_t src_cluster_id,
       const std::string& src_addr,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {}) override;
+      const std::vector<KVTransferMapping>& mappings) override;
 
   folly::SemiFuture<uint32_t> transfer_kv_blocks(
       const std::vector<BlockTransferInfo>& block_transfer_info) override;

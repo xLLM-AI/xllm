@@ -41,7 +41,7 @@ DEFINE_string(instance_role,
 
 DEFINE_string(
     kv_cache_transfer_type,
-    "LlmDataDist",
+    "Mooncake",
     "The type of kv cache transfer(e.g. LlmDataDist, Mooncake, HCCL).");
 
 DEFINE_string(kv_cache_transfer_mode,
@@ -141,12 +141,6 @@ void DisaggPDConfig::normalize_mlu(KVCacheConfig& kv_cache_config,
                  << "kv_cache_transfer_type=Mooncake; forcing from "
                  << kv_cache_transfer_type() << " to Mooncake.";
     kv_cache_transfer_type("Mooncake");
-  }
-  if (kv_cache_transfer_mode() != "PUSH") {
-    LOG(WARNING) << "MLU disaggregated PD requires "
-                 << "kv_cache_transfer_mode=PUSH; forcing from "
-                 << kv_cache_transfer_mode() << " to PUSH.";
-    kv_cache_transfer_mode("PUSH");
   }
   if (kv_cache_config.kv_cache_dtype() != "auto") {
     LOG(WARNING) << "MLU disaggregated PD requires kv_cache_dtype=auto; "

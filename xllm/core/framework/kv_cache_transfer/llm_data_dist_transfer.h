@@ -63,13 +63,9 @@ class LlmDataDistTransfer : public KVCacheTransfer {
                       const uint16_t port,
                       bool force_flag = true) override;
 
-  bool pull_kv_blocks(
-      const uint64_t src_cluster_id,
-      const std::string& src_addr,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids,
-      const std::vector<uint64_t>& dst_linear_state_ids) override;
+  bool pull_kv_blocks(const uint64_t src_cluster_id,
+                      const std::string& src_addr,
+                      const std::vector<KVTransferMapping>& mappings) override;
 
   bool push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
@@ -103,7 +99,6 @@ class LlmDataDistTransfer : public KVCacheTransfer {
   uint16_t listen_port_;
   bool enable_mla_ = false;
   bool enable_lighting_indexer_ = false;
-  bool has_grouped_cache_layout_ = false;
   LlmRole role_ = LlmRole::kMix;
   std::unordered_set<uint64_t> linked_cluster_ids;
 

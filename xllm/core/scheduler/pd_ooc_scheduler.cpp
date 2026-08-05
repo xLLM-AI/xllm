@@ -1482,36 +1482,15 @@ void PDOOCScheduler::dispatch_requests() {
         for (auto& sequence : requests[i]->sequences()) {
           TransferKVInfo info;
           info.request_id = requests[i]->request_id();
-          const auto& resp = resps.resps()[i];
-          const bool has_grouped_cache = resp.kv_block_groups_size() > 0;
-          if (has_grouped_cache) {
-            for (const auto& resp_group : resp.kv_block_groups()) {
-              KVBlockTransferGroup group;
-              group.group_id = resp_group.group_id();
-              group.remote_shared_num = resp_group.remote_shared_num();
-              group.remote_blocks_ids.reserve(resp_group.block_ids_size());
-              for (const int32_t block_id : resp_group.block_ids()) {
-                group.remote_blocks_ids.emplace_back(
-                    static_cast<uint64_t>(block_id));
-              }
-              info.block_transfer_groups.emplace_back(std::move(group));
-            }
-          } else {
-            for (const int32_t block_id : resp.blocks_ids()) {
-              info.remote_blocks_ids.emplace_back(
-                  static_cast<uint64_t>(block_id));
-            }
-            info.remote_shared_num = resp.remote_shared_num();
-          }
-          if (resp.linear_state_id() >= 0) {
-            info.remote_linear_state_ids.emplace_back(resp.linear_state_id());
-          }
-          if (!has_grouped_cache) {
-            const size_t prompt_blocks =
-                (requests[i]->state().prompt_tokens.size() +
-                 kv_cache_manager_->block_size() - 1) /
-                kv_cache_manager_->block_size();
-            info.local_blocks_ids.resize(prompt_blocks);
+          const proto::DisaggResponse& resp = resps.resps()[i];
+          info.mappings.reserve(resp.groups_size());
+          for (const proto::KVTransferGroup& proto_group : resp.groups()) {
+            KVTransferMapping mapping;
+            mapping.group_id = proto_group.group_id();
+            mapping.remote_ids.assign(proto_group.ids().begin(),
+                                      proto_group.ids().end());
+            mapping.remote_shared_num = proto_group.remote_shared_num();
+            info.mappings.emplace_back(std::move(mapping));
           }
           info.dp_rank = resp.dp_rank();
           // TODO: remote_instances_info_ is not multi-thread safe.
@@ -1520,28 +1499,27 @@ void PDOOCScheduler::dispatch_requests() {
 
           // Compress per-group transfer cursors to the D-side shared count.
           // Monotonic max; no-op when a group's remote_shared_num is 0.
-          const auto& groups =
-              sequence->kv_state().transfer_kv_info()->block_transfer_groups;
-          for (const auto& g : groups) {
-            if (g.remote_shared_num == 0) {
+          const auto& mappings =
+              sequence->kv_state().transfer_kv_info()->mappings;
+          for (const KVTransferMapping& mapping : mappings) {
+            if (mapping.remote_shared_num == 0) {
               continue;
             }
             const std::optional<BlockType> block_type =
-                block_type_from_cache_group_id(g.group_id);
+                block_type_from_cache_group_id(mapping.group_id);
             if (!block_type.has_value()) {
               LOG(ERROR) << "Unknown KV cache transfer group_id: "
-                         << g.group_id;
+                         << mapping.group_id;
               continue;
             }
-            sequence->kv_state().advance_group_transfer_block_idx(
-                block_type.value(), static_cast<size_t>(g.remote_shared_num));
-          }
-          // Flat KV counterpart: response ships block_ids starting from D's
-          // shared_num; advance the flat cursor so build_step_transfer_info
-          // indexes remote_blocks_ids from 0 rather than local_idx 0.
-          if (!has_grouped_cache && resp.remote_shared_num() > 0) {
-            sequence->kv_state().advance_transfer_block_idx(
-                static_cast<size_t>(resp.remote_shared_num()));
+            if (block_type.value() == BlockType::KV) {
+              sequence->kv_state().advance_transfer_block_idx(
+                  static_cast<size_t>(mapping.remote_shared_num));
+            } else {
+              sequence->kv_state().advance_group_transfer_block_idx(
+                  block_type.value(),
+                  static_cast<size_t>(mapping.remote_shared_num));
+            }
           }
         }
 
@@ -1640,21 +1618,25 @@ void PDOOCScheduler::prefill_send_first_generation() {
                             instance_info_.cluster_ids);
         ADD_VECTOR_TO_PROTO(gen->mutable_addrs(), instance_info_.addrs);
 
-        const auto blocks =
-            request->sequences()[0]->kv_state().blocks(BlockType::KV);
-        std::vector<uint64_t> block_ids;
-        block_ids.reserve(blocks.size());
-        for (const auto& block : blocks) {
-          block_ids.push_back(block.id());
+        Sequence* sequence = request->sequences()[0].get();
+        const Slice<Block> blocks = sequence->kv_state().blocks(BlockType::KV);
+        proto::KVTransferGroup* group = gen->add_source_groups();
+        group->set_group_id(cache_group_id(BlockType::KV));
+        group->mutable_ids()->Reserve(blocks.size());
+        for (const Block& block : blocks) {
+          CHECK(block.is_valid());
+          group->add_ids(static_cast<uint64_t>(block.id()));
         }
-        ADD_VECTOR_TO_PROTO(gen->mutable_block_ids(), block_ids);
-        // Advertise the recurrent-state slot to pull from: the LINEAR slot for
-        // Qwen3.5 GDN, or -1 otherwise. Must match the D-side response
-        // helper (Sequence::get_recurrent_state_slot_id).
-        gen->set_linear_state_id(
-            request->sequences()[0]->get_recurrent_state_slot_id());
+        if (has_linear_attention_layers(engine_->model_args())) {
+          const int32_t linear_state_id = sequence->get_linear_state_slot_id();
+          CHECK_GE(linear_state_id, 0)
+              << "PD-OOC source did not allocate a linear-state slot.";
+          proto::KVTransferGroup* linear_group = gen->add_source_groups();
+          linear_group->set_group_id(cache_group_id(BlockType::LINEAR));
+          linear_group->add_ids(static_cast<uint64_t>(linear_state_id));
+        }
         gen->set_dp_size(instance_info_.dp_size);
-        gen->set_dp_rank(request->sequences()[0]->dp_rank());
+        gen->set_dp_rank(sequence->dp_rank());
       }
 
       // send first gens to remote instance
@@ -1729,8 +1711,7 @@ bool PDOOCScheduler::decode_recv_multi_generations(
     const std::string& kv_cache_transfer_mode,
     std::vector<uint64_t> src_cluster_ids,
     std::vector<std::string> src_addrs,
-    std::vector<uint64_t> src_block_ids,
-    int32_t src_linear_state_id,
+    std::vector<KVTransferMapping> source_mappings,
     int32_t src_dp_size,
     int32_t src_dp_rank) {
   // push to request_queue_, and will be executed by engine.
@@ -1786,37 +1767,51 @@ bool PDOOCScheduler::decode_recv_multi_generations(
 
   // pull kv cache (only needed once for the entire request)
   if (kv_cache_transfer_mode == "PULL") {
-    const auto blocks =
-        request->sequences()[0]->kv_state().blocks(BlockType::KV);
-    std::vector<uint64_t> dst_block_ids;
-    dst_block_ids.reserve(blocks.size());
-    for (const auto& block : blocks) {
-      dst_block_ids.push_back(block.id());
-    }
-    std::vector<uint64_t> src_linear_state_ids;
-    std::vector<uint64_t> dst_linear_state_ids;
-    // Resolve the destination recurrent-state slot with the same helper the
-    // sender used to advertise src_linear_state_id (the LINEAR slot for Qwen3.5
-    // GDN, -1 otherwise), so PULL writes the pulled state into the slot the
-    // decode forward actually reads (see
-    // Sequence::get_recurrent_state_slot_id).
-    const int32_t dst_linear_state_id =
-        request->sequences()[0]->get_recurrent_state_slot_id();
-    if (src_linear_state_id >= 0 && dst_linear_state_id >= 0) {
-      src_linear_state_ids.emplace_back(src_linear_state_id);
-      dst_linear_state_ids.emplace_back(dst_linear_state_id);
+    Sequence* sequence = request->sequences()[0].get();
+    for (KVTransferMapping& mapping : source_mappings) {
+      const std::optional<BlockType> block_type =
+          block_type_from_cache_group_id(mapping.group_id);
+      if (!block_type.has_value()) {
+        LOG(ERROR) << "Unknown PD-OOC KV transfer group, req_id=" << req_id
+                   << ", group_id=" << mapping.group_id;
+        kv_cache_manager_->deallocate(request.get());
+        return false;
+      }
+      if (block_type.value() == BlockType::LINEAR ||
+          block_type.value() == BlockType::EMBEDDING) {
+        const int32_t local_id = block_type.value() == BlockType::LINEAR
+                                     ? sequence->get_linear_state_slot_id()
+                                     : sequence->get_embedding_block_id();
+        if (local_id >= 0) {
+          mapping.local_ids.emplace_back(static_cast<uint64_t>(local_id));
+        }
+      } else {
+        const Slice<Block> blocks =
+            sequence->kv_state().blocks(block_type.value());
+        mapping.local_ids.reserve(blocks.size());
+        for (const Block& block : blocks) {
+          if (block.is_valid()) {
+            mapping.local_ids.emplace_back(static_cast<uint64_t>(block.id()));
+          }
+        }
+      }
+      if (mapping.local_ids.size() != mapping.remote_ids.size()) {
+        LOG(ERROR) << "PD-OOC PULL mapping size mismatch, req_id=" << req_id
+                   << ", group_id=" << mapping.group_id
+                   << ", local=" << mapping.local_ids.size()
+                   << ", remote=" << mapping.remote_ids.size();
+        kv_cache_manager_->deallocate(request.get());
+        return false;
+      }
     }
 
-    int32_t dst_dp_rank = request->sequences()[0]->dp_rank();
+    int32_t dst_dp_rank = sequence->dp_rank();
     if (!engine_->pull_kv_blocks(src_dp_size,
                                  src_dp_rank,
                                  src_cluster_ids,
                                  src_addrs,
-                                 src_block_ids,
                                  dst_dp_rank,
-                                 dst_block_ids,
-                                 src_linear_state_ids,
-                                 dst_linear_state_ids)) {
+                                 source_mappings)) {
       LOG(ERROR) << "Failed to pull KV blocks for offline migration, req_id: "
                  << req_id;
       kv_cache_manager_->deallocate(request.get());
@@ -1966,35 +1961,15 @@ void PDOOCScheduler::dispatch_offline_requests() {
       for (auto& sequence : request->sequences()) {
         TransferKVInfo info;
         info.request_id = request->request_id();
-        const auto& resp = resps.resps()[0];
-        const bool has_grouped_cache = resp.kv_block_groups_size() > 0;
-        if (has_grouped_cache) {
-          for (const auto& resp_group : resp.kv_block_groups()) {
-            KVBlockTransferGroup group;
-            group.group_id = resp_group.group_id();
-            group.remote_shared_num = resp_group.remote_shared_num();
-            group.remote_blocks_ids.reserve(resp_group.block_ids_size());
-            for (const int32_t block_id : resp_group.block_ids()) {
-              group.remote_blocks_ids.emplace_back(
-                  static_cast<uint64_t>(block_id));
-            }
-            info.block_transfer_groups.emplace_back(std::move(group));
-          }
-        } else {
-          for (const int32_t block_id : resp.blocks_ids()) {
-            info.remote_blocks_ids.emplace_back(
-                static_cast<uint64_t>(block_id));
-          }
-          info.remote_shared_num = resp.remote_shared_num();
-        }
-        if (resp.linear_state_id() >= 0) {
-          info.remote_linear_state_ids.emplace_back(resp.linear_state_id());
-        }
-        if (!has_grouped_cache) {
-          const size_t prompt_blocks = (request->state().prompt_tokens.size() +
-                                        kv_cache_manager_->block_size() - 1) /
-                                       kv_cache_manager_->block_size();
-          info.local_blocks_ids.resize(prompt_blocks);
+        const proto::DisaggResponse& resp = resps.resps()[0];
+        info.mappings.reserve(resp.groups_size());
+        for (const proto::KVTransferGroup& proto_group : resp.groups()) {
+          KVTransferMapping mapping;
+          mapping.group_id = proto_group.group_id();
+          mapping.remote_ids.assign(proto_group.ids().begin(),
+                                    proto_group.ids().end());
+          mapping.remote_shared_num = proto_group.remote_shared_num();
+          info.mappings.emplace_back(std::move(mapping));
         }
         info.dp_rank = resp.dp_rank();
         info.remote_instance_info = remote_instances_info_[target_instance];
@@ -2002,24 +1977,27 @@ void PDOOCScheduler::dispatch_offline_requests() {
 
         // Compress per-group / flat transfer cursors to the D-side shared
         // counts; see the online dispatch path above for the rationale.
-        const auto& groups =
-            sequence->kv_state().transfer_kv_info()->block_transfer_groups;
-        for (const auto& g : groups) {
-          if (g.remote_shared_num == 0) {
+        const auto& mappings =
+            sequence->kv_state().transfer_kv_info()->mappings;
+        for (const KVTransferMapping& mapping : mappings) {
+          if (mapping.remote_shared_num == 0) {
             continue;
           }
           const std::optional<BlockType> block_type =
-              block_type_from_cache_group_id(g.group_id);
+              block_type_from_cache_group_id(mapping.group_id);
           if (!block_type.has_value()) {
-            LOG(ERROR) << "Unknown KV cache transfer group_id: " << g.group_id;
+            LOG(ERROR) << "Unknown KV cache transfer group_id: "
+                       << mapping.group_id;
             continue;
           }
-          sequence->kv_state().advance_group_transfer_block_idx(
-              block_type.value(), static_cast<size_t>(g.remote_shared_num));
-        }
-        if (!has_grouped_cache && resp.remote_shared_num() > 0) {
-          sequence->kv_state().advance_transfer_block_idx(
-              static_cast<size_t>(resp.remote_shared_num()));
+          if (block_type.value() == BlockType::KV) {
+            sequence->kv_state().advance_transfer_block_idx(
+                static_cast<size_t>(mapping.remote_shared_num));
+          } else {
+            sequence->kv_state().advance_group_transfer_block_idx(
+                block_type.value(),
+                static_cast<size_t>(mapping.remote_shared_num));
+          }
         }
       }
 
@@ -2147,10 +2125,21 @@ void PDOOCScheduler::prefill_send_multi_generations() {
         }
 
         const auto blocks = sequence->kv_state().blocks(BlockType::KV);
-        for (const auto& block : blocks) {
-          multi_req->mutable_block_ids()->Add(block.id());
+        proto::KVTransferGroup* group = multi_req->add_source_groups();
+        group->set_group_id(cache_group_id(BlockType::KV));
+        group->mutable_ids()->Reserve(blocks.size());
+        for (const Block& block : blocks) {
+          CHECK(block.is_valid());
+          group->add_ids(static_cast<uint64_t>(block.id()));
         }
-        multi_req->set_linear_state_id(sequence->get_recurrent_state_slot_id());
+        if (has_linear_attention_layers(engine_->model_args())) {
+          const int32_t linear_state_id = sequence->get_linear_state_slot_id();
+          CHECK_GE(linear_state_id, 0)
+              << "PD-OOC source did not allocate a linear-state slot.";
+          proto::KVTransferGroup* linear_group = multi_req->add_source_groups();
+          linear_group->set_group_id(cache_group_id(BlockType::LINEAR));
+          linear_group->add_ids(static_cast<uint64_t>(linear_state_id));
+        }
         multi_req->set_dp_size(instance_info_.dp_size);
         multi_req->set_dp_rank(sequence->dp_rank());
       }
