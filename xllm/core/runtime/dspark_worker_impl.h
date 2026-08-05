@@ -19,6 +19,8 @@ limitations under the License.
 
 namespace xllm {
 
+class ProcessGroup;
+
 // DSpark = DFlash block-diffusion draft + a low-rank Markov head that adds a
 // prefix-dependent bias to each block position's draft logits. It reuses the
 // entire DFlash pipeline (prefill, context-K/V injection, validate, cache
@@ -26,8 +28,8 @@ namespace xllm {
 //   1. sample_from_anchor() — returns true, so the shared query builder makes
 //      an N-wide block (every position predicts, anchor predicts the first
 //      draft token) instead of DFlash's (1 + N) anchor + masks.
-//   2. run_decode_draft — delegates the complete logits-only forward and block
-//      sampling lifecycle to LLMWorkerImpl's block-draft execution entry point.
+//   2. run_decode_draft — performs the logits-only block forward and sequential
+//      Markov sampling before returning proposals to the shared validator.
 class DSparkWorkerImpl final : public DFlashWorkerImpl {
  public:
   DSparkWorkerImpl(const ParallelArgs& parallel_args,
@@ -42,9 +44,26 @@ class DSparkWorkerImpl final : public DFlashWorkerImpl {
   // prepare_query_inputs reads this hook to pick the block layout.
   bool sample_from_anchor() const override { return true; }
 
-  // Build the DSpark query and delegate the complete proposal to draft_impl_.
+  // Build the DSpark query and produce the complete proposal block.
   DraftBlock run_decode_draft(const ForwardInput& input,
                               ForwardInput& validate_input) override;
+
+ private:
+  struct BlockSampleOutput {
+    torch::Tensor token_ids;
+    torch::Tensor probs;
+  };
+
+  BlockSampleOutput sample_block(
+      const torch::Tensor& base_logits,
+      const torch::Tensor& anchor_token_ids,
+      const SamplingParameters& sampling_params) const;
+
+  void synchronize_sampled_token_ids(
+      torch::Tensor& sampled_token_ids,
+      const SamplingParameters& sampling_params) const;
+
+  ProcessGroup* sampling_process_group_ = nullptr;
 };
 
 }  // namespace xllm

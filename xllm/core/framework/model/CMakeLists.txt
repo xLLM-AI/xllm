@@ -18,7 +18,6 @@ cc_library(
     :common_layers
     :kv_cache
     :parallel_state
-    :sampler
     :processors
     :chat_template
     :util

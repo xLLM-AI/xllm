@@ -24,17 +24,15 @@ limitations under the License.
 #include <vector>
 
 #include "framework/model_loader.h"
-#include "framework/parallel_state/process_group.h"
-#include "framework/sampling/dspark_sampler.h"
 #include "framework/state_dict/state_dict.h"
 #include "models/llm/npu/qwen3_dflash.h"
 #include "models/model_registry.h"
 
 namespace xllm::npu::model {
 
-// Low-rank Markov sampler for DSpark block-diffusion drafting. It owns the
-// Markov weights and the sequential sampling loop, while the draft worker owns
-// the backbone forward and logits lifecycle.
+// Low-rank Markov head for DSpark block-diffusion drafting. The model owns the
+// trained projection weights, while DSparkWorkerImpl owns the sequential
+// sampling loop and distributed token synchronization.
 //
 // Weights (no bias, no activation):
 //   markov_w1: [vocab_size, markov_rank]        embedded by the target-vocab
@@ -43,21 +41,15 @@ namespace xllm::npu::model {
 //                                               draft-vocab bias.
 //   bias(prev) = markov_w1[prev] @ markov_w2^T   -> [num_reqs, draft_vocab]
 //
-// Both weights are replicated on every TP rank. The Markov loop is sequential,
-// so sharding would add an all-reduce and a full-vocab gather for every draft
-// position. The backbone LM head still performs its normal TP gather once for
-// the whole block before this sampler runs. Random and mixed sampling retain a
-// token broadcast per position because xLLM sampling uses rank-local RNG state.
-class DSparkBlockDraftSampler final : public BlockDraftSampler {
+// Both weights are replicated on every TP rank. Sharding would add an
+// all-reduce and a full-vocab gather for every sequential draft position.
+class DSparkMarkovHead final {
  public:
-  DSparkBlockDraftSampler() = default;
+  DSparkMarkovHead() = default;
 
-  void initialize(const torch::TensorOptions& options,
-                  int64_t markov_rank,
-                  ProcessGroup* process_group) {
+  void initialize(const torch::TensorOptions& options, int64_t markov_rank) {
     tensor_options_ = options;
     markov_rank_ = markov_rank;
-    process_group_ = process_group;
     CHECK_GT(markov_rank_, 0) << "DSpark requires markov_rank > 0.";
   }
 
@@ -93,47 +85,6 @@ class DSparkBlockDraftSampler final : public BlockDraftSampler {
            "implemented.";
   }
 
-  bool defined() const { return markov_w1_.defined() && markov_w2_.defined(); }
-
-  int64_t vocab_size() const { return markov_w1_.size(0); }
-
-  BlockDraftSampleOutput sample(
-      const torch::Tensor& base_logits,
-      const torch::Tensor& anchor_token_ids,
-      const SamplingParameters& sampling_params) override {
-    CHECK(defined()) << "DSpark Markov sampler weights are not initialized.";
-    CHECK_EQ(base_logits.dim(), 3)
-        << "DSpark base_logits must be [num_reqs, n_spec, draft_vocab].";
-    const int64_t draft_vocab_size = base_logits.size(/*dim=*/2);
-    CHECK_EQ(draft_vocab_size, vocab_size())
-        << "DSpark reduced-vocab drafts (draft_vocab=" << draft_vocab_size
-        << " != vocab=" << vocab_size()
-        << ") need draft-to-target remapping, not yet implemented.";
-
-    return dspark::sample_block(
-        base_logits,
-        anchor_token_ids,
-        sampling_params,
-        [this](const torch::Tensor& previous_token_ids) {
-          return bias(previous_token_ids);
-        },
-        [this, &sampling_params](torch::Tensor& sampled_token_ids) {
-          synchronize_sampled_token_ids(sampled_token_ids, sampling_params);
-        });
-  }
-
- private:
-  void synchronize_sampled_token_ids(
-      torch::Tensor& sampled_token_ids,
-      const SamplingParameters& sampling_params) const {
-    if (sampling_params.all_greedy_sample || process_group_ == nullptr ||
-        process_group_->world_size() <= 1) {
-      return;
-    }
-    sampled_token_ids = sampled_token_ids.contiguous();
-    process_group_->broadcast(sampled_token_ids, /*root_rank=*/0);
-  }
-
   torch::Tensor bias(const torch::Tensor& prev_token_ids) const {
     CHECK(defined()) << "DSpark Markov head weights are not initialized.";
     namespace F = torch::nn::functional;
@@ -141,16 +92,19 @@ class DSparkBlockDraftSampler final : public BlockDraftSampler {
     return F::linear(markov_embedding, markov_w2_);
   }
 
+ private:
+  bool defined() const { return markov_w1_.defined() && markov_w2_.defined(); }
+
   torch::Tensor markov_w1_;  // [vocab_size, markov_rank]
   torch::Tensor markov_w2_;  // [draft_vocab_size, markov_rank]
   torch::TensorOptions tensor_options_;
-  ProcessGroup* process_group_ = nullptr;
   int64_t markov_rank_ = 0;
 };
 
 // DSpark draft model = DFlash block-diffusion backbone (context-K/V injection,
-// prefill, weight loading all inherited unchanged) + a block-draft sampler held
-// by the ForCausalLM layer. The backbone remains independent from sampling.
+// prefill, weight loading all inherited unchanged) + a low-rank Markov head
+// held by the ForCausalLM layer. The backbone remains independent from
+// sampling.
 class DSparkQwen3ModelImpl final : public DFlashQwen3ModelImpl {
  public:
   explicit DSparkQwen3ModelImpl(const ModelContext& context)
@@ -164,15 +118,14 @@ class DSparkQwen3ForCausalLMImpl final
   explicit DSparkQwen3ForCausalLMImpl(const ModelContext& context)
       : LlmForCausalLMImplBase<DSparkQwen3Model>(context) {
     const ModelArgs& model_args = context.get_model_args();
-    const ParallelArgs& parallel_args = context.get_parallel_args();
-    ProcessGroup* process_group = parallel_args.tp_group_ != nullptr
-                                      ? parallel_args.tp_group_
-                                      : parallel_args.process_group_;
-    block_draft_sampler_.initialize(
-        context.get_tensor_options(), model_args.markov_rank(), process_group);
+    markov_head_.initialize(context.get_tensor_options(),
+                            model_args.markov_rank());
   }
 
-  BlockDraftSampler* block_draft_sampler() { return &block_draft_sampler_; }
+  torch::Tensor dspark_markov_bias(
+      const torch::Tensor& previous_token_ids) const {
+    return markov_head_.bias(previous_token_ids);
+  }
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
@@ -183,11 +136,11 @@ class DSparkQwen3ForCausalLMImpl final
         sub_dict = state_dict->get_dict_with_prefix("");
       }
       model_->load_state_dict(sub_dict);
-      block_draft_sampler_.load_state_dict(sub_dict);
+      markov_head_.load_state_dict(sub_dict);
     }
     model_->verify_loaded_weights("");
     model_->merge_loaded_weights();
-    block_draft_sampler_.verify_loaded_weights("");
+    markov_head_.verify_loaded_weights("");
   }
 
   ModelOutput write_context_kv(const torch::Tensor& target_hidden,
@@ -200,7 +153,7 @@ class DSparkQwen3ForCausalLMImpl final
   }
 
  private:
-  DSparkBlockDraftSampler block_draft_sampler_;
+  DSparkMarkovHead markov_head_;
 };
 TORCH_MODULE(DSparkQwen3ForCausalLM);
 
