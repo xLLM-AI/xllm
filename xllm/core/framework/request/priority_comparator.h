@@ -20,6 +20,7 @@ limitations under the License.
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "common.pb.h"
 #include "framework/request/request.h"
@@ -103,14 +104,23 @@ enum class ShortRequestFirstRequestClass : int8_t {
 ShortRequestFirstRequestClass classify_short_request_first(Request& request,
                                                            int32_t threshold);
 
-// ShortRequestFirst ordering: aged LONG requests (wait >= long_max_wait_ms)
-// first, then SHORT requests, then remaining LONG requests. Within the same
+// Select the single LONG request that may be promoted ahead of waiting SHORT
+// requests: the LONG request with the oldest created_time, promoted only when
+// its wait reaches long_max_wait_ms and both SHORT and LONG requests are
+// waiting. Returns nullptr when no promotion applies.
+std::shared_ptr<Request> select_short_request_first_promoted(
+    const std::vector<std::shared_ptr<Request>>& requests,
+    int32_t threshold,
+    double long_max_wait_ms,
+    absl::Time now);
+
+// ShortRequestFirst ordering: the promoted LONG head first (when non-null),
+// then SHORT requests, then the remaining LONG requests. Within the same
 // class, older requests (created_time) come first.
 class ShortRequestFirstComparator final : public PriorityComparator {
  public:
   ShortRequestFirstComparator(int32_t threshold,
-                              double long_max_wait_ms,
-                              absl::Time now);
+                              std::shared_ptr<Request> promoted);
 
   bool operator()(const std::shared_ptr<Request>& a,
                   const std::shared_ptr<Request>& b) const override;
@@ -120,8 +130,7 @@ class ShortRequestFirstComparator final : public PriorityComparator {
       const std::shared_ptr<Request>& request) const;
 
   int32_t threshold_;
-  double long_max_wait_ms_;
-  absl::Time now_;
+  std::shared_ptr<Request> promoted_;
 };
 
 std::function<bool(const std::shared_ptr<Request>&,

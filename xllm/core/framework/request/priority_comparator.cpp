@@ -235,11 +235,40 @@ ShortRequestFirstRequestClass classify_short_request_first(Request& request,
   return ShortRequestFirstRequestClass::LONG;
 }
 
-ShortRequestFirstComparator::ShortRequestFirstComparator(
+std::shared_ptr<Request> select_short_request_first_promoted(
+    const std::vector<std::shared_ptr<Request>>& requests,
     int32_t threshold,
     double long_max_wait_ms,
-    absl::Time now)
-    : threshold_(threshold), long_max_wait_ms_(long_max_wait_ms), now_(now) {}
+    absl::Time now) {
+  std::shared_ptr<Request> oldest_long;
+  bool has_short = false;
+  bool has_long = false;
+  for (const auto& request : requests) {
+    const ShortRequestFirstRequestClass request_class =
+        classify_short_request_first(*request, threshold);
+    if (request_class == ShortRequestFirstRequestClass::SHORT) {
+      has_short = true;
+    } else if (request_class == ShortRequestFirstRequestClass::LONG) {
+      has_long = true;
+      if (oldest_long == nullptr ||
+          request->created_time() < oldest_long->created_time()) {
+        oldest_long = request;
+      }
+    }
+  }
+  if (long_max_wait_ms > 0.0 && has_short && has_long &&
+      oldest_long != nullptr &&
+      now - oldest_long->created_time() >=
+          absl::Milliseconds(long_max_wait_ms)) {
+    return oldest_long;
+  }
+  return nullptr;
+}
+
+ShortRequestFirstComparator::ShortRequestFirstComparator(
+    int32_t threshold,
+    std::shared_ptr<Request> promoted)
+    : threshold_(threshold), promoted_(promoted) {}
 
 bool ShortRequestFirstComparator::operator()(
     const std::shared_ptr<Request>& a,
@@ -257,8 +286,7 @@ int32_t ShortRequestFirstComparator::short_request_first_rank(
   const ShortRequestFirstRequestClass request_class =
       classify_short_request_first(*request, threshold_);
   if (request_class == ShortRequestFirstRequestClass::LONG &&
-      long_max_wait_ms_ > 0.0 &&
-      now_ - request->created_time() >= absl::Milliseconds(long_max_wait_ms_)) {
+      promoted_ != nullptr && request.get() == promoted_.get()) {
     return 0;
   }
   if (request_class == ShortRequestFirstRequestClass::SHORT) {
