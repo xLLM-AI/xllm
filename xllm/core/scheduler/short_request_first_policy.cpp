@@ -28,17 +28,14 @@ namespace {
 int32_t short_request_first_rank(ShortRequestFirstRequestClass request_class,
                                  const std::shared_ptr<Request>& request,
                                  const std::shared_ptr<Request>& promoted) {
-  if (request_class == ShortRequestFirstRequestClass::IMMEDIATE) {
-    return 0;
-  }
   if (request_class == ShortRequestFirstRequestClass::LONG &&
       promoted != nullptr && request.get() == promoted.get()) {
-    return 1;
+    return 0;
   }
   if (request_class == ShortRequestFirstRequestClass::SHORT) {
-    return 2;
+    return 1;
   }
-  return 3;
+  return 2;
 }
 
 }  // namespace
@@ -49,13 +46,6 @@ ShortRequestFirstRequestClass classify_short_request_first(Request& request,
   Sequence* sequence = request.sequences()[0].get();
   CHECK(sequence != nullptr);
 
-  // Chunked prefill continuations that hold KV blocks are routed to the
-  // chunk queue and scheduled ahead of the prefill queue, so the prefill
-  // queue only contains fresh requests and preempted requests (whose KV has
-  // already been deallocated). IMMEDIATE therefore means "preempted".
-  if (request.preempted()) {
-    return ShortRequestFirstRequestClass::IMMEDIATE;
-  }
   if (sequence->num_prompt_tokens() <= static_cast<size_t>(threshold)) {
     return ShortRequestFirstRequestClass::SHORT;
   }
@@ -134,22 +124,18 @@ void ShortRequestFirstPolicy::report_metrics(const SchedulerState& state,
 
   const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
   const int32_t threshold = scheduler_config.short_request_first_threshold();
-  size_t immediate_waiting = 0;
   size_t short_waiting = 0;
   size_t long_waiting = 0;
   for (auto it = state.prefill_queue.begin(); it != state.prefill_queue.end();
        ++it) {
     const ShortRequestFirstRequestClass request_class =
         classify_short_request_first(**it, threshold);
-    if (request_class == ShortRequestFirstRequestClass::IMMEDIATE) {
-      ++immediate_waiting;
-    } else if (request_class == ShortRequestFirstRequestClass::SHORT) {
+    if (request_class == ShortRequestFirstRequestClass::SHORT) {
       ++short_waiting;
     } else {
       ++long_waiting;
     }
   }
-  GAUGE_SET(num_short_request_first_immediate_waiting, immediate_waiting);
   GAUGE_SET(num_short_request_first_short_waiting, short_waiting);
   GAUGE_SET(num_short_request_first_long_waiting, long_waiting);
 }

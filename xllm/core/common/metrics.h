@@ -153,7 +153,6 @@ DECLARE_GAUGE(num_offline_decode_preempt_offline_requests);
 DECLARE_GAUGE(num_online_decode_preempt_online_requests);
 DECLARE_GAUGE(num_online_prefill_preempt_offline_requests);
 DECLARE_GAUGE(num_online_decode_preempt_offline_requests);
-DECLARE_GAUGE(num_short_request_first_immediate_waiting);
 DECLARE_GAUGE(num_short_request_first_short_waiting);
 DECLARE_GAUGE(num_short_request_first_long_waiting);
 DECLARE_GAUGE(num_running_sequences);

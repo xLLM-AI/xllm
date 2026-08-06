@@ -220,9 +220,9 @@ class PrefillFirstPolicy : public SchedulerPolicy {
 
 // ShortRequestFirstPolicy: PrefillFirstPolicy with ShortRequestFirst ordering
 // for the PD-prefill waiting queue. Before delegating to PrefillFirstPolicy it
-// stable-sorts the prefill queue so that immediate requests, then (at most) the
-// single aged LONG head, then SHORT requests, then remaining LONG requests are
-// scheduled in that order.
+// stable-sorts the prefill queue so that (at most) the single aged LONG head,
+// then SHORT requests, then remaining LONG requests are scheduled in that
+// order.
 class ShortRequestFirstPolicy : public PrefillFirstPolicy {
  public:
   using PrefillFirstPolicy::PrefillFirstPolicy;
@@ -304,23 +304,20 @@ class UnifiedPolicy : public SchedulerPolicy {
 // =============================================================================
 
 enum class ShortRequestFirstRequestClass : int8_t {
-  IMMEDIATE = 0,
-  SHORT = 1,
-  LONG = 2,
+  SHORT = 0,
+  LONG = 1,
 };
 
-// Classify a PD-prefill waiting request for ShortRequestFirst ordering.
-// IMMEDIATE covers preempted requests only: chunked prefill continuations
-// with partial KV are handled by the separate chunk queue and never enter the
-// prefill queue.
+// Classify a PD-prefill waiting request for ShortRequestFirst ordering by
+// prompt length.
 ShortRequestFirstRequestClass classify_short_request_first(Request& request,
                                                            int32_t threshold);
 
-// Stable-sort `queue` with ShortRequestFirst ordering: IMMEDIATE requests
-// first, then (at most) the single LONG request whose wait exceeds
-// `long_max_wait_ms`, then SHORT requests, then the remaining LONG requests.
-// Within the same class requests are ordered by created_time (oldest first).
-// `now` defaults to the current time and is injectable for tests.
+// Stable-sort `queue` with ShortRequestFirst ordering: (at most) the single
+// LONG request whose wait exceeds `long_max_wait_ms`, then SHORT requests,
+// then the remaining LONG requests. Within the same class requests are ordered
+// by created_time (oldest first). `now` defaults to the current time and is
+// injectable for tests.
 void sort_short_request_first_queue(RequestPriorityQueue& queue,
                                     int32_t threshold,
                                     double long_max_wait_ms,

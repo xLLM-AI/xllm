@@ -75,33 +75,6 @@ TEST(ShortRequestFirstPolicyTest, ClassifiesFreshRequestsByThreshold) {
             ShortRequestFirstRequestClass::LONG);
 }
 
-TEST(ShortRequestFirstPolicyTest, ClassifiesPreemptedAsImmediate) {
-  std::shared_ptr<Request> request =
-      make_request("preempted", /*prompt_tokens=*/512);
-  request->set_preempted();
-  EXPECT_EQ(classify_short_request_first(*request, /*threshold=*/256),
-            ShortRequestFirstRequestClass::IMMEDIATE);
-}
-
-TEST(ShortRequestFirstPolicyTest, SortsImmediateBeforeShortBeforeLong) {
-  DequeQueue queue;
-  std::shared_ptr<Request> immediate =
-      make_request("immediate", /*prompt_tokens=*/512);
-  immediate->set_preempted();
-  queue.push(immediate, /*if_back=*/true);
-  queue.push(make_request("long", /*prompt_tokens=*/512),
-             /*if_back=*/true);
-  queue.push(make_request("short", /*prompt_tokens=*/64),
-             /*if_back=*/true);
-
-  sort_short_request_first_queue(queue,
-                                 /*threshold=*/256,
-                                 /*long_max_wait_ms=*/0.0);
-
-  EXPECT_EQ(collect_ids(queue),
-            std::vector<std::string>({"immediate", "short", "long"}));
-}
-
 TEST(ShortRequestFirstPolicyTest, SortsShortBeforeLongByDefault) {
   DequeQueue queue;
   queue.push(make_request("long", /*prompt_tokens=*/512),
