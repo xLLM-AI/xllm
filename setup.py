@@ -683,7 +683,6 @@ class BuildDistWheel(bdist_wheel):
                 path = os.path.join(root, item)
                 if '_test' in item and os.path.isfile(path):
                     os.remove(path)
-        global BUILD_TEST_FILE
         BUILD_TEST_FILE = False
 
         self.skip_build = True
