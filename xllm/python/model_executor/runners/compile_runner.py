@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 from xllm.python.attention.backend import AttentionMetadata
@@ -44,9 +46,15 @@ class CompileRunner(BaseRunner):
     @staticmethod
     def _resolve_compile_backend(backend: str):
         if backend == "torchair":
+            os.environ.setdefault(
+                "AUTOFUSE_FLAGS",
+                "--enable_autofuse=true;--autofuse_enable_pass=reduce,concat,transpose,gather,split,slice",
+            )
             import torchair
             config = torchair.CompilerConfig()
             return torchair.get_npu_backend(compiler_config=config)
+        if backend == "inductor":
+            os.environ.setdefault("TORCHINDUCTOR_NPU_BACKEND", "ascendc")
         return backend
 
     def execute(
