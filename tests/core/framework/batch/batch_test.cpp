@@ -37,6 +37,7 @@ limitations under the License.
 #include "framework/block/block_utils.h"
 #include "framework/block/composite_block_manager.h"
 #include "framework/config/beam_search_config.h"
+#include "framework/config/service_config.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/prefix_cache/block_hasher.h"
@@ -250,6 +251,21 @@ class ScopedPrefillChunkStride final {
 
  private:
   int32_t previous_;
+};
+
+class ScopedJsonObjectOutput final {
+ public:
+  explicit ScopedJsonObjectOutput(bool enabled)
+      : previous_(ServiceConfig::get_instance().enable_json_object_output()) {
+    ServiceConfig::get_instance().enable_json_object_output(enabled);
+  }
+
+  ~ScopedJsonObjectOutput() {
+    ServiceConfig::get_instance().enable_json_object_output(previous_);
+  }
+
+ private:
+  bool previous_;
 };
 
 }  // namespace
@@ -1086,6 +1102,7 @@ TEST(BatchTest, SampleRequestInjectsAllMatchedSlots) {
 }
 
 TEST(BatchTest, JsonObjectSampleSequenceIdsFollowSamplingRows) {
+  ScopedJsonObjectOutput enabled(/*enabled=*/true);
   BlockManager::Options options;
   options.num_blocks(8).block_size(4);
   BlockManagerImpl manager(options);
@@ -1155,6 +1172,49 @@ TEST(BatchTest, JsonObjectSampleSequenceIdsFollowSamplingRows) {
   ForwardInput next_input = batch.prepare_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
   EXPECT_EQ(next_input.sample_prior_output_rows, std::vector<int32_t>({0, 1}));
+}
+
+TEST(BatchTest, JsonObjectMetadataIsSkippedWhenDisabled) {
+  ScopedJsonObjectOutput disabled(/*enabled=*/false);
+  BlockManager::Options options;
+  options.num_blocks(4).block_size(4);
+  BlockManagerImpl manager(options);
+
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(4);
+  std::shared_ptr<const JsonObjectGrammar> grammar =
+      std::make_shared<const JsonObjectGrammar>(
+          std::vector<std::string>{"{", "}", "\"", "a", ":", "1", ""},
+          std::unordered_set<int32_t>{6});
+
+  SequenceParams sequence_params;
+  sequence_params.seq_capacity = 16;
+  sequence_params.stopping_checker = &stopping_checker;
+  sequence_params.sampling_param = &sampling_param;
+  sequence_params.request_id = "req-disabled";
+  sequence_params.json_object_grammar = grammar;
+  sequence_params.enable_schedule_overlap = true;
+
+  IncrementalDecoder decoder("", 2, false, false);
+  Sequence sequence(/*index=*/0,
+                    /*token_ids=*/{10, 11},
+                    torch::Tensor(),
+                    MMData(),
+                    std::move(decoder),
+                    sequence_params);
+  sequence.add_blocks(BlockType::KV, manager.allocate(1));
+
+  Batch batch({&sequence});
+  ForwardInput forward_input = batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
+
+  EXPECT_TRUE(forward_input.json_object_states.empty());
+  EXPECT_TRUE(forward_input.json_object_state_snapshots.empty());
+  EXPECT_TRUE(forward_input.sample_sequence_ids.empty());
+  EXPECT_TRUE(forward_input.sample_prior_output_rows.empty());
+  EXPECT_FALSE(forward_input.sampling_params.filter_bitmask.defined());
+  EXPECT_FALSE(forward_input.sampling_params.filter_mask.defined());
 }
 
 TEST(BatchTest, ChunkedPDTransferUsesStepWindow) {

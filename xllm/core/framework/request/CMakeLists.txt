@@ -44,6 +44,7 @@ cc_library(
     stopping_checker.cpp
     priority_comparator.cpp
   DEPS
+    :config
     :kv_cache
     :prefix_cache
     :encoder_cache

@@ -21,10 +21,26 @@ limitations under the License.
 #include "anthropic.pb.h"
 #include "chat.pb.h"
 #include "completion.pb.h"
+#include "core/framework/config/service_config.h"
 #include "multimodal.pb.h"
 
 namespace xllm {
 namespace {
+
+class ScopedJsonObjectOutput final {
+ public:
+  explicit ScopedJsonObjectOutput(bool enabled)
+      : previous_(ServiceConfig::get_instance().enable_json_object_output()) {
+    ServiceConfig::get_instance().enable_json_object_output(enabled);
+  }
+
+  ~ScopedJsonObjectOutput() {
+    ServiceConfig::get_instance().enable_json_object_output(previous_);
+  }
+
+ private:
+  bool previous_;
+};
 
 TEST(RequestParamsTest, IncludeStopStringInOutputDefaultsToFalse) {
   RequestParams completion_params(proto::CompletionRequest(), "", "");
@@ -65,6 +81,9 @@ TEST(RequestParamsTest, IncludeStopStringInOutputUsesVllmJsonName) {
 }
 
 TEST(RequestParamsTest, ParsesJsonObjectResponseFormat) {
+  const ServiceConfig default_config;
+  EXPECT_TRUE(default_config.enable_json_object_output());
+  ScopedJsonObjectOutput enabled(/*enabled=*/true);
   proto::ChatRequest request;
   request.mutable_response_format()->set_type("json_object");
 
@@ -74,7 +93,19 @@ TEST(RequestParamsTest, ParsesJsonObjectResponseFormat) {
   EXPECT_TRUE(params.response_format_error.empty());
 }
 
+TEST(RequestParamsTest, IgnoresJsonObjectResponseFormatWhenDisabled) {
+  ScopedJsonObjectOutput disabled(/*enabled=*/false);
+  proto::ChatRequest request;
+  request.mutable_response_format()->set_type("json_object");
+
+  RequestParams params(request, "", "");
+
+  EXPECT_EQ(params.response_format, ResponseFormatType::NONE);
+  EXPECT_TRUE(params.response_format_error.empty());
+}
+
 TEST(RequestParamsTest, RejectsUnsupportedResponseFormat) {
+  ScopedJsonObjectOutput disabled(/*enabled=*/false);
   proto::ChatRequest request;
   request.mutable_response_format()->set_type("text");
 

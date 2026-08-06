@@ -21,6 +21,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/common/instance_name.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/config/service_config.h"
 #include "core/util/uuid.h"
 #include "request.h"
 
@@ -326,7 +327,9 @@ void init_from_chat_request(RequestParams& params, const ChatRequest& request) {
     if (request.has_response_format()) {
       const std::string& type = request.response_format().type();
       if (type == "json_object") {
-        params.response_format = ResponseFormatType::JSON_OBJECT;
+        if (ServiceConfig::get_instance().enable_json_object_output()) {
+          params.response_format = ResponseFormatType::JSON_OBJECT;
+        }
       } else {
         params.response_format_error =
             "Unsupported response_format.type: " + type +

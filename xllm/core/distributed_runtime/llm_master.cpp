@@ -30,6 +30,7 @@ limitations under the License.
 #include "api_service/call.h"
 #include "common/metrics.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/config/service_config.h"
 #include "core/framework/sampling/json_object_grammar.h"
 #include "core/platform/device_name_utils.h"
 #include "framework/model/model_args.h"
@@ -423,6 +424,7 @@ std::shared_ptr<Request> LLMMaster::generate_request(
   sampling_param.top_logprobs = sp.top_logprobs;
   sampling_param.is_embeddings = sp.is_embeddings;
   sampling_param.json_object =
+      ServiceConfig::get_instance().enable_json_object_output() &&
       sp.response_format == ResponseFormatType::JSON_OBJECT;
   const bool json_object = sampling_param.json_object;
   sampling_param.beam_width = sp.beam_width;

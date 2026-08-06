@@ -32,6 +32,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/service_config.h"
 #include "core/framework/multimodal/mm_visitor.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
@@ -216,6 +217,8 @@ BatchInputBuilder::BatchInputBuilder(
       input_embeddings_vec_(input_embeddings_vec),
       mm_data_vec_(mm_data_vec),
       args_(args),
+      enable_json_object_output_(
+          ServiceConfig::get_instance().enable_json_object_output()),
       thread_pool_(thread_pool),
       num_sequences_(sequences.size()),
       swap_block_transfer_infos_(swap_block_transfer_infos),
@@ -573,16 +576,18 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     state_.sampling_params.insert(state_.sampling_params.end(),
                                   state.sampling_params.begin(),
                                   state.sampling_params.end());
-    state_.json_object_states.insert(state_.json_object_states.end(),
-                                     state.json_object_states.begin(),
-                                     state.json_object_states.end());
-    state_.sample_sequence_ids.insert(state_.sample_sequence_ids.end(),
-                                      state.sample_sequence_ids.begin(),
-                                      state.sample_sequence_ids.end());
-    state_.sample_prior_output_rows.insert(
-        state_.sample_prior_output_rows.end(),
-        state.sample_prior_output_rows.begin(),
-        state.sample_prior_output_rows.end());
+    if (enable_json_object_output_) {
+      state_.json_object_states.insert(state_.json_object_states.end(),
+                                       state.json_object_states.begin(),
+                                       state.json_object_states.end());
+      state_.sample_sequence_ids.insert(state_.sample_sequence_ids.end(),
+                                        state.sample_sequence_ids.begin(),
+                                        state.sample_sequence_ids.end());
+      state_.sample_prior_output_rows.insert(
+          state_.sample_prior_output_rows.end(),
+          state.sample_prior_output_rows.begin(),
+          state.sample_prior_output_rows.end());
+    }
     int32_t sample_idxes_offset =
         static_cast<int32_t>(state_.sample_idxes.size());
     for (const auto& idx : state.sample_idxes) {
@@ -946,13 +951,15 @@ void BatchInputBuilder::handle_sampling_parameters(Sequence* sequence,
   state.selected_token_idxes.push_back(
       static_cast<int32_t>(state.flatten_tokens_vec.size() - 1));
   state.sampling_params.push_back(sequence->sampling_param());
-  const JsonObjectGrammarState* json_state = sequence->json_object_state();
-  state.json_object_states.push_back(
-      json_state == nullptr ? JsonObjectGrammarState() : *json_state);
-  state.sample_sequence_ids.emplace_back(sequence->sample_sequence_id());
-  const int32_t sampled_input_token = state.flatten_tokens_vec.back();
-  state.sample_prior_output_rows.emplace_back(
-      sampled_input_token < 0 ? -sampled_input_token - 1 : -1);
+  if (enable_json_object_output_) {
+    const JsonObjectGrammarState* json_state = sequence->json_object_state();
+    state.json_object_states.push_back(
+        json_state == nullptr ? JsonObjectGrammarState() : *json_state);
+    state.sample_sequence_ids.emplace_back(sequence->sample_sequence_id());
+    const int32_t sampled_input_token = state.flatten_tokens_vec.back();
+    state.sample_prior_output_rows.emplace_back(
+        sampled_input_token < 0 ? -sampled_input_token - 1 : -1);
+  }
   state.sample_idxes.push_back(
       static_cast<int32_t>(state.selected_token_idxes.size() - 1));
 
@@ -1273,6 +1280,9 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
                                        state_.unique_token_ids_vec,
                                        state_.unique_token_counts_vec,
                                        state_.unique_token_lens_vec);
+    if (!enable_json_object_output_) {
+      return forward_input;
+    }
     forward_input.json_object_states = std::move(state_.json_object_states);
     std::vector<std::string> sample_sequence_ids =
         std::move(state_.sample_sequence_ids);

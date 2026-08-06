@@ -191,6 +191,7 @@ class BatchInputBuilder {
   BuilderState state_;
 
   // Configuration
+  bool enable_json_object_output_ = true;
   bool use_mrope_ = false;
   uint32_t num_sequences_ = 0;
   bool need_unique_tokens_ = true;
