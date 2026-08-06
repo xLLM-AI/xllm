@@ -130,6 +130,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // FlashInfer batch-decode read-before-write race on the bonus token.
   bool use_chunked_prefill_spec_verify_path() const;
   bool is_kimi_k25_eagle3_pair() const;
+  bool requires_probability_based_validation() const;
   bool use_kimi_eagle3_step_major_validate_layout() const;
   void synchronize_kimi_eagle3_npu_forward();
   std::optional<ForwardOutput> run_worker_no_sync(

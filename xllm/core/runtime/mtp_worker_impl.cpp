@@ -752,6 +752,11 @@ bool MTPWorkerImpl::is_kimi_k25_eagle3_pair() const {
       draft_impl_->context_.get_model_args().model_type());
 }
 
+bool MTPWorkerImpl::requires_probability_based_validation() const {
+  // Keep validation independent of graph/eager sampled-token layouts.
+  return is_kimi_k25_eagle3_pair();
+}
+
 bool MTPWorkerImpl::use_kimi_eagle3_step_major_validate_layout() const {
   return is_kimi_k25_eagle3_pair() && !use_chunked_prefill_spec_verify_path();
 }
@@ -2217,6 +2222,7 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
   }
   extend_input = base_input;
   extend_input.sampling_params.return_probs =
+      requires_probability_based_validation() ||
       !extend_input.sampling_params.all_greedy_sample;
   clear_ready_events(extend_input);
   extend_input.device_tensors_ready = false;
@@ -2554,6 +2560,7 @@ void MTPWorkerImpl::prepare_draft_inputs(const ForwardInput& input,
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   draft_input = input;
   draft_input.sampling_params.return_probs =
+      requires_probability_based_validation() ||
       !draft_input.sampling_params.all_greedy_sample;
   clear_ready_events(draft_input);
   draft_input.device_tensors_ready = false;
@@ -2642,7 +2649,9 @@ SampleOutput MTPWorkerImpl::validate(
           batch_size,
           vocab_size,
           enable_opt_validate_probs_,
-          /*draft_probs_required=*/!sampling_params.all_greedy_sample);
+          /*draft_probs_required=*/
+          requires_probability_based_validation() ||
+              !sampling_params.all_greedy_sample);
   return validate(sampling_params, draft_token_ids, draft_probs, target_output);
 }
 
@@ -2694,7 +2703,8 @@ SampleOutput MTPWorkerImpl::validate(const SamplingParameters& sampling_params,
           .index({"...", ISlice(num_val_tokens - 1, None, num_val_tokens)})
           .view({-1, 1});
 
-  if (sampling_params.all_greedy_sample && !target_output.logprobs) {
+  if (!requires_probability_based_validation() &&
+      sampling_params.all_greedy_sample && !target_output.logprobs) {
     torch::Tensor target_token_ids =
         target_next_tokens.view({batch_size, num_val_tokens});
     torch::Tensor target_draft_token_ids = target_token_ids.slice(
