@@ -1493,6 +1493,32 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   COUNTER_ADD(speculative_execution_latency_seconds_validation,
               timer.elapsed_seconds());
 
+  // Kimi Eagle3 builds the next draft input from the host embedding cache.
+  // Keep accepted tokens and verifier embeddings in the same synchronous
+  // handoff used by the validated pre-rebase implementation.
+  if (is_kimi_k25_eagle3_pair()) {
+    if (enable_spec_token_broadcast(get_optimization_config()) &&
+        enable_schedule_overlap()) {
+      c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+      broadcast_spec_tokens(val_output.next_tokens,
+                            spec_broadcast_group(parallel_args_));
+    }
+
+    const int32_t ret = compute_stream_->synchronize();
+    CHECK_EQ(ret, 0) << "failed to synchronize Kimi Eagle3 validation, ret="
+                     << ret;
+    val_output.next_tokens = val_output.next_tokens.to(torch::kCPU);
+    write_target_context_to_cache(input, val_output);
+
+    if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
+      return std::nullopt;
+    }
+    clear_all_output_embeddings(target_output);
+    val_output.embeddings = torch::Tensor();
+    target_output.sample_output = val_output;
+    return target_output;
+  }
+
   const int64_t batch_size = val_output.next_tokens.size(0);
   const int64_t num_val_tokens = options_.num_speculative_tokens() + 1;
   CHECK_EQ(validate_input.positions.numel(), batch_size * num_val_tokens)
@@ -1579,6 +1605,22 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   val_output.embeddings = torch::Tensor();
   target_output.sample_output = val_output;
   return target_output;
+}
+
+void MTPWorkerImpl::write_target_context_to_cache(
+    const ForwardInput& input,
+    const SampleOutput& validate_output) {
+  CHECK(embedding_cache_ != nullptr)
+      << "embedding_cache_ must be initialized before target cache write";
+  CHECK(!input.input_params.embedding.embedding_ids.empty())
+      << "target context cache write requires embedding ids";
+
+  embedding_cache_->write_target_context(
+      input.input_params.embedding.embedding_ids,
+      input.input_params.embedding.request_ids,
+      validate_output.next_tokens,
+      validate_output.embeddings,
+      options_.num_speculative_tokens());
 }
 
 void MTPWorkerImpl::stage_target_context_write(
@@ -2185,7 +2227,7 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
   const bool use_chunked_prefill =
       !is_kimi_k25_eagle3_pair() &&
       ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel();
-  const bool force_kimi_k25_eagle3_two_rows =
+  const bool is_kimi_k25_eagle3_dp_decode =
       target_impl_ != nullptr && draft_impl_ != nullptr &&
       is_kimi_k25_eagle3_draft(
           target_impl_->context_.get_model_args().model_type(),
@@ -2217,12 +2259,12 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
     collect_row_count_group(draft_impl_->context_.get_parallel_args());
   }
   const bool can_sync_variable_dp_rows =
-      dp_enabled && !force_kimi_k25_eagle3_two_rows && !use_chunked_prefill &&
+      dp_enabled && !is_kimi_k25_eagle3_dp_decode && !use_chunked_prefill &&
       has_dp_token_counts &&
       (dp_row_count_group != nullptr || world_row_count_group != nullptr);
   const bool use_uniform_single_dp_rows =
-      dp_enabled && !force_kimi_k25_eagle3_two_rows && !use_chunked_prefill &&
-      !can_sync_variable_dp_rows;
+      dp_enabled && !use_chunked_prefill &&
+      (is_kimi_k25_eagle3_dp_decode || !can_sync_variable_dp_rows);
   CHECK_EQ(last_states.size(), static_cast<size_t>(num_sequences))
       << "draft extend state count mismatch";
 
@@ -2317,20 +2359,17 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
     }
     const bool has_prev_token =
         state.prev_token_id >= 0 && state.prev_embedding.defined();
-    const bool use_two_rows = force_two_rows ||
-                              force_kimi_k25_eagle3_two_rows ||
-                              (!use_uniform_single_dp_rows &&
-                               state.all_draft_accepted && has_prev_token);
+    const bool use_two_rows =
+        force_two_rows || (!use_uniform_single_dp_rows &&
+                           state.all_draft_accepted && has_prev_token);
     if (use_two_rows) {
       int32_t prev_token_id = state.prev_token_id;
       int32_t prev_position_offset = -1;
       torch::Tensor prev_embedding = state.prev_embedding;
       const bool prev_is_placeholder = prev_token_id < 0;
       if (prev_is_placeholder) {
-        // Kimi Eagle3 on DP needs uniform draft-extend rows.  On the first
-        // decode step there is no real previous target token yet, so use the
-        // current verifier hidden state instead of falling back to token
-        // embedding inside the draft model.
+        // A forced two-row layout may not have previous accepted state on the
+        // first decode step. Reuse the current verifier state for padding.
         prev_token_id = state.token_id;
         prev_embedding = state.embedding;
       }
@@ -2418,15 +2457,6 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
            input_params.parallel.raw_dp_global_token_nums) {
         token_num *= 2;
       }
-    } else if (dp_enabled && force_kimi_k25_eagle3_two_rows) {
-      constexpr int32_t num_extend_tokens = 2;
-      for (int32_t& token_num : input_params.parallel.dp_global_token_nums) {
-        token_num *= num_extend_tokens;
-      }
-      for (int32_t& token_num :
-           input_params.parallel.raw_dp_global_token_nums) {
-        token_num *= num_extend_tokens;
-      }
     } else if (dp_enabled && can_sync_variable_dp_rows) {
       CHECK_EQ(input_params.parallel.dp_global_token_nums.size(),
                static_cast<size_t>(parallel_args_.dp_size()))
@@ -2489,7 +2519,10 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
       params.selected_token_idxes.defined()
           ? params.selected_token_idxes.options()
           : torch::dtype(torch::kInt).device(device_);
-  if (use_chunked_prefill || dp_enabled || force_two_rows) {
+  const bool use_fixed_two_row_layout =
+      use_chunked_prefill || (dp_enabled && !is_kimi_k25_eagle3_dp_decode) ||
+      force_two_rows;
+  if (use_fixed_two_row_layout) {
     // These layouts always append two rows per sequence and select the second
     // row.  Build the tiny control tensor directly on device; copying a
     // temporary pinned CPU tensor forces its allocator to synchronize before

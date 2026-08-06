@@ -136,6 +136,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       WorkerImpl& worker,
       const ForwardInput& input,
       ForwardInput& processed_input);
+  void write_target_context_to_cache(const ForwardInput& input,
+                                     const SampleOutput& validate_output);
 
   // Prepare target validate input from cached target context.
   void prepare_validate_inputs(const ForwardInput& inputs,
