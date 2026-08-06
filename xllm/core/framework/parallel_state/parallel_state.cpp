@@ -292,7 +292,6 @@ torch::Tensor scatter(torch::Tensor input,
       << "dim_size " << dim_size << " cannot be divided by world_size "
       << world_size;
 
-  // torch::split does not create contiguous tensors by default.
   const auto tensor_list = input.split(dim_size / world_size, dim);
   const int32_t rank = process_group->rank();
   return tensor_list[rank];
@@ -312,12 +311,10 @@ std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input,
     return [input]() { return input; };
   }
 
-  auto rank = process_group->rank();
-
   TORCH_CHECK(input.dim() == 4,
               "all_to_all_4D: input must be 4D, got dim=",
               input.dim());
-  auto send_input = input;
+  torch::Tensor send_input = input;
 
   if (scatter_idx == 2 && gather_idx == 1) {
     // branch A : from "sequence shard" -> "head shard"
@@ -369,12 +366,10 @@ std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input,
               shard_head_num,
               head_size]() mutable -> torch::Tensor {
         all2all_work->wait();
-        auto comm_output =
-            output.reshape({seqlen, bs, shard_head_num, head_size})
-                .transpose(0, 1)
-                .contiguous()
-                .reshape({bs, seqlen, shard_head_num, head_size});
-        return comm_output;
+        return output.reshape({seqlen, bs, shard_head_num, head_size})
+            .transpose(0, 1)
+            .contiguous()
+            .reshape({bs, seqlen, shard_head_num, head_size});
       };
     }
   } else if (scatter_idx == 1 && gather_idx == 2) {

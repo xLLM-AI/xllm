@@ -113,6 +113,7 @@ torch::Tensor DenseMLPImpl::forward(const torch::Tensor& hidden_states) {
       return down_proj_->forward(gate_up,
                                  row_parallel_reduce_mode_for_fc1(*fc1_ctx));
     }
+
     return down_proj_->forward(gate_up);
   }
 

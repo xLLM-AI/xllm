@@ -92,6 +92,8 @@ class ModelContext {
 
   ModelContext with_parallel_args(const ParallelArgs& parallel_args) const;
 
+  ModelContext with_quant_args(const QuantArgs& quant_args) const;
+
 #if defined(USE_NPU)
   const atb::Context* get_atb_context() const { return context_; }
   std::shared_ptr<AtbWorkspace> get_atb_workspace() const {

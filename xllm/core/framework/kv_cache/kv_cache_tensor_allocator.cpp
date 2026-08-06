@@ -15,10 +15,6 @@ limitations under the License.
 
 #include "framework/kv_cache/kv_cache_tensor_allocator.h"
 
-#if defined(USE_MLU)
-#include "platform/mlu/mlu_tensor_alloc.h"
-#endif
-
 namespace xllm {
 namespace {
 
@@ -32,24 +28,6 @@ class DefaultKVCacheTensorAllocator final : public KVCacheTensorAllocator {
   }
 };
 
-#if defined(USE_MLU)
-class MluMooncakeTensorAllocator final : public KVCacheTensorAllocator {
- public:
-  torch::Tensor allocate(KVCacheTensorRole role,
-                         const std::vector<int64_t>& shape,
-                         torch::ScalarType dtype,
-                         const torch::Device& device) override {
-    // INDEX_SCALE is currently the only Mooncake role whose registered length
-    // can exceed its logical tensor bytes. Extend this branch explicitly if a
-    // future role requires RDMA padding.
-    if (role == KVCacheTensorRole::INDEX_SCALE) {
-      return mlu::alloc_rdma_registerable_zero_tensor(shape, dtype, device);
-    }
-    return mlu::alloc_zero_tensor(shape, dtype, device);
-  }
-};
-#endif
-
 }  // namespace
 
 std::shared_ptr<KVCacheTensorAllocator> default_kv_tensor_allocator() {
@@ -57,11 +35,5 @@ std::shared_ptr<KVCacheTensorAllocator> default_kv_tensor_allocator() {
       std::make_shared<DefaultKVCacheTensorAllocator>();
   return allocator;
 }
-
-#if defined(USE_MLU)
-std::shared_ptr<KVCacheTensorAllocator> mlu_mooncake_tensor_allocator() {
-  return std::make_shared<MluMooncakeTensorAllocator>();
-}
-#endif
 
 }  // namespace xllm

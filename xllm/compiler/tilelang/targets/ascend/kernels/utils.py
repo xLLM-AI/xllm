@@ -21,6 +21,11 @@ ASCEND_VEC_CORE_NUM_PROPERTY_KEYS = (
     "vec_core_num",
 )
 
+# This is the single source of truth for the generated speculative-verification
+# registries. Verification width includes the base target token, so these
+# variants cover MTP depths 3, 4, and 5.
+SUPPORTED_SPEC_VERIFY_WIDTHS = (4, 5, 6)
+
 
 def detect_vec_core_num(default_vec_core_num: int = 48) -> int:
     try:

@@ -17,7 +17,9 @@ limitations under the License.
 
 namespace xllm {
 
-void FBCacheTaylorSeer::init(const DiTCacheConfig& cfg) {
+void FBCacheTaylorSeer::init(const DiTCacheConfig& cfg,
+                             const ParallelArgs& parallel_args) {
+  parallel_args_ = &parallel_args;
   CHECK_GE(cfg.fbcachetaylorseer.residual_diff_threshold, 0.0)
       << "residual_diff_threshold must be >= 0";
   CHECK_GE(cfg.fbcachetaylorseer.warmup_steps, 0)
@@ -34,7 +36,7 @@ void FBCacheTaylorSeer::init(const DiTCacheConfig& cfg) {
 
   DiTCacheConfig ts_cfg;
   ts_cfg.taylorseer.n_derivatives = cfg.fbcachetaylorseer.n_derivatives;
-  taylorseer->init(ts_cfg);
+  taylorseer->init(ts_cfg, parallel_args);
 }
 
 bool FBCacheTaylorSeer::on_before_block(const CacheBlockIn& blockin) {
@@ -66,8 +68,8 @@ CacheBlockOut FBCacheTaylorSeer::on_after_block(const CacheBlockIn& blockin) {
 
   if (can_use_cache(first_hidden_states_residual)) {
     use_cache_ = true;
-    auto [new_hidden, new_encoder] =
-        apply_prev_hidden_states_residual(hidden_states, encoder_hidden_states);
+    auto [new_hidden, new_encoder] = apply_prev_hidden_states_residual(
+        original_hidden_states, encoder_hidden_states);
     output_hidden_states = std::move(new_hidden);
     output_encoder_hidden_states = std::move(new_encoder);
   } else {

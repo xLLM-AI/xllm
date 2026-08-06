@@ -137,7 +137,7 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
   dit_model_executor_ =
       std::make_unique<DiTExecutor>(dit_model_.get(), options_);
 
-  DiTCache::get_instance().init(cache_config);
+  DiTCache::get_instance().init(cache_config, parallel_args_);
 
   return true;
 }

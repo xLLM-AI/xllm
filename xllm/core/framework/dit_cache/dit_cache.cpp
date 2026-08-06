@@ -17,14 +17,15 @@ limitations under the License.
 
 namespace xllm {
 
-bool DiTCache::init(const DiTCacheConfig& cfg) {
+bool DiTCache::init(const DiTCacheConfig& cfg,
+                    const ParallelArgs& parallel_args) {
   active_cache_ = create_dit_cache(cfg);
   active_cond_cache_ = create_dit_cache(cfg);
   if (!active_cache_ || !active_cond_cache_) {
     return false;
   }
-  active_cache_->init(cfg);
-  active_cond_cache_->init(cfg);
+  active_cache_->init(cfg, parallel_args);
+  active_cond_cache_->init(cfg, parallel_args);
   return true;
 }
 

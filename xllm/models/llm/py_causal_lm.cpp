@@ -49,7 +49,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   if (tp_size_ > 1) {
     CHECK(!parallel_args.python_tp_rendezvous_host_.empty());
     CHECK_GT(parallel_args.python_tp_rendezvous_port_, 0);
-    py::module_::import("xllm.python.ops")
+    py::module_::import("xllm.python.distributed")
         .attr("init_tp_group")(parallel_args.python_tp_rendezvous_host_,
                                parallel_args.python_tp_rendezvous_port_,
                                tp_rank_,
@@ -83,6 +83,7 @@ py::dict PyCausalLM::build_config_dict(
   d["device"] = c10::str(device_);
   d["tp_size"] = tp_size_;
   d["tp_rank"] = tp_rank_;
+  d["enable_graph"] = ExecutionConfig::get_instance().enable_graph();
   d["python_graph_backend"] =
       ExecutionConfig::get_instance().python_graph_backend();
   return d;

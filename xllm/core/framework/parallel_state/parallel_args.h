@@ -16,7 +16,7 @@ limitations under the License.
 #pragma once
 
 #include "core/common/macros.h"
-#include "process_group.h"
+#include "core/framework/parallel_state/process_group.h"
 
 #if defined(USE_NPU)
 #include "hccl/hccl.h"
@@ -101,6 +101,7 @@ struct ParallelArgs {
                int32_t sp_size,
                int32_t cfg_size,
                int32_t vae_size,
+               int32_t text_encoder_tp_size,
                ProcessGroup* process_group)
       : rank_(rank),
         world_size_(world_size),
@@ -109,6 +110,7 @@ struct ParallelArgs {
         sp_size_(sp_size),
         cfg_size_(cfg_size),
         vae_size_(vae_size),
+        text_encoder_tp_size_(text_encoder_tp_size),
         process_group_(process_group) {}
 
   int32_t get_group_size_by_type(const std::string& group_type) const {
@@ -124,6 +126,8 @@ struct ParallelArgs {
       return ep_size();
     } else if (group_type == "vae") {
       return vae_size();
+    } else if (group_type == "text_encoder_tp") {
+      return text_encoder_tp_size();
     } else if (group_type == "cp") {
       return cp_size();
     } else {
@@ -185,6 +189,9 @@ struct ParallelArgs {
   // cfg size
   PROPERTY(int32_t, vae_size) = 1;
 
+  // text encoder tensor parallel size
+  PROPERTY(int32_t, text_encoder_tp_size) = 1;
+
   // atb hccl mapping json data
   PROPERTY(nlohmann::json, mapping_data);
 
@@ -212,6 +219,12 @@ struct ParallelArgs {
   // CP ProcessGroup for prefill AllGather (NPU standalone; MLU aliases TP).
   ProcessGroup* cp_group_ = nullptr;
   ProcessGroup* moe_ep_group_ = nullptr;
+  // Dedicated group for EPLB weight migration. It has the same rank set as
+  // moe_ep_group_ but isolates migration P2P from forward collectives.
+  ProcessGroup* eplb_group_ = nullptr;
+  // Dedicated group for fused MC2 dispatch/combine. It has the same rank set
+  // as moe_ep_group_ but isolates MC2 collectives from regular MoE EP traffic.
+  ProcessGroup* mc2_group_ = nullptr;
   ProcessGroup* moe_tp_group_ = nullptr;
 
   // PyTorch creates its own TP process group. These fields only reserve the
@@ -225,6 +238,7 @@ struct ParallelArgs {
   ProcessGroup* dit_cfg_group_ = nullptr;
   ProcessGroup* dit_dp_group_ = nullptr;
   ProcessGroup* dit_vae_group_ = nullptr;
+  ProcessGroup* dit_text_encoder_tp_group_ = nullptr;
 };
 
 }  // namespace xllm

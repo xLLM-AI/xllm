@@ -28,6 +28,7 @@ limitations under the License.
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/multimodal/mm_input.h"
 #include "core/framework/multimodal/mm_visitor.h"
+#include "core/framework/tokenizer/tokenizer_args.h"
 #include "processors/audio_processor.h"
 #include "processors/image_processor.h"
 #include "processors/processor_util.h"
@@ -51,20 +52,27 @@ class MultimodalProcessorBase {
                                   MMData& data) const = 0;
 
  protected:
-  explicit MultimodalProcessorBase(std::shared_ptr<Tokenizer> tokenizer);
+  MultimodalProcessorBase(
+      std::shared_ptr<Tokenizer> tokenizer,
+      const TokenizerArgs& tokenizer_args = TokenizerArgs{});
 
   bool tokenize(const std::string& prompt,
                 std::vector<int32_t>& token_ids) const;
 
-  void hash_mm_items(const MMInput& mm_input, MMData& mm_data) const;
+  void assign_mm_hash_keys(const MMInput& mm_input, MMData& mm_data) const;
+
+  void pad_to_max_length(std::vector<int32_t>& token_ids) const;
 
  private:
   std::shared_ptr<Tokenizer> tokenizer_;
+  TokenizerArgs tokenizer_args_;
 };
 
 std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
     const ModelArgs& model_args,
-    std::shared_ptr<Tokenizer> tokenizer);
+    std::shared_ptr<Tokenizer> tokenizer,
+    int64_t max_cache_items,
+    const TokenizerArgs& tokenizer_args);
 
 template <typename PromptProcessor,
           typename ImageProcessor = ImageNoneProcessor,
@@ -73,8 +81,9 @@ template <typename PromptProcessor,
 class MultimodalProcessor final : public MultimodalProcessorBase {
  public:
   MultimodalProcessor(const ModelArgs& model_args,
-                      std::shared_ptr<Tokenizer> tokenizer)
-      : MultimodalProcessorBase(std::move(tokenizer)),
+                      std::shared_ptr<Tokenizer> tokenizer,
+                      const TokenizerArgs& tokenizer_args)
+      : MultimodalProcessorBase(std::move(tokenizer), tokenizer_args),
         image_processor_(std::make_unique<ImageProcessor>(model_args)),
         video_processor_(std::make_unique<VideoProcessor>(model_args)),
         audio_processor_(std::make_unique<AudioProcessor>(model_args)),
@@ -122,7 +131,7 @@ class MultimodalProcessor final : public MultimodalProcessorBase {
         gather.finish(image_items, video_items, audio_items);
     data.set(gather.data_type_, std::move(output_items));
 
-    hash_mm_items(inputs, data);
+    assign_mm_hash_keys(inputs, data);
     return true;
   }
 

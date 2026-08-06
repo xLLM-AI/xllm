@@ -17,7 +17,9 @@ limitations under the License.
 
 namespace xllm {
 
-void FBCache::init(const DiTCacheConfig& cfg) {
+void FBCache::init(const DiTCacheConfig& cfg,
+                   const ParallelArgs& parallel_args) {
+  parallel_args_ = &parallel_args;
   CHECK_GE(cfg.fbcache.residual_diff_threshold, 0.0)
       << "residual_diff_threshold must be >= 0";
   CHECK_GE(cfg.fbcache.warmup_steps, 0) << "warmup_steps must be >= 0";

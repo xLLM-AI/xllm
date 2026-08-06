@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,11 +19,18 @@ import torch.nn as nn
 
 from xllm.python.attention.backend import AttentionBackend, AttentionMetadata, KVCache
 from xllm.python.layers.attention import Attention
+from xllm.python.model_executor.forward_context import LayerSynchronizer
 from xllm.python.model_executor.runners.eager import EagerRunner
+from xllm.python import platform
 
 
-def _is_npu_device(device: torch.device) -> bool:
-    return device.type in ("npu", "privateuseone")
+def _resolve_graph_backend(config: dict) -> str:
+    graph_backend = str(config.get("python_graph_backend", "off")).lower()
+    graph_disabled = graph_backend in ("", "off", "none", "0")
+    if graph_disabled and config.get("enable_graph", False):
+        if platform.is_npu():
+            return "aclgraph"
+    return graph_backend
 
 
 def _create_attention_backend(
@@ -31,7 +38,7 @@ def _create_attention_backend(
     device: torch.device,
     dtype: torch.dtype,
 ) -> AttentionBackend:
-    if _is_npu_device(device):
+    if platform.is_npu():
         from xllm.python.attention.npu_paged_attention import (
             NpuPagedAttentionBackend,
         )
@@ -44,7 +51,7 @@ def _create_attention_backend(
             device=device,
             dtype=dtype,
         )
-    if device.type == "cuda":
+    if platform.is_gpu():
         from xllm.python.attention.flashinfer import FlashInferBackend
         return FlashInferBackend(
             num_heads=first_attention.num_heads,
@@ -94,17 +101,28 @@ class ModelExecutor:
 
         execution_model = model.model
         self.eager_runner = EagerRunner(execution_model, self.attention_backend, device)
-        self.decode_cuda_graph_runner = None
+        self.decode_graph_runner = None
         self.inductor_runner = None
 
-        graph_backend = str(config.get("python_graph_backend", "off")).lower()
+        graph_backend = _resolve_graph_backend(config)
         if graph_backend in ("", "off", "none", "0"):
             pass
         elif graph_backend == "cudagraphs":
             from xllm.python.model_executor.runners.decode_cuda_graph import (
                 DecodeCudaGraphRunner,
             )
-            self.decode_cuda_graph_runner = DecodeCudaGraphRunner(
+            self.decode_graph_runner = DecodeCudaGraphRunner(
+                execution_model,
+                self.attention_backend,
+                device,
+                max_seqs_per_batch,
+                int(config["max_position_embeddings"]),
+            )
+        elif graph_backend == "aclgraph":
+            from xllm.python.model_executor.runners.decode_acl_graph import (
+                DecodeAclGraphRunner,
+            )
+            self.decode_graph_runner = DecodeAclGraphRunner(
                 execution_model,
                 self.attention_backend,
                 device,
@@ -142,15 +160,23 @@ class ModelExecutor:
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         metadata: AttentionMetadata,
+        layer_synchronizer: LayerSynchronizer | None = None,
     ) -> torch.Tensor:
         if not self._kv_bound:
             raise RuntimeError("KV caches are not bound")
 
-        graph_runner = self.decode_cuda_graph_runner
+        graph_runner = self.decode_graph_runner
         if graph_runner is not None:
             graph_runner.warmup(input_ids.device, input_ids.dtype)
+            # The graph runner only serves pure-decode steps (can_execute rejects
+            # prefill/chunked-prefill), while the layer synchronizer only drives
+            # KV-cache push during prefill, so decode has nothing to record.
             if graph_runner.can_execute(input_ids, metadata):
                 return graph_runner.execute(input_ids, positions, metadata)
         if self.inductor_runner is not None:
-            return self.inductor_runner.execute(input_ids, positions, metadata)
-        return self.eager_runner.execute(input_ids, positions, metadata)
+            return self.inductor_runner.execute(
+                input_ids, positions, metadata, layer_synchronizer
+            )
+        return self.eager_runner.execute(
+            input_ids, positions, metadata, layer_synchronizer
+        )

@@ -23,7 +23,8 @@ namespace xllm {
 // TorchProfiler drives online timeline collection through libtorch's in-process
 // Kineto profiler (the C++ equivalent of torch.profiler.profile). Unlike the
 // CUDA-profiler capture-range path (see CudaProfiler), this backend records CPU
-// and CUDA activities itself and, on stop(), writes a Chrome trace JSON to disk
+// and device activities (CUDA or MUSA PrivateUse1) itself and, on stop(),
+// writes a Chrome trace JSON to disk
 // without needing an external profiler such as nsys attached. This mirrors
 // vLLM's default TorchProfilerWrapper so that simply launching the server with
 // --enable_online_profile=true and driving /start_profile and /stop_profile

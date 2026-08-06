@@ -148,8 +148,10 @@ ForwardInput Batch::prepare_forward_input(uint32_t num_decoding_tokens,
                             &args,
                             batch_forward_type_,
                             cp_size);
-  return builder.build_forward_input(num_decoding_tokens,
-                                     min_decoding_batch_size);
+  ForwardInput forward_input =
+      builder.build_forward_input(num_decoding_tokens, min_decoding_batch_size);
+  linear_restore_src_blocks_ = builder.take_linear_restore_src_blocks();
+  return forward_input;
 }
 
 ForwardInput Batch::prepare_rec_forward_input(uint32_t num_decoding_tokens,
@@ -364,6 +366,7 @@ ForwardInput Batch::prepare_forward_input(const ModelArgs& args,
   ForwardInput forward_input =
       builder.build_forward_input(/*num_decoding_tokens=*/0,
                                   /*min_decoding_batch_size=*/0);
+  linear_restore_src_blocks_ = builder.take_linear_restore_src_blocks();
   if (has_partial_finished_beam_group()) {
     // Beam-search kernel assumes fixed beam width per group. When only part of
     // a group is active, fall back to software beam merge.

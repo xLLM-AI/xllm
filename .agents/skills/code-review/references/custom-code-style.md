@@ -153,7 +153,13 @@ ModelArgs(const std::string& path, int32_t num_layers = 12);
 // Good
 ModelOutput forward(torch::Tensor tokens, ...) override;
 
-// Bad
+// Bad – missing override
+ModelOutput forward(torch::Tensor tokens, ...);
+
+// Bad – redundant virtual on override
+virtual ModelOutput forward(torch::Tensor tokens, ...) override;
+
+// Bad – missing override (virtual-only in derived class)
 virtual ModelOutput forward(torch::Tensor tokens, ...);
 ```
 

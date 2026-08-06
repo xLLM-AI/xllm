@@ -20,10 +20,38 @@ TILELANG_BISHENG_COMMON_FLAGS = [
     "-DBACKEND_HYBM",
 ]
 
+TILELANG_BISHENG_A5_FLAGS = [
+    "-DREGISTER_BASE",
+    "-D__DAV_C310__",
+    "-O2",
+    "-std=gnu++17",
+    "-xcce",
+    "--cce-auto-sync",
+    "--cce-mask-opt",
+    "-mllvm",
+    "-cce-aicore-stack-size=0x8000",
+    "-mllvm",
+    "-cce-aicore-function-stack-size=0x8000",
+    "-mllvm",
+    "-cce-aicore-record-overflow=true",
+    "-mllvm",
+    "-cce-aicore-addr-transform",
+    "-mllvm",
+    "-cce-aicore-jump-expand=true",
+    "-mllvm",
+    "-cce-aicore-dcci-insert-for-scalar=false",
+    "-DL2_CACHE_HINT",
+    "-fPIC",
+    "-Wno-macro-redefined",
+    "-Wno-ignored-attributes",
+    "-Wno-non-c-typedef-for-linkage",
+    "-DBACKEND_HYBM",
+]
+
 ASCEND_DEVICE_TO_BISHENG_ARCH = {
     "a2": DEFAULT_ASCEND_BISHENG_ARCH,
     "a3": DEFAULT_ASCEND_BISHENG_ARCH,
-    "a5": DEFAULT_ASCEND_BISHENG_ARCH,
+    "a5": "dav-c310",
 }
 
 
@@ -32,6 +60,7 @@ class AscendBuildContext:
     device: str | None
     bisheng_arch: str
     bisheng_executable: str
+    bisheng_compile_flags: tuple[str, ...]
     toolchain_options: dict[str, str]
     fingerprint: dict[str, str]
     include_dirs: list[str]
@@ -69,6 +98,17 @@ def build_toolchain_options(device: str | None, bisheng_arch: str) -> dict[str, 
     if device is not None:
         toolchain_options["device"] = device
     return toolchain_options
+
+
+def build_bisheng_compile_flags(
+    device: str | None, bisheng_arch: str
+) -> list[str]:
+    if device == "a5":
+        return [
+            f"--cce-aicore-arch={bisheng_arch}",
+            *TILELANG_BISHENG_A5_FLAGS,
+        ]
+    return [f"--npu-arch={bisheng_arch}", *TILELANG_BISHENG_COMMON_FLAGS]
 
 
 def resolve_npu_home_path() -> str:
@@ -130,6 +170,9 @@ def resolve_build_context(device: str | None, bisheng_executable: str) -> Ascend
         device=normalized_device,
         bisheng_arch=bisheng_arch,
         bisheng_executable=bisheng_executable,
+        bisheng_compile_flags=tuple(
+            build_bisheng_compile_flags(normalized_device, bisheng_arch)
+        ),
         toolchain_options=build_toolchain_options(normalized_device, bisheng_arch),
         fingerprint=fingerprint,
         include_dirs=bisheng_include_dirs(),

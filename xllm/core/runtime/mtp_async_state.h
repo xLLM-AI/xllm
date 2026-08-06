@@ -19,8 +19,25 @@ limitations under the License.
 
 #include <cstdint>
 #include <string_view>
+#include <vector>
 
 namespace xllm::mtp_async {
+
+enum class TargetSpecVerifyMode {
+  GENERIC,
+  CAUSAL_CHUNKED_PREFILL,
+  QWEN3_5_EXPANDED_VERIFY,
+};
+
+// Keep target verification policy closed over model types with validated
+// layouts. Unknown models retain the generic path.
+TargetSpecVerifyMode classify_target_spec_verify_mode(
+    std::string_view model_type);
+
+// Shared allocation/launch width for target verification block tables. The
+// extra entry covers the speculative token that can cross a block boundary.
+int64_t speculative_verify_block_table_capacity(int64_t max_position_embeddings,
+                                                int64_t block_size);
 
 enum class CombinedDraftExecutionPath {
   UNSUPPORTED,
@@ -29,6 +46,13 @@ enum class CombinedDraftExecutionPath {
 
 CombinedDraftExecutionPath classify_combined_draft_execution_path(
     std::string_view model_type);
+
+// Materialize proposer-owned token columns into the row-major target verify
+// input. Graph replay normally performs this copy internally; eager fallback
+// must use the same logical tokens before invoking the model.
+torch::Tensor materialize_speculative_verify_tokens(
+    const torch::Tensor& verify_tokens,
+    const std::vector<torch::Tensor>& draft_token_sources);
 
 // Device-resident state derived from target verification. base_positions and
 // base_kv_seq_lens point at the logical position immediately after the accepted

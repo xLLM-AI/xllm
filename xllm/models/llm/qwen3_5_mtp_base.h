@@ -116,7 +116,8 @@ class Qwen3_5MtpModelImplBase : public Qwen3HybridModelImplBase {
         layer::AttentionMetadataBuilder::build(
             input_params,
             model_args_.enable_mla(),
-            build_attention_mask(input_params));
+            build_attention_mask(input_params),
+            /*device=*/device_);
     prepare_mrope(positions, attn_metadata);
 
     torch::Tensor embedding = embed_tokens_(tokens);
@@ -147,6 +148,13 @@ class Qwen3_5MtpModelImplBase : public Qwen3HybridModelImplBase {
                                        kv_caches[i],
                                        input_params,
                                        mrope_cos_sin);
+#if defined(USE_NPU)
+      if (input_params.parallel.layer_synchronizer != nullptr &&
+          !input_params.parallel.layer_synchronizer->record_event(
+              static_cast<int64_t>(i), device_.index())) {
+        return ModelOutput();
+      }
+#endif
     }
     auto [new_mtp_hidden, new_res] = norm_->forward(mtp_hidden, residual);
     mtp_hidden = new_mtp_hidden;

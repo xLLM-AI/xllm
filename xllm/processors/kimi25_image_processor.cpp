@@ -729,6 +729,10 @@ void KimiK25PromptProcessor::find_mm_spans(
         << "media span count exceeds mm item count";
     MMDataItem& item = mm_items[global_mm_index];
     item.mutable_state().mutable_token_pos() = {offset, length};
+    item.mutable_state().mutable_mm_token_mask() = torch::ones(
+        {length},
+        torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU));
+    item.mutable_state().mutable_mm_token_num() = length;
     ++global_mm_index;
     start = std::next(vision_end_it);
   }

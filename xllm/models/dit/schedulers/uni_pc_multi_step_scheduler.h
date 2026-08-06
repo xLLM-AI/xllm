@@ -27,11 +27,12 @@ limitations under the License.
 
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/state_dict/state_dict.h"
+#include "models/dit/schedulers/scheduler.h"
 #include "models/model_registry.h"
 
 namespace xllm {
 
-class UniPCMultistepSchedulerImpl final : public torch::nn::Module {
+class UniPCMultistepSchedulerImpl final : public xllm::dit::Scheduler {
  public:
   explicit UniPCMultistepSchedulerImpl(const ModelContext& context)
       : args_(context.get_model_args()) {
@@ -107,7 +108,10 @@ class UniPCMultistepSchedulerImpl final : public torch::nn::Module {
       int64_t num_inference_steps,
       const torch::Device& device = torch::kCPU,
       const std::optional<std::vector<float>>& sigmas = std::nullopt,
-      const std::optional<float>& mu = std::nullopt) {
+      const std::optional<float>& mu = std::nullopt,
+      const std::optional<std::vector<float>>& timesteps =
+          std::nullopt) override {
+    // UniPC computes its own schedule, so `timesteps` is ignored here.
     if (use_dynamic_shifting_ && !mu.has_value()) {
       LOG(FATAL) << "mu must be provided when use_dynamic_shifting is true";
     }
@@ -249,7 +253,10 @@ class UniPCMultistepSchedulerImpl final : public torch::nn::Module {
 
   torch::Tensor step(const torch::Tensor& model_output_in,
                      const torch::Tensor& timestep,
-                     const torch::Tensor& sample_in) {
+                     const torch::Tensor& sample_in,
+                     const std::optional<torch::Tensor>& per_token_timesteps =
+                         std::nullopt) override {
+    // UniPC does not support per-token timesteps, so the argument is ignored.
     auto input_dtype = sample_in.dtype();
     torch::Tensor model_output = model_output_in.to(torch::kFloat32);
     torch::Tensor sample = sample_in.to(torch::kFloat32);
@@ -342,7 +349,7 @@ class UniPCMultistepSchedulerImpl final : public torch::nn::Module {
 
   std::optional<int64_t> step_index() const { return step_index_; }
   std::optional<int64_t> begin_index() const { return begin_index_; }
-  const torch::Tensor& timesteps() const { return timesteps_; }
+  const torch::Tensor& timesteps() const override { return timesteps_; }
   const torch::Tensor& sigmas() const { return sigmas_; }
   int64_t size() const { return num_train_timesteps_; }
 
@@ -795,6 +802,7 @@ class UniPCMultistepSchedulerImpl final : public torch::nn::Module {
 TORCH_MODULE(UniPCMultistepScheduler);
 
 REGISTER_MODEL_ARGS(UniPCMultistepScheduler, [&] {
+  LOAD_ARG_OR(model_type, "_class_name", "UniPCMultistepScheduler");
   LOAD_ARG_OR(num_train_timesteps, "num_train_timesteps", 1000);
   LOAD_ARG_OR(beta_start, "beta_start", 0.0001f);
   LOAD_ARG_OR(beta_end, "beta_end", 0.02f);

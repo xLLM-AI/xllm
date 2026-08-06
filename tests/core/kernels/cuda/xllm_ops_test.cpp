@@ -266,7 +266,7 @@ with patch.object(executor_module, "_create_attention_backend", return_value=Fak
         },
         max_seqs_per_batch=3,
     )
-    assert model_executor.decode_cuda_graph_runner.max_batch == 3
+    assert model_executor.decode_graph_runner.max_batch == 3
 )PY");
 }
 

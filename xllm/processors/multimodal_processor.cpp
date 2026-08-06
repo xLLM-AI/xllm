@@ -18,17 +18,19 @@ limitations under the License.
 #include <utility>
 
 #include "common/metrics.h"
+#include "core/framework/config/dit_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/tokenizer/tokenizer.h"
-#include "core/util/hash_util.h"
 #include "models/model_registry.h"
+#include "processors/cacheable_multimodal_processor.h"
 #include "util/timer.h"
 
 namespace xllm {
 
 MultimodalProcessorBase::MultimodalProcessorBase(
-    std::shared_ptr<Tokenizer> tokenizer)
-    : tokenizer_(std::move(tokenizer)) {}
+    std::shared_ptr<Tokenizer> tokenizer,
+    const TokenizerArgs& tokenizer_args)
+    : tokenizer_(std::move(tokenizer)), tokenizer_args_(tokenizer_args) {}
 
 MultimodalProcessorBase::~MultimodalProcessorBase() = default;
 
@@ -39,31 +41,50 @@ bool MultimodalProcessorBase::tokenize(const std::string& prompt,
     LOG(ERROR) << "Failed to encode prompt: " + prompt;
     return false;
   }
+
+  pad_to_max_length(token_ids);
   COUNTER_ADD(tokenization_latency_seconds, timer.elapsed_seconds());
   return true;
 }
 
-void MultimodalProcessorBase::hash_mm_items(const MMInput& mm_input,
-                                            MMData& mm_data) const {
-  const auto& mm_input_items = mm_input.items();
-  auto& mm_items = mm_data.items<MMItemVec>();
-  size_t size = mm_input_items.size();
-  for (size_t idx = 0; idx < size; ++idx) {
-    const std::string& data = mm_input_items[idx].raw_data;
-    if (!data.empty()) {
-      XXH3Key mm_hash = hash_string(data);
-      auto& schedule_data =
-          mm_items[idx].mutable_state().mutable_schedule_data();
-      schedule_data.key = mm_hash;
-    } else {
-      LOG(WARNING) << "Empty data for multimodal item";
+void MultimodalProcessorBase::assign_mm_hash_keys(const MMInput& mm_input,
+                                                  MMData& mm_data) const {
+  const std::vector<MMInputItem>& input_items = mm_input.items();
+  MMItemVec& output_items = mm_data.items<MMItemVec>();
+  CHECK_EQ(input_items.size(), output_items.size());
+  for (size_t index = 0; index < input_items.size(); ++index) {
+    const std::optional<XXH3Key>& hash_key = input_items[index].hash_key;
+    if (hash_key.has_value()) {
+      output_items[index].mutable_state().mutable_schedule_data().key =
+          hash_key.value();
     }
   }
 }
 
+void MultimodalProcessorBase::pad_to_max_length(
+    std::vector<int32_t>& token_ids) const {
+  const int32_t max_sequence_length =
+      DiTConfig::get_instance().max_sequence_length();
+  if (max_sequence_length <= 0 || tokenizer_args_.pad_token().empty()) {
+    return;
+  }
+
+  const auto pad_id = tokenizer_->token_to_id(tokenizer_args_.pad_token());
+  if (!pad_id.has_value() ||
+      static_cast<int32_t>(token_ids.size()) >= max_sequence_length) {
+    return;
+  }
+
+  const int32_t pad_count =
+      max_sequence_length - static_cast<int32_t>(token_ids.size());
+  token_ids.insert(token_ids.begin(), pad_count, pad_id.value());
+}
+
 std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
     const ModelArgs& model_args,
-    std::shared_ptr<Tokenizer> tokenizer) {
+    std::shared_ptr<Tokenizer> tokenizer,
+    int64_t max_cache_items,
+    const TokenizerArgs& tokenizer_args) {
   const std::string& model_type = model_args.model_type();
   std::string resolved_name;
   std::string error_message;
@@ -75,7 +96,14 @@ std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
       ModelRegistry::get_multimodal_processor_factory(resolved_name);
   CHECK(multimodal_processor_factory != nullptr)
       << "Missing multimodal processor for model type: " << model_type;
-  return multimodal_processor_factory(model_args, std::move(tokenizer));
+  std::unique_ptr<MultimodalProcessorBase> processor =
+      multimodal_processor_factory(
+          model_args, std::move(tokenizer), tokenizer_args);
+  if (max_cache_items == 0) {
+    return processor;
+  }
+  return std::make_unique<CacheableMultimodalProcessor>(std::move(processor),
+                                                        max_cache_items);
 }
 
 }  // namespace xllm

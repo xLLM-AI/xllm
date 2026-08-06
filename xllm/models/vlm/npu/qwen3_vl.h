@@ -841,11 +841,15 @@ TORCH_MODULE(Qwen3_VLForConditionalGeneration);
 using Qwen3VLMultimodalProcessor = MultimodalProcessor<Qwen3VLPromptProcessor,
                                                        Qwen2VLImageProcessor,
                                                        Qwen3VLVideoProcessor>;
-REGISTER_MULTIMODAL_PROCESSOR(qwen3_vl, Qwen3VLMultimodalProcessor);
-REGISTER_CAUSAL_VLM_MODEL(qwen3_vl, Qwen3_VLForConditionalGeneration);
+REGISTER_MULTIMODAL_PROCESSOR_WITH_VARNAME(qwen3_vl_atb,
+                                           qwen3_vl_atb,
+                                           Qwen3VLMultimodalProcessor);
+REGISTER_CAUSAL_VLM_MODEL_WITH_VARNAME(qwen3_vl_atb,
+                                       qwen3_vl_atb,
+                                       Qwen3_VLForConditionalGeneration);
 REGISTER_MPOSITION_GENERATOR(qwen3_vl, xllm::Qwen3VLMPositionGenerator);
 
-REGISTER_MODEL_ARGS(qwen3_vl, [&] {
+REGISTER_MODEL_ARGS_WITH_VARNAME(qwen3_vl_atb, qwen3_vl_atb, [&] {
   // text config
   // LOAD_ARG_OR(attention_dropout, "attention_dropout", 0.0);
   LOAD_ARG_OR(model_type, "model_type", "qwen3_vl");

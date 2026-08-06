@@ -66,6 +66,7 @@ cc_library(
     gflags::gflags
     torch
     :platform
+    $<$<BOOL:${USE_NPU}>:npu_layers>
     $<$<BOOL:${USE_MLU}>:mlu_layers>
     $<$<AND:$<BOOL:${USE_CUDA}>,$<NOT:$<BOOL:${USE_MUSA}>>>:cuda_layers>
     $<$<BOOL:${USE_ILU}>:ilu_layers>
@@ -73,3 +74,8 @@ cc_library(
     $<$<BOOL:${USE_MUSA}>:musa_layers>
     $<$<BOOL:${USE_DCU}>:dcu_layers>
 )
+
+if(USE_NPU)
+  # Repeat the static-library cycle so NPU RoPE symbols are resolved.
+  set_property(TARGET common_layers PROPERTY LINK_INTERFACE_MULTIPLICITY 3)
+endif()

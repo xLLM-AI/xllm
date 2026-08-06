@@ -34,7 +34,7 @@ limitations under the License.
 #endif
 #if defined(USE_NPU)
 #include "platform/npu/device_capture_lock.h"
-#elif defined(USE_CUDA)
+#elif defined(USE_CUDA) || defined(USE_MUSA)
 #include "platform/cuda/device_capture_lock.h"
 #endif
 #include "core/util/net.h"
@@ -208,26 +208,21 @@ inline size_t get_xtensor_layer_offsets_size(
   return total;
 }
 
-inline size_t get_block_transfer_groups_size(
-    const std::vector<KVBlockTransferGroup>& groups) {
+inline size_t get_kv_transfer_mappings_size(
+    const std::vector<KVTransferMapping>& mappings) {
   size_t total = type_size<uint64_t>;
-  for (const auto& group : groups) {
-    total += type_size<int32_t> + get_vector_size(group.local_blocks_ids) +
-             get_vector_size(group.remote_blocks_ids);
+  for (const KVTransferMapping& mapping : mappings) {
+    total += type_size<int32_t> + get_vector_size(mapping.local_ids) +
+             get_vector_size(mapping.remote_ids);
   }
   return total;
 }
 
 inline size_t get_transfer_kv_info_size(const TransferKVInfo& info) {
-  return get_string_size(info.request_id) +
-         get_vector_size(info.local_blocks_ids) +
-         get_vector_size(info.remote_blocks_ids) +
-         get_vector_size(info.local_linear_state_ids) +
-         get_vector_size(info.remote_linear_state_ids) +
-         type_size<int32_t>  // dp_rank
+  return get_string_size(info.request_id) + type_size<int32_t>  // dp_rank
          + get_instance_info_size(info.remote_instance_info) +
          get_xtensor_layer_offsets_size(info.dst_xtensor_layer_offsets) +
-         get_block_transfer_groups_size(info.block_transfer_groups);
+         get_kv_transfer_mappings_size(info.mappings);
 }
 
 inline size_t get_eplb_info_size(const EplbInfo& info) {
@@ -772,25 +767,25 @@ inline void write_xtensor_layer_offsets(
   }
 }
 
-inline void write_block_transfer_groups(
+inline void write_kv_transfer_mappings(
     char*& buffer,
-    const std::vector<KVBlockTransferGroup>& groups) {
-  write_data(buffer, static_cast<uint64_t>(groups.size()));
-  for (const auto& group : groups) {
-    write_data(buffer, group.group_id);
-    write_vector(buffer, group.local_blocks_ids);
-    write_vector(buffer, group.remote_blocks_ids);
+    const std::vector<KVTransferMapping>& mappings) {
+  write_data(buffer, static_cast<uint64_t>(mappings.size()));
+  for (const KVTransferMapping& mapping : mappings) {
+    write_data(buffer, mapping.group_id);
+    write_vector(buffer, mapping.local_ids);
+    write_vector(buffer, mapping.remote_ids);
   }
 }
 
-inline void write_block_transfer_groups(
+inline void write_kv_transfer_mappings(
     RawInputSerializeContext& context,
-    const std::vector<KVBlockTransferGroup>& groups) {
-  write_data(context.descriptor, static_cast<uint64_t>(groups.size()));
-  for (const auto& group : groups) {
-    write_data(context.descriptor, group.group_id);
-    write_vector(context.descriptor, group.local_blocks_ids);
-    write_vector(context.descriptor, group.remote_blocks_ids);
+    const std::vector<KVTransferMapping>& mappings) {
+  write_data(context.descriptor, static_cast<uint64_t>(mappings.size()));
+  for (const KVTransferMapping& mapping : mappings) {
+    write_data(context.descriptor, mapping.group_id);
+    write_vector(context.descriptor, mapping.local_ids);
+    write_vector(context.descriptor, mapping.remote_ids);
   }
 }
 
@@ -806,27 +801,19 @@ inline void write_xtensor_layer_offsets(
 
 inline void write_transfer_kv_info(char*& buffer, const TransferKVInfo& info) {
   write_string(buffer, info.request_id);
-  write_vector(buffer, info.local_blocks_ids);
-  write_vector(buffer, info.remote_blocks_ids);
-  write_vector(buffer, info.local_linear_state_ids);
-  write_vector(buffer, info.remote_linear_state_ids);
   write_data(buffer, info.dp_rank);
   write_instance_info(buffer, info.remote_instance_info);
   write_xtensor_layer_offsets(buffer, info.dst_xtensor_layer_offsets);
-  write_block_transfer_groups(buffer, info.block_transfer_groups);
+  write_kv_transfer_mappings(buffer, info.mappings);
 }
 
 inline void write_transfer_kv_info(RawInputSerializeContext& context,
                                    const TransferKVInfo& info) {
   write_string(context.descriptor, info.request_id);
-  write_vector(context.descriptor, info.local_blocks_ids);
-  write_vector(context.descriptor, info.remote_blocks_ids);
-  write_vector(context.descriptor, info.local_linear_state_ids);
-  write_vector(context.descriptor, info.remote_linear_state_ids);
   write_data(context.descriptor, info.dp_rank);
   write_instance_info(context, info.remote_instance_info);
   write_xtensor_layer_offsets(context, info.dst_xtensor_layer_offsets);
-  write_block_transfer_groups(context, info.block_transfer_groups);
+  write_kv_transfer_mappings(context, info.mappings);
 }
 
 inline void write_eplb_info(char*& buffer, const EplbInfo& info) {
@@ -1677,29 +1664,29 @@ inline void read_xtensor_layer_offsets(
   }
 }
 
-inline void read_block_transfer_groups(
+inline void read_kv_transfer_mappings(
     const char*& buffer,
-    std::vector<KVBlockTransferGroup>& groups) {
-  uint64_t group_count;
-  read_data(buffer, group_count);
-  groups.resize(group_count);
-  for (auto& group : groups) {
-    read_data(buffer, group.group_id);
-    read_vector(buffer, group.local_blocks_ids);
-    read_vector(buffer, group.remote_blocks_ids);
+    std::vector<KVTransferMapping>& mappings) {
+  uint64_t mapping_count;
+  read_data(buffer, mapping_count);
+  mappings.resize(mapping_count);
+  for (KVTransferMapping& mapping : mappings) {
+    read_data(buffer, mapping.group_id);
+    read_vector(buffer, mapping.local_ids);
+    read_vector(buffer, mapping.remote_ids);
   }
 }
 
-inline void read_block_transfer_groups(
+inline void read_kv_transfer_mappings(
     ReadContext& context,
-    std::vector<KVBlockTransferGroup>& groups) {
-  uint64_t group_count;
-  read_data(context, group_count);
-  groups.resize(group_count);
-  for (auto& group : groups) {
-    read_data(context, group.group_id);
-    read_vector(context, group.local_blocks_ids);
-    read_vector(context, group.remote_blocks_ids);
+    std::vector<KVTransferMapping>& mappings) {
+  uint64_t mapping_count;
+  read_data(context, mapping_count);
+  mappings.resize(mapping_count);
+  for (KVTransferMapping& mapping : mappings) {
+    read_data(context, mapping.group_id);
+    read_vector(context, mapping.local_ids);
+    read_vector(context, mapping.remote_ids);
   }
 }
 
@@ -1717,26 +1704,18 @@ inline void read_xtensor_layer_offsets(
 
 inline void read_transfer_kv_info(const char*& buffer, TransferKVInfo& info) {
   read_string(buffer, info.request_id);
-  read_vector(buffer, info.local_blocks_ids);
-  read_vector(buffer, info.remote_blocks_ids);
-  read_vector(buffer, info.local_linear_state_ids);
-  read_vector(buffer, info.remote_linear_state_ids);
   read_data(buffer, info.dp_rank);
   read_instance_info(buffer, info.remote_instance_info);
   read_xtensor_layer_offsets(buffer, info.dst_xtensor_layer_offsets);
-  read_block_transfer_groups(buffer, info.block_transfer_groups);
+  read_kv_transfer_mappings(buffer, info.mappings);
 }
 
 inline void read_transfer_kv_info(ReadContext& context, TransferKVInfo& info) {
   read_string(context, info.request_id);
-  read_vector(context, info.local_blocks_ids);
-  read_vector(context, info.remote_blocks_ids);
-  read_vector(context, info.local_linear_state_ids);
-  read_vector(context, info.remote_linear_state_ids);
   read_data(context, info.dp_rank);
   read_instance_info(context, info.remote_instance_info);
   read_xtensor_layer_offsets(context, info.dst_xtensor_layer_offsets);
-  read_block_transfer_groups(context, info.block_transfer_groups);
+  read_kv_transfer_mappings(context, info.mappings);
 }
 
 inline void read_eplb_info(const char*& buffer, EplbInfo& info) {
@@ -2226,13 +2205,21 @@ inline void initialize_device_buffer_session(ReadContext& context,
 #endif
 
   auto& session = *context.device_session;
-  torch::Tensor host_input_buffer =
-      torch::from_blob(const_cast<char*>(payload_base),
-                       {static_cast<int64_t>(payload_size)},
-                       torch::TensorOptions()
-                           .dtype(torch::kUInt8)
-                           .device(torch::kCPU)
-                           .pinned_memory(/*pinned_memory=*/true));
+  // POSIX shared-memory pages are not pinned merely because TensorOptions says
+  // so. Own a genuinely pinned staging copy and keep it alive with ForwardInput
+  // until the asynchronous H2D has completed.
+  forward_input.input_host_buffer =
+      torch::empty({static_cast<int64_t>(payload_size)},
+                   torch::TensorOptions()
+                       .dtype(torch::kUInt8)
+                       .device(torch::kCPU)
+                       .pinned_memory(/*pinned_memory=*/true));
+  std::memcpy(
+      forward_input.input_host_buffer.data_ptr(), payload_base, payload_size);
+  const torch::Tensor& host_input_buffer = forward_input.input_host_buffer;
+  context.tensor_cursor =
+      static_cast<const char*>(host_input_buffer.data_ptr()) +
+      tensor_arena_offset;
 
   auto device_options =
       torch::TensorOptions().dtype(torch::kUInt8).device(device);
@@ -2242,7 +2229,7 @@ inline void initialize_device_buffer_session(ReadContext& context,
     auto& capture_lock =
         ::xllm::npu::DeviceCaptureLock::get_instance().get_lock(device.index());
     session.capture_lock_guard.emplace(capture_lock);
-#elif defined(USE_CUDA)
+#elif defined(USE_CUDA) || defined(USE_MUSA)
     if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
       auto& replay_lock =
           ::xllm::cuda::DeviceCaptureLock::get_instance().get_read_lock(
@@ -2364,13 +2351,15 @@ inline void deserialize_forward_input_payload(
   read_tensor(context, input_params.embedding.input_embedding, stream);
   read_vector(context, input_params.parallel.dp_global_token_nums);
   read_vector(context, input_params.parallel.raw_dp_global_token_nums);
+  read_vector(context, input_params.parallel.dp_global_kv_max_seq_lens);
   read_vector(context, input_params.parallel.dp_is_decode);
   read_vector(context, input_params.embedding.embedding_ids);
   read_vector(context, input_params.embedding.linear_state_ids);
   read_linear_state_cache_ops(context, input_params.linear_state_cache_ops);
   normalize_linear_state_ids(input_params.embedding.linear_state_ids,
                              input_params.meta.num_sequences);
-  if (!input_params.embedding.linear_state_ids.empty()) {
+  if (materialize_device_buffer &&
+      !input_params.embedding.linear_state_ids.empty()) {
     input_params.embedding.linear_state_indices =
         torch::tensor(input_params.embedding.linear_state_ids, torch::kInt)
             .to(device, /*non_blocking=*/true);
@@ -2726,6 +2715,8 @@ inline void serialize_forward_input_sections(
   write_vector(context.descriptor, input_params.parallel.dp_global_token_nums);
   write_vector(context.descriptor,
                input_params.parallel.raw_dp_global_token_nums);
+  write_vector(context.descriptor,
+               input_params.parallel.dp_global_kv_max_seq_lens);
   write_vector(context.descriptor, input_params.parallel.dp_is_decode);
   write_vector(context.descriptor, input_params.embedding.embedding_ids);
   write_vector(context.descriptor, input_params.embedding.linear_state_ids);
@@ -3146,8 +3137,10 @@ bool ForwardSharedMemoryManager::input_write(const ForwardInput& input) {
   return true;
 }
 
-void ForwardSharedMemoryManager::input_read(ForwardInput& input,
-                                            const torch::Device& device) {
+void ForwardSharedMemoryManager::input_read(
+    ForwardInput& input,
+    const torch::Device& device,
+    InputDeviceMaterializationPolicy policy) {
   while (true) {
     if (control_ptr_->version != last_version_) {
       last_version_ = control_ptr_->version;
@@ -3163,11 +3156,24 @@ void ForwardSharedMemoryManager::input_read(ForwardInput& input,
   read_data(data_ptr, total_size);
   bool materialize_device_buffer = false;
 #if defined(USE_NPU)
-  materialize_device_buffer = true;
+  materialize_device_buffer =
+      policy == InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ;
 #elif defined(USE_CUDA)
   materialize_device_buffer = device.type() == torch::kCUDA;
 #elif defined(USE_MLU)
   materialize_device_buffer = device.type() == torch::kPrivateUse1;
+#endif
+#if defined(USE_NPU)
+  if (policy == InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE) {
+    input.input_host_buffer =
+        torch::empty({static_cast<int64_t>(total_size)},
+                     torch::TensorOptions()
+                         .dtype(torch::kUInt8)
+                         .device(torch::kCPU)
+                         .pinned_memory(/*pinned_memory=*/true));
+    std::memcpy(input.input_host_buffer.data_ptr(), data_ptr, total_size);
+    data_ptr = static_cast<const char*>(input.input_host_buffer.data_ptr());
+  }
 #endif
   deserialize_forward_input_payload(data_ptr,
                                     total_size,

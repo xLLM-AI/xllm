@@ -37,6 +37,16 @@ namespace {
 std::mutex g_port_mutex;
 std::unordered_set<int> g_allocated_port_map;
 
+std::string to_ip_addr(const sockaddr_in& addr) {
+  char ip[INET_ADDRSTRLEN]{'\0'};
+  const char* result =
+      inet_ntop(addr.sin_family, &addr.sin_addr, ip, sizeof(ip));
+  if (result == nullptr) {
+    return "";
+  }
+  return std::string(ip);
+}
+
 }  // namespace
 
 // TODO: return private ip
@@ -69,6 +79,57 @@ std::string get_local_ip_addr() {
   }
 
   return std::string(ip);
+}
+
+std::string get_route_ip(const std::string& remote_addr) {
+  std::string remote_host;
+  int remote_port = 0;
+  parse_host_port_from_addr(remote_addr, remote_host, remote_port);
+
+  struct addrinfo* info = nullptr;
+  struct addrinfo hints;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_DGRAM;
+  std::string port = std::to_string(remote_port);
+  int ret = getaddrinfo(remote_host.c_str(), port.c_str(), &hints, &info);
+  if (ret != 0) {
+    LOG(ERROR) << "Failed to resolve remote address " << remote_addr << ": "
+               << gai_strerror(ret);
+    return "";
+  }
+  std::unique_ptr<struct addrinfo, decltype(&freeaddrinfo)> guard(info,
+                                                                  freeaddrinfo);
+
+  for (const struct addrinfo* current = info; current != nullptr;
+       current = current->ai_next) {
+    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+      continue;
+    }
+    ret = connect(fd, current->ai_addr, current->ai_addrlen);
+    if (ret != 0) {
+      ::close(fd);
+      continue;
+    }
+
+    sockaddr_in local{};
+    socklen_t local_len = sizeof(local);
+    ret =
+        getsockname(fd, reinterpret_cast<struct sockaddr*>(&local), &local_len);
+    ::close(fd);
+    if (ret != 0) {
+      continue;
+    }
+
+    std::string local_ip = to_ip_addr(local);
+    if (!local_ip.empty()) {
+      return local_ip;
+    }
+  }
+
+  LOG(ERROR) << "No local route found for remote address " << remote_addr;
+  return "";
 }
 
 int get_local_free_port() {

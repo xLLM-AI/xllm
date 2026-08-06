@@ -107,7 +107,10 @@ VLMMaster::VLMMaster(const Options& options)
   chat_template_ =
       std::make_unique<JinjaChatTemplate>(engine_->tokenizer_args());
   tokenizer_ = engine_->tokenizer()->clone();
-  processor_ = create_multimodal_processor(model_args_, tokenizer_);
+  processor_ = create_multimodal_processor(model_args_,
+                                           tokenizer_,
+                                           options_.max_processor_cache_items(),
+                                           engine_->tokenizer_args());
 
   threadpool_ = std::make_unique<ThreadPool>(
       /*num_threads=*/options_.num_request_handling_threads(),
@@ -374,7 +377,7 @@ std::shared_ptr<Request> VLMMaster::build_request(
   if (sp.stop_token_ids.has_value()) {
     const auto& stop_token_ids = sp.stop_token_ids.value();
     stop_tokens.insert(stop_token_ids.begin(), stop_token_ids.end());
-  } else {
+  } else if (!sp.ignore_eos) {
     stop_tokens = model_args_.stop_token_ids();
   }
   std::vector<std::vector<int32_t>> stop_sequences;
@@ -419,6 +422,7 @@ std::shared_ptr<Request> VLMMaster::build_request(
                          options_.enable_schedule_overlap(),
                          callback,
                          nullptr);
+  req_state.include_stop_str_in_output = sp.include_stop_str_in_output;
   auto request = std::make_shared<Request>(sp.request_id,
                                            sp.x_request_id,
                                            sp.x_request_time,

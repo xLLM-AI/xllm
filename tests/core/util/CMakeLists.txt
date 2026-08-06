@@ -7,8 +7,11 @@ cc_test(
     blocking_counter_test.cpp
     device_name_utils_test.cpp
     http_downloader_test.cpp
+    net_test.cpp
+    shared_memory_manager_test.cpp
     suffix_decoding_cache_test.cpp
     threadpool_test.cpp
+    verbose_trace_logger_test.cpp
     vocab_validation_test.cpp
   DEPS
     util

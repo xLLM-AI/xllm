@@ -51,6 +51,12 @@ void batch_decode(const torch::Tensor& query,
                   const torch::Tensor& seq_lens,
                   torch::Tensor& output);
 
+void apply_rotary(torch::Tensor& query,
+                  torch::Tensor& key,
+                  const torch::Tensor& cos,
+                  const torch::Tensor& sin,
+                  const std::string& input_layout);
+
 std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
     const torch::Tensor& query,
     const torch::Tensor& key,
@@ -65,7 +71,8 @@ std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
     int64_t block_size,
     int64_t sparse_mode,
     const std::string& input_layout,
-    bool softmax_lse_flag = false);
+    bool softmax_lse_flag = false,
+    bool is_causal = true);
 
 void batch_chunked_paged_prefill(const torch::Tensor& query,
                                  const torch::Tensor& k_cache,
@@ -410,4 +417,32 @@ void causal_conv1d_out(const torch::Tensor& output,
                        int64_t activation_mode,
                        int64_t pad_slot_id,
                        int64_t run_mode);
+
+bool has_mega_moe();
+
+std::tuple<torch::Tensor, torch::Tensor> apply_npu_mega_moe(
+    const torch::Tensor& context,
+    const torch::Tensor& x,
+    const torch::Tensor& topk_ids,
+    const torch::Tensor& topk_weights,
+    const torch::TensorList weight1,
+    const torch::TensorList weight2,
+    int64_t moe_expert_num,
+    int64_t ep_world_size,
+    int64_t ccl_buffer_size,
+    const std::optional<torch::TensorList>& weight_scales1 = std::nullopt,
+    const std::optional<torch::TensorList>& weight_scales2 = std::nullopt,
+    const std::optional<torch::TensorList>& bias1 = std::nullopt,
+    const std::optional<torch::TensorList>& bias2 = std::nullopt,
+    const std::optional<torch::Tensor>& x_active_mask = std::nullopt,
+    int64_t max_recv_token_num = 0,
+    int64_t dispatch_quant_mode = 0,
+    int64_t combine_quant_mode = 0,
+    const std::string& comm_alg = "",
+    int64_t num_max_tokens_per_rank = 0,
+    const std::string& activation = "swiglu",
+    float activation_clamp = std::numeric_limits<float>::max(),
+    int64_t dispatch_quant_out_dtype = 0,
+    int64_t topo_type = 0,
+    int64_t rank_num_per_server = 2);
 }  // namespace xllm::kernel::npu

@@ -171,7 +171,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `enable_pd_ooc` | `bool` | `false` | 是否在 PD 分离模式下启用在线/离线混部。 |
 | `disagg_pd_port` | `int32` | `7777` | PD 分离 bRPC server 的监听端口。 |
 | `instance_role` | `string` | `"DEFAULT"` | 当前实例角色，例如 `DEFAULT`、`PREFILL`、`DECODE`、`MIX`。 |
-| `kv_cache_transfer_type` | `string` | `"LlmDataDist"` | KV Cache 传输类型，例如 `LlmDataDist`、`Mooncake`、`HCCL`。 |
+| `kv_cache_transfer_type` | `string` | `"Mooncake"` | KV Cache 传输类型，例如 `Mooncake`、`LlmDataDist`、`HCCL`。 |
 | `kv_cache_transfer_mode` | `string` | `"PUSH"` | KV Cache 传输模式，例如 `PUSH`、`PULL`。 |
 | `transfer_listen_port` | `int32` | `26000` | KV Cache Transfer 的监听端口。 |
 | `kv_push_dst_rotate` | `bool` | `false` | 在 `push_kv_blocks` 中按 KV-split rank 轮转遍历目标 worker，用于分散对 decode worker 的流量。 |

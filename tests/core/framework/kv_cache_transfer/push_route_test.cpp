@@ -71,4 +71,22 @@ TEST(PushRouteTest, DstDpRankOffsetApplied) {
   EXPECT_EQ(dst_ranks, expect_ranks);
 }
 
+TEST(PushRouteTest, DecodeTpOneLinksEveryPrefillTpRank) {
+  const std::vector<int32_t> src_tp_ranks = get_src_tp_ranks(0, 2, 1);
+  const std::vector<int32_t> expect_src_tp_ranks = {0, 1};
+  EXPECT_EQ(src_tp_ranks, expect_src_tp_ranks);
+}
+
+TEST(PushRouteTest, DecodeRankLinksMatchingPrefillOwners) {
+  const std::vector<int32_t> src_tp_ranks = get_src_tp_ranks(1, 8, 2);
+  const std::vector<int32_t> expect_src_tp_ranks = {1, 3, 5, 7};
+  EXPECT_EQ(src_tp_ranks, expect_src_tp_ranks);
+}
+
+TEST(PushRouteTest, LargerDecodeTpKeepsRoundRobinSource) {
+  const std::vector<int32_t> src_tp_ranks = get_src_tp_ranks(5, 2, 8);
+  const std::vector<int32_t> expect_src_tp_ranks = {1};
+  EXPECT_EQ(src_tp_ranks, expect_src_tp_ranks);
+}
+
 }  // namespace xllm

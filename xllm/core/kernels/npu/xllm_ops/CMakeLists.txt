@@ -18,6 +18,7 @@ cc_library(
     compressor.cpp
     hc_post.cpp
     quant_lightning_indexer.cpp
+    lightning_indexer.cpp
     hc_pre_inv_rms.cpp
     hc_pre_sinkhorn.cpp
     hc_pre.cpp
@@ -25,6 +26,7 @@ cc_library(
     sparse_attn_sharedkv_metadata.cpp
     npu_inplace_partial_rotary_mul.cpp
     scatter_nd_update.cpp
+    reshape_and_cache_a5.cpp
     moe_gating_top_k_hash.cpp
     sparse_attn_sharedkv.cpp
     sparse_flash_attention.cpp

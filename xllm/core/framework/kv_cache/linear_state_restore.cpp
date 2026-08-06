@@ -79,10 +79,32 @@ int32_t discover_num_slots(const std::vector<KVCache>& kv_caches) {
 
 }  // namespace
 
+LinearStateValidityMask build_linear_state_mask(
+    const std::vector<int32_t>& cached_tokens,
+    int64_t active_rows) {
+  CHECK(!cached_tokens.empty()) << "cached_tokens must not be empty";
+  CHECK_GT(active_rows, 0) << "active_rows must be positive";
+  const int64_t logical_rows = static_cast<int64_t>(cached_tokens.size());
+  CHECK_EQ(active_rows % logical_rows, 0)
+      << "logical rows must evenly divide active rows, logical_rows="
+      << logical_rows << ", active_rows=" << active_rows;
+
+  const int64_t repeat_count = active_rows / logical_rows;
+  LinearStateValidityMask warm_mask;
+  warm_mask.reserve(static_cast<size_t>(active_rows));
+  for (int32_t num_tokens : cached_tokens) {
+    const int64_t is_warm = num_tokens > 0 ? 1 : 0;
+    for (int64_t repeat_idx = 0; repeat_idx < repeat_count; ++repeat_idx) {
+      warm_mask.emplace_back(is_warm);
+    }
+  }
+  return warm_mask;
+}
+
 void restore_linear_state_slots(
     std::vector<KVCache>& kv_caches,
     const std::vector<LinearStateCacheOp>& cache_ops,
-    std::vector<int64_t>& has_initial_state) {
+    LinearStateValidityMask& validity_mask) {
   if (cache_ops.empty()) {
     return;
   }
@@ -90,10 +112,11 @@ void restore_linear_state_slots(
   if (num_slots == 0) {
     return;
   }
-  CHECK_EQ(cache_ops.size(), has_initial_state.size())
-      << "has_initial_state must be sized to the cache_ops batch before "
+  CHECK_EQ(cache_ops.size(), validity_mask.size())
+      << "linear state validity mask must be sized to the cache_ops batch "
+         "before "
       << "restore, cache_ops=" << cache_ops.size()
-      << ", has_initial_state=" << has_initial_state.size();
+      << ", validity_mask=" << validity_mask.size();
   const auto slot_in_range = [num_slots](int32_t slot_id) {
     return slot_id >= 0 && slot_id < num_slots;
   };
@@ -105,7 +128,7 @@ void restore_linear_state_slots(
     const bool restore_requested = cache_op.restore_requested;
 
     // Continued requests and cold starts have no checkpoint to restore; leave
-    // has_initial_state at its kv-cache default.
+    // validity_mask at its kv-cache default.
     if (!restore_requested && src_slot_id < 0) {
       continue;
     }
@@ -114,7 +137,7 @@ void restore_linear_state_slots(
     // forward does not treat reused kv blocks as warm recurrent state.
     if (src_slot_id < 0 || !slot_in_range(live_slot_id) ||
         !slot_in_range(src_slot_id)) {
-      has_initial_state[i] = 0;
+      validity_mask[i] = 0;
       continue;
     }
     // Scheduler invariant: a resolved src slot implies a restore request. The
@@ -131,10 +154,10 @@ void restore_linear_state_slots(
                     "layer was copied; falling back to cold start. "
                     "live_slot_id="
                  << live_slot_id << ", src_slot_id=" << src_slot_id;
-      has_initial_state[i] = 0;
+      validity_mask[i] = 0;
       continue;
     }
-    has_initial_state[i] = 1;
+    validity_mask[i] = 1;
     VLOG(1) << "Qwen3.5 linear state checkpoint restored; live_slot_id="
             << live_slot_id << ", src_slot_id=" << src_slot_id;
   }

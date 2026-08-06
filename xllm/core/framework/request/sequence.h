@@ -20,6 +20,7 @@ limitations under the License.
 #include <absl/time/time.h>
 #include <folly/futures/Future.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -67,6 +68,10 @@ struct SequenceParams {
 
   // whether to skip special tokens in the output text. default = true.
   bool skip_special_tokens = true;
+
+  // whether to include stop strings or stop tokens in the output text.
+  // default = false.
+  bool include_stop_str_in_output = false;
 
   // whether to echo the prompt in the output text. default = false.
   bool echo = false;
@@ -134,9 +139,10 @@ class Sequence final {
   bool is_prefill_stage() const { return stage() != SequenceStage::DECODE; }
   // get the sequence stage
   SequenceStage stage() const {
-    if (kv_state_.kv_cache_tokens_num() <
+    const size_t cached_tokens = kv_cache_tokens_num();
+    if (cached_tokens <
         std::max(volatile_num_prompt_tokens_, num_prompt_tokens())) {
-      if (kv_state_.kv_cache_tokens_num() > 0) {
+      if (cached_tokens > 0) {
         return SequenceStage::CHUNKED_PREFILL;
       }
       return SequenceStage::PREFILL;
@@ -169,13 +175,13 @@ class Sequence final {
 
   // get the number of tokens need compute
   size_t num_need_compute_tokens() const {
-    return num_tokens_ - std::max(kv_state_.kv_cache_tokens_num(),
-                                  host_kv_state_.kv_cache_tokens_num());
+    return num_tokens_ - kv_cache_tokens_num();
   }
 
   size_t kv_cache_tokens_num() const {
-    return std::max(kv_state_.kv_cache_tokens_num(),
-                    host_kv_state_.kv_cache_tokens_num());
+    return std::max({kv_state_.kv_cache_tokens_num(),
+                     host_kv_state_.kv_cache_tokens_num(),
+                     effective_restore_tokens_.value_or(0)});
   }
 
   size_t num_prefix_cache_tokens() const;
@@ -187,7 +193,7 @@ class Sequence final {
   void update_token(size_t index, const Token& token);
   void update_last_step_token(const Token& token, size_t token_offset = 0);
   bool has_new_tokens_generated() const {
-    return num_tokens_ > decoder_.output_offset();
+    return num_tokens_ > stream_output_token_offset_;
   }
 
   // update mm embeddings to the sequence
@@ -201,9 +207,9 @@ class Sequence final {
   void clear_mtp_bootstrap_embedding() {
     mtp_bootstrap_embedding_ = torch::Tensor();
   }
-  // Single per-sequence resource block id (linear-state / embedding), or -1.
-  int32_t get_single_block_id() const {
-    return kv_state_.get_single_block_id();
+
+  int32_t get_embedding_block_id() const {
+    return kv_state_.get_embedding_block_id();
   }
 
   // Linear-state (Qwen3.5 GDN) live slot, stored in composite_blocks_ under
@@ -216,16 +222,8 @@ class Sequence final {
     return kv_state_.get_linear_block_id();
   }
 
-  // Recurrent state slot for models with sequence-scoped CONV/SSM caches.
-  // Prefer the dedicated LINEAR slot (Qwen3.5 GDN, drawn from
-  // LinearStateBlockManager); fall back to the SINGLE resource block id for
-  // legacy models where recurrent state still lives in the SINGLE slot. All
-  // P/D endpoints that advertise or consume the recurrent-state slot id must
-  // use this helper so the sender and receiver agree on which slot is holding
-  // the state.
   int32_t get_recurrent_state_slot_id() const {
-    const int32_t linear_slot = get_linear_state_slot_id();
-    return linear_slot >= 0 ? linear_slot : get_single_block_id();
+    return get_linear_state_slot_id();
   }
 
   void set_pending_linear_save(const XXH3Key& hash) {
@@ -365,12 +363,19 @@ class Sequence final {
 
   KVCacheState& kv_state() { return kv_state_; }
 
-  // Host-side block state, per BlockType (mirrors kv_state_). Today only
-  // BlockType::KV is populated by HierarchyBlockManagerPool; when host
-  // offload is extended past the flat-KV shape (SWA / C4 / C128), the
-  // additional per-type slots land under the same KVCacheState here without
-  // touching this signature.
+  bool has_any_blocks() const {
+    return kv_state_.has_any_blocks() || host_kv_state_.has_any_blocks();
+  }
+
   KVCacheState& host_kv_state() { return host_kv_state_; }
+
+  void set_host_cache_match(size_t restore_tokens, size_t copy_units);
+  void set_host_cache_restore(size_t restore_tokens, size_t copy_units);
+  void clear_host_cache_match();
+  bool has_host_cache_match() const {
+    return effective_restore_tokens_.has_value();
+  }
+  size_t host_cache_copy_units() const { return host_cache_copy_units_; }
 
   // for generated tokens
   float get_acc_logprob();
@@ -505,6 +510,11 @@ class Sequence final {
   // from the chunk containing `token_index` onward.
   void invalidate_linear_state_hashes_from(size_t token_index);
 
+  // Number of tokens available to the decoder after applying stop-output
+  // suppression and streaming buffering. The underlying sequence retains all
+  // generated tokens for usage and scheduling accounting.
+  size_t get_decodable_token_count(size_t size) const;
+
   SequenceOutputType output_type();
   void generate_embeddings_output(SequenceOutput& output);
   void generate_mm_embeddings_output(SequenceOutput& output);
@@ -536,6 +546,9 @@ class Sequence final {
 
   KVCacheState host_kv_state_;
 
+  std::optional<size_t> effective_restore_tokens_;
+  size_t host_cache_copy_units_ = 0;
+
   std::unique_ptr<LogprobState> logprob_state_;
 
   // latest token generate time
@@ -557,6 +570,11 @@ class Sequence final {
 
   // incremental decoder to decode the tokens
   IncrementalDecoder decoder_;
+
+  // All tokens before this offset have been returned in streaming output.
+  // This is independent from the decoder offset because hidden stop tokens
+  // remain present in token_ids and logprobs.
+  size_t stream_output_token_offset_ = 0;
 
   // token ids generated for the sequence
   std::vector<int32_t> tokens_;
@@ -625,6 +643,11 @@ class Sequence final {
 
   // the reason why the sequence is finished
   mutable FinishReason finish_reason_ = FinishReason::NONE;
+
+  // Number of trailing tokens that matched the stopping criterion. These
+  // tokens remain in `tokens_` and are omitted from decoded output when
+  // `include_stop_str_in_output` is false.
+  mutable size_t matched_stop_token_count_ = 0;
 
   // is the sequence closed.
   bool closed_ = false;

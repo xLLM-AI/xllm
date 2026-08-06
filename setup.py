@@ -91,6 +91,43 @@ def _maybe_compile_tilelang_kernels(device: str, jobs: int | str | None = None) 
     subprocess.check_call(cmd, cwd=base_dir, env=env)
 
 
+def _stage_python_kernel_package(py_pkg_src: str, py_pkg_dst: str, device: str) -> None:
+    """Stage the device's kernel package, leaving its peers out of the wheel.
+
+    ``xllm/python/`` holds one peer package per hardware platform
+    (``kernels_cuda``, ``kernels_npu``, ...). The peers share no code, never
+    import each other, and export the same names. ``xllm/python/__init__.py``
+    binds the one matching the active platform as ``xllm.python.kernels``, so
+    only that package has to reach the wheel.
+
+    The Python model executor covers fewer platforms than ``--device`` does, so
+    a device without a peer package is not a build error: the rest of
+    ``xllm.python`` still ships, and ``xllm/python/__init__.py`` rejects the
+    platform at import, which only happens once the executor is selected.
+    """
+    source = os.path.join(py_pkg_src, f"kernels_{device}")
+    if not os.path.isdir(source):
+        available = sorted(
+            name[len("kernels_"):]
+            for name in os.listdir(py_pkg_src)
+            if name.startswith("kernels_")
+            and os.path.isdir(os.path.join(py_pkg_src, name))
+        )
+        logger.info(
+            f"No Python kernel package for --device {device}; the Python model "
+            f"executor stays unavailable in this wheel (packages exist for "
+            f"{', '.join(available)}). To support it, add "
+            f"xllm/python/kernels_{device}/ exporting the same names as its "
+            "peers."
+        )
+        return
+    shutil.copytree(
+        source,
+        os.path.join(py_pkg_dst, f"kernels_{device}"),
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+
+
 def _stage_triton_npu_runtime_binaries(base_dir: str, extdir: str, device: str) -> None:
     if device != "npu":
         return
@@ -511,6 +548,8 @@ class ExtBuild(build_ext):
         # straight from site-packages with no sys.path manipulation;
         # --python_model_path / XLLM_PYTHON_MODEL_PATH only overrides the
         # directory containing the ``xllm`` package (e.g. source-tree runs).
+        # The per-platform ``kernels_*`` packages are excluded here so that only
+        # the one matching --device is staged right after.
         py_pkg_src = os.path.join(self.base_dir, "xllm", "python")
         if os.path.isdir(py_pkg_src):
             py_pkg_dst = os.path.join(extdir, "python")
@@ -519,8 +558,9 @@ class ExtBuild(build_ext):
             shutil.copytree(
                 py_pkg_src,
                 py_pkg_dst,
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "kernels_*"),
             )
+            _stage_python_kernel_package(py_pkg_src, py_pkg_dst, self.device)
 
         _stage_triton_npu_runtime_binaries(self.base_dir, extdir, self.device)
 

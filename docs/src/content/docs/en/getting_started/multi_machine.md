@@ -1,5 +1,5 @@
 ---
-title: "Multi-Node Deployment"
+title: "Multi-Machine Deployment"
 sidebar:
   order: 5
 ---

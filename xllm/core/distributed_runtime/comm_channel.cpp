@@ -244,25 +244,45 @@ bool CommChannel::estimate_kv_cache_capacity(int64_t& available_memory,
 bool CommChannel::pull_kv_blocks(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
+    const std::vector<KVTransferMapping>& mappings) {
   proto::PullKVCacheRequest request;
   request.set_cluster_id(src_cluster_id);
   request.set_addr(src_addr);
 
-  ADD_VECTOR_TO_PROTO(request.mutable_src_blocks(), src_blocks);
-  ADD_VECTOR_TO_PROTO(request.mutable_dst_blocks(), dst_blocks);
-  ADD_VECTOR_TO_PROTO(request.mutable_src_linear_state_ids(),
-                      src_linear_state_ids);
-  ADD_VECTOR_TO_PROTO(request.mutable_dst_linear_state_ids(),
-                      dst_linear_state_ids);
+  for (const KVTransferMapping& mapping : mappings) {
+    proto::KVTransferMapping* proto_mapping = request.add_mappings();
+    proto_mapping->set_group_id(mapping.group_id);
+    ADD_VECTOR_TO_PROTO(proto_mapping->mutable_local_ids(), mapping.local_ids);
+    ADD_VECTOR_TO_PROTO(proto_mapping->mutable_remote_ids(),
+                        mapping.remote_ids);
+  }
 
   proto::Status s;
   brpc::Controller cntl;
   stub_->PullKVCache(&cntl, &request, &s, nullptr);
 
+  return !cntl.Failed() && s.ok();
+}
+
+bool CommChannel::pull_hetero_kv_blocks(
+    const std::vector<uint64_t>& src_cluster_ids,
+    const std::vector<std::string>& src_addrs,
+    const std::vector<KVTransferMapping>& mappings) {
+  proto::PullKVCacheRequest request;
+  request.set_hetero_merge(true);
+  ADD_VECTOR_TO_PROTO(request.mutable_src_cluster_ids(), src_cluster_ids);
+  ADD_VECTOR_TO_PROTO(request.mutable_src_addrs(), src_addrs);
+  for (const KVTransferMapping& mapping : mappings) {
+    proto::KVTransferMapping* proto_mapping = request.add_mappings();
+    proto_mapping->set_group_id(mapping.group_id);
+    ADD_VECTOR_TO_PROTO(proto_mapping->mutable_local_ids(), mapping.local_ids);
+    ADD_VECTOR_TO_PROTO(proto_mapping->mutable_remote_ids(),
+                        mapping.remote_ids);
+  }
+
+  proto::Status s;
+  brpc::Controller cntl;
+  stub_->PullKVCache(&cntl, &request, &s, nullptr);
   return !cntl.Failed() && s.ok();
 }
 
@@ -328,15 +348,17 @@ void CommChannel::transfer_kv_blocks(
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
   proto::BlockTransferInfos pb_block_transfer_info;
-  if (!block_transfer_info_to_proto(
-          batch_id, block_transfer_info, &pb_block_transfer_info)) {
-    LOG(ERROR) << "transfer_kv_blocks with batch id " << batch_id
-               << " fail: create proto fail!";
-    return;
-  }
+  CHECK(block_transfer_info_to_proto(
+      batch_id, block_transfer_info, &pb_block_transfer_info))
+      << "Failed to serialize H2D transfer for batch_id=" << batch_id;
   brpc::Controller cntl;
   proto::TransferStatus response;
   stub_->TransferBlocks(&cntl, &pb_block_transfer_info, &response, nullptr);
+  CHECK(!cntl.Failed()) << "H2D transfer registration RPC failed for batch_id="
+                        << batch_id << ": " << cntl.ErrorText();
+  CHECK_EQ(response.success_cnt(), block_transfer_info.size())
+      << "H2D transfer registration was not acknowledged for batch_id="
+      << batch_id;
 }
 
 bool CommChannel::sleep(MasterStatus master_status) {
@@ -461,13 +483,13 @@ class ClientStreamReceiver : public brpc::StreamInputHandler {
     return 0;
   }
 
-  virtual void on_idle_timeout(brpc::StreamId id) override {
+  void on_idle_timeout(brpc::StreamId id) override {
     if (!promise_set_.exchange(true)) {
       close_promise_.set_value();
     }
   }
 
-  virtual void on_closed(brpc::StreamId id) override {
+  void on_closed(brpc::StreamId id) override {
     if (!promise_set_.exchange(true)) {
       close_promise_.set_value();
     }

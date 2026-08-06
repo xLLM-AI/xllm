@@ -22,6 +22,8 @@ limitations under the License.
 
 namespace xllm {
 
+struct ParallelArgs;
+
 using TensorMap = std::unordered_map<std::string, torch::Tensor>;
 
 class DitCacheImpl {
@@ -29,7 +31,10 @@ class DitCacheImpl {
   DitCacheImpl() = default;
   virtual ~DitCacheImpl() = default;
 
-  virtual void init(const DiTCacheConfig& cfg) = 0;
+  // Startup-time init. parallel_args carries the fixed parallel topology
+  // (e.g. the SP group used to all-reduce the similarity metric).
+  virtual void init(const DiTCacheConfig& cfg,
+                    const ParallelArgs& parallel_args) = 0;
 
   virtual bool on_before_block(const CacheBlockIn& blockin) = 0;
   virtual CacheBlockOut on_after_block(const CacheBlockIn& blockin) = 0;
@@ -37,27 +42,26 @@ class DitCacheImpl {
   virtual bool on_before_step(const CacheStepIn& stepin) = 0;
   virtual CacheStepOut on_after_step(const CacheStepIn& stepin) = 0;
 
-  virtual void set_infer_steps(const int64_t& infer_steps) {
-    infer_steps_ = infer_steps;
-  }
-
-  virtual void set_num_blocks(const int64_t& num_blocks) {
-    num_blocks_ = num_blocks;
+  // Per-generation params, refreshed on every forward().
+  virtual void set_context(const CacheContext& context) {
+    infer_steps_ = context.infer_steps;
+    num_blocks_ = context.num_blocks;
   }
 
  protected:
-  int64_t num_inference_steps_;
   int64_t warmup_steps_;
   int64_t current_step_;
   int64_t infer_steps_;
   int64_t num_blocks_;
   TensorMap buffers;
+  // Non-owning: the worker's ParallelArgs outlives this cache singleton.
+  const ParallelArgs* parallel_args_ = nullptr;
 
   static torch::Tensor get_tensor_or_empty(const TensorMap& m,
                                            const std::string& k);
-  static bool is_similar(const torch::Tensor& lhs,
-                         const torch::Tensor& rhs,
-                         float threshold);
+  bool is_similar(const torch::Tensor& lhs,
+                  const torch::Tensor& rhs,
+                  float threshold) const;
 };
 
 std::unique_ptr<DitCacheImpl> create_dit_cache(const DiTCacheConfig& cfg);

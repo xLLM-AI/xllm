@@ -33,18 +33,7 @@ class DiTCache {
     return ditcache;
   }
 
-  bool init(const DiTCacheConfig& cfg);
-
-  DiTCache(const DiTCacheConfig& cfg) {
-    active_cache_ = create_dit_cache(cfg);
-    active_cond_cache_ = create_dit_cache(cfg);
-    if (!active_cache_ || !active_cond_cache_) {
-      LOG(ERROR) << "failed to initialized dit cache, "
-                    "please check your config";
-    }
-    active_cache_->init(cfg);
-    active_cond_cache_->init(cfg);
-  }
+  bool init(const DiTCacheConfig& cfg, const ParallelArgs& parallel_args);
 
   bool on_before_block(const CacheBlockIn& blockin, bool use_cfg = false);
 
@@ -55,14 +44,9 @@ class DiTCache {
 
   CacheStepOut on_after_step(const CacheStepIn& stepin, bool use_cfg = false);
 
-  virtual void set_infer_steps(const int64_t& infer_steps) {
-    active_cache_->set_infer_steps(infer_steps);
-    active_cond_cache_->set_infer_steps(infer_steps);
-  }
-
-  virtual void set_num_blocks(const int64_t& num_blocks) {
-    active_cache_->set_num_blocks(num_blocks);
-    active_cond_cache_->set_num_blocks(num_blocks);
+  void set_context(const CacheContext& context) {
+    active_cache_->set_context(context);
+    active_cond_cache_->set_context(context);
   }
 
  private:

@@ -21,7 +21,9 @@ namespace {
 double factorial(int k) { return std::tgamma(static_cast<double>(k) + 1.0); }
 }  // namespace
 
-void TaylorSeer::init(const DiTCacheConfig& cfg) {
+void TaylorSeer::init(const DiTCacheConfig& cfg,
+                      const ParallelArgs& parallel_args) {
+  parallel_args_ = &parallel_args;
   CHECK_GE(cfg.taylorseer.warmup_steps, 0) << "warmup_steps must be >= 0";
   CHECK_GE(cfg.taylorseer.skip_interval_steps, 0)
       << "skip_interval_steps must be >= 0";

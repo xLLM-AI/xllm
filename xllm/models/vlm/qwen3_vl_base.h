@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/config/kernel_config.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/multimodal/mm_data_item.h"
 #include "core/layers/common/lm_head.h"
@@ -198,8 +199,13 @@ class Qwen3VLForConditionalGenerationBase : public torch::nn::Module {
     }
 
 #if defined(USE_NPU)
-    visual_->verify_loaded_weights("model.visual.");
-    visual_->merge_loaded_weights();
+    if constexpr (requires {
+                    visual_->verify_loaded_weights("model.visual.");
+                    visual_->merge_loaded_weights();
+                  }) {
+      visual_->verify_loaded_weights("model.visual.");
+      visual_->merge_loaded_weights();
+    }
 #endif
 
     if (!model_args_.encoder_embedding_mode()) {

@@ -15,6 +15,11 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "core/runtime/mtp_async_state.h"
 #include "framework/kv_cache/embedding_cache.h"
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #if defined(USE_NPU)
@@ -107,15 +112,21 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // prepare inputs for draft model at Prefill phase.
   void prepare_prefill_inputs(const ForwardInput& inputs,
                               ForwardInput& prefill_inputs);
-  bool use_qwen3_5_spec_verify_path() const;
-  bool use_mimo_spec_verify_path() const;
+  bool supports_explicit_spec_verify_replay_update() const;
+  bool should_use_explicit_spec_verify_replay_update(
+      const ForwardInput& input) const;
+  int64_t spec_verify_block_table_width(
+      const torch::Tensor& block_tables) const;
   // Returns true when validation must use chunked-prefill to avoid the
   // FlashInfer batch-decode read-before-write race on the bonus token.
   bool use_chunked_prefill_spec_verify_path() const;
 
   // Prepare target validate input from cached target context.
   void prepare_validate_inputs(const ForwardInput& inputs,
-                               ForwardInput& validate_inputs);
+                               ForwardInput& validate_inputs,
+                               bool static_graph_tasks_prepared = false);
+  bool prepare_static_mtp_graph_tasks_before_final_draft(
+      const ForwardInput& input);
 
   // prepare inputs for draft model at Decode phase.
   void prepare_draft_inputs(const ForwardInput& inputs,
@@ -203,6 +214,28 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // Whether validation directly uses selected-only draft_probs [B, S].
   // If false, selected-only cache values are restored to dense [B, S, V].
   bool enable_opt_validate_probs_ = false;
+
+  // Classified once when the target model is loaded. Decode-path decisions
+  // only read this closed policy and never traverse the model implementation.
+  mtp_async::TargetSpecVerifyMode target_spec_verify_mode_ =
+      mtp_async::TargetSpecVerifyMode::GENERIC;
+
+#if defined(USE_NPU)
+  // Stable-address sources consumed by the target ACL graph's leading input
+  // update. The existing H2D preparation overlaps with the final draft, so no
+  // extra graph-external D2D launch is introduced.
+  torch::Tensor spec_verify_attention_host_buffer_;
+  torch::Tensor spec_verify_attention_device_buffer_;
+  uint64_t spec_verify_attention_buffer_capacity_ = 0;
+  std::shared_ptr<int> spec_verify_attention_buffer_owner_ =
+      std::make_shared<int>(0);
+
+  // Stable validate-sampling controls for the common single-sequence greedy
+  // path.  Their values depend on speculative width, not tensor-parallel
+  // topology, and are rebuilt only when that width changes.
+  torch::Tensor mtp_validate_greedy_indices_;
+  torch::Tensor mtp_validate_greedy_do_sample_;
+#endif
 
 #if defined(USE_NPU) || defined(USE_MLU)
   std::shared_ptr<KVCacheTransfer> kv_cache_transfer_;

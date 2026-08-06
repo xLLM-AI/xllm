@@ -48,6 +48,7 @@ class KernelConfig final {
          "enable_split_rmsnorm_rope",
          "enable_aclnn_matmul",
          "enable_aclnn_swiglu",
+         "enable_mega_moe",
          "enable_flashcomm1",
          "flashcomm1_min_prefill_tokens",
          "enable_mmrs_fusion",
@@ -71,6 +72,8 @@ class KernelConfig final {
   PROPERTY(bool, enable_aclnn_matmul) = false;
 
   PROPERTY(bool, enable_aclnn_swiglu) = false;
+
+  PROPERTY(bool, enable_mega_moe) = false;
 
   PROPERTY(bool, enable_flashcomm1) = false;
 

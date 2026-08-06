@@ -28,13 +28,19 @@ limitations under the License.
 
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/state_dict/state_dict.h"
+#include "models/dit/schedulers/scheduler.h"
 #include "models/model_registry.h"
 
 namespace xllm {
-class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
+class FlowMatchEulerDiscreteSchedulerImpl : public xllm::dit::Scheduler {
  public:
-  explicit FlowMatchEulerDiscreteSchedulerImpl(const ModelContext& context)
-      : args_(context.get_model_args()) {
+  // raw_sigmas ends the sigma ramp at 1/N rather than sigma_min_, the schedule
+  // distilled Wan2.2 weights need. It defaults to false so every existing
+  // caller keeps the standard schedule; only the Wan2.2 I2V distill path
+  // passes true.
+  explicit FlowMatchEulerDiscreteSchedulerImpl(const ModelContext& context,
+                                               bool raw_sigmas = false)
+      : args_(context.get_model_args()), raw_sigmas_(raw_sigmas) {
     num_train_timesteps_ = args_.num_train_timesteps();
     shift_ = args_.shift();
     use_dynamic_shifting_ = args_.use_dynamic_shifting();
@@ -127,11 +133,12 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
   }
 
   void set_timesteps(
-      int num_inference_steps,
+      int64_t num_inference_steps,
       const torch::Device& device = torch::kCPU,
       const std::optional<std::vector<float>>& sigmas = std::nullopt,
       const std::optional<float>& mu = std::nullopt,
-      const std::optional<std::vector<float>>& timesteps = std::nullopt) {
+      const std::optional<std::vector<float>>& timesteps =
+          std::nullopt) override {
     if (use_dynamic_shifting_ && !mu.has_value()) {
       LOG(FATAL) << "mu must be provided when use_dynamic_shifting is true";
     }
@@ -140,7 +147,7 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
       LOG(FATAL) << "sigmas and timesteps must have the same length";
     }
 
-    int num_steps = num_inference_steps;
+    int64_t num_steps = num_inference_steps;
     if (num_steps <= 0) {
       num_steps = sigmas.has_value() ? sigmas->size() : timesteps->size();
     }
@@ -157,10 +164,17 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
 
     if (!sigmas.has_value()) {
       if (!timesteps.has_value()) {
+        // The ramp runs from sigma_max_ down to a lower bound. The standard
+        // schedule ends at sigma_min_, the smallest sigma of the training
+        // grid; distilled Wan2.2 weights need it at 1/N instead. Only the
+        // endpoint differs -- the interpolation below and the shift applied
+        // afterwards are the same for both.
+        const float sigma_end =
+            raw_sigmas_ ? 1.0f / static_cast<float>(num_steps) : sigma_min_;
         std::vector<float> ts_vec(num_steps);
         float start = sigma_max_ * num_train_timesteps_;
-        float end = sigma_min_ * num_train_timesteps_;
-        for (int i = 0; i < num_steps; ++i) {
+        float end = sigma_end * num_train_timesteps_;
+        for (int64_t i = 0; i < num_steps; ++i) {
           ts_vec[i] = start + (end - start) * i / (num_steps - 1);
         }
         ts_tensor =
@@ -214,17 +228,11 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
     begin_index_ = std::nullopt;
   }
 
-  torch::Tensor step(
-      const torch::Tensor& model_output,
-      const torch::Tensor& timestep,
-      const torch::Tensor& sample,
-      float s_churn = 0.0f,
-      float s_tmin = 0.0f,
-      float s_tmax = std::numeric_limits<float>::infinity(),
-      float s_noise = 1.0f,
-      const std::optional<torch::Generator>& generator = std::nullopt,
-      const std::optional<torch::Tensor>& per_token_timesteps = std::nullopt,
-      bool return_dict = true) {
+  torch::Tensor step(const torch::Tensor& model_output,
+                     const torch::Tensor& timestep,
+                     const torch::Tensor& sample,
+                     const std::optional<torch::Tensor>& per_token_timesteps =
+                         std::nullopt) override {
     if (!step_index_.has_value()) {
       init_step_index(timestep);
     }
@@ -277,13 +285,13 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
 
   std::optional<int> step_index() const { return step_index_; }
   std::optional<int> begin_index() const { return begin_index_; }
-  const torch::Tensor& timesteps() const { return timesteps_; }
+  const torch::Tensor& timesteps() const override { return timesteps_; }
   const torch::Tensor& sigmas() const { return sigmas_; }
   int size() const { return num_train_timesteps_; }
 
  private:
   torch::Tensor convert_to_karras(const torch::Tensor& in_sigmas,
-                                  int num_inference_steps) {
+                                  int64_t num_inference_steps) {
     float sigma_min = sigma_min_;
     float sigma_max = sigma_max_;
     if (in_sigmas.numel() > 0) {
@@ -293,7 +301,7 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
 
     const float rho = 7.0f;
     std::vector<float> ramp(num_inference_steps);
-    for (int i = 0; i < num_inference_steps; ++i) {
+    for (int64_t i = 0; i < num_inference_steps; ++i) {
       ramp[i] = static_cast<float>(i) / (num_inference_steps - 1);
     }
     torch::Tensor ramp_tensor =
@@ -306,7 +314,7 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
   }
 
   torch::Tensor convert_to_exponential(const torch::Tensor& in_sigmas,
-                                       int num_inference_steps) {
+                                       int64_t num_inference_steps) {
     float sigma_min = sigma_min_;
     float sigma_max = sigma_max_;
     if (in_sigmas.numel() > 0) {
@@ -317,7 +325,7 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
     std::vector<float> exp_sigmas(num_inference_steps);
     float log_sigma_max = std::log(sigma_max);
     float log_sigma_min = std::log(sigma_min);
-    for (int i = 0; i < num_inference_steps; ++i) {
+    for (int64_t i = 0; i < num_inference_steps; ++i) {
       float t = static_cast<float>(i) / (num_inference_steps - 1);
       exp_sigmas[i] =
           std::exp(log_sigma_max + t * (log_sigma_min - log_sigma_max));
@@ -372,6 +380,9 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
   bool use_karras_sigmas_ = false;
   bool use_exponential_sigmas_ = false;
   bool stochastic_sampling_ = false;
+  // Set only by the Wan2.2 I2V distill path; makes set_timesteps end the sigma
+  // ramp at 1/N instead of sigma_min_.
+  bool raw_sigmas_ = false;
   std::string time_shift_type_;
 
   // State variables
@@ -389,6 +400,7 @@ class FlowMatchEulerDiscreteSchedulerImpl : public torch::nn::Module {
 TORCH_MODULE(FlowMatchEulerDiscreteScheduler);
 
 REGISTER_MODEL_ARGS(FlowMatchEulerDiscreteScheduler, [&] {
+  LOAD_ARG_OR(model_type, "_class_name", "FlowMatchEulerDiscreteScheduler");
   LOAD_ARG_OR(num_train_timesteps, "num_train_timesteps", 1000);
   LOAD_ARG_OR(shift, "shift", 1);
   LOAD_ARG_OR(shift_terminal, "shift_terminal", -1);

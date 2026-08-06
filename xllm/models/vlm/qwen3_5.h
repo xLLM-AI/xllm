@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/kv_cache/linear_state_restore.h"
 #include "core/framework/model/model_output.h"
 #include "core/layers/common/lm_head.h"
 #include "core/layers/common/rotary_embedding_util.h"
@@ -152,7 +153,10 @@ class Qwen3_5ModelImpl final
       const ModelInputParams& params,
       const torch::Tensor& h) {
     auto attn_metadata =
-        layer::AttentionMetadataBuilder::build(params, /*enable_mla=*/false);
+        layer::AttentionMetadataBuilder::build(params,
+                                               /*enable_mla=*/false,
+                                               /*attn_mask=*/{},
+                                               h.device());
     // Init batch and token_block_offset for GDN attention
     if (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill) {
       constexpr int32_t kBlockM = 64;
@@ -211,6 +215,13 @@ class Qwen3_5ModelImpl final
       attn_metadata.tot = tot;
       attn_metadata.batch = batch_ptr;
       attn_metadata.token_block_offset = token_block_offset_ptr;
+#if defined(USE_MLU)
+      attn_metadata.has_initial_states =
+          materialize_linear_state_mask(params.linear_state_validity_mask,
+                                        attn_metadata.q_cu_seq_lens.size(0) - 1,
+                                        attn_metadata.is_dummy,
+                                        h.device());
+#else
       if (params.attention.device.kv_cache_tokens_nums.defined() &&
           params.attention.device.kv_cache_tokens_nums.numel() > 0) {
         attn_metadata.has_initial_states =
@@ -220,6 +231,7 @@ class Qwen3_5ModelImpl final
             torch::zeros({seqlens.size(0)},
                          torch::dtype(torch::kBool).device(seqlens.device()));
       }
+#endif
     }
     return attn_metadata;
   }
@@ -400,6 +412,9 @@ REGISTER_MODEL_ARGS(qwen3_5_moe, [&] {
 // qwen3_5 without vision config (text-only serving).
 // Model args are already registered by the VLM registration above.
 REGISTER_CAUSAL_MODEL_WITH_VARNAME(qwen3_5_lm, qwen3_5, Qwen3_5ForCausalLM);
+REGISTER_CAUSAL_MODEL_WITH_VARNAME(qwen3_5_moe_lm,
+                                   qwen3_5_moe,
+                                   Qwen3_5ForCausalLM);
 
 REGISTER_CAUSAL_MODEL(qwen3_5_text, Qwen3_5ForCausalLM);
 REGISTER_MODEL_ARGS(qwen3_5_text, [&] {

@@ -20,7 +20,6 @@ limitations under the License.
 namespace py = pybind11;
 #include <torch/torch.h>
 
-#include <algorithm>
 #if defined(USE_NPU)
 #include <acl/acl.h>
 #endif
@@ -64,6 +63,7 @@ namespace py = pybind11;
 #include "core/platform/device_name_utils.h"
 #include "core/util/net.h"
 #include "core/util/utils.h"
+#include "core/util/verbose_trace_logger.h"
 #include "function_call/function_call_parser.h"
 #include "parser/reasoning_parser.h"
 #include "server/xllm_server_registry.h"
@@ -91,33 +91,6 @@ void initialize_configs() {
   SchedulerConfig::get_instance().initialize();
   ServiceConfig::get_instance().initialize();
   SpeculativeConfig::get_instance().initialize();
-
-  // Reconcile the two per-batch admission caps into a single scheduler view
-  // consumed by every downstream user (Master -> Engine -> BlockManagerPool
-  // etc.). max_seqs_per_batch bounds the scheduler batch;
-  // max_concurrent_requests bounds the service-level admission; the effective
-  // batch cap is the tighter of the two. 0 means "unset" on either side; if
-  // both are 0 the caller has no way to size batch-bound resources (e.g. the
-  // SINGLE block pool) and we fail early.
-  {
-    SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
-    ServiceConfig& service_config = ServiceConfig::get_instance();
-    const int32_t scheduler_cap = scheduler_config.max_seqs_per_batch();
-    const int32_t service_cap = service_config.max_concurrent_requests();
-    int32_t effective_cap = 0;
-    if (scheduler_cap > 0 && service_cap > 0) {
-      effective_cap = std::min(scheduler_cap, service_cap);
-    } else if (scheduler_cap > 0) {
-      effective_cap = scheduler_cap;
-    } else if (service_cap > 0) {
-      effective_cap = service_cap;
-    } else {
-      LOG(FATAL) << "Both max_seqs_per_batch and max_concurrent_requests are "
-                    "0; set at least one to a positive value.";
-    }
-    scheduler_config.max_seqs_per_batch(effective_cap);
-    service_config.max_concurrent_requests(effective_cap);
-  }
 }
 
 Options create_options(const std::string& instance_name, bool is_local) {
@@ -162,6 +135,7 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .backend(model_config.backend())
       .limit_image_per_prompt(model_config.limit_image_per_prompt())
       .max_encoder_cache_size(model_config.max_encoder_cache_size())
+      .max_processor_cache_items(model_config.max_processor_cache_items())
       .block_size(kv_cache_config.block_size())
       .max_cache_size(kv_cache_config.max_cache_size())
       .max_memory_utilization(kv_cache_config.max_memory_utilization())
@@ -210,6 +184,8 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .sp_size(static_cast<int32_t>(parallel_config.sp_size()))
       .cfg_size(static_cast<int32_t>(parallel_config.cfg_size()))
       .vae_size(static_cast<int32_t>(parallel_config.vae_size()))
+      .text_encoder_tp_size(
+          static_cast<int32_t>(parallel_config.text_encoder_tp_size()))
       .instance_name(instance_name)
       .enable_disagg_pd(disagg_pd_config.enable_disagg_pd())
       .enable_pd_ooc(disagg_pd_config.enable_pd_ooc())
@@ -287,8 +263,18 @@ void init_npu_python_runtime() {
     we_initialized_python = true;
   }
 
-  const auto first_device = DeviceNameUtils::parse_devices("auto").front();
-  const int device_index = first_device.index();
+  // Select the same logical device this process's worker will run on. Multi-
+  // process single-card serving lets every process see all TP cards and picks
+  // its own via node_rank (see Master ctor). Using .front() here would pin an
+  // extra context on logical device 0 for every node_rank != 0 process, piling
+  // small allocations onto die0. Mirror master.cpp's get_device_idx instead.
+  const auto& distributed_config = DistributedConfig::get_instance();
+  const int32_t visible_device_count =
+      DeviceNameUtils::parse_devices("auto").size();
+  const int32_t device_index =
+      DeviceNameUtils::get_device_idx(distributed_config.node_rank(),
+                                      distributed_config.nnodes(),
+                                      visible_device_count);
 
   {
     py::gil_scoped_acquire gil;
@@ -343,6 +329,9 @@ void validate_config(const std::string& model_type) {
   }
   if (model_config.max_encoder_cache_size() < 0) {
     LOG(FATAL) << "max_encoder_cache_size must be >= 0.";
+  }
+  if (model_config.max_processor_cache_items() < 0) {
+    LOG(FATAL) << "max_processor_cache_items must be >= 0.";
   }
 #if defined(USE_MLU)
   // Disable enable_schedule_overlap for VLM models on MLU backend
@@ -455,15 +444,16 @@ int run() {
     model_config.backend(xllm::util::get_model_backend(model_path));
   }
 
+  const std::string local_ip = net::get_local_ip_addr();
   if (service_config.host().empty()) {
     // set the host to the local IP when the host is empty
-    service_config.host(net::get_local_ip_addr());
+    service_config.host(local_ip);
   }
 
-  const bool is_local =
-      !service_config.host().empty() &&
-      net::extract_ip(distributed_config.master_node_addr()) ==
-          service_config.host();
+  const std::string master_ip =
+      net::extract_ip(distributed_config.master_node_addr());
+  const bool is_local = !service_config.host().empty() &&
+                        master_ip == net::extract_ip(service_config.host());
 
   LOG(INFO) << "set worker role to "
             << (is_local ? "local worker" : "remote worker");
@@ -593,6 +583,19 @@ int main(int argc, char** argv) {
   google::ParseCommandLineFlags(&argc, &argv, true);
   google::InitGoogleLogging("xllm");
   initialize_configs();
+
+  const ServiceConfig& service_config = ServiceConfig::get_instance();
+  const DistributedConfig& distributed_config =
+      DistributedConfig::get_instance();
+  const std::string verbose_trace_log_path =
+      resolve_verbose_trace_log_path(service_config.verbose_trace_log_path(),
+                                     distributed_config.nnodes(),
+                                     distributed_config.node_rank());
+  VerboseTraceLogger::get_instance().initialize(
+      service_config.enable_verbose_trace_log(),
+      verbose_trace_log_path,
+      service_config.verbose_trace_log_max_size_mb(),
+      service_config.verbose_trace_log_max_files());
 
   // Check if model path is provided
   if (::xllm::ModelConfig::get_instance().model().empty()) {

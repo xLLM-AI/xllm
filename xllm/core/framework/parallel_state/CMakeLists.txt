@@ -21,6 +21,7 @@ cc_library(
     collective_communicator_base.h
     collective_communicator.h
     dit_collective_communicator.h
+    $<$<BOOL:${USE_NPU}>:mega_moe_comm_resource.h>
   SRCS
     mapping_npu.cpp
     npu_cp_plan.cpp
@@ -31,6 +32,7 @@ cc_library(
     process_group.cpp
     $<$<BOOL:${USE_NPU}>:npu_rank_table_env.cpp>
     $<$<BOOL:${USE_NPU}>:npu_process_group.cpp>
+    $<$<BOOL:${USE_NPU}>:mega_moe_comm_resource.cpp>
     collective_communicator.cpp
     dit_collective_communicator.cpp
   DEPS

@@ -19,7 +19,6 @@ limitations under the License.
 
 // MUSA layer directory: FlashInfer/Mate backend for CUDA-graph path.
 // Uses torch_musa runtime with mcc_wrapper + musamapping plugin.
-#if defined(USE_MUSA)
 
 #include <memory>
 #include <optional>
@@ -33,7 +32,7 @@ namespace layer {
 
 class BaseAttentionImpl;
 
-// CUDA-graph attention entry for USE_MUSA (FlashInfer-only backend).
+// CUDA-graph attention entry for the MUSA FlashInfer backend.
 class AttentionImpl final : public torch::nn::Module {
  public:
   AttentionImpl() = default;
@@ -66,5 +65,3 @@ TORCH_MODULE(Attention);
 
 }  // namespace layer
 }  // namespace xllm
-
-#endif  // USE_MUSA

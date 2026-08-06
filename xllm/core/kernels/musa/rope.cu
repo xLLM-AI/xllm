@@ -119,7 +119,7 @@ __global__ void XLLM_KERNEL_ATTR(512)
 }
 }  // namespace
 
-namespace xllm::kernel::cuda {
+namespace xllm::kernel::musa {
 
 void rotary_embedding(torch::Tensor& positions,
                       torch::Tensor& query,
@@ -375,4 +375,4 @@ void partial_rotary_embedding_inplace(torch::Tensor& positions,
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-}  // namespace xllm::kernel::cuda
+}  // namespace xllm::kernel::musa

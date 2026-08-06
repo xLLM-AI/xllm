@@ -101,8 +101,7 @@ class Qwen3_5GatedDeltaNetImpl final : public Qwen3NextGatedDeltaNetImpl {
   //
   // Sized lazily on the first (warmup) forward and grow-only thereafter,
   // matching the contract used by ColumnParallelLinearImpl::output_buf_ and
-  // friends. Same pattern is used by sglang's MergedColumnParallelLinear
-  // emitting the qkvz/ba tensors directly; here we keep the existing four
+  // friends. Keep the existing four
   // split projections (matching the on-disk checkpoint layout) and just
   // make the final concat capture-safe.
   mutable torch::Tensor qkvz_merge_buf_;

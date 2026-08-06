@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,7 +22,7 @@ import flashinfer
 import torch
 from flashinfer.decode import fast_decode_plan
 
-from xllm.python import ops
+from xllm.python import kernels
 from xllm.python.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
@@ -249,12 +249,12 @@ class FlashInferBackend(AttentionBackend):
         if metadata is None:
             raise RuntimeError("FlashInferBackend.prepare() was not called")
 
-        k_cache, v_cache = self._kv_caches[layer.layer_id]
+        k_cache, v_cache, _ = self._kv_caches[layer.layer_id]
         q_3d = q.view(-1, layer.num_heads, layer.head_dim)
         k_3d = k.view(-1, layer.num_kv_heads, layer.head_dim)
         v_3d = v.view(-1, layer.num_kv_heads, layer.head_dim)
 
-        ops.reshape_paged_cache(
+        kernels.reshape_paged_cache(
             metadata.slot_mapping, k_3d, v_3d, k_cache, v_cache
         )
 

@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,14 +13,14 @@
 # limitations under the License.
 
 """RMSNorm layer (with optional fused residual-add), matching xLLM's
-``apply_norm``. Depends on the op dispatch layer (:mod:`python.ops`)."""
+``apply_norm``. Depends on :mod:`python.kernels`."""
 
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 
-from xllm.python import ops
+from xllm.python import kernels
 
 
 class RMSNorm(nn.Module):
@@ -45,5 +45,5 @@ class RMSNorm(nn.Module):
         self, x: torch.Tensor, residual: torch.Tensor | None = None
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
-            return ops.rms_norm(x, self.weight, self.eps)
-        return ops.fused_add_rms_norm(x, residual, self.weight, self.eps)
+            return kernels.rms_norm(x, self.weight, self.eps)
+        return kernels.fused_add_rms_norm(x, residual, self.weight, self.eps)

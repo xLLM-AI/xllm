@@ -101,6 +101,7 @@ if(USE_MLU)
       mlu_graph_executor_test
     SRCS
       mlu_graph_executor_test.cpp
+      mlu_linear_state_restore_worker_test.cpp
     DEPS
       :runtime
       :model_loader

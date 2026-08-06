@@ -85,8 +85,16 @@ void Qwen3DecoderLoader::merge_host_at_weights() {
       quantize_type_.empty();
 
   if (quantize_type_.compare("w8a8") == 0) {
-    t[IN_ATTENTION_OUT_DEQSCALE] =
-        t[IN_ATTENTION_OUT_DEQSCALE].to(torch::kFloat32);
+    // Detect if o_proj is non-quantized (bf16) by checking quant_bias numel
+    // If IN_ATTENTION_OUT_BIAS is placeholder (numel <= 1), o_proj is bf16
+    o_proj_quantized_ = t[IN_ATTENTION_OUT_BIAS].numel() > 1;
+
+    if (o_proj_quantized_) {
+      t[IN_ATTENTION_OUT_DEQSCALE] =
+          t[IN_ATTENTION_OUT_DEQSCALE].to(torch::kFloat32);
+      t[IN_ATTENTION_OUT_OFFSET] = t[IN_ATTENTION_OUT_OFFSET].to(torch::kInt8);
+    }
+
     t[IN_Q_DEQSCALE] =
         torch::cat({t[IN_Q_DEQSCALE], t[IN_K_DEQSCALE], t[IN_V_DEQSCALE]}, 0)
             .to(torch::kFloat32);
@@ -119,14 +127,13 @@ void Qwen3DecoderLoader::merge_host_at_weights() {
     }
 
     t[IN_Q_OFFSET] = t[IN_Q_OFFSET].to(torch::kInt8);
-    t[IN_ATTENTION_OUT_OFFSET] = t[IN_ATTENTION_OUT_OFFSET].to(torch::kInt8);
     t[IN_MLP_W2_OFFSET] = t[IN_MLP_W2_OFFSET].to(torch::kInt8);
 
     if (t[IN_MLP_CPROJ_BIAS].numel() > 1) {
       t[IN_MLP_CPROJ_BIAS] = t[IN_MLP_CPROJ_BIAS].to(torch::kInt32);
       t[IN_MLP_CPROJ_DEQSCALE] = t[IN_MLP_CPROJ_DEQSCALE].to(torch::kFloat32);
-      t[IN_MLP_CPROJ_OFFSET] = t[IN_MLP_CPROJ_OFFSET].to(torch::kInt8);
-      t[IN_MLP_CPROJ_SCALE] = t[IN_MLP_CPROJ_SCALE].to(dtype_);
+      t[IN_MLP_CPROJ_OFFSET] = t[IN_MLP_CPROJ_OFFSET].to(torch::kFloat32);
+      t[IN_MLP_CPROJ_SCALE] = t[IN_MLP_CPROJ_SCALE].to(torch::kFloat32);
       down_proj_quantized_ = true;
     }
 

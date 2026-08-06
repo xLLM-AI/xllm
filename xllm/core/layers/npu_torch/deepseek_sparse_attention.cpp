@@ -26,6 +26,7 @@ limitations under the License.
 
 #include "common/flash_comm1_context.h"
 #include "kernels/ops_api.h"
+#include "layers/npu_torch/deepseek_v4_cp_context.h"
 #include "xllm/core/kernels/npu/xllm_ops/xllm_ops_api.h"
 
 DECLARE_bool(enable_chunked_prefill);
@@ -256,29 +257,57 @@ void scatter_by_slot(torch::Tensor& cache,
 // [num_blocks + 1, block_size, n, d]. This mirrors vllm-ascend's
 // pad_to_blocks path and lets sparse_attn_sharedkv read prefill KV through a
 // block table without depending on the persistent SWA ring cache.
+//
+// cu_seqlens_src locates each request's rows inside `kv`. cu_seqlens_dst, when
+// given, overrides how many rows each request exposes to the kernel; it exists
+// for prefill CP, where `kv` holds the gathered global rows of every rank but a
+// request must expose only the window its local queries may attend to, so the
+// packed extent matches the seqused_kv the metadata advertises.
+//
+// Both are (batch+1,) leading-zero cumsums. Copied rows are aligned to the END
+// of each request's window, which is where sparse_attn_sharedkv expects the
+// newest tokens. Like the non-CP path this assumes the window holds no cached
+// prefix -- prefix rows live in the persistent SWA cache, which the chunked
+// branch reads instead of calling this at all.
 std::tuple<torch::Tensor, torch::Tensor> build_prefill_pa_nd_kv(
     const torch::Tensor& kv,
-    const torch::Tensor& cu_seqlens_q,
+    const torch::Tensor& cu_seqlens_src,
     const torch::Tensor& block_table_hint,
-    int64_t block_size) {
-  if (!kv.defined() || !cu_seqlens_q.defined() || cu_seqlens_q.numel() <= 1 ||
-      block_size <= 0) {
+    int64_t block_size,
+    const torch::Tensor& cu_seqlens_dst = torch::Tensor()) {
+  if (!kv.defined() || !cu_seqlens_src.defined() ||
+      cu_seqlens_src.numel() <= 1 || block_size <= 0) {
     return {torch::Tensor(), torch::Tensor()};
   }
 
-  const int64_t batch_size = cu_seqlens_q.numel() - 1;
-  const auto cu_cpu = cu_seqlens_q.to(torch::kCPU).to(torch::kInt64);
+  const int64_t batch_size = cu_seqlens_src.numel() - 1;
+  const auto cu_cpu = cu_seqlens_src.to(torch::kCPU).to(torch::kInt64);
   std::vector<int64_t> q_starts(batch_size + 1);
   auto cu_acc = cu_cpu.accessor<int64_t, 1>();
+
+  const bool has_dst =
+      cu_seqlens_dst.defined() && cu_seqlens_dst.numel() == batch_size + 1;
+  std::vector<int64_t> dst_lens_vec(batch_size, 0);
+  if (has_dst) {
+    const auto dst_cpu = cu_seqlens_dst.to(torch::kCPU).to(torch::kInt64);
+    auto dst_acc = dst_cpu.accessor<int64_t, 1>();
+    for (int64_t i = 1; i <= batch_size; ++i) {
+      dst_lens_vec[i - 1] = dst_acc[i] - dst_acc[i - 1];
+    }
+  }
+
   int64_t total_blocks = 0;
   int64_t max_blocks_per_req = 0;
-  // cu_seqlens_q describes the packed token ranges for each request. Convert
+  // cu_seqlens_src describes the packed token ranges for each request. Convert
   // those ranges into the number of PA_ND blocks each request needs.
   for (int64_t i = 0; i <= batch_size; ++i) {
     q_starts[i] = cu_acc[i];
     if (i > 0) {
-      const int64_t q_len = q_starts[i] - q_starts[i - 1];
-      const int64_t blocks = (q_len + block_size - 1) / block_size;
+      if (!has_dst) {
+        dst_lens_vec[i - 1] = q_starts[i] - q_starts[i - 1];
+      }
+      const int64_t blocks =
+          (dst_lens_vec[i - 1] + block_size - 1) / block_size;
       total_blocks += blocks;
       max_blocks_per_req = std::max(max_blocks_per_req, blocks);
     }
@@ -303,7 +332,8 @@ std::tuple<torch::Tensor, torch::Tensor> build_prefill_pa_nd_kv(
   int64_t next_block = 1;
   for (int64_t req = 0; req < batch_size; ++req) {
     const int64_t q_start = q_starts[req];
-    const int64_t q_len = q_starts[req + 1] - q_start;
+    const int64_t src_len = q_starts[req + 1] - q_start;
+    const int64_t q_len = dst_lens_vec[req];
     const int64_t blocks = (q_len + block_size - 1) / block_size;
     if (q_len <= 0 || blocks <= 0) {
       continue;
@@ -313,14 +343,20 @@ std::tuple<torch::Tensor, torch::Tensor> build_prefill_pa_nd_kv(
           static_cast<int32_t>(next_block + j);
     }
     // Copy this request's contiguous prefill KV into its temporary PA_ND block
-    // range. The zero-initialized tail of the last block is padding.
-    auto target = packed_kv
-                      .slice(/*dim=*/0,
-                             /*start=*/next_block,
-                             /*end=*/next_block + blocks)
-                      .view({blocks * block_size, kv.size(1), kv.size(2)});
-    target.narrow(/*dim=*/0, /*start=*/0, /*length=*/q_len)
-        .copy_(kv.narrow(/*dim=*/0, /*start=*/q_start, /*length=*/q_len));
+    // range. The zero-initialized tail of the last block is padding. Under CP
+    // the window is shorter than the gathered rows kv holds for this request
+    // (it stops where this rank's queries stop), so clamp instead of reading
+    // past the window.
+    const int64_t copy_len = std::min(q_len, src_len);
+    if (copy_len > 0) {
+      auto target = packed_kv
+                        .slice(/*dim=*/0,
+                               /*start=*/next_block,
+                               /*end=*/next_block + blocks)
+                        .view({blocks * block_size, kv.size(1), kv.size(2)});
+      target.narrow(/*dim=*/0, /*start=*/q_len - copy_len, /*length=*/copy_len)
+          .copy_(kv.narrow(/*dim=*/0, /*start=*/q_start, /*length=*/copy_len));
+    }
     next_block += blocks;
   }
 
@@ -347,7 +383,14 @@ Dsv4PreprocessOutputs run_dsv4_preprocess_fallback(
     double eps,
     const torch::Tensor& q_rms_gamma,
     const torch::Tensor& cos,
-    const torch::Tensor& sin) {
+    const torch::Tensor& sin,
+    // Prefill CP: q runs on this rank's rows while kv must cover all tokens,
+    // so the kv projection takes its own input and its own global-position
+    // RoPE. All undefined (the default) means q and kv share one input, which
+    // is the non-CP path and stays byte-identical.
+    const torch::Tensor& kv_hidden_states = torch::Tensor(),
+    const torch::Tensor& kv_cos = torch::Tensor(),
+    const torch::Tensor& kv_sin = torch::Tensor()) {
   Dsv4PreprocessOutputs outputs;
 
   auto q_down = q_a_proj->forward(hidden_states);
@@ -382,12 +425,17 @@ Dsv4PreprocessOutputs run_dsv4_preprocess_fallback(
   xllm::kernel::fused_layernorm(q_rmsnorm_params);
   outputs.q = q_rmsnorm_params.output;
 
-  auto kv_down = kv_proj->forward(hidden_states);
+  const torch::Tensor& kv_input =
+      kv_hidden_states.defined() ? kv_hidden_states : hidden_states;
+  auto kv_down = kv_proj->forward(kv_input);
   outputs.kv = std::get<0>(kv_layernorm->forward(kv_down));
   outputs.kv = outputs.kv.view({-1, 1, qk_head_dim});
 
   apply_partial_rope(outputs.q, nope_head_dim, rope_head_dim, cos, sin);
-  apply_partial_rope(outputs.kv, nope_head_dim, rope_head_dim, cos, sin);
+  const torch::Tensor& kv_rope_cos = kv_cos.defined() ? kv_cos : cos;
+  const torch::Tensor& kv_rope_sin = kv_sin.defined() ? kv_sin : sin;
+  apply_partial_rope(
+      outputs.kv, nope_head_dim, rope_head_dim, kv_rope_cos, kv_rope_sin);
 
   return outputs;
 }
@@ -623,6 +671,30 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
       compress_metadata;
   auto cos = attn_metadata.cos;
   auto sin = attn_metadata.sin;
+
+  // Prefill CP: hidden_states holds only this rank's query rows, but the KV,
+  // compressor and index-cache writes must cover every token so each rank ends
+  // up with a full KV replica and local queries can attend to the whole prefix.
+  // Rebuild the global-ordered hidden once per layer here. RoPE is per-token
+  // and each rank's rows carry their true global positions, so gathering after
+  // the projections would be equivalent -- gathering the input keeps the
+  // downstream call sites unchanged.
+  const auto* cp_ctx = attn_metadata.v4_cp_context;
+  const bool cp_enabled = cp_ctx != nullptr && cp_ctx->enabled();
+  torch::Tensor kv_hidden_states;
+  torch::Tensor kv_cos;
+  torch::Tensor kv_sin;
+  // Cumulative row count of kv_hidden_states, in the compressor's (batch+1,)
+  // leading-zero layout. Stays empty when CP is off so every consumer falls
+  // back to the metadata's own query cumsum.
+  std::optional<torch::Tensor> kv_cu_seq_lens;
+  if (cp_enabled) {
+    kv_hidden_states = cp_ctx->gather_restore(hidden_states);
+    kv_cos = attn_metadata.kv_cos;
+    kv_sin = attn_metadata.kv_sin;
+    kv_cu_seq_lens = cp_ctx->global_q_cu_seq_lens;
+  }
+
   Dsv4PreprocessOutputs preprocess_outputs =
       run_dsv4_preprocess_fallback(q_a_proj_,
                                    q_layernorm_,
@@ -638,7 +710,10 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                                    eps_,
                                    q_rms_gamma_,
                                    cos,
-                                   sin);
+                                   sin,
+                                   kv_hidden_states,
+                                   kv_cos,
+                                   kv_sin);
   auto qr = preprocess_outputs.qr;
   auto qr_pertoken_scale = preprocess_outputs.qr_pertoken_scale;
   auto q = preprocess_outputs.q;
@@ -720,11 +795,19 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   if (use_temporary_prefill_kv) {
     const int64_t block_size =
         ori_kv.defined() && ori_kv.dim() > 1 ? ori_kv.size(1) : 128;
+    // Under CP `kv` was projected from the gathered global rows, so its request
+    // offsets are the global query cumsum -- actual_seq_lengths_query is this
+    // rank's localized view and would slice the wrong rows. The window each
+    // request exposes is the localized kv extent, matching the seqused_kv
+    // passed to sparse_attn_sharedkv below.
     std::tie(ori_kv_for_attn, ori_block_table_for_attn) =
-        build_prefill_pa_nd_kv(kv,
-                               attn_metadata.actual_seq_lengths_query,
-                               ori_block_table,
-                               block_size);
+        build_prefill_pa_nd_kv(
+            kv,
+            cp_enabled ? cp_ctx->global_q_cu_seq_lens
+                       : attn_metadata.actual_seq_lengths_query,
+            ori_block_table,
+            block_size,
+            cp_enabled ? cp_ctx->local_kv_cu_seq_lens : torch::Tensor());
     CHECK(ori_kv_for_attn.defined())
         << "Failed to build PA_ND KV for DeepSeek V4 prefill attention.";
   } else {
@@ -754,14 +837,19 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
     std::tuple<torch::Tensor, torch::Tensor> compressor_block_tables{
         kv_block_table, score_block_table};
 
-    auto compressed_kv =
-        compressor_->forward(attn_metadata,
-                             hidden_states,
-                             compressor_states,
-                             compressor_block_tables,
-                             compress_sin,
-                             compress_cos,
-                             attn_metadata.actual_seq_lengths_query);
+    auto compressed_kv = compressor_->forward(
+        attn_metadata,
+        // The compressor projects compressed KV from hidden with its own
+        // wkv, so under CP it needs every token -- its cache must be a full
+        // replica, addressed by the global cu_seqlens rather than the
+        // query-localized one.
+        cp_enabled ? kv_hidden_states : hidden_states,
+        compressor_states,
+        compressor_block_tables,
+        compress_sin,
+        compress_cos,
+        cp_enabled ? cp_ctx->global_q_cu_seq_lens
+                   : attn_metadata.actual_seq_lengths_query);
     scatter_by_slot(cmp_kv, cmp_slot, compressed_kv);
     cmp_kv_for_attn = cmp_kv;
   }
@@ -803,7 +891,14 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                              qli_metadata_opt,
                              use_prefill_attn,
                              &indexer_states,
-                             &indexer_block_tables);
+                             &indexer_block_tables,
+                             // Global-ordered hidden for the index-cache write;
+                             // the first arg stays local for build_weights.
+                             kv_hidden_states,
+                             // Cumulative lengths of kv_hidden_states' rows.
+                             // actual_seq_lengths_query above is this rank's
+                             // localized view and would under-count them.
+                             kv_cu_seq_lens);
     CHECK(compress_topk_idxs.defined())
         << "DSAttention indexer returned undefined topk indices for "
            "compress_ratio==4.";
@@ -825,9 +920,14 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
 
   std::optional<torch::Tensor> cu_seqlens_ori_kv_for_attn = std::nullopt;
   if (use_prefill_attn) {
-    // Prefill-style sparse metadata uses query cu-seqlens for ori_kv.
+    // Prefill-style sparse metadata uses query cu-seqlens for ori_kv. Without
+    // CP the two coincide (one query row per new kv row); under CP the kv
+    // window is longer than this rank's query block, and it is the window that
+    // describes ori_kv. Must match the cu_seqlens_ori_kv that
+    // build_precomputed_metadata baked into the sparse metadata tiling.
     cu_seqlens_ori_kv_for_attn =
-        as_optional(attn_metadata.actual_seq_lengths_query);
+        cp_enabled ? as_optional(cp_ctx->local_kv_cu_seq_lens)
+                   : as_optional(attn_metadata.actual_seq_lengths_query);
   }
 
   auto [attn_output, output_lse] = xllm::kernel::npu::sparse_attn_sharedkv(

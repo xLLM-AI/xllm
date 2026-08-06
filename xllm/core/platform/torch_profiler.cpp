@@ -29,6 +29,14 @@ namespace {
 namespace tp = torch::profiler::impl;
 namespace ap = torch::autograd::profiler;
 
+tp::ActivityType gpu_activity_type() {
+#if defined(USE_MUSA)
+  return tp::ActivityType::PrivateUse1;
+#else
+  return tp::ActivityType::CUDA;
+#endif
+}
+
 // Build the destination path for a worker's Chrome trace. Mirrors the
 // ".pt.trace.json" suffix produced by torch.profiler's tensorboard handler so
 // the file is recognized by the usual viewers (Perfetto, chrome://tracing,
@@ -75,7 +83,7 @@ bool TorchProfiler::start() {
 
   try {
     const std::set<tp::ActivityType> activities = {tp::ActivityType::CPU,
-                                                   tp::ActivityType::CUDA};
+                                                   gpu_activity_type()};
     const tp::ProfilerConfig config(tp::ProfilerState::KINETO,
                                     /*report_input_shapes=*/false,
                                     /*profile_memory=*/false,

@@ -46,3 +46,15 @@ cc_test(
 target_link_libraries(mooncake_transfer_engine_test PRIVATE
   "$<LINK_GROUP:RESCAN,xtensor,xllm_server>")
 endif()
+
+if(USE_MLU)
+cc_test(
+  NAME
+    quantized_indexer_host_offload_test
+  SRCS
+    hierarchy_kv_cache_transfer_test.cpp
+  DEPS
+    :kv_cache_transfer
+    GTest::gtest_main
+)
+endif()

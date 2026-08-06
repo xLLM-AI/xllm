@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,7 +29,7 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from xllm.python import ops
+from xllm.python import kernels
 from xllm.python.layers import (
     Attention,
     ColumnParallelLinear,
@@ -38,7 +38,11 @@ from xllm.python.layers import (
     RotaryEmbedding,
     RowParallelLinear,
 )
-from xllm.python.model_executor.forward_context import get_forward_context
+from xllm.python.model_executor.forward_context import (
+    ForwardContext,
+    forward_context,
+    record_layer_event,
+)  # noqa: F401
 from xllm.python.models.base import PyModelBase
 
 
@@ -137,7 +141,7 @@ class Qwen3MLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up = self.gate_up_proj(x)
-        act = ops.silu_and_mul(gate_up)
+        act = kernels.silu_and_mul(gate_up)
         return self.down_proj(act)
 
 
@@ -196,7 +200,7 @@ class Qwen3Attention(nn.Module):
     ) -> torch.Tensor:
         qkv = self.qkv_proj(hidden)
 
-        q, k, v = ops.fused_qk_norm_rope(
+        q, k, v = kernels.fused_qk_norm_rope(
             qkv,
             num_heads_q=self.num_heads,
             num_heads_k=self.num_kv_heads,
@@ -297,14 +301,12 @@ class Qwen3Model(nn.Module):
         # (its output lives in the graph memory pool), so replay re-casts the
         # updated static_positions correctly.
         positions = positions.to(torch.int64).contiguous()
-        cos, sin = None, None
-        if get_forward_context().device.type in ("npu", "privateuseone"):
-            cos, sin = self.rotary(positions)
         residual: Optional[torch.Tensor] = None
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             hidden, residual = layer(
-                hidden, residual, positions, self.rotary.cos_sin_cache, cos, sin
+                hidden, residual, positions, self.rotary.cos_sin_cache, None, None
             )
+            record_layer_event(i)
         hidden, _ = self.norm(hidden, residual)
         return hidden
 
@@ -414,6 +416,10 @@ class Qwen3ForCausalLM(PyModelBase):
 
             copy_in(p + "mlp.down_proj.weight",
                     shard(p + "mlp.down_proj.weight", dim=1))
+
+            layer = self.model.layers[i]
+            layer.self_attn.o_proj.process_weights_after_loading()
+            layer.mlp.down_proj.process_weights_after_loading()
 
         norm_name = "model.norm.weight"
         if not find(norm_name):

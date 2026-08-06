@@ -30,12 +30,15 @@ cc_library(
     npu_deepseek_v2_decoder_layer_impl.h
     npu_deepseek_v32_decoder_layer_impl.h
     npu_llama_decoder_layer_impl.h
+    npu_mistral3_vision_encoder_layer_impl.h
+    npu_mistral_decoder_layer_impl.h
     npu_qwen2_decoder_layer_impl.h
     npu_qwen3_decoder_layer_impl.h
     npu_onerec_block_layer_impl.h
     npu_eagle3_decoder_layer_impl.h
     npu_glm4_decoder_layer_impl.h
     npu_rms_norm_impl.h
+    npu_rope_layer_impl.h
     npu_siglip_encoder_layer_impl.h
     rotary_embedding.h
     ../common/rotary_embedding_util.h
@@ -53,6 +56,8 @@ cc_library(
     loader/glm4_moe_decoder_loader.h
     loader/glm4_moe_lite_decoder_loader.h
     loader/llama_decoder_loader.h
+    loader/mistral3_vision_encoder_loader.h
+    loader/mistral_decoder_loader.h
     loader/qwen2_vision_encoder_loader.h
     loader/qwen2dot5_vision_encoder_loader.h
     loader/qwen3_vision_encoder_loader.h
@@ -84,12 +89,15 @@ cc_library(
     npu_deepseek_v2_decoder_layer_impl.cpp
     npu_deepseek_v32_decoder_layer_impl.cpp
     npu_llama_decoder_layer_impl.cpp
+    npu_mistral3_vision_encoder_layer_impl.cpp
+    npu_mistral_decoder_layer_impl.cpp
     npu_qwen2_decoder_layer_impl.cpp
     npu_qwen3_decoder_layer_impl.cpp
     npu_onerec_block_layer_impl.cpp
     npu_eagle3_decoder_layer_impl.cpp
     npu_glm4_decoder_layer_impl.cpp
     npu_rms_norm_impl.cpp
+    npu_rope_layer_impl.cpp
     npu_siglip_encoder_layer_impl.cpp
     rotary_embedding.cpp
     ../common/rotary_embedding_util.cpp
@@ -107,6 +115,8 @@ cc_library(
     loader/glm4_moe_decoder_loader.cpp
     loader/glm4_moe_lite_decoder_loader.cpp
     loader/llama_decoder_loader.cpp
+    loader/mistral3_vision_encoder_loader.cpp
+    loader/mistral_decoder_loader.cpp
     loader/qwen2_vision_encoder_loader.cpp
     loader/qwen2dot5_vision_encoder_loader.cpp
     loader/qwen3_vision_encoder_loader.cpp

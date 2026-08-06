@@ -112,16 +112,6 @@ struct QuantArgs {
 
   // ── Convenience helpers for weight-loading prefix resolution ──────────
 
-  bool is_quantized() const { return !quant_descs_.empty(); }
-
-  // Returns `quant_key` when the model is quantized (quant_descs is
-  // non-empty), otherwise returns `fallback`.  Use this to pick between
-  // checkpoint key names / prefixes at load time without repeated if/else.
-  std::string resolve_prefix(const std::string& quant_key,
-                             const std::string& fallback) const {
-    return quant_descs_.empty() ? fallback : quant_key;
-  }
-
   // ── Module-level helpers ────────────────────────────────────────────────
 
   bool should_ignore_module(const std::string& module_name) const {

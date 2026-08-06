@@ -51,6 +51,8 @@ PYBIND11_MODULE(xllm_export, m) {
       .def_readwrite("enable_prefix_cache", &Options::enable_prefix_cache_)
       .def_readwrite("max_encoder_cache_size",
                      &Options::max_encoder_cache_size_)
+      .def_readwrite("max_processor_cache_items",
+                     &Options::max_processor_cache_items_)
       .def_readwrite("max_tokens_per_batch", &Options::max_tokens_per_batch_)
       .def_readwrite("max_seqs_per_batch", &Options::max_seqs_per_batch_)
       .def_readwrite("max_tokens_per_chunk_for_prefill",
@@ -236,6 +238,8 @@ PYBIND11_MODULE(xllm_export, m) {
       .def_readwrite("logprobs", &RequestParams::logprobs)
       .def_readwrite("top_logprobs", &RequestParams::top_logprobs)
       .def_readwrite("skip_special_tokens", &RequestParams::skip_special_tokens)
+      .def_readwrite("include_stop_str_in_output",
+                     &RequestParams::include_stop_str_in_output)
       .def_readwrite("ignore_eos", &RequestParams::ignore_eos)
       .def_readwrite("is_embeddings", &RequestParams::is_embeddings)
       .def_readwrite("stop", &RequestParams::stop)

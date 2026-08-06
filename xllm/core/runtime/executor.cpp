@@ -58,4 +58,10 @@ void Executor::prepare_graph_input(const torch::Tensor& tokens,
   impl_->prepare_graph_input(tokens, positions, kv_caches, params);
 }
 
+bool Executor::prepare_static_mtp_graph_tasks(
+    const SpecVerifyGraphTaskSignal& signal,
+    const Stream& signal_stream) {
+  return impl_->prepare_static_mtp_graph_tasks(signal, signal_stream);
+}
+
 }  // namespace xllm

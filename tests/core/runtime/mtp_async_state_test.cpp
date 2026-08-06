@@ -18,8 +18,30 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
+#include <utility>
+
 namespace xllm::mtp_async {
 namespace {
+
+TEST(MtpAsyncStateTest, ClassifiesClosedTargetSpecVerifyPolicy) {
+  const std::pair<std::string_view, TargetSpecVerifyMode> test_cases[] = {
+      {"qwen3_5", TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY},
+      {"qwen3_5_moe", TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY},
+      {"qwen3_5_text", TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY},
+      {"qwen3_5_moe_text", TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY},
+      {"mimo", TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL},
+      {"qwen3_next", TargetSpecVerifyMode::GENERIC},
+      {"qwen3_5_mtp", TargetSpecVerifyMode::GENERIC},
+      {"qwen3_5_moe_mtp", TargetSpecVerifyMode::GENERIC},
+      {"mimo_mtp", TargetSpecVerifyMode::GENERIC},
+      {"unknown_model", TargetSpecVerifyMode::GENERIC},
+  };
+
+  for (const auto& [model_type, expected] : test_cases) {
+    EXPECT_EQ(classify_target_spec_verify_mode(model_type), expected)
+        << "model_type=" << model_type;
+  }
+}
 
 TEST(MtpAsyncStateTest, ClassifiesSupportedCombinedDraftExecutionPaths) {
   EXPECT_EQ(classify_combined_draft_execution_path("qwen3_5_mtp"),
@@ -30,6 +52,38 @@ TEST(MtpAsyncStateTest, ClassifiesSupportedCombinedDraftExecutionPaths) {
             CombinedDraftExecutionPath::UNSUPPORTED);
   EXPECT_EQ(classify_combined_draft_execution_path("mimo_mtp"),
             CombinedDraftExecutionPath::UNSUPPORTED);
+}
+
+TEST(MtpAsyncStateTest, ComputesSharedSpecVerifyBlockTableCapacity) {
+  EXPECT_EQ(speculative_verify_block_table_capacity(262144, 16), 16385);
+  EXPECT_EQ(speculative_verify_block_table_capacity(262144, 32), 8193);
+  EXPECT_EQ(speculative_verify_block_table_capacity(262144, 64), 4097);
+  EXPECT_EQ(speculative_verify_block_table_capacity(262144, 128), 2049);
+  EXPECT_EQ(speculative_verify_block_table_capacity(300000, 128), 2345);
+}
+
+TEST(MtpAsyncStateTest, MaterializesDraftColumnsForEagerFallback) {
+  torch::Tensor verify_tokens =
+      torch::tensor({10, -1, -1, 20, -1, -1}, torch::kInt);
+  const std::vector<torch::Tensor> draft_sources = {
+      torch::tensor({11, 21}, torch::kLong),
+      torch::tensor({12, 22}, torch::kLong)};
+
+  torch::Tensor materialized =
+      materialize_speculative_verify_tokens(verify_tokens, draft_sources);
+
+  EXPECT_EQ(materialized.data_ptr(), verify_tokens.data_ptr());
+  EXPECT_TRUE(torch::equal(
+      materialized, torch::tensor({10, 11, 12, 20, 21, 22}, torch::kInt)));
+}
+
+TEST(MtpAsyncStateTest, LeavesOrdinaryEagerTokensUnchanged) {
+  const torch::Tensor verify_tokens = torch::tensor({10, 11}, torch::kInt);
+  torch::Tensor materialized =
+      materialize_speculative_verify_tokens(verify_tokens, {});
+
+  EXPECT_EQ(materialized.data_ptr(), verify_tokens.data_ptr());
+  EXPECT_TRUE(torch::equal(materialized, verify_tokens));
 }
 
 TEST(MtpAsyncStateTest, BuildsMixedAcceptanceStateWithoutHostRoundTrip) {

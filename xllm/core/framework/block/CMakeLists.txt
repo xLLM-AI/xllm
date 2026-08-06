@@ -18,7 +18,7 @@ cc_library(
   HDRS
     block.h
     block_manager.h
-    single_block_manager.h
+    embedding_block_manager.h
     block_manager_pool.h
     linear_state_block_manager.h
     block_manager_impl.h
@@ -28,7 +28,7 @@ cc_library(
     composite_block_manager.h
   SRCS
     block.cpp
-    single_block_manager.cpp
+    embedding_block_manager.cpp
     block_manager_pool.cpp
     linear_state_block_manager.cpp
     concurrent_block_manager_impl.cpp

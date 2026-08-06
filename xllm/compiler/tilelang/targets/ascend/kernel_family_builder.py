@@ -15,7 +15,7 @@ from . import abi_entry, kernel_registry, toolchain
 from .kernel_registry import RegisteredKernelFamily
 from .kernels import utils as kernel_utils
 from .kernels.utils import render_family_registry_inc, render_family_variants_inc
-from .toolchain import AscendBuildContext, TILELANG_BISHENG_COMMON_FLAGS
+from .toolchain import AscendBuildContext
 
 
 # TileLang variant compilation is much heavier than ordinary C++ compilation:
@@ -71,7 +71,7 @@ class _VariantWorkerArgs:
     plan: _VariantBuildPlan
     entry_symbol: str
     bisheng_executable: str
-    bisheng_arch: str
+    bisheng_compile_flags: tuple[str, ...]
     include_dirs: tuple[str, ...]
     toolchain_options: dict
     fingerprint: dict
@@ -109,8 +109,7 @@ def _run_variant_worker(args: _VariantWorkerArgs) -> _VariantBuildResult:
 
     compile_cmd = [
         args.bisheng_executable,
-        f"--npu-arch={args.bisheng_arch}",
-        *TILELANG_BISHENG_COMMON_FLAGS,
+        *args.bisheng_compile_flags,
         f"-Dg_tilingKey=g_tilingKey__{compile_spec.variant_key}",
         *[f"-I{d}" for d in args.include_dirs],
         str(plan.generated_source),
@@ -327,7 +326,7 @@ def build_kernel_family(
                 plan=plan,
                 entry_symbol=_variant_entry_symbol(plan.compile_spec),
                 bisheng_executable=context.bisheng_executable,
-                bisheng_arch=context.bisheng_arch,
+                bisheng_compile_flags=context.bisheng_compile_flags,
                 include_dirs=tuple(str(d) for d in context.include_dirs),
                 toolchain_options=dict(context.toolchain_options),
                 fingerprint=dict(context.fingerprint),

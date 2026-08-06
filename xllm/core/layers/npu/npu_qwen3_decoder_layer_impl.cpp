@@ -151,6 +151,7 @@ void NpuQwen3DecoderLayerImpl::initialize_parallel_parameters(
 
 void NpuQwen3DecoderLayerImpl::initialize_quantization_parameters(
     atb_speed::qwen::QwenLayerParam& param) {
+  param.enableSwigluQuant = false;
   if (quantize_type_.empty()) {
     param.linearDescs = {static_cast<int>(LinearTypeV2::BFLOAT16),
                          static_cast<int>(LinearTypeV2::INVALID),
@@ -232,10 +233,25 @@ int64_t NpuQwen3DecoderLayerImpl::init_layer() {
             static_cast<int>(LinearTypeV2::W8A8);
         p.linearQuantType[atb_speed::common::DOWN_LINEAR_INDEX] =
             static_cast<int>(LinearType::INT);
+        p.enableSwigluQuant = true;
       };
       update_down_proj(prefill_param_);
       update_down_proj(decode_graph_param_);
       update_down_proj(decode_eager_param_);
+    }
+    if (qwen3_loader && !qwen3_loader->o_proj_quantized()) {
+      // o_proj is bf16: change linearDescs[kDenseLinearIndex] from W8A8 to
+      // BFLOAT16, same pattern as down_proj non-quantized adaptation
+      constexpr uint64_t kDenseLinearIndex = 3;
+      auto update_o_proj = [](atb_speed::qwen::QwenLayerParam& p) {
+        p.linearDescs[kDenseLinearIndex] =
+            static_cast<int>(LinearTypeV2::BFLOAT16);
+        p.linearQuantType[kDenseLinearIndex] =
+            static_cast<int>(LinearType::INVALID);
+      };
+      update_o_proj(prefill_param_);
+      update_o_proj(decode_graph_param_);
+      update_o_proj(decode_eager_param_);
     }
   }
 

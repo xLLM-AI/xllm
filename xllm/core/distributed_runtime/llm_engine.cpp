@@ -26,7 +26,9 @@ limitations under the License.
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <memory>
+#include <optional>
 
 #include "common/device_monitor.h"
 #include "common/interruption_bus.h"
@@ -45,6 +47,7 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache_estimation.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/kv_cache/kv_cache_utils.h"
+#include "framework/kv_cache_transfer/push_route.h"
 #include "framework/model/model_args.h"
 #include "framework/model_loader.h"
 #include "framework/xtensor/page_allocator.h"
@@ -468,8 +471,6 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
   estimate_options.is_draft_engine = options_.is_draft_engine();
   estimate_options.enable_prefix_cache =
       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
-  estimate_options.enable_rdma_scale_padding =
-      options_.instance_role() != InstanceRole::DEFAULT;
   if (options_.enable_mtp_draft_body_tp1() && options_.is_draft_engine()) {
     estimate_options.world_size = 1;
     estimate_options.n_local_kv_heads =
@@ -493,6 +494,8 @@ KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
 }
 
 bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
+  const KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
+
   LOG(INFO) << "kv cache capacity: "
             << readable_size(kv_cache_cap.cache_size_in_bytes())
             << ", blocks: " << kv_cache_cap.n_blocks()
@@ -517,6 +520,30 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
   const int32_t block_size = static_cast<int32_t>(kv_cache_cap.block_size());
   const bool enable_gdn_attention = has_linear_attention_layers(args_);
 
+  // Validate host offload before constructing block managers or asking workers
+  // to allocate potentially large pinned host tensors.
+  const KVCacheShape kv_cache_shape(kv_cache_cap, args_, dp_local_tp_size_);
+  HostCacheValidationOptions host_cache_validation_options{
+      .host_blocks_factor = options_.host_blocks_factor(),
+      .device_block_count = kv_cache_cap.n_blocks(),
+      .supports_host_kv_offload = Platform::supports_host_kv_offload(),
+      .enable_prefix_cache = options_.enable_prefix_cache(),
+      .has_key_cache_shape = kv_cache_shape.has_key_cache_shape(),
+      .has_grouped_cache_layout = kv_cache_shape.has_grouped_cache_layout(),
+      .supports_grouped_cache_offload =
+          util::is_deepseek_v4_model_type(args_.model_type()),
+      .has_conv_cache_shape = kv_cache_shape.has_conv_cache_shape(),
+      .has_ssm_cache_shape = kv_cache_shape.has_ssm_cache_shape(),
+      .kv_cache_dtype = options_.kv_cache_dtype(),
+      .indexer_cache_dtype = kv_cache_config.indexer_cache_dtype(),
+      .model_type = args_.model_type(),
+  };
+  const std::optional<std::string> host_cache_error =
+      validate_host_cache_options(host_cache_validation_options);
+  if (host_cache_error.has_value()) {
+    LOG(FATAL) << *host_cache_error;
+  }
+
   // DECODE-side skips LINEAR prefix cache by role (see
   // composite_block_manager.cpp::leaf_participates_in_prefix_cache), so the
   // chunked-prefill + chunk-stride guards below are only meaningful for
@@ -537,7 +564,6 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
   }
 
   // init kv cache for each worker
-  const KVCacheShape kv_cache_shape(kv_cache_cap, args_, dp_local_tp_size_);
   kv_cache_shape.print_shapes();
 
   // initialize block manager
@@ -550,18 +576,19 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
                                         : block_size)
       .host_num_blocks(kv_cache_cap.n_blocks() * options_.host_blocks_factor())
       .enable_linear_state(enable_gdn_attention)
-      .enable_prefix_cache(
-          ::xllm::KVCacheConfig::get_instance().enable_xtensor()
-              ? false
-              : options_.enable_prefix_cache())
+      .enable_prefix_cache(kv_cache_config.enable_xtensor()
+                               ? false
+                               : options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_kvcache_store(options_.enable_kvcache_store())
-      .enable_xtensor(::xllm::KVCacheConfig::get_instance().enable_xtensor())
+      .enable_xtensor(kv_cache_config.enable_xtensor())
       .num_layers(args_.n_layers())
       .slot_size(kv_cache_cap.slot_size())
       .model_id(options_.model_id())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .num_speculative_tokens(options_.num_speculative_tokens())
+      .num_embedding_blocks(
+          static_cast<uint32_t>(kv_cache_shape.key_cache_shape()[0]))
       // DECODE-side prefix cache participation is per-leaf and gated by the
       // predicate in composite_block_manager.cpp. P and MIX are treated
       // identically (both admit prefix cache on every leaf).
@@ -609,23 +636,35 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
         .swa_blocks_per_seq(swa_blocks_per_seq)
         .max_tokens_per_batch(options_.max_tokens_per_batch())
         .manager_types(std::move(manager_types))
-        .compress_ratios(std::move(manager_compress_ratios))
-        .max_seqs_per_batch(options_.max_seqs_per_batch())
-        .num_single_blocks(static_cast<uint32_t>(std::min<int64_t>(
-            kv_cache_cap.swa_count(), std::numeric_limits<uint32_t>::max())));
+        .compress_ratios(std::move(manager_compress_ratios));
   }
 
   if (options_.host_blocks_factor() > 1.0) {
-    // Host prefix-cache offload routes device/host blocks through a single flat
-    // BlockType::KV host pool. DeepSeek-V4 has no KV block group (its device
-    // caches are SWA/C4/C128), so collect_offload_pairs would find no KV blocks
-    // and silently offload nothing while still allocating the pinned host
-    // cache. Fail loud until per-block-type host offload is implemented.
-    CHECK(!util::is_deepseek_v4_model_type(args_.model_type()))
-        << "host_blocks_factor > 1 (host prefix-cache offload) does not "
-           "support "
-           "DeepSeek-V4 yet: its SWA/C4/C128 block groups have no KV pool to "
-           "offload. Disable --host_blocks_factor for DeepSeek-V4 models.";
+    // Translate a composite cache capacity into typed Host pools. The
+    // hierarchy layer consumes only this BlockType map and does not need to
+    // identify the model that produced the layout.
+    if (!options.manager_types().empty()) {
+      std::map<BlockType, uint32_t> host_capacities;
+      if (kv_cache_cap.swa_count() > 0) {
+        host_capacities.emplace(
+            BlockType::SWA,
+            static_cast<uint32_t>(scale_host_block_count(
+                kv_cache_cap.swa_count(), options_.host_blocks_factor())));
+      }
+      if (kv_cache_cap.c4_count() > 0) {
+        host_capacities.emplace(
+            BlockType::C4,
+            static_cast<uint32_t>(scale_host_block_count(
+                kv_cache_cap.c4_count(), options_.host_blocks_factor())));
+      }
+      if (kv_cache_cap.c128_count() > 0) {
+        host_capacities.emplace(
+            BlockType::C128,
+            static_cast<uint32_t>(scale_host_block_count(
+                kv_cache_cap.c128_count(), options_.host_blocks_factor())));
+      }
+      options.host_num_blocks_by_type(std::move(host_capacities));
+    }
     options.enable_host_offload(true);
     kv_cache_manager_ =
         std::make_unique<HierarchyBlockManagerPool>(options, this, dp_size_);
@@ -659,16 +698,12 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
   return true;
 }
 
-bool LLMEngine::pull_kv_blocks(
-    const int32_t src_dp_size,
-    const int32_t src_dp_rank,
-    const std::vector<uint64_t>& src_cluster_ids,
-    const std::vector<std::string>& src_addrs,
-    const std::vector<uint64_t>& src_blocks,
-    const int32_t dst_dp_rank,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
+bool LLMEngine::pull_kv_blocks(const int32_t src_dp_size,
+                               const int32_t src_dp_rank,
+                               const std::vector<uint64_t>& src_cluster_ids,
+                               const std::vector<std::string>& src_addrs,
+                               const int32_t dst_dp_rank,
+                               const std::vector<KVTransferMapping>& mappings) {
   int32_t src_world_size = src_cluster_ids.size();
   int32_t src_tp_size = src_world_size / src_dp_size;
   int32_t dst_world_size = options_.nnodes();
@@ -686,10 +721,7 @@ bool LLMEngine::pull_kv_blocks(
     results.push_back(worker_clients_[dst_worker_rank]->pull_kv_blocks(
         src_cluster_ids[src_worker_rank],
         src_addrs[src_worker_rank],
-        src_blocks,
-        dst_blocks,
-        src_linear_state_ids,
-        dst_linear_state_ids));
+        mappings));
   }
 
   for (bool result : results) {
@@ -698,6 +730,47 @@ bool LLMEngine::pull_kv_blocks(
     }
   }
   return true;
+}
+
+bool LLMEngine::pull_hetero_kv_blocks(
+    const int32_t src_dp_size,
+    const int32_t src_dp_rank,
+    const std::vector<uint64_t>& src_cluster_ids,
+    const std::vector<std::string>& src_addrs,
+    const int32_t dst_dp_rank,
+    const std::vector<KVTransferMapping>& mappings) {
+  if (src_dp_size <= 0 || src_dp_rank < 0 || src_dp_rank >= src_dp_size ||
+      src_cluster_ids.size() != src_addrs.size() ||
+      src_cluster_ids.size() % static_cast<size_t>(src_dp_size) != 0) {
+    LOG(ERROR) << "Invalid heterogeneous KV pull topology.";
+    return false;
+  }
+  const int32_t src_tp_size =
+      static_cast<int32_t>(src_cluster_ids.size()) / src_dp_size;
+  const int32_t dst_tp_size = static_cast<int32_t>(dp_local_tp_size_);
+  if (src_tp_size < dst_tp_size || src_tp_size % dst_tp_size != 0) {
+    LOG(ERROR) << "Unsupported heterogeneous KV pull ratio: prefill_tp_size="
+               << src_tp_size << ", decode_tp_size=" << dst_tp_size;
+    return false;
+  }
+
+  std::vector<bool> results;
+  results.reserve(dst_tp_size);
+  for (int32_t dst_tp_rank = 0; dst_tp_rank < dst_tp_size; ++dst_tp_rank) {
+    std::vector<uint64_t> worker_src_cluster_ids;
+    std::vector<std::string> worker_src_addrs;
+    for (int32_t src_tp_rank :
+         get_src_tp_ranks(dst_tp_rank, src_tp_size, dst_tp_size)) {
+      const int32_t src_worker_rank = src_dp_rank * src_tp_size + src_tp_rank;
+      worker_src_cluster_ids.push_back(src_cluster_ids[src_worker_rank]);
+      worker_src_addrs.push_back(src_addrs[src_worker_rank]);
+    }
+    const int32_t dst_worker_rank = dst_dp_rank * dst_tp_size + dst_tp_rank;
+    results.push_back(worker_clients_[dst_worker_rank]->pull_hetero_kv_blocks(
+        worker_src_cluster_ids, worker_src_addrs, mappings));
+  }
+  return std::all_of(
+      results.begin(), results.end(), [](bool result) { return result; });
 }
 
 std::vector<folly::SemiFuture<uint32_t>> LLMEngine::transfer_kv_blocks(
@@ -785,15 +858,13 @@ bool LLMEngine::link_cluster(const std::vector<uint64_t>& cluster_ids,
                              const std::vector<uint16_t>& ports,
                              const int32_t src_dp_size,
                              const int32_t src_kv_split_size) {
-  // Each D worker connects to all P workers that share the same TP rank.
+  const int32_t src_world_size = static_cast<int32_t>(cluster_ids.size());
+
+  // Each D worker connects to every P worker that routes KV blocks to its TP
+  // rank. When P TP is larger, multiple P ranks share one D-side owner.
   // P layout: rank = dp_i * src_cp_tp_size + split_j * src_tp_size + tp_rank
-  // D workers cycle through tp_rank in [0, src_tp_size) round-robin.
-  // Requires: D-side dp_local_tp_size_ == src_tp_size.
-  int32_t src_world_size = static_cast<int32_t>(cluster_ids.size());
   int32_t src_cp_tp_size = src_world_size / src_dp_size;
   int32_t src_tp_size = src_cp_tp_size / src_kv_split_size;
-  int32_t src_dp_worker_index = 0;
-
   std::vector<folly::SemiFuture<bool>> futures;
   futures.reserve(worker_clients_num_);
   for (size_t worker_rank = 0; worker_rank < worker_clients_num_;
@@ -801,21 +872,28 @@ bool LLMEngine::link_cluster(const std::vector<uint64_t>& cluster_ids,
     std::vector<uint64_t> target_cluster_ids;
     std::vector<std::string> target_addrs;
     std::vector<uint16_t> target_ports;
-    target_cluster_ids.reserve(src_dp_size * src_kv_split_size);
-    target_addrs.reserve(src_dp_size * src_kv_split_size);
-    target_ports.reserve(src_dp_size * src_kv_split_size);
+    const int32_t dst_tp_rank =
+        static_cast<int32_t>(worker_rank % dp_local_tp_size_);
+    const std::vector<int32_t> src_tp_ranks =
+        get_src_tp_ranks(dst_tp_rank, src_tp_size, dp_local_tp_size_);
+    const size_t endpoint_count = static_cast<size_t>(src_dp_size) *
+                                  static_cast<size_t>(src_kv_split_size) *
+                                  src_tp_ranks.size();
+    target_cluster_ids.reserve(endpoint_count);
+    target_addrs.reserve(endpoint_count);
+    target_ports.reserve(endpoint_count);
 
     for (int32_t dp_i = 0; dp_i < src_dp_size; ++dp_i) {
       for (int32_t split_j = 0; split_j < src_kv_split_size; ++split_j) {
-        int32_t p_idx =
-            dp_i * src_cp_tp_size + split_j * src_tp_size + src_dp_worker_index;
-        target_cluster_ids.emplace_back(cluster_ids[p_idx]);
-        target_addrs.emplace_back(addrs[p_idx]);
-        target_ports.emplace_back(ports[p_idx]);
+        for (int32_t src_tp_rank : src_tp_ranks) {
+          const int32_t p_idx =
+              dp_i * src_cp_tp_size + split_j * src_tp_size + src_tp_rank;
+          target_cluster_ids.emplace_back(cluster_ids[p_idx]);
+          target_addrs.emplace_back(addrs[p_idx]);
+          target_ports.emplace_back(ports[p_idx]);
+        }
       }
     }
-
-    src_dp_worker_index = (src_dp_worker_index + 1) % src_tp_size;
 
     folly::Promise<bool> promise;
     auto future = promise.getSemiFuture();
@@ -847,12 +925,11 @@ bool LLMEngine::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
                                const std::vector<uint16_t>& ports,
                                const int32_t src_dp_size,
                                const int32_t src_kv_split_size) {
-  // Symmetric to link_cluster; uses the same rank mapping.
-  int32_t src_world_size = static_cast<int32_t>(cluster_ids.size());
+  const int32_t src_world_size = static_cast<int32_t>(cluster_ids.size());
+
+  // Symmetric to link_cluster; uses the same owner mapping.
   int32_t src_cp_tp_size = src_world_size / src_dp_size;
   int32_t src_tp_size = src_cp_tp_size / src_kv_split_size;
-  int32_t src_dp_worker_index = 0;
-
   std::vector<folly::SemiFuture<bool>> futures;
   futures.reserve(worker_clients_num_);
   for (size_t worker_rank = 0; worker_rank < worker_clients_num_;
@@ -860,21 +937,28 @@ bool LLMEngine::unlink_cluster(const std::vector<uint64_t>& cluster_ids,
     std::vector<uint64_t> target_cluster_ids;
     std::vector<std::string> target_addrs;
     std::vector<uint16_t> target_ports;
-    target_cluster_ids.reserve(src_dp_size * src_kv_split_size);
-    target_addrs.reserve(src_dp_size * src_kv_split_size);
-    target_ports.reserve(src_dp_size * src_kv_split_size);
+    const int32_t dst_tp_rank =
+        static_cast<int32_t>(worker_rank % dp_local_tp_size_);
+    const std::vector<int32_t> src_tp_ranks =
+        get_src_tp_ranks(dst_tp_rank, src_tp_size, dp_local_tp_size_);
+    const size_t endpoint_count = static_cast<size_t>(src_dp_size) *
+                                  static_cast<size_t>(src_kv_split_size) *
+                                  src_tp_ranks.size();
+    target_cluster_ids.reserve(endpoint_count);
+    target_addrs.reserve(endpoint_count);
+    target_ports.reserve(endpoint_count);
 
     for (int32_t dp_i = 0; dp_i < src_dp_size; ++dp_i) {
       for (int32_t split_j = 0; split_j < src_kv_split_size; ++split_j) {
-        int32_t p_idx =
-            dp_i * src_cp_tp_size + split_j * src_tp_size + src_dp_worker_index;
-        target_cluster_ids.emplace_back(cluster_ids[p_idx]);
-        target_addrs.emplace_back(addrs[p_idx]);
-        target_ports.emplace_back(ports[p_idx]);
+        for (int32_t src_tp_rank : src_tp_ranks) {
+          const int32_t p_idx =
+              dp_i * src_cp_tp_size + split_j * src_tp_size + src_tp_rank;
+          target_cluster_ids.emplace_back(cluster_ids[p_idx]);
+          target_addrs.emplace_back(addrs[p_idx]);
+          target_ports.emplace_back(ports[p_idx]);
+        }
       }
     }
-
-    src_dp_worker_index = (src_dp_worker_index + 1) % src_tp_size;
 
     folly::Promise<bool> promise;
     auto future = promise.getSemiFuture();
@@ -1150,6 +1234,7 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
   batched_inputs.reserve(dp_size_ * cp_size_);
   // some dp related variables
   std::vector<int32_t> dp_global_token_nums(dp_size_);
+  std::vector<int32_t> dp_global_kv_max_seq_lens(dp_size_);
   std::vector<int32_t> dp_is_decode(dp_size_, 0);
   // when enable dp, we need to check the forward type of each batch
   // and set the empty forward type of each batch to the same value as the first
@@ -1167,6 +1252,8 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
         batched_inputs[dp_rank].input_params.meta.batch_forward_type;
     dp_global_token_nums[dp_rank] =
         static_cast<int32_t>(batched_inputs[dp_rank].host_token_ids().numel());
+    dp_global_kv_max_seq_lens[dp_rank] =
+        batched_inputs[dp_rank].input_params.meta.kv_max_seq_len;
     if (util::is_deepseek_v4_model_type(args_.model_type())) {
       const int64_t actual_scheduled_tokens = static_cast<int64_t>(
           batched_inputs[dp_rank].host_token_ids().numel());
@@ -1220,6 +1307,8 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
         dp_global_token_nums;
     batched_inputs[dp_rank].input_params.parallel.raw_dp_global_token_nums =
         dp_global_token_nums;
+    batched_inputs[dp_rank].input_params.parallel.dp_global_kv_max_seq_lens =
+        dp_global_kv_max_seq_lens;
     batched_inputs[dp_rank].input_params.parallel.dp_is_decode = dp_is_decode;
     if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
       batched_inputs[dp_rank].input_params.expert.eplb_info = eplb_info;

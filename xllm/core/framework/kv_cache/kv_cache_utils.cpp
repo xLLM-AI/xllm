@@ -21,11 +21,16 @@ limitations under the License.
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <limits>
+#include <sstream>
 
 #include "core/framework/config/kv_cache_config.h"
 #include "framework/kv_cache/kv_cache_shape.h"
+#if defined(USE_MLU)
+#include "platform/mlu/mlu_host_memory.h"
+#endif
 #if defined(USE_NPU)
 #include "acl/acl_rt.h"
 
@@ -366,12 +371,46 @@ aclFormat get_npu_kv_cache_format(const std::string& model_type) {
 }
 #endif
 
+namespace {
+
+#if !defined(USE_MLU)
+void release_host_region(void*& base_ptr, size_t& total_bytes) {
+  if (base_ptr == nullptr || total_bytes == 0) {
+    base_ptr = nullptr;
+    total_bytes = 0;
+    return;
+  }
+#if defined(USE_NPU)
+  aclrtHostUnregister(base_ptr);
+#endif
+  munlock(base_ptr, total_bytes);
+  munmap(base_ptr, total_bytes);
+  base_ptr = nullptr;
+  total_bytes = 0;
+}
+#endif
+
+}  // namespace
+
+HostPageAlignedRegion::HostPageAlignedRegion() = default;
+
 HostPageAlignedRegion::HostPageAlignedRegion(size_t bytes) {
   if (bytes == 0) {
     return;
   }
-  size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+#if defined(USE_MLU)
+  mlu_region_ = std::make_unique<mlu::MLUHostMemoryRegion>(bytes);
+  base_ptr = mlu_region_->data();
+  total_bytes = mlu_region_->size();
+#else
+  const int64_t system_page_size = sysconf(_SC_PAGESIZE);
+  CHECK_GT(system_page_size, 0) << "Failed to query system page size.";
+  const size_t page_size = static_cast<size_t>(system_page_size);
+  CHECK_LE(bytes, std::numeric_limits<size_t>::max() - (page_size - 1))
+      << "Host region byte count overflows page rounding: bytes=" << bytes
+      << ", page_size=" << page_size;
   total_bytes = ((bytes + page_size - 1) / page_size) * page_size;
+
   base_ptr = mmap(nullptr,
                   total_bytes,
                   PROT_READ | PROT_WRITE,
@@ -401,40 +440,32 @@ HostPageAlignedRegion::HostPageAlignedRegion(size_t bytes) {
   }
   CHECK_EQ(ret, ACL_SUCCESS) << "aclrtHostRegister fail: " << ret;
 #endif
+#endif
 }
 
 HostPageAlignedRegion::HostPageAlignedRegion(
     HostPageAlignedRegion&& other) noexcept
-    : base_ptr(other.base_ptr), total_bytes(other.total_bytes) {
+    : base_ptr(other.base_ptr),
+      total_bytes(other.total_bytes)
+#if defined(USE_MLU)
+      ,
+      mlu_region_(std::move(other.mlu_region_))
+#endif
+{
   other.base_ptr = nullptr;
   other.total_bytes = 0;
 }
-
-namespace {
-
-void release_host_page_aligned_region(void*& base_ptr, size_t& total_bytes) {
-  if (base_ptr == nullptr || total_bytes == 0) {
-    base_ptr = nullptr;
-    total_bytes = 0;
-    return;
-  }
-#if defined(USE_NPU)
-  aclrtHostUnregister(base_ptr);
-#endif
-  munlock(base_ptr, total_bytes);
-  munmap(base_ptr, total_bytes);
-  base_ptr = nullptr;
-  total_bytes = 0;
-}
-
-}  // namespace
 
 HostPageAlignedRegion& HostPageAlignedRegion::operator=(
     HostPageAlignedRegion&& other) noexcept {
   if (this == &other) {
     return *this;
   }
-  release_host_page_aligned_region(base_ptr, total_bytes);
+#if !defined(USE_MLU)
+  release_host_region(base_ptr, total_bytes);
+#else
+  mlu_region_ = std::move(other.mlu_region_);
+#endif
   base_ptr = other.base_ptr;
   total_bytes = other.total_bytes;
   other.base_ptr = nullptr;
@@ -443,14 +474,106 @@ HostPageAlignedRegion& HostPageAlignedRegion::operator=(
 }
 
 HostPageAlignedRegion::~HostPageAlignedRegion() {
-  release_host_page_aligned_region(base_ptr, total_bytes);
+#if !defined(USE_MLU)
+  release_host_region(base_ptr, total_bytes);
+#endif
 }
 
 int64_t scale_host_block_count(int64_t block_count, double host_blocks_factor) {
   CHECK_GT(block_count, 0) << "block_count must be positive.";
+  CHECK(std::isfinite(host_blocks_factor))
+      << "host_blocks_factor must be finite.";
+  CHECK_GE(host_blocks_factor, 0.0)
+      << "host_blocks_factor must be non-negative.";
   const double factor = std::max(host_blocks_factor, 1.0);
+  const long double scaled_block_count =
+      static_cast<long double>(block_count) * static_cast<long double>(factor);
+  CHECK_LE(scaled_block_count,
+           static_cast<long double>(std::numeric_limits<int64_t>::max()))
+      << "scaled host block count exceeds the int64 limit.";
   return std::max<int64_t>(block_count,
-                           static_cast<int64_t>(block_count * factor));
+                           static_cast<int64_t>(scaled_block_count));
+}
+
+std::optional<std::string> validate_host_cache_options(
+    const HostCacheValidationOptions& options) {
+  if (!std::isfinite(options.host_blocks_factor) ||
+      options.host_blocks_factor < 0.0) {
+    std::ostringstream error;
+    error << "Invalid host prefix-cache offload configuration "
+          << "(host_blocks_factor=" << options.host_blocks_factor
+          << "): --host_blocks_factor must be finite and non-negative.";
+    return error.str();
+  }
+
+  if (options.host_blocks_factor <= 1.0) {
+    return std::nullopt;
+  }
+
+  std::vector<std::string> violations;
+  violations.reserve(10);
+  const long double host_block_count =
+      static_cast<long double>(options.device_block_count) *
+      static_cast<long double>(options.host_blocks_factor);
+  if (options.device_block_count <= 0 ||
+      host_block_count >
+          static_cast<long double>(std::numeric_limits<uint32_t>::max())) {
+    violations.emplace_back(
+        "requested host block count exceeds the uint32 block-manager limit; "
+        "reduce --host_blocks_factor");
+  }
+  if (!options.supports_host_kv_offload) {
+    violations.emplace_back(
+        "the current platform has no host KV offload copy/synchronization "
+        "provider");
+  }
+  if (!options.enable_prefix_cache) {
+    violations.emplace_back(
+        "prefix caching is disabled; set --enable_prefix_cache=true");
+  }
+
+  // Quantized KV caches add scale tensors whose host offload and restore
+  // lifecycle is not supported consistently by the common path yet.
+  if (options.kv_cache_dtype != "auto") {
+    violations.emplace_back(
+        "quantized KV cache scales are not transferred to host memory; set "
+        "--kv_cache_dtype=auto");
+  }
+  if (!options.has_key_cache_shape) {
+    violations.emplace_back("KV cache has no key-cache tensor to offload");
+  }
+  if (options.has_grouped_cache_layout &&
+      !options.supports_grouped_cache_offload) {
+    std::ostringstream violation;
+    violation << "model \"" << options.model_type
+              << "\" uses a grouped cache layout (for example DeepSeek-V4 "
+                 "SWA/C4/C128) that host offload does not support";
+    violations.emplace_back(violation.str());
+  }
+  if (options.has_conv_cache_shape || options.has_ssm_cache_shape) {
+    std::ostringstream violation;
+    violation << "model \"" << options.model_type
+              << "\" uses linear-attention conv/SSM cache tensors that host "
+                 "offload does not restore";
+    violations.emplace_back(violation.str());
+  }
+
+  if (violations.empty()) {
+    return std::nullopt;
+  }
+
+  std::ostringstream error;
+  error << "Invalid host prefix-cache offload configuration "
+        << "(host_blocks_factor=" << options.host_blocks_factor << "): ";
+  for (size_t i = 0; i < violations.size(); ++i) {
+    if (i != 0) {
+      error << "; ";
+    }
+    error << violations[i];
+  }
+  error << ". Fix the listed settings or disable offload with "
+           "--host_blocks_factor=0.";
+  return error.str();
 }
 
 std::vector<int64_t> build_host_tensor_shape(

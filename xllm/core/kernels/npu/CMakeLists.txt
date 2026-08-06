@@ -24,6 +24,7 @@ cc_library(
     npu_rain_fusion_attention.cpp
     npu_grouped_matmul.cpp
     npu_moe_gating_topk_softmax.cpp
+    npu_mega_moe.cpp
     npu_dispatch_ffn_combine.cpp
     npu_dispatch_gmm_combine_decode.cpp
     npu_moe_distribute_combine_v2.cpp
@@ -40,5 +41,7 @@ cc_library(
     :torch_npu_kernels
     :tilelang_kernels
     xllm_ops
+    nnopbase
     opapi
+    platform_npu
 )

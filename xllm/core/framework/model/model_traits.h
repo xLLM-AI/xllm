@@ -139,6 +139,15 @@ struct has_is_hybrid_linear_attention<
     : std::true_type {};
 
 template <typename T, typename = void>
+struct has_supports_mla_graph_kv_bucketing : std::false_type {};
+
+template <typename T>
+struct has_supports_mla_graph_kv_bucketing<
+    T,
+    std::void_t<decltype(std::declval<T>()->supports_mla_graph_kv_bucketing())>>
+    : std::true_type {};
+
+template <typename T, typename = void>
 struct has_create_graph_forward_metadata_state : std::false_type {};
 
 template <typename T>
@@ -233,6 +242,15 @@ struct has_write_context_kv<
         std::declval<const torch::Tensor&>(),
         std::declval<std::vector<KVCache>&>(),
         std::declval<const ModelInputParams&>()))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_dspark_markov_bias : std::false_type {};
+
+template <typename T>
+struct has_dspark_markov_bias<
+    T,
+    std::void_t<decltype(std::declval<T>()->dspark_markov_bias(
+        std::declval<const torch::Tensor&>()))>> : std::true_type {};
 
 }  // namespace detail
 }  // namespace xllm

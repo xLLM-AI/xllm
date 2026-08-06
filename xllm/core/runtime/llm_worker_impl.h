@@ -49,7 +49,7 @@ class LLMWorkerImpl : public WorkerImpl {
   std::optional<ForwardOutput> step(const ForwardInput& input) override;
 
   std::optional<ForwardOutput> step_no_sync(const ForwardInput& input);
-  std::optional<ForwardOutput> execute_no_sync_on_stream(
+  virtual std::optional<ForwardOutput> execute_no_sync_on_stream(
       const ForwardInput& input,
       Stream& compute_stream,
       bool record_ready_event = true);
@@ -70,6 +70,9 @@ class LLMWorkerImpl : public WorkerImpl {
 
  public:
 #if defined(USE_NPU)
+  bool prepare_static_mtp_graph_tasks(const SpecVerifyGraphTaskSignal& signal,
+                                      const Stream& signal_stream);
+
   layer::NpuLmHead get_npu_lm_head() { return model_->get_npu_lm_head(); };
 
   void set_npu_lm_head(layer::NpuLmHead& head) {
@@ -96,6 +99,10 @@ class LLMWorkerImpl : public WorkerImpl {
   void set_word_embedding(layer::WordEmbedding& embedding) {
     model_->set_word_embedding(embedding);
   };
+
+  torch::Tensor dspark_markov_bias(const torch::Tensor& previous_token_ids) {
+    return model_->dspark_markov_bias(previous_token_ids);
+  }
 
   // DFlash-specific delegate: eagerly project target hidden into the draft's
   // per-layer KV cache. Runs outside the executor because the pass has no

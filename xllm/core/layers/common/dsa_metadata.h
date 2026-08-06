@@ -47,6 +47,11 @@ struct DSAGroupInfo {
 
 namespace layer {
 
+namespace v4_cp {
+// Forward-declared so this header stays independent of the npu_torch layer.
+struct DeepseekV4CpContext;
+}  // namespace v4_cp
+
 struct DSACompressedAttentionMetadata {
   torch::Tensor context_lens;
   torch::Tensor block_table_for_attn;
@@ -83,10 +88,21 @@ struct DSAMetadata {
   // cp_input_dict: context-parallel inputs placeholder (reserved, optional)
   std::unordered_map<std::string, torch::Tensor> cp_input_dict;
 
+  // Prefill context-parallel plan for DeepSeek-V4, non-owning. Set by the model
+  // for the duration of the layer loop and cleared afterwards; null means CP is
+  // off and every path runs on full tokens.
+  const v4_cp::DeepseekV4CpContext* v4_cp_context = nullptr;
+
   // NPU-only DSA metadata fields.
   // RoPE caches selected for the current layer's q/kv/output RoPE.
   torch::Tensor cos;
   torch::Tensor sin;
+  // Global-position RoPE for the KV path under CP. `cos`/`sin` above are
+  // localized to this rank's query rows, but KV/compressor/index-cache writes
+  // cover all tokens and need the global table. Undefined when CP is off, in
+  // which case consumers fall back to `cos`/`sin`.
+  torch::Tensor kv_cos;
+  torch::Tensor kv_sin;
   // RoPE caches for compressor/indexer paths, indexed by compressed positions.
   torch::Tensor c4_cos;
   torch::Tensor c4_sin;

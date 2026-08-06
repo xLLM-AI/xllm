@@ -21,9 +21,48 @@ limitations under the License.
 #include "anthropic.pb.h"
 #include "chat.pb.h"
 #include "completion.pb.h"
+#include "multimodal.pb.h"
 
 namespace xllm {
 namespace {
+
+TEST(RequestParamsTest, IncludeStopStringInOutputDefaultsToFalse) {
+  RequestParams completion_params(proto::CompletionRequest(), "", "");
+  RequestParams chat_params(proto::ChatRequest(), "", "");
+  RequestParams mm_chat_params(proto::MMChatRequest(), "", "");
+
+  EXPECT_FALSE(completion_params.include_stop_str_in_output);
+  EXPECT_FALSE(chat_params.include_stop_str_in_output);
+  EXPECT_FALSE(mm_chat_params.include_stop_str_in_output);
+}
+
+TEST(RequestParamsTest, IncludeStopStringInOutputIsParsedFromRequests) {
+  proto::CompletionRequest completion_request;
+  completion_request.set_include_stop_str_in_output(true);
+  proto::ChatRequest chat_request;
+  chat_request.set_include_stop_str_in_output(true);
+  proto::MMChatRequest mm_chat_request;
+  mm_chat_request.set_include_stop_str_in_output(true);
+
+  RequestParams completion_params(completion_request, "", "");
+  RequestParams chat_params(chat_request, "", "");
+  RequestParams mm_chat_params(mm_chat_request, "", "");
+
+  EXPECT_TRUE(completion_params.include_stop_str_in_output);
+  EXPECT_TRUE(chat_params.include_stop_str_in_output);
+  EXPECT_TRUE(mm_chat_params.include_stop_str_in_output);
+}
+
+TEST(RequestParamsTest, IncludeStopStringInOutputUsesVllmJsonName) {
+  proto::ChatRequest request;
+  auto status = google::protobuf::util::JsonStringToMessage(
+      R"({"include_stop_str_in_output": true})", &request);
+  ASSERT_TRUE(status.ok()) << status.ToString();
+
+  RequestParams params(request, "", "");
+
+  EXPECT_TRUE(params.include_stop_str_in_output);
+}
 
 TEST(RequestParamsTest,
      CompletionBeamSearchDefaultsTopLogprobsToBeamWidthWhenUnset) {

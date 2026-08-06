@@ -22,6 +22,8 @@ limitations under the License.
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
+#include <limits>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -63,6 +65,7 @@ uint32_t get_sample_source_position(const SampleSlot& sample_slot) {
 
 void append_xtensor_offsets(TransferKVInfo* info,
                             const TransferKVInfo& full_info,
+                            size_t remote_id_count,
                             const std::vector<size_t>& remote_idxs) {
   if (full_info.dst_xtensor_layer_offsets.empty()) {
     return;
@@ -72,8 +75,8 @@ void append_xtensor_offsets(TransferKVInfo* info,
       full_info.dst_xtensor_layer_offsets.size());
   for (const XTensorLayerOffsets& full_layer :
        full_info.dst_xtensor_layer_offsets) {
-    CHECK_EQ(full_layer.k_offsets.size(), full_info.remote_blocks_ids.size());
-    CHECK_EQ(full_layer.v_offsets.size(), full_info.remote_blocks_ids.size());
+    CHECK_EQ(full_layer.k_offsets.size(), remote_id_count);
+    CHECK_EQ(full_layer.v_offsets.size(), remote_id_count);
     XTensorLayerOffsets layer;
     layer.k_offsets.reserve(remote_idxs.size());
     layer.v_offsets.reserve(remote_idxs.size());
@@ -237,151 +240,160 @@ BatchInputBuilder::BatchInputBuilder(
 
 TransferKVInfo BatchInputBuilder::build_step_transfer_info(
     const TransferKVInfo& full_info,
-    const std::vector<uint64_t>& local_block_ids,
-    size_t next_transfer_block_idx,
+    Sequence* sequence,
     uint32_t seq_len,
-    uint32_t block_size,
-    size_t* advanced_transfer_block_idx) {
-  CHECK(advanced_transfer_block_idx != nullptr);
-  *advanced_transfer_block_idx = next_transfer_block_idx;
+    uint32_t kv_split_size) {
+  CHECK(sequence != nullptr);
 
   TransferKVInfo info;
   info.request_id = full_info.request_id;
   info.dp_rank = full_info.dp_rank;
   info.remote_instance_info = full_info.remote_instance_info;
-  info.local_linear_state_ids = full_info.local_linear_state_ids;
-  info.remote_linear_state_ids = full_info.remote_linear_state_ids;
-  info.remote_shared_num = full_info.remote_shared_num;
+  info.dst_xtensor_layer_offsets.clear();
 
-  if (block_size == 0 || local_block_ids.empty()) {
-    return info;
-  }
+  for (const KVTransferMapping& full_mapping : full_info.mappings) {
+    const std::optional<BlockType> block_type =
+        block_type_from_cache_group_id(full_mapping.group_id);
+    if (!block_type.has_value()) {
+      LOG(ERROR) << "Unknown KV cache transfer group: "
+                 << full_mapping.group_id;
+      continue;
+    }
 
-  const size_t local_size = local_block_ids.size();
-  const size_t remote_size = full_info.remote_blocks_ids.size();
-  const size_t win_begin = next_transfer_block_idx;
-  const size_t win_end =
-      static_cast<size_t>(util::ceil_div(seq_len, block_size));
-  const size_t map_end = std::min(win_end, local_size);
-  const size_t remote_stride =
-      static_cast<size_t>(util::kv_split_size_effective());
-  // D shipped remote_blocks_ids starting at its shared_num, so P's local
-  // index `local_idx` maps to remote slot `local_idx - remote_shared_num`.
-  // The P scheduler has already advanced next_transfer_block_idx to at least
-  // remote_shared_num, so win_begin >= remote_shared_num is invariant here.
-  const size_t remote_shared_num =
-      static_cast<size_t>(full_info.remote_shared_num);
-  CHECK_GE(win_begin, remote_shared_num)
-      << "P transfer cursor slid below D-side shared prefix, request_id="
-      << full_info.request_id << ", win_begin=" << win_begin
-      << ", remote_shared_num=" << remote_shared_num;
+    KVTransferMapping step_mapping;
+    step_mapping.group_id = full_mapping.group_id;
+    step_mapping.remote_shared_num = full_mapping.remote_shared_num;
+    if (block_type.value() == BlockType::LINEAR ||
+        block_type.value() == BlockType::EMBEDDING) {
+      const int32_t local_id = block_type.value() == BlockType::LINEAR
+                                   ? sequence->get_linear_state_slot_id()
+                                   : sequence->get_embedding_block_id();
+      if (local_id < 0 || full_mapping.remote_ids.empty()) {
+        info.mappings.emplace_back(std::move(step_mapping));
+        continue;
+      }
+      CHECK_EQ(full_mapping.remote_ids.size(), static_cast<size_t>(1))
+          << "Sequence-scoped KV mapping must contain exactly one remote id, "
+          << "group_id=" << full_mapping.group_id;
+      step_mapping.local_ids.emplace_back(static_cast<uint64_t>(local_id));
+      step_mapping.remote_ids = full_mapping.remote_ids;
+      info.mappings.emplace_back(std::move(step_mapping));
+      continue;
+    }
 
-  const size_t stable_end = static_cast<size_t>(seq_len / block_size);
-  *advanced_transfer_block_idx =
-      std::max(next_transfer_block_idx, std::min(stable_end, map_end));
+    const Slice<Block> blocks = sequence->kv_state().blocks(block_type.value());
+    if (blocks.empty() || full_mapping.remote_ids.empty()) {
+      info.mappings.emplace_back(std::move(step_mapping));
+      continue;
+    }
+    uint32_t block_size = 0;
+    std::vector<int32_t> local_ids;
+    local_ids.reserve(blocks.size());
+    for (const Block& block : blocks) {
+      local_ids.emplace_back(block.id());
+      if (block.is_valid()) {
+        block_size = block.size();
+      }
+    }
+    if (block_size == 0) {
+      info.mappings.emplace_back(std::move(step_mapping));
+      continue;
+    }
 
-  // Early-return before computing remote_end: when the current chunk stops
-  // inside the D-side shared prefix, map_end can be less than remote_shared_num
-  // and the (map_end - remote_shared_num) subtraction below would underflow
-  // size_t. There is nothing to transfer in that case anyway.
-  if (win_begin >= map_end || map_end <= remote_shared_num) {
-    return info;
-  }
+    const bool is_flat_kv = block_type.value() == BlockType::KV;
+    const size_t next_transfer_idx =
+        is_flat_kv ? sequence->kv_state().next_transfer_block_idx()
+                   : sequence->kv_state().next_group_transfer_block_idx(
+                         block_type.value());
+    const size_t win_end =
+        static_cast<size_t>(util::ceil_div(seq_len, block_size));
+    const size_t map_end = std::min(win_end, local_ids.size());
+    const size_t remote_stride =
+        is_flat_kv ? static_cast<size_t>(kv_split_size) : 1;
+    CHECK_GT(remote_stride, static_cast<size_t>(0));
+    const size_t remote_shared_num =
+        static_cast<size_t>(full_mapping.remote_shared_num);
+    CHECK_GE(next_transfer_idx, remote_shared_num)
+        << "P transfer cursor slid below D-side shared prefix, request_id="
+        << full_info.request_id << ", group_id=" << full_mapping.group_id
+        << ", next_transfer_idx=" << next_transfer_idx
+        << ", remote_shared_num=" << remote_shared_num;
 
-  const size_t remote_end = (map_end - remote_shared_num) * remote_stride;
-  CHECK_GE(util::align_up(remote_size, remote_stride), remote_end)
-      << "remote block coverage shortage, request_id=" << full_info.request_id
-      << ", remote_size=" << remote_size << ", remote_end=" << remote_end
-      << ", remote_stride=" << remote_stride
-      << ", remote_shared_num=" << remote_shared_num;
+    // Flat KV responses omit D-side shared blocks, while grouped responses
+    // preserve their full logical tables (including SWA placeholders).
+    const size_t remote_origin = is_flat_kv ? remote_shared_num : 0;
+    const size_t remote_end =
+        map_end > remote_origin ? (map_end - remote_origin) * remote_stride : 0;
+    CHECK_GE(util::align_up(full_mapping.remote_ids.size(), remote_stride),
+             remote_end)
+        << "KV remote id coverage shortage, request_id=" << full_info.request_id
+        << ", group_id=" << full_mapping.group_id
+        << ", remote_size=" << full_mapping.remote_ids.size()
+        << ", remote_end=" << remote_end << ", remote_stride=" << remote_stride
+        << ", remote_shared_num=" << remote_shared_num;
 
-  std::vector<size_t> remote_idxs;
-  const size_t block_cnt = map_end - win_begin;
-  info.local_blocks_ids.reserve(block_cnt);
-  info.remote_blocks_ids.reserve(block_cnt * remote_stride);
-  remote_idxs.reserve(block_cnt * remote_stride);
-  for (size_t local_idx = win_begin; local_idx < map_end; ++local_idx) {
-    info.local_blocks_ids.emplace_back(local_block_ids[local_idx]);
-    for (size_t offset = 0; offset < remote_stride; ++offset) {
-      const size_t remote_idx =
-          (local_idx - remote_shared_num) * remote_stride + offset;
-      if (remote_idx >= full_info.remote_blocks_ids.size()) {
-        if (remote_stride > 1) {
+    const size_t stable_end = static_cast<size_t>(seq_len / block_size);
+    const size_t advanced_transfer_idx =
+        std::max(next_transfer_idx, std::min(stable_end, map_end));
+    if (is_flat_kv) {
+      sequence->kv_state().advance_transfer_block_idx(advanced_transfer_idx);
+    } else {
+      sequence->kv_state().advance_group_transfer_block_idx(
+          block_type.value(), advanced_transfer_idx);
+    }
+    if (next_transfer_idx >= map_end || map_end <= remote_origin) {
+      info.mappings.emplace_back(std::move(step_mapping));
+      continue;
+    }
+
+    const size_t block_count = map_end - next_transfer_idx;
+    step_mapping.local_ids.reserve(block_count);
+    step_mapping.remote_ids.reserve(block_count * remote_stride);
+    std::vector<size_t> remote_idxs;
+    remote_idxs.reserve(block_count * remote_stride);
+    for (size_t local_idx = next_transfer_idx; local_idx < map_end;
+         ++local_idx) {
+      if (local_ids[local_idx] < 0) {
+        continue;
+      }
+      const size_t remote_ids_begin = step_mapping.remote_ids.size();
+      const size_t remote_idxs_begin = remote_idxs.size();
+      bool has_remote_sentinel = false;
+      for (size_t offset = 0; offset < remote_stride; ++offset) {
+        const size_t remote_idx =
+            (local_idx - remote_origin) * remote_stride + offset;
+        if (remote_idx >= full_mapping.remote_ids.size()) {
+          CHECK_GT(remote_stride, static_cast<size_t>(1));
           break;
         }
-        LOG(FATAL) << "Out of bound access: remote_idx=" << remote_idx
-                   << ", remote_blocks_ids.size()="
-                   << full_info.remote_blocks_ids.size();
+        if (full_mapping.remote_ids[remote_idx] ==
+            std::numeric_limits<uint64_t>::max()) {
+          has_remote_sentinel = true;
+          break;
+        }
+        step_mapping.remote_ids.emplace_back(
+            full_mapping.remote_ids[remote_idx]);
+        remote_idxs.emplace_back(remote_idx);
       }
-      info.remote_blocks_ids.emplace_back(
-          full_info.remote_blocks_ids[remote_idx]);
-      remote_idxs.emplace_back(remote_idx);
+      if (has_remote_sentinel) {
+        step_mapping.remote_ids.resize(remote_ids_begin);
+        remote_idxs.resize(remote_idxs_begin);
+        continue;
+      }
+      step_mapping.local_ids.emplace_back(
+          static_cast<uint64_t>(local_ids[local_idx]));
     }
+    if (step_mapping.local_ids.empty()) {
+      info.mappings.emplace_back(std::move(step_mapping));
+      continue;
+    }
+    if (is_flat_kv) {
+      append_xtensor_offsets(
+          &info, full_info, full_mapping.remote_ids.size(), remote_idxs);
+    }
+    info.mappings.emplace_back(std::move(step_mapping));
   }
-
-  append_xtensor_offsets(&info, full_info, remote_idxs);
   return info;
-}
-
-KVBlockTransferGroup BatchInputBuilder::build_group_step_transfer(
-    const KVBlockTransferGroup& full_group,
-    const std::vector<int32_t>& local_block_ids,
-    size_t next_transfer_block_idx,
-    uint32_t seq_len,
-    uint32_t block_size,
-    size_t* advanced_transfer_block_idx) {
-  CHECK(advanced_transfer_block_idx != nullptr);
-  *advanced_transfer_block_idx = next_transfer_block_idx;
-
-  KVBlockTransferGroup step_group;
-  step_group.group_id = full_group.group_id;
-  if (block_size == 0 || local_block_ids.empty()) {
-    return step_group;
-  }
-
-  const size_t local_size = local_block_ids.size();
-  const size_t remote_size = full_group.remote_blocks_ids.size();
-  const size_t win_begin = next_transfer_block_idx;
-  const size_t win_end =
-      static_cast<size_t>(util::ceil_div(seq_len, block_size));
-  const size_t map_end = std::min(win_end, local_size);
-  CHECK_GE(remote_size, map_end)
-      << "Grouped KV remote block coverage shortage, group_id="
-      << full_group.group_id << ", remote_size=" << remote_size
-      << ", remote_end=" << map_end;
-
-  const size_t stable_end = static_cast<size_t>(seq_len / block_size);
-  *advanced_transfer_block_idx =
-      std::max(next_transfer_block_idx, std::min(stable_end, map_end));
-  if (win_begin >= map_end) {
-    return step_group;
-  }
-
-  const size_t block_count = map_end - win_begin;
-  step_group.local_blocks_ids.reserve(block_count);
-  step_group.remote_blocks_ids.reserve(block_count);
-  for (size_t local_idx = win_begin; local_idx < map_end; ++local_idx) {
-    const int32_t local_block_id = local_block_ids[local_idx];
-    if (local_block_id < 0) {
-      continue;
-    }
-    // Skip positions where the remote side sent a -1 sentinel: those
-    // correspond to slid-out SWA slots on D, whose ids are meaningless.
-    // P still holds a valid local block there but the transfer would land
-    // in undefined memory. Both sides slide the window identically, so
-    // this branch normally coincides with the local-invalid branch above.
-    // Remote comes in as int32 via proto and is stored zero-extended in the
-    // uint64 struct field, so a negative sentinel round-trips to the low
-    // 32 bits being all-ones.
-    const uint64_t remote_block_id = full_group.remote_blocks_ids[local_idx];
-    if (static_cast<int32_t>(remote_block_id) < 0) {
-      continue;
-    }
-    step_group.local_blocks_ids.emplace_back(
-        static_cast<uint64_t>(local_block_id));
-    step_group.remote_blocks_ids.emplace_back(remote_block_id);
-  }
-  return step_group;
 }
 
 ForwardInput BatchInputBuilder::build_forward_input(
@@ -448,8 +460,10 @@ void BatchInputBuilder::process_sequences_multithreaded() {
 #endif
     thread_state.embedding_ids.reserve(sequences_per_thread);
     thread_state.linear_state_ids.reserve(sequences_per_thread);
+    thread_state.linear_restore_src_blocks.reserve(sequences_per_thread);
     thread_state.request_ids.reserve(sequences_per_thread);
     thread_state.extra_token_ids.reserve(sequences_per_thread);
+    thread_state.scheduled_mm_data_vec.reserve(sequences_per_thread);
   }
 
   // parallel processing function
@@ -498,11 +512,13 @@ void BatchInputBuilder::process_sequences_multithreaded() {
   size_t total_seqs = 0;
   size_t total_slots = 0;
   size_t total_paged_indices = 0;
+  size_t total_linear_restore_sources = 0;
   for (const auto& state : thread_builder_states) {
     total_tokens += state.flatten_tokens_vec.size();
     total_seqs += state.block_tables_vec.size();
     total_slots += state.new_token_slot_ids.size();
     total_paged_indices += state.paged_kv_indices.size();
+    total_linear_restore_sources += state.linear_restore_src_blocks.size();
   }
   state_.flatten_tokens_vec.reserve(total_tokens);
   if (!use_mrope_) {
@@ -519,6 +535,7 @@ void BatchInputBuilder::process_sequences_multithreaded() {
 #endif
   state_.embedding_ids.reserve(total_seqs);
   state_.linear_state_ids.reserve(total_seqs);
+  state_.linear_restore_src_blocks.reserve(total_linear_restore_sources);
   state_.request_ids.reserve(total_seqs);
   state_.extra_token_ids.reserve(total_seqs);
   state_.paged_kv_indices.reserve(total_paged_indices);
@@ -526,7 +543,7 @@ void BatchInputBuilder::process_sequences_multithreaded() {
   state_.paged_kv_last_page_len.reserve(total_seqs);
 
   // Merge results from all threads
-  for (const auto& state : thread_builder_states) {
+  for (auto& state : thread_builder_states) {
     state_.flatten_tokens_vec.insert(state_.flatten_tokens_vec.end(),
                                      state.flatten_tokens_vec.begin(),
                                      state.flatten_tokens_vec.end());
@@ -607,6 +624,10 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     state_.linear_state_cache_ops.insert(state_.linear_state_cache_ops.end(),
                                          state.linear_state_cache_ops.begin(),
                                          state.linear_state_cache_ops.end());
+    state_.linear_restore_src_blocks.insert(
+        state_.linear_restore_src_blocks.end(),
+        std::make_move_iterator(state.linear_restore_src_blocks.begin()),
+        std::make_move_iterator(state.linear_restore_src_blocks.end()));
     state_.request_ids.insert(state_.request_ids.end(),
                               state.request_ids.begin(),
                               state.request_ids.end());
@@ -626,6 +647,9 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     state_.transfer_kv_infos.insert(state_.transfer_kv_infos.end(),
                                     state.transfer_kv_infos.begin(),
                                     state.transfer_kv_infos.end());
+    state_.scheduled_mm_data_vec.insert(state_.scheduled_mm_data_vec.end(),
+                                        state.scheduled_mm_data_vec.begin(),
+                                        state.scheduled_mm_data_vec.end());
 
     // for flashinfer
     // we skip the first '0' element
@@ -706,7 +730,8 @@ void BatchInputBuilder::process_single_sequence(
   state.q_seq_lens.push_back(state.q_seq_lens.back() + padded_q_seq_len);
 #endif
   // Process multi-modal input
-  process_multi_modal_inputs(sequence, n_kv_cache_tokens, q_seq_len, seq_index);
+  process_multi_modal_inputs(
+      sequence, n_kv_cache_tokens, q_seq_len, seq_index, state_ptr);
   // Process tokens and positions
   extract_tokens_and_positions(
       sequence, n_kv_cache_tokens, logical_seq_len, state_ptr);
@@ -784,7 +809,7 @@ void BatchInputBuilder::extract_tokens_and_positions(Sequence* sequence,
     // last chunk of prefill and decode
     // add -1 as extra token id
     state.extra_token_ids.emplace_back(-1);
-    state.embedding_ids.emplace_back(sequence->get_single_block_id());
+    state.embedding_ids.emplace_back(sequence->get_embedding_block_id());
     state.request_ids.emplace_back(sequence->request_id());
     torch::Tensor mtp_bootstrap = sequence->get_mtp_bootstrap_embedding();
     if (state.batch_forward_type.is_decode() && mtp_bootstrap.defined()) {
@@ -823,15 +848,11 @@ void BatchInputBuilder::append_linear_state_row(Sequence* sequence,
                                                 BuilderState& state) {
   // linear_state_ids must stay aligned with logical batch rows even when the
   // model has no linear-attention layers, because downstream consumers index by
-  // batch row. Prefer the dedicated linear-state slot. Linear-attention decode
-  // paths that only carry a scheduler-side single block still share that live
-  // slot value across embedding and linear-state transport fields.
+  // batch row. GDN models always hold a dedicated LINEAR slot, so read it
+  // directly; non-linear models emit -1 and return early below.
   const bool has_linear_attention =
       args_ && has_linear_attention_layers(*args_);
   int32_t linear_state_id = sequence->get_linear_state_slot_id();
-  if (linear_state_id < 0 && has_linear_attention) {
-    linear_state_id = sequence->get_single_block_id();
-  }
   state.linear_state_ids.emplace_back(linear_state_id);
   if (!has_linear_attention) {
     return;
@@ -875,9 +896,9 @@ void BatchInputBuilder::append_linear_state_row(Sequence* sequence,
   // Restore source (block-carried): allocate_shared_for_sequence mounts the
   // deepest-hit checkpoint at admission (class A); allocate_for_sequence
   // mounts the slot it just checkpointed at the previous step's save-rotation
-  // (class B). Take it unconditionally so the pin never outlives the step
-  // that consumed the match; its id is used below only when a restore hash is
-  // actually emitted, otherwise the handle drops here and releases the pin.
+  // (class B). Take it unconditionally so unused matches are released in this
+  // build. A source used by a restore descriptor moves into builder state and
+  // then the owning Batch, which pins it until the worker result is consumed.
   std::optional<Block> mounted_restore_src =
       sequence->take_linear_restore_src_block();
   if (needs_restore_hash) {
@@ -887,6 +908,8 @@ void BatchInputBuilder::append_linear_state_row(Sequence* sequence,
       linear_state_cache_op.restore_requested = true;
       if (mounted_restore_src.has_value()) {
         linear_state_cache_op.restore_src_slot_id = mounted_restore_src->id();
+        state.linear_restore_src_blocks.emplace_back(
+            std::move(*mounted_restore_src));
       }
     }
   }
@@ -989,72 +1012,21 @@ void BatchInputBuilder::setup_kv_cache_info(
       }
       state.multi_block_tables[m].emplace_back(std::move(block_ids));
     }
-    const auto& transfer_kv_info = sequence->kv_state().transfer_kv_info();
-    if (transfer_kv_info.has_value() &&
-        !transfer_kv_info->block_transfer_groups.empty()) {
-      TransferKVInfo step_info;
-      step_info.request_id = transfer_kv_info->request_id;
-      step_info.dp_rank = transfer_kv_info->dp_rank;
-      step_info.remote_instance_info = transfer_kv_info->remote_instance_info;
-      // Populate the sender-side linear-state slot id on demand from the
-      // sequence. Transfer builders never carry this forward from the
-      // scheduler (the field on TransferKVInfo is initialized empty), so
-      // deriving it here at build time keeps the P->D transport aligned
-      // with the D response, which advertises the same slot via
-      // Sequence::get_recurrent_state_slot_id() in disagg_pd_service_impl.
-      const int32_t local_recurrent_slot =
-          sequence->get_recurrent_state_slot_id();
-      if (local_recurrent_slot >= 0) {
-        step_info.local_linear_state_ids.emplace_back(
-            static_cast<uint64_t>(local_recurrent_slot));
-      }
-      step_info.remote_linear_state_ids =
-          transfer_kv_info->remote_linear_state_ids;
-      for (const auto& full_group : transfer_kv_info->block_transfer_groups) {
-        const auto block_type =
-            block_type_from_cache_group_id(full_group.group_id);
-        if (!block_type.has_value()) {
-          LOG(ERROR) << "Unknown KV cache transfer group: "
-                     << full_group.group_id;
-          continue;
-        }
-        const BlockType group_block_type = block_type.value();
-        const auto blocks = sequence->kv_state().blocks(group_block_type);
-        if (blocks.empty() || full_group.remote_blocks_ids.empty()) {
-          continue;
-        }
-
-        uint32_t block_size = 0;
-        std::vector<int32_t> local_block_ids;
-        local_block_ids.reserve(blocks.size());
-        for (const auto& block : blocks) {
-          local_block_ids.emplace_back(block.id());
-          if (block.is_valid()) {
-            block_size = block.size();
-          }
-        }
-        if (block_size == 0) {
-          continue;
-        }
-
-        const size_t next_transfer_block_idx =
-            sequence->kv_state().next_group_transfer_block_idx(
-                group_block_type);
-        size_t advanced_transfer_block_idx = next_transfer_block_idx;
-        KVBlockTransferGroup step_group =
-            build_group_step_transfer(full_group,
-                                      local_block_ids,
-                                      next_transfer_block_idx,
-                                      seq_len,
-                                      block_size,
-                                      &advanced_transfer_block_idx);
-        sequence->kv_state().advance_group_transfer_block_idx(
-            group_block_type, advanced_transfer_block_idx);
-        if (!step_group.local_blocks_ids.empty()) {
-          step_info.block_transfer_groups.emplace_back(std::move(step_group));
-        }
-      }
-      if (!step_info.block_transfer_groups.empty()) {
+    const std::optional<TransferKVInfo>& transfer_kv_info =
+        sequence->kv_state().transfer_kv_info();
+    if (transfer_kv_info.has_value()) {
+      TransferKVInfo step_info = build_step_transfer_info(
+          transfer_kv_info.value(),
+          sequence,
+          seq_len,
+          static_cast<uint32_t>(util::kv_split_size_effective()));
+      const bool has_transfer =
+          std::any_of(step_info.mappings.begin(),
+                      step_info.mappings.end(),
+                      [](const KVTransferMapping& mapping) {
+                        return !mapping.local_ids.empty();
+                      });
+      if (has_transfer) {
         state.transfer_kv_infos.emplace_back(std::move(step_info));
       }
     }
@@ -1075,14 +1047,11 @@ void BatchInputBuilder::setup_kv_cache_info(
       state.new_token_slot_ids.end(), slot_ids.begin(), slot_ids.end());
 
   std::vector<int32_t> block_ids;
-  std::vector<uint64_t> local_block_ids;
   block_ids.reserve(blocks.size());
-  local_block_ids.reserve(blocks.size());
   int32_t block_size = 0;
   for (const auto& block : blocks) {
     block_size = block.size();
     block_ids.push_back(block.id());
-    local_block_ids.emplace_back(static_cast<uint64_t>(block.id()));
     state.paged_kv_indices.push_back(block.id());
   }
   state.paged_kv_indptr.push_back(state.paged_kv_indptr.back() + blocks.size());
@@ -1100,38 +1069,17 @@ void BatchInputBuilder::setup_kv_cache_info(
 
   auto& transfer_kv_info = sequence->kv_state().transfer_kv_info();
   if (transfer_kv_info.has_value()) {
-    const size_t next_transfer_block_idx =
-        sequence->kv_state().next_transfer_block_idx();
-    size_t advanced_transfer_block_idx = next_transfer_block_idx;
     TransferKVInfo step_info = BatchInputBuilder::build_step_transfer_info(
         transfer_kv_info.value(),
-        local_block_ids,
-        next_transfer_block_idx,
+        sequence,
         seq_len,
-        static_cast<uint32_t>(block_size),
-        &advanced_transfer_block_idx);
-    // Populate the sender-side linear-state slot id on demand from the
-    // sequence (see the grouped path above for the rationale). Uses the
-    // same helper as the D-side response so both sides agree on slot id.
-    if (step_info.local_linear_state_ids.empty()) {
-      const int32_t local_recurrent_slot =
-          sequence->get_recurrent_state_slot_id();
-      if (local_recurrent_slot >= 0) {
-        step_info.local_linear_state_ids.emplace_back(
-            static_cast<uint64_t>(local_recurrent_slot));
-      }
-    }
-    sequence->kv_state().advance_transfer_block_idx(
-        advanced_transfer_block_idx);
-    // Keep the step if it carries KV blocks OR a recurrent-state slot. When a
-    // fully prefix-hit final chunk transfers zero KV blocks, the step still
-    // carries the final linear/recurrent state that D must receive (its LINEAR
-    // prefix cache is off by role), so gating solely on local_blocks_ids would
-    // silently drop it. The transfer consumer already handles a
-    // linear-state-only step (kv_cache_transfer.cpp filter keeps infos with a
-    // non-empty local_linear_state_ids).
-    if (!step_info.local_blocks_ids.empty() ||
-        !step_info.local_linear_state_ids.empty()) {
+        static_cast<uint32_t>(util::kv_split_size_effective()));
+    const bool has_transfer = std::any_of(step_info.mappings.begin(),
+                                          step_info.mappings.end(),
+                                          [](const KVTransferMapping& mapping) {
+                                            return !mapping.local_ids.empty();
+                                          });
+    if (has_transfer) {
       state.transfer_kv_infos.emplace_back(std::move(step_info));
     }
   }
@@ -1237,7 +1185,11 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
       torch::tensor(state_.paged_kv_last_page_len, torch::kInt);
 
   // Setup multimodal data
-  input_params.multimodal.mm_data.batch(mm_data_vec_);
+  std::vector<MMData> batch_mm_data_vec = mm_data_vec_;
+  batch_mm_data_vec.insert(batch_mm_data_vec.end(),
+                           state_.scheduled_mm_data_vec.begin(),
+                           state_.scheduled_mm_data_vec.end());
+  input_params.multimodal.mm_data.batch(batch_mm_data_vec);
 
   // Setup block tables
   util::pad_2d_vector(state_.block_tables_vec, /*pad_value=*/0);
@@ -1361,7 +1313,9 @@ void BatchInputBuilder::process_swap_block_infos(ForwardInput& forward_input) {
 void BatchInputBuilder::process_multi_modal_inputs(Sequence* sequence,
                                                    uint32_t n_kv_cache_tokens,
                                                    uint32_t q_seq_len,
-                                                   int32_t seq_index) {
+                                                   int32_t seq_index,
+                                                   BuilderState* state_ptr) {
+  BuilderState& state = state_ptr ? *state_ptr : state_;
   MMData& mm_data = sequence->mutable_mm_data();
   if ((sequence->stage() != SequenceStage::DECODE) && mm_data.valid()) {
     UpdateMMItemScheduleStateVisitor visitor(
@@ -1372,7 +1326,7 @@ void BatchInputBuilder::process_multi_modal_inputs(Sequence* sequence,
     }
     MMData scheduled_mm_data(visitor.scheduled_type_,
                              std::move(visitor.mm_data_items_));
-    mm_data_vec_.emplace_back(std::move(scheduled_mm_data));
+    state.scheduled_mm_data_vec.emplace_back(std::move(scheduled_mm_data));
   }
 }
 }  // namespace xllm

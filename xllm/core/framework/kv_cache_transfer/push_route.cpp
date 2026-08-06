@@ -51,4 +51,29 @@ std::vector<int32_t> get_dst_ranks(const int32_t src_tp_rank,
   return dst_ranks;
 }
 
+std::vector<int32_t> get_src_tp_ranks(const int32_t dst_tp_rank,
+                                      const int32_t src_tp_size,
+                                      const int32_t dst_tp_size) {
+  std::vector<int32_t> src_tp_ranks;
+  if (src_tp_size <= 0 || dst_tp_size <= 0 || dst_tp_rank < 0 ||
+      dst_tp_rank >= dst_tp_size) {
+    return src_tp_ranks;
+  }
+
+  if (src_tp_size <= dst_tp_size) {
+    src_tp_ranks.reserve(1);
+    src_tp_ranks.emplace_back(dst_tp_rank % src_tp_size);
+    return src_tp_ranks;
+  }
+
+  const size_t src_rank_num =
+      static_cast<size_t>((src_tp_size - 1 - dst_tp_rank) / dst_tp_size + 1);
+  src_tp_ranks.reserve(src_rank_num);
+  for (int32_t src_tp_rank = dst_tp_rank; src_tp_rank < src_tp_size;
+       src_tp_rank += dst_tp_size) {
+    src_tp_ranks.emplace_back(src_tp_rank);
+  }
+  return src_tp_ranks;
+}
+
 }  // namespace xllm

@@ -39,7 +39,6 @@ inline constexpr std::string_view kInlineConfig = R"json({
   "max_tokens_per_batch": 8192,
   "max_seqs_per_batch": 64,
   "model_impl": "py",
-  "python_model_path": "/tmp/xllm-python-model",
   "python_graph_backend": "cudagraphs"
 })json";
 
@@ -199,6 +198,7 @@ std::filesystem::path config_test_file_path() {
 TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
   const JsonReader json = config::parse_json_string(kInlineConfig);
   ConfigFlagGuard flag_guard;
+  const std::string old_python_model_path = FLAGS_python_model_path;
 
   ModelConfig model_config;
   model_config.from_json(json);
@@ -224,11 +224,13 @@ TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
   // matching gflag.
   EXPECT_EQ(model_config.model_impl(), "py");
   EXPECT_TRUE(ModelConfig::is_python_model_impl(model_config.model_impl()));
-  EXPECT_EQ(model_config.python_model_path(), "/tmp/xllm-python-model");
+  // model and python_model_path are command-line-only: from_json neither reads
+  // them nor touches their gflags, so both keep their pre-call values.
+  EXPECT_EQ(model_config.python_model_path(), "");
   EXPECT_EQ(execution_config.python_graph_backend(), "cudagraphs");
 
   EXPECT_EQ(FLAGS_model_impl, "py");
-  EXPECT_EQ(FLAGS_python_model_path, "/tmp/xllm-python-model");
+  EXPECT_EQ(FLAGS_python_model_path, old_python_model_path);
   EXPECT_EQ(FLAGS_python_graph_backend, "cudagraphs");
 
   EXPECT_EQ(kv_cache_config.kv_cache_dtype(), "auto");
@@ -291,6 +293,11 @@ TEST(ConfigJsonTest, RegistersOnlyContextParallelCommandLineOption) {
 }
 
 TEST(ConfigJsonTest, LoadJsonFileReadsConfigFixture) {
+  // The fixture sets more keys than ConfigFlagGuard restores, and from_json
+  // writes every resolved value back into its FLAGS_ global. FlagSaver reverts
+  // all of those writes so this fixture cannot leak flag state (values or the
+  // is_default bit) into later tests when GoogleTest shuffles the order.
+  google::FlagSaver flag_saver;
   ConfigFlagGuard flag_guard;
   const std::filesystem::path config_path = config_test_file_path();
   ASSERT_TRUE(std::filesystem::exists(config_path)) << config_path;
@@ -415,6 +422,127 @@ TEST(ConfigJsonTest, MissingJsonFileKeepsFlagDefaults) {
   EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 200);
 }
 
+TEST(ConfigPrecedenceTest, CommandLineFlagOverridesJson) {
+  // FlagSaver restores both flag values and their is_default bit, so the
+  // simulated command-line flags below do not leak into other tests.
+  google::FlagSaver flag_saver;
+
+  // Simulate `--block_size=64 --max_tokens_per_batch=2048 --model_impl=native`.
+  google::SetCommandLineOption("block_size", "64");
+  google::SetCommandLineOption("max_tokens_per_batch", "2048");
+  google::SetCommandLineOption("model_impl", "native");
+
+  // kInlineConfig sets block_size=16, max_tokens_per_batch=8192,
+  // model_impl="py": all conflict with the command-line values above.
+  const JsonReader json = config::parse_json_string(kInlineConfig);
+
+  KVCacheConfig kv_cache_config;
+  kv_cache_config.from_flags();
+  kv_cache_config.from_json(json);
+
+  SchedulerConfig scheduler_config;
+  scheduler_config.from_flags();
+  scheduler_config.from_json(json);
+
+  ModelConfig model_config;
+  model_config.from_flags();
+  model_config.from_json(json);
+
+  // CLI > Config: the command-line value wins over the JSON entry.
+  EXPECT_EQ(kv_cache_config.block_size(), 64);
+  EXPECT_EQ(scheduler_config.max_tokens_per_batch(), 2048);
+  EXPECT_EQ(model_config.model_impl(), "native");
+
+  // The FLAGS_ writeback must not clobber the command-line value either.
+  EXPECT_EQ(FLAGS_block_size, 64);
+  EXPECT_EQ(FLAGS_max_tokens_per_batch, 2048);
+  EXPECT_EQ(FLAGS_model_impl, "native");
+}
+
+TEST(ConfigPrecedenceTest, JsonOverridesDefaultWhenFlagUnspecified) {
+  google::FlagSaver flag_saver;
+
+  // None of these flags are specified on the command line, so JSON must win
+  // over the compiled-in defaults.
+  ASSERT_FALSE(config::is_flag_specified("block_size"));
+  ASSERT_FALSE(config::is_flag_specified("enable_prefix_cache"));
+  ASSERT_FALSE(config::is_flag_specified("max_seqs_per_batch"));
+
+  const JsonReader json = config::parse_json_string(kInlineConfig);
+
+  KVCacheConfig kv_cache_config;
+  kv_cache_config.from_flags();
+  kv_cache_config.from_json(json);
+
+  SchedulerConfig scheduler_config;
+  scheduler_config.from_flags();
+  scheduler_config.from_json(json);
+
+  // Config > Defaults.
+  EXPECT_EQ(kv_cache_config.block_size(), 16);
+  EXPECT_DOUBLE_EQ(kv_cache_config.max_memory_utilization(), 0.5);
+  EXPECT_FALSE(kv_cache_config.enable_prefix_cache());
+  EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 64);
+}
+
+TEST(ConfigPrecedenceTest, KeepsDefaultWhenNeitherCliNorJson) {
+  google::FlagSaver flag_saver;
+
+  // Config flags are process-global; pin the flags asserted below to their
+  // DEFINE_ defaults so this test is self-contained regardless of sibling
+  // tests. FlagSaver reverts these resets when the test ends.
+  FLAGS_enable_prefix_cache = true;
+  FLAGS_max_seqs_per_batch = 200;
+  FLAGS_priority_strategy = "fcfs";
+
+  // kUpdatedConfig only carries block_size and max_tokens_per_batch, so
+  // unrelated properties fall back to their defaults.
+  const JsonReader json = config::parse_json_string(kUpdatedConfig);
+
+  KVCacheConfig kv_cache_config;
+  kv_cache_config.from_flags();
+  kv_cache_config.from_json(json);
+
+  SchedulerConfig scheduler_config;
+  scheduler_config.from_flags();
+  scheduler_config.from_json(json);
+
+  EXPECT_TRUE(kv_cache_config.enable_prefix_cache());
+  EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 200);
+  EXPECT_EQ(scheduler_config.priority_strategy(), "fcfs");
+}
+
+TEST(ConfigPrecedenceTest, InitializeAppliesCliOverConfigOverDefault) {
+  google::FlagSaver flag_saver;
+
+  // Pin the default-asserted flag so this test is self-contained regardless of
+  // sibling tests; FlagSaver reverts it on exit.
+  FLAGS_max_decode_token_per_sequence = 256;
+
+  const std::filesystem::path config_path =
+      std::filesystem::temp_directory_path() /
+      "xllm_config_precedence_test.json";
+  write_config_file(config_path, kInlineConfig);
+
+  // Command line overrides block_size; JSON still supplies the rest.
+  google::SetCommandLineOption("block_size", "64");
+  FLAGS_config_json_file = config_path.string();
+
+  KVCacheConfig kv_cache_config;
+  kv_cache_config.initialize();
+
+  SchedulerConfig scheduler_config;
+  scheduler_config.initialize();
+
+  EXPECT_EQ(kv_cache_config.block_size(), 64);               // CLI    > Config
+  EXPECT_EQ(scheduler_config.max_tokens_per_batch(), 8192);  // Config > Default
+  EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 64);      // Config > Default
+  EXPECT_EQ(scheduler_config.max_decode_token_per_sequence(),
+            256);  // Default
+
+  std::filesystem::remove(config_path);
+}
+
 TEST(ConfigJsonTest, DumpStartupConfigSkipsWhenDisabled) {
   const std::filesystem::path dump_path =
       std::filesystem::temp_directory_path() /
@@ -451,8 +579,6 @@ TEST(ConfigJsonTest, DumpStartupConfigWritesNonDefaultValuesOnly) {
   ASSERT_TRUE(std::filesystem::exists(dump_path));
   const nlohmann::ordered_json config_json = read_json_file(dump_path);
   EXPECT_EQ(config_json.at("model_impl").get<std::string>(), "python");
-  EXPECT_EQ(config_json.at("python_model_path").get<std::string>(),
-            "/tmp/xllm-python-model");
   EXPECT_EQ(config_json.at("python_graph_backend").get<std::string>(),
             "cudagraphs");
   EXPECT_EQ(config_json.at("block_size").get<int32_t>(), 256);
@@ -461,6 +587,10 @@ TEST(ConfigJsonTest, DumpStartupConfigWritesNonDefaultValuesOnly) {
   EXPECT_EQ(config_json.at("max_seqs_per_batch").get<int32_t>(), 128);
   EXPECT_FALSE(config_json.at("enable_chunked_prefill").get<bool>());
 
+  // model and python_model_path are command-line-only: never dumped, even when
+  // set to a non-default value.
+  EXPECT_FALSE(config_json.contains("model"));
+  EXPECT_FALSE(config_json.contains("python_model_path"));
   EXPECT_FALSE(config_json.contains("max_cache_size"));
   EXPECT_FALSE(config_json.contains("kv_cache_dtype"));
   EXPECT_FALSE(config_json.contains("indexer_cache_dtype"));

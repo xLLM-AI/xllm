@@ -178,6 +178,9 @@ class Batch {
   // mm_data in the batch
   std::vector<MMData> mm_data_vec_;
 
+  // Pins serialized restore sources until this batch's worker result returns.
+  std::vector<Block> linear_restore_src_blocks_;
+
   // Runtime sampling targets that were actually injected for the current
   // forward pass. Sample requests may contribute multiple targets per
   // sequence.

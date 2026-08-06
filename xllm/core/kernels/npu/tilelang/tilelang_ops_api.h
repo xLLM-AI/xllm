@@ -22,10 +22,46 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/kernels/npu/paged_attention_tiling_layout.h"
+
 namespace xllm::kernel::npu::tilelang {
 
 // Public TileLang kernel APIs exported to the xLLM NPU runtime.
-//
+
+// Take the first token from each row of an existing row-major int32 verify
+// buffer and pack it with `spec_width - 1` proposer columns into graph-owned
+// row-major int32 storage on the current NPU stream. `spec_width` equals
+// draft_tokens.size() + 1; compiled variants currently cover widths 4, 5 and 6
+// (MTP depths 3, 4 and 5). Each draft source is contiguous int64 [batch], and
+// persistent_tokens is updated in place. The batch-1 variant performs an
+// eight-int32 vector store and clears its unused tail, so the destination must
+// provide at least eight elements.
+void spec_verify_token_update(const torch::Tensor& base_tokens,
+                              const std::vector<torch::Tensor>& draft_tokens,
+                              torch::Tensor& persistent_tokens,
+                              int64_t spec_width);
+
+bool has_spec_verify_token_update_specialization(int64_t spec_width);
+
+bool has_spec_verify_attention_tiling_update_specialization(int64_t spec_width,
+                                                            int64_t block_size);
+
+bool has_spec_verify_graph_update_specialization(int64_t spec_width,
+                                                 int64_t block_size);
+
+// Update only replay-varying fields in graph-owned CustomPagedAttention tiling
+// storage on the current NPU stream: max KV length, KV split length, and
+// per-row KV lengths. `layout` must describe a recognized ATB tiling schema;
+// `spec_width` equals the MTP depth plus one.
+void spec_verify_attention_tiling_update(
+    const torch::Tensor& src_kv_seq_lens,
+    torch::Tensor& tiling_data,
+    const PagedAttentionTilingLayout& layout,
+    int64_t spec_width,
+    int64_t block_size,
+    int64_t max_kv_seq_len,
+    int64_t kv_split_core_count);
+
 // Apply TileLang RoPE kernel in-place on a single input tensor.
 // Invalid inputs trigger CHECK failures.
 // Supports input not contiguous, with stride.

@@ -271,7 +271,7 @@ void RecMultiRoundBatchInputBuilder::extract_tokens_and_positions(
     // last chunk of prefill and decode
     // add -1 as extra token id
     base_state.extra_token_ids.push_back(-1);
-    base_state.embedding_ids.push_back(sequence->get_single_block_id());
+    base_state.embedding_ids.push_back(sequence->get_embedding_block_id());
   } else {
     base_state.extra_token_ids.push_back(token_ids[seq_len]);
   }

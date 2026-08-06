@@ -46,6 +46,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> RMSNormImpl::forward(
     std::optional<torch::Tensor> residual,
     std::optional<torch::Tensor> inplace_output) {
   auto org_shape = input.sizes().vec();
+
   input = input.reshape({-1, norm_dim_});
 
   torch::Tensor output;
@@ -146,6 +147,13 @@ void RMSNormImpl::load_state_dict(const StateDict& state_dict) {
     LOAD_WEIGHT(bias);
   }
 #endif
+}
+
+void RMSNormImpl::verify_loaded_weights(const std::string& prefix) const {
+  CHECK(weight_is_loaded_) << "weight is not loaded for " << prefix + "weight";
+  if (bias_.defined()) {
+    CHECK(bias_is_loaded_) << "bias is not loaded for " << prefix + "bias";
+  }
 }
 
 void RMSNormImpl::set_layernorm_mode() {

@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,15 +18,53 @@ The C++ ``PyCausalLM`` embeds a CPython interpreter (sharing this process'
 libtorch), loads a model class from this package, streams weights into
 ``load_weights``, and drives ``forward`` / ``compute_logits`` each step.
 
-Package layout follows ``models -> layers -> ops -> kernels``:
-:mod:`python.models` (per-arch graphs) depend on :mod:`python.layers`, which
-depend on the :mod:`python.ops` dispatch layer, which routes to the
-:mod:`python.kernels` backends. Every op resolves to the single
-``torch.ops.xllm_ops.*`` namespace — the same fused kernels the C++ decoder path
-uses — so the Python graph runs identical operators across hardware backends
-with no ``#ifdef``.
+Package layout follows ``models -> layers -> kernels``: :mod:`python.models`
+(per-arch graphs) depend on :mod:`python.layers`, which depend on
+``python.kernels``. :mod:`python.distributed` sits beside them and owns the
+tensor-parallel collectives, which differ only in ProcessGroup backend.
+
+``python.kernels`` is not a directory. One peer package per hardware platform
+lives here -- ``kernels_cuda``, ``kernels_npu``, and one per platform added
+later -- sharing no code and never importing each other. The import below binds
+the one matching the active platform as ``kernels``, so layers and models import
+a single fixed name and carry no hardware branch, and exactly one kernel package
+is ever imported in a process.
+
+This is one of the executor's two hardware branches. The other selects the
+attention backend and graph runner in :mod:`python.model_executor.executor`,
+where it belongs: attention backends hold state across steps and follow the
+executor's lifecycle, unlike the stateless functions a kernel package exports.
+
+The C++ worker registers ``torch.ops.xllm_ops`` before importing this package,
+so the kernel package finds its operators here.
 """
 
-from xllm.python.registry import get_model_class, register_model  # noqa: F401
+from __future__ import annotations
 
-__all__ = ["get_model_class", "register_model"]
+import sys
+
+from xllm.python import platform
+
+# Bound before anything else in the package so that a module reached from here
+# already finds ``xllm.python.kernels`` in place.
+if platform.is_gpu():
+    from xllm.python import kernels_cuda as kernels
+elif platform.is_npu():
+    from xllm.python import kernels_npu as kernels
+else:
+    raise ImportError(
+        f"no kernel package for platform '{platform.current_platform()}'; add "
+        f"xllm/python/kernels_{platform.current_platform()}/ exporting the same "
+        "names as its peers, and import it here"
+    )
+
+# The binding above only creates an attribute of this package, which the import
+# machinery does not consult, so ``import xllm.python.kernels`` and
+# ``from xllm.python.kernels import rms_norm`` would fail to resolve. Publishing
+# the same module object under the name lifts that restriction; it stays the one
+# object the peer package's own name is bound to, so nothing is imported twice.
+sys.modules[f"{__name__}.kernels"] = kernels
+
+from xllm.python.registry import get_model_class, register_model  # noqa: E402
+
+__all__ = ["get_model_class", "register_model", "kernels"]

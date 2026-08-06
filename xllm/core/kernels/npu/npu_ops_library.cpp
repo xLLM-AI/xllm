@@ -25,6 +25,7 @@ limitations under the License.
 #include <torch/library.h>
 #include <torch/torch.h>
 
+#include "kernels/npu/xllm_ops/xllm_ops_api.h"
 #include "npu_ops_api.h"
 
 namespace xllm {
@@ -69,11 +70,10 @@ void apply_rotary_embedding_npu(torch::Tensor& q,
   xllm::kernel::npu::apply_rotary(q, k, cos_sin_cache, positions);
 }
 
-// Stub for graph-mode decode metadata update. Currently only used by
-// DecodeCudaGraphRunner (--python_graph_backend=cudagraphs). Registered here so
-// that the Python ops module can be imported unconditionally on NPU without
-// AttributeError. Will gain a real NPU graph implementation once NPU graph
-// capture is enabled, or be removed if NPU graph takes a different approach.
+// Graph-mode decode metadata update. Copies real data into the head of
+// pre-allocated static buffers and fills padding slots with safe defaults
+// (zero tokens, -1 slot mapping, 1 last-page-len) so that the captured
+// graph operates on valid data for every padded position.
 torch::Tensor update_decode_graph_metadata_npu(
     const torch::Tensor& tokens,
     const torch::Tensor& positions,
@@ -91,19 +91,43 @@ torch::Tensor update_decode_graph_metadata_npu(
     torch::Tensor& dst_paged_kv_indices,
     torch::Tensor& dst_paged_kv_last_page_len,
     int64_t padded_num_tokens) {
-  dst_tokens.slice(0, 0, padded_num_tokens).copy_(tokens);
-  dst_positions.slice(0, 0, padded_num_tokens).copy_(positions);
-  dst_slot_mapping.slice(0, 0, padded_num_tokens).copy_(slot_mapping);
+  const int64_t n = tokens.size(0);
+  const int64_t p = padded_num_tokens;
 
-  const int64_t batch_size = kv_seq_lens.size(0);
-  dst_kv_seq_lens.slice(0, 0, batch_size).copy_(kv_seq_lens);
-  dst_kv_seq_lens_delta.slice(0, 0, batch_size).fill_(1);
-  dst_paged_kv_indptr.slice(0, 0, batch_size + 1).copy_(paged_kv_indptr);
+  dst_tokens.slice(0, 0, n).copy_(tokens);
+  dst_positions.slice(0, 0, n).copy_(positions);
+  dst_slot_mapping.slice(0, 0, n).copy_(slot_mapping);
+  if (p > n) {
+    dst_tokens.slice(0, n, p).zero_();
+    dst_positions.slice(0, n, p).zero_();
+    dst_slot_mapping.slice(0, n, p).fill_(-1);
+  }
+
+  const int64_t src_len = std::min<int64_t>(kv_seq_lens.size(0), n + 1);
+  dst_kv_seq_lens.slice(0, 0, src_len).copy_(kv_seq_lens.slice(0, 0, src_len));
+  if (p >= n) {
+    dst_kv_seq_lens.slice(0, src_len, p + 1)
+        .copy_(kv_seq_lens.slice(0, src_len - 1, src_len));
+  }
+  dst_kv_seq_lens_delta.slice(0, 0, p).copy_(
+      dst_kv_seq_lens.slice(0, 1, p + 1) - dst_kv_seq_lens.slice(0, 0, p));
+
+  const int64_t indptr_len = std::min<int64_t>(paged_kv_indptr.size(0), n + 1);
+  dst_paged_kv_indptr.slice(0, 0, indptr_len)
+      .copy_(paged_kv_indptr.slice(0, 0, indptr_len));
+  if (p >= n) {
+    dst_paged_kv_indptr.slice(0, indptr_len, p + 1)
+        .copy_(paged_kv_indptr.slice(0, indptr_len - 1, indptr_len));
+  }
+
+  dst_paged_kv_last_page_len.slice(0, 0, n).copy_(
+      paged_kv_last_page_len.slice(0, 0, n));
+  if (p > n) {
+    dst_paged_kv_last_page_len.slice(0, n, p).fill_(1);
+  }
 
   const int64_t num_pages = paged_kv_indices.size(0);
   dst_paged_kv_indices.slice(0, 0, num_pages).copy_(paged_kv_indices);
-  dst_paged_kv_last_page_len.slice(0, 0, batch_size)
-      .copy_(paged_kv_last_page_len);
 
   return dst_tokens;
 }
@@ -146,6 +170,31 @@ TORCH_LIBRARY(xllm_ops, m) {
       "dst_kv_seq_lens, Tensor(e!) dst_kv_seq_lens_delta, Tensor(f!) "
       "dst_paged_kv_indptr, Tensor(g!) dst_paged_kv_indices, Tensor(h!) "
       "dst_paged_kv_last_page_len, int padded_num_tokens) -> Tensor");
+  m.def(
+      "quant_matmul(Tensor x1, Tensor x2, bool transpose2, Tensor scale, "
+      "Tensor? offset, Tensor? pertoken_scale, Tensor? bias, ScalarType? "
+      "output_dtype) -> Tensor");
+  m.def(
+      "quantize_per_tensor(Tensor self, Tensor scales, Tensor zero_points, "
+      "ScalarType dtype, int axis) -> Tensor");
+  m.def(
+      "dynamic_quant(Tensor input, Tensor? smooth_scales, Tensor? group_index, "
+      "ScalarType? dst_type) -> (Tensor, Tensor?)");
+  m.def(
+      "lightning_indexer(Tensor query, Tensor key, Tensor weights, "
+      "Tensor? query_seq_lengths, Tensor? key_seq_lengths, Tensor? "
+      "block_table, str layout_query, str layout_key, int selected_count, int "
+      "sparse_mode, int pre_tokens, int next_tokens, bool return_value) -> "
+      "Tensor");
+  m.def(
+      "scatter_nd_update(Tensor(a!) var, Tensor indices, Tensor updates) -> "
+      "()");
+  m.def(
+      "sparse_flash_attention(Tensor query, Tensor key, Tensor value, Tensor "
+      "sparse_indices, Tensor? block_table, Tensor? actual_seq_lengths_query, "
+      "Tensor? actual_seq_lengths_kv, Tensor? query_rope, Tensor? key_rope, "
+      "float scale_value, int sparse_block_size, str layout_query, str "
+      "layout_kv, int sparse_mode) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
@@ -156,4 +205,12 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl("apply_rotary_embedding", TORCH_FN(xllm::apply_rotary_embedding_npu));
   m.impl("update_decode_graph_metadata",
          TORCH_FN(xllm::update_decode_graph_metadata_npu));
+  m.impl("quant_matmul", TORCH_FN(xllm::kernel::npu::quant_matmul));
+  m.impl("quantize_per_tensor",
+         TORCH_FN(xllm::kernel::npu::quantize_per_tensor));
+  m.impl("dynamic_quant", TORCH_FN(xllm::kernel::npu::dynamic_quant));
+  m.impl("lightning_indexer", TORCH_FN(xllm::kernel::npu::lightning_indexer));
+  m.impl("scatter_nd_update", TORCH_FN(xllm::kernel::npu::scatter_nd_update));
+  m.impl("sparse_flash_attention",
+         TORCH_FN(xllm::kernel::npu::sparse_flash_attention));
 }

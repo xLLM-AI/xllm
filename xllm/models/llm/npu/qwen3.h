@@ -80,16 +80,15 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
       blocks_->push_back(block);
     }
 
-    // Eagle3/DFlash target captures intermediate-layer aux hidden states to
-    // drive the draft. The worker fills layers_to_capture (from config.json for
-    // Eagle3, or the draft config for DFlash) before construction, so a
-    // non-empty list is the capture signal. The DFlash draft model itself never
-    // captures.
-    const bool is_dflash_draft_model =
-        model_args.model_type() == "DFlashDraftModel";
+    // Eagle3/DFlash/DSpark target captures intermediate-layer aux hidden states
+    // to drive the draft. The block-diffusion draft keeps layers_to_capture to
+    // size its context projection, but must not capture its own hidden states.
+    const bool is_block_diffusion_draft_model =
+        model_args.model_type() == "DFlashDraftModel" ||
+        model_args.model_type() == "DSparkDraftModel";
     const auto& layer_ids_from_config = model_args.layers_to_capture();
     const bool enable_aux_hidden_capture =
-        !is_dflash_draft_model && !layer_ids_from_config.empty();
+        !is_block_diffusion_draft_model && !layer_ids_from_config.empty();
     if (enable_aux_hidden_capture) {
       set_aux_hidden_capture_layers(layer_ids_from_config);
       // Pre-allocate aux output buffer [max_tokens_per_batch, hidden_size *
@@ -338,6 +337,10 @@ REGISTER_MODEL_ARGS_WITH_VARNAME(qwen3_atb, qwen3_atb, [&] {
   // Eagle3: layer ids (0-based) to capture from config, e.g.
   // "layers_to_capture": [2, 14, 25]; defaults to empty if missing
   LOAD_ARG_OR(layers_to_capture, "layers_to_capture", std::vector<int32_t>{});
+
+  // DSpark: low-rank dim of the Markov head (top-level config key, like vLLM's
+  // config.markov_rank). 0 = disabled (plain DFlash / non-DSpark models).
+  LOAD_ARG_OR(markov_rank, "markov_rank", 0);
 
   LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {
     return args->hidden_size() / args->n_heads();
