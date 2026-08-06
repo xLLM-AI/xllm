@@ -47,19 +47,17 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   // tp_group_ and cp_group_ are already the final, orthogonally-split groups:
   // the collective communicator narrows tp_group_ to world/(dp*cp) and builds a
   // separate cp_group_ over the cp-strided ranks. Read each dimension from its
-  // own group instead of carving CP back out of tp_group_. v1 supports pure CP
-  // (tp_size == 1) or pure TP (cp_size == 1), not an orthogonal mix.
+  // own group instead of carving CP back out of tp_group_. TP and CP are
+  // orthogonal: a rank can shard both attention heads (TP) and sequence tokens
+  // (CP) at once, so both dimensions may be > 1 simultaneously.
   tp_size_ = (tp_group_ != nullptr) ? tp_group_->world_size() : 1;
   tp_rank_ = (tp_group_ != nullptr) ? tp_group_->rank() : 0;
-  CHECK(cp_size_ == 1 || tp_size_ == 1)
-      << "Python CP v1 does not support orthogonal TP x CP "
-         "(tp_size="
-      << tp_size_ << ", cp_size=" << cp_size_ << ")";
 
   py::gil_scoped_acquire gil;
-  // The physical group's rendezvous endpoint (shared by all ranks in the group)
-  // backs either the TP group or the CP group depending on which dimension owns
-  // it. Init exactly the one that is > 1.
+  // The rendezvous endpoint (host/port) is shared by every rank that needs a
+  // torch process group on this device. Init each parallel dimension that is
+  // active: TP (attention-head sharding) and CP (sequence sharding) are
+  // orthogonal and each get their own group off the same endpoint.
   if (tp_size_ > 1) {
     CHECK(!parallel_args.python_tp_rendezvous_host_.empty());
     CHECK_GT(parallel_args.python_tp_rendezvous_port_, 0);
@@ -72,10 +70,10 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   }
   if (cp_size_ > 1) {
     CHECK(!parallel_args.python_tp_rendezvous_host_.empty());
-    CHECK_GT(parallel_args.python_tp_rendezvous_port_, 0);
+    CHECK_GT(parallel_args.python_cp_rendezvous_port_, 0);
     py::module_::import("xllm.python.ops")
         .attr("init_cp_group")(parallel_args.python_tp_rendezvous_host_,
-                               parallel_args.python_tp_rendezvous_port_,
+                               parallel_args.python_cp_rendezvous_port_,
                                cp_rank_,
                                cp_size_,
                                c10::str(device_));

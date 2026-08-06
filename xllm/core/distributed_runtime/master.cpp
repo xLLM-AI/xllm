@@ -151,9 +151,11 @@ std::optional<std::string> validate_model_cp(const Options& options,
     // eager prefill only) that does not go through the ATB fused-attention op,
     // so it bypasses the ATB-backend requirement and the ATB CP capability
     // allowlist below. The safety constraints above (LLM/generate, no graph,
-    // DEFAULT/PREFILL) still apply. Python CP v1 additionally requires
-    // dp_size == 1: unlike the model-owned TORCH split (deepseek_v4), it does
-    // not implement the orthogonal dp * cp layout.
+    // DEFAULT/PREFILL) still apply. Orthogonal TP x CP is supported (both may
+    // be > 1, sharing world = cp * tp); the collective communicator builds the
+    // narrowed TP group and the strided CP group and reserves a separate torch
+    // rendezvous port for each. DP > 1 stays unsupported: the Python executor
+    // does not implement the dp * cp * tp rank layout.
     if (ModelConfig::is_python_model_impl(
             ModelConfig::get_instance().model_impl())) {
       if (options.dp_size() != 1) {

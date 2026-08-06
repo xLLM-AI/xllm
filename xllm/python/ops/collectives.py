@@ -12,9 +12,16 @@ _cp_stores = {}
 
 
 def _create_process_group(
-    host: str, port: int, rank: int, world_size: int, device: str
+    host: str, port: int, rank: int, world_size: int, device: str,
+    group_id: str,
 ):
-    """Create HCCL or NCCL ProcessGroup depending on device type."""
+    """Create HCCL or NCCL ProcessGroup depending on device type.
+
+    ``group_id`` names the underlying HCCL communicator. It must be distinct per
+    logical group (TP vs CP): torch_npu keys each device's HCCL comm by this id,
+    and two comms sharing the default id collide in hcclCommInitRootInfoConfig
+    when an orthogonal TP x CP launch brings up both on the same device.
+    """
     store = dist.TCPStore(
         host,
         port,
@@ -30,7 +37,9 @@ def _create_process_group(
         import torch_npu  # noqa: F401
         from torch_npu._C._distributed_c10d import ProcessGroupHCCL
 
-        group = ProcessGroupHCCL(store, rank, world_size, timedelta(minutes=5))
+        options = ProcessGroupHCCL.Options()
+        options.group_id = group_id
+        group = ProcessGroupHCCL(store, rank, world_size, options)
     return store, group
 
 
@@ -52,7 +61,9 @@ def init_tp_group(
             )
         return group
 
-    store, group = _create_process_group(host, port, rank, world_size, device)
+    store, group = _create_process_group(
+        host, port, rank, world_size, device, "python_tp_group"
+    )
     _tp_stores[device_key] = store
     _tp_groups[device_key] = group
     return group
@@ -92,7 +103,9 @@ def init_cp_group(
             )
         return group
 
-    store, group = _create_process_group(host, port, rank, world_size, device)
+    store, group = _create_process_group(
+        host, port, rank, world_size, device, "python_cp_group"
+    )
     _cp_stores[device_key] = store
     _cp_groups[device_key] = group
     return group
