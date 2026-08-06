@@ -39,63 +39,9 @@ limitations under the License.
 #include "framework/request/request_state.h"
 #include "scheduler/profile/graph_warmup.h"
 #include "util/rec_model_utils.h"
-#include "util/utils.h"
 
 namespace xllm {
 namespace {
-
-constexpr int32_t kMlaGraphKvLenBucket = 2048;
-
-bool uses_deepseek_v2_mla_graph(const ModelArgs& args) {
-  return args.enable_mla() &&
-         util::is_deepseek_v2_family_model_type(args.model_type());
-}
-
-struct MlaGraphWarmupShape {
-  int32_t decode_seq_len = 0;
-  int32_t target_kv_bucket = 0;
-  int32_t effective_max_decode_seqs = 0;
-  int64_t per_seq_kv_budget = 0;
-};
-
-int32_t effective_graph_decode_max_batch_size(
-    const ProfileManager::Options& options) {
-  const int64_t max_seqs_per_batch =
-      std::max<int64_t>(options.max_seqs_per_batch(), 1);
-  const int64_t dp_size = std::max<int64_t>(options.dp_size(), 1);
-  const int64_t graph_decode_limit_per_dp =
-      std::max<int64_t>(::xllm::ExecutionConfig::get_instance()
-                            .acl_graph_decode_batch_size_limit(),
-                        1);
-  const int64_t graph_decode_limit = graph_decode_limit_per_dp * dp_size;
-  return static_cast<int32_t>(
-      std::min<int64_t>(max_seqs_per_batch, graph_decode_limit));
-}
-
-MlaGraphWarmupShape get_mla_graph_warmup_shape(
-    const ProfileManager::Options& options,
-    int32_t max_context_len,
-    int32_t block_size,
-    int32_t schedule_overlap_slack) {
-  const int32_t effective_max_decode_seqs =
-      effective_graph_decode_max_batch_size(options);
-  const int64_t max_tokens_per_batch =
-      std::max<int64_t>(options.max_tokens_per_batch(), 1);
-  const int64_t per_seq_kv_budget = std::min<int64_t>(
-      util::ceil_div(max_tokens_per_batch,
-                     static_cast<int64_t>(effective_max_decode_seqs)),
-      std::max<int32_t>(max_context_len, 1));
-  const int32_t target_kv_bucket = static_cast<int32_t>(util::align_up(
-      per_seq_kv_budget, static_cast<int64_t>(kMlaGraphKvLenBucket)));
-  const int32_t decode_seq_len = std::min(
-      std::max(2, target_kv_bucket - block_size - schedule_overlap_slack),
-      max_context_len);
-
-  return MlaGraphWarmupShape{decode_seq_len,
-                             target_kv_bucket,
-                             effective_max_decode_seqs,
-                             per_seq_kv_budget};
-}
 
 int64_t graph_warmup_bootstrap_hidden_size(const ModelArgs& model_args) {
   const int64_t hidden_size = model_args.hidden_size();
@@ -1066,36 +1012,6 @@ void ProfileManager::warmup_prefill_for_graph() {
 
   int32_t prefill_tokens =
       std::min(options_.max_tokens_per_batch(), max_context_len);
-  int32_t max_seqs_per_batch = options_.max_seqs_per_batch();
-  int32_t decode_seq_len = std::min(16, max_context_len);
-  MlaGraphWarmupShape mla_graph_warmup_shape;
-  if (uses_deepseek_v2_mla_graph(model_args)) {
-    const int32_t block_size =
-        std::max<int32_t>(block_manager_pool_->options().block_size(), 1);
-    const int32_t schedule_overlap_slack =
-        options_.enable_schedule_overlap()
-            ? (::xllm::SpeculativeConfig::get_instance()
-                   .num_speculative_tokens() +
-               1)
-            : 0;
-    mla_graph_warmup_shape = get_mla_graph_warmup_shape(
-        options_, max_context_len, block_size, schedule_overlap_slack);
-    decode_seq_len = mla_graph_warmup_shape.decode_seq_len;
-    max_seqs_per_batch = std::min(
-        max_seqs_per_batch, mla_graph_warmup_shape.effective_max_decode_seqs);
-    LOG(INFO) << "MLA graph warmup shape: max_tokens_per_batch="
-              << options_.max_tokens_per_batch()
-              << ", max_seqs_per_batch=" << options_.max_seqs_per_batch()
-              << ", effective_max_decode_seqs="
-              << mla_graph_warmup_shape.effective_max_decode_seqs
-              << ", per_seq_kv_budget="
-              << mla_graph_warmup_shape.per_seq_kv_budget
-              << ", target_kv_bucket="
-              << mla_graph_warmup_shape.target_kv_bucket
-              << ", block_size=" << block_size
-              << ", schedule_overlap_slack=" << schedule_overlap_slack
-              << ", decode_seq_len=" << decode_seq_len;
-  }
 
   if (options_.dp_size() > 1) {
     prefill_tokens = std::max(prefill_tokens, options_.dp_size());
@@ -1133,7 +1049,7 @@ void ProfileManager::warmup_decode_for_graph() {
       static_cast<int32_t>(decode_batch_sizes.size());
 
   LOG(INFO) << "Graph warmup started: bucket_count=" << decode_bucket_count
-            << ", max_seqs_per_batch=" << max_seqs_per_batch
+            << ", max_decode_batch_size=" << max_decode_batch_size
             << ", decode_seq_len=" << decode_seq_len;
 
   // Capture from the largest bucket down to the smallest so every smaller
