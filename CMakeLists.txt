@@ -473,6 +473,18 @@ if(USE_NPU)
   )
   message(STATUS "Configured xllm_atb_layers from source: ${XLLM_ATB_LAYERS_SOURCE_DIR}")
 
+  if(EXISTS "$ENV{NPU_HOME_PATH}/include/aclnnop")
+    target_include_directories(xllm_atb_layers SYSTEM PRIVATE
+      $ENV{NPU_HOME_PATH}/include/aclnnop
+    )
+  endif()
+
+  if(EXISTS "$ENV{NPU_HOME_PATH}/opp/vendors/custom_xllm_math/op_api/include/aclnnop")
+    target_include_directories(xllm_atb_layers SYSTEM PRIVATE
+      $ENV{NPU_HOME_PATH}/opp/vendors/custom_xllm_math/op_api/include/aclnnop
+    )
+  endif()
+
   # torch npu_torch and npu ops is only used by npu related modules/classes, so system priority is reasonable.
   include_directories(SYSTEM
       $ENV{PYTHON_INCLUDE_PATH}
@@ -481,6 +493,7 @@ if(USE_NPU)
       $ENV{PYTORCH_NPU_INSTALL_PATH}/include
       $ENV{PYTORCH_INSTALL_PATH}/include/torch/csrc/distributed
       $ENV{NPU_HOME_PATH}/include
+      $ENV{NPU_HOME_PATH}/include/aclnnop
       $ENV{ATB_HOME_PATH}/include
       ${CMAKE_CURRENT_SOURCE_DIR}/third_party/torch_npu_ops/
   )

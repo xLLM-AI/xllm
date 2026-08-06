@@ -1174,6 +1174,7 @@ std::tuple<torch::Tensor, torch::Tensor> dispatch_ffn_combine(
                                              params.scale1,
                                              params.scale2,
                                              params.probs,
+                                             params.x_active_mask,
                                              params.group,
                                              params.max_output_size,
                                              params.swiglu_limit,

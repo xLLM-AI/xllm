@@ -26,7 +26,8 @@ namespace layer {
 
 DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
     const ModelContext& context,
-    int32_t layer_id) {
+    int32_t layer_id)
+    : layer_id_(layer_id) {
   const auto& args = context.get_model_args();
   const auto& quant_args = context.get_quant_args();
   const auto& parallel_args = context.get_parallel_args();
@@ -53,6 +54,7 @@ DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
   moe_args.skip_gate_load = true;
   moe_mlp_ = register_module(
       "ffn", FusedMoE(args, moe_args, quant_args, parallel_args, options));
+  moe_mlp_->set_eplb_layer_id(layer_id_ - args.first_k_dense_replace());
   // Register as "gate" to match Python's mlp.gate module path.
   gate_ = register_module("gate", DeepseekV4Gate(context, layer_id));
 
@@ -129,6 +131,19 @@ void DeepseekV4DecoderLayerImpl::load_state_dict(const StateDict& state_dict) {
 }
 
 void DeepseekV4DecoderLayerImpl::verify_loaded_weights() const {}
+
+void DeepseekV4DecoderLayerImpl::prepare_expert_weight(
+    const std::vector<int32_t>& expert_ids) {
+  moe_mlp_->prepare_expert_weight(expert_ids);
+}
+
+void DeepseekV4DecoderLayerImpl::start_expert_weight_transfer() {
+  moe_mlp_->start_expert_weight_transfer();
+}
+
+void DeepseekV4DecoderLayerImpl::update_expert_weight() {
+  moe_mlp_->update_expert_weight();
+}
 
 torch::Tensor DeepseekV4DecoderLayerImpl::forward(
     torch::Tensor& x,

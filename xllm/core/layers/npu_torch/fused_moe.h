@@ -17,9 +17,14 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <chrono>
+#include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
@@ -32,9 +37,29 @@ limitations under the License.
 #include "layers/common/dense_mlp.h"
 #include "layers/common/fused_moe_base.h"
 #include "layers/common/linear.h"
+#include "layers/npu_torch/deepseek_v4_eplb_utils.h"
 
 namespace xllm {
 namespace layer {
+
+namespace dsv4_eplb {
+void stage_resident_expert_slots(const torch::Tensor& source,
+                                 torch::Tensor& pending,
+                                 const std::vector<int32_t>& source_slots);
+void stage_resident_expert_slots(const torch::Tensor& source,
+                                 torch::Tensor& pending,
+                                 const std::vector<int32_t>& source_slots,
+                                 const std::vector<int32_t>& changed_slots);
+bool should_activate_full_expert_tensor(int64_t changed_slots,
+                                        int64_t total_slots);
+void activate_expert_slots(torch::Tensor& active,
+                           const torch::Tensor& pending,
+                           const std::vector<int32_t>& changed_slots,
+                           bool activate_full_tensor);
+void update_dispatch_scale_slots(const torch::Tensor& source,
+                                 torch::Tensor& dispatch_scale,
+                                 const torch::Tensor& changed_slot_indices);
+}  // namespace dsv4_eplb
 
 class FusedMoEImpl : public torch::nn::Module {
  public:
@@ -49,6 +74,7 @@ class FusedMoEImpl : public torch::nn::Module {
       const torch::Tensor& hidden_states,
       const torch::Tensor& router_logits,
       const std::optional<torch::Tensor>& shared_output,
+      const ModelInputParams& input_params,
       bool use_mega_moe);
   torch::Tensor forward_with_selected_experts(
       const torch::Tensor& hidden_states,
@@ -58,6 +84,18 @@ class FusedMoEImpl : public torch::nn::Module {
   torch::Tensor forward(const torch::Tensor& hidden_states,
                         const ModelInputParams& input_params);
   void load_state_dict(const StateDict& state_dict);
+  void set_eplb_layer_id(int32_t layer_id);
+  void prepare_expert_weight(const std::vector<int32_t>& expert_ids);
+  void start_expert_weight_transfer();
+  void commit_pending_eplb_transfer();
+  void update_expert_weight();
+  // Returns whether the most recent prepare_expert_weight() call finished with
+  // pending weights ready. EplbExecutor gates ready_layer_id_ on this so a
+  // silent failure (missing tensor, provider unwired) does not confuse
+  // EplbManager into thinking the layer is deployed.
+  bool last_prepare_expert_weight_ok() const {
+    return last_prepare_expert_weight_ok_;
+  }
 
  private:
   // struct to store the selected expert info
@@ -72,10 +110,11 @@ class FusedMoEImpl : public torch::nn::Module {
   // initial steps for MoE computation, select the experts for each token
   torch::Tensor select_experts(const torch::Tensor& hidden_states_2d,
                                const torch::Tensor& router_logits_2d,
-                               SelectedExpertInfo& selected_expert_info);
+                               SelectedExpertInfo& selected_expert_info,
+                               const ModelInputParams& input_params);
 
   // Computes router choices in the global expert-id space. MegaMoe consumes
-  // these values before the legacy per-rank expert mask is applied.
+  // these values before the EPLB physical-expert remap is applied.
   std::pair<torch::Tensor, torch::Tensor> select_global_experts(
       const torch::Tensor& hidden_states_2d,
       const torch::Tensor& router_logits_2d);
@@ -160,6 +199,26 @@ class FusedMoEImpl : public torch::nn::Module {
   bool should_gather_dp_inputs_for_moe() const;
   bool can_use_ep2_dispatch_combine(const ModelInputParams& input_params,
                                     const torch::Tensor& hidden_states) const;
+  int64_t local_physical_experts_num() const;
+  int64_t global_physical_experts_num() const;
+  torch::Tensor remap_expert_ids_for_eplb(const torch::Tensor& ids_2d) const;
+  void record_eplb_expert_load(const torch::Tensor& ids_2d,
+                               const ModelInputParams& input_params) const;
+  void record_eplb_dispatch_expert_load(
+      const torch::Tensor& expert_token_counts,
+      const ModelInputParams& input_params) const;
+  void initialize_eplb_state();
+  void expand_eplb_weight_storage();
+  void expand_eplb_tensor_storage(torch::Tensor& tensor);
+  void reserve_eplb_staging_memory();
+  bool prepare_eplb_tensor_slots(const torch::Tensor& tensor,
+                                 const std::string& tensor_name,
+                                 const std::vector<int32_t>& source_slots);
+  void update_eplb_tensor_slots(torch::Tensor& tensor,
+                                const std::string& tensor_name);
+  void clear_pending_eplb_state();
+  bool prepare_eplb_pending_weights(const std::vector<int32_t>& source_slots);
+  void update_eplb_active_weights();
   int32_t fused_mc2_mode() const;
   bool prepare_dispatch_ffn_combine_inputs();
   bool prepare_dispatch_gmm_combine_decode_inputs();
@@ -167,26 +226,65 @@ class FusedMoEImpl : public torch::nn::Module {
       const torch::Tensor& input_2d,
       const torch::Tensor& weights_2d,
       const torch::Tensor& ids_2d,
-      at::IntArrayRef hidden_states_shape);
+      const torch::Tensor& active_token_mask,
+      at::IntArrayRef hidden_states_shape,
+      const ModelInputParams& input_params);
   torch::Tensor forward_with_dispatch_gmm_combine_decode(
       const torch::Tensor& input_2d,
       const torch::Tensor& weights_2d,
       const torch::Tensor& ids_2d,
+      const torch::Tensor& active_token_mask,
       at::IntArrayRef hidden_states_shape,
-      int64_t global_bs);
+      int64_t global_bs,
+      const ModelInputParams& input_params);
   torch::Tensor forward_with_selected_experts_ep2(
       const torch::Tensor& hidden_states,
       const torch::Tensor& topk_weights,
       const torch::Tensor& topk_ids,
       const ModelInputParams& input_params);
-  const std::string& get_moe_ep_group_name();
+  const std::string& get_mc2_group_name();
+  const std::string& get_moe_ep_process_group_name();
 
   bool enable_ep2_dispatch_combine_ = false;
+  bool enable_eplb_ = false;
+  bool reserve_eplb_staging_buffers_ = false;
+  int32_t eplb_layer_id_ = -1;
+  int64_t device_experts_num_ = 0;
+  int64_t redundant_experts_num_ = 0;
+  std::vector<int32_t> active_expert_ids_host_;
+  std::vector<int32_t> active_expert_ids_global_host_;
+  std::vector<int32_t> pending_expert_ids_host_;
+  std::vector<int32_t> pending_expert_ids_global_host_;
+  std::vector<int32_t> pending_changed_slots_;
+  std::vector<int32_t> pending_source_slots_;
+  torch::Tensor pending_changed_slot_indices_;
+  torch::Tensor active_expert_ids_;
+  torch::Tensor pending_expert_ids_;
+  torch::Tensor log2phy_map_;
+  torch::Tensor pending_log2phy_map_;
+  bool pending_eplb_weights_ready_ = false;
+  bool last_prepare_expert_weight_ok_ = true;
+  std::vector<dsv4_eplb::P2POp> pending_eplb_recv_ops_;
+  std::vector<dsv4_eplb::P2POp> pending_eplb_send_ops_;
+  c10::intrusive_ptr<c10d::Work> pending_eplb_work_;
+  std::unordered_map<std::string, torch::Tensor> pending_eplb_tensors_;
+  std::unordered_map<std::string, torch::Tensor> pending_eplb_source_tensors_;
+  bool pending_eplb_tensors_materialized_ = false;
+  bool pending_full_tensor_activation_ = false;
+  // Monotonic P2P bucket counters aggregated across every layer's
+  // prepare_expert_weight since process start. A 60s heartbeat in
+  // prepare_expert_weight prints deltas so on-call can watch HCCS migration
+  // volume without an all-gather.
+  dsv4_eplb::EplbP2PBucketStats eplb_p2p_stats_total_;
+  dsv4_eplb::EplbP2PBucketStats eplb_p2p_stats_last_heartbeat_;
+  std::chrono::steady_clock::time_point eplb_p2p_heartbeat_last_ =
+      std::chrono::steady_clock::now();
   bool dispatch_ffn_combine_prepared_ = false;
   bool dispatch_gmm_combine_decode_prepared_ = false;
   torch::Tensor dispatch_ffn_w13_scale_;
   torch::Tensor dispatch_ffn_w2_scale_;
-  std::string moe_ep_group_name_;
+  std::string mc2_group_name_;
+  std::string moe_ep_process_group_name_;
 
   bool mega_moe_enabled_ = false;
   std::weak_ptr<MegaMoeCommResource> mega_moe_comm_resource_;

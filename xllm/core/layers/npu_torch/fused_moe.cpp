@@ -18,20 +18,24 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
+#include <mutex>
 #include <numeric>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef TORCH_HIGHER_THAN_PTA6
 #include <torch_npu/csrc/aten/CustomFunctions.h>
-#include <torch_npu/csrc/core/npu/NPUFormat.h>
 #else
 #include <torch_npu/csrc/aten/NPUNativeFunctions.h>
 #endif
+#include <torch_npu/csrc/core/npu/NPUFormat.h>
 
 #include "framework/config/eplb_config.h"
 #include "framework/config/kernel_config.h"
@@ -40,11 +44,73 @@ limitations under the License.
 #include "framework/parallel_state/parallel_state.h"
 #include "kernels/ops_api.h"
 #include "layers/common/dp_utils.h"
+#include "layers/npu_torch/deepseek_v4_eplb_load_utils.h"
 #include "platform/device.h"
 #include "util/utils.h"
 
 namespace xllm {
 namespace layer {
+
+namespace dsv4_eplb {
+
+void stage_resident_expert_slots(const torch::Tensor& source,
+                                 torch::Tensor& pending,
+                                 const std::vector<int32_t>& source_slots) {
+  std::vector<int32_t> changed_slots(source_slots.size());
+  std::iota(changed_slots.begin(), changed_slots.end(), 0);
+  stage_resident_expert_slots(source, pending, source_slots, changed_slots);
+}
+
+void stage_resident_expert_slots(const torch::Tensor& source,
+                                 torch::Tensor& pending,
+                                 const std::vector<int32_t>& source_slots,
+                                 const std::vector<int32_t>& changed_slots) {
+  CHECK(source.defined());
+  CHECK(pending.defined());
+  CHECK_EQ(source.sizes(), pending.sizes());
+  CHECK_GT(source.dim(), 0);
+  CHECK_EQ(source.size(0), static_cast<int64_t>(source_slots.size()));
+  for (int32_t destination_slot : changed_slots) {
+    CHECK_GE(destination_slot, 0);
+    CHECK_LT(destination_slot, static_cast<int32_t>(source_slots.size()));
+    const int32_t source_slot =
+        source_slots[static_cast<size_t>(destination_slot)];
+    if (source_slot < 0) {
+      continue;
+    }
+    CHECK_LT(source_slot, source.size(0));
+    pending[destination_slot].copy_(source[source_slot]);
+  }
+}
+
+bool should_activate_full_expert_tensor(int64_t changed_slots,
+                                        int64_t total_slots) {
+  CHECK_GE(changed_slots, 0);
+  CHECK_GE(total_slots, 0);
+  CHECK_LE(changed_slots, total_slots);
+  return total_slots > 0 && changed_slots >= (total_slots + 1) / 2;
+}
+
+void activate_expert_slots(torch::Tensor& active,
+                           const torch::Tensor& pending,
+                           const std::vector<int32_t>& changed_slots,
+                           bool activate_full_tensor) {
+  CHECK(active.defined());
+  CHECK(pending.defined());
+  CHECK_EQ(active.sizes(), pending.sizes());
+  CHECK_GT(active.dim(), 0);
+  if (activate_full_tensor) {
+    active.copy_(pending);
+    return;
+  }
+  for (int32_t slot : changed_slots) {
+    CHECK_GE(slot, 0);
+    CHECK_LT(slot, active.size(0));
+    active[slot].copy_(pending[slot]);
+  }
+}
+
+}  // namespace dsv4_eplb
 
 namespace {
 
@@ -183,6 +249,88 @@ torch::Tensor npu_format_cast(const torch::Tensor& tensor, int64_t format) {
 #endif
 }
 
+torch::Tensor empty_with_matching_npu_format(const torch::Tensor& tensor) {
+  if (tensor.device().is_cpu()) {
+    return torch::empty_like(tensor);
+  }
+  return at_npu::native::empty_with_format(
+      tensor.sizes(), tensor.options(), get_tensor_npu_format(tensor));
+}
+
+dsv4_eplb::StagingBufferKey staging_buffer_key(const torch::Tensor& tensor,
+                                               int64_t npu_format) {
+  return {/*numel=*/tensor.numel(),
+          /*scalar_type=*/static_cast<int32_t>(tensor.scalar_type()),
+          /*npu_format=*/npu_format};
+}
+
+bool has_private_npu_format(const torch::Tensor& tensor) {
+  return !tensor.device().is_cpu() &&
+         get_tensor_npu_format(tensor) != ACL_FORMAT_ND;
+}
+
+struct EplbStagingReservation {
+  int64_t storage_bytes = 0;
+  std::vector<torch::Tensor> tensors;
+};
+
+std::mutex& eplb_staging_reservation_mutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+std::unordered_map<int32_t, EplbStagingReservation>&
+eplb_staging_reservations() {
+  static std::unordered_map<int32_t, EplbStagingReservation> reservations;
+  return reservations;
+}
+
+torch::Tensor take_eplb_staging_tensor(const torch::Tensor& reference,
+                                       int64_t npu_format) {
+  if (!reference.device().is_cpu() && reference.device().index() >= 0) {
+    const int32_t device_index =
+        static_cast<int32_t>(reference.device().index());
+    std::lock_guard<std::mutex> lock(eplb_staging_reservation_mutex());
+    auto& tensors = eplb_staging_reservations()[device_index].tensors;
+    const auto iter = std::find_if(
+        tensors.begin(), tensors.end(), [&](const torch::Tensor& candidate) {
+          return candidate.defined() &&
+                 candidate.device() == reference.device() &&
+                 candidate.scalar_type() == reference.scalar_type() &&
+                 candidate.numel() == reference.numel() &&
+                 get_tensor_npu_format(candidate) == npu_format;
+        });
+    if (iter != tensors.end()) {
+      torch::Tensor staging_tensor = std::move(*iter);
+      tensors.erase(iter);
+      return staging_tensor.view(reference.sizes());
+    }
+  }
+  if (reference.device().is_cpu()) {
+    return torch::empty_like(reference);
+  }
+  return at_npu::native::empty_with_format(
+      reference.sizes(), reference.options(), npu_format);
+}
+
+void recycle_eplb_staging_tensors(
+    const torch::Device& device,
+    std::unordered_map<std::string, torch::Tensor>& staging_tensors) {
+  if (device.is_cpu() || device.index() < 0 || staging_tensors.empty()) {
+    return;
+  }
+  const int32_t device_index = static_cast<int32_t>(device.index());
+  std::lock_guard<std::mutex> lock(eplb_staging_reservation_mutex());
+  auto& tensors = eplb_staging_reservations()[device_index].tensors;
+  tensors.reserve(tensors.size() + staging_tensors.size());
+  for (auto& [tensor_name, tensor] : staging_tensors) {
+    (void)tensor_name;
+    if (tensor.defined()) {
+      tensors.emplace_back(std::move(tensor));
+    }
+  }
+}
+
 void empty_cache_for_tensor(const torch::Tensor& tensor) {
   if (!tensor.defined() || tensor.device().is_cpu() ||
       tensor.device().index() < 0) {
@@ -236,6 +384,14 @@ bool has_w_style_shared_expert_weights(const StateDict& state_dict) {
   return false;
 }
 
+torch::Tensor expert_weight_prefix(torch::Tensor& weight,
+                                   int64_t checkpoint_expert_count) {
+  CHECK(weight.defined());
+  CHECK_GT(weight.dim(), 0);
+  CHECK_GE(weight.size(0), checkpoint_expert_count);
+  return weight.narrow(/*dim=*/0, /*start=*/0, checkpoint_expert_count);
+}
+
 // Qwen3.5-MoE fused checkpoint fallback helpers.
 bool load_fused_gate_up_fallback(const StateDict& state_dict,
                                  int64_t rank,
@@ -269,10 +425,11 @@ bool load_fused_gate_up_fallback(const StateDict& state_dict,
 
   auto gate_up_slice = slice_expert_weights(
       fused_gate_up, start_expert_id, num_experts_per_rank);
-  CHECK_EQ(w13.sizes(), gate_up_slice.sizes())
+  torch::Tensor load_target = expert_weight_prefix(w13, num_experts_per_rank);
+  CHECK_EQ(load_target.sizes(), gate_up_slice.sizes())
       << "weight size mismatch for " << state_dict.prefix()
       << "experts.gate_up_proj";
-  w13.copy_(gate_up_slice);
+  load_target.copy_(gate_up_slice);
   return true;
 }
 
@@ -297,10 +454,11 @@ bool load_fused_down_fallback(const StateDict& state_dict,
 
   auto down_slice =
       slice_expert_weights(fused_down, start_expert_id, num_experts_per_rank);
-  CHECK_EQ(w2.sizes(), down_slice.sizes())
+  torch::Tensor load_target = expert_weight_prefix(w2, num_experts_per_rank);
+  CHECK_EQ(load_target.sizes(), down_slice.sizes())
       << "weight size mismatch for " << state_dict.prefix()
       << "experts.down_proj";
-  w2.copy_(down_slice);
+  load_target.copy_(down_slice);
   return true;
 }
 
@@ -340,14 +498,16 @@ bool load_fused_up_scale_fallback(const StateDict& state_dict,
 
   auto gate_up_scale_slice = slice_expert_weights(
       fused_gate_up_scale, start_expert_id, num_experts_per_rank);
-  if (gate_up_scale_slice.sizes() != w13_scale.sizes() &&
-      gate_up_scale_slice.numel() == w13_scale.numel()) {
-    gate_up_scale_slice = gate_up_scale_slice.reshape(w13_scale.sizes());
+  torch::Tensor load_target =
+      expert_weight_prefix(w13_scale, num_experts_per_rank);
+  if (gate_up_scale_slice.sizes() != load_target.sizes() &&
+      gate_up_scale_slice.numel() == load_target.numel()) {
+    gate_up_scale_slice = gate_up_scale_slice.reshape(load_target.sizes());
   }
-  CHECK_EQ(w13_scale.sizes(), gate_up_scale_slice.sizes())
+  CHECK_EQ(load_target.sizes(), gate_up_scale_slice.sizes())
       << "weight size mismatch for " << state_dict.prefix()
       << "experts.gate_up_proj.weight_scale";
-  w13_scale.copy_(gate_up_scale_slice);
+  load_target.copy_(gate_up_scale_slice);
   return true;
 }
 
@@ -362,18 +522,50 @@ bool load_fused_down_scale_fallback(const StateDict& state_dict,
 
   auto down_scale_slice = slice_expert_weights(
       fused_down_scale, start_expert_id, num_experts_per_rank);
-  if (down_scale_slice.sizes() != w2_scale.sizes() &&
-      down_scale_slice.numel() == w2_scale.numel()) {
-    down_scale_slice = down_scale_slice.reshape(w2_scale.sizes());
+  torch::Tensor load_target =
+      expert_weight_prefix(w2_scale, num_experts_per_rank);
+  if (down_scale_slice.sizes() != load_target.sizes() &&
+      down_scale_slice.numel() == load_target.numel()) {
+    down_scale_slice = down_scale_slice.reshape(load_target.sizes());
   }
-  CHECK_EQ(w2_scale.sizes(), down_scale_slice.sizes())
+  CHECK_EQ(load_target.sizes(), down_scale_slice.sizes())
       << "weight size mismatch for " << state_dict.prefix()
       << "experts.down_proj.weight_scale";
-  w2_scale.copy_(down_scale_slice);
+  load_target.copy_(down_scale_slice);
   return true;
 }
 
 }  // namespace
+
+namespace dsv4_eplb {
+
+void update_dispatch_scale_slots(const torch::Tensor& source,
+                                 torch::Tensor& dispatch_scale,
+                                 const torch::Tensor& changed_slot_indices) {
+  CHECK(source.defined());
+  CHECK(dispatch_scale.defined());
+  CHECK(changed_slot_indices.defined());
+  CHECK_EQ(source.sizes(), dispatch_scale.sizes());
+  CHECK_GT(source.dim(), 0);
+  CHECK_EQ(changed_slot_indices.dim(), 1);
+  CHECK_EQ(changed_slot_indices.scalar_type(), torch::kInt64);
+  CHECK_EQ(changed_slot_indices.device(), source.device());
+  CHECK_EQ(dispatch_scale.device(), source.device());
+  if (changed_slot_indices.numel() == 0) {
+    return;
+  }
+  if (changed_slot_indices.numel() * 2 >= source.size(0)) {
+    dispatch_scale.copy_(convert_fp32_scale_to_int64(source).contiguous());
+    return;
+  }
+  torch::Tensor updated_scale =
+      convert_fp32_scale_to_int64(source.index_select(
+                                      /*dim=*/0, changed_slot_indices))
+          .contiguous();
+  dispatch_scale.index_copy_(/*dim=*/0, changed_slot_indices, updated_scale);
+}
+
+}  // namespace dsv4_eplb
 
 FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
                            const FusedMoEArgs& moe_args,
@@ -416,9 +608,22 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
     ep_rank = parallel_args.moe_ep_group_->rank();
   }
 
+  CHECK_EQ(num_experts % ep_size, 0)
+      << "FusedMoE requires routed experts to be divisible by ep_size.";
   // calculate the number of experts per rank
   num_experts_per_rank_ = num_experts / ep_size;
   start_expert_id_ = ep_rank * num_experts_per_rank_;
+  redundant_experts_num_ =
+      ::xllm::EPLBConfig::get_instance().redundant_experts_num();
+  CHECK_GE(redundant_experts_num_, 0)
+      << "DeepSeek-V4 EPLB redundant_experts_num must be non-negative.";
+  enable_eplb_ = is_deepseek_v4_ &&
+                 ::xllm::EPLBConfig::get_instance().enable_eplb() &&
+                 ep_size > 1;
+  reserve_eplb_staging_buffers_ = dsv4_eplb::should_reserve_staging_buffers(
+      enable_eplb_, model_args.model_type());
+  device_experts_num_ =
+      num_experts_per_rank_ + (enable_eplb_ ? redundant_experts_num_ : 0);
   enable_ep2_dispatch_combine_ =
       is_deepseek_v4_ &&
       ::xllm::EPLBConfig::get_instance().expert_parallel_degree() == 2 &&
@@ -426,6 +631,17 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
   if (enable_ep2_dispatch_combine_) {
     CHECK(parallel_args_.moe_ep_group_ != nullptr)
         << "DeepSeek-V4 NPU EP2 dispatch/combine requires moe_ep_group.";
+  }
+  if (enable_eplb_) {
+    CHECK(parallel_args_.eplb_group_ != nullptr)
+        << "DeepSeek-V4 EPLB requires a dedicated EPLB process group.";
+    CHECK_EQ(parallel_args_.eplb_group_->rank(),
+             parallel_args_.moe_ep_group_->rank())
+        << "EPLB and MoE EP groups must use the same rank ordering.";
+    CHECK_EQ(parallel_args_.eplb_group_->world_size(),
+             parallel_args_.moe_ep_group_->world_size())
+        << "EPLB and MoE EP groups must use the same world size.";
+    initialize_eplb_state();
   }
 
   if (topk_method == "noaux_tc") {
@@ -478,32 +694,31 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
     w13_ = register_parameter(
         "w13",
         torch::empty(
-            {num_experts_per_rank_, local_intermediate_size * 2, hidden_size_},
+            {device_experts_num_, local_intermediate_size * 2, hidden_size_},
             quant_option),
         false);
     w13_scale_ = register_parameter(
         "w13_scale",
-        torch::empty({num_experts_per_rank_, local_intermediate_size * 2},
+        torch::empty({device_experts_num_, local_intermediate_size * 2},
                      fp_option),
         false);
     input_smooth_ = register_parameter(
         "input_smooth",
-        torch::empty({num_experts_per_rank_, hidden_size_}, fp_option),
+        torch::empty({device_experts_num_, hidden_size_}, fp_option),
         false);
     w2_ = register_parameter(
         "w2",
         torch::empty(
-            {num_experts_per_rank_, hidden_size_, local_intermediate_size},
+            {device_experts_num_, hidden_size_, local_intermediate_size},
             quant_option),
         false);
     w2_scale_ = register_parameter(
         "w2_scale",
-        torch::empty({num_experts_per_rank_, hidden_size_}, fp_option),
+        torch::empty({device_experts_num_, hidden_size_}, fp_option),
         false);
     act_smooth_ = register_parameter(
         "act_smooth",
-        torch::empty({num_experts_per_rank_, local_intermediate_size},
-                     fp_option),
+        torch::empty({device_experts_num_, local_intermediate_size}, fp_option),
         false);
   } else if (quant_args_.quant_method() == kQuantMethodAscendInt4) {
     CHECK_EQ(hidden_size_ % 2, 0)
@@ -512,13 +727,13 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
     w13_ = register_parameter(
         "w13",
         torch::empty(
-            {num_experts_per_rank_, local_intermediate_size, hidden_size_},
+            {device_experts_num_, local_intermediate_size, hidden_size_},
             options_.dtype(torch::kInt8)),
         false);
     w2_ = register_parameter(
         "w2",
         torch::empty(
-            {num_experts_per_rank_, hidden_size_ / 2, local_intermediate_size},
+            {device_experts_num_, hidden_size_ / 2, local_intermediate_size},
             options_.dtype(torch::kInt8)),
         false);
   } else if (quant_args_.quant_method() == kQuantMethodAscendInt8 ||
@@ -526,26 +741,26 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
     w13_ = register_parameter(
         "w13",
         torch::empty(
-            {num_experts_per_rank_, local_intermediate_size * 2, hidden_size_},
+            {device_experts_num_, local_intermediate_size * 2, hidden_size_},
             options_.dtype(torch::kInt8)),
         false);
     w2_ = register_parameter(
         "w2",
         torch::empty(
-            {num_experts_per_rank_, hidden_size_, local_intermediate_size},
+            {device_experts_num_, hidden_size_, local_intermediate_size},
             options_.dtype(torch::kInt8)),
         false);
   } else {
     w13_ = register_parameter(
         "w13",
         torch::empty(
-            {num_experts_per_rank_, local_intermediate_size * 2, hidden_size_},
+            {device_experts_num_, local_intermediate_size * 2, hidden_size_},
             options_),
         false);
     w2_ = register_parameter(
         "w2",
         torch::empty(
-            {num_experts_per_rank_, hidden_size_, local_intermediate_size},
+            {device_experts_num_, hidden_size_, local_intermediate_size},
             options_),
         false);
   }
@@ -605,22 +820,22 @@ void FusedMoEImpl::ensure_quant_weight_layout() {
     push(w13_,
          w13_is_loaded_,
          "w13",
-         {num_experts_per_rank_, local_intermediate_size_ * 2, hidden_size_},
+         {device_experts_num_, local_intermediate_size_ * 2, hidden_size_},
          options_.dtype(torch::kInt8));
     push(w2_,
          w2_is_loaded_,
          "w2",
-         {num_experts_per_rank_, hidden_size_, local_intermediate_size_},
+         {device_experts_num_, hidden_size_, local_intermediate_size_},
          options_.dtype(torch::kInt8));
     push(w13_scale_,
          w13_scale_is_loaded_,
          "w13_scale",
-         {num_experts_per_rank_, local_intermediate_size_ * 2},
+         {device_experts_num_, local_intermediate_size_ * 2},
          fp32_options);
     push(w2_scale_,
          w2_scale_is_loaded_,
          "w2_scale",
-         {num_experts_per_rank_, hidden_size_},
+         {device_experts_num_, hidden_size_},
          w2_scale_options);
     weight::ensure_parameter_storage(this, specs);
     return;
@@ -639,23 +854,23 @@ void FusedMoEImpl::ensure_quant_weight_layout() {
   push(w13_,
        w13_is_loaded_,
        "w13",
-       {num_experts_per_rank_, w13_weight_out, hidden_size_},
+       {device_experts_num_, w13_weight_out, hidden_size_},
        options_.dtype(torch::kInt8));
   push(w2_,
        w2_is_loaded_,
        "w2",
-       {num_experts_per_rank_, w2_weight_out, local_intermediate_size_},
+       {device_experts_num_, w2_weight_out, local_intermediate_size_},
        options_.dtype(torch::kInt8));
 
   push(w13_scale_,
        w13_scale_is_loaded_,
        "w13_scale",
-       {num_experts_per_rank_, local_intermediate_size_ * 2, 1},
+       {device_experts_num_, local_intermediate_size_ * 2, 1},
        fp32_options);
   push(w2_scale_,
        w2_scale_is_loaded_,
        "w2_scale",
-       {num_experts_per_rank_, hidden_size_, 1},
+       {device_experts_num_, hidden_size_, 1},
        fp32_options);
 
   if (quant_args_.group_size() > 0) {
@@ -669,14 +884,14 @@ void FusedMoEImpl::ensure_quant_weight_layout() {
     push(w13_scale_second_,
          w13_scale_second_is_loaded_,
          "w13_scale_second",
-         {num_experts_per_rank_,
+         {device_experts_num_,
           local_intermediate_size_ * 2,
           hidden_size_ / quant_args_.group_size()},
          fp32_options);
     push(w2_scale_second_,
          w2_scale_second_is_loaded_,
          "w2_scale_second",
-         {num_experts_per_rank_,
+         {device_experts_num_,
           hidden_size_,
           local_intermediate_size_ / quant_args_.group_size()},
          fp32_options);
@@ -685,12 +900,12 @@ void FusedMoEImpl::ensure_quant_weight_layout() {
   push(w13_scale_bias_,
        w13_scale_bias_is_loaded_,
        "w13_scale_bias",
-       {num_experts_per_rank_, local_intermediate_size_ * 2, 1},
+       {device_experts_num_, local_intermediate_size_ * 2, 1},
        fp32_options);
   push(w2_scale_bias_,
        w2_scale_bias_is_loaded_,
        "w2_scale_bias",
-       {num_experts_per_rank_, hidden_size_, 16 / tp_pg_->world_size()},
+       {device_experts_num_, hidden_size_, 16 / tp_pg_->world_size()},
        fp32_options);
 
   weight::ensure_parameter_storage(this, specs);
@@ -728,11 +943,11 @@ void FusedMoEImpl::resolve_quant_method_from_state_dict(
     push(w13_,
          w13_is_loaded_,
          "w13",
-         {num_experts_per_rank_, local_intermediate_size_ * 2, hidden_size_});
+         {device_experts_num_, local_intermediate_size_ * 2, hidden_size_});
     push(w2_,
          w2_is_loaded_,
          "w2",
-         {num_experts_per_rank_, hidden_size_, local_intermediate_size_});
+         {device_experts_num_, hidden_size_, local_intermediate_size_});
     weight::ensure_parameter_storage(this, specs);
   }
 }
@@ -766,6 +981,722 @@ void FusedMoEImpl::ensure_group_gemm_weight_layout(torch::Tensor& weight,
       << name
       << " grouped matmul output dim mismatch after layout prepare, got "
       << weight.sizes() << ", expected dim2=" << output_dim;
+}
+
+void FusedMoEImpl::set_eplb_layer_id(int32_t layer_id) {
+  eplb_layer_id_ = layer_id;
+}
+
+int64_t FusedMoEImpl::local_physical_experts_num() const {
+  return enable_eplb_ ? device_experts_num_ : num_experts_per_rank_;
+}
+
+int64_t FusedMoEImpl::global_physical_experts_num() const {
+  if (!enable_eplb_) {
+    return num_total_experts_;
+  }
+  CHECK(parallel_args_.moe_ep_group_ != nullptr)
+      << "DeepSeek-V4 EPLB requires moe_ep_group.";
+  return device_experts_num_ * parallel_args_.moe_ep_group_->world_size();
+}
+
+void FusedMoEImpl::initialize_eplb_state() {
+  CHECK(parallel_args_.moe_ep_group_ != nullptr)
+      << "DeepSeek-V4 EPLB requires moe_ep_group.";
+  const int32_t ep_world_size = parallel_args_.moe_ep_group_->world_size();
+  const int32_t ep_rank = parallel_args_.moe_ep_group_->rank();
+  CHECK_EQ(ep_world_size * num_experts_per_rank_, num_total_experts_)
+      << "DeepSeek-V4 EPLB requires EP world size to cover all routed experts.";
+  const std::vector<int32_t> initial_expert_ids =
+      dsv4_eplb::build_initial_expert_ids(
+          static_cast<int32_t>(num_total_experts_),
+          ep_world_size,
+          static_cast<int32_t>(device_experts_num_),
+          static_cast<int32_t>(redundant_experts_num_));
+  active_expert_ids_host_ = dsv4_eplb::slice_rank_expert_ids(
+      initial_expert_ids, ep_rank, static_cast<int32_t>(device_experts_num_));
+  CHECK_EQ(active_expert_ids_host_.size(),
+           static_cast<size_t>(device_experts_num_))
+      << "DeepSeek-V4 EPLB failed to build rank expert ids.";
+  active_expert_ids_global_host_ = initial_expert_ids;
+  // moe_tp_group_ is optional. When it is unset (pure EP) the rank collapses
+  // to 0 so we keep the historical `ep_rank % duplicate_count` selection.
+  const int32_t moe_tp_rank_in_group =
+      parallel_args_.moe_tp_group_ != nullptr
+          ? parallel_args_.moe_tp_group_->rank()
+          : 0;
+  const std::vector<int32_t> initial_log2phy_map =
+      dsv4_eplb::build_log2phy_map(initial_expert_ids,
+                                   static_cast<int32_t>(num_total_experts_),
+                                   ep_rank,
+                                   moe_tp_rank_in_group);
+  CHECK_EQ(initial_log2phy_map.size(), static_cast<size_t>(num_total_experts_))
+      << "DeepSeek-V4 EPLB log2phy map size mismatch.";
+  CHECK(std::all_of(initial_log2phy_map.begin(),
+                    initial_log2phy_map.end(),
+                    [](int32_t physical_id) { return physical_id >= 0; }))
+      << "DeepSeek-V4 EPLB initial log2phy map has unmapped experts.";
+  auto int_options = torch::TensorOptions().dtype(torch::kInt32);
+  active_expert_ids_ =
+      torch::tensor(active_expert_ids_host_, int_options).to(options_.device());
+  log2phy_map_ =
+      torch::tensor(initial_log2phy_map, int_options).to(options_.device());
+}
+
+torch::Tensor FusedMoEImpl::remap_expert_ids_for_eplb(
+    const torch::Tensor& ids_2d) const {
+  if (!enable_eplb_) {
+    return ids_2d;
+  }
+  CHECK(log2phy_map_.defined()) << "DeepSeek-V4 EPLB log2phy map is missing.";
+  torch::Tensor flat_ids = ids_2d.reshape({-1}).to(torch::kInt64);
+  torch::Tensor remapped =
+      log2phy_map_.index_select(/*dim=*/0, flat_ids).reshape(ids_2d.sizes());
+  return remapped.to(torch::kInt32).contiguous();
+}
+
+void FusedMoEImpl::record_eplb_expert_load(
+    const torch::Tensor& ids_2d,
+    const ModelInputParams& input_params) const {
+  if (!enable_eplb_ || eplb_layer_id_ < 0 ||
+      !input_params.expert.expert_load_data.defined() || ids_2d.numel() == 0) {
+    return;
+  }
+  const bool decode_only =
+      ::xllm::EPLBConfig::get_instance().eplb_use_decode_only_load();
+  if (decode_only && !all_dp_ranks_are_decode(input_params)) {
+    return;
+  }
+  CHECK_GE(input_params.expert.expert_load_data.dim(), 2)
+      << "DeepSeek-V4 EPLB expert_load_data must be 2D.";
+  CHECK_GT(input_params.expert.expert_load_data.size(0), eplb_layer_id_)
+      << "DeepSeek-V4 EPLB expert_load_data misses layer " << eplb_layer_id_;
+  CHECK_EQ(input_params.expert.expert_load_data.size(1), device_experts_num_)
+      << "DeepSeek-V4 EPLB expert_load_data local expert count mismatch.";
+  CHECK(parallel_args_.moe_ep_group_ != nullptr)
+      << "DeepSeek-V4 EPLB requires moe_ep_group.";
+  const int64_t ep_rank = parallel_args_.moe_ep_group_->rank();
+  const int64_t local_start = ep_rank * device_experts_num_;
+  torch::Tensor flat_ids = ids_2d.reshape({-1}).to(torch::kInt64);
+  // Histogram local physical experts with only fixed-shape ops. Shift ids into
+  // local slot space; ids outside [0, device_experts_num_) are clamped to a
+  // valid slot but contribute zero weight, so they do not affect the counts.
+  // Avoiding masked_select keeps the output shape static, which removes the
+  // per-layer device->host sync it forces and keeps this path ACL-graph
+  // capturable.
+  torch::Tensor local_ids = flat_ids - local_start;
+  torch::Tensor valid = torch::logical_and(
+      local_ids >= 0, local_ids < static_cast<int64_t>(device_experts_num_));
+  torch::Tensor safe_ids =
+      local_ids.clamp(0, static_cast<int64_t>(device_experts_num_) - 1);
+  torch::Tensor weights = valid.to(torch::kInt64);
+  torch::Tensor counts = torch::zeros({device_experts_num_},
+                                      flat_ids.options().dtype(torch::kInt64));
+  counts.scatter_add_(/*dim=*/0, safe_ids, weights);
+  torch::Tensor prefix_counts = counts.cumsum(/*dim=*/0);
+  input_params.expert.expert_load_data.select(/*dim=*/0, eplb_layer_id_)
+      .copy_(prefix_counts);
+}
+
+void FusedMoEImpl::record_eplb_dispatch_expert_load(
+    const torch::Tensor& expert_token_counts,
+    const ModelInputParams& input_params) const {
+  if (!enable_eplb_ || eplb_layer_id_ < 0 ||
+      !input_params.expert.expert_load_data.defined()) {
+    return;
+  }
+  const bool decode_only =
+      ::xllm::EPLBConfig::get_instance().eplb_use_decode_only_load();
+  if (decode_only && !all_dp_ranks_are_decode(input_params)) {
+    return;
+  }
+  dsv4_eplb::record_dispatch_expert_load(expert_token_counts,
+                                         input_params.expert.expert_load_data,
+                                         eplb_layer_id_,
+                                         /*is_graph_warmup=*/false);
+}
+
+void FusedMoEImpl::expand_eplb_tensor_storage(torch::Tensor& tensor) {
+  if (!enable_eplb_ || !tensor.defined() || tensor.dim() == 0 ||
+      device_experts_num_ == num_experts_per_rank_) {
+    return;
+  }
+  CHECK_GT(num_experts_per_rank_, 0)
+      << "DeepSeek-V4 EPLB expects at least one routed expert per rank.";
+  CHECK_EQ(tensor.size(0), device_experts_num_)
+      << "DeepSeek-V4 EPLB weights must allocate final physical expert "
+         "capacity before loading.";
+  for (int64_t slot = num_experts_per_rank_; slot < device_experts_num_;
+       ++slot) {
+    tensor[slot].copy_(tensor[num_experts_per_rank_ - 1]);
+  }
+}
+
+void FusedMoEImpl::expand_eplb_weight_storage() {
+  if (!enable_eplb_) {
+    return;
+  }
+  expand_eplb_tensor_storage(w13_);
+  expand_eplb_tensor_storage(w1_);
+  expand_eplb_tensor_storage(w3_);
+  expand_eplb_tensor_storage(w2_);
+  expand_eplb_tensor_storage(w13_scale_);
+  expand_eplb_tensor_storage(w1_scale_);
+  expand_eplb_tensor_storage(w3_scale_);
+  expand_eplb_tensor_storage(w2_scale_);
+  expand_eplb_tensor_storage(w1_scale_second_);
+  expand_eplb_tensor_storage(w3_scale_second_);
+  expand_eplb_tensor_storage(w13_scale_second_);
+  expand_eplb_tensor_storage(w2_scale_second_);
+  expand_eplb_tensor_storage(w1_scale_bias_);
+  expand_eplb_tensor_storage(w3_scale_bias_);
+  expand_eplb_tensor_storage(w13_scale_bias_);
+  expand_eplb_tensor_storage(w2_scale_bias_);
+  expand_eplb_tensor_storage(input_smooth_);
+  expand_eplb_tensor_storage(act_smooth_);
+}
+
+void FusedMoEImpl::reserve_eplb_staging_memory() {
+  if (!reserve_eplb_staging_buffers_ || options_.device().is_cpu() ||
+      options_.device().index() < 0) {
+    return;
+  }
+  static const std::array<std::pair<const char*, torch::Tensor FusedMoEImpl::*>,
+                          18>
+      kEplbTensorTable = {{
+          {"w13", &FusedMoEImpl::w13_},
+          {"w1", &FusedMoEImpl::w1_},
+          {"w3", &FusedMoEImpl::w3_},
+          {"w2", &FusedMoEImpl::w2_},
+          {"w13_scale", &FusedMoEImpl::w13_scale_},
+          {"w1_scale", &FusedMoEImpl::w1_scale_},
+          {"w3_scale", &FusedMoEImpl::w3_scale_},
+          {"w2_scale", &FusedMoEImpl::w2_scale_},
+          {"w1_scale_second", &FusedMoEImpl::w1_scale_second_},
+          {"w3_scale_second", &FusedMoEImpl::w3_scale_second_},
+          {"w13_scale_second", &FusedMoEImpl::w13_scale_second_},
+          {"w2_scale_second", &FusedMoEImpl::w2_scale_second_},
+          {"w1_scale_bias", &FusedMoEImpl::w1_scale_bias_},
+          {"w3_scale_bias", &FusedMoEImpl::w3_scale_bias_},
+          {"w13_scale_bias", &FusedMoEImpl::w13_scale_bias_},
+          {"w2_scale_bias", &FusedMoEImpl::w2_scale_bias_},
+          {"input_smooth", &FusedMoEImpl::input_smooth_},
+          {"act_smooth", &FusedMoEImpl::act_smooth_},
+      }};
+  std::vector<dsv4_eplb::StagingTensorSpec> tensor_specs;
+  tensor_specs.reserve(kEplbTensorTable.size());
+  for (const auto& [tensor_name, member_ptr] : kEplbTensorTable) {
+    const torch::Tensor& tensor = this->*member_ptr;
+    if (!tensor.defined() || tensor.dim() == 0) {
+      continue;
+    }
+    const int64_t storage_bytes =
+        tensor.numel() * static_cast<int64_t>(tensor.element_size());
+    tensor_specs.emplace_back(dsv4_eplb::StagingTensorSpec{
+        storage_bytes, has_private_npu_format(tensor)});
+  }
+  const int64_t required_bytes =
+      dsv4_eplb::calculate_staging_reservation_bytes(tensor_specs);
+  if (required_bytes <= 0) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(eplb_staging_reservation_mutex());
+  auto& reservations = eplb_staging_reservations();
+  const int32_t device_index = static_cast<int32_t>(options_.device().index());
+  EplbStagingReservation& reservation = reservations[device_index];
+  std::vector<dsv4_eplb::StagingBufferKey> available_buffers;
+  available_buffers.reserve(reservation.tensors.size() +
+                            tensor_specs.size() * 2);
+  for (const torch::Tensor& tensor : reservation.tensors) {
+    available_buffers.emplace_back(
+        staging_buffer_key(tensor, get_tensor_npu_format(tensor)));
+  }
+  reservation.tensors.reserve(reservation.tensors.size() +
+                              tensor_specs.size() * 2);
+  const int64_t previous_storage_bytes = reservation.storage_bytes;
+  for (const auto& [tensor_name, member_ptr] : kEplbTensorTable) {
+    const torch::Tensor& tensor = this->*member_ptr;
+    if (!tensor.defined() || tensor.dim() == 0) {
+      continue;
+    }
+    const bool needs_format_cast = has_private_npu_format(tensor);
+    const int64_t staging_format =
+        needs_format_cast ? ACL_FORMAT_ND : get_tensor_npu_format(tensor);
+    const int32_t required_count = needs_format_cast ? 2 : 1;
+    const dsv4_eplb::StagingBufferKey required_buffer =
+        staging_buffer_key(tensor, staging_format);
+    const int32_t missing_count = dsv4_eplb::missing_staging_buffer_count(
+        available_buffers, required_buffer, required_count);
+    for (int32_t copy_index = 0; copy_index < missing_count; ++copy_index) {
+      torch::Tensor staging_tensor =
+          needs_format_cast
+              ? at_npu::native::empty_with_format(
+                    tensor.sizes(), tensor.options(), ACL_FORMAT_ND)
+              : empty_with_matching_npu_format(tensor);
+      reservation.storage_bytes +=
+          staging_tensor.numel() *
+          static_cast<int64_t>(staging_tensor.element_size());
+      reservation.tensors.emplace_back(std::move(staging_tensor));
+      available_buffers.emplace_back(required_buffer);
+    }
+  }
+  const int64_t added_bytes =
+      reservation.storage_bytes - previous_storage_bytes;
+  if (added_bytes > 0) {
+    LOG(INFO) << "EPLB staging reservation warmed | device=" << device_index
+              << " | requested_bytes=" << required_bytes
+              << " | added_bytes=" << added_bytes
+              << " | pooled_bytes=" << reservation.storage_bytes
+              << " | tensors=" << reservation.tensors.size();
+  }
+}
+
+bool FusedMoEImpl::prepare_eplb_tensor_slots(
+    const torch::Tensor& tensor,
+    const std::string& tensor_name,
+    const std::vector<int32_t>& source_slots) {
+  if (!tensor.defined() || tensor.dim() == 0) {
+    return true;
+  }
+  torch::Tensor transfer_source = tensor;
+  torch::Tensor pending_tensor;
+  if (has_private_npu_format(tensor)) {
+    // Let format-cast reuse the exact-size source reservation instead of
+    // retaining a third full-layer tensor behind copy_.
+    torch::Tensor source_reservation =
+        take_eplb_staging_tensor(tensor, ACL_FORMAT_ND);
+    source_reservation = torch::Tensor();
+    transfer_source = npu_format_cast(tensor, ACL_FORMAT_ND).contiguous();
+    pending_tensor = take_eplb_staging_tensor(tensor, ACL_FORMAT_ND);
+    pending_eplb_source_tensors_[tensor_name] = transfer_source;
+  } else {
+    pending_tensor =
+        take_eplb_staging_tensor(tensor, get_tensor_npu_format(tensor));
+  }
+  CHECK_EQ(get_tensor_npu_format(pending_tensor), ACL_FORMAT_ND)
+      << "DeepSeek-V4 EPLB pending tensor format mismatch for " << tensor_name;
+  if (pending_full_tensor_activation_) {
+    dsv4_eplb::stage_resident_expert_slots(
+        transfer_source, pending_tensor, source_slots);
+  } else {
+    dsv4_eplb::stage_resident_expert_slots(
+        transfer_source, pending_tensor, source_slots, pending_changed_slots_);
+  }
+  pending_eplb_tensors_[tensor_name] = pending_tensor;
+  return true;
+}
+
+void FusedMoEImpl::update_eplb_tensor_slots(torch::Tensor& tensor,
+                                            const std::string& tensor_name) {
+  if (!tensor.defined()) {
+    return;
+  }
+  const auto iter = pending_eplb_tensors_.find(tensor_name);
+  if (iter == pending_eplb_tensors_.end()) {
+    return;
+  }
+  dsv4_eplb::activate_expert_slots(tensor,
+                                   iter->second,
+                                   pending_changed_slots_,
+                                   pending_full_tensor_activation_);
+}
+
+void FusedMoEImpl::clear_pending_eplb_state() {
+  recycle_eplb_staging_tensors(options_.device(), pending_eplb_tensors_);
+  recycle_eplb_staging_tensors(options_.device(), pending_eplb_source_tensors_);
+  pending_expert_ids_host_.clear();
+  pending_expert_ids_global_host_.clear();
+  pending_expert_ids_ = torch::Tensor();
+  pending_log2phy_map_ = torch::Tensor();
+  pending_changed_slot_indices_ = torch::Tensor();
+  pending_eplb_tensors_.clear();
+  pending_eplb_source_tensors_.clear();
+  pending_changed_slots_.clear();
+  pending_source_slots_.clear();
+  pending_eplb_recv_ops_.clear();
+  pending_eplb_send_ops_.clear();
+  pending_eplb_work_.reset();
+  pending_eplb_tensors_materialized_ = false;
+  pending_eplb_weights_ready_ = false;
+  pending_full_tensor_activation_ = false;
+}
+
+bool FusedMoEImpl::prepare_eplb_pending_weights(
+    const std::vector<int32_t>& source_slots) {
+  pending_eplb_tensors_.clear();
+  pending_eplb_source_tensors_.clear();
+
+  const bool ok =
+      prepare_eplb_tensor_slots(w13_, "w13", source_slots) &&
+      prepare_eplb_tensor_slots(w1_, "w1", source_slots) &&
+      prepare_eplb_tensor_slots(w3_, "w3", source_slots) &&
+      prepare_eplb_tensor_slots(w2_, "w2", source_slots) &&
+      prepare_eplb_tensor_slots(w13_scale_, "w13_scale", source_slots) &&
+      prepare_eplb_tensor_slots(w1_scale_, "w1_scale", source_slots) &&
+      prepare_eplb_tensor_slots(w3_scale_, "w3_scale", source_slots) &&
+      prepare_eplb_tensor_slots(w2_scale_, "w2_scale", source_slots) &&
+      prepare_eplb_tensor_slots(
+          w1_scale_second_, "w1_scale_second", source_slots) &&
+      prepare_eplb_tensor_slots(
+          w3_scale_second_, "w3_scale_second", source_slots) &&
+      prepare_eplb_tensor_slots(
+          w13_scale_second_, "w13_scale_second", source_slots) &&
+      prepare_eplb_tensor_slots(
+          w2_scale_second_, "w2_scale_second", source_slots) &&
+      prepare_eplb_tensor_slots(
+          w1_scale_bias_, "w1_scale_bias", source_slots) &&
+      prepare_eplb_tensor_slots(
+          w3_scale_bias_, "w3_scale_bias", source_slots) &&
+      prepare_eplb_tensor_slots(
+          w13_scale_bias_, "w13_scale_bias", source_slots) &&
+      prepare_eplb_tensor_slots(
+          w2_scale_bias_, "w2_scale_bias", source_slots) &&
+      prepare_eplb_tensor_slots(input_smooth_, "input_smooth", source_slots) &&
+      prepare_eplb_tensor_slots(act_smooth_, "act_smooth", source_slots);
+  if (!ok) {
+    pending_eplb_tensors_.clear();
+    pending_eplb_source_tensors_.clear();
+  }
+  return ok;
+}
+
+void FusedMoEImpl::update_eplb_active_weights() {
+  update_eplb_tensor_slots(w13_, "w13");
+  update_eplb_tensor_slots(w1_, "w1");
+  update_eplb_tensor_slots(w3_, "w3");
+  update_eplb_tensor_slots(w2_, "w2");
+  update_eplb_tensor_slots(w13_scale_, "w13_scale");
+  update_eplb_tensor_slots(w1_scale_, "w1_scale");
+  update_eplb_tensor_slots(w3_scale_, "w3_scale");
+  update_eplb_tensor_slots(w2_scale_, "w2_scale");
+  update_eplb_tensor_slots(w1_scale_second_, "w1_scale_second");
+  update_eplb_tensor_slots(w3_scale_second_, "w3_scale_second");
+  update_eplb_tensor_slots(w13_scale_second_, "w13_scale_second");
+  update_eplb_tensor_slots(w2_scale_second_, "w2_scale_second");
+  update_eplb_tensor_slots(w1_scale_bias_, "w1_scale_bias");
+  update_eplb_tensor_slots(w3_scale_bias_, "w3_scale_bias");
+  update_eplb_tensor_slots(w13_scale_bias_, "w13_scale_bias");
+  update_eplb_tensor_slots(w2_scale_bias_, "w2_scale_bias");
+  update_eplb_tensor_slots(input_smooth_, "input_smooth");
+  update_eplb_tensor_slots(act_smooth_, "act_smooth");
+}
+
+void FusedMoEImpl::prepare_expert_weight(
+    const std::vector<int32_t>& expert_ids) {
+  last_prepare_expert_weight_ok_ = true;
+  if (!enable_eplb_) {
+    return;
+  }
+  CHECK_GE(eplb_layer_id_, 0)
+      << "DeepSeek-V4 EPLB prepare_expert_weight called before eplb_layer_id "
+         "is bound.";
+  CHECK(parallel_args_.moe_ep_group_ != nullptr)
+      << "DeepSeek-V4 EPLB requires moe_ep_group.";
+  const int64_t expected_ids =
+      num_total_experts_ +
+      static_cast<int64_t>(parallel_args_.moe_ep_group_->world_size()) *
+          redundant_experts_num_;
+  CHECK_EQ(static_cast<int64_t>(expert_ids.size()), expected_ids)
+      << "DeepSeek-V4 EPLB expert_ids size mismatch: expected " << expected_ids
+      << " (num_total_experts + ep_world_size * redundant_experts_num), got "
+      << expert_ids.size() << ".";
+  const int32_t ep_rank = parallel_args_.moe_ep_group_->rank();
+  // moe_tp_group_ is optional. When it is unset (pure EP) the rank collapses
+  // to 0 so we keep the historical `ep_rank % duplicate_count` selection.
+  const int32_t moe_tp_rank_in_group =
+      parallel_args_.moe_tp_group_ != nullptr
+          ? parallel_args_.moe_tp_group_->rank()
+          : 0;
+  // expert_ids is the EP-wide global distribution broadcast by the driver;
+  // cache it directly so commit_pending_eplb_transfer no longer needs to
+  // allgather it back on every layer switch.
+  pending_expert_ids_global_host_ = expert_ids;
+  pending_expert_ids_host_ = dsv4_eplb::slice_rank_expert_ids(
+      expert_ids, ep_rank, static_cast<int32_t>(device_experts_num_));
+  CHECK_EQ(pending_expert_ids_host_.size(),
+           static_cast<size_t>(device_experts_num_))
+      << "DeepSeek-V4 EPLB expert distribution size mismatch.";
+  pending_changed_slots_ = dsv4_eplb::collect_changed_slots(
+      active_expert_ids_host_, pending_expert_ids_host_);
+  pending_full_tensor_activation_ =
+      dsv4_eplb::should_activate_full_expert_tensor(
+          static_cast<int64_t>(pending_changed_slots_.size()),
+          device_experts_num_);
+  pending_changed_slot_indices_ =
+      torch::tensor(pending_changed_slots_, torch::kInt64)
+          .to(options_.device());
+  const std::vector<int32_t> pending_log2phy_map =
+      dsv4_eplb::build_log2phy_map(expert_ids,
+                                   static_cast<int32_t>(num_total_experts_),
+                                   ep_rank,
+                                   moe_tp_rank_in_group);
+  CHECK(std::all_of(pending_log2phy_map.begin(),
+                    pending_log2phy_map.end(),
+                    [](int32_t physical_id) { return physical_id >= 0; }))
+      << "DeepSeek-V4 EPLB pending log2phy map has unmapped experts.";
+  auto int_options = torch::TensorOptions().dtype(torch::kInt32);
+  pending_expert_ids_ = torch::tensor(pending_expert_ids_host_, int_options)
+                            .to(options_.device());
+  pending_log2phy_map_ =
+      torch::tensor(pending_log2phy_map, int_options).to(options_.device());
+  pending_source_slots_ = dsv4_eplb::find_slot_sources(
+      active_expert_ids_host_, pending_expert_ids_host_);
+  // Precompute the EP-wide P2P plan on the worker thread. The plan only depends
+  // on the global active / pending views (identical across ranks by
+  // construction), so no collective is needed. The main forward thread later
+  // replays this plan against every weight tensor via a single batched HCCL
+  // call over the HCCS super-node fabric.
+  pending_eplb_recv_ops_.clear();
+  pending_eplb_send_ops_.clear();
+  CHECK(!active_expert_ids_global_host_.empty())
+      << "DeepSeek-V4 EPLB active_expert_ids_global_host_ must be initialized "
+         "before prepare_expert_weight.";
+  dsv4_eplb::EplbP2PBucketStats round_stats;
+  const bool plan_ok_p2p = dsv4_eplb::compute_p2p_transfer_plan(
+      active_expert_ids_global_host_,
+      pending_expert_ids_global_host_,
+      ep_rank,
+      static_cast<int32_t>(device_experts_num_),
+      pending_eplb_recv_ops_,
+      pending_eplb_send_ops_,
+      &round_stats);
+  if (!plan_ok_p2p) {
+    LOG(ERROR) << "DeepSeek-V4 EPLB cannot resolve P2P transfer plan for layer "
+               << eplb_layer_id_;
+    clear_pending_eplb_state();
+    last_prepare_expert_weight_ok_ = false;
+    return;
+  }
+  // Accumulate per-round bucket counts into the process-wide monotonic counter
+  // and drop a heartbeat every 60s so on-call can watch local copies versus
+  // HCCS migration volume without an all-gather.
+  eplb_p2p_stats_total_.unchanged += round_stats.unchanged;
+  eplb_p2p_stats_total_.same_gpu += round_stats.same_gpu;
+  eplb_p2p_stats_total_.hccs += round_stats.hccs;
+  const std::chrono::steady_clock::time_point now =
+      std::chrono::steady_clock::now();
+  if (now - eplb_p2p_heartbeat_last_ >= std::chrono::seconds(60)) {
+    const int64_t d_unchanged = eplb_p2p_stats_total_.unchanged -
+                                eplb_p2p_stats_last_heartbeat_.unchanged;
+    const int64_t d_same_gpu = eplb_p2p_stats_total_.same_gpu -
+                               eplb_p2p_stats_last_heartbeat_.same_gpu;
+    const int64_t d_hccs =
+        eplb_p2p_stats_total_.hccs - eplb_p2p_stats_last_heartbeat_.hccs;
+    LOG(INFO) << "EPLB heartbeat | p2p_bucket | layer=" << eplb_layer_id_
+              << " | rank=" << ep_rank << " | delta_unchanged=" << d_unchanged
+              << " | delta_same_gpu=" << d_same_gpu
+              << " | delta_hccs=" << d_hccs
+              << " | total_hccs=" << eplb_p2p_stats_total_.hccs;
+    eplb_p2p_stats_last_heartbeat_ = eplb_p2p_stats_total_;
+    eplb_p2p_heartbeat_last_ = now;
+  }
+  // Keep the worker thread limited to host-side planning. Materializing a
+  // private-format NPU weight while the forward stream is reading it can race
+  // with QuantMatmul. start_expert_weight_transfer performs the materialization
+  // at the forward boundary, ordered between two model executions.
+  pending_eplb_tensors_materialized_ = false;
+  pending_eplb_weights_ready_ = false;
+  // The plan is committed unconditionally on the main forward thread so every
+  // rank participates in the same set of collectives, regardless of whether
+  // this rank happens to have only local hits. Keep this flag false; commit
+  // flips it after the batched P2P completes.
+  last_prepare_expert_weight_ok_ = true;
+}
+
+void FusedMoEImpl::start_expert_weight_transfer() {
+  if (!enable_eplb_ || pending_expert_ids_host_.empty()) {
+    return;
+  }
+  if (pending_eplb_weights_ready_) {
+    return;
+  }
+  CHECK(parallel_args_.eplb_group_ != nullptr)
+      << "DeepSeek-V4 EPLB transfer requires eplb_group.";
+  CHECK(pending_eplb_work_ == nullptr)
+      << "DeepSeek-V4 EPLB transfer is already in flight for layer "
+      << eplb_layer_id_;
+  if (!pending_eplb_tensors_materialized_) {
+    const std::chrono::steady_clock::time_point materialize_start =
+        std::chrono::steady_clock::now();
+    CHECK(prepare_eplb_pending_weights(pending_source_slots_))
+        << "DeepSeek-V4 EPLB failed to materialize pending weights for layer "
+        << eplb_layer_id_;
+    pending_eplb_tensors_materialized_ = true;
+    const int64_t materialize_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - materialize_start)
+            .count();
+    LOG(INFO) << "materialize_expert_weight | layer=" << eplb_layer_id_
+              << " | duration=" << materialize_ms << "ms";
+  }
+  // Every rank enters commit unconditionally (regardless of whether its own
+  // slots happen to be all-local) so participation in the batched P2P is
+  // symmetric across the EP group. Otherwise a rank that only receives would
+  // stall waiting for a rank that only sends, and vice versa.
+  if (pending_eplb_recv_ops_.empty() && pending_eplb_send_ops_.empty()) {
+    pending_eplb_weights_ready_ = true;
+    return;
+  }
+  static const std::array<std::pair<const char*, torch::Tensor FusedMoEImpl::*>,
+                          18>
+      kEplbTensorTable = {{
+          {"w13", &FusedMoEImpl::w13_},
+          {"w1", &FusedMoEImpl::w1_},
+          {"w3", &FusedMoEImpl::w3_},
+          {"w2", &FusedMoEImpl::w2_},
+          {"w13_scale", &FusedMoEImpl::w13_scale_},
+          {"w1_scale", &FusedMoEImpl::w1_scale_},
+          {"w3_scale", &FusedMoEImpl::w3_scale_},
+          {"w2_scale", &FusedMoEImpl::w2_scale_},
+          {"w1_scale_second", &FusedMoEImpl::w1_scale_second_},
+          {"w3_scale_second", &FusedMoEImpl::w3_scale_second_},
+          {"w13_scale_second", &FusedMoEImpl::w13_scale_second_},
+          {"w2_scale_second", &FusedMoEImpl::w2_scale_second_},
+          {"w1_scale_bias", &FusedMoEImpl::w1_scale_bias_},
+          {"w3_scale_bias", &FusedMoEImpl::w3_scale_bias_},
+          {"w13_scale_bias", &FusedMoEImpl::w13_scale_bias_},
+          {"w2_scale_bias", &FusedMoEImpl::w2_scale_bias_},
+          {"input_smooth", &FusedMoEImpl::input_smooth_},
+          {"act_smooth", &FusedMoEImpl::act_smooth_},
+      }};
+  const size_t tensor_op_count =
+      pending_eplb_recv_ops_.size() + pending_eplb_send_ops_.size();
+  std::vector<std::string> op_types;
+  std::vector<torch::Tensor> op_tensors;
+  std::vector<int64_t> remote_ranks;
+  op_types.reserve(kEplbTensorTable.size() * tensor_op_count);
+  op_tensors.reserve(kEplbTensorTable.size() * tensor_op_count);
+  remote_ranks.reserve(kEplbTensorTable.size() * tensor_op_count);
+  for (const auto& [tensor_name_cstr, member_ptr] : kEplbTensorTable) {
+    torch::Tensor& local_tensor = this->*member_ptr;
+    if (!local_tensor.defined() || local_tensor.dim() == 0) {
+      continue;
+    }
+    auto pending_iter =
+        pending_eplb_tensors_.find(std::string(tensor_name_cstr));
+    CHECK(pending_iter != pending_eplb_tensors_.end())
+        << "DeepSeek-V4 EPLB pending tensor missing for " << tensor_name_cstr;
+    torch::Tensor& pending_tensor = pending_iter->second;
+    torch::Tensor* transfer_source = &local_tensor;
+    const auto source_iter =
+        pending_eplb_source_tensors_.find(std::string(tensor_name_cstr));
+    if (source_iter != pending_eplb_source_tensors_.end()) {
+      transfer_source = &source_iter->second;
+    }
+    for (const dsv4_eplb::P2POp& op : pending_eplb_recv_ops_) {
+      torch::Tensor recv_view = pending_tensor[op.local_slot];
+      op_types.emplace_back("recv");
+      op_tensors.emplace_back(recv_view);
+      remote_ranks.emplace_back(static_cast<int64_t>(op.peer_rank));
+    }
+    for (const dsv4_eplb::P2POp& op : pending_eplb_send_ops_) {
+      torch::Tensor send_view = (*transfer_source)[op.local_slot];
+      op_types.emplace_back("send");
+      op_tensors.emplace_back(send_view);
+      remote_ranks.emplace_back(static_cast<int64_t>(op.peer_rank));
+    }
+  }
+  c10::intrusive_ptr<c10d::Work> work =
+      parallel_args_.eplb_group_->batch_isend_irecv(
+          op_types, op_tensors, remote_ranks);
+  CHECK(work != nullptr)
+      << "DeepSeek-V4 EPLB transfer returned no work for non-empty P2P plan.";
+  pending_eplb_work_ = std::move(work);
+}
+
+void FusedMoEImpl::commit_pending_eplb_transfer() {
+  if (!enable_eplb_ || pending_expert_ids_host_.empty()) {
+    return;
+  }
+  if (pending_eplb_weights_ready_) {
+    return;
+  }
+  if (pending_eplb_recv_ops_.empty() && pending_eplb_send_ops_.empty()) {
+    pending_eplb_weights_ready_ = true;
+    return;
+  }
+  if (pending_eplb_work_ == nullptr) {
+    start_expert_weight_transfer();
+  }
+  CHECK(pending_eplb_work_ != nullptr)
+      << "DeepSeek-V4 EPLB transfer was not started for layer "
+      << eplb_layer_id_;
+  CHECK(pending_eplb_work_->wait())
+      << "DeepSeek-V4 EPLB transfer failed for layer " << eplb_layer_id_;
+  pending_eplb_work_.reset();
+  // At this point every non-resident pending slot has been filled by the recv
+  // side of the dedicated EPLB P2P group. Locally-resident slots were already
+  // copied in prepare_eplb_pending_weights on the worker thread.
+  pending_eplb_weights_ready_ = true;
+}
+
+void FusedMoEImpl::update_expert_weight() {
+  if (!enable_eplb_ || pending_expert_ids_host_.empty()) {
+    return;
+  }
+  const std::chrono::steady_clock::time_point update_start =
+      std::chrono::steady_clock::now();
+  const size_t recv_slot_count = pending_eplb_recv_ops_.size();
+  const size_t send_slot_count = pending_eplb_send_ops_.size();
+  const size_t tensor_count = pending_eplb_tensors_.size();
+  const size_t changed_slot_count = pending_changed_slots_.size();
+  const bool full_tensor_activation = pending_full_tensor_activation_;
+  const int32_t ep_rank = parallel_args_.moe_ep_group_->rank();
+  const int32_t mc2_mode = fused_mc2_mode();
+  commit_pending_eplb_transfer();
+  if (!pending_eplb_weights_ready_) {
+    LOG(ERROR) << "DeepSeek-V4 EPLB update skipped because pending weights "
+                  "were not prepared.";
+    return;
+  }
+  const std::chrono::steady_clock::time_point transfer_end =
+      std::chrono::steady_clock::now();
+  update_eplb_active_weights();
+  log2phy_map_.copy_(pending_log2phy_map_);
+  active_expert_ids_.copy_(pending_expert_ids_);
+  active_expert_ids_host_ = pending_expert_ids_host_;
+  active_expert_ids_global_host_ = pending_expert_ids_global_host_;
+  if (dispatch_ffn_combine_prepared_) {
+    dsv4_eplb::update_dispatch_scale_slots(
+        w13_scale_, dispatch_ffn_w13_scale_, pending_changed_slot_indices_);
+    dsv4_eplb::update_dispatch_scale_slots(
+        w2_scale_, dispatch_ffn_w2_scale_, pending_changed_slot_indices_);
+  }
+  const int32_t synchronize_result =
+      Device(options_.device()).synchronize_default_stream();
+  CHECK_EQ(synchronize_result, 0)
+      << "DeepSeek-V4 EPLB failed to synchronize active weight updates.";
+  const std::chrono::steady_clock::time_point update_end =
+      std::chrono::steady_clock::now();
+  clear_pending_eplb_state();
+
+  const int64_t transfer_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(transfer_end -
+                                                            update_start)
+          .count();
+  const int64_t activation_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(update_end -
+                                                            transfer_end)
+          .count();
+  const int64_t total_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(update_end -
+                                                            update_start)
+          .count();
+  const size_t p2p_operation_count =
+      (recv_slot_count + send_slot_count) * tensor_count;
+  LOG(INFO) << "update_expert_weight | layer=" << eplb_layer_id_
+            << " | rank=" << ep_rank << " | mc2_mode=" << mc2_mode
+            << " | tensor_count=" << tensor_count
+            << " | changed_slots=" << changed_slot_count
+            << " | activation_mode="
+            << (full_tensor_activation ? "full" : "slots")
+            << " | recv_slots=" << recv_slot_count
+            << " | send_slots=" << send_slot_count
+            << " | p2p_operations=" << p2p_operation_count
+            << " | transfer_ms=" << transfer_ms
+            << " | activation_ms=" << activation_ms
+            << " | total_ms=" << total_ms;
 }
 
 std::pair<torch::Tensor, torch::Tensor> FusedMoEImpl::select_global_experts(
@@ -836,12 +1767,21 @@ std::pair<torch::Tensor, torch::Tensor> FusedMoEImpl::select_global_experts(
 torch::Tensor FusedMoEImpl::select_experts(
     const torch::Tensor& hidden_states_2d,
     const torch::Tensor& router_logits_2d,
-    SelectedExpertInfo& selected_expert_info) {
+    SelectedExpertInfo& selected_expert_info,
+    const ModelInputParams& input_params) {
   auto [topk_weights, topk_ids] =
       select_global_experts(hidden_states_2d, router_logits_2d);
 
-  const int64_t local_expert_start = start_expert_id_;
-  const int64_t local_expert_end = start_expert_id_ + num_experts_per_rank_;
+  if (enable_eplb_) {
+    topk_ids = remap_expert_ids_for_eplb(topk_ids);
+    record_eplb_expert_load(topk_ids, input_params);
+  }
+
+  const int64_t local_expert_start =
+      enable_eplb_ ? parallel_args_.moe_ep_group_->rank() * device_experts_num_
+                   : start_expert_id_;
+  const int64_t local_expert_end =
+      local_expert_start + local_physical_experts_num();
   if (parallel_args_.ep_size() > 1) {
     // The routing op uses global expert ids, but this rank only contributes
     // outputs for its active expert range.
@@ -857,7 +1797,7 @@ torch::Tensor FusedMoEImpl::select_experts(
   moe_init_routing_params.offset = std::nullopt;
   moe_init_routing_params.active_num = hidden_states_2d.size(0) * topk_;
   moe_init_routing_params.expert_capacity = 0;
-  moe_init_routing_params.expert_num = num_total_experts_;
+  moe_init_routing_params.expert_num = global_physical_experts_num();
   moe_init_routing_params.drop_pad_mode = 0;
   moe_init_routing_params.expert_tokens_num_type = 1;
   moe_init_routing_params.expert_tokens_num_flag = true;
@@ -870,9 +1810,9 @@ torch::Tensor FusedMoEImpl::select_experts(
   auto [expand_hidden_states, expand_row_ids, group_list, dynamic_scale] =
       xllm::kernel::moe_init_routing_v2(moe_init_routing_params);
   (void)dynamic_scale;
-  CHECK_EQ(group_list.size(0), num_experts_per_rank_)
+  CHECK_EQ(group_list.size(0), local_physical_experts_num())
       << "npu_moe_init_routing_v2 returned " << group_list.size(0)
-      << " groups, expected local experts " << num_experts_per_rank_
+      << " groups, expected local experts " << local_physical_experts_num()
       << " for active expert range [" << local_expert_start << ", "
       << local_expert_end << ")";
 
@@ -980,6 +1920,7 @@ torch::Tensor FusedMoEImpl::forward_expert(
     const torch::Tensor& hidden_states,
     const torch::Tensor& router_logits,
     const std::optional<torch::Tensor>& shared_output,
+    const ModelInputParams& input_params,
     bool use_mega_moe) {
   if (use_mega_moe) {
     return forward_mega_moe(hidden_states, router_logits, shared_output);
@@ -994,8 +1935,8 @@ torch::Tensor FusedMoEImpl::forward_expert(
 
   // Step 1-3: select experts
   SelectedExpertInfo selected_expert_info;
-  torch::Tensor expand_hidden_states =
-      select_experts(hidden_states_2d, router_logits_2d, selected_expert_info);
+  torch::Tensor expand_hidden_states = select_experts(
+      hidden_states_2d, router_logits_2d, selected_expert_info, input_params);
 
   torch::Tensor gemm1_out;
   torch::Tensor gemm2_out;
@@ -1279,8 +2220,8 @@ torch::Tensor FusedMoEImpl::forward(const torch::Tensor& hidden_states,
   auto router_logits = gate_(input);
   const bool use_mega_moe =
       mega_moe_enabled_ && input.size(0) <= kMegaMoeMaxTokens;
-  auto output =
-      forward_expert(input, router_logits, shared_output, use_mega_moe);
+  auto output = forward_expert(
+      input, router_logits, shared_output, input_params, use_mega_moe);
 
   if (need_slice) {
     const int64_t dp_rank = parallel_args_.dp_local_process_group_->rank();
@@ -1447,7 +2388,9 @@ torch::Tensor FusedMoEImpl::forward_with_dispatch_ffn_combine(
     const torch::Tensor& input_2d,
     const torch::Tensor& weights_2d,
     const torch::Tensor& ids_2d,
-    at::IntArrayRef hidden_states_shape) {
+    const torch::Tensor& active_token_mask,
+    at::IntArrayRef hidden_states_shape,
+    const ModelInputParams& input_params) {
   std::vector<torch::Tensor> weight1_list = {w13_};
   std::vector<torch::Tensor> weight2_list = {w2_};
   std::vector<torch::Tensor> scale1_list = {dispatch_ffn_w13_scale_};
@@ -1461,18 +2404,22 @@ torch::Tensor FusedMoEImpl::forward_with_dispatch_ffn_combine(
   params.scale1 = torch::TensorList(scale1_list);
   params.scale2 = torch::TensorList(scale2_list);
   params.probs = weights_2d;
-  params.group = get_moe_ep_group_name();
-  params.max_output_size = 65536;
+  params.x_active_mask = active_token_mask;
+  params.group = get_mc2_group_name();
+  params.max_output_size = dsv4_eplb::dispatch_ffn_max_output_size(
+      input_2d.size(0), topk_, parallel_args_.moe_ep_group_->world_size());
+  CHECK_GT(params.max_output_size, 0)
+      << "DispatchFFNCombine requires a valid token capacity.";
   params.swiglu_limit = swiglu_limit_;
   params.output = torch::empty_like(input_2d);
   params.expert_token_nums = torch::empty(
-      {num_experts_per_rank_}, ids_2d.options().dtype(torch::kInt32));
+      {local_physical_experts_num()}, ids_2d.options().dtype(torch::kInt32));
 
   torch::Tensor final_hidden_states_2d;
   torch::Tensor expert_token_nums;
   std::tie(final_hidden_states_2d, expert_token_nums) =
       xllm::kernel::dispatch_ffn_combine(params);
-  (void)expert_token_nums;
+  record_eplb_dispatch_expert_load(expert_token_nums, input_params);
   return final_hidden_states_2d.reshape(hidden_states_shape);
 }
 
@@ -1480,8 +2427,10 @@ torch::Tensor FusedMoEImpl::forward_with_dispatch_gmm_combine_decode(
     const torch::Tensor& input_2d,
     const torch::Tensor& weights_2d,
     const torch::Tensor& ids_2d,
+    const torch::Tensor& active_token_mask,
     at::IntArrayRef hidden_states_shape,
-    int64_t global_bs) {
+    int64_t global_bs,
+    const ModelInputParams& input_params) {
   std::vector<torch::Tensor> weight1_list = {w13_};
   std::vector<torch::Tensor> weight2_list = {w2_};
   std::vector<torch::Tensor> scale1_list = {w13_scale_};
@@ -1495,10 +2444,11 @@ torch::Tensor FusedMoEImpl::forward_with_dispatch_gmm_combine_decode(
   params.gmm2_weight = torch::TensorList(weight2_list);
   params.gmm2_weight_scale = torch::TensorList(scale2_list);
   params.expert_scales = weights_2d;
-  params.group_ep = get_moe_ep_group_name();
+  params.x_active_mask = active_token_mask;
+  params.group_ep = get_mc2_group_name();
   params.ep_rank_size = parallel_args_.moe_ep_group_->world_size();
   params.ep_rank_id = parallel_args_.moe_ep_group_->rank();
-  params.moe_expert_num = num_total_experts_;
+  params.moe_expert_num = global_physical_experts_num();
   params.shared_expert_num = 0;
   params.shared_expert_rank_num = 0;
   params.quant_mode = 0;
@@ -1508,18 +2458,31 @@ torch::Tensor FusedMoEImpl::forward_with_dispatch_gmm_combine_decode(
   torch::Tensor expert_token_nums;
   std::tie(final_hidden_states_2d, expert_token_nums) =
       xllm::kernel::dispatch_gmm_combine_decode(params);
-  (void)expert_token_nums;
+  record_eplb_dispatch_expert_load(expert_token_nums, input_params);
   return final_hidden_states_2d.reshape(hidden_states_shape);
 }
 
-const std::string& FusedMoEImpl::get_moe_ep_group_name() {
-  if (moe_ep_group_name_.empty()) {
-    moe_ep_group_name_ = parallel_args_.dispatchAndCombinecommDomain();
-    CHECK(!moe_ep_group_name_.empty())
-        << "DeepSeek-V4 NPU EP2 dispatch/combine requires a pre-initialized "
-           "dispatch/combine comm domain.";
+const std::string& FusedMoEImpl::get_mc2_group_name() {
+  if (mc2_group_name_.empty()) {
+    CHECK(parallel_args_.mc2_group_ != nullptr)
+        << "DeepSeek-V4 fused MC2 requires a dedicated MC2 process group.";
+    mc2_group_name_ = parallel_args_.mc2_group_->hccl_comm_name();
+    CHECK(!mc2_group_name_.empty())
+        << "DeepSeek-V4 fused MC2 requires a valid HCCL process-group name.";
   }
-  return moe_ep_group_name_;
+  return mc2_group_name_;
+}
+
+const std::string& FusedMoEImpl::get_moe_ep_process_group_name() {
+  if (moe_ep_process_group_name_.empty()) {
+    CHECK(parallel_args_.moe_ep_group_ != nullptr)
+        << "DeepSeek-V4 NPU EP2 dispatch/combine requires moe_ep_group.";
+    moe_ep_process_group_name_ = parallel_args_.moe_ep_group_->hccl_comm_name();
+    CHECK(!moe_ep_process_group_name_.empty())
+        << "DeepSeek-V4 NPU EP2 dispatch/combine requires a valid HCCL "
+           "process-group name.";
+  }
+  return moe_ep_process_group_name_;
 }
 
 torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
@@ -1527,15 +2490,13 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
     const torch::Tensor& topk_weights,
     const torch::Tensor& topk_ids,
     const ModelInputParams& input_params) {
-  prepare_dispatch_ffn_combine_inputs();
-  prepare_dispatch_gmm_combine_decode_inputs();
-
   const auto hidden_states_shape = hidden_states.sizes();
   auto input_2d =
       hidden_states.reshape({-1, hidden_states.size(-1)}).contiguous();
   auto weights_2d =
       topk_weights.reshape({-1, topk_}).to(torch::kFloat32).contiguous();
-  auto ids_2d = topk_ids.reshape({-1, topk_}).to(torch::kInt32).contiguous();
+  auto ids_2d = remap_expert_ids_for_eplb(
+      topk_ids.reshape({-1, topk_}).to(torch::kInt32).contiguous());
   CHECK_EQ(weights_2d.size(0), input_2d.size(0))
       << "topk_weights token count mismatch, expected " << input_2d.size(0)
       << ", got " << weights_2d.size(0);
@@ -1545,6 +2506,7 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
 
   const auto ep_world_size = parallel_args_.moe_ep_group_->world_size();
   const auto ep_rank_id = parallel_args_.moe_ep_group_->rank();
+  torch::Tensor active_token_mask;
   int64_t global_bs = input_2d.size(0) * ep_world_size;
   if (parallel_args_.dp_size() > 1 &&
       !input_params.parallel.dp_global_token_nums.empty()) {
@@ -1555,21 +2517,31 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
   }
 
   if (dispatch_ffn_combine_prepared_) {
-    return forward_with_dispatch_ffn_combine(
-        input_2d, weights_2d, ids_2d, hidden_states_shape);
+    return forward_with_dispatch_ffn_combine(input_2d,
+                                             weights_2d,
+                                             ids_2d,
+                                             active_token_mask,
+                                             hidden_states_shape,
+                                             input_params);
   }
   if (dispatch_gmm_combine_decode_prepared_) {
-    return forward_with_dispatch_gmm_combine_decode(
-        input_2d, weights_2d, ids_2d, hidden_states_shape, global_bs);
+    return forward_with_dispatch_gmm_combine_decode(input_2d,
+                                                    weights_2d,
+                                                    ids_2d,
+                                                    active_token_mask,
+                                                    hidden_states_shape,
+                                                    global_bs,
+                                                    input_params);
   }
   xllm::kernel::MoeDistributeDispatchV2Params dispatch_params;
   dispatch_params.x = input_2d;
   dispatch_params.expert_ids = ids_2d;
   dispatch_params.expert_scales = weights_2d;
-  dispatch_params.group_ep = get_moe_ep_group_name();
+  dispatch_params.x_active_mask = active_token_mask;
+  dispatch_params.group_ep = get_moe_ep_process_group_name();
   dispatch_params.ep_world_size = ep_world_size;
   dispatch_params.ep_rank_id = ep_rank_id;
-  dispatch_params.moe_expert_num = num_total_experts_;
+  dispatch_params.moe_expert_num = global_physical_experts_num();
   dispatch_params.tp_world_size = 0;
   dispatch_params.tp_rank_id = 0;
   dispatch_params.expert_shard_type = 0;
@@ -1588,6 +2560,7 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
         expand_scales] =
       xllm::kernel::moe_distribute_dispatch_v2(dispatch_params);
   (void)dynamic_scale;
+  record_eplb_dispatch_expert_load(group_list, input_params);
 
   torch::Tensor gemm1_out;
   torch::Tensor gemm2_out;
@@ -1706,11 +2679,12 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
   combine_params.ep_send_counts = ep_send_counts;
   combine_params.expert_scales = weights_2d;
   combine_params.tp_send_counts = tp_send_counts;
+  combine_params.x_active_mask = active_token_mask;
   combine_params.expand_scales = expand_scales;
-  combine_params.group_ep = get_moe_ep_group_name();
+  combine_params.group_ep = get_moe_ep_process_group_name();
   combine_params.ep_world_size = ep_world_size;
   combine_params.ep_rank_id = ep_rank_id;
-  combine_params.moe_expert_num = num_total_experts_;
+  combine_params.moe_expert_num = global_physical_experts_num();
   combine_params.tp_world_size = 0;
   combine_params.tp_rank_id = 0;
   combine_params.expert_shard_type = 0;
@@ -1731,7 +2705,11 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts(
   torch::Tensor input = hidden_states;
   torch::Tensor selected_topk_weights = topk_weights;
   torch::Tensor selected_topk_ids = topk_ids;
-  if (can_use_ep2_dispatch_combine(input_params, input)) {
+  prepare_dispatch_ffn_combine_inputs();
+  prepare_dispatch_gmm_combine_decode_inputs();
+  const bool use_ep2_dispatch_combine =
+      can_use_ep2_dispatch_combine(input_params, input);
+  if (use_ep2_dispatch_combine) {
     std::optional<torch::Tensor> shared_output = std::nullopt;
     if (n_shared_experts_ > 0) {
       shared_output = shared_experts_(input);
@@ -1801,8 +2779,8 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts(
   torch::Tensor router_logits = torch::empty(router_shape, input.options());
   const bool use_mega_moe =
       mega_moe_enabled_ && input.size(0) <= kMegaMoeMaxTokens;
-  torch::Tensor output =
-      forward_expert(input, router_logits, shared_output, use_mega_moe);
+  torch::Tensor output = forward_expert(
+      input, router_logits, shared_output, input_params, use_mega_moe);
   preselected_experts_ = std::nullopt;
 
   if (need_slice) {
@@ -1954,6 +2932,7 @@ void FusedMoEImpl::load_experts(const StateDict& state_dict) {
     LOAD_MOE_WEIGHT("down_proj.", "qweight", w2, 1);
     LOAD_MOE_WEIGHT("down_proj.", "per_channel_scale", w2_scale, -1);
     LOAD_MOE_WEIGHT("down_proj.", "smooth", act_smooth, 0);
+    expand_eplb_weight_storage();
     return;
   }
 
@@ -2055,6 +3034,7 @@ void FusedMoEImpl::load_experts(const StateDict& state_dict) {
       LOAD_MOE_WEIGHT("w2.", "scale_bias", w2_scale_bias, 1);
     }
   }
+  expand_eplb_weight_storage();
 }
 
 void FusedMoEImpl::load_state_dict(const StateDict& state_dict) {
@@ -2100,6 +3080,7 @@ void FusedMoEImpl::load_state_dict(const StateDict& state_dict) {
   }
   load_experts(state_dict.get_dict_with_prefix("experts."));
   preprocess_w4a8_dynamic_weights();
+  reserve_eplb_staging_memory();
 }
 
 }  // namespace layer

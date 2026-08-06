@@ -261,7 +261,11 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
                                      const std::vector<int32_t>& expert_ids) {
     return;
   }
+  virtual void start_expert_weight_transfer(int32_t /*layer_id*/) {}
   virtual void update_expert_weight(int32_t layer_id) { return; }
+  virtual bool last_prepare_expert_weight_ok(int32_t /*layer_id*/) const {
+    return true;
+  }
 
   virtual layer::LmHead get_lm_head() {
     CHECK(!lm_head_.is_empty())
