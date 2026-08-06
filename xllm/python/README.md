@@ -45,7 +45,9 @@ elif platform.is_npu():
 
 Layers and models write `from xllm.python import kernels` and reach a fixed
 name, so they carry no hardware branch. `setup.py` ships only the package
-matching `--device`.
+matching `--device`. xLLM builds for more devices than the executor covers, so
+a device without a peer package ships the rest of `xllm.python` and the import
+above raises for its platform.
 
 This is one of two places where the executor branches on hardware. The other is
 `model_executor/executor.py`, which selects the attention backend and the graph
@@ -143,5 +145,5 @@ up the change.
    C++ operators.
 4. Teach `platform.current_platform()` to report `<device>` and add the matching
    branch to the import in `xllm/python/__init__.py`.
-5. `setup.py --device <device>` then ships it; a missing package fails the build
-   with the list of packages that do exist.
+5. `setup.py --device <device>` then ships it. Before that, a build for the
+   device logs the packages that do exist and ships none of them.

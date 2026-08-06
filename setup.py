@@ -99,6 +99,11 @@ def _stage_python_kernel_package(py_pkg_src: str, py_pkg_dst: str, device: str) 
     import each other, and export the same names. ``xllm/python/__init__.py``
     binds the one matching the active platform as ``xllm.python.kernels``, so
     only that package has to reach the wheel.
+
+    The Python model executor covers fewer platforms than ``--device`` does, so
+    a device without a peer package is not a build error: the rest of
+    ``xllm.python`` still ships, and ``xllm/python/__init__.py`` rejects the
+    platform at import, which only happens once the executor is selected.
     """
     source = os.path.join(py_pkg_src, f"kernels_{device}")
     if not os.path.isdir(source):
@@ -108,13 +113,14 @@ def _stage_python_kernel_package(py_pkg_src: str, py_pkg_dst: str, device: str) 
             if name.startswith("kernels_")
             and os.path.isdir(os.path.join(py_pkg_src, name))
         )
-        raise RuntimeError(
-            f"No Python kernel package for --device {device}: {source} does "
-            "not exist.\n"
-            f"Hint: packages exist for {', '.join(available)}; add "
+        logger.info(
+            f"No Python kernel package for --device {device}; the Python model "
+            f"executor stays unavailable in this wheel (packages exist for "
+            f"{', '.join(available)}). To support it, add "
             f"xllm/python/kernels_{device}/ exporting the same names as its "
             "peers."
         )
+        return
     shutil.copytree(
         source,
         os.path.join(py_pkg_dst, f"kernels_{device}"),
