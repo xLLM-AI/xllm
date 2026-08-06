@@ -238,13 +238,20 @@ void BlockManagerImpl::free(int32_t block_id) {
 std::optional<std::vector<Block>> BlockManagerImpl::allocate_for_sequence(
     Sequence* seq,
     size_t num_tokens) {
+  return allocate_for_sequence(seq, seq->kv_state(), num_tokens);
+}
+
+std::optional<std::vector<Block>> BlockManagerImpl::allocate_for_sequence(
+    Sequence* seq,
+    KVCacheState& kv_state,
+    size_t num_tokens) {
   if (seq == nullptr) {
     return std::nullopt;
   }
   if (block_size_ == 0) {
     return std::vector<Block>{};
   }
-  const size_t held = seq->kv_state().num_blocks(block_type());
+  const size_t held = kv_state.num_blocks(block_type());
   const size_t num_blocks_needed = (num_tokens + block_size_ - 1) / block_size_;
   if (num_blocks_needed <= held) {
     return std::vector<Block>{};

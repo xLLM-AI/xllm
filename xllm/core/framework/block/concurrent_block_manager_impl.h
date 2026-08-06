@@ -60,7 +60,12 @@ class ConcurrentBlockManagerImpl : public BlockManager {
   std::optional<std::vector<Block>> allocate_for_sequence(
       Sequence* seq,
       size_t num_tokens) override;
+  std::optional<std::vector<Block>> allocate_for_sequence(
+      Sequence* seq,
+      KVCacheState& kv_state,
+      size_t num_tokens) override;
   void release_out_of_window(Sequence* seq) override;
+  void release_out_of_window(Sequence* seq, KVCacheState& kv_state) override;
 
   void reset_prefix_cache() override;
 

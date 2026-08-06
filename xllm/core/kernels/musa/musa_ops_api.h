@@ -40,10 +40,6 @@ torch::Tensor moe_combine_result_indexed(const torch::Tensor& gemm2_sorted,
                                          int64_t num_tokens,
                                          int32_t top_k);
 
-}  // namespace xllm::kernel::musa
-
-namespace xllm::kernel::musa {
-
 void rotary_embedding(torch::Tensor& positions,
                       torch::Tensor& query,
                       std::optional<torch::Tensor> key,
@@ -59,28 +55,6 @@ void mul_sigmoid_gate_inplace(torch::Tensor& out, const torch::Tensor& gate);
 void fused_shared_expert_gate_inplace(torch::Tensor& shared_output,
                                       const torch::Tensor& hidden_states,
                                       const torch::Tensor& gate_weight);
-
-}  // namespace xllm::kernel::musa
-
-namespace xllm::kernel::cuda {
-
-void reshape_paged_cache(torch::Tensor slot_ids,
-                         torch::Tensor keys,
-                         torch::Tensor values,
-                         torch::Tensor key_cache,
-                         torch::Tensor value_cache);
-
-void block_copy(torch::Tensor key_cache_ptrs,
-                torch::Tensor value_cache_ptrs,
-                torch::Tensor src_block_indices,
-                torch::Tensor dst_block_indices,
-                torch::Tensor cum_sum,
-                int64_t numel_per_block,
-                torch::ScalarType cache_dtype);
-
-}  // namespace xllm::kernel::cuda
-
-namespace xllm::kernel::musa {
 
 void batch_prefill(const std::string& uri,
                    ffi::Array<int64_t> plan_info,
@@ -158,6 +132,7 @@ void batch_decode(
     const torch::Tensor& paged_kv_indptr_host = torch::Tensor(),
     const torch::Tensor& paged_kv_indices_host = torch::Tensor(),
     const torch::Tensor& paged_kv_last_page_len_host = torch::Tensor());
+
 void fa3_decode(const torch::Tensor& query,
                 const torch::Tensor& k_cache,
                 const torch::Tensor& v_cache,
@@ -228,24 +203,6 @@ torch::Tensor fa3_decode_scheduler_metadata(const torch::Device& device,
                                             int32_t window_size_right,
                                             const torch::Tensor& cu_seqlens_q,
                                             const torch::Tensor& seqused_k);
-
-}  // namespace xllm::kernel::musa
-
-namespace xllm::kernel::cuda {
-
-void rms_norm(torch::Tensor output,
-              torch::Tensor input,
-              torch::Tensor weight,
-              double eps);
-
-void fused_add_rms_norm(torch::Tensor& input,
-                        torch::Tensor& residual,
-                        torch::Tensor& weight,
-                        double epsilon);
-
-}  // namespace xllm::kernel::cuda
-
-namespace xllm::kernel::musa {
 
 void gemma_rms_norm(torch::Tensor output,
                     torch::Tensor input,
@@ -356,42 +313,27 @@ torch::Tensor fused_moe_ragged_combine(const torch::Tensor& down,
                                        int64_t alignment);
 
 // AOT kernels support decode batch sizes 1 through 8.
-bool musa_fused_moe_aot_available(int64_t num_tokens);
+bool fused_moe_aot_available(int64_t num_tokens);
 
-bool musa_fused_moe_bf16_aot_available(int64_t num_tokens);
+bool fused_moe_bf16_aot_available(int64_t num_tokens);
 
-void prepare_musa_fused_moe_aot(const torch::Device& device);
+void prepare_fused_moe_aot(const torch::Device& device);
 
-void prepare_musa_fused_moe_bf16_aot(const torch::Device& device);
+void prepare_fused_moe_bf16_aot(const torch::Device& device);
 
-torch::Tensor musa_fused_moe_aot_fp8(const torch::Tensor& hidden_states,
-                                     const torch::Tensor& w13,
-                                     const torch::Tensor& w13_scale,
-                                     const torch::Tensor& w2,
-                                     const torch::Tensor& w2_scale,
-                                     const torch::Tensor& topk_weights,
-                                     const torch::Tensor& topk_ids);
+torch::Tensor fused_moe_aot_fp8(const torch::Tensor& hidden_states,
+                                const torch::Tensor& w13,
+                                const torch::Tensor& w13_scale,
+                                const torch::Tensor& w2,
+                                const torch::Tensor& w2_scale,
+                                const torch::Tensor& topk_weights,
+                                const torch::Tensor& topk_ids);
 
-torch::Tensor musa_fused_moe_aot_bf16(const torch::Tensor& hidden_states,
-                                      const torch::Tensor& w13,
-                                      const torch::Tensor& w2,
-                                      const torch::Tensor& topk_weights,
-                                      const torch::Tensor& topk_ids);
-
-}  // namespace xllm::kernel::musa
-
-namespace xllm::kernel::cuda {
-
-std::tuple<torch::Tensor, torch::Tensor> moe_fused_topk(
-    torch::Tensor& gating_output,
-    int64_t topk,
-    bool renormalize,
-    const std::optional<torch::Tensor>& correction_bias,
-    const std::string& scoring_func);
-
-}  // namespace xllm::kernel::cuda
-
-namespace xllm::kernel::musa {
+torch::Tensor fused_moe_aot_bf16(const torch::Tensor& hidden_states,
+                                 const torch::Tensor& w13,
+                                 const torch::Tensor& w2,
+                                 const torch::Tensor& topk_weights,
+                                 const torch::Tensor& topk_ids);
 
 torch::Tensor random_sample(const torch::Tensor& probs);
 
@@ -451,14 +393,48 @@ torch::Tensor ragged_moe_gemm_fp8(const torch::Tensor& input,
                                   torch::ScalarType output_dtype,
                                   int64_t alignment);
 
-std::tuple<torch::Tensor, torch::Tensor> musa_moe_topk_softmax(
+std::tuple<torch::Tensor, torch::Tensor> moe_topk_softmax(
     const torch::Tensor& router_logits,
     int64_t topk);
-bool musa_moe_topk_softmax_available();
+bool moe_topk_softmax_available();
 
 }  // namespace xllm::kernel::musa
 
+// Shared CUDA-source helpers compiled into the MUSA kernel library via
+// mcc_wrapper. Keep them in kernel::cuda so USE_CUDA || USE_MUSA dispatch in
+// ops_api.cpp can call one namespace for both backends.
 namespace xllm::kernel::cuda {
+
+void reshape_paged_cache(torch::Tensor slot_ids,
+                         torch::Tensor keys,
+                         torch::Tensor values,
+                         torch::Tensor key_cache,
+                         torch::Tensor value_cache);
+
+void block_copy(torch::Tensor key_cache_ptrs,
+                torch::Tensor value_cache_ptrs,
+                torch::Tensor src_block_indices,
+                torch::Tensor dst_block_indices,
+                torch::Tensor cum_sum,
+                int64_t numel_per_block,
+                torch::ScalarType cache_dtype);
+
+void rms_norm(torch::Tensor output,
+              torch::Tensor input,
+              torch::Tensor weight,
+              double eps);
+
+void fused_add_rms_norm(torch::Tensor& input,
+                        torch::Tensor& residual,
+                        torch::Tensor& weight,
+                        double epsilon);
+
+std::tuple<torch::Tensor, torch::Tensor> moe_fused_topk(
+    torch::Tensor& gating_output,
+    int64_t topk,
+    bool renormalize,
+    const std::optional<torch::Tensor>& correction_bias,
+    const std::string& scoring_func);
 
 // Returns {src_dst, dst_src, expert_sizes}.
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> moe_compute_index(

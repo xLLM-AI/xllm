@@ -500,33 +500,28 @@ void WorkerService::PullKVCache(::google::protobuf::RpcController* controller,
                                 ::google::protobuf::Closure* done) {
   threadpool_->schedule([this, controller, req, resp, done]() mutable {
     brpc::ClosureGuard done_guard(done);
-    std::vector<uint64_t> src_blocks(req->src_blocks().begin(),
-                                     req->src_blocks().end());
-    std::vector<uint64_t> dst_blocks(req->dst_blocks().begin(),
-                                     req->dst_blocks().end());
-    std::vector<uint64_t> src_linear_state_ids(
-        req->src_linear_state_ids().begin(), req->src_linear_state_ids().end());
-    std::vector<uint64_t> dst_linear_state_ids(
-        req->dst_linear_state_ids().begin(), req->dst_linear_state_ids().end());
+    std::vector<KVTransferMapping> mappings;
+    mappings.reserve(req->mappings_size());
+    for (const proto::KVTransferMapping& proto_mapping : req->mappings()) {
+      KVTransferMapping mapping;
+      mapping.group_id = proto_mapping.group_id();
+      mapping.local_ids.assign(proto_mapping.local_ids().begin(),
+                               proto_mapping.local_ids().end());
+      mapping.remote_ids.assign(proto_mapping.remote_ids().begin(),
+                                proto_mapping.remote_ids().end());
+      mappings.emplace_back(std::move(mapping));
+    }
     auto future = [&]() {
       if (req->hetero_merge()) {
         std::vector<uint64_t> src_cluster_ids(req->src_cluster_ids().begin(),
                                               req->src_cluster_ids().end());
         std::vector<std::string> src_addrs(req->src_addrs().begin(),
                                            req->src_addrs().end());
-        return worker_->pull_hetero_kv_blocks_async(src_cluster_ids,
-                                                    src_addrs,
-                                                    src_blocks,
-                                                    dst_blocks,
-                                                    src_linear_state_ids,
-                                                    dst_linear_state_ids);
+        return worker_->pull_hetero_kv_blocks_async(
+            src_cluster_ids, src_addrs, mappings);
       }
-      return worker_->pull_kv_blocks_async(req->cluster_id(),
-                                           req->addr(),
-                                           src_blocks,
-                                           dst_blocks,
-                                           src_linear_state_ids,
-                                           dst_linear_state_ids);
+      return worker_->pull_kv_blocks_async(
+          req->cluster_id(), req->addr(), mappings);
     }();
     bool status = std::move(future).get();
     resp->set_ok(status);

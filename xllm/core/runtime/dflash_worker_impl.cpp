@@ -31,7 +31,7 @@ limitations under the License.
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/process_group.h"
 #include "framework/sampling/rejection_sampler.h"
-#if defined(USE_MLU)
+#if defined(USE_NPU) || defined(USE_MLU)
 #include "framework/kv_cache_transfer/mooncake_kv_cache_transfer.h"
 #endif
 #if defined(USE_NPU)
@@ -164,11 +164,17 @@ void build_query_rows(const ForwardInput& input,
                       int32_t mask_token_id,
                       int32_t num_speculative_tokens,
                       int32_t block_size,
+                      bool sample_from_anchor,
                       specBuilder::DecodeBuildBuffers& buf,
                       std::vector<int32_t>& selected_idxes,
                       std::vector<int32_t>& q_cu_seq_lens) {
   const int32_t num_sequences = input.input_params.meta.num_sequences;
-  const int32_t query_width = num_speculative_tokens + 1;
+  // DFlash: (1 + N) block — slot 0 is the un-selected anchor (real token), the
+  // N mask positions are sampled. DSpark: N-wide block — every position is a
+  // prediction; slot 0 still carries the real token but is itself sampled
+  // (predicts the first draft token), positions 1..N-1 are masks.
+  const int32_t query_width =
+      sample_from_anchor ? num_speculative_tokens : num_speculative_tokens + 1;
   specBuilder::DecodeRowContext row_ctx =
       specBuilder::make_decode_row_context(input);
   Slice<int32_t> token_ids = {
@@ -183,7 +189,7 @@ void build_query_rows(const ForwardInput& input,
   buf.out_kv_seq_lens.reserve(num_sequences);
   buf.out_q_seq_lens.reserve(num_sequences);
 
-  selected_idxes.reserve(num_sequences * num_speculative_tokens);
+  selected_idxes.reserve(num_sequences * query_width);
   q_cu_seq_lens.reserve(num_sequences + 1);
   q_cu_seq_lens.emplace_back(0);
 
@@ -197,18 +203,25 @@ void build_query_rows(const ForwardInput& input,
       row.append_q_len_one = false;
       row.append_block_table = false;
       specBuilder::append_decode_row(row_ctx, row, block_size, buf);
-      if (query_idx > 0) {
+      // DFlash skips slot 0 (anchor, not sampled); DSpark samples every slot.
+      if (sample_from_anchor || query_idx > 0) {
         selected_idxes.emplace_back(seq_id * query_width + query_idx);
       }
     }
 
     specBuilder::append_seq_len_by_layout(buf.out_q_seq_lens, query_width);
     q_cu_seq_lens.emplace_back(q_cu_seq_lens.back() + query_width);
+    // kv_len must cover exactly this block's max absolute position (anchor +
+    // query_width - 1), not a fixed anchor + num_speculative_tokens: DFlash's
+    // (1+N)-wide block and DSpark's N-wide block (sample_from_anchor) advance
+    // the max position by different amounts, and using num_speculative_tokens
+    // unconditionally overshoots by one slot for DSpark, exposing an
+    // uninitialized cache slot to this block's non-causal attention.
     const int32_t kv_len =
         specBuilder::calc_kv_len(input.input_params.attention.host.kv_seq_lens,
                                  seq_id,
                                  /*offset=*/0) +
-        num_speculative_tokens;
+        (query_width - 1);
     specBuilder::update_kv_seq_lens_and_max(
         buf.out_kv_seq_lens, kv_len, buf.meta.kv_max_seq_len);
   }
@@ -275,8 +288,8 @@ DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
   // the aux hidden, so the draft would silently receive the wrong tensor.
   // Reject cp_size > 1 until aux-hidden plumbing under CP is implemented.
   CHECK_LE(parallel_args.cp_size(), 1)
-      << "DFlash speculative decoding does not support context parallelism "
-         "(cp_size > 1).";
+      << "Block-diffusion speculative decoding does not support context "
+         "parallelism (cp_size > 1).";
   draft_impl_ = std::make_unique<LLMWorkerImpl>(
       parallel_args, device, draft_options(options));
 }
@@ -289,7 +302,8 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
   // back to a causal mask and proposal quality silently degrades, so require
   // the flag rather than accept a misconfigured run.
   CHECK(::xllm::SchedulerConfig::get_instance().enable_chunked_prefill())
-      << "DFlash requires --enable_chunked_prefill=true.";
+      << "Block-diffusion speculative decoding requires "
+         "--enable_chunked_prefill=true.";
   bool result = true;
   const bool loading_target =
       impl_->get_status() == WorkerImpl::Status::UNINITIALIZED;
@@ -336,25 +350,32 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
     JsonReader reader;
     const std::string config_path = model_weights_path + "/config.json";
     CHECK(reader.parse(config_path))
-        << "Failed to parse DFlash draft config: " << config_path;
+        << "Failed to parse block-diffusion draft config: " << config_path;
     std::optional<int32_t> mask_token_id =
         reader.value<int32_t>("dflash_config.mask_token_id");
+    if (!mask_token_id.has_value()) {
+      mask_token_id = reader.value<int32_t>("mask_token_id");
+    }
     CHECK(mask_token_id.has_value())
-        << "DFlash draft config requires dflash_config.mask_token_id.";
+        << "Block-diffusion draft config requires mask_token_id or "
+           "dflash_config.mask_token_id.";
     mask_token_id_ = mask_token_id.value();
 
     const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
     const int64_t draft_vocab_size = draft_args.vocab_size();
-    CHECK_GT(draft_vocab_size, 0) << "DFlash draft vocab_size must be set.";
-    CHECK_GE(mask_token_id_, 0) << "DFlash mask_token_id (" << mask_token_id_
-                                << ") must be a valid embedding index (>= 0).";
+    CHECK_GT(draft_vocab_size, 0)
+        << "Block-diffusion draft vocab_size must be set.";
+    CHECK_GE(mask_token_id_, 0)
+        << "Block-diffusion mask_token_id (" << mask_token_id_
+        << ") must be a valid embedding index (>= 0).";
     CHECK_LT(mask_token_id_, draft_vocab_size)
-        << "DFlash mask_token_id (" << mask_token_id_
+        << "Block-diffusion mask_token_id (" << mask_token_id_
         << ") must be < draft vocab_size (" << draft_vocab_size << ").";
     const int64_t num_target_layers =
         static_cast<int64_t>(draft_args.layers_to_capture().size());
     CHECK_GT(num_target_layers, 0)
-        << "DFlash requires dflash_config.target_layer_ids.";
+        << "Block-diffusion draft config requires target_layer_ids or "
+           "dflash_config.target_layer_ids.";
     expected_context_hidden_size_ =
         static_cast<int64_t>(draft_args.hidden_size()) * num_target_layers;
   }
@@ -403,15 +424,26 @@ bool DFlashWorkerImpl::allocate_kv_cache_with_transfer(
 
   if (kv_cache_transfer_ == nullptr) {
 #if defined(USE_NPU)
-    kv_cache_transfer_ = std::make_shared<SpecKVCacheTransfer>(
-        options_.transfer_listen_port(),
-        options_.instance_role(),
-        context_.get_model_args().index_n_heads() > 0,
-        context_.get_model_args().enable_mla());
+    const std::string& transfer_type =
+        ::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type();
+    if (transfer_type == "LlmDataDist") {
+      kv_cache_transfer_ = std::make_shared<SpecKVCacheTransfer>(
+          options_.transfer_listen_port(),
+          options_.instance_role(),
+          context_.get_model_args().index_n_heads() > 0,
+          context_.get_model_args().enable_mla());
+    } else {
+      CHECK_EQ(transfer_type, "Mooncake");
+      kv_cache_transfer_ = std::make_shared<MooncakeKVCacheTransferDefault>(
+          device_.index(),
+          options_.transfer_listen_port(),
+          device_,
+          context_.get_model_args().model_type());
+    }
 #elif defined(USE_MLU)
     CHECK_EQ(::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type(),
              "Mooncake")
-        << "MLU DFlash push only supports Mooncake KV transfer.";
+        << "MLU DFlash only supports Mooncake KV transfer.";
     kv_cache_transfer_ = std::make_shared<MooncakeKVCacheTransferDefault>(
         device_.index(),
         options_.transfer_listen_port(),
@@ -472,7 +504,12 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
     return output;
   }
 
-  const int32_t query_width = options_.num_speculative_tokens() + 1;
+  // Mirror prepare_query_inputs' block-width branch below: an idle DP rank's
+  // dummy query must match the width active ranks build, or DP shape
+  // symmetry breaks for DSpark (sample_from_anchor() == true, N-wide).
+  const int32_t query_width = sample_from_anchor()
+                                  ? options_.num_speculative_tokens()
+                                  : options_.num_speculative_tokens() + 1;
   ForwardInput query_input = input;
   query_input.input_params.meta.batch_forward_type =
       BatchForwardType::CHUNKED_PREFILL;
@@ -941,10 +978,14 @@ void DFlashWorkerImpl::prepare_query_inputs(const ForwardInput& input,
                    mask_token_id_,
                    options_.num_speculative_tokens(),
                    options_.block_size(),
+                   sample_from_anchor(),
                    buf,
                    selected_idxes,
                    q_cu_seq_lens);
-  const int32_t query_width = options_.num_speculative_tokens() + 1;
+  // DFlash: (1 + N) rows per seq; DSpark (sample_from_anchor): N rows.
+  const int32_t query_width = sample_from_anchor()
+                                  ? options_.num_speculative_tokens()
+                                  : options_.num_speculative_tokens() + 1;
   // DFlash emits query_width rows per seq unconditionally, so DP shape
   // symmetry holds by construction. Catch scheduler regressions that break
   // the invariant (see MTP dp_enabled idle-rank branch).

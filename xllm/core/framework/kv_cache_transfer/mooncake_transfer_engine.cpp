@@ -18,8 +18,10 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <limits>
 #include <numeric>
 
+#include "common/metrics.h"
 #include "util/net.h"
 
 namespace xllm {
@@ -200,11 +202,11 @@ bool MooncakeTransferEngineCore::open_session(const uint64_t cluster_id,
 
     LOG(INFO) << "OpenSession RPC to " << remote_addr
               << ", local_addr=" << addr_;
-#if !defined(USE_DCU)
-    return true;
-#endif
   }
 
+  // Keep a local handle as well as asking the peer to open one. WRITE uses
+  // the peer-side handle created by the RPC, while READ needs this local
+  // handle to address the peer's registered segment.
   Transport::SegmentHandle handle = engine_->openSegment(remote_addr);
   if (handle == static_cast<Transport::SegmentHandle>(-1)) {
     LOG(ERROR) << "Fail to connect to " << remote_addr;
@@ -223,7 +225,7 @@ bool MooncakeTransferEngineCore::open_session(const uint64_t cluster_id,
 
 bool MooncakeTransferEngineCore::close_session(const uint64_t cluster_id,
                                                const std::string& remote_addr) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
 
   LOG(INFO) << "close_session, cluster_id=" << cluster_id
             << ", remote_addr=" << remote_addr;
@@ -237,22 +239,17 @@ bool MooncakeTransferEngineCore::close_session(const uint64_t cluster_id,
       if (it->second.ref_count > 0) {
         return true;
       }
-    }
-#if defined(USE_DCU)
-    if (!close_remote_session(this, cluster_id)) {
-      return false;
-    }
-    if (it != handles_.end()) {
       Transport::SegmentHandle handle = it->second.handle;
       if (handle != static_cast<Transport::SegmentHandle>(-1)) {
         engine_->closeSegment(handle);
       }
       handles_.erase(it);
     }
-    return true;
-#else
+    // close_remote_session() obtains the core mutex through
+    // get_or_create_stub(). Release it after updating local state to avoid
+    // recursively locking the same non-recursive mutex.
+    lock.unlock();
     return close_remote_session(this, cluster_id);
-#endif
   }
 
   if (it == handles_.end()) {
@@ -446,6 +443,42 @@ bool MooncakeTransferEngine::move_memory_blocks(
     return false;
   }
 
+  std::vector<int64_t> active_buf_ids = buf_ids;
+  if (active_buf_ids.empty()) {
+    active_buf_ids.resize(buf_bytes_.size());
+    std::iota(active_buf_ids.begin(), active_buf_ids.end(), 0);
+  }
+
+  std::vector<BufferTransferMapping> mappings;
+  mappings.reserve(active_buf_ids.size());
+  for (int64_t buf_id : active_buf_ids) {
+    BufferTransferMapping mapping;
+    mapping.buf_id = buf_id;
+    if (move_opcode == MoveOpcode::WRITE) {
+      mapping.local_ids = src_blocks;
+      mapping.remote_ids = dst_blocks;
+    } else {
+      mapping.local_ids = dst_blocks;
+      mapping.remote_ids = src_blocks;
+    }
+    mappings.emplace_back(std::move(mapping));
+  }
+  return move_memory_groups(remote_addr, mappings, move_opcode);
+}
+
+bool MooncakeTransferEngine::move_memory_groups(
+    const std::string& remote_addr,
+    const std::vector<BufferTransferMapping>& mappings,
+    MoveOpcode move_opcode) {
+  for (const BufferTransferMapping& mapping : mappings) {
+    if (mapping.local_ids.size() != mapping.remote_ids.size()) {
+      LOG(ERROR) << "local_ids size must equal remote_ids size, buf_id="
+                 << mapping.buf_id << ", local=" << mapping.local_ids.size()
+                 << ", remote=" << mapping.remote_ids.size();
+      return false;
+    }
+  }
+
   SegmentHandle remote_handle = core_.get_handle(remote_addr);
   if (remote_handle == static_cast<SegmentHandle>(-1)) {
     LOG(ERROR) << "remote addr does not exist: " << remote_addr;
@@ -480,30 +513,15 @@ bool MooncakeTransferEngine::move_memory_blocks(
     return false;
   }
 
-  std::vector<uint64_t> merged_src_blocks;
-  std::vector<uint64_t> merged_dst_blocks;
-  std::vector<uint64_t> block_lengths;
-  merge_block_ids(src_blocks,
-                  dst_blocks,
-                  merged_src_blocks,
-                  merged_dst_blocks,
-                  block_lengths);
-
-  std::vector<int64_t> active_buf_ids;
-  if (buf_ids.empty()) {
-    active_buf_ids.resize(buf_bytes_.size());
-    std::iota(active_buf_ids.begin(), active_buf_ids.end(), 0);
-  } else {
-    active_buf_ids = buf_ids;
-  }
-
   TransferRequest::OpCode opcode = TransferRequest::READ;
   if (move_opcode == MoveOpcode::WRITE) {
     opcode = TransferRequest::WRITE;
   }
 
   std::vector<TransferRequest> entries;
-  for (int64_t buf_id : active_buf_ids) {
+  uint64_t total_bytes = 0;
+  for (const BufferTransferMapping& mapping : mappings) {
+    const int64_t buf_id = mapping.buf_id;
     if (buf_id < 0 || static_cast<size_t>(buf_id) >= local_buf_cnt) {
       LOG(ERROR) << "buf_id out of range, buf_id=" << buf_id
                  << ", buf_cnt=" << local_buf_cnt;
@@ -518,16 +536,19 @@ bool MooncakeTransferEngine::move_memory_blocks(
     char* local_base =
         reinterpret_cast<char*>(local_segment_desc->buffers[local_buf_id].addr);
     uint64_t remote_base = remote_segment_desc->buffers[local_buf_id].addr;
-    for (size_t i = 0; i < merged_src_blocks.size(); ++i) {
-      uint64_t src_block_id = merged_src_blocks[i];
-      uint64_t dst_block_id = merged_dst_blocks[i];
+
+    std::vector<uint64_t> merged_local_ids;
+    std::vector<uint64_t> merged_remote_ids;
+    std::vector<uint64_t> block_lengths;
+    merge_block_ids(mapping.local_ids,
+                    mapping.remote_ids,
+                    merged_local_ids,
+                    merged_remote_ids,
+                    block_lengths);
+    for (size_t i = 0; i < merged_local_ids.size(); ++i) {
+      uint64_t local_block_id = merged_local_ids[i];
+      uint64_t remote_block_id = merged_remote_ids[i];
       uint64_t block_length = block_lengths[i];
-      uint64_t local_block_id = src_block_id;
-      uint64_t remote_block_id = dst_block_id;
-      if (move_opcode == MoveOpcode::READ) {
-        local_block_id = dst_block_id;
-        remote_block_id = src_block_id;
-      }
       if (!check_buf_range(
               local_buf_len, buf_bytes, local_block_id, block_length, buf_id) ||
           !check_buf_range(remote_buf_len,
@@ -541,6 +562,11 @@ bool MooncakeTransferEngine::move_memory_blocks(
       uint64_t local_bias = local_block_id * buf_bytes;
       uint64_t remote_bias = remote_block_id * buf_bytes;
       uint64_t len = block_length * buf_bytes;
+      if (len > std::numeric_limits<uint64_t>::max() - total_bytes) {
+        LOG(ERROR) << "MoonCake transfer byte count overflow";
+        return false;
+      }
+      total_bytes += len;
 
       TransferRequest entry;
       entry.opcode = opcode;
@@ -557,11 +583,13 @@ bool MooncakeTransferEngine::move_memory_blocks(
     return true;
   }
 
+  Timer transfer_timer;
   size_t batch_size = entries.size();
   auto batch_id = engine->allocateBatchID(batch_size);
   mooncake::Status s = engine->submitTransfer(batch_id, entries);
   if (!s.ok()) {
     LOG(ERROR) << "submit failed";
+    COUNTER_INC(mooncake_transfer_failed_total);
     engine->freeBatchID(batch_id);
     return false;
   }
@@ -571,10 +599,28 @@ bool MooncakeTransferEngine::move_memory_blocks(
   s = engine->freeBatchID(batch_id);
   if (!s.ok()) {
     LOG(ERROR) << "freeBatchID failed";
+    COUNTER_INC(mooncake_transfer_failed_total);
     return false;
   }
 
-  return transfer_success;
+  if (!transfer_success) {
+    COUNTER_INC(mooncake_transfer_failed_total);
+    return false;
+  }
+  const int64_t latency_microseconds = static_cast<int64_t>(
+      transfer_timer.elapsed_seconds() * static_cast<double>(1000000));
+  if (move_opcode == MoveOpcode::READ) {
+    COUNTER_INC(mooncake_transfer_completed_total_read);
+    COUNTER_ADD(mooncake_transfer_bytes_total_read, total_bytes);
+    HISTOGRAM_OBSERVE(mooncake_transfer_latency_microseconds_read,
+                      latency_microseconds);
+  } else {
+    COUNTER_INC(mooncake_transfer_completed_total_write);
+    COUNTER_ADD(mooncake_transfer_bytes_total_write, total_bytes);
+    HISTOGRAM_OBSERVE(mooncake_transfer_latency_microseconds_write,
+                      latency_microseconds);
+  }
+  return true;
 }
 
 bool MooncakeTransferEngine::move_memory_by_global_offsets(

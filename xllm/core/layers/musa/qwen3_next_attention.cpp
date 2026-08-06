@@ -250,7 +250,7 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
         (head_dim_ == 64 || head_dim_ == 128 || head_dim_ == 256)) {
       auto cos_sin_cache = rotary_emb_->get_cos_sin_cache();
       int64_t k_head_offset = attn_output_gate_ ? num_heads_ * 2 : num_heads_;
-      xllm::kernel::cuda::fused_qk_norm_rope(qkv,
+      xllm::kernel::musa::fused_qk_norm_rope(qkv,
                                              num_heads_,
                                              num_kv_heads_,
                                              num_kv_heads_,
@@ -286,7 +286,7 @@ torch::Tensor Qwen3NextAttentionImpl::forward(
     if (attn_output_gate_) {
       // Capture-safe fused gating: compute sigmoid(gate) and multiply `out`
       // in one launch without a temporary allocation or mutating `gate`.
-      xllm::kernel::cuda::mul_sigmoid_gate_inplace(out, gate);
+      xllm::kernel::musa::mul_sigmoid_gate_inplace(out, gate);
     }
     return o_proj_->forward(out);
   }

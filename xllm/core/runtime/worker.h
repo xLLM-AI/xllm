@@ -111,18 +111,12 @@ class Worker {
   virtual folly::SemiFuture<bool> pull_kv_blocks_async(
       const uint64_t src_cluster_id,
       const std::string& src_addr,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {});
+      const std::vector<KVTransferMapping>& mappings);
 
   virtual folly::SemiFuture<bool> pull_hetero_kv_blocks_async(
       const std::vector<uint64_t>& src_cluster_ids,
       const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {});
+      const std::vector<KVTransferMapping>& mappings);
 
   virtual uint32_t transfer_kv_blocks(
       const uint64_t batch_id,

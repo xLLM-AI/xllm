@@ -54,7 +54,7 @@ bool s_enable_graph_timing() {
   return val;
 }
 
-bool s_use_musa_fa3_decode(int64_t gqa_ratio) {
+bool s_use_fa3_decode(int64_t gqa_ratio) {
   static const int32_t setting = [] {
     const char* decode_env = std::getenv("XLLM_USE_FA3_DECODE");
     if (decode_env != nullptr) {
@@ -156,7 +156,7 @@ size_t get_allocator_reserved_bytes(c10::DeviceIndex device_index) {
   return static_cast<size_t>(device_stats.reserved_bytes[stat_index].current);
 }
 
-bool is_musa_contiguous_int_tensor(const torch::Tensor& tensor) {
+bool is_contiguous_int_tensor(const torch::Tensor& tensor) {
   if (!tensor.defined() || !tensor.is_contiguous()) {
     return false;
   }
@@ -350,21 +350,18 @@ bool MusaGraphPersistentParam::can_use_llm_decode_fast_path(
     return false;
   }
   const bool device_token_metadata_ok =
-      is_musa_contiguous_int_tensor(tokens) &&
-      is_musa_contiguous_int_tensor(positions) &&
-      is_musa_contiguous_int_tensor(params.attention.device.new_cache_slots);
+      is_contiguous_int_tensor(tokens) && is_contiguous_int_tensor(positions) &&
+      is_contiguous_int_tensor(params.attention.device.new_cache_slots);
   if (!device_token_metadata_ok) {
     return false;
   }
   if (has_llm_decode_host_metadata(params.attention.host)) {
     return true;
   }
-  return is_musa_contiguous_int_tensor(params.attention.device.kv_seq_lens) &&
-         is_musa_contiguous_int_tensor(
-             params.attention.device.paged_kv_indptr) &&
-         is_musa_contiguous_int_tensor(
-             params.attention.device.paged_kv_indices) &&
-         is_musa_contiguous_int_tensor(
+  return is_contiguous_int_tensor(params.attention.device.kv_seq_lens) &&
+         is_contiguous_int_tensor(params.attention.device.paged_kv_indptr) &&
+         is_contiguous_int_tensor(params.attention.device.paged_kv_indices) &&
+         is_contiguous_int_tensor(
              params.attention.device.paged_kv_last_page_len);
 }
 
@@ -1070,8 +1067,8 @@ std::optional<ModelInputParams> MusaGraphPersistentParam::update(
   const bool is_qwen3_5 = args_.model_type() == "qwen3_5_text" ||
                           args_.model_type() == "qwen3_5_moe_text";
   const int64_t gqa_ratio = n_kv_heads > 0 ? n_heads / n_kv_heads : int64_t{0};
-  if (s_use_musa_fa3_decode(gqa_ratio) && is_qwen3_5 &&
-      !attn_metadata->is_prefill && !attn_metadata->is_chunked_prefill &&
+  if (s_use_fa3_decode(gqa_ratio) && is_qwen3_5 && !attn_metadata->is_prefill &&
+      !attn_metadata->is_chunked_prefill &&
       attn_metadata->block_table.defined()) {
     const int64_t batch_size = attn_metadata->block_table.size(0);
     if (batch_size > 0 && (gqa_ratio == 6 || gqa_ratio == 8)) {
@@ -1328,14 +1325,14 @@ bool MusaGraph::capture(CausalLM* model,
     for (int warmup_iter = 0; warmup_iter < 2; ++warmup_iter) {
       capture_stream.synchronize();
       {
-        xllm::kernel::musa::MusaTvmffiPreparationSyncGuard ffi_sync_guard;
+        xllm::kernel::musa::TvmffiPreparationSyncGuard ffi_sync_guard;
         model->forward(
             persistent_param_.persistent_tokens(padded_num_tokens_),
             persistent_param_.persistent_positions(padded_num_tokens_),
             kv_cache,
             graph_params_opt.value());
       }
-      xllm::kernel::musa::sync_musa_ffi_stream(persistent_param_.device());
+      xllm::kernel::musa::sync_ffi_stream(persistent_param_.device());
       if (snapshot_linear_state) {
         // The warmup is an eager forward and therefore mutates the live
         // recurrent state. Restore it before the next warmup so every warmup
@@ -1356,13 +1353,13 @@ bool MusaGraph::capture(CausalLM* model,
     recorded_ffi_allocs_.clear();
     xllm::kernel::musa::begin_ffi_alloc_record();
     {
-      xllm::kernel::musa::MusaTvmffiPreparationSyncGuard ffi_sync_guard;
+      xllm::kernel::musa::TvmffiPreparationSyncGuard ffi_sync_guard;
       model->forward(persistent_param_.persistent_tokens(padded_num_tokens_),
                      persistent_param_.persistent_positions(padded_num_tokens_),
                      kv_cache,
                      graph_params_opt.value());
     }
-    xllm::kernel::musa::sync_musa_ffi_stream(persistent_param_.device());
+    xllm::kernel::musa::sync_ffi_stream(persistent_param_.device());
     if (snapshot_linear_state) {
       // The FFI recording pass is eager as well; leave the live cache at the
       // pre-capture state before beginning graph capture.
@@ -1394,7 +1391,7 @@ bool MusaGraph::capture(CausalLM* model,
     // graph_.capture_begin(pool);
     void* const capture_stream_handle =
         reinterpret_cast<void*>(capture_stream.stream());
-    std::optional<xllm::kernel::musa::MusaTvmffiStreamOverrideGuard>
+    std::optional<xllm::kernel::musa::TvmffiStreamOverrideGuard>
         ffi_capture_stream_guard;
     ffi_capture_stream_guard.emplace(persistent_param_.device(),
                                      capture_stream_handle);

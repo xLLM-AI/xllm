@@ -279,7 +279,6 @@ TEST(KVCacheTest, DeepSeekV4FourDimCachesUseDeviceLayout) {
     ASSERT_NE(it, tensors.end()) << "missing role=" << role.to_string();
     EXPECT_EQ(it->group_id, cache_group_id(expected_block_type))
         << "role=" << role.to_string();
-    EXPECT_FALSE(it->sequence_scoped);
   };
   expect_tensor_group(caches[0], KVCacheTensorRole::WINDOW, BlockType::SWA);
   expect_tensor_group(caches[1], KVCacheTensorRole::KEY, BlockType::C4);
@@ -868,6 +867,32 @@ TEST_F(HostKVCacheConfigTest, RejectsQuantizedKVCache) {
 
   ASSERT_TRUE(error.has_value());
   EXPECT_NE(error->find("--kv_cache_dtype=auto"), std::string::npos);
+}
+
+TEST_F(HostKVCacheConfigTest, RejectsUnsupportedGroupedCacheLayout) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.has_grouped_cache_layout = true;
+  options.model_type = "unknown_grouped_model";
+
+  const std::optional<std::string> error = validate_host_cache_options(options);
+
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->find("grouped cache layout"), std::string::npos);
+}
+
+TEST_F(HostKVCacheConfigTest, AcceptsSupportedGroupedCacheLayout) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.has_grouped_cache_layout = true;
+  options.supports_grouped_cache_offload = true;
+  options.model_type = "deepseek_v4";
+
+  EXPECT_FALSE(validate_host_cache_options(options).has_value());
 }
 
 }  // namespace xllm

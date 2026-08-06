@@ -20,6 +20,7 @@ limitations under the License.
 #include <absl/time/time.h>
 #include <folly/futures/Future.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -138,9 +139,10 @@ class Sequence final {
   bool is_prefill_stage() const { return stage() != SequenceStage::DECODE; }
   // get the sequence stage
   SequenceStage stage() const {
-    if (kv_state_.kv_cache_tokens_num() <
+    const size_t cached_tokens = kv_cache_tokens_num();
+    if (cached_tokens <
         std::max(volatile_num_prompt_tokens_, num_prompt_tokens())) {
-      if (kv_state_.kv_cache_tokens_num() > 0) {
+      if (cached_tokens > 0) {
         return SequenceStage::CHUNKED_PREFILL;
       }
       return SequenceStage::PREFILL;
@@ -173,13 +175,13 @@ class Sequence final {
 
   // get the number of tokens need compute
   size_t num_need_compute_tokens() const {
-    return num_tokens_ - std::max(kv_state_.kv_cache_tokens_num(),
-                                  host_kv_state_.kv_cache_tokens_num());
+    return num_tokens_ - kv_cache_tokens_num();
   }
 
   size_t kv_cache_tokens_num() const {
-    return std::max(kv_state_.kv_cache_tokens_num(),
-                    host_kv_state_.kv_cache_tokens_num());
+    return std::max({kv_state_.kv_cache_tokens_num(),
+                     host_kv_state_.kv_cache_tokens_num(),
+                     effective_restore_tokens_.value_or(0)});
   }
 
   size_t num_prefix_cache_tokens() const;
@@ -360,12 +362,19 @@ class Sequence final {
 
   KVCacheState& kv_state() { return kv_state_; }
 
-  // Host-side block state, per BlockType (mirrors kv_state_). Today only
-  // BlockType::KV is populated by HierarchyBlockManagerPool; when host
-  // offload is extended past the flat-KV shape (SWA / C4 / C128), the
-  // additional per-type slots land under the same KVCacheState here without
-  // touching this signature.
+  bool has_any_blocks() const {
+    return kv_state_.has_any_blocks() || host_kv_state_.has_any_blocks();
+  }
+
   KVCacheState& host_kv_state() { return host_kv_state_; }
+
+  void set_host_cache_match(size_t restore_tokens, size_t copy_units);
+  void set_host_cache_restore(size_t restore_tokens, size_t copy_units);
+  void clear_host_cache_match();
+  bool has_host_cache_match() const {
+    return effective_restore_tokens_.has_value();
+  }
+  size_t host_cache_copy_units() const { return host_cache_copy_units_; }
 
   // for generated tokens
   float get_acc_logprob();
@@ -535,6 +544,9 @@ class Sequence final {
   KVCacheState kv_state_;
 
   KVCacheState host_kv_state_;
+
+  std::optional<size_t> effective_restore_tokens_;
+  size_t host_cache_copy_units_ = 0;
 
   std::unique_ptr<LogprobState> logprob_state_;
 

@@ -56,12 +56,14 @@ class FakeTokenizer : public Tokenizer {
 
 class FakeEngine : public Engine {
  public:
-  FakeEngine(int32_t num_blocks, int32_t block_size) {
+  FakeEngine(int32_t num_blocks,
+             int32_t block_size,
+             bool enable_prefix_cache = false) {
     BlockManagerPool::Options opt;
     opt.num_blocks_ = num_blocks;
     opt.block_size_ = block_size;
     opt.max_seqs_per_batch_ = 1024;
-    opt.enable_prefix_cache_ = false;
+    opt.enable_prefix_cache_ = enable_prefix_cache;
     fake_tokenizer_ = std::make_unique<FakeTokenizer>();
     fake_block_manager_ = std::make_unique<BlockManagerPool>(opt, 1);
   }
@@ -232,6 +234,47 @@ TEST(SchedulerPolicyTest, AddNewRequestBase) {
       EXPECT_TRUE(allowed_max_tokens[i] == validate_allowed_max_tokens[idx]);
     }
   }
+}
+
+TEST(SchedulerPolicyTest, UnifiedPrefixHitIncludesScheduledSuffixCapacity) {
+  ScopedConfigValue<bool> mix_batch_guard(
+      SchedulerConfig::get_instance().enable_mix_batch(), true);
+  constexpr int32_t kBlockSize = 128;
+  constexpr int32_t kPrefixTokens = 256;
+  constexpr int32_t kPromptTokens = 2313;
+  constexpr int32_t kChunkTokens = 256;
+
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      /*max_tokens_per_batch=*/kChunkTokens,
+      /*max_seqs_per_batch=*/16,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/kChunkTokens,
+      /*dp_size=*/1,
+      /*priority_strategy=*/"multi_slo_and_prio");
+  auto engine = std::make_unique<FakeEngine>(
+      /*num_blocks=*/64, kBlockSize, /*enable_prefix_cache=*/true);
+
+  auto cached_requests =
+      generate_request({kPrefixTokens}, {1}, std::nullopt, std::nullopt, 10000);
+  Sequence* cached_sequence = cached_requests[0]->sequences()[0].get();
+  ASSERT_TRUE(engine->block_manager_pool()->allocate(cached_sequence));
+  cached_sequence->kv_state().set_kv_cache_tokens_num(kPrefixTokens);
+  engine->block_manager_pool()->cache(cached_sequence);
+  engine->block_manager_pool()->deallocate(cached_sequence);
+
+  auto scheduler = std::make_unique<ContinuousScheduler>(engine.get(), opt);
+  auto requests =
+      generate_request({kPromptTokens}, {1}, std::nullopt, std::nullopt, 10000);
+  scheduler->add_request(requests[0]);
+
+  std::vector<Batch> batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  ASSERT_EQ(batches[0].size(), 1u);
+  Sequence* hit_sequence = requests[0]->sequences()[0].get();
+  EXPECT_EQ(hit_sequence->kv_cache_tokens_num(), kPrefixTokens);
+  EXPECT_EQ(batches[0].get_allowed_max_tokens()[0], kChunkTokens);
+  EXPECT_GE(hit_sequence->kv_state().current_max_tokens_capacity(),
+            kPrefixTokens + kChunkTokens);
 }
 
 // TEST-2:

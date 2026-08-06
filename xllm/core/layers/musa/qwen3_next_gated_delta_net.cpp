@@ -201,28 +201,28 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::merge_qkvz_from_split_activations(
   const int64_t total_last_dim = 2 * head_k_dim_ + 2 * head_v_part;
   const int64_t flat_dim = local_k_heads * total_last_dim;
   const bool needs_realloc =
-      !qkvz_merge_buf_.defined() || qkvz_merge_buf_.size(0) < M ||
+      !qkvz_merge_buf_.defined() || qkvz_merge_buf_.size(0) < m ||
       qkvz_merge_buf_.size(1) != flat_dim ||
       qkvz_merge_buf_.scalar_type() != qkv.scalar_type() ||
       qkvz_merge_buf_.device() != qkv.device();
   if (needs_realloc) {
     // Grow-only so views handed out for already-captured smaller-bucket
     // graphs stay valid.
-    const int64_t target_M =
-        qkvz_merge_buf_.defined() ? std::max(M, qkvz_merge_buf_.size(0)) : M;
-    qkvz_merge_buf_ = torch::empty({target_M, flat_dim}, qkv.options());
+    const int64_t target_m =
+        qkvz_merge_buf_.defined() ? std::max(m, qkvz_merge_buf_.size(0)) : m;
+    qkvz_merge_buf_ = torch::empty({target_m, flat_dim}, qkv.options());
   }
-  auto buf_4d = qkvz_merge_buf_.narrow(/*dim=*/0, /*start=*/0, /*length=*/M)
-                    .view({M, local_k_heads, total_last_dim});
+  auto buf_4d = qkvz_merge_buf_.narrow(/*dim=*/0, /*start=*/0, /*length=*/m)
+                    .view({m, local_k_heads, total_last_dim});
   buf_4d.narrow(/*dim=*/-1, /*start=*/0, /*length=*/head_k_dim_)
-      .copy_(q.reshape({M, local_k_heads, head_k_dim_}));
+      .copy_(q.reshape({m, local_k_heads, head_k_dim_}));
   buf_4d.narrow(/*dim=*/-1, head_k_dim_, head_k_dim_)
-      .copy_(k.reshape({M, local_k_heads, head_k_dim_}));
+      .copy_(k.reshape({m, local_k_heads, head_k_dim_}));
   buf_4d.narrow(/*dim=*/-1, 2 * head_k_dim_, head_v_part)
-      .copy_(v.reshape({M, local_k_heads, head_v_part}));
+      .copy_(v.reshape({m, local_k_heads, head_v_part}));
   buf_4d.narrow(/*dim=*/-1, 2 * head_k_dim_ + head_v_part, head_v_part)
-      .copy_(z_view.reshape({M, local_k_heads, head_v_part}));
-  return qkvz_merge_buf_.narrow(/*dim=*/0, /*start=*/0, /*length=*/M)
+      .copy_(z_view.reshape({m, local_k_heads, head_v_part}));
+  return qkvz_merge_buf_.narrow(/*dim=*/0, /*start=*/0, /*length=*/m)
       .view({bs, seqlen, flat_dim});
 #else
   return torch::cat({q, k, v, z_view}, -1).view({bs, seqlen, -1}).contiguous();

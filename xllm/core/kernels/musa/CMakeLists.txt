@@ -19,12 +19,16 @@ set(_TORCH_MUSA_KERNEL_SRCS
   attention_decode.cpp
   attention_prefill.cpp
   gdn_decode.cu
-  gdn_state_commit.cu
   gdn_prefill.cpp
   causal_conv1d.cu
   gemma_norm.cu
   activation.cu
   rope.cu
+  gdn_state_commit.cu
+  ../cuda/block_copy.cu
+  ../cuda/norm.cu
+  ../cuda/reshape_paged_cache.cu
+  ../cuda/moe/moe_fused_topk.cu
   random_sample.cpp
   rejection_sample.cu
   replace_token.cu
@@ -38,9 +42,11 @@ set(_TORCH_MUSA_KERNEL_SRCS
   # Graph-safe expert histogram/prefix/placement used by Qwen3.5 routing.
   ../cuda/moe/moe_compute_index.cu
   ../cuda/moe/moe_combine.cu
+  # MUSA-only indexed combine for expert-major GEMM output.
+  moe_combine_indexed.cu
   # Fused per-token-group FP8 activation quant (MUSA-native intrinsics)
   fp8_act_quant.cu
-  # Mate FFI + graph helpers
+  # Mate FFI helpers
   musa_tvmffi_stream.cpp
   llm_decode_metadata_update.cu
 )
@@ -70,3 +76,4 @@ cc_library(
     musa
     musart
 )
+

@@ -57,27 +57,20 @@ class SpeculativeEngine : public Engine {
   std::vector<int64_t> get_active_activation_memory() const override;
 
   // P/D
-  bool pull_kv_blocks(
-      const int32_t src_dp_size,
-      const int32_t src_dp_rank,
-      const std::vector<uint64_t>& src_cluster_ids,
-      const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
-      const int32_t dst_dp_rank,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {}) override;
+  bool pull_kv_blocks(const int32_t src_dp_size,
+                      const int32_t src_dp_rank,
+                      const std::vector<uint64_t>& src_cluster_ids,
+                      const std::vector<std::string>& src_addrs,
+                      const int32_t dst_dp_rank,
+                      const std::vector<KVTransferMapping>& mappings) override;
 
   bool pull_hetero_kv_blocks(
       const int32_t src_dp_size,
       const int32_t src_dp_rank,
       const std::vector<uint64_t>& src_cluster_ids,
       const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
       const int32_t dst_dp_rank,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {}) override;
+      const std::vector<KVTransferMapping>& mappings) override;
 
   void get_cache_info(std::vector<uint64_t>& cluster_ids,
                       std::vector<std::string>& addrs,

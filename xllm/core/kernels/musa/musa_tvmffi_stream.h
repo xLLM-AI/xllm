@@ -31,29 +31,28 @@ namespace ffi = tvm::ffi;
 
 namespace xllm::kernel::musa {
 
-inline bool is_torch_musa_device(const torch::Device& device) {
+inline bool is_torch_device(const torch::Device& device) {
   return device.is_privateuseone() || device.is_cuda();
 }
 
-void bind_musa_tvmffi_stream(const torch::Device& device);
+void bind_tvmffi_stream(const torch::Device& device);
 
-bool is_musa_stream_capturing();
+bool is_stream_capturing();
 
-void sync_current_musa_stream(const torch::Device& device);
+void sync_current_stream(const torch::Device& device);
 
-void sync_musa_ffi_stream(const torch::Device& device);
+void sync_ffi_stream(const torch::Device& device);
 
-void sync_musa_graph_preparation_stage(const torch::Device& device);
+void sync_graph_preparation_stage(const torch::Device& device);
 
-class MusaTvmffiPreparationSyncGuard final {
+class TvmffiPreparationSyncGuard final {
  public:
-  MusaTvmffiPreparationSyncGuard();
-  ~MusaTvmffiPreparationSyncGuard();
+  TvmffiPreparationSyncGuard();
+  ~TvmffiPreparationSyncGuard();
 
-  MusaTvmffiPreparationSyncGuard(const MusaTvmffiPreparationSyncGuard&) =
+  TvmffiPreparationSyncGuard(const TvmffiPreparationSyncGuard&) = delete;
+  TvmffiPreparationSyncGuard& operator=(const TvmffiPreparationSyncGuard&) =
       delete;
-  MusaTvmffiPreparationSyncGuard& operator=(
-      const MusaTvmffiPreparationSyncGuard&) = delete;
 
  private:
   bool previous_ = false;
@@ -61,14 +60,14 @@ class MusaTvmffiPreparationSyncGuard final {
 
 // During graph capture, replaces only an invalid current MUSA stream with the
 // capture stream. Individual FFI operators still rebind their stream handle.
-class MusaTvmffiStreamOverrideGuard final {
+class TvmffiStreamOverrideGuard final {
  public:
-  MusaTvmffiStreamOverrideGuard(const torch::Device& device, void* stream);
-  ~MusaTvmffiStreamOverrideGuard();
+  TvmffiStreamOverrideGuard(const torch::Device& device, void* stream);
+  ~TvmffiStreamOverrideGuard();
 
-  MusaTvmffiStreamOverrideGuard(const MusaTvmffiStreamOverrideGuard&) = delete;
-  MusaTvmffiStreamOverrideGuard& operator=(
-      const MusaTvmffiStreamOverrideGuard&) = delete;
+  TvmffiStreamOverrideGuard(const TvmffiStreamOverrideGuard&) = delete;
+  TvmffiStreamOverrideGuard& operator=(const TvmffiStreamOverrideGuard&) =
+      delete;
 
  private:
   torch::Device device_;
@@ -76,13 +75,13 @@ class MusaTvmffiStreamOverrideGuard final {
   void* previous_forced_stream_ = nullptr;
 };
 
-class MusaTvmffiStreamGuard final {
+class TvmffiStreamGuard final {
  public:
-  explicit MusaTvmffiStreamGuard(const torch::Device& device);
-  ~MusaTvmffiStreamGuard();
+  explicit TvmffiStreamGuard(const torch::Device& device);
+  ~TvmffiStreamGuard();
 
-  MusaTvmffiStreamGuard(const MusaTvmffiStreamGuard&) = delete;
-  MusaTvmffiStreamGuard& operator=(const MusaTvmffiStreamGuard&) = delete;
+  TvmffiStreamGuard(const TvmffiStreamGuard&) = delete;
+  TvmffiStreamGuard& operator=(const TvmffiStreamGuard&) = delete;
 
  private:
   torch::Device device_;
@@ -171,7 +170,7 @@ ffi::Function get_function(const std::string& uri,
 
 // Registers TileLang's embedded MUSA-module loader with TVM FFI. Returns false
 // when libtilelang is unavailable so callers can use a non-TileLang fallback.
-bool ensure_tilelang_musa_loader();
+bool ensure_tilelang_loader();
 
 enum class FfiAllocMode { kPassthrough, kRecord, kReplay };
 

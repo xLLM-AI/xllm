@@ -35,6 +35,7 @@ class SlidingWindowBlockManager : public BlockManagerImpl {
   // invalid placeholders in their slots. Called by the composite after a
   // successful allocate commit.
   void release_out_of_window(Sequence* seq) override;
+  void release_out_of_window(Sequence* seq, KVCacheState& kv_state) override;
 
   // Gap-tolerant SWA probe. Delegates to LinearStatePrefixCache::match; see
   // that class for the shape returned. Composite owns the tail-continuity
@@ -46,6 +47,11 @@ class SlidingWindowBlockManager : public BlockManagerImpl {
       const Slice<XXH3Key>& block_hashes = {}) override;
 
   uint32_t swa_blocks_per_seq() const { return options_.swa_blocks_per_seq(); }
+
+ private:
+  void release_out_of_window(Sequence* seq,
+                             KVCacheState& kv_state,
+                             size_t cached_tokens);
 };
 
 }  // namespace xllm

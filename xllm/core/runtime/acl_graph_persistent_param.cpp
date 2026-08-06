@@ -1290,10 +1290,6 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
       graph_params->embedding.linear_state_indices =
           persistent_linear_state_indices(
               static_cast<uint32_t>(padded_batch_size));
-      graph_params->parallel.has_initial_state =
-          params.parallel.has_initial_state;
-      graph_params->parallel.has_initial_state.resize(
-          static_cast<size_t>(padded_batch_size), 0);
       graph_params->linear_state_validity_mask =
           params.linear_state_validity_mask;
       graph_params->linear_state_validity_mask.resize(
@@ -1360,15 +1356,6 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     for (int64_t i = 0; i < padded_batch_size; ++i) {
       qsl.emplace_back(qsl.back() +
                        padded_q_seq_lens_vec[static_cast<size_t>(i)]);
-    }
-
-    if (!params.parallel.has_initial_state.empty()) {
-      auto& his = graph_params->parallel.has_initial_state;
-      his = params.parallel.has_initial_state;
-      if (his.size() > static_cast<size_t>(actual_batch_size)) {
-        his.resize(static_cast<size_t>(actual_batch_size));
-      }
-      his.resize(static_cast<size_t>(padded_batch_size), 0);
     }
 
     if (!params.linear_state_validity_mask.empty()) {

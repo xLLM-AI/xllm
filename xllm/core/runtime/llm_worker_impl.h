@@ -100,6 +100,10 @@ class LLMWorkerImpl : public WorkerImpl {
     model_->set_word_embedding(embedding);
   };
 
+  torch::Tensor dspark_markov_bias(const torch::Tensor& previous_token_ids) {
+    return model_->dspark_markov_bias(previous_token_ids);
+  }
+
   // DFlash-specific delegate: eagerly project target hidden into the draft's
   // per-layer KV cache. Runs outside the executor because the pass has no
   // attention and its shape doesn't match the decode graph. See CausalLM.

@@ -39,16 +39,25 @@ class CompositeBlockManager : public BlockManager {
     bool participates_in_admission = true;
     bool supports_prefix_cache = false;
   };
+  using LeafMap = std::map<BlockType, LeafEntry>;
+
+  // Raw prefix-cache aliases returned by one leaf. The caller must either
+  // mount every valid alias or return it with release_probes().
+  struct ProbeResult {
+    BlockType type = BlockType::KV;
+    BlockManager* leaf = nullptr;
+    std::vector<Block> blocks;
+    size_t block_size = 0;
+  };
 
   // Which prefix-cache-supported leaf shape this composite carries. Classified
   // once at construction and cached in `combination_`; the sequence-level
   // orchestrators dispatch on it to pick the trim / mount strategy.
-  //   FLAT_KV        Plain KV (normal / Qwen). No trim.
-  //   FLAT_KV_LINEAR KV + LINEAR restore (Qwen3.5-Next GDN). Composite clamps
-  //                  KV to LINEAR's recoverable budget and pulls out its
-  //                  deepest checkpoint as a restore source.
-  //   SWA_COMPRESSED SWA + C4 + C128 (DSV4). Cross-leaf min, C128-stride
-  //                  clamp, SWA tail-continuity, exact-repeat pop.
+  //   FLAT_KV        Plain KV. No cross-leaf trim.
+  //   FLAT_KV_LINEAR KV + LINEAR restore. Clamp KV to LINEAR's recoverable
+  //                  budget and select its deepest checkpoint.
+  //   SWA_COMPRESSED SWA + C4 + C128. Cross-leaf min, C128-stride clamp,
+  //                  SWA tail-continuity, exact-repeat pop.
   //   UNSUPPORTED    Prefix cache off (xtensor / --enable_prefix_cache=false).
   enum class LeafCombination : int8_t {
     FLAT_KV,
@@ -57,7 +66,7 @@ class CompositeBlockManager : public BlockManager {
     UNSUPPORTED,
   };
 
-  explicit CompositeBlockManager(std::map<BlockType, LeafEntry> leaves);
+  explicit CompositeBlockManager(LeafMap leaves);
   ~CompositeBlockManager() override = default;
 
   bool is_composite() const override { return true; }
@@ -66,10 +75,26 @@ class CompositeBlockManager : public BlockManager {
   // each leaf's own primitives and writes results back into KVCacheState
   // under the leaf's block_type().
   bool allocate_sequence(Sequence* seq, size_t num_tokens);
+  void release_out_of_window_for_sequence(Sequence* seq);
   void deallocate_for_sequence(Sequence* seq);
   void allocate_shared_for_sequence(Sequence* seq);
   void cache_for_sequence(Sequence* seq);
   void cache_for_sequence(Sequence* seq, size_t num_tokens);
+  void cache_full_blocks_for_sequence(Sequence* seq);
+
+  // Probe every prefix-capable leaf without mounting the returned aliases.
+  // The two-argument overload uses sequence->kv_state(); hierarchy callers use
+  // the explicit state overload for Host leaves.
+  static std::vector<ProbeResult> probe_prefix_cache(Sequence* seq,
+                                                     const LeafMap& leaves);
+  static std::vector<ProbeResult> probe_prefix_cache(
+      Sequence* seq,
+      const LeafMap& leaves,
+      const KVCacheState& existing_state);
+  static void release_probes(std::vector<ProbeResult>* probes);
+
+  const LeafMap& leaf_entries() const { return leaves_; }
+  LeafCombination leaf_combination() const { return combination_; }
 
   // Typed block-level allocation routed to the leaf under `type`. Used for
   // beam copy-on-write.
@@ -80,6 +105,10 @@ class CompositeBlockManager : public BlockManager {
   std::vector<Block> allocate(size_t num_blocks) override;
   std::optional<std::vector<Block>> allocate_for_sequence(
       Sequence* seq,
+      size_t num_tokens) override;
+  std::optional<std::vector<Block>> allocate_for_sequence(
+      Sequence* seq,
+      KVCacheState& kv_state,
       size_t num_tokens) override;
   std::vector<Block> allocate_shared(
       const Slice<int32_t>& tokens_ids,
@@ -116,34 +145,23 @@ class CompositeBlockManager : public BlockManager {
 
   // The admission leaf whose raw block count defines the pool's
   // scheduler-facing capacity unit. Picks the finest-grained admission leaf
-  // (smallest block_size): KV for normal models, C4 for DSV4.
+  // (smallest block_size): KV for flat layouts, C4 for compressed layouts.
   const LeafEntry* capacity_leaf() const;
 
-  static LeafCombination classify_leaf_combination(
-      const std::map<BlockType, LeafEntry>& leaves);
+  static LeafCombination classify_leaf_combination(const LeafMap& leaves);
 
-  // Pre-grow / final-flush cache hook. Inserts every leaf's newly-forwarded
-  // full blocks into its own prefix cache incrementally (cursor lives in
-  // KVCacheState::num_cached_blocks). Only fires for leaves that carry token
-  // cache and are not the KV leaf -- KV has its own final-flush semantics
-  // via cache_for_sequence at deallocate time; EMBEDDING / LINEAR hold no token
-  // cache.
-  void cache_full_blocks_for_sequence(Sequence* seq);
-
-  std::map<BlockType, LeafEntry> leaves_;
+  LeafMap leaves_;
   LeafCombination combination_;
 };
 
-// Build the leaf map for one DP rank. Per model (base cache-bearing leaves):
-//   normal / Qwen -> {KV}
-//   DSV4          -> {SWA, C4, C128}
-//   xtensor       -> {KV(XTensorBlockManagerImpl)}
+// Build the leaf map for one DP rank. Base cache-bearing layouts are flat KV,
+// compressed SWA/C4/C128, and xtensor-backed KV.
 // A LINEAR leaf is added when enable_linear_state (GDN recurrent models).
 // Leaves are wrapped in ConcurrentBlockManagerImpl for disagg-PD / kvcache
 // store. The EMBEDDING leaf is appended by the pool caller only when spec
 // decode needs it. dp_rank is used by the xtensor KV leaf (per-rank VMM page
 // pool).
-std::map<BlockType, CompositeBlockManager::LeafEntry> build_composite_leaves(
+CompositeBlockManager::LeafMap build_composite_leaves(
     const BlockManager::Options& options,
     int32_t dp_rank = 0);
 

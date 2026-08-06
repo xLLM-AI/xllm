@@ -25,7 +25,7 @@ limitations under the License.
 #include "kernels/musa/musa_tvmffi_stream.h"
 #include "layers/cuda/flashinfer_workspace.h"
 
-using namespace xllm::kernel::cuda;
+using namespace xllm::kernel::musa;
 
 namespace {
 
@@ -95,7 +95,7 @@ void update_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
 
   const auto device =
       FlashinferWorkspace::get_instance().get_float_workspace_buffer().device();
-  MusaTvmffiStreamGuard stream_guard(device);
+  TvmffiStreamGuard stream_guard(device);
 
   VLOG(kGraphExecutorLogVerboseLevel)
       << "update_prefill_plan_info: layer_id=" << plan_info->layer_id
@@ -216,7 +216,7 @@ void update_chunked_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
 
   const auto device =
       FlashinferWorkspace::get_instance().get_float_workspace_buffer().device();
-  MusaTvmffiStreamGuard stream_guard(device);
+  TvmffiStreamGuard stream_guard(device);
 
   VLOG(kGraphExecutorLogVerboseLevel)
       << "update_chunked_prefill_plan_info: layer_id=" << plan_info->layer_id
@@ -357,7 +357,7 @@ void update_decode_plan_info(std::shared_ptr<PlanInfo> plan_info,
     const auto device = FlashinferWorkspace::get_instance()
                             .get_float_workspace_buffer()
                             .device();
-    MusaTvmffiStreamGuard stream_guard(device);
+    TvmffiStreamGuard stream_guard(device);
 
     VLOG(kGraphExecutorLogVerboseLevel)
         << "update_decode_plan_info: layer_id=" << plan_info->layer_id

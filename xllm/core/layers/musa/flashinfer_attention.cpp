@@ -68,12 +68,12 @@ AttentionMetadata build_expanded_decode_metadata(
 
 bool qwen35_mtp_attention_debug_enabled() {
   static const bool enabled = std::getenv("XLLM_DEBUG_QWEN35_MTP") != nullptr;
-  return enabled && !xllm::kernel::cuda::is_musa_stream_capturing();
+  return enabled && !xllm::kernel::musa::is_stream_capturing();
 }
 
 void qwen35_mtp_attention_debug_sync(const char* stage) {
   if (!qwen35_mtp_attention_debug_enabled() ||
-      xllm::kernel::cuda::is_musa_stream_capturing()) {
+      xllm::kernel::musa::is_stream_capturing()) {
     return;
   }
   LOG(INFO) << "[Qwen3.5 MTP attention debug] sync begin: " << stage;
@@ -371,7 +371,7 @@ void FlashInferAttentionImpl::prefill_forward(
         scheduler_metadata = attn_metadata.fa3_scheduler_metadata;
       }
       if (!scheduler_metadata.defined()) {
-        scheduler_metadata = xllm::kernel::cuda::fa3_prefill_scheduler_metadata(
+        scheduler_metadata = xllm::kernel::musa::fa3_prefill_scheduler_metadata(
             query.device(),
             batch_size,
             static_cast<int32_t>(num_heads_),
@@ -409,7 +409,7 @@ void FlashInferAttentionImpl::prefill_forward(
             lse_buf_.narrow(0, 0, required).view({num_heads_, query.size(0)});
       }
 
-      xllm::kernel::cuda::fa3_prefill_paged(
+      xllm::kernel::musa::fa3_prefill_paged(
           query,
           k_cache,
           v_cache,
@@ -448,7 +448,9 @@ void FlashInferAttentionImpl::prefill_forward(
       lse_tensor = lse_buf_.narrow(0, 0, required).view({num_heads_, total_q});
     }
 
-    xllm::kernel::cuda::fa3_prefill_with_optional_piecewise_capture(
+    // Piecewise-capture wrappers were removed from the MUSA kernel library;
+    // graph capture for attention is owned by the MUSA graph executor path.
+    xllm::kernel::musa::fa3_prefill(
         query,
         key,
         value,
@@ -506,21 +508,20 @@ void FlashInferAttentionImpl::prefill_forward(
                                          attn_metadata.enable_cuda_graph);
   }
 
-  xllm::kernel::cuda::batch_prefill_with_optional_piecewise_capture(
-      attn_metadata.plan_info->uri,
-      attn_metadata.plan_info->plan_info,
-      float_workspace_buffer_,
-      int_workspace_buffer_,
-      page_locked_int_workspace_buffer_,
-      query,
-      key,
-      value,
-      attn_metadata.q_cu_seq_lens,
-      attn_metadata.kv_cu_seq_lens,
-      sliding_window_,
-      scale_,
-      output,
-      output_lse);
+  xllm::kernel::musa::batch_prefill(attn_metadata.plan_info->uri,
+                                    attn_metadata.plan_info->plan_info,
+                                    float_workspace_buffer_,
+                                    int_workspace_buffer_,
+                                    page_locked_int_workspace_buffer_,
+                                    query,
+                                    key,
+                                    value,
+                                    attn_metadata.q_cu_seq_lens,
+                                    attn_metadata.kv_cu_seq_lens,
+                                    sliding_window_,
+                                    scale_,
+                                    output,
+                                    output_lse);
 }
 
 void FlashInferAttentionImpl::chunked_prefill_forward(
@@ -581,7 +582,7 @@ void FlashInferAttentionImpl::chunked_prefill_forward(
     qo_indptr_arg = attn_metadata.qo_indptr;
   }
 
-  xllm::kernel::cuda::batch_chunked_prefill_with_optional_piecewise_capture(
+  xllm::kernel::musa::batch_chunked_prefill(
       attn_metadata.plan_info->uri,
       attn_metadata.plan_info->plan_info,
       float_workspace_buffer_,
@@ -694,7 +695,7 @@ void FlashInferAttentionImpl::decoder_forward(
               ? *decode_attn.qo_indptr
               : decode_attn.q_cu_seq_lens;
       if (!scheduler_metadata.defined()) {
-        scheduler_metadata = xllm::kernel::cuda::fa3_decode_scheduler_metadata(
+        scheduler_metadata = xllm::kernel::musa::fa3_decode_scheduler_metadata(
             query.device(),
             /*batch_size=*/static_cast<int32_t>(batch_size),
             /*num_heads_q=*/static_cast<int32_t>(num_heads_),
@@ -741,7 +742,7 @@ void FlashInferAttentionImpl::decoder_forward(
             lse_buf_.narrow(0, 0, required).view({num_heads_, total_q});
       }
 
-      xllm::kernel::cuda::fa3_decode(
+      xllm::kernel::musa::fa3_decode(
           query,
           k_cache,
           v_cache,
@@ -797,7 +798,7 @@ void FlashInferAttentionImpl::decoder_forward(
                                         decode_use_tensor_core_);
   }
 
-  xllm::kernel::cuda::batch_decode(decode_attn.plan_info->uri,
+  xllm::kernel::musa::batch_decode(decode_attn.plan_info->uri,
                                    decode_attn.plan_info->plan_info,
                                    float_workspace_buffer_,
                                    int_workspace_buffer_,

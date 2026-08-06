@@ -99,7 +99,8 @@ class EmbeddingCache final {
       const std::vector<int32_t>& embedding_ids,
       const std::vector<std::string>& request_ids) const;
   std::vector<int32_t> read_accepted_prefix_lengths(
-      const std::vector<int32_t>& embedding_ids) const;
+      const std::vector<int32_t>& embedding_ids,
+      const std::vector<std::string>& request_ids) const;
 
   void clear(const std::vector<int32_t>& embedding_ids);
 

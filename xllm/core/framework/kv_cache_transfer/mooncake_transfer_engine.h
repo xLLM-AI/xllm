@@ -98,6 +98,12 @@ class MooncakeTransferEngine {
  public:
   enum class MoveOpcode { READ = 0, WRITE = 1 };
 
+  struct BufferTransferMapping {
+    int64_t buf_id = 0;
+    std::vector<uint64_t> local_ids;
+    std::vector<uint64_t> remote_ids;
+  };
+
   MooncakeTransferEngine(const uint16_t listen_port,
                          const torch::Device& device);
   virtual ~MooncakeTransferEngine() = default;
@@ -113,6 +119,11 @@ class MooncakeTransferEngine {
                           const std::vector<uint64_t>& dst_blocks,
                           const std::vector<int64_t>& buf_ids,
                           MoveOpcode move_opcode);
+
+  virtual bool move_memory_groups(
+      const std::string& remote_addr,
+      const std::vector<BufferTransferMapping>& mappings,
+      MoveOpcode move_opcode);
 
   virtual bool pull_memory_blocks(const std::string& remote_addr,
                                   const std::vector<uint64_t>& src_blocks,

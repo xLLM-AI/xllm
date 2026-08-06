@@ -88,7 +88,7 @@ void log_tvmffi_stream_debug(const char* phase,
 
 bool is_current_stream_capturing();
 
-c10::musa::MUSAStream& get_or_create_tvmffi_musa_stream(
+c10::musa::MUSAStream& get_or_create_tvmffi_stream(
     c10::DeviceIndex device_index) {
   static thread_local std::array<std::optional<c10::musa::MUSAStream>, 8> slots;
   CHECK(device_index >= 0 &&
@@ -102,9 +102,9 @@ c10::musa::MUSAStream& get_or_create_tvmffi_musa_stream(
   return slot.value();
 }
 
-class MusaTvmffiEventHandoff final {
+class TvmffiEventHandoff final {
  public:
-  explicit MusaTvmffiEventHandoff(c10::DeviceType device_type)
+  explicit TvmffiEventHandoff(c10::DeviceType device_type)
       : current_to_ffi_event_(device_type),
         ffi_to_current_event_(device_type) {}
 
@@ -112,15 +112,14 @@ class MusaTvmffiEventHandoff final {
   c10::Event ffi_to_current_event_;
 };
 
-MusaTvmffiEventHandoff& get_or_create_tvmffi_event_handoff(
+TvmffiEventHandoff& get_or_create_tvmffi_event_handoff(
     c10::DeviceIndex device_index,
     c10::DeviceType device_type) {
-  static thread_local std::array<std::optional<MusaTvmffiEventHandoff>, 8>
-      slots;
+  static thread_local std::array<std::optional<TvmffiEventHandoff>, 8> slots;
   CHECK(device_index >= 0 &&
         device_index < static_cast<c10::DeviceIndex>(slots.size()))
       << "invalid MUSA device index: " << device_index;
-  std::optional<MusaTvmffiEventHandoff>& slot =
+  std::optional<TvmffiEventHandoff>& slot =
       slots[static_cast<size_t>(device_index)];
   if (!slot.has_value()) {
     slot.emplace(device_type);
@@ -154,17 +153,17 @@ bool is_current_stream_capturing() {
          c10::musa::CaptureStatus::None;
 }
 
-bool current_musa_stream_is_valid(c10::DeviceIndex device_index) {
+bool current_stream_is_valid(c10::DeviceIndex device_index) {
   c10::musa::MUSAGuard device_guard(device_index);
   void* const stream = reinterpret_cast<void*>(
       c10::musa::getCurrentMUSAStream(device_index).stream());
   return stream != nullptr;
 }
 
-bool enqueue_musa_stream_dependency(const torch::Device& device,
-                                    const c10::musa::MUSAStream& producer,
-                                    const c10::musa::MUSAStream& consumer,
-                                    c10::Event& event) {
+bool enqueue_stream_dependency(const torch::Device& device,
+                               const c10::musa::MUSAStream& producer,
+                               const c10::musa::MUSAStream& consumer,
+                               c10::Event& event) {
   try {
     c10::musa::MUSAGuard device_guard(device.index());
     event.record(producer.unwrap());
@@ -183,10 +182,10 @@ bool enqueue_musa_stream_dependency(const torch::Device& device,
 
 }  // namespace
 
-bool is_musa_stream_capturing() { return is_current_stream_capturing(); }
+bool is_stream_capturing() { return is_current_stream_capturing(); }
 
-void bind_musa_tvmffi_stream(const torch::Device& device) {
-  if (!is_torch_musa_device(device)) {
+void bind_tvmffi_stream(const torch::Device& device) {
+  if (!is_torch_device(device)) {
     return;
   }
   c10::musa::MUSAGuard device_guard(device.index());
@@ -216,7 +215,7 @@ void bind_musa_tvmffi_stream(const torch::Device& device) {
     set_tvmffi_stream_handle(device.index(), forced_stream);
     return;
   }
-  musa_stream = get_or_create_tvmffi_musa_stream(device.index());
+  musa_stream = get_or_create_tvmffi_stream(device.index());
   void* const pool_stream = reinterpret_cast<void*>(musa_stream.stream());
   if (pool_stream == nullptr) {
     LOG(ERROR) << "[tvmffi.stream] MUSA stream handle is null on " << device;
@@ -232,20 +231,20 @@ void bind_musa_tvmffi_stream(const torch::Device& device) {
   set_tvmffi_stream_handle(device.index(), pool_stream);
 }
 
-void sync_current_musa_stream(const torch::Device& device) {
-  if (!is_torch_musa_device(device) || is_current_stream_capturing()) {
+void sync_current_stream(const torch::Device& device) {
+  if (!is_torch_device(device) || is_current_stream_capturing()) {
     return;
   }
   c10::musa::MUSAGuard device_guard(device.index());
   c10::musa::getCurrentMUSAStream(device.index()).synchronize();
 }
 
-void sync_musa_ffi_stream(const torch::Device& device) {
-  if (!is_torch_musa_device(device) || is_current_stream_capturing()) {
+void sync_ffi_stream(const torch::Device& device) {
+  if (!is_torch_device(device) || is_current_stream_capturing()) {
     return;
   }
   c10::musa::MUSAGuard device_guard(device.index());
-  get_or_create_tvmffi_musa_stream(device.index()).synchronize();
+  get_or_create_tvmffi_stream(device.index()).synchronize();
 }
 
 // During MUSA graph preparation, the executor deliberately runs eager
@@ -256,43 +255,43 @@ void sync_musa_ffi_stream(const torch::Device& device) {
 // otherwise skip the preparation barriers and let MoE/FFI work race the next
 // full-attention kernel.  Keep a preparation-only variant that bypasses the
 // status check; the guard is never held while the real graph is active.
-void sync_current_musa_stream_for_preparation(const torch::Device& device) {
-  if (!is_torch_musa_device(device)) {
+void sync_current_stream_for_preparation(const torch::Device& device) {
+  if (!is_torch_device(device)) {
     return;
   }
   c10::musa::MUSAGuard device_guard(device.index());
   c10::musa::getCurrentMUSAStream(device.index()).synchronize();
 }
 
-void sync_musa_ffi_stream_for_preparation(const torch::Device& device) {
-  if (!is_torch_musa_device(device)) {
+void sync_ffi_stream_for_preparation(const torch::Device& device) {
+  if (!is_torch_device(device)) {
     return;
   }
   c10::musa::MUSAGuard device_guard(device.index());
-  get_or_create_tvmffi_musa_stream(device.index()).synchronize();
+  get_or_create_tvmffi_stream(device.index()).synchronize();
 }
 
-void sync_musa_graph_preparation_stage(const torch::Device& device) {
+void sync_graph_preparation_stage(const torch::Device& device) {
   if (!s_force_ffi_preparation_sync) {
     return;
   }
-  sync_current_musa_stream_for_preparation(device);
-  sync_musa_ffi_stream_for_preparation(device);
+  sync_current_stream_for_preparation(device);
+  sync_ffi_stream_for_preparation(device);
 }
 
-MusaTvmffiPreparationSyncGuard::MusaTvmffiPreparationSyncGuard()
+TvmffiPreparationSyncGuard::TvmffiPreparationSyncGuard()
     : previous_(s_force_ffi_preparation_sync) {
   s_force_ffi_preparation_sync = true;
 }
 
-MusaTvmffiPreparationSyncGuard::~MusaTvmffiPreparationSyncGuard() {
+TvmffiPreparationSyncGuard::~TvmffiPreparationSyncGuard() {
   s_force_ffi_preparation_sync = previous_;
 }
 
-MusaTvmffiStreamOverrideGuard::MusaTvmffiStreamOverrideGuard(
+TvmffiStreamOverrideGuard::TvmffiStreamOverrideGuard(
     const torch::Device& device,
     void* stream)
-    : device_(device), active_(is_torch_musa_device(device)) {
+    : device_(device), active_(is_torch_device(device)) {
   if (!active_) {
     return;
   }
@@ -304,7 +303,7 @@ MusaTvmffiStreamOverrideGuard::MusaTvmffiStreamOverrideGuard(
   forced_stream = stream;
 }
 
-MusaTvmffiStreamOverrideGuard::~MusaTvmffiStreamOverrideGuard() {
+TvmffiStreamOverrideGuard::~TvmffiStreamOverrideGuard() {
   if (!active_) {
     return;
   }
@@ -312,8 +311,8 @@ MusaTvmffiStreamOverrideGuard::~MusaTvmffiStreamOverrideGuard() {
   get_forced_tvmffi_stream(device_.index()) = previous_forced_stream_;
 }
 
-MusaTvmffiStreamGuard::MusaTvmffiStreamGuard(const torch::Device& device)
-    : device_(device), active_(is_torch_musa_device(device)) {
+TvmffiStreamGuard::TvmffiStreamGuard(const torch::Device& device)
+    : device_(device), active_(is_torch_device(device)) {
   if (!active_) {
     return;
   }
@@ -321,49 +320,47 @@ MusaTvmffiStreamGuard::MusaTvmffiStreamGuard(const torch::Device& device)
   const bool has_forced_stream =
       get_forced_tvmffi_stream(device_.index()) != nullptr;
   needs_sync_ = !capturing && !has_forced_stream &&
-                !current_musa_stream_is_valid(device_.index());
+                !current_stream_is_valid(device_.index());
   if (needs_sync_) {
     c10::musa::MUSAGuard device_guard(device_.index());
     const c10::musa::MUSAStream current_stream =
         c10::musa::getCurrentMUSAStream(device_.index());
     const c10::musa::MUSAStream ffi_stream =
-        get_or_create_tvmffi_musa_stream(device_.index());
-    MusaTvmffiEventHandoff& event_handoff = get_or_create_tvmffi_event_handoff(
+        get_or_create_tvmffi_stream(device_.index());
+    TvmffiEventHandoff& event_handoff = get_or_create_tvmffi_event_handoff(
         device_.index(), current_stream.device_type());
     uses_event_handoff_ =
-        enqueue_musa_stream_dependency(device_,
-                                       current_stream,
-                                       ffi_stream,
-                                       event_handoff.current_to_ffi_event_);
+        enqueue_stream_dependency(device_,
+                                  current_stream,
+                                  ffi_stream,
+                                  event_handoff.current_to_ffi_event_);
     if (!uses_event_handoff_) {
-      sync_current_musa_stream(device_);
+      sync_current_stream(device_);
     }
   }
-  bind_musa_tvmffi_stream(device_);
+  bind_tvmffi_stream(device_);
 }
 
-MusaTvmffiStreamGuard::~MusaTvmffiStreamGuard() {
+TvmffiStreamGuard::~TvmffiStreamGuard() {
   if (active_ && s_force_ffi_preparation_sync) {
-    sync_current_musa_stream_for_preparation(device_);
-    sync_musa_ffi_stream_for_preparation(device_);
+    sync_current_stream_for_preparation(device_);
+    sync_ffi_stream_for_preparation(device_);
   } else if (active_ && needs_sync_) {
     if (uses_event_handoff_) {
       const c10::musa::MUSAStream current_stream =
           c10::musa::getCurrentMUSAStream(device_.index());
       const c10::musa::MUSAStream ffi_stream =
-          get_or_create_tvmffi_musa_stream(device_.index());
-      MusaTvmffiEventHandoff& event_handoff =
-          get_or_create_tvmffi_event_handoff(device_.index(),
-                                             current_stream.device_type());
-      if (!enqueue_musa_stream_dependency(
-              device_,
-              ffi_stream,
-              current_stream,
-              event_handoff.ffi_to_current_event_)) {
-        sync_musa_ffi_stream(device_);
+          get_or_create_tvmffi_stream(device_.index());
+      TvmffiEventHandoff& event_handoff = get_or_create_tvmffi_event_handoff(
+          device_.index(), current_stream.device_type());
+      if (!enqueue_stream_dependency(device_,
+                                     ffi_stream,
+                                     current_stream,
+                                     event_handoff.ffi_to_current_event_)) {
+        sync_ffi_stream(device_);
       }
     } else {
-      sync_musa_ffi_stream(device_);
+      sync_ffi_stream(device_);
     }
   }
 }
@@ -795,7 +792,7 @@ void ensure_tvm_ffi_tensor_allocator() {
 
 namespace xllm::kernel::musa {
 
-bool ensure_tilelang_musa_loader() {
+bool ensure_tilelang_loader() {
   static const bool loaded = []() {
     std::vector<std::string> candidates;
     const char* explicit_lib = std::getenv("XLLM_TILELANG_LIB");
@@ -878,8 +875,8 @@ void end_ffi_alloc_replay() {
 FfiAllocMode get_ffi_alloc_mode() { return g_ffi_alloc_state.mode; }
 
 void bind_tvmffi_stream_to_current_torch_stream(const torch::Device& device) {
-  if (is_torch_musa_device(device)) {
-    bind_musa_tvmffi_stream(device);
+  if (is_torch_device(device)) {
+    bind_tvmffi_stream(device);
     return;
   }
 }
@@ -1093,7 +1090,7 @@ ffi::Module get_module(const std::string& uri) {
   ensure_tvm_ffi_tensor_allocator();
   // TileLang device kernels are packaged as ffi.Module.load_from_bytes.musa;
   // without this registration LoadFromFile aborts the process.
-  CHECK(ensure_tilelang_musa_loader())
+  CHECK(ensure_tilelang_loader())
       << "TileLang MUSA FFI loader unavailable; set XLLM_TILELANG_LIB to "
          "libtilelang.so before loading Mate/FlashInfer ops (uri="
       << uri << ")";

@@ -172,6 +172,15 @@ class CausalLM : public torch::nn::Module {
     return {};
   }
 
+  // DSpark-specific low-rank Markov projection. The draft worker owns the
+  // sequential sampling lifecycle; the model owns only the trained weights and
+  // bias computation.
+  virtual torch::Tensor dspark_markov_bias(
+      const torch::Tensor& previous_token_ids) {
+    NOT_IMPLEMENTED();
+    return {};
+  }
+
   virtual void lazy_load_model(std::unique_ptr<ModelLoader> loader) {
     NOT_IMPLEMENTED();
   }
@@ -279,6 +288,14 @@ class CausalLMImpl : public CausalLM {
                                         kv_caches,
                                         input_params);
     }
+  }
+
+  torch::Tensor dspark_markov_bias(
+      const torch::Tensor& previous_token_ids) override {
+    if constexpr (detail::has_dspark_markov_bias<Model>::value) {
+      return model_->dspark_markov_bias(previous_token_ids);
+    }
+    return CausalLM::dspark_markov_bias(previous_token_ids);
   }
 
   void lazy_load_model(std::unique_ptr<ModelLoader> loader) override {

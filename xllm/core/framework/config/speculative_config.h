@@ -43,7 +43,8 @@ class SpeculativeConfig final {
   // process, which reads its own Options rather than this global config, can
   // classify without an initialized singleton.
   static bool requires_aux_hidden_capture(std::string_view algorithm) {
-    return algorithm == "Eagle3" || algorithm == "DFlash";
+    return algorithm == "Eagle3" || algorithm == "DFlash" ||
+           algorithm == "DSpark";
   }
 
   static bool is_mtp_algorithm(std::string_view algorithm) {

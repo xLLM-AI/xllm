@@ -202,6 +202,10 @@ DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
     return shape;
   };
 
+  // Host H2D resumes only at a C128 boundary. Compressor/index state represents
+  // partial compression within the current C4/C128 group and is regenerated
+  // after such a boundary, so the SWA host group stores the persistent window
+  // for every DSV4 layer but no compressor scratch tensors.
   switch (type) {
     case BlockType::SWA:
       host_page_aligned_regions_.reserve(1);
@@ -211,7 +215,7 @@ DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
                          nullptr);
       break;
     case BlockType::C4:
-      host_page_aligned_regions_.reserve(2);
+      host_page_aligned_regions_.reserve(3);
       create_host_tensor(host_group_shape(host_c4_count, n_heads, head_dim),
                          create_options.dtype(),
                          &key_cache_,
@@ -221,6 +225,16 @@ DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
           cache_policy.index_dtype,
           &index_cache_,
           nullptr);
+      // C4 indexer values are int8; the fp16 per-token scale must travel with
+      // them for correct dequantization on H2D restore.
+      if (cache_policy.has_indexer_cache_scale) {
+        std::vector<int64_t> scale_shape = {host_c4_count, block_size, 1};
+        scale_shape.insert(scale_shape.begin() + 1, layer_count);
+        create_host_tensor(scale_shape,
+                           cache_policy.scale_dtype,
+                           &indexer_cache_scale_,
+                           nullptr);
+      }
       break;
     case BlockType::C128:
       host_page_aligned_regions_.reserve(1);
@@ -284,8 +298,8 @@ std::vector<KVCacheTensor> DeepSeekV4KVCacheImpl::get_cache_tensors() const {
                                const torch::Tensor& tensor,
                                BlockType block_type) {
     if (tensor.defined() && tensor.numel() > 0) {
-      tensors.emplace_back(KVCacheTensor{
-          role, tensor, cache_group_id(block_type), /*sequence_scoped=*/false});
+      tensors.emplace_back(
+          KVCacheTensor{role, tensor, cache_group_id(block_type)});
     }
   };
 
@@ -320,6 +334,11 @@ BlockTypeTensorMap DeepSeekV4KVCacheImpl::get_block_type_tensors(
           index_cache_.defined() && index_cache_.numel() > 0) {
         tensor_map.emplace(KVCacheTensorRole::KEY, key_cache_);
         tensor_map.emplace(KVCacheTensorRole::INDEX, index_cache_);
+        if (indexer_cache_scale_.defined() &&
+            indexer_cache_scale_.numel() > 0) {
+          tensor_map.emplace(KVCacheTensorRole::INDEX_SCALE,
+                             indexer_cache_scale_);
+        }
       }
       break;
     case BlockType::C128:

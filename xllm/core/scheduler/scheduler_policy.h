@@ -267,11 +267,11 @@ class UnifiedPolicy : public SchedulerPolicy {
                                 ScheduleBudget& budget,
                                 const SchedulerState& state);
   size_t get_needed_copy_block_num(
-      std::vector<std::shared_ptr<Request>>& req_vec,
-      std::vector<size_t>& per_req_copy_block_num_vec,
-      double max_h2d_transfer_time,
-      double min_total_exec_time,
-      size_t max_h2d_block_num,
+      const std::vector<std::shared_ptr<Request>>& requests,
+      const std::vector<size_t>& per_request_copy_units,
+      double full_h2d_transfer_time,
+      double full_restore_exec_time,
+      size_t full_copy_units,
       const SchedulerState& state);
   int32_t get_max_chunk(Sequence* sequence,
                         size_t num_tokens,

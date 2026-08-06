@@ -35,9 +35,9 @@ limitations under the License.
 namespace xllm::kernel::musa {
 namespace {
 
-constexpr const char* kAlignUri = "sglang_musa_moe_align_block_size";
-constexpr const char* kActivationUri = "sglang_musa_moe_act_and_mul";
-constexpr const char* kSumUri = "sglang_musa_moe_sum_reduce";
+constexpr const char* kAlignUri = "xllm_musa_moe_align_block_size";
+constexpr const char* kActivationUri = "xllm_musa_moe_act_and_mul";
+constexpr const char* kSumUri = "xllm_musa_moe_sum_reduce";
 constexpr const char* kKernelName = "fused_moe_kernel";
 constexpr int64_t kTopK = 8;
 constexpr int64_t kGroupSize = 128;
@@ -235,8 +235,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> align_topk_ids(
   auto num_tokens_post_padded = torch::empty({1}, int_options);
   auto cumsum_buffer = torch::empty({num_experts + 2}, int_options);
 
-  MusaTvmffiStreamGuard stream_guard(topk_ids.device());
-  get_function(kAlignUri, "sgl_musa_moe_align_block_size")(
+  TvmffiStreamGuard stream_guard(topk_ids.device());
+  get_function(kAlignUri, "xllm_musa_moe_align_block_size")(
       to_ffi_tensor_view(topk_ids),
       num_experts + 1,
       block_size,
@@ -252,8 +252,8 @@ torch::Tensor activate_gate_up(const torch::Tensor& gate_up,
                                const torch::Tensor& topk_ids) {
   auto output =
       torch::empty({gate_up.size(0), gate_up.size(1) / 2}, gate_up.options());
-  MusaTvmffiStreamGuard stream_guard(gate_up.device());
-  get_function(kActivationUri, "sgl_musa_moe_act_and_mul")(
+  TvmffiStreamGuard stream_guard(gate_up.device());
+  get_function(kActivationUri, "xllm_musa_moe_act_and_mul")(
       to_ffi_tensor_view(gate_up),
       to_ffi_tensor_view(output),
       to_ffi_tensor_view(topk_ids.reshape({-1})),
@@ -266,8 +266,8 @@ torch::Tensor activate_gate_up(const torch::Tensor& gate_up,
 torch::Tensor reduce_assignments(const torch::Tensor& assignments) {
   auto output = torch::empty({assignments.size(0), assignments.size(2)},
                              assignments.options());
-  MusaTvmffiStreamGuard stream_guard(assignments.device());
-  get_function(kSumUri, "sgl_musa_moe_sum_reduce")(
+  TvmffiStreamGuard stream_guard(assignments.device());
+  get_function(kSumUri, "xllm_musa_moe_sum_reduce")(
       to_ffi_tensor_view(assignments),
       to_ffi_tensor_view(output),
       /*routed_scaling_factor=*/1.0);
@@ -450,7 +450,7 @@ void check_bf16_inputs(const torch::Tensor& hidden_states,
 
 }  // namespace
 
-bool musa_fused_moe_aot_available(int64_t num_tokens) {
+bool fused_moe_aot_available(int64_t num_tokens) {
   const KernelConfig* config = find_config(num_tokens, /*use_fp8=*/true);
   if (config == nullptr || artifact_root().empty()) {
     return false;
@@ -464,7 +464,7 @@ bool musa_fused_moe_aot_available(int64_t num_tokens) {
          ffi_artifact_available(kSumUri);
 }
 
-bool musa_fused_moe_bf16_aot_available(int64_t num_tokens) {
+bool fused_moe_bf16_aot_available(int64_t num_tokens) {
   const KernelConfig* config = find_config(num_tokens, /*use_fp8=*/false);
   if (config == nullptr || bf16_artifact_root().empty()) {
     return false;
@@ -478,7 +478,7 @@ bool musa_fused_moe_bf16_aot_available(int64_t num_tokens) {
          ffi_artifact_available(kSumUri);
 }
 
-void prepare_musa_fused_moe_aot(const torch::Device& device) {
+void prepare_fused_moe_aot(const torch::Device& device) {
   static std::mutex mutex;
   static std::set<int32_t> prepared_devices;
   const int32_t device_index = device.index();
@@ -488,11 +488,11 @@ void prepare_musa_fused_moe_aot(const torch::Device& device) {
   }
 
   c10::musa::MUSAGuard device_guard(device_index);
-  get_function(kAlignUri, "sgl_musa_moe_align_block_size");
-  get_function(kActivationUri, "sgl_musa_moe_act_and_mul");
-  get_function(kSumUri, "sgl_musa_moe_sum_reduce");
+  get_function(kAlignUri, "xllm_musa_moe_align_block_size");
+  get_function(kActivationUri, "xllm_musa_moe_act_and_mul");
+  get_function(kSumUri, "xllm_musa_moe_sum_reduce");
   for (const KernelConfig& config : kKernelConfigs) {
-    if (!musa_fused_moe_aot_available(config.batch_size)) {
+    if (!fused_moe_aot_available(config.batch_size)) {
       continue;
     }
     get_kernel(
@@ -503,7 +503,7 @@ void prepare_musa_fused_moe_aot(const torch::Device& device) {
   prepared_devices.insert(device_index);
 }
 
-void prepare_musa_fused_moe_bf16_aot(const torch::Device& device) {
+void prepare_fused_moe_bf16_aot(const torch::Device& device) {
   static std::mutex mutex;
   static std::set<int32_t> prepared_devices;
   const int32_t device_index = device.index();
@@ -513,11 +513,11 @@ void prepare_musa_fused_moe_bf16_aot(const torch::Device& device) {
   }
 
   c10::musa::MUSAGuard device_guard(device_index);
-  get_function(kAlignUri, "sgl_musa_moe_align_block_size");
-  get_function(kActivationUri, "sgl_musa_moe_act_and_mul");
-  get_function(kSumUri, "sgl_musa_moe_sum_reduce");
+  get_function(kAlignUri, "xllm_musa_moe_align_block_size");
+  get_function(kActivationUri, "xllm_musa_moe_act_and_mul");
+  get_function(kSumUri, "xllm_musa_moe_sum_reduce");
   for (const KernelConfig& config : kBf16KernelConfigs) {
-    if (!musa_fused_moe_bf16_aot_available(config.batch_size)) {
+    if (!fused_moe_bf16_aot_available(config.batch_size)) {
       continue;
     }
     get_kernel(
@@ -528,13 +528,13 @@ void prepare_musa_fused_moe_bf16_aot(const torch::Device& device) {
   prepared_devices.insert(device_index);
 }
 
-torch::Tensor musa_fused_moe_aot_fp8(const torch::Tensor& hidden_states,
-                                     const torch::Tensor& w13,
-                                     const torch::Tensor& w13_scale,
-                                     const torch::Tensor& w2,
-                                     const torch::Tensor& w2_scale,
-                                     const torch::Tensor& topk_weights,
-                                     const torch::Tensor& topk_ids) {
+torch::Tensor fused_moe_aot_fp8(const torch::Tensor& hidden_states,
+                                const torch::Tensor& w13,
+                                const torch::Tensor& w13_scale,
+                                const torch::Tensor& w2,
+                                const torch::Tensor& w2_scale,
+                                const torch::Tensor& topk_weights,
+                                const torch::Tensor& topk_ids) {
   check_fp8_inputs(
       hidden_states, w13, w13_scale, w2, w2_scale, topk_weights, topk_ids);
   const KernelConfig* config =
@@ -542,7 +542,7 @@ torch::Tensor musa_fused_moe_aot_fp8(const torch::Tensor& hidden_states,
   CHECK(config != nullptr)
       << "MUSA fused MoE AOT supports decode batches 1 through 8; got "
       << hidden_states.size(0);
-  CHECK(musa_fused_moe_aot_available(hidden_states.size(0)))
+  CHECK(fused_moe_aot_available(hidden_states.size(0)))
       << "MUSA fused MoE AOT artifacts are unavailable for batch "
       << hidden_states.size(0);
 
@@ -578,18 +578,18 @@ torch::Tensor musa_fused_moe_aot_fp8(const torch::Tensor& hidden_states,
   return reduce_assignments(down);
 }
 
-torch::Tensor musa_fused_moe_aot_bf16(const torch::Tensor& hidden_states,
-                                      const torch::Tensor& w13,
-                                      const torch::Tensor& w2,
-                                      const torch::Tensor& topk_weights,
-                                      const torch::Tensor& topk_ids) {
+torch::Tensor fused_moe_aot_bf16(const torch::Tensor& hidden_states,
+                                 const torch::Tensor& w13,
+                                 const torch::Tensor& w2,
+                                 const torch::Tensor& topk_weights,
+                                 const torch::Tensor& topk_ids) {
   check_bf16_inputs(hidden_states, w13, w2, topk_weights, topk_ids);
   const KernelConfig* config =
       find_config(hidden_states.size(0), /*use_fp8=*/false);
   CHECK(config != nullptr)
       << "MUSA BF16 fused MoE AOT supports decode batches 1 through 8; got "
       << hidden_states.size(0);
-  CHECK(musa_fused_moe_bf16_aot_available(hidden_states.size(0)))
+  CHECK(fused_moe_bf16_aot_available(hidden_states.size(0)))
       << "MUSA BF16 fused MoE AOT artifacts are unavailable for batch "
       << hidden_states.size(0);
 

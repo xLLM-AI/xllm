@@ -71,8 +71,7 @@ class PDOOCScheduler : public DisaggPDScheduler {
       const std::string& kv_cache_transfer_mode,
       std::vector<uint64_t> src_cluster_ids,
       std::vector<std::string> src_addrs,
-      std::vector<uint64_t> src_block_ids,
-      int32_t src_linear_state_id,
+      std::vector<KVTransferMapping> source_mappings,
       int32_t src_dp_size,
       int32_t src_dp_rank);
 

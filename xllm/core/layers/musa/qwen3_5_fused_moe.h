@@ -37,14 +37,14 @@ namespace layer {
 
 // Qwen3.5 routed MoE with masked grouped-GEMM. Currently TP1/EP1 only:
 // partial expert replication would be incorrect, so larger TP/EP fails fast.
-class Qwen3_5MusaFusedMoEImpl : public torch::nn::Module {
+class Qwen3_5FusedMoEImpl : public torch::nn::Module {
  public:
-  Qwen3_5MusaFusedMoEImpl() = default;
-  Qwen3_5MusaFusedMoEImpl(const ModelArgs& model_args,
-                          const FusedMoEArgs& moe_args,
-                          const QuantArgs& quant_args,
-                          const ParallelArgs& parallel_args,
-                          const torch::TensorOptions& options);
+  Qwen3_5FusedMoEImpl() = default;
+  Qwen3_5FusedMoEImpl(const ModelArgs& model_args,
+                      const FusedMoEArgs& moe_args,
+                      const QuantArgs& quant_args,
+                      const ParallelArgs& parallel_args,
+                      const torch::TensorOptions& options);
 
   torch::Tensor forward(const torch::Tensor& hidden_states,
                         const ModelInputParams& input_params);
@@ -90,7 +90,7 @@ class Qwen3_5MusaFusedMoEImpl : public torch::nn::Module {
   bool shared_expert_gate_is_loaded_ = false;
 };
 
-TORCH_MODULE(Qwen3_5MusaFusedMoE);
+TORCH_MODULE(Qwen3_5FusedMoE);
 
 }  // namespace layer
 }  // namespace xllm
