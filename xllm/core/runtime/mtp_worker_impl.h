@@ -126,10 +126,6 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   void prepare_prefill_inputs(const ForwardInput& inputs,
                               ForwardInput& prefill_inputs);
   bool supports_explicit_spec_verify_replay_update() const;
-  bool should_use_explicit_spec_verify_replay_update(
-      const ForwardInput& input) const;
-  int64_t spec_verify_block_table_width(
-      const torch::Tensor& block_tables) const;
   // Returns true when validation must use chunked-prefill to avoid the
   // FlashInfer batch-decode read-before-write race on the bonus token.
   bool use_chunked_prefill_spec_verify_path() const;

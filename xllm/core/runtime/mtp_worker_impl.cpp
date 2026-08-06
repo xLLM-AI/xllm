@@ -108,8 +108,6 @@ KVCacheEstimateOptions make_kv_cache_estimate_options(
   estimate_options.is_draft_engine = options.is_draft_engine();
   estimate_options.enable_prefix_cache =
       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
-  estimate_options.enable_rdma_scale_padding =
-      options.instance_role() != InstanceRole::DEFAULT;
   return estimate_options;
 }
 
@@ -275,8 +273,7 @@ std::optional<ForwardOutput> run_worker_no_sync_impl(
       processed_input,
       prepare_stream,
       /*record_ready_event=*/&prepare_stream != &compute_stream);
-  return worker.execute_no_sync_on_stream(
-      processed_input, compute_stream, /*record_ready_event=*/false);
+  return worker.execute_no_sync_on_stream(processed_input, compute_stream);
 }
 
 torch::Tensor clone_host_tensor(const torch::Tensor& tensor) {
@@ -518,10 +515,6 @@ void force_atb_spec_kernel_for_qwen3_5_mtp(
 }
 #endif
 
-bool is_mimo_target_model_type(const std::string& model_type) {
-  return model_type == "mimo";
-}
-
 }  // namespace
 
 MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
@@ -580,6 +573,8 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
   if (target_impl_ != nullptr &&
       target_impl_->get_status() == WorkerImpl::Status::LOADED) {
     context_ = target_impl_->context_;
+    target_spec_verify_mode_ = mtp_async::classify_target_spec_verify_mode(
+        context_.get_model_args().model_type());
   }
 
   if (draft_impl_ != nullptr &&
@@ -625,7 +620,7 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
     }
   }
 #if defined(USE_NPU)
-  if (result && use_qwen3_5_spec_verify_path()) {
+  if (result && supports_explicit_spec_verify_replay_update()) {
     CHECK_EQ(::xllm::KernelConfig::get_instance().npu_kernel_backend(), "TORCH")
         << "Qwen3.5 MTP only supports NPU Torch backend";
   }
@@ -686,6 +681,11 @@ int64_t MTPWorkerImpl::get_embedding_placeholder_size() {
   return static_cast<int64_t>(embedding_size_);
 }
 
+bool MTPWorkerImpl::supports_explicit_spec_verify_replay_update() const {
+  return target_spec_verify_mode_ ==
+         mtp_async::TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY;
+}
+
 bool MTPWorkerImpl::should_use_separate_draft_kv_cache_shape() const {
   if (target_impl_ == nullptr || draft_impl_ == nullptr) {
     return false;
@@ -735,18 +735,6 @@ KVCacheShape MTPWorkerImpl::get_draft_kv_cache_shape(
   return KVCacheShape(draft_kv_cache_cap, draft_args, draft_tp_size);
 }
 
-bool MTPWorkerImpl::use_qwen3_5_spec_verify_path() const {
-  if (target_impl_ == nullptr ||
-      target_impl_->get_status() == WorkerImpl::Status::UNINITIALIZED) {
-    return false;
-  }
-  if (is_kimi_k25_eagle3_pair()) {
-    return false;
-  }
-  return is_qwen3_5_target_model_type(
-      target_impl_->context_.get_model_args().model_type());
-}
-
 bool MTPWorkerImpl::is_kimi_k25_eagle3_pair() const {
   if (target_impl_ == nullptr || draft_impl_ == nullptr ||
       target_impl_->get_status() == WorkerImpl::Status::UNINITIALIZED ||
@@ -762,21 +750,8 @@ bool MTPWorkerImpl::use_kimi_eagle3_step_major_validate_layout() const {
   return is_kimi_k25_eagle3_pair() && !use_chunked_prefill_spec_verify_path();
 }
 
-// MiMo MTP validation requires chunked-prefill mode (same as Qwen3.5) to
-// avoid the read-before-write race in FlashInfer batch-decode: validation
-// token 1 (at position p+1) must attend to the KV written by token 0 (at
-// position p) within the same batch call, but all-reads-then-all-writes
-// ordering means it reads garbage.  Chunked prefill executes tokens causally
-// so token 1 always sees token 0's committed KV.
-bool MTPWorkerImpl::use_mimo_spec_verify_path() const {
-  return target_impl_ != nullptr &&
-         target_impl_->get_status() != WorkerImpl::Status::UNINITIALIZED &&
-         is_mimo_target_model_type(
-             target_impl_->context_.get_model_args().model_type());
-}
-
 bool MTPWorkerImpl::use_chunked_prefill_spec_verify_path() const {
-  return use_qwen3_5_spec_verify_path() || use_mimo_spec_verify_path();
+  return target_spec_verify_mode_ != mtp_async::TargetSpecVerifyMode::GENERIC;
 }
 
 bool MTPWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
@@ -2113,7 +2088,7 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
 
   input_params.attention.rebuild_device_buffer(device_);
 #if defined(USE_NPU)
-  if (use_qwen3_5_spec_verify_path()) {
+  if (supports_explicit_spec_verify_replay_update()) {
     build_expanded_spec_verify_graph_input(input_params, device_);
   }
 #endif
@@ -2399,7 +2374,7 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
                                      std::move(buf.out_kv_seq_lens),
                                      /*update_block_tables=*/true);
   }
-  if (use_qwen3_5_spec_verify_path()) {
+  if (supports_explicit_spec_verify_replay_update()) {
     input_params.attention.host.q_cu_seq_lens.clear();
     input_params.attention.host.q_cu_seq_lens.reserve(
         input_params.meta.num_sequences + 1);
@@ -2569,7 +2544,7 @@ void MTPWorkerImpl::prepare_draft_inputs(const ForwardInput& input,
       std::move(input_params.attention.host.q_cu_seq_lens),
       buf.meta.kv_max_seq_len,
       std::move(buf.out_kv_seq_lens));
-  if (use_qwen3_5_spec_verify_path()) {
+  if (supports_explicit_spec_verify_replay_update()) {
     input_params.attention.host.q_cu_seq_lens.clear();
     input_params.attention.host.q_cu_seq_lens.reserve(
         input_params.meta.num_sequences + 1);
