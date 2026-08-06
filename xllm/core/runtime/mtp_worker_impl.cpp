@@ -1497,8 +1497,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   // Keep accepted tokens and verifier embeddings in the same synchronous
   // handoff used by the validated pre-rebase implementation.
   if (is_kimi_k25_eagle3_pair()) {
-    if (enable_spec_token_broadcast(get_optimization_config()) &&
-        enable_schedule_overlap()) {
+    if (get_optimization_config().enable_spec_token_broadcast &&
+        enable_schedule_overlap() && !input.sampling_params.all_greedy_sample) {
       c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
       broadcast_spec_tokens(val_output.next_tokens,
                             spec_broadcast_group(parallel_args_));
