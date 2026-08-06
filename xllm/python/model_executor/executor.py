@@ -110,14 +110,17 @@ class ModelExecutor:
         self.inductor_runner = None
 
         graph_backend = _resolve_graph_backend(config)
-        if int(config.get("dp_size", 1)) > 1 and graph_backend not in (
+        dp_size = int(config.get("dp_size", 1))
+        dp_rank = int(config.get("dp_rank", 0))
+        if dp_size > 1 and graph_backend not in (
             "",
             "off",
             "none",
             "0",
+            "cudagraphs",
         ):
             raise NotImplementedError(
-                "Python data parallel execution currently supports eager mode only"
+                "Python data parallel graph execution supports cudagraphs only"
             )
         if graph_backend in ("", "off", "none", "0"):
             pass
@@ -131,6 +134,8 @@ class ModelExecutor:
                 device,
                 max_seqs_per_batch,
                 int(config["max_position_embeddings"]),
+                dp_size,
+                dp_rank,
             )
         elif graph_backend == "aclgraph":
             from xllm.python.model_executor.runners.decode_acl_graph import (

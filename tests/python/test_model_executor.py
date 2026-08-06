@@ -23,6 +23,7 @@ from __future__ import annotations
 import sys
 import types
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import List
 from unittest.mock import MagicMock, patch
 
@@ -42,6 +43,10 @@ from xllm.python.model_executor.executor import (  # noqa: E402
     ModelExecutor,
     _create_attention_backend,
     _resolve_graph_backend,
+)
+from xllm.python.model_executor.runners.decode_cuda_graph import (  # noqa: E402
+    DecodeCudaGraphRunner,
+    _decode_graph_buckets,
 )
 
 
@@ -233,6 +238,136 @@ class TestModelExecutorConstruction:
             )
             assert executor.decode_graph_runner is None
             assert executor.inductor_runner is None
+
+    @patch(
+        "xllm.python.model_executor.runners.decode_cuda_graph."
+        "DecodeCudaGraphRunner"
+    )
+    @patch("xllm.python.model_executor.executor._create_attention_backend")
+    def test_data_parallel_cuda_graph_is_supported(
+        self, mock_create, mock_graph_runner
+    ):
+        mock_create.return_value = StubAttentionBackend()
+        model = _FakeModel(num_layers=1)
+
+        ModelExecutor(
+            model,
+            {
+                "dp_size": 2,
+                "dp_rank": 1,
+                "max_position_embeddings": 128,
+                "python_graph_backend": "cudagraphs",
+            },
+            max_seqs_per_batch=4,
+        )
+
+        mock_graph_runner.assert_called_once_with(
+            model.model,
+            mock_create.return_value,
+            torch.device("cpu"),
+            4,
+            128,
+            2,
+            1,
+        )
+
+    @patch("xllm.python.model_executor.executor._create_attention_backend")
+    def test_data_parallel_rejects_non_cuda_graph_backend(self, mock_create):
+        mock_create.return_value = StubAttentionBackend()
+        model = _FakeModel(num_layers=1)
+
+        with pytest.raises(NotImplementedError, match="supports cudagraphs only"):
+            ModelExecutor(
+                model,
+                {
+                    "dp_size": 2,
+                    "max_position_embeddings": 128,
+                    "python_graph_backend": "inductor",
+                },
+                max_seqs_per_batch=4,
+            )
+
+
+class TestDecodeCudaGraphDataParallelKeys:
+    @staticmethod
+    def _runner(dp_rank: int = 0) -> DecodeCudaGraphRunner:
+        runner = object.__new__(DecodeCudaGraphRunner)
+        runner.max_batch = 16
+        runner.dp_size = 2
+        runner.dp_rank = dp_rank
+        runner._graphs = {}
+        return runner
+
+    @staticmethod
+    def _metadata(token_counts: list[int]) -> SimpleNamespace:
+        return SimpleNamespace(
+            is_prefill=False,
+            is_chunked_prefill=False,
+            dp_token_counts=token_counts,
+        )
+
+    def test_graph_key_uses_global_max_data_parallel_bucket(self):
+        runner = self._runner()
+        input_ids = torch.zeros(3, dtype=torch.int32)
+
+        first = runner._graph_key(input_ids, self._metadata([3, 1]))
+        second = runner._graph_key(input_ids, self._metadata([3, 2]))
+
+        assert first == (4, (4, 4))
+        assert second == first
+
+    def test_data_parallel_warmup_uses_local_batch_capacity(self):
+        assert _decode_graph_buckets(16, 2) == [1, 2, 4, 8]
+        assert _decode_graph_buckets(20, 2) == [1, 2, 4, 8, 16]
+
+    def test_single_rank_graph_key_reuses_padded_bucket(self):
+        runner = self._runner()
+        runner.dp_size = 1
+        runner.dp_rank = 0
+
+        first = runner._graph_key(
+            torch.zeros(3, dtype=torch.int32), self._metadata([3])
+        )
+        second = runner._graph_key(
+            torch.zeros(4, dtype=torch.int32), self._metadata([4])
+        )
+
+        assert first == (4, (4,))
+        assert second == first
+
+    def test_graph_key_accepts_empty_data_parallel_rank(self):
+        runner = self._runner(dp_rank=1)
+        input_ids = torch.zeros(1, dtype=torch.int32)
+
+        assert runner._graph_key(input_ids, self._metadata([5, 0])) == (
+            8,
+            (8, 8),
+        )
+
+    def test_graph_key_rejects_unbalanced_unwarmed_bucket(self):
+        runner = self._runner()
+        input_ids = torch.zeros(9, dtype=torch.int32)
+
+        assert runner._graph_key(input_ids, self._metadata([9, 7])) is None
+
+    def test_can_execute_requires_warmed_graph(self):
+        runner = self._runner()
+        input_ids = torch.zeros(3, dtype=torch.int32)
+        metadata = self._metadata([3, 1])
+        graph_key = runner._graph_key(input_ids, metadata)
+
+        assert not runner.can_execute(input_ids, metadata)
+        runner._graphs[graph_key] = object()
+        assert runner.can_execute(input_ids, metadata)
+
+    @pytest.mark.parametrize("token_counts", ([3], [3, -1], [3, 2]))
+    def test_graph_key_rejects_invalid_data_parallel_metadata(
+        self, token_counts
+    ):
+        runner = self._runner(dp_rank=1)
+        input_ids = torch.zeros(1, dtype=torch.int32)
+
+        assert runner._graph_key(input_ids, self._metadata(token_counts)) is None
 
 
 # ---------------------------------------------------------------------------

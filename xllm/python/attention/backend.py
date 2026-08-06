@@ -80,7 +80,7 @@ class AttentionMetadata(Protocol):
     kv_seq_lens: torch.Tensor | None
     linear_state_indices: torch.Tensor | None
     has_initial_state: torch.Tensor | None
-    dp_token_counts: list[int]
+    dp_token_counts: Sequence[int]
     is_prefill: bool
     is_chunked_prefill: bool
 
