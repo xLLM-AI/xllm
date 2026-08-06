@@ -163,6 +163,8 @@ struct AttentionMetadata {
   torch::Tensor chunk_indices;
   torch::Tensor batch;
   torch::Tensor token_block_offset;
+  // Per-sequence recurrent-state validity for prefill/chunked-prefill only.
+  // Decode advances already-initialized states selected by linear state ids.
   torch::Tensor has_initial_states;
   int32_t tot = 0;
 

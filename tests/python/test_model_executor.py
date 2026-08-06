@@ -32,7 +32,11 @@ import torch.nn as nn
 
 # conftest.py stands in for xllm.python, whose import would bind the active
 # platform's kernel package and reach for operators from the C++ binary.
-from xllm.python.attention.backend import AttentionBackend, AttentionMetadata, KVCache  # noqa: E402
+from xllm.python.attention.backend import (  # noqa: E402
+    AttentionBackend,
+    AttentionMetadata,
+    LayerCache,
+)
 from xllm.python.layers.attention import Attention  # noqa: E402
 from xllm.python.model_executor.executor import (  # noqa: E402
     ModelExecutor,
@@ -51,10 +55,10 @@ class StubAttentionBackend(AttentionBackend):
 
     def __init__(self, **kwargs):
         self.init_kwargs = kwargs
-        self._kv_caches: list[KVCache] = []
+        self._kv_caches: list[LayerCache] = []
         self._prepared = False
 
-    def bind_kv_caches(self, kv_caches: list[KVCache]) -> None:
+    def bind_kv_caches(self, kv_caches: list[LayerCache]) -> None:
         self._kv_caches = kv_caches
 
     def prepare(self, metadata: AttentionMetadata, *, graph_mode: bool = False) -> None:
@@ -307,10 +311,18 @@ class TestExecuteRouting:
 
         metadata = MagicMock(spec=AttentionMetadata)
         executor.eager_runner = MagicMock()
-        executor.eager_runner.execute.return_value = torch.ones(5)
+        grad_enabled = None
+
+        def execute(*_args):
+            nonlocal grad_enabled
+            grad_enabled = torch.is_grad_enabled()
+            return torch.ones(5)
+
+        executor.eager_runner.execute.side_effect = execute
 
         result = executor.execute(torch.zeros(1), torch.zeros(1), metadata)
         executor.eager_runner.execute.assert_called_once()
+        assert grad_enabled is False
         assert torch.equal(result, torch.ones(5))
 
     @patch(

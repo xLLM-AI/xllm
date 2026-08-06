@@ -189,7 +189,7 @@ void ensure_forward_input_device_tensors(ForwardInput& input,
                                   device);
 }
 
-#if defined(USE_NPU) || defined(USE_MLU)
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA)
 struct LinearStateInputRows {
   std::vector<int32_t> cached_tokens;
   int64_t active_rows = 0;
@@ -197,8 +197,11 @@ struct LinearStateInputRows {
 };
 #endif
 
-#if defined(USE_NPU)
-LinearStateInputRows get_npu_linear_state_rows(ModelInputParams& input_params) {
+#if defined(USE_NPU) || defined(USE_CUDA)
+// NPU and CUDA workers carry the same host attention views, so they derive the
+// linear-state rows identically; only the NPU model reads back
+// parallel.query_start_loc.
+LinearStateInputRows get_host_linear_state_rows(ModelInputParams& input_params) {
   // Early-return on dummy/empty-shard inputs. Under dp>1, an empty shard is
   // padded with a fake token by worker_impl but its GDN-related tensors
   // (attention.device.kv_cache_tokens_nums etc.) are left undefined. Reading
@@ -223,9 +226,15 @@ LinearStateInputRows get_npu_linear_state_rows(ModelInputParams& input_params) {
   if (batch_size == 0 && input_params.attention.device.block_tables.defined()) {
     batch_size = input_params.attention.device.block_tables.size(0);
   }
+  if (batch_size == 0 &&
+      input_params.embedding.linear_state_indices.defined()) {
+    batch_size = input_params.embedding.linear_state_indices.numel();
+  }
+
+#if defined(USE_NPU)
   input_params.parallel.query_start_loc.resize(batch_size + 1, 0);
   for (int64_t i = 0; i < batch_size; ++i) {
-    int64_t seq_len =
+    const int64_t seq_len =
         has_leading_zero
             ? static_cast<int64_t>(host_q_seq_lens[static_cast<size_t>(i + 1)] -
                                    host_q_seq_lens[static_cast<size_t>(i)])
@@ -233,11 +242,12 @@ LinearStateInputRows get_npu_linear_state_rows(ModelInputParams& input_params) {
     input_params.parallel.query_start_loc[i + 1] =
         input_params.parallel.query_start_loc[i] + seq_len;
   }
+#endif
 
   const std::vector<int32_t>& cached_tokens =
       input_params.attention.host.kv_cache_tokens_nums;
   CHECK(!cached_tokens.empty())
-      << "NPU linear-state input requires host kv cache token counts";
+      << "linear-state input requires host kv cache token counts";
   return {cached_tokens, batch_size, /*empty_shard=*/false};
 }
 #endif
@@ -281,12 +291,12 @@ LinearStateInputRows get_mlu_linear_state_rows(ModelInputParams& input_params) {
 }
 #endif
 
-#if defined(USE_NPU) || defined(USE_MLU)
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA)
 void prepare_input_params_for_linear_attention(ModelInputParams& input_params) {
-#if defined(USE_NPU)
-  LinearStateInputRows rows = get_npu_linear_state_rows(input_params);
-#elif defined(USE_MLU)
+#if defined(USE_MLU)
   LinearStateInputRows rows = get_mlu_linear_state_rows(input_params);
+#else
+  LinearStateInputRows rows = get_host_linear_state_rows(input_params);
 #endif
   if (rows.empty_shard) {
     input_params.linear_state_validity_mask.clear();
@@ -848,6 +858,8 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
           torch::ones({1}, token_options.device(device_));
       processed_input.positions =
           torch::zeros({1}, position_options.device(device_));
+      processed_input.input_params.embedding.linear_state_indices =
+          torch::zeros({1}, token_options.dtype(torch::kInt32).device(device_));
       empty_shard = false;
     }
     if (empty_shard) {
@@ -899,7 +911,7 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
     }
 #endif
 
-#if defined(USE_NPU) || defined(USE_MLU)
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA)
     if (has_linear_attention_layers(context_.get_model_args())) {
       prepare_input_params_for_linear_attention(input_params);
       // Under schedule_overlap chunked prefill the previous chunk's forward
@@ -1242,13 +1254,14 @@ bool WorkerImpl::update_weights(const std::string& weights_path) {
 bool WorkerImpl::start_profile() {
   const auto& cfg = ProfileConfig::get_instance();
   LOG(INFO) << "Starting profiling with backend: " << cfg.profile_backend();
-#if defined(USE_CUDA) || defined(USE_DCU) || defined(USE_MUSA)
 #if defined(USE_CUDA)
   if (cfg.profile_backend() == "cuda") {
     // Capture-range only; requires the server to run under nsys.
     return CudaProfiler::get_instance().start();
   }
-#endif
+  LOG(ERROR) << "Unsupported CUDA profiling backend: " << cfg.profile_backend();
+  return false;
+#elif defined(USE_DCU) || defined(USE_MUSA)
   // Default "torch" backend records in-process via Kineto. CPU-op capture uses
   // thread-local callbacks, so enable it on the compute thread that runs the
   // forward pass rather than on the RPC handler thread.
@@ -1267,12 +1280,13 @@ bool WorkerImpl::start_profile() {
 bool WorkerImpl::stop_profile() {
   const auto& cfg = ProfileConfig::get_instance();
   LOG(INFO) << "Stopping profiling with backend: " << cfg.profile_backend();
-#if defined(USE_CUDA) || defined(USE_DCU) || defined(USE_MUSA)
 #if defined(USE_CUDA)
   if (cfg.profile_backend() == "cuda") {
     return CudaProfiler::get_instance().stop();
   }
-#endif
+  LOG(ERROR) << "Unsupported CUDA profiling backend: " << cfg.profile_backend();
+  return false;
+#elif defined(USE_DCU) || defined(USE_MUSA)
   const std::string profile_dir = cfg.profile_dir();
   const int32_t rank = parallel_args_.rank();
   folly::Promise<bool> promise;

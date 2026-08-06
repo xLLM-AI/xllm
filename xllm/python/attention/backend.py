@@ -16,14 +16,53 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, Sequence
 
 import torch
 
 if TYPE_CHECKING:
     from xllm.python.layers.attention import Attention
 
-KVCache = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+@dataclass(frozen=True, slots=True)
+class LayerCache:
+    """Every cache a layer may own, named rather than positional.
+
+    A layer holds a subset: full attention uses ``key``/``value``, the MLA
+    sparse indexer adds ``index``, and a linear-attention layer uses
+    ``conv``/``ssm`` instead of K/V. An absent slot is ``None`` rather than an
+    empty tensor, so a layer that reads the wrong slot fails loudly.
+    """
+
+    key: torch.Tensor | None
+    value: torch.Tensor | None
+    index: torch.Tensor | None = None
+    conv: torch.Tensor | None = None
+    ssm: torch.Tensor | None = None
+
+
+#: Field order of the tuple form, which is what the C++ executor hands over.
+_LAYER_CACHE_SLOTS = ("key", "value", "index", "conv", "ssm")
+
+LayerCacheInput = LayerCache | tuple[torch.Tensor | None, ...]
+
+
+def normalize_layer_caches(caches: Sequence[LayerCacheInput]) -> list[LayerCache]:
+    """Accept the tuple form and return named caches with empty slots dropped."""
+    normalized: list[LayerCache] = []
+    for cache in caches:
+        if isinstance(cache, LayerCache):
+            normalized.append(cache)
+            continue
+        if not 2 <= len(cache) <= len(_LAYER_CACHE_SLOTS):
+            raise ValueError(
+                "layer cache must hold between K/V and "
+                f"{'/'.join(_LAYER_CACHE_SLOTS)} tensors"
+            )
+        slots = [None if tensor is None or not tensor.numel() else tensor
+                 for tensor in cache]
+        slots.extend([None] * (len(_LAYER_CACHE_SLOTS) - len(slots)))
+        normalized.append(LayerCache(*slots))
+    return normalized
 
 
 class AttentionMetadata(Protocol):
@@ -39,6 +78,9 @@ class AttentionMetadata(Protocol):
     paged_kv_last_page_len_host: torch.Tensor | None
     block_table: torch.Tensor | None
     kv_seq_lens: torch.Tensor | None
+    linear_state_indices: torch.Tensor | None
+    has_initial_state: torch.Tensor | None
+    dp_token_counts: list[int]
     is_prefill: bool
     is_chunked_prefill: bool
 
@@ -48,9 +90,9 @@ class MlaIndexContext:
     """Public contract handed to an optional LightningIndexer.
 
     Replaces direct model access to ``backend._metadata`` / ``backend._kv_caches``
-    for MLA layers. The backend owns the paged index cache (the third slot of
-    ``KVCache``) and prepares the paging / sequence-length metadata once per
-    step; the indexer receives this view and produces ``topk``.
+    for MLA layers. The backend owns the paged index cache (``LayerCache.index``)
+    and prepares the paging / sequence-length metadata once per step; the indexer
+    receives this view and produces ``topk``.
     """
 
     index_cache: torch.Tensor
@@ -62,7 +104,7 @@ class MlaIndexContext:
 
 class AttentionBackend(ABC):
     @abstractmethod
-    def bind_kv_caches(self, kv_caches: list[KVCache]) -> None:
+    def bind_kv_caches(self, kv_caches: list[LayerCache]) -> None:
         pass
 
     @abstractmethod
@@ -117,7 +159,7 @@ class AttentionBackend(ABC):
     def mla_index_context(self, layer: "Attention") -> MlaIndexContext:
         """Public hook for an optional LightningIndexer.
 
-        Hands out the paged index cache view (third ``KVCache`` slot) plus the
+        Hands out the paged index cache view (``LayerCache.index``) plus the
         paging / sequence-length metadata the indexer needs, so the model never
         touches ``backend._metadata`` / ``backend._kv_caches`` directly.
         Backends that do not support the sparse MLA indexer raise.

@@ -227,10 +227,10 @@ struct ParallelArgs {
   ProcessGroup* mc2_group_ = nullptr;
   ProcessGroup* moe_tp_group_ = nullptr;
 
-  // PyTorch creates its own TP process group. These fields only reserve the
-  // TCPStore endpoint after the native process-group port range.
-  std::string python_tp_rendezvous_host_;
-  int32_t python_tp_rendezvous_port_ = 0;
+  // Python process groups reuse the native world TCPStore. PrefixStore keeps
+  // the bootstrap keys for each logical group independent.
+  std::string python_rendezvous_host_;
+  int32_t python_rendezvous_port_ = 0;
 
   // ProcessGroups for DiT models
   ProcessGroup* dit_tp_group_ = nullptr;

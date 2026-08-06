@@ -56,6 +56,8 @@ class _StaticAttentionMetadata:
     paged_kv_last_page_len_host: torch.Tensor | None = None
     is_prefill: bool = False
     is_chunked_prefill: bool = False
+    linear_state_indices: torch.Tensor | None = None
+    has_initial_state: torch.Tensor | None = None
 
 
 class _DecodeGraphEntry:
@@ -158,7 +160,14 @@ class DecodeCudaGraphRunner(BaseRunner):
         with torch.cuda.stream(self._stream):
             self._fill_entry(entry, input_ids, positions, metadata, batch_size)
             self.attention_backend.prepare(entry.static_metadata, graph_mode=True)
-            with forward_context(ForwardContext(self.attention_backend, self.device)):
+            with forward_context(
+                ForwardContext(
+                    self.attention_backend,
+                    self.device,
+                    entry.static_metadata,
+                    self.layer_caches,
+                )
+            ):
                 if first_capture:
                     self._capture(entry)
                 entry.graph.replay()
@@ -218,6 +227,9 @@ class DecodeCudaGraphRunner(BaseRunner):
                 dtype=torch.int32,
                 device=device,
             ),
+            linear_state_indices=torch.zeros(
+                padded_batch_size, dtype=torch.int32, device=device
+            ),
             paged_kv_indptr_host=torch.zeros(
                 padded_batch_size + 1, dtype=torch.int32, device="cpu"
             ),
@@ -267,6 +279,13 @@ class DecodeCudaGraphRunner(BaseRunner):
             static_metadata.paged_kv_last_page_len,
             padded_batch_size,
         )
+        linear_state_indices = getattr(metadata, "linear_state_indices", None)
+        if linear_state_indices is not None:
+            static_metadata.linear_state_indices[:batch_size].copy_(
+                linear_state_indices
+            )
+        if padded_batch_size > batch_size:
+            static_metadata.linear_state_indices[batch_size:].zero_()
         self._fill_host_metadata(entry, metadata, batch_size)
 
     def _fill_host_metadata(

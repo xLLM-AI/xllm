@@ -253,6 +253,17 @@ void ModelRegistry::register_dit_model_factory(const std::string& name,
   }
 }
 
+void ModelRegistry::register_model_backend(const std::string& name,
+                                           const std::string& backend) {
+  ModelRegistry* instance = get_instance();
+  auto [it, inserted] = instance->model_backend_.emplace(name, backend);
+  if (!inserted && it->second != backend) {
+    SAFE_LOG_WARNING("model backend for "
+                     << name << " already registered as " << it->second
+                     << "; ignoring conflicting backend " << backend << ".");
+  }
+}
+
 void ModelRegistry::register_multimodal_processor_factory(
     const std::string& name,
     MultimodalProcessorFactory factory) {

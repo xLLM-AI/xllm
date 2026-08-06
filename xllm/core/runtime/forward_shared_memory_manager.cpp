@@ -426,6 +426,7 @@ inline void write_linear_state_cache_ops(
   write_data(context.descriptor, static_cast<uint64_t>(cache_ops.size()));
   for (const LinearStateCacheOp& cache_op : cache_ops) {
     write_data(context.descriptor, cache_op.linear_state_id);
+    write_data(context.descriptor, cache_op.reset_requested);
     write_data(context.descriptor, cache_op.restore_requested);
     write_data(context.descriptor, cache_op.restore_src_slot_id);
   }
@@ -1214,6 +1215,7 @@ inline void read_linear_state_cache_ops(
   cache_ops.resize(size);
   for (LinearStateCacheOp& cache_op : cache_ops) {
     read_data(context, cache_op.linear_state_id);
+    read_data(context, cache_op.reset_requested);
     read_data(context, cache_op.restore_requested);
     read_data(context, cache_op.restore_src_slot_id);
   }

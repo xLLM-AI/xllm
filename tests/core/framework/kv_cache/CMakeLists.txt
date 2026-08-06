@@ -60,3 +60,4 @@ cc_test(
     :linear_state_restore
     GTest::gtest_main
 )
+target_link_libraries(linear_state_restore_test PUBLIC Python::Python)

@@ -210,6 +210,7 @@ c10::intrusive_ptr<c10d::Store> create_tcp_store(const std::string& host,
   c10d::TCPStoreOptions tcp_options;
   tcp_options.isServer = (rank == 0);
   tcp_options.port = port;
+  tcp_options.multiTenant = true;
   return c10::make_intrusive<c10d::TCPStore>(host, tcp_options);
 }
 

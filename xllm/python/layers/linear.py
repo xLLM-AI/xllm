@@ -92,10 +92,18 @@ class RowParallelLinear(nn.Module):
         bias: bool = False,
         dtype: torch.dtype | None = None,
         device: torch.device | str | None = None,
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.tp_size = tp_size
         self._weight_is_transposed = False
+        self.reduce_results = reduce_results
+        if bias and not reduce_results:
+            # The bias is replicated and must be added exactly once, which is
+            # only possible here when this layer owns the reduction.
+            raise ValueError(
+                "a deferred reduction cannot be combined with a replicated bias"
+            )
         self.weight = nn.Parameter(
             torch.empty(
                 out_features,
@@ -124,7 +132,7 @@ class RowParallelLinear(nn.Module):
             out = torch.matmul(x, self.weight)
         else:
             out = torch.nn.functional.linear(x, self.weight)
-        if self.tp_size > 1:
+        if self.tp_size > 1 and self.reduce_results:
             distributed.all_reduce_(out)
         if self.bias is not None:
             out = out + self.bias

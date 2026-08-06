@@ -36,7 +36,10 @@ class EagerRunner(BaseRunner):
         self.attention_backend.prepare(metadata)
         with forward_context(
             ForwardContext(
-                self.attention_backend, self.device,
+                self.attention_backend,
+                self.device,
+                metadata,
+                self.layer_caches,
                 layer_synchronizer=layer_synchronizer,
             )
         ):

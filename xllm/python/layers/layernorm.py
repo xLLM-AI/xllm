@@ -47,3 +47,43 @@ class RMSNorm(nn.Module):
         if residual is None:
             return kernels.rms_norm(x, self.weight, self.eps)
         return kernels.fused_add_rms_norm(x, residual, self.weight, self.eps)
+
+
+class GemmaRMSNorm(nn.Module):
+    """Gemma-style RMSNorm used by Qwen3.5.
+
+    Checkpoints store the offset from one, so the effective scale is
+    ``1 + weight`` rather than ``weight``.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        eps: float = 1e-6,
+        dtype: torch.dtype | None = None,
+        device: torch.device | str | None = None,
+    ) -> None:
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(
+            torch.zeros(dim, dtype=torch.float32, device=device)
+        )
+
+    def forward(
+        self, x: torch.Tensor, residual: torch.Tensor | None = None
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # TODO: Extend the fused RMSNorm/residual-add op with Gemma's FP32
+        # (weight + 1) semantics to remove eager decode kernels in a performance PR.
+        original_dtype = x.dtype
+        normalized = x.float()
+        if residual is not None:
+            normalized = normalized + residual.float()
+            residual = normalized.to(original_dtype)
+
+        variance = normalized.pow(2).mean(dim=-1, keepdim=True)
+        normalized = normalized * torch.rsqrt(variance + self.eps)
+        normalized = normalized * (self.weight + 1.0)
+        output = normalized.to(original_dtype)
+        if residual is None:
+            return output
+        return output, residual

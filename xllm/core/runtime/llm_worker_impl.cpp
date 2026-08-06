@@ -223,7 +223,6 @@ LLMWorkerImpl::step_async_no_sync(const ForwardInput& input) {
 
 std::optional<ForwardOutput> LLMWorkerImpl::step_for_schedule_overlap(
     const ForwardInput& input) {
-#if defined(USE_NPU) || defined(USE_MLU)
   // Restore live recurrent-state slots from saved checkpoints here (worker
   // thread, on compute_stream_) instead of in prepare_work_before_execute on
   // prepare_stream_. The single-threaded worker pool guarantees the previous
@@ -238,7 +237,6 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_for_schedule_overlap(
                                mutable_params.linear_state_cache_ops,
                                mutable_params.linear_state_validity_mask);
   }
-#endif
   return execute_no_sync_on_stream(input, *compute_stream_);
 }
 

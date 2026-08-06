@@ -860,6 +860,7 @@ void BatchInputBuilder::append_linear_state_row(Sequence* sequence,
 
   LinearStateCacheOp linear_state_cache_op;
   linear_state_cache_op.linear_state_id = state.linear_state_ids.back();
+  linear_state_cache_op.reset_requested = n_kv_cache_tokens == 0;
   // Linear-state checkpoints live on chunk-end boundaries, so the prefix hash
   // is chained per chunk (stride = max_tokens_per_chunk_for_prefill), not per
   // KV block. The engine enforces this stride is a positive multiple of
@@ -904,14 +905,15 @@ void BatchInputBuilder::append_linear_state_row(Sequence* sequence,
   if (needs_restore_hash) {
     const size_t restore_chunk_idx =
         static_cast<size_t>(n_kv_cache_tokens) / chunk_stride - 1;
-    if (restore_chunk_idx < linear_state_hashes.size()) {
-      linear_state_cache_op.restore_requested = true;
-      if (mounted_restore_src.has_value()) {
-        linear_state_cache_op.restore_src_slot_id = mounted_restore_src->id();
-        state.linear_restore_src_blocks.emplace_back(
-            std::move(*mounted_restore_src));
-      }
-    }
+    CHECK_LT(restore_chunk_idx, linear_state_hashes.size())
+        << "mounted linear-state checkpoint must have a matching chunk hash";
+    CHECK(mounted_restore_src.has_value())
+        << "linear-state restore must resolve its checkpoint slot before "
+           "building worker input";
+    linear_state_cache_op.restore_requested = true;
+    linear_state_cache_op.restore_src_slot_id = mounted_restore_src->id();
+    state.linear_restore_src_blocks.emplace_back(
+        std::move(*mounted_restore_src));
   }
   if (needs_save_hash) {
     const size_t save_chunk_idx =

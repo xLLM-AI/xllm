@@ -18,9 +18,18 @@ from __future__ import annotations
 
 from xllm.python.distributed.collectives import (
     all_gather,
+    all_gather_variable,
     all_reduce_,
+    init_process_group,
     init_tp_group,
     tp_rank,
 )
 
-__all__ = ["init_tp_group", "tp_rank", "all_reduce_", "all_gather"]
+__all__ = [
+    "init_process_group",
+    "init_tp_group",
+    "tp_rank",
+    "all_reduce_",
+    "all_gather",
+    "all_gather_variable",
+]

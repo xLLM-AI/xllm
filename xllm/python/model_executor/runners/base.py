@@ -19,7 +19,7 @@ from abc import ABC, abstractmethod
 import torch
 import torch.nn as nn
 
-from xllm.python.attention.backend import AttentionBackend, AttentionMetadata
+from xllm.python.attention.backend import AttentionBackend, AttentionMetadata, LayerCache
 
 
 class BaseRunner(ABC):
@@ -29,6 +29,10 @@ class BaseRunner(ABC):
         self.model = model
         self.attention_backend = attention_backend
         self.device = device
+        self.layer_caches: list[LayerCache] = []
+
+    def bind_layer_caches(self, layer_caches: list[LayerCache]) -> None:
+        self.layer_caches = layer_caches
 
     @abstractmethod
     def execute(

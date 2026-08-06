@@ -64,6 +64,8 @@ class _StaticAttentionMetadata:
     paged_kv_last_page_len_host: torch.Tensor | None = None
     block_table: torch.Tensor | None = None
     kv_seq_lens: torch.Tensor | None = None
+    linear_state_indices: torch.Tensor | None = None
+    has_initial_state: torch.Tensor | None = None
     is_prefill: bool = False
     is_chunked_prefill: bool = False
 
@@ -426,7 +428,12 @@ class DecodeAclGraphRunner(BaseRunner):
             ].fill_(int(cumulative_seq_lens[-1]))
 
     def _capture(self, entry: _DecodeGraphEntry) -> None:
-        context = ForwardContext(self.attention_backend, self.device)
+        context = ForwardContext(
+            self.attention_backend,
+            self.device,
+            entry.static_metadata,
+            self.layer_caches,
+        )
         with forward_context(context):
             for _ in range(_CAPTURE_WARMUP_STEPS):
                 self.model(entry.static_input_ids, entry.static_positions)
@@ -436,6 +443,8 @@ class DecodeAclGraphRunner(BaseRunner):
         context = ForwardContext(
             self.attention_backend,
             self.device,
+            entry.static_metadata,
+            self.layer_caches,
             acl_graph=capture_context,
         )
         with forward_context(context):

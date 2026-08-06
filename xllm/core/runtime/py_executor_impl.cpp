@@ -21,6 +21,7 @@ limitations under the License.
 #include <torch/extension.h>
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "common/metrics.h"
@@ -40,12 +41,21 @@ namespace xllm {
 
 namespace {
 
+py::object optional_tensor(const torch::Tensor& tensor) {
+  return tensor.defined() ? py::cast(tensor) : py::none();
+}
+
 class AttentionMetadataView final {
  public:
   explicit AttentionMetadataView(
-      std::shared_ptr<layer::AttentionMetadata> metadata)
+      std::shared_ptr<layer::AttentionMetadata> metadata,
+      const ModelInputParams& params)
       : metadata_(std::move(metadata)),
-        kv_seq_lens_host_(make_kv_seq_lens_host(metadata_)) {}
+        kv_seq_lens_host_(make_kv_seq_lens_host(metadata_)),
+        linear_state_indices_(params.embedding.linear_state_indices),
+        dp_token_counts_(params.parallel.raw_dp_global_token_nums.empty()
+                             ? params.parallel.dp_global_token_nums
+                             : params.parallel.raw_dp_global_token_nums) {}
 
   const torch::Tensor& slot_mapping() const { return metadata_->slot_mapping; }
   const torch::Tensor& paged_kv_indptr() const {
@@ -78,6 +88,15 @@ class AttentionMetadataView final {
   py::object kv_seq_lens() const {
     return optional_tensor(metadata_->kv_seq_lens);
   }
+  py::object linear_state_indices() const {
+    return optional_tensor(linear_state_indices_);
+  }
+  py::object has_initial_state() const {
+    return optional_tensor(metadata_->has_initial_states);
+  }
+  const std::vector<int32_t>& dp_token_counts() const {
+    return dp_token_counts_;
+  }
   bool is_prefill() const { return metadata_->is_prefill; }
   bool is_chunked_prefill() const { return metadata_->is_chunked_prefill; }
 
@@ -96,12 +115,10 @@ class AttentionMetadataView final {
         torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
   }
 
-  static py::object optional_tensor(const torch::Tensor& tensor) {
-    return tensor.defined() ? py::cast(tensor) : py::none();
-  }
-
   std::shared_ptr<layer::AttentionMetadata> metadata_;
   torch::Tensor kv_seq_lens_host_;
+  torch::Tensor linear_state_indices_;
+  std::vector<int32_t> dp_token_counts_;
 };
 
 }  // namespace
@@ -125,6 +142,12 @@ PYBIND11_EMBEDDED_MODULE(xllm_runtime, m) {
                              &AttentionMetadataView::kv_seq_lens_host)
       .def_property_readonly("block_table", &AttentionMetadataView::block_table)
       .def_property_readonly("kv_seq_lens", &AttentionMetadataView::kv_seq_lens)
+      .def_property_readonly("linear_state_indices",
+                             &AttentionMetadataView::linear_state_indices)
+      .def_property_readonly("has_initial_state",
+                             &AttentionMetadataView::has_initial_state)
+      .def_property_readonly("dp_token_counts",
+                             &AttentionMetadataView::dp_token_counts)
       .def_property_readonly("is_prefill", &AttentionMetadataView::is_prefill)
       .def_property_readonly("is_chunked_prefill",
                              &AttentionMetadataView::is_chunked_prefill);
@@ -147,6 +170,7 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
                                const runtime::Options& options)
     : py_causal_lm_(dynamic_cast<PyCausalLM*>(model)),
       args_(args),
+      device_(device),
       options_(options),
       enable_mla_(args.enable_mla()) {
   CHECK(py_causal_lm_ != nullptr) << "PyExecutorImpl requires PyCausalLM";
@@ -183,7 +207,8 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
       params.attn_metadata;
   if (!attn_metadata) {
     attn_metadata = std::make_shared<layer::AttentionMetadata>(
-        layer::AttentionMetadataBuilder::build(params, enable_mla_));
+        layer::AttentionMetadataBuilder::build(
+            params, enable_mla_, std::nullopt, device_));
   }
 
   py::gil_scoped_acquire gil;
@@ -193,8 +218,12 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
   if (!kv_bound_) {
     py::list kv_caches_py;
     for (auto& kv : kv_caches) {
-      kv_caches_py.append(py::make_tuple(
-          kv.get_k_cache(), kv.get_v_cache(), kv.get_index_cache()));
+      // Slot order must match ``LayerCache`` on the Python side.
+      kv_caches_py.append(py::make_tuple(optional_tensor(kv.get_k_cache()),
+                                         optional_tensor(kv.get_v_cache()),
+                                         optional_tensor(kv.get_index_cache()),
+                                         optional_tensor(kv.get_conv_cache()),
+                                         optional_tensor(kv.get_ssm_cache())));
     }
     py_executor_.attr("bind_kv_caches")(kv_caches_py);
     kv_bound_ = true;
@@ -204,7 +233,8 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
         << "KV cache layer count changed after initial bind";
   }
 
-  py::object py_metadata = py::cast(AttentionMetadataView(attn_metadata));
+  py::object py_metadata =
+      py::cast(AttentionMetadataView(attn_metadata, params));
 
   py::object py_sync = py::none();
 #if defined(USE_NPU)

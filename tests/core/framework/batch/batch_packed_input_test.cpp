@@ -36,6 +36,7 @@ namespace {
 void expect_linear_state_cache_op_eq(const LinearStateCacheOp& actual,
                                      const LinearStateCacheOp& expected) {
   EXPECT_EQ(actual.linear_state_id, expected.linear_state_id);
+  EXPECT_EQ(actual.reset_requested, expected.reset_requested);
   EXPECT_EQ(actual.restore_requested, expected.restore_requested);
   EXPECT_EQ(actual.restore_src_slot_id, expected.restore_src_slot_id);
 }
@@ -110,6 +111,7 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackPreservesLinearStateCacheOps) {
 
   LinearStateCacheOp no_restore_op;
   no_restore_op.linear_state_id = 8;
+  no_restore_op.reset_requested = true;
 
   input.input_params.linear_state_cache_ops = {restore_op, no_restore_op};
 

@@ -24,6 +24,7 @@ ARG http_proxy=
 ARG https_proxy=
 # Optional: use pypi mirror (e.g. https://pypi.tuna.tsinghua.edu.cn/simple)
 ARG UV_DEFAULT_INDEX=
+ARG PIP_INDEX_URL=
 # Optional: accelerate github https clone (e.g. https://gh-proxy.com/)
 ARG GIT_HTTPS_MIRROR_PREFIX=
 # Optional: use rustup proxy (example: https://rsproxy.cn)
@@ -101,8 +102,10 @@ ENV NVSHMEM_HOME=/usr/local
 
 # Install cmake
 RUN set -eux; \
-    url="https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz"; \
-    curl -fL --retry 3 --retry-delay 2 -o /tmp/cmake.tar.gz "${url}"; \
+    github_url="https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz"; \
+    url="${GIT_HTTPS_MIRROR_PREFIX}${github_url}"; \
+    curl -fL --retry 3 --retry-all-errors --retry-delay 2 \
+      -o /tmp/cmake.tar.gz "${url}"; \
     mkdir -p /opt/cmake; \
     tar -xzf /tmp/cmake.tar.gz -C /opt/cmake --strip-components=1; \
     rm -f /tmp/cmake.tar.gz; \

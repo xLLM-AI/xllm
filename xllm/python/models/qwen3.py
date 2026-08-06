@@ -33,6 +33,7 @@ from xllm.python import kernels
 from xllm.python.layers import (
     Attention,
     ColumnParallelLinear,
+    GatedMLP,
     HiddenParallelEmbedding,
     RMSNorm,
     RotaryEmbedding,
@@ -114,35 +115,6 @@ class Qwen3Config:
             num_kv_heads = 1
             replicas = tp // self.n_kv_heads
         return num_heads, num_kv_heads, replicas
-
-
-class Qwen3MLP(nn.Module):
-    def __init__(
-        self, cfg: Qwen3Config, dtype: torch.dtype, device: torch.device
-    ) -> None:
-        super().__init__()
-        tp = cfg.tp_size
-        assert cfg.intermediate_size % tp == 0
-        inter_per_rank = cfg.intermediate_size // tp
-        self.gate_up_proj = ColumnParallelLinear(
-            cfg.hidden_size,
-            2 * inter_per_rank,
-            tp,
-            dtype=dtype,
-            device=device,
-        )
-        self.down_proj = RowParallelLinear(
-            inter_per_rank,
-            cfg.hidden_size,
-            tp,
-            dtype=dtype,
-            device=device,
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up = self.gate_up_proj(x)
-        act = kernels.silu_and_mul(gate_up)
-        return self.down_proj(act)
 
 
 class Qwen3Attention(nn.Module):
@@ -236,7 +208,13 @@ class Qwen3DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device
         )
-        self.mlp = Qwen3MLP(cfg, dtype, device)
+        self.mlp = GatedMLP(
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            cfg.tp_size,
+            dtype,
+            device,
+        )
 
     def forward(
         self,

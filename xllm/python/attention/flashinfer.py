@@ -26,13 +26,39 @@ from xllm.python import kernels
 from xllm.python.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
-    KVCache,
+    LayerCache,
 )
 
 if TYPE_CHECKING:
     from xllm.python.layers.attention import Attention
 
 _WORKSPACE_SIZE = 128 * 1024 * 1024
+
+
+def _should_use_tensor_core_decode(
+    dtype: torch.dtype,
+    num_heads: int,
+    num_kv_heads: int,
+) -> bool:
+    return (
+        dtype in (torch.float16, torch.bfloat16)
+        and num_heads // num_kv_heads >= 4
+    )
+
+
+def _pack_head_axes(tensor: torch.Tensor) -> torch.Tensor:
+    """Satisfy the ``reshape_paged_cache`` layout precondition.
+
+    The kernel indexes keys and values as if the head and head-dim axes were
+    packed, and only the token stride is free. Eager execution happens to hand
+    it such a layout, so the contract used to hold by accident.
+
+    This materializes instead of testing the strides: a stride test is folded
+    away while Dynamo traces, which is before the compiler picks layouts for
+    the tensors it produces, so the test would pass at trace time and the
+    kernel would still be handed an unpacked tensor at run time.
+    """
+    return tensor.contiguous()
 
 
 class FlashInferBackend(AttentionBackend):
@@ -52,12 +78,17 @@ class FlashInferBackend(AttentionBackend):
         self.scale = scale
         self.sliding_window = sliding_window
         self.dtype = dtype
+        self._decode_use_tensor_cores = _should_use_tensor_core_decode(
+            dtype, num_heads, num_kv_heads
+        )
 
         self._decode_workspace = torch.empty(
             _WORKSPACE_SIZE, dtype=torch.uint8, device=device
         )
         self._decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-            self._decode_workspace, "NHD"
+            self._decode_workspace,
+            "NHD",
+            use_tensor_cores=self._decode_use_tensor_cores,
         )
         self._prefill_ragged_wrapper = (
             flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
@@ -72,7 +103,7 @@ class FlashInferBackend(AttentionBackend):
             )
         )
 
-        self._kv_caches: list[KVCache] = []
+        self._kv_caches: list[LayerCache] = []
         self._metadata: AttentionMetadata | None = None
         self._active_decode_wrapper = self._decode_wrapper
         self._graph_decode_wrappers: dict[
@@ -81,7 +112,7 @@ class FlashInferBackend(AttentionBackend):
         self._graph_decode_buffer_ptrs: dict[int, tuple[int, int, int]] = {}
         self._planned_graph_batches: set[int] = set()
 
-    def bind_kv_caches(self, kv_caches: list[KVCache]) -> None:
+    def bind_kv_caches(self, kv_caches: list[LayerCache]) -> None:
         if not kv_caches:
             raise ValueError("FlashInferBackend requires at least one KV cache")
         self._kv_caches = kv_caches
@@ -90,13 +121,33 @@ class FlashInferBackend(AttentionBackend):
     def num_kv_blocks(self) -> int:
         if not self._kv_caches:
             raise RuntimeError("KV caches are not bound")
-        return self._kv_caches[0][0].size(0)
+        cache = next(
+            (
+                cache
+                for cache in self._kv_caches
+                if cache.key is not None and cache.key.numel()
+            ),
+            None,
+        )
+        if cache is None:
+            raise RuntimeError("no full-attention KV cache is bound")
+        return cache.key.size(0)
 
     @property
     def page_size(self) -> int:
         if not self._kv_caches:
             raise RuntimeError("KV caches are not bound")
-        k_cache = self._kv_caches[0][0]
+        cache = next(
+            (
+                cache
+                for cache in self._kv_caches
+                if cache.key is not None and cache.key.numel()
+            ),
+            None,
+        )
+        if cache is None:
+            raise RuntimeError("no full-attention KV cache is bound")
+        k_cache = cache.key
         return k_cache.size(1) if k_cache.dim() >= 2 else 1
 
     def prepare(
@@ -217,6 +268,7 @@ class FlashInferBackend(AttentionBackend):
                 paged_kv_indptr_buffer=metadata.paged_kv_indptr,
                 paged_kv_indices_buffer=metadata.paged_kv_indices,
                 paged_kv_last_page_len_buffer=metadata.paged_kv_last_page_len,
+                use_tensor_cores=self._decode_use_tensor_cores,
             )
             self._graph_decode_wrappers[batch_size] = wrapper
             self._graph_decode_buffer_ptrs[batch_size] = self._buffer_ptrs(
@@ -249,10 +301,15 @@ class FlashInferBackend(AttentionBackend):
         if metadata is None:
             raise RuntimeError("FlashInferBackend.prepare() was not called")
 
-        k_cache, v_cache, _ = self._kv_caches[layer.layer_id]
+        layer_cache = self._kv_caches[layer.layer_id]
+        k_cache, v_cache = layer_cache.key, layer_cache.value
+        if k_cache is None or v_cache is None:
+            raise RuntimeError(
+                f"full-attention KV cache is missing for layer {layer.layer_id}"
+            )
         q_3d = q.view(-1, layer.num_heads, layer.head_dim)
-        k_3d = k.view(-1, layer.num_kv_heads, layer.head_dim)
-        v_3d = v.view(-1, layer.num_kv_heads, layer.head_dim)
+        k_3d = _pack_head_axes(k.view(-1, layer.num_kv_heads, layer.head_dim))
+        v_3d = _pack_head_axes(v.view(-1, layer.num_kv_heads, layer.head_dim))
 
         kernels.reshape_paged_cache(
             metadata.slot_mapping, k_3d, v_3d, k_cache, v_cache

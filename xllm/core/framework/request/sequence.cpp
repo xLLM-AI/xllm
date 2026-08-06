@@ -320,6 +320,9 @@ Sequence::Sequence(const Sequence& other)
   // is private: drop the copied Embedding and Linear blocks so this sequence
   // allocates its own on the next allocate. Preserves the pre-map behavior
   // where the private slot was never copied by this constructor.
+  // TODO: Linear-attention beam search is not supported yet. A beam child that
+  // keeps its parent's KV progress must clone the parent's recurrent state into
+  // its newly allocated private LINEAR slot before the next forward.
   kv_state_.erase_blocks(BlockType::EMBEDDING);
   kv_state_.erase_blocks(BlockType::LINEAR);
   host_kv_state_.erase_blocks(BlockType::EMBEDDING);

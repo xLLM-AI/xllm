@@ -902,14 +902,16 @@ using LinearStateValidityMask = std::vector<int64_t>;
 struct LinearStateCacheOp {
   // Live slot the sequence advances its recurrent state in.
   int32_t linear_state_id = -1;
+  // A newly admitted sequence has no recurrent history. The physical slot may
+  // have been used by an earlier request, so the worker must clear it before
+  // the first forward instead of relying on allocator contents.
+  bool reset_requested = false;
   // Restore request flag and the checkpoint slot the scheduler resolved it to.
   // The worker copies `restore_src_slot_id` -> `linear_state_id`. This mirrors
-  // KV, which sends the worker only the resolved block-swap descriptor and
-  // never the prefix hash. Kept as a bool (not derived from
-  // `restore_src_slot_id >= 0`) so the "restore requested but the scheduler
-  // could not resolve a source -> force cold start" state survives the IPC
-  // boundary; the worker's copy-in relies on that bit
-  // (linear_state_restore.cpp).
+  // KV, which sends the worker only a fully resolved block-swap descriptor and
+  // never the prefix hash. A restore request without a valid source is an
+  // invariant violation because the full-attention KV prefix has already been
+  // reused and cannot be paired with a cold recurrent state.
   bool restore_requested = false;
   int32_t restore_src_slot_id = -1;
 };

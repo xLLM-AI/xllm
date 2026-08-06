@@ -195,6 +195,31 @@ std::filesystem::path config_test_file_path() {
   return std::filesystem::path("tests/core/framework/config/config_test.json");
 }
 
+TEST(ModelConfigValidationTest, RejectsQwen35PythonSpeculativeDecode) {
+  const std::optional<std::string> error =
+      ModelConfig::validate_python_speculative_decode(
+          "python", "qwen3_5_moe_text", 4);
+
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->find("does not support speculative decoding"),
+            std::string::npos);
+  EXPECT_TRUE(
+      ModelConfig::validate_python_speculative_decode("py", "qwen3_5_text", 1)
+          .has_value());
+}
+
+TEST(ModelConfigValidationTest, AcceptsSupportedPythonExecutionModes) {
+  EXPECT_FALSE(ModelConfig::validate_python_speculative_decode(
+                   "python", "qwen3_5_text", 0)
+                   .has_value());
+  EXPECT_FALSE(ModelConfig::validate_python_speculative_decode(
+                   "native", "qwen3_5_text", 4)
+                   .has_value());
+  EXPECT_FALSE(
+      ModelConfig::validate_python_speculative_decode("python", "qwen3", 4)
+          .has_value());
+}
+
 TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
   const JsonReader json = config::parse_json_string(kInlineConfig);
   ConfigFlagGuard flag_guard;

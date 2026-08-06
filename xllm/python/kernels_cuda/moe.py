@@ -30,7 +30,7 @@ def supports_cutlass_moe(device: torch.device) -> bool:
     Returns:
         ``True`` when the CUDA architecture has a CUTLASS expert GEMM.
     """
-    if not torch.cuda.is_available():
+    if device.type != "cuda" or not torch.cuda.is_available():
         return False
     device_index = device.index
     if device_index is None:

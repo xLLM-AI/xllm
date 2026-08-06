@@ -17,7 +17,12 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from xllm.python.attention.backend import AttentionBackend, AttentionMetadata, KVCache
+from xllm.python.attention.backend import (
+    AttentionBackend,
+    AttentionMetadata,
+    LayerCacheInput,
+    normalize_layer_caches,
+)
 from xllm.python.layers.attention import Attention
 from xllm.python.model_executor.forward_context import LayerSynchronizer
 from xllm.python.model_executor.runners.eager import EagerRunner
@@ -105,6 +110,15 @@ class ModelExecutor:
         self.inductor_runner = None
 
         graph_backend = _resolve_graph_backend(config)
+        if int(config.get("dp_size", 1)) > 1 and graph_backend not in (
+            "",
+            "off",
+            "none",
+            "0",
+        ):
+            raise NotImplementedError(
+                "Python data parallel execution currently supports eager mode only"
+            )
         if graph_backend in ("", "off", "none", "0"):
             pass
         elif graph_backend == "cudagraphs":
@@ -145,16 +159,28 @@ class ModelExecutor:
             layer.sliding_window,
         )
 
-    def bind_kv_caches(self, kv_caches: list[KVCache]) -> None:
-        if len(kv_caches) != self._num_attention_layers:
+    def bind_kv_caches(self, kv_caches: list[LayerCacheInput]) -> None:
+        layer_caches = normalize_layer_caches(kv_caches)
+        required_layers = max(
+            layer.layer_id
+            for layer in self.model.modules()
+            if isinstance(layer, Attention)
+        ) + 1
+        if len(layer_caches) < required_layers:
             raise ValueError(
-                "KV cache layer count does not match model attention layer count"
+                "cache layer count does not match the model layer layout"
             )
         if self._kv_bound:
             return
-        self.attention_backend.bind_kv_caches(kv_caches)
+        self.attention_backend.bind_kv_caches(layer_caches)
+        self.eager_runner.bind_layer_caches(layer_caches)
+        if self.decode_graph_runner is not None:
+            self.decode_graph_runner.bind_layer_caches(layer_caches)
+        if self.inductor_runner is not None:
+            self.inductor_runner.bind_layer_caches(layer_caches)
         self._kv_bound = True
 
+    @torch.inference_mode()
     def execute(
         self,
         input_ids: torch.Tensor,

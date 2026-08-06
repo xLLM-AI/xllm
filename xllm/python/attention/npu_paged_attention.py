@@ -29,7 +29,7 @@ from xllm.python import kernels
 from xllm.python.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
-    KVCache,
+    LayerCache,
     MlaIndexContext,
 )
 from xllm.python.model_executor.forward_context import (
@@ -62,7 +62,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
         self.dtype = dtype
         self.device = device
 
-        self._kv_caches: list[KVCache] = []
+        self._kv_caches: list[LayerCache] = []
         self._metadata: AttentionMetadata | None = None
         self._graph_workspace: torch.Tensor | None = None
         self._graph_outputs: dict[int, torch.Tensor] = {}
@@ -82,15 +82,17 @@ class NpuPagedAttentionBackend(AttentionBackend):
     def num_kv_blocks(self) -> int:
         if not self._kv_caches:
             return 0
-        return self._kv_caches[0][0].shape[0]
+        key_cache = self._kv_caches[0].key
+        return key_cache.shape[0] if key_cache is not None else 0
 
     @property
     def page_size(self) -> int:
         if not self._kv_caches:
             return 1
-        return self._kv_caches[0][0].shape[1]
+        key_cache = self._kv_caches[0].key
+        return key_cache.shape[1] if key_cache is not None else 1
 
-    def bind_kv_caches(self, kv_caches: list[KVCache]) -> None:
+    def bind_kv_caches(self, kv_caches: list[LayerCache]) -> None:
         self._kv_caches = kv_caches
 
     def prepare(
@@ -203,7 +205,10 @@ class NpuPagedAttentionBackend(AttentionBackend):
         assert metadata is not None
 
         layer_id = layer.layer_id
-        k_cache, v_cache, _ = self._kv_caches[layer_id]
+        layer_cache = self._kv_caches[layer_id]
+        k_cache, v_cache = layer_cache.key, layer_cache.value
+        if k_cache is None or v_cache is None:
+            raise RuntimeError(f"KV cache is missing for layer {layer_id}")
         num_tokens = q.shape[0]
 
         # Write KV to paged cache (kernel expects [T, kv_heads, head_dim]).
@@ -237,7 +242,11 @@ class NpuPagedAttentionBackend(AttentionBackend):
                 "NpuPagedAttentionBackend"
             )
         layer_id = layer.layer_id
-        nope_cache, rope_cache, _ = self._kv_caches[layer_id]
+        layer_cache = self._kv_caches[layer_id]
+        # MLA reuses the K/V slots for the latent (nope) and rope caches.
+        nope_cache, rope_cache = layer_cache.key, layer_cache.value
+        if nope_cache is None or rope_cache is None:
+            raise RuntimeError(f"MLA latent cache is missing for layer {layer_id}")
 
         torch.ops.xllm_ops.reshape_paged_cache(
             metadata.slot_mapping, k_latent_3d, k_pe_3d, nope_cache, rope_cache
@@ -249,7 +258,11 @@ class NpuPagedAttentionBackend(AttentionBackend):
     def mla_index_context(self, layer: "Attention") -> MlaIndexContext:
         metadata = self._metadata
         assert metadata is not None, "mla_index_context called before prepare()"
-        _, _, index_cache = self._kv_caches[layer.layer_id]
+        index_cache = self._kv_caches[layer.layer_id].index
+        if index_cache is None:
+            raise RuntimeError(
+                f"MLA index cache is missing for layer {layer.layer_id}"
+            )
         return MlaIndexContext(
             index_cache=index_cache,
             slot_mapping=metadata.slot_mapping,
