@@ -37,26 +37,24 @@ namespace {
 
 bool use_expanded_spec_decode_attention(
     const AttentionMetadata& attn_metadata) {
-  return attn_metadata.use_expanded_decode_for_spec_verify_attention &&
-         attn_metadata.expanded_paged_kv_indptr.defined() &&
-         attn_metadata.expanded_paged_kv_indptr.numel() >= 2;
+  const ExpandedDecodeMetadata& expanded = attn_metadata.expanded_decode;
+  return expanded.enabled && expanded.paged_kv_indptr.defined() &&
+         expanded.paged_kv_indptr.numel() >= 2;
 }
 
 AttentionMetadata build_expanded_decode_metadata(
     const AttentionMetadata& attn_metadata) {
   AttentionMetadata decode_meta = attn_metadata;
-  const int64_t expanded_batch =
-      attn_metadata.expanded_paged_kv_indptr.size(0) - 1;
-  const torch::Device expanded_device =
-      attn_metadata.expanded_paged_kv_indptr.device();
+  const ExpandedDecodeMetadata& expanded = attn_metadata.expanded_decode;
+  const int64_t expanded_batch = expanded.paged_kv_indptr.size(0) - 1;
+  const torch::Device expanded_device = expanded.paged_kv_indptr.device();
   const torch::TensorOptions expanded_int_options =
       torch::TensorOptions().dtype(torch::kInt32).device(expanded_device);
-  decode_meta.paged_kv_indptr = attn_metadata.expanded_paged_kv_indptr;
-  decode_meta.paged_kv_indices = attn_metadata.expanded_paged_kv_indices;
-  decode_meta.paged_kv_last_page_len =
-      attn_metadata.expanded_paged_kv_last_page_len;
-  decode_meta.block_table = attn_metadata.expanded_block_table;
-  decode_meta.kv_seq_lens = attn_metadata.expanded_kv_seq_lens;
+  decode_meta.paged_kv_indptr = expanded.paged_kv_indptr;
+  decode_meta.paged_kv_indices = expanded.paged_kv_indices;
+  decode_meta.paged_kv_last_page_len = expanded.paged_kv_last_page_len;
+  decode_meta.block_table = expanded.block_table;
+  decode_meta.kv_seq_lens = expanded.kv_seq_lens;
   decode_meta.qo_indptr =
       torch::arange(0, expanded_batch + 1, expanded_int_options);
   decode_meta.max_query_len = 1;
@@ -236,7 +234,7 @@ FlashInferAttentionImpl::forward(const AttentionMetadata& attn_metadata,
   qwen35_mtp_attention_debug_sync("attention_before_core");
   const bool spec_verify_expanded_decode =
       attn_metadata.is_chunked_prefill &&
-      (attn_metadata.use_expanded_decode_for_spec_verify_attention ||
+      (attn_metadata.expanded_decode.enabled ||
        use_expanded_spec_decode_attention(attn_metadata) ||
        attn_metadata.is_spec_verify);
   if (attn_metadata.is_prefill) {

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "attention_metadata_builder.h"
+#include "layers/common/attention_metadata_builder.h"
 
 #include <glog/logging.h>
 
@@ -21,12 +21,13 @@ limitations under the License.
 #include <numeric>
 #include <vector>
 
-#include "attention_metadata.h"
 #include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/rec_config.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
+#include "layers/common/attention_metadata.h"
+#include "layers/common/expanded_decode_metadata_builder.h"
 
 namespace xllm::layer {
 
@@ -88,6 +89,7 @@ AttentionMetadata build_attention_metadata(
   attn_metadata.use_dense_flash_attention =
       params.graph.use_dense_flash_attention;
 #endif
+  attn_metadata.expanded_decode = ExpandedDecodeMetadataBuilder::build(params);
 
   // for flashinfer
   attn_metadata.paged_kv_indptr = params.attention.device.paged_kv_indptr;
@@ -116,18 +118,6 @@ AttentionMetadata build_attention_metadata(
 
 #if defined(USE_NPU)
   attn_metadata.is_spec_verify = params.is_spec_verify;
-  attn_metadata.use_expanded_decode_for_spec_verify_attention =
-      params.graph.use_expanded_decode_for_spec_verify_attention;
-  if (attn_metadata.use_expanded_decode_for_spec_verify_attention) {
-    attn_metadata.expanded_kv_seq_lens = params.graph.expanded_kv_seq_lens;
-    attn_metadata.expanded_block_table = params.graph.expanded_block_tables;
-    attn_metadata.expanded_paged_attention_tiling_data =
-        params.graph.expanded_tiling_data;
-    if (!params.graph.expanded_kv_seq_lens_vec.empty()) {
-      attn_metadata.expanded_kv_seq_lens_host =
-          torch::tensor(params.graph.expanded_kv_seq_lens_vec, torch::kInt);
-    }
-  }
   // Determine if we should use ACL graph mode:
   // - --enable_graph=true
   // - Must be decode phase or spec-verify chunked prefill

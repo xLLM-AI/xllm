@@ -31,6 +31,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
+#include "core/layers/common/expanded_decode_metadata_builder.h"
 #include "core/runtime/mtp_async_state.h"
 #include "core/util/utils.h"
 
@@ -1318,14 +1319,15 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
           static_cast<uint32_t>(padded_batch_size));
     }
     if (use_expanded_spec_decode_attention) {
-      graph_params->graph.use_expanded_decode_for_spec_verify_attention = true;
-      graph_params->graph.expanded_kv_seq_lens = expanded_kv_seq_lens_.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens);
-      graph_params->graph.expanded_block_tables =
-          expanded_block_tables_for_graph();
+      layer::ExpandedDecodeMetadataBuilder::populate_expanded_layout(
+          *graph_params,
+          expanded_kv_seq_lens_.slice(
+              /*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens),
+          expanded_block_tables_for_graph(),
+          expanded_kv_seq_lens_vec,
+          options_.block_size());
       graph_params->graph.expanded_tiling_data =
           uses_paged_attention_tiling() ? tiling_data() : torch::Tensor();
-      graph_params->graph.expanded_kv_seq_lens_vec = expanded_kv_seq_lens_vec;
     }
     if (params.attention.device.q_cu_seq_lens.defined()) {
       const bool use_hybrid_query_start_loc = is_hybrid_linear_attention_;

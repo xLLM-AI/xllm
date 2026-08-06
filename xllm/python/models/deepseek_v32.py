@@ -961,7 +961,7 @@ class DeepseekV3Model(nn.Module):
 class DeepseekV3ForCausalLM(PyModelBase):
     """DeepSeek-V3.2 causal LM. Registered under ``model_type='deepseek_v32'``."""
 
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict, build_model: bool = True) -> None:
         super().__init__()
         self.cfg = DeepseekV3Config.from_dict(config)
         self.cfg.tp_size = int(config.get("tp_size", 1))
@@ -975,14 +975,21 @@ class DeepseekV3ForCausalLM(PyModelBase):
         self.device = device
         tp = self.cfg.tp_size
         assert self.cfg.vocab_size % tp == 0
-        self.model = DeepseekV3Model(self.cfg, dtype, device)
+        self.model: Optional[nn.Module] = None
+        self.lm_head: Optional[nn.Module] = None
+        if build_model:
+            self._build_model()
+
+    def _build_model(self) -> None:
+        tp = self.cfg.tp_size
+        self.model = DeepseekV3Model(self.cfg, self.dtype, self.device)
         self.lm_head = ColumnParallelLinear(
             self.cfg.hidden_size,
             self.cfg.vocab_size // tp,
             tp,
             gather_output=True,
-            dtype=dtype,
-            device=device,
+            dtype=self.dtype,
+            device=self.device,
         )
 
     def load_weights(
@@ -991,12 +998,18 @@ class DeepseekV3ForCausalLM(PyModelBase):
         tp_rank: int,
         tp_size: int,
         load_lm_head: bool = True,
+        load_embedding: bool = True,
     ) -> None:
         cfg = self.cfg
         loader = W8A8WeightLoader(self, state_dicts, cfg.tp_size, cfg.tp_rank)
 
-        loader.copy_in("model.embed_tokens.weight",
-                       loader.shard(loader.load_tensor("model.embed_tokens.weight"), dim=1))
+        if load_embedding:
+            loader.copy_in(
+                "model.embed_tokens.weight",
+                loader.shard(
+                    loader.load_tensor("model.embed_tokens.weight"), dim=1
+                ),
+            )
 
         for i in range(cfg.n_layers):
             p = f"model.layers.{i}."

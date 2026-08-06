@@ -29,12 +29,14 @@ limitations under the License.
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/kv_cache/kv_cache_estimation.h"
 #include "core/framework/model/mtp_utils.h"
 #include "core/framework/multimodal/mm_data.h"
 #if defined(USE_NPU)
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
+#include "core/layers/common/expanded_decode_metadata_builder.h"
 #endif
 #include "core/layers/common/dsa_topk_share_plan.h"
 #include "core/runtime/mtp_async_input_builder.h"
@@ -220,6 +222,9 @@ void clear_expanded_spec_verify_graph_input(ModelInputParams& input_params) {
   input_params.graph.use_expanded_decode_for_spec_verify_attention = false;
   input_params.graph.expanded_kv_seq_lens = torch::Tensor();
   input_params.graph.expanded_block_tables = torch::Tensor();
+  input_params.graph.expanded_paged_kv_indptr = torch::Tensor();
+  input_params.graph.expanded_paged_kv_indices = torch::Tensor();
+  input_params.graph.expanded_paged_kv_last_page_len = torch::Tensor();
   input_params.graph.expanded_tiling_data = torch::Tensor();
   input_params.graph.expanded_kv_seq_lens_vec.clear();
 }
@@ -239,20 +244,9 @@ bool build_expanded_spec_verify_graph_host_input(
   if (q_seq_lens.empty() || kv_seq_lens.empty()) {
     return false;
   }
-  CHECK_EQ(q_seq_lens.size(), kv_seq_lens.size())
-      << "spec verify q/kv seq lens must both be sequence-scoped";
-  const int64_t batch_size = static_cast<int64_t>(q_seq_lens.size());
-
-  std::vector<int32_t> expanded_kv_seq_lens;
-  for (int64_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
-    const int32_t q_len = q_seq_lens[static_cast<size_t>(seq_idx)];
-    const int32_t kv_len = kv_seq_lens[static_cast<size_t>(seq_idx)];
-    CHECK_GE(q_len, 1) << "spec verify q_len must be positive";
-    CHECK_GE(kv_len, q_len) << "kv_len must include validate query tokens";
-    for (int32_t token_idx = 0; token_idx < q_len; ++token_idx) {
-      expanded_kv_seq_lens.emplace_back(kv_len - q_len + token_idx + 1);
-    }
-  }
+  std::vector<int32_t> expanded_kv_seq_lens =
+      layer::ExpandedDecodeMetadataBuilder::build_tokenwise_kv_seq_lens(
+          q_seq_lens, kv_seq_lens);
   if (expanded_kv_seq_lens.empty()) {
     return false;
   }
@@ -264,7 +258,8 @@ bool build_expanded_spec_verify_graph_host_input(
 
 void bind_expanded_spec_verify_graph_input(ModelInputParams& input_params,
                                            const torch::Device& device,
-                                           bool kv_lens_already_bound) {
+                                           bool kv_lens_already_bound,
+                                           int32_t block_size) {
   if (!input_params.graph.use_expanded_decode_for_spec_verify_attention) {
     return;
   }
@@ -299,14 +294,21 @@ void bind_expanded_spec_verify_graph_input(ModelInputParams& input_params,
 
   // ATB consumes this tensor as dense row-major storage. Keep the generic
   // fallback contiguous; a zero-stride expand view is rejected at runtime.
-  input_params.graph.expanded_block_tables =
-      torch::stack(expanded_block_rows, 0);
+  torch::Tensor expanded_block_tables = torch::stack(expanded_block_rows, 0);
+  layer::ExpandedDecodeMetadataBuilder::populate_expanded_layout(
+      input_params,
+      input_params.graph.expanded_kv_seq_lens,
+      expanded_block_tables,
+      input_params.graph.expanded_kv_seq_lens_vec,
+      block_size);
 }
 
 void build_expanded_spec_verify_graph_input(ModelInputParams& input_params,
-                                            const torch::Device& device) {
+                                            const torch::Device& device,
+                                            int32_t block_size) {
   build_expanded_spec_verify_graph_host_input(input_params);
-  bind_expanded_spec_verify_graph_input(input_params, device, false);
+  bind_expanded_spec_verify_graph_input(
+      input_params, device, false, block_size);
 }
 #endif
 
@@ -680,8 +682,16 @@ int64_t MTPWorkerImpl::get_embedding_placeholder_size() {
 }
 
 bool MTPWorkerImpl::supports_explicit_spec_verify_replay_update() const {
+  if (target_spec_verify_mode_ ==
+      mtp_async::TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY) {
+    return true;
+  }
+  // The Python NPU paged-attention runner consumes expanded metadata and can
+  // replay its ACL graph for DeepSeek MLA. The native target executor has no
+  // corresponding MLA spec-verify graph path yet, so it remains generic.
   return target_spec_verify_mode_ ==
-         mtp_async::TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY;
+             mtp_async::TargetSpecVerifyMode::DEEPSEEK_V32_EXPANDED_VERIFY &&
+         ModelConfig::is_python_model_impl(context_.get_model_impl());
 }
 
 bool MTPWorkerImpl::should_use_explicit_spec_verify_replay_update(
@@ -733,7 +743,9 @@ int64_t MTPWorkerImpl::spec_verify_block_table_width(
 }
 
 bool MTPWorkerImpl::use_chunked_prefill_spec_verify_path() const {
-  return target_spec_verify_mode_ != mtp_async::TargetSpecVerifyMode::GENERIC;
+  return target_spec_verify_mode_ ==
+             mtp_async::TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL ||
+         supports_explicit_spec_verify_replay_update();
 }
 
 bool MTPWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
@@ -2227,12 +2239,19 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
         attention.attention_buffer_capacity;
     input_params.graph.expanded_block_tables = expanded_block_tables_flat.view(
         {expanded_block_rows, verify_block_table_width});
+    layer::ExpandedDecodeMetadataBuilder::populate_expanded_layout(
+        input_params,
+        input_params.graph.expanded_kv_seq_lens,
+        input_params.graph.expanded_block_tables,
+        input_params.graph.expanded_kv_seq_lens_vec,
+        options_.block_size());
     input_params.graph.input_tokens_override = validate_input.token_ids;
     input_params.graph.spec_verify_source_addresses_stable = true;
   } else {
     input_params.attention.rebuild_device_buffer(device_);
     if (supports_explicit_spec_verify_replay_update()) {
-      build_expanded_spec_verify_graph_input(input_params, device_);
+      build_expanded_spec_verify_graph_input(
+          input_params, device_, options_.block_size());
     }
   }
 #else
