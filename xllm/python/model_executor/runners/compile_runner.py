@@ -25,10 +25,29 @@ from xllm.python.model_executor.forward_context import (
 from xllm.python.model_executor.runners.base import BaseRunner
 
 
-class InductorRunner(BaseRunner):
-    def __init__(self, model, attention_backend, device, backend: str) -> None:
+class CompileRunner(BaseRunner):
+    def __init__(
+        self,
+        model,
+        attention_backend,
+        device,
+        backend: str,
+        fullgraph: bool = False,
+        dynamic: bool = False,
+    ) -> None:
         super().__init__(model, attention_backend, device)
-        self.compiled_model = torch.compile(model, backend=backend)
+        compile_backend = self._resolve_compile_backend(backend)
+        self.compiled_model = torch.compile(
+            model, backend=compile_backend, fullgraph=fullgraph, dynamic=dynamic,
+        )
+
+    @staticmethod
+    def _resolve_compile_backend(backend: str):
+        if backend == "torchair":
+            import torchair
+            config = torchair.CompilerConfig()
+            return torchair.get_npu_backend(compiler_config=config)
+        return backend
 
     def execute(
         self,

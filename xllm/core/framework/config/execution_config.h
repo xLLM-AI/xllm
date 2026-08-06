@@ -53,7 +53,9 @@ class ExecutionConfig final {
          "input_shm_size",
          "output_shm_size",
          "random_seed",
-         "python_graph_backend"}};
+         "python_graph_backend",
+         "python_compile_fullgraph",
+         "python_compile_dynamic"}};
     return kOptionCategory;
   }
 
@@ -82,6 +84,10 @@ class ExecutionConfig final {
   PROPERTY(int32_t, random_seed) = -1;
 
   PROPERTY(std::string, python_graph_backend) = "off";
+
+  PROPERTY(bool, python_compile_fullgraph) = false;
+
+  PROPERTY(bool, python_compile_dynamic) = false;
 };
 
 }  // namespace xllm

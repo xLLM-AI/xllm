@@ -105,7 +105,7 @@ class ModelExecutor:
         execution_model = model.model
         self.eager_runner = EagerRunner(execution_model, self.attention_backend, device)
         self.decode_graph_runner = None
-        self.inductor_runner = None
+        self.compile_runner = None
 
         graph_backend = _resolve_graph_backend(config, device)
         if graph_backend in ("", "off", "none", "0"):
@@ -133,9 +133,16 @@ class ModelExecutor:
                 int(config["max_position_embeddings"]),
             )
         else:
-            from xllm.python.model_executor.runners.inductor import InductorRunner
-            self.inductor_runner = InductorRunner(
-                execution_model, self.attention_backend, device, graph_backend
+            from xllm.python.model_executor.runners.compile_runner import (
+                CompileRunner,
+            )
+            self.compile_runner = CompileRunner(
+                execution_model,
+                self.attention_backend,
+                device,
+                backend=graph_backend,
+                fullgraph=bool(config.get("python_compile_fullgraph", False)),
+                dynamic=bool(config.get("python_compile_dynamic", False)),
             )
 
     @staticmethod
@@ -176,8 +183,8 @@ class ModelExecutor:
             # KV-cache push during prefill, so decode has nothing to record.
             if graph_runner.can_execute(input_ids, metadata):
                 return graph_runner.execute(input_ids, positions, metadata)
-        if self.inductor_runner is not None:
-            return self.inductor_runner.execute(
+        if self.compile_runner is not None:
+            return self.compile_runner.execute(
                 input_ids, positions, metadata, layer_synchronizer
             )
         return self.eager_runner.execute(

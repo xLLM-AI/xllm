@@ -213,7 +213,7 @@ class TestModelExecutorConstruction:
 
         assert executor._num_attention_layers == 3
         assert executor.decode_graph_runner is None
-        assert executor.inductor_runner is None
+        assert executor.compile_runner is None
 
     @patch(
         "xllm.python.model_executor.executor._create_attention_backend",
@@ -244,7 +244,7 @@ class TestModelExecutorConstruction:
                 model, {"python_graph_backend": off_value}, max_seqs_per_batch=4
             )
             assert executor.decode_graph_runner is None
-            assert executor.inductor_runner is None
+            assert executor.compile_runner is None
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +332,7 @@ class TestExecuteRouting:
     @patch(
         "xllm.python.model_executor.executor._create_attention_backend",
     )
-    def test_inductor_runner_takes_priority_over_eager(self, mock_create):
+    def test_compile_runner_takes_priority_over_eager(self, mock_create):
         mock_create.return_value = StubAttentionBackend()
         model = _FakeModel(num_layers=1)
         executor = ModelExecutor(model, {}, max_seqs_per_batch=4)
@@ -340,10 +340,10 @@ class TestExecuteRouting:
         kv = (torch.zeros(1), torch.zeros(1))
         executor.bind_kv_caches([kv])
 
-        executor.inductor_runner = MagicMock()
-        executor.inductor_runner.execute.return_value = torch.ones(3)
+        executor.compile_runner = MagicMock()
+        executor.compile_runner.execute.return_value = torch.ones(3)
 
         metadata = MagicMock(spec=AttentionMetadata)
         result = executor.execute(torch.zeros(1), torch.zeros(1), metadata)
-        executor.inductor_runner.execute.assert_called_once()
+        executor.compile_runner.execute.assert_called_once()
         assert torch.equal(result, torch.ones(3))

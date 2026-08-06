@@ -225,6 +225,9 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `input_shm_size` | `uint64` | `1024` | 输入共享内存大小，默认 1GB。 |
 | `output_shm_size` | `uint64` | `128` | 输出共享内存大小，默认 128MB。 |
 | `random_seed` | `int32` | `-1` | 随机数生成器 seed；`-1` 表示不固定 seed。 |
+| `python_graph_backend` | `string` | `"off"` | Python model executor 的图编译后端。`off` 表示 eager 模式；`cudagraphs` 使用 CUDA decode graph；`aclgraph` 使用 NPU decode graph；其他值（如 `inductor`、`torchair`）作为 `torch.compile` backend 使用。 |
+| `python_compile_fullgraph` | `bool` | `false` | 是否启用 `torch.compile(fullgraph=True)` 整图捕获模式；启用后要求模型整图编译，不允许 graph break。 |
+| `python_compile_dynamic` | `bool` | `false` | 是否启用 `torch.compile(dynamic=True)` 动态 shape 编译；启用后编译器生成支持动态 shape 的代码，避免 shape 变化时重编译。 |
 
 ## KernelConfig
 
