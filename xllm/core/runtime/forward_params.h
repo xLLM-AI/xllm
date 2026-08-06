@@ -537,7 +537,6 @@ struct ForwardInput {
     inputs.skip_sampling_for_logits_only = skip_sampling_for_logits_only;
     inputs.kv_slot_layout = kv_slot_layout;
     inputs.metadata_ready_event = metadata_ready_event;
-    inputs.cp_partitioned = cp_partitioned;
     inputs.sample_sequence_ids = sample_sequence_ids;
     inputs.sample_prior_output_rows = sample_prior_output_rows;
     inputs.json_object_states = json_object_states;
