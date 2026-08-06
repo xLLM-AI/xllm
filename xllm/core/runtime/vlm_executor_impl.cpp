@@ -97,4 +97,16 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
   return model_->forward(tokens, positions, kv_caches, params);
 }
 
+void VlmExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
+                                          const torch::Tensor& positions,
+                                          std::vector<KVCache>& kv_caches,
+                                          const ModelInputParams& params) {
+  // Decode-only double-buffer graph prewarm. Delegate to the inner graph
+  // executor built in enable_graph mode; multimodal prefill steps never reach
+  // here because the worker gates this on decode-phase input params.
+  if (llm_executor_) {
+    llm_executor_->prepare_graph_input(tokens, positions, kv_caches, params);
+  }
+}
+
 }  // namespace xllm

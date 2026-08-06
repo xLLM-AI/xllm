@@ -49,6 +49,11 @@ class VlmExecutorImpl : public ExecutorImpl {
                   std::vector<KVCache>& kv_caches,
                   const ModelInputParams& params) override;
 
+  void prepare_graph_input(const torch::Tensor& tokens,
+                           const torch::Tensor& positions,
+                           std::vector<KVCache>& kv_caches,
+                           const ModelInputParams& params) override;
+
   virtual MMDict encode(const ModelInputParams& params);
 
   // not own
