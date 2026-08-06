@@ -184,7 +184,8 @@ void build_query_rows(const ForwardInput& input,
       << "DFlash input token_ids size is smaller than num_sequences.";
 
   buf.out_token_ids.reserve(num_sequences * query_width);
-  buf.out_positions.reserve(num_sequences * query_width);
+  buf.position_helper.use_mrope_positions = row_ctx.use_mrope_positions;
+  buf.position_helper.reserve_out_position_id(num_sequences * query_width);
   buf.out_new_cache_slots.reserve(num_sequences * query_width);
   buf.out_kv_seq_lens.reserve(num_sequences);
   buf.out_q_seq_lens.reserve(num_sequences);
@@ -241,8 +242,9 @@ std::vector<int64_t> build_accepted_context_rows(
       specBuilder::make_decode_row_context(input);
   std::vector<int64_t> accepted_idxes;
   accepted_idxes.reserve(static_cast<size_t>(accepted_tokens_cpu.numel()));
-  buf.out_positions.reserve(buf.out_positions.size() +
-                            static_cast<size_t>(accepted_tokens_cpu.numel()));
+  buf.position_helper.use_mrope_positions = row_ctx.use_mrope_positions;
+  buf.position_helper.reserve_out_position_id(
+      static_cast<int32_t>(accepted_tokens_cpu.numel()));
   buf.out_new_cache_slots.reserve(
       buf.out_new_cache_slots.size() +
       static_cast<size_t>(accepted_tokens_cpu.numel()));
@@ -268,7 +270,8 @@ std::vector<int64_t> build_accepted_context_rows(
 
   CHECK(!accepted_idxes.empty())
       << "DFlash accepted context must not be empty.";
-  CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_positions.size())
+  CHECK_EQ(buf.out_new_cache_slots.size(),
+           static_cast<size_t>(buf.position_helper.out_position_columns))
       << "DFlash accepted context slots/positions mismatch.";
   return accepted_idxes;
 }
@@ -991,16 +994,17 @@ void DFlashWorkerImpl::prepare_query_inputs(const ForwardInput& input,
   // symmetry holds by construction. Catch scheduler regressions that break
   // the invariant (see MTP dp_enabled idle-rank branch).
   const int32_t num_sequences_query = input.input_params.meta.num_sequences;
-  CHECK_EQ(static_cast<int32_t>(buf.out_positions.size()),
+  CHECK_EQ(buf.position_helper.out_position_columns,
            num_sequences_query * query_width)
       << "DFlash per-seq row count must be uniform (query_width=" << query_width
       << ", num_sequences=" << num_sequences_query << ")";
 
-  specBuilder::set_token_position_tensors(query_input,
-                                          buf.out_token_ids,
-                                          buf.out_positions,
-                                          input.token_ids.options(),
-                                          input.positions.options());
+  specBuilder::set_token_position_tensors(
+      query_input,
+      buf.out_token_ids,
+      buf.position_helper.make_cpu_position_tensor(),
+      input.token_ids.options(),
+      input.positions.options());
   input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
   specBuilder::update_input_params(input_params,
                                    buf,
@@ -1151,8 +1155,10 @@ void DFlashWorkerImpl::write_target_context_to_cache(
       {batch_size * token_width, accepted_embeddings.size(/*dim=*/2)});
   torch::Tensor context_hidden =
       flat_embeddings.index_select(/*dim=*/0, accepted_index);
-  torch::Tensor positions_device =
-      cpu_int_vec_to_device(buf.out_positions, device_);
+  torch::Tensor positions_device = safe_to(
+      buf.position_helper.make_cpu_position_tensor(),
+      torch::TensorOptions().dtype(torch::kInt).device(device_.unwrap()),
+      /*non_blocking=*/true);
   torch::Tensor new_cache_slots_device =
       cpu_int_vec_to_device(buf.out_new_cache_slots, device_);
   // Publish the prepare_stream_ work (index_select producing context_hidden +

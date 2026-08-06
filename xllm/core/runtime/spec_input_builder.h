@@ -229,7 +229,7 @@ torch::Tensor make_cpu_int_tensor(const std::vector<int32_t>& values);
 // with async H2D copies, toggling device_tensors_ready around the write.
 void set_token_position_tensors(ForwardInput& input,
                                 const std::vector<int32_t>& token_ids,
-                                const std::vector<int32_t>& positions,
+                                const torch::Tensor& positions_host,
                                 const torch::TensorOptions& token_options,
                                 const torch::TensorOptions& position_options);
 

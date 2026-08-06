@@ -492,12 +492,12 @@ torch::Tensor make_cpu_int_tensor(const std::vector<int32_t>& values) {
 
 void set_token_position_tensors(ForwardInput& input,
                                 const std::vector<int32_t>& token_ids,
-                                const std::vector<int32_t>& positions,
+                                const torch::Tensor& positions_host,
                                 const torch::TensorOptions& token_options,
                                 const torch::TensorOptions& position_options) {
   input.device_tensors_ready = false;
   input.token_ids_host = make_cpu_int_tensor(token_ids);
-  input.positions_host = make_cpu_int_tensor(positions);
+  input.positions_host = positions_host;
   input.token_ids =
       safe_to(input.token_ids_host, token_options, /*non_blocking=*/true);
   input.positions =
