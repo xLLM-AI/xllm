@@ -41,6 +41,10 @@ from xllm.python.ops.attention import (
 from xllm.python.ops.collectives import (
     all_gather,
     all_reduce_,
+    cp_all_gather,
+    cp_rank,
+    cp_world_size,
+    init_cp_group,
     init_tp_group,
     tp_rank,
 )
@@ -62,4 +66,8 @@ __all__ = [
     "all_gather",
     "init_tp_group",
     "tp_rank",
+    "cp_all_gather",
+    "cp_rank",
+    "cp_world_size",
+    "init_cp_group",
 ]

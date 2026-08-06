@@ -358,6 +358,87 @@ TEST_F(NpuXllmOpsTest, Qwen35_27B_TP4_KvCacheCrosses128TokenBoundary) {
              .item<float>();
 }
 
+// DCP shard-write correctness hinge: the Python decode/prefill KV-shard plan
+// marks tokens this rank does not own with slot == -1 and relies on
+// reshape_paged_cache skipping them. On Ascend950 the a5 kernel skips negative
+// slots (verified in source). Every other SoC — including this box
+// (Ascend910_9382) — routes to atb::npu_reshape_and_cache, a precompiled
+// black box with no documented -1 behavior. Probe it empirically: any -1 token
+// leaking into the cache (or an out-of-bounds write) would make the -1
+// shard-write plan silently corrupt KV, so DCP would instead need a compacted
+// index_select write.
+TEST_F(NpuXllmOpsTest, AtbReshapePagedCacheSkipsNegativeSlot) {
+  py::gil_scoped_acquire gil;
+  if (is_ascend950_device()) {
+    GTEST_SKIP() << "Ascend950 routes to the a5 kernel (known to skip -1); "
+                    "this probe targets the atb fallback path.";
+  }
+
+  constexpr int64_t kBlockSize = 128;
+  constexpr int64_t kNumBlocks = 4;
+  constexpr int64_t kKvHeads = 1;
+  constexpr int64_t kHeadDim = 16;
+
+  const auto npu_bf16 = torch::TensorOptions()
+                            .dtype(torch::kBFloat16)
+                            .device(torch::kPrivateUse1);
+
+  auto key_cache =
+      torch::zeros({kNumBlocks, kBlockSize, kKvHeads, kHeadDim}, npu_bf16);
+  auto value_cache_tensor = torch::zeros_like(key_cache);
+  std::optional<torch::Tensor> value_cache = value_cache_tensor;
+
+  // Four tokens carrying distinct non-zero sentinels 1,2,3,4. Tokens 1 and 3
+  // (sentinels 2,4) are handed slot -1: they must not touch the cache. Tokens
+  // 0 and 2 (sentinels 1,3) go to slots 5 and 300 (300 = block 2, offset 44).
+  constexpr int64_t kNumTokens = 4;
+  auto key_cpu =
+      torch::empty({kNumTokens, kKvHeads, kHeadDim}, torch::kFloat32);
+  for (int64_t t = 0; t < kNumTokens; ++t) {
+    key_cpu[t].fill_(static_cast<float>(t + 1));
+  }
+  const auto value_cpu = key_cpu + 100.0f;
+  auto key = key_cpu.to(torch::kBFloat16).to(torch::kPrivateUse1);
+  auto value_tensor = value_cpu.to(torch::kBFloat16).to(torch::kPrivateUse1);
+  std::optional<torch::Tensor> value = value_tensor;
+
+  const auto slot_mapping =
+      torch::tensor({5, -1, 300, -1},
+                    torch::TensorOptions().dtype(torch::kInt32))
+          .to(torch::kPrivateUse1);
+
+  xllm::kernel::npu::reshape_paged_cache(
+      key, value, key_cache, value_cache, slot_mapping);
+  aclrtSynchronizeDevice();
+
+  const auto key_cache_cpu = key_cache.cpu().to(torch::kFloat32);
+  const auto value_cache_cpu = value_cache.value().cpu().to(torch::kFloat32);
+
+  auto slot_key = [&](int64_t slot) {
+    return key_cache_cpu[slot / kBlockSize][slot % kBlockSize][0][0]
+        .item<float>();
+  };
+  auto slot_value = [&](int64_t slot) {
+    return value_cache_cpu[slot / kBlockSize][slot % kBlockSize][0][0]
+        .item<float>();
+  };
+
+  // Owned tokens landed at their slots.
+  EXPECT_FLOAT_EQ(slot_key(5), 1.0f);
+  EXPECT_FLOAT_EQ(slot_value(5), 101.0f);
+  EXPECT_FLOAT_EQ(slot_key(300), 3.0f);
+  EXPECT_FLOAT_EQ(slot_value(300), 103.0f);
+
+  // The -1 tokens (sentinels 2 and 4) leaked nowhere in the cache.
+  const auto key_flat = key_cache_cpu.reshape({-1});
+  for (float leaked : {2.0f, 4.0f}) {
+    const auto hits = (key_flat == leaked).sum().item<int64_t>();
+    EXPECT_EQ(hits, 0) << "slot -1 token with sentinel " << leaked
+                       << " was written into the KV cache: atb does NOT skip "
+                          "-1, so DCP must use a compacted index_select write.";
+  }
+}
+
 TEST_F(NpuXllmOpsTest, ModelExecutorUsesExplicitRuntimeBatchLimit) {
   py::gil_scoped_acquire gil;
   prepend_python_model_path();

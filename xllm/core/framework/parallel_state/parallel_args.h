@@ -227,10 +227,15 @@ struct ParallelArgs {
   ProcessGroup* mc2_group_ = nullptr;
   ProcessGroup* moe_tp_group_ = nullptr;
 
-  // PyTorch creates its own TP process group. These fields only reserve the
-  // TCPStore endpoint after the native process-group port range.
+  // PyTorch creates its own process groups. These fields only reserve TCPStore
+  // endpoints after the native process-group port range. TP and CP are
+  // orthogonal, so each dimension needs its own rendezvous endpoint: an
+  // orthogonal TP x CP launch initializes both a TP and a CP torch group at
+  // once, and two groups sharing one host:port would collide on the TCPStore
+  // master. The CP port stays 0 when cp_size == 1 (no CP group is created).
   std::string python_tp_rendezvous_host_;
   int32_t python_tp_rendezvous_port_ = 0;
+  int32_t python_cp_rendezvous_port_ = 0;
 
   // ProcessGroups for DiT models
   ProcessGroup* dit_tp_group_ = nullptr;

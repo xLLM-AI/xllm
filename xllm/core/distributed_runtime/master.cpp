@@ -147,6 +147,26 @@ std::optional<std::string> validate_model_cp(const Options& options,
       return "Model-side CP supports only DEFAULT or PREFILL roles";
     }
 
+    // Python model executor runs a standalone torch CP path (all-gather KV,
+    // eager prefill only) that does not go through the ATB fused-attention op,
+    // so it bypasses the ATB-backend requirement and the ATB CP capability
+    // allowlist below. The safety constraints above (LLM/generate, no graph,
+    // DEFAULT/PREFILL) still apply. Orthogonal TP x CP is supported (both may
+    // be > 1, sharing world = cp * tp); the collective communicator builds the
+    // narrowed TP group and the strided CP group and reserves a separate torch
+    // rendezvous port for each. DP > 1 stays unsupported: the Python executor
+    // does not implement the dp * cp * tp rank layout.
+    if (ModelConfig::is_python_model_impl(
+            ModelConfig::get_instance().model_impl())) {
+      if (options.dp_size() != 1) {
+        return "Python CP requires dp_size == 1";
+      }
+      if (global_world_size % (options.dp_size() * options.cp_size()) != 0) {
+        return "Python CP requires world_size divisible by dp_size * cp_size";
+      }
+      return std::nullopt;
+    }
+
     // Require registered NPU model-side CP capability. The backend is not
     // constrained: ATB models drive CP through NpuCpPlan, while TORCH models
     // (deepseek_v4) own their CP split inside the model. Both rely on the
@@ -311,6 +331,17 @@ Master::Master(const Options& options, EngineType type)
   print_startup_banner(model_path, options_.backend(), options_.node_rank());
   LOG(INFO) << "Master init options: " << options_.to_string();
   ParallelConfig::get_instance().cp_size(options_.cp_size());
+  // DCP for the Python model executor: widen the block manager's logical block
+  // to block_size * cp_size (kv_split_size == cp_size) so each CP rank stores
+  // only 1/cp of every sequence's KV. The Python attention backend compacts the
+  // resulting logical slot_mapping to this rank's physical slots (cp_utils
+  // cp_compact_slots), so opening this switch and the Python shard-write must
+  // ship together. Non-Python CP models keep the default (kv_split follows
+  // their own ATB/TORCH plan).
+  if (options_.cp_size() > 1 && ModelConfig::is_python_model_impl(
+                                    ModelConfig::get_instance().model_impl())) {
+    ParallelConfig::get_instance().kv_split_size(options_.cp_size());
+  }
   // cp_size <= 1 -> "disabled", otherwise "model" (model-side CP).
   const char* cp_sharding_stage =
       options_.cp_size() <= 1 ? "disabled" : "model";

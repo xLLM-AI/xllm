@@ -63,6 +63,8 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalLM {
 
   int64_t tp_size_ = 1;
   int64_t tp_rank_ = 0;
+  int64_t cp_size_ = 1;
+  int64_t cp_rank_ = 0;
   ProcessGroup* tp_group_ = nullptr;
 
   pybind11::object py_model_;

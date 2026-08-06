@@ -42,10 +42,22 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
 
   const ParallelArgs& parallel_args = context.get_parallel_args();
   tp_group_ = parallel_args.tp_group_;
+  cp_size_ = parallel_args.cp_size();
+  cp_rank_ = parallel_args.cp_rank();
+  // tp_group_ and cp_group_ are already the final, orthogonally-split groups:
+  // the collective communicator narrows tp_group_ to world/(dp*cp) and builds a
+  // separate cp_group_ over the cp-strided ranks. Read each dimension from its
+  // own group instead of carving CP back out of tp_group_. TP and CP are
+  // orthogonal: a rank can shard both attention heads (TP) and sequence tokens
+  // (CP) at once, so both dimensions may be > 1 simultaneously.
   tp_size_ = (tp_group_ != nullptr) ? tp_group_->world_size() : 1;
   tp_rank_ = (tp_group_ != nullptr) ? tp_group_->rank() : 0;
 
   py::gil_scoped_acquire gil;
+  // The rendezvous endpoint (host/port) is shared by every rank that needs a
+  // torch process group on this device. Init each parallel dimension that is
+  // active: TP (attention-head sharding) and CP (sequence sharding) are
+  // orthogonal and each get their own group off the same endpoint.
   if (tp_size_ > 1) {
     CHECK(!parallel_args.python_tp_rendezvous_host_.empty());
     CHECK_GT(parallel_args.python_tp_rendezvous_port_, 0);
@@ -54,6 +66,16 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
                                parallel_args.python_tp_rendezvous_port_,
                                tp_rank_,
                                tp_size_,
+                               c10::str(device_));
+  }
+  if (cp_size_ > 1) {
+    CHECK(!parallel_args.python_tp_rendezvous_host_.empty());
+    CHECK_GT(parallel_args.python_cp_rendezvous_port_, 0);
+    py::module_::import("xllm.python.ops")
+        .attr("init_cp_group")(parallel_args.python_tp_rendezvous_host_,
+                               parallel_args.python_cp_rendezvous_port_,
+                               cp_rank_,
+                               cp_size_,
                                c10::str(device_));
   }
   const std::string module_name = context.get_model_args().model_type().empty()
@@ -83,6 +105,9 @@ py::dict PyCausalLM::build_config_dict(
   d["device"] = c10::str(device_);
   d["tp_size"] = tp_size_;
   d["tp_rank"] = tp_rank_;
+  // cp_size is a reflected ParallelArgs PROPERTY (already in d), but cp_rank is
+  // a derived member function, so pass it explicitly for the Python executor.
+  d["cp_rank"] = cp_rank_;
   d["enable_graph"] = ExecutionConfig::get_instance().enable_graph();
   d["python_graph_backend"] =
       ExecutionConfig::get_instance().python_graph_backend();

@@ -583,11 +583,29 @@ void CollectiveCommunicator::create_process_groups(
     }
   }
 
-  const int32_t tp_group_index = global_rank / tp_size;
+  // The Python model executor creates its own torch process groups that
+  // rendezvous on TCPStore endpoints reserved after the native port range. TP
+  // and CP are orthogonal dimensions with different rank partitions, so each
+  // gets an independent port window: an orthogonal TP x CP launch brings up
+  // both a TP and a CP torch group at once, and a shared endpoint would collide
+  // on the TCPStore master. A TP group is the contiguous run of tp_size ranks
+  // (index by global_rank / tp_size); a CP group is strided by tp_size -- fixed
+  // (dp_rank, tp_rank), varying cp_rank -- so index by the CP group instead.
   parallel_args_->python_tp_rendezvous_host_ = host;
-  parallel_args_->python_tp_rendezvous_port_ = port + tp_group_index + 1;
+  const int32_t tp_rendezvous_index = global_rank / tp_size;
+  parallel_args_->python_tp_rendezvous_port_ = port + tp_rendezvous_index + 1;
+  port += tp_group_count;
+  if (cp_size > 1) {
+    const int32_t dp_stride = cp_size * tp_size;
+    const int32_t cp_rendezvous_index =
+        (global_rank / dp_stride) * tp_size + global_rank % tp_size;
+    parallel_args_->python_cp_rendezvous_port_ = port + cp_rendezvous_index + 1;
+    port += dp_size * tp_size;
+  }
   CHECK_LE(parallel_args_->python_tp_rendezvous_port_, 65535)
       << "No TCP port remains for the Python TP rendezvous.";
+  CHECK_LE(parallel_args_->python_cp_rendezvous_port_, 65535)
+      << "No TCP port remains for the Python CP rendezvous.";
 
 #if defined(USE_NPU)
   if (::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH" &&

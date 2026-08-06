@@ -570,6 +570,14 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
   // Logical block_size *= kv_split_size.
   const int32_t kv_split_size_eff =
       ::xllm::ParallelConfig::get_instance().kv_split_size_effective();
+  if (kv_split_size_eff > 1) {
+    LOG(INFO) << "DCP KV-split active: logical block_size = " << block_size
+              << " * " << kv_split_size_eff << " = "
+              << block_size * kv_split_size_eff << " (each CP rank stores 1/"
+              << kv_split_size_eff
+              << " of every sequence's KV; a sequence occupies 1/"
+              << kv_split_size_eff << " the physical blocks per rank).";
+  }
   BlockManagerPool::Options options;
   options.num_blocks(kv_cache_cap.n_blocks())
       .block_size(kv_split_size_eff > 1 ? block_size * kv_split_size_eff

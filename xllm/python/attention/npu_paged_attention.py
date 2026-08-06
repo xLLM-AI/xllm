@@ -32,6 +32,11 @@ from xllm.python.attention.backend import (
     KVCache,
     MlaIndexContext,
 )
+from xllm.python.model_executor.cp_utils import (
+    cp_compact_slots,
+    cp_decode_local_kv_lens,
+    cp_gather_kv,
+)
 from xllm.python.model_executor.forward_context import (
     AclGraphTask,
     get_forward_context,
@@ -206,14 +211,35 @@ class NpuPagedAttentionBackend(AttentionBackend):
         k_cache, v_cache, _ = self._kv_caches[layer_id]
         num_tokens = q.shape[0]
 
-        # Write KV to paged cache (kernel expects [T, kv_heads, head_dim]).
         k_3d = k.view(num_tokens, self.num_kv_heads, self.head_dim).contiguous()
         v_3d = v.view(num_tokens, self.num_kv_heads, self.head_dim).contiguous()
+        q_3d = q.view(num_tokens, self.num_heads, self.head_dim).contiguous()
+
+        # Context-Parallel prefill: q/k/v are this rank's sequence shard while the
+        # slot_mapping/metadata still describe the full global sequence (C++ does
+        # not pre-shard the Python qwen3 path). All-gather K/V to the full
+        # sequence, persist it, and attend over this rank's causal prefix.
+        cp_context = get_forward_context().cp_context
+        if cp_context is not None:
+            return self._prefill_cp(
+                q_3d, k_3d, v_3d, metadata, cp_context, k_cache, v_cache
+            )
+
+        # DCP decode: cp_context is None on decode (the query batch is replicated
+        # across CP ranks, not sharded), but with kv_split_size == cp_size each
+        # rank stores only its 1/cp of the KV. Detect the CP group directly and
+        # route to the KV-shard decode path; cp_size == 1 falls through to the
+        # plain single-rank paths.
+        cp_size = ops.cp_world_size(self.device)
+        if cp_size > 1 and not (metadata.is_prefill or metadata.is_chunked_prefill):
+            return self._decode_cp(
+                q_3d, k_3d, v_3d, metadata, k_cache, v_cache, num_tokens, cp_size
+            )
+
+        # Write KV to paged cache (kernel expects [T, kv_heads, head_dim]).
         ops.reshape_paged_cache(
             metadata.slot_mapping, k_3d, v_3d, k_cache, v_cache
         )
-
-        q_3d = q.view(num_tokens, self.num_heads, self.head_dim).contiguous()
 
         if metadata.is_prefill or metadata.is_chunked_prefill:
             return self._prefill(q_3d, k_3d, v_3d, metadata, num_tokens)
@@ -303,6 +329,94 @@ class NpuPagedAttentionBackend(AttentionBackend):
         return output.reshape(num_tokens, self.num_heads * self.head_dim)
 
     # ------------------------------------------------------------------
+    # Context-Parallel prefill: all-gather KV, attend over causal prefix
+    # ------------------------------------------------------------------
+
+    def _prefill_cp(
+        self,
+        q_3d: torch.Tensor,
+        k_3d: torch.Tensor,
+        v_3d: torch.Tensor,
+        metadata: AttentionMetadata,
+        cp_context,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+    ) -> torch.Tensor:
+        """Prefill attention for this rank's zigzag sequence shard.
+
+        q/k/v hold this rank's ``total_local`` rows (two owned chunks per
+        sequence, padding rows zeroed). We all-gather K/V back to the full
+        global-order sequence, write the complete KV into the paged cache (so a
+        later non-CP decode sees every position), then run one FIA over this
+        rank's real queries. Each owned (sequence, half) segment is a packed
+        sub-sequence: its ``real_count`` queries attend the causal prefix
+        ``[0, segment_start + real_count)`` selected by ``kv_gather_index``.
+        With ``sparse_mode=3`` (right-aligned causal) query row ``i`` of a
+        segment attends KV ``[0, segment_start + i]`` — its exact global causal
+        range. Segments are independent sub-sequences delimited by
+        ``q_cu_seqlens`` / ``kv_cu_seqlens``, so both owned chunks resolve in a
+        single call.
+        """
+        local_tokens = q_3d.shape[0]
+
+        kv_global_k = cp_gather_kv(k_3d, cp_context)
+        kv_global_v = cp_gather_kv(v_3d, cp_context)
+
+        # DCP KV-storage sharding: with kv_split_size == cp_size the block
+        # manager hands down a logical slot_mapping over a block_size * cp_size
+        # space. Compact it to this rank's physical slots (tokens this rank does
+        # not own become -1, which reshape_paged_cache skips) so each rank
+        # persists only its 1/cp of the global-order KV into its own pages.
+        page_size = k_cache.size(1)
+        local_slots = cp_compact_slots(
+            metadata.slot_mapping,
+            cp_context.cp_size,
+            cp_context.cp_rank,
+            page_size,
+        )
+        ops.reshape_paged_cache(
+            local_slots,
+            kv_global_k.contiguous(),
+            kv_global_v.contiguous(),
+            k_cache,
+            v_cache,
+        )
+
+        # Real queries this rank owns, packed per (sequence, half) segment.
+        q_real = q_3d.index_select(0, cp_context.query_index).contiguous()
+        # Each segment's causal KV prefix, packed in the same segment order.
+        kv_prefix_k = kv_global_k.index_select(
+            0, cp_context.kv_gather_index
+        ).contiguous()
+        kv_prefix_v = kv_global_v.index_select(
+            0, cp_context.kv_gather_index
+        ).contiguous()
+
+        output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+            q_real,
+            kv_prefix_k,
+            kv_prefix_v,
+            pse_shift=None,
+            atten_mask=self._causal_mask,
+            actual_seq_lengths=cp_context.q_cu_seqlens,
+            actual_seq_lengths_kv=cp_context.kv_cu_seqlens,
+            num_heads=self.num_heads,
+            scale=self.scale,
+            input_layout="TND",
+            num_key_value_heads=self.num_kv_heads,
+            sparse_mode=3,
+            softmax_lse_flag=False,
+        )
+        output = output.reshape(-1, self.num_heads * self.head_dim)
+
+        # Scatter real-query outputs back into the padded [total_local] layout;
+        # padding rows stay zero (they are never selected by restore_index in
+        # the subsequent all-gather merge).
+        out_local = q_3d.new_zeros(local_tokens, self.num_heads * self.head_dim)
+        out_local.index_copy_(0, cp_context.query_index, output)
+        return out_local
+
+    # ------------------------------------------------------------------
     # Decode: FIA with block_table (paged KV, no gather)
     # ------------------------------------------------------------------
 
@@ -378,6 +492,100 @@ class NpuPagedAttentionBackend(AttentionBackend):
             softmax_lse_flag=False,
         )
         return output.reshape(num_tokens, self.num_heads * self.head_dim)
+
+    # ------------------------------------------------------------------
+    # DCP decode: KV-storage sharding (each rank stores 1/cp of the KV)
+    # ------------------------------------------------------------------
+
+    def _decode_cp(
+        self, q_3d: torch.Tensor, k_3d: torch.Tensor, v_3d: torch.Tensor,
+        metadata: AttentionMetadata, k_cache: torch.Tensor,
+        v_cache: torch.Tensor, num_tokens: int, cp_size: int,
+    ) -> torch.Tensor:
+        """Decode attention when the KV is sharded across the CP group.
+
+        Every CP rank runs the full (replicated) decode query batch, but with
+        ``kv_split_size == cp_size`` each rank physically stores only its 1/cp
+        block-strided slice of every sequence's KV. So each rank:
+
+        1. writes the new token's KV only if it owns that slot (the rest of the
+           compacted slot_mapping is -1, which reshape_paged_cache skips);
+        2. runs FIA over its local shard, reading ``local_kv_len`` tokens from
+           the physical pages (physical block id == logical block id) and asking
+           for the softmax LSE;
+        3. all-gathers every rank's (out, lse) and merges them with
+           npu_attention_update, which is the exact online-softmax reduction
+           ``O = sum_i O_i * exp(lse_i - lse)`` — no accuracy loss versus reading
+           the full KV on one rank.
+
+        Ranks that own no token of a sequence (its context is shorter than this
+        rank's first block) read a single dummy token to keep FIA happy, then
+        force that sequence's LSE to ``-inf`` so the merge discards the dummy.
+        """
+        cp_rank = ops.cp_rank(self.device)
+        page_size = k_cache.size(1)
+
+        # 1. Write the new token's KV into its owner rank's shard.
+        local_slots = cp_compact_slots(
+            metadata.slot_mapping, cp_size, cp_rank, page_size
+        )
+        ops.reshape_paged_cache(local_slots, k_3d, v_3d, k_cache, v_cache)
+
+        # 2. Local FIA over this rank's KV shard.
+        block_size = k_cache.size(1)
+        k_flat = k_cache.view(k_cache.size(0), block_size, -1)
+        v_flat = v_cache.view(v_cache.size(0), block_size, -1)
+
+        # Per-sequence total context length (prepare() built this host list from
+        # kv_seq_lens_host); derive each rank's block-strided share of it.
+        kv_seq_lens = torch.tensor(
+            self._actual_seq_kv[:num_tokens],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        local_kv = cp_decode_local_kv_lens(
+            kv_seq_lens, cp_size, cp_rank, page_size
+        )
+        empty = local_kv == 0
+        # FIA rejects a 0-length KV; read one dummy token there and mask later.
+        local_kv_fia = torch.clamp(local_kv, min=1)
+
+        out, lse = torch.ops.npu.npu_fused_infer_attention_score(
+            q_3d, k_flat, v_flat,
+            pse_shift=None,
+            atten_mask=None,
+            actual_seq_lengths=self._actual_seq_q[:num_tokens],
+            actual_seq_lengths_kv=local_kv_fia.tolist(),
+            block_table=self._block_table_i32,
+            num_heads=self.num_heads,
+            scale=self.scale,
+            input_layout="TND",
+            num_key_value_heads=self.num_kv_heads,
+            sparse_mode=0,
+            block_size=block_size,
+            softmax_lse_flag=True,
+        )
+
+        # 3. Cross-rank merge. npu_attention_update wants a per-shard list of
+        # out [N, head_dim] and lse [N] (N = batch * seq * head), both float32.
+        n_rows = num_tokens * self.num_heads
+        local_out = out.reshape(n_rows, self.head_dim).to(torch.float32)
+        local_lse = lse.reshape(n_rows).to(torch.float32)
+        if bool(empty.any()):
+            # Rows of an empty-shard sequence get LSE -inf so they contribute
+            # nothing to the online-softmax merge.
+            row_empty = empty[:num_tokens].repeat_interleave(self.num_heads)
+            local_lse = local_lse.masked_fill(row_empty, float("-inf"))
+
+        gathered_out = ops.cp_all_gather(local_out, 0, cp_size)
+        gathered_lse = ops.cp_all_gather(local_lse, 0, cp_size)
+        out_list = [gathered_out[r * n_rows:(r + 1) * n_rows] for r in range(cp_size)]
+        lse_list = [gathered_lse[r * n_rows:(r + 1) * n_rows] for r in range(cp_size)]
+
+        merged, _ = torch_npu.npu_attention_update(lse_list, out_list, 1)
+        return merged.reshape(num_tokens, self.num_heads * self.head_dim).to(
+            q_3d.dtype
+        )
 
     # ------------------------------------------------------------------
     # Helpers
