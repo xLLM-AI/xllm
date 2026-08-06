@@ -184,7 +184,6 @@ AttentionMetadata build_attention_metadata(
       params.meta.batch_forward_type.is_mixed() ||
       params.meta.batch_forward_type.is_chunked_prefill();
   attn_metadata.is_prefill = params.meta.batch_forward_type.is_prefill();
-  attn_metadata.prefill_without_cache = params.prefill_without_cache;
 
   // MLA-family MLU paths require per-sequence q/kv lengths during prefill.
   if (!attn_metadata.is_prefill || enable_mla) {

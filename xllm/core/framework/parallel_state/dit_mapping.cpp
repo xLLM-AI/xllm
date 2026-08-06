@@ -28,7 +28,6 @@ DiTMapping::DiTMapping(const int32_t world_size,
   cfg_.backend("hccl");
   dp_.backend("hccl");
   vae_.backend("hccl");
-  text_encoder_tp_.backend("hccl");
   parse_parallel_info();
   validate();
   RankGenerator rank_generator(world_size);
@@ -48,15 +47,6 @@ DiTMapping::DiTMapping(const int32_t world_size,
   auto ranks_mapping_vae =
       rank_generator.get_ranks_mapping(vae_group_ranks, vae_group_order);
   set_group_by_type(vae_, "vae", ranks_mapping_vae.at("vae"));
-
-  std::vector<int32_t> text_encoder_tp_group_ranks = {
-      text_encoder_tp_.group_size()};
-  std::vector<std::string> text_encoder_tp_group_order = {"text_encoder_tp"};
-  auto ranks_mapping_text_encoder_tp = rank_generator.get_ranks_mapping(
-      text_encoder_tp_group_ranks, text_encoder_tp_group_order);
-  set_group_by_type(text_encoder_tp_,
-                    "text_encoder_tp",
-                    ranks_mapping_text_encoder_tp.at("text_encoder_tp"));
 }
 
 void DiTMapping::parse_parallel_info() {
@@ -74,9 +64,6 @@ void DiTMapping::parse_parallel_info() {
   }
   if (options_.dit_vae_size() != -1) {
     vae_.group_size(options_.dit_vae_size());
-  }
-  if (options_.dit_text_encoder_tp_size() != -1) {
-    text_encoder_tp_.group_size(options_.dit_text_encoder_tp_size());
   }
 }
 
@@ -120,21 +107,6 @@ void DiTMapping::validate() {
              std::to_string(vae_.group_size()) + ", world_size is " +
              std::to_string(world_size_) +
              ". Please check `vae` and 'world_size'.";
-
-  CHECK(text_encoder_tp_.group_size() >= 1 &&
-        text_encoder_tp_.group_size() <= world_size_)
-      << "text_encoder_tp_size must be between 1 and world_size. "
-         "text_encoder_tp_size is " +
-             std::to_string(text_encoder_tp_.group_size()) +
-             ", world_size is " + std::to_string(world_size_) +
-             ". Please check `text_encoder_tp_size` and 'world_size'.";
-
-  CHECK(world_size_ % text_encoder_tp_.group_size() == 0)
-      << "world_size could not be divided by text_encoder_tp_size. "
-         "text_encoder_tp_size is " +
-             std::to_string(text_encoder_tp_.group_size()) +
-             ", world_size is " + std::to_string(world_size_) +
-             ". Please check `text_encoder_tp_size` and 'world_size'.";
 }
 
 void DiTMapping::set_group_by_type(
@@ -178,8 +150,6 @@ const ParallelInfo& DiTMapping::get_parallel_info(
     return dp_;
   } else if (group_type == "vae") {
     return vae_;
-  } else if (group_type == "text_encoder_tp") {
-    return text_encoder_tp_;
   } else {
     LOG(FATAL) << "get unexpected group_type: " << group_type;
   }
@@ -191,7 +161,6 @@ nlohmann::json DiTMapping::to_json() {
   data["SpSize"] = options_.dit_sp_size();
   data["TpSize"] = options_.dit_tp_size();
   data["CfgSize"] = options_.dit_cfg_size();
-  data["TextEncoderTpSize"] = options_.dit_text_encoder_tp_size();
   data["worldSize"] = world_size_;
   data["rank"] = rank_;
   data["sp"] = sp_.to_json();
@@ -199,7 +168,6 @@ nlohmann::json DiTMapping::to_json() {
   data["cfg"] = cfg_.to_json();
   data["dp"] = dp_.to_json();
   data["vae"] = vae_.to_json();
-  data["text_encoder_tp"] = text_encoder_tp_.to_json();
   return data;
 }
 

@@ -38,7 +38,6 @@ cc_library(
     npu_eagle3_decoder_layer_impl.h
     npu_glm4_decoder_layer_impl.h
     npu_rms_norm_impl.h
-    npu_rope_layer_impl.h
     npu_siglip_encoder_layer_impl.h
     rotary_embedding.h
     ../common/rotary_embedding_util.h
@@ -97,7 +96,6 @@ cc_library(
     npu_eagle3_decoder_layer_impl.cpp
     npu_glm4_decoder_layer_impl.cpp
     npu_rms_norm_impl.cpp
-    npu_rope_layer_impl.cpp
     npu_siglip_encoder_layer_impl.cpp
     rotary_embedding.cpp
     ../common/rotary_embedding_util.cpp

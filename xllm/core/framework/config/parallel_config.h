@@ -48,7 +48,6 @@ class ParallelConfig final {
          "sp_size",
          "cfg_size",
          "vae_size",
-         "text_encoder_tp_size",
          "communication_backend",
          "enable_mm_encoder_dp",
          "enable_multi_stream_parallel",
@@ -73,8 +72,6 @@ class ParallelConfig final {
   PROPERTY(int64_t, cfg_size) = 1;
 
   PROPERTY(int64_t, vae_size) = 1;
-
-  PROPERTY(int64_t, text_encoder_tp_size) = 1;
 
   PROPERTY(std::string, communication_backend) = "hccl";
 

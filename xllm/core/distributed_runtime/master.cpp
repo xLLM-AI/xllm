@@ -621,7 +621,6 @@ Master::Master(const Options& options, EngineType type)
         .model_id(options.model_id())
         .devices(devices)
         .backend(options.backend())
-        .npu_kernel_backend(options_.npu_kernel_backend())
         .enable_prefix_cache(options_.enable_prefix_cache())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .enable_offline_inference(options_.enable_offline_inference())
@@ -641,8 +640,7 @@ Master::Master(const Options& options, EngineType type)
         .tp_size(options_.tp_size())
         .sp_size(options_.sp_size())
         .cfg_size(options_.cfg_size())
-        .vae_size(options_.vae_size())
-        .text_encoder_tp_size(options_.text_encoder_tp_size());
+        .vae_size(options_.vae_size());
 
     auto dit_engine = std::make_unique<DiTEngine>(eng_options);
     engine_ = std::move(dit_engine);

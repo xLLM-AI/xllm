@@ -184,8 +184,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .sp_size(static_cast<int32_t>(parallel_config.sp_size()))
       .cfg_size(static_cast<int32_t>(parallel_config.cfg_size()))
       .vae_size(static_cast<int32_t>(parallel_config.vae_size()))
-      .text_encoder_tp_size(
-          static_cast<int32_t>(parallel_config.text_encoder_tp_size()))
       .instance_name(instance_name)
       .enable_disagg_pd(disagg_pd_config.enable_disagg_pd())
       .enable_pd_ooc(disagg_pd_config.enable_pd_ooc())

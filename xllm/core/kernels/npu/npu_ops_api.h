@@ -51,12 +51,6 @@ void batch_decode(const torch::Tensor& query,
                   const torch::Tensor& seq_lens,
                   torch::Tensor& output);
 
-void apply_rotary(torch::Tensor& query,
-                  torch::Tensor& key,
-                  const torch::Tensor& cos,
-                  const torch::Tensor& sin,
-                  const std::string& input_layout);
-
 std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
     const torch::Tensor& query,
     const torch::Tensor& key,
@@ -71,8 +65,7 @@ std::tuple<torch::Tensor, torch::Tensor> npu_fused_infer_attention(
     int64_t block_size,
     int64_t sparse_mode,
     const std::string& input_layout,
-    bool softmax_lse_flag = false,
-    bool is_causal = true);
+    bool softmax_lse_flag = false);
 
 void batch_chunked_paged_prefill(const torch::Tensor& query,
                                  const torch::Tensor& k_cache,

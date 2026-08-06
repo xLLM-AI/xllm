@@ -28,8 +28,7 @@ class DiTCollectiveCommunicator : public CollectiveCommunicatorBase {
                             int32_t dit_tp_size,
                             int32_t dit_sp_size,
                             int32_t dit_cfg_size,
-                            int32_t dit_vae_size,
-                            int32_t dit_text_encoder_tp_size);
+                            int32_t dit_vae_size);
 
   ~DiTCollectiveCommunicator() = default;
 
@@ -55,7 +54,6 @@ class DiTCollectiveCommunicator : public CollectiveCommunicatorBase {
   std::unique_ptr<ProcessGroup> dit_dp_group_;
   std::unique_ptr<ProcessGroup> dit_cfg_group_;
   std::unique_ptr<ProcessGroup> dit_vae_group_;
-  std::unique_ptr<ProcessGroup> dit_text_encoder_tp_group_;
 };
 
 }  // namespace xllm
