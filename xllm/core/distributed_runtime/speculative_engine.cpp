@@ -141,6 +141,13 @@ bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache() {
     return engine_->allocate_kv_cache(target_kv_cache_cap);
   }
 
+  // Kimi K2.5 Eagle3 keeps the draft worker inside the target engine and
+  // allocates its non-MLA KV cache with a separate shape.  Do not compare it
+  // with the target MLA cache or allocate the external draft engine here.
+  if (should_skip_external_draft_kv_cache()) {
+    return engine_->allocate_kv_cache(target_kv_cache_cap);
+  }
+
   KVCacheCapacity draft_kv_cache_cap =
       draft_engine_->estimate_kv_cache_capacity();
 
@@ -172,9 +179,6 @@ bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache() {
   target_kv_cache_cap.cache_size_in_bytes() = kv_cache_size;
   draft_kv_cache_cap.n_blocks() = n_blocks;
   draft_kv_cache_cap.cache_size_in_bytes() = kv_cache_size;
-  if (should_skip_external_draft_kv_cache()) {
-    return engine_->allocate_kv_cache(target_kv_cache_cap);
-  }
   return engine_->allocate_kv_cache(target_kv_cache_cap) &&
          draft_engine_->allocate_kv_cache(draft_kv_cache_cap);
 }
