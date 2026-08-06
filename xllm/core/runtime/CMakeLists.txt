@@ -37,6 +37,7 @@ cc_library(
     mtp_async_input_builder.h
     mtp_worker_impl.h
     mtp_async_state.h
+    mtp_json_object_state.h
     suffix_worker_impl.h
     eagle3_worker_impl.h
     dflash_worker_impl.h

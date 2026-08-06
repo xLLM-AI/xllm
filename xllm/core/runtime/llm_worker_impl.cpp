@@ -248,7 +248,8 @@ LLMWorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
   c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
   CHECK(compute_stream_->wait_event(last_step_output_.ready_event))
       << "failed to wait last step output ready event";
-  return update_input_by_last_step_output(input);
+  return WorkerImpl::update_input_by_last_step_output_for_schedule_overlap(
+      input);
 }
 
 std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
@@ -350,6 +351,8 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     output.max_top_logprobs = sampling_params.max_top_logprobs;
     if (!input.skip_sampling_for_logits_only) {
       auto sample_output = sampler_->forward(logits, sampling_params);
+      output.filter_bitmask_applied_to_logits =
+          sampling_params.filter_bitmask.defined();
 
       // beam search kernel
       BeamSearchOutput beam_search_output;

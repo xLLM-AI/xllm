@@ -415,6 +415,8 @@ DECLARE_bool(use_cpp_chat_template);
 
 DECLARE_int32(health_check_interval_ms);
 
+DECLARE_bool(enable_json_object_output);
+
 // --- verbose trace logging config ---
 DECLARE_bool(enable_verbose_trace_log);
 

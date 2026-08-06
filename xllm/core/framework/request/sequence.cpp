@@ -238,6 +238,14 @@ Sequence::Sequence(size_t index,
       stream_output_token_offset_(decoder_.output_offset()),
       termination_flag_(std::make_shared<std::atomic<int32_t>>(INT32_MAX)),
       request_id_(seq_params.request_id) {
+  if (sequence_params_.request_failure_state == nullptr) {
+    sequence_params_.request_failure_state =
+        std::make_shared<RequestFailureState>();
+  }
+  if (sequence_params_.json_object_grammar != nullptr) {
+    json_object_state_ = sequence_params_.json_object_grammar->initial_state(
+        sequence_params_.json_reasoning_enabled);
+  }
   if (is_onerec_model()) {
     init_onerec_sequence(prompt_token_ids, std::move(input_embedding));
     return;
@@ -273,8 +281,10 @@ Sequence::Sequence(size_t index,
   cur_generated_token_idx_ = num_prompt_tokens_;
 }
 
-Sequence::Sequence(const Sequence& other)
-    : index_(other.index_),
+Sequence::Sequence(const Sequence& other) : Sequence(other, other.index_) {}
+
+Sequence::Sequence(const Sequence& other, size_t index)
+    : index_(index),
       kv_state_(other.kv_state_),
       host_kv_state_(other.host_kv_state_),
       effective_restore_tokens_(other.effective_restore_tokens_),
@@ -301,6 +311,7 @@ Sequence::Sequence(const Sequence& other)
       linear_state_hashes_(other.linear_state_hashes_),
       linear_hash_stride_(other.linear_hash_stride_),
       onerec_state_(other.onerec_state_),
+      json_object_state_(other.json_object_state_),
       volatile_num_prompt_tokens_(other.volatile_num_prompt_tokens_),
       request_id_(other.request_id_),
       finished_(other.finished_),
@@ -345,10 +356,29 @@ void Sequence::record_first_token(const Token& token) {
 void Sequence::append_token(const Token& token) {
   CHECK_LT(num_tokens_, tokens_.size())
       << "exceed the token capacity of the sequence";
-  CHECK(!finished_) << "cannot append token to a finished sequence";
+  CHECK(!finished_ && !error_status().has_value())
+      << "cannot append token to a finished sequence";
   if (!is_onerec_model()) {
     CHECK(kv_state_.kv_cache_tokens_num() > 0 && !is_chunked_prefill_stage())
         << "cannot append token to a prefill sequence";
+  }
+
+  const int32_t token_id = static_cast<int32_t>(token.id);
+  if (json_object_state_.has_value() && token_id >= 0) {
+    if (!json_object_state_->can_accept_token(token_id)) {
+      const JsonObjectGrammarSnapshot snapshot = json_object_state_->snapshot();
+      LOG(ERROR) << "JSON grammar commit mismatch: request_id=" << request_id_
+                 << ", sequence_index=" << index_
+                 << ", output_row=-1, token_offset=-1"
+                 << ", token_id=" << token_id
+                 << ", committed_tokens=" << snapshot.token_ids.size()
+                 << ", state_fingerprint=" << json_object_state_->fingerprint();
+      fail(Status(StatusCode::UNKNOWN,
+                  "generated token violates json_object grammar, token_id=" +
+                      std::to_string(token_id)));
+      return;
+    }
+    CHECK(json_object_state_->accept_token(token_id));
   }
 
   // The real token was generated in function
@@ -363,7 +393,6 @@ void Sequence::append_token(const Token& token) {
   // append the token id and update the token count
   const auto cur_idx = num_tokens_++;
   kv_state_.set_kv_cache_tokens_num(cur_idx);
-  const int32_t token_id = static_cast<int32_t>(token.id);
   tokens_[cur_idx] = token_id;
 
   // skip update in enable_schedule_overlap
@@ -374,7 +403,6 @@ void Sequence::append_token(const Token& token) {
 
   // A real token was committed (overlap-fake placeholders returned above).
   ++generated_tokens_since_latency_;
-
   if (need_unique_tokens_) {
     token_to_count_map_[token_id]++;
   }
@@ -393,6 +421,33 @@ void Sequence::update_last_step_token(const Token& token, size_t token_offset) {
   CHECK(sequence_params_.enable_schedule_overlap)
       << "update_last_step_token should only be called when "
          "enable_schedule_overlap";
+  if (error_status().has_value()) {
+    return;
+  }
+
+  const int32_t token_id = static_cast<int32_t>(token.id);
+  if (json_object_state_.has_value() && token_id >= 0) {
+    if (!json_object_state_->can_accept_token(token_id)) {
+      const JsonObjectGrammarSnapshot snapshot = json_object_state_->snapshot();
+      const JsonObjectGrammar* grammar = json_object_state_->grammar();
+      LOG(ERROR)
+          << "MTP JSON grammar mismatch: token_offset=" << token_offset
+          << ", request_id=" << request_id_ << ", sequence_index=" << index_
+          << ", output_row=-1"
+          << ", token_id=" << token_id
+          << ", committed_tokens=" << snapshot.token_ids.size()
+          << ", state_fingerprint=" << json_object_state_->fingerprint()
+          << ", allowed_tokens="
+          << (grammar == nullptr
+                  ? 0
+                  : grammar->allowed_token_ids(*json_object_state_).size());
+      fail(Status(StatusCode::UNKNOWN,
+                  "accepted MTP token violates json_object grammar, token_id=" +
+                      std::to_string(token_id)));
+      return;
+    }
+    CHECK(json_object_state_->accept_token(token_id));
+  }
   // check if the token is the first token
   is_first_token_ = cur_generated_token_idx_ == num_prompt_tokens_;
   record_first_token(token);
@@ -419,7 +474,6 @@ void Sequence::update_last_step_token(const Token& token, size_t token_offset) {
   // MTP token when token_offset > 0); preempted MTP steps returned above.
   ++generated_tokens_since_latency_;
 
-  const int32_t token_id = static_cast<int32_t>(token.id);
   tokens_[cur_generated_token_idx_] = token_id;
   // Overlap/MTP may rewrite tokens at decode positions; drop any cached block
   // hash from this position onward so it is recomputed when next needed.
@@ -869,6 +923,9 @@ void Sequence::invalidate_linear_state_hashes_from(size_t token_index) {
 }
 
 bool Sequence::finished() const {
+  if (error_status().has_value()) {
+    return true;
+  }
   // return the cached finish status
   if (!finish_status_invalidated_) {
     return finished_;
@@ -1005,7 +1062,20 @@ void Sequence::finish() {
   }
 }
 
+void Sequence::fail(Status status) {
+  CHECK(!status.ok());
+  if (!sequence_params_.request_failure_state->status.has_value()) {
+    sequence_params_.request_failure_state->status = std::move(status);
+  }
+  finished_ = true;
+  finish_status_invalidated_ = false;
+  finish_reason_ = FinishReason::NONE;
+}
+
 void Sequence::reset_finish_state_for_beam_search() {
+  if (error_status().has_value()) {
+    return;
+  }
   finished_ = false;
   finish_reason_ = FinishReason::NONE;
   matched_stop_token_count_ = 0;

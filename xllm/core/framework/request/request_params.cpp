@@ -16,9 +16,12 @@ limitations under the License.
 
 #include "request_params.h"
 
+#include <type_traits>
+
 #include "core/common/global_flags.h"
 #include "core/common/instance_name.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/config/service_config.h"
 #include "core/util/uuid.h"
 #include "request.h"
 
@@ -320,6 +323,20 @@ std::vector<xllm::JsonTool> parse_tools_from_proto(
 
 template <typename ChatRequest>
 void init_from_chat_request(RequestParams& params, const ChatRequest& request) {
+  if constexpr (std::is_same_v<ChatRequest, proto::ChatRequest>) {
+    if (request.has_response_format()) {
+      const std::string& type = request.response_format().type();
+      if (type == "json_object") {
+        if (ServiceConfig::get_instance().enable_json_object_output()) {
+          params.response_format = ResponseFormatType::JSON_OBJECT;
+        }
+      } else {
+        params.response_format_error =
+            "Unsupported response_format.type: " + type +
+            "; only json_object is supported";
+      }
+    }
+  }
   if (request.has_request_id()) {
     params.request_id = request.request_id();
   }
@@ -574,6 +591,13 @@ RequestParams::RequestParams(const proto::AnthropicMessagesRequest& request,
 }
 
 bool RequestParams::verify_params(OutputCallback callback) const {
+  if (!response_format_error.empty()) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        response_format_error,
+                        service_request_id,
+                        source_xservice_addr);
+    return false;
+  }
   if (n == 0) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "n should be greater than 0",

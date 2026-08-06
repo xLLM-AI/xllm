@@ -499,6 +499,9 @@ void ContinuousScheduler::process_batch_output(bool enable_schedule_overlap) {
         if (request->cancelled()) {
           continue;
         }
+        if (request->error_status().has_value()) {
+          continue;
+        }
         if (!request->finished()) {
           stream_requests.emplace_back(request);
           continue;
@@ -511,7 +514,8 @@ void ContinuousScheduler::process_batch_output(bool enable_schedule_overlap) {
       } else if (request->finished() && !request->last_token_handled()) {
         request->handle_last_token();
       }
-    } else if (request->state().stream) {
+    } else if (request->state().stream &&
+               !request->error_status().has_value()) {
       stream_requests.emplace_back(request);
     }
   }

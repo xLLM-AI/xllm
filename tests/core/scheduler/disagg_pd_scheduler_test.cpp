@@ -516,4 +516,23 @@ TEST(DisaggPDSchedulerTest, SpeculativeMetricsSilentWhenDisabled) {
                    -1.0);
 }
 
+TEST(DisaggPDSchedulerTest, StructuredOutputFieldsPreserveWireTags) {
+  proto::DisaggRequest request;
+  request.set_include_stop_str_in_output(true);
+  request.set_json_object(true);
+  request.set_json_reasoning_enabled(true);
+
+  std::string serialized;
+  ASSERT_TRUE(request.SerializeToString(&serialized));
+
+  proto::DisaggRequest decoded;
+  ASSERT_TRUE(decoded.ParseFromString(serialized));
+  EXPECT_TRUE(decoded.include_stop_str_in_output());
+  EXPECT_TRUE(decoded.json_object());
+  EXPECT_TRUE(decoded.json_reasoning_enabled());
+  EXPECT_EQ(proto::DisaggRequest::kIncludeStopStrInOutputFieldNumber, 39);
+  EXPECT_EQ(proto::DisaggRequest::kJsonObjectFieldNumber, 40);
+  EXPECT_EQ(proto::DisaggRequest::kJsonReasoningEnabledFieldNumber, 41);
+}
+
 }  // namespace xllm

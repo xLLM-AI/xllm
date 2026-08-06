@@ -51,6 +51,7 @@ class ServiceConfig final {
          "num_request_handling_threads",
          "num_response_handling_threads",
          "health_check_interval_ms",
+         "enable_json_object_output",
          "enable_verbose_trace_log",
          "verbose_trace_log_path",
          "verbose_trace_log_max_size_mb",
@@ -77,6 +78,8 @@ class ServiceConfig final {
   PROPERTY(int32_t, num_response_handling_threads) = 4;
 
   PROPERTY(int32_t, health_check_interval_ms) = 3000;
+
+  PROPERTY(bool, enable_json_object_output) = true;
 
   PROPERTY(bool, enable_verbose_trace_log) = false;
 

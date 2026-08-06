@@ -115,4 +115,28 @@ TEST(SamplingParamsTest, AbnormalConcat) {
   EXPECT_FALSE(sampling_parameters_1.sample_idxes.defined());
 }
 
+TEST(SamplingParamsTest, ConcatPadsUnconstrainedRows) {
+  RequestSamplingParam constrained_request;
+  SamplingParameters constrained;
+  constrained.init({&constrained_request},
+                   {0},
+                   {0},
+                   {},
+                   {},
+                   {},
+                   {torch::tensor({0.0F, -1.0e9F})});
+
+  RequestSamplingParam unconstrained_request;
+  SamplingParameters unconstrained;
+  unconstrained.init({&unconstrained_request}, {1}, {0}, {}, {}, {});
+
+  constrained.concat(unconstrained);
+
+  ASSERT_TRUE(constrained.filter_mask.defined());
+  ASSERT_EQ(constrained.filter_mask.sizes(), torch::IntArrayRef({2, 2}));
+  EXPECT_EQ(constrained.filter_mask.index({0, 1}).item<float>(), -1.0e9F);
+  EXPECT_EQ(constrained.filter_mask.index({1, 0}).item<float>(), 0.0F);
+  EXPECT_EQ(constrained.filter_mask.index({1, 1}).item<float>(), 0.0F);
+}
+
 }  // namespace xllm

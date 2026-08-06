@@ -34,10 +34,12 @@ limitations under the License.
 #include "framework/config/execution_config.h"
 #include "framework/model/model_input_params.h"
 #include "framework/sampling/beam_searcher.h"
+#include "framework/sampling/json_object_grammar.h"
 #include "framework/sampling/sampling_params.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "runtime/dit_forward_params.h"
+#include "runtime/json_object_output_rows.h"
 
 namespace xllm {
 
@@ -194,6 +196,8 @@ inline bool add_sampling_to_plan(const SamplingParameters& source,
                   &target.unique_token_ids_lens) &&
          plan.add(source.sample_idxes, &target.sample_idxes) &&
          plan.add(source.do_sample, &target.do_sample) &&
+         plan.add(source.filter_mask, &target.filter_mask) &&
+         plan.add(source.filter_bitmask, &target.filter_bitmask) &&
          plan.add(source.acc_logprob, &target.acc_logprob);
 }
 
@@ -533,6 +537,10 @@ struct ForwardInput {
     inputs.skip_sampling_for_logits_only = skip_sampling_for_logits_only;
     inputs.kv_slot_layout = kv_slot_layout;
     inputs.metadata_ready_event = metadata_ready_event;
+    inputs.sample_sequence_ids = sample_sequence_ids;
+    inputs.sample_prior_output_rows = sample_prior_output_rows;
+    inputs.json_object_states = json_object_states;
+    inputs.json_object_state_snapshots = json_object_state_snapshots;
   }
 
   void set_host_views(ForwardInput& inputs) const {
@@ -587,6 +595,15 @@ struct ForwardInput {
   ModelInputParams input_params;
   SamplingParameters sampling_params;
   SamplingParameters decoder_sampling_params;
+  std::vector<std::string> sample_sequence_ids;
+  std::vector<int32_t> sample_prior_output_rows;
+  std::vector<JsonObjectGrammarState> json_object_states;
+  std::vector<JsonObjectGrammarSnapshot> json_object_state_snapshots;
+  // Flattened [sequence][draft position] flags produced during MTP
+  // validation. This is execution-local metadata and is not transported.
+  std::vector<uint8_t> json_object_invalid_draft;
+  // Errors detected while aligning prior overlap output with grammar rows.
+  std::vector<JsonObjectOutputError> json_object_errors;
 
   // step-level decode metadata
   std::optional<StepDecodeMeta> step_decode;
@@ -625,6 +642,11 @@ struct ForwardOutput {
   // max number of top logprobs in the batch
   int64_t max_top_logprobs = 0;
   SampleOutput sample_output;
+  // The target sampler applies packed token masks in-place before returning
+  // sampled tokens. MTP validation uses this local contract to avoid applying
+  // the same mask to target logits a second time.
+  bool filter_bitmask_applied_to_logits = false;
+  std::vector<JsonObjectOutputError> json_object_errors;
   // Keep no-sync input tensor handles alive until downstream consumers finish
   // using outputs on the same compute stream.
   std::shared_ptr<ForwardInput> retained_input;
@@ -660,6 +682,7 @@ struct RawSampleOutput {
 
 struct RawForwardOutput {
   std::vector<RawSampleOutput> outputs;  // num seqs
+  std::vector<JsonObjectOutputError> json_object_errors;
   std::vector<int64_t> expert_load_data;
   int32_t prepared_layer_id;
   // beam search kernel output

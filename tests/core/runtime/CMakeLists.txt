@@ -95,6 +95,26 @@ if(EXISTS "$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
     "-Wl,-rpath-link,$ENV{PYTORCH_INSTALL_PATH}/../torch.libs")
 endif()
 
+cc_test(
+  NAME
+    worker_json_object_overlap_test
+  SRCS
+    worker_json_object_overlap_test.cpp
+  DEPS
+    :json_object_grammar
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    mtp_json_object_state_test
+  SRCS
+    mtp_json_object_state_test.cpp
+  DEPS
+    :json_object_grammar
+    GTest::gtest_main
+)
+
 if(USE_MLU)
   cc_test(
     NAME

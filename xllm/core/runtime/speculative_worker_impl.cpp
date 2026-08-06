@@ -209,6 +209,8 @@ void SpeculativeWorkerImpl::update_sampling_params(
   TENSOR_REPEAT(sampling_params.unique_token_counts, num_val_tokens);
   TENSOR_REPEAT(sampling_params.unique_token_ids_lens, num_val_tokens);
   TENSOR_REPEAT(sampling_params.do_sample, num_val_tokens);
+  TENSOR_REPEAT(sampling_params.filter_mask, num_val_tokens);
+  TENSOR_REPEAT(sampling_params.filter_bitmask, num_val_tokens);
 }
 
 void SpeculativeWorkerImpl::prepare_validate_inputs(
@@ -339,5 +341,9 @@ void SpeculativeWorkerImpl::prepare_work_before_execute(
     const ForwardInput& input,
     ForwardInput& processed_input) {
   WorkerImpl::prepare_work_before_execute(input, processed_input);
+}
+
+void SpeculativeWorkerImpl::restore_json_object_states(ForwardInput& input) {
+  impl_->restore_json_object_states(input);
 }
 }  // namespace xllm

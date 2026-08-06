@@ -356,6 +356,10 @@ std::string TiktokenTokenizer::decode(const Slice<int32_t>& ids,
   return utf8_ss.str();
 }
 
+std::string TiktokenTokenizer::decode_token(int32_t id) const {
+  return id_to_token(id);
+}
+
 size_t TiktokenTokenizer::vocab_size() const {
   // vocab size = encoder size + special tokens size
   return encoder_.size() + args_.special_tokens().size();

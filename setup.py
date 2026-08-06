@@ -654,6 +654,8 @@ class BuildDistWheel(bdist_wheel):
         super().finalize_options()
 
     def run(self) -> None:
+        global BUILD_TEST_FILE
+
         build_ext_cmd = self.get_finalized_command('build_ext')
         build_ext_cmd.device = self.device
         build_ext_cmd.arch = self.arch
@@ -662,8 +664,11 @@ class BuildDistWheel(bdist_wheel):
         logger.info("🔨 build project...")
         self.run_command('build')
 
-        logger.info("🧪 testing UT...")
-        self.run_command('test')
+        if BUILD_TEST_FILE:
+            logger.info("🧪 testing UT...")
+            self.run_command('test')
+        else:
+            logger.info("⏭️ skipping UT because test build is disabled.")
 
         if self.arch == 'arm':
             ext_path = get_base_dir() + f"/build/lib.linux-aarch64-cpython-{get_python_version()}/"
@@ -678,7 +683,6 @@ class BuildDistWheel(bdist_wheel):
                 path = os.path.join(root, item)
                 if '_test' in item and os.path.isfile(path):
                     os.remove(path)
-        global BUILD_TEST_FILE
         BUILD_TEST_FILE = False
 
         self.skip_build = True
