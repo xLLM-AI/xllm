@@ -339,6 +339,7 @@ bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .enable_disagg_pd(options_.enable_disagg_pd())
       .hasher_type(BlockHasherType::MM)
       .max_seqs_per_batch(options_.max_seqs_per_batch())
+      .num_speculative_tokens(options_.num_speculative_tokens())
       .num_embedding_blocks(
           static_cast<uint32_t>(kv_cache_shape.key_cache_shape()[0]))
       // DECODE-side prefix cache participation is per-leaf and gated by the
