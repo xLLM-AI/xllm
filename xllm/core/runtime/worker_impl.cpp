@@ -234,24 +234,11 @@ LinearStateInputRows get_npu_linear_state_rows(ModelInputParams& input_params) {
         input_params.parallel.query_start_loc[i] + seq_len;
   }
 
-  const std::vector<int32_t>& host_kv_cache_tokens_nums =
+  const std::vector<int32_t>& cached_tokens =
       input_params.attention.host.kv_cache_tokens_nums;
-  std::vector<int32_t> cached_tokens;
-  if (!host_kv_cache_tokens_nums.empty()) {
-    cached_tokens = host_kv_cache_tokens_nums;
-  } else {
-    // Compatibility fallback for inputs that only carry the device view.
-    torch::Tensor cached_tokens_tensor =
-        input_params.attention.device.kv_cache_tokens_nums > 0;
-    torch::Tensor cached_tokens_cpu = cached_tokens_tensor.contiguous()
-                                          .view({-1})
-                                          .to(torch::kCPU)
-                                          .to(torch::kInt32);
-    cached_tokens.assign(
-        cached_tokens_cpu.data_ptr<int32_t>(),
-        cached_tokens_cpu.data_ptr<int32_t>() + cached_tokens_cpu.numel());
-  }
-  return {std::move(cached_tokens), batch_size, /*empty_shard=*/false};
+  CHECK(!cached_tokens.empty())
+      << "NPU linear-state input requires host kv cache token counts";
+  return {cached_tokens, batch_size, /*empty_shard=*/false};
 }
 #endif
 

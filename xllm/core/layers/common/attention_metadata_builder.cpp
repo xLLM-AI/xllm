@@ -43,6 +43,57 @@ torch::TensorOptions int32_options_like(const torch::Tensor& preferred,
   return torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
 }
 
+void materialize_linear_state_validity(
+    const ModelInputParams& params,
+    const std::optional<torch::Device>& device,
+    AttentionMetadata& attn_metadata) {
+  const bool needs_initial_states =
+      attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
+  if (!needs_initial_states) {
+    return;
+  }
+
+  const int64_t mask_rows =
+      static_cast<int64_t>(params.linear_state_validity_mask.size());
+  const bool has_linear_state_rows =
+      !params.embedding.linear_state_ids.empty() ||
+      params.embedding.linear_state_indices.defined();
+  if (!attn_metadata.is_dummy && mask_rows == 0) {
+    CHECK(!has_linear_state_rows)
+        << "linear-state metadata requires a canonical validity mask";
+    return;
+  }
+
+  if (!(attn_metadata.is_dummy && mask_rows == 0)) {
+    int64_t metadata_rows = mask_rows;
+    if (!params.embedding.linear_state_ids.empty()) {
+      metadata_rows =
+          static_cast<int64_t>(params.embedding.linear_state_ids.size());
+    } else if (params.embedding.linear_state_indices.defined()) {
+      metadata_rows = params.embedding.linear_state_indices.numel();
+    }
+    CHECK_EQ(mask_rows, metadata_rows)
+        << "linear state mask row count mismatch: mask_rows=" << mask_rows
+        << ", metadata_rows=" << metadata_rows;
+  }
+
+  torch::TensorOptions options;
+  if (params.embedding.linear_state_indices.defined()) {
+    options = params.embedding.linear_state_indices.options();
+  } else if (params.attention.device.q_seq_lens.defined()) {
+    options = params.attention.device.q_seq_lens.options();
+  } else {
+    CHECK(device.has_value())
+        << "linear state metadata requires a target device";
+    options = torch::TensorOptions().device(device.value());
+  }
+  options = options.dtype(torch::kBool);
+  attn_metadata.has_initial_states =
+      attn_metadata.is_dummy && mask_rows == 0
+          ? torch::zeros({1}, options)
+          : torch::tensor(params.linear_state_validity_mask, options);
+}
+
 AttentionMetadata build_attention_metadata(
     const ModelInputParams& params,
     bool enable_mla,
@@ -240,6 +291,7 @@ AttentionMetadata build_attention_metadata(
     attn_metadata.max_query_len = 1;
     attn_metadata.max_seq_len = std::max<int64_t>(attn_metadata.max_seq_len, 1);
   }
+  materialize_linear_state_validity(params, device, attn_metadata);
 
   // Set is_causal: true for prefill (causal attention), false for decode
   // (non-causal) Default to true (causal) if not explicitly set

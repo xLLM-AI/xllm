@@ -15,7 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include "core/framework/kv_cache/linear_state_restore.h"
 #include "core/framework/model/model_output.h"
 #include "core/layers/common/lm_head.h"
 #include "core/layers/common/rotary_embedding_util.h"
@@ -215,23 +214,6 @@ class Qwen3_5ModelImpl final
       attn_metadata.tot = tot;
       attn_metadata.batch = batch_ptr;
       attn_metadata.token_block_offset = token_block_offset_ptr;
-#if defined(USE_MLU)
-      attn_metadata.has_initial_states =
-          materialize_linear_state_mask(params.linear_state_validity_mask,
-                                        attn_metadata.q_cu_seq_lens.size(0) - 1,
-                                        attn_metadata.is_dummy,
-                                        h.device());
-#else
-      if (params.attention.device.kv_cache_tokens_nums.defined() &&
-          params.attention.device.kv_cache_tokens_nums.numel() > 0) {
-        attn_metadata.has_initial_states =
-            (params.attention.device.kv_cache_tokens_nums > 0).to(torch::kBool);
-      } else {
-        attn_metadata.has_initial_states =
-            torch::zeros({seqlens.size(0)},
-                         torch::dtype(torch::kBool).device(seqlens.device()));
-      }
-#endif
     }
     return attn_metadata;
   }

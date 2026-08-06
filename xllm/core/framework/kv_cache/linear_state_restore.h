@@ -15,9 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include <glog/logging.h>
-#include <torch/torch.h>
-
 #include <cstdint>
 #include <vector>
 
@@ -32,25 +29,6 @@ namespace xllm {
 LinearStateValidityMask build_linear_state_mask(
     const std::vector<int32_t>& cached_tokens,
     int64_t active_rows);
-
-// Materialize the worker-produced linear-state validity result for a backend
-// kernel that consumes a device bool tensor. Empty data-parallel shards have
-// one synthetic, always-cold dummy metadata row.
-inline torch::Tensor materialize_linear_state_mask(
-    const LinearStateValidityMask& validity_mask,
-    int64_t metadata_rows,
-    bool is_dummy,
-    const torch::Device& device) {
-  const int64_t mask_rows = static_cast<int64_t>(validity_mask.size());
-  if (is_dummy && mask_rows == 0 && metadata_rows == 1) {
-    return torch::zeros({1}, torch::dtype(torch::kBool).device(device));
-  }
-  CHECK_EQ(mask_rows, metadata_rows)
-      << "linear state mask row count mismatch: mask_rows=" << mask_rows
-      << ", metadata_rows=" << metadata_rows;
-  return torch::tensor(validity_mask,
-                       torch::dtype(torch::kBool).device(device));
-}
 
 // Apply each op's restore plan in-place: copy `restore_src_slot_id` into
 // `linear_state_id` across every linear-attention layer present in

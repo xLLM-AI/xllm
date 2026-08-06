@@ -63,40 +63,6 @@ TEST(LinearStateRestoreTest, RejectsNonDivisibleActiveRows) {
                "logical rows must evenly divide active rows");
 }
 
-TEST(LinearStateRestoreTest, MaterializesExplicitValidityMask) {
-  const std::vector<int64_t> validity_mask = {0, 1, 1, 0, 0, 1};
-
-  torch::Tensor tensor =
-      materialize_linear_state_mask(validity_mask,
-                                    /*metadata_rows=*/6,
-                                    /*is_dummy=*/false,
-                                    torch::Device(torch::kCPU));
-
-  EXPECT_EQ(tensor.scalar_type(), torch::kBool);
-  EXPECT_EQ(tensor.device(), torch::Device(torch::kCPU));
-  EXPECT_TRUE(torch::equal(
-      tensor, torch::tensor({false, true, true, false, false, true})));
-}
-
-TEST(LinearStateRestoreTest, MaterializesColdMaskForEmptyDataParallelShard) {
-  torch::Tensor tensor = materialize_linear_state_mask(
-      /*validity_mask=*/{},
-      /*metadata_rows=*/1,
-      /*is_dummy=*/true,
-      torch::Device(torch::kCPU));
-
-  EXPECT_TRUE(torch::equal(tensor, torch::tensor({false})));
-}
-
-TEST(LinearStateRestoreTest, RejectsValidityMaskMetadataRowMismatch) {
-  EXPECT_DEATH(materialize_linear_state_mask(/*validity_mask=*/{0, 1},
-                                             /*metadata_rows=*/3,
-                                             /*is_dummy=*/false,
-                                             torch::Device(torch::kCPU)),
-               "linear state mask row count mismatch.*mask_rows=2.*"
-               "metadata_rows=3");
-}
-
 TEST(LinearStateRestoreTest, ModelInputConversionPreservesValidityMask) {
   ModelInputParams input_params;
   input_params.linear_state_validity_mask = {0, 1, 1, 0};

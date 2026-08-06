@@ -918,7 +918,7 @@ TEST_F(AclGraphExecutorTest, BatchInputCarriesLinearStateIds) {
   EXPECT_EQ(forward_input.input_params.embedding.embedding_ids[0],
             expected_embedding_id);
 
-  forward_input.input_params.linear_state_validity_mask = {0};
+  forward_input.input_params.linear_state_validity_mask = {1};
   forward_input = forward_input.to(*device_, torch::kFloat32);
   npu::GraphPersistentParam persistent_param(model_args_, *device_, options_);
   std::optional<ModelInputParams> params_for_capture = persistent_param.update(
@@ -935,7 +935,7 @@ TEST_F(AclGraphExecutorTest, BatchInputCarriesLinearStateIds) {
       params_for_capture->embedding.linear_state_ids,
       std::vector<int32_t>({expected_linear_state_id, kPaddingLinearStateId}));
   ASSERT_EQ(params_for_capture->linear_state_validity_mask.size(), 2);
-  EXPECT_EQ(params_for_capture->linear_state_validity_mask[0], 0);
+  EXPECT_EQ(params_for_capture->linear_state_validity_mask[0], 1);
   EXPECT_EQ(params_for_capture->linear_state_validity_mask[1], 0);
 }
 
