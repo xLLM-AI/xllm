@@ -69,6 +69,8 @@ class ArgumentParser:
         self.parser.add_argument('--enable_graph_mode_decode_no_padding', nargs='?', const=True, default=False, type=_str_to_bool, help='Whether to enable graph-mode decode without padding for offline inference.')
         self.parser.add_argument('--enable_prefill_piecewise_graph', nargs='?', const=True, default=False, type=_str_to_bool, help='Whether to enable prefill piecewise graph for offline inference.')
         self.parser.add_argument('--max_tokens_for_graph_mode', type=int, default=2048, help='Maximum number of tokens for graph execution.')
+        self.parser.add_argument('--python_compile_fullgraph', nargs='?', const=True, default=False, type=_str_to_bool, help='Whether to enable torch.compile fullgraph mode for Python model executor.')
+        self.parser.add_argument('--python_compile_dynamic', nargs='?', const=True, default=False, type=_str_to_bool, help='Whether to enable torch.compile dynamic shape mode for Python model executor.')
         self.parser.add_argument('--enable_shm', nargs='?', const=True, default=False, type=_str_to_bool, help='Use shared memory for inter-process communication in the single-machine multi-GPU scenario.')
         self.parser.add_argument('--input_shm_size', type=int, default=1024, help='The size of input shared memory in MB.')
         self.parser.add_argument('--output_shm_size', type=int, default=128, help='The size of output shared memory in MB.')

@@ -86,6 +86,10 @@ py::dict PyCausalLM::build_config_dict(
   d["enable_graph"] = ExecutionConfig::get_instance().enable_graph();
   d["python_graph_backend"] =
       ExecutionConfig::get_instance().python_graph_backend();
+  d["python_compile_fullgraph"] =
+      ExecutionConfig::get_instance().python_compile_fullgraph();
+  d["python_compile_dynamic"] =
+      ExecutionConfig::get_instance().python_compile_dynamic();
   return d;
 }
 
