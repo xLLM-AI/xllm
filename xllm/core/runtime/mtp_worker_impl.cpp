@@ -262,6 +262,12 @@ void clear_ready_events(ForwardInput& input) {
   input.metadata_ready_event.reset();
 }
 
+void clear_mla_prefixcache_workspace(ForwardInput& input) {
+  auto& attention = input.input_params.attention.device;
+  attention.history_compressed_kv = torch::Tensor();
+  attention.history_k_rope = torch::Tensor();
+}
+
 std::optional<ForwardOutput> run_worker_no_sync_impl(
     WorkerImpl& worker,
     const ForwardInput& input,
@@ -750,6 +756,32 @@ bool MTPWorkerImpl::use_kimi_eagle3_step_major_validate_layout() const {
   return is_kimi_k25_eagle3_pair() && !use_chunked_prefill_spec_verify_path();
 }
 
+void MTPWorkerImpl::synchronize_kimi_eagle3_npu_forward() {
+#if defined(USE_NPU)
+  if (is_kimi_k25_eagle3_pair()) {
+    const int32_t ret = compute_stream_->synchronize();
+    CHECK_EQ(ret, 0) << "failed to synchronize Kimi Eagle3 forward, ret="
+                     << ret;
+  }
+#endif
+}
+
+std::optional<ForwardOutput> MTPWorkerImpl::run_worker_no_sync(
+    WorkerImpl& worker,
+    const ForwardInput& input,
+    ForwardInput& processed_input) {
+  std::optional<ForwardOutput> output = run_worker_no_sync_impl(
+      worker, input, *prepare_stream_, *compute_stream_, processed_input);
+  synchronize_kimi_eagle3_npu_forward();
+  if (is_kimi_k25_eagle3_pair()) {
+    clear_mla_prefixcache_workspace(processed_input);
+    if (output.has_value() && output->retained_input != nullptr) {
+      clear_mla_prefixcache_workspace(*output->retained_input);
+    }
+  }
+  return output;
+}
+
 bool MTPWorkerImpl::use_chunked_prefill_spec_verify_path() const {
   return target_spec_verify_mode_ != mtp_async::TargetSpecVerifyMode::GENERIC;
 }
@@ -916,16 +948,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
   if (!input.input_params.meta.batch_forward_type.is_decode()) {
     ForwardInput target_prepared;
     ForwardInput draft_prepared;
-    auto output = run_worker_no_sync_impl(*target_impl_,
-                                          input,
-                                          *prepare_stream_,
-                                          *compute_stream_,
-                                          target_prepared);
-    auto draft_output = run_worker_no_sync_impl(*draft_impl_,
-                                                input,
-                                                *prepare_stream_,
-                                                *compute_stream_,
-                                                draft_prepared);
+    auto output = run_worker_no_sync(*target_impl_, input, target_prepared);
+    auto draft_output = run_worker_no_sync(*draft_impl_, input, draft_prepared);
     if (draft_output.has_value()) {
       transfer_retained_inputs(*output, draft_output.value());
     }
@@ -950,20 +974,14 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
          new_input.input_params.parallel.raw_dp_global_token_nums) {
       token_num *= 2;
     }
-    draft_outputs.emplace_back(run_worker_no_sync_impl(*draft_impl_,
-                                                       new_input,
-                                                       *prepare_stream_,
-                                                       *compute_stream_,
-                                                       draft_extend_prepared)
-                                   .value());
+    draft_outputs.emplace_back(
+        run_worker_no_sync(*draft_impl_, new_input, draft_extend_prepared)
+            .value());
 
     for (int32_t i = 1; i < options_.num_speculative_tokens(); ++i) {
-      draft_outputs.emplace_back(run_worker_no_sync_impl(*draft_impl_,
-                                                         input,
-                                                         *prepare_stream_,
-                                                         *compute_stream_,
-                                                         draft_step_prepared[i])
-                                     .value());
+      draft_outputs.emplace_back(
+          run_worker_no_sync(*draft_impl_, input, draft_step_prepared[i])
+              .value());
     }
 
     new_input = input;
@@ -975,12 +993,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
          new_input.input_params.parallel.raw_dp_global_token_nums) {
       token_num *= options_.num_speculative_tokens() + 1;
     }
-    ForwardOutput output = run_worker_no_sync_impl(*target_impl_,
-                                                   new_input,
-                                                   *prepare_stream_,
-                                                   *compute_stream_,
-                                                   target_prepared)
-                               .value();
+    ForwardOutput output =
+        run_worker_no_sync(*target_impl_, new_input, target_prepared).value();
     for (ForwardOutput& draft_output : draft_outputs) {
       transfer_retained_inputs(output, draft_output);
     }
@@ -1000,12 +1014,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
   ForwardInput draft_prepared;
 
   // run the target model to get first token and hidden states
-  ForwardOutput output = run_worker_no_sync_impl(*target_impl_,
-                                                 input,
-                                                 *prepare_stream_,
-                                                 *compute_stream_,
-                                                 target_prepared)
-                             .value();
+  ForwardOutput output =
+      run_worker_no_sync(*target_impl_, input, target_prepared).value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
   // MTP path that depends on hidden states.
@@ -1031,12 +1041,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
   }
   // generate kv cache for draft model
   timer.reset();
-  ForwardOutput draft_output = run_worker_no_sync_impl(*draft_impl_,
-                                                       prefill_input,
-                                                       *prepare_stream_,
-                                                       *compute_stream_,
-                                                       draft_prepared)
-                                   .value();
+  ForwardOutput draft_output =
+      run_worker_no_sync(*draft_impl_, prefill_input, draft_prepared).value();
   {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     process_draft_sample_output(draft_output.sample_output);
@@ -1304,11 +1310,16 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
           std::move(pending_draft_context_.prepared_input);
       pending_draft_context_ = PendingDraftContext();
     } else {
-      draft_output_opt = run_worker_no_sync_impl(*draft_impl_,
-                                                 current_draft_input,
-                                                 *compute_stream_,
-                                                 *compute_stream_,
-                                                 draft_prepared[draft_idx]);
+      if (is_kimi_k25_eagle3_pair()) {
+        draft_output_opt = run_worker_no_sync(
+            *draft_impl_, current_draft_input, draft_prepared[draft_idx]);
+      } else {
+        draft_output_opt = run_worker_no_sync_impl(*draft_impl_,
+                                                   current_draft_input,
+                                                   *compute_stream_,
+                                                   *compute_stream_,
+                                                   draft_prepared[draft_idx]);
+      }
     }
 
     if ((use_device_target_context || use_prelaunched_first_draft) &&
@@ -1444,12 +1455,19 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   ForwardInput target_prepared;
   fill_validate_input_from_draft_outputs(
       draft_outputs, validate_input, *compute_stream_);
-  ForwardOutput target_output = run_worker_no_sync_impl(*target_impl_,
-                                                        validate_input,
-                                                        *compute_stream_,
-                                                        *compute_stream_,
-                                                        target_prepared)
-                                    .value();
+  ForwardOutput target_output;
+  if (is_kimi_k25_eagle3_pair()) {
+    target_output =
+        run_worker_no_sync(*target_impl_, validate_input, target_prepared)
+            .value();
+  } else {
+    target_output = run_worker_no_sync_impl(*target_impl_,
+                                            validate_input,
+                                            *compute_stream_,
+                                            *compute_stream_,
+                                            target_prepared)
+                        .value();
+  }
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
 
