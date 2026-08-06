@@ -47,27 +47,6 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
-namespace {
-
-void validate_short_request_first_options(
-    const ContinuousScheduler::Options& options) {
-  if (!options.enable_disagg_pd()) {
-    LOG(FATAL) << "ShortRequestFirst requires enable_disagg_pd=true.";
-  }
-  if (!options.enable_chunked_prefill()) {
-    LOG(FATAL) << "ShortRequestFirst requires enable_chunked_prefill=true.";
-  }
-  if (options.instance_role() == InstanceRole::DECODE) {
-    LOG(FATAL) << "ShortRequestFirst is only supported on PD prefill or mix "
-               << "instances, not decode instances.";
-  }
-  if (options.priority_strategy() != "fcfs") {
-    LOG(FATAL) << "ShortRequestFirst requires priority_strategy=fcfs, got "
-               << options.priority_strategy();
-  }
-}
-
-}  // namespace
 
 void CancelRequestQueue::submit(std::shared_ptr<Request> request) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -208,14 +187,6 @@ bool ContinuousScheduler::add_request(std::shared_ptr<Request>& request) {
 }
 
 void ContinuousScheduler::create_queues(const Options& options) {
-  const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
-  if (scheduler_config.enable_short_request_first()) {
-    validate_short_request_first_options(options);
-    LOG(INFO) << "Enable PD-prefill ShortRequestFirst scheduling: threshold="
-              << scheduler_config.short_request_first_threshold()
-              << ", long_max_wait_ms="
-              << scheduler_config.short_request_first_long_max_wait_ms();
-  }
   if (options.priority_strategy() == "multi_slo_and_prio" ||
       options.priority_strategy() == "fcfs") {
     prefill_queue_ = std::make_unique<DequeQueue>();
