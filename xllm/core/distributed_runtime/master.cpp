@@ -80,6 +80,7 @@ void apply_runtime_kv_cache_options(const Options& source,
       .store_metadata_server(source.store_metadata_server())
       .store_local_hostname(source.store_local_hostname())
       .prefetch_batch_size(source.prefetch_batch_size())
+      .prefetch_timeout(source.prefetch_timeout())
       .layers_wise_copy_batchs(source.layers_wise_copy_batchs())
       .kv_cache_dtype(source.kv_cache_dtype());
 }

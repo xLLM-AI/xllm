@@ -122,6 +122,19 @@ TEST(AttentionMetadataBuilderTest, DecodeDoesNotMaterializeInitialStateMask) {
   EXPECT_FALSE(metadata.has_initial_states.defined());
 }
 
+TEST(AttentionMetadataBuilderTest, IgnoresTransportIdsWithoutLinearStateOps) {
+  ModelInputParams params = make_params();
+  params.embedding.linear_state_ids = {-1, -1, -1};
+  params.embedding.linear_state_indices =
+      torch::tensor({-1, -1, -1}, torch::kInt);
+  params.linear_state_validity_mask.clear();
+
+  AttentionMetadata metadata =
+      AttentionMetadataBuilder::build(params, /*enable_mla=*/false);
+
+  EXPECT_FALSE(metadata.has_initial_states.defined());
+}
+
 TEST(AttentionMetadataBuilderTest, MaterializesColdMaskForDummyShard) {
   ModelInputParams params;
   params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;

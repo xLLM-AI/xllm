@@ -56,6 +56,7 @@ class KVCacheManager {
 
   virtual void allocate_shared(Sequence* sequence) = 0;
   virtual bool supports_host_cache_restore() const { return false; }
+  virtual bool has_pending_async_block_release() const { return false; }
   virtual HostCacheRestorePoint select_host_cache_restore(
       Sequence* sequence,
       size_t /*max_copy_units*/) {

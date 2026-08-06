@@ -18,6 +18,7 @@ limitations under the License.
 #include <algorithm>
 #include <iterator>
 #include <limits>
+#include <tuple>
 #include <unordered_map>
 
 #include "block_manager_impl.h"
@@ -100,6 +101,24 @@ struct PrefixMatch {
   size_t copy_units = 0;
 };
 
+size_t probe_reach(const ProbeResult& probe, bool sparse) {
+  if (sparse) {
+    size_t reach = 0;
+    for (size_t i = 0; i < probe.blocks.size(); ++i) {
+      if (probe.blocks[i].is_valid()) {
+        reach = i + 1;
+      }
+    }
+    return reach;
+  }
+  for (size_t i = 0; i < probe.blocks.size(); ++i) {
+    if (!probe.blocks[i].is_valid()) {
+      return i;
+    }
+  }
+  return probe.blocks.size();
+}
+
 PrefixMatch trim_shared_probes(
     CompositeBlockManager::LeafCombination combination,
     std::vector<ProbeResult>* hbm_probes,
@@ -126,15 +145,16 @@ PrefixMatch trim_shared_probes(
     const size_t block_size = hbm_kv->block_size;
     CHECK_EQ(block_size, host_kv->block_size);
     match.restore_tokens = cap_and_align(
-        std::max(hbm_kv->blocks.size(), host_kv->blocks.size()) * block_size,
+        std::max(probe_reach(*hbm_kv, false), probe_reach(*host_kv, false)) *
+            block_size,
         block_size);
     const size_t restore_blocks = match.restore_tokens / block_size;
     match.hbm_tokens =
-        std::min(hbm_kv->blocks.size(), restore_blocks) * block_size;
+        std::min(probe_reach(*hbm_kv, false), restore_blocks) * block_size;
     match.host_tokens =
-        std::min(host_kv->blocks.size(), restore_blocks) * block_size;
-    match.copy_units = restore_blocks > hbm_kv->blocks.size()
-                           ? restore_blocks - hbm_kv->blocks.size()
+        std::min(probe_reach(*host_kv, false), restore_blocks) * block_size;
+    match.copy_units = restore_blocks > probe_reach(*hbm_kv, false)
+                           ? restore_blocks - probe_reach(*hbm_kv, false)
                            : 0;
     trim_blocks_from_back(hbm_kv->leaf, &hbm_kv->blocks, restore_blocks);
     return match;
@@ -157,12 +177,14 @@ PrefixMatch trim_shared_probes(
       static_cast<size_t>(hbm_swa->leaf->options().swa_blocks_per_seq());
 
   size_t max_matched_tokens = cap_and_align(
-      std::min({std::max(hbm_swa->blocks.size(), host_swa->blocks.size()) *
-                    swa_block_size,
-                std::max(hbm_c4->blocks.size(), host_c4->blocks.size()) *
-                    hbm_c4->block_size,
-                std::max(hbm_c128->blocks.size(), host_c128->blocks.size()) *
-                    c128_block_size}),
+      std::min(
+          {std::max(probe_reach(*hbm_swa, true), probe_reach(*host_swa, true)) *
+               swa_block_size,
+           std::max(probe_reach(*hbm_c4, false), probe_reach(*host_c4, false)) *
+               hbm_c4->block_size,
+           std::max(probe_reach(*hbm_c128, false),
+                    probe_reach(*host_c128, false)) *
+               c128_block_size}),
       c128_block_size);
   while (max_matched_tokens > 0 && !has_valid_swa_window(max_matched_tokens,
                                                          swa_block_size,
@@ -176,9 +198,9 @@ PrefixMatch trim_shared_probes(
                                  const ProbeResult& c4,
                                  const ProbeResult& c128) {
     size_t tokens =
-        cap_and_align(std::min({swa.blocks.size() * swa_block_size,
-                                c4.blocks.size() * c4.block_size,
-                                c128.blocks.size() * c128_block_size}),
+        cap_and_align(std::min({probe_reach(swa, true) * swa_block_size,
+                                probe_reach(c4, false) * c4.block_size,
+                                probe_reach(c128, false) * c128_block_size}),
                       c128_block_size);
     tokens = std::min(tokens, max_matched_tokens);
     while (tokens > 0 &&
@@ -198,8 +220,8 @@ PrefixMatch trim_shared_probes(
   match.restore_tokens = max_matched_tokens;
   match.hbm_tokens = max_hbm_matched_tokens;
   match.host_tokens = max_host_matched_tokens;
-  match.copy_units = restore_units > hbm_c128->blocks.size()
-                         ? restore_units - hbm_c128->blocks.size()
+  match.copy_units = restore_units > probe_reach(*hbm_c128, false)
+                         ? restore_units - probe_reach(*hbm_c128, false)
                          : 0;
 
   trim_blocks_from_back(
@@ -244,11 +266,6 @@ HierarchyBlockManagerPool::HierarchyBlockManagerPool(
     if (host_capacities.empty() && options_.host_num_blocks() > 0) {
       host_capacities.emplace(BlockType::KV, options_.host_num_blocks());
     }
-    CHECK(!options_.enable_kvcache_store() ||
-          host_capacities.count(BlockType::KV) > 0)
-        << "KV cache storage prefetch currently supports only a flat KV Host "
-           "cache layout; disable enable_kvcache_store for typed Host caches.";
-
     for (const auto& [type, num_blocks] : host_capacities) {
       const auto device_leaf_it = device_leaves.find(type);
       if (device_leaf_it == device_leaves.end() || num_blocks == 0) {
@@ -514,7 +531,6 @@ void HierarchyBlockManagerPool::allocate_shared(Sequence* sequence) {
   if (!should_probe_prefix_cache(sequence)) {
     return;
   }
-  sequence->clear_host_cache_match();
 
   const int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
   auto* composite =
@@ -528,12 +544,40 @@ void HierarchyBlockManagerPool::allocate_shared(Sequence* sequence) {
     return;
   }
 
-  std::vector<ProbeResult> hbm_probes =
-      CompositeBlockManager::probe_prefix_cache(sequence,
-                                                composite->leaf_entries());
-  std::vector<ProbeResult> host_probes =
-      CompositeBlockManager::probe_prefix_cache(
-          sequence, host_block_managers_[dp_rank], sequence->host_kv_state());
+  KVCacheState& hbm_state = sequence->kv_state();
+  KVCacheState& host_state = sequence->host_kv_state();
+  std::vector<ProbeResult> hbm_probes;
+  std::vector<ProbeResult> host_probes;
+
+  if (hbm_state.prefix_cache_matched()) {
+    for (const auto& [type, entry] : composite->leaf_entries()) {
+      if (!entry.supports_prefix_cache || entry.leaf == nullptr) {
+        continue;
+      }
+      hbm_probes.emplace_back(ProbeResult{type,
+                                          entry.leaf.get(),
+                                          hbm_state.take_blocks(type),
+                                          entry.leaf->block_size()});
+    }
+  } else {
+    hbm_probes = CompositeBlockManager::probe_prefix_cache(
+        sequence, composite->leaf_entries(), hbm_state);
+  }
+
+  if (host_state.prefix_cache_matched()) {
+    for (const auto& [type, entry] : host_block_managers_[dp_rank]) {
+      if (!entry.supports_prefix_cache || entry.leaf == nullptr) {
+        continue;
+      }
+      host_probes.emplace_back(ProbeResult{type,
+                                           entry.leaf.get(),
+                                           host_state.take_blocks(type),
+                                           entry.leaf->block_size()});
+    }
+  } else {
+    host_probes = CompositeBlockManager::probe_prefix_cache(
+        sequence, host_block_managers_[dp_rank], host_state);
+  }
 
   PrefixMatch match = trim_shared_probes(composite->leaf_combination(),
                                          &hbm_probes,
@@ -544,15 +588,13 @@ void HierarchyBlockManagerPool::allocate_shared(Sequence* sequence) {
           << " hbm_tokens=" << match.hbm_tokens
           << " host_tokens=" << match.host_tokens;
 
-  release_host_match(sequence, dp_rank);
-  KVCacheState& host_state = sequence->host_kv_state();
+  sequence->clear_host_cache_match();
   for (ProbeResult& probe : host_probes) {
     host_state.mount_composite_shared(probe.type, std::move(probe.blocks));
   }
   CHECK_GE(host_state.current_max_tokens_capacity(), match.host_tokens);
   host_state.incr_kv_cache_tokens_num_up_to(match.host_tokens);
 
-  KVCacheState& hbm_state = sequence->kv_state();
   for (ProbeResult& probe : hbm_probes) {
     hbm_state.mount_composite_shared(probe.type, std::move(probe.blocks));
   }
@@ -561,6 +603,8 @@ void HierarchyBlockManagerPool::allocate_shared(Sequence* sequence) {
   hbm_state.set_kv_cache_tokens_num(match.hbm_tokens);
   CompositeBlockManager::release_probes(&hbm_probes);
   CompositeBlockManager::release_probes(&host_probes);
+  hbm_state.set_prefix_cache_matched();
+  host_state.set_prefix_cache_matched();
 
   if (match.restore_tokens > match.hbm_tokens) {
     sequence->set_host_cache_match(match.restore_tokens, match.copy_units);
@@ -629,8 +673,27 @@ HostCacheRestorePoint HierarchyBlockManagerPool::select_host_cache_restore(
 
 bool HierarchyBlockManagerPool::should_probe_prefix_cache(
     Sequence* sequence) const {
-  return options_.enable_prefix_cache() && sequence != nullptr &&
-         !sequence->has_any_blocks();
+  if (!options_.enable_prefix_cache() || sequence == nullptr) {
+    return false;
+  }
+  // Decode only has a device cache.  Prefill may enter with Host already
+  // matched by Mooncake, so the tier completion flags, rather than block
+  // presence, define whether another probe is needed.
+  KVCacheState& hbm_state = sequence->kv_state();
+  if (sequence->stage() == SequenceStage::DECODE) {
+    return !hbm_state.prefix_cache_matched();
+  }
+  if (!hbm_state.prefix_cache_matched()) {
+    return true;
+  }
+  // A Host match released after an HBM allocation failure may be re-probed
+  // while HBM still contains only its immutable prefix aliases. Once forward
+  // has advanced beyond that prefix, re-probing would detach computed DSV4
+  // SWA/C4/C128 blocks and replace the cursor with a shorter cache match.
+  if (hbm_state.kv_cache_tokens_num() > hbm_state.shared_tokens_num()) {
+    return false;
+  }
+  return !sequence->host_kv_state().prefix_cache_matched();
 }
 
 BlockManager* HierarchyBlockManagerPool::leaf_of(BlockType type,
@@ -647,55 +710,112 @@ void HierarchyBlockManagerPool::prefetch_from_storage(
   }
 
   for (auto& prefill_sequence : request->sequences()) {
-    DCHECK(prefill_sequence.get() != nullptr);
+    Sequence* sequence = prefill_sequence.get();
+    CHECK(sequence != nullptr);
+    CHECK(!sequence->has_any_blocks())
+        << "Mooncake prefetch admission requires an empty Sequence state.";
 
-    int32_t dp_rank = BlockManagerPool::get_dp_rank(prefill_sequence.get());
-    std::vector<Block> shared_blocks =
-        host_block_managers_[dp_rank]
-            .at(BlockType::KV)
-            .leaf->allocate_shared(prefill_sequence->tokens());
-    prefill_sequence->add_shared_host_blocks(BlockType::KV,
-                                             std::move(shared_blocks));
+    const int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
+    auto plan = std::make_shared<PrefetchPlan>();
+    plan->sequence = sequence;
 
-    size_t shared_blocks_num =
-        prefill_sequence->host_kv_state().shared_blocks_num(BlockType::KV);
-    const size_t num_additional_blocks =
-        (prefill_sequence->num_tokens() + options_.block_size() - 1) /
-            options_.block_size() -
-        shared_blocks_num;
-    if (num_additional_blocks <= 1) {
-      continue;
-    }
+    plan->host_probes = CompositeBlockManager::probe_prefix_cache(
+        sequence, host_block_managers_[dp_rank]);
+    for (size_t probe_index = 0; probe_index < plan->host_probes.size();
+         ++probe_index) {
+      ProbeResult& probe = plan->host_probes[probe_index];
+      CHECK(probe.leaf != nullptr);
+      const size_t full_blocks = sequence->tokens().size() / probe.block_size;
+      if (probe.blocks.size() > full_blocks) {
+        trim_blocks_from_back(probe.leaf, &probe.blocks, full_blocks);
+      }
+      probe.blocks.resize(full_blocks);
 
-    auto host_blocks = host_block_managers_[dp_rank]
-                           .at(BlockType::KV)
-                           .leaf->allocate(num_additional_blocks);
-    if (host_blocks.size() != num_additional_blocks) {
-      continue;
-    }
-    prefill_sequence->add_host_blocks(BlockType::KV, host_blocks);
-    PrefixCache::compute_hash_keys(
-        prefill_sequence->tokens(),
-        *prefill_sequence->host_kv_state().mutable_blocks(BlockType::KV),
-        shared_blocks_num);
-
-    if (num_additional_blocks > 1) {
-      const auto host_blks =
-          prefill_sequence->host_kv_state().blocks(BlockType::KV);
-      std::vector<BlockTransferInfo> block_transfer_infos;
-      block_transfer_infos.reserve(num_additional_blocks);
-      for (size_t i = 0; i < num_additional_blocks - 1; i++) {
-        block_transfer_infos.emplace_back(BlockTransferInfo(
-            -1,
-            host_blks[shared_blocks_num + i].id(),
-            host_blks[shared_blocks_num + i].get_immutable_hash_value(),
-            TransferType::G2H));
+      std::vector<size_t> missing;
+      for (size_t block_index = 0; block_index < full_blocks; ++block_index) {
+        if (!probe.blocks[block_index].is_valid()) {
+          missing.emplace_back(block_index);
+        }
+      }
+      if (missing.empty()) {
+        continue;
       }
 
-      engine_->prefetch_from_storage(prefill_sequence->dp_rank(),
-                                     std::move(block_transfer_infos),
-                                     prefill_sequence->get_termination_flag(),
-                                     prefill_sequence->get_prefetch_results());
+      const size_t requested_blocks = missing.size();
+      size_t allocatable_blocks =
+          std::min(requested_blocks,
+                   probe.leaf->num_free_blocks() +
+                       probe.leaf->num_blocks_in_prefix_cache());
+      std::vector<Block> allocated = probe.leaf->allocate(allocatable_blocks);
+      if (allocated.empty() && allocatable_blocks > 0) {
+        allocatable_blocks =
+            std::min(requested_blocks, probe.leaf->num_free_blocks());
+        allocated = probe.leaf->allocate(allocatable_blocks);
+      }
+      if (allocated.empty()) {
+        LOG(WARNING) << "[Mooncake][Prefetch] insufficient Host blocks: seq="
+                     << sequence->seq_id()
+                     << ", type=" << static_cast<int32_t>(probe.type)
+                     << ", requested=" << requested_blocks << ", allocated=0";
+        continue;
+      }
+      CHECK_EQ(allocated.size(), allocatable_blocks);
+      if (allocated.size() < requested_blocks) {
+        LOG(WARNING) << "[Mooncake][Prefetch] partial Host allocation: seq="
+                     << sequence->seq_id()
+                     << ", type=" << static_cast<int32_t>(probe.type)
+                     << ", requested=" << requested_blocks
+                     << ", allocated=" << allocated.size();
+      }
+      sequence->update_block_hashes(probe.block_size,
+                                    probe.leaf->options().hasher_type());
+      const Slice<XXH3Key> hashes = sequence->block_hashes();
+      CHECK_GE(hashes.size(), full_blocks);
+      for (size_t i = 0; i < allocated.size(); ++i) {
+        const size_t block_index = missing[i];
+        allocated[i].set_hash_value(hashes[block_index].data);
+        probe.blocks[block_index] = std::move(allocated[i]);
+        plan->queries.emplace_back(PrefetchQuery{
+            probe_index, block_index, 0, block_index * probe.block_size});
+      }
+    }
+
+    std::sort(
+        plan->queries.begin(),
+        plan->queries.end(),
+        [](const PrefetchQuery& lhs, const PrefetchQuery& rhs) {
+          return std::tie(lhs.token_start, lhs.probe_index, lhs.block_index) <
+                 std::tie(rhs.token_start, rhs.probe_index, rhs.block_index);
+        });
+
+    std::vector<BlockTransferInfo> transfer_infos;
+    transfer_infos.reserve(plan->queries.size());
+    for (size_t result_index = 0; result_index < plan->queries.size();
+         ++result_index) {
+      PrefetchQuery& query = plan->queries[result_index];
+      ProbeResult& probe = plan->host_probes[query.probe_index];
+      Block& block = probe.blocks[query.block_index];
+      query.result_index = result_index;
+      transfer_infos.emplace_back(/*src_id=*/-1,
+                                  /*dst_id=*/block.id(),
+                                  block.get_immutable_hash_value(),
+                                  TransferType::G2H,
+                                  probe.type);
+    }
+
+    if (transfer_infos.empty()) {
+      release_prefetch_plan(plan.get(), /*publish_store_hits=*/true);
+      continue;
+    }
+
+    CHECK(engine_ != nullptr) << "Mooncake prefetch requires an Engine.";
+    plan->result = engine_->prefetch_from_storage(dp_rank, transfer_infos);
+    CHECK(plan->result != nullptr);
+    {
+      std::lock_guard<std::mutex> lock(prefetch_plans_mutex_);
+      const bool inserted = prefetch_plans_.emplace(sequence, plan).second;
+      CHECK(inserted) << "Duplicate Mooncake prefetch plan for sequence "
+                      << sequence->seq_id();
     }
   }
 }
@@ -707,27 +827,102 @@ bool HierarchyBlockManagerPool::update_prefetch_result(
     return true;
   }
 
-  bool prefetch_result = true;
+  bool all_completed = true;
   for (auto& prefill_sequence : request->sequences()) {
-    uint32_t success_cnt = 0;
-    prefetch_result &=
-        prefill_sequence->update_prefetch_result(timeout, success_cnt);
+    Sequence* sequence = prefill_sequence.get();
+    std::shared_ptr<PrefetchPlan> plan;
+    {
+      std::lock_guard<std::mutex> lock(prefetch_plans_mutex_);
+      const auto it = prefetch_plans_.find(sequence);
+      if (it != prefetch_plans_.end()) {
+        plan = it->second;
+      }
+    }
+    if (plan == nullptr) {
+      continue;
+    }
+    const bool discard_result = request->finished() || request->cancelled();
+    if (!plan->result->completed()) {
+      if (discard_result && plan->result->request_stop()) {
+        VLOG(1) << "[Mooncake][Prefetch] cancelled sequence "
+                << sequence->seq_id()
+                << "; stop requested, waiting for every TP worker's "
+                   "in-flight batch to finish.";
+      } else if (timeout > 0 && plan->timer.elapsed_milliseconds() >= timeout &&
+                 plan->result->request_stop()) {
+        LOG(WARNING) << "[Mooncake][Prefetch] timeout after " << timeout
+                     << " ms for sequence " << sequence->seq_id()
+                     << "; stop requested, waiting for every TP worker's "
+                        "in-flight batch to finish.";
+      }
+      all_completed = false;
+      continue;
+    }
 
-    if (prefetch_result && success_cnt > 0) {
-      int32_t dp_rank = BlockManagerPool::get_dp_rank(prefill_sequence.get());
-      auto host_blocks =
-          prefill_sequence->host_kv_state().blocks(BlockType::KV);
-      auto cached_blocks =
-          prefill_sequence->host_kv_state().shared_blocks_num(BlockType::KV);
+    {
+      std::lock_guard<std::mutex> lock(prefetch_plans_mutex_);
+      const size_t erased = prefetch_plans_.erase(sequence);
+      CHECK_EQ(erased, 1u);
+    }
+    release_prefetch_plan(plan.get(),
+                          /*publish_store_hits=*/!discard_result);
+  }
 
-      host_block_managers_[dp_rank]
-          .at(BlockType::KV)
-          .leaf->cache(
-              host_blocks.slice(cached_blocks - success_cnt, cached_blocks));
+  return all_completed;
+}
+
+void HierarchyBlockManagerPool::release_prefetch_plan(PrefetchPlan* plan,
+                                                      bool publish_store_hits) {
+  CHECK(plan != nullptr);
+  CHECK(plan->sequence != nullptr);
+  if (!publish_store_hits) {
+    for (ProbeResult& probe : plan->host_probes) {
+      CHECK(probe.leaf != nullptr);
+      probe.leaf->deallocate(probe.blocks);
+      probe.blocks.clear();
+    }
+    return;
+  }
+
+  std::vector<uint8_t> merged_hits;
+  if (plan->result != nullptr) {
+    merged_hits = plan->result->merged_hits();
+  }
+
+  for (const PrefetchQuery& query : plan->queries) {
+    ProbeResult& probe = plan->host_probes[query.probe_index];
+    CHECK_LT(query.block_index, probe.blocks.size());
+    const bool hit = query.result_index < merged_hits.size() &&
+                     merged_hits[query.result_index] != 0;
+    if (!hit) {
+      std::vector<Block> miss;
+      miss.emplace_back(std::move(probe.blocks[query.block_index]));
+      probe.leaf->deallocate(miss);
     }
   }
 
-  return prefetch_result;
+  KVCacheState& host_state = plan->sequence->host_kv_state();
+  for (ProbeResult& probe : plan->host_probes) {
+    CHECK(probe.leaf != nullptr);
+    if (!probe.blocks.empty()) {
+      // PrefixCache::insert skips invalid SWA placeholders. Valid Store hits
+      // are inserted before the vector is shortened for the usable prefix.
+      probe.leaf->cache(probe.blocks);
+    }
+
+    const bool sparse = probe.type == BlockType::SWA;
+    const size_t reach = probe_reach(probe, sparse);
+    if (probe.blocks.size() > reach) {
+      trim_blocks_from_back(probe.leaf, &probe.blocks, reach);
+    }
+    if (!probe.blocks.empty()) {
+      host_state.mount_composite_shared(probe.type, std::move(probe.blocks));
+    }
+
+    VLOG(1) << "[Mooncake][PrefetchComplete] type="
+            << static_cast<int32_t>(probe.type) << ", reach=" << reach;
+  }
+  host_state.set_prefix_cache_matched();
 }
 
 void HierarchyBlockManagerPool::transfer_blocks(std::vector<Batch>& batches) {
@@ -747,6 +942,18 @@ void HierarchyBlockManagerPool::transfer_blocks(std::vector<Batch>& batches) {
 }
 
 void HierarchyBlockManagerPool::transfer_blocks() { transfer_offload_blocks(); }
+
+bool HierarchyBlockManagerPool::has_pending_async_block_release() const {
+  if (pending_offload_transfers_.load(std::memory_order_relaxed) > 0) {
+    return true;
+  }
+  for (const OffloadBlockPairQueue& queue : offload_block_pair_queues_) {
+    if (queue.size_approx() > 0) {
+      return true;
+    }
+  }
+  return false;
+}
 
 void HierarchyBlockManagerPool::transfer_offload_blocks() {
   for (size_t i = 0; i < offload_block_pair_queues_.size(); i++) {
@@ -780,6 +987,9 @@ void HierarchyBlockManagerPool::transfer_offload_blocks() {
       for (const auto& [type, entry] : host_block_managers_[i]) {
         host_leaves_snapshot.emplace(type, entry.leaf.get());
       }
+      pending_offload_transfers_.fetch_add(1, std::memory_order_relaxed);
+      std::atomic<size_t>* pending_offload_transfers =
+          &pending_offload_transfers_;
       folly::collectAll(
           std::move(engine_->transfer_kv_blocks(i, std::move(transfer_infos))))
           .via(folly::getGlobalCPUExecutor())
@@ -853,6 +1063,9 @@ void HierarchyBlockManagerPool::transfer_offload_blocks() {
             }
 
             return 0;
+          })
+          .ensure([pending_offload_transfers]() {
+            pending_offload_transfers->fetch_sub(1, std::memory_order_relaxed);
           });
     }
   }

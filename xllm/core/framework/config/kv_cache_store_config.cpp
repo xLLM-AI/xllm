@@ -20,7 +20,8 @@ limitations under the License.
 
 DEFINE_uint32(prefetch_timeout,
               0,
-              "Prefetch timeout for prefetch from kv cache store.");
+              "Stop issuing new KV cache Store prefetch batches after this "
+              "timeout; wait for in-flight batches before admission.");
 
 DEFINE_uint32(prefetch_batch_size,
               2,

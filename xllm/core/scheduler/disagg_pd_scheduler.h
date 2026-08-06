@@ -54,13 +54,17 @@ class DisaggPDScheduler : public ContinuousScheduler {
   ~DisaggPDScheduler() override;
 
   uint32_t get_waiting_requests_num() const override {
-    return prefill_queue_->size();
+    return prefill_queue_->size() + num_prefetch_pending_requests();
   };
 
   void step(const absl::Duration& timeout) override;
 
   bool add_request(std::shared_ptr<Request>& request) override;
 
+ protected:
+  bool enqueue_ready_request(std::shared_ptr<Request> request) override;
+
+ public:
   // prefill-1: for prefill send new request to decode
   virtual void dispatch_requests();
   // prefill-2: for prefill send first token to decode

@@ -287,8 +287,14 @@ void BlockManagerPool::allocate_shared(Sequence* sequence) {
     return;
   }
   int32_t dp_rank = get_dp_rank(sequence);
-  static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get())
-      ->allocate_shared_for_sequence(sequence);
+  auto* composite =
+      static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
+  if (composite->leaf_combination() ==
+          CompositeBlockManager::LeafCombination::SWA_COMPRESSED &&
+      sequence->kv_state().prefix_cache_matched()) {
+    return;
+  }
+  composite->allocate_shared_for_sequence(sequence);
 }
 
 void BlockManagerPool::cache(Sequence* sequence) {

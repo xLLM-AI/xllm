@@ -193,6 +193,9 @@ class WorkerImpl {
 
   void set_hierarchy_layer_synchronizer(ModelInputParams& input_params);
 
+  virtual std::vector<uint8_t> prefetch_kv_blocks(
+      Slice<BlockTransferInfo>& block_transfer_info);
+
   // Run the model on the given input. async call
   // the future returns a successfull status with no meaningful value
   virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(

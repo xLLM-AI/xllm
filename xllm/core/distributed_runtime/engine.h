@@ -22,6 +22,7 @@ limitations under the License.
 #include "core/framework/speculative/speculative_profile_registry.h"
 #include "framework/batch/batch.h"
 #include "framework/block/block_manager_pool.h"
+#include "framework/kv_cache_transfer/prefetch_result.h"
 #include "framework/model/model_args.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
@@ -111,12 +112,11 @@ class Engine {
     NOT_IMPLEMENTED();
   };
 
-  virtual void prefetch_from_storage(
+  virtual std::shared_ptr<PrefetchResult> prefetch_from_storage(
       const uint32_t dp_rank,
-      const std::vector<BlockTransferInfo>& block_transfer_info,
-      std::shared_ptr<std::atomic<int32_t>> flag,
-      std::vector<std::shared_ptr<std::atomic<uint32_t>>>* prefetch_results) {
+      const std::vector<BlockTransferInfo>& block_transfer_info) {
     NOT_IMPLEMENTED();
+    return nullptr;
   };
 
   virtual void get_cache_info(std::vector<uint64_t>& cluster_ids,

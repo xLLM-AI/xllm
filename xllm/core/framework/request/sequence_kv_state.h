@@ -53,6 +53,15 @@ class KVCacheState {
   // to decide whether an allocation that started from an empty sequence should
   // be fully rolled back on failure (vs. a grow on an already-populated seq).
   bool has_any_blocks() const;
+
+  // True after this cache tier has completed its prefix-cache probe.  This is
+  // deliberately independent from has_any_blocks(): a completed probe may
+  // have matched zero blocks, and a Mooncake prefetch may have populated Host
+  // blocks before HBM has been probed.
+  bool prefix_cache_matched() const { return prefix_cache_matched_; }
+  void set_prefix_cache_matched(bool matched = true) {
+    prefix_cache_matched_ = matched;
+  }
   // token <-> physical slot mapping for `type` (paged attention). CHECKs the
   // type is present.
   std::vector<int32_t> cache_slots(BlockType type,
@@ -81,6 +90,11 @@ class KVCacheState {
   // Drop all blocks held under `type` (releases their Block refs and removes
   // the map entry).
   void erase_blocks(BlockType type);
+
+  // Move the blocks for `type` out without dropping their references.  The
+  // caller becomes responsible for the returned aliases and may mount them
+  // again after combining probes from another cache tier.
+  std::vector<Block> take_blocks(BlockType type);
 
   // Number of shared (prefix-cache-hit) blocks held under `type`.
   size_t shared_blocks_num(BlockType type) const;
@@ -202,6 +216,8 @@ class KVCacheState {
 
   // number of tokens in kv cache
   size_t kv_cache_tokens_num_ = 0;
+
+  bool prefix_cache_matched_ = false;
 
   // KV cache blocks keyed by cache role. The flat attention KV lives under
   // BlockType::KV; DSV4 keeps its SWA / C4 / C128 groups here; the per-sequence

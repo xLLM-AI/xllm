@@ -203,6 +203,11 @@ uint32_t Worker::transfer_kv_blocks(
   return impl_->transfer_kv_blocks(batch_id, block_transfer_info);
 }
 
+std::vector<uint8_t> Worker::prefetch_kv_blocks(
+    Slice<BlockTransferInfo>& block_transfer_info) {
+  return impl_->prefetch_kv_blocks(block_transfer_info);
+}
+
 const torch::Device& Worker::device() const { return impl_->device(); }
 
 folly::SemiFuture<std::optional<ForwardOutput>>

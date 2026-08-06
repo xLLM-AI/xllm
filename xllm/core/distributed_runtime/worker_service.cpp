@@ -570,7 +570,7 @@ void WorkerService::PrefetchFromStorage(
 
   brpc::StreamId stream_id;
   brpc::StreamOptions stream_options;
-  stream_options.idle_timeout_ms = 5 * options_.prefetch_batch_size();
+  stream_options.idle_timeout_ms = -1;
   if (brpc::StreamAccept(&stream_id, *cntl, &stream_options) != 0) {
     resp->set_ok(false);
     LOG(ERROR) << "Failed to accept stream!";
@@ -580,47 +580,33 @@ void WorkerService::PrefetchFromStorage(
   std::vector<BlockTransferInfo> block_transfer_info;
   proto_to_block_transfer_info(*req, block_transfer_info);
 
-  copy_threadpool_.schedule([this,
-                             block_transfer_info =
-                                 std::move(block_transfer_info),
-                             stream_id = std::move(stream_id)]() mutable {
-    Slice<BlockTransferInfo> transfer_slice{block_transfer_info};
-    bool is_completed = false;
-
-    for (size_t i = 0; i < transfer_slice.size();
-         i += options_.prefetch_batch_size()) {
-      auto current_slice = transfer_slice.slice(
-          i,
-          std::min(i + options_.prefetch_batch_size(), transfer_slice.size()));
-
-      auto success_cnt =
-          worker_->transfer_kv_blocks(UNINITIALIZED_BATCH_ID, current_slice);
-
-      if (success_cnt != current_slice.size() ||
-          (i + options_.prefetch_batch_size()) >= transfer_slice.size()) {
-        is_completed = true;
-      }
-
-      butil::IOBuf buf;
-      buf.append(std::to_string(success_cnt));
-      if (brpc::StreamWrite(stream_id, buf) != 0) {
-        brpc::StreamClose(stream_id);
-        return;
-      }
-
-      if (is_completed) {
-        if (success_cnt != 0) {
-          butil::IOBuf buf_end;
-          buf_end.append("0");
-          if (brpc::StreamWrite(stream_id, buf_end) != 0) {
-            brpc::StreamClose(stream_id);
-            return;
-          }
+  copy_threadpool_.schedule(
+      [this,
+       block_transfer_info = std::move(block_transfer_info),
+       stream_id = std::move(stream_id)]() mutable {
+        Slice<BlockTransferInfo> transfer_slice{block_transfer_info};
+        std::vector<uint8_t> hits = worker_->prefetch_kv_blocks(transfer_slice);
+        const bool worker_ok = hits.size() == transfer_slice.size();
+        if (!worker_ok) {
+          LOG(ERROR) << "Mooncake prefetch returned an invalid bitmap size: "
+                     << hits.size() << " != " << transfer_slice.size();
+          hits.assign(transfer_slice.size(), /*value=*/0);
         }
-        break;
-      }
-    }
-  });
+
+        proto::PrefetchResultChunk result_chunk;
+        result_chunk.set_offset(0);
+        result_chunk.set_hit_bitmap(reinterpret_cast<const char*>(hits.data()),
+                                    hits.size());
+        result_chunk.set_completed(true);
+        result_chunk.set_worker_ok(worker_ok);
+
+        std::string payload;
+        CHECK(result_chunk.SerializeToString(&payload));
+        butil::IOBuf buffer;
+        buffer.append(payload);
+        brpc::StreamWrite(stream_id, buffer);
+        brpc::StreamClose(stream_id);
+      });
 
   resp->set_ok(true);
   return;
