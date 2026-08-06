@@ -324,6 +324,13 @@ class Flux2PipelineImpl final : public Flux2PipelineBaseImpl {
         noise_pred = noise_pred.narrow(1, 0, prepared_latents.size(1));
       }
 
+      torch::Tensor before_scheduler_noise_pred = noise_pred.to(torch::kCPU);
+      std::string save_path_1 =
+          "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/"
+          "dump_flux2_tensor/10_cpp_dit_loop_noise_pred/01_noise_pred/09_" +
+          std::to_string(i + 1) + "_before_scheduler_noise_pred.pt";
+      torch::save(before_scheduler_noise_pred, save_path_1);
+
       auto prev_latents = scheduler_->step(noise_pred, t, prepared_latents);
 
       prepared_latents = prev_latents.detach();
@@ -337,6 +344,12 @@ class Flux2PipelineImpl final : public Flux2PipelineBaseImpl {
       }
     }
 
+    torch::Tensor dit_output_prepared_latents =
+        prepared_latents.to(torch::kCPU);
+    torch::save(dit_output_prepared_latents,
+                "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/"
+                "dump_flux2_tensor/09_cpp_flux2_dit_and_output_tensor/"
+                "09_02_dit_output_prepared_latents.pt");
     torch::Tensor image;
 
     torch::Tensor unpacked_latents =
@@ -353,9 +366,18 @@ class Flux2PipelineImpl final : public Flux2PipelineBaseImpl {
     unpacked_latents = unpatchify_latents(unpacked_latents);
 
     image = vae_->decode(unpacked_latents);
-
+    torch::Tensor dit_image_vae = image.to(torch::kCPU);
+    torch::save(dit_image_vae,
+                "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/"
+                "dump_flux2_tensor/09_cpp_flux2_dit_and_output_tensor/"
+                "09_03_dit_image_vae.pt");
     image = flux2_image_processor_->postprocess(image);
 
+    torch::Tensor dit_image = image.to(torch::kCPU);
+    torch::save(dit_image,
+                "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/"
+                "dump_flux2_tensor/09_cpp_flux2_dit_and_output_tensor/"
+                "09_04_dit_image.pt");
     return image;
   }
 

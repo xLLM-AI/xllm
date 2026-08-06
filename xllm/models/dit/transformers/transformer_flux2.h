@@ -1208,11 +1208,12 @@ class Flux2Transformer2DModelImpl : public torch::nn::Module {
     auto axes_dims_rope = model_args.axes_dims_rope();
     in_channels_ = model_args.in_channels();
     out_channels_ = model_args.out_channels();
+    guidance_embeds_ = model_args.guidance_embeds();
 
     int64_t inner_dim = num_attention_heads * attention_head_dim;
 
-    time_guidance_embed_ =
-        Flux2TimestepGuidanceEmbeddings(context, inner_dim, false, true);
+    time_guidance_embed_ = Flux2TimestepGuidanceEmbeddings(
+        context, inner_dim, false, guidance_embeds_);
     register_module("time_guidance_embed", time_guidance_embed_);
 
     double_stream_modulation_img_ =
@@ -1421,9 +1422,12 @@ class Flux2Transformer2DModelImpl : public torch::nn::Module {
 
   int64_t in_channels() { return in_channels_; }
 
+  bool guidance_embeds() { return guidance_embeds_; }
+
  private:
   int64_t in_channels_;
   int64_t out_channels_;
+  bool guidance_embeds_;
   layer::AddMatmul context_embedder_{nullptr};
   layer::AddMatmul x_embedder_{nullptr};
   Flux2TimestepGuidanceEmbeddings time_guidance_embed_{nullptr};
@@ -1468,6 +1472,10 @@ class Flux2DiTModelImpl : public torch::nn::Module {
   }
   int64_t in_channels() { return flux2_transformer_2d_model_->in_channels(); }
 
+  bool guidance_embeds() {
+    return flux2_transformer_2d_model_->guidance_embeds();
+  }
+
   void load_model(std::unique_ptr<DiTFolderLoader> loader) {
     flux2_transformer_2d_model_->load_model(std::move(loader));
     flux2_transformer_2d_model_->verify_loaded_weights("");
@@ -1495,6 +1503,7 @@ REGISTER_MODEL_ARGS(Flux2Transformer2DModel, [&] {
   LOAD_ARG_OR(patch_size, "patch_size", 1);
   LOAD_ARG_OR(rope_theta, "rope_theta", 2000.0f);
   LOAD_ARG_OR(timestep_guidance_channels, "timestep_guidance_channels", 256);
+  LOAD_ARG_OR(guidance_embeds, "guidance_embeds", true);
 });
 
 }  // namespace xllm
