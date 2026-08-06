@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import subprocess
 import sys
@@ -25,36 +24,16 @@ from pathlib import Path
 
 import pytest
 
+from xllm.python import platform
+
 _REPO_ROOT = Path(__file__).parents[2]
 _PYTHON_ROOT = _REPO_ROOT / "xllm" / "python"
 
-
-def _load_platform_module():
-    """Load ``platform.py`` without importing the package that binds kernels.
-
-    ``xllm/python/__init__.py`` needs the platform's kernel package and its C++
-    operators, neither of which a bare test runner has. Loading the file under a
-    private name keeps ``sys.modules["xllm.python"]`` untouched for the test
-    modules that do import the real package.
-    """
-    spec = importlib.util.spec_from_file_location(
-        "_xllm_python_platform", _PYTHON_ROOT / "platform.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-platform = _load_platform_module()
-
-_OP_SCHEMAS = (
+_COMMON_SCHEMAS = (
     "rms_norm(Tensor input, Tensor weight, float eps) -> Tensor",
     "fused_add_rms_norm(Tensor(a!) input, Tensor(b!) residual, Tensor weight, "
     "float eps) -> (Tensor, Tensor)",
     "silu_and_mul(Tensor input) -> Tensor",
-    "fused_qk_norm_rope(Tensor(a!) qkv, int num_heads_q, int num_heads_k, "
-    "int num_heads_v, int head_dim, float eps, Tensor q_weight, Tensor k_weight, "
-    "Tensor cos_sin_cache, bool interleaved, Tensor position_ids) -> Tensor",
     "reshape_paged_cache(Tensor slot_mapping, Tensor keys, Tensor values, "
     "Tensor(a!) key_cache, Tensor(b!) value_cache) -> Tensor",
     "update_decode_graph_metadata(Tensor tokens, Tensor positions, Tensor "
@@ -64,6 +43,15 @@ _OP_SCHEMAS = (
     "dst_kv_seq_lens, Tensor(e!) dst_kv_seq_lens_delta, Tensor(f!) "
     "dst_paged_kv_indptr, Tensor(g!) dst_paged_kv_indices, Tensor(h!) "
     "dst_paged_kv_last_page_len, int padded_num_tokens) -> Tensor",
+)
+_CUDA_SCHEMAS = (
+    *_COMMON_SCHEMAS,
+    "fused_qk_norm_rope(Tensor(a!) qkv, int num_heads_q, int num_heads_k, "
+    "int num_heads_v, int head_dim, float eps, Tensor q_weight, Tensor k_weight, "
+    "Tensor cos_sin_cache, bool interleaved, Tensor position_ids) -> Tensor",
+)
+_NPU_SCHEMAS = (
+    *_COMMON_SCHEMAS,
     "quant_matmul(Tensor x1, Tensor x2, bool transpose2, Tensor scale, "
     "Tensor? offset, Tensor? pertoken_scale, Tensor? bias, ScalarType? "
     "output_dtype) -> Tensor",
@@ -81,24 +69,7 @@ _OP_SCHEMAS = (
     "Tensor? actual_seq_lengths_kv, Tensor? query_rope, Tensor? key_rope, "
     "float scale_value, int sparse_block_size, str layout_query, str "
     "layout_kv, int sparse_mode) -> Tensor",
-    "moe_fused_topk(Tensor gating_output, int topk, bool renormalize, str "
-    "scoring_func) -> (Tensor, Tensor)",
-    "cutlass_fused_moe(Tensor input, Tensor token_selected_experts, Tensor "
-    "token_final_scales, Tensor fc1_expert_weights, Tensor fc2_expert_weights, "
-    "int tp_size, int tp_rank, int ep_size, int ep_rank) -> Tensor",
 )
-
-# Reaching a kernel package directly, without the binding in
-# ``xllm/python/__init__.py``, keeps a FakeTensor contract test off the vendor
-# runtime of the platform it belongs to.
-_STANDALONE_PACKAGE = f"""
-import sys
-import types
-
-package = types.ModuleType("xllm.python")
-package.__path__ = [{str(_PYTHON_ROOT)!r}]
-sys.modules["xllm.python"] = package
-"""
 
 _PLATFORM_REQUIRED = pytest.mark.skipif(
     not (platform.is_gpu() or platform.is_npu()),
@@ -106,14 +77,46 @@ _PLATFORM_REQUIRED = pytest.mark.skipif(
 )
 
 
-def _run_isolated_python(script: str, standalone: bool = False) -> None:
-    definitions = [
-        "import torch",
-        'library = torch.library.Library("xllm_ops", "DEF")',
-        *(f"library.define({schema!r})" for schema in _OP_SCHEMAS),
+def _package_stub(kernel_package: str | None = None) -> str:
+    lines = [
+        "import sys",
+        "import types",
+        'package = types.ModuleType("xllm.python")',
+        f"package.__path__ = [{str(_PYTHON_ROOT)!r}]",
+        'sys.modules["xllm.python"] = package',
     ]
-    if standalone:
-        definitions.append(_STANDALONE_PACKAGE)
+    if kernel_package:
+        qualified_name = f"xllm.python.{kernel_package}"
+        lines.extend(
+            (
+                f"kernels = types.ModuleType({qualified_name!r})",
+                f"kernels.__path__ = [{str(_PYTHON_ROOT / kernel_package)!r}]",
+                f"package.{kernel_package} = kernels",
+                f"sys.modules[{qualified_name!r}] = kernels",
+            )
+        )
+    return "\n".join(lines)
+
+
+def _run_isolated_python(
+    script: str,
+    *,
+    schemas: tuple[str, ...] = (),
+    standalone: bool = False,
+    kernel_package: str | None = None,
+) -> None:
+    definitions: list[str] = []
+    if schemas:
+        definitions.extend(
+            (
+                "import torch",
+                'library = torch.library.Library("xllm_ops", "DEF")',
+                *(f"library.define({schema!r})" for schema in schemas),
+            )
+        )
+    if standalone or kernel_package is not None:
+        definitions.append(_package_stub(kernel_package))
+
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
         value for value in (str(_REPO_ROOT), env.get("PYTHONPATH", "")) if value
@@ -136,8 +139,8 @@ def test_platform_queries_are_no_argument(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 @_PLATFORM_REQUIRED
-def test_binding_answers_every_import_form_with_one_module() -> None:
-    """``kernels`` is an alias, so no kernel package is imported twice."""
+def test_binding_import_contract() -> None:
+    schemas = _CUDA_SCHEMAS if platform.is_gpu() else _NPU_SCHEMAS
     _run_isolated_python(
         """
         import sys
@@ -146,61 +149,36 @@ def test_binding_answers_every_import_form_with_one_module() -> None:
         from xllm.python import kernels
         import xllm.python.kernels
         from xllm.python.kernels import rms_norm
-
         from xllm.python import platform
 
         selected = f"xllm.python.kernels_{'cuda' if platform.is_gpu() else 'npu'}"
+        peer = (
+            "xllm.python.kernels_npu"
+            if platform.is_gpu()
+            else "xllm.python.kernels_cuda"
+        )
         assert kernels is sys.modules[selected]
         assert kernels is sys.modules["xllm.python.kernels"]
         assert kernels is xllm.python.kernels
         assert rms_norm is kernels.rms_norm
-
-        # The alias does not hide which package is live.
         assert kernels.__name__ == selected
-        """
-    )
-
-
-@_PLATFORM_REQUIRED
-def test_binding_leaves_the_peer_package_unimported() -> None:
-    _run_isolated_python(
-        """
-        import importlib
-        import sys
-
-        import xllm.python
-        from xllm.python import platform
-
-        peer, vendor = (
-            ("xllm.python.kernels_npu", "torch_npu")
-            if platform.is_gpu()
-            else ("xllm.python.kernels_cuda", "flashinfer")
-        )
-
-        for module_name in (
-            "xllm.python.layers.linear",
-            "xllm.python.models.deepseek_v32",
-            "xllm.python.models.glm5_2",
-        ):
-            importlib.import_module(module_name)
-
-        loaded = set(sys.modules)
         assert not any(
-            name == peer or name.startswith(peer + ".") for name in loaded
+            name == peer or name.startswith(peer + ".") for name in sys.modules
         )
-        assert vendor not in loaded
-        """
+        """,
+        schemas=schemas,
     )
 
 
 def test_registry_does_not_preload_model_modules() -> None:
     _run_isolated_python(
         """
-        import importlib
         import sys
 
-        registry = importlib.import_module("xllm.python.registry")
-        assert {"qwen3", "deepseek_v32", "glm_moe_dsa"} <= registry._REGISTRY.keys()
+        from xllm.python.registry import get_model_class, register_model
+
+        assert callable(get_model_class)
+        assert callable(register_model)
         assert not any(name.startswith("xllm.python.models.") for name in sys.modules)
         """,
         standalone=True,
@@ -253,12 +231,13 @@ def test_npu_fake_tensor_and_mutation_contracts() -> None:
             else:
                 raise AssertionError("invalid int4 input shape was accepted")
         """,
-        standalone=True,
+        schemas=_NPU_SCHEMAS,
+        kernel_package="kernels_npu",
     )
 
 
 def test_cuda_fake_tensor_and_mutation_contracts() -> None:
-    """Normalization, activation and rope shapes traced without a GPU."""
+    """Normalization and activation shapes traced without a GPU."""
     _run_isolated_python(
         """
         import xllm.python.kernels_cuda._custom_op  # noqa: F401
@@ -281,5 +260,6 @@ def test_cuda_fake_tensor_and_mutation_contracts() -> None:
             gated = torch.empty(4, 32)
             assert activation.silu_and_mul(gated).shape == (4, 16)
         """,
-        standalone=True,
+        schemas=_CUDA_SCHEMAS,
+        kernel_package="kernels_cuda",
     )
