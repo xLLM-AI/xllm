@@ -12,25 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Graph interfaces for Python-authored activation operators."""
+"""NPU paged-attention support kernels.
+
+Both operators are capturable: they read only their arguments, so a decode
+graph can replay them without re-planning.
+"""
 
 from __future__ import annotations
 
 import torch
 
+reshape_paged_cache = torch.ops.xllm_ops.reshape_paged_cache
+update_decode_graph_metadata = torch.ops.xllm_ops.update_decode_graph_metadata
 
-@torch.library.custom_op("xllm_triton::silu_and_mul", mutates_args=())
-def silu_and_mul(value: torch.Tensor) -> torch.Tensor:
-    """Run the CUDA Triton gated SiLU kernel as one graph node."""
-    from xllm.python.kernels.triton.cuda.silu_and_mul import (
-        silu_and_mul as triton_silu_and_mul,
-    )
-
-    return triton_silu_and_mul(value)
-
-
-@silu_and_mul.register_fake
-def _silu_and_mul_fake(value: torch.Tensor) -> torch.Tensor:
-    shape = list(value.shape)
-    shape[-1] //= 2
-    return value.new_empty(shape)
+__all__ = ["reshape_paged_cache", "update_decode_graph_metadata"]

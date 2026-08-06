@@ -20,7 +20,7 @@ import torch
 import triton
 import triton.language as tl
 
-from xllm.python.kernels.triton.npu.utils import (
+from .utils import (
     extract_slice,
     get_element,
     get_vectorcore_num,

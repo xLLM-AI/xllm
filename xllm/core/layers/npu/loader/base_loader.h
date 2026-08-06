@@ -88,6 +88,8 @@ class BaseLoader {
 
   torch::Dtype string2dtype(const std::string& dtype_str);
 
+  std::string expert_shm_namespace() const;
+
   void correct_tensor_dtype(torch::Tensor& tensor,
                             const std::string& tensorName);
 

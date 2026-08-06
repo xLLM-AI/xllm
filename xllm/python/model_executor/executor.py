@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,17 +21,14 @@ from xllm.python.attention.backend import AttentionBackend, AttentionMetadata, K
 from xllm.python.layers.attention import Attention
 from xllm.python.model_executor.forward_context import LayerSynchronizer
 from xllm.python.model_executor.runners.eager import EagerRunner
+from xllm.python import platform
 
 
-def _is_npu_device(device: torch.device) -> bool:
-    return device.type in ("npu", "privateuseone")
-
-
-def _resolve_graph_backend(config: dict, device: torch.device) -> str:
+def _resolve_graph_backend(config: dict) -> str:
     graph_backend = str(config.get("python_graph_backend", "off")).lower()
     graph_disabled = graph_backend in ("", "off", "none", "0")
     if graph_disabled and config.get("enable_graph", False):
-        if _is_npu_device(device):
+        if platform.is_npu():
             return "aclgraph"
     return graph_backend
 
@@ -41,7 +38,7 @@ def _create_attention_backend(
     device: torch.device,
     dtype: torch.dtype,
 ) -> AttentionBackend:
-    if _is_npu_device(device):
+    if platform.is_npu():
         from xllm.python.attention.npu_paged_attention import (
             NpuPagedAttentionBackend,
         )
@@ -54,7 +51,7 @@ def _create_attention_backend(
             device=device,
             dtype=dtype,
         )
-    if device.type == "cuda":
+    if platform.is_gpu():
         from xllm.python.attention.flashinfer import FlashInferBackend
         return FlashInferBackend(
             num_heads=first_attention.num_heads,
@@ -107,7 +104,7 @@ class ModelExecutor:
         self.decode_graph_runner = None
         self.inductor_runner = None
 
-        graph_backend = _resolve_graph_backend(config, device)
+        graph_backend = _resolve_graph_backend(config)
         if graph_backend in ("", "off", "none", "0"):
             pass
         elif graph_backend == "cudagraphs":

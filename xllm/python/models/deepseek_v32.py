@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,9 +22,8 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch_npu  # noqa: F401
 
-from xllm.python import ops
+from xllm.python import distributed, kernels
 
 if TYPE_CHECKING:
     from xllm_weight_loader import StateDict
@@ -109,10 +108,7 @@ def _interleave_rope_with(
     x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
 ) -> torch.Tensor:
     """Apply interleaved RoPE to ``[T, H, D]`` with precomputed cos/sin."""
-    t, h, d = x.shape
-    return torch_npu.npu_interleave_rope(
-        x.view(t, h, 1, d), cos, sin
-    ).view(t, h, d)
+    return kernels.interleaved_rotary_embedding(x, cos, sin)
 
 
 def _apply_half_rope(
@@ -361,9 +357,9 @@ class W8A8StaticLinear(nn.Module):
             ),
             -128, 127,
         ).to(torch.int8)
-        return ops.quant_matmul(
+        return kernels.quant_matmul(
             x_int8, self.weight, False, self.deq_scale, None, None,
-            self.quant_bias if not (self.row_parallel and ops.tp_rank(x.device) != 0) else None,
+            self.quant_bias if not (self.row_parallel and distributed.tp_rank(x.device) != 0) else None,
             torch.bfloat16,
         )
 
@@ -399,8 +395,8 @@ class W8A8DynamicLinear(nn.Module):
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_int8, pertoken = torch.ops.npu.npu_dynamic_quant(x)
-        return ops.quant_matmul(
+        x_int8, pertoken = kernels.dynamic_quant(x)
+        return kernels.quant_matmul(
             x_int8, self.weight, False, self.weight_scale, None,
             pertoken, None, torch.bfloat16,
         )
@@ -517,10 +513,10 @@ class DeepseekV3MLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up = self.gate_up_proj(x)
-        act = ops.silu_and_mul(gate_up)
+        act = kernels.silu_and_mul(gate_up)
         out = self.down_proj(act)
         if self.tp > 1 and not self.skip_tp_reduce:
-            ops.all_reduce_(out)
+            distributed.all_reduce_(out)
         return out
 
 
@@ -662,7 +658,7 @@ class DeepseekV3MLAAttention(Attention):
         )
         o = self.o_proj(v_full)
         if self.cfg.tp_size > 1:
-            ops.all_reduce_(o)
+            distributed.all_reduce_(o)
         return o
 
 
@@ -711,10 +707,10 @@ class DeepseekV3Indexer(nn.Module):
         k = torch.cat([k_pe, k_nope], dim=-1)
         if ctx.index_cache is not None and ctx.slot_mapping is not None:
             k_view = ctx.index_cache.view(-1, ctx.index_cache.size(-1))
-            ops.scatter_nd_update(
+            kernels.scatter_nd_update(
                 k_view, ctx.slot_mapping.reshape(-1, 1).clamp_min(0), k
             )
-        topk = ops.lightning_indexer(
+        topk = kernels.lightning_indexer(
             q, ctx.index_cache, weights,
             ctx.actual_seq_q, ctx.actual_seq_kv, ctx.block_table,
             "TND", "PA_BSND", self.topk, 3,
@@ -811,10 +807,12 @@ class DeepseekV3MoE(nn.Module):
             "(experts_w2_offset == 0)")
         self.experts_w13.data = self.experts_w13.data.transpose(1, 2).contiguous()
         self.experts_w2.data = self.experts_w2.data.transpose(1, 2).contiguous()
-        self.experts_w13.data = torch_npu.npu_format_cast(
-            self.experts_w13.data, 29)  # ACL_FORMAT_FRACTAL_NZ
-        self.experts_w2.data = torch_npu.npu_format_cast(
-            self.experts_w2.data, 29)  # ACL_FORMAT_FRACTAL_NZ
+        self.experts_w13.data, self.experts_w2.data = (
+            kernels.prepare_grouped_moe_weights(
+                self.experts_w13.data,
+                self.experts_w2.data,
+            )
+        )
         self.experts_w13_scale.data = self.experts_w13_scale.data.view(
             self.num_experts, -1
         ).contiguous()
@@ -829,70 +827,26 @@ class DeepseekV3MoE(nn.Module):
         ).contiguous()
         self.shared_experts.process_weights_after_loading()
 
-    def _grouped_topk(
-        self, gating_output: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """noaux_tc groupwise top-k via ``npu_moe_gating_top_k``."""
-        bias = self.e_score_correction_bias
-        if bias is not None and bias.dtype != gating_output.dtype:
-            bias = bias.to(gating_output.dtype)
-        topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
-            gating_output,
-            k=self.topk,
-            bias=bias,
-            k_group=self.topk_group,
-            group_count=self.n_group,
-            group_select_mode=1,
-            renorm=1 if self.cfg.norm_topk_prob else 0,
-            norm_type=1,
-            routed_scaling_factor=1.0,
-            eps=1e-20,
-        )
-        return topk_weights, topk_ids
-
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        num_tokens = hidden.shape[0]
         logits = self.gate(hidden)
-        topk_w, topk_idx = self._grouped_topk(logits)
-
-        sorted_hidden_i8, expanded_row_idx, expert_tokens, pertoken_scale = torch_npu.npu_moe_init_routing_v2(
+        routed = kernels.grouped_moe(
             hidden,
-            topk_idx.to(torch.int32),
-            scale=None,
-            active_num=num_tokens * self.topk,
-            expert_num=self.num_experts,
-            expert_tokens_num_type=1,
-            expert_tokens_num_flag=True,
-            active_expert_range=[0, self.num_experts],
-            quant_mode=1,
-        )
-        group_list = torch.cumsum(expert_tokens.to(torch.int64), 0)
-
-        act_i8, act_pt, _ = torch.ops.npu.npu_grouped_matmul_swiglu_quant(
-            x=sorted_hidden_i8,
-            weight=self.experts_w13,
-            group_list=group_list,
-            weight_scale=self.experts_w13_scale,
-            x_scale=pertoken_scale,
-        )
-
-        out = torch.ops.npu.npu_grouped_matmul(
-            x=[act_i8], weight=[self.experts_w2],
-            scale=[self.experts_w2_scale.to(torch.bfloat16)],
-            per_token_scale=[act_pt],
-            split_item=2, group_list_type=0, group_type=0,
-            group_list=group_list, output_dtype=torch.bfloat16)[0]
-
-        routed = torch_npu.npu_moe_token_unpermute(
-            permuted_tokens=out,
-            sorted_indices=expanded_row_idx.abs(),
-            probs=topk_w.to(out.dtype),
+            logits,
+            self.experts_w13,
+            self.experts_w2,
+            self.experts_w13_scale,
+            self.experts_w2_scale,
+            self.e_score_correction_bias,
+            self.topk,
+            self.topk_group,
+            self.n_group,
+            self.cfg.norm_topk_prob,
         )
         routed = routed * self.routed_scaling
         shared_out = self.shared_experts(hidden)
         final = routed + shared_out
         if self.cfg.tp_size > 1:
-            ops.all_reduce_(final)
+            distributed.all_reduce_(final)
         return final
 
 

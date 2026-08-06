@@ -322,8 +322,9 @@ class Sequence final {
 
   // time between two tokens
   int64_t tbt(const absl::Time& now);
+  int64_t tbt_microseconds(const absl::Time& now);
 
-  // Number of real tokens committed to this sequence since the last tbt()
+  // Number of real tokens committed to this sequence since the last tbt/tbt_us
   // reset. Speculative/MTP steps commit multiple tokens per step, so this is
   // used to amortize the per-step inter-token latency into a per-token value.
   size_t generated_tokens_since_latency() const {

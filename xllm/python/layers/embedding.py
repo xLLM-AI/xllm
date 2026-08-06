@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,7 +19,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from xllm.python import ops
+from xllm.python import distributed
 
 
 class HiddenParallelEmbedding(nn.Module):
@@ -52,5 +52,5 @@ class HiddenParallelEmbedding(nn.Module):
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         out = torch.nn.functional.embedding(input_ids, self.weight)
         if self.tp_size > 1:
-            out = ops.all_gather(out, dim=-1, world_size=self.tp_size)
+            out = distributed.all_gather(out, dim=-1, world_size=self.tp_size)
         return out

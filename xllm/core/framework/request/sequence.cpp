@@ -921,10 +921,14 @@ size_t Sequence::get_decodable_token_count(size_t size) const {
 }
 
 int64_t Sequence::tbt(const absl::Time& now) {
+  return (tbt_microseconds(now) + 500) / 1000;
+}
+
+int64_t Sequence::tbt_microseconds(const absl::Time& now) {
   const int64_t latency =
-      absl::ToInt64Milliseconds(now - latest_generate_time_);
+      absl::ToInt64Microseconds(now - latest_generate_time_);
   latest_generate_time_ = now;
-  // Reset the committed-token counter so the next tbt() interval amortizes only
+  // Reset the committed-token counter so the next tbt interval amortizes only
   // the tokens generated within that interval.
   generated_tokens_since_latency_ = 0;
   return latency;

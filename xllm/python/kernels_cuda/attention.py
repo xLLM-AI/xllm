@@ -1,4 +1,4 @@
-# Copyright 2025-2026 The xLLM Authors.
+# Copyright 2026 The xLLM Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,8 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Hardware execution kernels used by Python graph operators.
+"""CUDA paged-attention support kernels.
 
-Kernel modules provide backend-specific launchers. Torch schemas, FakeTensor
-implementations, and backend dispatch belong to :mod:`xllm.python.ops`.
+Both operators are capturable: they read only their arguments, so a decode
+graph can replay them without re-planning.
 """
+
+from __future__ import annotations
+
+import torch
+
+reshape_paged_cache = torch.ops.xllm_ops.reshape_paged_cache
+update_decode_graph_metadata = torch.ops.xllm_ops.update_decode_graph_metadata
+
+__all__ = ["reshape_paged_cache", "update_decode_graph_metadata"]

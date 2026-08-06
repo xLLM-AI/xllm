@@ -11,17 +11,17 @@ from __future__ import annotations
 
 import torch
 
-from xllm.python.kernels.triton.cuda.fla.chunk_delta_h import (
+from .chunk_delta_h import (
     chunk_gated_delta_rule_fwd_h,
 )
-from xllm.python.kernels.triton.cuda.fla.chunk_o import chunk_fwd_o
-from xllm.python.kernels.triton.cuda.fla.chunk_scaled_dot_kkt import (
+from .chunk_o import chunk_fwd_o
+from .chunk_scaled_dot_kkt import (
     chunk_scaled_dot_kkt_fwd,
 )
-from xllm.python.kernels.triton.cuda.fla.cumsum import chunk_local_cumsum
-from xllm.python.kernels.triton.cuda.fla.solve_tril import solve_tril
-from xllm.python.kernels.triton.cuda.fla.utils import FLA_CHUNK_SIZE, input_guard
-from xllm.python.kernels.triton.cuda.fla.wy_fast import recompute_w_u_fwd
+from .cumsum import chunk_local_cumsum
+from .solve_tril import solve_tril
+from .utils import FLA_CHUNK_SIZE, input_guard
+from .wy_fast import recompute_w_u_fwd
 
 
 @input_guard

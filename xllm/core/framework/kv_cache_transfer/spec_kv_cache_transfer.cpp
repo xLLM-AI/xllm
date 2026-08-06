@@ -52,6 +52,39 @@ std::optional<int32_t> get_remote_tp_size(
   return std::nullopt;
 }
 
+const KVTransferMapping* find_mapping(
+    const std::vector<KVTransferMapping>& mappings,
+    int32_t group_id) {
+  const auto it = std::find_if(mappings.begin(),
+                               mappings.end(),
+                               [group_id](const KVTransferMapping& mapping) {
+                                 return mapping.group_id == group_id;
+                               });
+  return it == mappings.end() ? nullptr : &*it;
+}
+
+void append_mappings(std::vector<KVTransferMapping>& destination,
+                     const std::vector<KVTransferMapping>& source) {
+  for (const KVTransferMapping& source_mapping : source) {
+    auto destination_it =
+        std::find_if(destination.begin(),
+                     destination.end(),
+                     [&source_mapping](const KVTransferMapping& mapping) {
+                       return mapping.group_id == source_mapping.group_id;
+                     });
+    if (destination_it == destination.end()) {
+      destination.emplace_back(source_mapping);
+      continue;
+    }
+    destination_it->local_ids.insert(destination_it->local_ids.end(),
+                                     source_mapping.local_ids.begin(),
+                                     source_mapping.local_ids.end());
+    destination_it->remote_ids.insert(destination_it->remote_ids.end(),
+                                      source_mapping.remote_ids.begin(),
+                                      source_mapping.remote_ids.end());
+  }
+}
+
 void merge_heterogeneous_kv_blocks(
     std::unordered_map<std::string, KVCacheTransfer::KVCacheInfo>& merged,
     const std::vector<TransferKVInfo>& transfer_kv_infos,
@@ -82,18 +115,7 @@ void merge_heterogeneous_kv_blocks(
     auto& kv_info = merged[key];
     kv_info.dst_cluster_id = dst_cluster_id;
     kv_info.dst_addr = dst_addr;
-    kv_info.src_blocks.insert(kv_info.src_blocks.end(),
-                              info.local_blocks_ids.begin(),
-                              info.local_blocks_ids.end());
-    kv_info.dst_blocks.insert(kv_info.dst_blocks.end(),
-                              info.remote_blocks_ids.begin(),
-                              info.remote_blocks_ids.end());
-    kv_info.src_linear_state_ids.insert(kv_info.src_linear_state_ids.end(),
-                                        info.local_linear_state_ids.begin(),
-                                        info.local_linear_state_ids.end());
-    kv_info.dst_linear_state_ids.insert(kv_info.dst_linear_state_ids.end(),
-                                        info.remote_linear_state_ids.begin(),
-                                        info.remote_linear_state_ids.end());
+    append_mappings(kv_info.mappings, info.mappings);
   }
 }
 
@@ -320,21 +342,23 @@ bool SpecKVCacheTransfer::pull_and_merge_sharded_caches(
     const LayerRegisteredCaches& layer_registered_caches,
     const LayerRegisteredCaches& staging_registered_caches,
     const std::vector<uint64_t>& src_cluster_ids,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
+    const std::vector<KVTransferMapping>& mappings,
+    bool sequence_scoped) {
   if (src_cluster_ids.size() !=
           static_cast<size_t>(kSupportedHeterogeneousSourceShardCount) ||
-      layer_registered_caches.size() != staging_registered_caches.size() ||
-      src_blocks.size() != dst_blocks.size() ||
-      src_linear_state_ids.size() != dst_linear_state_ids.size()) {
+      layer_registered_caches.size() != staging_registered_caches.size()) {
     LOG(ERROR) << "Invalid heterogeneous KV pull metadata: src_tp="
-               << src_cluster_ids.size() << ", src_blocks=" << src_blocks.size()
-               << ", dst_blocks=" << dst_blocks.size()
-               << ", src_linear_states=" << src_linear_state_ids.size()
-               << ", dst_linear_states=" << dst_linear_state_ids.size();
+               << src_cluster_ids.size()
+               << ", mapping_count=" << mappings.size();
     return false;
+  }
+  for (const KVTransferMapping& mapping : mappings) {
+    if (mapping.remote_ids.size() != mapping.local_ids.size()) {
+      LOG(ERROR) << "Invalid heterogeneous KV mapping size: group_id="
+                 << mapping.group_id << ", remote=" << mapping.remote_ids.size()
+                 << ", local=" << mapping.local_ids.size();
+      return false;
+    }
   }
 
   const int64_t shard_count = static_cast<int64_t>(src_cluster_ids.size());
@@ -366,6 +390,17 @@ bool SpecKVCacheTransfer::pull_and_merge_sharded_caches(
          ++cache_index) {
       const RegisteredCache& registered_cache = layer_caches[cache_index];
       const RegisteredCache& stage_cache = layer_staging_caches[cache_index];
+      if (registered_cache.sequence_scoped != sequence_scoped) {
+        continue;
+      }
+      const KVTransferMapping* mapping =
+          find_mapping(mappings, registered_cache.group_id);
+      if (mapping == nullptr) {
+        LOG(ERROR) << "Missing heterogeneous KV mapping, layer=" << layer_id
+                   << ", role=" << registered_cache.role.to_string()
+                   << ", group_id=" << registered_cache.group_id;
+        return false;
+      }
       const int64_t shard_dim =
           sharded_dimension(registered_cache.role, registered_cache.tensor);
       if (shard_dim < 0) {
@@ -379,12 +414,8 @@ bool SpecKVCacheTransfer::pull_and_merge_sharded_caches(
           << ", role=" << registered_cache.role.to_string()
           << ", shape=" << registered_cache.tensor.sizes();
 
-      const bool linear_state_cache =
-          is_linear_state_cache(registered_cache.role);
-      std::vector<uint64_t> remote_ids =
-          linear_state_cache ? src_linear_state_ids : src_blocks;
-      std::vector<uint64_t> final_ids =
-          linear_state_cache ? dst_linear_state_ids : dst_blocks;
+      std::vector<uint64_t> remote_ids = mapping->remote_ids;
+      std::vector<uint64_t> final_ids = mapping->local_ids;
       if (registered_cache.role == KVCacheTensorRole::SSM) {
         remote_ids = expand_checkpoint_ids(remote_ids, checkpoint_stride);
         final_ids = expand_checkpoint_ids(final_ids, checkpoint_stride);
@@ -507,7 +538,7 @@ bool SpecKVCacheTransfer::pull_and_merge_sharded_caches(
     }
   }
   VLOG(1) << "Heterogeneous pull-merge breakdown"
-          << " linear_request=" << !src_linear_state_ids.empty()
+          << " sequence_scoped=" << sequence_scoped
           << " parallel_shard_pull=" << parallel_shard_pull_
           << " pull_calls=" << pull_calls << " merge_calls=" << merge_calls
           << " shard0_pull_ms=" << shard_pull_seconds[0] * 1000.0
@@ -529,9 +560,9 @@ bool SpecKVCacheTransfer::pull_and_merge_sharded_caches(
 bool SpecKVCacheTransfer::merge_pre_pushed_sharded_caches(
     const LayerRegisteredCaches& layer_registered_caches,
     const LayerRegisteredCaches& staging_registered_caches,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& dst_linear_state_ids,
-    int64_t source_shard_count) {
+    const std::vector<KVTransferMapping>& mappings,
+    int64_t source_shard_count,
+    bool sequence_scoped) {
   if (source_shard_count != kSupportedHeterogeneousSourceShardCount ||
       layer_registered_caches.size() != staging_registered_caches.size()) {
     LOG(ERROR) << "Invalid pre-pushed heterogeneous KV layout: source_tp="
@@ -554,12 +585,21 @@ bool SpecKVCacheTransfer::merge_pre_pushed_sharded_caches(
          ++cache_index) {
       const RegisteredCache& registered_cache = layer_caches[cache_index];
       const RegisteredCache& stage_cache = layer_staging_caches[cache_index];
+      if (registered_cache.sequence_scoped != sequence_scoped) {
+        continue;
+      }
+      const KVTransferMapping* mapping =
+          find_mapping(mappings, registered_cache.group_id);
+      if (mapping == nullptr) {
+        LOG(ERROR) << "Missing pre-pushed heterogeneous KV mapping, layer="
+                   << layer_id << ", role=" << registered_cache.role.to_string()
+                   << ", group_id=" << registered_cache.group_id;
+        return false;
+      }
       const int64_t shard_dim =
           sharded_dimension(registered_cache.role, registered_cache.tensor);
       CHECK_GE(shard_dim, 0);
-      std::vector<uint64_t> final_ids =
-          is_linear_state_cache(registered_cache.role) ? dst_linear_state_ids
-                                                       : dst_blocks;
+      std::vector<uint64_t> final_ids = mapping->local_ids;
       if (registered_cache.role == KVCacheTensorRole::SSM) {
         final_ids = expand_checkpoint_ids(final_ids, checkpoint_stride);
       }
@@ -630,11 +670,20 @@ bool SpecKVCacheTransfer::push_layer_registered_caches_to_staging(
         // their pre-pushed staging rows is not correct on the heterogeneous
         // Qwen3.5 path. Avoid sending the same large recurrent state twice;
         // heterogeneous staging PUSH is only useful for target KEY/VALUE.
-        if (is_linear_state_cache(source_cache.role)) {
+        if (source_cache.sequence_scoped) {
           continue;
         }
-        const std::vector<uint64_t>& src_ids = kv_info.src_blocks;
-        std::vector<uint64_t> dst_ids = kv_info.dst_blocks;
+        const KVTransferMapping* mapping =
+            find_mapping(kv_info.mappings, source_cache.group_id);
+        if (mapping == nullptr) {
+          LOG(ERROR) << "Missing heterogeneous staging mapping, layer="
+                     << layer_id << ", role=" << source_cache.role.to_string()
+                     << ", group_id=" << source_cache.group_id;
+          success = false;
+          continue;
+        }
+        const std::vector<uint64_t>& src_ids = mapping->local_ids;
+        std::vector<uint64_t> dst_ids = mapping->remote_ids;
         if (src_ids.empty() || dst_ids.empty()) {
           continue;
         }
@@ -751,21 +800,31 @@ void SpecKVCacheTransfer::register_hetero_staging_caches(
 
 bool SpecKVCacheTransfer::pull_replicated_spec_kv_blocks(
     uint64_t src_cluster_id,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks) {
-  CHECK_EQ(src_blocks.size(), dst_blocks.size());
+    const std::vector<KVTransferMapping>& mappings) {
   bool success = true;
   for (size_t layer_id = 0; layer_id < spec_layer_registered_caches_.size();
        ++layer_id) {
     for (const RegisteredCache& cache :
          spec_layer_registered_caches_[layer_id]) {
+      const KVTransferMapping* mapping = find_mapping(mappings, cache.group_id);
+      if (mapping == nullptr ||
+          mapping->remote_ids.size() != mapping->local_ids.size()) {
+        LOG(ERROR) << "Invalid replicated draft KV mapping, layer=" << layer_id
+                   << ", role=" << cache.role.to_string()
+                   << ", group_id=" << cache.group_id;
+        success = false;
+        continue;
+      }
       CacheIndex source{src_cluster_id, cache.cache.cache_id};
       KvCacheExtParam ext_param{};
       ext_param.src_layer_range = {0, 0};
       ext_param.dst_layer_range = {0, 0};
       ext_param.tensor_num_per_layer = 1;
-      const auto ret = llm_data_dist_->PullKvBlocks(
-          source, cache.cache, src_blocks, dst_blocks, ext_param);
+      const auto ret = llm_data_dist_->PullKvBlocks(source,
+                                                    cache.cache,
+                                                    mapping->remote_ids,
+                                                    mapping->local_ids,
+                                                    ext_param);
       if (ret != LLM_SUCCESS) {
         LOG(ERROR) << "Pull replicated TP1 draft KV failed, layer=" << layer_id
                    << ", role=" << cache.role.to_string()
@@ -786,7 +845,6 @@ void SpecKVCacheTransfer::register_kv_cache_internal(
 void SpecKVCacheTransfer::free_kv_cache() {
   layer_registered_caches_.clear();
   spec_layer_registered_caches_.clear();
-  has_grouped_cache_layout_ = false;
   hetero_staging_registered_caches_.clear();
   spec_hetero_staging_registered_caches_.clear();
 }
@@ -794,37 +852,38 @@ void SpecKVCacheTransfer::free_kv_cache() {
 bool SpecKVCacheTransfer::pull_kv_blocks(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
-  if (has_grouped_cache_layout_) {
-    return LlmDataDistTransfer::pull_kv_blocks(src_cluster_id,
-                                               src_addr,
-                                               src_blocks,
-                                               dst_blocks,
-                                               src_linear_state_ids,
-                                               dst_linear_state_ids);
-  }
+    const std::vector<KVTransferMapping>& mappings) {
   const bool base_success =
-      LlmDataDistTransfer::pull_kv_blocks(src_cluster_id,
-                                          src_addr,
-                                          src_blocks,
-                                          dst_blocks,
-                                          src_linear_state_ids,
-                                          dst_linear_state_ids);
+      LlmDataDistTransfer::pull_kv_blocks(src_cluster_id, src_addr, mappings);
   bool spec_success = true;
   for (int64_t layer_id = 0;
        layer_id < static_cast<int64_t>(spec_layer_registered_caches_.size());
        ++layer_id) {
     const auto& registered_caches = spec_layer_registered_caches_[layer_id];
     for (const RegisteredCache& registered_cache : registered_caches) {
-      const bool sequence_scoped = registered_cache.sequence_scoped;
-      const std::vector<uint64_t>& src_ids =
-          sequence_scoped ? src_linear_state_ids : src_blocks;
-      const std::vector<uint64_t>& dst_ids =
-          sequence_scoped ? dst_linear_state_ids : dst_blocks;
-      if (src_ids.empty() || dst_ids.empty()) {
+      const auto mapping_it =
+          std::find_if(mappings.begin(),
+                       mappings.end(),
+                       [&registered_cache](const KVTransferMapping& mapping) {
+                         return mapping.group_id == registered_cache.group_id;
+                       });
+      if (mapping_it == mappings.end()) {
+        LOG(ERROR) << "Missing spec KV cache transfer mapping, layer="
+                   << layer_id << ", role=" << registered_cache.role.to_string()
+                   << ", group_id=" << registered_cache.group_id;
+        spec_success = false;
+        continue;
+      }
+      if (mapping_it->local_ids.size() != mapping_it->remote_ids.size()) {
+        LOG(ERROR) << "Spec KV cache mapping size mismatch, layer=" << layer_id
+                   << ", role=" << registered_cache.role.to_string()
+                   << ", group_id=" << registered_cache.group_id
+                   << ", local=" << mapping_it->local_ids.size()
+                   << ", remote=" << mapping_it->remote_ids.size();
+        spec_success = false;
+        continue;
+      }
+      if (mapping_it->local_ids.empty()) {
         continue;
       }
       CacheIndex cache_index{src_cluster_id, registered_cache.cache.cache_id};
@@ -832,8 +891,11 @@ bool SpecKVCacheTransfer::pull_kv_blocks(
       ext_param.src_layer_range = {0, 0};
       ext_param.dst_layer_range = {0, 0};
       ext_param.tensor_num_per_layer = 1;
-      auto ret = llm_data_dist_->PullKvBlocks(
-          cache_index, registered_cache.cache, src_ids, dst_ids, ext_param);
+      auto ret = llm_data_dist_->PullKvBlocks(cache_index,
+                                              registered_cache.cache,
+                                              mapping_it->remote_ids,
+                                              mapping_it->local_ids,
+                                              ext_param);
       if (ret != LLM_SUCCESS) {
         LOG(ERROR) << "Pull spec KvBlocks failed, layer = " << layer_id
                    << ", ret = " << std::hex << ret;
@@ -847,13 +909,14 @@ bool SpecKVCacheTransfer::pull_kv_blocks(
 bool SpecKVCacheTransfer::pull_hetero_kv_blocks(
     const std::vector<uint64_t>& src_cluster_ids,
     const std::vector<std::string>& src_addrs,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
+    const std::vector<KVTransferMapping>& mappings) {
   if (!heterogeneous_pd_enabled_) {
     LOG(ERROR) << "Heterogeneous KV restore requested while "
                   "enable_heterogeneous_pd is false.";
+    return false;
+  }
+  if (!validate_transfer_mappings(
+          mappings, /*request_id=*/"heterogeneous PULL", /*kv_split_size=*/1)) {
     return false;
   }
   (void)src_addrs;
@@ -869,10 +932,8 @@ bool SpecKVCacheTransfer::pull_hetero_kv_blocks(
       pull_and_merge_sharded_caches(layer_registered_caches_,
                                     hetero_staging_registered_caches_,
                                     src_cluster_ids,
-                                    /*src_blocks=*/{},
-                                    /*dst_blocks=*/{},
-                                    src_linear_state_ids,
-                                    dst_linear_state_ids);
+                                    mappings,
+                                    /*sequence_scoped=*/true);
   if (!linear_success) {
     return false;
   }
@@ -881,9 +942,9 @@ bool SpecKVCacheTransfer::pull_hetero_kv_blocks(
   const bool target_success =
       merge_pre_pushed_sharded_caches(layer_registered_caches_,
                                       hetero_staging_registered_caches_,
-                                      dst_blocks,
-                                      /*dst_linear_state_ids=*/{},
-                                      kSupportedHeterogeneousSourceShardCount);
+                                      mappings,
+                                      kSupportedHeterogeneousSourceShardCount,
+                                      /*sequence_scoped=*/false);
   if (!target_success) {
     return false;
   }
@@ -895,23 +956,26 @@ bool SpecKVCacheTransfer::pull_hetero_kv_blocks(
   // layer event observes the cache before the MTP prefill write is complete.
   const bool draft_success =
       draft_body_uses_tp1_
-          ? pull_replicated_spec_kv_blocks(
-                src_cluster_ids.front(), src_blocks, dst_blocks)
+          ? pull_replicated_spec_kv_blocks(src_cluster_ids.front(), mappings)
           : pull_and_merge_sharded_caches(
                 spec_layer_registered_caches_,
                 spec_hetero_staging_registered_caches_,
                 src_cluster_ids,
-                src_blocks,
-                dst_blocks,
-                /*src_linear_state_ids=*/{},
-                /*dst_linear_state_ids=*/{});
+                mappings,
+                /*sequence_scoped=*/false);
   if (draft_success) {
+    const KVTransferMapping* kv_mapping =
+        find_mapping(mappings, cache_group_id(BlockType::KV));
+    const KVTransferMapping* linear_mapping =
+        find_mapping(mappings, cache_group_id(BlockType::LINEAR));
     const double draft_seconds = phase_timer.elapsed_seconds();
     VLOG(1) << "Merged heterogeneous TP KV cache (target KV pre-pushed, "
                "linear state and draft pulled): source_shards="
-            << kSupportedHeterogeneousSourceShardCount
-            << ", blocks=" << dst_blocks.size()
-            << ", linear_states=" << dst_linear_state_ids.size()
+            << kSupportedHeterogeneousSourceShardCount << ", blocks="
+            << (kv_mapping == nullptr ? 0 : kv_mapping->local_ids.size())
+            << ", linear_states="
+            << (linear_mapping == nullptr ? 0
+                                          : linear_mapping->local_ids.size())
             << ", linear_ms=" << linear_seconds * 1000.0
             << ", target_merge_ms=" << target_merge_seconds * 1000.0
             << ", draft_ms=" << draft_seconds * 1000.0 << ", total_ms="
@@ -1010,6 +1074,10 @@ folly::SemiFuture<bool> SpecKVCacheTransfer::push_kv_blocks_async(
 
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
+  if (!validate_transfer_mappings(transfer_kv_infos, kv_split_size)) {
+    promise.setValue(false);
+    return future;
+  }
   // In heterogeneous non-MLA mode Decode intentionally restores the draft
   // cache from the source shards with a synchronous PULL.  Pushing the same
   // one-layer draft cache into staging is therefore redundant: no Decode
@@ -1040,6 +1108,10 @@ folly::SemiFuture<bool> SpecKVCacheTransfer::push_kv_blocks_async(
     // we keep the legacy 1:1 remote_blocks_ids mapping.
     const int32_t effective_kv_split_size =
         parallel_args.kv_split_size_effective();
+    if (!validate_transfer_mappings(*kv_infos, effective_kv_split_size)) {
+      promise.setValue(false);
+      return;
+    }
     if (effective_kv_split_size > 1) {
       filtered_kv_infos = filter_kv_split_infos(
           parallel_args.kv_split_rank(), effective_kv_split_size, *kv_infos);
@@ -1048,6 +1120,10 @@ folly::SemiFuture<bool> SpecKVCacheTransfer::push_kv_blocks_async(
         promise.setValue(true);
         return;
       }
+    }
+    if (!validate_transfer_mappings(*kv_infos, /*kv_split_size=*/1)) {
+      promise.setValue(false);
+      return;
     }
     if (heterogeneous_non_mla) {
       merge_heterogeneous_kv_blocks(

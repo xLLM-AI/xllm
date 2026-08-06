@@ -383,11 +383,6 @@ bool WorkerImpl::allocate_kv_cache_storage(
     CHECK_EQ(::xllm::ParallelConfig::get_instance().kv_split_size_effective(),
              1)
         << "Grouped KV cache PD does not support KV-split.";
-    CHECK_EQ(::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type(),
-             "LlmDataDist")
-        << "Grouped KV cache PD requires LlmDataDist transfer.";
-    CHECK_EQ(options_.kv_cache_transfer_mode(), "PUSH")
-        << "Grouped KV cache PD requires PUSH transfer mode.";
     CHECK(!options_.enable_pd_ooc())
         << "Grouped KV cache PD does not support PD-OOC yet.";
   }
@@ -493,28 +488,35 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   CHECK(model_ != nullptr) << "Model is not initialized.";
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
 
-  // create a KVCache for each layer
   const ModelArgs& model_args = context_.get_model_args();
-  const int64_t num_layers = model_args.n_layers();
   const bool enable_lighting_indexer = model_args.index_n_heads() > 0;
-  kv_cache_transfer_ = KVCacheTransferFactory::create(
-      ::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type(),
-      options_.transfer_listen_port(),
-      options_.instance_role(),
-      device_,
-      kv_cache_shape,
-      dtype_,
-      kv_caches_,
-      num_layers,
-      [this](const KVCacheShape& shape,
-             bool use_huge_page_allocator,
-             std::shared_ptr<KVCacheTensorAllocator> tensor_allocator) {
-        return this->allocate_kv_cache_storage(
-            shape, use_huge_page_allocator, std::move(tensor_allocator));
-      },
-      enable_lighting_indexer,
-      model_args.model_type(),
-      options_.model_id());
+  const std::string& transfer_type =
+      ::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type();
+  kv_cache_transfer_ =
+      KVCacheTransferFactory::create(transfer_type,
+                                     options_.transfer_listen_port(),
+                                     options_.instance_role(),
+                                     device_,
+                                     enable_lighting_indexer,
+                                     model_args.model_type(),
+                                     options_.model_id());
+  CHECK(kv_cache_transfer_ != nullptr)
+      << "Failed to create KV cache transfer backend.";
+  kv_cache_transfer_->initialize(device_.index());
+
+  bool use_huge_page_allocator = true;
+  std::shared_ptr<KVCacheTensorAllocator> tensor_allocator;
+#if defined(USE_MLU)
+  if (transfer_type == "Mooncake") {
+    use_huge_page_allocator = false;
+  }
+#endif
+  if (!allocate_kv_cache_storage(kv_cache_shape,
+                                 use_huge_page_allocator,
+                                 std::move(tensor_allocator))) {
+    return false;
+  }
+  kv_cache_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
 
   status_ = Status::READY;
   return true;
@@ -1685,54 +1687,35 @@ folly::SemiFuture<bool> WorkerImpl::allocate_kv_cache_with_transfer_async(
 folly::SemiFuture<bool> WorkerImpl::pull_kv_blocks_async(
     uint64_t src_cluster_id,
     const std::string& src_addr,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
-#if defined(USE_NPU) || defined(USE_DCU)
-  return kv_cache_transfer_->pull_kv_blocks_async(src_cluster_id,
-                                                  src_addr,
-                                                  src_blocks,
-                                                  dst_blocks,
-                                                  src_linear_state_ids,
-                                                  dst_linear_state_ids);
-#elif defined(USE_MLU)
+    const std::vector<KVTransferMapping>& mappings) {
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
+  return kv_cache_transfer_->pull_kv_blocks_async(
+      src_cluster_id, src_addr, mappings);
+#else
+  folly::Promise<bool> promise;
+  auto future = promise.getSemiFuture();
   (void)src_cluster_id;
   (void)src_addr;
-  (void)src_blocks;
-  (void)dst_blocks;
-  (void)src_linear_state_ids;
-  (void)dst_linear_state_ids;
-  LOG(FATAL) << "MLU backend does not support PULL kv cache transfer.";
+  (void)mappings;
+  promise.setValue(false);
+  return future;
 #endif
-  return false;
 }
 
 folly::SemiFuture<bool> WorkerImpl::pull_hetero_kv_blocks_async(
     const std::vector<uint64_t>& src_cluster_ids,
     const std::vector<std::string>& src_addrs,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
+    const std::vector<KVTransferMapping>& mappings) {
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
 #if defined(USE_NPU)
   threadpool_.schedule([this,
                         src_cluster_ids,
                         src_addrs,
-                        src_blocks,
-                        dst_blocks,
-                        src_linear_state_ids,
-                        dst_linear_state_ids,
+                        mappings,
                         promise = std::move(promise)]() mutable {
-    const bool success =
-        kv_cache_transfer_->pull_hetero_kv_blocks(src_cluster_ids,
-                                                  src_addrs,
-                                                  src_blocks,
-                                                  dst_blocks,
-                                                  src_linear_state_ids,
-                                                  dst_linear_state_ids);
+    const bool success = kv_cache_transfer_->pull_hetero_kv_blocks(
+        src_cluster_ids, src_addrs, mappings);
     if (success) {
       const int ret = device_.synchronize_default_stream();
       if (ret != 0) {
@@ -1748,10 +1731,7 @@ folly::SemiFuture<bool> WorkerImpl::pull_hetero_kv_blocks_async(
 #else
   (void)src_cluster_ids;
   (void)src_addrs;
-  (void)src_blocks;
-  (void)dst_blocks;
-  (void)src_linear_state_ids;
-  (void)dst_linear_state_ids;
+  (void)mappings;
   promise.setValue(false);
 #endif
   return future;

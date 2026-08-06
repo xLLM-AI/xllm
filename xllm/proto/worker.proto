@@ -95,13 +95,14 @@ message P2PLinkWorkerRequest {
 message PullKVCacheRequest {
   uint64 cluster_id = 1;
   string addr = 6;
-  repeated uint64 src_blocks = 4;
-  repeated uint64 dst_blocks = 5;
-  repeated uint64 src_linear_state_ids = 7;
-  repeated uint64 dst_linear_state_ids = 8;
+  repeated uint64 src_blocks = 4 [deprecated = true];
+  repeated uint64 dst_blocks = 5 [deprecated = true];
+  repeated uint64 src_linear_state_ids = 7 [deprecated = true];
+  repeated uint64 dst_linear_state_ids = 8 [deprecated = true];
   repeated uint64 src_cluster_ids = 9;
   repeated string src_addrs = 10;
   bool hetero_merge = 11;
+  repeated KVTransferMapping mappings = 12;
 }
 
 enum TransferType {
@@ -165,31 +166,32 @@ message InstanceInfo {
 
 message TransferKVInfo {
   string request_id = 1;
-  repeated uint64 local_blocks_ids = 2;
-  repeated uint64 remote_blocks_ids = 3;
+  repeated uint64 local_blocks_ids = 2 [deprecated = true];
+  repeated uint64 remote_blocks_ids = 3 [deprecated = true];
   int32 dp_rank = 4;
   InstanceInfo remote_instance_info = 5;
   // XTensor mode: destination offsets from D-node (per-layer)
   // Each XTensorLayerOffsets contains K/V offsets for all blocks at one layer
   repeated XTensorLayerOffsets dst_xtensor_layer_offsets = 6;
   // Sequence-scoped cache rows used by linear attention caches.
-  repeated uint64 local_linear_state_ids = 7;
-  repeated uint64 remote_linear_state_ids = 8;
+  repeated uint64 local_linear_state_ids = 7 [deprecated = true];
+  repeated uint64 remote_linear_state_ids = 8 [deprecated = true];
 
-  repeated KVBlockTransferGroup block_transfer_groups = 22;
+  repeated KVTransferMapping mappings = 22;
 }
 
-message KVBlockTransferGroup {
+message KVTransferMapping {
   int32 group_id = 1;
   reserved 2;
-  repeated uint64 local_blocks_ids = 3;
-  repeated uint64 remote_blocks_ids = 4;
+  repeated uint64 local_ids = 3;
+  repeated uint64 remote_ids = 4;
 }
 
 message EplbInfo {
   int32 prepare_layer_id = 1;
   repeated int32 expert_ids = 2;
   int32 update_layer_id = 3;
+  int64 prepare_token = 4;
 };
 
 message RequestSamplingParam {
@@ -378,7 +380,7 @@ message SquenceOutput {
 message ForwardOutput {
   repeated SquenceOutput outputs = 2;
   repeated int64 expert_load_data = 3;
-  int32 prepared_layer_id = 4;
+  int64 prepared_token = 4;
   repeated int32 src_seq_idxes = 5;
   repeated int32 out_tokens = 6;
   repeated float out_logprobs = 7;

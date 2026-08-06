@@ -12,17 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Graph interfaces for Python-authored normalization operators."""
+"""CUDA normalization kernels."""
 
 from __future__ import annotations
 
 import torch
 
+rms_norm = torch.ops.xllm_ops.rms_norm
+fused_add_rms_norm = torch.ops.xllm_ops.fused_add_rms_norm
+
 
 @torch.library.custom_op("xllm_triton::l2_norm", mutates_args=())
 def l2_norm(value: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Run CUDA Triton L2 normalization as one graph node."""
-    from xllm.python.kernels.triton.cuda.l2_norm import l2_norm as triton_l2_norm
+    """Run Triton L2 normalization as one graph node."""
+    from .triton.l2_norm import l2_norm as triton_l2_norm
 
     return triton_l2_norm(value, eps)
 
@@ -40,8 +43,8 @@ def rms_norm_gated(
     weight: torch.Tensor,
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Run CUDA Triton gated RMSNorm as one graph node."""
-    from xllm.python.kernels.triton.cuda.rms_norm import (
+    """Run Triton gated RMSNorm as one graph node."""
+    from .triton.rms_norm import (
         rms_norm_gated as triton_rms_norm_gated,
     )
 
@@ -57,3 +60,6 @@ def _rms_norm_gated_fake(
 ) -> torch.Tensor:
     del gate, weight, eps
     return torch.empty_like(value)
+
+
+__all__ = ["rms_norm", "fused_add_rms_norm", "l2_norm", "rms_norm_gated"]

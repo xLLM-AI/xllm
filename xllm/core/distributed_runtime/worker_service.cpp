@@ -179,7 +179,7 @@ void WorkerService::step(ForwardInput& fwd_input,
                          std::vector<torch::Tensor>& dit_images,
                          std::vector<std::string>& dit_text_output,
                          torch::Tensor& expert_load_data,
-                         int32_t& prepared_layer_id,
+                         int64_t& prepared_token,
                          torch::Tensor& src_seq_idxes,
                          torch::Tensor& out_tokens,
                          torch::Tensor& out_logprobs) {
@@ -203,7 +203,7 @@ void WorkerService::step(ForwardInput& fwd_input,
       expert_load_data = safe_to(forward_outputs.value().expert_load_data,
                                  torch::kCPU,
                                  /*non_blocking=*/true);
-      prepared_layer_id = forward_outputs.value().prepared_layer_id;
+      prepared_token = forward_outputs.value().prepared_token;
 
       {
         auto copy_output_to_host = [&]() {
@@ -335,7 +335,7 @@ void WorkerService::create_polling_shm_thread(
           std::vector<torch::Tensor> dit_images;
           std::vector<std::string> dit_text_output;
           torch::Tensor expert_load_data;
-          int32_t prepared_layer_id = -1;
+          int64_t prepared_token = -1;
 
           // beam search kernel output
           torch::Tensor src_seq_idxes;
@@ -352,7 +352,7 @@ void WorkerService::create_polling_shm_thread(
                dit_images,
                dit_text_output,
                expert_load_data,
-               prepared_layer_id,
+               prepared_token,
                src_seq_idxes,
                out_tokens,
                out_logprobs);
@@ -367,7 +367,7 @@ void WorkerService::create_polling_shm_thread(
                                                    dit_images,
                                                    dit_text_output,
                                                    expert_load_data,
-                                                   prepared_layer_id,
+                                                   prepared_token,
                                                    src_seq_idxes,
                                                    out_tokens,
                                                    out_logprobs);
@@ -500,33 +500,28 @@ void WorkerService::PullKVCache(::google::protobuf::RpcController* controller,
                                 ::google::protobuf::Closure* done) {
   threadpool_->schedule([this, controller, req, resp, done]() mutable {
     brpc::ClosureGuard done_guard(done);
-    std::vector<uint64_t> src_blocks(req->src_blocks().begin(),
-                                     req->src_blocks().end());
-    std::vector<uint64_t> dst_blocks(req->dst_blocks().begin(),
-                                     req->dst_blocks().end());
-    std::vector<uint64_t> src_linear_state_ids(
-        req->src_linear_state_ids().begin(), req->src_linear_state_ids().end());
-    std::vector<uint64_t> dst_linear_state_ids(
-        req->dst_linear_state_ids().begin(), req->dst_linear_state_ids().end());
+    std::vector<KVTransferMapping> mappings;
+    mappings.reserve(req->mappings_size());
+    for (const proto::KVTransferMapping& proto_mapping : req->mappings()) {
+      KVTransferMapping mapping;
+      mapping.group_id = proto_mapping.group_id();
+      mapping.local_ids.assign(proto_mapping.local_ids().begin(),
+                               proto_mapping.local_ids().end());
+      mapping.remote_ids.assign(proto_mapping.remote_ids().begin(),
+                                proto_mapping.remote_ids().end());
+      mappings.emplace_back(std::move(mapping));
+    }
     auto future = [&]() {
       if (req->hetero_merge()) {
         std::vector<uint64_t> src_cluster_ids(req->src_cluster_ids().begin(),
                                               req->src_cluster_ids().end());
         std::vector<std::string> src_addrs(req->src_addrs().begin(),
                                            req->src_addrs().end());
-        return worker_->pull_hetero_kv_blocks_async(src_cluster_ids,
-                                                    src_addrs,
-                                                    src_blocks,
-                                                    dst_blocks,
-                                                    src_linear_state_ids,
-                                                    dst_linear_state_ids);
+        return worker_->pull_hetero_kv_blocks_async(
+            src_cluster_ids, src_addrs, mappings);
       }
-      return worker_->pull_kv_blocks_async(req->cluster_id(),
-                                           req->addr(),
-                                           src_blocks,
-                                           dst_blocks,
-                                           src_linear_state_ids,
-                                           dst_linear_state_ids);
+      return worker_->pull_kv_blocks_async(
+          req->cluster_id(), req->addr(), mappings);
     }();
     bool status = std::move(future).get();
     resp->set_ok(status);
@@ -776,7 +771,7 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
         std::vector<torch::Tensor> dit_images;
         std::vector<std::string> dit_text_output;
         torch::Tensor expert_load_data;
-        int32_t prepared_layer_id = -1;
+        int64_t prepared_token = -1;
         // beam search kernel output
         torch::Tensor src_seq_idxes;
         torch::Tensor out_tokens;
@@ -792,7 +787,7 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
              dit_images,
              dit_text_output,
              expert_load_data,
-             prepared_layer_id,
+             prepared_token,
              src_seq_idxes,
              out_tokens,
              out_logprobs);
@@ -804,7 +799,7 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
                                 embeddings,
                                 mm_embeddings,
                                 expert_load_data,
-                                prepared_layer_id,
+                                prepared_token,
                                 src_seq_idxes,
                                 out_tokens,
                                 out_logprobs,
@@ -831,7 +826,7 @@ void WorkerService::GetLastStepResult(
         if (forward_outputs) {
           const ForwardOutput& forward_output = forward_outputs.value();
           const auto& sample_output = forward_output.sample_output;
-          int32_t prepared_layer_id = forward_output.prepared_layer_id;
+          int64_t prepared_token = forward_output.prepared_token;
           const auto& beam_search_output = forward_output.beam_search_output;
           torch::Tensor expert_load_data;
           torch::Tensor embeddings;
@@ -935,7 +930,7 @@ void WorkerService::GetLastStepResult(
                                     embeddings,
                                     mm_embeddings,
                                     expert_load_data,
-                                    prepared_layer_id,
+                                    prepared_token,
                                     src_seq_idxes,
                                     out_tokens,
                                     out_logprobs,

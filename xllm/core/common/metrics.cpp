@@ -74,6 +74,21 @@ DEFINE_COUNTER(detokenization_latency_seconds_non_stream,
 DEFINE_COUNTER(num_model_execution_total_eager,
                "Total number of model execution");
 
+DEFINE_COUNTER(mooncake_transfer_completed_total_read,
+               "Total number of completed MoonCake READ transfers");
+DEFINE_COUNTER(mooncake_transfer_completed_total_write,
+               "Total number of completed MoonCake WRITE transfers");
+DEFINE_COUNTER(mooncake_transfer_bytes_total_read,
+               "Total bytes completed by MoonCake READ transfers");
+DEFINE_COUNTER(mooncake_transfer_bytes_total_write,
+               "Total bytes completed by MoonCake WRITE transfers");
+DEFINE_COUNTER(mooncake_transfer_failed_total,
+               "Total number of failed MoonCake transfers");
+DEFINE_HISTOGRAM(mooncake_transfer_latency_microseconds_read,
+                 "MoonCake READ transfer latency in microseconds");
+DEFINE_HISTOGRAM(mooncake_transfer_latency_microseconds_write,
+                 "MoonCake WRITE transfer latency in microseconds");
+
 // worker metrics
 DEFINE_COUNTER(execution_latency_seconds_model,
                "Latency of model execution in seconds");
@@ -125,13 +140,8 @@ DEFINE_HISTOGRAM(time_to_first_token_latency_milliseconds,
 // inter token latency histogram
 DEFINE_HISTOGRAM(inter_token_latency_milliseconds,
                  "Histogram of inter token latency in milliseconds");
-// speculative/MTP amortized inter token latency histogram. Each observation is
-// the per-step wall-clock latency divided by the tokens committed that step
-// (per-step amortized, not token-weighted).
-DEFINE_HISTOGRAM(
-    speculative_per_token_latency_milliseconds,
-    "Histogram of speculative per-token amortized inter token latency in "
-    "milliseconds (per-step amortized, not token-weighted)");
+DEFINE_HISTOGRAM(inter_token_latency_microseconds,
+                 "Histogram of inter token latency in microseconds");
 
 // response metrics
 DEFINE_COUNTER(responsing_latency_seconds_stream,

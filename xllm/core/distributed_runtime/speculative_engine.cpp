@@ -117,6 +117,7 @@ bool SpeculativeEngine::init_model() {
     }
   }
 
+  engine_->init_eplb_manager();
   dtype_ = util::parse_dtype(model_args_.dtype(), options_.devices()[0]);
   return true;
 }
@@ -255,20 +256,14 @@ bool SpeculativeEngine::pull_kv_blocks(
     const int32_t src_dp_rank,
     const std::vector<uint64_t>& src_cluster_ids,
     const std::vector<std::string>& src_addrs,
-    const std::vector<uint64_t>& src_blocks,
     const int32_t dst_dp_rank,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
+    const std::vector<KVTransferMapping>& mappings) {
   return engine_->pull_kv_blocks(src_dp_size,
                                  src_dp_rank,
                                  src_cluster_ids,
                                  src_addrs,
-                                 src_blocks,
                                  dst_dp_rank,
-                                 dst_blocks,
-                                 src_linear_state_ids,
-                                 dst_linear_state_ids);
+                                 mappings);
 };
 
 bool SpeculativeEngine::pull_hetero_kv_blocks(
@@ -276,20 +271,14 @@ bool SpeculativeEngine::pull_hetero_kv_blocks(
     const int32_t src_dp_rank,
     const std::vector<uint64_t>& src_cluster_ids,
     const std::vector<std::string>& src_addrs,
-    const std::vector<uint64_t>& src_blocks,
     const int32_t dst_dp_rank,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
+    const std::vector<KVTransferMapping>& mappings) {
   return engine_->pull_hetero_kv_blocks(src_dp_size,
                                         src_dp_rank,
                                         src_cluster_ids,
                                         src_addrs,
-                                        src_blocks,
                                         dst_dp_rank,
-                                        dst_blocks,
-                                        src_linear_state_ids,
-                                        dst_linear_state_ids);
+                                        mappings);
 }
 
 void SpeculativeEngine::get_cache_info(std::vector<uint64_t>& cluster_ids,

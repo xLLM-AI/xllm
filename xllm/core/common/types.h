@@ -291,13 +291,13 @@ struct XTensorLayerOffsets {
   std::vector<uint64_t> v_offsets;  // V cache offsets in GlobalXTensor
 };
 
-// Block mapping for one cache group. group_id is an opaque, stable identifier
-// shared by the P/D cache layouts; transfer code does not interpret model
-// semantics such as compression ratios.
-struct KVBlockTransferGroup {
+// Transfer mapping for one cache group. group_id is an opaque, stable
+// identifier shared by the P/D cache layouts; transfer code does not interpret
+// model semantics such as compression ratios.
+struct KVTransferMapping {
   int32_t group_id = 0;
-  std::vector<uint64_t> local_blocks_ids;
-  std::vector<uint64_t> remote_blocks_ids;
+  std::vector<uint64_t> local_ids;
+  std::vector<uint64_t> remote_ids;
   // Number of leading blocks D already has from its own device-side prefix
   // cache under this group. P uses this to compress its per-group transfer
   // cursor to the first block D actually needs (no shared -> zero, no-op).
@@ -306,27 +306,15 @@ struct KVBlockTransferGroup {
 
 struct TransferKVInfo {
   std::string request_id;
-  // Before batch build this may carry the full logical block table length as a
-  // hint. BatchInputBuilder overwrites it with the current step local blocks.
-  std::vector<uint64_t> local_blocks_ids;
-  std::vector<uint64_t> remote_blocks_ids;
-  std::vector<uint64_t> local_linear_state_ids;
-  std::vector<uint64_t> remote_linear_state_ids;
-  int32_t dp_rank;
+  int32_t dp_rank = 0;
   InstanceInfo remote_instance_info;
-  // Number of leading blocks D already holds from its own device-side prefix
-  // cache under BlockType::KV (flat KV path). remote_blocks_ids is shipped
-  // starting from that offset; build_step_transfer_info uses this to
-  // translate a local block index to the correct remote_blocks_ids slot.
-  // Zero when D had no hit, which preserves the pre-existing indexing.
-  uint32_t remote_shared_num = 0;
 
   // XTensor mode: destination offsets from D-node (per-layer)
   // Only populated when KVCacheConfig::enable_xtensor is true.
   std::vector<XTensorLayerOffsets> dst_xtensor_layer_offsets;
 
-  // Group-aware transfer mappings, one entry per exported block manager.
-  std::vector<KVBlockTransferGroup> block_transfer_groups;
+  // One entry per cache id space. group_id is unique within one request.
+  std::vector<KVTransferMapping> mappings;
 };
 
 // in bytes
@@ -360,21 +348,6 @@ struct JsonTool {
   JsonTool(const std::string& tool_type, const JsonFunction& func)
       : type(tool_type), function(func) {}
 };
-// Experts update the required information
-struct EplbInfo {
-  // Target layer ID for new expert weight pre-loading (-1 = no pending load)
-  // Values >=0 indicate the layer ID that should start loading new expert
-  // weights
-  int32_t prepare_layer_id = -1;
-  // Expert IDs requiring updates, ordered by device shard assignment
-  // Contains per-device expert indices for distributed weight updates
-  std::vector<int32_t> expert_ids;
-  // Layer ID ready for expert weight activation (-1 = no pending update)
-  // Values >=0 indicate the layer ID whose pre-loaded weights are ready for
-  // deployment
-  int32_t update_layer_id = -1;
-};
-
 class MasterStatus {
  public:
   enum Value : int32_t {

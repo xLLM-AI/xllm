@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch_npu
 
-from xllm.python import ops
+from xllm.python import kernels
 from xllm.python.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
@@ -209,7 +209,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
         # Write KV to paged cache (kernel expects [T, kv_heads, head_dim]).
         k_3d = k.view(num_tokens, self.num_kv_heads, self.head_dim).contiguous()
         v_3d = v.view(num_tokens, self.num_kv_heads, self.head_dim).contiguous()
-        ops.reshape_paged_cache(
+        kernels.reshape_paged_cache(
             metadata.slot_mapping, k_3d, v_3d, k_cache, v_cache
         )
 

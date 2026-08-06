@@ -23,47 +23,63 @@ from pathlib import Path
 import pytest
 import torch
 
-_PYTHON_ROOT = Path(__file__).parents[2] / "xllm" / "python"
-_python_package = types.ModuleType("xllm.python")
-_python_package.__path__ = [str(_PYTHON_ROOT)]
-sys.modules.setdefault("xllm.python", _python_package)
-_ops_package = types.ModuleType("xllm.python.ops")
-_ops_package.__path__ = [str(_PYTHON_ROOT / "ops")]
-sys.modules.setdefault("xllm.python.ops", _ops_package)
+if not torch.cuda.is_available():
+    pytest.skip("CUDA Triton tests require CUDA", allow_module_level=True)
 
-from xllm.python.kernels.triton.cuda.causal_conv1d import (
-    causal_conv1d_decode as kernel_causal_conv1d_decode,
+_PYTHON_ROOT = Path(__file__).parents[2] / "xllm" / "python"
+
+# conftest.py stands in for xllm.python. Stand in for the CUDA kernel package
+# too, so that its __init__ -- which declares FakeTensor contracts for every C++
+# operator -- does not run: these tests define only the two operators their
+# wrappers call.
+_kernels_package = types.ModuleType("xllm.python.kernels_cuda")
+_kernels_package.__path__ = [str(_PYTHON_ROOT / "kernels_cuda")]
+sys.modules["xllm.python.kernels_cuda"] = _kernels_package
+
+_native_ops = torch.library.Library("xllm_ops", "DEF")
+_native_ops.define(
+    "moe_fused_topk(Tensor gating_output, int topk, bool renormalize, str "
+    "scoring_func) -> (Tensor, Tensor)"
 )
-from xllm.python.kernels.triton.cuda.causal_conv1d import (
-    causal_conv1d_prefill as kernel_causal_conv1d_prefill,
+_native_ops.define(
+    "cutlass_fused_moe(Tensor input, Tensor token_selected_experts, Tensor "
+    "token_final_scales, Tensor fc1_expert_weights, Tensor fc2_expert_weights, "
+    "int tp_size, int tp_rank, int ep_size, int ep_rank) -> Tensor"
 )
-from xllm.python.kernels.triton.cuda.fused_moe import fused_moe as kernel_fused_moe
-from xllm.python.kernels.triton.cuda.gated_delta_net import (
-    fused_recurrent_gated_delta_rule_packed_decode as kernel_gdn_decode,
-)
-from xllm.python.kernels.triton.cuda.gdn_prefill import (
-    fused_gdn_prefill_post_conv as kernel_gdn_post_conv,
-)
-from xllm.python.kernels.triton.cuda.l2_norm import l2_norm as kernel_l2_norm
-from xllm.python.kernels.triton.cuda.rms_norm import (
-    rms_norm_gated as kernel_rms_norm_gated,
-)
-from xllm.python.kernels.triton.cuda.silu_and_mul import (
-    silu_and_mul as kernel_silu_and_mul,
-)
-from xllm.python.ops.activation import silu_and_mul
-from xllm.python.ops.causal_conv1d import (
+
+from xllm.python.kernels_cuda.activation import silu_and_mul
+from xllm.python.kernels_cuda.causal_conv1d import (
     causal_conv1d_decode,
     causal_conv1d_prefill,
 )
-from xllm.python.ops.gated_delta_net import (
+from xllm.python.kernels_cuda.gated_delta_net import (
     chunk_gated_delta_rule,
     fused_gdn_prefill_post_conv,
     fused_recurrent_gated_delta_rule_packed_decode,
     resolve_gdn_prefill_backend,
 )
-from xllm.python.ops.moe import fused_moe
-from xllm.python.ops.normalization import l2_norm, rms_norm_gated
+from xllm.python.kernels_cuda.moe import fused_moe
+from xllm.python.kernels_cuda.normalization import l2_norm, rms_norm_gated
+from xllm.python.kernels_cuda.triton.causal_conv1d import (
+    causal_conv1d_decode as kernel_causal_conv1d_decode,
+)
+from xllm.python.kernels_cuda.triton.causal_conv1d import (
+    causal_conv1d_prefill as kernel_causal_conv1d_prefill,
+)
+from xllm.python.kernels_cuda.triton.fused_moe import fused_moe as kernel_fused_moe
+from xllm.python.kernels_cuda.triton.gated_delta_net import (
+    fused_recurrent_gated_delta_rule_packed_decode as kernel_gdn_decode,
+)
+from xllm.python.kernels_cuda.triton.gdn_prefill import (
+    fused_gdn_prefill_post_conv as kernel_gdn_post_conv,
+)
+from xllm.python.kernels_cuda.triton.l2_norm import l2_norm as kernel_l2_norm
+from xllm.python.kernels_cuda.triton.rms_norm import (
+    rms_norm_gated as kernel_rms_norm_gated,
+)
+from xllm.python.kernels_cuda.triton.silu_and_mul import (
+    silu_and_mul as kernel_silu_and_mul,
+)
 
 _CUDA_REQUIRED = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA is required"

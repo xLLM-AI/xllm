@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -38,7 +38,7 @@ from typing import Any, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from xllm.python import ops
+from xllm.python import distributed, kernels
 from xllm.python.attention.backend import MlaIndexContext
 from xllm.python.layers import (
     Attention,
@@ -400,7 +400,7 @@ class Glm52MLAAttention(Attention):
         )
         o = self.o_proj(v_full)
         if self.cfg.tp_size > 1:
-            ops.all_reduce_(o)
+            distributed.all_reduce_(o)
         return o, topk
 
 
@@ -465,11 +465,11 @@ class Glm52Indexer(nn.Module):
         k = torch.cat([k_pe, k_nope], dim=-1)
         if index_cache is not None and slot_mapping is not None:
             k_view = index_cache.view(-1, index_cache.size(-1))
-            ops.scatter_nd_update(
+            kernels.scatter_nd_update(
                 k_view, slot_mapping.reshape(-1, 1).clamp_min(0), k
             )
         weights = self.weights_proj(hidden.to(torch.float32)).to(torch.bfloat16)
-        topk = ops.lightning_indexer(
+        topk = kernels.lightning_indexer(
             q, index_cache, weights,
             actual_seq_q, actual_seq_kv, block_table,
             "TND", "PA_BSND", self.topk, 3,

@@ -298,8 +298,8 @@ std::vector<KVCacheTensor> DeepSeekV4KVCacheImpl::get_cache_tensors() const {
                                const torch::Tensor& tensor,
                                BlockType block_type) {
     if (tensor.defined() && tensor.numel() > 0) {
-      tensors.emplace_back(KVCacheTensor{
-          role, tensor, cache_group_id(block_type), /*sequence_scoped=*/false});
+      tensors.emplace_back(
+          KVCacheTensor{role, tensor, cache_group_id(block_type)});
     }
   };
 

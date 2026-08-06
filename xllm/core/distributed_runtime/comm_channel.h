@@ -71,21 +71,14 @@ class CommChannel {
   virtual bool estimate_kv_cache_capacity(int64_t& available_memory,
                                           int64_t& total_memory);
 
-  virtual bool pull_kv_blocks(
-      const uint64_t src_cluster_id,
-      const std::string& src_addr,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {});
+  virtual bool pull_kv_blocks(const uint64_t src_cluster_id,
+                              const std::string& src_addr,
+                              const std::vector<KVTransferMapping>& mappings);
 
   virtual bool pull_hetero_kv_blocks(
       const std::vector<uint64_t>& src_cluster_ids,
       const std::vector<std::string>& src_addrs,
-      const std::vector<uint64_t>& src_blocks,
-      const std::vector<uint64_t>& dst_blocks,
-      const std::vector<uint64_t>& src_linear_state_ids = {},
-      const std::vector<uint64_t>& dst_linear_state_ids = {});
+      const std::vector<KVTransferMapping>& mappings);
 
   virtual void execute_model_async(
       const ForwardInput& input,

@@ -18,14 +18,12 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <limits>
+#include <unordered_set>
 
 #include "common/global_flags.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/kv_cache_config.h"
-
-#if defined(USE_NPU)
-#include <torch_npu/csrc/core/npu/NPUFormat.h>
-#endif
 
 #if defined(USE_NPU)
 #include "framework/kv_cache_transfer/llm_data_dist_transfer.h"
@@ -37,78 +35,153 @@ limitations under the License.
 
 namespace xllm {
 
+bool KVCacheTransfer::validate_transfer_mappings(
+    const std::vector<KVTransferMapping>& mappings,
+    const std::string& request_id,
+    int32_t kv_split_size) {
+  if (kv_split_size < 1) {
+    LOG(ERROR) << "KV cache transfer requires kv_split_size >= 1, request_id="
+               << request_id << ", kv_split_size=" << kv_split_size;
+    return false;
+  }
+
+  std::unordered_set<int32_t> group_ids;
+  group_ids.reserve(mappings.size());
+  for (const KVTransferMapping& mapping : mappings) {
+    if (!group_ids.emplace(mapping.group_id).second) {
+      LOG(ERROR) << "Duplicate KV cache transfer mapping, request_id="
+                 << request_id << ", group_id=" << mapping.group_id;
+      return false;
+    }
+
+    const bool validate_full_kv_split_coverage =
+        kv_split_size > 1 && mapping.group_id == cache_group_id(BlockType::KV);
+    if (!validate_full_kv_split_coverage) {
+      if (mapping.local_ids.size() != mapping.remote_ids.size()) {
+        LOG(ERROR) << "KV cache transfer mapping size mismatch, request_id="
+                   << request_id << ", group_id=" << mapping.group_id
+                   << ", local=" << mapping.local_ids.size()
+                   << ", remote=" << mapping.remote_ids.size();
+        return false;
+      }
+      continue;
+    }
+
+    const size_t local_count = mapping.local_ids.size();
+    const size_t remote_count = mapping.remote_ids.size();
+    if (local_count == 0) {
+      if (remote_count != 0) {
+        LOG(ERROR) << "KV-split mapping has remote ids without local ids, "
+                   << "request_id=" << request_id
+                   << ", group_id=" << mapping.group_id
+                   << ", remote=" << remote_count;
+        return false;
+      }
+      continue;
+    }
+
+    const size_t split_size = static_cast<size_t>(kv_split_size);
+    if (local_count > std::numeric_limits<size_t>::max() / split_size) {
+      LOG(ERROR) << "KV-split mapping coverage size overflow, request_id="
+                 << request_id << ", group_id=" << mapping.group_id
+                 << ", local=" << local_count
+                 << ", kv_split_size=" << kv_split_size;
+      return false;
+    }
+    const size_t max_remote_count = local_count * split_size;
+    const size_t min_remote_count = max_remote_count - split_size + 1;
+    if (remote_count < min_remote_count || remote_count > max_remote_count) {
+      LOG(ERROR) << "KV-split mapping remote coverage mismatch, request_id="
+                 << request_id << ", group_id=" << mapping.group_id
+                 << ", local=" << local_count << ", remote=" << remote_count
+                 << ", kv_split_size=" << kv_split_size
+                 << ", expected_remote_range=[" << min_remote_count << ", "
+                 << max_remote_count << "]";
+      return false;
+    }
+  }
+  return true;
+}
+
+bool KVCacheTransfer::validate_transfer_mappings(
+    const std::vector<TransferKVInfo>& transfer_kv_infos,
+    int32_t kv_split_size) {
+  for (const TransferKVInfo& info : transfer_kv_infos) {
+    if (!validate_transfer_mappings(
+            info.mappings, info.request_id, kv_split_size)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 folly::SemiFuture<bool> KVCacheTransfer::pull_kv_blocks_async(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks,
-    const std::vector<uint64_t>& src_linear_state_ids,
-    const std::vector<uint64_t>& dst_linear_state_ids) {
+    const std::vector<KVTransferMapping>& mappings) {
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
+  if (!validate_transfer_mappings(
+          mappings, /*request_id=*/"PULL", /*kv_split_size=*/1)) {
+    promise.setValue(false);
+    return future;
+  }
   threadpool_.schedule([this,
                         src_cluster_id,
                         src_addr,
-                        src_blocks,
-                        dst_blocks,
-                        src_linear_state_ids,
-                        dst_linear_state_ids,
+                        mappings,
                         promise = std::move(promise)]() mutable {
-    const bool success = pull_kv_blocks(src_cluster_id,
-                                        src_addr,
-                                        src_blocks,
-                                        dst_blocks,
-                                        src_linear_state_ids,
-                                        dst_linear_state_ids);
+    const bool success = pull_kv_blocks(src_cluster_id, src_addr, mappings);
     promise.setValue(success);
   });
   return future;
 }
 
-// In KV-split mode, local_blocks_ids already contains only this KV-split
-// rank's physical blocks. remote_blocks_ids holds the full D-side
-// total_blocks entries; this rank maps local_block[k] to
-// remote_blocks_ids[kv_split_rank + k * kv_split_size]. The function rebuilds
-// remote_blocks_ids accordingly and drops infos with no local blocks.
+// In KV-split mode, the KV mapping's local_ids already contains only this
+// rank's physical blocks. remote_ids holds the full D-side block entries; this
+// rank maps local_ids[k] to remote_ids[kv_split_rank + k * kv_split_size]. The
+// function rebuilds remote_ids accordingly and drops infos with no mappings.
 std::vector<TransferKVInfo> filter_kv_split_infos(
     int32_t kv_split_rank,
     int32_t kv_split_size,
     const std::vector<TransferKVInfo>& kv_infos) {
   std::vector<TransferKVInfo> filtered_kv_infos;
-  for (const auto& kv_info : kv_infos) {
-    if (kv_info.local_blocks_ids.empty() &&
-        kv_info.local_linear_state_ids.empty()) {
-      continue;
-    }
-    const size_t n_local = kv_info.local_blocks_ids.size();
+  for (const TransferKVInfo& kv_info : kv_infos) {
     TransferKVInfo filtered = kv_info;
-    filtered.remote_blocks_ids.clear();
-    size_t mapped_local = 0;
-    if (n_local > 0) {
-      filtered.remote_blocks_ids.reserve(n_local);
-      for (size_t k = 0; k < n_local; ++k) {
+    for (KVTransferMapping& mapping : filtered.mappings) {
+      if (mapping.group_id != cache_group_id(BlockType::KV)) {
+        continue;
+      }
+      const std::vector<uint64_t> remote_ids = mapping.remote_ids;
+      mapping.remote_ids.clear();
+      size_t mapped_local = 0;
+      mapping.remote_ids.reserve(mapping.local_ids.size());
+      for (size_t k = 0; k < mapping.local_ids.size(); ++k) {
         const size_t remote_idx = static_cast<size_t>(kv_split_rank) +
                                   k * static_cast<size_t>(kv_split_size);
-        if (remote_idx >= kv_info.remote_blocks_ids.size()) {
+        if (remote_idx >= remote_ids.size()) {
           break;
         }
-        filtered.remote_blocks_ids.emplace_back(
-            kv_info.remote_blocks_ids[remote_idx]);
+        mapping.remote_ids.emplace_back(remote_ids[remote_idx]);
         ++mapped_local;
       }
+      mapping.local_ids.resize(mapped_local);
     }
-    // local_block[k] maps to remote_blocks_ids[kv_split_rank + k *
-    // kv_split_size]. When the strided remote index runs past the D-side block
-    // list (the prompt spans multiple logical blocks and the last one is not
-    // full, which only happens for kv_split_rank > 0), the loop above stops
-    // early. local_blocks_ids must then be truncated to the blocks that
-    // actually got a remote target; otherwise src/dst counts differ and
-    // PushKvBlocks rejects the whole transfer, leaving decode with
-    // un-transferred KV (-> repetition). The dropped tail blocks correspond to
-    // tokens beyond the prompt length, so the truncation is loss-free.
-    filtered.local_blocks_ids.resize(mapped_local);
-    if (!filtered.remote_blocks_ids.empty() ||
-        !filtered.remote_linear_state_ids.empty()) {
+    // local_ids[k] maps to remote_ids[kv_split_rank + k * kv_split_size]. When
+    // the strided remote index runs past the D-side block list (the prompt
+    // spans multiple logical blocks and the last one is not full, which only
+    // happens for kv_split_rank > 0), the loop above stops early. local_ids
+    // must then be truncated to the blocks that actually got a remote target;
+    // otherwise the two sides differ in size and PushKvBlocks rejects the whole
+    // transfer. The dropped tail blocks correspond to tokens beyond the prompt
+    // length, so the truncation is loss-free.
+    const bool has_mapping = std::any_of(filtered.mappings.begin(),
+                                         filtered.mappings.end(),
+                                         [](const KVTransferMapping& mapping) {
+                                           return !mapping.local_ids.empty() &&
+                                                  !mapping.remote_ids.empty();
+                                         });
+    if (has_mapping) {
       filtered_kv_infos.push_back(std::move(filtered));
     }
   }
@@ -147,8 +220,12 @@ folly::SemiFuture<bool> KVCacheTransfer::push_kv_blocks_async(
     const std::vector<TransferKVInfo>* kv_infos = &transfer_kv_infos;
     // Filter when KV is actually sharded across ranks. When kv_split_size==1
     // (each CP rank holds a full KV replica) the filter degenerates to a copy,
-    // so we skip it and let each rank consume remote_blocks_ids 1:1.
+    // so we skip it and let each rank consume remote_ids 1:1.
     const int32_t kv_split_size = parallel_args.kv_split_size_effective();
+    if (!validate_transfer_mappings(*kv_infos, kv_split_size)) {
+      promise.setValue(false);
+      return;
+    }
     if (kv_split_size > 1) {
       filtered_kv_infos = filter_kv_split_infos(
           parallel_args.kv_split_rank(), kv_split_size, *kv_infos);
@@ -157,6 +234,10 @@ folly::SemiFuture<bool> KVCacheTransfer::push_kv_blocks_async(
         promise.setValue(true);
         return;
       }
+    }
+    if (!validate_transfer_mappings(*kv_infos, /*kv_split_size=*/1)) {
+      promise.setValue(false);
+      return;
     }
     merge_kv_blocks(merged_kv_infos, *kv_infos, parallel_args);
     bool success = true;
@@ -190,28 +271,26 @@ void KVCacheTransfer::merge_kv_blocks(
   int32_t src_world_size = parallel_args.world_size();
   int32_t src_tp_size = src_world_size / src_dp_size / src_kv_split_size;
   int32_t src_dp_local_tp_rank = src_rank % src_tp_size;
-  auto append_transfer_groups =
-      [](std::vector<KVBlockTransferGroup>& dst,
-         const std::vector<KVBlockTransferGroup>& src) {
-        for (const auto& src_group : src) {
-          auto it =
-              std::find_if(dst.begin(),
-                           dst.end(),
-                           [&src_group](const KVBlockTransferGroup& group) {
-                             return group.group_id == src_group.group_id;
-                           });
-          if (it == dst.end()) {
-            dst.emplace_back(src_group);
-            continue;
-          }
-          it->local_blocks_ids.insert(it->local_blocks_ids.end(),
-                                      src_group.local_blocks_ids.begin(),
-                                      src_group.local_blocks_ids.end());
-          it->remote_blocks_ids.insert(it->remote_blocks_ids.end(),
-                                       src_group.remote_blocks_ids.begin(),
-                                       src_group.remote_blocks_ids.end());
-        }
-      };
+  auto append_mappings = [](std::vector<KVTransferMapping>& dst,
+                            const std::vector<KVTransferMapping>& src) {
+    for (const KVTransferMapping& src_mapping : src) {
+      auto it = std::find_if(dst.begin(),
+                             dst.end(),
+                             [&src_mapping](const KVTransferMapping& mapping) {
+                               return mapping.group_id == src_mapping.group_id;
+                             });
+      if (it == dst.end()) {
+        dst.emplace_back(src_mapping);
+        continue;
+      }
+      it->local_ids.insert(it->local_ids.end(),
+                           src_mapping.local_ids.begin(),
+                           src_mapping.local_ids.end());
+      it->remote_ids.insert(it->remote_ids.end(),
+                            src_mapping.remote_ids.begin(),
+                            src_mapping.remote_ids.end());
+    }
+  };
   for (auto& info : transfer_kv_infos) {
     // Obtain the parallel parameters of the destination instance.
     int32_t dst_dp_rank = info.dp_rank;
@@ -246,45 +325,15 @@ void KVCacheTransfer::merge_kv_blocks(
         KVCacheInfo kv_info;
         kv_info.dst_cluster_id = dst_cluster_id;
         kv_info.dst_addr = dst_addr;
-        kv_info.src_blocks.insert(kv_info.src_blocks.end(),
-                                  info.local_blocks_ids.begin(),
-                                  info.local_blocks_ids.end());
-        kv_info.dst_blocks.insert(kv_info.dst_blocks.end(),
-                                  info.remote_blocks_ids.begin(),
-                                  info.remote_blocks_ids.end());
-        kv_info.src_linear_state_ids.insert(kv_info.src_linear_state_ids.end(),
-                                            info.local_linear_state_ids.begin(),
-                                            info.local_linear_state_ids.end());
-        kv_info.dst_linear_state_ids.insert(
-            kv_info.dst_linear_state_ids.end(),
-            info.remote_linear_state_ids.begin(),
-            info.remote_linear_state_ids.end());
+        append_mappings(kv_info.mappings, info.mappings);
 
         // XTensor mode: copy destination offsets
         if (!info.dst_xtensor_layer_offsets.empty()) {
           kv_info.dst_xtensor_layer_offsets = info.dst_xtensor_layer_offsets;
         }
-        append_transfer_groups(kv_info.block_transfer_groups,
-                               info.block_transfer_groups);
-
         merged_kv_infos[key] = std::move(kv_info);
       } else {
-        merged_kv_infos[key].src_blocks.insert(
-            merged_kv_infos[key].src_blocks.end(),
-            info.local_blocks_ids.begin(),
-            info.local_blocks_ids.end());
-        merged_kv_infos[key].dst_blocks.insert(
-            merged_kv_infos[key].dst_blocks.end(),
-            info.remote_blocks_ids.begin(),
-            info.remote_blocks_ids.end());
-        merged_kv_infos[key].src_linear_state_ids.insert(
-            merged_kv_infos[key].src_linear_state_ids.end(),
-            info.local_linear_state_ids.begin(),
-            info.local_linear_state_ids.end());
-        merged_kv_infos[key].dst_linear_state_ids.insert(
-            merged_kv_infos[key].dst_linear_state_ids.end(),
-            info.remote_linear_state_ids.begin(),
-            info.remote_linear_state_ids.end());
+        append_mappings(merged_kv_infos[key].mappings, info.mappings);
 
         // XTensor mode: merge destination offsets (append to each layer)
         if (!info.dst_xtensor_layer_offsets.empty()) {
@@ -309,65 +358,16 @@ void KVCacheTransfer::merge_kv_blocks(
             }
           }
         }
-        append_transfer_groups(merged_kv_infos[key].block_transfer_groups,
-                               info.block_transfer_groups);
       }
     }
   }
 }
-
-#if defined(USE_NPU)
-std::vector<torch::Tensor> KVCacheTransfer::convert_to_torch_tensor(
-    const std::vector<int64_t>& dims,
-    const torch::ScalarType dtype,
-    const std::vector<uintptr_t>& addresses,
-    const aclFormat format) {
-  std::vector<torch::Tensor> torch_tensors;
-  c10::DeviceType device_type = c10::DeviceType::PrivateUse1;
-  torch::TensorOptions option =
-      torch::TensorOptions().dtype(dtype).device(device_type);
-
-  torch_tensors.reserve(addresses.size());
-  for (auto dev_addr : addresses) {
-    auto tensor = torch::empty({0}, option);
-    auto address = reinterpret_cast<void*>(dev_addr);
-    torch::DataPtr c10_data_ptr(
-        address, address, [](void*) {}, tensor.device());
-
-    size_t tensor_nbytes = at::detail::computeStorageNbytesContiguous(
-        dims, tensor.dtype().itemsize());
-    torch::Storage storage;
-    // get npu storage constructor from register and construct storage
-    auto fptr = c10::GetStorageImplCreate(device_type);
-    auto allocator = c10::GetAllocator(device_type);
-
-    // PyTorch 2.7+: StorageImpl now takes DataPtr instead of raw allocator
-    storage = fptr(c10::StorageImpl::use_byte_size_t(),
-                   c10::SymInt(tensor_nbytes),
-                   std::move(c10_data_ptr),
-                   allocator,
-                   true);
-
-    tensor.set_(storage, 0, dims);
-    auto* tensor_storage = static_cast<torch_npu::NPUStorageImpl*>(
-        tensor.storage().unsafeGetStorageImpl());
-    tensor_storage->npu_desc_.npu_format_ = format;
-    torch_tensors.emplace_back(std::move(tensor));
-  }
-  return torch_tensors;
-}
-#endif
 
 std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
     const std::string& transfer_type,
     uint16_t transfer_listen_port,
     InstanceRole instance_role,
     const Device& device,
-    const KVCacheShape& kv_cache_shape,
-    torch::ScalarType dtype,
-    std::vector<xllm::KVCache>& kv_caches,
-    int64_t num_layers,
-    AllocateKVCacheFunc allocate_kv_cache_func,
     bool enable_lighting_indexer,
     const std::string& model_type,
     const std::string& model_id) {
@@ -382,13 +382,6 @@ std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
 #if defined(USE_NPU)
     transfer = std::make_shared<LlmDataDistTransfer>(
         transfer_listen_port, instance_role, enable_lighting_indexer);
-
-    transfer->initialize(device_id);
-    CHECK(allocate_kv_cache_func(kv_cache_shape,
-                                 /*use_huge_page_allocator=*/true,
-                                 /*tensor_allocator=*/nullptr))
-        << "Allocate KV cache failed.";
-    transfer->register_kv_cache(kv_caches, kv_cache_shape, dtype);
 #else
     LOG(FATAL) << "LlmDataDist is not supported on this backend.";
 #endif
@@ -413,23 +406,6 @@ std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
     mooncake_transfer = std::make_shared<MooncakeKVCacheTransferDefault>(
         device_id, transfer_listen_port, device, model_type);
 #endif
-
-    mooncake_transfer->initialize(device_id);
-#if defined(USE_MLU)
-    CHECK(allocate_kv_cache_func(kv_cache_shape,
-                                 /*use_huge_page_allocator=*/false,
-                                 /*tensor_allocator=*/nullptr))
-        << "Allocate KV cache failed.";
-#else
-    // TODO(xllm-kv-allocator): NPU/DCU/XTensor remains on its existing
-    // physical allocation path in the MLU Mooncake migration. A follow-up
-    // must route this backend through
-    // KVCacheCreateOptions::tensor_allocator without moving cache structure
-    // decisions into Transfer. Do not add indexer layer-mask handling here.
-    mooncake_transfer->allocate_kv_cache(
-        kv_caches, num_layers, kv_cache_shape, dtype);
-#endif
-    mooncake_transfer->register_kv_cache(kv_caches, kv_cache_shape, dtype);
 
     transfer = mooncake_transfer;
   } else {

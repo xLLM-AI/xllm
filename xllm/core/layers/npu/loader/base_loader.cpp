@@ -16,6 +16,7 @@ limitations under the License.
 #include "base_loader.h"
 
 #include "core/common/global_flags.h"
+#include "core/framework/config/distributed_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/platform/sleepable_allocator.h"
 #include "framework/xtensor/xtensor_allocator.h"
@@ -72,6 +73,14 @@ BaseLoader::BaseLoader(uint64_t weight_count,
 BaseLoader::~BaseLoader() {
   release_host_storage();
   release_device_storage();
+}
+
+std::string BaseLoader::expert_shm_namespace() const {
+  const std::string& master_node_addr =
+      ::xllm::DistributedConfig::get_instance().master_node_addr();
+  CHECK(!master_node_addr.empty())
+      << "EPLB expert SHM requires master_node_addr for service isolation.";
+  return master_node_addr + "|" + model_id_;
 }
 
 // ----------------------------- set_weight ---------------------------------

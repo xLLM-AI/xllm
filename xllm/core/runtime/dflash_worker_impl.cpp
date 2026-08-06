@@ -31,7 +31,7 @@ limitations under the License.
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/process_group.h"
 #include "framework/sampling/rejection_sampler.h"
-#if defined(USE_MLU)
+#if defined(USE_NPU) || defined(USE_MLU)
 #include "framework/kv_cache_transfer/mooncake_kv_cache_transfer.h"
 #endif
 #if defined(USE_NPU)
@@ -424,15 +424,26 @@ bool DFlashWorkerImpl::allocate_kv_cache_with_transfer(
 
   if (kv_cache_transfer_ == nullptr) {
 #if defined(USE_NPU)
-    kv_cache_transfer_ = std::make_shared<SpecKVCacheTransfer>(
-        options_.transfer_listen_port(),
-        options_.instance_role(),
-        context_.get_model_args().index_n_heads() > 0,
-        context_.get_model_args().enable_mla());
+    const std::string& transfer_type =
+        ::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type();
+    if (transfer_type == "LlmDataDist") {
+      kv_cache_transfer_ = std::make_shared<SpecKVCacheTransfer>(
+          options_.transfer_listen_port(),
+          options_.instance_role(),
+          context_.get_model_args().index_n_heads() > 0,
+          context_.get_model_args().enable_mla());
+    } else {
+      CHECK_EQ(transfer_type, "Mooncake");
+      kv_cache_transfer_ = std::make_shared<MooncakeKVCacheTransferDefault>(
+          device_.index(),
+          options_.transfer_listen_port(),
+          device_,
+          context_.get_model_args().model_type());
+    }
 #elif defined(USE_MLU)
     CHECK_EQ(::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type(),
              "Mooncake")
-        << "MLU DFlash push only supports Mooncake KV transfer.";
+        << "MLU DFlash only supports Mooncake KV transfer.";
     kv_cache_transfer_ = std::make_shared<MooncakeKVCacheTransferDefault>(
         device_.index(),
         options_.transfer_listen_port(),

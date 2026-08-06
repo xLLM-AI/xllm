@@ -70,19 +70,9 @@ class BatchInputBuilder {
 
   static TransferKVInfo build_step_transfer_info(
       const TransferKVInfo& full_info,
-      const std::vector<uint64_t>& local_block_ids,
-      size_t next_transfer_block_idx,
+      Sequence* sequence,
       uint32_t seq_len,
-      uint32_t block_size,
-      size_t* advanced_transfer_block_idx);
-
-  static KVBlockTransferGroup build_group_step_transfer(
-      const KVBlockTransferGroup& full_group,
-      const std::vector<int32_t>& local_block_ids,
-      size_t next_transfer_block_idx,
-      uint32_t seq_len,
-      uint32_t block_size,
-      size_t* advanced_transfer_block_idx);
+      uint32_t kv_split_size);
 
   void process_swap_block_infos(ForwardInput& forward_input);
 

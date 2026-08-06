@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Graph interfaces and backend dispatch for gated delta networks."""
+"""CUDA gated-delta-network kernels."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def fused_gdn_prefill_post_conv(
     torch.Tensor,
 ]:
     """Prepare normalized Q/K and GDN gates as one graph node."""
-    from xllm.python.kernels.triton.cuda.gdn_prefill import (
+    from .triton.gdn_prefill import (
         fused_gdn_prefill_post_conv as triton_gdn_post_conv,
     )
 
@@ -112,7 +112,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     scale: float,
 ) -> torch.Tensor:
     """Run a packed recurrent GDN update as one graph node."""
-    from xllm.python.kernels.triton.cuda.gated_delta_net import (
+    from .triton.gated_delta_net import (
         fused_recurrent_gated_delta_rule_packed_decode as triton_gdn_decode,
     )
 
@@ -165,13 +165,13 @@ def chunk_gated_delta_rule(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run a backend-selected chunked gated delta rule as one graph node."""
     if backend == "flashinfer":
-        from xllm.python.kernels.flashinfer.gated_delta_net import (
+        from .flashinfer.gated_delta_net import (
             chunk_gated_delta_rule as flashinfer_gdn,
         )
 
         return flashinfer_gdn(q, k, v, g, beta, initial_state, cu_seqlens)
     if backend == "triton":
-        from xllm.python.kernels.triton.cuda.fla import (
+        from .triton.fla import (
             chunk_gated_delta_rule as triton_gdn,
         )
 
@@ -201,3 +201,12 @@ def _chunk_gated_delta_rule_fake(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     del q, k, g, beta, cu_seqlens, backend
     return torch.empty_like(v), torch.empty_like(initial_state)
+
+
+__all__ = [
+    "GdnPrefillBackend",
+    "resolve_gdn_prefill_backend",
+    "fused_gdn_prefill_post_conv",
+    "fused_recurrent_gated_delta_rule_packed_decode",
+    "chunk_gated_delta_rule",
+]

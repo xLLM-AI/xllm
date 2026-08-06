@@ -12,6 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from xllm.python.kernels.triton.cuda.fla.chunk import chunk_gated_delta_rule
+"""Distributed execution for the Python model executor."""
 
-__all__ = ["chunk_gated_delta_rule"]
+from __future__ import annotations
+
+from xllm.python.distributed.collectives import (
+    all_gather,
+    all_reduce_,
+    init_tp_group,
+    tp_rank,
+)
+
+__all__ = ["init_tp_group", "tp_rank", "all_reduce_", "all_gather"]

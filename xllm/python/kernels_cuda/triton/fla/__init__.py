@@ -12,4 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Hardware-specific Triton kernel implementations."""
+from .chunk import chunk_gated_delta_rule
+
+__all__ = ["chunk_gated_delta_rule"]

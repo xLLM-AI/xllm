@@ -12,163 +12,137 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Architecture and import tests for Python graph ops and hardware kernels."""
+"""Architecture boundaries for Python models, layers, and kernel packages."""
 
 from __future__ import annotations
 
 import ast
-import subprocess
-import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).parents[2]
 _PYTHON_ROOT = _REPO_ROOT / "xllm" / "python"
+_KERNEL_PACKAGES = ("kernels_cuda", "kernels_npu")
+
+_HARDWARE_IMPORTS = (
+    "flashinfer",
+    "torch_npu",
+    "triton",
+    "xllm.python.kernels_cuda",
+    "xllm.python.kernels_npu",
+    "xllm.python.platform",
+)
+_HARDWARE_ATTRIBUTES = ("torch.cuda", "torch.ops.npu", "torch_npu")
+
+_NODES = {
+    path: tuple(ast.walk(ast.parse(path.read_text(), filename=str(path))))
+    for path in sorted(_PYTHON_ROOT.rglob("*.py"))
+}
 
 
-def _python_files(directory: Path) -> list[Path]:
-    return sorted(
-        path
-        for path in directory.rglob("*.py")
-        if "__pycache__" not in path.parts
-    )
+def _files_under(directory: Path) -> Iterator[tuple[Path, tuple[ast.AST, ...]]]:
+    for path, nodes in _NODES.items():
+        if path.is_relative_to(directory):
+            yield path, nodes
 
 
-def _decorator_name(decorator: ast.expr) -> str:
-    if isinstance(decorator, ast.Call):
-        decorator = decorator.func
+def _qualified_name(node: ast.AST) -> str:
     parts: list[str] = []
-    while isinstance(decorator, ast.Attribute):
-        parts.append(decorator.attr)
-        decorator = decorator.value
-    if isinstance(decorator, ast.Name):
-        parts.append(decorator.id)
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
     return ".".join(reversed(parts))
 
 
-def test_kernel_modules_do_not_register_torch_ops() -> None:
+def _imported_modules(nodes: tuple[ast.AST, ...]) -> Iterator[tuple[int, str]]:
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                yield node.lineno, alias.name
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            yield node.lineno, module
+            if module and node.level == 0:
+                for alias in node.names:
+                    if alias.name != "*":
+                        yield node.lineno, f"{module}.{alias.name}"
+
+
+def _matches(name: str, prefixes: tuple[str, ...]) -> bool:
+    return any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes)
+
+
+def _relative(path: Path) -> Path:
+    return path.relative_to(_REPO_ROOT)
+
+
+def _exports(package: str) -> tuple[str, ...]:
+    path = _PYTHON_ROOT / package / "__init__.py"
+    for node in _NODES[path]:
+        if not isinstance(node, ast.Assign):
+            continue
+        defines_all = any(
+            isinstance(target, ast.Name) and target.id == "__all__"
+            for target in node.targets
+        )
+        if defines_all:
+            exports = ast.literal_eval(node.value)
+            return tuple(exports)
+    raise AssertionError(f"{_relative(path)} does not define __all__")
+
+
+def test_models_and_layers_are_hardware_independent() -> None:
     violations: list[str] = []
-    for path in _python_files(_PYTHON_ROOT / "kernels"):
-        tree = ast.parse(path.read_text(), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for decorator in node.decorator_list:
-                name = _decorator_name(decorator)
-                if name.endswith("custom_op") or name.endswith("register_fake"):
-                    violations.append(f"{path.relative_to(_REPO_ROOT)}:{node.lineno}")
+    for directory in ("models", "layers"):
+        for path, nodes in _files_under(_PYTHON_ROOT / directory):
+            for line, module in _imported_modules(nodes):
+                if _matches(module, _HARDWARE_IMPORTS):
+                    violations.append(f"{_relative(path)}:{line}: {module}")
+            for node in nodes:
+                if not isinstance(node, ast.Attribute):
+                    continue
+                name = _qualified_name(node)
+                if _matches(name, _HARDWARE_ATTRIBUTES):
+                    violations.append(f"{_relative(path)}:{node.lineno}: {name}")
     assert violations == []
 
 
-def test_op_modules_do_not_define_triton_kernels() -> None:
-    violations: list[str] = []
-    for path in _python_files(_PYTHON_ROOT / "ops"):
-        tree = ast.parse(path.read_text(), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for decorator in node.decorator_list:
-                name = _decorator_name(decorator)
-                if name.endswith("triton.jit") or name.endswith("triton.autotune"):
-                    violations.append(f"{path.relative_to(_REPO_ROOT)}:{node.lineno}")
-    assert violations == []
-
-
-def test_triton_kernels_are_partitioned_by_hardware() -> None:
-    triton_root = _PYTHON_ROOT / "kernels" / "triton"
-    assert (triton_root / "cuda" / "silu_and_mul.py").is_file()
-    assert (triton_root / "cuda" / "fused_moe.py").is_file()
-    assert (triton_root / "npu" / "split_qkv_rmsnorm_rope.py").is_file()
-    legacy_ops = _PYTHON_ROOT / "ops" / "triton"
-    assert not any(legacy_ops.glob("*.py"))
-    assert not (_PYTHON_ROOT / "kernels" / "triton_ops.py").exists()
-
-    compute_source = (_PYTHON_ROOT / "ops" / "compute.py").read_text()
-    assert "xllm.python.kernels.triton.npu.split_qkv_rmsnorm_rope" in compute_source
-    assert "xllm.python.ops.triton" not in compute_source
-
-
-def test_public_ops_import_does_not_load_hardware_kernels() -> None:
-    script = r'''
-import sys
-import types
-from pathlib import Path
-import torch
-
-python_package = types.ModuleType("xllm.python")
-python_package.__path__ = [str(Path.cwd() / "xllm/python")]
-sys.modules["xllm.python"] = python_package
-
-library = torch.library.Library("xllm_ops", "DEF")
-library.define("rms_norm(Tensor input, Tensor weight, float eps) -> Tensor")
-library.define(
-    "fused_add_rms_norm(Tensor(a!) input, Tensor(b!) residual, Tensor weight, "
-    "float eps) -> (Tensor, Tensor)"
-)
-library.define("silu_and_mul(Tensor input) -> Tensor")
-library.define(
-    "fused_qk_norm_rope(Tensor(a!) qkv, int num_heads_q, int num_heads_k, "
-    "int num_heads_v, int head_dim, float eps, Tensor q_weight, Tensor k_weight, "
-    "Tensor cos_sin_cache, bool interleaved, Tensor position_ids) -> Tensor"
-)
-library.define(
-    "quant_matmul(Tensor x1, Tensor x2, bool transpose2, Tensor scale, "
-    "Tensor? offset, Tensor? pertoken_scale, Tensor? bias, ScalarType? "
-    "output_dtype) -> Tensor"
-)
-library.define(
-    "quantize_per_tensor(Tensor self, Tensor scales, Tensor zero_points, "
-    "ScalarType dtype, int axis) -> Tensor"
-)
-library.define(
-    "dynamic_quant(Tensor input, Tensor? smooth_scales, Tensor? group_index, "
-    "ScalarType? dst_type) -> (Tensor, Tensor?)"
-)
-library.define(
-    "lightning_indexer(Tensor query, Tensor key, Tensor weights, "
-    "Tensor? query_seq_lengths, Tensor? key_seq_lengths, Tensor? block_table, "
-    "str layout_query, str layout_key, int selected_count, int sparse_mode, "
-    "int pre_tokens, int next_tokens, bool return_value) -> Tensor"
-)
-library.define(
-    "scatter_nd_update(Tensor(a!) var, Tensor indices, Tensor updates) -> ()"
-)
-library.define(
-    "sparse_flash_attention(Tensor query, Tensor key, Tensor value, "
-    "Tensor sparse_indices, Tensor? block_table, Tensor? actual_seq_lengths_query, "
-    "Tensor? actual_seq_lengths_kv, Tensor? query_rope, Tensor? key_rope, "
-    "float scale_value, int sparse_block_size, str layout_query, str layout_kv, "
-    "int sparse_mode) -> Tensor"
-)
-library.define(
-    "reshape_paged_cache(Tensor slot_mapping, Tensor keys, Tensor values, "
-    "Tensor(a!) key_cache, Tensor(b!) value_cache) -> Tensor"
-)
-library.define(
-    "update_decode_graph_metadata(Tensor tokens, Tensor positions, "
-    "Tensor slot_mapping, Tensor kv_seq_lens, Tensor paged_kv_indptr, "
-    "Tensor paged_kv_indices, Tensor paged_kv_last_page_len, "
-    "Tensor(a!) dst_tokens, Tensor(b!) dst_positions, "
-    "Tensor(c!) dst_slot_mapping, Tensor(d!) dst_kv_seq_lens, "
-    "Tensor(e!) dst_kv_seq_lens_delta, Tensor(f!) dst_paged_kv_indptr, "
-    "Tensor(g!) dst_paged_kv_indices, Tensor(h!) dst_paged_kv_last_page_len, "
-    "int padded_num_tokens) -> Tensor"
-)
-
-import xllm.python.ops  # noqa: F401
-
-assert "triton" not in sys.modules
-assert "flashinfer" not in sys.modules
-assert not any(
-    name.startswith("xllm.python.kernels.triton") for name in sys.modules
-)
-assert not any(
-    name.startswith("xllm.python.kernels.flashinfer") for name in sys.modules
-)
-'''
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=_REPO_ROOT,
-        capture_output=True,
-        text=True,
+def test_kernel_package_import_boundaries() -> None:
+    forbidden = (
+        "xllm.python.layers",
+        "xllm.python.models",
+        *(f"xllm.python.{package}" for package in _KERNEL_PACKAGES),
     )
-    assert result.returncode == 0, result.stderr
+    violations: list[str] = []
+    for package in _KERNEL_PACKAGES:
+        for path, nodes in _files_under(_PYTHON_ROOT / package):
+            for line, module in _imported_modules(nodes):
+                if _matches(module, forbidden):
+                    violations.append(f"{_relative(path)}:{line}: {module}")
+    assert violations == []
+
+
+def test_platform_packages_export_the_same_kernel_api() -> None:
+    cuda_exports = _exports("kernels_cuda")
+    npu_exports = _exports("kernels_npu")
+    assert cuda_exports
+    assert set(cuda_exports) == set(npu_exports)
+
+
+def test_platform_queries_stay_in_the_owning_layers() -> None:
+    violations: list[str] = []
+    binding = Path("xllm/python/__init__.py")
+    executor_root = Path("xllm/python/model_executor")
+    for path, nodes in _NODES.items():
+        relative = _relative(path)
+        for node in nodes:
+            if not isinstance(node, ast.Call):
+                continue
+            name = _qualified_name(node.func)
+            if not name.endswith(("platform.is_gpu", "platform.is_npu")):
+                continue
+            if relative != binding and not relative.is_relative_to(executor_root):
+                violations.append(f"{relative}:{node.lineno}: {name}")
+    assert violations == []

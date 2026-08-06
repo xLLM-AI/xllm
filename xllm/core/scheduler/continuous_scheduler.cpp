@@ -431,10 +431,15 @@ void ContinuousScheduler::generate() {
   response_processor_->wait_completion();
 }
 
-int64_t ContinuousScheduler::amortized_token_latency_ms(int64_t tbt_ms,
-                                                        size_t num_tokens) {
+int64_t ContinuousScheduler::microseconds_to_milliseconds(
+    int64_t microseconds) {
+  return (microseconds + 500) / 1000;
+}
+
+int64_t ContinuousScheduler::amortized_token_latency(int64_t latency,
+                                                     size_t num_tokens) {
   const int64_t n = static_cast<int64_t>(num_tokens);
-  return (tbt_ms + n / 2) / n;
+  return (latency + n / 2) / n;
 }
 
 void ContinuousScheduler::update_token_latency_metrics(
@@ -452,21 +457,26 @@ void ContinuousScheduler::update_token_latency_metrics(
     }
     // Read the committed-token count before tbt(), which resets it.
     const size_t committed_tokens = sequence->generated_tokens_since_latency();
-    int64_t tbt_milliseconds = sequence->tbt(now);
+    const int64_t tbt_microseconds = sequence->tbt_microseconds(now);
+    const int64_t tbt_milliseconds =
+        microseconds_to_milliseconds(tbt_microseconds);
     if (sequence->is_first_token()) {
       HISTOGRAM_OBSERVE(time_to_first_token_latency_milliseconds,
                         tbt_milliseconds);
       sequence->set_time_to_first_token_latency_seconds(
           static_cast<double>(tbt_milliseconds) / 1000);
     } else {
-      HISTOGRAM_OBSERVE(inter_token_latency_milliseconds, tbt_milliseconds);
+      int64_t inter_token_latency_us = tbt_microseconds;
       if (speculative_metrics_enabled && committed_tokens > 0) {
-        HISTOGRAM_OBSERVE(
-            speculative_per_token_latency_milliseconds,
-            amortized_token_latency_ms(tbt_milliseconds, committed_tokens));
+        inter_token_latency_us =
+            amortized_token_latency(tbt_microseconds, committed_tokens);
         step_committed_tokens += static_cast<int64_t>(committed_tokens);
         ++step_decode_seqs;
       }
+      HISTOGRAM_OBSERVE(inter_token_latency_microseconds,
+                        inter_token_latency_us);
+      HISTOGRAM_OBSERVE(inter_token_latency_milliseconds,
+                        microseconds_to_milliseconds(inter_token_latency_us));
     }
   }
   if (step_decode_seqs > 0) {

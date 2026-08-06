@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Graph interfaces for causal-convolution operators."""
+"""CUDA causal-convolution kernels."""
 
 from __future__ import annotations
 
@@ -31,8 +31,8 @@ def causal_conv1d_prefill(
     has_initial_state: torch.Tensor,
     query_start_loc: torch.Tensor,
 ) -> torch.Tensor:
-    """Run CUDA Triton varlen causal convolution as one graph node."""
-    from xllm.python.kernels.triton.cuda.causal_conv1d import (
+    """Run Triton varlen causal convolution as one graph node."""
+    from .triton.causal_conv1d import (
         causal_conv1d_prefill as triton_causal_conv1d_prefill,
     )
 
@@ -69,8 +69,8 @@ def causal_conv1d_decode(
     conv_state: torch.Tensor,
     state_indices: torch.Tensor,
 ) -> torch.Tensor:
-    """Run CUDA Triton single-token causal convolution as one graph node."""
-    from xllm.python.kernels.triton.cuda.causal_conv1d import (
+    """Run Triton single-token causal convolution as one graph node."""
+    from .triton.causal_conv1d import (
         causal_conv1d_decode as triton_causal_conv1d_decode,
     )
 
@@ -91,3 +91,6 @@ def _causal_conv1d_decode_fake(
 ) -> torch.Tensor:
     del weight, conv_state, state_indices
     return torch.empty_like(value)
+
+
+__all__ = ["causal_conv1d_prefill", "causal_conv1d_decode"]

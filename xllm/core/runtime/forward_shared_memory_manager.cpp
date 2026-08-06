@@ -208,32 +208,29 @@ inline size_t get_xtensor_layer_offsets_size(
   return total;
 }
 
-inline size_t get_block_transfer_groups_size(
-    const std::vector<KVBlockTransferGroup>& groups) {
+inline size_t get_kv_transfer_mappings_size(
+    const std::vector<KVTransferMapping>& mappings) {
   size_t total = type_size<uint64_t>;
-  for (const auto& group : groups) {
-    total += type_size<int32_t> + get_vector_size(group.local_blocks_ids) +
-             get_vector_size(group.remote_blocks_ids);
+  for (const KVTransferMapping& mapping : mappings) {
+    total += type_size<int32_t> + get_vector_size(mapping.local_ids) +
+             get_vector_size(mapping.remote_ids);
   }
   return total;
 }
 
 inline size_t get_transfer_kv_info_size(const TransferKVInfo& info) {
-  return get_string_size(info.request_id) +
-         get_vector_size(info.local_blocks_ids) +
-         get_vector_size(info.remote_blocks_ids) +
-         get_vector_size(info.local_linear_state_ids) +
-         get_vector_size(info.remote_linear_state_ids) +
-         type_size<int32_t>  // dp_rank
+  return get_string_size(info.request_id) + type_size<int32_t>  // dp_rank
          + get_instance_info_size(info.remote_instance_info) +
          get_xtensor_layer_offsets_size(info.dst_xtensor_layer_offsets) +
-         get_block_transfer_groups_size(info.block_transfer_groups);
+         get_kv_transfer_mappings_size(info.mappings);
 }
 
 inline size_t get_eplb_info_size(const EplbInfo& info) {
-  return type_size<int32_t>  // prepare_layer_id
+  return type_size<int32_t>    // prepare_layer_id
+         + type_size<int64_t>  // prepare_token
          + get_vector_size(info.expert_ids) +
-         type_size<int32_t>;  // update_layer_id
+         type_size<int32_t> +  // update_layer_id
+         type_size<int64_t>;   // activation_token
 }
 
 inline size_t get_mm_dict_size(const MMDict& mm_dict) {
@@ -772,25 +769,25 @@ inline void write_xtensor_layer_offsets(
   }
 }
 
-inline void write_block_transfer_groups(
+inline void write_kv_transfer_mappings(
     char*& buffer,
-    const std::vector<KVBlockTransferGroup>& groups) {
-  write_data(buffer, static_cast<uint64_t>(groups.size()));
-  for (const auto& group : groups) {
-    write_data(buffer, group.group_id);
-    write_vector(buffer, group.local_blocks_ids);
-    write_vector(buffer, group.remote_blocks_ids);
+    const std::vector<KVTransferMapping>& mappings) {
+  write_data(buffer, static_cast<uint64_t>(mappings.size()));
+  for (const KVTransferMapping& mapping : mappings) {
+    write_data(buffer, mapping.group_id);
+    write_vector(buffer, mapping.local_ids);
+    write_vector(buffer, mapping.remote_ids);
   }
 }
 
-inline void write_block_transfer_groups(
+inline void write_kv_transfer_mappings(
     RawInputSerializeContext& context,
-    const std::vector<KVBlockTransferGroup>& groups) {
-  write_data(context.descriptor, static_cast<uint64_t>(groups.size()));
-  for (const auto& group : groups) {
-    write_data(context.descriptor, group.group_id);
-    write_vector(context.descriptor, group.local_blocks_ids);
-    write_vector(context.descriptor, group.remote_blocks_ids);
+    const std::vector<KVTransferMapping>& mappings) {
+  write_data(context.descriptor, static_cast<uint64_t>(mappings.size()));
+  for (const KVTransferMapping& mapping : mappings) {
+    write_data(context.descriptor, mapping.group_id);
+    write_vector(context.descriptor, mapping.local_ids);
+    write_vector(context.descriptor, mapping.remote_ids);
   }
 }
 
@@ -806,40 +803,36 @@ inline void write_xtensor_layer_offsets(
 
 inline void write_transfer_kv_info(char*& buffer, const TransferKVInfo& info) {
   write_string(buffer, info.request_id);
-  write_vector(buffer, info.local_blocks_ids);
-  write_vector(buffer, info.remote_blocks_ids);
-  write_vector(buffer, info.local_linear_state_ids);
-  write_vector(buffer, info.remote_linear_state_ids);
   write_data(buffer, info.dp_rank);
   write_instance_info(buffer, info.remote_instance_info);
   write_xtensor_layer_offsets(buffer, info.dst_xtensor_layer_offsets);
-  write_block_transfer_groups(buffer, info.block_transfer_groups);
+  write_kv_transfer_mappings(buffer, info.mappings);
 }
 
 inline void write_transfer_kv_info(RawInputSerializeContext& context,
                                    const TransferKVInfo& info) {
   write_string(context.descriptor, info.request_id);
-  write_vector(context.descriptor, info.local_blocks_ids);
-  write_vector(context.descriptor, info.remote_blocks_ids);
-  write_vector(context.descriptor, info.local_linear_state_ids);
-  write_vector(context.descriptor, info.remote_linear_state_ids);
   write_data(context.descriptor, info.dp_rank);
   write_instance_info(context, info.remote_instance_info);
   write_xtensor_layer_offsets(context, info.dst_xtensor_layer_offsets);
-  write_block_transfer_groups(context, info.block_transfer_groups);
+  write_kv_transfer_mappings(context, info.mappings);
 }
 
 inline void write_eplb_info(char*& buffer, const EplbInfo& info) {
   write_data(buffer, info.prepare_layer_id);
+  write_data(buffer, info.prepare_token);
   write_vector(buffer, info.expert_ids);
   write_data(buffer, info.update_layer_id);
+  write_data(buffer, info.activation_token);
 }
 
 inline void write_eplb_info(RawInputSerializeContext& context,
                             const EplbInfo& info) {
   write_data(context.descriptor, info.prepare_layer_id);
+  write_data(context.descriptor, info.prepare_token);
   write_vector(context.descriptor, info.expert_ids);
   write_data(context.descriptor, info.update_layer_id);
+  write_data(context.descriptor, info.activation_token);
 }
 
 inline void write_swap_blocks(char*& buffer,
@@ -1677,29 +1670,29 @@ inline void read_xtensor_layer_offsets(
   }
 }
 
-inline void read_block_transfer_groups(
+inline void read_kv_transfer_mappings(
     const char*& buffer,
-    std::vector<KVBlockTransferGroup>& groups) {
-  uint64_t group_count;
-  read_data(buffer, group_count);
-  groups.resize(group_count);
-  for (auto& group : groups) {
-    read_data(buffer, group.group_id);
-    read_vector(buffer, group.local_blocks_ids);
-    read_vector(buffer, group.remote_blocks_ids);
+    std::vector<KVTransferMapping>& mappings) {
+  uint64_t mapping_count;
+  read_data(buffer, mapping_count);
+  mappings.resize(mapping_count);
+  for (KVTransferMapping& mapping : mappings) {
+    read_data(buffer, mapping.group_id);
+    read_vector(buffer, mapping.local_ids);
+    read_vector(buffer, mapping.remote_ids);
   }
 }
 
-inline void read_block_transfer_groups(
+inline void read_kv_transfer_mappings(
     ReadContext& context,
-    std::vector<KVBlockTransferGroup>& groups) {
-  uint64_t group_count;
-  read_data(context, group_count);
-  groups.resize(group_count);
-  for (auto& group : groups) {
-    read_data(context, group.group_id);
-    read_vector(context, group.local_blocks_ids);
-    read_vector(context, group.remote_blocks_ids);
+    std::vector<KVTransferMapping>& mappings) {
+  uint64_t mapping_count;
+  read_data(context, mapping_count);
+  mappings.resize(mapping_count);
+  for (KVTransferMapping& mapping : mappings) {
+    read_data(context, mapping.group_id);
+    read_vector(context, mapping.local_ids);
+    read_vector(context, mapping.remote_ids);
   }
 }
 
@@ -1717,38 +1710,34 @@ inline void read_xtensor_layer_offsets(
 
 inline void read_transfer_kv_info(const char*& buffer, TransferKVInfo& info) {
   read_string(buffer, info.request_id);
-  read_vector(buffer, info.local_blocks_ids);
-  read_vector(buffer, info.remote_blocks_ids);
-  read_vector(buffer, info.local_linear_state_ids);
-  read_vector(buffer, info.remote_linear_state_ids);
   read_data(buffer, info.dp_rank);
   read_instance_info(buffer, info.remote_instance_info);
   read_xtensor_layer_offsets(buffer, info.dst_xtensor_layer_offsets);
-  read_block_transfer_groups(buffer, info.block_transfer_groups);
+  read_kv_transfer_mappings(buffer, info.mappings);
 }
 
 inline void read_transfer_kv_info(ReadContext& context, TransferKVInfo& info) {
   read_string(context, info.request_id);
-  read_vector(context, info.local_blocks_ids);
-  read_vector(context, info.remote_blocks_ids);
-  read_vector(context, info.local_linear_state_ids);
-  read_vector(context, info.remote_linear_state_ids);
   read_data(context, info.dp_rank);
   read_instance_info(context, info.remote_instance_info);
   read_xtensor_layer_offsets(context, info.dst_xtensor_layer_offsets);
-  read_block_transfer_groups(context, info.block_transfer_groups);
+  read_kv_transfer_mappings(context, info.mappings);
 }
 
 inline void read_eplb_info(const char*& buffer, EplbInfo& info) {
   read_data(buffer, info.prepare_layer_id);
+  read_data(buffer, info.prepare_token);
   read_vector(buffer, info.expert_ids);
   read_data(buffer, info.update_layer_id);
+  read_data(buffer, info.activation_token);
 }
 
 inline void read_eplb_info(ReadContext& context, EplbInfo& info) {
   read_data(context, info.prepare_layer_id);
+  read_data(context, info.prepare_token);
   read_vector(context, info.expert_ids);
   read_data(context, info.update_layer_id);
+  read_data(context, info.activation_token);
 }
 
 inline void read_swap_blocks(const char*& buffer,
@@ -2548,7 +2537,7 @@ size_t calculate_raw_forward_output_size(const RawForwardOutput& output) {
   size += get_vector_size(output.src_seq_idxes);
   size += get_vector_size(output.out_tokens);
   size += get_vector_size(output.out_logprobs);
-  size += type_size<int32_t>;  // prepared_layer_id
+  size += type_size<int64_t>;  // prepared_token
   const bool has_dit_forward_output =
       !output.dit_forward_output.tensors.empty();
   size += type_size<bool>;
@@ -2622,7 +2611,7 @@ void deserialize_raw_forward_output(const char* buffer,
   read_vector(buffer, output.out_tokens);
   read_vector(buffer, output.out_logprobs);
 
-  read_data(buffer, output.prepared_layer_id);
+  read_data(buffer, output.prepared_token);
 
   bool has_dit_forward_output = false;
   read_data(buffer, has_dit_forward_output);
@@ -2643,7 +2632,7 @@ void serialize_raw_forward_output(const RawForwardOutput& output,
   write_vector(buffer, output.out_tokens);
   write_vector(buffer, output.out_logprobs);
 
-  write_data(buffer, output.prepared_layer_id);
+  write_data(buffer, output.prepared_token);
 
   const bool has_dit_forward_output =
       !output.dit_forward_output.tensors.empty();
@@ -2867,12 +2856,12 @@ void convert_tensor_to_raw_output(
     const std::vector<torch::Tensor>& dit_images,
     const std::vector<std::string>& dit_text_output,
     const torch::Tensor& expert_load_data,
-    int32_t prepared_layer_id,
+    int64_t prepared_token,
     const torch::Tensor& src_seq_idxes,
     const torch::Tensor& out_tokens,
     const torch::Tensor& out_logprobs,
     RawForwardOutput& raw_output) {
-  raw_output.prepared_layer_id = prepared_layer_id;
+  raw_output.prepared_token = prepared_token;
 
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     torch::Tensor expert_load_data_flattened =
@@ -3217,7 +3206,7 @@ bool ForwardSharedMemoryManager::raw_output_write(
     const std::vector<torch::Tensor>& dit_images,
     const std::vector<std::string>& dit_text_output,
     const torch::Tensor& expert_load_data,
-    int32_t prepared_layer_id,
+    int64_t prepared_token,
     const torch::Tensor& src_seq_idxes,
     const torch::Tensor& out_tokens,
     const torch::Tensor& out_logprobs) {
@@ -3231,7 +3220,7 @@ bool ForwardSharedMemoryManager::raw_output_write(
                                dit_images,
                                dit_text_output,
                                expert_load_data,
-                               prepared_layer_id,
+                               prepared_token,
                                src_seq_idxes,
                                out_tokens,
                                out_logprobs,
