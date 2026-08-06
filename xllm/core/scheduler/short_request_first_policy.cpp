@@ -14,7 +14,6 @@ limitations under the License.
 ==============================================================================*/
 
 #include <cstdint>
-#include <vector>
 
 #include "common/metrics.h"
 #include "core/framework/config/scheduler_config.h"
@@ -28,19 +27,12 @@ void ShortRequestFirstPolicy::schedule(
     std::vector<std::shared_ptr<Request>>& finished) {
   const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
   const int32_t threshold = scheduler_config.short_request_first_threshold();
-  std::vector<std::shared_ptr<Request>> waiting_requests;
-  waiting_requests.reserve(state.prefill_queue.size());
-  for (auto it = state.prefill_queue.begin(); it != state.prefill_queue.end();
-       ++it) {
-    waiting_requests.emplace_back(*it);
-  }
-  state.prefill_queue.sort(ShortRequestFirstComparator(
+  const std::shared_ptr<Request> promoted = select_short_request_first_promoted(
+      state.prefill_queue,
       threshold,
-      select_short_request_first_promoted(
-          waiting_requests,
-          threshold,
-          scheduler_config.short_request_first_long_max_wait_ms(),
-          absl::Now())));
+      scheduler_config.short_request_first_long_max_wait_ms(),
+      absl::Now());
+  state.prefill_queue.sort(ShortRequestFirstComparator(threshold, promoted));
   PrefillFirstPolicy::schedule(state, budget, finished);
 }
 

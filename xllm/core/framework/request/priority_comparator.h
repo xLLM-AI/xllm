@@ -20,7 +20,6 @@ limitations under the License.
 #include <functional>
 #include <memory>
 #include <string>
-#include <vector>
 
 #include "common.pb.h"
 #include "framework/request/request.h"
@@ -107,12 +106,39 @@ ShortRequestFirstRequestClass classify_short_request_first(Request& request,
 // Select the single LONG request that may be promoted ahead of waiting SHORT
 // requests: the LONG request with the oldest created_time, promoted only when
 // its wait reaches long_max_wait_ms and both SHORT and LONG requests are
-// waiting. Returns nullptr when no promotion applies.
+// waiting. Returns nullptr when no promotion applies. `requests` is any range
+// yielding std::shared_ptr<Request> (e.g. RequestPriorityQueue or a vector),
+// so the caller can scan the live queue without copying it.
+template <typename RequestRange>
 std::shared_ptr<Request> select_short_request_first_promoted(
-    const std::vector<std::shared_ptr<Request>>& requests,
+    const RequestRange& requests,
     int32_t threshold,
     double long_max_wait_ms,
-    absl::Time now);
+    absl::Time now) {
+  std::shared_ptr<Request> oldest_long;
+  bool has_short = false;
+  bool has_long = false;
+  for (const auto& request : requests) {
+    const ShortRequestFirstRequestClass request_class =
+        classify_short_request_first(*request, threshold);
+    if (request_class == ShortRequestFirstRequestClass::SHORT) {
+      has_short = true;
+    } else if (request_class == ShortRequestFirstRequestClass::LONG) {
+      has_long = true;
+      if (oldest_long == nullptr ||
+          request->created_time() < oldest_long->created_time()) {
+        oldest_long = request;
+      }
+    }
+  }
+  if (long_max_wait_ms > 0.0 && has_short && has_long &&
+      oldest_long != nullptr &&
+      now - oldest_long->created_time() >=
+          absl::Milliseconds(long_max_wait_ms)) {
+    return oldest_long;
+  }
+  return nullptr;
+}
 
 // ShortRequestFirst ordering: the promoted LONG head first (when non-null),
 // then SHORT requests, then the remaining LONG requests. Within the same

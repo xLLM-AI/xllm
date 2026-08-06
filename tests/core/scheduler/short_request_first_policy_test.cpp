@@ -71,14 +71,10 @@ void sort_short_request_first(DequeQueue& queue,
                               int32_t threshold,
                               double long_max_wait_ms,
                               absl::Time now) {
-  std::vector<std::shared_ptr<Request>> waiting_requests;
-  for (auto it = queue.begin(); it != queue.end(); ++it) {
-    waiting_requests.emplace_back(*it);
-  }
   queue.sort(ShortRequestFirstComparator(
       threshold,
       select_short_request_first_promoted(
-          waiting_requests, threshold, long_max_wait_ms, now)));
+          queue, threshold, long_max_wait_ms, now)));
 }
 
 TEST(ShortRequestFirstPolicyTest, ClassifiesFreshRequestsByThreshold) {
