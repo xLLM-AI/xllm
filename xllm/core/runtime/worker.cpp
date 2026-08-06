@@ -53,8 +53,7 @@ Worker::Worker(const ParallelArgs& parallel_args,
     const std::string& algorithm = options.speculative_algorithm();
     LOG(INFO) << "Speculative decode is enabled, algorithm: " << algorithm;
     if (algorithm == "Eagle3") {
-      impl_ =
-          new Eagle3WorkerImpl(parallel_args, device, options, worker_type);
+      impl_ = new Eagle3WorkerImpl(parallel_args, device, options, worker_type);
     } else if (algorithm == "DFlash") {
       impl_ = new DFlashWorkerImpl(parallel_args, device, options);
     } else if (algorithm == "DSpark") {

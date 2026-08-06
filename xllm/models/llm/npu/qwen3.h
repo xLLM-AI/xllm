@@ -379,6 +379,15 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
       return aux_h;
     }
 
+    CHECK_EQ(quarot_global_rotation_t_.dim(), 2)
+        << "QuaRot global_rotation must be a 2D tensor";
+    CHECK_EQ(quarot_global_rotation_t_.size(0), hidden_size)
+        << "QuaRot global_rotation hidden size mismatch, expected "
+        << hidden_size << ", got " << quarot_global_rotation_t_.size(0);
+    CHECK_EQ(quarot_global_rotation_t_.size(1), hidden_size)
+        << "QuaRot global_rotation hidden size mismatch, expected "
+        << hidden_size << ", got " << quarot_global_rotation_t_.size(1);
+
     return torch::matmul(aux_h, quarot_global_rotation_t_);
   }
 
@@ -530,13 +539,13 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
     CHECK_EQ(global_rotation.size(0), global_rotation.size(1))
         << "QuaRot global_rotation must be square";
 
-    auto global_rotation_cpu =
-        global_rotation
-            .to(torch::TensorOptions().dtype(torch::kFloat32).device(
-                    torch::kCPU),
-                /*non_blocking=*/false,
-                /*copy=*/true)
-            .contiguous();
+    auto global_rotation_cpu = global_rotation
+                                   .to(torch::TensorOptions()
+                                           .dtype(torch::kFloat32)
+                                           .device(torch::kCPU),
+                                       /*non_blocking=*/false,
+                                       /*copy=*/true)
+                                   .contiguous();
     torch::DeviceGuard device_guard(device_);
     auto global_rotation_device =
         global_rotation_cpu

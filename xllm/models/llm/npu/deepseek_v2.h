@@ -144,9 +144,9 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     }
 
     const bool enable_eagle3_aux_capture =
-        ::xllm::SpeculativeConfig::get_instance().speculative_algorithm() ==
-            "Eagle3" ||
-        (model_args.model_type() == "kimi_k25" &&
+        model_args.model_type() == "kimi_k25" &&
+        (::xllm::SpeculativeConfig::get_instance().speculative_algorithm() ==
+             "Eagle3" ||
          model_args.num_speculative_tokens() > 0);
     if (enable_eagle3_aux_capture) {
       const auto& layer_ids_from_config = model_args.layers_to_capture();

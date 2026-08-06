@@ -390,8 +390,9 @@ ForwardOutput VLMEngine::step(std::vector<Batch>& batch) {
   futures.reserve(worker_clients_num_);
 
   // update dp related global paramters and then execute model
-  for (auto worker_rank = 0; worker_rank < worker_clients_num_; ++worker_rank) {
-    auto dp_rank = worker_rank / dp_local_tp_size_;
+  for (int32_t worker_rank = 0; worker_rank < worker_clients_num_;
+       ++worker_rank) {
+    int32_t dp_rank = worker_rank / dp_local_tp_size_;
     futures.emplace_back(worker_clients_[worker_rank]->step_remote_async(
         forward_inputs[dp_rank]));
   }
@@ -448,9 +449,9 @@ void VLMEngine::update_last_step_result(std::vector<Batch>& last_batch) {
   // cause the output on other workers is the same as that on driver.
   // Under data parallelism (DP), we need to get dp_size outputs.
   // The `stride` means the workers num we can skip.
-  int stride = dp_local_tp_size_;
+  int32_t stride = dp_local_tp_size_;
 
-  for (auto worker_rank = 0; worker_rank < worker_clients_num_;
+  for (int32_t worker_rank = 0; worker_rank < worker_clients_num_;
        worker_rank += stride) {
     futures.emplace_back(
         worker_clients_[worker_rank]->get_last_step_result_async());
@@ -458,7 +459,7 @@ void VLMEngine::update_last_step_result(std::vector<Batch>& last_batch) {
   // wait for the all future to complete
   auto last_step_results = folly::collectAll(futures).get();
 
-  for (auto worker_rank = 0; worker_rank < worker_clients_num_;
+  for (int32_t worker_rank = 0; worker_rank < worker_clients_num_;
        worker_rank += dp_local_tp_size_) {
     auto result = last_step_results[worker_rank / stride].value();
     if (result.has_value()) {
@@ -468,7 +469,7 @@ void VLMEngine::update_last_step_result(std::vector<Batch>& last_batch) {
     }
   }
 
-  for (auto i = 0; i < last_batch.size(); i++) {
+  for (size_t i = 0; i < last_batch.size(); ++i) {
     last_batch[i].process_sample_output(raw_forward_outputs[i],
                                         options_.enable_schedule_overlap());
     // Keep Batch::sequences_ aligned with SequencesGroup after beam updates.
@@ -513,7 +514,7 @@ std::vector<ForwardInput> VLMEngine::prepare_inputs(std::vector<Batch>& batch) {
   // batch
   BatchForwardType batch_forward_type;
 
-  for (auto dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
+  for (int32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
     if (batch[dp_rank].empty()) {
       // Use value-initialization to zero primitive fields for empty shard.
       ForwardInput empty_input;
@@ -553,7 +554,7 @@ std::vector<ForwardInput> VLMEngine::prepare_inputs(std::vector<Batch>& batch) {
   }
 
   // update dp_global_token_nums and batch_forward_type
-  for (auto dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
+  for (int32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
     batched_inputs[dp_rank].input_params.parallel.dp_global_token_nums =
         dp_global_token_nums;
     batched_inputs[dp_rank].input_params.parallel.raw_dp_global_token_nums =

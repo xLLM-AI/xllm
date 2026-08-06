@@ -941,13 +941,16 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
   if (!input.input_params.meta.batch_forward_type.is_decode()) {
     ForwardInput target_prepared;
     ForwardInput draft_prepared;
-    auto output = run_worker_no_sync_impl(
-        *target_impl_, input, *prepare_stream_, *compute_stream_, target_prepared);
+    auto output = run_worker_no_sync_impl(*target_impl_,
+                                          input,
+                                          *prepare_stream_,
+                                          *compute_stream_,
+                                          target_prepared);
     auto draft_output = run_worker_no_sync_impl(*draft_impl_,
-                                             input,
-                                             *prepare_stream_,
-                                             *compute_stream_,
-                                             draft_prepared);
+                                                input,
+                                                *prepare_stream_,
+                                                *compute_stream_,
+                                                draft_prepared);
     if (draft_output.has_value()) {
       transfer_retained_inputs(*output, draft_output.value());
     }
@@ -973,18 +976,18 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
       token_num *= 2;
     }
     draft_outputs.emplace_back(run_worker_no_sync_impl(*draft_impl_,
-                                                    new_input,
-                                                    *prepare_stream_,
-                                                    *compute_stream_,
-                                                    draft_extend_prepared)
+                                                       new_input,
+                                                       *prepare_stream_,
+                                                       *compute_stream_,
+                                                       draft_extend_prepared)
                                    .value());
 
     for (int32_t i = 1; i < options_.num_speculative_tokens(); ++i) {
       draft_outputs.emplace_back(run_worker_no_sync_impl(*draft_impl_,
-                                                      input,
-                                                      *prepare_stream_,
-                                                      *compute_stream_,
-                                                      draft_step_prepared[i])
+                                                         input,
+                                                         *prepare_stream_,
+                                                         *compute_stream_,
+                                                         draft_step_prepared[i])
                                      .value());
     }
 
@@ -998,10 +1001,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
       token_num *= options_.num_speculative_tokens() + 1;
     }
     ForwardOutput output = run_worker_no_sync_impl(*target_impl_,
-                                                new_input,
-                                                *prepare_stream_,
-                                                *compute_stream_,
-                                                target_prepared)
+                                                   new_input,
+                                                   *prepare_stream_,
+                                                   *compute_stream_,
+                                                   target_prepared)
                                .value();
     for (ForwardOutput& draft_output : draft_outputs) {
       transfer_retained_inputs(output, draft_output);
@@ -1054,10 +1057,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
   // generate kv cache for draft model
   timer.reset();
   ForwardOutput draft_output = run_worker_no_sync_impl(*draft_impl_,
-                                                    prefill_input,
-                                                    *prepare_stream_,
-                                                    *compute_stream_,
-                                                    draft_prepared)
+                                                       prefill_input,
+                                                       *prepare_stream_,
+                                                       *compute_stream_,
+                                                       draft_prepared)
                                    .value();
   {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
@@ -1327,10 +1330,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
       pending_draft_context_ = PendingDraftContext();
     } else {
       draft_output_opt = run_worker_no_sync_impl(*draft_impl_,
-                                              current_draft_input,
-                                              *compute_stream_,
-                                              *compute_stream_,
-                                              draft_prepared[draft_idx]);
+                                                 current_draft_input,
+                                                 *compute_stream_,
+                                                 *compute_stream_,
+                                                 draft_prepared[draft_idx]);
     }
 
     if ((use_device_target_context || use_prelaunched_first_draft) &&
@@ -1467,10 +1470,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   fill_validate_input_from_draft_outputs(
       draft_outputs, validate_input, *compute_stream_);
   ForwardOutput target_output = run_worker_no_sync_impl(*target_impl_,
-                                                     validate_input,
-                                                     *compute_stream_,
-                                                     *compute_stream_,
-                                                     target_prepared)
+                                                        validate_input,
+                                                        *compute_stream_,
+                                                        *compute_stream_,
+                                                        target_prepared)
                                     .value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
@@ -1785,10 +1788,10 @@ void MTPWorkerImpl::enqueue_next_first_draft(
   pending_draft_context_.request_ids = input.input_params.embedding.request_ids;
   pending_draft_context_.output =
       run_worker_no_sync_impl(*draft_impl_,
-                           combined_input,
-                           *compute_stream_,
-                           *compute_stream_,
-                           pending_draft_context_.prepared_input);
+                              combined_input,
+                              *compute_stream_,
+                              *compute_stream_,
+                              pending_draft_context_.prepared_input);
   CHECK(pending_draft_context_.output.has_value())
       << "failed to prelaunch next MTP first draft";
 }
@@ -2042,12 +2045,12 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
   CHECK_EQ(buf.position_helper.out_position_columns, buf.out_token_ids.size())
       << "validate positions/tokens mismatch";
 
-  specBuilder::set_token_position_tensors(validate_input,
-                                          buf.out_token_ids,
-                                          buf.position_helper
-                                              .make_cpu_position_tensor(),
-                                          token_options,
-                                          position_options);
+  specBuilder::set_token_position_tensors(
+      validate_input,
+      buf.out_token_ids,
+      buf.position_helper.make_cpu_position_tensor(),
+      token_options,
+      position_options);
   if (!use_atb_spec_kernel) {
     input_params.meta.num_sequences = total_num_val_tokens;
     input_params.meta.batch_forward_type = BatchForwardType::DECODE;
@@ -2359,12 +2362,12 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
            static_cast<size_t>(buf.position_helper.out_position_columns))
       << "draft extend embeddings/positions mismatch";
 
-  specBuilder::set_token_position_tensors(extend_input,
-                                          buf.out_token_ids,
-                                          buf.position_helper
-                                              .make_cpu_position_tensor(),
-                                          token_options,
-                                          position_options);
+  specBuilder::set_token_position_tensors(
+      extend_input,
+      buf.out_token_ids,
+      buf.position_helper.make_cpu_position_tensor(),
+      token_options,
+      position_options);
   if (use_chunked_prefill) {
     input_params.meta.num_sequences = num_sequences;
     input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;

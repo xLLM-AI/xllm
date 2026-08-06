@@ -262,10 +262,10 @@ void Batch::dp_balance_shuffle_seqs() {
 #if defined(USE_NPU)
   // this shuffle operation is mainly used for npu with 24 cores
   // and specific mla op implementation
-  const auto num_npu_cores = 24;  // npu cube core num
+  constexpr size_t kNumNpuCores = 24;
   if (::xllm::KernelConfig::get_instance().enable_customize_mla_kernel() &&
       ::xllm::ParallelConfig::get_instance().enable_dp_balance() &&
-      sequences_.size() > num_npu_cores) {
+      sequences_.size() > kNumNpuCores) {
     std::vector<uint32_t> kv_cache_tokens_num;
     kv_cache_tokens_num.reserve(sequences_.size());
     for (auto& seq : sequences_) {
@@ -299,10 +299,10 @@ void Batch::dp_balance_shuffle_seqs() {
 
 std::unordered_map<uint32_t, uint32_t> Batch::cal_seq_exchange_index(
     std::vector<uint32_t>& kv_cache_tokens_num) {
-  const auto num_npu_cores = 24;  // npu cube core num
-  const auto num_seqs = kv_cache_tokens_num.size();
-  const auto base_per_core = num_seqs / num_npu_cores;
-  const auto remainder = num_seqs % num_npu_cores;
+  constexpr size_t kNumNpuCores = 24;
+  const size_t num_seqs = kv_cache_tokens_num.size();
+  const size_t base_per_core = num_seqs / kNumNpuCores;
+  const size_t remainder = num_seqs % kNumNpuCores;
 
   // find the indices of the remainder biggest elements
   std::vector<uint32_t> indices(num_seqs);
@@ -331,11 +331,11 @@ std::unordered_map<uint32_t, uint32_t> Batch::cal_seq_exchange_index(
   // allocate a long and a short request to each core, to ensuring
   // load balance among all cores
   std::vector<std::vector<uint32_t>> base_assignment(
-      num_npu_cores, std::vector<uint32_t>(base_per_core));
-  for (auto i = 0; i < base_indices.size(); ++i) {
-    auto col = i / num_npu_cores;
-    auto row = (col % 2 == 0) ? (i % num_npu_cores)
-                              : (num_npu_cores - 1 - (i % num_npu_cores));
+      kNumNpuCores, std::vector<uint32_t>(base_per_core));
+  for (size_t i = 0; i < base_indices.size(); ++i) {
+    const size_t col = i / kNumNpuCores;
+    const size_t row = (col % 2 == 0) ? (i % kNumNpuCores)
+                                      : (kNumNpuCores - 1 - (i % kNumNpuCores));
     base_assignment[row][col] = base_indices[i];
   }
 
@@ -343,15 +343,16 @@ std::unordered_map<uint32_t, uint32_t> Batch::cal_seq_exchange_index(
   // second one is the target index to be exchanged to
   std::unordered_map<uint32_t, uint32_t> index_shift;
   // add base part data
-  for (auto i = 0; i < num_npu_cores; ++i) {
-    for (auto j = 0; j < base_per_core; ++j) {
-      auto idx = base_assignment[i][j];
-      index_shift[idx] = i + j * num_npu_cores;
+  for (size_t i = 0; i < kNumNpuCores; ++i) {
+    for (size_t j = 0; j < base_per_core; ++j) {
+      const uint32_t idx = base_assignment[i][j];
+      index_shift[idx] = static_cast<uint32_t>(i + j * kNumNpuCores);
     }
   }
   // add remainder part data
-  for (auto i = 0; i < remainder; ++i) {
-    index_shift[remainder_indices[i]] = i + num_npu_cores * base_per_core;
+  for (size_t i = 0; i < remainder; ++i) {
+    index_shift[remainder_indices[i]] =
+        static_cast<uint32_t>(i + kNumNpuCores * base_per_core);
   }
 
   return index_shift;
