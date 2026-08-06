@@ -33,6 +33,7 @@ limitations under the License.
 namespace xllm {
 
 class AsyncResponseProcessor;
+class ModelArgs;
 
 // SchedulerState provides explicit access to the scheduler's internal state.
 // The SchedulerPolicy operates solely through this boundary -- it never
@@ -57,6 +58,7 @@ struct SchedulerState {
   KVCacheManager* kv_cache_manager;
   ProfileManager* profile_manager;
   AsyncResponseProcessor* response_processor;
+  const ModelArgs& model_args;
 
   // Flags.
   bool& last_step_prefill;
@@ -150,6 +152,10 @@ class SchedulerPolicy {
       ScheduleBudget& budget,
       std::vector<std::shared_ptr<Request>>& finished,
       size_t& reserved_full_footprint);
+  bool request_has_media_prefill(const std::shared_ptr<Request>& request) const;
+  int32_t select_media_prefill_dp_rank(const Sequence* sequence,
+                                       const SchedulerState& state) const;
+  bool should_limit_media_prefill_requests(const SchedulerState& state) const;
   size_t compute_prefill_tokens(Sequence* seq,
                                 size_t remaining_budget,
                                 const SchedulerState& state);
