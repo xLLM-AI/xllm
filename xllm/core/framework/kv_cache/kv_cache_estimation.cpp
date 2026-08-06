@@ -24,7 +24,6 @@ limitations under the License.
 #include "framework/block/block_utils.h"
 #include "framework/kv_cache/deepseek_v4_cache_policy.h"
 #include "framework/model/model_args.h"
-#include "platform/mlu/mlu_rdma_memory_plan.h"
 #include "util/pretty_print.h"
 #include "util/tensor_helper.h"
 #include "util/utils.h"
