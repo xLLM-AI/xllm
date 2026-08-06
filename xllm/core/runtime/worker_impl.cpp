@@ -1741,7 +1741,6 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   model_weights_path_ = std::move(model_weights_path);
   auto tokenizer = model_loader->tokenizer();
   CHECK(tokenizer != nullptr);
-  tokenizer_ = std::move(tokenizer);
 
   auto args = model_loader->model_args();
   auto quant_args = model_loader->quant_args();
@@ -1749,9 +1748,9 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   args.embedding_mode(embedding_mode);
   torch::ScalarType dtype = util::parse_dtype(args.dtype(), device_);
 
-  // Draft engine is fed token ids and detokenized by the target, so it loads
-  // no tokenizer of its own (not universal: Eagle3 keeps its own draft vocab;
-  // see speculative_engine.cpp).
+  // Only the target engine reconciles tokenizer and model vocab sizes. Draft
+  // engines do not detokenize output, but worker-local JSON grammar state
+  // restoration still requires retaining the tokenizer below.
   if (!options_.is_draft_engine()) {
     const int64_t tokenizer_vocab_size = tokenizer->vocab_size();
     int64_t model_vocab_size = args.vocab_size();
@@ -1766,6 +1765,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
                    << tokenizer_vocab_size << ", model: " << model_vocab_size;
     }
   }
+  tokenizer_ = std::move(tokenizer);
 
 #if defined(USE_NPU)
   const std::string& speculative_algorithm = options_.speculative_algorithm();
