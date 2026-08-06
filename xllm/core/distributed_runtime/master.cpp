@@ -331,6 +331,17 @@ Master::Master(const Options& options, EngineType type)
   print_startup_banner(model_path, options_.backend(), options_.node_rank());
   LOG(INFO) << "Master init options: " << options_.to_string();
   ParallelConfig::get_instance().cp_size(options_.cp_size());
+  // DCP for the Python model executor: widen the block manager's logical block
+  // to block_size * cp_size (kv_split_size == cp_size) so each CP rank stores
+  // only 1/cp of every sequence's KV. The Python attention backend compacts the
+  // resulting logical slot_mapping to this rank's physical slots (cp_utils
+  // cp_compact_slots), so opening this switch and the Python shard-write must
+  // ship together. Non-Python CP models keep the default (kv_split follows
+  // their own ATB/TORCH plan).
+  if (options_.cp_size() > 1 && ModelConfig::is_python_model_impl(
+                                    ModelConfig::get_instance().model_impl())) {
+    ParallelConfig::get_instance().kv_split_size(options_.cp_size());
+  }
   // cp_size <= 1 -> "disabled", otherwise "model" (model-side CP).
   const char* cp_sharding_stage =
       options_.cp_size() <= 1 ? "disabled" : "model";

@@ -256,3 +256,84 @@ def cp_gather_kv(local_kv: torch.Tensor, ctx: CpContext) -> torch.Tensor:
     """
     gathered = ops.cp_all_gather(local_kv, 0, ctx.cp_size)
     return gathered.index_select(0, ctx.restore_index)
+
+
+# ---------------------------------------------------------------------------
+# DCP (decode context parallel): KV *storage* sharding.
+#
+# CP has two independent shardings. The zigzag split above shards *query
+# compute* during prefill. DCP additionally shards *KV storage*: with the block
+# manager's logical block widened to ``cp_size * page_size`` (kv_split_size ==
+# cp_size), a logical KV slot ``s`` is owned by rank ``(s % (cp*B)) // B`` -- so
+# each logical block's tokens are dealt out to ranks in contiguous runs of
+# ``page_size``. Each rank then stores only its 1/cp of every sequence's KV in
+# its own physical pages, and the physical block id equals the logical block id
+# (the pool keeps the same block count; only the logical width grew).
+#
+# This mirrors the ATB-only C++ ``map_cache_slots_to_kv_shard``
+# (npu_cp_plan.cpp:924-949), reimplemented in pure torch because the Python
+# executor runs on the TORCH backend and never enters NpuCpPlan.
+# ---------------------------------------------------------------------------
+
+
+def cp_slot_owner(logical_slots: torch.Tensor, cp_size: int,
+                  page_size: int) -> torch.Tensor:
+    """KV-storage owner rank of each logical slot (block-granular).
+
+    ``-1`` slots (padding / not-yet-written) map to owner ``-1``.
+    """
+    logical_block_size = cp_size * page_size
+    owner = torch.remainder(logical_slots, logical_block_size).div(
+        page_size, rounding_mode="floor"
+    )
+    return torch.where(logical_slots >= 0, owner, torch.full_like(owner, -1))
+
+
+def cp_compact_slots(logical_slots: torch.Tensor, cp_size: int, cp_rank: int,
+                     page_size: int) -> torch.Tensor:
+    """Map global logical slots to this rank's physical slots (else ``-1``).
+
+    ``logical_slots`` is the full per-token logical ``slot_mapping`` handed down
+    by C++ (its space is ``cp_size`` times the physical cache). A token whose
+    logical slot is owned by ``cp_rank`` maps to physical slot
+    ``logical_block_id * page_size + (logical_slot % page_size)``; every other
+    token (including original ``-1`` slots) maps to ``-1`` so the
+    reshape-and-cache kernel skips it. This rank therefore writes only its 1/cp
+    of the sequence into its own physical pages.
+
+    Mirrors npu_cp_plan.cpp:924-949 exactly (block-granular ownership, physical
+    block id == logical block id).
+    """
+    logical_block_size = cp_size * page_size
+    valid = logical_slots >= 0
+    owner = torch.remainder(logical_slots, logical_block_size).div(
+        page_size, rounding_mode="floor"
+    )
+    owned = valid & (owner == cp_rank)
+    logical_block_id = logical_slots.div(logical_block_size, rounding_mode="floor")
+    physical = logical_block_id * page_size + torch.remainder(
+        logical_slots, page_size
+    )
+    return torch.where(owned, physical, torch.full_like(logical_slots, -1))
+
+
+def cp_decode_local_kv_lens(kv_seq_lens: torch.Tensor, cp_size: int,
+                            cp_rank: int, page_size: int) -> torch.Tensor:
+    """Per-sequence count of KV tokens this rank stores, under DCP.
+
+    With block-granular ownership (runs of ``page_size`` dealt round-robin to
+    ranks), a sequence of context length ``L`` gives rank ``r`` the tokens whose
+    logical position ``p`` satisfies ``(p % (cp*B)) // B == r``. That count is
+    ``full_blocks_of_this_rank * B + tail``, where the sequence has
+    ``L // (cp*B)`` complete logical blocks (each contributing ``B`` to every
+    rank) plus a remainder handed out ``B`` at a time to ranks ``0, 1, ...``.
+    Mirrors vllm-ascend ``_get_cp_local_seq_lens`` (pcp_utils.py:706-713).
+    """
+    stride = cp_size * page_size
+    full = kv_seq_lens.div(stride, rounding_mode="floor")  # complete logical blocks
+    rem = torch.remainder(kv_seq_lens, stride)  # leftover tokens
+    # Leftover goes to ranks in page_size chunks: this rank gets a whole page if
+    # rem > (cp_rank+1)*B, a partial page if it straddles cp_rank*B, else none.
+    tail = torch.clamp(rem - cp_rank * page_size, min=0)
+    tail = torch.clamp(tail, max=page_size)
+    return full * page_size + tail
