@@ -62,6 +62,9 @@ std::string get_header_x_request_id(const brpc::Controller* controller) {
     x_request_id =
         get_valid_header(controller->http_request(), "x-ms-client-request-id");
   }
+  if (x_request_id.empty()) {
+    x_request_id = get_valid_header(controller->http_request(), "trace_id");
+  }
   return x_request_id;
 }
 
