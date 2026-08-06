@@ -143,8 +143,8 @@ void scale_dp_global_token_nums(ModelInputParams& input_params,
   }
 }
 
-std::optional<ForwardOutput> run_llm_no_sync_impl(
-    LLMWorkerImpl& worker,
+std::optional<ForwardOutput> run_worker_no_sync_impl(
+    WorkerImpl& worker,
     const ForwardInput& input,
     Stream& prepare_stream,
     Stream& compute_stream,
@@ -281,7 +281,8 @@ DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
     : SpeculativeWorkerImpl(parallel_args,
                             device,
                             options,
-                            target_options(options)) {
+                            target_options(options),
+                            WorkerType::LLM) {
   // DFlash feeds the target's captured intermediate-layer aux hidden states
   // into the draft's context K/V. Under context parallelism the worker only
   // exposes the lm_head-gathered final hidden (see llm_worker_impl.cpp), not
@@ -306,7 +307,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
          "--enable_chunked_prefill=true.";
   bool result = true;
   const bool loading_target =
-      impl_->get_status() == WorkerImpl::Status::UNINITIALIZED;
+      target_impl_->get_status() == WorkerImpl::Status::UNINITIALIZED;
   if (loading_target) {
     result = SpeculativeWorkerImpl::init_model(
         model_weights_path, random_seed, master_status);
@@ -322,26 +323,26 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
         model_weights_path, random_seed, master_status);
   }
 
-  if (impl_->get_status() == WorkerImpl::Status::LOADED) {
-    context_ = impl_->context_;
+  if (target_impl_->get_status() == WorkerImpl::Status::LOADED) {
+    context_ = target_impl_->context_;
   }
 
   if (draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
     // Draft shares the target's lm_head and word embedding to save memory and a
     // redundant matmul.
     auto share_torch_head_and_embedding = [this]() {
-      auto head = impl_->get_lm_head();
+      auto head = target_impl_->get_lm_head();
       draft_impl_->set_lm_head(head);
-      auto word_embedding = impl_->get_word_embedding();
+      auto word_embedding = target_impl_->get_word_embedding();
       draft_impl_->set_word_embedding(word_embedding);
     };
 #if defined(USE_NPU)
     // The DFlash draft body is registered ATB-only, so a TORCH-backend run
     // aborts in create_llm_model before reaching here; the draft always uses
     // the target's NPU (ATB) head and embedding.
-    auto head = impl_->get_npu_lm_head();
+    auto head = target_impl_->get_npu_lm_head();
     draft_impl_->set_npu_lm_head(head);
-    auto word_embedding = impl_->get_npu_word_embedding();
+    auto word_embedding = target_impl_->get_npu_word_embedding();
     draft_impl_->set_npu_word_embedding(word_embedding);
 #else
     share_torch_head_and_embedding();
@@ -384,7 +385,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
 
 std::tuple<int64_t, int64_t> DFlashWorkerImpl::estimate_kv_cache_capacity() {
   const std::tuple<int64_t, int64_t> target_memory =
-      impl_->estimate_kv_cache_capacity();
+      target_impl_->estimate_kv_cache_capacity();
   const std::tuple<int64_t, int64_t> draft_memory =
       draft_impl_->estimate_kv_cache_capacity();
   const int64_t cache_size_in_bytes =
@@ -399,9 +400,9 @@ bool DFlashWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   embedding_cache_ = std::make_shared<EmbeddingCache>(num_blocks);
 
   bool target_allocated = true;
-  const WorkerImpl::Status target_status = impl_->get_status();
+  const WorkerImpl::Status target_status = target_impl_->get_status();
   if (target_status == WorkerImpl::Status::LOADED) {
-    target_allocated = impl_->allocate_kv_cache(kv_cache_shape);
+    target_allocated = target_impl_->allocate_kv_cache(kv_cache_shape);
   } else {
     CHECK_EQ(target_status, WorkerImpl::Status::READY);
   }
@@ -456,9 +457,9 @@ bool DFlashWorkerImpl::allocate_kv_cache_with_transfer(
   }
 
   bool target_allocated = true;
-  const WorkerImpl::Status target_status = impl_->get_status();
+  const WorkerImpl::Status target_status = target_impl_->get_status();
   if (target_status == WorkerImpl::Status::LOADED) {
-    target_allocated = impl_->allocate_kv_cache_with_transfer(
+    target_allocated = target_impl_->allocate_kv_cache_with_transfer(
         kv_cache_transfer_, kv_cache_shape);
   } else {
     CHECK_EQ(target_status, WorkerImpl::Status::READY);
@@ -486,12 +487,12 @@ ForwardInput DFlashWorkerImpl::update_input_by_last_step_output(
 std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
     const ForwardInput& input) {
   if (!input.input_params.meta.batch_forward_type.is_decode()) {
-    std::optional<ForwardOutput> output =
-        run_llm_no_sync_impl(*impl_, input, *prepare_stream_, *compute_stream_);
+    std::optional<ForwardOutput> output = run_worker_no_sync_impl(
+        *target_impl_, input, *prepare_stream_, *compute_stream_);
     // Warmup only: prime the draft; its output is unused. Keep it alive until
     // the sync below so the no-sync draft input is not freed while its kernel
     // is still in flight.
-    std::optional<ForwardOutput> draft_output = run_llm_no_sync_impl(
+    std::optional<ForwardOutput> draft_output = run_worker_no_sync_impl(
         *draft_impl_, input, *prepare_stream_, *compute_stream_);
     // Both forwards launched no-sync, so their staged inputs and the returned
     // target output are still in flight. Sync before returning so a DP idle
@@ -518,14 +519,14 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   // Warmup only: prime the draft; its output is unused. Keep it alive until the
   // sync below so the no-sync draft input is not freed while the target forward
   // launched next can reuse the buffer.
-  std::optional<ForwardOutput> draft_output = run_llm_no_sync_impl(
+  std::optional<ForwardOutput> draft_output = run_worker_no_sync_impl(
       *draft_impl_, query_input, *prepare_stream_, *compute_stream_);
 
   ForwardInput validate_input = input;
   scale_dp_global_token_nums(validate_input.input_params, query_width);
   ForwardOutput output =
-      run_llm_no_sync_impl(
-          *impl_, validate_input, *prepare_stream_, *compute_stream_)
+      run_worker_no_sync_impl(
+          *target_impl_, validate_input, *prepare_stream_, *compute_stream_)
           .value();
   // See above: sync the no-sync draft and target forwards before returning.
   compute_stream_->synchronize();
@@ -537,11 +538,11 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_prefill(
     const ForwardInput& input) {
   Timer timer;
   ForwardInput processed_target_input;
-  ForwardOutput output = run_llm_no_sync_impl(*impl_,
-                                              input,
-                                              *prepare_stream_,
-                                              *compute_stream_,
-                                              &processed_target_input)
+  ForwardOutput output = run_worker_no_sync_impl(*target_impl_,
+                                                 input,
+                                                 *prepare_stream_,
+                                                 *compute_stream_,
+                                                 &processed_target_input)
                              .value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
@@ -671,7 +672,7 @@ DFlashWorkerImpl::DraftBlock DFlashWorkerImpl::run_decode_draft(
   prepare_query_inputs(input, query_input);
 
   ForwardOutput draft_output =
-      run_llm_no_sync_impl(
+      run_worker_no_sync_impl(
           *draft_impl_, query_input, *prepare_stream_, *compute_stream_)
           .value();
   // Overlap validate input preparation with the async draft forward: the draft
@@ -764,8 +765,8 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
   fill_validate_input_from_draft_outputs(
       draft_block, validate_input, *compute_stream_);
   ForwardOutput target_output =
-      run_llm_no_sync_impl(
-          *impl_, validate_input, *prepare_stream_, *compute_stream_)
+      run_worker_no_sync_impl(
+          *target_impl_, validate_input, *prepare_stream_, *compute_stream_)
           .value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
