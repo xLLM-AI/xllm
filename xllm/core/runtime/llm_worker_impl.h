@@ -56,7 +56,7 @@ class LLMWorkerImpl : public WorkerImpl {
   std::optional<ForwardOutput> execute_no_sync_on_stream(
       const ForwardInput& input,
       Stream& compute_stream,
-      bool record_ready_event = true);
+      bool record_ready_event);
 
   folly::SemiFuture<std::optional<ForwardOutput>> step_async_no_sync(
       const ForwardInput& input);
