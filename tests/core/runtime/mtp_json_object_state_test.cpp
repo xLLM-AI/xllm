@@ -119,5 +119,13 @@ TEST(MtpJsonObjectStateTest, PreservesAcceptedPrefixAfterMiddleInvalidDraft) {
             scratch.states_after[0][0].fingerprint());
 }
 
+TEST(MtpJsonObjectStateTest, CopiesContiguousHostDraftTokensInBulk) {
+  const int64_t token_ids[] = {0, 4, -1, 5};
+
+  EXPECT_EQ(detail::copy_json_draft_token_ids(token_ids, 4),
+            std::vector<int32_t>({0, 4, -1, 5}));
+  EXPECT_TRUE(detail::copy_json_draft_token_ids(nullptr, 0).empty());
+}
+
 }  // namespace
 }  // namespace xllm

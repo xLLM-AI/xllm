@@ -16,11 +16,12 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "core/runtime/mtp_async_state.h"
-#include <mutex>
 #include "framework/kv_cache/embedding_cache.h"
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #if defined(USE_NPU)
@@ -33,6 +34,10 @@ namespace xllm {
 
 #if defined(USE_NPU)
 using namespace llm_datadist;
+
+namespace detail {
+class NpuJsonDraftTokenHandoff;
+}  // namespace detail
 #endif
 
 // MTP (Multi-Token Prediction) speculative worker.
@@ -44,7 +49,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                 const torch::Device& device,
                 const runtime::Options& options);
 
-  ~MTPWorkerImpl() override = default;
+  ~MTPWorkerImpl() override;
 
  protected:
   // For derived classes (e.g. Eagle3WorkerImpl) that need custom options for
@@ -251,6 +256,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // topology, and are rebuilt only when that width changes.
   torch::Tensor mtp_validate_greedy_indices_;
   torch::Tensor mtp_validate_greedy_do_sample_;
+  std::unique_ptr<detail::NpuJsonDraftTokenHandoff> json_draft_token_handoff_;
 #endif
 
 #if defined(USE_NPU) || defined(USE_MLU)

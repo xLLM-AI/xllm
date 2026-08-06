@@ -18,8 +18,14 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <cctype>
 #include <exception>
 #include <memory>
+#include <string>
+
+#if defined(USE_NPU)
+#include <acl/acl.h>
+#endif
 
 #include "common/metrics.h"
 #if defined(USE_NPU) || defined(USE_MLU)
@@ -535,6 +541,274 @@ bool is_qwen3_5_draft_model_type(const std::string& model_type) {
 
 }  // namespace
 
+#if defined(USE_NPU)
+namespace detail {
+
+struct DraftTokenHandoffMetrics final {
+  bvar::LatencyRecorder* copy_submission = nullptr;
+  bvar::LatencyRecorder* ready_wait = nullptr;
+  bvar::LatencyRecorder* bulk_read = nullptr;
+  bvar::LatencyRecorder* total_handoff = nullptr;
+};
+
+class NpuJsonDraftTokenHandoff final {
+ public:
+  NpuJsonDraftTokenHandoff(const int64_t max_sequences_per_batch,
+                           const int32_t num_speculative_tokens)
+      : max_sequences_per_batch_(max_sequences_per_batch) {
+    const int32_t metric_count = std::max(num_speculative_tokens, 0);
+    metrics_.reserve(metric_count);
+    for (int32_t draft_index = 0; draft_index < metric_count; ++draft_index) {
+      const std::string metric_key = std::to_string(draft_index);
+      DraftTokenHandoffMetrics metrics;
+      metrics.copy_submission =
+          MULTI_HISTOGRAM_speculative_draft_token_copy_submission_latency_microseconds
+              .get_stats({metric_key});
+      metrics.ready_wait =
+          MULTI_HISTOGRAM_speculative_draft_token_ready_wait_latency_microseconds
+              .get_stats({metric_key});
+      metrics.bulk_read =
+          MULTI_HISTOGRAM_speculative_draft_token_bulk_read_latency_microseconds
+              .get_stats({metric_key});
+      metrics.total_handoff =
+          MULTI_HISTOGRAM_speculative_draft_token_handoff_latency_microseconds
+              .get_stats({metric_key});
+      metrics_.emplace_back(metrics);
+    }
+  }
+
+  ~NpuJsonDraftTokenHandoff() {
+    if (wait_stream_ != nullptr) {
+      const aclError ret = aclrtDestroyStream(wait_stream_);
+      if (ret != ACL_SUCCESS) {
+        LOG(WARNING)
+            << "Failed to destroy JSON draft token handoff wait stream: "
+            << ret;
+      }
+    }
+    if (ready_event_ == nullptr) {
+      return;
+    }
+    const aclError ret = aclrtDestroyEvent(ready_event_);
+    if (ret != ACL_SUCCESS) {
+      LOG(WARNING) << "Failed to destroy JSON draft token handoff event: "
+                   << ret;
+    }
+  }
+
+  std::vector<int32_t> read_tokens(const torch::Tensor& next_tokens,
+                                   Stream& compute_stream,
+                                   const int32_t draft_index) {
+    Timer total_timer;
+    const DraftTokenHandoffMetrics* metrics = get_metrics(draft_index);
+    const int64_t token_count = next_tokens.numel();
+    bool copy_submitted = false;
+    bool handoff_ready = false;
+    std::vector<int32_t> token_ids;
+
+    if (can_use_async_handoff(next_tokens, token_count)) {
+      c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
+      if (ensure_resources()) {
+        Timer copy_submission_timer;
+        try {
+          torch::Tensor host_tokens =
+              pinned_tokens_.narrow(/*dim=*/0, /*start=*/0, token_count);
+          copy_submitted = true;
+          host_tokens.copy_(next_tokens.flatten(), /*non_blocking=*/true);
+        } catch (const c10::Error& error) {
+          disable_event_path("submit host copy", error.what());
+        } catch (const std::exception& error) {
+          disable_event_path("submit host copy", error.what());
+        }
+        observe(metrics == nullptr ? nullptr : metrics->copy_submission,
+                copy_submission_timer.elapsed_microseconds());
+
+        if (copy_submitted && event_path_enabled_) {
+          const aclError record_ret = aclrtRecordEvent(
+              ready_event_, compute_stream.get_stream()->stream());
+          if (record_ret != ACL_SUCCESS) {
+            disable_event_path("record host-copy event", record_ret);
+          } else {
+            Timer ready_wait_timer;
+            const aclError wait_event_ret =
+                aclrtStreamWaitEvent(wait_stream_, ready_event_);
+            const aclError reset_ret =
+                wait_event_ret == ACL_SUCCESS
+                    ? aclrtResetEvent(ready_event_, wait_stream_)
+                    : wait_event_ret;
+            const aclError wait_ret =
+                reset_ret == ACL_SUCCESS
+                    ? aclrtSynchronizeStreamWithTimeout(wait_stream_,
+                                                        /*timeout=*/-1)
+                    : reset_ret;
+            observe(metrics == nullptr ? nullptr : metrics->ready_wait,
+                    ready_wait_timer.elapsed_microseconds());
+            if (wait_ret != ACL_SUCCESS) {
+              disable_event_path("synchronize host-copy event", wait_ret);
+            } else {
+              Timer bulk_read_timer;
+              token_ids =
+                  copy_json_draft_token_ids(pinned_tokens_.data_ptr<int64_t>(),
+                                            static_cast<size_t>(token_count));
+              observe(metrics == nullptr ? nullptr : metrics->bulk_read,
+                      bulk_read_timer.elapsed_microseconds());
+              handoff_ready = true;
+            }
+          }
+        }
+      }
+    }
+
+    if (!handoff_ready) {
+      if (copy_submitted) {
+        synchronize_after_failed_handoff(compute_stream);
+      }
+      COUNTER_INC(speculative_draft_token_handoff_fallback_total);
+      token_ids = read_tokens_synchronously(next_tokens);
+    }
+
+    const int64_t total_microseconds =
+        static_cast<int64_t>(total_timer.elapsed_microseconds());
+    observe(metrics == nullptr ? nullptr : metrics->total_handoff,
+            total_microseconds);
+    HISTOGRAM_OBSERVE(speculative_draft_token_d2h_latency_microseconds,
+                      total_microseconds);
+    return token_ids;
+  }
+
+ private:
+  bool can_use_async_handoff(const torch::Tensor& next_tokens,
+                             const int64_t token_count) const {
+    return event_path_enabled_ && max_sequences_per_batch_ > 0 &&
+           token_count >= 0 && token_count <= max_sequences_per_batch_ &&
+           !next_tokens.device().is_cpu() && next_tokens.is_contiguous() &&
+           next_tokens.scalar_type() == torch::kLong;
+  }
+
+  bool ensure_resources() {
+    if (!pinned_tokens_.defined()) {
+      try {
+        pinned_tokens_ = torch::empty({max_sequences_per_batch_},
+                                      torch::TensorOptions()
+                                          .dtype(torch::kLong)
+                                          .device(torch::kCPU)
+                                          .pinned_memory(true));
+      } catch (const c10::Error& error) {
+        disable_event_path("allocate pinned host token buffer", error.what());
+        return false;
+      } catch (const std::exception& error) {
+        disable_event_path("allocate pinned host token buffer", error.what());
+        return false;
+      }
+    }
+
+    if (ready_event_ == nullptr) {
+      aclError create_ret =
+          aclrtCreateEventWithFlag(&ready_event_, ACL_EVENT_SYNC);
+      if (create_ret != ACL_SUCCESS) {
+        create_ret = aclrtCreateEvent(&ready_event_);
+      }
+      if (create_ret != ACL_SUCCESS) {
+        ready_event_ = nullptr;
+        disable_event_path("create host-copy event", create_ret);
+        return false;
+      }
+    }
+
+    if (wait_stream_ == nullptr) {
+      const aclError create_ret = aclrtCreateStream(&wait_stream_);
+      if (create_ret != ACL_SUCCESS) {
+        wait_stream_ = nullptr;
+        disable_event_path("create host-copy wait stream", create_ret);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  std::vector<int32_t> read_tokens_synchronously(
+      const torch::Tensor& next_tokens) const {
+    torch::Tensor host_tokens =
+        safe_to(next_tokens.flatten(), torch::kCPU).contiguous();
+    if (host_tokens.scalar_type() == torch::kLong) {
+      return copy_json_draft_token_ids(
+          host_tokens.data_ptr<int64_t>(),
+          static_cast<size_t>(host_tokens.numel()));
+    }
+
+    std::vector<int32_t> token_ids;
+    token_ids.reserve(host_tokens.numel());
+    for (int64_t token_index = 0; token_index < host_tokens.numel();
+         ++token_index) {
+      token_ids.emplace_back(
+          static_cast<int32_t>(host_tokens[token_index].item<int64_t>()));
+    }
+    return token_ids;
+  }
+
+  void synchronize_after_failed_handoff(Stream& compute_stream) const {
+    if (wait_stream_ != nullptr) {
+      const aclError wait_ret =
+          aclrtSynchronizeStreamWithTimeout(wait_stream_, /*timeout=*/-1);
+      if (wait_ret != ACL_SUCCESS) {
+        LOG(ERROR) << "Failed to synchronize JSON draft token handoff wait "
+                      "stream after fallback: "
+                   << wait_ret;
+      }
+    }
+    const int32_t compute_ret = compute_stream.synchronize();
+    if (compute_ret != 0) {
+      LOG(ERROR) << "Failed to synchronize MTP compute stream after JSON draft "
+                    "token handoff fallback: "
+                 << compute_ret;
+    }
+  }
+
+  const DraftTokenHandoffMetrics* get_metrics(const int32_t draft_index) const {
+    if (draft_index < 0 ||
+        draft_index >= static_cast<int32_t>(metrics_.size())) {
+      return nullptr;
+    }
+    return &metrics_[draft_index];
+  }
+
+  void observe(bvar::LatencyRecorder* recorder,
+               const double elapsed_microseconds) const {
+    if (recorder != nullptr) {
+      *recorder << static_cast<int64_t>(elapsed_microseconds);
+    }
+  }
+
+  void disable_event_path(const std::string& operation, const aclError ret) {
+    if (event_path_enabled_) {
+      LOG(WARNING)
+          << "Disabling NPU JSON draft token asynchronous handoff after "
+          << operation << " failed: " << ret;
+    }
+    event_path_enabled_ = false;
+  }
+
+  void disable_event_path(const std::string& operation,
+                          const std::string& error) {
+    if (event_path_enabled_) {
+      LOG(WARNING)
+          << "Disabling NPU JSON draft token asynchronous handoff after "
+          << operation << " failed: " << error;
+    }
+    event_path_enabled_ = false;
+  }
+
+  int64_t max_sequences_per_batch_ = 0;
+  torch::Tensor pinned_tokens_;
+  aclrtEvent ready_event_ = nullptr;
+  aclrtStream wait_stream_ = nullptr;
+  bool event_path_enabled_ = true;
+  std::vector<DraftTokenHandoffMetrics> metrics_;
+};
+
+}  // namespace detail
+#endif
+
 MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
                              const torch::Device& device,
                              const runtime::Options& options)
@@ -559,6 +833,8 @@ MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
       device,
       mtp_draft_options(draft_options));
 }
+
+MTPWorkerImpl::~MTPWorkerImpl() = default;
 
 bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
                                int32_t random_seed,
@@ -1372,19 +1648,30 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
           draft_outputs.back().sample_output.next_tokens;
       CHECK(next_tokens.defined())
           << "draft next_tokens must be defined for JSON grammar handling";
+      std::vector<int32_t> draft_token_ids;
+#if defined(USE_NPU)
+      if (json_draft_token_handoff_ == nullptr) {
+        json_draft_token_handoff_ =
+            std::make_unique<detail::NpuJsonDraftTokenHandoff>(
+                static_cast<int64_t>(options_.max_seqs_per_batch()),
+                num_speculative_tokens);
+      }
+      draft_token_ids = json_draft_token_handoff_->read_tokens(
+          next_tokens, *compute_stream_, draft_idx);
+#else
       Timer draft_token_d2h_timer;
       torch::Tensor draft_tokens =
           safe_to(next_tokens.flatten(), torch::kCPU).contiguous();
       HISTOGRAM_OBSERVE(
           speculative_draft_token_d2h_latency_microseconds,
           static_cast<int64_t>(draft_token_d2h_timer.elapsed_microseconds()));
-      std::vector<int32_t> draft_token_ids;
       draft_token_ids.reserve(draft_tokens.numel());
       for (int64_t token_idx = 0; token_idx < draft_tokens.numel();
            ++token_idx) {
         draft_token_ids.emplace_back(
             static_cast<int32_t>(draft_tokens[token_idx].item<int64_t>()));
       }
+#endif
       halt_json_draft =
           detail::append_json_draft_step(current_draft_input.json_object_states,
                                          json_invalid_suffix,
