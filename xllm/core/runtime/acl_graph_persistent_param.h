@@ -19,11 +19,13 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <vector>
 
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_input_params.h"
+#include "core/kernels/npu/paged_attention_tiling_layout.h"
 #include "core/runtime/options.h"
 
 // Forward declarations for ATB
@@ -37,6 +39,26 @@ struct TilingBufferInfo;
 
 namespace xllm::npu {
 
+int32_t get_mla_capture_kv_seq_len_bucket(const ModelInputParams& params,
+                                          const runtime::Options& options);
+
+struct PagedAttentionPlanDescriptor {
+  std::vector<uint32_t> normalized_tiling;
+  uint64_t workspace_size = 0;
+  kernel::npu::PagedAttentionTilingLayout layout;
+};
+
+inline bool operator==(const PagedAttentionPlanDescriptor& lhs,
+                       const PagedAttentionPlanDescriptor& rhs) {
+  return lhs.workspace_size == rhs.workspace_size && lhs.layout == rhs.layout &&
+         lhs.normalized_tiling == rhs.normalized_tiling;
+}
+
+enum class SpecVerifyInputUpdateScope : uint8_t {
+  TOKENS_ONLY,
+  ALL_INPUTS,
+};
+
 // Helper class to hold persistent parameters for graph execution
 // Multiple AclGraph instances can share the same GraphPersistentParam object
 class GraphPersistentParam final {
@@ -45,16 +67,17 @@ class GraphPersistentParam final {
                        const torch::Device& device,
                        const runtime::Options& options,
                        bool need_update_attn_mask = false,
-                       bool is_hybrid_linear_attention = false);
+                       bool is_hybrid_linear_attention = false,
+                       bool supports_mla_graph_kv_bucketing = false);
 
   ~GraphPersistentParam();
 
   // Update persistent tensors with new input data
-  // If return_capture_params is true, returns a ModelInputParams with
-  // persistent buffer references. padded_num_tokens must be > 0 when
-  // return_capture_params is true, used for build new ModelInputParams for
-  // capture. If return_capture_params is false, only updates persistent buffers
-  // and returns std::nullopt.
+  // If return_capture_params is true, returns persistent graph inputs.
+  // buffer references. During capture, pass for_capture=true so model-specific
+  // host parameters can be bucketed for graph tiling/workspace. During replay,
+  // return_capture_params may still be true for metadata refresh, but
+  // for_capture must stay false so dynamic host metadata uses actual lengths.
   std::optional<ModelInputParams> update(const torch::Tensor& tokens,
                                          const torch::Tensor& k_cache,
                                          const torch::Tensor& v_cache,
@@ -62,12 +85,22 @@ class GraphPersistentParam final {
                                          const ModelInputParams& params,
                                          uint32_t padded_num_tokens,
                                          bool return_capture_params = false,
-                                         bool skip_token_update = false);
+                                         bool skip_token_update = false,
+                                         bool for_capture = false);
 
   void update_tokens(const torch::Tensor& tokens,
                      const ModelInputParams& params,
                      uint32_t actual_num_tokens,
                      uint32_t padded_num_tokens);
+
+  // Update persistent graph inputs from speculative-verify source tensors on
+  // the current producer stream. TileLang fusion is an optional specialization
+  // hidden behind this interface.
+  void update_spec_verify_inputs(const torch::Tensor& tokens,
+                                 const torch::Tensor& positions,
+                                 const ModelInputParams& params,
+                                 uint32_t padded_num_tokens,
+                                 SpecVerifyInputUpdateScope scope);
 
   // Getter methods for persistent tensors
   torch::Tensor persistent_tokens(uint32_t actual_tokens = 0) const {
@@ -109,6 +142,14 @@ class GraphPersistentParam final {
     return persistent_mask_;
   }
   const torch::Tensor& tiling_data() const { return tiling_data_; }
+  std::optional<PagedAttentionPlanDescriptor> paged_attention_plan_descriptor(
+      int64_t num_rows,
+      int64_t spec_width) const;
+  std::optional<PagedAttentionPlanDescriptor>
+  classify_spec_verify_paged_attention_plan(const torch::Tensor& tokens,
+                                            const torch::Tensor& k_cache,
+                                            const torch::Tensor& v_cache,
+                                            const ModelInputParams& params);
   torch::Tensor hidden_states(uint32_t actual_tokens = 0) const {
     if (actual_tokens > 0) {
       return hidden_states_.slice(
@@ -135,6 +176,18 @@ class GraphPersistentParam final {
           /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size);
     }
     return kv_seq_lens_;
+  }
+  const int32_t* persistent_host_q_seq_lens_data() const {
+    return persistent_host_q_seq_lens_.data();
+  }
+  const int32_t* persistent_host_kv_seq_lens_data() const {
+    return persistent_host_kv_seq_lens_.data();
+  }
+  const int32_t* capture_host_q_seq_lens_data() const {
+    return capture_host_q_seq_lens_.data();
+  }
+  const int32_t* capture_host_kv_seq_lens_data() const {
+    return capture_host_kv_seq_lens_.data();
   }
   bool need_update_attn_mask() const { return need_update_attn_mask_; }
   void set_need_update_attn_mask(bool value) { need_update_attn_mask_ = value; }
@@ -195,7 +248,8 @@ class GraphPersistentParam final {
                                    const torch::Tensor& v_cache,
                                    const torch::Tensor& block_tables,
                                    const ModelInputParams& input_params,
-                                   aclrtStream stream);
+                                   aclrtStream stream,
+                                   bool copy_to_device = true);
 
   std::vector<int32_t> update_expanded_spec_decode_attention(
       const ModelInputParams& input_params,
@@ -227,6 +281,10 @@ class GraphPersistentParam final {
   torch::Tensor q_seq_lens_default_;
   torch::Tensor kv_seq_lens_default_;
   torch::Tensor expanded_kv_seq_lens_;
+  std::vector<int32_t> persistent_host_q_seq_lens_;
+  std::vector<int32_t> persistent_host_kv_seq_lens_;
+  std::vector<int32_t> capture_host_q_seq_lens_;
+  std::vector<int32_t> capture_host_kv_seq_lens_;
 
   // for deepseekv3.2
   torch::Tensor q_cu_seq_lens_;
@@ -250,6 +308,9 @@ class GraphPersistentParam final {
 
   // Persistent paged attention tiling tensor on device
   torch::Tensor tiling_data_;
+  std::vector<uint32_t> paged_attention_tiling_template_;
+  uint64_t paged_attention_plan_workspace_size_ = 0;
+  std::mutex paged_attention_plan_mutex_;
 
   // Cached attention parameters
   int32_t num_head_;
@@ -260,6 +321,8 @@ class GraphPersistentParam final {
   // Flag indicating whether the model uses hybrid linear attention
   // (e.g., Qwen3.5/Next with gated delta net layers)
   bool is_hybrid_linear_attention_;
+  // Flag indicating whether MLA graph capture uses KV length bucketing.
+  bool supports_mla_graph_kv_bucketing_;
   // Flag indicating whether attention plan needs to be updated based on model
   // type
   bool need_update_attention_plan_;

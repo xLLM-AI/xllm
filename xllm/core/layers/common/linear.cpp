@@ -1519,7 +1519,6 @@ torch::Tensor RowParallelLinearImpl::forward_impl(
                                      quant_bias,
                                      output_dtype_);
   } else if (is_w8a8_dynamic_quant(resolved_weight_quant_method_)) {
-    log_mmrs_quant_skip(reduce_mode, fc1_ctx, "w8a8_dynamic", input);
     if (!input_is_parallelized_ && !skip_scatter) {
       input = xllm::parallel_state::scatter(input, process_group_);
     }
@@ -1532,8 +1531,60 @@ torch::Tensor RowParallelLinearImpl::forward_impl(
     output = dcu_w8a8_dynamic_linear_forward(
         input, weight_, weight_scale.value(), bias, output_dtype_);
 #elif defined(USE_NPU)
-    output = npu_w8a8_dynamic_linear_forward(
-        input, weight_, weight_scale.value(), bias, output_dtype_);
+    // FC1 fused int8 MMRS: per-token quantize the (padded) activation, then let
+    // torch_npu fuse matmul + reduce_scatter. Numerically equivalent to the
+    // symmetric w8a8_dynamic path (per-channel weight scale, no weight offset).
+    if (wants_mmrs(reduce_mode) && fc1_ctx && is_sequence_sharded(*fc1_ctx) &&
+        fc1_ctx->enable_mmrs_fusion && !bias.has_value() && input.defined() &&
+        input.dim() == 2 && input.size(0) == fc1_ctx->original_num_tokens) {
+      torch::Tensor mmrs_input = input;
+      if (fc1_ctx->pad_size > 0) {
+        mmrs_input = pad_rows_by_copy(input, fc1_ctx->padded_num_tokens);
+      }
+      xllm::kernel::NpuQuantizeParams q_params;
+      q_params.input = mmrs_input;
+      torch::Tensor q_input;
+      std::optional<torch::Tensor> pertoken_scale;
+      std::tie(q_input, pertoken_scale) = xllm::kernel::dynamic_quant(q_params);
+      if (pertoken_scale.has_value() && pertoken_scale->defined()) {
+        const std::vector<int64_t> output_shape = {
+            fc1_ctx->padded_local_num_tokens, weight_.size(0)};
+        xllm::kernel::MatmulReduceScatterParams mmrs_params;
+        mmrs_params.a = q_input;
+        mmrs_params.b = mmrs_weight_transposed();
+        mmrs_params.bias = std::nullopt;
+        mmrs_params.process_group = process_group_;
+        mmrs_params.comm_mode = fc1_ctx->mmrs_comm_mode;
+        mmrs_params.x1_scale = pertoken_scale->reshape({-1, 1}).to(at::kFloat);
+        mmrs_params.x2_scale =
+            weight_scale.value().reshape({1, -1}).to(at::kFloat);
+        mmrs_params.output_dtype = output_dtype_;
+        try {
+          output = xllm::kernel::matmul_reduce_scatter(mmrs_params);
+        } catch (const c10::Error& error) {
+          LOG_FIRST_N(WARNING, 8)
+              << "FC1 w8a8 MMRS call failed; fallback reduction will run: "
+              << error.what_without_backtrace();
+          output = torch::Tensor();
+        }
+        if (output.defined() &&
+            output.sizes() == torch::IntArrayRef(output_shape)) {
+          return output;
+        }
+        if (output.defined()) {
+          LOG_FIRST_N(WARNING, 8)
+              << "FC1 w8a8 MMRS returned unexpected shape; fallback reduction "
+                 "will run. returned="
+              << output.sizes() << ", expected_local=" << output_shape;
+          output = torch::Tensor();
+        }
+      }
+    }
+    if (!output.defined()) {
+      log_mmrs_quant_skip(reduce_mode, fc1_ctx, "w8a8_dynamic", input);
+      output = npu_w8a8_dynamic_linear_forward(
+          input, weight_, weight_scale.value(), bias, output_dtype_);
+    }
 #endif
   } else {
     if (!input_is_parallelized_ && !skip_scatter) {

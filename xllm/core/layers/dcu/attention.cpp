@@ -15,9 +15,13 @@ limitations under the License.
 
 #include "layers/dcu/attention.h"
 
+#include <cstdlib>
+#include <cstring>
+
 #include "core/util/rec_model_utils.h"
 #include "layers/dcu/base_attention_impl.h"
 #include "layers/dcu/flash_attention.h"
+#include "layers/dcu/torch_attention.h"
 
 namespace xllm {
 namespace layer {
@@ -33,8 +37,19 @@ AttentionImpl::AttentionImpl(int64_t num_heads,
           << sliding_window << " is_rec_multi_round_mode "
           << is_rec_multi_round_mode();
 
-  attention_impl_ = std::make_shared<FlashAttentionImpl>(
-      num_heads, head_size, scale, num_kv_heads, sliding_window);
+  // Debug switch: set XLLM_DCU_ATTN_IMPL=torch to fall back to the pure-PyTorch
+  // implementation (TorchAttentionImpl) instead of the default FlashAttention
+  // kernel. Useful for cross-checking numerics when debugging the fast path.
+  const char* impl_env = std::getenv("XLLM_DCU_ATTN_IMPL");
+  if (impl_env != nullptr && std::strcmp(impl_env, "torch") == 0) {
+    LOG(INFO) << "AttentionImpl: using TorchAttentionImpl (debug fallback via "
+                 "XLLM_DCU_ATTN_IMPL=torch)";
+    attention_impl_ = std::make_shared<TorchAttentionImpl>(
+        num_heads, head_size, scale, num_kv_heads, sliding_window);
+  } else {
+    attention_impl_ = std::make_shared<FlashAttentionImpl>(
+        num_heads, head_size, scale, num_kv_heads, sliding_window);
+  }
 }
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(

@@ -15,8 +15,10 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/kv_cache/linear_state_restore.h"
 #include "core/framework/model/model_output.h"
 #include "core/layers/common/lm_head.h"
+#include "core/layers/common/rotary_embedding_util.h"
 #include "models/model_registry.h"
 #include "models/vlm/mposition/mposition.h"
 #include "models/vlm/qwen3_vl_base.h"
@@ -89,34 +91,7 @@ class Qwen3_5ModelImpl final
 
   std::pair<torch::Tensor, torch::Tensor> apply_mrope(
       const torch::Tensor positions) override {
-    auto target_cos_sin = cos_sin_.index({positions});
-    auto target_cos_sin_chunks = target_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
-    auto cos_pos = target_cos_sin_chunks[0].contiguous();
-    auto sin_pos = target_cos_sin_chunks[1].contiguous();
-    auto options = positions.options().dtype(torch::kLong);
-    auto apply = [this, options](torch::Tensor x) {
-      auto freqs_t = x[0].clone();
-      int64_t mrop_length = static_cast<int64_t>(freqs_t.size(-1) / 2);
-
-      for (int32_t dim_idx = 1; dim_idx <= 2; ++dim_idx) {
-        int64_t offset = dim_idx;
-        int64_t section_len = mrope_section_[dim_idx];
-        int64_t length = section_len * 3;
-
-        auto idx_first_half = torch::arange(offset, length, 3, options);
-        auto idx_second_half = torch::arange(
-            offset + mrop_length, length + mrop_length, 3, options);
-
-        auto idx_tensor =
-            torch::cat({idx_first_half, idx_second_half}, 0).to(x.device());
-        auto src = x[dim_idx].index_select(-1, idx_tensor);
-        freqs_t.index_copy_(-1, idx_tensor, src);
-      }
-      return freqs_t;
-    };
-    cos_pos = apply(cos_pos.reshape({positions.size(0), -1, cos_pos.size(-1)}));
-    sin_pos = apply(sin_pos.reshape({positions.size(0), -1, sin_pos.size(-1)}));
-    return std::make_pair(cos_pos, sin_pos);
+    return layer::rotary::apply_mrope(cos_sin_, positions, mrope_section_);
   }
 
   virtual ModelOutput forward(torch::Tensor tokens,
@@ -178,7 +153,10 @@ class Qwen3_5ModelImpl final
       const ModelInputParams& params,
       const torch::Tensor& h) {
     auto attn_metadata =
-        layer::AttentionMetadataBuilder::build(params, /*enable_mla=*/false);
+        layer::AttentionMetadataBuilder::build(params,
+                                               /*enable_mla=*/false,
+                                               /*attn_mask=*/{},
+                                               h.device());
     // Init batch and token_block_offset for GDN attention
     if (attn_metadata.is_prefill || attn_metadata.is_chunked_prefill) {
       constexpr int32_t kBlockM = 64;
@@ -237,6 +215,13 @@ class Qwen3_5ModelImpl final
       attn_metadata.tot = tot;
       attn_metadata.batch = batch_ptr;
       attn_metadata.token_block_offset = token_block_offset_ptr;
+#if defined(USE_MLU)
+      attn_metadata.has_initial_states =
+          materialize_linear_state_mask(params.linear_state_validity_mask,
+                                        attn_metadata.q_cu_seq_lens.size(0) - 1,
+                                        attn_metadata.is_dummy,
+                                        h.device());
+#else
       if (params.attention.device.kv_cache_tokens_nums.defined() &&
           params.attention.device.kv_cache_tokens_nums.numel() > 0) {
         attn_metadata.has_initial_states =
@@ -246,6 +231,7 @@ class Qwen3_5ModelImpl final
             torch::zeros({seqlens.size(0)},
                          torch::dtype(torch::kBool).device(seqlens.device()));
       }
+#endif
     }
     return attn_metadata;
   }
@@ -426,6 +412,9 @@ REGISTER_MODEL_ARGS(qwen3_5_moe, [&] {
 // qwen3_5 without vision config (text-only serving).
 // Model args are already registered by the VLM registration above.
 REGISTER_CAUSAL_MODEL_WITH_VARNAME(qwen3_5_lm, qwen3_5, Qwen3_5ForCausalLM);
+REGISTER_CAUSAL_MODEL_WITH_VARNAME(qwen3_5_moe_lm,
+                                   qwen3_5_moe,
+                                   Qwen3_5ForCausalLM);
 
 REGISTER_CAUSAL_MODEL(qwen3_5_text, Qwen3_5ForCausalLM);
 REGISTER_MODEL_ARGS(qwen3_5_text, [&] {

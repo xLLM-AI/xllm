@@ -39,6 +39,7 @@ limitations under the License.
 #include "core/layers/common/word_embedding.h"
 #include "core/layers/deepseek_v4_decoder_layer.h"
 #include "layers/npu/deepseek_v4_rotary_embedding.h"
+#include "layers/npu_torch/deepseek_v4_cp_context.h"
 #include "models/llm/deepseek_v4.h"
 #include "models/llm/llm_model_base.h"
 #include "models/llm/mtp_model_base.h"
@@ -94,10 +95,15 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
 
     num_heads_ = model_args_.n_heads();
     head_dim_ = model_args_.o_lora_rank() + model_args_.qk_rope_head_dim();
-    dp_local_tp_size_ =
-        std::max<int64_t>(parallel_args.world_size() /
-                              std::max<int64_t>(parallel_args.dp_size(), 1),
-                          1);
+    // Attention TP width under the orthogonal dp * cp * attn_tp == world
+    // layout, matching the narrowed tp_group_ the draft's DSAttention shards
+    // heads by. See DeepseekV4ModelImpl for why dividing by dp alone is wrong.
+    cp_size_ = std::max<int64_t>(parallel_args.cp_size(), 1);
+    cp_group_ = parallel_args.cp_group_;
+    dp_local_tp_size_ = std::max<int64_t>(
+        parallel_args.world_size() /
+            std::max<int64_t>(parallel_args.dp_size(), 1) / cp_size_,
+        1);
     CHECK_EQ(num_heads_ % dp_local_tp_size_, 0)
         << "[DeepseekV4Mtp] n_heads must be divisible by local tp "
            "size. n_heads="
@@ -294,10 +300,67 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
              static_cast<int32_t>(mtp_layers_.size()))
         << "deepseek_v4_mtp requires kv_caches size >= mtp layer count";
 
+    // Prefill CP, symmetric with the main model. The draft owns its own
+    // DSAttention instances whose heads are sharded by the same narrowed
+    // tp_group_, so it must localize its query rows too -- otherwise its
+    // metadata advertises global q lengths while attention runs local rows.
+    // previous_hidden_states arrives already gathered to full global order (it
+    // is the main model's aux output), so re-splitting it here is well defined.
+    layer::v4_cp::DeepseekV4CpContext cp_ctx;
+    const bool cp_enabled =
+        cp_size_ > 1 && cp_group_ != nullptr && !is_empty_dp_rank &&
+        input_params.meta.batch_forward_type.no_decode() &&
+        modified_input_params.attn_metadata != nullptr &&
+        modified_input_params.attn_metadata->dsa_metadata != nullptr;
+    if (cp_enabled) {
+      auto& dsa = *(modified_input_params.attn_metadata->dsa_metadata);
+      cp_ctx = layer::v4_cp::build_deepseek_v4_cp_context(
+          static_cast<int32_t>(cp_size_),
+          cp_group_->rank(),
+          cp_group_,
+          modified_input_params.attention.host.q_seq_lens,
+          modified_input_params.attention.host.kv_seq_lens,
+          dsa.input_positions);
+      if (cp_ctx.enabled()) {
+        // Save global-position RoPE per ratio before localizing.
+        // prepare_for_layer swaps dsa.cos to the layer's ratio table, so the
+        // KV path must pair with the global table of that same ratio.
+        cp_ctx.global_rope_by_ratio[1] = {dsa.cos, dsa.sin};
+        if (dsa.c4_cos.defined()) {
+          cp_ctx.global_rope_by_ratio[4] = {dsa.c4_cos, dsa.c4_sin};
+        }
+        if (dsa.c128_cos.defined()) {
+          cp_ctx.global_rope_by_ratio[128] = {dsa.c128_cos, dsa.c128_sin};
+        }
+        rebuild_cp_local_query_metadata(dsa, modified_input_params, cp_ctx);
+        hidden_states = cp_ctx.shard_rows(hidden_states);
+        previous_hidden_states = cp_ctx.shard_rows(previous_hidden_states);
+        positions = cp_ctx.shard_rows(positions);
+        // tokens stays global on purpose: see the matching note in
+        // deepseek_v4.h. The decoder layer re-gathers before the MoE gate, so
+        // input_ids and dp_global_token_nums both stay on the global token set.
+        dsa.v4_cp_context = &cp_ctx;
+      }
+    }
+
     torch::Tensor aux_hidden_states;
     for (size_t i = 0; i < mtp_layers_.size(); ++i) {
       const int32_t layer_id = static_cast<int32_t>(i);
       prepare_for_layer(*modified_input_params.attn_metadata, layer_id);
+      if (cp_ctx.enabled()) {
+        // prepare_for_layer just picked the localized table for this ratio;
+        // pair it with the global table of the same ratio for the KV path.
+        auto& dsa = *(modified_input_params.attn_metadata->dsa_metadata);
+        auto [kv_cos, kv_sin] =
+            cp_ctx.global_rope(deepseek_v4_normalize_compress_ratio(
+                (layer_id <
+                 static_cast<int32_t>(model_args_.compress_ratios().size()))
+                    ? model_args_
+                          .compress_ratios()[static_cast<size_t>(layer_id)]
+                    : 1));
+        dsa.kv_cos = kv_cos;
+        dsa.kv_sin = kv_sin;
+      }
       hidden_states = mtp_layers_[i](hidden_states,
                                      previous_hidden_states,
                                      positions,
@@ -313,6 +376,18 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
         return ModelOutput();
       }
 #endif
+    }
+
+    if (cp_ctx.enabled()) {
+      // Restore global order before final_norm / lm_head, which are not
+      // CP-aware. aux_hidden_states feeds the next draft step, so it has to be
+      // restored as well or its row count would not match the batch.
+      hidden_states = cp_ctx.gather_restore(hidden_states);
+      if (aux_hidden_states.defined()) {
+        aux_hidden_states = cp_ctx.gather_restore(aux_hidden_states);
+      }
+      modified_input_params.attn_metadata->dsa_metadata->v4_cp_context =
+          nullptr;
     }
 
     auto [output, _] = final_norm_(hidden_states, std::nullopt);
@@ -625,6 +700,79 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     build_precomputed_metadata(dsa, input_params);
   }
 
+  // Draft-side twin of DeepseekV4ModelImpl::rebuild_cp_local_query_metadata:
+  // localizes the query axis plus the kv extent the attention / indexer kernels
+  // read, and leaves slot_mapping and block_tables global because every CP rank
+  // holds a full KV replica. See DeepseekV4CpContext::local_kv_seq_lens for why
+  // the kv extent has to shrink even though the replica is full.
+  void rebuild_cp_local_query_metadata(
+      layer::DSAMetadata& dsa,
+      ModelInputParams& params,
+      layer::v4_cp::DeepseekV4CpContext& cp_ctx) const {
+    const auto& local_q = cp_ctx.local_q_seq_lens;
+    const torch::Device device =
+        dsa.seq_lens_q.defined() ? dsa.seq_lens_q.device() : device_;
+    const auto int_options =
+        torch::TensorOptions().dtype(torch::kInt32).device(device);
+
+    params.attention.host.q_seq_lens = local_q;
+    torch::Tensor q_lens = torch::tensor(local_q, int_options);
+    params.attention.device.q_seq_lens = q_lens;
+    dsa.seq_lens_q = q_lens;
+    torch::Tensor q_cumsum =
+        torch::cumsum(q_lens, /*dim=*/0, /*dtype=*/torch::kInt32);
+    dsa.actual_seq_lengths_query =
+        torch::cat({torch::zeros({1}, int_options), q_cumsum});
+    params.attention.device.q_cu_seq_lens = dsa.actual_seq_lengths_query;
+    std::vector<int32_t> q_cu_host;
+    q_cu_host.reserve(local_q.size());
+    int32_t running = 0;
+    for (const int32_t len : local_q) {
+      running += len;
+      q_cu_host.push_back(running);
+    }
+    params.attention.host.q_cu_seq_lens = q_cu_host;
+
+    const int64_t local_q_max = vector_max_or_zero(local_q);
+    params.meta.q_max_seq_len = static_cast<int32_t>(local_q_max);
+    dsa.max_seqlen_q = q_lens.numel() > 0
+                           ? torch::max(q_lens).to(torch::kInt32).reshape({1})
+                           : torch::zeros({1}, int_options);
+    dsa.max_query_len = local_q_max;
+
+    // Attention-side kv view: prefix + this rank's last local row.
+    const auto& local_kv = cp_ctx.local_kv_seq_lens;
+    torch::Tensor kv_lens = torch::tensor(local_kv, int_options);
+    params.attention.host.kv_seq_lens = local_kv;
+    params.attention.device.kv_seq_lens = kv_lens;
+    dsa.actual_seq_lengths_kv = kv_lens;
+    dsa.seq_lens = kv_lens;
+    dsa.kv_cu_seq_lens = cp_ctx.local_kv_cu_seq_lens;
+    const int64_t local_kv_max = vector_max_or_zero(local_kv);
+    params.meta.kv_max_seq_len = static_cast<int32_t>(local_kv_max);
+    dsa.max_seqlen_kv = kv_lens.numel() > 0
+                            ? torch::max(kv_lens).to(torch::kInt32).reshape({1})
+                            : torch::zeros({1}, int_options);
+    dsa.max_seq_len = local_kv_max;
+
+    if (cp_ctx.local_positions.defined()) {
+      dsa.input_positions = cp_ctx.local_positions;
+    }
+    // Rebuild all ratio tables from local positions. prepare_for_layer() swaps
+    // dsa.cos to dsa.c4_cos / dsa.c128_cos, so those must be localized too or a
+    // compressed layer would silently fall back to the global table.
+    build_dsa_rope_metadata(dsa);
+
+    // start_pos deliberately keeps the global value: see the matching note in
+    // deepseek_v4.h. The compressor and the indexer's compress_kv are its only
+    // consumers and both run on the CP-gathered global token set, so localizing
+    // it makes them skip a nonexistent prefix and launch with blockDim == 0.
+    // It must not be recomputed after this point either, since both fields it
+    // derives from are localized above.
+
+    build_precomputed_metadata(dsa, params, cp_ctx.local_kv_cu_seq_lens);
+  }
+
   void build_dsa_rope_metadata(layer::DSAMetadata& dsa) const {
     if (!dsa_rotary_embedding_) {
       return;
@@ -701,8 +849,13 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     }
   }
 
-  void build_precomputed_metadata(layer::DSAMetadata& dsa,
-                                  const ModelInputParams& params) const {
+  // cu_seqlens_ori_kv_override: see the matching note in deepseek_v4.h. Only
+  // prefill CP passes it, and it has to agree with the cu_seqlens_ori_kv the
+  // attention layer passes at call time.
+  void build_precomputed_metadata(
+      layer::DSAMetadata& dsa,
+      const ModelInputParams& params,
+      const torch::Tensor& cu_seqlens_ori_kv_override = torch::Tensor()) const {
     dsa.c1_metadata = torch::Tensor();
     dsa.c4_metadata = torch::Tensor();
     dsa.c128_metadata = torch::Tensor();
@@ -745,9 +898,11 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
 
     const char* layout_kv = "PA_ND";
     auto empty_int32_opt = as_empty_int32_tensor(dsa.actual_seq_lengths_query);
+    const torch::Tensor& ori_kv_cu = cu_seqlens_ori_kv_override.defined()
+                                         ? cu_seqlens_ori_kv_override
+                                         : dsa.actual_seq_lengths_query;
     auto cu_seqlens_ori_kv_opt =
-        is_prefill ? as_optional_tensor(dsa.actual_seq_lengths_query)
-                   : empty_int32_opt;
+        is_prefill ? as_optional_tensor(ori_kv_cu) : empty_int32_opt;
 
     xllm::kernel::SparseAttnSharedkvMetadataParams c1_params;
     c1_params.num_heads_q = tp_num_heads_;
@@ -948,6 +1103,9 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
   int64_t num_heads_ = 0;
   int64_t tp_num_heads_ = 0;
   int64_t dp_local_tp_size_ = 1;
+  // Prefill CP geometry. cp_size_ == 1 means CP is off everywhere below.
+  int64_t cp_size_ = 1;
+  ProcessGroup* cp_group_ = nullptr;
   int64_t head_dim_ = 0;
   int64_t window_size_ = 128;
   int64_t index_n_heads_ = 0;

@@ -23,6 +23,7 @@ limitations under the License.
 #include <utility>
 
 #include "framework/encoder_cache/encoder_cache.h"
+#include "processors/processor_cache.h"
 
 namespace xllm {
 
@@ -397,6 +398,35 @@ bool UpdateMMItemScheduleStateVisitor::visit(MMDataItem& item) {
   item.mutable_state().mutable_seq_index() = seq_idx_;
   scheduled_type_ |= item.type();
   mm_data_items_.push_back(item);
+  return true;
+}
+
+ProcessorCacheLookupVisitor::ProcessorCacheLookupVisitor(ProcessorCache& cache,
+                                                         size_t item_count)
+    : cache_(cache) {
+  cache_hits_.reserve(item_count);
+  miss_inputs_.reserve(item_count);
+}
+
+bool ProcessorCacheLookupVisitor::visit(const MMInputItem& input) {
+  std::optional<MMDataItem> cache_hit;
+  if (input.hash_key.has_value()) {
+    cache_hit = cache_.lookup(input.hash_key.value());
+  }
+  if (!cache_hit.has_value()) {
+    miss_inputs_.emplace_back(input);
+  }
+  cache_hits_.emplace_back(std::move(cache_hit));
+  return true;
+}
+
+ProcessorCacheInsertVisitor::ProcessorCacheInsertVisitor(ProcessorCache& cache)
+    : cache_(cache) {}
+
+bool ProcessorCacheInsertVisitor::visit(MMDataItem& item) {
+  if (!item.is_embedded()) {
+    cache_.insert(item.state().schedule_data().key, item);
+  }
   return true;
 }
 

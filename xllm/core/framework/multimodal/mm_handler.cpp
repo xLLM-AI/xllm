@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/framework/config/model_config.h"
+#include "core/util/hash_util.h"
 #include "core/util/http_downloader.h"
 #include "mm_codec.h"
 #include "mm_embedding_handler.h"
@@ -38,6 +39,10 @@ MMErrCode MMHandlerBase::process(const MMContent& content,
 
   code = this->decode(input);
   if (code != MMErrCode::SUCCESS) return code;
+
+  if (!input.raw_data.empty()) {
+    input.hash_key = hash_string(input.raw_data);
+  }
 
   return MMErrCode::SUCCESS;
 }

@@ -45,6 +45,33 @@ constexpr int64_t kNumHeads = 8;
 constexpr int64_t kNumKvHeads = 2;
 constexpr int64_t kBlockSize = 16;
 
+const std::vector<int64_t> kRealMropeSection = {11, 11, 10};
+const std::vector<int64_t> kAxisByHalfDim = {0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1,
+                                             2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0,
+                                             1, 2, 0, 1, 2, 0, 1, 2, 0, 1};
+
+std::pair<torch::Tensor, torch::Tensor> make_mrope_ref(
+    const torch::Tensor& cos_sin_cache,
+    const torch::Tensor& positions) {
+  torch::Tensor selected = cos_sin_cache.index({positions});
+  std::vector<torch::Tensor> chunks = selected.chunk(/*chunks=*/2, /*dim=*/-1);
+  int64_t rotary_dim = chunks[0].size(-1);
+  int64_t half_rotary_dim = rotary_dim / 2;
+  torch::Tensor expected_cos =
+      torch::empty({positions.size(1), rotary_dim}, cos_sin_cache.options());
+  torch::Tensor expected_sin =
+      torch::empty({positions.size(1), rotary_dim}, cos_sin_cache.options());
+
+  for (int64_t column = 0; column < rotary_dim; ++column) {
+    int64_t axis = kAxisByHalfDim[column % half_rotary_dim];
+    expected_cos.select(/*dim=*/1, column)
+        .copy_(chunks[0].select(/*dim=*/0, axis).select(/*dim=*/1, column));
+    expected_sin.select(/*dim=*/1, column)
+        .copy_(chunks[1].select(/*dim=*/0, axis).select(/*dim=*/1, column));
+  }
+  return {expected_cos, expected_sin};
+}
+
 class Qwen3_5AttentionTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -368,6 +395,45 @@ TEST_F(Qwen3_5AttentionTest, DecodeWithGate) {
                   .all()
                   .item<bool>())
       << "Decode output must be finite";
+}
+
+TEST_F(Qwen3_5AttentionTest, TextPositionsProduceValidMropeCaches) {
+  (void)MakeLayer(/*attn_output_gate=*/true);
+  auto text_positions = torch::arange(0, 4, options_.dtype(torch::kInt32));
+
+  auto [cos, sin] =
+      rotary::apply_mrope(cos_sin_, text_positions, mrope_section_);
+  auto expanded_positions = text_positions.unsqueeze(0).repeat({3, 1});
+  auto [expected_cos, expected_sin] = ApplyMrope(expanded_positions);
+
+  EXPECT_EQ(cos.dim(), 2);
+  EXPECT_EQ(sin.dim(), 2);
+  EXPECT_TRUE(torch::allclose(cos, expected_cos));
+  EXPECT_TRUE(torch::allclose(sin, expected_sin));
+}
+
+TEST_F(Qwen3_5AttentionTest, RealSectionsProduceInterleavedMrope) {
+  constexpr int64_t kTestRotaryDim = 64;
+  torch::Tensor cos_sin_cache =
+      rotary::get_concat_rotary_embedding(kTestRotaryDim,
+                                          /*seq_len=*/64,
+                                          /*rope_theta=*/1000000.0,
+                                          options_);
+  torch::Tensor positions = torch::tensor(
+      {{1, 2, 3}, {11, 12, 13}, {21, 22, 23}}, options_.dtype(torch::kLong));
+
+  auto [cos, sin] =
+      rotary::apply_mrope(cos_sin_cache, positions, kRealMropeSection);
+  auto [expected_cos, expected_sin] = make_mrope_ref(cos_sin_cache, positions);
+
+  EXPECT_EQ(cos.sizes(),
+            torch::IntArrayRef({positions.size(1), kTestRotaryDim}));
+  EXPECT_EQ(sin.sizes(),
+            torch::IntArrayRef({positions.size(1), kTestRotaryDim}));
+  EXPECT_TRUE(torch::equal(cos, expected_cos));
+  EXPECT_TRUE(torch::equal(sin, expected_sin));
+  EXPECT_TRUE(cos.is_contiguous());
+  EXPECT_TRUE(sin.is_contiguous());
 }
 
 }  // namespace

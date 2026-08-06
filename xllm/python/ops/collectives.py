@@ -66,6 +66,12 @@ def _require_tp_group(x: torch.Tensor):
     return group
 
 
+def tp_rank(device) -> int:
+    """Rank in the TP group for ``device`` (0 when no TP group exists)."""
+    group = _tp_groups.get(str(torch.device(device)))
+    return group.rank() if group is not None else 0
+
+
 @torch.library.custom_op("xllm_ops::all_reduce_", mutates_args={"x"})
 def all_reduce_(x: torch.Tensor) -> None:
     group = _require_tp_group(x)

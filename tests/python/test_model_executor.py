@@ -42,6 +42,7 @@ from xllm.python.model_executor.executor import (  # noqa: E402
     ModelExecutor,
     _create_attention_backend,
     _is_npu_device,
+    _resolve_graph_backend,
 )
 
 
@@ -144,6 +145,21 @@ class TestIsNpuDevice:
 
 
 # ---------------------------------------------------------------------------
+# Tests: graph backend resolution
+# ---------------------------------------------------------------------------
+
+
+class TestNpuGraphBackendResolution:
+    def test_enable_graph_selects_aclgraph_on_npu(self):
+        config = {"enable_graph": True, "python_graph_backend": "off"}
+
+        assert (
+            _resolve_graph_backend(config, torch.device("npu"))
+            == "aclgraph"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Tests: _create_attention_backend dispatch
 # ---------------------------------------------------------------------------
 
@@ -196,7 +212,7 @@ class TestModelExecutorConstruction:
         executor = ModelExecutor(model, config, max_seqs_per_batch=4)
 
         assert executor._num_attention_layers == 3
-        assert executor.decode_cuda_graph_runner is None
+        assert executor.decode_graph_runner is None
         assert executor.inductor_runner is None
 
     @patch(
@@ -227,7 +243,7 @@ class TestModelExecutorConstruction:
             executor = ModelExecutor(
                 model, {"python_graph_backend": off_value}, max_seqs_per_batch=4
             )
-            assert executor.decode_cuda_graph_runner is None
+            assert executor.decode_graph_runner is None
             assert executor.inductor_runner is None
 
 

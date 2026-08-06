@@ -15,6 +15,9 @@ limitations under the License.
 
 #pragma once
 
+#include <memory>
+#include <mutex>
+
 #include "framework/kv_cache_transfer/llm_data_dist_transfer.h"
 #include "framework/parallel_state/parallel_args.h"
 
@@ -26,7 +29,9 @@ class SpecKVCacheTransfer : public LlmDataDistTransfer {
  public:
   SpecKVCacheTransfer(const uint16_t listen_port,
                       const InstanceRole& instance_role,
-                      bool enable_lighting_indexer = false);
+                      bool enable_lighting_indexer = false,
+                      bool enable_mla = false,
+                      bool draft_body_uses_tp1 = false);
 
   virtual ~SpecKVCacheTransfer() = default;
 
@@ -47,6 +52,14 @@ class SpecKVCacheTransfer : public LlmDataDistTransfer {
   bool pull_kv_blocks(
       const uint64_t src_cluster_id,
       const std::string& src_addr,
+      const std::vector<uint64_t>& src_blocks,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids,
+      const std::vector<uint64_t>& dst_linear_state_ids) override;
+
+  bool pull_hetero_kv_blocks(
+      const std::vector<uint64_t>& src_cluster_ids,
+      const std::vector<std::string>& src_addrs,
       const std::vector<uint64_t>& src_blocks,
       const std::vector<uint64_t>& dst_blocks,
       const std::vector<uint64_t>& src_linear_state_ids,
@@ -78,8 +91,60 @@ class SpecKVCacheTransfer : public LlmDataDistTransfer {
       int32_t kv_split_rank = 0,
       int32_t kv_split_size = 1);
 
+  bool push_kv_blocks_to_hetero_staging(
+      std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
+      std::shared_ptr<NPULayerSynchronizerImpl>& layer_synchronizer,
+      bool is_spec_draft,
+      int64_t source_shard_rank,
+      int64_t source_shard_count);
+
  private:
+  bool pull_and_merge_sharded_caches(
+      const LayerRegisteredCaches& layer_registered_caches,
+      const LayerRegisteredCaches& staging_registered_caches,
+      const std::vector<uint64_t>& src_cluster_ids,
+      const std::vector<uint64_t>& src_blocks,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& src_linear_state_ids,
+      const std::vector<uint64_t>& dst_linear_state_ids);
+
+  bool merge_pre_pushed_sharded_caches(
+      const LayerRegisteredCaches& layer_registered_caches,
+      const LayerRegisteredCaches& staging_registered_caches,
+      const std::vector<uint64_t>& dst_blocks,
+      const std::vector<uint64_t>& dst_linear_state_ids,
+      int64_t source_shard_count);
+
+  bool push_layer_registered_caches_to_staging(
+      const LayerRegisteredCaches& layer_registered_caches,
+      const LayerRegisteredCaches& staging_registered_caches,
+      std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
+      std::shared_ptr<NPULayerSynchronizerImpl>& layer_synchronizer,
+      int64_t source_shard_rank,
+      int64_t source_shard_count);
+
+  void register_hetero_staging_caches(
+      const LayerRegisteredCaches& source_registered_caches,
+      LayerRegisteredCaches& staging_registered_caches,
+      int64_t source_shard_count,
+      bool source_is_sharded);
+
+  bool pull_replicated_spec_kv_blocks(uint64_t src_cluster_id,
+                                      const std::vector<uint64_t>& src_blocks,
+                                      const std::vector<uint64_t>& dst_blocks);
+
+  bool draft_body_uses_tp1_ = false;
+  bool heterogeneous_pd_enabled_ = false;
+  LayerRegisteredCaches hetero_staging_registered_caches_;
+  LayerRegisteredCaches spec_hetero_staging_registered_caches_;
   LayerRegisteredCaches spec_layer_registered_caches_;
+  bool parallel_shard_pull_ = true;
+  // Staging tensors are shared by all heterogeneous requests. Keep the full
+  // restore transaction serialized until request-scoped staging slots exist.
+  std::mutex hetero_restore_mutex_;
+  // Created only for the opt-in heterogeneous path. Homogeneous PD should not
+  // reserve a worker thread for a code path it cannot enter.
+  std::unique_ptr<ThreadPool> shard_pull_threadpool_;
 };
 
 }  // namespace xllm

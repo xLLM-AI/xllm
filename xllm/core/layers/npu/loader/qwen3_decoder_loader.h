@@ -33,6 +33,7 @@ class Qwen3DecoderLoader : public BaseLoader {
   void load_state_dict(const StateDict& state_dict) override;
   void verify_loaded_weights() const override;
   bool down_proj_quantized() const { return down_proj_quantized_; }
+  bool o_proj_quantized() const { return o_proj_quantized_; }
 
  protected:
   void merge_host_at_weights() override;
@@ -40,6 +41,7 @@ class Qwen3DecoderLoader : public BaseLoader {
   torch::Tensor at_placeholder_;
   bool enableAddNorm_;
   bool down_proj_quantized_ = false;
+  bool o_proj_quantized_ = true;  // default true for W8A8 models
   int rank_id_;
 };
 

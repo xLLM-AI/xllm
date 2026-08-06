@@ -25,4 +25,5 @@ cc_library(
   torch
   glog::glog
   Folly::folly
+  parallel_state
 )

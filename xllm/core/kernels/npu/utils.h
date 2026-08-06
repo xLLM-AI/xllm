@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch_npu/csrc/libs/init_npu.h>
 #include <torch_npu/torch_npu.h>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -36,4 +37,8 @@ void check_tensor(const torch::Tensor& t,
 void check_tensor_shapes_equal(const torch::Tensor& a,
                                const torch::Tensor& b,
                                const std::string& func_name = "");
+bool is_ascend950();
+torch::Tensor expand_kv_heads(const torch::Tensor& tensor,
+                              int64_t num_heads,
+                              int64_t num_kv_heads);
 }  // namespace xllm::kernel::npu

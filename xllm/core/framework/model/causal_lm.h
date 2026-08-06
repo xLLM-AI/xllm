@@ -69,6 +69,8 @@ class CausalLM : public torch::nn::Module {
 
   virtual bool is_hybrid_linear_attention() { return false; }
 
+  virtual bool supports_mla_graph_kv_bucketing() const { return false; }
+
   virtual std::unique_ptr<ModelGraphMetadataState>
   create_graph_forward_metadata_state() {
     return nullptr;
@@ -170,6 +172,15 @@ class CausalLM : public torch::nn::Module {
     return {};
   }
 
+  // DSpark-specific low-rank Markov projection. The draft worker owns the
+  // sequential sampling lifecycle; the model owns only the trained weights and
+  // bias computation.
+  virtual torch::Tensor dspark_markov_bias(
+      const torch::Tensor& previous_token_ids) {
+    NOT_IMPLEMENTED();
+    return {};
+  }
+
   virtual void lazy_load_model(std::unique_ptr<ModelLoader> loader) {
     NOT_IMPLEMENTED();
   }
@@ -208,6 +219,13 @@ class CausalLMImpl : public CausalLM {
     } else {
       return CausalLM::is_hybrid_linear_attention();
     }
+  }
+
+  bool supports_mla_graph_kv_bucketing() const override {
+    if constexpr (detail::has_supports_mla_graph_kv_bucketing<Model>::value) {
+      return model_->supports_mla_graph_kv_bucketing();
+    }
+    return CausalLM::supports_mla_graph_kv_bucketing();
   }
 
   std::unique_ptr<ModelGraphMetadataState> create_graph_forward_metadata_state()
@@ -272,6 +290,14 @@ class CausalLMImpl : public CausalLM {
     }
   }
 
+  torch::Tensor dspark_markov_bias(
+      const torch::Tensor& previous_token_ids) override {
+    if constexpr (detail::has_dspark_markov_bias<Model>::value) {
+      return model_->dspark_markov_bias(previous_token_ids);
+    }
+    return CausalLM::dspark_markov_bias(previous_token_ids);
+  }
+
   void lazy_load_model(std::unique_ptr<ModelLoader> loader) override {
     if constexpr (detail::has_lazy_load_model<Model>::value) {
       model_->lazy_load_model(std::move(loader));
@@ -304,13 +330,12 @@ class CausalLMImpl : public CausalLM {
     }
   }
 
-  virtual void prepare_expert_weight(
-      int32_t layer_id,
-      const std::vector<int32_t>& expert_ids) override {
+  void prepare_expert_weight(int32_t layer_id,
+                             const std::vector<int32_t>& expert_ids) override {
     return model_->prepare_expert_weight(layer_id, expert_ids);
   }
 
-  virtual void update_expert_weight(int32_t layer_id) {
+  void update_expert_weight(int32_t layer_id) override {
     return model_->update_expert_weight(layer_id);
   }
 

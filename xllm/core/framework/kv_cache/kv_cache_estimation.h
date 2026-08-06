@@ -43,7 +43,6 @@ struct KVCacheEstimateOptions {
   int64_t max_linear_state_cache_slots = 0;
   bool is_draft_engine = false;
   bool enable_prefix_cache = false;
-  bool enable_rdma_scale_padding = false;
   const ModelArgs* draft_model_args = nullptr;
   const KVCacheEstimateOptions* draft_options = nullptr;
 };
@@ -64,5 +63,11 @@ std::vector<bool> resolve_indexer_cache_enabled_layers(
 KVCacheCapacity estimate_kv_cache_capacity(
     const ModelArgs& model_args,
     const KVCacheEstimateOptions& options);
+
+int64_t estimate_speculative_kv_cache_blocks(
+    const KVCacheCapacity& target_kv_cache_cap,
+    const KVCacheCapacity& draft_kv_cache_cap,
+    bool share_device,
+    bool draft_body_uses_tp1 = false);
 
 }  // namespace xllm

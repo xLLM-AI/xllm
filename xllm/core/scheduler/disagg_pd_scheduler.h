@@ -38,15 +38,13 @@ class DisaggPDScheduler : public ContinuousScheduler {
  public:
   DisaggPDScheduler(Engine* engine, const Options& options);
 
-  virtual ~DisaggPDScheduler();
+  ~DisaggPDScheduler() override;
 
-  virtual uint32_t get_waiting_requests_num() const override {
+  uint32_t get_waiting_requests_num() const override {
     return prefill_queue_->size();
   };
 
   void step(const absl::Duration& timeout) override;
-
-  std::vector<Batch> prepare_batch() override;
 
   bool add_request(std::shared_ptr<Request>& request) override;
 
@@ -74,6 +72,7 @@ class DisaggPDScheduler : public ContinuousScheduler {
       int32_t src_linear_state_id,
       int32_t src_dp_size,
       int32_t src_dp_rank,
+      bool heterogeneous_pd = false,
       torch::Tensor mtp_bootstrap_embedding = torch::Tensor(),
       int32_t num_cached_tokens = 0);
 
@@ -83,7 +82,7 @@ class DisaggPDScheduler : public ContinuousScheduler {
   bool enable_schedule_overlap() { return options_.enable_schedule_overlap(); };
 
   void get_latency_metrics(std::vector<int64_t>& ttft,
-                           std::vector<int64_t>& tbt);
+                           std::vector<int64_t>& tbt) override;
 
   bool link_instance(const std::string& instance_name,
                      const std::vector<uint64_t>& cluster_ids,

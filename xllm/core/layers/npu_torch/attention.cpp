@@ -49,21 +49,22 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
     return std::make_tuple(output, output_lse);
   }
 
-  bool only_prefill =
+  const bool only_prefill =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
 
   torch::Tensor k_cache = kv_cache.get_k_cache();
-  torch::Tensor v = value.view({-1, num_kv_heads_, head_size_});
   std::optional<torch::Tensor> v_cache = kv_cache.get_v_cache();
 
-  // Reshape and cache key/value
-  xllm::kernel::ReshapePagedCacheParams reshape_paged_cache_params;
-  reshape_paged_cache_params.key = key.view({-1, num_kv_heads_, head_size_});
-  reshape_paged_cache_params.value = v;
-  reshape_paged_cache_params.k_cache = k_cache;
-  reshape_paged_cache_params.v_cache = v_cache;
-  reshape_paged_cache_params.slot_mapping = attn_metadata.slot_mapping;
-  xllm::kernel::reshape_paged_cache(reshape_paged_cache_params);
+  if (!attn_metadata.prefill_without_cache) {
+    xllm::kernel::ReshapePagedCacheParams reshape_paged_cache_params;
+    reshape_paged_cache_params.key = key.view({-1, num_kv_heads_, head_size_});
+    reshape_paged_cache_params.value =
+        value.view({-1, num_kv_heads_, head_size_});
+    reshape_paged_cache_params.k_cache = k_cache;
+    reshape_paged_cache_params.v_cache = v_cache;
+    reshape_paged_cache_params.slot_mapping = attn_metadata.slot_mapping;
+    xllm::kernel::reshape_paged_cache(reshape_paged_cache_params);
+  }
 
   if (attn_metadata.use_expanded_decode_for_spec_verify_attention) {
     decoder_forward(query, output, k_cache, v_cache, attn_metadata);

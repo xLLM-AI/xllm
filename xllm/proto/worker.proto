@@ -99,6 +99,9 @@ message PullKVCacheRequest {
   repeated uint64 dst_blocks = 5;
   repeated uint64 src_linear_state_ids = 7;
   repeated uint64 dst_linear_state_ids = 8;
+  repeated uint64 src_cluster_ids = 9;
+  repeated string src_addrs = 10;
+  bool hetero_merge = 11;
 }
 
 enum TransferType {
@@ -110,13 +113,15 @@ enum TransferType {
 }
 
 // Mirrors xllm::BlockType (framework/block/block.h). Kept in wire order so
-// numeric values round-trip losslessly across RPC.
+// numeric values round-trip losslessly across RPC (serialized by number, not
+// name). Enumerator 4 was historically named SINGLE; it is now EMBEDDING to
+// match the C++ enum, with the value pinned at 4 for wire compatibility.
 enum BlockType {
   KV = 0;
   SWA = 1;
   C4 = 2;
   C128 = 3;
-  SINGLE = 4;
+  EMBEDDING = 4;
   LINEAR = 5;
 }
 

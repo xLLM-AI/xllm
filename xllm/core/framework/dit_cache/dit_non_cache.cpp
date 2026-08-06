@@ -17,7 +17,8 @@ limitations under the License.
 
 namespace xllm {
 
-void DiTNonCache::init(const DiTCacheConfig& cfg) {
+void DiTNonCache::init(const DiTCacheConfig& /*cfg*/,
+                       const ParallelArgs& /*parallel_args*/) {
   // NonCache: nothing to initialize.
 }
 

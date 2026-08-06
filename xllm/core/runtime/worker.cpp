@@ -32,6 +32,7 @@ limitations under the License.
 #include "framework/state_dict/state_dict.h"
 #include "runtime/dflash_worker_impl.h"
 #include "runtime/dit_worker_impl.h"
+#include "runtime/dspark_worker_impl.h"
 #include "runtime/eagle3_worker_impl.h"
 #include "runtime/embed_vlm_worker_impl.h"
 #include "runtime/embed_worker_impl.h"
@@ -55,6 +56,8 @@ Worker::Worker(const ParallelArgs& parallel_args,
       impl_ = new Eagle3WorkerImpl(parallel_args, device, options);
     } else if (algorithm == "DFlash") {
       impl_ = new DFlashWorkerImpl(parallel_args, device, options);
+    } else if (algorithm == "DSpark") {
+      impl_ = new DSparkWorkerImpl(parallel_args, device, options);
     } else if (algorithm == "Suffix") {
       impl_ = new SuffixWorkerImpl(parallel_args, device, options);
     } else if (SpeculativeConfig::is_mtp_algorithm(algorithm)) {
@@ -179,6 +182,21 @@ folly::SemiFuture<bool> Worker::pull_kv_blocks_async(
                                      dst_blocks,
                                      src_linear_state_ids,
                                      dst_linear_state_ids);
+}
+
+folly::SemiFuture<bool> Worker::pull_hetero_kv_blocks_async(
+    const std::vector<uint64_t>& src_cluster_ids,
+    const std::vector<std::string>& src_addrs,
+    const std::vector<uint64_t>& src_blocks,
+    const std::vector<uint64_t>& dst_blocks,
+    const std::vector<uint64_t>& src_linear_state_ids,
+    const std::vector<uint64_t>& dst_linear_state_ids) {
+  return impl_->pull_hetero_kv_blocks_async(src_cluster_ids,
+                                            src_addrs,
+                                            src_blocks,
+                                            dst_blocks,
+                                            src_linear_state_ids,
+                                            dst_linear_state_ids);
 }
 
 uint32_t Worker::transfer_kv_blocks(

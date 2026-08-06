@@ -189,8 +189,8 @@ std::ostream& operator<<(std::ostream& os, const Stream& stream) {
   // MLUStream output: device index and stream id
   os << "MLUStream[device=" << stream.stream_.device_index()
      << ", stream_id=" << stream.stream_.id() << "]";
-#elif defined(USE_CUDA) || defined(USE_ILU) || defined(USE_DCU)
-  // For CUDA, use the existing operator<< from c10::cuda::CUDAStream
+#elif defined(USE_MUSA) || defined(USE_CUDA) || defined(USE_ILU) || \
+    defined(USE_DCU)
   os << stream.stream_;
 #else
   os << "UnknownStream";

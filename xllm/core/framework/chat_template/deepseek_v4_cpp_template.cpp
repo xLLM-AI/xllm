@@ -125,7 +125,9 @@ constexpr const char* kToolCallTemplate =
 constexpr const char* kToolOutputTemplate =
     "<tool_result>{content}</tool_result>";
 
-constexpr const char* kReasoningEffortMax =
+// Prompt prefixes for the reasoning effort tiers the encoder understands,
+// mirroring vLLM's REASONING_EFFORT_PROMPTS. The "low" tier renders nothing.
+constexpr const char* kReasoningEffortPromptHigh =
     "Reasoning Effort: Absolute maximum with no "
     "shortcuts permitted.\n"
     "You MUST be very thorough in your thinking "
@@ -139,6 +141,30 @@ constexpr const char* kReasoningEffortMax =
     "considered alternative, and rejected "
     "hypothesis to ensure absolutely no assumption "
     "is left unchecked.\n\n";
+
+constexpr const char* kReasoningEffortPromptMax =
+    "Reasoning Effort: Beyond maximum — "
+    "exhaustive, relentless, and "
+    "uncompromising.\n"
+    "You MUST reason with the utmost depth and "
+    "rigor, leaving absolutely nothing to chance: "
+    "exhaustively decompose the problem into its "
+    "most fundamental components, trace every "
+    "causal chain to its root, and resolve the "
+    "underlying cause rather than any surface "
+    "symptom.\n"
+    "Do not stop reasoning until you have "
+    "independently verified the solution from "
+    "multiple angles and are certain that no "
+    "assumption remains unchecked and no error "
+    "remains undiscovered.\n\n";
+
+// Reasoning effort tiers understood by the prompt encoder. Request-level values
+// are collapsed onto these by resolve_reasoning_effort().
+constexpr const char* kReasoningEffortNone = "none";
+constexpr const char* kReasoningEffortLowTier = "low";
+constexpr const char* kReasoningEffortHighTier = "high";
+constexpr const char* kReasoningEffortMaxTier = "max";
 
 constexpr const char* kThinkingModeThinking = "thinking";
 constexpr const char* kThinkingModeChat = "chat";
@@ -199,20 +225,77 @@ bool get_thinking_enabled(const nlohmann::ordered_json& kwargs) {
   return false;
 }
 
-std::string get_thinking_mode(const nlohmann::ordered_json& kwargs) {
-  if (kwargs.contains("thinking_mode") && kwargs["thinking_mode"].is_string()) {
-    return kwargs["thinking_mode"].get<std::string>();
-  }
-  return get_thinking_enabled(kwargs) ? kThinkingModeThinking
-                                      : kThinkingModeChat;
-}
-
 std::string get_reasoning_effort(const nlohmann::ordered_json& kwargs) {
   if (kwargs.contains("reasoning_effort") &&
       kwargs["reasoning_effort"].is_string()) {
     return kwargs["reasoning_effort"].get<std::string>();
   }
   return "";
+}
+
+// Collapse a request-level reasoning effort onto the tiers the prompt encoder
+// understands. DeepSeek-V4-Flash-0731 widened the accepted set to
+// none/minimal/low/medium/high/xhigh/max; this mirrors the mapping in vLLM's
+// DeepSeek-V4 tokenizer wrapper and Rust renderer:
+//   "none"                        -> "" (and forces chat mode, see
+//                                        get_thinking_mode)
+//   "minimal" / "low" / "medium"  -> "low"  (renders no prefix)
+//   "max"                         -> "max"
+//   "high" / "xhigh" / absent /
+//   anything unrecognized         -> "high"
+std::string resolve_reasoning_effort(const std::string& reasoning_effort) {
+  if (reasoning_effort == kReasoningEffortNone) {
+    return "";
+  }
+  if (reasoning_effort == kReasoningEffortMaxTier) {
+    return kReasoningEffortMaxTier;
+  }
+  if (reasoning_effort == "minimal" ||
+      reasoning_effort == kReasoningEffortLowTier ||
+      reasoning_effort == "medium") {
+    return kReasoningEffortLowTier;
+  }
+  return kReasoningEffortHighTier;
+}
+
+// Prefix for an already-resolved tier. Unknown tiers degrade to "low", matching
+// vLLM's DEFAULT_REASONING_EFFORT.
+const char* reasoning_effort_prompt(const std::string& resolved_effort) {
+  if (resolved_effort == kReasoningEffortMaxTier) {
+    return kReasoningEffortPromptMax;
+  }
+  if (resolved_effort == kReasoningEffortHighTier) {
+    return kReasoningEffortPromptHigh;
+  }
+  return "";
+}
+
+bool has_explicit_thinking_flag(const nlohmann::ordered_json& kwargs) {
+  return (kwargs.contains("thinking") && kwargs["thinking"].is_boolean()) ||
+         (kwargs.contains("enable_thinking") &&
+          kwargs["enable_thinking"].is_boolean());
+}
+
+std::string get_thinking_mode(const nlohmann::ordered_json& kwargs) {
+  if (kwargs.contains("thinking_mode") && kwargs["thinking_mode"].is_string()) {
+    return kwargs["thinking_mode"].get<std::string>();
+  }
+  const std::string reasoning_effort = get_reasoning_effort(kwargs);
+  // reasoning_effort="none" disables thinking outright, even when a thinking
+  // flag asks for it. Matches vLLM's DeepSeek-V4 tokenizer wrapper.
+  if (reasoning_effort == kReasoningEffortNone) {
+    return kThinkingModeChat;
+  }
+  // Without an explicit thinking flag, thinking is on: either implied by a
+  // reasoning_effort, or by DeepSeek-V4's own default. Matches vLLM's
+  // DeepSeek-V4 tokenizer wrapper, which sets thinking_enabled = true when
+  // neither "thinking" nor "enable_thinking" is present, and xLLM's own
+  // get_enable_thinking_from_request() default in chat_service_impl.cpp.
+  if (!has_explicit_thinking_flag(kwargs)) {
+    return kThinkingModeThinking;
+  }
+  return get_thinking_enabled(kwargs) ? kThinkingModeThinking
+                                      : kThinkingModeChat;
 }
 
 std::vector<nlohmann::ordered_json> tool_calls_from_openai_format(
@@ -525,10 +608,10 @@ std::string render_message(const nlohmann::ordered_json& messages,
     response_format = msg["response_format"];
   }
 
-  // Reasoning effort prefix at index 0
-  if (index == 0 && thinking_mode == kThinkingModeThinking &&
-      reasoning_effort == "max") {
-    prompt += kReasoningEffortMax;
+  // Reasoning effort prefix at index 0. reasoning_effort is already collapsed
+  // to a tier by resolve_reasoning_effort(); the "low" tier renders nothing.
+  if (index == 0 && thinking_mode == kThinkingModeThinking) {
+    prompt += reasoning_effort_prompt(reasoning_effort);
   }
 
   if (role == kRoleSystem) {
@@ -691,7 +774,8 @@ std::optional<std::string> DeepseekV4CppTemplate::apply(
     nlohmann::ordered_json normalized =
         normalize_messages(messages, json_tools);
     std::string thinking_mode = get_thinking_mode(chat_template_kwargs);
-    std::string reasoning_effort = get_reasoning_effort(chat_template_kwargs);
+    std::string reasoning_effort =
+        resolve_reasoning_effort(get_reasoning_effort(chat_template_kwargs));
 
     // Preprocess: merge tool + sort
     normalized = merge_tool_messages(normalized);

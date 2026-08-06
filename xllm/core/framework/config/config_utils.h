@@ -59,9 +59,18 @@ void dump_startup_config();
 // Assign a config property from JSON, then write the resolved value back to
 // the corresponding FLAGS_ global so that code reading FLAGS_##property
 // directly observes the JSON-provided value instead of the gflags default.
-#define XLLM_CONFIG_ASSIGN_FROM_JSON(property)                               \
-  do {                                                                       \
-    property(json.value_or<std::decay_t<decltype(property())>>(#property,    \
-                                                               property())); \
-    FLAGS_##property = property();                                           \
+//
+// Precedence is CLI > Config(JSON) > Defaults: a JSON value is applied only
+// when the matching gflag was NOT explicitly set on the command line. When the
+// flag is specified on the CLI, its value (already assigned by from_flags via
+// XLLM_CONFIG_ASSIGN_FROM_FLAG) is preserved and the JSON entry is ignored.
+// is_flag_specified() reads gflags' is_default bit, which the FLAGS_ writeback
+// below (a direct assignment) never flips, so the signal stays accurate.
+#define XLLM_CONFIG_ASSIGN_FROM_JSON(property)                                 \
+  do {                                                                         \
+    if (!::xllm::config::is_flag_specified(#property)) {                       \
+      property(json.value_or<std::decay_t<decltype(property())>>(#property,    \
+                                                                 property())); \
+      FLAGS_##property = property();                                           \
+    }                                                                          \
   } while (false)

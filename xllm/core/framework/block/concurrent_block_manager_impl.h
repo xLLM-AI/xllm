@@ -28,8 +28,9 @@ namespace xllm {
 // threadpools).
 //
 // Composition, not inheritance: the inner manager is always a leaf
-// (BlockManagerImpl / SingleBlockManager / ...), never a CompositeBlockManager.
-// The composite constructs this wrapper around the leaves that need it.
+// (BlockManagerImpl / EmbeddingBlockManager / ...), never a
+// CompositeBlockManager. The composite constructs this wrapper around the
+// leaves that need it.
 class ConcurrentBlockManagerImpl : public BlockManager {
  public:
   explicit ConcurrentBlockManagerImpl(std::unique_ptr<BlockManager> inner);
@@ -59,7 +60,12 @@ class ConcurrentBlockManagerImpl : public BlockManager {
   std::optional<std::vector<Block>> allocate_for_sequence(
       Sequence* seq,
       size_t num_tokens) override;
+  std::optional<std::vector<Block>> allocate_for_sequence(
+      Sequence* seq,
+      KVCacheState& kv_state,
+      size_t num_tokens) override;
   void release_out_of_window(Sequence* seq) override;
+  void release_out_of_window(Sequence* seq, KVCacheState& kv_state) override;
 
   void reset_prefix_cache() override;
 

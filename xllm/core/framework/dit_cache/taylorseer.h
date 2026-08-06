@@ -36,7 +36,8 @@ class TaylorSeer : public DitCacheImpl {
   TaylorSeer(TaylorSeer&&) = default;
   TaylorSeer& operator=(TaylorSeer&&) = default;
 
-  void init(const DiTCacheConfig& cfg) override;
+  void init(const DiTCacheConfig& cfg,
+            const ParallelArgs& parallel_args) override;
 
   // Reset all cached derivatives and internal state
   void reset_cache();

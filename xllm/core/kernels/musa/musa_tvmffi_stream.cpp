@@ -17,16 +17,19 @@ limitations under the License.
 
 #include <ATen/DLConvertor.h>
 #include <c10/core/Device.h>
-#include <glog/logging.h>
-#include <tvm/ffi/extra/c_env_api.h>
-#if !defined(USE_MUSA)
-#include <c10/cuda/CUDAGuard.h>
-#endif
+#include <c10/core/Event.h>
 #include <dlfcn.h>
 #include <dlpack/dlpack.h>
+#include <glog/logging.h>
+#include <tvm/ffi/extra/c_env_api.h>
+#include <unistd.h>
 
+#include <array>
+#include <atomic>
 #include <cstdlib>
+#include <exception>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -37,15 +40,55 @@ limitations under the License.
 #include "core/util/env_var.h"
 #include "core/util/utils.h"
 
-#if defined(USE_MUSA)
-
-#include <array>
-#include <optional>
-
-namespace xllm::kernel::cuda {
+namespace xllm::kernel::musa {
 namespace {
 
-c10::musa::MUSAStream& get_or_create_tvmffi_musa_stream(
+thread_local bool s_force_ffi_preparation_sync = false;
+
+void*& get_forced_tvmffi_stream(c10::DeviceIndex device_index) {
+  static thread_local std::array<void*, 8> streams{};
+  CHECK(device_index >= 0 &&
+        device_index < static_cast<c10::DeviceIndex>(streams.size()))
+      << "invalid MUSA device index: " << device_index;
+  return streams[static_cast<size_t>(device_index)];
+}
+
+constexpr int32_t kMaxTvmffiStreamDebugRecords = 4096;
+std::atomic<int32_t> s_tvmffi_stream_debug_record_count{0};
+
+bool tvmffi_stream_debug_enabled() {
+  static const bool enabled = []() {
+    const char* env = std::getenv("XLLM_TVMFFI_STREAM_DEBUG");
+    return env != nullptr && env[0] != '0' && env[0] != '\0';
+  }();
+  return enabled && access("/tmp/xllm_tvmffi_stream_debug_enabled", F_OK) == 0;
+}
+
+void log_tvmffi_stream_debug(const char* phase,
+                             c10::DeviceIndex device_index,
+                             bool capturing,
+                             void* stream,
+                             void* original_stream,
+                             int32_t device_type,
+                             int rc) {
+  if (!tvmffi_stream_debug_enabled()) {
+    return;
+  }
+  const int32_t record_index = s_tvmffi_stream_debug_record_count.fetch_add(
+      1, std::memory_order_relaxed);
+  if (record_index >= kMaxTvmffiStreamDebugRecords) {
+    return;
+  }
+  LOG(INFO) << "[tvmffi.stream.debug] n=" << record_index << " phase=" << phase
+            << " dev=" << static_cast<int32_t>(device_index)
+            << " capturing=" << capturing << " stream=" << stream
+            << " original=" << original_stream << " dev_type=" << device_type
+            << " rc=" << rc;
+}
+
+bool is_current_stream_capturing();
+
+c10::musa::MUSAStream& get_or_create_tvmffi_stream(
     c10::DeviceIndex device_index) {
   static thread_local std::array<std::optional<c10::musa::MUSAStream>, 8> slots;
   CHECK(device_index >= 0 &&
@@ -59,6 +102,31 @@ c10::musa::MUSAStream& get_or_create_tvmffi_musa_stream(
   return slot.value();
 }
 
+class TvmffiEventHandoff final {
+ public:
+  explicit TvmffiEventHandoff(c10::DeviceType device_type)
+      : current_to_ffi_event_(device_type),
+        ffi_to_current_event_(device_type) {}
+
+  c10::Event current_to_ffi_event_;
+  c10::Event ffi_to_current_event_;
+};
+
+TvmffiEventHandoff& get_or_create_tvmffi_event_handoff(
+    c10::DeviceIndex device_index,
+    c10::DeviceType device_type) {
+  static thread_local std::array<std::optional<TvmffiEventHandoff>, 8> slots;
+  CHECK(device_index >= 0 &&
+        device_index < static_cast<c10::DeviceIndex>(slots.size()))
+      << "invalid MUSA device index: " << device_index;
+  std::optional<TvmffiEventHandoff>& slot =
+      slots[static_cast<size_t>(device_index)];
+  if (!slot.has_value()) {
+    slot.emplace(device_type);
+  }
+  return slot.value();
+}
+
 void set_tvmffi_stream_handle(c10::DeviceIndex device_index, void* stream) {
   constexpr int32_t kDlCuda = 2;
   constexpr int32_t kDlExtDev = 12;
@@ -66,6 +134,13 @@ void set_tvmffi_stream_handle(c10::DeviceIndex device_index, void* stream) {
     void* original_stream = nullptr;
     const int rc =
         TVMFFIEnvSetStream(device_type, device_index, stream, &original_stream);
+    log_tvmffi_stream_debug(/*phase=*/"set",
+                            device_index,
+                            is_current_stream_capturing(),
+                            stream,
+                            original_stream,
+                            device_type,
+                            rc);
     if (rc != 0) {
       LOG(WARNING) << "[tvmffi.stream] failed to set stream, rc=" << rc
                    << " dev_type=" << device_type << " dev=" << device_index;
@@ -78,82 +153,219 @@ bool is_current_stream_capturing() {
          c10::musa::CaptureStatus::None;
 }
 
+bool current_stream_is_valid(c10::DeviceIndex device_index) {
+  c10::musa::MUSAGuard device_guard(device_index);
+  void* const stream = reinterpret_cast<void*>(
+      c10::musa::getCurrentMUSAStream(device_index).stream());
+  return stream != nullptr;
+}
+
+bool enqueue_stream_dependency(const torch::Device& device,
+                               const c10::musa::MUSAStream& producer,
+                               const c10::musa::MUSAStream& consumer,
+                               c10::Event& event) {
+  try {
+    c10::musa::MUSAGuard device_guard(device.index());
+    event.record(producer.unwrap());
+    event.block(consumer.unwrap());
+    return true;
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "[tvmffi.stream] failed to enqueue MUSA stream dependency; "
+                 << "falling back to host synchronization: " << e.what();
+  } catch (...) {
+    LOG(WARNING) << "[tvmffi.stream] failed to enqueue MUSA stream dependency "
+                 << "with an unknown error; falling back to host "
+                 << "synchronization.";
+  }
+  return false;
+}
+
 }  // namespace
 
-void bind_musa_tvmffi_stream(const torch::Device& device) {
-  if (!is_torch_musa_device(device)) {
+bool is_stream_capturing() { return is_current_stream_capturing(); }
+
+void bind_tvmffi_stream(const torch::Device& device) {
+  if (!is_torch_device(device)) {
     return;
   }
   c10::musa::MUSAGuard device_guard(device.index());
   c10::musa::MUSAStream musa_stream =
-      is_current_stream_capturing()
-          ? c10::musa::getCurrentMUSAStream(device.index())
-          : get_or_create_tvmffi_musa_stream(device.index());
+      c10::musa::getCurrentMUSAStream(device.index());
   void* const stream = reinterpret_cast<void*>(musa_stream.stream());
-  if (stream == nullptr) {
+  if (stream != nullptr) {
+    log_tvmffi_stream_debug(/*phase=*/"bind-current",
+                            device.index(),
+                            is_current_stream_capturing(),
+                            stream,
+                            nullptr,
+                            /*device_type=*/-1,
+                            /*rc=*/0);
+    set_tvmffi_stream_handle(device.index(), stream);
+    return;
+  }
+  void* const forced_stream = get_forced_tvmffi_stream(device.index());
+  if (forced_stream != nullptr) {
+    log_tvmffi_stream_debug(/*phase=*/"bind-forced",
+                            device.index(),
+                            is_current_stream_capturing(),
+                            forced_stream,
+                            nullptr,
+                            /*device_type=*/-1,
+                            /*rc=*/0);
+    set_tvmffi_stream_handle(device.index(), forced_stream);
+    return;
+  }
+  musa_stream = get_or_create_tvmffi_stream(device.index());
+  void* const pool_stream = reinterpret_cast<void*>(musa_stream.stream());
+  if (pool_stream == nullptr) {
     LOG(ERROR) << "[tvmffi.stream] MUSA stream handle is null on " << device;
     return;
   }
-  set_tvmffi_stream_handle(device.index(), stream);
+  log_tvmffi_stream_debug(/*phase=*/"bind-pool",
+                          device.index(),
+                          is_current_stream_capturing(),
+                          pool_stream,
+                          nullptr,
+                          /*device_type=*/-1,
+                          /*rc=*/0);
+  set_tvmffi_stream_handle(device.index(), pool_stream);
 }
 
-void sync_current_musa_stream(const torch::Device& device) {
-  if (!is_torch_musa_device(device)) {
-    return;
-  }
-  if (is_current_stream_capturing()) {
+void sync_current_stream(const torch::Device& device) {
+  if (!is_torch_device(device) || is_current_stream_capturing()) {
     return;
   }
   c10::musa::MUSAGuard device_guard(device.index());
   c10::musa::getCurrentMUSAStream(device.index()).synchronize();
 }
 
-void sync_musa_ffi_stream(const torch::Device& device) {
-  if (!is_torch_musa_device(device)) {
-    return;
-  }
-  if (is_current_stream_capturing()) {
+void sync_ffi_stream(const torch::Device& device) {
+  if (!is_torch_device(device) || is_current_stream_capturing()) {
     return;
   }
   c10::musa::MUSAGuard device_guard(device.index());
-  get_or_create_tvmffi_musa_stream(device.index()).synchronize();
+  get_or_create_tvmffi_stream(device.index()).synchronize();
 }
 
-MusaTvmffiStreamGuard::MusaTvmffiStreamGuard(const torch::Device& device)
-    : device_(device), active_(is_torch_musa_device(device)) {
+// During MUSA graph preparation, the executor deliberately runs eager
+// warmup/FFI-record forwards on the stream that will be captured next.  Some
+// torch_musa releases report that stream as "capturing" before
+// cudaGraph/capture_begin is entered.  The public sync helpers correctly
+// avoid synchronizing a genuinely active capture, but that early status would
+// otherwise skip the preparation barriers and let MoE/FFI work race the next
+// full-attention kernel.  Keep a preparation-only variant that bypasses the
+// status check; the guard is never held while the real graph is active.
+void sync_current_stream_for_preparation(const torch::Device& device) {
+  if (!is_torch_device(device)) {
+    return;
+  }
+  c10::musa::MUSAGuard device_guard(device.index());
+  c10::musa::getCurrentMUSAStream(device.index()).synchronize();
+}
+
+void sync_ffi_stream_for_preparation(const torch::Device& device) {
+  if (!is_torch_device(device)) {
+    return;
+  }
+  c10::musa::MUSAGuard device_guard(device.index());
+  get_or_create_tvmffi_stream(device.index()).synchronize();
+}
+
+void sync_graph_preparation_stage(const torch::Device& device) {
+  if (!s_force_ffi_preparation_sync) {
+    return;
+  }
+  sync_current_stream_for_preparation(device);
+  sync_ffi_stream_for_preparation(device);
+}
+
+TvmffiPreparationSyncGuard::TvmffiPreparationSyncGuard()
+    : previous_(s_force_ffi_preparation_sync) {
+  s_force_ffi_preparation_sync = true;
+}
+
+TvmffiPreparationSyncGuard::~TvmffiPreparationSyncGuard() {
+  s_force_ffi_preparation_sync = previous_;
+}
+
+TvmffiStreamOverrideGuard::TvmffiStreamOverrideGuard(
+    const torch::Device& device,
+    void* stream)
+    : device_(device), active_(is_torch_device(device)) {
   if (!active_) {
     return;
   }
-  sync_current_musa_stream(device_);
-  bind_musa_tvmffi_stream(device_);
+  CHECK_NE(stream, nullptr)
+      << "MUSA graph capture stream must have a native handle";
+  c10::musa::MUSAGuard device_guard(device_.index());
+  void*& forced_stream = get_forced_tvmffi_stream(device_.index());
+  previous_forced_stream_ = forced_stream;
+  forced_stream = stream;
 }
 
-MusaTvmffiStreamGuard::~MusaTvmffiStreamGuard() {
+TvmffiStreamOverrideGuard::~TvmffiStreamOverrideGuard() {
   if (!active_) {
     return;
   }
-  sync_musa_ffi_stream(device_);
+  c10::musa::MUSAGuard device_guard(device_.index());
+  get_forced_tvmffi_stream(device_.index()) = previous_forced_stream_;
 }
 
-}  // namespace xllm::kernel::cuda
+TvmffiStreamGuard::TvmffiStreamGuard(const torch::Device& device)
+    : device_(device), active_(is_torch_device(device)) {
+  if (!active_) {
+    return;
+  }
+  const bool capturing = is_current_stream_capturing();
+  const bool has_forced_stream =
+      get_forced_tvmffi_stream(device_.index()) != nullptr;
+  needs_sync_ = !capturing && !has_forced_stream &&
+                !current_stream_is_valid(device_.index());
+  if (needs_sync_) {
+    c10::musa::MUSAGuard device_guard(device_.index());
+    const c10::musa::MUSAStream current_stream =
+        c10::musa::getCurrentMUSAStream(device_.index());
+    const c10::musa::MUSAStream ffi_stream =
+        get_or_create_tvmffi_stream(device_.index());
+    TvmffiEventHandoff& event_handoff = get_or_create_tvmffi_event_handoff(
+        device_.index(), current_stream.device_type());
+    uses_event_handoff_ =
+        enqueue_stream_dependency(device_,
+                                  current_stream,
+                                  ffi_stream,
+                                  event_handoff.current_to_ffi_event_);
+    if (!uses_event_handoff_) {
+      sync_current_stream(device_);
+    }
+  }
+  bind_tvmffi_stream(device_);
+}
 
-#else
+TvmffiStreamGuard::~TvmffiStreamGuard() {
+  if (active_ && s_force_ffi_preparation_sync) {
+    sync_current_stream_for_preparation(device_);
+    sync_ffi_stream_for_preparation(device_);
+  } else if (active_ && needs_sync_) {
+    if (uses_event_handoff_) {
+      const c10::musa::MUSAStream current_stream =
+          c10::musa::getCurrentMUSAStream(device_.index());
+      const c10::musa::MUSAStream ffi_stream =
+          get_or_create_tvmffi_stream(device_.index());
+      TvmffiEventHandoff& event_handoff = get_or_create_tvmffi_event_handoff(
+          device_.index(), current_stream.device_type());
+      if (!enqueue_stream_dependency(device_,
+                                     ffi_stream,
+                                     current_stream,
+                                     event_handoff.ffi_to_current_event_)) {
+        sync_ffi_stream(device_);
+      }
+    } else {
+      sync_ffi_stream(device_);
+    }
+  }
+}
 
-namespace xllm::kernel::cuda {
-
-void bind_musa_tvmffi_stream(const torch::Device& /*device*/) {}
-
-void sync_current_musa_stream(const torch::Device& /*device*/) {}
-
-void sync_musa_ffi_stream(const torch::Device& /*device*/) {}
-
-MusaTvmffiStreamGuard::MusaTvmffiStreamGuard(const torch::Device& /*device*/) {}
-
-MusaTvmffiStreamGuard::~MusaTvmffiStreamGuard() {}
-
-}  // namespace xllm::kernel::cuda
-
-#endif
+}  // namespace xllm::kernel::musa
 
 namespace {
 const std::unordered_map<torch::ScalarType, std::string_view>
@@ -375,9 +587,19 @@ struct ATenDLMTensor {
   T tensor{};
 };
 
+struct BorrowedDLMTensor {
+  std::vector<int64_t> shape;
+  std::vector<int64_t> strides;
+  DLManagedTensorVersioned tensor{};
+};
+
 template <class T>
 void deleter(T* arg) {
   delete static_cast<ATenDLMTensor<T>*>(arg->manager_ctx);
+}
+
+void borrowed_deleter(DLManagedTensorVersioned* arg) {
+  delete static_cast<BorrowedDLMTensor*>(arg->manager_ctx);
 }
 
 template <class T>
@@ -436,8 +658,8 @@ bool ffi_alloc_dump_enabled() {
 }
 
 struct FfiAllocState {
-  ::xllm::kernel::cuda::FfiAllocMode mode =
-      ::xllm::kernel::cuda::FfiAllocMode::kPassthrough;
+  ::xllm::kernel::musa::FfiAllocMode mode =
+      ::xllm::kernel::musa::FfiAllocMode::kPassthrough;
   std::vector<torch::Tensor> record_buf;
   const std::vector<torch::Tensor>* replay_buf = nullptr;
   size_t replay_idx = 0;
@@ -463,10 +685,10 @@ int32_t torch_dlpack_managed_tensor_allocator(
             .dtype(at::toScalarType(prototype->dtype))
             .device(dl_device_to_torch_device_for_dlpack_v1(prototype->device));
 
-    if (ffi_alloc_dump_enabled()) {
-      thread_local int64_t call_idx = 0;
-      const int64_t this_call = call_idx++;
-
+    const bool dump_alloc = ffi_alloc_dump_enabled();
+    thread_local int64_t call_idx = 0;
+    const int64_t this_call = dump_alloc ? call_idx++ : -1;
+    if (dump_alloc) {
       const int64_t dtype_bits = static_cast<int64_t>(prototype->dtype.bits) *
                                  static_cast<int64_t>(prototype->dtype.lanes);
       int64_t numel = 1;
@@ -494,7 +716,7 @@ int32_t torch_dlpack_managed_tensor_allocator(
 
     torch::Tensor tensor;
     switch (g_ffi_alloc_state.mode) {
-      case ::xllm::kernel::cuda::FfiAllocMode::kReplay: {
+      case ::xllm::kernel::musa::FfiAllocMode::kReplay: {
         CHECK(g_ffi_alloc_state.replay_buf != nullptr)
             << "[TVMFFI-ALLOC] kReplay with null recording";
         const size_t idx = g_ffi_alloc_state.replay_idx;
@@ -524,16 +746,23 @@ int32_t torch_dlpack_managed_tensor_allocator(
         ++g_ffi_alloc_state.replay_idx;
         break;
       }
-      case ::xllm::kernel::cuda::FfiAllocMode::kRecord: {
+      case ::xllm::kernel::musa::FfiAllocMode::kRecord: {
         tensor = torch::empty(shape, options);
         g_ffi_alloc_state.record_buf.push_back(tensor);
         break;
       }
-      case ::xllm::kernel::cuda::FfiAllocMode::kPassthrough:
+      case ::xllm::kernel::musa::FfiAllocMode::kPassthrough:
       default: {
         tensor = torch::empty(shape, options);
         break;
       }
+    }
+    if (dump_alloc) {
+      const uintptr_t address = reinterpret_cast<uintptr_t>(tensor.data_ptr());
+      LOG(INFO) << "[TVMFFI-ALLOC-PTR #" << this_call
+                << "] mode=" << static_cast<int>(g_ffi_alloc_state.mode)
+                << " data=" << tensor.data_ptr() << " mod4k=" << address % 4096
+                << " mod16k=" << address % 16384;
     }
     *out = to_dlpack_impl<DLManagedTensorVersioned>(tensor);
     return 0;
@@ -561,7 +790,51 @@ void ensure_tvm_ffi_tensor_allocator() {
 }
 }  // namespace
 
-namespace xllm::kernel::cuda {
+namespace xllm::kernel::musa {
+
+bool ensure_tilelang_loader() {
+  static const bool loaded = []() {
+    std::vector<std::string> candidates;
+    const char* explicit_lib = std::getenv("XLLM_TILELANG_LIB");
+    if (explicit_lib != nullptr && explicit_lib[0] != '\0') {
+      candidates.emplace_back(explicit_lib);
+    }
+
+    const char* tvm_library_path = std::getenv("TVM_LIBRARY_PATH");
+    if (tvm_library_path != nullptr && tvm_library_path[0] != '\0') {
+      std::stringstream paths(tvm_library_path);
+      std::string path;
+      while (std::getline(paths, path, ':')) {
+        if (!path.empty()) {
+          candidates.emplace_back(path + "/libtilelang.so");
+        }
+      }
+    }
+    candidates.emplace_back("libtilelang.so");
+
+    std::string last_error;
+    for (const std::string& candidate : candidates) {
+      dlerror();
+      void* handle = dlopen(candidate.c_str(), RTLD_NOW | RTLD_GLOBAL);
+      if (handle != nullptr) {
+        VLOG(1) << "[tvmffi] registered TileLang MUSA module loader from "
+                << candidate;
+        return true;
+      }
+      const char* error = dlerror();
+      if (error != nullptr) {
+        last_error = error;
+      }
+    }
+
+    LOG_FIRST_N(WARNING, 1)
+        << "[tvmffi] failed to load libtilelang; TileLang FFI kernels are "
+           "unavailable. Set XLLM_TILELANG_LIB to libtilelang.so. dlerror="
+        << (last_error.empty() ? "unknown" : last_error);
+    return false;
+  }();
+  return loaded;
+}
 
 void begin_ffi_alloc_record() {
   CHECK(g_ffi_alloc_state.mode == FfiAllocMode::kPassthrough)
@@ -602,33 +875,10 @@ void end_ffi_alloc_replay() {
 FfiAllocMode get_ffi_alloc_mode() { return g_ffi_alloc_state.mode; }
 
 void bind_tvmffi_stream_to_current_torch_stream(const torch::Device& device) {
-  if (is_torch_musa_device(device)) {
-    sync_current_musa_stream(device);
-    bind_musa_tvmffi_stream(device);
+  if (is_torch_device(device)) {
+    bind_tvmffi_stream(device);
     return;
   }
-
-#if !defined(USE_MUSA)
-  const c10::cuda::CUDAStream cur =
-      c10::cuda::getCurrentCUDAStream(device.index());
-  void* const stream = reinterpret_cast<void*>(cur.stream());
-  if (stream == nullptr) {
-    LOG(WARNING) << "[tvmffi.stream] current torch stream handle is null on "
-                 << device;
-  }
-
-  constexpr int32_t kDlCuda = 2;
-  constexpr int32_t kDlExtDev = 12;
-  for (const int32_t device_type : {kDlCuda, kDlExtDev}) {
-    void* original_stream = nullptr;
-    const int rc = TVMFFIEnvSetStream(
-        device_type, device.index(), stream, &original_stream);
-    if (rc != 0) {
-      LOG(WARNING) << "[tvmffi.stream] failed to set stream, rc=" << rc
-                   << " dev_type=" << device_type << " dev=" << device.index();
-    }
-  }
-#endif
 }
 
 bool should_use_tensor_core(torch::ScalarType kv_cache_dtype,
@@ -764,6 +1014,43 @@ ffi::Tensor to_ffi_tensor(const torch::Tensor& torch_tensor) {
   return ffi::Tensor::FromDLPackVersioned(dlpack);
 }
 
+ffi::Tensor to_ffi_borrowed_tensor(const torch::Tensor& torch_tensor) {
+  CHECK(torch_tensor.defined()) << "torch_tensor is not defined";
+
+  auto* managed = new BorrowedDLMTensor;
+  managed->shape.assign(torch_tensor.sizes().begin(),
+                        torch_tensor.sizes().end());
+  managed->strides.assign(torch_tensor.strides().begin(),
+                          torch_tensor.strides().end());
+  managed->tensor.manager_ctx = managed;
+  managed->tensor.deleter = &borrowed_deleter;
+  managed->tensor.dl_tensor.data = torch_tensor.data_ptr();
+  managed->tensor.dl_tensor.device =
+      torch_device_to_dl_device_for_dlpack_v1(torch_tensor.device());
+  managed->tensor.dl_tensor.ndim = static_cast<int32_t>(torch_tensor.dim());
+  managed->tensor.dl_tensor.dtype = get_data_type_for_dlpack_v1(torch_tensor);
+  managed->tensor.dl_tensor.shape = managed->shape.data();
+  managed->tensor.dl_tensor.strides = managed->strides.data();
+  managed->tensor.dl_tensor.byte_offset = 0;
+  fill_version(&managed->tensor);
+  return ffi::Tensor::FromDLPackVersioned(&managed->tensor);
+}
+
+ffi::TensorView to_ffi_tensor_view(const torch::Tensor& torch_tensor) {
+  CHECK(torch_tensor.defined()) << "torch_tensor is not defined";
+
+  DLTensor dl_tensor{};
+  dl_tensor.data = torch_tensor.data_ptr();
+  dl_tensor.device =
+      torch_device_to_dl_device_for_dlpack_v1(torch_tensor.device());
+  dl_tensor.ndim = static_cast<int32_t>(torch_tensor.dim());
+  dl_tensor.dtype = get_data_type_for_dlpack_v1(torch_tensor);
+  dl_tensor.shape = const_cast<int64_t*>(torch_tensor.sizes().data());
+  dl_tensor.strides = const_cast<int64_t*>(torch_tensor.strides().data());
+  dl_tensor.byte_offset = 0;
+  return ffi::TensorView(&dl_tensor);
+}
+
 ffi::Optional<ffi::Tensor> to_ffi_optional_tensor(
     const std::optional<torch::Tensor>& optional) {
   if (!optional.has_value()) {
@@ -801,6 +1088,12 @@ ffi::Module get_module(const std::string& uri) {
 
   ensure_tvm_ffi_global_symbols();
   ensure_tvm_ffi_tensor_allocator();
+  // TileLang device kernels are packaged as ffi.Module.load_from_bytes.musa;
+  // without this registration LoadFromFile aborts the process.
+  CHECK(ensure_tilelang_loader())
+      << "TileLang MUSA FFI loader unavailable; set XLLM_TILELANG_LIB to "
+         "libtilelang.so before loading Mate/FlashInfer ops (uri="
+      << uri << ")";
   std::string so_file_path = path_to_uri_so_lib(uri);
   auto mod = ffi::Module::LoadFromFile(so_file_path);
   module_cache.emplace(uri, mod);
@@ -830,4 +1123,4 @@ ffi::Function get_function(const std::string& uri,
   func_cache.emplace(key, func);
   return func;
 }
-}  // namespace xllm::kernel::cuda
+}  // namespace xllm::kernel::musa

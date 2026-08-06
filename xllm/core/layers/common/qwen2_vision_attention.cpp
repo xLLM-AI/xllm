@@ -18,6 +18,9 @@ limitations under the License.
 #include <algorithm>
 
 #include "framework/parallel_state/parallel_state.h"
+#if defined(USE_NPU)
+#include "kernels/npu/npu_ops_api.h"
+#endif
 #if defined(USE_MLU)
 #include "kernels/mlu/mlu_ops_api.h"
 #endif
@@ -63,6 +66,11 @@ Qwen2VisionAttentionImpl::Qwen2VisionAttentionImpl(const ModelContext& context,
                                             quant_args,
                                             parallel_args.tp_group_,
                                             options));
+#if defined(USE_NPU)
+  // currently only atb rope operation supports the head_dim=72,
+  // aclnn rope operation only supports head_dim=64 or 128
+  rope_layer_ = register_module("rope", NpuRopeLayer(context));
+#endif
 }
 
 std::vector<torch::Tensor> Qwen2VisionAttentionImpl::split_qkv(
@@ -157,6 +165,44 @@ void compute_qwen2_vision_attention_torch(
 }
 #endif  // defined(USE_CUDA) || defined(USE_DCU)
 
+#if defined(USE_NPU)
+void compute_qwen_vision_attention_fused(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    torch::Tensor& output,
+    const std::vector<int32_t>& cu_seq_len_vec,
+    float scale) {
+  CHECK_GE(cu_seq_len_vec.size(), static_cast<size_t>(2));
+  CHECK_EQ(cu_seq_len_vec.front(), 0);
+
+  std::vector<int64_t> actual_seq_lengths;
+  actual_seq_lengths.reserve(cu_seq_len_vec.size() - 1);
+  for (size_t index = 1; index < cu_seq_len_vec.size(); ++index) {
+    CHECK_GE(cu_seq_len_vec[index], cu_seq_len_vec[index - 1]);
+    actual_seq_lengths.emplace_back(cu_seq_len_vec[index]);
+  }
+
+  auto attention_result =
+      xllm::kernel::npu::npu_fused_infer_attention(query,
+                                                   key,
+                                                   value,
+                                                   /*atten_mask=*/std::nullopt,
+                                                   /*block_table=*/std::nullopt,
+                                                   actual_seq_lengths,
+                                                   actual_seq_lengths,
+                                                   query.size(1),
+                                                   key.size(1),
+                                                   scale,
+                                                   /*block_size=*/0,
+                                                   /*sparse_mode=*/0,
+                                                   "TND",
+                                                   /*softmax_lse_flag=*/false,
+                                                   /*is_causal=*/false);
+  output.copy_(std::get<0>(attention_result).view_as(output));
+}
+#endif  // defined(USE_NPU)
+
 }  // namespace
 
 torch::Tensor Qwen2VisionAttentionImpl::forward(
@@ -190,6 +236,16 @@ torch::Tensor Qwen2VisionAttentionImpl::forward(
   k = k.reshape({B * S, num_attention_heads_per_partition_, head_dim});
 
   // Apply rotary position embedding to both q and k in a single call.
+#if defined(USE_NPU)
+  auto q_atb = q.reshape({B * S, -1});
+  auto k_atb = k.reshape({B * S, -1});
+  auto rotary_result = rope_layer_->forward(
+      q_atb, k_atb, m_cos_pos, m_sin_pos, cu_seq_len, cu_seq_len_vec);
+  q = std::get<0>(rotary_result)
+          .reshape({B * S, num_attention_heads_per_partition_, head_dim});
+  k = std::get<1>(rotary_result)
+          .reshape({B * S, num_attention_heads_per_partition_, head_dim});
+#else
   // NOTE: Do NOT call apply_rotary twice; the first call already handles both
   // q and k. A second call would incorrectly apply RoPE to k a second time.
   xllm::kernel::RotaryParams rotary_params;
@@ -215,6 +271,7 @@ torch::Tensor Qwen2VisionAttentionImpl::forward(
       {B * S, num_attention_heads_per_partition_, head_dim});
   k = rotary_params.k.reshape(
       {B * S, num_attention_heads_per_partition_, head_dim});
+#endif
 
   // q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
   // q and k are already [B*S, H, D] after the reshape above; just
@@ -254,6 +311,8 @@ torch::Tensor Qwen2VisionAttentionImpl::forward(
   // AOT kernels in this project do not support head_dim=80, so we intentionally
   // do not call FlashInfer here and run attention entirely in PyTorch instead.
   compute_qwen2_vision_attention_torch(q, k, v, output, cu_seq_len_vec, scale_);
+#elif defined(USE_NPU)
+  compute_qwen_vision_attention_fused(q, k, v, output, cu_seq_len_vec, scale_);
 #endif
 
   // context_layer = rearrange(output, "(b s) h d -> s b (h d)", b=batch_size)

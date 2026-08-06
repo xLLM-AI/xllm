@@ -126,6 +126,17 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
   return true;
 }
 
+#if defined(USE_NPU)
+bool LLMWorkerImpl::prepare_static_mtp_graph_tasks(
+    const SpecVerifyGraphTaskSignal& signal,
+    const Stream& signal_stream) {
+  if (model_executor_ == nullptr) {
+    return false;
+  }
+  return model_executor_->prepare_static_mtp_graph_tasks(signal, signal_stream);
+}
+#endif
+
 std::optional<ForwardOutput> LLMWorkerImpl::step_no_sync(
     const ForwardInput& input) {
   ForwardInput input_on_device;
@@ -212,7 +223,7 @@ LLMWorkerImpl::step_async_no_sync(const ForwardInput& input) {
 
 std::optional<ForwardOutput> LLMWorkerImpl::step_for_schedule_overlap(
     const ForwardInput& input) {
-#if defined(USE_NPU)
+#if defined(USE_NPU) || defined(USE_MLU)
   // Restore live recurrent-state slots from saved checkpoints here (worker
   // thread, on compute_stream_) instead of in prepare_work_before_execute on
   // prepare_stream_. The single-threaded worker pool guarantees the previous
@@ -221,10 +232,11 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_for_schedule_overlap(
   // after those writes without needing a cross-stream barrier.
   if (has_linear_attention_layers(context_.get_model_args())) {
     c10::StreamGuard restore_guard = compute_stream_->set_stream_guard();
-    auto& mutable_params = const_cast<ModelInputParams&>(input.input_params);
+    ModelInputParams& mutable_params =
+        const_cast<ModelInputParams&>(input.input_params);
     restore_linear_state_slots(kv_caches_,
                                mutable_params.linear_state_cache_ops,
-                               mutable_params.parallel.has_initial_state);
+                               mutable_params.linear_state_validity_mask);
   }
 #endif
   return execute_no_sync_on_stream(input, *compute_stream_);

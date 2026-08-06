@@ -68,6 +68,16 @@ bool is_sequence_sharded(const FlashComm1Context& ctx);
 
 torch::Tensor pad_rows_by_copy(const torch::Tensor& input, int64_t padded_rows);
 
+// Topology/config gate for FC1, independent of the process group and platform.
+// FC1 shards the sequence over the TP group, so it only needs a consistent
+// token count within that group: DP is fine (each DP rank owns a whole batch),
+// CP composition is not enabled because FC1 currently shards only over the TP
+// group and has not been validated together with model-side CP partitioning.
+bool is_flash_comm1_eligible(int32_t num_tokens,
+                             bool is_prefill,
+                             const ParallelArgs& parallel_args,
+                             const FlashComm1Options& options);
+
 FlashComm1Context build_flash_comm1_context(int32_t num_tokens,
                                             bool is_prefill,
                                             const ParallelArgs& parallel_args,

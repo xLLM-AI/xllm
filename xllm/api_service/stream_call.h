@@ -29,6 +29,7 @@ limitations under the License.
 #include "api_service/anthropic_json.h"
 #include "api_service/call.h"
 #include "core/common/types.h"
+#include "core/util/verbose_trace_logger.h"
 
 namespace xllm {
 
@@ -42,8 +43,9 @@ class StreamCall : public Call {
              ::google::protobuf::Closure* done,
              Request* request,
              Response* response,
-             bool use_arena = false)
-      : Call(controller),
+             bool use_arena = false,
+             bool is_http_request = false)
+      : Call(controller, request_body_x_request_id(request), is_http_request),
         done_(done),
         request_(request),
         response_(response),
@@ -66,7 +68,7 @@ class StreamCall : public Call {
     }
 
     json_options_.bytes_to_base64 = false;
-    json_options_.jsonify_empty_array = true;
+    json_options_.jsonify_empty_array = false;
   }
 
   ~StreamCall() override {
@@ -88,11 +90,15 @@ class StreamCall : public Call {
             response, &json_output, json_options_, &err_msg)) {
       return finish_with_error(StatusCode::UNKNOWN, err_msg);
     }
+    XLLM_VERBOSE_TRACE() << "event=response_serialized x-request-id="
+                         << x_request_id_;
     return true;
   }
 
   bool finish_with_error(const StatusCode& code,
                          const std::string& error_message) {
+    XLLM_VERBOSE_TRACE() << "event=request_error x-request-id=" << x_request_id_
+                         << " message=" << error_message;
     if (!stream_) {
       controller_->SetFailed(error_message);
 
@@ -128,6 +134,8 @@ class StreamCall : public Call {
     io_buf_.append("data: [DONE]\n\n");
 
     pa_->Write(io_buf_);
+    XLLM_VERBOSE_TRACE() << "event=stream_closed x-request-id="
+                         << x_request_id_;
     return true;
   }
 
@@ -170,13 +178,18 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
                 ::google::protobuf::Closure* done,
                 proto::AnthropicMessagesRequest* request,
                 proto::AnthropicMessagesResponse* response,
-                bool use_arena = false)
+                bool use_arena = false,
+                bool is_http_request = false)
       : StreamCall<proto::AnthropicMessagesRequest,
                    proto::AnthropicMessagesResponse>(controller,
                                                      done,
                                                      request,
                                                      response,
-                                                     use_arena) {}
+                                                     use_arena,
+                                                     is_http_request) {
+    // Anthropic responses require empty content arrays to remain visible.
+    this->json_options_.jsonify_empty_array = true;
+  }
 
   ~AnthropicCall() {}
 
@@ -188,6 +201,8 @@ class AnthropicCall : public StreamCall<proto::AnthropicMessagesRequest,
       return this->finish_with_error(StatusCode::UNKNOWN, err_msg);
     }
     this->controller_->response_attachment().append(json);
+    XLLM_VERBOSE_TRACE() << "event=response_serialized x-request-id="
+                         << this->x_request_id_;
     return true;
   }
 

@@ -26,7 +26,6 @@ namespace xllm {
 namespace {
 
 constexpr int32_t kFc1LocalTokenAlignment = 16;
-constexpr int32_t kFc1MinTpSize = 8;
 thread_local const FlashComm1Context* current_flash_comm1_context = nullptr;
 
 int32_t round_up_to_multiple(int32_t value, int32_t multiple) {
@@ -36,6 +35,15 @@ int32_t round_up_to_multiple(int32_t value, int32_t multiple) {
 }
 
 }  // namespace
+
+bool is_flash_comm1_eligible(int32_t num_tokens,
+                             bool is_prefill,
+                             const ParallelArgs& parallel_args,
+                             const FlashComm1Options& options) {
+  return options.enable_flashcomm1 && is_prefill &&
+         parallel_args.cp_size() == 1 &&
+         num_tokens >= options.min_prefill_tokens;
+}
 
 FlashComm1ContextScope::FlashComm1ContextScope(const FlashComm1Context* ctx)
     : previous_(current_flash_comm1_context) {
@@ -73,39 +81,19 @@ FlashComm1Context build_flash_comm1_context(int32_t num_tokens,
                                             bool is_prefill,
                                             const ParallelArgs& parallel_args,
                                             const FlashComm1Options& options) {
-  int32_t actual_tp_size = parallel_args.world_size() /
-                           (parallel_args.dp_size() * parallel_args.cp_size());
-
   FlashComm1Context ctx;
-
-  if (!options.enable_flashcomm1) {
-    return ctx;
-  }
-
-  if (!is_prefill) {
-    return ctx;
-  }
 
 #if !defined(USE_NPU)
   return ctx;
 #endif
 
-  if (parallel_args.dp_size() != 1 || parallel_args.cp_size() != 1) {
-    return ctx;
-  }
-
-  if (actual_tp_size < kFc1MinTpSize) {
+  if (!is_flash_comm1_eligible(
+          num_tokens, is_prefill, parallel_args, options)) {
     return ctx;
   }
 
   ProcessGroup* tp_group = parallel_args.tp_group_;
   if (!tp_group) {
-    return ctx;
-  }
-
-  int32_t threshold = options.min_prefill_tokens;
-
-  if (num_tokens < threshold) {
     return ctx;
   }
 

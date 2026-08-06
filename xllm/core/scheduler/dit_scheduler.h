@@ -66,7 +66,7 @@ class DiTScheduler : public SchedulerBase {
     PROPERTY(bool, disable_log_stats) = false;
   };
 
-  virtual ~DiTScheduler() = default;
+  ~DiTScheduler() override = default;
 
   // add a new request to scheduler.
   virtual bool add_request(std::shared_ptr<DiTRequest>& request) = 0;
@@ -75,7 +75,7 @@ class DiTScheduler : public SchedulerBase {
 class DiTDynamicBatchScheduler : public DiTScheduler {
  public:
   DiTDynamicBatchScheduler(Engine* engine, const Options& options);
-  virtual ~DiTDynamicBatchScheduler();
+  ~DiTDynamicBatchScheduler() override;
 
   bool add_request(std::shared_ptr<DiTRequest>& request) override;
 
@@ -94,7 +94,7 @@ class DiTDynamicBatchScheduler : public DiTScheduler {
     CHECK_GT(old_value, 0) << "pending requests underflow";
   }
 
-  size_t num_pending_requests() {
+  size_t num_pending_requests() override {
     return pending_requests_.load(std::memory_order_relaxed);
   }
 

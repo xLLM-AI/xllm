@@ -139,6 +139,8 @@ struct RequestState final {
 
   bool skip_special_tokens = true;
 
+  bool include_stop_str_in_output = false;
+
   OutputFunc output_func;
 
   // function to call when batch outputs is generated in disagg pd mode,
@@ -147,6 +149,11 @@ struct RequestState final {
 
   // decode address.
   std::string decode_address;
+
+  // Set after the Prefill/Decode topology guard accepts the opt-in non-MLA
+  // heterogeneous TP path. It scopes first-generation transfer metadata to
+  // requests that actually consume it.
+  bool heterogeneous_pd = false;
 
   torch::Tensor input_embedding;
 

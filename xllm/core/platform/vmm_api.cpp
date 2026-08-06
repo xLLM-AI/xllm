@@ -57,6 +57,14 @@ size_t get_recommended_granularity(int32_t device_id) {
   int ret = cnMemGetAllocationGranularity(
       &granularity_size, &prop, CN_MEM_ALLOC_GRANULARITY_RECOMMENDED);
   CHECK_EQ(ret, 0) << "Failed to get allocation granularity";
+#elif defined(USE_MUSA)
+  MUmemAllocationProp prop = {};
+  prop.type = MU_MEM_ALLOCATION_TYPE_PINNED;
+  prop.location.type = MU_MEM_LOCATION_TYPE_DEVICE;
+  prop.location.id = device_id;
+  int ret = muMemGetAllocationGranularity(
+      &granularity_size, &prop, MU_MEM_ALLOC_GRANULARITY_RECOMMENDED);
+  CHECK_EQ(ret, 0) << "Failed to get allocation granularity";
 #elif defined(USE_CUDA) || defined(USE_ILU)
   CUmemAllocationProp prop = {};
   prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
@@ -142,6 +150,12 @@ void create_phy_mem_handle(PhyMemHandle& phy_mem_handle,
   accessDesc.location.id = device_id;
   accessDesc.accessFlags = CN_MEM_ACCESS_FLAGS_PROT_READWRITE;
   ret = cnMemSetAccess(phy_mem_handle, size, &accessDesc, /*count=*/1);
+#elif defined(USE_MUSA)
+  MUmemAllocationProp prop = {};
+  prop.type = MU_MEM_ALLOCATION_TYPE_PINNED;
+  prop.location.type = MU_MEM_LOCATION_TYPE_DEVICE;
+  prop.location.id = device_id;
+  ret = muMemCreate(&phy_mem_handle, size, &prop, 0);
 #elif defined(USE_CUDA) || defined(USE_ILU)
   CUmemAllocationProp prop = {};
   prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;

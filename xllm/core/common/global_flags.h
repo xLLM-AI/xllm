@@ -61,6 +61,8 @@ DECLARE_bool(enable_in_batch_prefix_cache);
 
 DECLARE_int64(max_encoder_cache_size);
 
+DECLARE_int64(max_processor_cache_items);
+
 DECLARE_uint32(xxh3_128bits_seed);
 
 DECLARE_int32(max_tokens_per_batch);
@@ -112,6 +114,8 @@ DECLARE_int64(sp_size);
 DECLARE_int64(cfg_size);
 
 DECLARE_int64(vae_size);
+
+DECLARE_int64(text_encoder_tp_size);
 
 DECLARE_bool(enable_mm_encoder_dp);
 
@@ -410,3 +414,15 @@ DECLARE_string(mmrs_comm_mode);
 DECLARE_bool(use_cpp_chat_template);
 
 DECLARE_int32(health_check_interval_ms);
+
+// --- verbose trace logging config ---
+DECLARE_bool(enable_verbose_trace_log);
+
+DECLARE_string(verbose_trace_log_path);
+
+DECLARE_int32(verbose_trace_log_max_size_mb);
+
+DECLARE_int32(verbose_trace_log_max_files);
+
+// --- flux2 text encoder tokenizer config ---
+DECLARE_int32(max_sequence_length);

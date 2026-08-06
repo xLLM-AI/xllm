@@ -23,6 +23,7 @@ limitations under the License.
 #include <limits>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "core/framework/multimodal/mm_data.h"
@@ -53,16 +54,16 @@ class BatchInputBuilder {
   ForwardInput build_forward_input(uint32_t num_decoding_tokens,
                                    uint32_t min_decoding_batch_size);
 
+  std::vector<Block> take_linear_restore_src_blocks() {
+    return std::move(state_.linear_restore_src_blocks);
+  }
+
  private:
   friend class BatchInputBuilderTestPeer;
 
   // Core building methods
   void process_sequences();
   void process_sequences_multithreaded();
-  void process_multi_modal_inputs(Sequence* sequence,
-                                  uint32_t n_kv_cache_tokens,
-                                  uint32_t q_seq_len,
-                                  int32_t seq_index);
   ForwardInput state_to_forward_input();
   void padding_decode_batch_size(uint32_t num_decoding_tokens,
                                  uint32_t min_decoding_batch_size);
@@ -132,12 +133,14 @@ class BatchInputBuilder {
     std::vector<int32_t> embedding_ids;
     std::vector<int32_t> linear_state_ids;
     std::vector<LinearStateCacheOp> linear_state_cache_ops;
+    std::vector<Block> linear_restore_src_blocks;
     std::vector<std::string> request_ids;
     std::vector<int32_t> extra_token_ids;
     std::vector<int32_t> mtp_shifted_token_ids;
     std::vector<int32_t> mtp_bootstrap_row_idxes;
     std::vector<torch::Tensor> mtp_bootstrap_embeddings;
     std::vector<TransferKVInfo> transfer_kv_infos;
+    std::vector<MMData> scheduled_mm_data_vec;
 
     // for continuous kvcache
     std::vector<int64_t> new_cache_slot_offsets;  //[n_tokens]
@@ -154,6 +157,11 @@ class BatchInputBuilder {
       int32_t seq_index,
       BuilderState* state_ptr = nullptr,
       std::unordered_set<int32_t>* write_block_ids_ptr = nullptr);
+  void process_multi_modal_inputs(Sequence* sequence,
+                                  uint32_t n_kv_cache_tokens,
+                                  uint32_t q_seq_len,
+                                  int32_t seq_index,
+                                  BuilderState* state_ptr = nullptr);
   void extract_tokens_and_positions(Sequence* sequence,
                                     uint32_t n_kv_cache_tokens,
                                     uint32_t seq_len,

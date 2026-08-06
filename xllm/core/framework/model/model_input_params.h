@@ -357,6 +357,9 @@ struct AttentionHostInput {
   std::vector<int32_t> ring_cur_seqlen;
   std::vector<int32_t> ring_cache_seqlen;
   torch::Tensor block_tables;
+
+  const int32_t* graph_q_seq_lens_data = nullptr;
+  const int32_t* graph_kv_seq_lens_data = nullptr;
 };
 
 struct AttentionDeviceInput {
@@ -411,6 +414,18 @@ struct AttentionDeviceInput {
 };
 
 struct AttentionInput {
+  enum class BufferReusePolicy {
+    COPY_ON_WRITE,
+    GROWABLE,
+    FIXED_CAPACITY,
+  };
+
+  struct PackedIntInput {
+    const std::vector<int32_t>* values = nullptr;
+    torch::Tensor* host_view = nullptr;
+    torch::Tensor* device_view = nullptr;
+  };
+
   AttentionHostInput host;
   AttentionDeviceInput device;
   torch::Tensor attention_host_buffer;
@@ -431,11 +446,15 @@ struct AttentionInput {
     return out;
   }
 
-  bool rebuild_device_buffer(const torch::Device& target_device) {
+  bool rebuild_device_buffer(
+      const torch::Device& target_device,
+      const std::vector<PackedIntInput>& extra_int_inputs = {},
+      BufferReusePolicy reuse_policy = BufferReusePolicy::COPY_ON_WRITE) {
     struct Entry {
       const void* source = nullptr;
       std::vector<int64_t> sizes;
       torch::ScalarType dtype = torch::kUInt8;
+      torch::Tensor* host_target = nullptr;
       torch::Tensor* target = nullptr;
       uint64_t offset = 0;
       uint64_t bytes = 0;
@@ -457,15 +476,17 @@ struct AttentionInput {
                               std::vector<int64_t> sizes,
                               torch::ScalarType dtype,
                               uint64_t bytes,
+                              torch::Tensor* host_target,
                               torch::Tensor* target) {
       if (source == nullptr || bytes == 0) {
         return;
       }
-      entries.push_back(
-          Entry{source, std::move(sizes), dtype, target, 0, bytes, 0});
+      entries.push_back(Entry{
+          source, std::move(sizes), dtype, host_target, target, 0, bytes, 0});
     };
 
     auto add_int_vector = [&add_raw](const std::vector<int32_t>& values,
+                                     torch::Tensor* host_target,
                                      torch::Tensor* target) {
       if (values.empty()) {
         return;
@@ -474,6 +495,7 @@ struct AttentionInput {
               {static_cast<int64_t>(values.size())},
               torch::kInt,
               static_cast<uint64_t>(values.size() * sizeof(int32_t)),
+              host_target,
               target);
     };
 
@@ -496,20 +518,26 @@ struct AttentionInput {
       entries.push_back(Entry{source.data_ptr(),
                               source.sizes().vec(),
                               source.scalar_type(),
+                              nullptr,
                               target,
                               0,
                               bytes,
                               0});
     };
 
-    add_int_vector(host.q_seq_lens, &device.q_seq_lens);
-    add_int_vector(host.kv_seq_lens, &device.kv_seq_lens);
-    add_int_vector(host.q_cu_seq_lens, &device.q_cu_seq_lens);
-    add_int_vector(host.new_cache_slots, &device.new_cache_slots);
+    for (const PackedIntInput& extra : extra_int_inputs) {
+      CHECK(extra.values != nullptr);
+      add_int_vector(*extra.values, extra.host_view, extra.device_view);
+    }
+    add_int_vector(host.q_seq_lens, nullptr, &device.q_seq_lens);
+    add_int_vector(host.kv_seq_lens, nullptr, &device.kv_seq_lens);
+    add_int_vector(host.q_cu_seq_lens, nullptr, &device.q_cu_seq_lens);
+    add_int_vector(host.new_cache_slots, nullptr, &device.new_cache_slots);
     add_cpu_tensor(host.block_tables, &device.block_tables);
-    add_int_vector(host.kv_cache_tokens_nums, &device.kv_cache_tokens_nums);
-    add_int_vector(host.ring_cur_seqlen, &device.ring_cur_seqlen);
-    add_int_vector(host.ring_cache_seqlen, &device.ring_cache_seqlen);
+    add_int_vector(
+        host.kv_cache_tokens_nums, nullptr, &device.kv_cache_tokens_nums);
+    add_int_vector(host.ring_cur_seqlen, nullptr, &device.ring_cur_seqlen);
+    add_int_vector(host.ring_cache_seqlen, nullptr, &device.ring_cache_seqlen);
 
     add_cpu_tensor(device.paged_kv_indptr, &device.paged_kv_indptr);
     add_cpu_tensor(device.paged_kv_indices, &device.paged_kv_indices);
@@ -540,8 +568,17 @@ struct AttentionInput {
       return true;
     }
 
-    detach_attention_buffer_if_shared();
-    ensure_attention_buffer_capacity(total_bytes, target_device);
+    if (reuse_policy == BufferReusePolicy::COPY_ON_WRITE) {
+      detach_attention_buffer_if_shared();
+    }
+    if (reuse_policy == BufferReusePolicy::FIXED_CAPACITY) {
+      CHECK(attention_host_buffer.defined() &&
+            attention_device_buffer.defined());
+      CHECK_GE(attention_buffer_capacity, total_bytes)
+          << "fixed attention buffer cannot grow after graph capture";
+    } else {
+      ensure_attention_buffer_capacity(total_bytes, target_device);
+    }
     attention_buffer_bytes = total_bytes;
 
     auto* host_base = static_cast<char*>(attention_host_buffer.data_ptr());
@@ -564,6 +601,13 @@ struct AttentionInput {
     const char* device_base =
         static_cast<const char*>(attention_device_buffer.data_ptr());
     for (const auto& entry : entries) {
+      if (entry.host_target != nullptr) {
+        void* host_ptr = host_base + entry.offset;
+        *entry.host_target = torch::from_blob(
+            host_ptr,
+            entry.sizes,
+            torch::TensorOptions().dtype(entry.dtype).device(torch::kCPU));
+      }
       if (entry.target == nullptr) {
         continue;
       }
@@ -589,6 +633,11 @@ struct AttentionInput {
 #endif
     }
     return true;
+  }
+
+  void reserve_device_buffer_capacity(uint64_t capacity,
+                                      const torch::Device& target_device) {
+    ensure_attention_buffer_capacity(capacity, target_device);
   }
 
  private:
@@ -801,6 +850,13 @@ struct MultiModalInput {
 struct ParallelInput {
   // num tokens of all workers, mainly used for dp case
   std::vector<int32_t> dp_global_token_nums;
+  // Original DP token counts before empty ranks are padded to one fake token.
+  // Attention/FFN paths may need the padded counts, while lm_head output
+  // compaction must skip true empty DP ranks.
+  std::vector<int32_t> raw_dp_global_token_nums;
+  // max kv seq len of all dp shards. Graph key generation uses this so empty
+  // DP decode ranks pick the same graph as ranks with real decode tokens.
+  std::vector<int32_t> dp_global_kv_max_seq_lens;
   std::vector<int32_t> dp_is_decode;
 
   DpEpPaddingData dp_ep_padding_data;
@@ -817,12 +873,13 @@ struct ParallelInput {
   std::shared_ptr<LayerSynchronizer> layer_wise_load_synchronizer = nullptr;
 #if defined(USE_NPU)
   std::vector<int64_t> query_start_loc;
-  std::vector<int64_t> has_initial_state;
 #endif
 
   ParallelInput to(const torch::Device& device) const {
     ParallelInput out;
     out.dp_global_token_nums = dp_global_token_nums;
+    out.raw_dp_global_token_nums = raw_dp_global_token_nums;
+    out.dp_global_kv_max_seq_lens = dp_global_kv_max_seq_lens;
     out.dp_is_decode = dp_is_decode;
     out.dp_ep_padding_data = dp_ep_padding_data;
     out.cp_plan = cp_plan.to(device);
@@ -833,13 +890,13 @@ struct ParallelInput {
     out.layer_wise_load_synchronizer = layer_wise_load_synchronizer;
 #if defined(USE_NPU)
     out.query_start_loc = query_start_loc;
-    out.has_initial_state = has_initial_state;
 #endif
     return out;
   }
 };
 
 using LinearStatePrefixHash = PrefixHash;
+using LinearStateValidityMask = std::vector<int64_t>;
 
 struct LinearStateCacheOp {
   // Live slot the sequence advances its recurrent state in.
@@ -885,6 +942,18 @@ struct GraphInput {
   std::shared_ptr<npu::AclGraphTaskUpdateContext> acl_graph_task_update_context;
 #endif
   torch::Tensor input_tokens_override;
+  // Device token sources produced by a speculative proposer. A matching
+  // backend may fuse them into graph-owned target-verify storage.
+  std::vector<torch::Tensor> spec_verify_draft_token_sources;
+  // All dynamic target-verify source tensors retain their backing addresses
+  // across replay generations. When true, the ACL graph records those
+  // addresses separately from its graph key/task signature and validates them
+  // before each replay.
+  bool spec_verify_source_addresses_stable = false;
+  // All ready events for the current static causal-conv task signature have
+  // already been recorded on the signal stream. Replay can skip cold-path
+  // signaling on the final-draft-to-target critical path.
+  bool spec_verify_static_graph_tasks_prepared = false;
 
   GraphInput to(const torch::Device& device) const {
     GraphInput out;
@@ -904,6 +973,16 @@ struct GraphInput {
 #endif
     out.input_tokens_override =
         safe_to(input_tokens_override, device, /*non_blocking=*/true);
+    out.spec_verify_draft_token_sources.reserve(
+        spec_verify_draft_token_sources.size());
+    for (const auto& token : spec_verify_draft_token_sources) {
+      out.spec_verify_draft_token_sources.push_back(
+          safe_to(token, device, /*non_blocking=*/true));
+    }
+    out.spec_verify_source_addresses_stable =
+        spec_verify_source_addresses_stable;
+    out.spec_verify_static_graph_tasks_prepared =
+        spec_verify_static_graph_tasks_prepared;
     return out;
   }
 };
@@ -921,6 +1000,7 @@ struct ModelInputParams {
     params.graph = graph.to(device);
     params.dit_forward_input = dit_forward_input.to(device);
     params.linear_state_cache_ops = linear_state_cache_ops;
+    params.linear_state_validity_mask = linear_state_validity_mask;
     params.is_spec_verify = is_spec_verify;
     params.num_accepted_tokens = safe_to(num_accepted_tokens, device, true);
     params.num_accepted_tokens_host = num_accepted_tokens_host;
@@ -1048,8 +1128,13 @@ struct ModelInputParams {
 
   // Structured per-row linear-state cache operations.
   std::vector<LinearStateCacheOp> linear_state_cache_ops;
+  // Worker-produced per-row result declaring whether the recurrent state is
+  // valid for model-forward consumption after restore processing.
+  LinearStateValidityMask linear_state_validity_mask;
 
   bool is_spec_verify = false;
+  // Propagated to AttentionMetadata for caller-managed cacheless prefill.
+  bool prefill_without_cache = false;
   torch::Tensor num_accepted_tokens;
   // Backend-neutral state reused by the next MTP draft step.
   MtpTopkStatePtr mtp_topk_state;

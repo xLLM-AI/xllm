@@ -20,8 +20,8 @@ limitations under the License.
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 
 #include "core/common/global_flags.h"
+#include "core/framework/parallel_state/process_group.h"
 #include "hccl/hccl.h"
-#include "process_group.h"
 
 namespace xllm {
 
@@ -56,6 +56,7 @@ class ProcessGroupImpl : public ProcessGroup {
   ~ProcessGroupImpl() override;
 
   std::string hccl_comm_name(bool init_comm = true) override;
+  HcclComm hccl_comm() override;
 
  private:
   HcclComm comm_ = nullptr;

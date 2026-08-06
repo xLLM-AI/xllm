@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "kernels/mlu/chunk_gated_delta_rule.h"
 #include "kernels/mlu/mlu_ops_api.h"
+#include "kernels/ops_api.h"
 #include "layers/mlu/tests_utils.h"
 #include "platform/device.h"
 #include "platform/platform.h"
@@ -83,6 +84,15 @@ class Qwen3_5GatedDeltaNetOpsTest : public ::testing::Test {
 };
 
 torch::Device Qwen3_5GatedDeltaNetOpsTest::device_ = torch::kCPU;
+
+class Qwen3_5GatedDeltaNetSpecVerifyOpsTest
+    : public Qwen3_5GatedDeltaNetOpsTest,
+      public ::testing::WithParamInterface<int64_t> {};
+
+std::string spec_verify_width_name(
+    const ::testing::TestParamInfo<int64_t>& info) {
+  return "Width" + std::to_string(info.param);
+}
 
 // Build the (batch, token_block_offset, tot) triple used by the MLU
 // causal_conv1d_fn kernel. Mirrors the layout prepared by the Qwen3.5 model
@@ -195,6 +205,56 @@ torch::Tensor CausalConv1dUpdateRef(const torch::Tensor& x,
   return out;
 }
 
+torch::Tensor causal_conv1d_update_spec_verify_ref(
+    const torch::Tensor& x,
+    torch::Tensor& conv_state,
+    const torch::Tensor& weight,
+    const torch::Tensor& query_start_loc,
+    const torch::Tensor& conv_state_indices,
+    const torch::Tensor& num_accepted_tokens) {
+  const int64_t batch_size = conv_state_indices.size(0);
+  const int64_t width = weight.size(1);
+  const int64_t state_len = conv_state.size(2);
+  torch::Tensor out = torch::empty_like(x);
+
+  for (int64_t i = 0; i < batch_size; ++i) {
+    const int64_t query_start = query_start_loc.index({i}).item<int32_t>();
+    const int64_t query_end = query_start_loc.index({i + 1}).item<int32_t>();
+    const int64_t state_index = conv_state_indices.index({i}).item<int32_t>();
+    const int64_t accepted_offset =
+        num_accepted_tokens.index({i}).item<int32_t>() - 1;
+    torch::Tensor old_state =
+        conv_state.select(/*dim=*/0, /*index=*/state_index)
+            .slice(/*dim=*/1,
+                   /*start=*/accepted_offset,
+                   /*end=*/accepted_offset + width - 1)
+            .clone();
+    torch::Tensor x_seq =
+        x.select(/*dim=*/0, /*index=*/0)
+            .slice(/*dim=*/1, /*start=*/query_start, /*end=*/query_end);
+    torch::Tensor combined =
+        torch::cat({old_state, x_seq}, /*dim=*/1).to(weight.scalar_type());
+
+    for (int64_t t = 0; t < query_end - query_start; ++t) {
+      torch::Tensor window =
+          combined.slice(/*dim=*/1, /*start=*/t, /*end=*/t + width);
+      torch::Tensor out_token =
+          torch::silu((window * weight).sum(/*dim=*/1)).to(x.scalar_type());
+      out.select(/*dim=*/0, /*index=*/0)
+          .slice(/*dim=*/1,
+                 /*start=*/query_start + t,
+                 /*end=*/query_start + t + 1)
+          .copy_(out_token.unsqueeze(/*dim=*/1));
+    }
+
+    torch::Tensor new_state =
+        combined.slice(/*dim=*/1, /*start=*/1, /*end=*/1 + state_len);
+    conv_state.select(/*dim=*/0, /*index=*/state_index)
+        .copy_(new_state.to(conv_state.scalar_type()));
+  }
+  return out;
+}
+
 std::pair<torch::Tensor, torch::Tensor> FusedRecurrentPackedDecodeRef(
     const torch::Tensor& mixed_qkv,
     const torch::Tensor& a,
@@ -259,6 +319,83 @@ std::pair<torch::Tensor, torch::Tensor> FusedRecurrentPackedDecodeRef(
     }
   }
   return {out, final_state};
+}
+
+std::pair<torch::Tensor, torch::Tensor> FusedSigmoidSpecVerifyRef(
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& a,
+    const torch::Tensor& b,
+    const torch::Tensor& a_log,
+    const torch::Tensor& dt_bias,
+    double scale,
+    const torch::Tensor& initial_state,
+    const torch::Tensor& ssm_state_indices,
+    const torch::Tensor& cu_seqlens,
+    const torch::Tensor& num_accepted_tokens) {
+  const int64_t num_k_heads = q.size(2);
+  const int64_t num_v_heads = v.size(2);
+  const int64_t kv_group = num_v_heads / num_k_heads;
+
+  torch::Tensor q_ref =
+      L2NormalizeLastDim(q.squeeze(/*dim=*/0)).to(torch::kFloat32) * scale;
+  torch::Tensor k_ref =
+      L2NormalizeLastDim(k.squeeze(/*dim=*/0)).to(torch::kFloat32);
+  torch::Tensor v_ref = v.squeeze(/*dim=*/0).to(torch::kFloat32);
+  torch::Tensor g =
+      (-torch::exp(a_log.to(torch::kFloat32)) *
+       torch::nn::functional::softplus(
+           a.to(torch::kFloat32) + dt_bias.to(torch::kFloat32),
+           torch::nn::functional::SoftplusFuncOptions().beta(1.0).threshold(
+               20.0)));
+  torch::Tensor beta = torch::sigmoid(b.to(torch::kFloat32));
+
+  torch::Tensor out_ref = torch::empty_like(v);
+  torch::Tensor final_state_ref = initial_state.clone();
+  const int64_t num_sequences = cu_seqlens.size(0) - 1;
+  for (int64_t i = 0; i < num_sequences; ++i) {
+    const int64_t bos = cu_seqlens.index({i}).item<int32_t>();
+    const int64_t eos = cu_seqlens.index({i + 1}).item<int32_t>();
+    const int64_t accepted_offset =
+        num_accepted_tokens.index({i}).item<int32_t>() - 1;
+    const int64_t initial_state_idx =
+        ssm_state_indices.index({i, accepted_offset}).item<int32_t>();
+    torch::Tensor running_state =
+        final_state_ref.select(/*dim=*/0, initial_state_idx).clone();
+    for (int64_t n = bos; n < eos; ++n) {
+      torch::Tensor out_token = torch::empty(
+          {num_v_heads, v.size(3)}, v.options().dtype(torch::kFloat32));
+      for (int64_t hv = 0; hv < num_v_heads; ++hv) {
+        const int64_t h = hv / kv_group;
+        torch::Tensor state_h = running_state.select(/*dim=*/0, hv);
+        torch::Tensor k_t = k_ref.select(/*dim=*/0, n).select(/*dim=*/0, h);
+        torch::Tensor q_t = q_ref.select(/*dim=*/0, n).select(/*dim=*/0, h);
+        torch::Tensor v_t = v_ref.select(/*dim=*/0, n).select(/*dim=*/0, hv);
+        state_h.mul_(torch::exp(g.select(/*dim=*/0, n).select(/*dim=*/0, hv)));
+        torch::Tensor v_new =
+            (v_t - (state_h * k_t.unsqueeze(/*dim=*/0)).sum(/*dim=*/-1)) *
+            beta.select(/*dim=*/0, n).select(/*dim=*/0, hv);
+        state_h.add_(v_new.unsqueeze(/*dim=*/1) * k_t.unsqueeze(/*dim=*/0));
+        out_token.select(/*dim=*/0, hv)
+            .copy_((state_h * q_t.unsqueeze(/*dim=*/0)).sum(/*dim=*/-1));
+      }
+      const int64_t state_offset = n - bos;
+      const int64_t final_state_idx =
+          ssm_state_indices.index({i, state_offset}).item<int32_t>();
+      final_state_ref.select(/*dim=*/0, final_state_idx).copy_(running_state);
+      out_ref.select(/*dim=*/0, /*index=*/0)
+          .select(/*dim=*/0, n)
+          .copy_(out_token.to(out_ref.scalar_type()));
+    }
+  }
+  return {out_ref, final_state_ref};
+}
+
+torch::Tensor select_rebased_checkpoint_rows(
+    const torch::Tensor& state,
+    const torch::Tensor& ssm_state_indices) {
+  return state.index({ssm_state_indices.reshape({-1})});
 }
 
 // ===========================================================================
@@ -626,6 +763,95 @@ TEST_F(Qwen3_5GatedDeltaNetOpsTest, CausalConv1dUpdateDecodeSupportsVarlen) {
                               /*atol=*/5e-2));
 }
 
+void run_causal_conv1d_update_spec_verify_test(
+    const torch::Device& device,
+    const std::string& key_prefix,
+    int32_t q_max_seq_len,
+    const std::vector<int32_t>& accepted_prefixes) {
+  const int64_t dim = 384;
+  const int64_t width = 4;
+  const int64_t batch_size = static_cast<int64_t>(accepted_prefixes.size());
+  const int64_t state_len = q_max_seq_len + 2;
+  const int64_t total_tokens = batch_size * q_max_seq_len;
+  auto opts_int = torch::TensorOptions().dtype(torch::kInt32).device(device);
+
+  auto x =
+      (test::seeded_tensor(
+           key_prefix + ".x", {total_tokens, dim}, torch::kBFloat16, device) -
+       0.5f) *
+      (std::sqrt(12.0f) * 0.02f);
+  auto conv_state = (test::seeded_tensor(key_prefix + ".state",
+                                         {batch_size + 1, dim, state_len},
+                                         torch::kBFloat16,
+                                         device) -
+                     0.5f) *
+                    (std::sqrt(12.0f) * 0.02f);
+  auto weight =
+      (test::seeded_tensor(
+           key_prefix + ".weight", {dim, width}, torch::kBFloat16, device) -
+       0.5f) *
+      (std::sqrt(12.0f) * 0.02f);
+  auto query_start_loc =
+      torch::arange(0, total_tokens + 1, q_max_seq_len, opts_int);
+  auto conv_state_indices = torch::arange(1, batch_size + 1, opts_int);
+  auto num_accepted_tokens = torch::tensor(accepted_prefixes, opts_int);
+
+  auto conv_state_orig = conv_state.clone();
+  auto conv_state_ref = conv_state_orig.clone();
+  torch::Tensor x_ref =
+      x.transpose(/*dim0=*/0, /*dim1=*/1).unsqueeze(/*dim=*/0).contiguous();
+  auto out_ref = causal_conv1d_update_spec_verify_ref(x_ref,
+                                                      conv_state_ref,
+                                                      weight,
+                                                      query_start_loc,
+                                                      conv_state_indices,
+                                                      num_accepted_tokens)
+                     .squeeze(/*dim=*/0)
+                     .transpose(/*dim0=*/0, /*dim1=*/1)
+                     .contiguous();
+
+  auto conv_state_run = conv_state_orig.clone();
+  auto out = causal_conv1d_update_decode(x,
+                                         conv_state_run,
+                                         weight,
+                                         /*bias_opt=*/std::nullopt,
+                                         conv_state_indices,
+                                         /*activation=*/true,
+                                         /*pad_slot_id=*/-1,
+                                         query_start_loc,
+                                         q_max_seq_len,
+                                         num_accepted_tokens);
+  Device xllm_device(device);
+  xllm_device.synchronize_default_stream();
+
+  EXPECT_EQ(out.sizes(), x.sizes());
+  EXPECT_EQ(out.scalar_type(), x.scalar_type());
+  auto out_abs_diff =
+      (out.to(torch::kFloat32) - out_ref.to(torch::kFloat32)).abs();
+  auto state_abs_diff =
+      (conv_state_run.index({conv_state_indices}).to(torch::kFloat32) -
+       conv_state_ref.index({conv_state_indices}).to(torch::kFloat32))
+          .abs();
+  EXPECT_TRUE(torch::allclose(out, out_ref, /*rtol=*/1e-2, /*atol=*/5e-2))
+      << "max out diff: " << out_abs_diff.max().item<float>()
+      << ", mean out diff: " << out_abs_diff.mean().item<float>();
+  EXPECT_TRUE(torch::allclose(conv_state_run.index({conv_state_indices}),
+                              conv_state_ref.index({conv_state_indices}),
+                              /*rtol=*/1e-2,
+                              /*atol=*/5e-2))
+      << "max state diff: " << state_abs_diff.max().item<float>()
+      << ", mean state diff: " << state_abs_diff.mean().item<float>();
+}
+
+TEST_P(Qwen3_5GatedDeltaNetSpecVerifyOpsTest,
+       CausalConv1dUpdateUsesAcceptedPrefix) {
+  const int32_t q_max_seq_len = static_cast<int32_t>(GetParam());
+  const std::string key_prefix =
+      "conv1d_spec_width" + std::to_string(q_max_seq_len);
+  run_causal_conv1d_update_spec_verify_test(
+      device_, key_prefix, q_max_seq_len, {1, q_max_seq_len});
+}
+
 // ===========================================================================
 // fused_recurrent_gated_delta_rule_packed_decode: decode path.
 // mixed_qkv: [B, qkv_dim], ssm_cache: [num_slots, HV, V, K] (fp32).
@@ -846,7 +1072,7 @@ TEST_F(Qwen3_5GatedDeltaNetOpsTest,
   const int64_t num_k_heads = 1;
   const int64_t num_v_heads = 1;
   const int64_t head_k_dim = 128;
-  const int64_t head_v_dim = 128;
+  const int64_t head_v_dim = 256;
 
   auto q = MakeNoise("sigmoid_update.kda.q",
                      {batch_size, num_tokens, num_k_heads, head_k_dim},
@@ -873,6 +1099,65 @@ TEST_F(Qwen3_5GatedDeltaNetOpsTest,
 
   double scale = 1.0 / std::sqrt(static_cast<double>(head_k_dim));
   auto update_state = initial_state.clone();
+  torch::Tensor q_ref = L2NormalizeLastDim(q).to(torch::kFloat32) * scale;
+  torch::Tensor k_ref = L2NormalizeLastDim(k).to(torch::kFloat32);
+  torch::Tensor v_ref = v.to(torch::kFloat32);
+  torch::Tensor a_ref =
+      a.view({batch_size, num_tokens, num_v_heads, head_k_dim});
+  torch::Tensor b_ref = b.view({batch_size, num_tokens, num_v_heads});
+  torch::Tensor dt_bias_ref =
+      dt_bias.view({num_v_heads, head_k_dim}).to(torch::kFloat32);
+  torch::Tensor out_ref = torch::empty_like(v);
+  torch::Tensor final_state_ref = torch::empty_like(initial_state);
+  for (int64_t batch = 0; batch < batch_size; ++batch) {
+    torch::Tensor running_state =
+        initial_state.select(/*dim=*/0, batch * num_tokens).clone();
+    for (int64_t token = 0; token < num_tokens; ++token) {
+      for (int64_t hv = 0; hv < num_v_heads; ++hv) {
+        torch::Tensor state_h = running_state.select(/*dim=*/0, hv);
+        torch::Tensor decay = torch::exp(
+            -torch::exp(a_log.select(/*dim=*/0, hv).to(torch::kFloat32)) *
+            torch::nn::functional::softplus(
+                a_ref.select(/*dim=*/0, batch)
+                        .select(/*dim=*/0, token)
+                        .select(/*dim=*/0, hv)
+                        .to(torch::kFloat32) +
+                    dt_bias_ref.select(/*dim=*/0, hv),
+                torch::nn::functional::SoftplusFuncOptions()
+                    .beta(1.0)
+                    .threshold(20.0)));
+        torch::Tensor q_token = q_ref.select(/*dim=*/0, batch)
+                                    .select(/*dim=*/0, token)
+                                    .select(/*dim=*/0, hv);
+        torch::Tensor k_token = k_ref.select(/*dim=*/0, batch)
+                                    .select(/*dim=*/0, token)
+                                    .select(/*dim=*/0, hv);
+        torch::Tensor v_token = v_ref.select(/*dim=*/0, batch)
+                                    .select(/*dim=*/0, token)
+                                    .select(/*dim=*/0, hv);
+        state_h.mul_(decay.unsqueeze(/*dim=*/0));
+        torch::Tensor beta = torch::sigmoid(b_ref.select(/*dim=*/0, batch)
+                                                .select(/*dim=*/0, token)
+                                                .select(/*dim=*/0, hv)
+                                                .to(torch::kFloat32));
+        torch::Tensor value_delta =
+            (v_token -
+             (state_h * k_token.unsqueeze(/*dim=*/0)).sum(/*dim=*/-1)) *
+            beta;
+        state_h.add_(value_delta.unsqueeze(/*dim=*/1) *
+                     k_token.unsqueeze(/*dim=*/0));
+        out_ref.select(/*dim=*/0, batch)
+            .select(/*dim=*/0, token)
+            .select(/*dim=*/0, hv)
+            .copy_((state_h * q_token.unsqueeze(/*dim=*/0))
+                       .sum(/*dim=*/-1)
+                       .to(out_ref.scalar_type()));
+      }
+      final_state_ref.select(/*dim=*/0, batch * num_tokens + token)
+          .copy_(running_state);
+    }
+  }
+
   torch::Tensor state_indices;
   torch::Tensor cu_seqlens;
   auto [out, final_state] = fused_sigmoid_gating_delta_rule_update(
@@ -902,10 +1187,253 @@ TEST_F(Qwen3_5GatedDeltaNetOpsTest,
       final_state.sizes(),
       torch::IntArrayRef(
           {batch_size * num_tokens, num_v_heads, head_v_dim, head_k_dim}));
-  EXPECT_TRUE(torch::isfinite(out.to(torch::kFloat32)).all().item<bool>());
-  EXPECT_TRUE(
-      torch::isfinite(final_state.to(torch::kFloat32)).all().item<bool>());
+  EXPECT_TRUE(torch::allclose(out, out_ref, /*rtol=*/1e-2, /*atol=*/1e-2));
+  EXPECT_TRUE(torch::allclose(
+      final_state, final_state_ref, /*rtol=*/1e-2, /*atol=*/1e-2));
 }
+
+TEST_F(Qwen3_5GatedDeltaNetOpsTest,
+       FusedSigmoidGatingDeltaRuleUpdateCommonApiPassesAcceptedPrefix) {
+  const int64_t num_k_heads = 16;
+  const int64_t num_v_heads = 32;
+  const int64_t head_k_dim = 128;
+  const int64_t head_v_dim = 128;
+  const int64_t batch_size = 1;
+  const int64_t num_tokens = 4;
+  auto opts_int = torch::TensorOptions().dtype(torch::kInt32).device(device_);
+
+  auto q = MakeNoise("sigmoid_update_api.q",
+                     {batch_size, num_tokens, num_k_heads, head_k_dim},
+                     0.02f);
+  auto k = MakeNoise("sigmoid_update_api.k",
+                     {batch_size, num_tokens, num_k_heads, head_k_dim},
+                     0.02f);
+  auto v = MakeNoise("sigmoid_update_api.v",
+                     {batch_size, num_tokens, num_v_heads, head_v_dim},
+                     0.02f);
+  auto a = MakeNoise("sigmoid_update_api.a", {num_tokens, num_v_heads}, 0.02f);
+  auto b = MakeNoise("sigmoid_update_api.b", {num_tokens, num_v_heads}, 0.02f);
+  auto a_log = MakeNoise("sigmoid_update_api.A_log", {num_v_heads}, 0.02f);
+  auto dt_bias = MakeNoise("sigmoid_update_api.dt_bias", {num_v_heads}, 0.02f);
+  auto initial_state =
+      MakeNoise("sigmoid_update_api.initial_state",
+                {num_tokens + 1, num_v_heads, head_v_dim, head_k_dim},
+                0.01f,
+                torch::kFloat32);
+  auto ssm_state_indices =
+      torch::arange(1, num_tokens + 1, opts_int).unsqueeze(0);
+  auto cu_seqlens = torch::tensor(
+      std::vector<int32_t>{0, static_cast<int32_t>(num_tokens)}, opts_int);
+  auto num_accepted_tokens = torch::full({1}, /*value=*/3, opts_int);
+  double scale = 1.0 / std::sqrt(static_cast<double>(head_k_dim));
+
+  auto expected_state = initial_state.clone();
+  auto [expected_out, expected_final_state] =
+      fused_sigmoid_gating_delta_rule_update(a_log,
+                                             a,
+                                             b,
+                                             dt_bias,
+                                             q,
+                                             k,
+                                             v,
+                                             expected_state,
+                                             ssm_state_indices,
+                                             cu_seqlens,
+                                             scale,
+                                             /*use_qk_l2norm_in_kernel=*/true,
+                                             /*softplus_beta=*/1.0f,
+                                             /*softplus_threshold=*/20.0f,
+                                             num_accepted_tokens);
+  Sync();
+
+  xllm::kernel::FusedSigmoidGatingDeltaRuleUpdateParams params;
+  params.A_log = a_log;
+  params.a = a.clone();
+  params.dt_bias = dt_bias;
+  params.q = q.clone();
+  params.k = k.clone();
+  params.v = v.clone();
+  params.b = b.clone();
+  params.initial_state_source = initial_state.clone();
+  params.initial_state_indices = ssm_state_indices;
+  params.cu_seqlens = cu_seqlens;
+  params.scale = static_cast<float>(scale);
+  params.use_qk_l2norm_in_kernel = true;
+  params.softplus_beta = 1.0f;
+  params.softplus_threshold = 20.0f;
+  params.num_accepted_tokens = num_accepted_tokens;
+  torch::Tensor out =
+      xllm::kernel::fused_sigmoid_gating_delta_rule_update(params);
+  Sync();
+
+  EXPECT_EQ(out.sizes(), expected_out.sizes());
+  EXPECT_TRUE(torch::allclose(out,
+                              expected_out,
+                              /*rtol=*/1e-3,
+                              /*atol=*/1e-4));
+  EXPECT_TRUE(torch::allclose(params.initial_state_source,
+                              expected_final_state,
+                              /*rtol=*/1e-3,
+                              /*atol=*/1e-4));
+}
+
+void run_rebased_ssm_checkpoint_group_test(const torch::Device& device,
+                                           const std::string& key_prefix,
+                                           int64_t q_max_seq_len) {
+  const int64_t num_k_heads = 1;
+  const int64_t num_v_heads = 2;
+  const int64_t head_k_dim = 128;
+  const int64_t head_v_dim = 128;
+  const int64_t batch_size = 2;
+  const int64_t num_tokens = batch_size * q_max_seq_len;
+  const int64_t num_state_slots = num_tokens + 1;
+  auto opts_int = torch::TensorOptions().dtype(torch::kInt32).device(device);
+
+  auto make_noise = [&](const std::string& name,
+                        torch::IntArrayRef shape,
+                        float stddev,
+                        torch::ScalarType dtype = torch::kBFloat16) {
+    auto raw =
+        test::seeded_tensor(key_prefix + "." + name, shape, dtype, device);
+    return (raw - 0.5f) * (std::sqrt(12.0f) * stddev);
+  };
+
+  auto q1 =
+      make_noise("iter1.q", {1, num_tokens, num_k_heads, head_k_dim}, 0.02f);
+  auto k1 =
+      make_noise("iter1.k", {1, num_tokens, num_k_heads, head_k_dim}, 0.02f);
+  auto v1 =
+      make_noise("iter1.v", {1, num_tokens, num_v_heads, head_v_dim}, 0.02f);
+  auto a1 = make_noise("iter1.a", {num_tokens, num_v_heads}, 0.02f);
+  auto b1 = make_noise("iter1.b", {num_tokens, num_v_heads}, 0.02f);
+  auto q2 =
+      make_noise("iter2.q", {1, num_tokens, num_k_heads, head_k_dim}, 0.02f);
+  auto k2 =
+      make_noise("iter2.k", {1, num_tokens, num_k_heads, head_k_dim}, 0.02f);
+  auto v2 =
+      make_noise("iter2.v", {1, num_tokens, num_v_heads, head_v_dim}, 0.02f);
+  auto a2 = make_noise("iter2.a", {num_tokens, num_v_heads}, 0.02f);
+  auto b2 = make_noise("iter2.b", {num_tokens, num_v_heads}, 0.02f);
+  auto a_log = make_noise("A_log", {num_v_heads}, 0.02f);
+  auto dt_bias = make_noise("dt_bias", {num_v_heads}, 0.02f);
+  auto initial_state =
+      make_noise("initial_state",
+                 {num_state_slots, num_v_heads, head_v_dim, head_k_dim},
+                 0.01f,
+                 torch::kFloat32);
+  auto ssm_state_indices = torch::arange(1, num_state_slots, opts_int)
+                               .view({batch_size, q_max_seq_len});
+  auto cu_seqlens = torch::arange(0, num_tokens + 1, q_max_seq_len, opts_int);
+  auto first_accepted =
+      torch::full({batch_size}, static_cast<int32_t>(q_max_seq_len), opts_int);
+  const int32_t middle_accepted =
+      static_cast<int32_t>(std::max<int64_t>(2, (q_max_seq_len + 1) / 2));
+  torch::Tensor second_accepted =
+      torch::tensor(std::vector<int32_t>{1, middle_accepted}, opts_int);
+  double scale = 1.0 / std::sqrt(static_cast<double>(head_k_dim));
+
+  auto [out_ref1, state_ref1] = FusedSigmoidSpecVerifyRef(q1,
+                                                          k1,
+                                                          v1,
+                                                          a1,
+                                                          b1,
+                                                          a_log,
+                                                          dt_bias,
+                                                          scale,
+                                                          initial_state,
+                                                          ssm_state_indices,
+                                                          cu_seqlens,
+                                                          first_accepted);
+  auto state_run1 = initial_state.clone();
+  auto [out1, final_state1] =
+      fused_sigmoid_gating_delta_rule_update(a_log,
+                                             a1,
+                                             b1,
+                                             dt_bias,
+                                             q1,
+                                             k1,
+                                             v1,
+                                             state_run1,
+                                             ssm_state_indices,
+                                             cu_seqlens,
+                                             scale,
+                                             /*use_qk_l2norm_in_kernel=*/true,
+                                             /*softplus_beta=*/1.0f,
+                                             /*softplus_threshold=*/20.0f,
+                                             first_accepted);
+  Device xllm_device(device);
+  xllm_device.synchronize_default_stream();
+
+  EXPECT_TRUE(torch::allclose(out1, out_ref1, /*rtol=*/1e-2, /*atol=*/1e-2))
+      << "Rebased Checkpoint Group first iteration output mismatch";
+  EXPECT_TRUE(torch::allclose(
+      select_rebased_checkpoint_rows(final_state1, ssm_state_indices),
+      select_rebased_checkpoint_rows(state_ref1, ssm_state_indices),
+      /*rtol=*/1e-2,
+      /*atol=*/1e-2))
+      << "Rebased Checkpoint Group first iteration checkpoint mismatch";
+  EXPECT_FALSE(torch::allclose(final_state1.index({ssm_state_indices.select(
+                                   /*dim=*/1, /*index=*/0)}),
+                               initial_state.index({ssm_state_indices.select(
+                                   /*dim=*/1, /*index=*/0)}),
+                               /*rtol=*/1e-5,
+                               /*atol=*/1e-6))
+      << "Rebased Checkpoint Group offset 0 must be rewritten";
+
+  auto [out_ref2, state_ref2] = FusedSigmoidSpecVerifyRef(q2,
+                                                          k2,
+                                                          v2,
+                                                          a2,
+                                                          b2,
+                                                          a_log,
+                                                          dt_bias,
+                                                          scale,
+                                                          state_ref1,
+                                                          ssm_state_indices,
+                                                          cu_seqlens,
+                                                          second_accepted);
+  auto state_run2 = final_state1.clone();
+  auto [out2, final_state2] =
+      fused_sigmoid_gating_delta_rule_update(a_log,
+                                             a2,
+                                             b2,
+                                             dt_bias,
+                                             q2,
+                                             k2,
+                                             v2,
+                                             state_run2,
+                                             ssm_state_indices,
+                                             cu_seqlens,
+                                             scale,
+                                             /*use_qk_l2norm_in_kernel=*/true,
+                                             /*softplus_beta=*/1.0f,
+                                             /*softplus_threshold=*/20.0f,
+                                             second_accepted);
+  xllm_device.synchronize_default_stream();
+
+  EXPECT_TRUE(torch::allclose(out2, out_ref2, /*rtol=*/1e-2, /*atol=*/1e-2))
+      << "Rebased Checkpoint Group accepted prefix 1 must resume from "
+         "rewritten offset 0";
+  EXPECT_TRUE(torch::allclose(
+      select_rebased_checkpoint_rows(final_state2, ssm_state_indices),
+      select_rebased_checkpoint_rows(state_ref2, ssm_state_indices),
+      /*rtol=*/1e-2,
+      /*atol=*/1e-2))
+      << "Rebased Checkpoint Group second iteration checkpoint mismatch";
+}
+
+TEST_P(Qwen3_5GatedDeltaNetSpecVerifyOpsTest,
+       FusedSigmoidGatingDeltaRuleUpdateRebasedCheckpoint) {
+  const int64_t q_max_seq_len = GetParam();
+  const std::string key_prefix =
+      "sigmoid_rebased_width" + std::to_string(q_max_seq_len);
+  run_rebased_ssm_checkpoint_group_test(device_, key_prefix, q_max_seq_len);
+}
+
+INSTANTIATE_TEST_SUITE_P(SpecVerifyWidths,
+                         Qwen3_5GatedDeltaNetSpecVerifyOpsTest,
+                         ::testing::Values(int64_t{2}, int64_t{3}, int64_t{4}),
+                         spec_verify_width_name);
 
 // ===========================================================================
 // ChunkGatedDeltaRule: prefill chunked kernel.

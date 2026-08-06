@@ -397,6 +397,53 @@ TEST_F(MluGraphExecutorTest, TargetDecodeCapturesThenReplays) {
   EXPECT_EQ(model_->forward_cnt(), 1);
 }
 
+TEST_F(MluGraphExecutorTest, SpecVerifyFallsBackAndNonSpecStillCaptures) {
+  options_.is_draft_engine(false);
+  rebuild_impl();
+
+  const int32_t batch_size = 5;
+  auto spec_input = prepare_inputs(batch_size, /*seed=*/13);
+  spec_input.input_params.is_spec_verify = true;
+
+  const int32_t start_cnt = model_->forward_cnt();
+  auto first_spec_output = impl_
+                               ->run({spec_input.token_ids},
+                                     {spec_input.positions},
+                                     kv_caches_,
+                                     {spec_input.input_params})
+                               .hidden_states;
+  auto second_spec_output = impl_
+                                ->run({spec_input.token_ids},
+                                      {spec_input.positions},
+                                      kv_caches_,
+                                      {spec_input.input_params})
+                                .hidden_states;
+
+  torch_mlu::synchronize();
+  EXPECT_TRUE(
+      torch::allclose(first_spec_output, second_spec_output, 1e-5, 1e-6));
+  EXPECT_EQ(model_->forward_cnt(), start_cnt + 2);
+
+  auto decode_input = prepare_inputs(batch_size, /*seed=*/14);
+  auto first_decode_output = impl_
+                                 ->run({decode_input.token_ids},
+                                       {decode_input.positions},
+                                       kv_caches_,
+                                       {decode_input.input_params})
+                                 .hidden_states;
+  auto second_decode_output = impl_
+                                  ->run({decode_input.token_ids},
+                                        {decode_input.positions},
+                                        kv_caches_,
+                                        {decode_input.input_params})
+                                  .hidden_states;
+
+  torch_mlu::synchronize();
+  EXPECT_TRUE(
+      torch::allclose(first_decode_output, second_decode_output, 1e-5, 1e-6));
+  EXPECT_EQ(model_->forward_cnt(), start_cnt + 3);
+}
+
 TEST_F(MluGraphExecutorTest, LargeDecodeBucketCapturesThenReplays) {
   ScopedConfigSnapshot config_snapshot;
   ExecutionConfig::get_instance().max_tokens_for_graph_mode(128);

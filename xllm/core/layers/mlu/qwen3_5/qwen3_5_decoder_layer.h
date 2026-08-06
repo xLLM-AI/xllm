@@ -30,23 +30,27 @@ limitations under the License.
 #include "layers/mlu/qwen3_5/qwen3_5_attention.h"
 #include "layers/mlu/qwen3_5/qwen3_5_fused_moe.h"
 #include "layers/mlu/qwen3_5/qwen3_5_gated_delta_net.h"
+#include "layers/mlu/qwen3_5/qwen3_5_hybrid_decoder_layer_base.h"
 #include "layers/mlu/qwen3_5/qwen3_next_rms_norm.h"
 
 namespace xllm {
 namespace layer {
 
-class Qwen3_5DecoderLayerImpl final : public torch::nn::Module {
+class Qwen3_5DecoderLayerImpl final : public Qwen3HybridDecoderLayerModule {
  public:
   Qwen3_5DecoderLayerImpl(const ModelContext& context, int32_t layer_id);
 
-  void load_state_dict(const StateDict& state_dict);
+  void load_state_dict(const StateDict& state_dict) override;
+
+  void verify_loaded_weights(const std::string& prefix) const override;
 
   torch::Tensor forward(torch::Tensor& x,
                         std::optional<torch::Tensor>& residual,
                         torch::Tensor& positions,
                         const AttentionMetadata& attn_metadata,
                         KVCache& kv_cache,
-                        const ModelInputParams& input_params);
+                        const ModelInputParams& input_params,
+                        const torch::Tensor& mrope_cos_sin = {}) override;
 
  private:
   std::tuple<torch::Tensor, std::optional<torch::Tensor>> apply_norm(

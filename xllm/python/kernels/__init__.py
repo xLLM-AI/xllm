@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Python-authored kernel implementations.
+"""Hardware execution kernels used by Python graph operators.
 
-Each kernel module registers its own op (e.g. ``xllm_triton::silu_and_mul``)
-with a ``register_fake`` so it stays a single capturable node under
-torch.compile / cudagraph.
+Kernel modules provide backend-specific launchers. Torch schemas, FakeTensor
+implementations, and backend dispatch belong to :mod:`xllm.python.ops`.
 """

@@ -150,6 +150,13 @@ std::tuple<torch::Tensor, torch::Tensor> dispatch_gmm_combine_decode(
 
 bool has_dispatch_gmm_combine_decode();
 
+// Fused expert-parallel mega MoE kernel: dispatch + grouped GEMM (gate/up) +
+// activation + combine grouped GEMM (down) + combine, in one fused call.
+// Returns tuple of (output hidden states, expert token nums).
+std::tuple<torch::Tensor, torch::Tensor> mega_moe(MegaMoeParams& params);
+
+bool has_mega_moe();
+
 // FP8 scaled quantize: quantizes input tensor to FP8 e4m3 format
 // Returns: (quantized_output, scale)
 std::tuple<torch::Tensor, torch::Tensor> fp8_scaled_quantize(

@@ -22,6 +22,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -448,8 +449,10 @@ void BatchInputBuilder::process_sequences_multithreaded() {
 #endif
     thread_state.embedding_ids.reserve(sequences_per_thread);
     thread_state.linear_state_ids.reserve(sequences_per_thread);
+    thread_state.linear_restore_src_blocks.reserve(sequences_per_thread);
     thread_state.request_ids.reserve(sequences_per_thread);
     thread_state.extra_token_ids.reserve(sequences_per_thread);
+    thread_state.scheduled_mm_data_vec.reserve(sequences_per_thread);
   }
 
   // parallel processing function
@@ -498,11 +501,13 @@ void BatchInputBuilder::process_sequences_multithreaded() {
   size_t total_seqs = 0;
   size_t total_slots = 0;
   size_t total_paged_indices = 0;
+  size_t total_linear_restore_sources = 0;
   for (const auto& state : thread_builder_states) {
     total_tokens += state.flatten_tokens_vec.size();
     total_seqs += state.block_tables_vec.size();
     total_slots += state.new_token_slot_ids.size();
     total_paged_indices += state.paged_kv_indices.size();
+    total_linear_restore_sources += state.linear_restore_src_blocks.size();
   }
   state_.flatten_tokens_vec.reserve(total_tokens);
   if (!use_mrope_) {
@@ -519,6 +524,7 @@ void BatchInputBuilder::process_sequences_multithreaded() {
 #endif
   state_.embedding_ids.reserve(total_seqs);
   state_.linear_state_ids.reserve(total_seqs);
+  state_.linear_restore_src_blocks.reserve(total_linear_restore_sources);
   state_.request_ids.reserve(total_seqs);
   state_.extra_token_ids.reserve(total_seqs);
   state_.paged_kv_indices.reserve(total_paged_indices);
@@ -526,7 +532,7 @@ void BatchInputBuilder::process_sequences_multithreaded() {
   state_.paged_kv_last_page_len.reserve(total_seqs);
 
   // Merge results from all threads
-  for (const auto& state : thread_builder_states) {
+  for (auto& state : thread_builder_states) {
     state_.flatten_tokens_vec.insert(state_.flatten_tokens_vec.end(),
                                      state.flatten_tokens_vec.begin(),
                                      state.flatten_tokens_vec.end());
@@ -607,6 +613,10 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     state_.linear_state_cache_ops.insert(state_.linear_state_cache_ops.end(),
                                          state.linear_state_cache_ops.begin(),
                                          state.linear_state_cache_ops.end());
+    state_.linear_restore_src_blocks.insert(
+        state_.linear_restore_src_blocks.end(),
+        std::make_move_iterator(state.linear_restore_src_blocks.begin()),
+        std::make_move_iterator(state.linear_restore_src_blocks.end()));
     state_.request_ids.insert(state_.request_ids.end(),
                               state.request_ids.begin(),
                               state.request_ids.end());
@@ -626,6 +636,9 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     state_.transfer_kv_infos.insert(state_.transfer_kv_infos.end(),
                                     state.transfer_kv_infos.begin(),
                                     state.transfer_kv_infos.end());
+    state_.scheduled_mm_data_vec.insert(state_.scheduled_mm_data_vec.end(),
+                                        state.scheduled_mm_data_vec.begin(),
+                                        state.scheduled_mm_data_vec.end());
 
     // for flashinfer
     // we skip the first '0' element
@@ -706,7 +719,8 @@ void BatchInputBuilder::process_single_sequence(
   state.q_seq_lens.push_back(state.q_seq_lens.back() + padded_q_seq_len);
 #endif
   // Process multi-modal input
-  process_multi_modal_inputs(sequence, n_kv_cache_tokens, q_seq_len, seq_index);
+  process_multi_modal_inputs(
+      sequence, n_kv_cache_tokens, q_seq_len, seq_index, state_ptr);
   // Process tokens and positions
   extract_tokens_and_positions(
       sequence, n_kv_cache_tokens, logical_seq_len, state_ptr);
@@ -784,7 +798,7 @@ void BatchInputBuilder::extract_tokens_and_positions(Sequence* sequence,
     // last chunk of prefill and decode
     // add -1 as extra token id
     state.extra_token_ids.emplace_back(-1);
-    state.embedding_ids.emplace_back(sequence->get_single_block_id());
+    state.embedding_ids.emplace_back(sequence->get_embedding_block_id());
     state.request_ids.emplace_back(sequence->request_id());
     torch::Tensor mtp_bootstrap = sequence->get_mtp_bootstrap_embedding();
     if (state.batch_forward_type.is_decode() && mtp_bootstrap.defined()) {
@@ -823,15 +837,11 @@ void BatchInputBuilder::append_linear_state_row(Sequence* sequence,
                                                 BuilderState& state) {
   // linear_state_ids must stay aligned with logical batch rows even when the
   // model has no linear-attention layers, because downstream consumers index by
-  // batch row. Prefer the dedicated linear-state slot. Linear-attention decode
-  // paths that only carry a scheduler-side single block still share that live
-  // slot value across embedding and linear-state transport fields.
+  // batch row. GDN models always hold a dedicated LINEAR slot, so read it
+  // directly; non-linear models emit -1 and return early below.
   const bool has_linear_attention =
       args_ && has_linear_attention_layers(*args_);
   int32_t linear_state_id = sequence->get_linear_state_slot_id();
-  if (linear_state_id < 0 && has_linear_attention) {
-    linear_state_id = sequence->get_single_block_id();
-  }
   state.linear_state_ids.emplace_back(linear_state_id);
   if (!has_linear_attention) {
     return;
@@ -875,9 +885,9 @@ void BatchInputBuilder::append_linear_state_row(Sequence* sequence,
   // Restore source (block-carried): allocate_shared_for_sequence mounts the
   // deepest-hit checkpoint at admission (class A); allocate_for_sequence
   // mounts the slot it just checkpointed at the previous step's save-rotation
-  // (class B). Take it unconditionally so the pin never outlives the step
-  // that consumed the match; its id is used below only when a restore hash is
-  // actually emitted, otherwise the handle drops here and releases the pin.
+  // (class B). Take it unconditionally so unused matches are released in this
+  // build. A source used by a restore descriptor moves into builder state and
+  // then the owning Batch, which pins it until the worker result is consumed.
   std::optional<Block> mounted_restore_src =
       sequence->take_linear_restore_src_block();
   if (needs_restore_hash) {
@@ -887,6 +897,8 @@ void BatchInputBuilder::append_linear_state_row(Sequence* sequence,
       linear_state_cache_op.restore_requested = true;
       if (mounted_restore_src.has_value()) {
         linear_state_cache_op.restore_src_slot_id = mounted_restore_src->id();
+        state.linear_restore_src_blocks.emplace_back(
+            std::move(*mounted_restore_src));
       }
     }
   }
@@ -1237,7 +1249,11 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
       torch::tensor(state_.paged_kv_last_page_len, torch::kInt);
 
   // Setup multimodal data
-  input_params.multimodal.mm_data.batch(mm_data_vec_);
+  std::vector<MMData> batch_mm_data_vec = mm_data_vec_;
+  batch_mm_data_vec.insert(batch_mm_data_vec.end(),
+                           state_.scheduled_mm_data_vec.begin(),
+                           state_.scheduled_mm_data_vec.end());
+  input_params.multimodal.mm_data.batch(batch_mm_data_vec);
 
   // Setup block tables
   util::pad_2d_vector(state_.block_tables_vec, /*pad_value=*/0);
@@ -1361,7 +1377,9 @@ void BatchInputBuilder::process_swap_block_infos(ForwardInput& forward_input) {
 void BatchInputBuilder::process_multi_modal_inputs(Sequence* sequence,
                                                    uint32_t n_kv_cache_tokens,
                                                    uint32_t q_seq_len,
-                                                   int32_t seq_index) {
+                                                   int32_t seq_index,
+                                                   BuilderState* state_ptr) {
+  BuilderState& state = state_ptr ? *state_ptr : state_;
   MMData& mm_data = sequence->mutable_mm_data();
   if ((sequence->stage() != SequenceStage::DECODE) && mm_data.valid()) {
     UpdateMMItemScheduleStateVisitor visitor(
@@ -1372,7 +1390,7 @@ void BatchInputBuilder::process_multi_modal_inputs(Sequence* sequence,
     }
     MMData scheduled_mm_data(visitor.scheduled_type_,
                              std::move(visitor.mm_data_items_));
-    mm_data_vec_.emplace_back(std::move(scheduled_mm_data));
+    state.scheduled_mm_data_vec.emplace_back(std::move(scheduled_mm_data));
   }
 }
 }  // namespace xllm

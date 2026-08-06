@@ -17,12 +17,14 @@ limitations under the License.
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "core/common/message.h"
 #include "core/common/types.h"
 #include "core/framework/multimodal/embedding_output.h"
+#include "core/util/hash_util.h"
 #include "mm_type.h"
 
 namespace xllm {
@@ -39,6 +41,7 @@ struct MMInputItem {
   void clear() {
     type = MMType::NONE;
     raw_data.clear();
+    hash_key.reset();
   }
 
   std::optional<torch::Tensor> get_decode_data(MMType type_) const {
@@ -60,6 +63,7 @@ struct MMInputItem {
   uint32_t type = MMType::NONE;
 
   std::string raw_data;  // binary
+  std::optional<XXH3Key> hash_key;
 
   torch::Tensor decode_image;  // image: rgb, [c,h,w], uint8
   torch::Tensor decode_video;  // video: rgb, [t,c,h,w], uint8

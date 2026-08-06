@@ -99,4 +99,25 @@ void check_tensor_shapes_equal(const torch::Tensor& a,
   }
 }
 
+bool is_ascend950() {
+  const char* soc_name = aclrtGetSocName();
+  return soc_name != nullptr &&
+         std::string(soc_name).find("Ascend950") != std::string::npos;
+}
+
+torch::Tensor expand_kv_heads(const torch::Tensor& tensor,
+                              int64_t num_heads,
+                              int64_t num_kv_heads) {
+  if (num_heads == num_kv_heads) {
+    return tensor;
+  }
+
+  CHECK_EQ(num_heads % num_kv_heads, 0)
+      << "num_heads must be divisible by num_kv_heads";
+  const int64_t expansion_factor = num_heads / num_kv_heads;
+  return tensor.unsqueeze(2)
+      .expand({tensor.size(0), num_kv_heads, expansion_factor, tensor.size(2)})
+      .reshape({tensor.size(0), num_heads, tensor.size(2)});
+}
+
 }  // namespace xllm::kernel::npu

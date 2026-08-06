@@ -223,3 +223,38 @@ done
 ```
 
 详见 [摩尔线程 MUSA](/zh/hardware/musa/)。
+
+---
+
+## 统一启动方式(实验性)
+
+需要提前安装xllm wheel包或者使用release镜像：
+
+```bash
+# from source
+python setup.py install
+```
+
+```bash
+#!/bin/bash
+set -e
+
+MODEL_PATH="/path/to/model"
+PORT=8010
+MASTER_NODE_ADDR="127.0.0.1:9748"
+NNODES=1
+
+xllm serve --model=$MODEL_PATH \
+       --port=$PORT \
+       --nnodes=$NNODES \
+       --master_node_addr=$MASTER_NODE_ADDR \
+       --block_size=128 \
+       --max_memory_utilization=0.86 \
+       --enable_prefix_cache=false \
+       --enable_chunked_prefill=true \
+       --enable_schedule_overlap=true \
+       --enable_graph=true
+
+```
+
+多机部署部署时，需要加上`--machine_rank`参数，用于指定当前机器的排名。

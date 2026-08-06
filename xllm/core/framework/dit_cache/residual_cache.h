@@ -36,7 +36,8 @@ class ResidualCache : public DitCacheImpl {
   ResidualCache(ResidualCache&&) = default;
   ResidualCache& operator=(ResidualCache&&) = default;
 
-  void init(const DiTCacheConfig& cfg) override;
+  void init(const DiTCacheConfig& cfg,
+            const ParallelArgs& parallel_args) override;
   // check whether to use cache
   bool cache_validation();
 

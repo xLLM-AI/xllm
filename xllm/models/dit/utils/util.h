@@ -86,4 +86,24 @@ torch::Tensor randn_tensor(const std::vector<int64_t>& shape,
   return latents;
 }
 
+// Convert module parameters & buffers to BF16 on the target device,
+// but leave Int8 (quantized) tensors unchanged — to(bf16) would corrupt them.
+inline void to_bf16_preserve_quant(torch::nn::Module& module,
+                                   torch::Device device) {
+  for (auto& p : module.named_parameters()) {
+    if (p.value().scalar_type() == torch::kInt8) {
+      p.value().set_data(p.value().to(device, torch::kInt8));
+    } else {
+      p.value().set_data(p.value().to(device, torch::kBFloat16));
+    }
+  }
+  for (auto& b : module.named_buffers()) {
+    if (b.value().scalar_type() == torch::kInt8) {
+      b.value().set_data(b.value().to(device, torch::kInt8));
+    } else {
+      b.value().set_data(b.value().to(device, torch::kBFloat16));
+    }
+  }
+}
+
 }  // namespace xllm::dit

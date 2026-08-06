@@ -130,6 +130,7 @@ std::shared_ptr<Request> DisaggPDServiceImpl::generate_request(
                          scheduler_->enable_schedule_overlap(),
                          output_callback,
                          batch_output_callback);
+  req_state.include_stop_str_in_output = req.include_stop_str_in_output();
 
   auto new_request = std::make_shared<Request>(req.req_id(),
                                                req.x_request_id(),
@@ -175,9 +176,10 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
 
       auto dp_rank = sequence->dp_rank();
       resp->set_dp_rank(dp_rank);
-      // Advertise the recurrent-state slot: LINEAR for Qwen3.5 GDN, SINGLE
-      // for legacy models. Sender-side batch_input_builder resolves the slot
-      // via the same helper so both sides agree.
+      // Advertise the recurrent-state slot: the LINEAR slot for Qwen3.5 GDN,
+      // or -1 for models without linear-attention layers. Sender-side
+      // batch_input_builder resolves the slot via the same helper so both
+      // sides agree.
       resp->set_linear_state_id(sequence->get_recurrent_state_slot_id());
 
       std::vector<int32_t> block_ids;
@@ -308,6 +310,7 @@ void DisaggPDServiceImpl::decode_recv_first_generation(
         linear_state_id,
         gen.dp_size(),
         gen.dp_rank(),
+        gen.heterogeneous_pd(),
         mtp_bootstrap_embedding,
         gen.num_cached_tokens());
     if (!success) {

@@ -41,6 +41,37 @@ torch::Tensor reshape_quant_vector_if_compatible(const std::string& name,
   }
   return loaded;
 }
+
+torch::Tensor get_expert_load_target(const torch::Tensor& weight,
+                                     const torch::Tensor& loaded_weight,
+                                     const std::string& weight_name) {
+  if (weight.sizes() == loaded_weight.sizes()) {
+    return weight;
+  }
+  CHECK_EQ(weight.dim(), loaded_weight.dim())
+      << "weight rank mismatch for " << weight_name;
+  CHECK_GT(weight.dim(), 0)
+      << "expert weight must have an expert dimension for " << weight_name;
+  CHECK_GE(weight.size(0), loaded_weight.size(0))
+      << "physical expert capacity is smaller than checkpoint expert count for "
+      << weight_name;
+  for (int64_t dim = 1; dim < weight.dim(); ++dim) {
+    CHECK_EQ(weight.size(dim), loaded_weight.size(dim))
+        << "weight size mismatch for " << weight_name;
+  }
+  return weight.narrow(/*dim=*/0, /*start=*/0, loaded_weight.size(0));
+}
+
+torch::Tensor get_checkpoint_expert_prefix(const torch::Tensor& weight,
+                                           int64_t checkpoint_expert_count,
+                                           const std::string& weight_name) {
+  CHECK_GT(weight.dim(), 0)
+      << "expert weight must have an expert dimension for " << weight_name;
+  CHECK_GE(weight.size(0), checkpoint_expert_count)
+      << "physical expert capacity is smaller than checkpoint expert count for "
+      << weight_name;
+  return weight.narrow(/*dim=*/0, /*start=*/0, checkpoint_expert_count);
+}
 }  // namespace
 
 void load_weight(const StateDict& state_dict,
@@ -266,16 +297,26 @@ void load_moe_weight(const StateDict& state_dict,
 
   if (weight_is_loaded) {
     const auto merged_weight = torch::stack(accumulated_tensors);
-    const auto reshaped_weight =
-        reshape_quant_vector_if_compatible(name, weight, merged_weight);
-    CHECK_EQ(weight.sizes(), reshaped_weight.sizes())
-        << "weight size mismatch for " << state_dict.prefix() << "["
-        << start_expert_id << ":" << (start_expert_id + num_experts_per_rank)
-        << "]." << sub_prefix << name;
+    const std::string weight_name =
+        std::string(state_dict.prefix()) + "[" +
+        std::to_string(start_expert_id) + ":" +
+        std::to_string(start_expert_id + num_experts_per_rank) + "]." +
+        sub_prefix + name;
+    const torch::Tensor checkpoint_target =
+        get_checkpoint_expert_prefix(weight, num_experts_per_rank, weight_name);
+    const auto reshaped_weight = reshape_quant_vector_if_compatible(
+        name, checkpoint_target, merged_weight);
     if (transform_func) {
-      weight.set_data(transform_func(reshaped_weight));
+      torch::Tensor transformed_weight = transform_func(reshaped_weight);
+      if (weight.sizes() == transformed_weight.sizes()) {
+        weight.set_data(transformed_weight);
+      } else {
+        get_expert_load_target(weight, transformed_weight, weight_name)
+            .copy_(transformed_weight);
+      }
     } else {
-      weight.copy_(reshaped_weight);
+      get_expert_load_target(weight, reshaped_weight, weight_name)
+          .copy_(reshaped_weight);
     }
     // release the memory for weight_list
     accumulated_tensors.clear();
@@ -392,16 +433,26 @@ void load_moe_fused_weight(const StateDict& state_dict,
       w13_vec[idx] = torch::cat({w1_tensors[idx], w3_tensors[idx]});
     }
     const auto merged_weight = torch::stack(w13_vec);
-    const auto reshaped_weight =
-        reshape_quant_vector_if_compatible(name, w13, merged_weight);
-    CHECK_EQ(w13.sizes(), reshaped_weight.sizes())
-        << "weight size mismatch for " << state_dict.prefix() << "["
-        << start_expert_id << ":" << (start_expert_id + num_experts_per_rank)
-        << "].{" << prefixes[0] << ", " << prefixes[1] << "}." << name;
+    const std::string weight_name =
+        std::string(state_dict.prefix()) + "[" +
+        std::to_string(start_expert_id) + ":" +
+        std::to_string(start_expert_id + num_experts_per_rank) + "].{" +
+        prefixes[0] + ", " + prefixes[1] + "}." + name;
+    const torch::Tensor checkpoint_target =
+        get_checkpoint_expert_prefix(w13, num_experts_per_rank, weight_name);
+    const auto reshaped_weight = reshape_quant_vector_if_compatible(
+        name, checkpoint_target, merged_weight);
     if (transform_func) {
-      w13.set_data(transform_func(reshaped_weight));
+      torch::Tensor transformed_weight = transform_func(reshaped_weight);
+      if (w13.sizes() == transformed_weight.sizes()) {
+        w13.set_data(transformed_weight);
+      } else {
+        get_expert_load_target(w13, transformed_weight, weight_name)
+            .copy_(transformed_weight);
+      }
     } else {
-      w13.copy_(reshaped_weight);
+      get_expert_load_target(w13, reshaped_weight, weight_name)
+          .copy_(reshaped_weight);
     }
 
     // release the memory for weight_list

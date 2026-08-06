@@ -52,7 +52,9 @@ class DisaggPDConfig final {
          "instance_role",
          "kv_cache_transfer_type",
          "kv_cache_transfer_mode",
-         "transfer_listen_port"}};
+         "transfer_listen_port",
+         "enable_heterogeneous_pd",
+         "enable_pd_parallel_shard_pull"}};
     return kOptionCategory;
   }
 
@@ -71,6 +73,13 @@ class DisaggPDConfig final {
   PROPERTY(int32_t, transfer_listen_port) = 26000;
 
   PROPERTY(bool, kv_push_dst_rotate) = false;
+
+  // Enables the non-MLA heterogeneous TP cache-transfer extension. Keep this
+  // opt-in so ordinary and homogeneous PD deployments do not allocate its
+  // staging caches or enter its restore path.
+  PROPERTY(bool, enable_heterogeneous_pd) = false;
+
+  PROPERTY(bool, enable_pd_parallel_shard_pull) = true;
 };
 
 }  // namespace xllm

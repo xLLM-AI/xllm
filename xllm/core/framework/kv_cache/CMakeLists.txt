@@ -21,7 +21,6 @@ cc_library(
     :common
     :deepseek_v4_cache_policy
     :block_utils
-    :mlu_rdma_memory_plan
     :platform
     glog::glog
     proto::xllm_proto
@@ -62,6 +61,7 @@ cc_library(
     :xtensor
     glog::glog
     torch
+    $<$<BOOL:${USE_MLU}>:cndrv>
     $<$<BOOL:${USE_NPU}>:ascendcl>
     $<$<BOOL:${USE_NPU}>:torch_npu>
 )

@@ -108,7 +108,7 @@ std::unique_ptr<KVCacheImpl> create_host_kv_cache_impl(
   }
 
   switch (type) {
-    case BlockType::SINGLE:
+    case BlockType::LINEAR:
       return std::make_unique<LinearAttentionKVCacheImpl>(
           kv_cache_shape, create_options, type, layer_count);
     case BlockType::KV:

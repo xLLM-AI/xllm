@@ -22,6 +22,7 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
+#include "common/constants.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/kv_cache/kv_cache_utils.h"
 #include "framework/model/model_args.h"
@@ -55,6 +56,62 @@ constexpr int64_t kVSize = kNumVHeads * kHeadVDim;  // 1024
 constexpr int64_t kChannels = kKSize * 2 + kVSize;  // 2048
 constexpr int64_t kConvStateLen = kConvKernel - 1;  // 3
 constexpr int64_t kNumStateSlots = 8;
+
+TEST(Qwen3_5GatedDeltaNetSplitTest, SplitMixedQkvPreservesOffsets) {
+  const int64_t num_tokens = 2;
+  const int64_t num_k_heads = 2;
+  const int64_t num_v_heads = 1;
+  const int64_t head_k_dim = 3;
+  const int64_t head_v_dim = 4;
+  const int64_t q_size = num_k_heads * head_k_dim;
+  const int64_t k_size = num_k_heads * head_k_dim;
+  const int64_t v_size = num_v_heads * head_v_dim;
+  const int64_t channels = q_size + k_size + v_size;
+  torch::Tensor mixed_qkv =
+      torch::arange(num_tokens * channels, torch::kFloat32)
+          .view({num_tokens, channels});
+
+  auto [q, k, v] = split_mixed_qkv(
+      mixed_qkv, num_k_heads, num_v_heads, head_k_dim, head_v_dim);
+
+  torch::Tensor expected_q =
+      mixed_qkv.slice(/*dim=*/1, /*start=*/0, /*end=*/q_size)
+          .contiguous()
+          .view({1, num_tokens, num_k_heads, head_k_dim});
+  torch::Tensor expected_k =
+      mixed_qkv.slice(/*dim=*/1, /*start=*/q_size, /*end=*/q_size + k_size)
+          .contiguous()
+          .view({1, num_tokens, num_k_heads, head_k_dim});
+  torch::Tensor expected_v =
+      mixed_qkv
+          .slice(/*dim=*/1,
+                 /*start=*/q_size + k_size,
+                 /*end=*/q_size + k_size + v_size)
+          .contiguous()
+          .view({1, num_tokens, num_v_heads, head_v_dim});
+
+  EXPECT_TRUE(torch::equal(q, expected_q));
+  EXPECT_TRUE(torch::equal(k, expected_k));
+  EXPECT_TRUE(torch::equal(v, expected_v));
+  EXPECT_TRUE(q.is_contiguous());
+  EXPECT_TRUE(k.is_contiguous());
+  EXPECT_TRUE(v.is_contiguous());
+}
+
+TEST(Qwen3_5GatedDeltaNetSplitTest, BuildRebasedSsmStateIndicesCreatesGroups) {
+  torch::Tensor linear_state_indices =
+      torch::tensor({2, 5}, torch::dtype(torch::kInt32));
+
+  torch::Tensor indices =
+      build_rebased_ssm_state_indices(linear_state_indices,
+                                      /*checkpoint_stride=*/3,
+                                      /*q_max_seq_len=*/3);
+
+  torch::Tensor expected =
+      torch::tensor({{6, 7, 8}, {15, 16, 17}}, torch::dtype(torch::kInt32));
+  EXPECT_TRUE(torch::equal(indices, expected));
+  EXPECT_TRUE(indices.is_contiguous());
+}
 
 class Qwen3_5GatedDeltaNetTest : public ::testing::Test {
  protected:
@@ -221,6 +278,84 @@ class Qwen3_5GatedDeltaNetTest : public ::testing::Test {
     return metadata;
   }
 
+  AttentionMetadata MakeSpecVerifyMetadata(int64_t batch_size,
+                                           int64_t q_max_seq_len) {
+    auto opts_int = torch::dtype(torch::kInt32).device(device_);
+    AttentionMetadata metadata;
+    metadata.q_cu_seq_lens = torch::arange(
+        0, (batch_size + 1) * q_max_seq_len, q_max_seq_len, opts_int);
+    metadata.q_seq_lens = torch::full({batch_size}, q_max_seq_len, opts_int);
+    metadata.q_seq_lens_vec.assign(static_cast<size_t>(batch_size),
+                                   static_cast<int32_t>(q_max_seq_len));
+    metadata.max_query_len = q_max_seq_len;
+    metadata.max_seq_len = q_max_seq_len;
+    metadata.total_kv_len = batch_size * q_max_seq_len;
+    metadata.compute_dtype = "half";
+    metadata.is_prefill = false;
+    metadata.is_chunked_prefill = true;
+    metadata.is_dummy = false;
+    return metadata;
+  }
+
+  KVCache MakeSpecVerifyKvCache(int64_t q_max_seq_len) {
+    const int64_t conv_rows = 4;
+    const int64_t conv_state_len = (q_max_seq_len - 1) + (kConvKernel - 1);
+    torch::Tensor conv_cache =
+        torch::zeros({conv_rows, conv_state_len, kChannels}, options_);
+    torch::Tensor ssm_cache = torch::zeros(
+        {conv_rows * q_max_seq_len, kNumVHeads, kHeadKDim, kHeadVDim},
+        torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+    return KVCache(LinearAttentionKVCacheTensors{conv_cache, ssm_cache});
+  }
+
+  ModelInputParams MakeSpecVerifyInputParams(
+      const std::vector<int64_t>& accepted_lengths) {
+    auto opts_int = torch::dtype(torch::kInt32).device(device_);
+    ModelInputParams input_params;
+    input_params.is_spec_verify = true;
+    input_params.num_accepted_tokens =
+        torch::tensor(accepted_lengths, opts_int);
+    input_params.num_accepted_tokens_host = accepted_lengths;
+    input_params.embedding.linear_state_ids.reserve(accepted_lengths.size());
+    for (size_t i = 0; i < accepted_lengths.size(); ++i) {
+      input_params.embedding.linear_state_ids.emplace_back(
+          static_cast<int32_t>(i) + 1);
+    }
+    return input_params;
+  }
+
+  void ExpectSpecVerifySsmCheckpointsWritten(
+      const KVCache& kv_cache,
+      const ModelInputParams& input_params,
+      int64_t q_max_seq_len) {
+    std::vector<int64_t> checkpoint_rows;
+    checkpoint_rows.reserve(input_params.embedding.linear_state_ids.size() *
+                            static_cast<size_t>(q_max_seq_len));
+    for (const int32_t state_id : input_params.embedding.linear_state_ids) {
+      ASSERT_GT(state_id, kPaddingLinearStateId)
+          << "Spec Verify tests must use real linear state rows";
+      for (int64_t offset = 0; offset < q_max_seq_len; ++offset) {
+        checkpoint_rows.emplace_back(
+            static_cast<int64_t>(state_id) * q_max_seq_len + offset);
+      }
+    }
+
+    torch::Tensor row_indices = torch::tensor(
+        checkpoint_rows,
+        torch::TensorOptions().dtype(torch::kLong).device(device_));
+    torch::Tensor selected_rows = kv_cache.get_ssm_cache().index({row_indices});
+    torch::Tensor row_sums =
+        selected_rows.to(torch::kFloat32)
+            .abs()
+            .view({static_cast<int64_t>(checkpoint_rows.size()), -1})
+            .sum(/*dim=*/1)
+            .cpu();
+    for (int64_t i = 0; i < row_sums.size(0); ++i) {
+      EXPECT_GT(row_sums.index({i}).item<float>(), 0.0f)
+          << "Spec Verify must rewrite every rebased SSM checkpoint row";
+    }
+  }
+
   Qwen3_5GatedDeltaNet MakeLayer() {
     auto layer = Qwen3_5GatedDeltaNet(
         model_args_, QuantArgs(), parallel_args_, options_);
@@ -277,6 +412,31 @@ TEST_F(Qwen3_5GatedDeltaNetTest, PrefillForward) {
       << "Prefill output must be finite";
 }
 
+TEST_F(Qwen3_5GatedDeltaNetTest, PrefillStoresSsmStateAtCheckpointGroupBase) {
+  constexpr int64_t kCheckpointStride = 4;
+  constexpr int64_t kStateId = 2;
+  constexpr int64_t kSequenceLength = 128;
+  const int64_t state_base = kStateId * kCheckpointStride;
+
+  auto layer = MakeLayer();
+  auto hidden = MakeHidden(kSequenceLength);
+  auto metadata = MakePrefillMetadata(/*batch_size=*/1, kSequenceLength);
+  auto spec_kv_cache = MakeSpecVerifyKvCache(kCheckpointStride);
+  ModelInputParams input_params;
+  input_params.embedding.linear_state_ids = {kStateId};
+
+  layer->forward(hidden, metadata, spec_kv_cache, input_params);
+  Device xllm_device(device_);
+  xllm_device.synchronize_default_stream();
+
+  torch::Tensor logical_row =
+      spec_kv_cache.get_ssm_cache().select(/*dim=*/0, /*index=*/kStateId);
+  torch::Tensor base_row =
+      spec_kv_cache.get_ssm_cache().select(/*dim=*/0, /*index=*/state_base);
+  EXPECT_EQ(logical_row.abs().sum().item<float>(), 0.0f);
+  EXPECT_GT(base_row.abs().sum().item<float>(), 0.0f);
+}
+
 // Decode path exercises causal_conv1d_update_decode +
 // fused_recurrent_gated_delta_rule_packed_decode.
 TEST_F(Qwen3_5GatedDeltaNetTest, DecodeForward) {
@@ -300,6 +460,71 @@ TEST_F(Qwen3_5GatedDeltaNetTest, DecodeForward) {
   ASSERT_TRUE(torch::isfinite(out_cpu).all().item<bool>())
       << "Decode output must be finite";
 }
+
+TEST_F(Qwen3_5GatedDeltaNetTest, SpecVerifyPrefersInputParamsOverPrefillFlag) {
+  auto layer = MakeLayer();
+  auto hidden = MakeHidden(/*num_tokens=*/4);
+  auto metadata = MakeSpecVerifyMetadata(/*batch_size=*/2, /*q_max_seq_len=*/2);
+  metadata.is_prefill = true;
+  auto input_params = MakeSpecVerifyInputParams({1, 2});
+  auto spec_kv_cache = MakeSpecVerifyKvCache(/*q_max_seq_len=*/2);
+
+  auto output = layer->forward(hidden, metadata, spec_kv_cache, input_params);
+  Device xllm_device(device_);
+  xllm_device.synchronize_default_stream();
+
+  ASSERT_EQ(output.sizes(), torch::IntArrayRef({4, kHiddenSize}));
+  ExpectSpecVerifySsmCheckpointsWritten(
+      spec_kv_cache, input_params, /*q_max_seq_len=*/2);
+}
+
+TEST_F(Qwen3_5GatedDeltaNetTest, SpecVerifyRejectsTokenExpandedDecode) {
+  auto layer = MakeLayer();
+  auto hidden = MakeHidden(/*num_tokens=*/2);
+  auto metadata = MakeDecodeMetadata(/*batch_size=*/2);
+  auto input_params = MakeSpecVerifyInputParams({1, 1});
+
+  EXPECT_DEATH(layer->forward(hidden, metadata, kv_cache_, input_params),
+               "Spec Verify requires chunked-prefill Dense Validate Span");
+}
+
+class Qwen3_5GatedDeltaNetSpecVerifyTest
+    : public Qwen3_5GatedDeltaNetTest,
+      public ::testing::WithParamInterface<int64_t> {};
+
+std::string spec_verify_width_name(
+    const ::testing::TestParamInfo<int64_t>& info) {
+  return "Width" + std::to_string(info.param);
+}
+
+TEST_P(Qwen3_5GatedDeltaNetSpecVerifyTest, ReturnsFullDenseValidateSpan) {
+  constexpr int64_t kBatchSize = 2;
+  const int64_t q_max_seq_len = GetParam();
+  const int64_t num_tokens = kBatchSize * q_max_seq_len;
+
+  auto layer = MakeLayer();
+  auto hidden = MakeHidden(num_tokens);
+  auto metadata = MakeSpecVerifyMetadata(kBatchSize, q_max_seq_len);
+  auto input_params = MakeSpecVerifyInputParams({1, q_max_seq_len});
+  auto spec_kv_cache = MakeSpecVerifyKvCache(q_max_seq_len);
+
+  auto output = layer->forward(hidden, metadata, spec_kv_cache, input_params);
+  Device xllm_device(device_);
+  xllm_device.synchronize_default_stream();
+
+  ASSERT_EQ(output.sizes(), torch::IntArrayRef({num_tokens, kHiddenSize}));
+  ASSERT_EQ(output.scalar_type(), options_.dtype());
+  torch::Tensor output_cpu = output.flatten().to(torch::kFloat32).cpu();
+  ASSERT_TRUE(torch::isfinite(output_cpu).all().item<bool>())
+      << "Spec Verify width " << q_max_seq_len << " output must be finite";
+  ExpectSpecVerifySsmCheckpointsWritten(
+      spec_kv_cache, input_params, q_max_seq_len);
+}
+
+INSTANTIATE_TEST_SUITE_P(DenseValidateWidths,
+                         Qwen3_5GatedDeltaNetSpecVerifyTest,
+                         ::testing::Values(int64_t{2}, int64_t{3}, int64_t{4}),
+                         spec_verify_width_name);
 
 }  // namespace
 }  // namespace layer

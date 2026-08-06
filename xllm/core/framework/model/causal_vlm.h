@@ -69,6 +69,13 @@ class CausalVLMImpl : public CausalVLM {
     }
   }
 
+  bool supports_mla_graph_kv_bucketing() const override {
+    if constexpr (detail::has_supports_mla_graph_kv_bucketing<Model>::value) {
+      return model_->supports_mla_graph_kv_bucketing();
+    }
+    return CausalLM::supports_mla_graph_kv_bucketing();
+  }
+
   torch::Tensor pooler(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) override {
     if constexpr (detail::has_pooler<Model>::value) {
@@ -92,7 +99,7 @@ class CausalVLMImpl : public CausalVLM {
     return;
   }
 
-  virtual void update_expert_weight(int32_t layer_id) { return; }
+  void update_expert_weight(int32_t layer_id) override { return; }
 
 #if defined(USE_NPU)
   layer::NpuLmHead get_npu_lm_head() override {

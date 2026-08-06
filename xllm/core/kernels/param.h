@@ -134,14 +134,14 @@ struct ReshapePagedCacheParams {
   // Last two dimensions must be contiguous: stride(-1)==1,
   // stride(-2)==head_dim. Must have same device and dtype as other tensors.
   std::optional<torch::Tensor> value;
-  // Key cache tensor in paged format. Shape: [num_blocks, num_heads,
-  // block_size, head_dim]. Must be contiguous. Must have same device and dtype
+  // Key cache tensor in paged format. Shape: [num_blocks, block_size,
+  // num_heads, head_dim]. Must be contiguous. Must have same device and dtype
   // as key and value.
   torch::Tensor k_cache;
-  // Optional value cache tensor in paged format. Shape: [num_blocks, num_heads,
-  // block_size, head_dim]. If provided, value must also be provided (and vice
-  // versa). Must be contiguous. Must have same device and dtype as other
-  // tensors.
+  // Optional value cache tensor in paged format. Shape: [num_blocks,
+  // block_size, num_heads, head_dim]. If provided, value must also be provided
+  // (and vice versa). Must be contiguous. Must have same device and dtype as
+  // other tensors.
   std::optional<torch::Tensor> v_cache;
   // Slot mapping tensor. Shape: [num_tokens]. Type must be int32.
   // Maps each token to its corresponding slot in the cache. Must be contiguous.
@@ -348,6 +348,16 @@ struct MatmulReduceScatterParams {
   std::string reduce_op = "sum";
   int64_t comm_turn = 0;
   std::string comm_mode = "aiv";
+
+  // Optional per-token activation dequant scale, shape (m, 1), float32.
+  // When both x1_scale and x2_scale are set, the int8 quantized MMRS path is
+  // used (FC1 w8a8_dynamic): a/b are int8 and output is dequantized.
+  std::optional<torch::Tensor> x1_scale;
+  // Optional per-channel weight dequant scale, shape (1, n), float32.
+  std::optional<torch::Tensor> x2_scale;
+  // Optional output dtype for the quantized path (bf16/fp16). Ignored by the
+  // non-quant path.
+  std::optional<at::ScalarType> output_dtype;
 };
 
 // Quantized matmul parameters (NPU aclnnQuantMatmulV4 path).
@@ -1923,6 +1933,60 @@ struct NpuInplacePartialRotaryMulParams {
   torch::Tensor r2;
   std::string rotary_mode = "interleave";
   std::vector<int64_t> partial_slice;
+};
+
+// Parameters for the fused expert-parallel mega MoE kernel.
+// Wraps the NPU apply_npu_mega_moe op: dispatch + grouped GEMM (gate/up) +
+// activation + combine grouped GEMM (down) + combine, in one fused call.
+struct MegaMoeParams {
+  // HCCL context tensor that carries the communicator handle.
+  torch::Tensor context;
+  // Input hidden states. Shape: [num_tokens, hidden_size].
+  torch::Tensor x;
+  // Routed expert ids. Shape: [num_tokens, topk], dtype int32.
+  torch::Tensor topk_ids;
+  // Router top-k weights. Shape: [num_tokens, topk], dtype fp32.
+  torch::Tensor topk_weights;
+  // First expert weights as TensorList (gate/up projection).
+  torch::TensorList weight1;
+  // Second expert weights as TensorList (down projection).
+  torch::TensorList weight2;
+  // Total number of experts across all ranks.
+  int64_t moe_expert_num = 0;
+  // Expert-parallel world size.
+  int64_t ep_world_size = 1;
+  // HCCL communication buffer size in bytes.
+  int64_t ccl_buffer_size = 0;
+  // Optional W8A8/int8 weight scales for weight1.
+  std::optional<torch::TensorList> weight_scales1 = std::nullopt;
+  // Optional W8A8/int8 weight scales for weight2.
+  std::optional<torch::TensorList> weight_scales2 = std::nullopt;
+  // Optional bias list added to the first matmul output.
+  std::optional<torch::TensorList> bias1 = std::nullopt;
+  // Optional bias list added to the second matmul output.
+  std::optional<torch::TensorList> bias2 = std::nullopt;
+  // Optional active token mask. Shape: [num_tokens], dtype int8/bool.
+  std::optional<torch::Tensor> x_active_mask = std::nullopt;
+  // Maximum number of tokens that can be received from remote ranks.
+  int64_t max_recv_token_num = 0;
+  // Dispatch communication quantization mode.
+  int64_t dispatch_quant_mode = 0;
+  // Combine communication quantization mode.
+  int64_t combine_quant_mode = 0;
+  // HCCL communication algorithm name.
+  std::string comm_alg = "";
+  // Maximum number of tokens per rank for the all-to-all buffer.
+  int64_t num_max_tokens_per_rank = 0;
+  // Activation function name for the gated MLP.
+  std::string activation = "swiglu";
+  // Clamp limit applied to the activation output.
+  float activation_clamp = std::numeric_limits<float>::max();
+  // Output dtype used by dispatch quantization.
+  int64_t dispatch_quant_out_dtype = 0;
+  // Topology type for the expert-parallel communication.
+  int64_t topo_type = 0;
+  // Number of ranks per server node.
+  int64_t rank_num_per_server = 2;
 };
 
 }  // namespace xllm::kernel

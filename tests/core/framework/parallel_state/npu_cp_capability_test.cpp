@@ -23,9 +23,14 @@ namespace xllm {
 namespace {
 
 TEST(NpuCpCapabilityTest, RegisteredCpCapableModels) {
-  // The four models that opt into the NPU ATB model-side CP pipeline.
+  // The models that opt into NPU model-side CP. deepseek_v32 / glm_moe_dsa
+  // drive it through the ATB NpuCpPlan pipeline; deepseek_v4 owns its split
+  // inside the model on the TORCH backend. Both are advertised here because
+  // this is the master-side startup gate, not the worker-side sharding switch.
   EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v32"));
   EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v32_mtp"));
+  EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v4"));
+  EXPECT_TRUE(is_npu_model_cp_capable("deepseek_v4_mtp"));
   EXPECT_TRUE(is_npu_model_cp_capable("glm_moe_dsa"));
   EXPECT_TRUE(is_npu_model_cp_capable("glm_moe_dsa_mtp"));
   // The registry must advertise NPU_MODEL for these and NONE for the rest.
@@ -41,10 +46,13 @@ TEST(NpuCpCapabilityTest, UnregisteredModelsAreNotCapable) {
   // validate_model_cp rejects deepseek_v3_mtp + cp_size>1 at startup.
   EXPECT_FALSE(is_npu_model_cp_capable("deepseek_v3_mtp"));
   EXPECT_FALSE(is_npu_model_cp_capable("deepseek_v3"));
-  // TORCH-only / unrelated NPU models are not CP-capable.
+  // Unrelated NPU models are not CP-capable.
   EXPECT_FALSE(is_npu_model_cp_capable("qwen3"));
   EXPECT_FALSE(is_npu_model_cp_capable("qwen3_atb"));
-  EXPECT_FALSE(is_npu_model_cp_capable("deepseek_v4"));
+  // Hybrid linear attention models are the only ones the graph executor takes
+  // through spec-verify chunked prefill; none of them is CP-capable, which is
+  // what keeps that capture path CP-free.
+  EXPECT_FALSE(is_npu_model_cp_capable("qwen3_next"));
   // Unknown model names default to NONE.
   EXPECT_FALSE(is_npu_model_cp_capable("definitely_not_a_model"));
   EXPECT_EQ(ModelRegistry::get_cp_sharding_mode("deepseek_v3_mtp"),

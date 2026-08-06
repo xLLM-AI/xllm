@@ -1,0 +1,15 @@
+{
+  "nnodes": 1,
+  "port": 8010,
+  "block_size": 128,
+  "max_memory_utilization": 0.9,
+  "enable_prefix_cache": true,
+  "max_tokens_per_batch": 8192,
+  "max_seqs_per_batch": 256,
+  "enable_schedule_overlap": true,
+  "enable_chunked_prefill": true,
+  "max_tokens_per_chunk_for_prefill": 2048,
+  "npu_kernel_backend": "ATB",
+  "enable_graph": true,
+  "max_tokens_for_graph_mode": 2048
+}

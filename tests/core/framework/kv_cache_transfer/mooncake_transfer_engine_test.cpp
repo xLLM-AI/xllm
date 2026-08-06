@@ -29,9 +29,6 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
 #include "platform/device.h"
-#if defined(USE_MLU)
-#include "platform/mlu/mlu_tensor_alloc.h"
-#endif
 #include "platform/platform.h"
 #include "util/net.h"
 #include "worker.pb.h"
@@ -47,7 +44,6 @@ namespace xllm {
 namespace {
 
 constexpr size_t kScaleBlockBytes = 96 * sizeof(float);
-constexpr size_t kAlignedRegisterBytes = 2097408;
 
 TransferKVInfo make_info(int32_t dst_dp_size,
                          int32_t dst_tp_size,
@@ -135,7 +131,7 @@ KVCacheShape make_indexer_int8_transfer_shape() {
 
 std::vector<KVCache> make_mixed_transfer_caches(const torch::Device& device) {
   std::shared_ptr<KVCacheTensorAllocator> allocator =
-      mlu_mooncake_tensor_allocator();
+      default_kv_tensor_allocator();
   auto make_full_cache = [&allocator, &device]() {
     torch::Tensor key = allocator->allocate(
         KVCacheTensorRole::KEY, {2, 1, 1, 16}, torch::kBFloat16, device);
@@ -326,7 +322,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
 }
 
 TEST(MooncakeKVCacheTransferDefaultTest,
-     AddBufUsesRdmaRegisterableLengthWithoutChangingBlockBytes) {
+     AddBufUsesLogicalLengthWithoutChangingBlockBytes) {
   if (Platform::device_count() < 1) {
     GTEST_SKIP() << "MLU device is required for Mooncake registration tests.";
   }
@@ -338,22 +334,17 @@ TEST(MooncakeKVCacheTransferDefaultTest,
       /*listen_port=*/0,
       torch_device,
       /*model_type=*/"test");
-  const torch::Tensor tensor = mlu::alloc_rdma_registerable_zero_tensor(
-      {2, 96, 1}, torch::kFloat32, torch_device);
+  const torch::Tensor tensor = torch::zeros(
+      {2, 96, 1}, torch::dtype(torch::kFloat32).device(torch_device));
   std::vector<void*> addrs;
   std::vector<size_t> lens;
   std::vector<uint64_t> block_bytes;
 
-  transfer.add_buf(tensor,
-                   addrs,
-                   lens,
-                   block_bytes,
-                   MooncakeKVCacheTransferDefault::RegisterLengthPolicy::
-                       RDMA_REGISTERABLE_BYTES);
+  transfer.add_buf(tensor, addrs, lens, block_bytes);
 
   ASSERT_EQ(addrs.size(), 1U);
   EXPECT_EQ(addrs[0], tensor.data_ptr());
-  EXPECT_EQ(lens[0], kAlignedRegisterBytes);
+  EXPECT_EQ(lens[0], tensor.nbytes());
   EXPECT_EQ(block_bytes[0], kScaleBlockBytes);
 }
 
@@ -391,7 +382,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
       caches[3].get_k_cache().data_ptr()};
   EXPECT_EQ(engine_observer->registered_addrs[0], expected_addrs);
   EXPECT_EQ(engine_observer->registered_lens[0][2],
-            caches[0].get_indexer_cache_scale()->storage().nbytes());
+            caches[0].get_indexer_cache_scale()->nbytes());
   EXPECT_EQ(engine_observer->registered_block_bytes[0][2],
             caches[0].get_indexer_cache_scale()->nbytes() / 2);
 
@@ -456,35 +447,6 @@ TEST(MooncakeKVCacheTransferDefaultTest, AddBufRejectsNonContiguousTensor) {
                "contiguous");
 }
 
-TEST(MooncakeKVCacheTransferDefaultTest, AddBufRejectsRdmaLengthBeyondStorage) {
-  if (Platform::device_count() < 1) {
-    GTEST_SKIP() << "MLU device is required for Mooncake registration tests.";
-  }
-  GTEST_FLAG_SET(death_test_style, "threadsafe");
-  Device device(/*device_id=*/0);
-  device.set_device();
-  const torch::Device torch_device = device.unwrap();
-  MooncakeKVCacheTransferDefault transfer(
-      /*device_id=*/0,
-      /*listen_port=*/0,
-      torch_device,
-      /*model_type=*/"test");
-  const torch::Tensor tensor =
-      mlu::alloc_zero_tensor({2, 96, 1}, torch::kFloat32, torch_device);
-  std::vector<void*> addrs;
-  std::vector<size_t> lens;
-  std::vector<uint64_t> block_bytes;
-
-  EXPECT_DEATH(
-      transfer.add_buf(tensor,
-                       addrs,
-                       lens,
-                       block_bytes,
-                       MooncakeKVCacheTransferDefault::RegisterLengthPolicy::
-                           RDMA_REGISTERABLE_BYTES),
-      "exceeds tensor storage capacity");
-}
-
 TEST(MooncakeKVCacheTransferDefaultTest,
      IndexScaleRegistersAndRoundTripsWithKvBlocks) {
   if (Platform::device_count() < 1) {
@@ -511,8 +473,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
       .num_layers(1)
       .model_type("deepseek_v32")
       .enable_lighting_indexer(true)
-      .enable_indexer_cache_quant(true)
-      .tensor_allocator(mlu_mooncake_tensor_allocator());
+      .enable_indexer_cache_quant(true);
   std::vector<KVCache> caches;
   allocate_kv_caches(caches, shape, options);
   ASSERT_EQ(caches.size(), 1U);
@@ -526,7 +487,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   ASSERT_EQ(index_cache.scalar_type(), torch::kChar);
   ASSERT_EQ(index_scale->scalar_type(), torch::kFloat32);
   EXPECT_EQ(index_scale->nbytes(), 2 * kScaleBlockBytes);
-  EXPECT_EQ(index_scale->storage().nbytes(), kAlignedRegisterBytes);
+  EXPECT_EQ(index_scale->storage().nbytes(), index_scale->nbytes());
 
   key_cache.index({0}).fill_(1.25);
   key_cache.index({1}).zero_();

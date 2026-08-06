@@ -158,6 +158,10 @@ struct XLLM_CAPI_EXPORT XLLM_RequestParams {
   // Whether to skip special tokens in the output text. default = true.
   bool skip_special_tokens = true;
 
+  // Whether to include stop strings or stop tokens in the output text.
+  // default = false.
+  bool include_stop_str_in_output = false;
+
   // Number of completions to return for each prompt. default = 1
   uint32_t n = 1;
 
@@ -209,7 +213,6 @@ struct XLLM_CAPI_EXPORT XLLM_RequestParams {
   float temperature = 0.0;
 
   // The list of strings to stop generating further tokens.
-  // the output will contain the stop string.
   std::optional<std::vector<std::string>> stop;
 
   // The list of token ids to stop generating further tokens.

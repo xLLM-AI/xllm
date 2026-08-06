@@ -65,7 +65,21 @@ class DeepseekV4IndexerImpl : public torch::nn::Module {
       bool with_prefill = false,
       std::tuple<torch::Tensor, torch::Tensor>* compressor_states = nullptr,
       std::tuple<torch::Tensor, torch::Tensor>* compressor_block_tables =
-          nullptr);
+          nullptr,
+      // Under prefill CP, `x` serves two conflicting roles: compress_kv(x)
+      // writes the index cache and must see all tokens, while build_weights(x)
+      // emits one weight row per query and must match this rank's query shard.
+      // x_kv carries the global-ordered hidden; undefined (the default) makes
+      // both paths use `x`, keeping non-CP callers unchanged. Appended last so
+      // existing positional calls keep binding to the same parameters.
+      const torch::Tensor& x_kv = torch::Tensor(),
+      // Cumulative query lengths describing x_kv's row axis: (batch+1,) with a
+      // leading 0, the same layout the compressor expects from
+      // actual_seq_lengths_query. Must be supplied whenever x_kv is, because
+      // actual_seq_lengths_query has been localized to this rank's shard and
+      // would under-count x_kv's rows. Do not substitute
+      // actual_seq_lengths_key: that one is per-sequence, not cumulative.
+      const std::optional<torch::Tensor>& x_kv_cu_seq_lens = std::nullopt);
 
   torch::Tensor select_qli(
       const torch::Tensor& x,
@@ -84,7 +98,10 @@ class DeepseekV4IndexerImpl : public torch::nn::Module {
       bool with_prefill = false,
       std::tuple<torch::Tensor, torch::Tensor>* compressor_states = nullptr,
       std::tuple<torch::Tensor, torch::Tensor>* compressor_block_tables =
-          nullptr);
+          nullptr,
+      // Forwarded to the full overload; see its declaration above.
+      const torch::Tensor& x_kv = torch::Tensor(),
+      const std::optional<torch::Tensor>& x_kv_cu_seq_lens = std::nullopt);
 
   torch::Tensor build_query(const torch::Tensor& qr);
   torch::Tensor build_query(

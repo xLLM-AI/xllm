@@ -17,11 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <algorithm>
-#include <chrono>
-
 #include "common/macros.h"
-#include "core/framework/config/disagg_pd_config.h"
 #include "util/net.h"
 
 namespace xllm {
@@ -229,7 +225,8 @@ RegisteredCache LlmDataDistTransfer::register_cache_tensor(
   RegisteredCache registered_cache{cache_tensor.role,
                                    cache_tensor.group_id,
                                    cache_tensor.sequence_scoped,
-                                   Cache{}};
+                                   Cache{},
+                                   tensor};
   registered_cache.cache.tensor_addrs = {tensor_addr};
 
   CacheDesc& desc = registered_cache.cache.cache_desc;
@@ -242,7 +239,10 @@ RegisteredCache LlmDataDistTransfer::register_cache_tensor(
   CHECK(ret == LLM_SUCCESS)
       << "Register " << cache_tensor.role.to_string()
       << " cache failed at layer " << layer_id << ", ret = " << std::hex << ret;
-
+  VLOG(5) << "Registered KV cache: layer=" << layer_id
+          << ", role=" << cache_tensor.role.to_string()
+          << ", cache_id=" << registered_cache.cache.cache_id
+          << ", shape=" << tensor.sizes();
   return registered_cache;
 }
 

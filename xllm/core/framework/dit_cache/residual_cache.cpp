@@ -17,7 +17,9 @@ limitations under the License.
 
 namespace xllm {
 
-void ResidualCache::init(const DiTCacheConfig& cfg) {
+void ResidualCache::init(const DiTCacheConfig& cfg,
+                         const ParallelArgs& parallel_args) {
+  parallel_args_ = &parallel_args;
   CHECK_GT(cfg.residual_cache.skip_interval_steps, 0)
       << "skip_interval_steps must be > 0";
   CHECK_GT(cfg.residual_cache.dit_cache_start_steps, 0)

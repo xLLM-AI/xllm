@@ -505,6 +505,7 @@ std::shared_ptr<Request> LLMMaster::generate_request(
                          batch_callback,
                          sp.decode_address,
                          call);
+  req_state.include_stop_str_in_output = sp.include_stop_str_in_output;
   req_state.sample_slots = sp.sample_slots;
 
   auto request = std::make_shared<Request>(sp.request_id,

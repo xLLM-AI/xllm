@@ -224,8 +224,9 @@ def tmo_causal_conv1d_update_decode_kernel(
                     oldstart = 1
                 else:
                     oldstart = actual_seqlen
-                cover_lo = state_len - actual_seqlen
+                cover_lo = actual_state_len - actual_seqlen  # = S - L, runtime but unrelated to a
                 new_state_rows = tl.empty((state_len, BLOCK_N), dtype=oldState.dtype)
+                FULL_LEN_I: tl.constexpr = FULL_LEN  # total rows of new_conv_state, used for clamping
                 for gi in tl.static_range(state_len):
                     in_cover = (gi >= cover_lo) & (gi < state_len)
                     src_row = tl.where(
@@ -233,6 +234,9 @@ def tmo_causal_conv1d_update_decode_kernel(
                         (gi - cover_lo) + (KERNEL_WIDTH - 1),
                         oldstart + gi,
                     )
+                    # When cover_lo < 0 (varlen short sequence a<L, S-L<0), non-steady-state branch
+                    # src_row may go out of [0, FULL_LEN); the baseline relies on the read side of tl.where(mask,...)
+                    src_row = tl.minimum(tl.maximum(src_row, 0), FULL_LEN_I - 1)
                     new_state_rows[gi, :] = new_conv_state[src_row, :]
                 new_state_data = tl.trans(new_state_rows)  # [BLOCK_N, state_len]
 

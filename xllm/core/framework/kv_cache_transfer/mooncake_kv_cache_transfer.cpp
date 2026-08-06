@@ -45,7 +45,6 @@ limitations under the License.
 #if defined(USE_DCU)
 #include "platform/dcu/dcu_tensor_alloc.h"
 #endif
-#include "platform/mlu/mlu_tensor_alloc.h"
 #include "util/net.h"
 
 namespace xllm {
@@ -415,8 +414,7 @@ void MooncakeKVCacheTransferDefault::add_buf(
     const torch::Tensor& tensor,
     std::vector<void*>& addrs,
     std::vector<size_t>& lens,
-    std::vector<uint64_t>& buf_bytes,
-    RegisterLengthPolicy register_length_policy) const {
+    std::vector<uint64_t>& buf_bytes) const {
   if (!tensor.defined() || tensor.numel() == 0) {
     return;
   }
@@ -450,29 +448,14 @@ void MooncakeKVCacheTransferDefault::add_buf(
   CHECK_GT(block_bytes, static_cast<size_t>(0))
       << "cache tensor block byte size must be positive";
 
-  size_t registered_bytes = logical_bytes;
-  switch (register_length_policy) {
-    case RegisterLengthPolicy::LOGICAL_BYTES:
-      break;
-    case RegisterLengthPolicy::RDMA_REGISTERABLE_BYTES:
-#if defined(USE_MLU)
-      registered_bytes = mlu::get_rdma_registerable_nbytes(tensor);
-#else
-      LOG(FATAL) << "RDMA registerable storage is only supported on MLU";
-#endif
-      break;
-  }
-  CHECK_EQ(registered_bytes % block_bytes, static_cast<size_t>(0))
-      << "registered bytes must be divisible by block bytes";
-  CHECK_GE(available_bytes, registered_bytes)
+  CHECK_GE(available_bytes, logical_bytes)
       << "Mooncake registration exceeds tensor storage capacity: "
       << "logical_bytes=" << logical_bytes
-      << ", registered_bytes=" << registered_bytes
       << ", available_bytes=" << available_bytes
       << ", block_bytes=" << block_bytes;
 
   addrs.emplace_back(tensor.data_ptr());
-  lens.emplace_back(registered_bytes);
+  lens.emplace_back(logical_bytes);
   buf_bytes.emplace_back(static_cast<uint64_t>(block_bytes));
 }
 
@@ -553,18 +536,6 @@ void MooncakeKVCacheTransferDefault::register_kv_cache_impl(
     const std::vector<KVCacheTensor> transfer_tensors =
         get_mooncake_tensors(cache);
     for (const KVCacheTensor& cache_tensor : transfer_tensors) {
-      if (cache_tensor.role == KVCacheTensorRole::INDEX_SCALE) {
-#if defined(USE_MLU)
-        add_buf(cache_tensor.tensor,
-                addrs,
-                lens,
-                buf_bytes,
-                RegisterLengthPolicy::RDMA_REGISTERABLE_BYTES);
-#else
-        add_buf(cache_tensor.tensor, addrs, lens, buf_bytes);
-#endif
-        continue;
-      }
       add_buf(cache_tensor.tensor, addrs, lens, buf_bytes);
     }
   }

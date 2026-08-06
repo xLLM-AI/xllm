@@ -134,6 +134,13 @@ void Qwen3_5DecoderLayerImpl::load_state_dict(const StateDict& state_dict) {
   }
 }
 
+void Qwen3_5DecoderLayerImpl::verify_loaded_weights(
+    const std::string& prefix) const {
+  if (linear_attention_) {
+    linear_attention_->verify_loaded_weights(prefix + "linear_attn.");
+  }
+}
+
 torch::Tensor Qwen3_5DecoderLayerImpl::run_moe(
     torch::Tensor x,
     const ModelInputParams& input_params) {
@@ -165,7 +172,11 @@ torch::Tensor Qwen3_5DecoderLayerImpl::forward(
     torch::Tensor& positions,
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
-    const ModelInputParams& input_params) {
+    const ModelInputParams& input_params,
+    const torch::Tensor& mrope_cos_sin) {
+  // MLU attention/GDN does not use the mrope split; accept the argument to
+  // satisfy the hybrid interface and discard it.
+  (void)mrope_cos_sin;
   // Pre-attention norm
   std::tie(x, residual) = apply_norm(input_norm_, x, residual);
 

@@ -52,6 +52,10 @@ class Platform final {
 #endif
   }
 
+  // Performance preference between equivalent mRoPE implementations, not a
+  // statement of functional support.
+  static constexpr bool prefers_sliced_mrope() { return is_mlu(); }
+
   // Model-side CP: shard after embed, gather+restore before LM head.
   static constexpr bool uses_model_cp_sharding() {
     return is_mlu() || is_npu();
@@ -62,6 +66,12 @@ class Platform final {
   // allocation until they implement the same cache-elision contract.
   static constexpr bool supports_dsa_indexer_cache_elision() {
     return is_mlu();
+  }
+
+  // Host KV offload requires both a batch memcpy provider and a layer-wise
+  // synchronization implementation.
+  static constexpr bool supports_host_kv_offload() {
+    return is_npu() || is_mlu();
   }
 
   static constexpr bool is_ilu() {

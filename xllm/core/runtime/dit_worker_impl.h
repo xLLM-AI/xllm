@@ -37,7 +37,7 @@ class DiTWorkerImpl : public WorkerImpl {
                 const torch::Device& device,
                 const runtime::Options& options);
 
-  ~DiTWorkerImpl() = default;
+  ~DiTWorkerImpl() override = default;
 
   // initialize model, cache manager. blocking call
   bool init_model(const std::string& model_weights_path,
@@ -54,14 +54,14 @@ class DiTWorkerImpl : public WorkerImpl {
   std::optional<ForwardOutput> step(const ForwardInput& inputs) override;
 
   folly::SemiFuture<std::optional<ForwardOutput>> step_async(
-      const ForwardInput& inputs);
+      const ForwardInput& inputs) override;
 
   folly::SemiFuture<std::optional<DiTForwardOutput>> step_async(
       const DiTForwardInput& inputs);
 
-  void process_group_test();
+  void process_group_test() override;
 
-  folly::SemiFuture<folly::Unit> process_group_test_async();
+  folly::SemiFuture<folly::Unit> process_group_test_async() override;
 
   // prepare input for execution
   DiTForwardInput prepare_inputs(DiTBatch& batch);

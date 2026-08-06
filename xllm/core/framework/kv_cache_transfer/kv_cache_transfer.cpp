@@ -418,7 +418,7 @@ std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
 #if defined(USE_MLU)
     CHECK(allocate_kv_cache_func(kv_cache_shape,
                                  /*use_huge_page_allocator=*/false,
-                                 mlu_mooncake_tensor_allocator()))
+                                 /*tensor_allocator=*/nullptr))
         << "Allocate KV cache failed.";
 #else
     // TODO(xllm-kv-allocator): NPU/DCU/XTensor remains on its existing

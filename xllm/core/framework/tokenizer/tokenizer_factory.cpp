@@ -24,7 +24,11 @@ std::unique_ptr<Tokenizer> TokenizerFactory::create_tokenizer(
     TokenizerArgs tokenizer_args,
     bool proxy) {
   std::unique_ptr<Tokenizer> tokenizer;
-  if (tokenizer_args.tokenizer_type() == "fast") {
+  if (tokenizer_args.tokenizer_type() == "rwkv") {
+    LOG(INFO) << "Create RWKV trie tokenizer.";
+    tokenizer =
+        std::make_unique<RwkvTokenizer>(model_weights_path, tokenizer_args);
+  } else if (tokenizer_args.tokenizer_type() == "fast") {
     // 1. fast tokenizer
     LOG(INFO) << "Create fast tokenizer.";
     tokenizer = std::make_unique<FastTokenizer>(tokenizer_args);

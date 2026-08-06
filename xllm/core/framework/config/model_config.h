@@ -53,6 +53,7 @@ class ModelConfig final {
          "python_model_path",
          "limit_image_per_prompt",
          "max_encoder_cache_size",
+         "max_processor_cache_items",
          "reasoning_parser",
          "tool_call_parser",
          "enable_qwen3_reranker",
@@ -79,6 +80,8 @@ class ModelConfig final {
   PROPERTY(int32_t, limit_image_per_prompt) = 8;
 
   PROPERTY(int64_t, max_encoder_cache_size) = 0;
+
+  PROPERTY(int64_t, max_processor_cache_items) = 256;
 
   PROPERTY(std::string, reasoning_parser);
 

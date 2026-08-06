@@ -28,6 +28,34 @@ limitations under the License.
 
 namespace xllm::kernel::mlu {
 
+namespace {
+
+constexpr int64_t kMaxBlockHv = 32;
+constexpr int64_t kMaxBlockN = 4;
+constexpr int64_t kBlockQueryLen = 4;
+
+int64_t choose_block_hv(int64_t num_k_heads,
+                        int64_t num_v_heads,
+                        int64_t max_block_hv) {
+  CHECK_GT(num_k_heads, 0);
+  CHECK_GE(num_v_heads, num_k_heads);
+  CHECK_EQ(num_v_heads % num_k_heads, 0) << "HV must be divisible by H";
+
+  int64_t heads_per_query = num_v_heads / num_k_heads;
+  int64_t candidate = std::min<int64_t>(
+      (max_block_hv / heads_per_query) * heads_per_query, num_v_heads);
+  for (; candidate >= heads_per_query; candidate -= heads_per_query) {
+    if (num_v_heads % candidate == 0) {
+      return candidate;
+    }
+  }
+  LOG(FATAL) << "Failed to select BLOCK_HV for H=" << num_k_heads
+             << ", HV=" << num_v_heads;
+  return heads_per_query;
+}
+
+}  // namespace
+
 using xllm::triton_jit::JITKernel;
 
 std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
@@ -151,25 +179,17 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
 
   int64_t block_k = head_k_dim;
   int64_t block_v = std::min<int64_t>(head_v_dim, 128);
-  int64_t block_hv = std::min<int64_t>(num_v_heads, 4);
-
-  int32_t kBlockN = 1;
-  int32_t kMaxN = 128;
-  if (batch_size <= core_count) {
-    kBlockN = 1;
-  } else if (batch_size <= core_count * 2) {
-    kBlockN = 2;
-  } else if (batch_size > 128) {
-    kMaxN = 1024;
-    // to avoid nram out of resource
-    kBlockN = num_v_heads > 6 ? 1 : 4;
+  int64_t block_n = 1;
+  if (num_sequences > core_count * 2) {
+    block_n = kMaxBlockN;
+  } else if (num_sequences > core_count) {
+    block_n = 2;
   }
+  int64_t max_block_hv = kMaxBlockHv / block_n;
 
-  int64_t block_query_len = seq_len;
+  int64_t block_hv = choose_block_hv(num_k_heads, num_v_heads, max_block_hv);
   int64_t total_blocks = ((head_k_dim + block_k - 1) / block_k) *
-                         ((head_v_dim + block_v - 1) / block_v) *
-                         ((num_v_heads + block_hv - 1) / block_hv) *
-                         num_sequences;
+                         ((head_v_dim + block_v - 1) / block_v) * num_sequences;
 
   cnrtQueue_t queue = torch_mlu::getCurMLUStream();
   JITKernel& f = JITKernel::get(
@@ -181,7 +201,7 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
   f.launch(static_cast<void*>(queue),
            /*grid=*/
            {static_cast<uint32_t>(std::min(total_blocks, core_count)), 1, 1},
-           /*cfg=*/{/*num_warps=*/1, /*num_stages=*/2},
+           /*cfg=*/{/*num_warps=*/1, /*num_stages=*/3},
            A_log,
            a,
            b,
@@ -203,6 +223,7 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
            static_cast<int32_t>(batch_size),
            static_cast<int32_t>(num_k_heads),
            static_cast<int32_t>(num_v_heads),
+           /*BLOCK_HV=*/static_cast<int32_t>(block_hv),
            static_cast<int32_t>(head_k_dim),
            static_cast<int32_t>(head_v_dim),
            /*BK=*/static_cast<int32_t>(block_k),
@@ -218,10 +239,8 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
            /*IS_CONTINUOUS_BATCHING=*/ssm_state_indices.defined() ? 1 : 0,
            /*IS_SPEC_DECODING=*/num_accepted_tokens_opt.has_value() ? 1 : 0,
            /*IS_KDA=*/is_kda ? 1 : 0,
-           /*MAX_N=*/static_cast<int32_t>(kMaxN),
-           /*BLOCK_N=*/static_cast<int32_t>(kBlockN),
-           /*BLOCK_QUERY_LEN=*/static_cast<int32_t>(block_query_len),
-           /*BLOCK_HV=*/static_cast<int32_t>(block_hv));
+           /*BLOCK_N=*/static_cast<int32_t>(block_n),
+           /*BLOCK_QUERY_LEN=*/static_cast<int32_t>(kBlockQueryLen));
 
   return std::make_pair(out, final_state);
 }

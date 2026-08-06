@@ -23,6 +23,7 @@ limitations under the License.
 #include <functional>
 #include <tuple>
 #include <unordered_map>
+#include <vector>
 
 #include "framework/model/model_args.h"
 
@@ -94,6 +95,11 @@ torch::Tensor get_concat_rotary_embedding(int64_t dim,
                                           int64_t seq_len,
                                           double rope_theta,
                                           const torch::TensorOptions& options);
+
+std::pair<torch::Tensor, torch::Tensor> apply_mrope(
+    const torch::Tensor& cos_sin_cache,
+    const torch::Tensor& positions,
+    const std::vector<int64_t>& mrope_section);
 
 torch::Tensor get_chatglm_rotary_embedding(int64_t dim,
                                            int64_t seq_len,

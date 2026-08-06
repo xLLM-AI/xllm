@@ -18,6 +18,7 @@ limitations under the License.
 #include <absl/strings/match.h>
 #include <gflags/gflags_declare.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <unordered_set>
 #include <vector>
@@ -40,9 +41,21 @@ StoppingChecker::StoppingChecker(
       stop_tokens_(std::move(stop_tokens)),
       stop_sequences_(std::move(stop_sequences)) {}
 
+size_t StoppingChecker::get_max_stop_sequence_token_count() const {
+  size_t max_token_count = 0;
+  for (const auto& sequence : stop_sequences_) {
+    max_token_count = std::max(max_token_count, sequence.size());
+  }
+  return max_token_count;
+}
+
 FinishReason StoppingChecker::check(const Slice<int32_t>& token_ids,
-                                    size_t num_prompt_tokens) const {
+                                    size_t num_prompt_tokens,
+                                    size_t* matched_stop_token_count) const {
   CHECK(!token_ids.empty());
+  if (matched_stop_token_count != nullptr) {
+    *matched_stop_token_count = 0;
+  }
 
   // if enable_schedule_overlap, there might be pre scheduled fake token -1
   // need to figure out the valid token to check finish.
@@ -56,20 +69,11 @@ FinishReason StoppingChecker::check(const Slice<int32_t>& token_ids,
     }
   }
 
-  // check max generated tokens
-  if (max_generated_tokens_ > 0 &&
-      total_tokens - num_prompt_tokens >= max_generated_tokens_) {
-    return FinishReason::LENGTH;
-  }
-
-  // check max context tokens
-  if (max_context_len_ > 0 && total_tokens >= max_context_len_) {
-    CHECK_GE(total_tokens, num_prompt_tokens) << "Unknow error";
-    return FinishReason::LENGTH;
-  }
-
   // check eos token
   if (!ignore_eos_ && last_token_id == eos_token_) {
+    if (matched_stop_token_count != nullptr) {
+      *matched_stop_token_count = 1;
+    }
     return FinishReason::STOP;
   }
 
@@ -81,14 +85,36 @@ FinishReason StoppingChecker::check(const Slice<int32_t>& token_ids,
   // request that supplies stop_token_ids replaces this default, so pairing it
   // with ignore_eos is contradictory by construction and ignore_eos wins.
   if (!ignore_eos_ && stop_tokens_.count(last_token_id) > 0) {
+    if (matched_stop_token_count != nullptr) {
+      *matched_stop_token_count = 1;
+    }
     return FinishReason::STOP;
   }
 
   // check stop sequences
   for (const auto& seq : stop_sequences_) {
     if (seq.back() == last_token_id && util::match_suffix(token_ids, seq)) {
+      if (matched_stop_token_count != nullptr) {
+        // A stop sequence may begin in the prompt and end in generated output.
+        // Never hide prompt tokens, including when prompt echo is enabled.
+        *matched_stop_token_count =
+            std::min(seq.size(), total_tokens - num_prompt_tokens);
+      }
       return FinishReason::STOP;
     }
+  }
+
+  // Match explicit stop criteria before length limits. When a stop token lands
+  // exactly on the length boundary, vLLM reports a stop and applies
+  // include_stop_str_in_output to that token.
+  if (max_generated_tokens_ > 0 &&
+      total_tokens - num_prompt_tokens >= max_generated_tokens_) {
+    return FinishReason::LENGTH;
+  }
+
+  if (max_context_len_ > 0 && total_tokens >= max_context_len_) {
+    CHECK_GE(total_tokens, num_prompt_tokens) << "Unknow error";
+    return FinishReason::LENGTH;
   }
 
   return FinishReason::NONE;

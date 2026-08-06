@@ -100,6 +100,20 @@ ModelContext ModelContext::with_parallel_args(
   return derived;
 }
 
+ModelContext ModelContext::with_quant_args(const QuantArgs& quant_args) const {
+#if defined(USE_NPU)
+  ModelContext derived(
+      parallel_args_, model_args_, quant_args, tensor_options_, context_);
+  derived.atb_workspace_ = atb_workspace_;
+#else
+  ModelContext derived(
+      parallel_args_, model_args_, quant_args, tensor_options_);
+#endif
+  derived.model_id_ = model_id_;
+  derived.derive_optimization_config();
+  return derived;
+}
+
 void ModelContext::derive_optimization_config() {
   // default disable fused kernel
   optimization_config_.enable_fused_spec_kernel = false;

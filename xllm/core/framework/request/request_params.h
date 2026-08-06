@@ -62,6 +62,12 @@ struct RequestParams {
                 const std::string& x_rid,
                 const std::string& x_rtime);
 
+  void set_x_request_id_if_absent(const std::string& fallback) {
+    if (x_request_id.empty()) {
+      x_request_id = fallback;
+    }
+  }
+
   bool verify_params(OutputCallback callback) const;
 
   // request id
@@ -120,6 +126,10 @@ struct RequestParams {
   // whether to skip special tokens in the output text. default = true.
   bool skip_special_tokens = true;
 
+  // whether to include stop strings or stop tokens in the output text.
+  // default = false.
+  bool include_stop_str_in_output = false;
+
   // whether to ignore the end of sequence token. default = false.
   bool ignore_eos = false;
 
@@ -127,7 +137,6 @@ struct RequestParams {
   bool is_embeddings = false;
 
   // the list of strings to stop generating further tokens.
-  // the output will contain the stop string.
   std::optional<std::vector<std::string>> stop;
 
   // the list of token ids to stop generating further tokens.

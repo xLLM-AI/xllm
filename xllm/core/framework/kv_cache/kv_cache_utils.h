@@ -47,6 +47,11 @@ limitations under the License.
 namespace xllm {
 
 class KVCacheShape;
+#if defined(USE_MLU)
+namespace mlu {
+class MLUHostMemoryRegion;
+}
+#endif
 
 struct KVCacheCreateOptions {
   PROPERTY(torch::Device, device) = torch::Device(torch::kCPU);
@@ -109,6 +114,21 @@ struct LinearAttentionKVCacheTensors {
   torch::Tensor ssm_cache;
 };
 
+struct HostCacheValidationOptions {
+  double host_blocks_factor = 0.0;
+  int64_t device_block_count = 0;
+  bool supports_host_kv_offload = false;
+  bool enable_prefix_cache = true;
+  bool has_key_cache_shape = true;
+  bool has_grouped_cache_layout = false;
+  bool supports_grouped_cache_offload = false;
+  bool has_conv_cache_shape = false;
+  bool has_ssm_cache_shape = false;
+  std::string kv_cache_dtype = "auto";
+  std::string indexer_cache_dtype = "auto";
+  std::string model_type;
+};
+
 struct KVCacheTensor {
   KVCacheTensorRole role;
   torch::Tensor tensor;
@@ -122,13 +142,18 @@ struct HostPageAlignedRegion {
   void* base_ptr = nullptr;
   size_t total_bytes = 0;
 
-  HostPageAlignedRegion() = default;
+  HostPageAlignedRegion();
   explicit HostPageAlignedRegion(size_t bytes);
   HostPageAlignedRegion(const HostPageAlignedRegion&) = delete;
   HostPageAlignedRegion& operator=(const HostPageAlignedRegion&) = delete;
   HostPageAlignedRegion(HostPageAlignedRegion&& other) noexcept;
   HostPageAlignedRegion& operator=(HostPageAlignedRegion&& other) noexcept;
   ~HostPageAlignedRegion();
+
+ private:
+#if defined(USE_MLU)
+  std::unique_ptr<mlu::MLUHostMemoryRegion> mlu_region_;
+#endif
 };
 
 struct DeepSeekV4KVCacheTensors {
@@ -173,6 +198,11 @@ LinearAttentionKVCacheTensors create_linear_attention_kv_cache_tensors(
 // Scale a device block count to the host block count using host_blocks_factor
 // (clamped to >= 1.0 so the host pool is never smaller than the device pool).
 int64_t scale_host_block_count(int64_t block_count, double host_blocks_factor);
+
+// Return an actionable error for an unsupported host prefix-cache
+// configuration, or std::nullopt when the configuration is valid.
+std::optional<std::string> validate_host_cache_options(
+    const HostCacheValidationOptions& options);
 
 // Build a host tensor shape from a per-layer device shape by scaling dim 0
 // (block count) by host_blocks_factor.

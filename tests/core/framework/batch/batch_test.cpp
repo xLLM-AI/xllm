@@ -223,6 +223,23 @@ Sequence make_overlap_sequence(const std::vector<int32_t>& prompt_token_ids,
                   seq_params);
 }
 
+class ScopedPrefillChunkStride final {
+ public:
+  explicit ScopedPrefillChunkStride(int32_t chunk_stride)
+      : previous_(SchedulerConfig::get_instance()
+                      .max_tokens_per_chunk_for_prefill()) {
+    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(
+        chunk_stride);
+  }
+
+  ~ScopedPrefillChunkStride() {
+    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(previous_);
+  }
+
+ private:
+  int32_t previous_;
+};
+
 }  // namespace
 
 TEST(BatchInputBuilderTest, FirstChunkUsesRemotePrefix) {
@@ -482,11 +499,13 @@ TEST(BatchTest, DecodeForwardInputConsumesMtpBootstrap) {
   BlockManagerPool::Options options;
   options.num_blocks(8).block_size(4).enable_disagg_pd(true);
   options.max_seqs_per_batch(1024);
+  options.num_speculative_tokens(1);
+  options.num_embedding_blocks(8);
   BlockManagerPool manager(options, /*dp_size=*/1);
 
   Sequence sequence = make_basic_sequence({1, 2, 3});
   ASSERT_TRUE(manager.allocate(&sequence));
-  ASSERT_GE(sequence.get_single_block_id(), 0);
+  ASSERT_GE(sequence.get_embedding_block_id(), 0);
   sequence.kv_state().set_kv_cache_tokens_num(sequence.num_prompt_tokens());
   sequence.append_token(Token(42));
 
@@ -509,6 +528,8 @@ TEST(BatchTest, DecodeForwardInputMapsSparseMtpBootstrapRows) {
   BlockManagerPool::Options options;
   options.num_blocks(8).block_size(4).enable_disagg_pd(true);
   options.max_seqs_per_batch(1024);
+  options.num_speculative_tokens(1);
+  options.num_embedding_blocks(8);
   BlockManagerPool manager(options, /*dp_size=*/1);
 
   Sequence first = make_basic_sequence({1, 2, 3});
@@ -1300,7 +1321,7 @@ TEST(BatchTest, DecodeMinBatchSizeDoesNotPadTransportState) {
             std::vector<int32_t>({-1}));
 }
 
-TEST(BatchTest, DecodeSingleBlockIdsStaySplitInTransportButShareSlotValue) {
+TEST(BatchTest, DecodeEmbeddingAndLinearStateIdsAreIndependentSlots) {
   const uint32_t n_blocks = 8;
   const uint32_t block_size = 4;
   BlockManager::Options options;
@@ -1328,10 +1349,19 @@ TEST(BatchTest, DecodeSingleBlockIdsStaySplitInTransportButShareSlotValue) {
   seq.kv_state().incr_kv_cache_tokens_num(/*size=*/3);
   seq.append_token(4);
 
-  auto slot_block = manager.allocate(1);
-  ASSERT_EQ(slot_block.size(), 1u);
-  const int32_t expected_slot_id = slot_block[0].id();
-  seq.add_blocks(BlockType::SINGLE, slot_block);
+  // EMBEDDING and LINEAR are now fully decoupled slots: the embedding-row id
+  // (embedding_ids) and the recurrent-state id (linear_state_ids) come from
+  // separate blocks and no longer share a value.
+  auto embedding_block = manager.allocate(1);
+  ASSERT_EQ(embedding_block.size(), 1u);
+  const int32_t expected_embedding_id = embedding_block[0].id();
+  seq.add_blocks(BlockType::EMBEDDING, embedding_block);
+
+  auto linear_block = manager.allocate(1);
+  ASSERT_EQ(linear_block.size(), 1u);
+  const int32_t expected_linear_id = linear_block[0].id();
+  seq.add_blocks(BlockType::LINEAR, linear_block);
+  ASSERT_NE(expected_embedding_id, expected_linear_id);
 
   std::vector<Sequence*> sequences = {&seq};
   std::vector<uint32_t> allowed_max_tokens = {1};
@@ -1355,22 +1385,20 @@ TEST(BatchTest, DecodeSingleBlockIdsStaySplitInTransportButShareSlotValue) {
   ASSERT_EQ(forward_input.input_params.embedding.embedding_ids.size(), 1u);
   ASSERT_EQ(forward_input.input_params.embedding.linear_state_ids.size(), 1u);
   EXPECT_EQ(forward_input.input_params.embedding.embedding_ids[0],
-            expected_slot_id);
+            expected_embedding_id);
   EXPECT_EQ(forward_input.input_params.embedding.linear_state_ids[0],
-            expected_slot_id);
+            expected_linear_id);
 }
 
-TEST(BatchTest, LinearStateCheckpointSavesOnlyAtPrefillStepBoundary) {
+TEST(BatchTest, LinearRestoreSourceStaysPinnedForBatchLifetime) {
   // Linear-state checkpoints are hashed per chunk-end boundary. This test's
   // save/restore boundaries (16, 20) are multiples of the KV block_size (4),
   // so set the chunk stride to block_size to keep them chunk-aligned and the
   // per-chunk hash chain identical to the per-block helper below.
-  const int32_t prev_chunk_stride =
-      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
-  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(4);
+  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
 
   torch::Device device(Platform::type_torch(), 0);
-  const uint32_t n_blocks = 24;
+  const uint32_t n_blocks = 22;
   const uint32_t block_size = 4;
   BlockManager::Options options;
   options.num_blocks(n_blocks).block_size(block_size);
@@ -1446,15 +1474,16 @@ TEST(BatchTest, LinearStateCheckpointSavesOnlyAtPrefillStepBoundary) {
   decode_seq.kv_state().incr_kv_cache_tokens_num(/*size=*/16);
   decode_seq.append_token(57);
 
-  Batch batch;
-  batch.add(&aligned_seq, /*allowed_max_token=*/16);
-  batch.add(&restore_seq, /*allowed_max_token=*/4);
-  batch.add(&off_boundary_seq, /*allowed_max_token=*/15);
-  batch.add(&decode_seq, /*allowed_max_token=*/1);
+  std::optional<Batch> batch;
+  batch.emplace();
+  batch->add(&aligned_seq, /*allowed_max_token=*/16);
+  batch->add(&restore_seq, /*allowed_max_token=*/4);
+  batch->add(&off_boundary_seq, /*allowed_max_token=*/15);
+  batch->add(&decode_seq, /*allowed_max_token=*/1);
 
   ModelArgs args;
   args.layer_types({"linear_attention"});
-  ForwardInput forward_input = batch.prepare_forward_input(
+  ForwardInput forward_input = batch->prepare_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, args);
 
   const auto& cache_ops = forward_input.input_params.linear_state_cache_ops;
@@ -1489,8 +1518,122 @@ TEST(BatchTest, LinearStateCheckpointSavesOnlyAtPrefillStepBoundary) {
   EXPECT_FALSE(cache_ops[3].restore_requested);
   EXPECT_FALSE(decode_seq.has_pending_linear_save());
 
-  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(
-      prev_chunk_stride);
+  // The host Block handle, not device state, keeps the full pool pinned.
+  EXPECT_TRUE(manager.allocate(1).empty());
+  batch.reset();
+  EXPECT_EQ(manager.allocate(1).size(), 1u);
+}
+
+TEST(BatchTest, UnusedLinearRestoreSourceIsReleasedDuringBuild) {
+  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
+
+  BlockManager::Options options;
+  options.num_blocks(/*num_blocks=*/3).block_size(/*block_size=*/4);
+  BlockManagerImpl manager(options);
+
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(1);
+  SequenceParams seq_params;
+  seq_params.seq_capacity = 4;
+  seq_params.stopping_checker = &stopping_checker;
+  seq_params.sampling_param = &sampling_param;
+
+  IncrementalDecoder decoder("", 3, false, false);
+  Sequence sequence(/*index=*/0,
+                    /*token_ids=*/{1, 2, 3},
+                    /*input_embedding=*/torch::Tensor(),
+                    /*mm_data=*/MMData(),
+                    std::move(decoder),
+                    seq_params);
+  sequence.add_blocks(BlockType::KV, manager.allocate(1));
+  sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/2);
+  std::vector<Block> restore_sources = manager.allocate(1);
+  ASSERT_EQ(restore_sources.size(), 1u);
+  sequence.set_linear_restore_src_block(std::move(restore_sources[0]));
+
+  std::optional<Batch> batch;
+  batch.emplace();
+  batch->add(&sequence, /*allowed_max_token=*/1);
+  ModelArgs args;
+  args.layer_types({"linear_attention"});
+  ForwardInput forward_input = batch->prepare_forward_input(
+      /*num_decoding_tokens=*/0, /*min_decoding_bach_size=*/0, args);
+
+  ASSERT_EQ(forward_input.input_params.linear_state_cache_ops.size(), 1u);
+  EXPECT_FALSE(
+      forward_input.input_params.linear_state_cache_ops[0].restore_requested);
+  EXPECT_EQ(manager.allocate(1).size(), 1u);
+}
+
+TEST(BatchTest, ThreadedBatchPinsEveryLinearRestoreSourceUntilRelease) {
+  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
+
+  constexpr size_t kQueryTokensPerSequence = 32768;
+  constexpr size_t kCachedTokensPerSequence = 4;
+  const size_t sequence_tokens =
+      kQueryTokensPerSequence + kCachedTokensPerSequence;
+  BlockManager::Options options;
+  options.num_blocks(/*num_blocks=*/5)
+      .block_size(static_cast<uint32_t>(sequence_tokens));
+  BlockManagerImpl manager(options);
+
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(1);
+  SequenceParams seq_params;
+  seq_params.seq_capacity = sequence_tokens + 1;
+  seq_params.stopping_checker = &stopping_checker;
+  seq_params.sampling_param = &sampling_param;
+
+  std::vector<int32_t> first_tokens(sequence_tokens, 1);
+  std::vector<int32_t> second_tokens(sequence_tokens, 2);
+  IncrementalDecoder first_decoder("", sequence_tokens, false, false);
+  Sequence first_sequence(/*index=*/0,
+                          first_tokens,
+                          /*input_embedding=*/torch::Tensor(),
+                          /*mm_data=*/MMData(),
+                          std::move(first_decoder),
+                          seq_params);
+  IncrementalDecoder second_decoder("", sequence_tokens, false, false);
+  Sequence second_sequence(/*index=*/1,
+                           second_tokens,
+                           /*input_embedding=*/torch::Tensor(),
+                           /*mm_data=*/MMData(),
+                           std::move(second_decoder),
+                           seq_params);
+  first_sequence.add_blocks(BlockType::KV, manager.allocate(1));
+  second_sequence.add_blocks(BlockType::KV, manager.allocate(1));
+  first_sequence.kv_state().incr_kv_cache_tokens_num(
+      /*size=*/kCachedTokensPerSequence);
+  second_sequence.kv_state().incr_kv_cache_tokens_num(
+      /*size=*/kCachedTokensPerSequence);
+
+  std::vector<Block> first_restore_source = manager.allocate(1);
+  std::vector<Block> second_restore_source = manager.allocate(1);
+  ASSERT_EQ(first_restore_source.size(), 1u);
+  ASSERT_EQ(second_restore_source.size(), 1u);
+  first_sequence.set_linear_restore_src_block(
+      std::move(first_restore_source[0]));
+  second_sequence.set_linear_restore_src_block(
+      std::move(second_restore_source[0]));
+
+  std::optional<Batch> batch;
+  batch.emplace();
+  batch->add(&first_sequence);
+  batch->add(&second_sequence);
+  ThreadPool thread_pool(/*num_threads=*/2);
+  ModelArgs args;
+  args.layer_types({"linear_attention"});
+  ForwardInput forward_input = batch->prepare_forward_input(args, &thread_pool);
+
+  const auto& cache_ops = forward_input.input_params.linear_state_cache_ops;
+  ASSERT_EQ(cache_ops.size(), 2u);
+  EXPECT_TRUE(cache_ops[0].restore_requested);
+  EXPECT_TRUE(cache_ops[1].restore_requested);
+  EXPECT_TRUE(manager.allocate(1).empty());
+  batch.reset();
+  EXPECT_EQ(manager.allocate(2).size(), 2u);
 }
 
 TEST(BatchTest, SharedMemoryRoundTripPreservesLinearStateIds) {

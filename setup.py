@@ -262,6 +262,35 @@ def _stage_triton_jit_scripts(base_dir: str, extdir: str) -> None:
 
     logger.info(f"Staged triton_jit compile script into {dest_dir}")
 
+def _stage_auto_tuning_config(base_dir: str, extdir: str) -> None:
+    """Stage the per-model-type auto-tuning profiles into the wheel.
+
+    ``xllm/auto_config`` ships one ``<model_type>.json`` base config plus one
+    ``<model_type>.py`` tuning module per supported model type. The launcher
+    (``xllm/launch_server.py``) resolves this directory relative to its own
+    location, so it must land under the installed ``xllm`` package as
+    ``xllm/auto_config``. ``extdir`` already points at that package dir; do NOT
+    add another ``xllm`` segment (see ``_stage_mlu_triton_kernels`` for the
+    collision rationale).
+    """
+    source_dir = os.path.join(base_dir, "xllm", "auto_config")
+    if not os.path.isdir(source_dir):
+        raise RuntimeError(
+            f"auto-tuning config directory does not exist: {source_dir}\n"
+            "Hint: Ensure the source tree is intact (xllm/auto_config must exist)."
+        )
+
+    dest_dir = os.path.join(extdir, "auto_config")
+    if os.path.isdir(dest_dir):
+        shutil.rmtree(dest_dir)
+    shutil.copytree(
+        source_dir,
+        dest_dir,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+
+    logger.info(f"Staged auto-tuning config into {dest_dir}")
+
 class CMakeExtension(Extension):
     def __init__(self, name: str, path: str, sourcedir: str = "") -> None:
         super().__init__(name, sources=[])
@@ -539,6 +568,8 @@ class ExtBuild(build_ext):
         _stage_mlu_triton_kernels(self.base_dir, extdir, self.device)
 
         _stage_triton_jit_scripts(self.base_dir, extdir)
+
+        _stage_auto_tuning_config(self.base_dir, extdir)
 
         if BUILD_EXPORT:
             # build export module

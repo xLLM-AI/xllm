@@ -213,6 +213,14 @@ class CausalConv1dKernel(TilelangKernel):
             "dtype": "float16",
         },
         {
+            "variant_key": "bs1_d6144_w4_silu0_f16",
+            "batch_size": 1,
+            "dim": 6144,
+            "width": 4,
+            "has_silu": 0,
+            "dtype": "float16",
+        },
+        {
             "variant_key": "bs1_d8192_w4_silu0_f16",
             "batch_size": 1,
             "dim": 8192,

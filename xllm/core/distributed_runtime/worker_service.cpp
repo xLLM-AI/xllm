@@ -315,7 +315,15 @@ void WorkerService::create_polling_shm_thread(
         Timer timer;
         while (true) {
           ForwardInput fwd_input;
-          input_shm_manager->input_read(fwd_input, device_);
+          // NPU graph task updates cannot safely overlap an H2D enqueue from
+          // the SHM polling thread. Keep scheduler overlap, but defer device
+          // materialization to WorkerImpl's ordered prepare stream.
+          const InputDeviceMaterializationPolicy materialization_policy =
+              options_.enable_schedule_overlap() && options_.enable_graph()
+                  ? InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE
+                  : InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ;
+          input_shm_manager->input_read(
+              fwd_input, device_, materialization_policy);
           timer.reset();
           // model output variables
           torch::Tensor next_tokens;
@@ -492,8 +500,6 @@ void WorkerService::PullKVCache(::google::protobuf::RpcController* controller,
                                 ::google::protobuf::Closure* done) {
   threadpool_->schedule([this, controller, req, resp, done]() mutable {
     brpc::ClosureGuard done_guard(done);
-    uint64_t src_cluster_id = req->cluster_id();
-    std::string addr = req->addr();
     std::vector<uint64_t> src_blocks(req->src_blocks().begin(),
                                      req->src_blocks().end());
     std::vector<uint64_t> dst_blocks(req->dst_blocks().begin(),
@@ -502,12 +508,26 @@ void WorkerService::PullKVCache(::google::protobuf::RpcController* controller,
         req->src_linear_state_ids().begin(), req->src_linear_state_ids().end());
     std::vector<uint64_t> dst_linear_state_ids(
         req->dst_linear_state_ids().begin(), req->dst_linear_state_ids().end());
-    auto future = worker_->pull_kv_blocks_async(src_cluster_id,
-                                                addr,
-                                                src_blocks,
-                                                dst_blocks,
-                                                src_linear_state_ids,
-                                                dst_linear_state_ids);
+    auto future = [&]() {
+      if (req->hetero_merge()) {
+        std::vector<uint64_t> src_cluster_ids(req->src_cluster_ids().begin(),
+                                              req->src_cluster_ids().end());
+        std::vector<std::string> src_addrs(req->src_addrs().begin(),
+                                           req->src_addrs().end());
+        return worker_->pull_hetero_kv_blocks_async(src_cluster_ids,
+                                                    src_addrs,
+                                                    src_blocks,
+                                                    dst_blocks,
+                                                    src_linear_state_ids,
+                                                    dst_linear_state_ids);
+      }
+      return worker_->pull_kv_blocks_async(req->cluster_id(),
+                                           req->addr(),
+                                           src_blocks,
+                                           dst_blocks,
+                                           src_linear_state_ids,
+                                           dst_linear_state_ids);
+    }();
     bool status = std::move(future).get();
     resp->set_ok(status);
   });

@@ -1,8 +1,23 @@
 include(cc_library)
 
+cc_library(
+  NAME
+    processor_cache
+  HDRS
+    processor_cache.h
+  SRCS
+    processor_cache.cpp
+  DEPS
+    :common
+    :util
+    glog::glog
+    torch
+)
+
 # Define the base dependencies
 set(BASE_DEPS
   :multimodal
+  :processor_cache
   :common
   :kv_cache
   :prefix_cache
@@ -20,6 +35,7 @@ cc_library(
     processors
   HDRS
     transforms.h
+    cacheable_multimodal_processor.h
     multimodal_processor.h
     audio_processor.h
     image_processor.h
@@ -32,6 +48,8 @@ cc_library(
     glm4v_video_processor.h
     minicpmv_image_processor.h
     minicpmv_prompt_processor.h
+    mistral3_image_processor.h
+    mistral3_prompt_processor.h
     pywarpper_input_processor.h
     qwen2_vl_prompt_processor.h
     qwen2_vl_image_processor.h
@@ -41,6 +59,7 @@ cc_library(
     video_processor.h
   SRCS
     transforms.cpp
+    cacheable_multimodal_processor.cpp
     multimodal_processor.cpp
     clip_image_processor.cpp
     clip_prompt_processor.cpp
@@ -50,6 +69,8 @@ cc_library(
     glm4v_video_processor.cpp
     minicpmv_image_processor.cpp
     minicpmv_prompt_processor.cpp
+    mistral3_image_processor.cpp
+    mistral3_prompt_processor.cpp
     pywarpper_input_processor.cpp
     qwen2_vl_prompt_processor.cpp
     qwen2_vl_image_processor.cpp

@@ -42,7 +42,8 @@ class DenseMLPImpl : public torch::nn::Module {
                ProcessGroup* process_group,
                const torch::TensorOptions& options,
                const std::string& module_prefix = "",
-               double swiglu_limit = 0.0);
+               double swiglu_limit = 0.0,
+               bool apply_fc1_sequence_parallel = true);
 
   torch::Tensor forward(const torch::Tensor& hidden_states);
 
@@ -64,6 +65,7 @@ class DenseMLPImpl : public torch::nn::Module {
   bool is_smoothquant_;
   std::string hidden_act_;
   double swiglu_limit_ = 0.0;
+  bool apply_fc1_sequence_parallel_ = true;
 };
 TORCH_MODULE(DenseMLP);
 

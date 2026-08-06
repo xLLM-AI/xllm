@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 
 #include "core/framework/config/kv_cache_config.h"
@@ -72,6 +73,28 @@ TEST(DisaggPDConfigTest, KeepsMluPrefixCacheForPrefillSideRoles) {
     EXPECT_EQ(kv_cache_config.enable_prefix_cache(),
               test_case.keep_prefix_cache);
   }
+}
+
+TEST(DisaggPDConfigTest, ExposesParallelHeterogeneousShardPullOption) {
+  DisaggPDConfig disagg_pd_config;
+  EXPECT_FALSE(disagg_pd_config.enable_heterogeneous_pd());
+  EXPECT_TRUE(disagg_pd_config.enable_pd_parallel_shard_pull());
+
+  disagg_pd_config.enable_heterogeneous_pd(true);
+  disagg_pd_config.enable_pd_parallel_shard_pull(false);
+  EXPECT_TRUE(disagg_pd_config.enable_heterogeneous_pd());
+  EXPECT_FALSE(disagg_pd_config.enable_pd_parallel_shard_pull());
+
+  const std::vector<std::string>& option_names =
+      DisaggPDConfig::option_category().option_names;
+  EXPECT_NE(
+      std::find(
+          option_names.begin(), option_names.end(), "enable_heterogeneous_pd"),
+      option_names.end());
+  EXPECT_NE(std::find(option_names.begin(),
+                      option_names.end(),
+                      "enable_pd_parallel_shard_pull"),
+            option_names.end());
 }
 
 }  // namespace

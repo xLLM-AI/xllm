@@ -104,6 +104,9 @@ REGISTER_MODEL_ARGS(
       LOAD_ARG_OR(index_share_for_mtp_iteration,
                   "index_share_for_mtp_iteration",
                   false);
+      LOAD_ARG_OR(indexer_types, "indexer_types", std::vector<std::string>());
+      LOAD_ARG_OR(
+          mlp_layer_types, "mlp_layer_types", std::vector<std::string>());
 
       // Computed parameters
       // the original head_dim in glm5 config seem useless

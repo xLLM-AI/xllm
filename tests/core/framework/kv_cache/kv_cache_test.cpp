@@ -18,6 +18,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -30,9 +31,6 @@ limitations under the License.
 #include "kv_cache_estimation.h"
 #include "kv_cache_shape.h"
 #include "platform/device.h"
-#if defined(USE_MLU)
-#include "platform/mlu/mlu_tensor_alloc.h"
-#endif
 #include "platform/platform.h"
 #include "worker.pb.h"
 
@@ -160,15 +158,30 @@ TEST(Dsv4StateCacheTest, MissingPackedFallsBackWithoutSwappingSplit) {
   EXPECT_TRUE(torch::equal(state.score(), score));
 }
 
-// Host prefix-cache allocation registers page-aligned host memory with the NPU
-// via aclrtHostRegister, which requires a live device context. Set one up once.
+// Platform page-locked host allocation requires a live device context.
 class HostKVCacheTest : public ::testing::Test {
  protected:
   void SetUp() override {
+#if defined(USE_MLU)
+    if (Platform::device_count() < 1) {
+      GTEST_SKIP() << "MLU device is required for host KV cache tests.";
+    }
+#endif
     Device device(/*device_index=*/0);
     device.set_device();
     device.init_device_context();
+#if defined(USE_MLU)
+    context_tensor_ =
+        torch::zeros({1}, torch::TensorOptions().device(device.unwrap()));
+#endif
   }
+
+  torch::Tensor context_tensor_;
+};
+
+class HostKVCacheConfigTest : public ::testing::Test {
+ protected:
+  void SetUp() override { GTEST_FLAG_SET(death_test_style, "threadsafe"); }
 };
 
 TEST(KVCacheTest, DeepSeekV4FourDimCachesUseDeviceLayout) {
@@ -717,43 +730,6 @@ TEST(KVCacheTest, MluMixedDsaLayersUseInjectedAllocatorForActualRoles) {
   EXPECT_FALSE(caches[3].get_indexer_cache_scale().has_value());
 }
 
-TEST(KVCacheTensorAllocatorTest,
-     MluMooncakePadsOnlyIndexScaleAndDoesNotOwnTensorLifetime) {
-  if (Platform::device_count() < 1) {
-    GTEST_SKIP() << "MLU device is required for allocator storage checks.";
-  }
-
-  Device device(/*device_index=*/0);
-  device.set_device();
-  const torch::Device torch_device = device.unwrap();
-  std::shared_ptr<KVCacheTensorAllocator> allocator =
-      mlu_mooncake_tensor_allocator();
-  std::weak_ptr<KVCacheTensorAllocator> allocator_lifetime = allocator;
-
-  torch::Tensor key = allocator->allocate(
-      KVCacheTensorRole::KEY, {2, 4}, torch::kBFloat16, torch_device);
-  torch::Tensor index_scale =
-      allocator->allocate(KVCacheTensorRole::INDEX_SCALE,
-                          {2, 96, 1},
-                          torch::kFloat32,
-                          torch_device);
-
-  EXPECT_EQ(key.storage().nbytes(), key.nbytes());
-  EXPECT_EQ(index_scale.sizes().vec(), (std::vector<int64_t>{2, 96, 1}));
-  EXPECT_EQ(index_scale.scalar_type(), torch::kFloat32);
-  EXPECT_EQ(index_scale.nbytes(), 2 * 96 * sizeof(float));
-  EXPECT_GE(index_scale.storage().nbytes(), index_scale.nbytes());
-  EXPECT_EQ(mlu::get_rdma_registerable_nbytes(index_scale),
-            index_scale.storage().nbytes());
-
-  allocator.reset();
-  EXPECT_TRUE(allocator_lifetime.expired());
-  key.fill_(1);
-  index_scale.fill_(2);
-  device.synchronize_default_stream();
-  EXPECT_TRUE(key.defined());
-  EXPECT_TRUE(index_scale.defined());
-}
 #endif
 
 TEST_F(HostKVCacheTest, HostKVCacheNormalLayoutAddsLayerDim) {
@@ -861,6 +837,63 @@ TEST_F(HostKVCacheTest, HostKVCacheDeepSeekV4PerBlockType) {
   EXPECT_TRUE(c128_tensors.count(KVCacheTensorRole::INDEX) == 0);
   EXPECT_EQ(c128_tensors.at(KVCacheTensorRole::KEY).size(0),
             scale_host_block_count(kC128Count, kHostFactor));
+}
+
+TEST_F(HostKVCacheConfigTest, MluPlatformAdvertisesHostOffloadSupport) {
+#if defined(USE_MLU)
+  EXPECT_TRUE(Platform::supports_host_kv_offload());
+#else
+  GTEST_SKIP() << "MLU build is required for the host offload capability.";
+#endif
+}
+
+TEST_F(HostKVCacheConfigTest, AcceptsQuantizedIndexerCache) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.indexer_cache_dtype = "int8";
+
+  EXPECT_FALSE(validate_host_cache_options(options).has_value());
+}
+
+TEST_F(HostKVCacheConfigTest, RejectsQuantizedKVCache) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.kv_cache_dtype = "int8";
+
+  const std::optional<std::string> error = validate_host_cache_options(options);
+
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->find("--kv_cache_dtype=auto"), std::string::npos);
+}
+
+TEST_F(HostKVCacheConfigTest, RejectsUnsupportedGroupedCacheLayout) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.has_grouped_cache_layout = true;
+  options.model_type = "unknown_grouped_model";
+
+  const std::optional<std::string> error = validate_host_cache_options(options);
+
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->find("grouped cache layout"), std::string::npos);
+}
+
+TEST_F(HostKVCacheConfigTest, AcceptsSupportedGroupedCacheLayout) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.has_grouped_cache_layout = true;
+  options.supports_grouped_cache_offload = true;
+  options.model_type = "deepseek_v4";
+
+  EXPECT_FALSE(validate_host_cache_options(options).has_value());
 }
 
 }  // namespace xllm

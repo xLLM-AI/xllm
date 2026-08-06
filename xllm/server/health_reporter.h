@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <brpc/health_reporter.h>
 
+#include <nlohmann/json.hpp>
+
 #include "core/common/health_check_manager.h"
 
 namespace xllm {
@@ -36,13 +38,20 @@ class HealthReporter : public brpc::HealthReporter {
 
     bool is_healthy = HealthCheckManager::instance().is_healthy();
 
+    nlohmann::ordered_json report;
     if (!is_healthy) {
       std::string reason = HealthCheckManager::instance().unhealthy_reason();
       LOG(ERROR) << "HealthReporter: cluster is unhealthy, reason: " << reason;
+      report["status"] = "unhealthy";
+      report["reason"] = reason;
       cntl->http_response().set_status_code(503);  // Service Unavailable
     } else {
+      report["status"] = "healthy";
       cntl->http_response().set_status_code(200);  // OK
     }
+
+    cntl->http_response().set_content_type("application/json");
+    cntl->response_attachment().append(report.dump());
   }
 };
 

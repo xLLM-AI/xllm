@@ -461,12 +461,12 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
     m_sin = m_sin.repeat({1, 2});
 
     torch::Tensor cu_seqlens_cpu = cu_seqlens.cpu();
-    std::vector<int> cu_seqlens_vec(
+    std::vector<int32_t> cu_seqlens_vec(
         cu_seqlens_cpu.data_ptr<int>(),  // full seqlen vec
         cu_seqlens_cpu.data_ptr<int>() + cu_seqlens_cpu.numel());
     std::vector<torch::Tensor> deepstack_feature_lists;
     deepstack_feature_lists.reserve(deepstack_visual_indexes_.size());
-    for (int idx = 0; idx < layers_.size(); ++idx) {
+    for (int32_t idx = 0; idx < layers_.size(); ++idx) {
       hidden_states = layers_[idx](
           hidden_states, m_cos, m_sin, cu_seqlens, cu_seqlens_vec, idx);
       auto it = std::find(deepstack_visual_indexes_.begin(),
@@ -557,11 +557,13 @@ TORCH_MODULE(Qwen3_VLForConditionalGeneration);
 using Qwen3VLMultimodalProcessor = MultimodalProcessor<Qwen3VLPromptProcessor,
                                                        Qwen2VLImageProcessor,
                                                        Qwen3VLVideoProcessor>;
+
 REGISTER_MULTIMODAL_PROCESSOR(qwen3_vl, Qwen3VLMultimodalProcessor);
 REGISTER_CAUSAL_VLM_MODEL(qwen3_vl, Qwen3_VLForConditionalGeneration);
 REGISTER_MPOSITION_GENERATOR(qwen3_vl, Qwen3VLMPositionGenerator);
 
-REGISTER_MODEL_ARGS(qwen3_vl, [&] {
+const ModelArgsLoader kQwen3VLModelArgsLoader = [](const JsonReader& json,
+                                                   ModelArgs* args) {
   // text config
   // LOAD_ARG_OR(attention_dropout, "attention_dropout", 0.0);
   LOAD_ARG_OR(model_type, "model_type", "qwen3_vl");
@@ -617,7 +619,11 @@ REGISTER_MODEL_ARGS(qwen3_vl, [&] {
 
   LOAD_ARG_OR(
       rope_scaling_rope_type, "vision_config.rope_scaling.type", "mrope");
-
   LOAD_ARG_OR(vocab_size, "text_config.vocab_size", 151936);
-});
+  return true;
+};
+
+REGISTER_MODEL_ARGS_LOADER(qwen3_vl, kQwen3VLModelArgsLoader);
+REGISTER_MODEL_ARGS_LOADER(Qwen3VLForConditionalGeneration,
+                           kQwen3VLModelArgsLoader);
 }  // namespace xllm

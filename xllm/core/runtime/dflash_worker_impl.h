@@ -28,7 +28,7 @@ limitations under the License.
 
 namespace xllm {
 
-class DFlashWorkerImpl final : public SpeculativeWorkerImpl {
+class DFlashWorkerImpl : public SpeculativeWorkerImpl {
  public:
   DFlashWorkerImpl(const ParallelArgs& parallel_args,
                    const torch::Device& device,
@@ -72,8 +72,25 @@ class DFlashWorkerImpl final : public SpeculativeWorkerImpl {
     std::shared_ptr<ForwardInput> draft_retained_input;
   };
 
-  DraftBlock run_decode_draft(const ForwardInput& input,
-                              ForwardInput& validate_input);
+  // virtual: DSpark overrides the draft sampling (parallel block sample ->
+  // one forward + sequential Markov-head sampling loop).
+  virtual DraftBlock run_decode_draft(const ForwardInput& input,
+                                      ForwardInput& validate_input);
+
+  // Block layout hook: false (DFlash) -> query_width N+1, slot 0 is the
+  // un-selected anchor; true (DSpark) -> query_width N, every position predicts
+  // and slot 0 predicts the first draft token. prepare_query_inputs and the
+  // query row builder read this so the whole (helper-heavy) query-build logic
+  // stays here and a subclass flips one bit.
+  virtual bool sample_from_anchor() const { return false; }
+
+  // Shared with subclasses (DSpark): build the N/N+1-wide draft query block and
+  // the target validate input. A DSpark override of run_decode_draft calls both
+  // before its draft forward.
+  void prepare_query_inputs(const ForwardInput& input,
+                            ForwardInput& query_input);
+  void prepare_validate_inputs(const ForwardInput& input,
+                               ForwardInput& validate_input);
 
  private:
   void fill_validate_input_from_draft_outputs(const DraftBlock& draft_block,
@@ -103,12 +120,6 @@ class DFlashWorkerImpl final : public SpeculativeWorkerImpl {
       ForwardInput& input,
       const std::vector<EmbeddingCache::DecodeState>& last_states) const;
 
-  void prepare_validate_inputs(const ForwardInput& input,
-                               ForwardInput& validate_input);
-
-  void prepare_query_inputs(const ForwardInput& input,
-                            ForwardInput& query_input);
-
   void write_context_kv(const ForwardInput& input,
                         const torch::Tensor& context_hidden,
                         const torch::Tensor& positions_device,
@@ -117,6 +128,7 @@ class DFlashWorkerImpl final : public SpeculativeWorkerImpl {
   void write_target_context_to_cache(const ForwardInput& input,
                                      const SampleOutput& validate_output);
 
+ protected:
   std::unique_ptr<LLMWorkerImpl> draft_impl_;
   std::shared_ptr<EmbeddingCache> embedding_cache_;
 #if defined(USE_NPU) || defined(USE_MLU)

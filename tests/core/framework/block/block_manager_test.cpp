@@ -163,10 +163,11 @@ BlockManagerPool::Options make_linear_state_pool_options(
   BlockManagerPool::Options options;
   options.num_blocks(8).host_num_blocks(0).block_size(4).enable_prefix_cache(
       true);
-  // Zero out max_seqs_per_batch so the SINGLE pool is sized purely by
-  // num_single_blocks (otherwise the pool takes the max of the two).
+  // The EMBEDDING pool is sized directly by num_embedding_blocks and is only
+  // built under spec decode, so opt in here.
   options.max_seqs_per_batch(0)
-      .num_single_blocks(4)
+      .num_embedding_blocks(4)
+      .num_speculative_tokens(1)
       .enable_linear_state(true)
       .linear_state_num_slots(linear_state_num_slots);
   return options;
@@ -280,7 +281,8 @@ TEST(BlockManagerPoolTest, AllocateAssignsSingleBlockWhenEnabled) {
   BlockManagerPool::Options options;
   options.num_blocks(8).host_num_blocks(0).block_size(1).enable_prefix_cache(
       false);
-  options.num_single_blocks(FLAGS_max_seqs_per_batch + 2)
+  options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
+      .num_speculative_tokens(1)
       .enable_linear_state(true)
       .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
@@ -289,10 +291,10 @@ TEST(BlockManagerPoolTest, AllocateAssignsSingleBlockWhenEnabled) {
 
   Sequence seq = make_sequence(0, /*prompt_tokens=*/{1, 2, 3});
   EXPECT_TRUE(pool.allocate(&seq));
-  EXPECT_TRUE(seq.get_single_block_id() >= 0);
+  EXPECT_TRUE(seq.get_embedding_block_id() >= 0);
   // id 0 is the reserved padding slot, so a real assignment is strictly
   // positive.
-  EXPECT_GT(seq.get_single_block_id(), 0);
+  EXPECT_GT(seq.get_embedding_block_id(), 0);
 }
 
 TEST(BlockManagerPoolTest, DeallocateReleasesSingleBlockId) {
@@ -302,7 +304,8 @@ TEST(BlockManagerPoolTest, DeallocateReleasesSingleBlockId) {
   BlockManagerPool::Options options;
   options.num_blocks(8).host_num_blocks(0).block_size(1).enable_prefix_cache(
       false);
-  options.num_single_blocks(FLAGS_max_seqs_per_batch + 2)
+  options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
+      .num_speculative_tokens(1)
       .enable_linear_state(true)
       .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
@@ -311,26 +314,31 @@ TEST(BlockManagerPoolTest, DeallocateReleasesSingleBlockId) {
 
   Sequence seq1 = make_sequence(0, /*prompt_tokens=*/{1, 2, 3});
   ASSERT_TRUE(pool.allocate(&seq1));
-  const int32_t id1 = seq1.get_single_block_id();
+  const int32_t id1 = seq1.get_embedding_block_id();
   pool.deallocate(&seq1);
-  EXPECT_FALSE(seq1.get_single_block_id() >= 0);
+  EXPECT_FALSE(seq1.get_embedding_block_id() >= 0);
 
   Sequence seq2 = make_sequence(1, /*prompt_tokens=*/{4, 5, 6});
   ASSERT_TRUE(pool.allocate(&seq2));
-  EXPECT_EQ(seq2.get_single_block_id(), id1);
+  EXPECT_EQ(seq2.get_embedding_block_id(), id1);
 }
 
-TEST(BlockManagerPoolTest, SingleBlockCapacityUsesOptionsMaxSeqs) {
+TEST(BlockManagerPoolTest, EmbeddingBlockCapacityUsesNumEmbeddingBlocks) {
   ScopedValue<int32_t> max_seqs_guard(
       &SchedulerConfig::get_instance().max_seqs_per_batch(), 0);
 
   BlockManagerPool::Options options;
+  // The EMBEDDING pool is sized directly by num_embedding_blocks (id 0 is
+  // reserved for padding, so 5 exposes 4 usable ids for the 4 sequences).
   options.num_blocks(16)
       .host_num_blocks(0)
       .block_size(1)
       .enable_prefix_cache(false)
       .max_seqs_per_batch(4);
-  options.enable_linear_state(true).linear_state_num_slots(64);
+  options.num_embedding_blocks(5)
+      .num_speculative_tokens(1)
+      .enable_linear_state(true)
+      .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
@@ -340,7 +348,7 @@ TEST(BlockManagerPoolTest, SingleBlockCapacityUsesOptionsMaxSeqs) {
   for (size_t i = 0; i < 4; ++i) {
     sequences.emplace_back(make_sequence(i, /*prompt_tokens=*/{1}));
     EXPECT_TRUE(pool.allocate(&sequences.back()));
-    EXPECT_TRUE(sequences.back().get_single_block_id() >= 0);
+    EXPECT_TRUE(sequences.back().get_embedding_block_id() >= 0);
   }
 }
 
@@ -350,9 +358,11 @@ TEST(BlockManagerPoolTest, TryAllocateKvFailureRollsBackSingleBlock) {
       false);
   // id 0 is reserved for padding, so capacity 3 exposes 2 usable single-block
   // ids, enough for the two sequences allocated after the rollback. Zero out
-  // max_seqs_per_batch so num_single_blocks alone drives the SINGLE pool size.
+  // max_seqs_per_batch so num_embedding_blocks alone drives the EMBEDDING pool
+  // size.
   options.max_seqs_per_batch(0)
-      .num_single_blocks(3)
+      .num_embedding_blocks(3)
+      .num_speculative_tokens(1)
       .enable_linear_state(true)
       .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
@@ -364,7 +374,7 @@ TEST(BlockManagerPoolTest, TryAllocateKvFailureRollsBackSingleBlock) {
   std::vector<int32_t> huge_prompt(100, 1);
   Sequence fail_seq = make_sequence(0, huge_prompt);
   EXPECT_FALSE(pool.try_allocate(&fail_seq));
-  EXPECT_FALSE(fail_seq.get_single_block_id() >= 0);
+  EXPECT_FALSE(fail_seq.get_embedding_block_id() >= 0);
 
   // The unified slot must have been rolled back, leaving enough capacity for
   // two new sequences to allocate.
@@ -372,25 +382,24 @@ TEST(BlockManagerPoolTest, TryAllocateKvFailureRollsBackSingleBlock) {
   Sequence seq2 = make_sequence(2, /*prompt_tokens=*/{2});
   EXPECT_TRUE(pool.try_allocate(&seq1));
   EXPECT_TRUE(pool.try_allocate(&seq2));
-  EXPECT_TRUE(seq1.get_single_block_id() >= 0);
-  EXPECT_TRUE(seq2.get_single_block_id() >= 0);
+  EXPECT_TRUE(seq1.get_embedding_block_id() >= 0);
+  EXPECT_TRUE(seq2.get_embedding_block_id() >= 0);
 }
 
 TEST(BlockManagerPoolTest, SingleBlockCapacityCanBeLowerThanMaxSeqs) {
   BlockManagerPool::Options options;
-  // id 0 is reserved for padding, so capacity 4 exposes 3 usable single blocks.
-  // max_seqs_per_batch is 8 in the scheduler view, but num_single_blocks caps
-  // the SINGLE pool at 4 (pool takes the max, so num_single_blocks wins only
-  // when it is >= max_seqs_per_batch + 2 -- here it is 4 vs 8+2=10, so the
-  // 8+2 path would win; force num_single_blocks to be the winner by lowering
-  // the scheduler side).
+  // The EMBEDDING pool is sized directly by num_embedding_blocks, independent
+  // of max_seqs_per_batch. id 0 is reserved for padding, so 4 exposes 3 usable
+  // ids -- a deliberately smaller pool than the scheduler's max_seqs view.
   options.num_blocks(16)
       .host_num_blocks(0)
       .block_size(1)
       .max_seqs_per_batch(0)
-      .num_single_blocks(4)
+      .num_embedding_blocks(4)
       .enable_prefix_cache(false);
-  options.enable_linear_state(true).linear_state_num_slots(64);
+  options.num_speculative_tokens(1)
+      .enable_linear_state(true)
+      .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
@@ -405,24 +414,26 @@ TEST(BlockManagerPoolTest, SingleBlockCapacityCanBeLowerThanMaxSeqs) {
   EXPECT_TRUE(pool.try_allocate(&seq2));
   EXPECT_FALSE(pool.try_allocate(&seq3));
 
-  EXPECT_TRUE(seq0.get_single_block_id() >= 0);
-  EXPECT_TRUE(seq1.get_single_block_id() >= 0);
-  EXPECT_TRUE(seq2.get_single_block_id() >= 0);
-  EXPECT_FALSE(seq3.get_single_block_id() >= 0);
+  EXPECT_TRUE(seq0.get_embedding_block_id() >= 0);
+  EXPECT_TRUE(seq1.get_embedding_block_id() >= 0);
+  EXPECT_TRUE(seq2.get_embedding_block_id() >= 0);
+  EXPECT_FALSE(seq3.get_embedding_block_id() >= 0);
 }
 
 TEST(BlockManagerPoolTest, DpRankSelectionSkipsExhaustedSingleBlockPool) {
   BlockManagerPool::Options options;
   // id 0 is reserved for padding, so capacity 2 exposes 1 usable block per
-  // rank. Zero out max_seqs_per_batch so num_single_blocks alone drives the
-  // SINGLE pool size.
+  // rank. Zero out max_seqs_per_batch so num_embedding_blocks alone drives the
+  // EMBEDDING pool size.
   options.num_blocks(16)
       .host_num_blocks(0)
       .block_size(1)
       .max_seqs_per_batch(0)
-      .num_single_blocks(2)
+      .num_embedding_blocks(2)
       .enable_prefix_cache(false);
-  options.enable_linear_state(true).linear_state_num_slots(64);
+  options.num_speculative_tokens(1)
+      .enable_linear_state(true)
+      .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/2);
@@ -439,15 +450,17 @@ TEST(BlockManagerPoolTest, DpRankSelectionSkipsExhaustedSingleBlockPool) {
 TEST(BlockManagerPoolTest, SingleBlockExhaustionBehavesLikeKvBlockExhaustion) {
   BlockManagerPool::Options options;
   // id 0 is reserved for padding, so capacity 2 exposes 1 usable block per
-  // rank. Zero out max_seqs_per_batch so num_single_blocks alone drives the
-  // SINGLE pool size.
+  // rank. Zero out max_seqs_per_batch so num_embedding_blocks alone drives the
+  // EMBEDDING pool size.
   options.num_blocks(16)
       .host_num_blocks(0)
       .block_size(1)
       .max_seqs_per_batch(0)
-      .num_single_blocks(2)
+      .num_embedding_blocks(2)
       .enable_prefix_cache(false);
-  options.enable_linear_state(true).linear_state_num_slots(64);
+  options.num_speculative_tokens(1)
+      .enable_linear_state(true)
+      .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/2);
@@ -473,11 +486,12 @@ TEST(BlockManagerPoolTest, AllocateAssignsSingleBlockWhenLinearStateDisabled) {
   BlockManagerPool::Options options;
   options.num_blocks(8).host_num_blocks(0).block_size(1).enable_prefix_cache(
       false);
+  options.num_speculative_tokens(1).num_embedding_blocks(4);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
   Sequence seq = make_sequence(0, /*prompt_tokens=*/{1, 2});
   EXPECT_TRUE(pool.allocate(&seq));
-  EXPECT_TRUE(seq.get_single_block_id() >= 0);
+  EXPECT_TRUE(seq.get_embedding_block_id() >= 0);
 }
 
 TEST(BlockManagerPoolTest, CapacityReportsKvPoolWhenLinearStateEnabled) {
@@ -496,7 +510,7 @@ TEST(BlockManagerPoolTest, CapacityReportsKvPoolWhenLinearStateEnabled) {
       .host_num_blocks(0)
       .block_size(8)
       .enable_prefix_cache(false);
-  options.num_single_blocks(FLAGS_max_seqs_per_batch + 2)
+  options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
       .linear_state_num_slots(kLinearStateSlots);
   ScopedValue<int32_t> chunk_guard(
@@ -519,7 +533,8 @@ TEST(BlockManagerPoolTest, SequenceCopyDoesNotReuseSingleBlockSlot) {
   BlockManagerPool::Options options;
   options.num_blocks(8).host_num_blocks(0).block_size(1).enable_prefix_cache(
       false);
-  options.num_single_blocks(FLAGS_max_seqs_per_batch + 2)
+  options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
+      .num_speculative_tokens(1)
       .enable_linear_state(true)
       .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
@@ -528,20 +543,20 @@ TEST(BlockManagerPoolTest, SequenceCopyDoesNotReuseSingleBlockSlot) {
 
   Sequence src = make_sequence(0, /*prompt_tokens=*/{1, 2, 3});
   ASSERT_TRUE(pool.allocate(&src));
-  ASSERT_TRUE(src.get_single_block_id() >= 0);
+  ASSERT_TRUE(src.get_embedding_block_id() >= 0);
   ASSERT_TRUE(src.has_linear_state_slot());
-  const int32_t src_single_block_id = src.get_single_block_id();
+  const int32_t src_single_block_id = src.get_embedding_block_id();
   const int32_t src_linear_state_slot_id = src.get_linear_state_slot_id();
 
   Sequence clone(src);
-  EXPECT_FALSE(clone.get_single_block_id() >= 0);
-  EXPECT_EQ(clone.get_single_block_id(), -1);
+  EXPECT_FALSE(clone.get_embedding_block_id() >= 0);
+  EXPECT_EQ(clone.get_embedding_block_id(), -1);
   EXPECT_FALSE(clone.has_linear_state_slot());
   EXPECT_EQ(clone.get_linear_state_slot_id(), -1);
 
   ASSERT_TRUE(pool.allocate(&clone));
-  EXPECT_TRUE(clone.get_single_block_id() >= 0);
-  EXPECT_NE(clone.get_single_block_id(), src_single_block_id);
+  EXPECT_TRUE(clone.get_embedding_block_id() >= 0);
+  EXPECT_NE(clone.get_embedding_block_id(), src_single_block_id);
   EXPECT_TRUE(clone.has_linear_state_slot());
   EXPECT_NE(clone.get_linear_state_slot_id(), src_linear_state_slot_id);
 }
@@ -575,7 +590,7 @@ TEST(BlockManagerPoolTest, LinearStateBlockManagerMatchesOnlyCheckpointHashes) {
   BlockManagerPool::Options options;
   options.num_blocks(8).host_num_blocks(0).block_size(4).enable_prefix_cache(
       true);
-  options.num_single_blocks(FLAGS_max_seqs_per_batch + 2)
+  options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
       .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
@@ -631,7 +646,7 @@ TEST(BlockManagerPoolTest, ExactPromptCannotReuseUncheckpointedTailBoundary) {
   BlockManagerPool::Options options;
   options.num_blocks(32).host_num_blocks(0).block_size(4).enable_prefix_cache(
       true);
-  options.num_single_blocks(FLAGS_max_seqs_per_batch + 2)
+  options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
       .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
@@ -670,7 +685,7 @@ TEST(BlockManagerPoolTest, PromptPastCheckpointReusesCheckpointBoundary) {
   BlockManagerPool::Options options;
   options.num_blocks(32).host_num_blocks(0).block_size(4).enable_prefix_cache(
       true);
-  options.num_single_blocks(FLAGS_max_seqs_per_batch + 2)
+  options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
       .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
@@ -967,7 +982,7 @@ TEST(BlockManagerPoolTest, SparseLinearStateCheckpointTrimsSharedKVBlocks) {
     BlockManagerPool::Options options;
     options.num_blocks(48).host_num_blocks(0).block_size(4).enable_prefix_cache(
         true);
-    options.num_single_blocks(FLAGS_max_seqs_per_batch + 2)
+    options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
         .enable_linear_state(true)
         .linear_state_num_slots(64);
     ScopedValue<int32_t> chunk_guard(
@@ -1023,7 +1038,7 @@ TEST(BlockManagerPoolTest, SparseLinearStateCheckpointCannotExceedKVMatch) {
   BlockManagerPool::Options options;
   options.num_blocks(48).host_num_blocks(0).block_size(4).enable_prefix_cache(
       true);
-  options.num_single_blocks(FLAGS_max_seqs_per_batch + 2)
+  options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
       .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(
@@ -1073,7 +1088,7 @@ TEST(BlockManagerPoolTest, ExactPromptStopsAtEarlierCheckpoint) {
   BlockManagerPool::Options options;
   options.num_blocks(32).host_num_blocks(0).block_size(4).enable_prefix_cache(
       true);
-  options.num_single_blocks(FLAGS_max_seqs_per_batch + 2)
+  options.num_embedding_blocks(FLAGS_max_seqs_per_batch + 2)
       .enable_linear_state(true)
       .linear_state_num_slots(64);
   ScopedValue<int32_t> chunk_guard(

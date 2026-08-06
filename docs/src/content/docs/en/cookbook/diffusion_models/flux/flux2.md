@@ -1,17 +1,19 @@
 ---
 title: "Flux2"
-description: "CookBook recipe placeholder for Flux2 diffusion model inference"
+description: "CookBook recipe for Flux2 diffusion model inference"
 sidebar:
   order: 3
 ---
 
-This section will collect Flux2 diffusion model inference recipes for xLLM.
+This section collects Flux2 diffusion model inference recipes for xLLM.
 
 + Source code: https://github.com/xLLM-AI/xllm
 
 + Available in China: https://gitcode.com/xLLM-AI/xllm
 
 + Weight download: [modelscope-FLUX.2-dev](https://www.modelscope.cn/models/black-forest-labs/FLUX.2-dev/)
+
+Note: Since the default `add_bos_token` in xLLM is `True`, and line 4 of `tokenizer/chat_template.jinja` in the Flux2 model weight directory uses `{{ bos_token }}` by default, you need to comment it out or remove it.
 
 ## 1. Pull the Image Environment
 
@@ -25,6 +27,7 @@ docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260605
 # A3 arm
 docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260605
 ```
+
 
 Then create the corresponding container:
 
@@ -57,6 +60,7 @@ docker exec -it $CONTAINER bash
 Download the official repository and module dependencies:
 
 ```bash
+
 git clone https://github.com/xLLM-AI/xllm.git
 cd xllm
 
@@ -88,7 +92,7 @@ python -c "import torch_npu
 for i in range(16):torch_npu.npu.set_device(i)"
 ```
 
-Flux2 serving in xLLM uses a two-stage mode: you need to start the text-encoder component and the DiT component separately, then trigger the full Flux2 inference pipeline via the Python embedding script. Additionally, Flux2 supports TP, SP, and dit_cache features (TaylorSeer, ResidualCache), but does not currently support the chunked prefill feature.
+Flux2 serving in xLLM uses a two-stage mode: you need to start the text-encoder component and the DiT component separately, then trigger the full Flux2 inference pipeline via the Python embedding script. Additionally, Flux2 supports TP, SP, and dit_cache features (TaylorSeer, ResidualCache).
 
 ### 1. Start the text-encoder component
 #### Environment Variables
@@ -119,6 +123,8 @@ NNODES=2                                           # Number of nodes (this scrip
 
 mkdir -p $LOG_DIR
 
+export ASCEND_RT_VISIBLE_DEVICES=4,5               # NPU logical device IDs
+
 for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
@@ -129,14 +135,17 @@ do
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --max_memory_utilization=0.86 \
+    --max_tokens_per_batch=40000 \
+    --max_seqs_per_batch=256 \
     --block_size=128 \
     --tp_size=2 \
     --communication_backend="hccl" \
+    --backend="vlm" \
     --enable_prefix_cache=false \
     --enable_chunked_prefill=false \
-    --enable_schedule_overlap=true \
-    --enable_return_mm_full_embeddings=true \
-    --enable_mistral_prompt_to_message=true \
+    --enable_schedule_overlap=false \
+    --enable_return_mm_full_embeddings 1 \
+    --max_sequence_length=512 \
     --task="embed" \
     --enable_shm=true \
     --node_rank=$i \ > $LOG_FILE 2>&1 &
@@ -180,23 +189,26 @@ export HCCL_IF_BASE_PORT=43432  # HCCL communication base port
 #### Startup Command - Flux2 DiT component (single machine, 1 card with 2 dies, TP=2)
 
 ```bash
-MASTER_NODE_ADDR="127.0.0.1:8999"                  # Master node address (must be consistent globally)
+MASTER_NODE_ADDR="127.0.0.1:8888"                  # Master node address (must be consistent globally)
 START_PORT=18018                                   # Service starting port
 LOG_DIR="log"                                      # Log directory
 NNODES=2                                           # Number of nodes (this script starts 2 processes)
+
+export ASCEND_RT_VISIBLE_DEVICES=6,7               # NPU logical device IDs
 
 for (( i=0; i<2; i++ ))
 do
   PORT=$((START_PORT + i))
   LOG_FILE="$LOG_DIR/dit_node_$i.log"
   ./build/xllm/core/server/xllm \
-    --model="/path/to/flux2/" \
+    --model="/export/home/models/flux2/" \
     --max_memory_utilization=0.6 \
     --backend="dit" \
     --tp_size=2 \
     --master_node_addr=$MASTER_NODE_ADDR \
     --nnodes=$NNODES \
     --port $PORT \
+    --dit_cache_policy=None \
     --communication_backend="hccl" \
     --enable_prefix_cache=false \
     --enable_chunked_prefill=false \
@@ -293,7 +305,6 @@ def load_tensor(
     target_dtype = dtype or torch.float32
     tensor = tensor.to(dtype=target_dtype)
 
-    # Clone to ensure independent memory (optional but safe)
     return tensor.clone()
 
 def base64_to_image(base64_string, output_path):
@@ -384,6 +395,110 @@ def create_tensor(data, name, datatype="FP32"):
         }
 
 
+def _get_tensor_content(contents, snake_name, camel_name):
+        value = contents.get(snake_name)
+        if value is None:
+                value = contents.get(camel_name)
+        return value
+
+
+def _decode_tensor_bytes(raw_value):
+        if raw_value is None or raw_value == "":
+                return None
+        if isinstance(raw_value, str):
+                return base64.b64decode(raw_value)
+        if isinstance(raw_value, bytes):
+                return raw_value
+        if isinstance(raw_value, list):
+                return bytes(raw_value)
+        raise ValueError(f"Unsupported bytes_contents type: {type(raw_value)}")
+
+
+def _reshape_tensor_from_bytes(raw_bytes, datatype, shape):
+        byte_buffer = bytearray(raw_bytes)
+        normalized_datatype = datatype.upper()
+        if normalized_datatype == "FP32":
+                tensor = torch.frombuffer(byte_buffer, dtype=torch.float32).clone()
+        elif normalized_datatype == "FP16":
+                tensor = torch.frombuffer(byte_buffer, dtype=torch.float16).clone()
+                tensor = tensor.to(torch.float32)
+        elif normalized_datatype == "BF16":
+                tensor = torch.frombuffer(byte_buffer, dtype=torch.bfloat16).clone()
+                tensor = tensor.to(torch.float32)
+        else:
+                raise ValueError(f"Parsing bytes_contents with datatype={datatype} is not yet supported")
+
+        expected_numel = math.prod(shape)
+        if tensor.numel() != expected_numel:
+                raise ValueError(
+                    f"bytes_contents element count does not match shape: numel={tensor.numel()}, "
+                    f"expected={expected_numel}, datatype={datatype}, shape={shape}"
+                )
+        return tensor.reshape(shape)
+
+
+def _extract_tensor_payload(tensor, shape):
+        datatype = tensor.get("datatype", "FP32")
+        contents = tensor.get("contents", {})
+        flat_embedding = _get_tensor_content(
+            contents, "fp32_contents", "fp32Contents"
+        )
+        if flat_embedding:
+                return torch.tensor(flat_embedding, dtype=torch.float32).reshape(shape)
+
+        raw_value = _get_tensor_content(
+            contents, "bytes_contents", "bytesContents"
+        )
+        raw_bytes = _decode_tensor_bytes(raw_value)
+        if raw_bytes is not None:
+                return _reshape_tensor_from_bytes(raw_bytes, datatype, shape)
+
+        raise ValueError(
+            f"tensor has shape but no usable data: datatype={datatype}, shape={shape}, "
+            f"contents keys={list(contents.keys())}"
+        )
+
+
+def extract_prompt_embedding(result, hidden_size=5120, num_layers=3):
+        """Extract Flux2 prompt embeddings from text_encoder response."""
+        data_items = result.get("data", [])
+        if not data_items:
+                raise ValueError(f"text_encoder response missing data field or data is empty: {result.keys()}")
+
+        data = data_items[0]
+        mm_embeddings = data.get("mm_embeddings", [])
+        if mm_embeddings:
+                tensor = mm_embeddings[0].get("embedding", {})
+                shape = [int(dim) for dim in tensor.get("shape", [])]
+                if not shape:
+                        raise ValueError("mm_embeddings[0].embedding missing shape field")
+                if any(dim <= 0 for dim in shape):
+                        raise ValueError(f"mm_embeddings[0].embedding has invalid shape: {shape}")
+
+                print("response_keys", list(data.keys()))
+                print("mm_embedding_datatype", tensor.get("datatype", "FP32"))
+                print("mm_embedding_shape", shape)
+                return _extract_tensor_payload(tensor, shape)
+
+        flat_embedding = data.get("embedding", [])
+        if not flat_embedding:
+                raise ValueError(
+                    f"embedding is empty and no mm_embeddings found in text_encoder response, data keys: {list(data.keys())}"
+                )
+
+        seq_len = len(flat_embedding) // (num_layers * hidden_size)
+        if seq_len <= 0:
+                raise ValueError(
+                    f"plain embedding length insufficient, len={len(flat_embedding)}, "
+                    f"num_layers={num_layers}, hidden_size={hidden_size}"
+                )
+        print("response_keys", list(data.keys()))
+        print("embedding_shape", [num_layers, seq_len, hidden_size])
+        return torch.tensor(flat_embedding, dtype=torch.float32).reshape(
+            num_layers, seq_len, hidden_size
+        )
+
+
 def test_image_generation(pos_embed):
         """Test the image generation API (using the corrected Tensor structure)"""
         api_base = "http://127.0.0.1:18018"
@@ -433,11 +548,12 @@ def test_image_generation(pos_embed):
                 data=json.dumps(payload),
                 timeout=60 * 5
                 )
-
                 response.raise_for_status()
                 result = response.json()
+                # print("data",json.dumps(payload))
                 # 4. Parse response
                 print(f"API response: {json.dumps(result, indent=2, ensure_ascii=False)}")
+                # print(f"Request elapsed time: {time.time() - :.2f}s")
                 if result.get("output") and result["output"].get("results"):
                         for idx, image_result in enumerate(result["output"]["results"]):
                                 print(f"\nGenerated image {idx + 1}:")
@@ -456,6 +572,7 @@ def test_image_generation(pos_embed):
         except Exception as e:
                 print(f"Processing failed: {str(e)}")
 
+
 def calculate_dimensions(target_area, ratio):
     width = math.sqrt(target_area * ratio)
     height = width / ratio
@@ -466,35 +583,29 @@ def calculate_dimensions(target_area, ratio):
     return width, height
 
 def main(args: argparse.Namespace):
-    start = time.time()
-
-    tokenizer = AutoTokenizer.from_pretrained("/path/to/flux2/text_encoder/")
-    messages = [
-        {"role": "system", "content": "You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object\nattribution and actions without speculation."},
-        {"role": "user", "content": "A cat holding a sign that says hello world"},
-    ]
-    formatted_input = tokenizer.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        tokenize=False,
-    )                                                                                                                                                             
-    # 4. Construct payload with the formatted string as input
-    payload = {                                                                                                                                                   
-        "model": "text_encoder",                                                                                                                                  
-        "input": formatted_input,
-        "encoding_format": "float"                                                                                                                                
+    start = time.time()            
+    # 1. Construct payload with the formatted string as input
+    payload = {
+        "model": "text_encoder",
+        "messages": [
+            {"role": "system", "content": [
+                {"type": "text", "text": "You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object\nattribution and actions without speculation."}
+            ]},
+            {"role": "user", "content": [
+                {"type": "text", "text": "A cat holding a sign that says hello world"}
+            ]},
+        ],
     }
 
-    # Send request to the text-encoder
+    # 2. Send request to the text-encoder
     raw_response = requests.post("http://127.0.0.1:18001/v1/embeddings", json=payload)
     result = raw_response.json()
 
-    # Parse embeddings
-    bytes_data = result["data"][0]["mm_embeddings"][0]["embedding"]["contents"]["bytes_contents"]
-    embed_data = base64.b64decode(bytes_data)
-    embed_shape = result["data"][0]["mm_embeddings"][0]["embedding"]["shape"]
-    pos_embed = torch.frombuffer(bytearray(embed_data), dtype=torch.bfloat16).reshape(embed_shape)
+    # 3. Mistral3 Flux2 text encoder output shape: [3, seq_len, hidden_size]
+    pos_embed = extract_prompt_embedding(result)
+    print("embed_shape", list(pos_embed.shape))
 
+    # 4. Call the DiT component to generate the image
     test_image_generation(pos_embed)
     end = time.time()
     print(f"Elapsed time: {end - start:.2f} seconds")

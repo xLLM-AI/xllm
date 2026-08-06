@@ -406,7 +406,9 @@ torch::Tensor DeepseekV4IndexerImpl::select_qli(
     const std::optional<torch::Tensor>& qli_metadata,
     bool with_prefill,
     std::tuple<torch::Tensor, torch::Tensor>* compressor_states,
-    std::tuple<torch::Tensor, torch::Tensor>* compressor_block_tables) {
+    std::tuple<torch::Tensor, torch::Tensor>* compressor_block_tables,
+    const torch::Tensor& x_kv,
+    const std::optional<torch::Tensor>& x_kv_cu_seq_lens) {
   CHECK(index_cache.defined())
       << "DeepseekV4Indexer::select_qli: index_cache is undefined";
 
@@ -421,11 +423,30 @@ torch::Tensor DeepseekV4IndexerImpl::select_qli(
   auto hadamard = get_hadamard_matrix(attn_metadata, hadamard_matrix_);
   q = rotate_activation_with_hadamard(q, hadamard, hadamard_scale_);
 
-  auto kv = compress_kv(x,
+  // The index cache must cover every token so that top-k indices and the sparse
+  // attention block-table addressing share one global compressed coordinate
+  // space. Under CP, x_kv holds the global-ordered hidden; x stays local so
+  // build_weights() below keeps one weight row per local query.
+  const bool cp_split_inputs = x_kv.defined();
+  const torch::Tensor& kv_source = cp_split_inputs ? x_kv : x;
+  // The cu_seqlens must count the rows of the tensor it is paired with, in the
+  // compressor's (batch+1,) leading-zero cumulative layout. x_kv holds the
+  // gathered query rows of every CP rank, so it pairs with the global query
+  // cumsum -- not with actual_seq_lengths_query, which the model localized to
+  // this rank's shard, and not with actual_seq_lengths_key, which is
+  // per-sequence rather than cumulative. Feeding either of those makes the
+  // kernel's tiling read past the end and launch with blockDim == 0.
+  if (cp_split_inputs) {
+    CHECK(x_kv_cu_seq_lens.has_value() && x_kv_cu_seq_lens->defined())
+        << "DeepseekV4Indexer::select_qli: x_kv requires x_kv_cu_seq_lens";
+  }
+  const std::optional<torch::Tensor>& compress_cu_seqlens =
+      cp_split_inputs ? x_kv_cu_seq_lens : actual_seq_lengths_query;
+  auto kv = compress_kv(kv_source,
                         attn_metadata,
                         compressed_cos,
                         compressed_sin,
-                        actual_seq_lengths_query,
+                        compress_cu_seqlens,
                         compressor_states,
                         compressor_block_tables);
   if (kv.numel() > 0) {
@@ -548,7 +569,11 @@ torch::Tensor DeepseekV4IndexerImpl::select_qli(
     const std::optional<torch::Tensor>& qli_metadata,
     bool with_prefill,
     std::tuple<torch::Tensor, torch::Tensor>* compressor_states,
-    std::tuple<torch::Tensor, torch::Tensor>* compressor_block_tables) {
+    std::tuple<torch::Tensor, torch::Tensor>* compressor_block_tables,
+    const torch::Tensor& x_kv,
+    const std::optional<torch::Tensor>& x_kv_cu_seq_lens) {
+  // Must forward x_kv and its cu_seqlens, otherwise callers using this overload
+  // would silently lose CP and write a partial index cache.
   return select_qli(x,
                     qr,
                     qr_pertoken_scale,
@@ -564,7 +589,9 @@ torch::Tensor DeepseekV4IndexerImpl::select_qli(
                     qli_metadata,
                     with_prefill,
                     compressor_states,
-                    compressor_block_tables);
+                    compressor_block_tables,
+                    x_kv,
+                    x_kv_cu_seq_lens);
 }
 
 void DeepseekV4IndexerImpl::load_state_dict(const StateDict& state_dict) {

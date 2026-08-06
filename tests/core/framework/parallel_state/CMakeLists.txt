@@ -77,6 +77,17 @@ if(USE_NPU)
       absl::time
       GTest::gtest_main
   )
+
+  cc_test(
+    NAME
+      process_group_batch_test
+    SRCS
+      process_group_batch_test.cpp
+    DEPS
+      parallel_state
+      torch
+      GTest::gtest_main
+  )
 endif()
 
 if(USE_MLU)

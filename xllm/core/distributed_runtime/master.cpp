@@ -130,20 +130,27 @@ std::optional<std::string> validate_model_cp(const Options& options,
              "speculative algorithms (Eagle3/DFlash); disable CP or disable "
              "the speculative algorithm. MTP and Suffix are supported.";
     }
-    // CP is prefill-only; reject graph/non-prefill roles.
-    if (options.enable_graph()) {
-      return "Model-side CP does not support graph capture "
-             "(enable_graph=true); disable graph or disable CP (cp_size=1).";
-    }
+    // enable_graph is compatible with CP because the two are phase-disjoint:
+    // CP only engages on batch_forward_type.no_decode() (both the model-owned
+    // split in deepseek_v4 and NpuCpPlan::prepare return early on decode),
+    // while ACL graph only captures/replays pure decode -- AclGraphExecutorImpl
+    // ::run() falls back to eager for anything else, and params.enable_graph is
+    // set only by the decode capture path. Graph-mode decode therefore runs
+    // with CP inactive, which is the same non-CP decode CP already relies on.
+    //
+    // The one batch that satisfies both gates is spec-verify chunked prefill.
+    // The graph executor only takes it for hybrid-linear-attention models, and
+    // no CP-capable model is one, so it falls back to eager today; the guard in
+    // AclGraphExecutorImpl::run() keeps that true if a future model is both.
     if (options.instance_role() != InstanceRole::DEFAULT &&
         options.instance_role() != InstanceRole::PREFILL) {
       return "Model-side CP supports only DEFAULT or PREFILL roles";
     }
-    if (options.dp_size() != 1) {
-      return "Model-side CP requires dp_size == 1";
-    }
 
-    // Require registered NPU model-side CP capability + ATB backend.
+    // Require registered NPU model-side CP capability. The backend is not
+    // constrained: ATB models drive CP through NpuCpPlan, while TORCH models
+    // (deepseek_v4) own their CP split inside the model. Both rely on the
+    // orthogonal dp * cp * attn_tp == world layout validated below.
     std::string effective_backend;
     std::string resolved_name;
     std::string resolve_error;
@@ -157,16 +164,12 @@ std::optional<std::string> validate_model_cp(const Options& options,
       return "Model-side CP rejected model_type=" + model_type + ": " +
              resolve_error;
     }
-    if (effective_backend != "ATB") {
-      return "NPU model-side CP requires --npu_kernel_backend=ATB for "
-             "model_type=" +
-             model_type + " (resolved backend=" + effective_backend + ")";
-    }
     if (!is_npu_model_cp_capable(resolved_name)) {
       return "NPU model-side CP does not support model_type=" + model_type +
              " (resolved=" + resolved_name +
-             "); only deepseek_v32, deepseek_v32_mtp, glm_moe_dsa, "
-             "glm_moe_dsa_mtp are registered as CP-capable.";
+             "); only deepseek_v32, deepseek_v32_mtp, deepseek_v4, "
+             "deepseek_v4_mtp, glm_moe_dsa, glm_moe_dsa_mtp are registered as "
+             "CP-capable.";
     }
     if (global_world_size % (options.dp_size() * options.cp_size()) != 0) {
       return "NPU CP requires world_size divisible by dp_size * cp_size "
@@ -384,6 +387,7 @@ Master::Master(const Options& options, EngineType type)
         .max_memory_utilization(options.max_memory_utilization())
         .enable_prefix_cache(options.enable_prefix_cache())
         .max_encoder_cache_size(options.max_encoder_cache_size())
+        .max_processor_cache_items(options.max_processor_cache_items())
         .max_linear_state_cache_slots(options.max_linear_state_cache_slots())
         .task_type(options.task_type())
         .enable_mla(options_.enable_mla())
@@ -392,6 +396,8 @@ Master::Master(const Options& options, EngineType type)
         .enable_mmrs_fusion(options_.enable_mmrs_fusion())
         .mmrs_comm_mode(options_.mmrs_comm_mode())
         .cp_size(options_.cp_size())
+        .instance_role(options_.instance_role())
+        .enable_disagg_pd(options_.enable_disagg_pd())
         .npu_kernel_backend(options_.npu_kernel_backend())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .enable_offline_inference(options_.enable_offline_inference())
@@ -615,6 +621,7 @@ Master::Master(const Options& options, EngineType type)
         .model_id(options.model_id())
         .devices(devices)
         .backend(options.backend())
+        .npu_kernel_backend(options_.npu_kernel_backend())
         .enable_prefix_cache(options_.enable_prefix_cache())
         .enable_chunked_prefill(options_.enable_chunked_prefill())
         .enable_offline_inference(options_.enable_offline_inference())
@@ -634,7 +641,8 @@ Master::Master(const Options& options, EngineType type)
         .tp_size(options_.tp_size())
         .sp_size(options_.sp_size())
         .cfg_size(options_.cfg_size())
-        .vae_size(options_.vae_size());
+        .vae_size(options_.vae_size())
+        .text_encoder_tp_size(options_.text_encoder_tp_size());
 
     auto dit_engine = std::make_unique<DiTEngine>(eng_options);
     engine_ = std::move(dit_engine);

@@ -54,21 +54,24 @@ Qwen3HybridDecoderLayerImplBase::Qwen3HybridDecoderLayerImplBase(
       Qwen3NextRMSNorm(
           model_args.hidden_size(), model_args.rms_norm_eps(), options));
 
-  // Initialize mlp
+  // Initialize the feed-forward block. Qwen3.5 uses a routed block; select the
+  // MUSA MoE path only for qwen3_5_moe_text (generic Qwen3-Next MoE differs).
   auto mlp_only_layers = model_args.mlp_only_layers();
-#if !defined(USE_MUSA)
-  if ((std::count(mlp_only_layers.begin(), mlp_only_layers.end(), layer_id) ==
-       0) &&
+  const bool is_moe_layer =
+      std::count(mlp_only_layers.begin(), mlp_only_layers.end(), layer_id) ==
+          0 &&
       model_args.n_routed_experts() > 0 &&
-      (layer_id + 1) % model_args.decoder_sparse_step() == 0) {
+      (layer_id + 1) % model_args.decoder_sparse_step() == 0;
+  const bool use_qwen35_moe =
+      is_moe_layer && model_args.model_type() == "qwen3_5_moe_text";
+  if (use_qwen35_moe) {
     moe_mlp_ = register_module("mlp",
-                               FusedMoE(model_args,
-                                        FusedMoEArgs{.is_gated = true},
-                                        quant_args,
-                                        parallel_args,
-                                        options));
+                               Qwen3_5FusedMoE(model_args,
+                                               FusedMoEArgs{.is_gated = true},
+                                               quant_args,
+                                               parallel_args,
+                                               options));
   } else {
-#endif
     mlp_ = register_module("mlp",
                            DenseMLP(model_args.hidden_size(),
                                     model_args.intermediate_size(),
@@ -79,9 +82,7 @@ Qwen3HybridDecoderLayerImplBase::Qwen3HybridDecoderLayerImplBase(
                                     quant_args,
                                     parallel_args.tp_group_,
                                     options));
-#if !defined(USE_MUSA)
   }
-#endif
 }
 
 void Qwen3HybridDecoderLayerImplBase::load_state_dict(
@@ -96,21 +97,20 @@ void Qwen3HybridDecoderLayerImplBase::load_state_dict(
       state_dict.get_dict_with_prefix("input_layernorm."));
   post_norm_->load_state_dict(
       state_dict.get_dict_with_prefix("post_attention_layernorm."));
-#if !defined(USE_MUSA)
   if (moe_mlp_) {
     moe_mlp_->load_state_dict(state_dict.get_dict_with_prefix("mlp."));
   } else {
-#endif
     mlp_->load_state_dict(state_dict.get_dict_with_prefix("mlp."));
-#if !defined(USE_MUSA)
   }
-#endif
 }
 
 void Qwen3HybridDecoderLayerImplBase::verify_loaded_weights(
     const std::string& prefix) const {
   if (linear_attention_) {
     linear_attention_->verify_loaded_weights(prefix + "linear_attn.");
+  }
+  if (moe_mlp_) {
+    moe_mlp_->verify_loaded_weights();
   }
 }
 
@@ -142,15 +142,11 @@ torch::Tensor Qwen3HybridDecoderLayerImplBase::forward(
   std::tie(x, residual) = post_norm_->forward(x, residual);
 
   // MLP forward
-#if !defined(USE_MUSA)
   if (moe_mlp_) {
-    x = moe_mlp_(x, input_params);
+    x = moe_mlp_->forward(x, input_params);
   } else {
-#endif
     x = mlp_(x);
-#if !defined(USE_MUSA)
   }
-#endif
 
   return x;
 }

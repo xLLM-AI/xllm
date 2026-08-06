@@ -4,124 +4,97 @@ sidebar:
   order: 82
 ---
 
-## Feature Introduction
+## Overview
 
-FlashComm is a prefill communication optimization for NPU Tensor Parallel inference in xLLM. It targets the communication overhead after row-parallel linear layers in long-prefill workloads, and uses a Matmul + ReduceScatter fused operator when the workload is suitable.
+FlashComm is xLLM's prefill communication optimization for NPU Tensor Parallel inference. It reduces the communication cost after row-parallel linear layers during long-input prefill, and where supported, uses a Matmul + ReduceScatter fused operator to cut kernel-launch and communication-scheduling overhead.
 
-FlashComm currently contains two parts:
+FlashComm has two tiers:
 
-- **Sequence sharding**: during prefill, the token sequence is split across TP ranks so part of the following computation runs on local token shards.
-- **MMRS fused operator**: in supported row-parallel linear layers, the normal `matmul + reduce_scatter` path is replaced by the torch_npu `npu_mm_reduce_scatter_base` operator, which fuses Matmul and ReduceScatter.
+- **Sequence-dimension sharding (core)**: during prefill, the token sequence is split across TP ranks so that later work runs on each rank's token shard, and the `all_reduce` after row-parallel layers is replaced with `reduce_scatter`, gathering the full sequence back only at the boundaries that need it. This tier applies to **all dtypes** (BF16 and every quantization path) and is the main source of the speedup.
+- **MMRS fused operator (incremental)**: in supported row-parallel layers, `matmul + reduce_scatter` is replaced with torch_npu's `npu_mm_reduce_scatter_base`, further reducing launch and scheduling cost. The fused kernel currently covers the **BF16** and **w8a8_dynamic (int8 dynamic)** paths.
 
-FlashComm is disabled by default. Even when the feature flag is enabled, it only becomes active when the runtime conditions are satisfied. Otherwise, xLLM falls back to the original execution path.
+FlashComm is off by default, controlled by the `--enable_flashcomm1` master switch. Once enabled, it only activates when the runtime conditions are met (prefill stage, token count above threshold, `cp=1`); otherwise it falls back to the original execution path.
 
 ## Design
 
-The FlashComm flow is:
+The FlashComm flow:
 
-1. When a request enters prefill, the runtime builds a FlashComm context from the token count, parallel configuration, and feature flags.
-2. If the context is active, hidden states are sharded along the sequence dimension across TP ranks.
-3. Supported row-parallel linear layers first try the MMRS fused path.
-4. If MMRS is not applicable, for example because of unsupported shape, dtype, bias, or communication context, the caller falls back to the normal matmul and reduce_scatter path.
-5. At boundaries that require full hidden states, xLLM gathers the sequence back.
+1. When a request enters prefill, the runtime builds a FlashComm context from the token count, parallel config, and switches.
+2. When the context is active, the input hidden states are split along the sequence dimension across TP ranks.
+3. After a row-parallel linear layer, communication switches from `all_reduce` to `reduce_scatter`; if the layer's dtype supports MMRS, the `npu_mm_reduce_scatter_base` fused path is tried first.
+4. If MMRS does not apply (dtype without a fused kernel, unsupported shape/bias, or missing communication context), it falls back to plain matmul + reduce_scatter — functionally and numerically identical, just without the kernel fusion.
+5. At boundaries needing the full hidden states (e.g. attention q_a/kv projections, MoE input), the full sequence is restored via gather.
 
-The current MMRS path uses the torch_npu `npu_mm_reduce_scatter_base` operator. The xLLM wrapper is intentionally thin: it validates inputs, resolves the HCCL group, selects `comm_mode`, and records logs. It does not reimplement the Matmul + ReduceScatter kernel.
+The MMRS path uses torch_npu's `npu_mm_reduce_scatter_base` (BF16) and the corresponding int8 fused entry (w8a8_dynamic). xLLM keeps only a thin wrapper for input validation, HCCL group acquisition, `comm_mode` selection, quant-scale passing, and logging — it does not reimplement the kernel.
 
-## Suitable Workloads
+## When to use
 
-FlashComm is most suitable for:
+FlashComm fits best when:
 
-- NPU backend.
-- Long prefill, for example input length greater than or equal to 8K tokens.
-- Large TP size. The current default activation condition recommends `TP >= 8`.
-- `dp=1` and `cp=1`.
-- Workloads where prefill is a large part of end-to-end latency, such as 8K/128 and 32K/1K.
-- BF16/FP16 non-quantized row-parallel linear layers.
+- Running on the NPU backend.
+- Long-input prefill, e.g. input length at or above `flashcomm1_min_prefill_tokens` (default 8192).
+- Prefill is a large share of end-to-end latency, e.g. 8K/128, 32K/1K long-prompt scenarios.
 
-FlashComm is usually not suitable, or has limited benefit, for:
+Limited benefit when:
 
-- Decode phase. FlashComm only optimizes prefill, so TPOT usually does not directly benefit.
-- Short prompts, such as 2K input. Communication may not dominate enough to offset sharding, gather, and scheduling overhead.
-- Long-output workloads where decode dominates total latency.
-- `TP < 8`, `dp > 1`, or `cp > 1`, which are not enabled by the default activation rule.
-- Quantized row-parallel paths. MMRS is currently wired only for the normal BF16/FP16 matmul path.
-- MoE models. FC1 currently supports Dense models only and is automatically disabled when routed experts are present.
+- Decode stage. FlashComm only optimizes prefill, so TPOT usually does not benefit directly.
+- Short inputs (below threshold). When communication is a small fraction, sharding/gather/scheduling overhead may cancel the gain, and below the threshold it won't trigger at all.
+- Decode-heavy workloads (long outputs). End-to-end latency may be dominated by decode.
+- `cp > 1` (context parallel), currently not enabled.
 
 ## Usage
 
-Both FlashComm and the MMRS fused operator are disabled by default. For long-prefill NPU serving with TP=8 or larger, enable them explicitly:
+The core benefit (sequence sharding + reduce_scatter) is delivered by the single `--enable_flashcomm1` master switch:
+
+```bash
+--enable_flashcomm1=true
+```
+
+`enable_mmrs_fusion` (the MMRS fused operator) is an **optional incremental** speedup on top, and is only read when `enable_flashcomm1=true`. It is **off by default**, because the fused kernel can still fail on some shapes (default-on will be reconsidered once that is fixed). On shapes verified to be stable, enable it explicitly for the extra gain:
 
 ```bash
 --enable_flashcomm1=true \
---enable_mmrs_fusion=true \
---flashcomm1_min_prefill_tokens=8192 \
---mmrs_comm_mode=aiv
+--enable_mmrs_fusion=true
 ```
 
-Graph Mode is also recommended to reduce Host-side scheduling overhead:
+Parameters:
 
-```bash
---enable_graph=true \
---enable_prefill_piecewise_graph=true
-```
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `enable_flashcomm1` | `false` | FlashComm master switch |
+| `enable_mmrs_fusion` | `false` | Enables the Matmul + ReduceScatter fused operator (only read when `enable_flashcomm1=true`). Off by default because the fused kernel can fail on some shapes |
+| `flashcomm1_min_prefill_tokens` | `8192` | Minimum prefill token count before FlashComm activates |
+| `mmrs_comm_mode` | `aiv` | torch_npu MMRS communication mode: `aiv`, `ai_cpu`, or `none` |
 
-A complete recommended configuration is:
+The optimal `flashcomm1_min_prefill_tokens` threshold depends on model parameter count — the FC1 break-even point differs per model, so the default 8192 is a conservative general starting point. Prefer documenting a validated recommended config in each model's deployment doc rather than relying on a single default.
 
-```bash
---enable_graph=true \
---enable_prefill_piecewise_graph=true \
---enable_flashcomm1=true \
---enable_mmrs_fusion=true \
---flashcomm1_min_prefill_tokens=8192 \
---mmrs_comm_mode=aiv
-```
+When MMRS is enabled, keep `mmrs_comm_mode=aiv` in general. If some shapes hit AICore errors on the AIV path, temporarily switch to `--mmrs_comm_mode=ai_cpu`. Using `aiv` requires an ops-transformers 9.1.0 or newer operator library that includes the MMRS AIV fix.
 
-Flag reference:
+## Reference performance
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `enable_flashcomm1` | `false` | Main FlashComm switch |
-| `enable_mmrs_fusion` | `false` | Enables the Matmul + ReduceScatter fused operator |
-| `flashcomm1_min_prefill_tokens` | `8192` | Minimum prefill token count required before FlashComm can become active |
-| `mmrs_comm_mode` | `aiv` | torch_npu MMRS communication mode. Supported values: `aiv`, `ai_cpu`, `none` |
+DeepSeek-V4-Flash W8A8C16, A3, EP16 / dp4 / tp4, ais-bench gsm8k 8K input, concurrency 32:
 
-In most cases, keep `mmrs_comm_mode=aiv`. If some shapes hit AICore errors on the AIV path, switch temporarily to:
+| Config | TTFT (ms) | TPOT (ms) |
+|--------|-----------|-----------|
+| baseline | 10211.2 | 49.6 |
+| `+ enable_flashcomm1` (with MMRS explicitly enabled) | 8840.9 | 46.7 |
 
-```bash
---mmrs_comm_mode=ai_cpu
-```
+FlashComm yields about **−13.4% TTFT**, with sequence sharding contributing the bulk (~−11.8%) and MMRS fusion adding roughly another −1.8% on top. The small TPOT improvement comes from faster prefill improving overall scheduling.
 
-When using `mmrs_comm_mode=aiv`, load an ops-transformers 9.1.0 or newer operator library that includes the MMRS AIV fix.
+## Performance and correctness notes
 
-## Recommended Configuration
+- FlashComm only optimizes prefill, so focus on TTFT, prefill throughput, and the prefill-stage communication changes in profiling.
+- TPOT and decode throughput may not improve noticeably; with a high decode share, end-to-end latency may show little gain.
+- When MMRS hits, the `reduce_scatter` after some row-parallel layers is fused into the matmul in profiling; the success path is silent, so no warning means the fusion is active (only fallback prints `FC1 MMRS skipped ...`).
+- Extra gather, layout conversion, or host-scheduling overhead can offset the MMRS gain.
+- Evaluate with multiple stable rounds after warmup; don't use a single profiling run's absolute latency as a performance conclusion.
 
-Use the following table as the initial tuning guidance:
+## Validation checklist
 
-| Scenario | Recommendation |
-|----------|----------------|
-| 8K input / short output | Enable FlashComm and MMRS |
-| 32K input / medium or short output | Enable FlashComm and MMRS |
-| 2K input / long output | Do not enable by default; benefits are usually unstable |
-| TP=2 or TP=4 | Do not enable by default |
-| TP=8 | Currently the best starting point for evaluation |
-| Chunked Prefill | Can be enabled, but keep the chunk size no smaller than `flashcomm1_min_prefill_tokens`; otherwise a single chunk may not trigger FlashComm |
+Before rollout or tuning, complete at least:
 
-If your service mixes short and long prompts, keep FlashComm disabled by default and enable it only for long-input services, long-context models, or separately deployed long-prompt workloads.
-
-## Performance and Correctness Notes
-
-- FlashComm only optimizes prefill. Focus on TTFT, prompt throughput, and prefill communication in profiling.
-- TPOT, decode throughput, and long-output latency may not improve. If decode dominates, end-to-end latency may show little benefit.
-- With MMRS enabled, profiling should show that part of the row-parallel communication is replaced by the Matmul + ReduceScatter fused path.
-- Extra gather, layout conversion, or Host scheduling overhead can offset the MMRS benefit.
-- Use multiple warmup-completed stable rounds for performance conclusions. Do not use absolute latency from profiling runs as the final benchmark number.
-
-## Validation Checklist
-
-Before enabling FlashComm in production or changing thresholds, run at least:
-
-1. Compare `enable_flashcomm1=false, enable_mmrs_fusion=false` against `enable_flashcomm1=true, enable_mmrs_fusion=true`.
-2. Use the same model, TP size, input length, output length, and concurrency.
+1. Compare `enable_flashcomm1=false` against `enable_flashcomm1=true`; to assess the MMRS increment, add `--enable_mmrs_fusion=true` as a further comparison.
+2. Use the same model, same parallel config, same input/output lengths, and same concurrency.
 3. Record TTFT, TPOT, prompt throughput, decode throughput, request throughput, and latency.
-4. For long-input workloads, collect profiling and verify that the MMRS path is actually hit.
-5. Run a small numerical consistency check to confirm that outputs match with FlashComm on and off.
+4. For long-input scenarios, collect profiling to confirm the MMRS path is hit (no `FC1 MMRS skipped` warnings).
+5. Run a small numerical-consistency check to confirm outputs match with FlashComm on and off.

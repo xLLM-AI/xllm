@@ -1,56 +1,57 @@
 include(cc_library)
 
-if(USE_MUSA)
-  set(_MUSA_LAYERS_HDRS
-    ../cuda/base_attention_impl.h
-    ../cuda/flashinfer_workspace.h
-    attention.h
-    flashinfer_attention.h
-    flashinfer_planinfo.h
-    qwen3_gated_delta_net_base.h
-    qwen3_next_attention.h
-    qwen3_next_gated_delta_net.h
-    qwen3_next_hybrid_decoder_layer_base.h
-    qwen3_next_decoder_layer_impl.h
-    qwen3_5_decoder_layer_impl.h
-  )
-  set(_MUSA_LAYERS_SRCS
-    ../cuda/flashinfer_workspace.cpp
-    attention.cpp
-    flashinfer_attention.cpp
-    flashinfer_planinfo.cpp
-    qwen3_gated_delta_net_base.cpp
-    qwen3_next_attention.cpp
-    qwen3_next_gated_delta_net.cpp
-    qwen3_next_hybrid_decoder_layer_base.cpp
-    qwen3_next_decoder_layer_impl.cpp
-    qwen3_5_decoder_layer_impl.cpp
-  )
-  set(_MUSA_LAYERS_DEPS
-    :cuda_kernels
-    :common_layers
-    :parallel_state
-    :state_dict
-    :kv_cache
-    :prefix_cache
-    :block
-    glog::glog
-    gflags::gflags
-    torch
-  )
+# MUSA layers - FlashInfer/Mate path
+set(_MUSA_LAYERS_HDRS
+  attention.h
+  flashinfer_attention.h
+  flashinfer_planinfo.h
+  ../cuda/base_attention_impl.h
+  ../cuda/flashinfer_workspace.h
+  qwen3_gated_delta_net_base.h
+  qwen3_next_attention.h
+  qwen3_next_gated_delta_net.h
+  qwen3_next_hybrid_decoder_layer_base.h
+  qwen3_next_decoder_layer_impl.h
+  qwen3_5_decoder_layer_impl.h
+  qwen3_5_fused_moe.h
+)
+set(_MUSA_LAYERS_SRCS
+  attention.cpp
+  flashinfer_attention.cpp
+  flashinfer_planinfo.cpp
+  ../cuda/flashinfer_workspace.cpp
+  qwen3_gated_delta_net_base.cpp
+  qwen3_next_attention.cpp
+  qwen3_next_gated_delta_net.cpp
+  qwen3_next_hybrid_decoder_layer_base.cpp
+  qwen3_next_decoder_layer_impl.cpp
+  qwen3_5_decoder_layer_impl.cpp
+  qwen3_5_fused_moe.cpp
+)
+set(_MUSA_LAYERS_DEPS
+  :cuda_kernels
+  :common_layers
+  :parallel_state
+  :state_dict
+  :kv_cache
+  :prefix_cache
+  :block
+  glog::glog
+  gflags::gflags
+  torch
+)
 
-  cc_library(
-    NAME
-      musa_layers
-    HDRS
-      ${_MUSA_LAYERS_HDRS}
-    SRCS
-      ${_MUSA_LAYERS_SRCS}
-    COPTS
-      ${_XLLM_MUSIFY_COPTS}
-    DEPS
-      "-Wl,--whole-archive"
-      "-Wl,--no-whole-archive"
-      ${_MUSA_LAYERS_DEPS}
-  )
-endif()
+cc_library(
+  NAME
+    musa_layers
+  HDRS
+    ${_MUSA_LAYERS_HDRS}
+  SRCS
+    ${_MUSA_LAYERS_SRCS}
+  COPTS
+    ${_XLLM_MUSIFY_COPTS}
+  DEPS
+    "-Wl,--whole-archive"
+    "-Wl,--no-whole-archive"
+    ${_MUSA_LAYERS_DEPS}
+)

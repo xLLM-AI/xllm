@@ -1648,8 +1648,8 @@ void PDOOCScheduler::prefill_send_first_generation() {
           block_ids.push_back(block.id());
         }
         ADD_VECTOR_TO_PROTO(gen->mutable_block_ids(), block_ids);
-        // Advertise the recurrent-state slot to pull from: LINEAR for
-        // Qwen3.5 GDN, SINGLE fallback. Must match the D-side response
+        // Advertise the recurrent-state slot to pull from: the LINEAR slot for
+        // Qwen3.5 GDN, or -1 otherwise. Must match the D-side response
         // helper (Sequence::get_recurrent_state_slot_id).
         gen->set_linear_state_id(
             request->sequences()[0]->get_recurrent_state_slot_id());
@@ -1796,8 +1796,8 @@ bool PDOOCScheduler::decode_recv_multi_generations(
     std::vector<uint64_t> src_linear_state_ids;
     std::vector<uint64_t> dst_linear_state_ids;
     // Resolve the destination recurrent-state slot with the same helper the
-    // sender used to advertise src_linear_state_id (LINEAR for Qwen3.5 GDN,
-    // SINGLE otherwise), so PULL writes the pulled state into the slot the
+    // sender used to advertise src_linear_state_id (the LINEAR slot for Qwen3.5
+    // GDN, -1 otherwise), so PULL writes the pulled state into the slot the
     // decode forward actually reads (see
     // Sequence::get_recurrent_state_slot_id).
     const int32_t dst_linear_state_id =
@@ -2240,6 +2240,8 @@ void PDOOCScheduler::build_disagg_requests(
     req->set_is_embeddings(requests[i]->state().sampling_param.is_embeddings);
     req->set_echo(requests[i]->state().echo);
     req->set_skip_special_tokens(requests[i]->state().skip_special_tokens);
+    req->set_include_stop_str_in_output(
+        requests[i]->state().include_stop_str_in_output);
     req->set_offline(requests[i]->offline());
   }
 

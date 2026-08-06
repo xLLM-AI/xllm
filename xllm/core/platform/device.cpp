@@ -44,14 +44,14 @@ limitations under the License.
 namespace xllm {
 
 Device::Device(const torch::Device& device) : device_(device) {
-#if defined(USE_CUDA)
+#if defined(USE_CUDA) || defined(USE_MUSA)
   Platform::init_capabilities(device.index());
 #endif
 }
 
 Device::Device(const int32_t device_index)
     : device_(torch::Device(Platform::type_torch(), device_index)) {
-#if defined(USE_CUDA)
+#if defined(USE_CUDA) || defined(USE_MUSA)
   Platform::init_capabilities(device_index);
 #endif
 }

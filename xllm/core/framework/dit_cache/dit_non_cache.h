@@ -28,7 +28,8 @@ class DiTNonCache : public DitCacheImpl {
   DiTNonCache(DiTNonCache&&) = default;
   DiTNonCache& operator=(DiTNonCache&&) = default;
 
-  void init(const DiTCacheConfig& cfg) override;
+  void init(const DiTCacheConfig& cfg,
+            const ParallelArgs& parallel_args) override;
 
   bool on_before_block(const CacheBlockIn& blockin) override;
   CacheBlockOut on_after_block(const CacheBlockIn& blockin) override;

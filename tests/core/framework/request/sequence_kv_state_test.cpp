@@ -54,7 +54,7 @@ TEST(KVCacheStateTest, ResetClearsBeamSourceState) {
 }
 
 // Finding 2 regression: has_any_blocks() must report true for ANY
-// cache-bearing type (KV / SWA / C4 / C128) and IGNORE SINGLE. The pool's
+// cache-bearing type (KV / SWA / C4 / C128) and IGNORE EMBEDDING. The pool's
 // "started_empty" rollback decision relies on this so that a DSV4 sequence
 // (which holds SWA/C4/C128 but no KV) is not treated as fresh on a failed grow.
 TEST(KVCacheStateTest, HasAnyBlocksIgnoresSingle) {
@@ -68,10 +68,10 @@ TEST(KVCacheStateTest, HasAnyBlocksIgnoresSingle) {
     EXPECT_FALSE(state.has_any_blocks());
   }
 
-  // SINGLE-only must NOT count as cache.
+  // EMBEDDING-only must NOT count as cache.
   {
     KVCacheState state;
-    state.add_blocks(BlockType::SINGLE, make_block(1));
+    state.add_blocks(BlockType::EMBEDDING, make_block(1));
     EXPECT_FALSE(state.has_any_blocks());
   }
 
@@ -89,7 +89,7 @@ TEST(KVCacheStateTest, HasAnyBlocksIgnoresSingle) {
     state.add_blocks(BlockType::SWA, make_block(3));
     state.add_blocks(BlockType::C4, make_block(4));
     state.add_blocks(BlockType::C128, make_block(5));
-    state.add_blocks(BlockType::SINGLE, make_block(6));
+    state.add_blocks(BlockType::EMBEDDING, make_block(6));
     EXPECT_TRUE(state.has_any_blocks());
   }
 }

@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <functional>
+
 #include "parallel_args.h"
 #include "process_group.h"
 
@@ -78,11 +80,11 @@ torch::Tensor scatter(torch::Tensor input,
                       ProcessGroup* process_group,
                       int dim = -1);
 
-std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input_,
+std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input,
                                              int32_t scatter_idx,
                                              int32_t gather_idx,
-                                             bool is_sync,
-                                             ProcessGroup* pg);
+                                             bool async_ops,
+                                             ProcessGroup* process_group);
 
 // Create a process group where each process has a single device
 // devices: list of devices to create process groups on.

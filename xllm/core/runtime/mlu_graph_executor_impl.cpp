@@ -127,6 +127,7 @@ enum class RunMode : int8_t {
   kGraph = 0,
   kPaddedDpGraph,
   kDraft,
+  kSpecVerify,
   kNonDecode,
   kDummy,
   kUnevenDp,
@@ -221,6 +222,10 @@ RunMode get_run_mode(const xllm::runtime::Options& options,
                      const xllm::ModelInputParams& params) {
   if (options.is_draft_engine()) {
     return RunMode::kDraft;
+  }
+
+  if (params.is_spec_verify) {
+    return RunMode::kSpecVerify;
   }
 
   if (!params.meta.batch_forward_type.is_decode()) {
@@ -578,6 +583,8 @@ ModelOutput MluGraphExecutorImpl::run_eager(const torch::Tensor& tokens,
   RunMode run_mode = get_run_mode(options_, params);
   if (run_mode == RunMode::kDraft) {
     LOG_FIRST_N(INFO, 1) << "MLU graph fallback to eager for draft worker";
+  } else if (run_mode == RunMode::kSpecVerify) {
+    LOG_FIRST_N(INFO, 1) << "MLU graph fallback to eager for Spec Verify";
   } else if (run_mode == RunMode::kDummy) {
     LOG_FIRST_N(INFO, 1)
         << "MLU graph fallback to eager when decode inputs contain dummy run";

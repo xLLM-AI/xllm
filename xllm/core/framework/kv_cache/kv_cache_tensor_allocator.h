@@ -38,8 +38,4 @@ class KVCacheTensorAllocator {
 
 std::shared_ptr<KVCacheTensorAllocator> default_kv_tensor_allocator();
 
-#if defined(USE_MLU)
-std::shared_ptr<KVCacheTensorAllocator> mlu_mooncake_tensor_allocator();
-#endif
-
 }  // namespace xllm

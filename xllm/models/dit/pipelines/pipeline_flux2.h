@@ -286,8 +286,8 @@ class Flux2PipelineImpl final : public Flux2PipelineBaseImpl {
         torch::stack({rot_emb1, rot_emb2}, 0).to(options_.dtype());
 
     // denosing loop
-    DiTCache::get_instance().set_infer_steps(num_inference_steps);
-    DiTCache::get_instance().set_num_blocks(num_single_layers_);
+    DiTCache::get_instance().set_context({/*infer_steps=*/num_inference_steps,
+                                          /*num_blocks=*/num_single_layers_});
     scheduler_->set_begin_index(0);
     torch::Tensor timestep =
         torch::empty({prepared_latents.size(0)}, prepared_latents.options());
@@ -318,7 +318,7 @@ class Flux2PipelineImpl final : public Flux2PipelineBaseImpl {
                                                        timestep,
                                                        guidance,
                                                        image_rotary_emb,
-                                                       /*step_idx=*/i);
+                                                       /*step_idx=*/i + 1);
 
       if (image_latents.defined()) {
         noise_pred = noise_pred.narrow(1, 0, prepared_latents.size(1));

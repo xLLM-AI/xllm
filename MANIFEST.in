@@ -4,6 +4,7 @@ include LICENSE
 include .gitmodules
 recursive-include src *.*
 recursive-include xllm *.py
+recursive-include xllm/auto_config *.json
 recursive-include examples *.py
 recursive-include third_party *
 recursive-include tools *.*

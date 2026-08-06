@@ -30,7 +30,7 @@ namespace layer {
 // MUSA-native FlashInfer attention. Mirrors the CUDA
 // layers/cuda/flashinfer_attention.h declaration but is owned by the MUSA
 // backend so MUSA-only state (the FA3 decode LSE scratch) stays out of the
-// shared CUDA header. Only the USE_MUSA build links this class
+// shared CUDA header. Only the MUSA backend links this class
 // (layers/musa/flashinfer_attention.cpp provides the definitions); a pure
 // CUDA build links its own layers/cuda copy instead, so the two declarations
 // never coexist in one binary.
@@ -56,7 +56,9 @@ class FlashInferAttentionImpl final : public BaseAttentionImpl {
                        torch::Tensor& key,
                        torch::Tensor& value,
                        torch::Tensor& output,
-                       std::optional<torch::Tensor>& output_lse);
+                       std::optional<torch::Tensor>& output_lse,
+                       const torch::Tensor& k_cache,
+                       const torch::Tensor& v_cache);
 
   void chunked_prefill_forward(const AttentionMetadata& attn_metadata,
                                torch::Tensor& query,
@@ -79,12 +81,10 @@ class FlashInferAttentionImpl final : public BaseAttentionImpl {
   torch::Tensor int_workspace_buffer_;
   torch::Tensor page_locked_int_workspace_buffer_;
 
-  // Persistent grow-only scratch for the FA3 decode LSE output. The decode
-  // path discards LSE (output_lse stays nullopt), but the FA3 kernel still
-  // needs a writable [num_qo_heads, total_q] fp32 buffer. Serving it from a
-  // persistent buffer avoids a torch::empty allocation under MUSA stream
-  // capture, which is forbidden (see AttentionImpl::forward output_buf_
-  // rationale).
+  // Persistent grow-only scratch for FA3 LSE ([num_qo_heads, total_q] fp32).
+  // Shared by FA3 decode and dense FA3 prefill; both paths may discard the
+  // contents when output_lse stays nullopt. Avoids torch::empty under MUSA
+  // stream capture (see AttentionImpl::forward output_buf_ rationale).
   torch::Tensor lse_buf_;
 };
 

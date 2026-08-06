@@ -50,3 +50,13 @@ target_link_libraries(kv_cache_test
                       $<$<BOOL:${USE_NPU}>:hccl>
                       $<$<BOOL:${USE_NPU}>:c_sec>
                       $<$<BOOL:${USE_NPU}>:nnopbase>)
+
+cc_test(
+  NAME
+    linear_state_restore_test
+  SRCS
+    linear_state_restore_test.cpp
+  DEPS
+    :linear_state_restore
+    GTest::gtest_main
+)
