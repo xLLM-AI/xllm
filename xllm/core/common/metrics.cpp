@@ -125,13 +125,8 @@ DEFINE_HISTOGRAM(time_to_first_token_latency_milliseconds,
 // inter token latency histogram
 DEFINE_HISTOGRAM(inter_token_latency_milliseconds,
                  "Histogram of inter token latency in milliseconds");
-// speculative/MTP amortized inter token latency histogram. Each observation is
-// the per-step wall-clock latency divided by the tokens committed that step
-// (per-step amortized, not token-weighted).
-DEFINE_HISTOGRAM(
-    speculative_per_token_latency_milliseconds,
-    "Histogram of speculative per-token amortized inter token latency in "
-    "milliseconds (per-step amortized, not token-weighted)");
+DEFINE_HISTOGRAM(inter_token_latency_microseconds,
+                 "Histogram of inter token latency in microseconds");
 
 // response metrics
 DEFINE_COUNTER(responsing_latency_seconds_stream,

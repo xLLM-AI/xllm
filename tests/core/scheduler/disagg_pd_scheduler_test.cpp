@@ -117,9 +117,9 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
     return request_queue_.read(*request);
   }
 
-  static int64_t amortized_token_latency_for_test(int64_t tbt_ms,
+  static int64_t amortized_token_latency_for_test(int64_t latency,
                                                   size_t num_tokens) {
-    return amortized_token_latency_ms(tbt_ms, num_tokens);
+    return amortized_token_latency(latency, num_tokens);
   }
 
   void update_metrics(std::vector<Sequence*>& sequences) {
@@ -374,7 +374,7 @@ TEST(DisaggPDSchedulerTest, InvalidPrefillCachedTokensFallBackToZero) {
 }
 
 TEST(DisaggPDSchedulerTest, AmortizedTokenLatencyRoundsHalfUp) {
-  // Amortized per-token latency is round(tbt_ms / n) via (tbt_ms + n/2) / n.
+  // Amortized per-token latency is round(latency / n) via (latency + n/2) / n.
   EXPECT_EQ(TestDisaggPDScheduler::amortized_token_latency_for_test(100, 4),
             25);
   EXPECT_EQ(TestDisaggPDScheduler::amortized_token_latency_for_test(101, 4),

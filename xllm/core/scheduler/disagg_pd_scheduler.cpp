@@ -1023,7 +1023,9 @@ void DisaggPDScheduler::update_token_latency_metrics(
     }
     // Read the committed-token count before tbt(), which resets it.
     const size_t committed_tokens = sequence->generated_tokens_since_latency();
-    int64_t tbt_milliseconds = sequence->tbt(now);
+    const int64_t tbt_microseconds = sequence->tbt_microseconds(now);
+    const int64_t tbt_milliseconds =
+        microseconds_to_milliseconds(tbt_microseconds);
     if (sequence->is_first_token()) {
       HISTOGRAM_OBSERVE(time_to_first_token_latency_milliseconds,
                         tbt_milliseconds);
@@ -1031,15 +1033,18 @@ void DisaggPDScheduler::update_token_latency_metrics(
           static_cast<double>(tbt_milliseconds) / 1000);
       recent_ttft_.emplace_back(tbt_milliseconds);
     } else {
-      HISTOGRAM_OBSERVE(inter_token_latency_milliseconds, tbt_milliseconds);
+      int64_t inter_token_latency_us = tbt_microseconds;
       recent_tbt_.emplace_back(tbt_milliseconds);
       if (speculative_metrics_enabled && committed_tokens > 0) {
-        HISTOGRAM_OBSERVE(
-            speculative_per_token_latency_milliseconds,
-            amortized_token_latency_ms(tbt_milliseconds, committed_tokens));
+        inter_token_latency_us =
+            amortized_token_latency(tbt_microseconds, committed_tokens);
         step_committed_tokens += static_cast<int64_t>(committed_tokens);
         ++step_decode_seqs;
       }
+      HISTOGRAM_OBSERVE(inter_token_latency_microseconds,
+                        inter_token_latency_us);
+      HISTOGRAM_OBSERVE(inter_token_latency_milliseconds,
+                        microseconds_to_milliseconds(inter_token_latency_us));
     }
   }
   if (step_decode_seqs > 0) {
