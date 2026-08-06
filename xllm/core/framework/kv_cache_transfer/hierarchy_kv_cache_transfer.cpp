@@ -18,12 +18,61 @@ limitations under the License.
 #include <algorithm>
 #include <future>
 #include <memory>
+#include <string>
 #include <vector>
+
+#include "framework/kv_cache_transfer/kv_cache_store.h"
 
 namespace xllm {
 namespace {
 
 constexpr uint32_t TIMEOUT_MS = 60000;
+
+std::string make_store_local_hostname(const std::string& configured,
+                                      uint32_t worker_id) {
+  const uint32_t kDefaultPort = 12345;
+  if (configured.empty()) {
+    return "127.0.0.1:" + std::to_string(kDefaultPort + worker_id);
+  }
+
+  std::string host = configured;
+  uint32_t port = kDefaultPort;
+  size_t host_end = std::string::npos;
+  size_t port_begin = std::string::npos;
+  const size_t bracket_end = configured.find("]:");
+  if (!configured.empty() && configured.front() == '[' &&
+      bracket_end != std::string::npos) {
+    host_end = bracket_end + 1;
+    port_begin = bracket_end + 2;
+  } else {
+    const size_t last_colon = configured.rfind(':');
+    const bool has_single_colon = last_colon != std::string::npos &&
+                                  configured.find(':') == last_colon &&
+                                  last_colon + 1 < configured.size();
+    if (has_single_colon) {
+      host_end = last_colon;
+      port_begin = last_colon + 1;
+    }
+  }
+  if (port_begin != std::string::npos) {
+    const std::string port_text = configured.substr(port_begin);
+    bool numeric = true;
+    for (const char character : port_text) {
+      if (character < '0' || character > '9') {
+        numeric = false;
+        break;
+      }
+    }
+    if (numeric) {
+      port = static_cast<uint32_t>(std::stoul(port_text));
+      host = configured.substr(0, host_end);
+    }
+  }
+  CHECK_LE(worker_id, 65535u);
+  CHECK_LE(port, 65535u - worker_id)
+      << "Mooncake local endpoint port exceeds 65535.";
+  return host + ":" + std::to_string(port + worker_id);
+}
 
 // Streams reserved for concurrent D2H offload callers. D2H runs synchronously
 // on the RemoteWorker copy threadpool (4 threads, see remote_worker.h); reserve
@@ -180,7 +229,34 @@ HierarchyKVCacheTransfer::HierarchyKVCacheTransfer(
     batch_memcpy_ = create_batch_memcpy(device_);
     create_host_cache();
   }
+
+  if (options_.enable_kvcache_store()) {
+    CHECK(options_.host_blocks_factor() > 1.0)
+        << "Mooncake Store requires Host cache capacity.";
+    KVCacheStoreInitConfig store_config;
+    const std::string store_local_hostname = make_store_local_hostname(
+        options_.store_local_hostname(), options_.store_worker_id());
+    store_config.localhost_name = store_local_hostname;
+    store_config.protocol = options_.store_protocol();
+    store_config.metadata_server = options_.store_metadata_server();
+    store_config.master_server_address = options_.store_master_server_address();
+    store_config.model_id = options_.store_namespace();
+    store_config.tp_rank = options_.tp_rank();
+    store_config.tp_size = options_.tp_size();
+    LOG(INFO) << "[Mooncake][StoreEngine] initialize, endpoint="
+              << store_local_hostname << ", protocol=" << store_config.protocol
+              << ", tp_rank=" << store_config.tp_rank
+              << ", tp_size=" << store_config.tp_size;
+    kv_cache_store_ = std::make_unique<KVCacheStore>();
+    CHECK(kv_cache_store_->init(store_config, &host_kv_caches_))
+        << "Failed to initialize Mooncake Store.";
+    LOG(INFO) << "[Mooncake][StoreEngine] ready, endpoint="
+              << store_local_hostname << ", protocol=" << store_config.protocol
+              << ", tp_rank=" << store_config.tp_rank;
+  }
 }
+
+HierarchyKVCacheTransfer::~HierarchyKVCacheTransfer() = default;
 
 void HierarchyKVCacheTransfer::build_device_block_type_map() {
   device_kv_caches_.clear();
@@ -379,8 +455,32 @@ uint32_t HierarchyKVCacheTransfer::transfer_kv_blocks(
     uint64_t /*batch_id*/,
     Slice<BlockTransferInfo>& block_transfer_info) {
   CHECK(!block_transfer_info.empty());
-  LOG(ERROR) << "Slice-based transfer not supported in Phase 1 (no store).";
+  CHECK(kv_cache_store_ != nullptr);
+  if (block_transfer_info[0].transfer_type == TransferType::G2H) {
+    return kv_cache_store_->batch_get(block_transfer_info);
+  }
+  LOG(ERROR) << "Unsupported slice transfer type: "
+             << static_cast<uint32_t>(block_transfer_info[0].transfer_type);
   return 0;
+}
+
+std::vector<uint8_t> HierarchyKVCacheTransfer::prefetch_kv_blocks(
+    Slice<BlockTransferInfo>& block_transfer_info) {
+  CHECK(!block_transfer_info.empty());
+  if (!options_.enable_kvcache_store() || kv_cache_store_ == nullptr ||
+      block_transfer_info[0].transfer_type != TransferType::G2H) {
+    LOG(ERROR) << "Unsupported prefetch transfer type: "
+               << static_cast<uint32_t>(block_transfer_info[0].transfer_type);
+    return std::vector<uint8_t>(block_transfer_info.size(), /*value=*/0);
+  }
+  std::vector<uint8_t> hits =
+      kv_cache_store_->batch_get_with_status(block_transfer_info);
+  const size_t hit_count =
+      std::count(hits.begin(), hits.end(), static_cast<uint8_t>(1));
+  VLOG(1) << "[Mooncake][PrefetchGet] type="
+          << static_cast<int32_t>(block_transfer_info[0].block_type)
+          << ", blocks=" << hits.size() << ", hits=" << hit_count;
+  return hits;
 }
 
 uint32_t HierarchyKVCacheTransfer::offload(
@@ -397,6 +497,16 @@ uint32_t HierarchyKVCacheTransfer::offload(
   if (!offload_to_host(slice)) {
     LOG(ERROR) << "Offload to host failed.";
     return 0;
+  }
+  if (options_.enable_kvcache_store()) {
+    CHECK(kv_cache_store_ != nullptr);
+    const uint32_t put_count = kv_cache_store_->batch_put(block_transfer_info);
+    if (put_count != block_transfer_info.size()) {
+      LOG(WARNING) << "Mooncake BatchPut partially failed: " << put_count << "/"
+                   << block_transfer_info.size();
+    }
+    VLOG(1) << "[Mooncake][OffloadPut] blocks=" << block_transfer_info.size()
+            << ", success=" << put_count;
   }
   return block_transfer_info.size();
 }

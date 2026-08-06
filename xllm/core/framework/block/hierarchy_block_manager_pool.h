@@ -15,12 +15,16 @@ limitations under the License.
 
 #pragma once
 
+#include <atomic>
 #include <map>
+#include <mutex>
+#include <unordered_map>
 
 #include "block_manager_pool.h"
 #include "composite_block_manager.h"
 #include "distributed_runtime/engine.h"
 #include "util/blockingconcurrentqueue.h"
+#include "util/timer.h"
 
 namespace xllm {
 
@@ -48,6 +52,7 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
 
   void allocate_shared(Sequence* sequence) override;
   bool supports_host_cache_restore() const override { return true; }
+  bool has_pending_async_block_release() const override;
   HostCacheRestorePoint select_host_cache_restore(
       Sequence* sequence,
       size_t max_copy_units) override;
@@ -65,8 +70,27 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
                               const uint32_t timeout) override;
 
  private:
+  struct PrefetchQuery {
+    size_t probe_index = 0;
+    size_t block_index = 0;
+    size_t result_index = 0;
+    size_t token_start = 0;
+  };
+
+  struct PrefetchPlan {
+    // Each probe owns the complete logical prompt vector for its Host leaf.
+    // Invalid entries are either local misses waiting for Store or Store
+    // misses after completion; SWA intentionally keeps those holes positional.
+    std::vector<CompositeBlockManager::ProbeResult> host_probes;
+    std::vector<PrefetchQuery> queries;
+    Sequence* sequence = nullptr;
+    std::shared_ptr<PrefetchResult> result;
+    Timer timer;
+  };
+
   friend class HierarchyPoolTestPeer;
   void release_host_match(Sequence* sequence, int32_t dp_rank);
+  void release_prefetch_plan(PrefetchPlan* plan, bool publish_store_hits);
   void collect_offload_pairs(Sequence* sequence,
                              int32_t dp_rank,
                              size_t completed_tokens);
@@ -84,6 +108,10 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   // owned only by the Sequence's Host/device cache states.
   std::vector<std::vector<BlockTransferInfo>> load_block_transfer_infos_;
   std::vector<OffloadBlockPairQueue> offload_block_pair_queues_;
+  std::atomic<size_t> pending_offload_transfers_{0};
+
+  std::mutex prefetch_plans_mutex_;
+  std::unordered_map<Sequence*, std::shared_ptr<PrefetchPlan>> prefetch_plans_;
 };
 
 }  // namespace xllm

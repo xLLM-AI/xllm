@@ -297,19 +297,16 @@ void DisaggPDScheduler::step(const absl::Duration& timeout) {
 }
 
 bool DisaggPDScheduler::add_request(std::shared_ptr<Request>& request) {
-  CHECK(request != nullptr);
-  CHECK(!request->sequences().empty());
+  return ContinuousScheduler::add_request(request);
+}
 
-  kv_cache_manager_->prefetch_from_storage(request);
-
+bool DisaggPDScheduler::enqueue_ready_request(
+    std::shared_ptr<Request> request) {
   if (request->offline()) {
-    // offline request, push to offline queue
-    prefill_request_queue_offline_.enqueue(request);
+    prefill_request_queue_offline_.enqueue(std::move(request));
     return true;
   }
-  // push and wait
-  prefill_request_queue_.enqueue(request);
-
+  prefill_request_queue_.enqueue(std::move(request));
   return true;
 }
 

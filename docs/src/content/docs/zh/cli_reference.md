@@ -80,7 +80,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
-| `prefetch_timeout` | `uint32` | `0` | 从 KV Cache Store 预取数据的超时时间。 |
+| `prefetch_timeout` | `uint32` | `0` | 到期后停止下发新的 KV Cache Store 预取批次，并等待在途批次完成；`0` 表示无限等待。 |
 | `prefetch_batch_size` | `uint32` | `2` | 从 KV Cache Store 预取并拷贝的 batch size。 |
 | `layers_wise_copy_batchs` | `uint32` | `4` | 按层执行 H2D 拷贝的 batch 数。 |
 | `host_blocks_factor` | `double` | `0.0` | host block 系数，例如 `host block num = host_blocks_factor * hbm block num`。 |

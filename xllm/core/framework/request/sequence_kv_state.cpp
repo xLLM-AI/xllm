@@ -159,6 +159,22 @@ void KVCacheState::erase_blocks(BlockType type) {
   }
 }
 
+std::vector<Block> KVCacheState::take_blocks(BlockType type) {
+  auto it = composite_blocks_.find(type);
+  if (it == composite_blocks_.end()) {
+    num_owned_shared_blocks_.erase(type);
+    num_cached_blocks_.erase(type);
+    block_sizes_.erase(type);
+    return {};
+  }
+  std::vector<Block> blocks = std::move(it->second);
+  composite_blocks_.erase(it);
+  block_sizes_.erase(type);
+  num_owned_shared_blocks_.erase(type);
+  num_cached_blocks_.erase(type);
+  return blocks;
+}
+
 Block KVCacheState::copy_block(BlockType type) const {
   DCHECK(type == BlockType::EMBEDDING || type == BlockType::LINEAR)
       << "copy_block is for singleton block types only";
@@ -412,6 +428,7 @@ void KVCacheState::advance_group_transfer_block_idx(BlockType type,
 
 void KVCacheState::reset() {
   kv_cache_tokens_num_ = 0;
+  prefix_cache_matched_ = false;
   num_owned_shared_blocks_.clear();
   num_cached_blocks_.clear();
   pushed_local_block_count_ = 0;
