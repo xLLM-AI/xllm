@@ -2645,8 +2645,7 @@ SampleOutput MTPWorkerImpl::validate(const SamplingParameters& sampling_params,
 
   if (sampling_params.all_greedy_sample && !target_output.logprobs) {
     torch::Tensor target_token_ids =
-        target_output.sample_output.next_tokens.view(
-            {batch_size, num_val_tokens});
+        target_next_tokens.view({batch_size, num_val_tokens});
     torch::Tensor target_draft_token_ids = target_token_ids.slice(
         /*dim=*/1, /*start=*/0, /*end=*/num_val_tokens - 1);
     auto [accepted_token_ids, masked_accepted_token_ids] =
@@ -2659,14 +2658,10 @@ SampleOutput MTPWorkerImpl::validate(const SamplingParameters& sampling_params,
 
     SampleOutput sample_output;
     sample_output.next_tokens = masked_accepted_token_ids;
-    torch::Tensor embeddings = target_output.sample_output.embeddings;
-    sample_output.embeddings =
-        embeddings.view({batch_size, num_val_tokens, embeddings.size(-1)});
+    sample_output.embeddings = target_embeddings;
     return sample_output;
   }
 
-  auto target_logits =
-      target_output.logits.view({batch_size, num_val_tokens, vocab_size});
   // prepare input for rejection sampling
   auto rejection_sampler =
       std::make_unique<RejectionSampler>(sampling_params.do_sample,

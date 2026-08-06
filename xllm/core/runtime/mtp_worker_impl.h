@@ -134,10 +134,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
 
   // Prepare target validate input from cached target context.
   void prepare_validate_inputs(const ForwardInput& inputs,
-                               ForwardInput& validate_inputs,
-                               bool static_graph_tasks_prepared = false);
-  bool prepare_static_mtp_graph_tasks_before_final_draft(
-      const ForwardInput& input);
+                               ForwardInput& validate_inputs);
 
   // prepare inputs for draft model at Decode phase.
   void prepare_draft_inputs(const ForwardInput& inputs,
