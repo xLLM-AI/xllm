@@ -26,6 +26,25 @@ limitations under the License.
 
 namespace xllm::kernel::mlu {
 
+void beam_search(torch::Tensor acc_logprob,
+                 torch::Tensor in_sequence_group,
+                 torch::Tensor top_tokens,
+                 torch::Tensor top_logprobs,
+                 torch::Tensor out_acc_logprob,
+                 torch::Tensor out_token_ids,
+                 torch::Tensor out_token_index,
+                 torch::Tensor out_beam_count_prefix_sums,
+                 torch::Tensor out_sequence_group,
+                 uint32_t batch_size,
+                 uint32_t num_return_sequences,
+                 uint32_t current_step);
+
+void cache_select(const torch::Tensor& out_token_index,
+                  std::vector<torch::Tensor>& unshared_k_caches,
+                  std::vector<torch::Tensor>& unshared_v_caches,
+                  int64_t decode_step,
+                  int64_t beam_width);
+
 void apply_rotary(torch::Tensor& q,
                   torch::Tensor& k,
                   const torch::Tensor& sin,
@@ -45,6 +64,18 @@ void active(const torch::Tensor& input,
             bool is_gated,
             int64_t start_expert_id,
             int64_t expert_size);
+
+void reshape_linear_cache(
+    const torch::Tensor& key,
+    const std::optional<torch::Tensor>& value,
+    torch::Tensor& key_cache,
+    const std::optional<torch::Tensor>& value_cache,
+    const torch::Tensor& context_lengths,
+    c10::SymInt max_context_len,
+    bool packed,
+    const std::optional<torch::Tensor>& context_seq_offset,
+    const std::optional<torch::Tensor>& cache_bs_id,
+    const std::optional<torch::Tensor>& cache_seqlen_offset);
 
 void reshape_paged_cache(torch::Tensor& key,
                          const std::optional<torch::Tensor>& value,
@@ -144,6 +175,15 @@ void batch_decode(const torch::Tensor& query,
                   bool return_lse,
                   int64_t kv_cache_quant_bit_size);
 
+void update_out_and_lse(
+    torch::Tensor& out,
+    torch::Tensor& lse,
+    const torch::Tensor& block_out,
+    const torch::Tensor& block_lse,
+    const std::optional<torch::Tensor>& seq_offsets = std::nullopt,
+    const std::optional<torch::Tensor>& cu_seqs = std::nullopt,
+    const std::optional<torch::Tensor>& block_cu_seqs = std::nullopt);
+
 void masked_indexer_select_paged_kv(
     const torch::Tensor& query,
     const torch::Tensor& k_cache,
@@ -160,7 +200,11 @@ void masked_indexer_select_paged_kv(
     const std::optional<torch::Tensor>& q_scale,
     const std::optional<torch::Tensor>& k_scale_cache,
     const torch::Tensor& sparse_block_table,
-    const torch::Tensor& sparse_context_lens);
+    const torch::Tensor& sparse_context_lens,
+    bool is_score_float = false,
+    int64_t compress_ratio = 1,
+    const std::optional<torch::Tensor>& kv_cache_block_table_offset =
+        std::nullopt);
 
 void fused_layernorm(const torch::Tensor& input,
                      torch::Tensor& output,

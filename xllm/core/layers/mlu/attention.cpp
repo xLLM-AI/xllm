@@ -15,8 +15,13 @@ limitations under the License.
 
 #include "attention.h"
 
+#include <glog/logging.h>
+
+#include "common/global_flags.h"
+#include "core/util/rec_model_utils.h"
 #include "kernels/mlu/mlu_ops_api.h"
 #include "kernels/ops_api.h"
+#include "xattention.h"
 
 DECLARE_bool(enable_chunked_prefill);
 namespace xllm {
@@ -35,6 +40,13 @@ AttentionImpl::AttentionImpl(int64_t num_heads,
       enable_lighting_indexer_(false),
       enable_mla_(false),
       sliding_window_(sliding_window) {
+  if (is_rec_multi_round_mode()) {
+    CHECK(!FLAGS_enable_xattention_one_stage)
+        << "MLU REC xAttention only supports two-stage; disable "
+           "enable_xattention_one_stage";
+    xattention_impl_ = std::make_shared<MluXAttentionImpl>(
+        num_heads, head_size, scale, num_kv_heads, sliding_window);
+  }
   if (sliding_window_ > -1) {
     sliding_window_ = sliding_window_ - 1;
   }
@@ -58,6 +70,9 @@ AttentionImpl::AttentionImpl(int64_t num_heads,
       enable_lighting_indexer_(enable_lighting_indexer),
       enable_mla_(enable_mla),
       sliding_window_(sliding_window) {
+  CHECK(!is_rec_multi_round_mode())
+      << "MLU REC xAttention does not support the extended Attention "
+         "constructor for MLA or lighting indexer";
   if (sliding_window_ > -1) {
     sliding_window_ = sliding_window_ - 1;
   }
@@ -69,6 +84,11 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
     torch::Tensor& key,
     torch::Tensor& value,
     KVCache& kv_cache) {
+  if (xattention_impl_) {
+    return xattention_impl_->forward(
+        attn_metadata, query, key, value, kv_cache);
+  }
+
   const bool enable_mla = enable_mla_;
   std::optional<torch::Tensor> output_lse = std::nullopt;
   torch::Tensor output;

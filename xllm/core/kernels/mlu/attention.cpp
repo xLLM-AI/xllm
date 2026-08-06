@@ -17,6 +17,29 @@ limitations under the License.
 
 namespace xllm::kernel::mlu {
 
+void reshape_linear_cache(
+    const torch::Tensor& key,
+    const std::optional<torch::Tensor>& value,
+    torch::Tensor& key_cache,
+    const std::optional<torch::Tensor>& value_cache,
+    const torch::Tensor& context_lengths,
+    c10::SymInt max_context_len,
+    bool packed,
+    const std::optional<torch::Tensor>& context_seq_offset,
+    const std::optional<torch::Tensor>& cache_bs_id,
+    const std::optional<torch::Tensor>& cache_seqlen_offset) {
+  tmo::torch_api::reshape_linear_cache(key,
+                                       value,
+                                       key_cache,
+                                       value_cache,
+                                       context_lengths,
+                                       max_context_len,
+                                       packed,
+                                       context_seq_offset,
+                                       cache_bs_id,
+                                       cache_seqlen_offset);
+}
+
 void reshape_paged_cache(torch::Tensor& key,
                          const std::optional<torch::Tensor>& value,
                          torch::Tensor& k_cache,
@@ -173,6 +196,17 @@ void batch_decode(const torch::Tensor& query,
                                               kv_cache_quant_bit_size);
 }
 
+void update_out_and_lse(torch::Tensor& out,
+                        torch::Tensor& lse,
+                        const torch::Tensor& block_out,
+                        const torch::Tensor& block_lse,
+                        const std::optional<torch::Tensor>& seq_offsets,
+                        const std::optional<torch::Tensor>& cu_seqs,
+                        const std::optional<torch::Tensor>& block_cu_seqs) {
+  tmo::torch_api::update_out_and_lse(
+      out, lse, block_out, block_lse, seq_offsets, cu_seqs, block_cu_seqs);
+}
+
 void masked_indexer_select_paged_kv(
     const torch::Tensor& query,
     const torch::Tensor& k_cache,
@@ -189,7 +223,10 @@ void masked_indexer_select_paged_kv(
     const std::optional<torch::Tensor>& q_scale,
     const std::optional<torch::Tensor>& k_scale_cache,
     const torch::Tensor& sparse_block_table,
-    const torch::Tensor& sparse_context_lens) {
+    const torch::Tensor& sparse_context_lens,
+    bool is_score_float,
+    int64_t compress_ratio,
+    const std::optional<torch::Tensor>& kv_cache_block_table_offset) {
   // add one redundant dimension for future extension
   torch::Tensor weights_extended = weights.unsqueeze(-1);
   tmo::torch_api::masked_indexer_select_paged_kv(query,
@@ -207,7 +244,10 @@ void masked_indexer_select_paged_kv(
                                                  q_scale,
                                                  k_scale_cache,
                                                  sparse_block_table,
-                                                 sparse_context_lens);
+                                                 sparse_context_lens,
+                                                 is_score_float,
+                                                 compress_ratio,
+                                                 kv_cache_block_table_offset);
 }
 
 }  // namespace xllm::kernel::mlu

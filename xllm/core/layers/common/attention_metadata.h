@@ -34,7 +34,9 @@ struct PlanInfo {
   ffi::Array<int64_t> plan_info;
   std::string uri;
 };
+#endif
 
+#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_MLU)
 // Cache for xattention two-stage decode.
 struct XAttentionTwoStageDecodeCache {
   // Output tensors (shape fixed, values computed per layer)
@@ -44,11 +46,17 @@ struct XAttentionTwoStageDecodeCache {
   torch::Tensor unshared_o;    // [total_beam, num_heads, head_dim]
 
   // Fixed tensors (values don't change for the same batch/shape)
-  torch::Tensor q_cu_seq_lens_shared;             // [batch_size + 1], int32
+  torch::Tensor q_cu_seq_lens_shared;  // [batch_size + 1], int32
+#if defined(USE_CUDA) || defined(USE_MUSA)
   torch::Tensor qo_indptr_expanded;               // [total_beam + 1], int32
   torch::Tensor paged_kv_indptr_expanded;         // [total_beam + 1], int32
   torch::Tensor paged_kv_indices_expanded;        // [total_beam], int32
   torch::Tensor paged_kv_last_page_len_expanded;  // [total_beam], int32
+#elif defined(USE_MLU)
+  torch::Tensor shared_lse_kernel;    // [num_heads, total_beam], float32
+  torch::Tensor decode_slot_mapping;  // [total_beam], int32
+  torch::Tensor unshared_seq_lens;    // [total_beam], int32
+#endif
 
   // Cached parameters for validation / reuse
   int32_t cached_batch_size = -1;
@@ -121,7 +129,9 @@ struct AttentionMetadata {
   // Separate plan info for the unshared stage in xattention two-stage decode.
   std::shared_ptr<PlanInfo> unshared_plan_info;
 
-  // for xattention two-stage decode cache (layer 0 only)
+#endif
+#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_MLU)
+  // for xattention two-stage decode cache
   std::optional<XAttentionTwoStageDecodeCache>
       xattention_two_stage_decode_cache;
 #endif

@@ -39,10 +39,17 @@ AttentionMetadata build_attention_metadata(
   attn_metadata.max_query_len = params.q_max_seq_len;
   attn_metadata.max_seq_len = params.kv_max_seq_len;
   if (!params.kv_seq_lens_vec.empty()) {
-    const bool is_cu_seq_lens =
-        params.kv_seq_lens_vec.size() ==
-            static_cast<size_t>(params.num_sequences + 1) &&
-        params.kv_seq_lens_vec.front() == 0;
+    bool is_cu_seq_lens = params.kv_seq_lens_vec.size() ==
+                              static_cast<size_t>(params.num_sequences + 1) &&
+                          params.kv_seq_lens_vec.front() == 0;
+#if defined(USE_MLU)
+    if (params.has_llmrec_params()) {
+      const auto& llmrec_params = *params.llmrec_params();
+      is_cu_seq_lens = params.kv_seq_lens_vec.size() ==
+                           static_cast<size_t>(llmrec_params.batch_size + 1) &&
+                       params.kv_seq_lens_vec.front() == 0;
+    }
+#endif
     attn_metadata.total_kv_len =
         is_cu_seq_lens ? params.kv_seq_lens_vec.back()
                        : std::accumulate(params.kv_seq_lens_vec.begin(),
@@ -186,6 +193,82 @@ AttentionMetadata build_attention_metadata(
           llmrec_params.current_round_tensor.numel() > 0) {
         cache.cached_step = llmrec_params.current_round_tensor.item<int32_t>();
       }
+#elif defined(USE_MLU)
+      if (params.batch_forward_type.is_prefill()) {
+        return attn_metadata;
+      }
+      CHECK(params.batch_forward_type.is_decode())
+          << "MLU REC two-stage attention only supports PREFILL or DECODE, got "
+          << params.batch_forward_type.to_string();
+
+      const auto require_tensor = [](const torch::Tensor& tensor,
+                                     const char* name) {
+        CHECK(tensor.defined())
+            << "MLU REC two-stage metadata requires " << name;
+      };
+      require_tensor(llmrec_params.two_stage_shared_lse,
+                     "two_stage_shared_lse");
+      require_tensor(llmrec_params.two_stage_shared_o, "two_stage_shared_o");
+      require_tensor(llmrec_params.two_stage_unshared_lse,
+                     "two_stage_unshared_lse");
+      require_tensor(llmrec_params.two_stage_unshared_o,
+                     "two_stage_unshared_o");
+      require_tensor(llmrec_params.two_stage_q_cu_seq_lens_shared,
+                     "two_stage_q_cu_seq_lens_shared");
+      require_tensor(llmrec_params.two_stage_shared_lse_kernel,
+                     "two_stage_shared_lse_kernel");
+      require_tensor(llmrec_params.two_stage_decode_slot_mapping,
+                     "two_stage_decode_slot_mapping");
+      require_tensor(llmrec_params.two_stage_unshared_seq_lens,
+                     "two_stage_unshared_seq_lens");
+
+      const int64_t batch_size = llmrec_params.batch_size;
+      const int64_t total_beam = batch_size * llmrec_params.beam_width;
+      CHECK_GT(batch_size, 0) << "MLU REC batch_size must be positive";
+      CHECK_GT(llmrec_params.beam_width, 0)
+          << "MLU REC beam_width must be positive";
+      CHECK_EQ(params.num_sequences, total_beam)
+          << "MLU REC decode num_sequences mismatch: actual "
+          << params.num_sequences << ", expected " << total_beam;
+      CHECK_EQ(params.kv_seq_lens_vec.size(),
+               static_cast<size_t>(batch_size + 1))
+          << "MLU REC shared kv_seq_lens_vec size mismatch: actual "
+          << params.kv_seq_lens_vec.size() << ", expected " << batch_size + 1;
+      CHECK_EQ(params.kv_seq_lens_vec.front(), 0)
+          << "MLU REC shared kv_seq_lens_vec must start at zero";
+      CHECK_EQ(llmrec_params.two_stage_shared_lse.size(0), total_beam);
+      CHECK_EQ(llmrec_params.two_stage_shared_o.size(0), total_beam);
+      CHECK_EQ(llmrec_params.two_stage_unshared_lse.size(0), total_beam);
+      CHECK_EQ(llmrec_params.two_stage_unshared_o.size(0), total_beam);
+      CHECK_EQ(llmrec_params.two_stage_q_cu_seq_lens_shared.numel(),
+               batch_size + 1);
+      CHECK_EQ(llmrec_params.two_stage_decode_slot_mapping.numel(), total_beam);
+      CHECK_EQ(llmrec_params.two_stage_unshared_seq_lens.numel(), total_beam);
+      CHECK_EQ(llmrec_params.two_stage_shared_lse_kernel.dim(), 2);
+      CHECK_EQ(llmrec_params.two_stage_shared_lse_kernel.size(1), total_beam);
+
+      attn_metadata.xattention_two_stage_decode_cache.emplace(
+          XAttentionTwoStageDecodeCache{});
+      auto& cache = attn_metadata.xattention_two_stage_decode_cache.value();
+      cache.shared_lse = llmrec_params.two_stage_shared_lse;
+      cache.shared_o = llmrec_params.two_stage_shared_o;
+      cache.unshared_lse = llmrec_params.two_stage_unshared_lse;
+      cache.unshared_o = llmrec_params.two_stage_unshared_o;
+      cache.q_cu_seq_lens_shared = llmrec_params.two_stage_q_cu_seq_lens_shared;
+      cache.shared_lse_kernel = llmrec_params.two_stage_shared_lse_kernel;
+      cache.decode_slot_mapping = llmrec_params.two_stage_decode_slot_mapping;
+      cache.unshared_seq_lens = llmrec_params.two_stage_unshared_seq_lens;
+      cache.cached_batch_size = static_cast<int32_t>(batch_size);
+      cache.cached_beam_size = llmrec_params.beam_width;
+      if (!llmrec_params.unshared_k_caches.empty()) {
+        CHECK_EQ(llmrec_params.unshared_k_caches[0].dim(), 5)
+            << "MLU REC unshared K cache must be rank 5";
+        cache.cached_max_decode_step =
+            static_cast<int32_t>(llmrec_params.unshared_k_caches[0].size(3));
+      }
+      CHECK_EQ(cache.shared_o.dim(), 3);
+      cache.cached_num_heads = static_cast<int32_t>(cache.shared_o.size(1));
+      cache.cached_head_size = static_cast<int32_t>(cache.shared_o.size(2));
 #endif
     }
   }

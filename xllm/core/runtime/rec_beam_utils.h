@@ -23,6 +23,90 @@ limitations under the License.
 
 namespace xllm::runtime::detail {
 
+class MluDecodeRoundState {
+ public:
+  void require_prev_beam(int32_t round) const {
+    CHECK_GT(round, 0) << "decode rounds start at 1";
+    CHECK_EQ(last_beam_round_, round - 1)
+        << "MLU decode round " << round
+        << " requires the previous beam search to complete";
+  }
+
+  void mark_beam_complete(int32_t round) {
+    CHECK_EQ(round, last_beam_round_ + 1)
+        << "MLU beam search rounds must be consecutive";
+    last_beam_round_ = round;
+  }
+
+  int32_t last_beam_round() const { return last_beam_round_; }
+
+ private:
+  int32_t last_beam_round_ = -1;
+};
+
+inline torch::Tensor get_mlu_decode_tokens(const torch::Tensor& prev_tokens,
+                                           int64_t rows) {
+  CHECK(prev_tokens.defined()) << "MLU decode requires selected beam tokens";
+  CHECK_EQ(prev_tokens.scalar_type(), torch::kInt32)
+      << "MLU selected beam tokens must be int32";
+  CHECK(prev_tokens.is_contiguous())
+      << "MLU selected beam tokens must be contiguous";
+  CHECK_EQ(prev_tokens.numel(), rows)
+      << "MLU selected token count mismatch: actual " << prev_tokens.numel()
+      << ", expected " << rows;
+  return prev_tokens.reshape({rows});
+}
+
+inline bool should_reparent_mlu_cache(int32_t round, int32_t total_rounds) {
+  CHECK_GT(total_rounds, 0) << "total_rounds must be positive";
+  return round > 0 && round < total_rounds - 1;
+}
+
+inline bool has_mlu_fixed_result_width(int32_t beam_width,
+                                       int32_t num_return_sequences) {
+  const int32_t result_width =
+      num_return_sequences > 0 ? num_return_sequences : beam_width;
+  return result_width == beam_width;
+}
+
+inline void update_mlu_two_stage(const torch::Tensor& block_table,
+                                 int32_t decode_step,
+                                 int32_t max_decode_steps,
+                                 torch::Tensor& slot_mapping,
+                                 torch::Tensor& unshared_seq_lens) {
+  CHECK_GT(max_decode_steps, 0) << "max_decode_steps must be positive";
+  CHECK_GE(decode_step, 0) << "decode_step must be non-negative";
+  CHECK_LT(decode_step, max_decode_steps)
+      << "decode_step " << decode_step << " exceeds capacity "
+      << max_decode_steps;
+  CHECK_EQ(block_table.dim(), 2)
+      << "MLU block_table must have shape [total_beam, 1], got "
+      << block_table.sizes();
+  CHECK_EQ(block_table.size(1), 1)
+      << "MLU block_table must have shape [total_beam, 1], got "
+      << block_table.sizes();
+  CHECK_EQ(slot_mapping.dim(), 1) << "slot_mapping must be rank 1";
+  CHECK_EQ(unshared_seq_lens.dim(), 1) << "unshared_seq_lens must be rank 1";
+  CHECK_EQ(slot_mapping.numel(), block_table.size(0))
+      << "slot_mapping total_beam mismatch";
+  CHECK_EQ(unshared_seq_lens.numel(), block_table.size(0))
+      << "unshared_seq_lens total_beam mismatch";
+  CHECK_EQ(block_table.scalar_type(), torch::kInt32)
+      << "MLU block_table must be int32";
+  CHECK_EQ(slot_mapping.scalar_type(), torch::kInt32)
+      << "MLU slot_mapping must be int32";
+  CHECK_EQ(unshared_seq_lens.scalar_type(), torch::kInt32)
+      << "MLU unshared_seq_lens must be int32";
+  CHECK_EQ(slot_mapping.device(), block_table.device())
+      << "slot_mapping and block_table must be on the same device";
+  CHECK_EQ(unshared_seq_lens.device(), block_table.device())
+      << "unshared_seq_lens and block_table must be on the same device";
+
+  slot_mapping.copy_(block_table.view({-1}));
+  slot_mapping.mul_(max_decode_steps).add_(decode_step);
+  unshared_seq_lens.fill_(decode_step + 1);
+}
+
 inline void write_first_round_beam_outputs(
     const torch::Tensor& flat_top_tokens,
     const torch::Tensor& flat_top_logprobs,
@@ -63,7 +147,7 @@ inline void write_first_round_beam_outputs(
       .copy_(flat_top_tokens.view({batch_size, beam_width}));
 }
 
-// Records per-beam incremental logprobs for one decode round into
+// Records the cumulative beam score snapshot for each output slot into
 // token_step_logprobs[batch, beam, round].
 inline void write_beam_round_step_logprobs(const torch::Tensor& out_log_probs,
                                            int32_t batch_size,

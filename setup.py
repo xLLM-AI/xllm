@@ -551,7 +551,7 @@ if __name__ == "__main__":
         device = get_device_type()
     print(f"🚀 Build xllm with CPU arch: {arch} and target device: {device}")
 
-    pre_build()
+    pre_build(device)
 
     generate_so = config['generate_so']
     test_name = config.get('test_name')

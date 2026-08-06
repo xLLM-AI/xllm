@@ -35,6 +35,7 @@ limitations under the License.
 #include "framework/request/mm_data.h"
 #include "models/model_registry.h"
 #include "rec_engine.h"
+#include "runtime/rec_beam_utils.h"
 #include "runtime/xservice_client.h"
 #include "scheduler/scheduler_factory.h"
 #include "util/rec_model_utils.h"
@@ -942,6 +943,20 @@ void RecMaster::schedule_request(RequestParams sp,
     if (!sp.verify_params(callback)) {
       return;
     }
+
+#if defined(USE_MLU)
+    if (rec_type_ == RecType::kLlmRec && is_rec_multi_round_mode() &&
+        !runtime::detail::has_mlu_fixed_result_width(sp.beam_width,
+                                                     sp.num_return_sequences)) {
+      CALLBACK_WITH_ERROR(
+          StatusCode::INVALID_ARGUMENT,
+          "MLU REC multi-round requires num_return_sequences to be zero or "
+          "equal beam_width",
+          sp.service_request_id,
+          sp.source_xservice_addr);
+      return;
+    }
+#endif
 
     auto request = build_request(sp, std::move(callback));
     if (!request) {
