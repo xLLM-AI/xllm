@@ -34,13 +34,11 @@ class CompileRunner(BaseRunner):
         attention_backend,
         device,
         backend: str,
-        fullgraph: bool = False,
-        dynamic: bool = False,
     ) -> None:
         super().__init__(model, attention_backend, device)
         compile_backend = self._resolve_compile_backend(backend)
         self.compiled_model = torch.compile(
-            model, backend=compile_backend, fullgraph=fullgraph, dynamic=dynamic,
+            model, backend=compile_backend, fullgraph=False, dynamic=False,
         )
 
     @staticmethod

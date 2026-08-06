@@ -521,7 +521,7 @@ class TestCompileRunnerFullGraph:
         model = model.to(self.device, dtype=self.dtype)
         runner = CompileRunner(
             model, self.backend, self.device,
-            backend="npu", fullgraph=True, dynamic=False,
+            backend="npu",
         )
         x = torch.randn(batch, seq_len, dim, device=self.device, dtype=self.dtype)
         pos = torch.arange(seq_len, device=self.device)
@@ -550,7 +550,7 @@ class TestCompileRunnerFullGraph:
         model = _MlpBlock(dim=64).to(self.device, dtype=self.dtype)
         runner = CompileRunner(
             model, self.backend, self.device,
-            backend="npu", fullgraph=True, dynamic=False,
+            backend="npu",
         )
         metadata = MagicMock(spec=AttentionMetadata)
         for bs in [1, 4, 8]:
@@ -563,7 +563,7 @@ class TestCompileRunnerFullGraph:
         model = _TransformerBlock(dim=64, num_heads=4).to(self.device, dtype=self.dtype)
         runner = CompileRunner(
             model, self.backend, self.device,
-            backend="npu", fullgraph=True, dynamic=False,
+            backend="npu",
         )
         metadata = MagicMock(spec=AttentionMetadata)
         for seq_len in [4, 16, 32]:
@@ -576,7 +576,7 @@ class TestCompileRunnerFullGraph:
         model = _MlpBlock(dim=64).to(self.device, dtype=self.dtype)
         runner = CompileRunner(
             model, self.backend, self.device,
-            backend="npu", fullgraph=True, dynamic=False,
+            backend="npu",
         )
         metadata = MagicMock(spec=AttentionMetadata)
         x = torch.randn(2, 8, 64, device=self.device, dtype=self.dtype)
@@ -604,7 +604,7 @@ class TestCompileRunnerDynamo:
         model = model.to(self.device, dtype=self.dtype)
         runner = CompileRunner(
             model, self.backend, self.device,
-            backend="npu", fullgraph=False, dynamic=False,
+            backend="npu",
         )
         x = torch.randn(batch, seq_len, dim, device=self.device, dtype=self.dtype)
         pos = torch.arange(seq_len, device=self.device)
@@ -633,7 +633,7 @@ class TestCompileRunnerDynamo:
         model = _MlpBlock(dim=64).to(self.device, dtype=self.dtype)
         runner = CompileRunner(
             model, self.backend, self.device,
-            backend="npu", fullgraph=False, dynamic=False,
+            backend="npu",
         )
         metadata = MagicMock(spec=AttentionMetadata)
         x = torch.randn(2, 8, 64, device=self.device, dtype=self.dtype)
@@ -664,11 +664,11 @@ class TestFullGraphVsDynamoEquivalence:
 
         runner_fg = CompileRunner(
             model_fg, self.backend, self.device,
-            backend="npu", fullgraph=True, dynamic=False,
+            backend="npu",
         )
         runner_dy = CompileRunner(
             model_dy, self.backend, self.device,
-            backend="npu", fullgraph=False, dynamic=False,
+            backend="npu",
         )
 
         x = torch.randn(batch, seq_len, dim, device=self.device, dtype=self.dtype)
@@ -730,7 +730,6 @@ class TestModelExecutorCompileIntegration:
 
         config = {
             "python_graph_backend": "npu",
-            "python_compile_fullgraph": True,
         }
         executor = ModelExecutor(wrapper, config, max_seqs_per_batch=4)
 
@@ -745,7 +744,7 @@ class TestModelExecutorCompileIntegration:
         wrapper = _GraphCompileWrapperModel(inner, num_attn_layers=2, device="npu")
         wrapper = wrapper.to(self.device, dtype=self.dtype)
 
-        config = {"python_graph_backend": "npu", "python_compile_fullgraph": True}
+        config = {"python_graph_backend": "npu"}
         executor = ModelExecutor(wrapper, config, max_seqs_per_batch=4)
 
         kv = (torch.zeros(1), torch.zeros(1))
@@ -767,7 +766,7 @@ class TestModelExecutorCompileIntegration:
         wrapper = _GraphCompileWrapperModel(inner, num_attn_layers=2, device="npu")
         wrapper = wrapper.to(self.device, dtype=self.dtype)
 
-        config = {"python_graph_backend": "npu", "python_compile_fullgraph": True}
+        config = {"python_graph_backend": "npu"}
         executor = ModelExecutor(wrapper, config, max_seqs_per_batch=4)
 
         kv = (torch.zeros(1), torch.zeros(1))
@@ -789,7 +788,7 @@ class TestModelExecutorCompileIntegration:
         wrapper = _GraphCompileWrapperModel(inner, num_attn_layers=2, device="npu")
         wrapper = wrapper.to(self.device, dtype=self.dtype)
 
-        config = {"python_graph_backend": "npu", "python_compile_fullgraph": True}
+        config = {"python_graph_backend": "npu"}
         executor = ModelExecutor(wrapper, config, max_seqs_per_batch=4)
 
         kv = (torch.zeros(1), torch.zeros(1))
@@ -813,7 +812,6 @@ class TestModelExecutorCompileIntegration:
 
         config = {
             "python_graph_backend": "npu",
-            "python_compile_fullgraph": False,
         }
         executor = ModelExecutor(wrapper, config, max_seqs_per_batch=4)
 
@@ -841,7 +839,7 @@ class TestModelExecutorCompileIntegration:
         wrapper_eager = wrapper_eager.to(self.device, dtype=self.dtype)
         wrapper_eager.load_state_dict(wrapper_fg.state_dict())
 
-        config_compile = {"python_graph_backend": "npu", "python_compile_fullgraph": True}
+        config_compile = {"python_graph_backend": "npu"}
         config_eager = {"python_graph_backend": "off"}
 
         executor_compile = ModelExecutor(wrapper_fg, config_compile, max_seqs_per_batch=4)
@@ -874,11 +872,11 @@ class TestCompileRunnerTorchair:
         self.dtype = torch.float16
         self.backend = StubAttentionBackend()
 
-    def _run_and_verify(self, model, batch=2, seq_len=8, dim=64, fullgraph=True):
+    def _run_and_verify(self, model, batch=2, seq_len=8, dim=64):
         model = model.to(self.device, dtype=self.dtype)
         runner = CompileRunner(
             model, self.backend, self.device,
-            backend="torchair", fullgraph=fullgraph, dynamic=False,
+            backend="torchair",
         )
         x = torch.randn(batch, seq_len, dim, device=self.device, dtype=self.dtype)
         pos = torch.arange(seq_len, device=self.device)
@@ -891,23 +889,23 @@ class TestCompileRunnerTorchair:
         assert torch.allclose(compiled_out, eager_out, atol=1e-2, rtol=1e-2)
 
     def test_mlp_fullgraph(self):
-        self._run_and_verify(_MlpBlock(dim=64), fullgraph=True)
+        self._run_and_verify(_MlpBlock(dim=64))
 
     def test_mlp_dynamo(self):
-        self._run_and_verify(_MlpBlock(dim=64), fullgraph=False)
+        self._run_and_verify(_MlpBlock(dim=64))
 
     def test_transformer_fullgraph(self):
-        self._run_and_verify(_TransformerBlock(dim=64, num_heads=4), fullgraph=True)
+        self._run_and_verify(_TransformerBlock(dim=64, num_heads=4))
 
     def test_transformer_dynamo(self):
-        self._run_and_verify(_TransformerBlock(dim=64, num_heads=4), fullgraph=False)
+        self._run_and_verify(_TransformerBlock(dim=64, num_heads=4))
 
     def test_deep_network_fullgraph(self):
         self._run_and_verify(
-            _DeepNetwork(dim=64, num_heads=4, num_layers=2), fullgraph=True,
+            _DeepNetwork(dim=64, num_heads=4, num_layers=2),
         )
 
     def test_deep_network_dynamo(self):
         self._run_and_verify(
-            _DeepNetwork(dim=64, num_heads=4, num_layers=2), fullgraph=False,
+            _DeepNetwork(dim=64, num_heads=4, num_layers=2),
         )

@@ -141,8 +141,6 @@ class ModelExecutor:
                 self.attention_backend,
                 device,
                 backend=graph_backend,
-                fullgraph=bool(config.get("python_compile_fullgraph", False)),
-                dynamic=bool(config.get("python_compile_dynamic", False)),
             )
 
     @staticmethod
