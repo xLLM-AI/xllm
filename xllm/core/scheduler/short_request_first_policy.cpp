@@ -16,6 +16,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 
+#include "common/metrics.h"
 #include "core/framework/config/scheduler_config.h"
 #include "glog/logging.h"
 #include "scheduler/scheduler_policy.h"
@@ -123,6 +124,34 @@ void ShortRequestFirstPolicy::schedule(
       scheduler_config.short_request_first_threshold(),
       scheduler_config.short_request_first_long_max_wait_ms());
   PrefillFirstPolicy::schedule(state, budget, finished);
+}
+
+void ShortRequestFirstPolicy::report_metrics(const SchedulerState& state,
+                                             double elapsed_seconds,
+                                             size_t num_preempted_requests) {
+  PrefillFirstPolicy::report_metrics(
+      state, elapsed_seconds, num_preempted_requests);
+
+  const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+  const int32_t threshold = scheduler_config.short_request_first_threshold();
+  size_t immediate_waiting = 0;
+  size_t short_waiting = 0;
+  size_t long_waiting = 0;
+  for (auto it = state.prefill_queue.begin(); it != state.prefill_queue.end();
+       ++it) {
+    const ShortRequestFirstRequestClass request_class =
+        classify_short_request_first(**it, threshold);
+    if (request_class == ShortRequestFirstRequestClass::IMMEDIATE) {
+      ++immediate_waiting;
+    } else if (request_class == ShortRequestFirstRequestClass::SHORT) {
+      ++short_waiting;
+    } else {
+      ++long_waiting;
+    }
+  }
+  GAUGE_SET(num_short_request_first_immediate_waiting, immediate_waiting);
+  GAUGE_SET(num_short_request_first_short_waiting, short_waiting);
+  GAUGE_SET(num_short_request_first_long_waiting, long_waiting);
 }
 
 }  // namespace xllm

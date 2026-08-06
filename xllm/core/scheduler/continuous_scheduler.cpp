@@ -201,35 +201,6 @@ void ContinuousScheduler::create_queues(const Options& options) {
   }
 }
 
-void ContinuousScheduler::report_short_request_first_metrics() {
-  const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
-  if (!scheduler_config.enable_short_request_first()) {
-    GAUGE_SET(num_short_request_first_immediate_waiting, 0);
-    GAUGE_SET(num_short_request_first_short_waiting, 0);
-    GAUGE_SET(num_short_request_first_long_waiting, 0);
-    return;
-  }
-
-  const int32_t threshold = scheduler_config.short_request_first_threshold();
-  size_t immediate_waiting = 0;
-  size_t short_waiting = 0;
-  size_t long_waiting = 0;
-  for (auto it = prefill_queue_->begin(); it != prefill_queue_->end(); ++it) {
-    const ShortRequestFirstRequestClass request_class =
-        classify_short_request_first(**it, threshold);
-    if (request_class == ShortRequestFirstRequestClass::IMMEDIATE) {
-      ++immediate_waiting;
-    } else if (request_class == ShortRequestFirstRequestClass::SHORT) {
-      ++short_waiting;
-    } else {
-      ++long_waiting;
-    }
-  }
-  GAUGE_SET(num_short_request_first_immediate_waiting, immediate_waiting);
-  GAUGE_SET(num_short_request_first_short_waiting, short_waiting);
-  GAUGE_SET(num_short_request_first_long_waiting, long_waiting);
-}
-
 void ContinuousScheduler::clear_mtp_bootstrap(Request* request) {
   if (!options_.enable_disagg_pd() || options_.num_speculative_tokens() <= 0 ||
       request == nullptr || request->sequences().empty()) {
@@ -248,7 +219,6 @@ std::vector<Batch> ContinuousScheduler::prepare_batch() {
 
   // Common phases (strategy-independent)
   policy_->drain_request_queue(state, request_queue_);
-  report_short_request_first_metrics();
   auto finished = policy_->collect_finished(state);
 
   // Initialize budget
