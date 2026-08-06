@@ -39,18 +39,20 @@ void packed_proto_to_forward_input(
 void proto_to_forward_output(const proto::ForwardOutput& pb_output,
                              RawForwardOutput& raw_forward_output);
 
-void forward_output_to_proto(const torch::Tensor& next_tokens,
-                             const torch::Tensor& logprobs,
-                             const torch::Tensor& top_tokens,
-                             const torch::Tensor& top_logprobs,
-                             const torch::Tensor& embeddings,
-                             const torch::Tensor& expert_load_data,
-                             int32_t prepared_layer_id,
-                             const torch::Tensor& src_seq_idxes,
-                             const torch::Tensor& out_tokens,
-                             const torch::Tensor& out_logprobs,
-                             const std::vector<torch::Tensor>& dit_images,
-                             proto::ForwardOutput* pb_forward_output);
+void forward_output_to_proto(
+    const torch::Tensor& next_tokens,
+    const torch::Tensor& logprobs,
+    const torch::Tensor& top_tokens,
+    const torch::Tensor& top_logprobs,
+    const torch::Tensor& embeddings,
+    const torch::Tensor& expert_load_data,
+    int32_t prepared_layer_id,
+    const torch::Tensor& src_seq_idxes,
+    const torch::Tensor& out_tokens,
+    const torch::Tensor& out_logprobs,
+    const std::vector<torch::Tensor>& dit_images,
+    const std::vector<JsonObjectOutputError>& json_object_errors,
+    proto::ForwardOutput* pb_forward_output);
 
 Token build_token(int64_t index,
                   torch::Tensor token_ids,

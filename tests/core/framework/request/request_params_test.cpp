@@ -25,6 +25,34 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+TEST(RequestParamsTest, ParsesJsonObjectResponseFormat) {
+  proto::ChatRequest request;
+  request.mutable_response_format()->set_type("json_object");
+
+  RequestParams params(request, "", "");
+
+  EXPECT_EQ(params.response_format, ResponseFormatType::JSON_OBJECT);
+  EXPECT_TRUE(params.response_format_error.empty());
+}
+
+TEST(RequestParamsTest, RejectsUnsupportedResponseFormat) {
+  proto::ChatRequest request;
+  request.mutable_response_format()->set_type("text");
+
+  RequestParams params(request, "", "");
+  std::optional<Status> received_status;
+  const bool valid =
+      params.verify_params([&received_status](RequestOutput output) {
+        received_status = output.status;
+        return false;
+      });
+
+  EXPECT_FALSE(valid);
+  ASSERT_TRUE(received_status.has_value());
+  EXPECT_EQ(received_status->code(), StatusCode::INVALID_ARGUMENT);
+  EXPECT_NE(received_status->message().find("json_object"), std::string::npos);
+}
+
 TEST(RequestParamsTest,
      CompletionBeamSearchDefaultsTopLogprobsToBeamWidthWhenUnset) {
   proto::CompletionRequest request;

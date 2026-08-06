@@ -112,7 +112,11 @@ void AsyncResponseProcessor::process_completed_request(
     RequestOutput req_output =
         request->generate_output(*tokenizer_, &generate_output_threadpool_);
     if (!disable_log_stats_) {
-      request->log_statistic(end_2_end_latency_seconds);
+      if (req_output.status.has_value() && !req_output.status->ok()) {
+        request->log_error_statistic(req_output.status.value());
+      } else {
+        request->log_statistic(end_2_end_latency_seconds);
+      }
     }
     request->state().output_func(req_output);
   };
@@ -143,13 +147,15 @@ void AsyncResponseProcessor::batch_process_completed_requests(
       HISTOGRAM_OBSERVE(
           end_2_end_latency_milliseconds,
           static_cast<int64_t>(end_2_end_latency_seconds * 1000.0));
-      if (request->finished() || request->cancelled()) {
-        if (!disable_log_stats_) {
+      *request_output = std::move(request->generate_output(*tokenizer_));
+      if (!disable_log_stats_) {
+        if (request_output->status.has_value() &&
+            !request_output->status->ok()) {
+          request->log_error_statistic(request_output->status.value());
+        } else if (request->finished() || request->cancelled()) {
           request->log_statistic(end_2_end_latency_seconds);
         }
       }
-
-      *request_output = std::move(request->generate_output(*tokenizer_));
       if (request->sequences()[0]->num_generated_tokens() == 1) {
         // currently only support one sequence when enable_service_routing
         request_output->finished_on_prefill_instance = true;

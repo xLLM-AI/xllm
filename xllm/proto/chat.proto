@@ -25,6 +25,9 @@ message ChatMessage {
   optional string tool_call_id = 5;
 }
 
+message ResponseFormat {
+  optional string type = 1;
+}
 
 // Next Id: 45
 message ChatRequest {
@@ -154,6 +157,7 @@ message ChatRequest {
   // request trace headers from client.
   optional string x_request_id = 43;
   optional string x_request_time = 44;
+  optional ResponseFormat response_format = 47;
 }
 
 message ChatLogProbData {

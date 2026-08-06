@@ -158,7 +158,8 @@ class WorkerService : public proto::DistributeWorker {
             int32_t& prepared_layer_id,
             torch::Tensor& src_seq_idxes,
             torch::Tensor& out_tokens,
-            torch::Tensor& out_logprobs);
+            torch::Tensor& out_logprobs,
+            std::vector<JsonObjectOutputError>& json_object_errors);
   DISALLOW_COPY_AND_ASSIGN(WorkerService);
 
  private:

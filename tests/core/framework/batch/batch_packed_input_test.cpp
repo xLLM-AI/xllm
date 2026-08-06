@@ -89,6 +89,9 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresSampleIdxes) {
       builder.build_forward_input(/*num_decoding_tokens=*/1,
                                   /*min_decoding_batch_size=*/0);
   ASSERT_TRUE(input.sampling_params.sample_idxes.defined());
+  input.sampling_params.filter_bitmask =
+      torch::tensor({{static_cast<int32_t>(0x5)}},
+                    torch::TensorOptions().dtype(torch::kInt32));
 
   proto::PackedForwardInput packed_input;
   ASSERT_TRUE(forward_input_to_packed_proto(input, &packed_input));
@@ -108,6 +111,9 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresSampleIdxes) {
   ASSERT_TRUE(unpacked_input.sampling_params.sample_idxes.defined());
   EXPECT_TRUE(tensor_equals_vector<int32_t>(
       unpacked_input.sampling_params.sample_idxes, {0}));
+  ASSERT_TRUE(unpacked_input.sampling_params.filter_bitmask.defined());
+  EXPECT_TRUE(torch::equal(unpacked_input.sampling_params.filter_bitmask,
+                           input.sampling_params.filter_bitmask));
 }
 
 }  // namespace xllm

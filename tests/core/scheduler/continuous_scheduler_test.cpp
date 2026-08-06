@@ -82,6 +82,8 @@ class TestContinuousScheduler final : public ContinuousScheduler {
     response_processor_->batch_process_stream_requests(request_copy);
     response_processor_->wait_completion();
   }
+
+  void wait_for_responses() { response_processor_->wait_completion(); }
 };
 
 template <typename T>
@@ -935,6 +937,47 @@ TEST(ContinuousSchedulerTest, RejectedStreamCancelsAtSchedulingBoundary) {
             initial_free_blocks);
 }
 
+TEST(ContinuousSchedulerTest, FailedStreamReturnsStatusExactlyOnce) {
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(1024, 16, 0, 1024, 1);
+  opt.enable_schedule_overlap() = false;
+  auto engine = std::make_unique<FakeEngine>(32, 4);
+  auto scheduler = std::make_unique<TestContinuousScheduler>(engine.get(), opt);
+  auto request = generate_request_with_prompt_tokens({1, 2, 3, 4}, 4, 30000);
+  request->state().stream = true;
+  make_request_decode_ready(request);
+  scheduler->add_request(request);
+
+  int32_t callback_count = 0;
+  std::optional<Status> callback_status;
+  request->state().output_func = [&](const RequestOutput& output) {
+    ++callback_count;
+    callback_status = output.status;
+    return true;
+  };
+  std::vector<Batch> batch = scheduler->prepare_batch_test();
+  ASSERT_EQ(batch.size(), 1u);
+  ASSERT_EQ(batch[0].size(), 1u);
+
+  request->sequences()[0]->fail(
+      Status(StatusCode::UNKNOWN, "json_object row mismatch"));
+  scheduler->process_batch_output_test(/*enable_schedule_overlap=*/false);
+  scheduler->wait_for_responses();
+  EXPECT_EQ(callback_count, 0);
+
+  (void)scheduler->prepare_batch_test();
+  scheduler->wait_for_responses();
+
+  EXPECT_EQ(callback_count, 1);
+  ASSERT_TRUE(callback_status.has_value());
+  EXPECT_EQ(callback_status->code(), StatusCode::UNKNOWN);
+  EXPECT_EQ(callback_status->message(), "json_object row mismatch");
+
+  (void)scheduler->prepare_batch_test();
+  scheduler->wait_for_responses();
+  EXPECT_EQ(callback_count, 1);
+}
+
 TEST(ContinuousSchedulerTest, BatchRejectedStreamsCancelAtSchedulingBoundary) {
   ContinuousScheduler::Options opt =
       create_scheduler_options(1024, 16, 0, 1024, 1);
@@ -1171,7 +1214,6 @@ TEST(ContinuousSchedulerTest, PauseAbortCancelsRunningRequests) {
   EXPECT_EQ(scheduler->get_waiting_requests_num(), 0);     // NOT requeued
 
   (void)engine.release();
-
 }
 
 }  // namespace xllm

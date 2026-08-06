@@ -21,6 +21,7 @@ limitations under the License.
 #include <folly/futures/Future.h>
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -28,6 +29,7 @@ limitations under the License.
 
 #include "core/common/types.h"
 #include "core/framework/multimodal/mm_data.h"
+#include "core/framework/sampling/json_object_grammar.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/tokenizer/tokenizer.h"
 #include "core/util/slice.h"
@@ -57,6 +59,10 @@ enum class SequenceStage : int8_t {
   CHUNKED_PREFILL = 1,
   // Decode one token.
   DECODE = 2
+};
+
+struct RequestFailureState final {
+  std::optional<Status> status;
 };
 
 struct SequenceParams {
@@ -101,6 +107,10 @@ struct SequenceParams {
   // stopping checker
   // reference from request
   StoppingChecker* stopping_checker;  // not owned
+
+  std::shared_ptr<const JsonObjectGrammar> json_object_grammar;
+  bool json_reasoning_enabled = false;
+  std::shared_ptr<RequestFailureState> request_failure_state;
 };
 
 class Sequence final {
@@ -113,6 +123,7 @@ class Sequence final {
            const SequenceParams& seq_params);
 
   Sequence(const Sequence& other);
+  Sequence(const Sequence& other, size_t index);
 
   // get mm data
   const MMData& mm_data() const { return mm_data_; }
@@ -208,6 +219,9 @@ class Sequence final {
   }
   Block reset_single_block() { return std::move(single_block_); }
   const std::string& request_id() const { return request_id_; }
+  std::string sample_sequence_id() const {
+    return request_id_ + "#" + std::to_string(index_);
+  }
   // get input embedding
   torch::Tensor get_input_embedding() const { return input_embedding_; }
 
@@ -225,10 +239,14 @@ class Sequence final {
   }
 
   FinishReason finish_reason() const { return finish_reason_; }
+  const std::optional<Status>& error_status() const {
+    return sequence_params_.request_failure_state->status;
+  }
   // check finish status, use cached value if not invalidated
   bool finished() const;
   // mark sequence as finished (used by rec model multi-round decoding)
   void finish();
+  void fail(Status status);
 
   // get the output of the sequence until the specified number of tokens,
   // returns nullopt if no delta text and not finished
@@ -244,6 +262,11 @@ class Sequence final {
   // get the sampling parameters
   const RequestSamplingParam* sampling_param() const {
     return sequence_params_.sampling_param;
+  }
+
+  const JsonObjectGrammarState* json_object_state() const {
+    return json_object_state_.has_value() ? &json_object_state_.value()
+                                          : nullptr;
   }
 
   // get the stopping criteria
@@ -495,6 +518,8 @@ class Sequence final {
   size_t num_prompt_tokens_ = 0;
 
   std::optional<OneRecState> onerec_state_;
+
+  std::optional<JsonObjectGrammarState> json_object_state_;
 
   // NOTE: MUST FIXME Later
   // record all tokens num in last turn when the request is

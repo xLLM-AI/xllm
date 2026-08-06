@@ -34,6 +34,7 @@ cc_library(
     xservice_client.h
     speculative_worker_impl.h
     mtp_worker_impl.h
+    mtp_json_object_state.h
     suffix_worker_impl.h
     eagle3_worker_impl.h
     spec_input_builder.h

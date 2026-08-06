@@ -86,6 +86,9 @@ class BatchInputBuilder {
 
     // Sampling data
     std::vector<const RequestSamplingParam*> sampling_params;
+    std::vector<JsonObjectGrammarState> json_object_states;
+    std::vector<std::string> sample_sequence_ids;
+    std::vector<int32_t> sample_prior_output_rows;
     std::vector<int32_t> selected_token_idxes;
     std::vector<int32_t> sample_idxes;
 
