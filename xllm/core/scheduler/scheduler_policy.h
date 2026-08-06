@@ -15,7 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include <absl/time/time.h>
 #include <folly/MPMCQueue.h>
 
 #include <cstdint>
@@ -220,9 +219,7 @@ class PrefillFirstPolicy : public SchedulerPolicy {
 
 // ShortRequestFirstPolicy: PrefillFirstPolicy with ShortRequestFirst ordering
 // for the PD-prefill waiting queue. Before delegating to PrefillFirstPolicy it
-// stable-sorts the prefill queue so that (at most) the single aged LONG head,
-// then SHORT requests, then remaining LONG requests are scheduled in that
-// order.
+// sorts the prefill queue with the "short_request_first" comparator.
 class ShortRequestFirstPolicy : public PrefillFirstPolicy {
  public:
   using PrefillFirstPolicy::PrefillFirstPolicy;
@@ -298,30 +295,6 @@ class UnifiedPolicy : public SchedulerPolicy {
                         int32_t latency_budget,
                         const SchedulerState& state);
 };
-
-// =============================================================================
-// ShortRequestFirst helpers
-// =============================================================================
-
-enum class ShortRequestFirstRequestClass : int8_t {
-  SHORT = 0,
-  LONG = 1,
-};
-
-// Classify a PD-prefill waiting request for ShortRequestFirst ordering by
-// prompt length.
-ShortRequestFirstRequestClass classify_short_request_first(Request& request,
-                                                           int32_t threshold);
-
-// Stable-sort `queue` with ShortRequestFirst ordering: (at most) the single
-// LONG request whose wait exceeds `long_max_wait_ms`, then SHORT requests,
-// then the remaining LONG requests. Within the same class requests are ordered
-// by created_time (oldest first). `now` defaults to the current time and is
-// injectable for tests.
-void sort_short_request_first_queue(RequestPriorityQueue& queue,
-                                    int32_t threshold,
-                                    double long_max_wait_ms,
-                                    absl::Time now = absl::Now());
 
 // Factory function: creates the appropriate policy based on BatchMode.
 std::unique_ptr<SchedulerPolicy> create_scheduler_policy(

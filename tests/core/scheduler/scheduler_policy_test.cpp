@@ -642,6 +642,7 @@ TEST(SchedulerPolicyTest, ShortRequestFirstSchedulesShortBeforeLong) {
 
   ContinuousScheduler::Options opt =
       create_scheduler_options(10000, 256, 0, 1024, 1);
+  opt.priority_strategy_ = "short_request_first";
   opt.enable_disagg_pd_ = true;
   opt.enable_chunked_prefill_ = true;
   opt.instance_role_ = InstanceRole::PREFILL;

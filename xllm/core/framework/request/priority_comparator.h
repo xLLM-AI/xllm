@@ -14,6 +14,9 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
+#include <absl/time/time.h>
+
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -87,6 +90,38 @@ struct UrgencyPriorityComparator : public PriorityComparator {
 struct DecodeUrgencyDensityComparator : public PriorityComparator {
   bool operator()(const std::shared_ptr<Request>& a,
                   const std::shared_ptr<Request>& b) const override;
+};
+
+// ShortRequestFirst request class for PD-prefill waiting requests.
+enum class ShortRequestFirstRequestClass : int8_t {
+  SHORT = 0,
+  LONG = 1,
+};
+
+// Classify a PD-prefill waiting request for ShortRequestFirst ordering by
+// prompt length.
+ShortRequestFirstRequestClass classify_short_request_first(Request& request,
+                                                           int32_t threshold);
+
+// ShortRequestFirst ordering: aged LONG requests (wait >= long_max_wait_ms)
+// first, then SHORT requests, then remaining LONG requests. Within the same
+// class, older requests (created_time) come first.
+class ShortRequestFirstComparator final : public PriorityComparator {
+ public:
+  ShortRequestFirstComparator(int32_t threshold,
+                              double long_max_wait_ms,
+                              absl::Time now);
+
+  bool operator()(const std::shared_ptr<Request>& a,
+                  const std::shared_ptr<Request>& b) const override;
+
+ private:
+  int32_t short_request_first_rank(
+      const std::shared_ptr<Request>& request) const;
+
+  int32_t threshold_;
+  double long_max_wait_ms_;
+  absl::Time now_;
 };
 
 std::function<bool(const std::shared_ptr<Request>&,

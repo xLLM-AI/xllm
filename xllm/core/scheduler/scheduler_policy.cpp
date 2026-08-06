@@ -101,8 +101,9 @@ void validate_short_request_first_options(
     LOG(FATAL) << "ShortRequestFirst is only supported on PD prefill or mix "
                << "instances, not decode instances.";
   }
-  if (options.priority_strategy() != "fcfs") {
-    LOG(FATAL) << "ShortRequestFirst requires priority_strategy=fcfs, got "
+  if (options.priority_strategy() != "short_request_first") {
+    LOG(FATAL) << "ShortRequestFirst requires "
+                  "priority_strategy=short_request_first, got "
                << options.priority_strategy();
   }
 }

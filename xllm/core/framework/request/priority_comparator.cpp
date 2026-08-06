@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "priority_comparator.h"
 
+#include "framework/request/sequence.h"
 #include "glog/logging.h"
 
 namespace xllm {
@@ -220,6 +221,50 @@ bool DecodeUrgencyDensityComparator::operator()(
   } else {
     return sequence_a->stage() < sequence_b->stage();
   }
+}
+
+ShortRequestFirstRequestClass classify_short_request_first(Request& request,
+                                                           int32_t threshold) {
+  CHECK(!request.sequences().empty());
+  Sequence* sequence = request.sequences()[0].get();
+  CHECK(sequence != nullptr);
+
+  if (sequence->num_prompt_tokens() <= static_cast<size_t>(threshold)) {
+    return ShortRequestFirstRequestClass::SHORT;
+  }
+  return ShortRequestFirstRequestClass::LONG;
+}
+
+ShortRequestFirstComparator::ShortRequestFirstComparator(
+    int32_t threshold,
+    double long_max_wait_ms,
+    absl::Time now)
+    : threshold_(threshold), long_max_wait_ms_(long_max_wait_ms), now_(now) {}
+
+bool ShortRequestFirstComparator::operator()(
+    const std::shared_ptr<Request>& a,
+    const std::shared_ptr<Request>& b) const {
+  const int32_t rank_a = short_request_first_rank(a);
+  const int32_t rank_b = short_request_first_rank(b);
+  if (rank_a != rank_b) {
+    return rank_a < rank_b;
+  }
+  return a->created_time() < b->created_time();
+}
+
+int32_t ShortRequestFirstComparator::short_request_first_rank(
+    const std::shared_ptr<Request>& request) const {
+  const ShortRequestFirstRequestClass request_class =
+      classify_short_request_first(*request, threshold_);
+  if (request_class == ShortRequestFirstRequestClass::LONG &&
+      long_max_wait_ms_ > 0.0 &&
+      now_ - request->created_time() >= absl::Milliseconds(long_max_wait_ms_)) {
+    return 0;
+  }
+  if (request_class == ShortRequestFirstRequestClass::SHORT) {
+    return 1;
+  }
+  return 2;
 }
 
 // is_reversed = false for priority_queue comparator (default)

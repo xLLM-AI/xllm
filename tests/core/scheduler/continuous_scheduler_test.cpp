@@ -1104,6 +1104,7 @@ TEST(ContinuousSchedulerTest, ShortRequestFirstSchedulesShortBeforeLong) {
       /*num_speculative_tokens=*/0,
       /*max_tokens_per_chunk_for_prefill=*/1024,
       /*dp_size=*/1);
+  opt.priority_strategy_ = "short_request_first";
   opt.enable_disagg_pd_ = true;
   opt.enable_chunked_prefill_ = true;
   opt.instance_role_ = InstanceRole::PREFILL;

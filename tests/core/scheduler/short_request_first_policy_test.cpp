@@ -20,6 +20,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "framework/request/priority_comparator.h"
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"
 #include "scheduler/request_priority_queue.h"
@@ -82,9 +83,9 @@ TEST(ShortRequestFirstPolicyTest, SortsShortBeforeLongByDefault) {
   queue.push(make_request("short", /*prompt_tokens=*/64),
              /*if_back=*/true);
 
-  sort_short_request_first_queue(queue,
-                                 /*threshold=*/256,
-                                 /*long_max_wait_ms=*/0.0);
+  queue.sort(ShortRequestFirstComparator(/*threshold=*/256,
+                                         /*long_max_wait_ms=*/0.0,
+                                         absl::Now()));
 
   EXPECT_EQ(collect_ids(queue), std::vector<std::string>({"short", "long"}));
 }
@@ -97,15 +98,15 @@ TEST(ShortRequestFirstPolicyTest, DoesNotPromoteWhenAgingOff) {
   queue.push(make_request("short", /*prompt_tokens=*/64),
              /*if_back=*/true);
 
-  sort_short_request_first_queue(queue,
-                                 /*threshold=*/256,
-                                 /*long_max_wait_ms=*/0.0,
-                                 long_request->created_time() + absl::Hours(1));
+  queue.sort(ShortRequestFirstComparator(
+      /*threshold=*/256,
+      /*long_max_wait_ms=*/0.0,
+      long_request->created_time() + absl::Hours(1)));
 
   EXPECT_EQ(collect_ids(queue), std::vector<std::string>({"short", "long"}));
 }
 
-TEST(ShortRequestFirstPolicyTest, PromotesAgedLongHeadAtWaitBoundary) {
+TEST(ShortRequestFirstPolicyTest, PromotesAgedLongsAtWaitBoundary) {
   DequeQueue queue;
   std::shared_ptr<Request> long_request =
       make_request("long", /*prompt_tokens=*/512);
@@ -113,41 +114,39 @@ TEST(ShortRequestFirstPolicyTest, PromotesAgedLongHeadAtWaitBoundary) {
   queue.push(make_request("short", /*prompt_tokens=*/64),
              /*if_back=*/true);
 
-  sort_short_request_first_queue(
-      queue,
+  queue.sort(ShortRequestFirstComparator(
       /*threshold=*/256,
       /*long_max_wait_ms=*/100.0,
-      long_request->created_time() + absl::Milliseconds(99));
+      long_request->created_time() + absl::Milliseconds(99)));
 
   EXPECT_EQ(collect_ids(queue), std::vector<std::string>({"short", "long"}));
 
-  sort_short_request_first_queue(
-      queue,
+  queue.sort(ShortRequestFirstComparator(
       /*threshold=*/256,
       /*long_max_wait_ms=*/100.0,
-      long_request->created_time() + absl::Milliseconds(100));
+      long_request->created_time() + absl::Milliseconds(100)));
 
   EXPECT_EQ(collect_ids(queue), std::vector<std::string>({"long", "short"}));
 }
 
-TEST(ShortRequestFirstPolicyTest, PromotesOnlyTheOldestLongHead) {
+TEST(ShortRequestFirstPolicyTest, PromotesAllAgedLongsBeforeShort) {
   DequeQueue queue;
   std::shared_ptr<Request> long_0 =
       make_request("long-0", /*prompt_tokens=*/512);
   queue.push(long_0, /*if_back=*/true);
-  queue.push(make_request("long-1", /*prompt_tokens=*/768),
-             /*if_back=*/true);
+  std::shared_ptr<Request> long_1 =
+      make_request("long-1", /*prompt_tokens=*/768);
+  queue.push(long_1, /*if_back=*/true);
   queue.push(make_request("short", /*prompt_tokens=*/64),
              /*if_back=*/true);
 
-  sort_short_request_first_queue(
-      queue,
+  queue.sort(ShortRequestFirstComparator(
       /*threshold=*/256,
       /*long_max_wait_ms=*/100.0,
-      long_0->created_time() + absl::Milliseconds(100));
+      long_1->created_time() + absl::Milliseconds(100)));
 
   EXPECT_EQ(collect_ids(queue),
-            std::vector<std::string>({"long-0", "short", "long-1"}));
+            std::vector<std::string>({"long-0", "long-1", "short"}));
 }
 
 }  // namespace

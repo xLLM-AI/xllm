@@ -58,7 +58,8 @@ DEFINE_int32(
 
 DEFINE_string(priority_strategy,
               "fcfs",
-              "Priority strategy for requests(e.g. fcfs, priority, deadline).");
+              "Priority strategy for requests(e.g. fcfs, priority, deadline, "
+              "short_request_first).");
 
 DEFINE_bool(enable_short_request_first,
             false,
