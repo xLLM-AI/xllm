@@ -2163,51 +2163,6 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
   finish_metadata_prepare(*prepare_stream_, validate_input);
 }
 
-bool MTPWorkerImpl::prepare_static_mtp_graph_tasks_before_final_draft(
-    const ForwardInput& input) {
-#if defined(USE_NPU)
-  if (!should_use_explicit_spec_verify_replay_update(input) ||
-      input.input_params.embedding.linear_state_ids.size() != 1 ||
-      embedding_cache_ == nullptr ||
-      input.input_params.embedding.embedding_ids.empty()) {
-    return false;
-  }
-  const auto& block_tables = input.input_params.attention.host.block_tables;
-  if (!block_tables.defined() || block_tables.dim() != 2 ||
-      block_tables.size(0) != 1) {
-    return false;
-  }
-  const std::vector<int32_t> accepted_prefix_lengths =
-      embedding_cache_->read_accepted_prefix_lengths(
-          input.input_params.embedding.embedding_ids,
-          input.input_params.embedding.request_ids);
-  if (accepted_prefix_lengths.size() != 1) {
-    return false;
-  }
-  const int64_t verify_block_table_width =
-      spec_verify_block_table_width(block_tables);
-  const auto& kv_seq_lens = input.input_params.attention.host.kv_seq_lens;
-  if (kv_seq_lens.empty()) {
-    return false;
-  }
-  const int64_t spec_verify_max_kv_seq_len =
-      static_cast<int64_t>(
-          *std::max_element(kv_seq_lens.begin(), kv_seq_lens.end())) +
-      options_.num_speculative_tokens();
-  const SpecVerifyGraphTaskSignal signal{
-      .linear_state_id = input.input_params.embedding.linear_state_ids.front(),
-      .num_accepted_tokens = accepted_prefix_lengths.front(),
-      .spec_width = options_.num_speculative_tokens() + 1,
-      .block_table_width = verify_block_table_width,
-      .max_kv_seq_len = spec_verify_max_kv_seq_len,
-  };
-  return target_impl_->prepare_static_mtp_graph_tasks(signal, *compute_stream_);
-#else
-  (void)input;
-  return false;
-#endif
-}
-
 void MTPWorkerImpl::prepare_draft_extend_inputs(
     const ForwardInput& base_input,
     const std::vector<EmbeddingCache::DecodeState>& last_states,
