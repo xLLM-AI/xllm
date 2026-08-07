@@ -156,6 +156,10 @@ def vision_rotary_mul(
 ) -> torch.Tensor:
     """Apply RoPE via ``torch_npu.npu_rotary_mul`` (neox/half mode).
 
+    When ``torch.compile`` is active and ``head_dim`` is not aligned to 64,
+    falls back to standard PyTorch ops (mirrors op-plugin aclop fallback in
+    ``RotaryMulKernelNpu.cpp:27-30``): ``r1 * x + r2 * rotate_half(x)``.
+
     Args:
         value: ``(total_tokens, num_heads, head_dim)``.
         cos_full: ``(1, total_tokens, 1, head_dim)``.
@@ -166,6 +170,12 @@ def vision_rotary_mul(
     """
     import torch_npu
 
+    if torch.compiler.is_compiling() and value.shape[-1] % 64 != 0:
+        cos = cos_full.squeeze(0).squeeze(1).unsqueeze(1)
+        sin = sin_full.squeeze(0).squeeze(1).unsqueeze(1)
+        x1, x2 = value.chunk(2, dim=-1)
+        rotated = torch.cat((-x2, x1), dim=-1)
+        return cos * value + sin * rotated
     return torch_npu.npu_rotary_mul(value.unsqueeze(0).contiguous(), cos_full, sin_full).squeeze(0)
 
 
