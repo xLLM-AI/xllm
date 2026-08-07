@@ -67,7 +67,7 @@ void TextGenerationServiceImpl::process_async_impl(
     return;
   }
 
-  if (master_->get_rate_limiter()->is_limited()) {
+  if (master_->get_rate_limiter()->check_limited()) {
     call->finish_with_error(
         StatusCode::RESOURCE_EXHAUSTED,
         "The number of concurrent requests has reached the limit.");
@@ -87,7 +87,6 @@ void TextGenerationServiceImpl::process_async_impl(
        request_id = saved_request_id,
        created_time = absl::ToUnixSeconds(absl::Now())](
           const DiTRequestOutput& req_output) -> bool {
-        master->get_rate_limiter()->decrease_one_request();
         if (req_output.status.has_value()) {
           const auto& status = req_output.status.value();
           if (!status.ok()) {

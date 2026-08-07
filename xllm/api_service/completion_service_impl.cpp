@@ -191,23 +191,14 @@ void CompletionServiceImpl::process_async_rpc_impl(
     if (req_output.status.has_value()) {
       const auto& status = req_output.status.value();
       if (!status.ok()) {
-        // Reduce the number of concurrent requests when a request is
-        // finished with error.
-        master->get_rate_limiter()->decrease_one_request();
         return master->handle_rpc_response(req_output);
       }
-    }
-    // Reduce the number of concurrent requests when a request is finished
-    // or canceled.
-    if (req_output.finished || req_output.cancelled ||
-        req_output.finished_on_prefill_instance) {
-      master->get_rate_limiter()->decrease_one_request();
     }
     return master->handle_rpc_response(req_output);
   };
 
   // Check if the request is being rate-limited.
-  if (unlikely(master_->get_rate_limiter()->is_limited())) {
+  if (unlikely(master_->get_rate_limiter()->check_limited())) {
     CALLBACK_WITH_ERROR(
         StatusCode::RESOURCE_EXHAUSTED,
         "The number of concurrent requests has reached the limit.",
@@ -258,8 +249,8 @@ void CompletionServiceImpl::process_async_impl(
   }
 
   // Check if the request is being rate-limited or model is sleeping.
-  // is_limited() returns true if sleeping or rate-limited.
-  if (unlikely(master->get_rate_limiter()->is_limited())) {
+  // check_limited() returns true if sleeping or rate-limited.
+  if (unlikely(master->get_rate_limiter()->check_limited())) {
     if (master->get_rate_limiter()->is_sleeping()) {
       call->finish_with_error(StatusCode::UNAVAILABLE,
                               "Model is currently in sleep state.");
@@ -307,19 +298,8 @@ void CompletionServiceImpl::process_async_impl(
         if (req_output.status.has_value()) {
           const auto& status = req_output.status.value();
           if (!status.ok()) {
-            // Reduce the number of concurrent requests when a request is
-            // finished with error.
-            master->get_rate_limiter()->decrease_one_request();
-
             return call->finish_with_error(status.code(), status.message());
           }
-        }
-
-        // Reduce the number of concurrent requests when a request is finished
-        // or canceled.
-        if (req_output.finished || req_output.cancelled ||
-            req_output.finished_on_prefill_instance) {
-          master->get_rate_limiter()->decrease_one_request();
         }
 
         if (stream) {

@@ -23,7 +23,7 @@ limitations under the License.
 
 namespace xllm {
 
-bool RateLimiter::is_limited() {
+bool RateLimiter::check_limited() const {
   int32_t num_requests =
       num_concurrent_requests_.load(std::memory_order_relaxed);
 
@@ -40,22 +40,17 @@ bool RateLimiter::is_limited() {
     return true;
   }
 
+  return false;
+}
+
+void RateLimiter::increment() {
   num_concurrent_requests_.fetch_add(1, std::memory_order_relaxed);
   GAUGE_SET(num_concurrent_requests,
             num_concurrent_requests_.load(std::memory_order_relaxed));
-
-  return false;
 }
 
 void RateLimiter::decrease_one_request() {
   num_concurrent_requests_.fetch_sub(1, std::memory_order_relaxed);
-  GAUGE_SET(num_concurrent_requests,
-            num_concurrent_requests_.load(std::memory_order_relaxed));
-}
-
-void RateLimiter::decrease_requests(size_t decrease_requests_num) {
-  num_concurrent_requests_.fetch_sub(decrease_requests_num,
-                                     std::memory_order_relaxed);
   GAUGE_SET(num_concurrent_requests,
             num_concurrent_requests_.load(std::memory_order_relaxed));
 }

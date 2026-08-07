@@ -27,6 +27,7 @@ limitations under the License.
 #include <vector>
 
 #include "api_service/call.h"
+#include "common/rate_limiter.h"
 #include "core/framework/multimodal/mm_codec.h"
 
 namespace xllm {
@@ -97,13 +98,28 @@ DiTRequest::DiTRequest(const std::string& request_id,
                        const std::string& x_request_time,
                        const DiTRequestState& state,
                        const std::string& service_request_id,
-                       const std::string& source_xservice_addr)
+                       const std::string& source_xservice_addr,
+                       RateLimiter* rate_limiter)
     : RequestBase(request_id,
                   x_request_id,
                   x_request_time,
                   service_request_id,
                   source_xservice_addr),
-      state_(state) {}
+      state_(state),
+      rate_limiter_(rate_limiter) {
+  if (rate_limiter_ != nullptr) {
+    rate_limiter_->increment();
+  }
+}
+
+DiTRequest::~DiTRequest() { release_rate_limit_slot(); }
+
+void DiTRequest::release_rate_limit_slot() {
+  if (rate_limiter_ != nullptr) {
+    rate_limiter_->decrease_one_request();
+    rate_limiter_ = nullptr;
+  }
+}
 
 bool DiTRequest::finished() const { return true; }
 

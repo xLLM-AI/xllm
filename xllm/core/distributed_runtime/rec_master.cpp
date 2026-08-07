@@ -864,7 +864,8 @@ std::shared_ptr<Request> RecMaster::build_request_common(
                                            sp.x_request_time,
                                            std::move(req_state),
                                            sp.service_request_id,
-                                           sp.source_xservice_addr);
+                                           sp.source_xservice_addr,
+                                           get_rate_limiter());
   return request;
 }
 

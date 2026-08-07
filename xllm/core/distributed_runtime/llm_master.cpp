@@ -469,21 +469,9 @@ std::shared_ptr<Request> LLMMaster::generate_request(
   OutputsFunc batch_callback = nullptr;
   if (options_.enable_service_routing()) {
     batch_callback = [this](const std::vector<RequestOutput>& req_outputs) {
-      size_t decrease_requests_num = 0;
       for (const auto& req_output : req_outputs) {
         req_output.log_request_status();
-        if (req_output.status.has_value() && !req_output.status.value().ok()) {
-          decrease_requests_num++;
-          continue;
-        }
-        // Reduce the number of concurrent requests when a request is
-        // finished or canceled.
-        if (req_output.finished || req_output.cancelled ||
-            req_output.finished_on_prefill_instance) {
-          decrease_requests_num++;
-        }
       }
-      get_rate_limiter()->decrease_requests(decrease_requests_num);
       return handle_rpc_responses(req_outputs);
     };
   }
@@ -513,7 +501,8 @@ std::shared_ptr<Request> LLMMaster::generate_request(
                                            sp.x_request_time,
                                            std::move(req_state),
                                            sp.service_request_id,
-                                           sp.source_xservice_addr);
+                                           sp.source_xservice_addr,
+                                           get_rate_limiter());
 
   // add one sequence, rest will be added by scheduler
   return request;

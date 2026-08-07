@@ -649,7 +649,7 @@ void AnthropicServiceImpl::process_async_impl(
   }
 
   // Check rate limit
-  if (master_->get_rate_limiter()->is_limited()) {
+  if (master_->get_rate_limiter()->check_limited()) {
     call->finish_with_error(
         StatusCode::RESOURCE_EXHAUSTED,
         "The number of concurrent requests has reached the limit.");
@@ -712,15 +712,8 @@ void AnthropicServiceImpl::process_async_impl(
         if (req_output.status.has_value()) {
           const auto& status = req_output.status.value();
           if (!status.ok()) {
-            master->get_rate_limiter()->decrease_one_request();
             return call->finish_with_error(status.code(), status.message());
           }
-        }
-
-        // Decrease rate limiter on completion
-        if (req_output.finished || req_output.cancelled ||
-            req_output.finished_on_prefill_instance) {
-          master->get_rate_limiter()->decrease_one_request();
         }
 
         // Anthropic format:
