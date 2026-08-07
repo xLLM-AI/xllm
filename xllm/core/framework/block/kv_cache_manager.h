@@ -79,6 +79,12 @@ class KVCacheManager {
 
   virtual uint32_t num_blocks() const = 0;
   virtual int32_t block_size() const = 0;
+  // Read-only local prefix-cache hit length in full KV blocks for a sequence,
+  // without creating blocks or mutating the prefix cache (the sequence's block
+  // hashes may be memoized on first use). Used by residual-aware SJF to
+  // estimate remaining prefill work. Must only be called on scheduler-owned
+  // waiting requests. Default 0 for managers without a prefix cache.
+  virtual size_t get_num_local_computed_blocks(Sequence* sequence) { return 0; }
   // Drop all prefix-cache entries (RL sleep/wakeup: discarded KV would make
   // cached prefixes point to garbage). Default no-op for managers without a
   // prefix cache.

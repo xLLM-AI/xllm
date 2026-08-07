@@ -188,7 +188,8 @@ bool ContinuousScheduler::add_request(std::shared_ptr<Request>& request) {
 
 void ContinuousScheduler::create_queues(const Options& options) {
   if (options.priority_strategy() == "multi_slo_and_prio" ||
-      options.priority_strategy() == "fcfs") {
+      options.priority_strategy() == "fcfs" ||
+      options.priority_strategy() == "residual_sjf") {
     prefill_queue_ = std::make_unique<DequeQueue>();
     chunk_queue_ = std::make_unique<DequeQueue>();
     decode_queue_ = std::make_unique<DequeQueue>();

@@ -291,6 +291,15 @@ void BlockManagerPool::allocate_shared(Sequence* sequence) {
       ->allocate_shared_for_sequence(sequence);
 }
 
+size_t BlockManagerPool::get_num_local_computed_blocks(Sequence* sequence) {
+  if (sequence == nullptr || !options_.enable_prefix_cache()) {
+    return 0;
+  }
+  int32_t dp_rank = get_dp_rank(sequence);
+  return static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get())
+      ->get_num_local_computed_blocks(sequence);
+}
+
 void BlockManagerPool::cache(Sequence* sequence) {
   if (!options_.enable_prefix_cache()) {
     return;
