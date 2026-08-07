@@ -143,6 +143,10 @@ bool resolve_model_registration(const std::string& model_type,
     *resolved_name = "qwen3_atb";
   } else if (model_type == "qwen3_moe" && effective_backend == kAtbBackend) {
     *resolved_name = "qwen3_moe_atb";
+  } else if (model_type == "qwen2" && effective_backend == kAtbBackend) {
+    *resolved_name = "qwen2_atb";
+  } else if (model_type == "qwen2_5_vl" && effective_backend == kAtbBackend) {
+    *resolved_name = "qwen2_5_vl_atb";
   } else if (model_type == "qwen3_vl" && effective_backend == kAtbBackend) {
     *resolved_name = "qwen3_vl_atb";
   } else {
