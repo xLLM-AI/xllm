@@ -34,8 +34,6 @@ class RateLimiter final {
 
   void decrease_one_request();
 
-  void decrease_requests(size_t decrease_requests_num);
-
   int32_t get_num_concurrent_requests() const {
     return num_concurrent_requests_.load(std::memory_order_relaxed);
   }

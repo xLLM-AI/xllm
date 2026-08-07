@@ -30,6 +30,7 @@ cc_library(
     finish_reason.cpp
     incremental_decoder.cpp
     request.cpp
+    request_base.cpp
     dit_request.cpp
     request_output.cpp
     dit_request_output.cpp

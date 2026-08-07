@@ -31,19 +31,23 @@ limitations under the License.
 
 namespace xllm {
 
+class RateLimiter;
+
 class RequestBase {
  public:
   RequestBase(const std::string& request_id,
               const std::string& x_request_id,
               const std::string& x_request_time,
               const std::string& service_request_id = "",
-              const std::string& source_xservice_addr = "")
-      : request_id_(request_id),
-        x_request_id_(x_request_id),
-        x_request_time_(x_request_time),
-        service_request_id_(service_request_id),
-        source_xservice_addr_(source_xservice_addr),
-        created_time_(absl::Now()) {}
+              const std::string& source_xservice_addr = "",
+              RateLimiter* rate_limiter = nullptr);
+
+  virtual ~RequestBase();
+
+  RequestBase(const RequestBase&) = delete;
+  RequestBase& operator=(const RequestBase&) = delete;
+  RequestBase(RequestBase&&) = delete;
+  RequestBase& operator=(RequestBase&&) = delete;
 
   absl::Time created_time() const { return created_time_; }
 
@@ -79,6 +83,13 @@ class RequestBase {
 
   // x-request-time header value from client
   std::string x_request_time_;
+
+  // Non-owning; nullptr for profile/warmup requests and PD-decode-side
+  // forwarded requests that don't count against the concurrency budget. The
+  // slot is owned by whoever constructed the Request (either a scoped
+  // ScopeGuard on the failure path, or the Request itself on success). The
+  // destructor decrements exactly once when non-null.
+  RateLimiter* rate_limiter_ = nullptr;
 };
 
 }  // namespace xllm

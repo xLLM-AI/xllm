@@ -193,12 +193,19 @@ void LLMMaster::handle_request(std::string prompt,
     // remove the pending request after scheduling
     SCOPE_GUARD([this] { scheduler_->decr_pending_requests(); });
 
+    // Guard the rate-limit slot acquired at the service entry. If we bail
+    // before generate_request has a chance to create the Request, this
+    // releases the slot; otherwise Request itself takes ownership.
+    xllm::ScopeGuard rate_limit_guard(
+        [this] { get_rate_limiter()->decrease_one_request(); });
+
     Timer timer;
     // verify the prompt
     if (!sp.verify_params(callback)) {
       return;
     }
 
+    rate_limit_guard.dismiss();
     auto request = generate_request(
         std::move(prompt), std::move(prompt_token), sp, call, callback);
     if (!request) {
@@ -232,11 +239,16 @@ void LLMMaster::handle_request(std::vector<Message> messages,
     // remove the pending request after scheduling
     SCOPE_GUARD([this] { scheduler_->decr_pending_requests(); });
 
+    // Guard the rate-limit slot acquired at the service entry.
+    xllm::ScopeGuard rate_limit_guard(
+        [this] { get_rate_limiter()->decrease_one_request(); });
+
     // verify the prompt
     if (!sp.verify_params(callback)) {
       return;
     }
 
+    rate_limit_guard.dismiss();
     auto request =
         generate_request(messages, std::move(prompt_token), sp, call, callback);
     if (!request) {
@@ -289,6 +301,12 @@ std::shared_ptr<Request> LLMMaster::generate_request(
     const RequestParams& sp,
     std::optional<Call*> call,
     OutputCallback callback) {
+  // The caller (service_impl) has already incremented the rate limiter's
+  // slot via is_limited() returning false. This guard releases it on any
+  // early return below; we dismiss it right before Request takes ownership.
+  xllm::ScopeGuard rate_limit_guard(
+      [this] { get_rate_limiter()->decrease_one_request(); });
+
   // A request is valid as long as it carries either text or pre-tokenized
   // prompt tokens; pure-token input (no text) is a first-class input.
   const bool has_prompt_tokens = prompt_tokens.has_value();
@@ -469,21 +487,9 @@ std::shared_ptr<Request> LLMMaster::generate_request(
   OutputsFunc batch_callback = nullptr;
   if (options_.enable_service_routing()) {
     batch_callback = [this](const std::vector<RequestOutput>& req_outputs) {
-      size_t decrease_requests_num = 0;
       for (const auto& req_output : req_outputs) {
         req_output.log_request_status();
-        if (req_output.status.has_value() && !req_output.status.value().ok()) {
-          decrease_requests_num++;
-          continue;
-        }
-        // Reduce the number of concurrent requests when a request is
-        // finished or canceled.
-        if (req_output.finished || req_output.cancelled ||
-            req_output.finished_on_prefill_instance) {
-          decrease_requests_num++;
-        }
       }
-      get_rate_limiter()->decrease_requests(decrease_requests_num);
       return handle_rpc_responses(req_outputs);
     };
   }
@@ -508,12 +514,14 @@ std::shared_ptr<Request> LLMMaster::generate_request(
   req_state.include_stop_str_in_output = sp.include_stop_str_in_output;
   req_state.sample_slots = sp.sample_slots;
 
+  rate_limit_guard.dismiss();
   auto request = std::make_shared<Request>(sp.request_id,
                                            sp.x_request_id,
                                            sp.x_request_time,
                                            std::move(req_state),
                                            sp.service_request_id,
-                                           sp.source_xservice_addr);
+                                           sp.source_xservice_addr,
+                                           get_rate_limiter());
 
   // add one sequence, rest will be added by scheduler
   return request;
@@ -525,6 +533,13 @@ std::shared_ptr<Request> LLMMaster::generate_request(
     const RequestParams& sp,
     std::optional<Call*> call,
     OutputCallback callback) {
+  // Guard the rate-limit slot the caller acquired via is_limited(). The
+  // string-prompt overload installs its own guard once we forward there;
+  // we dismiss ours right before that call so the slot is not released
+  // twice.
+  xllm::ScopeGuard rate_limit_guard(
+      [this] { get_rate_limiter()->decrease_one_request(); });
+
   Timer timer;
 
   std::optional<std::string> prompt;
@@ -540,6 +555,7 @@ std::shared_ptr<Request> LLMMaster::generate_request(
 
   COUNTER_ADD(chat_template_latency_seconds, timer.elapsed_seconds());
 
+  rate_limit_guard.dismiss();
   return generate_request(
       std::move(prompt.value()), std::move(prompt_tokens), sp, call, callback);
 }

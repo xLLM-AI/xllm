@@ -336,12 +336,11 @@ bool SampleServiceImpl::process_request(const proto::SampleRequest& request,
       [this, &mu, &cv, &final_output, &has_final_output](
           const RequestOutput& req_output) -> bool {
         req_output.log_request_status();
-        if (req_output.status.has_value() && !req_output.status->ok()) {
-          master_->get_rate_limiter()->decrease_one_request();
-        } else if (req_output.finished || req_output.cancelled ||
-                   req_output.finished_on_prefill_instance) {
-          master_->get_rate_limiter()->decrease_one_request();
-        } else {
+        const bool is_error =
+            req_output.status.has_value() && !req_output.status->ok();
+        const bool is_terminal = req_output.finished || req_output.cancelled ||
+                                 req_output.finished_on_prefill_instance;
+        if (!is_error && !is_terminal) {
           return true;
         }
 
@@ -445,15 +444,9 @@ void SampleServiceImpl::process_async_impl(std::shared_ptr<SampleCall> call) {
         if (req_output.status.has_value()) {
           const auto& output_status = req_output.status.value();
           if (!output_status.ok()) {
-            master->get_rate_limiter()->decrease_one_request();
             return call->finish_with_error(output_status.code(),
                                            output_status.message());
           }
-        }
-
-        if (req_output.finished || req_output.cancelled ||
-            req_output.finished_on_prefill_instance) {
-          master->get_rate_limiter()->decrease_one_request();
         }
 
         if (!sample_service_internal::build_response(request_id,

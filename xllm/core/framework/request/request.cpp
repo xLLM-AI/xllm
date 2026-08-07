@@ -37,12 +37,14 @@ Request::Request(const std::string& request_id,
                  const std::string& x_request_time,
                  const RequestState& state,
                  const std::string& service_request_id,
-                 const std::string& source_xservice_addr)
+                 const std::string& source_xservice_addr,
+                 RateLimiter* rate_limiter)
     : RequestBase(request_id,
                   x_request_id,
                   x_request_time,
                   service_request_id,
-                  source_xservice_addr),
+                  source_xservice_addr,
+                  rate_limiter),
       state_(std::move(state)) {
   create_sequences_group();
 }

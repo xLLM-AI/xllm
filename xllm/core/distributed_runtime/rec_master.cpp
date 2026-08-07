@@ -320,6 +320,7 @@ std::shared_ptr<Request> RecMaster::RecMasterPipeline::generate_request(
     std::optional<std::vector<proto::InferInputTensor>> /*input_tensors*/,
     const RequestParams& /*sp*/,
     OutputCallback callback) {
+  master_.get_rate_limiter()->decrease_one_request();
   CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                       "This pipeline does not support prompt-based input");
   return nullptr;
@@ -330,6 +331,7 @@ std::shared_ptr<Request> RecMaster::RecMasterPipeline::generate_request(
     std::optional<MMData> mm_data,
     const RequestParams& sp,
     OutputCallback callback) {
+  master_.get_rate_limiter()->decrease_one_request();
   CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                       "This pipeline does not support raw input");
   return nullptr;
@@ -343,6 +345,9 @@ RecMaster::RecMasterPipeline::generate_onerec_request_common(
     const RequestParams& sp,
     OutputCallback callback,
     bool build_stop_checker) {
+  xllm::ScopeGuard rate_limit_guard(
+      [this] { master_.get_rate_limiter()->decrease_one_request(); });
+
   Timer timer;
   std::vector<int32_t> local_prompt_tokens;
   MMData processed_mm_data;
@@ -358,6 +363,7 @@ RecMaster::RecMasterPipeline::generate_onerec_request_common(
 
   COUNTER_ADD(tokenization_latency_seconds, timer.elapsed_seconds());
 
+  rate_limit_guard.dismiss();
   return master_.build_request_common(std::move(prompt),
                                       std::move(local_prompt_tokens),
                                       std::move(processed_mm_data),
@@ -378,6 +384,11 @@ std::shared_ptr<Request> RecMaster::LlmRecMasterPipeline::generate_request(
     std::optional<std::vector<proto::InferInputTensor>> /*input_tensors*/,
     const RequestParams& sp,
     OutputCallback callback) {
+  // Guard the rate-limit slot acquired at the service entry. Dismissed
+  // before we forward to build_request_common (which installs its own guard).
+  xllm::ScopeGuard rate_limit_guard(
+      [this] { master_.get_rate_limiter()->decrease_one_request(); });
+
   Timer timer;
   std::vector<int32_t> local_prompt_tokens;
   MMData processed_mm_data;
@@ -412,6 +423,7 @@ std::shared_ptr<Request> RecMaster::LlmRecMasterPipeline::generate_request(
 
   COUNTER_ADD(tokenization_latency_seconds, timer.elapsed_seconds());
 
+  rate_limit_guard.dismiss();
   return master_.build_request_common(std::move(prompt),
                                       std::move(local_prompt_tokens),
                                       std::move(processed_mm_data),
@@ -433,6 +445,9 @@ RecMaster::LlmRecWithMmDataMasterPipeline::generate_request(
     std::optional<MMData> mm_data,
     const RequestParams& sp,
     OutputCallback callback) {
+  xllm::ScopeGuard rate_limit_guard(
+      [this] { master_.get_rate_limiter()->decrease_one_request(); });
+
   std::vector<int32_t> local_prompt_tokens;
   MMData processed_mm_data;
 
@@ -447,6 +462,7 @@ RecMaster::LlmRecWithMmDataMasterPipeline::generate_request(
     return nullptr;
   }
 
+  rate_limit_guard.dismiss();
   return master_.build_request_common(std::string(""),
                                       std::move(local_prompt_tokens),
                                       std::move(processed_mm_data),
@@ -752,6 +768,11 @@ std::shared_ptr<Request> RecMaster::build_request_common(
     const RequestParams& sp,
     OutputCallback callback,
     bool build_stop_checker) {
+  // Guard the rate-limit slot acquired at the service entry. Dismissed
+  // right before Request takes ownership.
+  xllm::ScopeGuard rate_limit_guard(
+      [this] { get_rate_limiter()->decrease_one_request(); });
+
   int32_t max_context_len = model_args_.max_position_embeddings();
   if (!options_.enable_chunked_prefill()) {
     int32_t max_tokens_per_req = options_.max_tokens_per_batch();
@@ -859,12 +880,14 @@ std::shared_ptr<Request> RecMaster::build_request_common(
   req_state.include_stop_str_in_output = sp.include_stop_str_in_output;
   req_state.rec_type = rec_type_;
   req_state.bos_token_id = model_args_.bos_token_id();
+  rate_limit_guard.dismiss();
   auto request = std::make_shared<Request>(sp.request_id,
                                            sp.x_request_id,
                                            sp.x_request_time,
                                            std::move(req_state),
                                            sp.service_request_id,
-                                           sp.source_xservice_addr);
+                                           sp.source_xservice_addr,
+                                           get_rate_limiter());
   return request;
 }
 
