@@ -128,4 +128,55 @@ TEST(DpEpPaddingTest, BuildAttnUnpaddingWithTrailingEmptyDpGroup) {
                            torch::tensor({0, 1}, torch::kInt32)));
 }
 
+TEST(DpEpPaddingCacheTest, ReusesBAndTwoBLayouts) {
+  DpEpPaddingCache cache(/*capacity=*/2);
+  DpEpPaddingData b_data;
+  b_data.attn_padding_idx(torch::tensor({1}, torch::kInt32));
+  DpEpPaddingData two_b_data;
+  two_b_data.attn_padding_idx(torch::tensor({2}, torch::kInt32));
+
+  cache.insert({4}, {}, b_data);
+  cache.insert({8}, {8}, two_b_data);
+
+  const DpEpPaddingData* cached_b = cache.find({4}, {4});
+  const DpEpPaddingData* cached_two_b = cache.find({8}, {});
+  ASSERT_NE(cached_b, nullptr);
+  ASSERT_NE(cached_two_b, nullptr);
+  EXPECT_EQ(cached_b->attn_padding_idx().item<int32_t>(), 1);
+  EXPECT_EQ(cached_two_b->attn_padding_idx().item<int32_t>(), 2);
+}
+
+TEST(DpEpPaddingCacheTest, DistinguishesDataParallelTokenDistributions) {
+  DpEpPaddingCache cache(/*capacity=*/2);
+  DpEpPaddingData b_data;
+  b_data.attn_padding_idx(torch::tensor({1}, torch::kInt32));
+  DpEpPaddingData two_b_data;
+  two_b_data.attn_padding_idx(torch::tensor({2}, torch::kInt32));
+
+  cache.insert({1, 2}, {1, 2}, b_data);
+  cache.insert({2, 4}, {2, 4}, two_b_data);
+
+  const DpEpPaddingData* cached_b = cache.find({1, 2}, {1, 2});
+  const DpEpPaddingData* cached_two_b = cache.find({2, 4}, {2, 4});
+  ASSERT_NE(cached_b, nullptr);
+  ASSERT_NE(cached_two_b, nullptr);
+  EXPECT_EQ(cached_b->attn_padding_idx().item<int32_t>(), 1);
+  EXPECT_EQ(cached_two_b->attn_padding_idx().item<int32_t>(), 2);
+  EXPECT_EQ(cache.find({2, 1}, {2, 1}), nullptr);
+  EXPECT_EQ(cache.find({1, 2}, {2, 1}), nullptr);
+}
+
+TEST(DpEpPaddingCacheTest, EvictsOldLayoutAtCapacity) {
+  DpEpPaddingCache cache(/*capacity=*/2);
+  DpEpPaddingData data;
+
+  cache.insert({4}, {}, data);
+  cache.insert({8}, {}, data);
+  cache.insert({6}, {}, data);
+
+  EXPECT_EQ(cache.find({4}, {}), nullptr);
+  EXPECT_NE(cache.find({8}, {}), nullptr);
+  EXPECT_NE(cache.find({6}, {}), nullptr);
+}
+
 }  // namespace xllm

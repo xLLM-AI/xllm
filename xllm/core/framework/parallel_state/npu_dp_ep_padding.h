@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <cstddef>
 #include <vector>
 
 #include "common/macros.h"
@@ -50,6 +51,31 @@ struct DpEpPaddingData {
   PROPERTY(torch::Tensor, expert_array);
 
   PROPERTY(torch::Tensor, post_lmhead_gather_indices);
+};
+
+// A small exact-key cache for stable B/2B draft decode layouts. Prefill
+// metadata must always be rebuilt and is intentionally not represented here.
+class DpEpPaddingCache final {
+ public:
+  explicit DpEpPaddingCache(size_t capacity);
+
+  const DpEpPaddingData* find(
+      const std::vector<int32_t>& token_size_per_dp_group,
+      const std::vector<int32_t>& raw_token_size_per_dp_group) const;
+
+  void insert(const std::vector<int32_t>& token_size_per_dp_group,
+              const std::vector<int32_t>& raw_token_size_per_dp_group,
+              const DpEpPaddingData& data);
+
+ private:
+  struct Entry {
+    std::vector<int32_t> token_size_per_dp_group;
+    std::vector<int32_t> raw_token_size_per_dp_group;
+    DpEpPaddingData data;
+  };
+
+  size_t capacity_ = 0;
+  std::vector<Entry> entries_;
 };
 
 class DpEpPadding {
