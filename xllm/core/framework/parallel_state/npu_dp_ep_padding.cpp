@@ -131,11 +131,9 @@ void DpEpPadding::prepare_indices() {
   lm_head_skip_padding_token_indices_ = build_lm_head_indices();
 
   dp_padding_idx_ = build_dp_padding_indices();
-  // padding_idx_ =
-  // dp_padding_idx_[mapping_npu_["attnDp"]["rank"].get<int64_t>()];
-  padding_idx_ = dp_padding_idx_[mapping_npu_["attnDpSize"].get<int64_t>() - 1];
-  attn_padding_idx_ =
-      dp_padding_idx_[mapping_npu_["attnDp"]["rank"].get<int64_t>()];
+  const int64_t attn_dp_rank = mapping_npu_["attnDp"]["rank"].get<int64_t>();
+  padding_idx_ = dp_padding_idx_[attn_dp_rank];
+  attn_padding_idx_ = dp_padding_idx_[attn_dp_rank];
   un_padding_idx_ = torch::zeros({1}, torch::kInt32);
 
   prepare_gather_indices();
@@ -263,12 +261,6 @@ torch::Tensor DpEpPadding::build_ffn_unpadding_idx() {
   const auto& rank = mapping_npu_["attnDp"]["rank"].get<int64_t>();
   int64_t token_size = token_size_per_dp_group_[rank].item<int64_t>();
   token_size = (token_size == 0) ? 1 : token_size;  // Ensure at least 1 element
-
-  // Add proper offset based on DP rank
-  int64_t offset = 0;
-  for (int64_t i = 0; i < rank; ++i) {
-    offset += token_size_per_dp_group_[i].item<int64_t>();
-  }
 
   return torch::arange(token_size, torch::kInt32);
 }

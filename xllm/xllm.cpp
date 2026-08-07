@@ -547,7 +547,6 @@ int run() {
     master = create_master(model_config.backend(), options);
   }
   master->run();
-
   // supported models
   std::vector<std::string> model_names = {model_config.model_id()};
   std::vector<std::string> model_repository_names = {model_repository_name};

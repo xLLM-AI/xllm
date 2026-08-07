@@ -39,9 +39,20 @@ limitations under the License.
 #include "framework/request/request_state.h"
 #include "scheduler/profile/graph_warmup.h"
 #include "util/rec_model_utils.h"
-#include "util/utils.h"
 
 namespace xllm {
+namespace {
+
+int64_t graph_warmup_bootstrap_hidden_size(const ModelArgs& model_args) {
+  const int64_t hidden_size = model_args.hidden_size();
+  if (::xllm::SpeculativeConfig::get_instance().speculative_algorithm() ==
+      "Eagle3") {
+    return 3 * hidden_size;
+  }
+  return hidden_size;
+}
+
+}  // namespace
 
 ProfileManager::ProfileManager(Engine* engine, const Options& options)
     : options_(options), engine_(engine) {
@@ -584,7 +595,8 @@ double ProfileManager::predict_copy_blocks_time(
 
 std::shared_ptr<Request> ProfileManager::generate_single_request(
     int32_t token_length,
-    int32_t prefix_length) {
+    int32_t prefix_length,
+    std::optional<int32_t> dp_rank) {
   auto& model_args = engine_->model_args();
   int32_t vocab_size = model_args.vocab_size();
   int32_t eos_token_id = model_args.eos_token_id();
@@ -610,18 +622,25 @@ std::shared_ptr<Request> ProfileManager::generate_single_request(
       /*x_request_time=*/"",
       req_state);
 
+  auto* sequence = request->sequences()[0].get();
+  if (dp_rank.has_value()) {
+    CHECK_GE(dp_rank.value(), 0);
+    CHECK_LT(dp_rank.value(), options_.dp_size());
+    sequence->set_dp_rank(dp_rank.value());
+  }
+
   // TODO: better disable prefix cache
   if (prefix_length > 0) {
-    if (!block_manager_pool_->BlockManagerPool::allocate(
-            request->sequences()[0].get(), prefix_length)) {
+    if (!block_manager_pool_->BlockManagerPool::allocate(sequence,
+                                                         prefix_length)) {
       LOG(FATAL) << "Profiling time failed! Not enough blocks, prefix length : "
                  << prefix_length;
     }
-    request->sequences()[0]->kv_state().incr_kv_cache_tokens_num(prefix_length);
+    sequence->kv_state().incr_kv_cache_tokens_num(prefix_length);
   }
 
-  if (!block_manager_pool_->BlockManagerPool::allocate(
-          request->sequences()[0].get(), token_length)) {
+  if (!block_manager_pool_->BlockManagerPool::allocate(sequence,
+                                                       token_length)) {
     LOG(FATAL) << "Profiling time failed! Not enough blocks, token length : "
                << token_length;
   }
@@ -692,9 +711,10 @@ std::shared_ptr<Request> ProfileManager::generate_single_decode_request(
   // per-token decode state. Inject a placeholder bootstrap embedding so the
   // synthetic warmup/profile request takes the same bootstrap path as a real
   // disagg PD decode request instead of reading stale recycled decode state.
-  const int64_t bootstrap_width = mtp_hidden_state_width(model_args);
-  prepare_warmup_decode_sequence(
-      sequence, bootstrap_width, num_speculative_tokens);
+  // Eagle3 uses three concatenated target hidden states for this embedding.
+  prepare_warmup_decode_sequence(sequence,
+                                 graph_warmup_bootstrap_hidden_size(model_args),
+                                 num_speculative_tokens);
 
   CHECK(sequence->stage() == SequenceStage::DECODE)
       << "Decode profiling request is not in DECODE stage. total_length: "
@@ -811,6 +831,48 @@ double ProfileManager::run_decode_request(
     requests.emplace_back(request);
     sequences.emplace_back(request->sequences()[0].get());
     sequences_budget.emplace_back(1);
+  }
+
+  auto batches =
+      BatchFactory::get_instance(options_.dp_size())
+          ->create_batches(requests, sequences, sequences_budget, nullptr);
+
+  absl::Time start_time = absl::Now();
+  engine_->step(batches);
+  if (options_.enable_schedule_overlap()) {
+    engine_->update_last_step_result(batches);
+  }
+  double latency = absl::ToDoubleMilliseconds(absl::Now() - start_time);
+  for (auto& request : requests) {
+    block_manager_pool_->deallocate_without_cache(
+        request->sequences()[0].get());
+  }
+
+  return latency;
+}
+
+double ProfileManager::run_graph_prefill_request(int32_t token_length) {
+  CHECK_GT(options_.dp_size(), 0);
+  CHECK_GE(token_length, options_.dp_size())
+      << "Graph prefill warmup requires at least one token per DP rank.";
+
+  std::vector<Sequence*> sequences;
+  std::vector<size_t> sequences_budget;
+  std::vector<std::shared_ptr<Request>> requests;
+  sequences.reserve(static_cast<size_t>(options_.dp_size()));
+  sequences_budget.reserve(static_cast<size_t>(options_.dp_size()));
+  requests.reserve(static_cast<size_t>(options_.dp_size()));
+
+  const int32_t base_tokens = token_length / options_.dp_size();
+  const int32_t remaining_tokens = token_length % options_.dp_size();
+  for (int32_t dp_rank = 0; dp_rank < options_.dp_size(); ++dp_rank) {
+    const int32_t dp_tokens =
+        base_tokens + (dp_rank < remaining_tokens ? 1 : 0);
+    std::shared_ptr<Request> request =
+        generate_single_request(dp_tokens, /*prefix_length=*/0, dp_rank);
+    requests.emplace_back(request);
+    sequences.emplace_back(request->sequences()[0].get());
+    sequences_budget.emplace_back(static_cast<size_t>(dp_tokens));
   }
 
   auto batches =
@@ -950,9 +1012,17 @@ void ProfileManager::warmup_prefill_for_graph() {
 
   int32_t prefill_tokens =
       std::min(options_.max_tokens_per_batch(), max_context_len);
-  double prefill_latency =
-      run_request(prefill_tokens, /*prefix_length=*/0, /*batch_size=*/1);
+
+  if (options_.dp_size() > 1) {
+    prefill_tokens = std::max(prefill_tokens, options_.dp_size());
+  }
+  double prefill_latency = options_.dp_size() > 1
+                               ? run_graph_prefill_request(prefill_tokens)
+                               : run_request(prefill_tokens,
+                                             /*prefix_length=*/0,
+                                             /*batch_size=*/1);
   LOG(INFO) << "Prefill warmup completed: tokens=" << prefill_tokens
+            << ", dp_size=" << options_.dp_size()
             << ", latency=" << prefill_latency << " ms";
 }
 
@@ -979,6 +1049,7 @@ void ProfileManager::warmup_decode_for_graph() {
       static_cast<int32_t>(decode_batch_sizes.size());
 
   LOG(INFO) << "Graph warmup started: bucket_count=" << decode_bucket_count
+            << ", max_decode_batch_size=" << max_decode_batch_size
             << ", decode_seq_len=" << decode_seq_len;
 
   // Capture from the largest bucket down to the smallest so every smaller

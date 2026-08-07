@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "framework/kv_cache/embedding_cache.h"
 #include "framework/kv_cache_transfer/kv_cache_transfer.h"
+#include "runtime/llm_worker_impl.h"
 #include "runtime/speculative_worker_impl.h"
 
 namespace xllm {

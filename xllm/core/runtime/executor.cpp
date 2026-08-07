@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "executor.h"
 
+#include <string>
+
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/model_config.h"
 #include "executor_impl_factory.h"
@@ -22,6 +24,21 @@ limitations under the License.
 #include "platform/platform.h"
 
 namespace xllm {
+
+namespace {
+
+bool is_eagle3_model_type(const std::string& model_type) {
+  return model_type == "qwen3_eagle3" || model_type == "kimi_k25_eagle3";
+}
+
+bool is_mla_graph_eagle3_speculative_target(const CausalLM* model,
+                                            const runtime::Options& options) {
+  return model->supports_mla_graph_kv_bucketing() &&
+         options.enable_speculative_decode() &&
+         options.speculative_algorithm() == "Eagle3";
+}
+
+}  // namespace
 
 Executor::Executor(CausalLM* model,
                    const ModelArgs& args,
@@ -31,7 +48,9 @@ Executor::Executor(CausalLM* model,
   std::string backend;
   if (ModelConfig::is_python_model_impl(model_config.model_impl())) {
     backend = "python";
-  } else if (options.backend() != "vlm" && options.enable_graph()) {
+  } else if (options.backend() != "vlm" && options.enable_graph() &&
+             !is_eagle3_model_type(args.model_type()) &&
+             !is_mla_graph_eagle3_speculative_target(model, options)) {
     backend = Platform::type_str();
   } else {
     backend = options.backend();

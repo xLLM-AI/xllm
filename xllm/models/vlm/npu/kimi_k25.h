@@ -20,8 +20,11 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <cstdint>
-#include <unordered_map>
+#include <optional>
+#include <string>
+#include <vector>
 
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
@@ -38,7 +41,6 @@ limitations under the License.
 
 namespace xllm {
 const int32_t KIMIV_VT_INFER_MAX_PATCH_NUM = 16328;
-#define PrintTensor(tensor) print_tensor(tensor, #tensor, 10, true, false);
 
 namespace {
 StateDict get_dict_with_prefix_fallback(
@@ -106,6 +108,37 @@ void load_layernorm_if_defined(const StateDict& state_dict,
                          bias_loaded,
                          module_name,
                          layernorm_name + ".bias");
+}
+
+void check_multimodal_mask_matches_tokens(const torch::Tensor& input_ids,
+                                          const torch::Tensor& mask,
+                                          int64_t token_id,
+                                          const char* modality_name) {
+  if (!input_ids.defined() || input_ids.numel() == 0 || !mask.defined() ||
+      mask.numel() == 0) {
+    return;
+  }
+  CHECK_EQ(mask.scalar_type(), torch::kBool)
+      << modality_name
+      << " mask must be bool, got dtype=" << mask.scalar_type();
+  CHECK_EQ(mask.dim(), 1) << modality_name
+                          << " mask must be 1-D, got shape=" << mask.sizes();
+  CHECK_EQ(input_ids.dim(), 1)
+      << "Kimi K25 input_ids must be 1-D for multimodal mask check, got shape="
+      << input_ids.sizes();
+  CHECK_EQ(mask.size(0), input_ids.size(0))
+      << modality_name
+      << " mask length must match input_ids length, mask=" << mask.size(0)
+      << ", input_ids=" << input_ids.size(0);
+  auto expected_mask =
+      input_ids.to(mask.device(), /*non_blocking=*/false).eq(token_id);
+  CHECK(torch::equal(mask.to(torch::kCPU), expected_mask.to(torch::kCPU)))
+      << modality_name
+      << " mask positions do not match multimodal token positions, token_id="
+      << token_id << ", mask_true=" << mask.to(torch::kCPU).sum()
+      << ", expected_true=" << expected_mask.to(torch::kCPU).sum()
+      << ", input_ids=" << input_ids.to(torch::kCPU)
+      << ", mask=" << mask.to(torch::kCPU);
 }
 
 bool is_w8a8_dynamic_quant(const QuantArgs& quant_args,
@@ -855,56 +888,28 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
 
   std::vector<torch::Tensor> process_vision_features(torch::Tensor pixel_values,
                                                      torch::Tensor grid_thws) {
-    int n = grid_thws.size(0);
+    const int32_t n = static_cast<int32_t>(grid_thws.size(0));
     auto n_patches_each_media = grid_thws.prod(-1);
-    int max_infer_batch = std::max(n_patches_each_media.max().item<int>(),
-                                   KIMIV_VT_INFER_MAX_PATCH_NUM);
     auto n_patches_tensor =
         n_patches_each_media.cpu().to(torch::kInt).contiguous();
-    std::vector<int> n_patches_vec(
-        n_patches_tensor.data_ptr<int>(),
-        n_patches_tensor.data_ptr<int>() + n_patches_tensor.numel());
+    std::vector<int32_t> n_patches_vec(
+        n_patches_tensor.data_ptr<int32_t>(),
+        n_patches_tensor.data_ptr<int32_t>() + n_patches_tensor.numel());
 
     std::vector<torch::Tensor> features;
-    int pre_sum = 0;
-    int current_group_start = 0;
-    int current_group_patches = 0;
+    features.reserve(n);
 
-    for (int i = 0; i < n; i++) {
-      int current_media_patches = n_patches_vec[i];
-      if (current_group_patches + current_media_patches <= max_infer_batch) {
-        current_group_patches += current_media_patches;
-        continue;
-      }
-
-      if (current_group_start < i) {
-        auto group_grid_thw = grid_thws.slice(0, current_group_start, i);
-        int group_n_patches = 0;
-        for (int j = current_group_start; j < i; j++) {
-          group_n_patches += n_patches_vec[j];
-        }
-        auto group_input =
-            pixel_values.slice(0, pre_sum, pre_sum + group_n_patches);
-        auto group_output = visual_(group_input, group_grid_thw);
-        features.push_back(mm_projector_ ? mm_projector_(group_output)
-                                         : group_output);
-        pre_sum += group_n_patches;
-      }
-      current_group_start = i;
-      current_group_patches = current_media_patches;
-    }
-
-    if (current_group_start < n) {
-      auto group_grid_thw = grid_thws.slice(0, current_group_start, n);
-      int group_n_patches = 0;
-      for (int j = current_group_start; j < n; j++) {
-        group_n_patches += n_patches_vec[j];
-      }
-      auto group_input =
-          pixel_values.slice(0, pre_sum, pre_sum + group_n_patches);
-      auto group_output = visual_(group_input, group_grid_thw);
-      features.push_back(mm_projector_ ? mm_projector_(group_output)
-                                       : group_output);
+    int32_t patch_offset = 0;
+    for (int32_t i = 0; i < n; ++i) {
+      const int32_t current_media_patches = n_patches_vec[i];
+      auto media_grid_thw = grid_thws.slice(0, i, i + 1);
+      auto media_input = pixel_values.slice(
+          0, patch_offset, patch_offset + current_media_patches);
+      auto media_output = visual_(media_input, media_grid_thw);
+      torch::Tensor projected_output =
+          mm_projector_ ? mm_projector_(media_output) : media_output;
+      features.push_back(projected_output);
+      patch_offset += current_media_patches;
     }
 
     return features;
@@ -924,12 +929,35 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
       // visual
       auto pixel_values = image_input->pixel_values.to(options_);
       auto grid_thw = image_input->image_grid_thw.to(pixel_values.device());
+      CHECK_EQ(grid_thw.dim(), 2)
+          << "image_grid_thw must be a 2-D tensor, got shape="
+          << grid_thw.sizes();
+      CHECK_EQ(grid_thw.size(-1), 3)
+          << "image_grid_thw last dim must be 3, got shape="
+          << grid_thw.sizes();
+      CHECK_GT(grid_thw.size(0), 0)
+          << "image_grid_thw must contain at least one image";
       CHECK(grid_thw.scalar_type() == torch::kInt32 ||
             grid_thw.scalar_type() == torch::kInt64)
           << "image_grid_thw must be int tensor, got dtype="
           << grid_thw.scalar_type();
+      const auto expected_patches =
+          image_input->image_grid_thw.prod(-1).sum().item<int64_t>();
+      CHECK_EQ(pixel_values.size(0), expected_patches)
+          << "pixel_values rows must match sum(image_grid_thw.prod(-1)), "
+          << "pixel_values rows=" << pixel_values.size(0)
+          << ", expected_patches=" << expected_patches
+          << ", image_grid_thw=" << image_input->image_grid_thw;
       auto image_features = process_vision_features(pixel_values, grid_thw);
+      CHECK(!image_features.empty())
+          << "Kimi K25 vision encoder produced no image features.";
       auto image_embeds = torch::cat(image_features, 0);
+      auto patch_remainders =
+          image_input->image_grid_thw.prod(-1) % (merge_size * merge_size);
+      CHECK_EQ(patch_remainders.abs().sum().item<int64_t>(), 0)
+          << "image patch count must be divisible by merge_size^2, "
+          << "merge_size=" << merge_size
+          << ", image_grid_thw=" << image_input->image_grid_thw;
       auto image_tokens =
           (image_input->image_grid_thw.prod(-1) / merge_size / merge_size)
               .cpu()
@@ -938,6 +966,26 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
       std::vector<int64_t> image_tokens_vec(
           image_tokens.data_ptr<int64_t>(),
           image_tokens.data_ptr<int64_t>() + image_tokens.numel());
+      CHECK_EQ(static_cast<int64_t>(image_tokens_vec.size()), grid_thw.size(0))
+          << "image token split count must match image count, split_count="
+          << image_tokens_vec.size() << ", image_count=" << grid_thw.size(0);
+      int64_t total_image_tokens = 0;
+      for (int64_t token_count : image_tokens_vec) {
+        CHECK_GT(token_count, 0)
+            << "each image must produce positive visual tokens, token_count="
+            << token_count
+            << ", image_grid_thw=" << image_input->image_grid_thw;
+        total_image_tokens += token_count;
+      }
+      CHECK_EQ(image_embeds.size(0), total_image_tokens)
+          << "image embedding rows must match image token split sum, rows="
+          << image_embeds.size(0)
+          << ", total_image_tokens=" << total_image_tokens
+          << ", image_grid_thw=" << image_input->image_grid_thw;
+      CHECK_EQ(image_embeds.size(-1), model_args_.hidden_size())
+          << "image embedding hidden dim must match language hidden size, "
+          << "image_hidden=" << image_embeds.size(-1)
+          << ", hidden_size=" << model_args_.hidden_size();
       multimodal_embeds["image|embedding"] =
           image_embeds.split(image_tokens_vec, 0 /*dim*/);
     }
@@ -965,6 +1013,34 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
       torch::Tensor inputs_embeds,
       const torch::Tensor& multimodal_embeds,
       const torch::Tensor& is_multimodal) {
+    CHECK(inputs_embeds.defined()) << "inputs_embeds is not defined.";
+    CHECK(multimodal_embeds.defined()) << "multimodal_embeds is not defined.";
+    CHECK(is_multimodal.defined()) << "multimodal mask is not defined.";
+    CHECK_EQ(is_multimodal.scalar_type(), torch::kBool)
+        << "multimodal mask must be bool, got dtype="
+        << is_multimodal.scalar_type();
+    CHECK_EQ(inputs_embeds.dim(), 2)
+        << "inputs_embeds must be 2-D, got shape=" << inputs_embeds.sizes();
+    CHECK_EQ(multimodal_embeds.dim(), 2)
+        << "multimodal_embeds must be 2-D, got shape="
+        << multimodal_embeds.sizes();
+    CHECK_EQ(is_multimodal.dim(), 1)
+        << "multimodal mask must be 1-D, got shape=" << is_multimodal.sizes();
+    CHECK_EQ(is_multimodal.size(0), inputs_embeds.size(0))
+        << "multimodal mask length must match token embedding rows, "
+        << "mask_len=" << is_multimodal.size(0)
+        << ", input_rows=" << inputs_embeds.size(0);
+    CHECK_EQ(multimodal_embeds.size(-1), inputs_embeds.size(-1))
+        << "multimodal embedding hidden dim must match token embedding hidden "
+        << "dim, mm_hidden=" << multimodal_embeds.size(-1)
+        << ", input_hidden=" << inputs_embeds.size(-1);
+    const int64_t mask_tokens =
+        is_multimodal.to(torch::kCPU).sum().item<int64_t>();
+    CHECK_EQ(multimodal_embeds.size(0), mask_tokens)
+        << "multimodal embedding rows must match multimodal mask true count, "
+        << "embedding_rows=" << multimodal_embeds.size(0)
+        << ", mask_tokens=" << mask_tokens
+        << ", input_rows=" << inputs_embeds.size(0);
     inputs_embeds.index_put_({is_multimodal}, multimodal_embeds);
     return inputs_embeds;
   }
@@ -975,7 +1051,9 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
     torch::Tensor inputs_embeds =
         language_model_->get_npu_word_embedding()(input_ids, 0);
     auto merge_modality = [&](const std::string& embed_key,
-                              const std::string& mask_key) {
+                              const std::string& mask_key,
+                              int64_t token_id,
+                              const char* modality_name) {
       auto emb = mm_data.get<torch::Tensor>(embed_key);
       if (!emb.has_value() || !emb.value().defined()) {
         return;
@@ -984,12 +1062,16 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
       if (!mask.has_value() || !mask.value().defined()) {
         return;
       }
+      check_multimodal_mask_matches_tokens(
+          input_ids, mask.value(), token_id, modality_name);
       inputs_embeds =
           merge_multimodal_embeddings(inputs_embeds, emb.value(), mask.value());
     };
 
-    merge_modality("image|embedding", "image|mask");
-    merge_modality("video|embedding", "video|mask");
+    merge_modality(
+        "image|embedding", "image|mask", model_args_.image_token_id(), "image");
+    merge_modality(
+        "video|embedding", "video|mask", model_args_.video_token_id(), "video");
     return inputs_embeds;
   }
 
@@ -1005,6 +1087,12 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) {
     return language_model_->logits(hidden_states, seleted_idxes);
+  }
+
+  torch::Tensor logits(const torch::Tensor& hidden_states,
+                       const torch::Tensor& seleted_idxes,
+                       torch::Tensor& out_hidden) {
+    return language_model_->logits(hidden_states, seleted_idxes, out_hidden);
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader) {
@@ -1146,6 +1234,10 @@ REGISTER_MODEL_ARGS(kimi_k25, [&] {
       rope_scaling_attn_factor, "text_config.rope_scaling.attn_factor", 1.0f);
   LOAD_ARG_OR(
       num_nextn_predict_layers, "text_config.num_nextn_predict_layers", 1);
+  LOAD_ARG_OR(layers_to_capture, "layers_to_capture", std::vector<int32_t>{});
+  LOAD_ARG_OR(layers_to_capture,
+              "text_config.layers_to_capture",
+              args->layers_to_capture());
 
   LOAD_ARG_OR(bos_token_id, "text_config.bos_token_id", 163584);
   LOAD_ARG_OR(eos_token_id, "text_config.eos_token_id", 163585);
