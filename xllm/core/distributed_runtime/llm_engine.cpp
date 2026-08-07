@@ -539,6 +539,10 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .device_block_count = kv_cache_cap.n_blocks(),
       .supports_host_kv_offload = Platform::supports_host_kv_offload(),
       .enable_prefix_cache = options_.enable_prefix_cache(),
+      .enable_disagg_pd = options_.enable_disagg_pd(),
+      .enable_pd_ooc = options_.enable_pd_ooc(),
+      .enable_kvcache_store = options_.enable_kvcache_store(),
+      .instance_role = options_.instance_role(),
       .has_key_cache_shape = kv_cache_shape.has_key_cache_shape(),
       .has_grouped_cache_layout = kv_cache_shape.has_grouped_cache_layout(),
       .supports_grouped_cache_offload =

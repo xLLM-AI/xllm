@@ -65,6 +65,14 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
 
   bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;
 
+  uint32_t transfer_kv_blocks(
+      uint64_t batch_id,
+      const std::vector<BlockTransferInfo>& block_transfer_info) override;
+
+  uint32_t transfer_kv_blocks(
+      uint64_t batch_id,
+      Slice<BlockTransferInfo>& block_transfer_info) override;
+
 #if defined(USE_NPU) || defined(USE_MLU)
   bool allocate_kv_cache_with_transfer(
       const KVCacheShape& kv_cache_shape) override;

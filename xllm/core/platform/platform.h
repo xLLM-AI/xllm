@@ -68,8 +68,8 @@ class Platform final {
     return is_mlu();
   }
 
-  // Host KV offload requires both a batch memcpy provider and a layer-wise
-  // synchronization implementation.
+  // Host KV offload requires a batch memcpy provider with stream
+  // synchronization support.
   static constexpr bool supports_host_kv_offload() {
     return is_npu() || is_mlu();
   }

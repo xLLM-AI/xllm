@@ -111,6 +111,21 @@ if(USE_MLU)
       GTest::gtest_main
       torch_mlu
   )
+
+  cc_test(
+    NAME
+      mtp_host_offload_test
+    SRCS
+      mtp_host_offload_test.cpp
+    DEPS
+      :runtime
+      :model_loader
+      :batch
+      :kv_cache
+      :platform
+      GTest::gtest_main
+      torch_mlu
+  )
 endif()
 
 if(USE_CUDA)

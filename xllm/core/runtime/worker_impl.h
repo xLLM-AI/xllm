@@ -184,6 +184,8 @@ class WorkerImpl {
       const uint64_t batch_id,
       Slice<BlockTransferInfo>& block_transfer_info);
 
+  void set_hierarchy_layer_synchronizer(ModelInputParams& input_params);
+
   // Run the model on the given input. async call
   // the future returns a successfull status with no meaningful value
   virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(
