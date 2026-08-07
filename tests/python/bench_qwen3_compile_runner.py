@@ -312,6 +312,93 @@ def _print_report(results):
 # ---------------------------------------------------------------------------
 
 
+def _profile_single(backend_name, image_size, profile_dir, profile_steps):
+    """Run profiling for a single backend and image_size combination."""
+    print(f"\n{'='*80}")
+    print(f"Profiling: backend={backend_name}, image_size={image_size}")
+    print(f"{'='*80}")
+    
+    try:
+        model = _create_model()
+        executor, kv_caches = _create_executor(model, backend_name)
+        
+        device = torch.device("npu")
+        vocab_size = QWEN3_32B_CONFIG["vocab_size"]
+        input_ids = torch.randint(0, vocab_size, (image_size,), device=device)
+        positions = torch.arange(image_size, device=device)
+        
+        slot_mapping = torch.zeros(image_size, dtype=torch.int32, device=device)
+        q_cu_seq_lens = torch.tensor([0, image_size], dtype=torch.int32, device=device)
+        metadata = _PrefillMetadata(
+            slot_mapping=slot_mapping,
+            q_cu_seq_lens=q_cu_seq_lens,
+        )
+        
+        def run():
+            with torch.no_grad():
+                executor.execute(input_ids, positions, metadata)
+        
+        # Warmup
+        print(f"Warmup (2 iters) ...")
+        for _ in range(2):
+            run()
+        torch.npu.synchronize()
+        
+        # Profiling
+        print(f"Profiling ({profile_steps} iters) ...")
+        experimental_config = torch_npu.profiler._ExperimentalConfig(
+            export_type=[torch_npu.profiler.ExportType.Text],
+            profiler_level=torch_npu.profiler.ProfilerLevel.Level2,
+            msprof_tx=False,
+            aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
+            l2_cache=False,
+            op_attr=False,
+            data_simplification=False,
+            record_op_args=False,
+            gc_detect_threshold=None,
+        )
+        
+        output_dir = f"{profile_dir}/{backend_name}_img{image_size}"
+        with torch_npu.profiler.profile(
+            activities=[
+                torch_npu.profiler.ProfilerActivity.CPU,
+                torch_npu.profiler.ProfilerActivity.NPU,
+            ],
+            on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(output_dir),
+            record_shapes=True,
+            profile_memory=False,
+            with_stack=False,
+            with_modules=False,
+            with_flops=False,
+            experimental_config=experimental_config,
+        ) as prof:
+            for i in range(profile_steps):
+                print(f"  step {i+1}/{profile_steps}")
+                run()
+                torch.npu.synchronize()
+                prof.step()
+        
+        print(f"Profiling results saved to: {output_dir}")
+        print(f"Use TensorBoard to view: tensorboard --logdir {output_dir}")
+        
+        del model, executor, kv_caches
+        gc.collect()
+        torch.npu.empty_cache()
+        
+        return True
+        
+    except torch.OutOfMemoryError:
+        print(f"ERROR: OOM during profiling")
+        torch.npu.empty_cache()
+        gc.collect()
+        return False
+    except Exception as e:
+        print(f"ERROR: {type(e).__name__}: {str(e)[:100]}")
+        torch.npu.empty_cache()
+        gc.collect()
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(description="Qwen3Model 32B ModelExecutor benchmark")
     parser.add_argument("--backend", type=str, choices=["eager", "torchair", "inductor", "all"], default="all")
@@ -319,6 +406,9 @@ def main():
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--output", type=str, default=None, help="Output JSON file path")
+    parser.add_argument("--profile", action="store_true", help="Enable NPU profiling")
+    parser.add_argument("--profile-dir", type=str, default="./profiler", help="Profiling output directory")
+    parser.add_argument("--profile-steps", type=int, default=5, help="Number of profiling steps")
     args = parser.parse_args()
 
     _install_op_infrastructure()
@@ -326,28 +416,55 @@ def main():
     backends = BACKENDS if args.backend == "all" else [args.backend]
     image_sizes = [args.image_size] if args.image_size else IMAGE_SIZES
 
-    total = len(backends) * len(image_sizes)
-    print(f"Running {total} benchmark combinations via ModelExecutor ...")
+    # Run benchmark
+    if not args.profile:
+        total = len(backends) * len(image_sizes)
+        print(f"Running {total} benchmark combinations via ModelExecutor ...")
 
-    results = []
-    idx = 0
-    for backend in backends:
-        for image_size in image_sizes:
-            idx += 1
-            print(f"[{idx}/{total}] backend={backend}, image_size={image_size} ...", end=" ", flush=True)
-            r = _run_single(backend, image_size, args.warmup, args.repeats)
-            results.append(r)
-            if r["status"] == "OK":
-                print(f"OK  avg={r['avg']:.2f}ms")
-            else:
-                print(f"{r['status'][:50]}")
+        results = []
+        idx = 0
+        for backend in backends:
+            for image_size in image_sizes:
+                idx += 1
+                print(f"[{idx}/{total}] backend={backend}, image_size={image_size} ...", end=" ", flush=True)
+                r = _run_single(backend, image_size, args.warmup, args.repeats)
+                results.append(r)
+                if r["status"] == "OK":
+                    print(f"OK  avg={r['avg']:.2f}ms")
+                else:
+                    print(f"{r['status'][:50]}")
 
-    _print_report(results)
+        _print_report(results)
 
-    if args.output:
-        with open(args.output, "w") as f:
-            json.dump(results, f, indent=2, default=str)
-        print(f"Results saved to {args.output}")
+        if args.output:
+            with open(args.output, "w") as f:
+                json.dump(results, f, indent=2, default=str)
+            print(f"Results saved to {args.output}")
+    
+    # Run profiling
+    else:
+        print(f"Running profiling for {len(backends)} backend(s) x {len(image_sizes)} image_size(s) ...")
+        print(f"Output directory: {args.profile_dir}")
+        print(f"Profile steps: {args.profile_steps}")
+        
+        success_count = 0
+        fail_count = 0
+        
+        for backend in backends:
+            for image_size in image_sizes:
+                success = _profile_single(backend, image_size, args.profile_dir, args.profile_steps)
+                if success:
+                    success_count += 1
+                else:
+                    fail_count += 1
+        
+        print(f"\n{'='*80}")
+        print(f"Profiling Summary")
+        print(f"{'='*80}")
+        print(f"Success: {success_count}")
+        print(f"Failed:  {fail_count}")
+        print(f"Results saved to: {args.profile_dir}")
+        print(f"View with: tensorboard --logdir {args.profile_dir}")
 
 
 if __name__ == "__main__":
