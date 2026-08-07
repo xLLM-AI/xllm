@@ -15,9 +15,11 @@ limitations under the License.
 
 #pragma once
 
+#include <memory>
 #include <vector>
 
 #include "common/macros.h"
+#include "core/framework/speculative/adaptive_speculative_controller.h"
 #include "framework/sampling/rejection_sampler.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/options.h"
@@ -139,6 +141,12 @@ class SpeculativeWorkerImpl : public WorkerImpl {
  protected:
   // Target model worker
   std::unique_ptr<LLMWorkerImpl> impl_;
+
+  // Optional adaptive pruning controller. Subclasses create it in their ctor
+  // when the algorithm supports adaptive per-seq validate pruning (MTP,
+  // DFlash, DSpark). Left null otherwise. Held in the base so shared plumbing
+  // (predictor setter, profile hook) does not need per-subclass duplication.
+  std::unique_ptr<AdaptiveSpeculativeController> adaptive_spec_controller_;
 
   bool enable_fused_kernel_ = false;
   int32_t embedding_size_ = 0;

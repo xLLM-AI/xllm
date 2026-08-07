@@ -294,6 +294,9 @@ REGISTER_MODEL_ARGS_WITH_VARNAME(qwen3_atb, qwen3_atb, [&] {
   // DSpark: low-rank dim of the Markov head (top-level config key, like vLLM's
   // config.markov_rank). 0 = disabled (plain DFlash / non-DSpark models).
   LOAD_ARG_OR(markov_rank, "markov_rank", 0);
+  LOAD_ARG_OR(enable_confidence_head, "enable_confidence_head", false);
+  LOAD_ARG_OR(
+      confidence_head_with_markov, "confidence_head_with_markov", false);
 
   LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {
     return args->hidden_size() / args->n_heads();

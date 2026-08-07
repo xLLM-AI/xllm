@@ -321,6 +321,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   }
 
   torch::Tensor logits;
+  torch::Tensor selected_hidden;
   if (sampling_params.selected_token_idxes.defined()) {
     torch::Tensor selected_token_idxes = sampling_params.selected_token_idxes;
     if (model_output.hidden_states.defined() &&
@@ -330,7 +331,14 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
                                      /*non_blocking=*/false)
                                  .contiguous();
     }
-    logits = model_->logits(model_output.hidden_states, selected_token_idxes);
+    if (input.return_selected_hidden) {
+      // Emit both selected hidden and logits from a single lm_head pass so the
+      // ConfidenceHead can consume hidden without a second projection.
+      logits = model_->logits(
+          model_output.hidden_states, selected_token_idxes, selected_hidden);
+    } else {
+      logits = model_->logits(model_output.hidden_states, selected_token_idxes);
+    }
   }
 
   ForwardOutput output;
@@ -359,6 +367,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   // driver prepare model output
   if (sampling_params.selected_token_idxes.defined()) {
     output.logits = logits;
+    output.selected_hidden = selected_hidden;
     output.do_sample = sampling_params.do_sample;
     output.logprobs = sampling_params.logprobs;
     output.max_top_logprobs = sampling_params.max_top_logprobs;

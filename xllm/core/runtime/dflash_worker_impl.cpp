@@ -28,6 +28,7 @@ limitations under the License.
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/speculative/speculative_profile_registry.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/process_group.h"
 #include "framework/sampling/rejection_sampler.h"
@@ -288,6 +289,21 @@ DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
          "parallelism (cp_size > 1).";
   draft_impl_ = std::make_unique<LLMWorkerImpl>(
       parallel_args, device, draft_options(options));
+
+  // Adaptive per-seq validate pruning. Same DP/EP-parallel guard as MTP.
+  const bool enable_adaptive = options.enable_adaptive_speculative_decode() &&
+                               options.num_speculative_tokens() > 1;
+  const bool enable_parallel_adaptive_sl =
+      parallel_args.dp_size() <= 1 && parallel_args.ep_size() <= 1;
+  if (enable_adaptive && enable_parallel_adaptive_sl) {
+    adaptive_spec_controller_ =
+        std::make_unique<AdaptiveSpeculativeController>(options);
+  } else if (enable_adaptive) {
+    LOG(WARNING) << "DFlash/DSpark adaptive speculative decode disabled under "
+                 << "DP/EP parallelism (v1). dp_size="
+                 << parallel_args.dp_size()
+                 << ", ep_size=" << parallel_args.ep_size();
+  }
 }
 
 bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
@@ -754,9 +770,20 @@ void DFlashWorkerImpl::fill_validate_input_from_draft_outputs(
 
 std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
     const ForwardInput& input,
-    const DraftBlock& draft_block,
+    const DraftBlock& draft_block_in,
     ForwardInput& validate_input) {
   Timer timer;
+  // v1 adaptive pruning: keep the dense N+1 validate layout but zero out the
+  // per-seq draft probs beyond the controller-selected prefix. The rejection
+  // sampler naturally rejects those positions (draft_prob=0), so throughput
+  // and acceptance rate reflect the controller decision without touching the
+  // chunked_prefill metadata rebuild path.
+  DraftBlock draft_block = draft_block_in;
+  std::vector<int32_t> prefix_lengths =
+      compute_adaptive_prefix_lengths(draft_block, input);
+  if (!prefix_lengths.empty()) {
+    apply_adaptive_prune_to_draft(draft_block, prefix_lengths);
+  }
   fill_validate_input_from_draft_outputs(
       draft_block, validate_input, *compute_stream_);
   ForwardOutput target_output =
@@ -1172,6 +1199,107 @@ void DFlashWorkerImpl::write_target_context_to_cache(
       validate_output.next_tokens,
       validate_output.embeddings,
       options_.num_speculative_tokens());
+}
+
+// -----------------------------------------------------------------------------
+// Adaptive-speculative helpers (DFlash + DSpark).
+// -----------------------------------------------------------------------------
+
+std::vector<int32_t> DFlashWorkerImpl::compute_adaptive_prefix_lengths(
+    const DraftBlock& draft_block,
+    const ForwardInput& input) {
+  const int32_t num_speculative_tokens = options_.num_speculative_tokens();
+  if (adaptive_spec_controller_ == nullptr ||
+      !adaptive_spec_controller_->enabled()) {
+    return {};
+  }
+  // Prefer the trained ConfidenceHead output when present (DSpark);
+  // otherwise fall back to sampler-gathered proposal probs (DFlash / DSpark
+  // without a confidence head).
+  torch::Tensor probs_for_controller = draft_block.confidence_probs.defined()
+                                           ? draft_block.confidence_probs
+                                           : draft_block.probs;
+  if (!probs_for_controller.defined()) {
+    return {};
+  }
+  if (probs_for_controller.dim() != 2 ||
+      probs_for_controller.size(1) != num_speculative_tokens) {
+    LOG(WARNING) << "Adaptive: unexpected probs shape "
+                 << probs_for_controller.sizes()
+                 << " — falling back to full width.";
+    return {};
+  }
+
+  const int32_t batch_size = input.input_params.meta.num_sequences;
+  std::vector<double> per_seq_kv_lens(static_cast<size_t>(batch_size), 0.0);
+  const Slice<int32_t> kv_seq_lens =
+      input.input_params.attention.host.kv_seq_lens;
+  for (int32_t i = 0; i < batch_size; ++i) {
+    per_seq_kv_lens[static_cast<size_t>(i)] = static_cast<double>(
+        specBuilder::calc_kv_len(kv_seq_lens, i, /*offset=*/0));
+  }
+
+  double target_step_time_ms = 1.0;
+  SpeculativeProfileRegistry& registry =
+      SpeculativeProfileRegistry::get_instance();
+  auto predictor = registry.validate_time_predictor();
+  if (predictor.has_value()) {
+    const double q = static_cast<double>(num_speculative_tokens + 1);
+    double t = predictor->intercept_ms;
+    for (double kv : per_seq_kv_lens) {
+      t += predictor->query_token_ms * q + predictor->query_prefix_ms * q * kv;
+    }
+    target_step_time_ms = std::max(t, 1.0);
+  }
+
+  std::vector<int32_t> prefix_lengths =
+      adaptive_spec_controller_->select_pruned_prefix_lengths(
+          probs_for_controller.to(torch::kCPU).to(torch::kFloat64),
+          /*full_draft_time_ms=*/0.0,
+          target_step_time_ms,
+          per_seq_kv_lens);
+  return prefix_lengths;
+}
+
+void DFlashWorkerImpl::apply_adaptive_prune_to_draft(
+    DraftBlock& draft_block,
+    const std::vector<int32_t>& prefix_lengths) {
+  const int32_t num_speculative_tokens = options_.num_speculative_tokens();
+  const int64_t batch_size = draft_block.probs.size(0);
+  CHECK_EQ(static_cast<int64_t>(prefix_lengths.size()), batch_size)
+      << "adaptive prefix_lengths size must match draft batch";
+
+  // Build a [B, N] mask on the same device/dtype as probs.
+  torch::Tensor probs = draft_block.probs;
+  torch::Tensor mask = torch::zeros_like(probs);
+  bool any_prune = false;
+  bool trace_first = false;
+  int64_t pruned_seqs = 0;
+  int32_t max_kept = 0;
+  int32_t sum_kept = 0;
+  for (int64_t i = 0; i < batch_size; ++i) {
+    int32_t k = prefix_lengths[static_cast<size_t>(i)];
+    k = std::clamp(k, 0, num_speculative_tokens);
+    if (k > 0) {
+      mask.index_put_({i, torch::indexing::Slice(0, k)}, 1.0);
+    }
+    sum_kept += k;
+    if (k > max_kept) max_kept = k;
+    if (k < num_speculative_tokens) {
+      any_prune = true;
+      ++pruned_seqs;
+    }
+    if (!trace_first) trace_first = true;
+  }
+  if (!any_prune) return;
+  draft_block.probs = probs * mask;
+  LOG_EVERY_N(INFO, 32) << "[dflash_dspark_adaptive] batch=" << batch_size
+                        << " pruned_seqs=" << pruned_seqs
+                        << " max_kept=" << max_kept << " avg_kept="
+                        << (batch_size > 0
+                                ? static_cast<double>(sum_kept) / batch_size
+                                : 0.0)
+                        << " of " << num_speculative_tokens;
 }
 
 }  // namespace xllm

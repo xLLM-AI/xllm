@@ -92,6 +92,14 @@ class DSparkMarkovHead final {
     return F::linear(markov_embedding, markov_w2_);
   }
 
+  // Expose the shared markov_w1 embedding so ConfidenceHead can reuse the same
+  // rank-256 features without a redundant lookup table copy.
+  torch::Tensor markov_embed(const torch::Tensor& prev_token_ids) const {
+    CHECK(defined()) << "DSpark Markov head weights are not initialized.";
+    namespace F = torch::nn::functional;
+    return F::embedding(prev_token_ids, markov_w1_);
+  }
+
  private:
   bool defined() const { return markov_w1_.defined() && markov_w2_.defined(); }
 
@@ -99,6 +107,112 @@ class DSparkMarkovHead final {
   torch::Tensor markov_w2_;  // [draft_vocab_size, markov_rank]
   torch::TensorOptions tensor_options_;
   int64_t markov_rank_ = 0;
+};
+
+// DSpark ConfidenceHead: given a draft-step hidden state and the previous
+// token id, produces an acceptance-prob logit. When
+// confidence_head_with_markov=true (the standard config), the head is applied
+// on `concat(hidden, markov_embedding[prev])` — a low-rank Markov feature
+// that reuses markov_w1 (the same embedding table the MarkovHead uses).
+//
+// Weights (bias-less linear that xllm sees as `confidence_head.proj`):
+//   proj.weight: [1, hidden_size + markov_rank]  when with_markov=true
+//   proj.weight: [1, hidden_size]                 otherwise
+//   proj.bias:   [1]
+//
+// forward returns [num_reqs] float acceptance probabilities in [0, 1] (sigmoid
+// applied). The controller consumes them as per-step draft accept
+// probabilities.
+class DSparkConfidenceHead final {
+ public:
+  DSparkConfidenceHead() = default;
+
+  void initialize(const torch::TensorOptions& options,
+                  int64_t hidden_size,
+                  int64_t markov_rank,
+                  bool with_markov) {
+    tensor_options_ = options;
+    hidden_size_ = hidden_size;
+    markov_rank_ = markov_rank;
+    with_markov_ = with_markov;
+    CHECK_GT(hidden_size_, 0) << "DSpark ConfidenceHead requires hidden_size>0";
+    if (with_markov_) {
+      CHECK_GT(markov_rank_, 0)
+          << "DSpark ConfidenceHead with_markov requires markov_rank>0";
+    }
+  }
+
+  // vLLM keys: confidence_head.proj.{weight,bias}
+  void load_state_dict(const StateDict& state_dict) {
+    torch::Tensor w = state_dict.get_tensor("confidence_head.proj.weight");
+    torch::Tensor b = state_dict.get_tensor("confidence_head.proj.bias");
+    if (w.defined()) {
+      proj_weight_ = w.to(tensor_options_);
+    }
+    if (b.defined()) {
+      proj_bias_ = b.to(tensor_options_);
+    }
+  }
+
+  void verify_loaded_weights(const std::string& prefix) const {
+    CHECK(proj_weight_.defined())
+        << "Failed to find " << prefix << "confidence_head.proj.weight";
+    CHECK(proj_bias_.defined())
+        << "Failed to find " << prefix << "confidence_head.proj.bias";
+    CHECK_EQ(proj_weight_.dim(), 2)
+        << "confidence_head.proj.weight must be [1, in_dim]";
+    CHECK_EQ(proj_bias_.dim(), 1) << "confidence_head.proj.bias must be [1]";
+    CHECK_EQ(proj_weight_.size(0), 1)
+        << "confidence_head.proj.weight must output a single logit";
+    const int64_t expected_in =
+        with_markov_ ? hidden_size_ + markov_rank_ : hidden_size_;
+    CHECK_EQ(proj_weight_.size(1), expected_in)
+        << "confidence_head.proj.weight in_dim mismatch, expected "
+        << expected_in << " got " << proj_weight_.size(1);
+    CHECK_EQ(proj_bias_.size(0), 1)
+        << "confidence_head.proj.bias size mismatch";
+  }
+
+  // hidden: [num_reqs, hidden_size]
+  // markov_embed: [num_reqs, markov_rank] — from `markov_w1[prev_token_ids]`.
+  //   Only consumed when `with_markov_` is true.
+  // returns: [num_reqs] float32 acceptance probabilities in [0, 1].
+  torch::Tensor forward(const torch::Tensor& hidden,
+                        const torch::Tensor& markov_embed) const {
+    CHECK(defined()) << "DSpark ConfidenceHead weights are not initialized";
+    CHECK_EQ(hidden.dim(), 2) << "ConfidenceHead hidden must be [B, H]";
+    CHECK_EQ(hidden.size(-1), hidden_size_)
+        << "ConfidenceHead hidden size mismatch";
+    torch::Tensor input;
+    if (with_markov_) {
+      CHECK(markov_embed.defined())
+          << "ConfidenceHead with_markov requires markov_embed";
+      CHECK_EQ(markov_embed.size(0), hidden.size(0))
+          << "ConfidenceHead markov_embed batch mismatch";
+      CHECK_EQ(markov_embed.size(-1), markov_rank_)
+          << "ConfidenceHead markov_embed rank mismatch";
+      input = torch::cat({hidden.to(proj_weight_.dtype()),
+                          markov_embed.to(proj_weight_.dtype())},
+                         /*dim=*/-1);
+    } else {
+      input = hidden.to(proj_weight_.dtype());
+    }
+    namespace F = torch::nn::functional;
+    torch::Tensor logit = F::linear(input, proj_weight_, proj_bias_);
+    return torch::sigmoid(logit).squeeze(-1).to(torch::kFloat32);
+  }
+
+  bool defined() const {
+    return proj_weight_.defined() && proj_bias_.defined();
+  }
+
+ private:
+  torch::Tensor proj_weight_;  // [1, hidden_size (+ markov_rank)]
+  torch::Tensor proj_bias_;    // [1]
+  torch::TensorOptions tensor_options_;
+  int64_t hidden_size_ = 0;
+  int64_t markov_rank_ = 0;
+  bool with_markov_ = false;
 };
 
 // DSpark draft model = DFlash block-diffusion backbone (context-K/V injection,
@@ -120,12 +234,37 @@ class DSparkQwen3ForCausalLMImpl final
     const ModelArgs& model_args = context.get_model_args();
     markov_head_.initialize(context.get_tensor_options(),
                             model_args.markov_rank());
+    if (model_args.enable_confidence_head()) {
+      confidence_head_.initialize(context.get_tensor_options(),
+                                  model_args.hidden_size(),
+                                  model_args.markov_rank(),
+                                  model_args.confidence_head_with_markov());
+    }
   }
 
   torch::Tensor dspark_markov_bias(
       const torch::Tensor& previous_token_ids) const {
     return markov_head_.bias(previous_token_ids);
   }
+
+  // Compute per-request acceptance probability using the trained ConfidenceHead
+  // over the draft-step hidden state and the previous token embedding.
+  // hidden: [num_reqs, hidden_size], prev_token_ids: [num_reqs].
+  // Returns [num_reqs] fp32 in [0, 1]. Defined only when
+  // enable_confidence_head.
+  torch::Tensor dspark_confidence_probs(
+      const torch::Tensor& hidden,
+      const torch::Tensor& previous_token_ids) const {
+    CHECK(confidence_head_.defined())
+        << "DSpark ConfidenceHead is not initialized (enable_confidence_head?)";
+    torch::Tensor markov_embed;
+    if (previous_token_ids.defined()) {
+      markov_embed = markov_head_.markov_embed(previous_token_ids);
+    }
+    return confidence_head_.forward(hidden, markov_embed);
+  }
+
+  bool has_dspark_confidence_head() const { return confidence_head_.defined(); }
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
@@ -137,10 +276,14 @@ class DSparkQwen3ForCausalLMImpl final
       }
       model_->load_state_dict(sub_dict);
       markov_head_.load_state_dict(sub_dict);
+      confidence_head_.load_state_dict(sub_dict);
     }
     model_->verify_loaded_weights("");
     model_->merge_loaded_weights();
     markov_head_.verify_loaded_weights("");
+    if (confidence_head_.defined()) {
+      confidence_head_.verify_loaded_weights("");
+    }
   }
 
   ModelOutput write_context_kv(const torch::Tensor& target_hidden,
@@ -154,6 +297,7 @@ class DSparkQwen3ForCausalLMImpl final
 
  private:
   DSparkMarkovHead markov_head_;
+  DSparkConfidenceHead confidence_head_;
 };
 TORCH_MODULE(DSparkQwen3ForCausalLM);
 

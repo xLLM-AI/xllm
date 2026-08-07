@@ -486,15 +486,26 @@ void ProfileManager::profile_speculative_validate_time() {
   const SpeculativeConfig& speculative_config =
       ::xllm::SpeculativeConfig::get_instance();
   // Only fit the validate-time predictor when the adaptive path can
-  // actually consume it: MTP with SL > 1 and adaptive explicitly enabled.
-  // Otherwise this whole prefix/query/batch sweep is wasted startup time.
+  // actually consume it: MTP/DFlash/DSpark with SL > 1 and adaptive
+  // explicitly enabled. Otherwise this whole prefix/query/batch sweep is
+  // wasted startup time.
+  std::string speculative_algorithm =
+      speculative_config.speculative_algorithm();
+  std::transform(
+      speculative_algorithm.begin(),
+      speculative_algorithm.end(),
+      speculative_algorithm.begin(),
+      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  const bool is_supported_algo =
+      SpeculativeConfig::is_mtp_algorithm(speculative_algorithm) ||
+      speculative_algorithm == "dflash" || speculative_algorithm == "dspark";
   if (!speculative_config.enable_adaptive_speculative_decode() ||
       speculative_config.num_speculative_tokens() <= 1 ||
-      !SpeculativeConfig::is_mtp_algorithm(
-          speculative_config.speculative_algorithm())) {
+      !is_supported_algo) {
     return;
   }
-  LOG(INFO) << "Starting speculative validate profile for MTP, "
+  LOG(INFO) << "Starting speculative validate profile for "
+            << speculative_algorithm << ", "
             << "adaptive_enabled="
             << speculative_config.enable_adaptive_speculative_decode();
 
