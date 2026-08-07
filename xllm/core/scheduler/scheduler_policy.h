@@ -217,6 +217,19 @@ class PrefillFirstPolicy : public SchedulerPolicy {
                                          const SchedulerState& state) override;
 };
 
+// ResidualSJFPolicy: PrefillFirstPolicy with residual-aware SJF ordering.
+// Sorts the fresh prefill queue with the residual_sjf comparator (recovery
+// first, max-wait aged requests in FCFS order, then fresh requests by residual
+// local prefill cost) and then delegates to PrefillFirstPolicy.
+class ResidualSJFPolicy final : public PrefillFirstPolicy {
+ public:
+  using PrefillFirstPolicy::PrefillFirstPolicy;
+
+  void schedule(SchedulerState& state,
+                ScheduleBudget& budget,
+                std::vector<std::shared_ptr<Request>>& finished) override;
+};
+
 // DecodeFirstPolicy: mixed batch mode with fcfs/priority/deadline.
 // Decode requests fill the batch first ("decode-maximal batching"),
 // remaining token budget goes to chunked prefill.

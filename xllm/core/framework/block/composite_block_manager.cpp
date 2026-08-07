@@ -732,6 +732,24 @@ void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
   }
 }
 
+size_t CompositeBlockManager::get_num_local_computed_blocks(Sequence* seq) {
+  if (seq == nullptr || combination_ == LeafCombination::UNSUPPORTED) {
+    return 0;
+  }
+  const auto kv_leaf_it = leaves_.find(BlockType::KV);
+  if (kv_leaf_it == leaves_.end() ||
+      !kv_leaf_it->second.supports_prefix_cache) {
+    return 0;
+  }
+  BlockManager& kv_leaf = *kv_leaf_it->second.leaf;
+  if (!kv_leaf.options().enable_prefix_cache()) {
+    return 0;
+  }
+  seq->update_block_hashes(static_cast<uint32_t>(kv_leaf.block_size()),
+                           kv_leaf.options().hasher_type());
+  return kv_leaf.get_num_local_computed_blocks(seq->block_hashes());
+}
+
 void CompositeBlockManager::cache_for_sequence(Sequence* seq) {
   // Final flush at deallocate. KV shapes flush the tail via leaf->cache();
   // SWA_COMPRESSED re-runs the pre-grow hook (cursor-guarded, idempotent) so

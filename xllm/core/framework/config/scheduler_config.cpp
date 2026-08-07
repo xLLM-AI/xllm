@@ -58,6 +58,12 @@ DEFINE_string(priority_strategy,
               "fcfs",
               "Priority strategy for requests(e.g. fcfs, priority, deadline).");
 
+DEFINE_int32(residual_sjf_max_wait_ms,
+             10000,
+             "Max wait in milliseconds before a PD-prefill waiting request is "
+             "promoted ahead of residual-cost ordering under residual_sjf. "
+             "Larger values favor mean latency; 0 behaves like FCFS.");
+
 DEFINE_bool(enable_online_preempt_offline,
             true,
             "Whether to enable online preempt offline.");
@@ -87,6 +93,7 @@ void SchedulerConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(use_zero_evict);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_decode_token_per_sequence);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(priority_strategy);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(residual_sjf_max_wait_ms);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mix_batch);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_online_preempt_offline);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(aggressive_coeff);
@@ -105,6 +112,7 @@ void SchedulerConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(use_zero_evict);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_decode_token_per_sequence);
   XLLM_CONFIG_ASSIGN_FROM_JSON(priority_strategy);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(residual_sjf_max_wait_ms);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mix_batch);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_online_preempt_offline);
   XLLM_CONFIG_ASSIGN_FROM_JSON(aggressive_coeff);
@@ -135,6 +143,8 @@ void SchedulerConfig::append_config_json(
       config_json, default_config, max_decode_token_per_sequence);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, priority_strategy);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, residual_sjf_max_wait_ms);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_mix_batch);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
