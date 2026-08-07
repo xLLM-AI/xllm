@@ -1782,6 +1782,13 @@ uint32_t WorkerImpl::transfer_kv_blocks(
   return 0;
 }
 
+void WorkerImpl::set_hierarchy_layer_synchronizer(
+    ModelInputParams& input_params) {
+  if (hierarchy_kv_cache_transfer_ != nullptr) {
+    hierarchy_kv_cache_transfer_->set_layer_synchronizer(input_params);
+  }
+}
+
 int64_t WorkerImpl::get_active_activation_memory() {
   return DeviceMonitor::get_instance()
       .get_device_stats(device_.index())

@@ -338,6 +338,7 @@ std::optional<ForwardOutput> run_llm_no_sync_impl(
       processed_input,
       prepare_stream,
       /*record_ready_event=*/&prepare_stream != &compute_stream);
+  worker.set_hierarchy_layer_synchronizer(processed_input.input_params);
   return worker.execute_no_sync_on_stream(
       processed_input, compute_stream, /*record_ready_event=*/false);
 }
@@ -531,6 +532,16 @@ KVCacheShape MTPDraftKVCacheShape(const KVCacheShape& target_shape,
 bool is_qwen3_5_draft_model_type(const std::string& model_type) {
   return mtp_async::classify_combined_draft_execution_path(model_type) ==
          mtp_async::CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION;
+}
+
+uint32_t validate_paired_transfer_counts(uint32_t target_transferred,
+                                         uint32_t draft_transferred) {
+  if (target_transferred != draft_transferred) {
+    LOG(ERROR) << "MTP target/draft KV block transfer count mismatch: target="
+               << target_transferred << ", draft=" << draft_transferred;
+    return 0;
+  }
+  return target_transferred;
 }
 
 }  // namespace
@@ -772,6 +783,32 @@ bool MTPWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   }
 
   return target_allocated && draft_allocated;
+}
+
+uint32_t MTPWorkerImpl::transfer_kv_blocks(
+    uint64_t batch_id,
+    const std::vector<BlockTransferInfo>& block_transfer_info) {
+  CHECK(impl_ != nullptr);
+  CHECK(draft_impl_ != nullptr);
+
+  const uint32_t target_transferred =
+      impl_->transfer_kv_blocks(batch_id, block_transfer_info);
+  const uint32_t draft_transferred =
+      draft_impl_->transfer_kv_blocks(batch_id, block_transfer_info);
+  return validate_paired_transfer_counts(target_transferred, draft_transferred);
+}
+
+uint32_t MTPWorkerImpl::transfer_kv_blocks(
+    uint64_t batch_id,
+    Slice<BlockTransferInfo>& block_transfer_info) {
+  CHECK(impl_ != nullptr);
+  CHECK(draft_impl_ != nullptr);
+
+  const uint32_t target_transferred =
+      impl_->transfer_kv_blocks(batch_id, block_transfer_info);
+  const uint32_t draft_transferred =
+      draft_impl_->transfer_kv_blocks(batch_id, block_transfer_info);
+  return validate_paired_transfer_counts(target_transferred, draft_transferred);
 }
 
 #if defined(USE_NPU) || defined(USE_MLU)

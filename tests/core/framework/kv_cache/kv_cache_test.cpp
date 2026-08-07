@@ -856,6 +856,46 @@ TEST_F(HostKVCacheConfigTest, AcceptsQuantizedIndexerCache) {
   EXPECT_FALSE(validate_host_cache_options(options).has_value());
 }
 
+TEST_F(HostKVCacheConfigTest, AcceptsDisaggregatedPrefillInstance) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.enable_disagg_pd = true;
+  options.instance_role = InstanceRole::PREFILL;
+
+  EXPECT_FALSE(validate_host_cache_options(options).has_value());
+}
+
+TEST_F(HostKVCacheConfigTest, RejectsDisaggregatedDecodeInstance) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.enable_disagg_pd = true;
+  options.instance_role = InstanceRole::DECODE;
+
+  const std::optional<std::string> error = validate_host_cache_options(options);
+
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->find("PREFILL"), std::string::npos);
+}
+
+TEST_F(HostKVCacheConfigTest, RejectsDisaggregatedPrefillOocMode) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.enable_disagg_pd = true;
+  options.enable_pd_ooc = true;
+  options.instance_role = InstanceRole::PREFILL;
+
+  const std::optional<std::string> error = validate_host_cache_options(options);
+
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->find("PD-OOC"), std::string::npos);
+}
+
 TEST_F(HostKVCacheConfigTest, RejectsQuantizedKVCache) {
   HostCacheValidationOptions options;
   options.host_blocks_factor = 2.0;

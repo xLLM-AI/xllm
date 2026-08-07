@@ -33,6 +33,95 @@ namespace xllm {
 namespace {
 
 TEST(HierarchyKVCacheTransferTest,
+     RestoreRegistersReadyEventsForConfiguredLayerGroups) {
+  if (Platform::device_count() < 1) {
+    GTEST_SKIP() << "MLU device is required for hierarchy KV cache transfer.";
+  }
+
+  constexpr int64_t kBlockCount = 2;
+  constexpr int64_t kBlockSize = 4;
+  constexpr int64_t kLayerCount = 3;
+  constexpr int64_t kSourceBlockId = 0;
+  constexpr int64_t kDestinationBlockId = 1;
+  constexpr uint64_t kBatchId = 7;
+  constexpr double kHostBlocksFactor = 2.0;
+
+  Device device(/*device_index=*/0);
+  device.set_device();
+  device.init_device_context();
+
+  KVCacheCapacity capacity;
+  capacity.n_blocks(kBlockCount).block_size(kBlockSize);
+
+  ModelArgs model_args;
+  model_args.model_type("test_model")
+      .n_layers(kLayerCount)
+      .n_heads(2)
+      .n_kv_heads(1)
+      .head_dim(8);
+  const KVCacheShape cache_shape(capacity, model_args, /*world_size=*/1);
+
+  KVCacheCreateOptions create_options;
+  create_options.device(device.unwrap())
+      .dtype(torch::kFloat32)
+      .num_layers(kLayerCount)
+      .model_type("test_model");
+  std::vector<KVCache> caches;
+  allocate_kv_caches(caches, cache_shape, create_options);
+  ASSERT_EQ(caches.size(), static_cast<size_t>(kLayerCount));
+
+  for (size_t layer_idx = 0; layer_idx < caches.size(); ++layer_idx) {
+    const double layer_value = static_cast<double>(layer_idx);
+    caches[layer_idx].get_k_cache()[kSourceBlockId].fill_(3.0 + layer_value);
+    caches[layer_idx].get_v_cache()[kSourceBlockId].fill_(7.0 + layer_value);
+    caches[layer_idx].get_k_cache()[kDestinationBlockId].zero_();
+    caches[layer_idx].get_v_cache()[kDestinationBlockId].zero_();
+  }
+  ASSERT_EQ(device.synchronize_default_stream(), 0);
+
+  HierarchyKVCacheTransfer::Options transfer_options;
+  transfer_options.tp_rank(0)
+      .tp_size(1)
+      .layers(kLayerCount)
+      .host_blocks_factor(kHostBlocksFactor)
+      .layers_wise_copy_batchs(2);
+  std::unique_ptr<Stream> compute_stream = device.current_stream();
+  HierarchyKVCacheTransfer transfer(transfer_options,
+                                    device.unwrap(),
+                                    compute_stream.get(),
+                                    &caches,
+                                    cache_shape,
+                                    create_options);
+
+  BlockTransferInfo offload_info(kSourceBlockId, /*dst_block_id=*/0);
+  offload_info.block_type = BlockType::KV;
+  offload_info.transfer_type = TransferType::D2H2G;
+  EXPECT_EQ(transfer.transfer_kv_blocks(kBatchId, {offload_info}), 1U);
+
+  BlockTransferInfo load_info(/*src_block_id=*/0, kDestinationBlockId);
+  load_info.block_type = BlockType::KV;
+  load_info.transfer_type = TransferType::H2D;
+  EXPECT_EQ(transfer.transfer_kv_blocks(kBatchId, {load_info}), 1U);
+
+  ModelInputParams input_params;
+  input_params.meta.batch_id = kBatchId;
+  transfer.set_layer_synchronizer(input_params);
+  ASSERT_NE(input_params.parallel.layer_wise_load_synchronizer, nullptr);
+  EXPECT_EQ(input_params.parallel.layer_wise_load_synchronizer->size(), 3U);
+  EXPECT_EQ(input_params.parallel.layers_per_bacth_copy, 1U);
+  for (uint32_t layer_idx = 0; layer_idx < kLayerCount; ++layer_idx) {
+    ASSERT_TRUE(input_params.synchronize_layer(layer_idx));
+  }
+
+  for (KVCache& cache : caches) {
+    EXPECT_TRUE(torch::equal(cache.get_k_cache()[kSourceBlockId],
+                             cache.get_k_cache()[kDestinationBlockId]));
+    EXPECT_TRUE(torch::equal(cache.get_v_cache()[kSourceBlockId],
+                             cache.get_v_cache()[kDestinationBlockId]));
+  }
+}
+
+TEST(HierarchyKVCacheTransferTest,
      QuantizedIndexerRoundTripRestoresIndexAndScale) {
   if (Platform::device_count() < 1) {
     GTEST_SKIP() << "MLU device is required for hierarchy KV cache transfer.";
