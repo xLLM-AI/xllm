@@ -144,8 +144,26 @@ torch::Tensor selected_probs_by_step(
   int64_t batch_size = -1;
   for (const ForwardOutput& draft_output : draft_outputs) {
     torch::Tensor probs = draft_output.sample_output.probs;
-    CHECK(probs.defined())
-        << "adaptive pruning requires selected draft probabilities";
+    if (!probs.defined()) {
+      // Fallback: compute selected probs from logits+next_tokens on the fly.
+      // This bypasses the sampler's greedy fast-path which skips probs
+      // assignment. Avoids triggering model-side kernel paths (e.g. Qwen3.5
+      // CausalConv1d) that a sampler-side return_probs=true would touch.
+      const torch::Tensor& logits = draft_output.logits;
+      const torch::Tensor& next_tokens = draft_output.sample_output.next_tokens;
+      CHECK(logits.defined() && next_tokens.defined())
+          << "adaptive pruning fallback needs draft logits and next_tokens";
+      CHECK_EQ(logits.dim(), 2)
+          << "adaptive pruning expects draft logits [batch,vocab], got "
+          << logits.sizes();
+      torch::Tensor softmaxed =
+          torch::softmax(logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
+      probs =
+          softmaxed
+              .gather(/*dim=*/-1, next_tokens.view({-1, 1}).to(torch::kLong))
+              .squeeze(/*dim=*/-1)
+              .to(logits.dtype());
+    }
     CHECK(probs.dim() == 1 || probs.dim() == 2)
         << "adaptive pruning expects draft probs [batch] or [batch,1], got "
         << probs.sizes();
@@ -172,7 +190,13 @@ bool has_selected_probs_by_step(
   }
   for (const ForwardOutput& draft_output : draft_outputs) {
     const torch::Tensor& probs = draft_output.sample_output.probs;
-    if (!probs.defined()) {
+    if (probs.defined()) {
+      continue;  // ok
+    }
+    // Fallback: selected_probs_by_step will compute from logits+next_tokens.
+    const torch::Tensor& logits = draft_output.logits;
+    const torch::Tensor& next_tokens = draft_output.sample_output.next_tokens;
+    if (!logits.defined() || !next_tokens.defined()) {
       return false;
     }
   }

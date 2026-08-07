@@ -1444,6 +1444,8 @@ void MTPWorkerImpl::fill_validate_input_from_draft_outputs(
     Stream& compute_stream) {
   CHECK(!per_seq_val_tokens.empty()) << "per_seq_val_tokens must not be empty";
   const int32_t num_sequences = static_cast<int32_t>(per_seq_val_tokens.size());
+  const int32_t max_val_tokens =
+      *std::max_element(per_seq_val_tokens.begin(), per_seq_val_tokens.end());
   CHECK(validate_input.token_ids.defined())
       << "validate token_ids must be prepared before draft token fill";
   CHECK_EQ(validate_input.token_ids.dim(), 1)
@@ -1463,7 +1465,7 @@ void MTPWorkerImpl::fill_validate_input_from_draft_outputs(
       validate_input.input_params.graph.input_tokens_override.defined() &&
       supports_explicit_spec_verify_replay_update() &&
       kernel::npu::tilelang::has_spec_verify_graph_update_specialization(
-          num_val_tokens, options_.block_size());
+          max_val_tokens, options_.block_size());
   if (use_fused_verify_token_update) {
     fused_draft_tokens.reserve(draft_outputs.size());
     for (const ForwardOutput& draft_output : draft_outputs) {
@@ -1481,8 +1483,6 @@ void MTPWorkerImpl::fill_validate_input_from_draft_outputs(
   }
 #endif
 
-  const int32_t max_val_tokens =
-      *std::max_element(per_seq_val_tokens.begin(), per_seq_val_tokens.end());
   const int32_t total_val_tokens =
       static_cast<int32_t>(validate_input.token_ids.numel());
   const bool is_uniform = (total_val_tokens == num_sequences * max_val_tokens);
@@ -1508,8 +1508,9 @@ void MTPWorkerImpl::fill_validate_input_from_draft_outputs(
     // Slow path: per-seq variable-length, group by draft step.
     std::vector<int64_t> dst_idx_vec;
     std::vector<int64_t> src_idx_vec;
-    std::vector<int32_t> step_vec;
+    std::vector<int64_t> step_vec;
     int32_t offset = 0;
+    int32_t max_draft_step = -1;
     for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
       const int32_t seq_val_tokens =
           per_seq_val_tokens[static_cast<size_t>(seq_id)];
@@ -1518,13 +1519,32 @@ void MTPWorkerImpl::fill_validate_input_from_draft_outputs(
         dst_idx_vec.push_back(offset + draft_idx + 1);
         src_idx_vec.push_back(seq_id);
         step_vec.push_back(draft_idx);
+        max_draft_step = std::max(max_draft_step, draft_idx);
       }
       offset += seq_val_tokens;
     }
 
     if (!dst_idx_vec.empty()) {
-      const int32_t max_draft_step =
-          *std::max_element(step_vec.begin(), step_vec.end());
+      // Move all indices to device once (instead of a per-step H2D copy) and
+      // select each step's entries on-device via a boolean mask.
+      const torch::TensorOptions long_dev_opts =
+          torch::TensorOptions()
+              .dtype(torch::kLong)
+              .device(validate_input.token_ids.device());
+      torch::Tensor dst_idx_all =
+          safe_to(torch::tensor(dst_idx_vec,
+                                torch::TensorOptions().dtype(torch::kLong)),
+                  long_dev_opts,
+                  /*non_blocking=*/true);
+      torch::Tensor src_idx_all =
+          safe_to(torch::tensor(src_idx_vec,
+                                torch::TensorOptions().dtype(torch::kLong)),
+                  long_dev_opts,
+                  /*non_blocking=*/true);
+      torch::Tensor step_all = safe_to(
+          torch::tensor(step_vec, torch::TensorOptions().dtype(torch::kLong)),
+          long_dev_opts,
+          /*non_blocking=*/true);
       for (int32_t step = 0; step <= max_draft_step; ++step) {
         CHECK(static_cast<size_t>(step) < draft_outputs.size())
             << "draft_outputs index out of range for step " << step;
@@ -1535,29 +1555,14 @@ void MTPWorkerImpl::fill_validate_input_from_draft_outputs(
         torch::Tensor flat_tokens = safe_to(
             next_tokens.flatten(), token_options, /*non_blocking=*/true);
 
-        std::vector<int64_t> step_dst_indices;
-        std::vector<int64_t> step_src_indices;
-        for (size_t k = 0; k < step_vec.size(); ++k) {
-          if (step_vec[k] == step) {
-            step_dst_indices.push_back(dst_idx_vec[k]);
-            step_src_indices.push_back(src_idx_vec[k]);
-          }
-        }
-        if (step_dst_indices.empty()) {
+        torch::Tensor step_mask = step_all.eq(step);
+        torch::Tensor step_dst = dst_idx_all.masked_select(step_mask);
+        if (step_dst.numel() == 0) {
           continue;
         }
-        torch::Tensor dst_idx =
-            torch::tensor(step_dst_indices,
-                          torch::TensorOptions()
-                              .dtype(torch::kLong)
-                              .device(validate_input.token_ids.device()));
-        torch::Tensor src_idx =
-            torch::tensor(step_src_indices,
-                          torch::TensorOptions()
-                              .dtype(torch::kLong)
-                              .device(flat_tokens.device()));
-        torch::Tensor gathered = flat_tokens.index_select(/*dim=*/0, src_idx);
-        validate_input.token_ids.index_copy_(/*dim=*/0, dst_idx, gathered);
+        torch::Tensor step_src = src_idx_all.masked_select(step_mask);
+        torch::Tensor gathered = flat_tokens.index_select(/*dim=*/0, step_src);
+        validate_input.token_ids.index_copy_(/*dim=*/0, step_dst, gathered);
       }
     }
   }
@@ -1588,7 +1593,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_adaptive_validate(
   // The per-rank measured draft latency is NOT deterministic, so pruning is
   // driven purely by validate-time marginal cost (full_draft_time_ms = 0).
   std::vector<int32_t> prefix_lengths;
-  if (has_selected_probs_by_step(draft_outputs)) {
+  const bool has_probs = has_selected_probs_by_step(draft_outputs);
+  if (has_probs) {
     prefix_lengths = adaptive_spec_controller_->select_pruned_prefix_lengths(
         selected_probs_by_step(draft_outputs),
         /*full_draft_time_ms=*/0.0,
@@ -1605,20 +1611,65 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_adaptive_validate(
     effective_speculative_tokens = 1;
   }
 
+  // The Qwen3.5 GDN CausalConv1d kernel produces aivec errors when the
+  // per-seq validate segment length is smaller than num_accepted_tokens
+  // (the previous step's accepted count). The tiling validation would
+  // reject nat > lenI, but the underlying kernel itself is fragile at
+  // those boundaries. Floor effective_speculative_tokens by the batch's
+  // max num_accepted so uniform_val_tokens >= max(nat) + 1. Read from
+  // embedding_cache directly since input.num_accepted_tokens_host is
+  // populated by prepare_validate_inputs which hasn't run yet here.
+  if (supports_explicit_spec_verify_replay_update() &&
+      embedding_cache_ != nullptr &&
+      !input.input_params.embedding.embedding_ids.empty()) {
+    std::vector<int32_t> nat = embedding_cache_->read_accepted_prefix_lengths(
+        input.input_params.embedding.embedding_ids,
+        input.input_params.embedding.request_ids);
+    constexpr int32_t kGdnConvHistoryCap = 3;
+    int32_t max_nat = 0;
+    for (int32_t v : nat) {
+      max_nat = std::max(max_nat, std::min(v, kGdnConvHistoryCap));
+    }
+    effective_speculative_tokens =
+        std::max(effective_speculative_tokens, max_nat);
+    effective_speculative_tokens =
+        std::min(effective_speculative_tokens, num_speculative_tokens);
+  }
+
   std::vector<int32_t> per_seq_val_tokens(static_cast<size_t>(batch_size));
+  // Qwen3.5 GatedDeltaNet spec-verify path requires dense same-length validate
+  // tokens across sequences (see qwen3_gated_delta_net_base.cpp:405-408). On
+  // Qwen3.5 we still take the batch-max pruning benefit (effective_sl < max_sl
+  // when the controller decides to shrink), but every seq gets the same
+  // validate width. On non-Qwen3.5 models we keep per-seq variable-length
+  // tokens for maximum pruning benefit.
+  const bool require_uniform_val_tokens =
+      supports_explicit_spec_verify_replay_update();
+  const int32_t uniform_val_tokens = effective_speculative_tokens + 1;
   for (int32_t i = 0; i < batch_size; ++i) {
     per_seq_val_tokens[static_cast<size_t>(i)] =
-        std::max(prefix_lengths[static_cast<size_t>(i)], 1) + 1;
+        require_uniform_val_tokens
+            ? uniform_val_tokens
+            : std::max(prefix_lengths[static_cast<size_t>(i)], 1) + 1;
   }
   std::vector<ForwardOutput> pruned_draft_outputs =
       truncate_draft_outputs(draft_outputs, effective_speculative_tokens);
+  // If the controller did not actually prune any sequence, treat this as the
+  // static path: pass nullptr so run_validate takes the async handoff tail
+  // and skips the no-op pruned post-processing.
+  const bool has_actual_prune =
+      std::any_of(prefix_lengths.begin(),
+                  prefix_lengths.end(),
+                  [num_speculative_tokens](int32_t p) {
+                    return p < num_speculative_tokens;
+                  });
   prepare_validate_inputs(input, validate_input, per_seq_val_tokens);
   return run_validate(input,
                       pruned_draft_outputs,
                       validate_input,
                       effective_speculative_tokens,
                       per_seq_val_tokens,
-                      &prefix_lengths);
+                      has_actual_prune ? &prefix_lengths : nullptr);
 }
 
 std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
@@ -1751,8 +1802,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
     // Use the synchronous tail: unify tokens, then write target context inline.
     if (get_optimization_config().enable_spec_token_broadcast) {
       c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-      broadcast_spec_tokens(val_output.next_tokens,
-                            spec_broadcast_group(parallel_args_));
+      broadcast_spec_tokens(val_output.next_tokens, parallel_args_);
     }
 
     const int32_t ret = compute_stream_->synchronize();
@@ -2328,7 +2378,7 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
   torch::TensorOptions position_options = validate_input.positions.options();
 
   const int32_t num_sequences = input_params.meta.num_sequences;
-  const int32_t num_val_tokens = num_speculative_tokens + 1;
+  const int32_t num_val_tokens = options_.num_speculative_tokens() + 1;
   const int32_t total_num_val_tokens = num_sequences * num_val_tokens;
   const int32_t block_size = options_.block_size();
 #if defined(USE_NPU)
@@ -2385,7 +2435,8 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
     }
 
     if (use_atb_spec_kernel) {
-      const int32_t kv_len_after_validation = kv_len + num_speculative_tokens;
+      const int32_t kv_len_after_validation =
+          kv_len + options_.num_speculative_tokens();
       specBuilder::update_kv_seq_lens_and_max(
           atb_kv_seq_lens_vec, kv_len_after_validation, atb_kv_max_seq_len);
       specBuilder::append_q_seq_len(
@@ -2506,6 +2557,17 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
       accepted_prefix_lengths = embedding_cache_->read_accepted_prefix_lengths(
           input.input_params.embedding.embedding_ids,
           input.input_params.embedding.request_ids);
+    }
+    // Clamp num_accepted_tokens to Qwen3.5 GDN conv_state history capacity
+    // (kernel_conv_size - 1 = 3). Larger values describe history that has
+    // already rolled out of conv_state; passing them to aclnnCausalConv1d
+    // makes tiling fail when the current step's per_seq_val_tokens is small
+    // (e.g. adaptive prunes down to 2 while nat=5).
+    if (supports_explicit_spec_verify_replay_update()) {
+      constexpr int32_t kGdnConvHistoryCap = 3;
+      for (int32_t& v : accepted_prefix_lengths) {
+        v = std::min(v, kGdnConvHistoryCap);
+      }
     }
     input_params.num_accepted_tokens_host.assign(
         accepted_prefix_lengths.begin(), accepted_prefix_lengths.end());
@@ -2812,7 +2874,48 @@ void MTPWorkerImpl::prepare_validate_inputs(
     token_num = total_num_val_tokens;
   }
 
+  if (use_chunked_prefill_spec_verify_path()) {
+    input_params.embedding.input_embedding = torch::Tensor();
+    input_params.is_spec_verify = true;
+    if (!input_params.attention.host.q_seq_lens.empty()) {
+      std::vector<int32_t> q_cu_seq_lens_vec;
+      q_cu_seq_lens_vec.reserve(num_sequences + 1);
+      q_cu_seq_lens_vec.emplace_back(0);
+      for (int32_t q_len : input_params.attention.host.q_seq_lens) {
+        q_cu_seq_lens_vec.emplace_back(q_cu_seq_lens_vec.back() + q_len);
+      }
+      input_params.attention.host.q_cu_seq_lens = std::move(q_cu_seq_lens_vec);
+    }
+    std::vector<int32_t> accepted_prefix_lengths(num_sequences, 1);
+    if (embedding_cache_ != nullptr &&
+        !input.input_params.embedding.embedding_ids.empty()) {
+      accepted_prefix_lengths = embedding_cache_->read_accepted_prefix_lengths(
+          input.input_params.embedding.embedding_ids,
+          input.input_params.embedding.request_ids);
+    }
+    // Clamp num_accepted_tokens to Qwen3.5 GDN conv_state history capacity
+    // (kernel_conv_size - 1 = 3). Larger values describe history that has
+    // already rolled out of conv_state; passing them to aclnnCausalConv1d
+    // makes tiling fail when the current step's per_seq_val_tokens is small
+    // (e.g. adaptive prunes down to 2 while nat=5).
+    if (supports_explicit_spec_verify_replay_update()) {
+      constexpr int32_t kGdnConvHistoryCap = 3;
+      for (int32_t& v : accepted_prefix_lengths) {
+        v = std::min(v, kGdnConvHistoryCap);
+      }
+    }
+    input_params.num_accepted_tokens =
+        torch::tensor(accepted_prefix_lengths, token_options);
+    input_params.num_accepted_tokens_host.assign(
+        accepted_prefix_lengths.begin(), accepted_prefix_lengths.end());
+  }
+
   input_params.attention.rebuild_device_buffer(device_);
+#if defined(USE_NPU)
+  if (supports_explicit_spec_verify_replay_update()) {
+    build_expanded_spec_verify_graph_input(input_params, device_);
+  }
+#endif
   validate_input.device_tensors_ready = true;
   finish_metadata_prepare(*prepare_stream_, validate_input);
 }
@@ -2830,8 +2933,14 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
     prepare_stream_->wait_stream(*compute_stream_);
   }
   extend_input = base_input;
+  // Adaptive pruning needs draft selected-probs; force return_probs on so the
+  // sampler's greedy fast-path doesn't skip probs assignment. Skip Qwen3.5:
+  // its SSM (CausalConv1d) path fails when return_probs changes sampler
+  // routing; on Qwen3.5 the controller falls back to computing probs from
+  // logits (see adaptive_pruning_helpers.cpp).
   extend_input.sampling_params.return_probs =
-      !extend_input.sampling_params.all_greedy_sample;
+      !extend_input.sampling_params.all_greedy_sample ||
+      (adaptive_enabled() && !supports_explicit_spec_verify_replay_update());
   clear_ready_events(extend_input);
   extend_input.device_tensors_ready = false;
   auto& input_params = extend_input.input_params;
@@ -3068,8 +3177,14 @@ void MTPWorkerImpl::prepare_draft_inputs(const ForwardInput& input,
                                          int32_t position_offset) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   draft_input = input;
+  // Adaptive pruning needs draft selected-probs; force return_probs on so the
+  // sampler's greedy fast-path doesn't skip probs assignment. Skip Qwen3.5:
+  // its SSM (CausalConv1d) path fails when return_probs changes sampler
+  // routing; on Qwen3.5 the controller falls back to computing probs from
+  // logits (see adaptive_pruning_helpers.cpp).
   draft_input.sampling_params.return_probs =
-      !draft_input.sampling_params.all_greedy_sample;
+      !draft_input.sampling_params.all_greedy_sample ||
+      (adaptive_enabled() && !supports_explicit_spec_verify_replay_update());
   clear_ready_events(draft_input);
   draft_input.device_tensors_ready = false;
 
@@ -3184,11 +3299,8 @@ SampleOutput MTPWorkerImpl::validate(
           .index({"...", ISlice(num_val_tokens - 1, None, num_val_tokens)})
           .view({-1, 1});
 
-  // Greedy fast-path: skip full rejection sampling when all sequences are
-  // greedy and no logprobs needed. Disabled when adaptive pruning is active
-  // since pruning requires the full rejection sampling output format.
-  if (sampling_params.all_greedy_sample && !target_output.logprobs &&
-      pruned_prefix_lengths == nullptr) {
+  SampleOutput sample_output;
+  if (sampling_params.all_greedy_sample && !target_output.logprobs) {
     torch::Tensor target_token_ids =
         target_output.sample_output.next_tokens.view(
             {batch_size, num_val_tokens});
@@ -3202,39 +3314,38 @@ SampleOutput MTPWorkerImpl::validate(
             /*mask_out_rejected_tokens=*/true);
     (void)accepted_token_ids;
 
-    SampleOutput sample_output;
     sample_output.next_tokens = masked_accepted_token_ids;
     torch::Tensor embeddings = target_output.sample_output.embeddings;
     sample_output.embeddings =
         embeddings.view({batch_size, num_val_tokens, embeddings.size(-1)});
-    return sample_output;
+  } else {
+    torch::Tensor target_logits =
+        target_output.logits.view({batch_size, num_val_tokens, vocab_size});
+
+    // prepare input for rejection sampling
+    std::unique_ptr<RejectionSampler> rejection_sampler =
+        std::make_unique<RejectionSampler>(sampling_params.do_sample,
+                                           sampling_params.all_random_sample,
+                                           sampling_params.all_greedy_sample,
+                                           target_output.logprobs,
+                                           target_output.max_top_logprobs,
+                                           enable_fused_kernel_);
+
+    // get the accepted tokens
+    sample_output = rejection_sampler->forward(
+        draft_token_ids.to(bonus_token_ids),
+        draft_probs.defined() ? draft_probs.to(target_logits.device())
+                              : torch::Tensor(),
+        target_logits,
+        bonus_token_ids,
+        /*mask_out_rejected_tokens=*/true);
+
+    // process embedding
+    torch::Tensor embeddings = target_output.sample_output.embeddings;
+    sample_output.embeddings =
+        embeddings.view({batch_size, num_val_tokens, embeddings.size(-1)});
   }
 
-  torch::Tensor target_logits =
-      target_output.logits.view({batch_size, num_val_tokens, vocab_size});
-
-  // prepare input for rejection sampling
-  std::unique_ptr<RejectionSampler> rejection_sampler =
-      std::make_unique<RejectionSampler>(sampling_params.do_sample,
-                                         sampling_params.all_random_sample,
-                                         sampling_params.all_greedy_sample,
-                                         target_output.logprobs,
-                                         target_output.max_top_logprobs,
-                                         enable_fused_kernel_);
-
-  // get the accepted tokens
-  SampleOutput sample_output = rejection_sampler->forward(
-      draft_token_ids.to(bonus_token_ids),
-      draft_probs.defined() ? draft_probs.to(target_logits.device())
-                            : torch::Tensor(),
-      target_logits,
-      bonus_token_ids,
-      /*mask_out_rejected_tokens=*/true);
-
-  // process embedding
-  torch::Tensor embeddings = target_output.sample_output.embeddings;
-  sample_output.embeddings =
-      embeddings.view({batch_size, num_val_tokens, embeddings.size(-1)});
   if (pruned_prefix_lengths != nullptr) {
     sync_pruned_boundary_outputs(sample_output,
                                  target_output,
