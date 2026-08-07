@@ -404,6 +404,13 @@ class DecodeAclGraphRunner(BaseRunner):
                     (batch_size,), 2, dtype=torch.int32, device="cpu"
                 ),
                 kv_seq_lens_host_values=[2] * batch_size,
+                # _decode_metadata (added by the expanded-decode path) reads the
+                # device kv_seq_lens directly; the warmup must provide one so the
+                # graph captures. The value is a dummy -- at replay the real
+                # metadata's kv_seq_lens is copied over the static buffer.
+                kv_seq_lens=torch.full(
+                    (batch_size,), 2, dtype=torch.int32, device=device
+                ),
                 kv_cu_seq_lens=torch.arange(
                     batch_size + 1, dtype=torch.int32, device=device
                 ).mul_(2),

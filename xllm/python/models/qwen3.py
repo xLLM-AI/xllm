@@ -169,23 +169,59 @@ class Qwen3Attention(nn.Module):
         cos_sin_cache: torch.Tensor,
         cos: torch.Tensor | None,
         sin: torch.Tensor | None,
+        mrope_section: Optional[List[int]] = None,
     ) -> torch.Tensor:
         qkv = self.qkv_proj(hidden)
 
-        q, k, v = kernels.fused_qk_norm_rope(
-            qkv,
-            num_heads_q=self.num_heads,
-            num_heads_k=self.num_kv_heads,
-            num_heads_v=self.num_kv_heads,
-            head_dim=self.head_dim,
-            eps=self.q_norm.eps,
-            q_weight=self.q_norm.weight,
-            k_weight=self.k_norm.weight,
-            cos_sin_cache=cos_sin_cache,
-            position_ids=positions,
-            cos=cos,
-            sin=sin,
-        )
+        if mrope_section is not None and positions.dim() == 2:
+            # mRoPE prefill: per-head Q/K RMSNorm (same math as the fused
+            # kernel) then torch_npu.npu_mrope, which does the
+            # time/height/width section combination + rotation in one op.
+            # cos_sin_cache here is the [max_pos, head_dim]=[cos_half|sin_half]
+            # table; q/k stay 2D [N, num_heads*head_dim] as npu_mrope requires.
+            import torch_npu
+
+            num_tokens = qkv.size(0)
+            q = torch.ops.xllm_ops.rms_norm(
+                qkv[:, : self.q_size].reshape(
+                    num_tokens * self.num_heads, self.head_dim
+                ),
+                self.q_norm.weight,
+                self.q_norm.eps,
+            ).view(num_tokens, self.q_size)
+            k = torch.ops.xllm_ops.rms_norm(
+                qkv[:, self.q_size : self.q_size + self.kv_size].reshape(
+                    num_tokens * self.num_kv_heads, self.head_dim
+                ),
+                self.k_norm.weight,
+                self.k_norm.eps,
+            ).view(num_tokens, self.kv_size)
+            v = qkv[:, self.q_size + self.kv_size :]
+            q, k = torch_npu.npu_mrope(
+                positions.to(torch.int64),
+                q,
+                k,
+                cos_sin_cache,
+                self.head_dim,
+                mrope_section=list(mrope_section),
+                rotary_mode="half",
+                cache_mode="interleave",
+            )
+        else:
+            q, k, v = kernels.fused_qk_norm_rope(
+                qkv,
+                num_heads_q=self.num_heads,
+                num_heads_k=self.num_kv_heads,
+                num_heads_v=self.num_kv_heads,
+                head_dim=self.head_dim,
+                eps=self.q_norm.eps,
+                q_weight=self.q_norm.weight,
+                k_weight=self.k_norm.weight,
+                cos_sin_cache=cos_sin_cache,
+                position_ids=positions,
+                cos=cos,
+                sin=sin,
+            )
 
         attn_out = self.attn(q, k, v)
         return self.o_proj(attn_out)
@@ -224,6 +260,7 @@ class Qwen3DecoderLayer(nn.Module):
         cos_sin_cache: torch.Tensor,
         cos: torch.Tensor | None,
         sin: torch.Tensor | None,
+        mrope_section: Optional[List[int]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden
@@ -232,7 +269,7 @@ class Qwen3DecoderLayer(nn.Module):
             hidden, residual = self.input_layernorm(hidden, residual)
 
         hidden = self.self_attn(
-            positions, hidden, cos_sin_cache, cos, sin
+            positions, hidden, cos_sin_cache, cos, sin, mrope_section
         )
 
         hidden, residual = self.post_attention_layernorm(hidden, residual)
@@ -271,6 +308,7 @@ class Qwen3Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        mrope_section: Optional[List[int]] = None,
     ) -> torch.Tensor:
         hidden = self.embed_tokens(input_ids)
         # The fused QK-norm+RoPE kernel requires int64 position ids, but C++
@@ -282,7 +320,13 @@ class Qwen3Model(nn.Module):
         residual: Optional[torch.Tensor] = None
         for i, layer in enumerate(self.layers):
             hidden, residual = layer(
-                hidden, residual, positions, self.rotary.cos_sin_cache, None, None
+                hidden,
+                residual,
+                positions,
+                self.rotary.cos_sin_cache,
+                None,
+                None,
+                mrope_section,
             )
             record_layer_event(i)
         hidden, _ = self.norm(hidden, residual)

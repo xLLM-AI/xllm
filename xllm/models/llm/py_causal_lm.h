@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <glog/logging.h>
 #include <pybind11/pybind11.h>
 #include <torch/torch.h>
 
@@ -22,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model/causal_lm.h"
+#include "core/framework/model/causal_vlm.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model_context.h"
 
@@ -34,7 +36,12 @@ void share_python_model_weights(pybind11::object& draft_model,
                                 const pybind11::object& target_model);
 }  // namespace detail
 
-class __attribute__((visibility("hidden"))) PyCausalLM : public CausalLM {
+// Inherits CausalVLM so that ``--backend vlm --model_impl python`` can route a
+// Python VLM (e.g. Qwen3-VL) through the VLM engine while PyExecutorImpl drives
+// it. The CausalVLM ``encode`` / ``get_input_embeddings`` virtuals are stubbed:
+// in the Python path, PyExecutorImpl::run calls the Python model's own
+// encode/get_input_embeddings via pybind (they are never reached here).
+class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
  public:
   explicit PyCausalLM(const ModelContext& context);
   ~PyCausalLM() override;
@@ -43,6 +50,20 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalLM {
                       const torch::Tensor& positions,
                       std::vector<KVCache>& kv_caches,
                       const ModelInputParams& parameters) override;
+
+  MMDict encode(const ModelInputParams& parameters) override {
+    LOG(FATAL) << "PyCausalLM::encode must not be called directly; "
+               << "PyExecutorImpl drives the Python model's encode via pybind.";
+    return MMDict{};
+  }
+
+  torch::Tensor get_input_embeddings(
+      const torch::Tensor& input_ids,
+      const ModelInputParams& input_params) override {
+    LOG(FATAL) << "PyCausalLM::get_input_embeddings must not be called "
+               << "directly; PyExecutorImpl drives it via pybind.";
+    return torch::Tensor();
+  }
 
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) override;

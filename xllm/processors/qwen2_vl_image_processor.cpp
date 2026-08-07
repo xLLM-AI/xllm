@@ -15,9 +15,95 @@ limitations under the License.
 
 #include "processors/qwen2_vl_image_processor.h"
 
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+#include <torch/extension.h>  // registers the torch::Tensor pybind caster
+// (without it, passing torch::Tensor / vector<Tensor>
+//  to Python compiles but fails at runtime:
+//  "Unable to convert call argument to Python object")
+
+#include <string>
+#include <vector>
+
+#include "core/framework/config/model_config.h"
 #include "processors/transforms.h"
 
+namespace py = pybind11;
+
 namespace xllm {
+
+namespace {
+
+// Delegates image preprocessing to Python (HF AutoImageProcessor via
+// pybind.multimodal.preprocess_tensors) for the Python model-executor path,
+// so no per-model C++ image processor is needed. Mirrors the GIL/import
+// pattern in processors/pywarpper_input_processor.cpp. Lazily initialized on
+// first use (under the GIL acquired by run()).
+class PyImagePreprocess final {
+ public:
+  static PyImagePreprocess& instance() {
+    static PyImagePreprocess ins;
+    return ins;
+  }
+
+  bool run(const std::vector<torch::Tensor>& images,
+           std::vector<MMDataItem>& output_items) {
+    py::gil_scoped_acquire gil;
+    try {
+      // Pass the vector directly: pybind11 (pybind11/stl.h) converts
+      // std::vector<torch::Tensor> to a Python list at the call site. (Avoids
+      // both the null-handle default py::list pitfall and an explicit cast.)
+      py::dict res = preprocess_fn_(images, model_path_);
+      // HF returns batched tensors: pixel_values [total_patches, dim],
+      // image_grid_thw [num_images, 3]. Split per image to match the C++
+      // ImageProcessor contract (one MMDataItem per input image).
+      torch::Tensor pixel_values = py::cast<torch::Tensor>(res["pixel_values"]);
+      torch::Tensor grid_thw = py::cast<torch::Tensor>(res["image_grid_thw"]);
+      torch::Tensor grid = grid_thw.cpu().to(torch::kLong);
+      output_items.clear();
+      output_items.reserve(grid.size(0));
+      int64_t offset = 0;
+      for (int64_t i = 0; i < grid.size(0); ++i) {
+        int64_t gt = grid[i][0].item<int64_t>();
+        int64_t gh = grid[i][1].item<int64_t>();
+        int64_t gw = grid[i][2].item<int64_t>();
+        int64_t n = gt * gh * gw;
+        torch::Tensor pv_i =
+            pixel_values.slice(0, offset, offset + n).contiguous();
+        torch::Tensor thw_i = grid_thw[i].unsqueeze(0).contiguous();
+        output_items.emplace_back(
+            MMType::IMAGE,
+            MMDict{{"pixel_values", pv_i}, {"image_grid_thw", thw_i}});
+        offset += n;
+      }
+      return true;
+    } catch (py::error_already_set& e) {
+      LOG(ERROR) << "Python image preprocess failed: " << e.what();
+      return false;
+    } catch (std::exception& e) {
+      LOG(ERROR) << "Python image preprocess failed: " << e.what();
+      return false;
+    }
+  }
+
+ private:
+  PyImagePreprocess() {
+    // The constructor runs during the lazy singleton init (called from
+    // process(), outside any GIL scope) — importing a Python module touches
+    // the CPython C API, so the GIL MUST be held here (otherwise segfault).
+    py::gil_scoped_acquire gil;
+    model_path_ = ::xllm::ModelConfig::get_instance().model();
+    // node0 (master+worker) has already imported the `xllm` package via the
+    // Python model, so this submodule import is cheap and safe here.
+    py::module_ mm = py::module_::import("xllm.pybind.multimodal");
+    preprocess_fn_ = mm.attr("preprocess_tensors");
+  }
+
+  std::string model_path_;
+  py::object preprocess_fn_;
+};
+
+}  // namespace
 
 namespace {
 
@@ -171,6 +257,14 @@ bool Qwen2VLImageProcessor::process_image(
 bool Qwen2VLImageProcessor::process(
     const std::vector<torch::Tensor>& images,
     std::vector<MMDataItem>& output_items) const {
+  // Python model executor: delegate image preprocessing to Python (HF
+  // AutoImageProcessor). model_impl=python => no per-model C++ image
+  // processor; the Python model's encode() consumes the HF output directly.
+  if (::xllm::ModelConfig::is_python_model_impl(
+          ::xllm::ModelConfig::get_instance().model_impl())) {
+    return PyImagePreprocess::instance().run(images, output_items);
+  }
+
   std::vector<torch::Tensor> pixel_values;
   std::vector<torch::Tensor> thw;
   if (!process_image(images, pixel_values, thw)) {

@@ -76,7 +76,7 @@ def try_cat_feature(item):
     return torch.cat(lst)
 
 def preprocess(lst: List[str], model: str) -> Dict[str, Any]:
-    
+
     images = [Image.open(BytesIO(item)) for item in lst]
     image_processor = __cache_image_processor(model, trust_remote_code=True)
 
@@ -84,3 +84,23 @@ def preprocess(lst: List[str], model: str) -> Dict[str, Any]:
     return { key: try_cat_feature(val)
             for key, val in data.items()
             }
+
+def preprocess_tensors(tensors, model: str) -> Dict[str, Any]:
+    """Preprocess already-decoded images (uint8 [C,H,W] RGB torch tensors).
+
+    Used by the Python model-executor online path: the C++ side decodes
+    image_url -> uint8 [C,H,W] tensor (OpenCV), and delegates the actual
+    preprocessing (smart_resize / normalize / patchify) here to the HF
+    AutoImageProcessor, so no per-model C++ image processor is needed.
+    """
+    import numpy as np
+    images = []
+    for t in tensors:
+        arr = t.permute(1, 2, 0).contiguous().numpy()  # [H, W, C] RGB
+        if arr.dtype != np.uint8:
+            arr = arr.astype(np.uint8)
+        images.append(Image.fromarray(arr, mode="RGB"))
+    image_processor = __cache_image_processor(model, trust_remote_code=True)
+
+    data = image_processor.preprocess(images, return_tensors="pt").data
+    return {key: try_cat_feature(val) for key, val in data.items()}
