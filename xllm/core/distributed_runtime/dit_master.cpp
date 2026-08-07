@@ -99,7 +99,10 @@ void DiTMaster::handle_request(DiTRequestParams params,
     auto request = std::make_shared<DiTRequest>(params.request_id,
                                                 params.x_request_id,
                                                 params.x_request_time,
-                                                std::move(dit_state));
+                                                std::move(dit_state),
+                                                /*service_request_id=*/"",
+                                                /*source_xservice_addr=*/"",
+                                                get_rate_limiter());
 
     if (!scheduler_->add_request(request)) {
       CALLBACK_WITH_ERROR(StatusCode::RESOURCE_EXHAUSTED,

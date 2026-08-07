@@ -132,12 +132,16 @@ std::shared_ptr<Request> DisaggPDServiceImpl::generate_request(
                          batch_output_callback);
   req_state.include_stop_str_in_output = req.include_stop_str_in_output();
 
+  // Decode-side forwarded requests: their concurrency slot lives on the
+  // originating prefill instance's RateLimiter, not this one. Pass nullptr
+  // so the destructor does not decrement an unrelated counter.
   auto new_request = std::make_shared<Request>(req.req_id(),
                                                req.x_request_id(),
                                                req.x_request_time(),
                                                std::move(req_state),
                                                req.service_req_id(),
-                                               req.source_xservice_addr());
+                                               req.source_xservice_addr(),
+                                               /*rate_limiter=*/nullptr);
 
   // add one sequence, rest will be added by scheduler
   return new_request;

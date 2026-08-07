@@ -33,6 +33,8 @@ limitations under the License.
 
 namespace xllm {
 
+class RateLimiter;
+
 enum class Urgency { STARVED = 2, URGENT = 1, NORMAL = 0 };
 
 class Request : public RequestBase {
@@ -42,7 +44,20 @@ class Request : public RequestBase {
           const std::string& x_request_time,
           const RequestState& state,
           const std::string& service_request_id = "",
-          const std::string& source_xservice_addr = "");
+          const std::string& source_xservice_addr = "",
+          RateLimiter* rate_limiter = nullptr);
+
+  ~Request();
+
+  Request(const Request&) = delete;
+  Request& operator=(const Request&) = delete;
+  Request(Request&&) = delete;
+  Request& operator=(Request&&) = delete;
+
+  // Release the rate-limit slot before destruction. Used when a request
+  // leaves the local instance's concurrency budget early (e.g. finished on
+  // prefill instance under disaggregated PD serving). Idempotent.
+  void release_rate_limit_slot();
 
   bool finished() const;
 
@@ -181,6 +196,11 @@ class Request : public RequestBase {
   bool starved_ = false;
 
   size_t num_prefix_cache_tokens_ = 0;
+
+  // Non-owning; nullptr for profile/warmup requests that don't count against
+  // the concurrency budget. Set to nullptr by release_rate_limit_slot() once
+  // the slot has been released.
+  RateLimiter* rate_limiter_ = nullptr;
 
   void create_sequences_group();
 };

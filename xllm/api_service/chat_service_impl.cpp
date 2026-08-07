@@ -517,7 +517,7 @@ void ChatServiceImpl::process_rec_chat_request(std::shared_ptr<ChatCall> call) {
     return;
   }
 
-  if (rec_master_->get_rate_limiter()->is_limited()) {
+  if (rec_master_->get_rate_limiter()->check_limited()) {
     call->finish_with_error(
         StatusCode::RESOURCE_EXHAUSTED,
         "The number of concurrent requests has reached the limit.");
@@ -593,14 +593,8 @@ void ChatServiceImpl::process_rec_chat_request(std::shared_ptr<ChatCall> call) {
         if (req_output.status.has_value()) {
           const auto& status = req_output.status.value();
           if (!status.ok()) {
-            master->get_rate_limiter()->decrease_one_request();
             return call->finish_with_error(status.code(), status.message());
           }
-        }
-
-        if (req_output.finished || req_output.cancelled ||
-            req_output.finished_on_prefill_instance) {
-          master->get_rate_limiter()->decrease_one_request();
         }
 
         if (stream) {
@@ -627,17 +621,8 @@ void ChatServiceImpl::process_async_rpc_impl(
     if (req_output.status.has_value()) {
       const auto& status = req_output.status.value();
       if (!status.ok()) {
-        // Reduce the number of concurrent requests when a request is
-        // finished with error.
-        master->get_rate_limiter()->decrease_one_request();
         return master->handle_rpc_response(req_output);
       }
-    }
-    // Reduce the number of concurrent requests when a request is finished
-    // or canceled.
-    if (req_output.finished || req_output.cancelled ||
-        req_output.finished_on_prefill_instance) {
-      master->get_rate_limiter()->decrease_one_request();
     }
     return master->handle_rpc_response(req_output);
   };
@@ -645,7 +630,7 @@ void ChatServiceImpl::process_async_rpc_impl(
   // LLMMaster path (existing logic)
   // Check if the request is being rate-limited.
   CHECK(master_ != nullptr);
-  if (master_->get_rate_limiter()->is_limited()) {
+  if (master_->get_rate_limiter()->check_limited()) {
     CALLBACK_WITH_ERROR(
         StatusCode::RESOURCE_EXHAUSTED,
         "The number of concurrent requests has reached the limit.",
@@ -741,8 +726,8 @@ void ChatServiceImpl::process_async_impl(std::shared_ptr<ChatCall> call) {
   }
   // LLMMaster path (existing logic)
   // Check if the request is being rate-limited or model is sleeping.
-  // is_limited() returns true if sleeping or rate-limited.
-  if (unlikely(master->get_rate_limiter()->is_limited())) {
+  // check_limited() returns true if sleeping or rate-limited.
+  if (unlikely(master->get_rate_limiter()->check_limited())) {
     if (master->get_rate_limiter()->is_sleeping()) {
       call->finish_with_error(StatusCode::UNAVAILABLE,
                               "Model is currently in sleep state.");
@@ -845,19 +830,8 @@ void ChatServiceImpl::process_async_impl(std::shared_ptr<ChatCall> call) {
         if (req_output.status.has_value()) {
           const auto& status = req_output.status.value();
           if (!status.ok()) {
-            // Reduce the number of concurrent requests when a
-            // request is finished with error.
-            master->get_rate_limiter()->decrease_one_request();
-
             return call->finish_with_error(status.code(), status.message());
           }
-        }
-
-        // Reduce the number of concurrent requests when a request
-        // is finished or canceled.
-        if (req_output.finished || req_output.cancelled ||
-            req_output.finished_on_prefill_instance) {
-          master->get_rate_limiter()->decrease_one_request();
         }
 
         if (stream) {
@@ -903,7 +877,7 @@ void MMChatServiceImpl::process_async_impl(std::shared_ptr<MMChatCall> call) {
   }
 
   // Check if the request is being rate-limited.
-  if (master_->get_rate_limiter()->is_limited()) {
+  if (master_->get_rate_limiter()->check_limited()) {
     call->finish_with_error(
         StatusCode::RESOURCE_EXHAUSTED,
         "The number of concurrent requests has reached the limit.");
@@ -967,19 +941,8 @@ void MMChatServiceImpl::process_async_impl(std::shared_ptr<MMChatCall> call) {
         if (req_output.status.has_value()) {
           const auto& status = req_output.status.value();
           if (!status.ok()) {
-            // Reduce the number of concurrent requests when a request is
-            // finished with error.
-            master->get_rate_limiter()->decrease_one_request();
-
             return call->finish_with_error(status.code(), status.message());
           }
-        }
-
-        // Reduce the number of concurrent requests when a request is finished
-        // or canceled.
-        if (req_output.finished || req_output.cancelled ||
-            req_output.finished_on_prefill_instance) {
-          master->get_rate_limiter()->decrease_one_request();
         }
 
         if (stream) {

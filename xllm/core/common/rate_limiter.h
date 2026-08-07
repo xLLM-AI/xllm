@@ -28,13 +28,17 @@ class RateLimiter final {
 
   ~RateLimiter() = default;
 
-  // Returns true if request is rate-limited or sleeping.
-  // If not limited and not sleeping, increments the counter.
-  bool is_limited();
+  // Read-only: true if sleeping or count >= max. Does NOT increment.
+  bool check_limited() const;
+
+  // +1. Call only after check_limited() returned false, immediately before
+  // constructing the Request that will own the slot.
+  void increment();
+
+  // Kept for pybind backward compat; delegates to check_limited().
+  bool is_limited() const { return check_limited(); }
 
   void decrease_one_request();
-
-  void decrease_requests(size_t decrease_requests_num);
 
   int32_t get_num_concurrent_requests() const {
     return num_concurrent_requests_.load(std::memory_order_relaxed);

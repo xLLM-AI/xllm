@@ -278,7 +278,7 @@ void RecCompletionServiceImpl::process_async_impl(
   }
 
   // Check if the request is being rate-limited.
-  if (unlikely(master_->get_rate_limiter()->is_limited())) {
+  if (unlikely(master_->get_rate_limiter()->check_limited())) {
     call->finish_with_error(
         StatusCode::RESOURCE_EXHAUSTED,
         "The number of concurrent requests has reached the limit.");
@@ -349,9 +349,6 @@ void RecCompletionServiceImpl::process_async_impl(
         if (req_output.status.has_value()) {
           const auto& status = req_output.status.value();
           if (!status.ok()) {
-            // Reduce the number of concurrent requests when a request is
-            // finished with error.
-            master->get_rate_limiter()->decrease_one_request();
             HISTOGRAM_OBSERVE(
                 rec_total_latency_microseconds,
                 static_cast<int64_t>(request_timer.elapsed_microseconds()));
@@ -360,10 +357,7 @@ void RecCompletionServiceImpl::process_async_impl(
           }
         }
 
-        // Reduce the number of concurrent requests when a request is finished
-        // or canceled.
         if (req_output.finished || req_output.cancelled) {
-          master->get_rate_limiter()->decrease_one_request();
           HISTOGRAM_OBSERVE(
               rec_total_latency_microseconds,
               static_cast<int64_t>(request_timer.elapsed_microseconds()));

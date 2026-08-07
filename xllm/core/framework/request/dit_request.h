@@ -31,6 +31,8 @@ limitations under the License.
 
 namespace xllm {
 
+class RateLimiter;
+
 class DiTRequest : public RequestBase {
  public:
   DiTRequest(const std::string& request_id,
@@ -38,7 +40,17 @@ class DiTRequest : public RequestBase {
              const std::string& x_request_time,
              const DiTRequestState& state,
              const std::string& service_request_id = "",
-             const std::string& source_xservice_addr = "");
+             const std::string& source_xservice_addr = "",
+             RateLimiter* rate_limiter = nullptr);
+
+  ~DiTRequest();
+
+  DiTRequest(const DiTRequest&) = delete;
+  DiTRequest& operator=(const DiTRequest&) = delete;
+  DiTRequest(DiTRequest&&) = delete;
+  DiTRequest& operator=(DiTRequest&&) = delete;
+
+  void release_rate_limit_slot();
 
   bool finished() const;
 
@@ -55,6 +67,7 @@ class DiTRequest : public RequestBase {
  private:
   DiTRequestState state_;
   DiTForwardOutput output_;
+  RateLimiter* rate_limiter_ = nullptr;
 };
 
 }  // namespace xllm

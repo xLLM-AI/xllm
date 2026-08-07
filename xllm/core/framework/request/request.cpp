@@ -27,6 +27,7 @@ limitations under the License.
 #include <vector>
 
 #include "api_service/call.h"
+#include "common/rate_limiter.h"
 #include "sequence.h"
 #include "util/timer.h"
 
@@ -37,14 +38,31 @@ Request::Request(const std::string& request_id,
                  const std::string& x_request_time,
                  const RequestState& state,
                  const std::string& service_request_id,
-                 const std::string& source_xservice_addr)
+                 const std::string& source_xservice_addr,
+                 RateLimiter* rate_limiter)
     : RequestBase(request_id,
                   x_request_id,
                   x_request_time,
                   service_request_id,
                   source_xservice_addr),
-      state_(std::move(state)) {
+      state_(std::move(state)),
+      rate_limiter_(rate_limiter) {
   create_sequences_group();
+  // Acquire the rate-limit slot last, so any exception thrown above skips it
+  // and no counter leaks. Callers must ensure the RateLimiter has spare
+  // capacity via check_limited() before constructing.
+  if (rate_limiter_ != nullptr) {
+    rate_limiter_->increment();
+  }
+}
+
+Request::~Request() { release_rate_limit_slot(); }
+
+void Request::release_rate_limit_slot() {
+  if (rate_limiter_ != nullptr) {
+    rate_limiter_->decrease_one_request();
+    rate_limiter_ = nullptr;
+  }
 }
 
 void Request::create_sequences_group() {
