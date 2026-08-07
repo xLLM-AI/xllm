@@ -40,6 +40,16 @@ from xllm.python.model_executor.forward_context import (
 if TYPE_CHECKING:
     from xllm.python.layers.attention import Attention
 
+# Ascend FIA sparse_mode values (see CANN aclnnFusedInferAttentionScore docs).
+# 0: no compressed mask; used for single-query decode where no causal mask is
+#    needed.
+# 3: rightDownCausal; the causal mask is right-aligned to the KV tail, for the
+#    prefix-cache / chunked-prefill case where q_len < kv_len so the new queries
+#    attend the full cached prefix plus their own tokens (mode 2, leftUpCausal,
+#    only aligns when q_len == kv_len and would misalign on a cache hit).
+_SPARSE_MODE_NONE = 0
+_SPARSE_MODE_RIGHT_DOWN_CAUSAL = 3
+
 
 class NpuPagedAttentionBackend(AttentionBackend):
     """NPU attention backend dispatching to npu_fused_infer_attention_score."""
@@ -154,7 +164,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
                         actual_seq_lengths_kv=self._actual_seq_kv,
                         num_key_value_heads=self.num_kv_heads,
                         num_heads=self.num_heads,
-                        sparse_mode=0,
+                        sparse_mode=_SPARSE_MODE_NONE,
                         scale=self.scale,
                         softmax_lse_flag=False,
                     )
@@ -216,7 +226,9 @@ class NpuPagedAttentionBackend(AttentionBackend):
         q_3d = q.view(num_tokens, self.num_heads, self.head_dim).contiguous()
 
         if metadata.is_prefill or metadata.is_chunked_prefill:
-            return self._prefill(q_3d, k_3d, v_3d, metadata, num_tokens)
+            return self._prefill(
+                q_3d, k_3d, v_3d, k_cache, v_cache, metadata, num_tokens
+            )
         return self._decode(q_3d, k_cache, v_cache, metadata, num_tokens)
 
     def execute_mla(
@@ -283,9 +295,37 @@ class NpuPagedAttentionBackend(AttentionBackend):
 
     def _prefill(
         self, q_3d: torch.Tensor, k_3d: torch.Tensor, v_3d: torch.Tensor,
+        k_cache: torch.Tensor, v_cache: torch.Tensor,
         metadata: AttentionMetadata, num_tokens: int,
     ) -> torch.Tensor:
         actual_seq = self._cumulative_seq_lens(metadata, num_tokens)
+
+        # Prefix-cache hit (or chunked prefill with prior context): part of the
+        # KV already lives in the paged cache, so this forward only carries the
+        # new tokens (q_len < kv_len). Attend over the full paged KV via
+        # block_table, mirroring _decode. Without this, the new query tokens
+        # would only see their own KV (actual_seq_lengths_kv == q_len) and never
+        # the cached prefix, diverging from a full recompute.
+        if metadata.block_table is not None:
+            block_size = k_cache.size(1)
+            k_flat = k_cache.view(k_cache.size(0), block_size, -1)
+            v_flat = v_cache.view(v_cache.size(0), block_size, -1)
+            output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+                q_3d, k_flat, v_flat,
+                pse_shift=None,
+                atten_mask=self._causal_mask,
+                block_table=self._block_table_i32,
+                actual_seq_lengths=actual_seq,
+                actual_seq_lengths_kv=self._actual_seq_kv,
+                num_heads=self.num_heads,
+                scale=self.scale,
+                input_layout="TND",
+                num_key_value_heads=self.num_kv_heads,
+                block_size=block_size,
+                sparse_mode=_SPARSE_MODE_RIGHT_DOWN_CAUSAL,
+                softmax_lse_flag=False,
+            )
+            return output.reshape(num_tokens, self.num_heads * self.head_dim)
 
         output, _ = torch.ops.npu.npu_fused_infer_attention_score(
             q_3d, k_3d, v_3d,
@@ -297,7 +337,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
             scale=self.scale,
             input_layout="TND",
             num_key_value_heads=self.num_kv_heads,
-            sparse_mode=3,
+            sparse_mode=_SPARSE_MODE_RIGHT_DOWN_CAUSAL,
             softmax_lse_flag=False,
         )
         return output.reshape(num_tokens, self.num_heads * self.head_dim)
@@ -321,7 +361,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
             scale=self.scale,
             input_layout="TND",
             num_key_value_heads=self.num_kv_heads,
-            sparse_mode=0,
+            sparse_mode=_SPARSE_MODE_NONE,
             block_size=block_size,
             softmax_lse_flag=False,
             workspace=self._graph_workspace,
@@ -373,7 +413,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
             scale=self.scale,
             input_layout="TND",
             num_key_value_heads=self.num_kv_heads,
-            sparse_mode=0,
+            sparse_mode=_SPARSE_MODE_NONE,
             block_size=block_size,
             softmax_lse_flag=False,
         )
