@@ -55,9 +55,16 @@ void materialize_linear_state_validity(
 
   const int64_t mask_rows =
       static_cast<int64_t>(params.linear_state_validity_mask.size());
+  // Dense (non-linear) models still emit one linear_state_ids row per batch
+  // entry to keep row alignment for downstream consumers, but every slot is
+  // the invalid sentinel (-1); see BatchInputBuilder::append_linear_state_row.
+  // A canonical validity mask is only required when at least one row carries a
+  // real (non-negative) linear-state slot, so mirror has_linear_state_slot()
+  // rather than treating a placeholder-only container as linear state.
   const bool has_linear_state_rows =
-      !params.embedding.linear_state_ids.empty() ||
-      params.embedding.linear_state_indices.defined();
+      std::any_of(params.embedding.linear_state_ids.begin(),
+                  params.embedding.linear_state_ids.end(),
+                  [](int32_t linear_state_id) { return linear_state_id >= 0; });
   if (!attn_metadata.is_dummy && mask_rows == 0) {
     CHECK(!has_linear_state_rows)
         << "linear-state metadata requires a canonical validity mask";
