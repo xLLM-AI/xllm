@@ -26,6 +26,13 @@ limitations under the License.
 
 namespace xllm {
 
+// LoRA prefix cache isolation: set a thread-local adapter_id used by
+// xxh3_128bits_hash to seed the first block's hash. adapter_id == 0 means
+// base (no seeding, byte-identical to pre-patch behavior). Callers (typically
+// BlockManagerPool::allocate_shared/cache) must reset to 0 after each
+// match/insert to avoid cross-request contamination.
+void set_prefix_cache_adapter_id(uint64_t adapter_id);
+
 void xxh3_128bits_hash(const uint8_t* pre_hash_value,
                        const Slice<int32_t>& token_ids,
                        uint8_t* hash_value);

@@ -89,6 +89,12 @@ struct ForwardInputBufferEntry {
   torch::Tensor* target = nullptr;
   uint64_t offset = 0;
   uint64_t aligned_bytes = 0;
+
+  // LoRA adapter int_id per sequence, index-aligned with sequence order.
+  // Populated by BatchInputBuilder from Sequence::adapter_id() and carried
+  // through the shm channel to non-rank0 workers. Consumed by
+  // ModelInputParams::to(device) to build adapter_ids_per_token.
+  std::vector<uint64_t> adapter_ids;
 };
 
 struct ForwardInputBufferPlan {
