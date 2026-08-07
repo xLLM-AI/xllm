@@ -79,14 +79,19 @@ int64_t index_slot_size(const ModelArgs& model_args,
   }
 
   const int64_t index_n_head = 1;
+  int64_t split_factor = 1;
+  if (Platform::supports_dsa_indexer_cache_sharding() &&
+      util::kv_split_size_effective() > 1) {
+    split_factor = util::kv_split_size_effective();
+  }
   if (enable_indexer_cache_quantization) {
     // int8 index cache: one byte per element, plus an independent per-token
     // fp32 scale (kept separate from the main-KV scale_slot_size path).
-    return static_cast<int64_t>(sizeof(int8_t)) * index_n_head *
-               model_args.index_head_dim() +
-           static_cast<int64_t>(sizeof(float));
+    return split_factor * (static_cast<int64_t>(sizeof(int8_t)) * index_n_head *
+                               model_args.index_head_dim() +
+                           static_cast<int64_t>(sizeof(float)));
   }
-  return dtype_size * index_n_head * model_args.index_head_dim();
+  return split_factor * dtype_size * index_n_head * model_args.index_head_dim();
 }
 
 int64_t scale_slot_size(const ModelArgs& model_args,

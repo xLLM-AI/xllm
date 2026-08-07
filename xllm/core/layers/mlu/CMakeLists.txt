@@ -5,6 +5,8 @@ cc_library(
     mlu_layers
   HDRS
     attention.h
+    dcp_attention_merge.h
+    dcp_decode_context.h
     dsa_topk_relay.h
     dsa_topk_state.h
     deepseek_v2_attention.h
@@ -32,7 +34,10 @@ cc_library(
     moe_softplus_topk.h
   SRCS
     attention.cpp
+    dcp_attention_merge.cpp
+    dcp_decode_context.cpp
     deepseek_v2_attention.cpp
+    deepseek_v2_attention_dcp.cpp
     deepseek_v2_attention_sp.cpp
     deepseek_v2_decoder_layer_impl.cpp
     deepseek_v2_sparse_moe_block.cpp

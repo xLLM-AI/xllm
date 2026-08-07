@@ -21,6 +21,7 @@ limitations under the License.
 #include <cstddef>
 #include <utility>
 
+#include "core/platform/platform.h"
 #include "framework/kv_cache/kv_cache_utils.h"
 #include "util/utils.h"
 #include "worker.pb.h"
@@ -330,7 +331,12 @@ void KVCacheShape::init_value_cache_shape(const KVCacheCapacity& kv_cache_cap,
 
 void KVCacheShape::init_index_cache_shape(const KVCacheCapacity& kv_cache_cap,
                                           const ModelArgs& model_args) {
-  index_cache_shape_ = std::vector<int64_t>{kv_cache_cap.n_blocks(),
+  int64_t index_block_count = kv_cache_cap.n_blocks();
+  if (Platform::supports_dsa_indexer_cache_sharding() &&
+      util::kv_split_size_effective() > 1) {
+    index_block_count *= util::kv_split_size_effective();
+  }
+  index_cache_shape_ = std::vector<int64_t>{index_block_count,
                                             kv_cache_cap.block_size(),
                                             1,
                                             model_args.index_head_dim()};

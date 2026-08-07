@@ -37,6 +37,8 @@ cc_test(
     layer_test
   SRCS
     dense_mlp_test.cpp
+    dcp_attention_merge_test.cpp
+    dcp_decode_context_test.cpp
     tests_utils.cpp
     deepseek_v32_sp_utils_test.cpp
     dp_utils_test.cpp

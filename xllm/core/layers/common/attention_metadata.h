@@ -29,6 +29,7 @@ namespace ffi = tvm::ffi;
 #include <string>
 
 #include "dsa_metadata.h"
+#include "layers/common/kv_shard_batch_metadata.h"
 
 namespace xllm::layer {
 
@@ -79,6 +80,8 @@ struct AttentionMetadata {
   std::vector<int32_t> q_seq_lens_vec;
   torch::Tensor block_table;
   torch::Tensor slot_mapping;
+  // Cache-shard derivations are immutable batch data shared by all layers.
+  std::shared_ptr<const KVShardBatchMetadata> kv_shard_batch_metadata;
   int64_t max_query_len;
   int64_t max_seq_len;
   int64_t total_kv_len = 0;
