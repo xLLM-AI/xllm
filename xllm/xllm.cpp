@@ -24,6 +24,7 @@ namespace py = pybind11;
 #include <acl/acl.h>
 #endif
 
+#include <algorithm>
 #include <csignal>
 #include <filesystem>
 #include <memory>
@@ -318,6 +319,7 @@ void validate_config(const std::string& model_type) {
   LoadConfig& load_config = LoadConfig::get_instance();
   KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
   SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+  ServiceConfig& service_config = ServiceConfig::get_instance();
   ParallelConfig& parallel_config = ParallelConfig::get_instance();
   DisaggPDConfig& disagg_pd_config = DisaggPDConfig::get_instance();
   SpeculativeConfig& speculative_config = SpeculativeConfig::get_instance();
@@ -412,6 +414,38 @@ void validate_config(const std::string& model_type) {
     LOG(FATAL) << "enable_rolling_load is only supported on NPU.";
   }
 #endif
+
+  const int32_t scheduler_cap = scheduler_config.max_seqs_per_batch();
+  const int32_t service_cap = service_config.max_concurrent_requests();
+  if (scheduler_cap <= 0 && service_cap <= 0) {
+    LOG(FATAL) << "Both max_seqs_per_batch and max_concurrent_requests are 0; "
+                  "set at least one to a positive value.";
+  }
+
+  const int64_t decode_rows_per_request =
+      speculative_config.num_speculative_tokens() > 0
+          ? static_cast<int64_t>(speculative_config.num_speculative_tokens()) +
+                1
+          : 1;
+  int32_t effective_service_cap = service_cap;
+  int32_t effective_scheduler_cap = scheduler_cap;
+  if (effective_service_cap <= 0) {
+    effective_service_cap = static_cast<int32_t>(
+        std::max<int64_t>(scheduler_cap / decode_rows_per_request, 1));
+  }
+
+  const int64_t required_scheduler_cap =
+      static_cast<int64_t>(effective_service_cap) * decode_rows_per_request;
+  if (effective_scheduler_cap < required_scheduler_cap) {
+    LOG(WARNING) << "Increasing max_seqs_per_batch from "
+                 << effective_scheduler_cap << " to " << required_scheduler_cap
+                 << " to cover max_concurrent_requests="
+                 << effective_service_cap
+                 << " with decode_rows_per_request=" << decode_rows_per_request;
+    effective_scheduler_cap = static_cast<int32_t>(required_scheduler_cap);
+  }
+  scheduler_config.max_seqs_per_batch(effective_scheduler_cap);
+  service_config.max_concurrent_requests(effective_service_cap);
 
   model_config.normalize_cpp_chat_template(model_type);
 }
