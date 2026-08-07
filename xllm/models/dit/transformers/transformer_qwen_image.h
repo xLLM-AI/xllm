@@ -1584,6 +1584,17 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto img_query = attn_->to_q_->forward(hidden_states);
     auto img_key = attn_->to_k_->forward(hidden_states);
     auto img_value = attn_->to_v_->forward(hidden_states);
+
+    // Unpad before RegionE KV patch/store. Partial steps expand K/V to the
+    // full cached sequence; applying the SP pad trim afterward would shrink
+    // that full K/V by the edited-sequence pad length and break RoPE.
+    xllm::dit::SequenceParallelPadManager::get_instance().unpad_tensor(
+        img_query, /*tensor_name=*/"hidden_states", /*dim=*/1);
+    xllm::dit::SequenceParallelPadManager::get_instance().unpad_tensor(
+        img_key, /*tensor_name=*/"hidden_states", /*dim=*/1);
+    xllm::dit::SequenceParallelPadManager::get_instance().unpad_tensor(
+        img_value, /*tensor_name=*/"hidden_states", /*dim=*/1);
+
     auto* regione = DiTCache::get_instance().regione();
     if (regione) {
       std::tie(img_key, img_value) =
@@ -1630,13 +1641,6 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
         txt_key, /*tensor_name=*/"encoder_hidden_states", /*dim=*/1);
     xllm::dit::SequenceParallelPadManager::get_instance().unpad_tensor(
         txt_value, /*tensor_name=*/"encoder_hidden_states", /*dim=*/1);
-
-    xllm::dit::SequenceParallelPadManager::get_instance().unpad_tensor(
-        img_query, /*tensor_name=*/"hidden_states", /*dim=*/1);
-    xllm::dit::SequenceParallelPadManager::get_instance().unpad_tensor(
-        img_key, /*tensor_name=*/"hidden_states", /*dim=*/1);
-    xllm::dit::SequenceParallelPadManager::get_instance().unpad_tensor(
-        img_value, /*tensor_name=*/"hidden_states", /*dim=*/1);
 
     auto img_query_freqs = img_freqs;
     auto img_key_freqs = img_freqs;
@@ -2365,20 +2369,19 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
     }
 
     auto* regione = DiTCache::get_instance().regione();
-    const bool regione_partial_sp_mode =
-        regione && regione->regione_is_partial_sp_mode();
+    // RegionE partial+SP now replicates the global edited sequence on every
+    // rank (see RegionECache::regione_active_edited_ids), so the normal SP
+    // split/gather path applies — do not skip it for partial mode.
     if (::xllm::ParallelConfig::get_instance().sp_size() > 1) {
-      if (!regione_partial_sp_mode) {
-        new_hidden_states =
-            dit::sp_split_sequence(new_hidden_states,
-                                   /*dim=*/1,
-                                   parallel_args_.dit_sp_group_);
-      }
+      new_hidden_states =
+          dit::sp_split_sequence(new_hidden_states,
+                                 /*dim=*/1,
+                                 parallel_args_.dit_sp_group_);
       new_encoder_hidden_states =
           dit::sp_split_sequence(new_encoder_hidden_states,
                                  /*dim=*/1,
                                  parallel_args_.dit_sp_group_);
-      if (modulate_index.defined() && !regione_partial_sp_mode) {
+      if (modulate_index.defined()) {
         modulate_index = dit::sp_split_sequence(modulate_index,
                                                 /*dim=*/1,
                                                 parallel_args_.dit_sp_group_);
@@ -2460,8 +2463,7 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
 
     new_hidden_states = norm_out_->forward(new_hidden_states, temb);
     new_hidden_states = proj_out_->forward(new_hidden_states);
-    if (::xllm::ParallelConfig::get_instance().sp_size() > 1 &&
-        !regione_partial_sp_mode) {
+    if (::xllm::ParallelConfig::get_instance().sp_size() > 1) {
       new_hidden_states = dit::sp_gather_sequence(
           new_hidden_states, /*dim=*/1, parallel_args_.dit_sp_group_);
     }

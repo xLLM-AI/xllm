@@ -61,6 +61,28 @@ DEFINE_double(dit_regione_region_threshold,
               0.80,
               "RegionE: cosine threshold for adaptive region partition.");
 
+DEFINE_double(dit_regione_cache_threshold,
+              0.03,
+              "RegionE: AVDCache error threshold δ (paper Eq.8). "
+              "Reuse velocity while 1-accumulate <= threshold. "
+              "Qwen-Image-Edit default in RegionE inplace.py is 0.03.");
+
+DEFINE_bool(dit_regione_use_avd_gamma,
+            true,
+            "RegionE: use AVDCache with gamma (paper/inplace.py method). "
+            "Uses the original diffusers 28-step gamma curve, linearly "
+            "upsampled/downsampled to the actual inference step count. "
+            "Set false to use fixed skip_interval instead.");
+
+DEFINE_bool(dit_regione_erosion_dilation,
+            true,
+            "RegionE: enable erosion/dilation for region mask cleanup.");
+
+DEFINE_bool(dit_regione_profile,
+            false,
+            "RegionE: print per-step timing breakdown for partial/full DiT and "
+            "K/V CPU offload.");
+
 DEFINE_bool(dit_sp_communication_overlap,
             true,
             "Communication & Computation overlap for sequence parallel");
@@ -141,6 +163,10 @@ void DiTConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cache_end_blocks);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_regione_refresh_steps);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_regione_region_threshold);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_regione_cache_threshold);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_regione_use_avd_gamma);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_regione_erosion_dilation);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_regione_profile);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sp_communication_overlap);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_debug_print);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_laser_attention_enabled);
@@ -169,6 +195,10 @@ void DiTConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cache_end_blocks);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_regione_refresh_steps);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_regione_region_threshold);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_regione_cache_threshold);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_regione_use_avd_gamma);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_regione_erosion_dilation);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_regione_profile);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sp_communication_overlap);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_debug_print);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_laser_attention_enabled);
@@ -210,6 +240,14 @@ void DiTConfig::append_config_json(nlohmann::ordered_json& config_json) const {
       config_json, default_config, dit_regione_refresh_steps);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_regione_region_threshold);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_regione_cache_threshold);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_regione_use_avd_gamma);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_regione_erosion_dilation);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_regione_profile);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_sp_communication_overlap);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

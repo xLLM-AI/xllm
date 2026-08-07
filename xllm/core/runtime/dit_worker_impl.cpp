@@ -105,6 +105,14 @@ DiTCacheConfig parse_dit_cache_from_flags() {
         ::xllm::DiTConfig::get_instance().dit_regione_refresh_steps());
     cache_config.regione.region_threshold =
         ::xllm::DiTConfig::get_instance().dit_regione_region_threshold();
+    cache_config.regione.cache_threshold = static_cast<float>(
+        ::xllm::DiTConfig::get_instance().dit_regione_cache_threshold());
+    cache_config.regione.use_avd_gamma =
+        ::xllm::DiTConfig::get_instance().dit_regione_use_avd_gamma();
+    cache_config.regione.erosion_dilation =
+        ::xllm::DiTConfig::get_instance().dit_regione_erosion_dilation();
+    cache_config.regione.profile =
+        ::xllm::DiTConfig::get_instance().dit_regione_profile();
   } else if (::xllm::DiTConfig::get_instance().dit_cache_policy() == "None") {
     cache_config.selected_policy = PolicyType::None;
   }
