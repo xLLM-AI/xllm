@@ -22,6 +22,8 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/framework/lora/lora_context.h"
+#include "core/framework/lora/lora_runtime.h"
 #include "core/layers/qwen3_5_decoder_layer.h"
 #include "models/model_registry.h"
 #include "qwen3_next.h"
@@ -36,6 +38,82 @@ class Qwen3_5ModelImpl : public Qwen3NextModelImpl {
     for (int32_t layer_id = 0; layer_id < n_layers; ++layer_id) {
       add_decoder_layer(
           std::make_shared<layer::Qwen3_5DecoderLayerImpl>(context, layer_id));
+    }
+
+    // Qwen3.5-122B fix #4 + W4-A3: mirror qwen3_moe.h ctor. Register
+    // HotswapConfig + preload any --lora-modules static adapters on this
+    // rank's V60 window. The pinned executor thread also reads this config
+    // for HTTP hot-swap. Attention-only adapters use per-proj installer;
+    // MoE-experts.* keys go through install_static_adapter_on_moe_experts.
+    if (LoRARuntime::instance().enabled()) {
+      const auto& options = context.get_tensor_options();
+      const auto& model_args = context.get_model_args();
+      LoRARuntime::instance().set_model_device_dtype(
+          options.device(), options.dtype().toScalarType());
+      const auto& modules = LoRARuntime::instance().config().lora_modules;
+      auto parallel_args = context.get_parallel_args();
+      const int32_t tp_size =
+          std::max(1, parallel_args.world_size() / parallel_args.dp_size());
+      const int32_t tp_rank = parallel_args.rank() % tp_size;
+      const int32_t num_experts_total =
+          static_cast<int32_t>(model_args.num_experts());
+      const int32_t ep_size = std::max(1, parallel_args.ep_size());
+      const int32_t num_experts_per_rank = num_experts_total / ep_size;
+      const int32_t ep_rank = (ep_size > 1) ? parallel_args.rank() : 0;
+      const int32_t start_expert_id = ep_rank * num_experts_per_rank;
+      const int32_t moe_intermediate =
+          static_cast<int32_t>(model_args.moe_intermediate_size());
+      {
+        LoRARuntime::HotswapConfig cfg;
+        cfg.tp = TPInfo{tp_size, tp_rank};
+        cfg.install_per_proj = true;
+        cfg.install_moe_experts = true;
+        cfg.num_experts_total = num_experts_total;
+        cfg.num_experts_per_rank = num_experts_per_rank;
+        cfg.start_expert_id = start_expert_id;
+        cfg.moe_intermediate_size = moe_intermediate;
+        LoRARuntime::instance().set_hotswap_config(cfg);
+      }
+      if (!modules.empty()) {
+        LOG(INFO) << "[qwen3_5 M10] preloading " << modules.size()
+                  << " per-proj static adapter(s) on " << options.device();
+        int ok = 0, failed = 0;
+        for (const auto& [name, path] : modules) {
+          auto id =
+              LoRARuntime::instance().install_static_adapter_on_device_per_proj(
+                  name,
+                  path,
+                  /*base_model_name=*/"",
+                  options.device(),
+                  options.dtype().toScalarType(),
+                  TPInfo{tp_size, tp_rank});
+          if (id.has_value()) {
+            ++ok;
+            LOG(INFO) << "[qwen3_5 M10] preloaded '" << name << "' id=" << *id;
+          } else {
+            ++failed;
+            LOG(ERROR) << "[qwen3_5 M10] failed '" << name << "'";
+          }
+          auto moe_id =
+              LoRARuntime::instance().install_static_adapter_on_moe_experts(
+                  name,
+                  path,
+                  /*base_model_name=*/"",
+                  options.device(),
+                  options.dtype().toScalarType(),
+                  TPInfo{tp_size, tp_rank},
+                  num_experts_total,
+                  num_experts_per_rank,
+                  start_expert_id,
+                  moe_intermediate);
+          if (moe_id.has_value()) {
+            LOG(INFO) << "[qwen3_5 M10-MoE] preloaded expert-LoRA for '" << name
+                      << "' id=" << *moe_id;
+          }
+        }
+        LOG(INFO) << "[qwen3_5 M10] preload done: ok=" << ok
+                  << " failed=" << failed;
+      }
     }
   }
 };

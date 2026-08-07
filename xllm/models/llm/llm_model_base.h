@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "core/common/interruption_bus.h"
 #include "core/framework/kv_cache/kv_cache.h"
+#include "core/framework/lora/lora_context.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_context.h"
@@ -103,8 +104,20 @@ class LlmModelImplBase : public torch::nn::Module {
           << "Rec multi-round mode requires unshared_v_caches per layer.";
     }
 
+    // Multi-tenant LoRA: push a LoRAContext frame so LoRA-wrapped
+    // Linear layers (QKV / o_proj / gate_up / down) can read the
+    // per-batch adapter routing without extending Linear::forward.
+    // set_lora_context_layer updates layer_index on the top frame
+    // each iteration; LoRAScope pops on scope exit.
+    LoRAContextFrame lora_frame;
+    lora_frame.adapter_ids = &modified_input_params.adapter_ids;
+    lora_frame.adapter_ids_per_token =
+        &modified_input_params.adapter_ids_per_token;
+    LoRAScope _lora_scope(lora_frame);
+
     std::optional<torch::Tensor> residual;
     for (size_t i = 0; i < layers_.size(); i++) {
+      set_lora_context_layer(static_cast<int32_t>(i));
       if (llmrec_params != nullptr) {
         attn_metadata.full_k_cache = llmrec_params->full_k_caches[i];
         attn_metadata.full_v_cache = llmrec_params->full_v_caches[i];
