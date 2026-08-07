@@ -567,12 +567,15 @@ bool torch_to_proto(const torch::Tensor& torch_tensor,
           proto_contents, torch_tensor, proto_datatype);
       break;
     case torch::kBFloat16: {
-      // Need to convert bfloat16 to uint8_t for storage
-      auto bfloat16_ptr = torch_tensor.data_ptr<torch::BFloat16>();
+      // Need to convert bfloat16 to uint8_t for storage.
+      // Ensure contiguous layout first — data_ptr() reads raw memory
+      // which would be wrong for NHWC/ChannelsLast tensors.
+      torch::Tensor contig_tensor = torch_tensor.contiguous();
+      auto bfloat16_ptr = contig_tensor.data_ptr<torch::BFloat16>();
       uint8_t* uint8_ptr = reinterpret_cast<uint8_t*>(bfloat16_ptr);
       torch::Tensor uint8_tensor =
           torch::from_blob(uint8_ptr,
-                           {static_cast<int64_t>(torch_tensor.numel() *
+                           {static_cast<int64_t>(contig_tensor.numel() *
                                                  sizeof(torch::BFloat16))},
                            torch::dtype(torch::kUInt8));
       data_set_success = set_data_to_contents<uint8_t>(
@@ -580,12 +583,15 @@ bool torch_to_proto(const torch::Tensor& torch_tensor,
       break;
     }
     case torch::kHalf: {
-      // Need to convert float16 to uint8_t for storage
-      auto float16_ptr = torch_tensor.data_ptr<torch::Half>();
+      // Need to convert float16 to uint8_t for storage.
+      // Ensure contiguous layout first — data_ptr() reads raw memory
+      // which would be wrong for NHWC/ChannelsLast tensors.
+      torch::Tensor contig_tensor = torch_tensor.contiguous();
+      auto float16_ptr = contig_tensor.data_ptr<torch::Half>();
       uint8_t* uint8_ptr = reinterpret_cast<uint8_t*>(float16_ptr);
       torch::Tensor uint8_tensor = torch::from_blob(
           uint8_ptr,
-          {static_cast<int64_t>(torch_tensor.numel() * sizeof(torch::Half))},
+          {static_cast<int64_t>(contig_tensor.numel() * sizeof(torch::Half))},
           torch::dtype(torch::kUInt8));
       data_set_success = set_data_to_contents<uint8_t>(
           proto_contents, uint8_tensor, proto_datatype);
