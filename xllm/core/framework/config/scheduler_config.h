@@ -52,6 +52,9 @@ class SchedulerConfig final {
          "max_decode_token_per_sequence",
          "priority_strategy",
          "enable_mix_batch",
+         "enable_short_request_first",
+         "short_request_first_threshold",
+         "short_request_first_long_max_wait_ms",
          "enable_online_preempt_offline",
          "aggressive_coeff",
          "starve_threshold",
@@ -81,6 +84,12 @@ class SchedulerConfig final {
 
   PROPERTY(bool, enable_mix_batch) = true;
 
+  PROPERTY(bool, enable_short_request_first) = false;
+
+  PROPERTY(int32_t, short_request_first_threshold) = 256;
+
+  PROPERTY(double, short_request_first_long_max_wait_ms) = 0.0;
+
   PROPERTY(bool, enable_online_preempt_offline) = true;
 
   PROPERTY(double, aggressive_coeff) = 1.0;
@@ -88,6 +97,9 @@ class SchedulerConfig final {
   PROPERTY(double, starve_threshold) = 1.0;
 
   PROPERTY(bool, enable_starve_prevent) = true;
+
+ private:
+  void validate_short_request_first() const;
 };
 
 }  // namespace xllm

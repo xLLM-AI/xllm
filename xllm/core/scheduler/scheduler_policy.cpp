@@ -89,6 +89,25 @@ size_t get_sequence_free_blocks_for_rank(KVCacheManager* kv_cache_manager,
   return util::max(free_blocks);
 }
 
+void validate_short_request_first_options(
+    const ContinuousScheduler::Options& options) {
+  if (!options.enable_disagg_pd()) {
+    LOG(FATAL) << "ShortRequestFirst requires enable_disagg_pd=true.";
+  }
+  if (!options.enable_chunked_prefill()) {
+    LOG(FATAL) << "ShortRequestFirst requires enable_chunked_prefill=true.";
+  }
+  if (options.instance_role() == InstanceRole::DECODE) {
+    LOG(FATAL) << "ShortRequestFirst is only supported on PD prefill or mix "
+               << "instances, not decode instances.";
+  }
+  if (options.priority_strategy() != "short_request_first") {
+    LOG(FATAL) << "ShortRequestFirst requires "
+                  "priority_strategy=short_request_first, got "
+               << options.priority_strategy();
+  }
+}
+
 }  // namespace
 
 // =============================================================================
@@ -866,9 +885,17 @@ std::unique_ptr<SchedulerPolicy> create_scheduler_policy(
     return std::make_unique<UnifiedPolicy>(mode, options);
   } else if (mode.enable_mix_batch) {
     return std::make_unique<DecodeFirstPolicy>(mode, options);
-  } else {
-    return std::make_unique<PrefillFirstPolicy>(mode, options);
   }
+  const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+  if (scheduler_config.enable_short_request_first()) {
+    validate_short_request_first_options(options);
+    LOG(INFO) << "Enable PD-prefill ShortRequestFirst scheduling: threshold="
+              << scheduler_config.short_request_first_threshold()
+              << ", long_max_wait_ms="
+              << scheduler_config.short_request_first_long_max_wait_ms();
+    return std::make_unique<ShortRequestFirstPolicy>(mode, options);
+  }
+  return std::make_unique<PrefillFirstPolicy>(mode, options);
 }
 
 }  // namespace xllm

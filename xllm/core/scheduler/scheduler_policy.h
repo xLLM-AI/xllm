@@ -121,9 +121,9 @@ class SchedulerPolicy {
       SchedulerState& state,
       folly::MPMCQueue<std::shared_ptr<Request>>& request_queue);
   std::vector<std::shared_ptr<Request>> collect_finished(SchedulerState& state);
-  void report_metrics(const SchedulerState& state,
-                      double elapsed_seconds,
-                      size_t num_preempted_requests);
+  virtual void report_metrics(const SchedulerState& state,
+                              double elapsed_seconds,
+                              size_t num_preempted_requests);
 
  protected:
   // ===== Common phases (internal) =====
@@ -215,6 +215,22 @@ class PrefillFirstPolicy : public SchedulerPolicy {
                                          double& latency_budget,
                                          bool for_prefill,
                                          const SchedulerState& state) override;
+};
+
+// ShortRequestFirstPolicy: PrefillFirstPolicy with ShortRequestFirst ordering
+// for the PD-prefill waiting queue. Before delegating to PrefillFirstPolicy it
+// sorts the prefill queue with the "short_request_first" comparator.
+class ShortRequestFirstPolicy : public PrefillFirstPolicy {
+ public:
+  using PrefillFirstPolicy::PrefillFirstPolicy;
+
+  void schedule(SchedulerState& state,
+                ScheduleBudget& budget,
+                std::vector<std::shared_ptr<Request>>& finished) override;
+
+  void report_metrics(const SchedulerState& state,
+                      double elapsed_seconds,
+                      size_t num_preempted_requests) override;
 };
 
 // DecodeFirstPolicy: mixed batch mode with fcfs/priority/deadline.

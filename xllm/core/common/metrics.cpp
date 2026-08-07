@@ -111,6 +111,12 @@ DEFINE_GAUGE(num_online_prefill_preempt_offline_requests,
              "Number of online prefill preempt offline requests in scheduler");
 DEFINE_GAUGE(num_online_decode_preempt_offline_requests,
              "Number of online decode preempt offline requests in scheduler");
+DEFINE_GAUGE(num_short_request_first_short_waiting,
+             "Number of short requests waiting in PD-prefill "
+             "ShortRequestFirst");
+DEFINE_GAUGE(num_short_request_first_long_waiting,
+             "Number of long requests waiting in PD-prefill "
+             "ShortRequestFirst");
 
 DEFINE_GAUGE(num_running_sequences, "Number of running sequences");
 
