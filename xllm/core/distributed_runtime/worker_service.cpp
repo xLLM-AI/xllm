@@ -79,6 +79,19 @@ void record_speculative_metrics_from_output(const torch::Tensor& next_tokens,
     return;
   }
 
+  // MTP path records these metrics inside
+  // MTPWorkerImpl::record_validate_metrics with adaptive-pruning-aware draft
+  // counts. Skip here to avoid double-count.
+  std::string algorithm = options.speculative_algorithm();
+  std::transform(
+      algorithm.begin(),
+      algorithm.end(),
+      algorithm.begin(),
+      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (algorithm == "mtp") {
+    return;
+  }
+
   const int64_t batch_size = next_tokens.size(0);
   const int64_t token_width = next_tokens.size(1);
   const int64_t num_speculative_tokens = options.num_speculative_tokens();
@@ -456,6 +469,24 @@ void WorkerService::AllocateKVCache(
     auto future = worker_->allocate_kv_cache_async(kv_cache_shape);
     bool status = std::move(future).get();
     response->set_ok(status);
+  });
+  return;
+}
+
+void WorkerService::SetSpeculativeValidateTimePredictor(
+    ::google::protobuf::RpcController* controller,
+    const proto::SpeculativeValidateTimePredictor* request,
+    proto::Status* response,
+    ::google::protobuf::Closure* done) {
+  threadpool_->schedule([this, controller, request, response, done]() mutable {
+    brpc::ClosureGuard done_guard(done);
+    SpeculativeProfileRegistry::ValidateTimePredictor predictor;
+    predictor.intercept_ms = request->intercept_ms();
+    predictor.batch_ms = request->batch_ms();
+    predictor.query_token_ms = request->query_token_ms();
+    predictor.query_prefix_ms = request->query_prefix_ms();
+    response->set_ok(
+        worker_->set_speculative_validate_time_predictor(predictor));
   });
   return;
 }

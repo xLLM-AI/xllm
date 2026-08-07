@@ -64,6 +64,12 @@ class WorkerService : public proto::DistributeWorker {
                        proto::Status* response,
                        ::google::protobuf::Closure* done) override;
 
+  void SetSpeculativeValidateTimePredictor(
+      ::google::protobuf::RpcController* controller,
+      const proto::SpeculativeValidateTimePredictor* request,
+      proto::Status* response,
+      ::google::protobuf::Closure* done) override;
+
   void AllocateKVCacheWithTransfer(
       ::google::protobuf::RpcController* controller,
       const proto::AllocateKVCacheRequest* req,
