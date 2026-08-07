@@ -64,8 +64,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
 
   py::gil_scoped_acquire gil;
   py::object init_process_group =
-      py::module_::import("xllm.python.distributed")
-          .attr("init_process_group");
+      py::module_::import("xllm.python.distributed").attr("init_process_group");
   CHECK(!parallel_args.python_rendezvous_host_.empty());
   CHECK_GT(parallel_args.python_rendezvous_port_, 0);
   const int32_t global_rank = parallel_args.rank();

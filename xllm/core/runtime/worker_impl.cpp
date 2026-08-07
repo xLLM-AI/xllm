@@ -201,7 +201,8 @@ struct LinearStateInputRows {
 // NPU and CUDA workers carry the same host attention views, so they derive the
 // linear-state rows identically; only the NPU model reads back
 // parallel.query_start_loc.
-LinearStateInputRows get_host_linear_state_rows(ModelInputParams& input_params) {
+LinearStateInputRows get_host_linear_state_rows(
+    ModelInputParams& input_params) {
   // Early-return on dummy/empty-shard inputs. Under dp>1, an empty shard is
   // padded with a fake token by worker_impl but its GDN-related tensors
   // (attention.device.kv_cache_tokens_nums etc.) are left undefined. Reading

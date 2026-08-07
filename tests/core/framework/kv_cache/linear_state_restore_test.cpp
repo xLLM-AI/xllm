@@ -218,9 +218,8 @@ TEST(LinearStateRestoreTest, MixedResetAndRestorePreserveMetadata) {
   reset_four.reset_requested = true;
   std::vector<int64_t> validity_mask = {1, 0, 1};
 
-  restore_linear_state_slots(cache.kv_caches,
-                             {reset_two, restore_three, reset_four},
-                             validity_mask);
+  restore_linear_state_slots(
+      cache.kv_caches, {reset_two, restore_three, reset_four}, validity_mask);
 
   EXPECT_EQ(validity_mask, std::vector<int64_t>({0, 1, 0}));
   EXPECT_EQ(cache.conv_cache.select(0, 2).count_nonzero().item<int64_t>(), 0);
@@ -305,9 +304,9 @@ TEST(LinearStateRestoreTest, OutOfRangeSlotFailsClosed) {
   continued.linear_state_id = 4;
   std::vector<int64_t> validity_mask = {1};
 
-  EXPECT_DEATH(restore_linear_state_slots(
-                   cache.kv_caches, {continued}, validity_mask),
-               "live slot must be a real non-padding slot");
+  EXPECT_DEATH(
+      restore_linear_state_slots(cache.kv_caches, {continued}, validity_mask),
+      "live slot must be a real non-padding slot");
 }
 
 TEST(LinearStateRestoreTest, PartialLinearCacheLayoutFailsClosed) {
@@ -318,9 +317,9 @@ TEST(LinearStateRestoreTest, PartialLinearCacheLayoutFailsClosed) {
   continued.linear_state_id = 2;
   std::vector<int64_t> validity_mask = {1};
 
-  EXPECT_DEATH(restore_linear_state_slots(
-                   cache.kv_caches, {continued}, validity_mask),
-               "must provide both conv and ssm caches");
+  EXPECT_DEATH(
+      restore_linear_state_slots(cache.kv_caches, {continued}, validity_mask),
+      "must provide both conv and ssm caches");
 }
 
 TEST(LinearStateRestoreTest, EmptySsmCheckpointLayoutFailsClosed) {
