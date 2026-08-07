@@ -17,6 +17,12 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
+namespace {
+
+constexpr int64_t kPersistentMergeMaxRows = 256;
+
+}  // namespace
+
 Qwen3NextGatedDeltaNetImpl::Qwen3NextGatedDeltaNetImpl(
     const ModelArgs& args,
     const QuantArgs& quant_args,
@@ -193,24 +199,23 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::merge_qkvz_from_split_activations(
   v = v.view({bs, seqlen, local_k_heads, head_v_part});
   z_view = z_view.view({bs, seqlen, local_k_heads, head_v_part});
 
-#if defined(USE_CUDA) || defined(USE_MUSA)
-  // Graph-capture-safe replacement for `torch::cat({q,k,v,z_view}, -1)`.
-  // Pre-allocated `qkvz_merge_buf_` is reused across replays; each piece is
-  // written via a strided `copy_` into its slice along the last dim.
   const int64_t m = bs * seqlen;
   const int64_t total_last_dim = 2 * head_k_dim_ + 2 * head_v_part;
   const int64_t flat_dim = local_k_heads * total_last_dim;
+  if (m > kPersistentMergeMaxRows) {
+    return torch::cat({q, k, v, z_view}, /*dim=*/-1)
+        .view({bs, seqlen, flat_dim})
+        .contiguous();
+  }
   const bool needs_realloc =
-      !qkvz_merge_buf_.defined() || qkvz_merge_buf_.size(0) < m ||
+      !qkvz_merge_buf_.defined() ||
+      qkvz_merge_buf_.size(0) != kPersistentMergeMaxRows ||
       qkvz_merge_buf_.size(1) != flat_dim ||
       qkvz_merge_buf_.scalar_type() != qkv.scalar_type() ||
       qkvz_merge_buf_.device() != qkv.device();
   if (needs_realloc) {
-    // Grow-only so views handed out for already-captured smaller-bucket
-    // graphs stay valid.
-    const int64_t target_m =
-        qkvz_merge_buf_.defined() ? std::max(m, qkvz_merge_buf_.size(0)) : m;
-    qkvz_merge_buf_ = torch::empty({target_m, flat_dim}, qkv.options());
+    qkvz_merge_buf_ =
+        torch::empty({kPersistentMergeMaxRows, flat_dim}, qkv.options());
   }
   auto buf_4d = qkvz_merge_buf_.narrow(/*dim=*/0, /*start=*/0, /*length=*/m)
                     .view({m, local_k_heads, total_last_dim});
@@ -224,9 +229,6 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::merge_qkvz_from_split_activations(
       .copy_(z_view.reshape({m, local_k_heads, head_v_part}));
   return qkvz_merge_buf_.narrow(/*dim=*/0, /*start=*/0, /*length=*/m)
       .view({bs, seqlen, flat_dim});
-#else
-  return torch::cat({q, k, v, z_view}, -1).view({bs, seqlen, -1}).contiguous();
-#endif
 }
 
 torch::Tensor Qwen3_5GatedDeltaNetImpl::merge_ba_from_split_activations(
@@ -252,32 +254,31 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::merge_ba_from_split_activations(
   auto b_view = b.view({bs, seqlen, local_k_heads, num_v_heads_per_k});
   auto a_view = a.view({bs, seqlen, local_k_heads, num_v_heads_per_k});
 
-#if defined(USE_CUDA) || defined(USE_MUSA)
-  const int64_t m = bs * seqlen;
-  const int64_t M = bs * seqlen;
+  const int64_t rows = bs * seqlen;
   const int64_t total_last_dim = 2 * num_v_heads_per_k;
   const int64_t flat_dim = local_k_heads * total_last_dim;
+  if (rows > kPersistentMergeMaxRows) {
+    return torch::cat({b_view, a_view}, /*dim=*/-1)
+        .view({bs, seqlen, flat_dim})
+        .contiguous();
+  }
   const bool needs_realloc = !ba_merge_buf_.defined() ||
-                             ba_merge_buf_.size(0) < M ||
+                             ba_merge_buf_.size(0) != kPersistentMergeMaxRows ||
                              ba_merge_buf_.size(1) != flat_dim ||
                              ba_merge_buf_.scalar_type() != b.scalar_type() ||
                              ba_merge_buf_.device() != b.device();
   if (needs_realloc) {
-    const int64_t target_M =
-        ba_merge_buf_.defined() ? std::max(M, ba_merge_buf_.size(0)) : M;
-    ba_merge_buf_ = torch::empty({target_M, flat_dim}, b.options());
+    ba_merge_buf_ =
+        torch::empty({kPersistentMergeMaxRows, flat_dim}, b.options());
   }
-  auto buf_4d = ba_merge_buf_.narrow(/*dim=*/0, /*start=*/0, /*length=*/M)
-                    .view({M, local_k_heads, total_last_dim});
+  auto buf_4d = ba_merge_buf_.narrow(/*dim=*/0, /*start=*/0, /*length=*/rows)
+                    .view({rows, local_k_heads, total_last_dim});
   buf_4d.narrow(/*dim=*/-1, /*start=*/0, /*length=*/num_v_heads_per_k)
-      .copy_(b_view.reshape({M, local_k_heads, num_v_heads_per_k}));
+      .copy_(b_view.reshape({rows, local_k_heads, num_v_heads_per_k}));
   buf_4d.narrow(/*dim=*/-1, num_v_heads_per_k, num_v_heads_per_k)
-      .copy_(a_view.reshape({M, local_k_heads, num_v_heads_per_k}));
-  return ba_merge_buf_.narrow(/*dim=*/0, /*start=*/0, /*length=*/M)
+      .copy_(a_view.reshape({rows, local_k_heads, num_v_heads_per_k}));
+  return ba_merge_buf_.narrow(/*dim=*/0, /*start=*/0, /*length=*/rows)
       .view({bs, seqlen, flat_dim});
-#else
-  return torch::cat({b_view, a_view}, -1).view({bs, seqlen, -1}).contiguous();
-#endif
 }
 
 std::pair<torch::Tensor, torch::Tensor>

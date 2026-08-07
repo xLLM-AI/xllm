@@ -46,9 +46,10 @@ void rotary_embedding(torch::Tensor& positions,
                       torch::Tensor& cos_sin_cache,
                       bool is_neox);
 
-void act_and_mul(torch::Tensor out,
-                 torch::Tensor input,
-                 const std::string& act_mode);
+void active(torch::Tensor& output,
+            const torch::Tensor& input,
+            const std::string& act_mode,
+            bool is_gated);
 
 void mul_sigmoid_gate_inplace(torch::Tensor& out, const torch::Tensor& gate);
 

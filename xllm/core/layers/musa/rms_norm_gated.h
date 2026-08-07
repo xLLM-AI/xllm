@@ -1,4 +1,4 @@
-/* Copyright 2025-2026 The xLLM Authors.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,30 +17,31 @@ limitations under the License.
 
 #include <torch/torch.h>
 
-#include <cstdint>
-#include <vector>
+#include <optional>
 
-#include "framework/model_context.h"
 #include "framework/state_dict/state_dict.h"
 #include "framework/state_dict/utils.h"
 
-namespace xllm {
-namespace layer {
-class MUSALmHeadImpl : public torch::nn::Module {
+namespace xllm::layer::musa {
+
+class RmsNormGatedImpl final : public torch::nn::Module {
  public:
-  explicit MUSALmHeadImpl(const ModelContext& context);
+  RmsNormGatedImpl(int64_t dim,
+                   int64_t max_rows,
+                   double eps,
+                   const torch::TensorOptions& options);
 
-  ~MUSALmHeadImpl() {};
+  torch::Tensor forward(torch::Tensor& input,
+                        std::optional<torch::Tensor> gate = std::nullopt);
 
-  void load_state_dict(StateDict const& state_dict);
-
-  torch::Tensor forward(torch::Tensor const& input);
+  void load_state_dict(const StateDict& state_dict);
 
  private:
-  int64_t hidden_size_;
-  int64_t vocab_size_;
-  torch::TensorOptions options_;
-  std::vector<torch::Tensor> weights_;
+  DEFINE_WEIGHT(weight);
+  int64_t max_rows_;
+  double eps_;
+  mutable torch::Tensor output_buf_;
 };
-}  // namespace layer
-}  // namespace xllm
+TORCH_MODULE(RmsNormGated);
+
+}  // namespace xllm::layer::musa

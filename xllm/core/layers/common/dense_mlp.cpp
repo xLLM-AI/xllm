@@ -118,7 +118,7 @@ torch::Tensor DenseMLPImpl::forward(const torch::Tensor& hidden_states) {
   }
 
   torch::Tensor output;
-  if (!Platform::is_npu()) {
+  if (!Platform::is_npu() && !Platform::is_musa()) {
     const int64_t batch_size = gate_up.sizes()[0];
     output = torch::empty(
         {batch_size, intermediate_size_ / process_group_->world_size()},

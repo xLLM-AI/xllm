@@ -18,12 +18,10 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
-#include <optional>
+#include <cstdint>
 #include <tuple>
-#include <utility>
 
 #include "kernels/musa/musa_ops_api.h"
-#include "kernels/ops_api.h"
 #include "util/env_var.h"
 
 namespace xllm {
@@ -37,6 +35,30 @@ torch::Tensor get_tensor_with_weight_suffix(const StateDict& state_dict,
     tensor = state_dict.get_tensor(name + ".weight");
   }
   return tensor;
+}
+
+void check_fp8_weight_dtype(const torch::Tensor& weight,
+                            const std::string& name) {
+  if (!weight.defined()) {
+    return;
+  }
+  CHECK_EQ(weight.scalar_type(), torch::kFloat8_e4m3fn)
+      << "Qwen3.5 MUSA MoE supports only float8_e4m3fn weights; " << name
+      << " has dtype " << weight.scalar_type();
+}
+
+void check_expert_fp8_weight_dtypes(const StateDict& state_dict,
+                                    int64_t start_expert_id,
+                                    int64_t num_experts) {
+  for (int64_t index = 0; index < num_experts; ++index) {
+    const std::string prefix = std::to_string(start_expert_id + index) + ".";
+    check_fp8_weight_dtype(state_dict.get_tensor(prefix + "gate_proj.weight"),
+                           prefix + "gate_proj.weight");
+    check_fp8_weight_dtype(state_dict.get_tensor(prefix + "up_proj.weight"),
+                           prefix + "up_proj.weight");
+    check_fp8_weight_dtype(state_dict.get_tensor(prefix + "down_proj.weight"),
+                           prefix + "down_proj.weight");
+  }
 }
 
 constexpr int64_t kMaxChunkTokens = 1024;
@@ -150,8 +172,32 @@ bool use_moe_topk(int64_t num_tokens,
   return false;
 }
 
-bool use_fused_shared_expert_gate(int64_t num_tokens) {
-  return num_tokens == 1;
+bool is_16byte_aligned(const torch::Tensor& tensor) {
+  return reinterpret_cast<std::uintptr_t>(tensor.data_ptr()) % 16 == 0;
+}
+
+bool use_fused_shared_expert_gate(const torch::Tensor& shared_output,
+                                  const torch::Tensor& hidden_states,
+                                  const torch::Tensor& gate_weight) {
+  if (!shared_output.defined() || !hidden_states.defined() ||
+      !gate_weight.defined()) {
+    return false;
+  }
+
+  const torch::ScalarType dtype = shared_output.scalar_type();
+  return shared_output.dim() == 2 && hidden_states.dim() == 2 &&
+         shared_output.sizes() == hidden_states.sizes() &&
+         gate_weight.dim() == 2 && gate_weight.size(0) == 1 &&
+         gate_weight.size(1) == hidden_states.size(1) &&
+         dtype == hidden_states.scalar_type() &&
+         dtype == gate_weight.scalar_type() &&
+         (dtype == torch::kFloat16 || dtype == torch::kBFloat16) &&
+         shared_output.device() == hidden_states.device() &&
+         shared_output.device() == gate_weight.device() &&
+         shared_output.is_contiguous() && hidden_states.is_contiguous() &&
+         gate_weight.is_contiguous() && hidden_states.size(1) % 8 == 0 &&
+         is_16byte_aligned(shared_output) && is_16byte_aligned(hidden_states) &&
+         is_16byte_aligned(gate_weight);
 }
 
 }  // namespace
@@ -273,6 +319,8 @@ void Qwen3_5FusedMoEImpl::load_routed_weights(const StateDict& mlp_state_dict) {
   const int64_t start_expert_id = start_expert_id_;
   const int64_t num_experts_per_rank = num_experts_per_rank_;
   if (use_fp8_) {
+    check_expert_fp8_weight_dtypes(
+        state_dict, start_expert_id, num_experts_per_rank);
     // FP8 Qwen3.5 checkpoints store one gate/up/down tensor per expert.  The
     // Mate layout is [gate, up] (SwiGLU convention).
     const std::vector<std::string> prefixes = {"gate_proj.", "up_proj."};
@@ -292,6 +340,7 @@ void Qwen3_5FusedMoEImpl::load_routed_weights(const StateDict& mlp_state_dict) {
         packed_scale = state_dict.get_tensor("gate_up_proj_scale_inv");
       }
       if (packed.defined() && packed_scale.defined()) {
+        check_fp8_weight_dtype(packed, "gate_up_proj.weight");
         CHECK_EQ(packed.sizes(), w13_.sizes());
         CHECK_EQ(packed_scale.sizes(), w13_scale_inv_.sizes());
         w13_.copy_(packed);
@@ -307,6 +356,7 @@ void Qwen3_5FusedMoEImpl::load_routed_weights(const StateDict& mlp_state_dict) {
         packed_scale = state_dict.get_tensor("down_proj_scale_inv");
       }
       if (packed.defined() && packed_scale.defined()) {
+        check_fp8_weight_dtype(packed, "down_proj.weight");
         CHECK_EQ(packed.sizes(), w2_.sizes());
         CHECK_EQ(packed_scale.sizes(), w2_scale_inv_.sizes());
         w2_.copy_(packed);
@@ -558,7 +608,8 @@ torch::Tensor Qwen3_5FusedMoEImpl::forward_chunk(
     torch::Tensor activated;
     activation_->forward(gate_up, activated);
     auto [activated_fp8, activated_scale] =
-        xllm::kernel::per_token_group_quant_fp8(activated, 128);
+        xllm::kernel::musa::per_token_group_quant_fp8(activated,
+                                                      /*group_size=*/128);
     auto down = xllm::kernel::musa::contiguous_moe_gemm_fp8(
         activated_fp8,
         activated_scale,
@@ -676,7 +727,8 @@ torch::Tensor Qwen3_5FusedMoEImpl::forward_chunk(
     auto sorted_hidden =
         hidden_states.index_select(0, sorted_token_indices).contiguous();
     auto [sorted_hidden_fp8, sorted_hidden_scale] =
-        xllm::kernel::per_token_group_quant_fp8(sorted_hidden, 128);
+        xllm::kernel::musa::per_token_group_quant_fp8(sorted_hidden,
+                                                      /*group_size=*/128);
     return run_contiguous_fp8(sorted_hidden_fp8,
                               sorted_hidden_scale,
                               std::get<0>(route_index),
@@ -713,7 +765,8 @@ torch::Tensor Qwen3_5FusedMoEImpl::forward_chunk(
   torch::Tensor gate_up;
   if (use_fp8_) {
     auto [expanded_fp8, expanded_scale] =
-        xllm::kernel::per_token_group_quant_fp8(expanded, 128);
+        xllm::kernel::musa::per_token_group_quant_fp8(expanded,
+                                                      /*group_size=*/128);
     gate_up =
         xllm::kernel::musa::masked_moe_gemm_fp8(expanded_fp8,
                                                 expanded_scale,
@@ -737,7 +790,8 @@ torch::Tensor Qwen3_5FusedMoEImpl::forward_chunk(
   torch::Tensor down;
   if (use_fp8_) {
     auto [activated_fp8, activated_scale] =
-        xllm::kernel::per_token_group_quant_fp8(activated, 128);
+        xllm::kernel::musa::per_token_group_quant_fp8(activated,
+                                                      /*group_size=*/128);
     down = xllm::kernel::musa::masked_moe_gemm_fp8(activated_fp8,
                                                    activated_scale,
                                                    w2_,
@@ -800,7 +854,8 @@ torch::Tensor Qwen3_5FusedMoEImpl::forward(
   torch::Tensor shared;
   {
     shared = shared_experts_->forward(hidden_states);
-    if (use_fused_shared_expert_gate(hidden_states.size(0))) {
+    if (use_fused_shared_expert_gate(
+            shared, hidden_states, shared_expert_gate_->weight)) {
       xllm::kernel::musa::fused_shared_expert_gate_inplace(
           shared, hidden_states, shared_expert_gate_->weight);
     } else {

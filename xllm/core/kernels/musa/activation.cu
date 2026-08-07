@@ -13,11 +13,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include <ATen/ops/mv.h>
+#include <ATen/ops/swish_glu.h>
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/cuda.h>
 
 #include <cstdint>
+#include <vector>
 
 #include "core/kernels/cuda/device_utils.cuh"
 #include "core/kernels/musa/musa_ops_api.h"
@@ -350,6 +352,8 @@ void fused_shared_expert_gate_inplace(torch::Tensor& shared_output,
       shared_output, hidden_states, gate_weight);
 }
 
+namespace {
+
 void act_and_mul(torch::Tensor out,
                  torch::Tensor input,
                  const std::string& act_mode) {
@@ -366,6 +370,38 @@ void act_and_mul(torch::Tensor out,
   } else if (act_mode == "gelu_tanh" || act_mode == "gelu_pytorch_tanh") {
     gelu_tanh_and_mul(out, input);
   }
+}
+
+}  // namespace
+
+void active(torch::Tensor& output,
+            const torch::Tensor& input,
+            const std::string& act_mode,
+            bool is_gated) {
+  CHECK(is_gated) << "MUSA activation requires a gated input.";
+  if (act_mode == "silu" || act_mode == "swiglu") {
+    output = at::swish_glu(input);
+    return;
+  }
+
+  CHECK(input.defined()) << "MUSA activation input is undefined.";
+  CHECK_GT(input.dim(), 0) << "MUSA activation input must have a dimension.";
+  CHECK_EQ(input.size(-1) % 2, 0)
+      << "MUSA gated activation input dimension must be even.";
+  CHECK(input.is_contiguous()) << "MUSA activation input must be contiguous.";
+  std::vector<int64_t> output_shape = input.sizes().vec();
+  output_shape.back() /= 2;
+  if (!output.defined()) {
+    output = torch::empty(output_shape, input.options());
+  }
+  CHECK(output.sizes().vec() == output_shape)
+      << "MUSA activation output shape mismatch.";
+  CHECK_EQ(output.scalar_type(), input.scalar_type())
+      << "MUSA activation output dtype mismatch.";
+  CHECK(output.device() == input.device())
+      << "MUSA activation output device mismatch.";
+  CHECK(output.is_contiguous()) << "MUSA activation output must be contiguous.";
+  act_and_mul(output, input, act_mode);
 }
 
 torch::Tensor matmul(torch::Tensor a,

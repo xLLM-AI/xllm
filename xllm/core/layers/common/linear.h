@@ -119,6 +119,9 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
   DEFINE_FUSED_WEIGHT(weight_scale);  // FP8 weight scale
   DEFINE_FUSED_WEIGHT(
       input_scale);  // FP8 input (activation) scale for static quantization
+#if defined(USE_MUSA)
+  DEFINE_FUSED_WEIGHT(weight_scale_inv);
+#endif
 
   // NPU static W8A8 parameters.
   DEFINE_FUSED_WEIGHT(input_offset);  // Activation zero-point for npu_quantize.
@@ -147,6 +150,10 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
   at::ScalarType output_dtype_;
   LinearExtraArgs linear_extra_args_;
   std::optional<std::string> resolved_weight_quant_method_;
+#if defined(USE_MUSA)
+  bool block_fp8_resolved_unquantized_ = false;
+  mutable torch::Tensor matmul_output_buffer_;
+#endif
 };
 TORCH_MODULE(ColumnParallelLinear);
 
@@ -203,6 +210,9 @@ class QKVParallelLinearImpl : public torch::nn::Module {
   DEFINE_FUSED_WEIGHT(weight_scale);  // FP8 weight scale
   DEFINE_FUSED_WEIGHT(
       input_scale);  // FP8 input (activation) scale for static quantization
+#if defined(USE_MUSA)
+  DEFINE_FUSED_WEIGHT(weight_scale_inv);
+#endif
 
   // NPU static W8A8 parameters.
   DEFINE_FUSED_WEIGHT(input_offset);  // Activation zero-point for npu_quantize.
@@ -232,6 +242,10 @@ class QKVParallelLinearImpl : public torch::nn::Module {
   QuantArgs quant_args_;
   at::ScalarType output_dtype_;
   std::optional<std::string> resolved_weight_quant_method_;
+#if defined(USE_MUSA)
+  bool block_fp8_resolved_unquantized_ = false;
+  mutable torch::Tensor matmul_output_buffer_;
+#endif
 };
 TORCH_MODULE(QKVParallelLinear);
 
@@ -312,6 +326,9 @@ class RowParallelLinearImpl : public torch::nn::Module {
   DEFINE_FUSED_WEIGHT(weight_scale);  // FP8 weight scale
   DEFINE_FUSED_WEIGHT(
       input_scale);  // FP8 input (activation) scale for static quantization
+#if defined(USE_MUSA)
+  DEFINE_WEIGHT(weight_scale_inv);
+#endif
 
   // NPU static W8A8 parameters.
   DEFINE_WEIGHT(input_offset);  // Activation zero-point for npu_quantize.
@@ -341,6 +358,10 @@ class RowParallelLinearImpl : public torch::nn::Module {
   at::ScalarType output_dtype_;
   LinearExtraArgs linear_extra_args_;
   std::optional<std::string> resolved_weight_quant_method_;
+#if defined(USE_MUSA)
+  bool block_fp8_resolved_unquantized_ = false;
+  mutable torch::Tensor matmul_output_buffer_;
+#endif
   mutable torch::Tensor mmrs_weight_t_;
 };
 TORCH_MODULE(RowParallelLinear);
@@ -388,6 +409,9 @@ class ReplicatedLinearImpl : public torch::nn::Module {
   torch::TensorOptions options_;
   at::ScalarType output_dtype_;
   std::optional<std::string> resolved_weight_quant_method_;
+#if defined(USE_MUSA)
+  mutable torch::Tensor matmul_output_buffer_;
+#endif
 };
 TORCH_MODULE(ReplicatedLinear);
 

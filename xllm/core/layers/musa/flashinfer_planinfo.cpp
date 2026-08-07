@@ -24,17 +24,21 @@ limitations under the License.
 #include "core/util/utils.h"
 #include "kernels/musa/musa_tvmffi_stream.h"
 #include "layers/cuda/flashinfer_workspace.h"
+#include "layers/musa/attention_metadata.h"
 
-using namespace xllm::kernel::musa;
+namespace xllm::layer::musa::flashinfer {
+
+using ::xllm::kernel::musa::get_batch_decode_uri;
+using ::xllm::kernel::musa::get_batch_prefill_uri;
+using ::xllm::kernel::musa::get_cache_buffer;
+using ::xllm::kernel::musa::get_function;
+using ::xllm::kernel::musa::to_ffi_tensor;
+using ::xllm::kernel::musa::TvmffiStreamGuard;
+using ::xllm::layer::flashinfer::FlashinferWorkspace;
 
 namespace {
 
-// Helper function to deep copy ffi::Array<int64_t> to avoid lifetime issues
-// with TVM runtime memory management
-// This function immediately copies all data to avoid any dependency on TVM
-// runtime
 ffi::Array<int64_t> deep_copy_plan_info(const ffi::Array<int64_t>& src) {
-  // Get size first - this might fail if Array is invalid
   if (!src.defined()) {
     LOG(FATAL) << "src is not defined";
     return ffi::Array<int64_t>();
@@ -45,18 +49,12 @@ ffi::Array<int64_t> deep_copy_plan_info(const ffi::Array<int64_t>& src) {
     return ffi::Array<int64_t>();
   }
 
-  // Immediately extract all data to a vector to avoid any dependency on TVM
-  // runtime
   std::vector<int64_t> temp_vec;
   temp_vec.reserve(src_size);
-  // Use range-based for loop which is safer and more efficient
-  // This immediately copies all elements before any potential invalidation
   for (const auto& elem : src) {
     temp_vec.push_back(elem);
   }
 
-  // Create a new Array from the vector, which will have independent memory
-  // This Array will not depend on TVM runtime lifetime
   return ffi::Array<int64_t>(temp_vec.begin(), temp_vec.end());
 }
 
@@ -75,11 +73,9 @@ torch::Tensor get_kv_len_arr_host(
 
 }  // namespace
 
-namespace xllm::layer::flashinfer {
-
 void update_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
                               const std::string& backend,
-                              const AttentionMetadata& attn_meta,
+                              const ::xllm::layer::AttentionMetadata& attn_meta,
                               torch::ScalarType query_dtype,
                               torch::ScalarType key_dtype,
                               torch::ScalarType output_dtype,
@@ -130,10 +126,6 @@ void update_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
   const int64_t batch_size = qo_indptr_host.size(0) - 1;
 
   auto plan_func = get_function(plan_info->uri, "plan");
-  // Demoted from LOG(INFO) -- this fires once per full-attention layer per
-  // prefill step and adds non-trivial latency (glog mutex + sink write) on the
-  // hot path. Re-enable with `--v=kGraphExecutorLogVerboseLevel` when
-  // diagnosing FFI plan() shape/dtype mismatches.
   VLOG(kGraphExecutorLogVerboseLevel)
       << "[FFI-TRACE] prefill plan() uri=" << plan_info->uri
       << " layer_id=" << plan_info->layer_id
@@ -194,21 +186,22 @@ void update_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
   plan_info->plan_info = deep_copy_plan_info(plan_result);
 }
 
-void update_chunked_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
-                                      const std::string& backend,
-                                      const AttentionMetadata& attn_meta,
-                                      torch::ScalarType query_dtype,
-                                      torch::ScalarType key_dtype,
-                                      torch::ScalarType output_dtype,
-                                      int32_t head_dim_qk,
-                                      int32_t head_dim_vo,
-                                      int32_t num_qo_heads,
-                                      int32_t num_kv_heads,
-                                      int32_t block_size,
-                                      int32_t window_size_left,
-                                      bool enable_cuda_graph,
-                                      bool causal,
-                                      int32_t max_kv_blocks_per_seq) {
+void update_chunked_prefill_plan_info(
+    std::shared_ptr<PlanInfo> plan_info,
+    const std::string& backend,
+    const ::xllm::layer::AttentionMetadata& attn_meta,
+    torch::ScalarType query_dtype,
+    torch::ScalarType key_dtype,
+    torch::ScalarType output_dtype,
+    int32_t head_dim_qk,
+    int32_t head_dim_vo,
+    int32_t num_qo_heads,
+    int32_t num_kv_heads,
+    int32_t block_size,
+    int32_t window_size_left,
+    bool enable_cuda_graph,
+    bool causal,
+    int32_t max_kv_blocks_per_seq) {
   CHECK(plan_info->layer_id != -1) << "Need to set layer_id to PlanInfo.";
   if (plan_info->plan_info.size() > 0) {
     return;
@@ -251,18 +244,15 @@ void update_chunked_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
     qo_indptr_host = get_cache_buffer(batch_size + 1, torch::kCPU);
   }
 
+  const auto& musa_metadata =
+      ::xllm::layer::musa::get_attention_metadata(attn_meta);
   torch::Tensor paged_kv_indptr_host =
-      attn_meta.paged_kv_indptr.to(torch::kCPU);
+      musa_metadata.paged_kv_indptr_host.defined()
+          ? musa_metadata.paged_kv_indptr_host
+          : attn_meta.paged_kv_indptr.to(torch::kCPU);
   torch::Tensor kv_len_arr_host = get_kv_len_arr_host(attn_meta);
 
-  // CUDA-graph correctness: same rationale as update_decode_plan_info. The
-  // plan is cached on PlanInfo and reused by every captured replay; if the
-  // warmup-time layout has fewer KV blocks than future replays will need
-  // (e.g., decode after a block crossover), the cached plan dispatches
-  // insufficient work and the captured attention kernel silently underreads.
-  // Override paged_kv_indptr_host with the worst-case [0, max, 2*max, ...,
-  // bs*max] layout for the plan call so the cached plan covers any future
-  // runtime block count <= max_kv_blocks_per_seq.
+  // Capture a plan large enough for future KV block growth.
   if (enable_cuda_graph && max_kv_blocks_per_seq > 0 && batch_size > 0 &&
       paged_kv_indptr_host.defined()) {
     auto opts = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
@@ -319,7 +309,7 @@ void update_chunked_prefill_plan_info(std::shared_ptr<PlanInfo> plan_info,
 
 void update_decode_plan_info(std::shared_ptr<PlanInfo> plan_info,
                              const std::string& backend,
-                             const AttentionMetadata& attn_meta,
+                             const ::xllm::layer::AttentionMetadata& attn_meta,
                              torch::ScalarType query_dtype,
                              torch::ScalarType key_dtype,
                              torch::ScalarType output_dtype,
@@ -367,9 +357,6 @@ void update_decode_plan_info(std::shared_ptr<PlanInfo> plan_info,
         FlashinferWorkspace::get_instance().get_float_workspace_buffer());
     auto int_workspace_buffer = to_ffi_tensor(
         FlashinferWorkspace::get_instance().get_int_workspace_buffer());
-    auto page_locked_int_workspace_buffer =
-        to_ffi_tensor(FlashinferWorkspace::get_instance()
-                          .get_page_locked_int_workspace_buffer());
 
     plan_info->uri =
         get_batch_decode_uri(query_dtype,
@@ -382,39 +369,19 @@ void update_decode_plan_info(std::shared_ptr<PlanInfo> plan_info,
                              /*use_sliding_window=*/false,
                              /*use_logits_soft_cap=*/false);
 
-    // Prefer the host mirror pre-staged by AttentionMetadataBuilder (see Plan
-    // v2 in attention_metadata.h / batch_input_builder.cpp). The Mate FFI
-    // decode `plan` consumes a kDLCPU pointer; using the cache avoids one more
-    // D2H per forward step (plan runs once at layer 0, gated by
-    // plan_info->plan_info being empty). Critical for CUDA graph capture: any
-    // .to(kCPU) inside the captured region would abort capture. Fall back to a
-    // lazy D2H for callers that have not opted in (e.g. legacy input builders).
+    const auto& musa_metadata =
+        ::xllm::layer::musa::get_attention_metadata(attn_meta);
     torch::Tensor paged_kv_indptr_host =
-        attn_meta.paged_kv_indptr_host.defined()
-            ? attn_meta.paged_kv_indptr_host
+        musa_metadata.paged_kv_indptr_host.defined()
+            ? musa_metadata.paged_kv_indptr_host
             : attn_meta.paged_kv_indptr.to(torch::kCPU);
     const int64_t batch_size = attn_meta.paged_kv_last_page_len.size(0);
 
-    // CUDA-graph correctness: the plan_info computed here is cached on
-    // PlanInfo (see early-return at the top of this function) and reused by
-    // every captured replay. The plan function statically dispatches attention
-    // work based on `paged_kv_indptr_host[batch_size]` (the cumulative block
-    // count across all sequences). If the warmup-time layout uses 1 KV block,
-    // the plan only dispatches enough work for 1 block per sequence -- and the
-    // captured Mate FFI batch_decode kernel then silently underreads when the
-    // KV cache later crosses a block boundary at replay time (e.g., decode
-    // step 38 of a question with prefill=27 and block_size=64). Override the
-    // host indptr here with the worst-case layout for this graph instance so
-    // the plan is valid for any runtime block count <= max_kv_blocks_per_seq.
-    // The actual per-replay indptr/indices live in persistent device tensors
-    // refreshed by update() each call, and the attention kernel iterates over
-    // those at runtime.
+    // Capture a plan large enough for future KV block growth.
     if (enable_cuda_graph && max_kv_blocks_per_seq > 0 && batch_size > 0) {
       auto opts =
           torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
       torch::Tensor synth_indptr_host = torch::empty({batch_size + 1}, opts);
-      // Fill [0, max, 2*max, ..., bs*max]. Use int32 view since plan() and the
-      // upstream pinned-host buffers all use int32 for indptr.
       auto* p = synth_indptr_host.data_ptr<int32_t>();
       for (int64_t i = 0; i <= batch_size; ++i) {
         p[i] = static_cast<int32_t>(i * max_kv_blocks_per_seq);
@@ -435,16 +402,6 @@ void update_decode_plan_info(std::shared_ptr<PlanInfo> plan_info,
     torch::Tensor empty_kv_data =
         torch::empty({0}, torch::TensorOptions().dtype(key_dtype));
 
-    // mate's MateFlashinferDecodePlan signature takes only 2 workspace tensors
-    // (not 3): float_workspace_buffer, int_workspace_buffer,
-    // paged_kv_indptr_host, ...  Drop page_locked_int_workspace_buffer here so
-    // the FFI arg count matches mate's 14-arg `plan` export.
-    //
-    // Demoted from LOG(INFO) -- this fires once per full-attention layer per
-    // decode step (36 layers x every output token for Qwen3.5-27B), so the
-    // glog mutex + sink write adds measurable TPOT. Re-enable with
-    // `--v=kGraphExecutorLogVerboseLevel` when diagnosing FFI plan()
-    // shape/dtype mismatches.
     VLOG(kGraphExecutorLogVerboseLevel)
         << "[FFI-TRACE] decode plan() uri=" << plan_info->uri
         << " layer_id=" << plan_info->layer_id
@@ -481,4 +438,4 @@ void update_decode_plan_info(std::shared_ptr<PlanInfo> plan_info,
   }
 }
 
-}  // namespace xllm::layer::flashinfer
+}  // namespace xllm::layer::musa::flashinfer
