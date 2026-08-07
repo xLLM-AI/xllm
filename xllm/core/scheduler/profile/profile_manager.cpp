@@ -351,13 +351,9 @@ void ProfileManager::profile_step_time(bool if_dump_to_file) {
   for (int32_t token_length = 2; token_length < profile_max_prompt_length;
        token_length += profile_length_step_) {
     for (int32_t batch_size = 1; batch_size < max_batch_size; batch_size += 2) {
-      // Use run_decode_request to build genuine decode-stage requests (each
-      // seq prefills token_length-1 then decodes 1 token) instead of
-      // approximating via run_request.
-      std::vector<int32_t> total_length_vec(batch_size, token_length);
       double latency_mean = 0;
       for (int32_t k = 0; k < profile_count_per_step_; k++) {
-        latency_mean += run_decode_request(total_length_vec);
+        latency_mean += run_request(token_length, token_length - 1, batch_size);
       }
       latency_mean /= profile_count_per_step_;
       time_profiling_data.emplace_back(token_length, batch_size, latency_mean);
