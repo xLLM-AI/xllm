@@ -67,6 +67,11 @@ def _register_builtin_models() -> None:
         "qwen3",
     )
     _register_model_path(
+        "xllm.python.models.qwen3_vl",
+        "Qwen3VLForConditionalGeneration",
+        "qwen3_vl",
+    )
+    _register_model_path(
         "xllm.python.models.deepseek_v32",
         "DeepseekV3ForCausalLM",
         "deepseek_v32",
