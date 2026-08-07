@@ -86,10 +86,9 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                                    ForwardInput& processed_inputs) override;
 
  protected:
-  // MTP composite: leaves own NpuCpPlan::prepare.
-  bool owns_npu_cp_plan_build() const override;
+  // MTP composite: leaves own model-specific NPU input preparation.
+  bool owns_npu_parallel_input_prepare() const override;
 
- protected:
   std::optional<ForwardOutput> step_prefill(const ForwardInput& input) override;
   std::optional<ForwardOutput> step_decode(const ForwardInput& inputs) override;
   std::optional<ForwardOutput> step_empty(const ForwardInput& inputs) override;
@@ -169,7 +168,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // Prepare target validate input from cached target context.
   void prepare_validate_inputs(const ForwardInput& inputs,
                                ForwardInput& validate_inputs,
-                               bool static_graph_tasks_prepared = false);
+                               bool static_graph_tasks_prepared = false,
+                               bool record_ready_event = true);
   void prepare_validate_inputs(const ForwardInput& inputs,
                                ForwardInput& validate_inputs,
                                const std::vector<int32_t>& per_seq_val_tokens);
@@ -210,6 +210,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   struct PendingDraftContext {
     std::vector<int32_t> embedding_ids;
     std::vector<std::string> request_ids;
+    std::vector<int32_t> dp_global_token_nums;
+    std::vector<int32_t> raw_dp_global_token_nums;
     std::optional<ForwardOutput> output;
     ForwardInput prepared_input;
   };
@@ -273,10 +275,12 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   bool enable_opt_validate_probs_ = false;
   std::unique_ptr<AdaptiveSpeculativeController> adaptive_spec_controller_;
 
-  // Classified once when the target model is loaded. Decode-path decisions
-  // only read this closed policy and never traverse the model implementation.
+  // Classified once when the corresponding models are loaded. Decode-path
+  // decisions only read these closed policies.
   mtp_async::TargetSpecVerifyMode target_spec_verify_mode_ =
       mtp_async::TargetSpecVerifyMode::GENERIC;
+  mtp_async::CombinedDraftExecutionPath combined_draft_execution_path_ =
+      mtp_async::CombinedDraftExecutionPath::UNSUPPORTED;
 
 #if defined(USE_NPU)
   // Stable-address sources consumed by the target ACL graph's leading input

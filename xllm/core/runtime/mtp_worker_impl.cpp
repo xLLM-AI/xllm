@@ -638,10 +638,13 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
 
   if (draft_impl_ != nullptr &&
       draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
+    combined_draft_execution_path_ =
+        mtp_async::classify_combined_draft_execution_path(
+            draft_impl_->context_.get_model_args().model_type());
     const bool draft_owns_shared_weights =
         options_.enable_mtp_draft_body_tp1() &&
-        is_qwen3_5_draft_model_type(
-            draft_impl_->context_.get_model_args().model_type());
+        combined_draft_execution_path_ ==
+            mtp_async::CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION;
     // Qwen3.5 draft checkpoints contain complete embedding and LMHead weights.
     // Other MTP drafts retain their existing target-weight sharing contract;
     // only their transformer body is replicated with TP1 parallel arguments.
@@ -970,7 +973,7 @@ void MTPWorkerImpl::prepare_work_before_execute(const ForwardInput& input,
   SpeculativeWorkerImpl::prepare_work_before_execute(input, processed_input);
 }
 
-bool MTPWorkerImpl::owns_npu_cp_plan_build() const { return false; }
+bool MTPWorkerImpl::owns_npu_parallel_input_prepare() const { return false; }
 
 std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
     const ForwardInput& input) {
@@ -1298,7 +1301,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
   if (use_prelaunched_first_draft) {
     // The first draft was fully prepared and submitted by the preceding
     // run_validate(). Host metadata is corrected below after the accepted-token
-    // update; it is only needed for draft steps 1..N-1 and target verification.
+    // update; continuous DSA drafts use device correction, while target
+    // verification still consumes the exact Host metadata.
   } else if (use_device_target_context) {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
 
@@ -1375,6 +1379,60 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
     prepare_draft_extend_inputs(input, last_states, current_draft_input);
   }
 
+  const bool use_continuous_dsa_drafts =
+      (use_device_target_context || use_prelaunched_first_draft) &&
+      combined_draft_execution_path_ ==
+          mtp_async::CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION;
+  std::vector<ForwardInput> later_draft_inputs;
+  torch::Tensor accepted_base_positions;
+  torch::Tensor accepted_base_kv_seq_lens;
+  if (use_continuous_dsa_drafts) {
+    later_draft_inputs.resize(num_speculative_tokens);
+    const ForwardInput& combined_draft_input =
+        use_prelaunched_first_draft ? pending_draft_context_.prepared_input
+                                    : current_draft_input;
+    const int64_t batch_size = input.input_params.meta.num_sequences;
+    CHECK_EQ(combined_draft_input.positions.numel(), batch_size * 2)
+        << "combined draft positions must contain [repair,current] rows";
+    CHECK_EQ(
+        combined_draft_input.input_params.attention.device.kv_seq_lens.numel(),
+        batch_size * 2)
+        << "combined draft KV lengths must contain [repair,current] rows";
+    accepted_base_positions =
+        combined_draft_input.positions.view({batch_size, 2}).select(1, 1);
+    accepted_base_kv_seq_lens =
+        combined_draft_input.input_params.attention.device.kv_seq_lens
+            .view({batch_size, 2})
+            .select(1, 1);
+
+    for (int32_t draft_idx = 1; draft_idx < num_speculative_tokens;
+         ++draft_idx) {
+      // Only the fixed B layout is needed on prepare_stream. Reusing offset 0
+      // avoids extending an already conservative Host template past the
+      // scheduler-allocated block range; device metadata is replaced below.
+      prepare_draft_inputs(metadata_template,
+                           later_draft_inputs[draft_idx],
+                           /*position_offset=*/0);
+    }
+  }
+
+  const auto materialize_pending_target_host_state = [&]() {
+    flush_pending_target_context();
+    std::vector<EmbeddingCache::DecodeState> resolved_states =
+        embedding_cache_->read_decode_states(
+            input.input_params.embedding.embedding_ids,
+            input.input_params.embedding.request_ids);
+    // The scheduler input contains the conservative overlap placeholder.
+    // Force cache correction before comparing it with the accepted target.
+    input.token_ids_host = torch::full_like(input.token_ids_host, -1);
+    update_decode_step_input(input, resolved_states);
+    check_mtp_decode_states(resolved_states,
+                            input.input_params.embedding.request_ids,
+                            input.token_ids_host,
+                            /*allow_overlap_fake_token=*/false);
+    metadata_template = input;
+  };
+
   draft_outputs.reserve(num_speculative_tokens);
   const bool reuse_mtp_topk_state = layer::is_mtp_dsa_topk_reuse_enabled(
       draft_impl_->context_.get_model_args());
@@ -1383,7 +1441,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
   for (int32_t draft_idx = 0; draft_idx < num_speculative_tokens; ++draft_idx) {
     const bool is_final_draft = draft_idx == num_speculative_tokens - 1;
     const bool static_graph_tasks_prepared =
-        is_final_draft &&
+        is_final_draft && !use_continuous_dsa_drafts &&
         prepare_static_mtp_graph_tasks_before_final_draft(input);
     if (reuse_mtp_topk_state) {
       current_draft_input.input_params.mtp_topk_state = mtp_topk_state;
@@ -1403,34 +1461,62 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
     }
 
     if ((use_device_target_context || use_prelaunched_first_draft) &&
-        draft_idx == 0) {
+        !use_continuous_dsa_drafts && draft_idx == 0) {
       // The next draft forward is already queued behind target validation.
       // It can start immediately when rejection sampling finishes while the
       // worker materializes the accepted state for later draft/target metadata
       // on CPU.  This synchronization is therefore outside the NPU critical
       // path rather than sitting between target and draft launches.
-      flush_pending_target_context();
-      std::vector<EmbeddingCache::DecodeState> resolved_states =
-          embedding_cache_->read_decode_states(
-              input.input_params.embedding.embedding_ids,
-              input.input_params.embedding.request_ids);
-      // The scheduler input still contains the conservative placeholder used
-      // to launch the first draft.  Materialize the accepted host state before
-      // comparing token ids; otherwise this check compares the new target
-      // result with the intentionally stale overlap template.
-      input.token_ids_host = torch::full_like(input.token_ids_host, -1);
-      update_decode_step_input(input, resolved_states);
-      check_mtp_decode_states(resolved_states,
-                              input.input_params.embedding.request_ids,
-                              input.token_ids_host,
-                              /*allow_overlap_fake_token=*/false);
-      metadata_template = input;
+      materialize_pending_target_host_state();
+    }
+
+    if (use_continuous_dsa_drafts && is_final_draft) {
+      // Queue target metadata before the Host target-context wait. The fixed
+      // template can be copied immediately; its real device values are
+      // corrected after a prepare-stream wait on the previous target event.
+      prepare_validate_inputs(metadata_template,
+                              validate_input,
+                              /*static_graph_tasks_prepared=*/false,
+                              /*record_ready_event=*/false);
+      {
+        c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
+        CHECK(prepare_stream_->wait_event(pending_target_context_.ready_event))
+            << "failed to wait pending target state on prepare stream";
+        mtp_async::prepare_target_verify_from_accepted_state(
+            validate_input,
+            pending_target_context_.accepted_tokens,
+            pending_target_context_.base_positions,
+            pending_target_context_.base_kv_seq_lens,
+            options_.block_size());
+        validate_input.retained_device_tensors = {
+            pending_target_context_.accepted_tokens,
+            pending_target_context_.base_positions,
+            pending_target_context_.base_kv_seq_lens};
+        finish_metadata_prepare(*prepare_stream_, validate_input);
+      }
+
+      // Host cache materialization is still required before staging the next
+      // target context, but it no longer blocks target metadata submission.
+      materialize_pending_target_host_state();
     }
 
     // Overlap next-step input preparation with async draft forward.
     if (is_final_draft) {
-      prepare_validate_inputs(
-          metadata_template, validate_input, static_graph_tasks_prepared);
+      if (!use_continuous_dsa_drafts) {
+        prepare_validate_inputs(
+            metadata_template, validate_input, static_graph_tasks_prepared);
+      }
+    } else if (use_continuous_dsa_drafts) {
+      next_step_input = std::move(later_draft_inputs[draft_idx + 1]);
+      c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+      wait_metadata_ready_event(next_step_input, *compute_stream_);
+      clear_ready_events(next_step_input);
+      mtp_async::prepare_later_draft_from_device_base(next_step_input,
+                                                      input,
+                                                      accepted_base_positions,
+                                                      accepted_base_kv_seq_lens,
+                                                      draft_idx + 1,
+                                                      options_.block_size());
     } else {
       prepare_draft_inputs(metadata_template, next_step_input, draft_idx + 1);
     }
@@ -1439,12 +1525,13 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
         << "draft output is empty in speculative step";
 
     draft_outputs.emplace_back(std::move(draft_output_opt.value()));
+    const SamplingParameters& draft_sampling_params =
+        draft_prepared[draft_idx].sampling_params;
     {
       c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
       if (reuse_mtp_topk_state) {
         mtp_topk_state = specBuilder::select_mtp_topk_state_for_next_step(
-            draft_outputs.back().mtp_topk_state,
-            current_draft_input.sampling_params);
+            draft_outputs.back().mtp_topk_state, draft_sampling_params);
       }
       // Unify this step's draft next_tokens across the consensus group before
       // process_draft_sample_output() compresses the still-full [batch, vocab]
@@ -1453,7 +1540,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
       if (should_broadcast_spec_tokens(
               parallel_args_,
               get_optimization_config().enable_spec_token_broadcast,
-              current_draft_input.sampling_params.all_greedy_sample)) {
+              draft_sampling_params.all_greedy_sample)) {
         SampleOutput& draft_sample = draft_outputs.back().sample_output;
         broadcast_spec_tokens(draft_sample.next_tokens, parallel_args_);
       }
@@ -1981,8 +2068,11 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
     base_positions = validate_input.positions.view({batch_size, num_val_tokens})
                          .select(/*dim=*/1, /*index=*/0)
                          .contiguous();
-    base_kv_seq_lens = validate_kv_seq_lens.flatten().slice(0, 0, batch_size) -
-                       options_.num_speculative_tokens();
+    base_kv_seq_lens = mtp_async::extract_target_base_kv_seq_lens(
+        validate_kv_seq_lens,
+        batch_size,
+        num_val_tokens,
+        use_chunked_prefill_spec_verify_path());
 
     accepted_tokens_host.copy_(val_output.next_tokens,
                                /*non_blocking=*/true);
@@ -2149,20 +2239,19 @@ bool MTPWorkerImpl::supports_combined_first_draft_execution() const {
     return false;
   }
 
-  // The prelaunch builds an eager two-row DECODE input. The ATB speculative
-  // path expects CHUNKED_PREFILL metadata instead, and the current device
-  // target-context prelaunch is rank-local rather than DP-aware.
-  if (::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel() ||
-      parallel_args_.dp_size() > 1) {
+  // The ATB speculative path expects CHUNKED_PREFILL metadata instead of the
+  // eager two-row DECODE input used by the prelaunch.
+  if (::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
     return false;
   }
 
-  const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
-  return mtp_async::classify_combined_draft_execution_path(
-             draft_args.model_type()) ==
-             mtp_async::CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION &&
-         device_.unwrap().is_privateuseone() &&
-         ::xllm::KernelConfig::get_instance().npu_kernel_backend() == "TORCH";
+  const std::string& npu_backend =
+      ::xllm::KernelConfig::get_instance().npu_kernel_backend();
+  return device_.unwrap().is_privateuseone() &&
+         mtp_async::supports_combined_draft_configuration(
+             combined_draft_execution_path_,
+             npu_backend,
+             parallel_args_.dp_size());
 #else
   return false;
 #endif
@@ -2255,6 +2344,10 @@ void MTPWorkerImpl::enqueue_next_first_draft(
   pending_draft_context_.embedding_ids =
       input.input_params.embedding.embedding_ids;
   pending_draft_context_.request_ids = input.input_params.embedding.request_ids;
+  pending_draft_context_.dp_global_token_nums =
+      input.input_params.parallel.dp_global_token_nums;
+  pending_draft_context_.raw_dp_global_token_nums =
+      input.input_params.parallel.raw_dp_global_token_nums;
   pending_draft_context_.output =
       run_llm_no_sync_impl(*draft_impl_,
                            combined_input,
@@ -2271,7 +2364,11 @@ bool MTPWorkerImpl::pending_draft_context_matches(
          pending_draft_context_.embedding_ids ==
              input.input_params.embedding.embedding_ids &&
          pending_draft_context_.request_ids ==
-             input.input_params.embedding.request_ids;
+             input.input_params.embedding.request_ids &&
+         pending_draft_context_.dp_global_token_nums ==
+             input.input_params.parallel.dp_global_token_nums &&
+         pending_draft_context_.raw_dp_global_token_nums ==
+             input.input_params.parallel.raw_dp_global_token_nums;
 }
 
 void MTPWorkerImpl::record_validate_metrics(
@@ -2461,7 +2558,8 @@ void MTPWorkerImpl::update_decode_step_input(
 
 void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
                                             ForwardInput& validate_input,
-                                            bool static_graph_tasks_prepared) {
+                                            bool static_graph_tasks_prepared,
+                                            bool record_ready_event) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   validate_input = input;
   clear_ready_events(validate_input);
@@ -2797,7 +2895,9 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
   input_params.graph.spec_verify_static_graph_tasks_prepared =
       use_explicit_spec_verify_replay_update && static_graph_tasks_prepared;
 #endif
-  finish_metadata_prepare(*prepare_stream_, validate_input);
+  if (record_ready_event) {
+    finish_metadata_prepare(*prepare_stream_, validate_input);
+  }
 }
 
 bool MTPWorkerImpl::prepare_static_mtp_graph_tasks_before_final_draft(
@@ -3237,6 +3337,11 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
     }
   }
 
+#if defined(USE_NPU)
+  // The extend layout is the 2B cache variant during steady overlap decode.
+  draft_impl_->prepare_dp_ep_padding_on_stream(input_params, *prepare_stream_);
+#endif
+
   auto& params = extend_input.sampling_params;
   torch::TensorOptions idx_options =
       params.selected_token_idxes.defined()
@@ -3328,6 +3433,10 @@ void MTPWorkerImpl::prepare_draft_inputs(const ForwardInput& input,
     }
   }
   input_params.attention.rebuild_device_buffer(device_);
+#if defined(USE_NPU)
+  // Later draft steps share the B cache variant.
+  draft_impl_->prepare_dp_ep_padding_on_stream(input_params, *prepare_stream_);
+#endif
   // token_ids is intentionally filled later from the previous draft output.
   draft_input.device_tensors_ready = false;
 

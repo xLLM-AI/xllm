@@ -43,6 +43,7 @@ limitations under the License.
 #include "util/threadpool.h"
 #if defined(USE_NPU)
 #include "framework/kv_cache_transfer/mooncake_weight_transfer.h"
+#include "framework/parallel_state/npu_dp_ep_padding.h"
 #include "layers/npu/loader/rolling_load_manager.h"
 #endif
 
@@ -119,10 +120,16 @@ class WorkerImpl {
   // Per-worker-static configuration handed to NpuCpPlan::prepare(); built once
   // and cached.
   const CpPlanRuntimeConfig& npu_cp_plan_runtime_config() const;
+  // Builds or reuses draft decode padding on the current stream. MTP calls this
+  // while preparing B/2B metadata so the compute stream only observes hits.
+  bool uses_npu_dp_ep_padding() const;
+  void prepare_dp_ep_padding(ModelInputParams& input_params);
+  void prepare_dp_ep_padding_on_stream(ModelInputParams& input_params,
+                                       Stream& prepare_stream);
 #endif
 
-  // False on MTP composite: only leaf workers run NpuCpPlan::prepare.
-  virtual bool owns_npu_cp_plan_build() const { return true; }
+  // False on composites where only leaf workers consume parallel metadata.
+  virtual bool owns_npu_parallel_input_prepare() const { return true; }
 
   // Cached: whether the loaded model advertises NPU model-side CP.
   bool model_supports_model_cp() const;
@@ -285,6 +292,9 @@ class WorkerImpl {
 #endif
 
 #if defined(USE_NPU)
+  static constexpr size_t kDraftDpEpPaddingCacheCapacity = 2;
+  DpEpPaddingCache draft_dp_ep_padding_cache_{kDraftDpEpPaddingCacheCapacity};
+
   bool wakeup_from_remote_weights(const WakeupOptions& options);
   // Complete rolling initialization by delegating to model-owned rolling
   // runtime (manager + buffer): decoder preload, non-decoder reload, and

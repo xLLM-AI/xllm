@@ -533,6 +533,7 @@ struct ForwardInput {
     inputs.skip_sampling_for_logits_only = skip_sampling_for_logits_only;
     inputs.kv_slot_layout = kv_slot_layout;
     inputs.metadata_ready_event = metadata_ready_event;
+    inputs.retained_device_tensors = retained_device_tensors;
   }
 
   void set_host_views(ForwardInput& inputs) const {
@@ -614,6 +615,10 @@ struct ForwardInput {
   // stream. These are local runtime handles and are intentionally not included
   // in proto or shared-memory transport.
   StreamEventPtr metadata_ready_event;
+
+  // Keep cross-stream metadata sources alive through no-sync execution. These
+  // handles are local runtime state and are not serialized.
+  std::vector<torch::Tensor> retained_device_tensors;
 };
 
 // output after forward execution

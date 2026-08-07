@@ -1167,6 +1167,11 @@ void NpuDeepseekV32DecoderLayerImpl::build_node_variant_pack(
   const CpAttentionMeta& cp_attention_meta =
       input_params.parallel.cp_plan.attention_meta();
   const bool use_cp_ep_padding = (cp_size_ > 1 && is_prefill);
+  const bool uses_dsa_attention =
+      (is_prefill ? prefill_param_ : decode_param_).index_n_heads > 0;
+  // DSA passes sequence lengths to LightningIndexer/SparseFlashAttention as
+  // device aclTensors. Only dense MLA converts these inputs from hostData into
+  // aclIntArray metadata.
 
   if (dp_size_ <= 1 && ep_size_ <= 1 || cp_size_ > 1) {
     dp_ep_padding.set_placeholder(tensor_placeholder_);
@@ -1202,14 +1207,18 @@ void NpuDeepseekV32DecoderLayerImpl::build_node_variant_pack(
            nullptr)) {
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11) =
         atb_speed::Utils::AtTensor2Tensor(int_tensor_placeholder_);
-    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11).hostData =
-        const_cast<int32_t*>(placeholder_vec_.data());
+    if (!uses_dsa_attention) {
+      node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11).hostData =
+          const_cast<int32_t*>(placeholder_vec_.data());
+    }
   } else {
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11) =
         atb_speed::Utils::AtTensor2Tensor(
             input_params.attention.device.kv_seq_lens);
-    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11).hostData =
-        const_cast<int32_t*>(input_params.attention.host.kv_seq_lens.data());
+    if (!uses_dsa_attention) {
+      node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 11).hostData =
+          const_cast<int32_t*>(input_params.attention.host.kv_seq_lens.data());
+    }
   }
 
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 12) =
@@ -1242,14 +1251,18 @@ void NpuDeepseekV32DecoderLayerImpl::build_node_variant_pack(
              nullptr)) {
       node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 17) =
           atb_speed::Utils::AtTensor2Tensor(int_tensor_placeholder_);
-      node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 17).hostData =
-          const_cast<int32_t*>(placeholder_vec_.data());
+      if (!uses_dsa_attention) {
+        node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 17).hostData =
+            const_cast<int32_t*>(placeholder_vec_.data());
+      }
     } else {
       node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 17) =
           atb_speed::Utils::AtTensor2Tensor(
               input_params.attention.device.q_seq_lens);
-      node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 17).hostData =
-          const_cast<int32_t*>(input_params.attention.host.q_seq_lens.data());
+      if (!uses_dsa_attention) {
+        node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 17).hostData =
+            const_cast<int32_t*>(input_params.attention.host.q_seq_lens.data());
+      }
     }
   } else {
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 17) =

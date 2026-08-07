@@ -43,10 +43,16 @@ int64_t speculative_verify_block_table_capacity(int64_t max_position_embeddings,
 enum class CombinedDraftExecutionPath {
   UNSUPPORTED,
   QWEN3_5_PAGED_ATTENTION,
+  GLM_MOE_DSA_SPARSE_ATTENTION,
 };
 
 CombinedDraftExecutionPath classify_combined_draft_execution_path(
     std::string_view model_type);
+
+bool supports_combined_draft_configuration(
+    CombinedDraftExecutionPath execution_path,
+    std::string_view npu_backend,
+    int32_t dp_size);
 
 // Materialize proposer-owned token columns into the row-major target verify
 // input. Graph replay normally performs this copy internally; eager fallback
@@ -54,6 +60,15 @@ CombinedDraftExecutionPath classify_combined_draft_execution_path(
 torch::Tensor materialize_speculative_verify_tokens(
     const torch::Tensor& verify_tokens,
     const std::vector<torch::Tensor>& draft_token_sources);
+
+// Recover the KV length at the first target-verify token. Chunked-prefill
+// stores one post-verify length per sequence, while decode stores one length
+// per expanded verification row.
+torch::Tensor extract_target_base_kv_seq_lens(
+    const torch::Tensor& validate_kv_seq_lens,
+    int64_t batch_size,
+    int64_t num_validate_tokens,
+    bool use_chunked_prefill);
 
 // Device-resident state derived from target verification. base_positions and
 // base_kv_seq_lens point at the logical position immediately after the accepted
@@ -68,6 +83,18 @@ struct AcceptedState {
   torch::Tensor base_positions;
   torch::Tensor base_kv_seq_lens;
 };
+
+struct AcceptedTokenMetadata {
+  torch::Tensor accepted_lengths;
+  torch::Tensor last_tokens;
+  torch::Tensor base_positions;
+  torch::Tensor base_kv_seq_lens;
+};
+
+AcceptedTokenMetadata build_accepted_token_metadata(
+    const torch::Tensor& accepted_tokens,
+    const torch::Tensor& base_positions,
+    const torch::Tensor& base_kv_seq_lens);
 
 AcceptedState build_accepted_state(const torch::Tensor& accepted_tokens,
                                    const torch::Tensor& accepted_embeddings,

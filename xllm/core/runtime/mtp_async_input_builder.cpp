@@ -192,4 +192,94 @@ void prepare_next_draft_from_accepted_state(
 #endif
 }
 
+void prepare_later_draft_from_device_base(
+    ForwardInput& draft_input,
+    const ForwardInput& block_table_source,
+    const torch::Tensor& base_positions,
+    const torch::Tensor& base_kv_seq_lens,
+    int32_t position_offset,
+    int32_t block_size) {
+  CHECK(base_positions.defined());
+  CHECK(base_kv_seq_lens.defined());
+  CHECK_EQ(base_positions.dim(), 1);
+  CHECK_EQ(base_kv_seq_lens.dim(), 1);
+  CHECK_EQ(base_positions.numel(), base_kv_seq_lens.numel());
+  CHECK_GT(position_offset, 0);
+
+  torch::Tensor row_positions =
+      (base_positions + position_offset).unsqueeze(/*dim=*/1);
+  draft_input.positions =
+      row_positions.flatten().to(draft_input.positions.options());
+  draft_input.input_params.attention.device.new_cache_slots =
+      build_device_cache_slots(block_table_source, row_positions, block_size);
+  draft_input.input_params.attention.device.kv_seq_lens =
+      (base_kv_seq_lens + position_offset)
+          .to(draft_input.input_params.attention.device.kv_seq_lens.options());
+}
+
+void prepare_target_verify_from_accepted_state(
+    ForwardInput& validate_input,
+    const torch::Tensor& accepted_tokens,
+    const torch::Tensor& base_positions,
+    const torch::Tensor& base_kv_seq_lens,
+    int32_t block_size) {
+  CHECK(validate_input.token_ids.defined());
+  CHECK(validate_input.positions.defined());
+  CHECK_EQ(accepted_tokens.dim(), 2);
+  const int64_t batch_size = accepted_tokens.size(0);
+  const int64_t validate_width = accepted_tokens.size(1);
+  CHECK_EQ(validate_input.token_ids.numel(), batch_size * validate_width);
+  CHECK_EQ(validate_input.positions.numel(), batch_size * validate_width);
+
+  AcceptedTokenMetadata metadata = build_accepted_token_metadata(
+      accepted_tokens, base_positions, base_kv_seq_lens);
+  torch::Tensor template_position_rows =
+      validate_input.positions.view({batch_size, validate_width});
+  torch::Tensor position_delta =
+      metadata.base_positions -
+      template_position_rows.select(/*dim=*/1, /*index=*/0).to(torch::kLong);
+  torch::Tensor position_rows =
+      template_position_rows.to(torch::kLong) + position_delta.unsqueeze(1);
+  validate_input.positions =
+      position_rows.flatten().to(validate_input.positions.options());
+  if (validate_input.input_params.multi_block_tables.empty()) {
+    const torch::Tensor& expanded_block_tables =
+        validate_input.input_params.attention.device.block_tables;
+    CHECK(expanded_block_tables.defined());
+    CHECK_EQ(expanded_block_tables.dim(), 2);
+    CHECK_EQ(expanded_block_tables.size(0), batch_size * validate_width);
+    torch::Tensor sequence_block_tables =
+        expanded_block_tables
+            .view({batch_size, validate_width, expanded_block_tables.size(1)})
+            .select(/*dim=*/1, /*index=*/0);
+    validate_input.input_params.attention.device.new_cache_slots =
+        map_positions_to_cache_slots(
+            sequence_block_tables, position_rows, block_size);
+  } else {
+    validate_input.input_params.attention.device.new_cache_slots =
+        torch::zeros_like(position_rows,
+                          position_rows.options().dtype(torch::kInt))
+            .flatten();
+  }
+
+  torch::Tensor template_kv_rows =
+      validate_input.input_params.attention.device.kv_seq_lens.view(
+          {batch_size, validate_width});
+  torch::Tensor kv_delta =
+      metadata.base_kv_seq_lens -
+      template_kv_rows.select(/*dim=*/1, /*index=*/0).to(torch::kLong);
+  validate_input.input_params.attention.device.kv_seq_lens =
+      (template_kv_rows.to(torch::kLong) + kv_delta.unsqueeze(1))
+          .flatten()
+          .to(validate_input.input_params.attention.device.kv_seq_lens
+                  .options());
+
+  torch::Tensor token_rows =
+      validate_input.token_ids.view({batch_size, validate_width});
+  token_rows.select(/*dim=*/1, /*index=*/0)
+      .copy_(metadata.last_tokens.to(validate_input.token_ids.options()),
+             /*non_blocking=*/true);
+  validate_input.device_tensors_ready = true;
+}
+
 }  // namespace xllm::mtp_async

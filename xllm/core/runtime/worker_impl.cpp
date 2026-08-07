@@ -758,7 +758,7 @@ const CpPlanRuntimeConfig& WorkerImpl::npu_cp_plan_runtime_config() const {
   cfg.enabled =
       parallel_args_.cp_size() > 1 && Platform::uses_model_cp_sharding() &&
       ::xllm::KernelConfig::get_instance().npu_kernel_backend() == "ATB" &&
-      owns_npu_cp_plan_build() && model_supports_model_cp();
+      owns_npu_parallel_input_prepare() && model_supports_model_cp();
   cfg.has_prefix_slots =
       KVCacheConfig::get_instance().enable_prefix_cache() ||
       SchedulerConfig::get_instance().enable_chunked_prefill();
@@ -791,6 +791,78 @@ const CpPlanRuntimeConfig& WorkerImpl::npu_cp_plan_runtime_config() const {
   npu_cp_runtime_config_ = std::move(cfg);
   npu_cp_runtime_config_computed_ = true;
   return npu_cp_runtime_config_;
+}
+#endif
+
+#if defined(USE_NPU)
+bool WorkerImpl::uses_npu_dp_ep_padding() const {
+  const ParallelArgs& parallel_args = context_.get_parallel_args();
+  return !parallel_args.mapping_data().empty() &&
+         parallel_args.cp_size() <= 1 &&
+         (parallel_args.dp_size() > 1 || parallel_args.ep_size() > 1);
+}
+
+void WorkerImpl::prepare_dp_ep_padding(ModelInputParams& input_params) {
+  if (!uses_npu_dp_ep_padding()) {
+    return;
+  }
+
+  const std::vector<int32_t>& token_sizes =
+      input_params.parallel.dp_global_token_nums;
+  const std::vector<int32_t>& raw_token_sizes =
+      input_params.parallel.raw_dp_global_token_nums;
+  const bool is_prefill = input_params.meta.batch_forward_type.no_decode();
+  const bool use_draft_decode_cache = options_.is_draft_engine() && !is_prefill;
+  if (use_draft_decode_cache) {
+    const DpEpPaddingData* cached =
+        draft_dp_ep_padding_cache_.find(token_sizes, raw_token_sizes);
+    if (cached != nullptr) {
+      input_params.parallel.dp_ep_padding_data = *cached;
+      return;
+    }
+  }
+
+  torch::Tensor token_size_per_dp_group =
+      torch::tensor(token_sizes,
+                    torch::TensorOptions()
+                        .device(torch::kCPU)
+                        .dtype(torch::kInt32)
+                        .pinned_memory(true));
+  torch::Tensor raw_token_size_per_dp_group =
+      raw_token_sizes.empty() ? torch::Tensor()
+                              : torch::tensor(raw_token_sizes,
+                                              torch::TensorOptions()
+                                                  .device(torch::kCPU)
+                                                  .dtype(torch::kInt32)
+                                                  .pinned_memory(true));
+  DpEpPadding dp_ep_padding(token_size_per_dp_group,
+                            raw_token_size_per_dp_group,
+                            context_.get_model_args().num_experts_per_tok(),
+                            context_.get_parallel_args().mapping_data(),
+                            device_,
+                            dtype_,
+                            is_prefill);
+  DpEpPaddingData data = dp_ep_padding.build();
+  input_params.parallel.dp_ep_padding_data = data;
+  if (use_draft_decode_cache) {
+    draft_dp_ep_padding_cache_.insert(token_sizes, raw_token_sizes, data);
+  }
+}
+
+void WorkerImpl::prepare_dp_ep_padding_on_stream(ModelInputParams& input_params,
+                                                 Stream& prepare_stream) {
+  if (!uses_npu_dp_ep_padding()) {
+    return;
+  }
+  std::optional<std::unique_lock<std::mutex>> lock_guard;
+  if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
+    auto& capture_lock =
+        ::xllm::npu::DeviceCaptureLock::get_instance().get_lock(
+            device_.index());
+    lock_guard.emplace(capture_lock);
+  }
+  c10::StreamGuard stream_guard = prepare_stream.set_stream_guard();
+  prepare_dp_ep_padding(input_params);
 }
 #endif
 
@@ -875,36 +947,10 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
       prepare_mla_prefixcache_inputs(input_params);
     }
 
-    if (!context_.get_parallel_args().mapping_data().empty() &&
-        !(context_.get_parallel_args().cp_size() > 1) &&
-        (context_.get_parallel_args().dp_size() > 1 ||
-         context_.get_parallel_args().ep_size() > 1)) {
-      torch::Tensor token_size_per_dp_group = torch::tensor(
-          processed_input.input_params.parallel.dp_global_token_nums,
-          torch::TensorOptions()
-              .device(torch::kCPU)
-              .dtype(torch::kInt32)
-              .pinned_memory(true));
-      const auto& raw_dp_token_nums =
-          processed_input.input_params.parallel.raw_dp_global_token_nums;
-      torch::Tensor raw_token_size_per_dp_group =
-          raw_dp_token_nums.empty() ? torch::Tensor()
-                                    : torch::tensor(raw_dp_token_nums,
-                                                    torch::TensorOptions()
-                                                        .device(torch::kCPU)
-                                                        .dtype(torch::kInt32)
-                                                        .pinned_memory(true));
-      const bool is_prefill =
-          processed_input.input_params.meta.batch_forward_type.no_decode();
-      DpEpPadding dp_ep_padding(token_size_per_dp_group,
-                                raw_token_size_per_dp_group,
-                                context_.get_model_args().num_experts_per_tok(),
-                                context_.get_parallel_args().mapping_data(),
-                                device_,
-                                dtype_,
-                                is_prefill);
-      processed_input.input_params.parallel.dp_ep_padding_data =
-          dp_ep_padding.build();
+    if (owns_npu_parallel_input_prepare()) {
+      prepare_dp_ep_padding(processed_input.input_params);
+    }
+    if (uses_npu_dp_ep_padding()) {
       if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
         processed_input.input_params.expert.expert_load_data =
             expert_load_data_;

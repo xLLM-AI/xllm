@@ -34,6 +34,7 @@ TEST(MtpAsyncStateTest, ClassifiesClosedTargetSpecVerifyPolicy) {
       {"qwen3_next", TargetSpecVerifyMode::GENERIC},
       {"qwen3_5_mtp", TargetSpecVerifyMode::GENERIC},
       {"qwen3_5_moe_mtp", TargetSpecVerifyMode::GENERIC},
+      {"glm_moe_dsa", TargetSpecVerifyMode::GENERIC},
       {"mimo_mtp", TargetSpecVerifyMode::GENERIC},
       {"unknown_model", TargetSpecVerifyMode::GENERIC},
   };
@@ -50,9 +51,58 @@ TEST(MtpAsyncStateTest, ClassifiesSupportedCombinedDraftExecutionPaths) {
   EXPECT_EQ(classify_combined_draft_execution_path("qwen3_5_moe_mtp"),
             CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION);
   EXPECT_EQ(classify_combined_draft_execution_path("glm_moe_dsa_mtp"),
-            CombinedDraftExecutionPath::UNSUPPORTED);
+            CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION);
   EXPECT_EQ(classify_combined_draft_execution_path("mimo_mtp"),
             CombinedDraftExecutionPath::UNSUPPORTED);
+}
+
+TEST(MtpAsyncStateTest, RestrictsCombinedDraftToValidatedConfigurations) {
+  EXPECT_TRUE(supports_combined_draft_configuration(
+      CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION,
+      "TORCH",
+      /*dp_size=*/1));
+  EXPECT_FALSE(supports_combined_draft_configuration(
+      CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION,
+      "ATB",
+      /*dp_size=*/1));
+  EXPECT_FALSE(supports_combined_draft_configuration(
+      CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION,
+      "TORCH",
+      /*dp_size=*/2));
+  EXPECT_TRUE(supports_combined_draft_configuration(
+      CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION,
+      "ATB",
+      /*dp_size=*/1));
+  EXPECT_TRUE(supports_combined_draft_configuration(
+      CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION,
+      "ATB",
+      /*dp_size=*/2));
+  EXPECT_FALSE(supports_combined_draft_configuration(
+      CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION,
+      "TORCH",
+      /*dp_size=*/1));
+  EXPECT_FALSE(supports_combined_draft_configuration(
+      CombinedDraftExecutionPath::UNSUPPORTED, "ATB", /*dp_size=*/1));
+}
+
+TEST(MtpAsyncStateTest, ExtractsTargetBaseKvLengthsFromVerifyLayouts) {
+  const torch::Tensor chunked_kv_seq_lens =
+      torch::tensor({104, 204}, torch::kInt);
+  const torch::Tensor decode_kv_seq_lens =
+      torch::tensor({101, 102, 103, 104, 201, 202, 203, 204}, torch::kInt);
+
+  EXPECT_TRUE(torch::equal(
+      extract_target_base_kv_seq_lens(chunked_kv_seq_lens,
+                                      /*batch_size=*/2,
+                                      /*num_validate_tokens=*/4,
+                                      /*use_chunked_prefill=*/true),
+      torch::tensor({101, 201}, torch::kInt)));
+  EXPECT_TRUE(torch::equal(
+      extract_target_base_kv_seq_lens(decode_kv_seq_lens,
+                                      /*batch_size=*/2,
+                                      /*num_validate_tokens=*/4,
+                                      /*use_chunked_prefill=*/false),
+      torch::tensor({101, 201}, torch::kInt)));
 }
 
 TEST(MtpAsyncStateTest, ComputesSharedSpecVerifyBlockTableCapacity) {
@@ -122,6 +172,24 @@ TEST(MtpAsyncStateTest, BuildsMixedAcceptanceStateWithoutHostRoundTrip) {
                            torch::tensor({105, 203, 302}, torch::kLong)));
 }
 
+TEST(MtpAsyncStateTest, BuildsTargetMetadataWithoutEmbeddingGather) {
+  const torch::Tensor accepted_tokens = torch::tensor(
+      {{10, 11, 12, 13}, {20, 21, -1, -1}, {30, -1, -1, -1}}, torch::kLong);
+  const torch::Tensor base_positions = torch::tensor({100, 200, 300});
+  const torch::Tensor base_kv_seq_lens = torch::tensor({101, 201, 301});
+
+  const AcceptedTokenMetadata metadata = build_accepted_token_metadata(
+      accepted_tokens, base_positions, base_kv_seq_lens);
+
+  EXPECT_TRUE(torch::equal(metadata.accepted_lengths,
+                           torch::tensor({4, 2, 1}, torch::kLong)));
+  EXPECT_TRUE(torch::equal(metadata.last_tokens, torch::tensor({13, 21, 30})));
+  EXPECT_TRUE(torch::equal(metadata.base_positions,
+                           torch::tensor({104, 202, 301}, torch::kLong)));
+  EXPECT_TRUE(torch::equal(metadata.base_kv_seq_lens,
+                           torch::tensor({105, 203, 302}, torch::kLong)));
+}
+
 TEST(MtpAsyncStateTest, BuildsRowMetadataForChunkedAndDecodeLayouts) {
   AcceptedState state;
   state.base_positions = torch::tensor({104, 202, 301}, torch::kLong);
@@ -156,6 +224,24 @@ TEST(MtpAsyncStateTest, MapsPositionsAcrossCacheBlockBoundaries) {
   EXPECT_TRUE(torch::equal(
       map_positions_to_cache_slots(block_tables, positions, /*block_size=*/4),
       torch::tensor({43, 44, 87, 88}, torch::kInt)));
+}
+
+TEST(MtpAsyncStateTest, BuildsLaterDraftMetadataFromAcceptedDeviceBase) {
+  AcceptedState state;
+  state.base_positions = torch::tensor({3, 7}, torch::kLong);
+  state.base_kv_seq_lens = torch::tensor({4, 8}, torch::kInt);
+  const torch::Tensor offsets = torch::tensor({2}, torch::kLong);
+  const torch::Tensor positions = make_row_positions(state, offsets);
+  const torch::Tensor block_tables =
+      torch::tensor({{10, 11, 12}, {20, 21, 22}}, torch::kInt);
+
+  EXPECT_TRUE(torch::equal(positions, torch::tensor({{5}, {9}}, torch::kLong)));
+  EXPECT_TRUE(torch::equal(
+      make_kv_seq_lens(state, offsets, /*use_chunked_prefill=*/false),
+      torch::tensor({6, 10}, torch::kLong)));
+  EXPECT_TRUE(torch::equal(
+      map_positions_to_cache_slots(block_tables, positions, /*block_size=*/4),
+      torch::tensor({45, 89}, torch::kInt)));
 }
 
 }  // namespace
