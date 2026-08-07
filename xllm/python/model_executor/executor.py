@@ -160,23 +160,34 @@ class ModelExecutor:
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         metadata: AttentionMetadata,
+        input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
     ) -> torch.Tensor:
         if not self._kv_bound:
             raise RuntimeError("KV caches are not bound")
 
         graph_runner = self.decode_graph_runner
-        if graph_runner is not None:
-            graph_runner.warmup(input_ids.device, input_ids.dtype)
-            # The graph runner only serves pure-decode steps (can_execute rejects
-            # prefill/chunked-prefill), while the layer synchronizer only drives
-            # KV-cache push during prefill, so decode has nothing to record.
-            if graph_runner.can_execute(input_ids, metadata):
-                return graph_runner.execute(input_ids, positions, metadata)
+        if graph_runner is not None and graph_runner.can_execute(
+            input_ids, metadata, input_embedding
+        ):
+            graph_runner.warmup(
+                input_ids.device, input_ids.dtype, input_embedding
+            )
+            return graph_runner.execute(
+                input_ids, positions, metadata, input_embedding
+            )
         if self.inductor_runner is not None:
             return self.inductor_runner.execute(
-                input_ids, positions, metadata, layer_synchronizer
+                input_ids,
+                positions,
+                metadata,
+                input_embedding,
+                layer_synchronizer,
             )
         return self.eager_runner.execute(
-            input_ids, positions, metadata, layer_synchronizer
+            input_ids,
+            positions,
+            metadata,
+            input_embedding,
+            layer_synchronizer,
         )

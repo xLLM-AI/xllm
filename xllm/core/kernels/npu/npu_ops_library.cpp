@@ -187,6 +187,13 @@ TORCH_LIBRARY(xllm_ops, m) {
       "sparse_mode, int pre_tokens, int next_tokens, bool return_value) -> "
       "Tensor");
   m.def(
+      "lightning_indexer_out(Tensor query, Tensor key, Tensor weights, "
+      "Tensor? query_seq_lengths, Tensor? key_seq_lengths, Tensor? "
+      "block_table, str layout_query, str layout_key, int selected_count, "
+      "int sparse_mode, int pre_tokens, int next_tokens, bool return_value, "
+      "Tensor(a!) sparse_indices_out, Tensor(b!) sparse_values_out) -> "
+      "Tensor(a!)");
+  m.def(
       "scatter_nd_update(Tensor(a!) var, Tensor indices, Tensor updates) -> "
       "()");
   m.def(
@@ -195,6 +202,13 @@ TORCH_LIBRARY(xllm_ops, m) {
       "Tensor? actual_seq_lengths_kv, Tensor? query_rope, Tensor? key_rope, "
       "float scale_value, int sparse_block_size, str layout_query, str "
       "layout_kv, int sparse_mode) -> Tensor");
+  m.def(
+      "sparse_flash_attention_out(Tensor query, Tensor key, Tensor value, "
+      "Tensor sparse_indices, Tensor? block_table, Tensor? "
+      "actual_seq_lengths_query, Tensor? actual_seq_lengths_kv, Tensor? "
+      "query_rope, Tensor? key_rope, float scale_value, int "
+      "sparse_block_size, str layout_query, str layout_kv, int sparse_mode, "
+      "Tensor(a!) output) -> Tensor(a!)");
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
@@ -210,7 +224,11 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
          TORCH_FN(xllm::kernel::npu::quantize_per_tensor));
   m.impl("dynamic_quant", TORCH_FN(xllm::kernel::npu::dynamic_quant));
   m.impl("lightning_indexer", TORCH_FN(xllm::kernel::npu::lightning_indexer));
+  m.impl("lightning_indexer_out",
+         TORCH_FN(xllm::kernel::npu::lightning_indexer_out));
   m.impl("scatter_nd_update", TORCH_FN(xllm::kernel::npu::scatter_nd_update));
   m.impl("sparse_flash_attention",
          TORCH_FN(xllm::kernel::npu::sparse_flash_attention));
+  m.impl("sparse_flash_attention_out",
+         TORCH_FN(xllm::kernel::npu::sparse_flash_attention_out));
 }

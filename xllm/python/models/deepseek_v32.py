@@ -36,7 +36,10 @@ from xllm.python.layers import (
     RotaryEmbedding,
     RowParallelLinear,
 )
-from xllm.python.model_executor.forward_context import get_forward_context
+from xllm.python.model_executor.forward_context import (
+    get_execution_buffer,
+    get_forward_context,
+)
 from xllm.python.models.base import PyModelBase
 
 
@@ -706,16 +709,29 @@ class DeepseekV3Indexer(nn.Module):
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = torch.cat([k_pe, k_nope], dim=-1)
         if ctx.index_cache is not None and ctx.slot_mapping is not None:
-            k_view = ctx.index_cache.view(-1, ctx.index_cache.size(-1))
-            kernels.scatter_nd_update(
-                k_view, ctx.slot_mapping.reshape(-1, 1).clamp_min(0), k
-            )
-        topk = kernels.lightning_indexer(
+            ctx.update_index_cache(k)
+
+        key_head_num = ctx.index_cache.size(2) if ctx.index_cache.dim() >= 3 else 1
+        output_shape = (q.size(0), key_head_num, self.topk)
+        buffer_key = tuple(output_shape)
+        topk_buffer = get_execution_buffer(
+            ("LIGHTNING_INDEXER_INDICES",) + buffer_key,
+            lambda: torch.empty(
+                output_shape, dtype=torch.int32, device=q.device
+            ),
+        )
+        values_buffer = get_execution_buffer(
+            ("LIGHTNING_INDEXER_VALUES",) + buffer_key,
+            lambda: torch.empty(
+                output_shape, dtype=q.dtype, device=q.device
+            ),
+        )
+        topk = kernels.lightning_indexer_out(
             q, ctx.index_cache, weights,
             ctx.actual_seq_q, ctx.actual_seq_kv, ctx.block_table,
             "TND", "PA_BSND", self.topk, 3,
             9223372036854775807, 9223372036854775807,
-            False,
+            False, topk_buffer, values_buffer,
         )
         return topk
 
@@ -945,7 +961,7 @@ class DeepseekV3Model(nn.Module):
 class DeepseekV3ForCausalLM(PyModelBase):
     """DeepSeek-V3.2 causal LM. Registered under ``model_type='deepseek_v32'``."""
 
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict, build_model: bool = True) -> None:
         super().__init__()
         self.cfg = DeepseekV3Config.from_dict(config)
         self.cfg.tp_size = int(config.get("tp_size", 1))
@@ -959,14 +975,21 @@ class DeepseekV3ForCausalLM(PyModelBase):
         self.device = device
         tp = self.cfg.tp_size
         assert self.cfg.vocab_size % tp == 0
-        self.model = DeepseekV3Model(self.cfg, dtype, device)
+        self.model: Optional[nn.Module] = None
+        self.lm_head: Optional[nn.Module] = None
+        if build_model:
+            self._build_model()
+
+    def _build_model(self) -> None:
+        tp = self.cfg.tp_size
+        self.model = DeepseekV3Model(self.cfg, self.dtype, self.device)
         self.lm_head = ColumnParallelLinear(
             self.cfg.hidden_size,
             self.cfg.vocab_size // tp,
             tp,
             gather_output=True,
-            dtype=dtype,
-            device=device,
+            dtype=self.dtype,
+            device=self.device,
         )
 
     def load_weights(
@@ -974,12 +997,19 @@ class DeepseekV3ForCausalLM(PyModelBase):
         state_dicts: list,
         tp_rank: int,
         tp_size: int,
+        load_lm_head: bool = True,
+        load_embedding: bool = True,
     ) -> None:
         cfg = self.cfg
         loader = W8A8WeightLoader(self, state_dicts, cfg.tp_size, cfg.tp_rank)
 
-        loader.copy_in("model.embed_tokens.weight",
-                       loader.shard(loader.load_tensor("model.embed_tokens.weight"), dim=1))
+        if load_embedding:
+            loader.copy_in(
+                "model.embed_tokens.weight",
+                loader.shard(
+                    loader.load_tensor("model.embed_tokens.weight"), dim=1
+                ),
+            )
 
         for i in range(cfg.n_layers):
             p = f"model.layers.{i}."
@@ -1050,5 +1080,8 @@ class DeepseekV3ForCausalLM(PyModelBase):
                 self.model.layers[i].mlp.process_weights_after_loading()
 
         loader.copy_in("model.norm.weight", loader.load_tensor("model.norm.weight"))
-        loader.copy_in("lm_head.weight",
-                       loader.shard(loader.load_tensor("lm_head.weight"), dim=0))
+        if load_lm_head:
+            loader.copy_in(
+                "lm_head.weight",
+                loader.shard(loader.load_tensor("lm_head.weight"), dim=0),
+            )

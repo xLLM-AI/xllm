@@ -32,8 +32,12 @@ from xllm.python.attention.backend import (
     KVCache,
     MlaIndexContext,
 )
+from xllm.python.attention.expanded_decode_metadata import (
+    resolve_expanded_decode_metadata,
+)
 from xllm.python.model_executor.forward_context import (
     AclGraphTask,
+    get_execution_buffer,
     get_forward_context,
 )
 
@@ -61,6 +65,10 @@ class NpuPagedAttentionBackend(AttentionBackend):
         self.sliding_window = sliding_window
         self.dtype = dtype
         self.device = device
+        # DeepSeek-V3.2 MLA uses a 512-wide latent cache and the sparse MLA
+        # operators.  Ascend FIA graph tiling does not support that head
+        # dimension, so it must not be initialized for this backend instance.
+        self._is_mla = head_dim > 192 and num_kv_heads == 1
 
         self._kv_caches: list[KVCache] = []
         self._metadata: AttentionMetadata | None = None
@@ -69,6 +77,11 @@ class NpuPagedAttentionBackend(AttentionBackend):
         self._graph_lses: dict[int, torch.Tensor] = {}
         self._current_graph_output: torch.Tensor | None = None
         self._current_graph_lse: torch.Tensor | None = None
+        self._use_expanded_decode = False
+        self._block_table_i32: torch.Tensor | None = None
+        self._actual_seq_lens: list[int] | None = None
+        self._actual_seq_q: list[int] | torch.Tensor = []
+        self._actual_seq_kv: list[int] | torch.Tensor = []
         self._mla_actual_seq_q: torch.Tensor | None = None
         self._mla_actual_seq_kv: torch.Tensor | None = None
         self._causal_mask = (
@@ -90,8 +103,29 @@ class NpuPagedAttentionBackend(AttentionBackend):
             return 1
         return self._kv_caches[0][0].shape[1]
 
+    @property
+    def is_mla(self) -> bool:
+        return self._is_mla
+
     def bind_kv_caches(self, kv_caches: list[KVCache]) -> None:
         self._kv_caches = kv_caches
+
+    @staticmethod
+    def _query_sequence_ends(
+        q_cu_seq_lens: torch.Tensor | None,
+        batch_size: int,
+    ) -> torch.Tensor | None:
+        """Accept both NPU q-cumulative layouts used by the runtime."""
+        if q_cu_seq_lens is None:
+            return None
+        if q_cu_seq_lens.numel() == batch_size:
+            return q_cu_seq_lens.to(torch.int32)
+        if q_cu_seq_lens.numel() == batch_size + 1:
+            return q_cu_seq_lens[1:].to(torch.int32)
+        raise RuntimeError(
+            "q cumulative sequence lengths must contain either one value per "
+            "sequence or a leading zero plus one value per sequence"
+        )
 
     def prepare(
         self,
@@ -100,36 +134,67 @@ class NpuPagedAttentionBackend(AttentionBackend):
         graph_mode: bool = False,
     ) -> None:
         self._metadata = metadata
-        if metadata.q_cu_seq_lens is not None:
-            self._actual_seq_lens: list[int] | None = (
-                metadata.q_cu_seq_lens[1:].cpu().tolist()
+        expanded = resolve_expanded_decode_metadata(
+            metadata, block_size=self.page_size
+        )
+        self._use_expanded_decode = expanded is not None
+        block_table = (
+            expanded.block_table if expanded is not None else metadata.block_table
+        )
+        kv_seq_lens = (
+            expanded.kv_seq_lens if expanded is not None else metadata.kv_seq_lens
+        )
+        kv_seq_lens_host_values = (
+            expanded.kv_seq_lens_host_values
+            if expanded is not None
+            else getattr(metadata, "kv_seq_lens_host_values", None)
+        )
+
+        if block_table is not None:
+            self._block_table_i32 = block_table.to(torch.int32)
+            real_batch = block_table.shape[0]
+        else:
+            self._block_table_i32 = None
+            real_batch = 0
+
+        if self._use_expanded_decode or graph_mode or self._is_mla:
+            self._actual_seq_lens = None
+        elif metadata.q_cu_seq_lens is not None:
+            q_seq_lens = getattr(metadata, "q_seq_lens", None)
+            if q_seq_lens is not None:
+                batch_size = q_seq_lens.numel()
+            elif metadata.block_table is not None:
+                batch_size = metadata.block_table.shape[0]
+            else:
+                batch_size = max(metadata.q_cu_seq_lens.numel() - 1, 0)
+            q_seq_ends = self._query_sequence_ends(
+                metadata.q_cu_seq_lens,
+                batch_size,
             )
+            self._actual_seq_lens = q_seq_ends.cpu().tolist()
         else:
             self._actual_seq_lens = None
 
-        if metadata.block_table is not None:
-            self._block_table_i32 = metadata.block_table.to(torch.int32)
-
-            real_batch = metadata.block_table.shape[0]
-
-            kv_host = metadata.kv_seq_lens_host
-            if kv_host is not None:
-                kv_host = kv_host.cpu()
-                if kv_host.numel() == real_batch + 1:
-                    per_seq_kv = kv_host[1:] - kv_host[:-1]
-                else:
-                    per_seq_kv = kv_host
-            else:
-                per_seq_kv = torch.ones(real_batch, dtype=torch.int32)
-
-            kv_list = per_seq_kv[:real_batch].tolist()
-
+        if self._block_table_i32 is not None and not self._is_mla:
+            if kv_seq_lens_host_values is None:
+                raise RuntimeError(
+                    "decode attention requires scheduler-provided host KV lengths"
+                )
+            if len(kv_seq_lens_host_values) != real_batch:
+                raise RuntimeError(
+                    "host KV lengths must have one entry per block-table row"
+                )
             self._actual_seq_q: list[int] = list(range(1, real_batch + 1))
-            self._actual_seq_kv: list[int] = kv_list
+            self._actual_seq_kv: list[int] = list(kv_seq_lens_host_values)
         else:
-            self._block_table_i32 = None
+            self._actual_seq_q = []
+            self._actual_seq_kv = []
 
-        if graph_mode and self._block_table_i32 is not None:
+        if (
+            graph_mode
+            and self._block_table_i32 is not None
+            and not self._is_mla
+        ):
             graph_batch_size = self._block_table_i32.shape[0]
             if self._graph_workspace is None:
                 block_size = self.page_size
@@ -175,19 +240,41 @@ class NpuPagedAttentionBackend(AttentionBackend):
 
         # Pre-cache MLA (sparse SFA) seq-lens once per step; shared by
         # execute_mla / mla_index_context instead of re-derived per layer.
-        if metadata.kv_seq_lens is not None:
-            kv_seq_lens = metadata.kv_seq_lens
+        if self._is_mla and kv_seq_lens is not None:
             mla_device = kv_seq_lens.device
-            self._mla_actual_seq_kv = kv_seq_lens.to(torch.int32).to(mla_device)
-            if metadata.q_cu_seq_lens is not None:
-                self._mla_actual_seq_q = metadata.q_cu_seq_lens[1:].to(
-                    torch.int32
+            actual_seq_kv = kv_seq_lens.to(torch.int32).to(mla_device)
+            if self._use_expanded_decode:
+                actual_seq_q = torch.arange(
+                    1,
+                    actual_seq_kv.numel() + 1,
+                    dtype=torch.int32,
+                    device=mla_device,
+                )
+            elif metadata.q_cu_seq_lens is not None:
+                actual_seq_q = self._query_sequence_ends(
+                    metadata.q_cu_seq_lens,
+                    int(actual_seq_kv.numel()),
                 ).to(mla_device)
             else:
                 batch = kv_seq_lens.size(0)
-                self._mla_actual_seq_q = torch.arange(
+                actual_seq_q = torch.arange(
                     1, batch + 1, dtype=torch.int32, device=mla_device
                 )
+            if graph_mode:
+                graph_batch = int(actual_seq_kv.numel())
+                self._mla_actual_seq_q = get_execution_buffer(
+                    ("MLA_ACTUAL_SEQ_Q", graph_batch),
+                    lambda: torch.empty_like(actual_seq_q),
+                )
+                self._mla_actual_seq_kv = get_execution_buffer(
+                    ("MLA_ACTUAL_SEQ_KV", graph_batch),
+                    lambda: torch.empty_like(actual_seq_kv),
+                )
+                self._mla_actual_seq_q.copy_(actual_seq_q)
+                self._mla_actual_seq_kv.copy_(actual_seq_kv)
+            else:
+                self._mla_actual_seq_q = actual_seq_q
+                self._mla_actual_seq_kv = actual_seq_kv
         else:
             self._mla_actual_seq_q = None
             self._mla_actual_seq_kv = None
@@ -216,6 +303,8 @@ class NpuPagedAttentionBackend(AttentionBackend):
         q_3d = q.view(num_tokens, self.num_heads, self.head_dim).contiguous()
 
         if metadata.is_prefill or metadata.is_chunked_prefill:
+            if self._use_expanded_decode:
+                return self._decode(q_3d, k_cache, v_cache, metadata, num_tokens)
             return self._prefill(q_3d, k_3d, v_3d, metadata, num_tokens)
         return self._decode(q_3d, k_cache, v_cache, metadata, num_tokens)
 
@@ -238,24 +327,51 @@ class NpuPagedAttentionBackend(AttentionBackend):
             )
         layer_id = layer.layer_id
         nope_cache, rope_cache, _ = self._kv_caches[layer_id]
+        if self._block_table_i32 is None:
+            raise RuntimeError("MLA requires a block table")
 
         torch.ops.xllm_ops.reshape_paged_cache(
             metadata.slot_mapping, k_latent_3d, k_pe_3d, nope_cache, rope_cache
         )
         return self._mla_sparse(
-            q_latent, q_pe, nope_cache, rope_cache, topk, metadata.block_table
+            q_latent,
+            q_pe,
+            nope_cache,
+            rope_cache,
+            topk,
+            self._block_table_i32,
+            layer_id,
         )
 
     def mla_index_context(self, layer: "Attention") -> MlaIndexContext:
         metadata = self._metadata
         assert metadata is not None, "mla_index_context called before prepare()"
+        assert self._block_table_i32 is not None
+        assert self._mla_actual_seq_q is not None
+        assert self._mla_actual_seq_kv is not None
         _, _, index_cache = self._kv_caches[layer.layer_id]
         return MlaIndexContext(
             index_cache=index_cache,
             slot_mapping=metadata.slot_mapping,
-            block_table=metadata.block_table,
+            block_table=self._block_table_i32,
             actual_seq_q=self._mla_actual_seq_q,
             actual_seq_kv=self._mla_actual_seq_kv,
+            update_index_cache=lambda values: self._update_mla_index_cache(
+                index_cache, metadata.slot_mapping, values
+            ),
+        )
+
+    @staticmethod
+    def _update_mla_index_cache(
+        index_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        values: torch.Tensor,
+    ) -> None:
+        cache_view = index_cache.view(-1, index_cache.size(-1))
+        kernels.scatter_nd_update(
+            cache_view,
+            slot_mapping.reshape(-1, 1).clamp_min(0),
+            values,
         )
 
     def _mla_sparse(
@@ -266,16 +382,20 @@ class NpuPagedAttentionBackend(AttentionBackend):
         rope_cache: torch.Tensor,
         topk: torch.Tensor,
         block_table: torch.Tensor,
+        layer_id: int,
     ) -> torch.Tensor:
-        out = torch.ops.xllm_ops.sparse_flash_attention(
+        out = get_execution_buffer(
+            ("SFA_OUTPUT", layer_id) + tuple(q_latent.shape),
+            lambda: torch.empty_like(q_latent),
+        )
+        return kernels.sparse_flash_attention_out(
             q_latent, nope_cache, nope_cache, topk,
             block_table,
             self._mla_actual_seq_q,
             self._mla_actual_seq_kv,
             q_pe, rope_cache, self.scale, 1,
-            "TND", "PA_BSND", 3,
-        )
-        return out  # [T, H, kv_lora]
+            "TND", "PA_BSND", 3, out,
+        )  # [T, H, kv_lora]
 
     # ------------------------------------------------------------------
     # Prefill: packed TND with causal mask

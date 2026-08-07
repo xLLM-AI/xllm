@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "models/llm/py_causal_lm.h"
 
+#include <Python.h>
 #include <glog/logging.h>
 #include <pybind11/stl.h>
 #include <torch/extension.h>
@@ -32,6 +33,36 @@ limitations under the License.
 namespace py = pybind11;
 
 namespace xllm {
+namespace detail {
+
+void share_python_model_weights(py::object& draft_model,
+                                const py::object& target_model) {
+  draft_model.attr("lm_head") = target_model.attr("lm_head");
+  py::object draft_body = draft_model.attr("model");
+  py::object target_body = target_model.attr("model");
+  draft_body.attr("embed_tokens") = target_body.attr("embed_tokens");
+}
+
+}  // namespace detail
+
+namespace {
+
+void clear_python_object(py::object& object) {
+  if (!object) {
+    return;
+  }
+  if (!Py_IsInitialized()) {
+    // CPython has already torn down its GIL. Avoid decref during C++ static
+    // destruction; the process is exiting and the reference cannot be safely
+    // released anymore.
+    (void)object.release();
+    return;
+  }
+  py::gil_scoped_acquire gil;
+  object = py::object();
+}
+
+}  // namespace
 
 PyCausalLM::PyCausalLM(const ModelContext& context)
     : model_args_(context.get_model_args()),
@@ -68,9 +99,8 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
 }
 
 PyCausalLM::~PyCausalLM() {
-  py::gil_scoped_acquire gil;
-  py_model_ = py::object();
-  config_dict_ = py::object();
+  clear_python_object(py_model_);
+  clear_python_object(config_dict_);
 }
 
 py::dict PyCausalLM::build_config_dict(
@@ -123,6 +153,17 @@ torch::Tensor PyCausalLM::logits(const torch::Tensor& hidden_states,
                             : py::object(py::none());
   py::object out = py_model_.attr("compute_logits")(hidden_states, selected);
   return out.cast<torch::Tensor>();
+}
+
+bool PyCausalLM::share_weights_from(CausalLM& source) {
+  auto* source_model = dynamic_cast<PyCausalLM*>(&source);
+  if (source_model == nullptr) {
+    return false;
+  }
+
+  py::gil_scoped_acquire gil;
+  detail::share_python_model_weights(py_model_, source_model->py_model_);
+  return true;
 }
 
 }  // namespace xllm

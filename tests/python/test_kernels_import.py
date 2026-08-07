@@ -63,12 +63,22 @@ _NPU_SCHEMAS = (
     "query_seq_lengths, Tensor? key_seq_lengths, Tensor? block_table, str "
     "layout_query, str layout_key, int selected_count, int sparse_mode, int "
     "pre_tokens, int next_tokens, bool return_value) -> Tensor",
+    "lightning_indexer_out(Tensor query, Tensor key, Tensor weights, Tensor? "
+    "query_seq_lengths, Tensor? key_seq_lengths, Tensor? block_table, str "
+    "layout_query, str layout_key, int selected_count, int sparse_mode, int "
+    "pre_tokens, int next_tokens, bool return_value, Tensor(a!) "
+    "sparse_indices_out, Tensor(b!) sparse_values_out) -> Tensor",
     "scatter_nd_update(Tensor(a!) var, Tensor indices, Tensor updates) -> ()",
     "sparse_flash_attention(Tensor query, Tensor key, Tensor value, Tensor "
     "sparse_indices, Tensor? block_table, Tensor? actual_seq_lengths_query, "
     "Tensor? actual_seq_lengths_kv, Tensor? query_rope, Tensor? key_rope, "
     "float scale_value, int sparse_block_size, str layout_query, str "
     "layout_kv, int sparse_mode) -> Tensor",
+    "sparse_flash_attention_out(Tensor query, Tensor key, Tensor value, Tensor "
+    "sparse_indices, Tensor? block_table, Tensor? actual_seq_lengths_query, "
+    "Tensor? actual_seq_lengths_kv, Tensor? query_rope, Tensor? key_rope, "
+    "float scale_value, int sparse_block_size, str layout_query, str layout_kv, "
+    "int sparse_mode, Tensor(a!) output) -> Tensor",
 )
 
 _PLATFORM_REQUIRED = pytest.mark.skipif(

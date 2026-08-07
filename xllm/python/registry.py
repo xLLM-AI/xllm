@@ -77,5 +77,11 @@ def _register_builtin_models() -> None:
         "glm_moe_dsa",
     )
 
+    _register_model_path(
+        "xllm.python.models.deepseek_v32_mtp",
+        "DeepseekV32MtpForCausalLM",
+        "deepseek_v32_mtp",
+    )
+
 
 _register_builtin_models()

@@ -3,6 +3,28 @@ include(cc_test)
 if(USE_NPU)
   cc_test(
     NAME
+      mtp_async_input_builder_test
+    SRCS
+      mtp_async_input_builder_test.cpp
+    DEPS
+      :runtime
+      :models
+      GTest::gtest_main
+      torch
+      torch_npu
+      pybind11::embed
+  )
+  target_link_libraries(mtp_async_input_builder_test
+                        PRIVATE
+                        torch_python
+                        Python::Python
+                        ascendcl
+                        hccl
+                        c_sec
+                        nnopbase)
+
+  cc_test(
+    NAME
       acl_graph_executor_test
     SRCS
       acl_graph_executor_test.cpp

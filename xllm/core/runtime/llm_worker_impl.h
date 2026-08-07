@@ -104,6 +104,10 @@ class LLMWorkerImpl : public WorkerImpl {
     return model_->dspark_markov_bias(previous_token_ids);
   }
 
+  bool share_weights_from(LLMWorkerImpl& source) {
+    return model_->share_weights_from(*source.model_);
+  }
+
   // DFlash-specific delegate: eagerly project target hidden into the draft's
   // per-layer KV cache. Runs outside the executor because the pass has no
   // attention and its shape doesn't match the decode graph. See CausalLM.
