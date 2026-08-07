@@ -20,6 +20,7 @@ limitations under the License.
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <string>
 #include <utility>
 
@@ -123,16 +124,30 @@ AdaptiveSpeculativeController::select_pruned_prefix_lengths(
   std::optional<SpeculativeProfileRegistry::ValidateTimePredictor> predictor =
       SpeculativeProfileRegistry::get_instance().validate_time_predictor();
   const bool has_predictor = predictor.has_value();
-  const double query_token_ms = has_predictor ? predictor->query_token_ms : 0.0;
+  // Experiment knob: scale query_token_ms via env ADAPTIVE_QUERY_TOKEN_SCALE
+  // (default 1.0). Larger scale amplifies the per-token marginal validate cost
+  // in score's denominator, encouraging the greedy loop to prune more.
+  static const double query_token_scale = [] {
+    const char* s = std::getenv("ADAPTIVE_QUERY_TOKEN_SCALE");
+    return s != nullptr ? std::atof(s) : 1.0;
+  }();
+  const double query_token_ms =
+      has_predictor ? query_token_scale * predictor->query_token_ms : 0.0;
   const double query_prefix_ms =
       has_predictor ? predictor->query_prefix_ms : 0.0;
 
+  const double intercept_ms = has_predictor ? predictor->intercept_ms : 0.0;
+
   std::vector<int32_t> prefix_lengths(static_cast<size_t>(batch_size), 0);
   double expected_accepted = 0.0;
-  // Running raw validate_time for the current prefix_lengths (qᵢ = 0+1 = 1).
+  // Running validate_time for the current prefix_lengths (qᵢ = 0+1 = 1).
+  // We include intercept so that the marginal cost of adding a draft
+  // (query_token_ms·Δq + query_prefix_ms·Δq·kv) is weighed against the
+  // *full* estimated validate time. Excluding intercept overweights the
+  // marginal term and causes over-pruning when intercept dominates.
   double validate_time_raw = 1.0;  // fallback when predictor is unavailable
   if (has_predictor) {
-    validate_time_raw = predictor->intercept_ms;
+    validate_time_raw = intercept_ms;
     for (int32_t seq_id = 0; seq_id < batch_size; ++seq_id) {
       const double kv_i = static_cast<size_t>(seq_id) < per_seq_kv_lens.size()
                               ? per_seq_kv_lens[static_cast<size_t>(seq_id)]
@@ -141,13 +156,16 @@ AdaptiveSpeculativeController::select_pruned_prefix_lengths(
     }
   }
   auto score_of = [&](double accepted, double vtime_raw) {
+    // Guard against a degenerate zero denominator; do NOT clamp to a fraction
+    // of target_step_time_ms — that is a self-calibration loop that silently
+    // suppresses pruning when vtime_raw is small.
     const double estimated_time =
-        std::max(full_draft_time_ms, 1.0e-6) +
-        std::max(std::max(vtime_raw, 0.0), target_step_time_ms * 0.1);
+        std::max(full_draft_time_ms, 1.0e-6) + std::max(vtime_raw, 1.0e-6);
     return (static_cast<double>(batch_size) + accepted) / estimated_time;
   };
   double current_score = score_of(expected_accepted, validate_time_raw);
   const double min_gain = std::max(min_gain_, 0.0);
+
   for (const PruneCandidate& candidate : candidates) {
     int32_t& prefix_len = prefix_lengths[static_cast<size_t>(candidate.seq_id)];
     if (candidate.prefix_len <= prefix_len) {
@@ -175,7 +193,8 @@ AdaptiveSpeculativeController::select_pruned_prefix_lengths(
                       : validate_time_raw;
     const double next_score =
         score_of(candidate_expected_accepted, candidate_validate_time_raw);
-    if (next_score <= current_score * (1.0 + min_gain)) {
+    const bool accept = (next_score > current_score * (1.0 + min_gain));
+    if (!accept) {
       continue;
     }
 
