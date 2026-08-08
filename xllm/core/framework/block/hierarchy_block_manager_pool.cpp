@@ -741,20 +741,37 @@ void HierarchyBlockManagerPool::prefetch_from_storage(
         continue;
       }
 
-      std::vector<Block> allocated = probe.leaf->allocate(missing.size());
-      if (allocated.size() != missing.size()) {
+      const size_t requested_blocks = missing.size();
+      size_t allocatable_blocks =
+          std::min(requested_blocks,
+                   probe.leaf->num_free_blocks() +
+                       probe.leaf->num_blocks_in_prefix_cache());
+      std::vector<Block> allocated = probe.leaf->allocate(allocatable_blocks);
+      if (allocated.empty() && allocatable_blocks > 0) {
+        allocatable_blocks =
+            std::min(requested_blocks, probe.leaf->num_free_blocks());
+        allocated = probe.leaf->allocate(allocatable_blocks);
+      }
+      if (allocated.empty()) {
         LOG(WARNING) << "[Mooncake][Prefetch] insufficient Host blocks: seq="
                      << sequence->seq_id()
                      << ", type=" << static_cast<int32_t>(probe.type)
-                     << ", requested=" << missing.size();
-        probe.leaf->deallocate(allocated);
+                     << ", requested=" << requested_blocks << ", allocated=0";
         continue;
+      }
+      CHECK_EQ(allocated.size(), allocatable_blocks);
+      if (allocated.size() < requested_blocks) {
+        LOG(WARNING) << "[Mooncake][Prefetch] partial Host allocation: seq="
+                     << sequence->seq_id()
+                     << ", type=" << static_cast<int32_t>(probe.type)
+                     << ", requested=" << requested_blocks
+                     << ", allocated=" << allocated.size();
       }
       sequence->update_block_hashes(probe.block_size,
                                     probe.leaf->options().hasher_type());
       const Slice<XXH3Key> hashes = sequence->block_hashes();
       CHECK_GE(hashes.size(), full_blocks);
-      for (size_t i = 0; i < missing.size(); ++i) {
+      for (size_t i = 0; i < allocated.size(); ++i) {
         const size_t block_index = missing[i];
         allocated[i].set_hash_value(hashes[block_index].data);
         probe.blocks[block_index] = std::move(allocated[i]);
@@ -824,9 +841,15 @@ bool HierarchyBlockManagerPool::update_prefetch_result(
     if (plan == nullptr) {
       continue;
     }
+    const bool discard_result = request->finished() || request->cancelled();
     if (!plan->result->completed()) {
-      if (timeout > 0 && plan->timer.elapsed_milliseconds() >= timeout &&
-          plan->result->request_stop()) {
+      if (discard_result && plan->result->request_stop()) {
+        VLOG(1) << "[Mooncake][Prefetch] cancelled sequence "
+                << sequence->seq_id()
+                << "; stop requested, waiting for every TP worker's "
+                   "in-flight batch to finish.";
+      } else if (timeout > 0 && plan->timer.elapsed_milliseconds() >= timeout &&
+                 plan->result->request_stop()) {
         LOG(WARNING) << "[Mooncake][Prefetch] timeout after " << timeout
                      << " ms for sequence " << sequence->seq_id()
                      << "; stop requested, waiting for every TP worker's "
@@ -841,7 +864,8 @@ bool HierarchyBlockManagerPool::update_prefetch_result(
       const size_t erased = prefetch_plans_.erase(sequence);
       CHECK_EQ(erased, 1u);
     }
-    release_prefetch_plan(plan.get(), /*publish_store_hits=*/true);
+    release_prefetch_plan(plan.get(),
+                          /*publish_store_hits=*/!discard_result);
   }
 
   return all_completed;
@@ -851,16 +875,24 @@ void HierarchyBlockManagerPool::release_prefetch_plan(PrefetchPlan* plan,
                                                       bool publish_store_hits) {
   CHECK(plan != nullptr);
   CHECK(plan->sequence != nullptr);
+  if (!publish_store_hits) {
+    for (ProbeResult& probe : plan->host_probes) {
+      CHECK(probe.leaf != nullptr);
+      probe.leaf->deallocate(probe.blocks);
+      probe.blocks.clear();
+    }
+    return;
+  }
+
   std::vector<uint8_t> merged_hits;
-  if (publish_store_hits && plan->result != nullptr) {
+  if (plan->result != nullptr) {
     merged_hits = plan->result->merged_hits();
   }
 
   for (const PrefetchQuery& query : plan->queries) {
     ProbeResult& probe = plan->host_probes[query.probe_index];
     CHECK_LT(query.block_index, probe.blocks.size());
-    const bool hit = publish_store_hits &&
-                     query.result_index < merged_hits.size() &&
+    const bool hit = query.result_index < merged_hits.size() &&
                      merged_hits[query.result_index] != 0;
     if (!hit) {
       std::vector<Block> miss;

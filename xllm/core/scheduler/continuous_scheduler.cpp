@@ -192,16 +192,18 @@ bool ContinuousScheduler::add_request(std::shared_ptr<Request>& request) {
   kv_cache_manager_->prefetch_from_storage(request);
   if (kv_cache_manager_->update_prefetch_result(request,
                                                 options_.prefetch_timeout())) {
+    if (request->finished() || request->cancelled()) {
+      release_prefetch_admission_slot();
+      VLOG(1) << "[Mooncake][AdmissionCancelled] request="
+              << request->request_id();
+      return true;
+    }
     if (!enqueue_ready_request(request)) {
       std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
       prefetch_admission_queue_.emplace_back(request);
       return true;
     }
-    {
-      std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
-      CHECK_GT(prefetch_admission_slots_, 0u);
-      --prefetch_admission_slots_;
-    }
+    release_prefetch_admission_slot();
     return true;
   }
 
@@ -223,6 +225,12 @@ size_t ContinuousScheduler::num_prefetch_pending_requests() const {
   return prefetch_admission_slots_;
 }
 
+void ContinuousScheduler::release_prefetch_admission_slot() {
+  std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+  CHECK_GT(prefetch_admission_slots_, 0u);
+  --prefetch_admission_slots_;
+}
+
 void ContinuousScheduler::drain_prefetched_requests() {
   std::deque<std::shared_ptr<Request>> pending;
   {
@@ -233,17 +241,23 @@ void ContinuousScheduler::drain_prefetched_requests() {
   std::deque<std::shared_ptr<Request>> still_pending;
   for (std::shared_ptr<Request>& request : pending) {
     if (!kv_cache_manager_->update_prefetch_result(
-            request, options_.prefetch_timeout()) ||
-        !enqueue_ready_request(request)) {
+            request, options_.prefetch_timeout())) {
       still_pending.emplace_back(std::move(request));
       continue;
     }
 
-    {
-      std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
-      CHECK_GT(prefetch_admission_slots_, 0u);
-      --prefetch_admission_slots_;
+    if (request->finished() || request->cancelled()) {
+      release_prefetch_admission_slot();
+      VLOG(1) << "[Mooncake][AdmissionCancelled] request="
+              << request->request_id();
+      continue;
     }
+
+    if (!enqueue_ready_request(request)) {
+      still_pending.emplace_back(std::move(request));
+      continue;
+    }
+    release_prefetch_admission_slot();
     VLOG(1) << "[Mooncake][AdmissionReady] request=" << request->request_id();
   }
 

@@ -396,6 +396,41 @@ TEST(ContinuousSchedulerTest, PrefetchCompletesBeforeSchedulerQueueAdmission) {
   EXPECT_GE(engine->prefetch_update_calls(), 3u);
 }
 
+TEST(ContinuousSchedulerTest,
+     CancelledPendingPrefetchReleasesAdmissionWithoutEnqueue) {
+  ContinuousScheduler::Options options =
+      create_scheduler_options(64, 4, 0, 64, 1);
+  auto engine = std::make_unique<FakeEngine>(64, 32);
+  engine->set_prefetch_ready(false);
+  auto scheduler =
+      std::make_unique<TestContinuousScheduler>(engine.get(), options);
+  std::shared_ptr<Request> request =
+      generate_request({8},
+                       {4},
+                       std::nullopt,
+                       std::nullopt,
+                       std::nullopt,
+                       std::nullopt,
+                       /*max_context_len=*/30000)[0];
+
+  ASSERT_TRUE(scheduler->add_request(request));
+  ASSERT_EQ(scheduler->num_prefetch_pending_requests(), 1u);
+  request->set_cancel();
+
+  std::vector<Batch> batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  EXPECT_TRUE(batches.front().empty());
+  EXPECT_EQ(scheduler->num_prefetch_pending_requests(), 1u);
+  EXPECT_EQ(scheduler->scheduler_queue_size(), 0u);
+
+  engine->set_prefetch_ready(true);
+  batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  EXPECT_TRUE(batches.front().empty());
+  EXPECT_EQ(scheduler->num_prefetch_pending_requests(), 0u);
+  EXPECT_EQ(scheduler->scheduler_queue_size(), 0u);
+}
+
 TEST(ContinuousSchedulerTest, QueueCapacityRejectsBeforePrefetchStarts) {
   ScopedConfigValue<int32_t> request_queue_size(
       RecConfig::get_instance().request_queue_size(), 1);

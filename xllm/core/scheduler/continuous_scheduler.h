@@ -284,6 +284,7 @@ class ContinuousScheduler : public Scheduler {
  protected:
   void clear_mtp_bootstrap(Request* request);
   void drain_prefetched_requests();
+  void release_prefetch_admission_slot();
   virtual bool enqueue_ready_request(std::shared_ptr<Request> request);
 
   static int64_t microseconds_to_milliseconds(int64_t microseconds);
