@@ -304,10 +304,19 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
                     torch::dtype(dtype).device(device));
   }
 
-  q_cu_seq_lens_default_ = torch::zeros(
-      {metadata_capacity + 1}, torch::dtype(torch::kInt).device(device));
-  q_cu_seq_lens_ = torch::zeros({metadata_capacity + 1},
-                                torch::dtype(torch::kInt).device(device));
+  const torch::TensorOptions q_cu_options =
+      torch::dtype(torch::kInt).device(device);
+  if (is_hybrid_linear_attention_) {
+    // Hybrid decode consumes an indptr with a leading zero. Keeping the
+    // canonical one-token-per-row value as the reset template also gives
+    // logically empty graph shards a complete input without replay-time
+    // allocation.
+    q_cu_seq_lens_default_ = torch::arange(metadata_capacity + 1, q_cu_options);
+  } else {
+    q_cu_seq_lens_default_ =
+        torch::zeros({metadata_capacity + 1}, q_cu_options);
+  }
+  q_cu_seq_lens_ = q_cu_seq_lens_default_.clone();
 
   // Pre-allocate persistent dp/cp ep padding buffers with maximum capacity.
   const int64_t padding_buf_capacity =
@@ -818,11 +827,18 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
       is_chunked_prefill
           ? (padded_num_tokens + q_max_seq_len - 1) / q_max_seq_len
           : padded_num_tokens;
+  // WorkerImpl materializes one fake token for a logically empty DP decode
+  // rank so every rank can enter the same collectives. Canonicalize that
+  // physical row for hybrid models instead of letting q_max_seq_len == 0
+  // select dummy host branches while sharing a graph key with a real decode.
   const bool is_empty_dp_decode_rank =
-      is_decode && params.meta.num_sequences == 0 && actual_num_tokens > 0 &&
+      is_decode && params.meta.num_sequences == 0 &&
+      params.meta.actual_num_sequences == 0 && actual_num_tokens > 0 &&
       params.parallel.dp_global_token_nums.size() > 1 &&
       params.attention.host.kv_seq_lens.empty() &&
       params.attention.host.q_seq_lens.empty();
+  const bool canonical_empty_hybrid_decode =
+      is_empty_dp_decode_rank && is_hybrid_linear_attention_;
   const int64_t actual_seq_len_rows =
       is_empty_dp_decode_rank
           ? 0
@@ -926,6 +942,17 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     zero_tensor_tail(persistent_new_cache_slots_,
                      actual_num_tokens,
                      static_cast<int64_t>(padded_num_tokens));
+  }
+  if (canonical_empty_hybrid_decode && padded_batch_size > 0) {
+    CHECK_LE(padded_batch_size, persistent_linear_state_indices_.size(0))
+        << "padded graph metadata rows exceed persistent linear-state "
+           "capacity";
+    // An empty shard has no source state tensor. Reset the full active slice
+    // before copying real rows so real -> empty -> real replay cannot retain a
+    // live sequence's state id in the reserved padding row.
+    persistent_linear_state_indices_
+        .slice(/*dim=*/0, /*start=*/0, /*end=*/padded_batch_size)
+        .fill_(kPaddingLinearStateId);
   }
   if (!params.embedding.linear_state_ids.empty()) {
     const int64_t linear_copy_len = std::min<int64_t>(
@@ -1085,17 +1112,6 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     }
   }
 
-  // Expanded Qwen hybrid spec verification is represented as chunked prefill
-  // to the scheduler, but AttentionImpl routes it through decoder_forward().
-  // That path consumes expanded KV lengths, block tables and tiling data, not
-  // the dense graph attention mask. Avoid rebuilding the unused mask on every
-  // target replay while preserving all other decode/prefill paths.
-  const bool skip_unused_expanded_verify_mask =
-      can_skip_unused_expanded_verify_mask(params, is_hybrid_linear_attention_);
-  if (need_update_attn_mask_ && !skip_unused_expanded_verify_mask) {
-    update_attention_mask(params);
-  }
-
   std::vector<int32_t> padded_kv_seq_lens_vec(
       static_cast<size_t>(padded_batch_size), 1);
   std::vector<int32_t> padded_q_seq_lens_vec(
@@ -1115,6 +1131,26 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
   for (int64_t i = actual_seq_len_rows; i < padded_batch_size; ++i) {
     padded_q_seq_lens_vec[static_cast<size_t>(i)] =
         is_chunked_prefill ? q_max_seq_len : 1;
+  }
+
+  // Expanded Qwen hybrid spec verification is represented as chunked prefill
+  // to the scheduler, but AttentionImpl routes it through decoder_forward().
+  // That path consumes expanded KV lengths, block tables and tiling data, not
+  // the dense graph attention mask. Avoid rebuilding the unused mask on every
+  // target replay while preserving all other decode/prefill paths.
+  const bool skip_unused_expanded_verify_mask =
+      can_skip_unused_expanded_verify_mask(params, is_hybrid_linear_attention_);
+  if (need_update_attn_mask_ && !skip_unused_expanded_verify_mask) {
+    if (canonical_empty_hybrid_decode) {
+      ModelInputParams mask_params = params;
+      mask_params.attention.device.kv_seq_lens =
+          kv_seq_lens(static_cast<uint32_t>(padded_batch_size));
+      mask_params.meta.q_max_seq_len = 1;
+      mask_params.meta.kv_max_seq_len = 1;
+      update_attention_mask(mask_params);
+    } else {
+      update_attention_mask(params);
+    }
   }
   const bool use_expanded_spec_decode_attention =
       params.graph.use_expanded_decode_for_spec_verify_attention;
@@ -1272,6 +1308,12 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     }
     graph_params->meta.num_sequences = static_cast<int32_t>(padded_batch_size);
     graph_params->meta.batch_forward_type = params.meta.batch_forward_type;
+    if (canonical_empty_hybrid_decode) {
+      // Keep logical sequence counts empty while presenting a complete,
+      // non-dummy execution shape to every captured/replayed operator.
+      graph_params->meta.q_max_seq_len = 1;
+      graph_params->meta.kv_max_seq_len = 1;
+    }
     graph_params->enable_graph = true;
     if (graph_params->parallel.dp_global_token_nums.size() > 1) {
       graph_params->parallel.dp_global_token_nums = std::vector<int32_t>(
@@ -1282,7 +1324,8 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
         persistent_new_cache_slots(padded_num_tokens);
     graph_params->attention.device.block_tables =
         persistent_block_tables(static_cast<uint32_t>(padded_batch_size));
-    if (!params.embedding.linear_state_ids.empty()) {
+    if (!params.embedding.linear_state_ids.empty() ||
+        canonical_empty_hybrid_decode) {
       graph_params->embedding.linear_state_ids =
           params.embedding.linear_state_ids;
       graph_params->embedding.linear_state_ids.resize(
@@ -1327,7 +1370,8 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
           uses_paged_attention_tiling() ? tiling_data() : torch::Tensor();
       graph_params->graph.expanded_kv_seq_lens_vec = expanded_kv_seq_lens_vec;
     }
-    if (params.attention.device.q_cu_seq_lens.defined()) {
+    if (params.attention.device.q_cu_seq_lens.defined() ||
+        canonical_empty_hybrid_decode) {
       const bool use_hybrid_query_start_loc = is_hybrid_linear_attention_;
       graph_params->attention.device.q_cu_seq_lens = q_cu_seq_lens_.slice(
           /*dim=*/0,
@@ -1356,6 +1400,14 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     for (int64_t i = 0; i < padded_batch_size; ++i) {
       qsl.emplace_back(qsl.back() +
                        padded_q_seq_lens_vec[static_cast<size_t>(i)]);
+    }
+    if (canonical_empty_hybrid_decode) {
+      auto& host_q_cu_seq_lens = graph_params->attention.host.q_cu_seq_lens;
+      host_q_cu_seq_lens.clear();
+      host_q_cu_seq_lens.reserve(qsl.size());
+      for (int64_t offset : qsl) {
+        host_q_cu_seq_lens.emplace_back(static_cast<int32_t>(offset));
+      }
     }
 
     if (!params.linear_state_validity_mask.empty()) {
