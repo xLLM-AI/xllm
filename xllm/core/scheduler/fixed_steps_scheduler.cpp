@@ -54,16 +54,7 @@ FixedStepsScheduler::FixedStepsScheduler(Engine* engine, const Options& options)
 }
 
 bool FixedStepsScheduler::add_request(std::shared_ptr<Request>& request) {
-  CHECK(request != nullptr);
-  CHECK(!request->sequences().empty());
-
-  if (request_queue_.write(request)) {  //.get()
-    // take over the ownership of the request
-    // request.release();
-    return true;
-  }
-  // queue is full
-  return false;
+  return ContinuousScheduler::add_request(request);
 }
 
 void FixedStepsScheduler::handle_prefill_requests(
@@ -192,6 +183,7 @@ void FixedStepsScheduler::handle_prefill_requests(
 
 std::vector<Batch> FixedStepsScheduler::prepare_batch() {
   Timer timer;
+  drain_prefetched_requests();
   // propogate new requests to prefill_queue_
   // Include those requests that are preempted by others.
   auto propagate_request = [this](std::shared_ptr<Request>& request) {

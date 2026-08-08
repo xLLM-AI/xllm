@@ -41,6 +41,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:llm_data_dist_transfer.h>
     $<$<BOOL:${USE_NPU}>:spec_kv_cache_transfer.h>
     kv_cache_store.h
+    prefetch_result.h
     hierarchy_kv_cache_transfer.h
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_transfer_engine.h>
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_cache_transfer.h>

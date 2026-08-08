@@ -25,6 +25,7 @@ limitations under the License.
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -99,6 +100,8 @@ ContinuousScheduler::ContinuousScheduler(Engine* engine, const Options& options)
       engine_(engine),
       request_queue_(::xllm::RecConfig::get_instance().request_queue_size()) {
   CHECK(engine_ != nullptr);
+  prefetch_admission_limit_ = static_cast<size_t>(
+      ::xllm::RecConfig::get_instance().request_queue_size());
 
   kv_cache_manager_ = engine_->block_manager_pool();
   CHECK(kv_cache_manager_ != nullptr);
@@ -177,13 +180,94 @@ bool ContinuousScheduler::add_request(std::shared_ptr<Request>& request) {
   CHECK(request != nullptr);
   CHECK(!request->sequences().empty());
 
-  kv_cache_manager_->prefetch_from_storage(request);
+  {
+    std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+    if (request_queue_.size() + prefetch_admission_slots_ >=
+        prefetch_admission_limit_) {
+      return false;
+    }
+    ++prefetch_admission_slots_;
+  }
 
-  if (request_queue_.write(request)) {
+  kv_cache_manager_->prefetch_from_storage(request);
+  if (kv_cache_manager_->update_prefetch_result(request,
+                                                options_.prefetch_timeout())) {
+    if (request->finished() || request->cancelled()) {
+      release_prefetch_admission_slot();
+      VLOG(1) << "[Mooncake][AdmissionCancelled] request="
+              << request->request_id();
+      return true;
+    }
+    if (!enqueue_ready_request(request)) {
+      std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+      prefetch_admission_queue_.emplace_back(request);
+      return true;
+    }
+    release_prefetch_admission_slot();
     return true;
   }
 
-  return false;
+  {
+    std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+    prefetch_admission_queue_.emplace_back(request);
+  }
+  VLOG(1) << "[Mooncake][AdmissionPending] request=" << request->request_id();
+  return true;
+}
+
+bool ContinuousScheduler::enqueue_ready_request(
+    std::shared_ptr<Request> request) {
+  return request_queue_.write(std::move(request));
+}
+
+size_t ContinuousScheduler::num_prefetch_pending_requests() const {
+  std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+  return prefetch_admission_slots_;
+}
+
+void ContinuousScheduler::release_prefetch_admission_slot() {
+  std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+  CHECK_GT(prefetch_admission_slots_, 0u);
+  --prefetch_admission_slots_;
+}
+
+void ContinuousScheduler::drain_prefetched_requests() {
+  std::deque<std::shared_ptr<Request>> pending;
+  {
+    std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+    pending.swap(prefetch_admission_queue_);
+  }
+
+  std::deque<std::shared_ptr<Request>> still_pending;
+  for (std::shared_ptr<Request>& request : pending) {
+    if (!kv_cache_manager_->update_prefetch_result(
+            request, options_.prefetch_timeout())) {
+      still_pending.emplace_back(std::move(request));
+      continue;
+    }
+
+    if (request->finished() || request->cancelled()) {
+      release_prefetch_admission_slot();
+      VLOG(1) << "[Mooncake][AdmissionCancelled] request="
+              << request->request_id();
+      continue;
+    }
+
+    if (!enqueue_ready_request(request)) {
+      still_pending.emplace_back(std::move(request));
+      continue;
+    }
+    release_prefetch_admission_slot();
+    VLOG(1) << "[Mooncake][AdmissionReady] request=" << request->request_id();
+  }
+
+  if (!still_pending.empty()) {
+    std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+    prefetch_admission_queue_.insert(
+        prefetch_admission_queue_.end(),
+        std::make_move_iterator(still_pending.begin()),
+        std::make_move_iterator(still_pending.end()));
+  }
 }
 
 void ContinuousScheduler::create_queues(const Options& options) {
@@ -215,6 +299,7 @@ void ContinuousScheduler::clear_mtp_bootstrap(Request* request) {
 
 std::vector<Batch> ContinuousScheduler::prepare_batch() {
   Timer timer;
+  drain_prefetched_requests();
   auto state = make_state();
 
   // Common phases (strategy-independent)

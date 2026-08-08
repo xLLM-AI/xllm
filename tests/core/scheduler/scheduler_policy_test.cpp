@@ -13,10 +13,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "scheduler/scheduler_policy.h"
+
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <limits>
+#include <list>
 #include <memory>
 #include <optional>
 #include <string>
@@ -26,6 +29,7 @@ limitations under the License.
 #include "continuous_scheduler.h"
 #include "core/framework/config/scheduler_config.h"
 #include "distributed_runtime/engine.h"
+#include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
 #include "util/utils.h"
 
@@ -82,6 +86,113 @@ class FakeEngine : public Engine {
   std::unique_ptr<Tokenizer> fake_tokenizer_;
   std::unique_ptr<BlockManagerPool> fake_block_manager_;
   ModelArgs model_args_;
+};
+
+class TrackingBlockManagerPool final : public BlockManagerPool {
+ public:
+  TrackingBlockManagerPool()
+      : BlockManagerPool(make_options(), /*dp_size=*/1) {}
+
+  void allocate_shared(Sequence* sequence) override {
+    ++allocate_shared_calls_;
+    sequence->kv_state().set_prefix_cache_matched();
+  }
+
+  int32_t allocate_shared_calls() const { return allocate_shared_calls_; }
+
+ private:
+  static BlockManagerPool::Options make_options() {
+    BlockManagerPool::Options options;
+    options.num_blocks_ = 16;
+    options.block_size_ = 128;
+    options.max_seqs_per_batch_ = 16;
+    options.enable_prefix_cache_ = true;
+    return options;
+  }
+
+  int32_t allocate_shared_calls_ = 0;
+};
+
+class RetryRestoreBlockManagerPool final : public BlockManagerPool {
+ public:
+  RetryRestoreBlockManagerPool()
+      : BlockManagerPool(make_options(), /*dp_size=*/1) {}
+
+  bool allocate(Sequence* sequence, size_t num_tokens) override {
+    allocate_targets_.emplace_back(num_tokens);
+    if (allocate_targets_.size() == 1) {
+      sequence->clear_host_cache_match();
+      return false;
+    }
+    return true;
+  }
+
+  void allocate_shared(Sequence* sequence) override {
+    ++allocate_shared_calls_;
+    sequence->host_kv_state().set_prefix_cache_matched();
+    sequence->set_host_cache_match(/*restore_tokens=*/32768,
+                                   /*copy_units=*/2);
+  }
+
+  const std::vector<size_t>& allocate_targets() const {
+    return allocate_targets_;
+  }
+
+  int32_t allocate_shared_calls() const { return allocate_shared_calls_; }
+
+ private:
+  static BlockManagerPool::Options make_options() {
+    BlockManagerPool::Options options;
+    options.num_blocks_ = 512;
+    options.block_size_ = 128;
+    options.max_seqs_per_batch_ = 16;
+    options.enable_prefix_cache_ = true;
+    return options;
+  }
+
+  std::vector<size_t> allocate_targets_;
+  int32_t allocate_shared_calls_ = 0;
+};
+
+class PendingReleaseBlockManagerPool final : public BlockManagerPool {
+ public:
+  PendingReleaseBlockManagerPool()
+      : BlockManagerPool(make_options(), /*dp_size=*/1) {}
+
+  bool allocate(Sequence* /*sequence*/, size_t /*num_tokens*/) override {
+    ++allocate_calls_;
+    return false;
+  }
+
+  void allocate_shared(Sequence* sequence) override {
+    sequence->kv_state().set_prefix_cache_matched();
+  }
+
+  bool has_pending_async_block_release() const override { return true; }
+
+  int32_t allocate_calls() const { return allocate_calls_; }
+
+ private:
+  static BlockManagerPool::Options make_options() {
+    BlockManagerPool::Options options;
+    options.num_blocks_ = 256;
+    options.block_size_ = 128;
+    options.max_seqs_per_batch_ = 16;
+    options.enable_prefix_cache_ = true;
+    return options;
+  }
+
+  int32_t allocate_calls_ = 0;
+};
+
+class TestUnifiedPolicy final : public UnifiedPolicy {
+ public:
+  using UnifiedPolicy::UnifiedPolicy;
+
+  void allocate_shared_blocks_for_test(Sequence* sequence,
+                                       SchedulerState& state) {
+    allocate_shared_blocks_for(sequence, state);
+  }
 };
 
 template <typename T>
@@ -275,6 +386,203 @@ TEST(SchedulerPolicyTest, UnifiedPrefixHitIncludesScheduledSuffixCapacity) {
   EXPECT_EQ(batches[0].get_allowed_max_tokens()[0], kChunkTokens);
   EXPECT_GE(hit_sequence->kv_state().current_max_tokens_capacity(),
             kPrefixTokens + kChunkTokens);
+}
+
+TEST(SchedulerPolicyTest, KvlessCompositeReprobesAfterPartialAllocation) {
+  ContinuousScheduler::Options options = create_scheduler_options(
+      /*max_tokens_per_batch=*/16384,
+      /*max_seqs_per_batch=*/16,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/16384,
+      /*dp_size=*/1,
+      /*priority_strategy=*/"multi_slo_and_prio");
+  BatchMode mode{
+      .enable_mix_batch = true,
+      .enable_chunked_prefill = true,
+      .priority_strategy = "multi_slo_and_prio",
+  };
+  TestUnifiedPolicy policy(mode, options);
+  TrackingBlockManagerPool block_manager_pool;
+
+  std::vector<std::shared_ptr<Request>> requests = generate_request(
+      {32769}, {1}, std::nullopt, std::nullopt, /*max_context_len=*/40000);
+  Sequence* sequence = requests.front()->sequences().front().get();
+  sequence->kv_state().add_blocks(BlockType::C4, std::vector<Block>(1));
+  sequence->kv_state().set_prefix_cache_matched();
+  ASSERT_TRUE(sequence->kv_state().has_any_blocks());
+  ASSERT_EQ(sequence->kv_state().num_blocks(BlockType::KV), 0u);
+
+  DequeQueue prefill_queue;
+  DequeQueue chunk_queue;
+  DequeQueue decode_queue;
+  std::list<std::shared_ptr<Request>> unified_queue;
+  std::vector<std::shared_ptr<Request>> running_requests;
+  std::vector<Sequence*> running_sequences;
+  std::vector<size_t> running_sequence_budgets;
+  bool last_step_prefill = false;
+  SchedulerState state{
+      .prefill_queue = prefill_queue,
+      .chunk_queue = chunk_queue,
+      .decode_queue = decode_queue,
+      .unified_queue = unified_queue,
+      .running_requests = running_requests,
+      .running_sequences = running_sequences,
+      .running_sequences_budgets = running_sequence_budgets,
+      .kv_cache_manager = &block_manager_pool,
+      .profile_manager = nullptr,
+      .response_processor = nullptr,
+      .last_step_prefill = last_step_prefill,
+      .options = options,
+      .min_speculative_tokens_required = 0,
+      .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
+  };
+
+  policy.allocate_shared_blocks_for_test(sequence, state);
+
+  EXPECT_EQ(block_manager_pool.allocate_shared_calls(), 1);
+}
+
+TEST(SchedulerPolicyTest, UnifiedRetryRefreshesHostRestoreBeforeChunkSizing) {
+  constexpr size_t kPromptTokens = 34025;
+  constexpr size_t kRestoreTokens = 32768;
+  ContinuousScheduler::Options options = create_scheduler_options(
+      /*max_tokens_per_batch=*/16384,
+      /*max_seqs_per_batch=*/16,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/16384,
+      /*dp_size=*/1,
+      /*priority_strategy=*/"multi_slo_and_prio");
+  BatchMode mode{
+      .enable_mix_batch = true,
+      .enable_chunked_prefill = true,
+      .priority_strategy = "multi_slo_and_prio",
+  };
+  UnifiedPolicy policy(mode, options);
+  RetryRestoreBlockManagerPool block_manager_pool;
+  auto profile_engine = std::make_unique<FakeEngine>(512, 128);
+  ProfileManager::Options profile_options;
+  profile_options.max_tokens_per_batch(16384).max_seqs_per_batch(16);
+  ProfileManager profile_manager(profile_engine.get(), profile_options);
+
+  std::vector<std::shared_ptr<Request>> requests =
+      generate_request({static_cast<int32_t>(kPromptTokens),
+                        static_cast<int32_t>(kPromptTokens)},
+                       {1, 1},
+                       std::nullopt,
+                       std::vector<int32_t>{1, 3},
+                       /*max_context_len=*/40000);
+  requests[1]->sequences().front()->kv_state().set_kv_cache_tokens_num(1);
+  DequeQueue prefill_queue;
+  DequeQueue chunk_queue;
+  DequeQueue decode_queue;
+  std::list<std::shared_ptr<Request>> unified_queue{requests[0], requests[1]};
+  std::vector<std::shared_ptr<Request>> running_requests;
+  std::vector<Sequence*> running_sequences;
+  std::vector<size_t> running_sequence_budgets;
+  bool last_step_prefill = false;
+  SchedulerState state{
+      .prefill_queue = prefill_queue,
+      .chunk_queue = chunk_queue,
+      .decode_queue = decode_queue,
+      .unified_queue = unified_queue,
+      .running_requests = running_requests,
+      .running_sequences = running_sequences,
+      .running_sequences_budgets = running_sequence_budgets,
+      .kv_cache_manager = &block_manager_pool,
+      .profile_manager = &profile_manager,
+      .response_processor = nullptr,
+      .last_step_prefill = last_step_prefill,
+      .options = options,
+      .min_speculative_tokens_required = 0,
+      .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
+  };
+  ScheduleBudget budget{
+      .remaining_token_budget = 16384,
+      .remaining_seq_budget = 16,
+      .latency_budget = std::numeric_limits<double>::max(),
+      .estimate_latency = 0,
+      .num_preempted_requests = 0,
+  };
+  std::vector<std::shared_ptr<Request>> finished;
+
+  policy.schedule(state, budget, finished);
+
+  ASSERT_EQ(block_manager_pool.allocate_targets().size(), 2u);
+  EXPECT_EQ(block_manager_pool.allocate_targets()[0], kPromptTokens);
+  EXPECT_EQ(block_manager_pool.allocate_targets()[1], kPromptTokens);
+  EXPECT_GE(block_manager_pool.allocate_shared_calls(), 4);
+  ASSERT_EQ(running_sequences.size(), 1u);
+  EXPECT_EQ(running_sequences.front()->kv_cache_tokens_num(), kRestoreTokens);
+  EXPECT_EQ(running_sequence_budgets,
+            (std::vector<size_t>{kPromptTokens - kRestoreTokens}));
+  EXPECT_EQ(budget.num_preempted_requests, 1u);
+  EXPECT_TRUE(finished.empty());
+}
+
+TEST(SchedulerPolicyTest, DefersWhileAsyncBlockReleaseIsPending) {
+  ContinuousScheduler::Options options = create_scheduler_options(
+      /*max_tokens_per_batch=*/16384,
+      /*max_seqs_per_batch=*/16,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/16384,
+      /*dp_size=*/1,
+      /*priority_strategy=*/"multi_slo_and_prio");
+  BatchMode mode{
+      .enable_mix_batch = true,
+      .enable_chunked_prefill = true,
+      .priority_strategy = "multi_slo_and_prio",
+  };
+  UnifiedPolicy policy(mode, options);
+  PendingReleaseBlockManagerPool block_manager_pool;
+  auto profile_engine = std::make_unique<FakeEngine>(256, 128);
+  ProfileManager::Options profile_options;
+  profile_options.max_tokens_per_batch(16384).max_seqs_per_batch(16);
+  ProfileManager profile_manager(profile_engine.get(), profile_options);
+
+  std::vector<std::shared_ptr<Request>> requests = generate_request(
+      {34025}, {2}, std::nullopt, std::nullopt, /*max_context_len=*/40000);
+  DequeQueue prefill_queue;
+  DequeQueue chunk_queue;
+  DequeQueue decode_queue;
+  std::list<std::shared_ptr<Request>> unified_queue{requests.front()};
+  std::vector<std::shared_ptr<Request>> running_requests;
+  std::vector<Sequence*> running_sequences;
+  std::vector<size_t> running_sequence_budgets;
+  bool last_step_prefill = false;
+  SchedulerState state{
+      .prefill_queue = prefill_queue,
+      .chunk_queue = chunk_queue,
+      .decode_queue = decode_queue,
+      .unified_queue = unified_queue,
+      .running_requests = running_requests,
+      .running_sequences = running_sequences,
+      .running_sequences_budgets = running_sequence_budgets,
+      .kv_cache_manager = &block_manager_pool,
+      .profile_manager = &profile_manager,
+      .response_processor = nullptr,
+      .last_step_prefill = last_step_prefill,
+      .options = options,
+      .min_speculative_tokens_required = 0,
+      .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
+  };
+  ScheduleBudget budget{
+      .remaining_token_budget = 16384,
+      .remaining_seq_budget = 16,
+      .latency_budget = std::numeric_limits<double>::max(),
+      .estimate_latency = 0,
+      .num_preempted_requests = 0,
+  };
+  std::vector<std::shared_ptr<Request>> finished;
+
+  policy.schedule(state, budget, finished);
+
+  EXPECT_EQ(block_manager_pool.allocate_calls(), 1);
+  EXPECT_EQ(unified_queue.size(), 1u);
+  EXPECT_TRUE(running_sequences.empty());
+  EXPECT_TRUE(finished.empty());
 }
 
 // TEST-2:

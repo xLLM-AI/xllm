@@ -142,7 +142,8 @@ bool MooncakeTransferEngineCore::initialize(uint16_t listen_port,
     return false;
   }
 
-  LOG(INFO) << "TransferEngine init success, hostname=" << hostname;
+  LOG(INFO) << "[Mooncake][PDTransferEngine] transfer engine init success, "
+            << "handshake_endpoint=" << hostname;
 
   service_ = std::make_shared<MooncakeTransferEngineService>();
   if (server_.AddService(service_.get(), brpc::SERVER_DOESNT_OWN_SERVICE) !=
@@ -161,7 +162,8 @@ bool MooncakeTransferEngineCore::initialize(uint16_t listen_port,
   addr_ = host_ip_ + ":" + std::to_string(rpc_port_);
 
   initialized_ = true;
-  LOG(INFO) << "MooncakeTransferEngineCore initialize success, addr_=" << addr_;
+  LOG(INFO) << "[Mooncake][PDTransferEngine] ready, handshake_endpoint="
+            << hostname << ", data_endpoint=" << addr_;
 
   return true;
 }

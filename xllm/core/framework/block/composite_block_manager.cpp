@@ -684,6 +684,7 @@ void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
   }
   std::vector<ProbeResult> probes = probe_prefix_cache(seq, leaves_);
   if (probes.empty()) {
+    seq->kv_state().set_prefix_cache_matched();
     return;
   }
 
@@ -730,6 +731,7 @@ void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
     case LeafCombination::UNSUPPORTED:
       break;
   }
+  seq->kv_state().set_prefix_cache_matched();
 }
 
 void CompositeBlockManager::cache_for_sequence(Sequence* seq) {
