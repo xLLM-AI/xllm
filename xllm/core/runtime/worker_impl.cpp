@@ -143,11 +143,9 @@ class ScopedAtenLoadThreads {
   bool active_ = false;
 };
 
-// DFlash draft config lists target_layer_ids as the target-model layer indices
-// (0-based) whose output the draft consumes. xLLM's capture hook fires BEFORE
-// layer i runs, so capturing layer L's output means putting L+1 in the capture
-// set (matched against layer index i in the forward loop). Returns those L+1
-// ids.
+// Block-diffusion draft configs list target layer indices (0-based) whose
+// output the draft consumes. Model capture hooks use one-based layer outputs,
+// so return L+1 for both Qwen DFlash/DSpark and DeepSeek-V4 DSpark.
 std::vector<int32_t> read_dflash_capture_layer_ids(
     const std::string& model_weights_path) {
   JsonReader reader;
@@ -156,7 +154,8 @@ std::vector<int32_t> read_dflash_capture_layer_ids(
       << "Failed to parse DFlash config: " << config_path;
   std::vector<int32_t> capture_layer_ids;
   for (int32_t layer_id : reader.value_or<std::vector<int32_t>>(
-           std::vector<std::string>{"target_layer_ids",
+           std::vector<std::string>{"dspark_target_layer_ids",
+                                    "target_layer_ids",
                                     "dflash_config.target_layer_ids"},
            std::vector<int32_t>{})) {
     capture_layer_ids.emplace_back(layer_id + 1);
@@ -1449,14 +1448,32 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
     // the target engine reads --draft_model. The draft engine additionally
     // swaps in the DFlash/DSpark draft body.
     const bool is_dspark = options_.speculative_algorithm() == "DSpark";
+    const bool is_deepseek_v4 =
+        util::is_deepseek_v4_model_type(args.model_type());
     const char* draft_model_type =
-        is_dspark ? "DSparkDraftModel" : "DFlashDraftModel";
+        is_dspark && is_deepseek_v4
+            ? "deepseek_v4_dspark"
+            : (is_dspark ? "DSparkDraftModel" : "DFlashDraftModel");
     std::string draft_config_path;
     if (options_.is_draft_engine()) {
       LOG(INFO) << "Overriding draft model_type from " << args.model_type()
                 << " to " << draft_model_type
                 << " for block-diffusion speculative decoding";
       args.model_type(draft_model_type);
+      if (is_dspark && is_deepseek_v4) {
+        CHECK_GT(args.dspark_num_layers(), 0)
+            << "DeepSeek-V4 DSpark requires at least one draft layer.";
+        args.n_layers(args.dspark_num_layers());
+        args.n_hash_layers(0);
+        args.dspark_block_size(options_.num_speculative_tokens());
+        args.dspark_use_native_sas(::xllm::SpeculativeConfig::get_instance()
+                                       .enable_dspark_native_sas());
+        // DSpark stages are all standard SWA layers. Their stage ids are not
+        // target-model layer ids, so target compress_ratios[0..N) must not be
+        // reused (0731's third target layer is C4).
+        args.compress_ratios(std::vector<int32_t>(
+            static_cast<size_t>(args.dspark_num_layers()), 1));
+      }
       draft_config_path = model_weights_path_;
     } else {
       CHECK(options_.draft_model_path().has_value())
@@ -1499,6 +1516,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
           options_.speculative_algorithm()) &&
       args.model_type() != "DFlashDraftModel" &&
       args.model_type() != "DSparkDraftModel" &&
+      args.model_type() != "deepseek_v4_dspark" &&
       args.layers_to_capture().empty()) {
     const int32_t num_layers = static_cast<int32_t>(args.n_layers());
     args.layers_to_capture({2, num_layers / 2, num_layers - 3});

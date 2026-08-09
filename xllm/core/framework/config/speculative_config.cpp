@@ -27,7 +27,7 @@ DEFINE_int32(num_speculative_tokens, 0, "Number of speculative tokens.");
 DEFINE_string(speculative_algorithm,
               "MTP",
               "Speculative decoding algorithm. Supported options: MTP, Eagle3, "
-              "Suffix, DFlash. Default is MTP.");
+              "Suffix, DFlash, DSpark. Default is MTP.");
 
 DEFINE_int32(speculative_suffix_cache_max_depth,
              64,
@@ -66,6 +66,14 @@ DEFINE_bool(enable_mtp_draft_body_tp1,
             "Whether to run the MTP draft body with tensor-parallel size 1 "
             "while keeping the draft LMHead on the target TP group.");
 
+DEFINE_bool(enable_dspark_native_sas,
+            false,
+            "Use native DSpark SparseAttnSharedkv semantics: a gamma-wide "
+            "query block, non-empty ori_sparse_indices, and an expanded SWA "
+            "window. Keep disabled for CANN 9.0 operators that reject "
+            "ori_sparse_indices; xLLM then uses its compatible q_len=1 "
+            "fallback.");
+
 DEFINE_bool(enable_atb_spec_kernel,
             false,
             "Whether to use ATB speculative kernel.");
@@ -84,6 +92,7 @@ void SpeculativeConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_use_tree_spec);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_opt_validate_probs);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mtp_draft_body_tp1);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_dspark_native_sas);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_atb_spec_kernel);
 }
 
@@ -99,6 +108,7 @@ void SpeculativeConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_use_tree_spec);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_opt_validate_probs);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mtp_draft_body_tp1);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_dspark_native_sas);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_atb_spec_kernel);
 }
 
@@ -127,6 +137,8 @@ void SpeculativeConfig::append_config_json(
       config_json, default_config, enable_opt_validate_probs);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_mtp_draft_body_tp1);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_dspark_native_sas);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_atb_spec_kernel);
 }

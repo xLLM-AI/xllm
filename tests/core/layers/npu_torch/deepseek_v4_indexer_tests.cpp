@@ -19,6 +19,7 @@ limitations under the License.
 #include "framework/model/model_input_params.h"
 #include "framework/quant_args.h"
 #include "layers/common/dsa_metadata_builder.h"
+#include "layers/npu_torch/deepseek_sparse_attention.h"
 #include "layers/npu_torch/deepseek_v4_indexer.h"
 
 namespace xllm {
@@ -146,6 +147,60 @@ TEST_F(DeepseekV4IndexerTest, DsaSwaBlockTableUsesLogicalColumnsWithoutWrap) {
 
   const auto expected_slot = torch::tensor({10 * 128}, torch::kInt32);
   EXPECT_TRUE(torch::equal(dsa.slot_mappings[0][0].cpu(), expected_slot));
+}
+
+TEST_F(DeepseekV4IndexerTest, DsaSwaUsesExplicitBlockParallelSlots) {
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  params.meta.num_sequences = 3;
+  params.meta.q_max_seq_len = 1;
+  params.meta.kv_max_seq_len = 8;
+  params.attention.host.kv_seq_lens = {8, 8, 8};
+  params.attention.host.q_seq_lens = {1, 1, 1};
+  params.attention.host.new_cache_slots = {5, 6, 7};
+  params.multi_block_tables = {
+      torch::tensor({{0, 1, 2}, {0, 1, 2}, {0, 1, 2}}, torch::kInt32)};
+
+  const torch::Tensor positions = torch::tensor({5, 6, 7}, torch::kInt64);
+  const std::vector<DSAGroupInfo> group_infos = {
+      {DSACacheType::SLIDING_WINDOW, 1, 4}};
+  const std::vector<std::vector<DSACacheInfo>> caches_info = {{
+      {0, DSACacheType::SLIDING_WINDOW, 1, 4},
+  }};
+
+  const AttentionMetadata metadata = DSAMetadataBuilder::build(
+      params, positions, torch::Tensor(), caches_info, group_infos);
+
+  ASSERT_TRUE(metadata.dsa_metadata != nullptr);
+  ASSERT_EQ(metadata.dsa_metadata->slot_mappings.size(), 1);
+  ASSERT_EQ(metadata.dsa_metadata->slot_mappings[0].size(), 1);
+  EXPECT_TRUE(torch::equal(metadata.dsa_metadata->slot_mappings[0][0],
+                           torch::tensor({5, 6, 7}, torch::kInt32)));
+}
+
+TEST_F(DeepseekV4IndexerTest, DSparkSparseTilingUsesSupportedWindow) {
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  params.meta.q_max_seq_len = 1;
+
+  EXPECT_TRUE(
+      deepseek_v4_uses_prefill_sparse_metadata(params.meta.batch_forward_type));
+  EXPECT_EQ(deepseek_v4_ori_window_left(/*window_size=*/128,
+                                        /*dspark_block_size=*/5,
+                                        /*use_native_dspark_sas=*/false),
+            127);
+  EXPECT_EQ(deepseek_v4_ori_window_left(/*window_size=*/128,
+                                        /*dspark_block_size=*/0,
+                                        /*use_native_dspark_sas=*/true),
+            127);
+  EXPECT_EQ(deepseek_v4_ori_window_left(/*window_size=*/128,
+                                        /*dspark_block_size=*/5,
+                                        /*use_native_dspark_sas=*/true),
+            132);
+
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  EXPECT_FALSE(
+      deepseek_v4_uses_prefill_sparse_metadata(params.meta.batch_forward_type));
 }
 
 TEST_F(DeepseekV4IndexerTest, DsaDummyAttentionUsesPositionDevice) {

@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
+#include <string>
 #include <vector>
 
 #include "common/device_monitor.h"
@@ -28,6 +29,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "common/types.h"
 #include "core/distributed_runtime/comm_channel.h"
+#include "core/distributed_runtime/speculative_output_metrics.h"
 #include "core/framework/config/eplb_config.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/model/model_input_params.h"
@@ -59,19 +61,6 @@ int32_t get_num_decode_seqs_for_schedule_overlap(const ForwardInput& input) {
       unpacked_input.sampling_params.sample_idxes.size(0));
 }
 
-template <typename T>
-int64_t count_negative_tokens(const torch::Tensor& tokens) {
-  const T* data = tokens.const_data_ptr<T>();
-  const int64_t numel = tokens.numel();
-  int64_t count = 0;
-  for (int64_t i = 0; i < numel; ++i) {
-    if (data[i] < static_cast<T>(0)) {
-      ++count;
-    }
-  }
-  return count;
-}
-
 void record_speculative_metrics_from_output(const torch::Tensor& next_tokens,
                                             const runtime::Options& options) {
   if (!options.enable_speculative_decode() || !next_tokens.defined() ||
@@ -88,31 +77,36 @@ void record_speculative_metrics_from_output(const torch::Tensor& next_tokens,
   }
 
   torch::Tensor tokens = next_tokens.contiguous();
-  int64_t rejected_count = 0;
-  switch (tokens.scalar_type()) {
-    case torch::kInt64:
-      rejected_count = count_negative_tokens<int64_t>(tokens);
-      break;
-    case torch::kInt32:
-      rejected_count = count_negative_tokens<int32_t>(tokens);
-      break;
-    case torch::kInt16:
-      rejected_count = count_negative_tokens<int16_t>(tokens);
-      break;
-    case torch::kInt8:
-      rejected_count = count_negative_tokens<int8_t>(tokens);
-      break;
-    default:
-      LOG(WARNING) << "Unsupported speculative next_tokens dtype for metrics: "
-                   << tokens.scalar_type();
-      return;
+  worker_service_detail::SpeculativeOutputStats stats =
+      worker_service_detail::calculate_speculative_output_stats(
+          tokens, num_speculative_tokens);
+  if (!stats.supported_dtype) {
+    LOG(WARNING) << "Unsupported speculative next_tokens dtype for metrics: "
+                 << tokens.scalar_type();
+    return;
   }
 
   const int64_t num_draft_tokens = batch_size * num_speculative_tokens;
-  rejected_count = std::min(rejected_count, num_draft_tokens);
+  int64_t num_accepted_tokens = 0;
+  for (int64_t position = 0; position < num_speculative_tokens; ++position) {
+    const int64_t accepted =
+        stats.accepted_per_position[static_cast<size_t>(position)];
+    num_accepted_tokens += accepted;
+    MULTI_COUNTER_ADD(speculative_num_accepted_tokens_per_pos,
+                      std::to_string(position),
+                      accepted);
+  }
+  COUNTER_ADD(speculative_num_drafts_total, batch_size);
   COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
-  COUNTER_ADD(speculative_num_accepted_tokens_total,
-              num_draft_tokens - rejected_count);
+  COUNTER_ADD(speculative_num_accepted_tokens_total, num_accepted_tokens);
+  COUNTER_ADD(speculative_num_committed_tokens_total, stats.committed_tokens);
+  const double total_drafts = COUNTER_speculative_num_drafts_total.get_value();
+  const double total_committed =
+      COUNTER_speculative_num_committed_tokens_total.get_value();
+  if (total_drafts > 0.0) {
+    GAUGE_SET(speculative_mean_tokens_per_decode_step,
+              total_committed / total_drafts);
+  }
 }
 
 torch::Tensor clone_cpu_tensor_view(const torch::Tensor& tensor) {

@@ -91,6 +91,20 @@ class AutoCounter final {
     *latency_recorder_##name << (value);           \
   }
 
+// define multi counter (using bvar::MultiDimension for labeled counters)
+#define DEFINE_MULTI_COUNTER(name, label, desc)                         \
+  bvar::MultiDimension<bvar::Adder<double>> MULTI_COUNTER_##name(#name, \
+                                                                 {(label)});
+
+#define MULTI_COUNTER_ADD(name, key, value)      \
+  do {                                           \
+    bvar::Adder<double>* counter_##name =        \
+        MULTI_COUNTER_##name.get_stats({(key)}); \
+    if (counter_##name) {                        \
+      *counter_##name << (value);                \
+    }                                            \
+  } while (false)
+
 // declare gauge
 #define DECLARE_GAUGE(name) extern bvar::Status<double> GAUGE_##name;
 
@@ -103,6 +117,10 @@ class AutoCounter final {
 // declare multi histogram
 #define DECLARE_MULTI_HISTOGRAM(name) \
   extern bvar::MultiDimension<bvar::LatencyRecorder> MULTI_HISTOGRAM_##name;
+
+// declare multi counter
+#define DECLARE_MULTI_COUNTER(name) \
+  extern bvar::MultiDimension<bvar::Adder<double>> MULTI_COUNTER_##name;
 
 // NOLINTEND(bugprone-macro-parentheses)
 
@@ -203,8 +221,11 @@ DECLARE_GAUGE(xllm_gpu_utilization);
 DECLARE_COUNTER(speculative_execution_latency_seconds_draft);
 DECLARE_COUNTER(speculative_execution_latency_seconds_target);
 DECLARE_COUNTER(speculative_execution_latency_seconds_validation);
+DECLARE_COUNTER(speculative_num_drafts_total);
 DECLARE_COUNTER(speculative_num_accepted_tokens_total);
 DECLARE_COUNTER(speculative_num_draft_tokens_total);
+DECLARE_COUNTER(speculative_num_committed_tokens_total);
+DECLARE_MULTI_COUNTER(speculative_num_accepted_tokens_per_pos);
 DECLARE_GAUGE(speculative_mean_tokens_per_decode_step);
 
 // latency of proto conversion in seconds

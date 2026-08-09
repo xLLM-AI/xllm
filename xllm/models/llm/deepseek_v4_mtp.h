@@ -860,6 +860,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     dsa.c4_metadata = torch::Tensor();
     dsa.c128_metadata = torch::Tensor();
     dsa.qli_metadata = torch::Tensor();
+    dsa.sparse_metadata_ori_win_left = -1;
 
     torch::Device metadata_device(torch::kCPU);
     if (dsa.input_positions.defined()) {
@@ -893,6 +894,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
         params.meta.kv_max_seq_len,
         vector_max_or_zero(params.attention.host.kv_seq_lens));
     const int64_t ori_win_left = std::max<int64_t>(window_size_ - 1, 0);
+    dsa.sparse_metadata_ori_win_left = ori_win_left;
     const int64_t sparse_topk = std::max<int64_t>(index_topk_, 1);
     const bool is_prefill = params.meta.q_max_seq_len > 1;
 

@@ -179,13 +179,21 @@ DEFINE_COUNTER(speculative_execution_latency_seconds_target,
 DEFINE_COUNTER(speculative_execution_latency_seconds_validation,
                "Latency of validation in seconds");
 
+DEFINE_COUNTER(speculative_num_drafts_total,
+               "Total number of speculative proposal sequences");
 DEFINE_COUNTER(speculative_num_accepted_tokens_total,
                "Total number of accepted tokens in validation");
 DEFINE_COUNTER(speculative_num_draft_tokens_total,
                "Total number of draft tokens");
+DEFINE_COUNTER(speculative_num_committed_tokens_total,
+               "Total number of tokens committed by speculative decode");
+DEFINE_MULTI_COUNTER(speculative_num_accepted_tokens_per_pos,
+                     "position",
+                     "Accepted speculative tokens by zero-based draft "
+                     "position");
 DEFINE_GAUGE(speculative_mean_tokens_per_decode_step,
-             "Batch-mean tokens committed per decode step, i.e. the TPOT "
-             "speedup factor (1.0 without speculative decoding)");
+             "Cumulative mean tokens committed per speculative proposal "
+             "sequence (1.0 without accepted draft tokens)");
 
 // proto metrics
 DEFINE_COUNTER(proto_latency_seconds_proto2i,

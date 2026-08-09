@@ -179,6 +179,51 @@ int32_t calc_slot_id(int32_t position,
   return block_id * block_size + block_offset;
 }
 
+int32_t calc_ring_slot_id(int32_t position,
+                          const Slice<int32_t>& block_table_slice,
+                          int32_t block_size) {
+  CHECK_GT(block_size, 0) << "invalid block_size=" << block_size;
+  CHECK_GE(position, 0) << "invalid position=" << position;
+  CHECK(!block_table_slice.empty()) << "circular block table must not be empty";
+  const int32_t block_idx =
+      (position / block_size) % static_cast<int32_t>(block_table_slice.size());
+  const int32_t block_id = block_table_slice[block_idx];
+  CHECK_GE(block_id, 0) << "invalid circular block_id=" << block_id;
+  const int32_t block_offset = position % block_size;
+  return block_id * block_size + block_offset;
+}
+
+std::vector<int32_t> build_grouped_prefill_swa_slots(const ForwardInput& input,
+                                                     int32_t block_size) {
+  DecodeRowContext ctx = make_decode_row_context(input);
+  CHECK(ctx.model_managed_multiblock)
+      << "grouped prefill SWA slots require multi_block_tables";
+  CHECK(!ctx.multi_block_tables.empty())
+      << "grouped prefill SWA slots require manager 0";
+  CHECK_EQ(ctx.multi_block_tables.front().size(),
+           static_cast<size_t>(ctx.num_sequences))
+      << "grouped prefill SWA manager row count mismatch";
+
+  std::vector<int32_t> slots;
+  slots.reserve(ctx.positions.size());
+  for (int32_t seq_id = 0; seq_id < ctx.num_sequences; ++seq_id) {
+    const int32_t kv_len = calc_kv_len(ctx.kv_seq_lens, seq_id, /*offset=*/0);
+    const int32_t q_len = input.input_params.get_q_seq_len(seq_id);
+    CHECK_GE(q_len, 0) << "grouped prefill q length must be non-negative";
+    CHECK_GE(kv_len, q_len) << "grouped prefill kv length must cover the query";
+    const int32_t query_start = kv_len - q_len;
+    const Slice<int32_t>& swa_block_table =
+        ctx.multi_block_tables.front()[static_cast<size_t>(seq_id)];
+    for (int32_t query_idx = 0; query_idx < q_len; ++query_idx) {
+      slots.emplace_back(calc_ring_slot_id(
+          query_start + query_idx, swa_block_table, block_size));
+    }
+  }
+  CHECK_EQ(slots.size(), ctx.positions.size())
+      << "grouped prefill SWA slot/position count mismatch";
+  return slots;
+}
+
 int32_t calc_kv_len(const Slice<int32_t>& kv_seq_lens_slice,
                     int32_t seq_id,
                     int32_t offset) {
@@ -285,7 +330,14 @@ void append_decode_row(const DecodeRowContext& ctx,
   }
   buf.out_positions.emplace_back(new_position);
   if (ctx.model_managed_multiblock) {
-    buf.out_new_cache_slots.emplace_back(0);
+    CHECK(!ctx.multi_block_tables.empty())
+        << "model-managed multiblock input requires an SWA manager";
+    CHECK_LT(static_cast<size_t>(row.seq_id),
+             ctx.multi_block_tables.front().size());
+    buf.out_new_cache_slots.emplace_back(calc_ring_slot_id(
+        new_position,
+        ctx.multi_block_tables.front()[static_cast<size_t>(row.seq_id)],
+        block_size));
     if (row.append_block_table) {
       if (buf.out_multi_block_tables.size() < ctx.multi_block_tables.size()) {
         buf.out_multi_block_tables.resize(ctx.multi_block_tables.size());
@@ -320,8 +372,10 @@ void append_decode_row(const DecodeRowContext& ctx,
   }
 
   if (row.append_kv_len) {
-    int32_t kv_len =
-        calc_kv_len(ctx.kv_seq_lens, row.seq_id, row.position_offset);
+    const int32_t kv_len_offset =
+        row.kv_len_offset.value_or(row.position_offset);
+    const int32_t kv_len =
+        calc_kv_len(ctx.kv_seq_lens, row.seq_id, kv_len_offset);
     update_kv_seq_lens_and_max(
         buf.out_kv_seq_lens, kv_len, buf.meta.kv_max_seq_len);
   }
