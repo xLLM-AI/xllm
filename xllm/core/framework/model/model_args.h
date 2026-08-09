@@ -436,7 +436,7 @@ struct ModelArgs {
   // number of speculative decoding tokens
   PROPERTY(int64_t, num_speculative_tokens) = 0;
 
-  // Eagle3: layer indices (0-based) to capture aux hidden states, from config
+  // Layer indices whose residual streams feed a speculative draft.
   PROPERTY(std::vector<int32_t>, layers_to_capture) = {};
 
   // VAE related args

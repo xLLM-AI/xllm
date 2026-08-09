@@ -143,17 +143,13 @@ class ScopedAtenLoadThreads {
   bool active_ = false;
 };
 
-// DFlash draft config lists target_layer_ids as the target-model layer indices
-// (0-based) whose output the draft consumes. xLLM's capture hook fires BEFORE
-// layer i runs, so capturing layer L's output means putting L+1 in the capture
-// set (matched against layer index i in the forward loop). Returns those L+1
-// ids.
-std::vector<int32_t> read_dflash_capture_layer_ids(
+// Hooks run before a layer, so output layer L is captured at L + 1.
+std::vector<int32_t> read_capture_layer_ids(
     const std::string& model_weights_path) {
   JsonReader reader;
   const std::string config_path = model_weights_path + "/config.json";
   CHECK(reader.parse(config_path))
-      << "Failed to parse DFlash config: " << config_path;
+      << "Failed to parse block-diffusion draft config: " << config_path;
   std::vector<int32_t> capture_layer_ids;
   for (int32_t layer_id : reader.value_or<std::vector<int32_t>>(
            std::vector<std::string>{"target_layer_ids",
@@ -161,6 +157,10 @@ std::vector<int32_t> read_dflash_capture_layer_ids(
            std::vector<int32_t>{})) {
     capture_layer_ids.emplace_back(layer_id + 1);
   }
+  CHECK(!capture_layer_ids.empty())
+      << "Block-diffusion draft config requires target_layer_ids or "
+         "dflash_config.target_layer_ids: "
+      << config_path;
   return capture_layer_ids;
 }
 
@@ -1456,28 +1456,20 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   }
   if (options_.speculative_algorithm() == "DFlash" ||
       options_.speculative_algorithm() == "DSpark") {
-    // DSpark is a DFlash variant: same target-layer capture and draft-body
-    // swap, just a different draft model_type ("DSparkDraftModel") carrying the
-    // extra Markov head. Both engines capture the same target layers, whose ids
-    // live in the draft config: the draft engine reads its own weights path,
-    // the target engine reads --draft_model. The draft engine additionally
-    // swaps in the DFlash/DSpark draft body.
     const bool is_dspark = options_.speculative_algorithm() == "DSpark";
     const char* draft_model_type =
         is_dspark ? "DSparkDraftModel" : "DFlashDraftModel";
-    std::string draft_config_path;
     if (options_.is_draft_engine()) {
       LOG(INFO) << "Overriding draft model_type from " << args.model_type()
                 << " to " << draft_model_type
                 << " for block-diffusion speculative decoding";
       args.model_type(draft_model_type);
-      draft_config_path = model_weights_path_;
     } else {
       CHECK(options_.draft_model_path().has_value())
           << "block-diffusion speculative decoding requires --draft_model.";
-      draft_config_path = options_.draft_model_path().value();
+      args.layers_to_capture(
+          read_capture_layer_ids(options_.draft_model_path().value()));
     }
-    args.layers_to_capture(read_dflash_capture_layer_ids(draft_config_path));
   } else if (options_.enable_speculative_decode() &&
              ::xllm::SpeculativeConfig::get_instance()
                  .enable_atb_spec_kernel()) {
@@ -1502,17 +1494,8 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       args.full_attention_interval(1);
     }
   }
-  // Eagle3/DFlash targets capture intermediate-layer aux hidden from the layers
-  // in layers_to_capture, the model's sole capture signal. Fill the default
-  // {2, n/2, n-3} for an Eagle3 target whose config omits the list; DFlash
-  // already filled it from the draft config. The DFlash/DSpark draft body
-  // (DFlashDraftModel/DSparkDraftModel) consumes context-KV rather than
-  // capturing, so exclude it.
-  if (options_.enable_speculative_decode() &&
-      SpeculativeConfig::requires_aux_hidden_capture(
-          options_.speculative_algorithm()) &&
-      args.model_type() != "DFlashDraftModel" &&
-      args.model_type() != "DSparkDraftModel" &&
+  if (options_.enable_speculative_decode() && !options_.is_draft_engine() &&
+      SpeculativeConfig::requires_aux_hidden_capture(speculative_algorithm) &&
       args.layers_to_capture().empty()) {
     const int32_t num_layers = static_cast<int32_t>(args.n_layers());
     args.layers_to_capture({2, num_layers / 2, num_layers - 3});

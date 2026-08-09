@@ -25,6 +25,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/model_output.h"
 #include "core/layers/npu/npu_qwen3_decoder_layer_impl.h"
 #include "llm_model_base.h"
@@ -80,37 +81,10 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
       blocks_->push_back(block);
     }
 
-    // Eagle3/DFlash/DSpark target captures intermediate-layer aux hidden states
-    // to drive the draft. The block-diffusion draft keeps layers_to_capture to
-    // size its context projection, but must not capture its own hidden states.
-    const bool is_block_diffusion_draft_model =
-        model_args.model_type() == "DFlashDraftModel" ||
-        model_args.model_type() == "DSparkDraftModel";
-    const auto& layer_ids_from_config = model_args.layers_to_capture();
-    const bool enable_aux_hidden_capture =
-        !is_block_diffusion_draft_model && !layer_ids_from_config.empty();
-    if (enable_aux_hidden_capture) {
-      set_aux_hidden_capture_layers(layer_ids_from_config);
-      // Pre-allocate aux output buffer [max_tokens_per_batch, hidden_size *
-      // num_captured]
-      const int64_t num_captured = layers_to_capture_set_.size();
-      const int64_t aux_dim = model_args.hidden_size() * num_captured;
-      aux_output_buffer_ = torch::empty(
-          {::xllm::SchedulerConfig::get_instance().max_tokens_per_batch(),
-           aux_dim},
-          options);
-    }
-  }
-
-  void set_aux_hidden_capture_layers(const std::vector<int32_t>& layer_ids) {
-    capture_aux_hidden_states_ = true;
-    layers_to_capture_set_.clear();
-    // Config uses 0-based layer indices.
-    for (int32_t val : layer_ids) {
-      layers_to_capture_set_.insert(val);
-    }
-    LOG(INFO) << "layers_to_capture_set_ size: "
-              << layers_to_capture_set_.size();
+    aux_capture_.init(
+        model_args,
+        options,
+        ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch());
   }
 
   virtual ModelOutput forward(torch::Tensor tokens,
@@ -213,9 +187,7 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
 
     ModelInputParams& input_params_new =
         const_cast<ModelInputParams&>(input_params);
-    const int64_t num_tokens = h.size(0);
-    const int64_t hidden_size = h.size(-1);
-    int64_t capture_idx = 0;
+    aux_capture_.reset_capture_index();
     RollingLayerGuard rolling_guard(rolling_mgr_);
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event{nullptr};
@@ -232,14 +204,8 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
 
       auto& layer = layers_[i];
       const int32_t layer_index = i;
-      if (capture_aux_hidden_states_ &&
-          layers_to_capture_set_.count(layer_index) != 0) {
-        aux_output_buffer_.slice(0, 0, num_tokens)
-            .slice(
-                1, capture_idx * hidden_size, (capture_idx + 1) * hidden_size)
-            .copy_(h.reshape({num_tokens, hidden_size}));
-        capture_idx++;
-      }
+      // ATB keeps `h` as the full residual stream, so no separate residual.
+      aux_capture_.capture_layer(layer_index, h, std::nullopt);
 
       if (layer_forward_interrupted_) {
         LOG(INFO) << "Forward interrupted at layer: " << i;
@@ -264,14 +230,7 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
       }
     }
     auto hidden_states = norm_(h, 0);
-    if (capture_aux_hidden_states_) {
-      CHECK_EQ(capture_idx, static_cast<int64_t>(layers_to_capture_set_.size()))
-          << "Captured aux hidden layer count mismatch.";
-      torch::Tensor aux_hidden_states =
-          aux_output_buffer_.slice(0, 0, num_tokens);
-      return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);
-    }
-    return ModelOutput(hidden_states);
+    return aux_capture_.finalize(hidden_states);
   }
 
  protected:
@@ -285,9 +244,7 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
 
  private:
   torch::Tensor viusal_pos_mask_;
-  std::unordered_set<int32_t> layers_to_capture_set_;
-  bool capture_aux_hidden_states_ = false;
-  torch::Tensor aux_output_buffer_;
+  AuxHiddenCapture aux_capture_;
 };
 TORCH_MODULE(QWen3Model);
 
@@ -333,10 +290,6 @@ REGISTER_MODEL_ARGS_WITH_VARNAME(qwen3_atb, qwen3_atb, [&] {
 
   LOAD_ARG_OR(use_sliding_window, "use_sliding_window", false);
   LOAD_ARG_OR(max_window_layers, "max_window_layers", 28);
-
-  // Eagle3: layer ids (0-based) to capture from config, e.g.
-  // "layers_to_capture": [2, 14, 25]; defaults to empty if missing
-  LOAD_ARG_OR(layers_to_capture, "layers_to_capture", std::vector<int32_t>{});
 
   // DSpark: low-rank dim of the Markov head (top-level config key, like vLLM's
   // config.markov_rank). 0 = disabled (plain DFlash / non-DSpark models).

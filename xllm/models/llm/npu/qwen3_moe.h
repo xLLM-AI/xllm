@@ -17,6 +17,7 @@ limitations under the License.
 
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_context.h"
 #include "core/framework/parallel_state/npu_dp_ep_padding.h"
@@ -168,39 +169,10 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
       indices.push_back(i);
     }
 
-    // Eagle3/DFlash target captures intermediate-layer aux hidden states to
-    // drive the draft. The worker fills layers_to_capture (from config.json for
-    // Eagle3, or the draft config for DFlash) before construction, so a
-    // non-empty list is the capture signal. The DFlash draft model itself never
-    // captures.
-    const bool is_dflash_draft_model =
-        model_args.model_type() == "DFlashDraftModel";
-    const auto& layer_ids_from_config = model_args.layers_to_capture();
-    const bool enable_aux_hidden_capture =
-        !is_dflash_draft_model && !layer_ids_from_config.empty();
-    if (enable_aux_hidden_capture) {
-      set_aux_hidden_capture_layers(layer_ids_from_config);
-      // Pre-allocate aux output buffer [max_tokens_per_batch, hidden_size *
-      // num_captured]
-      const size_t num_captured = layers_to_capture_set_.size();
-      const int64_t aux_dim =
-          model_args.hidden_size() * static_cast<int64_t>(num_captured);
-      aux_output_buffer_ = torch::empty(
-          {::xllm::SchedulerConfig::get_instance().max_tokens_per_batch(),
-           aux_dim},
-          options);
-    }
-  }
-
-  void set_aux_hidden_capture_layers(const std::vector<int32_t>& layer_ids) {
-    capture_aux_hidden_states_ = true;
-    layers_to_capture_set_.clear();
-    // Config uses 0-based layer indices.
-    for (int32_t val : layer_ids) {
-      layers_to_capture_set_.insert(val);
-    }
-    LOG(INFO) << "layers_to_capture_set_ size: "
-              << layers_to_capture_set_.size();
+    aux_capture_.init(
+        model_args,
+        options,
+        ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch());
   }
 
   // tokens: [num_tokens]
@@ -309,9 +281,7 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
     if (::xllm::KernelConfig::get_instance().enable_intralayer_addnorm()) {
       residual = torch::zeros_like(h);
     }
-    const int64_t num_tokens = h.size(0);
-    const int64_t hidden_size = h.size(-1);
-    size_t capture_idx = 0;
+    aux_capture_.reset_capture_index();
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event = nullptr;
       std::atomic<bool>* event_flag = nullptr;
@@ -324,20 +294,8 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
         return ModelOutput();
       }
 
-      if (capture_aux_hidden_states_ &&
-          layers_to_capture_set_.count(static_cast<int32_t>(i)) != 0) {
-        // auto aux_h = h;
-        auto aux_h =
-            (::xllm::KernelConfig::get_instance().enable_intralayer_addnorm())
-                ? h + residual.value()
-                : h;
-        aux_output_buffer_.slice(0, 0, num_tokens)
-            .slice(1,
-                   static_cast<int64_t>(capture_idx) * hidden_size,
-                   static_cast<int64_t>(capture_idx + 1) * hidden_size)
-            .copy_(aux_h.reshape({num_tokens, hidden_size}));
-        capture_idx++;
-      }
+      // Intralayer add-norm splits the stream, so pass residual for the add.
+      aux_capture_.capture_layer(static_cast<int32_t>(i), h, residual);
 
       auto& layer = layers_[i];
       const int32_t layer_index = i;
@@ -361,14 +319,7 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
     if (::xllm::KernelConfig::get_instance().enable_intralayer_addnorm())
       h = h + residual.value();
     auto hidden_states = norm_(h, 0);
-    if (capture_aux_hidden_states_) {
-      CHECK_EQ(capture_idx, layers_to_capture_set_.size())
-          << "Captured aux hidden layer count mismatch.";
-      torch::Tensor aux_hidden_states =
-          aux_output_buffer_.slice(0, 0, num_tokens);
-      return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);
-    }
-    return ModelOutput(hidden_states);
+    return aux_capture_.finalize(hidden_states);
   }
 
   // load the weight from the checkpoint
@@ -484,10 +435,7 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
   std::vector<int64_t> mrope_section_;
   RollingLoadManager* rolling_mgr_ = nullptr;
 
-  // egale3
-  std::unordered_set<int32_t> layers_to_capture_set_;
-  bool capture_aux_hidden_states_ = false;
-  torch::Tensor aux_output_buffer_;
+  AuxHiddenCapture aux_capture_;
 };
 TORCH_MODULE(Qwen3MoeModel);
 
@@ -538,10 +486,6 @@ REGISTER_MODEL_ARGS_WITH_VARNAME(qwen3_moe_atb, qwen3_moe_atb, [&] {
   LOAD_ARG_OR(tie_word_embeddings, "tie_word_embeddings", false);
   LOAD_ARG_OR(vocab_size, "vocab_size", 151936);
   LOAD_ARG_OR(mlp_only_layers, "mlp_only_layers", std::vector<int>());
-
-  // Eagle3: layer ids (0-based) to capture from config, e.g.
-  // "layers_to_capture": [2, 14, 25]; defaults to empty if missing
-  LOAD_ARG_OR(layers_to_capture, "layers_to_capture", std::vector<int32_t>{});
 
   SET_ARG(stop_token_ids, std::unordered_set<int32_t>({args->eos_token_id()}));
 });

@@ -53,8 +53,6 @@ class DFlashQwen3ModelImpl : public QWen3ModelImpl {
     head_dim_ = model_args.head_dim();
     rms_norm_eps_ = model_args.rms_norm_eps();
     CHECK_GT(head_dim_, 0) << "DFlash head_dim must be positive.";
-    CHECK_GT(model_args.layers_to_capture().size(), 0u)
-        << "DFlash requires dflash_config.target_layer_ids.";
 
     fc_ = register_module("fc", layer::NpuColumnParallelLinear(context));
     hidden_norm_ = register_module("hidden_norm", layer::NpuRMSNorm(context));

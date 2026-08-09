@@ -8,6 +8,7 @@ cc_library(
     rec_causal_lm.h
     causal_vlm.h
     dit_model.h
+    aux_hidden_capture.h
     model_args.h
     model_input_params.h
     mtp_topk_state.h
