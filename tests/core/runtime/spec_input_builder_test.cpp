@@ -442,6 +442,23 @@ TEST(SpecDecodeInputBuilderTest, CalcSlotIdOutOfRangeDeath) {
                "block table index out of range");
 }
 
+TEST(SpecDecodeInputBuilderTest, CalcRingSlotIdWrapsSlidingWindowBlocks) {
+  std::vector<int32_t> block_table = {7, 9};
+
+  EXPECT_EQ(calc_ring_slot_id(
+                /*position=*/0, to_slice(block_table), /*block_size=*/4),
+            28);
+  EXPECT_EQ(calc_ring_slot_id(
+                /*position=*/7, to_slice(block_table), /*block_size=*/4),
+            39);
+  EXPECT_EQ(calc_ring_slot_id(
+                /*position=*/8, to_slice(block_table), /*block_size=*/4),
+            28);
+  EXPECT_EQ(calc_ring_slot_id(
+                /*position=*/13, to_slice(block_table), /*block_size=*/4),
+            37);
+}
+
 TEST(DraftProbsBuilderTest, CompressForCacheDense) {
   auto draft_probs =
       torch::tensor({{0.1f, 0.2f, 0.7f}, {0.6f, 0.1f, 0.3f}}, torch::kFloat32);
@@ -578,7 +595,7 @@ TEST(SpecDecodeInputBuilderTest, MultiBlockDraftSingleRowPerSeq) {
 
   EXPECT_TRUE(buf.out_token_ids.empty());
   EXPECT_EQ(buf.out_positions, std::vector<int32_t>({5, 9}));
-  EXPECT_EQ(buf.out_new_cache_slots, std::vector<int32_t>({0, 0}));
+  EXPECT_EQ(buf.out_new_cache_slots, std::vector<int32_t>({5, 21}));
   EXPECT_TRUE(buf.out_block_tables.empty());
 
   ASSERT_EQ(buf.out_multi_block_tables.size(), 2);
@@ -590,6 +607,32 @@ TEST(SpecDecodeInputBuilderTest, MultiBlockDraftSingleRowPerSeq) {
             std::vector<int32_t>({10, 11, 12}));
   EXPECT_EQ(buf.out_multi_block_tables[1][1],
             std::vector<int32_t>({13, 14, 15}));
+}
+
+TEST(SpecDecodeInputBuilderTest, GroupedPrefillBuildsSwaRingSlots) {
+  ForwardInput input;
+  input.input_params.meta.num_sequences = 2;
+  input.positions_host = torch::tensor({2, 3, 4, 6, 7}, torch::kInt);
+  input.input_params.attention.host.q_seq_lens = to_layout_seq_lens({3, 2});
+  input.input_params.attention.host.kv_seq_lens = to_layout_seq_lens({5, 8});
+  input.input_params.multi_block_tables = {
+      torch::tensor({{10, 11}, {20, 21}}, torch::kInt)};
+
+  EXPECT_EQ(build_grouped_prefill_swa_slots(input, /*block_size=*/4),
+            std::vector<int32_t>({42, 43, 44, 86, 87}));
+}
+
+TEST(SpecDecodeInputBuilderTest, GroupedPrefillSwaSlotsWrapRing) {
+  ForwardInput input;
+  input.input_params.meta.num_sequences = 1;
+  input.positions_host = torch::tensor({8, 9, 10}, torch::kInt);
+  input.input_params.attention.host.q_seq_lens = to_layout_seq_lens({3});
+  input.input_params.attention.host.kv_seq_lens = to_layout_seq_lens({11});
+  input.input_params.multi_block_tables = {
+      torch::tensor({{10, 11}}, torch::kInt)};
+
+  EXPECT_EQ(build_grouped_prefill_swa_slots(input, /*block_size=*/4),
+            std::vector<int32_t>({40, 41, 42}));
 }
 
 TEST(SpecDecodeInputBuilderTest, MultiBlockKeepsSparseAbsoluteRows) {
@@ -620,7 +663,7 @@ TEST(SpecDecodeInputBuilderTest, MultiBlockKeepsSparseAbsoluteRows) {
             std::vector<int32_t>({-1, -1, -1, -1, 60, -1}));
 }
 
-TEST(SpecDecodeInputBuilderTest, MultiBlockValidateExpansion) {
+TEST(SpecDecodeInputBuilderTest, MultiBlockParallelRowsShareFullKvLength) {
   std::vector<int32_t> kv_seq_lens = to_layout_seq_lens({5, 9});
   torch::Tensor token_ids = torch::tensor({10, 20}, torch::kInt);
   torch::Tensor positions = torch::tensor({4, 8}, torch::kInt);
@@ -634,6 +677,7 @@ TEST(SpecDecodeInputBuilderTest, MultiBlockValidateExpansion) {
   const int32_t num_val_tokens = 3;
 
   DecodeBuildBuffers buf;
+  buf.out_q_cu_seq_lens.emplace_back(0);
   for (int32_t seq_id = 0; seq_id < input.input_params.meta.num_sequences;
        ++seq_id) {
     for (int32_t val_idx = 0; val_idx < num_val_tokens; ++val_idx) {
@@ -645,6 +689,7 @@ TEST(SpecDecodeInputBuilderTest, MultiBlockValidateExpansion) {
         row.token_id = -1 * val_idx;
       }
       row.position_offset = 1 + val_idx;
+      row.kv_len_offset = num_val_tokens;
       row.append_q_len_one = true;
       row.append_block_table = true;
       row.append_kv_len = true;
@@ -654,9 +699,11 @@ TEST(SpecDecodeInputBuilderTest, MultiBlockValidateExpansion) {
 
   EXPECT_EQ(buf.out_token_ids, std::vector<int32_t>({10, -1, -2, 20, -1, -2}));
   EXPECT_EQ(buf.out_positions, std::vector<int32_t>({5, 6, 7, 9, 10, 11}));
-  EXPECT_EQ(buf.out_new_cache_slots, std::vector<int32_t>({0, 0, 0, 0, 0, 0}));
-  EXPECT_EQ(buf.out_kv_seq_lens, to_layout_seq_lens({6, 7, 8, 10, 11, 12}));
+  EXPECT_EQ(buf.out_new_cache_slots,
+            std::vector<int32_t>({5, 6, 7, 21, 22, 23}));
+  EXPECT_EQ(buf.out_kv_seq_lens, to_layout_seq_lens({8, 8, 8, 12, 12, 12}));
   EXPECT_EQ(buf.out_q_seq_lens, to_layout_seq_lens({1, 1, 1, 1, 1, 1}));
+  EXPECT_EQ(buf.out_q_cu_seq_lens, std::vector<int32_t>({0, 1, 2, 3, 4, 5, 6}));
   EXPECT_TRUE(buf.out_block_tables.empty());
 
   ASSERT_EQ(buf.out_multi_block_tables.size(), 1);

@@ -38,7 +38,6 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/speculative_config.h"
-#include "core/framework/kv_cache/kv_cache_estimation.h"
 #include "core/framework/model/mtp_utils.h"
 #include "core/framework/multimodal/mm_data.h"
 #if defined(USE_NPU)
@@ -135,52 +134,6 @@ void broadcast_spec_tokens(torch::Tensor& tokens,
   if (parallel_args.cp_group_ != parallel_args.tp_group_) {
     broadcast_tokens_in_group(tokens, parallel_args.cp_group_);
   }
-}
-
-int64_t get_dp_local_tp_size(const ParallelArgs& parallel_args) {
-  const int64_t dp_size = std::max<int64_t>(parallel_args.dp_size(), 1);
-  const int64_t cp_size = std::max<int64_t>(parallel_args.cp_size(), 1);
-  return std::max<int64_t>(parallel_args.world_size() / dp_size / cp_size, 1);
-}
-
-KVCacheEstimateOptions make_kv_cache_estimate_options(
-    const ModelArgs& model_args,
-    const runtime::Options& options,
-    const ParallelArgs& parallel_args,
-    torch::ScalarType dtype,
-    int64_t cache_size_in_bytes) {
-  const int64_t dp_local_tp_size = get_dp_local_tp_size(parallel_args);
-  const int64_t n_heads = model_args.n_heads();
-  const int64_t n_kv_heads = model_args.n_kv_heads().value_or(n_heads);
-
-  KVCacheEstimateOptions estimate_options;
-  estimate_options.dtype = dtype;
-  estimate_options.kv_cache_dtype = options.kv_cache_dtype();
-  estimate_options.indexer_cache_dtype =
-      ::xllm::KVCacheConfig::get_instance().indexer_cache_dtype();
-  estimate_options.cache_size_in_bytes = cache_size_in_bytes;
-  estimate_options.block_size = options.block_size();
-  estimate_options.world_size = dp_local_tp_size;
-  estimate_options.n_local_kv_heads =
-      std::max<int64_t>(n_kv_heads / dp_local_tp_size, 1);
-  if (has_linear_attention_layers(model_args)) {
-    estimate_options.n_local_linear_k_heads = std::max<int64_t>(
-        model_args.linear_num_key_heads() / dp_local_tp_size, 1);
-    estimate_options.n_local_linear_v_heads = std::max<int64_t>(
-        model_args.linear_num_value_heads() / dp_local_tp_size, 1);
-  }
-  estimate_options.max_seqs_per_batch =
-      static_cast<int64_t>(options.max_seqs_per_batch());
-  estimate_options.num_speculative_tokens =
-      static_cast<int64_t>(options.num_speculative_tokens());
-  estimate_options.max_tokens_per_batch =
-      static_cast<int64_t>(options.max_tokens_per_batch());
-  estimate_options.max_linear_state_cache_slots =
-      options.max_linear_state_cache_slots();
-  estimate_options.is_draft_engine = options.is_draft_engine();
-  estimate_options.enable_prefix_cache =
-      ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
-  return estimate_options;
 }
 
 void record_metadata_ready_event(Stream& stream, ForwardInput& input) {
@@ -673,43 +626,8 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
 std::tuple<int64_t, int64_t> MTPWorkerImpl::estimate_kv_cache_capacity() {
   CHECK(impl_ != nullptr);
   CHECK(draft_impl_ != nullptr);
-
-  const std::tuple<int64_t, int64_t> target_memory =
-      impl_->estimate_kv_cache_capacity();
-  const std::tuple<int64_t, int64_t> draft_memory =
-      draft_impl_->estimate_kv_cache_capacity();
-  const int64_t cache_size_in_bytes =
-      std::min(std::get<0>(target_memory), std::get<0>(draft_memory));
-  const int64_t total_memory =
-      std::min(std::get<1>(target_memory), std::get<1>(draft_memory));
-
-  const ModelArgs& target_model_args = impl_->context_.get_model_args();
-  const ModelArgs& draft_model_args = draft_impl_->context_.get_model_args();
-  if (!util::is_target_model_type(target_model_args.model_type(),
-                                  /*target_model_type=*/"deepseek_v4",
-                                  /*match_mtp=*/true)) {
-    return {cache_size_in_bytes, total_memory};
-  }
-
-  // use for DSv4
-  KVCacheEstimateOptions target_options =
-      make_kv_cache_estimate_options(target_model_args,
-                                     MTPTargetOptions(options_),
-                                     parallel_args_,
-                                     dtype_,
-                                     cache_size_in_bytes);
-  const KVCacheEstimateOptions draft_options =
-      make_kv_cache_estimate_options(draft_model_args,
-                                     mtp_draft_options(options_),
-                                     parallel_args_,
-                                     dtype_,
-                                     cache_size_in_bytes);
-  target_options.draft_model_args = &draft_model_args;
-  target_options.draft_options = &draft_options;
-
-  KVCacheCapacity kv_cache_cap =
-      ::xllm::estimate_kv_cache_capacity(target_model_args, target_options);
-  return {kv_cache_cap.cache_size_in_bytes(), total_memory};
+  return estimate_kv_cache_capacity_with_draft(
+      *draft_impl_, MTPTargetOptions(options_), mtp_draft_options(options_));
 }
 
 int64_t MTPWorkerImpl::get_embedding_placeholder_size() {

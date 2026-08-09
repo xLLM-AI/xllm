@@ -154,7 +154,8 @@ std::vector<int32_t> read_capture_layer_ids(
       << "Failed to parse block-diffusion draft config: " << config_path;
   std::vector<int32_t> capture_layer_ids;
   for (int32_t layer_id : reader.value_or<std::vector<int32_t>>(
-           std::vector<std::string>{"target_layer_ids",
+           std::vector<std::string>{"dspark_target_layer_ids",
+                                    "target_layer_ids",
                                     "dflash_config.target_layer_ids"},
            std::vector<int32_t>{})) {
     capture_layer_ids.emplace_back(layer_id + 1);
@@ -1568,13 +1569,31 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   if (options_.speculative_algorithm() == "DFlash" ||
       options_.speculative_algorithm() == "DSpark") {
     const bool is_dspark = options_.speculative_algorithm() == "DSpark";
+    const bool is_deepseek_v4 =
+        util::is_deepseek_v4_model_type(args.model_type());
     const char* draft_model_type =
-        is_dspark ? "DSparkDraftModel" : "DFlashDraftModel";
+        is_dspark && is_deepseek_v4
+            ? "deepseek_v4_dspark"
+            : (is_dspark ? "DSparkDraftModel" : "DFlashDraftModel");
     if (options_.is_draft_engine()) {
       LOG(INFO) << "Overriding draft model_type from " << args.model_type()
                 << " to " << draft_model_type
                 << " for block-diffusion speculative decoding";
       args.model_type(draft_model_type);
+      if (is_dspark && is_deepseek_v4) {
+        CHECK_GT(args.dspark_num_layers(), 0)
+            << "DeepSeek-V4 DSpark requires at least one draft layer.";
+        args.n_layers(args.dspark_num_layers());
+        args.n_hash_layers(0);
+        args.dspark_block_size(options_.num_speculative_tokens());
+        args.dspark_use_native_sas(::xllm::SpeculativeConfig::get_instance()
+                                       .enable_dspark_native_sas());
+        // DSpark stages are all standard SWA layers. Their stage ids are not
+        // target-model layer ids, so target compress_ratios[0..N) must not be
+        // reused (0731's third target layer is C4).
+        args.compress_ratios(std::vector<int32_t>(
+            static_cast<size_t>(args.dspark_num_layers()), 1));
+      }
     } else {
       CHECK(options_.draft_model_path().has_value())
           << "block-diffusion speculative decoding requires --draft_model.";

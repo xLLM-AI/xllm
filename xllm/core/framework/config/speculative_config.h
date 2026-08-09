@@ -75,7 +75,8 @@ class SpeculativeConfig final {
          "enable_mtp_draft_body_tp1",
          "enable_atb_spec_kernel",
          "enable_adaptive_speculative_decode",
-         "adaptive_speculative_min_gain"}};
+         "adaptive_speculative_min_gain",
+         "enable_dspark_native_sas"}};
     return kOptionCategory;
   }
 
@@ -100,6 +101,8 @@ class SpeculativeConfig final {
   PROPERTY(bool, enable_opt_validate_probs) = false;
 
   PROPERTY(bool, enable_mtp_draft_body_tp1) = false;
+
+  PROPERTY(bool, enable_dspark_native_sas) = false;
 
   PROPERTY(bool, enable_atb_spec_kernel) = false;
 

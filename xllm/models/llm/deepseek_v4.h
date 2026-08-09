@@ -35,6 +35,7 @@ limitations under the License.
 #include "core/common/flash_comm1_context.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/framework/state_dict/utils.h"
 #include "core/kernels/ops_api.h"
 #include "core/layers/common/dsa_metadata.h"
@@ -90,6 +91,17 @@ inline bool deepseek_v4_uses_acl_graph(
   (void)input_params;
   return false;
 #endif
+}
+
+inline void deepseek_v4_clamp_multi_block_tables(
+    ModelInputParams& input_params,
+    size_t registered_group_count) {
+  // multi_block_tables follows SWA/C4/C128 export order. The DSpark draft
+  // registers only the SWA prefix, while its input is copied from the
+  // three-group target, so discard groups this model cannot consume.
+  if (input_params.multi_block_tables.size() > registered_group_count) {
+    input_params.multi_block_tables.resize(registered_group_count);
+  }
 }
 
 inline size_t deepseek_v4_align_up(size_t value, size_t alignment) {
@@ -503,6 +515,30 @@ class DeepseekV4ModelImpl
       layers_.push_back(layer);
     }
 
+    const bool is_dspark_draft =
+        model_args.model_type() == "deepseek_v4_dspark";
+    if (!is_dspark_draft && !model_args.layers_to_capture().empty()) {
+      const auto& capture_layers = model_args.layers_to_capture();
+      for (size_t capture_idx = 0; capture_idx < capture_layers.size();
+           ++capture_idx) {
+        const int32_t output_layer = capture_layers[capture_idx];
+        CHECK_GT(output_layer, 0);
+        CHECK_LE(output_layer, model_args.n_layers())
+            << "DeepSeek-V4 capture layer output is out of range.";
+        CHECK(capture_layer_to_index_
+                  .emplace(output_layer, static_cast<int64_t>(capture_idx))
+                  .second)
+            << "DeepSeek-V4 capture layer outputs must be unique.";
+      }
+      const int64_t aux_width =
+          model_args.hidden_size() * capture_layer_to_index_.size();
+      aux_output_buffer_ = torch::empty(
+          {::xllm::SchedulerConfig::get_instance().max_tokens_per_batch(),
+           aux_width},
+          options);
+      capture_aux_hidden_states_ = true;
+    }
+
     // Build DSA caches_info from compress_ratios
     const auto& compress_ratios = model_args.compress_ratios();
     const int32_t window_size = model_args.window_size();
@@ -625,6 +661,25 @@ class DeepseekV4ModelImpl
     return layers_[layer_id]->last_prepare_expert_weight_ok();
   }
 
+ protected:
+  void load_hc_head_state_dict(const StateDict& state_dict) {
+    LOAD_WEIGHT(hc_head_fn);
+    LOAD_WEIGHT(hc_head_base);
+    LOAD_WEIGHT(hc_head_scale);
+  }
+
+  layer::DeepseekV4RotaryEmbedding::CosSinPair build_default_rope(
+      const torch::Tensor& positions) const {
+    CHECK(dsa_rotary_embedding_ != nullptr)
+        << "DeepSeek-V4 rotary embedding is not initialized.";
+    auto groups = dsa_rotary_embedding_->build(positions);
+    auto it = groups.find("default");
+    CHECK(it != groups.end())
+        << "DeepSeek-V4 default rotary group is unavailable.";
+    return it->second;
+  }
+
+ public:
   bool requires_graph_forward_metadata() { return true; }
 
   std::unique_ptr<ModelGraphMetadataState>
@@ -642,6 +697,8 @@ class DeepseekV4ModelImpl
     CHECK(deepseek_v4_state != nullptr)
         << "DeepSeek V4 received incompatible graph metadata state";
     auto modified_input_params = input_params;
+    deepseek_v4_clamp_multi_block_tables(modified_input_params,
+                                         group_infos_.size());
     if (modified_input_params.meta.actual_num_sequences == 0) {
       // Graph metadata must keep the bucket-shaped sequence count used during
       // capture/replay. The normal empty-DP fallback intentionally shrinks the
@@ -846,7 +903,8 @@ class DeepseekV4ModelImpl
           cp_ctx.tokens_per_rank.begin(), cp_ctx.tokens_per_rank.end());
     }
     FlashComm1Context fc1_ctx;
-    if (!acl_graph_forward && !is_empty_dp_rank) {
+    if (!acl_graph_forward && !is_empty_dp_rank &&
+        !capture_aux_hidden_states_) {
       const bool is_prefill_side =
           input_params.meta.batch_forward_type.no_decode();
       fc1_ctx = build_flash_comm1_context(
@@ -858,6 +916,7 @@ class DeepseekV4ModelImpl
     }
 
     std::optional<torch::Tensor> residual;
+    int64_t captured_count = 0;
     for (size_t i = 0; i < layers_.size(); i++) {
       if (attn_metadata.dsa_metadata) {
         auto& dsa = *(attn_metadata.dsa_metadata);
@@ -935,6 +994,22 @@ class DeepseekV4ModelImpl
                      kv_caches[i],
                      modified_input_params,
                      tokens);
+      const auto capture_it =
+          capture_layer_to_index_.find(static_cast<int32_t>(i + 1));
+      if (capture_aux_hidden_states_ &&
+          capture_it != capture_layer_to_index_.end()) {
+        torch::Tensor captured = h.dim() == 3 ? h.mean(/*dim=*/1) : h;
+        const int64_t num_tokens = captured.size(0);
+        const int64_t hidden_size = captured.size(-1);
+        const int64_t capture_idx = capture_it->second;
+        CHECK_LE(num_tokens, aux_output_buffer_.size(0));
+        aux_output_buffer_.slice(/*dim=*/0, /*start=*/0, /*end=*/num_tokens)
+            .slice(/*dim=*/1,
+                   /*start=*/capture_idx * hidden_size,
+                   /*end=*/(capture_idx + 1) * hidden_size)
+            .copy_(captured.reshape({num_tokens, hidden_size}));
+        ++captured_count;
+      }
 #if defined(USE_NPU)
       if (modified_input_params.parallel.layer_synchronizer != nullptr &&
           !modified_input_params.parallel.layer_synchronizer->record_event(
@@ -956,11 +1031,21 @@ class DeepseekV4ModelImpl
       }
     }
     torch::Tensor pre_hc_head_hidden_states;
-    if (model_args_.num_speculative_tokens() > 0) {
+    if (!capture_aux_hidden_states_ &&
+        model_args_.num_speculative_tokens() > 0) {
       pre_hc_head_hidden_states = h;
     }
     h = hc_head(h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
+    if (capture_aux_hidden_states_) {
+      CHECK_EQ(captured_count,
+               static_cast<int64_t>(capture_layer_to_index_.size()))
+          << "DeepSeek-V4 captured aux hidden layer count mismatch.";
+      const int64_t num_tokens = hidden_states.size(0);
+      ModelOutput out(hidden_states, residual_out);
+      out.aux_hidden_states = aux_output_buffer_.slice(0, 0, num_tokens);
+      return out;
+    }
     if (pre_hc_head_hidden_states.defined()) {
       ModelOutput out(hidden_states, residual_out);
       out.aux_hidden_states = pre_hc_head_hidden_states.flatten(1);
@@ -1162,6 +1247,8 @@ class DeepseekV4ModelImpl
   build_attention_metadata_for_forward(const torch::Tensor& positions,
                                        const ModelInputParams& input_params) {
     auto modified_input_params = input_params;
+    deepseek_v4_clamp_multi_block_tables(modified_input_params,
+                                         group_infos_.size());
     auto& dp_token_nums = modified_input_params.parallel.dp_global_token_nums;
     std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
 
@@ -1577,6 +1664,7 @@ class DeepseekV4ModelImpl
     dsa.c4_metadata = torch::Tensor();
     dsa.c128_metadata = torch::Tensor();
     dsa.qli_metadata = torch::Tensor();
+    dsa.sparse_metadata_ori_win_left = -1;
 
     torch::Device metadata_device(torch::kCPU);
     if (dsa.input_positions.defined()) {
@@ -1610,9 +1698,21 @@ class DeepseekV4ModelImpl
     const int64_t max_seqlen_kv = std::max<int64_t>(
         params.meta.kv_max_seq_len,
         vector_max_or_zero(params.attention.host.kv_seq_lens));
-    const int64_t ori_win_left = std::max<int64_t>(window_size_ - 1, 0);
+    // Keep the opaque tiling metadata identical to the arguments passed by
+    // DSAttentionImpl::forward. Native DSpark SAS expands the window and uses
+    // explicit indices; the compatibility fallback keeps the DSV4 window and
+    // expresses block non-causality through q_len=1 rows.
+    const int64_t ori_win_left =
+        layer::deepseek_v4_ori_window_left(window_size_,
+                                           model_args_.dspark_block_size(),
+                                           model_args_.dspark_use_native_sas());
+    dsa.sparse_metadata_ori_win_left = ori_win_left;
     const int64_t sparse_topk = std::max<int64_t>(index_topk_, 1);
-    const bool is_prefill = params.meta.q_max_seq_len > 1;
+    // The compatibility fallback uses q_len=1 with CHUNKED_PREFILL semantics,
+    // whereas native DSpark uses a gamma-wide DECODE query. The batch type,
+    // not q_max_seq_len, is therefore the authoritative metadata selector.
+    const bool is_prefill = layer::deepseek_v4_uses_prefill_sparse_metadata(
+        params.meta.batch_forward_type);
 
     const char* layout_kv = "PA_ND";
     auto empty_int32_opt = as_empty_int32_tensor(dsa.actual_seq_lengths_query);
@@ -1798,6 +1898,10 @@ class DeepseekV4ModelImpl
   ParallelArgs parallel_args_;
   FlashComm1Options flash_comm1_options_;
 
+  std::unordered_map<int32_t, int64_t> capture_layer_to_index_;
+  torch::Tensor aux_output_buffer_;
+  bool capture_aux_hidden_states_ = false;
+
   // DSA cache group info: built once at model init from compress_ratios
   // caches_info_[layer_id] = vector of DSACacheInfo for each cache in that
   // layer
@@ -1970,6 +2074,17 @@ inline void load_deepseek_v4_model_args(const JsonReader& json,
   LOAD_ARG_OR_FUNC(
       vocab_size, "vocab_size", [&] { return args->vocab_size(); });
   LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 163840);
+
+  // DSpark draft metadata. The 0731 checkpoint stores three draft layers
+  // under mtp.0/1/2 and uses DeepSeek-specific top-level key names.
+  LOAD_ARG_OR(markov_rank, "dspark_markov_rank", 0);
+  LOAD_ARG_OR_FUNC(dspark_num_layers, "n_mtp_layers", [&] {
+    return json.value_or<int32_t>("dspark_num_mtp_layers", 3);
+  });
+  // Do not copy dspark_block_size into the shared target args. The draft
+  // worker sets it from the runtime speculative-token count after swapping to
+  // deepseek_v4_dspark; setting it here would enable non-causal DSpark
+  // attention in the target model as well.
 
   // Token ids
   LOAD_ARG_OR(bos_token_id, "bos_token_id", 0);

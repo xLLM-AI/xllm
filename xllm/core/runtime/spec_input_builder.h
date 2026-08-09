@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -79,6 +80,9 @@ struct RowSpec {
   int32_t position_offset = 0;
   bool append_token = true;
   bool append_kv_len = true;
+  // When set, decouples the visible KV extent from this row's position. This
+  // lets block-parallel draft rows share the full block KV length.
+  std::optional<int32_t> kv_len_offset;
   bool append_q_len_one = false;
   bool append_block_table = false;
 };
@@ -120,6 +124,17 @@ void append_decode_row_from_last_step(const DecodeRowContext& ctx,
 int32_t calc_slot_id(int32_t position,
                      const Slice<int32_t>& block_table_slice,
                      int32_t block_size);
+
+// Computes one cache slot id from an absolute position and a circular block
+// table mapping, as used by DeepSeek-V4's sliding-window cache manager.
+int32_t calc_ring_slot_id(int32_t position,
+                          const Slice<int32_t>& block_table_slice,
+                          int32_t block_size);
+
+// Builds the sliding-window cache slots for every prefill query token in a
+// grouped-cache input. Manager 0 is the DeepSeek-V4 SWA manager.
+std::vector<int32_t> build_grouped_prefill_swa_slots(const ForwardInput& input,
+                                                     int32_t block_size);
 
 // Computes sequence kv length with platform-specific seq-lens layout handling.
 int32_t calc_kv_len(const Slice<int32_t>& kv_seq_lens_slice,

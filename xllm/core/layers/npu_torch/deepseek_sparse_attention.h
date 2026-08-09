@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -25,6 +26,7 @@ limitations under the License.
 #include "attention.h"
 #include "compressor.h"
 #include "deepseek_v4_indexer.h"
+#include "framework/batch/batch_forward_type.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
@@ -37,6 +39,23 @@ limitations under the License.
 
 namespace xllm {
 namespace layer {
+
+inline bool deepseek_v4_uses_prefill_sparse_metadata(
+    const BatchForwardType& batch_forward_type) {
+  return batch_forward_type.no_decode();
+}
+
+inline int64_t deepseek_v4_ori_window_left(int64_t window_size,
+                                           int64_t dspark_block_size,
+                                           bool use_native_dspark_sas) {
+  if (use_native_dspark_sas && dspark_block_size > 0) {
+    return std::max<int64_t>(window_size + dspark_block_size - 1, 0);
+  }
+  // The compatibility fallback accepted by CANN 9.0 uses window_size - 1
+  // (127 for DSV4). DSpark block visibility is encoded by expanding the block
+  // into q_len=1 rows that share the same kv end.
+  return std::max<int64_t>(window_size - 1, 0);
+}
 
 // DSA kv state aligned with Python:
 // (ori_kv, compressor_kv_state, compressor_score_state,
@@ -68,6 +87,14 @@ class DSAttentionImpl : public torch::nn::Module {
           tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>&
               compress_metadata);
 
+  // Project captured target hidden states into this draft layer's shared-KV
+  // cache without running query attention or the FFN.
+  void write_context_kv(const torch::Tensor& hidden_states,
+                        const torch::Tensor& cos,
+                        const torch::Tensor& sin,
+                        const torch::Tensor& slot_mapping,
+                        KVCache& kv_cache);
+
   void load_state_dict(const StateDict& state_dict);
   int64_t non_registered_weight_bytes() const;
 
@@ -98,6 +125,8 @@ class DSAttentionImpl : public torch::nn::Module {
   int64_t index_n_heads_ = 0;
   int64_t index_head_dim_ = 0;
   int64_t index_topk_ = 0;
+  int64_t dspark_block_size_ = 0;
+  bool dspark_use_native_sas_ = false;
 
   double rope_theta_ = 10000.0;
   double compress_rope_theta_ = 40000.0;
