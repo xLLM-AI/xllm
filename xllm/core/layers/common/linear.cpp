@@ -715,6 +715,37 @@ torch::Tensor ColumnParallelLinearImpl::forward(torch::Tensor input) {
   return output;
 }
 
+torch::Tensor ColumnParallelLinearImpl::forward_quantized(
+    const W8A8DynamicInput& input) {
+  CHECK(uses_w8a8_dynamic_quant())
+      << "forward_quantized requires w8a8_dynamic quant method.";
+  CHECK(input.activation.defined())
+      << "forward_quantized requires a quantized activation.";
+  CHECK(input.per_token_scale.defined())
+      << "forward_quantized requires a per-token scale.";
+  CHECK_EQ(input.activation.dim(), 2)
+      << "forward_quantized requires a 2D activation.";
+  CHECK_EQ(input.activation.size(0), input.per_token_scale.numel())
+      << "forward_quantized requires one scale per activation row.";
+
+#if defined(USE_NPU)
+  torch::Tensor output = npu_w8a8_dynamic_quantized_linear_forward(
+      input.activation.to(device_),
+      input.per_token_scale.to(device_),
+      weight_,
+      w8a8_dynamic_weight_scale(),
+      bias(),
+      output_dtype_);
+  if (world_size_ > 1 && gather_output_) {
+    output = xllm::parallel_state::gather(output, process_group_);
+  }
+  return output;
+#else
+  LOG(FATAL) << "forward_quantized is only supported on NPU.";
+  return torch::Tensor();
+#endif
+}
+
 bool ColumnParallelLinearImpl::uses_w8a8_dynamic_quant() const {
   return is_w8a8_dynamic_quant(resolved_weight_quant_method_);
 }
@@ -1776,6 +1807,9 @@ torch::Tensor RowParallelLinearImpl::forward_impl(
         }
         if (output.defined() &&
             output.sizes() == torch::IntArrayRef(output_shape)) {
+          retain_quantized_mmrs_launch_tensors(q_input,
+                                               mmrs_params.x1_scale.value(),
+                                               mmrs_params.x2_scale.value());
           return output;
         }
         if (output.defined()) {

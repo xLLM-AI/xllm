@@ -24,6 +24,31 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
+namespace {
+
+#if defined(USE_NPU)
+W8A8DynamicInput quantize_and_gather_w8a8_dynamic_input(
+    const torch::Tensor& input,
+    const FlashComm1Context& fc1_ctx) {
+  xllm::kernel::NpuQuantizeParams quantize_params;
+  quantize_params.input = input;
+
+  torch::Tensor quantized_input;
+  std::optional<torch::Tensor> per_token_scale;
+  std::tie(quantized_input, per_token_scale) =
+      xllm::kernel::dynamic_quant(quantize_params);
+  CHECK(per_token_scale.has_value() && per_token_scale->defined())
+      << "dynamic_quant must return per-token scale before AllGather.";
+
+  torch::Tensor gathered_input = gather_sequence(quantized_input, fc1_ctx);
+  torch::Tensor gathered_scale =
+      gather_sequence(per_token_scale->reshape({-1, 1}), fc1_ctx).reshape({-1});
+  return W8A8DynamicInput{gathered_input, gathered_scale};
+}
+#endif
+
+}  // namespace
+
 DenseMLPImpl::DenseMLPImpl(int64_t hidden_size,
                            int64_t intermediate_size,
                            bool is_gated,
@@ -100,13 +125,24 @@ torch::Tensor DenseMLPImpl::forward(const torch::Tensor& hidden_states) {
   const FlashComm1Context* fc1_ctx = get_current_flash_comm1_context();
   const bool use_fc1_sequence_parallel =
       apply_fc1_sequence_parallel_ && fc1_ctx && is_sequence_sharded(*fc1_ctx);
-  torch::Tensor h = hidden_states;
-
-  if (use_fc1_sequence_parallel) {
-    h = gather_sequence(hidden_states, *fc1_ctx);
+  torch::Tensor gate_up;
+#if defined(USE_NPU)
+  const bool use_quantized_allgather = use_fc1_sequence_parallel &&
+                                       hidden_states.dim() == 2 &&
+                                       gate_up_proj_->uses_w8a8_dynamic_quant();
+  if (use_quantized_allgather) {
+    const W8A8DynamicInput quantized_input =
+        quantize_and_gather_w8a8_dynamic_input(hidden_states, *fc1_ctx);
+    gate_up = gate_up_proj_->forward_quantized(quantized_input);
   }
-
-  auto gate_up = gate_up_proj_->forward(h);
+#endif
+  if (!gate_up.defined()) {
+    torch::Tensor h = hidden_states;
+    if (use_fc1_sequence_parallel) {
+      h = gather_sequence(hidden_states, *fc1_ctx);
+    }
+    gate_up = gate_up_proj_->forward(h);
+  }
 
   if (is_smoothquant_) {
     if (use_fc1_sequence_parallel) {

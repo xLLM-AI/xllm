@@ -99,6 +99,10 @@ class FlashComm1ContextScope {
 
 const FlashComm1Context* get_current_flash_comm1_context();
 
+void retain_quantized_mmrs_launch_tensors(const torch::Tensor& activation,
+                                          const torch::Tensor& activation_scale,
+                                          const torch::Tensor& weight_scale);
+
 bool is_sequence_sharded(const FlashComm1Context& ctx);
 
 torch::Tensor pad_rows_by_copy(const torch::Tensor& input, int64_t padded_rows);

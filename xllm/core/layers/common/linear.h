@@ -39,6 +39,11 @@ struct LinearExtraArgs {
       : act_mode(act_mode_), is_gated(is_gated_) {}
 };
 
+struct W8A8DynamicInput {
+  torch::Tensor activation;
+  torch::Tensor per_token_scale;
+};
+
 // Linear layer with column parallelism.
 // The linear layer is defined as Y = XA + b. A is parallelized along
 // its second dimension as A = [A_1, ..., A_p].
@@ -58,6 +63,8 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
   ColumnParallelLinearImpl(const ModelContext& context);
 
   torch::Tensor forward(torch::Tensor input);
+
+  torch::Tensor forward_quantized(const W8A8DynamicInput& input);
 
   // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict);
