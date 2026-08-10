@@ -19,6 +19,8 @@ limitations under the License.
 
 #include <vector>
 
+#include "core/framework/model/model_args.h"
+
 namespace xllm::mtp_async {
 namespace {
 
@@ -42,8 +44,7 @@ torch::Tensor gather_sequence_rows(const torch::Tensor& values,
 
 TargetSpecVerifyMode classify_target_spec_verify_mode(
     std::string_view model_type) {
-  if (model_type == "qwen3_5" || model_type == "qwen3_5_moe" ||
-      model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text") {
+  if (is_qwen3_5_target_model_type(model_type)) {
     return TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY;
   }
   if (model_type == "mimo") {

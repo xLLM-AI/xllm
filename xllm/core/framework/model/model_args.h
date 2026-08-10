@@ -21,6 +21,7 @@ limitations under the License.
 #include <optional>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -615,6 +616,14 @@ inline bool has_linear_attention_layers(const ModelArgs& args) {
                        });
   }
   return args.full_attention_interval() > 1;
+}
+
+// Closed set by design: a new target variant must be enumerated here rather
+// than matched by a "qwen3_5_" prefix, so draft bodies ("qwen3_5_mtp") are not
+// silently promoted onto the target spec-verify path.
+inline bool is_qwen3_5_target_model_type(std::string_view model_type) {
+  return model_type == "qwen3_5" || model_type == "qwen3_5_moe" ||
+         model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text";
 }
 
 inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {

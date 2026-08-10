@@ -122,12 +122,6 @@ int64_t standard_full_cache_block_size_in_bytes(
   return logical_block_bytes;
 }
 
-bool is_qwen3_5_target_model_type(const std::string& model_type) {
-  return model_type == "qwen3_5" || model_type == "qwen3_5_moe" ||
-         model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text" ||
-         model_type.rfind("qwen3_5_", 0) == 0;
-}
-
 bool enable_qwen3_5_spec_verify(const ModelArgs& model_args,
                                 const KVCacheEstimateOptions& options) {
   return options.num_speculative_tokens > 0 && !options.is_draft_engine &&
