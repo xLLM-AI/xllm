@@ -36,7 +36,6 @@ class AdaptiveSpeculativeController final {
   std::vector<int32_t> select_pruned_prefix_lengths(
       const torch::Tensor& selected_probs_by_step,
       double full_draft_time_ms,
-      double target_step_time_ms,
       const std::vector<double>& per_seq_kv_lens) const;
 
  private:

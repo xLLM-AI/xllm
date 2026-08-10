@@ -230,8 +230,6 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       int32_t num_speculative_tokens,
       const std::vector<int32_t>* pruned_prefix_lengths = nullptr) const;
   bool adaptive_enabled() const;
-  double adaptive_step_time_estimate(const ForwardInput& input,
-                                     int32_t max_speculative_tokens) const;
 
  protected:
   // Draft model worker

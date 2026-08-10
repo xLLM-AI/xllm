@@ -73,7 +73,6 @@ TEST(AdaptiveSpeculativeControllerTest, SelectsPrunedPrefixesByPathProb) {
   const std::vector<int32_t> prefix_lengths =
       controller.select_pruned_prefix_lengths(probs,
                                               /*full_draft_time_ms=*/1.0,
-                                              /*target_step_time_ms=*/10.0,
                                               per_seq_kv_lens);
 
   ASSERT_EQ(prefix_lengths.size(), 2);
@@ -93,7 +92,6 @@ TEST(AdaptiveSpeculativeControllerTest, AllowsZeroPrefixWhenNoGain) {
   const std::vector<int32_t> prefix_lengths =
       controller.select_pruned_prefix_lengths(probs,
                                               /*full_draft_time_ms=*/1.0,
-                                              /*target_step_time_ms=*/100.0,
                                               per_seq_kv_lens);
 
   ASSERT_EQ(prefix_lengths.size(), 2);
@@ -113,7 +111,6 @@ TEST(AdaptiveSpeculativeControllerTest, ContinuesAfterNonImprovingCandidate) {
   const std::vector<int32_t> prefix_lengths =
       controller.select_pruned_prefix_lengths(probs,
                                               /*full_draft_time_ms=*/1.0,
-                                              /*target_step_time_ms=*/100.0,
                                               per_seq_kv_lens);
 
   ASSERT_EQ(prefix_lengths.size(), 2);

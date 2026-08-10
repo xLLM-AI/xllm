@@ -1575,8 +1575,6 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_adaptive_validate(
     const std::vector<ForwardOutput>& draft_outputs,
     ForwardInput& validate_input,
     int32_t num_speculative_tokens) {
-  const double target_step_time_ms =
-      adaptive_step_time_estimate(input, num_speculative_tokens);
   const int32_t batch_size = input.input_params.meta.num_sequences;
   std::vector<double> per_seq_kv_lens(static_cast<size_t>(batch_size), 0.0);
   const Slice<int32_t> kv_seq_lens =
@@ -1598,7 +1596,6 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_adaptive_validate(
     prefix_lengths = adaptive_spec_controller_->select_pruned_prefix_lengths(
         selected_probs_by_step(draft_outputs),
         /*full_draft_time_ms=*/0.0,
-        target_step_time_ms,
         per_seq_kv_lens);
   } else {
     prefix_lengths.assign(static_cast<size_t>(batch_size),
@@ -2191,47 +2188,6 @@ void MTPWorkerImpl::record_validate_metrics(
 bool MTPWorkerImpl::adaptive_enabled() const {
   return adaptive_spec_controller_ != nullptr &&
          adaptive_spec_controller_->enabled();
-}
-
-double MTPWorkerImpl::adaptive_step_time_estimate(
-    const ForwardInput& input,
-    int32_t max_speculative_tokens) const {
-  const int32_t batch_size = input.input_params.meta.num_sequences;
-  const Slice<int32_t> kv_seq_lens =
-      input.input_params.attention.host.kv_seq_lens;
-  if (batch_size <= 0 || max_speculative_tokens <= 0) {
-    return 1.0;
-  }
-#if defined(USE_NPU)
-  const size_t min_kv_seq_lens_size = static_cast<size_t>(batch_size);
-#else
-  const size_t min_kv_seq_lens_size = static_cast<size_t>(batch_size) + 1;
-#endif
-  if (kv_seq_lens.size() < min_kv_seq_lens_size) {
-    return 1.0;
-  }
-
-  double total_prefix_len = 0.0;
-  for (int32_t seq_id = 0; seq_id < batch_size; ++seq_id) {
-    total_prefix_len += static_cast<double>(
-        specBuilder::calc_kv_len(kv_seq_lens, seq_id, /*offset=*/0));
-  }
-  const double avg_prefix_len =
-      total_prefix_len / static_cast<double>(batch_size);
-
-  SpeculativeProfileRegistry& registry =
-      SpeculativeProfileRegistry::get_instance();
-  if (!registry.has_validate_time_predictor()) {
-    return 1.0;
-  }
-
-  const double max_speculative_target_time = registry.predict_validate_time_ms(
-      batch_size, max_speculative_tokens + 1, avg_prefix_len);
-  if (max_speculative_target_time <= 0.0 ||
-      !std::isfinite(max_speculative_target_time)) {
-    return 1.0;
-  }
-  return max_speculative_target_time;
 }
 
 void MTPWorkerImpl::process_draft_sample_output(SampleOutput& sample_output) {

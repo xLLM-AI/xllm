@@ -65,7 +65,6 @@ std::vector<int32_t>
 AdaptiveSpeculativeController::select_pruned_prefix_lengths(
     const torch::Tensor& selected_probs_by_step,
     double full_draft_time_ms,
-    double target_step_time_ms,
     const std::vector<double>& per_seq_kv_lens) const {
   CHECK(selected_probs_by_step.defined())
       << "adaptive pruning requires draft selected probabilities";
@@ -156,9 +155,7 @@ AdaptiveSpeculativeController::select_pruned_prefix_lengths(
     }
   }
   auto score_of = [&](double accepted, double vtime_raw) {
-    // Guard against a degenerate zero denominator; do NOT clamp to a fraction
-    // of target_step_time_ms — that is a self-calibration loop that silently
-    // suppresses pruning when vtime_raw is small.
+    // Keep the divisor strictly positive; a 1e-6 lower bound is enough.
     const double estimated_time =
         std::max(full_draft_time_ms, 1.0e-6) + std::max(vtime_raw, 1.0e-6);
     return (static_cast<double>(batch_size) + accepted) / estimated_time;
