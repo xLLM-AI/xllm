@@ -33,10 +33,19 @@ class AdaptiveSpeculativeController final {
   ~AdaptiveSpeculativeController() = default;
 
   bool enabled() const;
+  // `probs_are_path_probs=false` (default): each column of
+  // `selected_probs_by_step` is a per-step conditional accept probability (as
+  // MTP / DFlash sample-gathered probs are). The controller multiplies them
+  // cumulatively to obtain the path probability of accepting the first k
+  // tokens. `probs_are_path_probs=true`: each column *already is* the path
+  // acceptance probability at that step (e.g. DSpark's ConfidenceHead which is
+  // trained to predict "P(accept up to this token)"). The controller consumes
+  // the column directly without multiplying.
   std::vector<int32_t> select_pruned_prefix_lengths(
       const torch::Tensor& selected_probs_by_step,
       double full_draft_time_ms,
-      const std::vector<double>& per_seq_kv_lens) const;
+      const std::vector<double>& per_seq_kv_lens,
+      bool probs_are_path_probs = false) const;
 
  private:
   bool enabled_ = false;

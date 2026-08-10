@@ -67,7 +67,8 @@ std::vector<int32_t>
 AdaptiveSpeculativeController::select_pruned_prefix_lengths(
     const torch::Tensor& selected_probs_by_step,
     double full_draft_time_ms,
-    const std::vector<double>& per_seq_kv_lens) const {
+    const std::vector<double>& per_seq_kv_lens,
+    bool probs_are_path_probs) const {
   CHECK(selected_probs_by_step.defined())
       << "adaptive pruning requires draft selected probabilities";
   CHECK_EQ(selected_probs_by_step.dim(), 2)
@@ -98,11 +99,19 @@ AdaptiveSpeculativeController::select_pruned_prefix_lengths(
     double path_prob = 1.0;
     for (int32_t token_idx = 0; token_idx < num_speculative_tokens;
          ++token_idx) {
-      path_prob *= prob_data[seq_id * num_speculative_tokens + token_idx];
-      if (!std::isfinite(path_prob)) {
-        path_prob = 0.0;
+      const double step_prob =
+          prob_data[seq_id * num_speculative_tokens + token_idx];
+      if (probs_are_path_probs) {
+        // Column already encodes P(accept prefix of length k+1) — do not
+        // multiply. Clamp for safety in case of upstream numerical drift.
+        path_prob = std::clamp(step_prob, 0.0, 1.0);
+      } else {
+        path_prob *= step_prob;
+        if (!std::isfinite(path_prob)) {
+          path_prob = 0.0;
+        }
+        path_prob = std::clamp(path_prob, 0.0, 1.0);
       }
-      path_prob = std::clamp(path_prob, 0.0, 1.0);
       path_probs[static_cast<size_t>(seq_id) *
                      static_cast<size_t>(num_speculative_tokens) +
                  static_cast<size_t>(token_idx)] = path_prob;

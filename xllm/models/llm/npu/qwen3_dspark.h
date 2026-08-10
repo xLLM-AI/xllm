@@ -19,6 +19,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
@@ -199,6 +200,23 @@ class DSparkConfidenceHead final {
     }
     namespace F = torch::nn::functional;
     torch::Tensor logit = F::linear(input, proj_weight_, proj_bias_);
+    // Optional temperature scaling on the confidence logit before sigmoid.
+    // Raw neural confidence estimates are typically overconfident (Guo et al.
+    // 2017); the DSpark paper (Section 3.2.1 "Post-hoc Calibration") calls for
+    // Sequential Temperature Scaling to keep the cumulative product ∏ c_i
+    // aligned with the empirical acceptance rate. We approximate that with a
+    // single global temperature read from DSPARK_CONFIDENCE_TEMPERATURE
+    // (default 1.0 = no scaling). Higher T flattens confidence toward 0.5 so
+    // the cumulative product decays slower and the scheduler prunes less
+    // aggressively at long block lengths.
+    static const double temperature = [] {
+      const char* s = std::getenv("DSPARK_CONFIDENCE_TEMPERATURE");
+      double t = s != nullptr ? std::atof(s) : 1.0;
+      return t > 0.0 ? t : 1.0;
+    }();
+    if (temperature != 1.0) {
+      logit = logit / temperature;
+    }
     return torch::sigmoid(logit).squeeze(-1).to(torch::kFloat32);
   }
 

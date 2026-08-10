@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -1257,9 +1258,23 @@ std::vector<int32_t> DFlashWorkerImpl::compute_adaptive_prefix_lengths(
   // Prefer the trained ConfidenceHead output when present (DSpark);
   // otherwise fall back to sampler-gathered proposal probs (DFlash / DSpark
   // without a confidence head).
-  torch::Tensor probs_for_controller = draft_block.confidence_probs.defined()
-                                           ? draft_block.confidence_probs
-                                           : draft_block.probs;
+  //
+  // Per the DSpark paper (Section 3.2.1), c_k is a *conditional* probability
+  // and the joint prefix survival prob is ∏ c_i — so the controller's chain
+  // rule multiplication is technically correct. In practice however our
+  // ConfidenceHead is not STS-calibrated (paper Section 3.2.1 "Post-hoc
+  // Calibration"), and empirically raw c is overconfident enough that direct
+  // multiplication crashes DSpark throughput at higher block sizes. As a
+  // stop-gap knob, DSPARK_TREAT_CONFIDENCE_AS_PATH_PROB=1 tells the
+  // controller to consume each c_k as an already-cumulative path prob (i.e.
+  // skip chain-rule multiplication for the confidence tensor).
+  const bool use_confidence = draft_block.confidence_probs.defined();
+  static const bool treat_confidence_as_path_prob = [] {
+    const char* s = std::getenv("DSPARK_TREAT_CONFIDENCE_AS_PATH_PROB");
+    return s != nullptr && std::atoi(s) != 0;
+  }();
+  torch::Tensor probs_for_controller =
+      use_confidence ? draft_block.confidence_probs : draft_block.probs;
   if (!probs_for_controller.defined()) {
     return {};
   }
@@ -1298,7 +1313,9 @@ std::vector<int32_t> DFlashWorkerImpl::compute_adaptive_prefix_lengths(
           probs_for_controller.to(torch::kCPU).to(torch::kFloat64),
           /*full_draft_time_ms=*/0.0,
           target_step_time_ms,
-          per_seq_kv_lens);
+          per_seq_kv_lens,
+          /*probs_are_path_probs=*/
+          (use_confidence && treat_confidence_as_path_prob));
   return prefix_lengths;
 }
 
