@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "core/runtime/forward_params.h"
 #include "core/runtime/mtp_async_state.h"
+#include "layers/common/expanded_decode_metadata_builder.h"
 
 namespace xllm::mtp_async {
 namespace {
@@ -56,10 +57,33 @@ void apply_device_row_metadata(ForwardInput& input,
 }
 
 #if defined(USE_NPU)
+void expand_decode_attention_metadata(ForwardInput& draft_input,
+                                      const ForwardInput& block_table_source,
+                                      const torch::Tensor& kv_seq_lens,
+                                      int32_t block_size) {
+  layer::ExpandedDecodeMetadataBuilder::populate(
+      draft_input.input_params,
+      block_table_source.input_params,
+      kv_seq_lens,
+      block_size);
+}
+
 void apply_mtp_prepare_output(
     ForwardInput& draft_input,
+    const ForwardInput& block_table_source,
     const kernel::npu::MtpPrepareNextDraftOutput& output,
-    bool use_chunked_prefill) {
+    bool use_chunked_prefill,
+    int32_t block_size) {
+  CHECK_EQ(output.token_ids.dim(), 1);
+  CHECK_EQ(output.positions.dim(), 1);
+  CHECK_EQ(output.cache_slots.dim(), 1);
+  CHECK_EQ(output.embeddings.dim(), 2);
+  CHECK_EQ(output.kv_seq_lens.dim(), 1);
+  const int64_t token_count = output.token_ids.numel();
+  CHECK_EQ(output.positions.numel(), token_count);
+  CHECK_EQ(output.cache_slots.numel(), token_count);
+  CHECK_EQ(output.embeddings.size(0), token_count);
+
   draft_input.token_ids = output.token_ids;
   draft_input.input_params.embedding.input_embedding = output.embeddings;
   draft_input.positions = output.positions;
@@ -72,6 +96,20 @@ void apply_mtp_prepare_output(
   }
   draft_input.input_params.attention.device.new_cache_slots =
       output.cache_slots;
+  if (!use_chunked_prefill) {
+    expand_decode_attention_metadata(
+        draft_input, block_table_source, output.kv_seq_lens, block_size);
+    const auto& attention = draft_input.input_params.attention.device;
+    CHECK_EQ(attention.kv_seq_lens.numel(), token_count);
+    CHECK_EQ(attention.new_cache_slots.numel(), token_count);
+    CHECK_EQ(attention.block_tables.size(0), token_count);
+    CHECK_EQ(attention.paged_kv_indptr.numel(), token_count + 1);
+    CHECK_EQ(attention.paged_kv_last_page_len.numel(), token_count);
+    CHECK_EQ(draft_input.input_params.graph.expanded_kv_seq_lens.numel(),
+             token_count);
+    CHECK_EQ(draft_input.input_params.graph.expanded_block_tables.size(0),
+             token_count);
+  }
 }
 #endif
 
@@ -98,7 +136,11 @@ void prepare_next_draft_from_accepted_state(
         block_table_source.input_params.attention.device.block_tables,
         block_size);
     if (output.has_value()) {
-      apply_mtp_prepare_output(draft_input, *output, use_chunked_prefill);
+      apply_mtp_prepare_output(draft_input,
+                               block_table_source,
+                               *output,
+                               use_chunked_prefill,
+                               block_size);
       return;
     }
   }
@@ -139,6 +181,15 @@ void prepare_next_draft_from_accepted_state(
       torch::stack({state.previous_embeddings, state.last_embeddings},
                    /*dim=*/1)
           .flatten(/*start_dim=*/0, /*end_dim=*/1);
+#if defined(USE_NPU)
+  if (!use_chunked_prefill) {
+    expand_decode_attention_metadata(
+        draft_input,
+        block_table_source,
+        state.base_kv_seq_lens.to(base_kv_seq_lens.options()),
+        block_size);
+  }
+#endif
 }
 
 }  // namespace xllm::mtp_async

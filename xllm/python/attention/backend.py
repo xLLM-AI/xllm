@@ -20,6 +20,10 @@ from typing import TYPE_CHECKING, Callable, Protocol, Sequence
 
 import torch
 
+from xllm.python.attention.expanded_decode_metadata import (
+    ExpandedDecodeMetadataLike,
+)
+
 if TYPE_CHECKING:
     from xllm.python.layers.attention import Attention
 
@@ -74,6 +78,7 @@ class AttentionMetadata(Protocol):
     q_cu_seq_lens: torch.Tensor | None
     kv_cu_seq_lens: torch.Tensor | None
     kv_seq_lens_host: torch.Tensor | None
+    kv_seq_lens_host_values: list[int] | None
     paged_kv_indptr_host: torch.Tensor | None
     paged_kv_last_page_len_host: torch.Tensor | None
     block_table: torch.Tensor | None
@@ -81,6 +86,8 @@ class AttentionMetadata(Protocol):
     linear_state_indices: torch.Tensor | None
     has_initial_state: torch.Tensor | None
     dp_token_counts: Sequence[int]
+    q_seq_lens: torch.Tensor | None
+    expanded_decode_metadata: ExpandedDecodeMetadataLike
     is_prefill: bool
     is_chunked_prefill: bool
 

@@ -80,6 +80,47 @@ def lightning_indexer(
     )
 
 
+def lightning_indexer_out(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    weights: torch.Tensor,
+    query_seq_lengths: torch.Tensor | None,
+    key_seq_lengths: torch.Tensor | None,
+    block_table: torch.Tensor | None,
+    layout_query: str,
+    layout_key: str,
+    selected_count: int,
+    sparse_mode: int,
+    pre_tokens: int,
+    next_tokens: int,
+    return_value: bool,
+    sparse_indices_out: torch.Tensor,
+    sparse_values_out: torch.Tensor,
+) -> torch.Tensor:
+    """Select key blocks and write the result to caller-owned buffers."""
+    del (
+        query,
+        key,
+        weights,
+        query_seq_lengths,
+        key_seq_lengths,
+        block_table,
+        layout_query,
+        layout_key,
+        selected_count,
+        sparse_mode,
+        pre_tokens,
+        next_tokens,
+        return_value,
+        sparse_indices_out,
+        sparse_values_out,
+    )
+    raise NotImplementedError(
+        "lightning_indexer_out has no CUDA kernel; sparse attention on CUDA is "
+        "not supported yet"
+    )
+
+
 def scatter_nd_update(
     value: torch.Tensor,
     indices: torch.Tensor,
@@ -158,4 +199,51 @@ def sparse_flash_attention(
     )
 
 
-__all__ = ["lightning_indexer", "scatter_nd_update", "sparse_flash_attention"]
+def sparse_flash_attention_out(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    sparse_indices: torch.Tensor,
+    block_table: torch.Tensor | None,
+    actual_seq_lengths_query: torch.Tensor | None,
+    actual_seq_lengths_kv: torch.Tensor | None,
+    query_rope: torch.Tensor | None,
+    key_rope: torch.Tensor | None,
+    scale_value: float,
+    sparse_block_size: int,
+    layout_query: str,
+    layout_kv: str,
+    sparse_mode: int,
+    output: torch.Tensor,
+) -> torch.Tensor:
+    """Attend to selected blocks and write the result to ``output``."""
+    del (
+        query,
+        key,
+        value,
+        sparse_indices,
+        block_table,
+        actual_seq_lengths_query,
+        actual_seq_lengths_kv,
+        query_rope,
+        key_rope,
+        scale_value,
+        sparse_block_size,
+        layout_query,
+        layout_kv,
+        sparse_mode,
+        output,
+    )
+    raise NotImplementedError(
+        "sparse_flash_attention_out has no CUDA kernel; sparse attention on "
+        "CUDA is not supported yet"
+    )
+
+
+__all__ = [
+    "lightning_indexer",
+    "lightning_indexer_out",
+    "scatter_nd_update",
+    "sparse_flash_attention",
+    "sparse_flash_attention_out",
+]

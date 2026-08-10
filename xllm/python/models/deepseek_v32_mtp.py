@@ -27,11 +27,12 @@ from typing import Iterable, Optional
 import torch
 import torch.nn as nn
 
-from xllm.python.layers import ColumnParallelLinear, HiddenParallelEmbedding, RMSNorm
+from xllm.python.layers import ColumnParallelLinear, RMSNorm
 from xllm.python.models.deepseek_v32 import (
     DeepseekV3Config,
     DeepseekV3DecoderLayer,
     DeepseekV3ForCausalLM,
+    DeepseekYarnRotaryEmbedding,
 )
 
 
@@ -46,13 +47,7 @@ class DeepseekV32MtpModel(nn.Module):
         assert cfg.hidden_size % tp == 0
 
         self.cfg = cfg
-        self.embed_tokens = HiddenParallelEmbedding(
-            cfg.vocab_size,
-            cfg.hidden_size // tp,
-            tp,
-            dtype=dtype,
-            device=device,
-        )
+        self.embed_tokens: Optional[nn.Module] = None
         self.eh_proj = ColumnParallelLinear(
             2 * cfg.hidden_size,
             cfg.hidden_size // tp,
@@ -78,6 +73,18 @@ class DeepseekV32MtpModel(nn.Module):
             ]
         )
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
+        self.rotary = DeepseekYarnRotaryEmbedding(
+            cfg.qk_rope_head_dim,
+            cfg.original_max_position_embeddings,
+            cfg.rope_scaling_factor,
+            cfg.rope_theta,
+            cfg.rope_beta_fast,
+            cfg.rope_beta_slow,
+            cfg.rope_mscale,
+            cfg.rope_mscale_all_dim,
+            dtype=dtype,
+            device=device,
+        )
         self.enable_rot = False
 
     def forward(
@@ -86,6 +93,7 @@ class DeepseekV32MtpModel(nn.Module):
         positions: torch.Tensor,
         input_embedding: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.embed_tokens is not None
         token_hidden = self.embed_tokens(input_ids)
         if input_embedding is None:
             input_embedding = token_hidden
@@ -97,9 +105,10 @@ class DeepseekV32MtpModel(nn.Module):
             torch.cat((self.enorm(token_hidden), self.hnorm(rotated_embedding)), dim=-1)
         )
         positions = positions.to(torch.int64).contiguous()
+        cos_sin_cache = self.rotary.cos_sin_cache
         residual: Optional[torch.Tensor] = None
         for layer in self.layers:
-            h, residual = layer(h, residual, positions)
+            h, residual = layer(h, residual, positions, cos_sin_cache)
         h, _ = self.norm(h, residual)
         return h
 
@@ -138,12 +147,18 @@ class DeepseekV32MtpForCausalLM(DeepseekV3ForCausalLM):
     """DeepSeek-V3.2 MTP calculator; scheduling stays in the C++ worker."""
 
     def __init__(self, config: dict) -> None:
-        super().__init__(config)
+        super().__init__(config, build_model=False)
         self.model = DeepseekV32MtpModel(self.cfg, self.dtype, self.device)
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
         views = [_MtpStateDictView(state_dict) for state_dict in state_dicts]
-        super().load_weights(views, tp_rank, tp_size, load_lm_head=False)
+        super().load_weights(
+            views,
+            tp_rank,
+            tp_size,
+            load_lm_head=False,
+            load_embedding=False,
+        )
 
         def find(name: str):
             for state_dict in views:
@@ -151,7 +166,9 @@ class DeepseekV32MtpForCausalLM(DeepseekV3ForCausalLM):
                     return state_dict
             return None
 
-        def copy_if_present(module_name: str, *aliases: str) -> bool:
+        def copy_if_present(
+            module_name: str, *aliases: str, required: bool = False
+        ) -> bool:
             state_dict = find(module_name + ".weight")
             if state_dict is None:
                 for alias in aliases:
@@ -159,6 +176,10 @@ class DeepseekV32MtpForCausalLM(DeepseekV3ForCausalLM):
                     if state_dict is not None:
                         break
             if state_dict is None:
+                if required:
+                    raise KeyError(
+                        f"missing required MTP weight: {module_name}.weight"
+                    )
                 return False
             tensor = state_dict.get_tensor(module_name + ".weight")
             parameter = self.get_parameter("model." + module_name + ".weight")
@@ -168,7 +189,7 @@ class DeepseekV32MtpForCausalLM(DeepseekV3ForCausalLM):
             parameter.data.copy_(tensor.to(dtype=parameter.dtype, device=parameter.device))
             return True
 
-        copy_if_present("eh_proj")
-        copy_if_present("enorm")
-        copy_if_present("hnorm")
+        copy_if_present("eh_proj", required=True)
+        copy_if_present("enorm", required=True)
+        copy_if_present("hnorm", required=True)
         self.model.enable_rot = copy_if_present("rot")

@@ -29,6 +29,11 @@ namespace xllm {
 
 class ProcessGroup;
 
+namespace detail {
+void share_python_model_weights(pybind11::object& draft_model,
+                                const pybind11::object& target_model);
+}  // namespace detail
+
 class __attribute__((visibility("hidden"))) PyCausalLM : public CausalLM {
  public:
   explicit PyCausalLM(const ModelContext& context);

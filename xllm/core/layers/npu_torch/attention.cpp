@@ -66,7 +66,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
     xllm::kernel::reshape_paged_cache(reshape_paged_cache_params);
   }
 
-  if (attn_metadata.use_expanded_decode_for_spec_verify_attention) {
+  if (attn_metadata.expanded_decode.enabled) {
     decoder_forward(query, output, k_cache, v_cache, attn_metadata);
   } else if (only_prefill) {
     prefill_forward(query, key, value, output, k_cache, v_cache, attn_metadata);
@@ -146,13 +146,13 @@ void AttentionImpl::decoder_forward(torch::Tensor& query,
   torch::Tensor kv_seq_lens;
   torch::Tensor block_table = attn_metadata.block_table;
   torch::Tensor tiling_data = attn_metadata.paged_attention_tiling_data;
-  if (attn_metadata.use_expanded_decode_for_spec_verify_attention) {
-    block_table = attn_metadata.expanded_block_table;
-    tiling_data = attn_metadata.expanded_paged_attention_tiling_data;
-    if (attn_metadata.expanded_kv_seq_lens_host.defined()) {
-      kv_seq_lens = attn_metadata.expanded_kv_seq_lens_host;
+  if (attn_metadata.expanded_decode.enabled) {
+    block_table = attn_metadata.expanded_decode.block_table;
+    tiling_data = attn_metadata.expanded_decode.paged_attention_tiling_data;
+    if (attn_metadata.expanded_decode.kv_seq_lens_host.defined()) {
+      kv_seq_lens = attn_metadata.expanded_decode.kv_seq_lens_host;
     } else {
-      kv_seq_lens = attn_metadata.expanded_kv_seq_lens;
+      kv_seq_lens = attn_metadata.expanded_decode.kv_seq_lens;
     }
   } else if (attn_metadata.kv_seq_lens_host.defined()) {
     kv_seq_lens = attn_metadata.kv_seq_lens_host;

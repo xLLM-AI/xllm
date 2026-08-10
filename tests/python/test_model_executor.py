@@ -48,6 +48,9 @@ from xllm.python.model_executor.runners.decode_cuda_graph import (  # noqa: E402
     DecodeCudaGraphRunner,
     _decode_graph_buckets,
 )
+from xllm.python.model_executor.runners.decode_acl_graph import (  # noqa: E402
+    DecodeAclGraphRunner,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +82,12 @@ class StubAttentionBackend(AttentionBackend):
     @property
     def page_size(self) -> int:
         return 1
+
+
+class _PagedStubAttentionBackend(StubAttentionBackend):
+    @property
+    def page_size(self) -> int:
+        return 4
 
 
 def _make_attention_layer(
@@ -368,6 +377,226 @@ class TestDecodeCudaGraphDataParallelKeys:
         input_ids = torch.zeros(1, dtype=torch.int32)
 
         assert runner._graph_key(input_ids, self._metadata(token_counts)) is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: DecodeAclGraphRunner speculative metadata
+# ---------------------------------------------------------------------------
+
+
+class TestDecodeAclGraphSpeculativeMetadata:
+    @staticmethod
+    def _runner() -> DecodeAclGraphRunner:
+        return DecodeAclGraphRunner(
+            nn.Identity(),
+            _PagedStubAttentionBackend(),
+            torch.device("cpu"),
+            max_batch=4,
+            max_model_len=8,
+        )
+
+    @staticmethod
+    def _metadata() -> SimpleNamespace:
+        return SimpleNamespace(
+            slot_mapping=torch.arange(4, dtype=torch.int32),
+            paged_kv_indptr=torch.tensor(
+                [0, 1, 2, 4, 6], dtype=torch.int32
+            ),
+            paged_kv_indices=torch.tensor(
+                [10, 10, 20, 21, 20, 21], dtype=torch.int32
+            ),
+            paged_kv_last_page_len=torch.tensor(
+                [3, 4, 3, 4], dtype=torch.int32
+            ),
+            q_cu_seq_lens=torch.tensor([0, 2, 4], dtype=torch.int32),
+            kv_cu_seq_lens=torch.tensor([0, 4, 12], dtype=torch.int32),
+            kv_seq_lens_host=torch.tensor([4, 8], dtype=torch.int32),
+            kv_seq_lens_host_values=[4, 8],
+            block_table=torch.tensor(
+                [[10, 11], [20, 21]], dtype=torch.int32
+            ),
+            kv_seq_lens=torch.tensor([4, 8], dtype=torch.int32),
+            q_seq_lens=torch.tensor([2, 2], dtype=torch.int32),
+            expanded_decode_metadata=SimpleNamespace(
+                enabled=True,
+                kv_seq_lens=torch.tensor(
+                    [3, 4, 7, 8], dtype=torch.int32
+                ),
+                block_table=torch.tensor(
+                    [[10, 11], [10, 11], [20, 21], [20, 21]],
+                    dtype=torch.int32,
+                ),
+                paged_kv_indptr=torch.tensor(
+                    [0, 1, 2, 4, 6], dtype=torch.int32
+                ),
+                paged_kv_indices=torch.tensor(
+                    [10, 10, 20, 21, 20, 21], dtype=torch.int32
+                ),
+                paged_kv_last_page_len=torch.tensor(
+                    [3, 4, 3, 4], dtype=torch.int32
+                ),
+                paged_attention_tiling_data=None,
+                kv_seq_lens_host=torch.tensor(
+                    [3, 4, 7, 8], dtype=torch.int32
+                ),
+                kv_seq_lens_host_values=[3, 4, 7, 8],
+            ),
+            is_prefill=False,
+            is_chunked_prefill=True,
+        )
+
+    def test_expanded_metadata_selects_matching_paged_kv_rows(self) -> None:
+        runner = self._runner()
+        (
+            block_table,
+            kv_seq_lens,
+            _,
+            paged_kv_indptr,
+            paged_kv_indices,
+            paged_kv_last_page_len,
+        ) = runner._decode_metadata(self._metadata())
+
+        assert block_table.tolist() == [
+            [10, 11],
+            [10, 11],
+            [20, 21],
+            [20, 21],
+        ]
+        assert kv_seq_lens.tolist() == [3, 4, 7, 8]
+        assert paged_kv_indptr.tolist() == [0, 1, 2, 4, 6]
+        assert paged_kv_indices.tolist() == [10, 10, 20, 21, 20, 21]
+        assert paged_kv_last_page_len.tolist() == [3, 4, 3, 4]
+
+    def test_expanded_chunked_verify_can_use_decode_graph(self) -> None:
+        runner = self._runner()
+        input_ids = torch.arange(4, dtype=torch.int32)
+
+        assert runner.can_execute(input_ids, self._metadata())
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            (
+                "block_table",
+                torch.arange(8, dtype=torch.int32),
+                "block_table must be two-dimensional",
+            ),
+            (
+                "kv_seq_lens",
+                torch.tensor([3, 4, 7], dtype=torch.int32),
+                "kv_seq_lens must contain one value per sequence",
+            ),
+            (
+                "kv_seq_lens_host",
+                torch.tensor([3, 4, 7], dtype=torch.int32),
+                "kv_seq_lens_host must contain one value per sequence",
+            ),
+            (
+                "paged_kv_indptr",
+                torch.tensor([0, 1, 2, 4], dtype=torch.int32),
+                "paged_kv_indptr must contain one offset per sequence",
+            ),
+            (
+                "paged_kv_indices",
+                torch.tensor([[10, 10], [20, 21]], dtype=torch.int32),
+                "paged_kv_indices must be a non-empty flat page list",
+            ),
+            (
+                "paged_kv_last_page_len",
+                torch.tensor([3, 4, 3], dtype=torch.int32),
+                "paged_kv_last_page_len must contain one value per sequence",
+            ),
+        ],
+    )
+    def test_expanded_metadata_shape_mismatch_fails(
+        self,
+        field: str,
+        value: torch.Tensor,
+        message: str,
+    ) -> None:
+        metadata = self._metadata()
+        setattr(metadata.expanded_decode_metadata, field, value)
+
+        with pytest.raises(RuntimeError, match=message):
+            self._runner()._decode_metadata(metadata)
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            (
+                "paged_kv_indptr",
+                torch.tensor([1, 1, 2, 4, 6], dtype=torch.int32),
+                "must start at zero",
+            ),
+            (
+                "paged_kv_indptr",
+                torch.tensor([0, 2, 1, 4, 6], dtype=torch.int32),
+                "must be monotonic",
+            ),
+            (
+                "paged_kv_indptr",
+                torch.tensor([0, 1, 2, 4, 5], dtype=torch.int32),
+                "terminal page offset must match page count",
+            ),
+            (
+                "paged_kv_last_page_len",
+                torch.tensor([3, 4, 0, 4], dtype=torch.int32),
+                "last-page lengths must be positive",
+            ),
+            (
+                "paged_kv_last_page_len",
+                torch.tensor([3, 4, 5, 4], dtype=torch.int32),
+                "must not exceed block size",
+            ),
+        ],
+    )
+    def test_expanded_paged_metadata_invariant_fails(
+        self,
+        field: str,
+        value: torch.Tensor,
+        message: str,
+    ) -> None:
+        metadata = self._metadata()
+        setattr(metadata.expanded_decode_metadata, field, value)
+
+        with pytest.raises(RuntimeError, match=message):
+            self._runner()._decode_metadata(metadata)
+
+    def test_expanded_page_count_exceeding_capacity_fails(self) -> None:
+        metadata = self._metadata()
+        metadata.expanded_decode_metadata.kv_seq_lens_host_values = [3, 4, 7, 9]
+
+        with pytest.raises(RuntimeError, match="exceeds block-table capacity"):
+            self._runner()._decode_metadata(metadata)
+
+    @pytest.mark.parametrize(
+        ("input_ids", "slot_mapping", "message"),
+        [
+            (
+                torch.arange(3, dtype=torch.int32),
+                torch.arange(4, dtype=torch.int32),
+                "input_ids must contain one token per sequence",
+            ),
+            (
+                torch.arange(4, dtype=torch.int32),
+                torch.arange(3, dtype=torch.int32),
+                "slot_mapping must contain one slot per token",
+            ),
+        ],
+    )
+    def test_token_layout_mismatch_fails(
+        self,
+        input_ids: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        message: str,
+    ) -> None:
+        with pytest.raises(RuntimeError, match=message):
+            self._runner()._validate_decode_token_layout(
+                input_ids,
+                torch.arange(4, dtype=torch.int32),
+                slot_mapping,
+                sequence_count=4,
+            )
 
 
 # ---------------------------------------------------------------------------

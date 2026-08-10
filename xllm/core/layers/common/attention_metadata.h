@@ -33,6 +33,18 @@ namespace ffi = tvm::ffi;
 
 namespace xllm::layer {
 
+struct ExpandedDecodeMetadata {
+  bool enabled = false;
+  torch::Tensor kv_seq_lens;
+  torch::Tensor block_table;
+  torch::Tensor paged_kv_indptr;
+  torch::Tensor paged_kv_indices;
+  torch::Tensor paged_kv_last_page_len;
+  torch::Tensor paged_attention_tiling_data;
+  torch::Tensor kv_seq_lens_host;
+  std::vector<int32_t> kv_seq_lens_host_vec;
+};
+
 #if defined(USE_CUDA) || defined(USE_MUSA)
 struct PlanInfo {
   int32_t layer_id = -1;
@@ -99,11 +111,7 @@ struct AttentionMetadata {
 
   // Spec-verify ACL graph can run full attention as expanded decode while GDN
   // layers keep the original spec-verify metadata.
-  bool use_expanded_decode_for_spec_verify_attention = false;
-  torch::Tensor expanded_kv_seq_lens;
-  torch::Tensor expanded_block_table;
-  torch::Tensor expanded_paged_attention_tiling_data;
-  torch::Tensor expanded_kv_seq_lens_host;
+  ExpandedDecodeMetadata expanded_decode;
 
   // for mrope
   torch::Tensor mrope_cos;

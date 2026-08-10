@@ -939,6 +939,9 @@ struct GraphInput {
   bool use_expanded_decode_for_spec_verify_attention = false;
   torch::Tensor expanded_kv_seq_lens;
   torch::Tensor expanded_block_tables;
+  torch::Tensor expanded_paged_kv_indptr;
+  torch::Tensor expanded_paged_kv_indices;
+  torch::Tensor expanded_paged_kv_last_page_len;
   torch::Tensor expanded_tiling_data;
   std::vector<int32_t> expanded_kv_seq_lens_vec;
 #if defined(USE_NPU)
@@ -969,6 +972,12 @@ struct GraphInput {
         use_expanded_decode_for_spec_verify_attention;
     out.expanded_kv_seq_lens = safe_to(expanded_kv_seq_lens, device, true);
     out.expanded_block_tables = safe_to(expanded_block_tables, device, true);
+    out.expanded_paged_kv_indptr =
+        safe_to(expanded_paged_kv_indptr, device, true);
+    out.expanded_paged_kv_indices =
+        safe_to(expanded_paged_kv_indices, device, true);
+    out.expanded_paged_kv_last_page_len =
+        safe_to(expanded_paged_kv_last_page_len, device, true);
     out.expanded_tiling_data = safe_to(expanded_tiling_data, device, true);
     out.expanded_kv_seq_lens_vec = expanded_kv_seq_lens_vec;
 #if defined(USE_NPU)
