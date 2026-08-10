@@ -56,11 +56,7 @@ void wait_input_ready_events(const ForwardInput& input, const Stream& stream) {
 
 StreamEventPtr record_current_stream_event(const Device& device) {
   std::unique_ptr<Stream> stream = device.current_stream();
-  StreamEventPtr event = stream->record_event();
-  if (event == nullptr) {
-    stream->synchronize();
-  }
-  return event;
+  return stream->record_event_or_sync();
 }
 
 }  // namespace

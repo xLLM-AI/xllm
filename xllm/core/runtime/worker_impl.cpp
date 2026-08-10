@@ -947,11 +947,8 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
   prepare_device_on_stream();
 
   if (record_ready_event) {
-    StreamEventPtr event = prepare_stream.record_event();
-    if (event == nullptr) {
-      prepare_stream.synchronize();
-    }
-    processed_input.metadata_ready_event = event;
+    processed_input.metadata_ready_event =
+        prepare_stream.record_event_or_sync();
   } else {
     processed_input.metadata_ready_event.reset();
   }

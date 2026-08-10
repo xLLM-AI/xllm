@@ -75,6 +75,7 @@ class Stream {
   const PlatformStream* get_stream() const { return &stream_; }
   void wait_stream(const Stream& other_stream);
   StreamEventPtr record_event() const;
+  StreamEventPtr record_event_or_sync() const;
   bool wait_event(const StreamEventPtr& event) const;
 
   // Support for LOG(INFO) output
