@@ -336,6 +336,12 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       // ConfidenceHead can consume hidden without a second projection.
       logits = model_->logits(
           model_output.hidden_states, selected_token_idxes, selected_hidden);
+      if (!selected_hidden.defined() && model_output.hidden_states.defined()) {
+        // ATB lm_head backend does not expose a second output tensor; gather
+        // the hidden ourselves so ConfidenceHead is not silently disabled.
+        selected_hidden = model_output.hidden_states.index_select(
+            /*dim=*/0, selected_token_idxes.to(torch::kLong));
+      }
     } else {
       logits = model_->logits(model_output.hidden_states, selected_token_idxes);
     }
