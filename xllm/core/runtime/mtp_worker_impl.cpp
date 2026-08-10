@@ -3304,16 +3304,23 @@ SampleOutput MTPWorkerImpl::validate(
   }
 
   if (pruned_prefix_lengths != nullptr) {
+    // Build cut/keep masks once from pruned_prefix_lengths and reuse across
+    // both helpers below, so we avoid re-uploading prefix_lengths and
+    // rebuilding identical arange+eq+logical_and masks per call.
+    const adaptive_pruning::PrunedPrefixMasks pruning_masks =
+        adaptive_pruning::build_pruned_prefix_masks(
+            *pruned_prefix_lengths,
+            num_speculative_tokens,
+            sample_output.next_tokens.device());
     sync_pruned_boundary_outputs(sample_output,
                                  target_output,
                                  batch_size,
                                  num_val_tokens,
-                                 num_speculative_tokens,
-                                 *pruned_prefix_lengths);
+                                 pruning_masks);
     apply_pruned_prefix_lengths(sample_output,
                                 target_output.sample_output.next_tokens,
                                 num_speculative_tokens,
-                                *pruned_prefix_lengths);
+                                pruning_masks);
   }
 
   return sample_output;

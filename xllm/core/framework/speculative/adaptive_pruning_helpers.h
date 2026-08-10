@@ -51,25 +51,42 @@ std::vector<ForwardOutput> truncate_draft_outputs(
     const std::vector<ForwardOutput>& draft_outputs,
     int32_t num_speculative_tokens);
 
+// Precomputed device-side masks derived from the per-seq pruning prefix
+// lengths. Built once per validate() so the three pruning helpers do not
+// each re-upload prefix_lengths and re-run arange+eq+logical_and.
+//
+// Shapes (with batch=B, num_val_tokens=W):
+//   keep_mask [B, W] — positions <= prefix_len (token kept).
+//   cut_mask  [B, W] — position == prefix_len && prefix_len < num_spec
+//                       (boundary position that switches to target token).
+struct PrunedPrefixMasks {
+  torch::Tensor keep_mask;
+  torch::Tensor cut_mask;
+};
+
+// Build keep_mask / cut_mask on `device`. Helpers below can then re-target
+// them to per-tensor devices with .to(...), which is a no-op if they match.
+PrunedPrefixMasks build_pruned_prefix_masks(
+    const std::vector<int32_t>& pruned_prefix_lengths,
+    int32_t num_speculative_tokens,
+    const torch::Device& device);
+
 // Apply per-seq pruning to rejection sampling output: mask positions beyond
 // each seq's prefix_len to -1, and replace the boundary position with the
 // target model's token (acting as bonus token for the truncated sequence).
-void apply_pruned_prefix_lengths(
-    SampleOutput& sample_output,
-    const torch::Tensor& target_next_tokens,
-    int32_t num_speculative_tokens,
-    const std::vector<int32_t>& pruned_prefix_lengths);
+void apply_pruned_prefix_lengths(SampleOutput& sample_output,
+                                 const torch::Tensor& target_next_tokens,
+                                 int32_t num_speculative_tokens,
+                                 const PrunedPrefixMasks& masks);
 
 // Correct logprobs/top_logprobs at pruning boundaries: replace the boundary
 // position's logprob with target model's logprob (since the token changed from
 // a potentially-accepted draft token to a target-resampled token).
-void sync_pruned_boundary_outputs(
-    SampleOutput& sample_output,
-    const ForwardOutput& target_output,
-    int32_t batch_size,
-    int32_t num_val_tokens,
-    int32_t num_speculative_tokens,
-    const std::vector<int32_t>& pruned_prefix_lengths);
+void sync_pruned_boundary_outputs(SampleOutput& sample_output,
+                                  const ForwardOutput& target_output,
+                                  int32_t batch_size,
+                                  int32_t num_val_tokens,
+                                  const PrunedPrefixMasks& masks);
 
 }  // namespace adaptive_pruning
 }  // namespace xllm

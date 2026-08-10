@@ -30,13 +30,11 @@ torch::Tensor make_cpu_int_tensor(const std::vector<int32_t>& values) {
                            .pinned_memory(true));
 }
 
-void sync_pruned_boundary_logprobs(
-    SampleOutput& sample_output,
-    const ForwardOutput& target_output,
-    int32_t batch_size,
-    int32_t num_val_tokens,
-    int32_t num_speculative_tokens,
-    const std::vector<int32_t>& pruned_prefix_lengths) {
+void sync_pruned_boundary_logprobs(SampleOutput& sample_output,
+                                   const ForwardOutput& target_output,
+                                   int32_t batch_size,
+                                   int32_t num_val_tokens,
+                                   const PrunedPrefixMasks& masks) {
   if (!sample_output.logprobs.defined()) {
     return;
   }
@@ -47,20 +45,7 @@ void sync_pruned_boundary_logprobs(
       target_output.sample_output.logprobs.numel(),
       static_cast<int64_t>(batch_size) * static_cast<int64_t>(num_val_tokens))
       << "target logprob count mismatch";
-  torch::Tensor prefix_lengths =
-      safe_to(make_cpu_int_tensor(pruned_prefix_lengths),
-              torch::TensorOptions()
-                  .dtype(torch::kLong)
-                  .device(sample_output.logprobs.device()),
-              /*non_blocking=*/true)
-          .clamp(0, num_speculative_tokens);
-  torch::Tensor positions =
-      torch::arange(num_val_tokens, prefix_lengths.options());
-  torch::Tensor cut_mask =
-      positions.unsqueeze(/*dim=*/0)
-          .eq(prefix_lengths.unsqueeze(/*dim=*/1))
-          .logical_and(
-              prefix_lengths.unsqueeze(/*dim=*/1).lt(num_speculative_tokens));
+  torch::Tensor cut_mask = masks.cut_mask.to(sample_output.logprobs.device());
   torch::Tensor target_logprobs = safe_to(
       target_output.sample_output.logprobs.view({batch_size, num_val_tokens}),
       sample_output.logprobs.options(),
@@ -69,13 +54,11 @@ void sync_pruned_boundary_logprobs(
       torch::where(cut_mask, target_logprobs, sample_output.logprobs);
 }
 
-void sync_pruned_boundary_top_logprobs(
-    SampleOutput& sample_output,
-    const ForwardOutput& target_output,
-    int32_t batch_size,
-    int32_t num_val_tokens,
-    int32_t num_speculative_tokens,
-    const std::vector<int32_t>& pruned_prefix_lengths) {
+void sync_pruned_boundary_top_logprobs(SampleOutput& sample_output,
+                                       const ForwardOutput& target_output,
+                                       int32_t batch_size,
+                                       int32_t num_val_tokens,
+                                       const PrunedPrefixMasks& masks) {
   if (!sample_output.top_tokens.defined()) {
     return;
   }
@@ -95,20 +78,8 @@ void sync_pruned_boundary_top_logprobs(
       static_cast<int64_t>(batch_size) * static_cast<int64_t>(num_val_tokens))
       << "target top_logprobs count mismatch";
 
-  torch::Tensor prefix_lengths =
-      safe_to(make_cpu_int_tensor(pruned_prefix_lengths),
-              torch::TensorOptions()
-                  .dtype(torch::kLong)
-                  .device(sample_output.top_tokens.device()),
-              /*non_blocking=*/true)
-          .clamp(0, num_speculative_tokens);
-  torch::Tensor positions =
-      torch::arange(num_val_tokens, prefix_lengths.options());
-  torch::Tensor cut_mask =
-      positions.unsqueeze(/*dim=*/0)
-          .eq(prefix_lengths.unsqueeze(/*dim=*/1))
-          .logical_and(
-              prefix_lengths.unsqueeze(/*dim=*/1).lt(num_speculative_tokens))
+  torch::Tensor cut_mask_broadcast =
+      masks.cut_mask.to(sample_output.top_tokens.device())
           .unsqueeze(/*dim=*/-1);
   const int64_t top_k = sample_output.top_tokens.size(2);
   CHECK_EQ(target_output.sample_output.top_tokens.size(1), top_k)
@@ -121,13 +92,13 @@ void sync_pruned_boundary_top_logprobs(
       target_output.sample_output.top_logprobs.view(
           {batch_size, num_val_tokens, top_k});
   sample_output.top_tokens =
-      torch::where(cut_mask,
+      torch::where(cut_mask_broadcast,
                    safe_to(target_top_tokens,
                            sample_output.top_tokens.options(),
                            /*non_blocking=*/true),
                    sample_output.top_tokens);
   sample_output.top_logprobs =
-      torch::where(cut_mask.to(sample_output.top_logprobs.device()),
+      torch::where(cut_mask_broadcast.to(sample_output.top_logprobs.device()),
                    safe_to(target_top_logprobs,
                            sample_output.top_logprobs.options(),
                            /*non_blocking=*/true),
@@ -135,6 +106,28 @@ void sync_pruned_boundary_top_logprobs(
 }
 
 }  // namespace
+
+PrunedPrefixMasks build_pruned_prefix_masks(
+    const std::vector<int32_t>& pruned_prefix_lengths,
+    int32_t num_speculative_tokens,
+    const torch::Device& device) {
+  const int32_t num_val_tokens = num_speculative_tokens + 1;
+  torch::Tensor prefix_lengths =
+      safe_to(make_cpu_int_tensor(pruned_prefix_lengths),
+              torch::TensorOptions().dtype(torch::kLong).device(device),
+              /*non_blocking=*/true)
+          .clamp(0, num_speculative_tokens);
+  torch::Tensor positions =
+      torch::arange(num_val_tokens, prefix_lengths.options());
+  PrunedPrefixMasks masks;
+  masks.keep_mask =
+      positions.unsqueeze(/*dim=*/0).le(prefix_lengths.unsqueeze(/*dim=*/1));
+  masks.cut_mask = positions.unsqueeze(/*dim=*/0)
+                       .eq(prefix_lengths.unsqueeze(/*dim=*/1))
+                       .logical_and(prefix_lengths.unsqueeze(/*dim=*/1).lt(
+                           num_speculative_tokens));
+  return masks;
+}
 
 torch::Tensor selected_probs_by_step(
     const std::vector<ForwardOutput>& draft_outputs) {
@@ -238,11 +231,10 @@ std::vector<ForwardOutput> truncate_draft_outputs(
   return truncated_outputs;
 }
 
-void apply_pruned_prefix_lengths(
-    SampleOutput& sample_output,
-    const torch::Tensor& target_next_tokens,
-    int32_t num_speculative_tokens,
-    const std::vector<int32_t>& pruned_prefix_lengths) {
+void apply_pruned_prefix_lengths(SampleOutput& sample_output,
+                                 const torch::Tensor& target_next_tokens,
+                                 int32_t num_speculative_tokens,
+                                 const PrunedPrefixMasks& masks) {
   CHECK(sample_output.next_tokens.defined())
       << "validate output tokens are undefined";
   CHECK_EQ(sample_output.next_tokens.dim(), 2)
@@ -252,28 +244,14 @@ void apply_pruned_prefix_lengths(
   const int32_t num_val_tokens = num_speculative_tokens + 1;
   CHECK_EQ(sample_output.next_tokens.size(1), num_val_tokens)
       << "validate output width mismatch";
-  CHECK_EQ(pruned_prefix_lengths.size(), static_cast<size_t>(batch_size))
-      << "adaptive pruning prefix length batch mismatch";
   CHECK(target_next_tokens.defined())
       << "target output tokens are required for adaptive pruning";
   torch::Tensor target_next_tokens_view =
       target_next_tokens.view({batch_size, num_val_tokens});
-  torch::Tensor prefix_lengths =
-      safe_to(make_cpu_int_tensor(pruned_prefix_lengths),
-              torch::TensorOptions()
-                  .dtype(torch::kLong)
-                  .device(sample_output.next_tokens.device()),
-              /*non_blocking=*/true)
-          .clamp(0, num_speculative_tokens);
-  torch::Tensor positions =
-      torch::arange(num_val_tokens, prefix_lengths.options());
   torch::Tensor keep_mask =
-      positions.unsqueeze(/*dim=*/0).le(prefix_lengths.unsqueeze(/*dim=*/1));
+      masks.keep_mask.to(sample_output.next_tokens.device());
   torch::Tensor cut_mask =
-      positions.unsqueeze(/*dim=*/0)
-          .eq(prefix_lengths.unsqueeze(/*dim=*/1))
-          .logical_and(
-              prefix_lengths.unsqueeze(/*dim=*/1).lt(num_speculative_tokens));
+      masks.cut_mask.to(sample_output.next_tokens.device());
   torch::Tensor target_tokens = safe_to(target_next_tokens_view,
                                         sample_output.next_tokens.options(),
                                         /*non_blocking=*/true);
@@ -293,7 +271,7 @@ void apply_pruned_prefix_lengths(
                                             sample_output.logprobs.options(),
                                             /*non_blocking=*/true);
     sample_output.logprobs =
-        torch::where(keep_mask.to(sample_output.logprobs.device()),
+        torch::where(masks.keep_mask.to(sample_output.logprobs.device()),
                      output_logprobs,
                      torch::zeros_like(output_logprobs));
   }
@@ -314,7 +292,8 @@ void apply_pruned_prefix_lengths(
     CHECK_EQ(sample_output.top_logprobs.size(1), num_val_tokens)
         << "validate top_logprobs width mismatch";
     torch::Tensor top_keep_mask =
-        keep_mask.to(sample_output.top_tokens.device()).unsqueeze(/*dim=*/-1);
+        masks.keep_mask.to(sample_output.top_tokens.device())
+            .unsqueeze(/*dim=*/-1);
     sample_output.top_tokens =
         torch::where(top_keep_mask,
                      sample_output.top_tokens,
@@ -336,32 +315,23 @@ void apply_pruned_prefix_lengths(
       << "validate embedding width mismatch";
 
   torch::Tensor embedding_keep_mask =
-      keep_mask.to(sample_output.embeddings.device()).unsqueeze(/*dim=*/-1);
+      masks.keep_mask.to(sample_output.embeddings.device())
+          .unsqueeze(/*dim=*/-1);
   sample_output.embeddings =
       torch::where(embedding_keep_mask,
                    sample_output.embeddings,
                    torch::zeros_like(sample_output.embeddings));
 }
 
-void sync_pruned_boundary_outputs(
-    SampleOutput& sample_output,
-    const ForwardOutput& target_output,
-    int32_t batch_size,
-    int32_t num_val_tokens,
-    int32_t num_speculative_tokens,
-    const std::vector<int32_t>& pruned_prefix_lengths) {
-  sync_pruned_boundary_logprobs(sample_output,
-                                target_output,
-                                batch_size,
-                                num_val_tokens,
-                                num_speculative_tokens,
-                                pruned_prefix_lengths);
-  sync_pruned_boundary_top_logprobs(sample_output,
-                                    target_output,
-                                    batch_size,
-                                    num_val_tokens,
-                                    num_speculative_tokens,
-                                    pruned_prefix_lengths);
+void sync_pruned_boundary_outputs(SampleOutput& sample_output,
+                                  const ForwardOutput& target_output,
+                                  int32_t batch_size,
+                                  int32_t num_val_tokens,
+                                  const PrunedPrefixMasks& masks) {
+  sync_pruned_boundary_logprobs(
+      sample_output, target_output, batch_size, num_val_tokens, masks);
+  sync_pruned_boundary_top_logprobs(
+      sample_output, target_output, batch_size, num_val_tokens, masks);
 }
 
 }  // namespace adaptive_pruning
