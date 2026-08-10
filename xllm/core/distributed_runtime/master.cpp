@@ -470,6 +470,18 @@ Master::Master(const Options& options, EngineType type)
            "non-multi_slo_and_prio priority_strategy), or set "
            "--decode_context_parallel_size=1.";
   }
+  if (options_.decode_context_parallel_size() > 1 &&
+      dcp_model_config.has_value() &&
+      dcp_model_config->model_type == "qwen3_5_moe_text") {
+    LOG(WARNING)
+        << "Qwen3.5 MoE with decode_context_parallel_size>1 is not "
+           "bitwise-equivalent to decode_context_parallel_size=1. The DCP "
+           "decode attention uses a different kernel path (FIA) than dcp=1 "
+           "(batch_decode), and MoE expert routing amplifies that difference "
+           "into a measurable per-step logprob delta (order 1e-2). This is an "
+           "accepted known limitation; the unified kernel path fix is future "
+           "work. Set --decode_context_parallel_size=1 to avoid it.";
+  }
   const std::string cp_model_type =
       dcp_model_config.has_value() ? dcp_model_config->model_type : "";
   const std::optional<std::string> cp_error =
