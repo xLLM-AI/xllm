@@ -140,6 +140,25 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
       ForwardInput& validate_input,
       const std::vector<int32_t>& prefix_lengths);
 
+  // Per-seq varlen prune: rebuild validate_input as a true varlen
+  // [Σ per_seq_val_tokens[i], ...] batch so target forward only spends
+  // compute on tokens each seq's prefix_len actually needs. Reuses the base
+  // SpeculativeWorkerImpl per-seq builder.
+  void apply_per_seq_varlen_prune(
+      const ForwardInput& input,
+      ForwardInput& validate_input,
+      const std::vector<int32_t>& per_seq_val_tokens);
+
+  // After target forward on a varlen validate_input, scatter the flat
+  // [Σ per_seq_val_tokens, V] logits into a padded [B, max_val_tokens, V]
+  // layout so the dense rejection sampler API can consume it. Padded
+  // positions are filled with -inf on logits and 0 on next_tokens/embeddings.
+  void scatter_varlen_target_output_to_dense(
+      ForwardOutput& target_output,
+      const std::vector<int32_t>& per_seq_val_tokens,
+      int32_t batch_size,
+      int32_t max_val_tokens);
+
   void process_draft_sample_output(SampleOutput& sample_output);
 
   // Mirrors sampled tokens to rank 0 under schedule-overlap so every rank

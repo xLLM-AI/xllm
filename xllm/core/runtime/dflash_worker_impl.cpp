@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/speculative/adaptive_pruning_helpers.h"
 #include "core/framework/speculative/speculative_profile_registry.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/process_group.h"
@@ -788,26 +789,51 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
     const DraftBlock& draft_block_in,
     ForwardInput& validate_input) {
   Timer timer;
-  // Adaptive-speculative hard batch-max pruning:
+  // Adaptive-speculative per-seq varlen validate:
   // 1. controller decides per-seq prefix_lengths from confidence/proposal
   //    probs.
-  // 2. we shrink the target validate width to max(prefix_lengths)+1 and
-  //    rebuild the dense validate_input at that width — target forward truly
-  //    consumes less compute for pruned steps.
-  // 3. we still soft-mask draft probs beyond each seq's prefix_len so the
-  //    rejection sampler only accepts draft tokens the controller endorsed
-  //    (per-seq granularity within the batch-max window).
+  // 2. we rebuild validate_input as a *true varlen* [Σ (prefix_i+1), ...]
+  //    batch — target forward runs only Σ (prefix_i+1) tokens, so batches with
+  //    even a single high-confidence seq do not force the whole batch to full
+  //    N+1 width (the batch-max regression from v1). MTP already scatters
+  //    varlen target output back into padded dense before rejection sampling
+  //    — we do the same here.
+  // 3. rejection sampler is dense-only; scatter varlen target output into
+  //    [B, N+1, ...] with -inf at padded positions.
+  // 4. apply_pruned_prefix_lengths clips the sampler output at each seq's
+  //    prefix_len so the accepted_token_ids beyond prefix_i become -1.
+  const int32_t num_speculative_tokens = options_.num_speculative_tokens();
+  const int32_t default_val_tokens = num_speculative_tokens + 1;
+  const int32_t batch_size = input.input_params.meta.num_sequences;
+
   DraftBlock draft_block = draft_block_in;
   std::vector<int32_t> prefix_lengths =
       compute_adaptive_prefix_lengths(draft_block, input);
-  int32_t effective_val_tokens = options_.num_speculative_tokens() + 1;
+  std::vector<int32_t> per_seq_val_tokens;
+  bool did_prune = false;
+  int32_t max_val_tokens = default_val_tokens;
   if (!prefix_lengths.empty()) {
     apply_adaptive_prune_to_draft(draft_block, prefix_lengths);
-    effective_val_tokens =
-        apply_batch_max_hard_prune(input, validate_input, prefix_lengths);
+    per_seq_val_tokens.resize(batch_size);
+    max_val_tokens = 0;
+    for (int32_t i = 0; i < batch_size; ++i) {
+      int32_t p = std::clamp(prefix_lengths[static_cast<size_t>(i)],
+                             /*min=*/0,
+                             /*max=*/num_speculative_tokens);
+      // Require at least one draft slot beyond the anchor so the rejection
+      // sampler always sees a non-empty per-seq block.
+      int32_t width = std::max(p + 1, 2);
+      per_seq_val_tokens[static_cast<size_t>(i)] = width;
+      max_val_tokens = std::max(max_val_tokens, width);
+      if (width < default_val_tokens) did_prune = true;
+    }
+  }
+
+  if (did_prune) {
+    apply_per_seq_varlen_prune(input, validate_input, per_seq_val_tokens);
   }
   fill_validate_input_from_draft_outputs(
-      draft_block, validate_input, *compute_stream_, effective_val_tokens);
+      draft_block, validate_input, *compute_stream_, max_val_tokens);
   ForwardOutput target_output =
       run_llm_no_sync_impl(
           *impl_, validate_input, *prepare_stream_, *compute_stream_)
@@ -815,9 +841,33 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
 
+  // Scatter varlen target output back to dense [B, max_val_tokens] layout so
+  // the rejection sampler (dense API) can consume it.
+  if (did_prune) {
+    scatter_varlen_target_output_to_dense(
+        target_output, per_seq_val_tokens, batch_size, max_val_tokens);
+  }
+
   timer.reset();
   SampleOutput val_output = validate(
-      input.sampling_params, draft_block, target_output, effective_val_tokens);
+      input.sampling_params, draft_block, target_output, max_val_tokens);
+  // Post-process: mask sampler output beyond each seq's prefix_len so seq
+  // accepted counts respect the per-seq decision even under batch-max
+  // dense rejection sampling.
+  if (did_prune) {
+    // Convert per_seq_val_tokens[i] back to prefix_len[i] =
+    // per_seq_val_tokens[i]-1.
+    std::vector<int32_t> effective_prefix(batch_size);
+    for (int32_t i = 0; i < batch_size; ++i) {
+      effective_prefix[static_cast<size_t>(i)] =
+          per_seq_val_tokens[static_cast<size_t>(i)] - 1;
+    }
+    adaptive_pruning::apply_pruned_prefix_lengths(
+        val_output,
+        target_output.sample_output.next_tokens,
+        max_val_tokens - 1,
+        effective_prefix);
+  }
   COUNTER_ADD(speculative_execution_latency_seconds_validation,
               timer.elapsed_seconds());
 
@@ -1402,6 +1452,102 @@ int32_t DFlashWorkerImpl::apply_batch_max_hard_prune(
                         << effective_val_tokens_clamped << " (was "
                         << default_val_tokens << ")";
   return effective_val_tokens_clamped;
+}
+
+void DFlashWorkerImpl::apply_per_seq_varlen_prune(
+    const ForwardInput& input,
+    ForwardInput& validate_input,
+    const std::vector<int32_t>& per_seq_val_tokens) {
+  const int32_t num_sequences = input.input_params.meta.num_sequences;
+  CHECK_EQ(static_cast<int32_t>(per_seq_val_tokens.size()), num_sequences);
+  c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
+  ForwardInput prepared_input = input;
+  prepared_input.metadata_ready_event.reset();
+  ForwardInput new_validate;
+  SpeculativeWorkerImpl::prepare_validate_inputs(
+      prepared_input, new_validate, per_seq_val_tokens);
+  new_validate.input_params.embedding.input_embedding = torch::Tensor();
+  record_metadata_ready_event(*prepare_stream_, new_validate);
+  validate_input = std::move(new_validate);
+
+  int32_t max_w = 0;
+  int32_t total_w = 0;
+  int32_t sum_kept_below_default = 0;
+  int32_t default_val_tokens = options_.num_speculative_tokens() + 1;
+  int32_t pruned_seqs = 0;
+  for (int32_t v : per_seq_val_tokens) {
+    max_w = std::max(max_w, v);
+    total_w += v;
+    if (v < default_val_tokens) {
+      ++pruned_seqs;
+      sum_kept_below_default += v;
+    }
+  }
+  LOG_EVERY_N(INFO, 32) << "[dflash_dspark_varlen_prune] batch="
+                        << num_sequences << " total_val_tokens=" << total_w
+                        << " max_val_tokens=" << max_w << " (was "
+                        << (num_sequences * default_val_tokens) << ")"
+                        << " pruned_seqs=" << pruned_seqs;
+}
+
+void DFlashWorkerImpl::scatter_varlen_target_output_to_dense(
+    ForwardOutput& target_output,
+    const std::vector<int32_t>& per_seq_val_tokens,
+    int32_t batch_size,
+    int32_t max_val_tokens) {
+  CHECK(target_output.logits.defined())
+      << "target logits must be defined for varlen->dense scatter";
+  const int32_t total_tokens =
+      static_cast<int32_t>(target_output.logits.size(0));
+  const int64_t padded_total =
+      static_cast<int64_t>(batch_size) * max_val_tokens;
+  if (total_tokens == static_cast<int32_t>(padded_total)) {
+    // Already uniform max width; no scatter needed.
+    return;
+  }
+  const int32_t vocab_size =
+      static_cast<int32_t>(target_output.logits.size(-1));
+
+  std::vector<int64_t> dst_indices_vec;
+  dst_indices_vec.reserve(static_cast<size_t>(total_tokens));
+  for (int32_t i = 0; i < batch_size; ++i) {
+    const int32_t seq_tokens = per_seq_val_tokens[static_cast<size_t>(i)];
+    for (int32_t j = 0; j < seq_tokens; ++j) {
+      dst_indices_vec.push_back(static_cast<int64_t>(i) * max_val_tokens + j);
+    }
+  }
+  torch::Tensor dst_indices =
+      torch::tensor(dst_indices_vec,
+                    torch::TensorOptions()
+                        .dtype(torch::kLong)
+                        .device(target_output.logits.device()));
+
+  // Logits: pad to [B*max_val_tokens, V] filled with -inf so rejection sampler
+  // sees a strictly rejecting distribution at padded positions.
+  torch::Tensor padded_logits = torch::full(
+      {padded_total, vocab_size}, -1e9, target_output.logits.options());
+  padded_logits.index_copy_(/*dim=*/0, dst_indices, target_output.logits);
+  target_output.logits = padded_logits;
+
+  // next_tokens: pad with zeros; apply_pruned_prefix_lengths will mask beyond
+  // per-seq prefix in the sampler output anyway.
+  if (target_output.sample_output.next_tokens.defined()) {
+    torch::Tensor padded_next_tokens = torch::zeros(
+        {padded_total}, target_output.sample_output.next_tokens.options());
+    padded_next_tokens.index_copy_(
+        /*dim=*/0, dst_indices, target_output.sample_output.next_tokens);
+    target_output.sample_output.next_tokens = padded_next_tokens;
+  }
+  if (target_output.sample_output.embeddings.defined()) {
+    const int32_t hidden_size =
+        static_cast<int32_t>(target_output.sample_output.embeddings.size(-1));
+    torch::Tensor padded_embeddings =
+        torch::zeros({padded_total, hidden_size},
+                     target_output.sample_output.embeddings.options());
+    padded_embeddings.index_copy_(
+        /*dim=*/0, dst_indices, target_output.sample_output.embeddings);
+    target_output.sample_output.embeddings = padded_embeddings;
+  }
 }
 
 }  // namespace xllm
