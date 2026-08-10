@@ -954,6 +954,10 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
                  /*end=*/padded_batch_size)
           .fill_(kPaddingLinearStateId);
     }
+  } else if (is_empty_dp_decode_rank && is_hybrid_linear_attention_) {
+    persistent_linear_state_indices_
+        .slice(/*dim=*/0, /*start=*/0, /*end=*/padded_batch_size)
+        .fill_(kPaddingLinearStateId);
   }
   if (params.num_accepted_tokens.defined()) {
     persistent_num_accepted_tokens_
@@ -1093,7 +1097,18 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
   const bool skip_unused_expanded_verify_mask =
       can_skip_unused_expanded_verify_mask(params, is_hybrid_linear_attention_);
   if (need_update_attn_mask_ && !skip_unused_expanded_verify_mask) {
-    update_attention_mask(params);
+    if (is_empty_dp_decode_rank) {
+      // An empty DP decode shard has no live sequence and an undefined
+      // per-rank kv_seq_lens; update_attention_mask() would dereference that
+      // undefined tensor. Publish a cold (all-zero) mask over the padded rows
+      // instead, mirroring the padding the empty-shard branch already applies
+      // to the linear-state indices. The zero_() also clears any -inf left in
+      // the persistent buffer by a previous non-empty request.
+      persistent_mask_.slice(/*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens)
+          .zero_();
+    } else {
+      update_attention_mask(params);
+    }
   }
 
   std::vector<int32_t> padded_kv_seq_lens_vec(
@@ -1282,7 +1297,8 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
         persistent_new_cache_slots(padded_num_tokens);
     graph_params->attention.device.block_tables =
         persistent_block_tables(static_cast<uint32_t>(padded_batch_size));
-    if (!params.embedding.linear_state_ids.empty()) {
+    if (!params.embedding.linear_state_ids.empty() ||
+        (is_empty_dp_decode_rank && is_hybrid_linear_attention_)) {
       graph_params->embedding.linear_state_ids =
           params.embedding.linear_state_ids;
       graph_params->embedding.linear_state_ids.resize(

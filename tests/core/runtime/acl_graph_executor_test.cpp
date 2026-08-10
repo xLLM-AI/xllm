@@ -938,6 +938,102 @@ TEST_F(AclGraphExecutorTest, BatchInputCarriesLinearStateIds) {
   EXPECT_EQ(params_for_capture->linear_state_validity_mask[1], 0);
 }
 
+TEST(AclGraphPersistentParamTest,
+     EmptyHybridDpDecodePadsLinearStateGraphMetadata) {
+  ModelArgs args;
+  args.model_type("qwen3_5");
+  args.dtype("float32");
+  args.hidden_size(8);
+  args.max_position_embeddings(32);
+
+  runtime::Options options;
+  options.block_size(4);
+  options.max_seqs_per_batch(4);
+  options.max_tokens_per_batch(4);
+  options.num_decoding_tokens(1);
+
+  const torch::Device device("npu:0");
+  const auto int_options = torch::dtype(torch::kInt).device(device);
+  npu::GraphPersistentParam persistent_param(
+      args, device, options, false, true);
+
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  params.meta.q_max_seq_len = 1;
+  params.meta.kv_max_seq_len = 1;
+  params.parallel.dp_global_token_nums = {1, 1};
+
+  const torch::Tensor tokens = torch::ones({1}, int_options);
+  const torch::Tensor positions = torch::zeros({1}, int_options);
+  std::optional<ModelInputParams> params_for_capture = persistent_param.update(
+      tokens, torch::Tensor(), torch::Tensor(), positions, params, 2, true);
+
+  ASSERT_TRUE(params_for_capture.has_value());
+  EXPECT_EQ(params_for_capture->meta.actual_num_sequences, 0);
+  EXPECT_EQ(params_for_capture->meta.num_sequences, 2);
+  EXPECT_EQ(
+      params_for_capture->embedding.linear_state_ids,
+      std::vector<int32_t>({kPaddingLinearStateId, kPaddingLinearStateId}));
+  EXPECT_TRUE(torch::equal(
+      params_for_capture->embedding.linear_state_indices.cpu(),
+      torch::tensor({kPaddingLinearStateId, kPaddingLinearStateId})));
+  EXPECT_EQ(params_for_capture->linear_state_validity_mask,
+            std::vector<int64_t>({0, 0}));
+  EXPECT_EQ(params_for_capture->parallel.query_start_loc,
+            std::vector<int64_t>({0, 1, 2}));
+}
+
+TEST(AclGraphPersistentParamTest,
+     EmptyHybridDpDecodeGraphMaskDoesNotDerefUndefinedKvSeqLens) {
+  ModelArgs args;
+  args.model_type("qwen3_5");
+  args.dtype("float32");
+  args.hidden_size(8);
+  args.max_position_embeddings(32);
+
+  runtime::Options options;
+  options.block_size(4);
+  options.max_seqs_per_batch(4);
+  options.max_tokens_per_batch(4);
+  options.num_decoding_tokens(1);
+
+  const torch::Device device("npu:0");
+  const auto int_options = torch::dtype(torch::kInt).device(device);
+  // need_update_attn_mask=true opens the attention-mask path that an empty DP
+  // decode shard used to crash on (undefined per-rank kv_seq_lens).
+  npu::GraphPersistentParam persistent_param(
+      args,
+      device,
+      options,
+      /*need_update_attn_mask=*/true,
+      /*is_hybrid_linear_attention=*/true);
+
+  ModelInputParams params;
+  params.meta.batch_forward_type = BatchForwardType::DECODE;
+  params.meta.q_max_seq_len = 1;
+  params.meta.kv_max_seq_len = 1;
+  params.parallel.dp_global_token_nums = {1, 1};
+  // attention.device.kv_seq_lens intentionally left undefined: this is the
+  // empty-shard state that previously threw in update_attention_mask().
+
+  const torch::Tensor tokens = torch::ones({1}, int_options);
+  const torch::Tensor positions = torch::zeros({1}, int_options);
+  std::optional<ModelInputParams> params_for_capture = persistent_param.update(
+      tokens, torch::Tensor(), torch::Tensor(), positions, params, 2, true);
+
+  // Core assertion: update() must not dereference the undefined kv_seq_lens.
+  ASSERT_TRUE(params_for_capture.has_value());
+  EXPECT_EQ(params_for_capture->meta.actual_num_sequences, 0);
+  EXPECT_EQ(params_for_capture->meta.num_sequences, 2);
+  // The captured graph mask must be a defined, all-cold (all-zero) mask over
+  // the padded rows, not a stale or undefined tensor.
+  const torch::Tensor& attn_mask = params_for_capture->graph.attn_mask;
+  ASSERT_TRUE(attn_mask.defined());
+  EXPECT_EQ(attn_mask.size(0), 2);
+  EXPECT_TRUE(
+      torch::equal(attn_mask.cpu(), torch::zeros_like(attn_mask.cpu())));
+}
+
 TEST_F(AclGraphExecutorTest, GraphDoubleBufferFlagControlsSlotCount) {
   ExecutionConfig& execution_config = ExecutionConfig::get_instance();
   const bool original_enable_graph_double_buffer =
