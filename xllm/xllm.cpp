@@ -181,6 +181,8 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .cp_size(parallel_config.cp_size())
       .decode_context_parallel_size(
           parallel_config.decode_context_parallel_size())
+      .enable_experimental_dcp_chunked_prefill(
+          parallel_config.enable_experimental_dcp_chunked_prefill())
       .ep_size(parallel_config.ep_size())
       .tp_size(static_cast<int32_t>(parallel_config.tp_size()))
       .sp_size(static_cast<int32_t>(parallel_config.sp_size()))

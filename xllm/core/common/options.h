@@ -142,6 +142,10 @@ class Options {
 
   PROPERTY(int32_t, decode_context_parallel_size) = 1;
 
+  // Opt-in for the experimental DCP chunked prefill path. See ParallelConfig
+  // for the numerical caveat; not bitwise-equivalent to dcp=1.
+  PROPERTY(bool, enable_experimental_dcp_chunked_prefill) = false;
+
   PROPERTY(int32_t, ep_size) = 1;
 
   PROPERTY(int32_t, tp_size) = 1;

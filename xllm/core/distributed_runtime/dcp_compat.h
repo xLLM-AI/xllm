@@ -29,9 +29,12 @@ inline std::optional<std::string> validate_dcp_first_version_options(
   if (options.decode_context_parallel_size() <= 1) {
     return std::nullopt;
   }
-  if (options.enable_chunked_prefill()) {
-    return "decode_context_parallel_size first version does not yet support "
-           "chunked prefill; set --enable_chunked_prefill=false or set "
+  if (options.enable_chunked_prefill() &&
+      !options.enable_experimental_dcp_chunked_prefill()) {
+    return "decode_context_parallel_size with chunked prefill is experimental "
+           "and not bitwise-equivalent to decode_context_parallel_size=1; set "
+           "--enable_experimental_dcp_chunked_prefill=true to opt in, or set "
+           "--enable_chunked_prefill=false, or set "
            "--decode_context_parallel_size=1";
   }
   if (options.enable_schedule_overlap()) {

@@ -32,6 +32,13 @@ DEFINE_int32(decode_context_parallel_size,
              "cache along sequence within a TP group and does not expand "
              "world size.");
 
+DEFINE_bool(enable_experimental_dcp_chunked_prefill,
+            false,
+            "Opt-in for the experimental DCP chunked prefill path. Required "
+            "when decode_context_parallel_size > 1 is combined with chunked "
+            "prefill. The path is not bitwise-equivalent to "
+            "decode_context_parallel_size=1 and closes mixed batching.");
+
 DEFINE_int32(kv_split_size,
              1,
              "KV-cache split width. 0 falls back to cp_size (legacy); 1 means "
@@ -82,6 +89,7 @@ void ParallelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(ep_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(cp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(decode_context_parallel_size);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_experimental_dcp_chunked_prefill);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_split_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(tp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(sp_size);
@@ -99,6 +107,7 @@ void ParallelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(ep_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(cp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(decode_context_parallel_size);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_experimental_dcp_chunked_prefill);
   XLLM_CONFIG_ASSIGN_FROM_JSON(tp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(sp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(cfg_size);
@@ -118,6 +127,8 @@ void ParallelConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, cp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, decode_context_parallel_size);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_experimental_dcp_chunked_prefill);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, tp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, sp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

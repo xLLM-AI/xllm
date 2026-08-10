@@ -296,10 +296,41 @@ TEST(ConfigJsonTest, RegistersContextParallelCommandLineOptions) {
   EXPECT_TRUE(google::GetCommandLineFlagInfo("decode_context_parallel_size",
                                              &flag_info));
   EXPECT_EQ(flag_info.default_value, "1");
+  EXPECT_TRUE(google::GetCommandLineFlagInfo(
+      "enable_experimental_dcp_chunked_prefill", &flag_info));
+  EXPECT_EQ(flag_info.default_value, "false");
 
   const std::string removed_flag = std::string("enable_") + "prefill_sp";
   EXPECT_FALSE(
       google::GetCommandLineFlagInfo(removed_flag.c_str(), &flag_info));
+}
+
+TEST(ConfigJsonTest, ParallelConfigReadsExperimentalDcpChunkedPrefill) {
+  google::FlagSaver flag_saver;
+  const JsonReader json = config::parse_json_string(
+      R"json({"enable_experimental_dcp_chunked_prefill": true})json");
+  ParallelConfig parallel_config;
+  parallel_config.from_json(json);
+
+  EXPECT_TRUE(parallel_config.enable_experimental_dcp_chunked_prefill());
+}
+
+TEST(ConfigJsonTest, ParallelConfigDefaultsExperimentalDcpChunkedPrefillFalse) {
+  const ParallelConfig parallel_config;
+
+  EXPECT_FALSE(parallel_config.enable_experimental_dcp_chunked_prefill());
+}
+
+TEST(ConfigJsonTest, ParallelConfigDumpsExperimentalDcpChunkedPrefill) {
+  ParallelConfig parallel_config;
+  parallel_config.enable_experimental_dcp_chunked_prefill(true);
+
+  nlohmann::ordered_json config_json;
+  parallel_config.append_config_json(config_json);
+
+  ASSERT_TRUE(config_json.contains("enable_experimental_dcp_chunked_prefill"));
+  EXPECT_TRUE(
+      config_json.at("enable_experimental_dcp_chunked_prefill").get<bool>());
 }
 
 TEST(ConfigJsonTest, LoadJsonFileReadsConfigFixture) {

@@ -27,11 +27,19 @@ Options dcp_options_with_supported_feature_flags() {
   Options options;
   options.decode_context_parallel_size(2)
       .enable_chunked_prefill(false)
+      .enable_experimental_dcp_chunked_prefill(false)
       .enable_prefix_cache(false)
       .enable_schedule_overlap(false)
       .enable_disagg_pd(false)
       .instance_role(InstanceRole::DEFAULT)
       .num_speculative_tokens(0);
+  return options;
+}
+
+Options dcp_options_with_experimental_chunked_prefill() {
+  Options options = dcp_options_with_supported_feature_flags();
+  options.enable_chunked_prefill(true).enable_experimental_dcp_chunked_prefill(
+      true);
   return options;
 }
 
@@ -56,13 +64,36 @@ TEST(DcpCompatTest, AllowsSupportedFirstVersionFeatureFlags) {
       validate_dcp_first_version_options(options, EngineType::LLM).has_value());
 }
 
-TEST(DcpCompatTest, RejectsChunkedPrefill) {
+TEST(DcpCompatTest, DcpOneChunkedPrefillWithoutExperimentalAllowed) {
+  Options options = dcp_options_with_supported_feature_flags();
+  options.decode_context_parallel_size(1).enable_chunked_prefill(true);
+
+  EXPECT_FALSE(
+      validate_dcp_first_version_options(options, EngineType::LLM).has_value());
+}
+
+TEST(DcpCompatTest, DcpChunkedPrefillWithoutExperimentalRejected) {
   Options options = dcp_options_with_supported_feature_flags();
   options.enable_chunked_prefill(true);
 
   expect_error_contains(
       validate_dcp_first_version_options(options, EngineType::LLM),
-      "enable_chunked_prefill=false");
+      "enable_experimental_dcp_chunked_prefill=true");
+}
+
+TEST(DcpCompatTest, DcpChunkedPrefillWithExperimentalAllowed) {
+  const Options options = dcp_options_with_experimental_chunked_prefill();
+
+  EXPECT_FALSE(
+      validate_dcp_first_version_options(options, EngineType::LLM).has_value());
+}
+
+TEST(DcpCompatTest, DcpChunkedPrefillWithPrefixAndExperimentalAllowed) {
+  Options options = dcp_options_with_experimental_chunked_prefill();
+  options.enable_prefix_cache(true);
+
+  EXPECT_FALSE(
+      validate_dcp_first_version_options(options, EngineType::LLM).has_value());
 }
 
 TEST(DcpCompatTest, AllowsPrefixCache) {
@@ -126,12 +157,49 @@ TEST(DcpCompatTest, RejectsSpeculativeTokens) {
       "num_speculative_tokens=0");
 }
 
+// Enabling the experimental chunked prefill opt-in must not bypass the other
+// first-version rejections: schedule overlap, disaggregated PD, and
+// speculative decoding are still unsupported even under the experimental path.
+TEST(DcpCompatTest, ExperimentalChunkedPrefillDoesNotBypassScheduleOverlap) {
+  Options options = dcp_options_with_experimental_chunked_prefill();
+  options.enable_schedule_overlap(true);
+
+  expect_error_contains(
+      validate_dcp_first_version_options(options, EngineType::LLM),
+      "enable_schedule_overlap=false");
+}
+
+TEST(DcpCompatTest, ExperimentalChunkedPrefillDoesNotBypassDisaggPd) {
+  Options options = dcp_options_with_experimental_chunked_prefill();
+  options.enable_disagg_pd(true);
+
+  expect_error_contains(
+      validate_dcp_first_version_options(options, EngineType::LLM),
+      "enable_disagg_pd=false");
+}
+
+TEST(DcpCompatTest, ExperimentalChunkedPrefillDoesNotBypassSpeculative) {
+  const Options options = dcp_options_with_experimental_chunked_prefill();
+
+  expect_error_contains(
+      validate_dcp_first_version_options(options, EngineType::SSM),
+      "speculative decoding");
+}
+
 TEST(DcpCompatTest, AllowsDenseQwen35ModelType) {
   EXPECT_FALSE(
       validate_dcp_first_version_model_type("qwen3_5_text").has_value());
 }
 
 TEST(DcpCompatTest, RejectsUnvalidatedQwen35MoeModelType) {
+  expect_error_contains(
+      validate_dcp_first_version_model_type("qwen3_5_moe_text"), "MoE");
+}
+
+// Model-type rejection is independent of the experimental flag: MoE stays
+// unsupported. The experimental opt-in only gates the options-level chunked
+// prefill path, not the model-type gate.
+TEST(DcpCompatTest, ExperimentalChunkedPrefillDoesNotBypassMoeModelType) {
   expect_error_contains(
       validate_dcp_first_version_model_type("qwen3_5_moe_text"), "MoE");
 }

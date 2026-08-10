@@ -443,11 +443,12 @@ void AttentionImpl::dcp_chunked_prefill_forward(
       context_out, context_lse, local_context_lens, q_cu_seq_lens);
 
   // Merge context shards from all ranks with the (replicated) current part in a
-  // single online-softmax reduction. The formula is equivalent to softmax over
-  // the complete key set before kernel output quantization, but FIA partial
-  // outputs are low precision and are not guaranteed to be bitwise identical
-  // to one monolithic FIA call. The current part is identical on every rank, so
-  // contributing it once (from this rank) is correct.
+  // single online-softmax reduction. The formula is mathematically equivalent
+  // to softmax over the complete key set. FIA emits each partial output in the
+  // query dtype (BF16/FP16) before this fp32 merge, so results match a single
+  // monolithic FIA call only up to that partial-output quantization (on the
+  // order of a few 1e-3), not bitwise. The current part is identical on every
+  // rank, so contributing it once (from this rank) is correct.
   const torch::Tensor all_context_out =
       dcp_group_->allgather_base_sync(context_out);
   const torch::Tensor all_context_lse =
