@@ -155,6 +155,24 @@ TEST(DcpAttentionUtilsTest, ContextShardLenReadsOnlyCachedContext) {
   EXPECT_EQ(context_shard_lens, (std::vector<int64_t>{128, 128}));
 }
 
+TEST(DcpAttentionUtilsTest, CoversPhase4LocalContextContracts) {
+  const std::vector<int64_t> context_lens = {128, 256, 512};
+  std::vector<std::vector<int64_t>> local_context_lens_by_rank;
+  local_context_lens_by_rank.reserve(2);
+  for (int32_t dcp_rank = 0; dcp_rank < 2; ++dcp_rank) {
+    local_context_lens_by_rank.emplace_back(
+        detail::compute_dcp_local_kv_seq_lens(context_lens,
+                                              /*dcp_size=*/2,
+                                              dcp_rank,
+                                              /*block_size=*/128));
+  }
+
+  ASSERT_EQ(local_context_lens_by_rank.size(), 2);
+  EXPECT_EQ(local_context_lens_by_rank[0],
+            (std::vector<int64_t>{128, 128, 256}));
+  EXPECT_EQ(local_context_lens_by_rank[1], (std::vector<int64_t>{0, 128, 256}));
+}
+
 TEST(DcpAttentionUtilsTest, ValidateChunkedLengthsAcceptsMultiTokenRequests) {
   const std::vector<int64_t> normalized_q_cu_seq_lens =
       detail::validate_dcp_chunked_lengths(

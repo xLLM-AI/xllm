@@ -24,6 +24,7 @@ limitations under the License.
 #include <cstdint>
 #include <string>
 
+#include "api_service/utils.h"
 #include "common/instance_name.h"
 #include "completion.pb.h"
 #include "core/distributed_runtime/llm_master.h"
@@ -105,9 +106,7 @@ bool send_delta_to_client_brpc(std::shared_ptr<CompletionCall> call,
     response.set_model(model);
     response.mutable_choices();
     auto* proto_usage = response.mutable_usage();
-    proto_usage->set_prompt_tokens(usage.num_prompt_tokens);
-    proto_usage->set_completion_tokens(usage.num_generated_tokens);
-    proto_usage->set_total_tokens(usage.num_total_tokens);
+    api_service::set_proto_usage(proto_usage, usage);
     if (!call->write(response)) {
       return false;
     }
@@ -145,9 +144,7 @@ bool send_result_to_client_brpc(std::shared_ptr<CompletionCall> call,
   if (req_output.usage.has_value()) {
     const auto& usage = req_output.usage.value();
     auto* proto_usage = response.mutable_usage();
-    proto_usage->set_prompt_tokens(usage.num_prompt_tokens);
-    proto_usage->set_completion_tokens(usage.num_generated_tokens);
-    proto_usage->set_total_tokens(usage.num_total_tokens);
+    api_service::set_proto_usage(proto_usage, usage);
   }
 
   return call->write_and_finish(response);
