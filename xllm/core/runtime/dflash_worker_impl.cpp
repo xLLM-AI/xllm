@@ -1259,22 +1259,21 @@ std::vector<int32_t> DFlashWorkerImpl::compute_adaptive_prefix_lengths(
   // otherwise fall back to sampler-gathered proposal probs (DFlash / DSpark
   // without a confidence head).
   //
-  // Per the DSpark paper (Section 3.2.1), c_k is a *conditional* probability
-  // and the joint prefix survival prob is ∏ c_i — so the controller's chain
-  // rule multiplication is technically correct. In practice however our
-  // ConfidenceHead is not STS-calibrated (paper Section 3.2.1 "Post-hoc
-  // Calibration"), and empirically raw c is overconfident enough that direct
-  // multiplication crashes DSpark throughput at higher block sizes. As a
-  // stop-gap knob, DSPARK_TREAT_CONFIDENCE_AS_PATH_PROB=1 tells the
-  // controller to consume each c_k as an already-cumulative path prob (i.e.
-  // skip chain-rule multiplication for the confidence tensor).
-  const bool use_confidence = draft_block.confidence_probs.defined();
-  static const bool treat_confidence_as_path_prob = [] {
-    const char* s = std::getenv("DSPARK_TREAT_CONFIDENCE_AS_PATH_PROB");
-    return s != nullptr && std::atoi(s) != 0;
-  }();
-  torch::Tensor probs_for_controller =
-      use_confidence ? draft_block.confidence_probs : draft_block.probs;
+  // Both signals are per-step conditional accept probabilities per the
+  // DSpark paper (Section 3.2.1) and the classical spec-decode setup: c_k =
+  // P(step k accepted | prefix accepted). The controller multiplies them via
+  // chain rule to obtain path probs a_{r,j} = ∏ c_i.
+  //
+  // Note (DSpark v1): the ConfidenceHead is loaded from the released
+  // checkpoint but is *not* STS-calibrated yet (paper Section 3.2.1 "Post-hoc
+  // Calibration"). Raw sigmoid confidence is overconfident, so the cumulative
+  // product decays incorrectly at longer block sizes and can over-prune.
+  // DSPARK_CONFIDENCE_TEMPERATURE (see qwen3_dspark.h) offers a single
+  // temperature knob to approximate STS until we ship a proper offline
+  // per-position calibration table.
+  torch::Tensor probs_for_controller = draft_block.confidence_probs.defined()
+                                           ? draft_block.confidence_probs
+                                           : draft_block.probs;
   if (!probs_for_controller.defined()) {
     return {};
   }
@@ -1313,9 +1312,7 @@ std::vector<int32_t> DFlashWorkerImpl::compute_adaptive_prefix_lengths(
           probs_for_controller.to(torch::kCPU).to(torch::kFloat64),
           /*full_draft_time_ms=*/0.0,
           target_step_time_ms,
-          per_seq_kv_lens,
-          /*probs_are_path_probs=*/
-          (use_confidence && treat_confidence_as_path_prob));
+          per_seq_kv_lens);
   return prefix_lengths;
 }
 
@@ -1327,11 +1324,15 @@ void DFlashWorkerImpl::apply_adaptive_prune_to_draft(
   CHECK_EQ(static_cast<int64_t>(prefix_lengths.size()), batch_size)
       << "adaptive prefix_lengths size must match draft batch";
 
+  // draft_block.probs is a no-sync tensor produced on compute_stream_ (see
+  // run_decode_draft), so read/write ops here must be scheduled on the same
+  // stream to avoid a cross-stream data race with the draft forward.
+  c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+
   // Build a [B, N] mask on the same device/dtype as probs.
   torch::Tensor probs = draft_block.probs;
   torch::Tensor mask = torch::zeros_like(probs);
   bool any_prune = false;
-  bool trace_first = false;
   int64_t pruned_seqs = 0;
   int32_t max_kept = 0;
   int32_t sum_kept = 0;
@@ -1347,7 +1348,6 @@ void DFlashWorkerImpl::apply_adaptive_prune_to_draft(
       any_prune = true;
       ++pruned_seqs;
     }
-    if (!trace_first) trace_first = true;
   }
   if (!any_prune) return;
   draft_block.probs = probs * mask;

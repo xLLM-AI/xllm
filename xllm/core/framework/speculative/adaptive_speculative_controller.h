@@ -33,14 +33,12 @@ class AdaptiveSpeculativeController final {
   ~AdaptiveSpeculativeController() = default;
 
   bool enabled() const;
-  // `probs_are_path_probs=false` (default): each column of
-  // `selected_probs_by_step` is a per-step conditional accept probability (as
-  // MTP / DFlash sample-gathered probs are). The controller multiplies them
-  // cumulatively to obtain the path probability of accepting the first k
-  // tokens. `probs_are_path_probs=true`: each column *already is* the path
-  // acceptance probability at that step (e.g. DSpark's ConfidenceHead which is
-  // trained to predict "P(accept up to this token)"). The controller consumes
-  // the column directly without multiplying.
+  // Each column of `selected_probs_by_step` is a per-step conditional accept
+  // probability. For MTP / DFlash sample-gathered probs this is P(sampled
+  // token | step logits). For DSpark ConfidenceHead this is c_k = P(step k
+  // accepted | prefix accepted). The controller multiplies them cumulatively
+  // via the chain rule (paper Section 3.2.2, Algorithm 1 line 2) to obtain
+  // path acceptance probabilities a_{r,j} = ∏_{i<=j} c_i used for scheduling.
   std::vector<int32_t> select_pruned_prefix_lengths(
       const torch::Tensor& selected_probs_by_step,
       double full_draft_time_ms,

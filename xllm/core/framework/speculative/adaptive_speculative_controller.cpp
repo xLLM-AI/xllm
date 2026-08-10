@@ -101,9 +101,13 @@ AdaptiveSpeculativeController::select_pruned_prefix_lengths(
          ++token_idx) {
       const double step_prob =
           prob_data[seq_id * num_speculative_tokens + token_idx];
+      // For MTP / DFlash sample-gathered probs each column is a per-step
+      // conditional accept probability, so we cumulatively multiply via chain
+      // rule to get path prob a_{r,j} = ∏ c_i (paper Section 3.2.2 Algorithm
+      // 1). For DSpark's ConfidenceHead the column already encodes P(accept
+      // prefix of length k+1) — we consume it directly. `probs_are_path_probs`
+      // selects between the two semantics.
       if (probs_are_path_probs) {
-        // Column already encodes P(accept prefix of length k+1) — do not
-        // multiply. Clamp for safety in case of upstream numerical drift.
         path_prob = std::clamp(step_prob, 0.0, 1.0);
       } else {
         path_prob *= step_prob;

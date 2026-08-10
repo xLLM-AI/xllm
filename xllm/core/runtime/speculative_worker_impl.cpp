@@ -476,17 +476,20 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
   update_sampling_params(
       validate_input.sampling_params, per_seq_val_tokens, total_num_val_tokens);
 
-  // dp/ep parallel token counts: use the actual total, not batch * width.
-  const int32_t dense_baseline = num_sequences * (num_speculative_tokens + 1);
-  const double scale = dense_baseline > 0
-                           ? static_cast<double>(total_num_val_tokens) /
-                                 static_cast<double>(dense_baseline)
-                           : 1.0;
+  // dp/ep parallel token counts: dense variant multiplies by num_val_tokens
+  // because each seq expands into that many validate rows. Here per-seq width
+  // varies, so scale by the average width = total_num_val_tokens /
+  // num_sequences so raw_dp_global_token_nums reflects the actual number of
+  // rows a rank owns.
+  const double avg_width =
+      num_sequences > 0
+          ? static_cast<double>(total_num_val_tokens) / num_sequences
+          : 1.0;
   for (auto& it : input_params.parallel.dp_global_token_nums) {
-    it = static_cast<int32_t>(std::round(it * scale));
+    it = static_cast<int32_t>(std::round(it * avg_width));
   }
   for (auto& it : input_params.parallel.raw_dp_global_token_nums) {
-    it = static_cast<int32_t>(std::round(it * scale));
+    it = static_cast<int32_t>(std::round(it * avg_width));
   }
   validate_input.device_tensors_ready = true;
 }

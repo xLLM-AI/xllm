@@ -145,6 +145,10 @@ class DSparkConfidenceHead final {
 
   // vLLM keys: confidence_head.proj.{weight,bias}
   void load_state_dict(const StateDict& state_dict) {
+    if (hidden_size_ <= 0) {
+      // Not initialized (enable_confidence_head=false); skip.
+      return;
+    }
     torch::Tensor w = state_dict.get_tensor("confidence_head.proj.weight");
     torch::Tensor b = state_dict.get_tensor("confidence_head.proj.bias");
     if (w.defined()) {
