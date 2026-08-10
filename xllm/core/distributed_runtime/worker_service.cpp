@@ -79,19 +79,6 @@ void record_speculative_metrics_from_output(const torch::Tensor& next_tokens,
     return;
   }
 
-  // MTP path records these metrics inside
-  // MTPWorkerImpl::record_validate_metrics with adaptive-pruning-aware draft
-  // counts. Skip here to avoid double-count.
-  std::string algorithm = options.speculative_algorithm();
-  std::transform(
-      algorithm.begin(),
-      algorithm.end(),
-      algorithm.begin(),
-      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  if (algorithm == "mtp") {
-    return;
-  }
-
   const int64_t batch_size = next_tokens.size(0);
   const int64_t token_width = next_tokens.size(1);
   const int64_t num_speculative_tokens = options.num_speculative_tokens();

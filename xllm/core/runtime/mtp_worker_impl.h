@@ -89,11 +89,6 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   void fill_validate_input_from_draft_outputs(
       const std::vector<ForwardOutput>& draft_outputs,
       ForwardInput& validate_input,
-      int32_t num_speculative_tokens,
-      Stream& compute_stream);
-  void fill_validate_input_from_draft_outputs(
-      const std::vector<ForwardOutput>& draft_outputs,
-      ForwardInput& validate_input,
       const std::vector<int32_t>& per_seq_val_tokens,
       Stream& compute_stream);
   // Adaptive pruning path: compute per-seq prefix lengths, truncate draft
@@ -146,6 +141,13 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   bool supports_explicit_spec_verify_replay_update() const;
   bool should_use_explicit_spec_verify_replay_update(
       const ForwardInput& input) const;
+  // Returns true when the target model's spec-verify kernel requires the
+  // validate width (val_tokens) to be identical across every sequence in the
+  // batch. Currently Qwen3.5 GDN's FusedRecurrentGatedDeltaRule spec-verify
+  // path has this constraint; other paths accept per-seq variable widths.
+  // Kept separate from supports_explicit_spec_verify_replay_update() so the
+  // two capabilities can diverge for future targets.
+  bool requires_uniform_validate_width() const;
   int64_t spec_verify_block_table_width(
       const torch::Tensor& block_tables) const;
   // Returns true when validation must use chunked-prefill to avoid the

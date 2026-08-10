@@ -18,26 +18,15 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
-#include <cctype>
 #include <cmath>
-#include <cstdlib>
 #include <string>
-#include <utility>
 
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/speculative/speculative_profile_registry.h"
 #include "util/tensor_helper.h"
 
 namespace xllm {
 namespace {
-
-bool is_mtp_algorithm(std::string algorithm) {
-  std::transform(
-      algorithm.begin(),
-      algorithm.end(),
-      algorithm.begin(),
-      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return algorithm == "mtp";
-}
 
 struct PruneCandidate {
   int32_t seq_id = 0;
@@ -51,7 +40,8 @@ AdaptiveSpeculativeController::AdaptiveSpeculativeController(
     const runtime::Options& options)
     : enabled_(options.enable_adaptive_speculative_decode() &&
                options.num_speculative_tokens() > 1 &&
-               is_mtp_algorithm(options.speculative_algorithm()) &&
+               SpeculativeConfig::is_mtp_algorithm(
+                   options.speculative_algorithm()) &&
                !options.enable_graph()),
       min_gain_(options.adaptive_speculative_min_gain()) {}
 
@@ -123,15 +113,7 @@ AdaptiveSpeculativeController::select_pruned_prefix_lengths(
   std::optional<SpeculativeProfileRegistry::ValidateTimePredictor> predictor =
       SpeculativeProfileRegistry::get_instance().validate_time_predictor();
   const bool has_predictor = predictor.has_value();
-  // Experiment knob: scale query_token_ms via env ADAPTIVE_QUERY_TOKEN_SCALE
-  // (default 1.0). Larger scale amplifies the per-token marginal validate cost
-  // in score's denominator, encouraging the greedy loop to prune more.
-  static const double query_token_scale = [] {
-    const char* s = std::getenv("ADAPTIVE_QUERY_TOKEN_SCALE");
-    return s != nullptr ? std::atof(s) : 1.0;
-  }();
-  const double query_token_ms =
-      has_predictor ? query_token_scale * predictor->query_token_ms : 0.0;
+  const double query_token_ms = has_predictor ? predictor->query_token_ms : 0.0;
   const double query_prefix_ms =
       has_predictor ? predictor->query_prefix_ms : 0.0;
 

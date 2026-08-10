@@ -59,6 +59,20 @@ constexpr uint64_t MBUF_SIZE = 128 * 1024 * 1024;
 
 namespace {
 
+// Qwen3.5 GDN conv_state history capacity (kernel_conv_size - 1). Values of
+// num_accepted_tokens beyond this describe history that has already rolled
+// out of conv_state; passing them to aclnnCausalConv1d makes tiling fail when
+// the current step's per_seq_val_tokens is small (e.g. adaptive prunes down
+// to 2 while nat=5). Callers clamp accepted-prefix lengths to this cap before
+// invoking the GDN spec-verify path.
+constexpr int32_t kGdnConvHistoryCap = 3;
+
+void clamp_gdn_conv_history(std::vector<int32_t>& accepted_prefix_lengths) {
+  for (int32_t& v : accepted_prefix_lengths) {
+    v = std::min(v, kGdnConvHistoryCap);
+  }
+}
+
 void broadcast_tokens_in_group(torch::Tensor& tokens,
                                ProcessGroup* process_group,
                                int32_t root_rank = 0) {
@@ -707,6 +721,16 @@ int64_t MTPWorkerImpl::get_embedding_placeholder_size() {
 }
 
 bool MTPWorkerImpl::supports_explicit_spec_verify_replay_update() const {
+  return target_spec_verify_mode_ ==
+         mtp_async::TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY;
+}
+
+bool MTPWorkerImpl::requires_uniform_validate_width() const {
+  // Currently only Qwen3.5's GDN spec-verify kernel requires uniform width;
+  // this happens to coincide with the QWEN3_5_EXPANDED_VERIFY mode used by
+  // supports_explicit_spec_verify_replay_update, but the two are semantically
+  // distinct capabilities (graph-update capability vs. per-seq varlen kernel
+  // support).
   return target_spec_verify_mode_ ==
          mtp_async::TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY;
 }
@@ -1420,26 +1444,6 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
 void MTPWorkerImpl::fill_validate_input_from_draft_outputs(
     const std::vector<ForwardOutput>& draft_outputs,
     ForwardInput& validate_input,
-    int32_t num_speculative_tokens,
-    Stream& compute_stream) {
-  const int32_t num_val_tokens = num_speculative_tokens + 1;
-  CHECK(validate_input.token_ids.defined())
-      << "validate token_ids must be prepared before draft token fill";
-  CHECK_EQ(validate_input.token_ids.dim(), 1)
-      << "validate token_ids must be flat";
-  CHECK_EQ(validate_input.token_ids.numel() % num_val_tokens, 0)
-      << "validate token_ids size must be divisible by validation width";
-  const int32_t num_sequences =
-      static_cast<int32_t>(validate_input.token_ids.numel() / num_val_tokens);
-  std::vector<int32_t> per_seq_val_tokens(static_cast<size_t>(num_sequences),
-                                          num_val_tokens);
-  fill_validate_input_from_draft_outputs(
-      draft_outputs, validate_input, per_seq_val_tokens, compute_stream);
-}
-
-void MTPWorkerImpl::fill_validate_input_from_draft_outputs(
-    const std::vector<ForwardOutput>& draft_outputs,
-    ForwardInput& validate_input,
     const std::vector<int32_t>& per_seq_val_tokens,
     Stream& compute_stream) {
   CHECK(!per_seq_val_tokens.empty()) << "per_seq_val_tokens must not be empty";
@@ -1622,7 +1626,6 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_adaptive_validate(
     std::vector<int32_t> nat = embedding_cache_->read_accepted_prefix_lengths(
         input.input_params.embedding.embedding_ids,
         input.input_params.embedding.request_ids);
-    constexpr int32_t kGdnConvHistoryCap = 3;
     int32_t max_nat = 0;
     for (int32_t v : nat) {
       max_nat = std::max(max_nat, std::min(v, kGdnConvHistoryCap));
@@ -1640,8 +1643,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_adaptive_validate(
   // when the controller decides to shrink), but every seq gets the same
   // validate width. On non-Qwen3.5 models we keep per-seq variable-length
   // tokens for maximum pruning benefit.
-  const bool require_uniform_val_tokens =
-      supports_explicit_spec_verify_replay_update();
+  const bool require_uniform_val_tokens = requires_uniform_validate_width();
   const int32_t uniform_val_tokens = effective_speculative_tokens + 1;
   for (int32_t i = 0; i < batch_size; ++i) {
     per_seq_val_tokens[static_cast<size_t>(i)] =
@@ -1788,8 +1790,6 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
                           num_speculative_tokens,
                           pruned_prefix_lengths);
   }
-  record_validate_metrics(
-      val_output, num_speculative_tokens, pruned_prefix_lengths);
   COUNTER_ADD(speculative_execution_latency_seconds_validation,
               timer.elapsed_seconds());
 
@@ -1806,6 +1806,11 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
     CHECK_EQ(ret, 0) << "failed to synchronize MTP compute stream, ret=" << ret;
     release_retained_inputs(target_output);
     val_output.next_tokens = val_output.next_tokens.to(torch::kCPU);
+    // Record adaptive-prune-aware draft/accept counts on the already-CPU
+    // next_tokens. Static path lets worker_service count on the async-handoff
+    // CPU tensor with no extra device sync.
+    record_validate_metrics(
+        val_output, num_speculative_tokens, pruned_prefix_lengths);
     write_target_context_to_cache(input, val_output, num_speculative_tokens);
 
     if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
@@ -2151,9 +2156,11 @@ void MTPWorkerImpl::record_validate_metrics(
   CHECK_EQ(validate_output.next_tokens.size(1), num_speculative_tokens + 1)
       << "validate output width mismatch";
 
-  torch::Tensor next_tokens_cpu = validate_output.next_tokens.to(torch::kCPU)
-                                      .to(torch::kInt64)
-                                      .contiguous();
+  CHECK(validate_output.next_tokens.device().is_cpu())
+      << "record_validate_metrics expects next_tokens already on CPU to avoid "
+         "a blocking device sync on the hot path";
+  torch::Tensor next_tokens_cpu =
+      validate_output.next_tokens.to(torch::kInt64).contiguous();
   const int64_t* token_data = next_tokens_cpu.const_data_ptr<int64_t>();
   int64_t num_draft_tokens = 0;
   int64_t accepted_count = 0;
@@ -2520,10 +2527,7 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
     // makes tiling fail when the current step's per_seq_val_tokens is small
     // (e.g. adaptive prunes down to 2 while nat=5).
     if (supports_explicit_spec_verify_replay_update()) {
-      constexpr int32_t kGdnConvHistoryCap = 3;
-      for (int32_t& v : accepted_prefix_lengths) {
-        v = std::min(v, kGdnConvHistoryCap);
-      }
+      clamp_gdn_conv_history(accepted_prefix_lengths);
     }
     input_params.num_accepted_tokens_host.assign(
         accepted_prefix_lengths.begin(), accepted_prefix_lengths.end());
@@ -2855,10 +2859,7 @@ void MTPWorkerImpl::prepare_validate_inputs(
     // makes tiling fail when the current step's per_seq_val_tokens is small
     // (e.g. adaptive prunes down to 2 while nat=5).
     if (supports_explicit_spec_verify_replay_update()) {
-      constexpr int32_t kGdnConvHistoryCap = 3;
-      for (int32_t& v : accepted_prefix_lengths) {
-        v = std::min(v, kGdnConvHistoryCap);
-      }
+      clamp_gdn_conv_history(accepted_prefix_lengths);
     }
     input_params.num_accepted_tokens =
         torch::tensor(accepted_prefix_lengths, token_options);
