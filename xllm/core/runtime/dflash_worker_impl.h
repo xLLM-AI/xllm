@@ -96,7 +96,8 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
  private:
   void fill_validate_input_from_draft_outputs(const DraftBlock& draft_block,
                                               ForwardInput& validate_input,
-                                              Stream& compute_stream);
+                                              Stream& compute_stream,
+                                              int32_t effective_val_tokens);
 
   std::optional<ForwardOutput> run_validate(const ForwardInput& input,
                                             const DraftBlock& draft_block,
@@ -104,12 +105,14 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
 
   SampleOutput validate(const SamplingParameters& sampling_params,
                         const DraftBlock& draft_block,
-                        const ForwardOutput& target_output);
+                        const ForwardOutput& target_output,
+                        int32_t effective_val_tokens);
 
   SampleOutput validate(const SamplingParameters& sampling_params,
                         const torch::Tensor& draft_token_ids,
                         const torch::Tensor& draft_probs,
-                        const ForwardOutput& target_output);
+                        const ForwardOutput& target_output,
+                        int32_t effective_val_tokens);
 
   // Adaptive-speculative helper: run controller on draft acceptance
   // probabilities (ConfidenceHead output if available, sampler-gathered probs
@@ -126,6 +129,15 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
   // and controller produced non-uniform prefixes.
   void apply_adaptive_prune_to_draft(
       DraftBlock& draft_block,
+      const std::vector<int32_t>& prefix_lengths);
+
+  // Hard batch-max prune: shrink validate_input's dense per-seq width from
+  // (num_speculative_tokens + 1) to effective_val_tokens = max(prefix)+1 so
+  // the target forward truly runs a narrower block. Returns
+  // effective_val_tokens; equals the default when no shrink happens.
+  int32_t apply_batch_max_hard_prune(
+      const ForwardInput& input,
+      ForwardInput& validate_input,
       const std::vector<int32_t>& prefix_lengths);
 
   void process_draft_sample_output(SampleOutput& sample_output);

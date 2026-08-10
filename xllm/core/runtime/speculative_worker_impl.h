@@ -137,6 +137,13 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   // prepare inputs for target model at Decode phase (validation).
   void prepare_validate_inputs(const ForwardInput& inputs,
                                ForwardInput& validate_inputs);
+  // Per-seq variant used by adaptive-speculative pruning: each sequence's
+  // validate row width equals per_seq_val_tokens[i] (must be in [1, N+1]).
+  // The dense meta/token/position/kv-slot buffers are rebuilt as varlen with
+  // total_tokens = Σ per_seq_val_tokens.
+  void prepare_validate_inputs(const ForwardInput& inputs,
+                               ForwardInput& validate_inputs,
+                               const std::vector<int32_t>& per_seq_val_tokens);
 
  protected:
   // Target model worker
