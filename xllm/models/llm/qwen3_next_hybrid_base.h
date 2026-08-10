@@ -100,8 +100,14 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
     torch::NoGradGuard no_grad;
     if (dp_size_ > 1) {
       if (tokens.sizes() == 0) {
-        tokens = torch::tensor({1}).to(torch::kInt32).to(device_);
-        positions = torch::tensor({0}).to(torch::kInt32).to(device_);
+        // Build the empty-shard dummy directly on-device. The previous
+        // torch::tensor({...}).to(device_) issues a synchronous host->device
+        // aclrtMemcpy that is illegal inside an ACL graph capture region (NPU
+        // error 107030 -> capture abort -> eager fallback). On-device alloc +
+        // constant fill runs a device kernel only: capture-safe, eager-same.
+        auto dummy_opts = torch::dtype(torch::kInt32).device(device_);
+        tokens = torch::ones({1}, dummy_opts);
+        positions = torch::zeros({1}, dummy_opts);
       }
     }
 
