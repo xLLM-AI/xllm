@@ -29,7 +29,6 @@ class SpeculativeProfileRegistry final {
  public:
   struct ValidateTimePredictor {
     double intercept_ms = 0.0;
-    double batch_ms = 0.0;
     double query_token_ms = 0.0;
     double query_prefix_ms = 0.0;
   };
@@ -41,10 +40,6 @@ class SpeculativeProfileRegistry final {
 
   bool has_validate_time_predictor() const;
   std::optional<ValidateTimePredictor> validate_time_predictor() const;
-
-  double predict_validate_time_ms(int32_t batch_size,
-                                  int32_t query_len,
-                                  double avg_prefix_len) const;
 
  private:
   SpeculativeProfileRegistry() = default;

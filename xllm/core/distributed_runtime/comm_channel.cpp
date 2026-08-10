@@ -95,7 +95,6 @@ bool CommChannel::set_speculative_validate_time_predictor(
     const SpeculativeProfileRegistry::ValidateTimePredictor& predictor) {
   proto::SpeculativeValidateTimePredictor request;
   request.set_intercept_ms(predictor.intercept_ms);
-  request.set_batch_ms(predictor.batch_ms);
   request.set_query_token_ms(predictor.query_token_ms);
   request.set_query_prefix_ms(predictor.query_prefix_ms);
 

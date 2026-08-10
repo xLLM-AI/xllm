@@ -61,7 +61,7 @@ message AllocateKVCacheRequest {
 
 message SpeculativeValidateTimePredictor {
   double intercept_ms = 1;
-  double batch_ms = 2;
+  reserved 2;  // was: double batch_ms (dropped, dead field)
   double query_token_ms = 3;
   double query_prefix_ms = 4;
 }

@@ -17,19 +17,20 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <optional>
 
 namespace xllm {
 namespace {
 
-TEST(SpeculativeProfileRegistryTest, PredictsValidateTimeFromLinearTerms) {
+TEST(SpeculativeProfileRegistryTest, StoresAndRetrievesPredictor) {
   SpeculativeProfileRegistry& registry =
       SpeculativeProfileRegistry::get_instance();
   registry.reset_validate_time_predictor();
+  EXPECT_FALSE(registry.has_validate_time_predictor());
 
   SpeculativeProfileRegistry::ValidateTimePredictor predictor;
   predictor.intercept_ms = 1.0;
-  predictor.batch_ms = 2.0;
   predictor.query_token_ms = 3.0;
   predictor.query_prefix_ms = 0.5;
   registry.set_validate_time_predictor(predictor);
@@ -37,26 +38,32 @@ TEST(SpeculativeProfileRegistryTest, PredictsValidateTimeFromLinearTerms) {
   const std::optional<SpeculativeProfileRegistry::ValidateTimePredictor>
       registered_predictor = registry.validate_time_predictor();
   ASSERT_TRUE(registered_predictor.has_value());
+  EXPECT_DOUBLE_EQ(registered_predictor->intercept_ms, 1.0);
+  EXPECT_DOUBLE_EQ(registered_predictor->query_token_ms, 3.0);
   EXPECT_DOUBLE_EQ(registered_predictor->query_prefix_ms, 0.5);
-
-  const double time_ms = registry.predict_validate_time_ms(
-      /*batch_size=*/4, /*query_len=*/3, /*avg_prefix_len=*/5.0);
-
-  EXPECT_DOUBLE_EQ(time_ms,
-                   1.0 + 2.0 * 4.0 + 3.0 * 4.0 * 3.0 + 0.5 * 4.0 * 3.0 * 5.0);
   registry.reset_validate_time_predictor();
+  EXPECT_FALSE(registry.has_validate_time_predictor());
 }
 
-TEST(SpeculativeProfileRegistryTest, ReturnsZeroBeforeRegistration) {
+TEST(SpeculativeProfileRegistryTest,
+     SanitizesNonFiniteAndNegativeCoefficients) {
   SpeculativeProfileRegistry& registry =
       SpeculativeProfileRegistry::get_instance();
   registry.reset_validate_time_predictor();
 
-  EXPECT_DOUBLE_EQ(registry.predict_validate_time_ms(
-                       /*batch_size=*/4,
-                       /*query_len=*/3,
-                       /*avg_prefix_len=*/128.0),
-                   0.0);
+  SpeculativeProfileRegistry::ValidateTimePredictor predictor;
+  predictor.intercept_ms = -1.0;
+  predictor.query_token_ms = std::numeric_limits<double>::quiet_NaN();
+  predictor.query_prefix_ms = 0.5;
+  registry.set_validate_time_predictor(predictor);
+
+  const std::optional<SpeculativeProfileRegistry::ValidateTimePredictor> got =
+      registry.validate_time_predictor();
+  ASSERT_TRUE(got.has_value());
+  EXPECT_DOUBLE_EQ(got->intercept_ms, 0.0);
+  EXPECT_DOUBLE_EQ(got->query_token_ms, 0.0);
+  EXPECT_DOUBLE_EQ(got->query_prefix_ms, 0.5);
+  registry.reset_validate_time_predictor();
 }
 
 }  // namespace

@@ -469,7 +469,6 @@ void WorkerService::SetSpeculativeValidateTimePredictor(
     brpc::ClosureGuard done_guard(done);
     SpeculativeProfileRegistry::ValidateTimePredictor predictor;
     predictor.intercept_ms = request->intercept_ms();
-    predictor.batch_ms = request->batch_ms();
     predictor.query_token_ms = request->query_token_ms();
     predictor.query_prefix_ms = request->query_prefix_ms();
     response->set_ok(

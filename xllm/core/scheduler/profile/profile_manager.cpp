@@ -386,8 +386,8 @@ void ProfileManager::train_speculative_validate_time_predictor(
   }
 
   // Fit T = intercept + query_token_ms*(batch*query) +
-  // query_prefix_ms*(batch*query*prefix). The standalone batch_ms term is
-  // dropped: it is pruning-invariant (does not depend on prefix) and only
+  // query_prefix_ms*(batch*query*prefix). A standalone batch term was tried
+  // and dropped: it is pruning-invariant (does not depend on prefix) and only
   // steals variance from the marginal query terms that drive pruning.
   constexpr int32_t kNumCoefficients = 3;
   Eigen::MatrixXd matrix(time_profiling_data.size(), kNumCoefficients);
@@ -434,7 +434,6 @@ void ProfileManager::train_speculative_validate_time_predictor(
 
   SpeculativeProfileRegistry::ValidateTimePredictor predictor;
   predictor.intercept_ms = coefficients(0);
-  predictor.batch_ms = 0.0;
   predictor.query_token_ms = coefficients(1);
   predictor.query_prefix_ms = coefficients(2);
   SpeculativeProfileRegistry::get_instance().set_validate_time_predictor(

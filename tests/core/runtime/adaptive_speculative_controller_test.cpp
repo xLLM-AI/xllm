@@ -39,7 +39,6 @@ runtime::Options make_options() {
 void setup_registry() {
   SpeculativeProfileRegistry::ValidateTimePredictor predictor;
   predictor.intercept_ms = 1.0;
-  predictor.batch_ms = 0.1;
   predictor.query_token_ms = 0.5;
   predictor.query_prefix_ms = 0.001;
   SpeculativeProfileRegistry::get_instance().set_validate_time_predictor(
