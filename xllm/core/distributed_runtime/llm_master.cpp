@@ -513,6 +513,7 @@ std::shared_ptr<Request> LLMMaster::generate_request(
                          call);
   req_state.include_stop_str_in_output = sp.include_stop_str_in_output;
   req_state.sample_slots = sp.sample_slots;
+  if (sp.adapter_id.has_value()) req_state.adapter_id = sp.adapter_id.value();
 
   rate_limit_guard.dismiss();
   auto request = std::make_shared<Request>(sp.request_id,
