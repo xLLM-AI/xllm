@@ -82,10 +82,17 @@ void record_speculative_metrics_from_output(const torch::Tensor& next_tokens,
   const int64_t batch_size = next_tokens.size(0);
   const int64_t token_width = next_tokens.size(1);
   const int64_t num_speculative_tokens = options.num_speculative_tokens();
-  if (num_speculative_tokens <= 0 ||
-      token_width != num_speculative_tokens + 1) {
+  if (num_speculative_tokens <= 0 || token_width < 2) {
     return;
   }
+  // For MTP the check was strict `token_width == num_speculative_tokens + 1`;
+  // DFlash / DSpark adaptive pruning may hand back a narrower validate block
+  // (effective_val_tokens < N+1), so accept any width in [2, N+1] and derive
+  // the actual draft count from `token_width - 1`.
+  if (token_width > num_speculative_tokens + 1) {
+    return;
+  }
+  const int64_t effective_speculative_tokens = token_width - 1;
 
   torch::Tensor tokens = next_tokens.contiguous();
   int64_t rejected_count = 0;
@@ -108,7 +115,7 @@ void record_speculative_metrics_from_output(const torch::Tensor& next_tokens,
       return;
   }
 
-  const int64_t num_draft_tokens = batch_size * num_speculative_tokens;
+  const int64_t num_draft_tokens = batch_size * effective_speculative_tokens;
   rejected_count = std::min(rejected_count, num_draft_tokens);
   COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
   COUNTER_ADD(speculative_num_accepted_tokens_total,
