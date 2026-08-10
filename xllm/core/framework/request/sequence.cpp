@@ -237,7 +237,8 @@ Sequence::Sequence(size_t index,
       decoder_(std::move(decoder)),
       stream_output_token_offset_(decoder_.output_offset()),
       termination_flag_(std::make_shared<std::atomic<int32_t>>(INT32_MAX)),
-      request_id_(seq_params.request_id) {
+      request_id_(seq_params.request_id),
+      adapter_id_(seq_params.adapter_id) {
   if (is_onerec_model()) {
     init_onerec_sequence(prompt_token_ids, std::move(input_embedding));
     return;

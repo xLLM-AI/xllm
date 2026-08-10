@@ -22,10 +22,42 @@ limitations under the License.
 
 namespace xllm {
 
+// LoRA prefix cache isolation: thread-local adapter_id set by
+// BlockManagerPool before hashing. When != 0, the first-block hash is seeded
+// with adapter_id so different adapters (and base) produce disjoint hash
+// chains for identical tokens. When == 0 (base, no LoRA), hashing behavior
+// is byte-identical to the pre-patch baseline.
+thread_local uint64_t g_prefix_cache_adapter_id = 0;
+
+void set_prefix_cache_adapter_id(uint64_t adapter_id) {
+  g_prefix_cache_adapter_id = adapter_id;
+}
+
 void xxh3_128bits_hash(const uint8_t* pre_hash_value,
                        const Slice<int32_t>& token_ids,
                        uint8_t* hash_value) {
   if (pre_hash_value == nullptr) {
+    // LoRA prefix cache isolation: when adapter_id != 0, prepend it to the
+    // hashed data so that adapter chains diverge from the base chain at
+    // block 0. This keeps identical prompts across adapters (and base) on
+    // disjoint hash chains, preventing cross-adapter cache contamination.
+    if (g_prefix_cache_adapter_id != 0) {
+      const size_t adapter_id_bytes = sizeof(g_prefix_cache_adapter_id);
+      const size_t token_bytes = sizeof(int32_t) * token_ids.size();
+      std::vector<uint8_t> key(adapter_id_bytes + token_bytes);
+      memcpy(key.data(), &g_prefix_cache_adapter_id, adapter_id_bytes);
+      memcpy(key.data() + adapter_id_bytes,
+             reinterpret_cast<const void*>(token_ids.data()),
+             token_bytes);
+      XXH128_hash_t xxh3_128bits_hash_value = XXH3_128bits_withSeed(
+          reinterpret_cast<const void*>(key.data()),
+          key.size(),
+          ::xllm::KVCacheConfig::get_instance().xxh3_128bits_seed());
+      memcpy(hash_value,
+             &xxh3_128bits_hash_value,
+             sizeof(xxh3_128bits_hash_value));
+      return;
+    }
     XXH128_hash_t xxh3_128bits_hash_value = XXH3_128bits_withSeed(
         reinterpret_cast<const void*>(token_ids.data()),
         sizeof(int32_t) * token_ids.size(),
