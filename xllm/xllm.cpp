@@ -57,6 +57,8 @@ namespace py = pybind11;
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/lora/lora_config.h"
+#include "core/framework/lora/lora_runtime.h"
 #include "core/framework/xtensor/global_xtensor.h"
 #include "core/framework/xtensor/options.h"
 #include "core/framework/xtensor/xtensor_allocator.h"
@@ -586,6 +588,12 @@ int main(int argc, char** argv) {
   google::ParseCommandLineFlags(&argc, &argv, true);
   google::InitGoogleLogging("xllm");
   initialize_configs();
+
+  {
+    xllm::LoRAConfig lora_cfg;
+    lora_cfg.load_from_flags();
+    xllm::LoRARuntime::instance().init(lora_cfg);
+  }
 
   const ServiceConfig& service_config = ServiceConfig::get_instance();
   const DistributedConfig& distributed_config =
