@@ -72,8 +72,11 @@ BatchMode resolve_batch_mode(const ContinuousScheduler::Options& options) {
     mode.enable_chunked_prefill = true;
   }
 
-  // CP/MTP: prefill cannot mix with decode in the same batch.
-  if (options.cp_size() > 1 || options.num_speculative_tokens() > 0) {
+  // CP/DCP/MTP: prefill cannot mix with decode in the same batch.
+  // DCP reuses TP cards, so cp_size may be 1 while decode_context_parallel_size
+  // is > 1; the worker asserts a non-mixed batch under DCP, so close mix here.
+  if (options.cp_size() > 1 || options.decode_context_parallel_size() > 1 ||
+      options.num_speculative_tokens() > 0) {
     mode.enable_mix_batch = false;
   }
 

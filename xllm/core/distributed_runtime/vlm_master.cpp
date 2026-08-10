@@ -86,6 +86,7 @@ VLMMaster::VLMMaster(const Options& options)
       .max_tokens_per_chunk_for_prefill(
           options.max_tokens_per_chunk_for_prefill())
       .dp_size(options_.dp_size())
+      .decode_context_parallel_size(options_.decode_context_parallel_size())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_chunked_prefill(options_.enable_chunked_prefill())
       .instance_name(options_.instance_name())
