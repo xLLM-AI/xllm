@@ -16,19 +16,21 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "core/framework/block/block_manager_pool.h"
 #include "core/framework/model/mtp_utils.h"
+#include "core/framework/request/incremental_decoder.h"
+#include "core/framework/request/sequence.h"
+#include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
-#include "framework/block/block_manager_pool.h"
-#include "framework/request/incremental_decoder.h"
-#include "framework/request/sequence.h"
-#include "framework/request/stopping_checker.h"
 #include "platform/platform.h"
 #include "runtime/decode_graph_bucket.h"
 #include "scheduler/profile/decode_graph_warmup_plan.h"
 #include "scheduler/profile/graph_warmup.h"
+#include "scheduler/profile/profile_manager.h"
 
 namespace xllm {
 namespace {
@@ -76,6 +78,55 @@ runtime::DecodeGraphExecutionShape make_decode_graph_execution_shape(
   execution_shape.enable_graph_mode_decode_no_padding = enable_no_padding;
   return execution_shape;
 }
+
+class RecordingProfileEngine final : public Engine {
+ public:
+  RecordingProfileEngine() {
+    BlockManagerPool::Options options;
+    options.num_blocks(/*num_blocks=*/64)
+        .block_size(/*block_size=*/4)
+        .enable_prefix_cache(/*enable_prefix_cache=*/false)
+        .max_seqs_per_batch(/*max_seqs_per_batch=*/8);
+    block_manager_ = std::make_unique<BlockManagerPool>(options, /*dp_size=*/1);
+    model_args_.vocab_size(128)
+        .eos_token_id(2)
+        .max_position_embeddings(16)
+        .hidden_size(8);
+  }
+
+  ForwardOutput step(std::vector<Batch>& batches) override {
+    for (Batch& batch : batches) {
+      for (Sequence* sequence : batch.get_sequences()) {
+        all_requests_marked_ =
+            all_requests_marked_ && sequence->is_graph_warmup();
+      }
+    }
+    return ForwardOutput();
+  }
+
+  void update_last_step_result(std::vector<Batch>& batches) override {
+    (void)batches;
+  }
+
+  BlockManagerPool* block_manager_pool() const override {
+    return block_manager_.get();
+  }
+
+  const ModelArgs& model_args() const override { return model_args_; }
+
+  std::vector<int64_t> get_active_activation_memory() const override {
+    return {};
+  }
+
+  void reset_profile_markers() { all_requests_marked_ = true; }
+
+  bool all_requests_marked() const { return all_requests_marked_; }
+
+ private:
+  std::unique_ptr<BlockManagerPool> block_manager_;
+  ModelArgs model_args_;
+  bool all_requests_marked_ = true;
+};
 
 TEST(GraphWarmupTest, BuildsCanonicalBuckets) {
   const DecodeGraphWarmupPlan plan = get_compatibility_decode_graph_warmup_plan(
@@ -171,6 +222,18 @@ TEST(DecodeGraphWarmupPlanTest, PreservesSuppliedExecutionShape) {
   } else {
     EXPECT_EQ(plan.batch_sizes, (std::vector<int32_t>{1, 2, 4, 8, 16}));
   }
+}
+
+TEST(DecodeGraphWarmupPlanTest, RespectsReducedWarmupCapacity) {
+  const runtime::DecodeGraphExecutionShape execution_shape =
+      make_decode_graph_execution_shape(
+          /*num_decoding_tokens=*/1,
+          /*num_speculative_tokens=*/0,
+          /*enable_no_padding=*/false);
+  const DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
+      execution_shape, /*max_global_batch_size=*/15, /*dp_size=*/1);
+
+  EXPECT_EQ(plan.batch_sizes, (std::vector<int32_t>{1, 2, 4, 8, 15}));
 }
 
 TEST(GraphWarmupTest, PrefillRoleUsesPrefillOnlyPlan) {
@@ -274,6 +337,18 @@ TEST(GraphWarmupTest, PresetDpRankControlsBlockAllocation) {
   EXPECT_EQ(sequence.dp_rank(), 1);
   EXPECT_EQ(pool.num_used_blocks()[0], used_before[0]);
   EXPECT_GT(pool.num_used_blocks()[1], used_before[1]);
+}
+
+TEST(GraphWarmupTest, MarksOrdinaryProfileRequestsAsSyntheticLoad) {
+  RecordingProfileEngine engine;
+  ProfileManager::Options options;
+  options.max_tokens_per_batch(4).max_seqs_per_batch(1).dp_size(1);
+  ProfileManager profile_manager(&engine, options);
+  engine.reset_profile_markers();
+
+  profile_manager.run_request(/*token_length=*/4, /*prefix_length=*/0);
+
+  EXPECT_TRUE(engine.all_requests_marked());
 }
 
 }  // namespace

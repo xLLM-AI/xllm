@@ -2399,6 +2399,7 @@ inline void deserialize_forward_input_payload(
   read_data(context, input_params.meta.kv_max_seq_len);
   read_data(context, input_params.meta.q_max_seq_len);
   read_data(context, input_params.meta.batch_id);
+  read_data(context, input_params.meta.is_graph_warmup);
   read_tensor_and_vector(context,
                          input_params.attention.device.q_seq_lens,
                          input_params.attention.host.q_seq_lens,
@@ -2526,6 +2527,9 @@ inline void deserialize_forward_input_payload(
     read_transfer_kv_info(context, transfer);
   }
   read_eplb_info(context, forward_input.input_params.expert.eplb_info);
+  read_tensor(context,
+              forward_input.input_params.expert.eplb_decode_token_mask,
+              stream);
 
   read_tensor_and_vector(context,
                          input_params.attention.device.new_cache_slots,
@@ -2855,6 +2859,7 @@ inline void serialize_forward_input_sections(
   write_data(context.descriptor, input_params.meta.kv_max_seq_len);
   write_data(context.descriptor, input_params.meta.q_max_seq_len);
   write_data(context.descriptor, input_params.meta.batch_id);
+  write_data(context.descriptor, input_params.meta.is_graph_warmup);
 
   write_host_vector_or_tensor(context,
                               input_params.attention.host.q_seq_lens,
@@ -2971,6 +2976,7 @@ inline void serialize_forward_input_sections(
     write_transfer_kv_info(context, transfer);
   }
   write_eplb_info(context, input_params.expert.eplb_info);
+  write_tensor(context, input_params.expert.eplb_decode_token_mask);
 
   write_host_vector_or_tensor(context,
                               input_params.attention.host.new_cache_slots,

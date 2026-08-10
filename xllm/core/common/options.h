@@ -108,7 +108,7 @@ class Options {
 
   PROPERTY(std::optional<int64_t>, eplb_update_interval);
 
-  PROPERTY(std::optional<double>, eplb_update_threshold);
+  PROPERTY(std::optional<double>, eplb_min_peak_load_improvement);
 
   PROPERTY(std::optional<std::string>, communication_backend);
 

@@ -16,6 +16,7 @@ cc_library(
     vlm_executor_impl.h
     base_executor_impl.h
     dit_executor.h
+    $<$<BOOL:${USE_NPU}>:acl_graph_bucket_policy.h>
     $<$<BOOL:${USE_NPU}>:acl_graph_executor_impl.h>
     $<$<BOOL:${USE_NPU}>:acl_graph_persistent_param.h>
     $<$<BOOL:${USE_MLU}>:mlu_graph_executor_impl.h>

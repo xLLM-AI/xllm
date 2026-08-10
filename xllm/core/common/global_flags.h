@@ -135,7 +135,11 @@ DECLARE_int32(redundant_experts_num);
 
 DECLARE_int64(eplb_update_interval);
 
-DECLARE_double(eplb_update_threshold);
+DECLARE_double(eplb_min_peak_load_improvement);
+
+DECLARE_string(eplb_policy_kind);
+
+DECLARE_bool(eplb_use_decode_only_load);
 
 DECLARE_int32(expert_parallel_degree);
 

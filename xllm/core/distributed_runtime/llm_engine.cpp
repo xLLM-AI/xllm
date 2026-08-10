@@ -64,6 +64,28 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
+namespace {
+
+bool contains_graph_warmup(const std::vector<ForwardInput>& inputs) {
+  return std::any_of(
+      inputs.begin(), inputs.end(), [](const ForwardInput& input) {
+        return input.input_params.meta.is_graph_warmup;
+      });
+}
+
+bool contains_graph_warmup(const std::vector<Batch>& batches) {
+  for (const Batch& batch : batches) {
+    const std::vector<Sequence*> sequences = batch.get_sequences();
+    if (std::any_of(sequences.begin(), sequences.end(), [](Sequence* sequence) {
+          return sequence != nullptr && sequence->is_graph_warmup();
+        })) {
+      return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace
 
 // Extra weight pages reserved for mapping/alignment overhead.
 constexpr size_t kXTensorWeightPageSafetyMargin = 20;
@@ -1115,6 +1137,7 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
       << " and actual batch size as " << batch.size() << ".";
 
   auto forward_inputs = prepare_inputs(batch);
+  const bool is_graph_warmup = contains_graph_warmup(forward_inputs);
   int64_t dispatched_activation_token = -1;
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     CHECK(!forward_inputs.empty());
@@ -1166,7 +1189,7 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
   }
 
   if (::xllm::EPLBConfig::get_instance().enable_eplb() &&
-      !options_.enable_schedule_overlap()) {
+      !options_.enable_schedule_overlap() && !is_graph_warmup) {
     process_eplb_data(results, dispatched_activation_token);
   }
 
@@ -1195,8 +1218,9 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
 }
 
 void LLMEngine::update_last_step_result(std::vector<Batch>& last_batch) {
+  const bool is_graph_warmup = contains_graph_warmup(last_batch);
   int64_t completed_activation_token = -1;
-  if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
+  if (::xllm::EPLBConfig::get_instance().enable_eplb() && !is_graph_warmup) {
     CHECK(!pending_eplb_activation_tokens_.empty())
         << "Missing EPLB activation metadata for completed overlap step.";
     completed_activation_token = pending_eplb_activation_tokens_.front();
@@ -1402,7 +1426,27 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
         << "EPLB manager must be initialized before preparing inputs.";
     eplb_info = eplb_manager_->get_eplb_info(
         /*allow_eplb_command=*/has_non_empty_batch &&
-        all_non_empty_batches_are_decode);
+        all_non_empty_batches_are_decode &&
+        !contains_graph_warmup(batched_inputs));
+    std::vector<torch::Tensor> decode_masks;
+    decode_masks.reserve(batched_inputs.size());
+    for (const ForwardInput& input : batched_inputs) {
+      const torch::Tensor& local_mask =
+          input.input_params.expert.eplb_decode_token_mask;
+      if (!local_mask.defined()) {
+        CHECK_EQ(input.host_token_ids().numel(), 0)
+            << "EPLB requires a per-token decode mask.";
+        decode_masks.emplace_back(torch::empty({0}, torch::kBool));
+      } else {
+        decode_masks.emplace_back(local_mask);
+      }
+    }
+    const torch::Tensor global_decode_mask =
+        eplb::build_global_decode_token_mask(decode_masks,
+                                             dp_global_token_nums);
+    for (ForwardInput& input : batched_inputs) {
+      input.input_params.expert.eplb_decode_token_mask = global_decode_mask;
+    }
   }
 
   // Empty DP ranks inherit decode below and use fake inputs in WorkerImpl.

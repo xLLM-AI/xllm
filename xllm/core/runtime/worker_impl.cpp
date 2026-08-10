@@ -76,6 +76,7 @@ limitations under the License.
 #endif
 #include "core/distributed_runtime/master.h"
 #include "core/runtime/worker_rendezvous.h"
+#include "framework/eplb/eplb_utils.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/kv_cache/linear_state_restore.h"
 #include "framework/model/model_input_params.h"
@@ -2075,9 +2076,13 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     // todo: support xtensor
     int32_t num_layers = args.n_layers() - args.first_k_dense_replace();
-    int32_t num_device_experts =
-        args.n_routed_experts() / context_.get_parallel_args().world_size() +
-        ::xllm::EPLBConfig::get_instance().redundant_experts_num();
+    const int32_t eplb_device_num =
+        eplb::effective_device_num(context_.get_parallel_args().world_size(),
+                                   context_.get_parallel_args().ep_size());
+    int32_t num_device_experts = eplb::local_physical_experts_num(
+        args.n_routed_experts(),
+        eplb_device_num,
+        ::xllm::EPLBConfig::get_instance().redundant_experts_num());
     expert_load_data_ = torch::zeros({num_layers, num_device_experts})
                             .to(torch::kInt64)
                             .to(device_)

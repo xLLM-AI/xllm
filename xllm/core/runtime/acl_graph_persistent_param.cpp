@@ -236,6 +236,10 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
       {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
   persistent_new_cache_slots_default_ = torch::zeros(
       {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
+  const int64_t eplb_decode_mask_capacity =
+      max_tokens_per_batch * std::max<int32_t>(options.dp_size(), 1);
+  persistent_eplb_decode_token_mask_ = torch::zeros(
+      {eplb_decode_mask_capacity}, torch::dtype(torch::kBool).device(device));
   persistent_linear_state_indices_ = torch::zeros(
       {metadata_capacity}, torch::dtype(torch::kInt).device(device));
   persistent_num_accepted_tokens_ = torch::ones(
@@ -584,6 +588,62 @@ void zero_tensor_tail(torch::Tensor& tensor,
 
 }  // namespace
 
+void GraphPersistentParam::update_eplb_decode_token_mask(
+    const ModelInputParams& input_params,
+    uint32_t padded_num_tokens) {
+  persistent_eplb_decode_token_mask_.fill_(false);
+  if (!input_params.expert.eplb_decode_token_mask.defined()) {
+    return;
+  }
+
+  torch::Tensor source_mask =
+      input_params.expert.eplb_decode_token_mask.reshape({-1});
+  const std::vector<int32_t>& dp_token_counts =
+      input_params.parallel.dp_global_token_nums;
+  const int64_t dp_size =
+      std::max<int64_t>(static_cast<int64_t>(dp_token_counts.size()), 1);
+  const int64_t required_capacity =
+      static_cast<int64_t>(padded_num_tokens) * dp_size;
+  CHECK_LE(required_capacity, persistent_eplb_decode_token_mask_.numel())
+      << "EPLB graph decode mask exceeds persistent capacity.";
+
+  if (dp_token_counts.size() <= 1) {
+    CHECK_LE(source_mask.numel(), static_cast<int64_t>(padded_num_tokens));
+    persistent_eplb_decode_token_mask_
+        .slice(/*dim=*/0, /*start=*/0, /*end=*/source_mask.numel())
+        .copy_(source_mask, /*non_blocking=*/true);
+    return;
+  }
+
+  int64_t global_real_tokens = 0;
+  for (int32_t rank_tokens : dp_token_counts) {
+    CHECK_GE(rank_tokens, 0) << "EPLB DP token counts must be non-negative.";
+    CHECK_LE(rank_tokens, static_cast<int64_t>(padded_num_tokens))
+        << "EPLB DP rank token count exceeds graph padding capacity.";
+    global_real_tokens += rank_tokens;
+  }
+  CHECK_EQ(source_mask.numel(), global_real_tokens)
+      << "EPLB graph decode mask does not match DP token counts.";
+
+  int64_t source_begin = 0;
+  for (int32_t dp_rank = 0;
+       dp_rank < static_cast<int32_t>(dp_token_counts.size());
+       ++dp_rank) {
+    const int64_t rank_tokens = dp_token_counts[static_cast<size_t>(dp_rank)];
+    const int64_t destination_begin =
+        static_cast<int64_t>(dp_rank) * padded_num_tokens;
+    persistent_eplb_decode_token_mask_
+        .slice(/*dim=*/0,
+               /*start=*/destination_begin,
+               /*end=*/destination_begin + rank_tokens)
+        .copy_(source_mask.slice(/*dim=*/0,
+                                 /*start=*/source_begin,
+                                 /*end=*/source_begin + rank_tokens),
+               /*non_blocking=*/true);
+    source_begin += rank_tokens;
+  }
+}
+
 std::vector<int32_t>
 GraphPersistentParam::update_expanded_spec_decode_attention(
     const ModelInputParams& input_params,
@@ -621,7 +681,6 @@ GraphPersistentParam::update_expanded_spec_decode_attention(
       expanded_kv_seq_lens_vec.emplace_back(1);
     }
   }
-
   // The worker has already packed the real rows into a device tensor. Copy it
   // directly into the stable graph buffer instead of rebuilding the same data
   // through torch::tensor(host).to(device), which would add a synchronous H2D
@@ -853,6 +912,7 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
                      static_cast<int64_t>(padded_num_tokens),
                      use_mrope_ ? 1 : 0);
   }
+  update_eplb_decode_token_mask(params, padded_num_tokens);
   if (q_seq_lens_default_.defined() &&
       q_seq_lens_default_.sizes() == q_seq_lens_.sizes()) {
     q_seq_lens_.copy_(q_seq_lens_default_, /*non_blocking=*/true);
@@ -1278,6 +1338,18 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
       graph_params->parallel.dp_global_token_nums = std::vector<int32_t>(
           graph_params->parallel.dp_global_token_nums.size(),
           static_cast<int32_t>(padded_num_tokens));
+    }
+    if (params.expert.eplb_decode_token_mask.defined()) {
+      const int64_t decode_mask_tokens =
+          static_cast<int64_t>(padded_num_tokens) *
+          std::max<int64_t>(
+              static_cast<int64_t>(params.parallel.dp_global_token_nums.size()),
+              1);
+      CHECK_LE(decode_mask_tokens, persistent_eplb_decode_token_mask_.numel())
+          << "EPLB graph decode mask exceeds persistent capacity.";
+      graph_params->expert.eplb_decode_token_mask =
+          persistent_eplb_decode_token_mask(
+              static_cast<uint32_t>(decode_mask_tokens));
     }
     graph_params->attention.device.new_cache_slots =
         persistent_new_cache_slots(padded_num_tokens);

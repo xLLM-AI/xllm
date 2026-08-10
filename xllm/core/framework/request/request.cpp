@@ -61,6 +61,7 @@ void Request::create_sequences_group() {
   sequence_params.best_of = state_.best_of;
   sequence_params.streaming = state_.stream;
   sequence_params.enable_schedule_overlap = state_.enable_schedule_overlap;
+  sequence_params.is_graph_warmup = state_.is_graph_warmup;
   sequence_params.rec_type = state_.rec_type;
   sequence_params.bos_token_id = state_.bos_token_id;
   sequence_params.request_id = request_id_;

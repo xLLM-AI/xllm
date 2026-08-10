@@ -769,6 +769,7 @@ struct BatchInputMeta {
   int32_t kv_max_seq_len = 0;
   int32_t q_max_seq_len = 0;
   uint64_t batch_id = 0;
+  bool is_graph_warmup = false;
 };
 
 struct ModelEmbeddingInput {
@@ -925,12 +926,15 @@ struct ExpertInput {
   torch::Tensor expert_load_data;
   torch::Tensor expert_array;
   EplbInfo eplb_info;
+  torch::Tensor eplb_decode_token_mask;
 
   ExpertInput to(const torch::Device& device) const {
     ExpertInput out;
     out.expert_load_data = expert_load_data;
     out.expert_array = expert_array;
     out.eplb_info = eplb_info;
+    out.eplb_decode_token_mask =
+        safe_to(eplb_decode_token_mask, device, /*non_blocking=*/true);
     return out;
   }
 };

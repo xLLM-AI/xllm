@@ -25,6 +25,11 @@ limitations under the License.
 
 namespace xllm::layer::dsv4_eplb {
 
+inline bool is_eager_warmup(bool is_graph_warmup, bool enable_graph) {
+  // Eager profiling reuses the graph-warmup request marker.
+  return is_graph_warmup && !enable_graph;
+}
+
 inline torch::Tensor select_decode_token_mask(
     const torch::Tensor& global_decode_token_mask,
     int64_t routed_token_count,
@@ -112,11 +117,7 @@ inline torch::Tensor select_recorded_load_token_mask(
 inline void record_dispatch_expert_load(
     const torch::Tensor& expert_token_counts,
     const torch::Tensor& expert_load_data,
-    int32_t layer_id,
-    bool is_graph_warmup = false) {
-  if (is_graph_warmup) {
-    return;
-  }
+    int32_t layer_id) {
   CHECK(expert_token_counts.defined());
   CHECK_EQ(expert_token_counts.dim(), 1);
   CHECK(expert_token_counts.scalar_type() == torch::kInt32 ||

@@ -179,7 +179,8 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .enable_eplb(eplb_config.enable_eplb())
       .redundant_experts_num(eplb_config.redundant_experts_num())
       .eplb_update_interval(eplb_config.eplb_update_interval())
-      .eplb_update_threshold(eplb_config.eplb_update_threshold())
+      .eplb_min_peak_load_improvement(
+          eplb_config.eplb_min_peak_load_improvement())
       .rank_tablefile(eplb_config.rank_tablefile())
       .expert_parallel_degree(eplb_config.expert_parallel_degree())
       .enable_chunked_prefill(scheduler_config.enable_chunked_prefill())

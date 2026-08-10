@@ -21,6 +21,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/eplb/eplb_utils.h"
 #include "core/framework/kv_cache/kv_cache_estimation.h"
 #include "core/framework/model/mtp_utils.h"
 #include "core/framework/speculative/spec_input_builder.h"
@@ -132,6 +133,8 @@ void scale_speculative_parallel_token_counts(ModelInputParams& params,
   for (int32_t& token_num : params.parallel.raw_dp_global_token_nums) {
     token_num *= multiplier;
   }
+  params.expert.eplb_decode_token_mask = eplb::expand_decode_token_mask(
+      params.expert.eplb_decode_token_mask, multiplier);
 }
 
 SpeculativeOutputStats calculate_speculative_output_stats(

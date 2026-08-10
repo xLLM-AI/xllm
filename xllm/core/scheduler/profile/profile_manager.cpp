@@ -56,6 +56,12 @@ ProfileManager::ProfileManager(Engine* engine, const Options& options)
     max_decode_batch_size =
         std::min(max_decode_batch_size, max_concurrent_requests);
   }
+  const int32_t decode_batch_size_limit =
+      std::max<int32_t>(1,
+                        ::xllm::ExecutionConfig::get_instance()
+                            .acl_graph_decode_batch_size_limit());
+  max_decode_batch_size =
+      std::min(max_decode_batch_size, decode_batch_size_limit);
   decode_graph_warmup_plan_ =
       build_decode_graph_warmup_plan(engine_->decode_graph_execution_shape(),
                                      max_decode_batch_size,
@@ -84,10 +90,13 @@ ProfileManager::ProfileManager(Engine* engine, const Options& options)
   // prediction.
 
 #if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU)
-  // Warmup ACL graph executor if enabled
-  if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
-    if (!is_rec_multi_round_mode()) {
+  if (!is_rec_multi_round_mode()) {
+    if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
       warmup_for_graph();
+#if defined(USE_NPU)
+    } else {
+      warmup_for_eager();
+#endif
     }
   }
 #endif
@@ -796,7 +805,8 @@ double ProfileManager::predict_copy_blocks_time(
 
 std::shared_ptr<Request> ProfileManager::generate_single_request(
     int32_t token_length,
-    int32_t prefix_length) {
+    int32_t prefix_length,
+    bool is_graph_warmup) {
   auto& model_args = engine_->model_args();
   int32_t vocab_size = model_args.vocab_size();
   int32_t eos_token_id = model_args.eos_token_id();
@@ -816,6 +826,7 @@ std::shared_ptr<Request> ProfileManager::generate_single_request(
 
   RequestState req_state(token_ids);
   req_state.enable_schedule_overlap = options_.enable_schedule_overlap();
+  req_state.is_graph_warmup = is_graph_warmup;
   auto request = std::make_shared<Request>(
       /*request_id=*/next_warmup_request_id(),
       /*x_request_id=*/"",
@@ -843,7 +854,22 @@ std::shared_ptr<Request> ProfileManager::generate_single_request(
 
 std::shared_ptr<Request> ProfileManager::generate_single_decode_request(
     int32_t total_length,
-    std::optional<int32_t> dp_rank) {
+    std::optional<int32_t> dp_rank,
+    bool is_graph_warmup) {
+  std::shared_ptr<Request> request = try_generate_single_decode_request(
+      total_length, dp_rank, is_graph_warmup);
+  if (request == nullptr) {
+    LOG(FATAL) << "Profiling decode step time failed! Not enough blocks, total "
+                  "length: "
+               << total_length;
+  }
+  return request;
+}
+
+std::shared_ptr<Request> ProfileManager::try_generate_single_decode_request(
+    int32_t total_length,
+    std::optional<int32_t> dp_rank,
+    bool is_graph_warmup) {
   CHECK_GT(total_length, 1) << "Decode profiling requires total_length > 1.";
 
   auto& model_args = engine_->model_args();
@@ -866,6 +892,7 @@ std::shared_ptr<Request> ProfileManager::generate_single_decode_request(
 
   RequestState req_state(prompt_token_ids);
   req_state.enable_schedule_overlap = options_.enable_schedule_overlap();
+  req_state.is_graph_warmup = is_graph_warmup;
   const int32_t num_speculative_tokens =
       decode_graph_warmup_plan_.execution_shape.num_speculative_tokens;
   const int64_t num_decoding_tokens =
@@ -891,9 +918,7 @@ std::shared_ptr<Request> ProfileManager::generate_single_decode_request(
   }
   if (!block_manager_pool_->BlockManagerPool::allocate(sequence,
                                                        seq_capacity)) {
-    LOG(FATAL) << "Profiling decode step time failed! Not enough blocks, total "
-                  "length: "
-               << total_length;
+    return nullptr;
   }
   sequence->kv_state().incr_kv_cache_tokens_num(prompt_length);
 
@@ -922,11 +947,39 @@ std::shared_ptr<Request> ProfileManager::generate_single_decode_request(
   return request;
 }
 
+int32_t ProfileManager::measure_graph_decode_capacity(
+    int32_t configured_max_seqs,
+    int32_t total_length) {
+  CHECK_GT(configured_max_seqs, 0);
+  CHECK_GT(total_length, 1);
+  CHECK_GT(options_.dp_size(), 0);
+
+  std::vector<std::shared_ptr<Request>> requests;
+  requests.reserve(static_cast<size_t>(configured_max_seqs));
+  for (int32_t index = 0; index < configured_max_seqs; ++index) {
+    const int32_t dp_rank = index % options_.dp_size();
+    std::shared_ptr<Request> request =
+        try_generate_single_decode_request(total_length, dp_rank);
+    if (request == nullptr) {
+      break;
+    }
+    requests.emplace_back(std::move(request));
+  }
+
+  const int32_t allocatable_sequences = static_cast<int32_t>(requests.size());
+  for (const std::shared_ptr<Request>& request : requests) {
+    block_manager_pool_->deallocate_without_cache(
+        request->sequences()[0].get());
+  }
+  return allocatable_sequences;
+}
+
 // collect the latency of each step
 double ProfileManager::run_request(int32_t token_length,
                                    int32_t prefix_length,
                                    int32_t batch_size,
-                                   int32_t extra_token_length) {
+                                   int32_t extra_token_length,
+                                   bool is_graph_warmup) {
   CHECK(token_length >= prefix_length);
   std::vector<Sequence*> sequences;
   std::vector<size_t> sequences_budget;
@@ -939,7 +992,7 @@ double ProfileManager::run_request(int32_t token_length,
   for (int32_t i = 0; i < batch_size; i++) {
     // generate random token ids and request
     std::shared_ptr<Request> request =
-        generate_single_request(token_length, prefix_length);
+        generate_single_request(token_length, prefix_length, is_graph_warmup);
     requests.emplace_back(request);
     sequences.emplace_back(request->sequences()[0].get());
     sequences_budget.emplace_back(token_length - prefix_length);
@@ -948,7 +1001,7 @@ double ProfileManager::run_request(int32_t token_length,
   // budget profiling
   if (extra_token_length > 0) {
     std::shared_ptr<Request> request =
-        generate_single_request(token_length, prefix_length);
+        generate_single_request(token_length, prefix_length, is_graph_warmup);
     requests.emplace_back(request);
     sequences.emplace_back(request->sequences()[0].get());
     sequences_budget.emplace_back(token_length - prefix_length);
@@ -1059,8 +1112,8 @@ double ProfileManager::run_graph_decode_request(
 
   for (size_t i = 0; i < total_length_vec.size(); ++i) {
     int32_t dp_rank = static_cast<int32_t>(i % options_.dp_size());
-    std::shared_ptr<Request> request =
-        generate_single_decode_request(total_length_vec[i], dp_rank);
+    std::shared_ptr<Request> request = generate_single_decode_request(
+        total_length_vec[i], dp_rank, /*is_graph_warmup=*/true);
     requests.emplace_back(request);
     sequences.emplace_back(request->sequences()[0].get());
     sequences_budget.emplace_back(1);
@@ -1143,6 +1196,28 @@ void ProfileManager::generate_random_decode_batch(
   }
 }
 
+void ProfileManager::warmup_for_eager() {
+  constexpr int32_t kMaxEagerWarmupTokens = 256;
+  const int32_t max_context_len =
+      engine_->model_args().max_position_embeddings();
+  const int32_t prefill_tokens = std::min({options_.max_tokens_per_batch(),
+                                           max_context_len,
+                                           kMaxEagerWarmupTokens});
+  if (prefill_tokens <= 0 || engine_->model_args().vocab_size() <= 2) {
+    LOG(INFO) << "Skipping eager warmup because model metadata is incomplete: "
+              << "tokens=" << prefill_tokens
+              << ", vocab_size=" << engine_->model_args().vocab_size();
+    return;
+  }
+  const double prefill_latency = run_request(prefill_tokens,
+                                             0,
+                                             1,
+                                             /*extra_token_length=*/0,
+                                             /*is_graph_warmup=*/true);
+  LOG(INFO) << "Eager warmup completed: tokens=" << prefill_tokens
+            << ", latency=" << prefill_latency << " ms";
+}
+
 void ProfileManager::warmup_for_graph() {
   const GraphWarmupPlan plan = graph_warmup_plan(options_.instance_role());
   if (plan == GraphWarmupPlan::PREFILL_ONLY) {
@@ -1165,8 +1240,11 @@ void ProfileManager::warmup_prefill_for_graph() {
 
   int32_t prefill_tokens =
       std::min(options_.max_tokens_per_batch(), max_context_len);
-  double prefill_latency =
-      run_request(prefill_tokens, /*prefix_length=*/0, /*batch_size=*/1);
+  double prefill_latency = run_request(prefill_tokens,
+                                       /*prefix_length=*/0,
+                                       /*batch_size=*/1,
+                                       /*extra_token_length=*/0,
+                                       /*is_graph_warmup=*/true);
   LOG(INFO) << "Prefill warmup completed: tokens=" << prefill_tokens
             << ", latency=" << prefill_latency << " ms";
 }
@@ -1179,14 +1257,37 @@ void ProfileManager::warmup_unified_for_graph() {
 void ProfileManager::warmup_decode_for_graph() {
   auto& model_args = engine_->model_args();
   int32_t max_context_len = model_args.max_position_embeddings();
+  int32_t max_decode_batch_size = options_.max_seqs_per_batch();
+  const int32_t max_concurrent_requests =
+      ::xllm::ServiceConfig::get_instance().max_concurrent_requests();
+  if (max_concurrent_requests > 0) {
+    max_decode_batch_size =
+        std::min(max_decode_batch_size, max_concurrent_requests);
+  }
+  const int32_t decode_batch_size_limit =
+      std::max<int32_t>(1,
+                        ::xllm::ExecutionConfig::get_instance()
+                            .acl_graph_decode_batch_size_limit());
+  max_decode_batch_size =
+      std::min(max_decode_batch_size, decode_batch_size_limit);
   int32_t decode_seq_len = std::min(16, max_context_len);
 
+  const int32_t allocatable_sequences =
+      measure_graph_decode_capacity(max_decode_batch_size, decode_seq_len);
+  const int32_t warmup_capacity =
+      std::min(max_decode_batch_size, allocatable_sequences);
+  decode_graph_warmup_plan_ =
+      build_decode_graph_warmup_plan(engine_->decode_graph_execution_shape(),
+                                     warmup_capacity,
+                                     options_.dp_size());
   const std::vector<int32_t>& decode_batch_sizes =
       decode_graph_warmup_plan_.batch_sizes;
   const int32_t decode_bucket_count =
       static_cast<int32_t>(decode_batch_sizes.size());
 
   LOG(INFO) << "Graph warmup started: bucket_count=" << decode_bucket_count
+            << ", configured_max_batch_size=" << max_decode_batch_size
+            << ", allocatable_sequences=" << allocatable_sequences
             << ", decode_seq_len=" << decode_seq_len;
 
   // Capture from the largest bucket down to the smallest so every smaller

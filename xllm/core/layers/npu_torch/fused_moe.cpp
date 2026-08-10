@@ -1057,16 +1057,16 @@ torch::Tensor FusedMoEImpl::remap_expert_ids_for_eplb(
 
 void FusedMoEImpl::record_eplb_expert_load(
     const torch::Tensor& ids_2d,
-    const ModelInputParams& input_params) const {
-  if (!enable_eplb_ || eplb_layer_id_ < 0 ||
+    const ModelInputParams& input_params,
+    bool routed_tokens_are_dp_gathered) const {
+  const bool is_eager_warmup = dsv4_eplb::is_eager_warmup(
+      input_params.meta.is_graph_warmup, input_params.enable_graph);
+  if (!enable_eplb_ || is_eager_warmup || eplb_layer_id_ < 0 ||
       !input_params.expert.expert_load_data.defined() || ids_2d.numel() == 0) {
     return;
   }
   const bool decode_only =
       ::xllm::EPLBConfig::get_instance().eplb_use_decode_only_load();
-  if (decode_only && !all_dp_ranks_are_decode(input_params)) {
-    return;
-  }
   CHECK_GE(input_params.expert.expert_load_data.dim(), 2)
       << "DeepSeek-V4 EPLB expert_load_data must be 2D.";
   CHECK_GT(input_params.expert.expert_load_data.size(0), eplb_layer_id_)
@@ -1090,6 +1090,21 @@ void FusedMoEImpl::record_eplb_expert_load(
   torch::Tensor safe_ids =
       local_ids.clamp(0, static_cast<int64_t>(device_experts_num_) - 1);
   torch::Tensor weights = valid.to(torch::kInt64);
+  const int32_t dp_rank = parallel_args_.dp_local_process_group_ == nullptr
+                              ? 0
+                              : parallel_args_.dp_local_process_group_->rank();
+  torch::Tensor load_token_mask = dsv4_eplb::select_recorded_load_token_mask(
+      input_params.expert.eplb_decode_token_mask,
+      ids_2d.size(0),
+      input_params.parallel.dp_global_token_nums,
+      dp_rank,
+      routed_tokens_are_dp_gathered,
+      decode_only,
+      input_params.enable_graph);
+  if (load_token_mask.defined()) {
+    weights = dsv4_eplb::apply_decode_token_mask(
+        weights, load_token_mask, ids_2d.size(1));
+  }
   torch::Tensor counts = torch::zeros({device_experts_num_},
                                       flat_ids.options().dtype(torch::kInt64));
   counts.scatter_add_(/*dim=*/0, safe_ids, weights);
@@ -1101,7 +1116,9 @@ void FusedMoEImpl::record_eplb_expert_load(
 void FusedMoEImpl::record_eplb_dispatch_expert_load(
     const torch::Tensor& expert_token_counts,
     const ModelInputParams& input_params) const {
-  if (!enable_eplb_ || eplb_layer_id_ < 0 ||
+  const bool is_eager_warmup = dsv4_eplb::is_eager_warmup(
+      input_params.meta.is_graph_warmup, input_params.enable_graph);
+  if (!enable_eplb_ || is_eager_warmup || eplb_layer_id_ < 0 ||
       !input_params.expert.expert_load_data.defined()) {
     return;
   }
@@ -1112,8 +1129,7 @@ void FusedMoEImpl::record_eplb_dispatch_expert_load(
   }
   dsv4_eplb::record_dispatch_expert_load(expert_token_counts,
                                          input_params.expert.expert_load_data,
-                                         eplb_layer_id_,
-                                         /*is_graph_warmup=*/false);
+                                         eplb_layer_id_);
 }
 
 void FusedMoEImpl::expand_eplb_tensor_storage(torch::Tensor& tensor) {
@@ -1774,7 +1790,8 @@ torch::Tensor FusedMoEImpl::select_experts(
 
   if (enable_eplb_) {
     topk_ids = remap_expert_ids_for_eplb(topk_ids);
-    record_eplb_expert_load(topk_ids, input_params);
+    record_eplb_expert_load(
+        topk_ids, input_params, /*routed_tokens_are_dp_gathered=*/true);
   }
 
   const int64_t local_expert_start =
@@ -2507,6 +2524,24 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
   const auto ep_world_size = parallel_args_.moe_ep_group_->world_size();
   const auto ep_rank_id = parallel_args_.moe_ep_group_->rank();
   torch::Tensor active_token_mask;
+  if (enable_eplb_) {
+    const int32_t dp_rank =
+        parallel_args_.dp_local_process_group_ == nullptr
+            ? 0
+            : parallel_args_.dp_local_process_group_->rank();
+    active_token_mask = dsv4_eplb::select_ep2_active_token_mask(
+        input_params.expert.eplb_decode_token_mask,
+        input_2d.size(0),
+        input_params.parallel.dp_global_token_nums,
+        dp_rank,
+        all_dp_ranks_are_decode(input_params));
+  }
+  const bool decode_only =
+      ::xllm::EPLBConfig::get_instance().eplb_use_decode_only_load();
+  if (decode_only && !all_dp_ranks_are_decode(input_params)) {
+    record_eplb_expert_load(
+        ids_2d, input_params, /*routed_tokens_are_dp_gathered=*/false);
+  }
   int64_t global_bs = input_2d.size(0) * ep_world_size;
   if (parallel_args_.dp_size() > 1 &&
       !input_params.parallel.dp_global_token_nums.empty()) {

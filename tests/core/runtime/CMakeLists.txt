@@ -1,5 +1,14 @@
 include(cc_test)
 
+cc_test(
+  NAME
+    acl_graph_bucket_policy_test
+  SRCS
+    acl_graph_bucket_policy_test.cpp
+  DEPS
+    GTest::gtest_main
+)
+
 if(USE_NPU)
   cc_test(
     NAME

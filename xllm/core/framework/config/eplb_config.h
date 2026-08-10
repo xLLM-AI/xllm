@@ -63,11 +63,6 @@ class EPLBConfig final {
   // publishes a new placement. This gate is shared by all EPLB policies.
   PROPERTY(double, eplb_min_peak_load_improvement) = 0.05;
 
-  // Transitional source compatibility for public option plumbing removed in
-  // the final integration PR. This value is not registered, loaded, dumped,
-  // or consumed by EPLB policy selection.
-  PROPERTY(double, eplb_update_threshold) = 0.8;
-
   // Selects the concrete EPLB rebalance strategy MakeEplbPolicy instantiates.
   // Accepted (case-insensitive) values: "balanced" (default,
   // max-load-reduction replica selection + strict equal-cardinality LPT

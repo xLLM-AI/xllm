@@ -140,6 +140,7 @@ class Batch {
   // Get all sequences from either sequences_ or sequence_groups_
   // Used by RecEngine to access sequences for stopping checker evaluation
   std::vector<Sequence*> get_sequences();
+  std::vector<Sequence*> get_sequences() const;
 
  private:
   struct OutputTarget {

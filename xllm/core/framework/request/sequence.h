@@ -98,6 +98,8 @@ struct SequenceParams {
   // enable_schedule_overlap or not. default = false.
   bool enable_schedule_overlap = false;
 
+  bool is_graph_warmup = false;
+
   RecType rec_type = RecType::kNone;
 
   int32_t bos_token_id = 0;
@@ -261,6 +263,8 @@ class Sequence final {
   std::string sample_sequence_id() const {
     return request_id_ + "#" + std::to_string(index_);
   }
+
+  bool is_graph_warmup() const { return sequence_params_.is_graph_warmup; }
   // get input embedding
   torch::Tensor get_input_embedding() const { return input_embedding_; }
 

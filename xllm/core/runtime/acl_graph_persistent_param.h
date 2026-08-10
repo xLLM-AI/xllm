@@ -127,6 +127,14 @@ class GraphPersistentParam final {
     }
     return persistent_new_cache_slots_;
   }
+  torch::Tensor persistent_eplb_decode_token_mask(
+      uint32_t token_count = 0) const {
+    if (token_count > 0) {
+      return persistent_eplb_decode_token_mask_.slice(
+          /*dim=*/0, /*start=*/0, /*end=*/token_count);
+    }
+    return persistent_eplb_decode_token_mask_;
+  }
   torch::Tensor persistent_block_tables(uint32_t actual_batch_size = 0) const {
     if (actual_batch_size > 0) {
       return persistent_block_tables_.slice(
@@ -242,6 +250,9 @@ class GraphPersistentParam final {
   // Update attention mask efficiently from input parameters
   void update_attention_mask(const ModelInputParams& input_params);
 
+  void update_eplb_decode_token_mask(const ModelInputParams& input_params,
+                                     uint32_t padded_num_tokens);
+
   // Update paged attention tiling based on input parameters
   void plan_paged_attention_tiling(const torch::Tensor& tokens,
                                    const torch::Tensor& k_cache,
@@ -264,6 +275,7 @@ class GraphPersistentParam final {
   torch::Tensor persistent_tokens_;
   torch::Tensor persistent_positions_;
   torch::Tensor persistent_new_cache_slots_;
+  torch::Tensor persistent_eplb_decode_token_mask_;
   torch::Tensor persistent_block_tables_;
   torch::Tensor persistent_new_cache_slots_default_;
   torch::Tensor persistent_block_tables_default_;

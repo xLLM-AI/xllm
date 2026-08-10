@@ -191,26 +191,4 @@ std::unique_ptr<IEplbPolicy> MakeEplbPolicy(EplbPolicyKind kind,
                                             int32_t layer_num,
                                             EplbOptions options);
 
-// Compatibility facade for the current EplbManager API. It snapshots global
-// EPLB options, selects the configured concrete policy, and seeds that policy
-// with the identity placement used by EplbManager before its lifecycle is
-// migrated to explicit dependency injection.
-class EplbPolicy final : public IEplbPolicy {
- public:
-  EplbPolicy(int32_t device_experts_num, int32_t device_num, int32_t layer_num);
-
-  std::pair<torch::Tensor, std::vector<bool>> rebalance_experts(
-      torch::Tensor expert_load,
-      torch::Tensor physical_expert_load = torch::Tensor()) override;
-
-  void initialize_distribution(
-      const torch::Tensor& current_distribution) override;
-  void commit_layer(int32_t layer_id) override;
-  void abort_layer(int32_t layer_id) override;
-  std::string name() const override;
-
- private:
-  std::unique_ptr<IEplbPolicy> impl_;
-};
-
 }  // namespace xllm

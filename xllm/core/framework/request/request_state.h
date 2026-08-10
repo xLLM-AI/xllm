@@ -167,6 +167,8 @@ struct RequestState final {
 
   bool enable_schedule_overlap = false;
 
+  bool is_graph_warmup = false;
+
   RecType rec_type = RecType::kNone;
 
   int32_t bos_token_id = 0;

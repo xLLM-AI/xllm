@@ -145,7 +145,6 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `enable_eplb` | `bool` | `false` | Whether to enable expert parallel load balance. See [EPLB](/en/features/eplb/). |
 | `redundant_experts_num` | `int32` | `1` | Number of redundant experts per device. |
 | `eplb_update_interval` | `int64` | `1000` | EPLB update interval. |
-| `eplb_update_threshold` | `double` | `0.8` | EPLB update threshold. |
 | `expert_parallel_degree` | `int32` | `0` | Expert parallel degree. |
 | `rank_tablefile` | `string` | `""` | ATB HCCL rank table file. |
 

@@ -279,19 +279,6 @@ TEST(EplbPolicyTest, Factory_MakeEplbPolicy) {
   EXPECT_NE(dynamic_cast<BalancedEplbPolicy*>(balanced.get()), nullptr);
 }
 
-TEST(EplbPolicyTest, LegacyFacadeStartsFromManagerIdentityPlacement) {
-  EplbPolicy policy(kDeviceExpertsNum, kDeviceNum, kLayerNum);
-  torch::Tensor uniform =
-      torch::full({kLayerNum, kNumExperts}, 10, torch::kInt64);
-
-  auto [distribution, update] = policy.rebalance_experts(uniform);
-
-  EXPECT_FALSE(update[0]);
-  EXPECT_EQ(distribution.size(0), kLayerNum);
-  EXPECT_EQ(distribution.size(1), kDeviceNum);
-  EXPECT_EQ(distribution.size(2), kDeviceExpertsNum);
-}
-
 TEST(EplbPolicyTest, Factory_LegacyNamesAliasToBalanced) {
   EXPECT_EQ(eplb_policy_kind_from_string("deepseek_hier"),
             EplbPolicyKind::BALANCED);

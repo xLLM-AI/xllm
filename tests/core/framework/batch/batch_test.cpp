@@ -1710,6 +1710,7 @@ TEST(BatchTest, ForwardInputPackedRoundTripPreservesTransportFields) {
   seq_params.echo = false;
   seq_params.logprobs = true;
   seq_params.enable_schedule_overlap = false;
+  seq_params.is_graph_warmup = true;
   seq_params.request_id = "req-packed";
 
   torch::Tensor input_embedding;
@@ -1771,6 +1772,7 @@ TEST(BatchTest, ForwardInputPackedRoundTripPreservesTransportFields) {
   reader_manager.input_read(round_trip, torch::Device(torch::kCPU));
 
   EXPECT_EQ(round_trip.input_params.meta.batch_id, batch_id);
+  EXPECT_TRUE(round_trip.input_params.meta.is_graph_warmup);
   EXPECT_TRUE(equal(round_trip.token_ids, std::vector<int32_t>({1, 2, 3, 4})));
   ASSERT_EQ(round_trip.transfer_kv_infos.size(), 1u);
   const KVTransferMapping& mapping =

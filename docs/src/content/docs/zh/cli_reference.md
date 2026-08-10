@@ -145,7 +145,6 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `enable_eplb` | `bool` | `false` | 是否启用 expert parallel load balance；详见 [EPLB](/zh/features/eplb/)。 |
 | `redundant_experts_num` | `int32` | `1` | 每个 device 上的冗余 expert 数量。 |
 | `eplb_update_interval` | `int64` | `1000` | EPLB 更新间隔。 |
-| `eplb_update_threshold` | `double` | `0.8` | EPLB 更新阈值。 |
 | `expert_parallel_degree` | `int32` | `0` | Expert parallel degree。 |
 | `rank_tablefile` | `string` | `""` | ATB HCCL rank table 文件。 |
 

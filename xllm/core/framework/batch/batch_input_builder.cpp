@@ -31,6 +31,7 @@ limitations under the License.
 #include "common/global_flags.h"
 #include "common/metrics.h"
 #include "core/framework/config/beam_search_config.h"
+#include "core/framework/config/eplb_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/multimodal/mm_visitor.h"
@@ -235,6 +236,16 @@ BatchInputBuilder::BatchInputBuilder(
   state_.block_tables_vec.reserve(sequences.size());
   state_.acc_logprob_vec.reserve(sequences.size());
   state_.mtp_shifted_token_ids.reserve(reserve_size);
+  const EPLBConfig& eplb_config = EPLBConfig::get_instance();
+  build_eplb_decode_token_mask_ = eplb_config.enable_eplb();
+  if (build_eplb_decode_token_mask_) {
+    state_.eplb_decode_token_mask.reserve(reserve_size);
+  }
+  is_graph_warmup_ =
+      !sequences_.empty() &&
+      std::all_of(sequences_.begin(), sequences_.end(), [](Sequence* sequence) {
+        return sequence != nullptr && sequence->is_graph_warmup();
+      });
   state_.mtp_bootstrap_embeddings.reserve(sequences.size());
   state_.mtp_bootstrap_row_idxes.reserve(sequences.size());
   if (args_ != nullptr) {
@@ -658,6 +669,9 @@ void BatchInputBuilder::process_sequences_multithreaded() {
     state_.mtp_shifted_token_ids.insert(state_.mtp_shifted_token_ids.end(),
                                         state.mtp_shifted_token_ids.begin(),
                                         state.mtp_shifted_token_ids.end());
+    state_.eplb_decode_token_mask.insert(state_.eplb_decode_token_mask.end(),
+                                         state.eplb_decode_token_mask.begin(),
+                                         state.eplb_decode_token_mask.end());
     for (int32_t row_idx : state.mtp_bootstrap_row_idxes) {
       state_.mtp_bootstrap_row_idxes.emplace_back(row_offset + row_idx);
     }
@@ -756,6 +770,12 @@ void BatchInputBuilder::process_single_sequence(
   // Process tokens and positions
   extract_tokens_and_positions(
       sequence, n_kv_cache_tokens, logical_seq_len, state_ptr);
+  if (build_eplb_decode_token_mask_) {
+    state.eplb_decode_token_mask.insert(
+        state.eplb_decode_token_mask.end(),
+        static_cast<size_t>(padded_q_seq_len),
+        sequence->stage() == SequenceStage::DECODE);
+  }
 
   // Setup KV cache
   setup_kv_cache_info(sequence,
@@ -1141,6 +1161,9 @@ void BatchInputBuilder::padding_decode_batch_size(
                 torch::zeros({3, 1}, torch::kInt));
           }
           state_.new_token_slot_ids.emplace_back(0);
+          if (build_eplb_decode_token_mask_) {
+            state_.eplb_decode_token_mask.emplace_back(0);
+          }
         }
 #if defined(USE_NPU)
         state_.seq_lens.push_back(num_decoding_tokens);
@@ -1190,6 +1213,7 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
   input_params.meta.num_sequences = static_cast<int32_t>(num_sequences_);
   input_params.meta.kv_max_seq_len = state_.max_seq_len;
   input_params.meta.q_max_seq_len = state_.q_max_seq_len;
+  input_params.meta.is_graph_warmup = is_graph_warmup_;
   input_params.attention.device.kv_seq_lens =
       torch::tensor(state_.seq_lens, torch::kInt);
   input_params.attention.device.kv_cache_tokens_nums =
@@ -1291,6 +1315,13 @@ ForwardInput BatchInputBuilder::state_to_forward_input() {
     }
   }
   input_params.meta.batch_id = batch_id_;
+  if (build_eplb_decode_token_mask_) {
+    CHECK_EQ(state_.eplb_decode_token_mask.size(),
+             state_.flatten_tokens_vec.size())
+        << "EPLB decode mask must align with flattened tokens.";
+    input_params.expert.eplb_decode_token_mask =
+        torch::tensor(state_.eplb_decode_token_mask, torch::kBool);
+  }
 
   forward_input.transfer_kv_infos = std::move(state_.transfer_kv_infos);
   process_swap_block_infos(forward_input);

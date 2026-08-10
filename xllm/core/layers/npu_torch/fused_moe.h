@@ -203,7 +203,8 @@ class FusedMoEImpl : public torch::nn::Module {
   int64_t global_physical_experts_num() const;
   torch::Tensor remap_expert_ids_for_eplb(const torch::Tensor& ids_2d) const;
   void record_eplb_expert_load(const torch::Tensor& ids_2d,
-                               const ModelInputParams& input_params) const;
+                               const ModelInputParams& input_params,
+                               bool routed_tokens_are_dp_gathered) const;
   void record_eplb_dispatch_expert_load(
       const torch::Tensor& expert_token_counts,
       const ModelInputParams& input_params) const;

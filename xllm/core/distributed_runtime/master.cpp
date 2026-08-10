@@ -425,8 +425,9 @@ Master::Master(const Options& options, EngineType type)
   if (options.eplb_update_interval().has_value()) {
     eplb_config.eplb_update_interval(options.eplb_update_interval().value());
   }
-  if (options.eplb_update_threshold().has_value()) {
-    eplb_config.eplb_update_threshold(options.eplb_update_threshold().value());
+  if (options.eplb_min_peak_load_improvement().has_value()) {
+    eplb_config.eplb_min_peak_load_improvement(
+        options.eplb_min_peak_load_improvement().value());
   }
   resolve_npu_kernel_backend_for_options(&options_);
 #endif

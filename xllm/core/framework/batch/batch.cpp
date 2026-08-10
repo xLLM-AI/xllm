@@ -244,6 +244,10 @@ ForwardInput Batch::prepare_rec_forward_input(uint32_t num_decoding_tokens,
 }
 
 std::vector<Sequence*> Batch::get_sequences() {
+  return static_cast<const Batch&>(*this).get_sequences();
+}
+
+std::vector<Sequence*> Batch::get_sequences() const {
   if (!sequences_.empty()) {
     return sequences_;
   }
