@@ -20,6 +20,7 @@ limitations under the License.
 
 #include "common/options.h"
 #include "common/types.h"
+#include "scheduler/chunked_prefill_policy.h"
 
 namespace xllm {
 
@@ -29,13 +30,16 @@ inline std::optional<std::string> validate_dcp_first_version_options(
   if (options.decode_context_parallel_size() <= 1) {
     return std::nullopt;
   }
-  if (options.enable_chunked_prefill() &&
+  if (resolve_effective_chunked_prefill(options.enable_chunked_prefill(),
+                                        options.priority_strategy()) &&
       !options.enable_experimental_dcp_chunked_prefill()) {
     return "decode_context_parallel_size with chunked prefill is experimental "
-           "and not bitwise-equivalent to decode_context_parallel_size=1; set "
-           "--enable_experimental_dcp_chunked_prefill=true to opt in, or set "
-           "--enable_chunked_prefill=false, or set "
-           "--decode_context_parallel_size=1";
+           "and not bitwise-equivalent to decode_context_parallel_size=1 "
+           "(priority_strategy=multi_slo_and_prio also implicitly enables "
+           "chunked prefill); set --enable_experimental_dcp_chunked_prefill="
+           "true to opt in, or disable chunked prefill "
+           "(--enable_chunked_prefill=false and a non-multi_slo_and_prio "
+           "priority_strategy), or set --decode_context_parallel_size=1";
   }
   if (options.enable_schedule_overlap()) {
     return "decode_context_parallel_size first version does not yet support "

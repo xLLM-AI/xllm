@@ -422,6 +422,21 @@ TEST(ContinuousSchedulerBatchModeTest, Dcp2ClosesMixBatchUnderMultiSlo) {
   EXPECT_FALSE(mode.enable_mix_batch);
 }
 
+TEST(ContinuousSchedulerBatchModeTest, MultiSloForcesEffectiveChunkedPrefill) {
+  ContinuousScheduler::Options opt = create_scheduler_options(
+      10000, 256, 0, 1024, 1, /*priority_strategy=*/"multi_slo_and_prio");
+  ::xllm::SchedulerConfig::get_instance().enable_mix_batch() = true;
+  opt.enable_chunked_prefill() = false;
+  opt.decode_context_parallel_size() = 2;
+
+  BatchMode mode = resolve_batch_mode(opt);
+
+  // multi_slo_and_prio drives chunked prefill even when the raw flag is false;
+  // DCP then closes mix batching.
+  EXPECT_TRUE(mode.enable_chunked_prefill);
+  EXPECT_FALSE(mode.enable_mix_batch);
+}
+
 TEST(ContinuousSchedulerFactoryTest,
      ChunkedPrefillWithDcpDoesNotBuildMixedBatch) {
   ContinuousScheduler::Options opt = create_scheduler_options(8, 8, 0, 4, 1);

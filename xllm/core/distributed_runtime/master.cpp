@@ -459,15 +459,19 @@ Master::Master(const Options& options, EngineType type)
       validate_model_dcp(options_, type, dcp_model_config, global_world_size);
   CHECK(!dcp_error.has_value()) << dcp_error.value();
   if (options_.decode_context_parallel_size() > 1 &&
-      options_.enable_chunked_prefill() &&
+      resolve_effective_chunked_prefill(options_.enable_chunked_prefill(),
+                                        options_.priority_strategy()) &&
       options_.enable_experimental_dcp_chunked_prefill()) {
     LOG(WARNING)
         << "Experimental DCP chunked prefill is enabled "
            "(--enable_experimental_dcp_chunked_prefill=true). This path is not "
            "bitwise-equivalent to decode_context_parallel_size=1 (BF16/FP16 "
            "partial-output quantization before the FP32 merge), mixed batching "
-           "is automatically disabled, and it is unsupported for release. Set "
-           "--enable_experimental_dcp_chunked_prefill=false to roll back.";
+           "is automatically disabled, and it is unsupported for release. To "
+           "roll back, set --enable_experimental_dcp_chunked_prefill=false and "
+           "disable chunked prefill (--enable_chunked_prefill=false and a "
+           "non-multi_slo_and_prio priority_strategy), or set "
+           "--decode_context_parallel_size=1.";
   }
   const std::string cp_model_type =
       dcp_model_config.has_value() ? dcp_model_config->model_type : "";

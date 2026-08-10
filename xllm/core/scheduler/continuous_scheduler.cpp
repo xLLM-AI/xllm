@@ -41,6 +41,7 @@ limitations under the License.
 #include "framework/request/priority_comparator.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
+#include "scheduler/chunked_prefill_policy.h"
 #include "scheduler/request_priority_queue.h"
 #include "scheduler/scheduler_policy.h"
 #include "util/timer.h"
@@ -63,14 +64,10 @@ std::vector<std::shared_ptr<Request>> CancelRequestQueue::take_all() {
 BatchMode resolve_batch_mode(const ContinuousScheduler::Options& options) {
   BatchMode mode;
   mode.priority_strategy = options.priority_strategy();
-  mode.enable_chunked_prefill = options.enable_chunked_prefill();
+  mode.enable_chunked_prefill = resolve_effective_chunked_prefill(
+      options.enable_chunked_prefill(), options.priority_strategy());
   mode.enable_mix_batch =
       ::xllm::SchedulerConfig::get_instance().enable_mix_batch();
-
-  // multi_slo_and_prio requires chunked prefill.
-  if (mode.priority_strategy == "multi_slo_and_prio") {
-    mode.enable_chunked_prefill = true;
-  }
 
   // CP/DCP/MTP: prefill cannot mix with decode in the same batch.
   // DCP reuses TP cards, so cp_size may be 1 while decode_context_parallel_size
