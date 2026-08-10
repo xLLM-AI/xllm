@@ -99,6 +99,15 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
                                               Stream& compute_stream,
                                               int32_t effective_val_tokens);
 
+  // Per-seq varlen variant. Handles the case where validate_input.token_ids
+  // is a flat [Σ per_seq_val_tokens] layout (i.e. the base per_seq builder
+  // produced it), copying draft tokens into the varlen slots per seq.
+  void fill_validate_input_from_draft_outputs_varlen(
+      const DraftBlock& draft_block,
+      ForwardInput& validate_input,
+      Stream& compute_stream,
+      const std::vector<int32_t>& per_seq_val_tokens);
+
   std::optional<ForwardOutput> run_validate(const ForwardInput& input,
                                             const DraftBlock& draft_block,
                                             ForwardInput& validate_input);

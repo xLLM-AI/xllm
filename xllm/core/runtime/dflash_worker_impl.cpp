@@ -784,6 +784,66 @@ void DFlashWorkerImpl::fill_validate_input_from_draft_outputs(
   record_metadata_ready_event(compute_stream, validate_input);
 }
 
+void DFlashWorkerImpl::fill_validate_input_from_draft_outputs_varlen(
+    const DraftBlock& draft_block,
+    ForwardInput& validate_input,
+    Stream& compute_stream,
+    const std::vector<int32_t>& per_seq_val_tokens) {
+  const int32_t num_speculative_tokens = options_.num_speculative_tokens();
+  const int64_t num_sequences = static_cast<int64_t>(per_seq_val_tokens.size());
+  CHECK(draft_block.token_ids.defined())
+      << "DFlash draft token_ids must be defined for varlen validate fill";
+  CHECK_EQ(draft_block.token_ids.dim(), 2);
+  CHECK_EQ(draft_block.token_ids.size(0), num_sequences);
+  CHECK_EQ(draft_block.token_ids.size(1), num_speculative_tokens);
+  CHECK(validate_input.token_ids.defined());
+  CHECK_EQ(validate_input.token_ids.dim(), 1);
+
+  const torch::TensorOptions token_options = validate_input.token_ids.options();
+  c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
+  wait_metadata_ready_event(validate_input, compute_stream);
+
+  validate_input.device_tensors_ready = false;
+
+  // Compute destination offsets: seq i's draft tokens go at
+  // [cu_offset[i] + 1, cu_offset[i] + per_seq_val_tokens[i]).
+  std::vector<int64_t> dst_idx_vec;
+  std::vector<int64_t> src_idx_vec;
+  int64_t cu_offset = 0;
+  for (int64_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
+    const int32_t seq_val_tokens =
+        per_seq_val_tokens[static_cast<size_t>(seq_id)];
+    for (int32_t j = 0; j < seq_val_tokens - 1; ++j) {
+      dst_idx_vec.push_back(cu_offset + 1 + j);
+      src_idx_vec.push_back(seq_id * num_speculative_tokens + j);
+    }
+    cu_offset += seq_val_tokens;
+  }
+
+  if (!dst_idx_vec.empty()) {
+    const torch::TensorOptions long_dev_opts =
+        torch::TensorOptions()
+            .dtype(torch::kLong)
+            .device(validate_input.token_ids.device());
+    torch::Tensor dst_idx = safe_to(
+        torch::tensor(dst_idx_vec, torch::TensorOptions().dtype(torch::kLong)),
+        long_dev_opts,
+        /*non_blocking=*/true);
+    torch::Tensor src_idx = safe_to(
+        torch::tensor(src_idx_vec, torch::TensorOptions().dtype(torch::kLong)),
+        long_dev_opts,
+        /*non_blocking=*/true);
+    // Flatten [B, N] -> [B*N] and gather via src_idx.
+    torch::Tensor draft_flat = draft_block.token_ids.view({-1});
+    torch::Tensor draft_selected = draft_flat.index_select(/*dim=*/0, src_idx);
+    torch::Tensor draft_tokens =
+        safe_to(draft_selected, token_options, /*non_blocking=*/true);
+    validate_input.token_ids.index_copy_(/*dim=*/0, dst_idx, draft_tokens);
+  }
+  validate_input.device_tensors_ready = true;
+  record_metadata_ready_event(compute_stream, validate_input);
+}
+
 std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
     const ForwardInput& input,
     const DraftBlock& draft_block_in,
@@ -831,9 +891,12 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
 
   if (did_prune) {
     apply_per_seq_varlen_prune(input, validate_input, per_seq_val_tokens);
+    fill_validate_input_from_draft_outputs_varlen(
+        draft_block, validate_input, *compute_stream_, per_seq_val_tokens);
+  } else {
+    fill_validate_input_from_draft_outputs(
+        draft_block, validate_input, *compute_stream_, max_val_tokens);
   }
-  fill_validate_input_from_draft_outputs(
-      draft_block, validate_input, *compute_stream_, max_val_tokens);
   ForwardOutput target_output =
       run_llm_no_sync_impl(
           *impl_, validate_input, *prepare_stream_, *compute_stream_)
