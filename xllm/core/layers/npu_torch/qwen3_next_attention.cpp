@@ -54,30 +54,35 @@ Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
   kv_size_ = num_kv_heads_ * head_dim_;
   scaling_ = 1.0f / std::sqrt(static_cast<float>(head_dim_));
   attn_output_gate_ = args.attn_output_gate();
-  // 1. QKV linear
+  // 1. QKV linear (LoRA-wrapped). For attn_output_gate=true (Qwen3-Next),
+  // num_heads_ * 2 folds q + gate into one fused lane; the wrapper sizes
+  // q_size_local from that argument so PEFT B_q shape matches the fused lane.
   qkv_proj_ = register_module(
       "qkv_proj",
-      QKVParallelLinear(args.hidden_size(),
-                        attn_output_gate_ ? num_heads_ * 2 : num_heads_,
-                        num_kv_heads_,
-                        args.head_dim(),
-                        num_kv_head_replicas_,
-                        /*bias=*/args.attention_bias(),
-                        /*gather_output=*/false,
-                        parallel_args,
-                        options,
-                        quant_args));
+      LoRAQKVParallelLinear(args.hidden_size(),
+                            attn_output_gate_ ? num_heads_ * 2 : num_heads_,
+                            num_kv_heads_,
+                            args.head_dim(),
+                            num_kv_head_replicas_,
+                            /*bias=*/args.attention_bias(),
+                            /*gather_output=*/false,
+                            parallel_args,
+                            options,
+                            quant_args,
+                            /*q_has_gate=*/attn_output_gate_));
 
-  // 2. O proj
-  o_proj_ = register_module("o_proj",
-                            RowParallelLinear(total_num_heads * head_dim_,
-                                              args.hidden_size(),
-                                              /*bias=*/false,
-                                              /*input_is_parallelized=*/true,
-                                              /*if_reduce_results=*/true,
-                                              quant_args,
-                                              parallel_args.tp_group_,
-                                              options));
+  // 2. O proj (LoRA-wrapped).
+  o_proj_ =
+      register_module("o_proj",
+                      LoRARowParallelLinear(total_num_heads * head_dim_,
+                                            args.hidden_size(),
+                                            /*bias=*/false,
+                                            /*input_is_parallelized=*/true,
+                                            /*enable_result_reduction=*/true,
+                                            quant_args,
+                                            parallel_args.tp_group_,
+                                            options,
+                                            /*proj_name=*/"o_proj"));
 
   // 3. Q norm
   q_norm_ = register_module(

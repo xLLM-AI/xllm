@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "core/common/flash_comm1_context.h"
 #include "core/framework/kv_cache/kv_cache.h"
+#include "core/framework/lora/lora_context.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_context.h"
@@ -105,6 +106,18 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
       }
     }
 
+    // Multi-tenant LoRA (mirror of llm_model_base.h). Push a per-batch
+    // LoRAContext so LoRA-wrapped Linear layers (QKV / o_proj) can read
+    // adapter_ids without extending Linear::forward. set_lora_context_layer
+    // updates layer_index on the top frame each iteration; LoRAScope pops
+    // on scope exit.
+    LoRAContextFrame lora_frame;
+    lora_frame.adapter_ids = &input_params.adapter_ids;
+    lora_frame.q_seq_lens_vec = &input_params.attention.host.q_seq_lens;
+    lora_frame.adapter_ids_per_token = &input_params.adapter_ids_per_token;
+    lora_frame.layer_index = -1;
+    LoRAScope _lora_scope(lora_frame);
+
     layer::AttentionMetadata attn_metadata =
         layer::AttentionMetadataBuilder::build(
             input_params,
@@ -137,6 +150,7 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
 
     std::optional<torch::Tensor> residual = std::nullopt;
     for (size_t i = 0; i < layers_.size(); i++) {
+      set_lora_context_layer(static_cast<int32_t>(i));
       auto& layer = layers_[i];
       h = layer->forward(h,
                          residual,
