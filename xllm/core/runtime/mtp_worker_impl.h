@@ -212,6 +212,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
     std::vector<std::string> request_ids;
     std::vector<int32_t> dp_global_token_nums;
     std::vector<int32_t> raw_dp_global_token_nums;
+    std::vector<uint64_t> dp_global_batch_generations;
     std::optional<ForwardOutput> output;
     ForwardInput prepared_input;
   };
@@ -229,6 +230,7 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   void flush_pending_target_context();
   bool supports_combined_first_draft_execution() const;
   bool can_use_combined_first_draft() const;
+  bool can_prelaunch_next_first_draft(const ForwardInput& input) const;
   void prepare_next_first_draft_template(const ForwardInput& input,
                                          ForwardInput& combined_input);
   void enqueue_next_first_draft(const ForwardInput& input,
@@ -236,6 +238,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
                                 const torch::Tensor& base_positions,
                                 const torch::Tensor& base_kv_seq_lens,
                                 ForwardInput combined_input);
+  void submit_pending_first_draft(const ForwardInput& batch_identity_input,
+                                  ForwardInput draft_input);
   bool pending_draft_context_matches(const ForwardInput& input) const;
 
   void write_target_context_to_cache(const ForwardInput& input,

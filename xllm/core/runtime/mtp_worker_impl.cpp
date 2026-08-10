@@ -75,6 +75,17 @@ void clamp_gdn_conv_history(std::vector<int32_t>& accepted_prefix_lengths) {
   }
 }
 
+bool has_active_dp_tokens(const ForwardInput& input) {
+  const ParallelInput& parallel = input.input_params.parallel;
+  const std::vector<int32_t>& token_nums =
+      parallel.raw_dp_global_token_nums.empty()
+          ? parallel.dp_global_token_nums
+          : parallel.raw_dp_global_token_nums;
+  return std::any_of(token_nums.begin(), token_nums.end(), [](int32_t count) {
+    return count > 0;
+  });
+}
+
 void broadcast_tokens_in_group(torch::Tensor& tokens,
                                ProcessGroup* process_group,
                                int32_t root_rank = 0) {
@@ -977,8 +988,12 @@ bool MTPWorkerImpl::owns_npu_parallel_input_prepare() const { return false; }
 
 std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
     const ForwardInput& input) {
-  if (pending_draft_context_.output.has_value()) {
-    // The preceding validation may have speculatively submitted draft1 before
+  const bool use_prelaunched_first_draft =
+      input.input_params.meta.batch_forward_type.is_decode() &&
+      can_use_combined_first_draft() && pending_draft_context_matches(input);
+  if (pending_draft_context_.output.has_value() &&
+      !use_prelaunched_first_draft) {
+    // The preceding validation may have speculatively submitted draft-0 before
     // the scheduler learned that the batch had finished.  Keep its graph/input
     // buffers alive until the queued work completes, then discard the result.
     // This is a batch-exit slow path and is never taken in steady decode.
@@ -1023,12 +1038,19 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
          new_input.input_params.parallel.raw_dp_global_token_nums) {
       token_num *= 2;
     }
-    draft_outputs.emplace_back(run_llm_no_sync_impl(*draft_impl_,
-                                                    new_input,
-                                                    *prepare_stream_,
-                                                    *compute_stream_,
-                                                    draft_extend_prepared)
-                                   .value());
+    if (use_prelaunched_first_draft) {
+      draft_outputs.emplace_back(
+          std::move(pending_draft_context_.output.value()));
+      draft_extend_prepared = std::move(pending_draft_context_.prepared_input);
+      pending_draft_context_ = PendingDraftContext();
+    } else {
+      draft_outputs.emplace_back(run_llm_no_sync_impl(*draft_impl_,
+                                                      new_input,
+                                                      *prepare_stream_,
+                                                      *compute_stream_,
+                                                      draft_extend_prepared)
+                                     .value());
+    }
 
     for (int32_t i = 1; i < options_.num_speculative_tokens(); ++i) {
       draft_outputs.emplace_back(run_llm_no_sync_impl(*draft_impl_,
@@ -1060,6 +1082,18 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
     clear_all_output_embeddings(output);
     finalize_output_on_stream(
         output, *compute_stream_, enable_schedule_overlap());
+    if (can_prelaunch_next_first_draft(input)) {
+      ForwardInput next_first_draft_input = input;
+      for (int32_t& token_num :
+           next_first_draft_input.input_params.parallel.dp_global_token_nums) {
+        token_num *= 2;
+      }
+      for (int32_t& token_num : next_first_draft_input.input_params.parallel
+                                    .raw_dp_global_token_nums) {
+        token_num *= 2;
+      }
+      submit_pending_first_draft(input, std::move(next_first_draft_input));
+    }
     return output;
   }
 }
@@ -1219,6 +1253,19 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
   const bool use_device_target_context =
       can_use_combined_first_draft() && matching_device_target_context &&
       device_target_context_ready_for_batch(input);
+  // Keep the device-side accepted state alive across a first-transition Host
+  // cache flush. The prelaunched draft can be valid before the batch is marked
+  // device-context ready, while flush_pending_target_context() clears the
+  // owning context below.
+  const torch::Tensor accepted_tokens = pending_target_context_.accepted_tokens;
+  const torch::Tensor accepted_embeddings =
+      pending_target_context_.accepted_embeddings;
+  const torch::Tensor target_base_positions =
+      pending_target_context_.base_positions;
+  const torch::Tensor target_base_kv_seq_lens =
+      pending_target_context_.base_kv_seq_lens;
+  const StreamEventPtr target_context_ready_event =
+      pending_target_context_.ready_event;
   if (pending_draft_context_.output.has_value() &&
       !use_prelaunched_first_draft) {
     // A batch transition invalidates the speculative prelaunch.  Drain it
@@ -1354,11 +1401,11 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
     mtp_async::prepare_next_draft_from_accepted_state(
         current_draft_input,
         input,
-        pending_target_context_.accepted_tokens,
-        pending_target_context_.accepted_embeddings,
+        accepted_tokens,
+        accepted_embeddings,
         embedding_cache_->embedding_placeholder(),
-        pending_target_context_.base_positions,
-        pending_target_context_.base_kv_seq_lens,
+        target_base_positions,
+        target_base_kv_seq_lens,
         /*use_chunked_prefill=*/false,
         options_.block_size());
   } else {
@@ -1480,18 +1527,16 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
                               /*record_ready_event=*/false);
       {
         c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
-        CHECK(prepare_stream_->wait_event(pending_target_context_.ready_event))
+        CHECK(prepare_stream_->wait_event(target_context_ready_event))
             << "failed to wait pending target state on prepare stream";
         mtp_async::prepare_target_verify_from_accepted_state(
             validate_input,
-            pending_target_context_.accepted_tokens,
-            pending_target_context_.base_positions,
-            pending_target_context_.base_kv_seq_lens,
+            accepted_tokens,
+            target_base_positions,
+            target_base_kv_seq_lens,
             options_.block_size());
         validate_input.retained_device_tensors = {
-            pending_target_context_.accepted_tokens,
-            pending_target_context_.base_positions,
-            pending_target_context_.base_kv_seq_lens};
+            accepted_tokens, target_base_positions, target_base_kv_seq_lens};
         finish_metadata_prepare(*prepare_stream_, validate_input);
       }
 
@@ -1983,8 +2028,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
       needs_padding ? *padded_target_output_slow : uniform_target_view;
 
   const bool prelaunch_next_first_draft =
-      pruned_prefix_lengths == nullptr && can_use_combined_first_draft() &&
-      device_target_context_ready_for_batch(input);
+      pruned_prefix_lengths == nullptr && can_prelaunch_next_first_draft(input);
   ForwardInput next_first_draft_input;
   if (prelaunch_next_first_draft) {
     // This input is independent of the accepted token.  Prepare it on the
@@ -2261,6 +2305,21 @@ bool MTPWorkerImpl::can_use_combined_first_draft() const {
   return enable_schedule_overlap() && supports_combined_first_draft_execution();
 }
 
+bool MTPWorkerImpl::can_prelaunch_next_first_draft(
+    const ForwardInput& input) const {
+  if (!can_use_combined_first_draft()) {
+    return false;
+  }
+  const bool requires_dp_symmetric_prelaunch =
+      parallel_args_.dp_size() > 1 &&
+      combined_draft_execution_path_ ==
+          mtp_async::CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION;
+  if (requires_dp_symmetric_prelaunch) {
+    return has_active_dp_tokens(input);
+  }
+  return device_target_context_ready_for_batch(input);
+}
+
 void MTPWorkerImpl::prepare_next_first_draft_template(
     const ForwardInput& input,
     ForwardInput& combined_input) {
@@ -2316,8 +2375,6 @@ void MTPWorkerImpl::enqueue_next_first_draft(
     const torch::Tensor& base_positions,
     const torch::Tensor& base_kv_seq_lens,
     ForwardInput combined_input) {
-  CHECK(!pending_draft_context_.output.has_value())
-      << "MTP first-draft prelaunch was not consumed";
   CHECK(validate_output.next_tokens.defined());
   CHECK(validate_output.embeddings.defined());
   CHECK(embedding_cache_ != nullptr);
@@ -2341,16 +2398,27 @@ void MTPWorkerImpl::enqueue_next_first_draft(
       /*use_chunked_prefill=*/false,
       options_.block_size());
 
+  submit_pending_first_draft(input, std::move(combined_input));
+}
+
+void MTPWorkerImpl::submit_pending_first_draft(
+    const ForwardInput& batch_identity_input,
+    ForwardInput draft_input) {
+  CHECK(!pending_draft_context_.output.has_value())
+      << "MTP first-draft prelaunch was not consumed";
   pending_draft_context_.embedding_ids =
-      input.input_params.embedding.embedding_ids;
-  pending_draft_context_.request_ids = input.input_params.embedding.request_ids;
+      batch_identity_input.input_params.embedding.embedding_ids;
+  pending_draft_context_.request_ids =
+      batch_identity_input.input_params.embedding.request_ids;
   pending_draft_context_.dp_global_token_nums =
-      input.input_params.parallel.dp_global_token_nums;
+      batch_identity_input.input_params.parallel.dp_global_token_nums;
   pending_draft_context_.raw_dp_global_token_nums =
-      input.input_params.parallel.raw_dp_global_token_nums;
+      batch_identity_input.input_params.parallel.raw_dp_global_token_nums;
+  pending_draft_context_.dp_global_batch_generations =
+      batch_identity_input.input_params.parallel.dp_global_batch_generations;
   pending_draft_context_.output =
       run_llm_no_sync_impl(*draft_impl_,
-                           combined_input,
+                           draft_input,
                            *compute_stream_,
                            *compute_stream_,
                            pending_draft_context_.prepared_input);
@@ -2368,7 +2436,9 @@ bool MTPWorkerImpl::pending_draft_context_matches(
          pending_draft_context_.dp_global_token_nums ==
              input.input_params.parallel.dp_global_token_nums &&
          pending_draft_context_.raw_dp_global_token_nums ==
-             input.input_params.parallel.raw_dp_global_token_nums;
+             input.input_params.parallel.raw_dp_global_token_nums &&
+         pending_draft_context_.dp_global_batch_generations ==
+             input.input_params.parallel.dp_global_batch_generations;
 }
 
 void MTPWorkerImpl::record_validate_metrics(

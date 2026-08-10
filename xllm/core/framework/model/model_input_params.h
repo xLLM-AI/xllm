@@ -855,6 +855,10 @@ struct ParallelInput {
   // Attention/FFN paths may need the padded counts, while lm_head output
   // compaction must skip true empty DP ranks.
   std::vector<int32_t> raw_dp_global_token_nums;
+  // Per-DP-shard generation derived from the local batch identity. Every shard
+  // receives the full vector so speculative prelaunch reuse decisions remain
+  // collective-order consistent when any shard changes its batch.
+  std::vector<uint64_t> dp_global_batch_generations;
   // max kv seq len of all dp shards. Graph key generation uses this so empty
   // DP decode ranks pick the same graph as ranks with real decode tokens.
   std::vector<int32_t> dp_global_kv_max_seq_lens;
@@ -880,6 +884,7 @@ struct ParallelInput {
     ParallelInput out;
     out.dp_global_token_nums = dp_global_token_nums;
     out.raw_dp_global_token_nums = raw_dp_global_token_nums;
+    out.dp_global_batch_generations = dp_global_batch_generations;
     out.dp_global_kv_max_seq_lens = dp_global_kv_max_seq_lens;
     out.dp_is_decode = dp_is_decode;
     out.dp_ep_padding_data = dp_ep_padding_data;

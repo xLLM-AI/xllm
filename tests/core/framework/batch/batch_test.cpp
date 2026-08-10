@@ -1122,6 +1122,7 @@ TEST(BatchTest, ForwardInputPackedRoundTripPreservesTransportFields) {
   ForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
                                   /*min_decoding_batch_size=*/0);
+  input.input_params.parallel.dp_global_batch_generations = {3, 7};
   input.input_params.embedding.mtp_bootstrap_row_idxes = {0};
   input.input_params.embedding.mtp_bootstrap_embeddings =
       torch::tensor({{3.0f, 4.0f}});
@@ -1151,6 +1152,8 @@ TEST(BatchTest, ForwardInputPackedRoundTripPreservesTransportFields) {
   EXPECT_EQ(mapping.remote_ids, (std::vector<uint64_t>{100}));
   EXPECT_EQ(round_trip.input_params.embedding.mtp_bootstrap_row_idxes,
             std::vector<int32_t>{0});
+  EXPECT_EQ(round_trip.input_params.parallel.dp_global_batch_generations,
+            (std::vector<uint64_t>{3, 7}));
   ASSERT_TRUE(
       round_trip.input_params.embedding.mtp_bootstrap_embeddings.defined());
   EXPECT_TRUE(torch::equal(

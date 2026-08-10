@@ -98,6 +98,9 @@ LLMEngine::LLMEngine(const runtime::Options& options,
 
   dp_size_ = options_.dp_size();
   cp_size_ = options_.cp_size();
+  dp_batch_embedding_ids_.resize(dp_size_);
+  dp_batch_request_ids_.resize(dp_size_);
+  dp_batch_generations_.resize(dp_size_, 0);
   worker_clients_num_ = worker_clients_.size();
   dp_local_size_ = worker_clients_num_ / dp_size_;
   const bool use_model_sharding =
@@ -1362,6 +1365,15 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
     dp_is_decode[dp_rank] =
         current_batch_forward_type.is_decode() &&
         batched_inputs[dp_rank].input_params.meta.q_max_seq_len == 1;
+
+    const ModelEmbeddingInput& embedding =
+        batched_inputs[dp_rank].input_params.embedding;
+    if (dp_batch_embedding_ids_[dp_rank] != embedding.embedding_ids ||
+        dp_batch_request_ids_[dp_rank] != embedding.request_ids) {
+      dp_batch_embedding_ids_[dp_rank] = embedding.embedding_ids;
+      dp_batch_request_ids_[dp_rank] = embedding.request_ids;
+      ++dp_batch_generations_[dp_rank];
+    }
   }
 
   // eplb related
@@ -1392,6 +1404,8 @@ std::vector<ForwardInput> LLMEngine::prepare_inputs(std::vector<Batch>& batch) {
         dp_global_token_nums;
     batched_inputs[dp_rank].input_params.parallel.raw_dp_global_token_nums =
         dp_global_token_nums;
+    batched_inputs[dp_rank].input_params.parallel.dp_global_batch_generations =
+        dp_batch_generations_;
     batched_inputs[dp_rank].input_params.parallel.dp_global_kv_max_seq_lens =
         dp_global_kv_max_seq_lens;
     batched_inputs[dp_rank].input_params.parallel.dp_is_decode = dp_is_decode;
