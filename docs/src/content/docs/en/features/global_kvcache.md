@@ -286,11 +286,24 @@ Both `PUSH` and `PULL` are supported by the scheduler path. `kv_cache_transfer_t
 - Build or install the Mooncake Store `mooncake_master` and `mooncake_client` binaries.
 - Reserve enough Host memory. Mooncake Store requires `--enable_prefix_cache=true` and `--host_blocks_factor > 1`.
 
+For Mooncake's etcd-backed high availability mode, install Go first and explicitly enable the HA backends when building xLLM and the bundled Mooncake binaries:
+
+```bash
+MAX_JOBS=32 SKIP_EXPORT=1 \
+  python setup.py build --device npu --enable-ha true
+cmake --build build/cmake.linux-aarch64-cpython-311 \
+  --target mooncake_master mooncake_client -j32
+```
+
+Ready-to-use HA master, independent Store client, and xLLM argument scripts are available under `scripts/kvcache_store/`.
+
 ### Start a Minimal Mooncake Store
 
 The following TCP example uses Mooncake's P2P handshake, so no separate Transfer Engine metadata service is required:
 
 ```bash
+export MC_STORE_CLUSTER_ID=xllm-mooncake
+
 mooncake_master \
   --rpc_address=0.0.0.0 \
   --rpc_port=50051
@@ -307,6 +320,46 @@ mooncake_client \
   --metadata_server=P2PHANDSHAKE \
   --protocol=tcp
 ```
+
+### Start a High-Availability Mooncake Store Cluster
+
+First start an etcd cluster reachable by every Mooncake master. Then start one master instance on each master node. All instances use the same etcd endpoints and `cluster_id`, while `rpc_address` must identify the reachable address of that specific instance:
+
+```bash
+mooncake_master \
+  --enable_ha=true \
+  --ha_backend_type=etcd \
+  --ha_backend_connstring="10.0.0.1:2379;10.0.0.2:2379;10.0.0.3:2379" \
+  --cluster_id=xllm-mooncake \
+  --rpc_address=10.0.1.11 \
+  --rpc_port=50051
+```
+
+Store clients and xLLM use etcd to discover and follow the current leader instead of binding to one master address:
+
+```bash
+export MC_STORE_CLUSTER_ID=xllm-mooncake
+MOONCAKE_HA_ENTRY='etcd://10.0.0.1:2379;10.0.0.2:2379;10.0.0.3:2379'
+
+mooncake_client \
+  --host=0.0.0.0:50053 \
+  --port=50052 \
+  --global_segment_size=4GB \
+  --master_server_address="${MOONCAKE_HA_ENTRY}" \
+  --metadata_server=P2PHANDSHAKE \
+  --protocol=tcp
+
+/path/to/xllm \
+  --enable_prefix_cache=true \
+  --host_blocks_factor=4 \
+  --enable_kvcache_store=true \
+  --store_protocol=tcp \
+  --store_master_server_address="${MOONCAKE_HA_ENTRY}" \
+  --store_metadata_server=P2PHANDSHAKE \
+  --store_local_hostname=127.0.0.1:12345
+```
+
+The `etcd://` prefix in `store_master_server_address` selects the HA leader-discovery backend. Do not add `http://` to the endpoint list after that prefix. When using a custom `cluster_id`, every Mooncake master, Store client, and xLLM process must use the same `MC_STORE_CLUSTER_ID`.
 
 ### Start etcd and xLLM Service
 

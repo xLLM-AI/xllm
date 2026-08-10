@@ -8,9 +8,20 @@ option(USE_CUDA "Enable CUDA support" OFF)
 option(USE_MUSA "Enable MUSA support" OFF)
 option(USE_DCU "Enable DCU support" OFF)
 option(USE_MACA "Enable MACA support" OFF)
+option(ENABLE_HA "Enable Mooncake etcd-based high availability support" OFF)
 add_compile_definitions(YLT_ENABLE_IBV)
 add_definitions(-DYLT_ENABLE_IBV)
 set(YLT_ENABLE_IBV ON)
+
+if(ENABLE_HA)
+  set(USE_ETCD ON CACHE BOOL
+      "Enable Mooncake transfer-engine etcd backend" FORCE)
+  set(STORE_USE_ETCD ON CACHE BOOL
+      "Enable Mooncake Store etcd backend" FORCE)
+  list(APPEND CMAKE_BUILD_RPATH "$ORIGIN")
+  list(APPEND CMAKE_INSTALL_RPATH "$ORIGIN")
+  message(STATUS "ENABLE_HA=ON, Mooncake etcd high availability enabled")
+endif()
 
 if(DEVICE_ARCH STREQUAL "ARM")
     set(CMAKE_SYSTEM_PROCESSOR aarch64)
@@ -844,6 +855,28 @@ endif()
 # Configure third_party first so xllm can link against real CMake targets.
 
 add_subdirectory(third_party)
+if(ENABLE_HA)
+  if(NOT TARGET build_etcd_wrapper OR NOT TARGET mooncake_store)
+    message(FATAL_ERROR
+      "ENABLE_HA requires Mooncake Store and its etcd wrapper targets")
+  endif()
+
+  if(CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(MOONCAKE_HA_RUNTIME_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+  else()
+    set(MOONCAKE_HA_RUNTIME_DIR "${CMAKE_BINARY_DIR}")
+  endif()
+  set(MOONCAKE_ETCD_WRAPPER
+      "${CMAKE_BINARY_DIR}/third_party/Mooncake/mooncake-common/etcd/libetcd_wrapper.so")
+  add_custom_target(stage_mooncake_ha_runtime ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${MOONCAKE_HA_RUNTIME_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${MOONCAKE_ETCD_WRAPPER}"
+            "${MOONCAKE_HA_RUNTIME_DIR}/libetcd_wrapper.so"
+    DEPENDS build_etcd_wrapper
+    COMMENT "Staging Mooncake etcd HA runtime")
+  add_dependencies(mooncake_store stage_mooncake_ha_runtime)
+endif()
 if(TARGET brpc-static AND NOT TARGET brpc)
   add_library(brpc ALIAS brpc-static)
 endif()

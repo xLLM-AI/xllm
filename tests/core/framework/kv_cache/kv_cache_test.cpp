@@ -867,7 +867,29 @@ TEST_F(HostKVCacheConfigTest, AcceptsDisaggregatedPrefillInstance) {
   EXPECT_FALSE(validate_host_cache_options(options).has_value());
 }
 
-TEST_F(HostKVCacheConfigTest, RejectsDisaggregatedDecodeInstance) {
+TEST_F(HostKVCacheConfigTest, AcceptsKVCacheStore) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.enable_kvcache_store = true;
+
+  EXPECT_FALSE(validate_host_cache_options(options).has_value());
+}
+
+TEST_F(HostKVCacheConfigTest, AcceptsKVCacheStoreOnDisaggregatedDecode) {
+  HostCacheValidationOptions options;
+  options.host_blocks_factor = 2.0;
+  options.device_block_count = 128;
+  options.supports_host_kv_offload = true;
+  options.enable_disagg_pd = true;
+  options.enable_kvcache_store = true;
+  options.instance_role = InstanceRole::DECODE;
+
+  EXPECT_FALSE(validate_host_cache_options(options).has_value());
+}
+
+TEST_F(HostKVCacheConfigTest, AcceptsDisaggregatedDecodeInstance) {
   HostCacheValidationOptions options;
   options.host_blocks_factor = 2.0;
   options.device_block_count = 128;
@@ -875,10 +897,7 @@ TEST_F(HostKVCacheConfigTest, RejectsDisaggregatedDecodeInstance) {
   options.enable_disagg_pd = true;
   options.instance_role = InstanceRole::DECODE;
 
-  const std::optional<std::string> error = validate_host_cache_options(options);
-
-  ASSERT_TRUE(error.has_value());
-  EXPECT_NE(error->find("PREFILL"), std::string::npos);
+  EXPECT_FALSE(validate_host_cache_options(options).has_value());
 }
 
 TEST_F(HostKVCacheConfigTest, RejectsDisaggregatedPrefillOocMode) {
@@ -914,6 +933,7 @@ TEST_F(HostKVCacheConfigTest, RejectsUnsupportedGroupedCacheLayout) {
   options.host_blocks_factor = 2.0;
   options.device_block_count = 128;
   options.supports_host_kv_offload = true;
+  options.enable_kvcache_store = true;
   options.has_grouped_cache_layout = true;
   options.model_type = "unknown_grouped_model";
 
@@ -928,6 +948,7 @@ TEST_F(HostKVCacheConfigTest, AcceptsSupportedGroupedCacheLayout) {
   options.host_blocks_factor = 2.0;
   options.device_block_count = 128;
   options.supports_host_kv_offload = true;
+  options.enable_kvcache_store = true;
   options.has_grouped_cache_layout = true;
   options.supports_grouped_cache_offload = true;
   options.model_type = "deepseek_v4";

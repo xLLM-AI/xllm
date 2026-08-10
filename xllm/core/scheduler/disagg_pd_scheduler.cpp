@@ -312,10 +312,6 @@ void DisaggPDScheduler::step(const absl::Duration& timeout) {
   }
 }
 
-bool DisaggPDScheduler::add_request(std::shared_ptr<Request>& request) {
-  return ContinuousScheduler::add_request(request);
-}
-
 bool DisaggPDScheduler::enqueue_ready_request(
     std::shared_ptr<Request> request) {
   if (request->offline()) {

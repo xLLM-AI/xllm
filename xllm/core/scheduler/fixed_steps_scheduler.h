@@ -51,8 +51,6 @@ class FixedStepsScheduler final : public ContinuousScheduler {
   FixedStepsScheduler(Engine* engine, const Options& options);
   ~FixedStepsScheduler() override = default;
 
-  bool add_request(std::shared_ptr<Request>& request) override;
-
   // step the scheduler forward by one step
   // may get blocked if there are no requests to process
   void step(const absl::Duration& timeout) override;

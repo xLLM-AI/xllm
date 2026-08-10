@@ -42,7 +42,8 @@ DEFINE_string(store_protocol,
 
 DEFINE_string(store_master_server_address,
               "",
-              "The address information of the store master service.");
+              "The Store master address: IP:Port for standalone mode or "
+              "etcd://IP:Port;IP:Port;... for high availability mode.");
 
 DEFINE_string(store_metadata_server,
               "",

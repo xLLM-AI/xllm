@@ -59,12 +59,6 @@ class DisaggPDScheduler : public ContinuousScheduler {
 
   void step(const absl::Duration& timeout) override;
 
-  bool add_request(std::shared_ptr<Request>& request) override;
-
- protected:
-  bool enqueue_ready_request(std::shared_ptr<Request> request) override;
-
- public:
   // prefill-1: for prefill send new request to decode
   virtual void dispatch_requests();
   // prefill-2: for prefill send first token to decode
@@ -121,6 +115,8 @@ class DisaggPDScheduler : public ContinuousScheduler {
 
  protected:
   void do_permanent_rejection(const std::shared_ptr<Request>& request);
+
+  bool enqueue_ready_request(std::shared_ptr<Request> request) override;
 
   // Pre-execute prefill requests of different lengths at startup and obtain the
   // corresponding TTFT for calculating the estimated TTFT of requests.

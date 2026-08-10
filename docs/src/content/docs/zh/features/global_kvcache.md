@@ -286,11 +286,24 @@ sequenceDiagram
 - 编译或安装 Mooncake Store 的 `mooncake_master` 和 `mooncake_client`。
 - 预留足够的 Host 内存。Mooncake Store 要求 `--enable_prefix_cache=true` 且 `--host_blocks_factor > 1`。
 
+使用 Mooncake etcd 高可用模式时，需要先安装 Go，然后在构建 xLLM 和随仓库提供的 Mooncake 二进制时显式开启 HA 后端：
+
+```bash
+MAX_JOBS=32 SKIP_EXPORT=1 \
+  python setup.py build --device npu --enable-ha true
+cmake --build build/cmake.linux-aarch64-cpython-311 \
+  --target mooncake_master mooncake_client -j32
+```
+
+可直接复用的 HA master、独立 Store client 和 xLLM 参数脚本位于 `scripts/kvcache_store/`。
+
 ### 启动最小 Mooncake Store
 
 下面的 TCP 示例使用 Mooncake P2P handshake，因此不需要额外启动 Transfer Engine metadata service：
 
 ```bash
+export MC_STORE_CLUSTER_ID=xllm-mooncake
+
 mooncake_master \
   --rpc_address=0.0.0.0 \
   --rpc_port=50051
@@ -307,6 +320,46 @@ mooncake_client \
   --metadata_server=P2PHANDSHAKE \
   --protocol=tcp
 ```
+
+### 启动 Mooncake Store 高可用集群
+
+先启动可供所有 Mooncake master 访问的 etcd 集群。然后在每个 master 节点启动一个实例；所有实例使用相同的 etcd endpoints 和 `cluster_id`，但 `rpc_address` 必须是各自可达的地址：
+
+```bash
+mooncake_master \
+  --enable_ha=true \
+  --ha_backend_type=etcd \
+  --ha_backend_connstring="10.0.0.1:2379;10.0.0.2:2379;10.0.0.3:2379" \
+  --cluster_id=xllm-mooncake \
+  --rpc_address=10.0.1.11 \
+  --rpc_port=50051
+```
+
+Store client 和 xLLM 不再绑定单个 master 地址，而是通过 etcd 自动发现并跟随当前 leader：
+
+```bash
+export MC_STORE_CLUSTER_ID=xllm-mooncake
+MOONCAKE_HA_ENTRY='etcd://10.0.0.1:2379;10.0.0.2:2379;10.0.0.3:2379'
+
+mooncake_client \
+  --host=0.0.0.0:50053 \
+  --port=50052 \
+  --global_segment_size=4GB \
+  --master_server_address="${MOONCAKE_HA_ENTRY}" \
+  --metadata_server=P2PHANDSHAKE \
+  --protocol=tcp
+
+/path/to/xllm \
+  --enable_prefix_cache=true \
+  --host_blocks_factor=4 \
+  --enable_kvcache_store=true \
+  --store_protocol=tcp \
+  --store_master_server_address="${MOONCAKE_HA_ENTRY}" \
+  --store_metadata_server=P2PHANDSHAKE \
+  --store_local_hostname=127.0.0.1:12345
+```
+
+`store_master_server_address` 的 `etcd://` 前缀用于选择 HA leader-discovery 后端；后面的 endpoint 列表不带 `http://` 前缀。自定义 `cluster_id` 时，所有 Mooncake master、Store client 和 xLLM 进程都必须使用相同的 `MC_STORE_CLUSTER_ID`。
 
 ### 启动 etcd 与 xLLM Service
 

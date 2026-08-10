@@ -53,10 +53,6 @@ FixedStepsScheduler::FixedStepsScheduler(Engine* engine, const Options& options)
       /*pool_name=*/"FixedStepsScheduler.step");
 }
 
-bool FixedStepsScheduler::add_request(std::shared_ptr<Request>& request) {
-  return ContinuousScheduler::add_request(request);
-}
-
 void FixedStepsScheduler::handle_prefill_requests(
     size_t& remaining_token_budget,
     size_t& remaining_seq_budget,
