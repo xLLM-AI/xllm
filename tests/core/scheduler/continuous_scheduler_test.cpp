@@ -10,6 +10,7 @@
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "distributed_runtime/engine.h"
+#include "scheduler/chunked_prefill_policy.h"
 #include "scheduler_factory.h"
 #include "util/utils.h"
 
@@ -435,6 +436,18 @@ TEST(ContinuousSchedulerBatchModeTest, MultiSloForcesEffectiveChunkedPrefill) {
   // DCP then closes mix batching.
   EXPECT_TRUE(mode.enable_chunked_prefill);
   EXPECT_FALSE(mode.enable_mix_batch);
+}
+
+TEST(ChunkedPrefillPolicyTest, EffectiveChunkedTruthTable) {
+  // Raw flag wins when set, regardless of strategy.
+  EXPECT_TRUE(resolve_effective_chunked_prefill(true, "fcfs"));
+  EXPECT_TRUE(resolve_effective_chunked_prefill(true, "multi_slo_and_prio"));
+  // multi_slo_and_prio implicitly enables chunked prefill.
+  EXPECT_TRUE(resolve_effective_chunked_prefill(false, "multi_slo_and_prio"));
+  // Otherwise the raw false value is preserved.
+  EXPECT_FALSE(resolve_effective_chunked_prefill(false, "fcfs"));
+  EXPECT_FALSE(resolve_effective_chunked_prefill(false, "priority"));
+  EXPECT_FALSE(resolve_effective_chunked_prefill(false, "deadline"));
 }
 
 TEST(ContinuousSchedulerFactoryTest,

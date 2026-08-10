@@ -41,6 +41,7 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/scheduler/chunked_prefill_policy.h"
 #include "dit_master.h"
 #if defined(USE_NPU)
 #include "framework/parallel_state/npu_rank_table_env.h"

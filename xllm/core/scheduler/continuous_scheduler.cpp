@@ -601,7 +601,7 @@ void ContinuousScheduler::update_memory_metrics(
         std::to_string(dp_rank),
         static_cast<int64_t>(active_kv_cache_size_in_kilobytes));
 
-    if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
+    if (batch_mode_.enable_chunked_prefill) {
       MULTI_HISTOGRAM_OBSERVE(decode_active_activation_size_in_kilobytes,
                               std::to_string(dp_rank),
                               active_activation_size_in_kilobytes);

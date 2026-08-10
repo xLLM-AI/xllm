@@ -54,6 +54,7 @@ limitations under the License.
 #include "runtime/llm_worker_impl.h"
 #include "runtime/params_utils.h"
 #include "runtime/worker.h"
+#include "scheduler/chunked_prefill_policy.h"
 #include "server/xllm_server_registry.h"
 #include "util/env_var.h"
 #include "util/pretty_print.h"
@@ -548,10 +549,16 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
   const bool is_decode = options_.instance_role() == InstanceRole::DECODE;
   if (options_.enable_prefix_cache() && enable_gdn_attention && !is_decode) {
     const auto& scheduler_config = ::xllm::SchedulerConfig::get_instance();
-    CHECK(scheduler_config.enable_chunked_prefill())
+    // multi_slo_and_prio implicitly enables chunked prefill, so accept the
+    // effective value rather than the raw flag; the linear-state checkpoints
+    // are saved on the same chunked path either way.
+    CHECK(resolve_effective_chunked_prefill(
+        scheduler_config.enable_chunked_prefill(),
+        options_.priority_strategy()))
         << "Linear-attention prefix cache requires block-aligned chunked "
            "prefill to save matching linear states. Please set "
-           "--enable_chunked_prefill=true in your config.";
+           "--enable_chunked_prefill=true (or use priority_strategy="
+           "multi_slo_and_prio) in your config.";
     CHECK(scheduler_config.max_tokens_per_chunk_for_prefill() % block_size == 0)
         << "linear-attention prefix cache saves linear-state checkpoints at "
            "chunk-end boundaries, so max_tokens_per_chunk_for_prefill ("

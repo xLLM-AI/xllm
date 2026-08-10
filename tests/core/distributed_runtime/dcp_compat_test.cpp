@@ -234,16 +234,5 @@ TEST(DcpCompatTest, RejectsUnvalidatedQwen35MoeModelType) {
       validate_dcp_first_version_model_type("qwen3_5_moe_text"), "MoE");
 }
 
-// Model-type rejection lives in a separate flag-agnostic validator. The
-// experimental opt-in only gates the options-level chunked prefill path, so it
-// cannot bypass the MoE rejection: at startup master.cpp calls the options
-// validator and this model-type validator independently, and the latter has no
-// flag input to suppress. This test pins that the model-type validator rejects
-// MoE regardless of any option flags.
-TEST(DcpCompatTest, ModelTypeValidatorRejectsMoeRegardlessOfFlags) {
-  expect_error_contains(
-      validate_dcp_first_version_model_type("qwen3_5_moe_text"), "MoE");
-}
-
 }  // namespace
 }  // namespace xllm

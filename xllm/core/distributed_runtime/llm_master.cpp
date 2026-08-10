@@ -34,6 +34,7 @@ limitations under the License.
 #include "framework/request/request.h"
 #include "models/model_registry.h"
 #include "runtime/xservice_client.h"
+#include "scheduler/chunked_prefill_policy.h"
 #include "scheduler/scheduler_factory.h"
 #include "server/xllm_server_registry.h"
 #include "speculative_engine.h"
@@ -340,7 +341,8 @@ std::shared_ptr<Request> LLMMaster::generate_request(
 
   const int32_t max_context_len = model_args_.max_position_embeddings();
   int32_t prompt_token_limit = max_context_len;
-  if (!options_.enable_chunked_prefill()) {
+  if (!resolve_effective_chunked_prefill(options_.enable_chunked_prefill(),
+                                         options_.priority_strategy())) {
     prompt_token_limit =
         std::min(prompt_token_limit, options_.max_tokens_per_batch());
   }
