@@ -35,9 +35,10 @@ exact causal prefixes. Both segments are contiguous real ranges, so a single
 FIA call with per-segment ``actual_seq_lengths`` and ``sparse_mode=3``
 (right-aligned causal) masks every row exactly, with no custom mask.
 
-The shard/merge functions are deliberately backend-agnostic (plain torch index
-ops) so the round-trip ``merge(all_gather(shard(x))) == x`` can be unit-tested on
-CPU without NPU or a live process group.
+The zigzag index math (shard/restore/query/KV gather indices) is built by the
+``xllm_ops::build_cp_context`` C++ op and validated by its gtest
+(``cp_context_builder_test``). The shard/merge functions here stay plain torch
+index ops so ``merge(all_gather(shard(x))) == x`` holds by construction.
 """
 
 from __future__ import annotations
@@ -94,10 +95,6 @@ class CpContext:
     kv_cu_seqlens: List[int]
 
 
-def _ceil_div(a: int, b: int) -> int:
-    return (a + b - 1) // b
-
-
 def build_cp_context(
     seq_lens: Sequence[int],
     cp_size: int,
@@ -107,112 +104,36 @@ def build_cp_context(
     """Build a zigzag CP context from per-sequence lengths.
 
     ``seq_lens`` are the per-request query lengths in the packed batch order.
+    The index math runs in the ``xllm_ops::build_cp_context`` C++ op (host
+    scalar loops are far cheaper there than in Python on the prefill critical
+    path); this wrapper just packs the returned tensors into a ``CpContext``.
     Returns index tensors on ``device``.
     """
-    if cp_size <= 1:
-        raise ValueError("build_cp_context requires cp_size > 1")
-
-    num_chunks = cp_size * 2
-    # The two chunk ids this rank owns: an early one and its mirror.
-    first_chunk = cp_rank
-    second_chunk = num_chunks - 1 - cp_rank
-
-    shard_index: List[int] = []
-    query_index: List[int] = []
-    q_cu_seqlens: List[int] = []
-    kv_gather_index: List[int] = []
-    kv_cu_seqlens: List[int] = []
-    # restore_index needs the per-seq local segment offset (same on every rank)
-    # and the ownership map, so accumulate it in a second pass below.
-    chunk_lens: List[int] = []
-    local_seg_offsets: List[int] = []
-
-    global_offset = 0
-    local_offset = 0
-    q_run = 0
-    kv_run = 0
-    for length in seq_lens:
-        length = int(length)
-        padded = _ceil_div(length, num_chunks) * num_chunks
-        chunk_len = padded // num_chunks
-        chunk_lens.append(chunk_len)
-        local_seg_offsets.append(local_offset)
-
-        # Emit the two owned segments in local order: first half then second
-        # half. For each, the real rows sit at the front (small j) because real
-        # position grows with j, so query_index stays front-packed per segment.
-        for half, chunk_id in ((0, first_chunk), (1, second_chunk)):
-            seg_local_base = local_offset + half * chunk_len
-            seg_start = chunk_id * chunk_len  # first real position of segment
-            real_count = 0
-            for j in range(chunk_len):
-                pos_in_seq = seg_start + j
-                if pos_in_seq < length:
-                    shard_index.append(global_offset + pos_in_seq)
-                    query_index.append(seg_local_base + j)
-                    real_count += 1
-                else:
-                    shard_index.append(-1)
-            if real_count > 0:
-                # Causal prefix ends exactly at the last real query position + 1
-                # = seg_start + real_count (segment is a contiguous real range).
-                prefix_len = seg_start + real_count
-                q_run += real_count
-                q_cu_seqlens.append(q_run)
-                for p in range(prefix_len):
-                    kv_gather_index.append(global_offset + p)
-                kv_run += prefix_len
-                kv_cu_seqlens.append(kv_run)
-
-        global_offset += length
-        local_offset += 2 * chunk_len
-
-    total_local = local_offset
-    total_global = global_offset
-
-    # restore_index: for every global (real) row, where it lands in the
-    # rank-major all-gather output [cp_size * total_local].
-    restore_index: List[int] = []
-    global_offset = 0
-    for s, length in enumerate(seq_lens):
-        length = int(length)
-        chunk_len = chunk_lens[s]
-        seg_offset = local_seg_offsets[s]
-        for pos_in_seq in range(int(length)):
-            chunk_id = pos_in_seq // chunk_len
-            row_in_chunk = pos_in_seq % chunk_len
-            if chunk_id < cp_size:
-                owner_rank = chunk_id
-                local_pos = seg_offset + row_in_chunk
-            else:
-                owner_rank = num_chunks - 1 - chunk_id
-                local_pos = seg_offset + chunk_len + row_in_chunk
-            restore_index.append(owner_rank * total_local + local_pos)
-        global_offset += int(length)
-
-    shard_tensor = torch.tensor(shard_index, dtype=torch.int64, device=device)
-    valid_mask = shard_tensor >= 0
-    gather_index = torch.where(
-        valid_mask, shard_tensor, torch.zeros_like(shard_tensor)
+    (
+        shard_index,
+        shard_gather_index,
+        shard_valid_mask,
+        restore_index,
+        query_index,
+        kv_gather_index,
+        q_cu_seqlens,
+        kv_cu_seqlens,
+        total_local,
+    ) = torch.ops.xllm_ops.build_cp_context(
+        [int(length) for length in seq_lens], cp_size, cp_rank, device
     )
 
     return CpContext(
         cp_size=cp_size,
         cp_rank=cp_rank,
         total_local=total_local,
-        shard_index=shard_tensor,
-        shard_gather_index=gather_index,
-        shard_valid_mask=valid_mask,
-        restore_index=torch.tensor(
-            restore_index, dtype=torch.int64, device=device
-        ),
-        query_index=torch.tensor(
-            query_index, dtype=torch.int64, device=device
-        ),
+        shard_index=shard_index,
+        shard_gather_index=shard_gather_index,
+        shard_valid_mask=shard_valid_mask,
+        restore_index=restore_index,
+        query_index=query_index,
         q_cu_seqlens=q_cu_seqlens,
-        kv_gather_index=torch.tensor(
-            kv_gather_index, dtype=torch.int64, device=device
-        ),
+        kv_gather_index=kv_gather_index,
         kv_cu_seqlens=kv_cu_seqlens,
     )
 
