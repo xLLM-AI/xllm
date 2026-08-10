@@ -1189,7 +1189,12 @@ void LLMEngine::update_last_step_result(std::vector<Batch>& last_batch) {
   // cause the output on other workers is the same as that on driver.
   // Under data parallelism (DP), we need to get dp_size outputs.
   // The `stride` means the workers num we can skip.
-  uint32_t stride = dp_local_tp_size_;
+  // One retrievable result per DP group lives on its driver worker
+  // (dp_driver_: rank % (tp_size*cp_size) == 0), spaced dp_local_size_
+  // (= tp_size*cp_size) apart. dp_local_tp_size_ divides by cp_size, so
+  // under cp_size>1 it lands on cp_rank=1 non-driver workers whose
+  // get_last_step_result() blocks forever on cv_.wait(is_recorded_).
+  uint32_t stride = dp_local_size_;
   // If EPLB is enabled, we need to get results from all workers,
   // because the experts on each worker are different,
   // and the tokens load of all experts needs to be returned to engine.
@@ -1211,7 +1216,7 @@ void LLMEngine::update_last_step_result(std::vector<Batch>& last_batch) {
   }
 
   for (auto worker_rank = 0; worker_rank < worker_clients_num_;
-       worker_rank += dp_local_tp_size_) {
+       worker_rank += dp_local_size_) {
     auto result = last_step_results[worker_rank / stride].value();
     if (result.has_value()) {
       raw_forward_outputs.emplace_back(std::move(result.value()));

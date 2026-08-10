@@ -783,35 +783,29 @@ class DeepseekV4ModelImpl
       }
     }
 
-    const int32_t fc1_num_tokens = static_cast<int32_t>(h.size(0));
-    FlashComm1Context fc1_ctx;
-    if (!acl_graph_forward && !is_empty_dp_rank) {
-      const bool is_prefill_side =
-          input_params.meta.batch_forward_type.no_decode();
-      fc1_ctx = build_flash_comm1_context(fc1_num_tokens,
-                                          is_prefill_side,
-                                          parallel_args_,
-                                          flash_comm1_options_);
-    }
-    FlashComm1ContextScope fc1_scope(&fc1_ctx);
-    if (is_sequence_sharded(fc1_ctx)) {
-      h = shard_sequence(h, fc1_ctx);
-    }
+    // Row count of the DP-local batch, before any token-axis sharding. FC1
+    // thresholds against this so its on/off decision is identical on every rank
+    // of the CP group even though the CP segments below are uneven.
+    const int32_t fc1_global_num_tokens = static_cast<int32_t>(h.size(0));
 
     // Prefill context parallel. Built here, after the global DSA metadata is
     // complete, because the KV / compressor / index-cache write path keeps the
     // global kv_seq_lens and slot_mapping: only the query axis is localized.
+    //
+    // CP is the OUTER token-axis shard and FlashComm1 below is the inner one:
+    // CP splits the batch across cp_group, then FC1 splits this rank's CP
+    // segment across tp_group. The groups are orthogonal in the rank layout
+    // dp_rank * (cp_size * tp_size) + cp_rank * tp_size + tp_rank, and every
+    // rank of a TP group shares one cp_rank, so all TP peers see the same CP
+    // segment length and FC1's collectives stay symmetric. Both the tail of
+    // this function and the decoder layer unwind in the reverse order (FC1
+    // gather, then CP gather_restore).
     layer::v4_cp::DeepseekV4CpContext cp_ctx;
     const bool cp_enabled = cp_size_ > 1 && cp_group_ != nullptr &&
                             !is_empty_dp_rank &&
                             input_params.meta.batch_forward_type.no_decode() &&
                             attn_metadata.dsa_metadata != nullptr;
     if (cp_enabled) {
-      // FlashComm1 SP and CP both shard tokens; running both would shard twice.
-      CHECK(!is_sequence_sharded(fc1_ctx))
-          << "DeepSeek V4 cannot combine FlashComm1 sequence parallel with "
-             "context parallel; build_flash_comm1_context must disable itself "
-             "when cp_size > 1.";
       auto& dsa = *(attn_metadata.dsa_metadata);
       cp_ctx = layer::v4_cp::build_deepseek_v4_cp_context(
           static_cast<int32_t>(cp_size_),
@@ -836,6 +830,32 @@ class DeepseekV4ModelImpl
         // because the MoE DP gather runs on the already CP-gathered rows.
         dsa.v4_cp_context = &cp_ctx;
       }
+    }
+
+    // FlashComm1 sequence parallel, inner to the CP shard above. h now holds
+    // only this rank's CP rows, so the padding geometry is derived from them
+    // while the min_prefill_tokens threshold stays on the pre-CP count. The
+    // smallest CP segment gates composition: V4 splits each sequence into
+    // contiguous per-rank chunks, so short batches leave high cp_ranks with few
+    // or zero rows and FC1 must then stay off across the whole group.
+    FlashComm1TokenGeometry fc1_geometry =
+        FlashComm1TokenGeometry::without_cp(fc1_global_num_tokens);
+    if (cp_ctx.enabled() && !cp_ctx.tokens_per_rank.empty()) {
+      fc1_geometry.local_num_tokens = static_cast<int32_t>(h.size(0));
+      fc1_geometry.min_local_num_tokens =
+          *std::min_element(cp_ctx.tokens_per_rank.begin(),
+                            cp_ctx.tokens_per_rank.end());
+    }
+    FlashComm1Context fc1_ctx;
+    if (!acl_graph_forward && !is_empty_dp_rank) {
+      const bool is_prefill_side =
+          input_params.meta.batch_forward_type.no_decode();
+      fc1_ctx = build_flash_comm1_context(
+          fc1_geometry, is_prefill_side, parallel_args_, flash_comm1_options_);
+    }
+    FlashComm1ContextScope fc1_scope(&fc1_ctx);
+    if (is_sequence_sharded(fc1_ctx)) {
+      h = shard_sequence(h, fc1_ctx);
     }
 
     std::optional<torch::Tensor> residual;

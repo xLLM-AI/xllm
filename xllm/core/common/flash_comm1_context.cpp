@@ -36,13 +36,67 @@ int32_t round_up_to_multiple(int32_t value, int32_t multiple) {
 
 }  // namespace
 
+namespace {
+
+// TP width of the current rank. Prefers the process group, which is
+// authoritative, and otherwise derives it from the documented rank layout
+// dp_rank * (cp_size * tp_size) + cp_rank * tp_size + tp_rank -- the same
+// arithmetic ParallelArgs::cp_rank() uses. The fallback matters because the
+// eligibility gate is deliberately callable without a live process group.
+int32_t fc1_tp_world_size(const ParallelArgs& parallel_args) {
+  if (parallel_args.tp_group_ != nullptr) {
+    return parallel_args.tp_group_->world_size();
+  }
+  const int32_t dp_size = std::max<int32_t>(parallel_args.dp_size(), 1);
+  const int32_t cp_size = std::max<int32_t>(parallel_args.cp_size(), 1);
+  const int32_t world_size = std::max<int32_t>(parallel_args.world_size(), 1);
+  return std::max<int32_t>(world_size / dp_size / cp_size, 1);
+}
+
+}  // namespace
+
+bool is_flash_comm1_eligible(const FlashComm1TokenGeometry& geometry,
+                             bool is_prefill,
+                             const ParallelArgs& parallel_args,
+                             const FlashComm1Options& options) {
+  if (!options.enable_flashcomm1 || !is_prefill) {
+    return false;
+  }
+  // Threshold on the pre-CP count so the decision is identical on every rank of
+  // the CP group.
+  if (geometry.global_num_tokens < options.min_prefill_tokens) {
+    return false;
+  }
+  if (std::max<int32_t>(parallel_args.cp_size(), 1) == 1) {
+    // No outer CP shard: geometry collapses and the threshold above is the
+    // whole gate, exactly as before CP composition existed.
+    return true;
+  }
+  if (geometry.local_num_tokens <= 0) {
+    return false;
+  }
+  // Uneven CP segments: require the smallest one to still carry a full
+  // alignment unit per TP rank, otherwise padding would dominate the shard and
+  // the thinnest rank could reduce_scatter an all-padding tensor.
+  const int32_t min_rows_per_cp_rank =
+      fc1_tp_world_size(parallel_args) * kFc1LocalTokenAlignment;
+  return geometry.min_local_num_tokens >= min_rows_per_cp_rank;
+}
+
 bool is_flash_comm1_eligible(int32_t num_tokens,
                              bool is_prefill,
                              const ParallelArgs& parallel_args,
                              const FlashComm1Options& options) {
-  return options.enable_flashcomm1 && is_prefill &&
-         parallel_args.cp_size() == 1 &&
-         num_tokens >= options.min_prefill_tokens;
+  // No CP-local geometry available, so this caller shards over tp_group only.
+  // Composing with CP here would shard the sequence twice.
+  if (parallel_args.cp_size() != 1) {
+    return false;
+  }
+  return is_flash_comm1_eligible(
+      FlashComm1TokenGeometry::without_cp(num_tokens),
+      is_prefill,
+      parallel_args,
+      options);
 }
 
 FlashComm1ContextScope::FlashComm1ContextScope(const FlashComm1Context* ctx)
@@ -77,18 +131,18 @@ torch::Tensor pad_rows_by_copy(const torch::Tensor& input,
   return output;
 }
 
-FlashComm1Context build_flash_comm1_context(int32_t num_tokens,
-                                            bool is_prefill,
-                                            const ParallelArgs& parallel_args,
-                                            const FlashComm1Options& options) {
+FlashComm1Context build_flash_comm1_context(
+    const FlashComm1TokenGeometry& geometry,
+    bool is_prefill,
+    const ParallelArgs& parallel_args,
+    const FlashComm1Options& options) {
   FlashComm1Context ctx;
 
 #if !defined(USE_NPU)
   return ctx;
 #endif
 
-  if (!is_flash_comm1_eligible(
-          num_tokens, is_prefill, parallel_args, options)) {
+  if (!is_flash_comm1_eligible(geometry, is_prefill, parallel_args, options)) {
     return ctx;
   }
 
@@ -100,17 +154,43 @@ FlashComm1Context build_flash_comm1_context(int32_t num_tokens,
   ctx.enabled = true;
   ctx.tp_rank = tp_group->rank();
   ctx.tp_world_size = tp_group->world_size();
-  ctx.original_num_tokens = num_tokens;
-  ctx.enable_mmrs_fusion = options.enable_mmrs_fusion;
+  // Geometry follows the rows this rank actually holds: under an outer CP shard
+  // that is the CP segment, not the pre-CP batch. shard_sequence() and the
+  // row-parallel reduce paths all validate against original_num_tokens, so this
+  // must be the local count.
+  ctx.original_num_tokens = geometry.local_num_tokens;
+  // MMRS fusion stays off under CP. The fused matmul+reduce_scatter kernel is
+  // already shape-sensitive enough to be default-off (see enable_mmrs_fusion),
+  // and an outer CP shard makes the row counts it sees both smaller and less
+  // regular: local rows are a per-sequence CP segment rather than the whole
+  // batch. The unfused reduce_scatter path is equivalent, so prefer it until
+  // fused MMRS has been measured on CP-local shapes.
+  const bool cp_active = std::max<int32_t>(parallel_args.cp_size(), 1) > 1;
+  ctx.enable_mmrs_fusion = options.enable_mmrs_fusion && !cp_active;
   ctx.mmrs_comm_mode = options.mmrs_comm_mode;
   ctx.tp_group = tp_group;
 
   const int32_t token_alignment = ctx.tp_world_size * kFc1LocalTokenAlignment;
-  ctx.padded_num_tokens = round_up_to_multiple(num_tokens, token_alignment);
-  ctx.pad_size = ctx.padded_num_tokens - num_tokens;
+  ctx.padded_num_tokens =
+      round_up_to_multiple(ctx.original_num_tokens, token_alignment);
+  ctx.pad_size = ctx.padded_num_tokens - ctx.original_num_tokens;
   ctx.padded_local_num_tokens = ctx.padded_num_tokens / ctx.tp_world_size;
 
   return ctx;
+}
+
+FlashComm1Context build_flash_comm1_context(int32_t num_tokens,
+                                            bool is_prefill,
+                                            const ParallelArgs& parallel_args,
+                                            const FlashComm1Options& options) {
+  if (parallel_args.cp_size() != 1) {
+    return FlashComm1Context{};
+  }
+  return build_flash_comm1_context(
+      FlashComm1TokenGeometry::without_cp(num_tokens),
+      is_prefill,
+      parallel_args,
+      options);
 }
 
 torch::Tensor shard_sequence(const torch::Tensor& input,
