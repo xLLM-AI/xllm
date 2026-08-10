@@ -842,9 +842,8 @@ class DeepseekV4ModelImpl
         FlashComm1TokenGeometry::without_cp(fc1_global_num_tokens);
     if (cp_ctx.enabled() && !cp_ctx.tokens_per_rank.empty()) {
       fc1_geometry.local_num_tokens = static_cast<int32_t>(h.size(0));
-      fc1_geometry.min_local_num_tokens =
-          *std::min_element(cp_ctx.tokens_per_rank.begin(),
-                            cp_ctx.tokens_per_rank.end());
+      fc1_geometry.min_local_num_tokens = *std::min_element(
+          cp_ctx.tokens_per_rank.begin(), cp_ctx.tokens_per_rank.end());
     }
     FlashComm1Context fc1_ctx;
     if (!acl_graph_forward && !is_empty_dp_rank) {
