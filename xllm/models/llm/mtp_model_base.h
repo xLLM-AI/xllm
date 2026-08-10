@@ -393,8 +393,12 @@ class MtpModelImplBase : public torch::nn::Module {
     ModelInputParams modified_input_params = input_params;
     if (dp_size_ > 1) {
       if (tokens.sizes() == 0) {
-        tokens = torch::tensor({1}).to(torch::kInt32).to(device_);
-        positions = torch::tensor({1}).to(torch::kInt32).to(device_);
+        // On-device dummy build. torch::tensor({...}).to(device_) runs a
+        // host->device memcpy that is illegal inside an ACL graph capture
+        // region (NPU 107030); see qwen3_next_hybrid_base.h for the same fix.
+        auto dummy_opts = torch::dtype(torch::kInt32).device(device_);
+        tokens = torch::ones({1}, dummy_opts);
+        positions = torch::ones({1}, dummy_opts);
       }
       auto& dp_token_nums = modified_input_params.parallel.dp_global_token_nums;
       std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);

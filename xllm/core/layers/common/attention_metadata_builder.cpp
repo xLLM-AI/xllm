@@ -95,10 +95,26 @@ void materialize_linear_state_validity(
     options = torch::TensorOptions().device(device.value());
   }
   options = options.dtype(torch::kBool);
+  if (attn_metadata.is_dummy && mask_rows == 0) {
+    // Dummy empty shard: pure on-device alloc, no host source (capture-safe).
+    attn_metadata.has_initial_states = torch::zeros({1}, options);
+    return;
+  }
+#if defined(USE_NPU)
+  // On NPU, GDN consumes input_params.linear_state_validity_mask (a host
+  // IntArrayRef passed straight to the kernel) and never reads
+  // attn_metadata.has_initial_states. Building this via
+  // torch::tensor(host_vector, device_options) would run a synchronous
+  // host->device aclrtMemcpy that is illegal inside an ACL graph capture
+  // region (NPU error 107030, hit on hybrid spec-verify chunked-prefill
+  // capture). Keep it on host on NPU: same defined bool tensor and values, no
+  // H2D copy during capture. Other backends still materialize on-device.
+  attn_metadata.has_initial_states = torch::tensor(
+      params.linear_state_validity_mask, options.device(torch::kCPU));
+#else
   attn_metadata.has_initial_states =
-      attn_metadata.is_dummy && mask_rows == 0
-          ? torch::zeros({1}, options)
-          : torch::tensor(params.linear_state_validity_mask, options);
+      torch::tensor(params.linear_state_validity_mask, options);
+#endif
 }
 
 AttentionMetadata build_attention_metadata(

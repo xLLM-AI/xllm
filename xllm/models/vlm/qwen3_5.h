@@ -103,8 +103,13 @@ class Qwen3_5ModelImpl final
 
     if (dp_size_ > 1) {
       if (tokens.numel() == 0) {
-        tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
-        positions = torch::tensor({1}).to(torch::kInt32).to(positions.device());
+        // On-device dummy build; torch::tensor({...}).to(device) would run a
+        // capture-illegal host->device memcpy (NPU 107030). See
+        // qwen3_next_hybrid_base.h for the same fix.
+        tokens = torch::ones(
+            {1}, torch::dtype(torch::kInt32).device(tokens.device()));
+        positions = torch::ones(
+            {1}, torch::dtype(torch::kInt32).device(positions.device()));
       }
       auto& dp_token_nums = input_params_new.parallel.dp_global_token_nums;
       std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);

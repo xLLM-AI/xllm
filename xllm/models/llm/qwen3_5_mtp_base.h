@@ -108,8 +108,12 @@ class Qwen3_5MtpModelImplBase : public Qwen3HybridModelImplBase {
     torch::NoGradGuard no_grad;
 
     if (dp_size_ > 1 && tokens.sizes() == 0) {
-      tokens = torch::tensor({1}).to(torch::kInt32).to(device_);
-      positions = torch::tensor({0}).to(torch::kInt32).to(device_);
+      // On-device dummy build; torch::tensor({...}).to(device_) would run a
+      // capture-illegal host->device memcpy (NPU 107030). See
+      // qwen3_next_hybrid_base.h for the same fix.
+      auto dummy_opts = torch::dtype(torch::kInt32).device(device_);
+      tokens = torch::ones({1}, dummy_opts);
+      positions = torch::zeros({1}, dummy_opts);
     }
 
     layer::AttentionMetadata attn_metadata =
