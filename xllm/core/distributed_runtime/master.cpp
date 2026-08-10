@@ -161,10 +161,6 @@ std::optional<std::string> validate_model_dcp(
            "text models, got model_type=" +
            model_config->model_type;
   }
-  if (std::optional<std::string> dcp_model_error =
-          validate_dcp_first_version_model_type(model_config->model_type)) {
-    return dcp_model_error;
-  }
   if (options.dp_size() < 1) {
     return "decode context parallelism requires dp_size >= 1";
   }

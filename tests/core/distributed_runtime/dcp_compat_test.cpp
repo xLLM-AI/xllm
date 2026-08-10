@@ -224,15 +224,5 @@ TEST(DcpCompatTest, ExperimentalChunkedPrefillDoesNotBypassSpeculative) {
       "speculative decoding");
 }
 
-TEST(DcpCompatTest, AllowsDenseQwen35ModelType) {
-  EXPECT_FALSE(
-      validate_dcp_first_version_model_type("qwen3_5_text").has_value());
-}
-
-TEST(DcpCompatTest, RejectsUnvalidatedQwen35MoeModelType) {
-  expect_error_contains(
-      validate_dcp_first_version_model_type("qwen3_5_moe_text"), "MoE");
-}
-
 }  // namespace
 }  // namespace xllm

@@ -63,14 +63,4 @@ inline std::optional<std::string> validate_dcp_first_version_options(
   return std::nullopt;
 }
 
-inline std::optional<std::string> validate_dcp_first_version_model_type(
-    const std::string& model_type) {
-  if (model_type == "qwen3_5_moe_text") {
-    return "decode_context_parallel_size first version does not yet support "
-           "Qwen3.5 MoE; use dense Qwen3.5 or set "
-           "--decode_context_parallel_size=1";
-  }
-  return std::nullopt;
-}
-
 }  // namespace xllm
