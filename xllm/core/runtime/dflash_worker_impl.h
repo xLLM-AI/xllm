@@ -194,6 +194,12 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
 #endif
   int32_t mask_token_id_ = -1;
   int64_t expected_context_hidden_size_ = 0;
+
+  // Cached device tensor holding [0, 1, ..., num_speculative_tokens-1] as
+  // int32. apply_adaptive_prune_to_draft broadcasts this against a per-seq
+  // keep_cols vector every adaptive step; hoisting the arange out of the hot
+  // path saves an allocation + H2D per step.
+  mutable torch::Tensor prune_col_idx_cache_;
 };
 
 }  // namespace xllm

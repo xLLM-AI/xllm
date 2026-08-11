@@ -1431,7 +1431,7 @@ std::vector<int32_t> DFlashWorkerImpl::compute_adaptive_prefix_lengths(
 
   std::vector<int32_t> prefix_lengths =
       adaptive_spec_controller_->select_pruned_prefix_lengths(
-          probs_for_controller.to(torch::kCPU).to(torch::kFloat64),
+          probs_for_controller,
           /*full_draft_time_ms=*/0.0,
           per_seq_kv_lens);
   return prefix_lengths;
@@ -1488,11 +1488,15 @@ void DFlashWorkerImpl::apply_adaptive_prune_to_draft(
   torch::Tensor probs = draft_block.probs;
   torch::Tensor keep_cols_device =
       cpu_int_vec_to_device(keep_cols_vec, device_);
-  torch::Tensor col_idx = torch::arange(
-      num_speculative_tokens,
-      torch::TensorOptions().dtype(torch::kInt).device(probs.device()));
+  if (!prune_col_idx_cache_.defined() ||
+      prune_col_idx_cache_.numel() != num_speculative_tokens ||
+      prune_col_idx_cache_.device() != probs.device()) {
+    prune_col_idx_cache_ = torch::arange(
+        num_speculative_tokens,
+        torch::TensorOptions().dtype(torch::kInt).device(probs.device()));
+  }
   torch::Tensor keep_mask =
-      col_idx.unsqueeze(0).lt(keep_cols_device.unsqueeze(1));
+      prune_col_idx_cache_.unsqueeze(0).lt(keep_cols_device.unsqueeze(1));
   probs.masked_fill_(~keep_mask, 0);
   LOG_EVERY_N(INFO, 32) << "[dflash_dspark_adaptive] batch=" << batch_size
                         << " pruned_seqs=" << pruned_seqs

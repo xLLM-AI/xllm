@@ -62,7 +62,13 @@ DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::run_decode_draft(
   logits_input.skip_sampling_for_logits_only = true;
   // Request pre-lm_head hidden alongside logits so ConfidenceHead can consume
   // the same [num_reqs*num_spec, hidden] rows without a second projection.
-  const bool want_confidence = draft_impl_->has_dspark_confidence_head();
+  // Only pay the cost when adaptive pruning is actually enabled — static
+  // sampling doesn't consume confidence, and asking for selected_hidden
+  // triggers a target-side gather and a downstream linear+sigmoid every
+  // step.
+  const bool want_confidence = draft_impl_->has_dspark_confidence_head() &&
+                               adaptive_spec_controller_ != nullptr &&
+                               adaptive_spec_controller_->enabled();
   logits_input.return_selected_hidden = want_confidence;
 
   ForwardInput processed_input;
