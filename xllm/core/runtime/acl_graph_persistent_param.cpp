@@ -240,9 +240,6 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
        !util::is_deepseek_v4_model_type(args.model_type()) &&
        args.model_type() != "glm_moe_dsa" && !supports_mla_graph_kv_bucketing_);
 
-  // Check if mRoPE is used (for VLM models like qwen2-vl)
-  use_mrope_ = !args.rope_scaling_mrope_section().empty();
-
   const int64_t max_tokens_per_batch = options.max_tokens_per_batch();
   // Graph-mode token capacity is narrower than max_tokens_per_batch: ACL graph
   // only serves decode / spec-verify batches, so the relevant row upper bound
@@ -262,14 +259,8 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // Create persistent tensors with max_tokens_per_batch as first dimension
   persistent_tokens_ = torch::zeros({max_tokens_per_batch},
                                     torch::dtype(torch::kInt).device(device));
-  if (args.rope_scaling_mrope_section().empty()) {
-    persistent_positions_ = torch::zeros(
-        {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
-  } else {
-    persistent_positions_ = torch::zeros(
-        {3, max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
-    use_mrope_ = true;
-  }
+  persistent_positions_ = torch::zeros(
+      {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
   persistent_new_cache_slots_ = torch::zeros(
       {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
   persistent_new_cache_slots_default_ = torch::zeros(
@@ -841,15 +832,7 @@ void GraphPersistentParam::update_spec_verify_inputs(
   CHECK_LE(block_table_len, persistent_block_tables_.size(1));
   CHECK_LE(expanded_block_table_len, persistent_expanded_block_tables_.size(1));
 
-  if (use_mrope_) {
-    // Hybrid mRoPE models store graph positions as [3, max_tokens]. The MTP
-    // worker supplies the compact [num_tokens] position vector, matching the
-    // normal persistent update path where copy_ broadcasts it across the mRoPE
-    // rows.
-    persistent_positions_.narrow(1, 0, total_tokens).copy_(positions, true);
-  } else {
-    persistent_positions_.narrow(0, 0, total_tokens).copy_(positions, true);
-  }
+  persistent_positions_.narrow(0, 0, total_tokens).copy_(positions, true);
   q_seq_lens_.narrow(0, 0, batch_size)
       .copy_(attention.q_seq_lens.narrow(0, 0, batch_size), true);
   kv_seq_lens_.narrow(0, 0, batch_size)
@@ -928,23 +911,16 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
   if (!skip_token_update) {
     update_tokens(tokens, params, actual_num_tokens, padded_num_tokens);
   }
-  // mRoPE positions have shape [3, num_tokens], slice on dim 1
   if (actual_num_tokens > 0) {
-    if (use_mrope_) {
-      persistent_positions_
-          .slice(/*dim=*/1, /*start=*/0, /*end=*/actual_num_tokens)
-          .copy_(positions, /*non_blocking=*/true);
-    } else {
-      persistent_positions_
-          .slice(/*dim=*/0, /*start=*/0, /*end=*/actual_num_tokens)
-          .copy_(positions, /*non_blocking=*/true);
-    }
+    persistent_positions_
+        .slice(/*dim=*/0, /*start=*/0, /*end=*/actual_num_tokens)
+        .copy_(positions, /*non_blocking=*/true);
   }
   if (padded_num_tokens > actual_num_tokens) {
     zero_tensor_tail(persistent_positions_,
                      actual_num_tokens,
                      static_cast<int64_t>(padded_num_tokens),
-                     use_mrope_ ? 1 : 0);
+                     /*dim=*/0);
   }
   update_eplb_decode_token_mask(params, padded_num_tokens);
   if (q_seq_lens_default_.defined() &&

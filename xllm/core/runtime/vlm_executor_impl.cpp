@@ -90,11 +90,19 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
   params.embedding.input_embedding =
       model_->get_input_embeddings(tokens, params);
 
-  if (llm_executor_) {
-    return llm_executor_->run(tokens, positions, kv_caches, params);
+  // Decode mRoPE positions degenerate to identical rows; collapse to 1-D so
+  // decode runs ordinary rope. Prefill keeps the real [3, num_tokens] rows.
+  torch::Tensor fwd_positions = positions;
+  if (params.meta.batch_forward_type.is_decode() &&
+      args_.rope_scaling_rope_type() == "mrope") {
+    fwd_positions = positions[0].contiguous();
   }
 
-  return model_->forward(tokens, positions, kv_caches, params);
+  if (llm_executor_) {
+    return llm_executor_->run(tokens, fwd_positions, kv_caches, params);
+  }
+
+  return model_->forward(tokens, fwd_positions, kv_caches, params);
 }
 
 }  // namespace xllm
