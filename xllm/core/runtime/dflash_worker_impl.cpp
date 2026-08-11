@@ -124,11 +124,7 @@ void clear_all_output_embeddings(ForwardOutput& output) {
 }
 
 void record_metadata_ready_event(Stream& stream, ForwardInput& input) {
-  StreamEventPtr event = stream.record_event();
-  if (event == nullptr) {
-    stream.synchronize();
-  }
-  input.metadata_ready_event = event;
+  input.metadata_ready_event = stream.record_event_or_sync();
 }
 
 void wait_metadata_ready_event(const ForwardInput& input, Stream& stream) {
@@ -1160,12 +1156,11 @@ void DFlashWorkerImpl::write_target_context_to_cache(
   // enforce cross-stream ordering: the write_context_kv scatter could launch
   // before index_select finishes, producing corrupt KV cache. The prefill
   // caller runs its producer on compute_stream_, so no event is needed there.
-  StreamEventPtr context_hidden_ready_event = prepare_stream_->record_event();
+  StreamEventPtr context_hidden_ready_event =
+      prepare_stream_->record_event_or_sync();
   if (context_hidden_ready_event != nullptr) {
     CHECK(compute_stream_->wait_event(context_hidden_ready_event))
         << "failed to wait DFlash context hidden ready event";
-  } else {
-    prepare_stream_->synchronize();
   }
   write_context_kv(
       input, context_hidden, positions_device, new_cache_slots_device);

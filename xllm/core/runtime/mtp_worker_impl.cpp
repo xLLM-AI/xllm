@@ -173,11 +173,7 @@ KVCacheEstimateOptions make_kv_cache_estimate_options(
 }
 
 void record_metadata_ready_event(Stream& stream, ForwardInput& input) {
-  StreamEventPtr event = stream.record_event();
-  if (event == nullptr) {
-    stream.synchronize();
-  }
-  input.metadata_ready_event = event;
+  input.metadata_ready_event = stream.record_event_or_sync();
 }
 
 void finish_metadata_prepare(Stream& stream, ForwardInput& input) {
