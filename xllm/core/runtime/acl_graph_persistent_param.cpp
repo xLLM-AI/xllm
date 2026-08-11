@@ -212,11 +212,19 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // only serves decode / spec-verify batches, so the relevant row upper bound
   // comes from decode graph capacity instead.
   const int64_t max_graph_tokens = get_decode_graph_token_capacity(options);
-  // Hybrid spec verify keeps sequence-scoped metadata, while non-hybrid MTP
-  // expands every proposal token into its own decode metadata row.
-  const int64_t metadata_capacity = is_hybrid_linear_attention
-                                        ? get_decode_graph_capacity(options)
-                                        : max_graph_tokens;
+  // Hybrid speculative verification normally keeps sequence-scoped metadata.
+  // In DP target-MTP decode, however, an empty rank builds cold dummy metadata
+  // for every proposal-token row so that its graph shape matches active ranks.
+  // Reserve token capacity for that capture path; otherwise preserve the
+  // smaller sequence-scoped allocation used by hybrid speculative verification.
+  const bool needs_token_scoped_empty_dp_metadata =
+      is_hybrid_linear_attention && options.enable_speculative_decode() &&
+      !options.is_draft_engine() && options.dp_size() > 1;
+  const int64_t metadata_capacity =
+      needs_token_scoped_empty_dp_metadata
+          ? max_graph_tokens
+          : (is_hybrid_linear_attention ? get_decode_graph_capacity(options)
+                                        : max_graph_tokens);
 
   const int64_t max_seq_len = args_.max_position_embeddings();
 
@@ -818,13 +826,14 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
       is_chunked_prefill
           ? (padded_num_tokens + q_max_seq_len - 1) / q_max_seq_len
           : padded_num_tokens;
-  const bool is_empty_dp_decode_rank =
-      is_decode && params.meta.num_sequences == 0 && actual_num_tokens > 0 &&
+  const bool is_empty_dp_graph_rank =
+      (is_decode || is_hybrid_spec_verify_chunked_prefill) &&
+      params.meta.num_sequences == 0 && actual_num_tokens > 0 &&
       params.parallel.dp_global_token_nums.size() > 1 &&
       params.attention.host.kv_seq_lens.empty() &&
       params.attention.host.q_seq_lens.empty();
   const int64_t actual_seq_len_rows =
-      is_empty_dp_decode_rank
+      is_empty_dp_graph_rank
           ? 0
           : (is_chunked_prefill ? actual_batch_size : actual_num_tokens);
 
@@ -954,7 +963,7 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
                  /*end=*/padded_batch_size)
           .fill_(kPaddingLinearStateId);
     }
-  } else if (is_empty_dp_decode_rank && is_hybrid_linear_attention_) {
+  } else if (is_empty_dp_graph_rank && is_hybrid_linear_attention_) {
     persistent_linear_state_indices_
         .slice(/*dim=*/0, /*start=*/0, /*end=*/padded_batch_size)
         .fill_(kPaddingLinearStateId);
@@ -1068,7 +1077,7 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     }
     if (padded_batch_size > actual_seq_len_rows) {
       int32_t offset =
-          is_empty_dp_decode_rank ? 0 : static_cast<int32_t>(actual_num_tokens);
+          is_empty_dp_graph_rank ? 0 : static_cast<int32_t>(actual_num_tokens);
       std::vector<int32_t> padded_q_cu_seq_lens;
       padded_q_cu_seq_lens.reserve(padded_batch_size - actual_seq_len_rows);
       const int32_t padding_q_len = is_chunked_prefill ? q_max_seq_len : 1;
@@ -1097,8 +1106,8 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
   const bool skip_unused_expanded_verify_mask =
       can_skip_unused_expanded_verify_mask(params, is_hybrid_linear_attention_);
   if (need_update_attn_mask_ && !skip_unused_expanded_verify_mask) {
-    if (is_empty_dp_decode_rank) {
-      // An empty DP decode shard has no live sequence and an undefined
+    if (is_empty_dp_graph_rank) {
+      // An empty DP graph shard has no live sequence and an undefined
       // per-rank kv_seq_lens; update_attention_mask() would dereference that
       // undefined tensor. Publish a cold (all-zero) mask over the padded rows
       // instead, mirroring the padding the empty-shard branch already applies
@@ -1233,7 +1242,7 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     graph_params->attention.device.q_seq_lens =
         q_seq_lens(static_cast<uint32_t>(padded_batch_size));
     graph_params->meta.actual_num_sequences =
-        is_empty_dp_decode_rank ? 0 : static_cast<int32_t>(actual_num_tokens);
+        is_empty_dp_graph_rank ? 0 : static_cast<int32_t>(actual_num_tokens);
     if (supports_mla_graph_kv_bucketing_) {
       std::vector<int32_t> capture_host_kv_seq_lens_vec =
           persistent_host_kv_seq_lens_;
@@ -1298,7 +1307,7 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     graph_params->attention.device.block_tables =
         persistent_block_tables(static_cast<uint32_t>(padded_batch_size));
     if (!params.embedding.linear_state_ids.empty() ||
-        (is_empty_dp_decode_rank && is_hybrid_linear_attention_)) {
+        (is_empty_dp_graph_rank && is_hybrid_linear_attention_)) {
       graph_params->embedding.linear_state_ids =
           params.embedding.linear_state_ids;
       graph_params->embedding.linear_state_ids.resize(
