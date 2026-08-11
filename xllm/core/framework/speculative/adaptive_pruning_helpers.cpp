@@ -260,10 +260,15 @@ void apply_pruned_prefix_lengths(SampleOutput& sample_output,
   torch::Tensor target_tokens = safe_to(target_next_tokens_view,
                                         sample_output.next_tokens.options(),
                                         /*non_blocking=*/true);
+  // Boundary token: replace at cut positions with the target's resample.
+  // `torch::where(cond, src, dst)` is unavoidable here because the fill is a
+  // tensor, not a scalar. Downstream keep-mask fills use masked_fill_ to
+  // avoid the zeros_like/-ones_like scratch tensors.
   torch::Tensor next_tokens =
       torch::where(cut_mask, target_tokens, sample_output.next_tokens);
-  sample_output.next_tokens =
-      torch::where(keep_mask, next_tokens, -torch::ones_like(next_tokens));
+  const torch::Tensor drop_mask = keep_mask.logical_not();
+  next_tokens.masked_fill_(drop_mask, -1);
+  sample_output.next_tokens = next_tokens;
 
   if (sample_output.logprobs.defined()) {
     CHECK_EQ(sample_output.logprobs.dim(), 2)
@@ -272,13 +277,8 @@ void apply_pruned_prefix_lengths(SampleOutput& sample_output,
         << "validate logprob batch mismatch";
     CHECK_EQ(sample_output.logprobs.size(1), num_val_tokens)
         << "validate logprob width mismatch";
-    torch::Tensor output_logprobs = safe_to(sample_output.logprobs,
-                                            sample_output.logprobs.options(),
-                                            /*non_blocking=*/true);
-    sample_output.logprobs =
-        torch::where(masks.keep_mask.to(sample_output.logprobs.device()),
-                     output_logprobs,
-                     torch::zeros_like(output_logprobs));
+    sample_output.logprobs.masked_fill_(
+        drop_mask.to(sample_output.logprobs.device()), 0);
   }
 
   if (sample_output.top_tokens.defined()) {
@@ -296,17 +296,11 @@ void apply_pruned_prefix_lengths(SampleOutput& sample_output,
         << "validate top_logprobs batch mismatch";
     CHECK_EQ(sample_output.top_logprobs.size(1), num_val_tokens)
         << "validate top_logprobs width mismatch";
-    torch::Tensor top_keep_mask =
-        masks.keep_mask.to(sample_output.top_tokens.device())
-            .unsqueeze(/*dim=*/-1);
-    sample_output.top_tokens =
-        torch::where(top_keep_mask,
-                     sample_output.top_tokens,
-                     torch::zeros_like(sample_output.top_tokens));
-    sample_output.top_logprobs =
-        torch::where(top_keep_mask.to(sample_output.top_logprobs.device()),
-                     sample_output.top_logprobs,
-                     torch::zeros_like(sample_output.top_logprobs));
+    const torch::Tensor top_drop_mask =
+        drop_mask.to(sample_output.top_tokens.device()).unsqueeze(/*dim=*/-1);
+    sample_output.top_tokens.masked_fill_(top_drop_mask, 0);
+    sample_output.top_logprobs.masked_fill_(
+        top_drop_mask.to(sample_output.top_logprobs.device()), 0);
   }
 
   if (!sample_output.embeddings.defined()) {
@@ -319,13 +313,9 @@ void apply_pruned_prefix_lengths(SampleOutput& sample_output,
   CHECK_EQ(sample_output.embeddings.size(1), num_val_tokens)
       << "validate embedding width mismatch";
 
-  torch::Tensor embedding_keep_mask =
-      masks.keep_mask.to(sample_output.embeddings.device())
-          .unsqueeze(/*dim=*/-1);
-  sample_output.embeddings =
-      torch::where(embedding_keep_mask,
-                   sample_output.embeddings,
-                   torch::zeros_like(sample_output.embeddings));
+  const torch::Tensor embedding_drop_mask =
+      drop_mask.to(sample_output.embeddings.device()).unsqueeze(/*dim=*/-1);
+  sample_output.embeddings.masked_fill_(embedding_drop_mask, 0);
 }
 
 void sync_pruned_boundary_outputs(SampleOutput& sample_output,
