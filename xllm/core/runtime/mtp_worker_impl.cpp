@@ -3012,7 +3012,8 @@ void MTPWorkerImpl::prepare_validate_inputs(
   input_params.attention.rebuild_device_buffer(device_);
 #if defined(USE_NPU)
   if (supports_explicit_spec_verify_replay_update()) {
-    build_expanded_spec_verify_graph_input(input_params, device_);
+    build_expanded_spec_verify_graph_input(
+        input_params, device_, options_.block_size());
   }
 #endif
   validate_input.device_tensors_ready = true;
