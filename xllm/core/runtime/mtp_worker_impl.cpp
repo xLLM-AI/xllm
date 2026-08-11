@@ -1198,8 +1198,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
   // Adaptive is enabled only after profile completes (registry has predictor),
   // ensuring profiling warmup never triggers the adaptive HCCL broadcast.
   const bool use_adaptive_speculative_decode =
-      adaptive_spec_controller_ != nullptr &&
-      adaptive_spec_controller_->enabled() && adaptive_enabled() &&
+      adaptive_enabled() &&
       SpeculativeProfileRegistry::get_instance().has_validate_time_predictor();
 
   std::vector<ForwardOutput> draft_outputs;
@@ -1626,9 +1625,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_adaptive_validate(
     std::vector<int32_t> nat = embedding_cache_->read_accepted_prefix_lengths(
         input.input_params.embedding.embedding_ids,
         input.input_params.embedding.request_ids);
+    clamp_gdn_conv_history(nat);
     int32_t max_nat = 0;
     for (int32_t v : nat) {
-      max_nat = std::max(max_nat, std::min(v, kGdnConvHistoryCap));
+      max_nat = std::max(max_nat, v);
     }
     effective_speculative_tokens =
         std::max(effective_speculative_tokens, max_nat);
@@ -1765,6 +1765,37 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
           /*dim=*/0, dst_indices, target_output.sample_output.embeddings);
       padded_target_output.sample_output.embeddings = padded_embeddings;
     }
+
+    // Pad sampled logprobs / top_tokens / top_logprobs to [padded_total, ...]
+    // so downstream sync_pruned_boundary_{logprobs,top_logprobs} can safely
+    // view them as [batch, max_val_tokens]. Without this the shape CHECKs
+    // in the helpers abort on any actually-pruned adaptive step when the
+    // target sampler produced logprobs (non-Qwen3.5 targets + logprobs on).
+    if (target_output.sample_output.logprobs.defined()) {
+      torch::Tensor padded_logprobs = torch::zeros(
+          {padded_total}, target_output.sample_output.logprobs.options());
+      padded_logprobs.index_copy_(
+          /*dim=*/0, dst_indices, target_output.sample_output.logprobs);
+      padded_target_output.sample_output.logprobs = padded_logprobs;
+    }
+    if (target_output.sample_output.top_tokens.defined()) {
+      const int64_t top_k = target_output.sample_output.top_tokens.size(-1);
+      torch::Tensor padded_top_tokens =
+          torch::zeros({padded_total, top_k},
+                       target_output.sample_output.top_tokens.options());
+      padded_top_tokens.index_copy_(
+          /*dim=*/0, dst_indices, target_output.sample_output.top_tokens);
+      padded_target_output.sample_output.top_tokens = padded_top_tokens;
+    }
+    if (target_output.sample_output.top_logprobs.defined()) {
+      const int64_t top_k = target_output.sample_output.top_logprobs.size(-1);
+      torch::Tensor padded_top_logprobs =
+          torch::zeros({padded_total, top_k},
+                       target_output.sample_output.top_logprobs.options());
+      padded_top_logprobs.index_copy_(
+          /*dim=*/0, dst_indices, target_output.sample_output.top_logprobs);
+      padded_target_output.sample_output.top_logprobs = padded_top_logprobs;
+    }
   }
 
   const bool prelaunch_next_first_draft =
@@ -1797,7 +1828,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
     // Adaptive pruning path: per-seq validate width is variable, which is
     // incompatible with the async handoff's fixed-width base-state derivation.
     // Use the synchronous tail: unify tokens, then write target context inline.
-    if (get_optimization_config().enable_spec_token_broadcast) {
+    if (should_broadcast_spec_tokens(
+            parallel_args_,
+            get_optimization_config().enable_spec_token_broadcast,
+            input.sampling_params.all_greedy_sample)) {
       c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
       broadcast_spec_tokens(val_output.next_tokens, parallel_args_);
     }
