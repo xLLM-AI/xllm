@@ -71,9 +71,13 @@ AdaptiveSpeculativeController::select_pruned_prefix_lengths(
   CHECK_GT(num_speculative_tokens, 0)
       << "adaptive pruning speculative tokens must be positive";
 
-  std::vector<std::vector<double>> path_probs(
-      static_cast<size_t>(batch_size),
-      std::vector<double>(static_cast<size_t>(num_speculative_tokens), 0.0));
+  // path_probs laid out as a single [batch * num_speculative_tokens] buffer
+  // indexed by `seq * num_speculative_tokens + token_idx` to avoid the
+  // per-step batch_size heap allocations of vector<vector<double>>.
+  std::vector<double> path_probs(
+      static_cast<size_t>(batch_size) *
+          static_cast<size_t>(num_speculative_tokens),
+      0.0);
   std::vector<PruneCandidate> candidates;
   candidates.reserve(static_cast<size_t>(batch_size) *
                      static_cast<size_t>(num_speculative_tokens));
@@ -87,8 +91,9 @@ AdaptiveSpeculativeController::select_pruned_prefix_lengths(
         path_prob = 0.0;
       }
       path_prob = std::clamp(path_prob, 0.0, 1.0);
-      path_probs[static_cast<size_t>(seq_id)][static_cast<size_t>(token_idx)] =
-          path_prob;
+      path_probs[static_cast<size_t>(seq_id) *
+                     static_cast<size_t>(num_speculative_tokens) +
+                 static_cast<size_t>(token_idx)] = path_prob;
       candidates.push_back({seq_id, token_idx + 1, path_prob});
     }
   }
@@ -152,12 +157,12 @@ AdaptiveSpeculativeController::select_pruned_prefix_lengths(
     }
 
     double candidate_expected_accepted = expected_accepted;
-    const std::vector<double>& seq_path_probs =
-        path_probs[static_cast<size_t>(candidate.seq_id)];
+    const size_t seq_base = static_cast<size_t>(candidate.seq_id) *
+                            static_cast<size_t>(num_speculative_tokens);
     for (int32_t token_idx = prefix_len; token_idx < candidate.prefix_len;
          ++token_idx) {
       candidate_expected_accepted +=
-          seq_path_probs[static_cast<size_t>(token_idx)];
+          path_probs[seq_base + static_cast<size_t>(token_idx)];
     }
     // Incremental validate_time: only this seq's qᵢ grows by (new - old).
     const double kv_i =
