@@ -117,7 +117,11 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       const std::vector<ForwardOutput>& draft_outputs,
       const ForwardOutput& target_output,
       int32_t num_speculative_tokens,
-      const std::vector<int32_t>* pruned_prefix_lengths = nullptr);
+      // No default: Google Style bans default args on virtuals — they resolve
+      // statically from the declared base type, so an override changing the
+      // default would silently diverge when called through a base reference.
+      // Callers must pass nullptr explicitly for the static path.
+      const std::vector<int32_t>* pruned_prefix_lengths);
 
   // Hook for algorithm-specific draft output post-processing during decode.
   // Default MTP behavior always compresses probs for cache storage.

@@ -1491,21 +1491,32 @@ void MTPWorkerImpl::fill_validate_input_from_draft_outputs(
   const bool is_uniform = (total_val_tokens == num_sequences * max_val_tokens);
 
   if (is_uniform) {
-    // Fast path: all seqs have same val_tokens, use vectorized view+copy.
+    // Fast path: all seqs share the same val_tokens. Stack the draft-token
+    // columns once into a contiguous [batch, num_draft_tokens] tensor and
+    // issue a single strided slice-copy, instead of one device kernel per
+    // draft step. This is the static (non-adaptive) MTP baseline and runs
+    // every decode step; launch-bound NPU decode is measurably faster with
+    // one op than num_speculative_tokens ops writing the same bytes.
     const int32_t num_draft_tokens = max_val_tokens - 1;
     torch::Tensor validate_token_rows = validate_input.token_ids.view(
         {static_cast<int64_t>(num_sequences), max_val_tokens});
-    for (int32_t i = 0; i < num_draft_tokens; ++i) {
-      CHECK(static_cast<size_t>(i) < draft_outputs.size())
-          << "draft_outputs index out of range for step " << i;
-      const torch::Tensor& next_tokens =
-          draft_outputs[static_cast<size_t>(i)].sample_output.next_tokens;
-      CHECK(next_tokens.defined())
-          << "draft next_tokens must be defined for validate token fill";
-      torch::Tensor draft_tokens =
-          safe_to(next_tokens.flatten(), token_options, /*non_blocking=*/true);
-      validate_token_rows.select(/*dim=*/1, /*index=*/i + 1)
-          .copy_(draft_tokens, /*non_blocking=*/true);
+    if (num_draft_tokens > 0) {
+      std::vector<torch::Tensor> draft_token_columns;
+      draft_token_columns.reserve(static_cast<size_t>(num_draft_tokens));
+      for (int32_t i = 0; i < num_draft_tokens; ++i) {
+        CHECK(static_cast<size_t>(i) < draft_outputs.size())
+            << "draft_outputs index out of range for step " << i;
+        const torch::Tensor& next_tokens =
+            draft_outputs[static_cast<size_t>(i)].sample_output.next_tokens;
+        CHECK(next_tokens.defined())
+            << "draft next_tokens must be defined for validate token fill";
+        draft_token_columns.push_back(safe_to(
+            next_tokens.flatten(), token_options, /*non_blocking=*/true));
+      }
+      torch::Tensor packed_drafts =
+          torch::stack(draft_token_columns, /*dim=*/1);
+      validate_token_rows.slice(/*dim=*/1, /*start=*/1, /*end=*/max_val_tokens)
+          .copy_(packed_drafts, /*non_blocking=*/true);
     }
   } else {
     // Slow path: per-seq variable-length, group by draft step.
@@ -1723,13 +1734,16 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   const int64_t padded_total =
       static_cast<int64_t>(batch_size) * max_val_tokens;
 
-  ForwardOutput padded_target_output = target_output;
-  if (total_tokens == static_cast<int32_t>(padded_total)) {
-    // Fast path: all seqs have the same val_tokens (= max), no padding needed.
-    padded_target_output.logits =
-        target_output.logits.view({padded_total, vocab_size});
-  } else {
+  // For the uniform fast path we only need to reinterpret target_output.logits
+  // as `[padded_total, vocab]` — no ForwardOutput copy required. Only the
+  // variable-length slow path materializes a separate padded output.
+  std::optional<ForwardOutput> padded_target_output_slow;
+  const bool needs_padding =
+      (total_tokens != static_cast<int32_t>(padded_total));
+  if (needs_padding) {
     // Slow path: per-seq variable-length, scatter into padded layout.
+    padded_target_output_slow.emplace(target_output);
+    ForwardOutput& padded_target_output = *padded_target_output_slow;
     std::vector<int64_t> dst_indices_vec;
     dst_indices_vec.reserve(static_cast<size_t>(total_tokens));
     for (int32_t i = 0; i < batch_size; ++i) {
@@ -1744,8 +1758,31 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
                           .dtype(torch::kLong)
                           .device(target_output.logits.device()));
 
-    torch::Tensor padded_logits = torch::full(
-        {padded_total, vocab_size}, -1e9, target_output.logits.options());
+    // Only the padding rows need the -inf sentinel; using empty + a targeted
+    // index_fill_ over the complement of dst_indices avoids paying vocab_size
+    // × padded_total writes when most rows will be overwritten by index_copy_.
+    torch::Tensor padded_logits = torch::empty({padded_total, vocab_size},
+                                               target_output.logits.options());
+    if (dst_indices_vec.size() < static_cast<size_t>(padded_total)) {
+      std::vector<bool> valid(static_cast<size_t>(padded_total), false);
+      for (int64_t idx : dst_indices_vec) {
+        valid[static_cast<size_t>(idx)] = true;
+      }
+      std::vector<int64_t> pad_indices_vec;
+      pad_indices_vec.reserve(static_cast<size_t>(padded_total) -
+                              dst_indices_vec.size());
+      for (int64_t i = 0; i < padded_total; ++i) {
+        if (!valid[static_cast<size_t>(i)]) {
+          pad_indices_vec.push_back(i);
+        }
+      }
+      torch::Tensor pad_indices =
+          torch::tensor(pad_indices_vec,
+                        torch::TensorOptions()
+                            .dtype(torch::kLong)
+                            .device(target_output.logits.device()));
+      padded_logits.index_fill_(/*dim=*/0, pad_indices, -1e9);
+    }
     padded_logits.index_copy_(/*dim=*/0, dst_indices, target_output.logits);
     padded_target_output.logits = padded_logits;
 
@@ -1797,6 +1834,17 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
       padded_target_output.sample_output.top_logprobs = padded_top_logprobs;
     }
   }
+  // Uniform fast path uses a scoped local ForwardOutput whose only diff is
+  // logits viewed to [padded_total, vocab]; slow path uses the materialized
+  // padded copy above. Both are const-ref'd into validate() below.
+  ForwardOutput uniform_target_view;
+  if (!needs_padding) {
+    uniform_target_view = target_output;
+    uniform_target_view.logits =
+        target_output.logits.view({padded_total, vocab_size});
+  }
+  const ForwardOutput& target_output_for_validate =
+      needs_padding ? *padded_target_output_slow : uniform_target_view;
 
   const bool prelaunch_next_first_draft =
       pruned_prefix_lengths == nullptr && can_use_combined_first_draft() &&
@@ -1817,7 +1865,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     val_output = validate(input.sampling_params,
                           draft_outputs,
-                          padded_target_output,
+                          target_output_for_validate,
                           num_speculative_tokens,
                           pruned_prefix_lengths);
   }
