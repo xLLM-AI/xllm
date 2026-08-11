@@ -1650,6 +1650,37 @@ class DeepseekV4ModelImpl
     return *std::max_element(values.begin(), values.end());
   }
 
+  void build_dspark_swa_metadata(layer::DSAMetadata& dsa) const {
+    if (!model_args_.dspark_use_native_sas() ||
+        model_args_.dspark_block_size() <= 0) {
+      return;
+    }
+
+    for (size_t layer_id = 0; layer_id < caches_info_.size(); ++layer_id) {
+      const std::vector<DSACacheInfo>& layer_caches = caches_info_[layer_id];
+      if (layer_id >= dsa.block_tables.size()) {
+        continue;
+      }
+      for (size_t cache_id = 0; cache_id < layer_caches.size(); ++cache_id) {
+        const DSACacheInfo& cache_info = layer_caches[cache_id];
+        if (cache_info.type != DSACacheType::SLIDING_WINDOW ||
+            cache_id >= dsa.block_tables[layer_id].size() ||
+            !dsa.block_tables[layer_id][cache_id].defined()) {
+          continue;
+        }
+        dsa.dspark_swa_indices = layer::build_dspark_swa_indices(
+            dsa.block_tables[layer_id][cache_id],
+            dsa.actual_seq_lengths_query,
+            dsa.actual_seq_lengths_kv,
+            window_size_,
+            model_args_.dspark_block_size(),
+            cache_info.block_size);
+        return;
+      }
+    }
+    LOG(FATAL) << "Native DeepSeek-V4 DSpark requires an SWA block table.";
+  }
+
   // cu_seqlens_ori_kv_override, when defined, replaces the query cumsum the
   // prefill sparse metadata normally uses to describe ori_kv. Only prefill CP
   // passes it: there the kv window is longer than this rank's query block, so
@@ -1665,6 +1696,7 @@ class DeepseekV4ModelImpl
     dsa.c128_metadata = torch::Tensor();
     dsa.qli_metadata = torch::Tensor();
     dsa.sparse_metadata_ori_win_left = -1;
+    dsa.dspark_swa_indices = torch::Tensor();
 
     torch::Device metadata_device(torch::kCPU);
     if (dsa.input_positions.defined()) {
@@ -1689,6 +1721,11 @@ class DeepseekV4ModelImpl
         !dsa.actual_seq_lengths_kv.defined()) {
       return;
     }
+
+    // Native DSpark's explicit SWA indices are request-level metadata. All
+    // draft layers share the same SWA manager, so build them once per model
+    // forward instead of once per decoder layer.
+    build_dspark_swa_metadata(dsa);
 
     const int64_t batch_size =
         std::max<int64_t>(dsa.actual_seq_lengths_kv.size(0), 1);

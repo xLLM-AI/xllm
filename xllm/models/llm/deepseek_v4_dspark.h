@@ -31,6 +31,26 @@ limitations under the License.
 #include "models/model_registry.h"
 
 namespace xllm {
+namespace dspark_detail {
+
+template <typename Module>
+void load_vocab_weight(VocabularyWeightSelector& selector,
+                       const StateDict& dedicated_state_dict,
+                       const StateDict& fallback_state_dict,
+                       Module& module) {
+  if (dedicated_state_dict.size() > 0 &&
+      selector.should_load(/*dedicated=*/true)) {
+    module->load_state_dict(dedicated_state_dict);
+    selector.mark_loaded(/*dedicated=*/true);
+  }
+  if (fallback_state_dict.size() > 0 &&
+      selector.should_load(/*dedicated=*/false)) {
+    module->load_state_dict(fallback_state_dict);
+    selector.mark_loaded(/*dedicated=*/false);
+  }
+}
+
+}  // namespace dspark_detail
 
 // DeepSeek-V4-0731 stores the DSpark draft in mtp.0/1/2. Unlike the preview
 // model's serial MTP layer, these are ordinary V4 decoder layers: target layer
@@ -85,17 +105,9 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
     // QuaRot quantized checkpoints carry a dedicated mtp.0 basis. Accept both
     // layouts, but make the dedicated tensor win regardless of shard order.
     StateDict dedicated_embed = first.get_dict_with_prefix("embed.");
-    if (dedicated_embed.size() > 0 &&
-        embedding_source_.should_load(/*dedicated=*/true)) {
-      embed_tokens_->load_state_dict(dedicated_embed);
-      embedding_source_.mark_loaded(/*dedicated=*/true);
-    }
     StateDict fallback_embed = state_dict.get_dict_with_prefix("embed.");
-    if (fallback_embed.size() > 0 &&
-        embedding_source_.should_load(/*dedicated=*/false)) {
-      embed_tokens_->load_state_dict(fallback_embed);
-      embedding_source_.mark_loaded(/*dedicated=*/false);
-    }
+    dspark_detail::load_vocab_weight(
+        embedding_source_, dedicated_embed, fallback_embed, embed_tokens_);
 
     StateDict last = state_dict.get_dict_with_prefix(
         "mtp." + std::to_string(last_layer) + ".");
@@ -175,17 +187,9 @@ class DeepseekV4DSparkForCausalLMImpl final
       model_->load_state_dict(*state_dict);
       StateDict dedicated_head = state_dict->get_dict_with_prefix(
           "mtp." + std::to_string(last_layer) + ".head.");
-      if (dedicated_head.size() > 0 &&
-          head_source_.should_load(/*dedicated=*/true)) {
-        lm_head_->load_state_dict(dedicated_head);
-        head_source_.mark_loaded(/*dedicated=*/true);
-      }
       StateDict fallback_head = state_dict->get_dict_with_prefix("head.");
-      if (fallback_head.size() > 0 &&
-          head_source_.should_load(/*dedicated=*/false)) {
-        lm_head_->load_state_dict(fallback_head);
-        head_source_.mark_loaded(/*dedicated=*/false);
-      }
+      dspark_detail::load_vocab_weight(
+          head_source_, dedicated_head, fallback_head, lm_head_);
     }
     model_->verify_dspark_weights();
     CHECK(head_source_.loaded() && lm_head_->is_weight_loaded())

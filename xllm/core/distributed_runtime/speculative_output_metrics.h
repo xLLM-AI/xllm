@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    https://www.apache.org/licenses/LICENSE-2.0
+    https://github.com/jd-opensource/xllm/blob/main/LICENSE
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -43,13 +43,11 @@ SpeculativeOutputStats calculate_speculative_output_stats_typed(
     for (int64_t column = 0; column < token_width; ++column) {
       if (data[row * token_width + column] >= static_cast<T>(0)) {
         ++stats.committed_tokens;
-      }
-    }
-    for (int64_t position = 0; position < num_speculative_tokens; ++position) {
-      // Column 0 is always the first committed token. Draft position p was
-      // accepted exactly when output column p+1 is non-negative.
-      if (data[row * token_width + position + 1] >= static_cast<T>(0)) {
-        ++stats.accepted_per_position[static_cast<size_t>(position)];
+        // Column 0 is always the first committed token. Draft position p was
+        // accepted exactly when output column p+1 is non-negative.
+        if (column > 0 && column <= num_speculative_tokens) {
+          ++stats.accepted_per_position[static_cast<size_t>(column - 1)];
+        }
       }
     }
   }

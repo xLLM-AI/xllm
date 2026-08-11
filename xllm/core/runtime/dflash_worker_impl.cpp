@@ -526,16 +526,12 @@ ForwardInput DFlashWorkerImpl::update_input_by_last_step_output(
   return inputs;
 }
 
-bool DFlashWorkerImpl::uses_dsa_block_parallel_query_rows() const {
-  return draft_impl_ != nullptr &&
-         dflash_detail::uses_dsa_block_parallel_query_rows(
-             draft_impl_->context_.get_model_args(), sample_from_anchor());
-}
-
-bool DFlashWorkerImpl::uses_native_dspark_sas() const {
-  return draft_impl_ != nullptr &&
-         dflash_detail::uses_native_dspark_sas(
-             draft_impl_->context_.get_model_args(), sample_from_anchor());
+dflash_detail::DSparkSasMode DFlashWorkerImpl::draft_sas_mode() const {
+  if (draft_impl_ == nullptr) {
+    return dflash_detail::DSparkSasMode::NOT_DSPARK;
+  }
+  return dflash_detail::classify_dspark_sas_mode(
+      draft_impl_->context_.get_model_args(), sample_from_anchor());
 }
 
 std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
@@ -560,12 +556,15 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   const int32_t query_width = sample_from_anchor()
                                   ? options_.num_speculative_tokens()
                                   : options_.num_speculative_tokens() + 1;
-  const bool use_block_parallel_rows = uses_dsa_block_parallel_query_rows();
+  const dflash_detail::DSparkSasMode sas_mode = draft_sas_mode();
+  const bool use_block_parallel_rows =
+      sas_mode == dflash_detail::DSparkSasMode::COMPATIBILITY;
   ForwardInput query_input = input;
   dflash_detail::invalidate_draft_model_geometry(query_input.input_params);
   query_input.input_params.meta.batch_forward_type =
-      uses_native_dspark_sas() ? BatchForwardType::DECODE
-                               : BatchForwardType::CHUNKED_PREFILL;
+      sas_mode == dflash_detail::DSparkSasMode::NATIVE
+          ? BatchForwardType::DECODE
+          : BatchForwardType::CHUNKED_PREFILL;
   query_input.input_params.meta.q_max_seq_len =
       use_block_parallel_rows ? 1 : query_width;
   scale_dp_global_token_nums(query_input.input_params, query_width);
@@ -1034,7 +1033,9 @@ void DFlashWorkerImpl::prepare_query_inputs(const ForwardInput& input,
 
   specBuilder::DecodeBuildBuffers buf;
   std::vector<int32_t> selected_idxes;
-  const bool use_block_parallel_rows = uses_dsa_block_parallel_query_rows();
+  const dflash_detail::DSparkSasMode sas_mode = draft_sas_mode();
+  const bool use_block_parallel_rows =
+      sas_mode == dflash_detail::DSparkSasMode::COMPATIBILITY;
   build_query_rows(input,
                    mask_token_id_,
                    options_.num_speculative_tokens(),
@@ -1062,8 +1063,9 @@ void DFlashWorkerImpl::prepare_query_inputs(const ForwardInput& input,
                                           input.token_ids.options(),
                                           input.positions.options());
   input_params.meta.batch_forward_type =
-      uses_native_dspark_sas() ? BatchForwardType::DECODE
-                               : BatchForwardType::CHUNKED_PREFILL;
+      sas_mode == dflash_detail::DSparkSasMode::NATIVE
+          ? BatchForwardType::DECODE
+          : BatchForwardType::CHUNKED_PREFILL;
   if (use_block_parallel_rows) {
     input_params.meta.num_sequences = num_sequences_query * query_width;
     if (input_params.meta.actual_num_sequences > 0) {
