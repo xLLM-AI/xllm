@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "runtime/forward_shared_memory_manager.h"
 #include "runtime/worker.h"
@@ -170,6 +171,7 @@ class WorkerService : public proto::DistributeWorker {
  private:
   // runtime options
   runtime::Options options_;
+  std::vector<std::string> speculative_position_labels_;
 
   bool initialized_;
 

@@ -203,6 +203,31 @@ TEST_F(DeepseekV4IndexerTest, DSparkSparseTilingUsesSupportedWindow) {
       deepseek_v4_uses_prefill_sparse_metadata(params.meta.batch_forward_type));
 }
 
+TEST_F(DeepseekV4IndexerTest, DSparkNativeSwaIndicesAreSharedByQueryRows) {
+  const torch::Tensor block_table =
+      torch::tensor({{10, 11, 12}}, torch::kInt32);
+  const torch::Tensor query_cu_seq_lens = torch::tensor({0, 3}, torch::kInt32);
+  const torch::Tensor seq_lens = torch::tensor({6}, torch::kInt32);
+
+  const torch::Tensor indices =
+      build_dspark_swa_indices(block_table,
+                               query_cu_seq_lens,
+                               seq_lens,
+                               /*window_size=*/4,
+                               /*num_speculative_tokens=*/3,
+                               /*cache_block_size=*/4);
+
+  ASSERT_EQ(indices.dim(), 3);
+  ASSERT_EQ(indices.size(0), 3);
+  ASSERT_EQ(indices.size(1), 1);
+  ASSERT_EQ(indices.size(2), 128);
+  const torch::Tensor expected_prefix =
+      torch::tensor({40, 41, 42, 43, 44, 45, -1}, torch::kInt32);
+  for (int64_t row = 0; row < indices.size(0); ++row) {
+    EXPECT_TRUE(torch::equal(indices[row][0].slice(0, 0, 7), expected_prefix));
+  }
+}
+
 TEST_F(DeepseekV4IndexerTest, DsaDummyAttentionUsesPositionDevice) {
   ModelInputParams params;
   params.meta.batch_forward_type = BatchForwardType::DECODE;

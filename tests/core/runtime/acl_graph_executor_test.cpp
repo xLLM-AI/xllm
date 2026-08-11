@@ -1280,16 +1280,17 @@ TEST(DSparkWorkerWeightsTest, PreservesDeepseekDraftHeadAndEmbedding) {
 TEST(DSparkSasFallbackTest, ChoosesCompatibleRowsUnlessNativeIsEnabled) {
   ModelArgs draft_args;
   draft_args.model_type("deepseek_v4_dspark");
-  EXPECT_TRUE(dflash_detail::uses_dsa_block_parallel_query_rows(
-      draft_args, /*sample_from_anchor=*/true));
-  EXPECT_FALSE(dflash_detail::uses_native_dspark_sas(
-      draft_args, /*sample_from_anchor=*/true));
+  EXPECT_EQ(dflash_detail::classify_dspark_sas_mode(
+                draft_args, /*sample_from_anchor=*/true),
+            dflash_detail::DSparkSasMode::COMPATIBILITY);
 
   draft_args.dspark_use_native_sas(true);
-  EXPECT_FALSE(dflash_detail::uses_dsa_block_parallel_query_rows(
-      draft_args, /*sample_from_anchor=*/true));
-  EXPECT_TRUE(dflash_detail::uses_native_dspark_sas(
-      draft_args, /*sample_from_anchor=*/true));
+  EXPECT_EQ(dflash_detail::classify_dspark_sas_mode(
+                draft_args, /*sample_from_anchor=*/true),
+            dflash_detail::DSparkSasMode::NATIVE);
+  EXPECT_EQ(dflash_detail::classify_dspark_sas_mode(
+                draft_args, /*sample_from_anchor=*/false),
+            dflash_detail::DSparkSasMode::NOT_DSPARK);
 }
 
 TEST(DSparkWorkerWeightsTest, DedicatedVocabularyOverridesFallbackInAnyOrder) {

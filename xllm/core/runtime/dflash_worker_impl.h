@@ -47,26 +47,32 @@ inline void invalidate_draft_model_geometry(ModelInputParams& input_params) {
   input_params.attn_metadata.reset();
 }
 
+inline bool is_deepseek_v4_dspark_draft(const std::string& model_type) {
+  return model_type == "deepseek_v4_dspark";
+}
+
 inline bool draft_uses_own_head_and_embedding(const std::string& model_type) {
   // DeepSeek-V4 DSpark checkpoints contain trained mtp.0.embed and
   // mtp.<last>.head tensors. They are not aliases of the target model's
   // embedding/head (and may also carry the draft-side QuaRot transform), so
   // replacing them after load destroys proposal quality.
-  return model_type == "deepseek_v4_dspark";
+  return is_deepseek_v4_dspark_draft(model_type);
 }
 
-inline bool uses_dsa_block_parallel_query_rows(const ModelArgs& draft_args,
-                                               bool sample_from_anchor) {
-  return sample_from_anchor &&
-         draft_args.model_type() == "deepseek_v4_dspark" &&
-         !draft_args.dspark_use_native_sas();
-}
+enum class DSparkSasMode : uint8_t {
+  NOT_DSPARK,
+  COMPATIBILITY,
+  NATIVE,
+};
 
-inline bool uses_native_dspark_sas(const ModelArgs& draft_args,
-                                   bool sample_from_anchor) {
-  return sample_from_anchor &&
-         draft_args.model_type() == "deepseek_v4_dspark" &&
-         draft_args.dspark_use_native_sas();
+inline DSparkSasMode classify_dspark_sas_mode(const ModelArgs& draft_args,
+                                              bool sample_from_anchor) {
+  if (!sample_from_anchor ||
+      !is_deepseek_v4_dspark_draft(draft_args.model_type())) {
+    return DSparkSasMode::NOT_DSPARK;
+  }
+  return draft_args.dspark_use_native_sas() ? DSparkSasMode::NATIVE
+                                            : DSparkSasMode::COMPATIBILITY;
 }
 
 }  // namespace dflash_detail
@@ -136,8 +142,7 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
                                ForwardInput& validate_input);
 
  private:
-  bool uses_dsa_block_parallel_query_rows() const;
-  bool uses_native_dspark_sas() const;
+  dflash_detail::DSparkSasMode draft_sas_mode() const;
 
   void fill_validate_input_from_draft_outputs(const DraftBlock& draft_block,
                                               ForwardInput& validate_input,

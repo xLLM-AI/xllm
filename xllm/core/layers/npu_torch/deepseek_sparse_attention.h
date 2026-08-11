@@ -57,6 +57,13 @@ inline int64_t deepseek_v4_ori_window_left(int64_t window_size,
   return std::max<int64_t>(window_size - 1, 0);
 }
 
+torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
+                                       const torch::Tensor& query_cu_seq_lens,
+                                       const torch::Tensor& seq_lens,
+                                       int64_t window_size,
+                                       int64_t num_speculative_tokens,
+                                       int64_t cache_block_size);
+
 // DSA kv state aligned with Python:
 // (ori_kv, compressor_kv_state, compressor_score_state,
 //  c4_indexer_kv_state, c4_indexer_score_state)

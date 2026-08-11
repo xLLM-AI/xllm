@@ -256,12 +256,13 @@ void scatter_by_slot(torch::Tensor& cache,
 // Native DSpark SAS addresses the trailing SWA prefix plus the whole current
 // diffusion block explicitly. The compatibility fallback never calls it
 // because CANN 9.0 rejects a non-empty ori_sparse_indices argument.
-torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
-                                       const torch::Tensor& query_cu_seq_lens,
-                                       const torch::Tensor& seq_lens,
-                                       int64_t window_size,
-                                       int64_t num_speculative_tokens,
-                                       int64_t cache_block_size) {
+torch::Tensor build_dspark_swa_indices_impl(
+    const torch::Tensor& block_table,
+    const torch::Tensor& query_cu_seq_lens,
+    const torch::Tensor& seq_lens,
+    int64_t window_size,
+    int64_t num_speculative_tokens,
+    int64_t cache_block_size) {
   CHECK(block_table.defined() && query_cu_seq_lens.defined() &&
         seq_lens.defined());
   CHECK_GT(block_table.size(1), 0);
@@ -541,6 +542,20 @@ AttentionMetadata build_indexer_attention_metadata(
 }
 
 }  // namespace
+
+torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
+                                       const torch::Tensor& query_cu_seq_lens,
+                                       const torch::Tensor& seq_lens,
+                                       int64_t window_size,
+                                       int64_t num_speculative_tokens,
+                                       int64_t cache_block_size) {
+  return build_dspark_swa_indices_impl(block_table,
+                                       query_cu_seq_lens,
+                                       seq_lens,
+                                       window_size,
+                                       num_speculative_tokens,
+                                       cache_block_size);
+}
 
 DSAttentionImpl::DSAttentionImpl(const ModelContext& context, int32_t layer_id)
     : DSAttentionImpl(context.get_model_args(),
@@ -981,15 +996,9 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   std::optional<torch::Tensor> ori_sparse_indices = std::nullopt;
   if (dspark_use_native_sas_ && dspark_block_size_ > 0 &&
       compress_ratio_i == 1) {
-    const int64_t cache_block_size =
-        ori_kv.defined() && ori_kv.dim() > 1 ? ori_kv.size(1) : 128;
-    ori_sparse_indices =
-        build_dspark_swa_indices(ori_block_table_for_attn,
-                                 attn_metadata.actual_seq_lengths_query,
-                                 attn_metadata.actual_seq_lengths_kv,
-                                 window_size_,
-                                 dspark_block_size_,
-                                 cache_block_size);
+    CHECK(attn_metadata.dspark_swa_indices.defined())
+        << "Native DeepSeek-V4 DSpark requires precomputed SWA indices.";
+    ori_sparse_indices = as_optional(attn_metadata.dspark_swa_indices);
   }
 
   const int64_t ori_win_left = deepseek_v4_ori_window_left(
