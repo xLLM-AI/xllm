@@ -925,11 +925,16 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
       effective_prefix[static_cast<size_t>(i)] =
           per_seq_val_tokens[static_cast<size_t>(i)] - 1;
     }
+    adaptive_pruning::PrunedPrefixMasks masks =
+        adaptive_pruning::build_pruned_prefix_masks(
+            effective_prefix,
+            max_val_tokens - 1,
+            val_output.next_tokens.device());
     adaptive_pruning::apply_pruned_prefix_lengths(
         val_output,
         target_output.sample_output.next_tokens,
         max_val_tokens - 1,
-        effective_prefix);
+        masks);
   }
   COUNTER_ADD(speculative_execution_latency_seconds_validation,
               timer.elapsed_seconds());
@@ -1368,14 +1373,16 @@ std::vector<int32_t> DFlashWorkerImpl::compute_adaptive_prefix_lengths(
       !adaptive_spec_controller_->enabled()) {
     return {};
   }
-  // Prefer the trained ConfidenceHead output when present (DSpark);
-  // otherwise fall back to sampler-gathered proposal probs (DFlash / DSpark
-  // without a confidence head).
+  // Prefer the trained ConfidenceHead output when present (DSpark); otherwise
+  // fall back to sampler-gathered proposal probs (DFlash / DSpark without a
+  // confidence head).
   //
-  // Both signals are per-step conditional accept probabilities per the
-  // DSpark paper (Section 3.2.1) and the classical spec-decode setup: c_k =
-  // P(step k accepted | prefix accepted). The controller multiplies them via
-  // chain rule to obtain path probs a_{r,j} = ∏ c_i.
+  // Both signals are per-step conditional accept probabilities: c_k =
+  // P(step k accepted | prefix accepted). ConfidenceHead simply replaces
+  // proposal probs as a better-trained estimator of the same quantity. The
+  // controller chain-rule multiplies them to obtain path probs
+  // a_{r,j} = ∏ c_i (paper Section 3.2.2 Algorithm 1). Same code path for
+  // both signal sources.
   //
   // Note (DSpark v1): the ConfidenceHead is loaded from the released
   // checkpoint but is *not* STS-calibrated yet (paper Section 3.2.1 "Post-hoc
@@ -1407,24 +1414,10 @@ std::vector<int32_t> DFlashWorkerImpl::compute_adaptive_prefix_lengths(
         specBuilder::calc_kv_len(kv_seq_lens, i, /*offset=*/0));
   }
 
-  double target_step_time_ms = 1.0;
-  SpeculativeProfileRegistry& registry =
-      SpeculativeProfileRegistry::get_instance();
-  auto predictor = registry.validate_time_predictor();
-  if (predictor.has_value()) {
-    const double q = static_cast<double>(num_speculative_tokens + 1);
-    double t = predictor->intercept_ms;
-    for (double kv : per_seq_kv_lens) {
-      t += predictor->query_token_ms * q + predictor->query_prefix_ms * q * kv;
-    }
-    target_step_time_ms = std::max(t, 1.0);
-  }
-
   std::vector<int32_t> prefix_lengths =
       adaptive_spec_controller_->select_pruned_prefix_lengths(
           probs_for_controller.to(torch::kCPU).to(torch::kFloat64),
           /*full_draft_time_ms=*/0.0,
-          target_step_time_ms,
           per_seq_kv_lens);
   return prefix_lengths;
 }

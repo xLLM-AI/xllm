@@ -34,10 +34,9 @@ bool is_supported_algorithm(const std::string& algorithm) {
   if (SpeculativeConfig::is_mtp_algorithm(algorithm)) return true;
   std::string lower = algorithm;
   std::transform(
-      lower.begin(),
-      lower.end(),
-      lower.begin(),
-      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+      });
   return lower == "dflash" || lower == "dspark";
 }
 
@@ -67,8 +66,7 @@ std::vector<int32_t>
 AdaptiveSpeculativeController::select_pruned_prefix_lengths(
     const torch::Tensor& selected_probs_by_step,
     double full_draft_time_ms,
-    const std::vector<double>& per_seq_kv_lens,
-    bool probs_are_path_probs) const {
+    const std::vector<double>& per_seq_kv_lens) const {
   CHECK(selected_probs_by_step.defined())
       << "adaptive pruning requires draft selected probabilities";
   CHECK_EQ(selected_probs_by_step.dim(), 2)
@@ -101,21 +99,15 @@ AdaptiveSpeculativeController::select_pruned_prefix_lengths(
          ++token_idx) {
       const double step_prob =
           prob_data[seq_id * num_speculative_tokens + token_idx];
-      // For MTP / DFlash sample-gathered probs each column is a per-step
-      // conditional accept probability, so we cumulatively multiply via chain
-      // rule to get path prob a_{r,j} = ∏ c_i (paper Section 3.2.2 Algorithm
-      // 1). For DSpark's ConfidenceHead the column already encodes P(accept
-      // prefix of length k+1) — we consume it directly. `probs_are_path_probs`
-      // selects between the two semantics.
-      if (probs_are_path_probs) {
-        path_prob = std::clamp(step_prob, 0.0, 1.0);
-      } else {
-        path_prob *= step_prob;
-        if (!std::isfinite(path_prob)) {
-          path_prob = 0.0;
-        }
-        path_prob = std::clamp(path_prob, 0.0, 1.0);
+      // Chain rule cumulative product: a_{r,j} = ∏ c_i (paper Section 3.2.2
+      // Algorithm 1). Works for MTP / DFlash sample-gathered probs and for
+      // DSpark ConfidenceHead c_k alike; both are per-step conditional
+      // probabilities.
+      path_prob *= step_prob;
+      if (!std::isfinite(path_prob)) {
+        path_prob = 0.0;
       }
+      path_prob = std::clamp(path_prob, 0.0, 1.0);
       path_probs[static_cast<size_t>(seq_id) *
                      static_cast<size_t>(num_speculative_tokens) +
                  static_cast<size_t>(token_idx)] = path_prob;
