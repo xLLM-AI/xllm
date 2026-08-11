@@ -954,6 +954,12 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
   maybe_broadcast_spec_tokens(val_output.next_tokens);
   compute_stream_->synchronize();
   val_output.next_tokens = val_output.next_tokens.to(torch::kCPU);
+  // Precise adaptive-aware metrics on the already-CPU tensor: static path
+  // passes an empty per_seq_val_tokens and every row counts full width;
+  // adaptive passes the per-seq widths so padded tail slots aren't counted
+  // as rejections. Zero extra device sync — we're already on CPU.
+  record_validate_metrics(
+      val_output, did_prune ? per_seq_val_tokens : std::vector<int32_t>{});
   write_target_context_to_cache(input, val_output);
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
@@ -1591,6 +1597,66 @@ void DFlashWorkerImpl::scatter_varlen_target_output_to_dense(
         /*dim=*/0, dst_indices, target_output.sample_output.embeddings);
     target_output.sample_output.embeddings = padded_embeddings;
   }
+}
+
+void DFlashWorkerImpl::record_validate_metrics(
+    const SampleOutput& val_output,
+    const std::vector<int32_t>& per_seq_val_tokens) const {
+  if (!val_output.next_tokens.defined() || val_output.next_tokens.dim() != 2 ||
+      val_output.next_tokens.numel() == 0) {
+    return;
+  }
+  const int32_t batch_size =
+      static_cast<int32_t>(val_output.next_tokens.size(0));
+  const int32_t width = static_cast<int32_t>(val_output.next_tokens.size(1));
+  const int32_t num_speculative_tokens = options_.num_speculative_tokens();
+  if (num_speculative_tokens <= 0 || width < 2) {
+    return;
+  }
+  CHECK(val_output.next_tokens.device().is_cpu())
+      << "record_validate_metrics expects next_tokens already on CPU to avoid "
+         "a blocking device sync on the hot path";
+  const bool have_per_seq = !per_seq_val_tokens.empty();
+  if (have_per_seq) {
+    CHECK_EQ(per_seq_val_tokens.size(), static_cast<size_t>(batch_size))
+        << "per_seq_val_tokens size mismatch with next_tokens batch";
+  }
+
+  torch::Tensor next_tokens_cpu =
+      val_output.next_tokens.to(torch::kInt64).contiguous();
+  const int64_t* token_data = next_tokens_cpu.const_data_ptr<int64_t>();
+  int64_t num_draft_tokens = 0;
+  int64_t accepted_count = 0;
+  for (int32_t seq_id = 0; seq_id < batch_size; ++seq_id) {
+    // seq_width = target-side validate width for this seq (anchor + drafts).
+    // Under adaptive per-seq varlen prune it is per_seq_val_tokens[i], else
+    // the full dense width.
+    int32_t seq_width = width;
+    if (have_per_seq) {
+      seq_width = std::clamp(per_seq_val_tokens[static_cast<size_t>(seq_id)],
+                             /*lo=*/2,
+                             /*hi=*/width);
+    }
+    // Drafts attempted for this seq = seq_width - 1 (bonus column excluded).
+    const int32_t prefix_len = seq_width - 1;
+    num_draft_tokens += prefix_len;
+
+    // Count accepted drafts by walking columns [0, prefix_len) — the first
+    // -1 marks the boundary where the sampler rejected. Padding tail past
+    // prefix_len is ignored so it never counts as rejection.
+    const int64_t row_offset =
+        static_cast<int64_t>(seq_id) * static_cast<int64_t>(width);
+    int32_t emitted = 0;
+    for (int32_t token_idx = 0; token_idx < prefix_len; ++token_idx) {
+      if (token_data[row_offset + token_idx] < 0) {
+        break;
+      }
+      ++emitted;
+    }
+    accepted_count += emitted;
+  }
+  COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
+  COUNTER_ADD(speculative_num_accepted_tokens_total, accepted_count);
 }
 
 }  // namespace xllm

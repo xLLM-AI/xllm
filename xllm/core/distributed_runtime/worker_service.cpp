@@ -78,6 +78,16 @@ void record_speculative_metrics_from_output(const torch::Tensor& next_tokens,
       next_tokens.dim() != 2 || next_tokens.numel() == 0) {
     return;
   }
+  // DFlash / DSpark record metrics inline in their own worker
+  // (DFlashWorkerImpl::record_validate_metrics) with precise per-seq
+  // widths, so this generic per-tensor count would double-count them.
+  std::string algo = options.speculative_algorithm();
+  std::transform(algo.begin(), algo.end(), algo.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  if (algo == "dflash" || algo == "dspark") {
+    return;
+  }
 
   const int64_t batch_size = next_tokens.size(0);
   const int64_t token_width = next_tokens.size(1);
