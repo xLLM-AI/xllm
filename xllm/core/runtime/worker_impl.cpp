@@ -1153,6 +1153,15 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
       }
 
       const auto output = this->step_for_schedule_overlap(input);
+#if defined(USE_NPU)
+      if (output.has_value() && !output->sample_output.next_tokens.defined() &&
+          output->ready_event != nullptr &&
+          (output->retained_input != nullptr ||
+           !output->retained_input_dependencies.empty())) {
+        CHECK(output->ready_event->synchronize())
+            << "failed to retire asynchronous output without tokens";
+      }
+#endif
       if (output.has_value()) {
         if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
           std::unique_lock<std::mutex> lock(mtx_);
@@ -1161,6 +1170,24 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
           is_recorded_ = true;
           cv_.notify_one();
         } else {
+#if defined(USE_NPU)
+          // Driver outputs are copied by GetLastStepResult, which waits for the
+          // ready event before the retained no-sync inputs can be released.
+          // Non-driver ranks are not queried by LLMEngine. In eager DP MTP,
+          // overwriting their previous output can therefore release temporary
+          // DP/EP padding tensors while ATB still holds their device addresses.
+          // Keep one-step scheduler overlap, but retire the previous eager
+          // output only after its compute event has completed.
+          const bool wait_for_eager_dp_spec_input_lifetime =
+              last_step_output_valid_ && options_.enable_speculative_decode() &&
+              parallel_args_.dp_size() > 1 &&
+              !::xllm::ExecutionConfig::get_instance().enable_graph() &&
+              last_step_output_.ready_event != nullptr;
+          if (wait_for_eager_dp_spec_input_lifetime) {
+            CHECK(last_step_output_.ready_event->synchronize())
+                << "failed to retire previous eager DP speculative input";
+          }
+#endif
           update_last_step_output(output);
         }
       } else {
