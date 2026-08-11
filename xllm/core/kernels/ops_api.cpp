@@ -1851,20 +1851,21 @@ fused_qkvzba_split_reshape_cat(FusedQkvzbaSplitReshapeParams& params) {
 
 torch::Tensor sparse_flash_attention(SparseFlashAttentionParams& params) {
 #if defined(USE_NPU)
-  return npu::sparse_flash_attention(params.query,
-                                     params.key,
-                                     params.value,
-                                     params.sparse_indices,
-                                     params.block_table,
-                                     params.actual_seq_lengths_query,
-                                     params.actual_seq_lengths_kv,
-                                     params.query_rope,
-                                     params.key_rope,
-                                     params.scale_value,
-                                     params.sparse_block_size,
-                                     params.layout_query,
-                                     params.layout_kv,
-                                     params.sparse_mode);
+  auto result = npu::sparse_flash_attention(params.query,
+                                            params.key,
+                                            params.value,
+                                            params.sparse_indices,
+                                            params.block_table,
+                                            params.actual_seq_lengths_query,
+                                            params.actual_seq_lengths_kv,
+                                            params.query_rope,
+                                            params.key_rope,
+                                            params.scale_value,
+                                            params.sparse_block_size,
+                                            params.layout_query,
+                                            params.layout_kv,
+                                            params.sparse_mode);
+  return std::get<0>(result);
 #else
   NOT_IMPLEMENTED();
 #endif

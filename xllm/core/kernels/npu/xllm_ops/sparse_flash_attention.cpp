@@ -13,9 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <dlfcn.h>
 #include <torch/library.h>
 
 #include <string>
+#include <tuple>
 
 #include "core/kernels/npu/aclnn/pytorch_npu_helper.hpp"
 #include "xllm_ops_api.h"
@@ -23,9 +25,104 @@ limitations under the License.
 namespace xllm::kernel::npu {
 namespace {
 
-at::Tensor construct_sparse_flash_attention_output_tensor(
-    const at::Tensor& query) {
-  return at::empty(query.sizes(), query.options().dtype(query.dtype()));
+// The PR #6 SparseFlashAttention aclnn op lives in the ``custom_transformer``
+// vendor package. It exports the *same* symbol name
+// (``aclnnSparseFlashAttention``) as the legacy op in ``custom_xllm_math``,
+// so the global ``get_op_api_func_addr`` resolver cannot distinguish them --
+// whichever vendor wins ``config.ini`` load_priority serves both. To call the
+// PR #6 op (3 outputs / 8 attrs, supports rope=None) without disturbing the
+// other ops served by ``custom_xllm_math``, this implementation dlopens the
+// custom_transformer ``libcust_opapi.so`` directly and dlsyms the two entry
+// points, bypassing the global resolver entirely.
+//
+// The custom_transformer vendor is built/installed out-of-tree (fork repo
+// build_aclnn.sh). If it is absent, this op reports a clear error rather than
+// silently falling back to the legacy op.
+constexpr const char* kCustomTransformerLib =
+    "/vendors/custom_transformer/op_api/lib/libcust_opapi.so";
+
+struct CustomTransformerOpApi {
+  void* handler = nullptr;
+  void* get_workspace_size = nullptr;
+  void* op_api = nullptr;
+};
+
+// Loads the custom_transformer libcust_opapi.so once and resolves the two
+// aclnnSparseFlashAttention entry points. Thread-safe via call_once; the .so
+// stays loaded for the process lifetime (matching the global resolver's
+// behaviour).
+const CustomTransformerOpApi& load_custom_transformer_op_api() {
+  static CustomTransformerOpApi api;
+  static std::once_flag flag;
+  std::call_once(flag, []() {
+    const char* ascend_opp = std::getenv("ASCEND_OPP_PATH");
+    if (ascend_opp == nullptr) {
+      TORCH_CHECK(false,
+                  "ASCEND_OPP_PATH is not set; cannot locate "
+                  "custom_transformer vendor for sparse_flash_attention.");
+    }
+    std::string lib_path = std::string(ascend_opp) + kCustomTransformerLib;
+    api.handler = dlopen(lib_path.c_str(), RTLD_LAZY);
+    TORCH_CHECK(api.handler != nullptr,
+                "sparse_flash_attention: failed to dlopen custom_transformer "
+                "libcust_opapi.so at ",
+                lib_path,
+                ", error: ",
+                dlerror(),
+                ". Install the PR #6 SFA vendor (custom_transformer) first.");
+    api.get_workspace_size =
+        dlsym(api.handler, "aclnnSparseFlashAttentionGetWorkspaceSize");
+    api.op_api = dlsym(api.handler, "aclnnSparseFlashAttention");
+    TORCH_CHECK(api.get_workspace_size != nullptr && api.op_api != nullptr,
+                "sparse_flash_attention: aclnnSparseFlashAttention or "
+                "GetWorkspaceSize not found in custom_transformer "
+                "libcust_opapi.so.");
+  });
+  return api;
+}
+
+// Allocates the op's three outputs, matching the PR #6 op contract.
+// attention_out always matches query's shape/dtype; softmax_max/sum are empty
+// ({0}) float32 unless return_softmax_lse is set.
+std::tuple<at::Tensor, at::Tensor, at::Tensor>
+construct_sparse_flash_attention_outputs(const at::Tensor& query,
+                                         const at::Tensor& key,
+                                         const std::string& layout_query_str,
+                                         const std::string& layout_kv_str,
+                                         bool return_softmax_lse) {
+  constexpr int64_t kDim0 = 0;
+  constexpr int64_t kDim1 = 1;
+  constexpr int64_t kDim2 = 2;
+  constexpr int64_t kDim3 = 3;
+
+  TORCH_CHECK(layout_query_str == "BSND" || layout_query_str == "TND",
+              "The layout of query only support BSND and TND, but got ",
+              layout_query_str);
+
+  at::Tensor attention_output =
+      at::empty(query.sizes(), query.options().dtype(query.dtype()));
+
+  at::SmallVector<int64_t, 4> softmax_size;
+  if (return_softmax_lse) {
+    if (query.dim() == 3) {  // TND
+      const int64_t kv_head_num =
+          layout_kv_str == "PA_BSND" ? key.size(kDim2) : key.size(kDim1);
+      softmax_size = {
+          kv_head_num, query.size(kDim0), query.size(kDim1) / kv_head_num};
+    } else {  // BSND
+      softmax_size = {query.size(kDim0),
+                      key.size(kDim2),
+                      query.size(kDim1),
+                      query.size(kDim2) / key.size(kDim2)};
+    }
+  } else {
+    softmax_size = {0};
+  }
+  at::Tensor softmax_max =
+      at::empty(softmax_size, query.options().dtype(at::kFloat));
+  at::Tensor softmax_sum =
+      at::empty(softmax_size, query.options().dtype(at::kFloat));
+  return std::make_tuple(attention_output, softmax_max, softmax_sum);
 }
 
 void check_sparse_flash_attention_shape_and_dtype(
@@ -58,7 +155,11 @@ void check_sparse_flash_attention_shape_and_dtype(
 
 }  // namespace
 
-at::Tensor sparse_flash_attention(
+// PR #6 SparseFlashAttention: 3 outputs / 8 attrs, supports rope=None.
+// Resolves the op from the custom_transformer vendor directly (dlopen+dlsym)
+// rather than the global aclnn resolver, so it does not disturb the other ops
+// served by custom_xllm_math (which keeps load_priority via config.ini).
+std::tuple<at::Tensor, at::Tensor, at::Tensor> sparse_flash_attention(
     const at::Tensor& query,
     const at::Tensor& key,
     const at::Tensor& value,
@@ -72,7 +173,11 @@ at::Tensor sparse_flash_attention(
     int64_t sparse_block_size,
     c10::string_view layout_query,
     c10::string_view layout_kv,
-    int64_t sparse_mode) {
+    int64_t sparse_mode,
+    int64_t pre_tokens,
+    int64_t next_tokens,
+    int64_t attention_mode,
+    bool return_softmax_lse) {
   check_sparse_flash_attention_shape_and_dtype(query,
                                                key,
                                                value,
@@ -80,31 +185,122 @@ at::Tensor sparse_flash_attention(
                                                sparse_block_size,
                                                layout_query,
                                                layout_kv);
-  at::Tensor out = construct_sparse_flash_attention_output_tensor(query);
 
   std::string query_layout_str = std::string(layout_query);
   std::string kv_layout_str = std::string(layout_kv);
+  auto [out, softmax_max, softmax_sum] =
+      construct_sparse_flash_attention_outputs(
+          query, key, query_layout_str, kv_layout_str, return_softmax_lse);
+
   char* query_layout_ptr = const_cast<char*>(query_layout_str.c_str());
   char* kv_layout_ptr = const_cast<char*>(kv_layout_str.c_str());
 
-  EXEC_NPU_CMD(aclnnSparseFlashAttention,
-               query,
-               key,
-               value,
-               sparse_indices,
-               block_table,
-               actual_seq_lengths_query,
-               actual_seq_lengths_kv,
-               query_rope,
-               key_rope,
-               scale_value,
-               sparse_block_size,
-               query_layout_ptr,
-               kv_layout_ptr,
-               sparse_mode,
-               out);
+  const CustomTransformerOpApi& api = load_custom_transformer_op_api();
 
-  return out;
+  // Mirror EXEC_NPU_CMD (pytorch_npu_helper.hpp:703): the GetWorkspaceSize /
+  // op entry points come from the custom_transformer .so (resolved above),
+  // while the optional HugeMem helpers are resolved through the global
+  // resolver (they live in the built-in libopapi.so, not the vendor .so).
+  static const auto init_mem_addr =
+      ::xllm::kernel::npu::aclnn::detail::get_op_api_func_addr(
+          "InitHugeMemThreadLocal");
+  static const auto uninit_mem_addr =
+      ::xllm::kernel::npu::aclnn::detail::get_op_api_func_addr(
+          "UnInitHugeMemThreadLocal");
+  static const auto release_mem_addr =
+      ::xllm::kernel::npu::aclnn::detail::get_op_api_func_addr(
+          "ReleaseHugeMem");
+
+  auto acl_stream = c10_npu::getCurrentNPUStream().stream(false);
+  uint64_t workspace_size = 0;
+  uint64_t* workspace_size_addr = &workspace_size;
+  ::aclOpExecutor* executor = nullptr;
+  ::aclOpExecutor** executor_addr = &executor;
+
+  ::xllm::kernel::npu::aclnn::detail::InitHugeMemThreadLocalFn init_mem_func =
+      reinterpret_cast<
+          ::xllm::kernel::npu::aclnn::detail::InitHugeMemThreadLocalFn>(
+          init_mem_addr);
+  ::xllm::kernel::npu::aclnn::detail::UnInitHugeMemThreadLocalFn
+      uninit_mem_func = reinterpret_cast<
+          ::xllm::kernel::npu::aclnn::detail::UnInitHugeMemThreadLocalFn>(
+          uninit_mem_addr);
+  if (init_mem_func) {
+    init_mem_func(nullptr, false);
+  }
+
+  auto converted_params = ::xllm::kernel::npu::aclnn::detail::convert_types(
+      query,
+      key,
+      value,
+      sparse_indices,
+      block_table,
+      actual_seq_lengths_query,
+      actual_seq_lengths_kv,
+      query_rope,
+      key_rope,
+      scale_value,
+      sparse_block_size,
+      query_layout_ptr,
+      kv_layout_ptr,
+      sparse_mode,
+      pre_tokens,
+      next_tokens,
+      attention_mode,
+      return_softmax_lse,
+      out,
+      softmax_max,
+      softmax_sum,
+      workspace_size_addr,
+      executor_addr);
+
+  static auto get_workspace_size_func =
+      ::xllm::kernel::npu::aclnn::detail::convert_to_op_api_func(
+          converted_params, api.get_workspace_size);
+  auto workspace_status = ::xllm::kernel::npu::aclnn::detail::call(
+      get_workspace_size_func, converted_params);
+  TORCH_CHECK(workspace_status == 0,
+              "call aclnnSparseFlashAttention failed, detail: ",
+              aclGetRecentErrMsg());
+
+  void* workspace_addr = nullptr;
+  at::Tensor workspace_tensor;
+  if (workspace_size != 0) {
+    at::TensorOptions options =
+        at::TensorOptions(torch_npu::utils::get_npu_device_type());
+    workspace_tensor = at::empty({static_cast<int64_t>(workspace_size)},
+                                 options.dtype(at::kByte));
+    workspace_addr = const_cast<void*>(workspace_tensor.storage().data());
+  }
+
+  auto acl_call = [=]() -> int {
+    using OpApiFunc =
+        int (*)(void*, uint64_t, ::aclOpExecutor*, const aclrtStream);
+    OpApiFunc op_api_func = reinterpret_cast<OpApiFunc>(api.op_api);
+    auto api_ret =
+        op_api_func(workspace_addr, workspace_size, executor, acl_stream);
+    TORCH_CHECK(api_ret == 0,
+                "call aclnnSparseFlashAttention failed, detail: ",
+                aclGetRecentErrMsg());
+    ::xllm::kernel::npu::aclnn::detail::release_convert_types(converted_params);
+    ::xllm::kernel::npu::aclnn::detail::ReleaseHugeMemFn release_mem_func =
+        reinterpret_cast<::xllm::kernel::npu::aclnn::detail::ReleaseHugeMemFn>(
+            release_mem_addr);
+    if (release_mem_func) {
+      release_mem_func(nullptr, false);
+    }
+    return api_ret;
+  };
+  at_npu::native::OpCommand cmd;
+  cmd.Name("aclnnSparseFlashAttention");
+  cmd.SetCustomHandler(acl_call);
+  cmd.Run();
+
+  if (uninit_mem_func) {
+    uninit_mem_func(nullptr, false);
+  }
+
+  return std::make_tuple(out, softmax_max, softmax_sum);
 }
 
 }  // namespace xllm::kernel::npu

@@ -101,27 +101,22 @@ def sparse_flash_attention(
     layout_query: str,
     layout_kv: str,
     sparse_mode: int,
-) -> torch.Tensor:
-    """Attend to the key blocks selected by :func:`lightning_indexer`.
+    pre_tokens: int = 9223372036854775807,
+    next_tokens: int = 9223372036854775807,
+    attention_mode: int = 2,
+    return_softmax_lse: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """PR #6 SparseFlashAttention (3 outputs / 8 attrs, supports rope=None).
 
-    Args:
-        query: Query tensor laid out as ``layout_query``.
-        key: Key cache laid out as ``layout_kv``.
-        value: Value cache laid out as ``layout_kv``.
-        sparse_indices: Key blocks selected per query.
-        block_table: Paged cache block table, or ``None``.
-        actual_seq_lengths_query: Query length of every sequence, or ``None``.
-        actual_seq_lengths_kv: Key length of every sequence, or ``None``.
-        query_rope: Rotary part of the query, or ``None``.
-        key_rope: Rotary part of the key, or ``None``.
-        scale_value: Softmax scale.
-        sparse_block_size: Keys per selected block.
-        layout_query: Query layout, ``"TND"`` or ``"BSND"``.
-        layout_kv: Key and value layout.
-        sparse_mode: Sparse masking mode.
+    Dispatches to the custom_transformer vendor op via direct dlopen in the
+    C++ impl, bypassing the global aclnn resolver so it does not disturb the
+    other ops served by custom_xllm_math. Pass ``query_rope=None`` /
+    ``key_rope=None`` for the no-rope path.
 
     Returns:
-        Attention output with the shape and dtype of ``query``.
+        ``(attention_out, softmax_max, softmax_sum)``. ``attention_out`` has
+        the shape and dtype of ``query``; the two softmax tensors are empty
+        (shape ``{0}``, float32) unless ``return_softmax_lse`` is set.
     """
     return torch.ops.xllm_ops.sparse_flash_attention(
         query,
@@ -138,7 +133,15 @@ def sparse_flash_attention(
         layout_query,
         layout_kv,
         sparse_mode,
+        pre_tokens,
+        next_tokens,
+        attention_mode,
+        return_softmax_lse,
     )
 
 
-__all__ = ["lightning_indexer", "scatter_nd_update", "sparse_flash_attention"]
+__all__ = [
+    "lightning_indexer",
+    "scatter_nd_update",
+    "sparse_flash_attention",
+]
