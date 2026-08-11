@@ -429,9 +429,14 @@ void ProfileManager::train_speculative_validate_time_predictor(
                       static_cast<double>(time_profiling_data.size()) * 100.0;
 
   for (int32_t i = 0; i < kNumCoefficients; ++i) {
-    if (coefficients(i) < 0.0) {
-      LOG(ERROR) << "Negative speculative validate coefficient: "
-                 << coefficients(i) << ", set it to 0.";
+    // NaN/Inf can escape a rank-deficient QR solve or slip in via a NaN
+    // latency sample; `NaN < 0.0` is false so a raw negative-only clamp
+    // would silently broadcast poison to workers. Sanitize non-finite
+    // and negative values consistently here (the local registry has the
+    // same sanitizer, but the RPC path sees the raw values).
+    if (!std::isfinite(coefficients(i)) || coefficients(i) < 0.0) {
+      LOG(ERROR) << "Invalid speculative validate coefficient[" << i
+                 << "]=" << coefficients(i) << ", clamping to 0.";
       coefficients(i) = 0.0;
     }
   }
