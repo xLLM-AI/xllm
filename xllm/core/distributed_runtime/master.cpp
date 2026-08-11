@@ -29,6 +29,7 @@ limitations under the License.
 #include <optional>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 
 #include "common/metrics.h"
@@ -176,6 +177,22 @@ std::optional<std::string> validate_model_cp(const Options& options,
     // Python executor does not implement the dp * cp * tp rank layout.
     if (ModelConfig::is_python_model_impl(
             ModelConfig::get_instance().model_impl())) {
+      // Only models whose Python forward actually shards the sequence (via
+      // cp_shard_rows / cp_merge_rows) may enable CP. Other Python models keep
+      // a full-sequence forward, so a cp_context would be built but never
+      // consumed: qwen3_5 would reach _prefill_cp with unsharded rows (garbled
+      // or out-of-bounds output) and MLA models (glm_moe_dsa, deepseek_v32)
+      // would silently recompute the whole sequence on every rank. Mirror the
+      // NPU-side is_npu_model_cp_capable allowlist rather than admit any
+      // model_impl=python model_type.
+      static const std::unordered_set<std::string> kPythonCpCapableModels = {
+          "qwen3",
+      };
+      if (kPythonCpCapableModels.find(model_type) ==
+          kPythonCpCapableModels.end()) {
+        return "Python model-side CP does not support model_type=" +
+               model_type + "; only qwen3 implements the CP sequence sharding.";
+      }
       if (options.dp_size() != 1) {
         return "Python CP requires dp_size == 1";
       }

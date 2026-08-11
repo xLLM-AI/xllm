@@ -68,6 +68,8 @@ void register_attention_metadata_views(py::module_& module) {
                              &PyAttentionMetadataView::kv_seq_lens_host)
       .def_property_readonly("kv_seq_lens_host_values",
                              &PyAttentionMetadataView::kv_seq_lens_host_values)
+      .def_property_readonly("q_seq_lens_host",
+                             &PyAttentionMetadataView::q_seq_lens_host)
       .def_property_readonly("block_table",
                              &PyAttentionMetadataView::block_table)
       .def_property_readonly("kv_seq_lens",
@@ -147,7 +149,10 @@ const layer::ExpandedDecodeMetadata& PyExpandedDecodeMetadataView::metadata()
 PyAttentionMetadataView::PyAttentionMetadataView(
     std::shared_ptr<layer::AttentionMetadata> metadata)
     : metadata_(std::move(metadata)),
-      kv_seq_lens_host_(make_kv_seq_lens_host(metadata_)) {}
+      kv_seq_lens_host_(
+          make_host_int32_view(metadata_, metadata_->kv_seq_lens_vec)),
+      q_seq_lens_host_(
+          make_host_int32_view(metadata_, metadata_->q_seq_lens_vec)) {}
 
 PyAttentionMetadataView::PyAttentionMetadataView(
     std::shared_ptr<layer::AttentionMetadata> metadata,
@@ -223,6 +228,10 @@ py::object PyAttentionMetadataView::q_seq_lens() const {
   return optional_tensor(metadata_->q_seq_lens);
 }
 
+py::object PyAttentionMetadataView::q_seq_lens_host() const {
+  return optional_tensor(q_seq_lens_host_);
+}
+
 PyExpandedDecodeMetadataView PyAttentionMetadataView::expanded_decode_metadata()
     const {
   return PyExpandedDecodeMetadataView(metadata_);
@@ -236,16 +245,17 @@ bool PyAttentionMetadataView::is_chunked_prefill() const {
   return metadata_->is_chunked_prefill;
 }
 
-torch::Tensor PyAttentionMetadataView::make_kv_seq_lens_host(
-    const std::shared_ptr<layer::AttentionMetadata>& metadata) {
-  if (metadata->kv_seq_lens_vec.empty()) {
+torch::Tensor PyAttentionMetadataView::make_host_int32_view(
+    const std::shared_ptr<layer::AttentionMetadata>& metadata,
+    std::vector<int32_t>& host_vec) {
+  if (host_vec.empty()) {
     return torch::Tensor();
   }
 
   std::shared_ptr<layer::AttentionMetadata> owner = metadata;
   return torch::from_blob(
-      metadata->kv_seq_lens_vec.data(),
-      {static_cast<int64_t>(metadata->kv_seq_lens_vec.size())},
+      host_vec.data(),
+      {static_cast<int64_t>(host_vec.size())},
       [owner = std::move(owner)](void*) mutable { owner.reset(); },
       torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
 }

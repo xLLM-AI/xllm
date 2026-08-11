@@ -44,6 +44,7 @@ from xllm.python.model_executor.forward_context import (
 
 if TYPE_CHECKING:
     from xllm.python.layers.attention import Attention
+    from xllm.python.model_executor.cp_utils import CpContext
 
 # Ascend FIA sparse_mode values (see CANN aclnnFusedInferAttentionScore docs).
 # 0: no compressed mask; used for single-query decode where no causal mask is
@@ -497,7 +498,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
         k_3d: torch.Tensor,
         v_3d: torch.Tensor,
         metadata: AttentionMetadata,
-        cp_context,
+        cp_context: "CpContext",
         k_cache: torch.Tensor,
         v_cache: torch.Tensor,
     ) -> torch.Tensor:
@@ -529,6 +530,16 @@ class NpuPagedAttentionBackend(AttentionBackend):
             k_cache,
             v_cache,
         )
+
+        # A CP rank can own only padding chunks when every sequence in the batch
+        # is shorter than the zigzag chunk grid (e.g. a 1-token prompt with
+        # cp_size > 1). It then has no real queries. The KV all-gather above
+        # already ran (collectives must stay in lockstep across ranks) and the
+        # full global KV is now in this rank's paged cache, so skip the FIA:
+        # calling it with a 0-row query and empty actual_seq_lengths is rejected
+        # by npu_fused_infer_attention. Return the all-zero shard directly.
+        if cp_context.query_index.numel() == 0:
+            return q_3d.new_zeros(local_tokens, self.num_heads * self.head_dim)
 
         # Real queries this rank owns, packed per (sequence, half) segment.
         q_real = q_3d.index_select(0, cp_context.query_index).contiguous()

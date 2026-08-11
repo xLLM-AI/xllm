@@ -137,7 +137,7 @@ TEST_P(BuildCpContextTest, ShardsAreDisjointAndComplete) {
   const int64_t cp_size = std::get<1>(GetParam());
   const int64_t total = total_tokens(seq_lens);
 
-  std::vector<int> owner(total, -1);
+  std::vector<int32_t> owner(total, -1);
   for (int64_t r = 0; r < cp_size; ++r) {
     auto ctx = build_cp_context(seq_lens, cp_size, r);
     auto real = ctx.shard_index.masked_select(ctx.shard_valid_mask);
@@ -146,7 +146,7 @@ TEST_P(BuildCpContextTest, ShardsAreDisjointAndComplete) {
       ASSERT_GE(g, 0);
       ASSERT_LT(g, total);
       EXPECT_EQ(owner[g], -1) << "row " << g << " owned by >1 rank";
-      owner[g] = static_cast<int>(r);
+      owner[g] = static_cast<int32_t>(r);
     }
   }
   for (int64_t g = 0; g < total; ++g) {

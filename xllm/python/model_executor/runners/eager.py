@@ -29,14 +29,15 @@ from xllm.python.model_executor.runners.base import BaseRunner
 def _per_seq_lens_from_metadata(metadata: AttentionMetadata) -> list[int] | None:
     """Per-sequence query lengths for the packed prefill batch, or None.
 
-    Derived from ``q_cu_seq_lens`` (cumulative, leading 0). Returns None when
-    the field is absent so the caller falls back to the non-CP path.
+    Read straight from ``q_seq_lens_host`` — the host-side per-sequence query
+    lengths (NPU keeps these non-cumulative, one entry per sequence), so no
+    D2H copy and no diff. Returns None when the field is absent so the caller
+    falls back to the non-CP path.
     """
-    cu = metadata.q_cu_seq_lens
-    if cu is None:
+    lens = metadata.q_seq_lens_host
+    if lens is None:
         return None
-    cu_host = cu.cpu().tolist()
-    return [cu_host[i + 1] - cu_host[i] for i in range(len(cu_host) - 1)]
+    return lens.tolist()
 
 
 class EagerRunner(BaseRunner):

@@ -154,10 +154,11 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
   }
   if (cp_size_ > 1) {
     // CP shards sequence tokens; its group is strided by tp_size -- ranks with
-    // the same (dp, tp) slot but different cp_rank. The group index selects that
-    // (dp, tp) slot: dp block (global_rank / (cp_size*tp_size)) times tp_size,
-    // plus the tp offset within it. TP and CP are orthogonal, so both groups may
-    // be initialized on the same device off the shared rendezvous endpoint.
+    // the same (dp, tp) slot but different cp_rank. The group index selects
+    // that (dp, tp) slot: dp block (global_rank / (cp_size*tp_size)) times
+    // tp_size, plus the tp offset within it. TP and CP are orthogonal, so both
+    // groups may be initialized on the same device off the shared rendezvous
+    // endpoint.
     const int32_t cp_group_index =
         (global_rank / (cp_size_ * tp_size_)) * tp_size_ +
         global_rank % tp_size_;

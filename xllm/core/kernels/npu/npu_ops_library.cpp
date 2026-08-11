@@ -224,8 +224,11 @@ build_cp_context_npu(const std::vector<int64_t>& seq_lens,
   const int64_t total_local = local_offset;
 
   // restore_index: for every global (real) row, where it lands in the
-  // rank-major all-gather output [cp_size * total_local].
+  // rank-major all-gather output [cp_size * total_local]. Its final size is the
+  // total real-token count, which the first pass accumulated into
+  // global_offset.
   std::vector<int64_t> restore_index;
+  restore_index.reserve(global_offset);
   for (size_t s = 0; s < seq_lens.size(); ++s) {
     const int64_t length = seq_lens[s];
     const int64_t chunk_len = chunk_lens[s];

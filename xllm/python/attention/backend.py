@@ -79,6 +79,7 @@ class AttentionMetadata(Protocol):
     kv_cu_seq_lens: torch.Tensor | None
     kv_seq_lens_host: torch.Tensor | None
     kv_seq_lens_host_values: list[int] | None
+    q_seq_lens_host: torch.Tensor | None
     paged_kv_indptr_host: torch.Tensor | None
     paged_kv_last_page_len_host: torch.Tensor | None
     block_table: torch.Tensor | None

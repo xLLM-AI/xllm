@@ -144,10 +144,11 @@ def cp_shard_rows(x: torch.Tensor, ctx: CpContext) -> torch.Tensor:
     Padding rows are zeroed. Returns ``[total_local, ...]``.
     """
     local = x.index_select(0, ctx.shard_gather_index)
-    if not bool(ctx.shard_valid_mask.all()):
-        mask_shape = [ctx.shard_valid_mask.shape[0]] + [1] * (x.dim() - 1)
-        local = local * ctx.shard_valid_mask.view(mask_shape).to(local.dtype)
-    return local
+    # Always apply the mask (matching cp_shard_positions). Guarding on
+    # ``bool(mask.all())`` would force a device->host sync on the prefill
+    # critical path; the elementwise multiply is cheap and graph-safe.
+    mask_shape = [ctx.shard_valid_mask.shape[0]] + [1] * (x.dim() - 1)
+    return local * ctx.shard_valid_mask.view(mask_shape).to(local.dtype)
 
 
 def cp_shard_positions(positions: torch.Tensor, ctx: CpContext) -> torch.Tensor:
@@ -174,6 +175,8 @@ def cp_gather_kv(local_kv: torch.Tensor, ctx: CpContext) -> torch.Tensor:
     in original token order, used both to write the full KV into this rank's
     paged cache (decode stays on the non-CP path and needs every position) and,
     via ``ctx.kv_gather_index``, to select each owned segment's causal prefix.
+
+    Identical all-gather + restore as :func:`cp_merge_rows`; kept as a named
+    alias to document the KV-gather intent at the attention call site.
     """
-    gathered = distributed.all_gather(local_kv, 0, ctx.cp_size, "cp")
-    return gathered.index_select(0, ctx.restore_index)
+    return cp_merge_rows(local_kv, ctx)

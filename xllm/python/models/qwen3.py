@@ -66,8 +66,6 @@ class Qwen3Config:
     attention_bias: bool = False
     tp_size: int = 1
     tp_rank: int = 0
-    cp_size: int = 1
-    cp_rank: int = 0
 
     @classmethod
     def from_dict(cls, d: dict) -> "Qwen3Config":
@@ -97,8 +95,6 @@ class Qwen3Config:
             attention_bias=bool(pick("attention_bias", default=False)),
             tp_size=int(pick("tp_size", default=1)),
             tp_rank=int(pick("tp_rank", default=0)),
-            cp_size=int(pick("cp_size", default=1)),
-            cp_rank=int(pick("cp_rank", default=0)),
         )
 
     def head_split(self) -> Tuple[int, int, int]:
