@@ -279,7 +279,11 @@ std::tuple<at::Tensor, at::Tensor> sparse_attn_sharedkv(
     c10::string_view layout_kv,
     bool return_softmax_lse);
 
-at::Tensor sparse_flash_attention(
+// PR #6 SparseFlashAttention (3 outputs / 8 attrs, supports rope=None).
+// Resolves the op from the custom_transformer vendor directly (dlopen+dlsym),
+// bypassing the global aclnn resolver so it does not disturb the other ops
+// served by custom_xllm_math (which keeps config.ini load_priority).
+std::tuple<at::Tensor, at::Tensor, at::Tensor> sparse_flash_attention(
     const at::Tensor& query,
     const at::Tensor& key,
     const at::Tensor& value,
@@ -293,7 +297,11 @@ at::Tensor sparse_flash_attention(
     int64_t sparse_block_size,
     c10::string_view layout_query,
     c10::string_view layout_kv,
-    int64_t sparse_mode);
+    int64_t sparse_mode,
+    int64_t pre_tokens = 9223372036854775807,
+    int64_t next_tokens = 9223372036854775807,
+    int64_t attention_mode = 2,
+    bool return_softmax_lse = false);
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> mla_preprocess(
     const at::Tensor& input,

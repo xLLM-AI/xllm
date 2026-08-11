@@ -68,7 +68,9 @@ _NPU_SCHEMAS = (
     "sparse_indices, Tensor? block_table, Tensor? actual_seq_lengths_query, "
     "Tensor? actual_seq_lengths_kv, Tensor? query_rope, Tensor? key_rope, "
     "float scale_value, int sparse_block_size, str layout_query, str "
-    "layout_kv, int sparse_mode) -> Tensor",
+    "layout_kv, int sparse_mode, int pre_tokens=9223372036854775807, int "
+    "next_tokens=9223372036854775807, int attention_mode=2, bool "
+    "return_softmax_lse=False) -> (Tensor, Tensor, Tensor)",
 )
 
 _PLATFORM_REQUIRED = pytest.mark.skipif(

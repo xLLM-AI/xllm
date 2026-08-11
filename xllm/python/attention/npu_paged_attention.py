@@ -292,7 +292,7 @@ class NpuPagedAttentionBackend(AttentionBackend):
         topk: torch.Tensor,
         block_table: torch.Tensor,
     ) -> torch.Tensor:
-        out = torch.ops.xllm_ops.sparse_flash_attention(
+        out, _, _ = torch.ops.xllm_ops.sparse_flash_attention(
             q_latent, nope_cache, nope_cache, topk,
             block_table,
             self._mla_actual_seq_q,

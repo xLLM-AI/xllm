@@ -189,12 +189,17 @@ TORCH_LIBRARY(xllm_ops, m) {
   m.def(
       "scatter_nd_update(Tensor(a!) var, Tensor indices, Tensor updates) -> "
       "()");
+  // PR #6 SparseFlashAttention (3 outputs / 8 attrs, rope=None supported).
+  // Dispatched to the custom_transformer vendor via direct dlopen in the impl,
+  // bypassing the global aclnn resolver so it does not disturb other ops.
   m.def(
       "sparse_flash_attention(Tensor query, Tensor key, Tensor value, Tensor "
       "sparse_indices, Tensor? block_table, Tensor? actual_seq_lengths_query, "
       "Tensor? actual_seq_lengths_kv, Tensor? query_rope, Tensor? key_rope, "
       "float scale_value, int sparse_block_size, str layout_query, str "
-      "layout_kv, int sparse_mode) -> Tensor");
+      "layout_kv, int sparse_mode, int pre_tokens=9223372036854775807, int "
+      "next_tokens=9223372036854775807, int attention_mode=2, bool "
+      "return_softmax_lse=False) -> (Tensor, Tensor, Tensor)");
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
