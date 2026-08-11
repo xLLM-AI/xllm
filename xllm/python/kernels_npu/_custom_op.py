@@ -237,9 +237,12 @@ def _sparse_flash_attention_fake(
     layout_query: str,
     layout_kv: str,
     sparse_mode: int,
-) -> torch.Tensor:
+    pre_tokens: int = 9223372036854775807,
+    next_tokens: int = 9223372036854775807,
+    attention_mode: int = 2,
+    return_softmax_lse: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     del (
-        key,
         value,
         sparse_indices,
         block_table,
@@ -249,11 +252,29 @@ def _sparse_flash_attention_fake(
         key_rope,
         scale_value,
         sparse_block_size,
-        layout_query,
-        layout_kv,
         sparse_mode,
+        pre_tokens,
+        next_tokens,
+        attention_mode,
     )
-    return query.new_empty(query.shape, dtype=query.dtype)
+    attention_out = query.new_empty(query.shape, dtype=query.dtype)
+    if return_softmax_lse:
+        if query.dim() == 3:  # TND
+            kv_head_num = key.size(2) if layout_kv == "PA_BSND" else key.size(1)
+            lse_shape = (kv_head_num, query.size(0), query.size(1) // kv_head_num)
+        else:  # BSND
+            lse_shape = (
+                query.size(0),
+                key.size(2),
+                query.size(1),
+                query.size(2) // key.size(2),
+            )
+        softmax_max = query.new_empty(lse_shape, dtype=torch.float32)
+        softmax_sum = query.new_empty(lse_shape, dtype=torch.float32)
+    else:
+        softmax_max = query.new_empty((0,), dtype=torch.float32)
+        softmax_sum = query.new_empty((0,), dtype=torch.float32)
+    return attention_out, softmax_max, softmax_sum
 
 
 register_fake("xllm_ops::rms_norm", _rms_norm_fake)
