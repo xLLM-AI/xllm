@@ -56,8 +56,6 @@ class Engine {
   // return the model args
   virtual const ModelArgs& model_args() const { return args_; }
 
-  virtual const ModelArgs* draft_model_args() const { return nullptr; }
-
   virtual bool set_speculative_validate_time_predictor(
       const SpeculativeProfileRegistry::ValidateTimePredictor&) {
     return false;

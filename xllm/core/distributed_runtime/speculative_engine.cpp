@@ -164,13 +164,6 @@ bool SpeculativeEngine::allocate_kv_cache() {
          draft_engine_->allocate_kv_cache(draft_kv_cache_cap);
 }
 
-const ModelArgs* SpeculativeEngine::draft_model_args() const {
-  if (draft_engine_ == nullptr) {
-    return nullptr;
-  }
-  return &draft_engine_->model_args();
-}
-
 bool SpeculativeEngine::set_speculative_validate_time_predictor(
     const SpeculativeProfileRegistry::ValidateTimePredictor& predictor) {
   return engine_->set_speculative_validate_time_predictor(predictor);

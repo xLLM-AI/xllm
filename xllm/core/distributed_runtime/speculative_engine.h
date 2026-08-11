@@ -47,8 +47,6 @@ class SpeculativeEngine : public Engine {
 
   const ModelArgs& model_args() const override { return model_args_; }
 
-  const ModelArgs* draft_model_args() const override;
-
   bool set_speculative_validate_time_predictor(
       const SpeculativeProfileRegistry::ValidateTimePredictor& predictor)
       override;
