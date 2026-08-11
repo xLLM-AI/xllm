@@ -404,7 +404,9 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
     CHECK_LE(v, num_speculative_tokens + 1)
         << "per_seq_val_tokens must be <= num_speculative_tokens + 1";
     total_num_val_tokens += v;
-    if (v > max_val_tokens) max_val_tokens = v;
+    if (v > max_val_tokens) {
+      max_val_tokens = v;
+    }
   }
   const int32_t block_size = options_.block_size();
   specBuilder::DecodeRowContext row_ctx =

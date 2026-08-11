@@ -72,6 +72,42 @@ int64_t count_negative_tokens(const torch::Tensor& tokens) {
   return count;
 }
 
+// Count attempted draft slots for a [batch, width] next_tokens buffer.
+// Under adaptive per-seq varlen pruning some columns are padded to -1 (see
+// apply_pruned_prefix_lengths). Both padded and truly-rejected drafts show as
+// -1, so we cannot tell them apart per element; but per row the padded region
+// is always a contiguous tail (positions beyond per_seq_val_tokens[i]-1).
+// Draft-attempted slots = per-row scan up to the last non-negative token.
+// Bonus column (final slot) is unconditionally attempted for accepted paths
+// but is only present when the row still has anything else non-negative; if
+// the whole row is -1, count zero drafts.
+template <typename T>
+int64_t count_attempted_draft_slots(const torch::Tensor& tokens) {
+  const int64_t batch_size = tokens.size(0);
+  const int64_t width = tokens.size(1);
+  if (width < 2) {
+    return 0;
+  }
+  const T* data = tokens.const_data_ptr<T>();
+  int64_t attempted = 0;
+  for (int64_t b = 0; b < batch_size; ++b) {
+    int64_t last_non_neg = -1;
+    const T* row = data + b * width;
+    for (int64_t j = 0; j < width; ++j) {
+      if (row[j] >= static_cast<T>(0)) {
+        last_non_neg = j;
+      }
+    }
+    // last_non_neg is the highest index in the row that was actually filled;
+    // everything before it (inclusive) was attempted, everything after is
+    // padding for a seq the controller pruned narrower.
+    if (last_non_neg >= 1) {
+      attempted += last_non_neg;  // exclude bonus column at position last
+    }
+  }
+  return attempted;
+}
+
 void record_speculative_metrics_from_output(const torch::Tensor& next_tokens,
                                             const runtime::Options& options) {
   if (!options.enable_speculative_decode() || !next_tokens.defined() ||
@@ -96,18 +132,23 @@ void record_speculative_metrics_from_output(const torch::Tensor& next_tokens,
 
   torch::Tensor tokens = next_tokens.contiguous();
   int64_t rejected_count = 0;
+  int64_t attempted_slots = 0;
   switch (tokens.scalar_type()) {
     case torch::kInt64:
       rejected_count = count_negative_tokens<int64_t>(tokens);
+      attempted_slots = count_attempted_draft_slots<int64_t>(tokens);
       break;
     case torch::kInt32:
       rejected_count = count_negative_tokens<int32_t>(tokens);
+      attempted_slots = count_attempted_draft_slots<int32_t>(tokens);
       break;
     case torch::kInt16:
       rejected_count = count_negative_tokens<int16_t>(tokens);
+      attempted_slots = count_attempted_draft_slots<int16_t>(tokens);
       break;
     case torch::kInt8:
       rejected_count = count_negative_tokens<int8_t>(tokens);
+      attempted_slots = count_attempted_draft_slots<int8_t>(tokens);
       break;
     default:
       LOG(WARNING) << "Unsupported speculative next_tokens dtype for metrics: "
@@ -115,7 +156,15 @@ void record_speculative_metrics_from_output(const torch::Tensor& next_tokens,
       return;
   }
 
-  const int64_t num_draft_tokens = batch_size * effective_speculative_tokens;
+  // Under adaptive per-seq varlen pruning, some rows carry a padded tail (-1
+  // at positions past per_seq_val_tokens[i]-1). `attempted_slots` counts only
+  // slots that were actually validated per row; `rejected_count` still counts
+  // all -1s. The difference is exactly the padding, which we subtract off so
+  // acceptance-rate metrics reflect actual work.
+  const int64_t max_slots = batch_size * effective_speculative_tokens;
+  const int64_t num_draft_tokens = std::min(attempted_slots, max_slots);
+  const int64_t padding = max_slots - num_draft_tokens;
+  rejected_count = std::max<int64_t>(0, rejected_count - padding);
   rejected_count = std::min(rejected_count, num_draft_tokens);
   COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
   COUNTER_ADD(speculative_num_accepted_tokens_total,

@@ -140,15 +140,6 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
       DraftBlock& draft_block,
       const std::vector<int32_t>& prefix_lengths);
 
-  // Hard batch-max prune: shrink validate_input's dense per-seq width from
-  // (num_speculative_tokens + 1) to effective_val_tokens = max(prefix)+1 so
-  // the target forward truly runs a narrower block. Returns
-  // effective_val_tokens; equals the default when no shrink happens.
-  int32_t apply_batch_max_hard_prune(
-      const ForwardInput& input,
-      ForwardInput& validate_input,
-      const std::vector<int32_t>& prefix_lengths);
-
   // Per-seq varlen prune: rebuild validate_input as a true varlen
   // [Σ per_seq_val_tokens[i], ...] batch so target forward only spends
   // compute on tokens each seq's prefix_len actually needs. Reuses the base

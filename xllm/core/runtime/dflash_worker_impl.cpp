@@ -885,7 +885,9 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
       int32_t width = std::max(p + 1, 2);
       per_seq_val_tokens[static_cast<size_t>(i)] = width;
       max_val_tokens = std::max(max_val_tokens, width);
-      if (width < default_val_tokens) did_prune = true;
+      if (width < default_val_tokens) {
+        did_prune = true;
+      }
     }
   }
 
@@ -930,6 +932,13 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
             effective_prefix,
             max_val_tokens - 1,
             val_output.next_tokens.device());
+    // Sync logprob/top-logprob at each seq's cut position with the target's
+    // resampled token (paper Section 3.2: cut-position token switches from
+    // the rejected draft to a target resample; its logprob has to switch
+    // too). Skipping this leaves logprobs pointing at the draft token when
+    // logprobs=true in the sampling request.
+    adaptive_pruning::sync_pruned_boundary_outputs(
+        val_output, target_output, batch_size, max_val_tokens, masks);
     adaptive_pruning::apply_pruned_prefix_lengths(
         val_output,
         target_output.sample_output.next_tokens,
@@ -1430,14 +1439,17 @@ void DFlashWorkerImpl::apply_adaptive_prune_to_draft(
   CHECK_EQ(static_cast<int64_t>(prefix_lengths.size()), batch_size)
       << "adaptive prefix_lengths size must match draft batch";
 
-  // draft_block.probs is a no-sync tensor produced on compute_stream_ (see
-  // run_decode_draft), so read/write ops here must be scheduled on the same
-  // stream to avoid a cross-stream data race with the draft forward.
-  c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-
-  // Build a [B, N] mask on the same device/dtype as probs.
-  torch::Tensor probs = draft_block.probs;
-  torch::Tensor mask = torch::zeros_like(probs);
+  // Cheap host-side pass: compute per-seq keep_cols and the logging stats in
+  // one loop before any device work, so we can early-return when nothing gets
+  // pruned without touching the device.
+  //
+  // Preserve raw draft prob at position 0 when controller pruned to zero
+  // (`keep_cols = max(k, 1)`). If we zeroed position 0 too, the rejection
+  // sampler would see draft_prob=0 there and target/draft = +inf would
+  // unconditionally accept the token the controller wanted rejected;
+  // apply_pruned_prefix_lengths later masks the extra slot to -1 so the
+  // spurious accept never reaches the user.
+  std::vector<int32_t> keep_cols_vec(static_cast<size_t>(batch_size));
   bool any_prune = false;
   int64_t pruned_seqs = 0;
   int32_t max_kept = 0;
@@ -1445,18 +1457,37 @@ void DFlashWorkerImpl::apply_adaptive_prune_to_draft(
   for (int64_t i = 0; i < batch_size; ++i) {
     int32_t k = prefix_lengths[static_cast<size_t>(i)];
     k = std::clamp(k, 0, num_speculative_tokens);
-    if (k > 0) {
-      mask.index_put_({i, torch::indexing::Slice(0, k)}, 1.0);
-    }
+    keep_cols_vec[static_cast<size_t>(i)] = std::max(k, 1);
     sum_kept += k;
-    if (k > max_kept) max_kept = k;
+    if (k > max_kept) {
+      max_kept = k;
+    }
     if (k < num_speculative_tokens) {
       any_prune = true;
       ++pruned_seqs;
     }
   }
-  if (!any_prune) return;
-  draft_block.probs = probs * mask;
+  if (!any_prune) {
+    return;
+  }
+
+  // draft_block.probs is a no-sync tensor produced on compute_stream_ (see
+  // run_decode_draft), so read/write ops here must be scheduled on the same
+  // stream to avoid a cross-stream data race with the draft forward.
+  c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+
+  // Vectorised keep-mask: single H2D upload of keep_cols + broadcast lt over
+  // an arange row. Replaces the previous per-row index_put_ loop that
+  // launched `batch_size` device kernels per adaptive step.
+  torch::Tensor probs = draft_block.probs;
+  torch::Tensor keep_cols_device =
+      cpu_int_vec_to_device(keep_cols_vec, device_);
+  torch::Tensor col_idx = torch::arange(
+      num_speculative_tokens,
+      torch::TensorOptions().dtype(torch::kInt).device(probs.device()));
+  torch::Tensor keep_mask =
+      col_idx.unsqueeze(0).lt(keep_cols_device.unsqueeze(1));
+  probs.masked_fill_(~keep_mask, 0);
   LOG_EVERY_N(INFO, 32) << "[dflash_dspark_adaptive] batch=" << batch_size
                         << " pruned_seqs=" << pruned_seqs
                         << " max_kept=" << max_kept << " avg_kept="
@@ -1464,50 +1495,6 @@ void DFlashWorkerImpl::apply_adaptive_prune_to_draft(
                                 ? static_cast<double>(sum_kept) / batch_size
                                 : 0.0)
                         << " of " << num_speculative_tokens;
-}
-
-int32_t DFlashWorkerImpl::apply_batch_max_hard_prune(
-    const ForwardInput& input,
-    ForwardInput& validate_input,
-    const std::vector<int32_t>& prefix_lengths) {
-  const int32_t num_speculative_tokens = options_.num_speculative_tokens();
-  const int32_t default_val_tokens = num_speculative_tokens + 1;
-  if (prefix_lengths.empty()) return default_val_tokens;
-  int32_t max_prefix = 0;
-  for (int32_t p : prefix_lengths) {
-    max_prefix = std::max(max_prefix, std::clamp(p, 0, num_speculative_tokens));
-  }
-  const int32_t effective_val_tokens = max_prefix + 1;
-  // Guard: rejection sampler / validate pipeline needs at least one draft
-  // slot beyond the anchor. If controller says "prune all", keep 1 draft so
-  // static-like acceptance can still happen this step.
-  const int32_t effective_val_tokens_clamped =
-      std::max(effective_val_tokens, 2);
-  if (effective_val_tokens_clamped >= default_val_tokens)
-    return default_val_tokens;
-
-  // Rebuild validate_input as a dense per-seq width == effective_val_tokens by
-  // reusing the per-seq varlen builder with a uniform width. Because every
-  // entry equals effective_val_tokens, the resulting layout is dense but with
-  // a narrower target-forward block, so target compute drops linearly with
-  // (default - effective) / default.
-  const int32_t num_sequences = input.input_params.meta.num_sequences;
-  std::vector<int32_t> uniform_widths(static_cast<size_t>(num_sequences),
-                                      effective_val_tokens_clamped);
-  c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
-  ForwardInput prepared_input = input;
-  prepared_input.metadata_ready_event.reset();
-  ForwardInput new_validate;
-  SpeculativeWorkerImpl::prepare_validate_inputs(
-      prepared_input, new_validate, uniform_widths);
-  new_validate.input_params.embedding.input_embedding = torch::Tensor();
-  record_metadata_ready_event(*prepare_stream_, new_validate);
-  validate_input = std::move(new_validate);
-  LOG_EVERY_N(INFO, 32) << "[dflash_dspark_hard_prune] batch=" << num_sequences
-                        << " effective_val_tokens="
-                        << effective_val_tokens_clamped << " (was "
-                        << default_val_tokens << ")";
-  return effective_val_tokens_clamped;
 }
 
 void DFlashWorkerImpl::apply_per_seq_varlen_prune(

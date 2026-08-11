@@ -31,7 +31,9 @@ namespace {
 // Returns true when the adaptive controller can operate on the given
 // speculative algorithm name. Currently: MTP, DFlash, DSpark.
 bool is_supported_algorithm(const std::string& algorithm) {
-  if (SpeculativeConfig::is_mtp_algorithm(algorithm)) return true;
+  if (SpeculativeConfig::is_mtp_algorithm(algorithm)) {
+    return true;
+  }
   std::string lower = algorithm;
   std::transform(
       lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
