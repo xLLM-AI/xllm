@@ -662,4 +662,15 @@ TEST(SchedulerPolicyTest, ShortRequestFirstSchedulesShortBeforeLong) {
   EXPECT_EQ(batch[0][1]->num_prompt_tokens(), 512u);
 }
 
+TEST(SchedulerPolicyTest, ShortRequestFirstRejectsMixBatch) {
+  ContinuousScheduler::Options opt =
+      create_scheduler_options(10000, 256, 0, 1024, 1);
+  opt.priority_strategy_ = "short_request_first";
+  opt.enable_disagg_pd_ = true;
+  opt.enable_chunked_prefill_ = true;
+  auto engine = std::make_unique<FakeEngine>(1024, 32);
+  EXPECT_DEATH(std::make_unique<ContinuousScheduler>(engine.get(), opt),
+               "ShortRequestFirst requires exclusive batch");
+}
+
 }  // namespace xllm
