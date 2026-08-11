@@ -633,8 +633,6 @@ TEST(SchedulerPolicyTest, FullFootprintAdmitsBothWhenFits) {
 
 TEST(SchedulerPolicyTest, ShortRequestFirstSchedulesShortBeforeLong) {
   SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
-  ScopedConfigValue<bool> enable_srf(
-      scheduler_config.enable_short_request_first(), true);
   ScopedConfigValue<int32_t> threshold(
       scheduler_config.short_request_first_threshold(), 256);
   ScopedConfigValue<double> long_wait(

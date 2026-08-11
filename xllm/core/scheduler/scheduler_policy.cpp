@@ -886,8 +886,8 @@ std::unique_ptr<SchedulerPolicy> create_scheduler_policy(
   } else if (mode.enable_mix_batch) {
     return std::make_unique<DecodeFirstPolicy>(mode, options);
   }
-  const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
-  if (scheduler_config.enable_short_request_first()) {
+  if (mode.priority_strategy == "short_request_first") {
+    const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
     validate_short_request_first_options(options);
     LOG(INFO) << "Enable PD-prefill ShortRequestFirst scheduling: threshold="
               << scheduler_config.short_request_first_threshold()

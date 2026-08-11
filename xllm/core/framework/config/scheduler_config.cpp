@@ -61,10 +61,6 @@ DEFINE_string(priority_strategy,
               "Priority strategy for requests(e.g. fcfs, priority, deadline, "
               "short_request_first).");
 
-DEFINE_bool(enable_short_request_first,
-            false,
-            "Whether to enable PD-prefill ShortRequestFirst scheduling.");
-
 DEFINE_int32(short_request_first_threshold,
              256,
              "Prompt-length threshold for PD-prefill ShortRequestFirst.");
@@ -104,7 +100,6 @@ void SchedulerConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_decode_token_per_sequence);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(priority_strategy);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mix_batch);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_short_request_first);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(short_request_first_threshold);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(short_request_first_long_max_wait_ms);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_online_preempt_offline);
@@ -126,7 +121,6 @@ void SchedulerConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_decode_token_per_sequence);
   XLLM_CONFIG_ASSIGN_FROM_JSON(priority_strategy);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mix_batch);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_short_request_first);
   XLLM_CONFIG_ASSIGN_FROM_JSON(short_request_first_threshold);
   XLLM_CONFIG_ASSIGN_FROM_JSON(short_request_first_long_max_wait_ms);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_online_preempt_offline);
@@ -161,8 +155,6 @@ void SchedulerConfig::append_config_json(
       config_json, default_config, priority_strategy);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_mix_batch);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_short_request_first);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, short_request_first_threshold);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

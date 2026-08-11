@@ -52,7 +52,6 @@ class SchedulerConfig final {
          "max_decode_token_per_sequence",
          "priority_strategy",
          "enable_mix_batch",
-         "enable_short_request_first",
          "short_request_first_threshold",
          "short_request_first_long_max_wait_ms",
          "enable_online_preempt_offline",
@@ -83,8 +82,6 @@ class SchedulerConfig final {
   PROPERTY(std::string, priority_strategy) = "fcfs";
 
   PROPERTY(bool, enable_mix_batch) = true;
-
-  PROPERTY(bool, enable_short_request_first) = false;
 
   PROPERTY(int32_t, short_request_first_threshold) = 256;
 
