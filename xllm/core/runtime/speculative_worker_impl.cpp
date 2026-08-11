@@ -222,7 +222,9 @@ void SpeculativeWorkerImpl::update_sampling_params(
   }
   torch::Tensor selected_token_idxes = torch::tensor(selected_token_idxes_vec);
   sampling_params.selected_token_idxes = selected_token_idxes.to(device_);
-  sampling_params.sample_idxes = selected_token_idxes.to(device_);
+  // Alias sample_idxes to the already-uploaded device tensor rather than
+  // paying a second identical H2D copy.
+  sampling_params.sample_idxes = sampling_params.selected_token_idxes;
 
   torch::Tensor repeats_tensor =
       torch::tensor(std::vector<int64_t>(per_seq_val_tokens.begin(),
@@ -230,7 +232,9 @@ void SpeculativeWorkerImpl::update_sampling_params(
                     torch::kLong)
           .to(device_);
   auto repeat_per_seq = [&](torch::Tensor& tensor) {
-    if (!tensor.defined()) return;
+    if (!tensor.defined()) {
+      return;
+    }
     tensor = tensor.repeat_interleave(repeats_tensor, /*dim=*/0);
   };
   repeat_per_seq(sampling_params.frequency_penalties);
