@@ -389,6 +389,10 @@ void ProfileManager::train_speculative_validate_time_predictor(
   // query_prefix_ms*(batch*query*prefix). A standalone batch term was tried
   // and dropped: it is pruning-invariant (does not depend on prefix) and only
   // steals variance from the marginal query terms that drive pruning.
+  //
+  // TODO: dedup this Eigen least-squares + MAE/MAPE + negative-coefficient
+  // clamp with TimePredictor::fit_for_decode (same routine, different design
+  // matrix). Deferred to a follow-up commit to keep this PR focused.
   constexpr int32_t kNumCoefficients = 3;
   Eigen::MatrixXd matrix(time_profiling_data.size(), kNumCoefficients);
   Eigen::VectorXd target(time_profiling_data.size());
@@ -436,14 +440,23 @@ void ProfileManager::train_speculative_validate_time_predictor(
   predictor.intercept_ms = coefficients(0);
   predictor.query_token_ms = coefficients(1);
   predictor.query_prefix_ms = coefficients(2);
+  // Broadcast to workers FIRST, then commit locally. Workers gate the
+  // adaptive path on their own SpeculativeProfileRegistry, so any rank
+  // that misses the predictor will diverge from ranks that received it:
+  // one side runs adaptive (per-seq variable validate width), the other
+  // runs static, which corrupts collectives and shape assumptions.
+  // Treat broadcast failure as fatal for the adaptive path and leave the
+  // registry unset so every rank consistently falls back to static.
+  if (!engine_->set_speculative_validate_time_predictor(predictor)) {
+    LOG(ERROR)
+        << "Failed to broadcast speculative validate predictor to workers. "
+        << "Disabling adaptive speculative decode on all ranks to avoid "
+        << "cross-rank divergence.";
+    SpeculativeProfileRegistry::get_instance().reset_validate_time_predictor();
+    return;
+  }
   SpeculativeProfileRegistry::get_instance().set_validate_time_predictor(
       predictor);
-  if (!engine_->set_speculative_validate_time_predictor(predictor)) {
-    LOG(WARNING)
-        << "Failed to broadcast speculative validate predictor to workers. "
-        << "Adaptive speculative decode will fallback to runtime EWMA on "
-        << "workers without the profile.";
-  }
 
   LOG(INFO) << "Fitted speculative validate equation: time = "
             << predictor.query_token_ms << " * batch_size * query_len + "
@@ -456,15 +469,13 @@ void ProfileManager::train_speculative_validate_time_predictor(
 void ProfileManager::profile_speculative_validate_time() {
   const SpeculativeConfig& speculative_config =
       ::xllm::SpeculativeConfig::get_instance();
-  std::string speculative_algorithm =
-      speculative_config.speculative_algorithm();
-  std::transform(
-      speculative_algorithm.begin(),
-      speculative_algorithm.end(),
-      speculative_algorithm.begin(),
-      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  if (speculative_config.num_speculative_tokens() <= 1 ||
-      speculative_algorithm != "mtp") {
+  // Only fit the validate-time predictor when the adaptive path can
+  // actually consume it: MTP with SL > 1 and adaptive explicitly enabled.
+  // Otherwise this whole prefix/query/batch sweep is wasted startup time.
+  if (!speculative_config.enable_adaptive_speculative_decode() ||
+      speculative_config.num_speculative_tokens() <= 1 ||
+      !SpeculativeConfig::is_mtp_algorithm(
+          speculative_config.speculative_algorithm())) {
     return;
   }
   LOG(INFO) << "Starting speculative validate profile for MTP, "
