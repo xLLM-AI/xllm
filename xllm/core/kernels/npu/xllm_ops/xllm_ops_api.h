@@ -280,9 +280,10 @@ std::tuple<at::Tensor, at::Tensor> sparse_attn_sharedkv(
     bool return_softmax_lse);
 
 // PR #6 SparseFlashAttention (3 outputs / 8 attrs, supports rope=None).
-// Resolves the op from the custom_transformer vendor directly (dlopen+dlsym),
-// bypassing the global aclnn resolver so it does not disturb the other ops
-// served by custom_xllm_math (which keeps config.ini load_priority).
+// Resolves the op from the new-contract SFA vendor directly (dlopen+dlsym,
+// probing custom_transformer then glm_next_transformer), bypassing the global
+// aclnn resolver so it does not disturb the other ops served by
+// custom_xllm_math (which keeps config.ini load_priority).
 std::tuple<at::Tensor, at::Tensor, at::Tensor> sparse_flash_attention(
     const at::Tensor& query,
     const at::Tensor& key,

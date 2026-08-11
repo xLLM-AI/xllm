@@ -25,21 +25,29 @@ limitations under the License.
 namespace xllm::kernel::npu {
 namespace {
 
-// The PR #6 SparseFlashAttention aclnn op lives in the ``custom_transformer``
-// vendor package. It exports the *same* symbol name
-// (``aclnnSparseFlashAttention``) as the legacy op in ``custom_xllm_math``,
-// so the global ``get_op_api_func_addr`` resolver cannot distinguish them --
-// whichever vendor wins ``config.ini`` load_priority serves both. To call the
-// PR #6 op (3 outputs / 8 attrs, supports rope=None) without disturbing the
-// other ops served by ``custom_xllm_math``, this implementation dlopens the
-// custom_transformer ``libcust_opapi.so`` directly and dlsyms the two entry
-// points, bypassing the global resolver entirely.
+// The PR #6 SparseFlashAttention aclnn op (3 outputs / 8 attrs, rope=None
+// supported) exports the *same* symbol name (``aclnnSparseFlashAttention``)
+// as the legacy op in ``custom_xllm_math`` (1 output / 5 attrs, rope hardcoded
+// 64). The global ``get_op_api_func_addr`` resolver cannot distinguish them --
+// whichever vendor wins ``config.ini`` load_priority serves both -- so to call
+// the PR #6 op without disturbing the other ops served by ``custom_xllm_math``,
+// this implementation dlopens the new-contract vendor ``libcust_opapi.so``
+// directly and dlsyms the two entry points, bypassing the global resolver.
 //
-// The custom_transformer vendor is built/installed out-of-tree (fork repo
-// build_aclnn.sh). If it is absent, this op reports a clear error rather than
-// silently falling back to the legacy op.
-constexpr const char* kCustomTransformerLib =
-    "/vendors/custom_transformer/op_api/lib/libcust_opapi.so";
+// The new-contract SFA aclnn op is shipped out-of-tree by different vendor
+// packages depending on the deployment: ``custom_transformer`` (the fork repo
+// ``build_aclnn.sh`` target named by the original PR) on some boxes, or
+// ``glm_next_transformer`` (Huawei CANN GLM-Next transformer op package) on
+// others. Both export an identical 3-output / 8-attr
+// ``aclnnSparseFlashAttention``. We probe ``custom_transformer`` first to keep
+// the original PR semantics, then fall back to ``glm_next_transformer`` so the
+// op resolves on boxes where that is the only installed copy. If neither vendor
+// has the symbol, a clear error is reported rather than silently falling back
+// to the legacy op.
+constexpr const char* kNewSfaVendorLibs[] = {
+    "/vendors/custom_transformer/op_api/lib/libcust_opapi.so",
+    "/vendors/glm_next_transformer/op_api/lib/libcust_opapi.so",
+};
 
 struct CustomTransformerOpApi {
   void* handler = nullptr;
@@ -47,10 +55,11 @@ struct CustomTransformerOpApi {
   void* op_api = nullptr;
 };
 
-// Loads the custom_transformer libcust_opapi.so once and resolves the two
-// aclnnSparseFlashAttention entry points. Thread-safe via call_once; the .so
-// stays loaded for the process lifetime (matching the global resolver's
-// behaviour).
+// Loads the new-contract SFA vendor libcust_opapi.so once and resolves the two
+// aclnnSparseFlashAttention entry points. Probes kNewSfaVendorLibs in order and
+// keeps the first vendor whose .so both dlopens and dlsyms the two symbols.
+// Thread-safe via call_once; the .so stays loaded for the process lifetime
+// (matching the global resolver's behaviour).
 const CustomTransformerOpApi& load_custom_transformer_op_api() {
   static CustomTransformerOpApi api;
   static std::once_flag flag;
@@ -58,25 +67,38 @@ const CustomTransformerOpApi& load_custom_transformer_op_api() {
     const char* ascend_opp = std::getenv("ASCEND_OPP_PATH");
     if (ascend_opp == nullptr) {
       TORCH_CHECK(false,
-                  "ASCEND_OPP_PATH is not set; cannot locate "
-                  "custom_transformer vendor for sparse_flash_attention.");
+                  "ASCEND_OPP_PATH is not set; cannot locate the "
+                  "new-contract SFA vendor for sparse_flash_attention.");
     }
-    std::string lib_path = std::string(ascend_opp) + kCustomTransformerLib;
-    api.handler = dlopen(lib_path.c_str(), RTLD_LAZY);
-    TORCH_CHECK(api.handler != nullptr,
-                "sparse_flash_attention: failed to dlopen custom_transformer "
-                "libcust_opapi.so at ",
-                lib_path,
-                ", error: ",
-                dlerror(),
-                ". Install the PR #6 SFA vendor (custom_transformer) first.");
-    api.get_workspace_size =
-        dlsym(api.handler, "aclnnSparseFlashAttentionGetWorkspaceSize");
-    api.op_api = dlsym(api.handler, "aclnnSparseFlashAttention");
-    TORCH_CHECK(api.get_workspace_size != nullptr && api.op_api != nullptr,
+    std::string tried_paths;
+    bool resolved = false;
+    for (const char* rel : kNewSfaVendorLibs) {
+      std::string lib_path = std::string(ascend_opp) + rel;
+      tried_paths += "  " + lib_path + "\n";
+      void* handler = dlopen(lib_path.c_str(), RTLD_LAZY);
+      if (handler == nullptr) {
+        continue;
+      }
+      void* get_ws =
+          dlsym(handler, "aclnnSparseFlashAttentionGetWorkspaceSize");
+      void* op_api = dlsym(handler, "aclnnSparseFlashAttention");
+      if (get_ws != nullptr && op_api != nullptr) {
+        api.handler = handler;
+        api.get_workspace_size = get_ws;
+        api.op_api = op_api;
+        resolved = true;
+        break;
+      }
+      // Opened but missing the symbol: close and try the next vendor.
+      dlclose(handler);
+    }
+    TORCH_CHECK(resolved,
                 "sparse_flash_attention: aclnnSparseFlashAttention or "
-                "GetWorkspaceSize not found in custom_transformer "
-                "libcust_opapi.so.");
+                "GetWorkspaceSize not found in any new-contract SFA vendor "
+                "libcust_opapi.so. Tried:\n",
+                tried_paths,
+                "Install the PR #6 SFA vendor (custom_transformer or "
+                "glm_next_transformer) first.");
   });
   return api;
 }
@@ -156,9 +178,10 @@ void check_sparse_flash_attention_shape_and_dtype(
 }  // namespace
 
 // PR #6 SparseFlashAttention: 3 outputs / 8 attrs, supports rope=None.
-// Resolves the op from the custom_transformer vendor directly (dlopen+dlsym)
-// rather than the global aclnn resolver, so it does not disturb the other ops
-// served by custom_xllm_math (which keeps load_priority via config.ini).
+// Resolves the op from the new-contract SFA vendor directly (dlopen+dlsym,
+// probing custom_transformer then glm_next_transformer) rather than the global
+// aclnn resolver, so it does not disturb the other ops served by
+// custom_xllm_math (which keeps load_priority via config.ini).
 std::tuple<at::Tensor, at::Tensor, at::Tensor> sparse_flash_attention(
     const at::Tensor& query,
     const at::Tensor& key,
@@ -198,7 +221,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> sparse_flash_attention(
   const CustomTransformerOpApi& api = load_custom_transformer_op_api();
 
   // Mirror EXEC_NPU_CMD (pytorch_npu_helper.hpp:703): the GetWorkspaceSize /
-  // op entry points come from the custom_transformer .so (resolved above),
+  // op entry points come from the resolved new-contract SFA vendor .so above,
   // while the optional HugeMem helpers are resolved through the global
   // resolver (they live in the built-in libopapi.so, not the vendor .so).
   static const auto init_mem_addr =

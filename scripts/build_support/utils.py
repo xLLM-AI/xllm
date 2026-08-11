@@ -579,9 +579,68 @@ def _ensure_xllm_ops_rebuild_state(device: str) -> None:
         exit(1)
 
 
+def _ensure_glm_first_vendor_priority() -> None:
+    """Pin ``glm_next_transformer`` ahead of ``custom_xllm_math`` in the CANN
+    ``vendors/config.ini`` ``load_priority``.
+
+    Both vendors export ``aclnnSparseFlashAttention``. ``custom_xllm_math``
+    ships the legacy contract (1 output / 5 attrs, rope hardcoded 64) while
+    ``glm_next_transformer`` ships the PR #6 contract (3 outputs / 8 attrs,
+    rope=None). ``glm_next_transformer`` is the only other vendor that exports
+    the symbol, so reordering touches only SFA resolution; every other op
+    keeps hitting whichever vendor already served it.
+
+    ``xllm_ops/build.sh`` ``update_vendor_config`` prepends the freshly
+    installed ``custom_xllm_math`` on every reinstall, which would shadow the
+    new-contract op and make ``torch.ops.npu.npu_sparse_flash_attention`` crash
+    (3-output schema dispatched to a 1-output binary). Running this after every
+    ``pre_build`` restores the order regardless of whether xllm_ops was
+    reinstalled this run. No-op off NPU or when the file is absent.
+    """
+    opp_root = os.getenv("ASCEND_OPP_PATH")
+    if not opp_root:
+        return
+    config_file = os.path.join(
+        os.path.abspath(os.path.expanduser(opp_root)), "vendors", "config.ini"
+    )
+    if not os.path.isfile(config_file):
+        return
+
+    with open(config_file, "r", encoding="utf-8") as f:
+        lines = f.read().splitlines()
+
+    def _split(line: str) -> list[str]:
+        prefix = "load_priority="
+        return [v for v in line[len(prefix):].split(",") if v] if line.startswith(prefix) else []
+
+    for i, line in enumerate(lines):
+        vendors = _split(line)
+        if not vendors:
+            continue
+        glm = "glm_next_transformer"
+        cxm = "custom_xllm_math"
+        if glm not in vendors or cxm not in vendors:
+            continue
+        glm_idx = vendors.index(glm)
+        cxm_idx = vendors.index(cxm)
+        if glm_idx < cxm_idx:
+            return  # already glm-first
+        # move glm ahead of custom_xllm_math, keep the rest in order
+        vendors = [glm] + [v for v in vendors if v != glm]
+        lines[i] = "load_priority=" + ",".join(vendors)
+        with open(config_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        logger.info(
+            "✅ Pinned glm_next_transformer ahead of custom_xllm_math in "
+            f"{config_file} (new-contract SFA wins load_priority)."
+        )
+        return
+
+
 def pre_build(device: str) -> None:
     script_path = get_base_dir()
 
     _validate_submodules_or_exit(script_path)
     _ensure_prebuild_dependencies_installed(script_path)
     _ensure_xllm_ops_rebuild_state(device)
+    _ensure_glm_first_vendor_priority()
