@@ -218,8 +218,8 @@ block geometry and is out of the trained distribution; use it only after an
 acceptance/performance evaluation. Context parallelism (`cp_size > 1`) is not
 supported on this path yet.
 
-xLLM supports two SAS modes. The default compatibility mode works with CANN
-9.0 and needs no extra option. If the installed SAS operator accepts a
+On NPU, xLLM supports two SAS modes. The default compatibility mode works with
+CANN 9.0 and needs no extra option. If the installed SAS operator accepts a
 non-empty `ori_sparse_indices`, set `--enable_dspark_native_sas=true` to use
 the complete DSpark SWA window. Older operators terminate during tiling, so
 xLLM cannot safely detect this capability automatically.

@@ -20,6 +20,8 @@ limitations under the License.
 #include <torch_npu/torch_npu.h>
 
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -30,6 +32,7 @@ limitations under the License.
 #include "core/framework/block/block.h"
 #include "core/framework/block/block_manager_impl.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/kv_cache/kv_cache_utils.h"
@@ -48,6 +51,7 @@ limitations under the License.
 #include "core/runtime/acl_graph_executor_impl.h"
 #include "core/runtime/acl_graph_persistent_param.h"
 #include "core/runtime/base_executor_impl.h"
+#include "core/runtime/block_diffusion_model_config.h"
 #include "core/runtime/dflash_worker_impl.h"
 #include "core/runtime/mtp_async_state.h"
 #include "core/runtime/options.h"
@@ -1255,6 +1259,77 @@ TEST(DSparkWorkerOptionsTest, PreservesDraftBlockSize) {
 
   options.speculative_algorithm("DFlash");
   EXPECT_EQ(dflash_detail::draft_model_num_speculative_tokens(options), 0);
+}
+
+TEST(BlockDiffusionConfigTest, MapsCheckpointLayersToNpuCapturePoints) {
+  EXPECT_EQ(block_diffusion::map_target_layer_ids_to_capture_points(
+                std::vector<int32_t>{0, 40, 42}),
+            (std::vector<int32_t>{1, 41, 43}));
+}
+
+TEST(BlockDiffusionConfigTest, PreservesDeepseekV4NpuDraftArguments) {
+  const std::filesystem::path config_dir =
+      std::filesystem::path(::testing::TempDir()) /
+      "xllm_block_diffusion_config_test";
+  std::filesystem::create_directories(config_dir);
+  {
+    std::ofstream config_file(config_dir / "config.json");
+    config_file << R"json({"dspark_target_layer_ids":[40,41,42]})json";
+  }
+
+  runtime::Options target_options;
+  target_options.speculative_algorithm("DSpark")
+      .draft_model_path(config_dir.string())
+      .num_speculative_tokens(5)
+      .is_draft_engine(false);
+  ModelArgs target_args;
+  target_args.model_type("deepseek_v4")
+      .n_layers(43)
+      .dspark_num_layers(3)
+      .dspark_block_size(0)
+      .compress_ratios({1, 1, 4});
+  block_diffusion::configure_model_args(
+      target_args, target_options, /*model_weights_path=*/"unused");
+  EXPECT_EQ(target_args.model_type(), "deepseek_v4");
+  EXPECT_EQ(target_args.n_layers(), 43);
+  EXPECT_EQ(target_args.dspark_block_size(), 0);
+  EXPECT_EQ(target_args.layers_to_capture(),
+            (std::vector<int32_t>{41, 42, 43}));
+  EXPECT_EQ(target_args.compress_ratios(), (std::vector<int32_t>{1, 1, 4}));
+
+  runtime::Options draft_options;
+  draft_options.speculative_algorithm("DSpark")
+      .num_speculative_tokens(5)
+      .is_draft_engine(true);
+  ModelArgs draft_args;
+  draft_args.model_type("deepseek_v4")
+      .n_layers(43)
+      .n_hash_layers(2)
+      .dspark_num_layers(3)
+      .dspark_block_size(0)
+      .compress_ratios({1, 1, 4});
+
+  KernelConfig& kernel_config = KernelConfig::get_instance();
+  const bool original_native_sas = kernel_config.enable_dspark_native_sas();
+  kernel_config.enable_dspark_native_sas(false);
+  block_diffusion::configure_model_args(
+      draft_args, draft_options, config_dir.string());
+  kernel_config.enable_dspark_native_sas(original_native_sas);
+
+  EXPECT_EQ(draft_args.model_type(), "deepseek_v4_dspark");
+  EXPECT_EQ(draft_args.n_layers(), 3);
+  EXPECT_EQ(draft_args.n_hash_layers(), 0);
+  EXPECT_EQ(draft_args.dspark_block_size(), 5);
+  EXPECT_FALSE(draft_args.dspark_use_native_sas());
+  EXPECT_EQ(draft_args.layers_to_capture(), (std::vector<int32_t>{41, 42, 43}));
+  EXPECT_EQ(draft_args.compress_ratios(), (std::vector<int32_t>{1, 1, 1}));
+
+  std::filesystem::remove_all(config_dir);
+}
+
+TEST(DSparkNativeSasConfigTest, DefaultsToCompatibilityMode) {
+  KernelConfig config;
+  EXPECT_FALSE(config.enable_dspark_native_sas());
 }
 
 TEST(DSparkWorkerInputTest, InvalidatesTargetAttentionMetadataOnly) {

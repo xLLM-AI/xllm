@@ -215,8 +215,8 @@ DeepSeek-V4-Flash-0731 权重目录即可：
 `dspark_block_size=5` 训练。改用其他 gamma 会改变扩散块几何，超出训练分布，
 需要重新验证接受率和性能。当前路径暂不支持 `cp_size > 1`。
 
-xLLM 支持两种 SAS 模式。默认兼容模式适配 CANN 9.0，无需增加参数；若当前
-SAS 算子支持非空 `ori_sparse_indices`，可设置
+在 NPU 上，xLLM 支持两种 SAS 模式。默认兼容模式适配 CANN 9.0，无需增加参数；
+若当前 SAS 算子支持非空 `ori_sparse_indices`，可设置
 `--enable_dspark_native_sas=true`，使用完整的 DSpark SWA 窗口。旧版算子会在
 tiling 阶段直接终止进程，因此无法安全地自动探测该能力。
 

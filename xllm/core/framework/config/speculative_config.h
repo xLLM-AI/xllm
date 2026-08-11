@@ -73,7 +73,6 @@ class SpeculativeConfig final {
          "speculative_suffix_use_tree_spec",
          "enable_opt_validate_probs",
          "enable_mtp_draft_body_tp1",
-         "enable_dspark_native_sas",
          "enable_atb_spec_kernel"}};
     return kOptionCategory;
   }
@@ -99,8 +98,6 @@ class SpeculativeConfig final {
   PROPERTY(bool, enable_opt_validate_probs) = false;
 
   PROPERTY(bool, enable_mtp_draft_body_tp1) = false;
-
-  PROPERTY(bool, enable_dspark_native_sas) = false;
 
   PROPERTY(bool, enable_atb_spec_kernel) = false;
 };

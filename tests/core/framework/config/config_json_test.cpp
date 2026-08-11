@@ -24,6 +24,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
@@ -50,6 +51,16 @@ inline constexpr std::string_view kUpdatedConfig = R"json({
 inline constexpr std::string_view kMalformedConfig = R"json({
   "block_size":
 })json";
+
+#if !defined(USE_NPU)
+TEST(KernelConfigTest, RejectsNpuOnlyDsparkNativeSas) {
+  JsonReader json_config =
+      config::parse_json_string(R"json({"enable_dspark_native_sas":true})json");
+  KernelConfig kernel_config;
+  EXPECT_DEATH(kernel_config.from_json(json_config),
+               "enable_dspark_native_sas is only supported on NPU");
+}
+#endif
 
 class ConfigJsonFileFlagGuard final {
  public:

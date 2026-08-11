@@ -24,6 +24,7 @@ cc_library(
     $<$<BOOL:${USE_DCU}>:dcu_graph_executor_impl.h>
     worker.h
     worker_impl.h
+    block_diffusion_model_config.h
     llm_worker_impl.h
     vlm_worker_impl.h
     dit_worker_impl.h
@@ -59,6 +60,7 @@ cc_library(
     $<$<BOOL:${USE_DCU}>:dcu_graph_executor_impl.cpp>
     worker.cpp
     worker_impl.cpp
+    block_diffusion_model_config.cpp
     worker_rendezvous.cpp
     llm_worker_impl.cpp
     vlm_worker_impl.cpp
