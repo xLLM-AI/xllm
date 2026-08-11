@@ -72,6 +72,7 @@ limitations under the License.
 #include "platform/cuda_profiler.h"
 #endif
 #include "core/distributed_runtime/master.h"
+#include "core/runtime/block_diffusion_model_config.h"
 #include "core/runtime/worker_rendezvous.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/kv_cache/linear_state_restore.h"
@@ -87,7 +88,6 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "layers/npu/loader/rolling_weight_buffer.h"
 #endif
-#include "util/json_reader.h"
 #include "util/tensor_helper.h"
 #include "util/threadpool.h"
 #include "util/timer.h"
@@ -144,81 +144,6 @@ class ScopedAtenLoadThreads {
   int32_t prev_threads_ = 0;
   bool active_ = false;
 };
-
-// Hooks run before a layer, so output layer L is captured at L + 1.
-std::vector<int32_t> read_capture_layer_ids(
-    const std::string& model_weights_path) {
-  JsonReader reader;
-  const std::string config_path = model_weights_path + "/config.json";
-  CHECK(reader.parse(config_path))
-      << "Failed to parse block-diffusion draft config: " << config_path;
-  std::vector<int32_t> capture_layer_ids;
-  for (int32_t layer_id : reader.value_or<std::vector<int32_t>>(
-           std::vector<std::string>{"dspark_target_layer_ids",
-                                    "target_layer_ids",
-                                    "dflash_config.target_layer_ids"},
-           std::vector<int32_t>{})) {
-    capture_layer_ids.emplace_back(layer_id + 1);
-  }
-  CHECK(!capture_layer_ids.empty())
-      << "Block-diffusion draft config requires target_layer_ids or "
-         "dflash_config.target_layer_ids: "
-      << config_path;
-  return capture_layer_ids;
-}
-
-#if defined(USE_NPU)
-std::string resolve_block_diffusion_draft_model_type(
-    const ModelArgs& args,
-    const runtime::Options& options) {
-  if (options.speculative_algorithm() == "DFlash") {
-    return "DFlashDraftModel";
-  }
-  if (util::is_deepseek_v4_model_type(args.model_type())) {
-    return "deepseek_v4_dspark";
-  }
-  return "DSparkDraftModel";
-}
-
-void configure_block_diffusion_model_args(
-    ModelArgs& args,
-    const runtime::Options& options,
-    const std::string& model_weights_path) {
-  const bool is_dspark = options.speculative_algorithm() == "DSpark";
-  const bool is_deepseek_v4 =
-      util::is_deepseek_v4_model_type(args.model_type());
-  const std::string draft_model_type =
-      resolve_block_diffusion_draft_model_type(args, options);
-
-  std::string draft_config_path;
-  if (options.is_draft_engine()) {
-    LOG(INFO) << "Overriding draft model_type from " << args.model_type()
-              << " to " << draft_model_type
-              << " for block-diffusion speculative decoding";
-    args.model_type(draft_model_type);
-    if (is_dspark && is_deepseek_v4) {
-      CHECK_GT(args.dspark_num_layers(), 0)
-          << "DeepSeek-V4 DSpark requires at least one draft layer.";
-      args.n_layers(args.dspark_num_layers());
-      args.n_hash_layers(0);
-      args.dspark_block_size(options.num_speculative_tokens());
-      args.dspark_use_native_sas(
-          SpeculativeConfig::get_instance().enable_dspark_native_sas());
-      // DSpark stages are all standard SWA layers. Their stage ids are not
-      // target-model layer ids, so target compress_ratios[0..N) must not be
-      // reused (0731's third target layer is C4).
-      args.compress_ratios(std::vector<int32_t>(
-          static_cast<size_t>(args.dspark_num_layers()), 1));
-    }
-    draft_config_path = model_weights_path;
-  } else {
-    CHECK(options.draft_model_path().has_value())
-        << "block-diffusion speculative decoding requires --draft_model.";
-    draft_config_path = options.draft_model_path().value();
-  }
-  args.layers_to_capture(read_dflash_capture_layer_ids(draft_config_path));
-}
-#endif
 
 void move_tensor_to_device_if_needed(torch::Tensor& tensor,
                                      const torch::Device& device) {
@@ -1612,6 +1537,12 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
     }
   }
 
+  const bool is_block_diffusion =
+      block_diffusion::is_algorithm(options_.speculative_algorithm());
+  if (is_block_diffusion) {
+    block_diffusion::configure_model_args(args, options_, model_weights_path_);
+  }
+
 #if defined(USE_NPU)
   const std::string& speculative_algorithm = options_.speculative_algorithm();
   if (options_.enable_speculative_decode() &&
@@ -1619,17 +1550,10 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       util::is_deepseek_v4_model_type(args.model_type())) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
   }
-  if (options_.speculative_algorithm() == "DFlash" ||
-      options_.speculative_algorithm() == "DSpark") {
-    // Both target-layer capture and the draft model rewrite are algorithm
-    // configuration. Keep them together so generic worker initialization does
-    // not need to know individual draft model layouts.
-    configure_block_diffusion_model_args(args, options_, model_weights_path_);
-  } else if (options_.enable_speculative_decode() &&
-             ::xllm::SpeculativeConfig::get_instance()
-                 .enable_atb_spec_kernel()) {
+  if (!is_block_diffusion && options_.enable_speculative_decode() &&
+      ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
-  } else if (options_.enable_speculative_decode() &&
+  } else if (!is_block_diffusion && options_.enable_speculative_decode() &&
              options_.num_speculative_tokens() == 0 &&
              args.num_nextn_predict_layers() != 0) {
     const std::string& current_type = args.model_type();
@@ -1662,7 +1586,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
     // checkpoint as the target model. The draft worker needs to instantiate
     // the MTP variant, so override the model_type here without mutating the
     // original config.
-    if (options_.num_speculative_tokens() == 0 &&
+    if (!is_block_diffusion && options_.num_speculative_tokens() == 0 &&
         args.num_nextn_predict_layers() != 0) {
       static const std::unordered_map<std::string, std::string>
           kModelTypeToMtpType = {

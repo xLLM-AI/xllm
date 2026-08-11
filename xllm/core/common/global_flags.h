@@ -85,8 +85,6 @@ DECLARE_bool(enable_adaptive_speculative_decode);
 
 DECLARE_double(adaptive_speculative_min_gain);
 
-DECLARE_bool(enable_dspark_native_sas);
-
 DECLARE_int32(speculative_suffix_cache_max_depth);
 
 DECLARE_double(speculative_suffix_max_spec_factor);
@@ -405,6 +403,8 @@ DECLARE_bool(enable_split_rmsnorm_rope);
 DECLARE_bool(enable_aclnn_matmul);
 
 DECLARE_bool(enable_aclnn_swiglu);
+
+DECLARE_bool(enable_dspark_native_sas);
 
 DECLARE_bool(enable_flashcomm1);
 
