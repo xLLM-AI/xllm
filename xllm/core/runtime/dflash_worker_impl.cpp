@@ -703,9 +703,7 @@ DFlashWorkerImpl::DraftBlock DFlashWorkerImpl::run_decode_draft(
       {batch_size, num_speculative_tokens});
   draft_block.probs = draft_output.sample_output.probs.view(
       {batch_size, num_speculative_tokens});
-  // Keep the draft's no-sync input alive past run_validate's compute-stream
-  // sync (see DraftBlock::draft_retained_input).
-  draft_block.draft_retained_input = std::move(draft_output.retained_input);
+  draft_block.retained_inputs = take_retained_inputs(draft_output);
   return draft_block;
 }
 

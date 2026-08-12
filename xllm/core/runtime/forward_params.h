@@ -631,11 +631,9 @@ struct ForwardOutput {
   int64_t max_top_logprobs = 0;
   SampleOutput sample_output;
   // Keep no-sync input tensor handles alive until downstream consumers finish
-  // using outputs on the same compute stream.
-  std::shared_ptr<ForwardInput> retained_input;
-  // Composite workers retain nested no-sync inputs until their final output is
-  // synchronized or its ready event is consumed.
-  std::vector<std::shared_ptr<ForwardInput>> retained_input_dependencies;
+  // using outputs on the same compute stream. Composite workers append child
+  // outputs' retained inputs here. Local runtime handles; not in proto/shm.
+  std::vector<std::shared_ptr<ForwardInput>> retained_inputs;
   // Device-side readiness dependency for no-sync outputs. This local runtime
   // handle is intentionally not included in proto or shared-memory transport.
   StreamEventPtr ready_event;
@@ -655,6 +653,29 @@ struct ForwardOutput {
   // dit output data
   DiTForwardOutput dit_forward_output;
 };
+
+inline void copy_retained_inputs(ForwardOutput& destination,
+                                 const ForwardOutput& source) {
+  destination.retained_inputs.insert(destination.retained_inputs.end(),
+                                     source.retained_inputs.begin(),
+                                     source.retained_inputs.end());
+}
+
+inline void transfer_retained_inputs(ForwardOutput& destination,
+                                     ForwardOutput& source) {
+  CHECK_NE(&destination, &source)
+      << "transfer_retained_inputs cannot alias source and destination";
+  destination.retained_inputs.insert(
+      destination.retained_inputs.end(),
+      std::make_move_iterator(source.retained_inputs.begin()),
+      std::make_move_iterator(source.retained_inputs.end()));
+  source.retained_inputs.clear();
+}
+
+inline std::vector<std::shared_ptr<ForwardInput>> take_retained_inputs(
+    ForwardOutput& source) {
+  return std::exchange(source.retained_inputs, {});
+}
 
 struct RawSampleOutput {
   std::vector<RawToken> tokens;  // num tokens

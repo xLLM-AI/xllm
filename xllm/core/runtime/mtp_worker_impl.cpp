@@ -211,30 +211,6 @@ void record_output_ready_event(ForwardOutput& output, Stream& stream) {
   output.ready_event = event;
 }
 
-void transfer_retained_inputs(ForwardOutput& destination,
-                              ForwardOutput& source) {
-  const size_t retained_input_count =
-      source.retained_input_dependencies.size() +
-      (source.retained_input != nullptr ? 1 : 0);
-  destination.retained_input_dependencies.reserve(
-      destination.retained_input_dependencies.size() + retained_input_count);
-  if (source.retained_input != nullptr) {
-    destination.retained_input_dependencies.emplace_back(
-        std::move(source.retained_input));
-  }
-  for (std::shared_ptr<ForwardInput>& retained_input :
-       source.retained_input_dependencies) {
-    destination.retained_input_dependencies.emplace_back(
-        std::move(retained_input));
-  }
-  source.retained_input_dependencies.clear();
-}
-
-void release_retained_inputs(ForwardOutput& output) {
-  output.retained_input.reset();
-  output.retained_input_dependencies.clear();
-}
-
 void finalize_output_on_stream(ForwardOutput& output,
                                Stream& stream,
                                bool allow_async) {
@@ -244,7 +220,7 @@ void finalize_output_on_stream(ForwardOutput& output,
   }
   const int32_t ret = stream.synchronize();
   CHECK_EQ(ret, 0) << "failed to synchronize MTP compute stream, ret=" << ret;
-  release_retained_inputs(output);
+  output.retained_inputs.clear();
 }
 
 #if defined(USE_NPU)
@@ -2066,7 +2042,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
 
     const int32_t ret = compute_stream_->synchronize();
     CHECK_EQ(ret, 0) << "failed to synchronize MTP compute stream, ret=" << ret;
-    release_retained_inputs(target_output);
+    target_output.retained_inputs.clear();
     val_output.next_tokens = val_output.next_tokens.to(torch::kCPU);
     // Record adaptive-prune-aware draft/accept counts on the already-CPU
     // next_tokens. Static path lets worker_service count on the async-handoff
@@ -2146,22 +2122,16 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   }
   target_output.ready_event = target_context_ready_event;
 
-  // Target validation consumes all draft outputs on the same compute stream.
-  // Keep their prepared inputs alive until the target-context event completes.
+  // Target validation consumes all draft outputs on the same compute stream;
+  // keep their prepared inputs alive on target_output until the target-context
+  // event completes. Copy (not move): draft_outputs live beyond this loop.
   for (const ForwardOutput& draft_output : draft_outputs) {
-    if (draft_output.retained_input != nullptr) {
-      target_output.retained_input_dependencies.emplace_back(
-          draft_output.retained_input);
-    }
-    target_output.retained_input_dependencies.insert(
-        target_output.retained_input_dependencies.end(),
-        draft_output.retained_input_dependencies.begin(),
-        draft_output.retained_input_dependencies.end());
+    copy_retained_inputs(target_output, draft_output);
   }
 
   if (!enable_schedule_overlap()) {
     flush_pending_target_context();
-    release_retained_inputs(target_output);
+    target_output.retained_inputs.clear();
     target_output.ready_event.reset();
     val_output.next_tokens = std::move(accepted_tokens_cpu_result);
   }

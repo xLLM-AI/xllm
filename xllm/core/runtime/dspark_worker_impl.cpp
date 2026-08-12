@@ -98,7 +98,7 @@ DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::run_decode_draft(
   DraftBlock draft_block;
   draft_block.token_ids = std::move(sample_output.token_ids);
   draft_block.probs = std::move(sample_output.probs);
-  draft_block.draft_retained_input = std::move(draft_output->retained_input);
+  draft_block.retained_inputs = take_retained_inputs(*draft_output);
 
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               timer.elapsed_seconds());
