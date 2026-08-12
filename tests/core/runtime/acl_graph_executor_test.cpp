@@ -1225,6 +1225,138 @@ TEST(AclGraphPersistentParamTest,
   EXPECT_FALSE(params_for_capture->graph.attn_mask.defined());
 }
 
+TEST(AclGraphPersistentParamTest,
+     EmptyAndActiveRanksProduceIdenticalExpandedBlockTableWidth) {
+  constexpr int32_t kSpecWidth = 4;
+  constexpr int32_t kActiveNumSequences = 1;
+  constexpr int32_t kActiveNumTokens = kSpecWidth;
+  constexpr int32_t kEmptyLocalTokens = 1;
+  constexpr int32_t kActiveBlockTableWidth = 3;
+  constexpr int32_t kEmptyBlockTableWidth = 1;
+
+  ModelArgs args;
+  args.model_type("qwen3_5");
+  args.dtype("float32");
+  args.hidden_size(8);
+  args.max_position_embeddings(32);
+
+  runtime::Options options;
+  options.block_size(4);
+  options.dp_size(2);
+  options.max_seqs_per_batch(4);
+  options.max_tokens_per_batch(16);
+  options.num_decoding_tokens(kSpecWidth);
+  options.enable_speculative_decode(true);
+  options.is_draft_engine(false);
+
+  const torch::Device device("npu:0");
+  const auto int_options = torch::dtype(torch::kInt).device(device);
+
+  auto make_common_params = []() {
+    ModelInputParams params;
+    params.is_spec_verify = true;
+    params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+    params.meta.q_max_seq_len = kSpecWidth;
+    params.meta.kv_max_seq_len = 1;
+    params.parallel.dp_global_token_nums = {kSpecWidth, 0};
+    params.parallel.raw_dp_global_token_nums = {kSpecWidth, 0};
+    params.graph.use_expanded_decode_for_spec_verify_attention = true;
+    return params;
+  };
+
+  npu::GraphPersistentParam active_persistent(args,
+                                              device,
+                                              options,
+                                              /*need_update_attn_mask=*/true,
+                                              /*is_hybrid_linear_attention=*/
+                                              true);
+  npu::GraphPersistentParam empty_persistent(args,
+                                             device,
+                                             options,
+                                             /*need_update_attn_mask=*/true,
+                                             /*is_hybrid_linear_attention=*/
+                                             true);
+
+  ModelInputParams active_params = make_common_params();
+  active_params.meta.num_sequences = kActiveNumSequences;
+  active_params.attention.host.q_seq_lens = {kSpecWidth};
+  active_params.attention.host.kv_seq_lens = {kSpecWidth};
+  active_params.attention.host.new_cache_slots =
+      std::vector<int32_t>(kActiveNumTokens, 0);
+  active_params.attention.host.block_tables = torch::zeros(
+      {kActiveNumSequences, kActiveBlockTableWidth},
+      torch::TensorOptions().dtype(torch::kInt).device(torch::kCPU));
+  active_params.attention.device.block_tables =
+      torch::zeros({kActiveNumSequences, kActiveBlockTableWidth}, int_options);
+  active_params.attention.device.q_seq_lens =
+      torch::full({kActiveNumSequences}, kSpecWidth, int_options);
+  active_params.attention.device.kv_seq_lens =
+      torch::full({kActiveNumSequences}, kSpecWidth, int_options);
+  active_params.attention.device.new_cache_slots =
+      torch::zeros({kActiveNumTokens}, int_options);
+  active_params.embedding.linear_state_ids =
+      std::vector<int32_t>(kActiveNumSequences, 0);
+  active_params.embedding.linear_state_indices =
+      torch::zeros({kActiveNumSequences}, int_options);
+  active_params.linear_state_validity_mask =
+      std::vector<int64_t>(kActiveNumSequences, 1);
+  active_params.graph.expanded_kv_seq_lens =
+      torch::ones({kActiveNumTokens}, int_options);
+  active_params.graph.expanded_kv_seq_lens_vec.assign(kActiveNumTokens, 1);
+  active_params.graph.expanded_block_tables =
+      torch::zeros({kActiveNumTokens, kActiveBlockTableWidth}, int_options);
+
+  const torch::Tensor active_tokens =
+      torch::ones({kActiveNumTokens}, int_options);
+  const torch::Tensor active_positions =
+      torch::zeros({kActiveNumTokens}, int_options);
+  std::optional<ModelInputParams> active_capture =
+      active_persistent.update(active_tokens,
+                               torch::Tensor(),
+                               torch::Tensor(),
+                               active_positions,
+                               active_params,
+                               kSpecWidth,
+                               true);
+  ASSERT_TRUE(active_capture.has_value());
+  ASSERT_TRUE(active_capture->graph.expanded_block_tables.defined());
+
+  ModelInputParams empty_params = make_common_params();
+  empty_params.meta.num_sequences = 0;
+  empty_params.graph.expanded_kv_seq_lens =
+      torch::ones({kEmptyLocalTokens}, int_options);
+  empty_params.graph.expanded_kv_seq_lens_vec.assign(kEmptyLocalTokens, 1);
+  empty_params.graph.expanded_block_tables =
+      torch::zeros({kEmptyLocalTokens, kEmptyBlockTableWidth}, int_options);
+
+  const torch::Tensor empty_tokens =
+      torch::ones({kEmptyLocalTokens}, int_options);
+  const torch::Tensor empty_positions =
+      torch::zeros({kEmptyLocalTokens}, int_options);
+  std::optional<ModelInputParams> empty_capture =
+      empty_persistent.update(empty_tokens,
+                              torch::Tensor(),
+                              torch::Tensor(),
+                              empty_positions,
+                              empty_params,
+                              kSpecWidth,
+                              true);
+  ASSERT_TRUE(empty_capture.has_value());
+  ASSERT_TRUE(empty_capture->graph.expanded_block_tables.defined());
+
+  EXPECT_EQ(active_capture->graph.expanded_block_tables.size(1),
+            empty_capture->graph.expanded_block_tables.size(1))
+      << "active/empty rank expanded_block_tables must share the same width "
+         "so both ranks bind the same tensor view into the captured graph";
+  EXPECT_EQ(active_capture->graph.expanded_block_tables.size(0),
+            empty_capture->graph.expanded_block_tables.size(0))
+      << "active/empty rank expanded_block_tables must also pad to the same "
+         "row count (padded_num_tokens)";
+  EXPECT_EQ(active_capture->graph.expanded_block_tables.size(1),
+            mtp_async::speculative_verify_block_table_capacity(
+                args.max_position_embeddings(), options.block_size()));
+}
+
 TEST_F(AclGraphExecutorTest, GraphDoubleBufferFlagControlsSlotCount) {
   ExecutionConfig& execution_config = ExecutionConfig::get_instance();
   const bool original_enable_graph_double_buffer =
@@ -1244,6 +1376,52 @@ TEST_F(AclGraphExecutorTest, GraphDoubleBufferFlagControlsSlotCount) {
 
   execution_config.enable_graph_double_buffer(
       original_enable_graph_double_buffer);
+}
+
+TEST_F(AclGraphExecutorTest,
+       GenericSpecVerifyPathActiveAndEmptyRanksProduceIdenticalGraphKey) {
+  constexpr int32_t kSpecWidth = 4;
+  constexpr uint32_t kBucketNumTokens = 4;
+
+  auto executor = std::make_unique<::xllm::npu::AclGraphExecutorImpl>(
+      model_.get(), model_args_, *device_, options_);
+
+  auto make_common_spec_verify_params = []() {
+    ModelInputParams params;
+    params.is_spec_verify = true;
+    params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+    params.meta.q_max_seq_len = kSpecWidth;
+    params.graph.spec_verify_source_addresses_stable = false;
+    params.graph.use_expanded_decode_for_spec_verify_attention = true;
+    return params;
+  };
+
+  ModelInputParams active_params = make_common_spec_verify_params();
+  active_params.meta.num_sequences = 1;
+  active_params.parallel.dp_global_token_nums = {kSpecWidth, 0};
+  active_params.parallel.raw_dp_global_token_nums = {kSpecWidth, 0};
+  active_params.attention.host.q_seq_lens = {kSpecWidth};
+  active_params.attention.host.kv_seq_lens = {kSpecWidth};
+
+  ModelInputParams empty_params = make_common_spec_verify_params();
+  empty_params.meta.num_sequences = 0;
+  empty_params.parallel.dp_global_token_nums = {kSpecWidth, 0};
+  empty_params.parallel.raw_dp_global_token_nums = {kSpecWidth, 0};
+  empty_params.attention.host.q_seq_lens.clear();
+  empty_params.attention.host.kv_seq_lens.clear();
+
+  const uint64_t active_key = executor->get_graph_key_for_test(
+      kBucketNumTokens, active_params, /*attention_plan_class=*/0);
+  const uint64_t empty_key = executor->get_graph_key_for_test(
+      kBucketNumTokens, empty_params, /*attention_plan_class=*/0);
+
+  EXPECT_EQ(active_key, empty_key)
+      << "active/empty rank spec-verify graph keys must match; drift means "
+         "capture/replay would silently split across ranks";
+
+  const uint64_t pure_decode_key = static_cast<uint64_t>(kBucketNumTokens);
+  EXPECT_NE(active_key, pure_decode_key)
+      << "spec-verify path must not collapse into the pure-decode key space";
 }
 
 TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
