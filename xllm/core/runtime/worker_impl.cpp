@@ -1195,9 +1195,7 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
       const auto output = this->step_for_schedule_overlap(input);
 #if defined(USE_NPU)
       if (output.has_value() && !output->sample_output.next_tokens.defined() &&
-          output->ready_event != nullptr &&
-          (output->retained_input != nullptr ||
-           !output->retained_input_dependencies.empty())) {
+          output->ready_event != nullptr && !output->retained_inputs.empty()) {
         CHECK(output->ready_event->synchronize())
             << "failed to retire asynchronous output without tokens";
       }
