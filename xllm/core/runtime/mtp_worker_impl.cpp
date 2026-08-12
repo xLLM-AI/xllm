@@ -225,7 +225,8 @@ void clear_expanded_spec_verify_graph_input(ModelInputParams& input_params) {
 }
 
 bool build_expanded_spec_verify_graph_host_input(
-    ModelInputParams& input_params) {
+    ModelInputParams& input_params,
+    int64_t empty_rank_token_rows = 0) {
   clear_expanded_spec_verify_graph_input(input_params);
   if (!input_params.is_spec_verify ||
       !input_params.meta.batch_forward_type.is_chunked_prefill()) {
@@ -237,7 +238,15 @@ bool build_expanded_spec_verify_graph_host_input(
   const std::vector<int32_t>& kv_seq_lens =
       input_params.attention.host.kv_seq_lens;
   if (q_seq_lens.empty() || kv_seq_lens.empty()) {
-    return false;
+    CHECK_EQ(q_seq_lens.empty(), kv_seq_lens.empty())
+        << "spec verify q/kv seq lens must both be present or both be empty";
+    if (input_params.meta.num_sequences != 0 || empty_rank_token_rows <= 0) {
+      return false;
+    }
+    input_params.graph.use_expanded_decode_for_spec_verify_attention = true;
+    input_params.graph.expanded_kv_seq_lens_vec.assign(
+        static_cast<size_t>(empty_rank_token_rows), 1);
+    return true;
   }
   CHECK_EQ(q_seq_lens.size(), kv_seq_lens.size())
       << "spec verify q/kv seq lens must both be sequence-scoped";
@@ -268,9 +277,43 @@ void bind_expanded_spec_verify_graph_input(ModelInputParams& input_params,
   if (!input_params.graph.use_expanded_decode_for_spec_verify_attention) {
     return;
   }
+  if (!kv_lens_already_bound) {
+    torch::Tensor expanded_kv_seq_lens_host =
+        torch::tensor(input_params.graph.expanded_kv_seq_lens_vec,
+                      torch::TensorOptions()
+                          .dtype(torch::kInt)
+                          .device(torch::kCPU)
+                          .pinned_memory(true));
+    input_params.graph.expanded_kv_seq_lens =
+        expanded_kv_seq_lens_host.to(device, /*non_blocking=*/true);
+  }
+
+  const std::vector<int32_t>& q_seq_lens =
+      input_params.attention.host.q_seq_lens;
+  if (q_seq_lens.empty()) {
+    CHECK_EQ(input_params.meta.num_sequences, 0)
+        << "empty expanded spec verify input requires an empty rank";
+    const int64_t expanded_rows = static_cast<int64_t>(
+        input_params.graph.expanded_kv_seq_lens_vec.size());
+    CHECK_GT(expanded_rows, 0);
+
+    int64_t block_table_width = 1;
+    torch::TensorOptions block_table_options =
+        torch::TensorOptions().dtype(torch::kInt).device(device);
+    if (input_params.attention.device.block_tables.defined()) {
+      CHECK_EQ(input_params.attention.device.block_tables.dim(), 2);
+      block_table_width = std::max<int64_t>(
+          input_params.attention.device.block_tables.size(1), 1);
+      block_table_options =
+          input_params.attention.device.block_tables.options().device(device);
+    }
+    input_params.graph.expanded_block_tables =
+        torch::zeros({expanded_rows, block_table_width}, block_table_options);
+    return;
+  }
+
   CHECK(input_params.attention.device.block_tables.defined())
       << "spec verify block tables must be rebuilt before graph input";
-  const auto& q_seq_lens = input_params.attention.host.q_seq_lens;
   CHECK_GE(input_params.attention.device.block_tables.size(0),
            static_cast<int64_t>(q_seq_lens.size()))
       << "spec verify block table rows are fewer than sequences";
@@ -286,17 +329,6 @@ void bind_expanded_spec_verify_graph_input(ModelInputParams& input_params,
     }
   }
 
-  if (!kv_lens_already_bound) {
-    torch::Tensor expanded_kv_seq_lens_host =
-        torch::tensor(input_params.graph.expanded_kv_seq_lens_vec,
-                      torch::TensorOptions()
-                          .dtype(torch::kInt)
-                          .device(torch::kCPU)
-                          .pinned_memory(true));
-    input_params.graph.expanded_kv_seq_lens =
-        expanded_kv_seq_lens_host.to(device, /*non_blocking=*/true);
-  }
-
   // ATB consumes this tensor as dense row-major storage. Keep the generic
   // fallback contiguous; a zero-stride expand view is rejected at runtime.
   input_params.graph.expanded_block_tables =
@@ -304,8 +336,10 @@ void bind_expanded_spec_verify_graph_input(ModelInputParams& input_params,
 }
 
 void build_expanded_spec_verify_graph_input(ModelInputParams& input_params,
-                                            const torch::Device& device) {
-  build_expanded_spec_verify_graph_host_input(input_params);
+                                            const torch::Device& device,
+                                            int64_t empty_rank_token_rows = 0) {
+  build_expanded_spec_verify_graph_host_input(input_params,
+                                              empty_rank_token_rows);
   bind_expanded_spec_verify_graph_input(input_params, device, false);
 }
 #endif
@@ -969,15 +1003,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
                                      .value());
     }
 
-    new_input = input;
-    for (int32_t& token_num :
-         new_input.input_params.parallel.dp_global_token_nums) {
-      token_num *= options_.num_speculative_tokens() + 1;
-    }
-    for (int32_t& token_num :
-         new_input.input_params.parallel.raw_dp_global_token_nums) {
-      token_num *= options_.num_speculative_tokens() + 1;
-    }
+    prepare_empty_validate_inputs(input, new_input);
     ForwardOutput output = run_llm_no_sync_impl(*impl_,
                                                 new_input,
                                                 *prepare_stream_,
@@ -1953,6 +1979,58 @@ void MTPWorkerImpl::update_decode_step_input(
   input.positions_host = specBuilder::make_cpu_int_tensor(positions_vec);
   input.input_params.attention.host.kv_seq_lens = std::move(kv_seq_lens_vec);
   input.device_tensors_ready = false;
+}
+
+void MTPWorkerImpl::prepare_empty_validate_inputs(
+    const ForwardInput& input,
+    ForwardInput& validate_input) {
+  CHECK_EQ(input.input_params.meta.num_sequences, 0)
+      << "empty target validation requires an empty rank";
+  c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
+  validate_input = input;
+  clear_ready_events(validate_input);
+
+  ModelInputParams& input_params = validate_input.input_params;
+  const int32_t num_val_tokens = options_.num_speculative_tokens() + 1;
+  for (int32_t& token_num : input_params.parallel.dp_global_token_nums) {
+    token_num *= num_val_tokens;
+  }
+  for (int32_t& token_num : input_params.parallel.raw_dp_global_token_nums) {
+    token_num *= num_val_tokens;
+  }
+
+  if (!use_chunked_prefill_spec_verify_path()) {
+    return;
+  }
+
+  CHECK(input_params.attention.host.q_seq_lens.empty());
+  CHECK(input_params.attention.host.kv_seq_lens.empty());
+  input_params.attention.host.q_cu_seq_lens.clear();
+  input_params.attention.host.new_cache_slots.clear();
+  input_params.embedding.input_embedding = torch::Tensor();
+  input_params.meta.actual_num_sequences = 0;
+  input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  input_params.meta.q_max_seq_len = num_val_tokens;
+  input_params.meta.kv_max_seq_len = 1;
+  input_params.parallel.query_start_loc.clear();
+  input_params.is_spec_verify = true;
+  input_params.num_accepted_tokens = torch::Tensor();
+  input_params.num_accepted_tokens_host.clear();
+  input_params.graph.input_tokens_override = torch::Tensor();
+  input_params.graph.spec_verify_draft_token_sources.clear();
+  input_params.graph.spec_verify_source_addresses_stable = false;
+  input_params.graph.spec_verify_static_graph_tasks_prepared = false;
+
+#if defined(USE_NPU)
+  if (supports_explicit_spec_verify_replay_update()) {
+    const int64_t local_token_rows =
+        validate_input.token_ids.defined()
+            ? std::max<int64_t>(validate_input.token_ids.numel(), 1)
+            : 1;
+    build_expanded_spec_verify_graph_input(
+        input_params, device_, local_token_rows);
+  }
+#endif
 }
 
 void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,

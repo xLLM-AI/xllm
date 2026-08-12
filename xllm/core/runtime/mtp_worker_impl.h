@@ -130,6 +130,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   bool use_chunked_prefill_spec_verify_path() const;
 
   // Prepare target validate input from cached target context.
+  void prepare_empty_validate_inputs(const ForwardInput& inputs,
+                                     ForwardInput& validate_inputs);
   void prepare_validate_inputs(const ForwardInput& inputs,
                                ForwardInput& validate_inputs,
                                bool static_graph_tasks_prepared = false);

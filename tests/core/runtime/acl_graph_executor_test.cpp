@@ -47,6 +47,7 @@ limitations under the License.
 #include "core/runtime/acl_graph_persistent_param.h"
 #include "core/runtime/base_executor_impl.h"
 #include "core/runtime/mtp_async_state.h"
+#include "core/runtime/mtp_worker_impl.h"
 #include "core/runtime/options.h"
 #include "core/runtime/speculative_worker_impl.h"
 #include "models/model_registry.h"
@@ -112,6 +113,22 @@ TEST(AclGraphStaticGraphTaskSignatureTest,
 }
 
 namespace {
+class EmptyValidateTestMTPWorker final : public MTPWorkerImpl {
+ public:
+  EmptyValidateTestMTPWorker(const ParallelArgs& parallel_args,
+                             const torch::Device& device,
+                             const runtime::Options& options)
+      : MTPWorkerImpl(parallel_args, device, options) {}
+
+  ForwardInput prepare_empty_qwen_validate_input(const ForwardInput& input) {
+    target_spec_verify_mode_ =
+        mtp_async::TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY;
+    ForwardInput validate_input;
+    prepare_empty_validate_inputs(input, validate_input);
+    return validate_input;
+  }
+};
+
 const KVCache& first_full_attention_cache(
     const std::vector<KVCache>& kv_caches) {
   for (const auto& kv_cache : kv_caches) {
@@ -1086,9 +1103,50 @@ TEST(AclGraphPersistentParamTest,
             kPaddedTokens);
 }
 
+TEST(MTPWorkerImplTest, EmptyRankUsesExpandedSpecVerifyTargetLayout) {
+  constexpr int32_t kSpeculativeTokens = 3;
+  constexpr int32_t kSpecWidth = kSpeculativeTokens + 1;
+  const torch::Device device("npu:0");
+  layer::test::MockProcessGroup process_group(
+      device, /*rank=*/0, /*world_size=*/1);
+  ParallelArgs parallel_args(
+      /*rank=*/0, /*world_size=*/1, &process_group);
+  runtime::Options options;
+  options.num_speculative_tokens(kSpeculativeTokens);
+  EmptyValidateTestMTPWorker worker(parallel_args, device, options);
+
+  ForwardInput input;
+  input.input_params.meta.num_sequences = 0;
+  input.input_params.meta.batch_forward_type = BatchForwardType::DECODE;
+  input.input_params.parallel.dp_global_token_nums = {1, 0};
+  input.input_params.parallel.raw_dp_global_token_nums = {1, 0};
+
+  ForwardInput validate_input = worker.prepare_empty_qwen_validate_input(input);
+  const ModelInputParams& params = validate_input.input_params;
+
+  EXPECT_TRUE(params.meta.batch_forward_type.is_chunked_prefill());
+  EXPECT_TRUE(params.is_spec_verify);
+  EXPECT_EQ(params.meta.num_sequences, 0);
+  EXPECT_EQ(params.meta.q_max_seq_len, kSpecWidth);
+  EXPECT_EQ(params.meta.kv_max_seq_len, 1);
+  EXPECT_EQ(params.parallel.dp_global_token_nums,
+            std::vector<int32_t>({kSpecWidth, 0}));
+  EXPECT_EQ(params.parallel.raw_dp_global_token_nums,
+            std::vector<int32_t>({kSpecWidth, 0}));
+  EXPECT_TRUE(params.graph.use_expanded_decode_for_spec_verify_attention);
+  EXPECT_EQ(params.graph.expanded_kv_seq_lens_vec, std::vector<int32_t>({1}));
+  ASSERT_TRUE(params.graph.expanded_kv_seq_lens.defined());
+  EXPECT_EQ(params.graph.expanded_kv_seq_lens.numel(), 1);
+  ASSERT_TRUE(params.graph.expanded_block_tables.defined());
+  EXPECT_EQ(params.graph.expanded_block_tables.size(0), 1);
+  EXPECT_EQ(params.graph.expanded_block_tables.size(1), 1);
+  EXPECT_FALSE(params.graph.spec_verify_source_addresses_stable);
+}
+
 TEST(AclGraphPersistentParamTest,
-     EmptyHybridMtpSpecVerifyDpGraphPadsEmptyShardMetadata) {
+     EmptyHybridMtpSpecVerifyDpGraphPadsDummyExpandedMetadata) {
   constexpr int32_t kSpecWidth = 4;
+  constexpr int32_t kLocalDummyTokens = 1;
   ModelArgs args;
   args.model_type("qwen3_5");
   args.dtype("float32");
@@ -1118,15 +1176,18 @@ TEST(AclGraphPersistentParamTest,
   params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
   params.meta.q_max_seq_len = kSpecWidth;
   params.meta.kv_max_seq_len = 1;
-  params.parallel.dp_global_token_nums = {kSpecWidth, kSpecWidth};
+  params.parallel.dp_global_token_nums = {kSpecWidth, 0};
+  params.parallel.raw_dp_global_token_nums = {kSpecWidth, 0};
 
-  const torch::Tensor tokens = torch::ones({kSpecWidth}, int_options);
-  const torch::Tensor positions = torch::zeros({kSpecWidth}, int_options);
+  const torch::Tensor tokens = torch::ones({kLocalDummyTokens}, int_options);
+  const torch::Tensor positions =
+      torch::zeros({kLocalDummyTokens}, int_options);
   params.graph.use_expanded_decode_for_spec_verify_attention = true;
-  params.graph.expanded_kv_seq_lens = torch::ones({kSpecWidth}, int_options);
-  params.graph.expanded_kv_seq_lens_vec.assign(kSpecWidth, 1);
+  params.graph.expanded_kv_seq_lens =
+      torch::ones({kLocalDummyTokens}, int_options);
+  params.graph.expanded_kv_seq_lens_vec.assign(kLocalDummyTokens, 1);
   params.graph.expanded_block_tables =
-      torch::zeros({kSpecWidth, 1}, int_options);
+      torch::zeros({kLocalDummyTokens, 1}, int_options);
   std::optional<ModelInputParams> params_for_capture =
       persistent_param.update(tokens,
                               torch::Tensor(),
@@ -1148,10 +1209,19 @@ TEST(AclGraphPersistentParamTest,
             std::vector<int64_t>({0}));
   EXPECT_EQ(params_for_capture->parallel.query_start_loc,
             std::vector<int64_t>({0, kSpecWidth}));
+  EXPECT_TRUE(
+      params_for_capture->graph.use_expanded_decode_for_spec_verify_attention);
   EXPECT_TRUE(params_for_capture->graph.expanded_kv_seq_lens.defined());
   EXPECT_EQ(params_for_capture->graph.expanded_kv_seq_lens.numel(), kSpecWidth);
   EXPECT_EQ(params_for_capture->graph.expanded_kv_seq_lens_vec,
             std::vector<int32_t>(kSpecWidth, 1));
+  ASSERT_TRUE(params_for_capture->graph.expanded_block_tables.defined());
+  EXPECT_EQ(params_for_capture->graph.expanded_block_tables.size(0),
+            kSpecWidth);
+  EXPECT_TRUE(
+      torch::equal(params_for_capture->graph.expanded_block_tables.cpu(),
+                   torch::zeros_like(
+                       params_for_capture->graph.expanded_block_tables.cpu())));
   EXPECT_FALSE(params_for_capture->graph.attn_mask.defined());
 }
 
