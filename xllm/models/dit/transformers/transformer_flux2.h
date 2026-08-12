@@ -41,6 +41,7 @@ limitations under the License.
 #include "framework/model_context.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "models/dit/transformers/transformer_flux.h"
+#include "models/dit/utils/dit_cache_mixin.h"
 #include "models/dit/utils/dit_parallel_linear.h"
 #include "models/model_registry.h"
 #if defined(USE_NPU)
@@ -1192,7 +1193,8 @@ class Flux2SingleTransformerBlockImpl : public torch::nn::Module {
 };
 TORCH_MODULE(Flux2SingleTransformerBlock);
 
-class Flux2Transformer2DModelImpl : public torch::nn::Module {
+class Flux2Transformer2DModelImpl : public torch::nn::Module,
+                                    public dit::DiTCacheMixin {
  public:
   explicit Flux2Transformer2DModelImpl(const ModelContext& context,
                                        const ParallelArgs& parallel_args)
@@ -1282,83 +1284,55 @@ class Flux2Transformer2DModelImpl : public torch::nn::Module {
     auto double_stream_mod_txt = double_stream_modulation_txt_->forward(temb);
     auto single_stream_mod = single_stream_modulation_->forward(temb);
 
-    // ── Double-stream transformer blocks ──
-    for (int64_t i = 0; i < transformer_block_layers_.size(); ++i) {
-      auto block = transformer_block_layers_[i];
-      auto [new_encoder_hidden, new_hidden] =
-          block->forward(hidden_states,
-                         encoder_hidden_states,
-                         double_stream_mod_img,
-                         double_stream_mod_txt,
-                         image_rotary_emb);
+    // DiTCache integration mirrors transformer_flux.h: the double- and
+    // single-stream blocks run under a single cache step on the default cache
+    // instance (use_cfg=false). block_id is laid out as one contiguous range:
+    // double 0..num_double-1, single num_double..total-1, so ResidualCache's
+    // block-boundary math stays accurate across both loops.
+    torch::Tensor original_hidden_states = hidden_states;
+    torch::Tensor original_encoder_hidden_states = encoder_hidden_states;
 
-      hidden_states = new_hidden;
-      encoder_hidden_states = new_encoder_hidden;
-    }
+    exec_cache_step(step_idx, hidden_states, original_hidden_states, [&]() {
+      // Flux2's double block returns {encoder_hidden, hidden}; swap to the
+      // {hidden, encoder} order the mixin expects.
+      exec_cached_blocks(
+          static_cast<int64_t>(transformer_block_layers_.size()),
+          hidden_states,
+          encoder_hidden_states,
+          original_hidden_states,
+          original_encoder_hidden_states,
+          [&](int64_t i, const torch::Tensor& h, const torch::Tensor& eh) {
+            auto [new_encoder_hidden, new_hidden] =
+                transformer_block_layers_[i]->forward(h,
+                                                      eh,
+                                                      double_stream_mod_img,
+                                                      double_stream_mod_txt,
+                                                      image_rotary_emb);
+            return std::make_tuple(new_hidden, new_encoder_hidden);
+          });
 
-    // ── Merge into single stream: [txt_seq, img_seq]
-    hidden_states = torch::cat({encoder_hidden_states, hidden_states}, 1);
+      // Merge into single stream: [txt_seq, img_seq]
+      hidden_states = torch::cat({encoder_hidden_states, hidden_states}, 1);
 
-    // ── Single-stream transformer blocks (DiTCache: use_cfg=true) ──
-    // NOTE: Flux2 does NOT support CFG. The "use_cfg" parameter routes to
-    // the second cache instance (active_cond_cache_) to isolate single-stream.
-    torch::Tensor ss_original_hidden_states = hidden_states;
-    auto dummy_encoder =
-        torch::zeros({hidden_states.size(0), 1, hidden_states.size(2)},
-                     hidden_states.options());
+      const int64_t block_offset =
+          static_cast<int64_t>(transformer_block_layers_.size());
+      exec_cached_single_blocks(
+          static_cast<int64_t>(single_transformer_block_layers_.size()),
+          hidden_states,
+          original_hidden_states,
+          [&](int64_t i, const torch::Tensor& h) {
+            return single_transformer_block_layers_[i]->forward(
+                h, single_stream_mod, image_rotary_emb, false, 0);
+          },
+          /*block_id_offset=*/block_offset);
 
-    // Step start for single-stream phase
-    TensorMap ss_step_in_map = {
-        {"hidden_states", hidden_states},
-        {"original_hidden_states", ss_original_hidden_states}};
-    CacheStepIn ss_stepin_before(step_idx, ss_step_in_map);
-    bool ss_use_step_cache =
-        DiTCache::get_instance().on_before_step(ss_stepin_before,
-                                                /*use_cfg=*/true);
+      int64_t start = encoder_hidden_states.size(1);
+      int64_t length = hidden_states.size(1) - start;
+      hidden_states =
+          hidden_states.narrow(1, start, std::max(length, int64_t(0)));
+    });
 
-    if (!ss_use_step_cache) {
-      for (int64_t i = 0; i < single_transformer_block_layers_.size(); ++i) {
-        TensorMap ss_block_in_before_map = {};
-        CacheBlockIn ss_blockin_before(i, ss_block_in_before_map);
-        bool ss_use_block_cache =
-            DiTCache::get_instance().on_before_block(ss_blockin_before,
-                                                     /*use_cfg=*/true);
-
-        if (!ss_use_block_cache) {
-          auto block = single_transformer_block_layers_[i];
-          hidden_states = block->forward(
-              hidden_states, single_stream_mod, image_rotary_emb, false, 0);
-        }
-
-        TensorMap ss_block_in_after_map = {
-            {"hidden_states", hidden_states},
-            {"encoder_hidden_states", dummy_encoder},
-            {"original_hidden_states", ss_original_hidden_states}};
-        CacheBlockIn ss_blockin_after(i, ss_block_in_after_map);
-        CacheBlockOut ss_blockout_after =
-            DiTCache::get_instance().on_after_block(ss_blockin_after,
-                                                    /*use_cfg=*/true);
-
-        hidden_states = ss_blockout_after.tensors.at("hidden_states");
-      }
-    }
-
-    // Step end for single-stream phase
-    TensorMap ss_step_after_map = {
-        {"hidden_states", hidden_states},
-        {"original_hidden_states", ss_original_hidden_states}};
-    CacheStepIn ss_stepin_after(step_idx, ss_step_after_map);
-    CacheStepOut ss_stepout_after =
-        DiTCache::get_instance().on_after_step(ss_stepin_after,
-                                               /*use_cfg=*/true);
-    hidden_states = ss_stepout_after.tensors.at("hidden_states");
-
-    int64_t start = encoder_hidden_states.size(1);
-    int64_t length = hidden_states.size(1) - start;
-    auto output_hidden =
-        hidden_states.narrow(1, start, std::max(length, int64_t(0)));
-
-    auto output_hidden_final = norm_out_->forward(output_hidden, temb);
+    auto output_hidden_final = norm_out_->forward(hidden_states, temb);
 
     auto final_output = proj_out_->forward(output_hidden_final);
 

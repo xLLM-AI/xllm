@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
+#include "core/framework/dit_cache/dit_cache.h"
 #include "models/dit/pipelines/pipeline_flux_base.h"
 #include "models/dit/transformers/transformer_flux.h"
 // pipeline_flux compatible with huggingface weights
@@ -47,6 +48,9 @@ class FluxPipelineImpl : public FluxPipelineBaseImpl {
         FluxPosEmbed(ROPE_SCALE_BASE,
                      context.get_model_args("transformer").axes_dims_rope()));
     transformer_ = FluxDiTModel(context.get_model_context("transformer"));
+    num_layers_ = context.get_model_args("transformer").num_layers();
+    num_single_layers_ =
+        context.get_model_args("transformer").num_single_layers();
     t5_ = T5EncoderModel(context.get_model_context("text_encoder_2"));
     clip_text_model_ = CLIPTextModel(context.get_model_context("text_encoder"));
     scheduler_ =
@@ -263,6 +267,13 @@ class FluxPipelineImpl : public FluxPipelineBaseImpl {
       guidance = torch::full(torch::IntArrayRef({1}), guidance_scale, options);
       guidance = guidance.expand({prepared_latents.size(0)});
     }
+    // num_blocks is the total of double- and single-stream blocks. The
+    // transformer forward counts block_id continuously across both loops
+    // (double: 0..num_layers-1, single: num_layers..total-1), so this single
+    // num_blocks correctly bounds boundary-based policies (e.g. ResidualCache).
+    DiTCache::get_instance().set_context(
+        {/*infer_steps=*/num_inference_steps,
+         /*num_blocks=*/num_layers_ + num_single_layers_});
     scheduler_->set_begin_index(0);
     torch::Tensor timestep =
         torch::empty({prepared_latents.size(0)}, prepared_latents.options());
@@ -331,6 +342,8 @@ class FluxPipelineImpl : public FluxPipelineBaseImpl {
   FluxDiTModel transformer_{nullptr};
   float vae_scaling_factor_;
   float vae_shift_factor_;
+  int64_t num_layers_;
+  int64_t num_single_layers_;
   FluxPosEmbed pos_embed_{nullptr};
 };
 TORCH_MODULE(FluxPipeline);
