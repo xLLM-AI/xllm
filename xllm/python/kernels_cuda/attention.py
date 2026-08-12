@@ -20,9 +20,36 @@ graph can replay them without re-planning.
 
 from __future__ import annotations
 
+from typing import List
+
 import torch
 
 reshape_paged_cache = torch.ops.xllm_ops.reshape_paged_cache
 update_decode_graph_metadata = torch.ops.xllm_ops.update_decode_graph_metadata
 
-__all__ = ["reshape_paged_cache", "update_decode_graph_metadata"]
+
+def vision_fusion_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    actual_seq_qlen: List[int],
+    actual_seq_kvlen: List[int],
+    num_heads: int,
+    scale: float,
+    input_layout: str = "TND",
+) -> torch.Tensor:
+    """Run fused self-attention for ViT blocks."""
+    del q, k, v, actual_seq_qlen, actual_seq_kvlen, num_heads, scale
+    del input_layout
+    raise NotImplementedError(
+        "vision_fusion_attention has no CUDA kernel; CUDA models use "
+        "FlashAttention for ViT blocks"
+    )
+
+
+__all__ = [
+    "reshape_paged_cache",
+    "update_decode_graph_metadata",
+    "vision_fusion_attention",
+]

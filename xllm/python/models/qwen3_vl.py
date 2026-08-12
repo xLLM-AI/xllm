@@ -34,7 +34,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from xllm.python import ops
+from xllm.python import kernels, ops
 from xllm.python.layers import (
     Attention,
     ColumnParallelLinear,
@@ -209,14 +209,8 @@ def _apply_vision_rotary(
         q, k: ``(total_tokens, num_heads, head_dim)``.
         cos_full, sin_full: ``(1, total_tokens, 1, head_dim)``.
     """
-    import torch_npu
-
-    q_embed = torch_npu.npu_rotary_mul(
-        q.unsqueeze(0).contiguous(), cos_full, sin_full
-    ).squeeze(0)
-    k_embed = torch_npu.npu_rotary_mul(
-        k.unsqueeze(0).contiguous(), cos_full, sin_full
-    ).squeeze(0)
+    q_embed = kernels.vision_rotary_mul(q, cos_full, sin_full)
+    k_embed = kernels.vision_rotary_mul(k, cos_full, sin_full)
     return q_embed, k_embed
 
 
@@ -315,8 +309,6 @@ class Qwen3VLVisionAttention(nn.Module):
         rotary_cos_full: torch.Tensor,
         rotary_sin_full: torch.Tensor,
     ) -> torch.Tensor:
-        import torch_npu
-
         seq_length = x.shape[0]
         qkv = self.qkv(x).reshape(
             seq_length, 3, self.num_heads, self.head_dim
@@ -332,16 +324,16 @@ class Qwen3VLVisionAttention(nn.Module):
             q = F.pad(q, (0, pad), value=0)
             k = F.pad(k, (0, pad), value=0)
             v = F.pad(v, (0, pad), value=0)
-        attn_output = torch_npu.npu_fusion_attention(
+        attn_output = kernels.vision_fusion_attention(
             q.contiguous(),
             k.contiguous(),
             v.contiguous(),
             actual_seq_qlen=actual_seq,
             actual_seq_kvlen=actual_seq,
-            head_num=self.num_heads,
+            num_heads=self.num_heads,
             scale=self.scaling,
             input_layout="TND",
-        )[0]
+        )
         if self.pad_to_max:
             attn_output = attn_output[..., : self.head_dim]
 
