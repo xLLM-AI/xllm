@@ -83,6 +83,33 @@ TEST(AttentionMetadataBuilderTest, MaterializesChunkedPrefillMask) {
                            torch::tensor({false, true, false}, torch::kBool)));
 }
 
+TEST(AttentionMetadataBuilderTest, SkipsInitialStateMaterializationOnRequest) {
+  ModelInputParams params = make_params();
+  AttentionMetadataBuildOptions build_options;
+  build_options.materialize_linear_state_validity = false;
+
+  AttentionMetadata metadata = AttentionMetadataBuilder::build(
+      params, /*enable_mla=*/false, {}, std::nullopt, build_options);
+
+  EXPECT_FALSE(metadata.has_initial_states.defined());
+  EXPECT_EQ(params.linear_state_validity_mask,
+            LinearStateValidityMask({0, 1, 0}));
+  EXPECT_EQ(params.embedding.linear_state_ids, std::vector<int32_t>({4, 2, 9}));
+}
+
+TEST(AttentionMetadataBuilderTest,
+     SkippingInitialStateMaterializationKeepsValidation) {
+  ModelInputParams params = make_params();
+  params.linear_state_validity_mask.pop_back();
+  AttentionMetadataBuildOptions build_options;
+  build_options.materialize_linear_state_validity = false;
+
+  EXPECT_DEATH(
+      AttentionMetadataBuilder::build(
+          params, /*enable_mla=*/false, {}, std::nullopt, build_options),
+      "linear state mask row count mismatch");
+}
+
 TEST(AttentionMetadataBuilderTest, DecodeDoesNotMaterializeInitialStateMask) {
   ModelInputParams params = make_params();
   params.meta.batch_forward_type = BatchForwardType::DECODE;
