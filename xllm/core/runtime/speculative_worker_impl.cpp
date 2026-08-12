@@ -461,12 +461,21 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
                                           buf.out_positions,
                                           token_options,
                                           position_options);
-  input_params.meta.num_sequences = num_sequences;
-  input_params.meta.q_max_seq_len = max_val_tokens;
-  input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  // Match the dense (non-adaptive) validate path's DECODE-mode layout: each
+  // validate row is an independent q=1 decode step, and causal visibility
+  // across a seq's block comes from the per-row increasing kv_seq_lens (row j
+  // sees anchor_kv + j tokens), NOT from a chunked-prefill block mask. Using
+  // CHUNKED_PREFILL here (q_max_seq_len = max_val_tokens) gave the block a
+  // prefill-style mask under which col>=1 could not attend to the accepted
+  // draft tokens in col<j, so the target logits from col 1 onward diverged
+  // from the dense path and produced garbled adaptive output. Flatten to
+  // total_num_val_tokens q=1 rows exactly like the dense builder.
+  input_params.meta.num_sequences = total_num_val_tokens;
+  input_params.meta.q_max_seq_len = 1;
+  input_params.meta.batch_forward_type = BatchForwardType::DECODE;
   specBuilder::update_input_params(input_params,
                                    buf,
-                                   /*val_tokens_per_seq=*/max_val_tokens,
+                                   /*val_tokens_per_seq=*/1,
                                    std::move(buf.out_q_seq_lens),
                                    std::move(buf.out_q_cu_seq_lens),
                                    buf.meta.kv_max_seq_len,
