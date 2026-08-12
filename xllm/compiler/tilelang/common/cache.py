@@ -1,26 +1,48 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .manifest import KernelFamilyManifest
 from .spec import KernelCompileSpec
 from .toolchain import sha256_file
+
+
+def _dependency_cache_entry(
+    path: str | Path,
+    dependency_root: Path,
+) -> dict[str, str]:
+    resolved_path = Path(path).resolve()
+    try:
+        cache_path = resolved_path.relative_to(dependency_root).as_posix()
+    except ValueError:
+        cache_path = f"external/{resolved_path.name}"
+    return {
+        "path": cache_path,
+        "sha256": sha256_file(resolved_path),
+    }
 
 
 def compute_cache_key(
     spec: KernelCompileSpec,
     fingerprint: dict[str, Any],
     dependency_files: list[str | Path],
+    dependency_root: str | Path,
 ) -> str:
+    resolved_dependency_root = Path(dependency_root).resolve()
+    dependencies = [
+        _dependency_cache_entry(path, resolved_dependency_root)
+        for path in dependency_files
+    ]
+    dependencies.sort(key=lambda entry: (entry["path"], entry["sha256"]))
     payload = {
         "spec": spec.cache_key_material(),
         "fingerprint": fingerprint,
-        "dependencies": {
-            str(Path(path).resolve()): sha256_file(path) for path in dependency_files
-        },
+        "dependencies": dependencies,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
         "utf-8"
@@ -28,23 +50,14 @@ def compute_cache_key(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def is_cache_hit(
-    manifest_path: str | Path, variant_key: str, expected_cache_key: str
-) -> bool:
-    path = Path(manifest_path)
-    if not path.is_file():
-        return False
-
-    try:
-        manifest = KernelFamilyManifest.read(path)
-    except Exception:
-        return False
-
-    variant = manifest.get_variant(variant_key)
-    if variant is None:
-        return False
-
-    if variant.cache_key != expected_cache_key:
-        return False
-
-    return Path(variant.generated_source).is_file() and Path(variant.compiled_binary).is_file()
+@contextmanager
+def cache_file_lock(lock_path: str | Path) -> Iterator[None]:
+    """Serializes writers that publish artifacts into one cache directory."""
+    path = Path(lock_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

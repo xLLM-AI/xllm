@@ -26,19 +26,25 @@ function(tilelang_import_kernel_manifest)
 
   file(READ "${TL_MANIFEST_PATH}" TL_MANIFEST_JSON)
   string(JSON _schema_version GET "${TL_MANIFEST_JSON}" schema_version)
-  if(NOT _schema_version EQUAL 2)
+  if(NOT _schema_version EQUAL 2 AND NOT _schema_version EQUAL 3)
     message(FATAL_ERROR
       "Unsupported TileLang manifest schema_version=${_schema_version}: ${TL_MANIFEST_PATH}")
   endif()
+  get_filename_component(_manifest_dir "${TL_MANIFEST_PATH}" DIRECTORY)
 
   string(JSON _variants_inc GET "${TL_MANIFEST_JSON}" variants_inc)
+  get_filename_component(
+    _variants_inc "${_variants_inc}" ABSOLUTE BASE_DIR "${_manifest_dir}")
   if(NOT EXISTS "${_variants_inc}")
     message(FATAL_ERROR "TileLang variants.inc does not exist: ${_variants_inc}")
   endif()
 
   string(JSON _registry_inc ERROR_VARIABLE _registry_inc_error GET "${TL_MANIFEST_JSON}" registry_inc)
-  if(_registry_inc_error)
+  if(_registry_inc_error OR _registry_inc STREQUAL "")
     set(_registry_inc "${_variants_inc}")
+  else()
+    get_filename_component(
+      _registry_inc "${_registry_inc}" ABSOLUTE BASE_DIR "${_manifest_dir}")
   endif()
   if(NOT EXISTS "${_registry_inc}")
     message(FATAL_ERROR "TileLang registry.inc does not exist: ${_registry_inc}")
@@ -54,6 +60,10 @@ function(tilelang_import_kernel_manifest)
   foreach(_idx RANGE 0 ${_variants_last})
     string(JSON _generated_source GET "${TL_MANIFEST_JSON}" variants ${_idx} generated_source)
     string(JSON _compiled_binary GET "${TL_MANIFEST_JSON}" variants ${_idx} compiled_binary)
+    get_filename_component(
+      _generated_source "${_generated_source}" ABSOLUTE BASE_DIR "${_manifest_dir}")
+    get_filename_component(
+      _compiled_binary "${_compiled_binary}" ABSOLUTE BASE_DIR "${_manifest_dir}")
 
     if(NOT EXISTS "${_generated_source}")
       message(FATAL_ERROR "TileLang generated source does not exist: ${_generated_source}")
@@ -74,7 +84,14 @@ function(tilelang_import_kernel_manifest)
   set(${TL_PREFIX}_REGISTRY_INC "${_registry_inc}" PARENT_SCOPE)
 endfunction()
 
-set(TILELANG_GENERATED_ROOT "${CMAKE_BINARY_DIR}/xllm/compiler/tilelang")
+if(DEFINED ENV{XLLM_TILELANG_CACHE_ROOT} AND
+   NOT "$ENV{XLLM_TILELANG_CACHE_ROOT}" STREQUAL "")
+  get_filename_component(
+    TILELANG_GENERATED_ROOT "$ENV{XLLM_TILELANG_CACHE_ROOT}" ABSOLUTE
+  )
+else()
+  set(TILELANG_GENERATED_ROOT "${CMAKE_BINARY_DIR}/xllm/compiler/tilelang")
+endif()
 
 function(tilelang_register_runtime_kernel)
   set(options "")

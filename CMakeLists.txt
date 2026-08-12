@@ -8,6 +8,19 @@ option(USE_CUDA "Enable CUDA support" OFF)
 option(USE_MUSA "Enable MUSA support" OFF)
 option(USE_DCU "Enable DCU support" OFF)
 option(USE_MACA "Enable MACA support" OFF)
+
+set(XLLM_ARCHIVE_JOBS "" CACHE STRING
+    "Maximum concurrent archive and link jobs for Ninja builds")
+if(CMAKE_GENERATOR MATCHES "Ninja" AND NOT XLLM_ARCHIVE_JOBS STREQUAL "")
+  if(NOT XLLM_ARCHIVE_JOBS MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR "XLLM_ARCHIVE_JOBS must be a positive integer")
+  endif()
+  set_property(GLOBAL APPEND PROPERTY JOB_POOLS
+    archive=${XLLM_ARCHIVE_JOBS}
+  )
+  set(CMAKE_JOB_POOL_LINK archive)
+endif()
+
 add_compile_definitions(YLT_ENABLE_IBV)
 add_definitions(-DYLT_ENABLE_IBV)
 set(YLT_ENABLE_IBV ON)
@@ -153,6 +166,14 @@ function(parse_make_options options prefix)
         ${option_value}
         PARENT_SCOPE)
   endforeach()
+endfunction()
+
+function(xllm_set_compiler_flag_once flag_variable flag)
+  separate_arguments(_compiler_flags NATIVE_COMMAND "${${flag_variable}}")
+  list(REMOVE_ITEM _compiler_flags "${flag}")
+  list(APPEND _compiler_flags "${flag}")
+  string(JOIN " " _normalized_flags ${_compiler_flags})
+  set(${flag_variable} "${_normalized_flags}" PARENT_SCOPE)
 endfunction()
 
 # Remove matching entries from a target's interface property (compile options / definitions).
@@ -466,6 +487,14 @@ if(USE_NPU)
   #-> because the scope of third-party softwares managed by vcpkg is used throughout the entire xllm.
   message(STATUS "VCPKG_INCLUDE_DIR = ${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include")
   include_directories("${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include")
+
+  # Normalize before creating this large subproject so its targets do not
+  # capture first-configure-only duplicates added by the vcpkg toolchain.
+  xllm_set_compiler_flag_once(CMAKE_C_FLAGS "-fPIC")
+  xllm_set_compiler_flag_once(CMAKE_CXX_FLAGS "-fPIC")
+  xllm_set_compiler_flag_once(
+    CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=${USE_CXX11_ABI}"
+  )
 
   add_subdirectory(
     "${XLLM_ATB_LAYERS_SOURCE_DIR}"
@@ -788,6 +817,15 @@ else()
 endif()
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DC10_USE_GLOG")
+
+# The vcpkg toolchain is evaluated a different number of times on the first
+# and subsequent configure runs. Keep its global flag additions idempotent so
+# Ninja and ccache see the same compiler command after a clean configure.
+xllm_set_compiler_flag_once(CMAKE_C_FLAGS "-fPIC")
+xllm_set_compiler_flag_once(CMAKE_CXX_FLAGS "-fPIC")
+xllm_set_compiler_flag_once(
+  CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=${USE_CXX11_ABI}"
+)
 
 message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
 message(STATUS "CMAKE_CXX_FLAGS_DEBUG: ${CMAKE_CXX_FLAGS_DEBUG}")
