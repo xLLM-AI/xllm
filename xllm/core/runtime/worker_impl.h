@@ -124,6 +124,15 @@ class WorkerImpl {
   // False on MTP composite: only leaf workers run NpuCpPlan::prepare.
   virtual bool owns_npu_cp_plan_build() const { return true; }
 
+  // False on speculative composite workers: only leaf LLM workers allocate a
+  // KVCache with recurrent (conv/ssm) slots, so only they may drive the
+  // non-overlap linear-state restore in prepare_work_before_execute_on_stream.
+  // The outer composite copies the target's ModelArgs (so
+  // has_linear_attention_layers is true) but its own kv_caches_ is never
+  // populated - guarding the restore call by this policy avoids calling
+  // discover_num_slots() on an empty vector and tripping CHECK_GT there.
+  virtual bool owns_linear_state_cache() const { return true; }
+
   // Cached: whether the loaded model advertises NPU model-side CP.
   bool model_supports_model_cp() const;
 

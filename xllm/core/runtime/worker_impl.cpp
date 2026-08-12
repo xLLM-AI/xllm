@@ -300,7 +300,19 @@ void prepare_input_params_for_linear_attention(ModelInputParams& input_params) {
   LinearStateInputRows rows = get_host_linear_state_rows(input_params);
 #endif
   if (rows.empty_shard) {
+    // An empty DP shard has no local sequence, so it must not publish any
+    // local linear-state restore/reset operation. Historically only the
+    // validity mask was cleared here; the cache_ops vector kept whatever the
+    // batch input builder had emplaced from earlier sequences, and once the
+    // empty rank started running through the MTP spec-verify path it reached
+    // restore_linear_state_slots with a non-empty cache_ops. Even after the
+    // owns_linear_state_cache() guard blocks the outer composite from calling
+    // restore, the inner target LLMWorkerImpl still consumes these vectors
+    // together and expects them to remain synchronized. Clearing both here
+    // keeps the pair aligned and makes downstream restore an early-return
+    // no-op on the empty shard.
     input_params.linear_state_validity_mask.clear();
+    input_params.linear_state_cache_ops.clear();
     return;
   }
   input_params.linear_state_validity_mask =
@@ -921,7 +933,15 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
       // Defer the slot-restore copy to step_for_schedule_overlap (worker
       // thread, on compute_stream_) so stream ordering between chunk N-1
       // writes and chunk N restore is automatic.
-      if (!enable_schedule_overlap()) {
+      //
+      // owns_linear_state_cache() gates against composite (speculative) outer
+      // workers that copied the target's ModelArgs (so
+      // has_linear_attention_layers() is true) but never allocated their own
+      // kv_caches_. The inner target LLMWorkerImpl is created with
+      // schedule_overlap forced off and its own recurrent cache, so it will
+      // still run this restore against its populated kv_caches_ during its
+      // own prepare_work_before_execute_on_stream.
+      if (!enable_schedule_overlap() && owns_linear_state_cache()) {
         restore_linear_state_slots(kv_caches_,
                                    input_params.linear_state_cache_ops,
                                    input_params.linear_state_validity_mask);

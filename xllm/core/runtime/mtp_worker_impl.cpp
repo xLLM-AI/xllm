@@ -2014,8 +2014,16 @@ void MTPWorkerImpl::prepare_empty_validate_inputs(
   input_params.meta.kv_max_seq_len = 1;
   input_params.parallel.query_start_loc.clear();
   input_params.is_spec_verify = true;
-  input_params.num_accepted_tokens = torch::Tensor();
-  input_params.num_accepted_tokens_host.clear();
+  // Pad num_accepted_tokens to match the single-row dummy linear_state_id the
+  // persistent layer writes for an empty DP shard. AclGraph::update_graph_tasks
+  // (acl_graph_executor_impl.cpp:489) CHECKs
+  //   num_accepted_tokens_host.size() == linear_state_indices_host.size()
+  // during replay of the causal_conv1d spec-verify task. Clearing this vector
+  // would break the CHECK (0 vs 1) on the empty rank while active ranks
+  // provide num_sequences entries via prepare_validate_inputs().
+  input_params.num_accepted_tokens_host.assign(1, 0);
+  input_params.num_accepted_tokens = torch::zeros(
+      {1}, torch::TensorOptions().dtype(torch::kInt).device(device_));
   input_params.graph.input_tokens_override = torch::Tensor();
   input_params.graph.spec_verify_draft_token_sources.clear();
   input_params.graph.spec_verify_source_addresses_stable = false;

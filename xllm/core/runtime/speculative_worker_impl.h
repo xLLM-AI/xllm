@@ -100,6 +100,13 @@ class SpeculativeWorkerImpl : public WorkerImpl {
 
   ForwardInput update_input_by_last_step_output(ForwardInput& inputs) override;
 
+  // Speculative composite workers do not own a KVCache themselves; recurrent
+  // (conv/ssm) slots live on the inner target LLMWorkerImpl. Overriding to
+  // false stops WorkerImpl::prepare_work_before_execute_on_stream from calling
+  // restore_linear_state_slots on the outer worker's empty kv_caches_, which
+  // would trip discover_num_slots()==0 CHECK_GT.
+  bool owns_linear_state_cache() const override { return false; }
+
   folly::SemiFuture<bool> pull_kv_blocks_async(
       const uint64_t src_cluster_id,
       const std::string& src_addr,
