@@ -13,9 +13,8 @@ if(USE_NPU)
       GTest::gtest_main
   )
   target_link_libraries(model_registry_test
-                        PUBLIC Python::Python
-                               ascendcl
-                               hccl
-                               c_sec
-                               nnopbase)
+                        PUBLIC $<$<BOOL:${USE_NPU}>:ascendcl>
+                               $<$<BOOL:${USE_NPU}>:hccl>
+                               $<$<BOOL:${USE_NPU}>:c_sec>
+                               $<$<BOOL:${USE_NPU}>:nnopbase>)
 endif()

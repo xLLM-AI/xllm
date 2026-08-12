@@ -1,4 +1,4 @@
-/* Copyright 2026 The xLLM Authors.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,10 +15,8 @@ limitations under the License.
 
 #pragma once
 
-#include <cstdint>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace xllm {
 
@@ -31,11 +29,6 @@ class Options;
 namespace block_diffusion {
 
 bool is_algorithm(std::string_view algorithm);
-
-// Checkpoints store zero-based target layer IDs. Convert them to the capture
-// points used by the current backend without changing the checkpoint contract.
-std::vector<int32_t> map_target_layer_ids_to_capture_points(
-    const std::vector<int32_t>& target_layer_ids);
 
 // Apply the common block-diffusion checkpoint contract, then delegate model
 // registration names and backend-only capabilities to the platform policy.

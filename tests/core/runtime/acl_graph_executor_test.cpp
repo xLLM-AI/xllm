@@ -1215,12 +1215,6 @@ TEST(DSparkWorkerOptionsTest, PreservesDraftBlockSize) {
   EXPECT_EQ(dflash_detail::draft_model_num_speculative_tokens(options), 0);
 }
 
-TEST(BlockDiffusionConfigTest, MapsCheckpointLayersToNpuCapturePoints) {
-  EXPECT_EQ(block_diffusion::map_target_layer_ids_to_capture_points(
-                std::vector<int32_t>{0, 40, 42}),
-            (std::vector<int32_t>{1, 41, 43}));
-}
-
 TEST(BlockDiffusionConfigTest, PreservesDeepseekV4NpuDraftArguments) {
   const std::filesystem::path config_dir =
       std::filesystem::path(::testing::TempDir()) /

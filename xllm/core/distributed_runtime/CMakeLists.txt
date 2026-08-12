@@ -29,7 +29,6 @@ cc_library(
     remote_worker.h
     worker_server.h
     worker_service.h
-    speculative_output_metrics.h
     comm_channel.h
     shm_channel.h
   SRCS

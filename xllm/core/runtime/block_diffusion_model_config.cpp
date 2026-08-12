@@ -1,4 +1,4 @@
-/* Copyright 2026 The xLLM Authors.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@ limitations under the License.
 
 #include <optional>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/model/model_args.h"
@@ -115,28 +117,22 @@ bool is_algorithm(std::string_view algorithm) {
   return algorithm == "DFlash" || algorithm == "DSpark";
 }
 
-std::vector<int32_t> map_target_layer_ids_to_capture_points(
-    const std::vector<int32_t>& target_layer_ids) {
-  std::vector<int32_t> capture_points;
-  capture_points.reserve(target_layer_ids.size());
-  // NPU model hooks capture the input of layer i, so target layer L's output
-  // is observed at L+1. Backends whose hooks run after a layer use L directly.
-  const int32_t capture_offset =
-      Platform::block_diffusion_capture_layer_offset();
-  for (int32_t layer_id : target_layer_ids) {
-    capture_points.emplace_back(layer_id + capture_offset);
-  }
-  return capture_points;
-}
-
 void configure_model_args(ModelArgs& args,
                           const runtime::Options& options,
                           const std::string& model_weights_path) {
   CHECK(is_algorithm(options.speculative_algorithm()));
   const CheckpointConfig checkpoint =
       read_checkpoint_config(options, model_weights_path);
-  args.layers_to_capture(
-      map_target_layer_ids_to_capture_points(checkpoint.target_layer_ids));
+  std::vector<int32_t> capture_points;
+  capture_points.reserve(checkpoint.target_layer_ids.size());
+  // Checkpoints store zero-based target layer IDs. NPU hooks capture layer
+  // inputs, while other backends capture after layer execution.
+  const int32_t capture_offset =
+      Platform::block_diffusion_capture_layer_offset();
+  for (int32_t layer_id : checkpoint.target_layer_ids) {
+    capture_points.emplace_back(layer_id + capture_offset);
+  }
+  args.layers_to_capture(std::move(capture_points));
 
   if (!options.is_draft_engine()) {
     return;

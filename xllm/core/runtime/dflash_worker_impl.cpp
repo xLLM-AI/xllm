@@ -35,6 +35,7 @@ limitations under the License.
 #include "framework/kv_cache_transfer/mooncake_kv_cache_transfer.h"
 #endif
 #if defined(USE_NPU)
+#include "core/layers/npu_torch/deepseek_sparse_attention.h"
 #include "framework/kv_cache_transfer/kv_transfer_completion.h"
 #include "framework/kv_cache_transfer/spec_kv_cache_transfer.h"
 #endif
@@ -81,6 +82,25 @@ runtime::Options draft_options(const runtime::Options& options) {
           dflash_detail::draft_model_num_speculative_tokens(options))
       .enable_graph_aux_hidden_states(false);
   return opts;
+}
+
+void expand_block_parallel_sequence_rows(ModelInputParams& input_params,
+                                         int32_t query_width) {
+  input_params.meta.num_sequences *= query_width;
+  if (input_params.meta.actual_num_sequences > 0) {
+    input_params.meta.actual_num_sequences *= query_width;
+  }
+}
+
+int64_t native_dspark_ori_window_left(const ModelArgs& model_args) {
+#if defined(USE_NPU)
+  return layer::deepseek_v4_ori_window_left(model_args.window_size(),
+                                            model_args.dspark_block_size(),
+                                            /*use_native_dspark_sas=*/true);
+#else
+  return std::max<int64_t>(
+      model_args.window_size() + model_args.dspark_block_size() - 1, 0);
+#endif
 }
 
 // Pack a host int32 vector into a pinned CPU tensor and stage an async H2D
@@ -356,6 +376,8 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
         dflash_detail::draft_uses_own_head_and_embedding(
             draft_args.model_type());
     if (uses_own_head_and_embedding) {
+      CHECK_EQ(parallel_args_.cp_size(), 1)
+          << "DeepSeek-V4 DSpark does not support context parallelism yet.";
       CHECK_EQ(draft_args.dspark_block_size(),
                options_.num_speculative_tokens())
           << "DeepSeek-V4 DSpark draft block size must match "
@@ -370,8 +392,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
         LOG(WARNING)
             << "Native DeepSeek-V4 DSpark SAS requires an operator that "
                "accepts non-empty ori_sparse_indices and ori_win_left="
-            << draft_args.window_size() + draft_args.dspark_block_size() - 1
-            << ".";
+            << native_dspark_ori_window_left(draft_args) << ".";
       }
       // Keep the trained mtp.0.embed and mtp.<last>.head modules loaded by
       // DeepseekV4DSparkForCausalLMImpl. Sharing the target modules here makes
@@ -567,6 +588,9 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
           : BatchForwardType::CHUNKED_PREFILL;
   query_input.input_params.meta.q_max_seq_len =
       use_block_parallel_rows ? 1 : query_width;
+  if (use_block_parallel_rows) {
+    expand_block_parallel_sequence_rows(query_input.input_params, query_width);
+  }
   scale_dp_global_token_nums(query_input.input_params, query_width);
   // Warmup only: prime the draft; its output is unused. Keep it alive until the
   // sync below so the no-sync draft input is not freed while the target forward
@@ -1067,10 +1091,7 @@ void DFlashWorkerImpl::prepare_query_inputs(const ForwardInput& input,
           ? BatchForwardType::DECODE
           : BatchForwardType::CHUNKED_PREFILL;
   if (use_block_parallel_rows) {
-    input_params.meta.num_sequences = num_sequences_query * query_width;
-    if (input_params.meta.actual_num_sequences > 0) {
-      input_params.meta.actual_num_sequences *= query_width;
-    }
+    expand_block_parallel_sequence_rows(input_params, query_width);
   }
   specBuilder::update_input_params(input_params,
                                    buf,

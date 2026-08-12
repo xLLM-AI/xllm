@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -89,6 +90,11 @@ void record_speculative_metrics_from_output(
     return;
   }
 
+  // Step and GetLastStepResult share a thread pool. Serialize the counter
+  // update and derived gauge publication so the ratio cannot combine totals
+  // from different in-flight callbacks.
+  static std::mutex speculative_metrics_mutex;
+  std::lock_guard<std::mutex> lock(speculative_metrics_mutex);
   const int64_t num_draft_tokens = batch_size * num_speculative_tokens;
   int64_t num_accepted_tokens = 0;
   for (int64_t position = 0; position < num_speculative_tokens; ++position) {

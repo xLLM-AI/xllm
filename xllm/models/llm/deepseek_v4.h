@@ -532,10 +532,13 @@ class DeepseekV4ModelImpl
       }
       const int64_t aux_width =
           model_args.hidden_size() * capture_layer_to_index_.size();
-      aux_output_buffer_ = torch::empty(
-          {::xllm::SchedulerConfig::get_instance().max_tokens_per_batch(),
-           aux_width},
-          options);
+      // Scheduler capacity is fixed before model construction. Resizing this
+      // graph-visible buffer after initialization would invalidate captured
+      // addresses, so forward verifies that the runtime contract is unchanged.
+      aux_output_capacity_ =
+          ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch();
+      aux_output_buffer_ =
+          torch::empty({aux_output_capacity_, aux_width}, options);
       capture_aux_hidden_states_ = true;
     }
 
@@ -917,6 +920,14 @@ class DeepseekV4ModelImpl
 
     std::optional<torch::Tensor> residual;
     int64_t captured_count = 0;
+    if (capture_aux_hidden_states_) {
+      CHECK_EQ(::xllm::SchedulerConfig::get_instance().max_tokens_per_batch(),
+               aux_output_capacity_)
+          << "max_tokens_per_batch must remain unchanged after model "
+             "construction while auxiliary hidden capture is enabled.";
+      CHECK_LE(h.size(0), aux_output_capacity_)
+          << "Auxiliary hidden capture exceeds max_tokens_per_batch.";
+    }
     for (size_t i = 0; i < layers_.size(); i++) {
       if (attn_metadata.dsa_metadata) {
         auto& dsa = *(attn_metadata.dsa_metadata);
@@ -1002,7 +1013,6 @@ class DeepseekV4ModelImpl
         const int64_t num_tokens = captured.size(0);
         const int64_t hidden_size = captured.size(-1);
         const int64_t capture_idx = capture_it->second;
-        CHECK_LE(num_tokens, aux_output_buffer_.size(0));
         aux_output_buffer_.slice(/*dim=*/0, /*start=*/0, /*end=*/num_tokens)
             .slice(/*dim=*/1,
                    /*start=*/capture_idx * hidden_size,
@@ -1937,6 +1947,7 @@ class DeepseekV4ModelImpl
 
   std::unordered_map<int32_t, int64_t> capture_layer_to_index_;
   torch::Tensor aux_output_buffer_;
+  int64_t aux_output_capacity_ = 0;
   bool capture_aux_hidden_states_ = false;
 
   // DSA cache group info: built once at model init from compress_ratios

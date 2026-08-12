@@ -60,10 +60,11 @@ DEFINE_bool(enable_mega_moe,
 
 DEFINE_bool(enable_dspark_native_sas,
             false,
-            "Use native NPU DSpark SparseAttnSharedkv semantics: a gamma-wide "
-            "query block, non-empty ori_sparse_indices, and an expanded SWA "
-            "window. Keep disabled for operators that reject non-empty "
-            "ori_sparse_indices; xLLM then uses its q_len=1 fallback.");
+            "Enable native NPU DSpark SparseAttnSharedkv semantics with a "
+            "gamma-wide query block, non-empty ori_sparse_indices, and an "
+            "expanded SWA window. Older operators that reject non-empty "
+            "ori_sparse_indices may terminate during tiling; keep this false "
+            "to use q_len=1 compatibility mode.");
 
 DEFINE_bool(enable_flashcomm1,
             false,
