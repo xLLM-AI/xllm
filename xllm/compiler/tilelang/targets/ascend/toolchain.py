@@ -138,7 +138,6 @@ def bisheng_include_dirs() -> list[str]:
         f"{npu_home_path}/include",
         f"{npu_home_path}/include/experiment/runtime",
         f"{npu_home_path}/include/experiment/msprof",
-        f"{npu_home_path}/pkg_inc",
         f"{npu_home_path}/compiler/tikcpp",
         f"{npu_home_path}/compiler/tikcpp/tikcfw",
         f"{npu_home_path}/compiler/tikcpp/tikcfw/impl",

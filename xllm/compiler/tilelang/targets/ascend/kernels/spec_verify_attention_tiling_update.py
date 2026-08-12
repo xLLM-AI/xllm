@@ -55,7 +55,7 @@ class SpecVerifyAttentionTilingUpdateKernel(TilelangKernel):
     ]
     SPECIALIZATIONS = [
         {
-            "variant_key": f"attn_tiling_w{spec_width}",
+            "variant_key": f"w{spec_width}",
             "spec_width": spec_width,
         }
         for spec_width in SUPPORTED_SPEC_VERIFY_WIDTHS
