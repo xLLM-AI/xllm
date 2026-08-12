@@ -112,12 +112,20 @@ class Qwen3_5MtpModelImplBase : public Qwen3HybridModelImplBase {
       positions = torch::tensor({0}).to(torch::kInt32).to(device_);
     }
 
+    layer::AttentionMetadataBuildOptions metadata_build_options;
+#if defined(USE_NPU)
+    // Native NPU GDN consumes the canonical host mask directly. Avoid
+    // materializing the unused device bool tensor inside ACL graph capture.
+    metadata_build_options.materialize_linear_state_validity =
+        !input_params.enable_graph;
+#endif
     layer::AttentionMetadata attn_metadata =
         layer::AttentionMetadataBuilder::build(
             input_params,
             model_args_.enable_mla(),
             build_attention_mask(input_params),
-            /*device=*/device_);
+            /*device=*/device_,
+            metadata_build_options);
     prepare_mrope(positions, attn_metadata);
 
     torch::Tensor embedding = embed_tokens_(tokens);

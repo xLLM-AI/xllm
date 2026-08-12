@@ -46,6 +46,7 @@ torch::TensorOptions int32_options_like(const torch::Tensor& preferred,
 void materialize_linear_state_validity(
     const ModelInputParams& params,
     const std::optional<torch::Device>& device,
+    const AttentionMetadataBuildOptions& build_options,
     AttentionMetadata& attn_metadata) {
   const bool needs_initial_states =
       attn_metadata.is_prefill || attn_metadata.is_chunked_prefill;
@@ -84,6 +85,10 @@ void materialize_linear_state_validity(
         << ", metadata_rows=" << metadata_rows;
   }
 
+  if (!build_options.materialize_linear_state_validity) {
+    return;
+  }
+
   torch::TensorOptions options;
   if (params.embedding.linear_state_indices.defined()) {
     options = params.embedding.linear_state_indices.options();
@@ -106,7 +111,8 @@ AttentionMetadata build_attention_metadata(
     bool enable_mla,
     const std::string& compute_dtype,
     const std::optional<torch::Device>& device,
-    const std::optional<torch::Tensor>& attn_mask) {
+    const std::optional<torch::Tensor>& attn_mask,
+    const AttentionMetadataBuildOptions& build_options) {
   // MLA mode still affects which shared tensors must be materialized for
   // attention execution, but the flag itself is no longer carried in metadata.
   AttentionMetadata attn_metadata;
@@ -298,7 +304,8 @@ AttentionMetadata build_attention_metadata(
     attn_metadata.max_query_len = 1;
     attn_metadata.max_seq_len = std::max<int64_t>(attn_metadata.max_seq_len, 1);
   }
-  materialize_linear_state_validity(params, device, attn_metadata);
+  materialize_linear_state_validity(
+      params, device, build_options, attn_metadata);
 
   // Set is_causal: true for prefill (causal attention), false for decode
   // (non-causal) Default to true (causal) if not explicitly set
@@ -377,9 +384,10 @@ AttentionMetadata AttentionMetadataBuilder::build(
     const ModelInputParams& params,
     bool enable_mla,
     const std::optional<torch::Tensor>& attn_mask,
-    const std::optional<torch::Device>& device) {
+    const std::optional<torch::Device>& device,
+    const AttentionMetadataBuildOptions& build_options) {
   return AttentionMetadataBuilder::build(
-      params, enable_mla, "float", attn_mask, device);
+      params, enable_mla, "float", attn_mask, device, build_options);
 }
 
 AttentionMetadata AttentionMetadataBuilder::build(
@@ -387,9 +395,10 @@ AttentionMetadata AttentionMetadataBuilder::build(
     bool enable_mla,
     const std::string& compute_dtype,
     const std::optional<torch::Tensor>& attn_mask,
-    const std::optional<torch::Device>& device) {
+    const std::optional<torch::Device>& device,
+    const AttentionMetadataBuildOptions& build_options) {
   return build_attention_metadata(
-      params, enable_mla, compute_dtype, device, attn_mask);
+      params, enable_mla, compute_dtype, device, attn_mask, build_options);
 }
 
 }  // namespace xllm::layer
