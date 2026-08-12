@@ -34,6 +34,7 @@ limitations under the License.
 #include "core/layers/common/add_matmul.h"
 #include "core/layers/common/rms_norm.h"
 #include "framework/model_context.h"
+#include "models/dit/utils/dit_cache_mixin.h"
 #include "models/model_registry.h"
 #if defined(USE_NPU)
 #include "torch_npu/csrc/aten/CustomFunctions.h"
@@ -1203,7 +1204,8 @@ class FluxTransformerBlockImpl : public torch::nn::Module {
 };
 TORCH_MODULE(FluxTransformerBlock);
 
-class FluxTransformer2DModelImpl : public torch::nn::Module {
+class FluxTransformer2DModelImpl : public torch::nn::Module,
+                                   public dit::DiTCacheMixin {
  public:
   explicit FluxTransformer2DModelImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
@@ -1285,90 +1287,44 @@ class FluxTransformer2DModelImpl : public torch::nn::Module {
     torch::Tensor encoder_hidden_states =
         context_embedder_->forward(encoder_hidden_states_input);
 
-    bool use_step_cache = false;
-    bool use_block_cache = false;
     torch::Tensor original_hidden_states = hidden_states;
     torch::Tensor original_encoder_hidden_states = encoder_hidden_states;
 
-    // Step start: prepare inputs (hidden_states, original_hidden_states)
-    TensorMap step_in_map = {
-        {"hidden_states", hidden_states},
-        {"original_hidden_states", original_hidden_states}};
-    CacheStepIn stepin_before(step_idx, step_in_map);
-    use_step_cache = DiTCache::get_instance().on_before_step(stepin_before);
-
-    if (!use_step_cache) {
-      for (int64_t i = 0; i < transformer_block_layers_.size(); ++i) {
-        // Block start: prepare input (block_id)
-        CacheBlockIn blockin_before(i);
-        use_block_cache =
-            DiTCache::get_instance().on_before_block(blockin_before);
-
-        if (!use_block_cache) {
-          auto block = transformer_block_layers_[i];
-          auto [new_hidden, new_encoder_hidden] = block->forward(
-              hidden_states, encoder_hidden_states, temb, image_rotary_emb);
-          hidden_states = new_hidden;
-          encoder_hidden_states = new_encoder_hidden;
-        }
-
-        // Block end: update outputs (block_id, hidden_states,
-        // encoder_hidden_states, original_hidden_states,
-        // original_encoder_hidden_states)
-        TensorMap block_in_map = {
-            {"hidden_states", hidden_states},
-            {"encoder_hidden_states", encoder_hidden_states},
-            {"original_hidden_states", original_hidden_states},
-            {"original_encoder_hidden_states", original_encoder_hidden_states}};
-        CacheBlockIn blockin_after(i, block_in_map);
-        CacheBlockOut blockout_after =
-            DiTCache::get_instance().on_after_block(blockin_after);
-
-        hidden_states = blockout_after.tensors.at("hidden_states");
-        encoder_hidden_states =
-            blockout_after.tensors.at("encoder_hidden_states");
-      }
+    // The double- and single-stream blocks run under a single cache step on the
+    // default cache instance (use_cfg=false). block_id is laid out as one
+    // contiguous range: double 0..num_double-1, single num_double..total-1, so
+    // ResidualCache's block-boundary math stays accurate across both loops.
+    exec_cache_step(step_idx, hidden_states, original_hidden_states, [&]() {
+      exec_cached_blocks(
+          static_cast<int64_t>(transformer_block_layers_.size()),
+          hidden_states,
+          encoder_hidden_states,
+          original_hidden_states,
+          original_encoder_hidden_states,
+          [&](int64_t i, const torch::Tensor& h, const torch::Tensor& eh) {
+            return transformer_block_layers_[i]->forward(
+                h, eh, temb, image_rotary_emb);
+          });
 
       hidden_states = torch::cat({encoder_hidden_states, hidden_states}, 1);
 
-      for (int64_t i = 0; i < single_transformer_block_layers_.size(); ++i) {
-        // Block start: prepare input (block_id)
-        CacheBlockIn blockin_before(i);
-        use_block_cache =
-            DiTCache::get_instance().on_before_block(blockin_before);
-
-        if (!use_block_cache) {
-          auto block = single_transformer_block_layers_[i];
-          hidden_states = block->forward(hidden_states, temb, image_rotary_emb);
-        }
-
-        // Block end: update outputs (block_id, hidden_states,
-        // original_hidden_states)
-        TensorMap single_block_map = {
-            {"hidden_states", hidden_states},
-            {"original_hidden_states", original_hidden_states}};
-        CacheBlockIn blockin_after(i, single_block_map);
-        CacheBlockOut blockout_after =
-            DiTCache::get_instance().on_after_block(blockin_after);
-
-        hidden_states = blockout_after.tensors.at("hidden_states");
-      }
+      const int64_t block_offset =
+          static_cast<int64_t>(transformer_block_layers_.size());
+      exec_cached_single_blocks(
+          static_cast<int64_t>(single_transformer_block_layers_.size()),
+          hidden_states,
+          original_hidden_states,
+          [&](int64_t i, const torch::Tensor& h) {
+            return single_transformer_block_layers_[i]->forward(
+                h, temb, image_rotary_emb);
+          },
+          /*block_id_offset=*/block_offset);
 
       int64_t start = encoder_hidden_states.size(1);
       int64_t length = hidden_states.size(1) - start;
-      auto output_hidden =
+      hidden_states =
           hidden_states.narrow(1, start, std::max(length, int64_t(0)));
-      hidden_states = output_hidden;
-    }
-
-    // Step end: update outputs (hidden_states, original_hidden_states)
-    TensorMap step_after_map = {
-        {"hidden_states", hidden_states},
-        {"original_hidden_states", original_hidden_states}};
-    CacheStepIn stepin_after(step_idx, step_after_map);
-    CacheStepOut stepout_after =
-        DiTCache::get_instance().on_after_step(stepin_after);
-    hidden_states = stepout_after.tensors.at("hidden_states");
+    });
 
     auto output_hidden = norm_out_(hidden_states, temb);
     return proj_out_(output_hidden);

@@ -38,6 +38,7 @@ limitations under the License.
 #include "core/layers/common/add_matmul.h"
 #include "core/layers/common/rms_norm.h"
 #include "models/dit/transformers/transformer_qwen_image.h"
+#include "models/dit/utils/dit_cache_mixin.h"
 #include "models/dit/utils/dit_parallel_mixin.h"
 #include "models/model_registry.h"
 
@@ -705,7 +706,8 @@ TORCH_MODULE(TransformerBlock);
 
 class JoyImageEditPlusTransformer3DModelImpl final
     : public torch::nn::Module,
-      public xllm::dit::SequenceParallelMixin {
+      public xllm::dit::SequenceParallelMixin,
+      public xllm::dit::DiTCacheMixin {
  public:
   JoyImageEditPlusTransformer3DModelImpl(const ModelContext& context,
                                          const ParallelArgs& parallel_args)
@@ -846,49 +848,27 @@ class JoyImageEditPlusTransformer3DModelImpl final
     // 3. Blocks with optional DiT cache.
     torch::Tensor original_img = img;
     torch::Tensor original_txt = txt;
-    TensorMap step_before_map = {
-        {"hidden_states", img},
-        {"encoder_hidden_states", txt},
-        {"original_hidden_states", original_img},
-        {"original_encoder_hidden_states", original_txt}};
-    CacheStepIn step_before(step_index, step_before_map);
-    const bool use_step_cache =
-        DiTCache::get_instance().on_before_step(step_before, use_cfg);
-
-    if (!use_step_cache) {
-      for (int64_t block_index = 0;
-           block_index < static_cast<int64_t>(block_layers_.size());
-           ++block_index) {
-        CacheBlockIn block_before(block_index);
-        const bool use_block_cache =
-            DiTCache::get_instance().on_before_block(block_before, use_cfg);
-        if (!use_block_cache) {
-          std::tie(img, txt) = block_layers_[block_index]->forward(
-              img, txt, temb6, rope_cos, rope_sin, attention_mask);
-        }
-
-        TensorMap block_after_map = {
-            {"hidden_states", img},
-            {"encoder_hidden_states", txt},
-            {"original_hidden_states", original_img},
-            {"original_encoder_hidden_states", original_txt}};
-        CacheBlockIn block_after(block_index, block_after_map);
-        CacheBlockOut block_output =
-            DiTCache::get_instance().on_after_block(block_after, use_cfg);
-        img = block_output.tensors.at("hidden_states");
-        txt = block_output.tensors.at("encoder_hidden_states");
-      }
-    }
-
-    TensorMap step_after_map = {
-        {"hidden_states", img},
-        {"encoder_hidden_states", txt},
-        {"original_hidden_states", original_img},
-        {"original_encoder_hidden_states", original_txt}};
-    CacheStepIn step_after(step_index, step_after_map);
-    CacheStepOut step_output =
-        DiTCache::get_instance().on_after_step(step_after, use_cfg);
-    img = step_output.tensors.at("hidden_states");
+    exec_cache_step(
+        step_index,
+        img,
+        original_img,
+        [&]() {
+          exec_cached_blocks(
+              static_cast<int64_t>(block_layers_.size()),
+              img,
+              txt,
+              original_img,
+              original_txt,
+              [&](int64_t block_index,
+                  const torch::Tensor& h,
+                  const torch::Tensor& eh) {
+                return block_layers_[block_index]->forward(
+                    h, eh, temb6, rope_cos, rope_sin, attention_mask);
+              },
+              /*block_id_offset=*/0,
+              use_cfg);
+        },
+        use_cfg);
 
     // 4. Output projection + reshape to [B, N, C_out, pt, ph, pw].
     img = proj_out_->forward(fp32_norm_out(img));

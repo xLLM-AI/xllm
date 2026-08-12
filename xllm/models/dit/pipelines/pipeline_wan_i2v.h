@@ -560,7 +560,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
       auto& rolling = (current_model.get() == transformer_.get())
                           ? rolling_transformer_
                           : rolling_transformer_2_;
-      auto rolling_forward = [&](const torch::Tensor& embeds) {
+      auto rolling_forward = [&](const torch::Tensor& embeds, bool use_cfg) {
         return current_model->forward(
             latent_model_input,
             timestep_input,
@@ -568,10 +568,13 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
             torch::Tensor(),
             sparse_attn_state,
             [&rolling](int32_t i) { rolling.wait_h2d(i); },
-            [&rolling](int32_t i) { rolling.schedule_next_h2d(i); });
+            [&rolling](int32_t i) { rolling.schedule_next_h2d(i); },
+            /*step_idx=*/i + 1,
+            use_cfg);
       };
 #else
-      auto rolling_forward = [&](const torch::Tensor& /*embeds*/) {
+      auto rolling_forward = [&](const torch::Tensor& /*embeds*/,
+                                 bool /*use_cfg*/) {
         LOG(FATAL) << "Rolling load requires USE_NPU";
         return torch::Tensor{};
       };
@@ -581,12 +584,17 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
         auto [pos_noise, neg_noise] = exec_with_cfg([&](bool is_positive) {
           auto& embeds =
               is_positive ? encoded_prompt_embeds : encoded_negative_embeds;
-          return use_rolling_load_ ? rolling_forward(embeds)
-                                   : current_model->forward(latent_model_input,
-                                                            timestep_input,
-                                                            embeds,
-                                                            torch::Tensor(),
-                                                            sparse_attn_state);
+          return use_rolling_load_
+                     ? rolling_forward(embeds, is_positive)
+                     : current_model->forward(latent_model_input,
+                                              timestep_input,
+                                              embeds,
+                                              torch::Tensor(),
+                                              sparse_attn_state,
+                                              nullptr,
+                                              nullptr,
+                                              /*step_idx=*/i + 1,
+                                              /*use_cfg=*/is_positive);
         });
 
         noise_pred =
@@ -595,12 +603,17 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
                 (pos_noise.to(torch::kFloat32) - neg_noise.to(torch::kFloat32));
       } else {
         noise_pred = use_rolling_load_
-                         ? rolling_forward(encoded_prompt_embeds)
+                         ? rolling_forward(encoded_prompt_embeds,
+                                           /*use_cfg=*/false)
                          : current_model->forward(latent_model_input,
                                                   timestep_input,
                                                   encoded_prompt_embeds,
                                                   torch::Tensor(),
-                                                  sparse_attn_state);
+                                                  sparse_attn_state,
+                                                  nullptr,
+                                                  nullptr,
+                                                  /*step_idx=*/i + 1,
+                                                  /*use_cfg=*/false);
       }
       auto prev_latents = scheduler_->step(noise_pred, t, prepared_latents);
       prepared_latents = prev_latents.detach();
