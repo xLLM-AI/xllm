@@ -38,6 +38,7 @@ limitations under the License.
 #include "core/layers/common/add_matmul.h"
 #include "core/layers/common/linear.h"
 #include "core/layers/common/rms_norm.h"
+#include "models/dit/utils/dit_cache_mixin.h"
 #include "models/dit/utils/dit_parallel_linear.h"
 #include "models/dit/utils/sparse_attention.h"
 #include "models/dit/utils/util.h"
@@ -1473,7 +1474,8 @@ class WanTransformerBlockImpl : public torch::nn::Module {
 };
 TORCH_MODULE(WanTransformerBlock);
 
-class WanTransformer3DModelImpl : public torch::nn::Module {
+class WanTransformer3DModelImpl : public torch::nn::Module,
+                                  public dit::DiTCacheMixin {
  public:
   explicit WanTransformer3DModelImpl(
       const ModelContext& context,
@@ -1553,7 +1555,9 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                         const torch::Tensor& encoder_hidden_states_image,
                         xllm::dit::SparseAttnState& sparse_attn_state,
                         std::function<void(int32_t)> before_layer_cb = nullptr,
-                        std::function<void(int32_t)> after_layer_cb = nullptr) {
+                        std::function<void(int32_t)> after_layer_cb = nullptr,
+                        int64_t step_idx = 0,
+                        bool use_cfg = false) {
     int64_t batch_size = hidden_states_in.size(0);
     int64_t num_frames = hidden_states_in.size(2);
     int64_t height = hidden_states_in.size(3);
@@ -1625,20 +1629,35 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
       }
     }
 
-    for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
-      if (before_layer_cb) {
-        before_layer_cb(static_cast<int32_t>(i));
-      }
-      hidden_states =
-          transformer_layers_[i]->forward(hidden_states,
-                                          encoder_hidden_states_embedded,
-                                          timestep_proj,
-                                          rotary_emb,
-                                          sparse_attn_state);
-      if (after_layer_cb) {
-        after_layer_cb(static_cast<int32_t>(i));
-      }
-    }
+    torch::Tensor original_hidden_states = hidden_states;
+    exec_cache_step(
+        step_idx,
+        hidden_states,
+        original_hidden_states,
+        [&]() {
+          exec_cached_single_blocks(
+              transformer_layers_.size(),
+              hidden_states,
+              original_hidden_states,
+              [&](int64_t i, torch::Tensor& h) -> torch::Tensor {
+                if (before_layer_cb) {
+                  before_layer_cb(static_cast<int32_t>(i));
+                }
+                torch::Tensor out =
+                    transformer_layers_[i]->forward(h,
+                                                    encoder_hidden_states_embedded,
+                                                    timestep_proj,
+                                                    rotary_emb,
+                                                    sparse_attn_state);
+                if (after_layer_cb) {
+                  after_layer_cb(static_cast<int32_t>(i));
+                }
+                return out;
+              },
+              /*block_id_offset=*/0,
+              use_cfg);
+        },
+        use_cfg);
 
     if (::xllm::ParallelConfig::get_instance().sp_size() > 1) {
       hidden_states =
