@@ -873,16 +873,25 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
   bool did_prune = false;
   int32_t max_val_tokens = default_val_tokens;
   if (!prefix_lengths.empty()) {
-    apply_adaptive_prune_to_draft(draft_block, prefix_lengths);
+    // Note: we intentionally do NOT mask draft_block.probs beyond each seq's
+    // prefix_len. The varlen validate path only sends prefix_lengths[i] draft
+    // tokens per seq to target; and apply_pruned_prefix_lengths downstream
+    // overwrites all pruned rejection-sampler outputs (via cut_mask + drop
+    // mask). So the sampler's decision on pruned draft slots is irrelevant
+    // to the emitted tokens — no need to touch draft_probs on the hot path.
     per_seq_val_tokens.resize(batch_size);
     max_val_tokens = 0;
     for (int32_t i = 0; i < batch_size; ++i) {
       int32_t p = std::clamp(prefix_lengths[static_cast<size_t>(i)],
                              /*min=*/0,
                              /*max=*/num_speculative_tokens);
-      // Require at least one draft slot beyond the anchor so the rejection
-      // sampler always sees a non-empty per-seq block.
-      int32_t width = std::max(p + 1, 2);
+      // Per-seq validate width = accepted-draft-count + 1 bonus. When the
+      // controller decides prefix=0 (don't speculate this step), the seq
+      // still must verify its bonus token, so the minimum is 1 slot — not
+      // 2. A previous floor to 2 forced a phantom "draft slot" at position
+      // 0 that leaked whatever the sampler emitted there past the intended
+      // prefix, showing up as duplicate/garbage tokens in adaptive output.
+      const int32_t width = p + 1;
       per_seq_val_tokens[static_cast<size_t>(i)] = width;
       max_val_tokens = std::max(max_val_tokens, width);
       if (width < default_val_tokens) {
@@ -914,18 +923,27 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
   }
 
   timer.reset();
-  SampleOutput val_output = validate(
-      input.sampling_params, draft_block, target_output, max_val_tokens);
+  SampleOutput val_output =
+      validate(input.sampling_params,
+               draft_block,
+               target_output,
+               max_val_tokens,
+               did_prune ? per_seq_val_tokens : std::vector<int32_t>{});
   // Post-process: mask sampler output beyond each seq's prefix_len so seq
   // accepted counts respect the per-seq decision even under batch-max
   // dense rejection sampling.
   if (did_prune) {
-    // Convert per_seq_val_tokens[i] back to prefix_len[i] =
-    // per_seq_val_tokens[i]-1.
+    // effective_prefix[i] mirrors the controller's decision (0-based, clamped
+    // to [0, num_speculative_tokens]). Since per_seq_val_tokens[i] is exactly
+    // prefix_lengths[i] + 1 now (bonus slot only when prefix=0), we could
+    // equivalently write per_seq_val_tokens[i] - 1; keeping the raw
+    // prefix_lengths read here documents the semantic and stays robust if the
+    // width calculation grows another guard later.
     std::vector<int32_t> effective_prefix(batch_size);
     for (int32_t i = 0; i < batch_size; ++i) {
+      int32_t p = prefix_lengths[static_cast<size_t>(i)];
       effective_prefix[static_cast<size_t>(i)] =
-          per_seq_val_tokens[static_cast<size_t>(i)] - 1;
+          std::clamp(p, 0, options_.num_speculative_tokens());
     }
     adaptive_pruning::PrunedPrefixMasks masks =
         adaptive_pruning::build_pruned_prefix_masks(
@@ -974,7 +992,8 @@ SampleOutput DFlashWorkerImpl::validate(
     const SamplingParameters& sampling_params,
     const DraftBlock& draft_block,
     const ForwardOutput& target_output,
-    int32_t effective_val_tokens) {
+    int32_t effective_val_tokens,
+    const std::vector<int32_t>& per_seq_val_tokens) {
   // Draft already emits the whole block [batch, num_speculative_tokens]; feed
   // it straight to the verifier without the per-step select/view/cat round
   // trip. The shared rejection sampler uses MTP's dense contract, so
@@ -1007,7 +1026,8 @@ SampleOutput DFlashWorkerImpl::validate(
                   draft_token_ids,
                   draft_probs,
                   target_output,
-                  effective_val_tokens);
+                  effective_val_tokens,
+                  per_seq_val_tokens);
 }
 
 SampleOutput DFlashWorkerImpl::validate(
@@ -1015,7 +1035,8 @@ SampleOutput DFlashWorkerImpl::validate(
     const torch::Tensor& draft_token_ids,
     const torch::Tensor& draft_probs,
     const ForwardOutput& target_output,
-    int32_t effective_val_tokens) {
+    int32_t effective_val_tokens,
+    const std::vector<int32_t>& per_seq_val_tokens) {
   const int32_t num_val_tokens = effective_val_tokens;
   // Derive batch_size from the target logits rows rather than next_tokens so
   // the reshape stays valid regardless of how the target was sampled.
@@ -1030,10 +1051,35 @@ SampleOutput DFlashWorkerImpl::validate(
 
   using torch::indexing::None;
   using ISlice = torch::indexing::Slice;
-  torch::Tensor bonus_token_ids =
-      target_output.sample_output.next_tokens
-          .index({"...", ISlice(num_val_tokens - 1, None, num_val_tokens)})
-          .view({-1, 1});
+  torch::Tensor target_next_tokens_2d =
+      target_output.sample_output.next_tokens.view(
+          {batch_size, num_val_tokens});
+  torch::Tensor bonus_token_ids;
+  if (per_seq_val_tokens.empty()) {
+    // Uniform batch-max width: bonus is at the fixed last column.
+    bonus_token_ids = target_next_tokens_2d
+                          .index({ISlice(), ISlice(num_val_tokens - 1, None)})
+                          .view({-1, 1});
+  } else {
+    // Per-seq varlen: seq i's bonus lives at dense col
+    // (per_seq_val_tokens[i] - 1) because the varlen->dense scatter placed
+    // the seq's rows order-preserved at cols [0, per_seq_val_tokens[i]).
+    CHECK_EQ(static_cast<int32_t>(per_seq_val_tokens.size()), batch_size)
+        << "per_seq_val_tokens size must match validate batch";
+    std::vector<int64_t> bonus_cols(static_cast<size_t>(batch_size));
+    for (int32_t i = 0; i < batch_size; ++i) {
+      const int32_t w = per_seq_val_tokens[static_cast<size_t>(i)];
+      bonus_cols[static_cast<size_t>(i)] = std::max(w - 1, 0);
+    }
+    torch::Tensor bonus_idx =
+        torch::tensor(bonus_cols,
+                      torch::TensorOptions()
+                          .dtype(torch::kLong)
+                          .device(target_next_tokens_2d.device()))
+            .view({batch_size, 1});
+    bonus_token_ids =
+        target_next_tokens_2d.gather(/*dim=*/1, bonus_idx).view({-1, 1});
+  }
 
   torch::Tensor target_logits =
       target_output.logits.view({batch_size, num_val_tokens, vocab_size});
@@ -1437,76 +1483,6 @@ std::vector<int32_t> DFlashWorkerImpl::compute_adaptive_prefix_lengths(
   return prefix_lengths;
 }
 
-void DFlashWorkerImpl::apply_adaptive_prune_to_draft(
-    DraftBlock& draft_block,
-    const std::vector<int32_t>& prefix_lengths) {
-  const int32_t num_speculative_tokens = options_.num_speculative_tokens();
-  const int64_t batch_size = draft_block.probs.size(0);
-  CHECK_EQ(static_cast<int64_t>(prefix_lengths.size()), batch_size)
-      << "adaptive prefix_lengths size must match draft batch";
-
-  // Cheap host-side pass: compute per-seq keep_cols and the logging stats in
-  // one loop before any device work, so we can early-return when nothing gets
-  // pruned without touching the device.
-  //
-  // Preserve raw draft prob at position 0 when controller pruned to zero
-  // (`keep_cols = max(k, 1)`). If we zeroed position 0 too, the rejection
-  // sampler would see draft_prob=0 there and target/draft = +inf would
-  // unconditionally accept the token the controller wanted rejected;
-  // apply_pruned_prefix_lengths later masks the extra slot to -1 so the
-  // spurious accept never reaches the user.
-  std::vector<int32_t> keep_cols_vec(static_cast<size_t>(batch_size));
-  bool any_prune = false;
-  int64_t pruned_seqs = 0;
-  int32_t max_kept = 0;
-  int32_t sum_kept = 0;
-  for (int64_t i = 0; i < batch_size; ++i) {
-    int32_t k = prefix_lengths[static_cast<size_t>(i)];
-    k = std::clamp(k, 0, num_speculative_tokens);
-    keep_cols_vec[static_cast<size_t>(i)] = std::max(k, 1);
-    sum_kept += k;
-    if (k > max_kept) {
-      max_kept = k;
-    }
-    if (k < num_speculative_tokens) {
-      any_prune = true;
-      ++pruned_seqs;
-    }
-  }
-  if (!any_prune) {
-    return;
-  }
-
-  // draft_block.probs is a no-sync tensor produced on compute_stream_ (see
-  // run_decode_draft), so read/write ops here must be scheduled on the same
-  // stream to avoid a cross-stream data race with the draft forward.
-  c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-
-  // Vectorised keep-mask: single H2D upload of keep_cols + broadcast lt over
-  // an arange row. Replaces the previous per-row index_put_ loop that
-  // launched `batch_size` device kernels per adaptive step.
-  torch::Tensor probs = draft_block.probs;
-  torch::Tensor keep_cols_device =
-      cpu_int_vec_to_device(keep_cols_vec, device_);
-  if (!prune_col_idx_cache_.defined() ||
-      prune_col_idx_cache_.numel() != num_speculative_tokens ||
-      prune_col_idx_cache_.device() != probs.device()) {
-    prune_col_idx_cache_ = torch::arange(
-        num_speculative_tokens,
-        torch::TensorOptions().dtype(torch::kInt).device(probs.device()));
-  }
-  torch::Tensor keep_mask =
-      prune_col_idx_cache_.unsqueeze(0).lt(keep_cols_device.unsqueeze(1));
-  probs.masked_fill_(~keep_mask, 0);
-  LOG_EVERY_N(INFO, 32) << "[dflash_dspark_adaptive] batch=" << batch_size
-                        << " pruned_seqs=" << pruned_seqs
-                        << " max_kept=" << max_kept << " avg_kept="
-                        << (batch_size > 0
-                                ? static_cast<double>(sum_kept) / batch_size
-                                : 0.0)
-                        << " of " << num_speculative_tokens;
-}
-
 void DFlashWorkerImpl::apply_per_seq_varlen_prune(
     const ForwardInput& input,
     ForwardInput& validate_input,
@@ -1561,34 +1537,69 @@ void DFlashWorkerImpl::scatter_varlen_target_output_to_dense(
   const int32_t vocab_size =
       static_cast<int32_t>(target_output.logits.size(-1));
 
+  // Pure order-preserving scatter: seq i's varlen rows [cu_offset,
+  // cu_offset + seq_tokens) map to dense cols [0, seq_tokens). Row j is the
+  // target's prediction after seeing anchor + draft[0..j-1]:
+  //   dense col 0            → predicts draft[0] (anchor row)
+  //   dense col j            → predicts draft[j] given first j accepted
+  //   dense col seq_tokens-1 → bonus (all seq_tokens-1 drafts accepted)
+  // Trailing cols [seq_tokens, max_val_tokens) stay as the caller's -inf
+  // logits / 0 tokens. This matches MTP's varlen->dense scatter exactly; the
+  // per-seq bonus therefore lands at col (seq_tokens - 1), NOT the fixed last
+  // column, so validate()/apply_pruned_prefix_lengths must read the bonus and
+  // cut position per-seq (see per_seq_val_tokens plumbing below).
+  std::vector<int64_t> src_indices_vec;
   std::vector<int64_t> dst_indices_vec;
+  src_indices_vec.reserve(static_cast<size_t>(total_tokens));
   dst_indices_vec.reserve(static_cast<size_t>(total_tokens));
+  int64_t cu_offset = 0;
   for (int32_t i = 0; i < batch_size; ++i) {
     const int32_t seq_tokens = per_seq_val_tokens[static_cast<size_t>(i)];
     for (int32_t j = 0; j < seq_tokens; ++j) {
+      src_indices_vec.push_back(cu_offset + j);
       dst_indices_vec.push_back(static_cast<int64_t>(i) * max_val_tokens + j);
     }
+    cu_offset += seq_tokens;
   }
+  torch::Tensor src_indices =
+      torch::tensor(src_indices_vec,
+                    torch::TensorOptions()
+                        .dtype(torch::kLong)
+                        .device(target_output.logits.device()));
   torch::Tensor dst_indices =
       torch::tensor(dst_indices_vec,
                     torch::TensorOptions()
                         .dtype(torch::kLong)
                         .device(target_output.logits.device()));
 
-  // Logits: pad to [B*max_val_tokens, V] filled with -inf so rejection sampler
-  // sees a strictly rejecting distribution at padded positions.
+  // Logits: pad to [B*max_val_tokens, V] filled with -inf so any col we do
+  // not explicitly write remains a strictly-rejecting distribution.
   torch::Tensor padded_logits = torch::full(
       {padded_total, vocab_size}, -1e9, target_output.logits.options());
-  padded_logits.index_copy_(/*dim=*/0, dst_indices, target_output.logits);
+  padded_logits.index_copy_(
+      /*dim=*/0,
+      dst_indices,
+      target_output.logits.index_select(/*dim=*/0, src_indices));
   target_output.logits = padded_logits;
 
-  // next_tokens: pad with zeros; apply_pruned_prefix_lengths will mask beyond
-  // per-seq prefix in the sampler output anyway.
   if (target_output.sample_output.next_tokens.defined()) {
-    torch::Tensor padded_next_tokens = torch::zeros(
-        {padded_total}, target_output.sample_output.next_tokens.options());
+    // Pad next_tokens with -1 (reject marker) rather than 0. Qwen tokenizer
+    // token id 0 is "!" — if any downstream consumer picks up a padded slot
+    // (e.g. sync_pruned_boundary_outputs reads target_next_tokens at the
+    // cut position `per_seq_val_tokens[i]-1`, which for a pruned seq is a
+    // padded slot since we only fill dense positions [0, seq_tokens-2] and
+    // move the bonus to `max_val_tokens-1`), it must not emit garbage
+    // tokens. apply_pruned_prefix_lengths downstream masks drop_mask to -1
+    // anyway, so -1 propagates cleanly through the rest of the pipeline.
+    torch::Tensor padded_next_tokens =
+        torch::full({padded_total},
+                    static_cast<int64_t>(-1),
+                    target_output.sample_output.next_tokens.options());
     padded_next_tokens.index_copy_(
-        /*dim=*/0, dst_indices, target_output.sample_output.next_tokens);
+        /*dim=*/0,
+        dst_indices,
+        target_output.sample_output.next_tokens.index_select(/*dim=*/0,
+                                                             src_indices));
     target_output.sample_output.next_tokens = padded_next_tokens;
   }
   if (target_output.sample_output.embeddings.defined()) {
@@ -1598,7 +1609,10 @@ void DFlashWorkerImpl::scatter_varlen_target_output_to_dense(
         torch::zeros({padded_total, hidden_size},
                      target_output.sample_output.embeddings.options());
     padded_embeddings.index_copy_(
-        /*dim=*/0, dst_indices, target_output.sample_output.embeddings);
+        /*dim=*/0,
+        dst_indices,
+        target_output.sample_output.embeddings.index_select(/*dim=*/0,
+                                                            src_indices));
     target_output.sample_output.embeddings = padded_embeddings;
   }
 }

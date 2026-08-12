@@ -112,16 +112,23 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
                                             const DraftBlock& draft_block,
                                             ForwardInput& validate_input);
 
+  // `per_seq_val_tokens` (optional): when non-empty, the target output was
+  // scattered from a per-seq varlen batch and each seq's bonus lives at
+  // dense col (per_seq_val_tokens[i] - 1), not the fixed last column. Passing
+  // it lets validate() gather the bonus token per-seq. Empty = uniform
+  // batch-max width (bonus at col effective_val_tokens - 1 for every seq).
   SampleOutput validate(const SamplingParameters& sampling_params,
                         const DraftBlock& draft_block,
                         const ForwardOutput& target_output,
-                        int32_t effective_val_tokens);
+                        int32_t effective_val_tokens,
+                        const std::vector<int32_t>& per_seq_val_tokens);
 
   SampleOutput validate(const SamplingParameters& sampling_params,
                         const torch::Tensor& draft_token_ids,
                         const torch::Tensor& draft_probs,
                         const ForwardOutput& target_output,
-                        int32_t effective_val_tokens);
+                        int32_t effective_val_tokens,
+                        const std::vector<int32_t>& per_seq_val_tokens);
 
   // Adaptive-speculative helper: run controller on draft acceptance
   // probabilities (ConfidenceHead output if available, sampler-gathered probs
@@ -133,13 +140,6 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
       const ForwardInput& input);
 
   // Zero out draft probs beyond each sequence's prefix_len so the rejection
-  // sampler naturally rejects those draft tokens.
-  // draft_block is modified in place. Called only when adaptive is enabled
-  // and controller produced non-uniform prefixes.
-  void apply_adaptive_prune_to_draft(
-      DraftBlock& draft_block,
-      const std::vector<int32_t>& prefix_lengths);
-
   // Per-seq varlen prune: rebuild validate_input as a true varlen
   // [Σ per_seq_val_tokens[i], ...] batch so target forward only spends
   // compute on tokens each seq's prefix_len actually needs. Reuses the base
@@ -194,12 +194,6 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
 #endif
   int32_t mask_token_id_ = -1;
   int64_t expected_context_hidden_size_ = 0;
-
-  // Cached device tensor holding [0, 1, ..., num_speculative_tokens-1] as
-  // int32. apply_adaptive_prune_to_draft broadcasts this against a per-seq
-  // keep_cols vector every adaptive step; hoisting the arange out of the hot
-  // path saves an allocation + H2D per step.
-  mutable torch::Tensor prune_col_idx_cache_;
 };
 
 }  // namespace xllm
