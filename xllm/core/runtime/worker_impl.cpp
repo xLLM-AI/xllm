@@ -1648,12 +1648,12 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
 #else
   if (options_.enable_speculative_decode()) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
-    if (is_block_diffusion && options_.is_draft_engine()) {
-      LOG(FATAL) << speculative_algorithm
-                 << " block-diffusion draft is not supported on "
-                 << Platform::type_str() << ".";
-    }
-    if (is_block_diffusion && !options_.is_draft_engine()) {
+    if (is_block_diffusion) {
+      if (options_.is_draft_engine()) {
+        LOG(FATAL) << speculative_algorithm
+                   << " block-diffusion draft is not supported on "
+                   << Platform::type_str() << ".";
+      }
       CHECK(options_.draft_model_path().has_value())
           << "block-diffusion speculative decoding requires --draft_model.";
       std::vector<int32_t> capture_layer_ids =
