@@ -165,6 +165,17 @@ class AttentionBackend(ABC):
             f"{type(self).__name__} does not support MLA"
         )
 
+    def execute_linear(
+        self,
+        mixed_qkv: torch.Tensor,
+        gate: torch.Tensor,
+        beta: torch.Tensor,
+        layer: "Attention",
+    ) -> torch.Tensor:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support linear attention (KDA)"
+        )
+
     def mla_index_context(self, layer: "Attention") -> MlaIndexContext:
         """Public hook for an optional LightningIndexer.
 

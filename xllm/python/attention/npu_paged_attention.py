@@ -124,6 +124,149 @@ class NpuPagedAttentionBackend(AttentionBackend):
     def bind_kv_caches(self, kv_caches: list[LayerCache]) -> None:
         self._kv_caches = kv_caches
 
+    def execute_linear(
+        self,
+        mixed_qkv: torch.Tensor,
+        gate: torch.Tensor,
+        beta: torch.Tensor,
+        layer: "Attention",
+    ) -> torch.Tensor:
+        from xllm.python.kernels_npu.kda import (
+            _causal_conv1d_fn,
+            _causal_conv1d_update,
+        )
+
+        metadata = self._metadata
+        assert metadata is not None, "execute_linear called before prepare()"
+        layer_cache = self._kv_caches[layer.layer_id]
+        conv_cache = layer_cache.conv
+        ssm_cache = layer_cache.ssm
+        assert conv_cache is not None and ssm_cache is not None, (
+            "execute_linear requires a linear-attention layer cache (conv/ssm)")
+
+        seq_len = mixed_qkv.shape[-1]
+        conv_kernel_size = layer.conv_kernel_size
+        conv_state_len = conv_kernel_size - 1
+        head_dim = layer.head_dim
+        qkv_dim = layer.qkv_dim
+        is_prefill = metadata.is_prefill or metadata.is_chunked_prefill
+
+        idx = metadata.linear_state_indices
+        assert idx is not None, "execute_linear requires metadata.linear_state_indices"
+        num_seqs = idx.shape[0]
+        if idx.dtype != torch.int64:
+            idx = idx.to(torch.int64)
+        conv_state = conv_cache.index_select(0, idx)
+        conv_state = conv_state.transpose(1, 2).contiguous()
+        ssm_state = ssm_cache.index_select(0, idx)
+        # Pooled slots may hold a prior request's stale state; zero cold slots
+        # on prefill (decode continues its own warm slot).
+        if is_prefill:
+            his = metadata.has_initial_state
+            assert his is not None, (
+                "execute_linear requires metadata.has_initial_state for prefill")
+            if not isinstance(his, torch.Tensor):
+                his = torch.tensor(
+                    his, dtype=torch.int64, device=conv_state.device
+                )
+            if his.shape[0] != num_seqs:
+                raise ValueError(
+                    f"has_initial_state length {his.shape[0]} != num_seqs "
+                    f"{num_seqs}")
+            # mask = [num_seqs, 1, ...] broadcasting to each state's dims; bool
+            # mul zeroes cold slots without a zeros_like allocation.
+            warm = his.to(torch.bool)
+            conv_state = conv_state * warm.view(num_seqs, *([1] * (conv_state.ndim - 1)))
+            ssm_state = ssm_state * warm.view(num_seqs, *([1] * (ssm_state.ndim - 1)))
+
+        conv_weight = layer.conv1d.weight.squeeze(1)
+        activation = layer.activation
+        q_cu = metadata.q_cu_seq_lens
+        if q_cu is None:
+            q_cu = torch.tensor(
+                [0, seq_len], dtype=torch.int64, device=mixed_qkv.device)
+        else:
+            q_cu = q_cu.to(torch.int64)
+        q_cu_list = q_cu.tolist()
+        outs = []
+        for s in range(num_seqs):
+            t0, t1 = q_cu_list[s], q_cu_list[s + 1]
+            seg = mixed_qkv[:, :, t0:t1]   # [1, conv_dim, seg_len]
+            cs = conv_state[s:s + 1]       # [1, conv_dim, state_len]
+            seg_len = t1 - t0
+            if seg_len == 1:
+                outs.append(_causal_conv1d_update(
+                    seg, cs, conv_weight, activation
+                ))
+            else:
+                cin = torch.cat([cs, seg], dim=-1)
+                outs.append(_causal_conv1d_fn(
+                    cin, conv_weight, activation
+                )[:, :, -seg_len:])
+                conv_state[s] = cin[0, :, -conv_state_len:]
+        mixed_qkv = torch.cat(outs, dim=-1)
+        hidden_shape = (1, seq_len, -1, head_dim)
+
+        query, key, value = torch.split(
+            mixed_qkv.transpose(1, 2), [qkv_dim] * 3, dim=-1
+        )
+        query = query.view(hidden_shape)
+        key = key.view(hidden_shape)
+        value = value.view(hidden_shape)
+
+        # Delta-rule on fla_npu fused ops (one varlen call for all sequences).
+        core_attn_out, final_state = self._kda_fla_npu_varlen(
+            query, key, value, gate, beta, ssm_state, head_dim, q_cu,
+            is_prefill=is_prefill,
+        )
+
+        conv_cache.index_copy_(
+            0, idx, conv_state.transpose(1, 2).contiguous()
+        )
+        ssm_cache.index_copy_(
+            0, idx, final_state.float().contiguous()
+        )
+        return core_attn_out
+
+    def _kda_fla_npu_varlen(
+        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
+        gate: torch.Tensor, beta: torch.Tensor, ssm_state: torch.Tensor,
+        head_dim: int, cu_seqlens: torch.Tensor, *, is_prefill: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from fla_npu.ops.ascendc import chunk_kda_fwd, recurrent_kda
+        from xllm.python.kernels_npu.kda import _l2norm
+
+        scale = 1.0 / (head_dim ** 0.5)
+
+        if not is_prefill:
+            out, final_state = recurrent_kda(
+                query, key, value, gate, beta,
+                initial_state=ssm_state,
+                cu_seqlens=cu_seqlens,
+                layout="BSND", scale=scale,
+                output_final_state=True, inplace_final_state=False,
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=False,
+                use_beta_sigmoid_in_kernel=False,
+            )
+            return out.to(query.dtype), final_state
+
+        q_in = _l2norm(query.float(), dim=-1, eps=1e-6).to(torch.bfloat16).contiguous()
+        k_in = _l2norm(key.float(), dim=-1, eps=1e-6).to(torch.bfloat16).contiguous()
+        v_in = value.to(torch.bfloat16).contiguous()
+        result = chunk_kda_fwd(
+            q_in, k_in, v_in, gate, beta, scale,
+            chunk_size=64, layout="BSND",
+            initial_state=ssm_state,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens,
+            use_gate_in_kernel=False,
+            return_intermediate_states=False,
+        )
+        core_attn_out = result[0].to(query.dtype)
+        final_state = result[1]
+        return core_attn_out, final_state
+
     @staticmethod
     def _query_sequence_ends(
         q_cu_seq_lens: torch.Tensor | None,
