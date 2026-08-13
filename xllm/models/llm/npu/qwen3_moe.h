@@ -124,11 +124,7 @@ TORCH_MODULE(Qwen3MoeDecoderLayer);
 class Qwen3MoeModelImpl : public torch::nn::Module {
  public:
   Qwen3MoeModelImpl(const ModelContext& context)
-      : device_(context.get_tensor_options().device()),
-        aux_capture_(
-            context.get_model_args(),
-            context.get_tensor_options(),
-            ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch()) {
+      : device_(context.get_tensor_options().device()) {
     auto options = context.get_tensor_options();
     auto model_args = context.get_model_args();
     auto parallel_args = context.get_parallel_args();
@@ -172,6 +168,11 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
     for (int i = 0; i < parallel_args.world_size(); i += dp_local_tp_size_) {
       indices.push_back(i);
     }
+
+    aux_capture_.init(
+        model_args,
+        options,
+        ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch());
   }
 
   // tokens: [num_tokens]

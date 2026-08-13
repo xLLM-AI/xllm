@@ -34,9 +34,9 @@ namespace xllm {
 // signal.
 class AuxHiddenCapture final {
  public:
-  AuxHiddenCapture(const ModelArgs& model_args,
-                   const torch::TensorOptions& options,
-                   int64_t max_tokens_per_batch) {
+  void init(const ModelArgs& model_args,
+            const torch::TensorOptions& options,
+            int64_t max_tokens_per_batch) {
     if (model_args.layers_to_capture().empty()) {
       return;
     }

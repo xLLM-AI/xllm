@@ -421,11 +421,7 @@ class DeepseekV4ModelImpl
             "deepseek_v4",
             context.get_model_args()),
         parallel_args_(context.get_parallel_args()),
-        flash_comm1_options_(context.get_flash_comm1_options()),
-        aux_capture_(
-            context.get_model_args(),
-            context.get_tensor_options(),
-            ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch()) {
+        flash_comm1_options_(context.get_flash_comm1_options()) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
@@ -518,6 +514,13 @@ class DeepseekV4ModelImpl
     for (int32_t i = 0; i < model_args.n_layers(); ++i) {
       auto layer = layer::DeepseekV4DecoderLayer(context, i);
       layers_.push_back(layer);
+    }
+
+    if (!model_args.layers_to_capture().empty()) {
+      aux_capture_.init(
+          model_args,
+          options,
+          ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch());
     }
 
     // Build DSA caches_info from compress_ratios
