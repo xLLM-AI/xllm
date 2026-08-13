@@ -38,6 +38,21 @@ bool is_url_type(const std::string& type) {
   return type == "image_url" || type == "video_url" || type == "audio_url";
 }
 
+// Base modality for a url content type, set on the shell so the uuid pre-filter
+// can classify items before download.
+MMType url_type_to_modality(const std::string& type) {
+  if (type == "image_url") {
+    return MMType::IMAGE;
+  }
+  if (type == "video_url") {
+    return MMType::VIDEO;
+  }
+  if (type == "audio_url") {
+    return MMType::AUDIO;
+  }
+  return MMType::NONE;
+}
+
 bool is_binary_data_url(std::string_view url) {
   constexpr std::string_view kPrefix = "data:";
   constexpr std::string_view kMarker = ";binary,";
@@ -94,6 +109,13 @@ MMPayload slice_payload(const MMContent& item, MMPayload& payload) {
   return MMPayload(std::move(buf));
 }
 
+void apply_uuid_key(const MMContent& content, MMInputItem& item) {
+  if (content.uuid.has_value()) {
+    item.uuid = content.uuid.value();
+    item.hash_key = hash_string(content.uuid.value());
+  }
+}
+
 }  // namespace
 
 bool MMInput::foreach (MMInputItem::IVisitor& v) const {
@@ -131,6 +153,106 @@ MMErrCode MMInputTransfer::trans(const std::vector<Message>& messages,
     inputs.insert(ins);
   }
   return MMErrCode::SUCCESS;
+}
+
+MMErrCode MMInputTransfer::collect(const std::vector<Message>& messages,
+                                   MMInput& inputs,
+                                   std::vector<MMSourceRef>& refs) {
+  inputs.clear();
+  refs.clear();
+
+  for (const Message& message : messages) {
+    const MMContentVec& mmc = std::get<MMContentVec>(message.content);
+    for (const MMContent& content : mmc) {
+      if (content.type == "text") {
+        continue;
+      }
+      MMErrCode code = collect_content(content, inputs, refs);
+      if (code != MMErrCode::SUCCESS) {
+        return code;
+      }
+    }
+  }
+  return MMErrCode::SUCCESS;
+}
+
+MMErrCode MMInputTransfer::collect_content(const MMContent& content,
+                                           MMInput& inputs,
+                                           std::vector<MMSourceRef>& refs) {
+  const std::string& type = content.type;
+  MMInputItem item;
+
+  // Embedding items have no download/decode and consume the shared payload
+  // during load, so they are handled fully here in walk order.
+  if (!is_url_type(type)) {
+    MMErrCode code =
+        mm_handlers_->process(type, content, item, inputs.payload());
+    if (code != MMErrCode::SUCCESS) {
+      return code;
+    }
+    apply_uuid_key(content, item);
+    inputs.insert(std::move(item));
+    refs.push_back(
+        MMSourceRef{&content, MMPayload{}, /*needs_materialize=*/false});
+    return MMErrCode::SUCCESS;
+  }
+
+  MMPayload sliced = slice_payload(content, inputs.payload());
+  item.type = url_type_to_modality(type);
+  apply_uuid_key(content, item);
+  inputs.insert(std::move(item));
+  refs.push_back(
+      MMSourceRef{&content, std::move(sliced), /*needs_materialize=*/true});
+  return MMErrCode::SUCCESS;
+}
+
+MMErrCode MMInputTransfer::materialize(
+    const std::vector<MMSourceRef>& refs,
+    const std::vector<int32_t>& target_indices,
+    MMInput& inputs) {
+  std::vector<MMInputItem>& items = inputs.mutable_items();
+  CHECK_EQ(refs.size(), items.size()) << "materialize refs/items size mismatch";
+
+  if (target_indices.empty()) {
+    return MMErrCode::SUCCESS;
+  }
+
+  std::vector<int32_t> work;
+  work.reserve(target_indices.size());
+  for (int32_t input_index : target_indices) {
+    CHECK_GE(input_index, 0);
+    CHECK_LT(static_cast<size_t>(input_index), items.size());
+    if (refs[input_index].needs_materialize) {
+      work.push_back(input_index);
+    }
+  }
+  if (work.empty()) {
+    return MMErrCode::SUCCESS;
+  }
+
+  std::atomic<MMErrCode> error{MMErrCode::SUCCESS};
+  BlockingCounter counter(static_cast<int32_t>(work.size()));
+  for (size_t i = 0; i < work.size(); ++i) {
+    const int32_t input_index = work[i];
+    threadpool_->schedule([&, input_index]() {
+      if (error.load() == MMErrCode::SUCCESS) {
+        const MMSourceRef& ref = refs[input_index];
+        MMInputItem& item = items[input_index];
+        MMPayload payload = ref.payload;  // get() mutates offset; keep original
+        MMErrCode code = mm_handlers_->process(
+            ref.content->type, *ref.content, item, payload);
+        if (code != MMErrCode::SUCCESS) {
+          LOG(ERROR) << "materialize failed at input index " << input_index
+                     << ", type=" << ref.content->type;
+          MMErrCode expected = MMErrCode::SUCCESS;
+          error.compare_exchange_strong(expected, code);
+        }
+      }
+      counter.decrement_count();
+    });
+  }
+  counter.wait();
+  return error.load();
 }
 
 MMErrCode MMInputTransfer::trans_parallel(const MMContentVec& mmc,
