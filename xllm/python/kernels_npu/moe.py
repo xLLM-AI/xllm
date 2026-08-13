@@ -119,9 +119,7 @@ def grouped_moe(
         quant_mode=1,
     )
     num_local_experts = expert_range[1] - expert_range[0]
-    group_list = torch.cumsum(
-        expert_tokens[:num_local_experts].to(torch.int64), 0
-    )
+    group_list = torch.cumsum(expert_tokens[:num_local_experts].to(torch.int64), 0)
     act_i8, act_pt, _ = torch.ops.npu.npu_grouped_matmul_swiglu_quant(
         x=sorted_hidden_i8,
         weight=w13,

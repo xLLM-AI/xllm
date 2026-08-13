@@ -6,7 +6,7 @@ repos:
   rev: v0.14.0
   hooks:
   - id: ruff-check
-    args: [--fix]
+    args: [--output-format, github, --fix]
   - id: ruff-format
 
 - repo: https://github.com/codespell-project/codespell
