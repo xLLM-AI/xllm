@@ -118,6 +118,11 @@ DEFINE_int32(
     0,
     "Max sequence length for Flux2 text encoder tokenizer. 0 means disabled.");
 
+DEFINE_string(padding_side,
+              "left",
+              "Padding side for text encoder tokenizer: 'left' or 'right'. "
+              "Controls whether pad tokens are prepended or appended.");
+
 namespace xllm {
 
 void DiTConfig::from_flags() {
@@ -144,6 +149,7 @@ void DiTConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sparse_attention_version);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sparse_attention_mask_refresh_steps);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_sequence_length);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(padding_side);
 }
 
 void DiTConfig::from_json(const JsonReader& json) {
@@ -170,6 +176,7 @@ void DiTConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sparse_attention_version);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sparse_attention_mask_refresh_steps);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_sequence_length);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(padding_side);
 }
 
 void DiTConfig::append_config_json(nlohmann::ordered_json& config_json) const {
@@ -220,6 +227,8 @@ void DiTConfig::append_config_json(nlohmann::ordered_json& config_json) const {
       config_json, default_config, dit_sparse_attention_mask_refresh_steps);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, max_sequence_length);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, padding_side);
 }
 
 DiTConfig& DiTConfig::get_instance() {

@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 #pragma once
 #include <torch/torch.h>
+#include <torch_npu/csrc/aten/NPUGeneratorImpl.h>
 
 #include "lanczos_resample.h"
 #include "models/dit/schedulers/flowmatch_euler_discrete_scheduler.h"
@@ -76,13 +77,23 @@ torch::Tensor randn_tensor(const std::vector<int64_t>& shape,
   if (shape.empty()) {
     LOG(FATAL) << "Shape must not be empty.";
   }
-  torch::Generator gen = torch::make_generator<torch::CPUGeneratorImpl>();
-  gen = gen.clone();
-  gen.set_current_seed(seed);
   torch::Tensor latents;
-  latents =
-      torch::randn(shape, gen, options.device(torch::kCPU).dtype(target_type));
-  latents = latents.to(options.device());
+  if (options.device().type() == c10::DeviceType::PrivateUse1) {
+    // Use NPU generator (PhiloxNPU) to match Python
+    // torch.Generator(device="npu:X")
+    torch::Generator gen =
+        at_npu::detail::createNPUGenerator(options.device().index());
+    gen.set_current_seed(seed);
+    latents = torch::randn(shape, gen, options.dtype(target_type));
+  } else {
+    // Fallback: CPU generator for non-NPU devices
+    torch::Generator gen = torch::make_generator<torch::CPUGeneratorImpl>();
+    gen = gen.clone();
+    gen.set_current_seed(seed);
+    latents = torch::randn(
+        shape, gen, options.device(torch::kCPU).dtype(target_type));
+    latents = latents.to(options.device());
+  }
   return latents;
 }
 

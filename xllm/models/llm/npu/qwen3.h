@@ -23,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/global_flags.h"
+#include "core/framework/config/dit_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/model_output.h"
@@ -133,6 +134,20 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
       h = npu_embed_tokens_(tokens, 0);
     }
 
+    // === TENSOR DUMP: embedding output, tokens, positions ===
+    torch::save(h.to(torch::kCPU),
+                "/export/home/weinan5/wangshuibin/15_JD_push_xllm_flux2/"
+                "12_test_flux2_klein_acc/03_cpp_dump_qwen3_output_tensor/"
+                "01_cpp_dump_qwen3_inner_tensor/01_cpp_embedding_output.pt");
+    torch::save(tokens.to(torch::kCPU),
+                "/export/home/weinan5/wangshuibin/15_JD_push_xllm_flux2/"
+                "12_test_flux2_klein_acc/03_cpp_dump_qwen3_output_tensor/"
+                "01_cpp_dump_qwen3_inner_tensor/01_cpp_tokens.pt");
+    torch::save(positions.to(torch::kCPU),
+                "/export/home/weinan5/wangshuibin/15_JD_push_xllm_flux2/"
+                "12_test_flux2_klein_acc/03_cpp_dump_qwen3_output_tensor/"
+                "01_cpp_dump_qwen3_inner_tensor/01_cpp_positions.pt");
+
     // This residual tensor would be shared by all the layers, as the
     // current layer would use the output residual from previous layer,
     // the layer could use the residual through local variable
@@ -186,6 +201,7 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
     }
 
     torch::Tensor attn_mask;
+    int64_t pad_count = 0;
     // for chunked prefill, generate the attn mask.
     if (!input_params.meta.batch_forward_type.is_decode()) {
       if (::xllm::SchedulerConfig::get_instance().enable_chunked_prefill()) {
@@ -206,11 +222,71 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
           }
           attn_mask = torch::cat(req_mask_vec, 0);
         }
+      } else if (::xllm::DiTConfig::get_instance().max_sequence_length() > 0) {
+        int64_t seq_len = h.size(0);
+        // ATB kernel with disableisTriuMask=true does NOT support negative
+        // additive masking (tested: -9984 and -100 both cause NaN). Using 1.0
+        // as original. The padding token issue must be fixed via a different
+        // approach.
+        float min_dtype = 1.0f;
+        auto opts = torch::TensorOptions()
+                        .dtype(cos_pos.dtype().toScalarType())
+                        .device(cos_pos.device());
+
+        // Detect right-padding from token ID
+        auto is_pad = (tokens == 151643);  // [seqLen]
+        // right-padding: consecutive pad tokens from the end
+        auto is_pad_cpu = is_pad.cpu();
+        for (int64_t i = seq_len - 1; i >= 0; --i) {
+          if (is_pad_cpu[i].item<bool>()) {
+            pad_count++;
+          } else {
+            break;
+          }
+        }
+        // Create causal mask [seq_len, seq_len]
+        auto causal = torch::zeros({seq_len, seq_len}, opts);
+        auto upper = torch::ones({seq_len, seq_len}, opts);
+        upper.triu_(1);
+        causal = causal + upper * min_dtype;
+
+        if (pad_count > 0) {
+          // ATB kernel with disableisTriuMask=true has its OWN internal causal
+          // mask. The external mask tensor only provides PADDING information.
+          //
+          // ATB convention: 0 = attend, 1 = don't attend.
+          // Only mask padding COLUMNS to block real tokens from attending to
+          // padding. Do NOT modify padding rows - the ATB internal causal mask
+          // handles those correctly.
+          causal.slice(1, seq_len - pad_count, seq_len) = min_dtype;
+        }
+        attn_mask = causal;
+        LOG(INFO) << "only prefill attn_mask: " << attn_mask;
+        {
+          auto mask_cpu = attn_mask.cpu().to(torch::kFloat32);
+          int64_t tail_rows = std::min<int64_t>(50, attn_mask.size(0));
+          int64_t tail_cols = std::min<int64_t>(50, attn_mask.size(1));
+          int64_t tail_row_start = attn_mask.size(0) - tail_rows;
+          int64_t tail_col_start = attn_mask.size(1) - tail_cols;
+          auto tail = mask_cpu.slice(0, tail_row_start, attn_mask.size(0))
+                          .slice(1, tail_col_start, attn_mask.size(1));
+          LOG(INFO) << "attn_mask bottom-right [" << tail_rows << "x"
+                    << tail_cols << "]:";
+          LOG(INFO) << tail;
+        }
+        LOG(INFO) << "attn_mask shape: " << attn_mask.sizes();
+
       } else {
         attn_mask = attn_mask_.get_attn_mask(
             128, cos_pos.dtype().toScalarType(), cos_pos.device());
       }
     }
+
+    // // === TENSOR DUMP: attention mask ===
+    // if (attn_mask.defined()) {
+    //   torch::save(attn_mask.to(torch::kCPU),
+    //       "/export/home/weinan5/wangshuibin/15_JD_push_xllm_flux2/12_test_flux2_klein_acc/03_cpp_dump_qwen3_output_tensor/01_cpp_dump_qwen3_inner_tensor/01_cpp_attn_mask.pt");
+    // }
 
     ModelInputParams& input_params_new =
         const_cast<ModelInputParams&>(input_params);
@@ -258,6 +334,7 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
             event_flag);
 
       rolling_guard.after_layer(layer_index);
+
       if (use_deepstack) {
         if (deep_stacks.size() > 0 && i < deep_stacks.size()) {
           h = h + deep_stacks[i];
@@ -265,6 +342,35 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
       }
     }
     auto hidden_states = norm_(h, 0);
+
+    // For flux2 embedding mode: return intermediate layer hidden states
+    // reshaped to match diffusers format [num_layers, num_tokens, hidden_size]
+    bool is_embedding_task =
+        ::xllm::ModelConfig::get_instance().task() == "embed";
+    bool return_full_embeddings =
+        ::xllm::ModelConfig::get_instance().enable_return_mm_full_embeddings();
+    bool return_flux2_embeddings =
+        (is_embedding_task && return_full_embeddings);
+    if (return_flux2_embeddings && capture_aux_hidden_states_) {
+      CHECK_EQ(capture_idx, static_cast<int64_t>(layers_to_capture_set_.size()))
+          << "Captured aux hidden layer count mismatch.";
+      const int64_t num_captured =
+          static_cast<int64_t>(layers_to_capture_set_.size());
+      // Reshape from [num_tokens, num_captured * hidden_size] (flat concat)
+      // to [num_captured, num_tokens, hidden_size] (stacked per layer).
+      // Batch splitting is handled by EmbedWorkerImpl.
+      torch::Tensor aux_hidden_states =
+          aux_output_buffer_.slice(0, 0, num_tokens)
+              .view({num_tokens, num_captured, hidden_size})
+              .permute({1, 0, 2})
+              .contiguous();
+      LOG(INFO) << "aux_hidden_states shape: " << aux_hidden_states.sizes();
+      torch::save(aux_hidden_states.to(torch::kCPU),
+                  "/export/home/weinan5/wangshuibin/15_JD_push_xllm_flux2/"
+                  "12_test_flux2_klein_acc/03_cpp_dump_qwen3_output_tensor/"
+                  "03_01_cpp_qwen3_aux_hidden_states.pt");
+      return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);
+    }
     if (capture_aux_hidden_states_) {
       CHECK_EQ(capture_idx, static_cast<int64_t>(layers_to_capture_set_.size()))
           << "Captured aux hidden layer count mismatch.";

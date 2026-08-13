@@ -77,7 +77,13 @@ void MultimodalProcessorBase::pad_to_max_length(
 
   const int32_t pad_count =
       max_sequence_length - static_cast<int32_t>(token_ids.size());
-  token_ids.insert(token_ids.begin(), pad_count, pad_id.value());
+
+  const std::string& padding_side = DiTConfig::get_instance().padding_side();
+  if (padding_side == "right") {
+    token_ids.insert(token_ids.end(), pad_count, pad_id.value());
+  } else {
+    token_ids.insert(token_ids.begin(), pad_count, pad_id.value());
+  }
 }
 
 std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(

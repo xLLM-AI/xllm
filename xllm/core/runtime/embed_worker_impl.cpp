@@ -27,6 +27,7 @@ limitations under the License.
 #include <utility>
 
 #include "common/metrics.h"
+#include "framework/config/model_config.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/state_dict/state_dict.h"
@@ -83,9 +84,28 @@ std::optional<ForwardOutput> EmbedWorkerImpl::step(const ForwardInput& input) {
       input.sampling_params.is_embeddings) {
     // create embeddings
     timer.reset();
-    auto embeddings =
-        model_->pooler(hidden_states, sampling_params.selected_token_idxes);
-    sample_output.embeddings = embeddings;
+    if (::xllm::ModelConfig::get_instance()
+            .enable_return_mm_full_embeddings() &&
+        model_output.aux_hidden_states.defined()) {
+      // flux2 text encoder mode: split aux_hidden_states by sequence
+      // and add batch dimension for pipeline_flux2_klein 4D input.
+      // aux_hidden_states shape: [num_layers, total_tokens, hidden_size]
+      auto q_seq_len_vec = input.input_params.attention.host.q_seq_lens;
+      int32_t token_start = 0;
+      sample_output.mm_embeddings.reserve(q_seq_len_vec.size());
+      for (auto seq_len : q_seq_len_vec) {
+        auto seq_aux = model_output.aux_hidden_states.slice(
+            1, token_start, token_start + seq_len);
+        // shape: [num_layers, seq_len, hidden_size] (3D)
+        // dit_batch.cpp will torch::stack to add batch dim → 4D
+        sample_output.mm_embeddings.push_back({seq_aux});
+        token_start += seq_len;
+      }
+    } else {
+      auto embeddings =
+          model_->pooler(hidden_states, sampling_params.selected_token_idxes);
+      sample_output.embeddings = embeddings;
+    }
     COUNTER_ADD(execution_latency_seconds_sampling, timer.elapsed_seconds());
 
     // set sample output to output

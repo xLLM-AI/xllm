@@ -63,7 +63,8 @@ class DiTConfig final {
          "dit_sparse_attention_sparse_start_step",
          "dit_sparse_attention_version",
          "dit_sparse_attention_mask_refresh_steps",
-         "max_sequence_length"}};
+         "max_sequence_length",
+         "padding_side"}};
     return kOptionCategory;
   }
 
@@ -112,6 +113,8 @@ class DiTConfig final {
   PROPERTY(int64_t, dit_sparse_attention_mask_refresh_steps) = 1;
 
   PROPERTY(int32_t, max_sequence_length) = 0;
+
+  PROPERTY(std::string, padding_side) = "left";
 };
 
 }  // namespace xllm

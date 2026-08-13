@@ -29,6 +29,7 @@ limitations under the License.
 
 #include "api_service/call.h"
 #include "common/metrics.h"
+#include "core/framework/config/dit_config.h"
 #include "core/platform/device_name_utils.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
@@ -119,6 +120,7 @@ LLMMaster::LLMMaster(const Options& options)
       ChatTemplate::create(engine_->tokenizer_args(), model_args_.model_type());
 
   tokenizer_ = engine_->tokenizer()->clone();
+  tokenizer_args_ = engine_->tokenizer_args();
   threadpool_ = std::make_unique<ThreadPool>(
       /*num_threads=*/options_.num_request_handling_threads(),
       /*cpu_binding=*/false,
@@ -315,6 +317,27 @@ std::shared_ptr<Request> LLMMaster::generate_request(
                           sp.service_request_id,
                           sp.source_xservice_addr);
       return nullptr;
+    }
+
+    // Pad prompt tokens to max_sequence_length for DiT text encoder.
+    const int32_t max_seq_len =
+        ::xllm::DiTConfig::get_instance().max_sequence_length();
+    if (max_seq_len > 0 && !tokenizer_args_.pad_token().empty()) {
+      const auto pad_id = tokenizer_->token_to_id(tokenizer_args_.pad_token());
+      if (pad_id.has_value() &&
+          static_cast<int32_t>(local_prompt_tokens.size()) < max_seq_len) {
+        const int32_t pad_count =
+            max_seq_len - static_cast<int32_t>(local_prompt_tokens.size());
+        const std::string& padding_side =
+            ::xllm::DiTConfig::get_instance().padding_side();
+        if (padding_side == "right") {
+          local_prompt_tokens.insert(
+              local_prompt_tokens.end(), pad_count, pad_id.value());
+        } else {
+          local_prompt_tokens.insert(
+              local_prompt_tokens.begin(), pad_count, pad_id.value());
+        }
+      }
     }
   }
 
