@@ -45,6 +45,13 @@ py::object optional_tensor(const torch::Tensor& tensor) {
   return tensor.defined() ? py::cast(tensor) : py::none();
 }
 
+py::object optional_tensor(const std::optional<torch::Tensor>& tensor) {
+  if (!tensor.has_value() || !tensor->defined()) {
+    return py::none();
+  }
+  return py::cast(*tensor);
+}
+
 void clear_python_object(py::object& object) {
   if (!object) {
     return;
@@ -126,11 +133,21 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
     py::list kv_caches_py;
     for (auto& kv : kv_caches) {
       // Slot order must match ``LayerCache`` on the Python side.
-      kv_caches_py.append(py::make_tuple(optional_tensor(kv.get_k_cache()),
-                                         optional_tensor(kv.get_v_cache()),
-                                         optional_tensor(kv.get_index_cache()),
-                                         optional_tensor(kv.get_conv_cache()),
-                                         optional_tensor(kv.get_ssm_cache())));
+      // Keep this order synchronized with LayerCache/_LAYER_CACHE_SLOTS.
+      // Generic caches use the first five entries; DeepSeek-V4 uses the
+      // trailing six entries returned by KVCache's DSV4 getters.
+      kv_caches_py.append(
+          py::make_tuple(optional_tensor(kv.get_k_cache()),
+                         optional_tensor(kv.get_v_cache()),
+                         optional_tensor(kv.get_index_cache()),
+                         optional_tensor(kv.get_conv_cache()),
+                         optional_tensor(kv.get_ssm_cache()),
+                         optional_tensor(kv.get_swa_cache()),
+                         optional_tensor(kv.get_compress_kv_state()),
+                         optional_tensor(kv.get_compress_score_state()),
+                         optional_tensor(kv.get_compress_index_kv_state()),
+                         optional_tensor(kv.get_compress_index_score_state()),
+                         optional_tensor(kv.get_indexer_cache_scale())));
     }
     py_executor_.attr("bind_kv_caches")(kv_caches_py);
     kv_bound_ = true;
