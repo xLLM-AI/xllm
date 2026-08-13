@@ -183,8 +183,7 @@ TEST_F(DeepseekV4IndexerTest, DSparkSparseTilingUsesSupportedWindow) {
   params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
   params.meta.q_max_seq_len = 1;
 
-  EXPECT_TRUE(
-      deepseek_v4_uses_prefill_sparse_metadata(params.meta.batch_forward_type));
+  EXPECT_TRUE(params.meta.batch_forward_type.no_decode());
   EXPECT_EQ(deepseek_v4_ori_window_left(/*window_size=*/128,
                                         /*dspark_block_size=*/5,
                                         /*use_native_dspark_sas=*/false),
@@ -199,8 +198,7 @@ TEST_F(DeepseekV4IndexerTest, DSparkSparseTilingUsesSupportedWindow) {
             132);
 
   params.meta.batch_forward_type = BatchForwardType::DECODE;
-  EXPECT_FALSE(
-      deepseek_v4_uses_prefill_sparse_metadata(params.meta.batch_forward_type));
+  EXPECT_FALSE(params.meta.batch_forward_type.no_decode());
 }
 
 TEST_F(DeepseekV4IndexerTest, DSparkNativeSwaIndicesAreSharedByQueryRows) {

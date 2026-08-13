@@ -60,15 +60,10 @@ inline void invalidate_draft_model_geometry(ModelInputParams& input_params) {
 }
 
 inline bool is_deepseek_v4_dspark_draft(const std::string& model_type) {
+  // Also gates head/embedding sharing: DeepSeek-V4 DSpark checkpoints carry
+  // trained mtp.0.embed / mtp.<last>.head tensors (with the draft-side QuaRot
+  // transform) that must not be aliased to the target modules.
   return model_type == "deepseek_v4_dspark";
-}
-
-inline bool draft_uses_own_head_and_embedding(const std::string& model_type) {
-  // DeepSeek-V4 DSpark checkpoints contain trained mtp.0.embed and
-  // mtp.<last>.head tensors. They are not aliases of the target model's
-  // embedding/head (and may also carry the draft-side QuaRot transform), so
-  // replacing them after load destroys proposal quality.
-  return is_deepseek_v4_dspark_draft(model_type);
 }
 
 enum class DSparkSasMode : uint8_t {

@@ -366,9 +366,12 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
 
   if (draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
     const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
+    // DeepSeek-V4 DSpark checkpoints contain trained mtp.0.embed and
+    // mtp.<last>.head tensors. They are not aliases of the target model's
+    // embedding/head (and may also carry the draft-side QuaRot transform), so
+    // replacing them after load destroys proposal quality.
     const bool uses_own_head_and_embedding =
-        dflash_detail::draft_uses_own_head_and_embedding(
-            draft_args.model_type());
+        dflash_detail::is_deepseek_v4_dspark_draft(draft_args.model_type());
     if (uses_own_head_and_embedding) {
       CHECK_EQ(parallel_args_.cp_size(), 1)
           << "DeepSeek-V4 DSpark does not support context parallelism yet.";

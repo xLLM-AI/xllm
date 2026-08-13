@@ -1713,8 +1713,7 @@ class DeepseekV4ModelImpl
     // The compatibility fallback uses q_len=1 with CHUNKED_PREFILL semantics,
     // whereas native DSpark uses a gamma-wide DECODE query. The batch type,
     // not q_max_seq_len, is therefore the authoritative metadata selector.
-    const bool is_prefill = layer::deepseek_v4_uses_prefill_sparse_metadata(
-        params.meta.batch_forward_type);
+    const bool is_prefill = params.meta.batch_forward_type.no_decode();
 
     const char* layout_kv = "PA_ND";
     auto empty_int32_opt = as_empty_int32_tensor(dsa.actual_seq_lengths_query);

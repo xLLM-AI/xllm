@@ -40,11 +40,6 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
-inline bool deepseek_v4_uses_prefill_sparse_metadata(
-    const BatchForwardType& batch_forward_type) {
-  return batch_forward_type.no_decode();
-}
-
 inline int64_t deepseek_v4_ori_window_left(int64_t window_size,
                                            int64_t dspark_block_size,
                                            bool use_native_dspark_sas) {

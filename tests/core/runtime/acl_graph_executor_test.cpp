@@ -1279,12 +1279,9 @@ TEST(DSparkWorkerInputTest, SeparatesDraftAndValidationWidths) {
 }
 
 TEST(DSparkWorkerWeightsTest, PreservesDeepseekDraftHeadAndEmbedding) {
-  EXPECT_TRUE(
-      dflash_detail::draft_uses_own_head_and_embedding("deepseek_v4_dspark"));
-  EXPECT_FALSE(
-      dflash_detail::draft_uses_own_head_and_embedding("qwen3_dspark"));
-  EXPECT_FALSE(
-      dflash_detail::draft_uses_own_head_and_embedding("qwen3_dflash"));
+  EXPECT_TRUE(dflash_detail::is_deepseek_v4_dspark_draft("deepseek_v4_dspark"));
+  EXPECT_FALSE(dflash_detail::is_deepseek_v4_dspark_draft("qwen3_dspark"));
+  EXPECT_FALSE(dflash_detail::is_deepseek_v4_dspark_draft("qwen3_dflash"));
 }
 
 TEST(DSparkSasFallbackTest, ChoosesCompatibleRowsUnlessNativeIsEnabled) {
