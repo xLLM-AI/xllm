@@ -548,15 +548,10 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   // query_width-wide sequence.
   const int32_t draft_width = dflash_detail::decode_draft_width(
       options_.num_speculative_tokens(), sample_from_anchor());
-  const dflash_detail::DSparkSasMode sas_mode = draft_sas_mode();
-  const bool use_block_parallel_rows =
-      sas_mode == dflash_detail::DSparkSasMode::COMPATIBILITY;
+  const bool use_block_parallel_rows = draft_use_block_parallel_rows();
   ForwardInput query_input = input;
   dflash_detail::invalidate_draft_model_geometry(query_input.input_params);
-  query_input.input_params.meta.batch_forward_type =
-      sas_mode == dflash_detail::DSparkSasMode::NATIVE
-          ? BatchForwardType::DECODE
-          : BatchForwardType::CHUNKED_PREFILL;
+  query_input.input_params.meta.batch_forward_type = draft_batch_forward_type();
   query_input.input_params.meta.q_max_seq_len =
       use_block_parallel_rows ? 1 : draft_width;
   if (use_block_parallel_rows) {
@@ -1032,9 +1027,7 @@ void DFlashWorkerImpl::prepare_query_inputs(const ForwardInput& input,
 
   specBuilder::DecodeBuildBuffers buf;
   std::vector<int32_t> selected_idxes;
-  const dflash_detail::DSparkSasMode sas_mode = draft_sas_mode();
-  const bool use_block_parallel_rows =
-      sas_mode == dflash_detail::DSparkSasMode::COMPATIBILITY;
+  const bool use_block_parallel_rows = draft_use_block_parallel_rows();
   build_query_rows(input,
                    mask_token_id_,
                    options_.num_speculative_tokens(),
@@ -1060,10 +1053,7 @@ void DFlashWorkerImpl::prepare_query_inputs(const ForwardInput& input,
                                           buf.out_positions,
                                           input.token_ids.options(),
                                           input.positions.options());
-  input_params.meta.batch_forward_type =
-      sas_mode == dflash_detail::DSparkSasMode::NATIVE
-          ? BatchForwardType::DECODE
-          : BatchForwardType::CHUNKED_PREFILL;
+  input_params.meta.batch_forward_type = draft_batch_forward_type();
   if (use_block_parallel_rows) {
     expand_block_parallel_sequence_rows(input_params, query_width);
   }

@@ -132,6 +132,14 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
 
  private:
   dflash_detail::DSparkSasMode draft_sas_mode() const;
+  bool draft_use_block_parallel_rows() const {
+    return draft_sas_mode_ == dflash_detail::DSparkSasMode::COMPATIBILITY;
+  }
+  BatchForwardType draft_batch_forward_type() const {
+    return draft_sas_mode_ == dflash_detail::DSparkSasMode::NATIVE
+               ? BatchForwardType::DECODE
+               : BatchForwardType::CHUNKED_PREFILL;
+  }
 
   void fill_validate_input_from_draft_outputs(const DraftBlock& draft_block,
                                               ForwardInput& validate_input,

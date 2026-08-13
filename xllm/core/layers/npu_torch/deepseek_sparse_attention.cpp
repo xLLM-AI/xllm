@@ -501,7 +501,7 @@ torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
                                        const torch::Tensor& query_cu_seq_lens,
                                        const torch::Tensor& seq_lens,
                                        int64_t window_size,
-                                       int64_t num_speculative_tokens,
+                                       int64_t dspark_block_size,
                                        int64_t cache_block_size) {
   // Native DSpark SAS addresses the trailing SWA prefix plus the whole current
   // diffusion block explicitly. The compatibility fallback never calls it
@@ -522,7 +522,7 @@ torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
   torch::Tensor start_pos = (prefix_lens - window_size).clamp_min(0);
   torch::Tensor visible_lens = kv_lens - start_pos;
   constexpr int64_t kIndexAlignment = 128;
-  const int64_t min_width = window_size + num_speculative_tokens;
+  const int64_t min_width = window_size + dspark_block_size;
   const int64_t index_width = util::align_up(min_width, kIndexAlignment);
 
   torch::Tensor columns = torch::arange(

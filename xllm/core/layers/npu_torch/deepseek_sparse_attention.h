@@ -56,7 +56,7 @@ torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
                                        const torch::Tensor& query_cu_seq_lens,
                                        const torch::Tensor& seq_lens,
                                        int64_t window_size,
-                                       int64_t num_speculative_tokens,
+                                       int64_t dspark_block_size,
                                        int64_t cache_block_size);
 
 // DSA kv state aligned with Python:
