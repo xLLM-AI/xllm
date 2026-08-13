@@ -171,23 +171,6 @@ std::vector<int32_t> read_capture_layer_ids(
   return capture_layer_ids;
 }
 
-std::optional<std::string> block_diffusion_draft_model_type(
-    const ModelArgs& args,
-    const runtime::Options& options) {
-#if defined(USE_NPU)
-  if (options.speculative_algorithm() == "DFlash") {
-    return "DFlashDraftModel";
-  }
-  if (util::is_deepseek_v4_model_type(args.model_type())) {
-    return "deepseek_v4_dspark";
-  }
-  return "DSparkDraftModel";
-#else
-  (void)args;
-  (void)options;
-  return std::nullopt;
-#endif
-}
 
 void configure_deepseek_v4_dspark_args(ModelArgs& args,
                                        const runtime::Options& options) {
