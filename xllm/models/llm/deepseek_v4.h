@@ -911,7 +911,6 @@ class DeepseekV4ModelImpl
     }
 
     std::optional<torch::Tensor> residual;
-    aux_capture_.reset_capture_index();
     for (size_t i = 0; i < layers_.size(); i++) {
       if (attn_metadata.dsa_metadata) {
         auto& dsa = *(attn_metadata.dsa_metadata);

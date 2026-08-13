@@ -280,7 +280,6 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
     if (::xllm::KernelConfig::get_instance().enable_intralayer_addnorm()) {
       residual = torch::zeros_like(h);
     }
-    aux_capture_.reset_capture_index();
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event = nullptr;
       std::atomic<bool>* event_flag = nullptr;

@@ -1209,7 +1209,6 @@ TEST(AuxHiddenCaptureTest, PreservesConfiguredLayerOrderAndResidual) {
   AuxHiddenCapture capture(
       args, torch::TensorOptions().dtype(torch::kFloat32), 3);
 
-  capture.reset_capture_index();
   capture.capture_layer(
       /*layer_idx=*/0, torch::full({3, 2}, 10.0f), std::nullopt);
   capture.capture_layer(

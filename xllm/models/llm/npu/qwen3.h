@@ -186,7 +186,6 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
 
     ModelInputParams& input_params_new =
         const_cast<ModelInputParams&>(input_params);
-    aux_capture_.reset_capture_index();
     RollingLayerGuard rolling_guard(rolling_mgr_);
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event{nullptr};
