@@ -25,7 +25,6 @@ limitations under the License.
 #include <vector>
 
 #include "common/metrics.h"
-#include "core/common/speculative_output_metrics.h"
 #include "core/framework/batch/batch.h"
 #include "core/framework/block/block.h"
 #include "core/framework/block/block_manager_impl.h"
@@ -1307,8 +1306,8 @@ TEST(SpeculativeOutputMetricsTest, CountsCommittedAndAcceptedTokensFromOutput) {
   // Row 0 accepts two draft tokens; row 1 accepts all five.
   const torch::Tensor tokens = torch::tensor(
       {{10, 11, 12, -1, -1, -1}, {20, 21, 22, 23, 24, 25}}, torch::kInt32);
-  const auto stats = speculative_metrics::calculate_speculative_output_stats(
-      tokens, /*num_speculative_tokens=*/5);
+  const auto stats =
+      calculate_speculative_output_stats(tokens, /*num_speculative_tokens=*/5);
 
   EXPECT_TRUE(stats.supported_dtype);
   EXPECT_EQ(stats.committed_tokens, 9);

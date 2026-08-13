@@ -54,7 +54,6 @@ cc_library(
     shm_channel.cpp
   DEPS
     :api_service
-    :common
     :runtime
     :util
     glog::glog
@@ -75,7 +74,6 @@ cc_library(
   SRCS
     worker_service.cpp
   DEPS
-    :common
     :request
     absl::strings
     glog::glog

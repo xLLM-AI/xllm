@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
 #include "common/macros.h"
@@ -31,6 +32,22 @@ bool should_run_speculative_decode(const ModelInputParams& params);
 // Keep padded and raw DP token-count views in the same speculative layout.
 void scale_speculative_parallel_token_counts(ModelInputParams& params,
                                              int32_t multiplier);
+
+// Per-batch accounting of speculative decode outputs. Column 0 is always the
+// first committed token, and draft position p is accepted iff column p+1 is
+// non-negative.
+struct SpeculativeOutputStats {
+  std::vector<int64_t> accepted_per_position;
+  int64_t committed_tokens = 0;
+  bool supported_dtype = false;
+};
+
+// Extracts per-position acceptance counts and total committed tokens from a
+// speculative next_tokens tensor. Returns supported_dtype=false for unsupported
+// integer widths.
+SpeculativeOutputStats calculate_speculative_output_stats(
+    const torch::Tensor& tokens,
+    int64_t num_speculative_tokens);
 
 // Base class for all speculative decoding workers.
 // Provides common logic: target model management, step dispatch, and

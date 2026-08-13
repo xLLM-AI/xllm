@@ -48,6 +48,30 @@ int64_t get_dp_local_tp_size(const ParallelArgs& parallel_args) {
   return std::max<int64_t>(parallel_args.world_size() / dp_size / cp_size, 1);
 }
 
+template <typename T>
+SpeculativeOutputStats calculate_speculative_output_stats_typed(
+    const torch::Tensor& tokens,
+    int64_t num_speculative_tokens) {
+  const T* data = tokens.const_data_ptr<T>();
+  const int64_t batch_size = tokens.size(0);
+  const int64_t token_width = tokens.size(1);
+  SpeculativeOutputStats stats;
+  stats.accepted_per_position.assign(
+      static_cast<size_t>(num_speculative_tokens), 0);
+  stats.supported_dtype = true;
+  for (int64_t row = 0; row < batch_size; ++row) {
+    for (int64_t column = 0; column < token_width; ++column) {
+      if (data[row * token_width + column] >= static_cast<T>(0)) {
+        ++stats.committed_tokens;
+        if (column > 0 && column <= num_speculative_tokens) {
+          ++stats.accepted_per_position[static_cast<size_t>(column - 1)];
+        }
+      }
+    }
+  }
+  return stats;
+}
+
 KVCacheEstimateOptions make_kv_cache_estimate_options(
     const ModelArgs& model_args,
     const runtime::Options& options,
@@ -116,6 +140,27 @@ void scale_speculative_parallel_token_counts(ModelInputParams& params,
   }
   for (int32_t& token_num : params.parallel.raw_dp_global_token_nums) {
     token_num *= multiplier;
+  }
+}
+
+SpeculativeOutputStats calculate_speculative_output_stats(
+    const torch::Tensor& tokens,
+    int64_t num_speculative_tokens) {
+  switch (tokens.scalar_type()) {
+    case torch::kInt64:
+      return calculate_speculative_output_stats_typed<int64_t>(
+          tokens, num_speculative_tokens);
+    case torch::kInt32:
+      return calculate_speculative_output_stats_typed<int32_t>(
+          tokens, num_speculative_tokens);
+    case torch::kInt16:
+      return calculate_speculative_output_stats_typed<int16_t>(
+          tokens, num_speculative_tokens);
+    case torch::kInt8:
+      return calculate_speculative_output_stats_typed<int8_t>(
+          tokens, num_speculative_tokens);
+    default:
+      return {};
   }
 }
 
