@@ -22,6 +22,7 @@ limitations under the License.
 #include "core/framework/speculative/speculative_profile_registry.h"
 #include "forward_params.h"
 #include "framework/kv_cache/kv_cache_shape.h"
+#include "framework/kv_cache_transfer/prefetch_result.h"
 #include "framework/model/causal_lm.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_input_params.h"
@@ -127,8 +128,8 @@ class WorkerClient {
 
   virtual void prefetch_from_storage(
       const std::vector<BlockTransferInfo>& block_transfer_info,
-      std::shared_ptr<std::atomic<int32_t>> flag,
-      std::shared_ptr<std::atomic<uint32_t>> success_cnt);
+      std::shared_ptr<PrefetchResult> result,
+      size_t worker_index);
 
   // Run the model on the given input. async call
   // the future returns a successfull status with no meaningful value

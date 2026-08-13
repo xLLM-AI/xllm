@@ -399,7 +399,22 @@ def _validate_submodules_or_exit(repo_root: str) -> None:
         exit(1)
 
 
-def _ensure_prebuild_dependencies_installed(script_path: str) -> None:
+def _ensure_prebuild_dependencies_installed(
+    script_path: str,
+    enable_ha: bool = False,
+) -> None:
+    if enable_ha and not _run_shell_command(
+        "bash third_party/dependencies.sh --ensure-go",
+        cwd=script_path,
+        passthrough_output=True,
+    ):
+        logger.error("❌ Failed to install Go required by Mooncake HA.")
+        _print_manual_check_commands([
+            f"cd {script_path}",
+            "bash third_party/dependencies.sh --ensure-go",
+        ])
+        exit(1)
+
     dependency_files = _get_required_dependency_files()
     missing_dependencies = _collect_missing_dependencies(dependency_files)
     if missing_dependencies:
@@ -579,9 +594,9 @@ def _ensure_xllm_ops_rebuild_state(device: str) -> None:
         exit(1)
 
 
-def pre_build(device: str) -> None:
+def pre_build(device: str, enable_ha: bool = False) -> None:
     script_path = get_base_dir()
 
     _validate_submodules_or_exit(script_path)
-    _ensure_prebuild_dependencies_installed(script_path)
+    _ensure_prebuild_dependencies_installed(script_path, enable_ha)
     _ensure_xllm_ops_rebuild_state(device)

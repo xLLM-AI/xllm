@@ -91,7 +91,7 @@ def build_spec_verify_token_update_kernel(spec_width: int):
 class SpecVerifyTokenUpdateKernel(TilelangKernel):
     DISPATCH_SCHEMA = [DispatchField("spec_width", "int32")]
     SPECIALIZATIONS = [
-        {"variant_key": f"w{spec_width}", "spec_width": spec_width}
+        {"variant_key": f"token_w{spec_width}", "spec_width": spec_width}
         for spec_width in SUPPORTED_SPEC_VERIFY_WIDTHS
     ]
 

@@ -38,6 +38,8 @@ class KVCacheTensorRole {
     INDEX_KV_STATE = 12,
     INDEX_SCORE_STATE = 13,
     SWA = 14,
+    COMPRESS_STATE = 15,
+    COMPRESS_INDEX_STATE = 16,
     INVALID = -1,
   };
 
@@ -73,6 +75,10 @@ class KVCacheTensorRole {
       value_ = INDEX_SCORE_STATE;
     } else if (str == "SWA" || str == "swa") {
       value_ = SWA;
+    } else if (str == "COMPRESS_STATE" || str == "compress_state") {
+      value_ = COMPRESS_STATE;
+    } else if (str == "COMPRESS_INDEX_STATE" || str == "compress_index_state") {
+      value_ = COMPRESS_INDEX_STATE;
     } else {
       value_ = INVALID;
     }
@@ -119,6 +125,10 @@ class KVCacheTensorRole {
       return "index_score_state";
     } else if (this->value_ == SWA) {
       return "swa";
+    } else if (this->value_ == COMPRESS_STATE) {
+      return "compress_state";
+    } else if (this->value_ == COMPRESS_INDEX_STATE) {
+      return "compress_index_state";
     } else {
       return "invalid";
     }

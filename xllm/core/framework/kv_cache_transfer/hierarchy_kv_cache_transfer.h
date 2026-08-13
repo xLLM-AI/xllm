@@ -36,6 +36,8 @@ limitations under the License.
 #include "util/threadpool.h"
 
 namespace xllm {
+class KVCacheStore;
+
 class HierarchyKVCacheTransfer {
  public:
   struct LayerBatchRange {
@@ -67,6 +69,8 @@ class HierarchyKVCacheTransfer {
     PROPERTY(std::string, store_master_server_address) = "";
     PROPERTY(std::string, store_metadata_server) = "";
     PROPERTY(std::string, store_local_hostname) = "";
+    PROPERTY(std::string, store_namespace) = "";
+    PROPERTY(uint32_t, store_worker_id) = 0;
   };
 
   HierarchyKVCacheTransfer(const Options& options,
@@ -75,7 +79,7 @@ class HierarchyKVCacheTransfer {
                            std::vector<xllm::KVCache>* kv_caches_ptr,
                            const KVCacheShape& kv_cache_shape,
                            const KVCacheCreateOptions& create_options);
-  ~HierarchyKVCacheTransfer() = default;
+  ~HierarchyKVCacheTransfer();
 
   uint32_t transfer_kv_blocks(
       const uint64_t batch_id,
@@ -83,6 +87,9 @@ class HierarchyKVCacheTransfer {
 
   uint32_t transfer_kv_blocks(const uint64_t batch_id,
                               Slice<BlockTransferInfo>& block_transfer_info);
+
+  std::vector<uint8_t> prefetch_kv_blocks(
+      Slice<BlockTransferInfo>& block_transfer_info);
 
   void set_layer_synchronizer(ModelInputParams& params);
 
@@ -116,6 +123,7 @@ class HierarchyKVCacheTransfer {
   std::vector<LayerBatchRange> layer_batch_ranges_;
 
   std::unique_ptr<BatchMemcpy> batch_memcpy_;
+  std::unique_ptr<KVCacheStore> kv_cache_store_;
 
   mutable std::mutex mutex_;
   std::unordered_map<uint64_t, std::shared_ptr<LayerSynchronizer>>

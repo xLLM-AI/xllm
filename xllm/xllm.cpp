@@ -114,6 +114,14 @@ Options create_options(const std::string& instance_name, bool is_local) {
   const DiTConfig& dit_config = DiTConfig::get_instance();
   const RecConfig& rec_config = RecConfig::get_instance();
 
+  if (kv_cache_store_config.enable_kvcache_store()) {
+    CHECK(kv_cache_config.enable_prefix_cache())
+        << "KV cache Store requires --enable_prefix_cache=true.";
+    CHECK_GT(kv_cache_store_config.host_blocks_factor(), 1.0)
+        << "KV cache Store requires --host_blocks_factor > 1 so Host cache "
+           "blocks can serve as transfer destinations.";
+  }
+
 #if !defined(USE_NPU)
   CHECK(!speculative_config.enable_mtp_draft_body_tp1())
       << "enable_mtp_draft_body_tp1 is only supported on the NPU backend";
@@ -205,9 +213,7 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .enable_online_preempt_offline(
           scheduler_config.enable_online_preempt_offline())
       .host_blocks_factor(kv_cache_store_config.host_blocks_factor())
-      .enable_kvcache_store(kv_cache_store_config.enable_kvcache_store() &&
-                            kv_cache_config.enable_prefix_cache() &&
-                            (kv_cache_store_config.host_blocks_factor() > 1.0))
+      .enable_kvcache_store(kv_cache_store_config.enable_kvcache_store())
       .prefetch_timeout(kv_cache_store_config.prefetch_timeout())
       .prefetch_batch_size(kv_cache_store_config.prefetch_batch_size())
       .layers_wise_copy_batchs(kv_cache_store_config.layers_wise_copy_batchs())

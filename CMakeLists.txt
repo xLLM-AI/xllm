@@ -8,9 +8,20 @@ option(USE_CUDA "Enable CUDA support" OFF)
 option(USE_MUSA "Enable MUSA support" OFF)
 option(USE_DCU "Enable DCU support" OFF)
 option(USE_MACA "Enable MACA support" OFF)
+option(ENABLE_HA "Enable Mooncake etcd-based high availability support" OFF)
 add_compile_definitions(YLT_ENABLE_IBV)
 add_definitions(-DYLT_ENABLE_IBV)
 set(YLT_ENABLE_IBV ON)
+
+if(ENABLE_HA)
+  set(USE_ETCD ON CACHE BOOL
+      "Enable Mooncake transfer-engine etcd backend" FORCE)
+  set(STORE_USE_ETCD ON CACHE BOOL
+      "Enable Mooncake Store etcd backend" FORCE)
+  list(APPEND CMAKE_BUILD_RPATH "$ORIGIN")
+  list(APPEND CMAKE_INSTALL_RPATH "$ORIGIN")
+  message(STATUS "ENABLE_HA=ON, Mooncake etcd high availability enabled")
+endif()
 
 if(DEVICE_ARCH STREQUAL "ARM")
     set(CMAKE_SYSTEM_PROCESSOR aarch64)
@@ -268,11 +279,14 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-format-truncation")
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/cmake)
 set(_XLLM_MUSIFY_COPTS "")
-if(USE_MUSA)
-  if(NOT USE_CUDA)
-    message(FATAL_ERROR "USE_MUSA requires USE_CUDA=ON")
-  endif()
 
+if(USE_CUDA AND USE_MUSA)
+  message(FATAL_ERROR "USE_CUDA and USE_MUSA are mutually exclusive")
+endif()
+
+if(USE_MUSA)
+  # MUSA uses CUDA language with mcc_wrapper + musamapping plugin.
+  # mcc_wrapper must be set before project().
   if(DEFINED ENV{MUSAMAPPING_PATH} AND NOT "$ENV{MUSAMAPPING_PATH}" STREQUAL "")
     set(_XLLM_MUSAMAPPING_PATH "$ENV{MUSAMAPPING_PATH}")
   elseif(DEFINED ENV{MUSA_HOME} AND NOT "$ENV{MUSA_HOME}" STREQUAL "")
@@ -339,9 +353,10 @@ find_package(Boost REQUIRED)
 find_package(Boost REQUIRED COMPONENTS serialization)
 find_package(Threads REQUIRED)
 # find all dependencies from vcpkg
-find_package(folly CONFIG REQUIRED)
-find_package(glog CONFIG REQUIRED)
+set(GFLAGS_USE_TARGET_NAMESPACE TRUE)
 find_package(gflags CONFIG REQUIRED)
+find_package(glog CONFIG REQUIRED)
+find_package(folly CONFIG REQUIRED)
 find_package(leveldb CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(absl CONFIG REQUIRED)
@@ -571,7 +586,6 @@ endif()
 
 if(USE_MUSA)
   add_definitions(-DUSE_MUSA)
-  add_definitions(-DUSE_CUDA)
   add_compile_definitions(TORCH_CUDA=1)
   if(NOT DEFINED MUSA_PATH)
     if(DEFINED ENV{MUSA_HOME} AND NOT "$ENV{MUSA_HOME}" STREQUAL "")
@@ -844,6 +858,28 @@ endif()
 # Configure third_party first so xllm can link against real CMake targets.
 
 add_subdirectory(third_party)
+if(ENABLE_HA)
+  if(NOT TARGET build_etcd_wrapper OR NOT TARGET mooncake_store)
+    message(FATAL_ERROR
+      "ENABLE_HA requires Mooncake Store and its etcd wrapper targets")
+  endif()
+
+  if(CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(MOONCAKE_HA_RUNTIME_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+  else()
+    set(MOONCAKE_HA_RUNTIME_DIR "${CMAKE_BINARY_DIR}")
+  endif()
+  set(MOONCAKE_ETCD_WRAPPER
+      "${CMAKE_BINARY_DIR}/third_party/Mooncake/mooncake-common/etcd/libetcd_wrapper.so")
+  add_custom_target(stage_mooncake_ha_runtime ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${MOONCAKE_HA_RUNTIME_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${MOONCAKE_ETCD_WRAPPER}"
+            "${MOONCAKE_HA_RUNTIME_DIR}/libetcd_wrapper.so"
+    DEPENDS build_etcd_wrapper
+    COMMENT "Staging Mooncake etcd HA runtime")
+  add_dependencies(mooncake_store stage_mooncake_ha_runtime)
+endif()
 if(TARGET brpc-static AND NOT TARGET brpc)
   add_library(brpc ALIAS brpc-static)
 endif()

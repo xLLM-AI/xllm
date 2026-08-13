@@ -82,8 +82,20 @@ atb::Status BaseLayer::execute_node(atb_speed::Model::Node& node,
   //   capture ends, causing inconsistency between ATB context and the actual
   //   execution stream
   if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
-    void* stream = c10_npu::getCurrentNPUStream(device_.index()).stream();
-    context_->SetExecuteStream(stream);
+    aclrtStream stream = c10_npu::getCurrentNPUStream(device_.index()).stream();
+    std::vector<aclrtStream> execute_streams = context_->GetExecuteStreams();
+    atb::Status stream_status = atb::NO_ERROR;
+    if (execute_streams.size() > 1) {
+      execute_streams[0] = stream;
+      stream_status = context_->SetExecuteStreams(execute_streams);
+    } else {
+      stream_status = context_->SetExecuteStream(stream);
+    }
+    if (stream_status != atb::NO_ERROR) {
+      LOG(ERROR) << "Failed to bind ATB execute streams, status="
+                 << stream_status;
+      return stream_status;
+    }
   }
   // if (::xllm::ExecutionConfig::get_instance().enable_graph() &&
   // !graph_captured_) {

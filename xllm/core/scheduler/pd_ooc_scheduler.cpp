@@ -347,6 +347,7 @@ void PDOOCScheduler::prefill_step(const absl::Duration& timeout) {
 
 std::vector<Batch> PDOOCScheduler::prepare_batch() {
   Timer timer;
+  drain_prefetched_requests();
   // propogate new requests to prefill_queue_
   // Include those requests that are preempted by others.
   std::shared_ptr<Request> request;
@@ -699,13 +700,6 @@ void PDOOCScheduler::handle_prefill_requests_impl(
       CHECK(num_sequences == 1 || num_sequences == request->best_of())
           << "Waiting request should have either 1 or best_of("
           << request->best_of() << ") sequences, got " << num_sequences;
-    }
-
-    if (!kv_cache_manager_->update_prefetch_result(
-            request, options_.prefetch_timeout())) {
-      waiting_priority_queue->pop_top();
-      waiting_priority_queue->push(request);
-      continue;
     }
 
     // TODO: FIXME later

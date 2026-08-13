@@ -21,16 +21,19 @@ limitations under the License.
 
 #include "core/layers/npu/npu_deepseek_v32_decoder_layer_impl.h"
 #include "deepseek_v32.h"
+#include "models/llm/npu/glm_shared_expert_stream.h"
 
 namespace xllm::npu::model {
 
 using torch::indexing::None;
 using ISlice = torch::indexing::Slice;
 
-class GlmMoeDsaModelImpl : public torch::nn::Module {
+class GlmMoeDsaModelImpl : private GlmSharedExpertStreamOwner,
+                           public torch::nn::Module {
  public:
   GlmMoeDsaModelImpl(const ModelContext& context)
-      : device_(context.get_tensor_options().device()) {
+      : GlmSharedExpertStreamOwner(context),
+        device_(context.get_tensor_options().device()) {
     auto options = context.get_tensor_options();
     auto model_args = context.get_model_args();
     auto parallel_args = context.get_parallel_args();

@@ -427,3 +427,12 @@ service DistributeWorker {
   rpc StartProfile (Empty) returns (Status);
   rpc StopProfile (Empty) returns (Status);
 }
+
+// Block-granular result for one Mooncake prefetch batch. The payload is sent
+// over the brpc stream opened by PrefetchFromStorage.
+message PrefetchResultChunk {
+  uint64 offset = 1;
+  bytes hit_bitmap = 2;
+  bool completed = 3;
+  bool worker_ok = 4;
+}

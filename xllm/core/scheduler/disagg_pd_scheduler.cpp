@@ -312,20 +312,13 @@ void DisaggPDScheduler::step(const absl::Duration& timeout) {
   }
 }
 
-bool DisaggPDScheduler::add_request(std::shared_ptr<Request>& request) {
-  CHECK(request != nullptr);
-  CHECK(!request->sequences().empty());
-
-  kv_cache_manager_->prefetch_from_storage(request);
-
+bool DisaggPDScheduler::enqueue_ready_request(
+    std::shared_ptr<Request> request) {
   if (request->offline()) {
-    // offline request, push to offline queue
-    prefill_request_queue_offline_.enqueue(request);
+    prefill_request_queue_offline_.enqueue(std::move(request));
     return true;
   }
-  // push and wait
-  prefill_request_queue_.enqueue(request);
-
+  prefill_request_queue_.enqueue(std::move(request));
   return true;
 }
 
@@ -373,14 +366,17 @@ void DisaggPDScheduler::dispatch_requests() {
     }
     remote_instances_info_[selected_instance] = remote_info;
 
-    const bool enable_mla = engine_->model_args().enable_mla();
+    const ModelArgs& model_args = engine_->model_args();
+    const bool kv_cache_is_tp_invariant =
+        model_args.enable_mla() ||
+        util::is_tp_invariant_kv_cache_model_type(model_args.model_type());
     const bool enable_heterogeneous_pd =
         DisaggPDConfig::get_instance().enable_heterogeneous_pd();
     const PdTopoResult topo_result =
         check_pd_topo(instance_info_,
                       remote_info,
                       options_.kv_cache_transfer_mode(),
-                      enable_mla,
+                      kv_cache_is_tp_invariant,
                       enable_heterogeneous_pd);
     const bool allow_pd_topo = topo_result.status == PdTopoStatus::ALLOW_HOMO ||
                                topo_result.status == PdTopoStatus::ALLOW_HETERO;
@@ -395,12 +391,14 @@ void DisaggPDScheduler::dispatch_requests() {
                " is incompatible: " + topo_result.reason});
       continue;
     }
-    if (!enable_mla && topo_result.status == PdTopoStatus::ALLOW_HETERO &&
+    if (!kv_cache_is_tp_invariant &&
+        topo_result.status == PdTopoStatus::ALLOW_HETERO &&
         options_.num_speculative_tokens() <= 0) {
       response_processor_->process_failed_request(
           request,
           {StatusCode::INVALID_ARGUMENT,
-           "non-mla heterogeneous PD requires speculative decoding"});
+           "tp-sharded kv cache heterogeneous PD requires speculative "
+           "decoding"});
       continue;
     }
     if (topo_result.status == PdTopoStatus::ALLOW_HETERO && VLOG_IS_ON(1)) {
@@ -412,7 +410,8 @@ void DisaggPDScheduler::dispatch_requests() {
               << remote_topo.tp_size;
     }
     request->state().heterogeneous_pd =
-        !enable_mla && topo_result.status == PdTopoStatus::ALLOW_HETERO;
+        !kv_cache_is_tp_invariant &&
+        topo_result.status == PdTopoStatus::ALLOW_HETERO;
 
     proto::DisaggPDService_Stub* stub = create_rpc_channel(selected_instance);
     if (stub == nullptr) {
@@ -994,7 +993,7 @@ bool DisaggPDScheduler::decode_recv_first_generation(
   }
   const double prepare_seconds = receive_timer.elapsed_seconds();
 
-  // Pull KV cache in native PULL mode. For a non-MLA heterogeneous TP PUSH
+  // Pull KV cache in native PULL mode. For a TP-sharded heterogeneous PUSH
   // deployment, pull every P-side shard into temporary D-side caches and
   // concatenate the sharded tensor dimensions before decode starts.
   if (kv_cache_transfer_mode == "PULL" || hetero_kv_pull) {

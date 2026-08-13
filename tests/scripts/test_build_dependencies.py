@@ -67,6 +67,25 @@ class BuildDependenciesTest(unittest.TestCase):
             ["/opt/xllm/yalantinglibs/lib/cmake/yalantinglibs/config.cmake"],
         )
 
+    def test_ha_prebuild_installs_go(self) -> None:
+        with (
+            mock.patch.object(utils, "_run_shell_command", return_value=True) as run,
+            mock.patch.object(
+                utils, "_get_required_dependency_files", return_value={}
+            ),
+            mock.patch.object(utils, "_export_cmake_prefix_paths"),
+        ):
+            utils._ensure_prebuild_dependencies_installed(
+                "/repo",
+                enable_ha=True,
+            )
+
+        run.assert_called_once_with(
+            "bash third_party/dependencies.sh --ensure-go",
+            cwd="/repo",
+            passthrough_output=True,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

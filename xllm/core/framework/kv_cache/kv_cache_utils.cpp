@@ -531,19 +531,10 @@ std::optional<std::string> validate_host_cache_options(
     violations.emplace_back(
         "prefix caching is disabled; set --enable_prefix_cache=true");
   }
-  if (options.enable_kvcache_store) {
-    violations.emplace_back(
-        "basic host offload does not support KV cache store; disable it");
-  }
   if (options.enable_disagg_pd) {
-    if (options.instance_role != InstanceRole::PREFILL) {
-      violations.emplace_back(
-          "disaggregated host offload is supported only on the PREFILL "
-          "instance");
-    }
     if (options.enable_pd_ooc) {
       violations.emplace_back(
-          "disaggregated PREFILL host offload does not support PD-OOC");
+          "disaggregated host offload does not support PD-OOC");
     }
   } else if (options.instance_role != InstanceRole::DEFAULT) {
     violations.emplace_back(

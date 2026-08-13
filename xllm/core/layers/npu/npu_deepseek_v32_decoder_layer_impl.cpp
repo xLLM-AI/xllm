@@ -589,11 +589,14 @@ void NpuDeepseekV32DecoderLayerImpl::initialize_mlp_parameters(
     atb_speed::deepseekV2::DecoderLayerParam& param,
     const ModelArgs& args,
     const ParallelArgs& parallel_args) {
+  const bool is_glm_moe_dsa =
+      args.model_type().find("glm_moe_dsa") != std::string::npos;
   param.hasSharedExpert = (args.n_shared_experts() > 0);
   param.hasSharedExpertGate = false;
   param.processLogits = "normScaling";
   param.routedScalingFactor = args.routed_scaling_factor();
   param.numOfSelectedExperts = {args.num_experts_per_tok()};
+  param.enableDispatchCombineV2 = is_glm_moe_dsa && !param.isPrefill;
 
   if (ep_size_ > 1) {
     param.expertParallelDegree = std::max(
@@ -668,7 +671,10 @@ void NpuDeepseekV32DecoderLayerImpl::initialize_parallel_parameters(
     atb_speed::deepseekV2::DecoderLayerParam& param,
     const ParallelArgs& parallel_args) {
   param.lmHeadLocalTp = dp_local_tp_size_;
-  param.enableSharedExpertOverlap = false;  // TODO
+  param.enableSharedExpertOverlap =
+      param.enableDispatchCombineV2 && !param.isPrefill &&
+      param.expertParallelDegree == 2 && param.isDynamicEp &&
+      param.hasSharedExpert && !param.isDenseLayer;
 
   param.enableAllToAllMC2 = (param.expertParallelDegree == 2);
   param.enableGatherPreNorm = true;
@@ -1071,7 +1077,7 @@ torch::Tensor NpuDeepseekV32DecoderLayerImpl::forward_with_topk(
                             output_topk_);
     st = execute_node(decode_node_, node_id, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
-                           << "execute prefill layer fail, error code: " << st;
+                           << "execute decode layer fail, error code: " << st;
   } else {
     build_node_variant_pack(prefill_node_,
                             x,

@@ -667,6 +667,11 @@ bool LLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
         .compress_ratios(std::move(manager_compress_ratios));
   }
 
+  if (options_.enable_kvcache_store()) {
+    CHECK_GT(options_.host_blocks_factor(), 1.0)
+        << "KV cache Store requires Host cache blocks.";
+  }
+
   if (options_.host_blocks_factor() > 1.0) {
     // Translate a composite cache capacity into typed Host pools. The
     // hierarchy layer consumes only this BlockType map and does not need to
@@ -839,19 +844,23 @@ void LLMEngine::transfer_kv_blocks(
   }
 }
 
-void LLMEngine::prefetch_from_storage(
+std::shared_ptr<PrefetchResult> LLMEngine::prefetch_from_storage(
     const uint32_t dp_rank,
-    const std::vector<BlockTransferInfo>& block_transfer_info,
-    std::shared_ptr<std::atomic<int32_t>> flag,
-    std::vector<std::shared_ptr<std::atomic<uint32_t>>>* prefetch_results) {
-  prefetch_results->reserve(dp_local_tp_size_);
-  flag->store(dp_local_tp_size_, std::memory_order_relaxed);
+    const std::vector<BlockTransferInfo>& block_transfer_info) {
+  const size_t batch_size =
+      std::max<size_t>(options_.prefetch_batch_size(), 1u);
+  auto result = std::make_shared<PrefetchResult>(
+      dp_local_tp_size_,
+      block_transfer_info.size(),
+      batch_size,
+      options_.prefetch_timeout() == 0
+          ? -1
+          : static_cast<int64_t>(options_.prefetch_timeout()));
   for (uint32_t tp_rank = 0; tp_rank < dp_local_tp_size_; ++tp_rank) {
-    prefetch_results->emplace_back(std::make_shared<std::atomic<uint32_t>>(0));
     worker_clients_[tp_rank + dp_local_tp_size_ * dp_rank]
-        ->prefetch_from_storage(
-            block_transfer_info, flag, prefetch_results->at(tp_rank));
+        ->prefetch_from_storage(block_transfer_info, result, tp_rank);
   }
+  return result;
 }
 
 void LLMEngine::get_cache_info(std::vector<uint64_t>& cluster_ids,

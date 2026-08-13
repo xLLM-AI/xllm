@@ -34,6 +34,7 @@ limitations under the License.
 #include "framework/kv_cache/deepseek_v4_cache_policy.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/kv_cache/kv_cache_utils.h"
+#include "platform/platform.h"
 
 namespace xllm {
 namespace {
@@ -309,14 +310,25 @@ std::vector<KVCacheTensor> DeepSeekV4KVCacheImpl::get_cache_tensors() const {
   add_tensor(KVCacheTensorRole::INDEX_SCALE,
              indexer_cache_scale_,
              compressed_block_type_);
-  add_tensor(KVCacheTensorRole::KV_STATE, compress_state_.kv(), BlockType::SWA);
-  add_tensor(
-      KVCacheTensorRole::SCORE_STATE, compress_state_.score(), BlockType::SWA);
-  add_tensor(
-      KVCacheTensorRole::INDEX_KV_STATE, index_state_.kv(), BlockType::SWA);
-  add_tensor(KVCacheTensorRole::INDEX_SCORE_STATE,
-             index_state_.score(),
-             BlockType::SWA);
+  if (Platform::is_mlu()) {
+    add_tensor(KVCacheTensorRole::COMPRESS_STATE,
+               compress_state_.packed(),
+               BlockType::SWA);
+    add_tensor(KVCacheTensorRole::COMPRESS_INDEX_STATE,
+               index_state_.packed(),
+               BlockType::SWA);
+  } else {
+    add_tensor(
+        KVCacheTensorRole::KV_STATE, compress_state_.kv(), BlockType::SWA);
+    add_tensor(KVCacheTensorRole::SCORE_STATE,
+               compress_state_.score(),
+               BlockType::SWA);
+    add_tensor(
+        KVCacheTensorRole::INDEX_KV_STATE, index_state_.kv(), BlockType::SWA);
+    add_tensor(KVCacheTensorRole::INDEX_SCORE_STATE,
+               index_state_.score(),
+               BlockType::SWA);
+  }
   return tensors;
 }
 
@@ -415,18 +427,25 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
 
   const DeepSeekV4CachePolicy cache_policy =
       get_dsv4_cache_policy(create_options.dtype());
+  const std::shared_ptr<KVCacheTensorAllocator> tensor_allocator =
+      create_options.tensor_allocator();
 
 #if defined(USE_NPU)
   const bool use_huge_page_allocator =
       create_options.enable_kv_cache_huge_page_allocator();
 #endif
-  auto allocate_tensor = [&](const std::vector<int64_t>& dims,
+  auto allocate_tensor = [&](KVCacheTensorRole role,
+                             const std::vector<int64_t>& dims,
                              torch::ScalarType dtype) {
 #if defined(USE_NPU)
     if (use_huge_page_allocator) {
       return alloc_npu_huge_page_tensor(dims, dtype, ACL_FORMAT_ND);
     }
 #endif
+    if (tensor_allocator != nullptr) {
+      return cast_to_nd_format(tensor_allocator->allocate(
+          role, dims, dtype, create_options.device()));
+    }
     return cast_to_nd_format(torch::empty(
         dims, torch::dtype(dtype).device(create_options.device())));
   };
@@ -434,21 +453,27 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
   DeepSeekV4KVCacheTensors tensors;
   if (compress_ratio == 1) {
     tensors.swa_cache = allocate_tensor(
+        KVCacheTensorRole::WINDOW,
         dsv4_block_shape(swa_count, block_size, n_heads, head_dim),
         create_options.dtype());
   } else if (compress_ratio == 4) {
     tensors.compressed_block_type = BlockType::C4;
     tensors.key_cache = allocate_tensor(
+        KVCacheTensorRole::KEY,
         dsv4_block_shape(c4_count, block_size, n_heads, head_dim),
         create_options.dtype());
     tensors.index_cache = allocate_tensor(
+        KVCacheTensorRole::INDEX,
         dsv4_block_shape(c4_count, block_size, index_n_heads, index_head_dim),
         cache_policy.index_dtype);
     if (cache_policy.has_indexer_cache_scale) {
       tensors.indexer_cache_scale =
-          allocate_tensor({c4_count, block_size, 1}, cache_policy.scale_dtype);
+          allocate_tensor(KVCacheTensorRole::INDEX_SCALE,
+                          {c4_count, block_size, 1},
+                          cache_policy.scale_dtype);
     }
     tensors.swa_cache = allocate_tensor(
+        KVCacheTensorRole::WINDOW,
         dsv4_block_shape(swa_count, block_size, n_heads, head_dim),
         create_options.dtype());
 #if defined(USE_MLU)
@@ -457,54 +482,75 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
     // directly to fused_compress_*_kv (which requires a contiguous
     // state_cache).
     const int64_t cmp_coff_dim = 2 * head_dim;
-    tensors.compress_state = allocate_tensor(
-        {swa_count, block_size, 2 * cmp_coff_dim}, torch::kFloat32);
+    tensors.compress_state =
+        allocate_tensor(KVCacheTensorRole::COMPRESS_STATE,
+                        {swa_count, block_size, 2 * cmp_coff_dim},
+                        torch::kFloat32);
     tensors.compress_kv_state = tensors.compress_state.narrow(
         /*dim=*/2, /*start=*/0, /*length=*/cmp_coff_dim);
     tensors.compress_score_state = tensors.compress_state.narrow(
         /*dim=*/2, /*start=*/cmp_coff_dim, /*length=*/cmp_coff_dim);
     const int64_t idx_coff_dim = 2 * index_head_dim;
-    tensors.compress_index_state = allocate_tensor(
-        {swa_count, block_size, 2 * idx_coff_dim}, torch::kFloat32);
+    tensors.compress_index_state =
+        allocate_tensor(KVCacheTensorRole::COMPRESS_INDEX_STATE,
+                        {swa_count, block_size, 2 * idx_coff_dim},
+                        torch::kFloat32);
     tensors.compress_index_kv_state = tensors.compress_index_state.narrow(
         /*dim=*/2, /*start=*/0, /*length=*/idx_coff_dim);
     tensors.compress_index_score_state = tensors.compress_index_state.narrow(
         /*dim=*/2, /*start=*/idx_coff_dim, /*length=*/idx_coff_dim);
 #else
     tensors.compress_kv_state =
-        allocate_tensor({swa_count, block_size, 2 * head_dim}, torch::kFloat32);
+        allocate_tensor(KVCacheTensorRole::KV_STATE,
+                        {swa_count, block_size, 2 * head_dim},
+                        torch::kFloat32);
     tensors.compress_score_state =
-        allocate_tensor({swa_count, block_size, 2 * head_dim}, torch::kFloat32);
-    tensors.compress_index_kv_state = allocate_tensor(
-        {swa_count, block_size, 2 * index_head_dim}, torch::kFloat32);
-    tensors.compress_index_score_state = allocate_tensor(
-        {swa_count, block_size, 2 * index_head_dim}, torch::kFloat32);
+        allocate_tensor(KVCacheTensorRole::SCORE_STATE,
+                        {swa_count, block_size, 2 * head_dim},
+                        torch::kFloat32);
+    tensors.compress_index_kv_state =
+        allocate_tensor(KVCacheTensorRole::INDEX_KV_STATE,
+                        {swa_count, block_size, 2 * index_head_dim},
+                        torch::kFloat32);
+    tensors.compress_index_score_state =
+        allocate_tensor(KVCacheTensorRole::INDEX_SCORE_STATE,
+                        {swa_count, block_size, 2 * index_head_dim},
+                        torch::kFloat32);
 #endif
   } else if (compress_ratio == 128) {
     tensors.compressed_block_type = BlockType::C128;
     tensors.key_cache = allocate_tensor(
+        KVCacheTensorRole::KEY,
         dsv4_block_shape(c128_count, block_size, n_heads, head_dim),
         create_options.dtype());
     tensors.swa_cache = allocate_tensor(
+        KVCacheTensorRole::WINDOW,
         dsv4_block_shape(swa_count, block_size, n_heads, head_dim),
         create_options.dtype());
 #if defined(USE_MLU)
     // coff_dim = head_dim for ratio==128; merged dim = 2 * coff_dim.
     const int64_t cmp_coff_dim = head_dim;
-    tensors.compress_state = allocate_tensor(
-        {swa_count, block_size, 2 * cmp_coff_dim}, torch::kFloat32);
+    tensors.compress_state =
+        allocate_tensor(KVCacheTensorRole::COMPRESS_STATE,
+                        {swa_count, block_size, 2 * cmp_coff_dim},
+                        torch::kFloat32);
     tensors.compress_kv_state = tensors.compress_state.narrow(
         /*dim=*/2, /*start=*/0, /*length=*/cmp_coff_dim);
     tensors.compress_score_state = tensors.compress_state.narrow(
         /*dim=*/2, /*start=*/cmp_coff_dim, /*length=*/cmp_coff_dim);
 #else
     tensors.compress_kv_state =
-        allocate_tensor({swa_count, block_size, head_dim}, torch::kFloat32);
+        allocate_tensor(KVCacheTensorRole::KV_STATE,
+                        {swa_count, block_size, head_dim},
+                        torch::kFloat32);
     tensors.compress_score_state =
-        allocate_tensor({swa_count, block_size, head_dim}, torch::kFloat32);
+        allocate_tensor(KVCacheTensorRole::SCORE_STATE,
+                        {swa_count, block_size, head_dim},
+                        torch::kFloat32);
 #endif
   } else {
     tensors.swa_cache = allocate_tensor(
+        KVCacheTensorRole::WINDOW,
         dsv4_block_shape(swa_count, block_size, n_heads, head_dim),
         create_options.dtype());
   }

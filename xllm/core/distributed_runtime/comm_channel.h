@@ -26,6 +26,7 @@ limitations under the License.
 #include "common/types.h"
 #include "core/framework/speculative/speculative_profile_registry.h"
 #include "framework/kv_cache/kv_cache_shape.h"
+#include "framework/kv_cache_transfer/prefetch_result.h"
 #include "framework/xtensor/xtensor.h"
 #include "runtime/forward_params.h"
 #include "runtime/params_utils.h"
@@ -103,8 +104,8 @@ class CommChannel {
 
   virtual void prefetch_from_storage(
       const std::vector<BlockTransferInfo>& block_transfer_info,
-      std::shared_ptr<std::atomic<int32_t>> flag,
-      std::shared_ptr<std::atomic<uint32_t>> success_cnt);
+      std::shared_ptr<PrefetchResult> result,
+      size_t worker_index);
 
   virtual bool get_last_step_result_async(
       folly::Promise<std::optional<RawForwardOutput>>& promise);

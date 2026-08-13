@@ -1880,6 +1880,14 @@ void WorkerImpl::set_hierarchy_layer_synchronizer(
   }
 }
 
+std::vector<uint8_t> WorkerImpl::prefetch_kv_blocks(
+    Slice<BlockTransferInfo>& block_transfer_info) {
+  if (hierarchy_kv_cache_transfer_ == nullptr) {
+    return std::vector<uint8_t>(block_transfer_info.size(), /*value=*/0);
+  }
+  return hierarchy_kv_cache_transfer_->prefetch_kv_blocks(block_transfer_info);
+}
+
 int64_t WorkerImpl::get_active_activation_memory() {
   return DeviceMonitor::get_instance()
       .get_device_stats(device_.index())
@@ -1910,21 +1918,43 @@ int64_t WorkerImpl::get_active_activation_memory() {
 void WorkerImpl::init_hierarchy_kv_cache_transfer(
     const KVCacheShape& kv_cache_shape,
     const KVCacheCreateOptions& kv_cache_create_options) {
+  if (options_.enable_kvcache_store()) {
+    CHECK_GT(options_.host_blocks_factor(), 1.0)
+        << "KV cache Store requires Host cache blocks.";
+  }
   if (options_.host_blocks_factor() > 1.0) {
     CHECK(!kv_caches_.empty()) << "kv_caches is not initialized.";
     CHECK(hierarchy_kv_cache_transfer_ == nullptr)
         << "Hierarchy KV cache transfer is already initialized.";
+    CHECK_GT(options_.dp_size(), 0u);
+    CHECK_EQ(options_.world_size() % options_.dp_size(), 0u);
+    CHECK_GT(options_.cp_size(), 0u);
+    const uint32_t dp_local_size =
+        static_cast<uint32_t>(options_.world_size() / options_.dp_size());
+    CHECK_EQ(dp_local_size % options_.cp_size(), 0u);
+    const bool mlu_overlap = options_.cp_size() > 1 &&
+                             Platform::uses_model_cp_sharding() &&
+                             Platform::is_mlu();
+    const uint32_t tp_size =
+        mlu_overlap ? dp_local_size : dp_local_size / options_.cp_size();
+    CHECK_GT(tp_size, 0u);
+    const int32_t worker_rank = context_.get_parallel_args().rank();
+    CHECK_GE(worker_rank, 0);
+    const uint32_t worker_id = static_cast<uint32_t>(worker_rank);
     HierarchyKVCacheTransfer::Options transfer_options;
-    transfer_options
-        .tp_rank(options_.dp_size() > 1
-                     ? options_.node_rank() % options_.dp_size()
-                     : options_.node_rank())
-        .tp_size(options_.world_size() / options_.dp_size())
+    transfer_options.tp_rank(worker_id % tp_size)
+        .tp_size(tp_size)
         .layers(context_.get_model_args().n_layers())
         .host_blocks_factor(options_.host_blocks_factor())
         .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())
         .enable_mla(options_.enable_mla())
-        .enable_kvcache_store(false);
+        .enable_kvcache_store(options_.enable_kvcache_store())
+        .store_protocol(options_.store_protocol())
+        .store_master_server_address(options_.store_master_server_address())
+        .store_metadata_server(options_.store_metadata_server())
+        .store_local_hostname(options_.store_local_hostname())
+        .store_namespace(options_.model_id())
+        .store_worker_id(worker_id);
     hierarchy_kv_cache_transfer_ =
         std::make_unique<HierarchyKVCacheTransfer>(transfer_options,
                                                    device_,

@@ -220,6 +220,9 @@ struct Options {
   // Prefetch from kvcache store copy batch size
   PROPERTY(uint32_t, prefetch_batch_size) = 2;
 
+  // Maximum idle time for a Store prefetch stream. Zero disables the timeout.
+  PROPERTY(uint32_t, prefetch_timeout) = 0;
+
   // Layer wise H2D copy batchs
   PROPERTY(uint32_t, layers_wise_copy_batchs) = 4;
 

@@ -80,13 +80,13 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 
 | 参数名称 | 类型 | 默认值 | 参数含义 |
 |:---------|:-----|:-------|:---------|
-| `prefetch_timeout` | `uint32` | `0` | 从 KV Cache Store 预取数据的超时时间。 |
+| `prefetch_timeout` | `uint32` | `0` | 到期后停止下发新的 KV Cache Store 预取批次，并等待在途批次完成；`0` 表示无限等待。 |
 | `prefetch_batch_size` | `uint32` | `2` | 从 KV Cache Store 预取并拷贝的 batch size。 |
 | `layers_wise_copy_batchs` | `uint32` | `4` | 按层执行 H2D 拷贝的 batch 数。 |
 | `host_blocks_factor` | `double` | `0.0` | host block 系数，例如 `host block num = host_blocks_factor * hbm block num`。 |
 | `enable_kvcache_store` | `bool` | `false` | 是否启用 KV Cache Store。 |
 | `store_protocol` | `string` | `"tcp"` | KV Cache Store 协议，例如 `tcp`、`rdma`。 |
-| `store_master_server_address` | `string` | `""` | Store master service 的地址信息。 |
+| `store_master_server_address` | `string` | `""` | Store master 地址。单机模式使用 `IP:Port`；etcd 高可用模式使用 `etcd://IP:Port;IP:Port;...`。 |
 | `store_metadata_server` | `string` | `""` | KV Cache Store metadata service 的地址。 |
 | `store_local_hostname` | `string` | `""` | KV Cache Store client 的本地主机名。 |
 | `enable_control_h2d_block_num` | `bool` | `false` | 是否控制 H2D 拷贝的 block 数。 |

@@ -49,7 +49,7 @@ PdTopo get_pd_topo(const InstanceInfo& info);
 PdTopoResult check_pd_topo(const InstanceInfo& local,
                            const InstanceInfo& remote,
                            const std::string& kv_mode,
-                           bool enable_mla,
+                           bool kv_cache_is_tp_invariant,
                            bool enable_heterogeneous_pd = false);
 
 }  // namespace xllm

@@ -8,6 +8,7 @@
 #include <optional>
 
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/rec_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "distributed_runtime/engine.h"
 #include "scheduler_factory.h"
@@ -16,6 +17,31 @@
 namespace xllm {
 
 namespace {
+class ControllablePrefetchBlockManagerPool final : public BlockManagerPool {
+ public:
+  explicit ControllablePrefetchBlockManagerPool(const Options& options)
+      : BlockManagerPool(options, /*dp_size=*/1) {}
+
+  void prefetch_from_storage(std::shared_ptr<Request>& /*request*/) override {
+    ++prefetch_calls_;
+  }
+
+  bool update_prefetch_result(std::shared_ptr<Request>& /*request*/,
+                              uint32_t /*timeout*/) override {
+    ++update_calls_;
+    return prefetch_ready_;
+  }
+
+  void set_prefetch_ready(bool ready) { prefetch_ready_ = ready; }
+  size_t prefetch_calls() const { return prefetch_calls_; }
+  size_t update_calls() const { return update_calls_; }
+
+ private:
+  bool prefetch_ready_ = true;
+  size_t prefetch_calls_ = 0;
+  size_t update_calls_ = 0;
+};
+
 class FakeTokenizer : public Tokenizer {
  public:
   bool encode(const std::string_view& text,
@@ -56,7 +82,8 @@ class FakeEngine : public Engine {
       opt.linear_state_num_slots_ = num_blocks + 2;
     }
     fake_tokenizer_ = std::make_unique<FakeTokenizer>();
-    fake_block_manager_ = std::make_unique<BlockManagerPool>(opt, 1);
+    fake_block_manager_ =
+        std::make_unique<ControllablePrefetchBlockManagerPool>(opt);
   }
   ForwardOutput step(std::vector<Batch>& batch) { return {}; }
   void update_last_step_result(std::vector<Batch>& batch) { NOT_IMPLEMENTED(); }
@@ -69,9 +96,21 @@ class FakeEngine : public Engine {
   std::vector<int64_t> get_active_activation_memory() const { return {0}; }
   bool init() override { return true; }
 
+  void set_prefetch_ready(bool ready) {
+    fake_block_manager_->set_prefetch_ready(ready);
+  }
+
+  size_t prefetch_calls() const {
+    return fake_block_manager_->prefetch_calls();
+  }
+
+  size_t prefetch_update_calls() const {
+    return fake_block_manager_->update_calls();
+  }
+
  private:
   std::unique_ptr<Tokenizer> fake_tokenizer_;
-  std::unique_ptr<BlockManagerPool> fake_block_manager_;
+  std::unique_ptr<ControllablePrefetchBlockManagerPool> fake_block_manager_;
   ModelArgs model_args_;
 };
 
@@ -90,6 +129,8 @@ class TestContinuousScheduler final : public ContinuousScheduler {
     response_processor_->batch_process_stream_requests(request_copy);
     response_processor_->wait_completion();
   }
+
+  size_t scheduler_queue_size() { return request_queue_.size(); }
 };
 
 template <typename T>
@@ -315,6 +356,105 @@ TEST(ContinuousSchedulerFactoryTest,
 
   // All non-PD paths now create ContinuousScheduler with BatchMode routing.
   EXPECT_NE(dynamic_cast<ContinuousScheduler*>(scheduler.get()), nullptr);
+}
+
+TEST(ContinuousSchedulerTest, PrefetchCompletesBeforeSchedulerQueueAdmission) {
+  ContinuousScheduler::Options options =
+      create_scheduler_options(64, 4, 0, 64, 1);
+  auto engine = std::make_unique<FakeEngine>(64, 32);
+  engine->set_prefetch_ready(false);
+  auto scheduler =
+      std::make_unique<TestContinuousScheduler>(engine.get(), options);
+  std::shared_ptr<Request> request =
+      generate_request({8},
+                       {4},
+                       std::nullopt,
+                       std::nullopt,
+                       std::nullopt,
+                       std::nullopt,
+                       /*max_context_len=*/30000)[0];
+
+  ASSERT_TRUE(scheduler->add_request(request));
+  EXPECT_EQ(engine->prefetch_calls(), 1u);
+  EXPECT_EQ(scheduler->num_prefetch_pending_requests(), 1u);
+  EXPECT_EQ(scheduler->scheduler_queue_size(), 0u);
+  EXPECT_EQ(scheduler->get_waiting_requests_num(), 1u);
+
+  std::vector<Batch> batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  EXPECT_TRUE(batches.front().empty());
+  EXPECT_EQ(scheduler->scheduler_queue_size(), 0u);
+  EXPECT_EQ(scheduler->num_prefetch_pending_requests(), 1u);
+
+  engine->set_prefetch_ready(true);
+  batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  ASSERT_EQ(batches.front().size(), 1u);
+  EXPECT_EQ(batches.front()[0], request->sequences().front().get());
+  EXPECT_EQ(scheduler->num_prefetch_pending_requests(), 0u);
+  EXPECT_EQ(scheduler->scheduler_queue_size(), 0u);
+  EXPECT_GE(engine->prefetch_update_calls(), 3u);
+}
+
+TEST(ContinuousSchedulerTest,
+     CancelledPendingPrefetchReleasesAdmissionWithoutEnqueue) {
+  ContinuousScheduler::Options options =
+      create_scheduler_options(64, 4, 0, 64, 1);
+  auto engine = std::make_unique<FakeEngine>(64, 32);
+  engine->set_prefetch_ready(false);
+  auto scheduler =
+      std::make_unique<TestContinuousScheduler>(engine.get(), options);
+  std::shared_ptr<Request> request =
+      generate_request({8},
+                       {4},
+                       std::nullopt,
+                       std::nullopt,
+                       std::nullopt,
+                       std::nullopt,
+                       /*max_context_len=*/30000)[0];
+
+  ASSERT_TRUE(scheduler->add_request(request));
+  ASSERT_EQ(scheduler->num_prefetch_pending_requests(), 1u);
+  request->set_cancel();
+
+  std::vector<Batch> batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  EXPECT_TRUE(batches.front().empty());
+  EXPECT_EQ(scheduler->num_prefetch_pending_requests(), 1u);
+  EXPECT_EQ(scheduler->scheduler_queue_size(), 0u);
+
+  engine->set_prefetch_ready(true);
+  batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 1u);
+  EXPECT_TRUE(batches.front().empty());
+  EXPECT_EQ(scheduler->num_prefetch_pending_requests(), 0u);
+  EXPECT_EQ(scheduler->scheduler_queue_size(), 0u);
+}
+
+TEST(ContinuousSchedulerTest, QueueCapacityRejectsBeforePrefetchStarts) {
+  ScopedConfigValue<int32_t> request_queue_size(
+      RecConfig::get_instance().request_queue_size(), 1);
+  ContinuousScheduler::Options options =
+      create_scheduler_options(64, 4, 0, 64, 1);
+  auto engine = std::make_unique<FakeEngine>(64, 32);
+  auto scheduler =
+      std::make_unique<TestContinuousScheduler>(engine.get(), options);
+  std::vector<std::shared_ptr<Request>> requests =
+      generate_request({8, 8},
+                       {4, 4},
+                       std::nullopt,
+                       std::nullopt,
+                       std::nullopt,
+                       std::nullopt,
+                       /*max_context_len=*/30000);
+
+  ASSERT_TRUE(scheduler->add_request(requests[0]));
+  EXPECT_EQ(engine->prefetch_calls(), 1u);
+  EXPECT_EQ(scheduler->scheduler_queue_size(), 1u);
+
+  EXPECT_FALSE(scheduler->add_request(requests[1]));
+  EXPECT_EQ(engine->prefetch_calls(), 1u);
+  EXPECT_EQ(scheduler->scheduler_queue_size(), 1u);
 }
 
 TEST(ContinuousSchedulerFactoryTest,

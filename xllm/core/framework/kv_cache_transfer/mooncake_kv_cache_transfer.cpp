@@ -416,7 +416,6 @@ bool MooncakeKVCacheTransferDefault::pull_kv_blocks(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
     const std::vector<KVTransferMapping>& mappings) {
-  (void)src_cluster_id;
   std::vector<int64_t> layer_ids;
   std::vector<MooncakeTransferEngine::BufferTransferMapping> buffer_mappings;
   if (!append_buffer_mappings(
@@ -434,6 +433,10 @@ bool MooncakeKVCacheTransferDefault::pull_kv_blocks(
     LOG(ERROR) << "Pull KV cache mappings failed.";
     return false;
   }
+  VLOG(1) << "[Mooncake][PDTransfer] direction=pull, cluster_id="
+          << src_cluster_id << ", remote=" << src_addr
+          << ", mapping_groups=" << mappings.size()
+          << ", buffers=" << buffer_mappings.size() << ", success=true";
   return true;
 }
 
@@ -531,6 +534,8 @@ bool MooncakeKVCacheTransferDefault::push_kv_blocks(
       }
     }
   }
+  VLOG(1) << "[Mooncake][PDTransfer] direction=push, destinations="
+          << keys.size() << ", layers=" << num_layers << ", success=" << result;
   return result;
 }
 

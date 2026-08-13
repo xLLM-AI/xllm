@@ -18,6 +18,9 @@ limitations under the License.
 #include <brpc/controller.h>
 #include <glog/logging.h>
 
+#include <algorithm>
+#include <atomic>
+#include <cstddef>
 #include <future>
 
 #include "common/global_flags.h"
@@ -460,92 +463,151 @@ bool CommChannel::stop_profile() {
   return true;
 }
 
-class ClientStreamReceiver : public brpc::StreamInputHandler {
+class ClientStreamReceiver final : public brpc::StreamInputHandler {
  private:
-  std::shared_ptr<std::atomic<int32_t>> termination_flag_;
-  std::shared_ptr<std::atomic<uint32_t>> success_cnt_;
-  std::promise<void> close_promise_;
+  std::shared_ptr<PrefetchResult> result_;
+  size_t worker_index_ = 0;
+  size_t result_offset_ = 0;
+  std::promise<bool> close_promise_;
   std::atomic<bool> promise_set_{false};
+  bool terminal_received_ = false;
+  bool batch_ok_ = false;
+  bool failed_ = false;
 
- public:
-  ClientStreamReceiver(std::shared_ptr<std::atomic<int32_t>> termination_flag,
-                       std::shared_ptr<std::atomic<uint32_t>> success_cnt)
-      : termination_flag_(termination_flag), success_cnt_(success_cnt) {}
-
-  ~ClientStreamReceiver() {
+  void finish(bool batch_ok) {
     if (!promise_set_.exchange(true)) {
-      close_promise_.set_value();
+      close_promise_.set_value(batch_ok);
     }
   }
 
-  std::future<void> get_close_future() { return close_promise_.get_future(); }
+  void fail_and_close(brpc::StreamId id) {
+    failed_ = true;
+    brpc::StreamClose(id);
+  }
+
+ public:
+  ClientStreamReceiver(std::shared_ptr<PrefetchResult> result,
+                       size_t worker_index,
+                       size_t result_offset)
+      : result_(std::move(result)),
+        worker_index_(worker_index),
+        result_offset_(result_offset) {
+    CHECK(result_ != nullptr);
+    CHECK_LT(worker_index_, result_->worker_count());
+    CHECK_LE(result_offset_, result_->block_count());
+  }
+
+  ~ClientStreamReceiver() override { finish(/*batch_ok=*/false); }
+
+  std::future<bool> get_close_future() { return close_promise_.get_future(); }
 
   int on_received_messages(brpc::StreamId id,
                            butil::IOBuf* const messages[],
                            size_t size) override {
     for (size_t i = 0; i < size; ++i) {
       std::string msg_str = messages[i]->to_string();
-      int32_t success_cnt = std::stoi(msg_str);
+      proto::PrefetchResultChunk chunk;
+      if (!chunk.ParseFromString(msg_str)) {
+        LOG(ERROR) << "Failed to parse Mooncake prefetch result chunk.";
+        fail_and_close(id);
+        return -1;
+      }
 
-      if (success_cnt > 0 &&
-          termination_flag_->load(std::memory_order_acquire) > 0) {
-        success_cnt_->fetch_add(success_cnt, std::memory_order_relaxed);
-      } else {
-        termination_flag_->fetch_sub(1, std::memory_order_release);
-        if (!promise_set_.exchange(true)) {
-          close_promise_.set_value();
-        }
+      const std::string& bitmap = chunk.hit_bitmap();
+      std::vector<uint8_t> hits(bitmap.begin(), bitmap.end());
+      if (chunk.offset() > result_->block_count() - result_offset_) {
+        LOG(ERROR) << "Invalid Mooncake prefetch result offset: worker="
+                   << worker_index_ << ", base_offset=" << result_offset_
+                   << ", chunk_offset=" << chunk.offset();
+        fail_and_close(id);
+        return -1;
+      }
+      const size_t result_offset =
+          result_offset_ + static_cast<size_t>(chunk.offset());
+      if (!result_->set_batch_result(worker_index_, result_offset, hits)) {
+        LOG(ERROR) << "Invalid Mooncake prefetch result chunk: worker="
+                   << worker_index_ << ", offset=" << result_offset
+                   << ", count=" << hits.size();
+        fail_and_close(id);
+        return -1;
+      }
+      if (chunk.completed()) {
+        terminal_received_ = true;
+        batch_ok_ = chunk.worker_ok();
+        brpc::StreamClose(id);
         break;
       }
     }
     return 0;
   }
 
-  void on_idle_timeout(brpc::StreamId id) override {
-    if (!promise_set_.exchange(true)) {
-      close_promise_.set_value();
-    }
-  }
+  void on_idle_timeout(brpc::StreamId id) override { fail_and_close(id); }
 
-  void on_closed(brpc::StreamId id) override {
-    if (!promise_set_.exchange(true)) {
-      close_promise_.set_value();
-    }
+  void on_closed(brpc::StreamId /*id*/) override {
+    finish(terminal_received_ && batch_ok_ && !failed_);
+    delete this;
   }
 };
 
 void CommChannel::prefetch_from_storage(
     const std::vector<BlockTransferInfo>& block_transfer_info,
-    std::shared_ptr<std::atomic<int32_t>> flag,
-    std::shared_ptr<std::atomic<uint32_t>> success_cnt) {
-  proto::BlockTransferInfos pb_block_transfer_info;
-  if (!block_transfer_info_to_proto(block_transfer_info,
-                                    &pb_block_transfer_info)) {
-    LOG(ERROR) << "prefetch_from_storage fail: create proto fail!";
-    return;
-  }
-  ClientStreamReceiver receiver(flag, success_cnt);
-  brpc::Controller cntl;
-  brpc::StreamOptions stream_options;
-  brpc::StreamId stream_id;
-  proto::Status response;
-  stream_options.handler = &receiver;
-  stream_options.idle_timeout_ms = 30;
-  if (brpc::StreamCreate(&stream_id, cntl, &stream_options) != 0) {
-    LOG(ERROR) << "Failed to create stream";
-    return;
-  }
+    std::shared_ptr<PrefetchResult> result,
+    size_t worker_index) {
+  CHECK(result != nullptr);
+  const size_t batch_size = result->batch_size();
+  bool worker_ok = true;
+  for (size_t offset = 0; offset < block_transfer_info.size();
+       offset += batch_size) {
+    if (result->stop_requested()) {
+      VLOG(1) << "[Mooncake][PrefetchStop] worker=" << worker_index
+              << ", completed_blocks=" << offset;
+      break;
+    }
 
-  stub_->PrefetchFromStorage(
-      &cntl, &pb_block_transfer_info, &response, nullptr);
+    const size_t end =
+        offset + std::min(batch_size, block_transfer_info.size() - offset);
+    const std::vector<BlockTransferInfo> current_batch(
+        block_transfer_info.begin() + static_cast<std::ptrdiff_t>(offset),
+        block_transfer_info.begin() + static_cast<std::ptrdiff_t>(end));
+    proto::BlockTransferInfos pb_block_transfer_info;
+    if (!block_transfer_info_to_proto(current_batch, &pb_block_transfer_info)) {
+      LOG(ERROR) << "prefetch_from_storage fail: create proto fail!";
+      worker_ok = false;
+      break;
+    }
 
-  if (cntl.Failed() || !response.ok()) {
-    LOG(ERROR) << "Fail to connect stream, " << cntl.ErrorText();
-    return;
+    auto* receiver = new ClientStreamReceiver(result, worker_index, offset);
+    std::future<bool> close_future = receiver->get_close_future();
+    brpc::Controller cntl;
+    brpc::StreamOptions stream_options;
+    brpc::StreamId stream_id;
+    proto::Status response;
+    stream_options.handler = receiver;
+    stream_options.idle_timeout_ms = result->stream_idle_timeout_ms();
+    if (brpc::StreamCreate(&stream_id, cntl, &stream_options) != 0) {
+      LOG(ERROR) << "Failed to create stream";
+      delete receiver;
+      worker_ok = false;
+      break;
+    }
+
+    stub_->PrefetchFromStorage(
+        &cntl, &pb_block_transfer_info, &response, nullptr);
+    if (cntl.Failed() || !response.ok()) {
+      LOG(ERROR) << "Fail to connect stream, " << cntl.ErrorText();
+      brpc::StreamClose(stream_id);
+      close_future.wait();
+      worker_ok = false;
+      break;
+    }
+
+    const bool batch_ok = close_future.get();
+    if (!batch_ok) {
+      worker_ok = false;
+      break;
+    }
   }
-
-  receiver.get_close_future().wait();
-  brpc::StreamClose(stream_id);
+  result->mark_worker_completed(worker_index, worker_ok);
 }
 
 bool CommChannel::get_last_step_result_async(
