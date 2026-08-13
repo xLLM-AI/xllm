@@ -36,6 +36,7 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/kv_cache/kv_cache_utils.h"
+#include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_context.h"
@@ -1206,6 +1207,28 @@ TEST(SpeculativeConfigTest, MtpAlgorithmClassificationIsCaseInsensitive) {
   EXPECT_FALSE(SpeculativeConfig::is_mtp_algorithm("unknown"));
 }
 
+TEST(AuxHiddenCaptureTest, PreservesConfiguredLayerOrderAndResidual) {
+  ModelArgs args;
+  args.hidden_size(2).layers_to_capture({2, 0});
+  AuxHiddenCapture capture;
+  capture.init(args, torch::TensorOptions().dtype(torch::kFloat32), 3);
+
+  capture.reset_capture_index();
+  capture.capture_layer(
+      /*layer_idx=*/0, torch::full({3, 2}, 10.0f), std::nullopt);
+  capture.capture_layer(
+      /*layer_idx=*/2, torch::full({3, 2}, 20.0f), std::nullopt);
+  const torch::Tensor hidden_states = torch::zeros({3, 2});
+  const torch::Tensor residual = torch::ones({3, 2});
+  const ModelOutput output = capture.finalize(hidden_states, residual);
+
+  EXPECT_TRUE(torch::equal(output.residual, residual));
+  EXPECT_TRUE(torch::equal(output.aux_hidden_states.slice(1, 0, 2),
+                           torch::full({3, 2}, 20.0f)));
+  EXPECT_TRUE(torch::equal(output.aux_hidden_states.slice(1, 2, 4),
+                           torch::full({3, 2}, 10.0f)));
+}
+
 TEST(DSparkWorkerOptionsTest, PreservesDraftBlockSize) {
   runtime::Options options;
   options.speculative_algorithm("DSpark").num_speculative_tokens(5);
@@ -1243,6 +1266,7 @@ TEST(BlockDiffusionConfigTest, PreservesDeepseekV4NpuDraftArguments) {
   EXPECT_EQ(target_args.dspark_block_size(), 0);
   EXPECT_EQ(target_args.layers_to_capture(),
             (std::vector<int32_t>{41, 42, 43}));
+  EXPECT_EQ(target_args.block_diffusion_num_capture_layers(), 3);
   EXPECT_EQ(target_args.compress_ratios(), (std::vector<int32_t>{1, 1, 4}));
 
   runtime::Options draft_options;
@@ -1269,7 +1293,8 @@ TEST(BlockDiffusionConfigTest, PreservesDeepseekV4NpuDraftArguments) {
   EXPECT_EQ(draft_args.n_hash_layers(), 0);
   EXPECT_EQ(draft_args.dspark_block_size(), 5);
   EXPECT_FALSE(draft_args.dspark_use_native_sas());
-  EXPECT_EQ(draft_args.layers_to_capture(), (std::vector<int32_t>{41, 42, 43}));
+  EXPECT_TRUE(draft_args.layers_to_capture().empty());
+  EXPECT_EQ(draft_args.block_diffusion_num_capture_layers(), 3);
   EXPECT_EQ(draft_args.compress_ratios(), (std::vector<int32_t>{1, 1, 1}));
 
   std::filesystem::remove_all(config_dir);

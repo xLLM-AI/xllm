@@ -36,6 +36,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/state_dict/utils.h"
 #include "core/kernels/ops_api.h"
 #include "core/layers/common/dsa_metadata.h"
@@ -515,31 +516,22 @@ class DeepseekV4ModelImpl
       layers_.push_back(layer);
     }
 
-    const bool is_dspark_draft =
-        model_args.model_type() == "deepseek_v4_dspark";
-    if (!is_dspark_draft && !model_args.layers_to_capture().empty()) {
+    if (!model_args.layers_to_capture().empty()) {
       const auto& capture_layers = model_args.layers_to_capture();
-      for (size_t capture_idx = 0; capture_idx < capture_layers.size();
-           ++capture_idx) {
-        const int32_t output_layer = capture_layers[capture_idx];
+      std::unordered_set<int32_t> unique_capture_layers;
+      for (int32_t output_layer : capture_layers) {
         CHECK_GT(output_layer, 0);
         CHECK_LE(output_layer, model_args.n_layers())
             << "DeepSeek-V4 capture layer output is out of range.";
-        CHECK(capture_layer_to_index_
-                  .emplace(output_layer, static_cast<int64_t>(capture_idx))
-                  .second)
+        CHECK(unique_capture_layers.emplace(output_layer).second)
             << "DeepSeek-V4 capture layer outputs must be unique.";
       }
-      const int64_t aux_width =
-          model_args.hidden_size() * capture_layer_to_index_.size();
       // Scheduler capacity is fixed before model construction. Resizing this
       // graph-visible buffer after initialization would invalidate captured
       // addresses, so forward verifies that the runtime contract is unchanged.
       aux_output_capacity_ =
           ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch();
-      aux_output_buffer_ =
-          torch::empty({aux_output_capacity_, aux_width}, options);
-      capture_aux_hidden_states_ = true;
+      aux_capture_.init(model_args, options, aux_output_capacity_);
     }
 
     // Build DSA caches_info from compress_ratios
@@ -906,8 +898,7 @@ class DeepseekV4ModelImpl
           cp_ctx.tokens_per_rank.begin(), cp_ctx.tokens_per_rank.end());
     }
     FlashComm1Context fc1_ctx;
-    if (!acl_graph_forward && !is_empty_dp_rank &&
-        !capture_aux_hidden_states_) {
+    if (!acl_graph_forward && !is_empty_dp_rank && !aux_capture_.enabled()) {
       const bool is_prefill_side =
           input_params.meta.batch_forward_type.no_decode();
       fc1_ctx = build_flash_comm1_context(
@@ -919,14 +910,12 @@ class DeepseekV4ModelImpl
     }
 
     std::optional<torch::Tensor> residual;
-    int64_t captured_count = 0;
-    if (capture_aux_hidden_states_) {
+    aux_capture_.reset_capture_index();
+    if (aux_capture_.enabled()) {
       CHECK_EQ(::xllm::SchedulerConfig::get_instance().max_tokens_per_batch(),
                aux_output_capacity_)
           << "max_tokens_per_batch must remain unchanged after model "
              "construction while auxiliary hidden capture is enabled.";
-      CHECK_LE(h.size(0), aux_output_capacity_)
-          << "Auxiliary hidden capture exceeds max_tokens_per_batch.";
     }
     for (size_t i = 0; i < layers_.size(); i++) {
       if (attn_metadata.dsa_metadata) {
@@ -1005,20 +994,10 @@ class DeepseekV4ModelImpl
                      kv_caches[i],
                      modified_input_params,
                      tokens);
-      const auto capture_it =
-          capture_layer_to_index_.find(static_cast<int32_t>(i + 1));
-      if (capture_aux_hidden_states_ &&
-          capture_it != capture_layer_to_index_.end()) {
+      const int32_t capture_layer = static_cast<int32_t>(i + 1);
+      if (aux_capture_.should_capture(capture_layer)) {
         torch::Tensor captured = h.dim() == 3 ? h.mean(/*dim=*/1) : h;
-        const int64_t num_tokens = captured.size(0);
-        const int64_t hidden_size = captured.size(-1);
-        const int64_t capture_idx = capture_it->second;
-        aux_output_buffer_.slice(/*dim=*/0, /*start=*/0, /*end=*/num_tokens)
-            .slice(/*dim=*/1,
-                   /*start=*/capture_idx * hidden_size,
-                   /*end=*/(capture_idx + 1) * hidden_size)
-            .copy_(captured.reshape({num_tokens, hidden_size}));
-        ++captured_count;
+        aux_capture_.capture_layer(capture_layer, captured, std::nullopt);
       }
 #if defined(USE_NPU)
       if (modified_input_params.parallel.layer_synchronizer != nullptr &&
@@ -1041,20 +1020,13 @@ class DeepseekV4ModelImpl
       }
     }
     torch::Tensor pre_hc_head_hidden_states;
-    if (!capture_aux_hidden_states_ &&
-        model_args_.num_speculative_tokens() > 0) {
+    if (!aux_capture_.enabled() && model_args_.num_speculative_tokens() > 0) {
       pre_hc_head_hidden_states = h;
     }
     h = hc_head(h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
-    if (capture_aux_hidden_states_) {
-      CHECK_EQ(captured_count,
-               static_cast<int64_t>(capture_layer_to_index_.size()))
-          << "DeepSeek-V4 captured aux hidden layer count mismatch.";
-      const int64_t num_tokens = hidden_states.size(0);
-      ModelOutput out(hidden_states, residual_out);
-      out.aux_hidden_states = aux_output_buffer_.slice(0, 0, num_tokens);
-      return out;
+    if (aux_capture_.enabled()) {
+      return aux_capture_.finalize(hidden_states, residual_out);
     }
     if (pre_hc_head_hidden_states.defined()) {
       ModelOutput out(hidden_states, residual_out);
@@ -1945,10 +1917,8 @@ class DeepseekV4ModelImpl
   ParallelArgs parallel_args_;
   FlashComm1Options flash_comm1_options_;
 
-  std::unordered_map<int32_t, int64_t> capture_layer_to_index_;
-  torch::Tensor aux_output_buffer_;
+  AuxHiddenCapture aux_capture_;
   int64_t aux_output_capacity_ = 0;
-  bool capture_aux_hidden_states_ = false;
 
   // DSA cache group info: built once at model init from compress_ratios
   // caches_info_[layer_id] = vector of DSACacheInfo for each cache in that

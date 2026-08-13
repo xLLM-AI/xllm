@@ -123,16 +123,23 @@ void configure_model_args(ModelArgs& args,
   CHECK(is_algorithm(options.speculative_algorithm()));
   const CheckpointConfig checkpoint =
       read_checkpoint_config(options, model_weights_path);
-  std::vector<int32_t> capture_points;
-  capture_points.reserve(checkpoint.target_layer_ids.size());
-  // Checkpoints store zero-based target layer IDs. NPU hooks capture layer
-  // inputs, while other backends capture after layer execution.
-  const int32_t capture_offset =
-      Platform::block_diffusion_capture_layer_offset();
-  for (int32_t layer_id : checkpoint.target_layer_ids) {
-    capture_points.emplace_back(layer_id + capture_offset);
+  args.block_diffusion_num_capture_layers(
+      static_cast<int64_t>(checkpoint.target_layer_ids.size()));
+
+  if (options.is_draft_engine()) {
+    args.layers_to_capture({});
+  } else {
+    std::vector<int32_t> capture_points;
+    capture_points.reserve(checkpoint.target_layer_ids.size());
+    // Checkpoints store zero-based target layer IDs. NPU hooks capture layer
+    // inputs, while other backends capture after layer execution.
+    const int32_t capture_offset =
+        Platform::block_diffusion_capture_layer_offset();
+    for (int32_t layer_id : checkpoint.target_layer_ids) {
+      capture_points.emplace_back(layer_id + capture_offset);
+    }
+    args.layers_to_capture(std::move(capture_points));
   }
-  args.layers_to_capture(std::move(capture_points));
 
   if (!options.is_draft_engine()) {
     return;

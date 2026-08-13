@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <optional>
 #include <vector>
 
@@ -52,20 +53,22 @@ class AuxHiddenCapture final {
   void capture_layer(int32_t layer_idx,
                      const torch::Tensor& h,
                      const std::optional<torch::Tensor>& residual) {
-    if (layers_to_capture_.empty() ||
-        std::find(layers_to_capture_.begin(),
-                  layers_to_capture_.end(),
-                  layer_idx) == layers_to_capture_.end()) {
+    const auto layer_it = std::find(
+        layers_to_capture_.begin(), layers_to_capture_.end(), layer_idx);
+    if (layer_it == layers_to_capture_.end()) {
       return;
     }
     const int64_t num_tokens = h.size(0);
     const int64_t hidden_size = h.size(-1);
+    CHECK_LE(num_tokens, buffer_.size(0))
+        << "Auxiliary hidden capture exceeds its configured token capacity.";
+    const int64_t slot_idx = static_cast<int64_t>(
+        std::distance(layers_to_capture_.begin(), layer_it));
     // add_out fuses the residual add into the preallocated slice, avoiding a
     // fresh [tokens, hidden] sum tensor per captured layer.
-    torch::Tensor slot = buffer_.slice(0, 0, num_tokens)
-                             .slice(1,
-                                    capture_idx_ * hidden_size,
-                                    (capture_idx_ + 1) * hidden_size);
+    torch::Tensor slot =
+        buffer_.slice(0, 0, num_tokens)
+            .slice(1, slot_idx * hidden_size, (slot_idx + 1) * hidden_size);
     torch::Tensor h_2d = h.reshape({num_tokens, hidden_size});
     if (residual.has_value()) {
       torch::add_out(
@@ -80,14 +83,25 @@ class AuxHiddenCapture final {
   // column 0.
   void reset_capture_index() { capture_idx_ = 0; }
 
-  ModelOutput finalize(const torch::Tensor& hidden_states) const {
+  bool enabled() const { return !layers_to_capture_.empty(); }
+
+  bool should_capture(int32_t layer_idx) const {
+    return std::find(layers_to_capture_.begin(),
+                     layers_to_capture_.end(),
+                     layer_idx) != layers_to_capture_.end();
+  }
+
+  ModelOutput finalize(
+      const torch::Tensor& hidden_states,
+      const std::optional<torch::Tensor>& residual = std::nullopt) const {
+    ModelOutput output(hidden_states, residual);
     if (layers_to_capture_.empty()) {
-      return ModelOutput(hidden_states);
+      return output;
     }
     CHECK_EQ(capture_idx_, static_cast<int64_t>(layers_to_capture_.size()))
         << "Captured aux hidden layer count mismatch.";
-    torch::Tensor aux = buffer_.slice(0, 0, hidden_states.size(0));
-    return ModelOutput(hidden_states, torch::Tensor(), aux);
+    output.aux_hidden_states = buffer_.slice(0, 0, hidden_states.size(0));
+    return output;
   }
 
  private:
