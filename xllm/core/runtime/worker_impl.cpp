@@ -215,20 +215,27 @@ void configure_block_diffusion_model_args(
     return;
   }
 
-  const bool is_deepseek_v4 =
-      util::is_deepseek_v4_model_type(args.model_type());
-  const std::optional<std::string> draft_model_type =
-      block_diffusion_draft_model_type(args, options);
-  if (draft_model_type.has_value()) {
+  const std::string& algorithm = options.speculative_algorithm();
+#if !defined(USE_NPU)
+  LOG(FATAL) << algorithm << " block-diffusion draft is not supported on "
+             << Platform::type_str() << ".";
+#else
+  auto set_draft_model_type = [&](const std::string& draft_model_type) {
     LOG(INFO) << "Overriding draft model_type from " << args.model_type()
-              << " to " << *draft_model_type
+              << " to " << draft_model_type
               << " for block-diffusion speculative decoding";
-    args.model_type(*draft_model_type);
-  }
+    args.model_type(draft_model_type);
+  };
 
-  if (options.speculative_algorithm() == "DSpark" && is_deepseek_v4) {
+  if (algorithm == "DFlash") {
+    set_draft_model_type("DFlashDraftModel");
+  } else if (util::is_deepseek_v4_model_type(args.model_type())) {
+    set_draft_model_type("deepseek_v4_dspark");
     configure_deepseek_v4_dspark_args(args, options);
+  } else {
+    set_draft_model_type("DSparkDraftModel");
   }
+#endif
 }
 
 void move_tensor_to_device_if_needed(torch::Tensor& tensor,
