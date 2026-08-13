@@ -54,6 +54,7 @@ cc_library(
     shm_channel.cpp
   DEPS
     :api_service
+    :common
     :runtime
     :util
     glog::glog
@@ -71,10 +72,10 @@ cc_library(
     worker_service
   HDRS
     worker_service.h
-    speculative_output_metrics.h
   SRCS
     worker_service.cpp
   DEPS
+    :common
     :request
     absl::strings
     glog::glog

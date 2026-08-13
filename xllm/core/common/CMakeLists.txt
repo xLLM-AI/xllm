@@ -14,6 +14,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:mspti_helper.h>
     options.h
     rate_limiter.h
+    speculative_output_metrics.h
     types.h
     device_monitor.h
     version_singleton.h

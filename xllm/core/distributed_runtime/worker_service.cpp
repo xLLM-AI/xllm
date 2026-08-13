@@ -28,9 +28,9 @@ limitations under the License.
 #include "common/device_monitor.h"
 #include "common/global_flags.h"
 #include "common/metrics.h"
+#include "common/speculative_output_metrics.h"
 #include "common/types.h"
 #include "core/distributed_runtime/comm_channel.h"
-#include "core/distributed_runtime/speculative_output_metrics.h"
 #include "core/framework/config/eplb_config.h"
 #include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/model/model_input_params.h"
@@ -81,8 +81,8 @@ void record_speculative_metrics_from_output(
   CHECK_EQ(position_labels.size(), static_cast<size_t>(num_speculative_tokens));
 
   torch::Tensor tokens = next_tokens.contiguous();
-  worker_service_detail::SpeculativeOutputStats stats =
-      worker_service_detail::calculate_speculative_output_stats(
+  speculative_metrics::SpeculativeOutputStats stats =
+      speculative_metrics::calculate_speculative_output_stats(
           tokens, num_speculative_tokens);
   if (!stats.supported_dtype) {
     LOG(WARNING) << "Unsupported speculative next_tokens dtype for metrics: "

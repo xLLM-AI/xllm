@@ -20,7 +20,7 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
-namespace xllm::worker_service_detail {
+namespace xllm::speculative_metrics {
 
 struct SpeculativeOutputStats {
   std::vector<int64_t> accepted_per_position;
@@ -75,4 +75,4 @@ inline SpeculativeOutputStats calculate_speculative_output_stats(
   }
 }
 
-}  // namespace xllm::worker_service_detail
+}  // namespace xllm::speculative_metrics
