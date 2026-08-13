@@ -85,13 +85,6 @@ class Platform final {
   // keying and MTP replay contracts are verified against the same strategy.
   static constexpr bool supports_mtp_decode_graph_warmup() { return is_mlu(); }
 
-  // Block-diffusion checkpoints store the target layer whose output feeds the
-  // draft. NPU capture hooks observe layer inputs, so output L is captured at
-  // L+1. Other backends record after layer execution and use L directly.
-  static constexpr int32_t block_diffusion_capture_layer_offset() {
-    return is_npu() ? 1 : 0;
-  }
-
   static constexpr bool is_ilu() {
 #if defined(USE_ILU)
     return true;
