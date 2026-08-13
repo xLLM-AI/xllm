@@ -1205,7 +1205,7 @@ TEST(SpeculativeConfigTest, MtpAlgorithmClassificationIsCaseInsensitive) {
 
 TEST(AuxHiddenCaptureTest, PreservesConfiguredLayerOrderAndResidual) {
   ModelArgs args;
-  args.hidden_size(2).layers_to_capture({2, 0});
+  args.hidden_size(2).layers_to_capture({0, 2});
   AuxHiddenCapture capture;
   capture.init(args, torch::TensorOptions().dtype(torch::kFloat32), 3);
 
@@ -1220,9 +1220,9 @@ TEST(AuxHiddenCaptureTest, PreservesConfiguredLayerOrderAndResidual) {
 
   EXPECT_TRUE(torch::equal(output.residual, residual));
   EXPECT_TRUE(torch::equal(output.aux_hidden_states.slice(1, 0, 2),
-                           torch::full({3, 2}, 20.0f)));
-  EXPECT_TRUE(torch::equal(output.aux_hidden_states.slice(1, 2, 4),
                            torch::full({3, 2}, 10.0f)));
+  EXPECT_TRUE(torch::equal(output.aux_hidden_states.slice(1, 2, 4),
+                           torch::full({3, 2}, 20.0f)));
 }
 
 TEST(DSparkWorkerInputTest, InvalidatesTargetAttentionMetadataOnly) {

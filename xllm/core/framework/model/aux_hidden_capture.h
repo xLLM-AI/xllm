@@ -20,7 +20,6 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstdint>
-#include <iterator>
 #include <optional>
 #include <vector>
 
@@ -42,8 +41,9 @@ class AuxHiddenCapture final {
       return;
     }
     layers_to_capture_ = model_args.layers_to_capture();
-    const int64_t aux_dim = model_args.hidden_size() *
-                            static_cast<int64_t>(layers_to_capture_.size());
+    const int64_t num_captured =
+        static_cast<int64_t>(layers_to_capture_.size());
+    const int64_t aux_dim = model_args.hidden_size() * num_captured;
     buffer_ = torch::empty({max_tokens_per_batch, aux_dim}, options);
   }
 
@@ -52,22 +52,20 @@ class AuxHiddenCapture final {
   void capture_layer(int32_t layer_idx,
                      const torch::Tensor& h,
                      const std::optional<torch::Tensor>& residual) {
-    const auto layer_it = std::find(
-        layers_to_capture_.begin(), layers_to_capture_.end(), layer_idx);
-    if (layer_it == layers_to_capture_.end()) {
+    if (layers_to_capture_.empty() ||
+        std::find(layers_to_capture_.begin(),
+                  layers_to_capture_.end(),
+                  layer_idx) == layers_to_capture_.end()) {
       return;
     }
     const int64_t num_tokens = h.size(0);
     const int64_t hidden_size = h.size(-1);
-    CHECK_LE(num_tokens, buffer_.size(0))
-        << "Auxiliary hidden capture exceeds its configured token capacity.";
-    const int64_t slot_idx = static_cast<int64_t>(
-        std::distance(layers_to_capture_.begin(), layer_it));
     // add_out fuses the residual add into the preallocated slice, avoiding a
     // fresh [tokens, hidden] sum tensor per captured layer.
-    torch::Tensor slot =
-        buffer_.slice(0, 0, num_tokens)
-            .slice(1, slot_idx * hidden_size, (slot_idx + 1) * hidden_size);
+    torch::Tensor slot = buffer_.slice(0, 0, num_tokens)
+                             .slice(1,
+                                    capture_idx_ * hidden_size,
+                                    (capture_idx_ + 1) * hidden_size);
     torch::Tensor h_2d = h.reshape({num_tokens, hidden_size});
     if (residual.has_value()) {
       torch::add_out(
