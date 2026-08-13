@@ -209,6 +209,371 @@ TEST_F(NpuXllmOpsTest, EmbeddedInterpreterSeesOps) {
              .item<float>();
 }
 
+TEST_F(NpuXllmOpsTest, Dsv4PartialRotaryPythonWrapperRunsOnNpu) {
+  py::gil_scoped_acquire gil;
+
+  py::exec(R"PY(
+import torch
+from xllm.python.kernels_npu.rotary_embedding import (
+    npu_inplace_partial_rotary_mul,
+)
+
+torch.manual_seed(2026)
+x_cpu = torch.randn((8, 2, 128), dtype=torch.float32).to(torch.bfloat16)
+cos_cpu = torch.randn((8, 64), dtype=torch.float32).to(torch.bfloat16)
+sin_cpu = torch.randn((8, 64), dtype=torch.float32).to(torch.bfloat16)
+
+expected = x_cpu.float().clone()
+segment = x_cpu[..., 64:128].float()
+swapped = torch.empty_like(segment)
+swapped[..., 0::2] = segment[..., 1::2]
+swapped[..., 1::2] = segment[..., 0::2]
+sign = torch.ones_like(cos_cpu.float())
+sign[..., 0::2] = -1
+expected[..., 64:128] = (
+    segment * cos_cpu.float().unsqueeze(1)
+    + swapped * sin_cpu.float().unsqueeze(1) * sign.unsqueeze(1)
+)
+expected = expected.to(torch.bfloat16).float()
+
+x = x_cpu.to("privateuseone:0")
+cos = cos_cpu.to(x.device)
+sin = sin_cpu.to(x.device)
+result = npu_inplace_partial_rotary_mul(x, cos, sin, 64, 64)
+torch.npu.synchronize()
+
+assert result.data_ptr() == x.data_ptr()
+torch.testing.assert_close(
+    x.cpu().float(), expected, atol=2e-2, rtol=2e-2
+)
+)PY");
+}
+
+TEST_F(NpuXllmOpsTest, Dsv4CompressorPythonWrapperRunsOnNpu) {
+  py::gil_scoped_acquire gil;
+
+  py::exec(R"PY(
+import torch
+from xllm.python.kernels_npu.dsa import compressor
+
+device = torch.device("privateuseone:0")
+torch.manual_seed(2025)
+batch, tokens, hidden = 1, 128, 1024
+ratio, head_dim, coff, rope_dim = 128, 512, 1, 64
+compressed_tokens = tokens // ratio
+
+x_cpu = (torch.randn(batch, tokens, hidden) * 0.1).to(torch.float16)
+wkv_cpu = (torch.randn(coff * head_dim, hidden) * 0.05).to(torch.float16)
+wgate_cpu = (torch.randn(coff * head_dim, hidden) * 0.05).to(torch.float16)
+ape_cpu = (torch.randn(ratio, coff * head_dim) * 0.1).float()
+norm_cpu = (torch.randn(head_dim) * 0.1 + 1).to(torch.float16)
+rope_cos_cpu = (
+    torch.randn(batch, compressed_tokens, rope_dim) * 0.1
+).to(torch.float16)
+rope_sin_cpu = (
+    torch.randn(batch, compressed_tokens, rope_dim) * 0.1
+).to(torch.float16)
+
+projected_kv = x_cpu.float()[0] @ wkv_cpu.float().T
+scores = x_cpu.float()[0] @ wgate_cpu.float().T + ape_cpu
+pooled = (torch.softmax(scores, dim=0) * projected_kv).sum(0, keepdim=True)
+variance = pooled.square().mean(-1, keepdim=True)
+expected = pooled * torch.rsqrt(variance + 1e-6) * norm_cpu.float()
+rope_segment = expected[:, -rope_dim:].clone()
+half = rope_dim // 2
+rotated = torch.cat((-rope_segment[:, half:], rope_segment[:, :half]), dim=-1)
+expected[:, -rope_dim:] = (
+    rope_segment * rope_cos_cpu.float()[0]
+    + rotated * rope_sin_cpu.float()[0]
+)
+expected = expected.view(batch, compressed_tokens, head_dim).half().float()
+
+x = x_cpu.to(device)
+wkv = wkv_cpu.to(device)
+wgate = wgate_cpu.to(device)
+ape = ape_cpu.to(device)
+norm_weight = norm_cpu.to(device)
+rope_sin = rope_sin_cpu.to(device)
+rope_cos = rope_cos_cpu.to(device)
+kv_state = torch.zeros((1, 128, head_dim), dtype=torch.float32, device=device)
+score_state = torch.zeros_like(kv_state)
+kv_block_table = torch.tensor([[0]], dtype=torch.int32, device=device)
+score_block_table = torch.tensor([[0]], dtype=torch.int32, device=device)
+
+out, wkv_proj, softmax_res, norm_x, norm_rstd = compressor(
+    x,
+    wkv,
+    wgate,
+    kv_state,
+    score_state,
+    ape,
+    norm_weight,
+    rope_sin,
+    rope_cos,
+    kv_block_table,
+    score_block_table,
+    None,
+    None,
+    None,
+    rope_dim,
+    ratio,
+    coff,
+    1e-6,
+    1,
+    False,
+)
+torch.npu.synchronize()
+
+assert out.shape == (batch, compressed_tokens, head_dim)
+assert out.dtype == torch.float16
+assert wkv_proj.numel() == 0
+assert softmax_res.numel() == 0
+assert norm_x.numel() == 0
+assert norm_rstd.numel() == 0
+torch.testing.assert_close(
+    out.cpu().float(), expected, atol=2e-2, rtol=2e-2
+)
+)PY");
+}
+
+TEST_F(NpuXllmOpsTest, Dsv4QuantLightningIndexerPythonWrapperRunsOnNpu) {
+  py::gil_scoped_acquire gil;
+
+  py::exec(R"PY(
+import torch
+from xllm.python.kernels_npu.dsa import (
+    quant_lightning_indexer,
+    quant_lightning_indexer_metadata,
+)
+
+device = torch.device("privateuseone:0")
+torch.manual_seed(2026)
+tokens, heads, head_dim = 84, 64, 128
+page_size, sparse_count = 128, 512
+query_cpu = torch.randint(-8, 8, (tokens, heads, head_dim), dtype=torch.int8)
+key_cpu = torch.randint(-8, 8, (1, page_size, 1, head_dim), dtype=torch.int8)
+query = query_cpu.to(device)
+key = key_cpu.to(device)
+weights = torch.ones((tokens, heads), dtype=torch.float16, device=device)
+query_scale = torch.ones((tokens, heads), dtype=torch.float16, device=device)
+key_scale = torch.ones((1, page_size, 1), dtype=torch.float16, device=device)
+query_lens = torch.tensor([tokens], dtype=torch.int32, device=device)
+key_lens = torch.tensor([tokens], dtype=torch.int32, device=device)
+block_table = torch.tensor([[0]], dtype=torch.int32, device=device)
+metadata = quant_lightning_indexer_metadata(
+    heads,
+    1,
+    head_dim,
+    0,
+    0,
+    query_lens,
+    key_lens,
+    1,
+    tokens,
+    tokens,
+    "TND",
+    "PA_BSND",
+    sparse_count,
+    3,
+    2**63 - 1,
+    2**63 - 1,
+    4,
+    "npu",
+)
+metadata_again = quant_lightning_indexer_metadata(
+    heads,
+    1,
+    head_dim,
+    0,
+    0,
+    query_lens,
+    key_lens,
+    1,
+    tokens,
+    tokens,
+    "TND",
+    "PA_BSND",
+    sparse_count,
+    3,
+    2**63 - 1,
+    2**63 - 1,
+    4,
+    "npu",
+)
+indices, values = quant_lightning_indexer(
+    query,
+    key,
+    weights,
+    query_scale,
+    key_scale,
+    0,
+    0,
+    query_lens,
+    key_lens,
+    block_table,
+    metadata,
+    "TND",
+    "PA_BSND",
+    sparse_count,
+    3,
+    2**63 - 1,
+    2**63 - 1,
+    4,
+    False,
+)
+torch.npu.synchronize()
+
+assert indices.shape == (tokens, 1, sparse_count)
+assert indices.dtype == torch.int32
+assert values.numel() == 0
+assert values.dtype == torch.float32
+assert torch.equal(metadata.cpu(), metadata_again.cpu())
+
+valid_key_count = tokens // 4
+indices_cpu = indices.cpu().squeeze(1)
+assert torch.all(
+    (indices_cpu == -1)
+    | ((indices_cpu >= 0) & (indices_cpu < valid_key_count))
+)
+keys = key_cpu[0, :valid_key_count, 0].float()
+token_idx = tokens - 1
+dots = query_cpu[token_idx].float() @ keys.T
+expected_top8 = set(torch.topk(dots.clamp_min(0).sum(0), 8).indices.tolist())
+actual_top8 = set(indices_cpu[token_idx, :8].tolist())
+assert len(expected_top8 & actual_top8) >= 4, (
+    sorted(expected_top8),
+    sorted(actual_top8),
+)
+)PY");
+}
+
+TEST_F(NpuXllmOpsTest, Dsv4SparseAttentionPythonWrapperRunsOnNpu) {
+  py::gil_scoped_acquire gil;
+
+  py::exec(R"PY(
+import torch
+from xllm.python.kernels_npu.dsa import (
+    sparse_attn_sharedkv,
+    sparse_attn_sharedkv_metadata,
+)
+
+device = torch.device("privateuseone:0")
+torch.manual_seed(1234)
+batch, q_tokens, kv_tokens = 1, 4, 16
+heads, head_dim, page_size = 64, 512, 16
+query_cpu = (torch.randn(batch, q_tokens, heads, head_dim) * 0.1).half()
+kv_cpu = (torch.randn(batch, kv_tokens, 1, head_dim) * 0.1).half()
+sinks_cpu = (torch.randn(heads) * 0.1).float()
+query = query_cpu.to(device)
+ori_kv = kv_cpu.view(1, page_size, 1, head_dim).to(device)
+block_table = torch.tensor([[0]], dtype=torch.int32, device=device)
+cu_q = torch.tensor([0, q_tokens], dtype=torch.int32, device=device)
+cu_kv = torch.tensor([0, kv_tokens], dtype=torch.int32, device=device)
+seq_q = torch.tensor([q_tokens], dtype=torch.int32, device=device)
+seq_kv = torch.tensor([kv_tokens], dtype=torch.int32, device=device)
+sinks = sinks_cpu.to(device)
+metadata = sparse_attn_sharedkv_metadata(
+    heads,
+    1,
+    head_dim,
+    cu_q,
+    cu_kv,
+    None,
+    seq_q,
+    seq_kv,
+    batch,
+    q_tokens,
+    kv_tokens,
+    0,
+    0,
+    1,
+    4,
+    3,
+    127,
+    0,
+    "BSND",
+    "PA_ND",
+    True,
+    False,
+)
+metadata_again = sparse_attn_sharedkv_metadata(
+    heads,
+    1,
+    head_dim,
+    cu_q,
+    cu_kv,
+    None,
+    seq_q,
+    seq_kv,
+    batch,
+    q_tokens,
+    kv_tokens,
+    0,
+    0,
+    1,
+    4,
+    3,
+    127,
+    0,
+    "BSND",
+    "PA_ND",
+    True,
+    False,
+)
+out, lse = sparse_attn_sharedkv(
+    query,
+    ori_kv,
+    None,
+    None,
+    None,
+    block_table,
+    None,
+    None,
+    None,
+    None,
+    None,
+    seq_kv,
+    sinks,
+    metadata,
+    head_dim**-0.5,
+    1,
+    4,
+    3,
+    127,
+    0,
+    "BSND",
+    "PA_ND",
+    False,
+)
+torch.npu.synchronize()
+
+assert out.shape == query.shape
+assert out.dtype == query.dtype
+assert lse.numel() == 0
+assert torch.equal(metadata.cpu(), metadata_again.cpu())
+
+expected = torch.zeros_like(query_cpu.float())
+keys = kv_cpu[0, :, 0].float()
+scale = head_dim**-0.5
+for q_idx in range(q_tokens):
+    diagonal = kv_tokens - q_tokens + q_idx
+    left = max(diagonal - 127, 0)
+    right = diagonal
+    selected_keys = keys[left:right + 1]
+    logits = query_cpu[0, q_idx].float() @ selected_keys.T * scale
+    sink_logits = sinks_cpu[:, None]
+    normalizer = torch.logsumexp(
+        torch.cat((logits, sink_logits), dim=1), dim=1
+    )
+    probabilities = torch.exp(logits - normalizer[:, None])
+    expected[0, q_idx] = probabilities @ selected_keys
+expected = expected.half().float()
+torch.testing.assert_close(
+    out.cpu().float(), expected, atol=2e-2, rtol=2e-2
+)
+)PY");
+}
+
 TEST_F(NpuXllmOpsTest, Qwen35_27B_TP4_FullAttentionMatchesReference) {
   py::gil_scoped_acquire gil;
   if (!is_ascend950_device()) {

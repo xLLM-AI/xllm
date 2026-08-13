@@ -42,6 +42,17 @@ from .causal_conv1d import (
     causal_conv1d_decode,
     causal_conv1d_prefill,
 )
+from .dsa import (
+    compressor,
+    dequant_swiglu_quant,
+    hc_post,
+    hc_pre,
+    moe_gating_top_k_hash,
+    quant_lightning_indexer,
+    quant_lightning_indexer_metadata,
+    sparse_attn_sharedkv,
+    sparse_attn_sharedkv_metadata,
+)
 from .gated_delta_net import (
     chunk_gated_delta_rule,
     fused_gdn_prefill_post_conv,
@@ -61,6 +72,7 @@ from .normalization import (
     fused_add_rms_norm,
     l2_norm,
     rms_norm,
+    rms_norm_dynamic_quant,
     rms_norm_gated,
 )
 from .quantization import (
@@ -73,6 +85,7 @@ from .rotary_embedding import (
     interleaved_rotary_embedding,
     mrope,
     vision_rotary_mul,
+    npu_inplace_partial_rotary_mul,
 )
 from .sparse_attention import (
     lightning_indexer,
@@ -85,6 +98,7 @@ from .sparse_attention import (
 __all__ = [
     "rms_norm",
     "fused_add_rms_norm",
+    "rms_norm_dynamic_quant",
     "l2_norm",
     "rms_norm_gated",
     "silu_and_mul",
@@ -93,6 +107,7 @@ __all__ = [
     "vision_fusion_attention",
     "fused_qk_norm_rope",
     "interleaved_rotary_embedding",
+    "npu_inplace_partial_rotary_mul",
     "mrope",
     "vision_rotary_mul",
     "moe_fused_topk",
@@ -112,6 +127,15 @@ __all__ = [
     "sparse_flash_attention_out",
     "causal_conv1d_prefill",
     "causal_conv1d_decode",
+    "compressor",
+    "dequant_swiglu_quant",
+    "hc_pre",
+    "hc_post",
+    "moe_gating_top_k_hash",
+    "quant_lightning_indexer",
+    "quant_lightning_indexer_metadata",
+    "sparse_attn_sharedkv",
+    "sparse_attn_sharedkv_metadata",
     "resolve_gdn_prefill_backend",
     "fused_gdn_prefill_post_conv",
     "fused_recurrent_gated_delta_rule_packed_decode",
