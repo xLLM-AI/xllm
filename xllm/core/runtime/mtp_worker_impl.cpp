@@ -22,6 +22,7 @@ limitations under the License.
 #include <exception>
 #include <memory>
 #include <string>
+#include <unordered_set>
 
 #if defined(USE_NPU)
 #include <acl/acl.h>
@@ -727,7 +728,7 @@ class NpuJsonDraftTokenHandoff final {
   bool can_use_async_handoff(const torch::Tensor& next_tokens,
                              const int64_t token_count) const {
     return event_path_enabled_ && max_sequences_per_batch_ > 0 &&
-           token_count >= 0 && token_count <= max_sequences_per_batch_ &&
+           token_count > 0 && token_count <= max_sequences_per_batch_ &&
            !next_tokens.device().is_cpu() && next_tokens.is_contiguous() &&
            next_tokens.scalar_type() == torch::kLong;
   }
@@ -1130,7 +1131,10 @@ folly::SemiFuture<std::optional<ForwardOutput>> MTPWorkerImpl::step_async(
 
     auto output = this->step_for_schedule_overlap(input_on_device);
     if (output.has_value()) {
-      output->json_object_errors = input_on_device.json_object_errors;
+      output->json_object_errors.insert(
+          output->json_object_errors.end(),
+          input_on_device.json_object_errors.begin(),
+          input_on_device.json_object_errors.end());
       if (is_driver() || ::xllm::EPLBConfig::get_instance().enable_eplb()) {
         std::unique_lock<std::mutex> output_lock(mtx_);
         cv_.wait(output_lock, [this] { return !is_recorded_; });
@@ -1714,6 +1718,68 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
       static_cast<int64_t>(final_sync_timer.elapsed_microseconds()));
   release_retained_inputs(target_output);
   val_output.next_tokens = val_output.next_tokens.to(torch::kCPU);
+  std::vector<size_t> failed_sequence_rows;
+  if (!input.json_object_states.empty()) {
+    CHECK_EQ(val_output.next_tokens.dim(), 2)
+        << "MTP JSON accepted output must be [sequence, token]";
+    CHECK_EQ(input.sample_sequence_ids.size(), input.json_object_states.size())
+        << "MTP JSON sequence ids must match grammar state rows";
+    const torch::Tensor accepted_tokens =
+        val_output.next_tokens.to(torch::kInt64).contiguous();
+    const std::vector<detail::JsonAcceptedTokenMismatch> mismatches =
+        detail::find_json_accepted_token_mismatches(
+            input.json_object_states,
+            accepted_tokens.const_data_ptr<int64_t>(),
+            static_cast<size_t>(accepted_tokens.size(0)),
+            static_cast<size_t>(accepted_tokens.size(1)));
+    CHECK_EQ(input.input_params.embedding.embedding_ids.size(),
+             input.json_object_states.size())
+        << "MTP JSON embedding ids must match grammar state rows";
+    std::unordered_set<std::string> failed_sequence_ids;
+    failed_sequence_ids.reserve(input.json_object_errors.size() +
+                                target_output.json_object_errors.size() +
+                                mismatches.size());
+    for (const JsonObjectOutputError& error : input.json_object_errors) {
+      CHECK(!error.sample_sequence_id.empty())
+          << "MTP JSON input error requires a sampled sequence id";
+      failed_sequence_ids.emplace(error.sample_sequence_id);
+    }
+    for (const JsonObjectOutputError& error :
+         target_output.json_object_errors) {
+      CHECK(!error.sample_sequence_id.empty())
+          << "MTP JSON output error requires a sampled sequence id";
+      failed_sequence_ids.emplace(error.sample_sequence_id);
+    }
+    for (const detail::JsonAcceptedTokenMismatch& mismatch : mismatches) {
+      const std::string& sample_sequence_id =
+          input.sample_sequence_ids[mismatch.sequence_index];
+      CHECK(!sample_sequence_id.empty())
+          << "MTP JSON mismatch requires a sampled sequence id";
+      LOG(ERROR) << "MTP JSON accepted output replay mismatch: sequence_id="
+                 << sample_sequence_id
+                 << ", token_offset=" << mismatch.token_offset
+                 << ", token_id=" << mismatch.token_id
+                 << ", committed_tokens=" << mismatch.committed_tokens
+                 << ", state_fingerprint=" << mismatch.state_fingerprint;
+      if (failed_sequence_ids.emplace(sample_sequence_id).second) {
+        target_output.json_object_errors.push_back(
+            {sample_sequence_id,
+             "accepted MTP output violates json_object grammar, token_id=" +
+                 std::to_string(mismatch.token_id)});
+      }
+    }
+    failed_sequence_rows.reserve(failed_sequence_ids.size());
+    for (size_t sequence_index = 0;
+         sequence_index < input.sample_sequence_ids.size();
+         ++sequence_index) {
+      if (failed_sequence_ids.contains(
+              input.sample_sequence_ids[sequence_index])) {
+        failed_sequence_rows.emplace_back(sequence_index);
+      }
+    }
+    CHECK_EQ(failed_sequence_rows.size(), failed_sequence_ids.size())
+        << "MTP JSON errors must reference sampled rows in the current batch";
+  }
   {
     int64_t constrained_accepted = 0;
     int64_t plain_accepted = 0;
@@ -1757,7 +1823,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
                 constrained_draft);
     COUNTER_ADD(speculative_num_draft_tokens_plain_total, plain_draft);
   }
-  write_target_context_to_cache(input, val_output);
+  write_target_context_to_cache(input, val_output, failed_sequence_rows);
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
     return std::nullopt;
@@ -1770,17 +1836,62 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
 
 void MTPWorkerImpl::write_target_context_to_cache(
     const ForwardInput& input,
-    const SampleOutput& validate_output) {
+    const SampleOutput& validate_output,
+    const std::vector<size_t>& failed_rows) {
   CHECK(embedding_cache_ != nullptr)
       << "embedding_cache_ must be initialized before target cache write";
   CHECK(!input.input_params.embedding.embedding_ids.empty())
       << "target context cache write requires embedding ids";
-  embedding_cache_->write_target_context(
-      input.input_params.embedding.embedding_ids,
-      input.input_params.embedding.request_ids,
-      validate_output.next_tokens,
-      validate_output.embeddings,
-      options_.num_speculative_tokens());
+  if (failed_rows.empty()) {
+    embedding_cache_->write_target_context(
+        input.input_params.embedding.embedding_ids,
+        input.input_params.embedding.request_ids,
+        validate_output.next_tokens,
+        validate_output.embeddings,
+        options_.num_speculative_tokens());
+    return;
+  }
+
+  const std::vector<int32_t>& embedding_ids =
+      input.input_params.embedding.embedding_ids;
+  const std::vector<std::string>& request_ids =
+      input.input_params.embedding.request_ids;
+  CHECK(request_ids.empty() || request_ids.size() == embedding_ids.size())
+      << "target context request ids must match embedding ids";
+  std::unordered_set<size_t> failed_row_set(failed_rows.begin(),
+                                            failed_rows.end());
+  CHECK_EQ(failed_row_set.size(), failed_rows.size())
+      << "target context failed rows must be unique";
+
+  std::vector<int32_t> failed_embedding_ids;
+  failed_embedding_ids.reserve(failed_rows.size());
+  for (const size_t failed_row : failed_rows) {
+    CHECK_LT(failed_row, embedding_ids.size())
+        << "target context failed row exceeds embedding ids";
+    failed_embedding_ids.emplace_back(embedding_ids[failed_row]);
+  }
+  embedding_cache_->clear(failed_embedding_ids);
+
+  for (size_t sequence_index = 0; sequence_index < embedding_ids.size();
+       ++sequence_index) {
+    if (failed_row_set.contains(sequence_index)) {
+      continue;
+    }
+    const std::vector<int32_t> row_embedding_ids = {
+        embedding_ids[sequence_index]};
+    const std::vector<std::string> row_request_ids =
+        request_ids.empty()
+            ? std::vector<std::string>()
+            : std::vector<std::string>{request_ids[sequence_index]};
+    embedding_cache_->write_target_context(
+        row_embedding_ids,
+        row_request_ids,
+        validate_output.next_tokens.narrow(
+            /*dim=*/0, /*start=*/sequence_index, /*length=*/1),
+        validate_output.embeddings.narrow(
+            /*dim=*/0, /*start=*/sequence_index, /*length=*/1),
+        options_.num_speculative_tokens());
+  }
 }
 
 void MTPWorkerImpl::process_draft_sample_output(SampleOutput& sample_output) {

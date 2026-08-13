@@ -989,6 +989,12 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
 
   auto prepare_device_on_stream = [&]() {
     processed_input = prep_for_device.to(device_, dtype_);
+    // Packed RPC/SHM inputs deserialize JSON snapshots inside ForwardInput::to.
+    // Restore them before speculative dispatch so MTP sees the grammar rows.
+    if (processed_input.json_object_states.empty() &&
+        !processed_input.json_object_state_snapshots.empty()) {
+      restore_json_object_states(processed_input);
+    }
     ensure_forward_input_device_tensors(processed_input, device_);
 
 #if defined(USE_NPU)

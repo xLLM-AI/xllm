@@ -202,6 +202,17 @@ TEST(JsonObjectGrammarTest, ReasoningIsUnconstrainedUntilEndMarker) {
   EXPECT_FALSE(state.can_accept_token(1));
 }
 
+TEST(JsonObjectGrammarTest, ReasoningDisabledRejectsEndMarkerAtJsonStart) {
+  JsonObjectGrammar grammar({"{", "}", "reasoning", "<think>", "</think>"},
+                            /*stop_token_ids=*/{1},
+                            {3, 4});
+  JsonObjectGrammarState state = grammar.initial_state();
+
+  EXPECT_FALSE(state.in_reasoning());
+  EXPECT_FALSE(state.can_accept_token(/*reasoning_end=*/4));
+  EXPECT_TRUE(state.can_accept_token(/*open_object=*/0));
+}
+
 TEST(JsonObjectGrammarTest, RejectsNonEmptyStopTokensBeforeRootCompletion) {
   JsonObjectGrammar grammar({"{",
                              "\"",

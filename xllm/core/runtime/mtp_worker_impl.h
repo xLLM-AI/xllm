@@ -146,7 +146,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
       ForwardInput& extend_input);
 
   void write_target_context_to_cache(const ForwardInput& input,
-                                     const SampleOutput& validate_output);
+                                     const SampleOutput& validate_output,
+                                     const std::vector<size_t>& failed_rows);
 
  protected:
   // Draft model worker

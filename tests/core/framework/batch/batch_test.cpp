@@ -40,6 +40,7 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/request/stopping_checker.h"
+#include "framework/sampling/rejection_sampler.h"
 #include "framework/sampling/sampling_params.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "platform/device.h"
@@ -944,6 +945,168 @@ TEST(BatchTest, JsonObjectSampleSequenceIdsFollowSamplingRows) {
   ForwardInput next_input = batch.prepare_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
   EXPECT_EQ(next_input.sample_prior_output_rows, std::vector<int32_t>({0, 1}));
+}
+
+TEST(BatchTest, ReorderedMtpAcceptedRowsCommitToOwningSequences) {
+  ScopedJsonObjectOutput enabled(/*enabled=*/true);
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(16);
+  BlockManagerImpl manager(options);
+
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(16);
+  std::shared_ptr<const JsonObjectGrammar> grammar =
+      std::make_shared<const JsonObjectGrammar>(
+          std::vector<std::string>{"{",
+                                   "\"a\"",
+                                   ":",
+                                   "1",
+                                   "}",
+                                   "stop",
+                                   "plain-6",
+                                   "plain-7",
+                                   "plain-8",
+                                   "]",
+                                   "plain-10",
+                                   "plain-11",
+                                   "plain-12",
+                                   "plain-13",
+                                   "plain-14",
+                                   "plain-15"},
+          std::unordered_set<int32_t>{5});
+
+  SequenceParams constrained_params;
+  constrained_params.seq_capacity = 16;
+  constrained_params.stopping_checker = &stopping_checker;
+  constrained_params.sampling_param = &sampling_param;
+  constrained_params.request_id = "req-json-chain";
+  constrained_params.json_object_grammar = grammar;
+  constrained_params.json_reasoning_enabled = false;
+  constrained_params.enable_schedule_overlap = true;
+
+  SequenceParams plain_params = constrained_params;
+  plain_params.request_id = "req-plain-chain";
+  plain_params.json_object_grammar.reset();
+
+  IncrementalDecoder constrained_decoder("", 2, false, false);
+  Sequence constrained(/*index=*/0,
+                       /*prompt_token_ids=*/{100, 101},
+                       torch::Tensor(),
+                       MMData(),
+                       std::move(constrained_decoder),
+                       constrained_params);
+  constrained.add_kv_blocks(manager.allocate(1));
+
+  IncrementalDecoder plain_decoder("", 2, false, false);
+  Sequence plain(/*index=*/1,
+                 /*prompt_token_ids=*/{200, 201},
+                 torch::Tensor(),
+                 MMData(),
+                 std::move(plain_decoder),
+                 plain_params);
+  plain.add_kv_blocks(manager.allocate(1));
+
+  Batch batch({&plain, &constrained});
+  ForwardInput first_input = batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
+  EXPECT_EQ(
+      first_input.sample_sequence_ids,
+      std::vector<std::string>({"req-plain-chain#1", "req-json-chain#0"}));
+  EXPECT_TRUE(equal(first_input.sampling_params.selected_token_idxes,
+                    std::vector<int32_t>({1, 3})));
+  ASSERT_EQ(first_input.json_object_states.size(), 2u);
+  EXPECT_FALSE(first_input.json_object_states[0].initialized());
+  EXPECT_TRUE(first_input.json_object_states[1].initialized());
+
+  RawForwardOutput fake_output;
+  fake_output.outputs = {make_raw_sample_output(-1, std::nullopt),
+                         make_raw_sample_output(-2, std::nullopt)};
+  batch.process_sample_output(fake_output, /*replace_fake_token=*/false);
+  ForwardInput commit_input = batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
+  EXPECT_EQ(
+      commit_input.sample_sequence_ids,
+      std::vector<std::string>({"req-plain-chain#1", "req-json-chain#0"}));
+  EXPECT_EQ(commit_input.sample_prior_output_rows,
+            std::vector<int32_t>({0, 1}));
+
+  const torch::Tensor draft_token_ids =
+      torch::tensor({{10, 11, 12, 13, 14}, {0, 1, 9, 3, 4}}, torch::kInt64);
+  const torch::Tensor target_token_ids =
+      torch::tensor({{10, 11, 12, 13, 14}, {0, 1, 2, 3, 4}}, torch::kInt64);
+  torch::Tensor target_logits = torch::zeros({2, 6, 16}, torch::kFloat32);
+  for (int64_t row = 0; row < target_token_ids.size(0); ++row) {
+    for (int64_t step = 0; step < target_token_ids.size(1); ++step) {
+      target_logits.index_put_(
+          {row, step, target_token_ids.index({row, step}).item<int64_t>()},
+          20.0F);
+    }
+  }
+  const torch::Tensor bonus_token_ids =
+      torch::tensor({{15}, {5}}, torch::kInt64);
+  const torch::Tensor do_sample = torch::tensor({false, false}, torch::kBool);
+  RejectionSampler rejection_sampler(do_sample,
+                                     /*all_random_sample=*/false,
+                                     /*all_greedy_sample=*/true,
+                                     /*logprobs=*/false,
+                                     /*max_top_logprobs=*/0);
+  const SampleOutput accepted_output =
+      rejection_sampler.forward(draft_token_ids,
+                                torch::zeros({2, 5}, torch::kFloat32),
+                                target_logits,
+                                bonus_token_ids,
+                                /*mask_out_rejected_tokens=*/true);
+  EXPECT_TRUE(torch::equal(
+      accepted_output.next_tokens,
+      torch::tensor({{10, 11, 12, 13, 14, 15}, {0, 1, 2, -1, -1, -1}},
+                    torch::kInt64)));
+
+  JsonObjectGrammarState expected_constrained_state = grammar->initial_state();
+  ASSERT_TRUE(expected_constrained_state.accept_token(0));
+  ASSERT_TRUE(expected_constrained_state.accept_token(1));
+  EXPECT_FALSE(expected_constrained_state.can_accept_token(9));
+  ASSERT_TRUE(expected_constrained_state.accept_token(2));
+
+  const torch::Tensor undefined;
+  proto::ForwardOutput proto_output;
+  forward_output_to_proto(accepted_output.next_tokens,
+                          undefined,
+                          undefined,
+                          undefined,
+                          undefined,
+                          undefined,
+                          /*prepared_layer_id=*/-1,
+                          undefined,
+                          undefined,
+                          undefined,
+                          /*dit_images=*/{},
+                          /*json_object_errors=*/{},
+                          &proto_output);
+  RawForwardOutput raw_output;
+  proto_to_forward_output(proto_output, raw_output);
+  ASSERT_EQ(raw_output.outputs.size(), 2u);
+  EXPECT_EQ(raw_output.outputs[0].tokens.size(), 6u);
+  EXPECT_EQ(raw_output.outputs[0].tokens.back().id, 15);
+  EXPECT_EQ(raw_output.outputs[1].tokens.size(), 3u);
+  EXPECT_EQ(raw_output.outputs[1].tokens.back().id, 2);
+
+  EXPECT_NO_FATAL_FAILURE(
+      batch.process_sample_output(raw_output, /*replace_fake_token=*/true));
+  ASSERT_FALSE(plain.error_status().has_value());
+  ASSERT_FALSE(constrained.error_status().has_value());
+  ASSERT_EQ(plain.num_generated_tokens(), 6u);
+  ASSERT_EQ(constrained.num_generated_tokens(), 3u);
+  for (size_t token_idx = 0; token_idx < 6; ++token_idx) {
+    EXPECT_EQ(plain.tokens()[plain.num_prompt_tokens() + token_idx],
+              10 + token_idx);
+  }
+  EXPECT_EQ(constrained.tokens()[constrained.num_prompt_tokens()], 0);
+  EXPECT_EQ(constrained.tokens()[constrained.num_prompt_tokens() + 1], 1);
+  EXPECT_EQ(constrained.tokens()[constrained.num_prompt_tokens() + 2], 2);
+  ASSERT_NE(constrained.json_object_state(), nullptr);
+  EXPECT_EQ(constrained.json_object_state()->fingerprint(),
+            expected_constrained_state.fingerprint());
 }
 
 TEST(BatchTest, JsonObjectMetadataIsSkippedWhenDisabled) {
