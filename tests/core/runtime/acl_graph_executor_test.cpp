@@ -1270,8 +1270,7 @@ TEST(DSparkWorkerWeightsTest, DedicatedVocabularyOverridesFallbackInAnyOrder) {
   fallback_first.mark_loaded(/*dedicated=*/false);
   EXPECT_TRUE(fallback_first.should_load(/*dedicated=*/true));
   fallback_first.mark_loaded(/*dedicated=*/true);
-  EXPECT_EQ(fallback_first.source(),
-            dspark_detail::VocabularyWeightSource::DEDICATED);
+  EXPECT_FALSE(fallback_first.should_load(/*dedicated=*/true));
   EXPECT_FALSE(fallback_first.should_load(/*dedicated=*/false));
 
   dspark_detail::VocabularyWeightSelector dedicated_first;

@@ -41,8 +41,6 @@ class VocabularyWeightSelector final {
 
   bool loaded() const { return source_ != VocabularyWeightSource::NONE; }
 
-  VocabularyWeightSource source() const { return source_; }
-
   const char* source_name() const {
     switch (source_) {
       case VocabularyWeightSource::TARGET_FALLBACK:
