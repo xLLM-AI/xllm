@@ -281,11 +281,11 @@ class TestModelExecutorConstruction:
         )
 
     @patch("xllm.python.model_executor.executor._create_attention_backend")
-    def test_data_parallel_rejects_non_cuda_graph_backend(self, mock_create):
+    def test_data_parallel_rejects_unsupported_graph_backend(self, mock_create):
         mock_create.return_value = StubAttentionBackend()
         model = _FakeModel(num_layers=1)
 
-        with pytest.raises(NotImplementedError, match="supports cudagraphs only"):
+        with pytest.raises(NotImplementedError, match="supports cudagraphs and aclgraph only"):
             ModelExecutor(
                 model,
                 {
