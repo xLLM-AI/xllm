@@ -1598,18 +1598,10 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       config_dir = options_.draft_model_path().value();
     }
     if (options_.is_draft_engine()) {
-      std::vector<int32_t> capture_layer_ids =
-          read_capture_layer_ids(config_dir);
+      args.layers_to_capture({});
       const bool is_dspark = speculative_algorithm == "DSpark";
       const bool is_deepseek_v4_dspark =
           is_dspark && util::is_deepseek_v4_model_type(args.model_type());
-      // DeepSeek-V4 DSpark needs the target capture count to size its context
-      // projection. Other draft bodies must not enable their own aux capture.
-      if (is_deepseek_v4_dspark) {
-        args.layers_to_capture(std::move(capture_layer_ids));
-      } else {
-        args.layers_to_capture({});
-      }
       std::string draft_model_type =
           is_dspark ? "DSparkDraftModel" : "DFlashDraftModel";
       if (is_deepseek_v4_dspark) {

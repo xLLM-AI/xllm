@@ -59,12 +59,11 @@ void load_vocab_weight(VocabularyWeightSelector& selector,
 class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
  public:
   explicit DeepseekV4DSparkModelImpl(const ModelContext& context)
-      : DeepseekV4ModelImpl(context, /*enable_aux_capture=*/false) {
+      : DeepseekV4ModelImpl(context) {
     const ModelArgs& args = context.get_model_args();
-    const int64_t capture_count =
-        static_cast<int64_t>(args.layers_to_capture().size());
+    const int64_t capture_count = args.dspark_num_layers();
     CHECK_GT(capture_count, 0)
-        << "DeepSeek-V4 DSpark requires dspark_target_layer_ids.";
+        << "DeepSeek-V4 DSpark requires dspark_num_layers > 0.";
     CHECK_EQ(args.n_layers(), args.dspark_num_layers())
         << "DeepSeek-V4 DSpark draft layer count mismatch.";
     CHECK_GT(args.markov_rank(), 0)
