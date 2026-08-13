@@ -73,6 +73,7 @@ void apply_mtp_prepare_output(
     const ForwardInput& block_table_source,
     const kernel::npu::MtpPrepareNextDraftOutput& output,
     bool use_chunked_prefill,
+    bool rebuild_expanded_decode_metadata,
     int32_t block_size) {
   CHECK_EQ(output.token_ids.dim(), 1);
   CHECK_EQ(output.positions.dim(), 1);
@@ -96,7 +97,7 @@ void apply_mtp_prepare_output(
   }
   draft_input.input_params.attention.device.new_cache_slots =
       output.cache_slots;
-  if (!use_chunked_prefill) {
+  if (!use_chunked_prefill && rebuild_expanded_decode_metadata) {
     expand_decode_attention_metadata(
         draft_input, block_table_source, output.kv_seq_lens, block_size);
     const auto& attention = draft_input.input_params.attention.device;
@@ -124,6 +125,7 @@ void prepare_next_draft_from_accepted_state(
     const torch::Tensor& base_positions,
     const torch::Tensor& base_kv_seq_lens,
     bool use_chunked_prefill,
+    bool rebuild_expanded_decode_metadata,
     int32_t block_size) {
 #if defined(USE_NPU)
   if (block_table_source.input_params.multi_block_tables.empty()) {
@@ -140,6 +142,7 @@ void prepare_next_draft_from_accepted_state(
                                block_table_source,
                                *output,
                                use_chunked_prefill,
+                               rebuild_expanded_decode_metadata,
                                block_size);
       return;
     }
@@ -182,7 +185,7 @@ void prepare_next_draft_from_accepted_state(
                    /*dim=*/1)
           .flatten(/*start_dim=*/0, /*end_dim=*/1);
 #if defined(USE_NPU)
-  if (!use_chunked_prefill) {
+  if (!use_chunked_prefill && rebuild_expanded_decode_metadata) {
     expand_decode_attention_metadata(
         draft_input,
         block_table_source,

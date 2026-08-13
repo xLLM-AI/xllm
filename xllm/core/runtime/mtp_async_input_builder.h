@@ -37,6 +37,7 @@ void prepare_next_draft_from_accepted_state(
     const torch::Tensor& base_positions,
     const torch::Tensor& base_kv_seq_lens,
     bool use_chunked_prefill,
+    bool rebuild_expanded_decode_metadata,
     int32_t block_size);
 
 // Builds one-row-per-sequence metadata for a later draft step from the

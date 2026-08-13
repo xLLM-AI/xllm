@@ -64,7 +64,8 @@ ForwardInput make_block_table_source(const torch::Tensor& block_tables,
 
 void prepare_single_sequence(ForwardInput& draft_input,
                              const ForwardInput& block_table_source,
-                             int32_t base_kv_seq_len) {
+                             int32_t base_kv_seq_len,
+                             bool rebuild_expanded_decode_metadata = true) {
   const torch::Tensor accepted_tokens = torch::tensor({{42, -1}}, torch::kLong);
   const torch::Tensor accepted_embeddings =
       torch::tensor({{{1.0F, 2.0F}, {3.0F, 4.0F}}});
@@ -82,6 +83,7 @@ void prepare_single_sequence(ForwardInput& draft_input,
                                          base_positions,
                                          base_kv_seq_lens,
                                          /*use_chunked_prefill=*/false,
+                                         rebuild_expanded_decode_metadata,
                                          kBlockSize);
 }
 
@@ -114,6 +116,27 @@ TEST(MtpAsyncInputBuilderTest, BuildsExpandedMetadataAcrossBlockBoundary) {
                            torch::tensor({10, 10, 11}, torch::kInt)));
   EXPECT_TRUE(torch::equal(attention.paged_kv_last_page_len,
                            torch::tensor({4, 1}, torch::kInt)));
+}
+
+TEST(MtpAsyncInputBuilderTest, CanSkipExpandedMetadataRebuild) {
+  ForwardInput draft_input = make_draft_input(/*batch_size=*/1,
+                                              /*hidden_size=*/2);
+  const torch::Tensor template_block_tables =
+      torch::tensor({{90, 91}, {90, 91}}, torch::kInt);
+  draft_input.input_params.attention.device.block_tables =
+      template_block_tables;
+  const torch::Tensor block_tables = torch::tensor({{10, 11}}, torch::kInt);
+  ForwardInput block_table_source = make_block_table_source(block_tables, {5});
+
+  prepare_single_sequence(draft_input,
+                          block_table_source,
+                          /*base_kv_seq_len=*/5,
+                          /*rebuild_expanded_decode_metadata=*/false);
+
+  EXPECT_TRUE(
+      torch::equal(draft_input.input_params.attention.device.block_tables,
+                   template_block_tables));
+  EXPECT_FALSE(draft_input.input_params.graph.expanded_kv_seq_lens.defined());
 }
 
 TEST(MtpAsyncInputBuilderTest, BuildsTokenwiseSpecVerifyKvLengths) {

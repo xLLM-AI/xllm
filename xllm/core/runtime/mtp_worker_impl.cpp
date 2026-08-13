@@ -1407,6 +1407,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
         target_base_positions,
         target_base_kv_seq_lens,
         /*use_chunked_prefill=*/false,
+        /*rebuild_expanded_decode_metadata=*/true,
         options_.block_size());
   } else {
     // First decode after prefill and batch transitions use the host cache.
@@ -2396,6 +2397,7 @@ void MTPWorkerImpl::enqueue_next_first_draft(
       base_positions,
       base_kv_seq_lens,
       /*use_chunked_prefill=*/false,
+      /*rebuild_expanded_decode_metadata=*/false,
       options_.block_size());
 
   submit_pending_first_draft(input, std::move(combined_input));
