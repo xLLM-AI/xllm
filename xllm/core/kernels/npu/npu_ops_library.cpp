@@ -283,6 +283,19 @@ TORCH_LIBRARY(xllm_ops, m) {
       "fused_add_rms_norm(Tensor(a!) input, Tensor(b!) residual, Tensor "
       "weight, "
       "float eps) -> (Tensor, Tensor)");
+  // Fused RMSNorm + dynamic per-token int8 quant (W8A8 query preprocess).
+  // Returns (qr_int8, qr_pertoken_scale) matching C++ rms_norm_dynamic_quant
+  // (npu_ops_api.h:122), used by the DSV4 indexer build_query path.
+  m.def(
+      "rms_norm_dynamic_quant(Tensor input, Tensor weight, float eps) -> "
+      "(Tensor, Tensor)");
+  // In-place partial rotary embedding (interleaved). x is 4D [B,N,S,D], r1/r2
+  // are cos/sin [B,1,1,rope_head_dim]; partial_slice=[rope_start,
+  // rope_head_dim]. Mirrors C++ apply_partial_rope
+  // (deepseek_sparse_attention.cpp:151) used by the DSV4 indexer build_query.
+  m.def(
+      "npu_inplace_partial_rotary_mul(Tensor(a!) x, Tensor r1, Tensor r2, "
+      "str rotary_mode, int[] partial_slice) -> ()");
   m.def("silu_and_mul(Tensor input) -> Tensor");
   m.def(
       "fused_qk_norm_rope(Tensor(a!) qkv, int num_heads_q, int num_heads_k, "
@@ -349,11 +362,84 @@ TORCH_LIBRARY(xllm_ops, m) {
       "shard_valid_mask, Tensor restore_index, Tensor query_index, Tensor "
       "kv_gather_index, int[] q_cu_seqlens, int[] kv_cu_seqlens, int "
       "total_local)");
+  // ---- DeepSeek-V4 DSA kernels ----
+  // MoE hash routing gate (returns routed output, expert_idx, token_unpermute).
+  m.def(
+      "moe_gating_top_k_hash(Tensor x, int k, Tensor? bias, Tensor? input_ids, "
+      "Tensor? tid2eid, int k_group, int group_count, float "
+      "routed_scaling_factor, "
+      "float eps, int group_select_mode, int renorm, int norm_type, bool "
+      "out_flag) -> (Tensor, Tensor, Tensor)");
+  // Dequant + SwiGLU + quant (fused, replaces manual dequant loop).
+  m.def(
+      "dequant_swiglu_quant(Tensor x, Tensor? weight_scale, Tensor? "
+      "activation_scale, Tensor? bias, Tensor? quant_scale, Tensor? "
+      "quant_offset, Tensor? group_index, bool activate_left, int quant_mode, "
+      "int swiglu_mode, float clamp_limit, float glu_alpha, float glu_bias) "
+      "-> (Tensor, Tensor)");
+  // HyperConnection pre/post (hc_pre returns attn_input, post, comb).
+  m.def(
+      "hc_pre(Tensor x, Tensor hc_fn, Tensor hc_scale, Tensor hc_base, "
+      "int hc_mult, int hc_sinkhorn_iters, float norm_eps, float hc_eps) "
+      "-> (Tensor, Tensor, Tensor)");
+  m.def(
+      "hc_post(Tensor x, Tensor residual, Tensor post, Tensor comb) -> "
+      "Tensor");
+  // Compressor: NSA-style KV pooling. kv_state/score_state are in-place (Ref).
+  // Returns (cmp_kv, wkv_proj, softmax_res, norm_x, norm_rstd).
+  m.def(
+      "compressor(Tensor x, Tensor wkv, Tensor wgate, Tensor(a!) kv_state, "
+      "Tensor(b!) score_state, Tensor ape, Tensor norm_weight, Tensor "
+      "rope_sin, Tensor rope_cos, Tensor? kv_block_table, Tensor? "
+      "score_block_table, Tensor? cu_seqlens, Tensor? seqused, Tensor? "
+      "start_pos, int rope_head_dim, int cmp_ratio, int coff, float "
+      "norm_eps, int rotary_mode, bool enable_grad) -> (Tensor, Tensor, "
+      "Tensor, Tensor, Tensor)");
+  // Two-stage sparse attention over original + compressed KV.
+  m.def(
+      "sparse_attn_sharedkv(Tensor q, Tensor? ori_kv, Tensor? cmp_kv, "
+      "Tensor? ori_sparse_indices, Tensor? cmp_sparse_indices, Tensor? "
+      "ori_block_table, Tensor? cmp_block_table, Tensor? cu_seqlens_q, "
+      "Tensor? cu_seqlens_ori_kv, Tensor? cu_seqlens_cmp_kv, Tensor? "
+      "seqused_q, Tensor? seqused_kv, Tensor? sinks, Tensor? metadata, "
+      "float softmax_scale, int cmp_ratio, int ori_mask_mode, int "
+      "cmp_mask_mode, int ori_win_left, int ori_win_right, str layout_q, "
+      "str layout_kv, bool return_softmax_lse) -> (Tensor, Tensor)");
+  // AICPU tiling metadata builder for sparse_attn_sharedkv.
+  m.def(
+      "sparse_attn_sharedkv_metadata(int num_heads_q, int num_heads_kv, int "
+      "head_dim, Tensor? cu_seqlens_q, Tensor? cu_seqlens_ori_kv, Tensor? "
+      "cu_seqlens_cmp_kv, Tensor? seqused_q, Tensor? seqused_kv, int "
+      "batch_size, int max_seqlen_q, int max_seqlen_kv, int ori_topk, int "
+      "cmp_topk, int cmp_ratio, int ori_mask_mode, int cmp_mask_mode, int "
+      "ori_win_left, int ori_win_right, str layout_q, str layout_kv, bool "
+      "has_ori_kv, bool has_cmp_kv) -> Tensor");
+  // Quantized lightning indexer: int8 q/k top-k selection with cmp_ratio.
+  m.def(
+      "quant_lightning_indexer(Tensor query, Tensor key, Tensor weights, "
+      "Tensor query_dequant_scale, Tensor key_dequant_scale, int "
+      "query_quant_mode, int key_quant_mode, Tensor? actual_seq_lengths_query, "
+      "Tensor? actual_seq_lengths_key, Tensor? block_table, Tensor? metadata, "
+      "str layout_query, str layout_key, int sparse_count, int sparse_mode, "
+      "int pre_tokens, int next_tokens, int cmp_ratio, bool return_value) -> "
+      "(Tensor, Tensor)");
+  // AICPU tiling metadata builder for quant_lightning_indexer.
+  m.def(
+      "quant_lightning_indexer_metadata(int num_heads_q, int num_heads_k, int "
+      "head_dim, int query_quant_mode, int key_quant_mode, Tensor? "
+      "actual_seq_lengths_query, Tensor? actual_seq_lengths_key, int "
+      "batch_size, int max_seqlen_q, int max_seqlen_k, str layout_query, str "
+      "layout_key, int sparse_count, int sparse_mode, int pre_tokens, int "
+      "next_tokens, int cmp_ratio, str device) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl("rms_norm", TORCH_FN(xllm::rms_norm_npu));
   m.impl("fused_add_rms_norm", TORCH_FN(xllm::fused_add_rms_norm_npu));
+  m.impl("rms_norm_dynamic_quant",
+         TORCH_FN(xllm::kernel::npu::rms_norm_dynamic_quant));
+  m.impl("npu_inplace_partial_rotary_mul",
+         TORCH_FN(xllm::kernel::npu::npu_inplace_partial_rotary_mul));
   m.impl("silu_and_mul", TORCH_FN(xllm::silu_and_mul_npu));
   m.impl("reshape_paged_cache", TORCH_FN(xllm::reshape_paged_cache_npu));
   m.impl("apply_rotary_embedding", TORCH_FN(xllm::apply_rotary_embedding_npu));
@@ -379,4 +465,20 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
 // graph capture), so it needs no fake/meta registration.
 TORCH_LIBRARY_IMPL(xllm_ops, CompositeExplicitAutograd, m) {
   m.impl("build_cp_context", TORCH_FN(xllm::build_cp_context_npu));
+  // ---- DeepSeek-V4 DSA kernels ----
+  m.impl("moe_gating_top_k_hash",
+         TORCH_FN(xllm::kernel::npu::moe_gating_top_k_hash));
+  m.impl("dequant_swiglu_quant",
+         TORCH_FN(xllm::kernel::npu::dequant_swiglu_quant));
+  m.impl("hc_pre", TORCH_FN(xllm::kernel::npu::hc_pre));
+  m.impl("hc_post", TORCH_FN(xllm::kernel::npu::hc_post));
+  m.impl("compressor", TORCH_FN(xllm::kernel::npu::compressor));
+  m.impl("sparse_attn_sharedkv",
+         TORCH_FN(xllm::kernel::npu::sparse_attn_sharedkv));
+  m.impl("sparse_attn_sharedkv_metadata",
+         TORCH_FN(xllm::kernel::npu::sparse_attn_sharedkv_metadata));
+  m.impl("quant_lightning_indexer",
+         TORCH_FN(xllm::kernel::npu::quant_lightning_indexer));
+  m.impl("quant_lightning_indexer_metadata",
+         TORCH_FN(xllm::kernel::npu::quant_lightning_indexer_metadata));
 }
