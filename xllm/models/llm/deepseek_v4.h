@@ -513,12 +513,13 @@ class DeepseekV4ModelImpl
 
     for (int32_t i = 0; i < model_args.n_layers(); ++i) {
       auto layer = layer::DeepseekV4DecoderLayer(context, i);
+      layers_.push_back(layer);
+    }
+
     if (!model_args.layers_to_capture().empty()) {
       aux_capture_.init(
           model_args,
           options,
-          ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch());
-    }
           ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch());
     }
 
@@ -895,9 +896,10 @@ class DeepseekV4ModelImpl
     FlashComm1ContextScope fc1_scope(&fc1_ctx);
     if (is_sequence_sharded(fc1_ctx)) {
       h = shard_sequence(h, fc1_ctx);
-          << "max_tokens_per_batch must remain unchanged after model "
-             "construction while auxiliary hidden capture is enabled.";
     }
+
+    std::optional<torch::Tensor> residual;
+    aux_capture_.reset_capture_index();
     for (size_t i = 0; i < layers_.size(); i++) {
       if (attn_metadata.dsa_metadata) {
         auto& dsa = *(attn_metadata.dsa_metadata);
@@ -1896,9 +1898,9 @@ class DeepseekV4ModelImpl
   torch::Device device_{torch::kCPU};
 
   ParallelArgs parallel_args_;
+  FlashComm1Options flash_comm1_options_;
 
   AuxHiddenCapture aux_capture_;
-  int64_t aux_output_capacity_ = 0;
 
   // DSA cache group info: built once at model init from compress_ratios
   // caches_info_[layer_id] = vector of DSACacheInfo for each cache in that
