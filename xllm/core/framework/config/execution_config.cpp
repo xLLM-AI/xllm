@@ -95,6 +95,12 @@ DEFINE_string(
     "aclgraph (NPU decode graph with eager prefill), "
     "or any torch.compile backend name.");
 
+DEFINE_bool(
+    disable_fia_decode,
+    false,
+    "When true, Qwen3.5 decode attention uses PagedAttention instead of FIA. "
+    "Useful as a runtime rollback switch without rebuilding.");
+
 namespace xllm {
 
 void ExecutionConfig::from_flags() {
@@ -112,6 +118,7 @@ void ExecutionConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(output_shm_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(random_seed);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(python_graph_backend);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(disable_fia_decode);
 }
 
 void ExecutionConfig::from_json(const JsonReader& json) {
@@ -129,6 +136,7 @@ void ExecutionConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(output_shm_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(random_seed);
   XLLM_CONFIG_ASSIGN_FROM_JSON(python_graph_backend);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(disable_fia_decode);
 }
 
 void ExecutionConfig::append_config_json(
@@ -162,6 +170,8 @@ void ExecutionConfig::append_config_json(
       config_json, default_config, random_seed);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, python_graph_backend);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, disable_fia_decode);
 }
 
 ExecutionConfig& ExecutionConfig::get_instance() {

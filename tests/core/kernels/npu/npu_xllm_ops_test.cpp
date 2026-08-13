@@ -244,6 +244,104 @@ TEST_F(NpuXllmOpsTest, EmbeddedInterpreterSeesOps) {
              .item<float>();
 }
 
+TEST_F(NpuXllmOpsTest,
+       FusedInferAttentionDecodeOutMatchesEagerAcrossBlockBoundary) {
+  py::gil_scoped_acquire gil;
+  constexpr int64_t kBlockSize = 128;
+  constexpr int64_t kQueryHeads = 16;
+  constexpr int64_t kKvHeads = 4;
+  constexpr int64_t kHeadDim = 256;
+  constexpr int64_t kNumPhysicalBlocks = 4;
+  constexpr double kScale = 1.0 / 16.0;
+  const std::vector<int64_t> actual_seq_lengths = {1, 2, 3};
+  const std::vector<int64_t> actual_seq_lengths_kv = {127, 128, 129};
+
+  torch::manual_seed(20260811);
+  const torch::TensorOptions cpu_float =
+      torch::TensorOptions().dtype(torch::kFloat32);
+  torch::Tensor query = torch::randn({3, kQueryHeads, kHeadDim}, cpu_float)
+                            .to(torch::kBFloat16)
+                            .to(torch::kPrivateUse1)
+                            .contiguous();
+  torch::Tensor key =
+      torch::randn({kNumPhysicalBlocks, kBlockSize, kKvHeads * kHeadDim},
+                   cpu_float)
+          .to(torch::kBFloat16)
+          .to(torch::kPrivateUse1)
+          .contiguous();
+  torch::Tensor value =
+      torch::randn({kNumPhysicalBlocks, kBlockSize, kKvHeads * kHeadDim},
+                   cpu_float)
+          .to(torch::kBFloat16)
+          .to(torch::kPrivateUse1)
+          .contiguous();
+  torch::Tensor block_table =
+      torch::tensor({{0, 0}, {1, 0}, {2, 3}},
+                    torch::TensorOptions().dtype(torch::kInt32))
+          .to(torch::kPrivateUse1);
+
+  auto eager_result = xllm::kernel::npu::npu_fused_infer_attention(
+      query,
+      key,
+      value,
+      /*atten_mask=*/std::nullopt,
+      std::make_optional(block_table),
+      actual_seq_lengths,
+      actual_seq_lengths_kv,
+      kQueryHeads,
+      kKvHeads,
+      kScale,
+      kBlockSize,
+      /*sparse_mode=*/0,
+      /*input_layout=*/"TND");
+  torch::Tensor eager_output = std::get<0>(eager_result);
+
+  torch::Tensor workspace =
+      xllm::kernel::npu::npu_fused_infer_attention_decode_get_max_workspace(
+          query,
+          key,
+          value,
+          block_table,
+          actual_seq_lengths,
+          actual_seq_lengths_kv,
+          kQueryHeads,
+          kKvHeads,
+          kScale,
+          kBlockSize);
+  ASSERT_TRUE(workspace.defined());
+  EXPECT_GT(workspace.numel(), 0);
+  EXPECT_EQ(workspace.device(), query.device());
+
+  torch::Tensor out = torch::zeros_like(eager_output);
+  torch::Tensor softmax_lse = torch::empty({0}, query.options());
+  const void* out_data = out.const_data_ptr();
+  xllm::kernel::npu::npu_fused_infer_attention_decode_out(query,
+                                                          key,
+                                                          value,
+                                                          block_table,
+                                                          actual_seq_lengths,
+                                                          actual_seq_lengths_kv,
+                                                          kQueryHeads,
+                                                          kKvHeads,
+                                                          kScale,
+                                                          kBlockSize,
+                                                          workspace,
+                                                          out,
+                                                          softmax_lse);
+
+  EXPECT_EQ(out.const_data_ptr(), out_data);
+  EXPECT_EQ(out.sizes(), eager_output.sizes());
+  EXPECT_EQ(out.scalar_type(), torch::kBFloat16);
+  EXPECT_EQ(softmax_lse.numel(), 0);
+  const torch::Tensor actual = out.cpu().to(torch::kFloat32);
+  const torch::Tensor expected = eager_output.cpu().to(torch::kFloat32);
+  EXPECT_TRUE(torch::allclose(actual,
+                              expected,
+                              /*rtol=*/1e-3,
+                              /*atol=*/2e-3))
+      << "max abs diff = " << (actual - expected).abs().max().item<float>();
+}
+
 TEST_F(NpuXllmOpsTest, Qwen35_27B_TP4_FullAttentionMatchesReference) {
   py::gil_scoped_acquire gil;
   if (!is_ascend950_device()) {

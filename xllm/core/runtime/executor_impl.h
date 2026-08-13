@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "common/macros.h"
 #include "framework/batch/batch.h"
@@ -38,6 +39,7 @@ struct SpecVerifyGraphTaskSignal {
   int64_t spec_width = 0;
   int64_t block_table_width = 0;
   int64_t max_kv_seq_len = 0;
+  std::vector<int64_t> expanded_kv_seq_lens;
 };
 
 class ExecutorImpl {
