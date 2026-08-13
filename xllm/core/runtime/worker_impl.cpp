@@ -167,6 +167,7 @@ std::vector<int32_t> read_capture_layer_ids(
   return capture_layer_ids;
 }
 
+#if defined(USE_NPU)
 void configure_deepseek_v4_dspark_args(ModelArgs& args,
                                        const runtime::Options& options) {
   CHECK_GT(args.dspark_num_layers(), 0)
@@ -179,14 +180,10 @@ void configure_deepseek_v4_dspark_args(ModelArgs& args,
   args.compress_ratios(
       std::vector<int32_t>(static_cast<size_t>(args.dspark_num_layers()), 1));
 
-#if defined(USE_NPU)
   args.dspark_use_native_sas(
       KernelConfig::get_instance().enable_dspark_native_sas());
-#else
-  LOG(FATAL) << "DeepSeek-V4 DSpark is not supported on "
-             << Platform::type_str() << ".";
-#endif
 }
+#endif
 
 void move_tensor_to_device_if_needed(torch::Tensor& tensor,
                                      const torch::Device& device) {

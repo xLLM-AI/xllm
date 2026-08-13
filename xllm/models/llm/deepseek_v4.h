@@ -605,6 +605,22 @@ class DeepseekV4ModelImpl
             {gid, ce.type, ce.ratio, ce.block_size});
       }
     }
+
+    // Locate the first SWA cache so build_dspark_swa_metadata doesn't rescan
+    // caches_info_ on every model forward.
+    for (size_t layer_id = 0;
+         layer_id < caches_info_.size() && dspark_swa_layer_ < 0;
+         ++layer_id) {
+      const auto& layer_caches = caches_info_[layer_id];
+      for (size_t cache_id = 0; cache_id < layer_caches.size(); ++cache_id) {
+        if (layer_caches[cache_id].type == DSACacheType::SLIDING_WINDOW) {
+          dspark_swa_layer_ = static_cast<int32_t>(layer_id);
+          dspark_swa_cache_ = static_cast<int32_t>(cache_id);
+          dspark_swa_block_size_ = layer_caches[cache_id].block_size;
+          break;
+        }
+      }
+    }
   }
 
   void load_state_dict(const StateDict& state_dict) override {
@@ -1618,30 +1634,22 @@ class DeepseekV4ModelImpl
         model_args_.dspark_block_size() <= 0) {
       return;
     }
-
-    for (size_t layer_id = 0; layer_id < caches_info_.size(); ++layer_id) {
-      const std::vector<DSACacheInfo>& layer_caches = caches_info_[layer_id];
-      if (layer_id >= dsa.block_tables.size()) {
-        continue;
-      }
-      for (size_t cache_id = 0; cache_id < layer_caches.size(); ++cache_id) {
-        const DSACacheInfo& cache_info = layer_caches[cache_id];
-        if (cache_info.type != DSACacheType::SLIDING_WINDOW ||
-            cache_id >= dsa.block_tables[layer_id].size() ||
-            !dsa.block_tables[layer_id][cache_id].defined()) {
-          continue;
-        }
-        dsa.dspark_swa_indices = layer::build_dspark_swa_indices(
-            dsa.block_tables[layer_id][cache_id],
-            dsa.actual_seq_lengths_query,
-            dsa.actual_seq_lengths_kv,
-            window_size_,
-            model_args_.dspark_block_size(),
-            cache_info.block_size);
-        return;
-      }
+    CHECK_GE(dspark_swa_layer_, 0)
+        << "Native DeepSeek-V4 DSpark requires an SWA block table.";
+    const size_t layer_id = static_cast<size_t>(dspark_swa_layer_);
+    const size_t cache_id = static_cast<size_t>(dspark_swa_cache_);
+    if (layer_id >= dsa.block_tables.size() ||
+        cache_id >= dsa.block_tables[layer_id].size() ||
+        !dsa.block_tables[layer_id][cache_id].defined()) {
+      return;
     }
-    LOG(FATAL) << "Native DeepSeek-V4 DSpark requires an SWA block table.";
+    dsa.dspark_swa_indices =
+        layer::build_dspark_swa_indices(dsa.block_tables[layer_id][cache_id],
+                                        dsa.actual_seq_lengths_query,
+                                        dsa.actual_seq_lengths_kv,
+                                        window_size_,
+                                        model_args_.dspark_block_size(),
+                                        dspark_swa_block_size_);
   }
 
   // cu_seqlens_ori_kv_override, when defined, replaces the query cumsum the
@@ -1905,6 +1913,11 @@ class DeepseekV4ModelImpl
   std::vector<std::vector<DSACacheInfo>> caches_info_;
   // group_infos_[group_id] = DSAGroupInfo
   std::vector<DSAGroupInfo> group_infos_;
+
+  // Precomputed location of the first SWA cache used by native DSpark SAS.
+  int32_t dspark_swa_layer_ = -1;
+  int32_t dspark_swa_cache_ = -1;
+  int32_t dspark_swa_block_size_ = 0;
 
   DEFINE_WEIGHT(hc_head_fn);
   DEFINE_WEIGHT(hc_head_base);

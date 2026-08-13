@@ -97,11 +97,6 @@ void expand_block_parallel_sequence_rows(ModelInputParams& input_params,
   }
 }
 
-int64_t native_dspark_ori_window_left(const ModelArgs& model_args) {
-  return std::max<int64_t>(
-      model_args.window_size() + model_args.dspark_block_size() - 1, 0);
-}
-
 // Pack a host int32 vector into a pinned CPU tensor and stage an async H2D
 // copy onto the caller's active stream. Consolidates the three-line idiom
 // `TensorOptions(int, device) + specBuilder::make_cpu_int_tensor(vec) +
@@ -285,19 +280,6 @@ std::vector<int64_t> build_accepted_context_rows(
       row.append_token = false;
       row.append_kv_len = false;
       specBuilder::append_decode_row(row_ctx, row, block_size, buf);
-      if (row_ctx.model_managed_multiblock) {
-        CHECK(!row_ctx.multi_block_tables.empty())
-            << "DFlash composite cache is missing the SWA manager.";
-        CHECK_LT(static_cast<size_t>(seq_id),
-                 row_ctx.multi_block_tables.front().size());
-        const int32_t position =
-            row_ctx.positions[seq_id] + row.position_offset;
-        // DeepSeek-V4 exports SWA as manager 0. Composite row building uses a
-        // placeholder generic slot, so replace it with the circular SWA slot
-        // before scattering accepted target context into the draft cache.
-        buf.out_new_cache_slots.back() = specBuilder::calc_ring_slot_id(
-            position, row_ctx.multi_block_tables.front()[seq_id], block_size);
-      }
       accepted_idxes.emplace_back(row_offset + token_idx);
     }
   }
@@ -387,7 +369,11 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
         LOG(WARNING)
             << "Native DeepSeek-V4 DSpark SAS requires an operator that "
                "accepts non-empty ori_sparse_indices and ori_win_left="
-            << native_dspark_ori_window_left(draft_args) << ".";
+            << layer::deepseek_v4_ori_window_left(
+                   draft_args.window_size(),
+                   draft_args.dspark_block_size(),
+                   /*use_native_dspark_sas=*/true)
+            << ".";
       }
       // Keep the trained mtp.0.embed and mtp.<last>.head modules loaded by
       // DeepseekV4DSparkForCausalLMImpl. Sharing the target modules here makes
@@ -543,9 +529,7 @@ ForwardInput DFlashWorkerImpl::update_input_by_last_step_output(
 }
 
 dflash_detail::DSparkSasMode DFlashWorkerImpl::draft_sas_mode() const {
-  if (draft_impl_ == nullptr) {
-    return dflash_detail::DSparkSasMode::NOT_DSPARK;
-  }
+  CHECK(draft_impl_ != nullptr);
   return dflash_detail::classify_dspark_sas_mode(
       draft_impl_->context_.get_model_args(), sample_from_anchor());
 }

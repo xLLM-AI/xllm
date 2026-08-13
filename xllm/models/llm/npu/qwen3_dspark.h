@@ -46,11 +46,9 @@ class DSparkQwen3ForCausalLMImpl final
     : public LlmForCausalLMImplBase<DSparkQwen3Model> {
  public:
   explicit DSparkQwen3ForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<DSparkQwen3Model>(context) {
-    const ModelArgs& model_args = context.get_model_args();
-    markov_head_.initialize(context.get_tensor_options(),
-                            model_args.markov_rank());
-  }
+      : LlmForCausalLMImplBase<DSparkQwen3Model>(context),
+        markov_head_(context.get_tensor_options(),
+                     context.get_model_args().markov_rank()) {}
 
   torch::Tensor dspark_markov_bias(
       const torch::Tensor& previous_token_ids) const {

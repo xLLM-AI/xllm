@@ -62,10 +62,8 @@ int32_t get_num_decode_seqs_for_schedule_overlap(const ForwardInput& input) {
       unpacked_input.sampling_params.sample_idxes.size(0));
 }
 
-void record_speculative_metrics_from_output(
-    const torch::Tensor& next_tokens,
-    const runtime::Options& options,
-    const std::vector<std::string>& position_labels) {
+void record_speculative_metrics_from_output(const torch::Tensor& next_tokens,
+                                            const runtime::Options& options) {
   if (!options.enable_speculative_decode() || !next_tokens.defined() ||
       next_tokens.dim() != 2 || next_tokens.numel() == 0) {
     return;
@@ -78,7 +76,6 @@ void record_speculative_metrics_from_output(
       token_width != num_speculative_tokens + 1) {
     return;
   }
-  CHECK_EQ(position_labels.size(), static_cast<size_t>(num_speculative_tokens));
 
   SpeculativeOutputStats stats =
       calculate_speculative_output_stats(next_tokens, num_speculative_tokens);
@@ -95,7 +92,7 @@ void record_speculative_metrics_from_output(
         stats.accepted_per_position[static_cast<size_t>(position)];
     num_accepted_tokens += accepted;
     MULTI_COUNTER_ADD(speculative_num_accepted_tokens_per_pos,
-                      position_labels[static_cast<size_t>(position)],
+                      std::to_string(position),
                       accepted);
   }
   COUNTER_ADD(speculative_num_drafts_total, batch_size);
@@ -109,21 +106,6 @@ void record_speculative_metrics_from_output(
     GAUGE_SET(speculative_mean_tokens_per_decode_step,
               total_committed / total_drafts);
   }
-}
-
-std::vector<std::string> build_speculative_position_labels(
-    const runtime::Options& options) {
-  const int32_t num_speculative_tokens = options.num_speculative_tokens();
-  if (num_speculative_tokens <= 0) {
-    return {};
-  }
-
-  std::vector<std::string> labels;
-  labels.reserve(static_cast<size_t>(num_speculative_tokens));
-  for (int32_t position = 0; position < num_speculative_tokens; ++position) {
-    labels.emplace_back(std::to_string(position));
-  }
-  return labels;
 }
 
 torch::Tensor clone_cpu_tensor_view(const torch::Tensor& tensor) {
@@ -145,10 +127,7 @@ void stabilize_schedule_overlap_host_views(ForwardInput& input) {
 
 WorkerService::WorkerService(runtime::Options options,
                              const torch::Device& device)
-    : options_(options),
-      speculative_position_labels_(build_speculative_position_labels(options)),
-      initialized_(false),
-      device_(device) {
+    : options_(options), initialized_(false), device_(device) {
   device_.set_device();
   device_.init_device_context();
   stream_ = device_.get_stream_from_pool();
@@ -163,7 +142,6 @@ WorkerService::WorkerService(runtime::Options options,
                              const torch::Device& device,
                              std::unique_ptr<Worker> worker)
     : options_(options),
-      speculative_position_labels_(build_speculative_position_labels(options)),
       initialized_(true),
       device_(device),
       worker_(std::move(worker)) {
@@ -302,8 +280,7 @@ void WorkerService::step(ForwardInput& fwd_input,
         } else {
           stream_->synchronize();
         }
-        record_speculative_metrics_from_output(
-            next_tokens, options_, speculative_position_labels_);
+        record_speculative_metrics_from_output(next_tokens, options_);
       }
     }
   } else {
@@ -936,8 +913,7 @@ void WorkerService::GetLastStepResult(
                 device_.index());
 #endif
           }
-          record_speculative_metrics_from_output(
-              next_tokens, options_, speculative_position_labels_);
+          record_speculative_metrics_from_output(next_tokens, options_);
 
           if (next_tokens.defined() || !dit_images.empty() ||
               !dit_text_output.empty() ||

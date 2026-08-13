@@ -532,8 +532,7 @@ torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
   torch::Tensor block_columns =
       (positions / cache_block_size)
           .clamp(/*min=*/0, /*max=*/block_table.size(1) - 1);
-  torch::Tensor block_ids =
-      block_table.gather(/*dim=*/1, block_columns.to(torch::kLong));
+  torch::Tensor block_ids = block_table.gather(/*dim=*/1, block_columns);
   torch::Tensor slot_ids =
       block_ids * cache_block_size + positions.remainder(cache_block_size);
   slot_ids = torch::where(valid, slot_ids, torch::full_like(slot_ids, -1));

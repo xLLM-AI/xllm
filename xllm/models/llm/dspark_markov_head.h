@@ -30,11 +30,8 @@ namespace xllm {
 // consumes a full-vocabulary bias.
 class DSparkMarkovHead final {
  public:
-  DSparkMarkovHead() = default;
-
-  void initialize(const torch::TensorOptions& options, int64_t markov_rank) {
-    tensor_options_ = options;
-    markov_rank_ = markov_rank;
+  DSparkMarkovHead(const torch::TensorOptions& options, int64_t markov_rank)
+      : tensor_options_(options), markov_rank_(markov_rank) {
     CHECK_GT(markov_rank_, 0) << "DSpark requires markov_rank > 0.";
   }
 

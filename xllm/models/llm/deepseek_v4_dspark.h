@@ -59,7 +59,9 @@ void load_vocab_weight(VocabularyWeightSelector& selector,
 class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
  public:
   explicit DeepseekV4DSparkModelImpl(const ModelContext& context)
-      : DeepseekV4ModelImpl(context) {
+      : DeepseekV4ModelImpl(context),
+        markov_head_(context.get_tensor_options(),
+                     context.get_model_args().markov_rank()) {
     const ModelArgs& args = context.get_model_args();
     const int64_t capture_count = args.dspark_num_layers();
     CHECK_GT(capture_count, 0)
@@ -80,7 +82,6 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
     main_norm_ = register_module(
         "main_norm",
         layer::RMSNorm(args.hidden_size(), args.rms_norm_eps(), options));
-    markov_head_.initialize(options, args.markov_rank());
   }
 
   void load_state_dict(const StateDict& state_dict) override {
