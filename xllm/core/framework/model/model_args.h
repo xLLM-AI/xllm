@@ -443,9 +443,6 @@ struct ModelArgs {
 
   // Layer indices whose residual streams feed a speculative draft.
   PROPERTY(std::vector<int32_t>, layers_to_capture) = {};
-  // Number of target residual streams concatenated as block-diffusion draft
-  // context. Draft models need the width without enabling target-side capture.
-  PROPERTY(int64_t, block_diffusion_num_capture_layers) = 0;
 
   // VAE related args
   PROPERTY(int64_t, in_channels) = -1;

@@ -1597,26 +1597,34 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
           << "block-diffusion speculative decoding requires --draft_model.";
       config_dir = options_.draft_model_path().value();
     }
-    std::vector<int32_t> capture_layer_ids = read_capture_layer_ids(config_dir);
-    args.block_diffusion_num_capture_layers(
-        static_cast<int64_t>(capture_layer_ids.size()));
-
     if (options_.is_draft_engine()) {
-      args.layers_to_capture({});
+      std::vector<int32_t> capture_layer_ids =
+          read_capture_layer_ids(config_dir);
       const bool is_dspark = speculative_algorithm == "DSpark";
+      const bool is_deepseek_v4_dspark =
+          is_dspark && util::is_deepseek_v4_model_type(args.model_type());
+      // DeepSeek-V4 DSpark needs the target capture count to size its context
+      // projection. Other draft bodies must not enable their own aux capture.
+      if (is_deepseek_v4_dspark) {
+        args.layers_to_capture(std::move(capture_layer_ids));
+      } else {
+        args.layers_to_capture({});
+      }
       std::string draft_model_type =
           is_dspark ? "DSparkDraftModel" : "DFlashDraftModel";
-      if (is_dspark && util::is_deepseek_v4_model_type(args.model_type())) {
+      if (is_deepseek_v4_dspark) {
         draft_model_type = "deepseek_v4_dspark";
       }
       LOG(INFO) << "Overriding draft model_type from " << args.model_type()
                 << " to " << draft_model_type
                 << " for block-diffusion speculative decoding";
       args.model_type(draft_model_type);
-      if (is_dspark && draft_model_type == "deepseek_v4_dspark") {
+      if (is_deepseek_v4_dspark) {
         configure_deepseek_v4_dspark_args(args, options_);
       }
     } else {
+      std::vector<int32_t> capture_layer_ids =
+          read_capture_layer_ids(config_dir);
       args.layers_to_capture(std::move(capture_layer_ids));
     }
   } else if (options_.enable_speculative_decode() &&
@@ -1662,8 +1670,6 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
           << "block-diffusion speculative decoding requires --draft_model.";
       std::vector<int32_t> capture_layer_ids =
           read_capture_layer_ids(options_.draft_model_path().value());
-      args.block_diffusion_num_capture_layers(
-          static_cast<int64_t>(capture_layer_ids.size()));
       args.layers_to_capture(std::move(capture_layer_ids));
     }
     // When running speculative decoding, the draft worker reuses the same

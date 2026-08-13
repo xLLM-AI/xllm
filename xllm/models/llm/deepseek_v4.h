@@ -416,7 +416,8 @@ inline void deepseek_v4_build_cache_specs(
 class DeepseekV4ModelImpl
     : public LlmModelImplBase<layer::DeepseekV4DecoderLayer> {
  public:
-  explicit DeepseekV4ModelImpl(const ModelContext& context)
+  explicit DeepseekV4ModelImpl(const ModelContext& context,
+                               bool enable_aux_capture = true)
       : LlmModelImplBase<layer::DeepseekV4DecoderLayer>(
             "deepseek_v4",
             context.get_model_args()),
@@ -516,7 +517,7 @@ class DeepseekV4ModelImpl
       layers_.push_back(layer);
     }
 
-    if (!model_args.layers_to_capture().empty()) {
+    if (enable_aux_capture && !model_args.layers_to_capture().empty()) {
       aux_capture_.init(
           model_args,
           options,
