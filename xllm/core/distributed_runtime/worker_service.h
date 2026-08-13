@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -178,6 +179,9 @@ class WorkerService : public proto::DistributeWorker {
   // runtime options
   runtime::Options options_;
   std::vector<std::string> speculative_position_labels_;
+  std::mutex speculative_metrics_mutex_;
+  int64_t speculative_total_drafts_ = 0;
+  int64_t speculative_total_committed_ = 0;
 
   bool initialized_;
 

@@ -65,7 +65,10 @@ int32_t get_num_decode_seqs_for_schedule_overlap(const ForwardInput& input) {
 void record_speculative_metrics_from_output(
     const torch::Tensor& next_tokens,
     const runtime::Options& options,
-    const std::vector<std::string>& position_labels) {
+    const std::vector<std::string>& position_labels,
+    std::mutex& metrics_mutex,
+    int64_t& total_drafts,
+    int64_t& total_committed) {
   if (!options.enable_speculative_decode() || !next_tokens.defined() ||
       next_tokens.dim() != 2 || next_tokens.numel() == 0) {
     return;
@@ -82,11 +85,12 @@ void record_speculative_metrics_from_output(
   SpeculativeOutputStats stats =
       calculate_speculative_output_stats(next_tokens, num_speculative_tokens);
 
-  // Step and GetLastStepResult share a thread pool. Serialize the counter
-  // update and derived gauge publication so the ratio cannot combine totals
-  // from different in-flight callbacks.
-  static std::mutex speculative_metrics_mutex;
-  std::lock_guard<std::mutex> lock(speculative_metrics_mutex);
+  // Step and GetLastStepResult share a thread pool inside one WorkerService.
+  // Serialize the counter update and derived gauge publication so the ratio
+  // cannot combine totals from different in-flight callbacks on the same
+  // instance. A per-instance mutex avoids process-wide contention when
+  // multiple WorkerServices run in the same process (multi-DP).
+  std::lock_guard<std::mutex> lock(metrics_mutex);
   const int64_t num_draft_tokens = batch_size * num_speculative_tokens;
   int64_t num_accepted_tokens = 0;
   for (int64_t position = 0; position < num_speculative_tokens; ++position) {
@@ -101,12 +105,12 @@ void record_speculative_metrics_from_output(
   COUNTER_ADD(speculative_num_draft_tokens_total, num_draft_tokens);
   COUNTER_ADD(speculative_num_accepted_tokens_total, num_accepted_tokens);
   COUNTER_ADD(speculative_num_committed_tokens_total, stats.committed_tokens);
-  const double total_drafts = COUNTER_speculative_num_drafts_total.get_value();
-  const double total_committed =
-      COUNTER_speculative_num_committed_tokens_total.get_value();
-  if (total_drafts > 0.0) {
+  total_drafts += batch_size;
+  total_committed += stats.committed_tokens;
+  if (total_drafts > 0) {
     GAUGE_SET(speculative_mean_tokens_per_decode_step,
-              total_committed / total_drafts);
+              static_cast<double>(total_committed) /
+                  static_cast<double>(total_drafts));
   }
 }
 
@@ -302,8 +306,12 @@ void WorkerService::step(ForwardInput& fwd_input,
         } else {
           stream_->synchronize();
         }
-        record_speculative_metrics_from_output(
-            next_tokens, options_, speculative_position_labels_);
+        record_speculative_metrics_from_output(next_tokens,
+                                               options_,
+                                               speculative_position_labels_,
+                                               speculative_metrics_mutex_,
+                                               speculative_total_drafts_,
+                                               speculative_total_committed_);
       }
     }
   } else {
@@ -936,8 +944,12 @@ void WorkerService::GetLastStepResult(
                 device_.index());
 #endif
           }
-          record_speculative_metrics_from_output(
-              next_tokens, options_, speculative_position_labels_);
+          record_speculative_metrics_from_output(next_tokens,
+                                                 options_,
+                                                 speculative_position_labels_,
+                                                 speculative_metrics_mutex_,
+                                                 speculative_total_drafts_,
+                                                 speculative_total_committed_);
 
           if (next_tokens.defined() || !dit_images.empty() ||
               !dit_text_output.empty() ||

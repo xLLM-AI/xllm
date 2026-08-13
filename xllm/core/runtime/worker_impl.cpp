@@ -178,7 +178,8 @@ void configure_deepseek_v4_dspark_args(ModelArgs& args,
   // DSpark stages are all standard SWA layers. Their stage ids are not target
   // model layer ids, so target compress_ratios[0..N) must not be reused.
   args.compress_ratios(
-      std::vector<int32_t>(static_cast<size_t>(args.dspark_num_layers()), 1));
+      std::vector<int32_t>(static_cast<size_t>(args.dspark_num_layers()),
+                           /*value=*/1));
 
   args.dspark_use_native_sas(
       KernelConfig::get_instance().enable_dspark_native_sas());

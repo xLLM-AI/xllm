@@ -226,6 +226,34 @@ TEST_F(DeepseekV4IndexerTest, DSparkNativeSwaIndicesAreSharedByQueryRows) {
   }
 }
 
+TEST_F(DeepseekV4IndexerTest, DSparkNativeSwaIndicesWrapAroundRingBuffer) {
+  // Two-block ring buffer with kv_len=10 forces the SWA window to span both
+  // ring entries and to wrap. Positions 6..9 fall into block_column 1, and
+  // position 8..9 wrap back to block_column 0 once the ring rotates once
+  // (positions / block_size = {1,1,2,2}, then % ring_size(2) = {1,1,0,0}).
+  const torch::Tensor block_table = torch::tensor({{20, 21}}, torch::kInt32);
+  const torch::Tensor query_cu_seq_lens = torch::tensor({0, 1}, torch::kInt32);
+  const torch::Tensor seq_lens = torch::tensor({10}, torch::kInt32);
+
+  const torch::Tensor indices =
+      build_dspark_swa_indices(block_table,
+                               query_cu_seq_lens,
+                               seq_lens,
+                               /*window_size=*/4,
+                               /*num_speculative_tokens=*/3,
+                               /*cache_block_size=*/2);
+
+  ASSERT_EQ(indices.dim(), 3);
+  ASSERT_EQ(indices.size(0), 1);
+  ASSERT_EQ(indices.size(1), 1);
+  // start_pos = max(kv-window, 0) = 6, so the visible window is positions
+  // 6,7,8,9. block_column = pos/2 % 2 -> {1,1,0,0}; slot = block_id * 2 +
+  // pos%2 -> {21*2+0, 21*2+1, 20*2+0, 20*2+1} = {42, 43, 40, 41}.
+  const torch::Tensor expected_prefix =
+      torch::tensor({42, 43, 40, 41, -1}, torch::kInt32);
+  EXPECT_TRUE(torch::equal(indices[0][0].slice(0, 0, 5), expected_prefix));
+}
+
 TEST_F(DeepseekV4IndexerTest, DsaDummyAttentionUsesPositionDevice) {
   ModelInputParams params;
   params.meta.batch_forward_type = BatchForwardType::DECODE;

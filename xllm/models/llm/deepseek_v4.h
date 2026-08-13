@@ -608,17 +608,18 @@ class DeepseekV4ModelImpl
 
     // Locate the first SWA cache so build_dspark_swa_metadata doesn't rescan
     // caches_info_ on every model forward.
-    for (size_t layer_id = 0;
-         layer_id < caches_info_.size() && dspark_swa_layer_ < 0;
-         ++layer_id) {
+    for (size_t layer_id = 0; layer_id < caches_info_.size(); ++layer_id) {
       const auto& layer_caches = caches_info_[layer_id];
-      for (size_t cache_id = 0; cache_id < layer_caches.size(); ++cache_id) {
-        if (layer_caches[cache_id].type == DSACacheType::SLIDING_WINDOW) {
-          dspark_swa_layer_ = static_cast<int32_t>(layer_id);
-          dspark_swa_cache_ = static_cast<int32_t>(cache_id);
-          dspark_swa_block_size_ = layer_caches[cache_id].block_size;
-          break;
-        }
+      const auto it = std::find_if(
+          layer_caches.begin(), layer_caches.end(), [](const auto& c) {
+            return c.type == DSACacheType::SLIDING_WINDOW;
+          });
+      if (it != layer_caches.end()) {
+        dspark_swa_layer_ = static_cast<int32_t>(layer_id);
+        dspark_swa_cache_ =
+            static_cast<int32_t>(std::distance(layer_caches.begin(), it));
+        dspark_swa_block_size_ = it->block_size;
+        break;
       }
     }
   }
@@ -2089,7 +2090,7 @@ inline void load_deepseek_v4_model_args(const JsonReader& json,
   // under mtp.0/1/2 and uses DeepSeek-specific top-level key names.
   LOAD_ARG_OR(markov_rank, "dspark_markov_rank", 0);
   LOAD_ARG_OR_FUNC(dspark_num_layers, "n_mtp_layers", [&] {
-    return json.value_or<int32_t>("dspark_num_mtp_layers", 3);
+    return json.value_or<int32_t>("dspark_num_mtp_layers", /*default=*/3);
   });
   // Do not copy dspark_block_size into the shared target args. The draft
   // worker sets it from the runtime speculative-token count after swapping to
