@@ -127,16 +127,16 @@ SpeculativeOutputStats calculate_speculative_output_stats(
   const int64_t batch_size = int_tokens.size(0);
   const int64_t token_width = int_tokens.size(1);
   SpeculativeOutputStats stats;
-  stats.accepted_per_position.assign(
-      static_cast<size_t>(num_speculative_tokens), 0);
+  stats.accepted_per_position.resize(
+      static_cast<size_t>(num_speculative_tokens));
   for (int64_t row = 0; row < batch_size; ++row) {
     const int64_t* row_ptr = data + row * token_width;
-    if (row_ptr[0] >= 0) {
+    for (int64_t column = 0; column < token_width; ++column) {
+      if (row_ptr[column] < 0) {
+        continue;
+      }
       ++stats.committed_tokens;
-    }
-    for (int64_t column = 1; column < token_width; ++column) {
-      if (row_ptr[column] >= 0) {
-        ++stats.committed_tokens;
+      if (column > 0) {
         ++stats.accepted_per_position[static_cast<size_t>(column - 1)];
       }
     }
