@@ -120,6 +120,12 @@ class AclGraph {
                              std::vector<KVCache>& kv_cache,
                              const ModelInputParams& params);
 
+  [[nodiscard]] bool is_replay_compatible(const ModelInputParams& params) const;
+
+  void discard_prepared_replay_inputs() {
+    replay_inputs_prepared_.store(false, std::memory_order_release);
+  }
+
   bool prepare_static_mtp_graph_tasks(const SpecVerifyGraphTaskSignal& signal,
                                       const c10_npu::NPUStream& signal_stream);
 
@@ -165,6 +171,7 @@ class AclGraph {
   std::shared_ptr<AclGraphTaskUpdateContext> graph_task_context_;
   std::optional<c10_npu::NPUStream> update_stream_;
   std::atomic<bool> replay_inputs_prepared_{false};
+  std::vector<int32_t> captured_dp_global_token_nums_;
   std::optional<StaticGraphTaskSignature> static_graph_task_signature_;
   std::optional<std::array<const void*, 11>>
       spec_verify_input_addresses_at_capture_;

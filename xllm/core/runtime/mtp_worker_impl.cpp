@@ -741,6 +741,12 @@ bool MTPWorkerImpl::should_use_explicit_spec_verify_replay_update(
       block_tables.size(0) != input.input_params.meta.num_sequences) {
     return false;
   }
+  const std::vector<int32_t>& dp_token_nums =
+      input.input_params.parallel.dp_global_token_nums;
+  if (std::find(dp_token_nums.begin(), dp_token_nums.end(), 0) !=
+      dp_token_nums.end()) {
+    return false;
+  }
   const int64_t block_table_width = spec_verify_block_table_width(block_tables);
   if (block_table_width <= 0 ||
       block_table_width > kMaxSpecVerifyGraphUpdateBlockTableWidth) {
@@ -1989,6 +1995,8 @@ void MTPWorkerImpl::prepare_empty_validate_inputs(
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   validate_input = input;
   clear_ready_events(validate_input);
+  validate_input.input_host_buffer_has_layout = false;
+  validate_input.device_tensors_ready = false;
 
   ModelInputParams& input_params = validate_input.input_params;
   const int32_t num_val_tokens = options_.num_speculative_tokens() + 1;

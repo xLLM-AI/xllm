@@ -295,7 +295,8 @@ AttentionMetadata build_attention_metadata(
   }
 #endif
 
-  attn_metadata.is_dummy = (params.meta.q_max_seq_len == 0);
+  attn_metadata.is_dummy =
+      params.meta.q_max_seq_len == 0 || params.meta.num_sequences == 0;
   if (attn_metadata.is_dummy) {
     torch::TensorOptions options =
         int32_options_like(params.attention.device.new_cache_slots,

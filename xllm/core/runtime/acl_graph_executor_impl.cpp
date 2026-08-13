@@ -274,6 +274,7 @@ bool AclGraph::capture(CausalLM* model,
       static_cast<uint32_t>(tokens.size(/*dim=*/0));
   CHECK_GE(num_tokens_, actual_num_tokens)
       << "num_tokens_ >= actual_num_tokens";
+  captured_dp_global_token_nums_ = params.parallel.dp_global_token_nums;
   const bool update_spec_verify_tokens =
       params.graph.spec_verify_source_addresses_stable &&
       params.graph.input_tokens_override.defined() && params.is_spec_verify &&
@@ -452,6 +453,25 @@ bool AclGraph::capture(CausalLM* model,
   }
   make_current_stream_wait_for_graph(stream);
   return true;
+}
+
+bool AclGraph::is_replay_compatible(const ModelInputParams& params) const {
+  const std::vector<int32_t>& replay_dp_global_token_nums =
+      params.parallel.dp_global_token_nums;
+  const bool has_distributed_input =
+      captured_dp_global_token_nums_.size() > 1 ||
+      replay_dp_global_token_nums.size() > 1;
+  if (!has_distributed_input ||
+      captured_dp_global_token_nums_ == replay_dp_global_token_nums) {
+    return true;
+  }
+
+  LOG_FIRST_N(WARNING, 10)
+      << "Falling back to eager mode because the DP token distribution "
+         "differs from ACL graph capture. captured="
+      << captured_dp_global_token_nums_
+      << ", replay=" << replay_dp_global_token_nums;
+  return false;
 }
 
 bool AclGraph::update_graph_tasks(const ModelInputParams& params) {
@@ -1024,6 +1044,11 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   }
 
   if (replay_graph != nullptr) {
+    if (!replay_graph->is_replay_compatible(params_single)) {
+      replay_graph->discard_prepared_replay_inputs();
+      COUNTER_INC(num_model_execution_total_eager);
+      return forward_eager(model_, tokens, positions, kv_caches, params);
+    }
     // Replay the existing graph
     VLOG(kGraphExecutorLogVerboseLevel)
         << "AclGraphExecutorImpl::run() in replay mode";
@@ -1182,6 +1207,10 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
     }
     auto it = slot.graphs.find(graph_key);
     if (it == slot.graphs.end()) {
+      return;
+    }
+    if (!it->second->is_replay_compatible(params)) {
+      it->second->discard_prepared_replay_inputs();
       return;
     }
     graph = it->second;
