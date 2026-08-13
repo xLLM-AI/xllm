@@ -1911,7 +1911,6 @@ class DeepseekV4ModelImpl
   // group_infos_[group_id] = DSAGroupInfo
   std::vector<DSAGroupInfo> group_infos_;
 
-  // Precomputed location of the first SWA cache used by native DSpark SAS.
   int32_t dspark_swa_layer_ = -1;
   int32_t dspark_swa_cache_ = -1;
   int32_t dspark_swa_block_size_ = 0;

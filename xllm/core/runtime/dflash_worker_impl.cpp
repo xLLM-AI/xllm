@@ -74,8 +74,8 @@ runtime::Options target_options(const runtime::Options& options) {
 }
 
 runtime::Options draft_options(const runtime::Options& options) {
-  // DSpark uses num_speculative_tokens to size the DSpark attention window;
-  // other DFlash-style drafts keep the historical single-step options.
+  // DSpark sizes its attention window from num_speculative_tokens; other
+  // DFlash-style drafts still run one step at a time.
   const int32_t draft_num_speculative_tokens =
       options.speculative_algorithm() == "DSpark"
           ? options.num_speculative_tokens()
@@ -97,10 +97,7 @@ void expand_block_parallel_sequence_rows(ModelInputParams& input_params,
   }
 }
 
-// Pack a host int32 vector into a pinned CPU tensor and stage an async H2D
-// copy onto the caller's active stream. Consolidates the three-line idiom
-// `TensorOptions(int, device) + specBuilder::make_cpu_int_tensor(vec) +
-// safe_to(...)`.
+// Stage a host int32 vector to `device` on the caller's active stream.
 torch::Tensor cpu_int_vec_to_device(const std::vector<int32_t>& values,
                                     const Device& device) {
   return safe_to(

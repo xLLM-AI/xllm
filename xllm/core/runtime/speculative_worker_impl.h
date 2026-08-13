@@ -150,10 +150,8 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   void prepare_validate_inputs(const ForwardInput& inputs,
                                ForwardInput& validate_inputs);
 
-  // Returns the target-side cache budget after reserving cache storage for a
-  // colocated draft. DeepSeek-V4 has model-specific fixed SWA pools, so both
-  // model geometries must participate in capacity estimation before either
-  // cache is allocated.
+  // Target-side cache budget after reserving storage for a colocated draft.
+  // DeepSeek-V4's fixed SWA pools require both geometries to participate.
   std::tuple<int64_t, int64_t> estimate_kv_cache_capacity_with_draft(
       LLMWorkerImpl& draft_impl,
       const runtime::Options& target_options,
