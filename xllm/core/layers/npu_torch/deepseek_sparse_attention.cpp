@@ -253,53 +253,6 @@ void scatter_by_slot(torch::Tensor& cache,
   cache_2d.index_copy_(/*dim=*/0, valid_slots, valid_values);
 }
 
-// Native DSpark SAS addresses the trailing SWA prefix plus the whole current
-// diffusion block explicitly. The compatibility fallback never calls it
-// because CANN 9.0 rejects a non-empty ori_sparse_indices argument.
-torch::Tensor build_dspark_swa_indices_impl(
-    const torch::Tensor& block_table,
-    const torch::Tensor& query_cu_seq_lens,
-    const torch::Tensor& seq_lens,
-    int64_t window_size,
-    int64_t num_speculative_tokens,
-    int64_t cache_block_size) {
-  CHECK(block_table.defined() && query_cu_seq_lens.defined() &&
-        seq_lens.defined());
-  CHECK_GT(block_table.size(1), 0);
-  CHECK_GT(cache_block_size, 0);
-
-  const torch::Device device = block_table.device();
-  torch::Tensor q_cu = query_cu_seq_lens.to(device, torch::kLong);
-  torch::Tensor kv_lens = seq_lens.to(device, torch::kLong);
-  torch::Tensor q_lens = q_cu.slice(0, 1) - q_cu.slice(0, 0, q_cu.size(0) - 1);
-  CHECK_EQ(q_lens.numel(), block_table.size(0));
-  CHECK_EQ(kv_lens.numel(), block_table.size(0));
-
-  torch::Tensor prefix_lens = kv_lens - q_lens;
-  torch::Tensor start_pos = (prefix_lens - window_size).clamp_min(0);
-  torch::Tensor visible_lens = kv_lens - start_pos;
-  constexpr int64_t kIndexAlignment = 128;
-  const int64_t min_width = window_size + num_speculative_tokens;
-  const int64_t index_width =
-      ((min_width + kIndexAlignment - 1) / kIndexAlignment) * kIndexAlignment;
-
-  torch::Tensor columns = torch::arange(
-      index_width, torch::TensorOptions().dtype(torch::kLong).device(device));
-  torch::Tensor valid = columns.unsqueeze(0) < visible_lens.unsqueeze(1);
-  torch::Tensor positions = start_pos.unsqueeze(1) + columns.unsqueeze(0);
-  torch::Tensor block_columns =
-      (positions / cache_block_size)
-          .clamp(/*min=*/0, /*max=*/block_table.size(1) - 1);
-  torch::Tensor block_ids =
-      block_table.gather(/*dim=*/1, block_columns.to(torch::kLong));
-  torch::Tensor slot_ids =
-      block_ids * cache_block_size + positions.remainder(cache_block_size);
-  slot_ids = torch::where(valid, slot_ids, torch::full_like(slot_ids, -1));
-  return torch::repeat_interleave(slot_ids, q_lens, /*dim=*/0)
-      .to(torch::kInt32)
-      .unsqueeze(1);
-}
-
 // Pack prefill TND KV [total_tokens, n, d] into temporary PA_ND blocks
 // [num_blocks + 1, block_size, n, d]. Padding each request to blocks lets
 // sparse_attn_sharedkv read prefill KV through a block table without depending
@@ -549,12 +502,44 @@ torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
                                        int64_t window_size,
                                        int64_t num_speculative_tokens,
                                        int64_t cache_block_size) {
-  return build_dspark_swa_indices_impl(block_table,
-                                       query_cu_seq_lens,
-                                       seq_lens,
-                                       window_size,
-                                       num_speculative_tokens,
-                                       cache_block_size);
+  // Native DSpark SAS addresses the trailing SWA prefix plus the whole current
+  // diffusion block explicitly. The compatibility fallback never calls it
+  // because CANN 9.0 rejects a non-empty ori_sparse_indices argument.
+  CHECK(block_table.defined() && query_cu_seq_lens.defined() &&
+        seq_lens.defined());
+  CHECK_GT(block_table.size(1), 0);
+  CHECK_GT(cache_block_size, 0);
+
+  const torch::Device device = block_table.device();
+  torch::Tensor q_cu = query_cu_seq_lens.to(device, torch::kLong);
+  torch::Tensor kv_lens = seq_lens.to(device, torch::kLong);
+  torch::Tensor q_lens = q_cu.slice(0, 1) - q_cu.slice(0, 0, q_cu.size(0) - 1);
+  CHECK_EQ(q_lens.numel(), block_table.size(0));
+  CHECK_EQ(kv_lens.numel(), block_table.size(0));
+
+  torch::Tensor prefix_lens = kv_lens - q_lens;
+  torch::Tensor start_pos = (prefix_lens - window_size).clamp_min(0);
+  torch::Tensor visible_lens = kv_lens - start_pos;
+  constexpr int64_t kIndexAlignment = 128;
+  const int64_t min_width = window_size + num_speculative_tokens;
+  const int64_t index_width =
+      ((min_width + kIndexAlignment - 1) / kIndexAlignment) * kIndexAlignment;
+
+  torch::Tensor columns = torch::arange(
+      index_width, torch::TensorOptions().dtype(torch::kLong).device(device));
+  torch::Tensor valid = columns.unsqueeze(0) < visible_lens.unsqueeze(1);
+  torch::Tensor positions = start_pos.unsqueeze(1) + columns.unsqueeze(0);
+  torch::Tensor block_columns =
+      (positions / cache_block_size)
+          .clamp(/*min=*/0, /*max=*/block_table.size(1) - 1);
+  torch::Tensor block_ids =
+      block_table.gather(/*dim=*/1, block_columns.to(torch::kLong));
+  torch::Tensor slot_ids =
+      block_ids * cache_block_size + positions.remainder(cache_block_size);
+  slot_ids = torch::where(valid, slot_ids, torch::full_like(slot_ids, -1));
+  return torch::repeat_interleave(slot_ids, q_lens, /*dim=*/0)
+      .to(torch::kInt32)
+      .unsqueeze(1);
 }
 
 DSAttentionImpl::DSAttentionImpl(const ModelContext& context, int32_t layer_id)
