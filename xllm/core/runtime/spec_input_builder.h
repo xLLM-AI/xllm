@@ -125,14 +125,12 @@ int32_t calc_slot_id(int32_t position,
                      const Slice<int32_t>& block_table_slice,
                      int32_t block_size);
 
-// Computes one cache slot id from an absolute position and a circular block
-// table mapping, as used by DeepSeek-V4's sliding-window cache manager.
+// Circular (ring) variant of calc_slot_id for DSV4 SWA block tables.
 int32_t calc_ring_slot_id(int32_t position,
                           const Slice<int32_t>& block_table_slice,
                           int32_t block_size);
 
-// Builds the sliding-window cache slots for every prefill query token in a
-// grouped-cache input. Manager 0 is the DeepSeek-V4 SWA manager.
+// Manager 0 in a grouped-cache input is the DSV4 SWA manager.
 std::vector<int32_t> build_grouped_prefill_swa_slots(const ForwardInput& input,
                                                      int32_t block_size);
 

@@ -33,17 +33,11 @@ bool should_run_speculative_decode(const ModelInputParams& params);
 void scale_speculative_parallel_token_counts(ModelInputParams& params,
                                              int32_t multiplier);
 
-// Per-batch accounting of speculative decode outputs. Column 0 is always the
-// first committed token, and draft position p is accepted iff column p+1 is
-// non-negative.
 struct SpeculativeOutputStats {
   std::vector<int64_t> accepted_per_position;
   int64_t committed_tokens = 0;
 };
 
-// Extracts per-position acceptance counts and total committed tokens from a
-// speculative next_tokens tensor. Casts to int64 internally so callers can pass
-// any integer-typed output tensor.
 SpeculativeOutputStats calculate_speculative_output_stats(
     const torch::Tensor& tokens,
     int64_t num_speculative_tokens);

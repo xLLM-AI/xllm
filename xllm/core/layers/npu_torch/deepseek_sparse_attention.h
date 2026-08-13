@@ -89,8 +89,7 @@ class DSAttentionImpl : public torch::nn::Module {
           tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>&
               compress_metadata);
 
-  // Project captured target hidden states into this draft layer's shared-KV
-  // cache without running query attention or the FFN.
+  // Shared-KV write path: no query attention, no FFN.
   void write_context_kv(const torch::Tensor& hidden_states,
                         const torch::Tensor& cos,
                         const torch::Tensor& sin,

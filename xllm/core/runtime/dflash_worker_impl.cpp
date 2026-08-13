@@ -578,10 +578,8 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
       *draft_impl_, query_input, *prepare_stream_, *compute_stream_);
 
   ForwardInput validate_input = input;
-  // Target validation always evaluates the real anchor plus every draft token.
-  // DSpark's draft omits the extra anchor row, so its N-wide draft geometry
-  // must not be reused for this (N+1)-wide target forward. Active ranks use the
-  // same width in SpeculativeWorkerImpl::prepare_validate_inputs().
+  // DSpark's N-wide draft geometry must be rescaled to (N+1) for the target's
+  // anchor + drafts forward.
   scale_speculative_parallel_token_counts(
       validate_input.input_params, options_.num_speculative_tokens() + 1);
   ForwardOutput output =

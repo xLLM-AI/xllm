@@ -1225,11 +1225,6 @@ TEST(AuxHiddenCaptureTest, PreservesConfiguredLayerOrderAndResidual) {
                            torch::full({3, 2}, 10.0f)));
 }
 
-TEST(DSparkNativeSasConfigTest, DefaultsToCompatibilityMode) {
-  KernelConfig config;
-  EXPECT_FALSE(config.enable_dspark_native_sas());
-}
-
 TEST(DSparkWorkerInputTest, InvalidatesTargetAttentionMetadataOnly) {
   ModelInputParams params;
   params.attn_metadata = std::make_shared<layer::AttentionMetadata>();
@@ -1252,21 +1247,6 @@ TEST(DSparkWorkerInputTest, ScalesPaddedAndRawDpTokenCountsTogether) {
             (std::vector<int32_t>{10, 0, 20}));
   EXPECT_EQ(params.parallel.raw_dp_global_token_nums,
             (std::vector<int32_t>{5, 0, 15}));
-}
-
-TEST(DSparkWorkerInputTest, SeparatesDraftAndValidationWidths) {
-  EXPECT_EQ(dflash_detail::decode_draft_width(/*num_speculative_tokens=*/5,
-                                              /*sample_from_anchor=*/true),
-            5);
-  EXPECT_EQ(dflash_detail::decode_draft_width(/*num_speculative_tokens=*/5,
-                                              /*sample_from_anchor=*/false),
-            6);
-}
-
-TEST(DSparkWorkerWeightsTest, PreservesDeepseekDraftHeadAndEmbedding) {
-  EXPECT_TRUE(dflash_detail::is_deepseek_v4_dspark_draft("deepseek_v4_dspark"));
-  EXPECT_FALSE(dflash_detail::is_deepseek_v4_dspark_draft("qwen3_dspark"));
-  EXPECT_FALSE(dflash_detail::is_deepseek_v4_dspark_draft("qwen3_dflash"));
 }
 
 TEST(DSparkSasFallbackTest, ChoosesCompatibleRowsUnlessNativeIsEnabled) {

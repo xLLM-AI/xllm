@@ -173,6 +173,7 @@ class WorkerService : public proto::DistributeWorker {
             torch::Tensor& src_seq_idxes,
             torch::Tensor& out_tokens,
             torch::Tensor& out_logprobs);
+  void record_speculative_metrics_from_output(const torch::Tensor& next_tokens);
   DISALLOW_COPY_AND_ASSIGN(WorkerService);
 
  private:

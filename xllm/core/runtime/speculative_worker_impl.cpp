@@ -122,9 +122,9 @@ void scale_speculative_parallel_token_counts(ModelInputParams& params,
 SpeculativeOutputStats calculate_speculative_output_stats(
     const torch::Tensor& tokens,
     int64_t num_speculative_tokens) {
-  torch::Tensor int_tokens = tokens.scalar_type() == torch::kInt64
-                                 ? tokens.contiguous()
-                                 : tokens.to(torch::kInt64).contiguous();
+  // Tensor::to() is a no-op when the dtype already matches, so the extra
+  // branch we used to have here bought nothing.
+  torch::Tensor int_tokens = tokens.to(torch::kInt64).contiguous();
   const int64_t* data = int_tokens.const_data_ptr<int64_t>();
   const int64_t batch_size = int_tokens.size(0);
   const int64_t token_width = int_tokens.size(1);
@@ -491,7 +491,6 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
   update_sampling_params(
       validate_input.sampling_params, num_val_tokens, total_num_val_tokens);
 
-  // Update both padded and raw token counts for DP/EP parallelism.
   scale_speculative_parallel_token_counts(input_params, num_val_tokens);
   validate_input.device_tensors_ready = true;
 }
