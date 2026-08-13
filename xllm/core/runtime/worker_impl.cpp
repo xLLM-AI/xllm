@@ -1621,9 +1621,8 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
     } else {
       CHECK(options_.draft_model_path().has_value())
           << "block-diffusion speculative decoding requires --draft_model.";
-      std::vector<int32_t> capture_layer_ids =
-          read_capture_layer_ids(options_.draft_model_path().value());
-      args.layers_to_capture(std::move(capture_layer_ids));
+      args.layers_to_capture(
+          read_capture_layer_ids(options_.draft_model_path().value()));
     }
   } else if (options_.enable_speculative_decode() &&
              ::xllm::SpeculativeConfig::get_instance()
@@ -1666,9 +1665,8 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
       }
       CHECK(options_.draft_model_path().has_value())
           << "block-diffusion speculative decoding requires --draft_model.";
-      std::vector<int32_t> capture_layer_ids =
-          read_capture_layer_ids(options_.draft_model_path().value());
-      args.layers_to_capture(std::move(capture_layer_ids));
+      args.layers_to_capture(
+          read_capture_layer_ids(options_.draft_model_path().value()));
     }
     // When running speculative decoding, the draft worker reuses the same
     // checkpoint as the target model. The draft worker needs to instantiate

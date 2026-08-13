@@ -45,13 +45,6 @@ inline void invalidate_draft_model_geometry(ModelInputParams& input_params) {
   input_params.attn_metadata.reset();
 }
 
-inline bool is_deepseek_v4_dspark_draft(const std::string& model_type) {
-  // Gates head/embedding sharing: DeepSeek-V4 DSpark checkpoints carry trained
-  // mtp.0.embed / mtp.<last>.head tensors (with the draft-side QuaRot
-  // transform) that must not be aliased to the target modules.
-  return util::is_deepseek_v4_dspark_model_type(model_type);
-}
-
 enum class DSparkSasMode : uint8_t {
   NOT_DSPARK,
   COMPATIBILITY,
@@ -61,7 +54,7 @@ enum class DSparkSasMode : uint8_t {
 inline DSparkSasMode classify_dspark_sas_mode(const ModelArgs& draft_args,
                                               bool sample_from_anchor) {
   if (!sample_from_anchor ||
-      !is_deepseek_v4_dspark_draft(draft_args.model_type())) {
+      !util::is_deepseek_v4_dspark_model_type(draft_args.model_type())) {
     return DSparkSasMode::NOT_DSPARK;
   }
   return draft_args.dspark_use_native_sas() ? DSparkSasMode::NATIVE
@@ -131,7 +124,6 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
                                ForwardInput& validate_input);
 
  private:
-  dflash_detail::DSparkSasMode draft_sas_mode() const;
   bool draft_use_block_parallel_rows() const {
     return draft_sas_mode_ == dflash_detail::DSparkSasMode::COMPATIBILITY;
   }
