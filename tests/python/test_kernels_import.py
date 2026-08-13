@@ -57,6 +57,9 @@ _NPU_SCHEMAS = (
     "quantize_per_tensor(Tensor self, Tensor scales, Tensor zero_points, ScalarType dtype, int axis) -> Tensor",
     "dynamic_quant(Tensor input, Tensor? smooth_scales, Tensor? group_index, "
     "ScalarType? dst_type) -> (Tensor, Tensor?)",
+    "group_gemm(Tensor x, Tensor weight, Tensor? scale, Tensor? "
+    "per_token_scale, Tensor group_list, int split_item, int group_type, int "
+    "group_list_type, ScalarType? output_dtype) -> Tensor",
     "lightning_indexer(Tensor query, Tensor key, Tensor weights, Tensor? "
     "query_seq_lengths, Tensor? key_seq_lengths, Tensor? block_table, str "
     "layout_query, str layout_key, int selected_count, int sparse_mode, int "
@@ -224,6 +227,37 @@ def test_npu_fake_tensor_and_mutation_contracts() -> None:
             )
             assert quantized.shape == (2, 2) and quantized.dtype == torch.int32
             assert scale.shape == (2,) and scale.dtype == torch.float32
+
+            grouped = torch.ops.xllm_ops.group_gemm(
+                torch.empty(6, 16, dtype=torch.int8),
+                torch.empty(4, 16, 32, dtype=torch.int8),
+                None,
+                None,
+                torch.empty(4, dtype=torch.int64),
+                2,
+                0,
+                1,
+                torch.int32,
+            )
+            assert grouped.shape == (6, 32)
+            assert grouped.dtype == torch.int32
+
+            from xllm.python.kernels_npu import moe
+
+            selected_moe = moe.grouped_moe_with_selected_experts(
+                torch.empty(3, 16, dtype=torch.bfloat16),
+                torch.empty(3, 2, dtype=torch.bfloat16),
+                torch.empty(3, 2, dtype=torch.int32),
+                torch.empty(4, 16, 32, dtype=torch.int8),
+                torch.empty(4, 16, 16, dtype=torch.int8),
+                torch.empty(4, 32),
+                torch.empty(4, 16),
+                num_total_experts=16,
+                start_expert_id=4,
+                num_experts_per_rank=4,
+            )
+            assert selected_moe.shape == (3, 16)
+            assert selected_moe.dtype == torch.bfloat16
 
             query = torch.empty(8, 4, 16)
             key = torch.empty(8, 2, 16)

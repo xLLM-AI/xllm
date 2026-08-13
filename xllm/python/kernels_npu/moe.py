@@ -148,6 +148,135 @@ def grouped_moe(
     )
 
 
+def _group_gemm(**kwargs) -> torch.Tensor:
+    return torch.ops.xllm_ops.group_gemm(**kwargs)
+
+
+def _grouped_moe_with_selected_experts_impl(
+    hidden_states: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_offset: torch.Tensor | None = None,
+    w2_offset: torch.Tensor | None = None,
+    num_total_experts: int = -1,
+    start_expert_id: int = 0,
+    num_experts_per_rank: int = -1,
+    swiglu_limit: float = 0.0,
+) -> torch.Tensor:
+    """Run grouped quantized experts with pre-computed routing (no gate).
+
+    The routing and W8A8 grouped-matmul sequence mirrors the native NPU
+    ``FusedMoEImpl::select_experts`` and ``forward_expert`` paths.
+    """
+    num_tokens = hidden_states.shape[0]
+    expert_num = num_total_experts if num_total_experts > 0 else w13.shape[0]
+    local_expert_count = (
+        num_experts_per_rank if num_experts_per_rank > 0 else expert_num
+    )
+    active_range = [start_expert_id, start_expert_id + local_expert_count]
+    expanded_hidden, expanded_row_idx, expert_tokens, _ = (
+        torch_npu.npu_moe_init_routing_v2(
+            hidden_states,
+            topk_ids.to(torch.int32),
+            scale=None,
+            active_num=num_tokens * topk_ids.size(-1),
+            expert_num=expert_num,
+            expert_tokens_num_type=1,
+            expert_tokens_num_flag=True,
+            active_expert_range=active_range,
+            quant_mode=-1,
+        )
+    )
+    from xllm.python import kernels as _kernels
+
+    sorted_hidden_i8, pertoken_scale = _kernels.dynamic_quant(expanded_hidden)
+    if pertoken_scale is None:
+        raise RuntimeError("dynamic_quant did not return a per-token scale")
+    group_list = expert_tokens.to(torch.int64)
+    gemm1_out = _group_gemm(
+        x=sorted_hidden_i8,
+        weight=w13,
+        scale=None,
+        per_token_scale=None,
+        group_list=group_list,
+        split_item=2,
+        group_type=0,
+        group_list_type=1,
+        output_dtype=torch.int32,
+    )
+    act_i8, act_pt = _kernels.dequant_swiglu_quant(
+        x=gemm1_out,
+        weight_scale=w13_scale,
+        activation_scale=pertoken_scale,
+        bias=None,
+        quant_scale=None,
+        quant_offset=None,
+        group_index=group_list.to(torch.int64),
+        activate_left=True,
+        quant_mode=1,
+        swiglu_mode=1,
+        clamp_limit=swiglu_limit,
+        glu_alpha=1.0,
+        glu_bias=0.0,
+    )
+    del w13_offset, w2_offset
+    output = _group_gemm(
+        x=act_i8,
+        weight=w2,
+        scale=w2_scale.to(hidden_states.dtype),
+        per_token_scale=act_pt,
+        group_list=group_list,
+        split_item=2,
+        group_type=0,
+        group_list_type=1,
+        output_dtype=hidden_states.dtype,
+    )
+    return torch_npu.npu_moe_token_unpermute(
+        permuted_tokens=output,
+        sorted_indices=expanded_row_idx.abs(),
+        probs=topk_weights.to(output.dtype),
+    )
+
+
+@torch.library.custom_op(
+    "xllm_python::grouped_moe_with_selected_experts", mutates_args=()
+)
+def grouped_moe_with_selected_experts(
+    hidden_states: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_offset: torch.Tensor | None = None,
+    w2_offset: torch.Tensor | None = None,
+    num_total_experts: int = -1,
+    start_expert_id: int = 0,
+    num_experts_per_rank: int = -1,
+    swiglu_limit: float = 0.0,
+) -> torch.Tensor:
+    return _grouped_moe_with_selected_experts_impl(
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
+        w13_offset,
+        w2_offset,
+        num_total_experts,
+        start_expert_id,
+        num_experts_per_rank,
+        swiglu_limit,
+    )
+
+
 @grouped_moe.register_fake
 def _grouped_moe_fake(
     hidden_states: torch.Tensor,
@@ -176,6 +305,27 @@ def _grouped_moe_fake(
         renormalize,
         active_expert_range,
     )
+    return torch.empty_like(hidden_states)
+
+
+@grouped_moe_with_selected_experts.register_fake
+def _grouped_moe_with_selected_experts_fake(
+    hidden_states: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_offset: torch.Tensor | None = None,
+    w2_offset: torch.Tensor | None = None,
+    num_total_experts: int = -1,
+    start_expert_id: int = 0,
+    num_experts_per_rank: int = -1,
+    swiglu_limit: float = 0.0,
+) -> torch.Tensor:
+    del topk_weights, topk_ids, w13, w2, w13_scale, w2_scale, w13_offset, w2_offset
+    del num_total_experts, start_expert_id, num_experts_per_rank, swiglu_limit
     return torch.empty_like(hidden_states)
 
 

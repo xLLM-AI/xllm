@@ -328,6 +328,10 @@ TORCH_LIBRARY(xllm_ops, m) {
       "dynamic_quant(Tensor input, Tensor? smooth_scales, Tensor? group_index, "
       "ScalarType? dst_type) -> (Tensor, Tensor?)");
   m.def(
+      "group_gemm(Tensor x, Tensor weight, Tensor? scale, Tensor? "
+      "per_token_scale, Tensor group_list, int split_item, int group_type, int "
+      "group_list_type, ScalarType? output_dtype) -> Tensor");
+  m.def(
       "lightning_indexer(Tensor query, Tensor key, Tensor weights, "
       "Tensor? query_seq_lengths, Tensor? key_seq_lengths, Tensor? "
       "block_table, str layout_query, str layout_key, int selected_count, int "
@@ -449,6 +453,7 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl("quantize_per_tensor",
          TORCH_FN(xllm::kernel::npu::quantize_per_tensor));
   m.impl("dynamic_quant", TORCH_FN(xllm::kernel::npu::dynamic_quant));
+  m.impl("group_gemm", TORCH_FN(xllm::kernel::npu::group_gemm));
   m.impl("lightning_indexer", TORCH_FN(xllm::kernel::npu::lightning_indexer));
   m.impl("lightning_indexer_out",
          TORCH_FN(xllm::kernel::npu::lightning_indexer_out));

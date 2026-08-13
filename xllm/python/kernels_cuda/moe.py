@@ -201,6 +201,42 @@ def grouped_moe(
     )
 
 
+def grouped_moe_with_selected_experts(
+    hidden_states: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_offset: torch.Tensor | None = None,
+    w2_offset: torch.Tensor | None = None,
+    num_total_experts: int = -1,
+    start_expert_id: int = 0,
+    num_experts_per_rank: int = -1,
+    swiglu_limit: float = 0.0,
+) -> torch.Tensor:
+    """Reject the NPU-specific pre-selected grouped MoE contract on CUDA."""
+    del (
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
+        w13_offset,
+        w2_offset,
+        num_total_experts,
+        start_expert_id,
+        num_experts_per_rank,
+        swiglu_limit,
+    )
+    raise NotImplementedError(
+        "grouped_moe_with_selected_experts is currently implemented only for NPU"
+    )
+
+
 __all__ = [
     "supports_cutlass_moe",
     "moe_fused_topk",
@@ -208,4 +244,5 @@ __all__ = [
     "fused_moe",
     "prepare_grouped_moe_weights",
     "grouped_moe",
+    "grouped_moe_with_selected_experts",
 ]

@@ -209,6 +209,60 @@ TEST_F(NpuXllmOpsTest, EmbeddedInterpreterSeesOps) {
              .item<float>();
 }
 
+TEST_F(NpuXllmOpsTest, GroupGemmWrapperMatchesInt32Reference) {
+  py::gil_scoped_acquire gil;
+
+  py::exec(R"PY(
+import torch
+
+device = torch.device("privateuseone:0")
+torch.manual_seed(20260814)
+tokens, experts, input_dim, output_dim = 8, 2, 128, 256
+x_cpu = torch.randint(-4, 5, (tokens, input_dim), dtype=torch.int8)
+w_cpu = torch.randint(-4, 5, (experts, input_dim, output_dim), dtype=torch.int8)
+group_list_cpu = torch.tensor([4, 4], dtype=torch.int64)
+
+x = x_cpu.to(device)
+w = w_cpu.to(device)
+group_list = group_list_cpu.to(device)
+out = torch.ops.xllm_ops.group_gemm(
+    x, w, None, None, group_list, 2, 0, 1, torch.int32
+)
+torch.npu.synchronize()
+
+expected = torch.cat((
+    x_cpu[:4].to(torch.int32) @ w_cpu[0].to(torch.int32),
+    x_cpu[4:].to(torch.int32) @ w_cpu[1].to(torch.int32),
+), dim=0)
+assert out.shape == (tokens, output_dim)
+assert out.dtype == torch.int32
+torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
+)PY");
+}
+
+TEST_F(NpuXllmOpsTest, GroupGemmWrapperAcceptsScaleAndPerTokenScale) {
+  py::gil_scoped_acquire gil;
+
+  py::exec(R"PY(
+import torch
+
+device = torch.device("privateuseone:0")
+tokens, experts, input_dim, output_dim = 8, 2, 128, 128
+x = torch.randint(-4, 5, (tokens, input_dim), dtype=torch.int8, device=device)
+w = torch.randint(-4, 5, (experts, input_dim, output_dim), dtype=torch.int8, device=device)
+scale = torch.ones((experts, output_dim), dtype=torch.bfloat16, device=device)
+per_token_scale = torch.ones((tokens,), dtype=torch.float32, device=device)
+group_list = torch.tensor([4, 4], dtype=torch.int64, device=device)
+
+out = torch.ops.xllm_ops.group_gemm(
+    x, w, scale, per_token_scale, group_list, 2, 0, 1, torch.bfloat16
+)
+torch.npu.synchronize()
+assert out.shape == (tokens, output_dim)
+assert out.dtype == torch.bfloat16
+)PY");
+}
+
 TEST_F(NpuXllmOpsTest, Dsv4PartialRotaryPythonWrapperRunsOnNpu) {
   py::gil_scoped_acquire gil;
 

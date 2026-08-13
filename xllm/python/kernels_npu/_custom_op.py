@@ -179,6 +179,22 @@ def _dynamic_quant_fake(
     return output, scale
 
 
+def _group_gemm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor | None,
+    per_token_scale: torch.Tensor | None,
+    group_list: torch.Tensor,
+    split_item: int,
+    group_type: int,
+    group_list_type: int,
+    output_dtype: torch.dtype | None,
+) -> torch.Tensor:
+    del scale, per_token_scale, group_list, split_item, group_type, group_list_type
+    dtype = output_dtype if output_dtype is not None else x.dtype
+    return x.new_empty((x.size(0), weight.size(-1)), dtype=dtype)
+
+
 def _lightning_indexer_fake(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -662,6 +678,7 @@ register_fake("xllm_ops::update_decode_graph_metadata", _update_decode_graph_met
 register_fake("xllm_ops::quant_matmul", _quant_matmul_fake)
 register_fake("xllm_ops::quantize_per_tensor", _quantize_per_tensor_fake)
 register_fake("xllm_ops::dynamic_quant", _dynamic_quant_fake)
+register_fake("xllm_ops::group_gemm", _group_gemm_fake)
 register_fake("xllm_ops::lightning_indexer", _lightning_indexer_fake)
 register_fake("xllm_ops::lightning_indexer_out", _lightning_indexer_out_fake)
 register_fake("xllm_ops::scatter_nd_update", _scatter_nd_update_fake)
