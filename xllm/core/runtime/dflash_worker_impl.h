@@ -175,6 +175,8 @@ class DFlashWorkerImpl : public SpeculativeWorkerImpl {
 #endif
   int32_t mask_token_id_ = -1;
   int64_t expected_context_hidden_size_ = 0;
+  dflash_detail::DSparkSasMode draft_sas_mode_ =
+      dflash_detail::DSparkSasMode::NOT_DSPARK;
 };
 
 }  // namespace xllm

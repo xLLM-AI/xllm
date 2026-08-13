@@ -205,18 +205,20 @@ void build_query_rows(const ForwardInput& input,
 
   selected_idxes.reserve(num_sequences * query_width);
 
+  specBuilder::RowSpec row_template;
+  row_template.append_kv_len = use_block_parallel_rows;
+  row_template.kv_len_offset =
+      use_block_parallel_rows ? std::make_optional<int32_t>(query_width - 1)
+                              : std::nullopt;
+  row_template.append_q_len_one = use_block_parallel_rows;
+  row_template.append_block_table = use_block_parallel_rows;
+
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
     for (int32_t query_idx = 0; query_idx < query_width; ++query_idx) {
-      specBuilder::RowSpec row;
+      specBuilder::RowSpec row = row_template;
       row.seq_id = seq_id;
       row.token_id = query_idx == 0 ? token_ids[seq_id] : mask_token_id;
       row.position_offset = query_idx;
-      row.append_kv_len = use_block_parallel_rows;
-      row.kv_len_offset = use_block_parallel_rows
-                              ? std::make_optional<int32_t>(query_width - 1)
-                              : std::nullopt;
-      row.append_q_len_one = use_block_parallel_rows;
-      row.append_block_table = use_block_parallel_rows;
       specBuilder::append_decode_row(row_ctx, row, block_size, buf);
       // DFlash skips slot 0 (anchor, not sampled); DSpark samples every slot.
       if (sample_from_anchor || query_idx > 0) {
@@ -428,6 +430,8 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
            "target_layer_ids, or dflash_config.target_layer_ids.";
     expected_context_hidden_size_ =
         static_cast<int64_t>(target_args.hidden_size()) * num_target_layers;
+    draft_sas_mode_ = dflash_detail::classify_dspark_sas_mode(
+        draft_args, sample_from_anchor());
   }
   return result;
 }
@@ -529,9 +533,7 @@ ForwardInput DFlashWorkerImpl::update_input_by_last_step_output(
 }
 
 dflash_detail::DSparkSasMode DFlashWorkerImpl::draft_sas_mode() const {
-  CHECK(draft_impl_ != nullptr);
-  return dflash_detail::classify_dspark_sas_mode(
-      draft_impl_->context_.get_model_args(), sample_from_anchor());
+  return draft_sas_mode_;
 }
 
 std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
